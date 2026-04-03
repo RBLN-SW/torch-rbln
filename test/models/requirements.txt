@@ -1,0 +1,13 @@
+# Test-only dependencies for model tests
+# These packages are only needed when running model tests (test/models/*.py)
+#
+# Note: torchvision should be installed from PyTorch CPU index to avoid operator conflicts.
+# The ./tools/test/install-test-deps.sh script and ./test/run_tests.py --suite=models handle this automatically.
+# Model tests may still require access to external model artifacts at runtime.
+#
+# Format: package==version
+# Comments and empty lines are ignored
+torchvision==0.24.1+cpu
+transformers==4.57.6
+optimum-rbln==0.10.1a1
+pandas==2.2.3

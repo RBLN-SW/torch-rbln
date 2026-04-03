@@ -1,0 +1,395 @@
+# This file is adapted from https://github.com/pytorch/pytorch/blob/v2.8.0/aten/src/ATen/native/native_functions.yaml in upstream PyTorch.
+
+- func: add.out(Tensor self, Tensor other, *, Scalar alpha=1, Tensor(a!) out) -> Tensor(a!)
+  device_check: NoCheck   # TensorIterator
+  structured: True
+  structured_inherits: TensorIteratorBase
+  ufunc_inner_loop:
+    Generic: add (AllAndComplex, BFloat16, Half, ComplexHalf)
+    ScalarOnly: add (Bool)
+  dispatch:
+    PrivateUse1: add_out_rbln
+  tags: pointwise
+
+- func: sub.out(Tensor self, Tensor other, *, Scalar alpha=1, Tensor(a!) out) -> Tensor(a!)
+  device_check: NoCheck   # TensorIterator
+  structured: True
+  structured_inherits: TensorIteratorBase
+  dispatch:
+    PrivateUse1: sub_out_rbln
+  tags: pointwise
+
+- func: mul.out(Tensor self, Tensor other, *, Tensor(a!) out) -> Tensor(a!)
+  device_check: NoCheck   # TensorIterator
+  structured: True
+  structured_inherits: TensorIteratorBase
+  dispatch:
+    PrivateUse1: mul_out_rbln
+  tags: pointwise
+
+- func: div.out(Tensor self, Tensor other, *, Tensor(a!) out) -> Tensor(a!)
+  device_check: NoCheck   # TensorIterator
+  structured: True
+  structured_inherits: TensorIteratorBase
+  dispatch:
+    PrivateUse1: div_out_rbln
+  tags: pointwise
+
+- func: div.out_mode(Tensor self, Tensor other, *, str? rounding_mode, Tensor(a!) out) -> Tensor(a!)
+  device_check: NoCheck   # TensorIterator
+  structured: True
+  structured_inherits: TensorIteratorBase
+  dispatch:
+    PrivateUse1: div_out_mode_rbln
+  tags: pointwise
+
+- func: pow.Tensor_Scalar_out(Tensor self, Scalar exponent, *, Tensor(a!) out) -> Tensor(a!)
+  device_check: NoCheck   # TensorIterator
+  structured: True
+  structured_inherits: TensorIteratorBase
+  dispatch:
+    PrivateUse1: pow_tensor_scalar_out_rbln
+  tags: [pointwise, use_custom_kernel_rbln]
+
+- func: silu.out(Tensor self, *, Tensor(a!) out) -> Tensor(a!)
+  structured: True
+  structured_inherits: TensorIteratorBase
+  python_module: nn
+  dispatch:
+    PrivateUse1: silu_out_rbln
+  tags: pointwise
+
+- func: silu_backward(Tensor grad_output, Tensor self) -> Tensor
+  dispatch:
+    PrivateUse1: silu_backward_rbln
+  tags: use_custom_kernel_rbln
+
+- func: rsqrt.out(Tensor self, *, Tensor(a!) out) -> Tensor(a!)
+  device_check: NoCheck   # TensorIterator
+  structured: True
+  structured_inherits: TensorIteratorBase
+  dispatch:
+    PrivateUse1: rsqrt_out_rbln
+  tags: pointwise
+
+- func: mean.out(Tensor self, int[1]? dim, bool keepdim=False, *, ScalarType? dtype=None, Tensor(a!) out) -> Tensor(a!)
+  structured: True
+  device_check: NoCheck   # TensorIterator
+  dispatch:
+    PrivateUse1: mean_out_rbln
+
+- func: mm.out(Tensor self, Tensor mat2, *, Tensor(a!) out) -> Tensor(a!)
+  structured: True
+  dispatch:
+    PrivateUse1: mm_out_rbln
+
+- func: bmm.out(Tensor self, Tensor mat2, *, Tensor(a!) out) -> Tensor(a!)
+  structured: True
+  variants: function
+  dispatch:
+    PrivateUse1: bmm_out_rbln
+
+- func: neg.out(Tensor self, *, Tensor(a!) out) -> Tensor(a!)
+  device_check: NoCheck   # TensorIterator
+  structured: True
+  structured_inherits: TensorIteratorBase
+  dispatch:
+    PrivateUse1: neg_out_rbln
+  tags: pointwise
+
+- func: _softmax.out(Tensor self, int dim, bool half_to_float, *, Tensor(a!) out) -> Tensor(a!)
+  structured: True
+  dispatch:
+    PrivateUse1: custom_softmax_out_rbln
+  tags: use_custom_kernel_rbln
+
+- func: _softmax_backward_data(Tensor grad_output, Tensor output, int dim, ScalarType input_dtype) -> Tensor
+  dispatch:
+    PrivateUse1: softmax_backward_rbln
+  tags: use_custom_kernel_rbln
+
+# TODO: arange requires scalar-only inputs, which is not yet supported.
+# - func: arange.start_out(Scalar start, Scalar end, Scalar step=1, *, Tensor(a!) out) -> Tensor(a!)
+#   dispatch:
+#     PrivateUse1: arange_start_out_rbln
+#   cpp_no_default_args: ['step']
+
+- func: where.self(Tensor condition, Tensor self, Tensor other) -> Tensor
+  device_check: NoCheck   # TensorIterator
+  variants: function, method
+  dispatch:
+    PrivateUse1: where_self_rbln
+  tags: [core, pointwise]
+
+- func: where.self_out(Tensor condition, Tensor self, Tensor other, *, Tensor(a!) out) -> Tensor(a!)
+  device_check: NoCheck   # TensorIterator
+  dispatch:
+    PrivateUse1: where_self_out_rbln
+
+- func: ceil.out(Tensor self, *, Tensor(a!) out) -> Tensor(a!)
+  device_check: NoCheck   # TensorIterator
+  structured: True
+  structured_inherits: TensorIteratorBase
+  dispatch:
+    PrivateUse1: ceil_out_rbln
+  tags: pointwise
+
+- func: clamp.out(Tensor self, Scalar? min=None, Scalar? max=None, *, Tensor(a!) out) -> Tensor(a!)
+  device_check: NoCheck   # TensorIterator
+  cpp_no_default_args: ['min']
+  structured: True
+  structured_inherits: TensorIteratorBase
+  dispatch:
+    PrivateUse1: clamp_out_rbln
+  tags: pointwise
+
+# TODO: clamp with Tensor min/max is not yet supported.
+# - func: clamp.Tensor_out(Tensor self, Tensor? min=None, Tensor? max=None, *, Tensor(a!) out) -> Tensor(a!)
+#   device_check: NoCheck   # TensorIterator
+#   structured: True
+#   structured_inherits: TensorIteratorBase
+#   dispatch:
+#     PrivateUse1: clamp_tensor_out_rbln
+#   tags: pointwise
+
+- func: abs.out(Tensor self, *, Tensor(a!) out) -> Tensor(a!)
+  device_check: NoCheck   # TensorIterator
+  dispatch:
+    PrivateUse1: abs_out_rbln
+  tags: pointwise
+
+- func: zero_(Tensor(a!) self) -> Tensor(a!)
+  device_check: NoCheck   # TensorIterator
+  variants: method, function
+  dispatch:
+    PrivateUse1: custom_zero__rbln
+  tags: use_custom_kernel_rbln
+
+- func: log.out(Tensor self, *, Tensor(a!) out) -> Tensor(a!)
+  device_check: NoCheck   # TensorIterator
+  structured: True
+  structured_inherits: TensorIteratorBase
+  dispatch:
+    PrivateUse1: log_out_rbln
+  tags: pointwise
+
+# TODO: sum.IntList_out causes backward test failures; enable after verification.
+# - func: sum.IntList_out(Tensor self, int[1]? dim, bool keepdim=False, *, ScalarType? dtype=None, Tensor(a!) out) -> Tensor(a!)
+#   structured: True
+#   device_check: NoCheck   # TensorIterator
+#   dispatch:
+#     PrivateUse1: sum_intlist_out_rbln
+
+- func: floor.out(Tensor self, *, Tensor(a!) out) -> Tensor(a!)
+  device_check: NoCheck   # TensorIterator
+  structured: True
+  structured_inherits: TensorIteratorBase
+  dispatch:
+    PrivateUse1: floor_out_rbln
+  tags: pointwise
+
+- func: masked_fill_.Tensor(Tensor(a!) self, Tensor mask, Tensor value) -> Tensor(a!)
+  device_check: NoCheck   # TensorIterator
+  variants: method
+  dispatch:
+    PrivateUse1: masked_fill_tensor_rbln
+  autogen: masked_fill.Tensor_out
+
+- func: masked_fill_.Scalar(Tensor(a!) self, Tensor mask, Scalar value) -> Tensor(a!)
+  device_check: NoCheck   # TensorIterator
+  variants: method
+  dispatch:
+    PrivateUse1: masked_fill_scalar_rbln
+  autogen: masked_fill.Scalar_out
+
+- func: max(Tensor self) -> Tensor
+  device_check: NoCheck   # TensorIterator
+  variants: method, function
+  dispatch:
+    PrivateUse1: max_rbln
+
+- func: min(Tensor self) -> Tensor
+  device_check: NoCheck   # TensorIterator
+  variants: method, function
+  dispatch:
+    PrivateUse1: min_rbln
+
+- func: max.unary_out(Tensor self, *, Tensor(a!) out) -> Tensor(a!)
+  device_check: NoCheck   # TensorIterator
+  dispatch:
+    PrivateUse1: max_unary_out_rbln
+
+- func: min.unary_out(Tensor self, *, Tensor(a!) out) -> Tensor(a!)
+  device_check: NoCheck   # TensorIterator
+  dispatch:
+    PrivateUse1: min_unary_out_rbln
+
+- func: maximum.out(Tensor self, Tensor other, *, Tensor(a!) out) -> Tensor(a!)
+  structured: True
+  structured_inherits: TensorIteratorBase
+  device_check: NoCheck   # TensorIterator
+  dispatch:
+    PrivateUse1: maximum_out_rbln
+  tags: pointwise
+
+- func: minimum.out(Tensor self, Tensor other, *, Tensor(a!) out) -> Tensor(a!)
+  structured: True
+  structured_inherits: TensorIteratorBase
+  device_check: NoCheck   # TensorIterator
+  dispatch:
+    PrivateUse1: minimum_out_rbln
+  tags: pointwise
+
+- func: addmm.out(Tensor self, Tensor mat1, Tensor mat2, *, Scalar beta=1, Scalar alpha=1, Tensor(a!) out) -> Tensor(a!)
+  structured: True
+  dispatch:
+    PrivateUse1: addmm_out_rbln
+
+- func: linear(Tensor input, Tensor weight, Tensor? bias=None) -> Tensor
+  python_module: nn
+  dispatch:
+    PrivateUse1: linear_rbln
+
+- func: linear_backward(Tensor self, Tensor grad_output, Tensor weight, bool[3] output_mask) -> (Tensor, Tensor, Tensor)
+  dispatch:
+    PrivateUse1: linear_backward_rbln
+  tags: use_custom_kernel_rbln
+
+- func: sigmoid.out(Tensor self, *, Tensor(a!) out) -> Tensor(a!)
+  device_check: NoCheck   # TensorIterator
+  structured: True
+  structured_inherits: TensorIteratorBase
+  dispatch:
+    PrivateUse1: sigmoid_out_rbln
+  tags: pointwise
+
+# TODO: max/min with dim returns a tuple of (values, indices), which requires
+# special handling for multiple output tensors. Not yet supported.
+# - func: max.dim_max(Tensor self, int dim, bool keepdim=False, *, Tensor(a!) max, Tensor(b!) max_values) -> (Tensor(a!) values, Tensor(b!) indices)
+#   device_check: NoCheck   # TensorIterator
+#   structured: True
+#   precomputed:
+#   - dim -> int dim
+#   dispatch:
+#    PrivateUse1: max_dim_max_rbln
+
+# - func: min.dim_min(Tensor self, int dim, bool keepdim=False, *, Tensor(a!) min, Tensor(b!) min_indices) -> (Tensor(a!) values, Tensor(b!) indices)
+#   device_check: NoCheck   # TensorIterator
+#   structured: True
+#   precomputed:
+#   - dim -> int dim
+#   dispatch:
+#     PrivateUse1: min_dim_min_rbln
+
+- func: logical_not.out(Tensor self, *, Tensor(a!) out) -> Tensor(a!)
+  device_check: NoCheck   # TensorIterator
+  dispatch:
+    PrivateUse1: logical_not_out_rbln
+
+- func: ne.Tensor_out(Tensor self, Tensor other, *, Tensor(a!) out) -> Tensor(a!)
+  structured: True
+  structured_inherits: TensorIteratorBase
+  device_check: NoCheck   # TensorIterator
+  dispatch:
+    PrivateUse1: ne_tensor_out_rbln
+  tags: pointwise
+
+- func: eq.Tensor_out(Tensor self, Tensor other, *, Tensor(a!) out) -> Tensor(a!)
+  structured: True
+  structured_inherits: TensorIteratorBase
+  device_check: NoCheck   # TensorIterator
+  dispatch:
+    PrivateUse1: eq_tensor_out_rbln
+  tags: pointwise
+
+- func: gt.Tensor_out(Tensor self, Tensor other, *, Tensor(a!) out) -> Tensor(a!)
+  structured: True
+  structured_inherits: TensorIteratorBase
+  device_check: NoCheck   # TensorIterator
+  dispatch:
+    PrivateUse1: gt_tensor_out_rbln
+  tags: pointwise
+
+- func: ge.Tensor_out(Tensor self, Tensor other, *, Tensor(a!) out) -> Tensor(a!)
+  structured: True
+  structured_inherits: TensorIteratorBase
+  device_check: NoCheck   # TensorIterator
+  dispatch:
+    PrivateUse1: ge_tensor_out_rbln
+  tags: pointwise
+
+- func: lt.Tensor_out(Tensor self, Tensor other, *, Tensor(a!) out) -> Tensor(a!)
+  structured: True
+  structured_inherits: TensorIteratorBase
+  device_check: NoCheck   # TensorIterator
+  dispatch:
+    PrivateUse1: lt_tensor_out_rbln
+  tags: pointwise
+
+- func: le.Tensor_out(Tensor self, Tensor other, *, Tensor(a!) out) -> Tensor(a!)
+  structured: True
+  structured_inherits: TensorIteratorBase
+  device_check: NoCheck   # TensorIterator
+  dispatch:
+    PrivateUse1: le_tensor_out_rbln
+  tags: pointwise
+
+- func: ne.Scalar_out(Tensor self, Scalar other, *, Tensor(a!) out) -> Tensor(a!)
+  structured: True
+  structured_inherits: TensorIteratorBase
+  device_check: NoCheck   # TensorIterator
+  dispatch:
+    PrivateUse1: ne_scalar_out_rbln
+  tags: pointwise
+
+- func: eq.Scalar_out(Tensor self, Scalar other, *, Tensor(a!) out) -> Tensor(a!)
+  structured: True
+  structured_inherits: TensorIteratorBase
+  device_check: NoCheck   # TensorIterator
+  dispatch:
+    PrivateUse1: eq_scalar_out_rbln
+  tags: pointwise
+
+- func: gt.Scalar_out(Tensor self, Scalar other, *, Tensor(a!) out) -> Tensor(a!)
+  structured: True
+  structured_inherits: TensorIteratorBase
+  device_check: NoCheck   # TensorIterator
+  dispatch:
+    PrivateUse1: gt_scalar_out_rbln
+  tags: pointwise
+
+- func: ge.Scalar_out(Tensor self, Scalar other, *, Tensor(a!) out) -> Tensor(a!)
+  structured: True
+  structured_inherits: TensorIteratorBase
+  device_check: NoCheck   # TensorIterator
+  dispatch:
+    PrivateUse1: ge_scalar_out_rbln
+  tags: pointwise
+
+- func: lt.Scalar_out(Tensor self, Scalar other, *, Tensor(a!) out) -> Tensor(a!)
+  structured: True
+  structured_inherits: TensorIteratorBase
+  device_check: NoCheck   # TensorIterator
+  dispatch:
+    PrivateUse1: lt_scalar_out_rbln
+  tags: pointwise
+
+- func: le.Scalar_out(Tensor self, Scalar other, *, Tensor(a!) out) -> Tensor(a!)
+  structured: True
+  structured_inherits: TensorIteratorBase
+  device_check: NoCheck   # TensorIterator
+  dispatch:
+    PrivateUse1: le_scalar_out_rbln
+  tags: pointwise
+
+- func: _scaled_dot_product_fused_attention_overrideable(Tensor query, Tensor key, Tensor value, Tensor? attn_bias=None, float dropout_p=0.0, bool is_causal=False, bool return_debug_mask=False, *, float? scale=None) -> (Tensor output, Tensor logsumexp, Tensor cum_seq_q, Tensor cum_seq_k, SymInt max_q, SymInt max_k, Tensor philox_seed, Tensor philox_offset, Tensor debug_attn_mask)
+  dispatch:
+    PrivateUse1: scaled_dot_product_fused_attention_overrideable_rbln
+  tags: [nondeterministic_seeded, use_custom_kernel_rbln]
+
+- func: _scaled_dot_product_fused_attention_overrideable_backward(Tensor grad_out, Tensor query, Tensor key, Tensor value, Tensor attn_bias, bool[4] grad_input_mask, Tensor out, Tensor logsumexp, Tensor cum_seq_q, Tensor cum_seq_k, SymInt max_q, SymInt max_k, float dropout_p, bool is_causal, Tensor philox_seed, Tensor philox_offset, *, float? scale=None) -> (Tensor grad_query, Tensor grad_key, Tensor grad_value, Tensor grad_attn_bias)
+  device_check: NoCheck
+  variants: function
+  dispatch:
+    PrivateUse1: scaled_dot_product_fused_attention_overrideable_backward_rbln
+  tags: use_custom_kernel_rbln

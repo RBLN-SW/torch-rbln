@@ -1,0 +1,35 @@
+name: "Release"
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - "main"
+  push:
+    branches:
+      - "main"
+  workflow_dispatch:
+    inputs:
+      torch_rbln_ref:
+        description: "Git reference for torch-rbln (branch, tag, or SHA)"
+        type: string
+        required: true
+      torch_rbln_sha:
+        description: "Git commit SHA to include in the dispatch payload"
+        type: string
+        required: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' && github.event.pull_request.number) || (github.event_name == 'workflow_dispatch' && github.run_id) || github.sha }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+jobs:
+  dispatch_torch_rbln_release:
+    if: ${{ github.repository_owner == vars.TORCH_RBLN_REPO_OWNER }}
+    uses: ./.github/workflows/dispatch_event.yaml
+    with:
+      event_name: ${{ github.event_name }}
+      event_type: "torch-rbln-release"
+      torch_rbln_ref: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.ref) || (github.event_name == 'workflow_dispatch' && inputs.torch_rbln_ref) || github.ref }}
+      torch_rbln_sha: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || (github.event_name == 'workflow_dispatch' && inputs.torch_rbln_sha) || github.sha }}
+    secrets: inherit

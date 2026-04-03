@@ -1,0 +1,13 @@
+torch-rbln: PyTorch integration for Rebellions' NPU
+
+Copyright 2024-2026 Rebellions Inc.
+
+This product includes software developed by Rebellions Inc.
+Licensed under the Apache License, Version 2.0.
+
+---
+
+Third-party components used by this project (at build or runtime) are
+licensed under their own terms. This distribution does not include their
+source code; you obtain them separately (e.g., PyTorch, rebel-compiler).
+See each component's license for details.

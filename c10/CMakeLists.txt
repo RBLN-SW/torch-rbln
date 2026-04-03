@@ -1,0 +1,9 @@
+add_subdirectory(rbln)
+
+install(DIRECTORY ${CMAKE_CURRENT_LIST_DIR}
+  DESTINATION include
+  FILES_MATCHING PATTERN "*.h"
+  PATTERN "impl" EXCLUDE
+  PATTERN "detail" EXCLUDE
+  PATTERN "test" EXCLUDE
+)

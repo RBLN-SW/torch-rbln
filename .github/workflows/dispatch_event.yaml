@@ -1,0 +1,63 @@
+name: "Dispatch event"
+
+on:
+  workflow_call:
+    inputs:
+      event_name:
+        description: "GitHub event name that triggered the workflow"
+        type: string
+        required: true
+      event_type:
+        description: "Event type for repository dispatch"
+        type: string
+        required: true
+      torch_rbln_ref:
+        description: "Git reference for torch-rbln (branch, tag, or SHA)"
+        type: string
+        required: true
+      torch_rbln_sha:
+        description: "Git commit SHA to include in the dispatch payload"
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      event_name:
+        description: "GitHub event name that triggered the workflow"
+        type: string
+        required: true
+      event_type:
+        description: "Event type for repository dispatch"
+        type: string
+        required: true
+      torch_rbln_ref:
+        description: "Git reference for torch-rbln (branch, tag, or SHA)"
+        type: string
+        required: true
+      torch_rbln_sha:
+        description: "Git commit SHA to include in the dispatch payload"
+        type: string
+        required: true
+
+jobs:
+  dispatch_event:
+    name: "Dispatch event for ${{ inputs.event_type }}"
+    if: ${{ github.repository_owner == vars.TORCH_RBLN_REPO_OWNER }}
+    runs-on: ${{ vars.TORCH_RBLN_RUNNER_EXTERNAL }}
+    steps:
+      - name: "Dispatch ${{ inputs.event_type }} event"
+        uses: Wandalen/wretry.action@v3
+        with:
+          action: peter-evans/repository-dispatch@v4
+          attempt_limit: 5
+          attempt_delay: 5000
+          with: |
+            token: ${{ secrets.GIT_PAT }}
+            repository: ${{ vars.TORCH_RBLN_DISPATCH_REPOSITORY }}
+            event-type: ${{ inputs.event_type }}
+            client-payload: |
+              {
+                "event_name": "${{ inputs.event_name }}",
+                "torch_rbln_ref": "${{ inputs.torch_rbln_ref }}",
+                "torch_rbln_sha": "${{ inputs.torch_rbln_sha }}"
+              }
+    timeout-minutes: 60

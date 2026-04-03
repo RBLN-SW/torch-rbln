@@ -1,0 +1,74 @@
+name: "Check PR title"
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check_pr_title:
+    name: "Check PR title"
+    if: ${{ github.repository_owner == vars.TORCH_RBLN_REPO_OWNER }}
+    runs-on: ${{ vars.TORCH_RBLN_RUNNER_EXTERNAL }}
+    steps:
+      - name: "Check Conventional Commits format"
+        id: pr_title_lint
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: Wandalen/wretry.action@v3
+        with:
+          action: amannn/action-semantic-pull-request@v5
+          attempt_limit: 5
+          attempt_delay: 5000
+          with: |
+            types: |
+              feat
+              fix
+              refactor
+              perf
+              docs
+              test
+              build
+              ci
+              chore
+            requireScope: false
+            subjectPattern: "^[a-z].*[^\\.]$"
+            subjectPatternError: |
+              The subject "{subject}" found in the pull request title "{title}" must start with a lowercase letter and not end with a period.
+
+      - name: "Post comment on invalid PR title"
+        if: ${{ always() && steps.pr_title_lint.outcome == 'failure' }}
+        uses: Wandalen/wretry.action@v3
+        with:
+          action: marocchino/sticky-pull-request-comment@v2
+          attempt_limit: 5
+          attempt_delay: 5000
+          with: |
+            header: pr_title_lint_error
+            message: |
+              We require pull request titles to follow the [Conventional Commits specification](https://www.conventionalcommits.org/en/v1.0.0/) and it looks like your proposed title needs to be adjusted.
+
+              **Format:** `<type>(<optional scope>): <description>`
+
+              **Allowed types:** `feat`, `fix`, `refactor`, `perf`, `docs`, `test`, `build`, `ci`, `chore`
+
+              ```
+              ${{ fromJSON(steps.pr_title_lint.outputs.outputs || '{}').error_message }}
+              ```
+
+      - name: "Delete comment on valid PR title"
+        if: ${{ always() && steps.pr_title_lint.outcome == 'success' }}
+        uses: Wandalen/wretry.action@v3
+        with:
+          action: marocchino/sticky-pull-request-comment@v2
+          attempt_limit: 5
+          attempt_delay: 5000
+          with: |
+            header: pr_title_lint_error
+            delete: true
