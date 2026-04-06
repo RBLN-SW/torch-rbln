@@ -53,6 +53,7 @@ class CodeGenerator:
         """Generate the header imports and setup code."""
         return """
 from torch_rbln._internal.env_utils import *
+from torch_rbln._internal.compile_cache import compile_rbln_cached
 from torch_rbln._internal.ops_utils import *
 from torch_rbln._internal.register_custom_ops import *
 from torch_rbln._internal.register_backward_ops import *

@@ -13,6 +13,7 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 
 from test.utils import requires_logical_devices
 
+from torch_rbln._internal.compile_cache import clear_rbln_compile_cache, compile_rbln_cached
 from torch_rbln._internal.monkey_patches import patch_torch_compile
 from torch_rbln._internal.ops_utils import extract_device_id_from_inputs
 from torch_rbln._internal.torch_compile_patch_helpers import (
@@ -676,16 +677,21 @@ class TestTorchCompileMonkeyPatch(TestCase):
     """Tests for torch.compile monkey patching."""
 
     def setUp(self):
-        """Store original torch.compile before tests."""
+        """Store original torch.compile and torch._dynamo.reset before tests."""
         self._original_compile = torch.compile
+        self._original_dynamo_reset = torch._dynamo.reset
+        clear_rbln_compile_cache()
 
     def tearDown(self):
-        """Restore original torch.compile after tests."""
+        """Restore original torch.compile and torch._dynamo.reset after tests."""
         torch.compile = self._original_compile
+        torch._dynamo.reset = self._original_dynamo_reset
+        clear_rbln_compile_cache()
         # Reset patch state
         import torch_rbln._internal.monkey_patches as mp
 
         mp._torch_compile_patched = False
+        mp._torch_dynamo_reset_patched = False
         mp._rbln_backend_registered = False
 
     def test_patch_torch_compile_idempotent(self):
@@ -740,6 +746,60 @@ class TestTorchCompileMonkeyPatch(TestCase):
         # Applying again should be idempotent
         patch_torch_compile()
         self.assertIs(patched, torch.compile)
+
+    def test_compile_rbln_cached_reuses_compiled_callable_for_steady_state(self):
+        """Repeated eager-op compilation should hit the Python-level cache after the first call."""
+        model = Mock()
+        compiled_fn = Mock(name="compiled_fn")
+
+        with patch("torch_rbln._internal.compile_cache.torch.compile", return_value=compiled_fn) as mock_compile:
+            first = compile_rbln_cached(
+                model,
+                dynamic=False,
+                options={"disable_logger": True, "tensor_parallel_size": 1},
+                device_cache_key=0,
+            )
+            second = compile_rbln_cached(
+                model,
+                dynamic=False,
+                options={"disable_logger": True, "tensor_parallel_size": 1},
+                device_cache_key=0,
+            )
+
+        self.assertIs(first, compiled_fn)
+        self.assertIs(second, compiled_fn)
+        self.assertEqual(mock_compile.call_count, 1)
+
+    def test_compile_rbln_cached_recompiles_after_dynamo_reset(self):
+        """torch._dynamo.reset should also clear the RBLN eager compile cache."""
+        patch_torch_compile()
+        model = Mock()
+
+        with patch("torch_rbln._internal.compile_cache.torch.compile", side_effect=[Mock(), Mock()]) as mock_compile:
+            compile_rbln_cached(
+                model,
+                dynamic=False,
+                options={"disable_logger": True},
+                device_cache_key=0,
+            )
+            compile_rbln_cached(
+                model,
+                dynamic=False,
+                options={"disable_logger": True},
+                device_cache_key=0,
+            )
+            self.assertEqual(mock_compile.call_count, 1)
+
+            torch._dynamo.reset()
+
+            compile_rbln_cached(
+                model,
+                dynamic=False,
+                options={"disable_logger": True},
+                device_cache_key=0,
+            )
+
+        self.assertEqual(mock_compile.call_count, 2)
 
     @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_tp_if_needed")
     def test_patch_torch_compile_wrapper_integration(self, mock_auto_determine):

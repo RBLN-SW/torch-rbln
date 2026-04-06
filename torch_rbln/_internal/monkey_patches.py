@@ -7,11 +7,13 @@ Patches are organized by functionality and include proper error handling and ide
 
 import warnings
 
+from torch_rbln._internal.compile_cache import clear_rbln_compile_cache
 from torch_rbln._internal.torch_compile_patch_helpers import CompiledFunctionWrapper, is_rbln_backend
 
 
 # Module-level state to track if patches have been applied
 _torch_compile_patched: bool = False
+_torch_dynamo_reset_patched: bool = False
 _rbln_backend_registered: bool = False
 
 
@@ -93,7 +95,7 @@ def patch_torch_compile() -> None:
     the first compilation. The registration is lazy (happens on first call) to avoid
     import-time dependencies.
     """
-    global _torch_compile_patched
+    global _torch_compile_patched, _torch_dynamo_reset_patched
 
     if _torch_compile_patched:
         return
@@ -131,6 +133,16 @@ def patch_torch_compile() -> None:
     # Apply patch
     torch.compile = wrapper
     _torch_compile_patched = True
+
+    if not _torch_dynamo_reset_patched:
+        original_dynamo_reset = torch._dynamo.reset
+
+        def reset_wrapper(*args, **kwargs):
+            clear_rbln_compile_cache()
+            return original_dynamo_reset(*args, **kwargs)
+
+        torch._dynamo.reset = reset_wrapper
+        _torch_dynamo_reset_patched = True
 
 
 def apply_all_patches() -> None:
