@@ -9,18 +9,38 @@ _compiled_op_cache_lock = threading.Lock()
 _compiled_op_cache: dict[tuple[Any, ...], Any] = {}
 
 
+class _IdentityKey:
+    """Hashable identity wrapper that keeps the referenced object alive."""
+
+    __slots__ = ("value", "_hash")
+
+    def __init__(self, value: Any):
+        self.value = value
+        self._hash = id(value)
+
+    def __hash__(self) -> int:
+        return self._hash
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _IdentityKey) and self.value is other.value
+
+
+def _cache_sort_key(value: Any) -> tuple[str, str]:
+    if isinstance(value, _IdentityKey):
+        return ("identity", str(hash(value)))
+    return (type(value).__name__, repr(value))
+
+
 def _freeze_cache_value(value: Any) -> Any:
     if isinstance(value, Mapping):
         return tuple(sorted((key, _freeze_cache_value(item)) for key, item in value.items()))
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return tuple(_freeze_cache_value(item) for item in value)
     if isinstance(value, (set, frozenset)):
-        return tuple(sorted(_freeze_cache_value(item) for item in value))
-    if callable(value):
-        return ("callable", id(value))
+        return tuple(sorted((_freeze_cache_value(item) for item in value), key=_cache_sort_key))
     if isinstance(value, (str, int, float, bool, type(None))):
         return value
-    return ("object", id(value))
+    return _IdentityKey(value)
 
 
 def compile_rbln_cached(
@@ -31,7 +51,7 @@ def compile_rbln_cached(
     device_cache_key: int | None = None,
 ) -> Any:
     cache_key = (
-        id(model),
+        _IdentityKey(model),
         dynamic,
         device_cache_key,
         _freeze_cache_value(options or {}),
