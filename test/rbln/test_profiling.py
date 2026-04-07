@@ -189,7 +189,7 @@ class TestRblnProfiling(unittest.TestCase):
         self.assertEqual(snapshot["phase_totals"]["compile_wrapper.dynamo_runtime.guard_and_cache"]["total_ns"], 60)
         self.assertEqual(snapshot["counter_totals"]["compile_wrapper.dynamo_runtime.cache_hit"], 1)
         self.assertIn("Torch.compile/Dynamo runtime overhead", summary)
-        self.assertIn("eval_frame/cache_lookup/guards", summary)
+        self.assertIn("entry_to_guard_complete", summary)
         self.assertIn("cache_hits=1", summary)
 
     @patch.dict("os.environ", {"TORCH_RBLN_PROFILE": "ON"}, clear=False)

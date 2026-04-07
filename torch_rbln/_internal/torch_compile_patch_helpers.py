@@ -483,8 +483,8 @@ class CompiledFunctionWrapper:
 
         for attempt in range(self._max_retries + 1):
             try:
-                begin_dynamo_runtime_call_observation()
                 before_dynamo_state = snapshot_dynamo_state()
+                begin_dynamo_runtime_call_observation()
                 try:
                     with profile_phase("compile_wrapper.compiled_call"):
                         return self._compiled_fn(*args, **kwargs)

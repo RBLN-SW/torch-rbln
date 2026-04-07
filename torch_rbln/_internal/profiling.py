@@ -941,7 +941,7 @@ def _format_torch_compile_dynamo_runtime(snapshot: dict[str, Any]) -> list[str]:
         )
         lines.append(
             _format_table_row(
-                ("eval_frame/cache_lookup/guards", 30, "<"),
+                ("entry_to_guard_complete", 30, "<"),
                 (str(phase_stats["count"]), 7, ">"),
                 (_format_duration(phase_stats["total_ns"]), 12, ">"),
                 (_format_duration(_safe_average(phase_stats["total_ns"], phase_stats["count"])), 12, ">"),
@@ -950,8 +950,8 @@ def _format_torch_compile_dynamo_runtime(snapshot: dict[str, Any]) -> list[str]:
             )
         )
     lines.append(
-        "    note     includes Dynamo cache lookup, guard evaluation, and Python/C trampoline cost; "
-        "compiled graph execution itself is excluded from this row"
+        "    note     upper-bound of warm-path structural tax: includes compiled-entry Python/C trampoline, "
+        "Dynamo cache lookup, and guard evaluation; compiled graph execution is excluded"
     )
     return lines
 
