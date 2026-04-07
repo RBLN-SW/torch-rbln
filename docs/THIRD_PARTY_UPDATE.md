@@ -4,7 +4,7 @@ This document explains how to update the versions of third party packages in tor
 The current third party packages are:
 
 - **PyTorch** (for Debug CI builds)
-- **`rebel-compiler`** (build-only; see [RBLN SDK — PyTorch RBLN](https://docs.rbln.ai/latest/software/rbln_pytorch/overview.html) and [Developer guide](https://docs.rbln.ai/latest/software/rbln_pytorch/developer-guide.html) for the package itself and install)
+- **`rebel-compiler`** (build-only; see [PyTorch RBLN — Overview](https://docs.rbln.ai/latest/software/rbln_pytorch/overview.html) and [Installation](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html) for the package and setup; for usage and debugging workflows, see [Running and debugging with PyTorch RBLN](https://docs.rbln.ai/latest/software/rbln_pytorch/tutorial_running_n_debugging.html))
 
 ## Common
 
@@ -79,7 +79,7 @@ override it by passing a tag: ```./sync-linter.sh v2.10.0```.
 
 **`rebel-compiler`** is a **build-only** dependency in this repo. For installation, versioning, and runtime use of the compiler package, follow the **RBLN SDK** documentation:
 
-- [PyTorch RBLN — How to install](https://docs.rbln.ai/latest/software/rbln_pytorch/overview.html#install)
-- [PyTorch RBLN — Developer guide](https://docs.rbln.ai/latest/software/rbln_pytorch/developer-guide.html)
+- [PyTorch RBLN — Installation (quickstart)](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html#install)
+- [PyTorch RBLN — Running and debugging](https://docs.rbln.ai/latest/software/rbln_pytorch/tutorial_running_n_debugging.html)
 
 To bump the **pinned build dependency** in torch-rbln, update the version specifier in **`pyproject.toml`** in both **`[build-system].requires`** and **`[dependency-groups].build`**, and keep them aligned with each other.

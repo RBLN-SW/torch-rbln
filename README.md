@@ -40,7 +40,7 @@ For **`rebel-compiler`** and the rest of the setup, see **Prerequisites** above 
 ### Build from source
 
 1. Install **[uv](https://docs.astral.sh/uv/getting-started/installation/)** (see [Installation — Prerequisites](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html#prerequisites) in the SDK docs).
-2. Follow **[Build from source](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html#build-from-source)** (venv, **`rebel-compiler`**, editable build, manual steps).
+2. Follow **[Build from source](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html#build-from-source-advanced)** (venv, **`rebel-compiler`**, editable build, manual steps).
 
 ```bash
 git clone https://github.com/rbln-sw/torch-rbln.git
@@ -55,8 +55,12 @@ uv venv .venv && source .venv/bin/activate
 
 **RBLN SDK (hosted)**
 
-- [Overview](https://docs.rbln.ai/latest/software/rbln_pytorch/overview.html) — design, components, supported operators, tutorials
-- [Installation](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html) — pre-built wheels, **`rebel-compiler`**, build from source (requirements, **`uv`**, `dev-setup.sh`, manual build)
+- [Overview](https://docs.rbln.ai/latest/software/rbln_pytorch/overview.html) — design, components, and entry points into the PyTorch RBLN docs
+- [Installation](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html) — pre-built wheels, **`rebel-compiler`**, build from source
+- [Running and debugging with PyTorch RBLN](https://docs.rbln.ai/latest/software/rbln_pytorch/tutorial_running_n_debugging.html) — basic usage and debugging
+- [Running a LLM model: Llama3.2-1B](https://docs.rbln.ai/latest/software/rbln_pytorch/tutorial_llama.html) — `transformers` example
+- [Supported Ops](https://docs.rbln.ai/latest/software/rbln_pytorch/supported_ops.html) — operator coverage
+- [APIs](https://docs.rbln.ai/latest/software/rbln_pytorch/api.html) — Python API reference
 - [Troubleshooting](https://docs.rbln.ai/latest/software/rbln_pytorch/troubleshoot.html) — `librbln` / `torch_rbln.diagnose`, core dumps, logging, dtype / CPU, memory (maintained in the RBLN SDK docs)
 
 **This repository**
