@@ -5,6 +5,16 @@ from importlib.metadata import PackageNotFoundError, version
 from typing import Any  # noqa: UP035
 
 from torch_rbln._internal.env_utils import is_diagnose_mode
+from torch_rbln._internal.profiling import (
+    emit_rbln_overhead_summary,
+    format_rbln_overhead_summary,
+    get_rbln_overhead_profile_snapshot,
+    has_rbln_overhead_profile_samples,
+    is_rbln_overhead_profiling_enabled,
+    log_rbln_overhead_summary,
+    maybe_emit_rbln_overhead_summary,
+    reset_rbln_overhead_profile,
+)
 from torch_rbln._internal.tvm_libinfo import get_dll_directories, get_dll_directory_candidates
 
 

@@ -326,6 +326,18 @@ def get_rbln_overhead_profile_snapshot() -> dict[str, Any]:
         }
 
 
+def has_rbln_overhead_profile_samples() -> bool:
+    snapshot = get_rbln_overhead_profile_snapshot()
+    return any(
+        (
+            snapshot["call_totals"],
+            snapshot["phase_totals"],
+            snapshot["counter_totals"],
+            snapshot["guard_reason_totals"],
+        )
+    )
+
+
 def format_rbln_overhead_summary(*, top_n: int | None = None) -> str:
     snapshot = get_rbln_overhead_profile_snapshot()
     limit = top_n or _profile_top_n()
@@ -348,20 +360,58 @@ def format_rbln_overhead_summary(*, top_n: int | None = None) -> str:
     return "\n".join(lines)
 
 
-def emit_rbln_overhead_summary(*, reset: bool = False) -> str:
+def emit_rbln_overhead_summary(
+    *,
+    reset: bool = False,
+    top_n: int | None = None,
+    writer: Callable[[str], Any] | None = None,
+) -> str:
     global _PROFILE_SUMMARY_EMITTED
-    summary = format_rbln_overhead_summary()
-    sys.stderr.write(summary + "\n")
+    summary = format_rbln_overhead_summary(top_n=top_n)
+    _write_summary(summary, writer=writer)
     _PROFILE_SUMMARY_EMITTED = True
     if reset:
         reset_rbln_overhead_profile()
     return summary
 
 
+def maybe_emit_rbln_overhead_summary(
+    *,
+    reset: bool = False,
+    top_n: int | None = None,
+    writer: Callable[[str], Any] | None = None,
+) -> str | None:
+    if not is_rbln_overhead_profiling_enabled() or not has_rbln_overhead_profile_samples():
+        return None
+    return emit_rbln_overhead_summary(reset=reset, top_n=top_n, writer=writer)
+
+
+def log_rbln_overhead_summary(
+    log_fn: Callable[[str], Any],
+    *,
+    reset: bool = False,
+    top_n: int | None = None,
+) -> str | None:
+    return maybe_emit_rbln_overhead_summary(reset=reset, top_n=top_n, writer=lambda summary: _log_summary(summary, log_fn))
+
+
 def _emit_profile_summary_at_exit() -> None:
     if _PROFILE_SUMMARY_EMITTED or not is_rbln_overhead_profiling_enabled():
         return
     emit_rbln_overhead_summary(reset=False)
+
+
+def _write_summary(summary: str, *, writer: Callable[[str], Any] | None = None) -> None:
+    if writer is None:
+        sys.stderr.write(summary + "\n")
+        sys.stderr.flush()
+        return
+    writer(summary)
+
+
+def _log_summary(summary: str, log_fn: Callable[[str], Any]) -> None:
+    for line in summary.splitlines():
+        log_fn(line)
 
 
 def _flatten_mapping(prefix: str, value: Any) -> Iterator[tuple[str, int]]:

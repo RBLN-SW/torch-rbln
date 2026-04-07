@@ -8,6 +8,9 @@ from torch_rbln._internal.profiling import (
     _reset_profiler_after_fork,
     format_rbln_overhead_summary,
     get_rbln_overhead_profile_snapshot,
+    has_rbln_overhead_profile_samples,
+    log_rbln_overhead_summary,
+    maybe_emit_rbln_overhead_summary,
     profile_call_context,
     record_counter,
     record_dynamo_state_delta,
@@ -98,6 +101,24 @@ class TestRblnProfiling(unittest.TestCase):
         self.assertIn("Counter totals", summary)
         self.assertIn("compile_cache.hit", summary)
         self.assertIn("pid=", summary)
+
+    @patch.dict("os.environ", {"TORCH_RBLN_PROFILE": "ON"}, clear=False)
+    def test_log_summary_uses_callback_and_can_reset(self):
+        with profile_call_context("add_rbln", "eager_op", allow_nested=False):
+            record_phase_duration("compile_cache.total", 10_000)
+
+        messages = []
+        summary = log_rbln_overhead_summary(messages.append, reset=True, top_n=3)
+
+        self.assertIsNotNone(summary)
+        self.assertEqual(messages, summary.splitlines())
+        self.assertIn("add_rbln", summary)
+        self.assertFalse(has_rbln_overhead_profile_samples())
+
+    @patch.dict("os.environ", {"TORCH_RBLN_PROFILE": "ON"}, clear=False)
+    def test_maybe_emit_summary_is_quiet_when_no_samples_exist(self):
+        self.assertFalse(has_rbln_overhead_profile_samples())
+        self.assertIsNone(maybe_emit_rbln_overhead_summary())
 
     @patch.dict("os.environ", {"TORCH_RBLN_PROFILE": "ON"}, clear=False)
     def test_reset_profiler_after_fork_clears_parent_state(self):
