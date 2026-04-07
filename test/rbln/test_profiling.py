@@ -103,6 +103,7 @@ class TestRblnProfiling(unittest.TestCase):
         self.assertIn("Phase totals", summary)
         self.assertIn("Counter totals", summary)
         self.assertIn("compile_cache.hit", summary)
+        self.assertIn("Warm-up adjusted view", summary)
         self.assertIn("phases", summary)
         self.assertIn("counters", summary)
         self.assertIn("Share", summary)
@@ -112,9 +113,11 @@ class TestRblnProfiling(unittest.TestCase):
 
     @patch.dict("os.environ", {"TORCH_RBLN_PROFILE": "ON"}, clear=False)
     def test_overhead_estimate_separates_known_and_excluded_time(self):
-        record_phase_duration("torch_compile.api", 1_000_000)
-        record_phase_duration("dynamo.metric.build_guards", 2_000_000)
-        record_phase_duration("ops.finalize_output_tensor", 500_000)
+        with profile_call_context("compiled_add", "compiled_fn", allow_nested=True):
+            record_phase_duration("torch_compile.api", 1_000_000)
+            record_phase_duration("dynamo.metric.build_guards", 2_000_000)
+        with profile_call_context("add_rbln", "eager_op", allow_nested=False):
+            record_phase_duration("ops.finalize_output_tensor", 500_000)
         record_phase_duration("ops.cpu_fallback.exec_cpu_op", 9_000_000)
 
         summary = format_rbln_overhead_summary(top_n=5)
@@ -125,6 +128,10 @@ class TestRblnProfiling(unittest.TestCase):
         self.assertIn("compile_stack", summary)
         self.assertIn("eager_dispatch_glue", summary)
         self.assertIn("cpu_fallback_compute", summary)
+        self.assertIn("one_time_warmup", summary)
+        self.assertIn("recurring_steady_state", summary)
+        self.assertIn("/compile", summary)
+        self.assertIn("/call", summary)
         self.assertIn("3.500ms", summary)
         self.assertIn("9.000ms", summary)
 

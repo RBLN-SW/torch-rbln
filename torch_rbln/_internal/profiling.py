@@ -416,6 +416,7 @@ def format_rbln_overhead_summary(*, top_n: int | None = None) -> str:
         f"  pid={snapshot['pid']} env={_PROFILE_ENV}=ON top_n={limit}",
     ]
     lines.extend(_format_overview(snapshot))
+    lines.extend(_format_warmup_adjusted_view(snapshot))
     lines.extend(_format_added_overhead_estimate(snapshot, limit))
     lines.extend(_format_context_section("Eager dispatch calls", "eager_op", snapshot, limit))
     lines.extend(_format_context_section("Compiled function calls", "compiled_fn", snapshot, limit))
@@ -511,11 +512,8 @@ def _format_overview(snapshot: dict[str, Any]) -> list[str]:
     ]
 
 
-def _format_added_overhead_estimate(snapshot: dict[str, Any], limit: int) -> list[str]:
+def _summarize_added_overhead_buckets(snapshot: dict[str, Any]) -> tuple[Counter[str], Counter[str], Counter[str]]:
     phase_exclusive_totals = snapshot.get("phase_exclusive_totals", {})
-    if not phase_exclusive_totals:
-        return ["Added overhead estimate: none"]
-
     known_buckets: Counter[str] = Counter()
     excluded_buckets: Counter[str] = Counter()
     unclassified_buckets: Counter[str] = Counter()
@@ -529,6 +527,78 @@ def _format_added_overhead_estimate(snapshot: dict[str, Any], limit: int) -> lis
             excluded_buckets[bucket_name] += phase_total
         else:
             unclassified_buckets[bucket_name] += phase_total
+
+    return known_buckets, excluded_buckets, unclassified_buckets
+
+
+def _format_warmup_adjusted_view(snapshot: dict[str, Any]) -> list[str]:
+    known_buckets, _, _ = _summarize_added_overhead_buckets(snapshot)
+    if not known_buckets:
+        return ["Warm-up adjusted view: none"]
+
+    warmup_total = known_buckets.get("compile_stack", 0)
+    steady_state_total = sum(total_ns for bucket_name, total_ns in known_buckets.items() if bucket_name != "compile_stack")
+    known_total = warmup_total + steady_state_total
+    compile_events = _estimate_compile_event_count(snapshot)
+    profiled_calls = _estimate_profiled_call_count(snapshot)
+
+    lines = ["Warm-up adjusted view:"]
+    lines.append(
+        "  "
+        f"compile_events~={compile_events} "
+        f"profiled_calls={profiled_calls} "
+        f"guard_failures={snapshot['counter_totals'].get('dynamo.guard_failures', 0)}"
+    )
+    lines.extend(
+        _format_table_header(
+            ("Scope", 24, "<"),
+            ("Share", 7, ">"),
+            ("Total", 12, ">"),
+            ("Normalized", 18, ">"),
+            ("Interpretation", 0, "<"),
+        )
+    )
+
+    if warmup_total > 0:
+        lines.append(
+            _format_table_row(
+                ("one_time_warmup", 24, "<"),
+                (_format_percentage(warmup_total, known_total), 7, ">"),
+                (_format_duration(warmup_total), 12, ">"),
+                (_format_normalized_duration(warmup_total, compile_events, "compile"), 18, ">"),
+                ("mostly amortized after cache reuse; may return on recompiles", 0, "<"),
+            )
+        )
+
+    if steady_state_total > 0:
+        lines.append(
+            _format_table_row(
+                ("recurring_steady_state", 24, "<"),
+                (_format_percentage(steady_state_total, known_total), 7, ">"),
+                (_format_duration(steady_state_total), 12, ">"),
+                (_format_normalized_duration(steady_state_total, profiled_calls, "call"), 18, ">"),
+                ("persists after warm-up and represents ongoing host-side overhead", 0, "<"),
+            )
+        )
+
+    lines.append(
+        _format_table_row(
+            ("known_overhead_total", 24, "<"),
+            ("100.0%", 7, ">"),
+            (_format_duration(known_total), 12, ">"),
+            (_format_normalized_duration(known_total, profiled_calls, "call"), 18, ">"),
+            ("raw total of known extra overhead in this run", 0, "<"),
+        )
+    )
+    return lines
+
+
+def _format_added_overhead_estimate(snapshot: dict[str, Any], limit: int) -> list[str]:
+    phase_exclusive_totals = snapshot.get("phase_exclusive_totals", {})
+    if not phase_exclusive_totals:
+        return ["Added overhead estimate: none"]
+
+    known_buckets, excluded_buckets, unclassified_buckets = _summarize_added_overhead_buckets(snapshot)
 
     lines = ["Added overhead estimate (exclusive, host-side):"]
 
@@ -800,10 +870,32 @@ def _format_percentage(part: int, whole: int) -> str:
     return f"{(part / whole) * 100:.1f}%"
 
 
+def _format_normalized_duration(total_ns: int, count: int, unit: str) -> str:
+    if count <= 0:
+        return "n/a"
+    return f"{_format_duration(total_ns // count)}/{unit}"
+
+
 def _short_nested_name(name: str) -> str:
     if "." not in name:
         return name
     return name.split(".")[-1]
+
+
+def _estimate_compile_event_count(snapshot: dict[str, Any]) -> int:
+    counter_totals = snapshot.get("counter_totals", {})
+    compile_events = max(
+        int(counter_totals.get("dynamo.counter.stats.unique_graphs", 0)),
+        int(counter_totals.get("compile_cache.miss", 0)),
+        int(counter_totals.get("torch_compile.rbln_backend_calls", 0)),
+    )
+    if compile_events <= 0 and "compile_stack" in _summarize_added_overhead_buckets(snapshot)[0]:
+        return 1
+    return compile_events
+
+
+def _estimate_profiled_call_count(snapshot: dict[str, Any]) -> int:
+    return sum(stats["count"] for stats in snapshot.get("call_totals", {}).values())
 
 
 _KNOWN_EAGER_OVERHEAD_PHASES = frozenset(
