@@ -7,6 +7,8 @@ os.environ.setdefault("TORCH_RBLN_DIAGNOSE", "1")
 import torch_rbln._internal.profiling as profiling
 from torch_rbln._internal.profiling import (
     _reset_profiler_after_fork,
+    begin_dynamo_runtime_call_observation,
+    end_dynamo_runtime_call_observation,
     format_rbln_overhead_summary,
     get_rbln_overhead_phase_exclusive_snapshot,
     get_rbln_overhead_profile_snapshot,
@@ -18,6 +20,7 @@ from torch_rbln._internal.profiling import (
     record_bucket_value,
     record_compile_cause,
     record_counter,
+    record_dynamo_guard_complete,
     record_dynamo_state_delta,
     record_phase_duration,
     record_shape_signature,
@@ -170,6 +173,24 @@ class TestRblnProfiling(unittest.TestCase):
         self.assertIn("Transfer bytes", summary)
         self.assertIn("6.00KiB", summary)
         self.assertIn("8.00KiB", summary)
+
+    @patch.dict("os.environ", {"TORCH_RBLN_PROFILE": "ON"}, clear=False)
+    @patch("torch_rbln._internal.profiling.time.perf_counter_ns", side_effect=[10, 100, 160, 220])
+    def test_dynamo_runtime_guard_observation_records_warm_path_overhead(self, _perf_counter_ns):
+        with profile_call_context("model_wrapper", "compiled_fn", allow_nested=True):
+            begin_dynamo_runtime_call_observation()
+            record_dynamo_guard_complete(True)
+            observation = end_dynamo_runtime_call_observation()
+
+        snapshot = get_rbln_overhead_profile_snapshot()
+        summary = format_rbln_overhead_summary(top_n=5)
+
+        self.assertTrue(observation["cache_hit"])
+        self.assertEqual(snapshot["phase_totals"]["compile_wrapper.dynamo_runtime.guard_and_cache"]["total_ns"], 60)
+        self.assertEqual(snapshot["counter_totals"]["compile_wrapper.dynamo_runtime.cache_hit"], 1)
+        self.assertIn("Torch.compile/Dynamo runtime overhead", summary)
+        self.assertIn("eval_frame/cache_lookup/guards", summary)
+        self.assertIn("cache_hits=1", summary)
 
     @patch.dict("os.environ", {"TORCH_RBLN_PROFILE": "ON"}, clear=False)
     def test_log_summary_uses_callback_and_can_reset(self):

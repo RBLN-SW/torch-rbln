@@ -8,7 +8,12 @@ Patches are organized by functionality and include proper error handling and ide
 import warnings
 
 from torch_rbln._internal.compile_cache import clear_rbln_compile_cache
-from torch_rbln._internal.profiling import profile_phase, record_counter
+from torch_rbln._internal.profiling import (
+    is_rbln_overhead_profiling_enabled,
+    profile_phase,
+    record_counter,
+    record_dynamo_guard_complete,
+)
 from torch_rbln._internal.torch_compile_patch_helpers import CompiledFunctionWrapper, is_rbln_backend
 
 
@@ -18,6 +23,47 @@ _torch_dynamo_reset_patched: bool = False
 _rbln_backend_registered: bool = False
 _original_torch_compile = None
 _original_dynamo_reset = None
+_original_set_guard_complete_hook = None
+_torch_guard_complete_hook_patched: bool = False
+_user_guard_complete_hook = None
+
+
+def _combined_guard_complete_hook(cache_hit: bool) -> bool:
+    record_dynamo_guard_complete(cache_hit)
+    if _user_guard_complete_hook is None:
+        return cache_hit
+
+    result = _user_guard_complete_hook(cache_hit)
+    return cache_hit if result is None else bool(result)
+
+
+def patch_dynamo_guard_complete_hook() -> None:
+    global _original_set_guard_complete_hook, _torch_guard_complete_hook_patched, _user_guard_complete_hook
+
+    if not is_rbln_overhead_profiling_enabled():
+        return
+    if _torch_guard_complete_hook_patched:
+        return
+
+    import torch
+    import torch._dynamo.decorators as dynamo_decorators
+    import torch._dynamo.eval_frame as dynamo_eval_frame
+
+    if _original_set_guard_complete_hook is None:
+        _original_set_guard_complete_hook = torch._C._dynamo.eval_frame.set_guard_complete_hook
+
+    def set_guard_complete_hook_wrapper(user_hook):
+        global _user_guard_complete_hook
+        previous_hook = _user_guard_complete_hook
+        _user_guard_complete_hook = None if user_hook is _combined_guard_complete_hook else user_hook
+        _original_set_guard_complete_hook(_combined_guard_complete_hook)
+        return previous_hook
+
+    torch._C._dynamo.eval_frame.set_guard_complete_hook = set_guard_complete_hook_wrapper
+    dynamo_eval_frame.set_guard_complete_hook = set_guard_complete_hook_wrapper
+    dynamo_decorators.set_guard_complete_hook = set_guard_complete_hook_wrapper
+    set_guard_complete_hook_wrapper(None)
+    _torch_guard_complete_hook_patched = True
 
 
 def _is_backend_registered(backend_name: str) -> bool:
@@ -163,6 +209,7 @@ def apply_all_patches() -> None:
     Idempotent: Safe to call multiple times.
     """
     patch_torch_compile()
+    patch_dynamo_guard_complete_hook()
 
 
 def remove_all_patches() -> None:
@@ -172,15 +219,25 @@ def remove_all_patches() -> None:
     WARNING: This function is primarily for testing purposes.
     """
     global _rbln_backend_registered, _torch_compile_patched, _torch_dynamo_reset_patched
+    global _original_set_guard_complete_hook, _torch_guard_complete_hook_patched, _user_guard_complete_hook
 
     import torch
+    import torch._dynamo.decorators as dynamo_decorators
+    import torch._dynamo.eval_frame as dynamo_eval_frame
 
     if _original_torch_compile is not None:
         torch.compile = _original_torch_compile
     if _original_dynamo_reset is not None:
         torch._dynamo.reset = _original_dynamo_reset
+    if _original_set_guard_complete_hook is not None:
+        torch._C._dynamo.eval_frame.set_guard_complete_hook = _original_set_guard_complete_hook
+        dynamo_eval_frame.set_guard_complete_hook = _original_set_guard_complete_hook
+        dynamo_decorators.set_guard_complete_hook = _original_set_guard_complete_hook
+        _original_set_guard_complete_hook(None)
 
     clear_rbln_compile_cache()
     _torch_compile_patched = False
     _torch_dynamo_reset_patched = False
     _rbln_backend_registered = False
+    _torch_guard_complete_hook_patched = False
+    _user_guard_complete_hook = None

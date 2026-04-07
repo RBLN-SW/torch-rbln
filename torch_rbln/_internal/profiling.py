@@ -51,6 +51,13 @@ class _ActivePhaseFrame:
     child_ns: int = 0
 
 
+@dataclass
+class _DynamoRuntimeObservation:
+    start_ns: int
+    guard_complete_ns: int | None = None
+    cache_hit: bool | None = None
+
+
 class _ProfileStore:
     def __init__(self) -> None:
         self.call_totals: defaultdict[tuple[str, str], _DurationStat] = defaultdict(_DurationStat)
@@ -164,6 +171,14 @@ def _get_phase_stack() -> list[_ActivePhaseFrame]:
     return stack
 
 
+def _get_dynamo_runtime_observation_stack() -> list[_DynamoRuntimeObservation]:
+    stack = getattr(_PROFILE_TLS, "dynamo_runtime_observation_stack", None)
+    if stack is None:
+        stack = []
+        _PROFILE_TLS.dynamo_runtime_observation_stack = stack
+    return stack
+
+
 @contextmanager
 def profile_call_context(name: str, category: str, *, allow_nested: bool = True) -> Iterator[bool]:
     if not is_rbln_overhead_profiling_enabled():
@@ -224,6 +239,49 @@ def record_phase_duration(name: str, duration_ns: int) -> None:
     _ensure_process_exit_reporters_registered()
 
     _record_phase_stats(name, duration_ns, duration_ns)
+
+
+def begin_dynamo_runtime_call_observation() -> None:
+    if not is_rbln_overhead_profiling_enabled():
+        return
+
+    _ensure_process_exit_reporters_registered()
+    _get_dynamo_runtime_observation_stack().append(_DynamoRuntimeObservation(start_ns=time.perf_counter_ns()))
+
+
+def record_dynamo_guard_complete(cache_hit: bool) -> None:
+    if not is_rbln_overhead_profiling_enabled():
+        return
+
+    stack = _get_dynamo_runtime_observation_stack()
+    if not stack:
+        return
+
+    observation = stack[-1]
+    if observation.guard_complete_ns is not None:
+        return
+
+    now_ns = time.perf_counter_ns()
+    observation.guard_complete_ns = now_ns
+    observation.cache_hit = bool(cache_hit)
+    record_phase_duration("compile_wrapper.dynamo_runtime.guard_and_cache", now_ns - observation.start_ns)
+    record_counter("compile_wrapper.dynamo_runtime.cache_hit" if cache_hit else "compile_wrapper.dynamo_runtime.cache_miss")
+
+
+def end_dynamo_runtime_call_observation() -> dict[str, Any] | None:
+    if not is_rbln_overhead_profiling_enabled():
+        return None
+
+    stack = _get_dynamo_runtime_observation_stack()
+    if not stack:
+        return None
+
+    observation = stack.pop()
+    return {
+        "start_ns": observation.start_ns,
+        "guard_complete_ns": observation.guard_complete_ns,
+        "cache_hit": observation.cache_hit,
+    }
 
 
 def _record_phase_stats(name: str, duration_ns: int, exclusive_ns: int) -> None:
@@ -525,6 +583,7 @@ def format_rbln_overhead_summary(*, top_n: int | None = None) -> str:
     lines.extend(_format_overview(snapshot))
     lines.extend(_format_warmup_adjusted_view(snapshot))
     lines.extend(_format_added_overhead_estimate(snapshot, limit))
+    lines.extend(_format_torch_compile_dynamo_runtime(snapshot))
     lines.extend(_format_context_section("Eager dispatch calls", "eager_op", snapshot, limit))
     lines.extend(_format_context_section("Compiled function calls", "compiled_fn", snapshot, limit))
     lines.extend(_format_compiled_shape_signatures(snapshot, limit))
@@ -849,6 +908,51 @@ def _format_context_section(title: str, category: str, snapshot: dict[str, Any],
                     [f"{_short_nested_name(counter_name)}={value}" for counter_name, value in counter_items[:4]],
                 )
             )
+    return lines
+
+
+def _format_torch_compile_dynamo_runtime(snapshot: dict[str, Any]) -> list[str]:
+    phase_stats = snapshot.get("phase_totals", {}).get("compile_wrapper.dynamo_runtime.guard_and_cache")
+    counter_totals = snapshot.get("counter_totals", {})
+    cache_hits = int(counter_totals.get("compile_wrapper.dynamo_runtime.cache_hit", 0))
+    cache_misses = int(counter_totals.get("compile_wrapper.dynamo_runtime.cache_miss", 0))
+    total_calls = cache_hits + cache_misses
+
+    if phase_stats is None and total_calls == 0:
+        return ["Torch.compile/Dynamo runtime overhead: none"]
+
+    lines = ["Torch.compile/Dynamo runtime overhead:"]
+    lines.append(
+        "  "
+        f"cache_hits={cache_hits} "
+        f"cache_misses={cache_misses} "
+        f"hit_rate={_format_percentage(cache_hits, total_calls) if total_calls else 'n/a'}"
+    )
+    if phase_stats is not None:
+        lines.extend(
+            _format_table_header(
+                ("Observed path", 30, "<"),
+                ("Calls", 7, ">"),
+                ("Total", 12, ">"),
+                ("Avg", 12, ">"),
+                ("Max", 12, ">"),
+                ("Interpretation", 0, "<"),
+            )
+        )
+        lines.append(
+            _format_table_row(
+                ("eval_frame/cache_lookup/guards", 30, "<"),
+                (str(phase_stats["count"]), 7, ">"),
+                (_format_duration(phase_stats["total_ns"]), 12, ">"),
+                (_format_duration(_safe_average(phase_stats["total_ns"], phase_stats["count"])), 12, ">"),
+                (_format_duration(phase_stats["max_ns"]), 12, ">"),
+                ("warm-path structural tax before compiled graph body starts", 0, "<"),
+            )
+        )
+    lines.append(
+        "    note     includes Dynamo cache lookup, guard evaluation, and Python/C trampoline cost; "
+        "compiled graph execution itself is excluded from this row"
+    )
     return lines
 
 
@@ -1240,6 +1344,12 @@ _KNOWN_COMPILE_OVERHEAD_PHASES = frozenset(
     }
 )
 
+_KNOWN_RUNTIME_STRUCTURAL_OVERHEAD_PHASES = frozenset(
+    {
+        "compile_wrapper.dynamo_runtime.guard_and_cache",
+    }
+)
+
 _KNOWN_FALLBACK_GLUE_PHASES = frozenset(
     {
         "compile_wrapper.attempt_cpu_fallback",
@@ -1260,6 +1370,8 @@ def _classify_phase_for_overhead_estimate(phase_name: str) -> tuple[str, str]:
         return ("compile_stack", "known")
     if phase_name in _KNOWN_COMPILE_OVERHEAD_PHASES:
         return ("compile_stack", "known")
+    if phase_name in _KNOWN_RUNTIME_STRUCTURAL_OVERHEAD_PHASES:
+        return ("dynamo_runtime_glue", "known")
     if phase_name in _KNOWN_EAGER_OVERHEAD_PHASES:
         return ("eager_dispatch_glue", "known")
     if phase_name in _KNOWN_FALLBACK_GLUE_PHASES:
@@ -1277,6 +1389,8 @@ def _overhead_bucket_description(bucket_name: str) -> str:
         return "torch.compile entry, cache, Dynamo compile, guards, and failover control"
     if bucket_name == "eager_dispatch_glue":
         return "RBLN eager dispatch preprocessing and output handling"
+    if bucket_name == "dynamo_runtime_glue":
+        return "warm-path Dynamo cache lookup, guard checks, and Python/C trampoline"
     if bucket_name == "fallback_glue":
         return "fallback-specific glue such as to_cpu/to_device and device resolution"
     return "classified extra overhead"

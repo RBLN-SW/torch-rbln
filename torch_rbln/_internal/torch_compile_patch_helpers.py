@@ -15,6 +15,8 @@ from torch_rbln._internal.env_utils import is_fallback_disabled, use_tp_failover
 from torch_rbln._internal.log_utils import rbln_log_error, rbln_log_warn
 from torch_rbln._internal.ops_utils import estimate_tensor_nbytes, extract_device_id_from_inputs, to_cpu
 from torch_rbln._internal.profiling import (
+    begin_dynamo_runtime_call_observation,
+    end_dynamo_runtime_call_observation,
     profile_call_context,
     profile_phase,
     record_compile_cause,
@@ -373,14 +375,15 @@ class CompiledFunctionWrapper:
         self._pending_compile_cause = cause
         self._pending_compile_overhead_ns += max(0, orchestration_ns)
 
-    def _record_compile_cause_if_needed(self, delta_summary):
+    def _record_compile_cause_if_needed(self, delta_summary, runtime_observation=None):
         compile_total_ns = int(delta_summary.get("compile_total_ns", 0))
         if compile_total_ns <= 0:
             return
 
         cause = self._pending_compile_cause
+        cache_hit = None if runtime_observation is None else runtime_observation.get("cache_hit")
         if cause is None:
-            if int(delta_summary.get("guard_failure_count", 0)) > 0:
+            if cache_hit is False or int(delta_summary.get("guard_failure_count", 0)) > 0:
                 cause = "guard_miss"
             elif self._observed_compile_events == 0:
                 cause = "initial_compile"
@@ -480,14 +483,16 @@ class CompiledFunctionWrapper:
 
         for attempt in range(self._max_retries + 1):
             try:
+                begin_dynamo_runtime_call_observation()
                 before_dynamo_state = snapshot_dynamo_state()
                 try:
                     with profile_phase("compile_wrapper.compiled_call"):
                         return self._compiled_fn(*args, **kwargs)
                 finally:
+                    runtime_observation = end_dynamo_runtime_call_observation()
                     after_dynamo_state = snapshot_dynamo_state()
                     delta_summary = record_dynamo_state_delta(before_dynamo_state, after_dynamo_state)
-                    self._record_compile_cause_if_needed(delta_summary)
+                    self._record_compile_cause_if_needed(delta_summary, runtime_observation)
             except RuntimeError as e:
                 result = self._handle_runtime_error(e, device_id, args, kwargs)
                 if result is None:
