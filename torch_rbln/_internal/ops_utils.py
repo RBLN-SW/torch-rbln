@@ -466,26 +466,31 @@ def cpu_fallback_path(
         record_counter("ops.cpu_fallback_path.calls")
         if op_name is not None:
             rbln_log_cpu_fallback(op_name)
-        cpu_args = to_cpu(args)
-        cpu_op_kwargs = to_cpu(op_kwargs)
-        result_cpu = target_ops(*cpu_args, **cpu_op_kwargs)
+        with profile_phase("ops.cpu_fallback.to_cpu"):
+            cpu_args = to_cpu(args)
+            cpu_op_kwargs = to_cpu(op_kwargs)
+        with profile_phase("ops.cpu_fallback.exec_cpu_op"):
+            result_cpu = target_ops(*cpu_args, **cpu_op_kwargs)
         if result is not None and result_cpu.size() == result.size():
-            result.copy_(result_cpu)
+            with profile_phase("ops.cpu_fallback.copy_to_out"):
+                result.copy_(result_cpu)
             return result
 
         # Get device_index from result tensor or from input args/op_kwargs
         # In this context, rbln tensors always have a device_index
-        device_id = None
-        if result is not None and isinstance(result, torch.Tensor) and result.device.type == "rbln":
-            device_id = result.device.index
-        else:
-            # Find device_id from input tensors
-            device_id = extract_device_id_from_inputs(*args, **op_kwargs)
+        with profile_phase("ops.cpu_fallback.resolve_device"):
+            device_id = None
+            if result is not None and isinstance(result, torch.Tensor) and result.device.type == "rbln":
+                device_id = result.device.index
+            else:
+                # Find device_id from input tensors
+                device_id = extract_device_id_from_inputs(*args, **op_kwargs)
 
         # Convert result back to rbln device with proper device_index
         # device_id should always be available when rbln tensors are present
         assert device_id is not None, "device_id should be found from rbln tensors"
-        result = result_cpu.to(f"rbln:{device_id}")
+        with profile_phase("ops.cpu_fallback.return_to_rbln"):
+            result = result_cpu.to(f"rbln:{device_id}")
         return result
 
 

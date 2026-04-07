@@ -8,6 +8,7 @@ import torch_rbln._internal.profiling as profiling
 from torch_rbln._internal.profiling import (
     _reset_profiler_after_fork,
     format_rbln_overhead_summary,
+    get_rbln_overhead_phase_exclusive_snapshot,
     get_rbln_overhead_profile_snapshot,
     has_rbln_overhead_profile_samples,
     log_rbln_overhead_summary,
@@ -96,12 +97,36 @@ class TestRblnProfiling(unittest.TestCase):
         summary = format_rbln_overhead_summary(top_n=5)
 
         self.assertIn("Runtime overhead summary", summary)
+        self.assertIn("Overview:", summary)
         self.assertIn("Eager dispatch calls", summary)
         self.assertIn("add_rbln", summary)
         self.assertIn("Phase totals", summary)
         self.assertIn("Counter totals", summary)
         self.assertIn("compile_cache.hit", summary)
+        self.assertIn("phases", summary)
+        self.assertIn("counters", summary)
+        self.assertIn("Share", summary)
+        self.assertIn("Added overhead estimate", summary)
+        self.assertIn("known_overhead_total", summary)
         self.assertIn("pid=", summary)
+
+    @patch.dict("os.environ", {"TORCH_RBLN_PROFILE": "ON"}, clear=False)
+    def test_overhead_estimate_separates_known_and_excluded_time(self):
+        record_phase_duration("torch_compile.api", 1_000_000)
+        record_phase_duration("dynamo.metric.build_guards", 2_000_000)
+        record_phase_duration("ops.finalize_output_tensor", 500_000)
+        record_phase_duration("ops.cpu_fallback.exec_cpu_op", 9_000_000)
+
+        summary = format_rbln_overhead_summary(top_n=5)
+        exclusive_snapshot = get_rbln_overhead_phase_exclusive_snapshot()
+
+        self.assertEqual(exclusive_snapshot["torch_compile.api"]["total_ns"], 1_000_000)
+        self.assertEqual(exclusive_snapshot["ops.cpu_fallback.exec_cpu_op"]["total_ns"], 9_000_000)
+        self.assertIn("compile_stack", summary)
+        self.assertIn("eager_dispatch_glue", summary)
+        self.assertIn("cpu_fallback_compute", summary)
+        self.assertIn("3.500ms", summary)
+        self.assertIn("9.000ms", summary)
 
     @patch.dict("os.environ", {"TORCH_RBLN_PROFILE": "ON"}, clear=False)
     def test_log_summary_uses_callback_and_can_reset(self):

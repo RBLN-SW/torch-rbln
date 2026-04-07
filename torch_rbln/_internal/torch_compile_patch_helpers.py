@@ -78,15 +78,18 @@ def attempt_cpu_fallback(original_fn, args, kwargs, original_device):
     """Attempt to execute original function on CPU with fallback."""
     with profile_phase("compile_wrapper.attempt_cpu_fallback"):
         # Execute original function on CPU instead of compiled function
-        cpu_args = to_cpu(args)
-        cpu_kwargs = to_cpu(kwargs)
+        with profile_phase("compile_wrapper.cpu_fallback.to_cpu"):
+            cpu_args = to_cpu(args)
+            cpu_kwargs = to_cpu(kwargs)
         if original_fn is None:
             raise ValueError("original_fn is not provided")
-        result = original_fn(*cpu_args, **cpu_kwargs)
+        with profile_phase("compile_wrapper.cpu_fallback.exec_original"):
+            result = original_fn(*cpu_args, **cpu_kwargs)
 
         # Move result back to original device if needed
         if original_device and original_device.type != "cpu":
-            result = _convert_result_to_device(result, original_device)
+            with profile_phase("compile_wrapper.cpu_fallback.return_to_device"):
+                result = _convert_result_to_device(result, original_device)
         return result
 
 

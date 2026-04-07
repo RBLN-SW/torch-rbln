@@ -45,10 +45,17 @@ class _CallContext:
     name: str
 
 
+@dataclass
+class _ActivePhaseFrame:
+    start_ns: int
+    child_ns: int = 0
+
+
 class _ProfileStore:
     def __init__(self) -> None:
         self.call_totals: defaultdict[tuple[str, str], _DurationStat] = defaultdict(_DurationStat)
         self.phase_totals: defaultdict[str, _DurationStat] = defaultdict(_DurationStat)
+        self.phase_exclusive_totals: defaultdict[str, _DurationStat] = defaultdict(_DurationStat)
         self.phase_by_context: defaultdict[tuple[str, str, str], _DurationStat] = defaultdict(_DurationStat)
         self.counter_totals: Counter[str] = Counter()
         self.counter_by_context: Counter[tuple[str, str, str]] = Counter()
@@ -58,6 +65,7 @@ class _ProfileStore:
     def reset(self) -> None:
         self.call_totals.clear()
         self.phase_totals.clear()
+        self.phase_exclusive_totals.clear()
         self.phase_by_context.clear()
         self.counter_totals.clear()
         self.counter_by_context.clear()
@@ -140,6 +148,14 @@ def _get_context_stack() -> list[_CallContext]:
     return stack
 
 
+def _get_phase_stack() -> list[_ActivePhaseFrame]:
+    stack = getattr(_PROFILE_TLS, "phase_stack", None)
+    if stack is None:
+        stack = []
+        _PROFILE_TLS.phase_stack = stack
+    return stack
+
+
 @contextmanager
 def profile_call_context(name: str, category: str, *, allow_nested: bool = True) -> Iterator[bool]:
     if not is_rbln_overhead_profiling_enabled():
@@ -173,10 +189,18 @@ def profile_phase(name: str) -> Iterator[None]:
     _ensure_process_exit_reporters_registered()
 
     start_ns = time.perf_counter_ns()
+    phase_stack = _get_phase_stack()
+    phase_frame = _ActivePhaseFrame(start_ns=start_ns)
+    phase_stack.append(phase_frame)
     try:
         yield
     finally:
-        record_phase_duration(name, time.perf_counter_ns() - start_ns)
+        duration_ns = time.perf_counter_ns() - start_ns
+        phase_stack.pop()
+        exclusive_ns = max(0, duration_ns - phase_frame.child_ns)
+        if phase_stack:
+            phase_stack[-1].child_ns += duration_ns
+        _record_phase_stats(name, duration_ns, exclusive_ns)
 
 
 def _record_call_total(category: str, name: str, duration_ns: int) -> None:
@@ -191,11 +215,26 @@ def record_phase_duration(name: str, duration_ns: int) -> None:
 
     _ensure_process_exit_reporters_registered()
 
+    _record_phase_stats(name, duration_ns, duration_ns)
+
+
+def _record_phase_stats(name: str, duration_ns: int, exclusive_ns: int) -> None:
+    _ensure_process_local_state()
     contexts = tuple(_get_context_stack())
     with _PROFILE_LOCK:
         _PROFILE_STORE.phase_totals[name].add(duration_ns)
+        _PROFILE_STORE.phase_exclusive_totals[name].add(exclusive_ns)
         for context in contexts:
             _PROFILE_STORE.phase_by_context[(context.category, context.name, name)].add(duration_ns)
+
+
+def get_rbln_overhead_phase_exclusive_snapshot() -> dict[str, dict[str, int]]:
+    _ensure_process_local_state()
+    with _PROFILE_LOCK:
+        return {
+            key: {"count": stat.count, "total_ns": stat.total_ns, "max_ns": stat.max_ns}
+            for key, stat in _PROFILE_STORE.phase_exclusive_totals.items()
+        }
 
 
 def record_counter(name: str, delta: int = 1) -> None:
@@ -335,6 +374,10 @@ def get_rbln_overhead_profile_snapshot() -> dict[str, Any]:
                 key: {"count": stat.count, "total_ns": stat.total_ns, "max_ns": stat.max_ns}
                 for key, stat in _PROFILE_STORE.phase_totals.items()
             },
+            "phase_exclusive_totals": {
+                key: {"count": stat.count, "total_ns": stat.total_ns, "max_ns": stat.max_ns}
+                for key, stat in _PROFILE_STORE.phase_exclusive_totals.items()
+            },
             "phase_by_context": {
                 key: {"count": stat.count, "total_ns": stat.total_ns, "max_ns": stat.max_ns}
                 for key, stat in _PROFILE_STORE.phase_by_context.items()
@@ -372,6 +415,8 @@ def format_rbln_overhead_summary(*, top_n: int | None = None) -> str:
         "[TORCH-RBLN][PROFILE] Runtime overhead summary",
         f"  pid={snapshot['pid']} env={_PROFILE_ENV}=ON top_n={limit}",
     ]
+    lines.extend(_format_overview(snapshot))
+    lines.extend(_format_added_overhead_estimate(snapshot, limit))
     lines.extend(_format_context_section("Eager dispatch calls", "eager_op", snapshot, limit))
     lines.extend(_format_context_section("Compiled function calls", "compiled_fn", snapshot, limit))
     lines.extend(_format_phase_totals(snapshot, limit))
@@ -452,6 +497,106 @@ def _normalize_guard_key(key: Any) -> str:
     return str(key)
 
 
+def _format_overview(snapshot: dict[str, Any]) -> list[str]:
+    eager_ops = sum(1 for category, _ in snapshot["call_totals"] if category == "eager_op")
+    compiled_fns = sum(1 for category, _ in snapshot["call_totals"] if category == "compiled_fn")
+    return [
+        "Overview:",
+        "  "
+        f"eager_ops={eager_ops} "
+        f"compiled_fns={compiled_fns} "
+        f"phases={len(snapshot['phase_totals'])} "
+        f"counters={len(snapshot['counter_totals'])} "
+        f"guard_reasons={len(snapshot['guard_reason_totals'])}",
+    ]
+
+
+def _format_added_overhead_estimate(snapshot: dict[str, Any], limit: int) -> list[str]:
+    phase_exclusive_totals = snapshot.get("phase_exclusive_totals", {})
+    if not phase_exclusive_totals:
+        return ["Added overhead estimate: none"]
+
+    known_buckets: Counter[str] = Counter()
+    excluded_buckets: Counter[str] = Counter()
+    unclassified_buckets: Counter[str] = Counter()
+
+    for phase_name, stats in phase_exclusive_totals.items():
+        phase_total = stats["total_ns"]
+        bucket_name, bucket_group = _classify_phase_for_overhead_estimate(phase_name)
+        if bucket_group == "known":
+            known_buckets[bucket_name] += phase_total
+        elif bucket_group == "excluded":
+            excluded_buckets[bucket_name] += phase_total
+        else:
+            unclassified_buckets[bucket_name] += phase_total
+
+    lines = ["Added overhead estimate (exclusive, host-side):"]
+
+    if known_buckets:
+        known_total = sum(known_buckets.values())
+        known_items = known_buckets.most_common()
+        name_width = max(len("Bucket"), max(len(name) for name, _ in known_items + [("known_overhead_total", 0)]))
+        name_width = min(name_width, 24)
+        lines.extend(
+            _format_table_header(
+                ("Bucket", name_width, "<"),
+                ("Share", 7, ">"),
+                ("Total", 12, ">"),
+                ("What it means", 0, "<"),
+            )
+        )
+        for name, total_ns in known_items:
+            lines.append(
+                _format_table_row(
+                    (name, name_width, "<"),
+                    (_format_percentage(total_ns, known_total), 7, ">"),
+                    (_format_duration(total_ns), 12, ">"),
+                    (_overhead_bucket_description(name), 0, "<"),
+                )
+            )
+        lines.append(
+            _format_table_row(
+                ("known_overhead_total", name_width, "<"),
+                ("100.0%", 7, ">"),
+                (_format_duration(known_total), 12, ">"),
+                ("sum of known extra host-side overhead only", 0, "<"),
+            )
+        )
+    else:
+        lines.append("  known_overhead_total: none")
+
+    if excluded_buckets:
+        lines.append("Excluded mixed time (not added to total):")
+        lines.extend(
+            _format_table_header(
+                ("Bucket", 24, "<"),
+                ("Total", 12, ">"),
+                ("Why excluded", 0, "<"),
+            )
+        )
+        for name, total_ns in excluded_buckets.most_common(limit):
+            lines.append(
+                _format_table_row(
+                    (name, 24, "<"),
+                    (_format_duration(total_ns), 12, ">"),
+                    (_excluded_bucket_description(name), 0, "<"),
+                )
+            )
+
+    if unclassified_buckets:
+        lines.append("Unclassified profiled time:")
+        lines.extend(
+            _format_table_header(
+                ("Bucket", 24, "<"),
+                ("Total", 12, ">"),
+            )
+        )
+        for name, total_ns in unclassified_buckets.most_common(limit):
+            lines.append(_format_table_row((name, 24, "<"), (_format_duration(total_ns), 12, ">")))
+
+    return lines
+
+
 def _format_context_section(title: str, category: str, snapshot: dict[str, Any], limit: int) -> list[str]:
     call_totals = snapshot["call_totals"]
     items = [
@@ -464,8 +609,24 @@ def _format_context_section(title: str, category: str, snapshot: dict[str, Any],
 
     phase_by_context = snapshot["phase_by_context"]
     counter_by_context = snapshot["counter_by_context"]
+    ranked_items = sorted(items, key=lambda item: item[1]["total_ns"], reverse=True)[:limit]
+    total_ns = sum(stats["total_ns"] for _, stats in ranked_items)
+    name_width = max(len("Name"), max(len(name) for name, _ in ranked_items))
+    name_width = min(name_width, 36)
+
     lines = [f"{title}:"]
-    for name, stats in sorted(items, key=lambda item: item[1]["total_ns"], reverse=True)[:limit]:
+    lines.extend(
+        _format_table_header(
+            ("Name", name_width, "<"),
+            ("Calls", 7, ">"),
+            ("Share", 7, ">"),
+            ("Total", 12, ">"),
+            ("Avg", 12, ">"),
+            ("Max", 12, ">"),
+        )
+    )
+
+    for name, stats in ranked_items:
         phase_items = [
             (phase, phase_stats["total_ns"])
             for (ctx_category, ctx_name, phase), phase_stats in phase_by_context.items()
@@ -479,28 +640,34 @@ def _format_context_section(title: str, category: str, snapshot: dict[str, Any],
         ]
         counter_items.sort(key=lambda item: item[1], reverse=True)
 
-        extras = []
-        if phase_items:
-            phase_summary = ", ".join(
-                f"{phase.split('.')[-1]}={_format_duration(total_ns)}"
-                for phase, total_ns in phase_items[:4]
+        lines.append(
+            _format_table_row(
+                (name, name_width, "<"),
+                (str(stats["count"]), 7, ">"),
+                (_format_percentage(stats["total_ns"], total_ns), 7, ">"),
+                (_format_duration(stats["total_ns"]), 12, ">"),
+                (_format_duration(_safe_average(stats["total_ns"], stats["count"])), 12, ">"),
+                (_format_duration(stats["max_ns"]), 12, ">"),
             )
-            extras.append(f"phases[{phase_summary}]")
-        if counter_items:
-            counter_summary = ", ".join(
-                f"{counter_name.split('.')[-1]}={value}"
-                for counter_name, value in counter_items[:4]
-            )
-            extras.append(f"counters[{counter_summary}]")
-
-        line = (
-            f"  {name}: calls={stats['count']} total={_format_duration(stats['total_ns'])} "
-            f"avg={_format_duration(_safe_average(stats['total_ns'], stats['count']))} "
-            f"max={_format_duration(stats['max_ns'])}"
         )
-        if extras:
-            line += " | " + " | ".join(extras)
-        lines.append(line)
+        if phase_items:
+            lines.extend(
+                _format_wrapped_items(
+                    "phases",
+                    [
+                        f"{_short_nested_name(phase)}={_format_duration(duration_ns)} "
+                        f"({_format_percentage(duration_ns, stats['total_ns'])})"
+                        for phase, duration_ns in phase_items[:4]
+                    ],
+                )
+            )
+        if counter_items:
+            lines.extend(
+                _format_wrapped_items(
+                    "counters",
+                    [f"{_short_nested_name(counter_name)}={value}" for counter_name, value in counter_items[:4]],
+                )
+            )
     return lines
 
 
@@ -509,13 +676,32 @@ def _format_phase_totals(snapshot: dict[str, Any], limit: int) -> list[str]:
     if not phase_totals:
         return ["Phase totals: none"]
 
-    lines = ["Phase totals:"]
     items = sorted(phase_totals.items(), key=lambda item: item[1]["total_ns"], reverse=True)[:limit]
+    total_ns = sum(stats["total_ns"] for _, stats in items)
+    name_width = max(len("Phase"), max(len(name) for name, _ in items))
+    name_width = min(name_width, 44)
+
+    lines = ["Phase totals:"]
+    lines.extend(
+        _format_table_header(
+            ("Phase", name_width, "<"),
+            ("Calls", 7, ">"),
+            ("Share", 7, ">"),
+            ("Total", 12, ">"),
+            ("Avg", 12, ">"),
+            ("Max", 12, ">"),
+        )
+    )
     for name, stats in items:
         lines.append(
-            f"  {name}: calls={stats['count']} total={_format_duration(stats['total_ns'])} "
-            f"avg={_format_duration(_safe_average(stats['total_ns'], stats['count']))} "
-            f"max={_format_duration(stats['max_ns'])}"
+            _format_table_row(
+                (name, name_width, "<"),
+                (str(stats["count"]), 7, ">"),
+                (_format_percentage(stats["total_ns"], total_ns), 7, ">"),
+                (_format_duration(stats["total_ns"]), 12, ">"),
+                (_format_duration(_safe_average(stats["total_ns"], stats["count"])), 12, ">"),
+                (_format_duration(stats["max_ns"]), 12, ">"),
+            )
         )
     return lines
 
@@ -525,9 +711,19 @@ def _format_counter_totals(snapshot: dict[str, Any], limit: int) -> list[str]:
     if not counter_totals:
         return ["Counter totals: none"]
 
+    items = Counter(counter_totals).most_common(limit)
+    name_width = max(len("Counter"), max(len(name) for name, _ in items))
+    name_width = min(name_width, 52)
+
     lines = ["Counter totals:"]
-    for name, value in Counter(counter_totals).most_common(limit):
-        lines.append(f"  {name}: {value}")
+    lines.extend(
+        _format_table_header(
+            ("Counter", name_width, "<"),
+            ("Value", 12, ">"),
+        )
+    )
+    for name, value in items:
+        lines.append(_format_table_row((name, name_width, "<"), (str(value), 12, ">")))
     return lines
 
 
@@ -536,10 +732,155 @@ def _format_guard_reasons(snapshot: dict[str, Any], limit: int) -> list[str]:
     if not guard_reason_totals:
         return ["Guard failure reasons: none"]
 
+    items = Counter(guard_reason_totals).most_common(limit)
     lines = ["Guard failure reasons:"]
-    for reason, value in Counter(guard_reason_totals).most_common(limit):
-        lines.append(f"  {value}x {reason}")
+    lines.extend(
+        _format_table_header(
+            ("Count", 7, ">"),
+            ("Reason", 0, "<"),
+        )
+    )
+    for reason, value in items:
+        lines.append(_format_table_row((f"{value}x", 7, ">"), (reason, 0, "<")))
     return lines
+
+
+def _format_table_header(*columns: tuple[str, int, str]) -> list[str]:
+    return [
+        _format_table_row(*columns),
+        _format_table_rule(columns),
+    ]
+
+
+def _format_table_rule(columns: tuple[tuple[str, int, str], ...]) -> str:
+    pieces = []
+    for _, width, _ in columns:
+        rule_width = width if width > 0 else 12
+        pieces.append("-" * rule_width)
+    return "  " + " ".join(pieces)
+
+
+def _format_table_row(*columns: tuple[str, int, str]) -> str:
+    pieces = []
+    for value, width, align in columns:
+        text = str(value)
+        if width > 0 and len(text) > width:
+            text = text[: width - 1] + "…"
+        if width <= 0:
+            pieces.append(text)
+        elif align == "<":
+            pieces.append(f"{text:<{width}}")
+        else:
+            pieces.append(f"{text:>{width}}")
+    return "  " + " ".join(pieces)
+
+
+def _format_wrapped_items(label: str, items: list[str], *, width: int = 108) -> list[str]:
+    if not items:
+        return []
+
+    prefix = f"    {label:<8} "
+    continuation_prefix = " " * len(prefix)
+    lines: list[str] = []
+    current_line = prefix
+    for item in items:
+        token = item if current_line == prefix else f" | {item}"
+        if current_line != prefix and len(current_line) + len(token) > width:
+            lines.append(current_line)
+            current_line = continuation_prefix + item
+            continue
+        current_line += token
+    lines.append(current_line)
+    return lines
+
+
+def _format_percentage(part: int, whole: int) -> str:
+    if whole <= 0:
+        return "0.0%"
+    return f"{(part / whole) * 100:.1f}%"
+
+
+def _short_nested_name(name: str) -> str:
+    if "." not in name:
+        return name
+    return name.split(".")[-1]
+
+
+_KNOWN_EAGER_OVERHEAD_PHASES = frozenset(
+    {
+        "ops.finalize_output_tensor",
+        "ops.extract_device_id_from_inputs",
+        "ops.broadcast_args_general",
+        "ops.prepare_args_for_contiguous",
+        "ops.is_cpu_fallback_cases",
+        "ops.can_use_out_tensor_directly",
+        "ops.cpu_fallback_path",
+    }
+)
+
+_KNOWN_COMPILE_OVERHEAD_PHASES = frozenset(
+    {
+        "torch_compile.api",
+        "compile_cache.total",
+        "compile_cache.lock_wait",
+        "compile_cache.torch_compile_api",
+        "compile_wrapper.auto_determine_tp_if_needed",
+        "compile_wrapper.auto_tp_resolution",
+        "compile_wrapper.recompile_with_tp_size",
+        "compile_wrapper.handle_tp_failover",
+    }
+)
+
+_KNOWN_FALLBACK_GLUE_PHASES = frozenset(
+    {
+        "compile_wrapper.attempt_cpu_fallback",
+        "compile_wrapper.cpu_fallback",
+    }
+)
+
+
+def _classify_phase_for_overhead_estimate(phase_name: str) -> tuple[str, str]:
+    if phase_name == "compile_wrapper.compiled_call":
+        return ("compiled_execution_wall", "excluded")
+    if phase_name == "ops.cpu_fallback.exec_cpu_op":
+        return ("cpu_fallback_compute", "excluded")
+    if phase_name == "compile_wrapper.cpu_fallback.exec_original":
+        return ("compile_fallback_compute", "excluded")
+
+    if phase_name.startswith("dynamo.metric."):
+        return ("compile_stack", "known")
+    if phase_name in _KNOWN_COMPILE_OVERHEAD_PHASES:
+        return ("compile_stack", "known")
+    if phase_name in _KNOWN_EAGER_OVERHEAD_PHASES:
+        return ("eager_dispatch_glue", "known")
+    if phase_name in _KNOWN_FALLBACK_GLUE_PHASES:
+        return ("fallback_glue", "known")
+    if phase_name.startswith("ops.cpu_fallback."):
+        return ("fallback_glue", "known")
+    if phase_name.startswith("compile_wrapper.cpu_fallback."):
+        return ("fallback_glue", "known")
+
+    return (phase_name, "unclassified")
+
+
+def _overhead_bucket_description(bucket_name: str) -> str:
+    if bucket_name == "compile_stack":
+        return "torch.compile entry, cache, Dynamo compile, guards, and failover control"
+    if bucket_name == "eager_dispatch_glue":
+        return "RBLN eager dispatch preprocessing and output handling"
+    if bucket_name == "fallback_glue":
+        return "fallback-specific glue such as to_cpu/to_device and device resolution"
+    return "classified extra overhead"
+
+
+def _excluded_bucket_description(bucket_name: str) -> str:
+    if bucket_name == "compiled_execution_wall":
+        return "contains actual compiled execution wall time, not just extra overhead"
+    if bucket_name == "cpu_fallback_compute":
+        return "actual CPU operator compute during eager fallback"
+    if bucket_name == "compile_fallback_compute":
+        return "actual original function compute during compile fallback"
+    return "excluded from known overhead total"
 
 
 def _format_duration(duration_ns: int) -> str:
