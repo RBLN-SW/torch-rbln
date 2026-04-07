@@ -12,6 +12,13 @@ import torch
 from torch_rbln._internal.env_utils import is_fallback_disabled, use_tp_failover
 from torch_rbln._internal.log_utils import rbln_log_error, rbln_log_warn
 from torch_rbln._internal.ops_utils import extract_device_id_from_inputs, to_cpu
+from torch_rbln._internal.profiling import (
+    profile_call_context,
+    profile_phase,
+    record_counter,
+    record_dynamo_state_delta,
+    snapshot_dynamo_state,
+)
 from torch_rbln._internal.rsd_utils import auto_determine_tensor_parallel_size, get_physical_device_ids
 
 
@@ -69,30 +76,32 @@ def _convert_result_to_device(result, target_device):
 
 def attempt_cpu_fallback(original_fn, args, kwargs, original_device):
     """Attempt to execute original function on CPU with fallback."""
-    # Execute original function on CPU instead of compiled function
-    cpu_args = to_cpu(args)
-    cpu_kwargs = to_cpu(kwargs)
-    if original_fn is None:
-        raise ValueError("original_fn is not provided")
-    result = original_fn(*cpu_args, **cpu_kwargs)
+    with profile_phase("compile_wrapper.attempt_cpu_fallback"):
+        # Execute original function on CPU instead of compiled function
+        cpu_args = to_cpu(args)
+        cpu_kwargs = to_cpu(kwargs)
+        if original_fn is None:
+            raise ValueError("original_fn is not provided")
+        result = original_fn(*cpu_args, **cpu_kwargs)
 
-    # Move result back to original device if needed
-    if original_device and original_device.type != "cpu":
-        result = _convert_result_to_device(result, original_device)
-    return result
+        # Move result back to original device if needed
+        if original_device and original_device.type != "cpu":
+            result = _convert_result_to_device(result, original_device)
+        return result
 
 
 def recompile_with_tp_size(model, compile_kwargs, tp_size, original_compile_fn):
     """Recompile model with specified tensor_parallel_size."""
-    recompile_kwargs = compile_kwargs.copy()
-    recompile_options = recompile_kwargs.get("options", {})
-    if isinstance(recompile_options, dict):
-        recompile_options = recompile_options.copy()
-    else:
-        recompile_options = {}
-    recompile_options["tensor_parallel_size"] = tp_size
-    recompile_kwargs["options"] = recompile_options
-    return original_compile_fn(model, **recompile_kwargs)
+    with profile_phase("compile_wrapper.recompile_with_tp_size"):
+        recompile_kwargs = compile_kwargs.copy()
+        recompile_options = recompile_kwargs.get("options", {})
+        if isinstance(recompile_options, dict):
+            recompile_options = recompile_options.copy()
+        else:
+            recompile_options = {}
+        recompile_options["tensor_parallel_size"] = tp_size
+        recompile_kwargs["options"] = recompile_options
+        return original_compile_fn(model, **recompile_kwargs)
 
 
 def get_tensor_parallel_size_from_options(compile_kwargs):
@@ -133,19 +142,22 @@ def auto_determine_tp_if_needed(model, compile_kwargs, device_id, original_compi
         - TP size is already explicitly set
         - Auto-determination fails
     """
-    tp_size = get_tensor_parallel_size_from_options(compile_kwargs)
-    if tp_size is not None:
-        return None  # Already set, no need to auto-determine
+    with profile_phase("compile_wrapper.auto_determine_tp_if_needed"):
+        tp_size = get_tensor_parallel_size_from_options(compile_kwargs)
+        if tp_size is not None:
+            return None  # Already set, no need to auto-determine
 
-    auto_tp = auto_determine_tensor_parallel_size(device_id)
-    if auto_tp is None:
-        return None  # Cannot determine
+        auto_tp = auto_determine_tensor_parallel_size(device_id)
+        if auto_tp is None:
+            return None  # Cannot determine
 
-    try:
-        return recompile_with_tp_size(model, compile_kwargs, auto_tp, original_compile_fn)
-    except Exception:
-        # If recompilation fails, return None to use original compiled_fn
-        return None
+        try:
+            record_counter("compile_wrapper.auto_tp.attempts")
+            return recompile_with_tp_size(model, compile_kwargs, auto_tp, original_compile_fn)
+        except Exception:
+            record_counter("compile_wrapper.auto_tp.failures")
+            # If recompilation fails, return None to use original compiled_fn
+            return None
 
 
 def should_attempt_failover(device_id, compile_kwargs, current_tp):
@@ -197,27 +209,31 @@ def handle_tp_failover(model, compile_kwargs, device_id, original_compile_fn):
         Compiled function with tp=1 (failover), or None if failover is not applicable
         or recompilation fails (caller will then try CPU fallback or re-raise).
     """
-    # Determine the TP size that the current compiled_fn is actually using.
-    current_tp = _resolve_current_tensor_parallel_size(device_id, compile_kwargs)
+    with profile_phase("compile_wrapper.handle_tp_failover"):
+        # Determine the TP size that the current compiled_fn is actually using.
+        current_tp = _resolve_current_tensor_parallel_size(device_id, compile_kwargs)
 
-    if not should_attempt_failover(device_id, compile_kwargs, current_tp):
-        return None
+        if not should_attempt_failover(device_id, compile_kwargs, current_tp):
+            return None
 
-    # Log the failover attempt
-    physical_device_ids = get_physical_device_ids(device_id)
-    if physical_device_ids:
-        model_name = getattr(model, "__name__", str(model))
-        rbln_log_warn(
-            f"Model '{model_name}' unsupported with tp={current_tp}. "
-            f"Retrying with tp=1 on root device (NPU {physical_device_ids[0]})."
-        )
+        record_counter("compile_wrapper.tp_failover.attempts")
 
-    # Recompile with tp=1
-    try:
-        return recompile_with_tp_size(model, compile_kwargs, 1, original_compile_fn)
-    except Exception:
-        # If recompilation fails, return None to re-raise original error
-        return None
+        # Log the failover attempt
+        physical_device_ids = get_physical_device_ids(device_id)
+        if physical_device_ids:
+            model_name = getattr(model, "__name__", str(model))
+            rbln_log_warn(
+                f"Model '{model_name}' unsupported with tp={current_tp}. "
+                f"Retrying with tp=1 on root device (NPU {physical_device_ids[0]})."
+            )
+
+        # Recompile with tp=1
+        try:
+            return recompile_with_tp_size(model, compile_kwargs, 1, original_compile_fn)
+        except Exception:
+            record_counter("compile_wrapper.tp_failover.failures")
+            # If recompilation fails, return None to re-raise original error
+            return None
 
 
 class CompiledFunctionWrapper:
@@ -252,6 +268,7 @@ class CompiledFunctionWrapper:
         self._max_retries = 1
         self._auto_tp_determined = False
         self._failover_attempted = False
+        self._profile_name = getattr(original_fn, "__name__", type(original_fn).__name__)
 
     def _try_tp_failover(self, device_id):
         """Try tensor parallel failover on RuntimeError."""
@@ -278,14 +295,16 @@ class CompiledFunctionWrapper:
             )
             raise error
 
-        rbln_log_warn(
-            f"{error}.\n"
-            "Fallback to CPU execution due to RBLN compilation failure. "
-            "The operation will now proceed on the CPU using PyTorch. "
-            "Performance may be impacted."
-        )
-        original_device = extract_device_from_inputs(*args, **kwargs)
-        return attempt_cpu_fallback(self._original_fn, args, kwargs, original_device)
+        record_counter("compile_wrapper.cpu_fallback.calls")
+        with profile_phase("compile_wrapper.cpu_fallback"):
+            rbln_log_warn(
+                f"{error}.\n"
+                "Fallback to CPU execution due to RBLN compilation failure. "
+                "The operation will now proceed on the CPU using PyTorch. "
+                "Performance may be impacted."
+            )
+            original_device = extract_device_from_inputs(*args, **kwargs)
+            return attempt_cpu_fallback(self._original_fn, args, kwargs, original_device)
 
     def _handle_runtime_error(self, error, device_id, args, kwargs):
         """Handle RuntimeError with potential TP failover."""
@@ -309,11 +328,12 @@ class CompiledFunctionWrapper:
 
     def __call__(self, *args, **kwargs):
         """Execute the compiled function with reentrancy guard, TP auto-determination and failover."""
-        _enter_rbln_compile_op()
-        try:
-            return self._call_impl(*args, **kwargs)
-        finally:
-            _exit_rbln_compile_op()
+        with profile_call_context(self._profile_name, "compiled_fn", allow_nested=True):
+            _enter_rbln_compile_op()
+            try:
+                return self._call_impl(*args, **kwargs)
+            finally:
+                _exit_rbln_compile_op()
 
     def _call_impl(self, *args, **kwargs):
         # Extract device_id for TP operations
@@ -321,16 +341,23 @@ class CompiledFunctionWrapper:
 
         # Auto-determine tensor_parallel_size if needed (only once)
         if not self._auto_tp_determined:
-            compiled_fn_with_auto_tp = auto_determine_tp_if_needed(
-                self._original_fn, self._compile_kwargs, device_id, self._original_compile_fn
-            )
+            with profile_phase("compile_wrapper.auto_tp_resolution"):
+                compiled_fn_with_auto_tp = auto_determine_tp_if_needed(
+                    self._original_fn, self._compile_kwargs, device_id, self._original_compile_fn
+                )
             if compiled_fn_with_auto_tp is not None:
                 self._compiled_fn = compiled_fn_with_auto_tp
             self._auto_tp_determined = True
 
         for attempt in range(self._max_retries + 1):
             try:
-                return self._compiled_fn(*args, **kwargs)
+                before_dynamo_state = snapshot_dynamo_state()
+                try:
+                    with profile_phase("compile_wrapper.compiled_call"):
+                        return self._compiled_fn(*args, **kwargs)
+                finally:
+                    after_dynamo_state = snapshot_dynamo_state()
+                    record_dynamo_state_delta(before_dynamo_state, after_dynamo_state)
             except RuntimeError as e:
                 result = self._handle_runtime_error(e, device_id, args, kwargs)
                 if result is None:

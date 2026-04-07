@@ -10,6 +10,7 @@ import torch
 from torch.utils._pytree import tree_flatten, tree_unflatten
 
 from torch_rbln._internal.log_utils import rbln_log_cpu_fallback, rbln_log_warn
+from torch_rbln._internal.profiling import profile_phase, record_counter
 
 
 def _estimate_mm_shape(shape1, shape2):
@@ -37,16 +38,17 @@ def finalize_output_tensor(
     Ensure `out_tensor` has the correct shape, storage, and metadata to match
     `result` and `result_shape`, handling both resizing and data movement.
     """
-    # 1) Resize if shape mismatches
-    if out_tensor.shape != result_shape:
-        # Warn if tensor had existing elements
-        if out_tensor.numel() != 0:
-            warnings.warn("An output with one or more elements")  # pytorch rule
-        out_tensor.resize_(result_shape)
+    with profile_phase("ops.finalize_output_tensor"):
+        # 1) Resize if shape mismatches
+        if out_tensor.shape != result_shape:
+            # Warn if tensor had existing elements
+            if out_tensor.numel() != 0:
+                warnings.warn("An output with one or more elements")  # pytorch rule
+            out_tensor.resize_(result_shape)
 
-    # 2) Reconcile storage: copy or replace
-    if result.data_ptr() != out_tensor.data_ptr():
-        out_tensor.copy_(result)
+        # 2) Reconcile storage: copy or replace
+        if result.data_ptr() != out_tensor.data_ptr():
+            out_tensor.copy_(result)
 
 
 def _make_contig(obj):
@@ -151,11 +153,12 @@ def extract_device_id_from_inputs(*args, **kwargs):
     Returns:
         Optional[int]: The device index of the first RBLN tensor found, or None if no RBLN tensor is found.
     """
-    input_tensors = extract_tensors(args) + extract_tensors(kwargs)
-    for tensor in input_tensors:
-        if isinstance(tensor, torch.Tensor) and tensor.device.type == "rbln":
-            return tensor.device.index
-    return None
+    with profile_phase("ops.extract_device_id_from_inputs"):
+        input_tensors = extract_tensors(args) + extract_tensors(kwargs)
+        for tensor in input_tensors:
+            if isinstance(tensor, torch.Tensor) and tensor.device.type == "rbln":
+                return tensor.device.index
+        return None
 
 
 def remove_empty_tensors(obj):
@@ -229,24 +232,26 @@ def handle_empty_binary(args):
 
 
 def broadcast_args_general(tensor_args, args):
-    if _needs_broadcast(tensor_args):
-        try:
-            # broadcast_tensors returns the broadcasted result of the arguments
-            broadcasted = torch.broadcast_tensors(*tensor_args)
-            # if broadcast was successful, replace args with broadcasted
-            new_args = []
-            tensor_idx = 0
-            for a in args:
-                if isinstance(a, torch.Tensor):  # torch.Tensor외에 list,tuple,dict tensor도 다뤄야할 수 있음
-                    new_args.append(broadcasted[tensor_idx])
-                    tensor_idx += 1
-                else:
-                    new_args.append(a)
-            return tuple(new_args)
-        except RuntimeError as e:
-            tensor_shapes = [tuple(t.shape) for t in tensor_args]
-            raise RuntimeError(f"Broadcasting failed for tensor shapes={tensor_shapes}") from e
-    return args
+    with profile_phase("ops.broadcast_args_general"):
+        if _needs_broadcast(tensor_args):
+            try:
+                # broadcast_tensors returns the broadcasted result of the arguments
+                broadcasted = torch.broadcast_tensors(*tensor_args)
+                record_counter("ops.broadcast_args_general.applied")
+                # if broadcast was successful, replace args with broadcasted
+                new_args = []
+                tensor_idx = 0
+                for a in args:
+                    if isinstance(a, torch.Tensor):  # torch.Tensor외에 list,tuple,dict tensor도 다뤄야할 수 있음
+                        new_args.append(broadcasted[tensor_idx])
+                        tensor_idx += 1
+                    else:
+                        new_args.append(a)
+                return tuple(new_args)
+            except RuntimeError as e:
+                tensor_shapes = [tuple(t.shape) for t in tensor_args]
+                raise RuntimeError(f"Broadcasting failed for tensor shapes={tensor_shapes}") from e
+        return args
 
 
 def handle_empty_addmm(tensor_args, beta):
@@ -304,13 +309,16 @@ def handle_empty_tensor(tensor_args):
 
 
 def prepare_args_for_contiguous(args, kwargs_filtered):
-    flat_args, args_spec = tree_flatten((args, kwargs_filtered))
-    contig_args, changed_any = [], False
-    for a in flat_args:
-        t, changed = _make_contig(a)
-        contig_args.append(t)
-        changed_any |= changed
-    return tree_unflatten(contig_args, args_spec), changed_any
+    with profile_phase("ops.prepare_args_for_contiguous"):
+        flat_args, args_spec = tree_flatten((args, kwargs_filtered))
+        contig_args, changed_any = [], False
+        for a in flat_args:
+            t, changed = _make_contig(a)
+            contig_args.append(t)
+            changed_any |= changed
+        if changed_any:
+            record_counter("ops.prepare_args_for_contiguous.changed")
+        return tree_unflatten(contig_args, args_spec), changed_any
 
 
 _ALL_FALLBACK_CASES = frozenset({"dispatch_mode", "reentrant", "trace", "dtype", "scalar", "storage_offset", "nan_inf"})
@@ -367,62 +375,70 @@ def is_cpu_fallback_cases(args):
     Returns:
         bool: True if a CPU fallback is necessary, False otherwise.
     """
-    disabled_cases = _parse_disabled_fallback_cases()
+    with profile_phase("ops.is_cpu_fallback_cases"):
+        disabled_cases = _parse_disabled_fallback_cases()
 
-    # 0a: Python trace/debugger – when a trace function is set (e.g. pdb, coverage, sys.settrace), fall back to CPU
-    if "trace" not in disabled_cases and sys.gettrace() is not None:
-        return True
+        # 0a: Python trace/debugger – when a trace function is set (e.g. pdb, coverage, sys.settrace), fall back to CPU
+        if "trace" not in disabled_cases and sys.gettrace() is not None:
+            record_counter("ops.cpu_fallback_reason.trace")
+            return True
 
-    # 1: TorchDispatchMode active – run on CPU and do not attempt compile (cheap)
-    if "dispatch_mode" not in disabled_cases:
-        try:
-            from torch.utils._python_dispatch import is_in_torch_dispatch_mode
+        # 1: TorchDispatchMode active – run on CPU and do not attempt compile (cheap)
+        if "dispatch_mode" not in disabled_cases:
+            try:
+                from torch.utils._python_dispatch import is_in_torch_dispatch_mode
 
-            if is_in_torch_dispatch_mode(include_infra_modes=False):
+                if is_in_torch_dispatch_mode(include_infra_modes=False):
+                    record_counter("ops.cpu_fallback_reason.dispatch_mode")
+                    return True
+            except ImportError:
+                pass
+
+        # Checks 2-5 require tensors; bail early if none
+        tensor_args = extract_tensors(args)
+        if not tensor_args:
+            return False
+
+        # 2: RBLN device can only handle float16 dtype
+        if "dtype" not in disabled_cases:
+            if any(a.dtype != torch.float16 for a in tensor_args):
+                record_counter("ops.cpu_fallback_reason.dtype")
                 return True
-        except ImportError:
-            pass
 
-    # Checks 2-5 require tensors; bail early if none
-    tensor_args = extract_tensors(args)
-    if not tensor_args:
+        # 3: fall back to the CPU if all input tensors are scalar tensors
+        if "scalar" not in disabled_cases:
+            if all(a.ndim == 0 for a in tensor_args):
+                record_counter("ops.cpu_fallback_reason.scalar")
+                return True
+
+        # 4: fall back to the CPU if any contiguous tensor has non-zero storage offset
+        if "storage_offset" not in disabled_cases:
+            if any(a.is_contiguous() and a.storage_offset() != 0 for a in tensor_args):
+                record_counter("ops.cpu_fallback_reason.storage_offset")
+                return True
+
+        # 5: fall back to the CPU if any tensor contains NaN/Inf values (heavy: to_cpu + scan; non-deploy only)
+        if "nan_inf" not in disabled_cases:
+            try:
+                from torch_rbln._internal.env_utils import is_rbln_deploy
+
+                if not is_rbln_deploy() and has_invalid_tensor(to_cpu(args)):
+                    record_counter("ops.cpu_fallback_reason.nan_inf")
+                    return True
+            except ImportError:
+                pass
+
+        # 6: Reentrancy – already inside an RBLN compile op (e.g. from print/repr or from compiled graph).
+        #     Unexpected path; log a warning when it triggers.
+        if "reentrant" not in disabled_cases:
+            from torch_rbln._internal.torch_compile_patch_helpers import get_rbln_compile_op_depth
+
+            if get_rbln_compile_op_depth() > 0:
+                rbln_log_warn("Unexpected CPU fallback: reentrant dispatch (already inside RBLN compile op)")
+                record_counter("ops.cpu_fallback_reason.reentrant")
+                return True
+
         return False
-
-    # 2: RBLN device can only handle float16 dtype
-    if "dtype" not in disabled_cases:
-        if any(a.dtype != torch.float16 for a in tensor_args):
-            return True
-
-    # 3: fall back to the CPU if all input tensors are scalar tensors
-    if "scalar" not in disabled_cases:
-        if all(a.ndim == 0 for a in tensor_args):
-            return True
-
-    # 4: fall back to the CPU if any contiguous tensor has non-zero storage offset
-    if "storage_offset" not in disabled_cases:
-        if any(a.is_contiguous() and a.storage_offset() != 0 for a in tensor_args):
-            return True
-
-    # 5: fall back to the CPU if any tensor contains NaN/Inf values (heavy: to_cpu + scan; non-deploy only)
-    if "nan_inf" not in disabled_cases:
-        try:
-            from torch_rbln._internal.env_utils import is_rbln_deploy
-
-            if not is_rbln_deploy() and has_invalid_tensor(to_cpu(args)):
-                return True
-        except ImportError:
-            pass
-
-    # 6: Reentrancy – already inside an RBLN compile op (e.g. from print/repr or from compiled graph).
-    #     Unexpected path; log a warning when it triggers.
-    if "reentrant" not in disabled_cases:
-        from torch_rbln._internal.torch_compile_patch_helpers import get_rbln_compile_op_depth
-
-        if get_rbln_compile_op_depth() > 0:
-            rbln_log_warn("Unexpected CPU fallback: reentrant dispatch (already inside RBLN compile op)")
-            return True
-
-    return False
 
 
 def cpu_fallback_path(
@@ -446,29 +462,31 @@ def cpu_fallback_path(
     Returns:
         torch.Tensor: The result of the target operation, converted back to the 'rbln' device.
     """
-    if op_name is not None:
-        rbln_log_cpu_fallback(op_name)
-    cpu_args = to_cpu(args)
-    cpu_op_kwargs = to_cpu(op_kwargs)
-    result_cpu = target_ops(*cpu_args, **cpu_op_kwargs)
-    if result is not None and result_cpu.size() == result.size():
-        result.copy_(result_cpu)
+    with profile_phase("ops.cpu_fallback_path"):
+        record_counter("ops.cpu_fallback_path.calls")
+        if op_name is not None:
+            rbln_log_cpu_fallback(op_name)
+        cpu_args = to_cpu(args)
+        cpu_op_kwargs = to_cpu(op_kwargs)
+        result_cpu = target_ops(*cpu_args, **cpu_op_kwargs)
+        if result is not None and result_cpu.size() == result.size():
+            result.copy_(result_cpu)
+            return result
+
+        # Get device_index from result tensor or from input args/op_kwargs
+        # In this context, rbln tensors always have a device_index
+        device_id = None
+        if result is not None and isinstance(result, torch.Tensor) and result.device.type == "rbln":
+            device_id = result.device.index
+        else:
+            # Find device_id from input tensors
+            device_id = extract_device_id_from_inputs(*args, **op_kwargs)
+
+        # Convert result back to rbln device with proper device_index
+        # device_id should always be available when rbln tensors are present
+        assert device_id is not None, "device_id should be found from rbln tensors"
+        result = result_cpu.to(f"rbln:{device_id}")
         return result
-
-    # Get device_index from result tensor or from input args/op_kwargs
-    # In this context, rbln tensors always have a device_index
-    device_id = None
-    if result is not None and isinstance(result, torch.Tensor) and result.device.type == "rbln":
-        device_id = result.device.index
-    else:
-        # Find device_id from input tensors
-        device_id = extract_device_id_from_inputs(*args, **op_kwargs)
-
-    # Convert result back to rbln device with proper device_index
-    # device_id should always be available when rbln tensors are present
-    assert device_id is not None, "device_id should be found from rbln tensors"
-    result = result_cpu.to(f"rbln:{device_id}")
-    return result
 
 
 def is_inplace_op(args, kwargs) -> bool:
@@ -520,23 +538,27 @@ def can_use_out_tensor_directly(args: tuple, kwargs: dict) -> bool:
     Returns:
         bool: True if the out_tensor can be used directly, False otherwise.
     """
-    out_tensor = kwargs.get("out")
-    if out_tensor is None or out_tensor.data_ptr() == 0:
-        return False
+    with profile_phase("ops.can_use_out_tensor_directly"):
+        out_tensor = kwargs.get("out")
+        if out_tensor is None or out_tensor.data_ptr() == 0:
+            return False
 
-    # Check conditions:
-    # 1. Not inplace operation
-    # 2. Neither empty nor scalar
-    # 3. Contiguous
-    # 4. Zero storage offset
-    # 5. dtype is float16
-    return (
-        not is_inplace_op(args, kwargs)
-        and ((out_tensor.numel() > 0) and len(out_tensor.size()) > 0)
-        and out_tensor.is_contiguous()
-        and (out_tensor.storage_offset() == 0)
-        and (out_tensor.dtype == torch.float16)
-    )
+        # Check conditions:
+        # 1. Not inplace operation
+        # 2. Neither empty nor scalar
+        # 3. Contiguous
+        # 4. Zero storage offset
+        # 5. dtype is float16
+        can_use = (
+            not is_inplace_op(args, kwargs)
+            and ((out_tensor.numel() > 0) and len(out_tensor.size()) > 0)
+            and out_tensor.is_contiguous()
+            and (out_tensor.storage_offset() == 0)
+            and (out_tensor.dtype == torch.float16)
+        )
+        if can_use:
+            record_counter("ops.can_use_out_tensor_directly.true")
+        return can_use
 
 
 def _ceil_to_nearest_multiple_of_64(n):

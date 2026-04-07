@@ -54,6 +54,7 @@ class CodeGenerator:
         return """
 from torch_rbln._internal.env_utils import *
 from torch_rbln._internal.ops_utils import *
+from torch_rbln._internal.profiling import wrap_registered_dispatch_functions
 from torch_rbln._internal.register_custom_ops import *
 from torch_rbln._internal.register_backward_ops import *
 from torch_rbln._internal.kernels.custom_transpose import *
@@ -204,5 +205,8 @@ aten_impl.impl("{operator_name}", {normal_kernel_name}, "PrivateUse1")"""
             code_blocks += function_code
 
         # Step 4: Place code to register operator at the bottom of register_ops.py
+        code_blocks += """
+wrap_registered_dispatch_functions(globals(), module_name=__name__)
+"""
         code_blocks += operator_register_code
         return code_blocks

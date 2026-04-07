@@ -13,6 +13,7 @@ from torch_rbln._internal.ops_utils import (
     is_type_promotion_allowed,
     prepare_args_for_contiguous,
 )
+from torch_rbln._internal.profiling import wrap_registered_dispatch_functions
 
 
 class OpModule_softmax(torch.nn.Module):
@@ -448,6 +449,8 @@ def paged_causal_attn_decode_rbln(*args, **kwargs):
 
     return result_tensor
 
+
+wrap_registered_dispatch_functions(globals(), module_name=__name__)
 
 rbln_custom_impl = torch.library.Library("rbln_custom_ops", "IMPL")  # noqa: TOR901
 rbln_custom_impl.impl("paged_attn_prefill", paged_attn_prefill_rbln, "PrivateUse1")
