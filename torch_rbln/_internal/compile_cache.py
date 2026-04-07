@@ -6,7 +6,6 @@ import torch
 
 from torch_rbln._internal.profiling import current_profile_callsite, profile_phase, record_bucket_counter, record_counter
 
-
 _compiled_op_cache_lock = threading.Lock()
 _compiled_op_cache: dict[tuple[Any, ...], Any] = {}
 

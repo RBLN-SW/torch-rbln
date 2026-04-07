@@ -2,10 +2,12 @@ import math
 
 import torch
 
+from torch_rbln._internal.compile_cache import compile_rbln_cached
 from torch_rbln._internal.env_utils import use_device_group_tensor_parallel_size
 from torch_rbln._internal.log_utils import rbln_log_cpu_fallback
 from torch_rbln._internal.ops_utils import (
     can_use_out_tensor_directly,
+    extract_device_id_from_inputs,
     cpu_fallback_path,
     finalize_output_tensor,
     handle_empty_binary,
@@ -57,7 +59,12 @@ def custom_softmax_out_rbln(self, dim: int, half_to_float: bool, *, out=None):
                 result_tensor = None
 
         with out_tensor_context(result_tensor):
-            compiled = torch.compile(_softmax_op_module, backend="rbln", dynamic=False, options=compile_options)
+            compiled = compile_rbln_cached(
+                _softmax_op_module,
+                dynamic=False,
+                options=compile_options,
+                device_cache_key=self.device.index,
+            )
             external_result = compiled(self, dim=dim)
             if result_tensor is None:
                 result_tensor = external_result
@@ -116,7 +123,12 @@ def pow_tensor_scalar_out_rbln(self, exponent, *, out):
             result_tensor = None
 
         with out_tensor_context(result_tensor):
-            compiled = torch.compile(_pow_op_module, backend="rbln", dynamic=False, options=compile_options)
+            compiled = compile_rbln_cached(
+                _pow_op_module,
+                dynamic=False,
+                options=compile_options,
+                device_cache_key=self.device.index,
+            )
             external_result = compiled(self, exponent)
             if result_tensor is None:
                 result_tensor = external_result
@@ -153,6 +165,9 @@ class custom_rbln_paged_attn_prefill(torch.nn.Module):
             args[8],  # block_table
             args[9],  # block_size, int
         )
+
+
+_paged_attn_prefill_op_module = custom_rbln_paged_attn_prefill().eval()
 
 
 def paged_attn_prefill_rbln(*args, **kwargs):
@@ -203,11 +218,11 @@ def paged_attn_prefill_rbln(*args, **kwargs):
 
     with out_tensor_context(result_tensor):
         # tensor_parallel_size=1 is hardcoded due to custom kernel compiler constraints.
-        compiled = torch.compile(
-            custom_rbln_paged_attn_prefill(),
-            backend="rbln",
+        compiled = compile_rbln_cached(
+            _paged_attn_prefill_op_module,
             dynamic=False,
             options={"disable_logger": True, "tensor_parallel_size": 1},
+            device_cache_key=extract_device_id_from_inputs(*contig_args, **contig_kwargs),
         )
         external_result = compiled(*contig_args, **contig_kwargs)
         if result_tensor is None:
@@ -234,6 +249,9 @@ class custom_rbln_paged_attn_decode(torch.nn.Module):
             args[8],  # block_table
             args[9],  # block_size, int
         )
+
+
+_paged_attn_decode_op_module = custom_rbln_paged_attn_decode().eval()
 
 
 def paged_attn_decode_rbln(*args, **kwargs):
@@ -271,11 +289,11 @@ def paged_attn_decode_rbln(*args, **kwargs):
 
     with out_tensor_context(result_tensor):
         # tensor_parallel_size=1 is hardcoded due to custom kernel compiler constraints.
-        compiled = torch.compile(
-            custom_rbln_paged_attn_decode(),
-            backend="rbln",
+        compiled = compile_rbln_cached(
+            _paged_attn_decode_op_module,
             dynamic=False,
             options={"disable_logger": True, "tensor_parallel_size": 1},
+            device_cache_key=extract_device_id_from_inputs(*contig_args, **contig_kwargs),
         )
         external_result = compiled(*contig_args, **contig_kwargs)
         if result_tensor is None:
@@ -309,6 +327,9 @@ class custom_rbln_paged_causal_attn_prefill(torch.nn.Module):
         if len(args) > 10 and args[10] is not None:
             call_args.append(args[10])  # mask
         return torch.ops.rbln_custom_ops.paged_causal_attn_prefill(*call_args)
+
+
+_paged_causal_attn_prefill_op_module = custom_rbln_paged_causal_attn_prefill().eval()
 
 
 def paged_causal_attn_prefill_rbln(*args, **kwargs):
@@ -360,11 +381,11 @@ def paged_causal_attn_prefill_rbln(*args, **kwargs):
 
     with out_tensor_context(result_tensor):
         # tensor_parallel_size=1 is hardcoded due to custom kernel compiler constraints.
-        compiled = torch.compile(
-            custom_rbln_paged_causal_attn_prefill(),
-            backend="rbln",
+        compiled = compile_rbln_cached(
+            _paged_causal_attn_prefill_op_module,
             dynamic=False,
             options={"disable_logger": True, "tensor_parallel_size": 1},
+            device_cache_key=extract_device_id_from_inputs(*contig_args, **contig_kwargs),
         )
         external_result = compiled(*contig_args, **contig_kwargs)
         if result_tensor is None:
@@ -397,6 +418,9 @@ class custom_rbln_paged_causal_attn_decode(torch.nn.Module):
         if len(args) > 9 and args[9] is not None:
             call_args.append(args[9])  # mask
         return torch.ops.rbln_custom_ops.paged_causal_attn_decode(*call_args)
+
+
+_paged_causal_attn_decode_op_module = custom_rbln_paged_causal_attn_decode().eval()
 
 
 def paged_causal_attn_decode_rbln(*args, **kwargs):
@@ -435,11 +459,11 @@ def paged_causal_attn_decode_rbln(*args, **kwargs):
 
     with out_tensor_context(result_tensor):
         # tensor_parallel_size=1 is hardcoded due to custom kernel compiler constraints.
-        compiled = torch.compile(
-            custom_rbln_paged_causal_attn_decode(),
-            backend="rbln",
+        compiled = compile_rbln_cached(
+            _paged_causal_attn_decode_op_module,
             dynamic=False,
             options={"disable_logger": True, "tensor_parallel_size": 1},
+            device_cache_key=extract_device_id_from_inputs(*contig_args, **contig_kwargs),
         )
         external_result = compiled(*contig_args, **contig_kwargs)
         if result_tensor is None:
