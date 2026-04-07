@@ -659,6 +659,150 @@ def model_worker(
         )
 
 
+def perf_benchmark_worker(
+    prompt: str,
+    max_seq_len: int,
+    target_seq_length: int,
+    model_type: ModelType,
+    dtype: torch.dtype,
+    num_runs: int = 5,
+    warmup_runs: int = 2,
+    device: str | torch.device = "rbln:0",
+) -> None:
+    """Worker for benchmarking prefill/decode latency with warm-up runs.
+
+    Runs prefill ``num_runs`` times (each on a fresh KV cache) and decode
+    ``num_runs`` times consecutively (on the same KV cache, advancing one token
+    per step).  The first ``warmup_runs`` iterations are discarded so that JIT /
+    compilation overhead does not skew the results.  Averages of the remaining
+    runs are printed to stdout.
+    """
+    import time
+
+    device = torch.device(device) if isinstance(device, str) else device
+
+    model, _rbln_config, config_info = create_model(
+        model_type=model_type,
+        max_seq_len=max_seq_len,
+        dtype=dtype,
+        device=device,
+        use_inputs_embeds=True,
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(config_info.model_id)
+    tokenizer.pad_token = tokenizer.eos_token
+
+    input_ids, original_length = prepare_inputs(
+        tokenizer=tokenizer,
+        prompt=prompt,
+        target_seq_length=target_seq_length,
+        device=device,
+    )
+
+    embedding_layer = _get_embedding_layer(model)
+    embedding_layer_cpu = embedding_layer.to("cpu")
+    prefill_input = embedding_layer_cpu(input_ids.to("cpu")).to(device)
+
+    seq_length = input_ids.shape[-1]
+    query_position = torch.scalar_tensor(original_length - 1, dtype=torch.int16).to(device)
+    cache_position_prefill = torch.arange(0, original_length, dtype=torch.int32)
+    if original_length < seq_length:
+        cache_position_prefill = torch.nn.functional.pad(cache_position_prefill, (0, seq_length - original_length))
+    cache_position_prefill = cache_position_prefill.unsqueeze(0).to(device)
+    block_table = torch.arange(1, dtype=torch.int16).to(device)
+
+    # ── Prefill benchmark ────────────────────────────────────────────────────
+    prefill_times: list[float] = []
+    prefill_outputs = None
+    for i in range(num_runs):
+        past_key_values = prepare_past_key_values(
+            model=model,
+            batch_size=1,
+            num_key_value_head=config_info.num_key_value_head,
+            max_seq_len=max_seq_len,
+            head_dim=config_info.head_dim,
+            dtype=dtype,
+            device=device,
+            eager_mode=True,
+        )
+        t0 = time.perf_counter()
+        prefill_outputs = run_prefill(
+            model=model,
+            inputs_embeds=prefill_input,
+            cache_position=cache_position_prefill,
+            block_table=block_table,
+            query_position=query_position,
+            past_key_values=past_key_values,
+            eager_mode=True,
+        )
+        t1 = time.perf_counter()
+        elapsed_ms = (t1 - t0) * 1000
+        prefill_times.append(elapsed_ms)
+        label = "(warmup)" if i < warmup_runs else ""
+        print(f"  prefill run {i + 1:>2}/{num_runs}: {elapsed_ms:8.2f} ms {label}")
+
+    # ── Decode benchmark ─────────────────────────────────────────────────────
+    # Use a single prefill to populate the KV cache, then run consecutive
+    # decode steps so each step sees an increasingly filled cache (realistic).
+    past_key_values = prepare_past_key_values(
+        model=model,
+        batch_size=1,
+        num_key_value_head=config_info.num_key_value_head,
+        max_seq_len=max_seq_len,
+        head_dim=config_info.head_dim,
+        dtype=dtype,
+        device=device,
+        eager_mode=True,
+    )
+    setup_outputs = run_prefill(
+        model=model,
+        inputs_embeds=prefill_input,
+        cache_position=cache_position_prefill,
+        block_table=block_table,
+        query_position=query_position,
+        past_key_values=past_key_values,
+        eager_mode=True,
+    )
+
+    next_token = torch.argmax(setup_outputs.to("cpu"), dim=-1, keepdim=True).squeeze(0)
+    decode_input = embedding_layer_cpu(next_token.to("cpu")).to(device)
+
+    decode_times: list[float] = []
+    for i in range(num_runs):
+        cache_position_decode = torch.tensor([[original_length + i]], dtype=torch.int32, device=device)
+        t0 = time.perf_counter()
+        decode_outputs = run_decode(
+            model=model,
+            inputs_embeds=decode_input,
+            cache_position=cache_position_decode,
+            block_table=block_table,
+            past_key_values=past_key_values,
+            eager_mode=True,
+        )
+        t1 = time.perf_counter()
+        elapsed_ms = (t1 - t0) * 1000
+        decode_times.append(elapsed_ms)
+        label = "(warmup)" if i < warmup_runs else ""
+        print(f"  decode  run {i + 1:>2}/{num_runs}: {elapsed_ms:8.2f} ms {label}")
+
+        next_token = torch.argmax(decode_outputs.to("cpu"), dim=-1, keepdim=True).squeeze(0)
+        decode_input = embedding_layer_cpu(next_token.to("cpu")).to(device)
+
+    # ── Summary ──────────────────────────────────────────────────────────────
+    bench_prefill = prefill_times[warmup_runs:]
+    bench_decode = decode_times[warmup_runs:]
+    avg_prefill_ms = sum(bench_prefill) / len(bench_prefill)
+    avg_decode_ms = sum(bench_decode) / len(bench_decode)
+
+    print(
+        f"\n=== Perf benchmark: {model_type.value} | {dtype} "
+        f"| seq_len={target_seq_length} "
+        f"| runs={num_runs} warmup={warmup_runs} ==="
+    )
+    print(f"  prefill avg (runs {warmup_runs + 1}–{num_runs}): {avg_prefill_ms:.2f} ms")
+    print(f"  decode  avg (runs {warmup_runs + 1}–{num_runs}): {avg_decode_ms:.2f} ms")
+
+
 def past_key_values_worker(
     prompt: str,
     max_seq_len: int,
@@ -940,6 +1084,29 @@ class TestLlamaEager(TestLlamaBase):
             eager_mode=True,
             use_inputs_embeds=False,
         )
+
+    @dtypes(*SUPPORTED_DTYPES)
+    def test_tp1_eager_inputs_embeds_perf_llama_1b(self, dtype):
+        """Prefill/decode latency benchmark for Llama-1B in eager mode.
+
+        Runs prefill 5 times (each on a fresh KV cache) and decode 5 times
+        consecutively.  The first 2 iterations are treated as warm-up and
+        excluded; the average latency of the remaining 3 iterations is printed
+        for both prefill and decode phases.
+        """
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv("TORCH_RBLN_DISABLE_FALLBACK", "compile_error")
+            run_in_isolated_process(
+                perf_benchmark_worker,
+                self.prompt,
+                self.max_seq_len,
+                self.target_seq_length,
+                ModelType.LLAMA_1B,
+                dtype,
+                5,  # num_runs
+                2,  # warmup_runs
+                "rbln:0",
+            )
 
 
 instantiate_device_type_tests(TestLlamaRSDTP, globals(), only_for="privateuse1")
