@@ -7,7 +7,7 @@
 </picture>
 
 [![PyPI version](https://badge.fury.io/py/torch-rbln.svg)](https://badge.fury.io/py/torch-rbln)
-[![License](https://img.shields.io/github/license/rbln-sw/torch-rbln)](https://github.com/rbln-sw/torch-rbln/blob/main/LICENSE)
+[![License](https://img.shields.io/github/license/RBLN-SW/torch-rbln)](https://github.com/RBLN-SW/torch-rbln/blob/main/LICENSE)
 [![Documentation](https://img.shields.io/badge/docs-available-brightgreen)](https://docs.rbln.ai/latest/software/rbln_pytorch/overview.html)
 [![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-1.4-4baaaa.svg)](./docs/CODE_OF_CONDUCT.md)
 </div>
@@ -43,7 +43,7 @@ For **`rebel-compiler`** and the rest of the setup, see **Prerequisites** above 
 2. Follow **[Build from source](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html#build-from-source-advanced)** (venv, **`rebel-compiler`**, editable build, manual steps).
 
 ```bash
-git clone https://github.com/rbln-sw/torch-rbln.git
+git clone https://github.com/RBLN-SW/torch-rbln.git
 cd torch-rbln
 uv venv .venv && source .venv/bin/activate
 ./tools/dev-setup.sh pypi
