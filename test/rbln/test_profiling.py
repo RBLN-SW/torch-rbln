@@ -14,9 +14,14 @@ from torch_rbln._internal.profiling import (
     log_rbln_overhead_summary,
     maybe_emit_rbln_overhead_summary,
     profile_call_context,
+    record_bucket_counter,
+    record_bucket_value,
+    record_compile_cause,
     record_counter,
     record_dynamo_state_delta,
     record_phase_duration,
+    record_shape_signature,
+    record_transfer_bytes,
     reset_rbln_overhead_profile,
     wrap_registered_dispatch_functions,
 )
@@ -73,7 +78,7 @@ class TestRblnProfiling(unittest.TestCase):
         }
 
         with profile_call_context("compiled_add", "compiled_fn", allow_nested=True):
-            record_dynamo_state_delta(before, after)
+            delta_summary = record_dynamo_state_delta(before, after)
 
         snapshot = get_rbln_overhead_profile_snapshot()
         self.assertEqual(snapshot["phase_totals"]["dynamo.metric.backend_compile"]["total_ns"], 200)
@@ -83,6 +88,8 @@ class TestRblnProfiling(unittest.TestCase):
         self.assertEqual(snapshot["counter_totals"]["dynamo.guard_failures"], 2)
         self.assertEqual(snapshot["guard_reason_totals"]["dtype mismatch"], 1)
         self.assertEqual(snapshot["guard_reason_totals"]["requires_grad mismatch"], 1)
+        self.assertEqual(delta_summary["compile_total_ns"], 500)
+        self.assertEqual(delta_summary["guard_failure_count"], 2)
         self.assertEqual(
             snapshot["phase_by_context"][("compiled_fn", "compiled_add", "dynamo.metric.backend_compile")]["total_ns"],
             200,
@@ -93,6 +100,7 @@ class TestRblnProfiling(unittest.TestCase):
         with profile_call_context("add_rbln", "eager_op", allow_nested=False):
             record_phase_duration("compile_cache.total", 10_000)
             record_counter("compile_cache.hit", 3)
+            record_bucket_counter("compile_cache.callsite.hit", "eager_op:add_rbln", 3)
 
         summary = format_rbln_overhead_summary(top_n=5)
 
@@ -110,6 +118,7 @@ class TestRblnProfiling(unittest.TestCase):
         self.assertIn("Added overhead estimate", summary)
         self.assertIn("known_overhead_total", summary)
         self.assertIn("pid=", summary)
+        self.assertIn("Compile cache by callsite", summary)
 
     @patch.dict("os.environ", {"TORCH_RBLN_PROFILE": "ON"}, clear=False)
     def test_overhead_estimate_separates_known_and_excluded_time(self):
@@ -134,6 +143,33 @@ class TestRblnProfiling(unittest.TestCase):
         self.assertIn("/call", summary)
         self.assertIn("3.500ms", summary)
         self.assertIn("9.000ms", summary)
+
+    @patch.dict("os.environ", {"TORCH_RBLN_PROFILE": "ON"}, clear=False)
+    def test_summary_contains_shape_histogram_compile_causes_and_transfer_bytes(self):
+        with profile_call_context("model_wrapper", "compiled_fn", allow_nested=True):
+            record_shape_signature("phase=prefill batch=1 seq=128")
+            record_shape_signature("phase=decode batch=8 seq=1")
+            record_shape_signature("phase=decode batch=8 seq=1")
+            record_compile_cause("initial_compile", 10_000_000)
+            record_compile_cause("guard_miss", 2_000_000)
+            record_transfer_bytes("ops.cpu_fallback.to_cpu", 4096)
+            record_transfer_bytes("ops.cpu_fallback.to_cpu", 2048)
+        record_bucket_counter("compile_cache.callsite.hit", "eager_op:add_out_rbln", 4)
+        record_bucket_counter("compile_cache.callsite.miss", "eager_op:add_out_rbln", 1)
+        record_bucket_value("transfer_bytes", "compile_wrapper.cpu_fallback.return_to_device", 8192)
+
+        summary = format_rbln_overhead_summary(top_n=5)
+
+        self.assertIn("Compiled shape signatures", summary)
+        self.assertIn("phase=decode batch=8 seq=1", summary)
+        self.assertIn("Compile causes", summary)
+        self.assertIn("initial_compile", summary)
+        self.assertIn("guard_miss", summary)
+        self.assertIn("Compile cache by callsite", summary)
+        self.assertIn("eager_op:add_out_rbln", summary)
+        self.assertIn("Transfer bytes", summary)
+        self.assertIn("6.00KiB", summary)
+        self.assertIn("8.00KiB", summary)
 
     @patch.dict("os.environ", {"TORCH_RBLN_PROFILE": "ON"}, clear=False)
     def test_log_summary_uses_callback_and_can_reset(self):

@@ -5,18 +5,23 @@ This module contains utilities for wrapping compiled functions with tensor paral
 auto-determination, failover support, and CPU fallback functionality.
 """
 
+import inspect
 import threading
+import time
 
 import torch
 
 from torch_rbln._internal.env_utils import is_fallback_disabled, use_tp_failover
 from torch_rbln._internal.log_utils import rbln_log_error, rbln_log_warn
-from torch_rbln._internal.ops_utils import extract_device_id_from_inputs, to_cpu
+from torch_rbln._internal.ops_utils import estimate_tensor_nbytes, extract_device_id_from_inputs, to_cpu
 from torch_rbln._internal.profiling import (
     profile_call_context,
     profile_phase,
+    record_compile_cause,
     record_counter,
     record_dynamo_state_delta,
+    record_shape_signature,
+    record_transfer_bytes,
     snapshot_dynamo_state,
 )
 from torch_rbln._internal.rsd_utils import auto_determine_tensor_parallel_size, get_physical_device_ids
@@ -74,13 +79,97 @@ def _convert_result_to_device(result, target_device):
     return result
 
 
+def _iter_named_tensors(name, value):
+    if isinstance(value, torch.Tensor):
+        yield name, value
+        return
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            child_name = f"{name}.{key}" if name else str(key)
+            yield from _iter_named_tensors(child_name, nested)
+        return
+    if isinstance(value, (list, tuple)):
+        for index, nested in enumerate(value):
+            child_name = f"{name}[{index}]" if name else f"[{index}]"
+            yield from _iter_named_tensors(child_name, nested)
+
+
+def _bind_named_arguments(original_fn, args, kwargs):
+    bound_arguments = {}
+    target = getattr(original_fn, "forward", original_fn)
+    try:
+        signature = inspect.signature(target)
+        bound_arguments.update(signature.bind_partial(*args, **kwargs).arguments)
+    except Exception:
+        pass
+
+    for index, value in enumerate(args):
+        bound_arguments.setdefault(f"arg{index}", value)
+    for key, value in kwargs.items():
+        bound_arguments.setdefault(key, value)
+    return bound_arguments
+
+
+def _pick_preferred_tensor(named_tensors, keywords, *, min_ndim=1):
+    lowered_keywords = tuple(keyword.lower() for keyword in keywords)
+    for keyword in lowered_keywords:
+        for name, tensor in named_tensors:
+            if tensor.ndim >= min_ndim and keyword in name.lower():
+                return tensor
+    for _, tensor in named_tensors:
+        if tensor.ndim >= min_ndim:
+            return tensor
+    return None
+
+
+def _infer_shape_signature(profile_name, original_fn, args, kwargs):
+    bound_arguments = _bind_named_arguments(original_fn, args, kwargs)
+    named_tensors = []
+    for name, value in bound_arguments.items():
+        named_tensors.extend(_iter_named_tensors(name, value))
+
+    batch_tensor = _pick_preferred_tensor(
+        named_tensors,
+        ("input_ids", "position_ids", "positions", "hidden_states", "logits", "tokens", "seq", "query"),
+        min_ndim=1,
+    )
+    seq_tensor = _pick_preferred_tensor(
+        named_tensors,
+        ("input_ids", "position_ids", "positions", "hidden_states", "logits", "seq", "query"),
+        min_ndim=2,
+    )
+
+    batch = batch_tensor.shape[0] if batch_tensor is not None and batch_tensor.ndim >= 1 else None
+    seq_len = seq_tensor.shape[1] if seq_tensor is not None and seq_tensor.ndim >= 2 else None
+
+    if seq_len is None and batch_tensor is not None and batch_tensor.ndim == 1 and batch == 1:
+        seq_len = batch_tensor.shape[0]
+
+    lowered_name = str(profile_name).lower()
+    if "prefill" in lowered_name:
+        phase = "prefill"
+    elif "decode" in lowered_name:
+        phase = "decode"
+    elif seq_len is not None:
+        phase = "decode" if seq_len <= 1 else "prefill"
+    else:
+        phase = "unknown"
+
+    batch_text = "?" if batch is None else str(batch)
+    seq_text = "?" if seq_len is None else str(seq_len)
+    return f"phase={phase} batch={batch_text} seq={seq_text}"
+
+
 def attempt_cpu_fallback(original_fn, args, kwargs, original_device):
     """Attempt to execute original function on CPU with fallback."""
     with profile_phase("compile_wrapper.attempt_cpu_fallback"):
         # Execute original function on CPU instead of compiled function
         with profile_phase("compile_wrapper.cpu_fallback.to_cpu"):
+            to_cpu_bytes = estimate_tensor_nbytes(args, predicate=lambda tensor: tensor.device.type != "cpu")
+            to_cpu_bytes += estimate_tensor_nbytes(kwargs, predicate=lambda tensor: tensor.device.type != "cpu")
             cpu_args = to_cpu(args)
             cpu_kwargs = to_cpu(kwargs)
+        record_transfer_bytes("compile_wrapper.cpu_fallback.to_cpu", to_cpu_bytes)
         if original_fn is None:
             raise ValueError("original_fn is not provided")
         with profile_phase("compile_wrapper.cpu_fallback.exec_original"):
@@ -89,6 +178,10 @@ def attempt_cpu_fallback(original_fn, args, kwargs, original_device):
         # Move result back to original device if needed
         if original_device and original_device.type != "cpu":
             with profile_phase("compile_wrapper.cpu_fallback.return_to_device"):
+                record_transfer_bytes(
+                    "compile_wrapper.cpu_fallback.return_to_device",
+                    estimate_tensor_nbytes(result, predicate=lambda tensor: tensor.device.type == "cpu"),
+                )
                 result = _convert_result_to_device(result, original_device)
         return result
 
@@ -272,21 +365,50 @@ class CompiledFunctionWrapper:
         self._auto_tp_determined = False
         self._failover_attempted = False
         self._profile_name = getattr(original_fn, "__name__", type(original_fn).__name__)
+        self._pending_compile_cause = None
+        self._pending_compile_overhead_ns = 0
+        self._observed_compile_events = 0
+
+    def _set_pending_compile_cause(self, cause, orchestration_ns=0):
+        self._pending_compile_cause = cause
+        self._pending_compile_overhead_ns += max(0, orchestration_ns)
+
+    def _record_compile_cause_if_needed(self, delta_summary):
+        compile_total_ns = int(delta_summary.get("compile_total_ns", 0))
+        if compile_total_ns <= 0:
+            return
+
+        cause = self._pending_compile_cause
+        if cause is None:
+            if int(delta_summary.get("guard_failure_count", 0)) > 0:
+                cause = "guard_miss"
+            elif self._observed_compile_events == 0:
+                cause = "initial_compile"
+            else:
+                cause = "other_recompile"
+
+        record_compile_cause(cause, compile_total_ns + self._pending_compile_overhead_ns)
+        self._observed_compile_events += 1
+        self._pending_compile_cause = None
+        self._pending_compile_overhead_ns = 0
 
     def _try_tp_failover(self, device_id):
         """Try tensor parallel failover on RuntimeError."""
         if self._failover_attempted:
             return None
 
+        start_ns = time.perf_counter_ns()
         failover_compiled_fn = handle_tp_failover(
             self._original_fn,
             self._compile_kwargs,
             device_id,
             self._original_compile_fn,
         )
+        elapsed_ns = time.perf_counter_ns() - start_ns
         if failover_compiled_fn is not None:
             self._compiled_fn = failover_compiled_fn
             self._failover_attempted = True
+            self._set_pending_compile_cause("failover_recompile", elapsed_ns)
         return failover_compiled_fn
 
     def _attempt_cpu_fallback_or_raise(self, error, args, kwargs):
@@ -332,6 +454,7 @@ class CompiledFunctionWrapper:
     def __call__(self, *args, **kwargs):
         """Execute the compiled function with reentrancy guard, TP auto-determination and failover."""
         with profile_call_context(self._profile_name, "compiled_fn", allow_nested=True):
+            record_shape_signature(_infer_shape_signature(self._profile_name, self._original_fn, args, kwargs))
             _enter_rbln_compile_op()
             try:
                 return self._call_impl(*args, **kwargs)
@@ -344,12 +467,15 @@ class CompiledFunctionWrapper:
 
         # Auto-determine tensor_parallel_size if needed (only once)
         if not self._auto_tp_determined:
+            auto_tp_start_ns = time.perf_counter_ns()
             with profile_phase("compile_wrapper.auto_tp_resolution"):
                 compiled_fn_with_auto_tp = auto_determine_tp_if_needed(
                     self._original_fn, self._compile_kwargs, device_id, self._original_compile_fn
                 )
+            auto_tp_elapsed_ns = time.perf_counter_ns() - auto_tp_start_ns
             if compiled_fn_with_auto_tp is not None:
                 self._compiled_fn = compiled_fn_with_auto_tp
+                self._set_pending_compile_cause("auto_tp_recompile", auto_tp_elapsed_ns)
             self._auto_tp_determined = True
 
         for attempt in range(self._max_retries + 1):
@@ -360,7 +486,8 @@ class CompiledFunctionWrapper:
                         return self._compiled_fn(*args, **kwargs)
                 finally:
                     after_dynamo_state = snapshot_dynamo_state()
-                    record_dynamo_state_delta(before_dynamo_state, after_dynamo_state)
+                    delta_summary = record_dynamo_state_delta(before_dynamo_state, after_dynamo_state)
+                    self._record_compile_cause_if_needed(delta_summary)
             except RuntimeError as e:
                 result = self._handle_runtime_error(e, device_id, args, kwargs)
                 if result is None:

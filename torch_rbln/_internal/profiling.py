@@ -61,6 +61,10 @@ class _ProfileStore:
         self.counter_by_context: Counter[tuple[str, str, str]] = Counter()
         self.guard_reason_totals: Counter[str] = Counter()
         self.guard_reason_by_context: Counter[tuple[str, str, str]] = Counter()
+        self.bucket_counters: Counter[tuple[str, str]] = Counter()
+        self.bucket_counter_by_context: Counter[tuple[str, str, str, str]] = Counter()
+        self.bucket_value_totals: defaultdict[tuple[str, str], _DurationStat] = defaultdict(_DurationStat)
+        self.bucket_value_by_context: defaultdict[tuple[str, str, str, str], _DurationStat] = defaultdict(_DurationStat)
 
     def reset(self) -> None:
         self.call_totals.clear()
@@ -71,6 +75,10 @@ class _ProfileStore:
         self.counter_by_context.clear()
         self.guard_reason_totals.clear()
         self.guard_reason_by_context.clear()
+        self.bucket_counters.clear()
+        self.bucket_counter_by_context.clear()
+        self.bucket_value_totals.clear()
+        self.bucket_value_by_context.clear()
 
 
 _PROFILE_STORE = _ProfileStore()
@@ -267,6 +275,79 @@ def record_guard_failure_reason(reason: str, delta: int = 1) -> None:
             _PROFILE_STORE.guard_reason_by_context[(context.category, context.name, normalized)] += delta
 
 
+def record_bucket_counter(metric: str, bucket: str, delta: int = 1) -> None:
+    if not is_rbln_overhead_profiling_enabled():
+        return
+
+    _ensure_process_exit_reporters_registered()
+
+    normalized_metric = str(metric).strip()
+    normalized_bucket = str(bucket).strip() or "<empty>"
+    contexts = tuple(_get_context_stack())
+    with _PROFILE_LOCK:
+        _PROFILE_STORE.bucket_counters[(normalized_metric, normalized_bucket)] += delta
+        for context in contexts:
+            _PROFILE_STORE.bucket_counter_by_context[
+                (context.category, context.name, normalized_metric, normalized_bucket)
+            ] += delta
+
+
+def record_bucket_value(metric: str, bucket: str, value: int) -> None:
+    if not is_rbln_overhead_profiling_enabled() or value < 0:
+        return
+
+    _ensure_process_exit_reporters_registered()
+
+    normalized_metric = str(metric).strip()
+    normalized_bucket = str(bucket).strip() or "<empty>"
+    contexts = tuple(_get_context_stack())
+    with _PROFILE_LOCK:
+        _PROFILE_STORE.bucket_value_totals[(normalized_metric, normalized_bucket)].add(value)
+        for context in contexts:
+            _PROFILE_STORE.bucket_value_by_context[
+                (context.category, context.name, normalized_metric, normalized_bucket)
+            ].add(value)
+
+
+def record_shape_signature(signature: str) -> None:
+    record_bucket_counter("compiled.shape_signature", signature)
+
+
+def record_compile_cause(cause: str, duration_ns: int) -> None:
+    record_bucket_value("compile_cause.ns", cause, duration_ns)
+
+
+def record_transfer_bytes(path: str, num_bytes: int) -> None:
+    if num_bytes <= 0:
+        return
+    record_bucket_value("transfer_bytes", path, num_bytes)
+
+
+def current_profile_callsite(
+    *,
+    excluded_modules: tuple[str, ...] = (),
+    excluded_filenames: tuple[str, ...] = (),
+    default: str = "python:unknown",
+) -> str:
+    contexts = tuple(_get_context_stack())
+    if contexts:
+        context = contexts[-1]
+        return f"{context.category}:{context.name}"
+
+    frame = inspect.currentframe()
+    if frame is None:
+        return default
+
+    frame = frame.f_back
+    while frame is not None:
+        module_name = str(frame.f_globals.get("__name__", ""))
+        filename = os.path.basename(str(frame.f_code.co_filename))
+        if module_name != __name__ and module_name not in excluded_modules and filename not in excluded_filenames:
+            return f"python:{filename}:{frame.f_lineno}:{frame.f_code.co_name}"
+        frame = frame.f_back
+    return default
+
+
 def wrap_registered_dispatch_functions(namespace: dict[str, Any], *, module_name: str) -> None:
     """Wrap locally-defined RBLN dispatch entries so phases can be attributed per op."""
     if not is_rbln_overhead_profiling_enabled():
@@ -320,9 +401,16 @@ def snapshot_dynamo_state() -> dict[str, Any] | None:
     }
 
 
-def record_dynamo_state_delta(before: dict[str, Any] | None, after: dict[str, Any] | None) -> None:
+def record_dynamo_state_delta(before: dict[str, Any] | None, after: dict[str, Any] | None) -> dict[str, Any]:
+    delta_summary = {
+        "compile_metrics_ns": {},
+        "compile_total_ns": 0,
+        "counter_deltas": {},
+        "guard_failure_count": 0,
+        "guard_reasons": [],
+    }
     if not is_rbln_overhead_profiling_enabled() or before is None or after is None:
-        return
+        return delta_summary
 
     before_compile = before.get("compile_metrics_ns", {})
     after_compile = after.get("compile_metrics_ns", {})
@@ -330,13 +418,17 @@ def record_dynamo_state_delta(before: dict[str, Any] | None, after: dict[str, An
         delta_ns = current_ns - before_compile.get(name, 0)
         if delta_ns > 0:
             record_phase_duration(f"dynamo.metric.{name}", delta_ns)
+            delta_summary["compile_metrics_ns"][name] = delta_ns
+            delta_summary["compile_total_ns"] += delta_ns
 
     before_counters = before.get("counter_values", {})
     after_counters = after.get("counter_values", {})
     for name, current_value in after_counters.items():
         delta = current_value - before_counters.get(name, 0)
         if delta > 0:
-            record_counter(f"dynamo.counter.{name}", delta)
+            counter_name = f"dynamo.counter.{name}"
+            record_counter(counter_name, delta)
+            delta_summary["counter_deltas"][counter_name] = delta
 
     before_guards = before.get("guard_failures", {})
     after_guards = after.get("guard_failures", {})
@@ -349,8 +441,11 @@ def record_dynamo_state_delta(before: dict[str, Any] | None, after: dict[str, An
         total_new_guard_failures += len(new_reasons)
         for reason in new_reasons:
             record_guard_failure_reason(reason)
+            delta_summary["guard_reasons"].append(reason)
     if total_new_guard_failures > 0:
         record_counter("dynamo.guard_failures", total_new_guard_failures)
+        delta_summary["guard_failure_count"] = total_new_guard_failures
+    return delta_summary
 
 
 def reset_rbln_overhead_profile() -> None:
@@ -386,6 +481,16 @@ def get_rbln_overhead_profile_snapshot() -> dict[str, Any]:
             "counter_by_context": dict(_PROFILE_STORE.counter_by_context),
             "guard_reason_totals": dict(_PROFILE_STORE.guard_reason_totals),
             "guard_reason_by_context": dict(_PROFILE_STORE.guard_reason_by_context),
+            "bucket_counters": dict(_PROFILE_STORE.bucket_counters),
+            "bucket_counter_by_context": dict(_PROFILE_STORE.bucket_counter_by_context),
+            "bucket_value_totals": {
+                key: {"count": stat.count, "total": stat.total_ns, "max": stat.max_ns}
+                for key, stat in _PROFILE_STORE.bucket_value_totals.items()
+            },
+            "bucket_value_by_context": {
+                key: {"count": stat.count, "total": stat.total_ns, "max": stat.max_ns}
+                for key, stat in _PROFILE_STORE.bucket_value_by_context.items()
+            },
         }
 
 
@@ -397,6 +502,8 @@ def has_rbln_overhead_profile_samples() -> bool:
             snapshot["phase_totals"],
             snapshot["counter_totals"],
             snapshot["guard_reason_totals"],
+            snapshot["bucket_counters"],
+            snapshot["bucket_value_totals"],
         )
     )
 
@@ -420,6 +527,10 @@ def format_rbln_overhead_summary(*, top_n: int | None = None) -> str:
     lines.extend(_format_added_overhead_estimate(snapshot, limit))
     lines.extend(_format_context_section("Eager dispatch calls", "eager_op", snapshot, limit))
     lines.extend(_format_context_section("Compiled function calls", "compiled_fn", snapshot, limit))
+    lines.extend(_format_compiled_shape_signatures(snapshot, limit))
+    lines.extend(_format_compile_causes(snapshot, limit))
+    lines.extend(_format_compile_cache_callsites(snapshot, limit))
+    lines.extend(_format_transfer_bytes(snapshot, limit))
     lines.extend(_format_phase_totals(snapshot, limit))
     lines.extend(_format_counter_totals(snapshot, limit))
     lines.extend(_format_guard_reasons(snapshot, limit))
@@ -741,6 +852,212 @@ def _format_context_section(title: str, category: str, snapshot: dict[str, Any],
     return lines
 
 
+def _format_compiled_shape_signatures(snapshot: dict[str, Any], limit: int) -> list[str]:
+    grouped: dict[str, Counter[str]] = defaultdict(Counter)
+    for (category, name, metric, bucket), value in snapshot.get("bucket_counter_by_context", {}).items():
+        if category != "compiled_fn" or metric != "compiled.shape_signature" or value <= 0:
+            continue
+        grouped[name][bucket] += value
+
+    if not grouped:
+        return ["Compiled shape signatures: none"]
+
+    ranked_items = sorted(grouped.items(), key=lambda item: sum(item[1].values()), reverse=True)[:limit]
+    name_width = max(len("Function"), max(len(name) for name, _ in ranked_items))
+    name_width = min(name_width, 36)
+
+    lines = ["Compiled shape signatures:"]
+    lines.extend(
+        _format_table_header(
+            ("Function", name_width, "<"),
+            ("Calls", 7, ">"),
+            ("Unique", 7, ">"),
+            ("Top shape", 0, "<"),
+        )
+    )
+    for name, counter in ranked_items:
+        total_calls = sum(counter.values())
+        most_common_shape, most_common_count = counter.most_common(1)[0]
+        lines.append(
+            _format_table_row(
+                (name, name_width, "<"),
+                (str(total_calls), 7, ">"),
+                (str(len(counter)), 7, ">"),
+                (f"{most_common_shape} ({_format_percentage(most_common_count, total_calls)})", 0, "<"),
+            )
+        )
+        lines.extend(
+            _format_wrapped_items(
+                "shapes",
+                [
+                    f"{shape}={count} ({_format_percentage(count, total_calls)})"
+                    for shape, count in counter.most_common(4)
+                ],
+            )
+        )
+    return lines
+
+
+def _format_compile_causes(snapshot: dict[str, Any], limit: int) -> list[str]:
+    value_totals = snapshot.get("bucket_value_totals", {})
+    items = [
+        (bucket, stats)
+        for (metric, bucket), stats in value_totals.items()
+        if metric == "compile_cause.ns" and stats["count"] > 0
+    ]
+    if not items:
+        return ["Compile causes: none"]
+
+    items.sort(key=lambda item: item[1]["total"], reverse=True)
+    ranked_items = items[:limit]
+    total_ns = sum(stats["total"] for _, stats in ranked_items)
+    name_width = max(len("Cause"), max(len(name) for name, _ in ranked_items))
+    name_width = min(name_width, 24)
+
+    lines = ["Compile causes:"]
+    lines.extend(
+        _format_table_header(
+            ("Cause", name_width, "<"),
+            ("Events", 7, ">"),
+            ("Share", 7, ">"),
+            ("Total", 12, ">"),
+            ("Avg", 12, ">"),
+            ("Max", 12, ">"),
+        )
+    )
+
+    value_by_context = snapshot.get("bucket_value_by_context", {})
+    for cause, stats in ranked_items:
+        lines.append(
+            _format_table_row(
+                (cause, name_width, "<"),
+                (str(stats["count"]), 7, ">"),
+                (_format_percentage(stats["total"], total_ns), 7, ">"),
+                (_format_duration(stats["total"]), 12, ">"),
+                (_format_duration(_safe_average(stats["total"], stats["count"])), 12, ">"),
+                (_format_duration(stats["max"]), 12, ">"),
+            )
+        )
+        context_items = [
+            (ctx_name, ctx_stats["count"], ctx_stats["total"])
+            for (ctx_category, ctx_name, metric, bucket), ctx_stats in value_by_context.items()
+            if ctx_category == "compiled_fn" and metric == "compile_cause.ns" and bucket == cause and ctx_stats["count"] > 0
+        ]
+        context_items.sort(key=lambda item: item[2], reverse=True)
+        if context_items:
+            lines.extend(
+                _format_wrapped_items(
+                    "functions",
+                    [
+                        f"{name}={count}x/{_format_duration(total_ns)}"
+                        for name, count, total_ns in context_items[:4]
+                    ],
+                )
+            )
+    return lines
+
+
+def _format_compile_cache_callsites(snapshot: dict[str, Any], limit: int) -> list[str]:
+    rows: dict[str, dict[str, int]] = defaultdict(lambda: {"hit": 0, "miss": 0, "hit_after_lock": 0})
+    for (metric, bucket), value in snapshot.get("bucket_counters", {}).items():
+        if metric == "compile_cache.callsite.hit":
+            rows[bucket]["hit"] += value
+        elif metric == "compile_cache.callsite.miss":
+            rows[bucket]["miss"] += value
+        elif metric == "compile_cache.callsite.hit_after_lock":
+            rows[bucket]["hit_after_lock"] += value
+
+    if not rows:
+        return ["Compile cache by callsite: none"]
+
+    ranked_items = sorted(
+        rows.items(),
+        key=lambda item: (item[1]["miss"], item[1]["hit"] + item[1]["hit_after_lock"] + item[1]["miss"]),
+        reverse=True,
+    )[:limit]
+    name_width = max(len("Callsite"), max(len(name) for name, _ in ranked_items))
+    name_width = min(name_width, 40)
+
+    lines = ["Compile cache by callsite:"]
+    lines.extend(
+        _format_table_header(
+            ("Callsite", name_width, "<"),
+            ("Lookups", 7, ">"),
+            ("Hits", 7, ">"),
+            ("Miss", 7, ">"),
+            ("AfterLk", 7, ">"),
+            ("MissRt", 7, ">"),
+        )
+    )
+
+    for name, stats in ranked_items:
+        lookups = stats["hit"] + stats["miss"] + stats["hit_after_lock"]
+        lines.append(
+            _format_table_row(
+                (name, name_width, "<"),
+                (str(lookups), 7, ">"),
+                (str(stats["hit"]), 7, ">"),
+                (str(stats["miss"]), 7, ">"),
+                (str(stats["hit_after_lock"]), 7, ">"),
+                (_format_percentage(stats["miss"], lookups), 7, ">"),
+            )
+        )
+    return lines
+
+
+def _format_transfer_bytes(snapshot: dict[str, Any], limit: int) -> list[str]:
+    value_totals = snapshot.get("bucket_value_totals", {})
+    items = [
+        (bucket, stats)
+        for (metric, bucket), stats in value_totals.items()
+        if metric == "transfer_bytes" and stats["total"] > 0
+    ]
+    if not items:
+        return ["Transfer bytes: none"]
+
+    items.sort(key=lambda item: item[1]["total"], reverse=True)
+    ranked_items = items[:limit]
+    name_width = max(len("Path"), max(len(name) for name, _ in ranked_items))
+    name_width = min(name_width, 40)
+
+    lines = ["Transfer bytes:"]
+    lines.extend(
+        _format_table_header(
+            ("Path", name_width, "<"),
+            ("Calls", 7, ">"),
+            ("Total", 12, ">"),
+            ("Avg", 12, ">"),
+            ("Max", 12, ">"),
+        )
+    )
+
+    value_by_context = snapshot.get("bucket_value_by_context", {})
+    for path, stats in ranked_items:
+        lines.append(
+            _format_table_row(
+                (path, name_width, "<"),
+                (str(stats["count"]), 7, ">"),
+                (_format_bytes(stats["total"]), 12, ">"),
+                (_format_bytes(_safe_average(stats["total"], stats["count"])), 12, ">"),
+                (_format_bytes(stats["max"]), 12, ">"),
+            )
+        )
+        context_items = [
+            (f"{ctx_category}:{ctx_name}", ctx_stats["total"])
+            for (ctx_category, ctx_name, metric, bucket), ctx_stats in value_by_context.items()
+            if metric == "transfer_bytes" and bucket == path and ctx_stats["total"] > 0
+        ]
+        context_items.sort(key=lambda item: item[1], reverse=True)
+        if context_items:
+            lines.extend(
+                _format_wrapped_items(
+                    "contexts",
+                    [f"{name}={_format_bytes(total)}" for name, total in context_items[:4]],
+                )
+            )
+    return lines
+
+
 def _format_phase_totals(snapshot: dict[str, Any], limit: int) -> list[str]:
     phase_totals = snapshot["phase_totals"]
     if not phase_totals:
@@ -983,6 +1300,16 @@ def _format_duration(duration_ns: int) -> str:
     if duration_ns >= 1_000:
         return f"{duration_ns / 1_000:.3f}us"
     return f"{duration_ns}ns"
+
+
+def _format_bytes(num_bytes: int) -> str:
+    if num_bytes >= 1024**3:
+        return f"{num_bytes / (1024**3):.2f}GiB"
+    if num_bytes >= 1024**2:
+        return f"{num_bytes / (1024**2):.2f}MiB"
+    if num_bytes >= 1024:
+        return f"{num_bytes / 1024:.2f}KiB"
+    return f"{num_bytes}B"
 
 
 def _safe_average(total_ns: int, count: int) -> int:

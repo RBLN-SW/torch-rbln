@@ -4,7 +4,7 @@ from typing import Any
 
 import torch
 
-from torch_rbln._internal.profiling import profile_phase, record_counter
+from torch_rbln._internal.profiling import current_profile_callsite, profile_phase, record_bucket_counter, record_counter
 
 
 _compiled_op_cache_lock = threading.Lock()
@@ -53,6 +53,7 @@ def compile_rbln_cached(
     device_cache_key: int | None = None,
 ) -> Any:
     with profile_phase("compile_cache.total"):
+        callsite = current_profile_callsite(excluded_modules=(__name__,), excluded_filenames=("compile_cache.py",))
         cache_key = (
             _IdentityKey(model),
             dynamic,
@@ -63,6 +64,7 @@ def compile_rbln_cached(
         compiled = _compiled_op_cache.get(cache_key)
         if compiled is not None:
             record_counter("compile_cache.hit")
+            record_bucket_counter("compile_cache.callsite.hit", callsite)
             return compiled
 
         with profile_phase("compile_cache.lock_wait"):
@@ -70,11 +72,13 @@ def compile_rbln_cached(
                 compiled = _compiled_op_cache.get(cache_key)
                 if compiled is None:
                     record_counter("compile_cache.miss")
+                    record_bucket_counter("compile_cache.callsite.miss", callsite)
                     with profile_phase("compile_cache.torch_compile_api"):
                         compiled = torch.compile(model, backend="rbln", dynamic=dynamic, options=options)
                     _compiled_op_cache[cache_key] = compiled
                 else:
                     record_counter("compile_cache.hit_after_lock")
+                    record_bucket_counter("compile_cache.callsite.hit_after_lock", callsite)
                 return compiled
 
 

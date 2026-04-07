@@ -10,7 +10,7 @@ import torch
 from torch.utils._pytree import tree_flatten, tree_unflatten
 
 from torch_rbln._internal.log_utils import rbln_log_cpu_fallback, rbln_log_warn
-from torch_rbln._internal.profiling import profile_phase, record_counter
+from torch_rbln._internal.profiling import profile_phase, record_counter, record_transfer_bytes
 
 
 def _estimate_mm_shape(shape1, shape2):
@@ -185,6 +185,20 @@ def to_cpu(x):
         return {k: to_cpu(v) for k, v in x.items()}
     else:
         return x
+
+
+def estimate_tensor_nbytes(obj, *, predicate=None):
+    if isinstance(obj, torch.Tensor):
+        if predicate is not None and not predicate(obj):
+            return 0
+        return obj.numel() * obj.element_size()
+    if isinstance(obj, list):
+        return sum(estimate_tensor_nbytes(item, predicate=predicate) for item in obj)
+    if isinstance(obj, tuple):
+        return sum(estimate_tensor_nbytes(item, predicate=predicate) for item in obj)
+    if isinstance(obj, dict):
+        return sum(estimate_tensor_nbytes(value, predicate=predicate) for value in obj.values())
+    return 0
 
 
 def handle_empty_reduction(input: torch.Tensor, dim: Optional[Union[int, Sequence[int]]] = None, keepdim: bool = False):
@@ -467,12 +481,16 @@ def cpu_fallback_path(
         if op_name is not None:
             rbln_log_cpu_fallback(op_name)
         with profile_phase("ops.cpu_fallback.to_cpu"):
+            to_cpu_bytes = estimate_tensor_nbytes(args, predicate=lambda tensor: tensor.device.type != "cpu")
+            to_cpu_bytes += estimate_tensor_nbytes(op_kwargs, predicate=lambda tensor: tensor.device.type != "cpu")
             cpu_args = to_cpu(args)
             cpu_op_kwargs = to_cpu(op_kwargs)
+        record_transfer_bytes("ops.cpu_fallback.to_cpu", to_cpu_bytes)
         with profile_phase("ops.cpu_fallback.exec_cpu_op"):
             result_cpu = target_ops(*cpu_args, **cpu_op_kwargs)
         if result is not None and result_cpu.size() == result.size():
             with profile_phase("ops.cpu_fallback.copy_to_out"):
+                record_transfer_bytes("ops.cpu_fallback.copy_to_out", estimate_tensor_nbytes(result_cpu))
                 result.copy_(result_cpu)
             return result
 
@@ -490,6 +508,10 @@ def cpu_fallback_path(
         # device_id should always be available when rbln tensors are present
         assert device_id is not None, "device_id should be found from rbln tensors"
         with profile_phase("ops.cpu_fallback.return_to_rbln"):
+            record_transfer_bytes(
+                "ops.cpu_fallback.return_to_rbln",
+                estimate_tensor_nbytes(result_cpu, predicate=lambda tensor: tensor.device.type == "cpu"),
+            )
             result = result_cpu.to(f"rbln:{device_id}")
         return result
 
