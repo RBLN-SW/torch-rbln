@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("TORCH_RBLN_DIAGNOSE", "1")
 
+import torch_rbln._internal.profiling as profiling
 from torch_rbln._internal.profiling import (
     _reset_profiler_after_fork,
     format_rbln_overhead_summary,
@@ -119,6 +120,19 @@ class TestRblnProfiling(unittest.TestCase):
     def test_maybe_emit_summary_is_quiet_when_no_samples_exist(self):
         self.assertFalse(has_rbln_overhead_profile_samples())
         self.assertIsNone(maybe_emit_rbln_overhead_summary())
+
+    @patch.dict("os.environ", {"TORCH_RBLN_PROFILE": "ON"}, clear=False)
+    @patch("torch_rbln._internal.profiling.multiprocessing.util.Finalize")
+    @patch("torch_rbln._internal.profiling.atexit.register")
+    def test_profile_event_registers_process_exit_reporters(self, atexit_register, finalize):
+        profiling._PROFILE_ATEXIT_REGISTERED = False
+        profiling._PROFILE_MP_FINALIZER_REGISTERED = False
+        profiling._PROFILE_MP_FINALIZER = None
+
+        record_counter("compile_cache.hit", 1)
+
+        atexit_register.assert_called_once()
+        finalize.assert_called_once()
 
     @patch.dict("os.environ", {"TORCH_RBLN_PROFILE": "ON"}, clear=False)
     def test_reset_profiler_after_fork_clears_parent_state(self):

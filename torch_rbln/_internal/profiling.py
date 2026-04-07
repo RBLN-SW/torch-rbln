@@ -10,6 +10,7 @@ from __future__ import annotations
 import atexit
 import functools
 import inspect
+import multiprocessing.util
 import os
 import sys
 import threading
@@ -68,6 +69,8 @@ _PROFILE_STORE = _ProfileStore()
 _PROFILE_LOCK = threading.Lock()
 _PROFILE_TLS = threading.local()
 _PROFILE_ATEXIT_REGISTERED = False
+_PROFILE_MP_FINALIZER_REGISTERED = False
+_PROFILE_MP_FINALIZER = None
 _PROFILE_SUMMARY_EMITTED = False
 _PROFILE_PID = os.getpid()
 
@@ -95,6 +98,24 @@ def _ensure_atexit_reporter_registered() -> None:
     _PROFILE_ATEXIT_REGISTERED = True
 
 
+def _ensure_multiprocessing_reporter_registered() -> None:
+    global _PROFILE_MP_FINALIZER, _PROFILE_MP_FINALIZER_REGISTERED
+    _ensure_process_local_state()
+    if _PROFILE_MP_FINALIZER_REGISTERED or not is_rbln_overhead_profiling_enabled():
+        return
+    _PROFILE_MP_FINALIZER = multiprocessing.util.Finalize(
+        None,
+        _emit_profile_summary_at_exit,
+        exitpriority=1,
+    )
+    _PROFILE_MP_FINALIZER_REGISTERED = True
+
+
+def _ensure_process_exit_reporters_registered() -> None:
+    _ensure_atexit_reporter_registered()
+    _ensure_multiprocessing_reporter_registered()
+
+
 def _ensure_process_local_state() -> None:
     if os.getpid() != _PROFILE_PID:
         _reset_profiler_after_fork()
@@ -102,12 +123,11 @@ def _ensure_process_local_state() -> None:
 
 def _reset_profiler_after_fork() -> None:
     global _PROFILE_STORE, _PROFILE_LOCK, _PROFILE_TLS
-    global _PROFILE_ATEXIT_REGISTERED, _PROFILE_SUMMARY_EMITTED, _PROFILE_PID
+    global _PROFILE_SUMMARY_EMITTED, _PROFILE_PID
 
     _PROFILE_STORE = _ProfileStore()
     _PROFILE_LOCK = threading.Lock()
     _PROFILE_TLS = threading.local()
-    _PROFILE_ATEXIT_REGISTERED = False
     _PROFILE_SUMMARY_EMITTED = False
     _PROFILE_PID = os.getpid()
 
@@ -126,7 +146,7 @@ def profile_call_context(name: str, category: str, *, allow_nested: bool = True)
         yield False
         return
 
-    _ensure_atexit_reporter_registered()
+    _ensure_process_exit_reporters_registered()
 
     stack = _get_context_stack()
     if not allow_nested and any(ctx.category == category for ctx in stack):
@@ -150,7 +170,7 @@ def profile_phase(name: str) -> Iterator[None]:
         yield
         return
 
-    _ensure_atexit_reporter_registered()
+    _ensure_process_exit_reporters_registered()
 
     start_ns = time.perf_counter_ns()
     try:
@@ -169,7 +189,7 @@ def record_phase_duration(name: str, duration_ns: int) -> None:
     if not is_rbln_overhead_profiling_enabled():
         return
 
-    _ensure_atexit_reporter_registered()
+    _ensure_process_exit_reporters_registered()
 
     contexts = tuple(_get_context_stack())
     with _PROFILE_LOCK:
@@ -182,7 +202,7 @@ def record_counter(name: str, delta: int = 1) -> None:
     if not is_rbln_overhead_profiling_enabled():
         return
 
-    _ensure_atexit_reporter_registered()
+    _ensure_process_exit_reporters_registered()
 
     contexts = tuple(_get_context_stack())
     with _PROFILE_LOCK:
@@ -195,7 +215,7 @@ def record_guard_failure_reason(reason: str, delta: int = 1) -> None:
     if not is_rbln_overhead_profiling_enabled():
         return
 
-    _ensure_atexit_reporter_registered()
+    _ensure_process_exit_reporters_registered()
 
     normalized = " ".join(str(reason).split())
     if not normalized:
@@ -398,7 +418,7 @@ def log_rbln_overhead_summary(
 def _emit_profile_summary_at_exit() -> None:
     if _PROFILE_SUMMARY_EMITTED or not is_rbln_overhead_profiling_enabled():
         return
-    emit_rbln_overhead_summary(reset=False)
+    maybe_emit_rbln_overhead_summary(reset=False)
 
 
 def _write_summary(summary: str, *, writer: Callable[[str], Any] | None = None) -> None:
