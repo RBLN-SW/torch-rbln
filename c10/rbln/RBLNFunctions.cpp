@@ -235,6 +235,15 @@ void* malloc(c10::DeviceIndex device_index, size_t nbytes) {
   return data;
 }
 
+void mark_zeros(const void* rbln_data) {
+  RBLN_LOG_DEBUG("rbln_data={}", fmt::ptr(rbln_data));
+  RBLN_CHECK(rbln_data != nullptr, "rbln_data cannot be nullptr");
+
+  const auto vaddr = reinterpret_cast<uint64_t>(rbln_data);
+  RBLN_CHECK(!::rbln::rbln_mark_zeros(vaddr), "rbln_mark_zeros failed for vaddr={:#x}", vaddr);
+  RBLN_LOG_DEBUG("vaddr={:#x} marked as zero-initialized", vaddr);
+}
+
 void free(void* data) {
   RBLN_LOG_DEBUG("data={}", fmt::ptr(data));
   RBLN_CHECK(data != nullptr, "data cannot be nullptr");

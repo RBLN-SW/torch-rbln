@@ -206,6 +206,12 @@ RBLNRetCode rbln_malloc_lazy(uint32_t torch_device_id, uint64_t size, uint64_t& 
 // Releases the vmemory entry. This will free any associated host or device memory.
 RBLNRetCode rbln_free(uint64_t vaddr);
 
+// Marks the virtual memory at vaddr as logically zero-initialized without allocating any host
+// memory or performing a device transfer. On the next device read, zeros are transferred via a
+// temporary buffer; on the next device write, the transfer is skipped entirely. Use this for
+// in-place zeroing of large tensors (e.g. KV-cache) to avoid host memory pressure.
+RBLNRetCode rbln_mark_zeros(uint64_t vaddr);
+
 RBLNRetCode rbln_set_memory_info(uint64_t vaddr, DataType user_dtype, DataType physical_dtype,
                                  const std::vector<int64_t>& shape);
 RBLNRetCode rbln_set_raw_memory_alloc(uint64_t vaddr, uint64_t size);
