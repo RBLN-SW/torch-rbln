@@ -190,12 +190,6 @@ def paged_attn_prefill_rbln(*args, **kwargs):
         f"The last dimension of V-cache must be a multiple of 64, but got shape {v_cache.shape}"
     )
 
-    list_args = list(contig_args)
-    # TODO: to handle constbuffer, it might be 'cpu' tensor to use in runtime
-    list_args[6] = list_args[6].to("cpu")
-    list_args[8] = list_args[8].to("cpu")
-    contig_args = tuple(list_args)
-
     # Create aligned result tensor with 64-byte alignment for last dimension
     result_tensor = torch.empty(contig_args[0].shape, dtype=torch.float16, device=contig_args[0].device)
     assert result_tensor.size(-1) % 64 == 0
@@ -256,13 +250,6 @@ def paged_attn_decode_rbln(*args, **kwargs):
     assert v_cache.size(-1) % 64 == 0, (
         f"The last dimension of V-cache must be a multiple of 64, but got shape {v_cache.shape}"
     )
-
-    # for convert 'rbln' tensor to 'cpu' tensor
-    list_args = list(contig_args)
-    # TODO: to handle constbuffer, it might be 'cpu' tensor to use in runtime
-    list_args[6] = list_args[6].to("cpu")
-    list_args[8] = list_args[8].to("cpu")
-    contig_args = tuple(list_args)
 
     # Create aligned result tensor with 64-byte alignment for last dimension
     result_tensor = torch.empty(contig_args[0].shape, dtype=torch.float16, device=contig_args[0].device)
@@ -347,12 +334,6 @@ def paged_causal_attn_prefill_rbln(*args, **kwargs):
         f"The last dimension of V-cache must be a multiple of 64, but got shape {v_cache.shape}"
     )
 
-    list_args = list(contig_args)
-    # TODO: to handle constbuffer, it might be 'cpu' tensor to use in runtime
-    list_args[5] = list_args[5].to("cpu")
-    list_args[7] = list_args[7].to("cpu")
-    contig_args = tuple(list_args)
-
     # Create aligned result tensor with 64-byte alignment for last dimension
     result_tensor = torch.empty(contig_args[0].shape, dtype=torch.float16, device=contig_args[0].device)
     assert result_tensor.size(-1) % 64 == 0
@@ -420,13 +401,6 @@ def paged_causal_attn_decode_rbln(*args, **kwargs):
     assert v_cache.size(-1) % 64 == 0, (
         f"The last dimension of V-cache must be a multiple of 64, but got shape {v_cache.shape}"
     )
-
-    # for convert 'rbln' tensor to 'cpu' tensor
-    list_args = list(contig_args)
-    # TODO: to handle constbuffer, it might be 'cpu' tensor to use in runtime
-    list_args[5] = list_args[5].to("cpu")
-    list_args[7] = list_args[7].to("cpu")
-    contig_args = tuple(list_args)
 
     # Create aligned result tensor with 64-byte alignment for last dimension
     result_tensor = torch.empty(contig_args[0].shape, dtype=torch.float16, device=contig_args[0].device)
