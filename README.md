@@ -29,7 +29,7 @@ PyTorch RBLN is currently in **beta** and under active development. APIs may cha
 
 ### Install pre-built wheels
 
-**`torch-rbln`** (public wheel; **`torch`** resolves to **2.9.1+cpu** via the PyTorch CPU index):
+**`torch-rbln`** (public wheel; **`torch`** resolves to **2.10.0+cpu** via the PyTorch CPU index):
 
 ```bash
 pip3 install torch-rbln --extra-index-url https://download.pytorch.org/whl/cpu

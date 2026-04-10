@@ -19,7 +19,7 @@ else
   exit 1
 fi
 
-# Default version: parse torch version (e.g. 2.9.0) from pyproject.toml and use as tag v2.9.0
+# Default version: parse torch version (e.g. 2.10.0) from pyproject.toml and use as tag v2.10.0
 TORCH_VER=$(grep -E 'torch==[0-9]+\.[0-9]+\.[0-9]+' "$PYPROJECT" | head -1 | sed -E 's/.*torch==([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
 VERSION="${1:-v${TORCH_VER}}"
 
