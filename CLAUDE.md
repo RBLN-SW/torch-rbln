@@ -360,3 +360,4 @@ All test workflows dispatch to remote infrastructure with physical RBLN NPU hard
 - **Always ask before pushing** — Never `git push` to remote or create a PR without explicit user confirmation first.
 - **PRs must be draft** — When creating a pull request, always use draft/WIP status (`--draft` flag).
 - **Follow the PR template** — PR descriptions must follow `.github/PULL_REQUEST_TEMPLATE.md`. Include all sections: Summary of Changes, Related Issues, Type of Change (checkbox), Affected Modules (checkbox), How to Test, and Checklist. Do not skip or abbreviate sections.
+- **Always run lintrunner before committing** — Run `lintrunner -m dev -a` on changed files and fix all issues before every commit. If `lintrunner` is not installed, install it (`pip install lintrunner && lintrunner init`) and run it. Do not skip this step or rely on individual tools (ruff, black, flake8) alone — `lintrunner` coordinates all project linters together.
