@@ -565,3 +565,93 @@ def _ceil_to_nearest_multiple_of_64(n):
         int: The smallest multiple of 64 that is greater than or equal to `n`.
     """
     return math.ceil(n / 64) * 64
+
+
+# ---------------------------------------------------------------------------
+# Eager-mode compile+execute utilities
+# ---------------------------------------------------------------------------
+
+
+@lru_cache(maxsize=1)
+def _get_default_compile_options() -> dict:
+    """Return the default compile options for eager-mode RBLN ops.
+
+    The result is cached because the underlying environment variable
+    (``TORCH_RBLN_USE_DEVICE_TP``) is expected to be set once at process
+    start and remain constant for the lifetime of the process.
+    """
+    from torch_rbln._internal.env_utils import use_device_group_tensor_parallel_size
+
+    options: dict = {"disable_logger": True}
+    if not use_device_group_tensor_parallel_size():
+        options["tensor_parallel_size"] = 1
+    return options
+
+
+def _resolve_result_tensor(out_tensor, contig_args, contig_kwargs):
+    """Determine whether *out_tensor* can be written to directly by the compiler.
+
+    Returns *out_tensor* itself when direct use is safe, otherwise ``None``
+    (which tells the compiler to allocate a temporary).
+    """
+    if out_tensor is None:
+        return None
+    if can_use_out_tensor_directly(contig_args, dict(contig_kwargs, out=out_tensor)):
+        return out_tensor
+    return None
+
+
+def compile_and_execute(op_module, contig_args, contig_kwargs, out_tensor=None):
+    """Compile *op_module* with the RBLN backend and execute it.
+
+    This is the standard compile+execute pattern shared by all eager-mode ops
+    (both generated and hand-written).  It handles:
+
+    * Building compile options (tp_size, logger suppression)
+    * Resolving whether the caller's *out_tensor* can be reused directly
+    * Binding the result tensor via ``out_tensor_context``
+    * Copying the compiler's result if it landed at a different address
+
+    Args:
+        op_module: An ``nn.Module`` whose ``forward`` calls the target op.
+        contig_args: Contiguous positional arguments.
+        contig_kwargs: Contiguous keyword arguments (``out`` excluded).
+        out_tensor: Optional pre-allocated output tensor from the caller.
+
+    Returns:
+        The result tensor (on the RBLN device).
+    """
+    from torch_rbln.device.context_holder import out_tensor_context
+
+    compile_options = _get_default_compile_options()
+    result_tensor = _resolve_result_tensor(out_tensor, contig_args, contig_kwargs)
+
+    with out_tensor_context(result_tensor):
+        compiled = torch.compile(op_module, backend="rbln", dynamic=False, options=compile_options)
+        external_result = compiled(*contig_args, **contig_kwargs)
+        if result_tensor is None:
+            result_tensor = external_result
+        elif isinstance(external_result, torch.Tensor) and (external_result.data_ptr() != result_tensor.data_ptr()):
+            result_tensor.copy_(external_result)
+
+    return result_tensor
+
+
+def make_op_module(target_fn):
+    """Create an ``nn.Module`` whose ``forward`` delegates to *target_fn*.
+
+    Each eager op needs an opaque module wrapper so that ``torch.compile``
+    (Dynamo) captures the call as a single graph node rather than inlining the
+    op's implementation.
+
+    Usage::
+
+        _add_op_module = make_op_module(torch.add)
+    """
+
+    class _OpModule(torch.nn.Module):
+        def forward(self, *args, **kwargs):
+            return target_fn(*args, **kwargs)
+
+    _OpModule.__qualname__ = f"OpModule_{getattr(target_fn, '__name__', 'op')}"
+    return _OpModule().eval()
