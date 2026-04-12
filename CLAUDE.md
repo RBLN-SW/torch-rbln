@@ -357,3 +357,6 @@ All test workflows dispatch to remote infrastructure with physical RBLN NPU hard
 - **English only** — All issues, comments, code, and documentation must be in English.
 - **120-char line limit** — Enforced across Python (Black/Ruff) and C++ (clang-format).
 - **Squash merge only** — PRs are always squash-merged into the target branch.
+- **Always ask before pushing** — Never `git push` to remote or create a PR without explicit user confirmation first.
+- **PRs must be draft** — When creating a pull request, always use draft/WIP status (`--draft` flag).
+- **Follow the PR template** — PR descriptions must follow `.github/PULL_REQUEST_TEMPLATE.md`. Include all sections: Summary of Changes, Related Issues, Type of Change (checkbox), Affected Modules (checkbox), How to Test, and Checklist. Do not skip or abbreviate sections.
