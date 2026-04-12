@@ -14,10 +14,19 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 from torch.utils._python_dispatch import TorchDispatchMode
 
 from torch_rbln._internal.ops_utils import (
+    _all_scalars,
+    _contains_nan_or_inf,
+    _get_default_compile_options,
+    _has_nan_or_inf,
+    _has_non_float16_dtype,
+    _has_nonzero_storage_offset,
+    _is_trace_active,
     _parse_disabled_fallback_cases,
+    _resolve_result_tensor,
     broadcast_args_general,
     can_use_out_tensor_directly,
     cpu_fallback_path,
+    extract_tensors,
     finalize_output_tensor,
     handle_empty_binary,
     handle_empty_linear,
@@ -27,6 +36,7 @@ from torch_rbln._internal.ops_utils import (
     handle_empty_where,
     is_cpu_fallback_cases,
     is_inplace_op,
+    make_op_module,
     prepare_args_for_contiguous,
 )
 
@@ -589,9 +599,208 @@ class TestTorchDispatchModeWithRbln(TestCase):
         self.assertEqual(rbln_result.cpu(), expected, atol=1e-2, rtol=1e-2)
 
 
+@pytest.mark.test_set_ci
+class TestFallbackCheckers(TestCase):
+    """Unit tests for individual CPU fallback checker functions."""
+
+    def test_is_trace_active_no_trace(self):
+        with patch("sys.gettrace", return_value=None):
+            self.assertFalse(_is_trace_active())
+
+    def test_is_trace_active_with_trace(self):
+        with patch("sys.gettrace", return_value=lambda *a: None):
+            self.assertTrue(_is_trace_active())
+
+    def test_has_non_float16_dtype_all_float16(self):
+        tensors = [torch.empty(2, dtype=torch.float16), torch.empty(3, dtype=torch.float16)]
+        self.assertFalse(_has_non_float16_dtype(tensors))
+
+    def test_has_non_float16_dtype_mixed(self):
+        tensors = [torch.empty(2, dtype=torch.float16), torch.empty(3, dtype=torch.float32)]
+        self.assertTrue(_has_non_float16_dtype(tensors))
+
+    def test_has_non_float16_dtype_single_float32(self):
+        self.assertTrue(_has_non_float16_dtype([torch.empty(1, dtype=torch.float32)]))
+
+    def test_all_scalars_true(self):
+        scalars = [torch.tensor(1.0), torch.tensor(2.0)]
+        self.assertTrue(_all_scalars(scalars))
+
+    def test_all_scalars_false_with_1d(self):
+        tensors = [torch.tensor(1.0), torch.tensor([2.0])]
+        self.assertFalse(_all_scalars(tensors))
+
+    def test_all_scalars_empty_list(self):
+        self.assertTrue(_all_scalars([]))
+
+    def test_has_nonzero_storage_offset_no_offset(self):
+        t = torch.randn(4)
+        self.assertFalse(_has_nonzero_storage_offset([t]))
+
+    def test_has_nonzero_storage_offset_with_offset(self):
+        base = torch.randn(8)
+        sliced = base[2:6]  # contiguous but storage_offset != 0
+        self.assertTrue(sliced.is_contiguous())
+        self.assertNotEqual(sliced.storage_offset(), 0)
+        self.assertTrue(_has_nonzero_storage_offset([sliced]))
+
+    def test_has_nonzero_storage_offset_noncontiguous_ignored(self):
+        base = torch.randn(4, 4)
+        transposed = base.t()  # not contiguous, has offset 0
+        self.assertFalse(transposed.is_contiguous())
+        self.assertFalse(_has_nonzero_storage_offset([transposed]))
+
+    def test_contains_nan_or_inf_clean(self):
+        t = torch.tensor([1.0, 2.0, 3.0])
+        self.assertFalse(_contains_nan_or_inf(t))
+
+    def test_contains_nan_or_inf_with_nan(self):
+        t = torch.tensor([1.0, float("nan"), 3.0])
+        self.assertTrue(_contains_nan_or_inf(t))
+
+    def test_contains_nan_or_inf_with_inf(self):
+        t = torch.tensor([1.0, float("inf"), 3.0])
+        self.assertTrue(_contains_nan_or_inf(t))
+
+    def test_contains_nan_or_inf_bool_tensor(self):
+        t = torch.tensor([True, False])
+        self.assertFalse(_contains_nan_or_inf(t))
+
+    def test_contains_nan_or_inf_scalar_nan(self):
+        self.assertTrue(_contains_nan_or_inf(float("nan")))
+
+    def test_contains_nan_or_inf_scalar_normal(self):
+        self.assertFalse(_contains_nan_or_inf(42))
+        self.assertFalse(_contains_nan_or_inf(3.14))
+
+    def test_has_nan_or_inf_clean_tensors(self):
+        tensors = [torch.tensor([1.0, 2.0]), torch.tensor([3.0, 4.0])]
+        with patch("torch_rbln._internal.ops_utils.is_rbln_deploy", return_value=False):
+            self.assertFalse(_has_nan_or_inf(tensors))
+
+    def test_has_nan_or_inf_with_nan_tensor(self):
+        tensors = [torch.tensor([1.0, float("nan")])]
+        with patch("torch_rbln._internal.ops_utils.is_rbln_deploy", return_value=False):
+            self.assertTrue(_has_nan_or_inf(tensors))
+
+    def test_has_nan_or_inf_deploy_mode_skips(self):
+        tensors = [torch.tensor([1.0, float("nan")])]
+        with patch("torch_rbln._internal.ops_utils.is_rbln_deploy", return_value=True):
+            self.assertFalse(_has_nan_or_inf(tensors))
+
+    def test_has_nan_or_inf_early_return(self):
+        """Should return True on first NaN tensor without checking the rest."""
+        t1 = torch.tensor([float("nan")])
+        t2 = torch.tensor([1.0, 2.0])
+        with patch("torch_rbln._internal.ops_utils.is_rbln_deploy", return_value=False):
+            self.assertTrue(_has_nan_or_inf([t1, t2]))
+
+    def test_extract_tensors_flat(self):
+        t1 = torch.tensor([1.0])
+        t2 = torch.tensor([2.0])
+        result = extract_tensors((t1, 42, t2, "hello"))
+        self.assertEqual(len(result), 2)
+
+    def test_extract_tensors_nested(self):
+        t1 = torch.tensor([1.0])
+        t2 = torch.tensor([2.0])
+        result = extract_tensors({"a": t1, "b": [t2, 3]})
+        self.assertEqual(len(result), 2)
+
+    def test_extract_tensors_empty(self):
+        self.assertEqual(extract_tensors((42, "hello")), [])
+
+
+@pytest.mark.test_set_ci
+class TestCompileUtilities(TestCase):
+    """Unit tests for compile_and_execute utilities."""
+
+    def test_make_op_module_creates_module(self):
+        mod = make_op_module(torch.add)
+        self.assertIsInstance(mod, torch.nn.Module)
+        # Verify it's in eval mode
+        self.assertFalse(mod.training)
+
+    def test_make_op_module_forward_works_on_cpu(self):
+        mod = make_op_module(torch.add)
+        a = torch.tensor([1.0, 2.0])
+        b = torch.tensor([3.0, 4.0])
+        result = mod(a, b)
+        expected = torch.tensor([4.0, 6.0])
+        self.assertEqual(result, expected)
+
+    def test_make_op_module_qualname(self):
+        mod = make_op_module(torch.add)
+        self.assertIn("add", mod.__class__.__qualname__)
+
+    def test_get_default_compile_options_cached(self):
+        _get_default_compile_options.cache_clear()
+        try:
+            opts1 = _get_default_compile_options()
+            opts2 = _get_default_compile_options()
+            # Should be the exact same object (cached)
+            self.assertIs(opts1, opts2)
+            self.assertIn("disable_logger", opts1)
+            self.assertTrue(opts1["disable_logger"])
+        finally:
+            _get_default_compile_options.cache_clear()
+
+    def test_resolve_result_tensor_none_out(self):
+        result = _resolve_result_tensor(None, (), {})
+        self.assertIsNone(result)
+
+    def test_resolve_result_tensor_valid_out(self):
+        out = torch.empty(4, dtype=torch.float16, device="rbln")
+        args = (torch.randn(4, dtype=torch.float16, device="rbln"),)
+        result = _resolve_result_tensor(out, args, {"out": out})
+        # Should return out since it meets all conditions
+        self.assertIs(result, out)
+
+    def test_resolve_result_tensor_non_contiguous_out(self):
+        base = torch.empty(4, 4, dtype=torch.float16, device="rbln")
+        out = base.t()  # non-contiguous
+        args = (torch.randn(4, 4, dtype=torch.float16, device="rbln"),)
+        result = _resolve_result_tensor(out, args, {"out": out})
+        # Should return None since out is not contiguous
+        self.assertIsNone(result)
+
+
+@pytest.mark.test_set_ci
+class TestPrepareArgsContiguousFastPath(TestCase):
+    """Test the fast-path optimization in prepare_args_for_contiguous."""
+
+    def test_fast_path_all_contiguous(self):
+        t1 = torch.randn(2, 3, device="rbln")
+        t2 = torch.randn(4, device="rbln")
+        (new_args, new_kwargs), changed = prepare_args_for_contiguous((t1, t2), {"alpha": 1.0})
+        self.assertFalse(changed)
+
+    def test_slow_path_non_contiguous(self):
+        base = torch.randn(4, 4, device="rbln")
+        non_contig = base.t()
+        self.assertFalse(non_contig.is_contiguous())
+        (new_args, _), changed = prepare_args_for_contiguous((non_contig,), {})
+        self.assertTrue(changed)
+        self.assertTrue(new_args[0].is_contiguous())
+
+    def test_fast_path_mixed_tensor_and_scalar(self):
+        t = torch.randn(3, device="rbln")
+        (new_args, _), changed = prepare_args_for_contiguous((t, 42, "str"), {"dim": 0})
+        self.assertFalse(changed)
+
+    def test_empty_tensor_skipped_in_fast_path(self):
+        empty_t = torch.empty(0, device="rbln")
+        normal_t = torch.randn(3, device="rbln")
+        (new_args, _), changed = prepare_args_for_contiguous((empty_t, normal_t), {})
+        self.assertFalse(changed)
+
+
 instantiate_device_type_tests(TestInternalOpUtils, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestOutTensors, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestTorchDispatchModeWithRbln, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestFallbackCheckers, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestCompileUtilities, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestPrepareArgsContiguousFastPath, globals(), only_for="privateuse1")
 
 if __name__ == "__main__":
     run_tests()

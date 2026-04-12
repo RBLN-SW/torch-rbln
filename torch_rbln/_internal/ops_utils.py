@@ -304,7 +304,12 @@ def handle_empty_tensor(tensor_args):
 
 
 def prepare_args_for_contiguous(args, kwargs_filtered):
+    # Fast path: skip tree_flatten/unflatten if all tensors are already contiguous.
+    # This avoids pytree overhead for the common case where no copy is needed.
     flat_args, args_spec = tree_flatten((args, kwargs_filtered))
+    if all(a.is_contiguous() for a in flat_args if isinstance(a, torch.Tensor) and a.numel() > 0):
+        return tree_unflatten(flat_args, args_spec), False
+
     contig_args, changed_any = [], False
     for a in flat_args:
         t, changed = _make_contig(a)
@@ -365,14 +370,26 @@ def _has_nonzero_storage_offset(tensor_args) -> bool:
     return any(a.is_contiguous() and a.storage_offset() != 0 for a in tensor_args)
 
 
-def _has_nan_or_inf(args) -> bool:
-    """Check if any tensor contains NaN or Inf values (non-deploy mode only)."""
+def _has_nan_or_inf(tensor_args) -> bool:
+    """Check if any tensor contains NaN or Inf values (non-deploy mode only).
+
+    Accepts a pre-extracted flat list of tensors to avoid redundant
+    ``extract_tensors`` / ``to_cpu`` traversal over the full args tree.
+    Each tensor is individually copied to CPU and checked, with early
+    return on the first invalid value found.
+    """
     try:
         from torch_rbln._internal.env_utils import is_rbln_deploy
 
-        return not is_rbln_deploy() and has_invalid_tensor(to_cpu(args))
+        if is_rbln_deploy():
+            return False
     except ImportError:
         return False
+
+    for t in tensor_args:
+        if _contains_nan_or_inf(t.cpu()):
+            return True
+    return False
 
 
 def _is_reentrant() -> bool:
@@ -429,8 +446,9 @@ def is_cpu_fallback_cases(args):
     if "storage_offset" not in disabled_cases and _has_nonzero_storage_offset(tensor_args):
         return True
 
-    # Heavy check: copies tensors to CPU to scan for NaN/Inf
-    if "nan_inf" not in disabled_cases and _has_nan_or_inf(args):
+    # Heavy check: copies tensors to CPU to scan for NaN/Inf.
+    # Reuses the already-extracted tensor_args to avoid a second full-tree traversal.
+    if "nan_inf" not in disabled_cases and _has_nan_or_inf(tensor_args):
         return True
 
     # Last: reentrancy check
