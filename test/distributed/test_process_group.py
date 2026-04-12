@@ -9,7 +9,7 @@ import torch.multiprocessing as mp
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, subtest, TestCase
 
-from test.utils import configure_master_port_for_rccl_tests, SUPPORTED_DTYPES
+from test.utils import configure_master_port_for_rccl_tests, setup_distributed_environment, SUPPORTED_DTYPES
 
 
 KiB = 1024
@@ -20,9 +20,7 @@ TEST_DTYPES = SUPPORTED_DTYPES + [torch.float32, torch.float64, torch.int8, torc
 
 def setup_environment(rank: int, world_size: int) -> None:
     """Setup environment variables for distributed testing."""
-    os.environ["LOCAL_RANK"] = str(rank)
-    os.environ["WORLD_SIZE"] = str(world_size)
-    torch.rbln.set_device(rank)
+    setup_distributed_environment(rank, world_size)
 
 
 def run_allreduce_test(rank: int, world_size: int, backend: str, op: dist.ReduceOp) -> None:

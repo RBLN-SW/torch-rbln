@@ -11,12 +11,11 @@ import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
-from test.utils import SUPPORTED_DTYPES
+from test.utils import DEFAULT_ATOL, DEFAULT_RTOL, SUPPORTED_DTYPES
 
 
-# Tolerance for numerical comparisons
-ATOL = 0.01
-RTOL = 0.01
+ATOL = DEFAULT_ATOL
+RTOL = DEFAULT_RTOL
 
 
 TEST_DTYPES = SUPPORTED_DTYPES + [torch.float32]

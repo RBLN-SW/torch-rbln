@@ -136,6 +136,59 @@ def custom_zero__rbln(self):
     finalize_output_tensor(self, result_tensor, result_tensor.shape, self, {})
 
 
+def _validate_kv_cache_alignment(k_cache, v_cache, alignment=64):
+    """Validate that K/V cache tensors have their last dimension aligned to the given multiple.
+
+    This is a compiler constraint: the K/V-cache tensors must be allocated externally
+    with their last dimension being a multiple of ``alignment``.
+    """
+    if k_cache.size(-1) % alignment != 0:
+        raise ValueError(
+            f"The last dimension of K-cache must be a multiple of {alignment}, but got shape {k_cache.shape}"
+        )
+    if v_cache.size(-1) % alignment != 0:
+        raise ValueError(
+            f"The last dimension of V-cache must be a multiple of {alignment}, but got shape {v_cache.shape}"
+        )
+
+
+def _validate_prefill_batch_size(args):
+    """Validate that Q, K, V tensors have batch size of 1 (prefill constraint)."""
+    for i, name in enumerate(["Query (q)", "Key (k)", "Value (v)"]):
+        tensor = args[i]
+        if tensor.size(0) != 1:
+            raise ValueError(
+                f"Custom kernel with prefill: batch size of {name} must be 1, but got shape {tensor.shape}"
+            )
+
+
+def _compile_and_execute_kernel(op_module_factory, contig_args, contig_kwargs):
+    """Compile an attention kernel module and execute it, returning the result tensor.
+
+    Creates a result tensor matching the query shape, compiles the given ``op_module_factory``
+    with the RBLN backend (tp_size=1), and executes it. If the compiled result lives at a
+    different address than the pre-allocated tensor, copies it over.
+    """
+    from torch_rbln.device.context_holder import out_tensor_context
+
+    result_tensor = torch.empty(contig_args[0].shape, dtype=torch.float16, device=contig_args[0].device)
+
+    with out_tensor_context(result_tensor):
+        compiled = torch.compile(
+            op_module_factory(),
+            backend="rbln",
+            dynamic=False,
+            options={"disable_logger": True, "tensor_parallel_size": 1},
+        )
+        external_result = compiled(*contig_args, **contig_kwargs)
+        if result_tensor is None:
+            result_tensor = external_result
+        elif isinstance(external_result, torch.Tensor) and (external_result.data_ptr() != result_tensor.data_ptr()):
+            result_tensor.copy_(external_result)
+
+    return result_tensor
+
+
 class custom_rbln_paged_attn_prefill(torch.nn.Module):
     def forward(self, *args, **kwargs):
         # TODO: rtosa.multiply cannot accept tensor scalar value. scale must be constant tensor.
@@ -155,60 +208,14 @@ class custom_rbln_paged_attn_prefill(torch.nn.Module):
 
 
 def paged_attn_prefill_rbln(*args, **kwargs):
-    from torch_rbln.device.context_holder import out_tensor_context
-
     if len(args) != 10:
         raise RuntimeError("paged_attn_prefill takes 10 inputs.")
 
-    # Check if batch size (dim=0) is 1 for Q, K, and V tensors.
-    # This kernel is constrained to operate on a batch size of 1.
-    for i, name in enumerate(["Query (q)", "Key (k)", "Value (v)"]):
-        tensor = args[i]
-        assert tensor.size(0) == 1, (
-            f"Custom kernel with prefill must batch size of {name} must be 1, but got shape {tensor.shape}"
-        )
-
-    # origin_dim = args[0].size(-1)
+    _validate_prefill_batch_size(args)
     (contig_args, contig_kwargs), changed_any = prepare_args_for_contiguous(args, kwargs)
+    _validate_kv_cache_alignment(contig_args[4], contig_args[5])
 
-    # The K/V cache tensors (args[4], args[5]) are allocated externally, often
-    # as placeholders. This prefill operation is the first time they are populated.
-    # We must explicitly set their metadata dtype to custom_float16 here, as the
-    # underlying kernel will fill the cache with data in the custom_float16 format,
-    # regardless of the tensor's original torch.dtype.
-    k_cache = contig_args[4]
-    v_cache = contig_args[5]
-
-    # [Compiler Constraint] Check K/V cache alignment.
-    # Due to current compiler limitations, the K/V-cache tensors
-    # must be allocated externally with their last dimension being a multiple of 64.
-    # This alignment is required for the optimized kernel to function correctly.
-    assert k_cache.size(-1) % 64 == 0, (
-        f"The last dimension of K-cache must be a multiple of 64, but got shape {k_cache.shape}"
-    )
-    assert v_cache.size(-1) % 64 == 0, (
-        f"The last dimension of V-cache must be a multiple of 64, but got shape {v_cache.shape}"
-    )
-
-    # Create aligned result tensor with 64-byte alignment for last dimension
-    result_tensor = torch.empty(contig_args[0].shape, dtype=torch.float16, device=contig_args[0].device)
-    assert result_tensor.size(-1) % 64 == 0
-
-    with out_tensor_context(result_tensor):
-        # tensor_parallel_size=1 is hardcoded due to custom kernel compiler constraints.
-        compiled = torch.compile(
-            custom_rbln_paged_attn_prefill(),
-            backend="rbln",
-            dynamic=False,
-            options={"disable_logger": True, "tensor_parallel_size": 1},
-        )
-        external_result = compiled(*contig_args, **contig_kwargs)
-        if result_tensor is None:
-            result_tensor = external_result
-        elif isinstance(external_result, torch.Tensor) and (external_result.data_ptr() != result_tensor.data_ptr()):
-            result_tensor.copy_(external_result)
-
-    return result_tensor
+    return _compile_and_execute_kernel(custom_rbln_paged_attn_prefill, contig_args, contig_kwargs)
 
 
 class custom_rbln_paged_attn_decode(torch.nn.Module):
@@ -230,46 +237,13 @@ class custom_rbln_paged_attn_decode(torch.nn.Module):
 
 
 def paged_attn_decode_rbln(*args, **kwargs):
-    from torch_rbln.device.context_holder import out_tensor_context
-
     if len(args) != 10:
-        raise RuntimeError("paged_attn_prefill takes 10 inputs.")
+        raise RuntimeError("paged_attn_decode takes 10 inputs.")
 
     (contig_args, contig_kwargs), changed_any = prepare_args_for_contiguous(args, kwargs)
+    _validate_kv_cache_alignment(contig_args[4], contig_args[5])
 
-    k_cache = contig_args[4]
-    v_cache = contig_args[5]
-
-    # [Compiler Constraint] Check K/V cache alignment.
-    # Due to current compiler limitations, the K/V-cache tensors
-    # must be allocated externally with their last dimension being a multiple of 64.
-    # This alignment is required for the optimized kernel to function correctly.
-    assert k_cache.size(-1) % 64 == 0, (
-        f"The last dimension of K-cache must be a multiple of 64, but got shape {k_cache.shape}"
-    )
-    assert v_cache.size(-1) % 64 == 0, (
-        f"The last dimension of V-cache must be a multiple of 64, but got shape {v_cache.shape}"
-    )
-
-    # Create aligned result tensor with 64-byte alignment for last dimension
-    result_tensor = torch.empty(contig_args[0].shape, dtype=torch.float16, device=contig_args[0].device)
-    assert result_tensor.size(-1) % 64 == 0
-
-    with out_tensor_context(result_tensor):
-        # tensor_parallel_size=1 is hardcoded due to custom kernel compiler constraints.
-        compiled = torch.compile(
-            custom_rbln_paged_attn_decode(),
-            backend="rbln",
-            dynamic=False,
-            options={"disable_logger": True, "tensor_parallel_size": 1},
-        )
-        external_result = compiled(*contig_args, **contig_kwargs)
-        if result_tensor is None:
-            result_tensor = external_result
-        elif isinstance(external_result, torch.Tensor) and (external_result.data_ptr() != result_tensor.data_ptr()):
-            result_tensor.copy_(external_result)
-
-    return result_tensor
+    return _compile_and_execute_kernel(custom_rbln_paged_attn_decode, contig_args, contig_kwargs)
 
 
 class custom_rbln_paged_causal_attn_prefill(torch.nn.Module):
@@ -298,61 +272,15 @@ class custom_rbln_paged_causal_attn_prefill(torch.nn.Module):
 
 
 def paged_causal_attn_prefill_rbln(*args, **kwargs):
-    from torch_rbln.device.context_holder import out_tensor_context
-
-    # paged_causal_attn_prefill: q, k, v, kcache, vcache, seq, scale, block_table, block_size, is_bidirectional, mask (optional)
     if len(args) < 10 or len(args) > 11:
         raise RuntimeError(f"paged_causal_attn_prefill takes 10 or 11 inputs, but got {len(args)}.")
 
-    # Check if batch size (dim=0) is 1 for Q, K, and V tensors.
-    # This kernel is constrained to operate on a batch size of 1.
-    for i, name in enumerate(["Query (q)", "Key (k)", "Value (v)"]):
-        tensor = args[i]
-        assert tensor.size(0) == 1, (
-            f"Custom kernel with prefill must batch size of {name} must be 1, but got shape {tensor.shape}"
-        )
-
-    # origin_dim = args[0].size(-1)
+    _validate_prefill_batch_size(args)
     (contig_args, contig_kwargs), changed_any = prepare_args_for_contiguous(args, kwargs)
+    # causal variants use args[3], args[4] for K/V cache (no attn_mask before them)
+    _validate_kv_cache_alignment(contig_args[3], contig_args[4])
 
-    # The K/V cache tensors (args[3], args[4]) are allocated externally, often
-    # as placeholders. This prefill operation is the first time they are populated.
-    # We must explicitly set their metadata dtype to custom_float16 here, as the
-    # underlying kernel will fill the cache with data in the custom_float16 format,
-    # regardless of the tensor's original torch.dtype.
-    k_cache = contig_args[3]
-    v_cache = contig_args[4]
-
-    # [Compiler Constraint] Check K/V cache alignment.
-    # Due to current compiler limitations, the K/V-cache tensors
-    # must be allocated externally with their last dimension being a multiple of 64.
-    # This alignment is required for the optimized kernel to function correctly.
-    assert k_cache.size(-1) % 64 == 0, (
-        f"The last dimension of K-cache must be a multiple of 64, but got shape {k_cache.shape}"
-    )
-    assert v_cache.size(-1) % 64 == 0, (
-        f"The last dimension of V-cache must be a multiple of 64, but got shape {v_cache.shape}"
-    )
-
-    # Create aligned result tensor with 64-byte alignment for last dimension
-    result_tensor = torch.empty(contig_args[0].shape, dtype=torch.float16, device=contig_args[0].device)
-    assert result_tensor.size(-1) % 64 == 0
-
-    with out_tensor_context(result_tensor):
-        # tensor_parallel_size=1 is hardcoded due to custom kernel compiler constraints.
-        compiled = torch.compile(
-            custom_rbln_paged_causal_attn_prefill(),
-            backend="rbln",
-            dynamic=False,
-            options={"disable_logger": True, "tensor_parallel_size": 1},
-        )
-        external_result = compiled(*contig_args, **contig_kwargs)
-        if result_tensor is None:
-            result_tensor = external_result
-        elif isinstance(external_result, torch.Tensor) and (external_result.data_ptr() != result_tensor.data_ptr()):
-            result_tensor.copy_(external_result)
-
-    return result_tensor
+    return _compile_and_execute_kernel(custom_rbln_paged_causal_attn_prefill, contig_args, contig_kwargs)
 
 
 class custom_rbln_paged_causal_attn_decode(torch.nn.Module):
@@ -380,47 +308,14 @@ class custom_rbln_paged_causal_attn_decode(torch.nn.Module):
 
 
 def paged_causal_attn_decode_rbln(*args, **kwargs):
-    from torch_rbln.device.context_holder import out_tensor_context
-
-    # paged_causal_attn_decode: q, k, v, kcache, vcache, seq, scale, block_table, block_size, mask (optional)
     if len(args) < 9 or len(args) > 10:
         raise RuntimeError(f"paged_causal_attn_decode takes 9 or 10 inputs, but got {len(args)}.")
 
     (contig_args, contig_kwargs), changed_any = prepare_args_for_contiguous(args, kwargs)
+    # causal variants use args[3], args[4] for K/V cache (no attn_mask before them)
+    _validate_kv_cache_alignment(contig_args[3], contig_args[4])
 
-    k_cache = contig_args[3]
-    v_cache = contig_args[4]
-
-    # [Compiler Constraint] Check K/V cache alignment.
-    # Due to current compiler limitations, the K/V-cache tensors
-    # must be allocated externally with their last dimension being a multiple of 64.
-    # This alignment is required for the optimized kernel to function correctly.
-    assert k_cache.size(-1) % 64 == 0, (
-        f"The last dimension of K-cache must be a multiple of 64, but got shape {k_cache.shape}"
-    )
-    assert v_cache.size(-1) % 64 == 0, (
-        f"The last dimension of V-cache must be a multiple of 64, but got shape {v_cache.shape}"
-    )
-
-    # Create aligned result tensor with 64-byte alignment for last dimension
-    result_tensor = torch.empty(contig_args[0].shape, dtype=torch.float16, device=contig_args[0].device)
-    assert result_tensor.size(-1) % 64 == 0
-
-    with out_tensor_context(result_tensor):
-        # tensor_parallel_size=1 is hardcoded due to custom kernel compiler constraints.
-        compiled = torch.compile(
-            custom_rbln_paged_causal_attn_decode(),
-            backend="rbln",
-            dynamic=False,
-            options={"disable_logger": True, "tensor_parallel_size": 1},
-        )
-        external_result = compiled(*contig_args, **contig_kwargs)
-        if result_tensor is None:
-            result_tensor = external_result
-        elif isinstance(external_result, torch.Tensor) and (external_result.data_ptr() != result_tensor.data_ptr()):
-            result_tensor.copy_(external_result)
-
-    return result_tensor
+    return _compile_and_execute_kernel(custom_rbln_paged_causal_attn_decode, contig_args, contig_kwargs)
 
 
 rbln_custom_impl = torch.library.Library("rbln_custom_ops", "IMPL")  # noqa: TOR901
