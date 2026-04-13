@@ -15,7 +15,8 @@
 #   - Test infra: expecttest (used by torch.testing._internal when running
 #     `test/ops/` / `test/rbln/`; required in some environments).
 #   - Model tests: packages from `test/models/requirements.txt` (torchvision from
-#     PyTorch CPU index, transformers from PyPI, optimum-rbln from rbln index).
+#     PyTorch CPU index, transformers from PyPI, optimum-rbln from rbln index plus
+#     PyTorch CPU extra index so torchaudio==*+cpu resolves).
 #
 # For model-test packages, this script checks existing installations (version and
 # for torchvision the install source). If already satisfied, it skips; if version
@@ -130,6 +131,10 @@ while IFS= read -r line || [ -n "$line" ]; do
       echo "ERROR: $pkg version mismatch. Installed: $current_ver, Required: $ver" >&2
       if [ "$pkg" = "torchvision" ]; then
         echo "  pip install $spec --index-url https://download.pytorch.org/whl/cpu" >&2
+      elif [ "$pkg" = "optimum-rbln" ]; then
+        echo "  pip install $spec --pre \\" >&2
+        echo "    --extra-index-url https://pypi.rbln.ai/simple/ \\" >&2
+        echo "    --extra-index-url https://download.pytorch.org/whl/cpu" >&2
       else
         echo "  pip install $spec" >&2
       fi
@@ -141,8 +146,10 @@ while IFS= read -r line || [ -n "$line" ]; do
       echo "Installing $spec from PyTorch CPU index..."
       run_install "$spec" --index-url https://download.pytorch.org/whl/cpu
     elif [ "$pkg" = "optimum-rbln" ]; then
-      echo "Installing $spec (rbln index + PyPI)..."
-      run_install "$spec" --pre --extra-index-url https://pypi.rbln.ai/simple/
+      echo "Installing $spec (rbln + PyPI + PyTorch CPU extra indexes)..."
+      run_install "$spec" --pre \
+        --extra-index-url https://pypi.rbln.ai/simple/ \
+        --extra-index-url https://download.pytorch.org/whl/cpu
     else
       echo "Installing $spec..."
       run_install "$spec"
