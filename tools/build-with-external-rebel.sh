@@ -19,7 +19,7 @@
 #   cd /path/to/torch-rbln
 #   export REBEL_HOME=/path/to/rebel_compiler
 #   export RBLN_GCC_VERSION=12
-#   export TORCH_WHEEL_PATH=/path/to/torch-2.9.1-cp310-cp310-linux_x86_64.whl
+#   export TORCH_WHEEL_PATH=/path/to/torch-2.10.0-cp310-cp310-linux_x86_64.whl
 #   ./tools/build-with-external-rebel.sh --clean
 #
 # Arguments:
@@ -38,7 +38,7 @@
 #   TORCH_WHEEL_PATH       - Path to pre-built torch wheel file
 #                            REQUIRED for gcc-12 mode, ignored for gcc-13
 #                            The wheel must be built with gcc-12 and match Python version
-#                            Example: /path/to/torch-2.9.1-cp310-cp310-linux_x86_64.whl
+#                            Example: /path/to/torch-2.10.0-cp310-cp310-linux_x86_64.whl
 #
 
 set -e
@@ -426,8 +426,8 @@ modify_pyproject() {
         log_info "  Setting torch dependency to wheel: $effective_torch_wheel_path"
     else
         # gcc-13: use PyPI version
-        torch_dep="torch==2.9.1+cpu"
-        log_info "  Setting torch dependency to PyPI: torch==2.9.1+cpu"
+        torch_dep="torch==2.10.0+cpu"
+        log_info "  Setting torch dependency to PyPI: torch==2.10.0+cpu"
     fi
 
     python3 << EOF
@@ -449,9 +449,9 @@ content = re.sub(
 # Replace torch dependency in [project].dependencies
 # Match various formats:
 #   "torch @ file://..."
-#   "torch==2.9.1+cpu"
-#   "torch (==2.9.1+cpu)"  <- parentheses format
-#   "torch (>=2.9.1)"
+#   "torch==2.10.0+cpu"
+#   "torch (==2.10.0+cpu)"  <- parentheses format
+#   "torch (>=2.10.0)"
 content = re.sub(
     r'^\s*"torch\s*[\(@][^"]*",?\s*\n',
     f'  "{torch_dep}",\n',
@@ -545,10 +545,10 @@ build_torch_rbln() {
         local current_torch_version
         current_torch_version=$(pip show torch 2>/dev/null | grep "^Version:" | awk '{print $2}' || echo "")
 
-        if [ "$current_torch_version" != "2.9.1+cpu" ]; then
-            log_info "Installing PyTorch 2.9.1+cpu from PyPI..."
+        if [ "$current_torch_version" != "2.10.0+cpu" ]; then
+            log_info "Installing PyTorch 2.10.0+cpu from PyPI..."
             pip uninstall -y torch 2>/dev/null || true
-            pip install torch==2.9.1+cpu --index-url https://download.pytorch.org/whl/cpu
+            pip install torch==2.10.0+cpu --index-url https://download.pytorch.org/whl/cpu
         fi
     fi
 
@@ -578,7 +578,7 @@ build_torch_rbln() {
         else
             log_info "Reinstalling torch from PyPI..."
             pip uninstall -y torch 2>/dev/null || true
-            pip install torch==2.9.1+cpu --index-url https://download.pytorch.org/whl/cpu
+            pip install torch==2.10.0+cpu --index-url https://download.pytorch.org/whl/cpu
         fi
     fi
 
@@ -666,7 +666,7 @@ print_summary() {
     if [ "$gcc_version" = "12" ]; then
         echo "  PyTorch:         from wheel ($effective_torch_wheel_path)"
     else
-        echo "  PyTorch:         2.9.1+cpu (PyPI)"
+        echo "  PyTorch:         2.10.0+cpu (PyPI)"
     fi
     echo ""
     echo -e "${GREEN}How to use:${NC}"
@@ -707,7 +707,7 @@ main() {
             log_error ""
             log_error "Usage:"
             log_error "  export RBLN_GCC_VERSION=12"
-            log_error "  export TORCH_WHEEL_PATH=/path/to/torch-2.9.1-cpXXX-cpXXX-linux_x86_64.whl"
+            log_error "  export TORCH_WHEEL_PATH=/path/to/torch-2.10.0-cpXXX-cpXXX-linux_x86_64.whl"
             log_error "  ./tools/build-with-external-rebel.sh --clean"
             exit 1
         fi

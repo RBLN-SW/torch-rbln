@@ -19,11 +19,13 @@ from typing import NamedTuple
 # PyTorch directory root
 def scm_root() -> str:
     path = os.path.abspath(os.getcwd())
+    # pyrefly: ignore [bad-assignment]
     while True:
         if os.path.exists(os.path.join(path, ".git")):
             return path
         if os.path.isdir(os.path.join(path, ".hg")):
             return path
+        # pyrefly: ignore [bad-argument-type]
         n = len(path)
         path = os.path.dirname(path)
         if len(path) == n:
@@ -36,39 +38,6 @@ PYTORCH_ROOT = scm_root()
 # Returns '/usr/local/include/python<version number>'
 def get_python_include_dir() -> str:
     return gp()["include"]
-
-
-# NOTE (torch-rbln): This helper and its use in ``include_dir`` below are not from
-# upstream PyTorch. When merging updates from ``pytorch/tools/linter/adapters/clangtidy_linter.py``,
-# re-apply ``get_torch_include_dir`` and the ``([_torch_include] if _torch_include else [])``
-# slice in ``include_dir`` if they were dropped by the merge.
-def get_torch_include_dir() -> str | None:
-    """Return ``site-packages/torch/include`` if PyTorch is installed.
-
-    Headers such as ``c10/util/Exception.h`` live there; clang-tidy often
-    analyzes ``.h`` files without a matching compile_commands entry, so extra
-    ``-I`` is needed alongside ``-p build``.
-
-    See the module-level NOTE above when syncing this file with PyTorch upstream.
-    """
-    try:
-        proc = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                "import os, torch; print(os.path.join(os.path.dirname(torch.__file__), 'include'))",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=120,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if proc.returncode != 0:
-        return None
-    path = proc.stdout.strip()
-    return path if path and os.path.isdir(path) else None
 
 
 class LintSeverity(str, Enum):
@@ -165,12 +134,12 @@ def clang_search_dirs() -> list[str]:
 
 
 include_args = []
-_torch_include = get_torch_include_dir()
 include_dir = [
     "/usr/lib/llvm-11/include/openmp",
     get_python_include_dir(),
     os.path.join(PYTORCH_ROOT, "third_party/pybind11/include"),
-] + ([_torch_include] if _torch_include else []) + clang_search_dirs()
+    PYTORCH_ROOT,
+] + clang_search_dirs()
 for dir in include_dir:
     include_args += ["--extra-arg", f"-I{dir}"]
 
@@ -179,11 +148,22 @@ def check_file(
     filename: str,
     binary: str,
     build_dir: Path,
+    std: str | None,
 ) -> list[LintMessage]:
+    # Explicitly pass include path for linters that only check headers.
+    build_include_args = include_args + ["--extra-arg", f"-I{build_dir}"]
+    cmd = [
+        binary,
+        f"-p={build_dir}",
+        *build_include_args,
+        filename,
+    ]
+    # Only add -- and -std flag if std is explicitly specified
+    if std is not None:
+        cmd.extend(["--", f"-std={std}"])
+
     try:
-        proc = run_command(
-            [binary, f"-p={build_dir}", *include_args, filename],
-        )
+        proc = run_command(cmd)
     except OSError as err:
         return [
             LintMessage(
@@ -208,6 +188,8 @@ def check_file(
         for match in RESULTS_RE.finditer(proc.stdout.decode()):
             # Convert the reported path to an absolute path.
             abs_path = str(Path(match["file"]).resolve())
+            if not abs_path.startswith(PYTORCH_ROOT):
+                continue
             message = LintMessage(
                 path=abs_path,
                 name=match["code"],
@@ -245,6 +227,14 @@ def main() -> None:
         help=(
             "Where the compile_commands.json file is located. "
             "Gets passed to clang-tidy -p"
+        ),
+    )
+    parser.add_argument(
+        "--std",
+        default=None,
+        help=(
+            "C++ standard to use for compilation (e.g., c++17, c++20). "
+            "If not specified, uses the standard from compile_commands.json."
         ),
     )
     parser.add_argument(
@@ -307,6 +297,7 @@ def main() -> None:
                 filename,
                 binary_path,
                 abs_build_dir,
+                args.std,
             ): filename
             for filename in args.filenames
         }
