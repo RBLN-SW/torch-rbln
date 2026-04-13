@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pytest
 import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
-from torch.testing._internal.common_utils import run_tests, TestCase
+from torch.testing._internal.common_utils import TestCase, run_tests
 from torch.utils._python_dispatch import TorchDispatchMode
 
 from torch_rbln._internal.ops_utils import (
@@ -675,25 +675,36 @@ class TestFallbackCheckers(TestCase):
 
     def test_has_nan_or_inf_clean_tensors(self):
         tensors = [torch.tensor([1.0, 2.0]), torch.tensor([3.0, 4.0])]
-        with patch("torch_rbln._internal.ops_utils.is_rbln_deploy", return_value=False):
-            self.assertFalse(_has_nan_or_inf(tensors))
+        args = (torch.tensor([1.0, 2.0]), torch.tensor([3.0, 4.0]))
+        with patch("torch_rbln._internal.env_utils.is_rbln_deploy", return_value=False):
+            self.assertFalse(_has_nan_or_inf(tensors, args))
 
     def test_has_nan_or_inf_with_nan_tensor(self):
         tensors = [torch.tensor([1.0, float("nan")])]
-        with patch("torch_rbln._internal.ops_utils.is_rbln_deploy", return_value=False):
-            self.assertTrue(_has_nan_or_inf(tensors))
+        args = (torch.tensor([1.0, float("nan")]),)
+        with patch("torch_rbln._internal.env_utils.is_rbln_deploy", return_value=False):
+            self.assertTrue(_has_nan_or_inf(tensors, args))
 
     def test_has_nan_or_inf_deploy_mode_skips(self):
         tensors = [torch.tensor([1.0, float("nan")])]
-        with patch("torch_rbln._internal.ops_utils.is_rbln_deploy", return_value=True):
-            self.assertFalse(_has_nan_or_inf(tensors))
+        args = (torch.tensor([1.0, float("nan")]),)
+        with patch("torch_rbln._internal.env_utils.is_rbln_deploy", return_value=True):
+            self.assertFalse(_has_nan_or_inf(tensors, args))
 
     def test_has_nan_or_inf_early_return(self):
         """Should return True on first NaN tensor without checking the rest."""
         t1 = torch.tensor([float("nan")])
         t2 = torch.tensor([1.0, 2.0])
-        with patch("torch_rbln._internal.ops_utils.is_rbln_deploy", return_value=False):
-            self.assertTrue(_has_nan_or_inf([t1, t2]))
+        args = (t1, t2)
+        with patch("torch_rbln._internal.env_utils.is_rbln_deploy", return_value=False):
+            self.assertTrue(_has_nan_or_inf([t1, t2], args))
+
+    def test_has_nan_or_inf_scalar_nan(self):
+        """Scalar float('nan') in args (not in tensor) should be detected."""
+        t = torch.tensor([1.0, 2.0])
+        args = (t, float("nan"))
+        with patch("torch_rbln._internal.env_utils.is_rbln_deploy", return_value=False):
+            self.assertTrue(_has_nan_or_inf([t], args))
 
     def test_extract_tensors_flat(self):
         t1 = torch.tensor([1.0])

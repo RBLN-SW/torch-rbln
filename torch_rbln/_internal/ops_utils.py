@@ -370,13 +370,16 @@ def _has_nonzero_storage_offset(tensor_args) -> bool:
     return any(a.is_contiguous() and a.storage_offset() != 0 for a in tensor_args)
 
 
-def _has_nan_or_inf(tensor_args) -> bool:
-    """Check if any tensor contains NaN or Inf values (non-deploy mode only).
+def _has_nan_or_inf(tensor_args, args) -> bool:
+    """Check if any tensor or scalar arg contains NaN or Inf (non-deploy mode only).
 
-    Accepts a pre-extracted flat list of tensors to avoid redundant
-    ``extract_tensors`` / ``to_cpu`` traversal over the full args tree.
-    Each tensor is individually copied to CPU and checked, with early
-    return on the first invalid value found.
+    *tensor_args* is the pre-extracted flat list of tensors (avoids
+    redundant ``extract_tensors`` traversal).  Each tensor is individually
+    copied to CPU with early return on the first invalid value.
+
+    *args* is the original args tree — flattened cheaply (no tensor copies)
+    to catch scalar ``float('nan')`` / ``float('inf')`` arguments that
+    ``extract_tensors`` does not collect.
     """
     try:
         from torch_rbln._internal.env_utils import is_rbln_deploy
@@ -389,7 +392,10 @@ def _has_nan_or_inf(tensor_args) -> bool:
     for t in tensor_args:
         if _contains_nan_or_inf(t.cpu()):
             return True
-    return False
+
+    # Lightweight scalar check — tree_flatten involves no tensor copies.
+    flat_args, _ = tree_flatten(args)
+    return any(_contains_nan_or_inf(a) for a in flat_args if not isinstance(a, torch.Tensor))
 
 
 def _is_reentrant() -> bool:
@@ -448,7 +454,8 @@ def is_cpu_fallback_cases(args):
 
     # Heavy check: copies tensors to CPU to scan for NaN/Inf.
     # Reuses the already-extracted tensor_args to avoid a second full-tree traversal.
-    if "nan_inf" not in disabled_cases and _has_nan_or_inf(tensor_args):
+    # Also checks scalar float args (e.g. float('nan')) via lightweight tree_flatten.
+    if "nan_inf" not in disabled_cases and _has_nan_or_inf(tensor_args, args):
         return True
 
     # Last: reentrancy check
