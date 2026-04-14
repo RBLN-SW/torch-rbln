@@ -304,7 +304,12 @@ def handle_empty_tensor(tensor_args):
 
 
 def prepare_args_for_contiguous(args, kwargs_filtered):
+    # Fast path: skip tree_flatten/unflatten if all tensors are already contiguous.
+    # This avoids pytree overhead for the common case where no copy is needed.
     flat_args, args_spec = tree_flatten((args, kwargs_filtered))
+    if all(a.is_contiguous() for a in flat_args if isinstance(a, torch.Tensor) and a.numel() > 0):
+        return tree_unflatten(flat_args, args_spec), False
+
     contig_args, changed_any = [], False
     for a in flat_args:
         t, changed = _make_contig(a)
@@ -331,96 +336,131 @@ def _parse_disabled_fallback_cases() -> frozenset:
     return _ALL_FALLBACK_CASES if ("all" in cases) else (cases & _ALL_FALLBACK_CASES)
 
 
-def is_cpu_fallback_cases(args):
+def _is_trace_active() -> bool:
+    """Check if a Python trace/debugger is active (e.g. pdb, coverage, sys.settrace)."""
+    return sys.gettrace() is not None
+
+
+def _is_dispatch_mode_active() -> bool:
+    """Check if a non-infra TorchDispatchMode is active.
+
+    When active, torch.compile would skip compilation and run eagerly,
+    causing infinite recursion through the RBLN dispatch path.
     """
-    Determines if a CPU fallback is necessary for an operation.
+    try:
+        from torch.utils._python_dispatch import is_in_torch_dispatch_mode
 
-    This function checks for several conditions that would require an operation to fall back to the CPU:
-    0a. **Python trace/debugger**: When a trace function is set (e.g. pdb, coverage, sys.settrace), we fall
-        back to CPU to avoid running torch.compile under a tracer. Disable with
-        TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK=trace for debugging only.
-    1. **TorchDispatchMode Active**: When a non-infra TorchDispatchMode is active (e.g. LoggingMode,
-       CompositeCompliantTensorMode), we must not attempt torch.compile. Reason: with rbln tensors we do
-       add_rbln -> torch.compile(torch.add) -> ...; Dynamo sees the dispatch mode and skips compilation,
-       then runs the original torch.add eagerly; that eager call dispatches again and hits our add_rbln
-       -> same path repeats -> infinite recursion. So when TorchDispatchMode is on, we fall back to CPU
-       and never enter the compile path.
-    2. **Data Type Mismatch:** If any of the input tensors are not of the `torch.float16` data type,
-       which the `rbln` device is designed to handle.
-    3. **Scalar Tensors**: If all input tensors are scalar tensors, rebel-compiler falls back to host ops.
-    4. **Storage Offset**: If any tensor has `storage_offset != 0`, fall back to CPU.
-    5. **NaN/Inf Values**: When not in deploy mode, if any input tensor contains NaN or Inf values,
-       rbln cannot handle them and we need to fall back to CPU. This check converts tensors to CPU
-       before checking to ensure accurate detection.
-    6. **Reentrancy** (checked last): When we're already inside an RBLN op that uses torch.compile
-       (thread-local depth > 0), any nested dispatch (e.g. compiled graph running torch.add -> add_rbln
-       again, or print/repr triggering tensor ops) must use CPU fallback to avoid infinite recursion.
-       This is an unexpected path; a warning is logged when it triggers. Disable with
-       TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK=reentrant for debugging only.
+        return is_in_torch_dispatch_mode(include_infra_modes=False)
+    except ImportError:
+        return False
 
-    Individual checks can be disabled via `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK`
-    (comma-separated names or `"all"`).
+
+def _has_non_float16_dtype(tensor_args) -> bool:
+    """Check if any tensor has a dtype other than float16 (the only RBLN-supported dtype)."""
+    return any(a.dtype != torch.float16 for a in tensor_args)
+
+
+def _all_scalars(tensor_args) -> bool:
+    """Check if all input tensors are 0-dim scalars (rebel-compiler falls back to host ops)."""
+    return all(a.ndim == 0 for a in tensor_args)
+
+
+def _has_nonzero_storage_offset(tensor_args) -> bool:
+    """Check if any contiguous tensor has a non-zero storage offset."""
+    return any(a.is_contiguous() and a.storage_offset() != 0 for a in tensor_args)
+
+
+def _has_nan_or_inf(tensor_args, args) -> bool:
+    """Check if any tensor or scalar arg contains NaN or Inf (non-deploy mode only).
+
+    *tensor_args* is the pre-extracted flat list of tensors (avoids
+    redundant ``extract_tensors`` traversal).  Each tensor is individually
+    copied to CPU with early return on the first invalid value.
+
+    *args* is the original args tree — flattened cheaply (no tensor copies)
+    to catch scalar ``float('nan')`` / ``float('inf')`` arguments that
+    ``extract_tensors`` does not collect.
+    """
+    try:
+        from torch_rbln._internal.env_utils import is_rbln_deploy
+
+        if is_rbln_deploy():
+            return False
+    except ImportError:
+        return False
+
+    for t in tensor_args:
+        if _contains_nan_or_inf(t.cpu()):
+            return True
+
+    # Lightweight scalar check — tree_flatten involves no tensor copies.
+    flat_args, _ = tree_flatten(args)
+    return any(_contains_nan_or_inf(a) for a in flat_args if not isinstance(a, torch.Tensor))
+
+
+def _is_reentrant() -> bool:
+    """Check if we're already inside an RBLN compile op (risks infinite recursion)."""
+    from torch_rbln._internal.torch_compile_patch_helpers import get_rbln_compile_op_depth
+
+    if get_rbln_compile_op_depth() > 0:
+        rbln_log_warn("Unexpected CPU fallback: reentrant dispatch (already inside RBLN compile op)")
+        return True
+    return False
+
+
+def is_cpu_fallback_cases(args):
+    """Determines if a CPU fallback is necessary for an operation.
+
+    Checks several conditions in order (cheapest first):
+    0a. Python trace/debugger active
+    1. Non-infra TorchDispatchMode active (would cause infinite recursion)
+    2. Non-float16 dtype (unsupported by RBLN device)
+    3. All-scalar inputs (rebel-compiler falls back to host ops)
+    4. Non-zero storage offset on contiguous tensors
+    5. NaN/Inf values in inputs (non-deploy mode only)
+    6. Reentrancy (already inside RBLN compile op)
+
+    Individual checks can be disabled via ``TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK``
+    (comma-separated names or ``"all"``).
 
     Args:
-        args (tuple): A tuple of positional arguments for the operation, which may contain tensors.
+        args: Positional arguments for the operation, which may contain tensors.
 
     Returns:
-        bool: True if a CPU fallback is necessary, False otherwise.
+        True if a CPU fallback is necessary, False otherwise.
     """
     disabled_cases = _parse_disabled_fallback_cases()
 
-    # 0a: Python trace/debugger – when a trace function is set (e.g. pdb, coverage, sys.settrace), fall back to CPU
-    if "trace" not in disabled_cases and sys.gettrace() is not None:
+    # Pre-tensor checks (cheap, no tensor extraction needed)
+    if "trace" not in disabled_cases and _is_trace_active():
         return True
 
-    # 1: TorchDispatchMode active – run on CPU and do not attempt compile (cheap)
-    if "dispatch_mode" not in disabled_cases:
-        try:
-            from torch.utils._python_dispatch import is_in_torch_dispatch_mode
-
-            if is_in_torch_dispatch_mode(include_infra_modes=False):
-                return True
-        except ImportError:
-            pass
+    if "dispatch_mode" not in disabled_cases and _is_dispatch_mode_active():
+        return True
 
     # Checks 2-5 require tensors; bail early if none
     tensor_args = extract_tensors(args)
     if not tensor_args:
         return False
 
-    # 2: RBLN device can only handle float16 dtype
-    if "dtype" not in disabled_cases:
-        if any(a.dtype != torch.float16 for a in tensor_args):
-            return True
+    if "dtype" not in disabled_cases and _has_non_float16_dtype(tensor_args):
+        return True
 
-    # 3: fall back to the CPU if all input tensors are scalar tensors
-    if "scalar" not in disabled_cases:
-        if all(a.ndim == 0 for a in tensor_args):
-            return True
+    if "scalar" not in disabled_cases and _all_scalars(tensor_args):
+        return True
 
-    # 4: fall back to the CPU if any contiguous tensor has non-zero storage offset
-    if "storage_offset" not in disabled_cases:
-        if any(a.is_contiguous() and a.storage_offset() != 0 for a in tensor_args):
-            return True
+    if "storage_offset" not in disabled_cases and _has_nonzero_storage_offset(tensor_args):
+        return True
 
-    # 5: fall back to the CPU if any tensor contains NaN/Inf values (heavy: to_cpu + scan; non-deploy only)
-    if "nan_inf" not in disabled_cases:
-        try:
-            from torch_rbln._internal.env_utils import is_rbln_deploy
+    # Heavy check: copies tensors to CPU to scan for NaN/Inf.
+    # Reuses the already-extracted tensor_args to avoid a second full-tree traversal.
+    # Also checks scalar float args (e.g. float('nan')) via lightweight tree_flatten.
+    if "nan_inf" not in disabled_cases and _has_nan_or_inf(tensor_args, args):
+        return True
 
-            if not is_rbln_deploy() and has_invalid_tensor(to_cpu(args)):
-                return True
-        except ImportError:
-            pass
-
-    # 6: Reentrancy – already inside an RBLN compile op (e.g. from print/repr or from compiled graph).
-    #     Unexpected path; log a warning when it triggers.
-    if "reentrant" not in disabled_cases:
-        from torch_rbln._internal.torch_compile_patch_helpers import get_rbln_compile_op_depth
-
-        if get_rbln_compile_op_depth() > 0:
-            rbln_log_warn("Unexpected CPU fallback: reentrant dispatch (already inside RBLN compile op)")
-            return True
+    # Last: reentrancy check
+    if "reentrant" not in disabled_cases and _is_reentrant():
+        return True
 
     return False
 
@@ -550,3 +590,93 @@ def _ceil_to_nearest_multiple_of_64(n):
         int: The smallest multiple of 64 that is greater than or equal to `n`.
     """
     return math.ceil(n / 64) * 64
+
+
+# ---------------------------------------------------------------------------
+# Eager-mode compile+execute utilities
+# ---------------------------------------------------------------------------
+
+
+@lru_cache(maxsize=1)
+def _get_default_compile_options() -> dict:
+    """Return the default compile options for eager-mode RBLN ops.
+
+    The result is cached because the underlying environment variable
+    (``TORCH_RBLN_USE_DEVICE_TP``) is expected to be set once at process
+    start and remain constant for the lifetime of the process.
+    """
+    from torch_rbln._internal.env_utils import use_device_group_tensor_parallel_size
+
+    options: dict = {"disable_logger": True}
+    if not use_device_group_tensor_parallel_size():
+        options["tensor_parallel_size"] = 1
+    return options
+
+
+def _resolve_result_tensor(out_tensor, contig_args, contig_kwargs):
+    """Determine whether *out_tensor* can be written to directly by the compiler.
+
+    Returns *out_tensor* itself when direct use is safe, otherwise ``None``
+    (which tells the compiler to allocate a temporary).
+    """
+    if out_tensor is None:
+        return None
+    if can_use_out_tensor_directly(contig_args, dict(contig_kwargs, out=out_tensor)):
+        return out_tensor
+    return None
+
+
+def compile_and_execute(op_module, contig_args, contig_kwargs, out_tensor=None):
+    """Compile *op_module* with the RBLN backend and execute it.
+
+    This is the standard compile+execute pattern shared by all eager-mode ops
+    (both generated and hand-written).  It handles:
+
+    * Building compile options (tp_size, logger suppression)
+    * Resolving whether the caller's *out_tensor* can be reused directly
+    * Binding the result tensor via ``out_tensor_context``
+    * Copying the compiler's result if it landed at a different address
+
+    Args:
+        op_module: An ``nn.Module`` whose ``forward`` calls the target op.
+        contig_args: Contiguous positional arguments.
+        contig_kwargs: Contiguous keyword arguments (``out`` excluded).
+        out_tensor: Optional pre-allocated output tensor from the caller.
+
+    Returns:
+        The result tensor (on the RBLN device).
+    """
+    from torch_rbln.device.context_holder import out_tensor_context
+
+    compile_options = _get_default_compile_options()
+    result_tensor = _resolve_result_tensor(out_tensor, contig_args, contig_kwargs)
+
+    with out_tensor_context(result_tensor):
+        compiled = torch.compile(op_module, backend="rbln", dynamic=False, options=compile_options)
+        external_result = compiled(*contig_args, **contig_kwargs)
+        if result_tensor is None:
+            result_tensor = external_result
+        elif isinstance(external_result, torch.Tensor) and (external_result.data_ptr() != result_tensor.data_ptr()):
+            result_tensor.copy_(external_result)
+
+    return result_tensor
+
+
+def make_op_module(target_fn):
+    """Create an ``nn.Module`` whose ``forward`` delegates to *target_fn*.
+
+    Each eager op needs an opaque module wrapper so that ``torch.compile``
+    (Dynamo) captures the call as a single graph node rather than inlining the
+    op's implementation.
+
+    Usage::
+
+        _add_op_module = make_op_module(torch.add)
+    """
+
+    class _OpModule(torch.nn.Module):
+        def forward(self, *args, **kwargs):
+            return target_fn(*args, **kwargs)
+
+    _OpModule.__qualname__ = f"OpModule_{getattr(target_fn, '__name__', 'op')}"
+    return _OpModule().eval()

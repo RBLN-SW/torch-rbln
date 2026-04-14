@@ -124,7 +124,6 @@ class GeneralTemplates:
             """Generate function body start."""
             return f"""
 def {kernel_name}(*args, **kwargs):
-    from torch_rbln.device.context_holder import out_tensor_context
 """
 
         @staticmethod
@@ -144,49 +143,20 @@ def {kernel_name}(*args, **kwargs):
 
         @staticmethod
         def op_module_definition(root_name: str, target: str) -> str:
-            """Generate per-op nn.Module with literal forward (opaque under torch.compile). Module-level."""
-            class_name = f"OpModule_{root_name}"
+            """Generate per-op nn.Module via make_op_module factory (opaque under torch.compile). Module-level."""
             var_name = f"_{root_name}_op_module"
             return f"""
-class {class_name}(torch.nn.Module):
-    def forward(self, *args, **kwargs):
-        return {target}(*args, **kwargs)
-{var_name} = {class_name}().eval()
+{var_name} = make_op_module({target})
 """
 
         @staticmethod
         def compile_section(root_name: str, target: str) -> str:
-            """Generate compilation and execution section (uses per-op module for opaque compile)."""
+            """Generate compilation and execution section (uses compile_and_execute utility)."""
             op_module_var = f"_{root_name}_op_module"
-            return f"""        # Prepare result tensor and compile options based on out_tensor availability
-        # Base compile options: always include eager_mode for eager execution context
-        compile_options = {{"disable_logger": True}}
-        # By default, eager mode ops use tp_size=1 due to current compiler structure.
-        # If TORCH_RBLN_USE_DEVICE_TP=ON, eager mode ops will follow
-        # the logical device size (RBLN_NPUS_PER_DEVICE) like torch.compile operations.
-        if not use_device_group_tensor_parallel_size():
-            compile_options["tensor_parallel_size"] = 1
-        if out_tensor is None:
-            result_tensor = None
-        else:
-            # Check if out_tensor can be used directly by compiler
-            can_use_out_tensor_directly_flag = can_use_out_tensor_directly(
-                contig_args, dict(contig_kwargs, out=out_tensor)
+            return (
+                f"        result_tensor = compile_and_execute(\n"
+                f"            {op_module_var}, contig_args, contig_kwargs, out_tensor=out_tensor\n"
+                f"        )\n"
+                f"\n"
+                f"    return result_tensor, result_tensor.shape\n"
             )
-
-            if can_use_out_tensor_directly_flag:
-                # Use out tensor directly - compiler will write results here
-                result_tensor = out_tensor
-            else:
-                result_tensor = None
-
-        with out_tensor_context(result_tensor):
-            compiled = torch.compile({op_module_var}, backend="rbln", dynamic=False, options=compile_options)
-            external_result = compiled(*contig_args, **contig_kwargs)
-            if result_tensor is None:
-                result_tensor = external_result
-            elif isinstance(external_result, torch.Tensor) and (external_result.data_ptr() != result_tensor.data_ptr()):
-                result_tensor.copy_(external_result)
-
-    return result_tensor, result_tensor.shape
-"""

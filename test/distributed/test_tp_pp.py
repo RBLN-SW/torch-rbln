@@ -10,14 +10,12 @@ import torch.nn as nn
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, subtest, TestCase
 
-from test.utils import configure_master_port_for_rccl_tests, set_deterministic_seeds
+from test.utils import configure_master_port_for_rccl_tests, set_deterministic_seeds, setup_distributed_environment
 
 
 def setup_environment(rank: int, world_size: int) -> None:
     """Setup environment variables for distributed testing."""
-    os.environ["LOCAL_RANK"] = str(rank)
-    os.environ["WORLD_SIZE"] = str(world_size)
-    torch.rbln.set_device(rank)
+    setup_distributed_environment(rank, world_size)
 
 
 def run_default_group_allreduce_test(rank: int, world_size: int, backend: str) -> None:

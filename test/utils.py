@@ -10,6 +10,15 @@ import torch
 
 SUPPORTED_DTYPES = [torch.float16]
 
+# Default tolerances for float16 numerical comparisons on RBLN devices.
+DEFAULT_ATOL = 0.01
+DEFAULT_RTOL = 0.01
+
+# Wider tolerances for graph-vs-eager mode comparisons, where minor
+# numerical divergence between compiled graphs and eager execution is expected.
+GRAPH_EAGER_ATOL = 0.04
+GRAPH_EAGER_RTOL = 0.07
+
 _DEFAULT_DISTRIBUTED_MASTER_PORT = "29604"
 
 
@@ -71,6 +80,17 @@ def requires_physical_devices(num_devices):
         physical_device_count < num_devices,
         reason=f"Requires at least {num_devices} physical devices, found {physical_device_count}",
     )
+
+
+def setup_distributed_environment(rank: int, world_size: int) -> None:
+    """Setup environment variables for distributed testing.
+
+    Sets LOCAL_RANK, WORLD_SIZE, and the active RBLN device for the given rank.
+    Used by distributed test files (test_process_group, test_tp_pp, etc.).
+    """
+    os.environ["LOCAL_RANK"] = str(rank)
+    os.environ["WORLD_SIZE"] = str(world_size)
+    torch.rbln.set_device(rank)
 
 
 def run_in_isolated_process(func, *args):
