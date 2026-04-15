@@ -25,7 +25,7 @@ For Debug CI builds, PyTorch is cloned from the repository specified by the
 
 ### Version update checklist
 
-When updating the PyTorch version (e.g. 2.9.0 → 2.10.0), change **all** of the
+When updating the PyTorch version (e.g. 2.10.0 → 2.11.0), change **all** of the
 following together:
 
 | # | File | What to change |
@@ -72,8 +72,8 @@ To refresh ```tools/linter``` from PyTorch upstream (e.g. after a version bump),
 run ```sync-linter.sh``` from the repo root or from the parent of ```torch-rbln```.
 The script clones PyTorch at a given tag and copies ```tools/linter``` into the
 current tree. The **default tag** is derived from the torch version in
-```pyproject.toml``` (e.g. ```torch==2.9.0+cpu``` → tag ```v2.9.0```). You can
-override it by passing a tag: ```./sync-linter.sh v2.10.0```.
+```pyproject.toml``` (e.g. ```torch==2.10.0+cpu``` → tag ```v2.10.0```). You can
+override it by passing a tag: ```./sync-linter.sh v2.11.0```.
 
 ## Rebel compiler
 
