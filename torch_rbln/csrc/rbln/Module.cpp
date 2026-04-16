@@ -56,6 +56,9 @@ void register_public_device_api(py::module_& module) {
       &c10::rbln::exchange_device_index,
       "Exchange the current device and return the original device.");
 
+  // Synchronization
+  module.def("synchronize", &c10::rbln::synchronize, "Wait for all pending async transfers on a device.");
+
   // Memory management functions
   module.def("empty_cache", &c10::rbln::empty_cache, "Release all unoccupied cached memory.");
   module.def("memory_stats", &c10::rbln::memory_stats, "Get memory allocator statistics.");
