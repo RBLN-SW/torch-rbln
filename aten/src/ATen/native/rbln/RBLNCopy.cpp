@@ -200,6 +200,9 @@ at::Tensor _copy_from_rbln(const at::Tensor& src, const at::Tensor& dst, bool no
   if (non_blocking) {
     copy_impl_rbln_async(src, dst);
   } else {
+    // Drain pending async transfers before sync copy so the vmem state machine is consistent.
+    const auto rbln_device = src.device().is_privateuseone() ? src.device() : dst.device();
+    c10::rbln::synchronize(rbln_device.index());
     copy_impl_rbln(src, dst);
   }
 

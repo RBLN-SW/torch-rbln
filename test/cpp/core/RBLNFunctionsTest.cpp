@@ -218,3 +218,40 @@ TEST_F(RBLNFunctionsTest, GetUninitializedMemoryInfo) {
     c10::rbln::free(data);
   }
 }
+
+TEST_F(RBLNFunctionsTest, Synchronize) {
+  const auto device_count = c10::rbln::get_device_count();
+  EXPECT_GE(device_count, 1);
+  for (c10::DeviceIndex device_index = 0; device_index < device_count; ++device_index) {
+    // synchronize with no pending transfers should be a no-op
+    EXPECT_NO_THROW(c10::rbln::synchronize(device_index));
+  }
+}
+
+TEST_F(RBLNFunctionsTest, AsyncMemcpyH2VAndV2H) {
+  const auto device_count = c10::rbln::get_device_count();
+  EXPECT_GE(device_count, 1);
+  for (c10::DeviceIndex device_index = 0; device_index < device_count; ++device_index) {
+    constexpr size_t nbytes = 4096;
+    std::vector<int8_t> src_cpu(nbytes);
+    for (size_t i = 0; i < nbytes; ++i) {
+      src_cpu[i] = static_cast<int8_t>(i % 127);
+    }
+
+    auto rbln_data = c10::rbln::malloc(device_index, nbytes);
+    EXPECT_TRUE(rbln_data != nullptr);
+
+    // Async H2V
+    c10::rbln::memcpy_h2v_async(rbln_data, src_cpu.data(), nbytes);
+    c10::rbln::synchronize(device_index);
+
+    // Async V2H
+    std::vector<int8_t> dst_cpu(nbytes, 0);
+    c10::rbln::memcpy_v2h_async(dst_cpu.data(), rbln_data, nbytes);
+    c10::rbln::synchronize(device_index);
+
+    EXPECT_EQ(dst_cpu, src_cpu);
+
+    c10::rbln::free(rbln_data);
+  }
+}

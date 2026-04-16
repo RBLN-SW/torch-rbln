@@ -1,3 +1,4 @@
+#include <c10/rbln/RBLNFunctions.h>
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 #include <iostream>
@@ -81,6 +82,60 @@ TEST_F(RBLNCopyOpTest, RBLNtoCPU_UsingStorageOffset) {
       EXPECT_EQ(expected[i][j].item().toFloat(), dst[i][j].item().toFloat());
     }
   }
+}
+
+// ======== Async (non_blocking) copy tests ========
+
+TEST_F(RBLNCopyOpTest, CPUtoRBLN_NonBlocking) {
+  auto src = at::randn({4, 64});
+  auto dst = src.to(at::kPrivateUse1, /*non_blocking=*/true);
+  c10::rbln::synchronize(0);
+
+  auto readback = dst.to(at::kCPU);
+  EXPECT_TRUE(at::allclose(src, readback));
+}
+
+TEST_F(RBLNCopyOpTest, RBLNtoCPU_NonBlocking) {
+  auto src_cpu = at::randn({4, 64});
+  auto src = src_cpu.to(at::kPrivateUse1);
+
+  auto dst = src.to(at::kCPU, /*non_blocking=*/true);
+  c10::rbln::synchronize(0);
+
+  EXPECT_TRUE(at::allclose(src_cpu, dst));
+}
+
+TEST_F(RBLNCopyOpTest, RBLNtoCPU_NonBlocking_LargeData) {
+  auto src_cpu = at::randn({256, 1024});
+  auto src = src_cpu.to(at::kPrivateUse1);
+
+  auto dst = src.to(at::kCPU, /*non_blocking=*/true);
+  c10::rbln::synchronize(0);
+
+  EXPECT_TRUE(at::allclose(src_cpu, dst));
+}
+
+TEST_F(RBLNCopyOpTest, SyncAfterAsync_Consistent) {
+  // Async H2V followed by sync V2H — sync should auto-drain pending
+  auto src = at::randn({4, 64});
+  auto rbln_tensor = src.to(at::kPrivateUse1, /*non_blocking=*/true);
+
+  // Sync copy back — should auto-drain the async H2V first
+  auto dst = rbln_tensor.to(at::kCPU);
+
+  EXPECT_TRUE(at::allclose(src, dst));
+}
+
+TEST_F(RBLNCopyOpTest, NonBlocking_NonContiguous_FallsBackToSync) {
+  // Non-contiguous tensors should fall back to sync copy
+  auto src = at::randn({4, 64}, rbln_options);
+  auto sliced = src.slice(1, 0, 32);  // non-contiguous
+
+  // This should work (falls back to sync internally)
+  auto dst = sliced.to(at::kCPU, /*non_blocking=*/true);
+  auto expected = sliced.to(at::kCPU);
+
+  EXPECT_TRUE(at::allclose(expected, dst));
 }
 
 int main(int argc, char* argv[]) {
