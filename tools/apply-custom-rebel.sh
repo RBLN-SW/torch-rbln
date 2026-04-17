@@ -91,8 +91,8 @@ main() {
   # Update the submodules
   git submodule update --init ./ || return $?
 
-  # Create a virtual environment using uv
-  uv venv .venv && . .venv/bin/activate || return $?
+  # Create a virtual environment using uv (--clear replaces any stale .venv from a prior run)
+  uv venv --clear .venv && . .venv/bin/activate || return $?
 
   # Tooling needed before rebel_install.sh
   uv pip install conan~=2.1.0 cmake~=3.18 build lit auditwheel wheel ninja setuptools || return $?
@@ -117,14 +117,15 @@ main() {
     "-DCMAKE_BUILD_TYPE=$build_type" \
     "-DREBEL_DEPLOY=$rebel_deploy" || return $?
 
-  if [ ! -f ./python/gen_requirements.py ]; then
-    echo "Error: expected python/gen_requirements.py under REBEL_HOME" >&2
-    return 1
+  # Install the Python dependencies.
+  # Newer rebel-compiler (scikit-build-core) declares deps in pyproject.toml and no
+  # longer ships python/gen_requirements.py. Fall back to the legacy path if present.
+  if [ -f ./python/gen_requirements.py ]; then
+    python ./python/gen_requirements.py
   fi
-
-  # Install the Python dependencies
-  python ./python/gen_requirements.py
-  uv pip install -r ./python/requirements/core.txt || return $?
+  if [ -f ./python/requirements/core.txt ]; then
+    uv pip install -r ./python/requirements/core.txt || return $?
+  fi
 
   if [ "$build_only" -eq 1 ]; then
     deactivate
