@@ -69,6 +69,7 @@ uv venv .venv && source .venv/bin/activate
 - [Test Guide](docs/TEST_GUIDE.md) — local test runs
 - [Linting](docs/LINTING.md) — code style and lint
 - [Third-party update](docs/THIRD_PARTY_UPDATE.md) — PyTorch pin, upstream files, `rebel-compiler` version bumps in `pyproject.toml`
+- [Release Process](docs/RELEASE_PROCESS.md) — branch model, versioning, tagging, and publication
 
 ## Contributing
 
