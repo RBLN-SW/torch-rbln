@@ -1,2 +1,2 @@
 # Build/dev dependency constraints (single source of truth).
-rebel-compiler==0.10.3.dev275+g55dfa986
+rebel-compiler==0.10.3.dev282+ged838fa2
