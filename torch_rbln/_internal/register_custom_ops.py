@@ -3,7 +3,6 @@ import math
 import torch
 
 from torch_rbln._internal.env_utils import use_device_group_tensor_parallel_size
-from torch_rbln._internal.log_utils import rbln_log_cpu_fallback
 from torch_rbln._internal.ops_utils import (
     can_use_out_tensor_directly,
     cpu_fallback_path,
@@ -126,14 +125,18 @@ def pow_tensor_scalar_out_rbln(self, exponent, *, out):
 
 
 def custom_zero__rbln(self):
-    result_tensor = None
-    # zeros op is compilable in RBLN, but due to its in-place, it has problems with graph capture,
-    # so it is always processed on the host.
-    cpu_self = torch.empty_like(self, device=torch.device("cpu"))
-    rbln_log_cpu_fallback("aten::zero")
-    result_tensor = torch.zero_(cpu_self)
+    # zeros op is compilable in RBLN, but due to its in-place nature it has problems with graph
+    # capture, so it is always processed on the host.
+    # Optimization: mark the VMemory as EMPTY_INIT_WITH_ZERO without allocating any host memory.
+    # - NPU write-first (e.g. KV-cache output): zero transfer is skipped entirely.
+    # - NPU read-first: zeros are transferred via a temporary buffer at transfer time and freed.
+    # This avoids permanent host allocation for large tensors such as KV-cache.
+    if self.numel() == 0:
+        return
 
-    finalize_output_tensor(self, result_tensor, result_tensor.shape, self, {})
+    from torch_rbln._C import _mark_zeros
+
+    _mark_zeros(self.data_ptr())
 
 
 class custom_rbln_paged_attn_prefill(torch.nn.Module):
