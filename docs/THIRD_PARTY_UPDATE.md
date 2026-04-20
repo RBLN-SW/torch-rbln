@@ -83,3 +83,5 @@ override it by passing a tag: ```./sync-linter.sh v2.11.0```.
 - [PyTorch RBLN — Running and debugging](https://docs.rbln.ai/latest/software/rbln_pytorch/tutorial_running_n_debugging.html)
 
 To bump the **pinned build dependency** in torch-rbln, update the version specifier in **`pyproject.toml`** in both **`[build-system].requires`** and **`[dependency-groups].build`**, and keep them aligned with each other.
+
+> **Note:** The development build constraint is updated automatically by a nightly workflow. See [Workflows — Automated Dependency Updates](WORKFLOWS.md#automated-dependency-updates) for details.
