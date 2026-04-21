@@ -19,6 +19,8 @@ import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
+from test.utils import configure_rbln_network_for_autoport_tests
+
 
 _TEST_TP_PP = Path(__file__).resolve().parent / "test_tp_pp.py"
 _MIN_DEVICES = 8
@@ -50,6 +52,7 @@ class TestTPPPAutoportConcurrent(TestCase):
                 f"requires at least {_MIN_DEVICES} RBLN devices "
                 f"(available: {torch.rbln.device_count() if torch.rbln.is_available() else 0})",
             )
+        configure_rbln_network_for_autoport_tests()
         with ThreadPoolExecutor(max_workers=len(_PARTITIONS)) as executor:
             results = list(executor.map(_invoke_test_tp_pp, _PARTITIONS))
 

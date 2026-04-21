@@ -13,6 +13,19 @@ SUPPORTED_DTYPES = [torch.float16]
 _DEFAULT_DISTRIBUTED_MASTER_PORT = "29604"
 
 
+def configure_rbln_network_for_autoport_tests() -> None:
+    """Set ``RBLN_*`` IP defaults for autoport tests that spawn fresh Python processes.
+
+    Must run in the parent test process **before** ``subprocess.run`` so children
+    inherit ``RBLN_LOCAL_IP``, ``RBLN_ROOT_IP``, and optionally probed
+    ``RBLN_RDMA_IP`` when ``torch_rbln`` / ``librbln`` load in the subprocess.
+    See :mod:`torch_rbln._internal.rdma_env`.
+    """
+    from torch_rbln._internal.rdma_env import apply_default_rbln_network_environment
+
+    apply_default_rbln_network_environment()
+
+
 def configure_master_port_for_rccl_tests(default_port: str = _DEFAULT_DISTRIBUTED_MASTER_PORT) -> None:
     """Apply MASTER_PORT policy for RBLN distributed tests.
 
