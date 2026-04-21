@@ -1,4 +1,4 @@
-// Option B fast path for aten::sub.Tensor on RBLN PrivateUse1.
+// C++ fast path for aten::sub.Tensor on RBLN PrivateUse1.
 // See AddKernelB.cpp for structural commentary.
 
 #include <ATen/Operators.h>
@@ -8,7 +8,7 @@
 
 #include <array>
 
-namespace c10::rbln::kcache {
+namespace c10::rbln::kernel {
 namespace {
 
 bool sub_guard(const at::Tensor& a, const at::Tensor& b, const at::Scalar& alpha) {
@@ -31,8 +31,8 @@ at::Tensor sub_fallback(const at::Tensor& self, const at::Tensor& other, const a
   return out;
 }
 
-at::Tensor sub_tensor_rbln_b(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
-  if (!g_b_enabled.load(std::memory_order_relaxed) || g_building_entry || !sub_guard(self, other, alpha)) {
+at::Tensor sub_tensor_rbln(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+  if (!g_c_kernel_enabled.load(std::memory_order_relaxed) || g_building_entry || !sub_guard(self, other, alpha)) {
     return sub_fallback(self, other, alpha);
   }
 
@@ -52,8 +52,8 @@ at::Tensor sub_tensor_rbln_b(const at::Tensor& self, const at::Tensor& other, co
 }
 
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
-  m.impl("sub.Tensor", TORCH_FN(sub_tensor_rbln_b));
+  m.impl("sub.Tensor", TORCH_FN(sub_tensor_rbln));
 }
 
 }  // namespace
-}  // namespace c10::rbln::kcache
+}  // namespace c10::rbln::kernel

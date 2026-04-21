@@ -1,4 +1,4 @@
-// Option B fast path for aten::add.Tensor on RBLN PrivateUse1.
+// C++ fast path for aten::add.Tensor on RBLN PrivateUse1.
 //
 // V1 restrictions (guard fails -> Python slow path via aten::add_out):
 //   - alpha must be 1
@@ -12,7 +12,7 @@
 
 #include <array>
 
-namespace c10::rbln::kcache {
+namespace c10::rbln::kernel {
 namespace {
 
 bool add_guard(const at::Tensor& a, const at::Tensor& b, const at::Scalar& alpha) {
@@ -35,8 +35,8 @@ at::Tensor add_fallback(const at::Tensor& self, const at::Tensor& other, const a
   return out;
 }
 
-at::Tensor add_tensor_rbln_b(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
-  if (!g_b_enabled.load(std::memory_order_relaxed) || g_building_entry || !add_guard(self, other, alpha)) {
+at::Tensor add_tensor_rbln(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+  if (!g_c_kernel_enabled.load(std::memory_order_relaxed) || g_building_entry || !add_guard(self, other, alpha)) {
     return add_fallback(self, other, alpha);
   }
 
@@ -56,8 +56,8 @@ at::Tensor add_tensor_rbln_b(const at::Tensor& self, const at::Tensor& other, co
 }
 
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
-  m.impl("add.Tensor", TORCH_FN(add_tensor_rbln_b));
+  m.impl("add.Tensor", TORCH_FN(add_tensor_rbln));
 }
 
 }  // namespace
-}  // namespace c10::rbln::kcache
+}  // namespace c10::rbln::kernel

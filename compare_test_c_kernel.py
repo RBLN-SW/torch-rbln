@@ -1,6 +1,6 @@
-"""Quick correctness test for Option B add kernel.
+"""Quick correctness smoke test for the C-kernel path on aten::add.
 
-Run with: .venv/bin/python compare_test_b.py
+Run with: .venv/bin/python compare_test_c_kernel.py
 """
 
 import os
@@ -35,7 +35,7 @@ def main() -> int:
     if not torch.equal(c2_cpu, ref):
         print("MISMATCH c2 vs ref:", c2_cpu[:8].tolist(), "vs", ref[:8].tolist(), file=sys.stderr)
         return 1
-    print("PASS — add kernel B produces correct results on hit and miss")
+    print("PASS — C-kernel add produces correct results on hit and miss")
     return 0
 
 

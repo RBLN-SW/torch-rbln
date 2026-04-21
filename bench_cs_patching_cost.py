@@ -7,7 +7,7 @@ Three patterns:
   pool  — rotate over 16 pairs (addresses permute fully)
 
 If the runtime had O(1) address check + relocation cost, all three should
-produce similar p50 on B_ON. If patching is expensive, `pool` should be
+produce similar p50 on C_ON. If patching is expensive, `pool` should be
 noticeably slower than `same`.
 """
 
@@ -22,7 +22,7 @@ os.environ.setdefault("TORCH_RBLN_LOG_LEVEL", "ERROR")
 
 import torch
 import torch_rbln  # noqa: F401
-from _b_toggle import set_b
+from _kernel_toggle import set_enabled
 
 
 def make_pool(size: int, n_pairs: int):
@@ -72,8 +72,8 @@ def main() -> int:
         file=sys.stderr,
     )
     for size in sizes:
-        for mode_label, b_enabled in [("B_ON", True), ("B_OFF", False)]:
-            set_b(b_enabled)
+        for mode_label, b_enabled in [("C_ON", True), ("C_OFF", False)]:
+            set_enabled(b_enabled)
 
             # warm-up with first pool pair
             warm_pool = make_pool(size, 1)

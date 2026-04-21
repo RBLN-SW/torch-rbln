@@ -2,7 +2,7 @@
 
 Rationale: the earlier benchmark reused the same `a`, `b` tensors across
 iterations. If rebel's runtime skips CS patching when addresses are unchanged,
-that would artificially flatter B_ON's hot-path numbers. This benchmark
+that would artificially flatter C_ON's hot-path numbers. This benchmark
 allocates fresh tensors each iteration so the runtime must re-patch addresses
 every call.
 """
@@ -19,7 +19,7 @@ os.environ.setdefault("TORCH_RBLN_LOG_LEVEL", "ERROR")
 
 import torch
 import torch_rbln  # noqa: F401
-from _b_toggle import set_b
+from _kernel_toggle import set_enabled
 
 
 def time_add_varying(size: int, iters: int) -> list[float]:
@@ -73,8 +73,8 @@ def main() -> int:
     for size in sizes:
         dev = torch.device("rbln:0")
 
-        for label, b_enabled in [("B_ON", True), ("B_OFF", False)]:
-            set_b(b_enabled)
+        for label, b_enabled in [("C_ON", True), ("C_OFF", False)]:
+            set_enabled(b_enabled)
 
             # warm-up once
             a_w = torch.ones(size, dtype=torch.float16, device=dev)

@@ -1,6 +1,6 @@
 #pragma once
 
-// Option B kernel cache.
+// C-kernel cache.
 //
 // Each entry holds a rebel PyRblnSyncRuntime (via a strong Python reference to
 // the owning DynamoRuntime) plus the cached output profiles needed to allocate
@@ -41,7 +41,7 @@ class PyRblnSyncRuntime {
 };
 }  // namespace rbln
 
-namespace c10::rbln::kcache {
+namespace c10::rbln::kernel {
 
 enum class OpId : uint8_t {
   AddTensor = 0,
@@ -116,14 +116,14 @@ class C10_RBLN_API KernelCache {
 
 // --------------------------------------------------------------------------
 // Hot-path breakdown counters (cumulative). Compiled away in production
-// builds; enable with -DC10_RBLN_B_TIMING=1 for bench/profiling. When off,
-// the C ABI `c10_rbln_hp_read_and_reset` still exists and returns zeros so
+// builds; enable with -DC10_RBLN_C_KERNEL_TIMING=1 for bench/profiling. When off,
+// the C ABI `c10_rbln_c_kernel_read_timing` still exists and returns zeros so
 // callers can probe unconditionally.
-#ifndef C10_RBLN_B_TIMING
-#define C10_RBLN_B_TIMING 0
+#ifndef C10_RBLN_C_KERNEL_TIMING
+#define C10_RBLN_C_KERNEL_TIMING 0
 #endif
 
-#if C10_RBLN_B_TIMING
+#if C10_RBLN_C_KERNEL_TIMING
 struct HotPathCounters {
   std::atomic<uint64_t> n_calls{0};
   std::atomic<uint64_t> alloc_ns{0};
@@ -136,4 +136,4 @@ struct HotPathCounters {
 extern HotPathCounters g_hp;
 #endif
 
-}  // namespace c10::rbln::kcache
+}  // namespace c10::rbln::kernel

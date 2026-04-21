@@ -1,8 +1,8 @@
-"""Correctness + speedup for all V1 Option B kernels (add/sub/mul/div/neg).
+"""Correctness + speedup for all V1 C-kernel (add/sub/mul/div/neg).
 
 For each op:
-  1. Correctness under address churn (pool cycling) for B_ON and B_OFF.
-  2. Steady-state latency (p50/p99) for B_ON and B_OFF at one size.
+  1. Correctness under address churn (pool cycling) for C_ON and C_OFF.
+  2. Steady-state latency (p50/p99) for C_ON and C_OFF at one size.
 
 The goal is to confirm the same template works across op arities (binary and
 unary) and the speedup is consistent with the add-only numbers.
@@ -19,7 +19,7 @@ os.environ.setdefault("TORCH_RBLN_LOG_LEVEL", "ERROR")
 
 import torch
 import torch_rbln  # noqa: F401
-from _b_toggle import set_b
+from _kernel_toggle import set_enabled
 
 
 def make_pool_binary(size: int, n: int):
@@ -141,8 +141,8 @@ def main() -> int:
         # pool for measurement — fresh tensors.
         pool = make_pool(size, pool_n)
 
-        for label, enabled in [("B_ON", True), ("B_OFF", False)]:
-            set_b(enabled)
+        for label, enabled in [("C_ON", True), ("C_OFF", False)]:
+            set_enabled(enabled)
             errs = correctness_check(name, fn, ref_fn, pool, arity, corr_iters)
             corr = "OK" if not errs else f"FAIL({len(errs)})"
             if errs:
@@ -163,12 +163,12 @@ def main() -> int:
     print(flush=True, file=sys.stderr)
     print("=== speedup (p50, pool cycling) ===", flush=True, file=sys.stderr)
     for name, _fn, _ref, _arity, _mp in OP_TABLE:
-        on = results[(name, "B_ON")]["p50"]
-        off = results[(name, "B_OFF")]["p50"]
+        on = results[(name, "C_ON")]["p50"]
+        off = results[(name, "C_OFF")]["p50"]
         sp = off / on if on > 0 else float("inf")
         saved = off - on
         print(
-            f"{name:<6} B_OFF={off:>7.2f}us  B_ON={on:>7.2f}us  speedup={sp:.2f}x  saved={saved:>7.2f}us",
+            f"{name:<6} C_OFF={off:>7.2f}us  C_ON={on:>7.2f}us  speedup={sp:.2f}x  saved={saved:>7.2f}us",
             flush=True,
             file=sys.stderr,
         )

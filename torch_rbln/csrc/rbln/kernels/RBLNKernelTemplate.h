@@ -1,9 +1,9 @@
 #pragma once
 
-// Generic Option B kernel harness. Each ATen op maps onto this by providing:
+// Generic C-kernel harness. Each ATen op maps onto this by providing:
 //
 //   - a unique ``OpId`` for cache keying
-//   - a Python bootstrap function name (returns dict; see _b_bootstrap.py)
+//   - a Python bootstrap function name (returns dict; see _kernel_bootstrap.py)
 //   - a guard predicate (V1 restrictions)
 //   - a fallback callable that routes to the legacy Python path (typically via
 //     the corresponding ``aten::op.out`` overload)
@@ -25,15 +25,15 @@
 #include <map>
 #include <string>
 
-namespace c10::rbln::kcache {
+namespace c10::rbln::kernel {
 
 // Reentrancy guard: while a cache miss is inside Python driving torch.compile,
-// any ATen dispatch that lands back on a B kernel must take the slow path.
+// any ATen dispatch that lands back on a C-kernel must take the slow path.
 // Process-wide thread_local (single definition in RBLNKernelCache.cpp).
 extern thread_local bool g_building_entry;
 
 // Process-wide enable flag. Single definition in RBLNKernelCache.cpp.
-extern std::atomic<bool> g_b_enabled;
+extern std::atomic<bool> g_c_kernel_enabled;
 
 struct BuildGuard {
   BuildGuard() { g_building_entry = true; }
@@ -42,16 +42,16 @@ struct BuildGuard {
 
 at::ScalarType dtype_from_rbln_string(const std::string& s);
 
-// Build a cache entry by driving torch.compile via _b_bootstrap.py. The
+// Build a cache entry by driving torch.compile via _kernel_bootstrap.py. The
 // bootstrap function at ``builder_attr`` must accept the sample input tensors
-// and return a dict shaped like _b_bootstrap._runtime_info().
+// and return a dict shaped like _kernel_bootstrap._runtime_info().
 //
 // The variadic ``sample_inputs`` are forwarded to Python as positional args.
 template <typename... SampleTs>
 CacheEntry build_entry_via_python(const char* builder_attr, const SampleTs&... sample_inputs) {
   namespace py = pybind11;
   py::gil_scoped_acquire gil;
-  py::module_ mod = py::module_::import("torch_rbln._internal._b_bootstrap");
+  py::module_ mod = py::module_::import("torch_rbln._internal._kernel_bootstrap");
   py::object result = mod.attr(builder_attr)(sample_inputs...);
   py::dict info = py::cast<py::dict>(result);
 
@@ -75,8 +75,8 @@ CacheEntry build_entry_via_python(const char* builder_attr, const SampleTs&... s
   return entry;
 }
 
-// Helper: wall-clock nanoseconds. Only used when C10_RBLN_B_TIMING=1.
-#if C10_RBLN_B_TIMING
+// Helper: wall-clock nanoseconds. Only used when C10_RBLN_C_KERNEL_TIMING=1.
+#if C10_RBLN_C_KERNEL_TIMING
 inline uint64_t now_ns() {
   using clk = std::chrono::steady_clock;
   return std::chrono::duration_cast<std::chrono::nanoseconds>(clk::now().time_since_epoch()).count();
@@ -87,11 +87,11 @@ inline uint64_t now_ns() {
 // Returns the freshly allocated output tensor (rbln device).
 template <size_t N>
 at::Tensor run_cached(const CacheEntry& entry, const std::array<const at::Tensor*, N>& ins) {
-  TORCH_CHECK(entry.num_outputs == 1, "Option B template: expected 1 output, got ", entry.num_outputs);
+  TORCH_CHECK(entry.num_outputs == 1, "C-kernel template: expected 1 output, got ", entry.num_outputs);
   const OutProfile& op = entry.out_profiles[0];
-  TORCH_CHECK(op.is_rbln_device, "Option B template: expected rbln-device output");
+  TORCH_CHECK(op.is_rbln_device, "C-kernel template: expected rbln-device output");
 
-#if C10_RBLN_B_TIMING
+#if C10_RBLN_C_KERNEL_TIMING
   const auto t0 = now_ns();
 #endif
 
@@ -99,7 +99,7 @@ at::Tensor run_cached(const CacheEntry& entry, const std::array<const at::Tensor
       op.shape,
       at::TensorOptions().dtype(op.dtype).device(ins[0]->device()));
 
-#if C10_RBLN_B_TIMING
+#if C10_RBLN_C_KERNEL_TIMING
   const auto t1 = now_ns();
 #endif
 
@@ -112,25 +112,25 @@ at::Tensor run_cached(const CacheEntry& entry, const std::array<const at::Tensor
   dev_out.emplace(0u, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(out.data_ptr())));
   std::map<uint32_t, uintptr_t> cpu_out;
 
-#if C10_RBLN_B_TIMING
+#if C10_RBLN_C_KERNEL_TIMING
   const auto t2 = now_ns();
 #endif
 
   entry.runtime->PrepareInputs(dev_in, cpu_in);
 
-#if C10_RBLN_B_TIMING
+#if C10_RBLN_C_KERNEL_TIMING
   const auto t3 = now_ns();
 #endif
 
   entry.runtime->PrepareOutputs(dev_out, cpu_out);
 
-#if C10_RBLN_B_TIMING
+#if C10_RBLN_C_KERNEL_TIMING
   const auto t4 = now_ns();
 #endif
 
   entry.runtime->Run();
 
-#if C10_RBLN_B_TIMING
+#if C10_RBLN_C_KERNEL_TIMING
   const auto t5 = now_ns();
   g_hp.n_calls.fetch_add(1, std::memory_order_relaxed);
   g_hp.alloc_ns.fetch_add(t1 - t0, std::memory_order_relaxed);
@@ -156,4 +156,4 @@ inline bool tensor_is_v1_safe(const at::Tensor& t) {
   return true;
 }
 
-}  // namespace c10::rbln::kcache
+}  // namespace c10::rbln::kernel

@@ -1,4 +1,4 @@
-// Option B fast path for aten::div.Tensor on RBLN PrivateUse1.
+// C++ fast path for aten::div.Tensor on RBLN PrivateUse1.
 
 #include <ATen/Operators.h>
 #include <ATen/core/Tensor.h>
@@ -7,7 +7,7 @@
 
 #include <array>
 
-namespace c10::rbln::kcache {
+namespace c10::rbln::kernel {
 namespace {
 
 bool div_guard(const at::Tensor& a, const at::Tensor& b) {
@@ -23,8 +23,8 @@ at::Tensor div_fallback(const at::Tensor& self, const at::Tensor& other) {
   return out;
 }
 
-at::Tensor div_tensor_rbln_b(const at::Tensor& self, const at::Tensor& other) {
-  if (!g_b_enabled.load(std::memory_order_relaxed) || g_building_entry || !div_guard(self, other)) {
+at::Tensor div_tensor_rbln(const at::Tensor& self, const at::Tensor& other) {
+  if (!g_c_kernel_enabled.load(std::memory_order_relaxed) || g_building_entry || !div_guard(self, other)) {
     return div_fallback(self, other);
   }
 
@@ -44,8 +44,8 @@ at::Tensor div_tensor_rbln_b(const at::Tensor& self, const at::Tensor& other) {
 }
 
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
-  m.impl("div.Tensor", TORCH_FN(div_tensor_rbln_b));
+  m.impl("div.Tensor", TORCH_FN(div_tensor_rbln));
 }
 
 }  // namespace
-}  // namespace c10::rbln::kcache
+}  // namespace c10::rbln::kernel

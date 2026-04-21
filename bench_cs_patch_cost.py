@@ -28,7 +28,7 @@ os.environ.setdefault("TORCH_RBLN_LOG_LEVEL", "ERROR")
 
 import torch
 import torch_rbln  # noqa: F401
-from _b_toggle import STAGES, read_counters, set_b  # noqa: F401
+from _kernel_toggle import STAGES, read_counters, set_enabled  # noqa: F401
 
 
 def run_fixed(size: int, iters: int, warmup: int) -> dict:
@@ -112,7 +112,7 @@ def main() -> int:
     warmup = 100
     iters = 2000
 
-    set_b(True)
+    set_enabled(True)
     print(f"size={size}  warmup={warmup}  iters={iters}", flush=True, file=sys.stderr)
     print(flush=True, file=sys.stderr)
 

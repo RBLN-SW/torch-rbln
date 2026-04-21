@@ -1,4 +1,4 @@
-"""Benchmark Option B (C++ hot path) vs baseline (#3 + #19 + #20) for torch.add.
+"""Benchmark C-kernel (C++ hot path) vs baseline (#3 + #19 + #20) for torch.add.
 
 The B path is toggled at runtime via the ``c10_rbln_set_b_enabled`` C ABI
 entry point. When disabled, ``aten::add.Tensor`` calls fall through to the
@@ -20,7 +20,7 @@ os.environ.setdefault("TORCH_RBLN_LOG_LEVEL", "ERROR")  # silence INFO spam
 
 import torch
 import torch_rbln  # noqa: F401
-from _b_toggle import set_b
+from _kernel_toggle import set_enabled
 
 
 def time_add(a: torch.Tensor, b: torch.Tensor, iters: int) -> list[float]:
@@ -77,8 +77,8 @@ def run_suite(sizes: list[int], warmup: int, iters: int) -> list[dict]:
         a = torch.ones(size, dtype=torch.float16, device=device)
         b = torch.full((size,), 2.0, dtype=torch.float16, device=device)
 
-        for label, b_enabled in [("B_ON", True), ("B_OFF", False)]:
-            set_b(b_enabled)
+        for label, b_enabled in [("C_ON", True), ("C_OFF", False)]:
+            set_enabled(b_enabled)
             correctness_check(a, b)
 
             for _ in range(warmup):
@@ -114,13 +114,13 @@ def main() -> int:
     print(flush=True)
     print("=== B vs baseline speedup (p50) ===", flush=True)
     for size in args.sizes:
-        b_on = next(r for r in rows if r["size"] == size and r["label"] == "B_ON")
-        b_off = next(r for r in rows if r["size"] == size and r["label"] == "B_OFF")
+        b_on = next(r for r in rows if r["size"] == size and r["label"] == "C_ON")
+        b_off = next(r for r in rows if r["size"] == size and r["label"] == "C_OFF")
         speedup = b_off["p50_us"] / b_on["p50_us"] if b_on["p50_us"] > 0 else float("inf")
         saved = b_off["p50_us"] - b_on["p50_us"]
         print(
-            f"size={size:>8d}  B_OFF p50={b_off['p50_us']:>7.2f}us  "
-            f"B_ON p50={b_on['p50_us']:>7.2f}us  "
+            f"size={size:>8d}  C_OFF p50={b_off['p50_us']:>7.2f}us  "
+            f"C_ON p50={b_on['p50_us']:>7.2f}us  "
             f"speedup={speedup:.2f}x  saved={saved:>7.2f}us",
             flush=True,
         )

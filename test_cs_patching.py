@@ -1,11 +1,11 @@
-"""Stress-test Option B for rebel-runtime CS (command stream) patching.
+"""Stress-test C-kernel for rebel-runtime CS (command stream) patching.
 
 Concern: rebel's runtime stamps input/output addresses into the compiled command
 stream during PrepareInputs/PrepareOutputs. If any of that "re-patch on address
-change" logic lived in the Python DynamoRuntime.run wrapper that Option B
+change" logic lived in the Python DynamoRuntime.run wrapper that C-kernel
 bypasses, we'd see wrong results when tensor addresses vary between calls.
 
-This test compares Option B vs the legacy Python path across several address
+This test compares C-kernel vs the legacy Python path across several address
 patterns that would expose a stuck-address bug:
 
   - fresh allocations every call (fresh `a`, `b`, output)
@@ -14,8 +14,8 @@ patterns that would expose a stuck-address bug:
   - randomly permuted allocation order (address can go backward)
 
 Each call's result is compared against a CPU reference computed from the
-actual input values. A single mismatch on B_ON that does not reproduce on
-B_OFF indicates the CS patching assumption in B is wrong.
+actual input values. A single mismatch on C_ON that does not reproduce on
+C_OFF indicates the CS patching assumption in B is wrong.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ os.environ.setdefault("TORCH_RBLN_LOG_LEVEL", "ERROR")
 
 import torch
 import torch_rbln  # noqa: F401
-from _b_toggle import set_b
+from _kernel_toggle import set_enabled
 
 
 def _compare(a_rbln, b_rbln, out_rbln, label: str, i: int) -> tuple[bool, str]:
@@ -153,8 +153,8 @@ def main() -> int:
     any_fail = False
     for size in sizes:
         for name, fn in SCENARIOS:
-            for mode_name, enabled in [("B_ON", True), ("B_OFF", False)]:
-                set_b(enabled)
+            for mode_name, enabled in [("C_ON", True), ("C_OFF", False)]:
+                set_enabled(enabled)
                 # Warm-up once so compile/caching happens for this shape
                 # before the measurement scenarios.
                 dev = torch.device("rbln:0")
@@ -182,7 +182,7 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    print("RESULT: all scenarios passed for B_ON and B_OFF", flush=True, file=sys.stderr)
+    print("RESULT: all scenarios passed for C_ON and C_OFF", flush=True, file=sys.stderr)
     return 0
 
 

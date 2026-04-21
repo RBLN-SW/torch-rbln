@@ -1,4 +1,4 @@
-"""Break down the B_ON steady-state cost for torch.add into stages via the
+"""Break down the C_ON steady-state cost for torch.add into stages via the
 timing counters exported from torch_rbln/_C.*.so.
 
 Stages (run_cached template, all in rebel runtime after our guard+find):
@@ -25,7 +25,7 @@ os.environ.setdefault("TORCH_RBLN_LOG_LEVEL", "ERROR")
 
 import torch
 import torch_rbln  # noqa: F401
-from _b_toggle import STAGES, read_counters, set_b
+from _kernel_toggle import STAGES, read_counters, set_enabled
 
 def run_one(size: int, pool_n: int, warmup: int, iters: int) -> dict:
     device = torch.device("rbln:0")
@@ -71,8 +71,8 @@ def main() -> int:
     warmup = 100
     iters = 2000
 
-    # Use B_ON only — we're breaking down the B path itself.
-    set_b(True)
+    # Use C_ON only — we're breaking down the B path itself.
+    set_enabled(True)
 
     print(f"size={size}  pool={pool_n}  warmup={warmup}  iters={iters}",
           flush=True, file=sys.stderr)

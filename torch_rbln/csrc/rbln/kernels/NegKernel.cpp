@@ -1,4 +1,4 @@
-// Option B fast path for aten::neg on RBLN PrivateUse1.
+// C++ fast path for aten::neg on RBLN PrivateUse1.
 //
 // Unary op — tests the template on a single-input arity to verify generality.
 
@@ -9,7 +9,7 @@
 
 #include <array>
 
-namespace c10::rbln::kcache {
+namespace c10::rbln::kernel {
 namespace {
 
 bool neg_guard(const at::Tensor& a) {
@@ -22,8 +22,8 @@ at::Tensor neg_fallback(const at::Tensor& self) {
   return out;
 }
 
-at::Tensor neg_rbln_b(const at::Tensor& self) {
-  if (!g_b_enabled.load(std::memory_order_relaxed) || g_building_entry || !neg_guard(self)) {
+at::Tensor neg_rbln(const at::Tensor& self) {
+  if (!g_c_kernel_enabled.load(std::memory_order_relaxed) || g_building_entry || !neg_guard(self)) {
     return neg_fallback(self);
   }
 
@@ -43,8 +43,8 @@ at::Tensor neg_rbln_b(const at::Tensor& self) {
 }
 
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
-  m.impl("neg", TORCH_FN(neg_rbln_b));
+  m.impl("neg", TORCH_FN(neg_rbln));
 }
 
 }  // namespace
-}  // namespace c10::rbln::kcache
+}  // namespace c10::rbln::kernel

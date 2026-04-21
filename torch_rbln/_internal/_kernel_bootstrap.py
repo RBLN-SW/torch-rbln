@@ -1,4 +1,4 @@
-"""Bootstrap module for Option B (C++ hot-path) kernels.
+"""Bootstrap module for the C++ hot-path kernels.
 
 C++ kernels invoke ``build_*_runtime`` helpers here on cache miss to obtain
 a rebel ``DynamoRuntime`` whose ``_runtime_handle`` is a ``PyRblnSyncRuntime``.
@@ -66,7 +66,7 @@ def _drive_compile(op_module: torch.nn.Module, *sample_args: torch.Tensor):
     if not holder:
         raise RuntimeError(
             "rbln_backend did not populate _runtime_holder; cannot bootstrap "
-            f"Option B cache for {op_module.__class__.__name__}"
+            f"C-kernel cache for {op_module.__class__.__name__}"
         )
     return holder[-1]
 

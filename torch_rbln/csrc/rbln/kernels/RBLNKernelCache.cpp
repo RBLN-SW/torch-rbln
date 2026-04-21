@@ -6,12 +6,12 @@
 #include <atomic>
 #include <string>
 
-namespace c10::rbln::kcache {
+namespace c10::rbln::kernel {
 
-// Process-wide state for all Option B kernels.
-std::atomic<bool> g_b_enabled{true};
+// Process-wide state for all C-kernel.
+std::atomic<bool> g_c_kernel_enabled{true};
 thread_local bool g_building_entry = false;
-#if C10_RBLN_B_TIMING
+#if C10_RBLN_C_KERNEL_TIMING
 HotPathCounters g_hp;
 #endif
 
@@ -53,25 +53,25 @@ at::ScalarType dtype_from_rbln_string(const std::string& s) {
   TORCH_CHECK(false, "rbln dtype string not mapped to torch dtype: ", s);
 }
 
-}  // namespace c10::rbln::kcache
+}  // namespace c10::rbln::kernel
 
 // C ABI toggle — reachable from Python via ctypes, lets benchmarks flip the
-// Option B path on/off within one process for all kernels.
-extern "C" C10_RBLN_API void c10_rbln_set_b_enabled(int enabled) {
-  c10::rbln::kcache::g_b_enabled.store(enabled != 0, std::memory_order_relaxed);
+// C-kernel path on/off within one process for all kernels.
+extern "C" C10_RBLN_API void c10_rbln_c_kernel_set_enabled(int enabled) {
+  c10::rbln::kernel::g_c_kernel_enabled.store(enabled != 0, std::memory_order_relaxed);
 }
 
-extern "C" C10_RBLN_API int c10_rbln_get_b_enabled() {
-  return c10::rbln::kcache::g_b_enabled.load(std::memory_order_relaxed) ? 1 : 0;
+extern "C" C10_RBLN_API int c10_rbln_c_kernel_get_enabled() {
+  return c10::rbln::kernel::g_c_kernel_enabled.load(std::memory_order_relaxed) ? 1 : 0;
 }
 
 // Hot-path breakdown counters — read-then-reset via single call. When
-// C10_RBLN_B_TIMING is 0 the counters don't exist and this returns zeros.
+// C10_RBLN_C_KERNEL_TIMING is 0 the counters don't exist and this returns zeros.
 // `out_ns` must point to 7 uint64_t slots, in the order:
 //   [n_calls, alloc, build_maps, prepare_in, prepare_out, run, total]
-extern "C" C10_RBLN_API void c10_rbln_hp_read_and_reset(uint64_t* out_ns) {
-#if C10_RBLN_B_TIMING
-  using c10::rbln::kcache::g_hp;
+extern "C" C10_RBLN_API void c10_rbln_c_kernel_read_timing(uint64_t* out_ns) {
+#if C10_RBLN_C_KERNEL_TIMING
+  using c10::rbln::kernel::g_hp;
   out_ns[0] = g_hp.n_calls.exchange(0, std::memory_order_relaxed);
   out_ns[1] = g_hp.alloc_ns.exchange(0, std::memory_order_relaxed);
   out_ns[2] = g_hp.build_maps_ns.exchange(0, std::memory_order_relaxed);
