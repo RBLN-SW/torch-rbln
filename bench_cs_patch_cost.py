@@ -20,38 +20,15 @@ pre-allocated and reused to make the comparison clean.
 
 from __future__ import annotations
 
-import ctypes
 import os
 import sys
 import time
-from pathlib import Path
 
 os.environ.setdefault("TORCH_RBLN_LOG_LEVEL", "ERROR")
 
 import torch
 import torch_rbln  # noqa: F401
-
-_LIB = ctypes.CDLL(
-    str(Path(torch_rbln.__file__).parent / "lib" / "libc10_rbln.so"),
-    mode=ctypes.RTLD_GLOBAL,
-)
-_LIB.c10_rbln_set_b_enabled.argtypes = [ctypes.c_int]
-_LIB.c10_rbln_set_b_enabled.restype = None
-_LIB.c10_rbln_hp_read_and_reset.argtypes = [ctypes.POINTER(ctypes.c_uint64)]
-_LIB.c10_rbln_hp_read_and_reset.restype = None
-
-STAGES = ["n_calls", "guard", "find", "alloc", "build_maps",
-          "prepare_in", "prepare_out", "run", "total"]
-
-
-def set_b(enabled: bool) -> None:
-    _LIB.c10_rbln_set_b_enabled(1 if enabled else 0)
-
-
-def read_counters() -> dict[str, int]:
-    buf = (ctypes.c_uint64 * len(STAGES))()
-    _LIB.c10_rbln_hp_read_and_reset(buf)
-    return {name: int(buf[i]) for i, name in enumerate(STAGES)}
+from _b_toggle import STAGES, read_counters, set_b  # noqa: F401
 
 
 def run_fixed(size: int, iters: int, warmup: int) -> dict:
@@ -114,11 +91,14 @@ def _package(cnt, wall_total_ns, iters):
 
 
 def fmt_row(label, d):
-    our_cpp = (d["guard"] + d["find"] + d["alloc"] + d["build_maps"]) / 1000.0
+    # "our_cpp" here is the portion of kernel time spent in our C++ outside
+    # the rebel runtime calls — alloc + std::map construction inside
+    # run_cached<N>, plus (untracked) guard/find in the per-op stub.
+    our_cpp_tracked = (d["alloc"] + d["build_maps"]) / 1000.0
     our_py = d["python_extra"] / 1000.0
     return (
         f"{label:<6}  "
-        f"our_cpp={our_cpp:>5.2f}us  "
+        f"our_cpp={our_cpp_tracked:>5.2f}us  "
         f"prepare_in={d['prepare_in']/1000:>7.2f}us  "
         f"prepare_out={d['prepare_out']/1000:>7.2f}us  "
         f"run={d['run']/1000:>7.2f}us  "

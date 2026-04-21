@@ -3,7 +3,7 @@
 
 #include <ATen/Operators.h>
 #include <ATen/core/Tensor.h>
-#include <c10/rbln/impl/RBLNKernelTemplate.h>
+#include "RBLNKernelTemplate.h"
 #include <torch/library.h>
 
 #include <array>

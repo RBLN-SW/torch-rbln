@@ -10,28 +10,16 @@ unary) and the speedup is consistent with the add-only numbers.
 
 from __future__ import annotations
 
-import ctypes
 import os
 import statistics
 import sys
 import time
-from pathlib import Path
 
 os.environ.setdefault("TORCH_RBLN_LOG_LEVEL", "ERROR")
 
 import torch
 import torch_rbln  # noqa: F401
-
-_LIB = ctypes.CDLL(
-    str(Path(torch_rbln.__file__).parent / "lib" / "libc10_rbln.so"),
-    mode=ctypes.RTLD_GLOBAL,
-)
-_LIB.c10_rbln_set_b_enabled.argtypes = [ctypes.c_int]
-_LIB.c10_rbln_set_b_enabled.restype = None
-
-
-def set_b(enabled: bool) -> None:
-    _LIB.c10_rbln_set_b_enabled(1 if enabled else 0)
+from _b_toggle import set_b
 
 
 def make_pool_binary(size: int, n: int):

@@ -38,11 +38,6 @@ class PyRblnSyncRuntime {
                      const std::map<uint32_t, uintptr_t>& cpu_inputs);
   void PrepareOutputs(const std::map<uint32_t, uint64_t>& device_outputs,
                       const std::map<uint32_t, uintptr_t>& cpu_outputs);
-  // Lightweight variants: skip vmem manager re-sync and only patch the CS/GCE
-  // with the new device addresses. Must match upstream header exactly:
-  //   rebel/include/rebel/pyrbln_impl/compiled_model.h:162-163.
-  void UpdateInputAddr(uint32_t input_idx, const std::vector<uint64_t>& device_addrs);
-  void UpdateOutputAddr(uint32_t output_idx, const std::vector<uint64_t>& device_addrs);
 };
 }  // namespace rbln
 
@@ -120,13 +115,17 @@ class C10_RBLN_API KernelCache {
 };
 
 // --------------------------------------------------------------------------
-// Hot-path breakdown counters (cumulative). Bench code reads + resets these
-// via the C ABI in RBLNKernelCache.cpp. Overhead per call is ~8 chrono::now
-// probes (~150ns) which is small vs the >500us/op steady state.
+// Hot-path breakdown counters (cumulative). Compiled away in production
+// builds; enable with -DC10_RBLN_B_TIMING=1 for bench/profiling. When off,
+// the C ABI `c10_rbln_hp_read_and_reset` still exists and returns zeros so
+// callers can probe unconditionally.
+#ifndef C10_RBLN_B_TIMING
+#define C10_RBLN_B_TIMING 0
+#endif
+
+#if C10_RBLN_B_TIMING
 struct HotPathCounters {
   std::atomic<uint64_t> n_calls{0};
-  std::atomic<uint64_t> guard_ns{0};
-  std::atomic<uint64_t> find_ns{0};
   std::atomic<uint64_t> alloc_ns{0};
   std::atomic<uint64_t> build_maps_ns{0};
   std::atomic<uint64_t> prepare_in_ns{0};
@@ -134,11 +133,7 @@ struct HotPathCounters {
   std::atomic<uint64_t> run_ns{0};
   std::atomic<uint64_t> total_ns{0};
 };
-
 extern HotPathCounters g_hp;
-
-// Flag exposed to the bench: when true, AddKernelB uses UpdateInputAddr /
-// UpdateOutputAddr instead of PrepareInputs / PrepareOutputs on the hot path.
-extern std::atomic<bool> g_b_use_update_addr;
+#endif
 
 }  // namespace c10::rbln::kcache

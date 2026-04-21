@@ -9,26 +9,17 @@ every call.
 
 from __future__ import annotations
 
-import ctypes
 import gc
 import os
 import statistics
 import sys
 import time
-from pathlib import Path
 
 os.environ.setdefault("TORCH_RBLN_LOG_LEVEL", "ERROR")
 
 import torch
 import torch_rbln  # noqa: F401
-
-_LIB = ctypes.CDLL(str(Path(torch_rbln.__file__).parent / "lib" / "libc10_rbln.so"), mode=ctypes.RTLD_GLOBAL)
-_LIB.c10_rbln_set_b_add_enabled.argtypes = [ctypes.c_int]
-_LIB.c10_rbln_set_b_add_enabled.restype = None
-
-
-def set_b(enabled: bool) -> None:
-    _LIB.c10_rbln_set_b_add_enabled(1 if enabled else 0)
+from _b_toggle import set_b
 
 
 def time_add_varying(size: int, iters: int) -> list[float]:

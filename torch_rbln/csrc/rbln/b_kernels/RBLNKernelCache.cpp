@@ -1,5 +1,5 @@
 #include <ATen/core/ScalarType.h>
-#include <c10/rbln/impl/RBLNKernelCache.h>
+#include "RBLNKernelCache.h"
 #include <c10/rbln/RBLNMacros.h>
 #include <c10/util/Exception.h>
 
@@ -10,12 +10,10 @@ namespace c10::rbln::kcache {
 
 // Process-wide state for all Option B kernels.
 std::atomic<bool> g_b_enabled{true};
-// When true, AddKernelB swaps PrepareInputs/PrepareOutputs for the lighter
-// UpdateInputAddr/UpdateOutputAddr variants. Default off so behaviour is
-// identical to the original setup until explicitly enabled by benchmarks.
-std::atomic<bool> g_b_use_update_addr{false};
 thread_local bool g_building_entry = false;
+#if C10_RBLN_B_TIMING
 HotPathCounters g_hp;
+#endif
 
 KernelCache& KernelCache::instance() {
   static KernelCache cache;
@@ -67,22 +65,21 @@ extern "C" C10_RBLN_API int c10_rbln_get_b_enabled() {
   return c10::rbln::kcache::g_b_enabled.load(std::memory_order_relaxed) ? 1 : 0;
 }
 
-extern "C" C10_RBLN_API void c10_rbln_set_b_use_update_addr(int enabled) {
-  c10::rbln::kcache::g_b_use_update_addr.store(enabled != 0, std::memory_order_relaxed);
-}
-
-// Hot-path breakdown counters — read-then-reset via single call.
-// `out_ns` must point to 9 uint64_t slots, in the order:
-//   [n_calls, guard, find, alloc, build_maps, prepare_in, prepare_out, run, total]
+// Hot-path breakdown counters — read-then-reset via single call. When
+// C10_RBLN_B_TIMING is 0 the counters don't exist and this returns zeros.
+// `out_ns` must point to 7 uint64_t slots, in the order:
+//   [n_calls, alloc, build_maps, prepare_in, prepare_out, run, total]
 extern "C" C10_RBLN_API void c10_rbln_hp_read_and_reset(uint64_t* out_ns) {
+#if C10_RBLN_B_TIMING
   using c10::rbln::kcache::g_hp;
   out_ns[0] = g_hp.n_calls.exchange(0, std::memory_order_relaxed);
-  out_ns[1] = g_hp.guard_ns.exchange(0, std::memory_order_relaxed);
-  out_ns[2] = g_hp.find_ns.exchange(0, std::memory_order_relaxed);
-  out_ns[3] = g_hp.alloc_ns.exchange(0, std::memory_order_relaxed);
-  out_ns[4] = g_hp.build_maps_ns.exchange(0, std::memory_order_relaxed);
-  out_ns[5] = g_hp.prepare_in_ns.exchange(0, std::memory_order_relaxed);
-  out_ns[6] = g_hp.prepare_out_ns.exchange(0, std::memory_order_relaxed);
-  out_ns[7] = g_hp.run_ns.exchange(0, std::memory_order_relaxed);
-  out_ns[8] = g_hp.total_ns.exchange(0, std::memory_order_relaxed);
+  out_ns[1] = g_hp.alloc_ns.exchange(0, std::memory_order_relaxed);
+  out_ns[2] = g_hp.build_maps_ns.exchange(0, std::memory_order_relaxed);
+  out_ns[3] = g_hp.prepare_in_ns.exchange(0, std::memory_order_relaxed);
+  out_ns[4] = g_hp.prepare_out_ns.exchange(0, std::memory_order_relaxed);
+  out_ns[5] = g_hp.run_ns.exchange(0, std::memory_order_relaxed);
+  out_ns[6] = g_hp.total_ns.exchange(0, std::memory_order_relaxed);
+#else
+  for (int i = 0; i < 7; ++i) out_ns[i] = 0;
+#endif
 }

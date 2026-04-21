@@ -1,43 +1,26 @@
 """Benchmark Option B (C++ hot path) vs baseline (#3 + #19 + #20) for torch.add.
 
-The B path is toggled at runtime via the ``c10_rbln_set_b_add_enabled`` C ABI
-entry point exported from ``libc10_rbln.so``. When disabled, ``aten::add.Tensor``
-calls fall through to the legacy composite-explicit-autograd path, which
-allocates an output and invokes ``add.out`` → ``add_out_rbln`` (Python fast path
-from #19) → ``DynamoRuntime.run`` (trimmed by #20).
+The B path is toggled at runtime via the ``c10_rbln_set_b_enabled`` C ABI
+entry point. When disabled, ``aten::add.Tensor`` calls fall through to the
+composite-explicit-autograd path, which allocates an output and invokes
+``add.out`` → ``add_out_rbln`` (Python fast path from #19) → ``DynamoRuntime.run``
+(trimmed by #20).
 """
 
 from __future__ import annotations
 
 import argparse
-import ctypes
 import gc
 import os
 import statistics
 import sys
 import time
-from pathlib import Path
 
 os.environ.setdefault("TORCH_RBLN_LOG_LEVEL", "ERROR")  # silence INFO spam
 
 import torch
 import torch_rbln  # noqa: F401
-
-# Load libc10_rbln.so to flip the B toggle.
-_LIBC10_RBLN = ctypes.CDLL(
-    str(Path(torch_rbln.__file__).parent / "lib" / "libc10_rbln.so"),
-    mode=ctypes.RTLD_GLOBAL,
-)
-_LIBC10_RBLN.c10_rbln_set_b_add_enabled.argtypes = [ctypes.c_int]
-_LIBC10_RBLN.c10_rbln_set_b_add_enabled.restype = None
-_LIBC10_RBLN.c10_rbln_get_b_add_enabled.argtypes = []
-_LIBC10_RBLN.c10_rbln_get_b_add_enabled.restype = ctypes.c_int
-
-
-def set_b(enabled: bool) -> None:
-    _LIBC10_RBLN.c10_rbln_set_b_add_enabled(1 if enabled else 0)
-    got = _LIBC10_RBLN.c10_rbln_get_b_add_enabled()
-    assert got == (1 if enabled else 0), f"toggle failed: got {got}"
+from _b_toggle import set_b
 
 
 def time_add(a: torch.Tensor, b: torch.Tensor, iters: int) -> list[float]:
@@ -54,10 +37,7 @@ def time_add(a: torch.Tensor, b: torch.Tensor, iters: int) -> list[float]:
 def correctness_check(a: torch.Tensor, b: torch.Tensor) -> None:
     got = torch.add(a, b).detach().cpu()
     ref = (a.detach().cpu() + b.detach().cpu()).to(torch.float16)
-    # fp16 add on rbln should match fp16 add on cpu bit-for-bit for our inputs
-    # (ones + twos with small counts); if not, loosen to allclose.
     if not torch.equal(got, ref):
-        # Diff diagnostic
         max_err = (got.float() - ref.float()).abs().max().item()
         raise RuntimeError(f"correctness FAIL: max_abs_err={max_err}")
 
@@ -99,11 +79,8 @@ def run_suite(sizes: list[int], warmup: int, iters: int) -> list[dict]:
 
         for label, b_enabled in [("B_ON", True), ("B_OFF", False)]:
             set_b(b_enabled)
-
-            # Correctness before timing for each config.
             correctness_check(a, b)
 
-            # Warm-up (compile on first call if miss; settle caches).
             for _ in range(warmup):
                 _ = torch.add(a, b)
 
@@ -112,7 +89,6 @@ def run_suite(sizes: list[int], warmup: int, iters: int) -> list[dict]:
             results.append(r)
             print(fmt_row(r), flush=True)
 
-        # Free per-size tensors before moving on.
         del a, b
         gc.collect()
 
@@ -130,17 +106,11 @@ def main() -> int:
     ap.add_argument("--iters", type=int, default=1000)
     args = ap.parse_args()
 
-    # Sanity: require the toggle to be exported.
-    set_b(True)
-    set_b(False)
-    set_b(True)
-
     print(f"sizes={args.sizes}  warmup={args.warmup}  iters={args.iters}", flush=True)
     print(f"{'label':<10s} {'size':>13s}  {'min':>11s}  {'p50':>11s}  {'p99':>11s}  {'mean':>11s}", flush=True)
 
     rows = run_suite(args.sizes, args.warmup, args.iters)
 
-    # Side-by-side speedup summary.
     print(flush=True)
     print("=== B vs baseline speedup (p50) ===", flush=True)
     for size in args.sizes:

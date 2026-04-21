@@ -1,54 +1,31 @@
-"""Break down the ~700us B_ON steady-state cost for torch.add into stages
-via C++ counters exported from libc10_rbln.so.
+"""Break down the B_ON steady-state cost for torch.add into stages via the
+timing counters exported from torch_rbln/_C.*.so.
 
-Stages:
-  guard       -> tensor predicate + shape/dtype/device checks
-  find        -> CacheKey construct + unordered_map::find()
+Stages (run_cached template, all in rebel runtime after our guard+find):
   alloc       -> at::empty for output tensor
   build_maps  -> std::map<uint32_t, uint64_t> for dev_in / dev_out
-  prepare_in  -> PyRblnSyncRuntime::PrepareInputs (rebel C++)
-  prepare_out -> PyRblnSyncRuntime::PrepareOutputs (rebel C++)
+  prepare_in  -> PyRblnSyncRuntime::PrepareInputs
+  prepare_out -> PyRblnSyncRuntime::PrepareOutputs
   run         -> PyRblnSyncRuntime::Run (device launch + wait)
-  total       -> sum of above (kernel function time)
-  bench_wall  -> wall-clock per-call time measured in Python (dispatcher +
-                 return path included)
+  total       -> sum of above (time inside run_cached)
+  bench_wall  -> wall-clock per-call time measured in Python (includes
+                 ATen dispatcher entry, our guard/find, return path)
+
+Requires the C++ lib built with ``-DTORCH_RBLN_B_TIMING=ON``; otherwise the
+counters return zeros.
 """
 
 from __future__ import annotations
 
-import ctypes
 import os
 import sys
 import time
-from pathlib import Path
 
 os.environ.setdefault("TORCH_RBLN_LOG_LEVEL", "ERROR")
 
 import torch
 import torch_rbln  # noqa: F401
-
-_LIB = ctypes.CDLL(
-    str(Path(torch_rbln.__file__).parent / "lib" / "libc10_rbln.so"),
-    mode=ctypes.RTLD_GLOBAL,
-)
-_LIB.c10_rbln_set_b_enabled.argtypes = [ctypes.c_int]
-_LIB.c10_rbln_set_b_enabled.restype = None
-_LIB.c10_rbln_hp_read_and_reset.argtypes = [ctypes.POINTER(ctypes.c_uint64)]
-_LIB.c10_rbln_hp_read_and_reset.restype = None
-
-STAGES = ["n_calls", "guard", "find", "alloc", "build_maps",
-          "prepare_in", "prepare_out", "run", "total"]
-
-
-def set_b(enabled: bool) -> None:
-    _LIB.c10_rbln_set_b_enabled(1 if enabled else 0)
-
-
-def read_counters() -> dict[str, int]:
-    buf = (ctypes.c_uint64 * len(STAGES))()
-    _LIB.c10_rbln_hp_read_and_reset(buf)
-    return {name: int(buf[i]) for i, name in enumerate(STAGES)}
-
+from _b_toggle import STAGES, read_counters, set_b
 
 def run_one(size: int, pool_n: int, warmup: int, iters: int) -> dict:
     device = torch.device("rbln:0")
@@ -104,7 +81,7 @@ def main() -> int:
     stats = run_one(size, pool_n, warmup, iters)
 
     order = [
-        "guard", "find", "alloc", "build_maps",
+        "alloc", "build_maps",
         "prepare_in", "prepare_out", "run", "total",
         "python_extra", "bench_wall",
     ]

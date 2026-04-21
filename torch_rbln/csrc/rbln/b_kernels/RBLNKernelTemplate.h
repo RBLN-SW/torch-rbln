@@ -14,12 +14,13 @@
 #include <ATen/ATen.h>
 #include <ATen/core/Tensor.h>
 #include <ATen/ops/empty.h>
-#include <c10/rbln/impl/RBLNKernelCache.h>
+#include "RBLNKernelCache.h"
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <torch/csrc/utils/pybind.h>
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -74,6 +75,14 @@ CacheEntry build_entry_via_python(const char* builder_attr, const SampleTs&... s
   return entry;
 }
 
+// Helper: wall-clock nanoseconds. Only used when C10_RBLN_B_TIMING=1.
+#if C10_RBLN_B_TIMING
+inline uint64_t now_ns() {
+  using clk = std::chrono::steady_clock;
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(clk::now().time_since_epoch()).count();
+}
+#endif
+
 // Execute a single-output kernel given N input tensors already validated.
 // Returns the freshly allocated output tensor (rbln device).
 template <size_t N>
@@ -82,9 +91,17 @@ at::Tensor run_cached(const CacheEntry& entry, const std::array<const at::Tensor
   const OutProfile& op = entry.out_profiles[0];
   TORCH_CHECK(op.is_rbln_device, "Option B template: expected rbln-device output");
 
+#if C10_RBLN_B_TIMING
+  const auto t0 = now_ns();
+#endif
+
   auto out = at::empty(
       op.shape,
       at::TensorOptions().dtype(op.dtype).device(ins[0]->device()));
+
+#if C10_RBLN_B_TIMING
+  const auto t1 = now_ns();
+#endif
 
   std::map<uint32_t, uint64_t> dev_in;
   for (uint32_t i = 0; i < N; ++i) {
@@ -95,9 +112,35 @@ at::Tensor run_cached(const CacheEntry& entry, const std::array<const at::Tensor
   dev_out.emplace(0u, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(out.data_ptr())));
   std::map<uint32_t, uintptr_t> cpu_out;
 
+#if C10_RBLN_B_TIMING
+  const auto t2 = now_ns();
+#endif
+
   entry.runtime->PrepareInputs(dev_in, cpu_in);
+
+#if C10_RBLN_B_TIMING
+  const auto t3 = now_ns();
+#endif
+
   entry.runtime->PrepareOutputs(dev_out, cpu_out);
+
+#if C10_RBLN_B_TIMING
+  const auto t4 = now_ns();
+#endif
+
   entry.runtime->Run();
+
+#if C10_RBLN_B_TIMING
+  const auto t5 = now_ns();
+  g_hp.n_calls.fetch_add(1, std::memory_order_relaxed);
+  g_hp.alloc_ns.fetch_add(t1 - t0, std::memory_order_relaxed);
+  g_hp.build_maps_ns.fetch_add(t2 - t1, std::memory_order_relaxed);
+  g_hp.prepare_in_ns.fetch_add(t3 - t2, std::memory_order_relaxed);
+  g_hp.prepare_out_ns.fetch_add(t4 - t3, std::memory_order_relaxed);
+  g_hp.run_ns.fetch_add(t5 - t4, std::memory_order_relaxed);
+  g_hp.total_ns.fetch_add(t5 - t0, std::memory_order_relaxed);
+#endif
+
   return out;
 }
 

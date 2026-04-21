@@ -33,10 +33,4 @@ foreach(source ${sources})
     INSTALL_RPATH "${irpath}"
   )
 
-  # libc10_rbln.so now uses pybind11 (for the Option B kernel cache's miss
-  # path into Python). Test executables don't link libpython; let the linker
-  # ignore those unresolved shared-lib symbols. At test runtime the tests
-  # don't invoke the Python-using code path.
-  target_link_options(${target} PRIVATE "LINKER:--unresolved-symbols=ignore-in-shared-libs")
-
 endforeach()

@@ -20,40 +20,23 @@ B_OFF indicates the CS patching assumption in B is wrong.
 
 from __future__ import annotations
 
-import ctypes
 import os
 import random
 import sys
-from pathlib import Path
 
 os.environ.setdefault("TORCH_RBLN_LOG_LEVEL", "ERROR")
 
 import torch
 import torch_rbln  # noqa: F401
-
-_LIBC10_RBLN = ctypes.CDLL(
-    str(Path(torch_rbln.__file__).parent / "lib" / "libc10_rbln.so"),
-    mode=ctypes.RTLD_GLOBAL,
-)
-# NB: the toggle is still named *_b_add_enabled in the current build; the
-# refactor that renames to *_b_enabled is WIP.
-_LIBC10_RBLN.c10_rbln_set_b_add_enabled.argtypes = [ctypes.c_int]
-_LIBC10_RBLN.c10_rbln_set_b_add_enabled.restype = None
-
-
-def set_b(enabled: bool) -> None:
-    _LIBC10_RBLN.c10_rbln_set_b_add_enabled(1 if enabled else 0)
+from _b_toggle import set_b
 
 
 def _compare(a_rbln, b_rbln, out_rbln, label: str, i: int) -> tuple[bool, str]:
-    a_cpu = a_rbln.detach().cpu()
-    b_cpu = b_rbln.detach().cpu()
-    ref = (a_cpu.float() + b_cpu.float()).to(torch.float16)
+    ref = (a_rbln.detach().cpu().float() + b_rbln.detach().cpu().float()).to(torch.float16)
     got = out_rbln.detach().cpu()
     if torch.equal(got, ref):
         return True, ""
     max_err = (got.float() - ref.float()).abs().max().item()
-    # Find first mismatch index for diagnostic.
     diff_idx = int((got != ref).nonzero(as_tuple=False)[0, 0])
     return False, (
         f"[{label} i={i}] MISMATCH at idx={diff_idx}: "

@@ -2,12 +2,34 @@ set(target torch_rbln_csrc_rbln)
 
 find_package(Torch REQUIRED)
 
-pybind11_add_module(${target} Module.cpp ../distributed/c10d/rbln/ProcessGroupRBLNModule.cpp)
+# Option B C++ kernels live here — they use pybind11 (for the miss-path
+# bootstrap into Python) so they belong in the Python extension module, not
+# in libc10_rbln.so.
+set(b_kernel_sources
+  b_kernels/RBLNKernelCache.cpp
+  b_kernels/AddKernelB.cpp
+  b_kernels/SubKernelB.cpp
+  b_kernels/MulKernelB.cpp
+  b_kernels/DivKernelB.cpp
+  b_kernels/NegKernelB.cpp
+)
+
+pybind11_add_module(${target}
+  Module.cpp
+  ../distributed/c10d/rbln/ProcessGroupRBLNModule.cpp
+  ${b_kernel_sources}
+)
 
 
 find_library(TORCH_PYTHON_LIBRARY torch_python PATH "${TORCH_INSTALL_PREFIX}/lib")
 
 target_link_libraries(${target} PUBLIC torch_rbln ${TORCH_PYTHON_LIBRARY})
+
+# Enable hot-path breakdown counters (for bench). Off by default in release
+# builds; turn on via -DTORCH_RBLN_B_TIMING=ON to the top-level cmake.
+if(TORCH_RBLN_B_TIMING)
+  target_compile_definitions(${target} PRIVATE C10_RBLN_B_TIMING=1)
+endif()
 set_target_properties(${target} PROPERTIES
   OUTPUT_NAME _C
   PREFIX ""
