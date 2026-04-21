@@ -6,8 +6,8 @@ from torch_rbln._internal.compile_cache import compile_rbln_cached
 from torch_rbln._internal.env_utils import use_device_group_tensor_parallel_size
 from torch_rbln._internal.ops_utils import (
     can_use_out_tensor_directly,
-    extract_device_id_from_inputs,
     cpu_fallback_path,
+    extract_device_id_from_inputs,
     finalize_output_tensor,
     handle_empty_binary,
     is_cpu_fallback_cases,

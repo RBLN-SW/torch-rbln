@@ -12,9 +12,8 @@ import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from test.utils import requires_logical_devices
-
 import torch_rbln._internal.register_custom_ops as register_custom_ops
+from test.utils import requires_logical_devices
 from torch_rbln._internal.compile_cache import clear_rbln_compile_cache, compile_rbln_cached
 from torch_rbln._internal.monkey_patches import patch_torch_compile, remove_all_patches
 from torch_rbln._internal.ops_utils import extract_device_id_from_inputs
@@ -835,9 +834,15 @@ class TestTorchCompileMonkeyPatch(TestCase):
         compiled_b = Mock(name="compiled_b")
 
         with patch("torch_rbln._internal.compile_cache.id", return_value=7, create=True):
-            with patch("torch_rbln._internal.compile_cache.torch.compile", side_effect=[compiled_a, compiled_b]) as mock_compile:
-                first = compile_rbln_cached(model_a, dynamic=False, options={"disable_logger": True}, device_cache_key=0)
-                second = compile_rbln_cached(model_b, dynamic=False, options={"disable_logger": True}, device_cache_key=0)
+            with patch(
+                "torch_rbln._internal.compile_cache.torch.compile", side_effect=[compiled_a, compiled_b]
+            ) as mock_compile:
+                first = compile_rbln_cached(
+                    model_a, dynamic=False, options={"disable_logger": True}, device_cache_key=0
+                )
+                second = compile_rbln_cached(
+                    model_b, dynamic=False, options={"disable_logger": True}, device_cache_key=0
+                )
 
         self.assertIs(first, compiled_a)
         self.assertIs(second, compiled_b)

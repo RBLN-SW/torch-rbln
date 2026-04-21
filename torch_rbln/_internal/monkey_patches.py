@@ -112,7 +112,6 @@ def patch_torch_compile() -> None:
         def wrapper(*args, **kwargs):
             """Wrapper that registers RBLN backend on first use, then calls original torch.compile."""
             # Lazy registration: register backend on first use
-            global _rbln_backend_registered
             if not _rbln_backend_registered:
                 _register_rbln_backend()
 
