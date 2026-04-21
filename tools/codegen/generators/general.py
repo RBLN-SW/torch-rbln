@@ -55,6 +55,19 @@ class GeneralFunctionGenerator:
         # else:
         return self.templates.ArgsProcessing.contiguous_preparation_default()
 
+    def _fast_path_eligibility(self, root_name: str):
+        """Return ``(eligible, require_same_shape)`` for the eager fast path.
+
+        Currently enabled for binary same-shape elementwise ops
+        (BROADCASTABLE_OPS) and single-tensor unary ops (UNARY_OPS). Other
+        categories (mm, addmm, where, linear, reduction) keep the slow path.
+        """
+        if root_name in self.op_categories.BROADCASTABLE_OPS:
+            return True, True
+        if root_name in self.op_categories.UNARY_OPS:
+            return True, False
+        return False, False
+
     def generate_function_body(self, kernel_name: str, root_name: str, python_module: str, op_namespace: str) -> str:
         """Generate the complete function body for a general operation."""
         if python_module == "nn":
@@ -65,6 +78,11 @@ class GeneralFunctionGenerator:
         # Per-op module (class + instance) with literal forward for opaque torch.compile
         code = self.templates.FunctionBody.op_module_definition(root_name, target)
         code += self.templates.FunctionBody.start(kernel_name)
+        # Eager fast path attempt (no-op for ineligible ops). Inserted before
+        # any slow-path helpers so the common case bypasses them entirely.
+        eligible, require_same_shape = self._fast_path_eligibility(root_name)
+        if eligible:
+            code += self.templates.FunctionBody.fast_path_block(root_name, require_same_shape)
         code += self.generate_kwargs_filter(root_name)
         if self.op_categories.needs_tensor_args_extraction_before_empty_handling(root_name):
             code += self.templates.ArgsProcessing.tensor_args_extraction()

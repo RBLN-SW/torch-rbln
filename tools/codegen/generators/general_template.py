@@ -181,7 +181,12 @@ class {class_name}(torch.nn.Module):
                 result_tensor = None
 
         with out_tensor_context(result_tensor):
-            compiled = torch.compile({op_module_var}, backend="rbln", dynamic=False, options=compile_options)
+            compiled = compile_rbln_cached(
+                {op_module_var},
+                dynamic=False,
+                options=compile_options,
+                device_cache_key=extract_device_id_from_inputs(*contig_args, **contig_kwargs),
+            )
             external_result = compiled(*contig_args, **contig_kwargs)
             if result_tensor is None:
                 result_tensor = external_result
@@ -189,4 +194,24 @@ class {class_name}(torch.nn.Module):
                 result_tensor.copy_(external_result)
 
     return result_tensor, result_tensor.shape
+"""
+
+        @staticmethod
+        def fast_path_block(root_name: str, require_same_shape: bool) -> str:
+            """Generate the eager-dispatch fast path attempt block.
+
+            Emitted right after the function ``def`` + import line, before the
+            slow path's helper calls. Skips ``is_cpu_fallback_cases``,
+            ``prepare_args_for_contiguous``, ``broadcast_args_general``, the
+            duplicate ``extract_*`` walks, the ``out_tensor_context``
+            contextmanager, and ``CompiledFunctionWrapper`` per-call overhead.
+
+            On miss returns ``None`` so the caller falls through to the
+            existing slow path with semantics unchanged.
+            """
+            op_module_var = f"_{root_name}_op_module"
+            require_same_shape_str = "True" if require_same_shape else "False"
+            return f"""    _fast = try_fast_eager_dispatch({op_module_var}, args, kwargs, require_same_shape={require_same_shape_str})
+    if _fast is not None:
+        return _fast
 """

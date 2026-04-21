@@ -137,6 +137,163 @@ def extract_tensors(obj):
         return []
 
 
+# Allowlist for the eager fast path. Mirrors `_SAFE_DTYPES` in
+# `is_cpu_fallback_cases` (#2 dtype check). Kept frozen so the fast path can
+# do a single `dtype in _FAST_PATH_SAFE_DTYPES` lookup per tensor.
+_FAST_PATH_SAFE_DTYPES = frozenset({torch.float16})
+
+
+def fast_eager_dispatch_check(args, kwargs):
+    """Single-pass check + extraction for the eager dispatch fast path.
+
+    Returns ``(is_safe, device_id, tensor_args)`` where ``is_safe=True`` means
+    the caller can skip:
+
+      - the multi-stage ``is_cpu_fallback_cases`` checks,
+      - the duplicate ``extract_tensors`` traversals,
+      - ``prepare_args_for_contiguous`` (already verified contig + offset 0),
+      - ``extract_device_id_from_inputs`` (returned here),
+
+    A single positional walk validates that every tensor arg is on the same
+    rbln device, has a safe dtype, is contiguous with storage_offset 0, and is
+    non-empty. Caller still owns broadcasting decisions: when ``is_safe`` is
+    True the caller may further check shape equality (or scalar promotion) to
+    avoid the broadcast helper.
+
+    Bails out (returns ``(False, None, [])``) on:
+      - ``out=`` kwarg present (the slow path handles result_tensor binding)
+      - any non-tensor positional? Allowed (numeric scalars are fine for binary
+        ops); only tensor args are validated.
+      - kwargs containing tensors (slow path handles them)
+      - active sys.gettrace() — same conservative behavior as the slow path.
+    """
+    if sys.gettrace() is not None:
+        return False, None, []
+
+    # Reject any non-out kwargs that hold tensors — keep the fast path linear.
+    out_tensor = kwargs.get("out", None)
+    for k, v in kwargs.items():
+        if k == "out":
+            continue
+        if isinstance(v, torch.Tensor):
+            return False, None, []
+
+    tensors = []
+    device_id = None
+    for a in args:
+        if not isinstance(a, torch.Tensor):
+            continue
+        if a.device.type != "rbln":
+            return False, None, []
+        if a.dtype not in _FAST_PATH_SAFE_DTYPES:
+            return False, None, []
+        if a.numel() == 0:
+            return False, None, []
+        if a.storage_offset() != 0 or not a.is_contiguous():
+            return False, None, []
+        if device_id is None:
+            device_id = a.device.index
+        elif a.device.index != device_id:
+            return False, None, []
+        tensors.append(a)
+
+    if not tensors:
+        return False, None, []
+
+    # Validate out kwarg if present: must be a usable rbln tensor that can be
+    # written directly by the compiler (rejects inplace overlap).
+    if out_tensor is not None:
+        if not isinstance(out_tensor, torch.Tensor):
+            return False, None, []
+        if (out_tensor.device.type != "rbln"
+                or out_tensor.device.index != device_id
+                or out_tensor.dtype not in _FAST_PATH_SAFE_DTYPES
+                or out_tensor.numel() == 0
+                or not out_tensor.is_contiguous()
+                or out_tensor.storage_offset() != 0):
+            return False, None, []
+        # In-place detection: out shares storage with any input.
+        out_ptr = out_tensor.data_ptr()
+        for t in tensors:
+            if t.data_ptr() == out_ptr:
+                return False, None, []
+
+    return True, device_id, tensors
+
+
+# Cached compile options for the eager fast path. Identical across all ops
+# (only varies by tensor-parallel-size source). Pre-frozen so dict creation is
+# avoided on the hot path.
+_FAST_PATH_COMPILE_OPTS_TP1 = {"disable_logger": True, "tensor_parallel_size": 1}
+_FAST_PATH_COMPILE_OPTS_TPGROUP = {"disable_logger": True}
+
+
+def try_fast_eager_dispatch(op_module, args, kwargs, *, require_same_shape=True):
+    """Attempt the eager-dispatch fast path for a generated rbln op.
+
+    On hit, returns ``(result_tensor, result_shape)`` matching the slow-path
+    contract. On miss (any guard fails), returns ``None`` so the caller can
+    fall through to the existing slow path.
+
+    Skipped vs slow path:
+      - 5-stage ``is_cpu_fallback_cases``,
+      - duplicate ``extract_tensors`` traversals,
+      - ``prepare_args_for_contiguous`` (already verified contig + offset 0),
+      - ``broadcast_args_general`` (when shapes match),
+      - ``out_tensor_context`` contextmanager allocation,
+      - ``CompiledFunctionWrapper`` reentrancy/error wrapping (calls
+        ``_compiled_fn`` directly once auto-tp is settled).
+
+    The helper handles the dispatch-injected ``out=`` kwarg by validating it
+    via ``fast_eager_dispatch_check`` and writing through the eager helper.
+
+    ``require_same_shape=True`` enforces shape equality across tensor args
+    (binary same-shape ops). Set to False for unary ops.
+    """
+    from torch_rbln._internal.compile_cache import compile_rbln_cached
+    from torch_rbln._internal.env_utils import use_device_group_tensor_parallel_size
+    from torch_rbln.device.context_holder import helper as _eager_helper
+
+    is_safe, dev_id, tensors = fast_eager_dispatch_check(args, kwargs)
+    if not is_safe:
+        return None
+    if require_same_shape and len(tensors) > 1:
+        first_shape = tensors[0].shape
+        for t in tensors[1:]:
+            if t.shape != first_shape:
+                return None
+
+    opts = (_FAST_PATH_COMPILE_OPTS_TPGROUP
+            if use_device_group_tensor_parallel_size()
+            else _FAST_PATH_COMPILE_OPTS_TP1)
+    out = kwargs.get("out", None)
+    kwargs_no_out = (kwargs if out is None
+                     else {k: v for k, v in kwargs.items() if k != "out"})
+
+    compiled = compile_rbln_cached(
+        op_module, dynamic=False, options=opts, device_cache_key=dev_id,
+    )
+    # Bypass CompiledFunctionWrapper after first-call auto-tp determination —
+    # the wrapper owns reentrancy guard + RuntimeError fallback that the fast
+    # path's pre-validation makes unnecessary for these ops.
+    inner = getattr(compiled, "_compiled_fn", None)
+    invoke = inner if (inner is not None
+                       and getattr(compiled, "_auto_tp_determined", False)) else compiled
+
+    if out is not None:
+        _eager_helper.set_out_tensor(out)
+    try:
+        external_result = invoke(*args, **kwargs_no_out)
+    finally:
+        _eager_helper.clear_out_tensor()
+
+    if out is None:
+        return external_result, external_result.shape
+    if external_result.data_ptr() != out.data_ptr():
+        out.copy_(external_result)
+    return out, out.shape
+
+
 def extract_device_id_from_inputs(*args, **kwargs):
     """
     Extract RBLN device_id from tensor inputs.
@@ -388,9 +545,12 @@ def is_cpu_fallback_cases(args):
     if not tensor_args:
         return False
 
-    # 2: RBLN device can only handle float16 dtype
+    # 2: narrow allowlist — only fp16 through the compile path (rebel-compiler
+    #    does not reliably handle complex int graphs; int32 path triggers
+    #    UNEXPECTED_GRAPH on dev264, so keep int ops on CPU fallback for now).
     if "dtype" not in disabled_cases:
-        if any(a.dtype != torch.float16 for a in tensor_args):
+        _SAFE_DTYPES = {torch.float16}
+        if any(a.dtype not in _SAFE_DTYPES for a in tensor_args):
             return True
 
     # 3: fall back to the CPU if all input tensors are scalar tensors
@@ -425,27 +585,64 @@ def is_cpu_fallback_cases(args):
     return False
 
 
+### ─── Fallback profiling infrastructure ───────────────────────────────────
+import threading as _fb_threading
+import time as _fb_time
+from collections import defaultdict as _fb_defaultdict
+
+_fb_lock = _fb_threading.Lock()
+# {(op_name, reason): {"count": int, "total_time": float, "total_bytes": int, "shapes": set}}
+_fb_stats: dict = _fb_defaultdict(lambda: {"count": 0, "total_time": 0.0, "total_bytes": 0, "shapes": set()})
+_fb_enabled = os.environ.get("RBLN_PROFILE_FALLBACK", "0") == "1"
+
+
+def _fb_tensor_bytes(obj):
+    if isinstance(obj, torch.Tensor):
+        return obj.nelement() * obj.element_size()
+    if isinstance(obj, (tuple, list)):
+        return sum(_fb_tensor_bytes(x) for x in obj)
+    if isinstance(obj, dict):
+        return sum(_fb_tensor_bytes(v) for v in obj.values())
+    return 0
+
+
+def _fb_tensor_info(args):
+    """Extract shape/dtype info from tensor args for debugging."""
+    infos = []
+    for a in (args if isinstance(args, (tuple, list)) else [args]):
+        if isinstance(a, torch.Tensor):
+            infos.append(f"{tuple(a.shape)}/{a.dtype}")
+    return ", ".join(infos[:3])
+
+
+def _classify_fallback_reason(args):
+    """Determine WHY this op is falling back to CPU."""
+    tensor_args = extract_tensors(args)
+    if not tensor_args:
+        return "no_tensors"
+    dtypes = set(a.dtype for a in tensor_args)
+    if any(a.dtype != torch.float16 for a in tensor_args):
+        non_fp16 = [str(a.dtype) for a in tensor_args if a.dtype != torch.float16]
+        return f"dtype({','.join(set(non_fp16))})"
+    if all(a.ndim == 0 for a in tensor_args):
+        return "scalar"
+    if any(a.is_contiguous() and a.storage_offset() != 0 for a in tensor_args):
+        return "storage_offset"
+    return "other"
+
+
 def cpu_fallback_path(
     target_ops, args, *, result: Optional[torch.Tensor] = None, op_name: Optional[str] = None, **op_kwargs
 ):
     """
     Perform CPU fallback for the given target operation.
-
-    This function converts the input arguments and keyword arguments from their original device to CPU,
-    executes the target operation on these converted arguments, and then converts the result back to the 'rbln'
-    device.
-
-    Args:
-        target_ops (callable): The operation to be executed on the CPU.
-        args (tuple): A tuple of positional arguments that need to be converted to CPU.
-        result (Optional[torch.Tensor]): Optional pre-allocated output tensor. If provided and size matches,
-            the result will be copied into this tensor.
-        op_name (Optional[str]): Operator name like "aten::add" for logging purposes.
-        **op_kwargs: Keyword arguments for the operation (e.g. dim=2, out=...). Passed as-is to target_ops.
-
-    Returns:
-        torch.Tensor: The result of the target operation, converted back to the 'rbln' device.
     """
+    if _fb_enabled:
+        _t0 = _fb_time.perf_counter()
+        _bytes_in = _fb_tensor_bytes(args) + _fb_tensor_bytes(op_kwargs)
+        _reason = _classify_fallback_reason(args)
+        _shapes = _fb_tensor_info(args)
+
     if op_name is not None:
         rbln_log_cpu_fallback(op_name)
     cpu_args = to_cpu(args)
@@ -453,22 +650,69 @@ def cpu_fallback_path(
     result_cpu = target_ops(*cpu_args, **cpu_op_kwargs)
     if result is not None and result_cpu.size() == result.size():
         result.copy_(result_cpu)
+        if _fb_enabled:
+            _elapsed = _fb_time.perf_counter() - _t0
+            _name = op_name or str(target_ops)
+            with _fb_lock:
+                e = _fb_stats[(_name, _reason)]
+                e["count"] += 1; e["total_time"] += _elapsed; e["total_bytes"] += _bytes_in
+                e["shapes"].add(_shapes)
         return result
 
-    # Get device_index from result tensor or from input args/op_kwargs
-    # In this context, rbln tensors always have a device_index
     device_id = None
     if result is not None and isinstance(result, torch.Tensor) and result.device.type == "rbln":
         device_id = result.device.index
     else:
-        # Find device_id from input tensors
         device_id = extract_device_id_from_inputs(*args, **op_kwargs)
 
-    # Convert result back to rbln device with proper device_index
-    # device_id should always be available when rbln tensors are present
     assert device_id is not None, "device_id should be found from rbln tensors"
     result = result_cpu.to(f"rbln:{device_id}")
+
+    if _fb_enabled:
+        _elapsed = _fb_time.perf_counter() - _t0
+        _name = op_name or str(target_ops)
+        with _fb_lock:
+            e = _fb_stats[(_name, _reason)]
+            e["count"] += 1; e["total_time"] += _elapsed; e["total_bytes"] += _bytes_in
+            e["shapes"].add(_shapes)
+
     return result
+
+
+def print_fallback_report():
+    """Print categorized CPU fallback profiling report."""
+    with _fb_lock:
+        stats = dict(_fb_stats)
+    if not stats:
+        print("\n[RBLN FALLBACK] No Python-level CPU fallbacks recorded.", file=sys.stderr)
+        return
+    print("\n" + "=" * 110, file=sys.stderr)
+    print("  RBLN PYTHON CPU FALLBACK REPORT (op, reason, count, time, data, shapes)", file=sys.stderr)
+    print("=" * 110, file=sys.stderr)
+    print(f"  {'Op':<25} {'Reason':<30} {'Count':>7} {'Total(ms)':>10} {'Avg(us)':>9} {'Data(KB)':>9} {'Shapes'}", file=sys.stderr)
+    print(f"  {'─'*25} {'─'*30} {'─'*7} {'─'*10} {'─'*9} {'─'*9} {'─'*20}", file=sys.stderr)
+    total_time = 0; total_count = 0
+    # Group by reason
+    by_reason: dict = _fb_defaultdict(lambda: {"count": 0, "total_time": 0.0})
+    for (op, reason), data in sorted(stats.items(), key=lambda x: x[1]["total_time"], reverse=True):
+        c = data["count"]; t = data["total_time"]; b = data["total_bytes"]
+        avg = (t / c * 1e6) if c else 0
+        shapes = "; ".join(list(data["shapes"])[:2])
+        total_time += t; total_count += c
+        by_reason[reason]["count"] += c; by_reason[reason]["total_time"] += t
+        print(f"  {op:<25} {reason:<30} {c:>7} {t*1000:>10.2f} {avg:>9.1f} {b/1024:>9.1f} {shapes}", file=sys.stderr)
+    print(f"  {'─'*25} {'─'*30} {'─'*7} {'─'*10}", file=sys.stderr)
+    print(f"  {'TOTAL':<25} {'':<30} {total_count:>7} {total_time*1000:>10.2f}", file=sys.stderr)
+    print(f"\n  BY REASON:", file=sys.stderr)
+    for reason, data in sorted(by_reason.items(), key=lambda x: x[1]["total_time"], reverse=True):
+        print(f"    {reason:<35} {data['count']:>7} calls  {data['total_time']*1000:>10.2f} ms", file=sys.stderr)
+    print("=" * 110, file=sys.stderr)
+
+
+if _fb_enabled:
+    import atexit as _fb_atexit
+    _fb_atexit.register(print_fallback_report)
+### ─── End fallback profiling ──────────────────────────────────────────────
 
 
 def is_inplace_op(args, kwargs) -> bool:
