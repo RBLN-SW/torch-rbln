@@ -4,7 +4,7 @@ This document explains how to update the versions of third party packages in tor
 The current third party packages are:
 
 - **PyTorch** (for Debug CI builds)
-- **`rebel-compiler`** (build-only; see [RBLN SDK — PyTorch RBLN](https://docs.rbln.ai/latest/software/rbln_pytorch/overview.html) and [Developer guide](https://docs.rbln.ai/latest/software/rbln_pytorch/developer-guide.html) for the package itself and install)
+- **`rebel-compiler`** (build-only; see [PyTorch RBLN — Overview](https://docs.rbln.ai/latest/software/rbln_pytorch/overview.html) and [Installation](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html) for the package and setup; for usage and debugging workflows, see [Running and debugging with PyTorch RBLN](https://docs.rbln.ai/latest/software/rbln_pytorch/tutorial_running_n_debugging.html))
 
 ## Common
 
@@ -25,7 +25,7 @@ For Debug CI builds, PyTorch is cloned from the repository specified by the
 
 ### Version update checklist
 
-When updating the PyTorch version (e.g. 2.9.0 → 2.10.0), change **all** of the
+When updating the PyTorch version (e.g. 2.10.0 → 2.11.0), change **all** of the
 following together:
 
 | # | File | What to change |
@@ -72,14 +72,16 @@ To refresh ```tools/linter``` from PyTorch upstream (e.g. after a version bump),
 run ```sync-linter.sh``` from the repo root or from the parent of ```torch-rbln```.
 The script clones PyTorch at a given tag and copies ```tools/linter``` into the
 current tree. The **default tag** is derived from the torch version in
-```pyproject.toml``` (e.g. ```torch==2.9.0+cpu``` → tag ```v2.9.0```). You can
-override it by passing a tag: ```./sync-linter.sh v2.10.0```.
+```pyproject.toml``` (e.g. ```torch==2.10.0+cpu``` → tag ```v2.10.0```). You can
+override it by passing a tag: ```./sync-linter.sh v2.11.0```.
 
 ## Rebel compiler
 
 **`rebel-compiler`** is a **build-only** dependency in this repo. For installation, versioning, and runtime use of the compiler package, follow the **RBLN SDK** documentation:
 
-- [PyTorch RBLN — How to install](https://docs.rbln.ai/latest/software/rbln_pytorch/overview.html#install)
-- [PyTorch RBLN — Developer guide](https://docs.rbln.ai/latest/software/rbln_pytorch/developer-guide.html)
+- [PyTorch RBLN — Installation (quickstart)](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html#install)
+- [PyTorch RBLN — Running and debugging](https://docs.rbln.ai/latest/software/rbln_pytorch/tutorial_running_n_debugging.html)
 
 To bump the **pinned build dependency** in torch-rbln, update the version specifier in **`pyproject.toml`** in both **`[build-system].requires`** and **`[dependency-groups].build`**, and keep them aligned with each other.
+
+> **Note:** The development build constraint is updated automatically by a nightly workflow. See [Workflows — Automated Dependency Updates](WORKFLOWS.md#automated-dependency-updates) for details.

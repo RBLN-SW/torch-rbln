@@ -203,19 +203,10 @@ def prepare_past_key_values(
     eager_mode: bool,
 ) -> list[torch.Tensor]:
     """Initialize past key values with optional eager mode support"""
-    if eager_mode:
-        # Eager mode: directly on device, no alignment needed
-        past_key_values = [
-            torch.zeros(batch_size, num_key_value_head, max_seq_len, head_dim, dtype=dtype).to(device)
-            for _ in range(model.num_hidden_layers * 2)
-        ]
-    else:
-        # Graph mode: aligned to 64 bytes, on CPU with metadata
-        aligned_head_dim = ((head_dim + 63) // 64) * 64
-        past_key_values = [
-            torch.zeros(batch_size, num_key_value_head, max_seq_len, aligned_head_dim, dtype=dtype).to(device)
-            for _ in range(model.num_hidden_layers * 2)
-        ]
+    past_key_values = [
+        torch.zeros(batch_size, num_key_value_head, max_seq_len, head_dim, dtype=dtype).to(device)
+        for _ in range(model.num_hidden_layers * 2)
+    ]
 
     return past_key_values
 

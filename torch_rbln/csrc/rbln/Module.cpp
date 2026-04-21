@@ -94,6 +94,15 @@ void register_internal_api(py::module_& module) {
   module.def(
       "_create_tensor_from_ptr", &at::native::rbln::create_tensor_from_ptr, "Internal: create tensor from device ptr");
 
+  // Mark the virtual memory as logically zero-initialized without allocating host memory.
+  // Preferred implementation of aten::zero_ for large RBLN tensors (e.g. KV-cache).
+  module.def(
+      "_mark_zeros",
+      [](uint64_t vaddr) {
+        c10::rbln::mark_zeros(reinterpret_cast<const void*>(vaddr)); // NOLINT(performance-no-int-to-ptr)
+      },
+      "Internal: mark RBLN virtual memory as zero-initialized (no host alloc)");
+
   // Logging utilities
   module.def("_log_cpu_fallback", &c10::rbln::log_cpu_fallback, "Internal: log CPU fallback");
 

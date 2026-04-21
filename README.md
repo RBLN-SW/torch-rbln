@@ -7,7 +7,7 @@
 </picture>
 
 [![PyPI version](https://badge.fury.io/py/torch-rbln.svg)](https://badge.fury.io/py/torch-rbln)
-[![License](https://img.shields.io/github/license/rbln-sw/torch-rbln)](https://github.com/rbln-sw/torch-rbln/blob/main/LICENSE)
+[![License](https://img.shields.io/github/license/RBLN-SW/torch-rbln)](https://github.com/RBLN-SW/torch-rbln/blob/main/LICENSE)
 [![Documentation](https://img.shields.io/badge/docs-available-brightgreen)](https://docs.rbln.ai/latest/software/rbln_pytorch/overview.html)
 [![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-1.4-4baaaa.svg)](./docs/CODE_OF_CONDUCT.md)
 </div>
@@ -29,7 +29,7 @@ PyTorch RBLN is currently in **beta** and under active development. APIs may cha
 
 ### Install pre-built wheels
 
-**`torch-rbln`** (public wheel; **`torch`** resolves to **2.9.1+cpu** via the PyTorch CPU index):
+**`torch-rbln`** (public wheel; **`torch`** resolves to **2.10.0+cpu** via the PyTorch CPU index):
 
 ```bash
 pip3 install torch-rbln --extra-index-url https://download.pytorch.org/whl/cpu
@@ -40,10 +40,10 @@ For **`rebel-compiler`** and the rest of the setup, see **Prerequisites** above 
 ### Build from source
 
 1. Install **[uv](https://docs.astral.sh/uv/getting-started/installation/)** (see [Installation — Prerequisites](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html#prerequisites) in the SDK docs).
-2. Follow **[Build from source](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html#build-from-source)** (venv, **`rebel-compiler`**, editable build, manual steps).
+2. Follow **[Build from source](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html#build-from-source-advanced)** (venv, **`rebel-compiler`**, editable build, manual steps).
 
 ```bash
-git clone https://github.com/rbln-sw/torch-rbln.git
+git clone https://github.com/RBLN-SW/torch-rbln.git
 cd torch-rbln
 uv venv .venv && source .venv/bin/activate
 ./tools/dev-setup.sh pypi
@@ -55,8 +55,12 @@ uv venv .venv && source .venv/bin/activate
 
 **RBLN SDK (hosted)**
 
-- [Overview](https://docs.rbln.ai/latest/software/rbln_pytorch/overview.html) — design, components, supported operators, tutorials
-- [Installation](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html) — pre-built wheels, **`rebel-compiler`**, build from source (requirements, **`uv`**, `dev-setup.sh`, manual build)
+- [Overview](https://docs.rbln.ai/latest/software/rbln_pytorch/overview.html) — design, components, and entry points into the PyTorch RBLN docs
+- [Installation](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html) — pre-built wheels, **`rebel-compiler`**, build from source
+- [Running and debugging with PyTorch RBLN](https://docs.rbln.ai/latest/software/rbln_pytorch/tutorial_running_n_debugging.html) — basic usage and debugging
+- [Running a LLM model: Llama3.2-1B](https://docs.rbln.ai/latest/software/rbln_pytorch/tutorial_llama.html) — `transformers` example
+- [Supported Ops](https://docs.rbln.ai/latest/software/rbln_pytorch/supported_ops.html) — operator coverage
+- [APIs](https://docs.rbln.ai/latest/software/rbln_pytorch/api.html) — Python API reference
 - [Troubleshooting](https://docs.rbln.ai/latest/software/rbln_pytorch/troubleshoot.html) — `librbln` / `torch_rbln.diagnose`, core dumps, logging, dtype / CPU, memory (maintained in the RBLN SDK docs)
 
 **This repository**
@@ -65,6 +69,7 @@ uv venv .venv && source .venv/bin/activate
 - [Test Guide](docs/TEST_GUIDE.md) — local test runs
 - [Linting](docs/LINTING.md) — code style and lint
 - [Third-party update](docs/THIRD_PARTY_UPDATE.md) — PyTorch pin, upstream files, `rebel-compiler` version bumps in `pyproject.toml`
+- [Release Process](docs/RELEASE_PROCESS.md) — branch model, versioning, tagging, and publication
 
 ## Contributing
 
