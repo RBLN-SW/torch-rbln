@@ -184,6 +184,58 @@ bool is_output_alias_enabled() {
 // Forward declaration (defined below). Needed by try_output_alias_dispatch.
 at::Tensor borrow_alias_as_cpu(const at::Tensor& rbln_t, bool writable);
 
+// Run the op through the Meta dispatch key to infer its output shape/dtype
+// without touching real storage. Used by the D2 non-out-variant path to
+// size the pre-allocated rbln output before dispatching on CPU. Returns
+// nullopt for ops whose inputs contain tensorlists, or whose meta kernel
+// is missing / throws. (Input-side tensorlist inference is not yet plumbed
+// through, so those ops stay on the regular fallback path.)
+std::optional<at::Tensor> infer_single_tensor_output_via_meta(
+    const c10::OperatorHandle& op, const torch::jit::Stack& orig_stack) {
+  const auto& schema = op.schema();
+  const auto num_arguments = schema.arguments().size();
+  if (orig_stack.size() < num_arguments) return std::nullopt;
+  const auto arguments_begin = orig_stack.size() - num_arguments;
+
+  torch::jit::Stack meta_stack;
+  meta_stack.reserve(num_arguments);
+  for (size_t i = 0; i < num_arguments; ++i) {
+    const auto& ivalue = orig_stack[arguments_begin + i];
+    if (ivalue.isTensor()) {
+      const auto& t = ivalue.toTensor();
+      if (!t.defined()) {
+        meta_stack.emplace_back(at::Tensor{});
+        continue;
+      }
+      auto meta_t = at::empty_strided(t.sizes(), t.strides(),
+                                       t.options().device(c10::kMeta));
+      meta_stack.emplace_back(std::move(meta_t));
+    } else if (ivalue.isTensorList() || ivalue.isOptionalTensorList()) {
+      // Not handled — signal fallback.
+      return std::nullopt;
+    } else if (ivalue.isDevice()) {
+      meta_stack.emplace_back(c10::IValue(c10::Device(c10::kMeta)));
+    } else {
+      meta_stack.emplace_back(ivalue);
+    }
+  }
+
+  try {
+    c10::Dispatcher::singleton().callBoxedForDispatchKey(
+        op, c10::DispatchKey::Meta, &meta_stack);
+  } catch (...) {
+    return std::nullopt;
+  }
+
+  if (schema.returns().size() != 1) return std::nullopt;
+  if (meta_stack.empty()) return std::nullopt;
+  const auto& ret_ivalue = meta_stack.back();
+  if (!ret_ivalue.isTensor()) return std::nullopt;
+  const auto& meta_out = ret_ivalue.toTensor();
+  if (!meta_out.defined()) return std::nullopt;
+  return meta_out;
+}
+
 // Core output-alias entry point. CPU fallback sees the op already lowered to
 // its out-variant by PyTorch's CompositeImplicitAutograd (e.g. for a user call
 // ``torch.arange(5, 15, device='rbln')`` the op reaching this function is
@@ -306,6 +358,111 @@ bool try_output_alias_dispatch(
   return true;
 }
 
+// D2: output alias for non-out-variant ops. When PyTorch's CompositeImplicit
+// lowering doesn't rewrite the op to its ``.out`` overload before reaching
+// cpu_fallback_rbln (some niche ops only), but the Dispatcher still has an
+// out-variant registered, we:
+//   1. meta-dispatch the original op to infer output shape/dtype
+//   2. pre-allocate the rbln destination
+//   3. mark_zeros + borrow it as a CPU at::from_blob alias
+//   4. push that alias as an extra ``out`` slot on the stack
+//   5. callBoxedForDispatchKey on the out-variant (CPU)
+//   6. replace the alias with the rbln tensor as the return
+//
+// Returns true iff the op was handled. Conservative: rejects tensor-list
+// inputs (meta inference doesn't cover those here) and any output dtype that
+// isn't alias-safe. Caller must skip the normal Step 2 when true.
+bool try_output_alias_non_out_variant(
+    const c10::OperatorHandle& op, torch::jit::Stack* stack,
+    c10::DispatchKey cpu_dispatch_key,
+    const std::vector<at::Tensor>& tensor_args,
+    const std::vector<int>& /*tensor_args_indices*/) {
+  if (!is_output_alias_enabled()) return false;
+  const auto& schema = op.schema();
+  const auto& returns = schema.returns();
+  if (returns.size() != 1) return false;
+  if (returns[0].type()->kind() != c10::TypeKind::TensorType) return false;
+  if (returns[0].alias_info() != nullptr) return false;
+
+  const auto& orig_args = schema.arguments();
+  // Only handle ops that are *not* already an out-variant (the existing path
+  // try_output_alias_dispatch covers those).
+  for (const auto& a : orig_args) {
+    if (a.name() == "out") return false;
+  }
+
+  auto out_op_opt = find_out_variant(op);
+  if (!out_op_opt.has_value()) return false;
+  const auto& out_op = *out_op_opt;
+  const auto& out_schema = out_op.schema();
+  const auto& out_args = out_schema.arguments();
+  if (out_args.size() != orig_args.size() + 1) return false;
+  if (out_args.back().name() != "out") return false;
+  for (size_t i = 0; i < orig_args.size(); ++i) {
+    if (orig_args[i].name() != out_args[i].name()) return false;
+  }
+
+  auto meta_out_opt = infer_single_tensor_output_via_meta(op, *stack);
+  if (!meta_out_opt.has_value()) return false;
+  const auto& meta_out = *meta_out_opt;
+  if (!is_borrow_aliasable_dtype(meta_out.scalar_type())) return false;
+
+  // Output device inherits from the first rbln tensor input.
+  c10::Device out_device(c10::kCPU);
+  bool found_device = false;
+  for (const auto& t : tensor_args) {
+    if (t.defined() && t.device().is_privateuseone()) {
+      out_device = t.device();
+      found_device = true;
+      break;
+    }
+  }
+  if (!found_device) return false;
+
+  auto rbln_out = at::empty(
+      meta_out.sizes(),
+      at::TensorOptions().dtype(meta_out.scalar_type()).device(out_device));
+  if (!can_borrow_alias(rbln_out)) return false;
+
+  try {
+    c10::rbln::mark_zeros(rbln_out.storage().data_ptr().get());
+  } catch (...) {
+    // not fatal
+  }
+
+  at::Tensor cpu_alias;
+  try {
+    cpu_alias = borrow_alias_as_cpu(rbln_out, /*writable=*/true);
+  } catch (...) {
+    return false;
+  }
+
+  stack->emplace_back(cpu_alias);
+  try {
+    out_op.callBoxedForDispatchKey(cpu_dispatch_key, *stack);
+  } catch (...) {
+    throw;
+  }
+
+  if (!stack->empty() && stack->back().isTensor()) {
+    stack->pop_back();
+  }
+  stack->emplace_back(rbln_out);
+
+  if (is_output_alias_diag_enabled()) {
+    std::cerr << "[OUTPUT_ALIAS_HIT_NOV] op=" << schema.operator_name().name
+              << "::"
+              << (schema.operator_name().overload_name.empty()
+                      ? std::string("<default>")
+                      : schema.operator_name().overload_name)
+              << " -> " << out_schema.operator_name().overload_name
+              << " dtype=" << rbln_out.scalar_type() << " shape=";
+    for (auto s : rbln_out.sizes()) std::cerr << s << ",";
+    std::cerr << "\n";
+  }
+  return true;
+}
+
 at::Tensor borrow_alias_as_cpu(const at::Tensor& rbln_t, bool writable) {
   uint64_t borrow_id = 0;
   const auto storage_nbytes = rbln_t.storage().nbytes();
@@ -323,6 +480,66 @@ at::Tensor borrow_alias_as_cpu(const at::Tensor& rbln_t, bool writable) {
       rbln_t.strides(),
       std::move(deleter),
       at::TensorOptions().dtype(rbln_t.scalar_type()).device(at::kCPU));
+}
+
+// Per-element alias path for (optional) TensorList args. Tries to alias each
+// element that satisfies can_borrow_alias; the rest are materialised in one
+// batch through at::_to_cpu. Returns a parallel aliased_mask so Step 3 can
+// skip _copy_from_and_resize on the aliased elements.
+template <typename T>
+std::pair<std::vector<T>, std::vector<bool>> alias_list_elements(
+    const std::vector<T>& elems, bool alias_enabled, bool writable) {
+  std::vector<T> out(elems.size());
+  std::vector<bool> aliased(elems.size(), false);
+  std::vector<at::Tensor> fallback;
+  std::vector<size_t> fallback_pos;
+  fallback.reserve(elems.size());
+  fallback_pos.reserve(elems.size());
+  for (size_t i = 0; i < elems.size(); ++i) {
+    const at::Tensor* tref = nullptr;
+    if constexpr (std::is_same_v<T, std::optional<at::Tensor>>) {
+      if (elems[i].has_value() && elems[i].value().defined()) {
+        tref = &elems[i].value();
+      }
+    } else {
+      if (elems[i].defined()) tref = &elems[i];
+    }
+    if (tref == nullptr) {
+      out[i] = elems[i];
+      continue;
+    }
+    if (alias_enabled && can_borrow_alias(*tref)) {
+      at::Tensor aliased_cpu;
+      try {
+        aliased_cpu = borrow_alias_as_cpu(*tref, writable);
+      } catch (...) {
+        fallback_pos.push_back(i);
+        fallback.push_back(*tref);
+        continue;
+      }
+      if constexpr (std::is_same_v<T, std::optional<at::Tensor>>) {
+        out[i] = std::optional<at::Tensor>(aliased_cpu);
+      } else {
+        out[i] = aliased_cpu;
+      }
+      aliased[i] = true;
+    } else {
+      fallback_pos.push_back(i);
+      fallback.push_back(*tref);
+    }
+  }
+  if (!fallback.empty()) {
+    auto fb_cpu = at::_to_cpu(fallback);  // fallback entries are all defined
+    for (size_t j = 0; j < fallback_pos.size(); ++j) {
+      const auto pos = fallback_pos[j];
+      if constexpr (std::is_same_v<T, std::optional<at::Tensor>>) {
+        out[pos] = std::optional<at::Tensor>(std::move(fb_cpu[j]));
+      } else {
+        out[pos] = std::move(fb_cpu[j]);
+      }
+    }
+  }
+  return {std::move(out), std::move(aliased)};
 }
 
 // convenience helper for converting tensors to cpu
@@ -434,6 +651,10 @@ void cpu_fallback_rbln(
   // save converted cpu tensor for TensorList and optional TensorList
   std::vector<c10::IValue> tensorlist_cpu_args;
   std::vector<c10::IValue> optional_tensorlist_cpu_args;
+  // Per-element alias mask so Step 3 can skip _copy_from_and_resize on the
+  // list entries that were aliased (their deleter already handles the write).
+  std::vector<std::vector<bool>> tensorlist_aliased_mask;
+  std::vector<std::vector<bool>> optional_tensorlist_aliased_mask;
 
   // Step 1: Convert all non-CPU tensor inputs into CPU tensors
   // and put them on the stack at the correct indices.
@@ -443,19 +664,32 @@ void cpu_fallback_rbln(
       tensor_args.push_back(ivalue.toTensor());
       tensor_args_indices.push_back(idx);
     } else if (ivalue.isTensorList()) {
-      // Note: we copy each TensorList argument to CPU individually out of convenience,
-      // but XLA would benefit from materializing all tensor and TensorList args onto the CPU at the same time.
-      // We can improve this if we need better perf for XLA's CPU fallbacks.
+      // Per-element alias (D1): individual rbln tensors in the list go through
+      // the zero-copy borrow path, the rest fall back in a single at::_to_cpu.
       tensorlist_args.push_back(ivalue.toTensorList());
       tensorlist_args_indices.push_back(idx);
-      auto cpu_ivalue = c10::IValue(c10::List<at::Tensor>(to_cpu(ivalue.toTensorVector())));
+      const AliasInfo* list_alias_info = schema_args[idx].alias_info();
+      const bool list_is_write = (list_alias_info != nullptr && list_alias_info->isWrite());
+      const bool list_alias_enabled = is_borrow_alias_enabled()
+                                      && (!list_is_write || is_borrow_alias_write_enabled());
+      auto [aliased_vec, mask] = alias_list_elements<at::Tensor>(
+          ivalue.toTensorVector(), list_alias_enabled, list_is_write);
+      auto cpu_ivalue = c10::IValue(c10::List<at::Tensor>(aliased_vec));
       tensorlist_cpu_args.push_back(cpu_ivalue);
+      tensorlist_aliased_mask.push_back(std::move(mask));
       (*stack)[arguments_begin + idx] = std::move(cpu_ivalue);
     } else if (ivalue.isOptionalTensorList()) {
       optional_tensorlist_args.push_back(ivalue.toOptionalTensorList());
       optional_tensorlist_args_indices.push_back(idx);
-      auto cpu_ivalue = c10::IValue(c10::List<std::optional<at::Tensor>>(to_cpu(ivalue.toOptionalTensorVector())));
+      const AliasInfo* list_alias_info = schema_args[idx].alias_info();
+      const bool list_is_write = (list_alias_info != nullptr && list_alias_info->isWrite());
+      const bool list_alias_enabled = is_borrow_alias_enabled()
+                                      && (!list_is_write || is_borrow_alias_write_enabled());
+      auto [aliased_vec, mask] = alias_list_elements<std::optional<at::Tensor>>(
+          ivalue.toOptionalTensorVector(), list_alias_enabled, list_is_write);
+      auto cpu_ivalue = c10::IValue(c10::List<std::optional<at::Tensor>>(aliased_vec));
       optional_tensorlist_cpu_args.push_back(cpu_ivalue);
+      optional_tensorlist_aliased_mask.push_back(std::move(mask));
       (*stack)[arguments_begin + idx] = c10::IValue(cpu_ivalue);
     } else if (ivalue.isDevice()) {
       tgt_device = ivalue.toDevice();
@@ -509,8 +743,14 @@ void cpu_fallback_rbln(
   // a pre-allocated rbln output wrapped as a CPU alias. On success the stack
   // already holds the rbln tensor return, so we skip the regular Step 2 /
   // mutable-alias handling / Step 4 device copy for this op.
-  const bool output_alias_applied =
+  bool output_alias_applied =
       try_output_alias_dispatch(op, stack, cpu_dispatch_key, tensor_args, tensor_args_indices);
+  if (!output_alias_applied) {
+    // D2: op wasn't already in out-variant form — try to reroute to its
+    // registered out-variant (meta-dispatch for shape, pre-alloc, redispatch).
+    output_alias_applied = try_output_alias_non_out_variant(
+        op, stack, cpu_dispatch_key, tensor_args, tensor_args_indices);
+  }
 
   if (!output_alias_applied) {
     // Step 2: Call the underlying CPU implementation of the operator
@@ -542,29 +782,33 @@ void cpu_fallback_rbln(
   }
 
   // We also need to explicit reapply input mutations to inputs that are lists
-  // of tensors
+  // of tensors. Skip elements that went through the borrow-alias path — their
+  // deleter will mark the host as latest so the h2v copy is unnecessary.
   for (const auto i : c10::irange(tensorlist_args_indices.size())) {
     auto tensorlist_idx = tensorlist_args_indices[i];
     const AliasInfo* alias_info = schema_args[tensorlist_idx].alias_info();
     if (alias_info != nullptr && alias_info->isWrite()) {
       const auto& cpu_tensors = tensorlist_cpu_args[i].toTensorVector();
+      const auto& mask = tensorlist_aliased_mask[i];
       for (const auto idx : c10::irange(tensorlist_args[i].size())) {
         if (!cpu_tensors[idx].defined())
           continue;
+        if (idx < mask.size() && mask[idx]) continue;
         at::_copy_from_and_resize(cpu_tensors[idx], tensorlist_args[i][idx]);
       }
     }
   }
 
-  // We also need to explicit reapply input mutations to inputs that are lists
-  // of optional tensors
+  // Same for optional TensorLists.
   for (const auto i : c10::irange(optional_tensorlist_args_indices.size())) {
     auto tensorlist_idx = optional_tensorlist_args_indices[i];
     const AliasInfo* alias_info = schema_args[tensorlist_idx].alias_info();
     if (alias_info != nullptr && alias_info->isWrite()) {
       const auto& cpu_tensors = optional_tensorlist_cpu_args[i].toOptionalTensorList();
+      const auto& mask = optional_tensorlist_aliased_mask[i];
       for (const auto idx : c10::irange(optional_tensorlist_args[i].size())) {
         if (cpu_tensors[idx].has_value() && cpu_tensors[idx].value().defined()) {
+          if (idx < mask.size() && mask[idx]) continue;
           const std::optional<at::Tensor>& optional_tensor = optional_tensorlist_args[i][idx];
           at::_copy_from_and_resize(cpu_tensors[idx].value(), optional_tensor.value());
         }
