@@ -86,6 +86,22 @@ def requires_physical_devices(num_devices):
     )
 
 
+def spawn_target_with_clean_exit(rank: int, test_func, *args) -> None:
+    """Run ``test_func`` under ``mp.spawn`` and force a clean exit on success.
+
+    mp.spawn reports worker exit code as ProcessExitedException on SIGSEGV.
+    Python teardown in a worker that has compiled any module via rebel-compiler
+    segfaults in unloaded JIT .so destructors, so skip Python shutdown on
+    success. Exceptions still propagate to mp.spawn for normal failure
+    reporting.
+
+    Use as the first positional argument to ``mp.spawn`` and pass the real
+    target plus its args via ``args=(test_func, *test_args)``.
+    """
+    test_func(rank, *args)
+    os._exit(0)
+
+
 def run_in_isolated_process(func, *args):
     """Run `func` in a freshly spawned process and propagate failures.
 
