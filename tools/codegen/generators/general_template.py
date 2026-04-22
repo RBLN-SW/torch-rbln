@@ -195,3 +195,23 @@ class {class_name}(torch.nn.Module):
 
     return result_tensor, result_tensor.shape
 """
+
+        @staticmethod
+        def fast_path_block(root_name: str, require_same_shape: bool) -> str:
+            """Generate the eager-dispatch fast path attempt block.
+
+            Emitted right after the function ``def`` + import line, before the
+            slow path's helper calls. Skips ``is_cpu_fallback_cases``,
+            ``prepare_args_for_contiguous``, ``broadcast_args_general``, the
+            duplicate ``extract_*`` walks, the ``out_tensor_context``
+            contextmanager, and ``CompiledFunctionWrapper`` per-call overhead.
+
+            On miss returns ``None`` so the caller falls through to the
+            existing slow path with semantics unchanged.
+            """
+            op_module_var = f"_{root_name}_op_module"
+            require_same_shape_str = "True" if require_same_shape else "False"
+            return f"""    _fast = try_fast_eager_dispatch({op_module_var}, args, kwargs, require_same_shape={require_same_shape_str})
+    if _fast is not None:
+        return _fast
+"""
