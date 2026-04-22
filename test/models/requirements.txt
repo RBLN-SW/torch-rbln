@@ -5,6 +5,14 @@
 # The ./tools/test/install-test-deps.sh script and ./test/run_tests.py --suite=models handle this automatically.
 # Model tests may still require access to external model artifacts at runtime.
 #
+# vllm and vllm-rbln are *not* listed here — vllm-rbln's device-tensor flow lives
+# on a branch (origin/device_tensor_rebased) that is not on PyPI, so it must be
+# cloned + installed editable. ./tools/test/install-test-deps.sh handles that
+# separately (search for VLLM_RBLN_REF). Tests that need vllm-rbln
+# (e.g. test/models/test_vllm_llm.py) skip via pytest.importorskip when it is
+# absent, so environments that opt out with VLLM_RBLN_SKIP=1 still run the rest
+# of the model suite cleanly.
+#
 # Format: package==version
 # Comments and empty lines are ignored
 torchvision==0.25.0+cpu

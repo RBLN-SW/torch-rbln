@@ -157,4 +157,74 @@ while IFS= read -r line || [ -n "$line" ]; do
   fi
 done < "$MODEL_REQUIREMENTS"
 
+# -----------------------------------------------------------------------------
+# vllm + vllm-rbln (for test/models/test_vllm_llm.py)
+#
+# The test file pytest.importorskip's vllm_rbln, so environments that do not
+# install these deps skip cleanly; CI runs that want to exercise the vLLM model
+# path on RBLN device tensors install both here.
+#
+# * vllm is pinned to a CPU wheel on wheels.vllm.ai (0.18.0+cpu today). The
+#   version is controlled by the VLLM_VERSION env var.
+# * vllm-rbln's device-tensor flow is gated behind the VLLM_RBLN_USE_DEVICE_TENSOR
+#   env, introduced on the origin/device_tensor_rebased branch and not yet in a
+#   PyPI release. We therefore source-install from GitHub instead of pinning a
+#   version. The branch / repo / checkout path are configurable:
+#     VLLM_RBLN_REF   default: origin/device_tensor_rebased
+#     VLLM_RBLN_REPO  default: https://github.com/rbln-sw/vllm-rbln.git
+#     VLLM_RBLN_DIR   default: $PROJECT_ROOT/vllm-rbln
+#   Setting VLLM_RBLN_SKIP=1 disables the entire section for environments that
+#   cannot or should not install vllm-rbln.
+# -----------------------------------------------------------------------------
+
+if [ "${VLLM_RBLN_SKIP:-0}" = "1" ]; then
+  echo "VLLM_RBLN_SKIP=1 set — skipping vllm + vllm-rbln install."
+  echo "All test dependencies installed."
+  exit 0
+fi
+
+VLLM_VERSION="${VLLM_VERSION:-0.18.0+cpu}"
+VLLM_MINOR="${VLLM_VERSION%+*}"
+VLLM_WHEELS_INDEX="https://wheels.vllm.ai/${VLLM_MINOR}/cpu"
+VLLM_RBLN_REPO="${VLLM_RBLN_REPO:-https://github.com/rbln-sw/vllm-rbln.git}"
+VLLM_RBLN_REF="${VLLM_RBLN_REF:-origin/device_tensor_rebased}"
+VLLM_RBLN_DIR="${VLLM_RBLN_DIR:-$PROJECT_ROOT/vllm-rbln}"
+
+current_vllm=$(python -m pip show vllm 2>/dev/null | awk '/^Version:/{print $2}')
+if [ -n "$current_vllm" ]; then
+  if [ "$current_vllm" = "$VLLM_VERSION" ]; then
+    echo "✓ vllm==$VLLM_VERSION already installed"
+  else
+    echo "ERROR: vllm version mismatch. Installed: $current_vllm, Required: $VLLM_VERSION" >&2
+    echo "  pip install vllm==$VLLM_VERSION --extra-index-url $VLLM_WHEELS_INDEX --extra-index-url https://download.pytorch.org/whl/cpu" >&2
+    exit 1
+  fi
+else
+  echo "Installing vllm==$VLLM_VERSION from $VLLM_WHEELS_INDEX..."
+  run_install "vllm==$VLLM_VERSION" \
+    --extra-index-url "$VLLM_WHEELS_INDEX" \
+    --extra-index-url https://download.pytorch.org/whl/cpu
+fi
+
+if [ ! -d "$VLLM_RBLN_DIR/.git" ]; then
+  echo "Cloning vllm-rbln into $VLLM_RBLN_DIR..."
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "[dry-run] git clone $VLLM_RBLN_REPO $VLLM_RBLN_DIR"
+  else
+    git clone "$VLLM_RBLN_REPO" "$VLLM_RBLN_DIR"
+  fi
+fi
+
+echo "Updating vllm-rbln to $VLLM_RBLN_REF in $VLLM_RBLN_DIR..."
+if [ "$DRY_RUN" -eq 1 ]; then
+  echo "[dry-run] (cd $VLLM_RBLN_DIR && git fetch origin && git checkout --detach $VLLM_RBLN_REF)"
+else
+  (cd "$VLLM_RBLN_DIR" && git fetch origin --prune && git checkout --detach "$VLLM_RBLN_REF")
+fi
+
+echo "Installing vllm-rbln (editable) from $VLLM_RBLN_DIR..."
+run_install -e "$VLLM_RBLN_DIR" \
+  --extra-index-url "$VLLM_WHEELS_INDEX" \
+  --extra-index-url https://download.pytorch.org/whl/cpu
+
 echo "All test dependencies installed."

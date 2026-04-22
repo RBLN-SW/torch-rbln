@@ -1,0 +1,318 @@
+# Owner(s): ["module: PrivateUse1"]
+"""
+End-to-end vllm-rbln LLM tests on RBLN device tensors.
+
+Similar in spirit to ``test_optimum_llm.py`` but exercises the native vLLM
+model path (``VLLM_RBLN_USE_VLLM_MODEL=1``) with weights and KV cache placed
+on ``rbln:0``. The goal is to validate torch-rbln against a small set of
+representative vllm-rbln models as a pre-screen for downstream CI.
+
+Models are restricted to those that run on <=4 NPUs. Sampling is greedy
+(``temperature=0``); the first few generated tokens are compared against
+hard-coded expected strings.
+
+Environment requirements
+------------------------
+* ``vllm-rbln`` must be checked out at ``origin/device_tensor_rebased`` (or
+  a descendant) — that branch introduces ``VLLM_RBLN_USE_DEVICE_TENSOR`` as
+  the opt-in flag for the end-to-end device-tensor flow (platform
+  ``device_type='rbln'``, KV cache on device, CPU-first attention metadata,
+  padded sampling metadata, no CompileContext). Without those patches the
+  vLLM native path still runs on CPU tensors.
+* The test skips cleanly if ``vllm_rbln`` / ``vllm`` are not installed.
+
+Matrix
+------
+* Default: graph mode (``enforce_eager=False``) — the primary thing we want
+  to validate for device tensors + torch.compile.
+* One case: eager mode (``enforce_eager=True``) — sanity-check the eager
+  execution path.
+"""
+
+import unittest
+from dataclasses import dataclass, field
+from typing import Optional
+
+import pytest
+import torch
+from torch.testing._internal.common_utils import run_tests
+
+from test.utils import run_in_isolated_process
+
+
+pytest.importorskip(
+    "vllm_rbln",
+    reason="vllm-rbln is not installed; install vllm-rbln to run vLLM LLM tests",
+)
+
+
+# ---------------------------------------------------------------------------
+# Model matrix
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class VllmModelConfig:
+    """One model entry in the vLLM LLM test matrix."""
+
+    model_id: str
+    family: str
+    max_model_len: int = 4 * 1024
+    block_size: int = 1024
+    max_num_batched_tokens: int = 128
+    max_num_seqs: int = 1
+    trust_remote_code: bool = False
+    # Highest TP we will ever attempt for this model. Kept <=4 NPUs.
+    max_npus: int = 4
+    extra_env: dict[str, str] = field(default_factory=dict)
+
+
+# Three representative decoder-only LLMs that are already exercised by
+# vllm-rbln's own ``test_basic_models_correctness.py`` /
+# ``test_model_coverage_single.py`` matrix, picked to cover distinct
+# architectures (Llama, Qwen2, Qwen3) while keeping the 1-NPU / <=4-NPU budget.
+MODEL_CONFIGS: dict[str, VllmModelConfig] = {
+    "llama_3_2_1b": VllmModelConfig(
+        model_id="meta-llama/Llama-3.2-1B-Instruct",
+        family="llama",
+    ),
+    "qwen2_5_1_5b": VllmModelConfig(
+        model_id="Qwen/Qwen2.5-1.5B-Instruct",
+        family="qwen2",
+    ),
+    "qwen3_0_6b": VllmModelConfig(
+        model_id="Qwen/Qwen3-0.6B",
+        family="qwen3",
+    ),
+}
+
+
+PROMPT = "The capital of France is"
+MAX_TOKENS = 5
+
+
+# Hard-coded greedy (temperature=0) expected outputs from the CPU reference
+# run. Each value is the exact ``generated_text`` (including leading space)
+# returned by ``llm.generate``. If an entry is ``None`` the test falls back
+# to non-empty + shape checks only.
+#
+# Key: (model_key, tp_size, mode) where mode in {"graph", "eager"}.
+#
+# Captured from a green run on RBLN-CA25 with the default fallback stack
+# (torch-rbln + rebel-compiler dev329 + vllm-rbln device_tensor_rebased).
+# Any future drift against these strings is a real correctness regression.
+EXPECTED_TEXT: dict[tuple[str, int, str], Optional[str]] = {
+    ("llama_3_2_1b", 1, "graph"): " Paris. The Eiff",
+    ("qwen2_5_1_5b", 1, "graph"): " Paris. The capital of",
+    ("qwen3_0_6b", 1, "graph"): " Paris. The capital of",
+    # Eager mode uses VLLM_RBLN_SAMPLER=0 + VLLM_RBLN_COMPILE_MODEL=0 (see
+    # _run_case); output then matches the graph-mode greedy decode exactly.
+    ("llama_3_2_1b", 1, "eager"): " Paris. The Eiff",
+    # TP2 via RSD (VLLM_RBLN_TP_SIZE=2, single vLLM worker over 2 physical
+    # NPUs). Greedy decode matches TP1 exactly.
+    ("llama_3_2_1b", 2, "graph"): " Paris. The Eiff",
+}
+
+
+# ---------------------------------------------------------------------------
+# Subprocess worker
+# ---------------------------------------------------------------------------
+
+
+def _vllm_generate_worker(
+    model_key: str,
+    tp_size: int,
+    enforce_eager: bool,
+    expected_text: Optional[str],
+    prompt: str,
+    max_tokens: int,
+) -> None:
+    """Run a single greedy vLLM generation on RBLN device tensors.
+
+    Executed in a spawned subprocess so vllm-rbln / RBLN singleton state is
+    isolated from the parent test runner.
+    """
+    from vllm import LLM, SamplingParams
+
+    cfg = MODEL_CONFIGS[model_key]
+    tc = unittest.TestCase()
+
+    # NOTE: we always instantiate the vLLM engine with
+    # ``tensor_parallel_size=1`` and use ``VLLM_RBLN_TP_SIZE`` (set below
+    # in ``_run_case``) to drive RSD fan-out across physical NPUs. That
+    # keeps the test on a single worker process, exercising the "1 logical
+    # device = ``tp_size`` physical NPUs" path (the setup we actually ship
+    # for RSD) and avoids the RCCL multi-worker collective path, which is
+    # a separate axis we do not care about here.
+    llm = LLM(
+        model=cfg.model_id,
+        dtype="float16",
+        max_model_len=cfg.max_model_len,
+        block_size=cfg.block_size,
+        enable_chunked_prefill=True,
+        max_num_batched_tokens=cfg.max_num_batched_tokens,
+        max_num_seqs=cfg.max_num_seqs,
+        tensor_parallel_size=1,
+        trust_remote_code=cfg.trust_remote_code,
+        enforce_eager=enforce_eager,
+    )
+
+    outputs = llm.generate([prompt], SamplingParams(temperature=0.0, max_tokens=max_tokens))
+    tc.assertEqual(len(outputs), 1, "expected a single RequestOutput")
+
+    gen = outputs[0].outputs[0]
+    gen_text = gen.text
+    gen_ids = list(gen.token_ids)
+
+    mode = "eager" if enforce_eager else "graph"
+    print(f"[vllm_llm_test] model={model_key} tp={tp_size} mode={mode} text={gen_text!r} ids={gen_ids}")
+
+    tc.assertGreater(len(gen_text), 0, "generated text should not be empty")
+    tc.assertEqual(len(gen_ids), max_tokens, "greedy decode should fill max_tokens")
+    tc.assertTrue(all(isinstance(i, int) and i >= 0 for i in gen_ids))
+
+    if expected_text is not None:
+        tc.assertEqual(
+            gen_text,
+            expected_text,
+            (
+                f"vLLM RBLN output mismatch for {model_key} tp{tp_size} {mode}. "
+                f"Expected: {expected_text!r}, Got: {gen_text!r}"
+            ),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test helpers
+# ---------------------------------------------------------------------------
+
+
+def _skip_if_not_enough_npus(tp_size: int) -> None:
+    if tp_size <= 1:
+        return
+    n_phys = torch.rbln.physical_device_count()
+    if n_phys < tp_size:
+        pytest.skip(f"Requires at least {tp_size} physical devices, found {n_phys}")
+
+
+def _skip_if_device_tensor_flag_missing() -> None:
+    """Skip if vllm-rbln does not expose ``VLLM_RBLN_USE_DEVICE_TENSOR``.
+
+    That flag is introduced on ``origin/device_tensor_rebased`` and gates the
+    end-to-end device-tensor flow. Running this test against an older vllm-rbln
+    checkout produces false passes (tensors stay on CPU), so we hard-skip.
+    """
+    import vllm_rbln.rbln_envs as envs
+
+    if not hasattr(envs, "VLLM_RBLN_USE_DEVICE_TENSOR"):
+        pytest.skip(
+            "vllm-rbln checkout does not define VLLM_RBLN_USE_DEVICE_TENSOR; "
+            "check out origin/device_tensor_rebased to run this test"
+        )
+
+
+def _run_case(model_key: str, tp_size: int, enforce_eager: bool) -> None:
+    cfg = MODEL_CONFIGS[model_key]
+    if tp_size > cfg.max_npus:
+        pytest.skip(f"{model_key} matrix entry restricted to <={cfg.max_npus} NPUs, got tp={tp_size}")
+    _skip_if_not_enough_npus(tp_size)
+    _skip_if_device_tensor_flag_missing()
+
+    mode = "eager" if enforce_eager else "graph"
+    expected_text = EXPECTED_TEXT.get((model_key, tp_size, mode))
+
+    with pytest.MonkeyPatch.context() as mp:
+        # Native vLLM model path + end-to-end device-tensor flow.
+        mp.setenv("VLLM_RBLN_USE_VLLM_MODEL", "1")
+        mp.setenv("VLLM_RBLN_USE_DEVICE_TENSOR", "1")
+        mp.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+        mp.setenv("RBLN_KERNEL_MODE", "triton")
+        # torch-rbln: surface compile errors rather than silently fall back.
+        mp.setenv("TORCH_RBLN_DISABLE_FALLBACK", "compile_error")
+        # RSD fan-out — not vllm worker-level TP. ``VLLM_RBLN_TP_SIZE`` is
+        # the axis that tells vllm-rbln to claim ``tp_size`` physical NPUs
+        # for a single worker and merge them into one logical device; the
+        # worker then sets ``RBLN_NPUS_PER_DEVICE`` on its own (see
+        # ``vllm_rbln/v1/worker/rbln_worker.py::_init_device_env``). This
+        # is the axis we want to validate end-to-end — it keeps the test
+        # on a single process and skips the RCCL multi-worker collective
+        # path entirely. The vLLM engine is instantiated with
+        # ``tensor_parallel_size=1`` in ``_vllm_generate_worker`` to match.
+        mp.setenv("VLLM_RBLN_TP_SIZE", str(tp_size))
+        if enforce_eager:
+            # Eager mode + VLLM_RBLN_USE_DEVICE_TENSOR=1 + the default RBLN
+            # sampler (``VLLM_RBLN_SAMPLER=1``) trips rebel's weight-reuse
+            # assertion at RTOSAWeightReusabilityCheck. Root cause chain:
+            # the main model is not torch.compile'd in eager mode, so every
+            # forward sees dynamic input shapes; the RBLN topk/topp sampler
+            # is still torch.compile'd on each shape and re-registers under
+            # the same module name. rebel's use_weight_sharing path then
+            # flips the second compile into ``weight_mode="reuse"`` and
+            # aborts with ``OpInvalidWeightSharingError: no key found on
+            # reuse mode``. Falling back to vllm's native (CPU) sampler
+            # removes the repeated rbln compile entirely, so eager mode
+            # exercises the rest of the device-tensor path end-to-end.
+            # Revisit once rebel tolerates shape-only recompiles under
+            # ``use_weight_sharing``, or vllm-rbln shares a compile_context
+            # across sampler invocations when use_dt=True.
+            mp.setenv("VLLM_RBLN_SAMPLER", "0")
+            # vllm-rbln's flash-attention backend has multiple branches
+            # gated on ``VLLM_RBLN_COMPILE_MODEL`` (attention metadata
+            # layout, KV cache wiring, slot-mapping). With
+            # ``enforce_eager=True`` the main model is not torch.compile'd,
+            # but ``VLLM_RBLN_COMPILE_MODEL`` defaults to True, so the
+            # attention backend keeps taking the compile-mode code paths
+            # — the resulting mismatch causes the eager forward to emit
+            # wrong logits and the sampler to produce gibberish tokens.
+            # Aligning ``VLLM_RBLN_COMPILE_MODEL=0`` with eager execution
+            # makes the attention path consistent with the uncompiled
+            # model.
+            mp.setenv("VLLM_RBLN_COMPILE_MODEL", "0")
+        for key, val in cfg.extra_env.items():
+            mp.setenv(key, val)
+
+        run_in_isolated_process(
+            _vllm_generate_worker,
+            model_key,
+            tp_size,
+            enforce_eager,
+            expected_text,
+            PROMPT,
+            MAX_TOKENS,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests — graph mode is the default (enforce_eager=False); eager has one case.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.test_set_ci
+@pytest.mark.single_worker
+@pytest.mark.parametrize("model_key", list(MODEL_CONFIGS.keys()))
+def test_vllm_llm_graph_tp1(enable_deploy_mode, model_key):
+    """Graph mode (torch.compile) TP=1 — primary device-tensor validation."""
+    _run_case(model_key=model_key, tp_size=1, enforce_eager=False)
+
+
+@pytest.mark.test_set_ci
+@pytest.mark.single_worker
+@pytest.mark.parametrize("model_key", ["llama_3_2_1b"])
+def test_vllm_llm_graph_tp2(enable_deploy_mode, model_key):
+    """Graph mode with RSD=2 — 1 vLLM worker fans a single logical device
+    out across 2 physical NPUs via ``VLLM_RBLN_TP_SIZE=2``. Skipped if
+    fewer than 2 physical NPUs are available. This does **not** exercise
+    the RCCL multi-worker collective path (that is a separate axis)."""
+    _run_case(model_key=model_key, tp_size=2, enforce_eager=False)
+
+
+@pytest.mark.test_set_ci
+@pytest.mark.single_worker
+@pytest.mark.parametrize("model_key", ["llama_3_2_1b"])
+def test_vllm_llm_eager_tp1(enable_deploy_mode, model_key):
+    """Eager mode TP=1 — sanity check non-compile execution path."""
+    _run_case(model_key=model_key, tp_size=1, enforce_eager=True)
+
+
+if __name__ == "__main__":
+    run_tests()
