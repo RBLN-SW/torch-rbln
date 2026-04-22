@@ -5,6 +5,7 @@
 #include <ATen/native/CPUFallback.h>
 #include <ATen/native/rbln/RBLNCopy.h>
 #include <ATen/native/rbln/RBLNTensorUtils.h>
+#include <c10/core/DispatchKey.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
 
@@ -17,6 +18,7 @@
 #endif
 
 #include <cstdlib>
+#include <iostream>
 #include <sstream>
 #include <string_view>
 #include <vector>
@@ -82,6 +84,76 @@ bool can_borrow_alias(const at::Tensor& t) {
   const auto offset_nbytes = static_cast<size_t>(t.storage_offset()) * t.element_size();
   if (offset_nbytes + element_nbytes > t.storage().nbytes()) return false;
   return true;
+}
+
+// Diagnostic: when TORCH_RBLN_OUTPUT_ALIAS_DIAG=1, log each op that reaches
+// cpu_fallback_rbln together with whether an out-variant exists in the
+// Dispatcher. Used to scope the C(alpha) output-alias work without committing
+// to the full dispatch rewrite yet.
+bool is_output_alias_diag_enabled() {
+  static const bool enabled = []() {
+    const auto* env = std::getenv("TORCH_RBLN_OUTPUT_ALIAS_DIAG");
+    return env != nullptr && std::string_view(env) == "1";
+  }();
+  return enabled;
+}
+
+std::optional<c10::OperatorHandle> find_out_variant(const c10::OperatorHandle& op) {
+  const auto& name = op.schema().operator_name();
+  auto& dispatcher = c10::Dispatcher::singleton();
+  // Try the common out-variant overload suffixes the PyTorch codegen emits.
+  // The order matters slightly (prefer plain "out" before the typed variants).
+  static constexpr const char* kCandidateOverloads[] = {
+      "out",
+      "Tensor_out",
+      "Scalar_out",
+      "Tensor_Tensor_out",
+      "Tensor_Scalar_out",
+      "Scalar_Tensor_out",
+      "Scalar_Scalar_out",
+      "dim_out",
+      "dimname_out",
+      "DimnameList_out",
+      "IntList_out",
+      "names_out",
+      "dtype_out",
+      "int_out",
+      "self_out",
+      "src_out",
+      "value_out",
+      "unary_out",
+  };
+  for (const char* overload : kCandidateOverloads) {
+    auto candidate = c10::OperatorName(name.name, overload);
+    if (auto handle = dispatcher.findSchema(candidate); handle.has_value()) {
+      return handle;
+    }
+  }
+  return std::nullopt;
+}
+
+void maybe_log_output_alias_diag(const c10::OperatorHandle& op) {
+  if (!is_output_alias_diag_enabled()) return;
+  const auto& schema = op.schema();
+  const auto& name = schema.operator_name();
+  const auto& returns = schema.returns();
+  const auto out_variant = find_out_variant(op);
+  const bool single_tensor_return =
+      (returns.size() == 1 && returns[0].type()->kind() == c10::TypeKind::TensorType);
+  const auto* return_alias = returns.empty() ? nullptr : returns[0].alias_info();
+  const bool is_view_return = (return_alias != nullptr && !return_alias->isWrite());
+  // Use std::cerr directly so we bypass TORCH_RBLN_LOG_LEVEL gating; the env
+  // var TORCH_RBLN_OUTPUT_ALIAS_DIAG=1 is the only gate for this diagnostic.
+  std::cerr << "[OUTPUT_ALIAS_DIAG] op=" << name.name << "::"
+            << (name.overload_name.empty() ? "<default>" : name.overload_name)
+            << " returns=" << returns.size()
+            << " single_tensor=" << (single_tensor_return ? 1 : 0)
+            << " view_return=" << (is_view_return ? 1 : 0)
+            << " out_variant="
+            << (out_variant.has_value()
+                    ? out_variant->schema().operator_name().overload_name
+                    : std::string("<none>"))
+            << "\n";
 }
 
 // Borrow the backing host pointer of an rbln tensor and wrap it as a CPU
@@ -198,6 +270,10 @@ void cpu_fallback_rbln(
       c10::BackendComponent::CPUBit == c10::toBackendComponent(cpu_dispatch_key),
       "Expected CPU backend DispatchKey but got ",
       c10::toString(cpu_dispatch_key));
+
+  // Diagnostic hook for C(alpha) output-alias work: log op schema + whether
+  // an out-variant exists in the Dispatcher so we can scope the rewrite.
+  maybe_log_output_alias_diag(op);
   auto& schema_args = op.schema().arguments();
   const auto num_arguments = schema_args.size();
   auto arguments = torch::jit::last(stack, num_arguments);
