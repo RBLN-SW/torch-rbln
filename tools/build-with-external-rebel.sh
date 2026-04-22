@@ -352,7 +352,10 @@ setup_virtualenv() {
 install_dependencies() {
     log_info "Installing build dependencies..."
     pip install --upgrade pip
-    # Align with rebel-compiler Quick Install: cmake<4.0, lit
+    # Align with rebel-compiler Quick Install: cmake<4.0, lit.
+    # rebel-compiler's own build-system.requires (scikit-build-core, pybind11,
+    # cython, setuptools_scm) are installed later in install_rebel_python_deps,
+    # *after* `uv sync --no-install-project` — otherwise uv sync would wipe them.
     pip install "cmake>=3.18,<4.0" ninja jinja2 hatchling setuptools-scm editables mypy lit
 
     # Native lib paths only. Python import is wired up later by the editable
@@ -518,37 +521,52 @@ validate_torch_wheel() {
     log_info "Validated torch wheel: $wheel_path"
 }
 
-# Install rebel-compiler into the venv. Runs after uv sync so `uv sync
-# --no-install-project` doesn't wipe it. Supports both the current
-# scikit-build-core layout (pyproject.toml; runtime deps resolved automatically
-# via the editable install) and the legacy gen_requirements.py + core.txt flow.
+# Install rebel-compiler into the venv (scikit-build-core editable). Runs
+# after `uv sync --no-install-project` so the install isn't wiped by sync.
+#
+# Writes _rebel_compiler_editable.pth + the redirect hook to site-packages so
+# that `import rebel` resolves to $REBEL_HOME/python/rebel/ while
+# `import rebel._C` finds the extension under $REBEL_HOME/python/build/skbuild/.
+# With [tool.scikit-build.editable] rebuild=false, the pre-built extension is
+# reused rather than recompiled. Runtime deps come from the package's
+# pyproject.toml.
+#
+# --no-build-isolation keeps the editable install deterministic: it reuses the
+# scikit-build-core / pybind11 / cython / cmake / ninja pinned in
+# install_dependencies instead of fetching a separate PEP 517 build env from
+# PyPI each invocation.
 install_rebel_python_deps() {
-    # Legacy layout: generate core.txt and install it, if the file still exists.
-    if [ -f "$REBEL_HOME/python/gen_requirements.py" ]; then
-        log_info "Installing rebel-compiler Python dependencies (gen_requirements.py + core.txt)..."
-        (cd "$REBEL_HOME" && python ./python/gen_requirements.py) || return $?
-        if [ -d "$REBEL_HOME/python/requirements" ]; then
-            uv pip install -r "$REBEL_HOME/python/requirements/core.txt" || return $?
-        else
-            log_warn "REBEL_HOME/python/requirements not found after gen_requirements.py; skipping core.txt install"
-        fi
-    fi
-
-    # Editable install of rebel-compiler via scikit-build-core. Writes
-    # _rebel_compiler_editable.pth + the redirect hook to site-packages so that
-    # `import rebel` resolves to $REBEL_HOME/python/rebel/ while `import rebel._C`
-    # finds the extension under $REBEL_HOME/python/build/skbuild/. With
-    # [tool.scikit-build.editable] rebuild=false, the existing build output is
-    # reused rather than recompiled. pyproject.toml's [project].dependencies
-    # covers rebel-compiler's runtime deps, so no separate core.txt is needed
-    # under the new layout.
     if [ ! -f "$REBEL_HOME/python/pyproject.toml" ]; then
         log_error "REBEL_HOME/python/pyproject.toml not found — cannot install rebel-compiler."
         log_error "Expected path: $REBEL_HOME/python/pyproject.toml"
         return 1
     fi
-    log_info "Installing rebel-compiler (editable) from $REBEL_HOME/python..."
-    uv pip install -e "$REBEL_HOME/python" || return $?
+
+    # Fail loudly if the REBEL_HOME checkout isn't scikit-build-core (pre-migration
+    # trees built rebel-compiler via a different backend; this script no longer
+    # supports them).
+    if ! grep -q 'build-backend\s*=\s*"scikit_build_core.build"' "$REBEL_HOME/python/pyproject.toml"; then
+        log_error "REBEL_HOME/python/pyproject.toml does not use scikit_build_core.build."
+        log_error "This script targets the post-migration rebel-compiler layout; please upgrade"
+        log_error "REBEL_HOME to a scikit-build-core build of rebel-compiler."
+        return 1
+    fi
+
+    # Install rebel-compiler's own build-system.requires into the active venv so
+    # `uv pip install --no-build-isolation -e` can reuse them without creating a
+    # PEP 517 isolated build env (and its associated PyPI fetches). These pins
+    # track rebel-compiler/python/pyproject.toml's [build-system].requires.
+    log_info "Installing rebel-compiler build dependencies (scikit-build-core, pybind11, cython)..."
+    uv pip install \
+        "scikit-build-core>=0.10" \
+        "setuptools_scm>=8" \
+        "pybind11>=2.10,<=2.10.4" \
+        cython \
+        "cmake>=3.26,<4.0" \
+        ninja || return $?
+
+    log_info "Installing rebel-compiler (editable, --no-build-isolation) from $REBEL_HOME/python..."
+    uv pip install --no-build-isolation -e "$REBEL_HOME/python" || return $?
 
     log_info "rebel-compiler installed"
 }
@@ -562,8 +580,9 @@ build_torch_rbln() {
     fi
     export REBEL_HOME="$REBEL_HOME"
     export RBLN_USE_EXTERNAL_REBEL_COMPILER=1
-    # No PYTHONPATH shim: rebel-compiler is editable-installed below (scikit-build-core),
-    # and FindRebel.cmake reads REBEL_HOME directly for headers/libs.
+    # No PYTHONPATH shim: install_rebel_python_deps (called later in this function)
+    # does a scikit-build-core editable install of rebel-compiler, and
+    # FindRebel.cmake reads REBEL_HOME directly for headers/libs.
 
     # Install torch based on gcc version
     if [ "$gcc_version" = "12" ] && [ -n "$effective_torch_wheel_path" ]; then
@@ -667,7 +686,9 @@ print(f'  torch_rbln: {torch_rbln.__version__}')
         log_error "Possible causes:"
         log_error "  - Segmentation fault (library version mismatch)"
         log_error "  - LD_LIBRARY_PATH not set correctly"
-        log_error "  - PYTHONPATH not set correctly"
+        log_error "  - rebel-compiler editable install missing or shadowed"
+        log_error "    (check \$VIRTUAL_ENV/lib/python*/site-packages/_rebel_compiler_editable.pth;"
+        log_error "     re-run: uv pip install --no-build-isolation -e \$REBEL_HOME/python)"
         log_error "  - Python version mismatch with rebel-compiler"
         log_error "  - GCC version mismatch between torch and torch-rbln"
         log_error ""
