@@ -13,6 +13,7 @@ from torch_rbln._internal.torch_compile_patch_helpers import CompiledFunctionWra
 # Module-level state to track if patches have been applied
 _torch_compile_patched: bool = False
 _rbln_backend_registered: bool = False
+_get_torch_hash_patched: bool = False
 
 
 def _is_backend_registered(backend_name: str) -> bool:
@@ -133,16 +134,67 @@ def patch_torch_compile() -> None:
     _torch_compile_patched = True
 
 
+def patch_get_torch_hash() -> None:
+    """Force ``rebel.compilation.get_torch_hash`` to include graph structure.
+
+    Without ``include_graph=True`` the hash signature for parameter-less
+    fx.GraphModules is identical (``"no-param" + "no-buffer" + "" + version +
+    "class:GraphModule" + "tp:N"``). Distinct ops (e.g. eager ``mul int32``
+    triggered from torch-rbln's register_ops vs the vllm sampler's
+    ``softmax + top_k_top_p`` graph) collide on the same ``mod_name`` under
+    the shared CompileContext + ``use_weight_sharing=True``. The collision
+    surfaces as ``Graph Generation: [DEVICE_GRAPH_CONVERSION]`` at the
+    second compile (FINE-542 / WeightReusabilityCheck).
+
+    This patch wraps ``rebel.core.compilation._impl.get_torch_hash`` and
+    sets ``include_graph=True`` so the forward code becomes part of the
+    signature, giving distinct graphs distinct ``mod_name``s.
+
+    Patches all three module bindings (``_impl``, ``compile_from_any``,
+    ``core.compilation``) since some import the symbol by name (the import
+    locks an early reference that wouldn't see a single-module patch).
+    """
+    global _get_torch_hash_patched
+    if _get_torch_hash_patched:
+        return
+
+    try:
+        import rebel.compile_from_any as _cfa
+        import rebel.core.compilation as _rc
+        import rebel.core.compilation._impl as _impl
+    except ImportError:
+        return
+
+    original = _impl.get_torch_hash
+
+    def patched(mod, tensor_parallel_size=None):
+        from rebel.core.compilation._torch_hash import TorchModelHasher
+        meta = f"tp:{tensor_parallel_size}" if tensor_parallel_size is not None else None
+        digest = TorchModelHasher().get_model_hash(
+            mod, include_param=True, include_graph=True, meta=meta,
+        )
+        return digest[:6]
+
+    patched.__wrapped__ = original  # type: ignore[attr-defined]
+    for _mod in (_impl, _cfa, _rc):
+        if getattr(_mod, "get_torch_hash", None) is original:
+            _mod.get_torch_hash = patched
+
+    _get_torch_hash_patched = True
+
+
 def apply_all_patches() -> None:
     """
     Apply all monkey patches for RBLN functionality.
 
     This function applies patches in the correct order:
     1. torch.compile() patch
+    2. rebel get_torch_hash include-graph fix (FINE-542 workaround)
 
     Idempotent: Safe to call multiple times.
     """
     patch_torch_compile()
+    patch_get_torch_hash()
 
 
 def remove_all_patches() -> None:
@@ -155,7 +207,8 @@ def remove_all_patches() -> None:
     Note: This function only resets the patch flags. The actual patches remain
     applied. To fully restore, you would need to reload the module.
     """
-    global _torch_compile_patched
+    global _torch_compile_patched, _get_torch_hash_patched
 
     # Reset state flags (actual patches remain applied)
     _torch_compile_patched = False
+    _get_torch_hash_patched = False
