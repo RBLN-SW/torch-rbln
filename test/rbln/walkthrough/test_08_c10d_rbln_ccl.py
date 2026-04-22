@@ -91,8 +91,7 @@ def _run_all_gather(rank: int, world_size: int, backend: str) -> None:
 
         for other_rank, t in enumerate(gathered):
             assert t[0] == float(other_rank), (
-                f"all_gather failed on rank {rank}: "
-                f"expected gathered[{other_rank}][0]={float(other_rank)}, got {t[0]}"
+                f"all_gather failed on rank {rank}: expected gathered[{other_rank}][0]={float(other_rank)}, got {t[0]}"
             )
     finally:
         dist.destroy_process_group()

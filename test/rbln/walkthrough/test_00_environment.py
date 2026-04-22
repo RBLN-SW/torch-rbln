@@ -16,9 +16,10 @@ import sys
 
 import pytest
 import torch
-import torch_rbln
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
+
+import torch_rbln
 
 
 @pytest.mark.test_set_ci
