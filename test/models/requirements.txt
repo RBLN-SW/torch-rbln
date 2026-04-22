@@ -1,21 +1,25 @@
 # Test-only dependencies for model tests
 # These packages are only needed when running model tests (test/models/*.py)
 #
-# Note: torchvision should be installed from PyTorch CPU index to avoid operator conflicts.
-# The ./tools/test/install-test-deps.sh script and ./test/run_tests.py --suite=models handle this automatically.
-# Model tests may still require access to external model artifacts at runtime.
+# This file intentionally lists only deps that are *not* transitively provided
+# by vllm-rbln, to avoid version/index conflicts when both this loop and the
+# vllm-rbln editable install try to manage the same package:
+#   * torchvision — pinned to a specific CPU-index build (operator compat);
+#     must come from download.pytorch.org/whl/cpu rather than PyPI.
+#   * pandas — used by test/models/test_optimum_llm.py, not a vllm-rbln dep.
 #
-# vllm and vllm-rbln are *not* listed here — vllm-rbln's device-tensor flow lives
-# on a branch (origin/device_tensor_rebased) that is not on PyPI, so it must be
-# cloned + installed editable. ./tools/test/install-test-deps.sh handles that
-# separately (search for VLLM_RBLN_REF). Tests that need vllm-rbln
-# (e.g. test/models/test_vllm_llm.py) skip via pytest.importorskip when it is
-# absent, so environments that opt out with VLLM_RBLN_SKIP=1 still run the rest
-# of the model suite cleanly.
+# The following are *expected* to arrive via vllm-rbln's own dependencies when
+# ./tools/test/install-test-deps.sh runs the vllm-rbln section:
+#   * transformers, optimum-rbln (both pinned by vllm-rbln's pyproject.toml).
+# If VLLM_RBLN_SKIP=1 is used to opt out of vllm-rbln, tests that need
+# transformers/optimum-rbln will fail to import — install them manually in
+# that case.
+#
+# vllm + vllm-rbln themselves are handled entirely by install-test-deps.sh
+# (search for VLLM_RBLN_REF); vllm-rbln's device-tensor branch is not on
+# PyPI, so it is git-cloned + installed editable.
 #
 # Format: package==version
 # Comments and empty lines are ignored
 torchvision==0.25.0+cpu
-transformers==4.57.6
-optimum-rbln==0.10.3a1
 pandas==2.2.3

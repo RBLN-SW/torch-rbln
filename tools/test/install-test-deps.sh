@@ -223,8 +223,12 @@ else
 fi
 
 echo "Installing vllm-rbln (editable) from $VLLM_RBLN_DIR..."
+# The rbln index is needed so pip can resolve vllm-rbln's transitive
+# ``optimum-rbln==0.10.3a1`` pin; transformers + other ordinary PyPI packages
+# come from the default index.
 run_install -e "$VLLM_RBLN_DIR" \
   --extra-index-url "$VLLM_WHEELS_INDEX" \
+  --extra-index-url https://pypi.rbln.ai/simple/ \
   --extra-index-url https://download.pytorch.org/whl/cpu
 
 echo "All test dependencies installed."
