@@ -679,8 +679,15 @@ class TestTorchCompileMonkeyPatch(TestCase):
 
     def setUp(self):
         """Store original torch.compile and torch._dynamo.reset before tests."""
-        self._original_compile = torch.compile
-        self._original_dynamo_reset = torch._dynamo.reset
+        import torch_rbln._internal.monkey_patches as mp
+
+        # apply_all_patches() runs at torch_rbln import time, so torch.compile
+        # is already the wrapper by the time tests run. Pull the true originals
+        # from the module state instead of capturing the current (wrapped) values.
+        self._original_compile = mp._original_torch_compile if mp._original_torch_compile is not None else torch.compile
+        self._original_dynamo_reset = (
+            mp._original_dynamo_reset if mp._original_dynamo_reset is not None else torch._dynamo.reset
+        )
         clear_rbln_compile_cache()
 
     def tearDown(self):
