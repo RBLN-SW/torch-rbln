@@ -28,28 +28,33 @@ namespace at::native::rbln {
 
 namespace {
 
-// Gate the zero-copy CPU-fallback alias path. When enabled, integer rbln
-// tensors that are read-only inputs of an op are exposed to the CPU op as
-// at::from_blob aliases over rebel's borrowed host pointer instead of being
-// materialised through memcpy_v2h. See project_session_2026_04_22_end.md.
+// Helper: interpret an env flag with default-on semantics. Returns true when
+// env is unset or not equal to "0" / "false". Explicit "0" or "false" turns
+// the optimisation off for A/B bisection and regression triage.
+bool env_flag_default_on(const char* name) {
+  const auto* env = std::getenv(name);
+  if (env == nullptr) return true;
+  std::string_view v{env};
+  return !(v == "0" || v == "false" || v == "False" || v == "FALSE");
+}
+
+// Zero-copy CPU-fallback input alias (S3-new + B / view). Integer/bool rbln
+// tensors that are read-only op inputs are exposed to the CPU kernel as
+// at::from_blob aliases over rebel's borrowed host pointer. View / storage-
+// offset tensors are handled by borrowing the storage base and offsetting
+// into the returned host_ptr. Enabled by default; disable with
+// TORCH_RBLN_BORROW_ALIAS=0.
 bool is_borrow_alias_enabled() {
-  static const bool enabled = []() {
-    const auto* env = std::getenv("TORCH_RBLN_BORROW_ALIAS");
-    return env != nullptr && std::string_view(env) == "1";
-  }();
+  static const bool enabled = env_flag_default_on("TORCH_RBLN_BORROW_ALIAS");
   return enabled;
 }
 
-// Opt-in extension: also alias write inputs (mutable alias args). Measured to
-// regress Llama 1B step time by ~40% when enabled unconditionally (likely
-// because rebel has to sync the device side on return_borrowed(updated=true)
-// for large tensors). Keep this off by default until we understand the cost,
-// and expose the knob so we can iterate. Requires TORCH_RBLN_BORROW_ALIAS=1.
+// Extend the alias path to write inputs (mutable alias args). On return the
+// deleter calls rbln_v_return_borrowed(updated=true) and Step 3's
+// _copy_from_and_resize is skipped for aliased write tensors. Enabled by
+// default; disable with TORCH_RBLN_BORROW_ALIAS_WRITE=0.
 bool is_borrow_alias_write_enabled() {
-  static const bool enabled = []() {
-    const auto* env = std::getenv("TORCH_RBLN_BORROW_ALIAS_WRITE");
-    return env != nullptr && std::string_view(env) == "1";
-  }();
+  static const bool enabled = env_flag_default_on("TORCH_RBLN_BORROW_ALIAS_WRITE");
   return enabled;
 }
 
@@ -157,18 +162,14 @@ void maybe_log_output_alias_diag(const c10::OperatorHandle& op) {
             << "\n";
 }
 
-// Opt-in C(alpha) output-alias path. Routes single-tensor-return ops with an
-// out-variant overload (e.g. aten::arange.start_out, aten::index.Tensor_out,
-// aten::cat.out) to the out-variant: we pre-allocate the rbln destination,
-// wrap it as a CPU at::from_blob alias, push the alias as the ``out`` kwarg,
-// dispatch on CPU, and then hand the rbln tensor straight back to the stack.
-// Disabled by default because it requires a Meta-kernel for shape inference;
-// off-by-default keeps the established Borrow-alias input path untouched.
+// C(alpha) output-alias path. For ops that have already been lowered to an
+// out-variant schema by PyTorch's CompositeImplicitAutograd (arange, index,
+// cat, etc.), turn the pre-allocated rbln ``out`` into a CPU at::from_blob
+// alias so the kernel writes directly into the host-backing (paired with
+// rbln_v_mark_zeros so the borrow can skip the d->h sync of the stale
+// backing). Enabled by default; disable with TORCH_RBLN_OUTPUT_ALIAS=0.
 bool is_output_alias_enabled() {
-  static const bool enabled = []() {
-    const auto* env = std::getenv("TORCH_RBLN_OUTPUT_ALIAS");
-    return env != nullptr && std::string_view(env) == "1";
-  }();
+  static const bool enabled = env_flag_default_on("TORCH_RBLN_OUTPUT_ALIAS");
   return enabled;
 }
 
