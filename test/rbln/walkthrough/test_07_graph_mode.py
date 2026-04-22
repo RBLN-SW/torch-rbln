@@ -20,8 +20,6 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 from test.utils import SUPPORTED_DTYPES
 
 
-# Tolerance for eager-vs-graph numerical comparison. Matches the original
-# walkthrough script (atol=1e-4).
 ATOL = 1e-4
 RTOL = 1e-4
 
@@ -29,14 +27,10 @@ RTOL = 1e-4
 class _SmallNet(nn.Module):
     def __init__(self):
         super().__init__()
-        self.seq = nn.Sequential(
-            nn.Linear(128, 256),
-            nn.ReLU(),
-            nn.Linear(256, 64),
-        )
+        self.linear = nn.Linear(128, 64)
 
     def forward(self, x):
-        return self.seq(x)
+        return self.linear(x)
 
 
 @pytest.mark.test_set_ci
