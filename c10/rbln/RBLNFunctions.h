@@ -222,4 +222,18 @@ C10_RBLN_API void reset_accumulated_memory_stats(const c10::Device& device);
  */
 C10_RBLN_API void reset_peak_memory_stats(const c10::Device& device);
 
+/**
+ * @brief Borrow a CPU-accessible host pointer backing an RBLN virtual memory region.
+ *
+ * Wraps rebel::torch::rbln_v_borrow_host_ptr. Between borrow and return, the
+ * returned host pointer is safe for CPU reads/writes. Pair with return_borrowed().
+ */
+C10_RBLN_API uintptr_t borrow_host_ptr(const void* data, size_t nbytes, uint64_t& borrow_id_out);
+
+/**
+ * @brief Return a previously borrowed host pointer. updated=true marks host
+ *        memory as latest truth for the next device access.
+ */
+C10_RBLN_API void return_borrowed(uint64_t borrow_id, bool updated);
+
 } // namespace c10::rbln

@@ -4,6 +4,7 @@
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/util/CallOnce.h>
 #include <rebel/runtime/memory_stats.h>
+#include <rebel/torch/rbln_vmem_api_min.h>
 
 #include <cstdlib>
 #include <cstring>
@@ -415,6 +416,32 @@ void reset_peak_memory_stats(const c10::Device& device) {
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_reset_peak_memory_stats: device_id={}", device_id);
   RBLN_CHECK(!rbln_reset_peak_memory_stats(device_id));
+}
+
+uintptr_t borrow_host_ptr(const void* data, size_t nbytes, uint64_t& borrow_id_out) {
+  RBLN_CHECK(data != nullptr, "data cannot be nullptr");
+  RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
+  const auto vaddr = reinterpret_cast<uint64_t>(data);
+  const auto size = static_cast<uint64_t>(nbytes);
+  uintptr_t host_ptr = 0;
+  uint64_t borrow_id = 0;
+  RBLN_LOG_DEBUG(
+      "Calling rbln_v_borrow_host_ptr: vaddr={:#x}, size={}", vaddr, size);
+  const auto status = ::rebel::torch::rbln_v_borrow_host_ptr(vaddr, size, host_ptr, borrow_id);
+  RBLN_CHECK(status.IsOK(), "rbln_v_borrow_host_ptr failed for vaddr={:#x}", vaddr);
+  borrow_id_out = borrow_id;
+  RBLN_LOG_DEBUG(
+      "borrow_host_ptr: vaddr={:#x} -> host_ptr={:#x} borrow_id={}",
+      vaddr,
+      static_cast<uint64_t>(host_ptr),
+      borrow_id);
+  return host_ptr;
+}
+
+void return_borrowed(uint64_t borrow_id, bool updated) {
+  RBLN_LOG_DEBUG("Calling rbln_v_return_borrowed: borrow_id={} updated={}", borrow_id, updated);
+  const auto status = ::rebel::torch::rbln_v_return_borrowed(borrow_id, updated);
+  RBLN_CHECK(status.IsOK(), "rbln_v_return_borrowed failed for borrow_id={}", borrow_id);
 }
 
 } // namespace c10::rbln

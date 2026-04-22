@@ -5,20 +5,111 @@
 #include <ATen/native/CPUFallback.h>
 #include <ATen/native/rbln/RBLNCopy.h>
 #include <ATen/native/rbln/RBLNTensorUtils.h>
+#include <c10/rbln/RBLNFunctions.h>
+#include <c10/rbln/RBLNLogging.h>
 
 #ifndef AT_PER_OPERATOR_HEADERS
 #include <ATen/Functions.h>
 #else
 #include <ATen/ops/_copy_from_and_resize.h>
 #include <ATen/ops/_to_cpu.h>
+#include <ATen/ops/from_blob.h>
 #endif
 
+#include <cstdlib>
 #include <sstream>
+#include <string_view>
 #include <vector>
 
 namespace at::native::rbln {
 
 namespace {
+
+// Gate the zero-copy CPU-fallback alias path. When enabled, integer rbln
+// tensors that are read-only inputs of an op are exposed to the CPU op as
+// at::from_blob aliases over rebel's borrowed host pointer instead of being
+// materialised through memcpy_v2h. See project_session_2026_04_22_end.md.
+bool is_borrow_alias_enabled() {
+  static const bool enabled = []() {
+    const auto* env = std::getenv("TORCH_RBLN_BORROW_ALIAS");
+    return env != nullptr && std::string_view(env) == "1";
+  }();
+  return enabled;
+}
+
+// Opt-in extension: also alias write inputs (mutable alias args). Measured to
+// regress Llama 1B step time by ~40% when enabled unconditionally (likely
+// because rebel has to sync the device side on return_borrowed(updated=true)
+// for large tensors). Keep this off by default until we understand the cost,
+// and expose the knob so we can iterate. Requires TORCH_RBLN_BORROW_ALIAS=1.
+bool is_borrow_alias_write_enabled() {
+  static const bool enabled = []() {
+    const auto* env = std::getenv("TORCH_RBLN_BORROW_ALIAS_WRITE");
+    return env != nullptr && std::string_view(env) == "1";
+  }();
+  return enabled;
+}
+
+bool is_borrow_aliasable_dtype(c10::ScalarType dtype) {
+  // Only integer/boolean dtypes where raw host bytes round-trip cleanly; rebel
+  // never reinterprets these the way it may for float16. fp dtypes stay on the
+  // existing device-backed path and continue to flow through NPU compile.
+  switch (dtype) {
+    case c10::kBool:
+    case c10::kByte:
+    case c10::kChar:
+    case c10::kShort:
+    case c10::kInt:
+    case c10::kLong:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool can_borrow_alias(const at::Tensor& t) {
+  if (!t.defined()) return false;
+  if (!t.device().is_privateuseone()) return false;
+  if (!is_borrow_aliasable_dtype(t.scalar_type())) return false;
+  // Contiguous required so at::from_blob sees a linear memory region. Non-
+  // contiguous views have interior strides that rebel's borrow cannot expose
+  // as a single host-backed range; let those fall back through memcpy_v2h.
+  if (!t.is_contiguous()) return false;
+  if (t.numel() == 0) return false;
+  // View-safe: we borrow the whole storage and offset into it. Sanity-check
+  // that the view lies inside the storage (it always should).
+  const auto element_nbytes = static_cast<size_t>(t.numel()) * t.element_size();
+  const auto offset_nbytes = static_cast<size_t>(t.storage_offset()) * t.element_size();
+  if (offset_nbytes + element_nbytes > t.storage().nbytes()) return false;
+  return true;
+}
+
+// Borrow the backing host pointer of an rbln tensor and wrap it as a CPU
+// tensor via at::from_blob. We borrow the full storage (not just the tensor
+// slice) so views with storage_offset > 0 or sub-storage extent still work:
+// rebel only knows about storage-level v-memory entries, and re-borrowing the
+// same storage twice in the same fallback call is safe because each borrow
+// gets its own borrow_id. ``writable`` threads the schema's isWrite() bit
+// through to return_borrowed so rebel marks the host side as latest only for
+// mutating ops.
+at::Tensor borrow_alias_as_cpu(const at::Tensor& rbln_t, bool writable) {
+  uint64_t borrow_id = 0;
+  const auto storage_nbytes = rbln_t.storage().nbytes();
+  const auto element_size = rbln_t.element_size();
+  const auto offset_nbytes = static_cast<size_t>(rbln_t.storage_offset()) * element_size;
+  const uintptr_t storage_host_ptr = c10::rbln::borrow_host_ptr(
+      rbln_t.storage().data_ptr().get(), storage_nbytes, borrow_id);
+  const uintptr_t tensor_host_ptr = storage_host_ptr + offset_nbytes;
+  auto deleter = [borrow_id, writable](void*) {
+    c10::rbln::return_borrowed(borrow_id, /*updated=*/writable);
+  };
+  return at::from_blob(
+      reinterpret_cast<void*>(tensor_host_ptr),
+      rbln_t.sizes(),
+      rbln_t.strides(),
+      std::move(deleter),
+      at::TensorOptions().dtype(rbln_t.scalar_type()).device(at::kCPU));
+}
 
 // convenience helper for converting tensors to cpu
 template <
@@ -153,8 +244,43 @@ void cpu_fallback_rbln(
       (*stack)[arguments_begin + idx] = c10::IValue(c10::Device(kCPU));
     }
   }
-  // XLA requires all of the tensor arguments to be gathered up and converted to CPU together.
-  auto cpu_tensors = to_cpu(tensor_args);
+  // Build the CPU tensor view for each tensor argument. When the borrow-alias
+  // gate is on, integer rbln tensors (read-only AND write mutable) are exposed
+  // as at::from_blob wrappers over the rebel-borrowed host pointer (zero copy);
+  // everything else still flows through the batched at::_to_cpu path.
+  //
+  // aliased_mask[i] records whether cpu_tensors[i] is a borrow alias; used in
+  // Step 3 to skip the redundant _copy_from_and_resize on write inputs (the
+  // alias deleter already marks the host side as latest via updated=true).
+  std::vector<at::Tensor> cpu_tensors(tensor_args.size());
+  std::vector<bool> aliased_mask(tensor_args.size(), false);
+  std::vector<at::Tensor> fallback_inputs;
+  std::vector<size_t> fallback_positions;
+  fallback_inputs.reserve(tensor_args.size());
+  fallback_positions.reserve(tensor_args.size());
+  const bool alias_enabled = is_borrow_alias_enabled();
+  const bool alias_write_enabled = is_borrow_alias_write_enabled();
+  for (const auto i : c10::irange(tensor_args_indices.size())) {
+    const auto idx = tensor_args_indices[i];
+    const AliasInfo* alias_info = schema_args[idx].alias_info();
+    const bool schema_is_write = (alias_info != nullptr && alias_info->isWrite());
+    const bool aliasable = alias_enabled
+                           && can_borrow_alias(tensor_args[i])
+                           && (!schema_is_write || alias_write_enabled);
+    if (aliasable) {
+      cpu_tensors[i] = borrow_alias_as_cpu(tensor_args[i], /*writable=*/schema_is_write);
+      aliased_mask[i] = true;
+    } else {
+      fallback_positions.push_back(i);
+      fallback_inputs.push_back(tensor_args[i]);
+    }
+  }
+  if (!fallback_inputs.empty()) {
+    auto fallback_cpu = to_cpu(fallback_inputs);
+    for (size_t j = 0; j < fallback_positions.size(); ++j) {
+      cpu_tensors[fallback_positions[j]] = std::move(fallback_cpu[j]);
+    }
+  }
 
   for (const auto i : c10::irange(tensor_args_indices.size())) {
     auto idx = tensor_args_indices[i];
@@ -172,6 +298,11 @@ void cpu_fallback_rbln(
     const AliasInfo* alias_info = schema_args[tensor_idx].alias_info();
     if (alias_info != nullptr && alias_info->isWrite()) {
       if (!tensor_args[i].defined())
+        continue;
+      // Alias path already writes directly into the rbln-backed host pointer;
+      // the deleter tagged the borrow with updated=true so rebel will sync on
+      // the next device read. No explicit device-side copy needed.
+      if (aliased_mask[i])
         continue;
       at::_copy_from_and_resize(cpu_tensors[i], tensor_args[i]);
     }
