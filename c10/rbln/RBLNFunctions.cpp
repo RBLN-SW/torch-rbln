@@ -444,4 +444,12 @@ void return_borrowed(uint64_t borrow_id, bool updated) {
   RBLN_CHECK(status.IsOK(), "rbln_v_return_borrowed failed for borrow_id={}", borrow_id);
 }
 
+void mark_zeros(const void* data) {
+  RBLN_CHECK(data != nullptr, "data cannot be nullptr");
+  const auto vaddr = reinterpret_cast<uint64_t>(data);
+  RBLN_LOG_DEBUG("Calling rbln_v_mark_zeros: vaddr={:#x}", vaddr);
+  const auto status = ::rebel::torch::rbln_v_mark_zeros(vaddr);
+  RBLN_CHECK(status.IsOK(), "rbln_v_mark_zeros failed for vaddr={:#x}", vaddr);
+}
+
 } // namespace c10::rbln

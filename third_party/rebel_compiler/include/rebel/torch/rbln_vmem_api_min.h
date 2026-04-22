@@ -57,6 +57,15 @@ rbln::Status rbln_v_borrow_host_ptr(uint64_t vaddr, uint64_t size,
 // latest truth so rebel will propagate to device on next read.
 rbln::Status rbln_v_return_borrowed(uint64_t borrow_id, bool updated);
 
+// Mark the v-memory at key_vaddr as logically zero-initialised. No host
+// memory is allocated and no device transfer occurs. On the next device
+// read, zeros are transferred via a temporary buffer. On the next device
+// write, the transfer is skipped entirely (PHYSICAL_VIEW_IS_LATEST).
+// Used as the "about to be fully overwritten" hint so a subsequent
+// rbln_v_borrow_host_ptr doesn't trigger a useless d->h sync of the
+// previous (and irrelevant) contents.
+rbln::Status rbln_v_mark_zeros(uint64_t key_vaddr);
+
 } // namespace rebel::torch
 
 #endif // REBEL_TORCH_RBLN_VMEM_API_MIN_H

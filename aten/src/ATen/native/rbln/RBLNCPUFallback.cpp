@@ -258,6 +258,18 @@ bool try_output_alias_dispatch(
   const auto args_begin = stack->size() - num_arguments;
   auto& out_ivalue = (*stack)[args_begin + out_idx];
 
+  // Tell rebel "contents are irrelevant, next write will overwrite everything"
+  // so the upcoming borrow doesn't waste a d->h sync of the stale backing.
+  // rbln_v_mark_zeros is the documented hint: "On the next device write, the
+  // transfer is skipped entirely (PHYSICAL_VIEW_IS_LATEST)". Wrapped in a
+  // try/catch so a mark-zeros failure just loses the optimisation instead of
+  // breaking the op.
+  try {
+    c10::rbln::mark_zeros(out_tensor.storage().data_ptr().get());
+  } catch (...) {
+    // Not fatal — proceed with borrow anyway.
+  }
+
   // Wrap the rbln ``out`` as a CPU alias; CPU kernel will write through it.
   at::Tensor cpu_alias_out;
   try {

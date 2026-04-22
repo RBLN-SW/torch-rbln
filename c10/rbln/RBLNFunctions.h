@@ -236,4 +236,11 @@ C10_RBLN_API uintptr_t borrow_host_ptr(const void* data, size_t nbytes, uint64_t
  */
 C10_RBLN_API void return_borrowed(uint64_t borrow_id, bool updated);
 
+/**
+ * @brief Mark an rbln v-memory region as logically zero-initialised. Used
+ *        before borrow_host_ptr to tell rebel the existing contents are
+ *        irrelevant so the implicit d->h sync can be skipped.
+ */
+C10_RBLN_API void mark_zeros(const void* data);
+
 } // namespace c10::rbln
