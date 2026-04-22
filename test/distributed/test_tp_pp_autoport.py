@@ -56,11 +56,7 @@ class TestTPPPAutoportConcurrent(TestCase):
         with ThreadPoolExecutor(max_workers=len(_PARTITIONS)) as executor:
             results = list(executor.map(_invoke_test_tp_pp, _PARTITIONS))
 
-        failures = [
-            (env["RBLN_DEVICES"], r.returncode)
-            for env, r in zip(_PARTITIONS, results)
-            if r.returncode != 0
-        ]
+        failures = [(env["RBLN_DEVICES"], r.returncode) for env, r in zip(_PARTITIONS, results) if r.returncode != 0]
         self.assertFalse(
             failures,
             msg=f"test_tp_pp.py concurrent autoport runs failed: {failures}",

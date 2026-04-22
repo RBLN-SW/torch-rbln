@@ -26,6 +26,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+
 _SYSFS_INFINIBAND = Path("/sys/class/infiniband")
 _RDMA_LINK_TIMEOUT_SEC = 5.0
 _LOOPBACK = "127.0.0.1"
