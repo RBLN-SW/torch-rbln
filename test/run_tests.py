@@ -2,15 +2,14 @@
 """
 Unified test runner for torch-rbln.
 
-Defaults: runs all suites (core, distributed, models, ops, walkthrough) with CI marker
-(-m "test_set_ci") using 16 parallel workers (override via --workers).
+Defaults: runs all suites (core, distributed, models, ops) with CI marker (-m "test_set_ci")
+using 16 parallel workers (override via --workers).
 
 Usage:
     python test/run_tests.py                                          # All CI tests
     python test/run_tests.py --test_mode=release                      # All release tests
     python test/run_tests.py --suite=core --suite=ops                 # Only core and ops (CI)
     python test/run_tests.py --suite=distributed --test_mode=release  # Only distributed (release)
-    python test/run_tests.py --suite=walkthrough                      # Only walkthrough (CI)
 """
 
 import argparse
@@ -42,7 +41,6 @@ def _run_pytest(
     *,
     marker: str,
     workers: int,
-    extra_args: list[str] | None = None,
 ) -> int:
     """Run pytest for a single test_dir/marker combo. Returns the exit code."""
     base_cmd = [
@@ -52,7 +50,6 @@ def _run_pytest(
         test_dir,
         "-m",
         marker,
-        *(extra_args or []),
     ]
 
     # Collect-only dry run to show which tests will execute
@@ -111,7 +108,6 @@ def _run_with_worker_split(
     workers: int,
     results: _TestResults,
     project_root: Path,
-    extra_args: list[str] | None = None,
 ) -> None:
     """Run single_worker (serial) then multi-worker (parallel) for each dir."""
     mode_marker = TEST_MODE_MARKERS[test_mode]
@@ -122,12 +118,7 @@ def _run_with_worker_split(
             marker = f"{mode_marker} and {worker_marker}"
             num_processes = 1 if is_single_worker else workers
             desc = f"{test_dir} [{marker}]"
-            rc = _run_pytest(
-                abs_test_dir,
-                marker=marker,
-                workers=num_processes,
-                extra_args=extra_args,
-            )
+            rc = _run_pytest(abs_test_dir, marker=marker, workers=num_processes)
             results.record(rc, desc)
 
 
@@ -153,16 +144,12 @@ def run_core_tests(
     results: _TestResults,
     project_root: Path,
 ) -> None:
-    # The walkthrough subtree is exposed as its own suite, so exclude it from
-    # core to avoid running those tests twice in a default invocation.
-    walkthrough_ignore = str(project_root / "test" / "rbln" / "walkthrough")
     _run_with_worker_split(
         ["test/internal/", "test/rbln/"],
         test_mode=test_mode,
         workers=workers,
         results=results,
         project_root=project_root,
-        extra_args=[f"--ignore={walkthrough_ignore}"],
     )
 
 
@@ -212,22 +199,6 @@ def run_ops_tests(
     )
 
 
-def run_walkthrough_tests(
-    test_mode: str,
-    workers: int,
-    results: _TestResults,
-    project_root: Path,
-) -> None:
-    """Run the PoV walkthrough test suite (`test/rbln/walkthrough/`)."""
-    _run_with_worker_split(
-        ["test/rbln/walkthrough/"],
-        test_mode=test_mode,
-        workers=workers,
-        results=results,
-        project_root=project_root,
-    )
-
-
 class SuiteRunner(Protocol):
     def __call__(self, test_mode: str, workers: int, results: _TestResults, project_root: Path) -> None: ...
 
@@ -237,7 +208,6 @@ SUITE_RUNNERS: dict[str, SuiteRunner] = {
     "distributed": run_distributed_tests,
     "models": run_models_tests,
     "ops": run_ops_tests,
-    "walkthrough": run_walkthrough_tests,
 }
 
 
