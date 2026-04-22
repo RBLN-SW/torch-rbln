@@ -8,7 +8,7 @@ Ported from walkthrough_guide/3.rbln_tensor_metadata_handling.py.
 Verifies that RBLN tensors participate correctly in PyTorch's tensor
 metadata / stride handling:
 - `view()` and `reshape()` change shape/strides without copying when legal.
-- `transpose()` reorders dimensions.
+- `transpose()` and `permute()` reorder dimensions.
 - `is_contiguous()` / `contiguous()` report and enforce layout.
 """
 
@@ -51,6 +51,15 @@ class TestTensorMetadata(TestCase):
         r = x.reshape(2, 128)
         self.assertEqual(r.shape, (2, 128))
         self.assertEqual(r.device.type, "rbln")
+
+    @dtypes(*SUPPORTED_DTYPES)
+    def test_permute_reorders_dimensions(self, dtype):
+        """permute() should reorder dims and share storage with the input."""
+        x = torch.randn(2, 3, 4, device=self.rbln_device, dtype=dtype)
+        p = x.permute(2, 0, 1)
+        self.assertEqual(p.shape, (4, 2, 3))
+        self.assertEqual(p.device.type, "rbln")
+        self.assertEqual(x.data_ptr(), p.data_ptr())
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_transposed_is_not_contiguous(self, dtype):

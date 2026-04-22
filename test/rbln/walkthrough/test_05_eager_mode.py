@@ -6,8 +6,8 @@ Walkthrough example 5: torch eager execution on RBLN.
 Ported from walkthrough_guide/5.eager_mode.py.
 
 Verifies that standard PyTorch eager ops run on RBLN without `torch.compile`:
-- Pointwise ops (add, relu), scalar broadcast, and in-place variants.
-- Reductions (sum, sum along a dim).
+- Pointwise ops (add, relu, mul) and in-place variants (`mul_`), with scalar broadcast.
+- Reductions (sum, mean, max) both full and along a dim.
 - Matrix multiply via `torch.matmul`, the `@` operator, and matmul + bias.
 """
 
@@ -47,6 +47,19 @@ class TestEagerMode(TestCase):
         self.assertEqual(y.device.type, "rbln")
 
     @dtypes(*SUPPORTED_DTYPES)
+    def test_inplace_mul_(self, dtype):
+        """`x.mul_(scalar)` should mutate in place on RBLN without moving storage."""
+        x = torch.randn(64, 64, device=self.rbln_device, dtype=dtype)
+        original_ptr = x.data_ptr()
+
+        returned = x.mul_(2.0)
+
+        # Same tensor, same storage.
+        self.assertIs(returned, x)
+        self.assertEqual(x.data_ptr(), original_ptr)
+        self.assertEqual(x.device.type, "rbln")
+
+    @dtypes(*SUPPORTED_DTYPES)
     def test_reduction_sum_full(self, dtype):
         """Full reduction via `tensor.sum()` should produce a scalar tensor on RBLN."""
         x = torch.randn(64, 64, device=self.rbln_device, dtype=dtype)
@@ -61,6 +74,40 @@ class TestEagerMode(TestCase):
         row_sum = x.sum(dim=1)
         self.assertEqual(row_sum.shape, (64,))
         self.assertEqual(row_sum.device.type, "rbln")
+
+    @dtypes(*SUPPORTED_DTYPES)
+    def test_reduction_mean_full(self, dtype):
+        """Full `mean()` should produce a scalar tensor on RBLN."""
+        x = torch.randn(64, 64, device=self.rbln_device, dtype=dtype)
+        m = x.mean()
+        self.assertEqual(m.shape, ())
+        self.assertEqual(m.device.type, "rbln")
+
+    @dtypes(*SUPPORTED_DTYPES)
+    def test_reduction_mean_along_dim(self, dtype):
+        """`mean(dim=...)` should produce a 1-D tensor on RBLN."""
+        x = torch.randn(64, 64, device=self.rbln_device, dtype=dtype)
+        row_mean = x.mean(dim=1)
+        self.assertEqual(row_mean.shape, (64,))
+        self.assertEqual(row_mean.device.type, "rbln")
+
+    @dtypes(*SUPPORTED_DTYPES)
+    def test_reduction_max_full(self, dtype):
+        """Full `max()` should produce a scalar tensor on RBLN."""
+        x = torch.randn(64, 64, device=self.rbln_device, dtype=dtype)
+        m = x.max()
+        self.assertEqual(m.shape, ())
+        self.assertEqual(m.device.type, "rbln")
+
+    @dtypes(*SUPPORTED_DTYPES)
+    def test_reduction_max_along_dim(self, dtype):
+        """`max(dim=...)` should return a `(values, indices)` pair, both on RBLN."""
+        x = torch.randn(64, 64, device=self.rbln_device, dtype=dtype)
+        row_max = x.max(dim=1)
+        self.assertEqual(row_max.values.shape, (64,))
+        self.assertEqual(row_max.indices.shape, (64,))
+        self.assertEqual(row_max.values.device.type, "rbln")
+        self.assertEqual(row_max.indices.device.type, "rbln")
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_matmul_and_at_operator_match(self, dtype):
