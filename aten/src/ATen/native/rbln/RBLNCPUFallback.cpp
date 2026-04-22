@@ -14,6 +14,7 @@
 #else
 #include <ATen/ops/_copy_from_and_resize.h>
 #include <ATen/ops/_to_cpu.h>
+#include <ATen/ops/empty.h>
 #include <ATen/ops/from_blob.h>
 #endif
 
@@ -156,6 +157,21 @@ void maybe_log_output_alias_diag(const c10::OperatorHandle& op) {
             << "\n";
 }
 
+// Opt-in C(alpha) output-alias path. Routes single-tensor-return ops with an
+// out-variant overload (e.g. aten::arange.start_out, aten::index.Tensor_out,
+// aten::cat.out) to the out-variant: we pre-allocate the rbln destination,
+// wrap it as a CPU at::from_blob alias, push the alias as the ``out`` kwarg,
+// dispatch on CPU, and then hand the rbln tensor straight back to the stack.
+// Disabled by default because it requires a Meta-kernel for shape inference;
+// off-by-default keeps the established Borrow-alias input path untouched.
+bool is_output_alias_enabled() {
+  static const bool enabled = []() {
+    const auto* env = std::getenv("TORCH_RBLN_OUTPUT_ALIAS");
+    return env != nullptr && std::string_view(env) == "1";
+  }();
+  return enabled;
+}
+
 // Borrow the backing host pointer of an rbln tensor and wrap it as a CPU
 // tensor via at::from_blob. We borrow the full storage (not just the tensor
 // slice) so views with storage_offset > 0 or sub-storage extent still work:
@@ -164,6 +180,119 @@ void maybe_log_output_alias_diag(const c10::OperatorHandle& op) {
 // gets its own borrow_id. ``writable`` threads the schema's isWrite() bit
 // through to return_borrowed so rebel marks the host side as latest only for
 // mutating ops.
+// Forward declaration (defined below). Needed by try_output_alias_dispatch.
+at::Tensor borrow_alias_as_cpu(const at::Tensor& rbln_t, bool writable);
+
+// Core output-alias entry point. CPU fallback sees the op already lowered to
+// its out-variant by PyTorch's CompositeImplicitAutograd (e.g. for a user call
+// ``torch.arange(5, 15, device='rbln')`` the op reaching this function is
+// ``aten::arange.start_out`` with an rbln ``out`` tensor already on the stack).
+// We turn that existing out into a CPU at::from_blob alias over the rebel
+// borrowed host pointer, dispatch the out-variant on CPU so it writes
+// directly into the host-backed storage, and return the original rbln tensor
+// from the stack — skipping the output H2D copy the regular Step 4 would do.
+//
+// Returns true iff the op was dispatched via the aliased path; caller then
+// skips the default Step 2 / Step 4 processing for this op.
+bool try_output_alias_dispatch(
+    const c10::OperatorHandle& op, torch::jit::Stack* stack,
+    c10::DispatchKey cpu_dispatch_key,
+    const std::vector<at::Tensor>& tensor_args,
+    const std::vector<int>& tensor_args_indices) {
+  if (!is_output_alias_enabled()) return false;
+  const bool diag = is_output_alias_diag_enabled();
+  const auto& schema = op.schema();
+  const auto& returns = schema.returns();
+  auto log_miss = [&](const char* why) {
+    if (diag) {
+      std::cerr << "[OUTPUT_ALIAS_MISS] op=" << schema.operator_name().name
+                << "::" << schema.operator_name().overload_name
+                << " why=" << why << "\n";
+    }
+  };
+  if (returns.size() != 1) { log_miss("returns_not_one"); return false; }
+  if (returns[0].type()->kind() != c10::TypeKind::TensorType) { log_miss("return_not_tensor"); return false; }
+
+  // Only handle the case where the caller has already produced an
+  // out-variant schema — that is, one of the positional args is named
+  // ``out`` and marked as a write-alias.
+  const auto& args = schema.arguments();
+  int out_idx = -1;
+  for (size_t i = 0; i < args.size(); ++i) {
+    if (args[i].name() == "out") {
+      const auto* ai = args[i].alias_info();
+      if (ai != nullptr && ai->isWrite()) {
+        out_idx = static_cast<int>(i);
+        break;
+      }
+    }
+  }
+  if (out_idx < 0) { log_miss("no_out_arg"); return false; }
+
+  // Find the original rbln ``out`` tensor from tensor_args. Stack currently
+  // holds the CPU-converted version (Step 1 ran at::_to_cpu on fallback
+  // inputs), which is not what we want to borrow from.
+  int tensor_args_pos = -1;
+  for (size_t i = 0; i < tensor_args_indices.size(); ++i) {
+    if (tensor_args_indices[i] == out_idx) {
+      tensor_args_pos = static_cast<int>(i);
+      break;
+    }
+  }
+  if (tensor_args_pos < 0) { log_miss("out_not_in_tensor_args"); return false; }
+  const auto out_tensor = tensor_args[tensor_args_pos];
+  if (!out_tensor.defined()) { log_miss("out_undefined"); return false; }
+  if (!can_borrow_alias(out_tensor)) {
+    if (diag) {
+      std::cerr << "[OUTPUT_ALIAS_MISS] op=" << schema.operator_name().name
+                << "::" << schema.operator_name().overload_name
+                << " why=cannot_alias dtype=" << out_tensor.scalar_type()
+                << " device=" << out_tensor.device()
+                << " contiguous=" << out_tensor.is_contiguous()
+                << " numel=" << out_tensor.numel() << "\n";
+    }
+    return false;
+  }
+  const auto num_arguments = args.size();
+  if (stack->size() < num_arguments) { log_miss("stack_too_small"); return false; }
+  const auto args_begin = stack->size() - num_arguments;
+  auto& out_ivalue = (*stack)[args_begin + out_idx];
+
+  // Wrap the rbln ``out`` as a CPU alias; CPU kernel will write through it.
+  at::Tensor cpu_alias_out;
+  try {
+    cpu_alias_out = borrow_alias_as_cpu(out_tensor, /*writable=*/true);
+  } catch (...) {
+    return false;
+  }
+  // Substitute the alias into the out slot of the stack.
+  out_ivalue = c10::IValue(cpu_alias_out);
+
+  // Redispatch the op on CPU with the aliased out in place.
+  try {
+    op.callBoxedForDispatchKey(cpu_dispatch_key, *stack);
+  } catch (...) {
+    // Propagate; the stack state is inconsistent after a kernel throw.
+    throw;
+  }
+
+  // The kernel pushed one tensor return (== the alias, per out-variant
+  // semantics). Replace it with the original rbln tensor so downstream code
+  // sees the device-side result and Step 4 becomes a no-op.
+  if (!stack->empty() && stack->back().isTensor()) {
+    stack->pop_back();
+  }
+  stack->emplace_back(out_tensor);
+  if (is_output_alias_diag_enabled()) {
+    std::cerr << "[OUTPUT_ALIAS_HIT] op=" << schema.operator_name().name << "::"
+              << schema.operator_name().overload_name
+              << " dtype=" << out_tensor.scalar_type() << " shape=";
+    for (auto s : out_tensor.sizes()) std::cerr << s << ",";
+    std::cerr << "\n";
+  }
+  return true;
+}
+
 at::Tensor borrow_alias_as_cpu(const at::Tensor& rbln_t, bool writable) {
   uint64_t borrow_id = 0;
   const auto storage_nbytes = rbln_t.storage().nbytes();
@@ -363,24 +492,39 @@ void cpu_fallback_rbln(
     (*stack)[arguments_begin + idx] = c10::IValue(cpu_tensors[i]);
   }
 
-  // Step 2: Call the underlying CPU implementation of the operator
-  op.redispatchBoxed(c10::DispatchKeySet(cpu_dispatch_key), stack);
+  // Step 2a (optional C-alpha): try to dispatch the op via its out-variant with
+  // a pre-allocated rbln output wrapped as a CPU alias. On success the stack
+  // already holds the rbln tensor return, so we skip the regular Step 2 /
+  // mutable-alias handling / Step 4 device copy for this op.
+  const bool output_alias_applied =
+      try_output_alias_dispatch(op, stack, cpu_dispatch_key, tensor_args, tensor_args_indices);
+
+  if (!output_alias_applied) {
+    // Step 2: Call the underlying CPU implementation of the operator
+    op.redispatchBoxed(c10::DispatchKeySet(cpu_dispatch_key), stack);
+  }
 
   // Step 3: We need to take special care to handle mutable aliases properly:
   // If any input tensors are mutable aliases, we need to
   // directly copy the updated data on the CPU tensors back to the original inputs.
-  for (const auto i : c10::irange(tensor_args_indices.size())) {
-    auto tensor_idx = tensor_args_indices[i];
-    const AliasInfo* alias_info = schema_args[tensor_idx].alias_info();
-    if (alias_info != nullptr && alias_info->isWrite()) {
-      if (!tensor_args[i].defined())
-        continue;
-      // Alias path already writes directly into the rbln-backed host pointer;
-      // the deleter tagged the borrow with updated=true so rebel will sync on
-      // the next device read. No explicit device-side copy needed.
-      if (aliased_mask[i])
-        continue;
-      at::_copy_from_and_resize(cpu_tensors[i], tensor_args[i]);
+  // When the output-alias path fired, the CPU kernel already wrote through the
+  // rebel-backed host pointer, so we must skip the h2v copy-back entirely —
+  // otherwise we re-copy the stale CPU input buffer over the freshly-written
+  // rbln storage.
+  if (!output_alias_applied) {
+    for (const auto i : c10::irange(tensor_args_indices.size())) {
+      auto tensor_idx = tensor_args_indices[i];
+      const AliasInfo* alias_info = schema_args[tensor_idx].alias_info();
+      if (alias_info != nullptr && alias_info->isWrite()) {
+        if (!tensor_args[i].defined())
+          continue;
+        // Alias path already writes directly into the rbln-backed host pointer;
+        // the deleter tagged the borrow with updated=true so rebel will sync on
+        // the next device read. No explicit device-side copy needed.
+        if (aliased_mask[i])
+          continue;
+        at::_copy_from_and_resize(cpu_tensors[i], tensor_args[i]);
+      }
     }
   }
 
