@@ -22,7 +22,8 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 from test.utils import configure_rbln_network_for_autoport_tests
 
 
-_TEST_TP_PP = Path(__file__).resolve().parent / "test_tp_pp.py"
+_TARGET_MODULE = "test.distributed.test_tp_pp"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 _MIN_DEVICES = 8
 
 _PARTITIONS = (
@@ -32,11 +33,15 @@ _PARTITIONS = (
 
 
 def _invoke_test_tp_pp(env_overrides: dict) -> subprocess.CompletedProcess:
+    # Invoke via `python -m ...` from the repo root so the `test` package resolves
+    # without relying on the torch-rbln editable-install .pth. Running it as a script
+    # path sets sys.path[0] to the script's directory and breaks `from test.utils ...`.
     env = os.environ.copy()
     env.update(env_overrides)
     return subprocess.run(
-        [sys.executable, str(_TEST_TP_PP)],
+        [sys.executable, "-m", _TARGET_MODULE],
         env=env,
+        cwd=str(_REPO_ROOT),
         check=False,
     )
 
