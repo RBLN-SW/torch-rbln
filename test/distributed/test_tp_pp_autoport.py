@@ -41,7 +41,6 @@ def _invoke_test_tp_pp(env_overrides: dict) -> subprocess.CompletedProcess:
     )
 
 
-@pytest.mark.ci
 @pytest.mark.single_worker
 class TestTPPPAutoportConcurrent(TestCase):
     """Run test_tp_pp.py concurrently on two disjoint device partitions."""
