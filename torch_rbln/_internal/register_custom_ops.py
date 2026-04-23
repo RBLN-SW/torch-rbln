@@ -2,10 +2,12 @@ import math
 
 import torch
 
+from torch_rbln._internal.compile_cache import compile_rbln_cached
 from torch_rbln._internal.env_utils import use_device_group_tensor_parallel_size
 from torch_rbln._internal.ops_utils import (
     can_use_out_tensor_directly,
     cpu_fallback_path,
+    extract_device_id_from_inputs,
     finalize_output_tensor,
     handle_empty_binary,
     is_cpu_fallback_cases,
@@ -55,7 +57,12 @@ def custom_softmax_out_rbln(self, dim: int, half_to_float: bool, *, out=None):
                 result_tensor = None
 
         with out_tensor_context(result_tensor):
-            compiled = torch.compile(_softmax_op_module, backend="rbln", dynamic=False, options=compile_options)
+            compiled = compile_rbln_cached(
+                _softmax_op_module,
+                dynamic=False,
+                options=compile_options,
+                device_cache_key=self.device.index,
+            )
             external_result = compiled(self, dim=dim)
             if result_tensor is None:
                 result_tensor = external_result
@@ -114,7 +121,12 @@ def pow_tensor_scalar_out_rbln(self, exponent, *, out):
             result_tensor = None
 
         with out_tensor_context(result_tensor):
-            compiled = torch.compile(_pow_op_module, backend="rbln", dynamic=False, options=compile_options)
+            compiled = compile_rbln_cached(
+                _pow_op_module,
+                dynamic=False,
+                options=compile_options,
+                device_cache_key=self.device.index,
+            )
             external_result = compiled(self, exponent)
             if result_tensor is None:
                 result_tensor = external_result
@@ -155,6 +167,9 @@ class custom_rbln_paged_attn_prefill(torch.nn.Module):
             args[8],  # block_table
             args[9],  # block_size, int
         )
+
+
+_paged_attn_prefill_op_module = custom_rbln_paged_attn_prefill().eval()
 
 
 def paged_attn_prefill_rbln(*args, **kwargs):
@@ -199,11 +214,11 @@ def paged_attn_prefill_rbln(*args, **kwargs):
 
     with out_tensor_context(result_tensor):
         # tensor_parallel_size=1 is hardcoded due to custom kernel compiler constraints.
-        compiled = torch.compile(
-            custom_rbln_paged_attn_prefill(),
-            backend="rbln",
+        compiled = compile_rbln_cached(
+            _paged_attn_prefill_op_module,
             dynamic=False,
             options={"disable_logger": True, "tensor_parallel_size": 1},
+            device_cache_key=extract_device_id_from_inputs(*contig_args, **contig_kwargs),
         )
         external_result = compiled(*contig_args, **contig_kwargs)
         if result_tensor is None:
@@ -230,6 +245,9 @@ class custom_rbln_paged_attn_decode(torch.nn.Module):
             args[8],  # block_table
             args[9],  # block_size, int
         )
+
+
+_paged_attn_decode_op_module = custom_rbln_paged_attn_decode().eval()
 
 
 def paged_attn_decode_rbln(*args, **kwargs):
@@ -260,11 +278,11 @@ def paged_attn_decode_rbln(*args, **kwargs):
 
     with out_tensor_context(result_tensor):
         # tensor_parallel_size=1 is hardcoded due to custom kernel compiler constraints.
-        compiled = torch.compile(
-            custom_rbln_paged_attn_decode(),
-            backend="rbln",
+        compiled = compile_rbln_cached(
+            _paged_attn_decode_op_module,
             dynamic=False,
             options={"disable_logger": True, "tensor_parallel_size": 1},
+            device_cache_key=extract_device_id_from_inputs(*contig_args, **contig_kwargs),
         )
         external_result = compiled(*contig_args, **contig_kwargs)
         if result_tensor is None:
@@ -298,6 +316,9 @@ class custom_rbln_paged_causal_attn_prefill(torch.nn.Module):
         if len(args) > 10 and args[10] is not None:
             call_args.append(args[10])  # mask
         return torch.ops.rbln_custom_ops.paged_causal_attn_prefill(*call_args)
+
+
+_paged_causal_attn_prefill_op_module = custom_rbln_paged_causal_attn_prefill().eval()
 
 
 def paged_causal_attn_prefill_rbln(*args, **kwargs):
@@ -343,11 +364,11 @@ def paged_causal_attn_prefill_rbln(*args, **kwargs):
 
     with out_tensor_context(result_tensor):
         # tensor_parallel_size=1 is hardcoded due to custom kernel compiler constraints.
-        compiled = torch.compile(
-            custom_rbln_paged_causal_attn_prefill(),
-            backend="rbln",
+        compiled = compile_rbln_cached(
+            _paged_causal_attn_prefill_op_module,
             dynamic=False,
             options={"disable_logger": True, "tensor_parallel_size": 1},
+            device_cache_key=extract_device_id_from_inputs(*contig_args, **contig_kwargs),
         )
         external_result = compiled(*contig_args, **contig_kwargs)
         if result_tensor is None:
@@ -382,6 +403,9 @@ class custom_rbln_paged_causal_attn_decode(torch.nn.Module):
         return torch.ops.rbln_custom_ops.paged_causal_attn_decode(*call_args)
 
 
+_paged_causal_attn_decode_op_module = custom_rbln_paged_causal_attn_decode().eval()
+
+
 def paged_causal_attn_decode_rbln(*args, **kwargs):
     from torch_rbln.device.context_holder import out_tensor_context
 
@@ -411,11 +435,11 @@ def paged_causal_attn_decode_rbln(*args, **kwargs):
 
     with out_tensor_context(result_tensor):
         # tensor_parallel_size=1 is hardcoded due to custom kernel compiler constraints.
-        compiled = torch.compile(
-            custom_rbln_paged_causal_attn_decode(),
-            backend="rbln",
+        compiled = compile_rbln_cached(
+            _paged_causal_attn_decode_op_module,
             dynamic=False,
             options={"disable_logger": True, "tensor_parallel_size": 1},
+            device_cache_key=extract_device_id_from_inputs(*contig_args, **contig_kwargs),
         )
         external_result = compiled(*contig_args, **contig_kwargs)
         if result_tensor is None:
@@ -426,8 +450,120 @@ def paged_causal_attn_decode_rbln(*args, **kwargs):
     return result_tensor
 
 
+class custom_rbln_flash_attention_naive_prefill(torch.nn.Module):
+    def forward(self, *args, **kwargs):
+        scale = torch.tensor(1 / math.sqrt(args[0].size(-1)))
+        call_args = [
+            args[0],
+            args[1],
+            args[2],
+            args[3],
+            args[4],
+            scale,
+            args[6],
+            args[7],
+            args[8],
+        ]
+        if len(args) > 9 and args[9] is not None:
+            call_args.append(args[9])
+        return torch.ops.rbln_custom_ops.flash_attention_naive_prefill(*call_args)
+
+
+def flash_attention_naive_prefill_rbln(*args, **kwargs):
+    from torch_rbln.device.context_holder import helper
+
+    if len(args) < 9 or len(args) > 10:
+        raise RuntimeError(f"flash_attention_naive_prefill takes 9 or 10 inputs (optional sinks), but got {len(args)}.")
+
+    for i, name in enumerate(["Query (q)", "Key (k)", "Value (v)"]):
+        tensor = args[i]
+        assert tensor.size(0) == 1, (
+            f"flash_attention_naive_prefill batch size of {name} must be 1, but got shape {tensor.shape}"
+        )
+
+    (contig_args, contig_kwargs), changed_any = prepare_args_for_contiguous(args, kwargs)
+
+    kv_cache = contig_args[3]
+    assert kv_cache.size(-1) % 64 == 0, (
+        f"The last dimension of kv_cache must be a multiple of 64, but got shape {kv_cache.shape}"
+    )
+
+    result_tensor = torch.empty(contig_args[0].shape, dtype=torch.float16, device=contig_args[0].device)
+    assert result_tensor.size(-1) % 64 == 0
+
+    helper.set_out_tensor(result_tensor)
+    compiled = torch.compile(
+        custom_rbln_flash_attention_naive_prefill(),
+        backend="rbln",
+        dynamic=False,
+        options={"disable_logger": True, "tensor_parallel_size": 1},
+    )
+    external_result = compiled(*contig_args, **contig_kwargs)
+    if result_tensor is None:
+        result_tensor = external_result
+    elif isinstance(external_result, torch.Tensor) and (external_result.data_ptr() != result_tensor.data_ptr()):
+        result_tensor.copy_(external_result)
+    helper.clear_out_tensor()
+
+    return result_tensor
+
+
+class custom_rbln_flash_attention_naive_decode(torch.nn.Module):
+    def forward(self, *args, **kwargs):
+        scale = torch.tensor(1 / math.sqrt(args[0].size(-1)))
+        call_args = [
+            args[0],
+            args[1],
+            args[2],
+            args[3],
+            args[4],
+            scale,
+            args[6],
+            args[7],
+            args[8],
+        ]
+        if len(args) > 9 and args[9] is not None:
+            call_args.append(args[9])
+        return torch.ops.rbln_custom_ops.flash_attention_naive_decode(*call_args)
+
+
+def flash_attention_naive_decode_rbln(*args, **kwargs):
+    from torch_rbln.device.context_holder import helper
+
+    if len(args) < 9 or len(args) > 10:
+        raise RuntimeError(f"flash_attention_naive_decode takes 9 or 10 inputs (optional sinks), but got {len(args)}.")
+
+    (contig_args, contig_kwargs), changed_any = prepare_args_for_contiguous(args, kwargs)
+
+    kv_cache = contig_args[3]
+    assert kv_cache.size(-1) % 64 == 0, (
+        f"The last dimension of kv_cache must be a multiple of 64, but got shape {kv_cache.shape}"
+    )
+
+    result_tensor = torch.empty(contig_args[0].shape, dtype=torch.float16, device=contig_args[0].device)
+    assert result_tensor.size(-1) % 64 == 0
+
+    helper.set_out_tensor(result_tensor)
+    compiled = torch.compile(
+        custom_rbln_flash_attention_naive_decode(),
+        backend="rbln",
+        dynamic=False,
+        options={"disable_logger": True, "tensor_parallel_size": 1},
+    )
+    external_result = compiled(*contig_args, **contig_kwargs)
+    if result_tensor is None:
+        result_tensor = external_result
+    elif isinstance(external_result, torch.Tensor) and (external_result.data_ptr() != result_tensor.data_ptr()):
+        result_tensor.copy_(external_result)
+    helper.clear_out_tensor()
+
+    return result_tensor
+
+
 rbln_custom_impl = torch.library.Library("rbln_custom_ops", "IMPL")  # noqa: TOR901
 rbln_custom_impl.impl("paged_attn_prefill", paged_attn_prefill_rbln, "PrivateUse1")
 rbln_custom_impl.impl("paged_attn_decode", paged_attn_decode_rbln, "PrivateUse1")
 rbln_custom_impl.impl("paged_causal_attn_prefill", paged_causal_attn_prefill_rbln, "PrivateUse1")
 rbln_custom_impl.impl("paged_causal_attn_decode", paged_causal_attn_decode_rbln, "PrivateUse1")
+rbln_custom_impl.impl("flash_attention_naive_prefill", flash_attention_naive_prefill_rbln, "PrivateUse1")
+rbln_custom_impl.impl("flash_attention_naive_decode", flash_attention_naive_decode_rbln, "PrivateUse1")
