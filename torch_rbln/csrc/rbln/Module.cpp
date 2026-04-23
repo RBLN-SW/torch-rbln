@@ -111,28 +111,6 @@ void register_internal_api(py::module_& module) {
       "_is_fallback_disabled",
       &c10::rbln::is_fallback_disabled,
       "Internal: check if specified fallback category is disabled");
-
-  // Experimental: expose rebel v-mem host-pointer borrow API for PoC work.
-  module.def(
-      "_borrow_host_ptr_experimental",
-      [](uintptr_t vaddr, size_t nbytes) -> std::pair<uintptr_t, uint64_t> {
-        uint64_t borrow_id = 0;
-        uintptr_t host_ptr =
-            c10::rbln::borrow_host_ptr(reinterpret_cast<const void*>(vaddr), nbytes, borrow_id);
-        return {host_ptr, borrow_id};
-      },
-      py::arg("vaddr"),
-      py::arg("nbytes"),
-      "Experimental: borrow a CPU-accessible host_ptr backing an RBLN vaddr. "
-      "Returns (host_ptr, borrow_id). Pair with _return_borrowed_experimental().");
-
-  module.def(
-      "_return_borrowed_experimental",
-      &c10::rbln::return_borrowed,
-      py::arg("borrow_id"),
-      py::arg("updated"),
-      "Experimental: return a previously borrowed host_ptr. updated=true marks "
-      "host memory as the latest truth for the next device access.");
 }
 
 /**

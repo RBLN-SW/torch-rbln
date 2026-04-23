@@ -425,16 +425,12 @@ uintptr_t borrow_host_ptr(const void* data, size_t nbytes, uint64_t& borrow_id_o
   const auto size = static_cast<uint64_t>(nbytes);
   uintptr_t host_ptr = 0;
   uint64_t borrow_id = 0;
-  RBLN_LOG_DEBUG(
-      "Calling rbln_v_borrow_host_ptr: vaddr={:#x}, size={}", vaddr, size);
+  RBLN_LOG_DEBUG("Calling rbln_v_borrow_host_ptr: vaddr={:#x}, size={}", vaddr, size);
   const auto status = ::rebel::torch::rbln_v_borrow_host_ptr(vaddr, size, host_ptr, borrow_id);
   RBLN_CHECK(status.IsOK(), "rbln_v_borrow_host_ptr failed for vaddr={:#x}", vaddr);
   borrow_id_out = borrow_id;
   RBLN_LOG_DEBUG(
-      "borrow_host_ptr: vaddr={:#x} -> host_ptr={:#x} borrow_id={}",
-      vaddr,
-      static_cast<uint64_t>(host_ptr),
-      borrow_id);
+      "borrow_host_ptr: vaddr={:#x} -> host_ptr={:#x} borrow_id={}", vaddr, static_cast<uint64_t>(host_ptr), borrow_id);
   return host_ptr;
 }
 
