@@ -29,8 +29,10 @@ Matrix
   execution path.
 """
 
+import os
 import unittest
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 import pytest
@@ -44,6 +46,19 @@ pytest.importorskip(
     "vllm_rbln",
     reason="vllm-rbln is not installed; install vllm-rbln to run vLLM LLM tests",
 )
+
+
+# Repo root: test/models/test_vllm_llm.py → parents[2] is the repo root.
+# EngineCore is spawned via ``multiprocessing.spawn`` from inside vLLM, so its
+# Python interpreter starts with a fresh ``sys.path`` (no implicit CWD). For
+# the qualified-name ``worker_cls`` below to resolve in that subprocess we
+# prepend the repo root to ``PYTHONPATH`` in ``_run_case``.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# Qualified path of the ``RBLNWorker`` subclass that skips the
+# ``_init_device_env`` re-assignment. See
+# ``test/models/_vllm_rbln_worker_patch.py`` for the full rationale.
+_PATCHED_WORKER_CLS = "test.models._vllm_rbln_worker_patch.PatchedRBLNWorker"
 
 
 # ---------------------------------------------------------------------------
@@ -132,59 +147,51 @@ def _vllm_generate_worker(
     Executed in a spawned subprocess so vllm-rbln / RBLN singleton state is
     isolated from the parent test runner.
     """
-    # NOTE: these two env vars MUST be set before any ``vllm`` / ``vllm_rbln``
-    # import, otherwise rebel's librbln-thunk.so snapshots RBLN_DEVICES at
-    # load time and later flags the mid-run mutation performed by
-    # vllm-rbln's ``RBLNWorker._init_device_env`` ("RBLN_DEVICES environment
-    # variable changed at runtime"). Pre-setting them here means
-    # ``_PatchedRBLNWorker._init_device_env`` below can stay a no-op and
-    # still have the right mapping visible to rebel / torch-rbln.
+    # These env vars MUST be set before any ``vllm`` / ``vllm_rbln`` import,
+    # otherwise rebel's librbln-thunk.so snapshots ``RBLN_DEVICES`` at load
+    # time and later flags the mutation that vllm-rbln's stock
+    # ``RBLNWorker._init_device_env`` performs ("RBLN_DEVICES environment
+    # variable changed at runtime"). Pre-setting them means the worker's
+    # ``_init_device_env`` can stay a no-op (see the patched subclass at
+    # ``_vllm_rbln_worker_patch.PatchedRBLNWorker``) while still exposing
+    # the correct mapping to rebel / torch-rbln.
     #
-    #  - ``RBLN_DEVICES``  : final expanded list ("0" for TP1, "0,1" for TP2).
-    #  - ``RBLN_NPUS_PER_DEVICE`` (only for RSD, TP>1): groups ``tp_size``
-    #    physical NPUs into one logical rbln device. Current vllm-rbln no
-    #    longer sets this from ``_init_device_env`` (the pre-rewrite version
-    #    did, see ``vllm_rbln_bak``), so the test has to set it itself.
+    #  - ``RBLN_DEVICES``         : final expanded list ("0" for TP1,
+    #                                "0,1" for TP2).
+    #  - ``RBLN_NPUS_PER_DEVICE`` : RSD grouping (only for TP>1). Groups
+    #                                ``tp_size`` physical NPUs into one
+    #                                logical rbln device. Current vllm-rbln
+    #                                no longer sets this (the pre-rewrite
+    #                                version did; cf. ``vllm_rbln_bak``), so
+    #                                the test has to set it itself.
     import os
 
     os.environ["RBLN_DEVICES"] = ",".join(str(i) for i in range(tp_size))
     if tp_size > 1:
         os.environ.setdefault("RBLN_NPUS_PER_DEVICE", str(tp_size))
 
+    # NOTE: ``vllm`` must be imported *after* the env vars above are set,
+    # because ``import vllm`` activates the rbln platform plugin which
+    # ``import``s ``rebel`` — and rebel snapshots ``RBLN_DEVICES`` on first
+    # device-handle construction downstream of that import.
     from vllm import LLM, SamplingParams
-    from vllm_rbln.v1.worker.rbln_worker import RBLNWorker
-
-    class _PatchedRBLNWorker(RBLNWorker):
-        """RBLNWorker that trusts the pre-set ``RBLN_DEVICES`` env var.
-
-        vllm-rbln's stock ``_init_device_env`` re-assigns ``RBLN_DEVICES``
-        from ``VLLM_RBLN_TP_SIZE`` + ``local_rank``. For our single-worker
-        RSD setup (``tensor_parallel_size=1`` + ``VLLM_RBLN_TP_SIZE>=1``)
-        that re-assignment happens *after* rebel has already recorded the
-        initial env value inside EngineCore, so the first ``get_npu_name``
-        call throws ``RBLN_DEVICES environment variable changed at
-        runtime``. Since ``_vllm_generate_worker`` above pre-computes the
-        same final value and exports it before any rebel-loading import,
-        we can safely skip the re-assignment here.
-        """
-
-        def _init_device_env(self) -> None:
-            return
 
     cfg = MODEL_CONFIGS[model_key]
     tc = unittest.TestCase()
 
     # NOTE: we always instantiate the vLLM engine with
-    # ``tensor_parallel_size=1`` and use ``VLLM_RBLN_TP_SIZE`` (set below
-    # in ``_run_case``) to drive RSD fan-out across physical NPUs. That
+    # ``tensor_parallel_size=1`` and use ``VLLM_RBLN_TP_SIZE`` (set in
+    # ``_run_case``) to drive RSD fan-out across physical NPUs. That
     # keeps the test on a single worker process, exercising the "1 logical
     # device = ``tp_size`` physical NPUs" path (the setup we actually ship
     # for RSD) and avoids the RCCL multi-worker collective path, which is
     # a separate axis we do not care about here.
     #
-    # ``worker_cls`` is cloudpickled by vLLM (see ``LLM.__init__``) so the
-    # in-closure subclass propagates to the EngineCore subprocess without
-    # needing the test module to be importable there.
+    # ``worker_cls`` must be a qualified module path; vLLM's
+    # ``ParallelConfig.worker_cls`` is typed ``str`` and ``worker_base.py``
+    # rejects non-string values ("passing worker_cls is no longer
+    # supported"). ``_run_case`` puts the repo root on ``PYTHONPATH`` so
+    # EngineCore can import the named module.
     llm = LLM(
         model=cfg.model_id,
         dtype="float16",
@@ -196,7 +203,7 @@ def _vllm_generate_worker(
         tensor_parallel_size=1,
         trust_remote_code=cfg.trust_remote_code,
         enforce_eager=enforce_eager,
-        worker_cls=_PatchedRBLNWorker,
+        worker_cls=_PATCHED_WORKER_CLS,
     )
 
     outputs = llm.generate([prompt], SamplingParams(temperature=0.0, max_tokens=max_tokens))
@@ -264,6 +271,21 @@ def _run_case(model_key: str, tp_size: int, enforce_eager: bool) -> None:
     expected_text = EXPECTED_TEXT.get((model_key, tp_size, mode))
 
     with pytest.MonkeyPatch.context() as mp:
+        # Ensure ``test.models._vllm_rbln_worker_patch`` is importable in the
+        # EngineCore subprocess. EngineCore is spawned by vLLM's
+        # ``multiprocessing.spawn`` path, which starts a fresh Python
+        # interpreter whose ``sys.path`` does not implicitly include the
+        # repo root. ``PYTHONPATH`` is the reliable way to inject it and it
+        # propagates through ``multiprocessing.spawn`` → ``EngineCore``.
+        existing_pythonpath = os.environ.get("PYTHONPATH", "")
+        if existing_pythonpath:
+            mp.setenv(
+                "PYTHONPATH",
+                f"{_REPO_ROOT}{os.pathsep}{existing_pythonpath}",
+            )
+        else:
+            mp.setenv("PYTHONPATH", str(_REPO_ROOT))
+
         # Native vLLM model path + end-to-end device-tensor flow.
         mp.setenv("VLLM_RBLN_USE_VLLM_MODEL", "1")
         mp.setenv("VLLM_RBLN_USE_DEVICE_TENSOR", "1")
