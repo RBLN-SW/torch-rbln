@@ -28,36 +28,6 @@ namespace at::native::rbln {
 
 namespace {
 
-// Helper: interpret an env flag with default-on semantics. Returns true when
-// env is unset or not equal to "0" / "false". Explicit "0" or "false" turns
-// the optimisation off for A/B bisection and regression triage.
-bool env_flag_default_on(const char* name) {
-  const auto* env = std::getenv(name);
-  if (env == nullptr) return true;
-  std::string_view v{env};
-  return !(v == "0" || v == "false" || v == "False" || v == "FALSE");
-}
-
-// Zero-copy CPU-fallback input alias (S3-new + B / view). Integer/bool rbln
-// tensors that are read-only op inputs are exposed to the CPU kernel as
-// at::from_blob aliases over rebel's borrowed host pointer. View / storage-
-// offset tensors are handled by borrowing the storage base and offsetting
-// into the returned host_ptr. Enabled by default; disable with
-// TORCH_RBLN_BORROW_ALIAS=0.
-bool is_borrow_alias_enabled() {
-  static const bool enabled = env_flag_default_on("TORCH_RBLN_BORROW_ALIAS");
-  return enabled;
-}
-
-// Extend the alias path to write inputs (mutable alias args). On return the
-// deleter calls rbln_v_return_borrowed(updated=true) and Step 3's
-// _copy_from_and_resize is skipped for aliased write tensors. Enabled by
-// default; disable with TORCH_RBLN_BORROW_ALIAS_WRITE=0.
-bool is_borrow_alias_write_enabled() {
-  static const bool enabled = env_flag_default_on("TORCH_RBLN_BORROW_ALIAS_WRITE");
-  return enabled;
-}
-
 bool is_borrow_aliasable_dtype(c10::ScalarType dtype) {
   // Only integer/boolean dtypes where raw host bytes round-trip cleanly; rebel
   // never reinterprets these the way it may for float16. fp dtypes stay on the
@@ -92,18 +62,6 @@ bool can_borrow_alias(const at::Tensor& t) {
   return true;
 }
 
-// Diagnostic: when TORCH_RBLN_OUTPUT_ALIAS_DIAG=1, log each op that reaches
-// cpu_fallback_rbln together with whether an out-variant exists in the
-// Dispatcher. Used to scope the C(alpha) output-alias work without committing
-// to the full dispatch rewrite yet.
-bool is_output_alias_diag_enabled() {
-  static const bool enabled = []() {
-    const auto* env = std::getenv("TORCH_RBLN_OUTPUT_ALIAS_DIAG");
-    return env != nullptr && std::string_view(env) == "1";
-  }();
-  return enabled;
-}
-
 std::optional<c10::OperatorHandle> find_out_variant(const c10::OperatorHandle& op) {
   const auto& name = op.schema().operator_name();
   auto& dispatcher = c10::Dispatcher::singleton();
@@ -136,41 +94,6 @@ std::optional<c10::OperatorHandle> find_out_variant(const c10::OperatorHandle& o
     }
   }
   return std::nullopt;
-}
-
-void maybe_log_output_alias_diag(const c10::OperatorHandle& op) {
-  if (!is_output_alias_diag_enabled()) return;
-  const auto& schema = op.schema();
-  const auto& name = schema.operator_name();
-  const auto& returns = schema.returns();
-  const auto out_variant = find_out_variant(op);
-  const bool single_tensor_return =
-      (returns.size() == 1 && returns[0].type()->kind() == c10::TypeKind::TensorType);
-  const auto* return_alias = returns.empty() ? nullptr : returns[0].alias_info();
-  const bool is_view_return = (return_alias != nullptr && !return_alias->isWrite());
-  // Use std::cerr directly so we bypass TORCH_RBLN_LOG_LEVEL gating; the env
-  // var TORCH_RBLN_OUTPUT_ALIAS_DIAG=1 is the only gate for this diagnostic.
-  std::cerr << "[OUTPUT_ALIAS_DIAG] op=" << name.name << "::"
-            << (name.overload_name.empty() ? "<default>" : name.overload_name)
-            << " returns=" << returns.size()
-            << " single_tensor=" << (single_tensor_return ? 1 : 0)
-            << " view_return=" << (is_view_return ? 1 : 0)
-            << " out_variant="
-            << (out_variant.has_value()
-                    ? out_variant->schema().operator_name().overload_name
-                    : std::string("<none>"))
-            << "\n";
-}
-
-// C(alpha) output-alias path. For ops that have already been lowered to an
-// out-variant schema by PyTorch's CompositeImplicitAutograd (arange, index,
-// cat, etc.), turn the pre-allocated rbln ``out`` into a CPU at::from_blob
-// alias so the kernel writes directly into the host-backing (paired with
-// rbln_v_mark_zeros so the borrow can skip the d->h sync of the stale
-// backing). Enabled by default; disable with TORCH_RBLN_OUTPUT_ALIAS=0.
-bool is_output_alias_enabled() {
-  static const bool enabled = env_flag_default_on("TORCH_RBLN_OUTPUT_ALIAS");
-  return enabled;
 }
 
 // Borrow the backing host pointer of an rbln tensor and wrap it as a CPU
@@ -252,19 +175,10 @@ bool try_output_alias_dispatch(
     c10::DispatchKey cpu_dispatch_key,
     const std::vector<at::Tensor>& tensor_args,
     const std::vector<int>& tensor_args_indices) {
-  if (!is_output_alias_enabled()) return false;
-  const bool diag = is_output_alias_diag_enabled();
   const auto& schema = op.schema();
   const auto& returns = schema.returns();
-  auto log_miss = [&](const char* why) {
-    if (diag) {
-      std::cerr << "[OUTPUT_ALIAS_MISS] op=" << schema.operator_name().name
-                << "::" << schema.operator_name().overload_name
-                << " why=" << why << "\n";
-    }
-  };
-  if (returns.size() != 1) { log_miss("returns_not_one"); return false; }
-  if (returns[0].type()->kind() != c10::TypeKind::TensorType) { log_miss("return_not_tensor"); return false; }
+  if (returns.size() != 1) return false;
+  if (returns[0].type()->kind() != c10::TypeKind::TensorType) return false;
 
   // Only handle the case where the caller has already produced an
   // out-variant schema — that is, one of the positional args is named
@@ -280,7 +194,7 @@ bool try_output_alias_dispatch(
       }
     }
   }
-  if (out_idx < 0) { log_miss("no_out_arg"); return false; }
+  if (out_idx < 0) return false;
 
   // Find the original rbln ``out`` tensor from tensor_args. Stack currently
   // holds the CPU-converted version (Step 1 ran at::_to_cpu on fallback
@@ -292,22 +206,12 @@ bool try_output_alias_dispatch(
       break;
     }
   }
-  if (tensor_args_pos < 0) { log_miss("out_not_in_tensor_args"); return false; }
+  if (tensor_args_pos < 0) return false;
   const auto out_tensor = tensor_args[tensor_args_pos];
-  if (!out_tensor.defined()) { log_miss("out_undefined"); return false; }
-  if (!can_borrow_alias(out_tensor)) {
-    if (diag) {
-      std::cerr << "[OUTPUT_ALIAS_MISS] op=" << schema.operator_name().name
-                << "::" << schema.operator_name().overload_name
-                << " why=cannot_alias dtype=" << out_tensor.scalar_type()
-                << " device=" << out_tensor.device()
-                << " contiguous=" << out_tensor.is_contiguous()
-                << " numel=" << out_tensor.numel() << "\n";
-    }
-    return false;
-  }
+  if (!out_tensor.defined()) return false;
+  if (!can_borrow_alias(out_tensor)) return false;
   const auto num_arguments = args.size();
-  if (stack->size() < num_arguments) { log_miss("stack_too_small"); return false; }
+  if (stack->size() < num_arguments) return false;
   const auto args_begin = stack->size() - num_arguments;
   auto& out_ivalue = (*stack)[args_begin + out_idx];
 
@@ -348,13 +252,6 @@ bool try_output_alias_dispatch(
     stack->pop_back();
   }
   stack->emplace_back(out_tensor);
-  if (is_output_alias_diag_enabled()) {
-    std::cerr << "[OUTPUT_ALIAS_HIT] op=" << schema.operator_name().name << "::"
-              << schema.operator_name().overload_name
-              << " dtype=" << out_tensor.scalar_type() << " shape=";
-    for (auto s : out_tensor.sizes()) std::cerr << s << ",";
-    std::cerr << "\n";
-  }
   return true;
 }
 
@@ -377,7 +274,6 @@ bool try_output_alias_non_out_variant(
     c10::DispatchKey cpu_dispatch_key,
     const std::vector<at::Tensor>& tensor_args,
     const std::vector<int>& /*tensor_args_indices*/) {
-  if (!is_output_alias_enabled()) return false;
   const auto& schema = op.schema();
   const auto& returns = schema.returns();
   if (returns.size() != 1) return false;
@@ -448,18 +344,6 @@ bool try_output_alias_non_out_variant(
     stack->pop_back();
   }
   stack->emplace_back(rbln_out);
-
-  if (is_output_alias_diag_enabled()) {
-    std::cerr << "[OUTPUT_ALIAS_HIT_NOV] op=" << schema.operator_name().name
-              << "::"
-              << (schema.operator_name().overload_name.empty()
-                      ? std::string("<default>")
-                      : schema.operator_name().overload_name)
-              << " -> " << out_schema.operator_name().overload_name
-              << " dtype=" << rbln_out.scalar_type() << " shape=";
-    for (auto s : rbln_out.sizes()) std::cerr << s << ",";
-    std::cerr << "\n";
-  }
   return true;
 }
 
@@ -488,7 +372,7 @@ at::Tensor borrow_alias_as_cpu(const at::Tensor& rbln_t, bool writable) {
 // skip _copy_from_and_resize on the aliased elements.
 template <typename T>
 std::pair<std::vector<T>, std::vector<bool>> alias_list_elements(
-    const std::vector<T>& elems, bool alias_enabled, bool writable) {
+    const std::vector<T>& elems, bool writable) {
   std::vector<T> out(elems.size());
   std::vector<bool> aliased(elems.size(), false);
   std::vector<at::Tensor> fallback;
@@ -508,7 +392,7 @@ std::pair<std::vector<T>, std::vector<bool>> alias_list_elements(
       out[i] = elems[i];
       continue;
     }
-    if (alias_enabled && can_borrow_alias(*tref)) {
+    if (can_borrow_alias(*tref)) {
       at::Tensor aliased_cpu;
       try {
         aliased_cpu = borrow_alias_as_cpu(*tref, writable);
@@ -630,9 +514,6 @@ void cpu_fallback_rbln(
       "Expected CPU backend DispatchKey but got ",
       c10::toString(cpu_dispatch_key));
 
-  // Diagnostic hook for C(alpha) output-alias work: log op schema + whether
-  // an out-variant exists in the Dispatcher so we can scope the rewrite.
-  maybe_log_output_alias_diag(op);
   auto& schema_args = op.schema().arguments();
   const auto num_arguments = schema_args.size();
   auto arguments = torch::jit::last(stack, num_arguments);
@@ -670,10 +551,8 @@ void cpu_fallback_rbln(
       tensorlist_args_indices.push_back(idx);
       const AliasInfo* list_alias_info = schema_args[idx].alias_info();
       const bool list_is_write = (list_alias_info != nullptr && list_alias_info->isWrite());
-      const bool list_alias_enabled = is_borrow_alias_enabled()
-                                      && (!list_is_write || is_borrow_alias_write_enabled());
       auto [aliased_vec, mask] = alias_list_elements<at::Tensor>(
-          ivalue.toTensorVector(), list_alias_enabled, list_is_write);
+          ivalue.toTensorVector(), list_is_write);
       auto cpu_ivalue = c10::IValue(c10::List<at::Tensor>(aliased_vec));
       tensorlist_cpu_args.push_back(cpu_ivalue);
       tensorlist_aliased_mask.push_back(std::move(mask));
@@ -683,10 +562,8 @@ void cpu_fallback_rbln(
       optional_tensorlist_args_indices.push_back(idx);
       const AliasInfo* list_alias_info = schema_args[idx].alias_info();
       const bool list_is_write = (list_alias_info != nullptr && list_alias_info->isWrite());
-      const bool list_alias_enabled = is_borrow_alias_enabled()
-                                      && (!list_is_write || is_borrow_alias_write_enabled());
       auto [aliased_vec, mask] = alias_list_elements<std::optional<at::Tensor>>(
-          ivalue.toOptionalTensorVector(), list_alias_enabled, list_is_write);
+          ivalue.toOptionalTensorVector(), list_is_write);
       auto cpu_ivalue = c10::IValue(c10::List<std::optional<at::Tensor>>(aliased_vec));
       optional_tensorlist_cpu_args.push_back(cpu_ivalue);
       optional_tensorlist_aliased_mask.push_back(std::move(mask));
@@ -696,10 +573,10 @@ void cpu_fallback_rbln(
       (*stack)[arguments_begin + idx] = c10::IValue(c10::Device(kCPU));
     }
   }
-  // Build the CPU tensor view for each tensor argument. When the borrow-alias
-  // gate is on, integer rbln tensors (read-only AND write mutable) are exposed
-  // as at::from_blob wrappers over the rebel-borrowed host pointer (zero copy);
-  // everything else still flows through the batched at::_to_cpu path.
+  // Build the CPU tensor view for each tensor argument. Integer rbln tensors
+  // (read-only AND write mutable) are exposed as at::from_blob wrappers over
+  // the rebel-borrowed host pointer (zero copy); everything else still flows
+  // through the batched at::_to_cpu path.
   //
   // aliased_mask[i] records whether cpu_tensors[i] is a borrow alias; used in
   // Step 3 to skip the redundant _copy_from_and_resize on write inputs (the
@@ -710,16 +587,11 @@ void cpu_fallback_rbln(
   std::vector<size_t> fallback_positions;
   fallback_inputs.reserve(tensor_args.size());
   fallback_positions.reserve(tensor_args.size());
-  const bool alias_enabled = is_borrow_alias_enabled();
-  const bool alias_write_enabled = is_borrow_alias_write_enabled();
   for (const auto i : c10::irange(tensor_args_indices.size())) {
     const auto idx = tensor_args_indices[i];
     const AliasInfo* alias_info = schema_args[idx].alias_info();
     const bool schema_is_write = (alias_info != nullptr && alias_info->isWrite());
-    const bool aliasable = alias_enabled
-                           && can_borrow_alias(tensor_args[i])
-                           && (!schema_is_write || alias_write_enabled);
-    if (aliasable) {
+    if (can_borrow_alias(tensor_args[i])) {
       cpu_tensors[i] = borrow_alias_as_cpu(tensor_args[i], /*writable=*/schema_is_write);
       aliased_mask[i] = true;
     } else {
