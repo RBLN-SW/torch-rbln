@@ -132,7 +132,44 @@ def _vllm_generate_worker(
     Executed in a spawned subprocess so vllm-rbln / RBLN singleton state is
     isolated from the parent test runner.
     """
+    # NOTE: these two env vars MUST be set before any ``vllm`` / ``vllm_rbln``
+    # import, otherwise rebel's librbln-thunk.so snapshots RBLN_DEVICES at
+    # load time and later flags the mid-run mutation performed by
+    # vllm-rbln's ``RBLNWorker._init_device_env`` ("RBLN_DEVICES environment
+    # variable changed at runtime"). Pre-setting them here means
+    # ``_PatchedRBLNWorker._init_device_env`` below can stay a no-op and
+    # still have the right mapping visible to rebel / torch-rbln.
+    #
+    #  - ``RBLN_DEVICES``  : final expanded list ("0" for TP1, "0,1" for TP2).
+    #  - ``RBLN_NPUS_PER_DEVICE`` (only for RSD, TP>1): groups ``tp_size``
+    #    physical NPUs into one logical rbln device. Current vllm-rbln no
+    #    longer sets this from ``_init_device_env`` (the pre-rewrite version
+    #    did, see ``vllm_rbln_bak``), so the test has to set it itself.
+    import os
+
+    os.environ["RBLN_DEVICES"] = ",".join(str(i) for i in range(tp_size))
+    if tp_size > 1:
+        os.environ.setdefault("RBLN_NPUS_PER_DEVICE", str(tp_size))
+
     from vllm import LLM, SamplingParams
+    from vllm_rbln.v1.worker.rbln_worker import RBLNWorker
+
+    class _PatchedRBLNWorker(RBLNWorker):
+        """RBLNWorker that trusts the pre-set ``RBLN_DEVICES`` env var.
+
+        vllm-rbln's stock ``_init_device_env`` re-assigns ``RBLN_DEVICES``
+        from ``VLLM_RBLN_TP_SIZE`` + ``local_rank``. For our single-worker
+        RSD setup (``tensor_parallel_size=1`` + ``VLLM_RBLN_TP_SIZE>=1``)
+        that re-assignment happens *after* rebel has already recorded the
+        initial env value inside EngineCore, so the first ``get_npu_name``
+        call throws ``RBLN_DEVICES environment variable changed at
+        runtime``. Since ``_vllm_generate_worker`` above pre-computes the
+        same final value and exports it before any rebel-loading import,
+        we can safely skip the re-assignment here.
+        """
+
+        def _init_device_env(self) -> None:
+            return
 
     cfg = MODEL_CONFIGS[model_key]
     tc = unittest.TestCase()
@@ -144,6 +181,10 @@ def _vllm_generate_worker(
     # device = ``tp_size`` physical NPUs" path (the setup we actually ship
     # for RSD) and avoids the RCCL multi-worker collective path, which is
     # a separate axis we do not care about here.
+    #
+    # ``worker_cls`` is cloudpickled by vLLM (see ``LLM.__init__``) so the
+    # in-closure subclass propagates to the EngineCore subprocess without
+    # needing the test module to be importable there.
     llm = LLM(
         model=cfg.model_id,
         dtype="float16",
@@ -155,6 +196,7 @@ def _vllm_generate_worker(
         tensor_parallel_size=1,
         trust_remote_code=cfg.trust_remote_code,
         enforce_eager=enforce_eager,
+        worker_cls=_PatchedRBLNWorker,
     )
 
     outputs = llm.generate([prompt], SamplingParams(temperature=0.0, max_tokens=max_tokens))
