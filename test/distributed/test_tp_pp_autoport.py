@@ -38,6 +38,11 @@ def _invoke_test_tp_pp(env_overrides: dict) -> subprocess.CompletedProcess:
     # path sets sys.path[0] to the script's directory and breaks `from test.utils ...`.
     env = os.environ.copy()
     env.update(env_overrides)
+    # The child runs torch.testing._internal.run_tests(), which in a CI environment
+    # auto-enables `xmlrunner` for XML reporting. The outer pytest already produces a
+    # JUnit report, so the child's XML path is redundant and would require xmlrunner in
+    # the venv. Drop CI so IS_CI=False in the child and xmlrunner is not imported.
+    env.pop("CI", None)
     return subprocess.run(
         [sys.executable, "-m", _TARGET_MODULE],
         env=env,
