@@ -146,34 +146,22 @@ def _vllm_generate_worker(
 
     Executed in a spawned subprocess so vllm-rbln / RBLN singleton state is
     isolated from the parent test runner.
+
+    ``RBLN_DEVICES`` / ``RBLN_NPUS_PER_DEVICE`` are intentionally NOT set
+    here. They must be exported in the *parent* pytest worker (see
+    ``_run_case``) so this spawned child inherits them before its own
+    ``import torch`` runs. Rationale: torch-rbln registers a
+    ``torch.backends`` entry point (``torch_backends_entry_point``) that
+    autoloads at ``import torch`` time and pulls in rebel's
+    ``librbln-thunk.so``; the thunk snapshots ``RBLN_DEVICES`` at library
+    load. Spawn re-imports this module before invoking the target function,
+    so by the time control reaches this function body rebel has already
+    recorded its initial value. Any mutation performed here (or later in
+    vllm-rbln's stock ``RBLNWorker._init_device_env``) would trip rebel's
+    consistency check ("RBLN_DEVICES environment variable changed at
+    runtime. Initial value: , Current value: 0"). See the matching pattern
+    used by ``test_optimum_llm.py::_run_test_case``.
     """
-    # These env vars MUST be set before any ``vllm`` / ``vllm_rbln`` import,
-    # otherwise rebel's librbln-thunk.so snapshots ``RBLN_DEVICES`` at load
-    # time and later flags the mutation that vllm-rbln's stock
-    # ``RBLNWorker._init_device_env`` performs ("RBLN_DEVICES environment
-    # variable changed at runtime"). Pre-setting them means the worker's
-    # ``_init_device_env`` can stay a no-op (see the patched subclass at
-    # ``_vllm_rbln_worker_patch.PatchedRBLNWorker``) while still exposing
-    # the correct mapping to rebel / torch-rbln.
-    #
-    #  - ``RBLN_DEVICES``         : final expanded list ("0" for TP1,
-    #                                "0,1" for TP2).
-    #  - ``RBLN_NPUS_PER_DEVICE`` : RSD grouping (only for TP>1). Groups
-    #                                ``tp_size`` physical NPUs into one
-    #                                logical rbln device. Current vllm-rbln
-    #                                no longer sets this (the pre-rewrite
-    #                                version did; cf. ``vllm_rbln_bak``), so
-    #                                the test has to set it itself.
-    import os
-
-    os.environ["RBLN_DEVICES"] = ",".join(str(i) for i in range(tp_size))
-    if tp_size > 1:
-        os.environ.setdefault("RBLN_NPUS_PER_DEVICE", str(tp_size))
-
-    # NOTE: ``vllm`` must be imported *after* the env vars above are set,
-    # because ``import vllm`` activates the rbln platform plugin which
-    # ``import``s ``rebel`` — and rebel snapshots ``RBLN_DEVICES`` on first
-    # device-handle construction downstream of that import.
     from vllm import LLM, SamplingParams
 
     cfg = MODEL_CONFIGS[model_key]
@@ -271,6 +259,22 @@ def _run_case(model_key: str, tp_size: int, enforce_eager: bool) -> None:
     expected_text = EXPECTED_TEXT.get((model_key, tp_size, mode))
 
     with pytest.MonkeyPatch.context() as mp:
+        # ``RBLN_DEVICES`` (and, for RSD, ``RBLN_NPUS_PER_DEVICE``) MUST be
+        # exported here in the parent, *before* ``run_in_isolated_process``
+        # spawns the worker. Both the spawned ``_vllm_generate_worker``
+        # child and the EngineCore subprocess it later forks inherit this
+        # env at process-start, so rebel's ``librbln-thunk.so`` — loaded
+        # via the ``torch.backends`` entry point that fires on ``import
+        # torch`` — snapshots the correct value once and stays consistent
+        # through ``determine_available_memory``. Setting them inside the
+        # child is too late: ``multiprocessing.spawn`` re-imports this
+        # module (and therefore runs ``import torch``) before calling
+        # ``_vllm_generate_worker``. Same pattern as
+        # ``test_optimum_llm.py::_run_test_case``.
+        mp.setenv("RBLN_DEVICES", ",".join(str(i) for i in range(tp_size)))
+        if tp_size > 1:
+            mp.setenv("RBLN_NPUS_PER_DEVICE", str(tp_size))
+
         # Ensure ``test.models._vllm_rbln_worker_patch`` is importable in the
         # EngineCore subprocess. EngineCore is spawned by vLLM's
         # ``multiprocessing.spawn`` path, which starts a fresh Python
