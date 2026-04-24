@@ -154,8 +154,10 @@ def apply_default_rbln_network_environment() -> None:
 
     existing = os.environ.get("RBLN_RDMA_IP", "").strip()
     if existing:
+        print(f"RBLN_RDMA_IP={existing}")
         return
 
     discovered = probe_roce_rdma_ipv4()
     if discovered:
         os.environ["RBLN_RDMA_IP"] = discovered
+    print(f"RBLN_RDMA_IP={os.environ.get('RBLN_RDMA_IP', '')}")
