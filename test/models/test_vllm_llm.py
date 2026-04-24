@@ -42,6 +42,7 @@ import torch
 
 from test.utils import run_in_isolated_process
 
+
 # NOTE: intentionally do NOT `from torch.testing._internal.common_utils import
 # run_tests` at module level. Importing ``common_utils`` pulls in enough of
 # torch's test-internal machinery to perturb the rebel runtime state of any
@@ -401,7 +402,4 @@ if __name__ == "__main__":
     # The canonical entry is ``pytest test/models/test_vllm_llm.py``; see the
     # module docstring for the reason we do not import
     # ``torch.testing._internal.common_utils.run_tests`` here.
-    raise SystemExit(
-        "Run this module via pytest: "
-        "pytest test/models/test_vllm_llm.py"
-    )
+    raise SystemExit("Run this module via pytest: pytest test/models/test_vllm_llm.py")
