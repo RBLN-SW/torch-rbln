@@ -83,7 +83,13 @@ class VllmModelConfig:
 
     model_id: str
     family: str
-    max_model_len: int = 4 * 1024
+    # Kept small on purpose: the test only greedy-decodes ``MAX_TOKENS=5``
+    # tokens from a short prompt, so we don't need a long context window
+    # and larger values just inflate the KV-cache block budget that vllm
+    # auto-computes in ``determine_available_memory`` — on tighter CI NPU
+    # memory that can blow up as ``RuntimeError: Not enough memory for
+    # N blocks of KV cache``.
+    max_model_len: int = 2 * 1024
     block_size: int = 1024
     max_num_batched_tokens: int = 128
     max_num_seqs: int = 1
@@ -191,6 +197,12 @@ def _vllm_generate_worker(
     # rejects non-string values ("passing worker_cls is no longer
     # supported"). ``_run_case`` puts the repo root on ``PYTHONPATH`` so
     # EngineCore can import the named module.
+    # ``gpu_memory_utilization=0.5`` caps the NPU memory share vllm uses
+    # for KV cache, which in turn caps the number of blocks auto-computed
+    # by ``determine_available_memory``. Default is 0.9; CI NPUs with
+    # smaller HBM budgets otherwise fail with "Not enough memory for N
+    # blocks of KV cache". The short prompt + ``MAX_TOKENS=5`` decode
+    # only needs a couple of blocks, so 0.5 is plenty.
     llm = LLM(
         model=cfg.model_id,
         dtype="float16",
@@ -202,6 +214,7 @@ def _vllm_generate_worker(
         tensor_parallel_size=1,
         trust_remote_code=cfg.trust_remote_code,
         enforce_eager=enforce_eager,
+        gpu_memory_utilization=0.5,
         worker_cls=_PATCHED_WORKER_CLS,
     )
 
