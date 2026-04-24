@@ -24,12 +24,26 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 
 _SYSFS_INFINIBAND = Path("/sys/class/infiniband")
 _RDMA_LINK_TIMEOUT_SEC = 5.0
 _LOOPBACK = "127.0.0.1"
+_DIAG_PREFIX = "[rbln_rdma_probe]"
+
+
+def _diag(msg: str) -> None:
+    """Print a diagnostic line to stderr with a greppable prefix.
+
+    Unconditional so CI logs capture every probe decision (no env toggle).
+    The emitted lines let an operator identify which filter stage (sysfs
+    missing, operstate down, no IPv4, rdma link DOWN/DISABLED, missing
+    `ip` or `rdma` binary) caused an empty RBLN_RDMA_IP result without
+    shell access to the CI host.
+    """
+    print(f"{_DIAG_PREFIX} {msg}", file=sys.stderr, flush=True)
 
 
 def _env_truthy(name: str) -> bool:
@@ -59,6 +73,7 @@ def _read_operstate(netdev_dir: Path) -> str | None:
 def _ipv4_for_iface(iface: str) -> str | None:
     ip_bin = shutil.which("ip")
     if not ip_bin:
+        _diag(f"iface={iface} `ip` binary not in PATH (install iproute2)")
         return None
     try:
         proc = subprocess.run(
@@ -68,9 +83,11 @@ def _ipv4_for_iface(iface: str) -> str | None:
             timeout=5,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _diag(f"iface={iface} `ip -4 addr show` failed: {exc!r}")
         return None
     if proc.returncode != 0:
+        _diag(f"iface={iface} `ip -4 addr show` rc={proc.returncode} stderr={proc.stderr.strip()!r}")
         return None
     m = re.search(r"inet (\d+\.\d+\.\d+\.\d+)/", proc.stdout)
     return m.group(1) if m else None
@@ -89,7 +106,8 @@ def _rdma_port_active(dev_name: str) -> bool | None:
             timeout=_RDMA_LINK_TIMEOUT_SEC,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _diag(f"dev={dev_name} `rdma link show` failed: {exc!r}")
         return None
     out = proc.stdout + proc.stderr
     if "state ACTIVE" in out:
@@ -99,13 +117,32 @@ def _rdma_port_active(dev_name: str) -> bool | None:
     return None
 
 
+def _diag_environment_preamble() -> None:
+    """One-time snapshot of the bits that drive the RoCE probe."""
+    _diag(f"sysfs={_SYSFS_INFINIBAND} exists={_SYSFS_INFINIBAND.is_dir()}")
+    _diag(f"ip_bin={shutil.which('ip')}  rdma_bin={shutil.which('rdma')}")
+    if _SYSFS_INFINIBAND.is_dir():
+        try:
+            entries = sorted(e.name for e in _SYSFS_INFINIBAND.iterdir())
+        except OSError as exc:
+            _diag(f"sysfs iterdir failed: {exc!r}")
+            return
+        _diag(f"sysfs entries (n={len(entries)}): {entries}")
+
+
 def probe_roce_rdma_ipv4() -> str | None:
     """Pick an IPv4 on an up netdev under ``/sys/class/infiniband/*/device/net``.
 
     Prefers interfaces whose RDMA link is ACTIVE when ``rdma`` from rdma-core
-    is available; otherwise returns the first usable IPv4.
+    is available; otherwise returns the first usable IPv4. Emits one
+    ``[rbln_rdma_probe]`` line per filter decision on stderr so CI logs
+    surface the reason an empty result was produced without needing shell
+    access to the runner.
     """
+    _diag_environment_preamble()
+
     if not _SYSFS_INFINIBAND.is_dir():
+        _diag(f"result=None reason=sysfs-missing path={_SYSFS_INFINIBAND}")
         return None
 
     active_first: list[tuple[str, str, str]] = []
@@ -113,33 +150,49 @@ def probe_roce_rdma_ipv4() -> str | None:
 
     for rdma_dev in sorted(_SYSFS_INFINIBAND.iterdir()):
         if not rdma_dev.is_dir():
+            _diag(f"skip dev={rdma_dev.name} reason=not-a-directory")
             continue
         dev_name = rdma_dev.name
         net_root = rdma_dev / "device" / "net"
         if not net_root.is_dir():
+            _diag(f"skip dev={dev_name} reason=no-device/net (path={net_root})")
             continue
-        for netdev in sorted(net_root.iterdir()):
+        netdevs = sorted(net_root.iterdir())
+        _diag(f"dev={dev_name} netdevs={[n.name for n in netdevs]}")
+        for netdev in netdevs:
             if not netdev.is_dir():
-                continue
-            if _read_operstate(netdev) != "up":
+                _diag(f"skip dev={dev_name} netdev={netdev.name} reason=not-a-directory")
                 continue
             iface = netdev.name
+            operstate = _read_operstate(netdev)
+            if operstate != "up":
+                _diag(f"skip dev={dev_name} iface={iface} reason=operstate={operstate!r} (need 'up')")
+                continue
             ipv4 = _ipv4_for_iface(iface)
             if not ipv4:
+                _diag(f"skip dev={dev_name} iface={iface} reason=no-ipv4-assigned")
                 continue
             link_ok = _rdma_port_active(dev_name)
             if link_ok is False:
+                _diag(f"skip dev={dev_name} iface={iface} ipv4={ipv4} reason=rdma-link-DOWN/DISABLED")
                 continue
             tup = (dev_name, iface, ipv4)
             if link_ok is True:
+                _diag(f"candidate dev={dev_name} iface={iface} ipv4={ipv4} bucket=active")
                 active_first.append(tup)
             else:
+                _diag(f"candidate dev={dev_name} iface={iface} ipv4={ipv4} bucket=fallback (rdma link unknown)")
                 fallback.append(tup)
 
     if active_first:
-        return active_first[0][2]
+        chosen = active_first[0]
+        _diag(f"result={chosen[2]} via dev={chosen[0]} iface={chosen[1]} bucket=active")
+        return chosen[2]
     if fallback:
-        return fallback[0][2]
+        chosen = fallback[0]
+        _diag(f"result={chosen[2]} via dev={chosen[0]} iface={chosen[1]} bucket=fallback")
+        return chosen[2]
+    _diag("result=None reason=no-candidate-passed-filters")
     return None
 
 
