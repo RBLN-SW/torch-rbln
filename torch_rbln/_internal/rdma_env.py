@@ -178,6 +178,36 @@ def _read_roce_v2_gid_ipv4s(rdma_dev_path: Path) -> list[str]:
     return sorted(out)
 
 
+def _read_rdma_port_state(rdma_dev_path: Path, port: str = "1") -> tuple[str | None, str | None]:
+    """Read ``state`` and ``phys_state`` directly from sysfs.
+
+    Avoids depending on the ``rdma`` (rdma-core) binary, which CI images
+    often omit. Each file is a short string like ``4: ACTIVE`` or
+    ``1: DOWN`` exposed by the kernel's ib_core.
+    """
+    port_dir = rdma_dev_path / "ports" / port
+
+    def _safe_read(name: str) -> str | None:
+        try:
+            return (port_dir / name).read_text(errors="ignore").strip()
+        except OSError:
+            return None
+
+    return _safe_read("state"), _safe_read("phys_state")
+
+
+def _classify_rdma_state(state: str | None) -> bool | None:
+    """Return True for ACTIVE, False for DOWN/DISABLED, None otherwise."""
+    if not state:
+        return None
+    upper = state.upper()
+    if "ACTIVE" in upper:
+        return True
+    if "DOWN" in upper or "DISABLED" in upper:
+        return False
+    return None  # INIT / ARMED / unknown — leave to fallback bucket
+
+
 def _rdma_port_active(dev_name: str) -> bool | None:
     """Return True/False from ``rdma link``, or None if ``rdma`` is missing or unparsable."""
     rdma_bin = shutil.which("rdma")
@@ -246,6 +276,14 @@ def probe_roce_rdma_ipv4() -> str | None:
         _diag(f"dev={dev_name} netdevs={[n.name for n in netdevs]}")
         roce_v2_gid_ipv4s = _read_roce_v2_gid_ipv4s(rdma_dev)
         _diag(f"dev={dev_name} roce_v2_gid_ipv4s={roce_v2_gid_ipv4s}")
+        # Sysfs-direct port state — works even when rdma-core is not installed
+        # in the container. We surface both numeric/textual fields so a CI log
+        # immediately shows whether the RDMA port is ACTIVE, DOWN or in some
+        # transient state (INIT/ARMED) — which is the most likely cause when
+        # the netdev IP and GID match but rcclGetUniqueId still fails.
+        port_state, phys_state = _read_rdma_port_state(rdma_dev)
+        _diag(f"dev={dev_name} port_state={port_state!r} phys_state={phys_state!r}")
+        sysfs_link_ok = _classify_rdma_state(port_state)
         for netdev in netdevs:
             if not netdev.is_dir():
                 _diag(f"skip dev={dev_name} netdev={netdev.name} reason=not-a-directory")
@@ -270,9 +308,14 @@ def probe_roce_rdma_ipv4() -> str | None:
                     f"NOT in RoCEv2 GID table {roce_v2_gid_ipv4s} — "
                     f"RDMA unique_id setup may reject this address"
                 )
-            link_ok = _rdma_port_active(dev_name)
+            # Prefer the sysfs port state. Fall back to the rdma binary only when
+            # the sysfs read returned an unrecognised value.
+            link_ok = sysfs_link_ok if sysfs_link_ok is not None else _rdma_port_active(dev_name)
             if link_ok is False:
-                _diag(f"skip dev={dev_name} iface={iface} ipv4={ipv4} reason=rdma-link-DOWN/DISABLED")
+                _diag(
+                    f"skip dev={dev_name} iface={iface} ipv4={ipv4} "
+                    f"reason=rdma-port-DOWN (port_state={port_state!r} phys_state={phys_state!r})"
+                )
                 continue
             tup = (dev_name, iface, ipv4)
             if link_ok is True:
