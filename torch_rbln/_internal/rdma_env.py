@@ -117,6 +117,67 @@ def _ipv4_for_iface(iface: str) -> str | None:
     return socket.inet_ntoa(packed[20:24])
 
 
+def _gid_to_ipv4(gid: str) -> str | None:
+    """Extract IPv4 from an IPv4-mapped IPv6 GID (``::ffff:a.b.c.d``).
+
+    sysfs writes GIDs as eight 16-bit groups, e.g.
+    ``0000:0000:0000:0000:0000:ffff:0a0a:1235`` for ``10.10.18.53``.
+    Returns None when the GID isn't IPv4-mapped or is the all-zero entry.
+    """
+    parts = gid.split(":")
+    if len(parts) != 8:
+        return None
+    if any(p != "0000" for p in parts[:5]):
+        return None
+    if parts[5].lower() != "ffff":
+        return None
+    try:
+        b1 = int(parts[6][:2], 16)
+        b2 = int(parts[6][2:], 16)
+        b3 = int(parts[7][:2], 16)
+        b4 = int(parts[7][2:], 16)
+    except (ValueError, IndexError):
+        return None
+    if (b1 | b2 | b3 | b4) == 0:
+        return None
+    return f"{b1}.{b2}.{b3}.{b4}"
+
+
+def _read_roce_v2_gid_ipv4s(rdma_dev_path: Path) -> list[str]:
+    """Return the sorted IPv4 addresses registered as RoCEv2 GIDs on a device.
+
+    The RDMA stack uses GID-table entries (not just netdev IPs) when binding
+    a connection. If the IP we hand to the runtime as RBLN_RDMA_IP is not in
+    this list, ``rcclGetUniqueId`` will fail to resolve it.
+    """
+    out: set[str] = set()
+    ports_root = rdma_dev_path / "ports"
+    if not ports_root.is_dir():
+        return []
+    for port_dir in sorted(ports_root.iterdir()):
+        if not port_dir.is_dir():
+            continue
+        gids_dir = port_dir / "gids"
+        types_dir = port_dir / "gid_attrs" / "types"
+        if not gids_dir.is_dir() or not types_dir.is_dir():
+            continue
+        for gid_file in sorted(gids_dir.iterdir()):
+            try:
+                gid_type = (types_dir / gid_file.name).read_text(errors="ignore").strip()
+            except OSError:
+                continue
+            if "RoCE v2" not in gid_type:
+                continue
+            try:
+                gid = gid_file.read_text(errors="ignore").strip()
+            except OSError:
+                continue
+            ipv4 = _gid_to_ipv4(gid)
+            if ipv4 is not None:
+                out.add(ipv4)
+    return sorted(out)
+
+
 def _rdma_port_active(dev_name: str) -> bool | None:
     """Return True/False from ``rdma link``, or None if ``rdma`` is missing or unparsable."""
     rdma_bin = shutil.which("rdma")
@@ -183,6 +244,8 @@ def probe_roce_rdma_ipv4() -> str | None:
             continue
         netdevs = sorted(net_root.iterdir())
         _diag(f"dev={dev_name} netdevs={[n.name for n in netdevs]}")
+        roce_v2_gid_ipv4s = _read_roce_v2_gid_ipv4s(rdma_dev)
+        _diag(f"dev={dev_name} roce_v2_gid_ipv4s={roce_v2_gid_ipv4s}")
         for netdev in netdevs:
             if not netdev.is_dir():
                 _diag(f"skip dev={dev_name} netdev={netdev.name} reason=not-a-directory")
@@ -196,6 +259,17 @@ def probe_roce_rdma_ipv4() -> str | None:
             if not ipv4:
                 _diag(f"skip dev={dev_name} iface={iface} reason=no-ipv4-assigned")
                 continue
+            # Cross-check the netdev IP against the RoCEv2 GID table. If the IP we are
+            # about to publish as RBLN_RDMA_IP is not registered as a RoCEv2 GID, the
+            # RDMA stack (rcclGetUniqueId, ibv_*) cannot resolve it and unique_id setup
+            # will fail downstream — surfacing this here makes the cause obvious in the
+            # CI log without having to read librbln runtime traces.
+            if roce_v2_gid_ipv4s and ipv4 not in roce_v2_gid_ipv4s:
+                _diag(
+                    f"warn dev={dev_name} iface={iface} ipv4={ipv4} "
+                    f"NOT in RoCEv2 GID table {roce_v2_gid_ipv4s} — "
+                    f"RDMA unique_id setup may reject this address"
+                )
             link_ok = _rdma_port_active(dev_name)
             if link_ok is False:
                 _diag(f"skip dev={dev_name} iface={iface} ipv4={ipv4} reason=rdma-link-DOWN/DISABLED")
