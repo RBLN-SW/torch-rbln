@@ -21,17 +21,29 @@ loads.
 from __future__ import annotations
 
 import os
-import re
 import shutil
+import socket
+import struct
 import subprocess
 import sys
 from pathlib import Path
+
+
+try:  # POSIX-only; Linux is the only RBLN runtime target.
+    import fcntl as _fcntl
+except ImportError:
+    _fcntl = None  # type: ignore[assignment]
 
 
 _SYSFS_INFINIBAND = Path("/sys/class/infiniband")
 _RDMA_LINK_TIMEOUT_SEC = 5.0
 _LOOPBACK = "127.0.0.1"
 _DIAG_PREFIX = "[rbln_rdma_probe]"
+# Linux SIOCGIFADDR ioctl number — get the IPv4 address bound to an iface.
+# Lets us read the IPv4 without depending on the `ip` (iproute2) binary,
+# which may be missing from minimal CI containers.
+_SIOCGIFADDR = 0x8915
+_IFNAMSIZ = 16  # IFNAMSIZ from <linux/if.h> (15-byte name + NUL)
 
 
 def _diag(msg: str) -> None:
@@ -71,26 +83,38 @@ def _read_operstate(netdev_dir: Path) -> str | None:
 
 
 def _ipv4_for_iface(iface: str) -> str | None:
-    ip_bin = shutil.which("ip")
-    if not ip_bin:
-        _diag(f"iface={iface} `ip` binary not in PATH (install iproute2)")
+    """Read the IPv4 bound to ``iface`` via ``SIOCGIFADDR`` ioctl.
+
+    Avoids the iproute2 ``ip`` binary so the probe still works in minimal
+    CI containers. ``OSError`` here typically means the kernel responded
+    with ``EADDRNOTAVAIL`` (interface has no IPv4) or ``ENODEV``
+    (interface vanished) — both are treated as "no IPv4 available".
+    """
+    if _fcntl is None:
+        _diag(f"iface={iface} fcntl module unavailable (non-POSIX runtime)")
+        return None
+    iface_bytes = iface.encode("utf-8")
+    if len(iface_bytes) >= _IFNAMSIZ:
+        _diag(f"iface={iface} name too long for ifreq (max {_IFNAMSIZ - 1} bytes)")
         return None
     try:
-        proc = subprocess.run(
-            [ip_bin, "-4", "addr", "show", iface],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        _diag(f"iface={iface} `ip -4 addr show` failed: {exc!r}")
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    except OSError as exc:
+        _diag(f"iface={iface} AF_INET socket() failed: {exc!r}")
         return None
-    if proc.returncode != 0:
-        _diag(f"iface={iface} `ip -4 addr show` rc={proc.returncode} stderr={proc.stderr.strip()!r}")
-        return None
-    m = re.search(r"inet (\d+\.\d+\.\d+\.\d+)/", proc.stdout)
-    return m.group(1) if m else None
+    try:
+        # ifreq layout: char ifr_name[IFNAMSIZ]; union { struct sockaddr ifr_addr; ... }
+        # We send a 256-byte buffer with the iface name; kernel writes sockaddr_in into bytes 16:.
+        ifreq = struct.pack("256s", iface_bytes)
+        try:
+            packed = _fcntl.ioctl(sock.fileno(), _SIOCGIFADDR, ifreq)
+        except OSError as exc:
+            _diag(f"iface={iface} SIOCGIFADDR ioctl failed: {exc!r}")
+            return None
+    finally:
+        sock.close()
+    # sockaddr_in: sa_family(2) + sin_port(2) + sin_addr(4) at offset 20 within ifreq.
+    return socket.inet_ntoa(packed[20:24])
 
 
 def _rdma_port_active(dev_name: str) -> bool | None:
@@ -120,7 +144,7 @@ def _rdma_port_active(dev_name: str) -> bool | None:
 def _diag_environment_preamble() -> None:
     """One-time snapshot of the bits that drive the RoCE probe."""
     _diag(f"sysfs={_SYSFS_INFINIBAND} exists={_SYSFS_INFINIBAND.is_dir()}")
-    _diag(f"ip_bin={shutil.which('ip')}  rdma_bin={shutil.which('rdma')}")
+    _diag(f"fcntl_module={'present' if _fcntl is not None else 'missing'}  rdma_bin={shutil.which('rdma')}")
     if _SYSFS_INFINIBAND.is_dir():
         try:
             entries = sorted(e.name for e in _SYSFS_INFINIBAND.iterdir())
