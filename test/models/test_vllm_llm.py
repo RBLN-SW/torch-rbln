@@ -60,14 +60,15 @@ pytest.importorskip(
 
 
 # Repo root: test/models/test_vllm_llm.py → parents[2] is the repo root.
-# EngineCore is spawned via ``multiprocessing.spawn`` from inside vLLM, so its
-# Python interpreter starts with a fresh ``sys.path`` (no implicit CWD). For
-# the qualified-name ``worker_cls`` below to resolve in that subprocess we
-# prepend the repo root to ``PYTHONPATH`` in ``_run_case``.
+# Used to prepend onto ``PYTHONPATH`` only for the TP>1 case, where we override
+# ``worker_cls`` with a qualified name that EngineCore (a freshly spawned
+# Python interpreter without our CWD on ``sys.path``) needs to resolve.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Qualified path of the ``RBLNWorker`` subclass that skips the
-# ``_init_device_env`` re-assignment. See
+# ``_init_device_env`` re-assignment. Only used for TP>1 (RSD) — for TP=1
+# stock vllm-rbln rewrites ``RBLN_DEVICES`` to the same value ("0" -> "0"),
+# which rebel does not flag as a runtime mutation. See
 # ``test/models/_vllm_rbln_worker_patch.py`` for the full rationale.
 _PATCHED_WORKER_CLS = "test.models._vllm_rbln_worker_patch.PatchedRBLNWorker"
 
@@ -192,18 +193,13 @@ def _vllm_generate_worker(
     # for RSD) and avoids the RCCL multi-worker collective path, which is
     # a separate axis we do not care about here.
     #
-    # ``worker_cls`` must be a qualified module path; vLLM's
-    # ``ParallelConfig.worker_cls`` is typed ``str`` and ``worker_base.py``
-    # rejects non-string values ("passing worker_cls is no longer
-    # supported"). ``_run_case`` puts the repo root on ``PYTHONPATH`` so
-    # EngineCore can import the named module.
     # ``gpu_memory_utilization=0.5`` caps the NPU memory share vllm uses
     # for KV cache, which in turn caps the number of blocks auto-computed
     # by ``determine_available_memory``. Default is 0.9; CI NPUs with
     # smaller HBM budgets otherwise fail with "Not enough memory for N
     # blocks of KV cache". The short prompt + ``MAX_TOKENS=5`` decode
     # only needs a couple of blocks, so 0.5 is plenty.
-    llm = LLM(
+    llm_kwargs: dict = dict(
         model=cfg.model_id,
         dtype="float16",
         max_model_len=cfg.max_model_len,
@@ -215,8 +211,17 @@ def _vllm_generate_worker(
         trust_remote_code=cfg.trust_remote_code,
         enforce_eager=enforce_eager,
         gpu_memory_utilization=0.5,
-        worker_cls=_PATCHED_WORKER_CLS,
     )
+    # ``worker_cls`` override is only needed for TP>1 — see
+    # ``_vllm_rbln_worker_patch.py`` for why. For TP=1 stock vllm-rbln
+    # rewrites ``RBLN_DEVICES`` to the same value (no rebel mutation), so
+    # we let vllm-rbln's platform.py auto-pick the standard worker. This
+    # also means the TP=1 path doesn't need a qualified-name import in
+    # EngineCore, so ``_run_case`` skips the PYTHONPATH munging too.
+    if tp_size > 1:
+        llm_kwargs["worker_cls"] = _PATCHED_WORKER_CLS
+
+    llm = LLM(**llm_kwargs)
 
     outputs = llm.generate([prompt], SamplingParams(temperature=0.0, max_tokens=max_tokens))
     tc.assertEqual(len(outputs), 1, "expected a single RequestOutput")
@@ -282,12 +287,25 @@ def _run_case(model_key: str, tp_size: int, enforce_eager: bool) -> None:
         if tp_size > 1:
             mp.setenv("RBLN_NPUS_PER_DEVICE", str(tp_size))
 
-        # Ensure ``test.models._vllm_rbln_worker_patch`` is importable in the
-        # EngineCore subprocess. EngineCore is spawned by vLLM's
-        # ``multiprocessing.spawn`` path, which starts a fresh Python
-        # interpreter whose ``sys.path`` does not implicitly include the
-        # repo root. ``PYTHONPATH`` is the reliable way to inject it and it
-        # propagates through ``multiprocessing.spawn`` → ``EngineCore``.
+        # Inject the repo root onto ``PYTHONPATH`` so it propagates through
+        # every subprocess that vLLM and rebel spawn from the EngineCore
+        # (notably ``multiprocessing.spawn`` for EngineCore itself, plus the
+        # triton kernel-compile helper that does ``import torch`` in a fresh
+        # interpreter under a temp cwd). Two reasons:
+        #
+        # 1. TP>1 uses a qualified-name ``worker_cls`` from
+        #    ``test.models._vllm_rbln_worker_patch``; EngineCore can only
+        #    resolve the qualified name if the repo root is on the import
+        #    path of its fresh interpreter.
+        # 2. In dev setups that have ``torch_rbln`` editable-installed from a
+        #    sibling checkout (e.g. /home/chanheo/torch-rbln-ext), prepending
+        #    the repo root forces ``import torch_rbln`` in those subprocesses
+        #    to resolve to *this* repo's ``torch_rbln/`` directory rather
+        #    than whatever site-packages points at — keeping the test process
+        #    and its kernel-compile children on a single torch-rbln/rebel
+        #    ABI pair. CI envs without a competing editable install still see
+        #    no behavior change because site-packages is the only resolution
+        #    target.
         existing_pythonpath = os.environ.get("PYTHONPATH", "")
         if existing_pythonpath:
             mp.setenv(
@@ -393,20 +411,17 @@ def test_vllm_llm_graph_tp2(enable_deploy_mode, model_key):
 def test_vllm_llm_eager_tp1(enable_deploy_mode, model_key):
     """Eager mode TP=1 — sanity check non-compile execution path.
 
-    Currently skipped: on ``origin/device_tensor_rebased`` eager execution
-    dies during sampling with ``RuntimeError: indices should be either on
-    cpu or on the same device as the indexed tensor (cpu)``. That is a
-    separate regression from the graph-mode path that this suite's other
-    cases validate, and it tracks upstream in vllm-rbln. Graph mode
-    (``test_vllm_llm_graph_tp1`` / ``test_vllm_llm_graph_tp2``) exercises
-    the compile + runtime path end-to-end, which is the main CI value.
-    Re-enable once vllm-rbln aligns the sampler/logits device placement
-    under ``enforce_eager=True``.
+    Uses ``VLLM_RBLN_SAMPLER=0`` + ``VLLM_RBLN_COMPILE_MODEL=0`` (set in
+    ``_run_case``) so the attention backend and sampler stay consistent
+    with the uncompiled main model. With ``enforce_eager=True``, vllm-rbln
+    sets ``device_type="rbln"`` (instead of the graph-mode default
+    ``"cpu"``) so ``CommonAttentionMetadata.query_start_loc`` /
+    ``seq_lens`` arrive on the NPU — the RBLN flash-attention metadata
+    builder must drive its CPU-side mask construction off the
+    ``query_start_loc_cpu`` mirror to avoid mixed-device indexing /
+    numpy-conversion errors. Greedy decode is expected to match the
+    graph-mode TP1 output exactly.
     """
-    pytest.skip(
-        "eager-mode path on device_tensor_rebased regresses with a "
-        "sampler-side device mismatch; see docstring for details."
-    )
     _run_case(model_key=model_key, tp_size=1, enforce_eager=True)
 
 
