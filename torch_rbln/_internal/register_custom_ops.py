@@ -136,21 +136,6 @@ def pow_tensor_scalar_out_rbln(self, exponent, *, out):
     finalize_output_tensor(out, result_tensor, result_tensor.shape, (self,), {})
 
 
-def custom_zero__rbln(self):
-    # zeros op is compilable in RBLN, but due to its in-place nature it has problems with graph
-    # capture, so it is always processed on the host.
-    # Optimization: mark the VMemory as EMPTY_INIT_WITH_ZERO without allocating any host memory.
-    # - NPU write-first (e.g. KV-cache output): zero transfer is skipped entirely.
-    # - NPU read-first: zeros are transferred via a temporary buffer at transfer time and freed.
-    # This avoids permanent host allocation for large tensors such as KV-cache.
-    if self.numel() == 0:
-        return
-
-    from torch_rbln._C import _mark_zeros
-
-    _mark_zeros(self.data_ptr())
-
-
 class custom_rbln_paged_attn_prefill(torch.nn.Module):
     def forward(self, *args, **kwargs):
         # TODO: rtosa.multiply cannot accept tensor scalar value. scale must be constant tensor.

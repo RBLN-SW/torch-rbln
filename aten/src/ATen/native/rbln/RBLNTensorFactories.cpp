@@ -102,4 +102,13 @@ at::Tensor _efficientzerotensor_rbln(
   return rbln_out;
 }
 
+at::Tensor& zero_rbln_(at::Tensor& self) {
+  RBLN_SCOPE_GUARD();
+  if (self.numel() == 0) {
+    return self;
+  }
+  c10::rbln::mark_zeros(self.data_ptr());
+  return self;
+}
+
 } // namespace at::native::rbln
