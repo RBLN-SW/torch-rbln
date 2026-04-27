@@ -268,11 +268,16 @@ check_rebel_python_version() {
     local expected_pattern="_C.cpython-${current_py_version}-*.so"
     local rebel_c_so
 
-    # Check in python/rebel first (primary location)
-    rebel_c_so=$(find "$REBEL_HOME/python/rebel" -maxdepth 1 -name "$expected_pattern" 2>/dev/null | head -1)
+    # scikit-build-core places the built extension under python/build/skbuild
+    # (current rebel-compiler layout). Source-tree python/rebel/ only holds .py
+    # files and _C/*.pyi stubs, so look in the build output first.
+    rebel_c_so=$(find "$REBEL_HOME/python/build/skbuild" -maxdepth 1 -name "$expected_pattern" 2>/dev/null | head -1)
 
+    # Legacy layouts (pre scikit-build-core migration) kept _C.so next to __init__.py.
     if [ -z "$rebel_c_so" ]; then
-        # Also check in rebel/python/rebel (alternative location)
+        rebel_c_so=$(find "$REBEL_HOME/python/rebel" -maxdepth 1 -name "$expected_pattern" 2>/dev/null | head -1)
+    fi
+    if [ -z "$rebel_c_so" ]; then
         rebel_c_so=$(find "$REBEL_HOME/rebel/python/rebel" -maxdepth 1 -name "$expected_pattern" 2>/dev/null | head -1)
     fi
 
@@ -288,7 +293,7 @@ check_rebel_python_version() {
 
     # Find all available versions
     local available_versions
-    available_versions=$(find "$REBEL_HOME/python/rebel" "$REBEL_HOME/rebel/python/rebel" -maxdepth 1 -name "_C.cpython-*.so" 2>/dev/null | \
+    available_versions=$(find "$REBEL_HOME/python/build/skbuild" "$REBEL_HOME/python/rebel" "$REBEL_HOME/rebel/python/rebel" -maxdepth 1 -name "_C.cpython-*.so" 2>/dev/null | \
         xargs -I{} basename {} | grep -oP 'cpython-\K\d+' | sort -u)
 
     if [ -n "$available_versions" ]; then
@@ -347,11 +352,17 @@ setup_virtualenv() {
 install_dependencies() {
     log_info "Installing build dependencies..."
     pip install --upgrade pip
-    # Align with rebel-compiler Quick Install: cmake<4.0, lit
+    # Align with rebel-compiler Quick Install: cmake<4.0, lit.
+    # rebel-compiler's own build-system.requires (scikit-build-core, pybind11,
+    # cython, setuptools_scm) are installed later in install_rebel_python_deps,
+    # *after* `uv sync --no-install-project` — otherwise uv sync would wipe them.
     pip install "cmake>=3.18,<4.0" ninja jinja2 hatchling setuptools-scm editables mypy lit
 
-    # Set environment for rebel-compiler (rebel Python deps installed after uv sync in build_torch_rbln)
-    export PYTHONPATH="$REBEL_HOME/python:$PYTHONPATH"
+    # Native lib paths only. Python import is wired up later by the editable
+    # rebel-compiler install (scikit-build-core), which drops its own redirect
+    # .pth into site-packages — prepending $REBEL_HOME/python to PYTHONPATH here
+    # would let the source-tree rebel/ shadow the editable install and break
+    # `import rebel._C` under the new layout.
     export LD_LIBRARY_PATH="$REBEL_HOME/build:$LD_LIBRARY_PATH"
 
     # Source dynamic_linking.env for additional libraries
@@ -362,11 +373,13 @@ install_dependencies() {
     # Create activate_rebel script
     create_activate_rebel_script
 
-    # Create .pth file for rebel-compiler in site-packages
+    # Remove the stale pre-scikit-build-core rebel_compiler.pth if an older run
+    # of this script left one behind; it would also shadow the editable install.
     local site_packages
     site_packages=$(python -c "import site; print(site.getsitepackages()[0])" 2>/dev/null || echo "")
-    if [ -n "$site_packages" ] && [ -d "$site_packages" ]; then
-        echo "$REBEL_HOME/python" > "$site_packages/rebel_compiler.pth"
+    if [ -n "$site_packages" ] && [ -f "$site_packages/rebel_compiler.pth" ]; then
+        log_info "  Removing stale rebel_compiler.pth from site-packages"
+        rm -f "$site_packages/rebel_compiler.pth"
     fi
 
     log_info "Dependencies installed"
@@ -386,9 +399,10 @@ create_activate_rebel_script() {
     cat > "$activate_script" << EOF
 # Rebel-compiler environment setup (sourced only when .use_external_rebel exists in venv)
 # To use PyPI package in this venv instead: remove .venv/.use_external_rebel and re-activate
+# rebel-compiler is installed editable via scikit-build-core; Python imports are
+# routed by _rebel_compiler_editable.pth in site-packages, so no PYTHONPATH here.
 export REBEL_HOME="$REBEL_HOME"
 export RBLN_USE_EXTERNAL_REBEL_COMPILER=1
-export PYTHONPATH="$REBEL_HOME/python:\$PYTHONPATH"
 export LD_LIBRARY_PATH="$REBEL_HOME/build:${conan_lib_path}:\$LD_LIBRARY_PATH"
 EOF
     chmod +x "$activate_script"
@@ -507,20 +521,54 @@ validate_torch_wheel() {
     log_info "Validated torch wheel: $wheel_path"
 }
 
-# Install rebel-compiler Python deps from gen_requirements.py + core.txt (after uv sync so they are not overwritten)
+# Install rebel-compiler into the venv (scikit-build-core editable). Runs
+# after `uv sync --no-install-project` so the install isn't wiped by sync.
+#
+# Writes _rebel_compiler_editable.pth + the redirect hook to site-packages so
+# that `import rebel` resolves to $REBEL_HOME/python/rebel/ while
+# `import rebel._C` finds the extension under $REBEL_HOME/python/build/skbuild/.
+# With [tool.scikit-build.editable] rebuild=false, the pre-built extension is
+# reused rather than recompiled. Runtime deps come from the package's
+# pyproject.toml.
+#
+# --no-build-isolation keeps the editable install deterministic: it reuses the
+# scikit-build-core / pybind11 / cython / cmake / ninja pinned in
+# install_dependencies instead of fetching a separate PEP 517 build env from
+# PyPI each invocation.
 install_rebel_python_deps() {
-    if [ ! -f "$REBEL_HOME/python/gen_requirements.py" ]; then
-        log_warn "REBEL_HOME/python/gen_requirements.py not found; skipping rebel Python deps"
-        return 0
+    if [ ! -f "$REBEL_HOME/python/pyproject.toml" ]; then
+        log_error "REBEL_HOME/python/pyproject.toml not found — cannot install rebel-compiler."
+        log_error "Expected path: $REBEL_HOME/python/pyproject.toml"
+        return 1
     fi
-    log_info "Installing rebel-compiler Python dependencies (gen_requirements.py + core.txt)..."
-    (cd "$REBEL_HOME" && python ./python/gen_requirements.py) || return $?
-    if [ ! -d "$REBEL_HOME/python/requirements" ]; then
-        log_warn "REBEL_HOME/python/requirements not found; skipping rebel Python deps"
-        return 0
+
+    # Fail loudly if the REBEL_HOME checkout isn't scikit-build-core (pre-migration
+    # trees built rebel-compiler via a different backend; this script no longer
+    # supports them).
+    if ! grep -q 'build-backend\s*=\s*"scikit_build_core.build"' "$REBEL_HOME/python/pyproject.toml"; then
+        log_error "REBEL_HOME/python/pyproject.toml does not use scikit_build_core.build."
+        log_error "This script targets the post-migration rebel-compiler layout; please upgrade"
+        log_error "REBEL_HOME to a scikit-build-core build of rebel-compiler."
+        return 1
     fi
-    uv pip install -r "$REBEL_HOME/python/requirements/core.txt" || return $?
-    log_info "Rebel Python dependencies installed"
+
+    # Install rebel-compiler's own build-system.requires into the active venv so
+    # `uv pip install --no-build-isolation -e` can reuse them without creating a
+    # PEP 517 isolated build env (and its associated PyPI fetches). These pins
+    # track rebel-compiler/python/pyproject.toml's [build-system].requires.
+    log_info "Installing rebel-compiler build dependencies (scikit-build-core, pybind11, cython)..."
+    uv pip install \
+        "scikit-build-core>=0.10" \
+        "setuptools_scm>=8" \
+        "pybind11>=2.10,<=2.10.4" \
+        cython \
+        "cmake>=3.26,<4.0" \
+        ninja || return $?
+
+    log_info "Installing rebel-compiler (editable, --no-build-isolation) from $REBEL_HOME/python..."
+    uv pip install --no-build-isolation -e "$REBEL_HOME/python" || return $?
+
+    log_info "rebel-compiler installed"
 }
 
 build_torch_rbln() {
@@ -532,7 +580,9 @@ build_torch_rbln() {
     fi
     export REBEL_HOME="$REBEL_HOME"
     export RBLN_USE_EXTERNAL_REBEL_COMPILER=1
-    export PYTHONPATH="$REBEL_HOME/python:$PYTHONPATH"
+    # No PYTHONPATH shim: install_rebel_python_deps (called later in this function)
+    # does a scikit-build-core editable install of rebel-compiler, and
+    # FindRebel.cmake reads REBEL_HOME directly for headers/libs.
 
     # Install torch based on gcc version
     if [ "$gcc_version" = "12" ] && [ -n "$effective_torch_wheel_path" ]; then
@@ -636,7 +686,9 @@ print(f'  torch_rbln: {torch_rbln.__version__}')
         log_error "Possible causes:"
         log_error "  - Segmentation fault (library version mismatch)"
         log_error "  - LD_LIBRARY_PATH not set correctly"
-        log_error "  - PYTHONPATH not set correctly"
+        log_error "  - rebel-compiler editable install missing or shadowed"
+        log_error "    (check \$VIRTUAL_ENV/lib/python*/site-packages/_rebel_compiler_editable.pth;"
+        log_error "     re-run: uv pip install --no-build-isolation -e \$REBEL_HOME/python)"
         log_error "  - Python version mismatch with rebel-compiler"
         log_error "  - GCC version mismatch between torch and torch-rbln"
         log_error ""
@@ -677,8 +729,10 @@ print_summary() {
     echo ""
     echo "  2. The activate_rebel script is auto-sourced, setting:"
     echo "     - REBEL_HOME"
-    echo "     - PYTHONPATH (includes rebel-compiler)"
+    echo "     - RBLN_USE_EXTERNAL_REBEL_COMPILER=1"
     echo "     - LD_LIBRARY_PATH (includes native libraries)"
+    echo "     (rebel-compiler is editable-installed via scikit-build-core;"
+    echo "      Python imports are routed by _rebel_compiler_editable.pth)"
     echo ""
     echo "  3. Example usage:"
     echo "     python -c 'import torch; import rebel; import torch_rbln; print(\"OK\")'"
