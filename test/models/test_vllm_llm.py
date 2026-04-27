@@ -15,15 +15,6 @@ Environment requirements
 * ``vllm-rbln`` installed on ``origin/device_tensor_rebased`` (or descendant).
 * ``vllm_rbln`` / ``vllm`` importable — the test skips cleanly otherwise.
 
-The test runs with ``VLLM_RBLN_USE_DEVICE_TENSOR`` *unset* (i.e. the default
-legacy KV cache path). The opt-in ``VLLM_RBLN_USE_DEVICE_TENSOR=1`` flow
-introduced by the ``a1d4d86`` commit is currently unstable (rebel runtime
-reports ``Buffer not found for DramTensor`` and submit fails with
-``SYS_ERROR -14``); it is excluded from this pre-screen until that
-end-to-end flow lands as a supported configuration upstream. The remaining
-env matches the vllm-rbln ``test_llama_batch.py`` reference configuration
-announced to run green on ``device_tensor_rebased``.
-
 Matrix
 ------
 * Default: graph mode (``enforce_eager=False``) — the primary compile path.
@@ -43,14 +34,9 @@ import torch
 from test.utils import run_in_isolated_process
 
 
-# NOTE: intentionally do NOT `from torch.testing._internal.common_utils import
-# run_tests` at module level. Importing ``common_utils`` pulls in enough of
-# torch's test-internal machinery to perturb the rebel runtime state of any
-# child process that later re-imports this module; the effect is that
-# ``multiprocessing.spawn`` children dispatched via ``run_in_isolated_process``
-# end up failing rebel's NPU submit with ``SYS_ERROR -14 Bad address``, while
-# the exact same child works fine otherwise. Details:
-# https://github.com/rbln-sw/torch-rbln/pull/10533 and internal notes.
+# NOTE: do NOT import ``torch.testing._internal.common_utils`` at module level.
+# Spawned children re-import this module, and that import path perturbs rebel
+# runtime state into ``SYS_ERROR -14`` on NPU submit. See PR #10533.
 
 
 pytest.importorskip(
@@ -59,17 +45,12 @@ pytest.importorskip(
 )
 
 
-# Repo root: test/models/test_vllm_llm.py → parents[2] is the repo root.
-# Used to prepend onto ``PYTHONPATH`` only for the TP>1 case, where we override
-# ``worker_cls`` with a qualified name that EngineCore (a freshly spawned
-# Python interpreter without our CWD on ``sys.path``) needs to resolve.
+# Prepended to PYTHONPATH so EngineCore's fresh interpreter can resolve the
+# TP>1 qualified-name ``worker_cls``.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# Qualified path of the ``RBLNWorker`` subclass that skips the
-# ``_init_device_env`` re-assignment. Only used for TP>1 (RSD) — for TP=1
-# stock vllm-rbln rewrites ``RBLN_DEVICES`` to the same value ("0" -> "0"),
-# which rebel does not flag as a runtime mutation. See
-# ``test/models/_vllm_rbln_worker_patch.py`` for the full rationale.
+# TP>1 only — skips stock ``_init_device_env`` which rewrites ``RBLN_DEVICES``
+# at runtime and trips rebel's mutation check. See ``_vllm_rbln_worker_patch.py``.
 _PATCHED_WORKER_CLS = "test.models._vllm_rbln_worker_patch.PatchedRBLNWorker"
 
 
@@ -84,12 +65,8 @@ class VllmModelConfig:
 
     model_id: str
     family: str
-    # Kept small on purpose: the test only greedy-decodes ``MAX_TOKENS=5``
-    # tokens from a short prompt, so we don't need a long context window
-    # and larger values just inflate the KV-cache block budget that vllm
-    # auto-computes in ``determine_available_memory`` — on tighter CI NPU
-    # memory that can blow up as ``RuntimeError: Not enough memory for
-    # N blocks of KV cache``.
+    # Kept small to fit CI NPU memory — vllm's KV-cache block budget scales
+    # with this in ``determine_available_memory``.
     max_model_len: int = 2 * 1024
     block_size: int = 1024
     max_num_batched_tokens: int = 128
@@ -124,25 +101,14 @@ PROMPT = "The capital of France is"
 MAX_TOKENS = 5
 
 
-# Hard-coded greedy (temperature=0) expected outputs from the CPU reference
-# run. Each value is the exact ``generated_text`` (including leading space)
-# returned by ``llm.generate``. If an entry is ``None`` the test falls back
-# to non-empty + shape checks only.
-#
-# Key: (model_key, tp_size, mode) where mode in {"graph", "eager"}.
-#
-# Captured from a green run on RBLN-CA25 with the default fallback stack
-# (torch-rbln + rebel-compiler dev329 + vllm-rbln device_tensor_rebased).
-# Any future drift against these strings is a real correctness regression.
+# Greedy-decode (temperature=0) expected outputs. Key: (model, tp, mode).
+# ``None`` falls back to non-empty + shape checks. Captured on RBLN-CA25 with
+# rebel-compiler dev329 + vllm-rbln device_tensor_rebased; drift = regression.
 EXPECTED_TEXT: dict[tuple[str, int, str], Optional[str]] = {
     ("llama_3_2_1b", 1, "graph"): " Paris. The Eiff",
     ("qwen2_5_1_5b", 1, "graph"): " Paris. The capital of",
     ("qwen3_0_6b", 1, "graph"): " Paris. The capital of",
-    # Eager mode uses VLLM_RBLN_SAMPLER=0 + VLLM_RBLN_COMPILE_MODEL=0 (see
-    # _run_case); output then matches the graph-mode greedy decode exactly.
     ("llama_3_2_1b", 1, "eager"): " Paris. The Eiff",
-    # TP2 via RSD (VLLM_RBLN_TP_SIZE=2, single vLLM worker over 2 physical
-    # NPUs). Greedy decode matches TP1 exactly.
     ("llama_3_2_1b", 2, "graph"): " Paris. The Eiff",
 }
 
@@ -160,45 +126,22 @@ def _vllm_generate_worker(
     prompt: str,
     max_tokens: int,
 ) -> None:
-    """Run a single greedy vLLM generation on RBLN device tensors.
+    """Run a single greedy vLLM generation in a spawned subprocess.
 
-    Executed in a spawned subprocess so vllm-rbln / RBLN singleton state is
-    isolated from the parent test runner.
-
-    ``RBLN_DEVICES`` / ``RBLN_NPUS_PER_DEVICE`` are intentionally NOT set
-    here. They must be exported in the *parent* pytest worker (see
-    ``_run_case``) so this spawned child inherits them before its own
-    ``import torch`` runs. Rationale: torch-rbln registers a
-    ``torch.backends`` entry point (``torch_backends_entry_point``) that
-    autoloads at ``import torch`` time and pulls in rebel's
-    ``librbln-thunk.so``; the thunk snapshots ``RBLN_DEVICES`` at library
-    load. Spawn re-imports this module before invoking the target function,
-    so by the time control reaches this function body rebel has already
-    recorded its initial value. Any mutation performed here (or later in
-    vllm-rbln's stock ``RBLNWorker._init_device_env``) would trip rebel's
-    consistency check ("RBLN_DEVICES environment variable changed at
-    runtime. Initial value: , Current value: 0"). See the matching pattern
-    used by ``test_optimum_llm.py::_run_test_case``.
+    ``RBLN_DEVICES`` / ``RBLN_NPUS_PER_DEVICE`` must be set in the *parent*
+    (``_run_case``) before spawn: rebel's ``librbln-thunk.so`` snapshots them
+    at ``import torch``, and spawn re-imports this module before reaching this
+    body. Same pattern as ``test_optimum_llm.py::_run_test_case``.
     """
     from vllm import LLM, SamplingParams
 
     cfg = MODEL_CONFIGS[model_key]
     tc = unittest.TestCase()
 
-    # NOTE: we always instantiate the vLLM engine with
-    # ``tensor_parallel_size=1`` and use ``VLLM_RBLN_TP_SIZE`` (set in
-    # ``_run_case``) to drive RSD fan-out across physical NPUs. That
-    # keeps the test on a single worker process, exercising the "1 logical
-    # device = ``tp_size`` physical NPUs" path (the setup we actually ship
-    # for RSD) and avoids the RCCL multi-worker collective path, which is
-    # a separate axis we do not care about here.
-    #
-    # ``gpu_memory_utilization=0.5`` caps the NPU memory share vllm uses
-    # for KV cache, which in turn caps the number of blocks auto-computed
-    # by ``determine_available_memory``. Default is 0.9; CI NPUs with
-    # smaller HBM budgets otherwise fail with "Not enough memory for N
-    # blocks of KV cache". The short prompt + ``MAX_TOKENS=5`` decode
-    # only needs a couple of blocks, so 0.5 is plenty.
+    # Always TP=1 on the vLLM engine; RSD fan-out is driven by
+    # ``VLLM_RBLN_TP_SIZE`` (set in ``_run_case``), keeping the test
+    # single-process and off the RCCL multi-worker path.
+    # ``gpu_memory_utilization=0.5`` caps KV-cache blocks for tight CI NPU mem.
     llm_kwargs: dict = dict(
         model=cfg.model_id,
         dtype="float16",
@@ -212,12 +155,7 @@ def _vllm_generate_worker(
         enforce_eager=enforce_eager,
         gpu_memory_utilization=0.5,
     )
-    # ``worker_cls`` override is only needed for TP>1 — see
-    # ``_vllm_rbln_worker_patch.py`` for why. For TP=1 stock vllm-rbln
-    # rewrites ``RBLN_DEVICES`` to the same value (no rebel mutation), so
-    # we let vllm-rbln's platform.py auto-pick the standard worker. This
-    # also means the TP=1 path doesn't need a qualified-name import in
-    # EngineCore, so ``_run_case`` skips the PYTHONPATH munging too.
+    # TP>1 only — see ``_PATCHED_WORKER_CLS`` above.
     if tp_size > 1:
         llm_kwargs["worker_cls"] = _PATCHED_WORKER_CLS
 
@@ -271,41 +209,18 @@ def _run_case(model_key: str, tp_size: int, enforce_eager: bool) -> None:
     expected_text = EXPECTED_TEXT.get((model_key, tp_size, mode))
 
     with pytest.MonkeyPatch.context() as mp:
-        # ``RBLN_DEVICES`` (and, for RSD, ``RBLN_NPUS_PER_DEVICE``) MUST be
-        # exported here in the parent, *before* ``run_in_isolated_process``
-        # spawns the worker. Both the spawned ``_vllm_generate_worker``
-        # child and the EngineCore subprocess it later forks inherit this
-        # env at process-start, so rebel's ``librbln-thunk.so`` — loaded
-        # via the ``torch.backends`` entry point that fires on ``import
-        # torch`` — snapshots the correct value once and stays consistent
-        # through ``determine_available_memory``. Setting them inside the
-        # child is too late: ``multiprocessing.spawn`` re-imports this
-        # module (and therefore runs ``import torch``) before calling
-        # ``_vllm_generate_worker``. Same pattern as
-        # ``test_optimum_llm.py::_run_test_case``.
+        # Set RBLN_DEVICES (and RBLN_NPUS_PER_DEVICE for RSD) in the parent
+        # before spawn — librbln-thunk snapshots them at ``import torch``,
+        # which fires when ``multiprocessing.spawn`` re-imports this module.
+        # Setting them inside the child is too late.
         mp.setenv("RBLN_DEVICES", ",".join(str(i) for i in range(tp_size)))
         if tp_size > 1:
             mp.setenv("RBLN_NPUS_PER_DEVICE", str(tp_size))
 
-        # Inject the repo root onto ``PYTHONPATH`` so it propagates through
-        # every subprocess that vLLM and rebel spawn from the EngineCore
-        # (notably ``multiprocessing.spawn`` for EngineCore itself, plus the
-        # triton kernel-compile helper that does ``import torch`` in a fresh
-        # interpreter under a temp cwd). Two reasons:
-        #
-        # 1. TP>1 uses a qualified-name ``worker_cls`` from
-        #    ``test.models._vllm_rbln_worker_patch``; EngineCore can only
-        #    resolve the qualified name if the repo root is on the import
-        #    path of its fresh interpreter.
-        # 2. In dev setups that have ``torch_rbln`` editable-installed from a
-        #    sibling checkout (e.g. /home/chanheo/torch-rbln-ext), prepending
-        #    the repo root forces ``import torch_rbln`` in those subprocesses
-        #    to resolve to *this* repo's ``torch_rbln/`` directory rather
-        #    than whatever site-packages points at — keeping the test process
-        #    and its kernel-compile children on a single torch-rbln/rebel
-        #    ABI pair. CI envs without a competing editable install still see
-        #    no behavior change because site-packages is the only resolution
-        #    target.
+        # Repo root on PYTHONPATH for EngineCore + triton kernel-compile
+        # subprocesses (fresh interpreters): (1) resolve the TP>1 qualified
+        # ``worker_cls``, and (2) prefer this checkout's ``torch_rbln`` over
+        # any sibling editable install in site-packages.
         existing_pythonpath = os.environ.get("PYTHONPATH", "")
         if existing_pythonpath:
             mp.setenv(
@@ -315,13 +230,8 @@ def _run_case(model_key: str, tp_size: int, enforce_eager: bool) -> None:
         else:
             mp.setenv("PYTHONPATH", str(_REPO_ROOT))
 
-        # Env matches the vllm-rbln ``test_llama_batch.py`` reference
-        # announced to run green on ``device_tensor_rebased``. The opt-in
-        # ``VLLM_RBLN_USE_DEVICE_TENSOR=1`` flow is intentionally NOT set:
-        # it is unstable on this branch (rebel runtime trips "Buffer not
-        # found for DramTensor" -> SYS_ERROR -14 at submit). We exercise
-        # the native vLLM model path over the legacy KV-cache path, which
-        # is the configuration the vllm-rbln team currently tests.
+        # Native vLLM model path config — matches the vllm-rbln team's
+        # ``test_llama_batch.py`` reference on ``device_tensor_rebased``.
         mp.setenv("VLLM_USE_V1", "1")
         mp.setenv("VLLM_RBLN_USE_VLLM_MODEL", "1")
         mp.setenv("VLLM_RBLN_SAMPLER", "1")
@@ -329,43 +239,18 @@ def _run_case(model_key: str, tp_size: int, enforce_eager: bool) -> None:
         mp.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
         mp.setenv("RBLN_KERNEL_MODE", "triton")
         mp.setenv("RBLN_PV_OPT", "1")
-        # torch-rbln: surface compile errors rather than silently fall back.
         mp.setenv("TORCH_RBLN_DISABLE_FALLBACK", "compile_error")
-        # RSD fan-out — not vllm worker-level TP. ``VLLM_RBLN_TP_SIZE`` is
-        # the axis that tells vllm-rbln to claim ``tp_size`` physical NPUs
-        # for a single worker and merge them into one logical device; the
-        # worker then sets ``RBLN_NPUS_PER_DEVICE`` on its own (see
-        # ``vllm_rbln/v1/worker/rbln_worker.py::_init_device_env``). This
-        # is the axis we want to validate end-to-end — it keeps the test
-        # on a single process and skips the RCCL multi-worker collective
-        # path entirely. The vLLM engine is instantiated with
-        # ``tensor_parallel_size=1`` in ``_vllm_generate_worker`` to match.
+        # RSD fan-out (1 worker → ``tp_size`` physical NPUs merged into one
+        # logical device). vllm engine stays at ``tensor_parallel_size=1``.
         mp.setenv("VLLM_RBLN_TP_SIZE", str(tp_size))
         if enforce_eager:
-            # Eager mode + the default RBLN sampler (``VLLM_RBLN_SAMPLER=1``)
-            # trips rebel's weight-reuse assertion at
-            # RTOSAWeightReusabilityCheck. Root cause chain: the main model
-            # is not torch.compile'd in eager mode, so every forward sees
-            # dynamic input shapes; the RBLN topk/topp sampler is still
-            # torch.compile'd on each shape and re-registers under the same
-            # module name. rebel's use_weight_sharing path then flips the
-            # second compile into ``weight_mode="reuse"`` and aborts with
-            # ``OpInvalidWeightSharingError: no key found on reuse mode``.
-            # Falling back to vllm's native (CPU) sampler removes the
-            # repeated rbln compile entirely, so eager mode exercises the
-            # rest of the path end-to-end. Revisit once rebel tolerates
-            # shape-only recompiles under ``use_weight_sharing``.
+            # Eager workarounds: keep sampler + attention backend off the
+            # compile path so they stay consistent with the uncompiled model.
+            # Without these: RBLN sampler hits weight-reuse assert
+            # (OpInvalidWeightSharingError) and FA emits wrong logits.
+            # Revisit when rebel tolerates shape-only recompiles under
+            # ``use_weight_sharing``.
             mp.setenv("VLLM_RBLN_SAMPLER", "0")
-            # vllm-rbln's flash-attention backend has multiple branches
-            # gated on ``VLLM_RBLN_COMPILE_MODEL`` (attention metadata
-            # layout, KV cache wiring, slot-mapping). With
-            # ``enforce_eager=True`` the main model is not torch.compile'd,
-            # but ``VLLM_RBLN_COMPILE_MODEL`` defaults to True, so the
-            # attention backend keeps taking the compile-mode code paths —
-            # the resulting mismatch causes the eager forward to emit wrong
-            # logits and the sampler to produce gibberish tokens. Aligning
-            # ``VLLM_RBLN_COMPILE_MODEL=0`` with eager execution makes the
-            # attention path consistent with the uncompiled model.
             mp.setenv("VLLM_RBLN_COMPILE_MODEL", "0")
         for key, val in cfg.extra_env.items():
             mp.setenv(key, val)
@@ -398,10 +283,9 @@ def test_vllm_llm_graph_tp1(enable_deploy_mode, model_key):
 @pytest.mark.single_worker
 @pytest.mark.parametrize("model_key", ["llama_3_2_1b"])
 def test_vllm_llm_graph_tp2(enable_deploy_mode, model_key):
-    """Graph mode with RSD=2 — 1 vLLM worker fans a single logical device
-    out across 2 physical NPUs via ``VLLM_RBLN_TP_SIZE=2``. Skipped if
-    fewer than 2 physical NPUs are available. This does **not** exercise
-    the RCCL multi-worker collective path (that is a separate axis)."""
+    """Graph mode RSD=2 — 1 vLLM worker over 2 physical NPUs via
+    ``VLLM_RBLN_TP_SIZE=2``. Skipped if <2 NPUs. Does not exercise the
+    RCCL multi-worker collective path (separate axis)."""
     _run_case(model_key=model_key, tp_size=2, enforce_eager=False)
 
 
@@ -409,25 +293,11 @@ def test_vllm_llm_graph_tp2(enable_deploy_mode, model_key):
 @pytest.mark.single_worker
 @pytest.mark.parametrize("model_key", ["llama_3_2_1b"])
 def test_vllm_llm_eager_tp1(enable_deploy_mode, model_key):
-    """Eager mode TP=1 — sanity check non-compile execution path.
-
-    Uses ``VLLM_RBLN_SAMPLER=0`` + ``VLLM_RBLN_COMPILE_MODEL=0`` (set in
-    ``_run_case``) so the attention backend and sampler stay consistent
-    with the uncompiled main model. With ``enforce_eager=True``, vllm-rbln
-    sets ``device_type="rbln"`` (instead of the graph-mode default
-    ``"cpu"``) so ``CommonAttentionMetadata.query_start_loc`` /
-    ``seq_lens`` arrive on the NPU — the RBLN flash-attention metadata
-    builder must drive its CPU-side mask construction off the
-    ``query_start_loc_cpu`` mirror to avoid mixed-device indexing /
-    numpy-conversion errors. Greedy decode is expected to match the
-    graph-mode TP1 output exactly.
-    """
+    """Eager mode TP=1 — sanity check non-compile path. Greedy decode should
+    match graph-mode TP1 (eager workaround envs set in ``_run_case``)."""
     _run_case(model_key=model_key, tp_size=1, enforce_eager=True)
 
 
 if __name__ == "__main__":
-    # NOTE: invoked via pytest, not ``python -m test.models.test_vllm_llm``.
-    # The canonical entry is ``pytest test/models/test_vllm_llm.py``; see the
-    # module docstring for the reason we do not import
-    # ``torch.testing._internal.common_utils.run_tests`` here.
+    # See module-level NOTE for why we don't use ``common_utils.run_tests``.
     raise SystemExit("Run this module via pytest: pytest test/models/test_vllm_llm.py")
