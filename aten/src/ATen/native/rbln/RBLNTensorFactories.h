@@ -42,4 +42,20 @@ at::Tensor empty_strided_rbln(
   std::optional<c10::Device> device_opt,
   std::optional<bool> pin_memory_opt);
 
+/**
+ * @brief RBLN-native impl of `aten::_efficientzerotensor`.
+ *
+ * Returns an RBLN tensor with the requested shape/dtype that reads as all
+ * zeros. The CPU fallback path crashes when redispatching this op (no tensor
+ * inputs but a Device IValue, see RBLNCPUFallback redispatchBoxed) — handling
+ * it directly here lets `sgn_backward`-style autograd paths return zero
+ * gradients without going through cpu_fallback_rbln.
+ */
+at::Tensor _efficientzerotensor_rbln(
+  c10::SymIntArrayRef sizes,
+  std::optional<c10::ScalarType> dtype_opt,
+  std::optional<c10::Layout> layout_opt,
+  std::optional<c10::Device> device_opt,
+  std::optional<bool> pin_memory_opt);
+
 } // namespace at::native::rbln
