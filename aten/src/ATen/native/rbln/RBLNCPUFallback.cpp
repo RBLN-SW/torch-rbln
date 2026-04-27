@@ -379,12 +379,12 @@ void cpu_fallback_rbln(
         const uint64_t vaddr = reinterpret_cast<uint64_t>(rbln_out.data_ptr()); // NOLINT
         uintptr_t host_ptr = 0;
         uint64_t bid = 0;
-        // write_only=true: we immediately memcpy over the whole region, so any
+        // Acquire-for-overwrite: we immediately memcpy over the whole region, so any
         // D2H from a stale PHYSICAL_VIEW_IS_LATEST state would be thrown away.
-        auto st = rebel::torch::rbln_v_borrow_host_ptr(vaddr, nbytes, host_ptr, bid,
-                                                       /*write_only=*/true);
+        auto st = rebel::torch::rbln_v_acquire_host_ptr_for_overwrite(
+            vaddr, nbytes, host_ptr, bid);
         TORCH_CHECK(st.IsOK(),
-                    "rbln_v_borrow_host_ptr failed for resized alias-write out "
+                    "rbln_v_acquire_host_ptr_for_overwrite failed for resized alias-write out "
                     "(vaddr=", vaddr, ", size=", nbytes, "): ", st.ToDebugString());
         std::memcpy(reinterpret_cast<void*>(host_ptr), cpu_tensors[i].data_ptr(), nbytes);
         auto st2 = rebel::torch::rbln_v_return_borrowed(bid, /*updated=*/true);
@@ -593,14 +593,14 @@ void cpu_fallback_rbln(
               const uint64_t vaddr = reinterpret_cast<uint64_t>(rbln_out.data_ptr()); // NOLINT
               uintptr_t host_ptr = 0;
               uint64_t borrow_id = 0;
-              // write_only=true: the tensor is a freshly-allocated at::empty;
+              // Acquire-for-overwrite: the tensor is a freshly-allocated at::empty;
               // any pre-existing data (in practice there is none, but if the
               // allocator ever caches a warm buffer the old device data is
               // irrelevant) will be overwritten by the memcpy below.
-              auto st = rebel::torch::rbln_v_borrow_host_ptr(vaddr, nbytes, host_ptr, borrow_id,
-                                                             /*write_only=*/true);
+              auto st = rebel::torch::rbln_v_acquire_host_ptr_for_overwrite(
+                  vaddr, nbytes, host_ptr, borrow_id);
               TORCH_CHECK(st.IsOK(),
-                          "rbln_v_borrow_host_ptr failed for output (vaddr=", vaddr,
+                          "rbln_v_acquire_host_ptr_for_overwrite failed for output (vaddr=", vaddr,
                           ", size=", nbytes, "): ", st.ToDebugString());
               std::memcpy(reinterpret_cast<void*>(host_ptr), cpu_out.data_ptr(), nbytes);
               auto st2 = rebel::torch::rbln_v_return_borrowed(borrow_id, /*updated=*/true);
