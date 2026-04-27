@@ -6,6 +6,8 @@
 #include <c10/rbln/RBLNLogging.h>
 #include <torch/csrc/utils/pybind.h>
 #include <torch_rbln/csrc/distributed/c10d/rbln/ProcessGroupRBLNModule.hpp>
+#include <torch_rbln/csrc/rbln/DispatchShim.h>
+#include <torch_rbln/csrc/rbln/WarmCache.h>
 #include <exception>
 #include <vector>
 
@@ -105,6 +107,63 @@ void register_internal_api(py::module_& module) {
 
   // Logging utilities
   module.def("_log_cpu_fallback", &c10::rbln::log_cpu_fallback, "Internal: log CPU fallback");
+
+  // C++ dispatch shim: install a boxed C++ handler on PrivateUse1 for the given
+  // op, with pre-check + cpu_fallback_rbln on fail and Python callback on pass.
+  // `skip_dtype_args` names positional arg indices whose dtype must not be
+  // compared to float16 (e.g. where.self_out's cond is bool).
+  module.def(
+      "_register_cpp_shim",
+      &torch_rbln::shim::register_cpp_shim,
+      "Internal: install a C++ dispatch shim for an op and register its Python impl",
+      pybind11::arg("op_name"),
+      pybind11::arg("py_fn"),
+      pybind11::arg("skip_dtype_args") = std::vector<size_t>{});
+
+  // Warm-cache API. The C++ shim populates a thread-local `pending` entry on
+  // every miss-path dispatch; the generated Python wrapper calls
+  // `_warmcache_install_pending` after a successful first compile + run so the
+  // runtime is cached for subsequent invocations with the same input profile.
+  module.def(
+      "_warmcache_install_pending",
+      &torch_rbln::shim::install_warmcache_from_pending,
+      "Internal: install a warm-cache entry from the thread-local pending key "
+      "set by the shim on the way into the miss path",
+      pybind11::arg("dyn_runtime"),
+      pybind11::arg("runtime_raw_ptr"),
+      pybind11::arg("num_inputs"),
+      pybind11::arg("num_outputs"),
+      pybind11::arg("out_profiles"));
+
+  module.def(
+      "_warmcache_set_enabled",
+      [](bool v) { torch_rbln::warmcache::WarmCache::instance().set_enabled(v); },
+      "Internal: enable/disable the warm-runtime cache path globally");
+  module.def(
+      "_warmcache_is_enabled",
+      []() { return torch_rbln::warmcache::WarmCache::instance().is_enabled(); },
+      "Internal: query whether warm-cache is currently enabled");
+  module.def(
+      "_warmcache_size",
+      []() { return torch_rbln::warmcache::WarmCache::instance().size(); },
+      "Internal: number of entries in the warm-cache (debug/bench only)");
+  module.def(
+      "_warmcache_clear",
+      []() { torch_rbln::warmcache::WarmCache::instance().clear(); },
+      "Internal: drop all warm-cache entries (tests / benchmarks)");
+  module.def(
+      "_warmcache_is_building",
+      []() { return torch_rbln::warmcache::WarmCache::is_building_entry(); },
+      "Internal: true iff the current thread is inside the miss-path compile");
+  module.def(
+      "_warmcache_enter_building",
+      []() { torch_rbln::warmcache::WarmCache::enter_building(); },
+      "Internal: mark the current thread as inside the miss-path compile "
+      "(reentrancy guard; pairs with _warmcache_exit_building)");
+  module.def(
+      "_warmcache_exit_building",
+      []() { torch_rbln::warmcache::WarmCache::exit_building(); },
+      "Internal: clear the miss-path reentrancy flag set by _warmcache_enter_building");
 
   // Fallback configuration
   module.def(
