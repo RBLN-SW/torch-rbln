@@ -92,9 +92,13 @@ at::Tensor _efficientzerotensor_rbln(
   // on the first NPU read (or are skipped entirely when the first access is a
   // write, e.g. KV-cache output). This mirrors what `aten::zero_` already
   // does on RBLN via `custom_zero__rbln`.
-  auto rbln_out = empty_rbln(sizes, dtype_opt, layout_opt, device_opt,
-                             pin_memory_opt,
-                             /*memory_format_opt=*/std::nullopt);
+  auto rbln_out = empty_rbln(
+      sizes,
+      dtype_opt,
+      layout_opt,
+      device_opt,
+      pin_memory_opt,
+      /*memory_format_opt=*/std::nullopt);
   if (rbln_out.numel() == 0) {
     return rbln_out;
   }
