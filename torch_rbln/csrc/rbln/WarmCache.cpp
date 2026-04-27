@@ -1,13 +1,13 @@
 #include <torch_rbln/csrc/rbln/WarmCache.h>
 
+#include <fcntl.h>
+#include <sys/types.h>
+#include <unistd.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fcntl.h>
 #include <fstream>
 #include <mutex>
-#include <sys/types.h>
-#include <unistd.h>
 
 namespace torch_rbln::warmcache {
 
@@ -17,7 +17,7 @@ namespace {
 inline void hash_combine_size_t(std::size_t& seed, std::size_t v) {
   seed ^= v + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
 }
-}  // namespace
+} // namespace
 
 std::size_t CacheKeyHash::operator()(const CacheKey& k) const noexcept {
   std::size_t h = std::hash<const void*>{}(static_cast<const void*>(k.schema_name_intern));
@@ -33,10 +33,17 @@ std::size_t CacheKeyHash::operator()(const CacheKey& k) const noexcept {
   for (const auto& s : k.scalars) {
     hash_combine_size_t(h, std::hash<uint8_t>{}(static_cast<uint8_t>(s.tag)));
     switch (s.tag) {
-      case ScalarValue::Tag::Int:     hash_combine_size_t(h, std::hash<int64_t>{}(s.i)); break;
-      case ScalarValue::Tag::Float:   hash_combine_size_t(h, std::hash<double>{}(s.f)); break;
-      case ScalarValue::Tag::Bool:    hash_combine_size_t(h, std::hash<bool>{}(s.b)); break;
-      case ScalarValue::Tag::Missing: break;
+      case ScalarValue::Tag::Int:
+        hash_combine_size_t(h, std::hash<int64_t>{}(s.i));
+        break;
+      case ScalarValue::Tag::Float:
+        hash_combine_size_t(h, std::hash<double>{}(s.f));
+        break;
+      case ScalarValue::Tag::Bool:
+        hash_combine_size_t(h, std::hash<bool>{}(s.b));
+        break;
+      case ScalarValue::Tag::Missing:
+        break;
     }
   }
   return h;
@@ -53,12 +60,13 @@ std::unordered_map<std::string, const char*>& intern_pool() {
   static std::unordered_map<std::string, const char*> p;
   return p;
 }
-}  // namespace
+} // namespace
 
 const char* intern_op_name(const std::string& name) {
   std::lock_guard<std::mutex> lk(intern_mutex());
   auto it = intern_pool().find(name);
-  if (it != intern_pool().end()) return it->second;
+  if (it != intern_pool().end())
+    return it->second;
   // The storage lives forever (owned by the map's key string).
   auto [ins, _] = intern_pool().emplace(name, nullptr);
   ins->second = ins->first.c_str();
@@ -81,13 +89,16 @@ namespace {
 // profiling / micro-bench scenarios where the savings are measurable.
 bool env_default_enabled() {
   const char* env = std::getenv("TORCH_RBLN_WARMCACHE");
-  if (env == nullptr || env[0] == '\0') return false;
-  if (env[0] == '1') return true;
+  if (env == nullptr || env[0] == '\0')
+    return false;
+  if (env[0] == '1')
+    return true;
   std::string v(env);
-  if (v == "on" || v == "ON" || v == "true" || v == "TRUE") return true;
+  if (v == "on" || v == "ON" || v == "true" || v == "TRUE")
+    return true;
   return false;
 }
-}  // namespace
+} // namespace
 
 WarmCache& WarmCache::instance() {
   static WarmCache c;
@@ -99,14 +110,16 @@ WarmCache& WarmCache::instance() {
 }
 
 const CacheEntry* WarmCache::find(const CacheKey& key) {
-  if (!enabled_.load(std::memory_order_relaxed)) return nullptr;
+  if (!enabled_.load(std::memory_order_relaxed))
+    return nullptr;
   std::shared_lock<std::shared_mutex> rd(mu_);
   auto it = map_.find(key);
   return (it != map_.end()) ? &it->second : nullptr;
 }
 
 void WarmCache::install(CacheKey key, CacheEntry entry) {
-  if (!enabled_.load(std::memory_order_relaxed)) return;
+  if (!enabled_.load(std::memory_order_relaxed))
+    return;
   std::unique_lock<std::shared_mutex> wr(mu_);
   // First-writer-wins: if another thread beat us to it, keep the earlier one.
   map_.try_emplace(std::move(key), std::move(entry));
@@ -129,14 +142,16 @@ void WarmCache::clear() {
 
 namespace {
 thread_local bool t_building_entry = false;
-}  // namespace
+} // namespace
 
-bool WarmCache::is_building_entry() { return t_building_entry; }
-void WarmCache::enter_building() { t_building_entry = true; }
-void WarmCache::exit_building() { t_building_entry = false; }
+bool WarmCache::is_building_entry() {
+  return t_building_entry;
+}
+void WarmCache::enter_building() {
+  t_building_entry = true;
+}
+void WarmCache::exit_building() {
+  t_building_entry = false;
+}
 
-#if TORCH_RBLN_WARMCACHE_TIMING
-WarmCacheCounters g_wc_counters;
-#endif
-
-}  // namespace torch_rbln::warmcache
+} // namespace torch_rbln::warmcache

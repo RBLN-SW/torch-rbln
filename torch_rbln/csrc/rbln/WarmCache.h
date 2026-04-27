@@ -30,9 +30,8 @@
 //     lifetime of the cache.
 
 #include <ATen/core/ScalarType.h>
-#include <c10/core/Device.h>
 #include <c10/util/SmallVector.h>
-#include <pybind11/pybind11.h>
+#include <torch/csrc/utils/pybind.h>
 
 #include <atomic>
 #include <cstddef>
@@ -41,8 +40,6 @@
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
-#include <variant>
-#include <vector>
 
 // Forward declaration of rebel's PyRblnSyncRuntime.
 //
@@ -56,12 +53,14 @@ namespace rbln {
 class PyRblnSyncRuntime {
  public:
   void Run();
-  void PrepareInputs(const std::map<uint32_t, uint64_t>& device_inputs,
-                     const std::map<uint32_t, uintptr_t>& cpu_inputs);
-  void PrepareOutputs(const std::map<uint32_t, uint64_t>& device_outputs,
-                      const std::map<uint32_t, uintptr_t>& cpu_outputs);
+  void PrepareInputs(
+      const std::map<uint32_t, uint64_t>& device_inputs,
+      const std::map<uint32_t, uintptr_t>& cpu_inputs);
+  void PrepareOutputs(
+      const std::map<uint32_t, uint64_t>& device_outputs,
+      const std::map<uint32_t, uintptr_t>& cpu_outputs);
 };
-}  // namespace rbln
+} // namespace rbln
 
 namespace torch_rbln::warmcache {
 
@@ -88,18 +87,31 @@ struct ScalarValue {
   double f{0.0};
   bool b{false};
 
-  static ScalarValue fromInt(int64_t v) { return {Tag::Int, v, 0.0, false}; }
-  static ScalarValue fromFloat(double v) { return {Tag::Float, 0, v, false}; }
-  static ScalarValue fromBool(bool v) { return {Tag::Bool, 0, 0.0, v}; }
-  static ScalarValue missing() { return {}; }
+  static ScalarValue fromInt(int64_t v) {
+    return {Tag::Int, v, 0.0, false};
+  }
+  static ScalarValue fromFloat(double v) {
+    return {Tag::Float, 0, v, false};
+  }
+  static ScalarValue fromBool(bool v) {
+    return {Tag::Bool, 0, 0.0, v};
+  }
+  static ScalarValue missing() {
+    return {};
+  }
 
   bool operator==(const ScalarValue& o) const noexcept {
-    if (tag != o.tag) return false;
+    if (tag != o.tag)
+      return false;
     switch (tag) {
-      case Tag::Int:     return i == o.i;
-      case Tag::Float:   return f == o.f;  // bit-identical compare ok for our use
-      case Tag::Bool:    return b == o.b;
-      case Tag::Missing: return true;
+      case Tag::Int:
+        return i == o.i;
+      case Tag::Float:
+        return f == o.f; // bit-identical compare ok for our use
+      case Tag::Bool:
+        return b == o.b;
+      case Tag::Missing:
+        return true;
     }
     return false;
   }
@@ -114,9 +126,7 @@ struct CacheKey {
   c10::SmallVector<ScalarValue, 4> scalars;
 
   bool operator==(const CacheKey& o) const noexcept {
-    return schema_name_intern == o.schema_name_intern
-        && inputs == o.inputs
-        && scalars == o.scalars;
+    return schema_name_intern == o.schema_name_intern && inputs == o.inputs && scalars == o.scalars;
   }
 };
 
@@ -169,8 +179,12 @@ class WarmCache {
   // Enable/disable the warm-cache path globally. When disabled, find() always
   // returns nullptr. Disabled path leaves `install` a no-op too to avoid
   // cache bloat during bisection/bench.
-  void set_enabled(bool v) { enabled_.store(v, std::memory_order_relaxed); }
-  bool is_enabled() const { return enabled_.load(std::memory_order_relaxed); }
+  void set_enabled(bool v) {
+    enabled_.store(v, std::memory_order_relaxed);
+  }
+  bool is_enabled() const {
+    return enabled_.load(std::memory_order_relaxed);
+  }
 
   size_t size();
   void clear();
@@ -198,25 +212,4 @@ class WarmCache {
 // per-shim-op at registration time and cache the result.
 const char* intern_op_name(const std::string& name);
 
-// ---------------------------------------------------------------------------
-// Hot-path breakdown counters (cumulative). Off in production builds; enable
-// with -DTORCH_RBLN_WARMCACHE_TIMING=1 for bench/profiling.
-#ifndef TORCH_RBLN_WARMCACHE_TIMING
-#define TORCH_RBLN_WARMCACHE_TIMING 0
-#endif
-
-#if TORCH_RBLN_WARMCACHE_TIMING
-struct WarmCacheCounters {
-  std::atomic<uint64_t> n_hits{0};
-  std::atomic<uint64_t> n_misses{0};
-  std::atomic<uint64_t> hit_lookup_ns{0};
-  std::atomic<uint64_t> hit_alloc_ns{0};
-  std::atomic<uint64_t> hit_maps_ns{0};
-  std::atomic<uint64_t> hit_prepare_ns{0};
-  std::atomic<uint64_t> hit_run_ns{0};
-  std::atomic<uint64_t> hit_total_ns{0};
-};
-extern WarmCacheCounters g_wc_counters;
-#endif
-
-}  // namespace torch_rbln::warmcache
+} // namespace torch_rbln::warmcache

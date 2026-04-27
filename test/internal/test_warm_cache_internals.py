@@ -109,8 +109,6 @@ class TestWarmCacheBuildingGuard:
         ev.wait(timeout=5.0)
         t.join(timeout=5.0)
 
-        assert seen_in_thread == [False], (
-            f"Thread-local flag leaked across threads: {seen_in_thread}"
-        )
+        assert seen_in_thread == [False], f"Thread-local flag leaked across threads: {seen_in_thread}"
         # Original thread still has the flag set.
         assert _C._warmcache_is_building() is True

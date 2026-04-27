@@ -18,10 +18,8 @@ def configure_master_port_for_rccl_tests(default_port: str = _DEFAULT_DISTRIBUTE
 
     When RCCL_PORT_GEN=1, RCCL uses the autoport / unique-id init path; the
     process group still needs MASTER_PORT for the TCP store. In that case the
-    user must set MASTER_PORT in the environment. Otherwise we pick a free
-    port for each test invocation so back-to-back distributed tests in the
-    same suite don't collide if a previous test's TCP store hasn't fully
-    released the socket yet.
+    user must set MASTER_PORT in the environment. Otherwise we set a default
+    port (without clobbering an existing MASTER_PORT).
     """
     if os.environ.get("RCCL_PORT_GEN") == "1":
         if not os.environ.get("MASTER_PORT"):
@@ -33,14 +31,7 @@ def configure_master_port_for_rccl_tests(default_port: str = _DEFAULT_DISTRIBUTE
             )
             sys.exit(1)
         return
-    # Always rebind to a free port. The previous behaviour kept a fixed port
-    # via setdefault, which bit us when an earlier test left the socket in
-    # TIME_WAIT or a worker process leaked it.
-    import socket
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        free_port = s.getsockname()[1]
-    os.environ["MASTER_PORT"] = str(free_port)
+    os.environ.setdefault("MASTER_PORT", default_port)
 
 
 def set_deterministic_seeds(seed: int):

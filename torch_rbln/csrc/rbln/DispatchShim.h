@@ -1,6 +1,7 @@
 #pragma once
 
 #include <pybind11/pybind11.h>
+#include <torch/csrc/utils/pybind.h>
 
 #include <cstdint>
 #include <string>
@@ -28,9 +29,10 @@ namespace torch_rbln::shim {
 // Called from generated `register_ops.py` at module-init time in place of the
 // usual `aten_impl.impl(...)` Python registration. The registered C++ library
 // is kept alive for the process lifetime.
-void register_cpp_shim(const std::string& op_name,
-                       pybind11::object py_fn,
-                       const std::vector<size_t>& skip_dtype_args = {});
+void register_cpp_shim(
+    const std::string& op_name,
+    pybind11::object py_fn,
+    const std::vector<size_t>& skip_dtype_args = {});
 
 // Called by the Python wrapper after a successful miss-path compile to install
 // a warm-cache entry keyed by the CacheKey that the shim built on the way in

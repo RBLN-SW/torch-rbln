@@ -20,7 +20,7 @@ These tests verify the factory's core invariants on the RBLN device:
 
 import pytest
 import torch
-from torch.testing._internal.common_utils import TestCase, run_tests
+from torch.testing._internal.common_utils import run_tests, TestCase
 
 
 @pytest.mark.test_set_ci
@@ -28,34 +28,26 @@ class TestEfficientZeroTensor(TestCase):
     """`aten::_efficientzerotensor` should produce a logically-zero RBLN tensor."""
 
     def test_shape_and_dtype_preserved_float16(self) -> None:
-        t = torch.ops.aten._efficientzerotensor(
-            (3, 4), dtype=torch.float16, device=torch.device("rbln")
-        )
+        t = torch.ops.aten._efficientzerotensor((3, 4), dtype=torch.float16, device=torch.device("rbln"))
         self.assertEqual(t.device.type, "rbln")
         self.assertEqual(t.dtype, torch.float16)
         self.assertEqual(tuple(t.shape), (3, 4))
 
     def test_shape_and_dtype_preserved_int64(self) -> None:
-        t = torch.ops.aten._efficientzerotensor(
-            (2,), dtype=torch.int64, device=torch.device("rbln")
-        )
+        t = torch.ops.aten._efficientzerotensor((2,), dtype=torch.int64, device=torch.device("rbln"))
         self.assertEqual(t.device.type, "rbln")
         self.assertEqual(t.dtype, torch.int64)
         self.assertEqual(tuple(t.shape), (2,))
 
     def test_zero_init_value_float16(self) -> None:
-        t = torch.ops.aten._efficientzerotensor(
-            (2, 3), dtype=torch.float16, device=torch.device("rbln")
-        )
+        t = torch.ops.aten._efficientzerotensor((2, 3), dtype=torch.float16, device=torch.device("rbln"))
         # Materialise to CPU and check elementwise equality with a freshly-
         # allocated zero tensor of the same shape and dtype.
         expected = torch.zeros(2, 3, dtype=torch.float16)
         self.assertEqual(t.to("cpu"), expected)
 
     def test_zero_init_value_int64(self) -> None:
-        t = torch.ops.aten._efficientzerotensor(
-            (4,), dtype=torch.int64, device=torch.device("rbln")
-        )
+        t = torch.ops.aten._efficientzerotensor((4,), dtype=torch.int64, device=torch.device("rbln"))
         expected = torch.zeros(4, dtype=torch.int64)
         self.assertEqual(t.to("cpu"), expected)
 

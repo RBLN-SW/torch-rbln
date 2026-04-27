@@ -136,9 +136,7 @@ at::Tensor borrow_rbln_as_cpu(const at::Tensor& t, uint64_t& borrow_id_out) {
   uintptr_t host_ptr = 0;
   uint64_t borrow_id = 0;
   auto st = rebel::torch::rbln_v_borrow_host_ptr(vaddr, nbytes, host_ptr, borrow_id);
-  TORCH_CHECK(st.IsOK(),
-              "rbln_v_borrow_host_ptr failed (vaddr=", vaddr, ", size=", nbytes,
-              "): ", st.ToDebugString());
+  TORCH_CHECK(st.IsOK(), "rbln_v_borrow_host_ptr failed (vaddr=", vaddr, ", size=", nbytes, "): ", st.ToDebugString());
   borrow_id_out = borrow_id;
 
   auto options = at::TensorOptions().dtype(t.dtype()).device(at::kCPU);
@@ -150,19 +148,25 @@ void release_borrow(uint64_t borrow_id, bool updated) {
     return;
   }
   auto st = rebel::torch::rbln_v_return_borrowed(borrow_id, updated);
-  TORCH_CHECK(st.IsOK(),
-              "rbln_v_return_borrowed failed (borrow_id=", borrow_id,
-              ", updated=", updated, "): ", st.ToDebugString());
+  TORCH_CHECK(
+      st.IsOK(),
+      "rbln_v_return_borrowed failed (borrow_id=",
+      borrow_id,
+      ", updated=",
+      updated,
+      "): ",
+      st.ToDebugString());
 }
 
 // TensorList variant of borrow_rbln_as_cpu. Walks each element; rbln entries
 // are borrowed (no D2H copy when host-latest), others fall through to the
 // legacy batched at::_to_cpu. Borrow ids are appended to `borrow_ids_out` so
 // the caller can release them after the op runs.
-std::vector<at::Tensor> borrow_rbln_list_as_cpu(const std::vector<at::Tensor>& tensors,
-                                                std::vector<uint64_t>& borrow_ids_out) {
+std::vector<at::Tensor> borrow_rbln_list_as_cpu(
+    const std::vector<at::Tensor>& tensors,
+    std::vector<uint64_t>& borrow_ids_out) {
   std::vector<at::Tensor> cpu_tensors(tensors.size());
-  std::vector<at::Tensor> leftover;          // non-rbln / empty — to_cpu later
+  std::vector<at::Tensor> leftover; // non-rbln / empty — to_cpu later
   std::vector<size_t> leftover_indices;
   for (size_t i = 0; i < tensors.size(); ++i) {
     uint64_t bid = 0;
@@ -332,12 +336,9 @@ void cpu_fallback_rbln(
     // would alias only the [vaddr, vaddr+nbytes) span — leaving the rest of
     // the strided storage stale. Caller's noncontiguous out= must go through
     // the legacy `_copy_from_and_resize` path which honors strides.
-    const bool borrow_resize_case =
-        tensor_args[i].device().type() == c10::DeviceType::PrivateUse1
-        && cpu_tensors[i].defined()
-        && cpu_tensors[i].is_contiguous()
-        && cpu_tensors[i].nbytes() > 0
-        && tensor_args[i].is_contiguous();
+    const bool borrow_resize_case = tensor_args[i].device().type() == c10::DeviceType::PrivateUse1 &&
+        cpu_tensors[i].defined() && cpu_tensors[i].is_contiguous() && cpu_tensors[i].nbytes() > 0 &&
+        tensor_args[i].is_contiguous();
     if (borrow_resize_case) {
       auto& rbln_out = tensor_args[i];
       if (rbln_out.sizes() != cpu_tensors[i].sizes()) {
@@ -350,16 +351,25 @@ void cpu_fallback_rbln(
         uint64_t bid = 0;
         // Acquire-for-overwrite: we immediately memcpy over the whole region, so any
         // D2H from a stale PHYSICAL_VIEW_IS_LATEST state would be thrown away.
-        auto st = rebel::torch::rbln_v_acquire_host_ptr_for_overwrite(
-            vaddr, nbytes, host_ptr, bid);
-        TORCH_CHECK(st.IsOK(),
-                    "rbln_v_acquire_host_ptr_for_overwrite failed for resized alias-write out "
-                    "(vaddr=", vaddr, ", size=", nbytes, "): ", st.ToDebugString());
+        auto st = rebel::torch::rbln_v_acquire_host_ptr_for_overwrite(vaddr, nbytes, host_ptr, bid);
+        TORCH_CHECK(
+            st.IsOK(),
+            "rbln_v_acquire_host_ptr_for_overwrite failed for resized alias-write out "
+            "(vaddr=",
+            vaddr,
+            ", size=",
+            nbytes,
+            "): ",
+            st.ToDebugString());
         std::memcpy(reinterpret_cast<void*>(host_ptr), cpu_tensors[i].data_ptr(), nbytes);
         auto st2 = rebel::torch::rbln_v_return_borrowed(bid, /*updated=*/true);
-        TORCH_CHECK(st2.IsOK(),
-                    "rbln_v_return_borrowed failed for resized alias-write out "
-                    "(borrow_id=", bid, "): ", st2.ToDebugString());
+        TORCH_CHECK(
+            st2.IsOK(),
+            "rbln_v_return_borrowed failed for resized alias-write out "
+            "(borrow_id=",
+            bid,
+            "): ",
+            st2.ToDebugString());
       }
     } else {
       at::_copy_from_and_resize(cpu_tensors[i], tensor_args[i]);
@@ -380,10 +390,8 @@ void cpu_fallback_rbln(
       for (const auto idx : c10::irange(tensorlist_args[i].size())) {
         if (!cpu_list[idx].defined())
           continue;
-        const bool is_borrowed =
-            i < tensorlist_borrow_ids.size()
-            && idx < tensorlist_borrow_ids[i].size()
-            && tensorlist_borrow_ids[i][idx] != 0;
+        const bool is_borrowed = i < tensorlist_borrow_ids.size() && idx < tensorlist_borrow_ids[i].size() &&
+            tensorlist_borrow_ids[i][idx] != 0;
         if (is_borrowed) {
           tensorlist_borrow_write[i][idx] = true;
         } else {
@@ -417,10 +425,9 @@ void cpu_fallback_rbln(
   }
   for (size_t i = 0; i < tensorlist_borrow_ids.size(); ++i) {
     for (size_t k = 0; k < tensorlist_borrow_ids[i].size(); ++k) {
-      const bool upd = (i < tensorlist_borrow_write.size()
-                        && k < tensorlist_borrow_write[i].size())
-                           ? tensorlist_borrow_write[i][k]
-                           : false;
+      const bool upd = (i < tensorlist_borrow_write.size() && k < tensorlist_borrow_write[i].size())
+          ? tensorlist_borrow_write[i][k]
+          : false;
       release_borrow(tensorlist_borrow_ids[i][k], upd);
     }
   }
@@ -563,16 +570,23 @@ void cpu_fallback_rbln(
               // any pre-existing data (in practice there is none, but if the
               // allocator ever caches a warm buffer the old device data is
               // irrelevant) will be overwritten by the memcpy below.
-              auto st = rebel::torch::rbln_v_acquire_host_ptr_for_overwrite(
-                  vaddr, nbytes, host_ptr, borrow_id);
-              TORCH_CHECK(st.IsOK(),
-                          "rbln_v_acquire_host_ptr_for_overwrite failed for output (vaddr=", vaddr,
-                          ", size=", nbytes, "): ", st.ToDebugString());
+              auto st = rebel::torch::rbln_v_acquire_host_ptr_for_overwrite(vaddr, nbytes, host_ptr, borrow_id);
+              TORCH_CHECK(
+                  st.IsOK(),
+                  "rbln_v_acquire_host_ptr_for_overwrite failed for output (vaddr=",
+                  vaddr,
+                  ", size=",
+                  nbytes,
+                  "): ",
+                  st.ToDebugString());
               std::memcpy(reinterpret_cast<void*>(host_ptr), cpu_out.data_ptr(), nbytes);
               auto st2 = rebel::torch::rbln_v_return_borrowed(borrow_id, /*updated=*/true);
-              TORCH_CHECK(st2.IsOK(),
-                          "rbln_v_return_borrowed failed for output (borrow_id=", borrow_id,
-                          "): ", st2.ToDebugString());
+              TORCH_CHECK(
+                  st2.IsOK(),
+                  "rbln_v_return_borrowed failed for output (borrow_id=",
+                  borrow_id,
+                  "): ",
+                  st2.ToDebugString());
             }
             (*stack)[returns_begin + idx] = c10::IValue(rbln_out);
           } else {

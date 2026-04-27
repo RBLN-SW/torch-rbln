@@ -18,7 +18,7 @@ wrong values or a crash).
 
 import pytest
 import torch
-from torch.testing._internal.common_utils import TestCase, run_tests
+from torch.testing._internal.common_utils import run_tests, TestCase
 
 
 @pytest.mark.test_set_ci

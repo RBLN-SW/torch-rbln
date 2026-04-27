@@ -30,21 +30,21 @@ using warmcache::WarmCache;
 // on every dispatch. Populated on the first invocation of a given op and
 // looked up with the same registry key thereafter.
 struct SchemaCache {
-  std::vector<bool> is_kwarg_only;          // parallel to schema args
-  std::vector<std::string> arg_names;       // only populated for kwarg_only slots
-  std::vector<bool> is_write_alias;         // alias_info != nullptr && isWrite()
-  int out_positional_idx = -1;              // -1 if no arg is named "out"
+  std::vector<bool> is_kwarg_only; // parallel to schema args
+  std::vector<std::string> arg_names; // only populated for kwarg_only slots
+  std::vector<bool> is_write_alias; // alias_info != nullptr && isWrite()
+  int out_positional_idx = -1; // -1 if no arg is named "out"
   size_t num_args = 0;
   size_t num_positional = 0;
-  std::vector<c10::TypePtr> return_types;   // parallel to schema returns
+  std::vector<c10::TypePtr> return_types; // parallel to schema returns
   bool populated = false;
 };
 
 struct ShimEntry {
   pybind11::object py_fn;
   std::vector<size_t> skip_dtype_args;
-  SchemaCache schema_cache;           // lazily filled
-  const char* op_name_intern = nullptr;  // stable pointer for WarmCache keys
+  SchemaCache schema_cache; // lazily filled
+  const char* op_name_intern = nullptr; // stable pointer for WarmCache keys
 };
 
 std::unordered_map<std::string, ShimEntry>& registry() {
@@ -127,9 +127,10 @@ bool is_skipped_arg(const std::vector<size_t>& skip_list, size_t i) {
 // path, not CPU. If we counted wrapped 0-dim against the shortcut here, we
 // would force the shortcut for the most common binary-op-with-python-scalar
 // case and bypass the compile-path that the test suite expects.
-bool quick_fallback_check(torch::jit::Stack* stack,
-                          const SchemaCache& cache,
-                          const std::vector<size_t>& skip_dtype_args) {
+bool quick_fallback_check(
+    torch::jit::Stack* stack,
+    const SchemaCache& cache,
+    const std::vector<size_t>& skip_dtype_args) {
   auto args = torch::jit::last(stack, cache.num_args);
   bool has_input_tensor = false;
   bool all_input_scalar = true;
@@ -182,14 +183,20 @@ bool quick_fallback_check(torch::jit::Stack* stack,
 // as TensorProfile; None/list args mean the schema uses an uncommon overload
 // shape that we don't currently warm-cache.
 ScalarValue ival_to_scalar(const c10::IValue& iv) {
-  if (iv.isInt()) return ScalarValue::fromInt(iv.toInt());
-  if (iv.isDouble()) return ScalarValue::fromFloat(iv.toDouble());
-  if (iv.isBool()) return ScalarValue::fromBool(iv.toBool());
+  if (iv.isInt())
+    return ScalarValue::fromInt(iv.toInt());
+  if (iv.isDouble())
+    return ScalarValue::fromFloat(iv.toDouble());
+  if (iv.isBool())
+    return ScalarValue::fromBool(iv.toBool());
   if (iv.isScalar()) {
     const auto& s = iv.toScalar();
-    if (s.isIntegral(false)) return ScalarValue::fromInt(s.toLong());
-    if (s.isFloatingPoint()) return ScalarValue::fromFloat(s.toDouble());
-    if (s.isBoolean()) return ScalarValue::fromBool(s.toBool());
+    if (s.isIntegral(false))
+      return ScalarValue::fromInt(s.toLong());
+    if (s.isFloatingPoint())
+      return ScalarValue::fromFloat(s.toDouble());
+    if (s.isBoolean())
+      return ScalarValue::fromBool(s.toBool());
   }
   return ScalarValue::missing();
 }
@@ -199,10 +206,11 @@ ScalarValue ival_to_scalar(const c10::IValue& iv) {
 // positional order. Scalar args become ScalarValues. None/Tensor-list args
 // are silently treated as a signal that we cannot warm-cache this call
 // (return false; caller skips warm cache and falls through to pybind).
-bool build_cache_key(torch::jit::Stack* stack,
-                     const SchemaCache& cache,
-                     const char* op_name_intern,
-                     CacheKey& out_key) {
+bool build_cache_key(
+    torch::jit::Stack* stack,
+    const SchemaCache& cache,
+    const char* op_name_intern,
+    CacheKey& out_key) {
   out_key.schema_name_intern = op_name_intern;
   out_key.inputs.clear();
   out_key.scalars.clear();
@@ -212,8 +220,10 @@ bool build_cache_key(torch::jit::Stack* stack,
     const auto& iv = arguments[i];
     if (iv.isTensor()) {
       const at::Tensor& t = iv.toTensor();
-      if (!t.defined()) continue;
-      if (cache.is_write_alias[i]) continue;  // out tensor, not part of key
+      if (!t.defined())
+        continue;
+      if (cache.is_write_alias[i])
+        continue; // out tensor, not part of key
       TensorProfile tp;
       tp.dtype = t.scalar_type();
       tp.shape.assign(t.sizes().begin(), t.sizes().end());
@@ -266,15 +276,16 @@ PendingInstall take_pending() {
 //                        (b) a freshly allocated tensor per the cached profile
 // Extended support (TensorLists, multi-output) can be added with parallel
 // codepaths — they're not on any shim op today.
-bool try_warmcache_hit(torch::jit::Stack* stack,
-                       const SchemaCache& cache,
-                       const CacheKey& key) {
+bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const CacheKey& key) {
   auto& wc = WarmCache::instance();
-  if (!wc.is_enabled() || WarmCache::is_building_entry()) return false;
-  if (cache.return_types.size() != 1) return false;
+  if (!wc.is_enabled() || WarmCache::is_building_entry())
+    return false;
+  if (cache.return_types.size() != 1)
+    return false;
 
   const CacheEntry* entry = wc.find(key);
-  if (entry == nullptr) return false;
+  if (entry == nullptr)
+    return false;
 
   // Build input-ptr map in the order tensor inputs appear on the stack.
   std::map<uint32_t, uint64_t> dev_in;
@@ -285,9 +296,11 @@ bool try_warmcache_hit(torch::jit::Stack* stack,
   uint32_t in_idx = 0;
   for (size_t i = 0; i < cache.num_args; ++i) {
     const auto& iv = arguments[i];
-    if (!iv.isTensor()) continue;
+    if (!iv.isTensor())
+      continue;
     const at::Tensor& t = iv.toTensor();
-    if (!t.defined()) continue;
+    if (!t.defined())
+      continue;
     if (cache.is_write_alias[i]) {
       out_tensor = t;
       continue;
@@ -308,11 +321,14 @@ bool try_warmcache_hit(torch::jit::Stack* stack,
   // For non-out ops (e.g. max.unary, min.unary with no overload), allocate a
   // fresh output tensor per the cached profile.
   if (!out_tensor.defined()) {
-    if (entry->out_profiles.empty()) return false;
+    if (entry->out_profiles.empty())
+      return false;
     const OutputProfile& op0 = entry->out_profiles[0];
-    if (!op0.is_rbln_device) return false;  // CPU output unsupported on hit path
+    if (!op0.is_rbln_device)
+      return false; // CPU output unsupported on hit path
     int8_t dev_idx = 0;
-    if (!key.inputs.empty()) dev_idx = key.inputs.front().device_index;
+    if (!key.inputs.empty())
+      dev_idx = key.inputs.front().device_index;
     auto device = c10::Device(c10::DeviceType::PrivateUse1, dev_idx);
     out_tensor = at::empty(op0.shape, at::TensorOptions().dtype(op0.dtype).device(device));
   }
@@ -336,19 +352,26 @@ bool try_warmcache_hit(torch::jit::Stack* stack,
   pybind11::gil_scoped_acquire wc_gil;
   bool runtime_failed = false;
   auto clear_and_fail = [&]() {
-    if (PyErr_Occurred()) PyErr_Clear();
+    if (PyErr_Occurred())
+      PyErr_Clear();
     runtime_failed = true;
   };
   try {
     entry->runtime->PrepareInputs(dev_in, cpu_in);
-    if (PyErr_Occurred()) { clear_and_fail(); }
+    if (PyErr_Occurred()) {
+      clear_and_fail();
+    }
     if (!runtime_failed) {
       entry->runtime->PrepareOutputs(dev_out, cpu_out);
-      if (PyErr_Occurred()) { clear_and_fail(); }
+      if (PyErr_Occurred()) {
+        clear_and_fail();
+      }
     }
     if (!runtime_failed) {
       entry->runtime->Run();
-      if (PyErr_Occurred()) { clear_and_fail(); }
+      if (PyErr_Occurred()) {
+        clear_and_fail();
+      }
     }
   } catch (const pybind11::error_already_set&) {
     clear_and_fail();
@@ -469,7 +492,7 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
   try {
     result = py_fn_copy(*pos_tup, **kwargs);
   } catch (...) {
-    t_pending.valid = false;  // scrub stale context on exception
+    t_pending.valid = false; // scrub stale context on exception
     throw;
   }
 
@@ -495,9 +518,12 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
     return;
   }
   pybind11::tuple tup = result.cast<pybind11::tuple>();
-  TORCH_CHECK(tup.size() == cache.return_types.size(),
-              "Python impl returned ", tup.size(),
-              " values but schema expects ", cache.return_types.size());
+  TORCH_CHECK(
+      tup.size() == cache.return_types.size(),
+      "Python impl returned ",
+      tup.size(),
+      " values but schema expects ",
+      cache.return_types.size());
   for (size_t i = 0; i < cache.return_types.size(); ++i) {
     pybind11::object v = tup[i];
     auto iv = torch::jit::toIValue(v, cache.return_types[i]);
@@ -521,9 +547,7 @@ std::string strip_namespace(const std::string& op_name) {
 // Public API
 // ---------------------------------------------------------------------------
 
-void register_cpp_shim(const std::string& op_name,
-                       pybind11::object py_fn,
-                       const std::vector<size_t>& skip_dtype_args) {
+void register_cpp_shim(const std::string& op_name, pybind11::object py_fn, const std::vector<size_t>& skip_dtype_args) {
   std::lock_guard<std::mutex> lk(registry_mutex());
 
   const char* interned = warmcache::intern_op_name(op_name);
@@ -543,8 +567,7 @@ void register_cpp_shim(const std::string& op_name,
       __FILE__,
       static_cast<uint32_t>(__LINE__));
   const std::string overload = strip_namespace(op_name);
-  lib->impl(overload.c_str(),
-            torch::CppFunction::makeFromBoxedFunction<&generic_shim_boxed>());
+  lib->impl(overload.c_str(), torch::CppFunction::makeFromBoxedFunction<&generic_shim_boxed>());
   installed_libs().push_back(std::move(lib));
 }
 
@@ -561,7 +584,8 @@ bool install_warmcache_from_pending(
     uint32_t num_outputs,
     const std::vector<std::tuple<std::vector<int64_t>, std::string, bool>>& out_profiles) {
   PendingInstall p = take_pending();
-  if (!p.valid) return false;
+  if (!p.valid)
+    return false;
 
   CacheEntry entry;
   entry.py_dyn_runtime = std::move(dyn_runtime);
@@ -575,16 +599,26 @@ bool install_warmcache_from_pending(
     const std::string& dtype_s = std::get<1>(tup);
     // Same table as the reference's dtype_from_rbln_string, kept local to
     // avoid a dependency across files.
-    if (dtype_s == "float16" || dtype_s == "torch.float16") op.dtype = at::kHalf;
-    else if (dtype_s == "float32" || dtype_s == "torch.float32") op.dtype = at::kFloat;
-    else if (dtype_s == "bfloat16" || dtype_s == "torch.bfloat16") op.dtype = at::kBFloat16;
-    else if (dtype_s == "int64" || dtype_s == "torch.int64") op.dtype = at::kLong;
-    else if (dtype_s == "int32" || dtype_s == "torch.int32") op.dtype = at::kInt;
-    else if (dtype_s == "int16" || dtype_s == "torch.int16") op.dtype = at::kShort;
-    else if (dtype_s == "int8" || dtype_s == "torch.int8") op.dtype = at::kChar;
-    else if (dtype_s == "uint8" || dtype_s == "torch.uint8") op.dtype = at::kByte;
-    else if (dtype_s == "bool" || dtype_s == "torch.bool") op.dtype = at::kBool;
-    else return false;  // unknown dtype: don't install
+    if (dtype_s == "float16" || dtype_s == "torch.float16")
+      op.dtype = at::kHalf;
+    else if (dtype_s == "float32" || dtype_s == "torch.float32")
+      op.dtype = at::kFloat;
+    else if (dtype_s == "bfloat16" || dtype_s == "torch.bfloat16")
+      op.dtype = at::kBFloat16;
+    else if (dtype_s == "int64" || dtype_s == "torch.int64")
+      op.dtype = at::kLong;
+    else if (dtype_s == "int32" || dtype_s == "torch.int32")
+      op.dtype = at::kInt;
+    else if (dtype_s == "int16" || dtype_s == "torch.int16")
+      op.dtype = at::kShort;
+    else if (dtype_s == "int8" || dtype_s == "torch.int8")
+      op.dtype = at::kChar;
+    else if (dtype_s == "uint8" || dtype_s == "torch.uint8")
+      op.dtype = at::kByte;
+    else if (dtype_s == "bool" || dtype_s == "torch.bool")
+      op.dtype = at::kBool;
+    else
+      return false; // unknown dtype: don't install
     op.is_rbln_device = std::get<2>(tup);
     entry.out_profiles.emplace_back(std::move(op));
   }
