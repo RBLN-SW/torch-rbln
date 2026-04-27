@@ -244,6 +244,7 @@ def run_test_with_env(env_vars, impl_test_func):
 
 
 @pytest.mark.test_set_ci
+@pytest.mark.single_worker
 class TestDeviceMappingEnvVars(TestCase):
     """Tests for device mapping with environment variables.
 

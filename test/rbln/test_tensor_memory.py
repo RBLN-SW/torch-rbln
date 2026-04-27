@@ -177,6 +177,7 @@ def _input_output_tensor_memory_independence_worker(rbln_device, dtype):
 
 
 @pytest.mark.test_set_ci
+@pytest.mark.single_worker
 class TestInputOutputTensors(TestCase):
     """
     Regression tests for input and output tensor memory collisions.
