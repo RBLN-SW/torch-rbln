@@ -5,7 +5,6 @@
 #include <ATen/core/stack.h>
 #include <ATen/native/rbln/RBLNCPUFallback.h>
 #include <ATen/ops/empty.h>
-#include <c10/rbln/RBLNLogging.h>
 #include <torch/csrc/jit/python/pybind_utils.h>
 #include <torch/library.h>
 
@@ -415,7 +414,6 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
   // the borrow_resize_case is gated on contiguity (see RBLNCPUFallback.cpp).
   const bool would_fallback = quick_fallback_check(stack, cache, skip_dtype_args);
   if (would_fallback) {
-    c10::rbln::dispatch_trace_emit("shim_shortcut_fallback", op.schema().name());
     ::at::native::rbln::cpu_fallback_rbln(op, stack);
     return;
   }
@@ -426,11 +424,9 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
   CacheKey key;
   const bool key_ok = build_cache_key(stack, cache, op_name_intern, key);
   if (key_ok && try_warmcache_hit(stack, cache, key)) {
-    c10::rbln::dispatch_trace_emit("wc_hit", op.schema().name());
     return;
   }
 
-  c10::rbln::dispatch_trace_emit("shim_miss", op.schema().name());
   // MISS path: set up thread-local pending install so the Python wrapper can
   // call `_warmcache_install_pending(runtime, out_profiles)` once it finishes
   // compile + first run. The pending context is discarded unconditionally at

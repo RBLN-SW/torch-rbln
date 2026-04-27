@@ -3,15 +3,10 @@
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <cstdint>
-#include <cstdio>
 #include <cstdlib>
-#include <fcntl.h>
 #include <filesystem>
 #include <memory>
-#include <mutex>
 #include <string>
-#include <string_view>
-#include <unistd.h>
 #include <vector>
 
 namespace c10::rbln {
@@ -278,52 +273,6 @@ void log_cpu_fallback(std::string_view full_op_name) {
 
 int get_scope_depth() {
   return scope_depth_;
-}
-
-// ---------------------------------------------------------------------------
-// Lightweight dispatch tracer; activated by env TORCH_RBLN_DISPATCH_TRACE.
-// Each call appends one line to the path (best-effort, line-atomic via
-// O_APPEND). Used to audit which ATen ops actually flow through which C++
-// path during a workload (warm-cache hit, shim native miss, shim fallback,
-// generic fallback). Disabled produces no I/O.
-namespace {
-class DispatchTrace {
- public:
-  DispatchTrace() {
-    const char* path = std::getenv("TORCH_RBLN_DISPATCH_TRACE");
-    if (path == nullptr || path[0] == '\0') return;
-    path_ = path;
-    enabled_ = true;
-  }
-
-  bool enabled() const { return enabled_; }
-
-  void emit(const char* bucket, std::string_view op_name) {
-    if (!enabled_) return;
-    char buf[512];
-    int n = std::snprintf(buf, sizeof(buf), "%d\t%s\t%.*s\n",
-                          ::getpid(), bucket,
-                          static_cast<int>(op_name.size()), op_name.data());
-    if (n <= 0) return;
-    int fd = ::open(path_.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd < 0) return;
-    [[maybe_unused]] auto _ = ::write(fd, buf, static_cast<size_t>(n));
-    ::close(fd);
-  }
-
- private:
-  std::string path_;
-  bool enabled_ = false;
-};
-
-DispatchTrace& dispatch_trace_singleton() {
-  static DispatchTrace t;
-  return t;
-}
-}  // namespace
-
-void dispatch_trace_emit(const char* bucket, std::string_view op_name) {
-  dispatch_trace_singleton().emit(bucket, op_name);
 }
 
 } // namespace c10::rbln

@@ -199,19 +199,6 @@ class WarmCache {
 const char* intern_op_name(const std::string& name);
 
 // ---------------------------------------------------------------------------
-// Lightweight dispatch tracer. Off by default; activated by setting
-// ``TORCH_RBLN_DISPATCH_TRACE=/path/to/file.tsv``. Each call appends one
-// line to that file (best-effort, line-atomic). Used to audit which
-// ATen ops actually flow through which C++ path during a workload.
-//
-// `bucket` is a stable short tag — currently one of:
-//   "wc_hit"        — warm-cache hit, ran via PyRblnSyncRuntime directly
-//   "shim_miss"     — shim native path; warm-cache missed, fell to pybind
-//   "shim_fallback" — shim quick-precheck returned true → C++ fallback
-//   "generic_fb"    — ATen routed to C++ generic fallback_rbln
-void dispatch_trace_emit(const char* bucket, std::string_view op_name);
-
-// ---------------------------------------------------------------------------
 // Hot-path breakdown counters (cumulative). Off in production builds; enable
 // with -DTORCH_RBLN_WARMCACHE_TIMING=1 for bench/profiling.
 #ifndef TORCH_RBLN_WARMCACHE_TIMING
