@@ -135,6 +135,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   m.impl("_copy_from_and_resize", TORCH_FN(at::native::rbln::_copy_from_and_resize_rbln));
   m.impl("empty.memory_format", TORCH_FN(at::native::rbln::empty_rbln));
   m.impl("empty_strided", TORCH_FN(at::native::rbln::empty_strided_rbln));
+  m.impl("zero_", TORCH_FN(at::native::rbln::zero_rbln_));
   m.impl("resize_", TORCH_FN(at::native::rbln::resize_rbln_));
   m.impl("set_.source_Storage_storage_offset", TORCH_FN(at::native::rbln::set_storage_rbln_));
 
