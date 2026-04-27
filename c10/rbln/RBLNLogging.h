@@ -96,6 +96,15 @@ class C10_RBLN_API RBLNScopeGuard {
  */
 C10_RBLN_API void log_cpu_fallback(std::string_view full_op_name);
 
+// Lightweight dispatch tracer. Activated by `TORCH_RBLN_DISPATCH_TRACE=path`.
+// Each call appends one TSV line `<pid>\t<bucket>\t<op_name>\n` to that path,
+// best-effort, line-atomic via O_APPEND. `bucket` is one of:
+//   "wc_hit"        — warm-cache hit (no Python, no fallback)
+//   "shim_miss"     — shim native path missed warm-cache → pybind to Python
+//   "shim_fallback" — shim quick-precheck triggered C++ cpu_fallback_rbln
+//   "generic_fb"    — ATen routed to C++ generic fallback_rbln (non-shim)
+C10_RBLN_API void dispatch_trace_emit(const char* bucket, std::string_view op_name);
+
 /**
  * @brief Returns the current scope depth for hierarchical logging.
  *
