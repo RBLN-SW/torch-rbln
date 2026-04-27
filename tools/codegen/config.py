@@ -128,9 +128,15 @@ class OpCategories:
         # with single Tensor return. Still pointwise-compatible pre-check.
         "max",
         "min",
-        # MATMUL family left off the shim: measurable device-path overhead
-        # (+2% even after pybind callback optimization) outweighs the near-zero
-        # fallback rate for matmul in fp16 inference. See Task #12/#13 notes.
+        # MATMUL family. Earlier benches showed a small device-path overhead
+        # (~2% in pybind-heavy hot loops) which is now well below noise after
+        # the warm-cache path skips Python entirely on warm hits. Coverage gain
+        # — matmul is registered C++-side instead of Python-side — is the main
+        # reason; perf is parity within noise on llama_1b/llama_8b 1L bench.
+        "mm.out",
+        "bmm.out",
+        "addmm.out",
+        "linear",
     }
 
     # Per-op overrides of the dispatch-shim dtype check: positional arg indices
