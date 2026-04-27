@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import shutil
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -232,6 +233,57 @@ def _rdma_port_active(dev_name: str) -> bool | None:
     return None
 
 
+_DEV_INFINIBAND = Path("/dev/infiniband")
+
+
+def _diag_dev_infiniband() -> None:
+    """Surface /dev/infiniband/ contents and per-file R/W from this process.
+
+    ibv_open_device / rdma_cm need working char-device access to ``uverbsN``
+    and ``rdma_cm``. In Docker/Podman containers these are commonly absent
+    (no ``--device`` passthrough) or permission-restricted, which is invisible
+    to the rest of the RoCE probe but breaks ``rcclGetUniqueId`` downstream.
+    """
+    if not _DEV_INFINIBAND.is_dir():
+        _diag(f"{_DEV_INFINIBAND} NOT present — RDMA verbs unusable from this process")
+        return
+    try:
+        entries = sorted(e.name for e in _DEV_INFINIBAND.iterdir())
+    except OSError as exc:
+        _diag(f"{_DEV_INFINIBAND} iterdir failed: {exc!r}")
+        return
+    _diag(f"{_DEV_INFINIBAND} entries: {entries}")
+    for name in entries:
+        path = _DEV_INFINIBAND / name
+        try:
+            st = os.stat(str(path))
+        except OSError as exc:
+            _diag(f"{path} stat failed: {exc!r}")
+            continue
+        mode = stat.filemode(st.st_mode)
+        readable = os.access(str(path), os.R_OK)
+        writable = os.access(str(path), os.W_OK)
+        _diag(f"{path} mode={mode} R={readable} W={writable}")
+
+
+def _diag_memlock_limit() -> None:
+    """Surface RLIMIT_MEMLOCK — RDMA pinning needs a high (or unlimited) cap."""
+    try:
+        import resource
+
+        soft, hard = resource.getrlimit(resource.RLIMIT_MEMLOCK)
+    except Exception as exc:  # pragma: no cover - defensive
+        _diag(f"RLIMIT_MEMLOCK read failed: {exc!r}")
+        return
+
+    def _fmt(v: int) -> str:
+        if v == resource.RLIM_INFINITY:
+            return "unlimited"
+        return f"{v} ({v // (1024 * 1024)} MiB)"
+
+    _diag(f"RLIMIT_MEMLOCK soft={_fmt(soft)} hard={_fmt(hard)}")
+
+
 def _diag_environment_preamble() -> None:
     """One-time snapshot of the bits that drive the RoCE probe."""
     _diag(f"sysfs={_SYSFS_INFINIBAND} exists={_SYSFS_INFINIBAND.is_dir()}")
@@ -243,6 +295,8 @@ def _diag_environment_preamble() -> None:
             _diag(f"sysfs iterdir failed: {exc!r}")
             return
         _diag(f"sysfs entries (n={len(entries)}): {entries}")
+    _diag_dev_infiniband()
+    _diag_memlock_limit()
 
 
 def probe_roce_rdma_ipv4() -> str | None:
