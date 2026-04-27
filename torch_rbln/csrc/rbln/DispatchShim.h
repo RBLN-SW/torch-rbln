@@ -46,7 +46,7 @@ void register_cpp_shim(
 // `out_profiles` is a list of (shape, dtype_str, is_rbln) per output tensor.
 bool install_warmcache_from_pending(
     pybind11::object dyn_runtime,
-    uintptr_t runtime_raw_ptr,
+    pybind11::int_ runtime_raw_ptr,
     uint32_t num_inputs,
     uint32_t num_outputs,
     const std::vector<std::tuple<std::vector<int64_t>, std::string, bool>>& out_profiles);

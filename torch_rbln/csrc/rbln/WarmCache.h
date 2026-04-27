@@ -174,7 +174,7 @@ class WarmCache {
   // Miss path. Inserts entry under `key` if not already present. Called from
   // Python via pybind after a successful torch.compile. If a concurrent
   // inserter wins the race, this is a no-op (first writer wins).
-  void install(CacheKey key, CacheEntry entry);
+  void install(CacheKey key, const CacheEntry& entry);
 
   // Enable/disable the warm-cache path globally. When disabled, find() always
   // returns nullptr. Disabled path leaves `install` a no-op too to avoid

@@ -406,7 +406,7 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
     op_name += "." + overload;
   }
 
-  ShimEntry* entry;
+  ShimEntry* entry = nullptr;
   {
     std::lock_guard<std::mutex> lk(registry_mutex());
     entry = find_shim_entry(op_name);
@@ -579,7 +579,7 @@ void register_cpp_shim(const std::string& op_name, pybind11::object py_fn, const
 
 bool install_warmcache_from_pending(
     pybind11::object dyn_runtime,
-    uintptr_t runtime_raw_ptr,
+    pybind11::int_ runtime_raw_ptr,
     uint32_t num_inputs,
     uint32_t num_outputs,
     const std::vector<std::tuple<std::vector<int64_t>, std::string, bool>>& out_profiles) {
@@ -589,7 +589,14 @@ bool install_warmcache_from_pending(
 
   CacheEntry entry;
   entry.py_dyn_runtime = std::move(dyn_runtime);
-  entry.runtime = reinterpret_cast<::rbln::PyRblnSyncRuntime*>(runtime_raw_ptr);
+  void* runtime_void_ptr = PyLong_AsVoidPtr(runtime_raw_ptr.ptr());
+  if (runtime_void_ptr == nullptr) {
+    if (PyErr_Occurred()) {
+      PyErr_Clear();
+    }
+    return false;
+  }
+  entry.runtime = static_cast<::rbln::PyRblnSyncRuntime*>(runtime_void_ptr);
   entry.num_inputs = num_inputs;
   entry.num_outputs = num_outputs;
   entry.out_profiles.reserve(out_profiles.size());
@@ -623,7 +630,7 @@ bool install_warmcache_from_pending(
     entry.out_profiles.emplace_back(std::move(op));
   }
 
-  WarmCache::instance().install(std::move(p.key), std::move(entry));
+  WarmCache::instance().install(std::move(p.key), entry);
   return true;
 }
 

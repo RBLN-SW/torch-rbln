@@ -48,7 +48,7 @@ issuing a bad pointer to rebel.
 from __future__ import annotations
 
 import ctypes
-from typing import Any, List, Tuple
+from typing import Any
 
 import torch
 
@@ -91,7 +91,7 @@ def _dtype_key(dt: torch.dtype) -> str:
 
 def _collect_output_profiles(
     outputs: Any,
-) -> List[Tuple[List[int], str, bool]]:
+) -> list[tuple[list[int], str, bool]]:
     """Package a compile result into ``[(shape, dtype, is_rbln), ...]``.
 
     The compile may return a single tensor or a tuple/list of tensors; we
@@ -103,7 +103,7 @@ def _collect_output_profiles(
         return []
     if isinstance(outputs, torch.Tensor):
         outputs = (outputs,)
-    profiles: List[Tuple[List[int], str, bool]] = []
+    profiles: list[tuple[list[int], str, bool]] = []
     for t in outputs:
         if not isinstance(t, torch.Tensor):
             continue

@@ -117,12 +117,12 @@ const CacheEntry* WarmCache::find(const CacheKey& key) {
   return (it != map_.end()) ? &it->second : nullptr;
 }
 
-void WarmCache::install(CacheKey key, CacheEntry entry) {
+void WarmCache::install(CacheKey key, const CacheEntry& entry) {
   if (!enabled_.load(std::memory_order_relaxed))
     return;
   std::unique_lock<std::shared_mutex> wr(mu_);
   // First-writer-wins: if another thread beat us to it, keep the earlier one.
-  map_.try_emplace(std::move(key), std::move(entry));
+  map_.try_emplace(std::move(key), entry);
 }
 
 void WarmCache::erase(const CacheKey& key) {

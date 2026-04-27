@@ -65,7 +65,7 @@ aten_impl = torch.library.Library('aten', 'IMPL')
 DEBUG_MODE = torch.version.debug
 """
 
-    def _registration_line(self, operator_name, kernel_name: str) -> str:
+    def _registration_line(self, operator_name: Any, kernel_name: str) -> str:
         """
         Return the dispatcher-registration snippet for `operator_name`.
 

@@ -17,6 +17,7 @@ import threading
 
 import pytest
 import torch  # noqa: F401  (needed to load torch_rbln._C)
+from torch.testing._internal.common_utils import run_tests
 
 from torch_rbln import _C  # type: ignore[attr-defined]
 
@@ -112,3 +113,7 @@ class TestWarmCacheBuildingGuard:
         assert seen_in_thread == [False], f"Thread-local flag leaked across threads: {seen_in_thread}"
         # Original thread still has the flag set.
         assert _C._warmcache_is_building() is True
+
+
+if __name__ == "__main__":
+    run_tests()
