@@ -27,7 +27,6 @@ namespace {
  * @param stack The stack containing the input and output tensors.
  */
 void fallback_rbln(const c10::OperatorHandle& op, torch::jit::Stack* stack) {
-  c10::rbln::dispatch_trace_emit("generic_fb", op.schema().name());
   c10::rbln::log_cpu_fallback(op.schema().name());
   at::native::rbln::cpu_fallback_rbln(op, stack);
 }

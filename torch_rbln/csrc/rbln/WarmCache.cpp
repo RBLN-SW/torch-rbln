@@ -135,9 +135,6 @@ bool WarmCache::is_building_entry() { return t_building_entry; }
 void WarmCache::enter_building() { t_building_entry = true; }
 void WarmCache::exit_building() { t_building_entry = false; }
 
-// dispatch_trace_emit moved to c10/rbln/RBLNLogging.{h,cpp} so it lives in
-// libc10_rbln.so where libtorch_rbln (and its dependents) can link to it.
-
 #if TORCH_RBLN_WARMCACHE_TIMING
 WarmCacheCounters g_wc_counters;
 #endif
