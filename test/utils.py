@@ -13,6 +13,19 @@ SUPPORTED_DTYPES = [torch.float16]
 _DEFAULT_DISTRIBUTED_MASTER_PORT = "29604"
 
 
+def configure_rbln_network_for_autoport_tests() -> None:
+    """Set ``RBLN_*`` IP defaults for autoport tests that spawn fresh Python processes.
+
+    Must run in the parent test process **before** ``subprocess.run`` so children
+    inherit ``RBLN_LOCAL_IP``, ``RBLN_ROOT_IP``, and optionally probed
+    ``RBLN_RDMA_IP`` when ``torch_rbln`` / ``librbln`` load in the subprocess.
+    See :mod:`torch_rbln._internal.rdma_env`.
+    """
+    from torch_rbln._internal.rdma_env import apply_default_rbln_network_environment
+
+    apply_default_rbln_network_environment()
+
+
 def configure_master_port_for_rccl_tests(default_port: str = _DEFAULT_DISTRIBUTED_MASTER_PORT) -> None:
     """Apply MASTER_PORT policy for RBLN distributed tests.
 
@@ -71,6 +84,22 @@ def requires_physical_devices(num_devices):
         physical_device_count < num_devices,
         reason=f"Requires at least {num_devices} physical devices, found {physical_device_count}",
     )
+
+
+def spawn_target_with_clean_exit(rank: int, test_func, *args) -> None:
+    """Run ``test_func`` under ``mp.spawn`` and force a clean exit on success.
+
+    mp.spawn reports worker exit code as ProcessExitedException on SIGSEGV.
+    Python teardown in a worker that has compiled any module via rebel-compiler
+    segfaults in unloaded JIT .so destructors, so skip Python shutdown on
+    success. Exceptions still propagate to mp.spawn for normal failure
+    reporting.
+
+    Use as the first positional argument to ``mp.spawn`` and pass the real
+    target plus its args via ``args=(test_func, *test_args)``.
+    """
+    test_func(rank, *args)
+    os._exit(0)
 
 
 def run_in_isolated_process(func, *args):
