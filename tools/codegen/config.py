@@ -66,6 +66,82 @@ class OpCategories:
     # Operations that need contiguous preparation on device (instead of default)
     CONTIGUOUS_ON_DEVICE_OPS: Set[str] = {"bmm", "mm"}
 
+    # Operations whose Python-level aten_impl.impl registration is replaced by a
+    # C++ dispatch shim installed at module-init time. Codegen emits
+    # `_register_cpp_shim("aten::<op>", <kernel>)` instead of
+    # `aten_impl.impl(...)`.
+    # See torch_rbln/csrc/rbln/DispatchShim.cpp for shim behavior: cheap
+    # pre-check in C++, cpu_fallback_rbln on fail, Python callback on pass.
+    # Compared against the string form of the operator overload name
+    # (e.g. "add.out"), not the root name.
+    #
+    # Only pointwise/unary/compare out-variants are shimmed: their pre-check
+    # (dtype==fp16, not-all-scalar, storage_offset) matches the generic shim's
+    # quick_fallback_check. Matmul-family, reductions, where, masked_fill etc.
+    # stay on the Python path because their checks/preprocessing differ.
+    CPP_SHIM_OPS: Set[str] = {
+        # BROADCASTABLE binary
+        "add.out",
+        "sub.out",
+        "mul.out",
+        "div.out",
+        "div.out_mode",
+        "pow.Tensor_Scalar_out",
+        "maximum.out",
+        "minimum.out",
+        # UNARY
+        "silu.out",
+        "rsqrt.out",
+        "neg.out",
+        "abs.out",
+        "ceil.out",
+        "clamp.out",
+        "log.out",
+        "floor.out",
+        "sigmoid.out",
+        # COMPARE (bool output — checks are on inputs, so fine)
+        "logical_not.out",
+        "ne.Tensor_out",
+        "eq.Tensor_out",
+        "gt.Tensor_out",
+        "ge.Tensor_out",
+        "lt.Tensor_out",
+        "le.Tensor_out",
+        "ne.Scalar_out",
+        "eq.Scalar_out",
+        "gt.Scalar_out",
+        "ge.Scalar_out",
+        "lt.Scalar_out",
+        "le.Scalar_out",
+        # WHERE: arg 0 is bool cond — skip from dtype check (see CPP_SHIM_SKIP_DTYPE_ARGS)
+        "where.self",
+        "where.self_out",
+        # REDUCTION .out variants: quick_fallback_check is compatible
+        # (fp16 + not-all-scalar + no-contig-offset). Python wrappers keep
+        # the empty-tensor handle_empty_reduction branch — it runs before the
+        # shim decision on cold call, and on warm call our pre-check passes
+        # and we call into Python which handles empty correctly.
+        "mean.out",
+        "max.unary_out",
+        "min.unary_out",
+        # MAX/MIN full-reduction: registered as Normal variants (no overload)
+        # with single Tensor return. Still pointwise-compatible pre-check.
+        "max",
+        "min",
+        # MATMUL family left off the shim: measurable device-path overhead
+        # (+2% even after pybind callback optimization) outweighs the near-zero
+        # fallback rate for matmul in fp16 inference. See Task #12/#13 notes.
+    }
+
+    # Per-op overrides of the dispatch-shim dtype check: positional arg indices
+    # whose dtype should NOT be compared to float16. The shim's own check still
+    # applies to other args (storage offset, all-scalar, dtype).
+    # Keyed by the same overload name used in CPP_SHIM_OPS.
+    CPP_SHIM_SKIP_DTYPE_ARGS: Dict[str, List[int]] = {
+        "where.self": [0],      # cond (bool)
+        "where.self_out": [0],  # cond (bool)
+    }
+
     # EmptyTensor template names that skip `tensor_args = extract_tensors(args)` before the
     # empty-tensor branch (those templates only read raw positional args, e.g. args[0]).
     # Keep in sync when adding EmptyTensor methods with the same pattern.

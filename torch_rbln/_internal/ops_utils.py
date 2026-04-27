@@ -316,6 +316,27 @@ def prepare_args_for_contiguous(args, kwargs_filtered):
 _ALL_FALLBACK_CASES = frozenset({"dispatch_mode", "reentrant", "trace", "dtype", "scalar", "storage_offset", "nan_inf"})
 
 
+# Shim-fast-path marker. Set by the C++ dispatch shim before calling into
+# Python wrappers so `is_cpu_fallback_cases` can skip checks that the shim
+# already performed in C++ (dtype, scalar, storage_offset) and the expensive
+# nan_inf scan. `enter_shim_fast` / `exit_shim_fast` are GIL-protected
+# setters that form a matched pair around each pybind call in the shim.
+# Using a 1-element list avoids `global` inside hot functions.
+_SHIM_FAST_DEPTH = [0]
+
+
+def enter_shim_fast():
+    _SHIM_FAST_DEPTH[0] += 1
+
+
+def exit_shim_fast():
+    _SHIM_FAST_DEPTH[0] -= 1
+
+
+def is_shim_fast() -> bool:
+    return _SHIM_FAST_DEPTH[0] > 0
+
+
 @lru_cache(maxsize=1)
 def _parse_disabled_fallback_cases() -> frozenset:
     """
