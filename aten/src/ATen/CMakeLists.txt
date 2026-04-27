@@ -34,6 +34,10 @@ target_include_directories(${target} SYSTEM PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 
+target_include_directories(${target} SYSTEM PRIVATE
+  ${REBEL_INCLUDE_DIRS}
+)
+
 install(TARGETS ${target}
   EXPORT Caffe2Targets
   DESTINATION lib

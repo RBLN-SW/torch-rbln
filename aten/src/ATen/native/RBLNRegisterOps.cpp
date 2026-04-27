@@ -1,4 +1,5 @@
 #include <ATen/core/Tensor.h>
+#include <string_view>
 #include <ATen/core/VariableHooksInterface.h>
 #include <ATen/native/rbln/RBLNCPUFallback.h>
 #include <ATen/native/rbln/RBLNCopy.h>
@@ -26,6 +27,7 @@ namespace {
  * @param stack The stack containing the input and output tensors.
  */
 void fallback_rbln(const c10::OperatorHandle& op, torch::jit::Stack* stack) {
+  c10::rbln::dispatch_trace_emit("generic_fb", op.schema().name());
   c10::rbln::log_cpu_fallback(op.schema().name());
   at::native::rbln::cpu_fallback_rbln(op, stack);
 }
@@ -173,7 +175,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   m.impl("fill_.Scalar", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("fill_.Tensor", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("equal", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
-  m.impl("_efficientzerotensor", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
+  m.impl("_efficientzerotensor", TORCH_FN(at::native::rbln::_efficientzerotensor_rbln));
   m.impl("native_dropout", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
 
   // Random number generation
