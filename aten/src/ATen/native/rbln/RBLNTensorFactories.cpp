@@ -86,18 +86,19 @@ at::Tensor _efficientzerotensor_rbln(
   for (const auto& s : sizes_sym) {
     sizes.push_back(s.guard_int(__FILE__, __LINE__));
   }
-  // Allocate via the same path as `empty_rbln` (fresh privateuse1 storage),
-  // then write zeros into the v-memory backing. The simplest approach is to
-  // copy a CPU zeros tensor into the rbln allocation, mirroring how the
-  // Python-facing `torch.zeros(device='rbln')` already works.
+  // Allocate fresh privateuse1 storage and mark its v-memory as zero-init.
+  // `mark_zeros` flips the EMPTY_INIT_WITH_ZERO flag on the v-memory entry —
+  // no host allocation, no D→H copy, no actual write. Zeros materialise lazily
+  // on the first NPU read (or are skipped entirely when the first access is a
+  // write, e.g. KV-cache output). This mirrors what `aten::zero_` already
+  // does on RBLN via `custom_zero__rbln`.
   auto rbln_out = empty_rbln(sizes, dtype_opt, layout_opt, device_opt,
                              pin_memory_opt,
                              /*memory_format_opt=*/std::nullopt);
   if (rbln_out.numel() == 0) {
     return rbln_out;
   }
-  auto cpu_zero = at::zeros(sizes, rbln_out.options().device(at::kCPU));
-  rbln_out.copy_(cpu_zero);
+  c10::rbln::mark_zeros(rbln_out.data_ptr());
   return rbln_out;
 }
 
