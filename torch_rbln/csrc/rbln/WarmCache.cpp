@@ -101,12 +101,18 @@ bool env_default_enabled() {
 } // namespace
 
 WarmCache& WarmCache::instance() {
-  static WarmCache c;
-  [[maybe_unused]] static const int _init_default = [] {
-    c.set_enabled(env_default_enabled());
-    return 0;
+  // Leaky singleton: CacheEntry holds a strong pybind11::object reference to
+  // the DynamoRuntime. Running ~WarmCache after Py_Finalize() decrefs that
+  // py::object on a finalized interpreter and aborts inside libpython —
+  // surfaced as subprocess SIGSEGV in xdist parallel core tests. Allocating
+  // with `new` keeps the entries alive past Python finalize; the OS reclaims
+  // the process memory, and no decref race occurs.
+  static auto* c = [] {
+    auto* p = new WarmCache();
+    p->set_enabled(env_default_enabled());
+    return p;
   }();
-  return c;
+  return *c;
 }
 
 const CacheEntry* WarmCache::find(const CacheKey& key) {
