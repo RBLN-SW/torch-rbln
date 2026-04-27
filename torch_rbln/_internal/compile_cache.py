@@ -116,9 +116,7 @@ def compile_rbln_cached(
         compiled = _compiled_op_cache.get(cache_key)
         if compiled is None:
             # Use the *full* options on miss so the backend sees the holder.
-            compiled = torch.compile(
-                model, backend="rbln", dynamic=dynamic, options=options
-            )
+            compiled = torch.compile(model, backend="rbln", dynamic=dynamic, options=options)
             _compiled_op_cache[cache_key] = compiled
         return compiled
 

@@ -48,9 +48,10 @@ issuing a bad pointer to rebel.
 from __future__ import annotations
 
 import ctypes
-from typing import Any, List, Tuple
+from typing import Any
 
 import torch
+
 import torch_rbln._C as _C
 
 
@@ -68,8 +69,7 @@ def _raw_cpp_ptr(pybound_instance: Any) -> int:
     raw = ctypes.c_void_p.from_address(addr + _PYOBJECT_HEAD_SIZE).value
     if raw is None:
         raise RuntimeError(
-            "warm_cache: unexpected null C++ pointer extracted from pybind "
-            "instance; layout assumption may be wrong"
+            "warm_cache: unexpected null C++ pointer extracted from pybind instance; layout assumption may be wrong"
         )
     return int(raw)
 
@@ -91,7 +91,7 @@ def _dtype_key(dt: torch.dtype) -> str:
 
 def _collect_output_profiles(
     outputs: Any,
-) -> List[Tuple[List[int], str, bool]]:
+) -> list[tuple[list[int], str, bool]]:
     """Package a compile result into ``[(shape, dtype, is_rbln), ...]``.
 
     The compile may return a single tensor or a tuple/list of tensors; we
@@ -103,7 +103,7 @@ def _collect_output_profiles(
         return []
     if isinstance(outputs, torch.Tensor):
         outputs = (outputs,)
-    profiles: List[Tuple[List[int], str, bool]] = []
+    profiles: list[tuple[list[int], str, bool]] = []
     for t in outputs:
         if not isinstance(t, torch.Tensor):
             continue
@@ -111,7 +111,7 @@ def _collect_output_profiles(
         if not dt:
             # Unknown dtype — bail so we don't install a bad entry.
             return []
-        is_rbln = (t.device.type == "rbln")
+        is_rbln = t.device.type == "rbln"
         profiles.append((list(t.shape), dt, is_rbln))
     return profiles
 

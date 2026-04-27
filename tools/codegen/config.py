@@ -144,7 +144,7 @@ class OpCategories:
     # applies to other args (storage offset, all-scalar, dtype).
     # Keyed by the same overload name used in CPP_SHIM_OPS.
     CPP_SHIM_SKIP_DTYPE_ARGS: Dict[str, List[int]] = {
-        "where.self": [0],      # cond (bool)
+        "where.self": [0],  # cond (bool)
         "where.self_out": [0],  # cond (bool)
     }
 
