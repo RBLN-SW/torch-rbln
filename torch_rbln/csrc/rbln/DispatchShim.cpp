@@ -47,14 +47,22 @@ struct ShimEntry {
   const char* op_name_intern = nullptr; // stable pointer for WarmCache keys
 };
 
+// Leaky singletons: these hold pybind11::object (registry) and torch::Library
+// (installed_libs) which keep Python state alive. A regular `static T x;` runs
+// its destructor *after* Py_Finalize() during process teardown, which decrefs
+// Python objects on a finalized interpreter and aborts inside libpython —
+// observed as SIGSEGV in subprocess-based tests under xdist parallel mode.
+// Allocating with `new` and returning a reference keeps the storage and the
+// Python references alive until the OS reclaims the process; no destructor
+// fires, no decref race with finalize.
 std::unordered_map<std::string, ShimEntry>& registry() {
-  static std::unordered_map<std::string, ShimEntry> r;
-  return r;
+  static auto* r = new std::unordered_map<std::string, ShimEntry>();
+  return *r;
 }
 
 std::vector<std::unique_ptr<torch::Library>>& installed_libs() {
-  static std::vector<std::unique_ptr<torch::Library>> v;
-  return v;
+  static auto* v = new std::vector<std::unique_ptr<torch::Library>>();
+  return *v;
 }
 
 // Guards registry-level mutations (register_cpp_shim). Per-entry schema_cache
