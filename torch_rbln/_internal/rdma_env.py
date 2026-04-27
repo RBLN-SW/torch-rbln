@@ -266,6 +266,55 @@ def _diag_dev_infiniband() -> None:
         _diag(f"{path} mode={mode} R={readable} W={writable}")
 
 
+_LIBIBVERBS_CONFIG_DIR = Path("/etc/libibverbs.d")
+_LIBIBVERBS_PROVIDER_DIRS = (
+    Path("/usr/lib/x86_64-linux-gnu/libibverbs"),
+    Path("/usr/lib64/libibverbs"),
+    Path("/usr/lib/libibverbs"),
+)
+
+
+def _diag_libibverbs_userspace() -> None:
+    """Surface libibverbs vendor-driver config and provider .so availability.
+
+    libibverbs prints ``Warning: couldn't open config directory
+    '/etc/libibverbs.d'`` when the rdma-core userspace package is absent
+    or partially installed. Even when the kernel side (uverbsN, rdma_cm)
+    is present, ``ibv_open_device`` fails to bind a vendor driver if the
+    matching ``libNAME-rdmav<abi>.so`` provider isn't installed.
+    """
+    cfg_present = _LIBIBVERBS_CONFIG_DIR.is_dir()
+    if cfg_present:
+        try:
+            entries = sorted(e.name for e in _LIBIBVERBS_CONFIG_DIR.iterdir())
+        except OSError as exc:
+            _diag(f"{_LIBIBVERBS_CONFIG_DIR} iterdir failed: {exc!r}")
+            entries = []
+        _diag(f"{_LIBIBVERBS_CONFIG_DIR} drivers={entries}")
+    else:
+        _diag(
+            f"{_LIBIBVERBS_CONFIG_DIR} NOT present — "
+            f"rdma-core userspace likely not installed (ibv_open_device may fail)"
+        )
+
+    provider_dir_seen = False
+    for d in _LIBIBVERBS_PROVIDER_DIRS:
+        if not d.is_dir():
+            continue
+        provider_dir_seen = True
+        try:
+            sos = sorted(e.name for e in d.iterdir() if e.name.endswith((".so", ".so.inbox")))
+        except OSError as exc:
+            _diag(f"{d} iterdir failed: {exc!r}")
+            continue
+        _diag(f"{d} providers={sos}")
+    if not provider_dir_seen:
+        _diag(
+            f"libibverbs provider directory not found (looked in {[str(p) for p in _LIBIBVERBS_PROVIDER_DIRS]}) — "
+            f"vendor RDMA drivers may be missing"
+        )
+
+
 def _diag_memlock_limit() -> None:
     """Surface RLIMIT_MEMLOCK — RDMA pinning needs a high (or unlimited) cap."""
     try:
@@ -296,6 +345,7 @@ def _diag_environment_preamble() -> None:
             return
         _diag(f"sysfs entries (n={len(entries)}): {entries}")
     _diag_dev_infiniband()
+    _diag_libibverbs_userspace()
     _diag_memlock_limit()
 
 
