@@ -22,4 +22,7 @@ C10_RBLN_API std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>
 diag_dump_cpu_fallback_stages();
 C10_RBLN_API void diag_reset_cpu_fallback_stages();
 
+// DIAG: writeback sub-stage cumulative ns (alias_t, alias_tl, alias_otl).
+C10_RBLN_API std::tuple<uint64_t, uint64_t, uint64_t> diag_dump_writeback_substages();
+
 } // namespace at::native::rbln

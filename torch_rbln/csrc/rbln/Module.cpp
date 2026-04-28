@@ -171,6 +171,8 @@ void register_internal_api(py::module_& module) {
              "DIAG: dump (calls, ns_setup, ns_dispatch, ns_writeback, ns_release) for cpu_fallback_rbln");
   module.def("_cpu_fallback_diag_reset", &at::native::rbln::diag_reset_cpu_fallback_stages,
              "DIAG: reset cpu_fallback_rbln stage timers");
+  module.def("_cpu_fallback_diag_dump_wb_sub", &at::native::rbln::diag_dump_writeback_substages,
+             "DIAG: writeback sub-stages (alias_t, alias_tl, alias_otl)");
 
   // Fallback configuration
   module.def(
