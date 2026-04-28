@@ -1,9 +1,11 @@
 # Production Readiness Final Report — chan/v4-dispatch-shim-borrow
 
 작성일: 2026-04-27 ~ 28 (overnight)
-브랜치: `dev` (= `chan/v4-dispatch-shim-borrow`, 15 commits ahead of `rblnsw/dev`)
-HEAD: `81c2937 refactor(borrow): route v-mem borrow calls through c10::rbln wrappers`
-- direct stack:
+브랜치: `dev` (= `chan/v4-dispatch-shim-borrow`, 19 commits ahead of `rblnsw/dev`)
+HEAD: `8c87a1e test(borrow): add C++ unit tests for c10::rbln borrow API + sharper errors`
+- direct stack (top→bottom):
+  - `8c87a1e test(borrow): add C++ unit tests for c10::rbln borrow API + sharper errors`
+  - `b74bcf7 docs: add PRODUCTION_FINAL_REPORT`
   - `81c2937 refactor(borrow): route v-mem borrow calls through c10::rbln wrappers`
   - `8e6901f build(vendor): vendor rebel/common/{status,utility}.h for CI vendored build` (revert 됨 by `81c2937`)
   - `41e589a fix(dispatch): leak shim/warm-cache singletons to avoid Py_Finalize race`

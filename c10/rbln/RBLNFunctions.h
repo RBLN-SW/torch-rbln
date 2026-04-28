@@ -178,7 +178,10 @@ C10_RBLN_API void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, siz
  * @brief Result of a borrow_host_ptr / acquire_host_ptr_for_overwrite call.
  *
  * The borrow id MUST be passed back to `return_borrowed` exactly once to
- * release the underlying virtual-memory entry.
+ * release the underlying virtual-memory entry. A successful borrow always
+ * returns a non-zero `borrow_id`; the value `0` is reserved as a sentinel
+ * meaning "no live borrow" so cleanup paths can pre-fill a zero in a vector
+ * and call `return_borrowed` unconditionally for skipped entries.
  */
 struct BorrowedHostPtr {
   uintptr_t host_ptr;
@@ -194,8 +197,11 @@ struct BorrowedHostPtr {
  * The borrow MUST be released via `return_borrowed(result.borrow_id, ...)`.
  *
  * @param rbln_data A pointer to rbln-device memory (typically tensor data_ptr).
- * @param nbytes Number of bytes to borrow (must be positive).
- * @return Host pointer + borrow id; throws via RBLN_CHECK on failure.
+ *        Must not be nullptr.
+ * @param nbytes Number of bytes to borrow. Must be positive — callers with a
+ *        legitimate zero-byte case must short-circuit before invoking.
+ * @return Host pointer + non-zero borrow id; throws c10::Error via RBLN_CHECK
+ *         on failure (invalid args, rebel-side error).
  */
 C10_RBLN_API BorrowedHostPtr borrow_host_ptr(const void* rbln_data, size_t nbytes);
 
@@ -203,12 +209,17 @@ C10_RBLN_API BorrowedHostPtr borrow_host_ptr(const void* rbln_data, size_t nbyte
  * @brief Acquire a host pointer for **overwrite-only** access into the rbln
  * virtual memory backing `rbln_data`. Same lifecycle as `borrow_host_ptr`,
  * but the device→host transfer is skipped even when the entry is
- * physical-latest. Callers MUST overwrite the entire region before any
- * consumer reads it.
+ * physical-latest.
  *
- * @param rbln_data A pointer to rbln-device memory.
+ * IMPORTANT: callers MUST overwrite **the entire borrowed region** before
+ * `return_borrowed(..., updated=true)`; otherwise the region surfaces stale
+ * bytes to subsequent device consumers. Use `borrow_host_ptr` instead if a
+ * partial overwrite is intended.
+ *
+ * @param rbln_data A pointer to rbln-device memory. Must not be nullptr.
  * @param nbytes Number of bytes to acquire (must be positive).
- * @return Host pointer + borrow id; throws via RBLN_CHECK on failure.
+ * @return Host pointer + non-zero borrow id; throws c10::Error via RBLN_CHECK
+ *         on failure.
  */
 C10_RBLN_API BorrowedHostPtr acquire_host_ptr_for_overwrite(void* rbln_data, size_t nbytes);
 
@@ -216,10 +227,13 @@ C10_RBLN_API BorrowedHostPtr acquire_host_ptr_for_overwrite(void* rbln_data, siz
  * @brief Release a previously borrowed host pointer.
  *
  * @param borrow_id The id returned from `borrow_host_ptr` /
- * `acquire_host_ptr_for_overwrite`. A zero id is treated as a no-op so
- * cleanup paths can call this unconditionally.
+ *        `acquire_host_ptr_for_overwrite`. The value `0` is the
+ *        "no live borrow" sentinel and is treated as a no-op so cleanup
+ *        paths can release vectors of optional borrows uniformly.
  * @param updated If true, marks the host view as the latest source of truth;
- * the next device consumer performs a lazy host→device copy.
+ *        the next device consumer performs a lazy host→device copy. Must be
+ *        true after a successful `acquire_host_ptr_for_overwrite` write
+ *        sequence; otherwise the overwritten bytes are discarded.
  */
 C10_RBLN_API void return_borrowed(uint64_t borrow_id, bool updated);
 

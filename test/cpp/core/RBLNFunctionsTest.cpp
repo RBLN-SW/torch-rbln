@@ -2,6 +2,9 @@
 #include <c10/rbln/RBLNFunctions.h>
 #include <gtest/gtest.h>
 
+#include <cstdint>
+#include <cstring>
+
 class RBLNFunctionsTest : public ::testing::Test {
  protected:
   static void SetUpTestSuite() {
@@ -217,4 +220,130 @@ TEST_F(RBLNFunctionsTest, GetUninitializedMemoryInfo) {
 
     c10::rbln::free(data);
   }
+}
+
+// ---------------------------------------------------------------------------
+// borrow_host_ptr / acquire_host_ptr_for_overwrite / return_borrowed.
+// Covers the round-trip happy path, host-write-back semantics, the
+// overwrite-acquire variant (no D2H sync), and the input-validation contracts
+// (nullptr / zero size / sentinel borrow_id).
+// ---------------------------------------------------------------------------
+
+TEST_F(RBLNFunctionsTest, BorrowHostPtrRoundTrip) {
+  const auto device_count = c10::rbln::get_device_count();
+  EXPECT_GE(device_count, 1);
+
+  // Stage host-side bytes into rbln memory, then read them back via borrow.
+  const size_t nbytes = 1024;
+  std::vector<int8_t> src_cpu(nbytes, 0x5a);
+  auto rbln_data = c10::rbln::malloc(/*device_index=*/0, nbytes);
+  ASSERT_NE(rbln_data, nullptr);
+  c10::rbln::memcpy_h2v(rbln_data, src_cpu.data(), nbytes);
+
+  // Borrow returns a host-readable pointer + a non-zero borrow id.
+  const auto borrowed = c10::rbln::borrow_host_ptr(rbln_data, nbytes);
+  EXPECT_NE(borrowed.host_ptr, uintptr_t{0});
+  EXPECT_NE(borrowed.borrow_id, uint64_t{0});
+
+  // Bytes match what we staged.
+  const auto* host_view = reinterpret_cast<const int8_t*>(borrowed.host_ptr);
+  for (size_t i = 0; i < nbytes; ++i) {
+    EXPECT_EQ(host_view[i], static_cast<int8_t>(0x5a)) << "mismatch at byte " << i;
+  }
+
+  c10::rbln::return_borrowed(borrowed.borrow_id, /*updated=*/false);
+  c10::rbln::free(rbln_data);
+}
+
+TEST_F(RBLNFunctionsTest, BorrowHostPtrWriteBackVisibleAfterReturn) {
+  // Borrow + mutate host buffer + return(updated=true). Subsequent v2h read
+  // must observe the host-side mutation (host view becomes the latest source
+  // of truth on return with updated=true).
+  const size_t nbytes = 64;
+  auto rbln_data = c10::rbln::malloc(/*device_index=*/0, nbytes);
+  ASSERT_NE(rbln_data, nullptr);
+
+  // Initial state: stage zeros so we have a known device-side baseline.
+  std::vector<int8_t> zeros(nbytes, 0);
+  c10::rbln::memcpy_h2v(rbln_data, zeros.data(), nbytes);
+
+  {
+    const auto borrowed = c10::rbln::borrow_host_ptr(rbln_data, nbytes);
+    auto* host_writer = reinterpret_cast<int8_t*>(borrowed.host_ptr);
+    for (size_t i = 0; i < nbytes; ++i) {
+      host_writer[i] = static_cast<int8_t>(i);
+    }
+    c10::rbln::return_borrowed(borrowed.borrow_id, /*updated=*/true);
+  }
+
+  std::vector<int8_t> dst_cpu(nbytes, 0);
+  c10::rbln::memcpy_v2h(dst_cpu.data(), rbln_data, nbytes);
+  for (size_t i = 0; i < nbytes; ++i) {
+    EXPECT_EQ(dst_cpu[i], static_cast<int8_t>(i));
+  }
+
+  c10::rbln::free(rbln_data);
+}
+
+TEST_F(RBLNFunctionsTest, AcquireHostPtrForOverwriteRoundTrip) {
+  // Acquire-for-overwrite skips the device→host sync; caller must overwrite
+  // the entire region. Verify (a) the call returns a valid host pointer and
+  // (b) writing through it and returning(updated=true) makes the host bytes
+  // visible on subsequent v2h.
+  const size_t nbytes = 256;
+  auto rbln_data = c10::rbln::malloc(/*device_index=*/0, nbytes);
+  ASSERT_NE(rbln_data, nullptr);
+
+  const auto borrowed = c10::rbln::acquire_host_ptr_for_overwrite(rbln_data, nbytes);
+  EXPECT_NE(borrowed.host_ptr, uintptr_t{0});
+  EXPECT_NE(borrowed.borrow_id, uint64_t{0});
+
+  auto* host_writer = reinterpret_cast<uint8_t*>(borrowed.host_ptr);
+  std::memset(host_writer, 0xa5, nbytes);
+  c10::rbln::return_borrowed(borrowed.borrow_id, /*updated=*/true);
+
+  std::vector<uint8_t> dst_cpu(nbytes, 0);
+  c10::rbln::memcpy_v2h(dst_cpu.data(), rbln_data, nbytes);
+  for (size_t i = 0; i < nbytes; ++i) {
+    EXPECT_EQ(dst_cpu[i], 0xa5);
+  }
+
+  c10::rbln::free(rbln_data);
+}
+
+TEST_F(RBLNFunctionsTest, BorrowRejectsNullData) {
+  EXPECT_THROW(c10::rbln::borrow_host_ptr(/*rbln_data=*/nullptr, 64), c10::Error);
+  EXPECT_THROW(c10::rbln::acquire_host_ptr_for_overwrite(/*rbln_data=*/nullptr, 64), c10::Error);
+}
+
+TEST_F(RBLNFunctionsTest, BorrowRejectsZeroSize) {
+  // Mirrors memcpy_h2v which also rejects nbytes==0. Callers that have a
+  // legitimate zero-byte case must short-circuit before reaching the wrapper.
+  auto rbln_data = c10::rbln::malloc(/*device_index=*/0, 64);
+  ASSERT_NE(rbln_data, nullptr);
+  EXPECT_THROW(c10::rbln::borrow_host_ptr(rbln_data, /*nbytes=*/0), c10::Error);
+  EXPECT_THROW(c10::rbln::acquire_host_ptr_for_overwrite(rbln_data, /*nbytes=*/0), c10::Error);
+  c10::rbln::free(rbln_data);
+}
+
+TEST_F(RBLNFunctionsTest, ReturnBorrowedZeroIdIsNoop) {
+  // borrow_id == 0 is a sentinel meaning "no live borrow". Cleanup paths in
+  // RBLNCPUFallback rely on this so they can call return_borrowed
+  // unconditionally over a vector that may contain skipped entries.
+  EXPECT_NO_THROW(c10::rbln::return_borrowed(/*borrow_id=*/0, /*updated=*/false));
+  EXPECT_NO_THROW(c10::rbln::return_borrowed(/*borrow_id=*/0, /*updated=*/true));
+}
+
+TEST_F(RBLNFunctionsTest, ReturnBorrowedDoubleReleaseThrows) {
+  // The borrow ledger is single-shot; returning the same id twice must
+  // surface as an error.
+  const size_t nbytes = 64;
+  auto rbln_data = c10::rbln::malloc(/*device_index=*/0, nbytes);
+  ASSERT_NE(rbln_data, nullptr);
+
+  const auto borrowed = c10::rbln::borrow_host_ptr(rbln_data, nbytes);
+  c10::rbln::return_borrowed(borrowed.borrow_id, /*updated=*/false);
+  EXPECT_THROW(c10::rbln::return_borrowed(borrowed.borrow_id, /*updated=*/false), c10::Error);
+
+  c10::rbln::free(rbln_data);
 }
