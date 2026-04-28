@@ -18,6 +18,8 @@
 #include <ATen/ops/from_blob.h>
 #endif
 
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <sstream>
@@ -26,7 +28,36 @@
 
 namespace at::native::rbln {
 
+// DIAG: per-stage cumulative ns + per-stage call count
+std::atomic<uint64_t> g_diag_calls{0};
+std::atomic<uint64_t> g_diag_ns_setup{0};
+std::atomic<uint64_t> g_diag_ns_dispatch{0};
+std::atomic<uint64_t> g_diag_ns_writeback{0};
+std::atomic<uint64_t> g_diag_ns_release{0};
+
+std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t> diag_dump_cpu_fallback_stages() {
+  return std::make_tuple(g_diag_calls.load(std::memory_order_relaxed),
+                         g_diag_ns_setup.load(std::memory_order_relaxed),
+                         g_diag_ns_dispatch.load(std::memory_order_relaxed),
+                         g_diag_ns_writeback.load(std::memory_order_relaxed),
+                         g_diag_ns_release.load(std::memory_order_relaxed));
+}
+
+void diag_reset_cpu_fallback_stages() {
+  g_diag_calls.store(0, std::memory_order_relaxed);
+  g_diag_ns_setup.store(0, std::memory_order_relaxed);
+  g_diag_ns_dispatch.store(0, std::memory_order_relaxed);
+  g_diag_ns_writeback.store(0, std::memory_order_relaxed);
+  g_diag_ns_release.store(0, std::memory_order_relaxed);
+}
+
 namespace {
+
+inline uint64_t now_ns() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
 
 // convenience helper for converting tensors to cpu
 template <
@@ -174,6 +205,8 @@ void cpu_fallback_rbln(
     torch::jit::Stack* stack,
     bool error_on_views,
     c10::DispatchKey cpu_dispatch_key) {
+  const uint64_t _diag_t0 = now_ns();
+  g_diag_calls.fetch_add(1, std::memory_order_relaxed);
   TORCH_CHECK(
       c10::BackendComponent::CPUBit == c10::toBackendComponent(cpu_dispatch_key),
       "Expected CPU backend DispatchKey but got ",
@@ -279,8 +312,14 @@ void cpu_fallback_rbln(
     (*stack)[arguments_begin + idx] = c10::IValue(cpu_tensors[i]);
   }
 
+  const uint64_t _diag_t1 = now_ns();
+  g_diag_ns_setup.fetch_add(_diag_t1 - _diag_t0, std::memory_order_relaxed);
+
   // Step 2: Call the underlying CPU implementation of the operator
   op.redispatchBoxed(c10::DispatchKeySet(cpu_dispatch_key), stack);
+
+  const uint64_t _diag_t2 = now_ns();
+  g_diag_ns_dispatch.fetch_add(_diag_t2 - _diag_t1, std::memory_order_relaxed);
 
   // Step 3: Mutable alias write-back.
   // - Legacy path: the CPU op wrote into the fresh CPU tensor at cpu_tensors[i];
@@ -378,6 +417,9 @@ void cpu_fallback_rbln(
       }
     }
   }
+
+  const uint64_t _diag_t3 = now_ns();
+  g_diag_ns_writeback.fetch_add(_diag_t3 - _diag_t2, std::memory_order_relaxed);
 
   // Release any vmem borrows issued on the input path. Write-alias inputs use
   // `updated=true` so the rbln tensor's host view becomes the latest source of
@@ -553,6 +595,7 @@ void cpu_fallback_rbln(
       }
     }
   }
+  g_diag_ns_release.fetch_add(now_ns() - _diag_t3, std::memory_order_relaxed);
 }
 
 } // namespace at::native::rbln
