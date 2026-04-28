@@ -319,6 +319,42 @@ void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes) {
   }
 }
 
+BorrowedHostPtr borrow_host_ptr(const void* rbln_data, size_t nbytes) {
+  RBLN_LOG_DEBUG("rbln_data={}, nbytes={}", fmt::ptr(rbln_data), nbytes);
+  RBLN_CHECK(rbln_data != nullptr, "rbln_data cannot be nullptr");
+  RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
+
+  const auto vaddr = reinterpret_cast<uint64_t>(rbln_data);
+  const auto size = static_cast<uint64_t>(nbytes);
+  uintptr_t host_ptr = 0;
+  uint64_t borrow_id = 0;
+  RBLN_LOG_DEBUG("Calling rbln_v_borrow_host_ptr: vaddr={:#x}, size={}", vaddr, size);
+  RBLN_CHECK(!::rbln::rbln_v_borrow_host_ptr(vaddr, size, host_ptr, borrow_id));
+  return BorrowedHostPtr{host_ptr, borrow_id};
+}
+
+BorrowedHostPtr acquire_host_ptr_for_overwrite(void* rbln_data, size_t nbytes) {
+  RBLN_LOG_DEBUG("rbln_data={}, nbytes={}", fmt::ptr(rbln_data), nbytes);
+  RBLN_CHECK(rbln_data != nullptr, "rbln_data cannot be nullptr");
+  RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
+
+  const auto vaddr = reinterpret_cast<uint64_t>(rbln_data);
+  const auto size = static_cast<uint64_t>(nbytes);
+  uintptr_t host_ptr = 0;
+  uint64_t borrow_id = 0;
+  RBLN_LOG_DEBUG("Calling rbln_v_acquire_host_ptr_for_overwrite: vaddr={:#x}, size={}", vaddr, size);
+  RBLN_CHECK(!::rbln::rbln_v_acquire_host_ptr_for_overwrite(vaddr, size, host_ptr, borrow_id));
+  return BorrowedHostPtr{host_ptr, borrow_id};
+}
+
+void return_borrowed(uint64_t borrow_id, bool updated) {
+  if (borrow_id == 0) {
+    return;
+  }
+  RBLN_LOG_DEBUG("borrow_id={}, updated={}", borrow_id, updated);
+  RBLN_CHECK(!::rbln::rbln_v_return_borrowed(borrow_id, updated));
+}
+
 c10::CachingDeviceAllocator::DeviceStats get_device_stats(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
   const auto device_index = device.index();

@@ -175,6 +175,55 @@ C10_RBLN_API void memcpy_v2h(void* cpu_dst_data, const void* rbln_src_data, size
 C10_RBLN_API void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes);
 
 /**
+ * @brief Result of a borrow_host_ptr / acquire_host_ptr_for_overwrite call.
+ *
+ * The borrow id MUST be passed back to `return_borrowed` exactly once to
+ * release the underlying virtual-memory entry.
+ */
+struct BorrowedHostPtr {
+  uintptr_t host_ptr;
+  uint64_t borrow_id;
+};
+
+/**
+ * @brief Borrow a host pointer into the rbln virtual memory backing
+ * `rbln_data`. Triggers a device→host sync if the device view is currently
+ * authoritative; allocates host backing if none exists. After this call the
+ * host buffer is read-ready.
+ *
+ * The borrow MUST be released via `return_borrowed(result.borrow_id, ...)`.
+ *
+ * @param rbln_data A pointer to rbln-device memory (typically tensor data_ptr).
+ * @param nbytes Number of bytes to borrow (must be positive).
+ * @return Host pointer + borrow id; throws via RBLN_CHECK on failure.
+ */
+C10_RBLN_API BorrowedHostPtr borrow_host_ptr(const void* rbln_data, size_t nbytes);
+
+/**
+ * @brief Acquire a host pointer for **overwrite-only** access into the rbln
+ * virtual memory backing `rbln_data`. Same lifecycle as `borrow_host_ptr`,
+ * but the device→host transfer is skipped even when the entry is
+ * physical-latest. Callers MUST overwrite the entire region before any
+ * consumer reads it.
+ *
+ * @param rbln_data A pointer to rbln-device memory.
+ * @param nbytes Number of bytes to acquire (must be positive).
+ * @return Host pointer + borrow id; throws via RBLN_CHECK on failure.
+ */
+C10_RBLN_API BorrowedHostPtr acquire_host_ptr_for_overwrite(void* rbln_data, size_t nbytes);
+
+/**
+ * @brief Release a previously borrowed host pointer.
+ *
+ * @param borrow_id The id returned from `borrow_host_ptr` /
+ * `acquire_host_ptr_for_overwrite`. A zero id is treated as a no-op so
+ * cleanup paths can call this unconditionally.
+ * @param updated If true, marks the host view as the latest source of truth;
+ * the next device consumer performs a lazy host→device copy.
+ */
+C10_RBLN_API void return_borrowed(uint64_t borrow_id, bool updated);
+
+/**
  * @brief Returns comprehensive device memory statistics.
  *
  * Retrieves all memory metrics from the RBLN runtime in a single call and

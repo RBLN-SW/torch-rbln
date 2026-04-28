@@ -59,10 +59,34 @@ from torch_rbln._internal.register_custom_ops import *
 from torch_rbln._internal.register_backward_ops import *
 from torch_rbln._internal.kernels.custom_transpose import *
 from torch_rbln._internal.kernels.sdpa import *
+from torch_rbln._C import _register_cpp_shim
 
 aten_impl = torch.library.Library('aten', 'IMPL')
 DEBUG_MODE = torch.version.debug
 """
+
+    def _registration_line(self, operator_name: Any, kernel_name: str) -> str:
+        """
+        Return the dispatcher-registration snippet for `operator_name`.
+
+        Ops listed in OpCategories.CPP_SHIM_OPS are routed through a C++
+        dispatch shim installed at module-init time; everything else keeps the
+        existing Python-side torch.library registration.
+        Ops present in OpCategories.CPP_SHIM_SKIP_DTYPE_ARGS also get a
+        skip_dtype_args keyword so the shim's pre-check ignores the listed
+        positional argument indices (e.g. the bool cond in `where`).
+        """
+        op_str = str(operator_name)
+        if op_str not in OpCategories.CPP_SHIM_OPS:
+            return f"""
+aten_impl.impl("{operator_name}", {kernel_name}, "PrivateUse1")"""
+
+        skip = OpCategories.CPP_SHIM_SKIP_DTYPE_ARGS.get(op_str)
+        if skip:
+            return f"""
+_register_cpp_shim("aten::{operator_name}", {kernel_name}, skip_dtype_args={list(skip)})"""
+        return f"""
+_register_cpp_shim("aten::{operator_name}", {kernel_name})"""
 
     def _get_or_generate_general_function(
         self,
@@ -161,8 +185,7 @@ DEBUG_MODE = torch.version.debug
             if is_custom_kernel:
                 # Custom kernel - just register, no code generation needed
                 # Detailed implementation: No need to reference generators/ directory
-                operator_register_code += f"""
-aten_impl.impl("{operator_name}", {kernel_name}, "PrivateUse1")"""
+                operator_register_code += self._registration_line(operator_name, kernel_name)
 
             elif is_out:
                 # Out Function: Generate general function + Out wrapper
@@ -174,8 +197,7 @@ aten_impl.impl("{operator_name}", {kernel_name}, "PrivateUse1")"""
                 function_code += self.op_code_generator.generate_out_function(
                     kernel_name, root_name, general_kernel_name, self_arg_pos, has_device_kwarg
                 )
-                operator_register_code += f"""
-aten_impl.impl("{operator_name}", {kernel_name}, "PrivateUse1")"""
+                operator_register_code += self._registration_line(operator_name, kernel_name)
 
             elif is_inplace:
                 # Inplace Function: Generate general function + Inplace wrapper
@@ -185,8 +207,7 @@ aten_impl.impl("{operator_name}", {kernel_name}, "PrivateUse1")"""
 
                 # Generate Inplace function wrapper: General function call + copy_
                 function_code += self.op_code_generator.generate_inplace_function(kernel_name, general_kernel_name)
-                operator_register_code += f"""
-aten_impl.impl("{operator_name}", {kernel_name}, "PrivateUse1")"""
+                operator_register_code += self._registration_line(operator_name, kernel_name)
 
             else:
                 # Normal Function: Generate general function + Normal wrapper
@@ -199,8 +220,7 @@ aten_impl.impl("{operator_name}", {kernel_name}, "PrivateUse1")"""
                 function_code += self.op_code_generator.generate_normal_function(
                     normal_kernel_name, general_kernel_name
                 )
-                operator_register_code += f"""
-aten_impl.impl("{operator_name}", {normal_kernel_name}, "PrivateUse1")"""
+                operator_register_code += self._registration_line(operator_name, normal_kernel_name)
 
             code_blocks += function_code
 
