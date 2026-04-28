@@ -329,7 +329,11 @@ BorrowedHostPtr borrow_host_ptr(const void* rbln_data, size_t nbytes) {
   uintptr_t host_ptr = 0;
   uint64_t borrow_id = 0;
   RBLN_LOG_DEBUG("Calling rbln_v_borrow_host_ptr: vaddr={:#x}, size={}", vaddr, size);
-  RBLN_CHECK(!::rbln::rbln_v_borrow_host_ptr(vaddr, size, host_ptr, borrow_id));
+  RBLN_CHECK(
+      !::rbln::rbln_v_borrow_host_ptr(vaddr, size, host_ptr, borrow_id),
+      "rbln_v_borrow_host_ptr failed (vaddr={:#x}, size={}); see rebel runtime logs for details",
+      vaddr,
+      size);
   return BorrowedHostPtr{host_ptr, borrow_id};
 }
 
@@ -343,16 +347,27 @@ BorrowedHostPtr acquire_host_ptr_for_overwrite(void* rbln_data, size_t nbytes) {
   uintptr_t host_ptr = 0;
   uint64_t borrow_id = 0;
   RBLN_LOG_DEBUG("Calling rbln_v_acquire_host_ptr_for_overwrite: vaddr={:#x}, size={}", vaddr, size);
-  RBLN_CHECK(!::rbln::rbln_v_acquire_host_ptr_for_overwrite(vaddr, size, host_ptr, borrow_id));
+  RBLN_CHECK(
+      !::rbln::rbln_v_acquire_host_ptr_for_overwrite(vaddr, size, host_ptr, borrow_id),
+      "rbln_v_acquire_host_ptr_for_overwrite failed (vaddr={:#x}, size={}); see rebel runtime logs for details",
+      vaddr,
+      size);
   return BorrowedHostPtr{host_ptr, borrow_id};
 }
 
 void return_borrowed(uint64_t borrow_id, bool updated) {
+  // borrow_id == 0 is a sentinel meaning "no live borrow" — see header.
+  // Cleanup paths (e.g. RBLNCPUFallback's per-tensor borrow_ids vector)
+  // call this unconditionally over entries that may have been skipped.
   if (borrow_id == 0) {
     return;
   }
   RBLN_LOG_DEBUG("borrow_id={}, updated={}", borrow_id, updated);
-  RBLN_CHECK(!::rbln::rbln_v_return_borrowed(borrow_id, updated));
+  RBLN_CHECK(
+      !::rbln::rbln_v_return_borrowed(borrow_id, updated),
+      "rbln_v_return_borrowed failed (borrow_id={}, updated={}); see rebel runtime logs for details",
+      borrow_id,
+      updated);
 }
 
 c10::CachingDeviceAllocator::DeviceStats get_device_stats(const c10::Device& device) {
