@@ -6,6 +6,7 @@
 #include <c10/rbln/RBLNLogging.h>
 #include <torch/csrc/utils/pybind.h>
 #include <torch_rbln/csrc/distributed/c10d/rbln/ProcessGroupRBLNModule.hpp>
+#include <ATen/native/rbln/RBLNCPUFallback.h>
 #include <torch_rbln/csrc/rbln/DispatchShim.h>
 #include <torch_rbln/csrc/rbln/WarmCache.h>
 #include <exception>
@@ -164,6 +165,12 @@ void register_internal_api(py::module_& module) {
       "_warmcache_exit_building",
       []() { torch_rbln::warmcache::WarmCache::exit_building(); },
       "Internal: clear the miss-path reentrancy flag set by _warmcache_enter_building");
+
+  // DIAG: cpu_fallback_rbln per-stage timing
+  module.def("_cpu_fallback_diag_dump", &at::native::rbln::diag_dump_cpu_fallback_stages,
+             "DIAG: dump (calls, ns_setup, ns_dispatch, ns_writeback, ns_release) for cpu_fallback_rbln");
+  module.def("_cpu_fallback_diag_reset", &at::native::rbln::diag_reset_cpu_fallback_stages,
+             "DIAG: reset cpu_fallback_rbln stage timers");
 
   // Fallback configuration
   module.def(

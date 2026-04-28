@@ -17,4 +17,9 @@ C10_RBLN_API void cpu_fallback_rbln(const c10::OperatorHandle& op, torch::jit::S
                                     bool error_on_views = false,
                                     c10::DispatchKey cpu_dispatch_key = c10::DispatchKey::CPU);
 
+// DIAG: per-stage cumulative ns. Returns (calls, ns_setup, ns_dispatch, ns_writeback, ns_release).
+C10_RBLN_API std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>
+diag_dump_cpu_fallback_stages();
+C10_RBLN_API void diag_reset_cpu_fallback_stages();
+
 } // namespace at::native::rbln
