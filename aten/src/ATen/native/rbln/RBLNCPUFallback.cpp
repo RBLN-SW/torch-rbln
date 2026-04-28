@@ -321,8 +321,33 @@ void cpu_fallback_rbln(
                              schema_arg.name() == "out" &&
                              alias_info != nullptr && alias_info->isWrite();
     if (is_pure_out && tensor_args[i].defined()) {
-      cpu_tensors[i] = at::empty(tensor_args[i].sizes(),
-                                 tensor_args[i].options().device(at::kCPU));
+      // Direct output borrow: wrap the rbln out= tensor's host backing as a
+      // CPU view. The CPU kernel writes straight into the rbln vmem region,
+      // skipping the writeback memcpy entirely. release_borrowed(updated=true)
+      // is issued automatically by the existing borrow-write path in Step 3.
+      //
+      // Safety conditions: contiguous + non-zero bytes + RBLN device. PyTorch
+      // out= callers pass a tensor whose shape matches the result; if the
+      // CPU kernel ever tries to resize_(), `from_blob`'s fixed-size mapping
+      // silently no-ops and we'd corrupt the next slot, so we keep the
+      // size/contig guards strict and fall back to fresh empty otherwise.
+      auto& rbln_out = tensor_args[i];
+      const uint64_t nbytes = rbln_out.nbytes();
+      if (rbln_out.device().type() == c10::DeviceType::PrivateUse1 &&
+          rbln_out.is_contiguous() && nbytes > 0) {
+        auto borrowed = c10::rbln::acquire_host_ptr_for_overwrite(rbln_out.data_ptr(), nbytes);
+        borrow_ids[i] = borrowed.borrow_id;
+        auto opts = at::TensorOptions().dtype(rbln_out.dtype()).device(at::kCPU);
+        cpu_tensors[i] = at::from_blob(
+            reinterpret_cast<void*>(borrowed.host_ptr),
+            rbln_out.sizes(),
+            rbln_out.strides(),
+            opts);
+      } else {
+        // Resize-safe fallback: fresh CPU empty.
+        cpu_tensors[i] = at::empty(rbln_out.sizes(),
+                                   rbln_out.options().device(at::kCPU));
+      }
     } else {
       non_borrowed.push_back(tensor_args[i]);
       non_borrowed_indices.push_back(i);
