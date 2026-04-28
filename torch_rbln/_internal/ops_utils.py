@@ -158,6 +158,24 @@ def extract_device_id_from_inputs(*args, **kwargs):
     return None
 
 
+def extract_warm_cache_key(*args, **kwargs):
+    # Build a per-(device, input shape/dtype) cache key for compile_rbln_cached
+    # so the rebel backend re-runs (and the C++ warm cache picks up a fresh
+    # DynamoRuntime) when input profiles change. Without shape/dtype in the key,
+    # compile_rbln_cached would reuse the first compiled callable across all
+    # shapes and the warm-cache install path would only ever fire once.
+    device_id = None
+    profiles = []
+    input_tensors = extract_tensors(args) + extract_tensors(kwargs)
+    for tensor in input_tensors:
+        if not isinstance(tensor, torch.Tensor):
+            continue
+        if device_id is None and tensor.device.type == "rbln":
+            device_id = tensor.device.index
+        profiles.append((tuple(tensor.shape), str(tensor.dtype)))
+    return (device_id, tuple(profiles))
+
+
 def remove_empty_tensors(obj):
     if isinstance(obj, torch.Tensor):
         return None if obj.numel() == 0 else obj

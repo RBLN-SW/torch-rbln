@@ -55,6 +55,12 @@ def empty_cache(device: Optional[Union[int, str, torch.device]] = None) -> None:
             If None, uses the current device. Defaults to None.
     """
     device = _normalize_device(device)
+    # WarmCache holds strong refs to DynamoRuntime instances and the rbln
+    # runtime buffers behind them. empty_cache() means "let go of everything
+    # the user isn't holding"; if we kept warm entries the freed bytes would
+    # show up unchanged in memory_stats. Clearing first puts us in the same
+    # state as the cold dispatch path — entries get re-installed naturally.
+    torch_rbln._C._warmcache_clear()
     torch_rbln._C.empty_cache(device)
 
 
