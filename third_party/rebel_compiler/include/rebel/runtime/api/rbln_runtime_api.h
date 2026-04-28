@@ -219,6 +219,34 @@ RBLNRetCode rbln_set_raw_memory_alloc(uint64_t vaddr, uint64_t size);
 // Retrieves detailed information for the vmemory entry.
 RBLNRetCode rbln_get_memory_info(uint64_t vaddr, MemoryInfo& memory_info_out);
 
+// Borrow a host pointer into the rbln virtual memory at `vaddr`. Triggers a
+// device→host sync if the device view is currently authoritative; allocates
+// host backing if none exists. After this call the host buffer is read-ready.
+// The borrow MUST be released via `rbln_v_return_borrowed` with the returned
+// `borrow_id_out`.
+//
+// Light counterpart of `rebel::torch::rbln_v_borrow_host_ptr` declared in
+// `<rebel/torch/rbln_vmem_api.h>`. Distinct from the heavy variant only in
+// return convention (RBLNRetCode vs Status); free of vmemory_manager.h
+// dependencies so it is safe to call from torch-rbln without dragging in
+// absl / model headers.
+RBLNRetCode rbln_v_borrow_host_ptr(uint64_t vaddr, uint64_t size,
+                                   uintptr_t& host_ptr_out, uint64_t& borrow_id_out);
+
+// Acquire a host pointer for **overwrite-only** access. Same lifecycle as
+// `rbln_v_borrow_host_ptr` (must be released via `rbln_v_return_borrowed`),
+// but the device→host transfer is skipped even when the entry is
+// physical-latest. Callers MUST overwrite the entire region before any
+// consumer reads it; otherwise the host view will contain stale data.
+// State transitions to USER_VIEW_IS_LATEST on return.
+RBLNRetCode rbln_v_acquire_host_ptr_for_overwrite(uint64_t vaddr, uint64_t size,
+                                                  uintptr_t& host_ptr_out, uint64_t& borrow_id_out);
+
+// Release a previously borrowed host pointer. If `updated` is true, marks the
+// host view as the latest source of truth; the next device consumer performs
+// a lazy host→device copy.
+RBLNRetCode rbln_v_return_borrowed(uint64_t borrow_id, bool updated);
+
 // Copies the contents from host memory to the virtual memory area.
 RBLNRetCode rbln_memcpy_h2v(uintptr_t src_host_ptr, uint64_t dst_vaddr, uint64_t size);
 
@@ -240,7 +268,7 @@ RBLNRetCode rbln_memcpy_v2v(uint64_t src_vaddr, uint64_t dst_vaddr, uint64_t siz
 // However, if the dtype of the host memory area (i.e., `from_dtype`) is the same as
 // the device-side dtype (or physical dtype) of the vmemory entry for dst_vaddr, the data is copied
 // directly to device memory without conversion. This can be useful when the user wants the raw
-// custom_float16 contents to avoid the precision loss.
+// dlfloat contents to avoid the precision loss.
 RBLNRetCode rbln_memcpy_h2v_cast(uintptr_t src_host_ptr, uint64_t dst_vaddr, uint64_t size,
                                  DataType from_dtype, DataType to_dtype);
 
@@ -255,8 +283,8 @@ RBLNRetCode rbln_memcpy_h2v_cast(uintptr_t src_host_ptr, uint64_t dst_vaddr, uin
 // `to_dtype` and copied to the `dst_host_ptr`. However, if the user dtype of the vmemory area
 // corresponding to src_vaddr is `from_dtype` and the device dtype is `to_dtype`, the data is copied
 // directly from device memory to dst_host_ptr without conversion. This characteristic can be used
-// to resolve precision loss issues between custom_float16 and float16. This can be useful when the user
-// wants the raw custom_float16 contents to avoid the precision loss.
+// to resolve precision loss issues between dlfloat and float16. This can be useful when the user
+// wants the raw dlfloat contents to avoid the precision loss.
 RBLNRetCode rbln_memcpy_v2h_cast(uint64_t src_vaddr, uintptr_t dst_host_ptr, uint64_t size,
                                  DataType from_dtype, DataType to_dtype);
 
