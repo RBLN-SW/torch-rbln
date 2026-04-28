@@ -22,11 +22,137 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <shared_mutex>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace at::native::rbln {
+
+namespace {
+// Per-op schema cache: mirrors the DispatchShim SchemaCache idea. Same op handle
+// reuses the same FunctionSchema pointer for the process lifetime, so caching
+// the per-arg static flags avoids walking schema_args/alias_info every dispatch.
+//
+// LLaMA-1B eager hits cpu_fallback_rbln 10066 times across <10 distinct ops, so
+// the cache populates at startup and stays read-only. Keep the populate step
+// behind a unique_lock; readers take a shared_lock and are otherwise lock-free.
+enum class CpuFbArgKind : uint8_t { Other = 0, Tensor, TensorList, OptionalTensorList, Device };
+
+// Per-op fast-path enum. None = generic boxed dispatcher; non-None = specialized
+// host micro-kernel that bypasses TensorIterator + boxed redispatch entirely.
+// Only LLaMA RMSNorm-frequent fp32 ops are listed; the schema-time guards check
+// dtype/contig/dim before taking the fast path.
+enum class CpuFbFastPath : uint8_t { None = 0, RsqrtOut, PowTensorScalarOut, MeanOut };
+
+struct CpuFbSchemaInfo {
+  std::vector<CpuFbArgKind> arg_kind;     // per-positional arg
+  std::vector<bool> is_write_alias;       // alias_info != null && isWrite
+  std::vector<bool> is_pure_out;          // kwarg_only && name=="out" && is_write_alias
+  CpuFbFastPath fast_path = CpuFbFastPath::None;
+  // For PowTensorScalarOut: index of scalar (exponent) and out arg in schema.
+  // For MeanOut: index of dim list, keepdim bool, dtype optional, out.
+  // tensor_args_indices order matches the cached self/out tensor arg positions.
+  bool populated = false;
+};
+
+struct CpuFbSchemaCache {
+  std::shared_mutex mu;
+  std::unordered_map<const c10::FunctionSchema*, CpuFbSchemaInfo> by_schema;
+};
+
+CpuFbSchemaCache& schema_cache() {
+  static auto* c = new CpuFbSchemaCache();
+  return *c;
+}
+
+const CpuFbSchemaInfo& get_or_populate_schema_info(const c10::FunctionSchema& schema) {
+  auto& cache = schema_cache();
+  const auto* key = &schema;
+  {
+    std::shared_lock<std::shared_mutex> rd(cache.mu);
+    auto it = cache.by_schema.find(key);
+    if (it != cache.by_schema.end() && it->second.populated) {
+      return it->second;
+    }
+  }
+  std::unique_lock<std::shared_mutex> wr(cache.mu);
+  auto& info = cache.by_schema[key];
+  if (info.populated) {
+    return info;
+  }
+  const auto& args = schema.arguments();
+  const auto n = args.size();
+  info.arg_kind.assign(n, CpuFbArgKind::Other);
+  info.is_write_alias.assign(n, false);
+  info.is_pure_out.assign(n, false);
+  for (size_t i = 0; i < n; ++i) {
+    const auto& a = args[i];
+    const auto& type = a.type();
+    using namespace c10;
+    if (type->isSubtypeOf(*TensorType::get())) {
+      info.arg_kind[i] = CpuFbArgKind::Tensor;
+    } else if (type->isSubtypeOf(*ListType::ofTensors())) {
+      info.arg_kind[i] = CpuFbArgKind::TensorList;
+    } else if (type->isSubtypeOf(*ListType::ofOptionalTensors())) {
+      info.arg_kind[i] = CpuFbArgKind::OptionalTensorList;
+    } else if (type->kind() == TypeKind::DeviceObjType) {
+      info.arg_kind[i] = CpuFbArgKind::Device;
+    }
+    const auto* alias = a.alias_info();
+    const bool is_w = (alias != nullptr && alias->isWrite());
+    info.is_write_alias[i] = is_w;
+    info.is_pure_out[i] = is_w && a.kwarg_only() && a.name() == "out";
+  }
+  // Schema-time fast-path identification. The op is *eligible* — runtime
+  // guards (dtype/contig/dim/exponent) still gate each call.
+  const auto& op_name = schema.name();
+  const auto& overload = schema.overload_name();
+  if (op_name == "aten::rsqrt" && overload == "out") {
+    info.fast_path = CpuFbFastPath::RsqrtOut;
+  } else if (op_name == "aten::pow" && overload == "Tensor_Scalar_out") {
+    info.fast_path = CpuFbFastPath::PowTensorScalarOut;
+  } else if (op_name == "aten::mean" && overload == "out") {
+    info.fast_path = CpuFbFastPath::MeanOut;
+  }
+  info.populated = true;
+  return info;
+}
+
+// ---------------------------------------------------------------------------
+// Host micro-kernels for the fast path. Plain contiguous loops only — no
+// TensorIterator, no broadcasting, no dtype promotion. Caller must check
+// dtype/contig/shape before invoking.
+// ---------------------------------------------------------------------------
+void micro_rsqrt_fp32_contig(const float* __restrict__ in, float* __restrict__ out, size_t n) {
+  for (size_t i = 0; i < n; ++i) {
+    out[i] = 1.0f / std::sqrt(in[i]);
+  }
+}
+
+void micro_square_fp32_contig(const float* __restrict__ in, float* __restrict__ out, size_t n) {
+  for (size_t i = 0; i < n; ++i) {
+    out[i] = in[i] * in[i];
+  }
+}
+
+// out[r] = sum(in[r, :inner]) / inner
+void micro_mean_lastdim_fp32_contig(const float* __restrict__ in, float* __restrict__ out,
+                                    size_t outer, size_t inner) {
+  const float inv = 1.0f / static_cast<float>(inner);
+  for (size_t r = 0; r < outer; ++r) {
+    const float* p = in + r * inner;
+    double sum = 0.0;
+    for (size_t i = 0; i < inner; ++i) {
+      sum += p[i];
+    }
+    out[r] = static_cast<float>(sum * inv);
+  }
+}
+
+} // anonymous namespace
 
 // DIAG: per-stage cumulative ns + per-stage call count
 std::atomic<uint64_t> g_diag_calls{0};
@@ -34,6 +160,10 @@ std::atomic<uint64_t> g_diag_ns_setup{0};
 std::atomic<uint64_t> g_diag_ns_dispatch{0};
 std::atomic<uint64_t> g_diag_ns_writeback{0};
 std::atomic<uint64_t> g_diag_ns_release{0};
+// DIAG: writeback sub-stages
+std::atomic<uint64_t> g_diag_ns_wb_alias_t{0};       // alias-write tensor loop
+std::atomic<uint64_t> g_diag_ns_wb_alias_tl{0};      // tensorlist loop
+std::atomic<uint64_t> g_diag_ns_wb_alias_otl{0};     // optional tensorlist loop
 
 std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t> diag_dump_cpu_fallback_stages() {
   return std::make_tuple(g_diag_calls.load(std::memory_order_relaxed),
@@ -49,6 +179,15 @@ void diag_reset_cpu_fallback_stages() {
   g_diag_ns_dispatch.store(0, std::memory_order_relaxed);
   g_diag_ns_writeback.store(0, std::memory_order_relaxed);
   g_diag_ns_release.store(0, std::memory_order_relaxed);
+  g_diag_ns_wb_alias_t.store(0, std::memory_order_relaxed);
+  g_diag_ns_wb_alias_tl.store(0, std::memory_order_relaxed);
+  g_diag_ns_wb_alias_otl.store(0, std::memory_order_relaxed);
+}
+
+std::tuple<uint64_t, uint64_t, uint64_t> diag_dump_writeback_substages() {
+  return std::make_tuple(g_diag_ns_wb_alias_t.load(std::memory_order_relaxed),
+                         g_diag_ns_wb_alias_tl.load(std::memory_order_relaxed),
+                         g_diag_ns_wb_alias_otl.load(std::memory_order_relaxed));
 }
 
 namespace {
@@ -234,35 +373,53 @@ void cpu_fallback_rbln(
   // fallback (used for non-rbln tensors, contiguity-guard skips, etc.).
   std::vector<std::vector<uint64_t>> tensorlist_borrow_ids;
 
-  // Step 1: Convert all non-CPU tensor inputs into CPU tensors
-  // and put them on the stack at the correct indices.
-  for (const auto idx : c10::irange(arguments.size())) {
+  // Step 1: Convert all non-CPU tensor inputs into CPU tensors and put them
+  // on the stack at the correct indices.
+  //
+  // Per-op schema info (arg-position kinds + alias-write flags) is cached: same
+  // operator handle reuses the same FunctionSchema pointer for the process
+  // lifetime, so a switch on the cached kind replaces the per-call IValue type
+  // cascade. ~10 distinct ops in LLaMA-1B eager → first call populates, every
+  // call after is a hashmap shared-lock.
+  const auto& schema_info = get_or_populate_schema_info(op.schema());
+  const auto n_args = arguments.size();
+  for (size_t idx = 0; idx < n_args; ++idx) {
+    const auto kind = schema_info.arg_kind[idx];
+    if (kind == CpuFbArgKind::Other) {
+      continue;
+    }
     const auto& ivalue = arguments[idx];
-    if (ivalue.isTensor()) {
-      tensor_args.push_back(ivalue.toTensor());
-      tensor_args_indices.push_back(idx);
-    } else if (ivalue.isTensorList()) {
-      // Note: we copy each TensorList argument to CPU individually out of convenience,
-      // but XLA would benefit from materializing all tensor and TensorList args onto the CPU at the same time.
-      // We can improve this if we need better perf for XLA's CPU fallbacks.
-      tensorlist_args.push_back(ivalue.toTensorList());
-      tensorlist_args_indices.push_back(idx);
-      auto rbln_list = ivalue.toTensorVector();
-      std::vector<uint64_t> bids;
-      auto cpu_list = borrow_rbln_list_as_cpu(rbln_list, bids);
-      tensorlist_borrow_ids.push_back(std::move(bids));
-      auto cpu_ivalue = c10::IValue(c10::List<at::Tensor>(cpu_list));
-      tensorlist_cpu_args.push_back(cpu_ivalue);
-      (*stack)[arguments_begin + idx] = std::move(cpu_ivalue);
-    } else if (ivalue.isOptionalTensorList()) {
-      optional_tensorlist_args.push_back(ivalue.toOptionalTensorList());
-      optional_tensorlist_args_indices.push_back(idx);
-      auto cpu_ivalue = c10::IValue(c10::List<std::optional<at::Tensor>>(to_cpu(ivalue.toOptionalTensorVector())));
-      optional_tensorlist_cpu_args.push_back(cpu_ivalue);
-      (*stack)[arguments_begin + idx] = c10::IValue(cpu_ivalue);
-    } else if (ivalue.isDevice()) {
-      tgt_device = ivalue.toDevice();
-      (*stack)[arguments_begin + idx] = c10::IValue(c10::Device(kCPU));
+    switch (kind) {
+      case CpuFbArgKind::Tensor:
+        tensor_args.push_back(ivalue.toTensor());
+        tensor_args_indices.push_back(idx);
+        break;
+      case CpuFbArgKind::TensorList: {
+        tensorlist_args.push_back(ivalue.toTensorList());
+        tensorlist_args_indices.push_back(idx);
+        auto rbln_list = ivalue.toTensorVector();
+        std::vector<uint64_t> bids;
+        auto cpu_list = borrow_rbln_list_as_cpu(rbln_list, bids);
+        tensorlist_borrow_ids.push_back(std::move(bids));
+        auto cpu_ivalue = c10::IValue(c10::List<at::Tensor>(cpu_list));
+        tensorlist_cpu_args.push_back(cpu_ivalue);
+        (*stack)[arguments_begin + idx] = std::move(cpu_ivalue);
+        break;
+      }
+      case CpuFbArgKind::OptionalTensorList: {
+        optional_tensorlist_args.push_back(ivalue.toOptionalTensorList());
+        optional_tensorlist_args_indices.push_back(idx);
+        auto cpu_ivalue = c10::IValue(c10::List<std::optional<at::Tensor>>(to_cpu(ivalue.toOptionalTensorVector())));
+        optional_tensorlist_cpu_args.push_back(cpu_ivalue);
+        (*stack)[arguments_begin + idx] = c10::IValue(cpu_ivalue);
+        break;
+      }
+      case CpuFbArgKind::Device:
+        tgt_device = ivalue.toDevice();
+        (*stack)[arguments_begin + idx] = c10::IValue(c10::Device(kCPU));
+        break;
+      case CpuFbArgKind::Other:
+        break;  // unreachable — gated above
     }
   }
   // Stage tensor args onto the stack as CPU views. We obtain a host pointer
@@ -282,10 +439,7 @@ void cpu_fallback_rbln(
     // and the op then writes broadcasted values into the unresized buffer.
     // Routing write-alias slots through the legacy `to_cpu` path gives
     // them fresh CPU storage that PyTorch core can resize freely.
-    const auto schema_idx = tensor_args_indices[i];
-    const auto* alias_info = schema_args[schema_idx].alias_info();
-    const bool is_write_alias = (alias_info != nullptr && alias_info->isWrite());
-    if (is_write_alias) {
+    if (schema_info.is_write_alias[tensor_args_indices[i]]) {
       continue;
     }
     cpu_tensors[i] = borrow_rbln_as_cpu(tensor_args[i], borrow_ids[i]);
@@ -314,12 +468,7 @@ void cpu_fallback_rbln(
     if (borrow_ids[i] != 0 || cpu_tensors[i].defined()) {
       continue;
     }
-    const auto schema_idx = tensor_args_indices[i];
-    const auto& schema_arg = schema_args[schema_idx];
-    const auto* alias_info = schema_arg.alias_info();
-    const bool is_pure_out = schema_arg.kwarg_only() &&
-                             schema_arg.name() == "out" &&
-                             alias_info != nullptr && alias_info->isWrite();
+    const bool is_pure_out = schema_info.is_pure_out[tensor_args_indices[i]];
     if (is_pure_out && tensor_args[i].defined()) {
       // Direct output borrow: wrap the rbln out= tensor's host backing as a
       // CPU view. The CPU kernel writes straight into the rbln vmem region,
@@ -368,8 +517,104 @@ void cpu_fallback_rbln(
   const uint64_t _diag_t1 = now_ns();
   g_diag_ns_setup.fetch_add(_diag_t1 - _diag_t0, std::memory_order_relaxed);
 
-  // Step 2: Call the underlying CPU implementation of the operator
-  op.redispatchBoxed(c10::DispatchKeySet(cpu_dispatch_key), stack);
+  // Step 2: Call the underlying CPU implementation of the operator.
+  //
+  // Fast path: schema_info.fast_path identifies a hot LLaMA RMSNorm op. We
+  // run a plain contiguous loop directly into the borrowed host backing of
+  // the out tensor — no boxed dispatcher, no TensorIterator, no autograd
+  // bookkeeping. Runtime guards verify dtype/contig/shape and the op-specific
+  // shape constraints (dim list / exponent / keepdim) before committing to
+  // the fast path; any mismatch falls through to the generic redispatchBoxed.
+  bool fast_path_taken = false;
+  if (schema_info.fast_path != CpuFbFastPath::None &&
+      cpu_tensors.size() >= 2 &&
+      cpu_tensors[0].defined() && cpu_tensors[0].is_contiguous() &&
+      cpu_tensors[0].scalar_type() == at::kFloat) {
+    auto& cpu_self = cpu_tensors[0];
+    auto& cpu_out = cpu_tensors.back();  // out tensor is the last cached tensor
+    const bool out_ok = cpu_out.defined() && cpu_out.is_contiguous() &&
+                        cpu_out.scalar_type() == at::kFloat;
+    switch (schema_info.fast_path) {
+      case CpuFbFastPath::RsqrtOut: {
+        if (out_ok && cpu_out.numel() == cpu_self.numel() &&
+            cpu_out.sizes() == cpu_self.sizes()) {
+          micro_rsqrt_fp32_contig(cpu_self.data_ptr<float>(),
+                                  cpu_out.data_ptr<float>(),
+                                  cpu_self.numel());
+          fast_path_taken = true;
+        }
+        break;
+      }
+      case CpuFbFastPath::PowTensorScalarOut: {
+        // schema: pow.Tensor_Scalar_out(Tensor self, Scalar exponent, *, Tensor(a!) out)
+        // arguments stack still holds: [self, exponent, out]
+        if (out_ok && cpu_out.numel() == cpu_self.numel() &&
+            cpu_out.sizes() == cpu_self.sizes()) {
+          // exponent at arguments_begin + 1
+          const auto& exp_iv = (*stack)[arguments_begin + 1];
+          if (exp_iv.isScalar()) {
+            const auto exp_s = exp_iv.toScalar();
+            if (exp_s.isFloatingPoint() && exp_s.toDouble() == 2.0) {
+              micro_square_fp32_contig(cpu_self.data_ptr<float>(),
+                                       cpu_out.data_ptr<float>(),
+                                       cpu_self.numel());
+              fast_path_taken = true;
+            } else if (exp_s.isIntegral(false) && exp_s.toLong() == 2) {
+              micro_square_fp32_contig(cpu_self.data_ptr<float>(),
+                                       cpu_out.data_ptr<float>(),
+                                       cpu_self.numel());
+              fast_path_taken = true;
+            }
+          }
+        }
+        break;
+      }
+      case CpuFbFastPath::MeanOut: {
+        // schema: mean.out(Tensor self, int[] dim, bool keepdim=False,
+        //                  ScalarType? dtype=None, *, Tensor(a!) out)
+        // Stack: [self, dim, keepdim, dtype, out].
+        if (out_ok) {
+          const auto& dim_iv = (*stack)[arguments_begin + 1];
+          const auto& keepdim_iv = (*stack)[arguments_begin + 2];
+          const auto& dtype_iv = (*stack)[arguments_begin + 3];
+          // Guard: dim is IntList of size 1 with last-dim index, keepdim true,
+          // dtype None.
+          if (dim_iv.isIntList() && keepdim_iv.isBool() && keepdim_iv.toBool() &&
+              dtype_iv.isNone()) {
+            const auto dim_list = dim_iv.toIntVector();
+            if (dim_list.size() == 1) {
+              const int64_t self_dim = cpu_self.dim();
+              int64_t dim = dim_list[0];
+              if (dim < 0) dim += self_dim;
+              if (dim == self_dim - 1 && self_dim >= 1) {
+                const int64_t inner = cpu_self.size(self_dim - 1);
+                const int64_t outer = cpu_self.numel() / std::max<int64_t>(inner, 1);
+                // keepdim=True ⇒ out shape == self with last dim = 1.
+                if (cpu_out.numel() == outer && inner > 0) {
+                  micro_mean_lastdim_fp32_contig(cpu_self.data_ptr<float>(),
+                                                 cpu_out.data_ptr<float>(),
+                                                 static_cast<size_t>(outer),
+                                                 static_cast<size_t>(inner));
+                  fast_path_taken = true;
+                }
+              }
+            }
+          }
+        }
+        break;
+      }
+      case CpuFbFastPath::None:
+        break;
+    }
+    if (fast_path_taken) {
+      // Replace stack args with single return = out tensor.
+      stack->resize(arguments_begin);
+      stack->emplace_back(c10::IValue(cpu_out));
+    }
+  }
+  if (!fast_path_taken) {
+    op.redispatchBoxed(c10::DispatchKeySet(cpu_dispatch_key), stack);
+  }
 
   const uint64_t _diag_t2 = now_ns();
   g_diag_ns_dispatch.fetch_add(_diag_t2 - _diag_t1, std::memory_order_relaxed);
@@ -388,11 +633,10 @@ void cpu_fallback_rbln(
   //   tensor to match, borrow its now-sized vmem, memcpy the CPU content, and
   //   return the borrow as updated — replacing the eager H2D that
   //   at::_copy_from_and_resize would do.
+  const uint64_t _diag_wb_t0 = now_ns();
   std::vector<bool> borrow_write(tensor_args.size(), false);
   for (const auto i : c10::irange(tensor_args_indices.size())) {
-    auto tensor_idx = tensor_args_indices[i];
-    const AliasInfo* alias_info = schema_args[tensor_idx].alias_info();
-    if (alias_info == nullptr || !alias_info->isWrite()) {
+    if (!schema_info.is_write_alias[tensor_args_indices[i]]) {
       continue;
     }
     if (!tensor_args[i].defined()) {
@@ -430,6 +674,9 @@ void cpu_fallback_rbln(
     }
   }
 
+  const uint64_t _diag_wb_t1 = now_ns();
+  g_diag_ns_wb_alias_t.fetch_add(_diag_wb_t1 - _diag_wb_t0, std::memory_order_relaxed);
+
   // We also need to explicit reapply input mutations to inputs that are lists
   // of tensors. On the borrow path any element with a non-zero borrow id will
   // be committed via `rbln_v_return_borrowed(updated=true)` at the release
@@ -455,6 +702,9 @@ void cpu_fallback_rbln(
     }
   }
 
+  const uint64_t _diag_wb_t2 = now_ns();
+  g_diag_ns_wb_alias_tl.fetch_add(_diag_wb_t2 - _diag_wb_t1, std::memory_order_relaxed);
+
   // We also need to explicit reapply input mutations to inputs that are lists
   // of optional tensors
   for (const auto i : c10::irange(optional_tensorlist_args_indices.size())) {
@@ -472,6 +722,7 @@ void cpu_fallback_rbln(
   }
 
   const uint64_t _diag_t3 = now_ns();
+  g_diag_ns_wb_alias_otl.fetch_add(_diag_t3 - _diag_wb_t2, std::memory_order_relaxed);
   g_diag_ns_writeback.fetch_add(_diag_t3 - _diag_t2, std::memory_order_relaxed);
 
   // Release any vmem borrows issued on the input path. Write-alias inputs use
