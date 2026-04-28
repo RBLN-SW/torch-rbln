@@ -7,7 +7,7 @@
 #include <ATen/native/rbln/RBLNCopy.h>
 #include <ATen/native/rbln/RBLNTensorUtils.h>
 
-#include <ATen/native/rbln/rbln_vmem_borrow_api.h>
+#include <c10/rbln/RBLNFunctions.h>
 
 #ifndef AT_PER_OPERATOR_HEADERS
 #include <ATen/Functions.h>
@@ -125,7 +125,6 @@ at::Tensor borrow_rbln_as_cpu(const at::Tensor& t, uint64_t& borrow_id_out) {
     return {};
   }
 
-  const uint64_t vaddr = reinterpret_cast<uint64_t>(t.data_ptr()); // NOLINT
   const uint64_t nbytes = t.nbytes();
   if (nbytes == 0) {
     // Zero-element / empty tensor: no host region to borrow. Use an empty CPU
@@ -133,29 +132,15 @@ at::Tensor borrow_rbln_as_cpu(const at::Tensor& t, uint64_t& borrow_id_out) {
     return at::empty(t.sizes(), t.options().device(at::kCPU));
   }
 
-  uintptr_t host_ptr = 0;
-  uint64_t borrow_id = 0;
-  auto st = rebel::torch::rbln_v_borrow_host_ptr(vaddr, nbytes, host_ptr, borrow_id);
-  TORCH_CHECK(st.IsOK(), "rbln_v_borrow_host_ptr failed (vaddr=", vaddr, ", size=", nbytes, "): ", st.ToDebugString());
-  borrow_id_out = borrow_id;
+  auto borrowed = c10::rbln::borrow_host_ptr(t.data_ptr(), nbytes);
+  borrow_id_out = borrowed.borrow_id;
 
   auto options = at::TensorOptions().dtype(t.dtype()).device(at::kCPU);
-  return at::from_blob(reinterpret_cast<void*>(host_ptr), t.sizes(), t.strides(), options);
+  return at::from_blob(reinterpret_cast<void*>(borrowed.host_ptr), t.sizes(), t.strides(), options);
 }
 
 void release_borrow(uint64_t borrow_id, bool updated) {
-  if (borrow_id == 0) {
-    return;
-  }
-  auto st = rebel::torch::rbln_v_return_borrowed(borrow_id, updated);
-  TORCH_CHECK(
-      st.IsOK(),
-      "rbln_v_return_borrowed failed (borrow_id=",
-      borrow_id,
-      ", updated=",
-      updated,
-      "): ",
-      st.ToDebugString());
+  c10::rbln::return_borrowed(borrow_id, updated);
 }
 
 // TensorList variant of borrow_rbln_as_cpu. Walks each element; rbln entries
@@ -346,30 +331,11 @@ void cpu_fallback_rbln(
       }
       const uint64_t nbytes = rbln_out.nbytes();
       if (nbytes > 0) {
-        const uint64_t vaddr = reinterpret_cast<uint64_t>(rbln_out.data_ptr()); // NOLINT
-        uintptr_t host_ptr = 0;
-        uint64_t bid = 0;
         // Acquire-for-overwrite: we immediately memcpy over the whole region, so any
         // D2H from a stale PHYSICAL_VIEW_IS_LATEST state would be thrown away.
-        auto st = rebel::torch::rbln_v_acquire_host_ptr_for_overwrite(vaddr, nbytes, host_ptr, bid);
-        TORCH_CHECK(
-            st.IsOK(),
-            "rbln_v_acquire_host_ptr_for_overwrite failed for resized alias-write out "
-            "(vaddr=",
-            vaddr,
-            ", size=",
-            nbytes,
-            "): ",
-            st.ToDebugString());
-        std::memcpy(reinterpret_cast<void*>(host_ptr), cpu_tensors[i].data_ptr(), nbytes);
-        auto st2 = rebel::torch::rbln_v_return_borrowed(bid, /*updated=*/true);
-        TORCH_CHECK(
-            st2.IsOK(),
-            "rbln_v_return_borrowed failed for resized alias-write out "
-            "(borrow_id=",
-            bid,
-            "): ",
-            st2.ToDebugString());
+        auto borrowed = c10::rbln::acquire_host_ptr_for_overwrite(rbln_out.data_ptr(), nbytes);
+        std::memcpy(reinterpret_cast<void*>(borrowed.host_ptr), cpu_tensors[i].data_ptr(), nbytes);
+        c10::rbln::return_borrowed(borrowed.borrow_id, /*updated=*/true);
       }
     } else {
       at::_copy_from_and_resize(cpu_tensors[i], tensor_args[i]);
@@ -563,30 +529,13 @@ void cpu_fallback_rbln(
             auto rbln_out = at::empty(cpu_out.sizes(), cpu_out.options().device(*tgt_device));
             const uint64_t nbytes = rbln_out.nbytes();
             if (nbytes > 0) {
-              const uint64_t vaddr = reinterpret_cast<uint64_t>(rbln_out.data_ptr()); // NOLINT
-              uintptr_t host_ptr = 0;
-              uint64_t borrow_id = 0;
               // Acquire-for-overwrite: the tensor is a freshly-allocated at::empty;
               // any pre-existing data (in practice there is none, but if the
               // allocator ever caches a warm buffer the old device data is
               // irrelevant) will be overwritten by the memcpy below.
-              auto st = rebel::torch::rbln_v_acquire_host_ptr_for_overwrite(vaddr, nbytes, host_ptr, borrow_id);
-              TORCH_CHECK(
-                  st.IsOK(),
-                  "rbln_v_acquire_host_ptr_for_overwrite failed for output (vaddr=",
-                  vaddr,
-                  ", size=",
-                  nbytes,
-                  "): ",
-                  st.ToDebugString());
-              std::memcpy(reinterpret_cast<void*>(host_ptr), cpu_out.data_ptr(), nbytes);
-              auto st2 = rebel::torch::rbln_v_return_borrowed(borrow_id, /*updated=*/true);
-              TORCH_CHECK(
-                  st2.IsOK(),
-                  "rbln_v_return_borrowed failed for output (borrow_id=",
-                  borrow_id,
-                  "): ",
-                  st2.ToDebugString());
+              auto borrowed = c10::rbln::acquire_host_ptr_for_overwrite(rbln_out.data_ptr(), nbytes);
+              std::memcpy(reinterpret_cast<void*>(borrowed.host_ptr), cpu_out.data_ptr(), nbytes);
+              c10::rbln::return_borrowed(borrowed.borrow_id, /*updated=*/true);
             }
             (*stack)[returns_begin + idx] = c10::IValue(rbln_out);
           } else {
