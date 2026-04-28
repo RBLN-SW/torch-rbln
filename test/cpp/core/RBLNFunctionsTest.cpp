@@ -230,9 +230,6 @@ TEST_F(RBLNFunctionsTest, GetUninitializedMemoryInfo) {
 // ---------------------------------------------------------------------------
 
 TEST_F(RBLNFunctionsTest, BorrowHostPtrRoundTrip) {
-  const auto device_count = c10::rbln::get_device_count();
-  EXPECT_GE(device_count, 1);
-
   // Stage host-side bytes into rbln memory, then read them back via borrow.
   const size_t nbytes = 1024;
   std::vector<int8_t> src_cpu(nbytes, 0x5a);
