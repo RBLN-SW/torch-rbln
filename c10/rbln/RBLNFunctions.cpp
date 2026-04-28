@@ -356,9 +356,8 @@ BorrowedHostPtr acquire_host_ptr_for_overwrite(void* rbln_data, size_t nbytes) {
 }
 
 void return_borrowed(uint64_t borrow_id, bool updated) {
-  // borrow_id == 0 is a sentinel meaning "no live borrow" — see header.
-  // Cleanup paths (e.g. RBLNCPUFallback's per-tensor borrow_ids vector)
-  // call this unconditionally over entries that may have been skipped.
+  // borrow_id == 0 is a "no live borrow" sentinel — see header. Cleanup
+  // paths may call this unconditionally over entries that were skipped.
   if (borrow_id == 0) {
     return;
   }

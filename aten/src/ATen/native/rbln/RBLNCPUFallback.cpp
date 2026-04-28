@@ -139,10 +139,6 @@ at::Tensor borrow_rbln_as_cpu(const at::Tensor& t, uint64_t& borrow_id_out) {
   return at::from_blob(reinterpret_cast<void*>(borrowed.host_ptr), t.sizes(), t.strides(), options);
 }
 
-void release_borrow(uint64_t borrow_id, bool updated) {
-  c10::rbln::return_borrowed(borrow_id, updated);
-}
-
 // TensorList variant of borrow_rbln_as_cpu. Walks each element; rbln entries
 // are borrowed (no D2H copy when host-latest), others fall through to the
 // legacy batched at::_to_cpu. Borrow ids are appended to `borrow_ids_out` so
@@ -387,14 +383,14 @@ void cpu_fallback_rbln(
   // `updated=true` so the rbln tensor's host view becomes the latest source of
   // truth and the next device consumer triggers a lazy host→device sync.
   for (size_t i = 0; i < borrow_ids.size(); ++i) {
-    release_borrow(borrow_ids[i], borrow_write[i]);
+    c10::rbln::return_borrowed(borrow_ids[i], borrow_write[i]);
   }
   for (size_t i = 0; i < tensorlist_borrow_ids.size(); ++i) {
     for (size_t k = 0; k < tensorlist_borrow_ids[i].size(); ++k) {
       const bool upd = (i < tensorlist_borrow_write.size() && k < tensorlist_borrow_write[i].size())
           ? tensorlist_borrow_write[i][k]
           : false;
-      release_borrow(tensorlist_borrow_ids[i][k], upd);
+      c10::rbln::return_borrowed(tensorlist_borrow_ids[i][k], upd);
     }
   }
 
