@@ -48,13 +48,11 @@ struct ShimEntry {
 };
 
 // Leaky singletons: these hold pybind11::object (registry) and torch::Library
-// (installed_libs) which keep Python state alive. A regular `static T x;` runs
-// its destructor *after* Py_Finalize() during process teardown, which decrefs
-// Python objects on a finalized interpreter and aborts inside libpython —
-// observed as SIGSEGV in subprocess-based tests under xdist parallel mode.
-// Allocating with `new` and returning a reference keeps the storage and the
-// Python references alive until the OS reclaims the process; no destructor
-// fires, no decref race with finalize.
+// (installed_libs), both of which keep Python state alive. A regular
+// `static T x;` runs its destructor *after* Py_Finalize() during process
+// teardown, which decrefs Python objects on a finalized interpreter and
+// aborts inside libpython. Allocate with `new` so the storage outlives
+// Python finalize; the OS reclaims it at exit.
 std::unordered_map<std::string, ShimEntry>& registry() {
   static auto* r = new std::unordered_map<std::string, ShimEntry>();
   return *r;
