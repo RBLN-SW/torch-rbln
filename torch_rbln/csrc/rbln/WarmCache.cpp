@@ -75,40 +75,19 @@ const char* intern_op_name(const std::string& name) {
 
 // ---- WarmCache singleton ----------------------------------------------------
 
-namespace {
-// Default OFF in V1 — enable explicitly via TORCH_RBLN_WARMCACHE=1 (or "on"/"true").
-//
-// Rationale: the warm-cache hot path calls into rebel runtime methods with
-// raw v-memory addresses. Some tensor allocation paths (e.g. composite
-// decompositions that allocate output via empty()) produce data_ptr values
-// whose v-memory keys are not yet registered with the runtime, tripping
-// rebel's `Invalid key_vaddr=0` guard. The pybind miss path goes through
-// DynamoRuntime which performs the v-memory bookkeeping that handles those
-// cases. Until we land a clean integration with rebel's allocator metadata
-// (FINE-565), we keep the cache off by default and let users opt in for
-// profiling / micro-bench scenarios where the savings are measurable.
-bool env_default_enabled() {
-  const char* env = std::getenv("TORCH_RBLN_WARMCACHE");
-  if (env == nullptr || env[0] == '\0')
-    return false;
-  if (env[0] == '1')
-    return true;
-  std::string v(env);
-  if (v == "on" || v == "ON" || v == "true" || v == "TRUE")
-    return true;
-  return false;
-}
-} // namespace
-
 WarmCache& WarmCache::instance() {
   // Leaky singleton: CacheEntry holds a strong pybind11::object reference to
   // the DynamoRuntime. Running ~WarmCache after Py_Finalize() decrefs that
   // py::object on a finalized interpreter and aborts inside libpython.
   // Allocate with `new` so the entries outlive Python finalize; the OS
   // reclaims the process memory at exit.
+  //
+  // Default ON: hot path drives rebel runtime directly from C++ on warm hits;
+  // miss-path entries that fail v-memory lookup are erased by try_warmcache_hit
+  // so cold-path correctness is preserved.
   static auto* c = [] {
     auto* p = new WarmCache();
-    p->set_enabled(env_default_enabled());
+    p->set_enabled(true);
     return p;
   }();
   return *c;
