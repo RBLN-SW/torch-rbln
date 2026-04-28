@@ -74,107 +74,64 @@ def _raw_cpp_ptr(pybound_instance: Any) -> int:
     return int(raw)
 
 
-def _dtype_key(dt: torch.dtype) -> str:
-    """Map torch.dtype → the short string the C++ install path expects."""
-    return {
-        torch.float16: "float16",
-        torch.float32: "float32",
-        torch.bfloat16: "bfloat16",
-        torch.int64: "int64",
-        torch.int32: "int32",
-        torch.int16: "int16",
-        torch.int8: "int8",
-        torch.uint8: "uint8",
-        torch.bool: "bool",
-    }.get(dt, "")
-
-
-def _collect_output_profiles(
-    outputs: Any,
-) -> list[tuple[list[int], str, bool]]:
-    """Package a compile result into ``[(shape, dtype, is_rbln), ...]``.
-
-    The compile may return a single tensor or a tuple/list of tensors; we
-    normalize to a flat list of profiles. Any non-tensor element (e.g. None)
-    is skipped — it won't be restored on the hit path because the hit path
-    only handles single-tensor-return shim ops today.
-    """
-    if outputs is None:
-        return []
-    if isinstance(outputs, torch.Tensor):
-        outputs = (outputs,)
-    profiles: list[tuple[list[int], str, bool]] = []
-    for t in outputs:
-        if not isinstance(t, torch.Tensor):
-            continue
-        dt = _dtype_key(t.dtype)
-        if not dt:
-            # Unknown dtype — bail so we don't install a bad entry.
-            return []
-        is_rbln = t.device.type == "rbln"
-        profiles.append((list(t.shape), dt, is_rbln))
-    return profiles
+_DTYPE_KEY = {
+    torch.float16: "float16",
+    torch.float32: "float32",
+    torch.bfloat16: "bfloat16",
+    torch.int64: "int64",
+    torch.int32: "int32",
+    torch.int16: "int16",
+    torch.int8: "int8",
+    torch.uint8: "uint8",
+    torch.bool: "bool",
+}
 
 
 def install_pending(runtime_holder: list, outputs: Any) -> bool:
-    """Install a warm-cache entry for the op whose pending key is live.
-
-    Parameters
-    ----------
-    runtime_holder
-        The ``_runtime_holder`` list that rebel's ``rbln_backend`` appends
-        the fresh ``DynamoRuntime`` to on first compile. Expected to hold
-        exactly one element; no-op if empty (cache hit on compile but not
-        on warm cache; nothing new to install).
-    outputs
-        The result of the compiled call (tensor, tuple, or similar). Its
-        shape/dtype/device are captured as ``OutputProfile``s for the
-        hit path to allocate fresh output tensors when the op has no
-        ``out=`` argument.
-
-    Returns
-    -------
-    True if an entry was installed; False on no-op (empty holder, unknown
-    dtype, missing pending context, or layout mismatch).
-    """
-    if not runtime_holder:
+    # Hot codegen-injected path: skip work whenever WarmCache is disabled.
+    # `_warmcache_is_enabled` is one C call; cheaper than the rest of this
+    # function and makes WC OFF nearly free on the cold path.
+    if not runtime_holder or not _C._warmcache_is_enabled():
+        if runtime_holder:
+            runtime_holder.clear()
         return False
 
     dyn_runtime = runtime_holder[-1]
-    try:
-        runtime_handle = dyn_runtime._runtime_handle
-    except AttributeError:
+    runtime_handle = dyn_runtime._runtime_handle
+    raw_ptr = ctypes.c_void_p.from_address(id(runtime_handle) + _PYOBJECT_HEAD_SIZE).value
+    if raw_ptr is None:
+        runtime_holder.clear()
         return False
 
-    try:
-        raw_ptr = _raw_cpp_ptr(runtime_handle)
-    except Exception:
-        return False
-
-    # Output profile. The Python wrapper passes either the external result
-    # (fresh tensor) or the caller-provided out tensor. Either is fine:
-    # shape/dtype are what matter.
-    profiles = _collect_output_profiles(outputs)
+    if isinstance(outputs, torch.Tensor):
+        outputs = (outputs,)
+    profiles = []
+    for t in outputs:
+        if not isinstance(t, torch.Tensor):
+            continue
+        dt = _DTYPE_KEY.get(t.dtype)
+        if dt is None:
+            runtime_holder.clear()
+            return False
+        profiles.append((list(t.shape), dt, t.device.type == "rbln"))
     if not profiles:
+        runtime_holder.clear()
         return False
 
-    try:
-        num_inputs = int(dyn_runtime._num_inputs)
-        num_outputs = int(dyn_runtime._num_outputs)
-    except AttributeError:
-        # Older or different rebel runtime — harvest best-effort
-        num_inputs = 0
-        num_outputs = len(profiles)
+    num_inputs = getattr(dyn_runtime, "_num_inputs", 0)
+    num_outputs = getattr(dyn_runtime, "_num_outputs", len(profiles))
 
-    return bool(
-        _C._warmcache_install_pending(
-            dyn_runtime=dyn_runtime,
-            runtime_raw_ptr=raw_ptr,
-            num_inputs=num_inputs,
-            num_outputs=num_outputs,
-            out_profiles=profiles,
-        )
+    ok = _C._warmcache_install_pending(
+        dyn_runtime=dyn_runtime,
+        runtime_raw_ptr=raw_ptr,
+        num_inputs=num_inputs,
+        num_outputs=num_outputs,
+        out_profiles=profiles,
     )
+    # Drop the harvested DynamoRuntime so subsequent compile invocations on the
+    # same compiled callable don't grow the list unboundedly.
+    runtime_holder.clear()
+    return bool(ok)
 
 
 # ---------------------------------------------------------------------------

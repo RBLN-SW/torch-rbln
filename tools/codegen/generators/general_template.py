@@ -166,6 +166,12 @@ class {class_name}(torch.nn.Module):
         # the logical device size (RBLN_NPUS_PER_DEVICE) like torch.compile operations.
         if not use_device_group_tensor_parallel_size():
             compile_options["tensor_parallel_size"] = 1
+        # Side-channel: rebel backend appends the freshly-built DynamoRuntime to
+        # this list on first compile so the C++ warm cache can harvest it via
+        # warm_cache.install_pending() below. compile_cache strips the holder
+        # from its cache key so the same module gets one holder per profile.
+        _runtime_holder = []
+        compile_options["_runtime_holder"] = _runtime_holder
         if out_tensor is None:
             result_tensor = None
         else:
@@ -185,13 +191,14 @@ class {class_name}(torch.nn.Module):
                 {op_module_var},
                 dynamic=False,
                 options=compile_options,
-                device_cache_key=extract_device_id_from_inputs(*contig_args, **contig_kwargs),
+                device_cache_key=extract_warm_cache_key(*contig_args, **contig_kwargs),
             )
             external_result = compiled(*contig_args, **contig_kwargs)
             if result_tensor is None:
                 result_tensor = external_result
             elif isinstance(external_result, torch.Tensor) and (external_result.data_ptr() != result_tensor.data_ptr()):
                 result_tensor.copy_(external_result)
+            _install_warm_cache_pending(_runtime_holder, external_result)
 
     return result_tensor, result_tensor.shape
 """
