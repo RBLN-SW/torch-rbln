@@ -181,7 +181,12 @@ class {class_name}(torch.nn.Module):
                 result_tensor = None
 
         with out_tensor_context(result_tensor):
-            compiled = torch.compile({op_module_var}, backend="rbln", dynamic=False, options=compile_options)
+            compiled = compile_rbln_cached(
+                {op_module_var},
+                dynamic=False,
+                options=compile_options,
+                device_cache_key=extract_device_id_from_inputs(*contig_args, **contig_kwargs),
+            )
             external_result = compiled(*contig_args, **contig_kwargs)
             if result_tensor is None:
                 result_tensor = external_result

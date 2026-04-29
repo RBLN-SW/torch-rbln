@@ -1,5 +1,6 @@
 import torch
 
+from torch_rbln._internal.compile_cache import compile_rbln_cached
 from torch_rbln._internal.log_utils import rbln_log_debug
 
 
@@ -19,11 +20,11 @@ def custom_transpose_rbln(self, dim0: int, dim1: int, out=None):
     rbln_log_debug(f"custom_transpose_rbln: result_shape={result_tensor.shape}")
 
     with out_tensor_context(result_tensor):
-        compiled = torch.compile(
+        compiled = compile_rbln_cached(
             _transpose_op_module,
-            backend="rbln",
             dynamic=False,
             options={"disable_logger": True, "tensor_parallel_size": 1},
+            device_cache_key=self.device.index,
         )
         external_result = compiled(self, dim0=dim0, dim1=dim1)
         if result_tensor is None:

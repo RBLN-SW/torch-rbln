@@ -4,6 +4,7 @@
 Test suite for torch_compile_patch_helpers module.
 """
 
+from contextlib import nullcontext
 from unittest.mock import Mock, patch
 
 import pytest
@@ -11,9 +12,10 @@ import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
+import torch_rbln._internal.register_custom_ops as register_custom_ops
 from test.utils import requires_logical_devices
-
-from torch_rbln._internal.monkey_patches import patch_torch_compile
+from torch_rbln._internal.compile_cache import clear_rbln_compile_cache, compile_rbln_cached
+from torch_rbln._internal.monkey_patches import patch_torch_compile, remove_all_patches
 from torch_rbln._internal.ops_utils import extract_device_id_from_inputs
 from torch_rbln._internal.torch_compile_patch_helpers import (
     _convert_result_to_device,
@@ -676,17 +678,67 @@ class TestTorchCompileMonkeyPatch(TestCase):
     """Tests for torch.compile monkey patching."""
 
     def setUp(self):
-        """Store original torch.compile before tests."""
-        self._original_compile = torch.compile
+        """Store original torch.compile and torch._dynamo.reset before tests."""
+        import torch_rbln._internal.monkey_patches as mp
+
+        # apply_all_patches() runs at torch_rbln import time, so torch.compile
+        # is already the wrapper by the time tests run. Pull the true originals
+        # from the module state instead of capturing the current (wrapped) values.
+        self._original_compile = mp._original_torch_compile if mp._original_torch_compile is not None else torch.compile
+        self._original_dynamo_reset = (
+            mp._original_dynamo_reset if mp._original_dynamo_reset is not None else torch._dynamo.reset
+        )
+        clear_rbln_compile_cache()
 
     def tearDown(self):
-        """Restore original torch.compile after tests."""
+        """Restore original torch.compile and torch._dynamo.reset after tests."""
         torch.compile = self._original_compile
+        torch._dynamo.reset = self._original_dynamo_reset
+        clear_rbln_compile_cache()
         # Reset patch state
         import torch_rbln._internal.monkey_patches as mp
 
         mp._torch_compile_patched = False
+        mp._torch_dynamo_reset_patched = False
         mp._rbln_backend_registered = False
+
+    def _make_paged_attn_inputs(self):
+        q = torch.zeros((1, 1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
+        k = torch.zeros((1, 1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
+        v = torch.zeros((1, 1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
+        attn_mask = torch.zeros((1, 1, 1), device="rbln:0", dtype=torch.float16)
+        k_cache = torch.zeros((1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
+        v_cache = torch.zeros((1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
+        seq = torch.zeros((1, 1), dtype=torch.int32)
+        scale = torch.tensor(1.0)
+        block_table = torch.zeros((1, 1), dtype=torch.int32)
+        block_size = 16
+        return (q, k, v, attn_mask, k_cache, v_cache, seq, scale, block_table, block_size)
+
+    def _make_paged_causal_attn_prefill_inputs(self):
+        q = torch.zeros((1, 1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
+        k = torch.zeros((1, 1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
+        v = torch.zeros((1, 1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
+        k_cache = torch.zeros((1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
+        v_cache = torch.zeros((1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
+        seq = torch.zeros((1, 1), dtype=torch.int32)
+        scale = torch.tensor(1.0)
+        block_table = torch.zeros((1, 1), dtype=torch.int32)
+        block_size = 16
+        is_bidirectional = False
+        return (q, k, v, k_cache, v_cache, seq, scale, block_table, block_size, is_bidirectional)
+
+    def _make_paged_causal_attn_decode_inputs(self):
+        q = torch.zeros((1, 1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
+        k = torch.zeros((1, 1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
+        v = torch.zeros((1, 1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
+        k_cache = torch.zeros((1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
+        v_cache = torch.zeros((1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
+        seq = torch.zeros((1, 1), dtype=torch.int32)
+        scale = torch.tensor(1.0)
+        block_table = torch.zeros((1, 1), dtype=torch.int32)
+        block_size = 16
+        return (q, k, v, k_cache, v_cache, seq, scale, block_table, block_size)
 
     def test_patch_torch_compile_idempotent(self):
         """Test that patching multiple times is safe."""
@@ -697,6 +749,23 @@ class TestTorchCompileMonkeyPatch(TestCase):
         second_compile = torch.compile
 
         self.assertIs(first_compile, second_compile)
+
+    def test_remove_all_patches_restores_original_functions(self):
+        """remove_all_patches should restore both torch.compile and torch._dynamo.reset."""
+        patch_torch_compile()
+
+        self.assertIsNot(torch.compile, self._original_compile)
+        self.assertIsNot(torch._dynamo.reset, self._original_dynamo_reset)
+
+        remove_all_patches()
+
+        self.assertIs(torch.compile, self._original_compile)
+        self.assertIs(torch._dynamo.reset, self._original_dynamo_reset)
+
+        import torch_rbln._internal.monkey_patches as mp
+
+        self.assertFalse(mp._torch_compile_patched)
+        self.assertFalse(mp._torch_dynamo_reset_patched)
 
     def test_patch_torch_compile_non_rbln_backend(self):
         """Test that non-RBLN backends pass through normally."""
@@ -740,6 +809,127 @@ class TestTorchCompileMonkeyPatch(TestCase):
         # Applying again should be idempotent
         patch_torch_compile()
         self.assertIs(patched, torch.compile)
+
+    def test_compile_rbln_cached_reuses_compiled_callable_for_steady_state(self):
+        """Repeated eager-op compilation should hit the Python-level cache after the first call."""
+        model = Mock()
+        compiled_fn = Mock(name="compiled_fn")
+
+        with patch("torch_rbln._internal.compile_cache.torch.compile", return_value=compiled_fn) as mock_compile:
+            first = compile_rbln_cached(
+                model,
+                dynamic=False,
+                options={"disable_logger": True, "tensor_parallel_size": 1},
+                device_cache_key=0,
+            )
+            second = compile_rbln_cached(
+                model,
+                dynamic=False,
+                options={"disable_logger": True, "tensor_parallel_size": 1},
+                device_cache_key=0,
+            )
+
+        self.assertIs(first, compiled_fn)
+        self.assertIs(second, compiled_fn)
+        self.assertEqual(mock_compile.call_count, 1)
+
+    def test_compile_rbln_cached_does_not_alias_distinct_models_with_same_raw_id(self):
+        """Cache keys should distinguish different model objects even if raw id() collides."""
+        model_a = Mock(name="model_a")
+        model_b = Mock(name="model_b")
+        compiled_a = Mock(name="compiled_a")
+        compiled_b = Mock(name="compiled_b")
+
+        with patch("torch_rbln._internal.compile_cache.id", return_value=7, create=True):
+            with patch(
+                "torch_rbln._internal.compile_cache.torch.compile", side_effect=[compiled_a, compiled_b]
+            ) as mock_compile:
+                first = compile_rbln_cached(
+                    model_a, dynamic=False, options={"disable_logger": True}, device_cache_key=0
+                )
+                second = compile_rbln_cached(
+                    model_b, dynamic=False, options={"disable_logger": True}, device_cache_key=0
+                )
+
+        self.assertIs(first, compiled_a)
+        self.assertIs(second, compiled_b)
+        self.assertEqual(mock_compile.call_count, 2)
+
+    @requires_logical_devices(1)
+    def test_paged_attn_custom_kernel_paths_reuse_singleton_modules(self):
+        """Custom paged-attn kernels should pass stable module singletons into the compile cache."""
+        cases = [
+            (
+                register_custom_ops.paged_attn_prefill_rbln,
+                register_custom_ops._paged_attn_prefill_op_module,
+                self._make_paged_attn_inputs,
+            ),
+            (
+                register_custom_ops.paged_attn_decode_rbln,
+                register_custom_ops._paged_attn_decode_op_module,
+                self._make_paged_attn_inputs,
+            ),
+            (
+                register_custom_ops.paged_causal_attn_prefill_rbln,
+                register_custom_ops._paged_causal_attn_prefill_op_module,
+                self._make_paged_causal_attn_prefill_inputs,
+            ),
+            (
+                register_custom_ops.paged_causal_attn_decode_rbln,
+                register_custom_ops._paged_causal_attn_decode_op_module,
+                self._make_paged_causal_attn_decode_inputs,
+            ),
+        ]
+
+        def fake_out_tensor_context(out_tensor=None):
+            return nullcontext()
+
+        for kernel_fn, expected_module, make_inputs in cases:
+            seen_models = []
+
+            def fake_compile(model, **kwargs):
+                seen_models.append(model)
+                return lambda *args, **inner_kwargs: args[0].clone()
+
+            with patch.object(register_custom_ops, "compile_rbln_cached", side_effect=fake_compile):
+                with patch("torch_rbln.device.context_holder.out_tensor_context", new=fake_out_tensor_context):
+                    kernel_fn(*make_inputs())
+                    kernel_fn(*make_inputs())
+
+            self.assertEqual(len(seen_models), 2)
+            self.assertIs(seen_models[0], expected_module)
+            self.assertIs(seen_models[1], expected_module)
+
+    def test_compile_rbln_cached_recompiles_after_dynamo_reset(self):
+        """torch._dynamo.reset should also clear the RBLN eager compile cache."""
+        patch_torch_compile()
+        model = Mock()
+
+        with patch("torch_rbln._internal.compile_cache.torch.compile", side_effect=[Mock(), Mock()]) as mock_compile:
+            compile_rbln_cached(
+                model,
+                dynamic=False,
+                options={"disable_logger": True},
+                device_cache_key=0,
+            )
+            compile_rbln_cached(
+                model,
+                dynamic=False,
+                options={"disable_logger": True},
+                device_cache_key=0,
+            )
+            self.assertEqual(mock_compile.call_count, 1)
+
+            torch._dynamo.reset()
+
+            compile_rbln_cached(
+                model,
+                dynamic=False,
+                options={"disable_logger": True},
+                device_cache_key=0,
+            )
+
+        self.assertEqual(mock_compile.call_count, 2)
 
     @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_tp_if_needed")
     def test_patch_torch_compile_wrapper_integration(self, mock_auto_determine):
