@@ -34,6 +34,28 @@ void register_cpp_shim(
     pybind11::object py_fn,
     const std::vector<size_t>& skip_dtype_args = {});
 
+// DIAG: dispatch path counters/timing populated inside generic_shim_boxed.
+// Returns (n_total, n_fallback, n_warm_hit, n_miss, ns_warm_hit, ns_miss).
+//   n_total      - every shim invocation
+//   n_fallback   - quick_fallback_check=true → cpu_fallback_rbln
+//   n_warm_hit   - warm-cache hit fast path (rebel runtime driven from C++)
+//   n_miss       - cold/miss path (Python compile via py_fn)
+//   ns_warm_hit  - cumulative ns inside warm-cache hit path (~all in rebel run)
+//   ns_miss      - cumulative ns inside miss path (Python compile + first run)
+std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>
+diag_dump_dispatch_paths();
+void diag_reset_dispatch_paths();
+uint64_t diag_dump_align_fastpath_count();
+
+// DIAG: per-segment timers inside the warm-cache hit path. Returns
+// (n_hits, ns_lookup, ns_io_build, ns_gil, ns_prep_in, ns_prep_out, ns_run,
+//  ns_finalize). Counts/accumulates only when the hit path returns true; early
+// failures (find miss, ptr==0, runtime soft-fail) are excluded so per-segment
+// averages reflect successful warm-path calls only.
+std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>
+diag_dump_warm_segments();
+void diag_reset_warm_segments();
+
 // Called by the Python wrapper after a successful miss-path compile to install
 // a warm-cache entry keyed by the CacheKey that the shim built on the way in
 // (stored in a thread-local so Python doesn't need to re-build it).

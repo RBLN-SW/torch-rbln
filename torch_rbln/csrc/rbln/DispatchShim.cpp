@@ -8,16 +8,100 @@
 #include <torch/csrc/jit/python/pybind_utils.h>
 #include <torch/library.h>
 
+#include <atomic>
+#include <chrono>
+
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace torch_rbln::shim {
 
+// ---------------------------------------------------------------------------
+// DIAG counters: dispatch path classification. Populated on every call into
+// the boxed shim handler. Externally readable via diag_dump_dispatch_paths().
+// ---------------------------------------------------------------------------
 namespace {
+std::atomic<uint64_t> g_diag_n_total{0};       // total generic_shim_boxed invocations
+std::atomic<uint64_t> g_diag_n_fallback{0};    // would_fallback=true → cpu_fallback_rbln
+std::atomic<uint64_t> g_diag_n_warm_hit{0};    // warm-cache fast path hit
+std::atomic<uint64_t> g_diag_n_miss{0};        // Python compile (miss) path
+std::atomic<uint64_t> g_diag_ns_warm_hit{0};   // total ns inside warm-cache hit path
+std::atomic<uint64_t> g_diag_ns_miss{0};       // total ns inside miss path
+std::atomic<uint64_t> g_diag_n_align_fastpath{0}; // align fast-path hits → cpu_fallback
+
+// Warm-cache hit path per-segment timers. Accumulated only on successful hits
+// so per-segment averages = ns_X / n_hits give the steady-state breakdown.
+std::atomic<uint64_t> g_diag_warm_n_hits{0};
+std::atomic<uint64_t> g_diag_warm_ns_lookup{0};
+std::atomic<uint64_t> g_diag_warm_ns_io_build{0};
+std::atomic<uint64_t> g_diag_warm_ns_gil{0};
+std::atomic<uint64_t> g_diag_warm_ns_prep_in{0};
+std::atomic<uint64_t> g_diag_warm_ns_prep_out{0};
+std::atomic<uint64_t> g_diag_warm_ns_run{0};
+std::atomic<uint64_t> g_diag_warm_ns_finalize{0};
+} // namespace
+
+std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>
+diag_dump_dispatch_paths() {
+  return std::make_tuple(g_diag_n_total.load(std::memory_order_relaxed),
+                         g_diag_n_fallback.load(std::memory_order_relaxed),
+                         g_diag_n_warm_hit.load(std::memory_order_relaxed),
+                         g_diag_n_miss.load(std::memory_order_relaxed),
+                         g_diag_ns_warm_hit.load(std::memory_order_relaxed),
+                         g_diag_ns_miss.load(std::memory_order_relaxed));
+}
+
+uint64_t diag_dump_align_fastpath_count() {
+  return g_diag_n_align_fastpath.load(std::memory_order_relaxed);
+}
+
+void diag_reset_dispatch_paths() {
+  g_diag_n_total.store(0, std::memory_order_relaxed);
+  g_diag_n_fallback.store(0, std::memory_order_relaxed);
+  g_diag_n_warm_hit.store(0, std::memory_order_relaxed);
+  g_diag_n_miss.store(0, std::memory_order_relaxed);
+  g_diag_ns_warm_hit.store(0, std::memory_order_relaxed);
+  g_diag_ns_miss.store(0, std::memory_order_relaxed);
+  g_diag_n_align_fastpath.store(0, std::memory_order_relaxed);
+}
+
+std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>
+diag_dump_warm_segments() {
+  return std::make_tuple(
+      g_diag_warm_n_hits.load(std::memory_order_relaxed),
+      g_diag_warm_ns_lookup.load(std::memory_order_relaxed),
+      g_diag_warm_ns_io_build.load(std::memory_order_relaxed),
+      g_diag_warm_ns_gil.load(std::memory_order_relaxed),
+      g_diag_warm_ns_prep_in.load(std::memory_order_relaxed),
+      g_diag_warm_ns_prep_out.load(std::memory_order_relaxed),
+      g_diag_warm_ns_run.load(std::memory_order_relaxed),
+      g_diag_warm_ns_finalize.load(std::memory_order_relaxed));
+}
+
+void diag_reset_warm_segments() {
+  g_diag_warm_n_hits.store(0, std::memory_order_relaxed);
+  g_diag_warm_ns_lookup.store(0, std::memory_order_relaxed);
+  g_diag_warm_ns_io_build.store(0, std::memory_order_relaxed);
+  g_diag_warm_ns_gil.store(0, std::memory_order_relaxed);
+  g_diag_warm_ns_prep_in.store(0, std::memory_order_relaxed);
+  g_diag_warm_ns_prep_out.store(0, std::memory_order_relaxed);
+  g_diag_warm_ns_run.store(0, std::memory_order_relaxed);
+  g_diag_warm_ns_finalize.store(0, std::memory_order_relaxed);
+}
+
+namespace {
+
+inline uint64_t now_ns() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
 
 using warmcache::CacheEntry;
 using warmcache::CacheKey;
@@ -38,6 +122,11 @@ struct SchemaCache {
   size_t num_positional = 0;
   std::vector<c10::TypePtr> return_types; // parallel to schema returns
   bool populated = false;
+  bool is_align_sensitive = false; // op name in align_sensitive_ops() set
+  bool is_broadcast_op = false; // op may broadcast tensor args (mul/add/sub/...).
+                                 // When true, build_cache_key uses post-broadcast
+                                 // shapes and try_warmcache_hit broadcasts inputs
+                                 // before passing data_ptrs to PrepareInputs.
 };
 
 struct ShimEntry {
@@ -110,6 +199,170 @@ bool is_skipped_arg(const std::vector<size_t>& skip_list, size_t i) {
     if (idx == i) {
       return true;
     }
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Align-penalty fast-path
+//
+// RBLN device requires last-dim aligned to 64. When an op's output has
+// last-dim not divisible by 64, rebel-compiler inserts host pad/depad nodes
+// (RblnTensorPadLastDim + RblnTensorWrapHostOps passes) on the op graph,
+// producing the chain: host pad → H2D → device → D2H → host depad. For small
+// tensors (decode workloads), per-call cost is dominated by this
+// orchestration (~700 µs measured) rather than the compute (~5 µs).
+//
+// We route these calls through cpu_fallback_rbln, which uses v-mem
+// host-backed borrow (no D2H copy, no pad). Validated on aten::neg.out for
+// LLaMA-1B rotary: decode -10.3% (NEG_ONLY isolation).
+//
+// Eligibility (`g_align_sensitive_ops`):
+//   - Shape-preserving elementwise ops where output last-dim mirrors broadcast
+//     of inputs. These include unary (neg, abs, sqrt, log, exp, silu, rsqrt,
+//     ceil, floor, sigmoid, logical_not, pow.Tensor_Scalar_out), binary (add,
+//     sub, mul, div, div.out_mode, maximum, minimum), comparisons
+//     (ne/eq/gt/ge/lt/le), and where.self_out.
+//   - clamp.out is shape-preserving with scalar bounds.
+//
+// Excluded:
+//   - mm.out, bmm.out, addmm.out, linear: output last-dim depends on weight,
+//     not input. Compute (O(MNK)) usually dominates align cost.
+//   - mean.out / max.unary_out / min.unary_out: reductions change output dim.
+//   - cat / index ops: not in shim path anyway.
+//
+// Criterion: check OUT tensor's last-dim (post-broadcast result shape),
+// since for binary ops the result shape may be aligned even if one input is
+// not (e.g. `mul([B,S,64], [1,1,32]) → [B,S,64]` — device wins, no align
+// penalty).
+const std::unordered_set<std::string>& align_sensitive_ops() {
+  static const std::unordered_set<std::string>* s = new std::unordered_set<std::string>{
+    // Unary elementwise
+    "aten::neg.out",
+    "aten::abs.out",
+    "aten::log.out",
+    "aten::sigmoid.out",
+    "aten::silu.out",
+    "aten::rsqrt.out",
+    "aten::ceil.out",
+    "aten::floor.out",
+    "aten::logical_not.out",
+    "aten::pow.Tensor_Scalar_out",
+    "aten::clamp.out",
+    // Binary elementwise (broadcast-aware via OUT tensor check)
+    "aten::add.out",
+    "aten::sub.out",
+    "aten::mul.out",
+    "aten::div.out",
+    "aten::div.out_mode",
+    "aten::maximum.out",
+    "aten::minimum.out",
+    // Comparisons (output is bool but shape mirrors broadcast)
+    "aten::ne.Tensor_out",
+    "aten::eq.Tensor_out",
+    "aten::gt.Tensor_out",
+    "aten::ge.Tensor_out",
+    "aten::lt.Tensor_out",
+    "aten::le.Tensor_out",
+    "aten::ne.Scalar_out",
+    "aten::eq.Scalar_out",
+    "aten::gt.Scalar_out",
+    "aten::ge.Scalar_out",
+    "aten::lt.Scalar_out",
+    "aten::le.Scalar_out",
+    // Ternary (cond, self, other) — output shape is broadcast
+    "aten::where.self_out",
+  };
+  return *s;
+}
+
+// Set of ops whose tensor inputs MUST be pre-broadcast in the C++ shim path
+// because the compiled runtime expects post-broadcast-shape buffers.
+//
+// Ops whose tensor inputs MAY require pre-broadcast in the warm-hit path.
+// Membership marks the op as "elementwise broadcast-capable"; the actual
+// decision is made per-call by ``needs_last_dim_one_broadcast``, which
+// inspects the input shapes and triggers ``at::broadcast_tensors`` +
+// ``.contiguous()`` only for the specific pattern rebel-backend cannot
+// implicit-compile (last-dim ``size==1 → size>1``; see
+// ``ops_utils._has_last_dim_size_one_broadcast`` for the full rationale).
+//
+// Ops NOT in this set get the raw-data-ptr fast path even when their
+// inputs have differing shapes — those shapes are assumed to be ones the
+// Python wrapper passed RAW to ``compile_rbln_cached`` so the runtime was
+// compiled for the pre-broadcast layout (e.g. RMSNorm ``(B,S,H) * (H,)``).
+const std::unordered_set<std::string>& broadcast_ops() {
+  static const std::unordered_set<std::string>* s = new std::unordered_set<std::string>{
+    "aten::add.out",
+    "aten::sub.out",
+    "aten::mul.out",
+    "aten::div.out",
+    "aten::div.out_mode",
+    "aten::maximum.out",
+    "aten::minimum.out",
+    "aten::ne.Tensor_out",
+    "aten::eq.Tensor_out",
+    "aten::gt.Tensor_out",
+    "aten::ge.Tensor_out",
+    "aten::lt.Tensor_out",
+    "aten::le.Tensor_out",
+    "aten::where.self_out",
+  };
+  return *s;
+}
+
+// Mirror of ``ops_utils._has_last_dim_size_one_broadcast`` for the warm-hit
+// path. Returns true when ANY non-write-alias tensor input has
+// ``shape[-1] == 1`` while the broadcast result has ``shape[-1] > 1`` — the
+// pattern rebel-compiler raises ``UNEXPECTED_GRAPH`` on (e.g.
+// ``output(N,D) * K(N,1)`` from softmax/layernorm backward).
+//
+// Cheap: walks each tensor's last-dim once, no allocation.
+bool needs_last_dim_one_broadcast(
+    torch::jit::Stack* stack,
+    const SchemaCache& cache) {
+  auto args = torch::jit::last(stack, cache.num_args);
+  int64_t out_last = 0;
+  bool any_size_one = false;
+  for (size_t i = 0; i < cache.num_args; ++i) {
+    const auto& iv = args[i];
+    if (!iv.isTensor()) continue;
+    const auto& t = iv.toTensor();
+    if (!t.defined() || cache.is_write_alias[i] || t.dim() == 0) continue;
+    int64_t last = t.size(t.dim() - 1);
+    if (last > out_last) out_last = last;
+    if (last == 1) any_size_one = true;
+  }
+  return any_size_one && out_last > 1;
+}
+
+
+bool align_penalty_fast_path_check(
+    torch::jit::Stack* stack,
+    const SchemaCache& cache) {
+  if (!cache.is_align_sensitive) {
+    return false;
+  }
+  auto args = torch::jit::last(stack, cache.num_args);
+  // Prefer checking the OUT tensor's last-dim — it reflects the broadcast
+  // result shape, which is what the device graph would produce.
+  if (cache.out_positional_idx >= 0) {
+    const auto& iv = args[cache.out_positional_idx];
+    if (iv.isTensor()) {
+      const auto& t = iv.toTensor();
+      if (t.defined() && t.dim() > 0) {
+        return (t.size(t.dim() - 1) % 64) != 0;
+      }
+    }
+  }
+  // No `out` tensor (functional ops): fall back to input shape — pick the
+  // first non-write-alias tensor with non-zero dim.
+  for (size_t i = 0; i < cache.num_args; ++i) {
+    const auto& iv = args[i];
+    if (!iv.isTensor()) continue;
+    const auto& t = iv.toTensor();
+    if (!t.defined() || cache.is_write_alias[i] || t.dim() == 0) continue;
+    return (t.size(t.dim() - 1) % 64) != 0;
   }
   return false;
 }
@@ -207,11 +460,80 @@ ScalarValue ival_to_scalar(const c10::IValue& iv) {
   return ScalarValue::missing();
 }
 
+// Cheap pre-check: do tensor inputs already share the same shape? If yes,
+// broadcast is a no-op — skip at::broadcast_tensors entirely (which has
+// non-trivial overhead even in the no-op case from input validation).
+inline bool all_input_shapes_equal(torch::jit::Stack* stack, const SchemaCache& cache) {
+  auto arguments = torch::jit::last(stack, cache.num_args);
+  c10::IntArrayRef ref_shape;
+  bool ref_set = false;
+  for (size_t i = 0; i < cache.num_args; ++i) {
+    const auto& iv = arguments[i];
+    if (!iv.isTensor()) continue;
+    const auto& t = iv.toTensor();
+    if (!t.defined() || cache.is_write_alias[i]) continue;
+    if (!ref_set) {
+      ref_shape = t.sizes();
+      ref_set = true;
+    } else if (t.sizes() != ref_shape) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// For broadcast ops, compute the broadcast shapes that the runtime was
+// compiled for. For non-broadcast ops, returns empty (caller uses raw shapes).
+// On any error (mismatched shapes, etc.) returns empty too — caller falls
+// back to raw shapes which will likely runtime_failed and erase, but that's
+// no worse than current behavior.
+std::vector<std::vector<int64_t>> compute_broadcast_shapes(
+    torch::jit::Stack* stack, const SchemaCache& cache) {
+  std::vector<std::vector<int64_t>> result;
+  if (!cache.is_broadcast_op) return result;
+  // Fast-path: all tensor inputs already same shape → no broadcast needed,
+  // raw shapes are correct keys. Skip the expensive at::broadcast_tensors call.
+  if (all_input_shapes_equal(stack, cache)) return result;
+  auto arguments = torch::jit::last(stack, cache.num_args);
+  std::vector<at::Tensor> tensor_args;
+  std::vector<size_t> tensor_arg_indices;
+  for (size_t i = 0; i < cache.num_args; ++i) {
+    const auto& iv = arguments[i];
+    if (!iv.isTensor()) continue;
+    const auto& t = iv.toTensor();
+    if (!t.defined()) continue;
+    if (cache.is_write_alias[i]) continue;
+    tensor_args.push_back(t);
+    tensor_arg_indices.push_back(i);
+  }
+  if (tensor_args.size() < 2) return result;  // no broadcast needed
+  std::vector<at::Tensor> broadcasted;
+  try {
+    broadcasted = at::broadcast_tensors(tensor_args);
+  } catch (...) {
+    return result;
+  }
+  result.reserve(broadcasted.size());
+  for (const auto& bt : broadcasted) {
+    result.emplace_back(bt.sizes().begin(), bt.sizes().end());
+  }
+  return result;
+}
+
 // Build a WarmCache::CacheKey from the current stack's last num_args IValues.
 // Tensor args (non-write-alias, defined) become TensorProfiles in their
 // positional order. Scalar args become ScalarValues. None/Tensor-list args
 // are silently treated as a signal that we cannot warm-cache this call
 // (return false; caller skips warm cache and falls through to pybind).
+//
+// TensorProfile shapes are always the RAW input shapes. Two distinct calls
+// that broadcast to the same result shape (e.g. ``(4,8,16) + ()`` and
+// ``(4,8,16) + (4,8,1)``) MUST produce different cache keys, otherwise a
+// runtime compiled for one would be invoked on the other's inputs (a real
+// bug observed 2026-04-30: shape12 runtime was being hit by shape15).
+// The caller's ``try_warmcache_hit`` decides per-call whether broadcast is
+// needed based on actual input shapes (``needs_last_dim_one_broadcast``);
+// install/lookup consistency is guaranteed by raw-shape keys alone.
 bool build_cache_key(
     torch::jit::Stack* stack,
     const SchemaCache& cache,
@@ -243,6 +565,14 @@ bool build_cache_key(
     } else if (iv.isTensorList() || iv.isList()) {
       // Lists are not handled by the warm-cache path yet (no shim op uses
       // them). Bail out: caller falls through to pybind.
+      return false;
+    } else if (iv.isString()) {
+      // String args (e.g. ``div.out_mode``'s ``rounding_mode='trunc'`` vs
+      // ``'floor'``) are NOT representable in ``ScalarValue`` (which only
+      // knows int/float/bool). Without distinguishing them in the key,
+      // floor's compiled runtime would be hit by a trunc call (wire
+      // mismatch). Bail out to pybind on string args; safer than silently
+      // collapsing to Missing.
       return false;
     } else {
       out_key.scalars.push_back(ival_to_scalar(iv));
@@ -289,7 +619,9 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
   if (cache.return_types.size() != 1)
     return false;
 
+  const uint64_t _seg_t0 = now_ns();
   const CacheEntry* entry = wc.find(key);
+  const uint64_t _seg_t_lookup = now_ns();
   if (entry == nullptr)
     return false;
 
@@ -300,28 +632,96 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
   auto arguments = torch::jit::last(stack, cache.num_args);
   at::Tensor out_tensor;
   uint32_t in_idx = 0;
-  for (size_t i = 0; i < cache.num_args; ++i) {
-    const auto& iv = arguments[i];
-    if (!iv.isTensor())
-      continue;
-    const at::Tensor& t = iv.toTensor();
-    if (!t.defined())
-      continue;
-    if (cache.is_write_alias[i]) {
-      out_tensor = t;
-      continue;
+
+  // For broadcast ops: collect raw tensor inputs first, broadcast all at once,
+  // then materialize each to contig (matching what mul_rbln/add_rbln do in
+  // their Python wrappers). Without this, the cached runtime — which was
+  // compiled for the broadcast shape — would receive raw-shape data ptrs and
+  // fail (size mismatch / OOB read), causing erase + permanent miss.
+  // `held_tensors` keeps the materialized contig tensors alive until Run()
+  // completes (their data ptrs are what we pass to PrepareInputs).
+  std::vector<at::Tensor> held_tensors;
+  // Decide whether warm-hit needs to materialize a post-broadcast buffer.
+  //
+  // - Same-shape inputs: never broadcast; cache key was built from raw shapes
+  //   and raw ptrs are what the runtime wants.
+  // - Differing shapes: broadcast ONLY when the pattern is one rebel cannot
+  //   implicit-compile (last-dim size==1 → size>1; see ``broadcast_ops`` and
+  //   ``needs_last_dim_one_broadcast`` above). For other implicit broadcasts
+  //   like RMSNorm ``(B,S,H) * (H,)`` the runtime was compiled for raw shapes
+  //   in the Python wrapper, so we skip the materialization (~600 ms / step
+  //   on LLaMA-1B prefill).
+  const bool needs_broadcast = cache.is_broadcast_op &&
+                               !all_input_shapes_equal(stack, cache) &&
+                               needs_last_dim_one_broadcast(stack, cache);
+  if (needs_broadcast) {
+    std::vector<at::Tensor> raw_args;
+    raw_args.reserve(cache.num_args);
+    for (size_t i = 0; i < cache.num_args; ++i) {
+      const auto& iv = arguments[i];
+      if (!iv.isTensor()) continue;
+      const at::Tensor& t = iv.toTensor();
+      if (!t.defined()) continue;
+      if (cache.is_write_alias[i]) {
+        out_tensor = t;
+        continue;
+      }
+      raw_args.push_back(t);
     }
-    // Safety: a tensor with data_ptr() == 0 has no backing v-memory yet
-    // (e.g. an alias produced by a previous op whose materialization is
-    // pending). Passing 0 to PrepareInputs trips the rebel runtime's
-    // `Invalid key_vaddr=0` guard. Fall back to the pybind path so the
-    // Python wrapper can force materialization (via to_cpu/contig/etc.)
-    // and still produce a correct result.
-    void* ptr = t.data_ptr();
-    if (ptr == nullptr) {
-      return false;
+    if (raw_args.size() >= 2) {
+      std::vector<at::Tensor> broadcasted;
+      try {
+        broadcasted = at::broadcast_tensors(raw_args);
+      } catch (...) {
+        return false;
+      }
+      held_tensors.reserve(broadcasted.size());
+      for (size_t k = 0; k < broadcasted.size(); ++k) {
+        // .contiguous() is a no-op when raw shape already matches broadcast.
+        // For expanded views (stride 0), this materializes a contig buffer.
+        at::Tensor contig = broadcasted[k].contiguous();
+        void* ptr = contig.data_ptr();
+        if (ptr == nullptr) {
+          return false;
+        }
+        dev_in.emplace(in_idx++, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ptr)));
+        held_tensors.push_back(std::move(contig));
+      }
+    } else {
+      // Single-tensor broadcast op (shouldn't happen for ops in broadcast_ops()
+      // but handle gracefully): fall through to non-broadcast path.
+      for (const auto& t : raw_args) {
+        void* ptr = t.data_ptr();
+        if (ptr == nullptr) {
+          return false;
+        }
+        dev_in.emplace(in_idx++, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ptr)));
+      }
     }
-    dev_in.emplace(in_idx++, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ptr)));
+  } else {
+    for (size_t i = 0; i < cache.num_args; ++i) {
+      const auto& iv = arguments[i];
+      if (!iv.isTensor())
+        continue;
+      const at::Tensor& t = iv.toTensor();
+      if (!t.defined())
+        continue;
+      if (cache.is_write_alias[i]) {
+        out_tensor = t;
+        continue;
+      }
+      // Safety: a tensor with data_ptr() == 0 has no backing v-memory yet
+      // (e.g. an alias produced by a previous op whose materialization is
+      // pending). Passing 0 to PrepareInputs trips the rebel runtime's
+      // `Invalid key_vaddr=0` guard. Fall back to the pybind path so the
+      // Python wrapper can force materialization (via to_cpu/contig/etc.)
+      // and still produce a correct result.
+      void* ptr = t.data_ptr();
+      if (ptr == nullptr) {
+        return false;
+      }
+      dev_in.emplace(in_idx++, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ptr)));
+    }
   }
 
   // For non-out ops (e.g. max.unary, min.unary with no overload), allocate a
@@ -348,6 +748,8 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
   }
   dev_out.emplace(0u, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(out_ptr)));
 
+  const uint64_t _seg_t_io_build = now_ns();
+
   // rebel's PyRblnSyncRuntime methods are wrapped via pybind; they may set a
   // Python exception on failure rather than throw a C++ exception. Acquire
   // the GIL so we can both call them safely and inspect ``PyErr_Occurred``
@@ -356,7 +758,11 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
   // pybind miss path (which routes through DynamoRuntime and performs the
   // v-memory bookkeeping that lets the same tensor inputs succeed).
   pybind11::gil_scoped_acquire wc_gil;
+  const uint64_t _seg_t_gil = now_ns();
   bool runtime_failed = false;
+  uint64_t _seg_t_prep_in = _seg_t_gil;
+  uint64_t _seg_t_prep_out = _seg_t_gil;
+  uint64_t _seg_t_run = _seg_t_gil;
   auto clear_and_fail = [&]() {
     if (PyErr_Occurred())
       PyErr_Clear();
@@ -364,17 +770,20 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
   };
   try {
     entry->runtime->PrepareInputs(dev_in, cpu_in);
+    _seg_t_prep_in = now_ns();
     if (PyErr_Occurred()) {
       clear_and_fail();
     }
     if (!runtime_failed) {
       entry->runtime->PrepareOutputs(dev_out, cpu_out);
+      _seg_t_prep_out = now_ns();
       if (PyErr_Occurred()) {
         clear_and_fail();
       }
     }
     if (!runtime_failed) {
       entry->runtime->Run();
+      _seg_t_run = now_ns();
       if (PyErr_Occurred()) {
         clear_and_fail();
       }
@@ -399,11 +808,22 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
   // Pop args, push single return.
   torch::jit::drop(stack, cache.num_args);
   torch::jit::push(stack, out_tensor);
+  const uint64_t _seg_t_finalize = now_ns();
+
+  g_diag_warm_n_hits.fetch_add(1, std::memory_order_relaxed);
+  g_diag_warm_ns_lookup.fetch_add(_seg_t_lookup - _seg_t0, std::memory_order_relaxed);
+  g_diag_warm_ns_io_build.fetch_add(_seg_t_io_build - _seg_t_lookup, std::memory_order_relaxed);
+  g_diag_warm_ns_gil.fetch_add(_seg_t_gil - _seg_t_io_build, std::memory_order_relaxed);
+  g_diag_warm_ns_prep_in.fetch_add(_seg_t_prep_in - _seg_t_gil, std::memory_order_relaxed);
+  g_diag_warm_ns_prep_out.fetch_add(_seg_t_prep_out - _seg_t_prep_in, std::memory_order_relaxed);
+  g_diag_warm_ns_run.fetch_add(_seg_t_run - _seg_t_prep_out, std::memory_order_relaxed);
+  g_diag_warm_ns_finalize.fetch_add(_seg_t_finalize - _seg_t_run, std::memory_order_relaxed);
   return true;
 }
 
 // The boxed kernel that Library::impl points at for every shimmed op.
 void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack) {
+  g_diag_n_total.fetch_add(1, std::memory_order_relaxed);
   // Build the fully-qualified key as "<namespace>::<name>[.overload]" so it
   // matches what register_cpp_shim stored (e.g. "aten::add.out").
   std::string op_name = op.schema().name();
@@ -419,6 +839,14 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
     TORCH_CHECK(entry != nullptr, "No Python impl registered for shim op: ", op_name);
     if (!entry->schema_cache.populated) {
       populate_schema_cache(entry->schema_cache, op.schema());
+      // Populate align-sensitive flag once per op (avoids per-call string
+      // allocation + unordered_set lookup in the hot path).
+      const auto& align_set = align_sensitive_ops();
+      entry->schema_cache.is_align_sensitive =
+          (align_set.find(op_name) != align_set.end());
+      const auto& bcast_set = broadcast_ops();
+      entry->schema_cache.is_broadcast_op =
+          (bcast_set.find(op_name) != bcast_set.end());
     }
   }
 
@@ -443,17 +871,37 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
   // the borrow_resize_case is gated on contiguity (see RBLNCPUFallback.cpp).
   const bool would_fallback = quick_fallback_check(stack, cache, skip_dtype_args);
   if (would_fallback) {
+    g_diag_n_fallback.fetch_add(1, std::memory_order_relaxed);
     ::at::native::rbln::cpu_fallback_rbln(op, stack);
     return;
   }
+
+  // Align-penalty fast-path: previously routed shape-preserving elementwise
+  // ops with non-64-aligned last-dim through cpu_fallback to skip rebel's
+  // host pad → H2D → device → D2H → host depad penalty (~700 µs for tiny
+  // decode tensors).
+  //
+  // **Disabled (2026-04-30):** mixing CPU-fallback (native fp16) and device
+  // (cf16) for the same op produces 1-ULP rounding divergence, breaking
+  // bit-exact tests (``test/rbln/test_non_zero_storage_offset``) where
+  // sibling ops on aligned shapes stay on device. The helper/counter stay
+  // compiled so we can re-enable behind an env gate if a workload regresses.
+  (void)align_penalty_fast_path_check;
+  (void)g_diag_n_align_fastpath;
 
   // Warm-cache hot path: if we've previously compiled this op for an identical
   // input profile and have the rebel runtime cached, drive the runtime from
   // C++ directly.
   CacheKey key;
   const bool key_ok = build_cache_key(stack, cache, op_name_intern, key);
-  if (key_ok && try_warmcache_hit(stack, cache, key)) {
-    return;
+  if (key_ok) {
+    const uint64_t _diag_warm_t0 = now_ns();
+    const bool hit = try_warmcache_hit(stack, cache, key);
+    if (hit) {
+      g_diag_n_warm_hit.fetch_add(1, std::memory_order_relaxed);
+      g_diag_ns_warm_hit.fetch_add(now_ns() - _diag_warm_t0, std::memory_order_relaxed);
+      return;
+    }
   }
 
   // MISS path: set up thread-local pending install so the Python wrapper can
@@ -461,6 +909,15 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
   // compile + first run. The pending context is discarded unconditionally at
   // the end of this function (even on failure / exception) to avoid leaking
   // into subsequent unrelated ops on the same thread.
+  g_diag_n_miss.fetch_add(1, std::memory_order_relaxed);
+  const uint64_t _diag_miss_t0 = now_ns();
+  struct MissScopeTimer {
+    uint64_t t0;
+    ~MissScopeTimer() {
+      g_diag_ns_miss.fetch_add(
+          now_ns() - t0, std::memory_order_relaxed);
+    }
+  } _diag_miss_guard{_diag_miss_t0};
   if (key_ok) {
     t_pending.valid = true;
     t_pending.op_name_intern = op_name_intern;

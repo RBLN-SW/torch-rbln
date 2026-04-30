@@ -181,17 +181,68 @@ class TestInternalOpUtils(TestCase):
     # broadcast_args_general tests
     # =========================================================================
 
-    def test_broadcast_args_general(self):
-        a = torch.randn((2, 1), device="rbln")
-        b = torch.randn((2, 3), device="rbln")
+    def test_broadcast_args_general_pass_through(self):
+        # Default contract (2026-04-30+): broadcast_args_general validates
+        # broadcast compatibility but does NOT explicitly broadcast tensors
+        # for patterns rebel-backend handles in-graph (RMSNorm, leading-dim,
+        # middle-dim broadcast, etc.). Raw shapes flow through to
+        # compile_rbln_cached.
+        # Use a leading-dim broadcast pattern (last dims match) — this is the
+        # rebel-implicit-broadcast path, no host materialization expected.
+        a = torch.randn((1, 4), device="rbln")
+        b = torch.randn((3, 4), device="rbln")
         args = (a, "foo", b)
         tensor_args = [a, b]
         new_args = broadcast_args_general(tensor_args, args)
         # non-tensor args preserved
         self.assertEqual(new_args[1], "foo")
-        # tensors broadcasted to shape (2,3)
-        self.assertEqual(new_args[0].shape, torch.Size([2, 3]))
-        self.assertEqual(new_args[2].shape, torch.Size([2, 3]))
+        # tensor shapes preserved as raw (NOT broadcasted)
+        self.assertEqual(new_args[0].shape, torch.Size([1, 4]))
+        self.assertEqual(new_args[2].shape, torch.Size([3, 4]))
+        # underlying tensors unchanged (same data_ptr)
+        self.assertEqual(new_args[0].data_ptr(), a.data_ptr())
+        self.assertEqual(new_args[2].data_ptr(), b.data_ptr())
+
+    def test_broadcast_args_general_last_dim_one_forces_broadcast(self):
+        # Exception to the validate-only default: rebel-backend cannot
+        # implicit-compile broadcast where one operand has shape[-1] == 1
+        # while the result has shape[-1] > 1 (raises ``UNEXPECTED_GRAPH``,
+        # see ``softmax_backward_rbln`` test cases). For that pattern
+        # ``broadcast_args_general`` does ``torch.broadcast_tensors +
+        # .contiguous()`` so compile sees same-shape inputs.
+        a = torch.randn((3, 4), device="rbln")
+        b = torch.randn((3, 1), device="rbln")
+        args = (a, b)
+        tensor_args = [a, b]
+        new_args = broadcast_args_general(tensor_args, args)
+        # Both tensors now have the broadcast result shape (3, 4)
+        self.assertEqual(new_args[0].shape, torch.Size([3, 4]))
+        self.assertEqual(new_args[1].shape, torch.Size([3, 4]))
+        # The size-1 operand was materialized — different storage from input
+        self.assertNotEqual(new_args[1].data_ptr(), b.data_ptr())
+        # And contiguous (so prepare_args_view_aware doesn't re-detect expand)
+        self.assertTrue(new_args[1].is_contiguous())
+
+    def test_broadcast_args_general_compatibility_check(self):
+        # Even though we don't broadcast, we still validate compatibility so
+        # mismatched shapes raise here with full context (not deeper inside
+        # torch.compile / rebel runtime).
+        a = torch.randn((3, 4), device="rbln")
+        b = torch.randn((5, 4), device="rbln")  # 3 vs 5 — not broadcastable
+        with self.assertRaises(RuntimeError) as cm:
+            broadcast_args_general([a, b], (a, b))
+        # Error message should contain the shapes for diagnosability
+        self.assertIn("(3, 4)", str(cm.exception))
+        self.assertIn("(5, 4)", str(cm.exception))
+
+    def test_broadcast_args_general_same_shape_skip(self):
+        # When all tensor inputs share a shape, no validation is needed at all.
+        a = torch.randn((4, 5), device="rbln")
+        b = torch.randn((4, 5), device="rbln")
+        new_args = broadcast_args_general([a, b], (a, b))
+        # Pass-through, identity check
+        self.assertIs(new_args[0], a)
+        self.assertIs(new_args[1], b)
 
     # =========================================================================
     # prepare_args_for_contiguous tests
