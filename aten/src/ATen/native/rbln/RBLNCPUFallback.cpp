@@ -38,7 +38,20 @@ namespace {
 // LLaMA-1B eager hits cpu_fallback_rbln 10066 times across <10 distinct ops, so
 // the cache populates at startup and stays read-only. Keep the populate step
 // behind a unique_lock; readers take a shared_lock and are otherwise lock-free.
-enum class CpuFbArgKind : uint8_t { Other = 0, Tensor, TensorList, OptionalTensorList, Device };
+// OptionalTensor covers schema args typed `Tensor?` (e.g. linear's `bias`).
+// At runtime such an IValue is either a Tensor or None — old code recognized
+// this via the IValue's `isTensor()` cascade. After moving to schema-typed
+// arg_kind dispatch we must classify Tensor? explicitly, otherwise the arg
+// stays on the stack as an RBLN tensor when CPU dispatch runs (mixed-device
+// kernel inputs blow up at the next dispatch hop).
+enum class CpuFbArgKind : uint8_t {
+  Other = 0,
+  Tensor,
+  OptionalTensor,
+  TensorList,
+  OptionalTensorList,
+  Device,
+};
 
 struct CpuFbSchemaInfo {
   std::vector<CpuFbArgKind> arg_kind;     // per-positional arg
@@ -87,6 +100,9 @@ const CpuFbSchemaInfo& get_or_populate_schema_info(const c10::FunctionSchema& sc
       info.arg_kind[i] = CpuFbArgKind::TensorList;
     } else if (type->isSubtypeOf(*ListType::ofOptionalTensors())) {
       info.arg_kind[i] = CpuFbArgKind::OptionalTensorList;
+    } else if (auto opt = type->cast<OptionalType>();
+               opt && opt->getElementType()->isSubtypeOf(*TensorType::get())) {
+      info.arg_kind[i] = CpuFbArgKind::OptionalTensor;
     } else if (type->kind() == TypeKind::DeviceObjType) {
       info.arg_kind[i] = CpuFbArgKind::Device;
     }
@@ -292,6 +308,15 @@ void cpu_fallback_rbln(
       case CpuFbArgKind::Tensor:
         tensor_args.push_back(ivalue.toTensor());
         tensor_args_indices.push_back(idx);
+        break;
+      case CpuFbArgKind::OptionalTensor:
+        // `Tensor?` runtime IValue is Tensor when the optional has a value,
+        // else None. Only stage the present case onto tensor_args; absent
+        // (None) needs no transformation — the CPU kernel sees None too.
+        if (ivalue.isTensor()) {
+          tensor_args.push_back(ivalue.toTensor());
+          tensor_args_indices.push_back(idx);
+        }
         break;
       case CpuFbArgKind::TensorList: {
         tensorlist_args.push_back(ivalue.toTensorList());
