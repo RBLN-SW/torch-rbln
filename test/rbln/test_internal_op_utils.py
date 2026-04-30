@@ -640,9 +640,100 @@ class TestTorchDispatchModeWithRbln(TestCase):
         self.assertEqual(rbln_result.cpu(), expected, atol=1e-2, rtol=1e-2)
 
 
+@pytest.mark.test_set_ci
+class TestWarmCacheNonContigOut(TestCase):
+    """Regression guard for the warm-cache hit path serving stale layouts.
+
+    Cache keys exclude the write-alias `out=` arg (build_cache_key skips it),
+    so a contig and a non-contig out= for the same op + input shapes share
+    one entry. The runtime cached for the contig profile would write
+    numel*itemsize contiguous bytes into the non-contig view's data_ptr —
+    laying values at the wrong strided positions. try_warmcache_hit must
+    detect non-contig out= and fall through to the pybind miss path.
+    """
+
+    atol = 0.01
+    rtol = 0.01
+
+    def _diag_warm_hits(self):
+        # _dispatch_shim_diag_dump → (n_total, n_fallback, n_warm_hit, n_miss,
+        #                             ns_warm_hit, ns_miss)
+        import torch_rbln
+        return torch_rbln._C._dispatch_shim_diag_dump()[2]
+
+    def test_warmcache_bypassed_on_non_contig_out(self):
+        import torch_rbln
+        device = torch.device("rbln:0")
+        torch_rbln._C._warmcache_clear()
+        torch_rbln._C._dispatch_shim_diag_reset()
+
+        x = torch.randn(4, 60, device=device, dtype=torch.float16)
+        y = torch.randn(4, 60, device=device, dtype=torch.float16)
+
+        # Populate cache with contig out: first call misses, second hits.
+        out_c = torch.empty(4, 60, device=device, dtype=torch.float16)
+        torch.add(x, y, out=out_c)
+        torch.add(x, y, out=out_c)
+        contig_hits = self._diag_warm_hits()
+
+        # Non-contig out= must not consume a warm-cache entry.
+        base = torch.empty(60, 4, device=device, dtype=torch.float16)
+        out_nc = base.t()
+        self.assertFalse(out_nc.is_contiguous())
+        result = torch.add(x, y, out=out_nc)
+        cpu_ref = torch.add(x.cpu(), y.cpu())
+        self.assertEqual(result.cpu(), cpu_ref, atol=self.atol, rtol=self.rtol)
+        nc_hits = self._diag_warm_hits()
+        self.assertEqual(
+            nc_hits, contig_hits,
+            "warm-cache hit counter increased on non-contig out= dispatch; "
+            "the guard in try_warmcache_hit was bypassed.",
+        )
+
+
+@pytest.mark.test_set_ci
+class TestCpuFallbackOptionalTensor(TestCase):
+    """Regression guard for cpu_fallback's schema-typed arg_kind dispatch.
+
+    The cpu_fallback rewrite cached arg kinds by FunctionSchema type. The
+    initial classifier missed `Tensor?` (OptionalType(TensorType)), so a
+    schema arg like linear's `bias` fell through to `Other` and Step 1
+    skipped converting it to CPU. The RBLN tensor stayed on the stack
+    when the CPU kernel ran, and the next dispatch hop failed with
+    `Could not run aten::_copy_from_and_resize`.
+    """
+
+    atol = 1e-3
+    rtol = 1e-3
+
+    def test_linear_fp32_with_bias_through_cpu_fallback(self):
+        # fp32 linear forces cpu_fallback (rbln eager only handles fp16).
+        device = torch.device("rbln:0")
+        weight = torch.randn(20, 10, device=device, dtype=torch.float32)
+        bias = torch.randn(20, device=device, dtype=torch.float32)
+        x = torch.randn(5, 10, device=device, dtype=torch.float32)
+        out_rbln = torch.nn.functional.linear(x, weight, bias)
+        out_cpu = torch.nn.functional.linear(
+            x.cpu(), weight.cpu(), bias.cpu()
+        )
+        self.assertEqual(out_rbln.cpu(), out_cpu, atol=self.atol, rtol=self.rtol)
+
+    def test_linear_fp32_with_bias_none_through_cpu_fallback(self):
+        # Optional[Tensor] arg may also be None; the dispatch must still skip
+        # the slot without tripping on toTensor() of a None IValue.
+        device = torch.device("rbln:0")
+        weight = torch.randn(20, 10, device=device, dtype=torch.float32)
+        x = torch.randn(5, 10, device=device, dtype=torch.float32)
+        out_rbln = torch.nn.functional.linear(x, weight, None)
+        out_cpu = torch.nn.functional.linear(x.cpu(), weight.cpu(), None)
+        self.assertEqual(out_rbln.cpu(), out_cpu, atol=self.atol, rtol=self.rtol)
+
+
 instantiate_device_type_tests(TestInternalOpUtils, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestOutTensors, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestTorchDispatchModeWithRbln, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestWarmCacheNonContigOut, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestCpuFallbackOptionalTensor, globals(), only_for="privateuse1")
 
 if __name__ == "__main__":
     run_tests()
