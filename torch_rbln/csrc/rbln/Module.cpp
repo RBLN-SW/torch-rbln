@@ -114,6 +114,17 @@ void register_internal_api(py::module_& module) {
   // op, with pre-check + cpu_fallback_rbln on fail and Python callback on pass.
   // `skip_dtype_args` names positional arg indices whose dtype must not be
   // compared to float16 (e.g. where.self_out's cond is bool).
+  module.def("_dispatch_shim_diag_dump", &torch_rbln::shim::diag_dump_dispatch_paths,
+             "DIAG: dispatch path counts/timings (n_total, n_fallback, n_warm_hit, n_miss, ns_warm_hit, ns_miss)");
+  module.def("_dispatch_shim_diag_reset", &torch_rbln::shim::diag_reset_dispatch_paths,
+             "DIAG: reset dispatch path counters");
+  module.def("_dispatch_shim_align_fastpath_count", &torch_rbln::shim::diag_dump_align_fastpath_count,
+             "DIAG: count of align-penalty fast-path hits");
+  module.def("_dispatch_shim_warm_segments_dump", &torch_rbln::shim::diag_dump_warm_segments,
+             "DIAG: warm-cache hit per-segment timers (n_hits, ns_lookup, ns_io_build, "
+             "ns_gil, ns_prep_in, ns_prep_out, ns_run, ns_finalize)");
+  module.def("_dispatch_shim_warm_segments_reset", &torch_rbln::shim::diag_reset_warm_segments,
+             "DIAG: reset warm-cache hit per-segment timers");
   module.def(
       "_register_cpp_shim",
       &torch_rbln::shim::register_cpp_shim,

@@ -117,88 +117,62 @@ class GeneralTemplates:
 """
 
     class FunctionBody:
-        """Templates for function body generation."""
+        """Templates for function body generation.
+
+        2026-04-30 update: handlers delegate the compile + dispatch step to
+        ``compile_and_run_view_aware`` (in ops_utils.py) so view-on-device
+        detection (permute/expand/narrow/select/composite) and the
+        pre-existing contig + cpu-fallback + warm-cache-install logic all
+        live in one place. The generated handler is now ~12 lines instead
+        of ~50, and the per-op ``OpModule_<name>`` class is no longer
+        emitted (the helper builds dynamic wrapper modules keyed on
+        ``(op_callable, view_recipes)`` so identical view patterns reuse
+        the same compiled callable).
+        """
 
         @staticmethod
         def start(kernel_name: str) -> str:
-            """Generate function body start."""
+            """Generate function body start. No need to import
+            out_tensor_context — the helper does it lazily."""
             return f"""
 def {kernel_name}(*args, **kwargs):
-    from torch_rbln.device.context_holder import out_tensor_context
 """
 
         @staticmethod
         def main(target: str, root_name: str, op_namespace: str) -> str:
-            """Generate main function body logic."""
-            return f"""
-    # return values
-    result_tensor = None
+            """Generate main function body logic.
 
+            Delegates the device-path dispatch to
+            ``compile_and_run_view_aware`` (single helper call) and keeps
+            the cpu-fallback gate inline since it short-circuits without
+            going to the device.
+            """
+            return f"""
     out_tensor = kwargs.get('out', None)
     if is_cpu_fallback_cases(args):
-        result = cpu_fallback_path({target}, args, result=out_tensor, op_name="{op_namespace}::{root_name}", **kwargs_filtered)
-        result_tensor = result
+        result_tensor = cpu_fallback_path({target}, args, result=out_tensor, op_name="{op_namespace}::{root_name}", **kwargs_filtered)
     else:
-        # device tensor handling
+        result_tensor = compile_and_run_view_aware(
+            {target}, "{op_namespace}::{root_name}", args, kwargs_filtered, out_tensor,
+        )
+
+    return result_tensor, result_tensor.shape
 """
 
         @staticmethod
         def op_module_definition(root_name: str, target: str) -> str:
-            """Generate per-op nn.Module with literal forward (opaque under torch.compile). Module-level."""
-            class_name = f"OpModule_{root_name}"
-            var_name = f"_{root_name}_op_module"
-            return f"""
-class {class_name}(torch.nn.Module):
-    def forward(self, *args, **kwargs):
-        return {target}(*args, **kwargs)
-{var_name} = {class_name}().eval()
-"""
+            """Per-op ``OpModule_<name>`` class is no longer emitted: the
+            view-aware helper builds a wrapper OpModule dynamically and
+            caches it per ``(op_callable, view_recipes)``. Returning the
+            empty string keeps the rest of the generator untouched.
+            """
+            return ""
 
         @staticmethod
         def compile_section(root_name: str, target: str) -> str:
-            """Generate compilation and execution section (uses per-op module for opaque compile)."""
-            op_module_var = f"_{root_name}_op_module"
-            return f"""        # Prepare result tensor and compile options based on out_tensor availability
-        # Base compile options: always include eager_mode for eager execution context
-        compile_options = {{"disable_logger": True}}
-        # By default, eager mode ops use tp_size=1 due to current compiler structure.
-        # If TORCH_RBLN_USE_DEVICE_TP=ON, eager mode ops will follow
-        # the logical device size (RBLN_NPUS_PER_DEVICE) like torch.compile operations.
-        if not use_device_group_tensor_parallel_size():
-            compile_options["tensor_parallel_size"] = 1
-        # Side-channel: rebel backend appends the freshly-built DynamoRuntime to
-        # this list on first compile so the C++ warm cache can harvest it via
-        # warm_cache.install_pending() below. compile_cache strips the holder
-        # from its cache key so the same module gets one holder per profile.
-        _runtime_holder = []
-        compile_options["_runtime_holder"] = _runtime_holder
-        if out_tensor is None:
-            result_tensor = None
-        else:
-            # Check if out_tensor can be used directly by compiler
-            can_use_out_tensor_directly_flag = can_use_out_tensor_directly(
-                contig_args, dict(contig_kwargs, out=out_tensor)
-            )
-
-            if can_use_out_tensor_directly_flag:
-                # Use out tensor directly - compiler will write results here
-                result_tensor = out_tensor
-            else:
-                result_tensor = None
-
-        with out_tensor_context(result_tensor):
-            compiled = compile_rbln_cached(
-                {op_module_var},
-                dynamic=False,
-                options=compile_options,
-                device_cache_key=extract_warm_cache_key(*contig_args, **contig_kwargs),
-            )
-            external_result = compiled(*contig_args, **contig_kwargs)
-            if result_tensor is None:
-                result_tensor = external_result
-            elif isinstance(external_result, torch.Tensor) and (external_result.data_ptr() != result_tensor.data_ptr()):
-                result_tensor.copy_(external_result)
-            _install_warm_cache_pending(_runtime_holder, external_result)
-
-    return result_tensor, result_tensor.shape
-"""
+            """The legacy compile/dispatch block has been folded into the
+            ``main`` template's call to ``compile_and_run_view_aware``.
+            Keep the static method as a stub to preserve the call site
+            in ``general.py``.
+            """
+            return ""
