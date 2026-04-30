@@ -663,6 +663,12 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
       const at::Tensor& t = iv.toTensor();
       if (!t.defined()) continue;
       if (cache.is_write_alias[i]) {
+        // See note in the non-broadcast branch below: non-contig out= writes
+        // numel*itemsize contig bytes into a strided view's data_ptr, which
+        // corrupts the layout. Bail to pybind miss-path on non-contig out.
+        if (!t.is_contiguous()) {
+          return false;
+        }
         out_tensor = t;
         continue;
       }
@@ -707,6 +713,17 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
       if (!t.defined())
         continue;
       if (cache.is_write_alias[i]) {
+        // Non-contiguous out=view (e.g. ``torch.add(x, y, out=base.t())``)
+        // shares the cache key with the contiguous-out variant — out tensors
+        // are excluded from build_cache_key — but the cached runtime was
+        // compiled assuming contig output. Writing ``numel*itemsize`` contig
+        // bytes into a strided view's data_ptr lays values out at the wrong
+        // positions (98%+ data mismatch in TestOutTensors pair). Fall through
+        // to the pybind path; the Python wrapper materializes a contig out
+        // and copies back via the cpu_fallback writeback path.
+        if (!t.is_contiguous()) {
+          return false;
+        }
         out_tensor = t;
         continue;
       }
