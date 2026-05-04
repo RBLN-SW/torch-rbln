@@ -319,6 +319,55 @@ void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes) {
   }
 }
 
+void memcpy_h2v_async(void* rbln_dst_data, const void* cpu_src_data, size_t nbytes) {
+  RBLN_LOG_DEBUG(
+      "dst_rbln_data={}, src_cpu_data={}, nbytes={}", fmt::ptr(rbln_dst_data), fmt::ptr(cpu_src_data), nbytes);
+  RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
+  RBLN_CHECK(cpu_src_data != nullptr, "cpu_src_data cannot be nullptr");
+  RBLN_CHECK(rbln_dst_data != nullptr, "rbln_dst_data cannot be nullptr");
+
+  const auto src_host_ptr = reinterpret_cast<uintptr_t>(cpu_src_data);
+  const auto dst_vaddr = reinterpret_cast<uint64_t>(rbln_dst_data);
+  const auto size = static_cast<uint64_t>(nbytes);
+  uint64_t handle = 0;
+  RBLN_LOG_DEBUG(
+      "Calling rbln_memcpy_h2v_async: src_host_ptr={:#x}, dst_vaddr={:#x}, size={}", src_host_ptr, dst_vaddr, size);
+  RBLN_CHECK(!::rbln::rbln_memcpy_h2v_async(src_host_ptr, dst_vaddr, size, &handle));
+  if (handle != 0) {
+    RBLN_LOG_DEBUG("Async H2V dispatched, handle={}", handle);
+  } else {
+    RBLN_LOG_DEBUG("H2V fell back to sync");
+  }
+}
+
+void memcpy_v2h_async(void* cpu_dst_data, const void* rbln_src_data, size_t nbytes) {
+  RBLN_LOG_DEBUG(
+      "dst_cpu_data={}, src_rbln_data={}, nbytes={}", fmt::ptr(cpu_dst_data), fmt::ptr(rbln_src_data), nbytes);
+  RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
+  RBLN_CHECK(rbln_src_data != nullptr, "rbln_src_data cannot be nullptr");
+  RBLN_CHECK(cpu_dst_data != nullptr, "cpu_dst_data cannot be nullptr");
+
+  const auto src_vaddr = reinterpret_cast<uint64_t>(rbln_src_data);
+  const auto dst_host_ptr = reinterpret_cast<uintptr_t>(cpu_dst_data);
+  const auto size = static_cast<uint64_t>(nbytes);
+  uint64_t handle = 0;
+  RBLN_LOG_DEBUG(
+      "Calling rbln_memcpy_v2h_async: src_vaddr={:#x}, dst_host_ptr={:#x}, size={}", src_vaddr, dst_host_ptr, size);
+  RBLN_CHECK(!::rbln::rbln_memcpy_v2h_async(src_vaddr, dst_host_ptr, size, &handle));
+  if (handle != 0) {
+    RBLN_LOG_DEBUG("Async V2H dispatched, handle={}", handle);
+  } else {
+    RBLN_LOG_DEBUG("V2H fell back to sync");
+  }
+}
+
+void synchronize(c10::DeviceIndex device_index) {
+  RBLN_LOG_DEBUG("Synchronizing device {}", static_cast<int>(device_index));
+  check_device_index(device_index);
+  const auto torch_device_id = static_cast<uint32_t>(device_index);
+  RBLN_CHECK(!::rbln::rbln_device_synchronize(torch_device_id));
+}
+
 c10::CachingDeviceAllocator::DeviceStats get_device_stats(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
   const auto device_index = device.index();

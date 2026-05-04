@@ -159,22 +159,52 @@ void copy_impl_rbln(const at::Tensor& src, const at::Tensor& dst) {
 
 } // namespace
 
+void copy_impl_rbln_async(const at::Tensor& src, const at::Tensor& dst) {
+  RBLN_SCOPE_GUARD();
+  RBLN_LOG_DEBUG("Attempting async copy");
+
+  const auto src_device = src.device();
+  const auto dst_device = dst.device();
+  const auto direct_copy = is_direct_copy(src, dst);
+
+  // Async only supported for direct copies (same size, dtype, both contiguous).
+  // Non-direct copies require CPU-side staging which needs synchronous data access.
+  if (!direct_copy) {
+    RBLN_LOG_DEBUG("Non-direct copy, falling back to sync");
+    copy_impl_rbln(src, dst);
+    return;
+  }
+
+  const auto nbytes = at::detail::computeStorageNbytes(src.sizes(), src.strides(), src.element_size());
+
+  if (src_device.is_cpu() && dst_device.is_privateuseone()) {
+    RBLN_LOG_DEBUG("Async CPU -> RBLN");
+    c10::rbln::memcpy_h2v_async(dst.data_ptr(), src.data_ptr(), nbytes);
+  } else if (src_device.is_privateuseone() && dst_device.is_cpu()) {
+    RBLN_LOG_DEBUG("Async RBLN -> CPU");
+    c10::rbln::memcpy_v2h_async(dst.data_ptr(), src.data_ptr(), nbytes);
+  } else if (src_device.is_privateuseone() && dst_device.is_privateuseone()) {
+    // V2V has no async path yet — fall back to sync
+    RBLN_LOG_DEBUG("V2V async not supported, falling back to sync");
+    c10::rbln::memcpy_v2v(dst.data_ptr(), src.data_ptr(), nbytes);
+  } else {
+    RBLN_CHECK(
+        false, "Tensor copy from {} device to {} device is not supported", c10::str(src_device), c10::str(dst_device));
+  }
+}
+
 at::Tensor _copy_from_rbln(const at::Tensor& src, const at::Tensor& dst, bool non_blocking) {
   RBLN_SCOPE_GUARD();
   RBLN_LOG_DEBUG("src_data={}, dst_data={}", fmt::ptr(src.data_ptr()), fmt::ptr(dst.data_ptr()));
 
   if (non_blocking) {
-    if (c10::rbln::is_fallback_disabled("non_blocking_copy")) {
-      RBLN_CHECK(
-          false,
-          "Non-blocking copy is not supported on RBLN devices. "
-          "To enable fallback to blocking copy, remove 'non_blocking_copy' from `TORCH_RBLN_DISABLE_FALLBACK`.");
-    } else {
-      RBLN_WARN_ONCE("Non-blocking copy is not supported, falling back to blocking copy");
-    }
+    copy_impl_rbln_async(src, dst);
+  } else {
+    // Drain pending async transfers before sync copy so the vmem state machine is consistent.
+    const auto rbln_device = src.device().is_privateuseone() ? src.device() : dst.device();
+    c10::rbln::synchronize(rbln_device.index());
+    copy_impl_rbln(src, dst);
   }
-
-  copy_impl_rbln(src, dst);
 
   return dst;
 }

@@ -21,6 +21,7 @@ __all__ = [
     "is_available",
     "get_amp_supported_dtype",
     "set_device",
+    "synchronize",
     "device",
     "device_of",
     "device_summary",
@@ -83,6 +84,27 @@ def get_amp_supported_dtype() -> List[torch.dtype]:
         This function currently returns only `torch.float16`. It may need review to include other processable data types.
     """
     return [torch.float16]  # TODO: Needs review regarding processable dtypes
+
+
+def synchronize(device: Union[int, torch.device, str, None] = None) -> None:
+    """Wait for all pending async transfers on the given RBLN device.
+
+    If no device is specified, the current device is used.
+
+    Args:
+        device (torch.device or int or str, optional): The device to synchronize.
+            Defaults to the current device.
+
+    Example::
+        >>> import torch
+        >>> cpu_tensor = rbln_tensor.to("cpu", non_blocking=True)
+        >>> torch.rbln.synchronize()  # wait for the transfer to complete
+    """
+    if device is None:
+        device_idx = current_device()
+    else:
+        device_idx = _get_device_index(device)
+    torch_rbln._C.synchronize(device_idx)
 
 
 def set_device(device: Union[int, torch.device, str]) -> None:

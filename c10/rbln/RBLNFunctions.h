@@ -175,6 +175,37 @@ C10_RBLN_API void memcpy_v2h(void* cpu_dst_data, const void* rbln_src_data, size
 C10_RBLN_API void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes);
 
 /**
+ * @brief Asynchronously copies data from host memory to device memory.
+ *
+ * Falls back to synchronous copy when async is not possible (e.g., when
+ * the vmem entry does not have a simple device layout).
+ *
+ * @param rbln_dst_data A pointer to the destination device memory.
+ * @param cpu_src_data A pointer to the source host memory.
+ * @param nbytes The number of bytes to copy (must be positive).
+ */
+C10_RBLN_API void memcpy_h2v_async(void* rbln_dst_data, const void* cpu_src_data, size_t nbytes);
+
+/**
+ * @brief Asynchronously copies data from device memory to host memory.
+ *
+ * Falls back to synchronous copy when async is not possible (e.g., when
+ * the vmem entry does not have a simple device layout).
+ *
+ * @param cpu_dst_data A pointer to the destination host memory.
+ * @param rbln_src_data A pointer to the source device memory.
+ * @param nbytes The number of bytes to copy (must be positive).
+ */
+C10_RBLN_API void memcpy_v2h_async(void* cpu_dst_data, const void* rbln_src_data, size_t nbytes);
+
+/**
+ * @brief Waits for all pending async transfers on the given device to complete.
+ *
+ * @param device_index The RBLN device to synchronize.
+ */
+C10_RBLN_API void synchronize(c10::DeviceIndex device_index);
+
+/**
  * @brief Returns comprehensive device memory statistics.
  *
  * Retrieves all memory metrics from the RBLN runtime in a single call and
