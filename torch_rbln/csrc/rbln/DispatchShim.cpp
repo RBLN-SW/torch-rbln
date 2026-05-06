@@ -727,6 +727,18 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
         out_tensor = t;
         continue;
       }
+      // The cache key only includes (dtype, shape) per TensorProfile, so a
+      // non-contiguous view shares its key with a contiguous tensor of the
+      // same shape — but the cached runtime was compiled assuming contig
+      // layout. Driving it with the view's data_ptr() makes the runtime
+      // read along the view's strides as if they were contiguous, producing
+      // wrong values (observed 2026-05-06: test_compare_cpu_add fp16, 97%
+      // mismatch where one input is a select-stride view of a larger base).
+      // Fall through to pybind so the Python wrapper materializes via
+      // .contiguous() (or the view-aware path) before re-entering compile.
+      if (!t.is_contiguous()) {
+        return false;
+      }
       // Safety: a tensor with data_ptr() == 0 has no backing v-memory yet
       // (e.g. an alias produced by a previous op whose materialization is
       // pending). Passing 0 to PrepareInputs trips the rebel runtime's
@@ -738,6 +750,19 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
         return false;
       }
       dev_in.emplace(in_idx++, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ptr)));
+    }
+  }
+
+  // User-provided out= with a shape that doesn't match the cached runtime's
+  // output. PyTorch native eager resizes the out tensor and emits a warning;
+  // the hit path can't, since the runtime was compiled for the cached shape
+  // and writes ``numel(cached) * itemsize`` contig bytes into out.data_ptr().
+  // Fall through to the pybind miss-path so the Python wrapper handles
+  // resize-with-warning.
+  if (out_tensor.defined() && !entry->out_profiles.empty()) {
+    const auto& cached_shape = entry->out_profiles[0].shape;
+    if (out_tensor.sizes() != at::IntArrayRef(cached_shape.data(), cached_shape.size())) {
+      return false;
     }
   }
 
