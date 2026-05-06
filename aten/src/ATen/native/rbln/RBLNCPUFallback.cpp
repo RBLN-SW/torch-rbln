@@ -478,6 +478,15 @@ void cpu_fallback_rbln(
       continue;
     }
     if (borrow_ids[i] != 0) {
+      // The CPU kernel may have shrink-resized cpu_tensors[i] — a from_blob
+      // view wrapping the rbln_out vmem — when the caller passed an out= with
+      // wrong shape (PyTorch's "resize with warning" path). The shrink writes
+      // the new-shape data into the borrow host_ptr, but rbln_out's tensor
+      // metadata still reports the pre-resize shape. Sync sizes so downstream
+      // consumers (and the test's shape assertion) see the resized output.
+      if (cpu_tensors[i].sizes() != tensor_args[i].sizes()) {
+        tensor_args[i].resize_(cpu_tensors[i].sizes());
+      }
       borrow_write[i] = true;
       continue;
     }
