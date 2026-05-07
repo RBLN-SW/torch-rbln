@@ -966,31 +966,6 @@ class TestCommon(TestCase):
                 ("sum", ""),
             }:
                 assert_kwargs = {"rtol": 0.2, "atol": 1.0}
-            # fp16 chunk noncontig: assertEqual on the chunk-returned tensor
-            # list invokes eq_rbln on slice views (narrow + select recipes),
-            # which the view-aware compile path lowers as
-            # ``strided_slice + take + pad + equal`` IR — that pattern aborts
-            # in rebel-compiler ``build_internal``. The view-aware optimization
-            # for narrow+select-on-fp16 is broadly useful in the forward path,
-            # so a more targeted fix (forcing eq's input materialization) is
-            # preferred over disabling the recipe globally. Pending; keep the
-            # skip until a narrower workaround lands.
-            if dtype is torch.float16 and (op.name, op.variant_test_name) == ("chunk", ""):
-                self.skipTest(
-                    "fp16 chunk noncontig: view-aware narrow+select recipe + eq "
-                    "compile aborts in rebel-compiler; needs targeted fix"
-                )
-            # fp16 flatten noncontig: 6/25 NaN-pattern mismatch in forward
-            # (assertion sees NaN in actual but not in expected, with diff 0
-            # at finite positions). Investigation required: noncontig flatten
-            # involves a reshape over a strided view; the resulting graph's
-            # output may leave uninitialized fp16 lanes that surface as NaN.
-            # Pending.
-            if dtype is torch.float16 and (op.name, op.variant_test_name) == ("flatten", ""):
-                self.skipTest(
-                    "fp16 flatten noncontig: residual NaN-pattern mismatch in "
-                    "the reshape-over-strided-view forward output; pending triage"
-                )
             self.assertEqual(actual, expected, **assert_kwargs)
 
             # Validate backward
@@ -1199,14 +1174,19 @@ class TestCommon(TestCase):
     def test_out(self, device, dtype, op):
         # fp16 div.no_rounding_mode sample 5 (5,10,5)+(5,10,5): warm-cache
         # hit leaves 1 NaN at (4,8,4) in the NaN-prefilled out= buffer.
-        # ``RBLN_TEST_WARM_OFF=1`` makes it pass — the cached runtime's
-        # output write doesn't fully cover all 250 elements when last-dim
-        # is 5 (non-aligned). Pending warm-cache output write triage.
+        # ``RBLN_TEST_WARM_OFF=1`` makes it pass — the cached runtime under
+        # this specific code path doesn't fully cover all 250 elements when
+        # last-dim is 5 (non-aligned). Standalone Python (with the same
+        # imports / call sequence) does NOT reproduce, so the trigger is
+        # something pytest's TestCase wrapper does to the device-side state
+        # between the ``expected = op(...)`` and ``op_out(out=NaN_filled)``
+        # calls. Pending vmem allocator / warm-cache hit output coverage
+        # triage with rebel runtime.
         if dtype is torch.float16 and (op.name, op.variant_test_name) == ("div", "no_rounding_mode"):
             self.skipTest(
                 "fp16 div.no_rounding_mode: warm-cache hit leaves 1 NaN in the "
-                "pre-filled out= buffer (sample 5, shape (5,10,5)); pending warm-cache "
-                "output write triage"
+                "pre-filled out= buffer (sample 5, shape (5,10,5)) under pytest; "
+                "passes standalone. Pending warm-cache output write triage"
             )
         # Prefers running in float32 but has a fallback for the first listed supported dtype
         samples = op.sample_inputs(device, dtype)

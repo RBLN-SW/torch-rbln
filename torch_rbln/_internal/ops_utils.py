@@ -1664,6 +1664,27 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     from torch_rbln._internal.warm_cache import install_pending as _install_warm_cache_pending
     from torch_rbln.device.context_holder import out_tensor_context
 
+    # Comparison ops (output dtype = bool) trip a rebel-compiler abort when
+    # the view-aware path replays a narrow+select recipe inside the compiled
+    # graph: the resulting IR is ``strided_slice + take + nn.pad + equal +
+    # contrib_aligned_pad(bool, …, [-N])`` and ``build_internal`` aborts on
+    # the negative-pad-on-bool sequence (verified 2026-05-07 with
+    # base[:3,:,:,1] vs contig (3,5,5) eq, vs same shapes through ``add``
+    # which compiles fine because the depad runs on fp16 rather than bool).
+    # Materialize view inputs to ``.contiguous()`` so the comparison op
+    # receives plain tensors and the recipe path is skipped.
+    if op_name in {
+        "aten::eq", "aten::ne", "aten::gt", "aten::ge", "aten::lt", "aten::le",
+    }:
+        args = tuple(
+            a.contiguous() if isinstance(a, torch.Tensor) and not a.is_contiguous() else a
+            for a in args
+        )
+        kwargs_filtered = {
+            k: (v.contiguous() if isinstance(v, torch.Tensor) and not v.is_contiguous() else v)
+            for k, v in kwargs_filtered.items()
+        }
+
     (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs_filtered)
     has_views = any(r is not None for r in view_recipes)
 
