@@ -526,26 +526,7 @@ class TestCommon(TestCase):
             atol = max(atol, 0.05)
             ignore_inf_nan = True
             fp16_div_safe_range = (1e-3, 32000.0)  # |x| in [1e-3, ~half-fp16-max]
-        # div + floor/trunc on fp16: the rounding modes are discontinuous on
-        # (a/b). Tried two attempted fixes (output ``custom_float16_safe_range`` and
-        # input-side ``custom_float16_input_mask`` masking input flush positions)
-        # plus ``atol=1`` for per-bucket drift. Mask reduces but does not
-        # eliminate the disagreement: e.g. trunc reference sample 98 with
-        # input shape (357, 789) still produces ~937 / 269508 unmasked
-        # positions with diffs up to 36000 — the custom_float16 boundary is wider
-        # than (1e-3, 32000) and asymmetric on negative inputs. Bounding
-        # those would require an explicit custom_float16 boundary spec from the
-        # rebel SDK. Keep the skip.
         fp16_div_input_mask: torch.Tensor | None = None
-        if dtype is torch.float16 and (op.name, op.variant_test_name) in {
-            ("div", "floor_rounding"),
-            ("div", "trunc_rounding"),
-        }:
-            self.skipTest(
-                f"fp16 div with {op.variant_test_name} diverges at custom_float16-to-fp16 "
-                "bucket transitions; tolerance + input/output safe-range mask still "
-                "leave ~0.4% positions unbounded (need explicit custom_float16 boundary spec)"
-            )
 
         is_comparison_op = op.name in ("ne", "eq", "gt", "ge", "lt", "le")
 

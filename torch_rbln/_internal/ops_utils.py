@@ -1664,6 +1664,27 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     from torch_rbln._internal.warm_cache import install_pending as _install_warm_cache_pending
     from torch_rbln.device.context_holder import out_tensor_context
 
+    # fp16 div with rounding_mode trunc/floor: rebel-compiler emits IR for
+    # the discontinuous rounding op that returns wrong values for entire
+    # rows of the output (verified 2026-05-07 with sample 98 of trunc on
+    # input shape (357,789): row 338 outputs all 0.0 / -0.0 instead of the
+    # correct integer-bucketed quotient, despite both inputs being well
+    # within the custom_float16-safe range — not a per-element ULP drift, the
+    # device kernel returns wrong values for the affected rows). Route fp16
+    # div with trunc/floor through cpu_fallback. Plain ``torch.div(x, y)``
+    # (no rounding_mode) and fp32 div are unaffected and still flow through
+    # the device path, so no forward perf regression on real workloads
+    # that don't use the rounding modes.
+    if op_name == "aten::div":
+        rmode = kwargs_filtered.get("rounding_mode")
+        if rmode in ("trunc", "floor"):
+            for a in args:
+                if isinstance(a, torch.Tensor) and a.dtype == torch.float16:
+                    return cpu_fallback_path(
+                        op_callable, args, result=out_tensor,
+                        op_name=op_name, **kwargs_filtered,
+                    )
+
     # Comparison ops (output dtype = bool) trip a rebel-compiler abort when
     # the view-aware path replays a narrow+select recipe inside the compiled
     # graph: the resulting IR is ``strided_slice + take + nn.pad + equal +
