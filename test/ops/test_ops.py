@@ -966,46 +966,36 @@ class TestCommon(TestCase):
                 ("sum", ""),
             }:
                 assert_kwargs = {"rtol": 0.2, "atol": 1.0}
-            # The fp16 chunk / nn.functional.linear / flatten skips below all
-            # share the same upstream issue as the test_variant_consistency_eager
-            # fp16 skip — rebel-compiler aborts on fp16 graphs only with the
-            # current torch_rbln build (older public checkout passes the same
-            # call sequence). Pending C++ bisect; see that block for details.
+            # fp16 chunk noncontig: assertEqual on the chunk-returned tensor
+            # list invokes eq_rbln on slice views (narrow + select recipes),
+            # which the view-aware compile path lowers as
+            # ``strided_slice + take + pad + equal`` IR — that pattern aborts
+            # in rebel-compiler ``build_internal``. The view-aware optimization
+            # for narrow+select-on-fp16 is broadly useful in the forward path,
+            # so a more targeted fix (forcing eq's input materialization) is
+            # preferred over disabling the recipe globally. Pending; keep the
+            # skip until a narrower workaround lands.
             if dtype is torch.float16 and (op.name, op.variant_test_name) == ("chunk", ""):
                 self.skipTest(
-                    "fp16 chunk noncontig: rebel-compiler aborts on the eq_rbln "
-                    "compile triggered by assertEqual on the chunk-returned tensor "
-                    "list (see test_variant_consistency_eager for shared root cause)"
+                    "fp16 chunk noncontig: view-aware narrow+select recipe + eq "
+                    "compile aborts in rebel-compiler; needs targeted fix"
                 )
-            if dtype is torch.float16 and (op.name, op.variant_test_name) == ("nn.functional.linear", ""):
-                self.skipTest(
-                    "fp16 nn.functional.linear noncontig: rebel-compiler InternalError "
-                    "(TVM relay IndexError) on the fp16 noncontig compile path "
-                    "(see test_variant_consistency_eager for shared root cause)"
-                )
+            # fp16 flatten noncontig: 6/25 NaN-pattern mismatch in forward
+            # (assertion sees NaN in actual but not in expected, with diff 0
+            # at finite positions). Investigation required: noncontig flatten
+            # involves a reshape over a strided view; the resulting graph's
+            # output may leave uninitialized fp16 lanes that surface as NaN.
+            # Pending.
             if dtype is torch.float16 and (op.name, op.variant_test_name) == ("flatten", ""):
                 self.skipTest(
-                    "fp16 flatten noncontig: residual-NaN forward mismatch under pytest "
-                    "(passes outside pytest with the older public torch_rbln checkout); "
-                    "see test_variant_consistency_eager for shared root cause"
+                    "fp16 flatten noncontig: residual NaN-pattern mismatch in "
+                    "the reshape-over-strided-view forward output; pending triage"
                 )
             self.assertEqual(actual, expected, **assert_kwargs)
 
             # Validate backward
             # Short-circuits if the op doesn't support grad in this device x dtype
             if not test_grad:
-                continue
-
-            # fp16 backward of mean/sum/linear: same upstream issue as the
-            # ``test_variant_consistency_eager`` fp16 skip — rebel-compiler
-            # build_internal aborts on the fp16 backward graph compile with
-            # the current torch_rbln build. Skip the backward portion only;
-            # forward already passes.
-            if dtype is torch.float16 and (op.name, op.variant_test_name) in {
-                ("mean", ""),
-                ("nn.functional.linear", ""),
-                ("sum", ""),
-            }:
                 continue
 
             expected = sample_input.output_process_fn_grad(expected)
@@ -1207,17 +1197,16 @@ class TestCommon(TestCase):
     #   - if device, dtype are passed, device and dtype should match
     @ops(ops_and_refs, dtypes=OpDTypes.supported)
     def test_out(self, device, dtype, op):
-        # fp16 div.no_rounding_mode sample 5 (5,10,5)+(5,10,5): the warm-cache
-        # hit output write leaves 1 NaN at index (4,8,4) in the NaN-prefilled
-        # out tensor under the current torch_rbln build. Setting
-        # RBLN_TEST_WARM_OFF=1 makes the test pass, indicating the hit path's
-        # output write doesn't fully cover all elements. Same upstream class
-        # as the test_variant_consistency_eager fp16 skip.
+        # fp16 div.no_rounding_mode sample 5 (5,10,5)+(5,10,5): warm-cache
+        # hit leaves 1 NaN at (4,8,4) in the NaN-prefilled out= buffer.
+        # ``RBLN_TEST_WARM_OFF=1`` makes it pass — the cached runtime's
+        # output write doesn't fully cover all 250 elements when last-dim
+        # is 5 (non-aligned). Pending warm-cache output write triage.
         if dtype is torch.float16 and (op.name, op.variant_test_name) == ("div", "no_rounding_mode"):
             self.skipTest(
                 "fp16 div.no_rounding_mode: warm-cache hit leaves 1 NaN in the "
-                "pre-filled out= buffer at sample 5 (5,10,5); see "
-                "test_variant_consistency_eager for shared root cause"
+                "pre-filled out= buffer (sample 5, shape (5,10,5)); pending warm-cache "
+                "output write triage"
             )
         # Prefers running in float32 but has a fallback for the first listed supported dtype
         samples = op.sample_inputs(device, dtype)
@@ -1484,49 +1473,6 @@ class TestCommon(TestCase):
     #   against eager's gold standard op function variant
     @_variant_ops(op_db)
     def test_variant_consistency_eager(self, device, dtype, op):
-        # fp16 backward dispatch aborts inside rebel-compiler ``build_internal``
-        # during fp16 backward graph compile, ONLY with the current local
-        # torch_rbln checkout. Reproduction matrix (cos.sum().backward() on
-        # fp16 tensor with requires_grad=True):
-        #
-        #   torch_rbln source         | result
-        #   --------------------------+---------
-        #   /home/chanheo/torch-rbln-ext (this repo, dev HEAD)   ABORT
-        #   /home/chanheo/torch-rbln-public (older checkout)     PASS
-        #
-        # The same test passes when torch_rbln is loaded from the older
-        # public checkout, regardless of which torch (.venv vs pyenv) is
-        # loaded or which Python harness invokes the test (pytest single,
-        # pytest --forked, plain `.venv/bin/python -c`, all behave the
-        # same once the torch_rbln source is fixed).
-        #
-        # The diff between the two checkouts touches: WarmCache.cpp/h,
-        # DispatchShim.cpp/h, Module.cpp, register_ops.py, ops_utils.py,
-        # and the rebuilt torch_rbln/_C.so / libc10_rbln.so /
-        # libtorch_rbln.so. Disabling the C++ shim registration
-        # (monkey-patching `_register_cpp_shim` to a no-op before
-        # `import torch_rbln`) does NOT change the abort, so the trigger
-        # is in the .so build itself or in ops_utils' compile_and_run_view_aware
-        # path rather than in the warm-cache shim.
-        #
-        # Workaround options considered:
-        #   1. Forcing fp16 backward dispatch through cpu_fallback —
-        #      regresses forward perf on real workloads (mul/mm/neg/div
-        #      backward graphs share the Python wrapper used by forward).
-        #      Rejected.
-        #   2. Bisecting the torch_rbln C++ rebuild between the two
-        #      checkouts — pending.
-        #   3. Filing a rebel-compiler upstream ticket — needs the C++
-        #      bisect output to be actionable.
-        #
-        # Skip the whole fp16 dtype rather than maintain a whack-a-mole
-        # list of individual ops whose abort surface shifts run-to-run.
-        if dtype is torch.float16:
-            self.skipTest(
-                "fp16 variant_consistency_eager: rebel-compiler build_internal "
-                "aborts during fp16 backward graph compile with the current "
-                "torch_rbln build. Pending C++ bisect against the public checkout"
-            )
 
         # Acquires variants (method variant, inplace variant, operator variant, inplace_operator variant, aliases)
 

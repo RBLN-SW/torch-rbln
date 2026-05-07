@@ -252,6 +252,29 @@ def handle_empty_binary(args):
     return ret, ret.shape
 
 
+def _has_zero_dim_broadcast(tensor_args, out_shape):
+    """Detect a 0-dim (scalar) tensor that needs broadcast to a non-empty shape.
+
+    Pattern observed in fp16 backward of reductions: ``y = cos(x).sum()``
+    sets ``grad_y`` to a 0-dim fp16 tensor; the autograd-emitted backward
+    graph then performs ``mul(grad_y, -sin(x))`` against a vector. Without
+    pre-broadcast the rebel-compiler receives an IR that lowers the
+    0-dim → N-dim broadcast as ``expand_dims(scalar, 0)`` followed by
+    ``repeat(., N, axis=0)`` — and aborts inside ``build_internal`` for
+    fp16 scalar+vector multiply (verified 2026-05-07: the same call passes
+    when one of the inputs is forced to vector shape via pre-broadcast).
+
+    Pre-broadcast on the host turns the call into an N-dim × N-dim mul
+    that rebel-compiler handles cleanly.
+    """
+    if not out_shape:
+        return False
+    for t in tensor_args:
+        if t.dim() == 0:
+            return True
+    return False
+
+
 def _has_last_dim_size_one_broadcast(tensor_args, out_shape):
     """Detect tensors that need a stride-0 expand on the LAST dim.
 
@@ -325,7 +348,8 @@ def broadcast_args_general(tensor_args, args):
         tensor_shapes = [tuple(t.shape) for t in tensor_args]
         raise RuntimeError(f"Broadcasting failed for tensor shapes={tensor_shapes}") from e
 
-    if not _has_last_dim_size_one_broadcast(tensor_args, out_shape):
+    if not _has_last_dim_size_one_broadcast(tensor_args, out_shape) \
+            and not _has_zero_dim_broadcast(tensor_args, out_shape):
         return args
 
     try:
@@ -588,7 +612,21 @@ def _classify_single_step_view(parent: torch.Tensor, child: torch.Tensor):
                         ok = False
                         break
             if ok:
-                return ("expand", tuple(c_shape))
+                # Reject the recipe when ALL parent dims have size 1 (parent is a
+                # rank-N broadcast of a single scalar): autograd's bprop emits
+                # ``scalar.expand(target)`` for ``y.sum().backward()`` and similar
+                # reductions; if we replay this expand inside the traced graph,
+                # rebel-compiler lowers it as ``unsqueeze(scalar) + repeat`` and
+                # then aborts in ``build_internal`` for fp16 scalar+vector
+                # multiply (verified 2026-05-07 via the cos/neg/mul trio that
+                # ``test_variant_consistency_eager_*_rbln_float16`` exercises).
+                # Falling out of the recipe path makes the caller materialize a
+                # contig vector via ``.contiguous()``, so torch.compile sees
+                # vector × vector and the abort goes away.
+                if all(s == 1 for s in p_shape):
+                    pass
+                else:
+                    return ("expand", tuple(c_shape))
 
         # Narrow: exactly one dim shrunk, offset moved by start*stride[dim].
         diff_dims = [i for i in range(p_ndim) if p_shape[i] != c_shape[i]]
@@ -1275,6 +1313,16 @@ def _detect_view_recipe_safe(t: torch.Tensor):
         base = _construct_synthetic_base(t)
         if base is None:
             return None
+
+    # Reject 0-dim base: autograd's bprop emits ``scalar.expand(target_shape)``
+    # for ``y.sum().backward()`` and similar reductions. Replaying this expand
+    # inside a view-aware traced graph (``unsqueeze(scalar) + expand``) makes
+    # rebel-compiler abort in ``build_internal`` for fp16 scalar+vector mul
+    # (verified 2026-05-07 via cos backward fp16). Falling back to
+    # ``.contiguous()`` materializes a real vector buffer so the compile path
+    # sees vector × vector and skips the failing IR pattern.
+    if base.dim() == 0:
+        return None
 
     recipe = _bfs_search_recipe(base, t, max_steps=4)
     if recipe is None:
