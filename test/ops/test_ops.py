@@ -203,21 +203,29 @@ def assert_equal_where_specials_match(
     atol=1e-5,
     rtol=1e-3,
     custom_float16_safe_range: tuple[float, float] | None = None,
+    custom_float16_input_mask: torch.Tensor | None = None,
 ):
     """Compare tensors allowing inf/nan values to match between them.
 
-    When ``custom_float16_safe_range = (low, high)`` is set, additionally mask out
-    elements where either side has |value| < low or |value| > high. Use this
-    for fp16 ops whose device custom_float16 compDtype has a different representable
-    range than fp16:
+    ``custom_float16_safe_range = (low, high)`` masks output elements where either
+    side has |value| < low or |value| > high. Use for fp16 ops whose device
+    custom_float16 compDtype has a different representable range than fp16:
       - upper edge: a value above ``high`` is at risk of saturating to fp16
         max via custom_float16 → fp16 cast.
       - lower edge: a value below ``low`` may be flushed to zero in custom_float16
         (its mantissa is shorter than fp16's) so CPU and device disagree on
         whether the result is zero or non-trivial.
-    Element-wise tolerance cannot bound the resulting divergence, but masking
-    the boundary positions preserves the assertion on the (much larger) set
-    of well-behaved elements.
+
+    ``custom_float16_input_mask`` is a same-shape boolean tensor (broadcastable to
+    ``a``) marking positions where ALL fp16 input operands are within the
+    custom_float16-safe range. Output safe-range alone cannot catch divergence
+    caused by input-side custom_float16 flush — e.g. div with denominator that
+    flushes to zero on device produces a saturated output that's still
+    representable in fp16 but disagrees with the CPU finite result. Mask
+    those positions out using input value provenance instead.
+
+    Element-wise tolerance cannot bound either edge, but masking the
+    boundary positions preserves the assertion on the well-behaved set.
     """
     a = a.cpu()
     b = b.cpu()
@@ -232,19 +240,67 @@ def assert_equal_where_specials_match(
         b_abs = b.abs()
         a_ok = a_ok & (a_abs >= low) & (a_abs < high)
         b_ok = b_ok & (b_abs >= low) & (b_abs < high)
+    if custom_float16_input_mask is not None:
+        mask = custom_float16_input_mask.cpu().expand_as(a)
+        a_ok = a_ok & mask
+        b_ok = b_ok & mask
 
     # 1. check well-behaved elements
     both_ok = a_ok & b_ok
     if both_ok.any():
         torch.testing.assert_close(a[both_ok], b[both_ok], atol=atol, rtol=rtol, check_dtype=False)
 
-    # 2. boundary check — only when no safe-range is set. With a range,
+    # 2. boundary check — only when no range/mask is set. With either, the
     #    asymmetric out-of-range positions are the very thing we tolerate.
-    if custom_float16_safe_range is None:
+    if custom_float16_safe_range is None and custom_float16_input_mask is None:
         mismatch = a_ok ^ b_ok
         if mismatch.any():
             idx = torch.nonzero(mismatch, as_tuple=False)
             raise AssertionError(f"Mismatch at finite/special boundary: {idx}")
+
+
+def _custom_float16_input_safe_mask(
+    sample_input,
+    sample_args,
+    sample_kwargs,
+    output_shape,
+    *,
+    low: float = 1e-3,
+    high: float = 32000.0,
+) -> torch.Tensor | None:
+    """Build a per-output-element boolean mask flagging positions where
+    every fp16 tensor operand has |value| in [low, high). For elementwise
+    binary ops with broadcasting (e.g. div(numerator, denominator)) this
+    captures the custom_float16-flush / saturate boundary of inputs which the
+    output-only ``custom_float16_safe_range`` cannot see.
+
+    Returns None when the operand layout isn't recognisable (more than one
+    input non-tensor; non-broadcasting kwargs; etc.) — in which case the
+    caller should keep the output-only safe-range path.
+    """
+    tensors = []
+    if isinstance(sample_input, torch.Tensor):
+        tensors.append(sample_input)
+    for a in sample_args:
+        if isinstance(a, torch.Tensor):
+            tensors.append(a)
+    for v in sample_kwargs.values():
+        if isinstance(v, torch.Tensor):
+            tensors.append(v)
+    if not tensors:
+        return None
+    try:
+        broadcast = torch.broadcast_tensors(*tensors)
+    except RuntimeError:
+        return None
+    if broadcast[0].shape != tuple(output_shape):
+        return None
+    mask = torch.ones(output_shape, dtype=torch.bool, device=broadcast[0].device)
+    for t in broadcast:
+        if t.dtype == torch.float16:
+            t_abs = t.abs()
+            mask = mask & torch.isfinite(t) & (t_abs >= low) & (t_abs < high)
+    return mask
 
 
 @pytest.mark.test_set_ci
@@ -470,24 +526,25 @@ class TestCommon(TestCase):
             atol = max(atol, 0.05)
             ignore_inf_nan = True
             fp16_div_safe_range = (1e-3, 32000.0)  # |x| in [1e-3, ~half-fp16-max]
-        # div + floor/trunc on fp16 is uniquely brittle: both rounding modes
-        # are discontinuous on (a/b), so any precision drift that crosses an
-        # integer bucket boundary flips the result by ≥1 — and at fp16
-        # magnitudes the ULP itself is already several units, so adjacent
-        # fp16-representable a/b values often live in different buckets.
-        # CPU's exact fp16 a/b and the device's custom_float16-then-fp16 a/b
-        # therefore land in disagreeing buckets at orders-of-magnitude rates
-        # that no element-wise tolerance or output safe-range mask can bound
-        # (the diverging-bucket outputs are themselves valid in-range fp16
-        # values). Skip on fp16; no_rounding has the same custom_float16 precision
-        # limit but tolerates per-bucket drift via continuous output.
+        # div + floor/trunc on fp16: the rounding modes are discontinuous on
+        # (a/b). Tried two attempted fixes (output ``custom_float16_safe_range`` and
+        # input-side ``custom_float16_input_mask`` masking input flush positions)
+        # plus ``atol=1`` for per-bucket drift. Mask reduces but does not
+        # eliminate the disagreement: e.g. trunc reference sample 98 with
+        # input shape (357, 789) still produces ~937 / 269508 unmasked
+        # positions with diffs up to 36000 — the custom_float16 boundary is wider
+        # than (1e-3, 32000) and asymmetric on negative inputs. Bounding
+        # those would require an explicit custom_float16 boundary spec from the
+        # rebel SDK. Keep the skip.
+        fp16_div_input_mask: torch.Tensor | None = None
         if dtype is torch.float16 and (op.name, op.variant_test_name) in {
             ("div", "floor_rounding"),
             ("div", "trunc_rounding"),
         }:
             self.skipTest(
                 f"fp16 div with {op.variant_test_name} diverges at custom_float16-to-fp16 "
-                "bucket transitions; the discontinuity means tolerance cannot bound it"
+                "bucket transitions; tolerance + input/output safe-range mask still "
+                "leave ~0.4% positions unbounded (need explicit custom_float16 boundary spec)"
             )
 
         is_comparison_op = op.name in ("ne", "eq", "gt", "ge", "lt", "le")
@@ -530,12 +587,29 @@ class TestCommon(TestCase):
                 mask = torch.isposinf(cuda_results) & ~torch.isinf(cpu_results.to("rbln"))
                 cuda_results = torch.where(mask, torch.full_like(cuda_results, 65504.0), cuda_results)
             if ignore_inf_nan:
+                # Build input-side mask for fp16 div trunc/floor: positions
+                # where any fp16 operand is at the custom_float16 flush/saturate
+                # boundary saturate device-side but stay finite on CPU,
+                # producing in-fp16-range output values that disagree by
+                # arbitrary magnitude. The output safe-range can't see this;
+                # use the input mask in addition.
+                if dtype is torch.float16 and (op.name, op.variant_test_name) in {
+                    ("div", "floor_rounding"),
+                    ("div", "trunc_rounding"),
+                }:
+                    fp16_div_input_mask = _custom_float16_input_safe_mask(
+                        cpu_sample.input,
+                        cpu_sample.args,
+                        cpu_sample.kwargs,
+                        cuda_results.shape,
+                    )
                 assert_equal_where_specials_match(
                     cuda_results,
                     cpu_results,
                     atol=atol,
                     rtol=rtol,
                     custom_float16_safe_range=fp16_div_safe_range,
+                    custom_float16_input_mask=fp16_div_input_mask,
                 )
             else:
                 self.assertEqual(cuda_results, cpu_results, atol=atol, rtol=rtol)
@@ -892,41 +966,28 @@ class TestCommon(TestCase):
                 ("sum", ""),
             }:
                 assert_kwargs = {"rtol": 0.2, "atol": 1.0}
-            # chunk on fp16 noncontig: comparing the returned list of tensors
-            # invokes eq_rbln during assertEqual, which aborts inside rebel-
-            # compiler's build_internal on certain shapes/strides. The abort
-            # is a rebel-compiler internal failure unrelated to torch-rbln
-            # dispatch — skip until the upstream issue is fixed.
+            # The fp16 chunk / nn.functional.linear / flatten skips below all
+            # share the same upstream issue as the test_variant_consistency_eager
+            # fp16 skip — rebel-compiler aborts on fp16 graphs only with the
+            # current torch_rbln build (older public checkout passes the same
+            # call sequence). Pending C++ bisect; see that block for details.
             if dtype is torch.float16 and (op.name, op.variant_test_name) == ("chunk", ""):
                 self.skipTest(
-                    "fp16 chunk: rebel-compiler aborts in build_internal during the "
-                    "eq_rbln compile step that assertEqual on a chunk-returned tensor "
-                    "list triggers"
+                    "fp16 chunk noncontig: rebel-compiler aborts on the eq_rbln "
+                    "compile triggered by assertEqual on the chunk-returned tensor "
+                    "list (see test_variant_consistency_eager for shared root cause)"
                 )
-            # nn.functional.linear on fp16 noncontig: rebel-compiler raises
-            # ``InternalError: indexing N on an array of size M`` from inside
-            # TVM's relay pass pipeline when compiling the noncontig fp16
-            # linear graph. Same upstream class as the chunk skip — skip until
-            # the rebel-compiler fix lands.
             if dtype is torch.float16 and (op.name, op.variant_test_name) == ("nn.functional.linear", ""):
                 self.skipTest(
-                    "fp16 nn.functional.linear: rebel-compiler raises an InternalError "
-                    "from a TVM relay pass during the noncontig fp16 compile path"
+                    "fp16 nn.functional.linear noncontig: rebel-compiler InternalError "
+                    "(TVM relay IndexError) on the fp16 noncontig compile path "
+                    "(see test_variant_consistency_eager for shared root cause)"
                 )
-            # flatten on fp16 noncontig: a small set of output positions retain
-            # NaN values from prior in-process device memory state when run
-            # under the pytest harness (forward output mismatch is a NaN
-            # pattern with diff 0 — i.e. residual NaN in 6/25 positions). The
-            # exact same call sequence passes in a plain Python interpreter
-            # without pytest, so the trigger is some interaction between
-            # pytest's setup (autouse fixtures, test discovery) and the
-            # device-side buffer allocator/alignment that we have not yet
-            # isolated. Skip on fp16 until the harness/buffer interaction is
-            # diagnosed.
             if dtype is torch.float16 and (op.name, op.variant_test_name) == ("flatten", ""):
                 self.skipTest(
                     "fp16 flatten noncontig: residual-NaN forward mismatch under pytest "
-                    "(passes outside pytest); pending harness/buffer interaction triage"
+                    "(passes outside pytest with the older public torch_rbln checkout); "
+                    "see test_variant_consistency_eager for shared root cause"
                 )
             self.assertEqual(actual, expected, **assert_kwargs)
 
@@ -935,11 +996,11 @@ class TestCommon(TestCase):
             if not test_grad:
                 continue
 
-            # fp16 backward of these ops triggers a rebel-compiler abort in
-            # ``build_internal``. The matmul/reduction backward pass produces
-            # graphs (mul/mm/neg/div) that fail to compile inside the rebel
-            # compiler — same upstream issue as the chunk skip above. Skip
-            # the backward portion only; forward already passes.
+            # fp16 backward of mean/sum/linear: same upstream issue as the
+            # ``test_variant_consistency_eager`` fp16 skip — rebel-compiler
+            # build_internal aborts on the fp16 backward graph compile with
+            # the current torch_rbln build. Skip the backward portion only;
+            # forward already passes.
             if dtype is torch.float16 and (op.name, op.variant_test_name) in {
                 ("mean", ""),
                 ("nn.functional.linear", ""),
@@ -1146,20 +1207,17 @@ class TestCommon(TestCase):
     #   - if device, dtype are passed, device and dtype should match
     @ops(ops_and_refs, dtypes=OpDTypes.supported)
     def test_out(self, device, dtype, op):
-        # fp16 div with no_rounding_mode: when run under pytest with the warm-
-        # cache enabled, sample 5 (input shape (5, 10, 5) + (5, 10, 5)) produces
-        # a single residual NaN at index (4, 8, 4) in the output buffer that
-        # was pre-filled with NaN. Setting RBLN_TEST_WARM_OFF=1 makes the test
-        # pass, indicating the hit path serves an output buffer with one
-        # element not fully overwritten by the cached runtime — likely a
-        # last-dim alignment / depad off-by-one inside rebel runtime that we
-        # have not yet isolated. Skip until the warm-cache hit path's output
-        # write coverage is verified.
+        # fp16 div.no_rounding_mode sample 5 (5,10,5)+(5,10,5): the warm-cache
+        # hit output write leaves 1 NaN at index (4,8,4) in the NaN-prefilled
+        # out tensor under the current torch_rbln build. Setting
+        # RBLN_TEST_WARM_OFF=1 makes the test pass, indicating the hit path's
+        # output write doesn't fully cover all elements. Same upstream class
+        # as the test_variant_consistency_eager fp16 skip.
         if dtype is torch.float16 and (op.name, op.variant_test_name) == ("div", "no_rounding_mode"):
             self.skipTest(
                 "fp16 div.no_rounding_mode: warm-cache hit leaves 1 NaN in the "
-                "pre-filled out= buffer (sample 5, shape (5,10,5)); pending warm-cache "
-                "output write triage"
+                "pre-filled out= buffer at sample 5 (5,10,5); see "
+                "test_variant_consistency_eager for shared root cause"
             )
         # Prefers running in float32 but has a fallback for the first listed supported dtype
         samples = op.sample_inputs(device, dtype)
@@ -1426,20 +1484,48 @@ class TestCommon(TestCase):
     #   against eager's gold standard op function variant
     @_variant_ops(op_db)
     def test_variant_consistency_eager(self, device, dtype, op):
-        # fp16 backward dispatch routes through compile_and_run_view_aware,
-        # which triggers a rebel-compiler abort inside ``build_internal`` for
-        # a wide and unstable set of fp16 backward graphs (different ops
-        # surface across consecutive runs: abs, add, addmm, addmm.decomposed,
-        # _softmax_backward_data, cos, div.no_rounding_mode, fmod, log, ...).
-        # The abort is a rebel-compiler internal failure unrelated to
-        # torch-rbln dispatch — once a worker aborts, xdist marks the
-        # remaining tests for that worker as failed, so the symptom is
-        # whack-a-mole. Skip the whole fp16 variant for this test until the
-        # upstream rebel-compiler fix lands.
+        # fp16 backward dispatch aborts inside rebel-compiler ``build_internal``
+        # during fp16 backward graph compile, ONLY with the current local
+        # torch_rbln checkout. Reproduction matrix (cos.sum().backward() on
+        # fp16 tensor with requires_grad=True):
+        #
+        #   torch_rbln source         | result
+        #   --------------------------+---------
+        #   /home/chanheo/torch-rbln-ext (this repo, dev HEAD)   ABORT
+        #   /home/chanheo/torch-rbln-public (older checkout)     PASS
+        #
+        # The same test passes when torch_rbln is loaded from the older
+        # public checkout, regardless of which torch (.venv vs pyenv) is
+        # loaded or which Python harness invokes the test (pytest single,
+        # pytest --forked, plain `.venv/bin/python -c`, all behave the
+        # same once the torch_rbln source is fixed).
+        #
+        # The diff between the two checkouts touches: WarmCache.cpp/h,
+        # DispatchShim.cpp/h, Module.cpp, register_ops.py, ops_utils.py,
+        # and the rebuilt torch_rbln/_C.so / libc10_rbln.so /
+        # libtorch_rbln.so. Disabling the C++ shim registration
+        # (monkey-patching `_register_cpp_shim` to a no-op before
+        # `import torch_rbln`) does NOT change the abort, so the trigger
+        # is in the .so build itself or in ops_utils' compile_and_run_view_aware
+        # path rather than in the warm-cache shim.
+        #
+        # Workaround options considered:
+        #   1. Forcing fp16 backward dispatch through cpu_fallback —
+        #      regresses forward perf on real workloads (mul/mm/neg/div
+        #      backward graphs share the Python wrapper used by forward).
+        #      Rejected.
+        #   2. Bisecting the torch_rbln C++ rebuild between the two
+        #      checkouts — pending.
+        #   3. Filing a rebel-compiler upstream ticket — needs the C++
+        #      bisect output to be actionable.
+        #
+        # Skip the whole fp16 dtype rather than maintain a whack-a-mole
+        # list of individual ops whose abort surface shifts run-to-run.
         if dtype is torch.float16:
             self.skipTest(
-                f"fp16 variant_consistency_eager: rebel-compiler aborts in "
-                "build_internal during the fp16 backward compile path; upstream issue"
+                "fp16 variant_consistency_eager: rebel-compiler build_internal "
+                "aborts during fp16 backward graph compile with the current "
+                "torch_rbln build. Pending C++ bisect against the public checkout"
             )
 
         # Acquires variants (method variant, inplace variant, operator variant, inplace_operator variant, aliases)
