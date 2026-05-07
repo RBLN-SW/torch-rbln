@@ -24,7 +24,10 @@ import pytest
 import torch
 from torch.testing._internal.common_utils import TestCase, run_tests
 
-import torch_rbln  # noqa: F401  -- registers the rbln device module
+# torch.rbln is registered automatically via the "torch.backends" autoload
+# entry point declared in torch-rbln's pyproject.toml, so importing torch is
+# enough to expose torch.rbln.offload. We still import torch_rbln.memory
+# directly to peek at its module-level _offload_depth from the nesting test.
 import torch_rbln.memory as torch_rbln_memory
 
 
