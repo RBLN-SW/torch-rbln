@@ -193,17 +193,15 @@ def offload() -> Iterator[None]:
         with torch.rbln.offload():
             tensor = torch.zeros(1 << 30, device="rbln:0")  # offloaded
     """
-    from rebel._C import vmem as _rebel_vmem
-
     global _offload_depth
     with _offload_lock:
         _offload_depth += 1
         if _offload_depth == 1:
-            _rebel_vmem.set_file_offloading_enabled(True)
+            torch_rbln._C._set_file_offloading_enabled(True)
     try:
         yield
     finally:
         with _offload_lock:
             _offload_depth -= 1
             if _offload_depth == 0:
-                _rebel_vmem.set_file_offloading_enabled(False)
+                torch_rbln._C._set_file_offloading_enabled(False)
