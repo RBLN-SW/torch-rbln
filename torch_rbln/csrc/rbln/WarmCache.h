@@ -41,26 +41,7 @@
 #include <string>
 #include <unordered_map>
 
-// Forward declaration of rebel's PyRblnSyncRuntime.
-//
-// Including the real header (rebel/pyrbln_impl/compiled_model.h) pulls in a
-// transitive dependency on absl + other rebel-internal symbols that are not
-// part of the shipped prod librbln.so. The linker resolves these method
-// symbols against librbln.so at load time; signatures MUST match upstream.
-// Reference: /home/chanheo/rebel_compiler/rebel/include/rebel/pyrbln_impl/
-//            compiled_model.h.
-namespace rbln {
-class PyRblnSyncRuntime {
- public:
-  void Run();
-  void PrepareInputs(
-      const std::map<uint32_t, uint64_t>& device_inputs,
-      const std::map<uint32_t, uintptr_t>& cpu_inputs);
-  void PrepareOutputs(
-      const std::map<uint32_t, uint64_t>& device_outputs,
-      const std::map<uint32_t, uintptr_t>& cpu_outputs);
-};
-} // namespace rbln
+#include "torch_rbln/csrc/rbln/rebel_runtime_decl.h"
 
 namespace torch_rbln::warmcache {
 
