@@ -1,14 +1,19 @@
 set(target torch_rbln)
 set(sources
   native/rbln/RBLNCPUFallback.cpp
+  native/rbln/RBLNCPUFastPaths.cpp
   native/rbln/RBLNCopy.cpp
   native/rbln/RBLNResize.cpp
   native/rbln/RBLNTensorFactories.cpp
   native/rbln/RBLNTensorUtils.cpp
   native/RBLNRegisterOps.cpp
+  native/rbln/fast_paths/rsqrt_fp32.cpp
+  native/rbln/fast_paths/pow_squared_fp32.cpp
+  native/rbln/fast_paths/mean_lastdim_fp32.cpp
 )
 set(headers
   native/rbln/RBLNCPUFallback.h
+  native/rbln/RBLNCPUFastPaths.h
   native/rbln/RBLNCopy.h
   native/rbln/RBLNResize.h
   native/rbln/RBLNTensorFactories.h
