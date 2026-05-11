@@ -1758,13 +1758,15 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     # rotate_half regression (single-tensor neg/mul on unaligned views)
     # without penalizing TensorList ops.
     def _last_dim_unaligned(t):
-        return (isinstance(t, torch.Tensor) and t.dim() > 0
-                and t.shape[-1] % 64 != 0)
-    if any(_last_dim_unaligned(a) for a in args) or any(
-            _last_dim_unaligned(v) for v in kwargs_filtered.values()):
+        return isinstance(t, torch.Tensor) and t.dim() > 0 and t.shape[-1] % 64 != 0
+
+    if any(_last_dim_unaligned(a) for a in args) or any(_last_dim_unaligned(v) for v in kwargs_filtered.values()):
         return cpu_fallback_path(
-            op_callable, args, result=out_tensor,
-            op_name=op_name, **kwargs_filtered,
+            op_callable,
+            args,
+            result=out_tensor,
+            op_name=op_name,
+            **kwargs_filtered,
         )
 
     # fp16 div with rounding_mode trunc/floor: rebel-compiler emits IR for
