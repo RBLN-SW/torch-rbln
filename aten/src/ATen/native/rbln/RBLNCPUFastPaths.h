@@ -48,6 +48,11 @@ class CPUFastPathRegistry {
   // Returns ``nullptr`` when no handler is registered for the op.
   C10_RBLN_API CPUFastPathHandler::Fn try_get(const c10::FunctionSchema& schema) const;
 
+  // Introspection: does a handler exist for ``op_name``? Used by tests to
+  // verify the static-init registration fired without going through the
+  // FunctionSchema lookup path.
+  C10_RBLN_API bool has_handler_for_op(const std::string& op_name) const;
+
  private:
   CPUFastPathRegistry() = default;
   CPUFastPathRegistry(const CPUFastPathRegistry&) = delete;

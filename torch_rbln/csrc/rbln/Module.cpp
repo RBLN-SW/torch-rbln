@@ -7,6 +7,7 @@
 #include <torch/csrc/utils/pybind.h>
 #include <torch_rbln/csrc/distributed/c10d/rbln/ProcessGroupRBLNModule.hpp>
 #include <ATen/native/rbln/RBLNCPUFallback.h>
+#include <ATen/native/rbln/RBLNCPUFastPaths.h>
 #include <torch_rbln/csrc/rbln/DispatchShim.h>
 #include <torch_rbln/csrc/rbln/WarmCache.h>
 #include <exception>
@@ -165,6 +166,17 @@ void register_internal_api(py::module_& module) {
       "_warmcache_exit_building",
       []() { torch_rbln::warmcache::WarmCache::exit_building(); },
       "Internal: clear the miss-path reentrancy flag set by _warmcache_enter_building");
+
+  // CPU fast-path registry introspection. Returns True iff a handler is
+  // registered for the given fully-qualified op name (e.g. "aten::rsqrt.out").
+  // Used by tests to verify the static-init registration fired without
+  // needing a live OperatorHandle.
+  module.def(
+      "_cpu_fast_path_registered",
+      [](const std::string& op_name) {
+        return at::native::rbln::CPUFastPathRegistry::instance().has_handler_for_op(op_name);
+      },
+      "Internal: returns True iff a CPU fast-path handler is registered for the given op name");
 
   // Pybind11 instance raw-pointer extractor.
   //

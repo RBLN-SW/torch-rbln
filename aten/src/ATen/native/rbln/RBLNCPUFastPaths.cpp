@@ -21,6 +21,11 @@ void CPUFastPathRegistry::register_handler(
   by_name_.emplace(op_name, fn);
 }
 
+bool CPUFastPathRegistry::has_handler_for_op(const std::string& op_name) const {
+  std::shared_lock<std::shared_mutex> rd(mu_);
+  return by_name_.find(op_name) != by_name_.end();
+}
+
 CPUFastPathHandler::Fn CPUFastPathRegistry::try_get(
     const c10::FunctionSchema& schema) const {
   // Fast path: shared lock, look up cached handler by schema pointer.
