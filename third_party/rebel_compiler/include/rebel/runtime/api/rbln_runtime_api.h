@@ -230,8 +230,8 @@ RBLNRetCode rbln_get_memory_info(uint64_t vaddr, MemoryInfo& memory_info_out);
 // return convention (RBLNRetCode vs Status); free of vmemory_manager.h
 // dependencies so it is safe to call from torch-rbln without dragging in
 // absl / model headers.
-RBLNRetCode rbln_v_borrow_host_ptr(uint64_t vaddr, uint64_t size,
-                                   uintptr_t& host_ptr_out, uint64_t& borrow_id_out);
+RBLNRetCode rbln_v_borrow_host_ptr(uint64_t vaddr, uint64_t size, uintptr_t& host_ptr_out,
+                                   uint64_t& borrow_id_out);
 
 // Acquire a host pointer for **overwrite-only** access. Same lifecycle as
 // `rbln_v_borrow_host_ptr` (must be released via `rbln_v_return_borrowed`),

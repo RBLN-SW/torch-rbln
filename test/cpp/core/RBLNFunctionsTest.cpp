@@ -223,9 +223,9 @@ TEST_F(RBLNFunctionsTest, GetUninitializedMemoryInfo) {
 }
 
 // ---------------------------------------------------------------------------
-// borrow_host_ptr / acquire_host_ptr_for_overwrite / return_borrowed.
+// borrow_host_ptr (default / for_overwrite=true) / return_borrowed.
 // Covers the round-trip happy path, host-write-back semantics, the
-// overwrite-acquire variant (no D2H sync), and the input-validation contracts
+// for_overwrite=true variant (no D2H sync), and the input-validation contracts
 // (nullptr / zero size / sentinel borrow_id).
 // ---------------------------------------------------------------------------
 
@@ -282,16 +282,16 @@ TEST_F(RBLNFunctionsTest, BorrowHostPtrWriteBackVisibleAfterReturn) {
   c10::rbln::free(rbln_data);
 }
 
-TEST_F(RBLNFunctionsTest, AcquireHostPtrForOverwriteRoundTrip) {
-  // Acquire-for-overwrite skips the device→host sync; caller must overwrite
-  // the entire region. Verify (a) the call returns a valid host pointer and
-  // (b) writing through it and returning(updated=true) makes the host bytes
+TEST_F(RBLNFunctionsTest, BorrowHostPtrForOverwriteRoundTrip) {
+  // for_overwrite=true skips the device→host sync; caller must overwrite the
+  // entire region. Verify (a) the call returns a valid host pointer and (b)
+  // writing through it and returning(updated=true) makes the host bytes
   // visible on subsequent v2h.
   const size_t nbytes = 256;
   auto rbln_data = c10::rbln::malloc(/*device_index=*/0, nbytes);
   ASSERT_NE(rbln_data, nullptr);
 
-  const auto borrowed = c10::rbln::acquire_host_ptr_for_overwrite(rbln_data, nbytes);
+  const auto borrowed = c10::rbln::borrow_host_ptr(rbln_data, nbytes, /*for_overwrite=*/true);
   EXPECT_NE(borrowed.host_ptr, uintptr_t{0});
   EXPECT_NE(borrowed.borrow_id, uint64_t{0});
 
@@ -310,7 +310,8 @@ TEST_F(RBLNFunctionsTest, AcquireHostPtrForOverwriteRoundTrip) {
 
 TEST_F(RBLNFunctionsTest, BorrowRejectsNullData) {
   EXPECT_THROW(c10::rbln::borrow_host_ptr(/*rbln_data=*/nullptr, 64), c10::Error);
-  EXPECT_THROW(c10::rbln::acquire_host_ptr_for_overwrite(/*rbln_data=*/nullptr, 64), c10::Error);
+  EXPECT_THROW(c10::rbln::borrow_host_ptr(/*rbln_data=*/nullptr, 64, /*for_overwrite=*/true),
+               c10::Error);
 }
 
 TEST_F(RBLNFunctionsTest, BorrowRejectsZeroSize) {
@@ -319,7 +320,8 @@ TEST_F(RBLNFunctionsTest, BorrowRejectsZeroSize) {
   auto rbln_data = c10::rbln::malloc(/*device_index=*/0, 64);
   ASSERT_NE(rbln_data, nullptr);
   EXPECT_THROW(c10::rbln::borrow_host_ptr(rbln_data, /*nbytes=*/0), c10::Error);
-  EXPECT_THROW(c10::rbln::acquire_host_ptr_for_overwrite(rbln_data, /*nbytes=*/0), c10::Error);
+  EXPECT_THROW(c10::rbln::borrow_host_ptr(rbln_data, /*nbytes=*/0, /*for_overwrite=*/true),
+               c10::Error);
   c10::rbln::free(rbln_data);
 }
 

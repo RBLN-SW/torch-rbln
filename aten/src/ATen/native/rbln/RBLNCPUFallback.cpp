@@ -408,7 +408,8 @@ void cpu_fallback_rbln(
       const uint64_t nbytes = rbln_out.nbytes();
       if (rbln_out.device().type() == c10::DeviceType::PrivateUse1 &&
           rbln_out.is_contiguous() && nbytes > 0) {
-        auto borrowed = c10::rbln::acquire_host_ptr_for_overwrite(rbln_out.data_ptr(), nbytes);
+        auto borrowed =
+            c10::rbln::borrow_host_ptr(rbln_out.data_ptr(), nbytes, /*for_overwrite=*/true);
         borrow_ids[i] = borrowed.borrow_id;
         auto opts = at::TensorOptions().dtype(rbln_out.dtype()).device(at::kCPU);
         cpu_tensors[i] = at::from_blob(
@@ -507,9 +508,10 @@ void cpu_fallback_rbln(
       }
       const uint64_t nbytes = rbln_out.nbytes();
       if (nbytes > 0) {
-        // Acquire-for-overwrite: we immediately memcpy over the whole region, so any
+        // Borrow for overwrite: we immediately memcpy over the whole region, so any
         // D2H from a stale PHYSICAL_VIEW_IS_LATEST state would be thrown away.
-        auto borrowed = c10::rbln::acquire_host_ptr_for_overwrite(rbln_out.data_ptr(), nbytes);
+        auto borrowed =
+            c10::rbln::borrow_host_ptr(rbln_out.data_ptr(), nbytes, /*for_overwrite=*/true);
         std::memcpy(reinterpret_cast<void*>(borrowed.host_ptr), cpu_tensors[i].data_ptr(), nbytes);
         c10::rbln::return_borrowed(borrowed.borrow_id, /*updated=*/true);
       }
@@ -709,7 +711,8 @@ void cpu_fallback_rbln(
               // any pre-existing data (in practice there is none, but if the
               // allocator ever caches a warm buffer the old device data is
               // irrelevant) will be overwritten by the memcpy below.
-              auto borrowed = c10::rbln::acquire_host_ptr_for_overwrite(rbln_out.data_ptr(), nbytes);
+              auto borrowed = c10::rbln::borrow_host_ptr(rbln_out.data_ptr(), nbytes,
+                                                         /*for_overwrite=*/true);
               std::memcpy(reinterpret_cast<void*>(borrowed.host_ptr), cpu_out.data_ptr(), nbytes);
               c10::rbln::return_borrowed(borrowed.borrow_id, /*updated=*/true);
             }

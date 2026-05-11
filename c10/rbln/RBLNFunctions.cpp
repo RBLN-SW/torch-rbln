@@ -319,8 +319,9 @@ void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes) {
   }
 }
 
-BorrowedHostPtr borrow_host_ptr(const void* rbln_data, size_t nbytes) {
-  RBLN_LOG_DEBUG("rbln_data={}, nbytes={}", fmt::ptr(rbln_data), nbytes);
+BorrowedHostPtr borrow_host_ptr(const void* rbln_data, size_t nbytes, bool for_overwrite) {
+  RBLN_LOG_DEBUG(
+      "rbln_data={}, nbytes={}, for_overwrite={}", fmt::ptr(rbln_data), nbytes, for_overwrite);
   RBLN_CHECK(rbln_data != nullptr, "rbln_data cannot be nullptr");
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
 
@@ -328,30 +329,18 @@ BorrowedHostPtr borrow_host_ptr(const void* rbln_data, size_t nbytes) {
   const auto size = static_cast<uint64_t>(nbytes);
   uintptr_t host_ptr = 0;
   uint64_t borrow_id = 0;
-  RBLN_LOG_DEBUG("Calling rbln_v_borrow_host_ptr: vaddr={:#x}, size={}", vaddr, size);
-  RBLN_CHECK(
-      !::rbln::rbln_v_borrow_host_ptr(vaddr, size, host_ptr, borrow_id),
-      "rbln_v_borrow_host_ptr failed (vaddr={:#x}, size={}); see rebel runtime logs for details",
-      vaddr,
-      size);
-  return BorrowedHostPtr{host_ptr, borrow_id};
-}
-
-BorrowedHostPtr acquire_host_ptr_for_overwrite(void* rbln_data, size_t nbytes) {
-  RBLN_LOG_DEBUG("rbln_data={}, nbytes={}", fmt::ptr(rbln_data), nbytes);
-  RBLN_CHECK(rbln_data != nullptr, "rbln_data cannot be nullptr");
-  RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
-
-  const auto vaddr = reinterpret_cast<uint64_t>(rbln_data);
-  const auto size = static_cast<uint64_t>(nbytes);
-  uintptr_t host_ptr = 0;
-  uint64_t borrow_id = 0;
-  RBLN_LOG_DEBUG("Calling rbln_v_acquire_host_ptr_for_overwrite: vaddr={:#x}, size={}", vaddr, size);
-  RBLN_CHECK(
-      !::rbln::rbln_v_acquire_host_ptr_for_overwrite(vaddr, size, host_ptr, borrow_id),
-      "rbln_v_acquire_host_ptr_for_overwrite failed (vaddr={:#x}, size={}); see rebel runtime logs for details",
-      vaddr,
-      size);
+  const char* api_name =
+      for_overwrite ? "rbln_v_acquire_host_ptr_for_overwrite" : "rbln_v_borrow_host_ptr";
+  RBLN_LOG_DEBUG("Calling {}: vaddr={:#x}, size={}", api_name, vaddr, size);
+  const auto err = for_overwrite
+                       ? ::rbln::rbln_v_acquire_host_ptr_for_overwrite(
+                             vaddr, size, host_ptr, borrow_id)
+                       : ::rbln::rbln_v_borrow_host_ptr(vaddr, size, host_ptr, borrow_id);
+  RBLN_CHECK(!err,
+             "{} failed (vaddr={:#x}, size={}); see rebel runtime logs for details",
+             api_name,
+             vaddr,
+             size);
   return BorrowedHostPtr{host_ptr, borrow_id};
 }
 
