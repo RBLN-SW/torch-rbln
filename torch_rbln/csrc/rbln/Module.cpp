@@ -166,13 +166,33 @@ void register_internal_api(py::module_& module) {
       []() { torch_rbln::warmcache::WarmCache::exit_building(); },
       "Internal: clear the miss-path reentrancy flag set by _warmcache_enter_building");
 
-  // DIAG: cpu_fallback_rbln per-stage timing
-  module.def("_cpu_fallback_diag_dump", &at::native::rbln::diag_dump_cpu_fallback_stages,
-             "DIAG: dump (calls, ns_setup, ns_dispatch, ns_writeback, ns_release) for cpu_fallback_rbln");
-  module.def("_cpu_fallback_diag_reset", &at::native::rbln::diag_reset_cpu_fallback_stages,
-             "DIAG: reset cpu_fallback_rbln stage timers");
-  module.def("_cpu_fallback_diag_dump_wb_sub", &at::native::rbln::diag_dump_writeback_substages,
-             "DIAG: writeback sub-stages (alias_t, alias_tl, alias_otl)");
+  // Pybind11 instance raw-pointer extractor.
+  //
+  // For a pybind11 simple-layout instance (single-inheritance, standard
+  // ``unique_ptr`` / ``shared_ptr`` holder), the underlying C++ object pointer
+  // is stored directly after ``PyObject_HEAD``. We need this to bridge rebel's
+  // ``PyRblnSyncRuntime`` (built against pybind11 v2) into torch-rbln (which
+  // links pybind11 v3); the two registries are disjoint so ``py::cast<T*>``
+  // fails across DSOs.
+  //
+  // Reading the raw pointer requires knowing ``sizeof(PyObject)`` at the
+  // boundary. Doing this in C++ keeps the offset matched to the Python ABI
+  // we are compiled against, instead of a hardcoded Python-side constant
+  // that drifts on debug builds, free-threaded builds (PEP 703), or non-x86.
+  module.def(
+      "_pybind_instance_raw_ptr",
+      [](pybind11::handle h) -> uintptr_t {
+        PyObject* obj = h.ptr();
+        if (obj == nullptr) {
+          throw std::invalid_argument("_pybind_instance_raw_ptr: null handle");
+        }
+        // Layout: [PyObject_HEAD][void* instance_ptr][...]. Read the void*
+        // immediately past the head.
+        const auto* slot = reinterpret_cast<const uintptr_t*>(
+            reinterpret_cast<const char*>(obj) + sizeof(PyObject));
+        return *slot;
+      },
+      "Internal: extract the raw C++ pointer held by a pybind11 simple-layout instance");
 
   // Fallback configuration
   module.def(
