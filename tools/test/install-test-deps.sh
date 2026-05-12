@@ -24,8 +24,6 @@
 #
 # Optional environment:
 #   UV=1                 Use ``uv pip install`` instead of ``python -m pip``.
-#   VLLM_RBLN_SKIP=1     Skip step 4 entirely (test_vllm_llm.py becomes a
-#                        clean pytest.importorskip in that case).
 #   VLLM_RBLN_REPO       Override the source repo (default rbln-sw/vllm-rbln).
 #   VLLM_RBLN_REF        Override the ref (default origin/device_tensor_rebased).
 #   VLLM_RBLN_DIR        Override the local checkout path
@@ -95,14 +93,14 @@ install_test_infra() {
 # only by test/models/test_optimum_llm.py.
 #
 # transformers and optimum-rbln are NOT installed here — they arrive
-# transitively via vllm-rbln in step 4. Environments that opt out of vllm-rbln
-# (VLLM_RBLN_SKIP=1) and still want to run those tests must install both
-# manually.
+# transitively via vllm-rbln in step 4.
 
 install_model_test_deps() {
   log_step "Model-test deps (torchvision CPU + pandas)"
   pip_install "torchvision==0.25.0+cpu" \
-    --index-url https://download.pytorch.org/whl/cpu
+    --index-url https://download.pytorch.org/whl/cpu \
+    --force-reinstall \
+    --no-deps
   pip_install "pandas==2.2.3"
 }
 
@@ -131,11 +129,6 @@ PY
 }
 
 install_vllm_rbln() {
-  if [ "${VLLM_RBLN_SKIP:-0}" = "1" ]; then
-    log_step "vllm-rbln (skipped via VLLM_RBLN_SKIP=1)"
-    return 0
-  fi
-
   local repo="${VLLM_RBLN_REPO:-https://github.com/rbln-sw/vllm-rbln.git}"
   local ref="${VLLM_RBLN_REF:-origin/chan/remove_cpu_offload}"
   local dir="${VLLM_RBLN_DIR:-$PROJECT_ROOT/vllm-rbln}"

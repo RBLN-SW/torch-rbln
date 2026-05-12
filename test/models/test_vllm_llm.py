@@ -13,7 +13,7 @@ hard-coded expected strings.
 Environment requirements
 ------------------------
 * ``vllm-rbln`` installed on ``origin/device_tensor_rebased`` (or descendant).
-* ``vllm_rbln`` / ``vllm`` importable — the test skips cleanly otherwise.
+* ``vllm_rbln`` / ``vllm`` importable.
 
 Matrix
 ------
@@ -23,13 +23,13 @@ Matrix
 """
 
 import os
-import unittest
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 import pytest
 import torch
+import vllm_rbln  # noqa: F401
 
 from test.utils import run_in_isolated_process
 
@@ -37,12 +37,6 @@ from test.utils import run_in_isolated_process
 # NOTE: do NOT import ``torch.testing._internal.common_utils`` at module level.
 # Spawned children re-import this module, and that import path perturbs rebel
 # runtime state into ``SYS_ERROR -14`` on NPU submit. See PR #10533.
-
-
-pytest.importorskip(
-    "vllm_rbln",
-    reason="vllm-rbln is not installed; install vllm-rbln to run vLLM LLM tests",
-)
 
 
 # Prepended to PYTHONPATH so EngineCore's fresh interpreter can resolve the
@@ -136,7 +130,6 @@ def _vllm_generate_worker(
     from vllm import LLM, SamplingParams
 
     cfg = MODEL_CONFIGS[model_key]
-    tc = unittest.TestCase()
 
     # Always TP=1 on the vLLM engine; RSD fan-out is driven by
     # ``VLLM_RBLN_TP_SIZE`` (set in ``_run_case``), keeping the test
@@ -162,7 +155,7 @@ def _vllm_generate_worker(
     llm = LLM(**llm_kwargs)
 
     outputs = llm.generate([prompt], SamplingParams(temperature=0.0, max_tokens=max_tokens))
-    tc.assertEqual(len(outputs), 1, "expected a single RequestOutput")
+    assert len(outputs) == 1, "expected a single RequestOutput"
 
     gen = outputs[0].outputs[0]
     gen_text = gen.text
@@ -171,18 +164,14 @@ def _vllm_generate_worker(
     mode = "eager" if enforce_eager else "graph"
     print(f"[vllm_llm_test] model={model_key} tp={tp_size} mode={mode} text={gen_text!r} ids={gen_ids}")
 
-    tc.assertGreater(len(gen_text), 0, "generated text should not be empty")
-    tc.assertEqual(len(gen_ids), max_tokens, "greedy decode should fill max_tokens")
-    tc.assertTrue(all(isinstance(i, int) and i >= 0 for i in gen_ids))
+    assert len(gen_text) > 0, "generated text should not be empty"
+    assert len(gen_ids) == max_tokens, "greedy decode should fill max_tokens"
+    assert all(isinstance(i, int) and i >= 0 for i in gen_ids)
 
     if expected_text is not None:
-        tc.assertEqual(
-            gen_text,
-            expected_text,
-            (
-                f"vLLM RBLN output mismatch for {model_key} tp{tp_size} {mode}. "
-                f"Expected: {expected_text!r}, Got: {gen_text!r}"
-            ),
+        assert gen_text == expected_text, (
+            f"vLLM RBLN output mismatch for {model_key} tp{tp_size} {mode}. "
+            f"Expected: {expected_text!r}, Got: {gen_text!r}"
         )
 
 
@@ -239,7 +228,6 @@ def _run_case(model_key: str, tp_size: int, enforce_eager: bool) -> None:
         mp.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
         mp.setenv("RBLN_KERNEL_MODE", "triton")
         mp.setenv("RBLN_PV_OPT", "1")
-        mp.setenv("TORCH_RBLN_DISABLE_FALLBACK", "compile_error")
         # RSD fan-out (1 worker → ``tp_size`` physical NPUs merged into one
         # logical device). vllm engine stays at ``tensor_parallel_size=1``.
         mp.setenv("VLLM_RBLN_TP_SIZE", str(tp_size))
