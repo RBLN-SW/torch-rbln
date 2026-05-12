@@ -37,6 +37,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
@@ -155,19 +156,30 @@ struct CacheEntry {
   c10::SmallVector<OutputProfile, 2> out_profiles;
 };
 
+// Shared pointer to a cache entry. Returned by ``find`` so the caller can
+// safely use the entry even if another thread concurrently ``erase``s the
+// key — the entry stays alive as long as any shared_ptr references it.
+// Without this, a raw-pointer ``find`` could return a pointer that another
+// thread invalidates via ``erase`` before the caller reaches ``Run``,
+// causing a use-after-free.
+using CacheEntryPtr = std::shared_ptr<const CacheEntry>;
+
 // Process-global cache. Entries are created via `install` on cache miss from
 // the Python bootstrap path, then found via `find` on the hot path.
 class WarmCache {
  public:
   static WarmCache& instance();
 
-  // Hot path. Returns pointer to cached entry, or nullptr on miss. The
-  // returned pointer is stable for the process lifetime (no eviction in V1).
-  const CacheEntry* find(const CacheKey& key);
+  // Hot path. Returns a shared_ptr to the cached entry, or empty on miss.
+  // The shared_ptr keeps the entry alive across concurrent ``erase`` from
+  // peer threads (use-after-free guard).
+  CacheEntryPtr find(const CacheKey& key);
 
   // Drop a single entry — used when a hit attempt fails at runtime so the
   // next dispatch falls through to the pybind miss path (which exercises
   // the DynamoRuntime wrapper that handles edge-case v-memory routing).
+  // Outlives any in-flight shared_ptr borrower; the entry's py::object
+  // destructor runs under the GIL via the shared_ptr custom deleter.
   void erase(const CacheKey& key);
 
   // Miss path. Inserts entry under `key` if not already present. Called from
@@ -197,10 +209,21 @@ class WarmCache {
   static void enter_building();
   static void exit_building();
 
+  // Force-recompile signal: set by ``try_warmcache_hit`` when it ``erase``s
+  // a broken entry so the same thread's next pass through the Python
+  // wrapper can force ``compile_rbln_cached`` to skip its own cache for
+  // this key. Without it, the Python compile cache returns the same
+  // already-compiled callable and the rebel backend does NOT re-instantiate
+  // — ``_runtime_holder`` stays empty, install never fires again, and the
+  // op stays permanently on the Python wrapper path. Thread-local; the
+  // Python wrapper consumes (and clears) the flag exactly once.
+  static bool consume_force_recompile();
+  static void request_force_recompile();
+
  private:
   WarmCache() = default;
   std::shared_mutex mu_;
-  std::unordered_map<CacheKey, CacheEntry, CacheKeyHash> map_;
+  std::unordered_map<CacheKey, std::shared_ptr<CacheEntry>, CacheKeyHash> map_;
   std::atomic<bool> enabled_{true};
 };
 

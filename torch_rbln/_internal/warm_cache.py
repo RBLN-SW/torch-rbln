@@ -154,3 +154,15 @@ def size() -> int:
 
 def clear() -> None:
     _C._warmcache_clear()
+
+
+def consume_force_recompile() -> bool:
+    """Consume the thread-local force-recompile flag.
+
+    Set by the C++ shim when ``try_warmcache_hit`` had to ``erase`` a
+    broken entry. ``compile_and_run_view_aware`` consumes the flag right
+    before calling ``compile_rbln_cached`` so the next compile bypasses
+    the Python compile cache for this key, re-runs ``torch.compile``, and
+    re-populates ``_runtime_holder`` so install can fire again.
+    """
+    return bool(_C._warmcache_consume_force_recompile())

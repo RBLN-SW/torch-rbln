@@ -94,12 +94,24 @@ def compile_rbln_cached(
     dynamic: bool = False,
     options: dict[str, Any] | None = None,
     device_cache_key: Any = None,
+    force_recompile: bool = False,
 ) -> Any:
     # The cache key excludes ``_runtime_holder`` (see module docstring).
     # ``device_cache_key`` accepts any hashable; callers that want per-shape
     # warm-cache harvesting pass a (device_index, shape_sig, dtype_sig) tuple
     # so distinct input profiles end up in distinct compile_rbln_cached
     # entries and therefore receive fresh ``_runtime_holder`` slots.
+    #
+    # ``force_recompile`` is set by ``compile_and_run_view_aware`` when the
+    # C++ warm-cache erase'd an entry for this key on the prior dispatch
+    # (e.g. rebel runtime soft-failed). Without this, a cache-hit would
+    # return the same compiled callable that the rebel backend has already
+    # instantiated once and does not re-instantiate again, so
+    # ``_runtime_holder`` would stay empty and ``_install_warm_cache_pending``
+    # would never fire for this op+shape again. Drop the existing entry
+    # so the miss-path below re-runs ``torch.compile``, which re-populates
+    # the holder. See ``WarmCache::request_force_recompile`` in
+    # ``torch_rbln/csrc/rbln/DispatchShim.cpp`` for the producer side.
     cache_options = _options_cache_view(options)
     cache_key = (
         _IdentityKey(model),
@@ -107,6 +119,10 @@ def compile_rbln_cached(
         _freeze_cache_value(device_cache_key),
         _freeze_cache_value(cache_options),
     )
+
+    if force_recompile:
+        with _compiled_op_cache_lock:
+            _compiled_op_cache.pop(cache_key, None)
 
     compiled = _compiled_op_cache.get(cache_key)
     if compiled is not None:
