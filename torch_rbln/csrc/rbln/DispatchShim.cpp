@@ -104,6 +104,7 @@ inline uint64_t now_ns() {
 }
 
 using warmcache::CacheEntry;
+using warmcache::CacheEntryPtr;
 using warmcache::CacheKey;
 using warmcache::OutputProfile;
 using warmcache::ScalarValue;
@@ -652,9 +653,13 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
     return false;
 
   const uint64_t _seg_t0 = now_ns();
-  const CacheEntry* entry = wc.find(key);
+  // Hold a shared_ptr to the entry for the rest of the hit path. If a peer
+  // thread ``erase``s the same key while we are mid-flight, the entry stays
+  // alive until our shared_ptr goes out of scope. Without this, a raw
+  // pointer ``find`` could hand back a dangling pointer.
+  CacheEntryPtr entry = wc.find(key);
   const uint64_t _seg_t_lookup = now_ns();
-  if (entry == nullptr)
+  if (!entry)
     return false;
 
   // Build input-ptr map in the order tensor inputs appear on the stack.
@@ -875,7 +880,19 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
     // resolve). Drop the entry so subsequent dispatches with this key go
     // through the pybind miss path and rebuild via DynamoRuntime, which
     // handles the edge case correctly.
+    //
+    // Just erasing the C++ entry is not enough: the Python
+    // ``compile_rbln_cached`` still holds the compiled callable, and the
+    // rebel backend only pushes a DynamoRuntime to ``_runtime_holder`` on
+    // its first compile. A bare erase would leave the warm cache empty
+    // AND keep the Python compile cache hot, so install_pending would
+    // see an empty holder forever. Set the thread-local force-recompile
+    // flag — the same thread's next pass through
+    // ``compile_and_run_view_aware`` consumes it and forces
+    // ``compile_rbln_cached`` to skip its own cache for this key, letting
+    // the rebel backend re-instantiate and re-populate the holder.
     WarmCache::instance().erase(key);
+    WarmCache::request_force_recompile();
     return false;
   }
 

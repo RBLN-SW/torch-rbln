@@ -99,23 +99,43 @@ WarmCache& WarmCache::instance() {
   return *c;
 }
 
-const CacheEntry* WarmCache::find(const CacheKey& key) {
+namespace {
+// Custom deleter for CacheEntry. ``py_dyn_runtime`` holds a strong
+// pybind11::object reference; its destructor decrefs a Python object and
+// must therefore run under the GIL. The shared_ptr's last refcount drop
+// can happen on any thread (e.g. when a hit-path's local shared_ptr goes
+// out of scope after the calling Python thread released the GIL), so we
+// route every destruction through this deleter to guarantee GIL hold.
+void cache_entry_deleter(CacheEntry* p) {
+  if (p == nullptr) {
+    return;
+  }
+  pybind11::gil_scoped_acquire gil;
+  delete p;
+}
+} // namespace
+
+CacheEntryPtr WarmCache::find(const CacheKey& key) {
   if (!enabled_.load(std::memory_order_relaxed))
     return nullptr;
   std::shared_lock<std::shared_mutex> rd(mu_);
   auto it = map_.find(key);
-  return (it != map_.end()) ? &it->second : nullptr;
+  return (it != map_.end()) ? it->second : nullptr;
 }
 
 void WarmCache::install(CacheKey key, const CacheEntry& entry) {
   if (!enabled_.load(std::memory_order_relaxed))
     return;
   std::unique_lock<std::shared_mutex> wr(mu_);
+  std::shared_ptr<CacheEntry> entry_ptr(new CacheEntry(entry), &cache_entry_deleter);
   // First-writer-wins: if another thread beat us to it, keep the earlier one.
-  map_.try_emplace(std::move(key), entry);
+  map_.try_emplace(std::move(key), std::move(entry_ptr));
 }
 
 void WarmCache::erase(const CacheKey& key) {
+  // The map's strong reference drops here; any in-flight find() shared_ptr
+  // keeps the entry alive until that borrower releases. py::object
+  // destruction goes through the GIL-acquiring custom deleter.
   std::unique_lock<std::shared_mutex> wr(mu_);
   map_.erase(key);
 }
@@ -132,6 +152,7 @@ void WarmCache::clear() {
 
 namespace {
 thread_local bool t_building_entry = false;
+thread_local bool t_force_recompile = false;
 } // namespace
 
 bool WarmCache::is_building_entry() {
@@ -142,6 +163,16 @@ void WarmCache::enter_building() {
 }
 void WarmCache::exit_building() {
   t_building_entry = false;
+}
+
+bool WarmCache::consume_force_recompile() {
+  const bool v = t_force_recompile;
+  t_force_recompile = false;
+  return v;
+}
+
+void WarmCache::request_force_recompile() {
+  t_force_recompile = true;
 }
 
 } // namespace torch_rbln::warmcache

@@ -348,8 +348,9 @@ def broadcast_args_general(tensor_args, args):
         tensor_shapes = [tuple(t.shape) for t in tensor_args]
         raise RuntimeError(f"Broadcasting failed for tensor shapes={tensor_shapes}") from e
 
-    if not _has_last_dim_size_one_broadcast(tensor_args, out_shape) \
-            and not _has_zero_dim_broadcast(tensor_args, out_shape):
+    if not _has_last_dim_size_one_broadcast(tensor_args, out_shape) and not _has_zero_dim_broadcast(
+        tensor_args, out_shape
+    ):
         return args
 
     try:
@@ -570,11 +571,13 @@ def _classify_single_step_view(parent: torch.Tensor, child: torch.Tensor):
     if c_ndim == p_ndim and c_ndim > 0:
         # Permute (same numel, same offset, no stride 0, strides are perm
         # of parent's strides). Detect by finding a position-mapping.
-        if (c_off == p_off
-                and parent.numel() == child.numel()
-                and not any(s == 0 for s in c_stride)
-                and sorted(c_shape) == sorted(p_shape)
-                and sorted(c_stride) == sorted(p_stride)):
+        if (
+            c_off == p_off
+            and parent.numel() == child.numel()
+            and not any(s == 0 for s in c_stride)
+            and sorted(c_shape) == sorted(p_shape)
+            and sorted(c_stride) == sorted(p_stride)
+        ):
             perm = []
             used = [False] * p_ndim
             ok = True
@@ -630,8 +633,7 @@ def _classify_single_step_view(parent: torch.Tensor, child: torch.Tensor):
 
         # Narrow: exactly one dim shrunk, offset moved by start*stride[dim].
         diff_dims = [i for i in range(p_ndim) if p_shape[i] != c_shape[i]]
-        if (len(diff_dims) == 1
-                and p_stride == c_stride):
+        if len(diff_dims) == 1 and p_stride == c_stride:
             d = diff_dims[0]
             stride_d = p_stride[d]
             if stride_d != 0 and c_shape[d] <= p_shape[d]:
@@ -643,10 +645,14 @@ def _classify_single_step_view(parent: torch.Tensor, child: torch.Tensor):
                         return ("narrow", d, start, length)
 
         # Reshape (within same ndim): same numel, offset 0, both contig.
-        if (c_off == 0 and p_off == 0
-                and parent.numel() == child.numel()
-                and parent.is_contiguous() and child.is_contiguous()
-                and c_shape != p_shape):
+        if (
+            c_off == 0
+            and p_off == 0
+            and parent.numel() == child.numel()
+            and parent.is_contiguous()
+            and child.is_contiguous()
+            and c_shape != p_shape
+        ):
             return ("reshape", tuple(c_shape))
 
     # ---- 2. ndim shrunk by 1: squeeze or select ----
@@ -656,11 +662,11 @@ def _classify_single_step_view(parent: torch.Tensor, child: torch.Tensor):
             for sq in range(p_ndim):
                 if p_shape[sq] != 1:
                     continue
-                expected = p_shape[:sq] + p_shape[sq + 1:]
+                expected = p_shape[:sq] + p_shape[sq + 1 :]
                 if expected == c_shape:
                     # Strides also need to align — for size-1 dim, dropping
                     # it preserves the rest.
-                    expected_stride = p_stride[:sq] + p_stride[sq + 1:]
+                    expected_stride = p_stride[:sq] + p_stride[sq + 1 :]
                     if expected_stride == c_stride:
                         return ("squeeze", sq)
         # Select: indexing one position along a dim. offset increased by
@@ -675,10 +681,10 @@ def _classify_single_step_view(parent: torch.Tensor, child: torch.Tensor):
             index = offset_delta // stride_d
             if not (0 <= index < p_shape[sel]):
                 continue
-            expected = p_shape[:sel] + p_shape[sel + 1:]
+            expected = p_shape[:sel] + p_shape[sel + 1 :]
             if expected != c_shape:
                 continue
-            expected_stride = p_stride[:sel] + p_stride[sel + 1:]
+            expected_stride = p_stride[:sel] + p_stride[sel + 1 :]
             if expected_stride != c_stride:
                 continue
             return ("select", sel, index)
@@ -689,17 +695,21 @@ def _classify_single_step_view(parent: torch.Tensor, child: torch.Tensor):
             for un in range(c_ndim):
                 if c_shape[un] != 1:
                     continue
-                expected = c_shape[:un] + c_shape[un + 1:]
+                expected = c_shape[:un] + c_shape[un + 1 :]
                 if expected == p_shape:
-                    expected_stride = c_stride[:un] + c_stride[un + 1:]
+                    expected_stride = c_stride[:un] + c_stride[un + 1 :]
                     if expected_stride == p_stride:
                         return ("unsqueeze", un)
 
     # ---- 4. Reshape with ndim change ----
-    if (c_off == 0 and p_off == 0
-            and parent.numel() == child.numel()
-            and parent.is_contiguous() and child.is_contiguous()
-            and c_shape != p_shape):
+    if (
+        c_off == 0
+        and p_off == 0
+        and parent.numel() == child.numel()
+        and parent.is_contiguous()
+        and child.is_contiguous()
+        and c_shape != p_shape
+    ):
         return ("reshape", tuple(c_shape))
 
     return None
@@ -923,8 +933,7 @@ def _detect_permute_unsqueeze_composite(base: torch.Tensor, t: torch.Tensor):
     if len(one_dims) != t.dim() - base.dim():
         return None  # extra size-1 count must match the unsqueeze count
     # Build the "stripped" view: remove size-1 dims from t.
-    stripped_size = [t.size(i) for i in range(t.dim()) if t.size(i) != 1
-                     or i not in one_dims]
+    stripped_size = [t.size(i) for i in range(t.dim()) if t.size(i) != 1 or i not in one_dims]
     # The above is fragile; simpler: drop indices in `one_dims` (the dims we
     # plan to mark as unsqueezed), keeping the rest.
     drop = set(one_dims[: len(one_dims)])  # drop ALL size-1 candidates
@@ -1181,6 +1190,7 @@ def _gen_step_candidates(cur, target):
     elif len(cur_s) < len(tgt_s) and len(cur_s) >= 2:
         # Enumerate all non-identity permutations.
         from itertools import permutations
+
         identity = tuple(range(len(cur_s)))
         for perm in permutations(range(len(cur_s))):
             if perm != identity:
@@ -1650,6 +1660,7 @@ def get_view_op_module(op_callable_or_module, view_recipes):
         class _PlainOp(torch.nn.Module):
             def forward(self, *fwd_args, **fwd_kwargs):
                 return op_callable(*fwd_args, **fwd_kwargs)
+
         inst = _PlainOp().eval()
         _view_op_module_cache[key] = inst
         return inst
@@ -1673,6 +1684,7 @@ def get_view_op_module(op_callable_or_module, view_recipes):
                     cur = _apply_view_step(cur, step)
                 new_args.append(cur)
             return op_callable(*new_args, **fwd_kwargs)
+
     inst = _ViewOp().eval()
     _view_op_module_cache[key] = inst
     return inst
@@ -1718,7 +1730,10 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     """
     from torch_rbln._internal.compile_cache import compile_rbln_cached
     from torch_rbln._internal.env_utils import use_device_group_tensor_parallel_size
-    from torch_rbln._internal.warm_cache import install_pending as _install_warm_cache_pending
+    from torch_rbln._internal.warm_cache import (
+        consume_force_recompile as _consume_warm_cache_force_recompile,
+        install_pending as _install_warm_cache_pending,
+    )
     from torch_rbln.device.context_holder import out_tensor_context
 
     # Device 64-elem-align fallback: when an input tensor's last-dim isn't a
@@ -1743,13 +1758,15 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     # rotate_half regression (single-tensor neg/mul on unaligned views)
     # without penalizing TensorList ops.
     def _last_dim_unaligned(t):
-        return (isinstance(t, torch.Tensor) and t.dim() > 0
-                and t.shape[-1] % 64 != 0)
-    if any(_last_dim_unaligned(a) for a in args) or any(
-            _last_dim_unaligned(v) for v in kwargs_filtered.values()):
+        return isinstance(t, torch.Tensor) and t.dim() > 0 and t.shape[-1] % 64 != 0
+
+    if any(_last_dim_unaligned(a) for a in args) or any(_last_dim_unaligned(v) for v in kwargs_filtered.values()):
         return cpu_fallback_path(
-            op_callable, args, result=out_tensor,
-            op_name=op_name, **kwargs_filtered,
+            op_callable,
+            args,
+            result=out_tensor,
+            op_name=op_name,
+            **kwargs_filtered,
         )
 
     # fp16 div with rounding_mode trunc/floor: rebel-compiler emits IR for
@@ -1769,8 +1786,11 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
             for a in args:
                 if isinstance(a, torch.Tensor) and a.dtype == torch.float16:
                     return cpu_fallback_path(
-                        op_callable, args, result=out_tensor,
-                        op_name=op_name, **kwargs_filtered,
+                        op_callable,
+                        args,
+                        result=out_tensor,
+                        op_name=op_name,
+                        **kwargs_filtered,
                     )
 
     # Comparison ops (output dtype = bool) trip a rebel-compiler abort when
@@ -1783,12 +1803,14 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     # Materialize view inputs to ``.contiguous()`` so the comparison op
     # receives plain tensors and the recipe path is skipped.
     if op_name in {
-        "aten::eq", "aten::ne", "aten::gt", "aten::ge", "aten::lt", "aten::le",
+        "aten::eq",
+        "aten::ne",
+        "aten::gt",
+        "aten::ge",
+        "aten::lt",
+        "aten::le",
     }:
-        args = tuple(
-            a.contiguous() if isinstance(a, torch.Tensor) and not a.is_contiguous() else a
-            for a in args
-        )
+        args = tuple(a.contiguous() if isinstance(a, torch.Tensor) and not a.is_contiguous() else a for a in args)
         kwargs_filtered = {
             k: (v.contiguous() if isinstance(v, torch.Tensor) and not v.is_contiguous() else v)
             for k, v in kwargs_filtered.items()
@@ -1813,12 +1835,20 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
 
     op_module = get_view_op_module(op_callable, view_recipes)
 
+    # Consume the C++ side's force-recompile flag (set when the prior
+    # warm-cache hit erase'd a broken entry). On a True consumption,
+    # compile_rbln_cached drops its own cache entry for this key so the
+    # rebel backend re-instantiates and re-populates _runtime_holder so
+    # the install path below can fire again. See
+    # ``WarmCache::request_force_recompile`` in DispatchShim.cpp.
+    _force_recompile_warm = _consume_warm_cache_force_recompile()
     with out_tensor_context(result_tensor):
         compiled = compile_rbln_cached(
             op_module,
             dynamic=False,
             options=compile_options,
             device_cache_key=extract_warm_cache_key(*view_args, **view_kwargs),
+            force_recompile=_force_recompile_warm,
         )
         external_result = compiled(*view_args, **view_kwargs)
         if result_tensor is None:

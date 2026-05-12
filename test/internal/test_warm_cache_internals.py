@@ -115,5 +115,56 @@ class TestWarmCacheBuildingGuard:
         assert _C._warmcache_is_building() is True
 
 
+@pytest.mark.test_set_ci
+class TestWarmCacheForceRecompileFlag:
+    """Thread-local force-recompile signal that pairs ``try_warmcache_hit``'s
+    erase-on-failure with the next ``compile_rbln_cached`` invocation.
+
+    The C++ shim sets the flag inside ``try_warmcache_hit`` when it has to
+    ``erase`` a broken entry; ``compile_and_run_view_aware`` consumes the
+    flag and passes ``force_recompile=True`` to ``compile_rbln_cached`` so
+    the same op+shape gets a fresh ``torch.compile`` pass (which lets the
+    rebel backend re-populate ``_runtime_holder`` and install succeed
+    again). Without this pairing, the erased op+shape would stay
+    permanently on the Python wrapper path because the Python compile
+    cache returns the stale callable and the holder stays empty.
+    """
+
+    def setup_method(self) -> None:
+        _C._warmcache_consume_force_recompile()
+
+    def teardown_method(self) -> None:
+        _C._warmcache_consume_force_recompile()
+
+    def test_default_false(self) -> None:
+        assert _C._warmcache_consume_force_recompile() is False
+
+    def test_request_then_consume_once(self) -> None:
+        _C._warmcache_request_force_recompile()
+        assert _C._warmcache_consume_force_recompile() is True
+        # Consume is single-shot.
+        assert _C._warmcache_consume_force_recompile() is False
+
+    def test_thread_local_isolation(self) -> None:
+        """The flag must not leak across threads. If it did, an erase on
+        thread A would force unnecessary recompiles on thread B's next
+        unrelated op."""
+        _C._warmcache_request_force_recompile()
+        seen_in_thread: list[bool] = []
+        ev = threading.Event()
+
+        def worker() -> None:
+            seen_in_thread.append(_C._warmcache_consume_force_recompile())
+            ev.set()
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        ev.wait(timeout=5.0)
+        t.join(timeout=5.0)
+
+        assert seen_in_thread == [False], f"force-recompile flag leaked across threads: {seen_in_thread}"
+        assert _C._warmcache_consume_force_recompile() is True
+
+
 if __name__ == "__main__":
     run_tests()
