@@ -24,11 +24,17 @@ std::size_t CacheKeyHash::operator()(const CacheKey& k) const noexcept {
   for (const auto& in : k.inputs) {
     hash_combine_size_t(h, std::hash<int>{}(static_cast<int>(in.dtype)));
     hash_combine_size_t(h, std::hash<int>{}(in.device_index));
+    hash_combine_size_t(h, std::hash<int64_t>{}(in.storage_offset));
     for (int64_t d : in.shape) {
       hash_combine_size_t(h, std::hash<int64_t>{}(d));
     }
-    // size-separator so (a,b) vs (a,b,0) differ
+    // shape/strides separator so e.g. shape=(2,3) strides=(3,1) differs
+    // from shape=(2,3,1) strides=(3,1).
     hash_combine_size_t(h, 0x5a5a5a5aULL);
+    for (int64_t s : in.strides) {
+      hash_combine_size_t(h, std::hash<int64_t>{}(s));
+    }
+    hash_combine_size_t(h, 0xa5a5a5a5ULL);
   }
   for (const auto& s : k.scalars) {
     hash_combine_size_t(h, std::hash<uint8_t>{}(static_cast<uint8_t>(s.tag)));

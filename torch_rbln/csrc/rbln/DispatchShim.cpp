@@ -203,6 +203,36 @@ bool is_skipped_arg(const std::vector<size_t>& skip_list, size_t i) {
   return false;
 }
 
+// True iff `strides` is the standard row-major contiguous stride for `shape`,
+// i.e. strides[i] == product(shape[i+1:]). Used by
+// install_warmcache_from_pending to assert that runtimes only land in the
+// cache when compiled for a contig + offset=0 input layout. Matches
+// PyTorch's ``Tensor::is_contiguous()`` conventions: zero-numel tensors are
+// always contiguous, size-1 dims have a free stride.
+bool is_contiguous_row_major(
+    c10::ArrayRef<int64_t> shape,
+    c10::ArrayRef<int64_t> strides) noexcept {
+  if (shape.size() != strides.size()) {
+    return false;
+  }
+  int64_t numel = 1;
+  for (int64_t d : shape) {
+    numel *= d;
+  }
+  if (numel == 0) {
+    return true;
+  }
+  int64_t expected = 1;
+  for (size_t i = shape.size(); i > 0; --i) {
+    const int64_t dim = shape[i - 1];
+    if (dim != 1 && strides[i - 1] != expected) {
+      return false;
+    }
+    expected *= dim;
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Align-penalty fast-path
 //
@@ -555,6 +585,8 @@ bool build_cache_key(
       TensorProfile tp;
       tp.dtype = t.scalar_type();
       tp.shape.assign(t.sizes().begin(), t.sizes().end());
+      tp.strides.assign(t.strides().begin(), t.strides().end());
+      tp.storage_offset = t.storage_offset();
       tp.device_index = static_cast<int8_t>(t.device().index());
       out_key.inputs.emplace_back(std::move(tp));
     } else if (iv.isNone()) {
@@ -1091,6 +1123,26 @@ bool install_warmcache_from_pending(
   PendingInstall p = take_pending();
   if (!p.valid)
     return false;
+
+  // Layout invariant: ``compile_and_run_view_aware`` only calls
+  // ``_install_warm_cache_pending`` when no view recipe was applied
+  // (see the ``if not has_views`` gate). The runtime we are about to
+  // cache is therefore compiled for a contig + offset=0 input layout.
+  //
+  // The pending CacheKey was built at C++ shim entry — BEFORE any host
+  // materialization or view-recipe replacement — and reflects the
+  // original stack tensor's strides and storage_offset. If that
+  // original layout is non-contig or offset>0, the next warm-cache hit
+  // on the same key would pass the original view's data_ptr to a
+  // runtime that expects contig: silent wrong values for permute /
+  // transpose / expand views and wrong-offset reads for narrow views.
+  // Defense-in-depth against any future install call site that might
+  // bypass the Python ``has_views`` gate.
+  for (const auto& tp : p.key.inputs) {
+    if (tp.storage_offset != 0 || !is_contiguous_row_major(tp.shape, tp.strides)) {
+      return false;
+    }
+  }
 
   CacheEntry entry;
   entry.py_dyn_runtime = std::move(dyn_runtime);

@@ -41,19 +41,37 @@
 #include <string>
 #include <unordered_map>
 
-#include "torch_rbln/csrc/rbln/rebel_runtime_decl.h"
+#include <torch_rbln/csrc/rbln/rebel_runtime_decl.h>
 
 namespace torch_rbln::warmcache {
 
-// Per-tensor input profile. Shape/dtype/device together guard against
-// dispatching a cached runtime at a mismatched tensor.
+// Per-tensor input profile. Shape/strides/storage_offset/dtype/device
+// together pin down the exact layout the cached runtime was compiled for.
+//
+// Why strides + storage_offset: the warm-cache hit path passes the stack
+// tensor's ``data_ptr()`` straight to the rebel runtime. The runtime was
+// compiled assuming the input layout matches what the Python wrapper fed
+// to ``torch.compile`` — that layout is always contig+offset=0 today
+// (``compile_and_run_view_aware`` skips ``_install_warm_cache_pending``
+// via the ``has_views`` gate whenever any view recipe was applied, so
+// only contig+offset=0 inputs survive into install). If the key carried
+// only shape+dtype, a later call with a non-contig or offset>0 input of
+// the same shape would hit the contig-compiled entry and the runtime
+// would read ``numel*itemsize`` contiguous bytes from a stride-aware
+// pointer — silently wrong values for permute / transpose / expand and
+// wrong-offset reads for narrow(dim, k>0, …). Note: this is the input-
+// side counterpart of ``fix(warm-cache): bypass on non-contiguous out=
+// dispatch`` (commit 6406446), which already handled the out= mirror.
 struct TensorProfile {
   at::ScalarType dtype{at::ScalarType::Undefined};
   c10::SmallVector<int64_t, 6> shape;
+  c10::SmallVector<int64_t, 6> strides;
+  int64_t storage_offset{0};
   int8_t device_index{-1};
 
   bool operator==(const TensorProfile& o) const noexcept {
-    return dtype == o.dtype && device_index == o.device_index && shape == o.shape;
+    return dtype == o.dtype && device_index == o.device_index && storage_offset == o.storage_offset &&
+        shape == o.shape && strides == o.strides;
   }
 };
 
