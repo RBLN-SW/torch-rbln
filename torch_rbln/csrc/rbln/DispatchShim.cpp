@@ -125,9 +125,15 @@ struct SchemaCache {
   bool populated = false;
   bool is_align_sensitive = false; // op name in align_sensitive_ops() set
   bool is_broadcast_op = false; // op may broadcast tensor args (mul/add/sub/...).
-                                 // When true, build_cache_key uses post-broadcast
-                                 // shapes and try_warmcache_hit broadcasts inputs
-                                 // before passing data_ptrs to PrepareInputs.
+                                 // When true, ``try_warmcache_hit`` decides
+                                 // per-call (via ``needs_last_dim_one_broadcast``)
+                                 // whether to materialize the post-broadcast
+                                 // contig buffers before passing data_ptrs to
+                                 // PrepareInputs. ``build_cache_key`` always
+                                 // uses RAW input shapes regardless — keying on
+                                 // post-broadcast shapes earlier caused
+                                 // (4,8,16)+() and (4,8,16)+(4,8,1) to collide
+                                 // on a single key (2026-04-30).
 };
 
 struct ShimEntry {
@@ -511,44 +517,6 @@ inline bool all_input_shapes_equal(torch::jit::Stack* stack, const SchemaCache& 
     }
   }
   return true;
-}
-
-// For broadcast ops, compute the broadcast shapes that the runtime was
-// compiled for. For non-broadcast ops, returns empty (caller uses raw shapes).
-// On any error (mismatched shapes, etc.) returns empty too — caller falls
-// back to raw shapes which will likely runtime_failed and erase, but that's
-// no worse than current behavior.
-std::vector<std::vector<int64_t>> compute_broadcast_shapes(
-    torch::jit::Stack* stack, const SchemaCache& cache) {
-  std::vector<std::vector<int64_t>> result;
-  if (!cache.is_broadcast_op) return result;
-  // Fast-path: all tensor inputs already same shape → no broadcast needed,
-  // raw shapes are correct keys. Skip the expensive at::broadcast_tensors call.
-  if (all_input_shapes_equal(stack, cache)) return result;
-  auto arguments = torch::jit::last(stack, cache.num_args);
-  std::vector<at::Tensor> tensor_args;
-  std::vector<size_t> tensor_arg_indices;
-  for (size_t i = 0; i < cache.num_args; ++i) {
-    const auto& iv = arguments[i];
-    if (!iv.isTensor()) continue;
-    const auto& t = iv.toTensor();
-    if (!t.defined()) continue;
-    if (cache.is_write_alias[i]) continue;
-    tensor_args.push_back(t);
-    tensor_arg_indices.push_back(i);
-  }
-  if (tensor_args.size() < 2) return result;  // no broadcast needed
-  std::vector<at::Tensor> broadcasted;
-  try {
-    broadcasted = at::broadcast_tensors(tensor_args);
-  } catch (...) {
-    return result;
-  }
-  result.reserve(broadcasted.size());
-  for (const auto& bt : broadcasted) {
-    result.emplace_back(bt.sizes().begin(), bt.sizes().end());
-  }
-  return result;
 }
 
 // Build a WarmCache::CacheKey from the current stack's last num_args IValues.
