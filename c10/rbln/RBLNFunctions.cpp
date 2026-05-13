@@ -2,6 +2,7 @@
 #include <c10/rbln/DeviceMappingManager.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
+#include <c10/rbln/RBLNTransferStats.h>
 #include <c10/util/CallOnce.h>
 #include <rebel/runtime/memory_stats.h>
 
@@ -254,6 +255,7 @@ void free(void* data) {
 }
 
 void memcpy_h2v(void* rbln_dst_data, const void* cpu_src_data, size_t nbytes) {
+  bump_h2v(nbytes);
   RBLN_LOG_DEBUG(
       "dst_rbln_data={}, src_cpu_data={}, nbytes={}", fmt::ptr(rbln_dst_data), fmt::ptr(cpu_src_data), nbytes);
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
@@ -269,6 +271,7 @@ void memcpy_h2v(void* rbln_dst_data, const void* cpu_src_data, size_t nbytes) {
 }
 
 void memcpy_v2h(void* cpu_dst_data, const void* rbln_src_data, size_t nbytes) {
+  bump_v2h(nbytes);
   RBLN_LOG_DEBUG(
       "dst_cpu_data={}, src_rbln_data={}, nbytes={}", fmt::ptr(cpu_dst_data), fmt::ptr(rbln_src_data), nbytes);
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
@@ -284,6 +287,7 @@ void memcpy_v2h(void* cpu_dst_data, const void* rbln_src_data, size_t nbytes) {
 }
 
 void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes) {
+  bump_v2v(nbytes);
   RBLN_LOG_DEBUG(
       "dst_rbln_data={}, src_rbln_data={}, nbytes={}", fmt::ptr(rbln_dst_data), fmt::ptr(rbln_src_data), nbytes);
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);

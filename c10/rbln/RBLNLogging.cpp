@@ -1,4 +1,5 @@
 #include <c10/rbln/RBLNLogging.h>
+#include <c10/rbln/RBLNTransferStats.h>
 #include <spdlog/pattern_formatter.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
@@ -254,6 +255,7 @@ RBLNScopeGuard::~RBLNScopeGuard() noexcept {
 
 // NOLINTNEXTLINE(misc-use-internal-linkage) -- C10_RBLN_API in RBLNLogging.h
 void log_cpu_fallback(std::string_view full_op_name) {
+  bump_fallback();
   detail::log_info_message(
       detail::LogSourceLocation{__FILE__, __LINE__, __func__},
       std::string("`") + std::string(full_op_name) + "` op ran on CPU instead of RBLN");

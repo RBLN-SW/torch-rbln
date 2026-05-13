@@ -4,6 +4,7 @@
 #include <c10/rbln/RBLNFallbackConfig.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
+#include <c10/rbln/RBLNTransferStats.h>
 #include <torch/csrc/utils/pybind.h>
 #include <torch_rbln/csrc/distributed/c10d/rbln/ProcessGroupRBLNModule.hpp>
 #include <exception>
@@ -111,6 +112,25 @@ void register_internal_api(py::module_& module) {
       "_is_fallback_disabled",
       &c10::rbln::is_fallback_disabled,
       "Internal: check if specified fallback category is disabled");
+
+  // Transfer-stats counters: always-on counters for v2v / v2h / h2v / cpu_fallback.
+  // Used for perf debugging and verifying fallback coverage.
+  py::class_<c10::rbln::TransferStatsSnapshot>(module, "_TransferStatsSnapshot")
+      .def_readonly("v2v_calls", &c10::rbln::TransferStatsSnapshot::v2v_calls)
+      .def_readonly("v2v_bytes", &c10::rbln::TransferStatsSnapshot::v2v_bytes)
+      .def_readonly("v2h_calls", &c10::rbln::TransferStatsSnapshot::v2h_calls)
+      .def_readonly("v2h_bytes", &c10::rbln::TransferStatsSnapshot::v2h_bytes)
+      .def_readonly("h2v_calls", &c10::rbln::TransferStatsSnapshot::h2v_calls)
+      .def_readonly("h2v_bytes", &c10::rbln::TransferStatsSnapshot::h2v_bytes)
+      .def_readonly("borrow_r_calls", &c10::rbln::TransferStatsSnapshot::borrow_r_calls)
+      .def_readonly("borrow_r_bytes", &c10::rbln::TransferStatsSnapshot::borrow_r_bytes)
+      .def_readonly("borrow_w_calls", &c10::rbln::TransferStatsSnapshot::borrow_w_calls)
+      .def_readonly("borrow_w_bytes", &c10::rbln::TransferStatsSnapshot::borrow_w_bytes)
+      .def_readonly("fallback_dispatches", &c10::rbln::TransferStatsSnapshot::fallback_dispatches);
+  module.def("_transfer_stats_snapshot", &c10::rbln::transfer_stats_snapshot,
+             "Read v2v/v2h/h2v/borrow/fallback counters as a snapshot struct.");
+  module.def("_transfer_stats_reset", &c10::rbln::transfer_stats_reset,
+             "Zero out all transfer counters.");
 }
 
 /**

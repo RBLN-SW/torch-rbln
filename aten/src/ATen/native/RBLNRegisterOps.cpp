@@ -1,7 +1,9 @@
 #include <ATen/core/Tensor.h>
 #include <ATen/core/VariableHooksInterface.h>
+#include <ATen/native/rbln/RBLNCat.h>
 #include <ATen/native/rbln/RBLNCPUFallback.h>
 #include <ATen/native/rbln/RBLNCopy.h>
+#include <ATen/native/rbln/RBLNIndexSelect.h>
 #include <ATen/native/rbln/RBLNResize.h>
 #include <ATen/native/rbln/RBLNTensorFactories.h>
 #include <ATen/native/transformers/attention.h>
@@ -190,9 +192,11 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   m.impl("masked_scatter_", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("index.Tensor_out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("_index_put_impl_", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
-  // Note: index_select doesn't work on device if arg(index) is a tensor
-  m.impl("index_select", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
-  m.impl("index_select.out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
+  // index_select / index_select.out: native v2v-based implementation in
+  // RBLNIndexSelect.cpp (bypasses rebel-compiler). Handles non-contiguous
+  // self via stride coalescing and coalesces consecutive index runs.
+  m.impl("index_select", TORCH_FN(at::native::rbln::index_select_rbln));
+  m.impl("index_select.out", TORCH_FN(at::native::rbln::index_select_out_rbln));
   m.impl("index_add.out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("index_copy.out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("index_fill_.int_Scalar", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
@@ -200,7 +204,9 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   m.impl("scatter.src_out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("put_", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("nonzero", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
-  m.impl("cat.out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
+  // cat.out: native v2v-based implementation in RBLNCat.cpp. stack() goes
+  // through CompositeImplicitAutograd → cat, so stack inherits this path.
+  m.impl("cat.out", TORCH_FN(at::native::rbln::cat_out_rbln));
 
   // Bitwise operations
   m.impl("bitwise_and.out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
