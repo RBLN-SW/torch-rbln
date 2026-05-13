@@ -370,5 +370,6 @@ markers = [
     "test_set_experimental: [test set] marks tests for experimental features (deselect with `-m \"not test_set_experimental\"`)",
     "test_set_perf: [test set] marks performance tests (select with `-m test_set_perf`)",
     "no_dynamo_reset: skips autouse TorchDynamo reset fixture",
+    "no_caching_allocator_reset: skips autouse RBLN caching-allocator reset fixture",
     "single_worker: marks tests that must run on a single worker (select with `-m single_worker`)",
 ]
