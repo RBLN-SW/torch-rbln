@@ -5,8 +5,10 @@
 #include <ATen/native/Resize.h>
 #include <ATen/native/rbln/RBLNStrideUtils.h>
 #include <ATen/ops/empty.h>
+#include <c10/core/ScalarType.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
+#include <c10/util/Exception.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -19,22 +21,52 @@ at::Tensor& cat_out_rbln(const at::ITensorListRef& tensors, int64_t dim, at::Ten
 
   // Materialise the input list once so we can iterate it multiple times.
   auto materialised = tensors.materialize();
+  RBLN_CHECK(materialised.size() > 0, "cat: tensors list must be non-empty");
 
-  // Skip empty (numel == 0) inputs — PyTorch cat ignores them regardless of
-  // their shape, as long as at least one non-empty input is present.
-  std::vector<at::Tensor> inputs;
-  inputs.reserve(materialised.size());
+  // Snapshot all inputs once (the IListRef is single-pass-ish).
+  std::vector<at::Tensor> raw_inputs;
+  raw_inputs.reserve(materialised.size());
   for (const at::Tensor& t : materialised) {
-    if (t.numel() > 0)
-      inputs.push_back(t);
+    raw_inputs.push_back(t);
   }
 
-  // All-empty case: nothing to copy. Leave `out` as the caller passed it.
-  if (inputs.empty()) {
+  // PyTorch's `at::native::cat` skips 1-D empty tensors (shape == (0,)) from
+  // shape/rank validation entirely — they're a legacy "placeholder" pattern
+  // that callers sprinkle in to seed an empty accumulator. Match that.
+  auto is_legacy_empty_1d = [](const at::Tensor& t) { return t.dim() == 1 && t.numel() == 0; };
+
+  // Pick the first non-legacy-empty input as the canonical reference for rank
+  // / non-axis sizes / device. Result dtype still considers ALL inputs (including
+  // legacy-empty ones) per PyTorch's promotion rules.
+  const at::Tensor* first_ptr = nullptr;
+  for (const at::Tensor& t : raw_inputs) {
+    if (!is_legacy_empty_1d(t)) {
+      first_ptr = &t;
+      break;
+    }
+  }
+
+  auto common_dtype = raw_inputs.front().scalar_type();
+  for (size_t i = 1; i < raw_inputs.size(); ++i) {
+    common_dtype = c10::promoteTypes(common_dtype, raw_inputs[i].scalar_type());
+  }
+
+  // All-legacy-empty case: result is the canonical 1-D empty, regardless of dim.
+  if (first_ptr == nullptr) {
+    const auto device = raw_inputs.front().device();
+    RBLN_CHECK(device.is_privateuseone(), "cat_out_rbln: inputs must be on RBLN device, got {}", c10::str(device));
+    TORCH_CHECK_TYPE(
+        out.device() == device, "cat: out must be on the same device as inputs, got ", out.device(), " vs ", device);
+    RBLN_CHECK(
+        out.scalar_type() == common_dtype,
+        "cat: out dtype mismatch ({} vs {})",
+        c10::str(out.scalar_type()),
+        c10::str(common_dtype));
+    at::native::resize_output(out, {0});
     return out;
   }
 
-  const at::Tensor& first = inputs.front();
+  const at::Tensor& first = *first_ptr;
   const int64_t rank = first.dim();
   RBLN_CHECK(rank > 0, "cat requires non-zero-rank inputs, got {}-dim tensor", rank);
 
@@ -42,22 +74,19 @@ at::Tensor& cat_out_rbln(const at::ITensorListRef& tensors, int64_t dim, at::Ten
   RBLN_CHECK(axis >= 0 && axis < rank, "cat: dim {} out of range for rank-{} inputs", dim, rank);
 
   const auto device = first.device();
-  const auto dtype = first.scalar_type();
   RBLN_CHECK(device.is_privateuseone(), "cat_out_rbln: inputs must be on RBLN device, got {}", c10::str(device));
 
-  // Validate every input + accumulate the output axis extent.
+  // Validate every non-legacy-empty input + accumulate the output axis extent.
   int64_t total_axis = 0;
-  for (const at::Tensor& t : inputs) {
+  for (const at::Tensor& t : raw_inputs) {
+    if (is_legacy_empty_1d(t)) {
+      continue;
+    }
     RBLN_CHECK(
         t.device() == device,
         "cat: all inputs must be on the same device, got {} and {}",
         c10::str(device),
         c10::str(t.device()));
-    RBLN_CHECK(
-        t.scalar_type() == dtype,
-        "cat_out_rbln: dtype mismatch ({} vs {}); promotion is not supported",
-        c10::str(dtype),
-        c10::str(t.scalar_type()));
     RBLN_CHECK(t.dim() == rank, "cat: rank mismatch ({} vs {})", rank, t.dim());
     for (int64_t i = 0; i < rank; ++i) {
       if (i == axis)
@@ -72,15 +101,26 @@ at::Tensor& cat_out_rbln(const at::ITensorListRef& tensors, int64_t dim, at::Ten
     total_axis += t.size(axis);
   }
 
-  // Validate the output tensor's device / dtype BEFORE resize_ so a misrouted
-  // `out` fails with a clear error instead of going through resize_.
+  // Promote inputs (excluding legacy-empty placeholders, which we drop now)
+  // to the common dtype. `.to(common_dtype)` is a no-op when dtype matches.
+  std::vector<at::Tensor> inputs;
+  inputs.reserve(raw_inputs.size());
+  for (const at::Tensor& t : raw_inputs) {
+    if (is_legacy_empty_1d(t)) {
+      continue;
+    }
+    inputs.push_back(t.scalar_type() == common_dtype ? t : t.to(common_dtype));
+  }
+
+  // cat/stack family must raise TypeError (not RuntimeError) for cross-device
+  // `out` — see test/ops/test_ops.py:test_out Case 3 / TypeError list.
+  TORCH_CHECK_TYPE(
+      out.device() == device, "cat: out must be on the same device as inputs, got ", out.device(), " vs ", device);
   RBLN_CHECK(
-      out.device() == device,
-      "cat: out must be on the same device as inputs, got {} vs {}",
-      c10::str(out.device()),
-      c10::str(device));
-  RBLN_CHECK(
-      out.scalar_type() == dtype, "cat: out dtype mismatch ({} vs {})", c10::str(out.scalar_type()), c10::str(dtype));
+      out.scalar_type() == common_dtype,
+      "cat: out dtype mismatch ({} vs {})",
+      c10::str(out.scalar_type()),
+      c10::str(common_dtype));
 
   // Resize via the upstream helper so a wrong-shape non-empty `out` triggers
   // the canonical UserWarning ("An output with one or more elements was
@@ -88,6 +128,11 @@ at::Tensor& cat_out_rbln(const at::ITensorListRef& tensors, int64_t dim, at::Ten
   std::vector<int64_t> out_shape(first.sizes().begin(), first.sizes().end());
   out_shape[axis] = total_axis;
   at::native::resize_output(out, out_shape);
+
+  // Empty result (zero on cat axis or any other dim): nothing to copy.
+  if (out.numel() == 0) {
+    return out;
+  }
 
   // If the caller's `out` is non-contiguous, stage through a contig buffer and
   // copy_ at the end. The main v2v kernel below assumes canonical row-major
@@ -123,6 +168,15 @@ at::Tensor& cat_out_rbln(const at::ITensorListRef& tensors, int64_t dim, at::Ten
   int64_t axis_offset = 0; // running offset along the cat axis (in elements)
 
   for (const at::Tensor& t : inputs) {
+    // Empty inputs contribute no bytes but still advance axis_offset by their
+    // axis extent (which is 0 when the cat dim is the empty dim; otherwise the
+    // tensor would have numel>0). Skip before any v2v emission so we never call
+    // memcpy_v2v with nbytes==0 (which the runtime rejects).
+    if (t.numel() == 0) {
+      axis_offset += t.size(axis);
+      continue;
+    }
+
     const auto in_sizes = t.sizes();
     const auto in_strides = t.strides();
 

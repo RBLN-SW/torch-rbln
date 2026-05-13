@@ -602,5 +602,62 @@ def test_cat_dim_out_of_range_rejected():
         torch.cat([_to_dev(a_cpu), _to_dev(a_cpu)], dim=5)
 
 
+# ---------------------------------------------------------------------------
+# opinfo conformance regressions (test/ops/test_ops.py uncovered these once
+# cat / index_select / stack were registered as native RBLN kernels)
+# ---------------------------------------------------------------------------
+
+
+def test_cat_all_zero_axis_resizes_out_to_zero():
+    """cat of all-empty inputs along an axis where each size is 0 must resize
+    `out` to the empty shape (regression for the all-empty fast-path that
+    used to return `out` unchanged)."""
+    out_dev = torch.empty(1, dtype=torch.float32, device=DEVICE)  # wrong shape on purpose
+    with pytest.warns(UserWarning, match="An output with one or more elements"):
+        torch.cat([torch.empty(0, device=DEVICE), torch.empty(0, device=DEVICE)], dim=0, out=out_dev)
+    assert tuple(out_dev.shape) == (0,)
+
+
+def test_stack_empty_inputs_dim_negative_one():
+    """stack of two (0,1,0) tensors at dim=-1 must produce (0,1,0,2). The
+    pre-fix code dropped these as empties and returned the wrong-shape `out`
+    unchanged."""
+    empties_cpu = [torch.empty(0, 1, 0, dtype=torch.float32) for _ in range(2)]
+    expected = torch.stack(empties_cpu, dim=-1)
+    got = torch.stack([_to_dev(x) for x in empties_cpu], dim=-1)
+    assert tuple(got.shape) == tuple(expected.shape) == (0, 1, 0, 2)
+
+
+def test_cat_legacy_empty_1d_placeholder_is_skipped():
+    """A (0,) 1-D placeholder among rank-2 inputs is silently ignored, matching
+    PyTorch's `at::native::cat` legacy behaviour."""
+    a_cpu = torch.randn(5, 5, dtype=torch.float32)
+    placeholder_cpu = torch.empty(0, dtype=torch.float32)
+    expected = torch.cat([placeholder_cpu, a_cpu], dim=1)  # = a_cpu
+    got = torch.cat([_to_dev(placeholder_cpu), _to_dev(a_cpu)], dim=1)
+    _check(got, expected)
+
+
+def test_cat_out_on_wrong_device_raises_type_error():
+    """cat / stack family must raise TypeError (not RuntimeError) for `out` on
+    the wrong device. Required by test/ops/test_ops.py test_out Case 3."""
+    a_dev = torch.randn(2, 3, dtype=torch.float32, device=DEVICE)
+    out_cpu = torch.empty(2, 6, dtype=torch.float32, device="cpu")
+    with pytest.raises(TypeError):
+        torch.cat([a_dev, a_dev], dim=1, out=out_cpu)
+
+
+def test_cat_mixed_dtype_promotes_to_common():
+    """Mixed-dtype inputs are promoted to the common dtype (PyTorch semantics).
+    Previously we hard-errored with `promotion is not supported`."""
+    a_cpu = torch.randn(3, 4, dtype=torch.float16)
+    b_cpu = torch.randn(3, 2, dtype=torch.float64)
+    expected = torch.cat([a_cpu, b_cpu], dim=1)
+    assert expected.dtype == torch.float64
+    got = torch.cat([_to_dev(a_cpu), _to_dev(b_cpu)], dim=1)
+    assert got.dtype == torch.float64
+    _check(got, expected, atol=1e-3, rtol=1e-3)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
