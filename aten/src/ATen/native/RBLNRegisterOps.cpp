@@ -1,7 +1,9 @@
 #include <ATen/core/Tensor.h>
 #include <ATen/core/VariableHooksInterface.h>
+#include <ATen/native/rbln/RBLNCat.h>
 #include <ATen/native/rbln/RBLNCPUFallback.h>
 #include <ATen/native/rbln/RBLNCopy.h>
+#include <ATen/native/rbln/RBLNIndexSelect.h>
 #include <ATen/native/rbln/RBLNResize.h>
 #include <ATen/native/rbln/RBLNTensorFactories.h>
 #include <ATen/native/transformers/attention.h>
@@ -136,6 +138,9 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   m.impl("empty_strided", TORCH_FN(at::native::rbln::empty_strided_rbln));
   m.impl("resize_", TORCH_FN(at::native::rbln::resize_rbln_));
   m.impl("set_.source_Storage_storage_offset", TORCH_FN(at::native::rbln::set_storage_rbln_));
+  m.impl("index_select", TORCH_FN(at::native::rbln::index_select_rbln));
+  m.impl("index_select.out", TORCH_FN(at::native::rbln::index_select_out_rbln));
+  m.impl("cat.out", TORCH_FN(at::native::rbln::cat_out_rbln));
 
   // View operations (metadata-only, no device computation)
   // These operations only manipulate tensor metadata and do not require
@@ -190,9 +195,6 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   m.impl("masked_scatter_", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("index.Tensor_out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("_index_put_impl_", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
-  // Note: index_select doesn't work on device if arg(index) is a tensor
-  m.impl("index_select", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
-  m.impl("index_select.out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("index_add.out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("index_copy.out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("index_fill_.int_Scalar", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
@@ -200,7 +202,6 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   m.impl("scatter.src_out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("put_", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("nonzero", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
-  m.impl("cat.out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
 
   // Bitwise operations
   m.impl("bitwise_and.out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
