@@ -2,7 +2,9 @@
 
 #include <ATen/MemoryOverlap.h>
 #include <ATen/core/Tensor.h>
+#include <ATen/native/Resize.h>
 #include <ATen/native/rbln/RBLNStrideUtils.h>
+#include <ATen/ops/empty.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
 
@@ -80,13 +82,22 @@ at::Tensor& cat_out_rbln(const at::ITensorListRef& tensors, int64_t dim, at::Ten
   RBLN_CHECK(
       out.scalar_type() == dtype, "cat: out dtype mismatch ({} vs {})", c10::str(out.scalar_type()), c10::str(dtype));
 
-  // Resize the output tensor to the cat result shape.
+  // Resize via the upstream helper so a wrong-shape non-empty `out` triggers
+  // the canonical UserWarning ("An output with one or more elements was
+  // resized...").
   std::vector<int64_t> out_shape(first.sizes().begin(), first.sizes().end());
   out_shape[axis] = total_axis;
-  if (!out.defined() || out.sizes() != at::IntArrayRef(out_shape)) {
-    out.resize_(out_shape);
+  at::native::resize_output(out, out_shape);
+
+  // If the caller's `out` is non-contiguous, stage through a contig buffer and
+  // copy_ at the end. The main v2v kernel below assumes canonical row-major
+  // strides on `out`.
+  if (!out.is_contiguous()) {
+    auto staging = at::empty(out_shape, out.options().memory_format(c10::MemoryFormat::Contiguous));
+    cat_out_rbln(tensors, dim, staging);
+    out.copy_(staging);
+    return out;
   }
-  RBLN_CHECK(out.is_contiguous(), "cat_out_rbln: out tensor must be contiguous");
 
   // Reject any input that overlaps the output storage. In-place cat is not
   // supported; we rely on upstream `at::assert_no_overlap` so the overlap

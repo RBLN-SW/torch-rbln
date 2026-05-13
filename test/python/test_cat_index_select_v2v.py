@@ -261,6 +261,69 @@ def test_index_select_int32_index():
     _check(got, expected)
 
 
+@pytest.mark.parametrize("dim", [0, -1])
+@pytest.mark.parametrize("idx_value", [torch.tensor([0], dtype=torch.long), torch.tensor(0, dtype=torch.long)])
+def test_index_select_zero_dim_self(dim, idx_value):
+    """0-D self with index_select: PyTorch returns a 0-D tensor mirroring self's
+    rank. dim must be 0 or -1; index must contain exactly one value (= 0)."""
+    s_cpu = torch.tensor(3.5, dtype=torch.float16)
+    expected = torch.index_select(s_cpu, dim, idx_value)
+    got = torch.index_select(_to_dev(s_cpu), dim, idx_value)
+    _check(got, expected)
+
+
+def test_index_select_zero_dim_self_invalid_dim_rejected():
+    """For 0-D self, only dim in {0, -1} is valid."""
+    s_dev = _to_dev(torch.tensor(1.0, dtype=torch.float32))
+    idx = torch.tensor([0], dtype=torch.long)
+    with pytest.raises(RuntimeError):
+        torch.index_select(s_dev, 1, idx)
+
+
+def test_index_select_zero_dim_self_multi_index_rejected():
+    """For 0-D self, index must contain exactly one value (PyTorch upstream)."""
+    s_dev = _to_dev(torch.tensor(1.0, dtype=torch.float32))
+    bad_idx = torch.tensor([0, 0], dtype=torch.long)
+    with pytest.raises(RuntimeError):
+        torch.index_select(s_dev, 0, bad_idx)
+
+
+def test_index_select_zero_dim_self_oob_index_rejected():
+    """For 0-D self, the single index value must be 0."""
+    s_dev = _to_dev(torch.tensor(1.0, dtype=torch.float32))
+    bad_idx = torch.tensor([1], dtype=torch.long)
+    with pytest.raises(RuntimeError):
+        torch.index_select(s_dev, 0, bad_idx)
+
+
+def test_index_select_consecutive_run_on_noncontig_axis():
+    """When self is non-contiguous AT the index axis (stride > inner block),
+    run coalescing must NOT collapse consecutive indices into a single v2v —
+    consecutive index values map to memory separated by padding/NaN bytes.
+
+    Reproduces the bug found via PyTorch opinfo's `noncontiguous_samples`
+    test, which interleaves NaN padding between data elements."""
+    import math
+
+    # Build a non-contig view exactly like torch.testing's noncontiguous_like:
+    # shape (S, S), strides (2S, 2), with NaN padding at the in-between slots.
+    S = 5
+    data = torch.arange(S * S, dtype=torch.float16).reshape(S, S)
+    padded = torch.empty(S, S, 2, dtype=torch.float16)
+    padded[..., 0] = math.nan
+    padded[..., 1] = data
+    self_cpu = padded[..., 1]
+    assert not self_cpu.is_contiguous() and self_cpu.stride() == (2 * S, 2)
+
+    self_dev = padded.to(DEVICE)[..., 1]
+    # Index that triggers a length>1 run at axis=-1.
+    idx = torch.tensor([0, 3, 4, 1], dtype=torch.long)  # 3,4 → run of length 2
+
+    expected = torch.index_select(self_cpu, -1, idx)
+    got = torch.index_select(self_dev, -1, idx)
+    _check(got, expected)
+
+
 # ---------------------------------------------------------------------------
 # integration: end-to-end mimic of test.py's hot path
 # ---------------------------------------------------------------------------

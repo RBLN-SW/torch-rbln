@@ -1,6 +1,7 @@
 #include <ATen/native/rbln/RBLNIndexSelect.h>
 
 #include <ATen/core/Tensor.h>
+#include <ATen/native/Resize.h>
 #include <ATen/native/rbln/RBLNStrideUtils.h>
 #include <ATen/ops/empty.h>
 #include <c10/rbln/RBLNFunctions.h>
@@ -89,21 +90,48 @@ at::Tensor& index_select_out_rbln(const at::Tensor& self, int64_t dim, const at:
       c10::str(self.scalar_type()));
 
   const int64_t rank = self.dim();
-  RBLN_CHECK(rank > 0, "index_select: self must have at least 1 dim, got 0-D tensor");
-  const int64_t axis = dim < 0 ? dim + rank : dim;
-  RBLN_CHECK(axis >= 0 && axis < rank, "index_select: dim {} out of range for rank-{} self", dim, rank);
-
-  // Pull the index values onto the host once.
+  // Pull the index values onto the host once (also validates dtype / shape).
   const auto idx_host = read_index_to_host(index);
   const int64_t n_out = static_cast<int64_t>(idx_host.size());
 
-  // Resize out to the gather result shape.
-  std::vector<int64_t> out_shape(self.sizes().begin(), self.sizes().end());
-  out_shape[axis] = n_out;
-  if (!out.defined() || out.sizes() != at::IntArrayRef(out_shape)) {
-    out.resize_(out_shape);
+  // Determine the output shape so we can resize `out` uniformly.
+  std::vector<int64_t> out_shape;
+  if (rank == 0) {
+    // 0-D self: PyTorch's index_select returns a 0-D output (rank mirrors self).
+    // dim must be 0 or -1; index must contain exactly one value, equal to 0.
+    RBLN_CHECK(dim == 0 || dim == -1, "index_select: dim {} out of range for 0-D self", dim);
+    RBLN_CHECK(n_out == 1, "index_select: index to scalar can have only 1 value, got {}", n_out);
+    RBLN_CHECK(idx_host[0] == 0, "index_select: index value {} out of range [0, 1) for 0-D self", idx_host[0]);
+  } else {
+    const int64_t a = dim < 0 ? dim + rank : dim;
+    RBLN_CHECK(a >= 0 && a < rank, "index_select: dim {} out of range for rank-{} self", dim, rank);
+    out_shape.assign(self.sizes().begin(), self.sizes().end());
+    out_shape[a] = n_out;
   }
-  RBLN_CHECK(out.is_contiguous(), "index_select_out_rbln: out tensor must be contiguous");
+
+  // Resize via the upstream helper so a wrong-shape non-empty `out` triggers
+  // the canonical UserWarning ("An output with one or more elements was
+  // resized...").
+  at::native::resize_output(out, out_shape);
+
+  // If the caller's `out` is non-contiguous, stage through a contig buffer and
+  // copy_ at the end. The main v2v kernel below assumes canonical row-major
+  // strides on `out`.
+  if (!out.is_contiguous()) {
+    auto staging = at::empty(out_shape, out.options().memory_format(c10::MemoryFormat::Contiguous));
+    index_select_out_rbln(self, dim, index, staging);
+    out.copy_(staging);
+    return out;
+  }
+
+  // 0-D fast path: just v2v the single element.
+  if (rank == 0) {
+    const size_t elm_size = static_cast<size_t>(self.element_size());
+    c10::rbln::memcpy_v2v(out.data_ptr(), self.data_ptr(), elm_size);
+    return out;
+  }
+
+  const int64_t axis = dim < 0 ? dim + rank : dim;
 
   if (n_out == 0 || self.numel() == 0) {
     return out;
@@ -152,20 +180,30 @@ at::Tensor& index_select_out_rbln(const at::Tensor& self, int64_t dim, const at:
   for (int64_t d : btw_axis_sizes)
     btw_count *= d;
 
+  // Run coalescing (a length-L run = L consecutive indices [k, k+1, ..., k+L-1]
+  // emitted as one v2v of L*inner_block_bytes) is only valid when consecutive
+  // axis positions are adjacent in source memory, i.e. self_strides[axis] ==
+  // inner_block_elems. For non-contig self where the axis lives in the outer
+  // iteration (outer_end > axis + 1), stride[axis] is larger and consecutive
+  // index values map to memory positions separated by padding bytes — coalescing
+  // would read those padding bytes into the output. Detect this and emit one
+  // v2v per axis-position in such runs.
+  const bool axis_runs_are_contig_in_memory = (self_strides[axis] == inner_block_elems);
   const auto runs = coalesce_runs(idx_host);
 
   const uint8_t* self_base = static_cast<const uint8_t*>(self.data_ptr());
   uint8_t* out_base = static_cast<uint8_t*>(out.data_ptr());
 
   RBLN_LOG_DEBUG(
-      "index_select_out_rbln: self shape={} strides={} axis={} outer_end={} inner_block_bytes={} n_out={} runs={}",
+      "index_select_out_rbln: self shape={} strides={} axis={} outer_end={} inner_block_bytes={} n_out={} runs={} coalesce={}",
       c10::str(self_sizes),
       c10::str(self_strides),
       axis,
       outer_end,
       inner_block_bytes,
       n_out,
-      runs.size());
+      runs.size(),
+      axis_runs_are_contig_in_memory);
 
   std::vector<int64_t> pre_idx(pre_axis_sizes.size(), 0);
   std::vector<int64_t> btw_idx(btw_axis_sizes.size(), 0);
@@ -186,16 +224,21 @@ at::Tensor& index_select_out_rbln(const at::Tensor& self, int64_t dim, const at:
       }
 
       for (const auto& run : runs) {
-        const int64_t src_axis = run.src_start;
-        const int64_t out_axis = run.out_start;
-        const int64_t bytes = run.length * inner_block_bytes;
-
-        const int64_t src_off_elems = src_off_elems_base + src_axis * self_strides[axis];
-        const int64_t dst_off_bytes = dst_off_bytes_base + out_axis * out_byte_stride[axis];
-
-        const uint8_t* src = self_base + src_off_elems * elm_size;
-        uint8_t* dst = out_base + dst_off_bytes;
-        c10::rbln::memcpy_v2v(dst, src, static_cast<size_t>(bytes));
+        if (axis_runs_are_contig_in_memory) {
+          // Fast path: one v2v for the whole run.
+          const int64_t src_off_elems = src_off_elems_base + run.src_start * self_strides[axis];
+          const int64_t dst_off_bytes = dst_off_bytes_base + run.out_start * out_byte_stride[axis];
+          const size_t bytes = static_cast<size_t>(run.length * inner_block_bytes);
+          c10::rbln::memcpy_v2v(out_base + dst_off_bytes, self_base + src_off_elems * elm_size, bytes);
+        } else {
+          // Slow path: one v2v per axis position (self is non-contig at axis).
+          for (int64_t k = 0; k < run.length; ++k) {
+            const int64_t src_off_elems = src_off_elems_base + (run.src_start + k) * self_strides[axis];
+            const int64_t dst_off_bytes = dst_off_bytes_base + (run.out_start + k) * out_byte_stride[axis];
+            c10::rbln::memcpy_v2v(
+                out_base + dst_off_bytes, self_base + src_off_elems * elm_size, static_cast<size_t>(inner_block_bytes));
+          }
+        }
       }
 
       advance_multi_index(btw_idx, btw_axis_sizes);
@@ -208,11 +251,17 @@ at::Tensor& index_select_out_rbln(const at::Tensor& self, int64_t dim, const at:
 
 at::Tensor index_select_rbln(const at::Tensor& self, int64_t dim, const at::Tensor& index) {
   const int64_t rank = self.dim();
-  const int64_t axis = dim < 0 ? dim + rank : dim;
-  RBLN_CHECK(axis >= 0 && axis < rank, "index_select: dim {} out of range for rank-{} self", dim, rank);
 
-  std::vector<int64_t> out_shape(self.sizes().begin(), self.sizes().end());
-  out_shape[axis] = index.numel();
+  std::vector<int64_t> out_shape;
+  if (rank == 0) {
+    // 0-D self → output is 0-D (rank mirrors self). index_select_out_rbln
+    // validates dim ∈ {0, -1} and index has exactly one value (= 0).
+  } else {
+    const int64_t axis = dim < 0 ? dim + rank : dim;
+    RBLN_CHECK(axis >= 0 && axis < rank, "index_select: dim {} out of range for rank-{} self", dim, rank);
+    out_shape.assign(self.sizes().begin(), self.sizes().end());
+    out_shape[axis] = index.numel();
+  }
 
   at::Tensor out = at::empty(out_shape, self.options().memory_format(c10::MemoryFormat::Contiguous));
   return index_select_out_rbln(self, dim, index, out);
