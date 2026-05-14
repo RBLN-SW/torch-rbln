@@ -176,6 +176,10 @@ void copy_impl_rbln_async(const at::Tensor& src, const at::Tensor& dst) {
   }
 
   const auto nbytes = at::detail::computeStorageNbytes(src.sizes(), src.strides(), src.element_size());
+  if (nbytes == 0) {
+    RBLN_LOG_DEBUG("No bytes to copy");
+    return;
+  }
 
   if (src_device.is_cpu() && dst_device.is_privateuseone()) {
     RBLN_LOG_DEBUG("Async CPU -> RBLN");
