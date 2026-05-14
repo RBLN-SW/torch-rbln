@@ -1,0 +1,461 @@
+"""Default RBLN network-related environment before native runtime loads.
+
+Control-plane addresses:
+
+- If ``RBLN_LOCAL_IP`` / ``RBLN_ROOT_IP`` are **unset or empty**, they default to
+  ``127.0.0.1``. Values set in the environment **before** ``torch_rbln`` is
+  imported (e.g. multi-node jobs) are kept.
+- Set ``RBLN_FORCE_LOOPBACK_CONTROL_PLANE=1`` to force both to ``127.0.0.1``
+  even when they were already set (single-node / debugging).
+
+``RBLN_RDMA_IP`` is filled by probing RoCEv2-capable RDMA netdevs (sysfs mapping
++ optional ``rdma link``) when unset, matching the manual steps used on
+Ubuntu 22.04+.
+
+This module is not run at ``torch_rbln`` import time. Autoport distributed tests
+call it via ``test.utils.configure_rbln_network_for_autoport_tests`` before
+spawning subprocesses so each child inherits the variables when ``librbln``
+loads.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import socket
+import stat
+import struct
+import subprocess
+import sys
+from pathlib import Path
+
+
+try:  # POSIX-only; Linux is the only RBLN runtime target.
+    import fcntl as _fcntl
+except ImportError:
+    _fcntl = None  # type: ignore[assignment]
+
+
+_SYSFS_INFINIBAND = Path("/sys/class/infiniband")
+_RDMA_LINK_TIMEOUT_SEC = 5.0
+_LOOPBACK = "127.0.0.1"
+_DIAG_PREFIX = "[rbln_rdma_probe]"
+# Linux SIOCGIFADDR ioctl number — get the IPv4 address bound to an iface.
+# Lets us read the IPv4 without depending on the `ip` (iproute2) binary,
+# which may be missing from minimal CI containers.
+_SIOCGIFADDR = 0x8915
+_IFNAMSIZ = 16  # IFNAMSIZ from <linux/if.h> (15-byte name + NUL)
+
+
+def _diag(msg: str) -> None:
+    """Print a diagnostic line to stderr with a greppable prefix.
+
+    Unconditional so CI logs capture every probe decision (no env toggle).
+    The emitted lines let an operator identify which filter stage (sysfs
+    missing, operstate down, no IPv4, rdma link DOWN/DISABLED, missing
+    `ip` or `rdma` binary) caused an empty RBLN_RDMA_IP result without
+    shell access to the CI host.
+    """
+    print(f"{_DIAG_PREFIX} {msg}", file=sys.stderr, flush=True)
+
+
+def _env_truthy(name: str) -> bool:
+    v = os.environ.get(name, "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def _apply_control_plane_ips() -> None:
+    """Default LOCAL/ROOT to loopback; respect pre-set env; optional force flag."""
+    if _env_truthy("RBLN_FORCE_LOOPBACK_CONTROL_PLANE"):
+        os.environ["RBLN_LOCAL_IP"] = _LOOPBACK
+        os.environ["RBLN_ROOT_IP"] = _LOOPBACK
+        return
+    if not os.environ.get("RBLN_LOCAL_IP", "").strip():
+        os.environ["RBLN_LOCAL_IP"] = _LOOPBACK
+    if not os.environ.get("RBLN_ROOT_IP", "").strip():
+        os.environ["RBLN_ROOT_IP"] = _LOOPBACK
+
+
+def _read_operstate(netdev_dir: Path) -> str | None:
+    try:
+        return (netdev_dir / "operstate").read_text().strip()
+    except OSError:
+        return None
+
+
+def _ipv4_for_iface(iface: str) -> str | None:
+    """Read the IPv4 bound to ``iface`` via ``SIOCGIFADDR`` ioctl.
+
+    Avoids the iproute2 ``ip`` binary so the probe still works in minimal
+    CI containers. ``OSError`` here typically means the kernel responded
+    with ``EADDRNOTAVAIL`` (interface has no IPv4) or ``ENODEV``
+    (interface vanished) — both are treated as "no IPv4 available".
+    """
+    if _fcntl is None:
+        _diag(f"iface={iface} fcntl module unavailable (non-POSIX runtime)")
+        return None
+    iface_bytes = iface.encode("utf-8")
+    if len(iface_bytes) >= _IFNAMSIZ:
+        _diag(f"iface={iface} name too long for ifreq (max {_IFNAMSIZ - 1} bytes)")
+        return None
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    except OSError as exc:
+        _diag(f"iface={iface} AF_INET socket() failed: {exc!r}")
+        return None
+    try:
+        # ifreq layout: char ifr_name[IFNAMSIZ]; union { struct sockaddr ifr_addr; ... }
+        # We send a 256-byte buffer with the iface name; kernel writes sockaddr_in into bytes 16:.
+        ifreq = struct.pack("256s", iface_bytes)
+        try:
+            packed = _fcntl.ioctl(sock.fileno(), _SIOCGIFADDR, ifreq)
+        except OSError as exc:
+            _diag(f"iface={iface} SIOCGIFADDR ioctl failed: {exc!r}")
+            return None
+    finally:
+        sock.close()
+    # sockaddr_in: sa_family(2) + sin_port(2) + sin_addr(4) at offset 20 within ifreq.
+    return socket.inet_ntoa(packed[20:24])
+
+
+def _gid_to_ipv4(gid: str) -> str | None:
+    """Extract IPv4 from an IPv4-mapped IPv6 GID (``::ffff:a.b.c.d``).
+
+    sysfs writes GIDs as eight 16-bit groups, e.g.
+    ``0000:0000:0000:0000:0000:ffff:0a0a:1235`` for ``10.10.18.53``.
+    Returns None when the GID isn't IPv4-mapped or is the all-zero entry.
+    """
+    parts = gid.split(":")
+    if len(parts) != 8:
+        return None
+    if any(p != "0000" for p in parts[:5]):
+        return None
+    if parts[5].lower() != "ffff":
+        return None
+    try:
+        b1 = int(parts[6][:2], 16)
+        b2 = int(parts[6][2:], 16)
+        b3 = int(parts[7][:2], 16)
+        b4 = int(parts[7][2:], 16)
+    except (ValueError, IndexError):
+        return None
+    if (b1 | b2 | b3 | b4) == 0:
+        return None
+    return f"{b1}.{b2}.{b3}.{b4}"
+
+
+def _read_roce_v2_gid_ipv4s(rdma_dev_path: Path) -> list[str]:
+    """Return the sorted IPv4 addresses registered as RoCEv2 GIDs on a device.
+
+    The RDMA stack uses GID-table entries (not just netdev IPs) when binding
+    a connection. If the IP we hand to the runtime as RBLN_RDMA_IP is not in
+    this list, ``rcclGetUniqueId`` will fail to resolve it.
+    """
+    out: set[str] = set()
+    ports_root = rdma_dev_path / "ports"
+    if not ports_root.is_dir():
+        return []
+    for port_dir in sorted(ports_root.iterdir()):
+        if not port_dir.is_dir():
+            continue
+        gids_dir = port_dir / "gids"
+        types_dir = port_dir / "gid_attrs" / "types"
+        if not gids_dir.is_dir() or not types_dir.is_dir():
+            continue
+        for gid_file in sorted(gids_dir.iterdir()):
+            try:
+                gid_type = (types_dir / gid_file.name).read_text(errors="ignore").strip()
+            except OSError:
+                continue
+            if "RoCE v2" not in gid_type:
+                continue
+            try:
+                gid = gid_file.read_text(errors="ignore").strip()
+            except OSError:
+                continue
+            ipv4 = _gid_to_ipv4(gid)
+            if ipv4 is not None:
+                out.add(ipv4)
+    return sorted(out)
+
+
+def _read_rdma_port_state(rdma_dev_path: Path, port: str = "1") -> tuple[str | None, str | None]:
+    """Read ``state`` and ``phys_state`` directly from sysfs.
+
+    Avoids depending on the ``rdma`` (rdma-core) binary, which CI images
+    often omit. Each file is a short string like ``4: ACTIVE`` or
+    ``1: DOWN`` exposed by the kernel's ib_core.
+    """
+    port_dir = rdma_dev_path / "ports" / port
+
+    def _safe_read(name: str) -> str | None:
+        try:
+            return (port_dir / name).read_text(errors="ignore").strip()
+        except OSError:
+            return None
+
+    return _safe_read("state"), _safe_read("phys_state")
+
+
+def _classify_rdma_state(state: str | None) -> bool | None:
+    """Return True for ACTIVE, False for DOWN/DISABLED, None otherwise."""
+    if not state:
+        return None
+    upper = state.upper()
+    if "ACTIVE" in upper:
+        return True
+    if "DOWN" in upper or "DISABLED" in upper:
+        return False
+    return None  # INIT / ARMED / unknown — leave to fallback bucket
+
+
+def _rdma_port_active(dev_name: str) -> bool | None:
+    """Return True/False from ``rdma link``, or None if ``rdma`` is missing or unparsable."""
+    rdma_bin = shutil.which("rdma")
+    if not rdma_bin:
+        return None
+    try:
+        proc = subprocess.run(
+            [rdma_bin, "link", "show", f"{dev_name}/1"],
+            capture_output=True,
+            text=True,
+            timeout=_RDMA_LINK_TIMEOUT_SEC,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _diag(f"dev={dev_name} `rdma link show` failed: {exc!r}")
+        return None
+    out = proc.stdout + proc.stderr
+    if "state ACTIVE" in out:
+        return True
+    if "state DOWN" in out or "state DISABLED" in out:
+        return False
+    return None
+
+
+_DEV_INFINIBAND = Path("/dev/infiniband")
+
+
+def _diag_dev_infiniband() -> None:
+    """Surface /dev/infiniband/ contents and per-file R/W from this process.
+
+    ibv_open_device / rdma_cm need working char-device access to ``uverbsN``
+    and ``rdma_cm``. In Docker/Podman containers these are commonly absent
+    (no ``--device`` passthrough) or permission-restricted, which is invisible
+    to the rest of the RoCE probe but breaks ``rcclGetUniqueId`` downstream.
+    """
+    if not _DEV_INFINIBAND.is_dir():
+        _diag(f"{_DEV_INFINIBAND} NOT present — RDMA verbs unusable from this process")
+        return
+    try:
+        entries = sorted(e.name for e in _DEV_INFINIBAND.iterdir())
+    except OSError as exc:
+        _diag(f"{_DEV_INFINIBAND} iterdir failed: {exc!r}")
+        return
+    _diag(f"{_DEV_INFINIBAND} entries: {entries}")
+    for name in entries:
+        path = _DEV_INFINIBAND / name
+        try:
+            st = os.stat(str(path))
+        except OSError as exc:
+            _diag(f"{path} stat failed: {exc!r}")
+            continue
+        mode = stat.filemode(st.st_mode)
+        readable = os.access(str(path), os.R_OK)
+        writable = os.access(str(path), os.W_OK)
+        _diag(f"{path} mode={mode} R={readable} W={writable}")
+
+
+_LIBIBVERBS_CONFIG_DIR = Path("/etc/libibverbs.d")
+_LIBIBVERBS_PROVIDER_DIRS = (
+    Path("/usr/lib/x86_64-linux-gnu/libibverbs"),
+    Path("/usr/lib64/libibverbs"),
+    Path("/usr/lib/libibverbs"),
+)
+
+
+def _diag_libibverbs_userspace() -> None:
+    """Surface libibverbs vendor-driver config and provider .so availability.
+
+    libibverbs prints ``Warning: couldn't open config directory
+    '/etc/libibverbs.d'`` when the rdma-core userspace package is absent
+    or partially installed. Even when the kernel side (uverbsN, rdma_cm)
+    is present, ``ibv_open_device`` fails to bind a vendor driver if the
+    matching ``libNAME-rdmav<abi>.so`` provider isn't installed.
+    """
+    cfg_present = _LIBIBVERBS_CONFIG_DIR.is_dir()
+    if cfg_present:
+        try:
+            entries = sorted(e.name for e in _LIBIBVERBS_CONFIG_DIR.iterdir())
+        except OSError as exc:
+            _diag(f"{_LIBIBVERBS_CONFIG_DIR} iterdir failed: {exc!r}")
+            entries = []
+        _diag(f"{_LIBIBVERBS_CONFIG_DIR} drivers={entries}")
+    else:
+        _diag(
+            f"{_LIBIBVERBS_CONFIG_DIR} NOT present — "
+            f"rdma-core userspace likely not installed (ibv_open_device may fail)"
+        )
+
+    provider_dir_seen = False
+    for d in _LIBIBVERBS_PROVIDER_DIRS:
+        if not d.is_dir():
+            continue
+        provider_dir_seen = True
+        try:
+            sos = sorted(e.name for e in d.iterdir() if e.name.endswith((".so", ".so.inbox")))
+        except OSError as exc:
+            _diag(f"{d} iterdir failed: {exc!r}")
+            continue
+        _diag(f"{d} providers={sos}")
+    if not provider_dir_seen:
+        _diag(
+            f"libibverbs provider directory not found (looked in {[str(p) for p in _LIBIBVERBS_PROVIDER_DIRS]}) — "
+            f"vendor RDMA drivers may be missing"
+        )
+
+
+def _diag_memlock_limit() -> None:
+    """Surface RLIMIT_MEMLOCK — RDMA pinning needs a high (or unlimited) cap."""
+    try:
+        import resource
+
+        soft, hard = resource.getrlimit(resource.RLIMIT_MEMLOCK)
+    except Exception as exc:  # pragma: no cover - defensive
+        _diag(f"RLIMIT_MEMLOCK read failed: {exc!r}")
+        return
+
+    def _fmt(v: int) -> str:
+        if v == resource.RLIM_INFINITY:
+            return "unlimited"
+        return f"{v} ({v // (1024 * 1024)} MiB)"
+
+    _diag(f"RLIMIT_MEMLOCK soft={_fmt(soft)} hard={_fmt(hard)}")
+
+
+def _diag_environment_preamble() -> None:
+    """One-time snapshot of the bits that drive the RoCE probe."""
+    _diag(f"sysfs={_SYSFS_INFINIBAND} exists={_SYSFS_INFINIBAND.is_dir()}")
+    _diag(f"fcntl_module={'present' if _fcntl is not None else 'missing'}  rdma_bin={shutil.which('rdma')}")
+    if _SYSFS_INFINIBAND.is_dir():
+        try:
+            entries = sorted(e.name for e in _SYSFS_INFINIBAND.iterdir())
+        except OSError as exc:
+            _diag(f"sysfs iterdir failed: {exc!r}")
+            return
+        _diag(f"sysfs entries (n={len(entries)}): {entries}")
+    _diag_dev_infiniband()
+    _diag_libibverbs_userspace()
+    _diag_memlock_limit()
+
+
+def probe_roce_rdma_ipv4() -> str | None:
+    """Pick an IPv4 on an up netdev under ``/sys/class/infiniband/*/device/net``.
+
+    Prefers interfaces whose RDMA link is ACTIVE when ``rdma`` from rdma-core
+    is available; otherwise returns the first usable IPv4. Emits one
+    ``[rbln_rdma_probe]`` line per filter decision on stderr so CI logs
+    surface the reason an empty result was produced without needing shell
+    access to the runner.
+    """
+    _diag_environment_preamble()
+
+    if not _SYSFS_INFINIBAND.is_dir():
+        _diag(f"result=None reason=sysfs-missing path={_SYSFS_INFINIBAND}")
+        return None
+
+    active_first: list[tuple[str, str, str]] = []
+    fallback: list[tuple[str, str, str]] = []
+
+    for rdma_dev in sorted(_SYSFS_INFINIBAND.iterdir()):
+        if not rdma_dev.is_dir():
+            _diag(f"skip dev={rdma_dev.name} reason=not-a-directory")
+            continue
+        dev_name = rdma_dev.name
+        net_root = rdma_dev / "device" / "net"
+        if not net_root.is_dir():
+            _diag(f"skip dev={dev_name} reason=no-device/net (path={net_root})")
+            continue
+        netdevs = sorted(net_root.iterdir())
+        _diag(f"dev={dev_name} netdevs={[n.name for n in netdevs]}")
+        roce_v2_gid_ipv4s = _read_roce_v2_gid_ipv4s(rdma_dev)
+        _diag(f"dev={dev_name} roce_v2_gid_ipv4s={roce_v2_gid_ipv4s}")
+        # Sysfs-direct port state — works even when rdma-core is not installed
+        # in the container. We surface both numeric/textual fields so a CI log
+        # immediately shows whether the RDMA port is ACTIVE, DOWN or in some
+        # transient state (INIT/ARMED) — which is the most likely cause when
+        # the netdev IP and GID match but rcclGetUniqueId still fails.
+        port_state, phys_state = _read_rdma_port_state(rdma_dev)
+        _diag(f"dev={dev_name} port_state={port_state!r} phys_state={phys_state!r}")
+        sysfs_link_ok = _classify_rdma_state(port_state)
+        for netdev in netdevs:
+            if not netdev.is_dir():
+                _diag(f"skip dev={dev_name} netdev={netdev.name} reason=not-a-directory")
+                continue
+            iface = netdev.name
+            operstate = _read_operstate(netdev)
+            if operstate != "up":
+                _diag(f"skip dev={dev_name} iface={iface} reason=operstate={operstate!r} (need 'up')")
+                continue
+            ipv4 = _ipv4_for_iface(iface)
+            if not ipv4:
+                _diag(f"skip dev={dev_name} iface={iface} reason=no-ipv4-assigned")
+                continue
+            # Cross-check the netdev IP against the RoCEv2 GID table. If the IP we are
+            # about to publish as RBLN_RDMA_IP is not registered as a RoCEv2 GID, the
+            # RDMA stack (rcclGetUniqueId, ibv_*) cannot resolve it and unique_id setup
+            # will fail downstream — surfacing this here makes the cause obvious in the
+            # CI log without having to read librbln runtime traces.
+            if roce_v2_gid_ipv4s and ipv4 not in roce_v2_gid_ipv4s:
+                _diag(
+                    f"warn dev={dev_name} iface={iface} ipv4={ipv4} "
+                    f"NOT in RoCEv2 GID table {roce_v2_gid_ipv4s} — "
+                    f"RDMA unique_id setup may reject this address"
+                )
+            # Prefer the sysfs port state. Fall back to the rdma binary only when
+            # the sysfs read returned an unrecognised value.
+            link_ok = sysfs_link_ok if sysfs_link_ok is not None else _rdma_port_active(dev_name)
+            if link_ok is False:
+                _diag(
+                    f"skip dev={dev_name} iface={iface} ipv4={ipv4} "
+                    f"reason=rdma-port-DOWN (port_state={port_state!r} phys_state={phys_state!r})"
+                )
+                continue
+            tup = (dev_name, iface, ipv4)
+            if link_ok is True:
+                _diag(f"candidate dev={dev_name} iface={iface} ipv4={ipv4} bucket=active")
+                active_first.append(tup)
+            else:
+                _diag(f"candidate dev={dev_name} iface={iface} ipv4={ipv4} bucket=fallback (rdma link unknown)")
+                fallback.append(tup)
+
+    if active_first:
+        chosen = active_first[0]
+        _diag(f"result={chosen[2]} via dev={chosen[0]} iface={chosen[1]} bucket=active")
+        return chosen[2]
+    if fallback:
+        chosen = fallback[0]
+        _diag(f"result={chosen[2]} via dev={chosen[0]} iface={chosen[1]} bucket=fallback")
+        return chosen[2]
+    _diag("result=None reason=no-candidate-passed-filters")
+    return None
+
+
+def apply_default_rbln_network_environment() -> None:
+    """Apply control-plane defaults and auto-fill ``RBLN_RDMA_IP`` when unset.
+
+    See module docstring for ``RBLN_LOCAL_IP`` / ``RBLN_ROOT_IP`` and
+    ``RBLN_FORCE_LOOPBACK_CONTROL_PLANE``. Safe to call once before loading
+    ``librbln``. Non-empty ``RBLN_RDMA_IP`` is left unchanged.
+    """
+    _apply_control_plane_ips()
+
+    existing = os.environ.get("RBLN_RDMA_IP", "").strip()
+    if existing:
+        print(f"RBLN_RDMA_IP={existing}")
+        return
+
+    discovered = probe_roce_rdma_ipv4()
+    if discovered:
+        os.environ["RBLN_RDMA_IP"] = discovered
+    print(f"RBLN_RDMA_IP={os.environ.get('RBLN_RDMA_IP', '')}")

@@ -9,6 +9,7 @@ from typing import Optional
 
 import torch
 
+from torch_rbln._internal.compile_cache import compile_rbln_cached
 from torch_rbln._internal.log_utils import rbln_log_cpu_fallback
 from torch_rbln._internal.ops_utils import is_cpu_fallback_cases, to_cpu
 
@@ -378,8 +379,11 @@ def _sdpa_compute_attn_weights(
         merged_mask = merged_mask.contiguous()
 
     with out_tensor_context():
-        compiled = torch.compile(
-            _compile_sdpa_attn_weights_fn, backend="rbln", dynamic=False, options={"disable_logger": True}
+        compiled = compile_rbln_cached(
+            _compile_sdpa_attn_weights_fn,
+            dynamic=False,
+            options={"disable_logger": True},
+            device_cache_key=query.device.index,
         )
         external_result = compiled(query, key, attn_mask=merged_mask, scale=scale)
 
@@ -442,8 +446,11 @@ def _sdpa_compute_output(
     value = value.contiguous()
 
     with out_tensor_context():
-        compiled = torch.compile(
-            _compile_sdpa_output_fn, backend="rbln", dynamic=False, options={"disable_logger": True}
+        compiled = compile_rbln_cached(
+            _compile_sdpa_output_fn,
+            dynamic=False,
+            options={"disable_logger": True},
+            device_cache_key=attn_weights.device.index,
         )
         external_result = compiled(attn_weights, value, dropout_p=dropout_p)
 
@@ -559,27 +566,39 @@ def _sdpa_backward_compiled(
 
     with out_tensor_context():
         # Graph 1: grad_V = attn_weights^T @ grad_output
-        compiled_grad_v = torch.compile(
-            _compile_sdpa_grad_value_fn, backend="rbln", dynamic=False, options={"disable_logger": True}
+        compiled_grad_v = compile_rbln_cached(
+            _compile_sdpa_grad_value_fn,
+            dynamic=False,
+            options={"disable_logger": True},
+            device_cache_key=grad_output.device.index,
         )
         grad_value = compiled_grad_v(attn_weights, grad_output)
 
         # Graph 2: grad_scores = softmax_backward * scale
-        compiled_grad_scores = torch.compile(
-            _compile_sdpa_grad_scores_fn, backend="rbln", dynamic=False, options={"disable_logger": True}
+        compiled_grad_scores = compile_rbln_cached(
+            _compile_sdpa_grad_scores_fn,
+            dynamic=False,
+            options={"disable_logger": True},
+            device_cache_key=grad_output.device.index,
         )
         grad_scores = compiled_grad_scores(grad_output, value_expanded, attn_weights, scale)
 
         # Graph 3: grad_Q = grad_scores @ K
         grad_scores = grad_scores.contiguous()
-        compiled_grad_q = torch.compile(
-            _compile_sdpa_grad_query_fn, backend="rbln", dynamic=False, options={"disable_logger": True}
+        compiled_grad_q = compile_rbln_cached(
+            _compile_sdpa_grad_query_fn,
+            dynamic=False,
+            options={"disable_logger": True},
+            device_cache_key=grad_output.device.index,
         )
         grad_query = compiled_grad_q(grad_scores, key_expanded)
 
         # Graph 4: grad_K = grad_scores^T @ Q
-        compiled_grad_k = torch.compile(
-            _compile_sdpa_grad_key_fn, backend="rbln", dynamic=False, options={"disable_logger": True}
+        compiled_grad_k = compile_rbln_cached(
+            _compile_sdpa_grad_key_fn,
+            dynamic=False,
+            options={"disable_logger": True},
+            device_cache_key=grad_output.device.index,
         )
         grad_key = compiled_grad_k(grad_scores, query)
 

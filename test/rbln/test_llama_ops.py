@@ -177,6 +177,35 @@ class TestLlamaOps(TestCase):
         weight = torch.randn([out_features, in_features], dtype=dtype)
         self._run_op(torch.nn.functional.linear, input, weight)
 
+    # 3D input × bias-less linear where the compiler generates a post-GEMM host
+    # op sequence whose reshape and transpose ranks disagree. rebel-compiler
+    # PR #10429 (GEMM primitive interface change, released in dev281) made
+    # WrapHostOps emit a 3D reshape followed by a 4D transpose for the output,
+    # tripping `transpose_op.axis_order().size() == curr_shape.size()` at
+    # runtime/vmemory/transform/calculate.cc:250. Fixed by rebel-compiler
+    # PR #10476 (dev top).
+    #
+    # Shapes come from real compiled graphs captured during perf testing: the
+    # (1, 16, 1024) × (640, 1024) case is the one reported on Slack; the (192)
+    # and (768) siblings were in the same trace and were empirically verified
+    # to reproduce the identical runtime assert on rebel-compiler==dev281, but
+    # not on dev307+.
+    @dtypes(*SUPPORTED_DTYPES)
+    @parametrize(
+        "batch_size,seq_len,in_features,out_features",
+        [
+            (1, 16, 1024, 192),
+            (1, 16, 1024, 640),
+            (1, 16, 1024, 768),
+        ],
+    )
+    def test_llama_nn_functional_linear_host_op_seq_regression(
+        self, dtype, batch_size, seq_len, in_features, out_features
+    ):
+        input = torch.randn([batch_size, seq_len, in_features], dtype=dtype)
+        weight = torch.randn([out_features, in_features], dtype=dtype)
+        self._run_op(torch.nn.functional.linear, input, weight, None)
+
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("batch_size", batch_sizes)
     @parametrize("input_shape", [(8, 2048)])

@@ -3,8 +3,8 @@ import os
 import pytest
 import torch
 
+import torch_rbln
 from test.utils import set_deterministic_seeds
-
 from torch_rbln._internal.log_utils import rbln_log_debug
 
 
@@ -30,6 +30,37 @@ def reset_dynamo(request):
 
     rbln_log_debug("Resetting TorchDynamo")
     torch._dynamo.reset()
+
+
+# =============================================================================
+# RBLN caching-allocator reset fixture (autouse)
+# =============================================================================
+@pytest.fixture(scope="function", autouse=True)
+def reset_caching_allocator(request):
+    """Release the RBLN caching allocator's cached blocks before each test.
+
+    Without this, freed small blocks from prior tests accumulate in the
+    caching allocator and fragment the pool, so later tests can fail to
+    allocate large contiguous blocks. Mirrors the TorchDynamo reset above;
+    opt out per-test with the ``no_caching_allocator_reset`` marker.
+    """
+    if request.node.get_closest_marker("no_caching_allocator_reset"):
+        rbln_log_debug("Skipping RBLN caching allocator reset")
+        return
+
+    try:
+        num_devices = torch_rbln.device.device_count()
+    except Exception as exc:
+        rbln_log_debug(f"device_count() failed; skipping caching allocator reset: {exc}")
+        return
+
+    for idx in range(num_devices):
+        device = torch.device("rbln", idx)
+        rbln_log_debug(f"Releasing RBLN caching allocator blocks on {device}")
+        try:
+            torch_rbln.memory.empty_cache(device)
+        except Exception as exc:
+            rbln_log_debug(f"empty_cache({device}) failed: {exc}")
 
 
 # =============================================================================

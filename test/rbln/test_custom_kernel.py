@@ -8,6 +8,8 @@ This test suite covers the following custom kernels:
 2. rbln_custom_ops::paged_attn_decode
 3. rbln_custom_ops::paged_causal_attn_prefill
 4. rbln_custom_ops::paged_causal_attn_decode
+5. rbln_custom_ops::flash_attention_naive_prefill
+6. rbln_custom_ops::flash_attention_naive_decode
 """
 
 import math
@@ -524,6 +526,125 @@ def paged_causal_attn_decode_fake(
     return torch.empty_like(q)
 
 
+# ---------------------------------------------------------------------------
+# flash_attention_naive_prefill / flash_attention_naive_decode
+#
+# Unified paged KV cache (kv_cache axis 0 stacks [K, V]) flash attention
+# variants. The CPU reference mirrors vllm-rbln's reference
+# implementation (single-partition, slice_scatter-based cache update) so the
+# test exercises the same schema (q, k, v, kv_cache, mask, scale, seq_idx,
+# block_tables, slot_mapping[, sinks]) that vllm-rbln registers and the
+# rebel compiler expects.
+# ---------------------------------------------------------------------------
+
+
+def _flash_attn_naive_reference(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    kv_cache: Tensor,
+    mask: Tensor,
+    scale: Tensor,
+    seq_idx: Tensor,
+    block_tables: Tensor,
+) -> Tensor:
+    """Single-partition reference matching vllm-rbln's flash_attention_naive reference.
+
+    Writes new K/V slices into the cache for block ``block_tables[0]`` at
+    offset ``seq_idx[0][0]``, then computes causal-masked attention over the
+    partition. ``kv_cache`` is mutated in place for both K (axis 0) and V
+    (axis 1).
+    """
+    partition = kv_cache.size(-2)
+    seq_len = q.size(-2)
+    s = seq_idx[0][0]
+    e = s + seq_len
+    block = block_tables.reshape(-1)[0].to(torch.int32)
+
+    k_state = kv_cache[0][block].unsqueeze(0).slice_scatter(k, dim=3, start=s, end=e)
+    v_state = kv_cache[1][block].unsqueeze(0).slice_scatter(v, dim=3, start=s, end=e)
+    kv_cache[0][block] = k_state.squeeze(0)
+    kv_cache[1][block] = v_state.squeeze(0)
+
+    attn_weights = torch.matmul(q, k_state.transpose(3, 4)) * scale
+    causal_mask = torch.where(mask[:, :, :, :, :partition] > 0, 0.0, -float("inf")).to(attn_weights.dtype)
+    attn_weights = attn_weights + causal_mask
+    attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(q.dtype)
+    return torch.matmul(attn_weights, v_state)
+
+
+@torch.library.custom_op("rbln_custom_ops::flash_attention_naive_prefill", mutates_args=["kv_cache"])
+def flash_attention_naive_prefill(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    kv_cache: Tensor,
+    mask: Tensor,
+    scale: Tensor,
+    seq_idx: Tensor,
+    block_tables: Tensor,
+    slot_mapping: Tensor,
+    sinks: Optional[Tensor] = None,
+) -> Tensor:
+    """CPU reference for 'flash_attention_naive_prefill'.
+
+    ``slot_mapping`` and ``sinks`` are accepted to match the kernel signature
+    but are not used by this single-partition reference.
+    """
+    return _flash_attn_naive_reference(q, k, v, kv_cache, mask, scale, seq_idx, block_tables)
+
+
+@flash_attention_naive_prefill.register_fake
+def flash_attention_naive_prefill_fake(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    kv_cache: Tensor,
+    mask: Tensor,
+    scale: Tensor,
+    seq_idx: Tensor,
+    block_tables: Tensor,
+    slot_mapping: Tensor,
+    sinks: Optional[Tensor] = None,
+) -> Tensor:
+    """Fake-tensor implementation used during ``torch.compile`` tracing."""
+    return torch.empty_like(q)
+
+
+@torch.library.custom_op("rbln_custom_ops::flash_attention_naive_decode", mutates_args=["kv_cache"])
+def flash_attention_naive_decode(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    kv_cache: Tensor,
+    mask: Tensor,
+    scale: Tensor,
+    seq_idx: Tensor,
+    block_tables: Tensor,
+    slot_mapping: Tensor,
+    sinks: Optional[Tensor] = None,
+) -> Tensor:
+    """CPU reference for 'flash_attention_naive_decode'. Same shape contract as prefill."""
+    return _flash_attn_naive_reference(q, k, v, kv_cache, mask, scale, seq_idx, block_tables)
+
+
+@flash_attention_naive_decode.register_fake
+def flash_attention_naive_decode_fake(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    kv_cache: Tensor,
+    mask: Tensor,
+    scale: Tensor,
+    seq_idx: Tensor,
+    block_tables: Tensor,
+    slot_mapping: Tensor,
+    sinks: Optional[Tensor] = None,
+) -> Tensor:
+    """Fake-tensor implementation used during ``torch.compile`` tracing."""
+    return torch.empty_like(q)
+
+
 @pytest.mark.test_set_ci
 # In sequential test runs, the autouse fixture calls torch._dynamo.reset(),
 # which clears module-level custom op registrations. This can break later
@@ -878,6 +999,98 @@ class TestCustomKernelRBLN(TestCase):
         self.assertEqual(output_rbln.cpu(), output_cpu, rtol=self.rtol, atol=self.atol)
         self.assertEqual(k_cache_rbln.cpu(), k_cache_cpu, rtol=self.rtol, atol=self.atol)
         self.assertEqual(v_cache_rbln.cpu(), v_cache_cpu, rtol=self.rtol, atol=self.atol)
+
+    def _run_flash_attention_naive(self, dtype, *, seq_len: int, op_name: str) -> None:
+        """Shared body for flash_attention_naive prefill/decode comparison tests."""
+        # --- 1. Test Configuration ---
+        # Single batch / single block / single partition keeps the CPU reference
+        # in sync with the simplified layout used by `_flash_attn_naive_reference`.
+        num_kv_heads = 8  # H
+        num_q_groups = 4  # G (num_q_heads == num_kv_heads * num_q_groups)
+        head_dim = 64  # D — must be a multiple of 64 for the kernel
+        num_blocks = 1  # B
+        partition_size = 256  # P (also equals context length since NP=1)
+
+        is_decode = "decode" in op_name
+        # Prefill writes the full prompt starting at slot 0; decode appends one
+        # token to a partially-filled cache. The mask covers exactly the valid
+        # cache region (history + new token) so both reference and kernel
+        # attend over the same positions.
+        prefilled = 32 if is_decode else 0
+        valid_len = prefilled + seq_len
+
+        # --- 2. CPU Tensor Creation ---
+        q_cpu = torch.randn([1, num_kv_heads, num_q_groups, seq_len, head_dim], dtype=dtype)
+        k_cpu = torch.randn([1, num_kv_heads, 1, seq_len, head_dim], dtype=dtype)
+        v_cpu = torch.randn([1, num_kv_heads, 1, seq_len, head_dim], dtype=dtype)
+
+        # Unified KV cache: axis 0 stacks [K, V], paged by (B, H, 1, P, D).
+        kv_cache_cpu = torch.randn([2, num_blocks, num_kv_heads, 1, partition_size, head_dim], dtype=dtype)
+
+        # Mask is 1 for valid positions [0, valid_len), 0 elsewhere.
+        mask_cpu = torch.zeros([1, 1, 1, seq_len, partition_size], dtype=dtype)
+        mask_cpu[:, :, :, :, :valid_len] = 1
+
+        scale_tensor = torch.tensor(1.0 / math.sqrt(head_dim))
+        seq_idx_cpu = torch.tensor([[prefilled]], dtype=torch.int32)
+        # prefill: [num_partitions], decode: [batch, num_partitions]
+        block_tables_cpu = torch.tensor([[0]], dtype=torch.int16) if is_decode else torch.tensor([0], dtype=torch.int16)
+        # slot_mapping is consumed by the kernel for memory placement but not
+        # by the CPU reference; any positionally valid tensor is fine here.
+        slot_mapping_cpu = torch.arange(seq_len, dtype=torch.int32)
+
+        # --- 3. RBLN Tensors ---
+        q_rbln = q_cpu.clone().to(self.rbln_device)
+        k_rbln = k_cpu.clone().to(self.rbln_device)
+        v_rbln = v_cpu.clone().to(self.rbln_device)
+        kv_cache_rbln = kv_cache_cpu.clone().to(self.rbln_device)
+        mask_rbln = mask_cpu.clone().to(self.rbln_device)
+        seq_idx_rbln = seq_idx_cpu.clone().to(self.rbln_device)
+        block_tables_rbln = block_tables_cpu.clone().to(self.rbln_device)
+        slot_mapping_rbln = slot_mapping_cpu.clone().to(self.rbln_device)
+
+        rbln_args = (
+            q_rbln,
+            k_rbln,
+            v_rbln,
+            kv_cache_rbln,
+            mask_rbln,
+            scale_tensor,
+            seq_idx_rbln,
+            block_tables_rbln,
+            slot_mapping_rbln,
+        )
+        cpu_args = (
+            q_cpu,
+            k_cpu,
+            v_cpu,
+            kv_cache_cpu,
+            mask_cpu,
+            scale_tensor,
+            seq_idx_cpu,
+            block_tables_cpu,
+            slot_mapping_cpu,
+        )
+
+        # --- 4. Operator Execution ---
+        op = getattr(torch.ops.rbln_custom_ops, op_name)
+        with torch.no_grad():
+            output_rbln = op(*rbln_args)
+            output_cpu = op(*cpu_args)
+
+        # --- 5. Validation ---
+        self.assertEqual(output_rbln.shape, output_cpu.shape)
+        self.assertEqual(output_rbln.dtype, output_cpu.dtype)
+        self.assertEqual(output_rbln.cpu(), output_cpu, rtol=self.rtol, atol=self.atol)
+        self.assertEqual(kv_cache_rbln.cpu(), kv_cache_cpu, rtol=self.rtol, atol=self.atol)
+
+    @dtypes(*SUPPORTED_DTYPES)
+    def test_flash_attention_naive_prefill_comparison(self, dtype):
+        self._run_flash_attention_naive(dtype, seq_len=256, op_name="flash_attention_naive_prefill")
+
+    @dtypes(*SUPPORTED_DTYPES)
+    def test_flash_attention_naive_decode_comparison(self, dtype):
+        self._run_flash_attention_naive(dtype, seq_len=1, op_name="flash_attention_naive_decode")
 
 
 instantiate_device_type_tests(TestCustomKernelRBLN, globals(), only_for="privateuse1")

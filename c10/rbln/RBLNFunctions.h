@@ -114,6 +114,20 @@ C10_RBLN_API bool is_eager_malloc();
 C10_RBLN_API void* malloc(c10::DeviceIndex device_index, size_t nbytes);
 
 /**
+ * @brief Marks the virtual memory as logically zero-initialized.
+ *
+ * Sets the VMemory sync state to EMPTY_INIT_WITH_ZERO without allocating host memory or
+ * performing any device transfer. On the next device read, zeros are transferred via a
+ * temporary buffer; on the next device write, the transfer is skipped entirely.
+ *
+ * This is the preferred implementation of aten::zero_ for RBLN tensors. It avoids host
+ * memory allocation, which is critical for large tensors such as KV-cache.
+ *
+ * @param rbln_data Pointer to the RBLN virtual memory (tensor data_ptr).
+ */
+C10_RBLN_API void mark_zeros(const void* rbln_data);
+
+/**
  * @brief Frees memory allocated on an RBLN device.
  *
  * This function deallocates memory that was previously allocated using

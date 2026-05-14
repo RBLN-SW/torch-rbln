@@ -31,7 +31,10 @@ def split_env_var(env_var, split):
         If env_var exists, split env_var. Otherwise, empty list.
     """
     if os.environ.get(env_var, None):
-        return [p.strip() for p in os.environ[env_var].split(split)]
+        # Drop empty entries: a trailing/leading/double separator in
+        # LD_LIBRARY_PATH etc. yields "", which os.path.realpath("") resolves
+        # to cwd — injecting the current directory as a search path.
+        return [p.strip() for p in os.environ[env_var].split(split) if p.strip()]
     return []
 
 

@@ -10,7 +10,7 @@ import torch.nn as nn
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, subtest, TestCase
 
-from test.utils import configure_master_port_for_rccl_tests, set_deterministic_seeds
+from test.utils import configure_master_port_for_rccl_tests, set_deterministic_seeds, spawn_target_with_clean_exit
 
 
 def setup_environment(rank: int, world_size: int) -> None:
@@ -1421,7 +1421,7 @@ class TestTPPPRBLNBase(TestCase):
         with pytest.MonkeyPatch.context() as ctx:
             ctx.setenv("TORCH_RBLN_C10D_ASYNC", c10d_async_env)
 
-            mp.spawn(test_func, args=args, nprocs=nprocs, join=True)
+            mp.spawn(spawn_target_with_clean_exit, args=(test_func, *args), nprocs=nprocs, join=True)
 
 
 @pytest.mark.single_worker

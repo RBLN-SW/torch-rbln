@@ -231,6 +231,22 @@ C10_RBLN_API int get_scope_depth();
   } while (0)
 
 /**
+ * @brief Like RBLN_WARN but safe to call from a `noexcept` context.
+ *
+ * RBLN_WARN expands into calls that can throw (string formatting, c10::warn).
+ * Using it inside a catch handler of a `noexcept` function therefore risks
+ * std::terminate. Wrap such sites with this macro to swallow any secondary
+ * throw originating from the warning path itself.
+ */
+#define RBLN_WARN_NOTHROW(...) \
+  do {                         \
+    try {                      \
+      RBLN_WARN(__VA_ARGS__);  \
+    } catch (...) {            \
+    }                          \
+  } while (0)
+
+/**
  * @brief Macro for issuing warnings specific to RBLN only once.
  *
  * This macro ensures that the warning is logged and issued only once, regardless of how many times the macro is

@@ -46,7 +46,7 @@ This selects tests marked with `@pytest.mark.test_set_ci` — the core set of te
 
 **File:** [`.github/workflows/release.yaml`](../.github/workflows/release.yaml)
 
-The Release workflow runs when code is promoted from `dev` to `main` for release. It covers a broader test suite than CI, but neither is a strict superset of the other — experimental tests can run in CI but are excluded from Release:
+The Release workflow runs when code is promoted from `dev` to `main` for release. It builds and lints across all supported Python versions. It covers a broader test suite than CI, but neither is a strict superset of the other — experimental tests can run in CI but are excluded from Release:
 
 ```bash
 python test/run_tests.py --test_mode=release  # -m "not (test_set_experimental or test_set_perf)"
@@ -89,7 +89,7 @@ The workflow uses [`amannn/action-semantic-pull-request`](https://github.com/ama
 
 **Allowed types:** `feat`, `fix`, `refactor`, `perf`, `docs`, `test`, `build`, `ci`, `chore`
 
-If the title is invalid, the workflow posts a sticky comment on the PR explaining the required format using [`marocchino/sticky-pull-request-comment`](https://github.com/marocchino/sticky-pull-request-comment). The comment is automatically deleted once the title is corrected.
+If the title is invalid, the workflow uses [`marocchino/sticky-pull-request-comment`](https://github.com/marocchino/sticky-pull-request-comment) to post a sticky comment on the PR explaining the required format. The comment is automatically deleted once the title is corrected.
 
 ---
 
@@ -113,54 +113,15 @@ The event is dispatched to a separate repository (configured via `vars.TORCH_RBL
 
 ---
 
-## Workflow Lifecycle: From PR to Release
+## Automated Dependency Updates
 
-```
-                  (CI)              (Release)          (CI)
-                PR to dev          PR to main        PR to dev
-                   │                   │                │
-feature        ○───●                   │                │
-              ╱     ╲                  │                │     (CI)
-             ╱       ╲                 │                │  push to dev
-dev     ────○─────────●────────○───────┼────────────────┼────●─────────────────
-                push to dev     ╲      │                │   ╱
-                    (CI)         ╲     │                │  ╱
-rc                                ○────●                │ ╱
-                (Release)               ╲               │╱
-                PR to main               ╲         ●────●  backmerge
-                    │                     ╲       ╱
-hotfix         ○────●                      ╲     ╱
-              ╱      ╲                      ╲   ╱
-             ╱        ╲                      ╲ ╱
-main    ────○──────────●──────────────────────●───────────────────────────●────
-                  push to main           push to main                     │
-                   (Release)              (Release)                      tag
-                                                                         (CD)
-```
-
-### Branch roles
-
-| Branch    | Lifecycle                                                    |
-|-----------|--------------------------------------------------------------|
-| `feature` | Branch from `dev` → PR to `dev`                              |
-| `dev`     | Long-lived. Everyday integration point for all feature work. |
-| `rc`      | Branch from `dev`. Standing PR to `main`                     |
-| `hotfix`  | Branch from `main` → PR to `main`                            |
-| `main`    | Long-lived. Always release-ready. Tags are created here.     |
-
-### Flow summary
-
-1. **Feature development:** Developers branch from `dev`, open a PR back to `dev`. The CI workflow validates every PR with linting and `test_set_ci`-marked tests.
-2. **Integration:** Merging to `dev` triggers a CI push build, continuously verifying integration stability.
-3. **Release candidate:** A nightly job creates an `rc` branch from `dev` and maintains a standing PR to `main`. The Release workflow runs the full test suite on this PR daily.
-4. **Release:** When ready, the release manager merges the `rc` PR into `main`. Tagging `main` triggers the CD workflow for artifact build and deployment.
-5. **Backmerge:** After a `main` merge, a backmerge PR is automatically created from `main` to `dev`, ensuring hotfixes and release-only changes flow back.
-6. **Hotfix:** For urgent fixes, branch from `main`, PR back to `main`. The backmerge mechanism propagates the fix to `dev`.
+A nightly workflow tracks the latest `rebel-compiler` development build (not an official release) and automatically creates or updates a PR on `dev` when a newer build is available. Review and merge it once CI passes.
 
 ---
 
 ## Related Documentation
 
+- [Release Process](RELEASE_PROCESS.md) — Branch model, versioning, tagging, and publication
 - [Contributing Guide](CONTRIBUTING.md) — PR requirements and merge policy
 - [Test Guide](TEST_GUIDE.md) — Test infrastructure, markers, and `run_tests.py` usage
 - [Linting](LINTING.md) — Code style and pre-commit hooks

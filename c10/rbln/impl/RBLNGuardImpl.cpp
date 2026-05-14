@@ -60,11 +60,11 @@ void RBLNGuardImpl::uncheckedSetDevice(c10::Device device) const noexcept {
     RBLN_LOG_DEBUG("Setting device to {}", c10::str(device));
     setDevice(device);
   } catch (const c10::Error& error) {
-    RBLN_WARN("Failed to set device: {}", error.msg());
+    RBLN_WARN_NOTHROW("Failed to set device: {}", error.msg());
   } catch (const std::exception& e) {
-    RBLN_WARN("Failed to set device (std::exception): {}", e.what());
+    RBLN_WARN_NOTHROW("Failed to set device (std::exception): {}", e.what());
   } catch (...) {
-    RBLN_WARN("Failed to set device: unknown exception");
+    RBLN_WARN_NOTHROW("Failed to set device: unknown exception");
   }
 }
 
@@ -74,7 +74,7 @@ c10::DeviceIndex RBLNGuardImpl::deviceCount() const noexcept {
     RBLN_LOG_DEBUG("device_count={}", static_cast<int>(device_count));
     return device_count;
   } catch (const c10::Error& error) {
-    RBLN_WARN("Failed to get device count, returning 0: {}", error.msg());
+    RBLN_WARN_NOTHROW("Failed to get device count, returning 0: {}", error.msg());
     return 0;
   }
 }

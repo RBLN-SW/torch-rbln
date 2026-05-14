@@ -26,7 +26,8 @@ class Rccl {
   enum class RcclDataType : int {
     RCCL_INT8_TYPE = 0,
     RBLN_CUSTOM_FP16_TYPE = 1,
-    RCCL_MAX_DATA_TYPE = 2,
+    RCCL_BF16_TYPE = 2,
+    RCCL_MAX_DATA_TYPE = 3,
   };
 
   enum class RcclReduceOp : int {
@@ -157,11 +158,15 @@ class Rccl {
   std::unique_ptr<struct rccl_unique_id> unique_id_;
   std::unique_ptr<struct rccl_comm> comm_;
 
-  int rank_;  // group_rank
-  int size_;
-  int rccl_rank_;
-  int group_id_;
-  int torch_device_id_;
+  // These scalars are set during Init / PrepareContextAndExportMem / CommInitRank / CommUserRank,
+  // but appear as format arguments in several RT_LOG(ERROR, ...) paths that can fire before the
+  // setter has run (e.g. rcclCommInitRank failure on the first call leaves group_id_ / rccl_rank_
+  // unset). Default them to -1 so failed-init logging is well-defined instead of UB.
+  int rank_ = -1;  // group_rank
+  int size_ = -1;
+  int rccl_rank_ = -1;
+  int group_id_ = -1;
+  int torch_device_id_ = -1;
 };
 
 RBLNRetCode RcclInitExportMem(std::shared_ptr<Context> ctx);
