@@ -1,27 +1,25 @@
 set(target torch_rbln)
 set(sources
-  native/rbln/RBLNCat.cpp
   native/rbln/RBLNCPUFallback.cpp
   native/rbln/RBLNCopy.cpp
-  native/rbln/RBLNIndexCopy.cpp
-  native/rbln/RBLNIndexSelect.cpp
   native/rbln/RBLNResize.cpp
   native/rbln/RBLNStridedV2V.cpp
+  native/rbln/RBLNTensorAdvancedIndexing.cpp
   native/rbln/RBLNTensorFactories.cpp
+  native/rbln/RBLNTensorShape.cpp
   native/rbln/RBLNTensorUtils.cpp
   native/RBLNRegisterOps.cpp
 )
 set(headers
-  native/rbln/RBLNCat.h
   native/rbln/RBLNCPUFallback.h
   native/rbln/RBLNCopy.h
-  native/rbln/RBLNIndexCopy.h
-  native/rbln/RBLNIndexSelect.h
   native/rbln/RBLNIndexUtils.h
   native/rbln/RBLNResize.h
   native/rbln/RBLNStridedV2V.h
   native/rbln/RBLNStrideUtils.h
+  native/rbln/RBLNTensorAdvancedIndexing.h
   native/rbln/RBLNTensorFactories.h
+  native/rbln/RBLNTensorShape.h
   native/rbln/RBLNTensorUtils.h
 )
 add_library(${target}

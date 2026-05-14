@@ -1,12 +1,11 @@
 #include <ATen/core/Tensor.h>
 #include <ATen/core/VariableHooksInterface.h>
-#include <ATen/native/rbln/RBLNCat.h>
 #include <ATen/native/rbln/RBLNCPUFallback.h>
 #include <ATen/native/rbln/RBLNCopy.h>
-#include <ATen/native/rbln/RBLNIndexCopy.h>
-#include <ATen/native/rbln/RBLNIndexSelect.h>
 #include <ATen/native/rbln/RBLNResize.h>
+#include <ATen/native/rbln/RBLNTensorAdvancedIndexing.h>
 #include <ATen/native/rbln/RBLNTensorFactories.h>
+#include <ATen/native/rbln/RBLNTensorShape.h>
 #include <ATen/native/transformers/attention.h>
 #include <ATen/native/transformers/sdp_utils_cpp.h>
 #include <c10/rbln/RBLNFallbackConfig.h>
