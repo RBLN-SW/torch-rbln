@@ -24,7 +24,7 @@ worker is isolated; the class does not need ``single_worker``.
 
 import pytest
 import torch
-from torch.testing._internal.common_utils import TestCase, run_tests
+from torch.testing._internal.common_utils import run_tests, TestCase
 
 # torch.rbln is registered automatically via the "torch.backends" autoload
 # entry point declared in torch-rbln's pyproject.toml, so importing torch is
