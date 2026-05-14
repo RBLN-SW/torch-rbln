@@ -184,9 +184,8 @@ void copy_impl_rbln_async(const at::Tensor& src, const at::Tensor& dst) {
     RBLN_LOG_DEBUG("Async RBLN -> CPU");
     c10::rbln::memcpy_v2h_async(dst.data_ptr(), src.data_ptr(), nbytes);
   } else if (src_device.is_privateuseone() && dst_device.is_privateuseone()) {
-    // V2V has no async path yet — fall back to sync
-    RBLN_LOG_DEBUG("V2V async not supported, falling back to sync");
-    c10::rbln::memcpy_v2v(dst.data_ptr(), src.data_ptr(), nbytes);
+    RBLN_LOG_DEBUG("Async RBLN -> RBLN");
+    c10::rbln::memcpy_v2v_async(dst.data_ptr(), src.data_ptr(), nbytes);
   } else {
     RBLN_CHECK(
         false, "Tensor copy from {} device to {} device is not supported", c10::str(src_device), c10::str(dst_device));

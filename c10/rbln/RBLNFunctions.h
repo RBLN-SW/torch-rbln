@@ -185,6 +185,18 @@ C10_RBLN_API void memcpy_h2v_async(void* rbln_dst_data, const void* cpu_src_data
 C10_RBLN_API void memcpy_v2h_async(void* cpu_dst_data, const void* rbln_src_data, size_t nbytes);
 
 /**
+ * @brief Asynchronously copies data between two device memory regions on the same device.
+ *
+ * Falls back to synchronous copy when async is not possible (e.g., when
+ * either vmem entry does not have a compatible transform).
+ *
+ * @param rbln_dst_data A pointer to the destination device memory.
+ * @param rbln_src_data A pointer to the source device memory.
+ * @param nbytes The number of bytes to copy (must be positive).
+ */
+C10_RBLN_API void memcpy_v2v_async(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes);
+
+/**
  * @brief Waits for all pending async transfers on the given device to complete.
  *
  * @param device_index The RBLN device to synchronize.

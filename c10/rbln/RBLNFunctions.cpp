@@ -352,6 +352,27 @@ void memcpy_v2h_async(void* cpu_dst_data, const void* rbln_src_data, size_t nbyt
   }
 }
 
+void memcpy_v2v_async(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes) {
+  RBLN_LOG_DEBUG(
+      "dst_rbln_data={}, src_rbln_data={}, nbytes={}", fmt::ptr(rbln_dst_data), fmt::ptr(rbln_src_data), nbytes);
+  RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
+  RBLN_CHECK(rbln_src_data != nullptr, "rbln_src_data cannot be nullptr");
+  RBLN_CHECK(rbln_dst_data != nullptr, "rbln_dst_data cannot be nullptr");
+
+  const auto src_vaddr = reinterpret_cast<uint64_t>(rbln_src_data);
+  const auto dst_vaddr = reinterpret_cast<uint64_t>(rbln_dst_data);
+  const auto size = static_cast<uint64_t>(nbytes);
+  uint64_t handle = 0;
+  RBLN_LOG_DEBUG(
+      "Calling rbln_memcpy_v2v_async: src_vaddr={:#x}, dst_vaddr={:#x}, size={}", src_vaddr, dst_vaddr, size);
+  RBLN_CHECK(!::rbln::rbln_memcpy_v2v_async(src_vaddr, dst_vaddr, size, &handle));
+  if (handle != 0) {
+    RBLN_LOG_DEBUG("Async V2V dispatched, handle={}", handle);
+  } else {
+    RBLN_LOG_DEBUG("V2V fell back to sync");
+  }
+}
+
 void synchronize(c10::DeviceIndex device_index) {
   RBLN_LOG_DEBUG("Synchronizing device {}", static_cast<int>(device_index));
   check_device_index(device_index);
