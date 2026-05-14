@@ -121,6 +121,7 @@ _ops_with_rbln_native_kernel = [
     "cat",
     "index_copy",
     "index_select",
+    "repeat_interleave",
     "stack",
 ]
 

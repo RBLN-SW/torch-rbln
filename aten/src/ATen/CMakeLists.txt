@@ -2,6 +2,7 @@ set(target torch_rbln)
 set(sources
   native/rbln/RBLNCPUFallback.cpp
   native/rbln/RBLNCopy.cpp
+  native/rbln/RBLNRepeat.cpp
   native/rbln/RBLNResize.cpp
   native/rbln/RBLNStridedV2V.cpp
   native/rbln/RBLNTensorAdvancedIndexing.cpp
@@ -14,6 +15,7 @@ set(headers
   native/rbln/RBLNCPUFallback.h
   native/rbln/RBLNCopy.h
   native/rbln/RBLNIndexUtils.h
+  native/rbln/RBLNRepeat.h
   native/rbln/RBLNResize.h
   native/rbln/RBLNStridedV2V.h
   native/rbln/RBLNStrideUtils.h

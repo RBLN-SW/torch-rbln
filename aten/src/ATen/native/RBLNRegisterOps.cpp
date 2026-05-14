@@ -2,6 +2,7 @@
 #include <ATen/core/VariableHooksInterface.h>
 #include <ATen/native/rbln/RBLNCPUFallback.h>
 #include <ATen/native/rbln/RBLNCopy.h>
+#include <ATen/native/rbln/RBLNRepeat.h>
 #include <ATen/native/rbln/RBLNResize.h>
 #include <ATen/native/rbln/RBLNTensorAdvancedIndexing.h>
 #include <ATen/native/rbln/RBLNTensorFactories.h>
@@ -141,6 +142,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   m.impl("index_select", TORCH_FN(at::native::rbln::index_select_rbln));
   m.impl("index_select.out", TORCH_FN(at::native::rbln::index_select_out_rbln));
   m.impl("index_copy.out", TORCH_FN(at::native::rbln::index_copy_out_rbln));
+  m.impl("repeat_interleave.Tensor", TORCH_FN(at::native::rbln::repeat_interleave_Tensor_rbln));
   m.impl("cat.out", TORCH_FN(at::native::rbln::cat_out_rbln));
 
   // View operations (metadata-only, no device computation)
