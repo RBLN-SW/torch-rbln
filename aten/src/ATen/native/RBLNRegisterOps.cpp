@@ -3,6 +3,7 @@
 #include <ATen/native/rbln/RBLNCat.h>
 #include <ATen/native/rbln/RBLNCPUFallback.h>
 #include <ATen/native/rbln/RBLNCopy.h>
+#include <ATen/native/rbln/RBLNIndexCopy.h>
 #include <ATen/native/rbln/RBLNIndexSelect.h>
 #include <ATen/native/rbln/RBLNResize.h>
 #include <ATen/native/rbln/RBLNTensorFactories.h>
@@ -140,6 +141,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   m.impl("set_.source_Storage_storage_offset", TORCH_FN(at::native::rbln::set_storage_rbln_));
   m.impl("index_select", TORCH_FN(at::native::rbln::index_select_rbln));
   m.impl("index_select.out", TORCH_FN(at::native::rbln::index_select_out_rbln));
+  m.impl("index_copy.out", TORCH_FN(at::native::rbln::index_copy_out_rbln));
   m.impl("cat.out", TORCH_FN(at::native::rbln::cat_out_rbln));
 
   // View operations (metadata-only, no device computation)
@@ -196,7 +198,6 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   m.impl("index.Tensor_out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("_index_put_impl_", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("index_add.out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
-  m.impl("index_copy.out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("index_fill_.int_Scalar", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("gather.out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("scatter.src_out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());

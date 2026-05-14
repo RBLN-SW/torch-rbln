@@ -3,6 +3,7 @@ set(sources
   native/rbln/RBLNCat.cpp
   native/rbln/RBLNCPUFallback.cpp
   native/rbln/RBLNCopy.cpp
+  native/rbln/RBLNIndexCopy.cpp
   native/rbln/RBLNIndexSelect.cpp
   native/rbln/RBLNResize.cpp
   native/rbln/RBLNStridedV2V.cpp
@@ -14,6 +15,7 @@ set(headers
   native/rbln/RBLNCat.h
   native/rbln/RBLNCPUFallback.h
   native/rbln/RBLNCopy.h
+  native/rbln/RBLNIndexCopy.h
   native/rbln/RBLNIndexSelect.h
   native/rbln/RBLNResize.h
   native/rbln/RBLNStridedV2V.h
