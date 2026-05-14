@@ -1,6 +1,7 @@
 #include <ATen/native/rbln/RBLNStridedV2V.h>
 
 #include <ATen/native/rbln/RBLNStrideUtils.h>
+#include <ATen/native/rbln/RBLNTensorUtils.h>
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/util/Exception.h>
 
@@ -8,25 +9,6 @@
 #include <vector>
 
 namespace at::native::rbln {
-
-namespace {
-
-// Identity check: same storage, same offset, same strides — copy is a no-op.
-// `dst` and `src` must already have matching sizes (checked by caller).
-bool is_identity_copy(const at::Tensor& dst, const at::Tensor& src) {
-  if (!dst.has_storage() || !src.has_storage()) {
-    return false;
-  }
-  if (dst.storage().data() != src.storage().data()) {
-    return false;
-  }
-  if (dst.storage_offset() != src.storage_offset()) {
-    return false;
-  }
-  return dst.strides() == src.strides();
-}
-
-} // namespace
 
 void strided_v2v_copy(const at::Tensor& dst, const at::Tensor& src, c10::rbln::V2VBatch& batch) {
   RBLN_SCOPE_GUARD();
@@ -54,7 +36,8 @@ void strided_v2v_copy(const at::Tensor& dst, const at::Tensor& src, c10::rbln::V
   RBLN_CHECK(dst.numel() > 0, "strided_v2v_copy: numel must be > 0 (caller should short-circuit)");
 
   // Self-copy on the same view is a no-op (and would issue an aliased v2v).
-  if (is_identity_copy(dst, src)) {
+  // Sizes already validated above, so is_same_view fully characterises identity.
+  if (is_same_view(dst, src)) {
     RBLN_LOG_DEBUG("strided_v2v_copy: identity copy, no-op");
     return;
   }

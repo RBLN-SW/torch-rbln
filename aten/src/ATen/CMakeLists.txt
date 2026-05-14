@@ -17,6 +17,7 @@ set(headers
   native/rbln/RBLNCopy.h
   native/rbln/RBLNIndexCopy.h
   native/rbln/RBLNIndexSelect.h
+  native/rbln/RBLNIndexUtils.h
   native/rbln/RBLNResize.h
   native/rbln/RBLNStridedV2V.h
   native/rbln/RBLNStrideUtils.h

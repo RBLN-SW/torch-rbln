@@ -2,92 +2,17 @@
 
 #include <ATen/core/Tensor.h>
 #include <ATen/native/Resize.h>
+#include <ATen/native/rbln/RBLNIndexUtils.h>
 #include <ATen/native/rbln/RBLNStridedV2V.h>
+#include <ATen/native/rbln/RBLNTensorUtils.h>
 #include <ATen/ops/empty.h>
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNV2VBatch.h>
 
 #include <cstdint>
-#include <cstring>
 #include <vector>
 
 namespace at::native::rbln {
-
-namespace {
-
-// Read `index` into a host-side int64 buffer. Validates dtype is integral.
-// Duplicated from RBLNIndexSelect.cpp — both ops need the same host-side
-// index handling. Worth extracting if a third consumer appears.
-std::vector<int64_t> read_index_to_host(const at::Tensor& index) {
-  RBLN_CHECK(index.dim() <= 1, "index_copy: index must be 0- or 1-D, got {}-D", index.dim());
-  RBLN_CHECK(
-      index.scalar_type() == at::kLong || index.scalar_type() == at::kInt,
-      "index_copy: index dtype must be int32 or int64, got {}",
-      c10::str(index.scalar_type()));
-
-  at::Tensor host = index;
-  if (!host.device().is_cpu())
-    host = host.cpu();
-  if (!host.is_contiguous())
-    host = host.contiguous();
-
-  const int64_t n = host.numel();
-  std::vector<int64_t> values(n);
-  if (host.scalar_type() == at::kLong) {
-    std::memcpy(values.data(), host.data_ptr<int64_t>(), n * sizeof(int64_t));
-  } else {
-    const auto* src = host.data_ptr<int32_t>();
-    for (int64_t i = 0; i < n; ++i)
-      values[i] = static_cast<int64_t>(src[i]);
-  }
-  return values;
-}
-
-// Coalesce a sequence of integer indices into (axis_start, source_start, length)
-// runs of consecutive values. axis_start = position along `dim` in the
-// indexed-into tensor (out / self); source_start = position in the indexed-from
-// tensor (source); length = number of consecutive +1 increments starting there.
-// One v2v call per run instead of per element.
-struct IndexRun {
-  int64_t axis_start;
-  int64_t source_start;
-  int64_t length;
-};
-
-std::vector<IndexRun> coalesce_runs(const std::vector<int64_t>& idx) {
-  std::vector<IndexRun> runs;
-  if (idx.empty())
-    return runs;
-  IndexRun cur{idx[0], 0, 1};
-  for (int64_t i = 1; i < static_cast<int64_t>(idx.size()); ++i) {
-    if (idx[i] == cur.axis_start + cur.length) {
-      cur.length += 1;
-    } else {
-      runs.push_back(cur);
-      cur = IndexRun{idx[i], i, 1};
-    }
-  }
-  runs.push_back(cur);
-  return runs;
-}
-
-// `out` and `self` reference the same logical view: same storage, offset,
-// strides. Used to detect the in-place `index_copy_` dispatch (out == self)
-// so we can skip the redundant self → out initialisation.
-bool is_same_view(const at::Tensor& a, const at::Tensor& b) {
-  if (!a.has_storage() || !b.has_storage()) {
-    return false;
-  }
-  if (a.storage().data() != b.storage().data()) {
-    return false;
-  }
-  if (a.storage_offset() != b.storage_offset()) {
-    return false;
-  }
-  return a.strides() == b.strides();
-}
-
-} // namespace
 
 at::Tensor& index_copy_out_rbln(
     const at::Tensor& self,
@@ -123,7 +48,7 @@ at::Tensor& index_copy_out_rbln(
       c10::str(self.scalar_type()));
 
   const int64_t rank = self.dim();
-  const auto idx_host = read_index_to_host(index);
+  const auto idx_host = read_index_to_host(index, "index_copy");
   const int64_t n_idx = static_cast<int64_t>(idx_host.size());
 
   // 0-D self: dim must be 0 or -1; index must contain exactly one value (=0);
@@ -198,8 +123,10 @@ at::Tensor& index_copy_out_rbln(
     strided_v2v_copy(out, self);
   }
 
-  // Phase 2: overwrite indexed positions. One V2VBatch spans all runs so a
-  // future batched v2v API can fuse them into a single backend call.
+  // Phase 2: overwrite indexed positions. `run.value` is the axis position the
+  // run starts at in `out`/`self`; `run.pos` is the corresponding start in
+  // `source`. One V2VBatch spans all runs so a future batched v2v API can fuse
+  // them into a single backend call.
   c10::rbln::V2VBatch batch;
   const auto runs = coalesce_runs(idx_host);
   RBLN_LOG_DEBUG(
@@ -210,8 +137,8 @@ at::Tensor& index_copy_out_rbln(
       c10::str(self.sizes()),
       c10::str(source.strides()));
   for (const auto& run : runs) {
-    auto src_view = source.narrow(axis, run.source_start, run.length);
-    auto dst_view = out.narrow(axis, run.axis_start, run.length);
+    auto src_view = source.narrow(axis, run.pos, run.length);
+    auto dst_view = out.narrow(axis, run.value, run.length);
     strided_v2v_copy(dst_view, src_view, batch);
   }
   // batch.submit() runs on destructor.
