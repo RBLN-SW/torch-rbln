@@ -3,18 +3,28 @@
 #include <ATen/MemoryOverlap.h>
 #include <ATen/core/Tensor.h>
 #include <ATen/native/Resize.h>
-#include <ATen/native/rbln/RBLNStrideUtils.h>
+#include <ATen/native/rbln/RBLNStridedV2V.h>
 #include <ATen/ops/empty.h>
 #include <c10/core/ScalarType.h>
-#include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
+#include <c10/rbln/RBLNV2VBatch.h>
 #include <c10/util/Exception.h>
 
-#include <algorithm>
 #include <cstdint>
 #include <vector>
 
 namespace at::native::rbln {
+
+namespace {
+
+// PyTorch's `at::native::cat` skips 1-D empty tensors (shape == (0,)) from
+// shape/rank validation entirely — they're a legacy "placeholder" pattern
+// that callers sprinkle in to seed an empty accumulator.
+bool is_legacy_empty_1d(const at::Tensor& t) {
+  return t.dim() == 1 && t.numel() == 0;
+}
+
+} // namespace
 
 at::Tensor& cat_out_rbln(const at::ITensorListRef& tensors, int64_t dim, at::Tensor& out) {
   RBLN_SCOPE_GUARD();
@@ -23,17 +33,11 @@ at::Tensor& cat_out_rbln(const at::ITensorListRef& tensors, int64_t dim, at::Ten
   auto materialised = tensors.materialize();
   RBLN_CHECK(materialised.size() > 0, "cat: tensors list must be non-empty");
 
-  // Snapshot all inputs once (the IListRef is single-pass-ish).
   std::vector<at::Tensor> raw_inputs;
   raw_inputs.reserve(materialised.size());
   for (const at::Tensor& t : materialised) {
     raw_inputs.push_back(t);
   }
-
-  // PyTorch's `at::native::cat` skips 1-D empty tensors (shape == (0,)) from
-  // shape/rank validation entirely — they're a legacy "placeholder" pattern
-  // that callers sprinkle in to seed an empty accumulator. Match that.
-  auto is_legacy_empty_1d = [](const at::Tensor& t) { return t.dim() == 1 && t.numel() == 0; };
 
   // Pick the first non-legacy-empty input as the canonical reference for rank
   // / non-axis sizes / device. Result dtype still considers ALL inputs (including
@@ -135,8 +139,10 @@ at::Tensor& cat_out_rbln(const at::ITensorListRef& tensors, int64_t dim, at::Ten
   }
 
   // If the caller's `out` is non-contiguous, stage through a contig buffer and
-  // copy_ at the end. The main v2v kernel below assumes canonical row-major
-  // strides on `out`.
+  // copy_ at the end. We don't strictly need this — the engine handles
+  // non-contig dst views — but staging keeps the per-input slicing math (which
+  // assumes canonical row-major `out`) trivially correct, and the final v2v
+  // back is one strided call.
   if (!out.is_contiguous()) {
     auto staging = at::empty(out_shape, out.options().memory_format(c10::MemoryFormat::Contiguous));
     cat_out_rbln(tensors, dim, staging);
@@ -151,101 +157,25 @@ at::Tensor& cat_out_rbln(const at::ITensorListRef& tensors, int64_t dim, at::Ten
     at::assert_no_overlap(out, t);
   }
 
-  const int64_t elm_size = static_cast<int64_t>(out.element_size());
-
-  // Output byte-strides under canonical row-major layout.
-  std::vector<int64_t> out_byte_stride(rank);
-  {
-    int64_t s = elm_size;
-    for (int64_t i = rank - 1; i >= 0; --i) {
-      out_byte_stride[i] = s;
-      s *= out_shape[i];
-    }
-  }
-
-  uint8_t* out_base = static_cast<uint8_t*>(out.data_ptr());
-
-  int64_t axis_offset = 0; // running offset along the cat axis (in elements)
-
+  // Per-input slab copy: `out.narrow(axis, axis_offset, n)` carves out the
+  // destination view for one input; the engine handles whatever stride
+  // pattern the input has. All sub-copies share a single V2VBatch so any
+  // future batched v2v API can fuse them into one backend call.
+  c10::rbln::V2VBatch batch;
+  int64_t axis_offset = 0;
   for (const at::Tensor& t : inputs) {
-    // Empty inputs contribute no bytes but still advance axis_offset by their
-    // axis extent (which is 0 when the cat dim is the empty dim; otherwise the
-    // tensor would have numel>0). Skip before any v2v emission so we never call
-    // memcpy_v2v with nbytes==0 (which the runtime rejects).
+    const int64_t extent = t.size(axis);
     if (t.numel() == 0) {
-      axis_offset += t.size(axis);
+      // Empty inputs contribute no bytes but still advance the axis offset by
+      // their (possibly zero) axis extent.
+      axis_offset += extent;
       continue;
     }
-
-    const auto in_sizes = t.sizes();
-    const auto in_strides = t.strides();
-
-    // Find the input's innermost contiguous suffix. We can absorb the cat
-    // axis itself into the v2v block: the output's byte stride at `axis` is
-    // exactly the inner-block size (output is canonical contiguous), so the
-    // input slab [axis_offset, axis_offset + input.shape[axis]) along the
-    // output's axis dim is contiguous in output too. Concretely:
-    //   outer_end = max(contig_start_of_input, axis)
-    //   block dims = [outer_end, rank)        (block_elems incl. axis if it's contig)
-    //   outer dims = [0, outer_end)           (axis IS in outer iter iff axis < outer_end,
-    //                                          which only happens when contig_start > axis)
-    const int64_t in_contig_start = contig_suffix_start(in_sizes, in_strides);
-    const int64_t outer_end = std::max<int64_t>(in_contig_start, axis);
-
-    // Block size = product of inner (post-outer_end) dims.
-    int64_t block_elems = 1;
-    for (int64_t i = outer_end; i < rank; ++i)
-      block_elems *= in_sizes[i];
-    const int64_t block_bytes = block_elems * elm_size;
-
-    std::vector<int64_t> outer_sizes(in_sizes.begin(), in_sizes.begin() + outer_end);
-    std::vector<int64_t> idx(outer_end, 0);
-
-    const uint8_t* in_base = static_cast<const uint8_t*>(t.data_ptr());
-
-    int64_t outer_count = 1;
-    for (int64_t d : outer_sizes)
-      outer_count *= d;
-
-    RBLN_LOG_DEBUG(
-        "cat_out_rbln: input shape={} strides={} contig_start={} outer_end={} block_bytes={} outer_count={}",
-        c10::str(in_sizes),
-        c10::str(in_strides),
-        in_contig_start,
-        outer_end,
-        block_bytes,
-        outer_count);
-
-    for (int64_t o = 0; o < outer_count; ++o) {
-      // Source offset (in elements) from input strides.
-      int64_t src_off_elems = 0;
-      for (int64_t d = 0; d < outer_end; ++d)
-        src_off_elems += idx[d] * in_strides[d];
-      const uint8_t* src = in_base + src_off_elems * elm_size;
-
-      // Destination offset (in bytes) — output is contiguous, so we use its
-      // canonical byte strides. If axis is part of the outer iteration (true
-      // only when input contig_start > axis), its coord is shifted by the
-      // running axis_offset; otherwise axis is absorbed into the v2v block
-      // and we add axis_offset * out_byte_stride[axis] once.
-      int64_t dst_off_bytes = 0;
-      for (int64_t d = 0; d < outer_end; ++d) {
-        const int64_t coord = (d == axis) ? (axis_offset + idx[d]) : idx[d];
-        dst_off_bytes += coord * out_byte_stride[d];
-      }
-      if (axis >= outer_end) {
-        // axis was absorbed into the block — its contribution is the static offset.
-        dst_off_bytes += axis_offset * out_byte_stride[axis];
-      }
-      uint8_t* dst = out_base + dst_off_bytes;
-
-      c10::rbln::memcpy_v2v(dst, src, static_cast<size_t>(block_bytes));
-
-      advance_multi_index(idx, outer_sizes);
-    }
-
-    axis_offset += in_sizes[axis];
+    auto dst_view = out.narrow(axis, axis_offset, extent);
+    strided_v2v_copy(dst_view, t, batch);
+    axis_offset += extent;
   }
+  // batch.submit() runs on destructor.
 
   return out;
 }

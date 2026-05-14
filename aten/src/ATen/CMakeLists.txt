@@ -5,6 +5,7 @@ set(sources
   native/rbln/RBLNCopy.cpp
   native/rbln/RBLNIndexSelect.cpp
   native/rbln/RBLNResize.cpp
+  native/rbln/RBLNStridedV2V.cpp
   native/rbln/RBLNTensorFactories.cpp
   native/rbln/RBLNTensorUtils.cpp
   native/RBLNRegisterOps.cpp
@@ -15,6 +16,7 @@ set(headers
   native/rbln/RBLNCopy.h
   native/rbln/RBLNIndexSelect.h
   native/rbln/RBLNResize.h
+  native/rbln/RBLNStridedV2V.h
   native/rbln/RBLNStrideUtils.h
   native/rbln/RBLNTensorFactories.h
   native/rbln/RBLNTensorUtils.h

@@ -2,12 +2,11 @@
 
 #include <ATen/core/Tensor.h>
 #include <ATen/native/Resize.h>
-#include <ATen/native/rbln/RBLNStrideUtils.h>
+#include <ATen/native/rbln/RBLNStridedV2V.h>
 #include <ATen/ops/empty.h>
-#include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
+#include <c10/rbln/RBLNV2VBatch.h>
 
-#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -24,8 +23,6 @@ std::vector<int64_t> read_index_to_host(const at::Tensor& index) {
       "index_select: index dtype must be int32 or int64, got {}",
       c10::str(index.scalar_type()));
 
-  // Bring to CPU as a contiguous int64 vector. We go via .to(cpu).contiguous()
-  // — for already-CPU contig tensors this is a no-op alias.
   at::Tensor host = index;
   if (!host.device().is_cpu())
     host = host.cpu();
@@ -44,8 +41,9 @@ std::vector<int64_t> read_index_to_host(const at::Tensor& index) {
   return values;
 }
 
-// Group consecutive integer runs (e.g. [3,4,5, 9, 12,13]) into (start, length)
-// pairs so we can emit a single v2v per run instead of per element.
+// Group consecutive integer runs (e.g. [3,4,5, 9, 12,13]) into (src_start,
+// out_start, length) so we can emit one strided_v2v_copy per run instead of
+// per element.
 struct IndexRun {
   int64_t src_start;
   int64_t out_start;
@@ -90,15 +88,14 @@ at::Tensor& index_select_out_rbln(const at::Tensor& self, int64_t dim, const at:
       c10::str(self.scalar_type()));
 
   const int64_t rank = self.dim();
-  // Pull the index values onto the host once (also validates dtype / shape).
   const auto idx_host = read_index_to_host(index);
   const int64_t n_out = static_cast<int64_t>(idx_host.size());
 
   // Determine the output shape so we can resize `out` uniformly.
   std::vector<int64_t> out_shape;
   if (rank == 0) {
-    // 0-D self: PyTorch's index_select returns a 0-D output (rank mirrors self).
-    // dim must be 0 or -1; index must contain exactly one value, equal to 0.
+    // 0-D self: index_select returns a 0-D output. dim must be 0 or -1; index
+    // must contain exactly one value, equal to 0.
     RBLN_CHECK(dim == 0 || dim == -1, "index_select: dim {} out of range for 0-D self", dim);
     RBLN_CHECK(n_out == 1, "index_select: index to scalar can have only 1 value, got {}", n_out);
     RBLN_CHECK(idx_host[0] == 0, "index_select: index value {} out of range [0, 1) for 0-D self", idx_host[0]);
@@ -109,14 +106,9 @@ at::Tensor& index_select_out_rbln(const at::Tensor& self, int64_t dim, const at:
     out_shape[a] = n_out;
   }
 
-  // Resize via the upstream helper so a wrong-shape non-empty `out` triggers
-  // the canonical UserWarning ("An output with one or more elements was
-  // resized...").
   at::native::resize_output(out, out_shape);
 
-  // If the caller's `out` is non-contiguous, stage through a contig buffer and
-  // copy_ at the end. The main v2v kernel below assumes canonical row-major
-  // strides on `out`.
+  // Non-contig out: stage through a contig buffer and copy_ back at the end.
   if (!out.is_contiguous()) {
     auto staging = at::empty(out_shape, out.options().memory_format(c10::MemoryFormat::Contiguous));
     index_select_out_rbln(self, dim, index, staging);
@@ -124,10 +116,9 @@ at::Tensor& index_select_out_rbln(const at::Tensor& self, int64_t dim, const at:
     return out;
   }
 
-  // 0-D fast path: just v2v the single element.
+  // 0-D fast path: single element v2v via the engine.
   if (rank == 0) {
-    const size_t elm_size = static_cast<size_t>(self.element_size());
-    c10::rbln::memcpy_v2v(out.data_ptr(), self.data_ptr(), elm_size);
+    strided_v2v_copy(out, self);
     return out;
   }
 
@@ -137,114 +128,33 @@ at::Tensor& index_select_out_rbln(const at::Tensor& self, int64_t dim, const at:
     return out;
   }
 
+  // Bounds-check the index once on host.
   const int64_t axis_extent = self.size(axis);
   for (int64_t v : idx_host) {
     RBLN_CHECK(v >= 0 && v < axis_extent, "index_select: index value {} out of range [0, {})", v, axis_extent);
   }
 
-  const int64_t elm_size = static_cast<int64_t>(self.element_size());
-
-  // Cap the outer iteration at axis + 1 so the index axis is itself an outer
-  // dim (we drive it explicitly via the index run loop, not row-major).
-  const auto self_sizes = self.sizes();
-  const auto self_strides = self.strides();
-  const int64_t self_contig_start = contig_suffix_start(self_sizes, self_strides);
-  const int64_t outer_end = std::max<int64_t>(self_contig_start, axis + 1);
-
-  // Inner block size = product of dims [outer_end, rank).
-  int64_t inner_block_elems = 1;
-  for (int64_t i = outer_end; i < rank; ++i)
-    inner_block_elems *= self_sizes[i];
-  const int64_t inner_block_bytes = inner_block_elems * elm_size;
-
-  // Output byte strides (canonical row-major).
-  std::vector<int64_t> out_byte_stride(rank);
-  {
-    int64_t s = elm_size;
-    for (int64_t i = rank - 1; i >= 0; --i) {
-      out_byte_stride[i] = s;
-      s *= out_shape[i];
-    }
-  }
-
-  // Outer iteration covers dims [0, outer_end) split into pre-axis and
-  // between-axis ranges. Dim `axis` itself is driven by the index run loop,
-  // not row-major iteration, so it is excluded from both ranges.
-  std::vector<int64_t> pre_axis_sizes(self_sizes.begin(), self_sizes.begin() + axis);
-  std::vector<int64_t> btw_axis_sizes(self_sizes.begin() + axis + 1, self_sizes.begin() + outer_end);
-
-  int64_t pre_count = 1;
-  for (int64_t d : pre_axis_sizes)
-    pre_count *= d;
-  int64_t btw_count = 1;
-  for (int64_t d : btw_axis_sizes)
-    btw_count *= d;
-
-  // Run coalescing (a length-L run = L consecutive indices [k, k+1, ..., k+L-1]
-  // emitted as one v2v of L*inner_block_bytes) is only valid when consecutive
-  // axis positions are adjacent in source memory, i.e. self_strides[axis] ==
-  // inner_block_elems. For non-contig self where the axis lives in the outer
-  // iteration (outer_end > axis + 1), stride[axis] is larger and consecutive
-  // index values map to memory positions separated by padding bytes — coalescing
-  // would read those padding bytes into the output. Detect this and emit one
-  // v2v per axis-position in such runs.
-  const bool axis_runs_are_contig_in_memory = (self_strides[axis] == inner_block_elems);
+  // Per-run slab copy: src.narrow(axis, run.src_start, run.length) is a view
+  // with the same strides as self (so the engine sees the correct stride
+  // pattern for the chosen axis), and out.narrow(axis, run.out_start, run.length)
+  // is a slice of the contig out. The engine handles every contig combination
+  // — when self is contig along axis, runs collapse into one v2v each; when
+  // not, the outer loop iterates axis positions inside the engine.
+  c10::rbln::V2VBatch batch;
   const auto runs = coalesce_runs(idx_host);
-
-  const uint8_t* self_base = static_cast<const uint8_t*>(self.data_ptr());
-  uint8_t* out_base = static_cast<uint8_t*>(out.data_ptr());
-
   RBLN_LOG_DEBUG(
-      "index_select_out_rbln: self shape={} strides={} axis={} outer_end={} inner_block_bytes={} n_out={} runs={} coalesce={}",
-      c10::str(self_sizes),
-      c10::str(self_strides),
+      "index_select_out_rbln: axis={} n_out={} runs={} self_sizes={} self_strides={}",
       axis,
-      outer_end,
-      inner_block_bytes,
       n_out,
       runs.size(),
-      axis_runs_are_contig_in_memory);
-
-  std::vector<int64_t> pre_idx(pre_axis_sizes.size(), 0);
-  std::vector<int64_t> btw_idx(btw_axis_sizes.size(), 0);
-  for (int64_t p = 0; p < pre_count; ++p) {
-    std::fill(btw_idx.begin(), btw_idx.end(), 0);
-    for (int64_t b = 0; b < btw_count; ++b) {
-      // Compute the part of src/dst offsets that don't depend on the run.
-      int64_t src_off_elems_base = 0;
-      int64_t dst_off_bytes_base = 0;
-      for (int64_t d = 0; d < axis; ++d) {
-        src_off_elems_base += pre_idx[d] * self_strides[d];
-        dst_off_bytes_base += pre_idx[d] * out_byte_stride[d];
-      }
-      for (int64_t d = 0; d < static_cast<int64_t>(btw_axis_sizes.size()); ++d) {
-        const int64_t out_d = axis + 1 + d;
-        src_off_elems_base += btw_idx[d] * self_strides[out_d];
-        dst_off_bytes_base += btw_idx[d] * out_byte_stride[out_d];
-      }
-
-      for (const auto& run : runs) {
-        if (axis_runs_are_contig_in_memory) {
-          // Fast path: one v2v for the whole run.
-          const int64_t src_off_elems = src_off_elems_base + run.src_start * self_strides[axis];
-          const int64_t dst_off_bytes = dst_off_bytes_base + run.out_start * out_byte_stride[axis];
-          const size_t bytes = static_cast<size_t>(run.length * inner_block_bytes);
-          c10::rbln::memcpy_v2v(out_base + dst_off_bytes, self_base + src_off_elems * elm_size, bytes);
-        } else {
-          // Slow path: one v2v per axis position (self is non-contig at axis).
-          for (int64_t k = 0; k < run.length; ++k) {
-            const int64_t src_off_elems = src_off_elems_base + (run.src_start + k) * self_strides[axis];
-            const int64_t dst_off_bytes = dst_off_bytes_base + (run.out_start + k) * out_byte_stride[axis];
-            c10::rbln::memcpy_v2v(
-                out_base + dst_off_bytes, self_base + src_off_elems * elm_size, static_cast<size_t>(inner_block_bytes));
-          }
-        }
-      }
-
-      advance_multi_index(btw_idx, btw_axis_sizes);
-    }
-    advance_multi_index(pre_idx, pre_axis_sizes);
+      c10::str(self.sizes()),
+      c10::str(self.strides()));
+  for (const auto& run : runs) {
+    auto src_view = self.narrow(axis, run.src_start, run.length);
+    auto dst_view = out.narrow(axis, run.out_start, run.length);
+    strided_v2v_copy(dst_view, src_view, batch);
   }
+  // batch.submit() runs on destructor.
 
   return out;
 }
