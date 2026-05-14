@@ -22,57 +22,18 @@ bitwise; dtype-converted copies use `assert_close` with float tolerance.
 
 from __future__ import annotations
 
-import os
-
-
-os.environ.setdefault("TORCH_RBLN_EAGER_MALLOC", "1")
-os.environ.setdefault("TORCH_RBLN_DEPLOY", "ON")
-
 import pytest
 import torch
 
-import torch_rbln  # noqa: F401
-
-
-DEVICE = torch.device("rbln:0")
-CPU = torch.device("cpu")
-
-# Dtypes covered by the engine path (no cast). bfloat16 / float16 / float32
-# stress different element sizes; int dtypes confirm bit-exact correctness.
-ENGINE_DTYPES = [torch.float16, torch.bfloat16, torch.float32, torch.int32, torch.int64]
-
-
-def _to_dev(x: torch.Tensor) -> torch.Tensor:
-    """Materialise a CPU tensor on rbln:0 with the same layout/dtype."""
-    out = torch.empty_like(x, device=DEVICE)
-    out.copy_(x)
-    return out
-
-
-def _eq(actual_dev: torch.Tensor, expected_cpu: torch.Tensor):
-    """Bitwise equality after pulling the device tensor back to CPU."""
-    actual_cpu = actual_dev.cpu()
-    assert actual_cpu.shape == expected_cpu.shape, (
-        f"shape mismatch: device={tuple(actual_cpu.shape)} expected={tuple(expected_cpu.shape)}"
-    )
-    assert actual_cpu.dtype == expected_cpu.dtype, (
-        f"dtype mismatch: device={actual_cpu.dtype} expected={expected_cpu.dtype}"
-    )
-    assert torch.equal(actual_cpu, expected_cpu), f"bitwise mismatch:\n  device={actual_cpu}\n  expected={expected_cpu}"
-
-
-def _close(actual_dev: torch.Tensor, expected_cpu: torch.Tensor, atol=1e-2, rtol=1e-2):
-    actual_cpu = actual_dev.cpu()
-    assert actual_cpu.shape == expected_cpu.shape
-    torch.testing.assert_close(actual_cpu, expected_cpu, atol=atol, rtol=rtol)
-
-
-def _arange_like(shape, dtype):
-    """Deterministic ramp suitable for bitwise comparison across dtypes."""
-    n = 1
-    for s in shape:
-        n *= s
-    return torch.arange(n, dtype=dtype).reshape(shape)
+from test.utils_v2v import (
+    arange as _arange_like,
+    close as _close,
+    CPU,
+    DEVICE,
+    ENGINE_DTYPES,
+    eq as _eq,
+    to_dev as _to_dev,
+)
 
 
 # ---------------------------------------------------------------------------

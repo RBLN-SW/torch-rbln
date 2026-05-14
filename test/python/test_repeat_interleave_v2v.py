@@ -22,45 +22,10 @@ Coverage:
 
 from __future__ import annotations
 
-import os
-
-
-os.environ.setdefault("TORCH_RBLN_EAGER_MALLOC", "1")
-os.environ.setdefault("TORCH_RBLN_DEPLOY", "ON")
-
 import pytest
 import torch
 
-import torch_rbln  # noqa: F401
-
-
-DEVICE = torch.device("rbln:0")
-
-DTYPES = [torch.float16, torch.bfloat16, torch.float32, torch.int32, torch.int64]
-
-
-def _to_dev(x: torch.Tensor) -> torch.Tensor:
-    out = torch.empty_like(x, device=DEVICE)
-    out.copy_(x)
-    return out
-
-
-def _eq(actual_dev: torch.Tensor, expected_cpu: torch.Tensor):
-    actual_cpu = actual_dev.cpu()
-    assert actual_cpu.shape == expected_cpu.shape, (
-        f"shape mismatch: device={tuple(actual_cpu.shape)} expected={tuple(expected_cpu.shape)}"
-    )
-    assert actual_cpu.dtype == expected_cpu.dtype, (
-        f"dtype mismatch: device={actual_cpu.dtype} expected={expected_cpu.dtype}"
-    )
-    assert torch.equal(actual_cpu, expected_cpu), f"bitwise mismatch:\n  device={actual_cpu}\n  expected={expected_cpu}"
-
-
-def _arange(shape, dtype):
-    n = 1
-    for s in shape:
-        n *= s
-    return torch.arange(n, dtype=dtype).reshape(shape) if shape else torch.tensor(0, dtype=dtype)
+from test.utils_v2v import arange as _arange, ENGINE_DTYPES as DTYPES, eq as _eq, to_dev as _to_dev
 
 
 # ---------------------------------------------------------------------------
@@ -126,13 +91,17 @@ def test_tensor_output_size_matches():
 
 def test_tensor_output_size_mismatch_rejected():
     r_dev = _to_dev(torch.tensor([3, 1, 2], dtype=torch.int64))
-    with pytest.raises(Exception, match="output_size"):
+    # Upstream meta function may also reject this with a different wording,
+    # so match on either source's error string.
+    with pytest.raises(RuntimeError, match="output_size|allocated size"):
         torch.repeat_interleave(r_dev, output_size=99)
 
 
 def test_tensor_negative_repeat_rejected():
     r_dev = _to_dev(torch.tensor([2, -1, 3], dtype=torch.int64))
-    with pytest.raises(Exception, match="non-negative"):
+    # Upstream meta function intercepts before our kernel ("repeats can not be
+    # negative"); ours says "non-negative". Either wording is fine here.
+    with pytest.raises(RuntimeError, match="non-negative|can not be negative"):
         torch.repeat_interleave(r_dev)
 
 
