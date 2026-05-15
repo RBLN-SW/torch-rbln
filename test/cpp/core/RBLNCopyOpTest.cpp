@@ -129,7 +129,7 @@ TEST_F(RBLNCopyOpTest, SyncAfterAsync_Consistent) {
 TEST_F(RBLNCopyOpTest, NonBlocking_NonContiguous_FallsBackToSync) {
   // Non-contiguous tensors should fall back to sync copy
   auto src = at::randn({4, 64}, rbln_options);
-  auto sliced = src.slice(1, 0, 32);  // non-contiguous
+  auto sliced = src.slice(1, 0, 32); // non-contiguous
 
   // This should work (falls back to sync internally)
   auto dst = sliced.to(at::kCPU, /*non_blocking=*/true);

@@ -333,11 +333,7 @@ void memcpy_h2v_async(void* rbln_dst_data, const void* cpu_src_data, size_t nbyt
   RBLN_LOG_DEBUG(
       "Calling rbln_memcpy_h2v_async: src_host_ptr={:#x}, dst_vaddr={:#x}, size={}", src_host_ptr, dst_vaddr, size);
   RBLN_CHECK(!::rbln::rbln_memcpy_h2v_async(src_host_ptr, dst_vaddr, size, &handle));
-  if (handle != 0) {
-    RBLN_LOG_DEBUG("Async H2V dispatched, handle={}", handle);
-  } else {
-    RBLN_LOG_DEBUG("H2V fell back to sync");
-  }
+  RBLN_LOG_DEBUG("H2V async dispatched (handle={}, 0=sync fallback)", handle);
 }
 
 void memcpy_v2h_async(void* cpu_dst_data, const void* rbln_src_data, size_t nbytes) {
@@ -354,11 +350,7 @@ void memcpy_v2h_async(void* cpu_dst_data, const void* rbln_src_data, size_t nbyt
   RBLN_LOG_DEBUG(
       "Calling rbln_memcpy_v2h_async: src_vaddr={:#x}, dst_host_ptr={:#x}, size={}", src_vaddr, dst_host_ptr, size);
   RBLN_CHECK(!::rbln::rbln_memcpy_v2h_async(src_vaddr, dst_host_ptr, size, &handle));
-  if (handle != 0) {
-    RBLN_LOG_DEBUG("Async V2H dispatched, handle={}", handle);
-  } else {
-    RBLN_LOG_DEBUG("V2H fell back to sync");
-  }
+  RBLN_LOG_DEBUG("V2H async dispatched (handle={}, 0=sync fallback)", handle);
 }
 
 void memcpy_v2v_async(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes) {
@@ -375,17 +367,14 @@ void memcpy_v2v_async(void* rbln_dst_data, const void* rbln_src_data, size_t nby
   RBLN_LOG_DEBUG(
       "Calling rbln_memcpy_v2v_async: src_vaddr={:#x}, dst_vaddr={:#x}, size={}", src_vaddr, dst_vaddr, size);
   RBLN_CHECK(!::rbln::rbln_memcpy_v2v_async(src_vaddr, dst_vaddr, size, &handle));
-  if (handle != 0) {
-    RBLN_LOG_DEBUG("Async V2V dispatched, handle={}", handle);
-  } else {
-    RBLN_LOG_DEBUG("V2V fell back to sync");
-  }
+  RBLN_LOG_DEBUG("V2V async dispatched (handle={}, 0=sync fallback)", handle);
 }
 
 void synchronize(c10::DeviceIndex device_index) {
   RBLN_LOG_DEBUG("Synchronizing device {}", static_cast<int>(device_index));
   check_device_index(device_index);
-  const auto torch_device_id = static_cast<uint32_t>(device_index);
+  const auto torch_device_id =
+      static_cast<uint32_t>(static_cast<unsigned char>(device_index));
   RBLN_CHECK(!::rbln::rbln_device_synchronize(torch_device_id));
 }
 
