@@ -1,28 +1,23 @@
-"""Shared helpers for v2v-kernel test suites under test/python/test_*_v2v.py.
+"""Shared helpers for v2v-kernel test suites under test/rbln/test_*_v2v.py.
 
-Each test file under that directory used to redefine the same four or five
-helpers (`_to_dev`, `_eq`, `_close`, `_arange`, the `DEVICE` constant, the
-env-var setup) — collected here once so the test files are short and
-diff-friendly.
+Holds the per-op tests' shared constants (``DEVICE``, ``ENGINE_DTYPES``) and
+assertion helpers (``to_dev``, ``arange``, ``eq``, ``close``) — collected
+here once so each test file stays short and diff-friendly.
 
-Import as:
+The env-vars these tests need (``TORCH_RBLN_DEPLOY``, optionally
+``TORCH_RBLN_EAGER_MALLOC``) are applied per-test through the
+``enable_deploy_mode`` / ``enable_eager_malloc`` fixtures defined in
+``test/conftest.py``. Apply them at the class level::
 
-    from test.utils_v2v import DEVICE, ENGINE_DTYPES, arange, close, eq, to_dev
+    @pytest.mark.usefixtures("enable_deploy_mode")
+    class TestFooV2V(TestCase):
+        ...
 
-Importing this module also handles env-var defaults for stand-alone runs
-(`python test_foo_v2v.py`); under pytest the same env vars are set by
-`test/conftest.py` before tests start.
+so the env values are reverted between tests rather than leaking through the
+module-import side effects this file used to perform.
 """
 
 from __future__ import annotations
-
-import os
-
-
-# Must run before `import torch_rbln` for stand-alone executions; under pytest
-# conftest imports torch_rbln earlier, so these are best-effort no-ops there.
-os.environ.setdefault("TORCH_RBLN_EAGER_MALLOC", "1")
-os.environ.setdefault("TORCH_RBLN_DEPLOY", "ON")
 
 import torch
 

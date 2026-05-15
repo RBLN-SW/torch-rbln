@@ -3,6 +3,7 @@
 #include <c10/rbln/RBLNV2VBatch.h>
 
 #include <cstdint>
+#include <exception>
 #include <vector>
 
 namespace c10::rbln {
@@ -41,11 +42,14 @@ struct V2VBatch::Impl {
 V2VBatch::V2VBatch() : impl_(std::make_unique<Impl>()) {}
 
 V2VBatch::~V2VBatch() {
-  // Best-effort flush. If submit() throws (rebel rejection) it will propagate
-  // out of the destructor — same hazard pattern as any RAII flush. Callers
-  // worried about that should submit() explicitly first.
-  if (impl_ && !impl_->pending.empty()) {
-    submit();
+  // Safety net only — never issue backend calls here. A rebel rejection
+  // during stack unwinding would propagate out of the destructor and
+  // terminate the process. Reaching this point with pending entries on a
+  // normal path means the caller forgot submit(); log loudly so it gets
+  // caught in dev. During exception unwind stay silent: the real error is
+  // the in-flight throw, not the unsubmitted batch.
+  if (impl_ && !impl_->pending.empty() && std::uncaught_exceptions() == 0) {
+    RBLN_LOG_WARN("V2VBatch destroyed with {} pending entries — missing submit()", impl_->pending.size());
   }
 }
 

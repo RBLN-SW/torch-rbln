@@ -175,7 +175,7 @@ at::Tensor& cat_out_rbln(const at::ITensorListRef& tensors, int64_t dim, at::Ten
     strided_v2v_copy(dst_view, t, batch);
     axis_offset += extent;
   }
-  // batch.submit() runs on destructor.
+  batch.submit();
 
   return out;
 }

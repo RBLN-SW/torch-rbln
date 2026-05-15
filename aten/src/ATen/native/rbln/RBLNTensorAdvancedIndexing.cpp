@@ -103,7 +103,7 @@ at::Tensor& index_select_out_rbln(const at::Tensor& self, int64_t dim, const at:
     auto dst_view = out.narrow(axis, run.pos, run.length);
     strided_v2v_copy(dst_view, src_view, batch);
   }
-  // batch.submit() runs on destructor.
+  batch.submit();
 
   return out;
 }
@@ -257,7 +257,7 @@ at::Tensor& index_copy_out_rbln(
     auto dst_view = out.narrow(axis, run.value, run.length);
     strided_v2v_copy(dst_view, src_view, batch);
   }
-  // batch.submit() runs on destructor.
+  batch.submit();
 
   return out;
 }

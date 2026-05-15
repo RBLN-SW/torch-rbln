@@ -27,10 +27,12 @@ namespace c10::rbln {
  * When either lands, only this class changes. Engine / kernel code that uses
  * V2VBatch stays the same.
  *
- * Lifetime: pending operations are flushed on submit() or, if missing, on
- * destruction. The destructor's submit is best-effort and will RBLN_CHECK-fail
- * loudly if the backend rejects a queued op — call submit() explicitly if you
- * need to handle errors outside of destruction.
+ * Lifetime: callers MUST invoke submit() on the success path. The destructor
+ * is a leak-prevention safety net only — it never issues backend calls, since
+ * a backend rejection during stack unwinding would terminate the process. If
+ * the destructor sees pending entries on a normal (non-exceptional) path it
+ * logs a warning so the missing submit() is caught in development; during
+ * exception unwind it stays silent (the real error is the in-flight throw).
  *
  * Threading: not thread-safe. Each user thread should own its own batch.
  */

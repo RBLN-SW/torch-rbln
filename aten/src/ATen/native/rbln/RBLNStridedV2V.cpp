@@ -108,7 +108,7 @@ void strided_v2v_copy(const at::Tensor& dst, const at::Tensor& src, c10::rbln::V
 void strided_v2v_copy(const at::Tensor& dst, const at::Tensor& src) {
   c10::rbln::V2VBatch batch;
   strided_v2v_copy(dst, src, batch);
-  // batch.submit() runs on destructor.
+  batch.submit();
 }
 
 } // namespace at::native::rbln

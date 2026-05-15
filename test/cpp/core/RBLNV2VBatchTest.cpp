@@ -209,8 +209,10 @@ TEST_F(RBLNV2VBatchTest, StridedBroadcastStrideZero) {
   c10::rbln::free(dst);
 }
 
-// RAII flush: destruction submits.
-TEST_F(RBLNV2VBatchTest, DestructorFlush) {
+// Dropping a batch without calling submit() does NOT issue backend calls —
+// the destructor is leak-prevention only (warns in dev, never throws). The
+// dst slab stays at its pre-batch contents.
+TEST_F(RBLNV2VBatchTest, DestructorDoesNotFlush) {
   constexpr size_t n = 64;
   std::vector<int8_t> src_host(n);
   std::iota(src_host.begin(), src_host.end(), 1);
@@ -222,10 +224,38 @@ TEST_F(RBLNV2VBatchTest, DestructorFlush) {
   {
     c10::rbln::V2VBatch batch;
     batch.enqueue(dst, src, n);
-    // No explicit submit().
+    // Deliberately no submit().
   }
 
-  EXPECT_EQ(CopyToHost(dst, n), src_host);
+  // dst unchanged: dtor must not have drained the queue.
+  EXPECT_EQ(CopyToHost(dst, n), dst_initial);
+  c10::rbln::free(src);
+  c10::rbln::free(dst);
+}
+
+// The destructor must NOT throw even when entries are pending during stack
+// unwind — otherwise a backend rejection layered on an in-flight exception
+// would terminate the process.
+TEST_F(RBLNV2VBatchTest, DestructorIsNoexceptDuringUnwind) {
+  constexpr size_t n = 32;
+  std::vector<int8_t> src_host(n, 1);
+  std::vector<int8_t> dst_initial(n, 0);
+
+  void* src = AllocAndCopyFromHost(src_host.data(), n);
+  void* dst = AllocAndCopyFromHost(dst_initial.data(), n);
+
+  bool caught = false;
+  try {
+    c10::rbln::V2VBatch batch;
+    batch.enqueue(dst, src, n);
+    throw std::runtime_error("simulated mid-scope error");
+  } catch (const std::runtime_error&) {
+    caught = true;
+  }
+  EXPECT_TRUE(caught);
+  // dst stays untouched — dtor never submitted on the unwind path.
+  EXPECT_EQ(CopyToHost(dst, n), dst_initial);
+
   c10::rbln::free(src);
   c10::rbln::free(dst);
 }
