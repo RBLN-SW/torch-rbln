@@ -145,6 +145,7 @@ at::Tensor& cat_out_rbln(const at::ITensorListRef& tensors, int64_t dim, at::Ten
   uint8_t* out_base = static_cast<uint8_t*>(out_data_raw);
 
   int64_t axis_offset = 0;  // running offset along the cat axis (in elements)
+  std::vector<c10::rbln::V2VCopyOp> copies;
 
   for (const at::Tensor& t : inputs) {
     const auto in_sizes = t.sizes();
@@ -212,7 +213,7 @@ at::Tensor& cat_out_rbln(const at::ITensorListRef& tensors, int64_t dim, at::Ten
       }
       uint8_t* dst = out_base + dst_off_bytes;
 
-      c10::rbln::memcpy_v2v(dst, src, static_cast<size_t>(block_bytes));
+      copies.push_back({dst, src, static_cast<size_t>(block_bytes)});
 
       // Advance the outer multi-index. Don't call advance_multi_index on the
       // last iteration to avoid wrapping the assertion.
@@ -222,6 +223,7 @@ at::Tensor& cat_out_rbln(const at::ITensorListRef& tensors, int64_t dim, at::Ten
     axis_offset += in_sizes[axis];
   }
 
+  c10::rbln::memcpy_v2v_multi(copies);
   return out;
 }
 

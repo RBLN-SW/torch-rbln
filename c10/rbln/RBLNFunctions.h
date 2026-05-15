@@ -175,6 +175,22 @@ C10_RBLN_API void memcpy_v2h(void* cpu_dst_data, const void* rbln_src_data, size
 C10_RBLN_API void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes);
 
 /**
+ * @brief Descriptor for a single v2v copy used by memcpy_v2v_multi.
+ */
+struct C10_RBLN_API V2VCopyOp {
+  void* dst;
+  const void* src;
+  size_t nbytes;
+};
+
+/**
+ * @brief Batched device-to-device copies. Semantically equivalent to N calls of memcpy_v2v
+ * but submitted as few device dispatches as possible. All copies must target the same RBLN
+ * device. Caller must ensure src/dst regions do not overlap across copies.
+ */
+C10_RBLN_API void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies);
+
+/**
  * @brief Returns comprehensive device memory statistics.
  *
  * Retrieves all memory metrics from the RBLN runtime in a single call and

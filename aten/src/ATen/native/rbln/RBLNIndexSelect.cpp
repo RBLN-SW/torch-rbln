@@ -187,6 +187,8 @@ at::Tensor& index_select_out_rbln(
       c10::str(self_sizes), c10::str(self_strides), axis, outer_end,
       inner_block_bytes, n_out, runs.size());
 
+  std::vector<c10::rbln::V2VCopyOp> copies;
+  copies.reserve(pre_count * btw_count * runs.size());
   std::vector<int64_t> pre_idx(pre_axis_sizes.size(), 0);
   for (int64_t p = 0; p < pre_count; ++p) {
     std::vector<int64_t> btw_idx(btw_axis_sizes.size(), 0);
@@ -214,7 +216,7 @@ at::Tensor& index_select_out_rbln(
 
         const uint8_t* src = self_base + src_off_elems * elm_size;
         uint8_t* dst = out_base + dst_off_bytes;
-        c10::rbln::memcpy_v2v(dst, src, static_cast<size_t>(bytes));
+        copies.push_back({dst, src, static_cast<size_t>(bytes)});
       }
 
       if (b + 1 < btw_count) advance_multi_index(btw_idx, btw_axis_sizes);
@@ -222,6 +224,7 @@ at::Tensor& index_select_out_rbln(
     if (p + 1 < pre_count) advance_multi_index(pre_idx, pre_axis_sizes);
   }
 
+  c10::rbln::memcpy_v2v_multi(copies);
   return out;
 }
 
