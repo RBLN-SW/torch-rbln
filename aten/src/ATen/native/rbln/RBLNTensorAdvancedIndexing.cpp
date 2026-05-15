@@ -167,15 +167,30 @@ at::Tensor& index_copy_out_rbln(
   const auto idx_host = read_index_to_host(index, "index_copy");
   const int64_t n_idx = static_cast<int64_t>(idx_host.size());
 
-  // 0-D self: dim must be 0 or -1; index must contain exactly one value (=0);
-  // source must also be 0-D. The whole op reduces to out := source.
+  // 0-D self: idx values must all be 0. PyTorch's index_copy meta admits
+  // mismatched ranks when either side is 0-D, so source.dim() can be 0
+  // (scalar copy) or 1 (every write targets self[0]; last-write-wins picks
+  // source[n_idx - 1]).
   if (rank == 0) {
     RBLN_CHECK(dim == 0 || dim == -1, "index_copy: dim {} out of range for 0-D self", dim);
-    RBLN_CHECK(n_idx == 1, "index_copy: index for 0-D self must have 1 value, got {}", n_idx);
-    RBLN_CHECK(idx_host[0] == 0, "index_copy: index value {} out of range [0, 1) for 0-D self", idx_host[0]);
-    RBLN_CHECK(source.dim() == 0, "index_copy: source must be 0-D when self is 0-D, got {}-D", source.dim());
+    RBLN_CHECK(n_idx >= 1, "index_copy: index for 0-D self must have at least 1 value, got {}", n_idx);
+    for (int64_t i = 0; i < n_idx; ++i) {
+      RBLN_CHECK(idx_host[i] == 0, "index_copy: index value {} out of range [0, 1) for 0-D self", idx_host[i]);
+    }
     at::native::resize_output(out, {});
-    strided_v2v_copy(out, source);
+    if (source.dim() == 0) {
+      strided_v2v_copy(out, source);
+    } else if (source.dim() == 1) {
+      RBLN_CHECK(
+          source.size(0) == n_idx,
+          "index_copy: source.size(0) = {} must equal index.numel() = {} when self is 0-D",
+          source.size(0),
+          n_idx);
+      // Last write wins: copy source[n_idx - 1] (a 0-D view) into out.
+      strided_v2v_copy(out, source.select(0, n_idx - 1));
+    } else {
+      RBLN_CHECK(false, "index_copy: source rank {} not supported when self is 0-D (must be 0 or 1)", source.dim());
+    }
     return out;
   }
 

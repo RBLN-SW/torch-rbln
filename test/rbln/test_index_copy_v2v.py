@@ -239,6 +239,30 @@ class TestIndexCopyV2V(TestCase):
         got = torch.index_copy(_to_dev(self_cpu), dim, _to_dev(idx_cpu), _to_dev(src_cpu))
         _eq(got, expected)
 
+    def test_zero_d_self_one_d_source(self):
+        """torch._refs.index_select on a 0-D input decomposes to
+        ``empty_like(x).index_copy(0, idx, x.expand_as(idx))`` — 0-D self
+        with a 1-D source whose every element equals x. Matches CPU's
+        last-write-wins semantic."""
+        self_cpu = torch.tensor(42, dtype=torch.float32)
+        x = torch.tensor(7, dtype=torch.float32)
+        idx_cpu = torch.tensor([0, 0, 0], dtype=torch.int64)
+        src_cpu = x.expand_as(idx_cpu).contiguous()
+        expected = self_cpu.clone().index_copy_(0, idx_cpu, src_cpu)
+        got = torch.index_copy(_to_dev(self_cpu), 0, _to_dev(idx_cpu), _to_dev(src_cpu))
+        _eq(got, expected)
+
+    def test_zero_d_self_one_d_source_distinct_values(self):
+        """Non-broadcast 1-D source with distinct values on 0-D self: last
+        write wins, so the result is source[-1]. PyTorch's index_copy meta
+        admits this shape (self.dim()=0 or source.dim()=0 → mismatch OK)."""
+        self_cpu = torch.tensor(42, dtype=torch.float32)
+        src_cpu = torch.tensor([10.0, 20.0, 30.0], dtype=torch.float32)
+        idx_cpu = torch.tensor([0, 0, 0], dtype=torch.int64)
+        expected = self_cpu.clone().index_copy_(0, idx_cpu, src_cpu)
+        got = torch.index_copy(_to_dev(self_cpu), 0, _to_dev(idx_cpu), _to_dev(src_cpu))
+        _eq(got, expected)
+
     @dtypes(torch.float16, torch.int64)
     def test_empty_index(self, dtype):
         """Empty index → out is byte-equal to self."""

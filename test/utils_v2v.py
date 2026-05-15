@@ -10,8 +10,7 @@ The env-vars these tests need (``TORCH_RBLN_DEPLOY``, optionally
 ``test/conftest.py``. Apply them at the class level::
 
     @pytest.mark.usefixtures("enable_deploy_mode")
-    class TestFooV2V(TestCase):
-        ...
+    class TestFooV2V(TestCase): ...
 
 so the env values are reverted between tests rather than leaking through the
 module-import side effects this file used to perform.
