@@ -1679,39 +1679,6 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     )
     from torch_rbln.device.context_holder import out_tensor_context
 
-    # Device 64-elem-align fallback: when an input tensor's last-dim isn't a
-    # multiple of 64 elements, the rebel-compiler pipeline wraps the device fn
-    # with host-only `contrib_aligned_pad` (pre-pad to 64) + `contrib_aligned_pad`
-    # (post-trim back to user shape) + `contrib_dummy_cast` ops that have no
-    # RTOSA device-lowering. Each call pays the host-side ApplyTensorDeviceTransform
-    # memcpy + a full base-buffer D2H + H2D round-trip
-    # (~1MB / op for LLaMA-1B rotary). For these cases routing the whole op
-    # through cpu_fallback_path is strictly cheaper: one D2H of the source
-    # tensor + a host CPU op + one H2D of the result. Verified 2026-05-08 via
-    # IR dump (rbln_tensor_debug.log) and RBLN_VERBOSE=0 trace counts.
-    #
-    # Condition: ANY tensor arg has last-dim % 64 != 0. Aligned cases keep
-    # the view-on-device path (those don't trip the host-transform wrapping).
-    # Tensor-only check (NOT list/tuple). Reason: for list-input ops (cat,
-    # stack), the view-aware device path packs multiple unaligned tensors
-    # into a single fused IR which the rebel-compiler pipeline handles
-    # cheaper than per-tensor host fallback. Empirically (LLaMA-1B eager
-    # prefill, 2026-05-08): TensorList recursion adds +12% prefill via
-    # extra host-cat overhead. Tensor-only catches the dominant rotary
-    # rotate_half regression (single-tensor neg/mul on unaligned views)
-    # without penalizing TensorList ops.
-    def _last_dim_unaligned(t):
-        return isinstance(t, torch.Tensor) and t.dim() > 0 and t.shape[-1] % 64 != 0
-
-    if any(_last_dim_unaligned(a) for a in args) or any(_last_dim_unaligned(v) for v in kwargs_filtered.values()):
-        return cpu_fallback_path(
-            op_callable,
-            args,
-            result=out_tensor,
-            op_name=op_name,
-            **kwargs_filtered,
-        )
-
     # fp16 div with rounding_mode trunc/floor: rebel-compiler emits IR for
     # the discontinuous rounding op that returns wrong values for entire
     # rows of the output (verified 2026-05-07 with sample 98 of trunc on
