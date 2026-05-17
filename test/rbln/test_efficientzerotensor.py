@@ -6,7 +6,7 @@ Test suite for the RBLN-native `_efficientzerotensor` factory.
 `aten::_efficientzerotensor` is a "logically zero" tensor that PyTorch may
 produce as a backward-pass scratch and as the reference value for ops like
 `aten::sgn` (which decomposes into `_efficientzerotensor` plus a `where`).
-Before the V4 native registration this op fell through to the CPU-fallback
+Before the C++ native registration this op fell through to the CPU-fallback
 generic path, where the tensor surfaced into `at::sgn` with an empty / non-
 materialised storage and tripped a SIGSEGV inside the rebel runtime.
 
