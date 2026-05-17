@@ -1300,40 +1300,6 @@ def _bfs_search_recipe(base, t, max_steps=4):
     return None
 
 
-# Module-global cache for view recipe BFS results.
-#
-# BFS searches over (base_size, base_stride) -> (target_size, target_stride,
-# target_offset). Both endpoints are pure metadata; the recipe is a function
-# of metadata alone (data_ptr / _version do not affect the search). So a
-# geometric-only cache key is sound: same metadata pair always produces the
-# same recipe.
-#
-# LLaMA-1B prefill exercises ~48 BFS calls across 16 layers × ~3 view
-# patterns. The data_ptr-keyed cache previously prototyped never hit
-# (per-layer storages differ); a geometric key hits 16x for each of the
-# ~3 unique patterns. Saves ~4 s of the ~12 s prefill (measured 2026-05-11).
-#
-# Sentinel ``_RECIPE_CACHE_NONE`` marks "no recipe found" so the negative
-# result is cached too (BFS exhaustion is the expensive case).
-_RECIPE_CACHE_NONE = object()
-_recipe_cache: dict = {}
-_recipe_cache_hits = 0
-_recipe_cache_misses = 0
-
-
-def view_recipe_cache_stats():
-    """Return (hits, misses, size) for the recipe cache. Used by bench."""
-    return _recipe_cache_hits, _recipe_cache_misses, len(_recipe_cache)
-
-
-def view_recipe_cache_reset():
-    """Clear cache + reset counters. Used by bench to isolate phases."""
-    global _recipe_cache_hits, _recipe_cache_misses
-    _recipe_cache.clear()
-    _recipe_cache_hits = 0
-    _recipe_cache_misses = 0
-
-
 def _detect_view_recipe_safe(t: torch.Tensor):
     """Generic view recipe detector — replaces 5-layer hard-coded path.
 
@@ -1368,32 +1334,9 @@ def _detect_view_recipe_safe(t: torch.Tensor):
     if base.dim() == 0:
         return None
 
-    # Geometric cache lookup. The cache stores the BFS result keyed by the
-    # ``(base_metadata, target_metadata)`` pair. ``base`` itself is rebuilt
-    # per call (cheap) but the BFS is reused across calls with the same
-    # geometric pattern.
-    cache_key = (
-        tuple(base.size()),
-        tuple(base.stride()),
-        tuple(t.size()),
-        tuple(t.stride()),
-        t.storage_offset(),
-    )
-    cached = _recipe_cache.get(cache_key)
-    if cached is not None:
-        global _recipe_cache_hits
-        _recipe_cache_hits += 1
-        if cached is _RECIPE_CACHE_NONE:
-            return None
-        return base, cached
-
-    global _recipe_cache_misses
-    _recipe_cache_misses += 1
     recipe = _bfs_search_recipe(base, t, max_steps=4)
     if recipe is None:
-        _recipe_cache[cache_key] = _RECIPE_CACHE_NONE
         return None
-    _recipe_cache[cache_key] = recipe
     return base, recipe
 
 
