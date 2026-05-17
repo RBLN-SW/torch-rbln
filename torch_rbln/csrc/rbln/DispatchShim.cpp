@@ -5,11 +5,15 @@
 #include <ATen/core/stack.h>
 #include <ATen/native/rbln/RBLNCPUFallback.h>
 #include <ATen/ops/empty.h>
+#include <c10/rbln/RBLNFunctions.h>
 #include <torch/csrc/jit/python/pybind_utils.h>
 #include <torch/library.h>
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
 
 #include <map>
 #include <memory>
@@ -27,12 +31,12 @@ namespace torch_rbln::shim {
 // the boxed shim handler. Externally readable via diag_dump_dispatch_paths().
 // ---------------------------------------------------------------------------
 namespace {
-std::atomic<uint64_t> g_diag_n_total{0};       // total generic_shim_boxed invocations
-std::atomic<uint64_t> g_diag_n_fallback{0};    // would_fallback=true → cpu_fallback_rbln
-std::atomic<uint64_t> g_diag_n_warm_hit{0};    // warm-cache fast path hit
-std::atomic<uint64_t> g_diag_n_miss{0};        // Python compile (miss) path
-std::atomic<uint64_t> g_diag_ns_warm_hit{0};   // total ns inside warm-cache hit path
-std::atomic<uint64_t> g_diag_ns_miss{0};       // total ns inside miss path
+std::atomic<uint64_t> g_diag_n_total{0}; // total generic_shim_boxed invocations
+std::atomic<uint64_t> g_diag_n_fallback{0}; // would_fallback=true → cpu_fallback_rbln
+std::atomic<uint64_t> g_diag_n_warm_hit{0}; // warm-cache fast path hit
+std::atomic<uint64_t> g_diag_n_miss{0}; // Python compile (miss) path
+std::atomic<uint64_t> g_diag_ns_warm_hit{0}; // total ns inside warm-cache hit path
+std::atomic<uint64_t> g_diag_ns_miss{0}; // total ns inside miss path
 std::atomic<uint64_t> g_diag_n_align_fastpath{0}; // align fast-path hits → cpu_fallback
 
 // Warm-cache hit path per-segment timers. Accumulated only on successful hits
@@ -47,14 +51,14 @@ std::atomic<uint64_t> g_diag_warm_ns_run{0};
 std::atomic<uint64_t> g_diag_warm_ns_finalize{0};
 } // namespace
 
-std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>
-diag_dump_dispatch_paths() {
-  return std::make_tuple(g_diag_n_total.load(std::memory_order_relaxed),
-                         g_diag_n_fallback.load(std::memory_order_relaxed),
-                         g_diag_n_warm_hit.load(std::memory_order_relaxed),
-                         g_diag_n_miss.load(std::memory_order_relaxed),
-                         g_diag_ns_warm_hit.load(std::memory_order_relaxed),
-                         g_diag_ns_miss.load(std::memory_order_relaxed));
+std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t> diag_dump_dispatch_paths() {
+  return std::make_tuple(
+      g_diag_n_total.load(std::memory_order_relaxed),
+      g_diag_n_fallback.load(std::memory_order_relaxed),
+      g_diag_n_warm_hit.load(std::memory_order_relaxed),
+      g_diag_n_miss.load(std::memory_order_relaxed),
+      g_diag_ns_warm_hit.load(std::memory_order_relaxed),
+      g_diag_ns_miss.load(std::memory_order_relaxed));
 }
 
 uint64_t diag_dump_align_fastpath_count() {
@@ -71,8 +75,7 @@ void diag_reset_dispatch_paths() {
   g_diag_n_align_fastpath.store(0, std::memory_order_relaxed);
 }
 
-std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>
-diag_dump_warm_segments() {
+std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t> diag_dump_warm_segments() {
   return std::make_tuple(
       g_diag_warm_n_hits.load(std::memory_order_relaxed),
       g_diag_warm_ns_lookup.load(std::memory_order_relaxed),
@@ -98,8 +101,7 @@ void diag_reset_warm_segments() {
 namespace {
 
 inline uint64_t now_ns() {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(
-             std::chrono::steady_clock::now().time_since_epoch())
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
       .count();
 }
 
@@ -125,15 +127,15 @@ struct SchemaCache {
   bool populated = false;
   bool is_align_sensitive = false; // op name in align_sensitive_ops() set
   bool is_broadcast_op = false; // op may broadcast tensor args (mul/add/sub/...).
-                                 // When true, ``try_warmcache_hit`` decides
-                                 // per-call (via ``needs_last_dim_one_broadcast``)
-                                 // whether to materialize the post-broadcast
-                                 // contig buffers before passing data_ptrs to
-                                 // PrepareInputs. ``build_cache_key`` always
-                                 // uses RAW input shapes regardless — keying on
-                                 // post-broadcast shapes earlier caused
-                                 // (4,8,16)+() and (4,8,16)+(4,8,1) to collide
-                                 // on a single key (2026-04-30).
+                                // When true, ``try_warmcache_hit`` decides
+                                // per-call (via ``needs_last_dim_one_broadcast``)
+                                // whether to materialize the post-broadcast
+                                // contig buffers before passing data_ptrs to
+                                // PrepareInputs. ``build_cache_key`` always
+                                // uses RAW input shapes regardless — keying on
+                                // post-broadcast shapes earlier caused
+                                // (4,8,16)+() and (4,8,16)+(4,8,1) to collide
+                                // on a single key (2026-04-30).
 };
 
 struct ShimEntry {
@@ -216,9 +218,7 @@ bool is_skipped_arg(const std::vector<size_t>& skip_list, size_t i) {
 // cache when compiled for a contig + offset=0 input layout. Matches
 // PyTorch's ``Tensor::is_contiguous()`` conventions: zero-numel tensors are
 // always contiguous, size-1 dims have a free stride.
-bool is_contiguous_row_major(
-    c10::ArrayRef<int64_t> shape,
-    c10::ArrayRef<int64_t> strides) noexcept {
+bool is_contiguous_row_major(c10::ArrayRef<int64_t> shape, c10::ArrayRef<int64_t> strides) noexcept {
   if (shape.size() != strides.size()) {
     return false;
   }
@@ -274,41 +274,41 @@ bool is_contiguous_row_major(
 // penalty).
 const std::unordered_set<std::string>& align_sensitive_ops() {
   static const std::unordered_set<std::string>* s = new std::unordered_set<std::string>{
-    // Unary elementwise
-    "aten::neg.out",
-    "aten::abs.out",
-    "aten::log.out",
-    "aten::sigmoid.out",
-    "aten::silu.out",
-    "aten::rsqrt.out",
-    "aten::ceil.out",
-    "aten::floor.out",
-    "aten::logical_not.out",
-    "aten::pow.Tensor_Scalar_out",
-    "aten::clamp.out",
-    // Binary elementwise (broadcast-aware via OUT tensor check)
-    "aten::add.out",
-    "aten::sub.out",
-    "aten::mul.out",
-    "aten::div.out",
-    "aten::div.out_mode",
-    "aten::maximum.out",
-    "aten::minimum.out",
-    // Comparisons (output is bool but shape mirrors broadcast)
-    "aten::ne.Tensor_out",
-    "aten::eq.Tensor_out",
-    "aten::gt.Tensor_out",
-    "aten::ge.Tensor_out",
-    "aten::lt.Tensor_out",
-    "aten::le.Tensor_out",
-    "aten::ne.Scalar_out",
-    "aten::eq.Scalar_out",
-    "aten::gt.Scalar_out",
-    "aten::ge.Scalar_out",
-    "aten::lt.Scalar_out",
-    "aten::le.Scalar_out",
-    // Ternary (cond, self, other) — output shape is broadcast
-    "aten::where.self_out",
+      // Unary elementwise
+      "aten::neg.out",
+      "aten::abs.out",
+      "aten::log.out",
+      "aten::sigmoid.out",
+      "aten::silu.out",
+      "aten::rsqrt.out",
+      "aten::ceil.out",
+      "aten::floor.out",
+      "aten::logical_not.out",
+      "aten::pow.Tensor_Scalar_out",
+      "aten::clamp.out",
+      // Binary elementwise (broadcast-aware via OUT tensor check)
+      "aten::add.out",
+      "aten::sub.out",
+      "aten::mul.out",
+      "aten::div.out",
+      "aten::div.out_mode",
+      "aten::maximum.out",
+      "aten::minimum.out",
+      // Comparisons (output is bool but shape mirrors broadcast)
+      "aten::ne.Tensor_out",
+      "aten::eq.Tensor_out",
+      "aten::gt.Tensor_out",
+      "aten::ge.Tensor_out",
+      "aten::lt.Tensor_out",
+      "aten::le.Tensor_out",
+      "aten::ne.Scalar_out",
+      "aten::eq.Scalar_out",
+      "aten::gt.Scalar_out",
+      "aten::ge.Scalar_out",
+      "aten::lt.Scalar_out",
+      "aten::le.Scalar_out",
+      // Ternary (cond, self, other) — output shape is broadcast
+      "aten::where.self_out",
   };
   return *s;
 }
@@ -330,20 +330,20 @@ const std::unordered_set<std::string>& align_sensitive_ops() {
 // compiled for the pre-broadcast layout (e.g. RMSNorm ``(B,S,H) * (H,)``).
 const std::unordered_set<std::string>& broadcast_ops() {
   static const std::unordered_set<std::string>* s = new std::unordered_set<std::string>{
-    "aten::add.out",
-    "aten::sub.out",
-    "aten::mul.out",
-    "aten::div.out",
-    "aten::div.out_mode",
-    "aten::maximum.out",
-    "aten::minimum.out",
-    "aten::ne.Tensor_out",
-    "aten::eq.Tensor_out",
-    "aten::gt.Tensor_out",
-    "aten::ge.Tensor_out",
-    "aten::lt.Tensor_out",
-    "aten::le.Tensor_out",
-    "aten::where.self_out",
+      "aten::add.out",
+      "aten::sub.out",
+      "aten::mul.out",
+      "aten::div.out",
+      "aten::div.out_mode",
+      "aten::maximum.out",
+      "aten::minimum.out",
+      "aten::ne.Tensor_out",
+      "aten::eq.Tensor_out",
+      "aten::gt.Tensor_out",
+      "aten::ge.Tensor_out",
+      "aten::lt.Tensor_out",
+      "aten::le.Tensor_out",
+      "aten::where.self_out",
   };
   return *s;
 }
@@ -355,28 +355,27 @@ const std::unordered_set<std::string>& broadcast_ops() {
 // ``output(N,D) * K(N,1)`` from softmax/layernorm backward).
 //
 // Cheap: walks each tensor's last-dim once, no allocation.
-bool needs_last_dim_one_broadcast(
-    torch::jit::Stack* stack,
-    const SchemaCache& cache) {
+bool needs_last_dim_one_broadcast(torch::jit::Stack* stack, const SchemaCache& cache) {
   auto args = torch::jit::last(stack, cache.num_args);
   int64_t out_last = 0;
   bool any_size_one = false;
   for (size_t i = 0; i < cache.num_args; ++i) {
     const auto& iv = args[i];
-    if (!iv.isTensor()) continue;
+    if (!iv.isTensor())
+      continue;
     const auto& t = iv.toTensor();
-    if (!t.defined() || cache.is_write_alias[i] || t.dim() == 0) continue;
+    if (!t.defined() || cache.is_write_alias[i] || t.dim() == 0)
+      continue;
     int64_t last = t.size(t.dim() - 1);
-    if (last > out_last) out_last = last;
-    if (last == 1) any_size_one = true;
+    if (last > out_last)
+      out_last = last;
+    if (last == 1)
+      any_size_one = true;
   }
   return any_size_one && out_last > 1;
 }
 
-
-bool align_penalty_fast_path_check(
-    torch::jit::Stack* stack,
-    const SchemaCache& cache) {
+bool align_penalty_fast_path_check(torch::jit::Stack* stack, const SchemaCache& cache) {
   if (!cache.is_align_sensitive) {
     return false;
   }
@@ -396,12 +395,135 @@ bool align_penalty_fast_path_check(
   // first non-write-alias tensor with non-zero dim.
   for (size_t i = 0; i < cache.num_args; ++i) {
     const auto& iv = args[i];
-    if (!iv.isTensor()) continue;
+    if (!iv.isTensor())
+      continue;
     const auto& t = iv.toTensor();
-    if (!t.defined() || cache.is_write_alias[i] || t.dim() == 0) continue;
+    if (!t.defined() || cache.is_write_alias[i] || t.dim() == 0)
+      continue;
     return (t.size(t.dim() - 1) % 64) != 0;
   }
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// Env-cached deploy / nan_inf-disable gates
+// ---------------------------------------------------------------------------
+//
+// Both flags are read once at first access (lazy init) and cached for the
+// process lifetime. Matches the Python-side semantics: `is_rbln_deploy()`
+// (env_utils.py) checks ``TORCH_RBLN_DEPLOY == "ON"``;
+// ``_parse_disabled_fallback_cases`` (ops_utils.py) is ``@lru_cache(maxsize=1)``
+// on ``TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK`` with ``"all"`` / ``"nan_inf"``
+// disabling the NaN/Inf branch.
+bool is_deploy_mode() {
+  static std::atomic<int> cached{-1};
+  int v = cached.load(std::memory_order_relaxed);
+  if (v < 0) {
+    const char* env = std::getenv("TORCH_RBLN_DEPLOY");
+    v = (env != nullptr && std::strcmp(env, "ON") == 0) ? 1 : 0;
+    cached.store(v, std::memory_order_relaxed);
+  }
+  return v == 1;
+}
+
+bool is_nan_inf_check_disabled() {
+  static std::atomic<int> cached{-1};
+  int v = cached.load(std::memory_order_relaxed);
+  if (v < 0) {
+    const char* env = std::getenv("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK");
+    bool disabled = false;
+    if (env != nullptr) {
+      std::string s = env;
+      size_t start = 0;
+      while (start <= s.size()) {
+        size_t end = s.find(',', start);
+        if (end == std::string::npos)
+          end = s.size();
+        std::string token = s.substr(start, end - start);
+        const auto l = token.find_first_not_of(" \t");
+        const auto r = token.find_last_not_of(" \t");
+        if (l != std::string::npos) {
+          token = token.substr(l, r - l + 1);
+        } else {
+          token.clear();
+        }
+        if (token == "all" || token == "nan_inf") {
+          disabled = true;
+          break;
+        }
+        start = end + 1;
+      }
+    }
+    v = disabled ? 1 : 0;
+    cached.store(v, std::memory_order_relaxed);
+  }
+  return v == 1;
+}
+
+// fp16 NaN/Inf bit-pattern check.
+//
+// IEEE 754 binary16: 1 sign + 5 exponent + 10 mantissa.
+// Both NaN and Inf have all-ones in the exponent field (bits 14..10), i.e.
+// ``(raw & 0x7C00) == 0x7C00``. NaN distinguishes itself by a non-zero
+// mantissa; Inf has mantissa==0. We don't care about the distinction for
+// fallback routing — either value means "rbln runtime cannot handle this".
+inline bool fp16_has_nan_or_inf(const uint16_t* data, size_t n) noexcept {
+  for (size_t i = 0; i < n; ++i) {
+    if ((data[i] & 0x7C00) == 0x7C00) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Scan a single tensor for NaN/Inf. Uses ``c10::rbln::borrow_host_ptr`` for
+// rbln tensors so a host-latest entry pays no D2H cost; device-latest entries
+// will trigger a D2H sync (this is the price of catching NaN/Inf in
+// just-computed device data — matches AS-IS Python ``to_cpu(args)`` cost).
+//
+// Returns false for: undefined / empty / non-fp16 / non-contiguous tensors.
+// fp16 is the only dtype the shim path admits (non-fp16 is short-circuited
+// earlier in ``quick_fallback_check``); ``skip_dtype_args`` slots are
+// typically bool/int (eq/ne ``cond`` etc.) which cannot carry NaN/Inf.
+// Non-contiguous tensors are skipped here because the warm-cache key
+// requires contig + offset=0 anyway — the non-contig case will miss and
+// fall through to the Python wrapper which performs the full
+// ``has_invalid_tensor(to_cpu(args))`` scan.
+bool tensor_has_nan_or_inf(const at::Tensor& t) {
+  if (!t.defined())
+    return false;
+  const auto numel = t.numel();
+  if (numel == 0)
+    return false;
+  if (t.scalar_type() != c10::kHalf)
+    return false;
+  if (!t.is_contiguous())
+    return false;
+
+  const size_t n = static_cast<size_t>(numel);
+  const auto dev_type = t.device().type();
+  if (dev_type != c10::DeviceType::PrivateUse1) {
+    // CPU tensor (e.g. wrapped 0-dim scalar that didn't get unwrapped):
+    // scan in place.
+    const uint16_t* data = static_cast<const uint16_t*>(t.data_ptr());
+    if (data == nullptr)
+      return false;
+    return fp16_has_nan_or_inf(data, n);
+  }
+
+  void* ptr = t.data_ptr();
+  if (ptr == nullptr)
+    return false;
+
+  const size_t nbytes = static_cast<size_t>(t.nbytes());
+  if (nbytes == 0)
+    return false;
+
+  auto borrowed = c10::rbln::borrow_host_ptr(ptr, nbytes);
+  void* host_raw = reinterpret_cast<void*>(borrowed.host_ptr); // NOLINT(performance-no-int-to-ptr)
+  const bool found = fp16_has_nan_or_inf(static_cast<const uint16_t*>(host_raw), n);
+  c10::rbln::return_borrowed(borrowed.borrow_id, /*updated=*/false);
+  return found;
 }
 
 // Cheap C++-side pre-check mirroring the cheap branches of
@@ -409,6 +531,10 @@ bool align_penalty_fast_path_check(
 //   2. dtype != float16 on any input tensor
 //   3. all input tensors are scalar (ndim == 0)
 //   4. any input tensor is_contiguous() with storage_offset != 0
+//   5. NaN/Inf in any input tensor  (non-deploy mode only; mirrors the
+//      ``not is_rbln_deploy() and has_invalid_tensor(to_cpu(args))`` branch
+//      that AS-IS ran on every Python wrapper entry — the warm-cache hot
+//      path otherwise bypasses Python entirely, losing the safety net).
 //
 // Inputs means args NOT schema-marked as write aliases (out-tensor skipped).
 // `skip_dtype_args` indexes positional args whose dtype check is ignored (e.g.
@@ -428,8 +554,10 @@ bool quick_fallback_check(
     const SchemaCache& cache,
     const std::vector<size_t>& skip_dtype_args) {
   auto args = torch::jit::last(stack, cache.num_args);
+  const bool nan_inf_scan_enabled = !is_deploy_mode() && !is_nan_inf_check_disabled();
   bool has_input_tensor = false;
   bool all_input_scalar = true;
+  bool nan_inf_found = false;
   for (size_t i = 0; i < cache.num_args; ++i) {
     const auto& iv = args[i];
     if (!iv.isTensor()) {
@@ -442,6 +570,17 @@ bool quick_fallback_check(
     if (cache.is_write_alias[i]) {
       continue;
     }
+
+    // NaN/Inf scan: applies BEFORE the dtype / skip_dtype / wrapped-0-dim
+    // gates that skip args from the shortcut counter. We want to catch
+    // NaN/Inf in any defined non-write-alias input — including wrapped
+    // 0-dim values such as ``tensor + math.nan``. tensor_has_nan_or_inf
+    // internally filters non-fp16 (the only dtype that can encode NaN/Inf
+    // on the shim path).
+    if (nan_inf_scan_enabled && !nan_inf_found && tensor_has_nan_or_inf(t)) {
+      nan_inf_found = true;
+    }
+
     // NOTE: storage_offset != 0 contiguous inputs are NOT short-circuited to
     // cpu_fallback_rbln here. The Python wrapper's cpu_fallback_path takes a
     // different host-copy route (tensor.cpu()) than at::_to_cpu via
@@ -465,6 +604,9 @@ bool quick_fallback_check(
     if (t.dim() != 0) {
       all_input_scalar = false;
     }
+  }
+  if (nan_inf_found) {
+    return true;
   }
   return has_input_tensor && all_input_scalar;
 }
@@ -506,9 +648,11 @@ inline bool all_input_shapes_equal(torch::jit::Stack* stack, const SchemaCache& 
   bool ref_set = false;
   for (size_t i = 0; i < cache.num_args; ++i) {
     const auto& iv = arguments[i];
-    if (!iv.isTensor()) continue;
+    if (!iv.isTensor())
+      continue;
     const auto& t = iv.toTensor();
-    if (!t.defined() || cache.is_write_alias[i]) continue;
+    if (!t.defined() || cache.is_write_alias[i])
+      continue;
     if (!ref_set) {
       ref_shape = t.sizes();
       ref_set = true;
@@ -656,17 +800,18 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
   //   like RMSNorm ``(B,S,H) * (H,)`` the runtime was compiled for raw shapes
   //   in the Python wrapper, so we skip the materialization (~600 ms / step
   //   on LLaMA-1B prefill).
-  const bool needs_broadcast = cache.is_broadcast_op &&
-                               !all_input_shapes_equal(stack, cache) &&
-                               needs_last_dim_one_broadcast(stack, cache);
+  const bool needs_broadcast =
+      cache.is_broadcast_op && !all_input_shapes_equal(stack, cache) && needs_last_dim_one_broadcast(stack, cache);
   if (needs_broadcast) {
     std::vector<at::Tensor> raw_args;
     raw_args.reserve(cache.num_args);
     for (size_t i = 0; i < cache.num_args; ++i) {
       const auto& iv = arguments[i];
-      if (!iv.isTensor()) continue;
+      if (!iv.isTensor())
+        continue;
       const at::Tensor& t = iv.toTensor();
-      if (!t.defined()) continue;
+      if (!t.defined())
+        continue;
       if (cache.is_write_alias[i]) {
         // See note in the non-broadcast branch below: non-contig out= writes
         // numel*itemsize contig bytes into a strided view's data_ptr, which
@@ -901,11 +1046,9 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
       // Populate align-sensitive flag once per op (avoids per-call string
       // allocation + unordered_set lookup in the hot path).
       const auto& align_set = align_sensitive_ops();
-      entry->schema_cache.is_align_sensitive =
-          (align_set.find(op_name) != align_set.end());
+      entry->schema_cache.is_align_sensitive = (align_set.find(op_name) != align_set.end());
       const auto& bcast_set = broadcast_ops();
-      entry->schema_cache.is_broadcast_op =
-          (bcast_set.find(op_name) != bcast_set.end());
+      entry->schema_cache.is_broadcast_op = (bcast_set.find(op_name) != bcast_set.end());
     }
   }
 
@@ -973,8 +1116,7 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
   struct MissScopeTimer {
     uint64_t t0;
     ~MissScopeTimer() {
-      g_diag_ns_miss.fetch_add(
-          now_ns() - t0, std::memory_order_relaxed);
+      g_diag_ns_miss.fetch_add(now_ns() - t0, std::memory_order_relaxed);
     }
   } _diag_miss_guard{_diag_miss_t0};
   if (key_ok) {

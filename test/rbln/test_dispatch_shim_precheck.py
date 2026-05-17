@@ -3,12 +3,16 @@
 """
 Test suite for the C++ dispatch shim's pre-check behaviour.
 
-The shim short-circuits to the CPU fallback path on three conditions
+The shim short-circuits to the CPU fallback path on these conditions
 (see `DispatchShim.cpp::quick_fallback_check`):
 
   1. any input tensor whose dtype is not float16 (with a per-op
      `skip_dtype_args` allowlist for typed inputs e.g. bool predicates),
-  2. all input tensors are scalar (ndim == 0).
+  2. all input tensors are scalar (ndim == 0),
+  3. (non-deploy mode only) any input tensor contains NaN or Inf —
+     mirrors the AS-IS Python ``has_invalid_tensor(to_cpu(args))`` safety
+     net that the warm-cache hot path would otherwise bypass after the
+     first call had installed an entry on clean inputs.
 
 Two important non-trivial properties:
 
@@ -18,7 +22,7 @@ Two important non-trivial properties:
   * Storage-offset != 0 contiguous inputs must NOT short-circuit; they
     must fall through to the Python wrapper which dispatches via
     `cpu_fallback_path` (this preserves correctness on the rebel runtime
-    — see in-source notes in DispatchShim.cpp:149).
+    — see in-source notes in DispatchShim.cpp).
 
 These tests are end-to-end (drive a real op through the registered
 shim) so they catch regressions in either the C++ pre-check or the Python
@@ -28,6 +32,8 @@ wrapper path together.
 import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
+
+import torch_rbln._C as _C
 
 
 @pytest.mark.test_set_ci
@@ -83,6 +89,120 @@ class TestDispatchShimDtypeMismatch(TestCase):
         y = x + 3
         self.assertEqual(y.device.type, "rbln")
         self.assertEqual(y.to("cpu"), torch.arange(8, dtype=torch.int32) + 3)
+
+
+@pytest.mark.test_set_ci
+class TestDispatchShimNanInfFallback(TestCase):
+    """Inputs containing NaN or Inf must route to the CPU fallback path in
+    non-deploy mode.
+
+    The rbln runtime does not handle NaN/Inf inputs and will silently produce
+    wrong results. In AS-IS this safety net was carried by the Python
+    wrapper's per-call ``has_invalid_tensor(to_cpu(args))`` scan; in TO-BE
+    the C++ ``quick_fallback_check`` performs the same scan (only when
+    non-deploy + ``TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK`` does not contain
+    ``nan_inf`` / ``all``) so the warm-cache hot path cannot bypass it after
+    the first clean call installs an entry for the shape.
+
+    These tests assume the default non-deploy environment (the env-cached
+    gates are initialised on first dispatch; running the suite with
+    ``TORCH_RBLN_DEPLOY=ON`` skips the scan and these checks no longer hold
+    — that's the intended deploy-mode behaviour and matches AS-IS).
+    """
+
+    def setUp(self) -> None:
+        # Each test starts with an empty warm cache so warm-hit interactions
+        # are deterministic.
+        _C._warmcache_clear()
+
+    def test_nan_input_falls_back_and_propagates(self) -> None:
+        x = torch.tensor([1.0, float("nan"), 3.0], dtype=torch.float16, device="rbln")
+        y = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float16, device="rbln")
+        z = x + y
+        self.assertEqual(z.device.type, "rbln")
+        result = z.to("cpu")
+        # CPU semantics: NaN + 2.0 = NaN.  If we'd taken the device path the
+        # rbln runtime would have returned wrong (non-NaN) values for slot 1.
+        self.assertTrue(torch.isnan(result[1]))
+        self.assertEqual(result[0].item(), 2.0)
+        self.assertEqual(result[2].item(), 6.0)
+
+    def test_pos_inf_input_falls_back_and_propagates(self) -> None:
+        x = torch.tensor([1.0, float("inf"), 3.0], dtype=torch.float16, device="rbln")
+        y = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float16, device="rbln")
+        z = x + y
+        result = z.to("cpu")
+        self.assertTrue(torch.isinf(result[1]))
+        self.assertEqual(result[1].item(), float("inf"))
+        self.assertEqual(result[0].item(), 2.0)
+        self.assertEqual(result[2].item(), 6.0)
+
+    def test_neg_inf_input_falls_back_and_propagates(self) -> None:
+        x = torch.tensor([1.0, float("-inf"), 3.0], dtype=torch.float16, device="rbln")
+        y = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float16, device="rbln")
+        z = x + y
+        result = z.to("cpu")
+        self.assertTrue(torch.isinf(result[1]))
+        self.assertEqual(result[1].item(), float("-inf"))
+
+    def test_nan_in_second_operand_also_caught(self) -> None:
+        x = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float16, device="rbln")
+        y = torch.tensor([float("nan"), 2.0, 3.0], dtype=torch.float16, device="rbln")
+        z = x + y
+        result = z.to("cpu")
+        self.assertTrue(torch.isnan(result[0]))
+
+    def test_clean_input_takes_device_path(self) -> None:
+        # Regression: clean inputs must NOT be misclassified as needing
+        # fallback. Verified indirectly: a warm-cache entry must be installed
+        # (the fallback path never installs).
+        size_before = _C._warmcache_size()
+        x = torch.arange(8, dtype=torch.float16, device="rbln")
+        y = torch.ones(8, dtype=torch.float16, device="rbln")
+        z = x + y
+        self.assertEqual(z.to("cpu"), torch.arange(1, 9, dtype=torch.float16))
+        # At least one new warm-cache entry was installed.
+        self.assertGreater(_C._warmcache_size(), size_before)
+
+    def test_warm_hit_does_not_bypass_late_nan(self) -> None:
+        """The critical regression case for the fixup.
+
+        Step 1: clean inputs install a warm-cache entry for shape (8,).
+        Step 2: same shape, but one input has NaN. Without this fixup the
+                C++ shim would hit the warm cache, bypass the Python check,
+                and hand the NaN tensor to the rbln runtime — wrong result.
+        Step 3: NaN must propagate (proves the late NaN was caught and
+                routed to the CPU fallback path even with the entry hot).
+        """
+        # Step 1: prime the warm cache with clean inputs.
+        x_clean = torch.arange(8, dtype=torch.float16, device="rbln")
+        y = torch.ones(8, dtype=torch.float16, device="rbln")
+        _ = x_clean + y
+        self.assertGreater(_C._warmcache_size(), 0)
+
+        # Step 2: same shape, NaN injected on one slot.
+        x_dirty_cpu = torch.arange(8, dtype=torch.float16)
+        x_dirty_cpu[3] = float("nan")
+        x_dirty = x_dirty_cpu.to("rbln")
+        z = x_dirty + y
+        result = z.to("cpu")
+
+        # Step 3: NaN preserved (fallback path was taken).
+        self.assertTrue(torch.isnan(result[3]))
+        self.assertEqual(result[0].item(), 1.0)
+        self.assertEqual(result[7].item(), 8.0)
+
+    def test_nan_with_wrapped_python_scalar(self) -> None:
+        # Wrapped 0-dim Python scalars (``tensor + 1.0``) are skipped from
+        # the dtype shortcut but MUST still pass through the NaN/Inf scan —
+        # ``tensor + math.nan`` would otherwise feed NaN to the device.
+        import math
+
+        x = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float16, device="rbln")
+        z = x + math.nan
+        result = z.to("cpu")
+        # All slots must be NaN if the scan caught the wrapped scalar.
+        self.assertTrue(torch.isnan(result).all())
 
 
 if __name__ == "__main__":
