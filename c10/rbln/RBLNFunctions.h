@@ -6,9 +6,11 @@
 #include <c10/rbln/RBLNMacros.h>
 #include <rebel/runtime/api/rbln_runtime_api.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <string>
+#include <vector>
 
 namespace c10::rbln {
 
@@ -173,6 +175,50 @@ C10_RBLN_API void memcpy_v2h(void* cpu_dst_data, const void* rbln_src_data, size
  * @param nbytes The number of bytes to copy (must be positive).
  */
 C10_RBLN_API void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes);
+
+/**
+ * @brief Descriptor for one device-to-device slab copy submitted via
+ *        memcpy_v2v_multi.
+ *
+ * The triple mirrors a single rbln_memcpy_v2v call (dst, src, nbytes). Caller
+ * keeps ownership of the memory `dst` / `src` point to — the descriptor is
+ * read once during the batched dispatch.
+ */
+struct C10_RBLN_API V2VCopyOp {
+  void* dst;
+  const void* src;
+  size_t nbytes;
+};
+
+/**
+ * @brief Batched device-to-device copy.
+ *
+ * Routes the entire `copies` list through the runtime's bulk
+ * rbln_memcpy_v2v_multi entrypoint, amortising dispatch overhead across the
+ * batch. An empty input is a no-op.
+ *
+ * Each entry must have nbytes > 0 and non-null dst/src.
+ *
+ * Caller contract (NOT validated here):
+ *   - Every entry's src AND dst must reside on the same RBLN device.
+ *     The bulk runtime entrypoint routes by vaddr, so the thread's active
+ *     device does not need to match — but mixing entries from different
+ *     devices in one call is not supported.
+ *   - src/dst regions of different entries must not overlap.
+ *
+ * Unlike the single-call memcpy_v2v, this wrapper does NOT auto-route
+ * cross-device entries through a host bounce buffer — mixing in an entry
+ * from a different device would silently produce wrong results. Callers
+ * that may see heterogeneous inputs should partition up front or use
+ * memcpy_v2v per entry. V2VBatch handles this internally, falling back to
+ * per-entry dispatch when needed.
+ *
+ * The runtime may parallelise or reorder entries, so overlapping ranges
+ * yield undefined behaviour in the batched path.
+ *
+ * @param copies List of slab descriptors to dispatch as a single batch.
+ */
+C10_RBLN_API void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies);
 
 /**
  * @brief Returns comprehensive device memory statistics.

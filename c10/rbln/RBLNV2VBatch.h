@@ -15,16 +15,21 @@ namespace c10::rbln {
  * surface. Callers enqueue logical copy requests; submit() flushes them to
  * the backend.
  *
- * Today the runtime exposes only a single flat call (rbln_memcpy_v2v), so
- * submit() drains the queue by issuing one call per entry. Two future
- * additions are anticipated:
+ * submit() drains the queue through the runtime's bulk
+ * rbln_memcpy_v2v_multi entrypoint, amortising dispatch overhead across the
+ * batch. If any entry is cross-device, or the batch spans more than one
+ * RBLN device, submit() transparently falls back to per-entry memcpy_v2v
+ * (which routes through a host bounce buffer). The path is selected from
+ * bookkeeping maintained at enqueue time, so submit() itself is O(N) with
+ * no extra lookups.
  *
- *   1. A batched API that accepts a list of (dst, src, nbytes) in one call —
- *      submit() will rewrite to issue a single bulk call.
- *   2. A strided API that accepts (sizes, strides, inner_block) — enqueue_strided
- *      will stop expanding internally and forward the description directly.
+ * The remaining future addition is anticipated:
  *
- * When either lands, only this class changes. Engine / kernel code that uses
+ *   - A strided API that accepts (sizes, strides, inner_block) —
+ *     enqueue_strided will stop expanding internally and forward the
+ *     description directly.
+ *
+ * When that lands, only this class changes. Engine / kernel code that uses
  * V2VBatch stays the same.
  *
  * Lifetime: callers MUST invoke submit() on the success path. The destructor

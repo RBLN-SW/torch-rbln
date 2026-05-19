@@ -1,3 +1,4 @@
+#include <c10/core/Device.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNV2VBatch.h>
@@ -22,21 +23,38 @@ inline bool advance(std::vector<int64_t>& idx, c10::IntArrayRef sizes) {
   return false;
 }
 
+// Flip `homogeneous` to false if this (src, dst) pair would break the
+// "all entries on one device" invariant required by the bulk dispatch.
+// Once flipped, the lookup is skipped — no way to recover within a batch.
+inline void update_homogeneity(bool& homogeneous, c10::DeviceIndex& anchor, const void* src, const void* dst) {
+  if (!homogeneous) {
+    return;
+  }
+  const auto s = static_cast<c10::DeviceIndex>(get_memory_info(src).torch_device_id);
+  const auto d = static_cast<c10::DeviceIndex>(get_memory_info(dst).torch_device_id);
+  if (s != d) {
+    homogeneous = false;
+    return;
+  }
+  if (anchor < 0) {
+    anchor = s;
+  } else if (anchor != s) {
+    homogeneous = false;
+  }
+}
+
 } // namespace
 
 struct V2VBatch::Impl {
-  // Flat list of (dst, src, nbytes) entries.
-  //
-  // Today: each entry will be drained by one rbln_memcpy_v2v call in submit().
-  // When the runtime adds a batched API this becomes the input to one bulk
-  // call. The struct is intentionally trivial (no smart pointers / lifetimes)
-  // so that future batching primitives can hand it to C-style APIs directly.
-  struct Entry {
-    void* dst;
-    const void* src;
-    size_t nbytes;
-  };
-  std::vector<Entry> pending;
+  // Flat list of pending slab descriptors. Storing V2VCopyOp directly lets
+  // submit() hand the vector to memcpy_v2v_multi without an intermediate copy.
+  std::vector<V2VCopyOp> pending;
+  // submit() routes through the bulk memcpy_v2v_multi only while this stays
+  // true (all entries on the same device == `anchor`). The first cross-device
+  // or anchor-mismatching entry flips it; submit() then falls back to
+  // per-entry memcpy_v2v which handles host-bounce on its own.
+  bool homogeneous = true;
+  c10::DeviceIndex anchor = -1;
 };
 
 V2VBatch::V2VBatch() : impl_(std::make_unique<Impl>()) {}
@@ -59,6 +77,7 @@ void V2VBatch::enqueue(void* dst, const void* src, size_t nbytes) {
   if (nbytes == 0) {
     return;
   }
+  update_homogeneity(impl_->homogeneous, impl_->anchor, src, dst);
   impl_->pending.push_back({dst, src, nbytes});
 }
 
@@ -98,6 +117,9 @@ void V2VBatch::enqueue_strided(
 
   impl_->pending.reserve(impl_->pending.size() + static_cast<size_t>(outer_count));
 
+  // All N expanded entries share the same base devices — one lookup suffices.
+  update_homogeneity(impl_->homogeneous, impl_->anchor, src, dst);
+
   auto* dst_base = static_cast<uint8_t*>(dst);
   const auto* src_base = static_cast<const uint8_t*>(src);
 
@@ -118,13 +140,20 @@ void V2VBatch::submit() {
   if (!impl_ || impl_->pending.empty()) {
     return;
   }
-  // Drain in order. When a batched rebel API arrives this loop becomes a
-  // single bulk call over impl_->pending.
-  RBLN_LOG_DEBUG("V2VBatch::submit draining {} entries", impl_->pending.size());
-  for (const auto& e : impl_->pending) {
-    memcpy_v2v(e.dst, e.src, e.nbytes);
+  if (impl_->homogeneous) {
+    RBLN_LOG_DEBUG("V2VBatch::submit draining {} entries (batched)", impl_->pending.size());
+    memcpy_v2v_multi(impl_->pending);
+  } else {
+    // Heterogeneous batch — drain in enqueue order via per-entry memcpy_v2v,
+    // which routes cross-device entries through a host bounce buffer.
+    RBLN_LOG_DEBUG("V2VBatch::submit draining {} entries (per-entry fallback)", impl_->pending.size());
+    for (const auto& e : impl_->pending) {
+      memcpy_v2v(e.dst, e.src, e.nbytes);
+    }
   }
   impl_->pending.clear();
+  impl_->homogeneous = true;
+  impl_->anchor = -1;
 }
 
 size_t V2VBatch::pending_count() const {
