@@ -228,6 +228,22 @@ RBLNRetCode rbln_memcpy_v2h(uint64_t src_vaddr, uintptr_t dst_host_ptr, uint64_t
 // Copies the contents from a virtual memory area to another virtual memory area.
 RBLNRetCode rbln_memcpy_v2v(uint64_t src_vaddr, uint64_t dst_vaddr, uint64_t size);
 
+// Async variants. *handle_out == 0 means the call completed synchronously (fast path
+// ineligible); otherwise the caller must rbln_transfer_wait on it before reading the dst.
+RBLNRetCode rbln_memcpy_v2h_async(uint64_t src_vaddr, uintptr_t dst_host_ptr, uint64_t size,
+                                  uint64_t* handle_out);
+RBLNRetCode rbln_memcpy_h2v_async(uintptr_t src_host_ptr, uint64_t dst_vaddr, uint64_t size,
+                                  uint64_t* handle_out);
+RBLNRetCode rbln_memcpy_v2v_async(uint64_t src_vaddr, uint64_t dst_vaddr, uint64_t size,
+                                  uint64_t* handle_out);
+RBLNRetCode rbln_memcpy_v2v_multi_async(
+    const std::vector<std::tuple<uint64_t, uint64_t, uint64_t>>& copies, uint64_t* handle_out);
+
+// No-op if handle == 0.
+RBLNRetCode rbln_transfer_wait(uint64_t handle);
+
+RBLNRetCode rbln_device_synchronize(uint32_t torch_device_id);
+
 // Casts and copies the contents from host memory to the virtual memory area. The contents at
 // the host memory are assumed to be in `from_dtype` and will be converted to `to_dtype`. The
 // `size` should be the length in bytes of the host memory. It will fail if the `size` is not the
