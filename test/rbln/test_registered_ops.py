@@ -717,25 +717,9 @@ class TestRegisteredPythonOps(TestCase):
         self.assertEqual(result.dtype, expected.dtype)
         self.assertEqual(result.shape, expected.shape)
 
-    @dtypes(*SUPPORTED_DTYPES)
-    @parametrize(
-        "shapes,dim,expected_shape",
-        [
-            ([(3, 4), (3, 4)], 0, (6, 4)),
-            ([(3, 4), (3, 4)], 1, (3, 8)),
-            ([(2, 3, 4), (2, 3, 4)], 0, (4, 3, 4)),
-            ([(5, 10), (5, 10), (5, 10)], 1, (5, 30)),
-        ],
-    )
-    def test_cat(self, dtype, shapes, dim, expected_shape):
-        """Test cat op with various shapes"""
-        tensors = [torch.randn(shape, dtype=dtype, device=self.rbln_device) for shape in shapes]
-        result = torch.cat(tensors, dim=dim)
-        expected = torch.cat([t.cpu() for t in tensors], dim=dim)
-        self.assertEqual(result.cpu(), expected.cpu(), atol=ATOL, rtol=RTOL)
-        self.assertEqual(result.device, self.rbln_device)
-        self.assertEqual(result.dtype, expected.dtype)
-        self.assertEqual(result.shape, expected.shape)
+    # cat coverage lives in test_cat_index_select_v2v.py — TestCatV2V covers the
+    # native v2v kernel across dtypes, axes, contig / non-contig inputs, empty
+    # inputs, stack composite, and opinfo conformance regressions.
 
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("shape", TEST_SHAPES_SUBSET)
