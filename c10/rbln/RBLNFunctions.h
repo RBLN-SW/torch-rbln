@@ -268,4 +268,16 @@ C10_RBLN_API void reset_accumulated_memory_stats(const c10::Device& device);
  */
 C10_RBLN_API void reset_peak_memory_stats(const c10::Device& device);
 
+/**
+ * @brief Enables or disables process-wide file offloading for RBLN virtual memory.
+ *
+ * When enabled, host-side regions backing RBLN tensors may be paged out to disk to reduce
+ * host memory pressure. The setting applies to all RBLN devices initialized in the current
+ * process and takes effect for subsequent vmemory operations; existing user views are not
+ * migrated by the toggle itself.
+ *
+ * @param enabled If true, enable file offloading; if false, disable it.
+ */
+C10_RBLN_API void set_file_offloading_enabled(bool enabled);
+
 } // namespace c10::rbln

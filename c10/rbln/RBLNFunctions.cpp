@@ -434,4 +434,9 @@ void reset_peak_memory_stats(const c10::Device& device) {
   RBLN_CHECK(!rbln_reset_peak_memory_stats(device_id));
 }
 
+void set_file_offloading_enabled(bool enabled) {
+  RBLN_LOG_DEBUG("Calling rbln_set_file_offloading_enabled: enabled={}", enabled);
+  RBLN_CHECK(!::rbln::rbln_set_file_offloading_enabled(enabled));
+}
+
 } // namespace c10::rbln
