@@ -8,6 +8,8 @@
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
 
+#include <cstddef>
+
 namespace at::native::rbln {
 
 namespace {
@@ -194,6 +196,63 @@ at::Tensor _copy_from_and_resize_rbln(const at::Tensor& src, const at::Tensor& d
   copy_impl_rbln(src, dst);
 
   return dst;
+}
+
+at::Tensor clone_rbln(const at::Tensor& self, std::optional<c10::MemoryFormat> memory_format) {
+  RBLN_SCOPE_GUARD();
+  // aten::clone's default is MemoryFormat::Preserve, which is a *directive*
+  // (allocate the output with whatever layout best preserves the source's
+  // observable strides), not a concrete storage layout you can hand to
+  // ``at::empty``. Mirror PyTorch's reference resolution before allocating:
+  //   * Preserve + dense contiguous source → Contiguous
+  //   * Preserve + channels_last source → ChannelsLast (2D/3D)
+  //   * Preserve + arbitrary strided view → empty_strided(self.sizes(),
+  //     self.strides()) so the output observes identical strides
+  // For anything else the user explicitly named (Contiguous, ChannelsLast,
+  // ChannelsLast3d) we pass it through to ``at::empty`` as before.
+  const auto mf_req = memory_format.value_or(c10::MemoryFormat::Preserve);
+  const size_t nbytes = static_cast<size_t>(self.numel()) * self.element_size();
+
+  // Direct-d2d eligibility: contiguous storage layout, zero storage offset,
+  // and the user view spans the entire storage. When all three hold the
+  // source elements are contiguous in storage, so a single
+  // c10::rbln::memcpy_v2v moves them to a freshly allocated output without
+  // going through aten::copy_'s dispatch + TensorIterator path.
+  const bool direct_d2d_eligible = self.is_contiguous() && self.storage_offset() == 0 &&
+      static_cast<int64_t>(self.storage().nbytes()) == self.numel() * self.element_size();
+
+  at::Tensor out;
+  if (mf_req == c10::MemoryFormat::Preserve) {
+    if (self.is_non_overlapping_and_dense()) {
+      // Strided dense source: replay the strides on a fresh buffer so the
+      // clone observes identical layout.
+      out = at::empty_strided(self.sizes(), self.strides(), self.options());
+    } else if (self.is_contiguous(at::MemoryFormat::ChannelsLast)) {
+      out = at::empty(self.sizes(), self.options().memory_format(at::MemoryFormat::ChannelsLast));
+    } else if (self.is_contiguous(at::MemoryFormat::ChannelsLast3d)) {
+      out = at::empty(self.sizes(), self.options().memory_format(at::MemoryFormat::ChannelsLast3d));
+    } else {
+      out = at::empty(self.sizes(), self.options().memory_format(at::MemoryFormat::Contiguous));
+    }
+  } else {
+    out = at::empty(self.sizes(), self.options().memory_format(mf_req));
+  }
+
+  if (direct_d2d_eligible && nbytes > 0 && out.is_contiguous() && out.strides() == self.strides()) {
+    // Bypass aten::copy_ dispatch — write directly into the fresh output
+    // buffer. Both self and out live on the same RBLN device (Tensor::options
+    // preserves device), so this is always a same-device v2v. Require
+    // matching strides so the byte order is identical; if the requested
+    // memory format reshuffles strides (e.g. Preserve on a strided view
+    // gives empty_strided with non-contig strides), fall through to the
+    // copy_ path which honours strides.
+    c10::rbln::memcpy_v2v(out.data_ptr(), self.data_ptr(), nbytes);
+  } else {
+    // Non-contig / partial-storage view: keep the default composite path
+    // so aten::copy_'s TensorIterator handles the strided gather.
+    out.copy_(self);
+  }
+  return out;
 }
 
 } // namespace at::native::rbln
