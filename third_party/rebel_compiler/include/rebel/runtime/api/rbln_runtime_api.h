@@ -212,6 +212,13 @@ RBLNRetCode rbln_free(uint64_t vaddr);
 // in-place zeroing of large tensors (e.g. KV-cache) to avoid host memory pressure.
 RBLNRetCode rbln_mark_zeros(uint64_t vaddr);
 
+// Enables or disables process-wide file offloading for vmemory user views.
+// When enabled, host-side regions backing RBLN tensors may be paged out to disk to reduce host
+// memory pressure (e.g. for large weight or KV-cache tensors). The setting applies to all RBLN
+// devices initialized in the current process and takes effect for subsequent vmemory operations;
+// existing user views are not migrated by the toggle itself.
+RBLNRetCode rbln_set_file_offloading_enabled(bool enabled);
+
 RBLNRetCode rbln_set_memory_info(uint64_t vaddr, DataType user_dtype, DataType physical_dtype,
                                  const std::vector<int64_t>& shape);
 RBLNRetCode rbln_set_raw_memory_alloc(uint64_t vaddr, uint64_t size);

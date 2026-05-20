@@ -4,7 +4,9 @@ This module provides functions for managing RBLN device memory, including
 cache management, memory statistics, and memory monitoring capabilities.
 """
 
-from typing import Dict, Optional, Union  # noqa: UP035
+import contextlib
+import threading
+from typing import Dict, Iterator, Optional, Union  # noqa: UP035
 
 import torch
 
@@ -18,6 +20,7 @@ __all__ = [
     "memory_allocated",
     "memory_reserved",
     "memory_stats",
+    "offload",
     "reset_accumulated_memory_stats",
     "reset_peak_memory_stats",
 ]
@@ -165,3 +168,40 @@ def reset_peak_memory_stats(device: Optional[Union[int, str, torch.device]] = No
     """
     device = _normalize_device(device)
     torch_rbln._C.reset_peak_memory_stats(device)
+
+
+_offload_lock = threading.Lock()
+_offload_depth = 0
+
+
+@contextlib.contextmanager
+def offload() -> Iterator[None]:
+    """
+    Context manager that enables RBLN file offloading for its scope.
+
+    Inside the ``with`` block, the process-wide file offloading switch is on, so
+    host-side regions backing RBLN tensors allocated within the block may be paged
+    out to disk. Use this around code paths that allocate large host-resident
+    tensors (for example, KV-cache initialization) where host RAM pressure
+    matters.
+
+    Nested ``offload`` blocks are tracked via a thread-safe depth counter; the
+    switch is flipped back off only when the outermost context exits.
+
+    Example::
+
+        with torch.rbln.offload():
+            tensor = torch.zeros(1 << 30, device="rbln:0")  # offloaded
+    """
+    global _offload_depth
+    with _offload_lock:
+        _offload_depth += 1
+        if _offload_depth == 1:
+            torch_rbln._C._set_file_offloading_enabled(True)
+    try:
+        yield
+    finally:
+        with _offload_lock:
+            _offload_depth -= 1
+            if _offload_depth == 0:
+                torch_rbln._C._set_file_offloading_enabled(False)
