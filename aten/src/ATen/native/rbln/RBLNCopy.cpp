@@ -1,6 +1,7 @@
 // TODO: The previous copy optimizations based on physical shape and physical dtype were removed during
 // v-memory integration. Revisit these optimizations in a future pass.
 #include <ATen/native/rbln/RBLNCopy.h>
+#include <ATen/native/rbln/RBLNStrideUtils.h>
 #include <ATen/native/rbln/RBLNStridedV2V.h>
 #include <ATen/native/rbln/RBLNTensorUtils.h>
 #include <ATen/ops/empty.h>
@@ -8,6 +9,8 @@
 #include <c10/rbln/RBLNFallbackConfig.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
+
+#include <algorithm>
 
 namespace at::native::rbln {
 
@@ -99,6 +102,70 @@ void tensor_copy_from_rbln_to_cpu(const at::Tensor& rbln_src, const at::Tensor& 
   }
 }
 
+// strided_v2v_copy emits one v2v entry per outer iteration. For stride
+// patterns where common_inner_start finds little or no joint inner contig
+// block (e.g. transpose / permute that puts a non-stride-1 dim on the
+// inside) outer_count explodes and the per-entry overhead dominates, making
+// strided_v2v_copy slower than the host-bounce baseline.
+//
+// Gate strided_v2v_copy to (outer_count, inner_block_bytes) regions where it
+// beats host bounce:
+//
+//   - outer_count <= kStridedV2VOuterAlways : always. Per-entry overhead is
+//     bounded; the engine loses at most tens of μs even with 1-element
+//     blocks, and wins by orders of magnitude on fat blocks.
+//   - above that, inner_block_bytes >= kStridedV2VFatInnerBytes : the
+//     per-entry overhead amortizes; host bounce loses by a growing factor.
+//   - sparse views (view span >= kStridedV2VLargeViewSpanBytes) stay on the
+//     engine up to kStridedV2VOuterMax entries: the host bounce buffer is
+//     sized by the full view span (c.f. computeStorageNbytes), so a sparse
+//     view drags megabytes over PCIe both ways for a few KB of payload.
+//   - everything else (large outer_count, tiny inner block, compact span):
+//     host. Engine cost scales with outer_count; host copies the span once.
+constexpr int64_t kStridedV2VOuterAlways = 1024;
+constexpr int64_t kStridedV2VOuterMax = int64_t{256} * 1024;
+constexpr size_t kStridedV2VFatInnerBytes = 256;
+constexpr size_t kStridedV2VLargeViewSpanBytes = size_t{1} * 1024 * 1024;  // 1 MB
+
+bool should_use_strided_v2v_copy(const at::Tensor& rbln_src, const at::Tensor& rbln_dst) {
+  const auto rank = rbln_src.dim();
+  if (rank == 0) {
+    return true;  // 0-D copy is a single v2v, cheap.
+  }
+
+  // Mirror strided_v2v_copy's geometry computation so the gate matches what
+  // the kernel would actually do.
+  const auto inner_start = common_inner_start(rbln_src.sizes(), rbln_src.strides(), rbln_dst.strides());
+
+  int64_t outer_count = 1;
+  for (int64_t i = 0; i < inner_start; ++i) {
+    outer_count *= rbln_src.size(i);
+  }
+  if (outer_count <= kStridedV2VOuterAlways) {
+    return true;
+  }
+
+  int64_t inner_block_elems = 1;
+  for (int64_t i = inner_start; i < rank; ++i) {
+    inner_block_elems *= rbln_src.size(i);
+  }
+  const size_t elm = static_cast<size_t>(rbln_src.element_size());
+  const size_t inner_block_bytes = static_cast<size_t>(inner_block_elems) * elm;
+  if (inner_block_bytes >= kStridedV2VFatInnerBytes) {
+    return true;
+  }
+
+  if (outer_count > kStridedV2VOuterMax) {
+    return false;
+  }
+  const size_t src_span = static_cast<size_t>(
+      at::detail::computeStorageNbytes(rbln_src.sizes(), rbln_src.strides(), rbln_src.element_size()));
+  const size_t dst_span = static_cast<size_t>(
+      at::detail::computeStorageNbytes(rbln_dst.sizes(), rbln_dst.strides(), rbln_dst.element_size()));
+  const size_t max_span = std::max(src_span, dst_span);
+  return max_span >= kStridedV2VLargeViewSpanBytes;
+}
+
 void tensor_copy_from_rbln_to_rbln(const at::Tensor& rbln_src, const at::Tensor& rbln_dst) {
   RBLN_SCOPE_GUARD();
   RBLN_LOG_DEBUG("src_data={}, dst_data={}", fmt::ptr(rbln_src.data_ptr()), fmt::ptr(rbln_dst.data_ptr()));
@@ -111,16 +178,19 @@ void tensor_copy_from_rbln_to_rbln(const at::Tensor& rbln_src, const at::Tensor&
 
   // strided_v2v_copy preconditions: same device (above), same sizes, same dtype, numel > 0.
   // copy_impl_rbln guarantees numel > 0 before reaching here.
-  if (rbln_src.sizes() == rbln_dst.sizes() && rbln_src.scalar_type() == rbln_dst.scalar_type()) {
-    RBLN_LOG_DEBUG("Routing RBLN→RBLN copy through strided_v2v_copy engine");
+  const bool same_shape_dtype =
+      rbln_src.sizes() == rbln_dst.sizes() && rbln_src.scalar_type() == rbln_dst.scalar_type();
+  if (same_shape_dtype && should_use_strided_v2v_copy(rbln_src, rbln_dst)) {
+    RBLN_LOG_DEBUG("Routing RBLN→RBLN copy through strided_v2v_copy");
     strided_v2v_copy(rbln_dst, rbln_src);
     return;
   }
 
-  // Residual: shape mismatch (broadcast) or dtype conversion. Use the host
-  // bounce path which delegates to upstream at::native::copy_() on the CPU
-  // side for broadcast / dtype handling.
-  RBLN_LOG_DEBUG("Falling back to host bounce (shape or dtype mismatch)");
+  // Residual: shape/dtype mismatch, or geometry where strided_v2v_copy would
+  // fan out into many small v2v entries and lose to host bounce. Use the
+  // host bounce path which delegates to upstream at::native::copy_() on the
+  // CPU side for broadcast / dtype handling.
+  RBLN_LOG_DEBUG("Falling back to host bounce");
   const auto cpu_src = at::native::rbln::get_cpu_copy_of_rbln_tensor(rbln_src);
   tensor_copy_from_cpu_to_rbln(cpu_src, rbln_dst);
 }
