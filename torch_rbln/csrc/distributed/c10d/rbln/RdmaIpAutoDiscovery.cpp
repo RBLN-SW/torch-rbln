@@ -28,8 +28,7 @@
 
 #include <c10/rbln/RBLNLogging.h>
 
-namespace c10d {
-namespace rbln {
+namespace torch_rbln {
 namespace detail {
 
 namespace {
@@ -420,5 +419,4 @@ void MaybeAutoDiscoverRbnRdmaIp() {
 }
 
 } // namespace detail
-} // namespace rbln
-} // namespace c10d
+} // namespace torch_rbln

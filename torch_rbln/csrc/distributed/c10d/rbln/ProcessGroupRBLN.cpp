@@ -1659,7 +1659,7 @@ ProcessGroupRBLN::ProcessGroupRBLN(
   // TEMPORARY: auto-fill RBLN_RDMA_IP before InitRBLNWork runs
   // PrepareContextAndExportMem (which is when librbln-ccl reads the env).
   // Remove this call once librbln-ccl performs the discovery internally.
-  c10d::rbln::detail::MaybeAutoDiscoverRbnRdmaIp();
+  ::torch_rbln::detail::MaybeAutoDiscoverRbnRdmaIp();
 
   c10::rbln::get_device_count();
 
