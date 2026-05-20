@@ -34,6 +34,9 @@
 #include <torch/torch.h>
 #include <torch_rbln/csrc/distributed/c10d/rbln/ProcessGroupRBLN.hpp>
 #include <torch_rbln/csrc/distributed/c10d/rbln/RcclUniqueIdForC10d.hpp>
+// TEMPORARY: remove together with RdmaIpAutoDiscovery.{hpp,cpp} once
+// librbln-ccl performs RoCE GID auto-discovery internally.
+#include <torch_rbln/csrc/distributed/c10d/rbln/RdmaIpAutoDiscovery.hpp>
 
 #include <cstring>
 
@@ -1653,6 +1656,11 @@ ProcessGroupRBLN::ProcessGroupRBLN(
       backendName_(RBLN_BACKEND_NAME),
       global_ranks_in_group_(global_ranks_in_group),
       glooBackend_(std::move(glooBackend)) {
+  // TEMPORARY: auto-fill RBLN_RDMA_IP before InitRBLNWork runs
+  // PrepareContextAndExportMem (which is when librbln-ccl reads the env).
+  // Remove this call once librbln-ccl performs the discovery internally.
+  c10d::rbln::detail::MaybeAutoDiscoverRbnRdmaIp();
+
   c10::rbln::get_device_count();
 
   // Check environment variable for sync/async mode
