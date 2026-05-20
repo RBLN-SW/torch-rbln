@@ -1,6 +1,7 @@
 // TODO: The previous copy optimizations based on physical shape and physical dtype were removed during
 // v-memory integration. Revisit these optimizations in a future pass.
 #include <ATen/native/rbln/RBLNCopy.h>
+#include <ATen/native/rbln/RBLNStridedV2V.h>
 #include <ATen/native/rbln/RBLNTensorUtils.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/empty_strided.h>
@@ -102,22 +103,26 @@ void tensor_copy_from_rbln_to_rbln(const at::Tensor& rbln_src, const at::Tensor&
   RBLN_SCOPE_GUARD();
   RBLN_LOG_DEBUG("src_data={}, dst_data={}", fmt::ptr(rbln_src.data_ptr()), fmt::ptr(rbln_dst.data_ptr()));
   RBLN_CHECK(rbln_src.device().is_privateuseone() && rbln_dst.device().is_privateuseone());
+  RBLN_CHECK(
+      rbln_src.device() == rbln_dst.device(),
+      "tensor_copy_from_rbln_to_rbln: cross-device d2d not supported here (got src={} dst={})",
+      c10::str(rbln_src.device()),
+      c10::str(rbln_dst.device()));
 
-  const auto direct_copy = is_direct_copy(rbln_src, rbln_dst);
-  if (direct_copy) {
-    RBLN_LOG_DEBUG("Directly copying RBLN src to RBLN dst");
-
-    auto* dst_data = rbln_dst.data_ptr();
-    const auto* src_data = rbln_src.data_ptr();
-    const auto nbytes = at::detail::computeStorageNbytes(rbln_src.sizes(), rbln_src.strides(), rbln_src.element_size());
-    c10::rbln::memcpy_v2v(dst_data, src_data, nbytes);
-  } else {
-    RBLN_LOG_DEBUG("Creating CPU copy of RBLN src");
-    const auto cpu_src = at::native::rbln::get_cpu_copy_of_rbln_tensor(rbln_src);
-
-    RBLN_LOG_DEBUG("Copying CPU copy to RBLN dst");
-    tensor_copy_from_cpu_to_rbln(cpu_src, rbln_dst);
+  // strided_v2v_copy preconditions: same device (above), same sizes, same dtype, numel > 0.
+  // copy_impl_rbln guarantees numel > 0 before reaching here.
+  if (rbln_src.sizes() == rbln_dst.sizes() && rbln_src.scalar_type() == rbln_dst.scalar_type()) {
+    RBLN_LOG_DEBUG("Routing RBLN→RBLN copy through strided_v2v_copy engine");
+    strided_v2v_copy(rbln_dst, rbln_src);
+    return;
   }
+
+  // Residual: shape mismatch (broadcast) or dtype conversion. Use the host
+  // bounce path which delegates to upstream at::native::copy_() on the CPU
+  // side for broadcast / dtype handling.
+  RBLN_LOG_DEBUG("Falling back to host bounce (shape or dtype mismatch)");
+  const auto cpu_src = at::native::rbln::get_cpu_copy_of_rbln_tensor(rbln_src);
+  tensor_copy_from_cpu_to_rbln(cpu_src, rbln_dst);
 }
 
 void copy_impl_rbln(const at::Tensor& src, const at::Tensor& dst) {
