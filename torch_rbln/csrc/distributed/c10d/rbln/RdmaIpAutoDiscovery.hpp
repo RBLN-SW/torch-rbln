@@ -24,15 +24,13 @@
 // NOTE: must NOT be nested under namespace c10d -- a nested `rbln` namespace
 // there would shadow the top-level `::rbln` (rebel-compiler runtime) and break
 // every `rbln::MemoryInfo` / `rbln::DataType` reference inside c10d code.
-namespace torch_rbln {
-namespace detail {
+namespace torch_rbln::detail {
 
 // Auto-fill RBLN_RDMA_IP by probing /sys/class/infiniband for a RoCE v2
 // capable device whose port is ACTIVE and whose netdev has an IPv4 matching
-// the GID table. Idempotent (std::once_flag inside). Respects pre-set
+// the GID table. Idempotent (c10::once_flag inside). Respects pre-set
 // RBLN_RDMA_IP (does not overwrite). Set RBLN_DISABLE_AUTO_RDMA_IP=1 to skip.
 // Throws (via RBLN_CHECK) when RCCL_PORT_GEN is set but no IP can be found.
 void MaybeAutoDiscoverRbnRdmaIp();
 
-} // namespace detail
-} // namespace torch_rbln
+} // namespace torch_rbln::detail

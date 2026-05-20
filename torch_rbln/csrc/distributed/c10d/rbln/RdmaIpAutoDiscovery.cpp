@@ -18,7 +18,6 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <mutex>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -27,9 +26,9 @@
 #include <vector>
 
 #include <c10/rbln/RBLNLogging.h>
+#include <c10/util/CallOnce.h>
 
-namespace torch_rbln {
-namespace detail {
+namespace torch_rbln::detail {
 
 namespace {
 
@@ -226,11 +225,11 @@ std::optional<std::string> Ipv4ForIface(const std::string& iface) {
     return std::nullopt;
   }
   auto* sin = reinterpret_cast<struct sockaddr_in*>(&ifr.ifr_addr);
-  char buf[INET_ADDRSTRLEN] = {};
-  if (::inet_ntop(AF_INET, &sin->sin_addr, buf, sizeof(buf)) == nullptr) {
+  std::array<char, INET_ADDRSTRLEN> buf{};
+  if (::inet_ntop(AF_INET, &sin->sin_addr, buf.data(), buf.size()) == nullptr) {
     return std::nullopt;
   }
-  return std::string(buf);
+  return std::string(buf.data());
 }
 
 std::optional<std::string> ReadOperstate(const fs::path& netdev_dir) {
@@ -347,8 +346,7 @@ std::optional<std::string> ProbeRoceRdmaIpv4() {
         RDMA_DIAG("candidate dev={} iface={} ipv4={} bucket=active", dev_name, iface, *ipv4);
         active_first.push_back(std::move(tup));
       } else {
-        RDMA_DIAG(
-            "candidate dev={} iface={} ipv4={} bucket=fallback (rdma link unknown)", dev_name, iface, *ipv4);
+        RDMA_DIAG("candidate dev={} iface={} ipv4={} bucket=fallback (rdma link unknown)", dev_name, iface, *ipv4);
         fallback.push_back(std::move(tup));
       }
     }
@@ -414,9 +412,8 @@ void DoOnce() {
 } // namespace
 
 void MaybeAutoDiscoverRbnRdmaIp() {
-  static std::once_flag once;
-  std::call_once(once, &DoOnce);
+  static c10::once_flag once;
+  c10::call_once(once, &DoOnce);
 }
 
-} // namespace detail
-} // namespace torch_rbln
+} // namespace torch_rbln::detail
