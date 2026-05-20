@@ -25,20 +25,24 @@ inline bool advance(std::vector<int64_t>& idx, c10::IntArrayRef sizes) {
 
 // Flip `homogeneous` to false if this (src, dst) pair would break the
 // "all entries on one device" invariant required by the bulk dispatch.
-// Once flipped, the lookup is skipped — no way to recover within a batch.
+// Once flipped, all subsequent calls short-circuit.
+//
+// src is looked up first; if it already mismatches the anchor we can skip
+// the dst lookup entirely. The dst lookup only runs on the happy path
+// (src matches anchor) to catch cross-device entries.
 inline void update_homogeneity(bool& homogeneous, c10::DeviceIndex& anchor, const void* src, const void* dst) {
   if (!homogeneous) {
     return;
   }
   const auto s = static_cast<c10::DeviceIndex>(get_memory_info(src).torch_device_id);
-  const auto d = static_cast<c10::DeviceIndex>(get_memory_info(dst).torch_device_id);
-  if (s != d) {
-    homogeneous = false;
-    return;
-  }
   if (anchor < 0) {
     anchor = s;
   } else if (anchor != s) {
+    homogeneous = false;
+    return;
+  }
+  const auto d = static_cast<c10::DeviceIndex>(get_memory_info(dst).torch_device_id);
+  if (s != d) {
     homogeneous = false;
   }
 }
@@ -46,13 +50,9 @@ inline void update_homogeneity(bool& homogeneous, c10::DeviceIndex& anchor, cons
 } // namespace
 
 struct V2VBatch::Impl {
-  // Flat list of pending slab descriptors. Storing V2VCopyOp directly lets
-  // submit() hand the vector to memcpy_v2v_multi without an intermediate copy.
   std::vector<V2VCopyOp> pending;
-  // submit() routes through the bulk memcpy_v2v_multi only while this stays
-  // true (all entries on the same device == `anchor`). The first cross-device
-  // or anchor-mismatching entry flips it; submit() then falls back to
-  // per-entry memcpy_v2v which handles host-bounce on its own.
+  // True while every enqueued (src, dst) pair shares one device == `anchor`.
+  // submit() takes the bulk path when set, per-entry fallback otherwise.
   bool homogeneous = true;
   c10::DeviceIndex anchor = -1;
 };
@@ -60,12 +60,9 @@ struct V2VBatch::Impl {
 V2VBatch::V2VBatch() : impl_(std::make_unique<Impl>()) {}
 
 V2VBatch::~V2VBatch() {
-  // Safety net only — never issue backend calls here. A rebel rejection
-  // during stack unwinding would propagate out of the destructor and
-  // terminate the process. Reaching this point with pending entries on a
-  // normal path means the caller forgot submit(); log loudly so it gets
-  // caught in dev. During exception unwind stay silent: the real error is
-  // the in-flight throw, not the unsubmitted batch.
+  // Safety net — never issue backend calls (a rejection during stack unwind
+  // would terminate the process). On a normal path with pending entries,
+  // warn so the missing submit() gets caught; during unwind, stay silent.
   if (impl_ && !impl_->pending.empty() && std::uncaught_exceptions() == 0) {
     RBLN_LOG_WARN("V2VBatch destroyed with {} pending entries — missing submit()", impl_->pending.size());
   }
@@ -144,8 +141,7 @@ void V2VBatch::submit() {
     RBLN_LOG_DEBUG("V2VBatch::submit draining {} entries (batched)", impl_->pending.size());
     memcpy_v2v_multi(impl_->pending);
   } else {
-    // Heterogeneous batch — drain in enqueue order via per-entry memcpy_v2v,
-    // which routes cross-device entries through a host bounce buffer.
+    // Heterogeneous — per-entry memcpy_v2v handles host-bounce internally.
     RBLN_LOG_DEBUG("V2VBatch::submit draining {} entries (per-entry fallback)", impl_->pending.size());
     for (const auto& e : impl_->pending) {
       memcpy_v2v(e.dst, e.src, e.nbytes);

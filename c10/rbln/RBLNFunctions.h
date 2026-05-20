@@ -177,12 +177,7 @@ C10_RBLN_API void memcpy_v2h(void* cpu_dst_data, const void* rbln_src_data, size
 C10_RBLN_API void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes);
 
 /**
- * @brief Descriptor for one device-to-device slab copy submitted via
- *        memcpy_v2v_multi.
- *
- * The triple mirrors a single rbln_memcpy_v2v call (dst, src, nbytes). Caller
- * keeps ownership of the memory `dst` / `src` point to — the descriptor is
- * read once during the batched dispatch.
+ * @brief Descriptor for one device-to-device slab copy used by memcpy_v2v_multi.
  */
 struct C10_RBLN_API V2VCopyOp {
   void* dst;
@@ -191,32 +186,18 @@ struct C10_RBLN_API V2VCopyOp {
 };
 
 /**
- * @brief Batched device-to-device copy.
+ * @brief Batched device-to-device copy through rbln_memcpy_v2v_multi.
  *
- * Routes the entire `copies` list through the runtime's bulk
- * rbln_memcpy_v2v_multi entrypoint, amortising dispatch overhead across the
- * batch. An empty input is a no-op.
+ * Empty input is a no-op. Each entry must have nbytes > 0 and non-null dst/src.
  *
- * Each entry must have nbytes > 0 and non-null dst/src.
+ * Caller contract (NOT validated): every entry's src AND dst must reside on the
+ * same RBLN device. The bulk runtime entrypoint targets one device per call and
+ * does NOT host-bounce cross-device entries — mixing devices yields silent wrong
+ * results. Callers with heterogeneous inputs should partition up front or use
+ * memcpy_v2v per entry; V2VBatch handles this internally via fallback.
  *
- * Caller contract (NOT validated here):
- *   - Every entry's src AND dst must reside on the same RBLN device.
- *     The bulk runtime entrypoint routes by vaddr, so the thread's active
- *     device does not need to match — but mixing entries from different
- *     devices in one call is not supported.
- *   - src/dst regions of different entries must not overlap.
- *
- * Unlike the single-call memcpy_v2v, this wrapper does NOT auto-route
- * cross-device entries through a host bounce buffer — mixing in an entry
- * from a different device would silently produce wrong results. Callers
- * that may see heterogeneous inputs should partition up front or use
- * memcpy_v2v per entry. V2VBatch handles this internally, falling back to
- * per-entry dispatch when needed.
- *
- * The runtime may parallelise or reorder entries, so overlapping ranges
- * yield undefined behaviour in the batched path.
- *
- * @param copies List of slab descriptors to dispatch as a single batch.
+ * The runtime may parallelise or reorder entries, so overlapping ranges across
+ * entries yield undefined behaviour.
  */
 C10_RBLN_API void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies);
 
