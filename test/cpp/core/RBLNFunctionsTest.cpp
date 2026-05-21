@@ -202,6 +202,69 @@ TEST_F(RBLNFunctionsTest, CrossDeviceMemcpy) {
   }
 }
 
+// Empty input must be a clean no-op — no runtime call, no error.
+TEST_F(RBLNFunctionsTest, MemcpyV2VMultiEmptyIsNoop) {
+  std::vector<c10::rbln::V2VCopyOp> copies;
+  EXPECT_NO_THROW(c10::rbln::memcpy_v2v_multi(copies));
+}
+
+// Bulk dispatch: many independent slab copies into adjacent dst regions land
+// at the right offsets and preserve content. Validates the new
+// rbln_memcpy_v2v_multi entrypoint that V2VBatch::submit() now routes through.
+TEST_F(RBLNFunctionsTest, MemcpyV2VMultiBasic) {
+  constexpr size_t blk = 32;
+  constexpr size_t nblk = 64;
+  constexpr size_t total = blk * nblk;
+
+  std::vector<int8_t> src_host(total);
+  for (size_t i = 0; i < total; ++i) {
+    src_host[i] = static_cast<int8_t>((i * 17) % 127);
+  }
+  std::vector<int8_t> dst_initial(total, 0);
+
+  for (c10::DeviceIndex device_index = 0; device_index < c10::rbln::get_device_count(); ++device_index) {
+    c10::rbln::set_device_index(device_index);
+
+    auto* src_rbln = static_cast<int8_t*>(c10::rbln::malloc(device_index, total));
+    auto* dst_rbln = static_cast<int8_t*>(c10::rbln::malloc(device_index, total));
+    ASSERT_NE(src_rbln, nullptr);
+    ASSERT_NE(dst_rbln, nullptr);
+    c10::rbln::memcpy_h2v(src_rbln, src_host.data(), total);
+    c10::rbln::memcpy_h2v(dst_rbln, dst_initial.data(), total);
+
+    std::vector<c10::rbln::V2VCopyOp> copies;
+    copies.reserve(nblk);
+    for (size_t i = 0; i < nblk; ++i) {
+      copies.push_back({dst_rbln + i * blk, src_rbln + i * blk, blk});
+    }
+    c10::rbln::memcpy_v2v_multi(copies);
+
+    std::vector<int8_t> dst_host(total);
+    c10::rbln::memcpy_v2h(dst_host.data(), dst_rbln, total);
+    EXPECT_EQ(dst_host, src_host);
+
+    c10::rbln::free(src_rbln);
+    c10::rbln::free(dst_rbln);
+  }
+}
+
+// nullptr / 0-byte entries are rejected with a c10::Error before reaching the
+// runtime — mirrors the per-call memcpy_v2v contract.
+TEST_F(RBLNFunctionsTest, MemcpyV2VMultiRejectsInvalidEntries) {
+  constexpr size_t n = 16;
+  std::vector<int8_t> src_host(n, 7);
+  auto* src_rbln = c10::rbln::malloc(0, n);
+  auto* dst_rbln = c10::rbln::malloc(0, n);
+  c10::rbln::memcpy_h2v(src_rbln, src_host.data(), n);
+
+  EXPECT_THROW(c10::rbln::memcpy_v2v_multi({{dst_rbln, src_rbln, 0}}), c10::Error);
+  EXPECT_THROW(c10::rbln::memcpy_v2v_multi({{dst_rbln, nullptr, n}}), c10::Error);
+  EXPECT_THROW(c10::rbln::memcpy_v2v_multi({{nullptr, src_rbln, n}}), c10::Error);
+
+  c10::rbln::free(src_rbln);
+  c10::rbln::free(dst_rbln);
+}
+
 TEST_F(RBLNFunctionsTest, GetUninitializedMemoryInfo) {
   const auto device_count = c10::rbln::get_device_count();
   EXPECT_GE(device_count, 1);

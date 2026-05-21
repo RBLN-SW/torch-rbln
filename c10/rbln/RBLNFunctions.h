@@ -6,9 +6,11 @@
 #include <c10/rbln/RBLNMacros.h>
 #include <rebel/runtime/api/rbln_runtime_api.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <string>
+#include <vector>
 
 namespace c10::rbln {
 
@@ -173,6 +175,31 @@ C10_RBLN_API void memcpy_v2h(void* cpu_dst_data, const void* rbln_src_data, size
  * @param nbytes The number of bytes to copy (must be positive).
  */
 C10_RBLN_API void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes);
+
+/**
+ * @brief Descriptor for one device-to-device slab copy used by memcpy_v2v_multi.
+ */
+struct C10_RBLN_API V2VCopyOp {
+  void* dst;
+  const void* src;
+  size_t nbytes;
+};
+
+/**
+ * @brief Batched device-to-device copy through rbln_memcpy_v2v_multi.
+ *
+ * Empty input is a no-op. Each entry must have nbytes > 0 and non-null dst/src.
+ *
+ * Caller contract (NOT validated): every entry's src AND dst must reside on the
+ * same RBLN device. The bulk runtime entrypoint targets one device per call and
+ * does NOT host-bounce cross-device entries — mixing devices yields silent wrong
+ * results. Callers with heterogeneous inputs should partition up front or use
+ * memcpy_v2v per entry; V2VBatch handles this internally via fallback.
+ *
+ * The runtime may parallelise or reorder entries, so overlapping ranges across
+ * entries yield undefined behaviour.
+ */
+C10_RBLN_API void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies);
 
 /**
  * @brief Returns comprehensive device memory statistics.
