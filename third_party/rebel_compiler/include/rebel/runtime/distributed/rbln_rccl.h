@@ -114,8 +114,9 @@ class Rccl {
  private:
   inline bool IsForceRdma() const { return use_force_rdma_; }
   inline bool IsForceExportMem() const { return use_force_export_mem_; }
-  inline void ExportMemIfForced() {
-    if (IsForceRdma() || IsForceExportMem()) ExportMem();
+  inline RBLNRetCode ExportMemIfForced() {
+    if (IsForceRdma() || IsForceExportMem()) return ExportMem();
+    return RBLNRetCode_SUCCESS;
   }
   /**
    * @brief Export memory only if device memory has changed since last export.
@@ -123,8 +124,14 @@ class Rccl {
    * This checks the MemoryChangeTracker flag set by CachingAllocator and
    * only calls ExportMem() when necessary. This avoids the ~3ms overhead
    * of calling ExportMem() on every CCL operation.
+   *
+   * Note: ShouldExportMem() atomically clears the dirty flag *before* ExportMem()
+   * runs. If the underlying rcclExportMem call fails, we re-set the flag so a
+   * subsequent collective op tries again, and we propagate the failure to the
+   * caller; otherwise the next collective would silently operate on stale
+   * exported memory mappings.
    */
-  void ExportMemIfNeeded();
+  RBLNRetCode ExportMemIfNeeded();
   bool VerifyInitialized() const;
   void ReadEnv();
   RBLNRetCode ExportMem();

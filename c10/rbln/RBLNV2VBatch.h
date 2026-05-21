@@ -9,32 +9,23 @@
 namespace c10::rbln {
 
 /**
- * @brief A buffered batch of pending device-to-device (v2v) copies.
+ * @brief Buffered batch of pending device-to-device (v2v) copies.
  *
- * V2VBatch isolates the rest of torch-rbln from the rebel runtime's v2v API
- * surface. Callers enqueue logical copy requests; submit() flushes them to
- * the backend.
+ * Isolates callers from the rebel runtime's v2v API. enqueue() / enqueue_strided()
+ * record copy requests; submit() flushes them through rbln_memcpy_v2v_multi when
+ * every entry shares one device, or falls back to per-entry memcpy_v2v (which
+ * host-bounces cross-device entries). The path is decided from bookkeeping kept
+ * at enqueue time, so submit() is O(N) with no extra lookups.
  *
- * Today the runtime exposes only a single flat call (rbln_memcpy_v2v), so
- * submit() drains the queue by issuing one call per entry. Two future
- * additions are anticipated:
+ * When the runtime exposes a strided v2v API, enqueue_strided will forward the
+ * description directly instead of expanding internally — engine/kernel code that
+ * uses V2VBatch will not change.
  *
- *   1. A batched API that accepts a list of (dst, src, nbytes) in one call —
- *      submit() will rewrite to issue a single bulk call.
- *   2. A strided API that accepts (sizes, strides, inner_block) — enqueue_strided
- *      will stop expanding internally and forward the description directly.
+ * Lifetime: callers must invoke submit() on success. The destructor never issues
+ * backend calls (a rejection during unwind would terminate the process); it just
+ * warns when pending entries remain on a normal path.
  *
- * When either lands, only this class changes. Engine / kernel code that uses
- * V2VBatch stays the same.
- *
- * Lifetime: callers MUST invoke submit() on the success path. The destructor
- * is a leak-prevention safety net only — it never issues backend calls, since
- * a backend rejection during stack unwinding would terminate the process. If
- * the destructor sees pending entries on a normal (non-exceptional) path it
- * logs a warning so the missing submit() is caught in development; during
- * exception unwind it stays silent (the real error is the in-flight throw).
- *
- * Threading: not thread-safe. Each user thread should own its own batch.
+ * Threading: not thread-safe — one batch per thread.
  */
 class C10_RBLN_API V2VBatch {
  public:

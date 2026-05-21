@@ -322,6 +322,23 @@ void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes) {
   }
 }
 
+void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies) {
+  if (copies.empty()) {
+    return;
+  }
+  std::vector<std::tuple<uint64_t, uint64_t, uint64_t>> rbln_copies;
+  rbln_copies.reserve(copies.size());
+  for (const auto& c : copies) {
+    RBLN_CHECK(c.nbytes > 0, "memcpy_v2v_multi: nbytes must be positive");
+    RBLN_CHECK(c.src != nullptr, "memcpy_v2v_multi: src cannot be nullptr");
+    RBLN_CHECK(c.dst != nullptr, "memcpy_v2v_multi: dst cannot be nullptr");
+    rbln_copies.emplace_back(
+        reinterpret_cast<uint64_t>(c.src), reinterpret_cast<uint64_t>(c.dst), static_cast<uint64_t>(c.nbytes));
+  }
+  RBLN_LOG_DEBUG("Calling rbln_memcpy_v2v_multi: n_copies={}", copies.size());
+  RBLN_CHECK(!::rbln::rbln_memcpy_v2v_multi(rbln_copies));
+}
+
 c10::CachingDeviceAllocator::DeviceStats get_device_stats(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
   const auto device_index = device.index();
