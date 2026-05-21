@@ -290,16 +290,19 @@ void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes) {
   RBLN_CHECK(rbln_src_data != nullptr, "rbln_src_data cannot be nullptr");
   RBLN_CHECK(rbln_dst_data != nullptr, "rbln_dst_data cannot be nullptr");
 
-  const auto src_memory_info = get_memory_info(rbln_src_data);
-  const auto dst_memory_info = get_memory_info(rbln_dst_data);
-  const auto src_device_index = static_cast<c10::DeviceIndex>(src_memory_info.torch_device_id);
-  const auto dst_device_index = static_cast<c10::DeviceIndex>(dst_memory_info.torch_device_id);
-  RBLN_LOG_DEBUG("src=rbln:{}, dst=rbln:{}", static_cast<int>(src_device_index), static_cast<int>(dst_device_index));
-
   const auto src_vaddr = reinterpret_cast<uint64_t>(rbln_src_data);
   const auto dst_vaddr = reinterpret_cast<uint64_t>(rbln_dst_data);
   const auto size = static_cast<uint64_t>(nbytes);
-  if (src_device_index == dst_device_index) {
+
+  uint32_t src_torch_device_id = 0;
+  uint32_t dst_torch_device_id = 0;
+  RBLN_CHECK(!::rbln::rbln_get_torch_device_id_from_vaddr(src_vaddr, src_torch_device_id));
+  RBLN_CHECK(!::rbln::rbln_get_torch_device_id_from_vaddr(dst_vaddr, dst_torch_device_id));
+
+  RBLN_LOG_DEBUG(
+      "src=rbln:{}, dst=rbln:{}", static_cast<int>(src_torch_device_id), static_cast<int>(dst_torch_device_id));
+
+  if (src_torch_device_id == dst_torch_device_id) {
     RBLN_LOG_DEBUG("Performing same-device copy");
 
     RBLN_LOG_DEBUG("Calling rbln_memcpy_v2v: src_vaddr={:#x}, dst_vaddr={:#x}, size={}", src_vaddr, dst_vaddr, size);
