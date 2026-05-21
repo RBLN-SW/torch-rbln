@@ -1,3 +1,4 @@
+#include <c10/core/Device.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNV2VBatch.h>
@@ -22,32 +23,46 @@ inline bool advance(std::vector<int64_t>& idx, c10::IntArrayRef sizes) {
   return false;
 }
 
+// Flip `homogeneous` to false if this (src, dst) pair would break the
+// "all entries on one device" invariant required by the bulk dispatch.
+// Once flipped, all subsequent calls short-circuit.
+//
+// src is looked up first; if it already mismatches the anchor we can skip
+// the dst lookup entirely. The dst lookup only runs on the happy path
+// (src matches anchor) to catch cross-device entries.
+inline void update_homogeneity(bool& homogeneous, c10::DeviceIndex& anchor, const void* src, const void* dst) {
+  if (!homogeneous) {
+    return;
+  }
+  const auto s = static_cast<c10::DeviceIndex>(get_memory_info(src).torch_device_id);
+  if (anchor < 0) {
+    anchor = s;
+  } else if (anchor != s) {
+    homogeneous = false;
+    return;
+  }
+  const auto d = static_cast<c10::DeviceIndex>(get_memory_info(dst).torch_device_id);
+  if (s != d) {
+    homogeneous = false;
+  }
+}
+
 } // namespace
 
 struct V2VBatch::Impl {
-  // Flat list of (dst, src, nbytes) entries.
-  //
-  // Today: each entry will be drained by one rbln_memcpy_v2v call in submit().
-  // When the runtime adds a batched API this becomes the input to one bulk
-  // call. The struct is intentionally trivial (no smart pointers / lifetimes)
-  // so that future batching primitives can hand it to C-style APIs directly.
-  struct Entry {
-    void* dst;
-    const void* src;
-    size_t nbytes;
-  };
-  std::vector<Entry> pending;
+  std::vector<V2VCopyOp> pending;
+  // True while every enqueued (src, dst) pair shares one device == `anchor`.
+  // submit() takes the bulk path when set, per-entry fallback otherwise.
+  bool homogeneous = true;
+  c10::DeviceIndex anchor = -1;
 };
 
 V2VBatch::V2VBatch() : impl_(std::make_unique<Impl>()) {}
 
 V2VBatch::~V2VBatch() {
-  // Safety net only — never issue backend calls here. A rebel rejection
-  // during stack unwinding would propagate out of the destructor and
-  // terminate the process. Reaching this point with pending entries on a
-  // normal path means the caller forgot submit(); log loudly so it gets
-  // caught in dev. During exception unwind stay silent: the real error is
-  // the in-flight throw, not the unsubmitted batch.
+  // Safety net — never issue backend calls (a rejection during stack unwind
+  // would terminate the process). On a normal path with pending entries,
+  // warn so the missing submit() gets caught; during unwind, stay silent.
   if (impl_ && !impl_->pending.empty() && std::uncaught_exceptions() == 0) {
     RBLN_LOG_WARN("V2VBatch destroyed with {} pending entries — missing submit()", impl_->pending.size());
   }
@@ -59,6 +74,7 @@ void V2VBatch::enqueue(void* dst, const void* src, size_t nbytes) {
   if (nbytes == 0) {
     return;
   }
+  update_homogeneity(impl_->homogeneous, impl_->anchor, src, dst);
   impl_->pending.push_back({dst, src, nbytes});
 }
 
@@ -98,6 +114,9 @@ void V2VBatch::enqueue_strided(
 
   impl_->pending.reserve(impl_->pending.size() + static_cast<size_t>(outer_count));
 
+  // All N expanded entries share the same base devices — one lookup suffices.
+  update_homogeneity(impl_->homogeneous, impl_->anchor, src, dst);
+
   auto* dst_base = static_cast<uint8_t*>(dst);
   const auto* src_base = static_cast<const uint8_t*>(src);
 
@@ -118,13 +137,19 @@ void V2VBatch::submit() {
   if (!impl_ || impl_->pending.empty()) {
     return;
   }
-  // Drain in order. When a batched rebel API arrives this loop becomes a
-  // single bulk call over impl_->pending.
-  RBLN_LOG_DEBUG("V2VBatch::submit draining {} entries", impl_->pending.size());
-  for (const auto& e : impl_->pending) {
-    memcpy_v2v(e.dst, e.src, e.nbytes);
+  if (impl_->homogeneous) {
+    RBLN_LOG_DEBUG("V2VBatch::submit draining {} entries (batched)", impl_->pending.size());
+    memcpy_v2v_multi(impl_->pending);
+  } else {
+    // Heterogeneous — per-entry memcpy_v2v handles host-bounce internally.
+    RBLN_LOG_DEBUG("V2VBatch::submit draining {} entries (per-entry fallback)", impl_->pending.size());
+    for (const auto& e : impl_->pending) {
+      memcpy_v2v(e.dst, e.src, e.nbytes);
+    }
   }
   impl_->pending.clear();
+  impl_->homogeneous = true;
+  impl_->anchor = -1;
 }
 
 size_t V2VBatch::pending_count() const {
