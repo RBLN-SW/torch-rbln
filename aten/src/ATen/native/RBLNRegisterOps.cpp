@@ -144,6 +144,8 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   m.impl("index_copy.out", TORCH_FN(at::native::rbln::index_copy_out_rbln));
   m.impl("repeat_interleave.Tensor", TORCH_FN(at::native::rbln::repeat_interleave_Tensor_rbln));
   m.impl("cat.out", TORCH_FN(at::native::rbln::cat_out_rbln));
+  m.impl("fill_.Scalar", TORCH_FN(at::native::rbln::fill_scalar_rbln_));
+  m.impl("fill_.Tensor", TORCH_FN(at::native::rbln::fill_tensor_rbln_));
 
   // View operations (metadata-only, no device computation)
   // These operations only manipulate tensor metadata and do not require
@@ -178,8 +180,6 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   // Scalar and tensor manipulation
   m.impl("trunc.out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("_local_scalar_dense", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
-  m.impl("fill_.Scalar", TORCH_FN(at::native::rbln::fill_scalar_rbln_));
-  m.impl("fill_.Tensor", TORCH_FN(at::native::rbln::fill_tensor_rbln_));
   m.impl("equal", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("_efficientzerotensor", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("native_dropout", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
