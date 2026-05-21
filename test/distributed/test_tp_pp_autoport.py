@@ -19,8 +19,6 @@ import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from test.utils import configure_rbln_network_for_autoport_tests
-
 
 _TARGET_MODULE = "test.distributed.test_tp_pp"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -62,7 +60,12 @@ class TestTPPPAutoportConcurrent(TestCase):
                 f"requires at least {_MIN_DEVICES} RBLN devices "
                 f"(available: {torch.rbln.device_count() if torch.rbln.is_available() else 0})",
             )
-        configure_rbln_network_for_autoport_tests()
+        # RBLN_LOCAL_IP / RBLN_ROOT_IP need a loopback default for the control
+        # plane on single-host runs; RBLN_RDMA_IP is auto-discovered inside the
+        # C++ ProcessGroupRBLN ctor (see RdmaIpAutoDiscovery.cpp) so we no
+        # longer probe for it from Python.
+        os.environ.setdefault("RBLN_LOCAL_IP", "127.0.0.1")
+        os.environ.setdefault("RBLN_ROOT_IP", "127.0.0.1")
         with ThreadPoolExecutor(max_workers=len(_PARTITIONS)) as executor:
             results = list(executor.map(_invoke_test_tp_pp, _PARTITIONS))
 
