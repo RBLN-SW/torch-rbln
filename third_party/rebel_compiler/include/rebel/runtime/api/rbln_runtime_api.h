@@ -226,6 +226,9 @@ RBLNRetCode rbln_set_raw_memory_alloc(uint64_t vaddr, uint64_t size);
 // Retrieves detailed information for the vmemory entry.
 RBLNRetCode rbln_get_memory_info(uint64_t vaddr, MemoryInfo& memory_info_out);
 
+// Returns the torch_device_id from a vaddr.
+RBLNRetCode rbln_get_torch_device_id_from_vaddr(uint64_t vaddr, uint32_t& torch_device_id_out);
+
 // Copies the contents from host memory to the virtual memory area.
 RBLNRetCode rbln_memcpy_h2v(uintptr_t src_host_ptr, uint64_t dst_vaddr, uint64_t size);
 
