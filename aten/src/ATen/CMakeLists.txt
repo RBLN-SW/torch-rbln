@@ -35,9 +35,8 @@ target_link_libraries(${target} PUBLIC
 )
 set_target_properties(${target} PROPERTIES
   DEFINE_SYMBOL TORCH_RBLN_BUILD_MAIN_LIB
-)
-target_compile_options(${target} PRIVATE
-  -fvisibility=hidden
+  CXX_VISIBILITY_PRESET hidden
+  VISIBILITY_INLINES_HIDDEN ON
 )
 target_include_directories(${target} SYSTEM PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
