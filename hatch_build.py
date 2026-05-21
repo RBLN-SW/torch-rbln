@@ -107,10 +107,6 @@ class CMakeBuildHook(BuildHookInterface):
                 ]
             )
 
-        # Add custom CMake options from environment
-        if os.environ.get("TORCH_RBLN_DEPLOY") == "ON":
-            cmake_args.append("-DTORCH_RBLN_DEPLOY=ON")
-
         # Configure
         self._run_command(cmake_args, cwd=project_root)
 
