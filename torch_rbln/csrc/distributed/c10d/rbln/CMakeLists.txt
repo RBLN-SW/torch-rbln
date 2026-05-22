@@ -1,6 +1,9 @@
 set(target c10d_rbln)
 set(sources
   ProcessGroupRBLN.cpp
+  # TEMPORARY: remove together with RdmaIpAutoDiscovery.{hpp,cpp} once
+  # librbln-ccl performs RoCE GID auto-discovery internally.
+  RdmaIpAutoDiscovery.cpp
 )
 
 set(headers
