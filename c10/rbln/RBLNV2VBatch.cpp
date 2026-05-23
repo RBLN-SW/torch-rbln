@@ -137,11 +137,34 @@ void V2VBatch::submit() {
   if (!impl_ || impl_->pending.empty()) {
     return;
   }
+  bool drained = false;
   if (impl_->homogeneous) {
+    // Try the batched fast path first. The runtime's
+    // ``CopyVirtualToVirtualMulti`` enforces stricter no-overlap invariants
+    // between concurrent sub-copies than the per-entry path needs (writes
+    // can be observed out-of-order across the batch), and some strided
+    // patterns we emit from ``strided_v2v_copy`` — e.g. multi-slab ``cat``
+    // into a non-contig output where each slab fans out to thousands of
+    // narrow sub-copies — hit that check even though no two sub-copies
+    // actually alias each other. Catch the runtime rejection and fall back
+    // to the per-entry path, which has no such inter-copy ordering
+    // constraint. Correctness-equivalent to the dev path; loses the batch
+    // throughput win only for the offending submit().
     RBLN_LOG_DEBUG("V2VBatch::submit draining {} entries (batched)", impl_->pending.size());
-    memcpy_v2v_multi(impl_->pending);
-  } else {
-    // Heterogeneous — per-entry memcpy_v2v handles host-bounce internally.
+    try {
+      memcpy_v2v_multi(impl_->pending);
+      drained = true;
+    } catch (const c10::Error& e) {
+      RBLN_LOG_WARN(
+          "V2VBatch::submit batched path rejected ({} entries) — falling back to per-entry: {}",
+          impl_->pending.size(),
+          e.what_without_backtrace());
+    }
+  }
+  if (!drained) {
+    // Heterogeneous (or batched path was rejected) — per-entry memcpy_v2v
+    // handles host-bounce internally and tolerates any ordering between
+    // entries.
     RBLN_LOG_DEBUG("V2VBatch::submit draining {} entries (per-entry fallback)", impl_->pending.size());
     for (const auto& e : impl_->pending) {
       memcpy_v2v(e.dst, e.src, e.nbytes);

@@ -156,32 +156,39 @@ class TestDispatchShimNanInfFallback(TestCase):
         # Regression: clean inputs must NOT be misclassified as needing
         # fallback. Verified indirectly: a warm-cache entry must be installed
         # (the fallback path never installs).
+        # Use a 64-elem-aligned shape so ``compile_and_run_view_aware`` keeps
+        # the call on the device path; unaligned last-dim now routes through
+        # ``cpu_fallback_path`` and never primes the warm cache.
         size_before = _C._warmcache_size()
-        x = torch.arange(8, dtype=torch.float16, device="rbln")
-        y = torch.ones(8, dtype=torch.float16, device="rbln")
+        x = torch.arange(64, dtype=torch.float16, device="rbln")
+        y = torch.ones(64, dtype=torch.float16, device="rbln")
         z = x + y
-        self.assertEqual(z.to("cpu"), torch.arange(1, 9, dtype=torch.float16))
+        self.assertEqual(z.to("cpu"), torch.arange(1, 65, dtype=torch.float16))
         # At least one new warm-cache entry was installed.
         self.assertGreater(_C._warmcache_size(), size_before)
 
     def test_warm_hit_does_not_bypass_late_nan(self) -> None:
         """The critical regression case for the fixup.
 
-        Step 1: clean inputs install a warm-cache entry for shape (8,).
+        Step 1: clean inputs install a warm-cache entry for shape (64,).
         Step 2: same shape, but one input has NaN. Without this fixup the
                 C++ shim would hit the warm cache, bypass the Python check,
                 and hand the NaN tensor to the rbln runtime — wrong result.
         Step 3: NaN must propagate (proves the late NaN was caught and
                 routed to the CPU fallback path even with the entry hot).
         """
+        # Use a 64-aligned shape so the first call lands on the device path
+        # (and thus primes the warm cache); unaligned shapes route through
+        # ``cpu_fallback_path`` and never install an entry.
+        n = 64
         # Step 1: prime the warm cache with clean inputs.
-        x_clean = torch.arange(8, dtype=torch.float16, device="rbln")
-        y = torch.ones(8, dtype=torch.float16, device="rbln")
+        x_clean = torch.arange(n, dtype=torch.float16, device="rbln")
+        y = torch.ones(n, dtype=torch.float16, device="rbln")
         _ = x_clean + y
         self.assertGreater(_C._warmcache_size(), 0)
 
         # Step 2: same shape, NaN injected on one slot.
-        x_dirty_cpu = torch.arange(8, dtype=torch.float16)
+        x_dirty_cpu = torch.arange(n, dtype=torch.float16)
         x_dirty_cpu[3] = float("nan")
         x_dirty = x_dirty_cpu.to("rbln")
         z = x_dirty + y
@@ -190,7 +197,32 @@ class TestDispatchShimNanInfFallback(TestCase):
         # Step 3: NaN preserved (fallback path was taken).
         self.assertTrue(torch.isnan(result[3]))
         self.assertEqual(result[0].item(), 1.0)
-        self.assertEqual(result[7].item(), 8.0)
+        self.assertEqual(result[n - 1].item(), float(n))
+
+    def test_unaligned_clean_input_routes_to_cpu_fallback(self) -> None:
+        """Sibling to ``test_clean_input_takes_device_path``: locks in the
+        ``compile_and_run_view_aware`` 64-alignment guard.
+
+        The two warm-cache tests above pick a 64-aligned shape so the device
+        path runs and primes the warm cache. This test inverts the contract
+        for unaligned shapes: clean fp16 inputs whose last-dim is NOT a
+        multiple of 64 must route through ``cpu_fallback_path`` instead of
+        torch.compile, and therefore must NOT install a warm-cache entry. If
+        the alignment guard regresses (e.g. accidentally short-circuits to
+        always-true or always-false), this test catches it from the other
+        direction than ``test_clean_input_takes_device_path``.
+
+        Correctness on the value side is also asserted: the cpu fallback
+        result must match the upstream CPU result element-wise.
+        """
+        size_before = _C._warmcache_size()
+        # 8 % 64 != 0 → ``_last_dim_unaligned`` returns True → cpu_fallback.
+        x = torch.arange(8, dtype=torch.float16, device="rbln")
+        y = torch.ones(8, dtype=torch.float16, device="rbln")
+        z = x + y
+        self.assertEqual(z.to("cpu"), torch.arange(1, 9, dtype=torch.float16))
+        # No new warm-cache entry was installed (cpu_fallback never primes).
+        self.assertEqual(_C._warmcache_size(), size_before)
 
     def test_nan_with_wrapped_python_scalar(self) -> None:
         # Wrapped 0-dim Python scalars (``tensor + 1.0``) are skipped from
