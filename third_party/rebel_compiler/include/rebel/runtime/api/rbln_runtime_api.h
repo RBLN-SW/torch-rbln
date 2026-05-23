@@ -226,6 +226,9 @@ RBLNRetCode rbln_set_raw_memory_alloc(uint64_t vaddr, uint64_t size);
 // Retrieves detailed information for the vmemory entry.
 RBLNRetCode rbln_get_memory_info(uint64_t vaddr, MemoryInfo& memory_info_out);
 
+// Returns the torch_device_id from a vaddr.
+RBLNRetCode rbln_get_torch_device_id_from_vaddr(uint64_t vaddr, uint32_t& torch_device_id_out);
+
 // Borrow a host pointer into the rbln virtual memory at `vaddr`. Triggers a
 // device→host sync if the device view is currently authoritative; allocates
 // host backing if none exists. After this call the host buffer is read-ready.

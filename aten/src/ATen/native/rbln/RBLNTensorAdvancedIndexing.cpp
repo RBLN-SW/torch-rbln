@@ -242,10 +242,22 @@ at::Tensor& index_copy_out_rbln(
     return out;
   }
 
-  // Bounds-check index values once on host.
+  // Bounds-check index values once on host, and detect duplicates in the same
+  // pass. Duplicates make Phase 2's per-run dst slices overlap on the axis,
+  // which the batched v2v API rejects (it may reorder/parallelise entries, so
+  // overlapping ranges are undefined behaviour by contract). When duplicates
+  // exist we fall off the batched path and submit each run as its own v2v —
+  // sequential per-run calls preserve PyTorch's last-write-wins semantics.
   const int64_t axis_extent = self.size(axis);
+  std::vector<bool> seen(static_cast<size_t>(axis_extent), false);
+  bool has_duplicate_index = false;
   for (int64_t v : idx_host) {
     RBLN_CHECK(v >= 0 && v < axis_extent, "index_copy: index value {} out of range [0, {})", v, axis_extent);
+    if (seen[static_cast<size_t>(v)]) {
+      has_duplicate_index = true;
+    } else {
+      seen[static_cast<size_t>(v)] = true;
+    }
   }
 
   // Phase 1: initialise `out` with `self`. Skipped when `out` aliases `self`
@@ -256,23 +268,34 @@ at::Tensor& index_copy_out_rbln(
 
   // Phase 2: overwrite indexed positions. `run.value` is the axis position the
   // run starts at in `out`/`self`; `run.pos` is the corresponding start in
-  // `source`. One V2VBatch spans all runs so a future batched v2v API can fuse
-  // them into a single backend call.
-  c10::rbln::V2VBatch batch;
+  // `source`. With unique indices, one V2VBatch spans all runs so a future
+  // batched v2v API can fuse them into a single backend call. With duplicate
+  // indices, the per-run dst slices overlap; submit each run separately so
+  // the bulk API sees one (non-overlapping) entry at a time.
   const auto runs = coalesce_runs(idx_host);
   RBLN_LOG_DEBUG(
-      "index_copy_out_rbln: axis={} n_idx={} runs={} self_sizes={} source_strides={}",
+      "index_copy_out_rbln: axis={} n_idx={} runs={} self_sizes={} source_strides={} has_duplicate_index={}",
       axis,
       n_idx,
       runs.size(),
       c10::str(self.sizes()),
-      c10::str(source.strides()));
-  for (const auto& run : runs) {
-    auto src_view = source.narrow(axis, run.pos, run.length);
-    auto dst_view = out.narrow(axis, run.value, run.length);
-    strided_v2v_copy(dst_view, src_view, batch);
+      c10::str(source.strides()),
+      has_duplicate_index);
+  if (has_duplicate_index) {
+    for (const auto& run : runs) {
+      auto src_view = source.narrow(axis, run.pos, run.length);
+      auto dst_view = out.narrow(axis, run.value, run.length);
+      strided_v2v_copy(dst_view, src_view);
+    }
+  } else {
+    c10::rbln::V2VBatch batch;
+    for (const auto& run : runs) {
+      auto src_view = source.narrow(axis, run.pos, run.length);
+      auto dst_view = out.narrow(axis, run.value, run.length);
+      strided_v2v_copy(dst_view, src_view, batch);
+    }
+    batch.submit();
   }
-  batch.submit();
 
   return out;
 }
