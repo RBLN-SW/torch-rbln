@@ -707,17 +707,16 @@ bool build_cache_key(
       // without requiring us to distinguish "optional scalar absent" from
       // "optional tensor absent"; both just miss if later calls differ.
       out_key.scalars.push_back(ScalarValue::missing());
-    } else if (iv.isTensorList() || iv.isList()) {
-      // Lists are not handled by the warm-cache path yet (no shim op uses
-      // them). Bail out: caller falls through to pybind.
-      return false;
-    } else if (iv.isString()) {
-      // String args (e.g. ``div.out_mode``'s ``rounding_mode='trunc'`` vs
-      // ``'floor'``) are NOT representable in ``ScalarValue`` (which only
-      // knows int/float/bool). Without distinguishing them in the key,
-      // floor's compiled runtime would be hit by a trunc call (wire
-      // mismatch). Bail out to pybind on string args; safer than silently
-      // collapsing to Missing.
+    } else if (iv.isTensorList() || iv.isList() || iv.isString()) {
+      // Bail out to pybind for two distinct kinds of unsupported slots:
+      //   * Lists are not handled by the warm-cache path yet (no shim op
+      //     uses them).
+      //   * Strings (e.g. ``div.out_mode``'s ``rounding_mode='trunc'`` vs
+      //     ``'floor'``) are NOT representable in ``ScalarValue`` (which
+      //     only knows int/float/bool). Without distinguishing them in the
+      //     key, floor's compiled runtime would be hit by a trunc call —
+      //     wire mismatch — so we'd rather miss than silently collapse to
+      //     Missing.
       return false;
     } else {
       out_key.scalars.push_back(ival_to_scalar(iv));
@@ -832,10 +831,10 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
         return false;
       }
       held_tensors.reserve(broadcasted.size());
-      for (size_t k = 0; k < broadcasted.size(); ++k) {
+      for (const auto& b : broadcasted) {
         // .contiguous() is a no-op when raw shape already matches broadcast.
         // For expanded views (stride 0), this materializes a contig buffer.
-        at::Tensor contig = broadcasted[k].contiguous();
+        at::Tensor contig = b.contiguous();
         void* ptr = contig.data_ptr();
         if (ptr == nullptr) {
           return false;
@@ -952,7 +951,13 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
   pybind11::gil_scoped_acquire wc_gil;
   const uint64_t _seg_t_gil = now_ns();
   bool runtime_failed = false;
-  uint64_t _seg_t_prep_in = _seg_t_gil;
+  // Each phase timer is assigned right after its corresponding runtime call;
+  // ``runtime_failed`` short-circuits past unassigned timers into the early
+  // return below so the diag accumulators never read a stale value. Default
+  // to ``_seg_t_gil`` for the (statically dead) failure path that
+  // ``runtime_failed`` doesn't catch — keeps the code intent obvious even
+  // though the bare init is unreachable on the success/read path.
+  uint64_t _seg_t_prep_in = _seg_t_gil; // NOLINT(clang-analyzer-deadcode.DeadStores)
   uint64_t _seg_t_prep_out = _seg_t_gil;
   uint64_t _seg_t_run = _seg_t_gil;
   auto clear_and_fail = [&]() {

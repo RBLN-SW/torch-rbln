@@ -23,10 +23,7 @@ void micro_square_fp32_contig(const float* __restrict__ in, float* __restrict__ 
   }
 }
 
-bool pow_squared_handler(
-    c10::ArrayRef<at::Tensor> cpu_tensors,
-    torch::jit::Stack* stack,
-    size_t arguments_begin) {
+bool pow_squared_handler(c10::ArrayRef<at::Tensor> cpu_tensors, torch::jit::Stack* stack, size_t arguments_begin) {
   // schema: pow.Tensor_Scalar_out(Tensor self, Scalar exponent, *, Tensor(a!) out)
   // stack args at arguments_begin: [self, exponent, out]
   if (cpu_tensors.size() < 2) {
@@ -49,8 +46,8 @@ bool pow_squared_handler(
     return false;
   }
   const auto exp_s = exp_iv.toScalar();
-  const bool is_two = (exp_s.isFloatingPoint() && exp_s.toDouble() == 2.0) ||
-                      (exp_s.isIntegral(false) && exp_s.toLong() == 2);
+  const bool is_two =
+      (exp_s.isFloatingPoint() && exp_s.toDouble() == 2.0) || (exp_s.isIntegral(false) && exp_s.toLong() == 2);
   if (!is_two) {
     return false;
   }

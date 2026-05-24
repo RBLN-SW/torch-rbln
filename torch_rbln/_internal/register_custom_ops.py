@@ -3,9 +3,7 @@ import math
 import torch
 
 from torch_rbln._internal.compile_cache import compile_rbln_cached
-from torch_rbln._internal.env_utils import use_device_group_tensor_parallel_size
 from torch_rbln._internal.ops_utils import (
-    can_use_out_tensor_directly,
     compile_and_run_view_aware,
     cpu_fallback_path,
     extract_device_id_from_inputs,
@@ -27,7 +25,11 @@ def custom_softmax_out_rbln(self, dim: int, half_to_float: bool, *, out=None):
         # ``self`` and lowers the view step (permute / narrow / etc.) on
         # device alongside softmax.
         result_tensor = compile_and_run_view_aware(
-            torch.softmax, "aten::softmax", (self,), {"dim": dim}, out,
+            torch.softmax,
+            "aten::softmax",
+            (self,),
+            {"dim": dim},
+            out,
         )
 
     finalize_output_tensor(out, result_tensor, result_tensor.shape, tuple(self), {})
@@ -60,7 +62,11 @@ def pow_tensor_scalar_out_rbln(self, exponent, *, out):
         # view-aware helper detects any non-contig ``self`` and dispatches the
         # view step on device alongside pow.
         result_tensor = compile_and_run_view_aware(
-            torch.pow, "aten::pow", (self, exponent), {}, out,
+            torch.pow,
+            "aten::pow",
+            (self, exponent),
+            {},
+            out,
         )
 
     finalize_output_tensor(out, result_tensor, result_tensor.shape, (self,), {})

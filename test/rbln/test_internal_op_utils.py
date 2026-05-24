@@ -659,10 +659,12 @@ class TestWarmCacheNonContigOut(TestCase):
         # _dispatch_shim_diag_dump → (n_total, n_fallback, n_warm_hit, n_miss,
         #                             ns_warm_hit, ns_miss)
         import torch_rbln
+
         return torch_rbln._C._dispatch_shim_diag_dump()[2]
 
     def test_warmcache_bypassed_on_non_contig_out(self):
         import torch_rbln
+
         device = torch.device("rbln:0")
         torch_rbln._C._warmcache_clear()
         torch_rbln._C._dispatch_shim_diag_reset()
@@ -685,7 +687,8 @@ class TestWarmCacheNonContigOut(TestCase):
         self.assertEqual(result.cpu(), cpu_ref, atol=self.atol, rtol=self.rtol)
         nc_hits = self._diag_warm_hits()
         self.assertEqual(
-            nc_hits, contig_hits,
+            nc_hits,
+            contig_hits,
             "warm-cache hit counter increased on non-contig out= dispatch; "
             "the guard in try_warmcache_hit was bypassed.",
         )
@@ -713,9 +716,7 @@ class TestCpuFallbackOptionalTensor(TestCase):
         bias = torch.randn(20, device=device, dtype=torch.float32)
         x = torch.randn(5, 10, device=device, dtype=torch.float32)
         out_rbln = torch.nn.functional.linear(x, weight, bias)
-        out_cpu = torch.nn.functional.linear(
-            x.cpu(), weight.cpu(), bias.cpu()
-        )
+        out_cpu = torch.nn.functional.linear(x.cpu(), weight.cpu(), bias.cpu())
         self.assertEqual(out_rbln.cpu(), out_cpu, atol=self.atol, rtol=self.rtol)
 
     def test_linear_fp32_with_bias_none_through_cpu_fallback(self):

@@ -1231,10 +1231,13 @@ class TestCommon(TestCase):
                 # already been computed on-device — copying it to CPU for the
                 # tolerance check doesn't hide any device-side correctness
                 # issues, only the framework's own inf-equality bug.
-                if (isinstance(expected, torch.Tensor) and isinstance(out, torch.Tensor)
-                        and dtype is torch.float16
-                        and (op.name, op.variant_test_name) == ("div", "no_rounding_mode")
-                        and expected.device.type != "cpu"):
+                if (
+                    isinstance(expected, torch.Tensor)
+                    and isinstance(out, torch.Tensor)
+                    and dtype is torch.float16
+                    and (op.name, op.variant_test_name) == ("div", "no_rounding_mode")
+                    and expected.device.type != "cpu"
+                ):
                     self.assertEqual(expected.cpu(), out.cpu())
                 else:
                     self.assertEqual(expected, out)
@@ -1437,7 +1440,6 @@ class TestCommon(TestCase):
     #   against eager's gold standard op function variant
     @_variant_ops(op_db)
     def test_variant_consistency_eager(self, device, dtype, op):
-
         # Acquires variants (method variant, inplace variant, operator variant, inplace_operator variant, aliases)
 
         method = op.method_variant

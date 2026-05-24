@@ -24,10 +24,7 @@ void micro_rsqrt_fp32_contig(const float* __restrict__ in, float* __restrict__ o
   }
 }
 
-bool rsqrt_handler(
-    c10::ArrayRef<at::Tensor> cpu_tensors,
-    torch::jit::Stack* stack,
-    size_t arguments_begin) {
+bool rsqrt_handler(c10::ArrayRef<at::Tensor> cpu_tensors, torch::jit::Stack* stack, size_t arguments_begin) {
   if (cpu_tensors.size() < 2) {
     return false;
   }

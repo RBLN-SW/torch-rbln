@@ -1263,11 +1263,11 @@ BROADCAST_PATTERNS = [
     #   * Reduce-then-multiply patterns where ``keepdim=True`` leaves a 1 in
     #     the last position.
     # -----
-    ((3, 4), (3, 1)),                # softmax_backward shape0 (last-dim small)
-    ((2, 3, 4), (2, 3, 1)),          # softmax_backward shape2 (3D last-dim)
-    ((4, 8, 16), (4, 8, 1)),         # last-dim aligned-side (16) — also fails
-    ((1, 32, 4), (1, 32, 1)),        # head-shaped, last-dim small
-    ((4, 8, 1), (1, 1, 16)),         # both sides have last-dim==1 in one operand
+    ((3, 4), (3, 1)),  # softmax_backward shape0 (last-dim small)
+    ((2, 3, 4), (2, 3, 1)),  # softmax_backward shape2 (3D last-dim)
+    ((4, 8, 16), (4, 8, 1)),  # last-dim aligned-side (16) — also fails
+    ((1, 32, 4), (1, 32, 1)),  # head-shaped, last-dim small
+    ((4, 8, 1), (1, 1, 16)),  # both sides have last-dim==1 in one operand
     # Same-shape (sanity / fast-path that skips even broadcast_shapes check)
     ((4, 8, 16), (4, 8, 16)),
 ]
@@ -1287,8 +1287,9 @@ class TestBinaryOpsBroadcast(TestCase):
         # CPU reference in fp32 to avoid double-rounding in the assertion
         return op_callable(a_cpu, b_cpu)
 
-    def _check(self, op_callable, lhs_shape, rhs_shape, dtype=torch.float16,
-               atol=ATOL, rtol=RTOL, output_is_bool=False):
+    def _check(
+        self, op_callable, lhs_shape, rhs_shape, dtype=torch.float16, atol=ATOL, rtol=RTOL, output_is_bool=False
+    ):
         a_cpu = torch.randn(*lhs_shape, dtype=torch.float32) if lhs_shape else torch.randn(())
         b_cpu = torch.randn(*rhs_shape, dtype=torch.float32) if rhs_shape else torch.randn(())
         a = a_cpu.to(dtype=dtype, device=self.rbln_device)
@@ -1304,11 +1305,15 @@ class TestBinaryOpsBroadcast(TestCase):
         expected_shape = torch.broadcast_shapes(lhs_shape, rhs_shape) if (lhs_shape or rhs_shape) else torch.Size([])
         self.assertEqual(result.shape, expected_shape, msg=f"{op_callable.__name__} {lhs_shape}×{rhs_shape}")
         if output_is_bool:
-            self.assertEqual(result.cpu(), expected.cpu(),
-                             msg=f"{op_callable.__name__} {lhs_shape}×{rhs_shape}")
+            self.assertEqual(result.cpu(), expected.cpu(), msg=f"{op_callable.__name__} {lhs_shape}×{rhs_shape}")
         else:
-            self.assertEqual(result.cpu(), expected.cpu(), atol=atol, rtol=rtol,
-                             msg=f"{op_callable.__name__} {lhs_shape}×{rhs_shape}")
+            self.assertEqual(
+                result.cpu(),
+                expected.cpu(),
+                atol=atol,
+                rtol=rtol,
+                msg=f"{op_callable.__name__} {lhs_shape}×{rhs_shape}",
+            )
         self.assertEqual(result.device, self.rbln_device)
 
     @parametrize("lhs_shape,rhs_shape", BROADCAST_PATTERNS)
@@ -1352,8 +1357,12 @@ class TestBinaryOpsBroadcast(TestCase):
     def test_comparison_broadcast(self, op_callable, lhs_shape, rhs_shape):
         # We rebuild integer-valued tensors so fp16 rounding doesn't flip the
         # ordering of borderline pairs.
-        a_int = torch.randint(-3, 4, lhs_shape if lhs_shape else (1,), dtype=torch.int64).reshape(lhs_shape if lhs_shape else ())
-        b_int = torch.randint(-3, 4, rhs_shape if rhs_shape else (1,), dtype=torch.int64).reshape(rhs_shape if rhs_shape else ())
+        a_int = torch.randint(-3, 4, lhs_shape if lhs_shape else (1,), dtype=torch.int64).reshape(
+            lhs_shape if lhs_shape else ()
+        )
+        b_int = torch.randint(-3, 4, rhs_shape if rhs_shape else (1,), dtype=torch.int64).reshape(
+            rhs_shape if rhs_shape else ()
+        )
         a_cpu = a_int.to(torch.float32)
         b_cpu = b_int.to(torch.float32)
         a = a_cpu.to(dtype=torch.float16, device=self.rbln_device)
@@ -1374,10 +1383,10 @@ class TestBinaryOpsBroadcast(TestCase):
     # 8-hour debug session.
     _LAST_DIM_ONE_PATTERNS = [
         # (lhs_shape, rhs_shape, dim_used_in_originating_reduction)
-        ((3, 4),       (3, 1),      "softmax_backward shape0_dim_1"),
-        ((2, 3, 4),    (2, 3, 1),   "softmax_backward shape2_dim_2"),
-        ((4, 8, 16),   (4, 8, 1),   "last-dim aligned-side"),
-        ((1, 32, 4),   (1, 32, 1),  "head-shaped, last-dim small"),
+        ((3, 4), (3, 1), "softmax_backward shape0_dim_1"),
+        ((2, 3, 4), (2, 3, 1), "softmax_backward shape2_dim_2"),
+        ((4, 8, 16), (4, 8, 1), "last-dim aligned-side"),
+        ((1, 32, 4), (1, 32, 1), "head-shaped, last-dim small"),
     ]
 
     @parametrize("op_callable", [torch.add, torch.sub, torch.mul, torch.div])
@@ -1419,14 +1428,14 @@ class TestBinaryOpsBroadcast(TestCase):
 # =============================================================================
 PERMUTE_PATTERNS = [
     # base_shape, perm  — pairs we expect to round-trip correctly
-    ((2, 4, 8),           (2, 0, 1)),    # rotate axis 2 → 0
-    ((2, 4, 8),           (1, 0, 2)),    # transpose dim 0 & 1
-    ((2, 4, 8),           (0, 2, 1)),    # transpose last two dims
-    ((2, 4, 8, 16),       (3, 0, 1, 2)), # 4D rotation
-    ((2, 4, 8, 16),       (0, 2, 1, 3)), # 4D mid swap
-    ((1, 32, 64),         (0, 2, 1)),    # LLaMA rotary-shape transpose
-    ((4, 8, 16),          (2, 1, 0)),    # full reverse
-    ((1, 8, 1, 16),       (0, 2, 1, 3)), # size-1 dim mixed in
+    ((2, 4, 8), (2, 0, 1)),  # rotate axis 2 → 0
+    ((2, 4, 8), (1, 0, 2)),  # transpose dim 0 & 1
+    ((2, 4, 8), (0, 2, 1)),  # transpose last two dims
+    ((2, 4, 8, 16), (3, 0, 1, 2)),  # 4D rotation
+    ((2, 4, 8, 16), (0, 2, 1, 3)),  # 4D mid swap
+    ((1, 32, 64), (0, 2, 1)),  # LLaMA rotary-shape transpose
+    ((4, 8, 16), (2, 1, 0)),  # full reverse
+    ((1, 8, 1, 16), (0, 2, 1, 3)),  # size-1 dim mixed in
 ]
 
 
@@ -1445,24 +1454,22 @@ class TestViewOpsOnDevice(TestCase):
         base = torch.randn(*base_shape, dtype=dtype, device=device)
         return base, base.permute(*perm)
 
-    def _check_unary(self, op_callable, base_shape, perm,
-                     atol=ATOL, rtol=RTOL, output_is_bool=False):
+    def _check_unary(self, op_callable, base_shape, perm, atol=ATOL, rtol=RTOL, output_is_bool=False):
         base, t = self._make_permuted(base_shape, perm, device=self.rbln_device)
         result = op_callable(t)
         expected = op_callable(t.cpu())
-        self.assertEqual(result.shape, expected.shape,
-                         msg=f"{op_callable.__name__} permute({perm})")
+        self.assertEqual(result.shape, expected.shape, msg=f"{op_callable.__name__} permute({perm})")
         if output_is_bool:
-            self.assertEqual(result.cpu(), expected.cpu(),
-                             msg=f"{op_callable.__name__} permute({perm})")
+            self.assertEqual(result.cpu(), expected.cpu(), msg=f"{op_callable.__name__} permute({perm})")
         else:
-            self.assertEqual(result.cpu(), expected.cpu(), atol=atol, rtol=rtol,
-                             msg=f"{op_callable.__name__} permute({perm})")
+            self.assertEqual(
+                result.cpu(), expected.cpu(), atol=atol, rtol=rtol, msg=f"{op_callable.__name__} permute({perm})"
+            )
         self.assertEqual(result.device, self.rbln_device)
 
-    def _check_binary(self, op_callable, base_shape, perm,
-                      perm_lhs=True, perm_rhs=False,
-                      atol=ATOL, rtol=RTOL, output_is_bool=False):
+    def _check_binary(
+        self, op_callable, base_shape, perm, perm_lhs=True, perm_rhs=False, atol=ATOL, rtol=RTOL, output_is_bool=False
+    ):
         # The "other" tensor is built to match the permuted shape so we focus
         # on view dispatch correctness (not broadcast, which is covered
         # separately in TestBinaryOpsBroadcast).
@@ -1512,35 +1519,36 @@ class TestViewOpsOnDevice(TestCase):
         # rsqrt requires positive input — abs the source.
         def op(x):
             return torch.rsqrt(torch.abs(x) + 0.1)
+
         self._check_unary(op, base_shape, perm)
 
     @parametrize("base_shape,perm", PERMUTE_PATTERNS)
     def test_unary_log_permute(self, base_shape, perm):
         def op(x):
             return torch.log(torch.abs(x) + 0.1)
+
         self._check_unary(op, base_shape, perm)
 
     @parametrize("base_shape,perm", PERMUTE_PATTERNS)
     def test_unary_logical_not_permute(self, base_shape, perm):
         def op(x):
             return torch.logical_not(x > 0)
+
         self._check_unary(op, base_shape, perm, output_is_bool=True)
 
     # --- Binary ops (lhs permuted, rhs contig same shape) ---
     @parametrize("base_shape,perm", PERMUTE_PATTERNS)
-    @parametrize("op_callable", [torch.add, torch.sub, torch.mul, torch.div,
-                                 torch.maximum, torch.minimum])
+    @parametrize("op_callable", [torch.add, torch.sub, torch.mul, torch.div, torch.maximum, torch.minimum])
     def test_binary_lhs_permute(self, op_callable, base_shape, perm):
-        self._check_binary(op_callable, base_shape, perm,
-                           perm_lhs=True, perm_rhs=False,
-                           atol=0.05, rtol=0.05)  # fp16 div tolerance
+        self._check_binary(
+            op_callable, base_shape, perm, perm_lhs=True, perm_rhs=False, atol=0.05, rtol=0.05
+        )  # fp16 div tolerance
 
     # --- Binary ops (both lhs AND rhs permuted with same recipe) ---
     @parametrize("base_shape,perm", PERMUTE_PATTERNS)
     @parametrize("op_callable", [torch.mul, torch.add])
     def test_binary_both_permute(self, op_callable, base_shape, perm):
-        self._check_binary(op_callable, base_shape, perm,
-                           perm_lhs=True, perm_rhs=True)
+        self._check_binary(op_callable, base_shape, perm, perm_lhs=True, perm_rhs=True)
 
     # --- Comparison ops (bool output) ---
     @parametrize("base_shape,perm", PERMUTE_PATTERNS)
@@ -1830,8 +1838,14 @@ class TestViewOpsOnDevice(TestCase):
         view_makers = [
             ("permute", lambda b: b.permute(*range(b.dim() - 1, -1, -1))),  # full reverse
             ("narrow0", lambda b: b.narrow(0, 0, max(1, b.size(0) // 2))),
-            ("permute_then_narrow", lambda b: b.permute(*range(b.dim() - 1, -1, -1)).narrow(0, 0, max(1, b.size(-1) // 2))),
-            ("narrow_then_permute", lambda b: b.narrow(0, 0, max(1, b.size(0) // 2)).permute(*range(b.dim() - 1, -1, -1))),
+            (
+                "permute_then_narrow",
+                lambda b: b.permute(*range(b.dim() - 1, -1, -1)).narrow(0, 0, max(1, b.size(-1) // 2)),
+            ),
+            (
+                "narrow_then_permute",
+                lambda b: b.narrow(0, 0, max(1, b.size(0) // 2)).permute(*range(b.dim() - 1, -1, -1)),
+            ),
         ]
         for base in bases:
             for label, mk in view_makers:
@@ -1853,25 +1867,24 @@ class TestViewOpsOnDevice(TestCase):
                 )
                 target = (tuple(t.shape), tuple(t.stride()), t.storage_offset())
                 self.assertEqual(
-                    sim, target,
+                    sim,
+                    target,
                     msg=f"recipe simulation mismatch for base.shape={tuple(base.shape)} via {label}: "
-                        f"recipe={recipe}, sim={sim}, target={target}"
+                    f"recipe={recipe}, sim={sim}, target={target}",
                 )
 
     def test_view_telemetry_counter(self):
         # The fallback warning counter should remain at 0 across the
         # recognized-pattern operations exercised in this class. Reset it,
         # run a known-recognized view op, and check it didn't increment.
-        from torch_rbln._internal.ops_utils import (
-            _view_fallback_count_get,
-            _view_fallback_count_reset,
-        )
+        from torch_rbln._internal.ops_utils import _view_fallback_count_get, _view_fallback_count_reset
+
         _view_fallback_count_reset()
         base = torch.randn(2, 4, 8, dtype=torch.float16, device=self.rbln_device)
-        _ = torch.mul(base.permute(2, 0, 1),
-                      torch.randn(8, 2, 4, dtype=torch.float16, device=self.rbln_device))
-        self.assertEqual(_view_fallback_count_get(), 0,
-                         "Recognized permute view should NOT trigger .contiguous() fallback.")
+        _ = torch.mul(base.permute(2, 0, 1), torch.randn(8, 2, 4, dtype=torch.float16, device=self.rbln_device))
+        self.assertEqual(
+            _view_fallback_count_get(), 0, "Recognized permute view should NOT trigger .contiguous() fallback."
+        )
 
 
 @pytest.mark.test_set_ci

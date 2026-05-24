@@ -21,11 +21,7 @@ namespace at::native::rbln {
 namespace {
 
 // out[r] = sum(in[r, :inner]) / inner, accumulated in double.
-void micro_mean_lastdim_fp32_contig(
-    const float* __restrict__ in,
-    float* __restrict__ out,
-    size_t outer,
-    size_t inner) {
+void micro_mean_lastdim_fp32_contig(const float* __restrict__ in, float* __restrict__ out, size_t outer, size_t inner) {
   const float inv = 1.0f / static_cast<float>(inner);
   for (size_t r = 0; r < outer; ++r) {
     const float* p = in + r * inner;
@@ -37,10 +33,7 @@ void micro_mean_lastdim_fp32_contig(
   }
 }
 
-bool mean_lastdim_handler(
-    c10::ArrayRef<at::Tensor> cpu_tensors,
-    torch::jit::Stack* stack,
-    size_t arguments_begin) {
+bool mean_lastdim_handler(c10::ArrayRef<at::Tensor> cpu_tensors, torch::jit::Stack* stack, size_t arguments_begin) {
   // schema: mean.out(Tensor self, int[]? dim, bool keepdim=False,
   //                  ScalarType? dtype=None, *, Tensor(a!) out)
   // stack at arguments_begin: [self, dim, keepdim, dtype, out]
@@ -87,10 +80,7 @@ bool mean_lastdim_handler(
   }
 
   micro_mean_lastdim_fp32_contig(
-      self.data_ptr<float>(),
-      out.data_ptr<float>(),
-      static_cast<size_t>(outer),
-      static_cast<size_t>(inner));
+      self.data_ptr<float>(), out.data_ptr<float>(), static_cast<size_t>(outer), static_cast<size_t>(inner));
   stack->resize(arguments_begin);
   stack->emplace_back(c10::IValue(out));
   return true;

@@ -150,7 +150,13 @@ def {kernel_name}(*args, **kwargs):
             return f"""
     out_tensor = kwargs.get('out', None)
     if is_cpu_fallback_cases(args):
-        result_tensor = cpu_fallback_path({target}, args, result=out_tensor, op_name="{op_namespace}::{root_name}", **kwargs_filtered)
+        result_tensor = cpu_fallback_path(
+            {target},
+            args,
+            result=out_tensor,
+            op_name="{op_namespace}::{root_name}",
+            **kwargs_filtered,
+        )
     else:
         result_tensor = compile_and_run_view_aware(
             {target}, "{op_namespace}::{root_name}", args, kwargs_filtered, out_tensor,
