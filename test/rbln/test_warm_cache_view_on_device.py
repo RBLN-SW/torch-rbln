@@ -41,7 +41,8 @@ cache-size invariant for view-recipe calls.
 
 import pytest
 import torch
-from torch.testing._internal.common_utils import run_tests, TestCase
+from torch.testing._internal.common_device_type import instantiate_device_type_tests
+from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
 import torch_rbln  # noqa: F401 (registers the rbln backend)
 from torch_rbln import _C
@@ -73,7 +74,13 @@ class TestRotateHalfHeadDim128(TestCase):
     def setUp(self) -> None:
         _C._warmcache_clear()
 
-    def _half_neg(self, head_dim: int) -> None:
+    @parametrize("head_dim", [128, 256, 64])
+    def test_half_neg(self, head_dim) -> None:
+        # head_dim=64 control case: halves are 32 (not multiple of 64) →
+        # align-fallback kicks in and routes through cpu_fallback_path. The
+        # 128/256 variants are the textbook trigger for the wrong-hit
+        # scenario because the second half has storage_offset>0 AND last
+        # dim is 64-aligned (so view-on-device fires).
         B, S = 2, 4
         x = torch.randn(B, S, head_dim, dtype=torch.float16, device="rbln")
         first = x[..., : head_dim // 2]  # storage_offset == 0
@@ -85,19 +92,6 @@ class TestRotateHalfHeadDim128(TestCase):
         ref_second = -x.cpu()[..., head_dim // 2 :]
         _assert_fp16_close(out_first.cpu(), ref_first)
         _assert_fp16_close(out_second.cpu(), ref_second)
-
-    def test_head_dim_128(self) -> None:
-        self._half_neg(128)
-
-    def test_head_dim_256(self) -> None:
-        self._half_neg(256)
-
-    def test_head_dim_64_baseline_via_align_fallback(self) -> None:
-        # head_dim=64 → halves are 32 (not multiple of 64) → align-fallback
-        # kicks in and routes through cpu_fallback_path. Included as a
-        # control case: this should already be correct on the pre-fix branch
-        # because the warm-cache hit path isn't entered.
-        self._half_neg(64)
 
 
 @pytest.mark.test_set_ci
@@ -181,6 +175,11 @@ class TestWarmCacheSizeViewInteraction(TestCase):
         final_out = contig_c + contig_d
         final_ref = contig_c.cpu() + contig_d.cpu()
         _assert_fp16_close(final_out.cpu(), final_ref)
+
+
+instantiate_device_type_tests(TestRotateHalfHeadDim128, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestStorageAliasInputs, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestWarmCacheSizeViewInteraction, globals(), only_for="privateuse1")
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ wrong values or a crash).
 
 import pytest
 import torch
+from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 
@@ -46,6 +47,9 @@ class TestBorrowFastPath(TestCase):
         y = torch.sigmoid(x.float())
         self.assertEqual(y.device.type, "rbln")
         self.assertEqual(tuple(y.shape), (16,))
+
+
+instantiate_device_type_tests(TestBorrowFastPath, globals(), only_for="privateuse1")
 
 
 if __name__ == "__main__":

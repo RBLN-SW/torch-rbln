@@ -31,6 +31,7 @@ wrapper path together.
 
 import pytest
 import torch
+from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 import torch_rbln._C as _C
@@ -235,6 +236,12 @@ class TestDispatchShimNanInfFallback(TestCase):
         result = z.to("cpu")
         # All slots must be NaN if the scan caught the wrapped scalar.
         self.assertTrue(torch.isnan(result).all())
+
+
+instantiate_device_type_tests(TestDispatchShimWrappedScalar, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestDispatchShimAllScalarFallback, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestDispatchShimDtypeMismatch, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestDispatchShimNanInfFallback, globals(), only_for="privateuse1")
 
 
 if __name__ == "__main__":

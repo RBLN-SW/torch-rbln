@@ -20,41 +20,46 @@ These tests verify the factory's core invariants on the RBLN device:
 
 import pytest
 import torch
-from torch.testing._internal.common_utils import run_tests, TestCase
+from torch.testing._internal.common_device_type import instantiate_device_type_tests
+from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
 
 @pytest.mark.test_set_ci
 class TestEfficientZeroTensor(TestCase):
-    """`aten::_efficientzerotensor` should produce a logically-zero RBLN tensor."""
+    """`aten::_efficientzerotensor` should produce a logically-zero RBLN tensor.
 
-    def test_shape_and_dtype_preserved_float16(self) -> None:
-        t = torch.ops.aten._efficientzerotensor((3, 4), dtype=torch.float16, device=torch.device("rbln"))
+    The op is dtype-agnostic at the C++ level (it just allocates and
+    zero-marks v-memory) but we keep an explicit fp16 + int64 cross because
+    those are the two dtypes that actually reach the op on real workloads
+    (fp16 KV scratch, int64 indexing scratch). ``SUPPORTED_DTYPES`` alone
+    would only cover fp16, so we add int64 as an explicit ``@parametrize``.
+    """
+
+    @parametrize("dtype", [torch.float16, torch.int64])
+    @parametrize("shape", [(3, 4), (2,), (2, 3, 5)])
+    def test_shape_and_dtype_preserved(self, dtype, shape) -> None:
+        t = torch.ops.aten._efficientzerotensor(shape, dtype=dtype, device=torch.device("rbln"))
         self.assertEqual(t.device.type, "rbln")
-        self.assertEqual(t.dtype, torch.float16)
-        self.assertEqual(tuple(t.shape), (3, 4))
+        self.assertEqual(t.dtype, dtype)
+        self.assertEqual(tuple(t.shape), shape)
 
-    def test_shape_and_dtype_preserved_int64(self) -> None:
-        t = torch.ops.aten._efficientzerotensor((2,), dtype=torch.int64, device=torch.device("rbln"))
-        self.assertEqual(t.device.type, "rbln")
-        self.assertEqual(t.dtype, torch.int64)
-        self.assertEqual(tuple(t.shape), (2,))
-
-    def test_zero_init_value_float16(self) -> None:
-        t = torch.ops.aten._efficientzerotensor((2, 3), dtype=torch.float16, device=torch.device("rbln"))
+    @parametrize("dtype", [torch.float16, torch.int64])
+    def test_zero_init_value(self, dtype) -> None:
         # Materialise to CPU and check elementwise equality with a freshly-
         # allocated zero tensor of the same shape and dtype.
-        expected = torch.zeros(2, 3, dtype=torch.float16)
-        self.assertEqual(t.to("cpu"), expected)
-
-    def test_zero_init_value_int64(self) -> None:
-        t = torch.ops.aten._efficientzerotensor((4,), dtype=torch.int64, device=torch.device("rbln"))
-        expected = torch.zeros(4, dtype=torch.int64)
+        t = torch.ops.aten._efficientzerotensor((2, 3), dtype=dtype, device=torch.device("rbln"))
+        expected = torch.zeros(2, 3, dtype=dtype)
         self.assertEqual(t.to("cpu"), expected)
 
 
 @pytest.mark.test_set_ci
 class TestSgnDecomposition(TestCase):
-    """`aten::sgn` decomposes through `_efficientzerotensor`; verify safety + value."""
+    """`aten::sgn` decomposes through `_efficientzerotensor`; verify safety + value.
+
+    Only fp16 is exercised here — sgn on integer dtypes routes through a
+    different decomposition that doesn't depend on ``_efficientzerotensor``,
+    which is the regression surface this suite is meant to guard.
+    """
 
     def test_sgn_matches_cpu_float16(self) -> None:
         # Uses both negative, zero, and positive entries to exercise all
@@ -73,6 +78,10 @@ class TestSgnDecomposition(TestCase):
         x_cpu = torch.zeros(8, dtype=torch.float16)
         x_rbln = x_cpu.to("rbln")
         self.assertEqual(torch.sgn(x_rbln).to("cpu"), torch.sgn(x_cpu))
+
+
+instantiate_device_type_tests(TestEfficientZeroTensor, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestSgnDecomposition, globals(), only_for="privateuse1")
 
 
 if __name__ == "__main__":

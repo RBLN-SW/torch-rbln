@@ -17,13 +17,20 @@ import threading
 
 import pytest
 import torch  # noqa: F401  (needed to load torch_rbln._C)
-from torch.testing._internal.common_utils import run_tests
+from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torch_rbln import _C  # type: ignore[attr-defined]
 
 
+# These suites exercise the C++ warm-cache's process-wide / thread-local
+# state via its pybind surface. No RBLN-device tensor work happens here, so
+# ``instantiate_device_type_tests`` is intentionally NOT used — this matches
+# the precedent set by ``test/rbln/test_file_offloading.py`` for tests that
+# probe process-level flags rather than device-side ops.
+
+
 @pytest.mark.test_set_ci
-class TestWarmCacheEnableDisable:
+class TestWarmCacheEnableDisable(TestCase):
     """`_warmcache_set_enabled` round-trips and `clear()` empties the cache.
 
     These functions are the primitive on which the generated wrappers in
@@ -31,35 +38,35 @@ class TestWarmCacheEnableDisable:
     the cache and we lose the warm-path speedup.
     """
 
-    def setup_method(self) -> None:
+    def setUp(self) -> None:
         self._was_enabled = _C._warmcache_is_enabled()
 
-    def teardown_method(self) -> None:
+    def tearDown(self) -> None:
         _C._warmcache_set_enabled(self._was_enabled)
 
     def test_default_state_is_queryable(self) -> None:
         # Whether enabled or not by default, the query must succeed.
         v = _C._warmcache_is_enabled()
-        assert isinstance(v, bool)
+        self.assertIsInstance(v, bool)
 
     def test_set_enabled_round_trip(self) -> None:
         _C._warmcache_set_enabled(False)
-        assert _C._warmcache_is_enabled() is False
+        self.assertFalse(_C._warmcache_is_enabled())
         _C._warmcache_set_enabled(True)
-        assert _C._warmcache_is_enabled() is True
+        self.assertTrue(_C._warmcache_is_enabled())
 
     def test_size_is_non_negative_int(self) -> None:
         n = _C._warmcache_size()
-        assert isinstance(n, int)
-        assert n >= 0
+        self.assertIsInstance(n, int)
+        self.assertGreaterEqual(n, 0)
 
     def test_clear_returns_size_zero(self) -> None:
         _C._warmcache_clear()
-        assert _C._warmcache_size() == 0
+        self.assertEqual(_C._warmcache_size(), 0)
 
 
 @pytest.mark.test_set_ci
-class TestWarmCacheBuildingGuard:
+class TestWarmCacheBuildingGuard(TestCase):
     """Reentrancy guard set by the miss path.
 
     During the torch.compile compilation triggered by a shim cache miss,
@@ -69,24 +76,24 @@ class TestWarmCacheBuildingGuard:
     threads (one thread's flag does not leak into another).
     """
 
-    def teardown_method(self) -> None:
+    def tearDown(self) -> None:
         # Always leave the flag cleared for subsequent tests.
         _C._warmcache_exit_building()
 
     def test_initial_state_is_not_building(self) -> None:
         _C._warmcache_exit_building()
-        assert _C._warmcache_is_building() is False
+        self.assertFalse(_C._warmcache_is_building())
 
     def test_enter_then_exit(self) -> None:
         _C._warmcache_enter_building()
-        assert _C._warmcache_is_building() is True
+        self.assertTrue(_C._warmcache_is_building())
         _C._warmcache_exit_building()
-        assert _C._warmcache_is_building() is False
+        self.assertFalse(_C._warmcache_is_building())
 
     def test_double_exit_is_no_op(self) -> None:
         _C._warmcache_exit_building()
         _C._warmcache_exit_building()
-        assert _C._warmcache_is_building() is False
+        self.assertFalse(_C._warmcache_is_building())
 
     def test_thread_local_isolation(self) -> None:
         """Setting the flag in one thread must not affect another.
@@ -96,7 +103,7 @@ class TestWarmCacheBuildingGuard:
         scenarios.
         """
         _C._warmcache_enter_building()
-        assert _C._warmcache_is_building() is True
+        self.assertTrue(_C._warmcache_is_building())
 
         seen_in_thread: list[bool] = []
         ev = threading.Event()
@@ -110,13 +117,13 @@ class TestWarmCacheBuildingGuard:
         ev.wait(timeout=5.0)
         t.join(timeout=5.0)
 
-        assert seen_in_thread == [False], f"Thread-local flag leaked across threads: {seen_in_thread}"
+        self.assertEqual(seen_in_thread, [False], f"Thread-local flag leaked across threads: {seen_in_thread}")
         # Original thread still has the flag set.
-        assert _C._warmcache_is_building() is True
+        self.assertTrue(_C._warmcache_is_building())
 
 
 @pytest.mark.test_set_ci
-class TestWarmCacheForceRecompileFlag:
+class TestWarmCacheForceRecompileFlag(TestCase):
     """Thread-local force-recompile signal that pairs ``try_warmcache_hit``'s
     erase-on-failure with the next ``compile_rbln_cached`` invocation.
 
@@ -130,20 +137,20 @@ class TestWarmCacheForceRecompileFlag:
     cache returns the stale callable and the holder stays empty.
     """
 
-    def setup_method(self) -> None:
+    def setUp(self) -> None:
         _C._warmcache_consume_force_recompile()
 
-    def teardown_method(self) -> None:
+    def tearDown(self) -> None:
         _C._warmcache_consume_force_recompile()
 
     def test_default_false(self) -> None:
-        assert _C._warmcache_consume_force_recompile() is False
+        self.assertFalse(_C._warmcache_consume_force_recompile())
 
     def test_request_then_consume_once(self) -> None:
         _C._warmcache_request_force_recompile()
-        assert _C._warmcache_consume_force_recompile() is True
+        self.assertTrue(_C._warmcache_consume_force_recompile())
         # Consume is single-shot.
-        assert _C._warmcache_consume_force_recompile() is False
+        self.assertFalse(_C._warmcache_consume_force_recompile())
 
     def test_thread_local_isolation(self) -> None:
         """The flag must not leak across threads. If it did, an erase on
@@ -162,8 +169,8 @@ class TestWarmCacheForceRecompileFlag:
         ev.wait(timeout=5.0)
         t.join(timeout=5.0)
 
-        assert seen_in_thread == [False], f"force-recompile flag leaked across threads: {seen_in_thread}"
-        assert _C._warmcache_consume_force_recompile() is True
+        self.assertEqual(seen_in_thread, [False], f"force-recompile flag leaked across threads: {seen_in_thread}")
+        self.assertTrue(_C._warmcache_consume_force_recompile())
 
 
 if __name__ == "__main__":
