@@ -29,10 +29,11 @@ PyTorch RBLN is currently in **beta** and under active development. APIs may cha
 
 ### Install pre-built wheels
 
-**`torch-rbln`** (public wheel; **`torch`** resolves to **2.10.0+cpu** via the PyTorch CPU index):
+**`torch-rbln`** (public wheel). Install **`torch`** from the PyTorch CPU index first, then **`torch-rbln`** from PyPI.
 
 ```bash
-pip3 install torch-rbln --extra-index-url https://download.pytorch.org/whl/cpu
+pip3 install torch==2.10.0+cpu --index-url https://download.pytorch.org/whl/cpu
+pip3 install torch-rbln
 ```
 
 For **`rebel-compiler`** and the rest of the setup, see **Prerequisites** above and [Installation](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html#install).
