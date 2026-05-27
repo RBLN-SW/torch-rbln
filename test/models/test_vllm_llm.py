@@ -242,6 +242,11 @@ def _run_case(model_key: str, tp_size: int, enforce_eager: bool) -> None:
         # logical device). vllm engine stays at ``tensor_parallel_size=1``.
         mp.setenv("VLLM_RBLN_TP_SIZE", str(tp_size))
         if enforce_eager:
+            # Eager mode bypasses torch.compile, so ops must dispatch to a real
+            # device='rbln' instead of the compile-backend fake-CPU tensors of
+            # the default vLLM model path. vllm-rbln's platform validation now
+            # rejects ``enforce_eager=True`` without this. See platform.py.
+            mp.setenv("VLLM_RBLN_USE_DEVICE_TENSOR", "1")
             # Eager workarounds: keep sampler + attention backend off the
             # compile path so they stay consistent with the uncompiled model.
             # Without these: RBLN sampler hits weight-reuse assert
