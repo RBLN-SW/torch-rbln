@@ -137,6 +137,17 @@ void V2VBatch::submit() {
   if (!impl_ || impl_->pending.empty()) {
     return;
   }
+  // RAII guard: reset batch state on any exit so the destructor's
+  // "missing submit()" warning fires only when submit() was genuinely skipped.
+  struct ResetGuard {
+    Impl* impl;
+    ~ResetGuard() noexcept {
+      impl->pending.clear();
+      impl->homogeneous = true;
+      impl->anchor = -1;
+    }
+  } guard{impl_.get()};
+
   if (impl_->homogeneous) {
     RBLN_LOG_DEBUG("V2VBatch::submit draining {} entries (batched)", impl_->pending.size());
     memcpy_v2v_multi(impl_->pending);
@@ -147,9 +158,6 @@ void V2VBatch::submit() {
       memcpy_v2v(e.dst, e.src, e.nbytes);
     }
   }
-  impl_->pending.clear();
-  impl_->homogeneous = true;
-  impl_->anchor = -1;
 }
 
 size_t V2VBatch::pending_count() const {

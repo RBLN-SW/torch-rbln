@@ -258,6 +258,15 @@ class TestCatV2V(TestCase):
         with pytest.raises((RuntimeError, IndexError)):
             torch.cat([to_dev(a_cpu), to_dev(a_cpu)], dim=5)
 
+    @dtypes(*ENGINE_DTYPES)
+    def test_cat_out_internal_overlap_rejected(self, dtype):
+        """``out`` with internal overlap (broadcast view) must raise ``RuntimeError``."""
+        a = torch.arange(12, dtype=dtype, device=DEVICE).reshape(3, 4)
+        b = torch.arange(100, 112, dtype=dtype, device=DEVICE).reshape(3, 4)
+        out = torch.empty(1, 8, dtype=dtype, device=DEVICE).expand(3, 8)
+        with pytest.raises(RuntimeError):
+            torch.cat([a, b], dim=1, out=out)
+
     # ---- opinfo conformance regressions ----
 
     def test_cat_all_zero_axis_resizes_out_to_zero(self):
@@ -305,6 +314,30 @@ class TestCatV2V(TestCase):
         got = torch.cat([to_dev(a_cpu), to_dev(b_cpu)], dim=1)
         assert got.dtype == torch.float64
         _check(got, expected, atol=1e-3, rtol=1e-3)
+
+    @dtypes(*ENGINE_DTYPES)
+    def test_cat_out_non_contig_routes_through_staging(self, dtype):
+        """Non-contig ``out`` exercises the staging-buffer path."""
+        a_cpu = torch.arange(12, dtype=dtype).reshape(3, 4)
+        b_cpu = torch.arange(100, 112, dtype=dtype).reshape(3, 4)
+        expected = torch.cat([a_cpu, b_cpu], dim=0)
+        out = torch.empty(4, 6, dtype=dtype, device=DEVICE).t()
+        self.assertFalse(out.is_contiguous())
+        torch.cat([to_dev(a_cpu), to_dev(b_cpu)], dim=0, out=out)
+        _check(out, expected)
+
+    @pytest.mark.usefixtures("enable_eager_malloc")
+    def test_large_strided_cat(self):
+        """``aten::cat`` over a large batched strided copy."""
+        # Baseline allocations exercise the bulk strided copy path.
+        baseline_allocs = [torch.empty(102400, 2560, dtype=torch.float16, device=DEVICE) for _ in range(2)]
+        try:
+            a = torch.empty(4, 40, 1024, dtype=torch.float16, device=DEVICE).transpose(1, 2)
+            b = torch.empty(4, 40, 1024, dtype=torch.float16, device=DEVICE).transpose(1, 2)
+            out = torch.cat([a, b], dim=-1)
+            self.assertEqual(tuple(out.shape), (4, 1024, 80))
+        finally:
+            del baseline_allocs
 
 
 # ---------------------------------------------------------------------------
@@ -525,6 +558,17 @@ class TestIndexSelectV2V(TestCase):
         got = torch.index_select(to_dev(a_cpu), neg, idx)
         _check(got, expected)
 
+    @dtypes(*ENGINE_DTYPES)
+    def test_index_select_out_non_contig_routes_through_staging(self, dtype):
+        """Non-contig ``out`` exercises the staging-buffer path."""
+        src_cpu = torch.arange(20, dtype=dtype).reshape(4, 5)
+        idx = torch.tensor([3, 0, 2], dtype=torch.long)
+        expected = torch.index_select(src_cpu, 0, idx)
+        out = torch.empty(5, 3, dtype=dtype, device=DEVICE).t()
+        self.assertFalse(out.is_contiguous())
+        torch.index_select(to_dev(src_cpu), 0, idx, out=out)
+        _check(out, expected)
+
     # ---- error paths ----
 
     def test_index_select_2d_index_rejected(self):
@@ -533,6 +577,23 @@ class TestIndexSelectV2V(TestCase):
         idx_2d = torch.tensor([[0, 1], [2, 3]], dtype=torch.long)
         with pytest.raises(RuntimeError):
             torch.index_select(to_dev(a_cpu), 0, idx_2d)
+
+    @dtypes(*ENGINE_DTYPES)
+    def test_index_select_out_aliased_with_self_rejected(self, dtype):
+        """``out`` aliased with ``self`` must raise ``RuntimeError``."""
+        a = torch.arange(5, dtype=dtype, device=DEVICE)
+        idx = torch.tensor([1, 0], dtype=torch.long)
+        with pytest.raises(RuntimeError):
+            torch.index_select(a, 0, idx, out=a)
+
+    @dtypes(*ENGINE_DTYPES)
+    def test_index_select_out_internal_overlap_rejected(self, dtype):
+        """``out`` with internal overlap (broadcast view) must raise ``RuntimeError``."""
+        src = torch.arange(20, dtype=dtype, device=DEVICE).reshape(4, 5)
+        idx = torch.tensor([0, 2], dtype=torch.long)
+        out = torch.empty(1, 5, dtype=dtype, device=DEVICE).expand(2, 5)
+        with pytest.raises(RuntimeError):
+            torch.index_select(src, 0, idx, out=out)
 
     def test_index_select_oob_index_rejected(self):
         """Out-of-range index value must error, not silently corrupt output."""
