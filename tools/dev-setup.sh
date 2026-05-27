@@ -79,6 +79,16 @@ check_rebel_index_access() {
     echo "   Checked with uv (same auth as install):"
     echo "   - pypi.rbln.ai: no access"
     echo ""
+    echo "   This usually means credentials for pypi.rbln.ai are missing."
+    echo "   Add your RBLN Portal account to ~/.netrc:"
+    echo ""
+    echo "       machine pypi.rbln.ai"
+    echo "       login <your-rbln-portal-id>"
+    echo "       password <your-rbln-portal-password>"
+    echo ""
+    echo "   Then: chmod 600 ~/.netrc  and re-run this script."
+    echo "   See README.md → 'Authenticate to the RBLN package index'."
+    echo ""
     exit 1
 }
 

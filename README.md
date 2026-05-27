@@ -41,7 +41,8 @@ For **`rebel-compiler`** and the rest of the setup, see **Prerequisites** above 
 ### Build from source
 
 1. Install **[uv](https://docs.astral.sh/uv/getting-started/installation/)** (see [Installation — Prerequisites](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html#prerequisites) in the SDK docs).
-2. Follow **[Build from source](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html#build-from-source-advanced)** (venv, **`rebel-compiler`**, editable build, manual steps).
+2. Configure access to the RBLN package index (see [Authenticate to the RBLN package index](#authenticate-to-the-rbln-package-index) below).
+3. Follow **[Build from source](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html#build-from-source-advanced)** (venv, **`rebel-compiler`**, editable build, manual steps).
 
 ```bash
 git clone https://github.com/RBLN-SW/torch-rbln.git
@@ -51,6 +52,30 @@ uv venv .venv && source .venv/bin/activate
 ```
 
 **`rebel-compiler`** must be available in the same environment before the **`torch-rbln`** build finishes (see Prerequisites).
+
+#### Authenticate to the RBLN package index
+
+**`rebel-compiler`** is installed from the RBLN package index (`pypi.rbln.ai`), which requires an **[RBLN Portal account](https://docs.rbln.ai/latest/supports/contact_us.html#rbln-portal)**. Without credentials, `./tools/dev-setup.sh pypi` fails with:
+
+```
+❌ Cannot reach any rbln pypi index (no permission or network error).
+```
+
+Add your RBLN Portal credentials to `~/.netrc` so `pip`/`uv` can authenticate:
+
+```
+machine pypi.rbln.ai
+login <your-rbln-portal-id>
+password <your-rbln-portal-password>
+```
+
+Then restrict its permissions (tools refuse a world-readable `.netrc`):
+
+```bash
+chmod 600 ~/.netrc
+```
+
+Re-run `./tools/dev-setup.sh pypi` once the file is in place.
 
 ## Documentation
 
