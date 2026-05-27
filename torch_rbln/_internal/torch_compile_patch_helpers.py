@@ -35,6 +35,44 @@ def _exit_rbln_compile_op() -> None:
     _rbln_compile_op_depth.depth = max(0, d - 1)
 
 
+def _snapshot_chromium_event_state():
+    """Snapshot the thread-local chromium event stack so a nested op-compile's
+    ``reset_event_log_on_exit`` can't wipe an *outer* dynamo compile's events
+    (which crashes it in ``build_guards`` with "No toplevel event active").
+
+    Each RBLN ATen-op fallback is itself ``torch.compile``-d, so dispatching one
+    during an outer compile re-enters dynamo. Returns a zero-arg restorer, or
+    ``None`` if there is nothing to protect.
+    """
+    try:
+        from torch._dynamo.utils import get_chromium_event_logger
+
+        log = get_chromium_event_logger()
+        stack = log.get_stack()
+        if not stack:
+            return None  # not inside an outer compile
+        saved_stack = list(stack)
+        saved_substack = list(log.get_pt2_compile_substack())
+        saved_event_data = dict(log.get_event_data())
+    except Exception:
+        return None
+
+    def _restore():
+        try:
+            cur = log.get_stack()
+            if len(cur) >= len(saved_stack):
+                return  # not wiped
+            cur[:] = saved_stack
+            log.get_pt2_compile_substack()[:] = saved_substack
+            ed = log.get_event_data()
+            ed.clear()
+            ed.update(saved_event_data)
+        except Exception:
+            pass
+
+    return _restore
+
+
 def is_recompile_limit_exception(exception):
     """Check if exception is FailOnRecompileLimitHit."""
     try:
@@ -310,9 +348,13 @@ class CompiledFunctionWrapper:
     def __call__(self, *args, **kwargs):
         """Execute the compiled function with reentrancy guard, TP auto-determination and failover."""
         _enter_rbln_compile_op()
+        # Protect an outer compile's chromium event stack from this op-compile's reset.
+        restore_chromium = _snapshot_chromium_event_state()
         try:
             return self._call_impl(*args, **kwargs)
         finally:
+            if restore_chromium is not None:
+                restore_chromium()
             _exit_rbln_compile_op()
 
     def _call_impl(self, *args, **kwargs):
