@@ -333,6 +333,26 @@ class TestIndexCopyV2V(TestCase):
         with pytest.raises(RuntimeError):
             torch.index_copy(self_dev, 0, idx_dev, bad_src)
 
+    @dtypes(*ENGINE_DTYPES)
+    def test_out_source_overlap_rejected(self, dtype):
+        """``out`` and ``source`` sharing storage (``source`` is a slice of ``out``) must raise ``RuntimeError``."""
+        self_ref = _to_dev(_arange((5,), dtype))
+        idx = torch.tensor([0, 2], dtype=torch.long)
+        out = _to_dev(_arange((5,), dtype))
+        source = out[1:3]
+        with pytest.raises(RuntimeError):
+            torch.index_copy(self_ref, 0, idx, source, out=out)
+
+    @dtypes(*ENGINE_DTYPES)
+    def test_out_internal_overlap_rejected(self, dtype):
+        """``out`` with internal overlap (broadcast view) must raise ``RuntimeError``."""
+        self_ref = _to_dev(_arange((2, 4), dtype))
+        source = _to_dev(_arange((1, 4), dtype))
+        idx = torch.tensor([0], dtype=torch.long)
+        out = torch.empty(1, 4, dtype=dtype, device=DEVICE).expand(2, 4)
+        with pytest.raises(RuntimeError):
+            torch.index_copy(self_ref, 0, idx, source, out=out)
+
     # ---- large / stress ----
 
     def test_large_consecutive_run(self):

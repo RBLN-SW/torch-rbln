@@ -3,6 +3,8 @@
 #include <ATen/core/Tensor.h>
 #include <c10/rbln/RBLNV2VBatch.h>
 
+#include <functional>
+
 namespace at::native::rbln {
 
 /**
@@ -45,5 +47,24 @@ void strided_v2v_copy(
  * inline. Use the batch-aware overload for multi-step kernels.
  */
 void strided_v2v_copy(const at::Tensor& dst, const at::Tensor& src);
+
+/**
+ * @brief Submits `batch`, invoking `cpu_fallback` on a backend call failure.
+ *
+ * Only `rbln_memcpy_v2v_multi` failures (identified by the
+ * "rbln_memcpy_v2v_multi failed" substring in `e.what()`) route to
+ * `cpu_fallback`; every other `c10::Error` (validation, other backend
+ * calls) propagates so caller-side bugs surface. Gated by
+ * `TORCH_RBLN_DISABLE_FALLBACK=strided_copy_error` (default enabled).
+ *
+ * @param batch         V2V batch to submit.
+ * @param op_name       Op identifier used in the fallback warning log.
+ * @param cpu_fallback  Callable performing the CPU-equivalent computation;
+ *                      invoked only on a backend call failure.
+ */
+void submit_or_fallback(
+    c10::rbln::V2VBatch& batch,
+    const char* op_name,
+    std::function<void()> cpu_fallback);
 
 } // namespace at::native::rbln

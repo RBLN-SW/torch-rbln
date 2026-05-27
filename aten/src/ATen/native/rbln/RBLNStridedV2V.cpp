@@ -2,10 +2,13 @@
 
 #include <ATen/native/rbln/RBLNStrideUtils.h>
 #include <ATen/native/rbln/RBLNTensorUtils.h>
+#include <c10/rbln/RBLNFallbackConfig.h>
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/util/Exception.h>
 
 #include <cstdint>
+#include <functional>
+#include <string_view>
 #include <vector>
 
 namespace at::native::rbln {
@@ -108,7 +111,28 @@ void strided_v2v_copy(const at::Tensor& dst, const at::Tensor& src, c10::rbln::V
 void strided_v2v_copy(const at::Tensor& dst, const at::Tensor& src) {
   c10::rbln::V2VBatch batch;
   strided_v2v_copy(dst, src, batch);
-  batch.submit();
+  submit_or_fallback(batch, "strided_v2v_copy", [&] { dst.copy_(src.cpu()); });
+}
+
+void submit_or_fallback(c10::rbln::V2VBatch& batch, const char* op_name, std::function<void()> cpu_fallback) {
+  try {
+    batch.submit();
+  } catch (const c10::Error& e) {
+    const std::string_view error_message = e.what();
+    // TODO: Replace substring match with a typed exception when the wrapper API allows.
+    if (error_message.find("rbln_memcpy_v2v_multi failed") == std::string_view::npos) {
+      throw; // validation error — propagate
+    }
+    if (c10::rbln::is_fallback_disabled("strided_copy_error")) {
+      throw;
+    }
+    RBLN_LOG_WARN(
+        "{}: batched strided copy failed — falling back to CPU op. "
+        "Underlying error: {}",
+        op_name,
+        error_message);
+    cpu_fallback();
+  }
 }
 
 } // namespace at::native::rbln

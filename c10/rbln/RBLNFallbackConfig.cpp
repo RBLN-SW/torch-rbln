@@ -10,7 +10,8 @@ namespace c10::rbln {
 
 namespace {
 
-const std::set<std::string> kValidOptions = {"all", "compile_error", "non_blocking_copy", "unsupported_op"};
+const std::set<std::string> kValidOptions =
+    {"all", "compile_error", "non_blocking_copy", "strided_copy_error", "unsupported_op"};
 
 } // namespace
 
