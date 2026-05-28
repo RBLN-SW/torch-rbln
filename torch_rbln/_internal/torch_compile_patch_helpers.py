@@ -9,6 +9,7 @@ import threading
 
 import torch
 
+
 try:
     from torch._dynamo.utils import get_chromium_event_logger as _get_chromium_event_logger
 except Exception:  # pragma: no cover - torch internals may move
