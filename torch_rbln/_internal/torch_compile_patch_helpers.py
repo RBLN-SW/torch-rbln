@@ -9,6 +9,11 @@ import threading
 
 import torch
 
+try:
+    from torch._dynamo.utils import get_chromium_event_logger as _get_chromium_event_logger
+except Exception:  # pragma: no cover - torch internals may move
+    _get_chromium_event_logger = None
+
 from torch_rbln._internal.env_utils import is_fallback_disabled, use_tp_failover
 from torch_rbln._internal.log_utils import rbln_log_error, rbln_log_warn
 from torch_rbln._internal.ops_utils import extract_device_id_from_inputs, to_cpu
@@ -46,17 +51,19 @@ def _isolate_chromium_event_state():
 
     Returns a zero-arg restorer, or ``None`` if there is nothing to protect.
     """
+    if _get_chromium_event_logger is None:
+        return None
     try:
-        from torch._dynamo.utils import get_chromium_event_logger
-
-        log = get_chromium_event_logger()
+        log = _get_chromium_event_logger()
         tls = log.tls
-        if not log.get_stack():
-            return None  # not inside an outer compile
-        # Hold the outer compile's live containers aside, untouched by the nested compile.
-        saved_stack = log.get_stack()
-        saved_substack = log.get_pt2_compile_substack()
-        saved_event_data = log.get_event_data()
+        # No outer compile in flight -> tls.stack is absent or empty; bail fast
+        # without paying for the get_stack() call (which would also lazily create it).
+        stack = getattr(tls, "stack", None)
+        if not stack:
+            return None
+        saved_stack = stack
+        saved_substack = tls.pt2_compile_substack
+        saved_event_data = tls.event_data
     except Exception:
         return None
 
