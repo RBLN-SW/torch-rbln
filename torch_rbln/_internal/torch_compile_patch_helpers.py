@@ -36,20 +36,13 @@ def _exit_rbln_compile_op() -> None:
 
 
 def _isolate_chromium_event_state():
-    """Isolate the thread-local chromium event state across a nested op-compile.
+    """Isolate dynamo's thread-local chromium event state across a nested op-compile.
 
-    Each RBLN ATen-op fallback is itself ``torch.compile``-d, so dispatching one during an
-    *outer* compile's ``build_guards`` re-enters dynamo. dynamo wraps every ``_compile`` in
-    ``chromium_event_timed(reset_event_log_on_exit=True)``; on exit it calls
-    ``ChromiumEventLogger.reset()``, which ``.clear()``s the *shared*, thread-local event
-    stack -- wiping the outer compile's events so ``build_guards`` crashes with
-    "No toplevel event active" when it logs ``guard_latency_us``.
-
-    Instead of repairing the damage afterwards, redirect the logger's thread-local
-    containers to fresh throwaways for the duration of the (possibly nested) op-compile and
-    restore the originals unconditionally. The nested compile then runs in -- and resets --
-    its own isolated containers, leaving the outer compile's state byte-identical. No-op
-    when not inside an outer compile (~zero cost at steady-state inference).
+    RBLN ATen-op fallbacks are ``torch.compile``-d, so dispatching one during an outer
+    compile's ``build_guards`` re-enters dynamo; the nested compile's exit resets the
+    *shared* chromium event stack, wiping the outer compile's events and crashing it with
+    "No toplevel event active". Swap in throwaway containers for the op-compile, then
+    restore the originals unconditionally.
 
     Returns a zero-arg restorer, or ``None`` if there is nothing to protect.
     """
