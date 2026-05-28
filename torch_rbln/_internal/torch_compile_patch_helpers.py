@@ -35,38 +35,48 @@ def _exit_rbln_compile_op() -> None:
     _rbln_compile_op_depth.depth = max(0, d - 1)
 
 
-def _snapshot_chromium_event_state():
-    """Snapshot the thread-local chromium event stack so a nested op-compile's
-    ``reset_event_log_on_exit`` can't wipe an *outer* dynamo compile's events
-    (which crashes it in ``build_guards`` with "No toplevel event active").
+def _isolate_chromium_event_state():
+    """Isolate the thread-local chromium event state across a nested op-compile.
 
-    Each RBLN ATen-op fallback is itself ``torch.compile``-d, so dispatching one
-    during an outer compile re-enters dynamo. Returns a zero-arg restorer, or
-    ``None`` if there is nothing to protect.
+    Each RBLN ATen-op fallback is itself ``torch.compile``-d, so dispatching one during an
+    *outer* compile's ``build_guards`` re-enters dynamo. dynamo wraps every ``_compile`` in
+    ``chromium_event_timed(reset_event_log_on_exit=True)``; on exit it calls
+    ``ChromiumEventLogger.reset()``, which ``.clear()``s the *shared*, thread-local event
+    stack -- wiping the outer compile's events so ``build_guards`` crashes with
+    "No toplevel event active" when it logs ``guard_latency_us``.
+
+    Instead of repairing the damage afterwards, redirect the logger's thread-local
+    containers to fresh throwaways for the duration of the (possibly nested) op-compile and
+    restore the originals unconditionally. The nested compile then runs in -- and resets --
+    its own isolated containers, leaving the outer compile's state byte-identical. No-op
+    when not inside an outer compile (~zero cost at steady-state inference).
+
+    Returns a zero-arg restorer, or ``None`` if there is nothing to protect.
     """
     try:
         from torch._dynamo.utils import get_chromium_event_logger
 
         log = get_chromium_event_logger()
-        stack = log.get_stack()
-        if not stack:
+        tls = log.tls
+        if not log.get_stack():
             return None  # not inside an outer compile
-        saved_stack = list(stack)
-        saved_substack = list(log.get_pt2_compile_substack())
-        saved_event_data = dict(log.get_event_data())
+        # Hold the outer compile's live containers aside, untouched by the nested compile.
+        saved_stack = log.get_stack()
+        saved_substack = log.get_pt2_compile_substack()
+        saved_event_data = log.get_event_data()
     except Exception:
         return None
 
+    # The nested op-compile's reset_event_log_on_exit now clears these throwaways instead.
+    tls.stack = []
+    tls.pt2_compile_substack = []
+    tls.event_data = {}
+
     def _restore():
         try:
-            cur = log.get_stack()
-            if len(cur) >= len(saved_stack):
-                return  # not wiped
-            cur[:] = saved_stack
-            log.get_pt2_compile_substack()[:] = saved_substack
-            ed = log.get_event_data()
-            ed.clear()
-            ed.update(saved_event_data)
+            tls.stack = saved_stack
+            tls.pt2_compile_substack = saved_substack
+            tls.event_data = saved_event_data
         except Exception:
             pass
 
@@ -348,8 +358,8 @@ class CompiledFunctionWrapper:
     def __call__(self, *args, **kwargs):
         """Execute the compiled function with reentrancy guard, TP auto-determination and failover."""
         _enter_rbln_compile_op()
-        # Protect an outer compile's chromium event stack from this op-compile's reset.
-        restore_chromium = _snapshot_chromium_event_state()
+        # Isolate an outer compile's chromium event stack from this op-compile's reset.
+        restore_chromium = _isolate_chromium_event_state()
         try:
             return self._call_impl(*args, **kwargs)
         finally:
