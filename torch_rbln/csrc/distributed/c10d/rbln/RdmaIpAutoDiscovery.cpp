@@ -389,13 +389,9 @@ void DoOnce() {
     }
   }
 
-  // Final state log: recent librbln-ccl no longer needs RBLN_RDMA_IP on
-  // single-node runs, so missing-IP is no longer fatal even when
-  // RCCL_PORT_GEN is set. We cannot distinguish single- vs multi-node here
-  // (the world topology is decided later by ProcessGroupRBLN init), so
-  // warn loudly when RCCL_PORT_GEN is set without an IP and let the
-  // runtime decide whether the call is single-node (proceeds) or
-  // multi-node (will fail at RCCL init with its own diagnostics).
+  // No IP found. Missing-IP is no longer fatal: we can't tell single- vs
+  // multi-node here, so warn (when RCCL_PORT_GEN is set) and defer the
+  // decision to the runtime. See the header for the full contract.
   const char* port_gen_env = std::getenv("RCCL_PORT_GEN");
   const bool use_autoport = (port_gen_env != nullptr && port_gen_env[0] != '\0');
   const char* final_ip = std::getenv(kEnvRdmaIp);
@@ -405,13 +401,10 @@ void DoOnce() {
   }
   if (use_autoport) {
     RBLN_LOG_WARN(
-        "{} RCCL_PORT_GEN is set but {} could not be determined. "
-        "Single-node runs continue without it (recent librbln-ccl no longer "
-        "requires an IP); multi-node runs will fail later at RCCL init. To "
-        "pin an address explicitly set {} in the environment, or ensure "
-        "/sys/class/infiniband exposes a RoCE v2 capable device with an "
-        "ACTIVE port and an IPv4-assigned netdev. See [rbln_rdma_probe] "
-        "diagnostics above for the auto-discovery failure stage.",
+        "{} RCCL_PORT_GEN set but {} unresolved. Single-node runs continue; "
+        "multi-node will fail at RCCL init. To pin it set {}, or ensure "
+        "/sys/class/infiniband has a RoCE v2 ACTIVE port with an IPv4 netdev. "
+        "See [rbln_rdma_probe] above.",
         kDiagPrefix,
         kEnvRdmaIp,
         kEnvRdmaIp);
