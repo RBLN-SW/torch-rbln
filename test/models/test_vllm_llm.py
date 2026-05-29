@@ -154,12 +154,22 @@ def _vllm_generate_worker(
 
     llm = LLM(**llm_kwargs)
 
-    outputs = llm.generate([prompt], SamplingParams(temperature=0.0, max_tokens=max_tokens))
-    assert len(outputs) == 1, "expected a single RequestOutput"
+    try:
+        outputs = llm.generate([prompt], SamplingParams(temperature=0.0, max_tokens=max_tokens))
+        assert len(outputs) == 1, "expected a single RequestOutput"
 
-    gen = outputs[0].outputs[0]
-    gen_text = gen.text
-    gen_ids = list(gen.token_ids)
+        gen = outputs[0].outputs[0]
+        gen_text = gen.text
+        gen_ids = list(gen.token_ids)
+    finally:
+        # Deterministically tear down the vLLM EngineCore subprocess *before*
+        # this worker exits. vLLM V1 runs EngineCore in its own spawned process
+        # and relies on a ``weakref.finalize`` for cleanup. If the worker exits
+        # via an exception (e.g. the output-mismatch assert below), multiprocessing's
+        # atexit ``_exit_function`` joins the still-running EngineCore before that
+        # finalizer fires and deadlocks — the AssertionError only surfaces after a
+        # manual SIGINT. Shutting down here keeps failures observable.
+        llm.llm_engine.engine_core.shutdown()
 
     mode = "eager" if enforce_eager else "graph"
     print(f"[vllm_llm_test] model={model_key} tp={tp_size} mode={mode} text={gen_text!r} ids={gen_ids}")
@@ -232,6 +242,11 @@ def _run_case(model_key: str, tp_size: int, enforce_eager: bool) -> None:
         # logical device). vllm engine stays at ``tensor_parallel_size=1``.
         mp.setenv("VLLM_RBLN_TP_SIZE", str(tp_size))
         if enforce_eager:
+            # Eager mode bypasses torch.compile, so ops must dispatch to a real
+            # device='rbln' instead of the compile-backend fake-CPU tensors of
+            # the default vLLM model path. vllm-rbln's platform validation now
+            # rejects ``enforce_eager=True`` without this. See platform.py.
+            mp.setenv("VLLM_RBLN_USE_DEVICE_TENSOR", "1")
             # Eager workarounds: keep sampler + attention backend off the
             # compile path so they stay consistent with the uncompiled model.
             # Without these: RBLN sampler hits weight-reuse assert

@@ -1,11 +1,15 @@
 #include <ATen/native/rbln/RBLNTensorAdvancedIndexing.h>
 
+#include <ATen/MemoryOverlap.h>
 #include <ATen/core/Tensor.h>
 #include <ATen/native/Resize.h>
 #include <ATen/native/rbln/RBLNIndexUtils.h>
 #include <ATen/native/rbln/RBLNStridedV2V.h>
 #include <ATen/native/rbln/RBLNTensorUtils.h>
 #include <ATen/ops/empty.h>
+#include <ATen/ops/index_copy.h>
+#include <ATen/ops/index_select.h>
+#include <c10/rbln/RBLNFallbackConfig.h>
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNV2VBatch.h>
 
@@ -35,6 +39,11 @@ at::Tensor& index_select_out_rbln(const at::Tensor& self, int64_t dim, const at:
       "index_select: out dtype {} doesn't match self dtype {}",
       c10::str(out.scalar_type()),
       c10::str(self.scalar_type()));
+
+  // Mirror upstream PyTorch's `aten::index_select.out` overlap checks.
+  at::assert_no_internal_overlap(out);
+  at::assert_no_overlap(out, self);
+  at::assert_no_overlap(out, index);
 
   const int64_t rank = self.dim();
   const auto idx_host = read_index_to_host(index, "index_select");
@@ -103,7 +112,12 @@ at::Tensor& index_select_out_rbln(const at::Tensor& self, int64_t dim, const at:
     auto dst_view = out.narrow(axis, run.pos, run.length);
     strided_v2v_copy(dst_view, src_view, batch);
   }
-  batch.submit();
+  submit_or_fallback(batch, "index_select_out_rbln", [&] {
+    const auto cpu_self = self.cpu();
+    const auto cpu_index = index.cpu();
+    const auto cpu_out = at::index_select(cpu_self, dim, cpu_index);
+    out.copy_(cpu_out);
+  });
 
   return out;
 }
@@ -162,6 +176,12 @@ at::Tensor& index_copy_out_rbln(
       "index_copy: source dtype {} doesn't match self dtype {}",
       c10::str(source.scalar_type()),
       c10::str(self.scalar_type()));
+
+  // Mirror upstream PyTorch's `aten::index_copy.out` overlap checks
+  // (self ↔ out aliasing excluded — in-place dispatch pattern).
+  at::assert_no_internal_overlap(out);
+  at::assert_no_overlap(out, index);
+  at::assert_no_overlap(out, source);
 
   const int64_t rank = self.dim();
   const auto idx_host = read_index_to_host(index, "index_copy");
@@ -294,7 +314,13 @@ at::Tensor& index_copy_out_rbln(
       auto dst_view = out.narrow(axis, run.value, run.length);
       strided_v2v_copy(dst_view, src_view, batch);
     }
-    batch.submit();
+    submit_or_fallback(batch, "index_copy_out_rbln", [&] {
+      const auto cpu_self = self.cpu();
+      const auto cpu_index = index.cpu();
+      const auto cpu_source = source.cpu();
+      const auto cpu_out = at::index_copy(cpu_self, dim, cpu_index, cpu_source);
+      out.copy_(cpu_out);
+    });
   }
 
   return out;

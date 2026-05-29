@@ -4,8 +4,10 @@
 #include <ATen/core/Tensor.h>
 #include <ATen/native/Resize.h>
 #include <ATen/native/rbln/RBLNStridedV2V.h>
+#include <ATen/ops/cat.h>
 #include <ATen/ops/empty.h>
 #include <c10/core/ScalarType.h>
+#include <c10/rbln/RBLNFallbackConfig.h>
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNV2VBatch.h>
 #include <c10/util/Exception.h>
@@ -126,6 +128,12 @@ at::Tensor& cat_out_rbln(const at::ITensorListRef& tensors, int64_t dim, at::Ten
       c10::str(out.scalar_type()),
       c10::str(common_dtype));
 
+  // Mirror upstream PyTorch's `aten::cat.out` overlap checks.
+  at::assert_no_internal_overlap(out);
+  for (const auto& t : inputs) {
+    at::assert_no_overlap(out, t);
+  }
+
   // Resize via the upstream helper so a wrong-shape non-empty `out` triggers
   // the canonical UserWarning ("An output with one or more elements was
   // resized...").
@@ -150,13 +158,6 @@ at::Tensor& cat_out_rbln(const at::ITensorListRef& tensors, int64_t dim, at::Ten
     return out;
   }
 
-  // Reject any input that overlaps the output storage. In-place cat is not
-  // supported; we rely on upstream `at::assert_no_overlap` so the overlap
-  // detection matches PyTorch's semantics (full / partial / too-hard).
-  for (const at::Tensor& t : inputs) {
-    at::assert_no_overlap(out, t);
-  }
-
   // Per-input slab copy: `out.narrow(axis, axis_offset, n)` carves out the
   // destination view for one input; the engine handles whatever stride
   // pattern the input has. All sub-copies share a single V2VBatch so any
@@ -175,7 +176,15 @@ at::Tensor& cat_out_rbln(const at::ITensorListRef& tensors, int64_t dim, at::Ten
     strided_v2v_copy(dst_view, t, batch);
     axis_offset += extent;
   }
-  batch.submit();
+  submit_or_fallback(batch, "cat_out_rbln", [&] {
+    std::vector<at::Tensor> cpu_tensors;
+    cpu_tensors.reserve(inputs.size());
+    for (const auto& t : inputs) {
+      cpu_tensors.push_back(t.cpu());
+    }
+    const auto cpu_out = at::cat(cpu_tensors, axis);
+    out.copy_(cpu_out);
+  });
 
   return out;
 }

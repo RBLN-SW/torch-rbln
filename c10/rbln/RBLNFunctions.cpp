@@ -336,7 +336,8 @@ void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies) {
         reinterpret_cast<uint64_t>(c.src), reinterpret_cast<uint64_t>(c.dst), static_cast<uint64_t>(c.nbytes));
   }
   RBLN_LOG_DEBUG("Calling rbln_memcpy_v2v_multi: n_copies={}", copies.size());
-  RBLN_CHECK(!::rbln::rbln_memcpy_v2v_multi(rbln_copies));
+  // Error message matched by `at::native::rbln::submit_or_fallback` to gate CPU fallback — keep stable.
+  RBLN_CHECK(!::rbln::rbln_memcpy_v2v_multi(rbln_copies), "rbln_memcpy_v2v_multi failed");
 }
 
 BorrowedHostPtr borrow_host_ptr(const void* rbln_data, size_t nbytes) {
