@@ -91,8 +91,17 @@ class TestTensorCopy(TestCase):
     @parametrize("dst_dtype", TEST_DTYPES)
     @parametrize("src_is_contiguous", [True, False])
     @parametrize("dst_is_contiguous", [True, False])
+    @parametrize("non_blocking", [True, False])
     def test_tensor_copy_kernel(
-        self, shape, src_device_type, dst_device_type, src_dtype, dst_dtype, src_is_contiguous, dst_is_contiguous
+        self,
+        shape,
+        src_device_type,
+        dst_device_type,
+        src_dtype,
+        dst_dtype,
+        src_is_contiguous,
+        dst_is_contiguous,
+        non_blocking,
     ):
         src_device = torch.device(src_device_type)
         src = _make_tensor(shape, src_dtype, src_device, src_is_contiguous)
@@ -100,7 +109,9 @@ class TestTensorCopy(TestCase):
         dst_device = torch.device(dst_device_type)
         dst = _make_tensor(shape, dst_dtype, dst_device, dst_is_contiguous).zero_()
 
-        dst.copy_(src)
+        dst.copy_(src, non_blocking=non_blocking)
+        if non_blocking:
+            torch.rbln.synchronize()
 
         self.assertEqual(dst.cpu(), src.cpu().to(dst_dtype), atol=ATOL, rtol=RTOL)
         self.assertEqual(dst.is_contiguous(), dst_is_contiguous)

@@ -72,7 +72,6 @@ _ops_with_related_view_tests = [
 
 _ops_with_cpu_fallback_tests = [
     "sum",
-    "index_select",
     "masked_select",
     "fill",
     "normal",
@@ -113,6 +112,17 @@ _ops_with_cpu_fallback_tests = [
 # vs _scaled_dot_product_fused_attention_overrideable). Added explicitly for test discovery.
 _ops_with_public_api_name_mismatch = [
     "nn.functional.scaled_dot_product_attention",
+]
+
+# Ops with a native RBLN kernel that are not declared in our native_functions.yaml
+# (the kernels are registered manually in RBLNRegisterOps.cpp). Hardcoded so opinfo
+# discovery picks them up.
+_ops_with_rbln_native_kernel = [
+    "cat",
+    "index_copy",
+    "index_select",
+    "repeat_interleave",
+    "stack",
 ]
 
 # Assume this file is in `test/filters.py`.
@@ -168,6 +178,7 @@ else:
     _root_names.update(_ops_with_related_view_tests)
     _root_names.update(_ops_with_cpu_fallback_tests)
     _root_names.update(_ops_with_public_api_name_mismatch)
+    _root_names.update(_ops_with_rbln_native_kernel)
 
 _target_ops = set()
 for root_name in _root_names:

@@ -290,16 +290,19 @@ void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes) {
   RBLN_CHECK(rbln_src_data != nullptr, "rbln_src_data cannot be nullptr");
   RBLN_CHECK(rbln_dst_data != nullptr, "rbln_dst_data cannot be nullptr");
 
-  const auto src_memory_info = get_memory_info(rbln_src_data);
-  const auto dst_memory_info = get_memory_info(rbln_dst_data);
-  const auto src_device_index = static_cast<c10::DeviceIndex>(src_memory_info.torch_device_id);
-  const auto dst_device_index = static_cast<c10::DeviceIndex>(dst_memory_info.torch_device_id);
-  RBLN_LOG_DEBUG("src=rbln:{}, dst=rbln:{}", static_cast<int>(src_device_index), static_cast<int>(dst_device_index));
-
   const auto src_vaddr = reinterpret_cast<uint64_t>(rbln_src_data);
   const auto dst_vaddr = reinterpret_cast<uint64_t>(rbln_dst_data);
   const auto size = static_cast<uint64_t>(nbytes);
-  if (src_device_index == dst_device_index) {
+
+  uint32_t src_torch_device_id = 0;
+  uint32_t dst_torch_device_id = 0;
+  RBLN_CHECK(!::rbln::rbln_get_torch_device_id_from_vaddr(src_vaddr, src_torch_device_id));
+  RBLN_CHECK(!::rbln::rbln_get_torch_device_id_from_vaddr(dst_vaddr, dst_torch_device_id));
+
+  RBLN_LOG_DEBUG(
+      "src=rbln:{}, dst=rbln:{}", static_cast<int>(src_torch_device_id), static_cast<int>(dst_torch_device_id));
+
+  if (src_torch_device_id == dst_torch_device_id) {
     RBLN_LOG_DEBUG("Performing same-device copy");
 
     RBLN_LOG_DEBUG("Calling rbln_memcpy_v2v: src_vaddr={:#x}, dst_vaddr={:#x}, size={}", src_vaddr, dst_vaddr, size);
@@ -363,6 +366,20 @@ void memcpy_v2v_async(void* rbln_dst_data, const void* rbln_src_data, size_t nby
   const auto src_vaddr = reinterpret_cast<uint64_t>(rbln_src_data);
   const auto dst_vaddr = reinterpret_cast<uint64_t>(rbln_dst_data);
   const auto size = static_cast<uint64_t>(nbytes);
+
+  uint32_t src_torch_device_id = 0;
+  uint32_t dst_torch_device_id = 0;
+  RBLN_CHECK(!::rbln::rbln_get_torch_device_id_from_vaddr(src_vaddr, src_torch_device_id));
+  RBLN_CHECK(!::rbln::rbln_get_torch_device_id_from_vaddr(dst_vaddr, dst_torch_device_id));
+
+  if (src_torch_device_id != dst_torch_device_id) {
+    // rbln_memcpy_v2v_async only handles same-device copies; cross-device needs
+    // a host bounce, which we cannot do async without owning a buffer past return.
+    RBLN_LOG_DEBUG("Cross-device v2v, falling back to sync memcpy_v2v");
+    memcpy_v2v(rbln_dst_data, rbln_src_data, nbytes);
+    return;
+  }
+
   uint64_t handle = 0;
   RBLN_LOG_DEBUG(
       "Calling rbln_memcpy_v2v_async: src_vaddr={:#x}, dst_vaddr={:#x}, size={}", src_vaddr, dst_vaddr, size);
@@ -376,6 +393,24 @@ void synchronize(c10::DeviceIndex device_index) {
   const auto torch_device_id =
       static_cast<uint32_t>(static_cast<unsigned char>(device_index));
   RBLN_CHECK(!::rbln::rbln_device_synchronize(torch_device_id));
+}
+
+void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies) {
+  if (copies.empty()) {
+    return;
+  }
+  std::vector<std::tuple<uint64_t, uint64_t, uint64_t>> rbln_copies;
+  rbln_copies.reserve(copies.size());
+  for (const auto& c : copies) {
+    RBLN_CHECK(c.nbytes > 0, "memcpy_v2v_multi: nbytes must be positive");
+    RBLN_CHECK(c.src != nullptr, "memcpy_v2v_multi: src cannot be nullptr");
+    RBLN_CHECK(c.dst != nullptr, "memcpy_v2v_multi: dst cannot be nullptr");
+    rbln_copies.emplace_back(
+        reinterpret_cast<uint64_t>(c.src), reinterpret_cast<uint64_t>(c.dst), static_cast<uint64_t>(c.nbytes));
+  }
+  RBLN_LOG_DEBUG("Calling rbln_memcpy_v2v_multi: n_copies={}", copies.size());
+  // Error message matched by `at::native::rbln::submit_or_fallback` to gate CPU fallback — keep stable.
+  RBLN_CHECK(!::rbln::rbln_memcpy_v2v_multi(rbln_copies), "rbln_memcpy_v2v_multi failed");
 }
 
 c10::CachingDeviceAllocator::DeviceStats get_device_stats(const c10::Device& device) {
@@ -474,6 +509,11 @@ void reset_peak_memory_stats(const c10::Device& device) {
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_reset_peak_memory_stats: device_id={}", device_id);
   RBLN_CHECK(!rbln_reset_peak_memory_stats(device_id));
+}
+
+void set_file_offloading_enabled(bool enabled) {
+  RBLN_LOG_DEBUG("Calling rbln_set_file_offloading_enabled: enabled={}", enabled);
+  RBLN_CHECK(!::rbln::rbln_set_file_offloading_enabled(enabled));
 }
 
 } // namespace c10::rbln

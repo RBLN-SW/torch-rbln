@@ -114,6 +114,15 @@ void register_internal_api(py::module_& module) {
       "_is_fallback_disabled",
       &c10::rbln::is_fallback_disabled,
       "Internal: check if specified fallback category is disabled");
+
+  // Process-wide RBLN vmemory file offloading toggle. Exposed only as an
+  // internal helper so torch.rbln.offload (in torch_rbln/memory.py) can drive
+  // it; users should go through the offload() context manager rather than
+  // calling this directly.
+  module.def(
+      "_set_file_offloading_enabled",
+      &c10::rbln::set_file_offloading_enabled,
+      "Internal: enable or disable process-wide RBLN vmemory file offloading.");
 }
 
 /**
