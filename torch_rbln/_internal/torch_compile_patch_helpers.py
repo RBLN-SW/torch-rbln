@@ -9,6 +9,12 @@ import threading
 
 import torch
 
+
+try:
+    from torch._dynamo.utils import get_chromium_event_logger as _get_chromium_event_logger
+except Exception:  # pragma: no cover - torch internals may move
+    _get_chromium_event_logger = None
+
 from torch_rbln._internal.env_utils import is_fallback_disabled, use_tp_failover
 from torch_rbln._internal.log_utils import rbln_log_error, rbln_log_warn
 from torch_rbln._internal.ops_utils import extract_device_id_from_inputs, to_cpu
@@ -33,6 +39,49 @@ def _enter_rbln_compile_op() -> None:
 def _exit_rbln_compile_op() -> None:
     d = get_rbln_compile_op_depth()
     _rbln_compile_op_depth.depth = max(0, d - 1)
+
+
+def _isolate_chromium_event_state():
+    """Isolate dynamo's thread-local chromium event state across a nested op-compile.
+
+    RBLN ATen-op fallbacks are ``torch.compile``-d, so dispatching one during an outer
+    compile's ``build_guards`` re-enters dynamo; the nested compile's exit resets the
+    *shared* chromium event stack, wiping the outer compile's events and crashing it with
+    "No toplevel event active". Swap in throwaway containers for the op-compile, then
+    restore the originals unconditionally.
+
+    Returns a zero-arg restorer, or ``None`` if there is nothing to protect.
+    """
+    if _get_chromium_event_logger is None:
+        return None
+    try:
+        log = _get_chromium_event_logger()
+        tls = log.tls
+        # No outer compile in flight -> tls.stack is absent or empty; bail fast
+        # without paying for the get_stack() call (which would also lazily create it).
+        stack = getattr(tls, "stack", None)
+        if not stack:
+            return None
+        saved_stack = stack
+        saved_substack = tls.pt2_compile_substack
+        saved_event_data = tls.event_data
+    except Exception:
+        return None
+
+    # The nested op-compile's reset_event_log_on_exit now clears these throwaways instead.
+    tls.stack = []
+    tls.pt2_compile_substack = []
+    tls.event_data = {}
+
+    def _restore():
+        try:
+            tls.stack = saved_stack
+            tls.pt2_compile_substack = saved_substack
+            tls.event_data = saved_event_data
+        except Exception:
+            pass
+
+    return _restore
 
 
 def is_recompile_limit_exception(exception):
@@ -310,9 +359,13 @@ class CompiledFunctionWrapper:
     def __call__(self, *args, **kwargs):
         """Execute the compiled function with reentrancy guard, TP auto-determination and failover."""
         _enter_rbln_compile_op()
+        # Isolate an outer compile's chromium event stack from this op-compile's reset.
+        restore_chromium = _isolate_chromium_event_state()
         try:
             return self._call_impl(*args, **kwargs)
         finally:
+            if restore_chromium is not None:
+                restore_chromium()
             _exit_rbln_compile_op()
 
     def _call_impl(self, *args, **kwargs):

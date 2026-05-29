@@ -12,14 +12,13 @@ if(${CMAKE_SOURCE_DIR} STREQUAL ${CMAKE_BINARY_DIR})
 endif()
 
 # Set C++ and C standard
-set(CMAKE_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
 
 # Generate compile_commands.json
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-
-set(CMAKE_LINK_WHAT_YOU_USE TRUE)
 
 # Set not to use link path for RPATH
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH OFF)
@@ -82,9 +81,27 @@ target_compile_definitions(${target} INTERFACE
 )
 target_compile_options(${target} INTERFACE
   ${TORCH_CXX_FLAGS}
-  -fdebug-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}/=
-  -fdebug-prefix-map=${CMAKE_CURRENT_BINARY_DIR}/=
+  -ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}/=
+  -ffile-prefix-map=${CMAKE_CURRENT_BINARY_DIR}/=
+  -ffile-prefix-map=${CMAKE_INSTALL_PREFIX}/=
+  -ffile-prefix-map=${TORCH_INSTALL_PREFIX}/=torch/
 )
+# Hardening flags
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(${target} INTERFACE
+    # _FORTIFY_SOURCE is a no-op without -O; gate on non-Debug to silence the warning.
+    $<$<NOT:$<CONFIG:Debug>>:-D_FORTIFY_SOURCE=2>
+    -fstack-protector-strong
+    -fstack-clash-protection
+  )
+  target_link_options(${target} INTERFACE
+    -Wl,-z,relro
+    -Wl,-z,now
+    -Wl,-z,noexecstack
+    # Scope to non-executables: tests need libtorch_rbln in NEEDED for static-init op registration.
+    $<$<NOT:$<STREQUAL:$<TARGET_PROPERTY:TYPE>,EXECUTABLE>>:-Wl,--as-needed>
+  )
+endif()
 target_include_directories(${target} SYSTEM INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>

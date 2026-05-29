@@ -6,6 +6,7 @@ set(sources
   core/RBLNFunctionsTest.cpp
   core/RBLNLoggingTest.cpp
   core/RBLNTensorUtilsTest.cpp
+  core/RBLNV2VBatchTest.cpp
 )
 
 foreach(source ${sources})

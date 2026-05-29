@@ -12,7 +12,7 @@ namespace c10::rbln {
  * Parses the `TORCH_RBLN_DISABLE_FALLBACK` environment variable (comma-separated)
  * and returns true if the given category or 'all' is present.
  *
- * Valid categories: all, compile_error, non_blocking_copy, unsupported_op
+ * Valid categories: all, compile_error, non_blocking_copy, strided_copy_error, unsupported_op
  *
  * @param category The fallback category to check.
  * @return true if the category is disabled, false otherwise.

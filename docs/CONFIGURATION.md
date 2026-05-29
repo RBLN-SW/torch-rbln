@@ -57,12 +57,13 @@ export TORCH_RBLN_DISABLE_FALLBACK=compile_error,unsupported_op
 
 The value is a **comma-separated list** of fallback categories to disable:
 
-| Category            | Fallback behavior (default)                            | When disabled                                         |
-|---------------------|--------------------------------------------------------|-------------------------------------------------------|
-| `compile_error`     | `torch.compile` failures fall back to CPU execution    | Raises the compilation error directly                 |
-| `non_blocking_copy` | Non-blocking copy silently falls back to blocking copy | Raises an error instead of degrading to blocking copy |
-| `unsupported_op`    | Unsupported RBLN ops silently fall back to CPU         | Raises an error listing the unsupported operator      |
-| `all`               | —                                                      | Disables **all** of the above fallbacks               |
+| Category             | Fallback behavior (default)                              | When disabled                                         |
+|----------------------|----------------------------------------------------------|-------------------------------------------------------|
+| `compile_error`      | `torch.compile` failures fall back to CPU execution      | Raises the compilation error directly                 |
+| `non_blocking_copy`  | Non-blocking copy silently falls back to blocking copy   | Raises an error instead of degrading to blocking copy |
+| `strided_copy_error` | Batched strided copy failures fall back to CPU execution | Raises the underlying error directly                  |
+| `unsupported_op`     | Unsupported RBLN ops silently fall back to CPU execution | Raises an error listing the unsupported operator      |
+| `all`                | —                                                        | Disables **all** of the above fallbacks               |
 
 **Examples:**
 

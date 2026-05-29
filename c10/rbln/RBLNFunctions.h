@@ -6,9 +6,11 @@
 #include <c10/rbln/RBLNMacros.h>
 #include <rebel/runtime/api/rbln_runtime_api.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <string>
+#include <vector>
 
 namespace c10::rbln {
 
@@ -175,6 +177,31 @@ C10_RBLN_API void memcpy_v2h(void* cpu_dst_data, const void* rbln_src_data, size
 C10_RBLN_API void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes);
 
 /**
+ * @brief Descriptor for one device-to-device slab copy used by memcpy_v2v_multi.
+ */
+struct C10_RBLN_API V2VCopyOp {
+  void* dst;
+  const void* src;
+  size_t nbytes;
+};
+
+/**
+ * @brief Batched device-to-device copy through rbln_memcpy_v2v_multi.
+ *
+ * Empty input is a no-op. Each entry must have nbytes > 0 and non-null dst/src.
+ *
+ * Caller contract (NOT validated): every entry's src AND dst must reside on the
+ * same RBLN device. The bulk runtime entrypoint targets one device per call and
+ * does NOT host-bounce cross-device entries — mixing devices yields silent wrong
+ * results. Callers with heterogeneous inputs should partition up front or use
+ * memcpy_v2v per entry; V2VBatch handles this internally via fallback.
+ *
+ * The runtime may parallelise or reorder entries, so overlapping ranges across
+ * entries yield undefined behaviour.
+ */
+C10_RBLN_API void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies);
+
+/**
  * @brief Returns comprehensive device memory statistics.
  *
  * Retrieves all memory metrics from the RBLN runtime in a single call and
@@ -221,5 +248,17 @@ C10_RBLN_API void reset_accumulated_memory_stats(const c10::Device& device);
  * @param device The input device.
  */
 C10_RBLN_API void reset_peak_memory_stats(const c10::Device& device);
+
+/**
+ * @brief Enables or disables process-wide file offloading for RBLN virtual memory.
+ *
+ * When enabled, host-side regions backing RBLN tensors may be paged out to disk to reduce
+ * host memory pressure. The setting applies to all RBLN devices initialized in the current
+ * process and takes effect for subsequent vmemory operations; existing user views are not
+ * migrated by the toggle itself.
+ *
+ * @param enabled If true, enable file offloading; if false, disable it.
+ */
+C10_RBLN_API void set_file_offloading_enabled(bool enabled);
 
 } // namespace c10::rbln
