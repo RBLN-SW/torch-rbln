@@ -37,7 +37,16 @@ namespace fs = std::filesystem;
 constexpr const char* kSysfsInfiniband = "/sys/class/infiniband";
 constexpr const char* kDiagPrefix = "[rbln_rdma_probe]";
 constexpr const char* kEnvRdmaIp = "RBLN_RDMA_IP";
+constexpr const char* kEnvRdmaHca = "RBLN_RDMA_HCA";
 constexpr const char* kEnvDisable = "RBLN_DISABLE_AUTO_RDMA_IP";
+
+// Auto-discovery vendor priority. Lower wins. Broadcom (bnxt_re) is the
+// validated default on RBLN hosts; Intel iRDMA (irdma) on E810 is known to
+// mis-bind to RBLN traffic on mixed-vendor hosts so it is pushed below
+// every other driver. Unknown drivers sit in the middle.
+constexpr int kVendorPriorityBroadcom = 0;
+constexpr int kVendorPriorityUnknown = 1;
+constexpr int kVendorPriorityIntelIrdma = 2;
 
 // Mirrors the Python helper's stderr-tagged probe lines so existing CI grep
 // patterns ([rbln_rdma_probe] ...) keep working when the source of the
@@ -236,9 +245,113 @@ std::optional<std::string> ReadOperstate(const fs::path& netdev_dir) {
   return ReadFileTrimmed(netdev_dir / "operstate");
 }
 
+// Read /sys/class/infiniband/<hca>/device/driver symlink basename. Returns
+// the RDMA driver name ("bnxt_re", "irdma", "mlx5_core", ...) or nullopt
+// when the link is missing/unreadable.
+std::optional<std::string> ReadRdmaDriverName(const fs::path& rdma_dev) {
+  fs::path driver_link = rdma_dev / "device" / "driver";
+  std::error_code ec;
+  fs::path target = fs::read_symlink(driver_link, ec);
+  if (ec) {
+    return std::nullopt;
+  }
+  std::string base = target.filename().string();
+  if (base.empty()) {
+    return std::nullopt;
+  }
+  return base;
+}
+
+int VendorPriority(std::string_view driver_name) {
+  if (driver_name == "bnxt_re") {
+    return kVendorPriorityBroadcom;
+  }
+  if (driver_name == "irdma") {
+    return kVendorPriorityIntelIrdma;
+  }
+  return kVendorPriorityUnknown;
+}
+
+// Resolve an HCA device name (e.g. "rocep99s0", "mlx5_0") to its first
+// bound netdev under /sys/class/infiniband/<hca>/device/net/. Strips an
+// optional ":<port>" or "/<port>" suffix (NCCL-compatible syntax); the
+// port number is logged and ignored. Warns when multiple netdevs are
+// bound -- set RBLN_RDMA_IP explicitly to pick a specific one.
+std::optional<std::string> HcaToNetdev(std::string_view hca) {
+  size_t sep = hca.find_first_of(":/");
+  std::string dev_name(hca.substr(0, sep));
+  if (dev_name.empty()) {
+    RDMA_DIAG("{}={} parse failed: empty device name", kEnvRdmaHca, hca);
+    return std::nullopt;
+  }
+  if (sep != std::string_view::npos) {
+    RDMA_DIAG("{}={} ignoring port suffix '{}' for HCA '{}'", kEnvRdmaHca, hca, std::string(hca.substr(sep)), dev_name);
+  }
+
+  fs::path net_root = fs::path(kSysfsInfiniband) / dev_name / "device" / "net";
+  std::error_code ec;
+  if (!fs::is_directory(net_root, ec)) {
+    RDMA_DIAG("{}={} resolve failed: {} does not exist", kEnvRdmaHca, dev_name, net_root.string());
+    return std::nullopt;
+  }
+
+  std::vector<std::string> netdevs;
+  for (const auto& entry : fs::directory_iterator(net_root, ec)) {
+    std::string name = entry.path().filename().string();
+    if (name.empty() || name[0] == '.') {
+      continue;
+    }
+    netdevs.push_back(std::move(name));
+  }
+  if (netdevs.empty()) {
+    RDMA_DIAG("{}={} resolve failed: no netdev under {}", kEnvRdmaHca, dev_name, net_root.string());
+    return std::nullopt;
+  }
+  std::sort(netdevs.begin(), netdevs.end());
+  std::string chosen = netdevs.front();
+  if (netdevs.size() > 1) {
+    std::string others;
+    for (size_t i = 1; i < netdevs.size(); ++i) {
+      if (!others.empty()) {
+        others += ",";
+      }
+      others += netdevs[i];
+    }
+    RBLN_LOG_WARN(
+        "{} {}={} has multiple netdevs; selected '{}', also bound: [{}]. "
+        "To select a different one, set {} explicitly.",
+        kDiagPrefix,
+        kEnvRdmaHca,
+        dev_name,
+        chosen,
+        others,
+        kEnvRdmaIp);
+  }
+  return chosen;
+}
+
+// Full RBLN_RDMA_HCA -> IPv4 resolution. Returns nullopt and emits a
+// diagnostic on any failure; the caller decides whether to warn or
+// continue.
+std::optional<std::string> ResolveRbnRdmaHca(std::string_view hca) {
+  auto netdev = HcaToNetdev(hca);
+  if (!netdev) {
+    return std::nullopt;
+  }
+  auto ipv4 = Ipv4ForIface(*netdev);
+  if (!ipv4) {
+    RDMA_DIAG("{}={} netdev={} resolve failed: no IPv4", kEnvRdmaHca, hca, *netdev);
+    return std::nullopt;
+  }
+  RDMA_DIAG("{}={} netdev={} ipv4={}", kEnvRdmaHca, hca, *netdev, *ipv4);
+  return ipv4;
+}
+
 // Core loop. Walks /sys/class/infiniband/*, picks the first IPv4 on an
 // 'up' netdev whose RDMA port is ACTIVE. Falls back to any netdev IPv4
-// when no port reports ACTIVE.
+// when no port reports ACTIVE. Within each bucket, candidates are ranked
+// by vendor priority (Broadcom bnxt_re first, Intel irdma last) so that
+// mixed-vendor hosts deterministically prefer the validated Broadcom NIC.
 std::optional<std::string> ProbeRoceRdmaIpv4() {
   std::error_code ec;
   fs::path sysfs_root(kSysfsInfiniband);
@@ -253,7 +366,12 @@ std::optional<std::string> ProbeRoceRdmaIpv4() {
   }
   std::sort(rdma_devs.begin(), rdma_devs.end(), [](const auto& a, const auto& b) { return a.path() < b.path(); });
 
-  using Candidate = std::tuple<std::string, std::string, std::string>; // dev, iface, ipv4
+  struct Candidate {
+    int priority;
+    std::string dev;
+    std::string iface;
+    std::string ipv4;
+  };
   std::vector<Candidate> active_first;
   std::vector<Candidate> fallback;
 
@@ -283,6 +401,10 @@ std::optional<std::string> ProbeRoceRdmaIpv4() {
       netdev_names += nd.path().filename().string();
     }
     RDMA_DIAG("dev={} netdevs=[{}]", dev_name, netdev_names);
+
+    auto driver = ReadRdmaDriverName(rdma_dev);
+    int priority = driver.has_value() ? VendorPriority(*driver) : kVendorPriorityUnknown;
+    RDMA_DIAG("dev={} driver={} vendor_priority={}", dev_name, driver.value_or(std::string("<unknown>")), priority);
 
     auto gid_ipv4s = ReadRoceV2GidIpv4s(rdma_dev);
     std::string gid_list;
@@ -341,20 +463,34 @@ std::optional<std::string> ProbeRoceRdmaIpv4() {
             phys_state ? *phys_state : std::string("<unknown>"));
         continue;
       }
-      Candidate tup{dev_name, iface, *ipv4};
+      Candidate cand{priority, dev_name, iface, *ipv4};
       if (sysfs_link_ok.has_value() && *sysfs_link_ok == true) {
-        RDMA_DIAG("candidate dev={} iface={} ipv4={} bucket=active", dev_name, iface, *ipv4);
-        active_first.push_back(std::move(tup));
+        RDMA_DIAG("candidate dev={} iface={} ipv4={} priority={} bucket=active", dev_name, iface, *ipv4, priority);
+        active_first.push_back(std::move(cand));
       } else {
-        RDMA_DIAG("candidate dev={} iface={} ipv4={} bucket=fallback (rdma link unknown)", dev_name, iface, *ipv4);
-        fallback.push_back(std::move(tup));
+        RDMA_DIAG(
+            "candidate dev={} iface={} ipv4={} priority={} bucket=fallback (rdma link unknown)",
+            dev_name,
+            iface,
+            *ipv4,
+            priority);
+        fallback.push_back(std::move(cand));
       }
     }
   }
 
+  auto by_priority = [](const Candidate& a, const Candidate& b) {
+    if (a.priority != b.priority) {
+      return a.priority < b.priority;
+    }
+    return a.dev < b.dev;
+  };
+  std::sort(active_first.begin(), active_first.end(), by_priority);
+  std::sort(fallback.begin(), fallback.end(), by_priority);
+
   auto pick = [](const Candidate& c, const char* bucket) {
-    RDMA_DIAG("result={} via dev={} iface={} bucket={}", std::get<2>(c), std::get<0>(c), std::get<1>(c), bucket);
-    return std::get<2>(c);
+    RDMA_DIAG("result={} via dev={} iface={} priority={} bucket={}", c.ipv4, c.dev, c.iface, c.priority, bucket);
+    return c.ipv4;
   };
   if (!active_first.empty()) {
     return pick(active_first.front(), "active");
@@ -370,21 +506,53 @@ void DoOnce() {
   if (EnvTruthy(kEnvDisable)) {
     RDMA_DIAG("auto-discovery disabled by {}=1", kEnvDisable);
   } else {
-    const char* existing = std::getenv(kEnvRdmaIp);
-    if (existing != nullptr && existing[0] != '\0') {
-      RDMA_DIAG("{} already set ({}), skipping auto-discovery", kEnvRdmaIp, existing);
-    } else {
-      auto ipv4 = ProbeRoceRdmaIpv4();
+    // Resolution priority (see header for the full contract):
+    //   1. RBLN_RDMA_HCA -- explicit override, wins over existing RBLN_RDMA_IP.
+    //   2. Existing RBLN_RDMA_IP -- left as-is.
+    //   3. Auto-discovery via /sys/class/infiniband (vendor-prioritized).
+    const char* hca = std::getenv(kEnvRdmaHca);
+    if (hca != nullptr && hca[0] != '\0') {
+      auto ipv4 = ResolveRbnRdmaHca(hca);
       if (ipv4.has_value()) {
-        // overwrite=0: respect any value a parent set between EnvTruthy and now
-        // (extremely unlikely, but cheap to guarantee).
-        if (::setenv(kEnvRdmaIp, ipv4->c_str(), /*overwrite=*/0) != 0) {
+        const char* existing = std::getenv(kEnvRdmaIp);
+        if (existing != nullptr && existing[0] != '\0' && std::string(existing) != *ipv4) {
+          RBLN_LOG_WARN(
+              "{} existing {}={} overridden by {}={} -> {}",
+              kDiagPrefix,
+              kEnvRdmaIp,
+              existing,
+              kEnvRdmaHca,
+              hca,
+              *ipv4);
+        }
+        // overwrite=1: RBLN_RDMA_HCA explicitly takes precedence over any
+        // existing RBLN_RDMA_IP, matching ssw-common-umd PR #1930.
+        if (::setenv(kEnvRdmaIp, ipv4->c_str(), /*overwrite=*/1) != 0) {
           RDMA_DIAG("setenv({}, {}) failed errno={}", kEnvRdmaIp, *ipv4, errno);
         } else {
-          RDMA_DIAG("{}={} (auto-discovered)", kEnvRdmaIp, *ipv4);
+          RDMA_DIAG("{}={} (via {}={})", kEnvRdmaIp, *ipv4, kEnvRdmaHca, hca);
         }
       } else {
-        RDMA_DIAG("{}=<none> (auto-discovery produced no candidate)", kEnvRdmaIp);
+        RDMA_DIAG(
+            "{}={} resolution failed, leaving {} unchanged (see diagnostics above)", kEnvRdmaHca, hca, kEnvRdmaIp);
+      }
+    } else {
+      const char* existing = std::getenv(kEnvRdmaIp);
+      if (existing != nullptr && existing[0] != '\0') {
+        RDMA_DIAG("{} already set ({}), skipping auto-discovery", kEnvRdmaIp, existing);
+      } else {
+        auto ipv4 = ProbeRoceRdmaIpv4();
+        if (ipv4.has_value()) {
+          // overwrite=0: respect any value a parent set between EnvTruthy and now
+          // (extremely unlikely, but cheap to guarantee).
+          if (::setenv(kEnvRdmaIp, ipv4->c_str(), /*overwrite=*/0) != 0) {
+            RDMA_DIAG("setenv({}, {}) failed errno={}", kEnvRdmaIp, *ipv4, errno);
+          } else {
+            RDMA_DIAG("{}={} (auto-discovered)", kEnvRdmaIp, *ipv4);
+          }
+        } else {
+          RDMA_DIAG("{}=<none> (auto-discovery produced no candidate)", kEnvRdmaIp);
+        }
       }
     }
   }
