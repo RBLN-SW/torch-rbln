@@ -28,24 +28,23 @@ namespace torch_rbln::detail {
 
 // Resolve RBLN_RDMA_IP for the running process. Resolution priority:
 //
-//   1. RBLN_RDMA_HCA -- mirrors the explicit-HCA mechanism planned in
-//      librbln-ccl (ssw-common-umd PR #1930). Value is the HCA device
-//      name as listed under /sys/class/infiniband (e.g. "rocep99s0",
-//      "mlx5_0"); an optional ":<port>" / "/<port>" suffix is parsed
-//      and ignored. The HCA's first bound netdev is resolved to an
-//      IPv4 and overrides any existing RBLN_RDMA_IP.
-//   2. Existing RBLN_RDMA_IP -- left as-is.
-//   3. Auto-discovery -- probes /sys/class/infiniband for a RoCE v2
-//      capable device whose port is ACTIVE and whose netdev has an
-//      IPv4 matching the GID table. Devices are ranked by vendor
-//      priority (Broadcom bnxt_re first, Intel irdma last) to avoid
-//      picking an iRDMA NIC on mixed-vendor hosts where it is known
-//      to mis-bind to RBLN traffic.
+//   1. RBLN_RDMA_IP already set -- no-op (caller-provided value wins).
+//   2. RBLN_RDMA_HCA set -- HCA device name as listed under
+//      /sys/class/infiniband (e.g. "rocep99s0", "mlx5_0"); an
+//      optional ":<port>" / "/<port>" suffix is parsed and ignored.
+//      The HCA's first bound netdev is resolved to an IPv4 and
+//      written to RBLN_RDMA_IP. Failure is logged but non-fatal.
+//      Mirrors ssw-common-umd PR #1930 in librbln-ccl.
+//   3. RBLN_RDMA_HCA unset -- do nothing; RBLN_RDMA_IP stays unset.
+//
+// No auto-discovery: picking an HCA across mixed-vendor hosts is the
+// caller's responsibility (e.g. RBLN_RDMA_HCA=rocep99s0 to pin a
+// Broadcom NIC over a co-located Intel iRDMA one).
 //
 // Idempotent (c10::once_flag inside). Set RBLN_DISABLE_AUTO_RDMA_IP=1
 // to skip every step above and leave the environment alone.
 //
-// Never throws: when no IP can be found, logs a warning (if
+// Never throws: when no IP can be resolved, logs a warning (if
 // RCCL_PORT_GEN is set) or an info diagnostic (otherwise) and lets
 // librbln-ccl decide whether to fail at RCCL init -- recent
 // librbln-ccl no longer requires RBLN_RDMA_IP on single-node runs.
