@@ -6,6 +6,7 @@
 #include <c10/rbln/RBLNFallbackConfig.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
+#include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNSupportedDtypes.h>
 #include <torch/csrc/Dtype.h>
 #include <torch/csrc/utils/pybind.h>
@@ -135,6 +136,22 @@ void register_internal_api(py::module_& module) {
       "_dispatch_shim_warm_segments_reset",
       &torch_rbln::shim::diag_reset_warm_segments,
       "DIAG: reset warm-cache hit per-segment timers");
+
+  // PROFILER: hidden host-bounce / fallback counters (always-on, cold-path only).
+  // Returns per-site (count, bytes) in BounceSite enum order. See RBLNProfiler.h.
+  module.def(
+      "_profiler_dump_bounces",
+      []() {
+        const auto s = c10::rbln::prof::dump_bounces();
+        std::vector<std::pair<uint64_t, uint64_t>> out;
+        out.reserve(static_cast<size_t>(c10::rbln::prof::kNumBounceSites));
+        for (int i = 0; i < c10::rbln::prof::kNumBounceSites; ++i) {
+          out.emplace_back(s.count[i], s.bytes[i]);
+        }
+        return out;
+      },
+      "PROFILER: per-site (count, bytes) of hidden host bounces, in BounceSite order");
+  module.def("_profiler_reset_bounces", &c10::rbln::prof::reset_bounces, "PROFILER: reset hidden-bounce counters");
   module.def(
       "_register_cpp_shim",
       &torch_rbln::shim::register_cpp_shim,

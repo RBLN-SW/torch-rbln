@@ -1,6 +1,7 @@
 #include <c10/core/Device.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
+#include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNV2VBatch.h>
 
 #include <cstdint>
@@ -166,6 +167,9 @@ void V2VBatch::submit() {
       memcpy_v2v_multi(impl_->pending);
       drained = true;
     } catch (const c10::Error& e) {
+      // PROFILER (cold branch): batched v2v rejected by the runtime's no-overlap
+      // check; we fall to the per-entry loop (host-bounces cross-device entries).
+      c10::rbln::prof::record_bounce(c10::rbln::prof::BounceSite::kV2VBatchToPerEntry, 0);
       RBLN_LOG_WARN(
           "V2VBatch::submit batched path rejected ({} entries) — falling back to per-entry: {}",
           impl_->pending.size(),
