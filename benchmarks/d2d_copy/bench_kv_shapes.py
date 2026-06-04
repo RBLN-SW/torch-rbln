@@ -87,6 +87,42 @@ def storage_span_bytes(sizes, strides, elem_size):
     return (span + 1) * elem_size
 
 
+def gate_decision(src, dst):
+    """Replicates should_use_strided_v2v_copy from RBLNCopy.cpp.
+
+    Keep the thresholds in sync with the kStridedV2V* constants there.
+    """
+    sizes = list(src.shape)
+    src_strides = list(src.stride())
+    dst_strides = list(dst.stride())
+    rank = len(sizes)
+    if rank == 0:
+        return "engine (rank==0)"
+
+    inner_start = common_inner_start(sizes, src_strides, dst_strides)
+    outer_count = 1
+    for i in range(inner_start):
+        outer_count *= sizes[i]
+    if outer_count <= 1024:
+        return f"engine (outer={outer_count}<=1024)"
+
+    inner_elems = 1
+    for i in range(inner_start, rank):
+        inner_elems *= sizes[i]
+    inner_bytes = inner_elems * src.element_size()
+    if inner_bytes >= 256:
+        return f"engine (inner={inner_bytes}B>=256)"
+
+    if outer_count > 256 * 1024:
+        return f"host (outer={outer_count}>256K)"
+    src_span = storage_span_bytes(sizes, src_strides, src.element_size())
+    dst_span = storage_span_bytes(sizes, dst_strides, src.element_size())
+    max_span = max(src_span, dst_span)
+    if max_span >= 1024 * 1024:
+        return f"engine (span={max_span}B>=1M)"
+    return f"host (outer={outer_count},inner={inner_bytes}B,span={max_span}B)"
+
+
 def bench_shape(num_blocks, num_kv_heads, block_size, head_size, n_tokens, iters=10):
     kv = torch.empty(
         (2, num_blocks, num_kv_heads, 1, block_size, head_size),
@@ -110,6 +146,7 @@ def bench_shape(num_blocks, num_kv_heads, block_size, head_size, n_tokens, iters
         inner_elems *= sizes[i]
     src_span = storage_span_bytes(sizes, src_strides, src.element_size())
     dst_span = storage_span_bytes(sizes, dst_strides, src.element_size())
+    gate = gate_decision(src, dst)
 
     return {
         "num_blocks": num_blocks,
@@ -121,6 +158,7 @@ def bench_shape(num_blocks, num_kv_heads, block_size, head_size, n_tokens, iters
         "inner_elems": inner_elems,
         "inner_bytes": inner_elems * ELEM_SIZE,
         "max_view_span": max(src_span, dst_span),
+        "gate": gate,
         "us": us,
     }
 
@@ -139,7 +177,7 @@ def main():
     rows = []
     print(f"# label={args.label}", file=sys.stderr)
     print(f"{'kv_heads':>8}  {'head':>5}  {'block':>5}  {'n_tok':>5}  "
-          f"{'outer':>6}  {'inner_B':>9}  {'view_span':>11}  {'us':>10}")
+          f"{'outer':>6}  {'inner_B':>9}  {'view_span':>11}  {'us':>10}  gate")
     for block_size in block_sizes:
         # Pick a few n_tokens spanning sub-block, mid, near-full, full.
         n_tokens_list = sorted({128, block_size // 8, block_size // 4, block_size // 2,
@@ -154,7 +192,7 @@ def main():
                     rows.append({"label": args.label, **row})
                     print(f"{num_kv_heads:>8d}  {head_size:>5d}  {block_size:>5d}  {n:>5d}  "
                           f"{row['outer_count']:>6d}  {row['inner_bytes']:>9d}  "
-                          f"{row['max_view_span']:>11d}  {row['us']:>10.1f}")
+                          f"{row['max_view_span']:>11d}  {row['us']:>10.1f}  {row['gate']}")
 
     if args.out:
         with open(args.out, "w") as f:
