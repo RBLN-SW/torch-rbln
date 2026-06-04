@@ -87,24 +87,37 @@ class TestProfilerTruthfulnessAndScope(TestCase):
     """The verdict must never claim more truth than it has (C/E), and must not
     carry signals the user cannot act on (D)."""
 
-    def test_C_E_runtime_residency_present_or_honestly_pending(self):
-        # The runtime hidden-d2h (STATE) counter lights up only when the loaded
-        # librbln is a recent rebel-compiler that exposes it. Either way the
-        # profiler must be HONEST: report it when present, mark it pending when
-        # absent — never a false clean. (idle/memory gauges remain pending here.)
+    def test_runtime_signals_present_or_honestly_pending(self):
+        # When the loaded librbln exposes the runtime counters, the C/D/E sections
+        # (host traffic bytes, command streams, device idle, device memory) must
+        # be present. On an older runtime, the profiler must HONESTLY mark them
+        # pending — never a false clean.
         with torch.rbln.profile() as p:
             _ = torch.randn(8, 8, device=DEV, dtype=torch.float16)
         d = p.dump()
         rr = d["runtime_residency"]
-        pending = " ".join(d["pending_runtime_signals"]).lower()
         if rr["available"]:
             self.assertIn("total_count", rr)
             self.assertIn("by_reason", rr)
-            self.assertNotIn("d2h", pending)  # reported, not pending
+            self.assertIn("runtime_host_traffic", d)  # h2v/d2h leaf bytes
+            self.assertIn("command_streams", d)  # D
+            self.assertIn("device_idle", d)  # C
+            self.assertIn("device_memory", d)  # E
         else:
-            self.assertIn("d2h", pending)  # honestly pending on older runtimes
-        self.assertIn("idle", pending)  # C: device idle time (always pending here)
-        self.assertIn("memory", pending)  # E: memory peak / waste gauge (always pending here)
+            pending = " ".join(d["pending_runtime_signals"]).lower()
+            self.assertIn("d2h", pending)
+
+    def test_E_device_memory_gauge(self):
+        # Pure allocation (no compute) — the gauge is a process-level high-water
+        # mark, so it reads a sane non-zero peak >= current.
+        with torch.rbln.profile() as p:
+            _ = torch.empty(2048, 2048, device=DEV, dtype=torch.float16)
+        d = p.dump()
+        if not d["runtime_residency"]["available"]:
+            self.skipTest("runtime gauge not exposed by the loaded librbln")
+        m = d["device_memory"]
+        self.assertGreaterEqual(m["peak_bytes"], m["current_bytes"])
+        self.assertGreater(m["peak_bytes"], 0)
 
     def test_runtime_hidden_d2h_is_cause_tagged(self):
         # A plain contiguous copy_ of a freshly-created tensor bounces at the
