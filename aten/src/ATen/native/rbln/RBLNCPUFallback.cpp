@@ -218,11 +218,16 @@ at::Tensor borrow_rbln_as_cpu(const at::Tensor& t, uint64_t& borrow_id_out) {
     return at::empty(t.sizes(), t.options().device(at::kCPU));
   }
 
-  auto borrowed = c10::rbln::borrow_host_ptr(t.data_ptr(), nbytes);
-  borrow_id_out = borrowed.borrow_id;
-
+  // Borrow can be rejected for some runtime sub-states (see try_borrow_host_ptr);
+  // return an undefined tensor (borrow_id stays 0) to route this slot through the
+  // caller's legacy at::_to_cpu copy path (the non_borrowed collection below).
+  auto borrowed = c10::rbln::try_borrow_host_ptr(t.data_ptr(), nbytes);
+  if (!borrowed) {
+    return {};
+  }
+  borrow_id_out = borrowed->borrow_id;
   auto options = at::TensorOptions().dtype(t.dtype()).device(at::kCPU);
-  return at::from_blob(reinterpret_cast<void*>(borrowed.host_ptr), t.sizes(), t.strides(), options);
+  return at::from_blob(reinterpret_cast<void*>(borrowed->host_ptr), t.sizes(), t.strides(), options);
 }
 
 // TensorList variant of borrow_rbln_as_cpu. Walks each element; rbln entries

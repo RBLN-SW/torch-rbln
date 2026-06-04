@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -231,6 +232,20 @@ struct BorrowedHostPtr {
  *         on failure (invalid args, rebel-side error).
  */
 C10_RBLN_API BorrowedHostPtr borrow_host_ptr(const void* rbln_data, size_t nbytes);
+
+/**
+ * @brief Non-throwing variant of `borrow_host_ptr`. Returns `std::nullopt` when
+ * the runtime rejects the borrow (e.g. the backing entry is in a sub-state with
+ * no host-mappable user view), instead of throwing. Use this where a borrow
+ * failure is an expected, recoverable condition with a copy-based fallback —
+ * it scopes failure handling to exactly the borrow call (other errors still
+ * surface normally) rather than swallowing a broad c10::Error catch.
+ *
+ * @return Host pointer + non-zero borrow id on success; `std::nullopt` if the
+ *         runtime could not provide an in-place host view. Invalid args
+ *         (nullptr / zero nbytes) also return `std::nullopt`.
+ */
+C10_RBLN_API std::optional<BorrowedHostPtr> try_borrow_host_ptr(const void* rbln_data, size_t nbytes);
 
 /**
  * @brief Acquire a host pointer for **overwrite-only** access into the rbln

@@ -358,6 +358,23 @@ BorrowedHostPtr borrow_host_ptr(const void* rbln_data, size_t nbytes) {
   return BorrowedHostPtr{host_ptr, borrow_id};
 }
 
+std::optional<BorrowedHostPtr> try_borrow_host_ptr(const void* rbln_data, size_t nbytes) {
+  if (rbln_data == nullptr || nbytes == 0) {
+    return std::nullopt;
+  }
+  const auto vaddr = reinterpret_cast<uint64_t>(rbln_data);
+  const auto size = static_cast<uint64_t>(nbytes);
+  uintptr_t host_ptr = 0;
+  uint64_t borrow_id = 0;
+  // Non-zero return == failure (mirrors borrow_host_ptr's RBLN_CHECK(!...)).
+  // A failure here is an expected, recoverable condition for callers with a
+  // copy-based fallback, so report it as nullopt rather than throwing.
+  if (::rbln::rbln_v_borrow_host_ptr(vaddr, size, host_ptr, borrow_id)) {
+    return std::nullopt;
+  }
+  return BorrowedHostPtr{host_ptr, borrow_id};
+}
+
 BorrowedHostPtr acquire_host_ptr_for_overwrite(void* rbln_data, size_t nbytes) {
   RBLN_LOG_DEBUG("rbln_data={}, nbytes={}", fmt::ptr(rbln_data), nbytes);
   RBLN_CHECK(rbln_data != nullptr, "rbln_data cannot be nullptr");

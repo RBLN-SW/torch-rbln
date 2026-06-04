@@ -48,6 +48,22 @@ class TestBorrowFastPath(TestCase):
         self.assertEqual(y.device.type, "rbln")
         self.assertEqual(tuple(y.shape), (16,))
 
+    def test_borrow_rejected_falls_back_to_copy(self) -> None:
+        """Regression: a 0-K matmul yields an all-zero (5, 10) output. Writing
+        it into an ``out=`` tensor that already carries a host user view (from
+        ``full``) leaves the rebel vmem entry in a sub-state whose in-place host
+        borrow is rejected. Reading that tensor through cpu_fallback (and the
+        dispatch shim's NaN/Inf pre-check) must fall back to a D2H copy instead
+        of raising ``rbln_v_borrow_host_ptr failed`` (the PrepareUserViewBuffer
+        assertion). Comparing two rbln tensors routes ``eq`` through the borrow
+        path, so this exercises the fallback and checks correctness at once."""
+        a = torch.zeros(5, 0, dtype=torch.float16, device="rbln")
+        b = torch.zeros(0, 10, dtype=torch.float16, device="rbln")
+        out = torch.full((5, 10), float("nan"), dtype=torch.float16, device="rbln")
+        torch.mm(a, b, out=out)
+        # rbln-vs-rbln compare -> isclose/eq -> cpu_fallback borrow on `out`.
+        self.assertEqual(out, torch.zeros(5, 10, dtype=torch.float16, device="rbln"))
+
 
 instantiate_device_type_tests(TestBorrowFastPath, globals(), only_for="privateuse1")
 

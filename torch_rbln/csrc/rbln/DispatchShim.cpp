@@ -519,10 +519,19 @@ bool tensor_has_nan_or_inf(const at::Tensor& t) {
   if (nbytes == 0)
     return false;
 
-  auto borrowed = c10::rbln::borrow_host_ptr(ptr, nbytes);
-  void* host_raw = reinterpret_cast<void*>(borrowed.host_ptr); // NOLINT(performance-no-int-to-ptr)
+  // Borrow can be rejected for some runtime sub-states (see try_borrow_host_ptr);
+  // fall back to a D2H copy and scan that — same answer, at the cost of a copy.
+  auto borrowed = c10::rbln::try_borrow_host_ptr(ptr, nbytes);
+  if (!borrowed) {
+    const at::Tensor cpu_copy = t.cpu();
+    const uint16_t* host_data = static_cast<const uint16_t*>(cpu_copy.data_ptr());
+    if (host_data == nullptr)
+      return false;
+    return fp16_has_nan_or_inf(host_data, n);
+  }
+  void* host_raw = reinterpret_cast<void*>(borrowed->host_ptr); // NOLINT(performance-no-int-to-ptr)
   const bool found = fp16_has_nan_or_inf(static_cast<const uint16_t*>(host_raw), n);
-  c10::rbln::return_borrowed(borrowed.borrow_id, /*updated=*/false);
+  c10::rbln::return_borrowed(borrowed->borrow_id, /*updated=*/false);
   return found;
 }
 
