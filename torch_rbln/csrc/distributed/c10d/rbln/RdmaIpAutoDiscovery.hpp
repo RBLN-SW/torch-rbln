@@ -30,7 +30,10 @@ namespace torch_rbln::detail {
 // capable device whose port is ACTIVE and whose netdev has an IPv4 matching
 // the GID table. Idempotent (c10::once_flag inside). Respects pre-set
 // RBLN_RDMA_IP (does not overwrite). Set RBLN_DISABLE_AUTO_RDMA_IP=1 to skip.
-// Throws (via RBLN_CHECK) when RCCL_PORT_GEN is set but no IP can be found.
+// Never throws: when no IP can be found, logs a warning (if RCCL_PORT_GEN
+// is set) or an info diagnostic (otherwise) and lets librbln-ccl decide
+// whether to fail at RCCL init -- recent librbln-ccl no longer requires
+// RBLN_RDMA_IP on single-node runs.
 void MaybeAutoDiscoverRbnRdmaIp();
 
 } // namespace torch_rbln::detail
