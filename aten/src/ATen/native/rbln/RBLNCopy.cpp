@@ -1,6 +1,8 @@
 // TODO: The previous copy optimizations based on physical shape and physical dtype were removed during
 // v-memory integration. Revisit these optimizations in a future pass.
 #include <ATen/native/rbln/RBLNCopy.h>
+#include <ATen/native/rbln/RBLNStrideUtils.h>
+#include <ATen/native/rbln/RBLNStridedV2V.h>
 #include <ATen/native/rbln/RBLNTensorUtils.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/empty_strided.h>
@@ -103,21 +105,38 @@ void tensor_copy_from_rbln_to_rbln(const at::Tensor& rbln_src, const at::Tensor&
   RBLN_LOG_DEBUG("src_data={}, dst_data={}", fmt::ptr(rbln_src.data_ptr()), fmt::ptr(rbln_dst.data_ptr()));
   RBLN_CHECK(rbln_src.device().is_privateuseone() && rbln_dst.device().is_privateuseone());
 
-  const auto direct_copy = is_direct_copy(rbln_src, rbln_dst);
-  if (direct_copy) {
+  if (is_direct_copy(rbln_src, rbln_dst)) {
     RBLN_LOG_DEBUG("Directly copying RBLN src to RBLN dst");
 
     auto* dst_data = rbln_dst.data_ptr();
     const auto* src_data = rbln_src.data_ptr();
     const auto nbytes = at::detail::computeStorageNbytes(rbln_src.sizes(), rbln_src.strides(), rbln_src.element_size());
     c10::rbln::memcpy_v2v(dst_data, src_data, nbytes);
-  } else {
-    RBLN_LOG_DEBUG("Creating CPU copy of RBLN src");
-    const auto cpu_src = at::native::rbln::get_cpu_copy_of_rbln_tensor(rbln_src);
-
-    RBLN_LOG_DEBUG("Copying CPU copy to RBLN dst");
-    tensor_copy_from_cpu_to_rbln(cpu_src, rbln_dst);
+    return;
   }
+
+  // Strided copy: route to the on-device v2v engine while the outer iteration
+  // count stays within the runtime per-dst v2v cap (kMaxV2VMultiCopies); above
+  // it the engine fans out to a host fallback anyway, so bounce via host here.
+  constexpr int64_t kMaxStridedV2VOuter = 1024;
+  if (rbln_src.sizes() == rbln_dst.sizes() && rbln_src.scalar_type() == rbln_dst.scalar_type() &&
+      rbln_src.device() == rbln_dst.device()) {
+    const auto inner_start = common_inner_start(rbln_src.sizes(), rbln_src.strides(), rbln_dst.strides());
+    int64_t outer_count = 1;
+    for (int64_t i = 0; i < inner_start; ++i) {
+      outer_count *= rbln_src.size(i);
+    }
+    if (outer_count <= kMaxStridedV2VOuter) {
+      strided_v2v_copy(rbln_dst, rbln_src);
+      return;
+    }
+  }
+
+  RBLN_LOG_DEBUG("Creating CPU copy of RBLN src");
+  const auto cpu_src = at::native::rbln::get_cpu_copy_of_rbln_tensor(rbln_src);
+
+  RBLN_LOG_DEBUG("Copying CPU copy to RBLN dst");
+  tensor_copy_from_cpu_to_rbln(cpu_src, rbln_dst);
 }
 
 void copy_impl_rbln(const at::Tensor& src, const at::Tensor& dst) {
