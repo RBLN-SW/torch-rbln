@@ -441,35 +441,18 @@ def prepare_args_for_contiguous(args, kwargs_filtered):
 
 
 # ============================================================================
-# View-on-device helpers (2026-04-30+; extended 2026-05-01)
+# View-on-device helpers (2026-04-30+)
 #
-# When a non-contig view reaches an op handler, we historically called
-# ``.contiguous()`` which goes through host (D2H + host transform + H2D, see
-# RBLNCopy.cpp). For most view types the data transformation can instead be
-# expressed as an explicit ``aten::*`` node in the FX graph; rebel-backend
-# then lowers it on device alongside the compute kernel.
-#
-# Detection works in two layers:
-#
-#   1. Fast single-step path: read ``t.shape``, ``t.stride()``,
-#      ``t.storage_offset()`` and recognize a pure permute pattern (most
-#      common LLaMA hot path). No ``_base`` walk required.
-#
-#   2. Composite chain path: walk ``t._base`` until we hit a contig+offset=0
-#      ancestor. For each (parent, child) link, classify the single-step
-#      view op (permute / expand / narrow / select / reshape / squeeze /
-#      unsqueeze) by comparing shapes, strides, and offsets. Concatenate
-#      into a recipe list applied in order to the root base.
-#
-# An op handler's wrapper OpModule applies the recipe in its ``forward``,
-# so each step ends up as an explicit aten node in the FX graph and survives
-# torch.compile's tracing into rebel-backend's MLIR pipeline.
-#
-# Unrecognized chains (no contig root, or step we can't classify) fall back
-# to the legacy ``.contiguous()`` path. A ``rbln_log_warn`` and a counter
-# (``_view_fallback_count``) are emitted so we can detect when this happens
-# and either teach the classifier about a new view type, or accept the
-# host materialization.
+# A non-contig view reaching an op handler historically went through
+# ``.contiguous()`` (D2H + host transform + H2D, see RBLNCopy.cpp). Instead we
+# express the view as explicit ``aten::*`` nodes in the FX graph so rebel-backend
+# lowers it on device: detect a recipe of single-step view ops (permute / narrow
+# / expand / select / squeeze / unsqueeze) from a contig base, and a wrapper
+# OpModule replays it in ``forward``. The live detector is BFS-based
+# (``_detect_view_recipe_safe``); the hand-rolled helpers below are kept for
+# reference / differential testing. Unclassifiable chains fall back to
+# ``.contiguous()`` with a one-time warning and the ``_view_fallback_count``
+# telemetry counter.
 # ============================================================================
 
 # Telemetry: how often the view-detection fell back to .contiguous() because
@@ -615,17 +598,10 @@ def _classify_single_step_view(parent: torch.Tensor, child: torch.Tensor):
                         ok = False
                         break
             if ok:
-                # Reject the recipe when ALL parent dims have size 1 (parent is a
-                # rank-N broadcast of a single scalar): autograd's bprop emits
-                # ``scalar.expand(target)`` for ``y.sum().backward()`` and similar
-                # reductions; if we replay this expand inside the traced graph,
-                # rebel-compiler lowers it as ``unsqueeze(scalar) + repeat`` and
-                # then aborts in ``build_internal`` for fp16 scalar+vector
-                # multiply (verified 2026-05-07 via the cos/neg/mul trio that
-                # ``test_variant_consistency_eager_*_rbln_float16`` exercises).
-                # Falling out of the recipe path makes the caller materialize a
-                # contig vector via ``.contiguous()``, so torch.compile sees
-                # vector × vector and the abort goes away.
+                # Reject an all-size-1 parent (rank-N broadcast of a scalar):
+                # replaying ``scalar.expand`` in-graph aborts build_internal for
+                # fp16 scalar×vector — same bug as the 0-dim reject in
+                # _detect_view_recipe_safe. Materialize via .contiguous() instead.
                 if all(s == 1 for s in p_shape):
                     pass
                 else:
@@ -1000,28 +976,17 @@ def _construct_synthetic_base(t: torch.Tensor):
 
 
 # ============================================================================
-# Generic view recipe detector (2026-04-30+, replaces 5-layer hard-coded path)
+# Generic view recipe detector (2026-04-30+)
 #
-# Algorithm:
-#   1. BFS over single-step view primitives (permute / narrow / expand /
-#      select / squeeze / unsqueeze).
-#   2. Each candidate step's effect is simulated on (shape, stride, offset)
-#      tuples — no actual tensor allocation, just metadata math.
-#   3. A recipe is accepted only when its full simulation produces metadata
-#      identical to the target tensor's (shape, stride, offset). Wrong
-#      recipes can never silently emit because verification is bit-exact.
-#   4. Blacklisted patterns (rebel-backend bugs we've discovered) are
-#      filtered out so the search picks an algebraically-equivalent
-#      alternative when one exists.
-#   5. Synthetic-base fallback (``_construct_synthetic_base``) handles
-#      tensors whose ``_base`` is not contig+offset=0.
-#
-# Performance characteristics:
-#   - First match wins (BFS by recipe length); pure permute/narrow/etc.
-#     terminate after 1 step → ~5 µs.
-#   - Each step's simulation is O(ndim) integer ops, no allocation.
-#   - max_steps=4 caps the search depth (deeper chains are vanishingly
-#     rare; if they happen, we fall back to synthetic base).
+# BFS over single-step view primitives (permute / narrow / expand / select /
+# squeeze / unsqueeze), simulating each step on (shape, stride, offset) metadata
+# — no tensor allocation. A recipe is accepted only when its full simulation
+# matches the target's metadata exactly, so a wrong recipe can never silently
+# emit. Blacklisted patterns (known rebel-backend bugs, see
+# ``_is_known_bad_pattern``) are skipped so the search picks an
+# algebraically-equivalent route; ``_construct_synthetic_base`` handles tensors
+# whose ``_base`` isn't contig+offset=0. First match wins by recipe length
+# (single-step views terminate in ~5 µs); max_steps=4 caps depth.
 # ============================================================================
 
 
@@ -1101,45 +1066,36 @@ def _is_known_bad_pattern(recipe):
 
     Add new entries here as new rebel bugs surface.
     """
-    # 1. ``permute → narrow(non-leading dim)`` produces ``inf`` outputs from
-    #    rebel-compiler. The equivalent ``narrow → permute`` works.
-    #    (Observed 2026-04-30 with ``base.narrow(0,2,4).permute(2,0,1)``.)
+    # 1. ``permute → narrow(non-leading dim)`` → ``inf`` outputs; ``narrow →
+    #    permute`` works. (repro 2026-04-30: ``base.narrow(0,2,4).permute(2,0,1)``)
     for i, step in enumerate(recipe):
         if step[0] == "narrow" and i > 0:
             prev = recipe[i - 1]
             if prev[0] == "permute" and step[1] > 0:
                 return True
 
-    # 2. Trailing ``narrow`` on a non-leading dim with non-zero start (or
-    #    equivalently: any narrow on dim>0 where start>0) followed by an
-    #    elementwise op (silu / sigmoid / etc.) aborts rebel-compiler at
-    #    ``build_module.build_internal``. The same op on a contig input
-    #    works, so the safe path is to materialize via ``.contiguous()``
-    #    (return None from the detector — caller emits fallback warning).
-    #    (Observed 2026-04-30 with ``silu(base.narrow(1, 4, 8))``.)
+    # 2. ``narrow`` on dim>0 with start>0 + a following elementwise op (silu,
+    #    sigmoid, …) aborts at ``build_module.build_internal``; the same op on a
+    #    contig input works, so fall back to ``.contiguous()``.
+    #    (repro 2026-04-30: ``silu(base.narrow(1, 4, 8))``)
     for step in recipe:
         if step[0] == "narrow" and step[1] > 0 and step[2] > 0:
             return True
 
-    # 3. ``expand`` followed by anything other than another ``expand`` —
-    #    rebel-compiler rejects the resulting graph (e.g. ``compile error``
-    #    for ``mul(expand+permute(t), other)``). Pure expand alone, or a
-    #    chain of expand-on-different-dims (canonical broadcast lowering),
-    #    is fine. Only ``expand → permute / narrow / select`` trips the bug.
-    #    (Observed 2026-04-30 with ``base.expand(3,4,8).permute(2,0,1)``.)
+    # 3. ``expand → non-expand`` → compile error (``mul(expand+permute(t),
+    #    other)``). Pure expand, or expand → expand (canonical broadcast), is
+    #    fine; only ``expand → permute/narrow/select`` trips it.
+    #    (repro 2026-04-30: ``base.expand(3,4,8).permute(2,0,1)``)
     for i, step in enumerate(recipe):
         if step[0] == "expand" and i + 1 < len(recipe):
             if recipe[i + 1][0] != "expand":
                 return True
 
-    # 4. ``unsqueeze`` followed by anything other than another ``unsqueeze``
-    #    or ``expand`` — rebel-compiler runtime fails (vmemory verify
-    #    error) when unsqueeze precedes permute / narrow / etc. Legacy
-    #    detector emits ``permute → unsqueeze`` (unsqueeze last) which
-    #    works. ``unsqueeze → expand`` IS allowed: it's the canonical
-    #    broadcast lowering ``(H,).expand(B,S,H)`` → which rebel handles
-    #    fine (test_expand_view_via_binary_op exercises this).
-    #    (Observed 2026-04-30 with ``base.permute(2,0,1).unsqueeze(0)``.)
+    # 4. ``unsqueeze → non-(unsqueeze|expand)`` → runtime vmemory verify error;
+    #    ``permute → unsqueeze`` (unsqueeze last) works. ``unsqueeze → expand``
+    #    is allowed — canonical broadcast ``(H,).expand(B,S,H)``, exercised by
+    #    test_expand_view_via_binary_op.
+    #    (repro 2026-04-30: ``base.permute(2,0,1).unsqueeze(0)``)
     for i, step in enumerate(recipe):
         if step[0] == "unsqueeze" and i + 1 < len(recipe):
             next_op = recipe[i + 1][0]
@@ -1359,13 +1315,11 @@ def _detect_view_recipe_safe(t: torch.Tensor):
         if base is None:
             return None
 
-    # Reject 0-dim base: autograd's bprop emits ``scalar.expand(target_shape)``
-    # for ``y.sum().backward()`` and similar reductions. Replaying this expand
-    # inside a view-aware traced graph (``unsqueeze(scalar) + expand``) makes
-    # rebel-compiler abort in ``build_internal`` for fp16 scalar+vector mul
-    # (verified 2026-05-07 via cos backward fp16). Falling back to
-    # ``.contiguous()`` materializes a real vector buffer so the compile path
-    # sees vector × vector and skips the failing IR pattern.
+    # Reject 0-dim base: autograd bprop emits ``scalar.expand(target)`` for
+    # ``y.sum().backward()`` etc.; replaying it (``unsqueeze + expand``) aborts
+    # build_internal for fp16 scalar×vector. Falling back to ``.contiguous()``
+    # gives a real vector buffer so the compile path sees vector × vector.
+    # (verified 2026-05-07 via cos backward fp16)
     if base.dim() == 0:
         return None
 
@@ -1722,12 +1676,8 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
       Future calls re-enter Python and hit the compile_rbln_cached cache —
       ~50 µs/call overhead, still cheap relative to host materialization.
 
-    Lazy imports: ``compile_rbln_cached``, ``warm_cache.install_pending``,
-    ``env_utils.use_device_group_tensor_parallel_size``,
-    ``device.context_holder.out_tensor_context`` are imported inside the
-    function to avoid circular-import risk at module load time
-    (``ops_utils`` is imported by everyone; if it imported them at top
-    level it would deadlock the package init order).
+    Imports are deferred into the body to avoid a load-time circular import
+    (``ops_utils`` is imported broadly).
     """
     from torch_rbln._internal.compile_cache import compile_rbln_cached
     from torch_rbln._internal.env_utils import use_device_group_tensor_parallel_size
@@ -1737,27 +1687,14 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     )
     from torch_rbln.device.context_holder import out_tensor_context
 
-    # Device 64-elem-align fallback: when an input tensor's last-dim isn't a
-    # multiple of 64 elements, the rebel-compiler pipeline wraps the device fn
-    # with host-only `contrib_aligned_pad` (pre-pad to 64) + `contrib_aligned_pad`
-    # (post-trim back to user shape) + `contrib_dummy_cast` ops that have no
-    # RTOSA device-lowering. Each call pays the host-side ApplyTensorDeviceTransform
-    # memcpy + a full base-buffer D2H + H2D round-trip
-    # (~1MB / op for LLaMA-1B rotary). For these cases routing the whole op
-    # through cpu_fallback_path is strictly cheaper: one D2H of the source
-    # tensor + a host CPU op + one H2D of the result. Verified 2026-05-08 via
-    # IR dump (rbln_tensor_debug.log) and RBLN_VERBOSE=0 trace counts.
-    #
-    # Condition: ANY tensor arg has last-dim % 64 != 0. Aligned cases keep
-    # the view-on-device path (those don't trip the host-transform wrapping).
-    # Tensor-only check (NOT list/tuple). Reason: for list-input ops (cat,
-    # stack), the view-aware device path packs multiple unaligned tensors
-    # into a single fused IR which the rebel-compiler pipeline handles
-    # cheaper than per-tensor host fallback. Empirically (LLaMA-1B eager
-    # prefill, 2026-05-08): TensorList recursion adds +12% prefill via
-    # extra host-cat overhead. Tensor-only catches the dominant rotary
-    # rotate_half regression (single-tensor neg/mul on unaligned views)
-    # without penalizing TensorList ops.
+    # Device 64-elem-align fallback: a last-dim not a multiple of 64 makes the
+    # rebel pipeline wrap the device fn with host-only contrib_aligned_pad /
+    # contrib_dummy_cast ops (no RTOSA lowering), costing a base-buffer D2H+H2D
+    # round-trip (~1MB/op for LLaMA-1B rotary). cpu_fallback_path is strictly
+    # cheaper here (one D2H + host op + one H2D). Single-tensor args only: for
+    # list ops (cat/stack) the device path fuses unaligned tensors into one IR
+    # that's cheaper than per-tensor host fallback — TensorList recursion added
+    # +12% prefill. (verified 2026-05-08 via IR dump + trace counts)
     def _last_dim_unaligned(t):
         return isinstance(t, torch.Tensor) and t.dim() > 0 and t.shape[-1] % 64 != 0
 
@@ -1770,17 +1707,10 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
             **kwargs_filtered,
         )
 
-    # fp16 div with rounding_mode trunc/floor: rebel-compiler emits IR for
-    # the discontinuous rounding op that returns wrong values for entire
-    # rows of the output (verified 2026-05-07 with sample 98 of trunc on
-    # input shape (357,789): row 338 outputs all 0.0 / -0.0 instead of the
-    # correct integer-bucketed quotient, despite both inputs being well
-    # within the custom_float16-safe range — not a per-element ULP drift, the
-    # device kernel returns wrong values for the affected rows). Route fp16
-    # div with trunc/floor through cpu_fallback. Plain ``torch.div(x, y)``
-    # (no rounding_mode) and fp32 div are unaffected and still flow through
-    # the device path, so no forward perf regression on real workloads
-    # that don't use the rounding modes.
+    # fp16 div with rounding_mode trunc/floor: the device kernel returns wrong
+    # values for entire output rows (not ULP drift), so route it to cpu_fallback.
+    # Plain div (no rounding_mode) and fp32 div are unaffected. (verified
+    # 2026-05-07: trunc on (357,789), row 338 came back all 0.0/-0.0)
     if op_name == "aten::div":
         rmode = kwargs_filtered.get("rounding_mode")
         if rmode in ("trunc", "floor"):
@@ -1794,15 +1724,11 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
                         **kwargs_filtered,
                     )
 
-    # Comparison ops (output dtype = bool) trip a rebel-compiler abort when
-    # the view-aware path replays a narrow+select recipe inside the compiled
-    # graph: the resulting IR is ``strided_slice + take + nn.pad + equal +
-    # contrib_aligned_pad(bool, …, [-N])`` and ``build_internal`` aborts on
-    # the negative-pad-on-bool sequence (verified 2026-05-07 with
-    # base[:3,:,:,1] vs contig (3,5,5) eq, vs same shapes through ``add``
-    # which compiles fine because the depad runs on fp16 rather than bool).
-    # Materialize view inputs to ``.contiguous()`` so the comparison op
-    # receives plain tensors and the recipe path is skipped.
+    # Comparison ops (bool output): replaying a view recipe in-graph aborts
+    # ``build_internal`` on the negative-pad-on-bool IR sequence. Materialize
+    # view inputs to ``.contiguous()`` so the recipe path is skipped. (verified
+    # 2026-05-07: base[:3,:,:,1] eq contig (3,5,5); ``add`` on the same shapes
+    # compiles because the depad runs on fp16, not bool)
     if op_name in {
         "aten::eq",
         "aten::ne",
