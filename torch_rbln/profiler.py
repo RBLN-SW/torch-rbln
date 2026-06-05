@@ -6,21 +6,27 @@ kernel, recompile, or leave the NPU idle — for reasons the user never asked fo
 and cannot see. This profiler counts those hidden events, attributes the cause,
 and renders a torch.profiler-style report.
 
-Signals (every counter sits on an already-slow point — a host DMA, a job submit,
-a host-blocking wait, an alloc — never the fast device path; reads are lazy, so
-wrapping a run with profile() does not change its latency):
+Signals (every counter sits on an already-slow point — a host DMA or a fallback
+branch — never the fast device path; reads are lazy, so wrapping a run with
+profile() does not change its latency):
 
-  host bounce (torch-side, aten intent)  : non-direct copy_ / strided fallback / etc.
-  runtime host traffic (rebel leaf, bytes): d2h + h2v physical DMA, counted once each
-  runtime hidden-d2h cause (v2v slow)     : why a device v2v fell to host (src state)
-  dispatch                                : cpu_fallback, recompile/miss, warm-hit
-  command streams (D)                     : CS submissions
-  device-idle proxy (C)                   : region wall - host-blocked-on-device
-  device memory (E)                       : current live + peak high-water
+  host bounce (torch-side, aten intent) : non-direct copy_ / strided fallback / etc.
+  runtime hidden-d2h cause (v2v slow)   : why a device v2v fell to host (src state)
+  dispatch                              : cpu_fallback, recompile/miss, warm-hit
 
-Two complementary, non-overlapping witnesses (a transfer is counted once): the
-aten-layer "intent" counters and the runtime-leaf "physical byte" counters live
-in separate tiers and are never summed.
+Plus one RESOURCE gauge (NOT a hidden-overhead signal — kept because it is
+accurate and complete: every device allocation routes through BufferAllocator):
+
+  device memory : current live + peak high-water
+
+Scope: this profiler surfaces ONLY hidden host overhead a user issued as a normal
+op and cannot see. Generic dispatch/utilization counters (command-stream count,
+device-idle, total host-traffic bytes) are a different profiler's job
+(torch.profiler / nsys), are out of scope, and on the executed path live in the
+TVM runtime where they read ~0 here — surfacing them would mislead. The one
+hidden signal still missing — a side-effect host-sync on the TVM graph-exec path
+— is a tracked follow-up (it, not the excluded counters, is what TVM-runtime
+instrumentation is for).
 
 Usage::
 
@@ -60,9 +66,58 @@ _RUNTIME_REASONS: tuple[tuple[str, str], ...] = (
     ("src_synced_host_served", "src already on host+device; host memcpy, no transfer (usually benign)"),
 )
 
-# prof_get_scalars order (must match profiler_stats.h):
-#   0 h2v_bytes 1 h2v_count 2 d2h_bytes 3 d2h_count 4 cs_count 5 host_wait_ns 6 mem_cur 7 mem_peak
-_N_SCALARS = 8
+# Static cause -> one-line REMEDY ("what to change"). Read only at report()/
+# verdict() time, so it adds zero runtime cost. The runtime v2v-slow reasons
+# carry their own fix text in _RUNTIME_REASONS and are not duplicated here.
+_REMEDY: dict[str, str] = {
+    "copy_d2d_host_bounce": (
+        "non-contiguous device->device copy went via host; make it contiguous "
+        "(e.g. KV layout) or route it through the on-device v2v engine"
+    ),
+    "copy_h2d_staging": "cpu source staged before h2v; keep the source on-device, or stage it once and reuse",
+    "copy_h2d_noncontig_dst": (
+        "host->device write into a non-contiguous device dst; write into a contiguous buffer first, then h2d"
+    ),
+    "strided_v2v_cpu_fallback": (
+        "strided v2v fell back to CPU; lower outer_count / use a fatter contiguous inner block "
+        "so the device engine qualifies"
+    ),
+    "v2v_batch_to_per_entry": (
+        "batched v2v rejected to per-entry; check the per-dst limit (kMaxV2VMultiCopies) and batch geometry"
+    ),
+    "cpu_fallback": (
+        "op ran on CPU; prefer graph mode (torch.compile backend='rbln'), add a native rbln kernel, or fix "
+        "an unsupported dtype -- host-only ops (argmax/sampling) are expected"
+    ),
+    "recompile": (
+        "graph (re)compiled; stabilize shapes (pad/bucket) for warm-cache reuse, or use graph mode -- a cold "
+        "first compile is expected, repeated recompiles in the steady loop are not"
+    ),
+}
+
+
+def _collect_remedies(d: dict[str, Any]) -> list[dict[str, str]]:
+    """Map the signals that actually fired in this region to their one-line fix.
+
+    Returned in priority order (host bounce -> runtime cause -> dispatch) so the
+    most impactful change is listed first. Pure lookup over the already-computed
+    dump, so it costs nothing at runtime."""
+    fixes: list[dict[str, str]] = []
+    for name, vv in d["hidden_host_bounce"]["by_site"].items():
+        if vv["count"] and name in _REMEDY:
+            fixes.append({"signal": f"host_bounce/{name}", "fix": _REMEDY[name]})
+    rr = d["runtime_residency"]
+    if rr.get("available"):
+        rfix = dict(_RUNTIME_REASONS)
+        for n, vv in rr["by_reason"].items():
+            if vv["count"]:
+                fixes.append({"signal": f"runtime/v2v_slow:{n}", "fix": rfix[n]})
+    disp = d["dispatch"]
+    if disp["cpu_fallback"]:
+        fixes.append({"signal": "dispatch/cpu_fallback", "fix": _REMEDY["cpu_fallback"]})
+    if disp["recompile_miss"]:
+        fixes.append({"signal": "dispatch/recompile", "fix": _REMEDY["recompile"]})
+    return fixes
 
 
 def _read_bounces() -> list[tuple[int, int]]:
@@ -77,6 +132,17 @@ def _read_dispatch() -> tuple[int, int, int, int, int, int]:
     return tuple(_C._dispatch_shim_diag_dump())
 
 
+def _read_fallback_by_op() -> dict[str, int]:
+    """Per-op CPU-fallback counts from the dispatch shim (op_name -> count), or
+    {} if the loaded torch_rbln._C predates the binding (graceful degrade)."""
+    import torch_rbln._C as _C
+
+    fn = getattr(_C, "_dispatch_fallback_by_op", None)
+    if fn is None:
+        return {}
+    return {str(op): int(c) for op, c in fn()}
+
+
 # --- runtime (rebel-compiler) counters via ctypes from the loaded librbln -----
 _rt_fns: Optional[dict] = None
 _rt_resolved = False
@@ -87,25 +153,36 @@ def _runtime_fns():
     if _rt_resolved:
         return _rt_fns
     _rt_resolved = True
+    u64p = ctypes.POINTER(ctypes.c_uint64)
     for loader in (lambda: ctypes.CDLL(None), lambda: ctypes.CDLL("librbln.so")):
         try:
             lib = loader()
-            hidden = lib.rbln_prof_get_v2v_hidden_d2h
-            scalars = lib.rbln_prof_get_scalars
+            hidden = lib.rbln_prof_get_v2v_hidden_d2h  # core hidden-d2h signal; required
         except (OSError, AttributeError):
             continue
         hidden.restype = None
-        hidden.argtypes = [ctypes.POINTER(ctypes.c_uint64), ctypes.POINTER(ctypes.c_uint64), ctypes.c_uint32]
-        scalars.restype = None
-        scalars.argtypes = [ctypes.POINTER(ctypes.c_uint64), ctypes.c_uint32]
-        _rt_fns = {"hidden": hidden, "scalars": scalars}
+        hidden.argtypes = [u64p, u64p, ctypes.c_uint32]
+        fns = {"hidden": hidden}
+        try:
+            mem = lib.rbln_prof_get_memory  # device-memory gauge; optional (newer runtime)
+            mem.restype = None
+            mem.argtypes = [u64p, u64p]
+            fns["memory"] = mem
+        except (OSError, AttributeError):
+            pass  # older runtime without the gauge -> memory reported pending, not zero
+        _rt_fns = fns
         return _rt_fns
     _rt_fns = None
     return None
 
 
 def _read_runtime() -> Optional[dict]:
-    """Snapshot of runtime counters, or None if the loaded librbln lacks them."""
+    """Snapshot of runtime counters, or None if the loaded librbln lacks them.
+
+    ``hidden_count`` (the hidden-d2h cause breakdown) is the core signal. The
+    ``mem_cur``/``mem_peak`` device-memory gauge is present only on a runtime
+    that exposes ``rbln_prof_get_memory``; on an older one it is omitted and
+    reported as pending — never a false zero."""
     fns = _runtime_fns()
     if fns is None:
         return None
@@ -113,12 +190,13 @@ def _read_runtime() -> Optional[dict]:
     rc = (ctypes.c_uint64 * n)()
     rb = (ctypes.c_uint64 * n)()
     fns["hidden"](rc, rb, n)
-    sc = (ctypes.c_uint64 * _N_SCALARS)()
-    fns["scalars"](sc, _N_SCALARS)
-    return {
-        "hidden_count": [int(rc[i]) for i in range(n)],
-        "scalars": [int(sc[i]) for i in range(_N_SCALARS)],
-    }
+    out: dict[str, Any] = {"hidden_count": [int(rc[i]) for i in range(n)]}
+    if "memory" in fns:
+        cur, peak = ctypes.c_uint64(), ctypes.c_uint64()
+        fns["memory"](ctypes.byref(cur), ctypes.byref(peak))
+        out["mem_cur"] = int(cur.value)
+        out["mem_peak"] = int(peak.value)
+    return out
 
 
 def _fmt_bytes(b: float) -> str:
@@ -159,13 +237,14 @@ class RBLNProfile:
     numbers are deltas over the region; memory is read as a level/high-water mark."""
 
     def __init__(self) -> None:
-        self._b0 = self._d0 = self._rt0 = self._wall0 = None
-        self._bounces = self._dispatch = self._rt = None
+        self._b0 = self._d0 = self._rt0 = self._wall0 = self._f0 = None
+        self._bounces = self._dispatch = self._rt = self._fallback_by_op = None
         self._wall_ns = 0
 
     def start(self) -> RBLNProfile:
         self._b0 = _read_bounces()
         self._d0 = _read_dispatch()
+        self._f0 = _read_fallback_by_op()
         self._rt0 = _read_runtime()
         self._wall0 = time.perf_counter_ns()
         return self
@@ -175,11 +254,15 @@ class RBLNProfile:
         b1, d1, rt1 = _read_bounces(), _read_dispatch(), _read_runtime()
         self._bounces = [(c1 - c0, by1 - by0) for (c0, by0), (c1, by1) in zip(self._b0, b1)]
         self._dispatch = tuple(x1 - x0 for x0, x1 in zip(self._d0, d1))
+        f1 = _read_fallback_by_op()
+        self._fallback_by_op = {op: f1[op] - self._f0.get(op, 0) for op in f1 if f1[op] - self._f0.get(op, 0) > 0}
         if self._rt0 is not None and rt1 is not None:
             hc = [a - b for a, b in zip(rt1["hidden_count"], self._rt0["hidden_count"])]
-            s0, s1 = self._rt0["scalars"], rt1["scalars"]
-            flow = [s1[i] - s0[i] for i in range(6)]  # h2v/d2h bytes+count, cs, host_wait (delta)
-            self._rt = {"hidden_count": hc, "flow": flow, "mem_cur": s1[6], "mem_peak": s1[7]}
+            self._rt = {"hidden_count": hc}
+            if "mem_cur" in rt1:
+                # memory is a process-level high-water gauge (a level, not a delta)
+                self._rt["mem_cur"] = rt1["mem_cur"]
+                self._rt["mem_peak"] = rt1["mem_peak"]
         else:
             self._rt = None
         return self
@@ -208,34 +291,29 @@ class RBLNProfile:
             },
             "wall_ns": self._wall_ns,
         }
+        out["cpu_fallback_by_op"] = dict(sorted((self._fallback_by_op or {}).items(), key=lambda kv: -kv[1]))
         if self._rt is not None:
-            h2v_b, h2v_c, d2h_b, d2h_c, cs, host_wait = self._rt["flow"]
-            idle = max(0, self._wall_ns - host_wait)
             out["runtime_residency"] = {
                 "available": True,
                 "total_count": sum(self._rt["hidden_count"]),
                 "by_reason": {n: {"count": c} for (n, _f), c in zip(_RUNTIME_REASONS, self._rt["hidden_count"])},
             }
-            out["runtime_host_traffic"] = {
-                "h2v_bytes": h2v_b,
-                "h2v_count": h2v_c,
-                "d2h_bytes": d2h_b,
-                "d2h_count": d2h_c,
-                "total_bytes": h2v_b + d2h_b,
-            }
-            out["command_streams"] = cs
-            out["device_idle"] = {"host_wait_ns": host_wait, "idle_proxy_ns": idle, "wall_ns": self._wall_ns}
-            out["device_memory"] = {"current_bytes": self._rt["mem_cur"], "peak_bytes": self._rt["mem_peak"]}
-            out["pending_runtime_signals"] = ["fragmentation breakdown", "finer host-sync cause (dtype/align/chunks)"]
+            pending = [
+                "finer hidden-sync cause (dtype/align/chunks)",
+                "hidden host-sync on the TVM graph-exec path (side-effect h2v)",
+            ]
+            if "mem_cur" in self._rt:
+                out["device_memory"] = {"current_bytes": self._rt["mem_cur"], "peak_bytes": self._rt["mem_peak"]}
+            else:
+                pending.append("device memory gauge (older runtime)")
+            out["pending_runtime_signals"] = pending
         else:
             out["runtime_residency"] = {"available": False}
             out["pending_runtime_signals"] = [
                 "hidden_d2h / residency (STATE)",
-                "host traffic bytes",
-                "command streams (D)",
-                "device idle (C)",
-                "memory gauge (E)",
+                "device memory gauge",
             ]
+        out["remedies"] = _collect_remedies(out)
         return out
 
     def verdict(self) -> dict[str, Any]:
@@ -270,6 +348,7 @@ class RBLNProfile:
             "cpu_fallbacks": disp["cpu_fallback"],
             "recompiles": disp["recompile_miss"],
             "reasons": reasons,
+            "remedies": d.get("remedies", []),
         }
 
     def report(self) -> str:
@@ -286,15 +365,6 @@ class RBLNProfile:
         for name, vv in d["hidden_host_bounce"]["by_site"].items():
             if vv["count"]:
                 rows.append([f"host_bounce/{name}", str(vv["count"]), _fmt_bytes(vv["bytes"]), "torch aten intent"])
-        # runtime physical host traffic (leaf byte tier)
-        rt = d.get("runtime_host_traffic")
-        if rt:
-            rows.append(
-                ["runtime/d2h (device->host)", str(rt["d2h_count"]), _fmt_bytes(rt["d2h_bytes"]), "physical DMA, leaf"]
-            )
-            rows.append(
-                ["runtime/h2v (host->device)", str(rt["h2v_count"]), _fmt_bytes(rt["h2v_bytes"]), "physical DMA, leaf"]
-            )
         # runtime hidden-d2h cause (v2v slow)
         rr = d["runtime_residency"]
         if rr["available"]:
@@ -307,26 +377,20 @@ class RBLNProfile:
             rows.append(["dispatch/cpu_fallback", str(disp["cpu_fallback"]), "-", "op ran on CPU"])
         if disp["recompile_miss"]:
             rows.append(["dispatch/recompile", str(disp["recompile_miss"]), "-", "graph (re)compiled"])
-        if "command_streams" in d:
-            rows.append(["dispatch/command_streams", str(d["command_streams"]), "-", "CS (C++ submit paths)"])
         if not rows:
             rows.append(["(clean)", "0", "-", "no hidden overhead"])
 
         lines += _table(["Signal", "Count", "Bytes", "Note"], rows, ["l", "r", "r", "l"])
 
-        # device-idle proxy + memory gauge (torch.cuda.memory_summary-style line)
-        if "device_idle" in d:
-            di = d["device_idle"]
-            if di["host_wait_ns"] > 0:
-                lines.append(
-                    f"  device-busy (host blocked on device): {_fmt_ms(di['host_wait_ns'])} of "
-                    f"{_fmt_ms(di['wall_ns'])} wall  (idle proxy {_fmt_ms(di['idle_proxy_ns'])})"
-                )
-            else:
-                lines.append(
-                    "  device-busy/idle: not captured on the executed path "
-                    "(CS/wait instrumented on C++ submit paths; TVM graph-run pending)"
-                )
+        # WHERE: attribute the aggregate cpu_fallback count to the specific ops.
+        fbo = d.get("cpu_fallback_by_op") or {}
+        if fbo:
+            items = list(fbo.items())
+            shown = ", ".join(f"{op} {c}" for op, c in items[:8])
+            extra = "" if len(items) <= 8 else f", +{len(items) - 8} more"
+            lines.append(f"  cpu_fallback by op (top): {shown}{extra}")
+
+        # RESOURCE gauge (not a hidden-overhead signal): device memory high-water.
         if "device_memory" in d:
             m = d["device_memory"]
             lines.append(
@@ -334,6 +398,12 @@ class RBLNProfile:
             )
         if not rr["available"]:
             lines.append("  note: runtime signals not exposed by the loaded librbln (install a recent rebel-compiler)")
+        fixes = d.get("remedies", [])
+        if fixes:
+            lines.append("")
+            lines.append("  Suggested fixes (what to change), most impactful first:")
+            for f in fixes:
+                lines.append(f"   -> {f['signal']}: {f['fix']}")
         return "\n".join(lines)
 
 

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 namespace torch_rbln::shim {
@@ -45,6 +46,14 @@ void register_cpp_shim(
 std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t> diag_dump_dispatch_paths();
 void diag_reset_dispatch_paths();
 uint64_t diag_dump_align_fastpath_count();
+
+// DIAG/PROFILER: per-op CPU-fallback attribution (op_name -> fallback count),
+// non-zero entries only. Recorded on the already-slow fallback branch only (one
+// relaxed atomic via a pointer cached on the op's ShimEntry; warm/fast path
+// untouched), read lazily under registry_mutex. Lets torch.rbln.profile() turn
+// the aggregate cpu_fallback count into "which ops fell back".
+std::vector<std::pair<std::string, uint64_t>> diag_dump_fallback_by_op();
+void diag_reset_fallback_by_op();
 
 // DIAG: per-segment timers inside the warm-cache hit path. Returns
 // (n_hits, ns_lookup, ns_io_build, ns_gil, ns_prep_in, ns_prep_out, ns_run,

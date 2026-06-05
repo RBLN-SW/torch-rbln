@@ -124,6 +124,14 @@ void register_internal_api(py::module_& module) {
   module.def(
       "_dispatch_shim_diag_reset", &torch_rbln::shim::diag_reset_dispatch_paths, "DIAG: reset dispatch path counters");
   module.def(
+      "_dispatch_fallback_by_op",
+      &torch_rbln::shim::diag_dump_fallback_by_op,
+      "DIAG/PROFILER: per-op CPU-fallback counts (list of (op_name, count), non-zero only)");
+  module.def(
+      "_dispatch_fallback_by_op_reset",
+      &torch_rbln::shim::diag_reset_fallback_by_op,
+      "DIAG/PROFILER: reset per-op CPU-fallback counts");
+  module.def(
       "_dispatch_shim_align_fastpath_count",
       &torch_rbln::shim::diag_dump_align_fastpath_count,
       "DIAG: count of align-penalty fast-path hits");

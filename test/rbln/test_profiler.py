@@ -8,17 +8,25 @@ device and assert the profiler surfaces those hidden events, and ONLY those.
 
 Mapping to the profiler signal taxonomy discussed in design (A-E):
 
-  * copy host-bounce  -> ``hidden_host_bounce``   (torch-side, this build) [core]
-  * A recompile       -> ``dispatch.recompile_miss`` (torch-side, this build)
-  * B cpu_fallback    -> ``dispatch.cpu_fallback``    (torch-side, this build)
-  * C device idle     -> pending: owned by the rebel-compiler runtime collector,
-                         NOT wired in this build -> must be reported as pending,
-                         never as a false GREEN.
-  * D command-stream  -> deliberately NOT a verdict signal (not user-actionable).
-  * E memory gauge    -> pending: rebel-compiler runtime collector.
+  * copy host-bounce  -> ``hidden_host_bounce``   (torch-side) [core]
+  * A recompile       -> ``dispatch.recompile_miss`` (torch-side)
+  * B cpu_fallback    -> ``dispatch.cpu_fallback``    (torch-side)
+  * runtime hidden-d2h cause -> ``runtime_residency`` (rebel runtime) [core]
+  * C device idle / D command-stream / leaf-byte host-traffic -> deliberately
+                         EXCLUDED. They are a different profiler's job
+                         (dispatch/utilization, à la torch.profiler/nsys), out of
+                         this profiler's hidden-overhead scope, and on the
+                         executed path live in the TVM runtime where they read ~0
+                         -- surfacing them would mislead. The one hidden signal
+                         still missing (side-effect host-sync on the TVM
+                         graph-exec path) is a tracked follow-up, not these.
+  * E memory gauge    -> ``device_memory`` (rebel runtime). NOT a hidden-overhead
+                         signal; kept only because it is accurate and complete
+                         (every device alloc routes through BufferAllocator).
 
-The C/D/E tests therefore assert the profiler's *honesty and scope*, not a
-number we cannot yet measure truthfully.
+These tests therefore assert the profiler's *honesty and scope* — that it
+carries the hidden-overhead signals plus the memory gauge, and EXCLUDES the
+out-of-scope dispatch/utilization counters.
 """
 
 import pytest
@@ -88,10 +96,12 @@ class TestProfilerTruthfulnessAndScope(TestCase):
     carry signals the user cannot act on (D)."""
 
     def test_runtime_signals_present_or_honestly_pending(self):
-        # When the loaded librbln exposes the runtime counters, the C/D/E sections
-        # (host traffic bytes, command streams, device idle, device memory) must
-        # be present. On an older runtime, the profiler must HONESTLY mark them
-        # pending — never a false clean.
+        # When the loaded librbln exposes the runtime counters, the in-scope
+        # sections (hidden-d2h residency + the device-memory gauge) must be
+        # present. The out-of-scope dispatch/utilization counters (leaf-byte
+        # traffic, command streams, device idle) must NOT be surfaced. On an
+        # older runtime, the profiler must HONESTLY mark them pending — never a
+        # false clean.
         with torch.rbln.profile() as p:
             _ = torch.randn(8, 8, device=DEV, dtype=torch.float16)
         d = p.dump()
@@ -99,10 +109,11 @@ class TestProfilerTruthfulnessAndScope(TestCase):
         if rr["available"]:
             self.assertIn("total_count", rr)
             self.assertIn("by_reason", rr)
-            self.assertIn("runtime_host_traffic", d)  # h2v/d2h leaf bytes
-            self.assertIn("command_streams", d)  # D
-            self.assertIn("device_idle", d)  # C
-            self.assertIn("device_memory", d)  # E
+            self.assertIn("device_memory", d)  # E (resource gauge, kept)
+            # out of hidden-overhead scope — must not be surfaced:
+            self.assertNotIn("runtime_host_traffic", d)  # leaf bytes
+            self.assertNotIn("command_streams", d)  # D
+            self.assertNotIn("device_idle", d)  # C
         else:
             pending = " ".join(d["pending_runtime_signals"]).lower()
             self.assertIn("d2h", pending)

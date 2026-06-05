@@ -144,6 +144,10 @@ struct ShimEntry {
   std::vector<size_t> skip_dtype_args;
   SchemaCache schema_cache; // lazily filled
   const char* op_name_intern = nullptr; // stable pointer for WarmCache keys
+  // Cached pointer into fallback_by_op() for this op; bumped lock-free on the
+  // already-slow fallback branch. Raw ptr keeps ShimEntry an aggregate / movable
+  // (the registry stores it by value via move-assign).
+  std::atomic<uint64_t>* fallback_ctr = nullptr;
 };
 
 // Leaky singletons: these hold pybind11::object (registry) and torch::Library
@@ -168,6 +172,17 @@ std::vector<std::unique_ptr<torch::Library>>& installed_libs() {
 std::mutex& registry_mutex() {
   static std::mutex m;
   return m;
+}
+
+// Per-op CPU-fallback counts, keyed by the interned op-name pointer (stable +
+// deduplicated by intern_op_name). Heap-allocated atomics so each ShimEntry can
+// cache a raw pointer (fallback_ctr) and bump it lock-free on the fallback
+// branch. Populated/looked-up under registry_mutex at register time (import,
+// before any dispatch); survives op re-registration. Leaky singleton to match
+// registry() teardown semantics.
+std::unordered_map<const char*, std::unique_ptr<std::atomic<uint64_t>>>& fallback_by_op() {
+  static auto* m = new std::unordered_map<const char*, std::unique_ptr<std::atomic<uint64_t>>>();
+  return *m;
 }
 
 ShimEntry* find_shim_entry(const std::string& op_name) {
@@ -1101,6 +1116,9 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
   const bool would_fallback = quick_fallback_check(stack, cache, skip_dtype_args);
   if (would_fallback) {
     g_diag_n_fallback.fetch_add(1, std::memory_order_relaxed);
+    if (entry->fallback_ctr != nullptr) {
+      entry->fallback_ctr->fetch_add(1, std::memory_order_relaxed); // per-op attribution (same slow branch)
+    }
     ::at::native::rbln::cpu_fallback_rbln(op, stack);
     return;
   }
@@ -1245,6 +1263,16 @@ void register_cpp_shim(const std::string& op_name, pybind11::object py_fn, const
 
   const bool first_time = registry().find(op_name) == registry().end();
   registry()[op_name] = ShimEntry{std::move(py_fn), skip_dtype_args, SchemaCache{}, interned};
+  // Wire up the per-op fallback counter (heap atomic, keyed by interned name so
+  // it survives re-registration). The move-assign above reset fallback_ctr to
+  // null, so re-point it here.
+  {
+    auto& slot = fallback_by_op()[interned];
+    if (!slot) {
+      slot = std::make_unique<std::atomic<uint64_t>>(0);
+    }
+    registry()[op_name].fallback_ctr = slot.get();
+  }
   if (!first_time) {
     // Same op re-registered (e.g. codegen re-run during tests): reuse existing
     // Library entry, just refresh the stored Python callable above.
@@ -1260,6 +1288,30 @@ void register_cpp_shim(const std::string& op_name, pybind11::object py_fn, const
   const std::string overload = strip_namespace(op_name);
   lib->impl(overload.c_str(), torch::CppFunction::makeFromBoxedFunction<&generic_shim_boxed>());
   installed_libs().push_back(std::move(lib));
+}
+
+std::vector<std::pair<std::string, uint64_t>> diag_dump_fallback_by_op() {
+  std::vector<std::pair<std::string, uint64_t>> out;
+  std::lock_guard<std::mutex> lk(registry_mutex());
+  for (const auto& kv : registry()) {
+    const ShimEntry& e = kv.second;
+    if (e.fallback_ctr != nullptr) {
+      const uint64_t c = e.fallback_ctr->load(std::memory_order_relaxed);
+      if (c != 0) {
+        out.emplace_back(kv.first, c);
+      }
+    }
+  }
+  return out;
+}
+
+void diag_reset_fallback_by_op() {
+  std::lock_guard<std::mutex> lk(registry_mutex());
+  for (auto& kv : fallback_by_op()) {
+    if (kv.second) {
+      kv.second->store(0, std::memory_order_relaxed);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
