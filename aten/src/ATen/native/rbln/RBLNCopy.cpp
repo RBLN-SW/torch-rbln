@@ -9,6 +9,7 @@
 #include <c10/rbln/RBLNFallbackConfig.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
+#include <rebel/runtime/api/rbln_runtime_api.h>
 
 namespace at::native::rbln {
 
@@ -116,9 +117,9 @@ void tensor_copy_from_rbln_to_rbln(const at::Tensor& rbln_src, const at::Tensor&
   }
 
   // Strided copy: route to the on-device v2v engine while the outer iteration
-  // count stays within the runtime per-dst v2v cap (kMaxV2VMultiCopies); above
-  // it the engine fans out to a host fallback anyway, so bounce via host here.
-  constexpr int64_t kMaxStridedV2VOuter = 1024;
+  // count stays within the runtime per-dst v2v cap (::rbln::kMaxV2VMultiCopies,
+  // the single source shared with the runtime); above it the engine fans out to
+  // a host fallback anyway, so bounce via host here.
   if (rbln_src.sizes() == rbln_dst.sizes() && rbln_src.scalar_type() == rbln_dst.scalar_type() &&
       rbln_src.device() == rbln_dst.device()) {
     const auto inner_start = common_inner_start(rbln_src.sizes(), rbln_src.strides(), rbln_dst.strides());
@@ -126,7 +127,7 @@ void tensor_copy_from_rbln_to_rbln(const at::Tensor& rbln_src, const at::Tensor&
     for (int64_t i = 0; i < inner_start; ++i) {
       outer_count *= rbln_src.size(i);
     }
-    if (outer_count <= kMaxStridedV2VOuter) {
+    if (outer_count <= static_cast<int64_t>(::rbln::kMaxV2VMultiCopies)) {
       strided_v2v_copy(rbln_dst, rbln_src);
       return;
     }
