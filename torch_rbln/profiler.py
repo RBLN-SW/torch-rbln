@@ -263,6 +263,16 @@ def _runtime_fns():
             fns["memory"] = mem
         except (OSError, AttributeError):
             pass  # older runtime without the gauge -> memory reported pending, not zero
+        try:
+            # REAL device->host transfers (count, bytes) emitted by the v-mem manager
+            # at every real d2h primitive; the authoritative real-vs-host-served signal
+            # (a host-served copy never reaches it). Optional (newer runtime).
+            hs = lib.rbln_prof_get_host_sync_d2h
+            hs.restype = None
+            hs.argtypes = [u64p, u64p]
+            fns["host_sync"] = hs
+        except (OSError, AttributeError):
+            pass
         _rt_fns = fns
         return _rt_fns
     _rt_fns = None
@@ -289,6 +299,11 @@ def _read_runtime() -> Optional[dict]:
         fns["memory"](ctypes.byref(cur), ctypes.byref(peak))
         out["mem_cur"] = int(cur.value)
         out["mem_peak"] = int(peak.value)
+    if "host_sync" in fns:
+        hc, hb = ctypes.c_uint64(), ctypes.c_uint64()
+        fns["host_sync"](ctypes.byref(hc), ctypes.byref(hb))
+        out["host_sync_count"] = int(hc.value)
+        out["host_sync_bytes"] = int(hb.value)
     return out
 
 
@@ -370,6 +385,9 @@ class RBLNExplain:
                 # memory is a process-level high-water gauge (a level, not a delta)
                 self._rt["mem_cur"] = rt1["mem_cur"]
                 self._rt["mem_peak"] = rt1["mem_peak"]
+            if "host_sync_count" in rt1 and "host_sync_count" in self._rt0:
+                self._rt["host_sync_count"] = rt1["host_sync_count"] - self._rt0["host_sync_count"]
+                self._rt["host_sync_bytes"] = rt1["host_sync_bytes"] - self._rt0["host_sync_bytes"]
         else:
             self._rt = None
         if self._trace:
@@ -391,13 +409,18 @@ class RBLNExplain:
         per_site = {n: {"count": c, "bytes": by} for (n, _d), (c, by) in zip(_BOUNCE_SITES, self._bounces)}
         hb_count = sum(self._bounces[i][0] for i in _HOST_BOUNCE_SITES)
         hb_bytes = sum(self._bounces[i][1] for i in _HOST_BOUNCE_SITES)
-        n_total, n_fallback, n_warm_hit, n_miss, _a, _b = self._dispatch
+        # tuple is (n_total, n_fallback, n_warm_hit, n_miss, ns_warm_hit, ns_miss[, ns_fallback]);
+        # the 7th (cpu_fallback wall ns) is absent on a _C that predates it -> degrade to 0.
+        d = self._dispatch
+        n_total, n_fallback, n_warm_hit, n_miss = d[0], d[1], d[2], d[3]
+        ns_fallback = d[6] if len(d) > 6 else 0
 
         out: dict[str, Any] = {
             "hidden_host_bounce": {"by_site": per_site, "total_count": hb_count, "total_bytes": hb_bytes},
             "dispatch": {
                 "total": n_total,
                 "cpu_fallback": n_fallback,
+                "cpu_fallback_ns": ns_fallback,
                 "warm_hit": n_warm_hit,
                 "recompile_miss": n_miss,
             },
@@ -415,6 +438,13 @@ class RBLNExplain:
                 "total_count": sum(self._rt["hidden_count"]),
                 "by_reason": {n: {"count": c} for (n, _f), c in zip(_RUNTIME_REASONS, self._rt["hidden_count"])},
             }
+            if "host_sync_count" in self._rt:
+                # authoritative REAL device->host this region (manager-emitted). A host
+                # bounce with 0 real d2h was served on host (no device crossing).
+                out["runtime_residency"]["real_host_sync_d2h"] = {
+                    "count": self._rt["host_sync_count"],
+                    "bytes": self._rt["host_sync_bytes"],
+                }
             pending = [
                 "finer hidden-sync cause (dtype/align/chunks)",
                 "hidden host-sync on the TVM graph-exec path (side-effect h2v)",
@@ -505,6 +535,16 @@ class RBLNExplain:
         lines.append("")
         lines += _table(["Signal", "Count", "Bytes", "Fix"], rows, ["l", "r", "r", "l"])
 
+        # Qualify the torch-side host_bounce (a copy-PATH count, blind to residency)
+        # with the v-mem manager's authoritative REAL device->host count: 0 real means
+        # the bounce was served on the host (no device crossing) -> low cost, not a leak.
+        rhs = rr.get("real_host_sync_d2h") if rr.get("available") else None
+        if rhs is not None and (rhs["count"] or d["hidden_host_bounce"]["total_count"]):
+            if rhs["count"]:
+                lines.append(f"    real device->host (runtime): {rhs['count']} copies, {_fmt_bytes(rhs['bytes'])}")
+            else:
+                lines.append("    real device->host (runtime): 0 — host_bounce above was served on host")
+
         # attribution sub-lines (which ops, and WHY) — compact, under the table.
         def _top(m: dict) -> str:
             items = list(m.items())
@@ -520,7 +560,11 @@ class RBLNExplain:
 
         fbo = d.get("cpu_fallback_by_op") or {}
         if fbo:
-            lines.append(f"    cpu_fallback: {_top(fbo)}")
+            fb_ns = d["dispatch"].get("cpu_fallback_ns", 0)
+            # the COST -- distinguishes "many cheap fallbacks (path overhead)" from
+            # "few expensive ones (hidden transfer)"; only shown when the loaded _C exposes it.
+            cost = f"   (Σ {fb_ns / 1000:.0f} µs wall)" if fb_ns else ""
+            lines.append(f"    cpu_fallback: {_top(fbo)}{cost}")
         fr = d.get("cpu_fallback_reasons") or {}
         if fr:
             lines.append("      why: " + ", ".join(f"{n} {c}" for n, c in fr.items()))

@@ -29,6 +29,18 @@ void prof_get_v2v_hidden_d2h(uint64_t* counts, uint64_t* bytes, uint32_t n);
 uint32_t prof_v2v_hidden_num_reasons();
 void prof_reset_v2v_hidden_d2h();
 
+// --- hidden device->host transfers in the host-sync (v2h) path. COUNT of REAL
+// physical->user transfers the manager actually performed (every
+// TransferDataFromPhysicalToUser). Lets a profiler separate a host bounce that
+// truly crossed the device from one served entirely on the host (host-resident
+// src -> memcpy, NO transfer): when the torch-side copy-path bounce count is > 0
+// but this counter's delta is 0, no device crossing happened. The manager EMITS
+// this (it alone knows real-vs-served); the per-tensor sync_state stays hidden.
+// Recorded only on the already-slow real-transfer path. COUNT only.
+void prof_record_host_sync_d2h(uint64_t bytes);
+void prof_get_host_sync_d2h(uint64_t* count, uint64_t* bytes);
+void prof_reset_host_sync_d2h();
+
 // --- (E) device memory gauge: current live device bytes + high-water peak.
 // Recorded at every BufferAllocator alloc/free (the single device-allocation
 // chokepoint), so the gauge is complete. This is a RESOURCE gauge, not a

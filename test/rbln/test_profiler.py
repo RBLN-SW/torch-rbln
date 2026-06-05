@@ -75,7 +75,12 @@ class TestProfilerDispatchSignals(TestCase):
         with torch.rbln.explain() as p:
             a = torch.ones(32, 32, device=DEV, dtype=torch.int32)  # non-fp16 -> CPU fallback
             _ = a + a
-        self.assertGreaterEqual(p.dump()["dispatch"]["cpu_fallback"], 1)
+        disp = p.dump()["dispatch"]
+        self.assertGreaterEqual(disp["cpu_fallback"], 1)
+        # COST is surfaced too (wall ns spent in cpu_fallback), so a report can tell
+        # many-cheap fallbacks from few-expensive ones. >= 0 (0 only on a _C predating it).
+        self.assertIn("cpu_fallback_ns", disp)
+        self.assertGreaterEqual(disp["cpu_fallback_ns"], 0)
         self.assertIn(p.verdict()["status"], ("AMBER", "RED"))
 
     def test_A_recompile_counted(self):
@@ -88,6 +93,64 @@ class TestProfilerDispatchSignals(TestCase):
             _ = x + x
         self.assertGreaterEqual(p.dump()["dispatch"]["recompile_miss"], 1)
         self.assertIn(p.verdict()["status"], ("AMBER", "RED"))  # a compile -> not GREEN
+
+
+@pytest.mark.test_set_ci
+class TestProfilerFallbackRegimes(TestCase):
+    """explain must render each dispatch regime distinctly. The decode-path study
+    showed a CPU fallback is NOT automatically a host transfer: int arithmetic on a
+    contiguous, host-resident tensor falls back per op but stays host-resident (lazy
+    v-mem, borrow chain) — so its only cost is fallback wall-time, not d2h/bounce.
+    A non-contiguous input can't be borrowed and DOES round-trip host. These lock
+    that distinction so a regression can't silently turn one regime into another.
+    (host-bounce WITHOUT fallback is covered by TestProfilerCopyBounce.)"""
+
+    def test_device_run_no_fallback_no_bounce(self):
+        # Contiguous fp16 elementwise runs on-device: no CPU fallback, no host
+        # bounce. (A one-time recompile may still occur; not asserted here.)
+        x = torch.randn(64, 64, device=DEV, dtype=torch.float16)
+        for _ in range(3):
+            _ = x * 2  # warm
+        with torch.rbln.explain() as p:
+            _ = x * 2
+        d = p.dump()
+        self.assertEqual(d["dispatch"]["cpu_fallback"], 0)
+        self.assertEqual(d["hidden_host_bounce"]["total_count"], 0)
+
+    def test_fallback_without_transfer(self):
+        # int ops on a CONTIGUOUS host-resident tensor fall back EVERY op but stay
+        # host-resident -> NO host bounce, NO hidden d2h. explain surfaces the
+        # cpu_fallback count + its wall-time, and zero transfer signals.
+        a = torch.arange(256, dtype=torch.int32).to(DEV)
+
+        def chain():
+            r = a
+            for _ in range(8):
+                r = r - 1
+            return r
+
+        chain()  # warm
+        with torch.rbln.explain() as p:
+            chain()
+        d = p.dump()
+        self.assertGreaterEqual(d["dispatch"]["cpu_fallback"], 8)
+        self.assertIn("cpu_fallback_ns", d["dispatch"])  # COST is surfaced
+        self.assertEqual(d["hidden_host_bounce"]["total_count"], 0)  # contiguous -> borrowed, no copy
+        if d["runtime_residency"]["available"]:
+            self.assertEqual(d["runtime_residency"]["total_count"], 0)
+
+    def test_fallback_with_transfer(self):
+        # An int op on a NON-CONTIGUOUS tensor cannot be borrowed (borrow rejects
+        # non-contig), so the fallback routes through a real host copy -> explain
+        # shows BOTH a cpu_fallback AND a host bounce with bytes.
+        m = torch.arange(256, dtype=torch.int32).reshape(16, 16).to(DEV)
+        _ = m.t() - 1  # warm
+        with torch.rbln.explain() as p:
+            _ = m.t() - 1
+        d = p.dump()
+        self.assertGreaterEqual(d["dispatch"]["cpu_fallback"], 1)
+        self.assertGreaterEqual(d["hidden_host_bounce"]["total_count"], 1)
+        self.assertGreater(d["hidden_host_bounce"]["total_bytes"], 0)
 
 
 @pytest.mark.test_set_ci

@@ -39,6 +39,7 @@ std::atomic<uint64_t> g_diag_n_warm_hit{0}; // warm-cache fast path hit
 std::atomic<uint64_t> g_diag_n_miss{0}; // Python compile (miss) path
 std::atomic<uint64_t> g_diag_ns_warm_hit{0}; // total ns inside warm-cache hit path
 std::atomic<uint64_t> g_diag_ns_miss{0}; // total ns inside miss path
+std::atomic<uint64_t> g_diag_ns_fallback{0}; // total ns inside cpu_fallback_rbln (the COST, not just count)
 // cpu_fallback reason histogram. index = reason code from quick_fallback_check
 // (1=dtype-not-fp16, 2=nan/inf input, 3=all-scalar). Bumped on the fallback
 // branch only (the reason is already computed there) -> ON==OFF preserved.
@@ -57,14 +58,15 @@ std::atomic<uint64_t> g_diag_warm_ns_run{0};
 std::atomic<uint64_t> g_diag_warm_ns_finalize{0};
 } // namespace
 
-std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t> diag_dump_dispatch_paths() {
+std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t> diag_dump_dispatch_paths() {
   return std::make_tuple(
       g_diag_n_total.load(std::memory_order_relaxed),
       g_diag_n_fallback.load(std::memory_order_relaxed),
       g_diag_n_warm_hit.load(std::memory_order_relaxed),
       g_diag_n_miss.load(std::memory_order_relaxed),
       g_diag_ns_warm_hit.load(std::memory_order_relaxed),
-      g_diag_ns_miss.load(std::memory_order_relaxed));
+      g_diag_ns_miss.load(std::memory_order_relaxed),
+      g_diag_ns_fallback.load(std::memory_order_relaxed));
 }
 
 uint64_t diag_dump_align_fastpath_count() {
@@ -78,6 +80,7 @@ void diag_reset_dispatch_paths() {
   g_diag_n_miss.store(0, std::memory_order_relaxed);
   g_diag_ns_warm_hit.store(0, std::memory_order_relaxed);
   g_diag_ns_miss.store(0, std::memory_order_relaxed);
+  g_diag_ns_fallback.store(0, std::memory_order_relaxed);
   g_diag_n_align_fastpath.store(0, std::memory_order_relaxed);
 }
 
@@ -1198,7 +1201,11 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
     if (g_trace_enabled.load(std::memory_order_relaxed)) {
       capture_site(op_name); // (A) WHERE: opt-in, deduped, GIL-safe; off by default
     }
+    const uint64_t _fb_t0 = now_ns();
     ::at::native::rbln::cpu_fallback_rbln(op, stack);
+    // COST of the fallback (wall ns), so the report can tell "many cheap fallbacks
+    // (path overhead)" from "few expensive ones (hidden transfer)". Same slow branch.
+    g_diag_ns_fallback.fetch_add(now_ns() - _fb_t0, std::memory_order_relaxed);
     return;
   }
 
