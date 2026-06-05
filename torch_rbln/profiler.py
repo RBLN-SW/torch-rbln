@@ -38,6 +38,10 @@ Usage::
     print(p.report())  # torch.profiler-style table, verdict first
     p.dump()  # dict for CI gates
     p.verdict()  # {'status': 'GREEN'|'AMBER'|'RED', ...}
+
+    with torch.rbln.explain(trace=True) as p:  # opt-in: WHERE each fallback/recompile originates
+        model(x)
+    print(p.report())  # adds an "at <file:line(func)>" line per offending op
 """
 
 from __future__ import annotations
@@ -186,6 +190,36 @@ def _read_fallback_reasons() -> list[int]:
     return [int(c) for c in fn()]
 
 
+# --- (A) WHERE: opt-in Python call-site capture (off by default) --------------
+def _read_trace_by_op() -> dict[str, str]:
+    """Per-op captured call-site (op_name -> 'file:line(func) <- ...'), or {} if
+    trace was never enabled / the binding is absent (graceful degrade)."""
+    import torch_rbln._C as _C
+
+    fn = getattr(_C, "_explain_trace_by_op", None)
+    if fn is None:
+        return {}
+    return {str(op): str(site) for op, site in fn()}
+
+
+def _set_trace(on: bool) -> None:
+    """Flip the C++ capture gate. No-op on a _C that predates the binding (so a
+    trace=True request on an old build degrades to no call-sites, not an error)."""
+    import torch_rbln._C as _C
+
+    fn = getattr(_C, "_explain_set_trace", None)
+    if fn is not None:
+        fn(on)
+
+
+def _reset_trace() -> None:
+    import torch_rbln._C as _C
+
+    fn = getattr(_C, "_explain_trace_by_op_reset", None)
+    if fn is not None:
+        fn()
+
+
 # --- runtime (rebel-compiler) counters via ctypes from the loaded librbln -----
 _rt_fns: Optional[dict] = None
 _rt_resolved = False
@@ -279,13 +313,18 @@ class RBLNExplain:
     """A hidden-overhead explain region. Use via :func:`explain` as a context manager. All flow
     numbers are deltas over the region; memory is read as a level/high-water mark."""
 
-    def __init__(self) -> None:
+    def __init__(self, trace: bool = False) -> None:
         self._b0 = self._d0 = self._rt0 = self._wall0 = self._f0 = self._r0 = self._fr0 = None
         self._bounces = self._dispatch = self._rt = self._fallback_by_op = self._recompile_by_op = None
         self._fallback_reasons = None
+        self._trace = trace
+        self._trace_by_op: Optional[dict] = None
         self._wall_ns = 0
 
     def start(self) -> RBLNExplain:
+        if self._trace:
+            _set_trace(True)
+            _reset_trace()  # region-local captures (the C++ map dedups per op)
         self._b0 = _read_bounces()
         self._d0 = _read_dispatch()
         self._f0 = _read_fallback_by_op()
@@ -317,6 +356,11 @@ class RBLNExplain:
                 self._rt["mem_peak"] = rt1["mem_peak"]
         else:
             self._rt = None
+        if self._trace:
+            self._trace_by_op = _read_trace_by_op()
+            _set_trace(False)
+        else:
+            self._trace_by_op = {}
         return self
 
     def __enter__(self) -> RBLNExplain:
@@ -348,6 +392,7 @@ class RBLNExplain:
         out["cpu_fallback_reasons"] = {
             n: c for n, c in zip(_FALLBACK_REASON_NAMES, self._fallback_reasons or []) if c > 0
         }
+        out["trace_by_op"] = dict(self._trace_by_op or {})  # (A) WHERE; {} unless trace=True
         if self._rt is not None:
             out["runtime_residency"] = {
                 "available": True,
@@ -450,15 +495,26 @@ class RBLNExplain:
             shown = ", ".join(f"{op} {c}" for op, c in items[:8])
             return shown + ("" if len(items) <= 8 else f", +{len(items) - 8} more")
 
+        tbo = d.get("trace_by_op") or {}  # (A) WHERE: op -> call-site, only when trace=True
+
+        def _where(by_op: dict) -> None:
+            for op in list(by_op)[:3]:
+                if op in tbo:
+                    lines.append(f"      at {op}: {tbo[op]}")
+
         fbo = d.get("cpu_fallback_by_op") or {}
         if fbo:
             lines.append(f"    cpu_fallback: {_top(fbo)}")
         fr = d.get("cpu_fallback_reasons") or {}
         if fr:
             lines.append("      why: " + ", ".join(f"{n} {c}" for n, c in fr.items()))
+        _where(fbo)
         rbo = d.get("recompile_by_op") or {}
         if rbo:
             lines.append(f"    recompile: {_top(rbo)}")
+        _where(rbo)
+        if (fbo or rbo) and not tbo:
+            lines.append("      where? -> rerun with explain(trace=True)")
         if not rr["available"]:
             lines.append(_RT_UNAVAIL)
         lines.append("  (full fix detail -> p.help(signal) or dump()['remedies'])")
@@ -480,9 +536,14 @@ class RBLNExplain:
         return next((f["fix"] for f in fixes if signal in f["signal"]), f"no remedy for '{signal}'")
 
 
-def explain() -> RBLNExplain:
-    """Return a hidden-overhead explain region, usable as a context manager."""
-    return RBLNExplain()
+def explain(trace: bool = False) -> RBLNExplain:
+    """Return a hidden-overhead explain region, usable as a context manager.
+
+    With ``trace=True`` (opt-in; OFF by default, so a plain region adds nothing to
+    any path), the FIRST time each op falls back / recompiles its Python call-site
+    is captured (deduped per op) and shown as an ``at <file:line(func)>`` line in
+    the report — telling you WHERE in your model the hidden overhead originates."""
+    return RBLNExplain(trace=trace)
 
 
 # Backward-compatible aliases. The tool was originally exposed as ``profile``;
@@ -493,7 +554,7 @@ profile = explain
 
 
 def explain_steady(
-    fn: Callable[[], Any], *, warmup: int = 2, return_cold: bool = False
+    fn: Callable[[], Any], *, warmup: int = 2, return_cold: bool = False, trace: bool = False
 ) -> RBLNExplain | tuple[RBLNExplain, RBLNExplain]:
     """Profile ``fn()`` at STEADY STATE, isolating per-call overhead from one-time
     cold cost (compile / first-touch / cache fill).
@@ -515,14 +576,14 @@ def explain_steady(
         warm = torch.rbln.explain_steady(lambda: model(x), warmup=2)
         print(warm.report())  # the steady-state overhead that recurs
     """
-    cold = RBLNExplain().start()
+    cold = RBLNExplain(trace=trace).start()
     try:
         fn()
     finally:
         cold.stop()
     for _ in range(max(0, warmup)):
         fn()
-    warm = RBLNExplain().start()
+    warm = RBLNExplain(trace=trace).start()
     try:
         fn()
     finally:

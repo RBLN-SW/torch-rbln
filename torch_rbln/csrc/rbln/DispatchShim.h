@@ -68,6 +68,14 @@ void diag_reset_recompile_by_op();
 std::vector<uint64_t> diag_dump_fallback_reasons();
 void diag_reset_fallback_reasons();
 
+// DIAG/PROFILER (A) WHERE: opt-in Python call-site capture. OFF by default
+// (default explain() pays nothing). When enabled, the slow fallback/miss branch
+// captures the user's call-site ONCE per op (deduped, GIL-safe). dump returns
+// (op_name -> "file:line(func) <- ..."); reset clears between regions.
+void diag_set_trace_enabled(bool on);
+std::vector<std::pair<std::string, std::string>> diag_dump_trace_by_op();
+void diag_reset_trace_by_op();
+
 // DIAG: per-segment timers inside the warm-cache hit path. Returns
 // (n_hits, ns_lookup, ns_io_build, ns_gil, ns_prep_in, ns_prep_out, ns_run,
 //  ns_finalize). Counts/accumulates only when the hit path returns true; early

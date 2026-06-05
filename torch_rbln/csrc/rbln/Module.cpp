@@ -148,6 +148,18 @@ void register_internal_api(py::module_& module) {
       &torch_rbln::shim::diag_reset_fallback_reasons,
       "DIAG/PROFILER: reset cpu_fallback reason counts");
   module.def(
+      "_explain_set_trace",
+      &torch_rbln::shim::diag_set_trace_enabled,
+      "DIAG/PROFILER (A) WHERE: enable/disable opt-in call-site capture (off by default)");
+  module.def(
+      "_explain_trace_by_op",
+      &torch_rbln::shim::diag_dump_trace_by_op,
+      "DIAG/PROFILER (A) WHERE: per-op captured call-site (list of (op_name, site))");
+  module.def(
+      "_explain_trace_by_op_reset",
+      &torch_rbln::shim::diag_reset_trace_by_op,
+      "DIAG/PROFILER (A) WHERE: reset captured call-sites");
+  module.def(
       "_dispatch_shim_align_fastpath_count",
       &torch_rbln::shim::diag_dump_align_fastpath_count,
       "DIAG: count of align-penalty fast-path hits");

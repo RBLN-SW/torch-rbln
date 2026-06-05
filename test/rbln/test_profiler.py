@@ -197,6 +197,27 @@ class TestProfilerApi(TestCase):
         self.assertLessEqual(warm.dump()["dispatch"]["recompile_miss"], cold.dump()["dispatch"]["recompile_miss"])
         self.assertIn(warm.verdict()["status"], ("GREEN", "AMBER", "RED"))
 
+    def test_A_where_traceback_is_opt_in(self):
+        # (A) WHERE: default explain() captures NO call-site (opt-in => adds
+        # nothing); explain(trace=True) captures the Python call-site of the op.
+        def _do_fallback():
+            a = torch.ones(16, 16, device=DEV, dtype=torch.int32)  # int32 -> cpu_fallback
+            return a + a
+
+        with torch.rbln.explain() as off:
+            _do_fallback()
+        self.assertEqual(off.dump()["trace_by_op"], {})  # nothing unless asked
+
+        import torch_rbln._C as _C
+
+        if not hasattr(_C, "_explain_set_trace"):
+            self.skipTest("trace capture not exposed by this _C build")
+        with torch.rbln.explain(trace=True) as on:
+            _do_fallback()
+        tbo = on.dump()["trace_by_op"]
+        self.assertIn("aten::add.out", tbo)
+        self.assertIn("_do_fallback", tbo["aten::add.out"])  # the user's call-site frame
+
 
 if __name__ == "__main__":
     run_tests()

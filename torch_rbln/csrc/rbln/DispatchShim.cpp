@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <array>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -41,7 +42,7 @@ std::atomic<uint64_t> g_diag_ns_miss{0}; // total ns inside miss path
 // cpu_fallback reason histogram. index = reason code from quick_fallback_check
 // (1=dtype-not-fp16, 2=nan/inf input, 3=all-scalar). Bumped on the fallback
 // branch only (the reason is already computed there) -> ON==OFF preserved.
-std::atomic<uint64_t> g_fallback_reason[4]{};
+std::array<std::atomic<uint64_t>, 4> g_fallback_reason{};
 std::atomic<uint64_t> g_diag_n_align_fastpath{0}; // align fast-path hits → cpu_fallback
 
 // Warm-cache hit path per-segment timers. Accumulated only on successful hits
@@ -197,6 +198,63 @@ std::unordered_map<const char*, std::unique_ptr<std::atomic<uint64_t>>>& fallbac
 std::unordered_map<const char*, std::unique_ptr<std::atomic<uint64_t>>>& recompile_by_op() {
   static auto* m = new std::unordered_map<const char*, std::unique_ptr<std::atomic<uint64_t>>>();
   return *m;
+}
+
+// (A) WHERE: opt-in Python call-site capture. OFF by default -> default explain()
+// is byte-identical overhead. When on, capture the user's call-site for an op
+// ONCE (deduped per op), and ONLY on the already-slow fallback / miss branch.
+std::atomic<bool> g_trace_enabled{false};
+std::mutex& trace_mutex() {
+  static std::mutex m;
+  return m;
+}
+std::unordered_map<std::string, std::string>& trace_by_op() {
+  static auto* m = new std::unordered_map<std::string, std::string>();
+  return *m;
+}
+
+void capture_site(const std::string& op_name) {
+  {
+    std::lock_guard<std::mutex> lk(trace_mutex());
+    if (trace_by_op().find(op_name) != trace_by_op().end()) {
+      return; // already captured -> no GIL / no Python
+    }
+  }
+  if (!Py_IsInitialized()) {
+    return;
+  }
+  // The dispatcher may have released the GIL before this boxed branch; acquire
+  // it before ANY Python access (no-op if this thread already holds it).
+  pybind11::gil_scoped_acquire gil;
+  std::string site;
+  try {
+    pybind11::list stack = pybind11::module_::import("traceback").attr("extract_stack")();
+    const auto n = static_cast<pybind11::ssize_t>(pybind11::len(stack));
+    int shown = 0;
+    for (pybind11::ssize_t i = n - 1; i >= 0 && shown < 2; --i) {
+      pybind11::object fr = stack[static_cast<size_t>(i)];
+      const std::string fname = pybind11::str(fr.attr("filename"));
+      const long lineno = fr.attr("lineno").cast<long>();
+      const std::string func = pybind11::str(fr.attr("name"));
+      const auto slash = fname.rfind('/');
+      const std::string base = (slash == std::string::npos) ? fname : fname.substr(slash + 1);
+      if (!site.empty()) {
+        site += " <- ";
+      }
+      site += base;
+      site += ":";
+      site += std::to_string(lineno);
+      site += "(";
+      site += func;
+      site += ")";
+      ++shown;
+    }
+  } catch (const pybind11::error_already_set&) {
+    PyErr_Clear();
+    return;
+  }
+  std::lock_guard<std::mutex> lk(trace_mutex());
+  trace_by_op().emplace(op_name, site);
 }
 
 ShimEntry* find_shim_entry(const std::string& op_name) {
@@ -1137,6 +1195,9 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
     if (entry->fallback_ctr != nullptr) {
       entry->fallback_ctr->fetch_add(1, std::memory_order_relaxed); // per-op attribution (same slow branch)
     }
+    if (g_trace_enabled.load(std::memory_order_relaxed)) {
+      capture_site(op_name); // (A) WHERE: opt-in, deduped, GIL-safe; off by default
+    }
     ::at::native::rbln::cpu_fallback_rbln(op, stack);
     return;
   }
@@ -1177,6 +1238,9 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
   g_diag_n_miss.fetch_add(1, std::memory_order_relaxed);
   if (entry->recompile_ctr != nullptr) {
     entry->recompile_ctr->fetch_add(1, std::memory_order_relaxed); // per-op attribution (same slow miss branch)
+  }
+  if (g_trace_enabled.load(std::memory_order_relaxed)) {
+    capture_site(op_name); // (A) WHERE: opt-in, deduped, GIL-safe; off by default
   }
   const uint64_t _diag_miss_t0 = now_ns();
   struct MissScopeTimer {
@@ -1377,6 +1441,28 @@ void diag_reset_fallback_reasons() {
   for (auto& r : g_fallback_reason) {
     r.store(0, std::memory_order_relaxed);
   }
+}
+
+// (A) WHERE: opt-in call-site capture. enable() flips the gate the slow branches
+// read; dump returns (op_name -> "file:line(func) <- ...") for the ops that fired
+// while enabled; reset clears between regions.
+void diag_set_trace_enabled(bool on) {
+  g_trace_enabled.store(on, std::memory_order_relaxed);
+}
+
+std::vector<std::pair<std::string, std::string>> diag_dump_trace_by_op() {
+  std::vector<std::pair<std::string, std::string>> out;
+  std::lock_guard<std::mutex> lk(trace_mutex());
+  out.reserve(trace_by_op().size());
+  for (const auto& kv : trace_by_op()) {
+    out.emplace_back(kv.first, kv.second);
+  }
+  return out;
+}
+
+void diag_reset_trace_by_op() {
+  std::lock_guard<std::mutex> lk(trace_mutex());
+  trace_by_op().clear();
 }
 
 // ---------------------------------------------------------------------------
