@@ -218,6 +218,27 @@ class TestProfilerApi(TestCase):
         self.assertIn("aten::add.out", tbo)
         self.assertIn("_do_fallback", tbo["aten::add.out"])  # the user's call-site frame
 
+    def test_diff_reports_only_what_changed_between_two_regions(self):
+        # explain doesn't know lifecycle; diff compares two regions the USER places.
+        # int32 add falls back EVERY call -> persists; a stable fp16 shape compiles
+        # once then hits warm cache -> its recompile is gone in the later region.
+        a = torch.randn(40, 40, device=DEV, dtype=torch.float16)
+        i = torch.ones(16, 16, device=DEV, dtype=torch.int32)
+        with torch.rbln.explain() as r1:  # "early": first use of the fp16 shape
+            _ = a + a
+            _ = i + i
+        for _ in range(2):
+            _ = a + a  # warm the fp16 shape (USER-supplied structure)
+        with torch.rbln.explain() as r2:  # "later": fp16 shape now warm
+            _ = a + a
+            _ = i + i
+        dd = r1.diff(r2).dump()
+        # int32 fallback recurs across both -> persists; recompile does not grow.
+        self.assertGreaterEqual(dd["signals"]["cpu_fallback"]["b"], 1)
+        self.assertIn("cpu_fallback", dd["persists"])
+        self.assertLessEqual(dd["signals"]["recompile"]["b"], dd["signals"]["recompile"]["a"])
+        self.assertIsInstance(r1.diff(r2).report(), str)
+
 
 if __name__ == "__main__":
     run_tests()

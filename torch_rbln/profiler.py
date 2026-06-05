@@ -29,6 +29,14 @@ hidden signal still missing — a side-effect host-sync on the TVM graph-exec pa
 — is a tracked follow-up (it, not the excluded counters, is what TVM-runtime
 instrumentation is for).
 
+What it does NOT know: explain observes a bounded region; it has no idea where
+that region sits in your run (first step or thousandth), how many times you will
+run, or whether each run does the same work. So it never labels a signal
+"one-time" or "cold/warm" on its own — that would be a guess, and a wrong guess
+("ignore this, it's one-time") is worse than none. To tell a one-time cost from
+a recurring one, place two regions YOURSELF (an early one and a later one) and
+compare them with ``a.diff(b)``; only you know which is which.
+
 Usage::
 
     import torch
@@ -42,6 +50,14 @@ Usage::
     with torch.rbln.explain(trace=True) as p:  # opt-in: WHERE each fallback/recompile originates
         model(x)
     print(p.report())  # adds an "at <file:line(func)>" line per offending op
+
+    with torch.rbln.explain() as early:  # YOU place both points; only you know
+        model(x)  # which is "early" and which is "later"
+    for _ in range(5):
+        model(x)
+    with torch.rbln.explain() as later:
+        model(x)
+    print(early.diff(later).report())  # only what changed between YOUR two points
 """
 
 from __future__ import annotations
@@ -51,7 +67,7 @@ import time
 from typing import Any, Callable, Optional  # noqa: UP035
 
 
-__all__ = ["explain", "explain_steady", "RBLNExplain", "profile", "RBLNProfile"]
+__all__ = ["explain", "explain_steady", "RBLNExplain", "RBLNDiff", "profile", "RBLNProfile"]
 
 
 # Must match the BounceSite enum order in c10/rbln/RBLNProfiler.h.
@@ -535,6 +551,93 @@ class RBLNExplain:
             return rfix[key]
         return next((f["fix"] for f in fixes if signal in f["signal"]), f"no remedy for '{signal}'")
 
+    def diff(self, other: RBLNExplain) -> RBLNDiff:
+        """Compare this region with another one YOU placed (self -> other), e.g.
+        an early call vs a later steady call. explain cannot tell a one-time cost
+        from a recurring one on its own (it does not know your run structure);
+        placing the two regions is how YOU supply that. See :class:`RBLNDiff`."""
+        assert self._bounces is not None, "this region is not stopped"
+        assert other._bounces is not None, "the other region is not stopped"
+        return RBLNDiff(self, other)
+
+
+class RBLNDiff:
+    """The signal-by-signal change between two regions YOU placed (``a`` -> ``b``).
+
+    explain knows only what happened inside each region; it does NOT know your
+    run structure, so on its own it cannot tell a one-time cost from a recurring
+    one. By choosing where to put the two regions (e.g. an early call and a later
+    steady one) YOU supply that structure. This reports ONLY what changed between
+    your two points: a signal gone (0) in ``b`` did not recur across them; one
+    that persists is overhead that recurs between them. It makes no claim about
+    anything outside the two regions you captured."""
+
+    def __init__(self, a: RBLNExplain, b: RBLNExplain) -> None:
+        self._a = a.dump()
+        self._b = b.dump()
+
+    def _rows(self) -> list[tuple[str, int, int]]:
+        da, db = self._a, self._b
+        rows = [("host_bounce", da["hidden_host_bounce"]["total_count"], db["hidden_host_bounce"]["total_count"])]
+        ra, rb = da["runtime_residency"], db["runtime_residency"]
+        if ra.get("available") and rb.get("available"):
+            rows.append(("runtime/v2v_slow", ra["total_count"], rb["total_count"]))
+        rows.append(("cpu_fallback", da["dispatch"]["cpu_fallback"], db["dispatch"]["cpu_fallback"]))
+        rows.append(("recompile", da["dispatch"]["recompile_miss"], db["dispatch"]["recompile_miss"]))
+        return rows
+
+    def dump(self) -> dict[str, Any]:
+        """{'signals': {name: {'a','b'}}, 'persists'|'gone'|'appeared': [names],
+        'persists_by_op': [{signal, op, count, at}], 'device_memory': {...}}.
+        ``persists`` (present in ``b``) is the actionable, recurring set."""
+        out: dict[str, Any] = {"signals": {}, "persists": [], "gone": [], "appeared": [], "persists_by_op": []}
+        for name, av, bv in self._rows():
+            out["signals"][name] = {"a": av, "b": bv}
+            if bv > 0:
+                out["persists"].append(name)
+            elif av > 0:
+                out["gone"].append(name)
+            # av == 0 and bv == 0 -> neither; nothing to record
+        for name, av, bv in self._rows():
+            if av == 0 and bv > 0:
+                out["appeared"].append(name)
+        tbo = self._b.get("trace_by_op") or {}
+        for sig_key, by_key in (("cpu_fallback", "cpu_fallback_by_op"), ("recompile", "recompile_by_op")):
+            for op, c in (self._b.get(by_key) or {}).items():
+                if c > 0:
+                    out["persists_by_op"].append({"signal": sig_key, "op": op, "count": c, "at": tbo.get(op)})
+        if "device_memory" in self._a and "device_memory" in self._b:
+            out["device_memory"] = {
+                "a_peak_bytes": self._a["device_memory"]["peak_bytes"],
+                "b_peak_bytes": self._b["device_memory"]["peak_bytes"],
+            }
+        return out
+
+    def report(self) -> str:
+        d = self.dump()
+        lines = [
+            "RBLN EXPLAIN DIFF   (A -> B; you placed both points)",
+            "  explain does not know your run structure; this compares ONLY your two regions.",
+            "",
+        ]
+        rows = []
+        for name, vv in d["signals"].items():
+            av, bv = vv["a"], vv["b"]
+            mark = "*** PERSISTS" if bv > 0 else ("gone in B" if av > 0 else "")
+            rows.append([name, str(av), str(bv), mark])
+        lines += _table(["Signal", "A", "B", ""], rows, ["l", "r", "r", "l"])
+        pbo = d.get("persists_by_op") or []
+        if pbo:
+            lines.append("")
+            lines.append("  PERSISTS across your two points -> recurring overhead, act on these:")
+            for e in pbo[:8]:
+                at = f"  @ {e['at']}" if e.get("at") else ""
+                lines.append(f"    {e['signal']}: {e['op']} {e['count']}{at}")
+        elif not d["persists"]:
+            lines.append("")
+            lines.append("  nothing persisted into B (no recurring overhead across your two points)")
+        return "\n".join(lines)
+
 
 def explain(trace: bool = False) -> RBLNExplain:
     """Return a hidden-overhead explain region, usable as a context manager.
@@ -554,27 +657,38 @@ profile = explain
 
 
 def explain_steady(
-    fn: Callable[[], Any], *, warmup: int = 2, return_cold: bool = False, trace: bool = False
-) -> RBLNExplain | tuple[RBLNExplain, RBLNExplain]:
-    """Profile ``fn()`` at STEADY STATE, isolating per-call overhead from one-time
-    cold cost (compile / first-touch / cache fill).
+    fn: Callable[[], Any],
+    *,
+    warmup: int = 2,
+    return_cold: bool = False,
+    as_diff: bool = False,
+    trace: bool = False,
+) -> RBLNExplain | tuple[RBLNExplain, RBLNExplain] | RBLNDiff:
+    """Convenience: capture two regions around ``fn`` — the FIRST call it makes
+    and a later call after ``warmup`` more — so you can compare them.
 
-    Many signals only matter if they recur every step: a single cold run conflates
-    one-time compilation with per-call overhead (e.g. a decode whose first call is
-    8 s of compile but whose steady call is 12 ms). This runs ``fn`` once as the
-    COLD sample, ``warmup`` more times to reach steady state, then profiles one
-    more call as the WARM (steady) sample.
+    This does NOT know your lifecycle. It only AUTOMATES placing two regions; its
+    "cold"/"warm" labels mean literally "the first call I made" and "a later call
+    I made", nothing more. Reading the result as one-time vs recurring rests on
+    two assumptions YOU must ensure — neither of which explain can verify:
 
-    Pure-Python orchestration — it only snapshots the lazy counters at region
-    boundaries, so it adds nothing to the hot path.
+      1. ``fn`` was not already run/compiled before this call. Otherwise the real
+         one-time cost happened before the "cold" sample, so it is not captured.
+      2. every ``fn()`` does the SAME work. Otherwise the "warm" sample's
+         recompiles are just you feeding different shapes, not recurring overhead.
 
-    Returns the warm :class:`RBLNExplain`; with ``return_cold=True`` returns
-    ``(cold, warm)`` so you can see what was one-time vs steady.
+    When those hold, ``cold.diff(warm)`` shows what changed: signals gone in warm
+    did not recur across the two calls; signals that persist are the recurring
+    overhead. Pure-Python orchestration; adds nothing to the hot path.
+
+    Returns the warm :class:`RBLNExplain`; ``return_cold=True`` -> ``(cold, warm)``;
+    ``as_diff=True`` -> ``cold.diff(warm)`` (the recommended, most honest read,
+    since it states only what changed between the two calls it made).
 
     Example::
 
-        warm = torch.rbln.explain_steady(lambda: model(x), warmup=2)
-        print(warm.report())  # the steady-state overhead that recurs
+        d = torch.rbln.explain_steady(lambda: model(x), warmup=2, as_diff=True)
+        print(d.report())  # what PERSISTS is the overhead that recurs across the two calls
     """
     cold = RBLNExplain(trace=trace).start()
     try:
@@ -588,4 +702,6 @@ def explain_steady(
         fn()
     finally:
         warm.stop()
+    if as_diff:
+        return cold.diff(warm)
     return (cold, warm) if return_cold else warm
