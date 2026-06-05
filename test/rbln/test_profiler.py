@@ -1,6 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""User-level tests for ``torch.rbln.profile()`` — the hidden-overhead profiler.
+"""User-level tests for ``torch.rbln.explain()`` — the hidden-overhead profiler.
 
 A normal PyTorch op can silently round-trip the host or fall back to CPU for
 reasons the user never asked for. These tests drive real ops on the ``rbln``
@@ -50,14 +50,14 @@ class TestProfilerCopyBounce(TestCase):
         # freshly-created tensors — that is a real finding, not a test failure —
         # so we assert only the torch-side invariant here, and let
         # test_empty_region_is_green cover the unconditional-GREEN case.
-        with torch.rbln.profile() as p:
+        with torch.rbln.explain() as p:
             x = torch.randn(64, 64, device=DEV, dtype=torch.float16)
             y = torch.empty(64, 64, device=DEV, dtype=torch.float16)
             y.copy_(x)
         self.assertEqual(p.dump()["hidden_host_bounce"]["total_count"], 0)
 
     def test_noncontiguous_d2d_copy_bounces_with_bytes(self):
-        with torch.rbln.profile() as p:
+        with torch.rbln.explain() as p:
             big = torch.randn(512, 512, device=DEV, dtype=torch.float16)
             dst = torch.empty(512, 256, device=DEV, dtype=torch.float16)
             dst.copy_(big[:, :256])  # non-contiguous src -> NOT direct -> host round-trip
@@ -72,7 +72,7 @@ class TestProfilerDispatchSignals(TestCase):
     """A (recompile) and B (cpu_fallback) read from the existing dispatch counters."""
 
     def test_B_cpu_fallback_counted(self):
-        with torch.rbln.profile() as p:
+        with torch.rbln.explain() as p:
             a = torch.ones(32, 32, device=DEV, dtype=torch.int32)  # non-fp16 -> CPU fallback
             _ = a + a
         self.assertGreaterEqual(p.dump()["dispatch"]["cpu_fallback"], 1)
@@ -83,7 +83,7 @@ class TestProfilerDispatchSignals(TestCase):
         # it as a recompile/miss (the actionable "you are recompiling" signal).
         # NOTE: whether a *repeat* is served from warm cache is a property of the
         # warm cache, not of the profiler, so it is deliberately not asserted here.
-        with torch.rbln.profile() as p:
+        with torch.rbln.explain() as p:
             x = torch.randn(29, 31, device=DEV, dtype=torch.float16)
             _ = x + x
         self.assertGreaterEqual(p.dump()["dispatch"]["recompile_miss"], 1)
@@ -102,7 +102,7 @@ class TestProfilerTruthfulnessAndScope(TestCase):
         # traffic, command streams, device idle) must NOT be surfaced. On an
         # older runtime, the profiler must HONESTLY mark them pending — never a
         # false clean.
-        with torch.rbln.profile() as p:
+        with torch.rbln.explain() as p:
             _ = torch.randn(8, 8, device=DEV, dtype=torch.float16)
         d = p.dump()
         rr = d["runtime_residency"]
@@ -121,7 +121,7 @@ class TestProfilerTruthfulnessAndScope(TestCase):
     def test_E_device_memory_gauge(self):
         # Pure allocation (no compute) — the gauge is a process-level high-water
         # mark, so it reads a sane non-zero peak >= current.
-        with torch.rbln.profile() as p:
+        with torch.rbln.explain() as p:
             _ = torch.empty(2048, 2048, device=DEV, dtype=torch.float16)
         d = p.dump()
         if not d["runtime_residency"]["available"]:
@@ -135,7 +135,7 @@ class TestProfilerTruthfulnessAndScope(TestCase):
         # RUNTIME level (torch-side sees nothing). The profiler must not only
         # count it but attribute the CAUSE — and every incident must map to a
         # named reason (no unattributed/unknown).
-        with torch.rbln.profile() as p:
+        with torch.rbln.explain() as p:
             x = torch.randn(256, 256, device=DEV, dtype=torch.float16)
             y = torch.empty(256, 256, device=DEV, dtype=torch.float16)
             y.copy_(x)
@@ -150,26 +150,26 @@ class TestProfilerTruthfulnessAndScope(TestCase):
     def test_D_command_stream_is_not_a_verdict_signal(self):
         # Command-stream count / structural padding are intentionally excluded
         # from the verdict (measurable but not user-actionable).
-        with torch.rbln.profile() as p:
+        with torch.rbln.explain() as p:
             _ = torch.randn(8, 8, device=DEV, dtype=torch.float16)
         keys = set(p.verdict().keys())
         for forbidden in ("command_stream", "cs_count", "padding", "fragmentation"):
             self.assertNotIn(forbidden, keys)
 
     def test_empty_region_is_green(self):
-        with torch.rbln.profile() as p:
+        with torch.rbln.explain() as p:
             pass
         self.assertEqual(p.verdict()["status"], "GREEN")
         self.assertEqual(p.verdict()["hidden_host_bounces"], 0)
 
     def test_regions_are_independent_deltas(self):
-        with torch.rbln.profile() as p1:
+        with torch.rbln.explain() as p1:
             big = torch.randn(256, 256, device=DEV, dtype=torch.float16)
             dst = torch.empty(256, 128, device=DEV, dtype=torch.float16)
             dst.copy_(big[:, :128])
         self.assertGreaterEqual(p1.dump()["hidden_host_bounce"]["total_count"], 1)
         # a fresh region must not inherit the previous region's incidents.
-        with torch.rbln.profile() as p2:
+        with torch.rbln.explain() as p2:
             x = torch.randn(64, 64, device=DEV, dtype=torch.float16)
             y = torch.empty(64, 64, device=DEV, dtype=torch.float16)
             y.copy_(x)
@@ -179,7 +179,7 @@ class TestProfilerTruthfulnessAndScope(TestCase):
 @pytest.mark.test_set_ci
 class TestProfilerApi(TestCase):
     def test_report_is_str_and_dump_shape(self):
-        with torch.rbln.profile() as p:
+        with torch.rbln.explain() as p:
             _ = torch.randn(8, 8, device=DEV, dtype=torch.float16)
         self.assertIsInstance(p.report(), str)
         d = p.dump()
@@ -187,6 +187,15 @@ class TestProfilerApi(TestCase):
         self.assertIn("dispatch", d)
         self.assertIn("runtime_residency", d)
         self.assertIn("pending_runtime_signals", d)
+
+    def test_explain_steady_isolates_cold_compile(self):
+        # explain_steady profiles the WARM (steady-state) call. A stable-shape op
+        # compiles once (cold) then hits the warm cache, so steady-state recompile
+        # must be <= the cold sample's. This is the one-time-vs-every-step split.
+        a = torch.randn(48, 48, device=DEV, dtype=torch.float16)
+        cold, warm = torch.rbln.explain_steady(lambda: a + a, warmup=3, return_cold=True)
+        self.assertLessEqual(warm.dump()["dispatch"]["recompile_miss"], cold.dump()["dispatch"]["recompile_miss"])
+        self.assertIn(warm.verdict()["status"], ("GREEN", "AMBER", "RED"))
 
 
 if __name__ == "__main__":

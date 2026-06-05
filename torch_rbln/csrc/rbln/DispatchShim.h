@@ -55,6 +55,19 @@ uint64_t diag_dump_align_fastpath_count();
 std::vector<std::pair<std::string, uint64_t>> diag_dump_fallback_by_op();
 void diag_reset_fallback_by_op();
 
+// DIAG/PROFILER: per-op warm-cache MISS (recompile) attribution (op_name ->
+// count), non-zero only. Same low-overhead scheme as the fallback counter
+// (one relaxed atomic on the already-slow miss branch). Lets the profiler turn
+// the aggregate recompile_miss count into "which op-shapes keep recompiling".
+std::vector<std::pair<std::string, uint64_t>> diag_dump_recompile_by_op();
+void diag_reset_recompile_by_op();
+
+// DIAG/PROFILER: cpu_fallback reason histogram, counts for reason codes 1..3:
+// [dtype-not-fp16, nan/inf input, all-scalar]. Recorded on the fallback branch
+// only (reason already computed by quick_fallback_check) -> ON==OFF preserved.
+std::vector<uint64_t> diag_dump_fallback_reasons();
+void diag_reset_fallback_reasons();
+
 // DIAG: per-segment timers inside the warm-cache hit path. Returns
 // (n_hits, ns_lookup, ns_io_build, ns_gil, ns_prep_in, ns_prep_out, ns_run,
 //  ns_finalize). Counts/accumulates only when the hit path returns true; early

@@ -132,6 +132,22 @@ void register_internal_api(py::module_& module) {
       &torch_rbln::shim::diag_reset_fallback_by_op,
       "DIAG/PROFILER: reset per-op CPU-fallback counts");
   module.def(
+      "_dispatch_recompile_by_op",
+      &torch_rbln::shim::diag_dump_recompile_by_op,
+      "DIAG/PROFILER: per-op warm-cache miss (recompile) counts (list of (op_name, count), non-zero only)");
+  module.def(
+      "_dispatch_recompile_by_op_reset",
+      &torch_rbln::shim::diag_reset_recompile_by_op,
+      "DIAG/PROFILER: reset per-op recompile counts");
+  module.def(
+      "_dispatch_fallback_reasons",
+      &torch_rbln::shim::diag_dump_fallback_reasons,
+      "DIAG/PROFILER: cpu_fallback reason counts [dtype-not-fp16, nan/inf input, all-scalar]");
+  module.def(
+      "_dispatch_fallback_reasons_reset",
+      &torch_rbln::shim::diag_reset_fallback_reasons,
+      "DIAG/PROFILER: reset cpu_fallback reason counts");
+  module.def(
       "_dispatch_shim_align_fastpath_count",
       &torch_rbln::shim::diag_dump_align_fastpath_count,
       "DIAG: count of align-penalty fast-path hits");

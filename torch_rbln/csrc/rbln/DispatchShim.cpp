@@ -38,6 +38,10 @@ std::atomic<uint64_t> g_diag_n_warm_hit{0}; // warm-cache fast path hit
 std::atomic<uint64_t> g_diag_n_miss{0}; // Python compile (miss) path
 std::atomic<uint64_t> g_diag_ns_warm_hit{0}; // total ns inside warm-cache hit path
 std::atomic<uint64_t> g_diag_ns_miss{0}; // total ns inside miss path
+// cpu_fallback reason histogram. index = reason code from quick_fallback_check
+// (1=dtype-not-fp16, 2=nan/inf input, 3=all-scalar). Bumped on the fallback
+// branch only (the reason is already computed there) -> ON==OFF preserved.
+std::atomic<uint64_t> g_fallback_reason[4]{};
 std::atomic<uint64_t> g_diag_n_align_fastpath{0}; // align fast-path hits → cpu_fallback
 
 // Warm-cache hit path per-segment timers. Accumulated only on successful hits
@@ -148,6 +152,8 @@ struct ShimEntry {
   // already-slow fallback branch. Raw ptr keeps ShimEntry an aggregate / movable
   // (the registry stores it by value via move-assign).
   std::atomic<uint64_t>* fallback_ctr = nullptr;
+  // Same idea for the warm-cache miss (recompile) path -> recompile_by_op().
+  std::atomic<uint64_t>* recompile_ctr = nullptr;
 };
 
 // Leaky singletons: these hold pybind11::object (registry) and torch::Library
@@ -181,6 +187,14 @@ std::mutex& registry_mutex() {
 // before any dispatch); survives op re-registration. Leaky singleton to match
 // registry() teardown semantics.
 std::unordered_map<const char*, std::unique_ptr<std::atomic<uint64_t>>>& fallback_by_op() {
+  static auto* m = new std::unordered_map<const char*, std::unique_ptr<std::atomic<uint64_t>>>();
+  return *m;
+}
+
+// Per-op warm-cache MISS (recompile) counts. Same scheme as fallback_by_op():
+// the bump lives on the already-slow miss branch (Python compile), so it does
+// not touch the warm-cache hit fast path.
+std::unordered_map<const char*, std::unique_ptr<std::atomic<uint64_t>>>& recompile_by_op() {
   static auto* m = new std::unordered_map<const char*, std::unique_ptr<std::atomic<uint64_t>>>();
   return *m;
 }
@@ -586,7 +600,10 @@ bool tensor_has_nan_or_inf(const at::Tensor& t) {
 // path, not CPU. If we counted wrapped 0-dim against the shortcut here, we
 // would force the shortcut for the most common binary-op-with-python-scalar
 // case and bypass the compile-path that the test suite expects.
-bool quick_fallback_check(
+// Returns 0 = no fallback, else the reason code (1=dtype-not-fp16, 2=nan/inf
+// input, 3=all-scalar). The reason is already decided here; returning it instead
+// of a bool lets the caller attribute WHY at zero extra cost.
+int quick_fallback_check(
     torch::jit::Stack* stack,
     const SchemaCache& cache,
     const std::vector<size_t>& skip_dtype_args) {
@@ -636,16 +653,16 @@ bool quick_fallback_check(
     }
     has_input_tensor = true;
     if (!c10::rbln::is_dispatch_dtype(t.scalar_type())) {
-      return true;
+      return 1; // dtype-not-fp16 (dtype outside the dispatch policy)
     }
     if (t.dim() != 0) {
       all_input_scalar = false;
     }
   }
   if (nan_inf_found) {
-    return true;
+    return 2; // nan/inf in input (non-deploy debug scan)
   }
-  return has_input_tensor && all_input_scalar;
+  return (has_input_tensor && all_input_scalar) ? 3 : 0; // 3 = all-scalar inputs
 }
 
 // ---------------------------------------------------------------------------
@@ -1113,9 +1130,10 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
   // Earlier bugs that motivated disabling this shortcut have been fixed at
   // the borrow site: write-alias args are skipped from the borrow loop and
   // the borrow_resize_case is gated on contiguity (see RBLNCPUFallback.cpp).
-  const bool would_fallback = quick_fallback_check(stack, cache, skip_dtype_args);
-  if (would_fallback) {
+  const int fb_reason = quick_fallback_check(stack, cache, skip_dtype_args);
+  if (fb_reason != 0) {
     g_diag_n_fallback.fetch_add(1, std::memory_order_relaxed);
+    g_fallback_reason[fb_reason].fetch_add(1, std::memory_order_relaxed); // WHY (same slow branch)
     if (entry->fallback_ctr != nullptr) {
       entry->fallback_ctr->fetch_add(1, std::memory_order_relaxed); // per-op attribution (same slow branch)
     }
@@ -1157,6 +1175,9 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
   // the end of this function (even on failure / exception) to avoid leaking
   // into subsequent unrelated ops on the same thread.
   g_diag_n_miss.fetch_add(1, std::memory_order_relaxed);
+  if (entry->recompile_ctr != nullptr) {
+    entry->recompile_ctr->fetch_add(1, std::memory_order_relaxed); // per-op attribution (same slow miss branch)
+  }
   const uint64_t _diag_miss_t0 = now_ns();
   struct MissScopeTimer {
     uint64_t t0;
@@ -1272,6 +1293,11 @@ void register_cpp_shim(const std::string& op_name, pybind11::object py_fn, const
       slot = std::make_unique<std::atomic<uint64_t>>(0);
     }
     registry()[op_name].fallback_ctr = slot.get();
+    auto& rslot = recompile_by_op()[interned];
+    if (!rslot) {
+      rslot = std::make_unique<std::atomic<uint64_t>>(0);
+    }
+    registry()[op_name].recompile_ctr = rslot.get();
   }
   if (!first_time) {
     // Same op re-registered (e.g. codegen re-run during tests): reuse existing
@@ -1311,6 +1337,45 @@ void diag_reset_fallback_by_op() {
     if (kv.second) {
       kv.second->store(0, std::memory_order_relaxed);
     }
+  }
+}
+
+std::vector<std::pair<std::string, uint64_t>> diag_dump_recompile_by_op() {
+  std::vector<std::pair<std::string, uint64_t>> out;
+  std::lock_guard<std::mutex> lk(registry_mutex());
+  for (const auto& kv : registry()) {
+    const ShimEntry& e = kv.second;
+    if (e.recompile_ctr != nullptr) {
+      const uint64_t c = e.recompile_ctr->load(std::memory_order_relaxed);
+      if (c != 0) {
+        out.emplace_back(kv.first, c);
+      }
+    }
+  }
+  return out;
+}
+
+void diag_reset_recompile_by_op() {
+  std::lock_guard<std::mutex> lk(registry_mutex());
+  for (auto& kv : recompile_by_op()) {
+    if (kv.second) {
+      kv.second->store(0, std::memory_order_relaxed);
+    }
+  }
+}
+
+std::vector<uint64_t> diag_dump_fallback_reasons() {
+  // counts for reason codes 1..3: [dtype-not-fp16, nan/inf input, all-scalar].
+  return {
+      g_fallback_reason[1].load(std::memory_order_relaxed),
+      g_fallback_reason[2].load(std::memory_order_relaxed),
+      g_fallback_reason[3].load(std::memory_order_relaxed),
+  };
+}
+
+void diag_reset_fallback_reasons() {
+  for (auto& r : g_fallback_reason) {
+    r.store(0, std::memory_order_relaxed);
   }
 }
 

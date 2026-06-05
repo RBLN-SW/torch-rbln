@@ -1,14 +1,15 @@
-"""``torch.rbln.profile`` — surface HIDDEN torch-rbln overhead, with CAUSE.
+"""``torch.rbln.explain`` — surface HIDDEN torch-rbln overhead, with CAUSE + FIX.
 
 A normal PyTorch op (``a.copy_(b)``, ``torch.cat``, an indexing write, a forward
 pass) can silently round-trip the host (NPU->CPU->NPU), fall back to a CPU
-kernel, recompile, or leave the NPU idle — for reasons the user never asked for
-and cannot see. This profiler counts those hidden events, attributes the cause,
-and renders a torch.profiler-style report.
+kernel, or recompile — for reasons the user never asked for and cannot see.
+``explain()`` counts those hidden events, attributes the cause + a remedy, and
+renders a torch.profiler-style report. It is a hidden-overhead explainer (think
+``torch._dynamo.explain`` / JAX ``transfer_guard``), NOT a timing profiler.
 
 Signals (every counter sits on an already-slow point — a host DMA or a fallback
 branch — never the fast device path; reads are lazy, so wrapping a run with
-profile() does not change its latency):
+explain() does not change its latency):
 
   host bounce (torch-side, aten intent) : non-direct copy_ / strided fallback / etc.
   runtime hidden-d2h cause (v2v slow)   : why a device v2v fell to host (src state)
@@ -19,7 +20,7 @@ accurate and complete: every device allocation routes through BufferAllocator):
 
   device memory : current live + peak high-water
 
-Scope: this profiler surfaces ONLY hidden host overhead a user issued as a normal
+Scope: explain() surfaces ONLY hidden host overhead a user issued as a normal
 op and cannot see. Generic dispatch/utilization counters (command-stream count,
 device-idle, total host-traffic bytes) are a different profiler's job
 (torch.profiler / nsys), are out of scope, and on the executed path live in the
@@ -32,7 +33,7 @@ Usage::
 
     import torch
 
-    with torch.rbln.profile() as p:
+    with torch.rbln.explain() as p:
         model(x)
     print(p.report())  # torch.profiler-style table, verdict first
     p.dump()  # dict for CI gates
@@ -43,10 +44,10 @@ from __future__ import annotations
 
 import ctypes
 import time
-from typing import Any, Optional  # noqa: UP035
+from typing import Any, Callable, Optional  # noqa: UP035
 
 
-__all__ = ["profile", "RBLNProfile"]
+__all__ = ["explain", "explain_steady", "RBLNExplain", "profile", "RBLNProfile"]
 
 
 # Must match the BounceSite enum order in c10/rbln/RBLNProfiler.h.
@@ -58,6 +59,10 @@ _BOUNCE_SITES: tuple[tuple[str, str], ...] = (
     ("v2v_batch_to_per_entry", "batched v2v rejected -> per-entry"),
 )
 _HOST_BOUNCE_SITES = (0, 1, 2, 3)
+
+# cpu_fallback reason names; index matches the runtime histogram order (the WHY
+# behind dispatch.cpu_fallback). See quick_fallback_check in DispatchShim.cpp.
+_FALLBACK_REASON_NAMES = ("dtype-not-fp16", "nan/inf input", "all-scalar inputs")
 
 # Must match the reason order in rebel-compiler vmemory_manager.cc.
 _RUNTIME_REASONS: tuple[tuple[str, str], ...] = (
@@ -94,6 +99,22 @@ _REMEDY: dict[str, str] = {
         "first compile is expected, repeated recompiles in the steady loop are not"
     ),
 }
+
+
+# Terse inline "what to change" shown in the report's Fix column. The full prose
+# lives in _REMEDY, surfaced on demand via dump()["remedies"] / RBLNExplain.help().
+_FIX_SHORT: dict[str, str] = {
+    "copy_d2d_host_bounce": "make contiguous, or v2v engine",
+    "copy_h2d_staging": "keep src on-device / stage once",
+    "copy_h2d_noncontig_dst": "contiguous staging, then h2d",
+    "strided_v2v_cpu_fallback": "lower outer_count / fatter inner",
+    "v2v_batch_to_per_entry": "check kMaxV2VMultiCopies / batch geom",
+    "cpu_fallback": "graph mode / native kernel / dtype",
+    "recompile": "stabilize shapes, or graph mode",
+    "v2v_slow": "establish device residency first",
+}
+
+_RT_UNAVAIL = "  note: runtime signals not exposed by the loaded librbln (install a recent rebel-compiler)"
 
 
 def _collect_remedies(d: dict[str, Any]) -> list[dict[str, str]]:
@@ -141,6 +162,28 @@ def _read_fallback_by_op() -> dict[str, int]:
     if fn is None:
         return {}
     return {str(op): int(c) for op, c in fn()}
+
+
+def _read_recompile_by_op() -> dict[str, int]:
+    """Per-op warm-cache miss (recompile) counts (op_name -> count), or {} if the
+    loaded torch_rbln._C predates the binding (graceful degrade)."""
+    import torch_rbln._C as _C
+
+    fn = getattr(_C, "_dispatch_recompile_by_op", None)
+    if fn is None:
+        return {}
+    return {str(op): int(c) for op, c in fn()}
+
+
+def _read_fallback_reasons() -> list[int]:
+    """cpu_fallback reason counts [dtype-not-fp16, nan/inf input, all-scalar], or
+    [] if the loaded torch_rbln._C predates the binding (graceful degrade)."""
+    import torch_rbln._C as _C
+
+    fn = getattr(_C, "_dispatch_fallback_reasons", None)
+    if fn is None:
+        return []
+    return [int(c) for c in fn()]
 
 
 # --- runtime (rebel-compiler) counters via ctypes from the loaded librbln -----
@@ -232,30 +275,39 @@ def _table(headers: list[str], rows: list[list[str]], aligns: list[str]) -> list
     return lines
 
 
-class RBLNProfile:
-    """A profiling region. Use via :func:`profile` as a context manager. All flow
+class RBLNExplain:
+    """A hidden-overhead explain region. Use via :func:`explain` as a context manager. All flow
     numbers are deltas over the region; memory is read as a level/high-water mark."""
 
     def __init__(self) -> None:
-        self._b0 = self._d0 = self._rt0 = self._wall0 = self._f0 = None
-        self._bounces = self._dispatch = self._rt = self._fallback_by_op = None
+        self._b0 = self._d0 = self._rt0 = self._wall0 = self._f0 = self._r0 = self._fr0 = None
+        self._bounces = self._dispatch = self._rt = self._fallback_by_op = self._recompile_by_op = None
+        self._fallback_reasons = None
         self._wall_ns = 0
 
-    def start(self) -> RBLNProfile:
+    def start(self) -> RBLNExplain:
         self._b0 = _read_bounces()
         self._d0 = _read_dispatch()
         self._f0 = _read_fallback_by_op()
+        self._r0 = _read_recompile_by_op()
+        self._fr0 = _read_fallback_reasons()
         self._rt0 = _read_runtime()
         self._wall0 = time.perf_counter_ns()
         return self
 
-    def stop(self) -> RBLNProfile:
+    def stop(self) -> RBLNExplain:
         self._wall_ns = time.perf_counter_ns() - self._wall0
         b1, d1, rt1 = _read_bounces(), _read_dispatch(), _read_runtime()
         self._bounces = [(c1 - c0, by1 - by0) for (c0, by0), (c1, by1) in zip(self._b0, b1)]
         self._dispatch = tuple(x1 - x0 for x0, x1 in zip(self._d0, d1))
         f1 = _read_fallback_by_op()
         self._fallback_by_op = {op: f1[op] - self._f0.get(op, 0) for op in f1 if f1[op] - self._f0.get(op, 0) > 0}
+        r1 = _read_recompile_by_op()
+        self._recompile_by_op = {op: r1[op] - self._r0.get(op, 0) for op in r1 if r1[op] - self._r0.get(op, 0) > 0}
+        fr1 = _read_fallback_reasons()
+        self._fallback_reasons = (
+            [b - a for a, b in zip(self._fr0, fr1)] if self._fr0 and fr1 and len(fr1) == len(self._fr0) else []
+        )
         if self._rt0 is not None and rt1 is not None:
             hc = [a - b for a, b in zip(rt1["hidden_count"], self._rt0["hidden_count"])]
             self._rt = {"hidden_count": hc}
@@ -267,7 +319,7 @@ class RBLNProfile:
             self._rt = None
         return self
 
-    def __enter__(self) -> RBLNProfile:
+    def __enter__(self) -> RBLNExplain:
         return self.start()
 
     def __exit__(self, *exc: Any) -> None:
@@ -292,6 +344,10 @@ class RBLNProfile:
             "wall_ns": self._wall_ns,
         }
         out["cpu_fallback_by_op"] = dict(sorted((self._fallback_by_op or {}).items(), key=lambda kv: -kv[1]))
+        out["recompile_by_op"] = dict(sorted((self._recompile_by_op or {}).items(), key=lambda kv: -kv[1]))
+        out["cpu_fallback_reasons"] = {
+            n: c for n, c in zip(_FALLBACK_REASON_NAMES, self._fallback_reasons or []) if c > 0
+        }
         if self._rt is not None:
             out["runtime_residency"] = {
                 "available": True,
@@ -352,61 +408,123 @@ class RBLNProfile:
         }
 
     def report(self) -> str:
-        """torch.profiler-style report, verdict first."""
+        """Verdict-first report. The terse fix is inline (Fix column); the full
+        remedy prose is in dump()['remedies'] / help(signal), not dumped here."""
         d, v = self.dump(), self.verdict()
         mark = {"GREEN": "[ OK ]", "AMBER": "[WARN]", "RED": "[BAD ]"}[v["status"]]
-        lines = [f"{mark}  RBLN PROFILE — VERDICT: {v['status']}   (wall {_fmt_ms(d['wall_ns'])})"]
-        for r in v["reasons"]:
-            lines.append(f"   • {r}")
-        lines.append("")
+        head = f"{mark}  RBLN EXPLAIN — {v['status']}   (wall {_fmt_ms(d['wall_ns'])}"
+        if "device_memory" in d:
+            head += f" · mem {_fmt_bytes(d['device_memory']['peak_bytes'])} peak"
+        head += ")"
+        lines = [head]
 
+        rr = d["runtime_residency"]
         rows: list[list[str]] = []
-        # torch-side host bounces (aten intent tier)
         for name, vv in d["hidden_host_bounce"]["by_site"].items():
             if vv["count"]:
-                rows.append([f"host_bounce/{name}", str(vv["count"]), _fmt_bytes(vv["bytes"]), "torch aten intent"])
-        # runtime hidden-d2h cause (v2v slow)
-        rr = d["runtime_residency"]
+                rows.append(
+                    [f"host_bounce/{name}", str(vv["count"]), _fmt_bytes(vv["bytes"]), _FIX_SHORT.get(name, "")]
+                )
         if rr["available"]:
             for n, vv in rr["by_reason"].items():
                 if vv["count"]:
-                    rows.append([f"runtime/v2v_slow:{n}", str(vv["count"]), "-", "cause of hidden d2h"])
-        # dispatch
+                    rows.append([f"runtime/v2v_slow:{n}", str(vv["count"]), "-", _FIX_SHORT["v2v_slow"]])
         disp = d["dispatch"]
         if disp["cpu_fallback"]:
-            rows.append(["dispatch/cpu_fallback", str(disp["cpu_fallback"]), "-", "op ran on CPU"])
+            rows.append(["dispatch/cpu_fallback", str(disp["cpu_fallback"]), "-", _FIX_SHORT["cpu_fallback"]])
         if disp["recompile_miss"]:
-            rows.append(["dispatch/recompile", str(disp["recompile_miss"]), "-", "graph (re)compiled"])
+            rows.append(["dispatch/recompile", str(disp["recompile_miss"]), "-", _FIX_SHORT["recompile"]])
+
         if not rows:
-            rows.append(["(clean)", "0", "-", "no hidden overhead"])
+            lines.append("  (clean) no hidden overhead")
+            if not rr["available"]:
+                lines.append(_RT_UNAVAIL)
+            return "\n".join(lines)
 
-        lines += _table(["Signal", "Count", "Bytes", "Note"], rows, ["l", "r", "r", "l"])
+        lines.append("")
+        lines += _table(["Signal", "Count", "Bytes", "Fix"], rows, ["l", "r", "r", "l"])
 
-        # WHERE: attribute the aggregate cpu_fallback count to the specific ops.
+        # attribution sub-lines (which ops, and WHY) — compact, under the table.
+        def _top(m: dict) -> str:
+            items = list(m.items())
+            shown = ", ".join(f"{op} {c}" for op, c in items[:8])
+            return shown + ("" if len(items) <= 8 else f", +{len(items) - 8} more")
+
         fbo = d.get("cpu_fallback_by_op") or {}
         if fbo:
-            items = list(fbo.items())
-            shown = ", ".join(f"{op} {c}" for op, c in items[:8])
-            extra = "" if len(items) <= 8 else f", +{len(items) - 8} more"
-            lines.append(f"  cpu_fallback by op (top): {shown}{extra}")
-
-        # RESOURCE gauge (not a hidden-overhead signal): device memory high-water.
-        if "device_memory" in d:
-            m = d["device_memory"]
-            lines.append(
-                f"  device memory: current {_fmt_bytes(m['current_bytes'])} | peak {_fmt_bytes(m['peak_bytes'])}"
-            )
+            lines.append(f"    cpu_fallback: {_top(fbo)}")
+        fr = d.get("cpu_fallback_reasons") or {}
+        if fr:
+            lines.append("      why: " + ", ".join(f"{n} {c}" for n, c in fr.items()))
+        rbo = d.get("recompile_by_op") or {}
+        if rbo:
+            lines.append(f"    recompile: {_top(rbo)}")
         if not rr["available"]:
-            lines.append("  note: runtime signals not exposed by the loaded librbln (install a recent rebel-compiler)")
-        fixes = d.get("remedies", [])
-        if fixes:
-            lines.append("")
-            lines.append("  Suggested fixes (what to change), most impactful first:")
-            for f in fixes:
-                lines.append(f"   -> {f['signal']}: {f['fix']}")
+            lines.append(_RT_UNAVAIL)
+        lines.append("  (full fix detail -> p.help(signal) or dump()['remedies'])")
         return "\n".join(lines)
 
+    def help(self, signal: Optional[str] = None) -> str:
+        """Full remedy prose. No arg: the fix for every fired signal. With a
+        signal (bare cause or report label like 'dispatch/cpu_fallback'): just
+        that one."""
+        fixes = self.dump().get("remedies", [])
+        if signal is None:
+            return "\n".join(f"{f['signal']}: {f['fix']}" for f in fixes) or "no hidden overhead"
+        key = signal.rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+        if key in _REMEDY:
+            return _REMEDY[key]
+        rfix = dict(_RUNTIME_REASONS)
+        if key in rfix:
+            return rfix[key]
+        return next((f["fix"] for f in fixes if signal in f["signal"]), f"no remedy for '{signal}'")
 
-def profile() -> RBLNProfile:
-    """Return a profiling region usable as a context manager."""
-    return RBLNProfile()
+
+def explain() -> RBLNExplain:
+    """Return a hidden-overhead explain region, usable as a context manager."""
+    return RBLNExplain()
+
+
+# Backward-compatible aliases. The tool was originally exposed as ``profile``;
+# renamed to ``explain`` since it is a hidden-overhead explainer (cause + fix),
+# not a timing profiler. Kept so existing ``torch.rbln.profile()`` callers work.
+RBLNProfile = RBLNExplain
+profile = explain
+
+
+def explain_steady(
+    fn: Callable[[], Any], *, warmup: int = 2, return_cold: bool = False
+) -> RBLNExplain | tuple[RBLNExplain, RBLNExplain]:
+    """Profile ``fn()`` at STEADY STATE, isolating per-call overhead from one-time
+    cold cost (compile / first-touch / cache fill).
+
+    Many signals only matter if they recur every step: a single cold run conflates
+    one-time compilation with per-call overhead (e.g. a decode whose first call is
+    8 s of compile but whose steady call is 12 ms). This runs ``fn`` once as the
+    COLD sample, ``warmup`` more times to reach steady state, then profiles one
+    more call as the WARM (steady) sample.
+
+    Pure-Python orchestration — it only snapshots the lazy counters at region
+    boundaries, so it adds nothing to the hot path.
+
+    Returns the warm :class:`RBLNExplain`; with ``return_cold=True`` returns
+    ``(cold, warm)`` so you can see what was one-time vs steady.
+
+    Example::
+
+        warm = torch.rbln.explain_steady(lambda: model(x), warmup=2)
+        print(warm.report())  # the steady-state overhead that recurs
+    """
+    cold = RBLNExplain().start()
+    try:
+        fn()
+    finally:
+        cold.stop()
+    for _ in range(max(0, warmup)):
+        fn()
+    warm = RBLNExplain().start()
+    try:
+        fn()
+    finally:
+        warm.stop()
+    return (cold, warm) if return_cold else warm
