@@ -33,7 +33,6 @@ from torch.testing._internal.common_device_type import (
     onlyOn,
     OpDTypes,
     ops,
-    skipCUDAIfNotRocm,
     skipMeta,
     skipMPS,
     skipXPU,
@@ -63,7 +62,6 @@ from torch.testing._internal.common_utils import (
     IS_FBCODE,
     is_iterable_of_tensors,
     IS_SANDCASTLE,
-    MACOS_VERSION,
     noncontiguous_like,
     parametrize,
     run_tests,
@@ -89,9 +87,7 @@ if hasattr(torch, "_dynamo") and hasattr(torch._dynamo, "config"):
     torch._dynamo.config.cache_size_limit = 8
 
 if torch.get_default_dtype() != torch.float32:
-    raise AssertionError(
-        f"default dtype should be float32, got {torch.get_default_dtype()}"
-    )
+    raise AssertionError(f"default dtype should be float32, got {torch.get_default_dtype()}")
 
 # variant testing is only done with torch.float and torch.cfloat to avoid
 #   excessive test times and maximize signal to noise ratio
@@ -865,9 +861,7 @@ class TestCommon(TestCase):
                 # Special-cases boolean comparisons
                 if prims.utils.is_boolean_dtype(a.dtype):
                     if b.dtype is not torch.bool:
-                        raise AssertionError(
-                            f"expected dtype torch.bool, got {b.dtype}"
-                        )
+                        raise AssertionError(f"expected dtype torch.bool, got {b.dtype}")
                     return (a ^ b).sum()
 
                 same = a == b
@@ -3205,16 +3199,12 @@ class TestForwardADWithScalars(TestCase):
             if op.supports_rhs_python_scalar:
                 result = op(dual0d, 2.0)
                 p, t = torch.autograd.forward_ad.unpack_dual(result)
-                self.assertEqual(
-                    p.dtype, t.dtype, f"{op.name} and scalar on RHS - dtype mismatch"
-                )
+                self.assertEqual(p.dtype, t.dtype, f"{op.name} and scalar on RHS - dtype mismatch")
             # Test with scalar on LHS
             if op.supports_one_python_scalar:
                 result = op(2.0, dual0d)
                 p, t = torch.autograd.forward_ad.unpack_dual(result)
-                self.assertEqual(
-                    p.dtype, t.dtype, f"{op.name} and scalar on LHS - dtype mismatch"
-                )
+                self.assertEqual(p.dtype, t.dtype, f"{op.name} and scalar on LHS - dtype mismatch")
 
 
 custom_instantiate_device_type_tests(TestCommon, globals(), only_for="privateuse1")
