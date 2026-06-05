@@ -41,6 +41,17 @@ void prof_record_host_sync_d2h(uint64_t bytes);
 void prof_get_host_sync_d2h(uint64_t* count, uint64_t* bytes);
 void prof_reset_host_sync_d2h();
 
+// --- hidden host->device transfers (symmetric to d2h above). COUNT of REAL
+// host->device transfers the manager actually performed: the lazy push at the
+// device-consume boundary (EnsureSyncedOnPhysicalView -> DoRblnHostToDeviceCopy),
+// the fast host->virtual plan's main copy, and the direct DoMemcopy(kHost2Device).
+// A host-served write (host-resident dst -> memcpy, NO transfer) reaches none of
+// these. The manager EMITS this (it alone knows real-vs-served); the per-tensor
+// sync_state stays hidden. Recorded only on the real-transfer path. COUNT only.
+void prof_record_host_sync_h2d(uint64_t bytes);
+void prof_get_host_sync_h2d(uint64_t* count, uint64_t* bytes);
+void prof_reset_host_sync_h2d();
+
 // --- (E) device memory gauge: current live device bytes + high-water peak.
 // Recorded at every BufferAllocator alloc/free (the single device-allocation
 // chokepoint), so the gauge is complete. This is a RESOURCE gauge, not a

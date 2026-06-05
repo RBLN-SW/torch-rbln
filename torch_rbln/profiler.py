@@ -273,6 +273,17 @@ def _runtime_fns():
             fns["host_sync"] = hs
         except (OSError, AttributeError):
             pass
+        try:
+            # REAL host->device transfers (count, bytes): the lazy push at the
+            # device-consume boundary (a graph consuming host-latest data). Symmetric
+            # to host_sync (d2h); the authoritative real-vs-host-served signal for the
+            # push direction. Optional (newer runtime).
+            hsh = lib.rbln_prof_get_host_sync_h2d
+            hsh.restype = None
+            hsh.argtypes = [u64p, u64p]
+            fns["host_sync_h2d"] = hsh
+        except (OSError, AttributeError):
+            pass
         _rt_fns = fns
         return _rt_fns
     _rt_fns = None
@@ -304,6 +315,11 @@ def _read_runtime() -> Optional[dict]:
         fns["host_sync"](ctypes.byref(hc), ctypes.byref(hb))
         out["host_sync_count"] = int(hc.value)
         out["host_sync_bytes"] = int(hb.value)
+    if "host_sync_h2d" in fns:
+        hc, hb = ctypes.c_uint64(), ctypes.c_uint64()
+        fns["host_sync_h2d"](ctypes.byref(hc), ctypes.byref(hb))
+        out["host_sync_h2d_count"] = int(hc.value)
+        out["host_sync_h2d_bytes"] = int(hb.value)
     return out
 
 
@@ -388,6 +404,9 @@ class RBLNExplain:
             if "host_sync_count" in rt1 and "host_sync_count" in self._rt0:
                 self._rt["host_sync_count"] = rt1["host_sync_count"] - self._rt0["host_sync_count"]
                 self._rt["host_sync_bytes"] = rt1["host_sync_bytes"] - self._rt0["host_sync_bytes"]
+            if "host_sync_h2d_count" in rt1 and "host_sync_h2d_count" in self._rt0:
+                self._rt["host_sync_h2d_count"] = rt1["host_sync_h2d_count"] - self._rt0["host_sync_h2d_count"]
+                self._rt["host_sync_h2d_bytes"] = rt1["host_sync_h2d_bytes"] - self._rt0["host_sync_h2d_bytes"]
         else:
             self._rt = None
         if self._trace:
@@ -444,6 +463,14 @@ class RBLNExplain:
                 out["runtime_residency"]["real_host_sync_d2h"] = {
                     "count": self._rt["host_sync_count"],
                     "bytes": self._rt["host_sync_bytes"],
+                }
+            if "host_sync_h2d_count" in self._rt:
+                # authoritative REAL host->device this region (manager-emitted): the lazy
+                # push at the device-consume boundary. Reveals glue that pushes host-latest
+                # data onto the device for a graph to consume -- invisible to the d2h counter.
+                out["runtime_residency"]["real_host_sync_h2d"] = {
+                    "count": self._rt["host_sync_h2d_count"],
+                    "bytes": self._rt["host_sync_h2d_bytes"],
                 }
             pending = [
                 "finer hidden-sync cause (dtype/align/chunks)",
@@ -510,6 +537,13 @@ class RBLNExplain:
         lines = [head]
 
         rr = d["runtime_residency"]
+        # host->device push (runtime): the lazy push at the device-consume boundary.
+        # A region FACT shown up-front for A/B comparison; it does NOT drive the verdict
+        # (a push to feed a graph is expected, unlike an unwanted d2h pull). This was
+        # invisible before the h2d counter existed -> device-tensor glue cost shows here.
+        rhh = rr.get("real_host_sync_h2d") if rr.get("available") else None
+        if rhh is not None and rhh["count"]:
+            lines.append(f"  host->device push (runtime): {rhh['count']} pushes, {_fmt_bytes(rhh['bytes'])}")
         rows: list[list[str]] = []
         for name, vv in d["hidden_host_bounce"]["by_site"].items():
             if vv["count"]:
@@ -626,6 +660,10 @@ class RBLNDiff:
         ra, rb = da["runtime_residency"], db["runtime_residency"]
         if ra.get("available") and rb.get("available"):
             rows.append(("runtime/v2v_slow", ra["total_count"], rb["total_count"]))
+            ha = (ra.get("real_host_sync_h2d") or {}).get("count", 0)
+            hbv = (rb.get("real_host_sync_h2d") or {}).get("count", 0)
+            if ha or hbv:
+                rows.append(("runtime/h2d_push", ha, hbv))
         rows.append(("cpu_fallback", da["dispatch"]["cpu_fallback"], db["dispatch"]["cpu_fallback"]))
         rows.append(("recompile", da["dispatch"]["recompile_miss"], db["dispatch"]["recompile_miss"]))
         return rows

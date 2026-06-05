@@ -210,6 +210,26 @@ class TestProfilerTruthfulnessAndScope(TestCase):
         self.assertEqual(attributed, rr["total_count"])  # no unattributed hidden d2h
         self.assertTrue(any(v["count"] > 0 for v in rr["by_reason"].values()))
 
+    def test_runtime_h2d_push_counted(self):
+        # A device op (matmul) consuming host-latest inputs must push them to the
+        # device -> the manager-emitted real_host_sync_h2d counter fires. Symmetric
+        # to the d2h counter; without it the push direction (the lazy push at the
+        # device-consume boundary) is invisible. A host-served write never reaches it.
+        a = torch.randn(256, 256, dtype=torch.float16).to(DEV)  # host-latest (USER_VIEW)
+        b = torch.randn(256, 256, dtype=torch.float16).to(DEV)
+        _ = (a @ b).to("cpu")  # warm: compile/recompile out of the measured region
+        a = torch.randn(256, 256, dtype=torch.float16).to(DEV)
+        b = torch.randn(256, 256, dtype=torch.float16).to(DEV)
+        with torch.rbln.explain() as p:
+            _ = (a @ b).to("cpu")
+        rr = p.dump()["runtime_residency"]
+        if not rr.get("available") or "real_host_sync_h2d" not in rr:
+            self.skipTest("runtime h2d counter not exposed by the loaded librbln")
+        # both operands are host-latest -> each is pushed to device for the matmul.
+        self.assertGreaterEqual(rr["real_host_sync_h2d"]["count"], 1)
+        self.assertGreater(rr["real_host_sync_h2d"]["bytes"], 0)
+        self.assertIn("host->device push", p.report())
+
     def test_D_command_stream_is_not_a_verdict_signal(self):
         # Command-stream count / structural padding are intentionally excluded
         # from the verdict (measurable but not user-actionable).
