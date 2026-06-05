@@ -8,6 +8,18 @@ from torch.testing._internal.common_device_type import instantiate_device_type_t
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 
+def _round_up_to_block(nbytes, granularity):
+    """Round an allocation size up to the allocator's page granularity.
+
+    Module-level (not a staticmethod) on purpose: ``instantiate_device_type_tests``
+    re-attaches non-test class members via ``getattr``/``setattr``, which unwraps a
+    ``@staticmethod`` into a plain instance method and would inject ``self``.
+    """
+    if granularity <= 1:
+        return nbytes
+    return ((nbytes + granularity - 1) // granularity) * granularity
+
+
 @pytest.mark.test_set_ci
 @pytest.mark.single_worker
 @pytest.mark.usefixtures("enable_eager_malloc")
@@ -77,7 +89,7 @@ class TestMemoryStats(TestCase):
         Allocates the smallest possible tensor and measures how much
         ``allocated.current`` grows. On runtimes that round allocations up to a
         page boundary this returns the page size (e.g. 4096); on byte-exact
-        runtimes it returns the requested size, making :meth:`_round_up` a no-op.
+        runtimes it returns the requested size, making rounding a no-op.
         """
         before = torch.rbln.memory_stats(self.device)["allocated.current"]
         probe = torch.empty((1,), device=self.device, dtype=torch.float16)
@@ -86,20 +98,13 @@ class TestMemoryStats(TestCase):
         torch.rbln.empty_cache(self.device)
         return max(after - before, 1)
 
-    @staticmethod
-    def _round_up(nbytes, granularity):
-        """Round an allocation size up to the allocator's page granularity."""
-        if granularity <= 1:
-            return nbytes
-        return ((nbytes + granularity - 1) // granularity) * granularity
-
     def _expected_alloc(self, *sizes):
         """Total bytes the allocator accounts for the given allocations.
 
         Each allocation is rounded up to ``alloc_granularity`` independently
         (the runtime rounds per allocation, not on the aggregate).
         """
-        return sum(self._round_up(size, self.alloc_granularity) for size in sizes)
+        return sum(_round_up_to_block(size, self.alloc_granularity) for size in sizes)
 
     def test_hasattr(self):
         """Test that memory functions are available."""
