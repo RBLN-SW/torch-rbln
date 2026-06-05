@@ -32,7 +32,7 @@ PyTorch RBLN is currently in **beta** and under active development. APIs may cha
 **`torch-rbln`** (public wheel). Install **`torch`** from the PyTorch CPU index first, then **`torch-rbln`** from PyPI.
 
 ```bash
-pip3 install torch==2.10.0+cpu --index-url https://download.pytorch.org/whl/cpu
+pip3 install torch==2.11.0+cpu --index-url https://download.pytorch.org/whl/cpu
 pip3 install torch-rbln
 ```
 
