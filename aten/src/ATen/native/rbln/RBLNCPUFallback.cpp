@@ -31,19 +31,12 @@
 namespace at::native::rbln {
 
 namespace {
-// Per-op schema cache: mirrors the DispatchShim SchemaCache idea. Same op handle
-// reuses the same FunctionSchema pointer for the process lifetime, so caching
-// the per-arg static flags avoids walking schema_args/alias_info every dispatch.
-//
-// LLaMA-1B eager hits cpu_fallback_rbln 10066 times across <10 distinct ops, so
-// the cache populates at startup and stays read-only. Keep the populate step
-// behind a unique_lock; readers take a shared_lock and are otherwise lock-free.
-// OptionalTensor covers schema args typed `Tensor?` (e.g. linear's `bias`).
-// At runtime such an IValue is either a Tensor or None — old code recognized
-// this via the IValue's `isTensor()` cascade. After moving to schema-typed
-// arg_kind dispatch we must classify Tensor? explicitly, otherwise the arg
-// stays on the stack as an RBLN tensor when CPU dispatch runs (mixed-device
-// kernel inputs blow up at the next dispatch hop).
+// Per-op schema cache: same op handle reuses one FunctionSchema pointer for the
+// process lifetime, so caching per-arg kinds + alias-write flags avoids walking
+// schema_args every dispatch (LLaMA-1B eager hits this 10066x across <10 ops).
+// Populate under unique_lock; readers take a shared_lock. OptionalTensor (`Tensor?`,
+// e.g. linear's bias) must be classified explicitly — else the arg stays on the
+// stack as an RBLN tensor under CPU dispatch and blows up at the next hop.
 enum class CpuFbArgKind : uint8_t {
   Other = 0,
   Tensor,
@@ -301,14 +294,8 @@ void cpu_fallback_rbln(
   // fallback (used for non-rbln tensors, contiguity-guard skips, etc.).
   std::vector<std::vector<uint64_t>> tensorlist_borrow_ids;
 
-  // Step 1: Convert all non-CPU tensor inputs into CPU tensors and put them
-  // on the stack at the correct indices.
-  //
-  // Per-op schema info (arg-position kinds + alias-write flags) is cached: same
-  // operator handle reuses the same FunctionSchema pointer for the process
-  // lifetime, so a switch on the cached kind replaces the per-call IValue type
-  // cascade. ~10 distinct ops in LLaMA-1B eager → first call populates, every
-  // call after is a hashmap shared-lock.
+  // Step 1: convert all non-CPU tensor inputs into CPU tensors and stage them on
+  // the stack at the correct indices, switching on the cached per-arg schema kind.
   const auto& schema_info = get_or_populate_schema_info(op.schema());
   const auto n_args = arguments.size();
   for (size_t idx = 0; idx < n_args; ++idx) {
@@ -369,36 +356,25 @@ void cpu_fallback_rbln(
   std::vector<at::Tensor> cpu_tensors(tensor_args.size());
 
   for (size_t i = 0; i < tensor_args.size(); ++i) {
-    // Skip the borrow fast path for write-alias outputs (`out=` tensors).
-    // Borrowed tensors are wrapped via at::from_blob and have a fixed-size
-    // host-mapped storage, so the CPU op's resize path (which fires for
-    // wrong-shape `out=`, broadcasting binary ops, etc.) silently no-ops
-    // and the op then writes broadcasted values into the unresized buffer.
-    // Routing write-alias slots through the legacy `to_cpu` path gives
-    // them fresh CPU storage that PyTorch core can resize freely.
+    // Skip the borrow fast path for write-alias outputs (`out=`): from_blob's
+    // fixed-size storage can't be resized, so the CPU op's resize path (wrong-shape
+    // out=, broadcasting, etc.) would silently no-op. The legacy `to_cpu` path
+    // gives them fresh CPU storage that core can resize freely.
     if (schema_info.is_write_alias[tensor_args_indices[i]]) {
       continue;
     }
     cpu_tensors[i] = borrow_rbln_as_cpu(tensor_args[i], borrow_ids[i]);
   }
-  // Fill any slots that weren't borrowed (write-alias, undefined, non-rbln,
-  // or contiguity guard) by routing them through the legacy batched copy.
-  // Pure `out=` slots — kwarg-only, write-alias, named exactly "out" — get
-  // fresh empty CPU storage instead of going through the batched D2H copy:
-  // the CPU kernel will overwrite the buffer immediately, so D2H'ing the
-  // device contents we're about to discard is wasted bandwidth.
-  //
-  // We deliberately stay narrow here (vs. all write-alias args). In-place
-  // ops like `add_(self, other)` have a write-alias `self` that is also an
-  // *input* the CPU kernel reads from; replacing it with empty storage
-  // would feed garbage to the kernel. Kwarg-only `out=` is the schema shape
-  // that's guaranteed pure output (the CPU op writes; never reads). Other
-  // output kwarg names (e.g. `max.dim_max`'s `max`/`max_values`) need
-  // per-schema audit before extending.
-  //
-  // Profiling on LLaMA-1B eager: this single change freed ~22% of
-  // cpu_fallback_rbln host time — mean.out / rsqrt.out / pow.out's `out=`
-  // was hitting the slow path 1122 times each.
+  // Fill slots that weren't borrowed (write-alias / undefined / non-rbln /
+  // contiguity guard) via the legacy batched copy. Pure `out=` slots (kwarg-only,
+  // write-alias, named "out") instead get fresh empty CPU storage: the kernel
+  // overwrites immediately, so D2H'ing the about-to-be-discarded contents is
+  // wasted bandwidth. Stay narrow — in-place ops like `add_(self, other)` have a
+  // write-alias `self` the kernel also *reads*, so empty storage would feed it
+  // garbage; only kwarg-only `out=` is guaranteed pure-output. Other output kwarg
+  // names (e.g. max.dim_max) need a per-schema audit first.
+  // (LLaMA-1B eager: freed ~22% of cpu_fallback_rbln host time — mean/rsqrt/pow.out
+  // hit the slow path 1122x each.)
   std::vector<at::Tensor> non_borrowed;
   std::vector<size_t> non_borrowed_indices;
   for (size_t i = 0; i < tensor_args.size(); ++i) {
@@ -407,18 +383,12 @@ void cpu_fallback_rbln(
     }
     const bool is_pure_out = schema_info.is_pure_out[tensor_args_indices[i]];
     if (is_pure_out && tensor_args[i].defined()) {
-      // Direct output borrow: wrap the rbln out= tensor's host backing as a
-      // CPU view. The CPU kernel writes straight into the rbln vmem region,
-      // skipping the writeback memcpy entirely. release_borrowed(updated=true)
-      // is issued automatically by the existing borrow-write path in Step 3.
-      //
-      // Safety conditions: contiguous + offset 0 + non-zero bytes + RBLN
-      // device. PyTorch out= callers pass a tensor whose shape matches the
-      // result; if the CPU kernel ever tries to resize_(), `from_blob`'s
-      // fixed-size mapping silently no-ops and we'd corrupt the next slot, so
-      // we keep the size/contig guards strict and fall back to fresh empty
-      // otherwise. offset 0 matches borrow_rbln_as_cpu: an interior vaddr is
-      // not offset-resolved by the runtime borrow.
+      // Direct output borrow: wrap the rbln out= host backing as a CPU view so
+      // the kernel writes straight into vmem (no writeback memcpy); Step 3 issues
+      // release_borrowed(updated=true). Guards: contiguous + offset 0 + nonzero
+      // bytes + RBLN device — from_blob's fixed-size mapping can't resize_(), and
+      // offset 0 matches borrow_rbln_as_cpu (interior vaddrs aren't offset-resolved
+      // by the runtime borrow). Anything else falls back to fresh empty.
       auto& rbln_out = tensor_args[i];
       const uint64_t nbytes = rbln_out.nbytes();
       // try_acquire (not acquire): the overwrite borrow can be rejected for the
@@ -457,28 +427,20 @@ void cpu_fallback_rbln(
     (*stack)[arguments_begin + idx] = c10::IValue(cpu_tensors[i]);
   }
 
-  // Step 2: Call the underlying CPU implementation of the operator.
+  // Step 2: call the underlying CPU implementation.
   //
-  // Before redispatching, consult :class:`CPUFastPathRegistry` — handlers
-  // registered under aten/src/ATen/native/rbln/fast_paths/*.cpp self-register
-  // a specialized host micro-kernel for a single op (e.g. rsqrt.out,
-  // pow.Tensor_Scalar_out with exp==2, mean.out reducing last dim). The
-  // handler runs its own dtype/contig/shape guard; on match it writes the
-  // result directly into the borrowed out-tensor buffer and replaces
-  // ``stack`` with the single return. On no-match it returns ``false`` and
-  // we fall through to the generic boxed dispatcher.
-  // If anything in Step 2 (dispatch) or Step 3 (write-back) throws — e.g.
-  // PyTorch raises "result type X can't be cast to Y" for a dtype-mismatched
-  // out=, or _copy_from_and_resize trips when the caller passes a wrong-device
-  // out= that survived to step 3 — the borrows acquired above must still be
-  // released. Otherwise the rbln vmem manager keeps the input/out vaddrs in
-  // the borrowed state, and the next free on that vaddr fails. Since
-  // c10::rbln::free throws from a c10::DataPtr deleter (called from
-  // ~TensorImpl, a noexcept context), that failure escalates to std::terminate.
-  // RAII guard releases every still-live borrow as `updated=false` on
-  // destruction; the normal step-4 release loop clears borrow_ids[*] to 0
-  // before this guard goes out of scope on the happy path, so the guard is a
-  // no-op when nothing threw.
+  // First consult CPUFastPathRegistry — fast_paths/*.cpp self-register host
+  // micro-kernels for single ops (rsqrt.out, pow.Tensor_Scalar_out exp==2,
+  // mean.out last-dim). On match the handler runs its own guards, writes into
+  // the borrowed out buffer, and replaces the stack; on no-match it returns
+  // false and we fall through to the boxed dispatcher.
+  //
+  // If Step 2/3 throws (e.g. dtype-mismatched or wrong-device out=), the borrows
+  // above must still be released — else the next free on a still-borrowed vaddr
+  // fails, and since c10::rbln::free throws from a ~TensorImpl (noexcept) deleter
+  // that escalates to std::terminate. The RAII guard releases any still-live
+  // borrow (updated=false) on destruction; Step 4 zeroes borrow_ids on the happy
+  // path, so the guard is then a no-op.
   struct BorrowReleaseGuard {
     std::vector<uint64_t>& borrow_ids;
     std::vector<std::vector<uint64_t>>& tensorlist_borrow_ids;
@@ -516,20 +478,13 @@ void cpu_fallback_rbln(
     op.redispatchBoxed(c10::DispatchKeySet(cpu_dispatch_key), stack);
   }
 
-  // Step 3: Mutable alias write-back.
-  // - Legacy path: the CPU op wrote into the fresh CPU tensor at cpu_tensors[i];
-  //   we copy that result back into the original rbln tensor.
-  // - Borrow path, in-place case (borrow_ids[i] != 0): the CPU op wrote
-  //   directly into the borrowed host pointer, which already aliases the rbln
-  //   tensor's host-backed vmem; we only need to mark the borrow as updated so
-  //   the next device consumer lazily syncs.
-  // - Borrow path, resized-empty case: the composite's functional wrapper
-  //   allocates an empty out (numel=0) and lets the CPU kernel resize+fill it.
-  //   borrow_rbln_as_cpu couldn't borrow a zero-size vaddr, so borrow_id is 0
-  //   and cpu_tensors[i] holds fresh CPU storage. We resize the original rbln
-  //   tensor to match, borrow its now-sized vmem, memcpy the CPU content, and
-  //   return the borrow as updated — replacing the eager H2D that
-  //   at::_copy_from_and_resize would do.
+  // Step 3: mutable-alias write-back.
+  // - Legacy: copy the fresh CPU result at cpu_tensors[i] back into the rbln out.
+  // - Borrow, in-place (borrow_id != 0): the kernel already wrote into the host
+  //   ptr aliasing rbln vmem; just mark the borrow updated for lazy device sync.
+  // - Borrow, resized-empty: a functional wrapper passed an empty out (numel=0)
+  //   that couldn't be borrowed, so resize the rbln out, borrow its now-sized
+  //   vmem, memcpy the CPU content, and return updated — replacing the eager H2D.
   std::vector<bool> borrow_write(tensor_args.size(), false);
   for (const auto i : c10::irange(tensor_args_indices.size())) {
     if (!schema_info.is_write_alias[tensor_args_indices[i]]) {
@@ -648,24 +603,15 @@ void cpu_fallback_rbln(
     }
   }
 
-  // Step 4: Convert any CPU output tensors back to the original input device.
-  // For mutable alias'd outputs, we also need to take special care
-  // to move the ORIGINAL input tensor back onto the stack, in place of
-  // the temporary CPU output tensor that we created.
+  // Step 4: convert CPU output tensors back to the original input device. For
+  // mutable-alias outputs, move the ORIGINAL input tensor back onto the stack in
+  // place of the temporary CPU output.
   //
   // Note [CPU Fallback Does Not Handle View Operators]
-  // Also note that we are incapable of handling immutable aliases properly.
-  // Why?
-  // Schemas with an immutable alias'd tensor outputs correspond to view operators.
-  // For example, the `view_as` schema from native_functions.yaml:
-  // `view_as(Tensor(a) self, Tensor other) -> Tensor(a)`
-  // We can't handle these ops properly, because view ops are supposed to return
-  // a NEW tensor that shares the SAME storage as the original tensor.
-  // However, the new tensor that we created cannot share the same storage,
-  // since it lives on CPU and the original tensor lives on a different device.
-  // Because of that, we warn if someone attempts to call the
-  // CPU fallback on a view operator (this is to maintain BC for view ops for XLA
-  // that fall back to CPU).
+  // Immutable-alias outputs (view ops, e.g. `view_as(Tensor(a) self, ...) ->
+  // Tensor(a)`) can't be handled: a view must return a tensor sharing the input's
+  // storage, but our CPU temporary lives on a different device. We warn instead
+  // (BC for XLA-style view ops that fall back to CPU).
   const auto& schema_returns = op.schema().returns();
   const auto& num_returns = schema_returns.size();
   auto returns = torch::jit::last(stack, num_returns);
