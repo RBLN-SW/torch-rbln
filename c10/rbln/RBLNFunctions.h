@@ -266,6 +266,18 @@ C10_RBLN_API std::optional<BorrowedHostPtr> try_borrow_host_ptr(const void* rbln
 C10_RBLN_API BorrowedHostPtr acquire_host_ptr_for_overwrite(void* rbln_data, size_t nbytes);
 
 /**
+ * @brief Non-throwing variant of `acquire_host_ptr_for_overwrite`. Returns
+ * `std::nullopt` when the runtime rejects the acquire (same recoverable
+ * sub-states as `try_borrow_host_ptr`) instead of throwing. Use this where the
+ * caller has a copy-based fallback (e.g. a fresh `at::empty` + writeback).
+ *
+ * @return Host pointer + non-zero borrow id on success; `std::nullopt` if the
+ *         runtime could not provide an in-place host view. Invalid args
+ *         (nullptr / zero nbytes) also return `std::nullopt`.
+ */
+C10_RBLN_API std::optional<BorrowedHostPtr> try_acquire_host_ptr_for_overwrite(void* rbln_data, size_t nbytes);
+
+/**
  * @brief Release a previously borrowed host pointer.
  *
  * @param borrow_id The id returned from `borrow_host_ptr` /

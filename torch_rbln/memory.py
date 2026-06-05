@@ -64,6 +64,15 @@ def empty_cache(device: Optional[Union[int, str, torch.device]] = None) -> None:
     # show up unchanged in memory_stats. Clearing first puts us in the same
     # state as the cold dispatch path — entries get re-installed naturally.
     torch_rbln._C._warmcache_clear()
+    # The view-recipe cache holds only metadata-derived recipes (no device
+    # buffers), so it never shows up in memory_stats — but it has no eviction
+    # and grows once per distinct view geometry, so clear it here too to keep
+    # "let go of everything the user isn't holding" complete and to bound it
+    # under variable-shape workloads. Lazy import avoids a load-time cycle
+    # (ops_utils imports broadly).
+    from torch_rbln._internal.ops_utils import view_recipe_cache_reset
+
+    view_recipe_cache_reset()
     torch_rbln._C.empty_cache(device)
 
 

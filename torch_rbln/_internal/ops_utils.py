@@ -1327,7 +1327,8 @@ def view_recipe_cache_stats():
 
 
 def view_recipe_cache_reset():
-    """Clear cache + reset counters. Used by bench to isolate phases."""
+    """Clear cache + reset counters. Called by ``memory.empty_cache()`` to
+    bound the cache, and by bench to isolate phases."""
     global _recipe_cache_hits, _recipe_cache_misses
     _recipe_cache.clear()
     _recipe_cache_hits = 0

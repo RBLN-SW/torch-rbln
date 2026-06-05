@@ -75,7 +75,14 @@ bool mean_lastdim_handler(c10::ArrayRef<at::Tensor> cpu_tensors, torch::jit::Sta
     return false;
   }
   const int64_t outer = self.numel() / inner;
-  if (out.numel() != outer) {
+  // keepdim=True ⇒ the result shape is self.sizes() with the reduced last dim
+  // set to 1. Pin the full shape (like the rsqrt/pow siblings), not just the
+  // element count: a right-numel but wrong-shape out= would otherwise pass and
+  // come back un-resized, where core mean.out would have resized it. Bail to
+  // core for any other shape.
+  auto expected_sizes = self.sizes().vec();
+  expected_sizes.back() = 1;
+  if (out.sizes() != c10::IntArrayRef(expected_sizes)) {
     return false;
   }
 

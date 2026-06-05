@@ -371,6 +371,38 @@ TEST_F(RBLNFunctionsTest, AcquireHostPtrForOverwriteRoundTrip) {
   c10::rbln::free(rbln_data);
 }
 
+TEST_F(RBLNFunctionsTest, TryAcquireHostPtrForOverwriteRoundTrip) {
+  // Non-throwing variant: on success it behaves like acquire_host_ptr_for_overwrite.
+  const size_t nbytes = 256;
+  auto rbln_data = c10::rbln::malloc(/*device_index=*/0, nbytes);
+  ASSERT_NE(rbln_data, nullptr);
+
+  auto borrowed = c10::rbln::try_acquire_host_ptr_for_overwrite(rbln_data, nbytes);
+  ASSERT_TRUE(borrowed.has_value());
+  EXPECT_NE(borrowed->host_ptr, uintptr_t{0});
+  EXPECT_NE(borrowed->borrow_id, uint64_t{0});
+
+  std::memset(reinterpret_cast<uint8_t*>(borrowed->host_ptr), 0xa5, nbytes);
+  c10::rbln::return_borrowed(borrowed->borrow_id, /*updated=*/true);
+
+  std::vector<uint8_t> dst_cpu(nbytes, 0);
+  c10::rbln::memcpy_v2h(dst_cpu.data(), rbln_data, nbytes);
+  for (size_t i = 0; i < nbytes; ++i) {
+    EXPECT_EQ(dst_cpu[i], 0xa5);
+  }
+  c10::rbln::free(rbln_data);
+}
+
+TEST_F(RBLNFunctionsTest, TryAcquireHostPtrForOverwriteInvalidArgsReturnNullopt) {
+  // The copy-fallback path in cpu_fallback_rbln relies on invalid/rejected
+  // acquires returning nullopt rather than throwing.
+  EXPECT_FALSE(c10::rbln::try_acquire_host_ptr_for_overwrite(/*rbln_data=*/nullptr, 64).has_value());
+  auto rbln_data = c10::rbln::malloc(/*device_index=*/0, 64);
+  ASSERT_NE(rbln_data, nullptr);
+  EXPECT_FALSE(c10::rbln::try_acquire_host_ptr_for_overwrite(rbln_data, /*nbytes=*/0).has_value());
+  c10::rbln::free(rbln_data);
+}
+
 TEST_F(RBLNFunctionsTest, BorrowRejectsNullData) {
   EXPECT_THROW(c10::rbln::borrow_host_ptr(/*rbln_data=*/nullptr, 64), c10::Error);
   EXPECT_THROW(c10::rbln::acquire_host_ptr_for_overwrite(/*rbln_data=*/nullptr, 64), c10::Error);

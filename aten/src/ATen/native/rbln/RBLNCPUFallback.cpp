@@ -210,6 +210,15 @@ at::Tensor borrow_rbln_as_cpu(const at::Tensor& t, uint64_t& borrow_id_out) {
     // host region and corrupt reads. Caller falls back to the copy path.
     return {};
   }
+  if (t.storage_offset() != 0) {
+    // Contiguous offset view (e.g. `x[1:]`): `data_ptr()` points into the
+    // middle of the allocation, but `rbln_v_borrow_host_ptr` resolves the
+    // borrow against the backing allocation, not an interior vaddr — so the
+    // returned host view would not be offset-correct. Route through the copy
+    // path until interior-offset borrows are supported. (offset==0 contig is
+    // the only safe borrow shape.)
+    return {};
+  }
 
   const uint64_t nbytes = t.nbytes();
   if (nbytes == 0) {
@@ -403,21 +412,32 @@ void cpu_fallback_rbln(
       // skipping the writeback memcpy entirely. release_borrowed(updated=true)
       // is issued automatically by the existing borrow-write path in Step 3.
       //
-      // Safety conditions: contiguous + non-zero bytes + RBLN device. PyTorch
-      // out= callers pass a tensor whose shape matches the result; if the
-      // CPU kernel ever tries to resize_(), `from_blob`'s fixed-size mapping
-      // silently no-ops and we'd corrupt the next slot, so we keep the
-      // size/contig guards strict and fall back to fresh empty otherwise.
+      // Safety conditions: contiguous + offset 0 + non-zero bytes + RBLN
+      // device. PyTorch out= callers pass a tensor whose shape matches the
+      // result; if the CPU kernel ever tries to resize_(), `from_blob`'s
+      // fixed-size mapping silently no-ops and we'd corrupt the next slot, so
+      // we keep the size/contig guards strict and fall back to fresh empty
+      // otherwise. offset 0 matches borrow_rbln_as_cpu: an interior vaddr is
+      // not offset-resolved by the runtime borrow.
       auto& rbln_out = tensor_args[i];
       const uint64_t nbytes = rbln_out.nbytes();
-      if (rbln_out.device().type() == c10::DeviceType::PrivateUse1 && rbln_out.is_contiguous() && nbytes > 0) {
-        auto borrowed = c10::rbln::acquire_host_ptr_for_overwrite(rbln_out.data_ptr(), nbytes);
-        borrow_ids[i] = borrowed.borrow_id;
+      // try_acquire (not acquire): the overwrite borrow can be rejected for the
+      // same recoverable runtime sub-states as the read borrow above. On
+      // rejection fall back to a fresh CPU empty + writeback (Step 3), matching
+      // the read path's copy fallback, rather than throwing out of the op.
+      std::optional<c10::rbln::BorrowedHostPtr> borrowed;
+      if (rbln_out.device().type() == c10::DeviceType::PrivateUse1 && rbln_out.is_contiguous() &&
+          rbln_out.storage_offset() == 0 && nbytes > 0) {
+        borrowed = c10::rbln::try_acquire_host_ptr_for_overwrite(rbln_out.data_ptr(), nbytes);
+      }
+      if (borrowed) {
+        borrow_ids[i] = borrowed->borrow_id;
         auto opts = at::TensorOptions().dtype(rbln_out.dtype()).device(at::kCPU);
         cpu_tensors[i] =
-            at::from_blob(reinterpret_cast<void*>(borrowed.host_ptr), rbln_out.sizes(), rbln_out.strides(), opts);
+            at::from_blob(reinterpret_cast<void*>(borrowed->host_ptr), rbln_out.sizes(), rbln_out.strides(), opts);
       } else {
-        // Resize-safe fallback: fresh CPU empty.
+        // Resize-safe fallback (also the path when the acquire was rejected):
+        // fresh CPU empty, written back to rbln_out in Step 3.
         cpu_tensors[i] = at::empty(rbln_out.sizes(), rbln_out.options().device(at::kCPU));
       }
     } else {
@@ -541,6 +561,7 @@ void cpu_fallback_rbln(
     const bool borrow_resize_case = tensor_args[i].device().type() == c10::DeviceType::PrivateUse1 &&
         cpu_tensors[i].defined() && cpu_tensors[i].is_contiguous() && cpu_tensors[i].nbytes() > 0 &&
         tensor_args[i].is_contiguous();
+    bool wrote_back = false;
     if (borrow_resize_case) {
       auto& rbln_out = tensor_args[i];
       if (rbln_out.sizes() != cpu_tensors[i].sizes()) {
@@ -550,11 +571,19 @@ void cpu_fallback_rbln(
       if (nbytes > 0) {
         // Acquire-for-overwrite: we immediately memcpy over the whole region, so any
         // D2H from a stale PHYSICAL_VIEW_IS_LATEST state would be thrown away.
-        auto borrowed = c10::rbln::acquire_host_ptr_for_overwrite(rbln_out.data_ptr(), nbytes);
-        std::memcpy(reinterpret_cast<void*>(borrowed.host_ptr), cpu_tensors[i].data_ptr(), nbytes);
-        c10::rbln::return_borrowed(borrowed.borrow_id, /*updated=*/true);
+        // try_acquire (not acquire): on a runtime rejection fall through to the
+        // legacy copy-based writeback below rather than throwing — symmetric
+        // with the input out= borrow's copy fallback.
+        if (auto borrowed = c10::rbln::try_acquire_host_ptr_for_overwrite(rbln_out.data_ptr(), nbytes)) {
+          std::memcpy(reinterpret_cast<void*>(borrowed->host_ptr), cpu_tensors[i].data_ptr(), nbytes);
+          c10::rbln::return_borrowed(borrowed->borrow_id, /*updated=*/true);
+          wrote_back = true;
+        }
+      } else {
+        wrote_back = true; // empty result: nothing to copy.
       }
-    } else {
+    }
+    if (!wrote_back) {
       at::_copy_from_and_resize(cpu_tensors[i], tensor_args[i]);
     }
   }
