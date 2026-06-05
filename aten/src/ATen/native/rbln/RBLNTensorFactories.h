@@ -69,4 +69,23 @@ at::Tensor _efficientzerotensor_rbln(
  */
 at::Tensor& zero_rbln_(at::Tensor& self);
 
+// Native impl of aten::fill_.Scalar — borrow host pointer + typed std::fill_n
+// + return_borrowed(updated=true). Bypasses cpu_fallback_rbln's redispatchBoxed
+// + TensorIterator path. Contiguous self only (asserts otherwise).
+at::Tensor& fill_scalar_rbln_(at::Tensor& self, const at::Scalar& value);
+
+// Native impl of aten::arange.start_out — acquire_host_ptr_for_overwrite
+// (D2H skipped, write-only), host-fill out[i] = start + i*step, then
+// return_borrowed(updated=true). `out` is assumed already sized.
+at::Tensor& arange_start_out_rbln(
+    const at::Scalar& start,
+    const at::Scalar& end,
+    const at::Scalar& step,
+    at::Tensor& out);
+
+// Native impl of aten::_local_scalar_dense — 1-element tensor → Python scalar
+// (= `.item()`). D2H is unavoidable (we need the value on host) but we skip
+// cpu_fallback_rbln's schema cache + redispatch overhead. Read-only borrow.
+at::Scalar _local_scalar_dense_rbln(const at::Tensor& self);
+
 } // namespace at::native::rbln

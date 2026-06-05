@@ -168,7 +168,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   m.impl("min.dim_min", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("flip", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("cumsum.out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
-  m.impl("arange.start_out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
+  m.impl("arange.start_out", TORCH_FN(at::native::rbln::arange_start_out_rbln));
 
   // Operations used in pytest (temporary CPU fallbacks)
   // These are registered to manage unsupported operations encountered during pytest runs.
@@ -178,8 +178,9 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   // Operations not supported on the RBLN device (CPU fallback)
   // Scalar and tensor manipulation
   m.impl("trunc.out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
-  m.impl("_local_scalar_dense", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
-  m.impl("fill_.Scalar", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
+  m.impl("_local_scalar_dense", TORCH_FN(at::native::rbln::_local_scalar_dense_rbln));
+  m.impl("fill_.Scalar", TORCH_FN(at::native::rbln::fill_scalar_rbln_));
+  m.impl("clone", TORCH_FN(at::native::rbln::clone_rbln));
   m.impl("fill_.Tensor", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("equal", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("_efficientzerotensor", TORCH_FN(at::native::rbln::_efficientzerotensor_rbln));
