@@ -389,10 +389,9 @@ void DoOnce() {
     }
   }
 
-  // Gate: RCCL_PORT_GEN-enabled runs require RBLN_RDMA_IP. Without it, the
-  // RCCL autoport init path in ProcessGroupRBLN cannot bind a remote
-  // endpoint and InitRBLNWork would fail deep inside the runtime with a
-  // less-actionable message. Surface the misconfiguration here.
+  // No IP found. Missing-IP is no longer fatal: we can't tell single- vs
+  // multi-node here, so warn (when RCCL_PORT_GEN is set) and defer the
+  // decision to the runtime. See the header for the full contract.
   const char* port_gen_env = std::getenv("RCCL_PORT_GEN");
   const bool use_autoport = (port_gen_env != nullptr && port_gen_env[0] != '\0');
   const char* final_ip = std::getenv(kEnvRdmaIp);
@@ -400,12 +399,17 @@ void DoOnce() {
   if (have_ip) {
     return;
   }
-  RBLN_CHECK(
-      !use_autoport,
-      "RCCL_PORT_GEN is set but RBLN_RDMA_IP could not be determined. "
-      "Set RBLN_RDMA_IP explicitly, or ensure /sys/class/infiniband exposes a "
-      "RoCE v2 capable device with an ACTIVE port and an IPv4-assigned netdev. "
-      "See [rbln_rdma_probe] diagnostics above for the failure stage.");
+  if (use_autoport) {
+    RBLN_LOG_WARN(
+        "{} RCCL_PORT_GEN set but {} unresolved. Single-node runs continue; "
+        "multi-node will fail at RCCL init. To pin it set {}, or ensure "
+        "/sys/class/infiniband has a RoCE v2 ACTIVE port with an IPv4 netdev. "
+        "See [rbln_rdma_probe] above.",
+        kDiagPrefix,
+        kEnvRdmaIp,
+        kEnvRdmaIp);
+    return;
+  }
   RDMA_DIAG("RBLN_RDMA_IP unresolved, but RCCL_PORT_GEN is not set -- RDMA IP not required, continuing");
 }
 
