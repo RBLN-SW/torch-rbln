@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -200,6 +201,95 @@ struct C10_RBLN_API V2VCopyOp {
  * entries yield undefined behaviour.
  */
 C10_RBLN_API void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies);
+
+/**
+ * @brief Result of a borrow_host_ptr / acquire_host_ptr_for_overwrite call.
+ *
+ * The borrow id MUST be passed back to `return_borrowed` exactly once to
+ * release the underlying virtual-memory entry. A successful borrow always
+ * returns a non-zero `borrow_id`; the value `0` is reserved as a sentinel
+ * meaning "no live borrow" so cleanup paths can pre-fill a zero in a vector
+ * and call `return_borrowed` unconditionally for skipped entries.
+ */
+struct BorrowedHostPtr {
+  uintptr_t host_ptr;
+  uint64_t borrow_id;
+};
+
+/**
+ * @brief Borrow a host pointer into the rbln virtual memory backing
+ * `rbln_data`. Triggers a device→host sync if the device view is currently
+ * authoritative; allocates host backing if none exists. After this call the
+ * host buffer is read-ready.
+ *
+ * The borrow MUST be released via `return_borrowed(result.borrow_id, ...)`.
+ *
+ * @param rbln_data A pointer to rbln-device memory (typically tensor data_ptr).
+ *        Must not be nullptr.
+ * @param nbytes Number of bytes to borrow. Must be positive — callers with a
+ *        legitimate zero-byte case must short-circuit before invoking.
+ * @return Host pointer + non-zero borrow id; throws c10::Error via RBLN_CHECK
+ *         on failure (invalid args, rebel-side error).
+ */
+C10_RBLN_API BorrowedHostPtr borrow_host_ptr(const void* rbln_data, size_t nbytes);
+
+/**
+ * @brief Non-throwing variant of `borrow_host_ptr`. Returns `std::nullopt` when
+ * the runtime rejects the borrow (e.g. the backing entry is in a sub-state with
+ * no host-mappable user view), instead of throwing. Use this where a borrow
+ * failure is an expected, recoverable condition with a copy-based fallback —
+ * it scopes failure handling to exactly the borrow call (other errors still
+ * surface normally) rather than swallowing a broad c10::Error catch.
+ *
+ * @return Host pointer + non-zero borrow id on success; `std::nullopt` if the
+ *         runtime could not provide an in-place host view. Invalid args
+ *         (nullptr / zero nbytes) also return `std::nullopt`.
+ */
+C10_RBLN_API std::optional<BorrowedHostPtr> try_borrow_host_ptr(const void* rbln_data, size_t nbytes);
+
+/**
+ * @brief Acquire a host pointer for **overwrite-only** access into the rbln
+ * virtual memory backing `rbln_data`. Same lifecycle as `borrow_host_ptr`,
+ * but the device→host transfer is skipped even when the entry is
+ * physical-latest.
+ *
+ * IMPORTANT: callers MUST overwrite **the entire borrowed region** before
+ * `return_borrowed(..., updated=true)`; otherwise the region surfaces stale
+ * bytes to subsequent device consumers. Use `borrow_host_ptr` instead if a
+ * partial overwrite is intended.
+ *
+ * @param rbln_data A pointer to rbln-device memory. Must not be nullptr.
+ * @param nbytes Number of bytes to acquire (must be positive).
+ * @return Host pointer + non-zero borrow id; throws c10::Error via RBLN_CHECK
+ *         on failure.
+ */
+C10_RBLN_API BorrowedHostPtr acquire_host_ptr_for_overwrite(void* rbln_data, size_t nbytes);
+
+/**
+ * @brief Non-throwing variant of `acquire_host_ptr_for_overwrite`. Returns
+ * `std::nullopt` when the runtime rejects the acquire (same recoverable
+ * sub-states as `try_borrow_host_ptr`) instead of throwing. Use this where the
+ * caller has a copy-based fallback (e.g. a fresh `at::empty` + writeback).
+ *
+ * @return Host pointer + non-zero borrow id on success; `std::nullopt` if the
+ *         runtime could not provide an in-place host view. Invalid args
+ *         (nullptr / zero nbytes) also return `std::nullopt`.
+ */
+C10_RBLN_API std::optional<BorrowedHostPtr> try_acquire_host_ptr_for_overwrite(void* rbln_data, size_t nbytes);
+
+/**
+ * @brief Release a previously borrowed host pointer.
+ *
+ * @param borrow_id The id returned from `borrow_host_ptr` /
+ *        `acquire_host_ptr_for_overwrite`. The value `0` is the
+ *        "no live borrow" sentinel and is treated as a no-op so cleanup
+ *        paths can release vectors of optional borrows uniformly.
+ * @param updated If true, marks the host view as the latest source of truth;
+ *        the next device consumer performs a lazy host→device copy. Must be
+ *        true after a successful `acquire_host_ptr_for_overwrite` write
+ *        sequence; otherwise the overwritten bytes are discarded.
+ */
+C10_RBLN_API void return_borrowed(uint64_t borrow_id, bool updated);
 
 /**
  * @brief Returns comprehensive device memory statistics.
