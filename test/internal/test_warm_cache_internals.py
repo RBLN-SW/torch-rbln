@@ -1,0 +1,177 @@
+# Owner(s): ["module: PrivateUse1"]
+
+"""
+Test suite for the C++ warm-cache internals (torch_rbln._C._warmcache_*).
+
+The warm-cache caches the rebel-runtime handle for a (op, input-profile)
+combination so that subsequent dispatches with the same profile bypass the
+torch.compile / pybind round-trip and drive the runtime directly from C++.
+This module verifies the small public surface that the dispatch shim and the
+generated Python wrappers depend on:
+
+  - enable / disable / size / clear  (state transitions)
+  - thread-local "building" reentrancy guard
+"""
+
+import threading
+
+import pytest
+import torch  # noqa: F401  (needed to load torch_rbln._C)
+from torch.testing._internal.common_utils import run_tests, TestCase
+
+from torch_rbln import _C  # type: ignore[attr-defined]
+
+
+# These suites exercise the C++ warm-cache's process-wide / thread-local
+# state via its pybind surface. No RBLN-device tensor work happens here, so
+# ``instantiate_device_type_tests`` is intentionally NOT used — this matches
+# the precedent set by ``test/rbln/test_file_offloading.py`` for tests that
+# probe process-level flags rather than device-side ops.
+
+
+@pytest.mark.test_set_ci
+class TestWarmCacheEnableDisable(TestCase):
+    """`_warmcache_set_enabled` round-trips and `clear()` empties the cache.
+
+    These functions are the primitive on which the generated wrappers in
+    register_ops.py rely; if they regress, every shim op silently bypasses
+    the cache and we lose the warm-path speedup.
+    """
+
+    def setUp(self) -> None:
+        self._was_enabled = _C._warmcache_is_enabled()
+
+    def tearDown(self) -> None:
+        _C._warmcache_set_enabled(self._was_enabled)
+
+    def test_default_state_is_queryable(self) -> None:
+        # Whether enabled or not by default, the query must succeed.
+        v = _C._warmcache_is_enabled()
+        self.assertIsInstance(v, bool)
+
+    def test_set_enabled_round_trip(self) -> None:
+        _C._warmcache_set_enabled(False)
+        self.assertFalse(_C._warmcache_is_enabled())
+        _C._warmcache_set_enabled(True)
+        self.assertTrue(_C._warmcache_is_enabled())
+
+    def test_size_is_non_negative_int(self) -> None:
+        n = _C._warmcache_size()
+        self.assertIsInstance(n, int)
+        self.assertGreaterEqual(n, 0)
+
+    def test_clear_returns_size_zero(self) -> None:
+        _C._warmcache_clear()
+        self.assertEqual(_C._warmcache_size(), 0)
+
+
+@pytest.mark.test_set_ci
+class TestWarmCacheBuildingGuard(TestCase):
+    """Reentrancy guard set by the miss path.
+
+    During the torch.compile compilation triggered by a shim cache miss,
+    nested ATen dispatches must take the slow path so that they do not try
+    to hit a partially-built entry. The guard is thread-local; verify
+    enter / exit pair, idempotency on double-exit, and isolation across
+    threads (one thread's flag does not leak into another).
+    """
+
+    def tearDown(self) -> None:
+        # Always leave the flag cleared for subsequent tests.
+        _C._warmcache_exit_building()
+
+    def test_initial_state_is_not_building(self) -> None:
+        _C._warmcache_exit_building()
+        self.assertFalse(_C._warmcache_is_building())
+
+    def test_enter_then_exit(self) -> None:
+        _C._warmcache_enter_building()
+        self.assertTrue(_C._warmcache_is_building())
+        _C._warmcache_exit_building()
+        self.assertFalse(_C._warmcache_is_building())
+
+    def test_double_exit_is_no_op(self) -> None:
+        _C._warmcache_exit_building()
+        _C._warmcache_exit_building()
+        self.assertFalse(_C._warmcache_is_building())
+
+    def test_thread_local_isolation(self) -> None:
+        """Setting the flag in one thread must not affect another.
+
+        Without thread-local storage the flag would leak globally and the
+        miss-path reentrancy guard would be unreliable in multi-worker
+        scenarios.
+        """
+        _C._warmcache_enter_building()
+        self.assertTrue(_C._warmcache_is_building())
+
+        seen_in_thread: list[bool] = []
+        ev = threading.Event()
+
+        def worker() -> None:
+            seen_in_thread.append(_C._warmcache_is_building())
+            ev.set()
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        ev.wait(timeout=5.0)
+        t.join(timeout=5.0)
+
+        self.assertEqual(seen_in_thread, [False], f"Thread-local flag leaked across threads: {seen_in_thread}")
+        # Original thread still has the flag set.
+        self.assertTrue(_C._warmcache_is_building())
+
+
+@pytest.mark.test_set_ci
+class TestWarmCacheForceRecompileFlag(TestCase):
+    """Thread-local force-recompile signal that pairs ``try_warmcache_hit``'s
+    erase-on-failure with the next ``compile_rbln_cached`` invocation.
+
+    The C++ shim sets the flag inside ``try_warmcache_hit`` when it has to
+    ``erase`` a broken entry; ``compile_and_run_view_aware`` consumes the
+    flag and passes ``force_recompile=True`` to ``compile_rbln_cached`` so
+    the same op+shape gets a fresh ``torch.compile`` pass (which lets the
+    rebel backend re-populate ``_runtime_holder`` and install succeed
+    again). Without this pairing, the erased op+shape would stay
+    permanently on the Python wrapper path because the Python compile
+    cache returns the stale callable and the holder stays empty.
+    """
+
+    def setUp(self) -> None:
+        _C._warmcache_consume_force_recompile()
+
+    def tearDown(self) -> None:
+        _C._warmcache_consume_force_recompile()
+
+    def test_default_false(self) -> None:
+        self.assertFalse(_C._warmcache_consume_force_recompile())
+
+    def test_request_then_consume_once(self) -> None:
+        _C._warmcache_request_force_recompile()
+        self.assertTrue(_C._warmcache_consume_force_recompile())
+        # Consume is single-shot.
+        self.assertFalse(_C._warmcache_consume_force_recompile())
+
+    def test_thread_local_isolation(self) -> None:
+        """The flag must not leak across threads. If it did, an erase on
+        thread A would force unnecessary recompiles on thread B's next
+        unrelated op."""
+        _C._warmcache_request_force_recompile()
+        seen_in_thread: list[bool] = []
+        ev = threading.Event()
+
+        def worker() -> None:
+            seen_in_thread.append(_C._warmcache_consume_force_recompile())
+            ev.set()
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        ev.wait(timeout=5.0)
+        t.join(timeout=5.0)
+
+        self.assertEqual(seen_in_thread, [False], f"force-recompile flag leaked across threads: {seen_in_thread}")
+        self.assertTrue(_C._warmcache_consume_force_recompile())
+
+
+if __name__ == "__main__":
+    run_tests()

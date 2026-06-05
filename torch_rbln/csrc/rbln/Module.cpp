@@ -1,3 +1,5 @@
+#include <ATen/native/rbln/RBLNCPUFallback.h>
+#include <ATen/native/rbln/RBLNCPUFastPaths.h>
 #include <ATen/native/rbln/RBLNCopy.h>
 #include <ATen/native/rbln/RBLNTensorUtils.h>
 #include <c10/rbln/DeviceMappingManager.h>
@@ -6,6 +8,8 @@
 #include <c10/rbln/RBLNLogging.h>
 #include <torch/csrc/utils/pybind.h>
 #include <torch_rbln/csrc/distributed/c10d/rbln/ProcessGroupRBLNModule.hpp>
+#include <torch_rbln/csrc/rbln/DispatchShim.h>
+#include <torch_rbln/csrc/rbln/WarmCache.h>
 #include <exception>
 #include <vector>
 
@@ -105,6 +109,132 @@ void register_internal_api(py::module_& module) {
 
   // Logging utilities
   module.def("_log_cpu_fallback", &c10::rbln::log_cpu_fallback, "Internal: log CPU fallback");
+
+  // C++ dispatch shim: install a boxed C++ handler on PrivateUse1 for the given
+  // op, with pre-check + cpu_fallback_rbln on fail and Python callback on pass.
+  // `skip_dtype_args` names positional arg indices whose dtype must not be
+  // compared to float16 (e.g. where.self_out's cond is bool).
+  module.def(
+      "_dispatch_shim_diag_dump",
+      &torch_rbln::shim::diag_dump_dispatch_paths,
+      "DIAG: dispatch path counts/timings (n_total, n_fallback, n_warm_hit, n_miss, ns_warm_hit, ns_miss)");
+  module.def(
+      "_dispatch_shim_diag_reset", &torch_rbln::shim::diag_reset_dispatch_paths, "DIAG: reset dispatch path counters");
+  module.def(
+      "_dispatch_shim_align_fastpath_count",
+      &torch_rbln::shim::diag_dump_align_fastpath_count,
+      "DIAG: count of align-penalty fast-path hits");
+  module.def(
+      "_dispatch_shim_warm_segments_dump",
+      &torch_rbln::shim::diag_dump_warm_segments,
+      "DIAG: warm-cache hit per-segment timers (n_hits, ns_lookup, ns_io_build, "
+      "ns_gil, ns_prep_in, ns_prep_out, ns_run, ns_finalize)");
+  module.def(
+      "_dispatch_shim_warm_segments_reset",
+      &torch_rbln::shim::diag_reset_warm_segments,
+      "DIAG: reset warm-cache hit per-segment timers");
+  module.def(
+      "_register_cpp_shim",
+      &torch_rbln::shim::register_cpp_shim,
+      "Internal: install a C++ dispatch shim for an op and register its Python impl",
+      pybind11::arg("op_name"),
+      pybind11::arg("py_fn"),
+      pybind11::arg("skip_dtype_args") = std::vector<size_t>{});
+
+  // Warm-cache API. The C++ shim populates a thread-local `pending` entry on
+  // every miss-path dispatch; the generated Python wrapper calls
+  // `_warmcache_install_pending` after a successful first compile + run so the
+  // runtime is cached for subsequent invocations with the same input profile.
+  module.def(
+      "_warmcache_install_pending",
+      &torch_rbln::shim::install_warmcache_from_pending,
+      "Internal: install a warm-cache entry from the thread-local pending key "
+      "set by the shim on the way into the miss path",
+      pybind11::arg("dyn_runtime"),
+      pybind11::arg("runtime_raw_ptr"),
+      pybind11::arg("num_inputs"),
+      pybind11::arg("num_outputs"),
+      pybind11::arg("out_profiles"));
+
+  module.def(
+      "_warmcache_set_enabled",
+      [](bool v) { torch_rbln::warmcache::WarmCache::instance().set_enabled(v); },
+      "Internal: enable/disable the warm-runtime cache path globally");
+  module.def(
+      "_warmcache_is_enabled",
+      []() { return torch_rbln::warmcache::WarmCache::instance().is_enabled(); },
+      "Internal: query whether warm-cache is currently enabled");
+  module.def(
+      "_warmcache_size",
+      []() { return torch_rbln::warmcache::WarmCache::instance().size(); },
+      "Internal: number of entries in the warm-cache (debug/bench only)");
+  module.def(
+      "_warmcache_clear",
+      []() { torch_rbln::warmcache::WarmCache::instance().clear(); },
+      "Internal: drop all warm-cache entries (tests / benchmarks)");
+  module.def(
+      "_warmcache_is_building",
+      []() { return torch_rbln::warmcache::WarmCache::is_building_entry(); },
+      "Internal: true iff the current thread is inside the miss-path compile");
+  module.def(
+      "_warmcache_enter_building",
+      []() { torch_rbln::warmcache::WarmCache::enter_building(); },
+      "Internal: mark the current thread as inside the miss-path compile "
+      "(reentrancy guard; pairs with _warmcache_exit_building)");
+  module.def(
+      "_warmcache_exit_building",
+      []() { torch_rbln::warmcache::WarmCache::exit_building(); },
+      "Internal: clear the miss-path reentrancy flag set by _warmcache_enter_building");
+  module.def(
+      "_warmcache_consume_force_recompile",
+      []() { return torch_rbln::warmcache::WarmCache::consume_force_recompile(); },
+      "Internal: consume the thread-local force-recompile flag set by a failed "
+      "warm-cache hit. Returns True iff a flag was pending; clears it.");
+  module.def(
+      "_warmcache_request_force_recompile",
+      []() { torch_rbln::warmcache::WarmCache::request_force_recompile(); },
+      "Internal: set the thread-local force-recompile flag. Production callers "
+      "rely on the C++ shim auto-setting this on hit-failure; this binding "
+      "exists so tests can exercise the consume/clear pair without engineering "
+      "a runtime soft-failure.");
+
+  // CPU fast-path registry introspection. Returns True iff a handler is
+  // registered for the given fully-qualified op name (e.g. "aten::rsqrt.out").
+  // Used by tests to verify the static-init registration fired without
+  // needing a live OperatorHandle.
+  module.def(
+      "_cpu_fast_path_registered",
+      [](const std::string& op_name) {
+        return at::native::rbln::CPUFastPathRegistry::instance().has_handler_for_op(op_name);
+      },
+      "Internal: returns True iff a CPU fast-path handler is registered for the given op name");
+
+  // Pybind11 instance raw-pointer extractor.
+  //
+  // For a pybind11 simple-layout instance (single-inheritance, standard
+  // ``unique_ptr`` / ``shared_ptr`` holder), the underlying C++ object pointer
+  // is stored directly after ``PyObject_HEAD``. We need this to bridge rebel's
+  // ``PyRblnSyncRuntime`` (built against pybind11 v2) into torch-rbln (which
+  // links pybind11 v3); the two registries are disjoint so ``py::cast<T*>``
+  // fails across DSOs.
+  //
+  // Reading the raw pointer requires knowing ``sizeof(PyObject)`` at the
+  // boundary. Doing this in C++ keeps the offset matched to the Python ABI
+  // we are compiled against, instead of a hardcoded Python-side constant
+  // that drifts on debug builds, free-threaded builds (PEP 703), or non-x86.
+  module.def(
+      "_pybind_instance_raw_ptr",
+      [](pybind11::handle h) -> uintptr_t {
+        PyObject* obj = h.ptr();
+        if (obj == nullptr) {
+          throw std::invalid_argument("_pybind_instance_raw_ptr: null handle");
+        }
+        // Layout: [PyObject_HEAD][void* instance_ptr][...]. Read the void*
+        // immediately past the head.
+        const auto* slot = reinterpret_cast<const uintptr_t*>(reinterpret_cast<const char*>(obj) + sizeof(PyObject));
+        return *slot;
+      },
+      "Internal: extract the raw C++ pointer held by a pybind11 simple-layout instance");
 
   // Fallback configuration
   module.def(
