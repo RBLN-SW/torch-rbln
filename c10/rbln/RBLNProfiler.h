@@ -24,6 +24,7 @@
 // changes the user's behavior; everything uncertain stays raw until real
 // workloads prove it matters.
 
+#include <array>
 #include <cstdint>
 
 #include <c10/rbln/RBLNMacros.h>
@@ -46,13 +47,21 @@ enum class BounceSite : uint8_t {
 // fallback itself is the signal, bytes are attributed by the per-entry copies).
 C10_RBLN_API void record_bounce(BounceSite site, uint64_t nbytes) noexcept;
 
+// (A) WHERE for bounces — opt-in Python call-site capture. c10 has no Python, so
+// the higher layer (torch_rbln DispatchShim, which holds pybind) installs a capture
+// hook; record_bounce invokes it ONLY when installed (= trace enabled). OFF by
+// default -> one relaxed null-load on the already-slow bounce branch, ON == OFF.
+// The hook receives the BounceSite value (as uint8_t to keep this header Python-free).
+using BounceCaptureFn = void (*)(uint8_t site) noexcept;
+C10_RBLN_API void set_bounce_capture_fn(BounceCaptureFn fn) noexcept;
+
 inline constexpr int kNumBounceSites = static_cast<int>(BounceSite::kNumBounceSites);
 
 // Per-site snapshot for readout (torch_rbln.profiler.dump()). Lazy: only read
 // at report() time, never during the run.
 struct BounceSnapshot {
-  uint64_t count[kNumBounceSites];
-  uint64_t bytes[kNumBounceSites];
+  std::array<uint64_t, kNumBounceSites> count;
+  std::array<uint64_t, kNumBounceSites> bytes;
 };
 C10_RBLN_API BounceSnapshot dump_bounces() noexcept;
 C10_RBLN_API void reset_bounces() noexcept;

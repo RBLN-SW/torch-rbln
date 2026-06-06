@@ -10,6 +10,8 @@ namespace {
 // are themselves the slow thing being measured.
 std::array<std::atomic<uint64_t>, kNumBounceSites> g_count{};
 std::array<std::atomic<uint64_t>, kNumBounceSites> g_bytes{};
+// (A) WHERE hook. null unless the higher layer installed it (= trace enabled).
+std::atomic<BounceCaptureFn> g_bounce_capture_fn{nullptr};
 } // namespace
 
 void record_bounce(BounceSite site, uint64_t nbytes) noexcept {
@@ -18,6 +20,14 @@ void record_bounce(BounceSite site, uint64_t nbytes) noexcept {
   if (nbytes != 0) {
     g_bytes[i].fetch_add(nbytes, std::memory_order_relaxed);
   }
+  // opt-in call-site capture: only fires when trace installed the hook.
+  if (auto fn = g_bounce_capture_fn.load(std::memory_order_relaxed)) {
+    fn(static_cast<uint8_t>(site));
+  }
+}
+
+void set_bounce_capture_fn(BounceCaptureFn fn) noexcept {
+  g_bounce_capture_fn.store(fn, std::memory_order_relaxed);
 }
 
 BounceSnapshot dump_bounces() noexcept {

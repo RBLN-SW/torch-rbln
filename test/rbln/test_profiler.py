@@ -56,11 +56,14 @@ class TestProfilerCopyBounce(TestCase):
             y.copy_(x)
         self.assertEqual(p.dump()["hidden_host_bounce"]["total_count"], 0)
 
-    def test_noncontiguous_d2d_copy_bounces_with_bytes(self):
+    def test_d2d_int_cast_bounces_with_bytes(self):
+        # An int-dtype device->device cast (int64->int32) cannot use the fp16 on-device
+        # v2v engine, so it round-trips the host -> explain shows copy_d2d_host_bounce
+        # with bytes and a RED verdict. (A plain non-contiguous fp16 slice copy no longer
+        # bounces here -- the runtime's strided v2v now handles it fully on-device.)
+        s = torch.tensor([3, 4, 5, 6], dtype=torch.int64).to(DEV)
         with torch.rbln.explain() as p:
-            big = torch.randn(512, 512, device=DEV, dtype=torch.float16)
-            dst = torch.empty(512, 256, device=DEV, dtype=torch.float16)
-            dst.copy_(big[:, :256])  # non-contiguous src -> NOT direct -> host round-trip
+            _ = s.to(torch.int32)
         hb = p.dump()["hidden_host_bounce"]
         self.assertGreaterEqual(hb["by_site"]["copy_d2d_host_bounce"]["count"], 1)
         self.assertGreater(hb["total_bytes"], 0)  # real bytes were moved through host
@@ -247,9 +250,8 @@ class TestProfilerTruthfulnessAndScope(TestCase):
 
     def test_regions_are_independent_deltas(self):
         with torch.rbln.explain() as p1:
-            big = torch.randn(256, 256, device=DEV, dtype=torch.float16)
-            dst = torch.empty(256, 128, device=DEV, dtype=torch.float16)
-            dst.copy_(big[:, :128])
+            s = torch.tensor([3, 4, 5, 6], dtype=torch.int64).to(DEV)
+            _ = s.to(torch.int32)  # int d2d cast -> host bounce (fp16 v2v can't serve int)
         self.assertGreaterEqual(p1.dump()["hidden_host_bounce"]["total_count"], 1)
         # a fresh region must not inherit the previous region's incidents.
         with torch.rbln.explain() as p2:
@@ -300,6 +302,34 @@ class TestProfilerApi(TestCase):
         tbo = on.dump()["trace_by_op"]
         self.assertIn("aten::add.out", tbo)
         self.assertIn("_do_fallback", tbo["aten::add.out"])  # the user's call-site frame
+
+    def test_A_where_traces_bounce_site(self):
+        # (A) WHERE also covers host BOUNCES (not just cpu_fallback/recompile): with
+        # trace=True the bounced copy's Python call-site is captured under the site
+        # name, so the report can point at the offending copy. Previously a bounce was
+        # counted but unlocatable. OFF by default (a plain region captures nothing).
+        import torch_rbln._C as _C
+
+        if not hasattr(_C, "_explain_set_trace"):
+            self.skipTest("trace capture not exposed by this _C build")
+
+        def _do_bounce():
+            s = torch.tensor([7, 8], dtype=torch.int64).to(DEV)
+            return s.to(torch.int32)  # int d2d cast -> copy_d2d_host_bounce
+
+        with torch.rbln.explain() as off:
+            _do_bounce()
+        self.assertEqual(off.dump()["trace_by_op"], {})  # opt-in: nothing unless asked
+
+        with torch.rbln.explain(trace=True) as on:
+            _do_bounce()
+        d = on.dump()
+        if d["hidden_host_bounce"]["by_site"]["copy_d2d_host_bounce"]["count"] < 1:
+            self.skipTest("int cast did not bounce on this runtime")
+        tbo = d["trace_by_op"]
+        self.assertIn("copy_d2d_host_bounce", tbo)  # the bounce site was captured
+        self.assertIn("_do_bounce", tbo["copy_d2d_host_bounce"])  # user's call-site frame
+        self.assertIn("at host_bounce/copy_d2d_host_bounce", on.report())
 
     def test_diff_reports_only_what_changed_between_two_regions(self):
         # explain doesn't know lifecycle; diff compares two regions the USER places.

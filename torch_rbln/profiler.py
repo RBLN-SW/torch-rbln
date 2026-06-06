@@ -585,12 +585,19 @@ class RBLNExplain:
             shown = ", ".join(f"{op} {c}" for op, c in items[:8])
             return shown + ("" if len(items) <= 8 else f", +{len(items) - 8} more")
 
-        tbo = d.get("trace_by_op") or {}  # (A) WHERE: op -> call-site, only when trace=True
+        tbo = d.get("trace_by_op") or {}  # (A) WHERE: op/bounce-site -> call-site, only when trace=True
 
         def _where(by_op: dict) -> None:
             for op in list(by_op)[:3]:
                 if op in tbo:
                     lines.append(f"      at {op}: {tbo[op]}")
+
+        # (A) WHERE for bounces: trace=True keys the bounced copy's call-site under
+        # the site name -> show it so the user can locate the host round-trip itself
+        # (previously only fallback/recompile had a call-site; bounces were unlocatable).
+        for _bname, _bv in d["hidden_host_bounce"]["by_site"].items():
+            if _bv["count"] and _bname in tbo:
+                lines.append(f"      at host_bounce/{_bname}: {tbo[_bname]}")
 
         fbo = d.get("cpu_fallback_by_op") or {}
         if fbo:

@@ -6,6 +6,7 @@
 #include <ATen/native/rbln/RBLNCPUFallback.h>
 #include <ATen/ops/empty.h>
 #include <c10/rbln/RBLNFunctions.h>
+#include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNSupportedDtypes.h>
 #include <torch/csrc/jit/python/pybind_utils.h>
 #include <torch/library.h>
@@ -1450,11 +1451,42 @@ void diag_reset_fallback_reasons() {
   }
 }
 
+// (A) WHERE for bounces: c10::record_bounce calls this (when installed) with the
+// BounceSite ordinal. Map it to the report label and reuse capture_site, so a
+// bounced copy_ gets its Python call-site keyed by the site name in trace_by_op
+// (the report shows "at ..." under the bounce row). noexcept: it is invoked from
+// c10's noexcept record_bounce, so it must never let an exception escape. The
+// names + order mirror BounceSite and profiler.py's _BOUNCE_SITES.
+static void bounce_site_capture(uint8_t site) noexcept {
+  if (!g_trace_enabled.load(std::memory_order_relaxed)) {
+    return;
+  }
+  static constexpr std::array<const char*, 5> kNames = {
+      "copy_d2d_host_bounce",
+      "copy_h2d_staging",
+      "copy_h2d_noncontig_dst",
+      "strided_v2v_cpu_fallback",
+      "v2v_batch_to_per_entry"};
+  if (site >= kNames.size()) {
+    return;
+  }
+  // This hook runs inside c10's noexcept record_bounce, so it must never throw.
+  // capture_site can (mutex / map alloc); swallow — a diagnostic hook failing is
+  // not worth aborting the run.
+  try {
+    capture_site(kNames[site]);
+  } catch (...) {
+    return;
+  }
+}
+
 // (A) WHERE: opt-in call-site capture. enable() flips the gate the slow branches
 // read; dump returns (op_name -> "file:line(func) <- ...") for the ops that fired
-// while enabled; reset clears between regions.
+// while enabled; reset clears between regions. Also (un)installs the bounce hook
+// in c10 so bounced copies capture their call-site too (ON==OFF: null when off).
 void diag_set_trace_enabled(bool on) {
   g_trace_enabled.store(on, std::memory_order_relaxed);
+  c10::rbln::prof::set_bounce_capture_fn(on ? &bounce_site_capture : nullptr);
 }
 
 std::vector<std::pair<std::string, std::string>> diag_dump_trace_by_op() {
