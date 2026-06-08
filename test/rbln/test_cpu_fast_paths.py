@@ -53,6 +53,15 @@ class TestCPUFastPathRegistration(TestCase):
     def test_mean_out_registered(self):
         self.assertTrue(_C._cpu_fast_path_registered("aten::mean.out"))
 
+    def test_sub_out_registered(self):
+        self.assertTrue(_C._cpu_fast_path_registered("aten::sub.out"))
+
+    def test_mul_out_registered(self):
+        self.assertTrue(_C._cpu_fast_path_registered("aten::mul.out"))
+
+    def test_clamp_out_registered(self):
+        self.assertTrue(_C._cpu_fast_path_registered("aten::clamp.out"))
+
     def test_unregistered_op_returns_false(self):
         # add.out goes through the dispatch shim, not the cpu_fallback fast-path
         # registry — should not be present here.
@@ -150,9 +159,96 @@ class TestMeanLastDimFastPath(TestCase):
         self.assertEqual(rbln_out.cpu(), cpu_x.mean(dim=-1, keepdim=False), rtol=1e-5, atol=1e-6)
 
 
+@pytest.mark.test_set_ci
+class TestIntSubFastPath(TestCase):
+    """`aten::sub.out` integer fast path. The fp16-only device falls int ops back
+    to CPU; the handler runs a host loop (int64 accumulate, stored in out dtype).
+    Covers same-shape, scalar/last-dim broadcast, all int widths, and the
+    alpha != 1 guard fall-through."""
+
+    def test_int32_same_shape_matches_cpu(self):
+        cpu_a = torch.tensor([5, 3, 9, 1], dtype=torch.int32)
+        cpu_b = torch.tensor([1, 2, 3, 4], dtype=torch.int32)
+        ra, rb = cpu_a.to("rbln"), cpu_b.to("rbln")
+        self.assertEqual((ra - rb).cpu(), cpu_a - cpu_b)
+
+    def test_int64_same_shape_matches_cpu(self):
+        cpu_a = torch.tensor([5, 3, 9, 1], dtype=torch.int64)
+        cpu_b = torch.tensor([1, 2, 3, 4], dtype=torch.int64)
+        ra, rb = cpu_a.to("rbln"), cpu_b.to("rbln")
+        self.assertEqual((ra - rb).cpu(), cpu_a - cpu_b)
+
+    def test_int16_same_shape_matches_cpu(self):
+        cpu_a = torch.tensor([5, 3, 9, 1], dtype=torch.int16)
+        cpu_b = torch.tensor([1, 2, 3, 4], dtype=torch.int16)
+        ra, rb = cpu_a.to("rbln"), cpu_b.to("rbln")
+        self.assertEqual((ra - rb).cpu(), cpu_a - cpu_b)
+
+    def test_int32_scalar_broadcast_matches_cpu(self):
+        # `logits_indices = query_start_loc[1:] - 1` shape.
+        cpu_a = torch.tensor([5, 3, 9], dtype=torch.int32)
+        ra = cpu_a.to("rbln")
+        self.assertEqual((ra - 1).cpu(), cpu_a - 1)
+
+    def test_int32_lastdim_broadcast_matches_cpu(self):
+        # `cs - pidx * partition_len` shape: [num_reqs, num_partition] - [num_partition].
+        cpu_a = torch.tensor([[10, 20, 30]], dtype=torch.int32)
+        cpu_b = torch.tensor([1, 2, 3], dtype=torch.int32)
+        ra, rb = cpu_a.to("rbln"), cpu_b.to("rbln")
+        self.assertEqual((ra - rb).cpu(), cpu_a - cpu_b)
+
+    def test_alpha_not_one_falls_through(self):
+        # Handler guards on alpha == 1; alpha=2 must take the generic path.
+        cpu_a = torch.tensor([5, 3, 9, 1], dtype=torch.int32)
+        cpu_b = torch.tensor([1, 2, 3, 4], dtype=torch.int32)
+        ra, rb = cpu_a.to("rbln"), cpu_b.to("rbln")
+        self.assertEqual(torch.sub(ra, rb, alpha=2).cpu(), torch.sub(cpu_a, cpu_b, alpha=2))
+
+
+@pytest.mark.test_set_ci
+class TestIntMulFastPath(TestCase):
+    """`aten::mul.out` integer fast path; same-shape and scalar broadcast."""
+
+    def test_int32_same_shape_matches_cpu(self):
+        cpu_a = torch.tensor([5, 3, 9, 1], dtype=torch.int32)
+        cpu_b = torch.tensor([1, 2, 3, 4], dtype=torch.int32)
+        ra, rb = cpu_a.to("rbln"), cpu_b.to("rbln")
+        self.assertEqual((ra * rb).cpu(), cpu_a * cpu_b)
+
+    def test_int32_scalar_broadcast_matches_cpu(self):
+        # `pidx * partition_len` shape.
+        cpu_a = torch.tensor([0, 1, 2, 3], dtype=torch.int32)
+        ra = cpu_a.to("rbln")
+        self.assertEqual((ra * 1024).cpu(), cpu_a * 1024)
+
+
+@pytest.mark.test_set_ci
+class TestIntClampFastPath(TestCase):
+    """`aten::clamp.out` integer fast path; min+max, min-only, max-only."""
+
+    def test_int32_min_max_matches_cpu(self):
+        # `clamp(.., 0, partition_len)` shape.
+        cpu_x = torch.tensor([-5, 0, 500, 2000], dtype=torch.int32)
+        rx = cpu_x.to("rbln")
+        self.assertEqual(torch.clamp(rx, 0, 1024).cpu(), torch.clamp(cpu_x, 0, 1024))
+
+    def test_int32_min_only_matches_cpu(self):
+        cpu_x = torch.tensor([-5, 0, 7], dtype=torch.int32)
+        rx = cpu_x.to("rbln")
+        self.assertEqual(torch.clamp(rx, min=0).cpu(), torch.clamp(cpu_x, min=0))
+
+    def test_int32_max_only_matches_cpu(self):
+        cpu_x = torch.tensor([-5, 0, 2000], dtype=torch.int32)
+        rx = cpu_x.to("rbln")
+        self.assertEqual(torch.clamp(rx, max=1024).cpu(), torch.clamp(cpu_x, max=1024))
+
+
 instantiate_device_type_tests(TestRsqrtFastPath, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestPowSquaredFastPath, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestMeanLastDimFastPath, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestIntSubFastPath, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestIntMulFastPath, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestIntClampFastPath, globals(), only_for="privateuse1")
 
 
 if __name__ == "__main__":
