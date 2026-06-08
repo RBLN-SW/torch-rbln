@@ -114,7 +114,7 @@ The value is a **comma-separated list** of fallback case names to disable:
 | `dispatch_mode`  | Falls back to CPU when a non-infra `TorchDispatchMode` is active | Skips the check — risks infinite recursion                    |
 | `trace`          | Falls back to CPU when a Python trace is active (e.g. pdb, coverage) | Skips the check — compile may run under tracer              |
 | `reentrant`      | Falls back to CPU when already inside RBLN compile op (e.g. print/repr, nested op); logs a warning | Skips the check — risks infinite recursion                 |
-| `dtype`          | Falls back when any input tensor is not `torch.float16`          | Sends non-float16 tensors to RBLN — may produce wrong results |
+| `dtype`          | Falls back on unsupported or mismatched tensor dtypes            | Sends such tensors to RBLN — may produce wrong results        |
 | `scalar`         | Falls back when all input tensors are 0-dim scalars              | Sends scalar ops to RBLN — may fail in rebel-compiler         |
 | `storage_offset` | Falls back when a contiguous tensor has `storage_offset != 0`    | Sends offset tensors to RBLN — may read wrong data            |
 | `nan_inf`        | Falls back when inputs contain NaN or Inf (non-deploy mode only) | Skips the NaN/Inf scan — invalid values reach the device      |

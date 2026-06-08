@@ -313,7 +313,7 @@ instantiate_device_type_tests(TestRegisteredNativeOps, globals(), only_for="priv
 |----------------------------------------|---------------------------------------------------------------------------------------------------------------------------------|
 | `@requires_logical_devices(N)`         | `pytest.mark.skipif` — skips if `torch.rbln.device_count() < N`.                                                                |
 | `@requires_physical_devices(N)`        | `pytest.mark.skipif` — skips if `torch.rbln.physical_device_count() < N`.                                                       |
-| `SUPPORTED_DTYPES`                     | `[torch.float16]` — the baseline dtype list for RBLN backend tests.                                                             |
+| `SUPPORTED_DTYPES`                     | Baseline dtype list for RBLN backend tests, derived from `torch_rbln._internal.ops_utils.SupportedDtypes.dispatch`.             |
 | `set_deterministic_seeds(seed)`        | Sets torch, numpy, and random seeds. Must be called in each spawned process for reproducibility.                                |
 | `run_in_isolated_process(func, *args)` | Runs `func` in a fresh `spawn`-method process. Useful when tests need clean process state. `func` and `args` must be picklable. |
 

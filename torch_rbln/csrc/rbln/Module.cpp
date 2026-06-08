@@ -6,6 +6,8 @@
 #include <c10/rbln/RBLNFallbackConfig.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
+#include <c10/rbln/RBLNSupportedDtypes.h>
+#include <torch/csrc/Dtype.h>
 #include <torch/csrc/utils/pybind.h>
 #include <torch_rbln/csrc/distributed/c10d/rbln/ProcessGroupRBLNModule.hpp>
 #include <torch_rbln/csrc/rbln/DispatchShim.h>
@@ -252,6 +254,37 @@ void register_internal_api(py::module_& module) {
       "Internal: enable or disable process-wide RBLN vmemory file offloading.");
 }
 
+py::tuple supported_dtypes_to_tuple(c10::ArrayRef<c10::ScalarType> scalar_types) {
+  const auto n = scalar_types.size();
+  py::tuple out(n);
+  for (size_t i = 0; i < n; ++i) {
+    // `getTHPDtype` returns a borrowed reference to a process-wide singleton.
+    auto* const dtype_obj = reinterpret_cast<PyObject*>(torch::getTHPDtype(scalar_types[i]));
+    out[i] = py::reinterpret_borrow<py::object>(dtype_obj);
+  }
+  return out;
+}
+
+/**
+ * @brief Register dtype tuple getters consumed by Python `SupportedDtypes`.
+ *
+ * @param module The Python module to register the functions with
+ */
+void register_supported_dtypes_api(py::module_& module) {
+  module.def(
+      "_dispatch_dtypes",
+      [] { return supported_dtypes_to_tuple(c10::rbln::kDispatchDtypes); },
+      "Internal: eager-dispatch supported dtypes");
+  module.def(
+      "_sdpa_dtypes",
+      [] { return supported_dtypes_to_tuple(c10::rbln::kSdpaDtypes); },
+      "Internal: SDPA kernel supported dtypes");
+  module.def(
+      "_amp_dtypes",
+      [] { return supported_dtypes_to_tuple(c10::rbln::kAmpDtypes); },
+      "Internal: AMP autocast supported dtypes");
+}
+
 /**
  * @brief Register distributed method definitions with the module
  *
@@ -291,6 +324,7 @@ static std::vector<PyMethodDef> global_method_definitions;
  *    - register_distributed_method(): Adds distributed method definitions
  *    - register_public_device_api(): Registers public device functions
  *    - register_internal_api(): Registers internal backend functions
+ *    - register_supported_dtypes_api(): Registers supported dtype getters
  *
  * This approach follows the ascend-torch pattern and ensures clean separation
  * of concerns while avoiding circular import issues.
@@ -321,6 +355,7 @@ extern "C" PyObject* initModule() {
   // Step 4: Register all RBLN components
   register_public_device_api(python_module);
   register_internal_api(python_module);
+  register_supported_dtypes_api(python_module);
 
   c10::rbln::register_rbln_device_mapping_initialized_callback([]() {
     py::gil_scoped_acquire gil;
