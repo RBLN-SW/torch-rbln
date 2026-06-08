@@ -351,4 +351,18 @@ C10_RBLN_API void reset_peak_memory_stats(const c10::Device& device);
  */
 C10_RBLN_API void set_file_offloading_enabled(bool enabled);
 
+/**
+ * @brief Diagnostic: time spent inside librbln boundary calls (borrow / v2v /
+ * h2v / ...), so a profiler can split host overhead into "rebel runtime" vs
+ * "torch-side dispatch". Gated: when disabled each boundary call pays only one
+ * relaxed atomic load (no clock read), preserving ON==OFF latency; an explain
+ * region flips it on for its duration. ``rt_timing_get`` fills ``2 * kRtTimingN``
+ * uint64 slots as ``[ns, calls]`` per primitive (order matches the internal
+ * RtIdx enum: v2v, v2v_multi, borrow, acquire, return, v2h, h2v).
+ */
+constexpr std::size_t kRtTimingN = 7;
+C10_RBLN_API void rt_timing_enable(bool on);
+C10_RBLN_API void rt_timing_reset();
+C10_RBLN_API void rt_timing_get(uint64_t* out);
+
 } // namespace c10::rbln

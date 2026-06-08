@@ -353,5 +353,81 @@ class TestProfilerApi(TestCase):
         self.assertIsInstance(r1.diff(r2).report(), str)
 
 
+@pytest.mark.test_set_ci
+class TestProfilerHostCostContext(TestCase):
+    """Host-cost context signals: (A) which fallback ops lack a fast-path handler,
+    (E) host CPU oversubscription, (B) rebel-runtime (librbln) boundary time vs
+    torch-side dispatch."""
+
+    def test_A_unaccelerated_lists_only_unhandled_fallback_ops(self):
+        import torch_rbln._C as _C
+
+        if not hasattr(_C, "_cpu_fast_path_registered"):
+            self.skipTest("fast-path registry query not exposed by this _C build")
+        a = torch.tensor([5, 3, 9, 1], dtype=torch.int32).to(DEV)
+        b = torch.tensor([1, 2, 3, 4], dtype=torch.int32).to(DEV)
+        with torch.rbln.explain() as p:
+            _ = a - b  # int -> cpu_fallback
+        d = p.dump()
+        fbo = d["cpu_fallback_by_op"]
+        unaccel = d.get("cpu_fallback_unaccelerated", [])
+        # self-consistency (robust to handlers landing later): every listed op is a
+        # fallback op with no registered handler; any handled fallback op is excluded.
+        for op in unaccel:
+            self.assertIn(op, fbo)
+            self.assertFalse(_C._cpu_fast_path_registered(op))
+        for op in fbo:
+            if _C._cpu_fast_path_registered(op):
+                self.assertNotIn(op, unaccel)
+        if unaccel:
+            self.assertIn("no fast-path handler", p.report())
+
+    def test_E_host_threads_resource_fact(self):
+        with torch.rbln.explain() as p:
+            _ = torch.randn(8, 8, device=DEV, dtype=torch.float16)
+        ht = p.dump()["host_threads"]
+        self.assertGreaterEqual(ht["cores"], 1)
+        self.assertIsInstance(ht["oversubscribed"], bool)
+        # oversubscribed iff intended host parallelism exceeds the allowed cores.
+        self.assertEqual(ht["oversubscribed"], ht["cores"] > 0 and ht["intended_threads"] > ht["cores"])
+
+    def test_B_rebel_runtime_time_split(self):
+        import torch_rbln._C as _C
+
+        if not hasattr(_C, "_rt_timing_get"):
+            self.skipTest("rt-timing not exposed by this _C build")
+        a = torch.tensor([5, 3, 9, 1], dtype=torch.int32).to(DEV)
+        b = torch.tensor([1, 2, 3, 4], dtype=torch.int32).to(DEV)
+        with torch.rbln.explain() as p:
+            for _ in range(20):
+                _ = (a - b).cpu()  # exercises borrow / return / acquire / v2h boundary calls
+        rt = p.dump().get("rebel_runtime")
+        self.assertIsNotNone(rt)
+        self.assertGreaterEqual(rt["total_ns"], 0)
+        self.assertGreaterEqual(rt["wall_fraction"], 0.0)
+        self.assertLessEqual(rt["wall_fraction"], 1.0)
+        prims = {"v2v", "v2v_multi", "borrow", "acquire", "return", "v2h", "h2v"}
+        for prim, vv in rt["by_primitive"].items():
+            self.assertIn(prim, prims)
+            self.assertGreater(vv["calls"], 0)
+        self.assertTrue(rt["by_primitive"])  # boundary calls happened -> recorded
+        self.assertIn("rebel runtime", p.report())
+
+    def test_B_gated_off_outside_region(self):
+        # ON==OFF guard: librbln work OUTSIDE any explain region must NOT be counted
+        # (the timers are gated off + reset at region entry).
+        import torch_rbln._C as _C
+
+        if not hasattr(_C, "_rt_timing_get"):
+            self.skipTest("rt-timing not exposed by this _C build")
+        a = torch.tensor([1, 2], dtype=torch.int32).to(DEV)
+        _ = (a - a).cpu()  # boundary calls OUTSIDE a region -> gate off -> uncounted
+        with torch.rbln.explain() as p:
+            pass  # empty region
+        rt = p.dump().get("rebel_runtime")
+        self.assertIsNotNone(rt)
+        self.assertEqual(rt["total_ns"], 0)
+
+
 if __name__ == "__main__":
     run_tests()

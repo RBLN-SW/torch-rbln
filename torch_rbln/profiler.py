@@ -206,6 +206,93 @@ def _read_fallback_reasons() -> list[int]:
     return [int(c) for c in fn()]
 
 
+# --- (A) fast-path handler coverage: which fallback ops are un-accelerated -----
+def _read_fast_path_registered(op_name: str) -> Optional[bool]:
+    """True/False if the loaded _C can say whether ``op_name`` has a CPU
+    fast-path handler; None if the binding is absent (graceful degrade)."""
+    import torch_rbln._C as _C
+
+    fn = getattr(_C, "_cpu_fast_path_registered", None)
+    if fn is None:
+        return None
+    try:
+        return bool(fn(op_name))
+    except Exception:
+        return None
+
+
+# --- (E) host CPU oversubscription: an environment amplifier of host overhead --
+def _host_thread_info() -> dict[str, Any]:
+    """Cores this process may run on vs the host-thread parallelism. When threads
+    far exceed cores the worker's tiny serial host ops get preempted by the idle
+    OMP/numba pool, inflating per-op host latency several-fold -- invisible to any
+    per-op counter. A resource fact (like device memory), never a per-op verdict."""
+    import os
+
+    info: dict[str, Any] = {}
+    try:
+        info["cores"] = len(os.sched_getaffinity(0))  # cores actually allowed (post-pin)
+    except (AttributeError, OSError):
+        info["cores"] = os.cpu_count() or 0
+    try:
+        import torch
+
+        info["torch_threads"] = int(torch.get_num_threads())
+    except Exception:
+        info["torch_threads"] = 0
+    try:
+        info["omp_threads"] = int(os.environ.get("OMP_NUM_THREADS", "0") or 0)
+    except ValueError:
+        info["omp_threads"] = 0
+    try:
+        with open("/proc/self/status") as f:
+            for ln in f:
+                if ln.startswith("Threads:"):
+                    info["proc_threads"] = int(ln.split()[1])
+                    break
+    except Exception:
+        pass
+    intended = max(info.get("omp_threads", 0), info["torch_threads"], info.get("proc_threads", 0))
+    info["intended_threads"] = intended
+    info["oversubscribed"] = info["cores"] > 0 and intended > info["cores"]
+    return info
+
+
+# --- (B) rebel-runtime (librbln) boundary time, gated on the explain region ----
+# Order MUST match the C++ RtIdx enum in c10/rbln/RBLNFunctions.cpp.
+_RT_PRIMS = ("v2v", "v2v_multi", "borrow", "acquire", "return", "v2h", "h2v")
+
+
+def _rt_timing_enable(on: bool) -> None:
+    import torch_rbln._C as _C
+
+    fn = getattr(_C, "_rt_timing_enable", None)
+    if fn is not None:
+        fn(on)
+
+
+def _rt_timing_reset() -> None:
+    import torch_rbln._C as _C
+
+    fn = getattr(_C, "_rt_timing_reset", None)
+    if fn is not None:
+        fn()
+
+
+def _read_rt_timing() -> Optional[list[tuple[int, int]]]:
+    """Per-primitive (ns, calls) spent inside librbln boundary calls, or None if
+    the loaded _C predates the binding (graceful degrade)."""
+    import torch_rbln._C as _C
+
+    fn = getattr(_C, "_rt_timing_get", None)
+    if fn is None:
+        return None
+    try:
+        return [(int(ns), int(cnt)) for ns, cnt in fn()]
+    except Exception:
+        return None
+
+
 # --- (A) WHERE: opt-in Python call-site capture (off by default) --------------
 def _read_trace_by_op() -> dict[str, str]:
     """Per-op captured call-site (op_name -> 'file:line(func) <- ...'), or {} if
@@ -366,12 +453,17 @@ class RBLNExplain:
         self._fallback_reasons = None
         self._trace = trace
         self._trace_by_op: Optional[dict] = None
+        self._rt_timing: Optional[list[tuple[int, int]]] = None  # (B) per-primitive librbln (ns, calls)
         self._wall_ns = 0
 
     def start(self) -> RBLNExplain:
         if self._trace:
             _set_trace(True)
             _reset_trace()  # region-local captures (the C++ map dedups per op)
+        # (B) gate the librbln boundary timers ON for this region only (off => one
+        # relaxed atomic load per boundary call, no clock read -> ON==OFF preserved).
+        _rt_timing_reset()
+        _rt_timing_enable(True)
         self._b0 = _read_bounces()
         self._d0 = _read_dispatch()
         self._f0 = _read_fallback_by_op()
@@ -383,6 +475,8 @@ class RBLNExplain:
 
     def stop(self) -> RBLNExplain:
         self._wall_ns = time.perf_counter_ns() - self._wall0
+        self._rt_timing = _read_rt_timing()  # (B) region totals (reset at start)
+        _rt_timing_enable(False)
         b1, d1, rt1 = _read_bounces(), _read_dispatch(), _read_runtime()
         self._bounces = [(c1 - c0, by1 - by0) for (c0, by0), (c1, by1) in zip(self._b0, b1)]
         self._dispatch = tuple(x1 - x0 for x0, x1 in zip(self._d0, d1))
@@ -487,6 +581,29 @@ class RBLNExplain:
                 "hidden_d2h / residency (STATE)",
                 "device memory gauge",
             ]
+        # (A) which fallback ops lack a CPU fast-path handler = the optimization
+        # candidates (registered ones already bypass redispatchBoxed). Omitted when
+        # the _C predates the registry query (can't tell handled from un-handled).
+        unaccel: list[str] = []
+        for op in out["cpu_fallback_by_op"]:
+            if _read_fast_path_registered(op) is False:
+                unaccel.append(op)
+        if unaccel:
+            out["cpu_fallback_unaccelerated"] = unaccel
+
+        # (E) host CPU oversubscription (resource fact; amplifies all host overhead)
+        out["host_threads"] = _host_thread_info()
+
+        # (B) rebel-runtime (librbln) boundary time this region, per primitive.
+        if self._rt_timing is not None:
+            total_ns = sum(ns for ns, _c in self._rt_timing)
+            by_prim = {name: {"ns": ns, "calls": cnt} for name, (ns, cnt) in zip(_RT_PRIMS, self._rt_timing) if cnt}
+            out["rebel_runtime"] = {
+                "total_ns": total_ns,
+                "wall_fraction": (total_ns / self._wall_ns) if self._wall_ns else 0.0,
+                "by_primitive": by_prim,
+            }
+
         out["remedies"] = _collect_remedies(out)
         return out
 
@@ -535,6 +652,26 @@ class RBLNExplain:
             head += f" · mem {_fmt_bytes(d['device_memory']['peak_bytes'])} peak"
         head += ")"
         lines = [head]
+
+        # (E) host CPU oversubscription -- an environment amplifier of ALL host
+        # overhead (worker pinned to few cores while OMP/numba keep many threads).
+        # Shown up-front because it inflates per-op latency without any per-op bug.
+        ht = d.get("host_threads") or {}
+        if ht.get("oversubscribed"):
+            lines.append(
+                f"  ! host oversubscription: {ht['intended_threads']} threads on {ht['cores']} core(s)"
+                " -> per-op host latency may be inflated (tune affinity / OMP_NUM_THREADS)"
+            )
+        # (B) rebel-runtime (librbln) boundary time: how much of the region is the
+        # runtime itself (borrow/v2v/h2v...) vs torch-side dispatch. A region FACT.
+        rtm = d.get("rebel_runtime")
+        if rtm and rtm["total_ns"]:
+            bp = sorted(rtm["by_primitive"].items(), key=lambda kv: -kv[1]["ns"])
+            top = " · ".join(f"{n} {v['ns'] / 1000:.1f}({v['calls']})" for n, v in bp[:6])
+            lines.append(
+                f"  rebel runtime: {rtm['total_ns'] / 1000:.1f} us in librbln"
+                f" ({rtm['wall_fraction'] * 100:.1f}% of wall) -- {top}"
+            )
 
         rr = d["runtime_residency"]
         # host->device push (runtime): the lazy push at the device-consume boundary.
@@ -610,6 +747,12 @@ class RBLNExplain:
         if fr:
             lines.append("      why: " + ", ".join(f"{n} {c}" for n, c in fr.items()))
         _where(fbo)
+        # (A) of the fallback ops, which have NO CPU fast-path handler -> the
+        # actionable optimization candidates (add a fast_paths/*.cpp handler).
+        unaccel = d.get("cpu_fallback_unaccelerated") or []
+        if unaccel:
+            shown = ", ".join(unaccel[:8]) + ("" if len(unaccel) <= 8 else f", +{len(unaccel) - 8} more")
+            lines.append(f"      no fast-path handler (optimization candidates): {shown}")
         rbo = d.get("recompile_by_op") or {}
         if rbo:
             lines.append(f"    recompile: {_top(rbo)}")

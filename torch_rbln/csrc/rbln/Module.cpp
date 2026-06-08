@@ -264,6 +264,28 @@ void register_internal_api(py::module_& module) {
       },
       "Internal: returns True iff a CPU fast-path handler is registered for the given op name");
 
+  // (B) explain: rebel-runtime (librbln) boundary timing. Gated so it is OFF
+  // (one relaxed atomic load per boundary call) unless an explain region enables
+  // it; lets the profiler split host overhead into runtime vs torch-side dispatch.
+  module.def(
+      "_rt_timing_enable",
+      [](bool on) { c10::rbln::rt_timing_enable(on); },
+      "Internal: enable/disable librbln boundary timing for an explain region");
+  module.def("_rt_timing_reset", []() { c10::rbln::rt_timing_reset(); }, "Internal: zero the librbln boundary timers");
+  module.def(
+      "_rt_timing_get",
+      []() {
+        std::vector<uint64_t> buf(2 * c10::rbln::kRtTimingN, uint64_t{0});
+        c10::rbln::rt_timing_get(buf.data());
+        std::vector<std::pair<uint64_t, uint64_t>> out;
+        out.reserve(c10::rbln::kRtTimingN);
+        for (std::size_t i = 0; i < c10::rbln::kRtTimingN; ++i) {
+          out.emplace_back(buf[2 * i], buf[2 * i + 1]);
+        }
+        return out;
+      },
+      "Internal: per-primitive (ns, calls) spent inside librbln boundary calls this region");
+
   // Pybind11 instance raw-pointer extractor.
   //
   // For a pybind11 simple-layout instance (single-inheritance, standard
