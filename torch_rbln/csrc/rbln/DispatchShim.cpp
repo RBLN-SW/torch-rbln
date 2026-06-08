@@ -6,6 +6,7 @@
 #include <ATen/native/rbln/RBLNCPUFallback.h>
 #include <ATen/ops/empty.h>
 #include <c10/rbln/RBLNFunctions.h>
+#include <c10/rbln/RBLNSupportedDtypes.h>
 #include <torch/csrc/jit/python/pybind_utils.h>
 #include <torch/library.h>
 
@@ -476,6 +477,16 @@ inline bool fp16_has_nan_or_inf(const uint16_t* data, size_t n) noexcept {
   return false;
 }
 
+using ScannerFn = bool (*)(const uint16_t*, size_t);
+inline ScannerFn scanner_for(c10::ScalarType scalar_type) {
+  switch (scalar_type) {
+    case c10::kHalf:
+      return fp16_has_nan_or_inf;
+    default:
+      TORCH_INTERNAL_ASSERT(false, "missing scanner for ScalarType");
+  }
+}
+
 // Scan a single tensor for NaN/Inf. Uses ``c10::rbln::borrow_host_ptr`` for
 // rbln tensors so a host-latest entry pays no D2H cost; device-latest entries
 // will trigger a D2H sync (this is the price of catching NaN/Inf in
@@ -495,8 +506,10 @@ bool tensor_has_nan_or_inf(const at::Tensor& t) {
   const auto numel = t.numel();
   if (numel == 0)
     return false;
-  if (t.scalar_type() != c10::kHalf)
+  if (!c10::rbln::is_dispatch_dtype(t.scalar_type())) {
     return false;
+  }
+  const auto scanner = scanner_for(t.scalar_type());
   if (!t.is_contiguous())
     return false;
 
@@ -508,7 +521,7 @@ bool tensor_has_nan_or_inf(const at::Tensor& t) {
     const uint16_t* data = static_cast<const uint16_t*>(t.data_ptr());
     if (data == nullptr)
       return false;
-    return fp16_has_nan_or_inf(data, n);
+    return scanner(data, n);
   }
 
   void* ptr = t.data_ptr();
@@ -527,10 +540,10 @@ bool tensor_has_nan_or_inf(const at::Tensor& t) {
     const uint16_t* host_data = static_cast<const uint16_t*>(cpu_copy.data_ptr());
     if (host_data == nullptr)
       return false;
-    return fp16_has_nan_or_inf(host_data, n);
+    return scanner(host_data, n);
   }
   void* host_raw = reinterpret_cast<void*>(borrowed->host_ptr); // NOLINT(performance-no-int-to-ptr)
-  const bool found = fp16_has_nan_or_inf(static_cast<const uint16_t*>(host_raw), n);
+  const bool found = scanner(static_cast<const uint16_t*>(host_raw), n);
   c10::rbln::return_borrowed(borrowed->borrow_id, /*updated=*/false);
   return found;
 }
@@ -607,7 +620,7 @@ bool quick_fallback_check(
       continue;
     }
     has_input_tensor = true;
-    if (t.scalar_type() != c10::kHalf) {
+    if (!c10::rbln::is_dispatch_dtype(t.scalar_type())) {
       return true;
     }
     if (t.dim() != 0) {

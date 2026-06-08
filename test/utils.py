@@ -7,8 +7,10 @@ import numpy as np
 import pytest
 import torch
 
+from torch_rbln._internal.ops_utils import SupportedDtypes
 
-SUPPORTED_DTYPES = [torch.float16]
+
+SUPPORTED_DTYPES = list(SupportedDtypes.dispatch)
 
 _DEFAULT_DISTRIBUTED_MASTER_PORT = "29604"
 
