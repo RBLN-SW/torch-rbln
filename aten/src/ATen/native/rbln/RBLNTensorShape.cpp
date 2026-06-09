@@ -63,11 +63,8 @@ at::Tensor& cat_out_rbln(const at::ITensorListRef& tensors, int64_t dim, at::Ten
     RBLN_CHECK(device.is_privateuseone(), "cat_out_rbln: inputs must be on RBLN device, got {}", c10::str(device));
     TORCH_CHECK_TYPE(
         out.device() == device, "cat: out must be on the same device as inputs, got ", out.device(), " vs ", device);
-    RBLN_CHECK(
-        out.scalar_type() == common_dtype,
-        "cat: out dtype mismatch ({} vs {})",
-        c10::str(out.scalar_type()),
-        c10::str(common_dtype));
+    TORCH_CHECK_TYPE(
+        out.scalar_type() == common_dtype, "cat: out dtype mismatch (", out.scalar_type(), " vs ", common_dtype, ")");
     at::native::resize_output(out, {0});
     return out;
   }
@@ -118,15 +115,14 @@ at::Tensor& cat_out_rbln(const at::ITensorListRef& tensors, int64_t dim, at::Ten
     inputs.push_back(t.scalar_type() == common_dtype ? t : t.to(common_dtype));
   }
 
-  // cat/stack family must raise TypeError (not RuntimeError) for cross-device
-  // `out` — see test/ops/test_ops.py:test_out Case 3 / TypeError list.
+  // cat/stack must raise TypeError (not RuntimeError) for a mismatched `out`:
+  // device (test_out Case 3) and unsafe-cast dtype (Case 4), matching native
+  // cat's TORCH_CHECK_TYPE. Strict dtype (not canCast): the v2v copy below
+  // does not cast.
   TORCH_CHECK_TYPE(
       out.device() == device, "cat: out must be on the same device as inputs, got ", out.device(), " vs ", device);
-  RBLN_CHECK(
-      out.scalar_type() == common_dtype,
-      "cat: out dtype mismatch ({} vs {})",
-      c10::str(out.scalar_type()),
-      c10::str(common_dtype));
+  TORCH_CHECK_TYPE(
+      out.scalar_type() == common_dtype, "cat: out dtype mismatch (", out.scalar_type(), " vs ", common_dtype, ")");
 
   // Mirror upstream PyTorch's `aten::cat.out` overlap checks.
   at::assert_no_internal_overlap(out);

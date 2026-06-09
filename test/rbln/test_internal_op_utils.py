@@ -28,6 +28,7 @@ from torch_rbln._internal.ops_utils import (
     is_cpu_fallback_cases,
     is_inplace_op,
     prepare_args_for_contiguous,
+    SupportedDtypes,
 )
 
 
@@ -181,17 +182,68 @@ class TestInternalOpUtils(TestCase):
     # broadcast_args_general tests
     # =========================================================================
 
-    def test_broadcast_args_general(self):
-        a = torch.randn((2, 1), device="rbln")
-        b = torch.randn((2, 3), device="rbln")
+    def test_broadcast_args_general_pass_through(self):
+        # Default contract (2026-04-30+): broadcast_args_general validates
+        # broadcast compatibility but does NOT explicitly broadcast tensors
+        # for patterns rebel-backend handles in-graph (RMSNorm, leading-dim,
+        # middle-dim broadcast, etc.). Raw shapes flow through to
+        # compile_rbln_cached.
+        # Use a leading-dim broadcast pattern (last dims match) — this is the
+        # rebel-implicit-broadcast path, no host materialization expected.
+        a = torch.randn((1, 4), device="rbln")
+        b = torch.randn((3, 4), device="rbln")
         args = (a, "foo", b)
         tensor_args = [a, b]
         new_args = broadcast_args_general(tensor_args, args)
         # non-tensor args preserved
         self.assertEqual(new_args[1], "foo")
-        # tensors broadcasted to shape (2,3)
-        self.assertEqual(new_args[0].shape, torch.Size([2, 3]))
-        self.assertEqual(new_args[2].shape, torch.Size([2, 3]))
+        # tensor shapes preserved as raw (NOT broadcasted)
+        self.assertEqual(new_args[0].shape, torch.Size([1, 4]))
+        self.assertEqual(new_args[2].shape, torch.Size([3, 4]))
+        # underlying tensors unchanged (same data_ptr)
+        self.assertEqual(new_args[0].data_ptr(), a.data_ptr())
+        self.assertEqual(new_args[2].data_ptr(), b.data_ptr())
+
+    def test_broadcast_args_general_last_dim_one_forces_broadcast(self):
+        # Exception to the validate-only default: rebel-backend cannot
+        # implicit-compile broadcast where one operand has shape[-1] == 1
+        # while the result has shape[-1] > 1 (raises ``UNEXPECTED_GRAPH``,
+        # see ``softmax_backward_rbln`` test cases). For that pattern
+        # ``broadcast_args_general`` does ``torch.broadcast_tensors +
+        # .contiguous()`` so compile sees same-shape inputs.
+        a = torch.randn((3, 4), device="rbln")
+        b = torch.randn((3, 1), device="rbln")
+        args = (a, b)
+        tensor_args = [a, b]
+        new_args = broadcast_args_general(tensor_args, args)
+        # Both tensors now have the broadcast result shape (3, 4)
+        self.assertEqual(new_args[0].shape, torch.Size([3, 4]))
+        self.assertEqual(new_args[1].shape, torch.Size([3, 4]))
+        # The size-1 operand was materialized — different storage from input
+        self.assertNotEqual(new_args[1].data_ptr(), b.data_ptr())
+        # And contiguous (so prepare_args_view_aware doesn't re-detect expand)
+        self.assertTrue(new_args[1].is_contiguous())
+
+    def test_broadcast_args_general_compatibility_check(self):
+        # Even though we don't broadcast, we still validate compatibility so
+        # mismatched shapes raise here with full context (not deeper inside
+        # torch.compile / rebel runtime).
+        a = torch.randn((3, 4), device="rbln")
+        b = torch.randn((5, 4), device="rbln")  # 3 vs 5 — not broadcastable
+        with self.assertRaises(RuntimeError) as cm:
+            broadcast_args_general([a, b], (a, b))
+        # Error message should contain the shapes for diagnosability
+        self.assertIn("(3, 4)", str(cm.exception))
+        self.assertIn("(5, 4)", str(cm.exception))
+
+    def test_broadcast_args_general_same_shape_skip(self):
+        # When all tensor inputs share a shape, no validation is needed at all.
+        a = torch.randn((4, 5), device="rbln")
+        b = torch.randn((4, 5), device="rbln")
+        new_args = broadcast_args_general([a, b], (a, b))
+        # Pass-through, identity check
+        self.assertIs(new_args[0], a)
+        self.assertIs(new_args[1], b)
 
     # =========================================================================
     # prepare_args_for_contiguous tests
@@ -225,6 +277,38 @@ class TestInternalOpUtils(TestCase):
         self.assertEqual(contig.flatten(), base.flatten())
 
     # =========================================================================
+    # SupportedDtypes.dispatch tests
+    # =========================================================================
+
+    def test_supported_dtypes_dispatch(self):
+        """Tuple of ``float16``; unsupported dtypes are absent."""
+        self.assertIsInstance(SupportedDtypes.dispatch, tuple)
+        self.assertIn(torch.float16, SupportedDtypes.dispatch)
+        self.assertNotIn(torch.float32, SupportedDtypes.dispatch)
+        self.assertNotIn(torch.bool, SupportedDtypes.dispatch)
+
+    def test_supported_dtypes_sdpa(self):
+        """Tuple of ``float16``; the SDPA path must stay float-only."""
+        self.assertIsInstance(SupportedDtypes.sdpa, tuple)
+        self.assertIn(torch.float16, SupportedDtypes.sdpa)
+        self.assertNotIn(torch.float32, SupportedDtypes.sdpa)
+        self.assertNotIn(torch.int32, SupportedDtypes.sdpa)
+
+    def test_supported_dtypes_amp(self):
+        """Tuple of ``float16``; the AMP autocast path must stay float-only."""
+        self.assertIsInstance(SupportedDtypes.amp, tuple)
+        self.assertIn(torch.float16, SupportedDtypes.amp)
+        self.assertNotIn(torch.float32, SupportedDtypes.amp)
+        self.assertNotIn(torch.int32, SupportedDtypes.amp)
+
+    def test_get_amp_supported_dtype_matches_catalog(self):
+        """``get_amp_supported_dtype()`` delegates to ``SupportedDtypes.amp``."""
+        self.assertEqual(
+            tuple(torch.rbln.get_amp_supported_dtype()),
+            SupportedDtypes.amp,
+        )
+
+    # =========================================================================
     # is_cpu_fallback_cases tests
     # =========================================================================
 
@@ -240,6 +324,22 @@ class TestInternalOpUtils(TestCase):
         # Should not fallback for float16 scalar (unless other conditions apply)
         # Note: scalar tensors still trigger fallback, so this may still be True
         # This test now only checks dtype fallback behavior
+
+    def test_is_cpu_fallback_cases_dtype_float16(self):
+        """``float16`` non-scalar tensor passes the dtype gate."""
+        fp16_tensor = torch.tensor([1.0, 2.0], dtype=torch.float16, device="rbln")
+        self.assertFalse(is_cpu_fallback_cases((fp16_tensor,)))
+
+    def test_is_cpu_fallback_cases_dtype_unsupported(self):
+        """Unsupported dtype (e.g. ``float32``) falls back to CPU."""
+        unsupported_fp32_tensor = torch.tensor([1.0, 2.0], dtype=torch.float32, device="rbln")
+        self.assertTrue(is_cpu_fallback_cases((unsupported_fp32_tensor,)))
+
+    def test_is_cpu_fallback_cases_dtype_mixed_unsupported(self):
+        """When any arg uses an unsupported dtype, fall back to CPU."""
+        supported_fp16_tensor = torch.tensor([1.0, 2.0], dtype=torch.float16, device="rbln")
+        unsupported_fp32_tensor = torch.tensor([3.0, 4.0], dtype=torch.float32, device="rbln")
+        self.assertTrue(is_cpu_fallback_cases((supported_fp16_tensor, unsupported_fp32_tensor)))
 
     def test_is_cpu_fallback_cases_trace(self):
         """When sys.gettrace() is set (e.g. pdb, coverage), is_cpu_fallback_cases returns True (0a)."""
@@ -589,9 +689,101 @@ class TestTorchDispatchModeWithRbln(TestCase):
         self.assertEqual(rbln_result.cpu(), expected, atol=1e-2, rtol=1e-2)
 
 
+@pytest.mark.test_set_ci
+class TestWarmCacheNonContigOut(TestCase):
+    """Regression guard for the warm-cache hit path serving stale layouts.
+
+    Cache keys exclude the write-alias `out=` arg (build_cache_key skips it),
+    so a contig and a non-contig out= for the same op + input shapes share
+    one entry. The runtime cached for the contig profile would write
+    numel*itemsize contiguous bytes into the non-contig view's data_ptr —
+    laying values at the wrong strided positions. try_warmcache_hit must
+    detect non-contig out= and fall through to the pybind miss path.
+    """
+
+    atol = 0.01
+    rtol = 0.01
+
+    def _diag_warm_hits(self):
+        # _dispatch_shim_diag_dump → (n_total, n_fallback, n_warm_hit, n_miss,
+        #                             ns_warm_hit, ns_miss)
+        import torch_rbln
+
+        return torch_rbln._C._dispatch_shim_diag_dump()[2]
+
+    def test_warmcache_bypassed_on_non_contig_out(self):
+        import torch_rbln
+
+        device = torch.device("rbln:0")
+        torch_rbln._C._warmcache_clear()
+        torch_rbln._C._dispatch_shim_diag_reset()
+
+        x = torch.randn(4, 60, device=device, dtype=torch.float16)
+        y = torch.randn(4, 60, device=device, dtype=torch.float16)
+
+        # Populate cache with contig out: first call misses, second hits.
+        out_c = torch.empty(4, 60, device=device, dtype=torch.float16)
+        torch.add(x, y, out=out_c)
+        torch.add(x, y, out=out_c)
+        contig_hits = self._diag_warm_hits()
+
+        # Non-contig out= must not consume a warm-cache entry.
+        base = torch.empty(60, 4, device=device, dtype=torch.float16)
+        out_nc = base.t()
+        self.assertFalse(out_nc.is_contiguous())
+        result = torch.add(x, y, out=out_nc)
+        cpu_ref = torch.add(x.cpu(), y.cpu())
+        self.assertEqual(result.cpu(), cpu_ref, atol=self.atol, rtol=self.rtol)
+        nc_hits = self._diag_warm_hits()
+        self.assertEqual(
+            nc_hits,
+            contig_hits,
+            "warm-cache hit counter increased on non-contig out= dispatch; "
+            "the guard in try_warmcache_hit was bypassed.",
+        )
+
+
+@pytest.mark.test_set_ci
+class TestCpuFallbackOptionalTensor(TestCase):
+    """Regression guard for cpu_fallback's schema-typed arg_kind dispatch.
+
+    The cpu_fallback rewrite cached arg kinds by FunctionSchema type. The
+    initial classifier missed `Tensor?` (OptionalType(TensorType)), so a
+    schema arg like linear's `bias` fell through to `Other` and Step 1
+    skipped converting it to CPU. The RBLN tensor stayed on the stack
+    when the CPU kernel ran, and the next dispatch hop failed with
+    `Could not run aten::_copy_from_and_resize`.
+    """
+
+    atol = 1e-3
+    rtol = 1e-3
+
+    def test_linear_fp32_with_bias_through_cpu_fallback(self):
+        # fp32 linear forces cpu_fallback (rbln eager only handles fp16).
+        device = torch.device("rbln:0")
+        weight = torch.randn(20, 10, device=device, dtype=torch.float32)
+        bias = torch.randn(20, device=device, dtype=torch.float32)
+        x = torch.randn(5, 10, device=device, dtype=torch.float32)
+        out_rbln = torch.nn.functional.linear(x, weight, bias)
+        out_cpu = torch.nn.functional.linear(x.cpu(), weight.cpu(), bias.cpu())
+        self.assertEqual(out_rbln.cpu(), out_cpu, atol=self.atol, rtol=self.rtol)
+
+    def test_linear_fp32_with_bias_none_through_cpu_fallback(self):
+        # Optional[Tensor] arg may also be None; the dispatch must still skip
+        # the slot without tripping on toTensor() of a None IValue.
+        device = torch.device("rbln:0")
+        weight = torch.randn(20, 10, device=device, dtype=torch.float32)
+        x = torch.randn(5, 10, device=device, dtype=torch.float32)
+        out_rbln = torch.nn.functional.linear(x, weight, None)
+        out_cpu = torch.nn.functional.linear(x.cpu(), weight.cpu(), None)
+        self.assertEqual(out_rbln.cpu(), out_cpu, atol=self.atol, rtol=self.rtol)
+
+
 instantiate_device_type_tests(TestInternalOpUtils, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestOutTensors, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestTorchDispatchModeWithRbln, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestWarmCacheNonContigOut, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestCpuFallbackOptionalTensor, globals(), only_for="privateuse1")
 
 if __name__ == "__main__":
     run_tests()
