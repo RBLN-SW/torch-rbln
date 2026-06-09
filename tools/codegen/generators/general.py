@@ -56,13 +56,23 @@ class GeneralFunctionGenerator:
         return self.templates.ArgsProcessing.contiguous_preparation_default()
 
     def generate_function_body(self, kernel_name: str, root_name: str, python_module: str, op_namespace: str) -> str:
-        """Generate the complete function body for a general operation."""
+        """Generate the complete function body for a general operation.
+
+        2026-04-30 update: the per-op module definition, contiguous
+        preparation, and verbose compile-section have all been folded
+        into the single ``compile_and_run_view_aware`` helper called
+        from inside ``FunctionBody.main``. This shortens each handler
+        from ~50 lines to ~12 and unifies the view-on-device dispatch
+        path across binary / unary / matmul / ternary ops.
+        """
         if python_module == "nn":
             target = f"torch.nn.functional.{root_name}"
         else:
             target = f"torch.{root_name}"
 
-        # Per-op module (class + instance) with literal forward for opaque torch.compile
+        # Header (was: per-op OpModule class + instance) is now empty —
+        # the view-aware helper builds the wrapper OpModule dynamically
+        # and caches it per (op_callable, view_recipes_tuple).
         code = self.templates.FunctionBody.op_module_definition(root_name, target)
         code += self.templates.FunctionBody.start(kernel_name)
         code += self.generate_kwargs_filter(root_name)
@@ -70,8 +80,8 @@ class GeneralFunctionGenerator:
             code += self.templates.ArgsProcessing.tensor_args_extraction()
         code += self.generate_empty_tensor_handling(root_name)
         code += self.templates.FunctionBody.main(target, root_name, op_namespace)
-        code += self.generate_contiguous_preparation(root_name)
-        code += self.templates.FunctionBody.compile_section(root_name, target)
+        # contiguous_preparation + compile_section are intentionally not
+        # emitted — both subsumed by the helper inside ``main``.
 
         return code
 

@@ -12,6 +12,7 @@ from typing import Any, List, Union  # noqa: UP035
 import torch
 
 import torch_rbln._C
+from torch_rbln._internal.ops_utils import SupportedDtypes
 
 
 __all__ = [
@@ -79,11 +80,8 @@ def get_amp_supported_dtype() -> List[torch.dtype]:
 
     Returns:
         List[torch.dtype]: A list of data types supported by AMP.
-
-    Note:
-        This function currently returns only `torch.float16`. It may need review to include other processable data types.
     """
-    return [torch.float16]  # TODO: Needs review regarding processable dtypes
+    return list(SupportedDtypes.amp)
 
 
 def synchronize(device: Union[int, torch.device, str, None] = None) -> None:

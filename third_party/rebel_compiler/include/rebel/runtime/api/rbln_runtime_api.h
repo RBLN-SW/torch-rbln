@@ -266,6 +266,13 @@ RBLNRetCode rbln_memcpy_v2h(uint64_t src_vaddr, uintptr_t dst_host_ptr, uint64_t
 // Copies the contents from a virtual memory area to another virtual memory area.
 RBLNRetCode rbln_memcpy_v2v(uint64_t src_vaddr, uint64_t dst_vaddr, uint64_t size);
 
+// Maximum number of per-destination sub-copies that rbln_memcpy_v2v_multi
+// dispatches on-device. At or below this count the copies go through the device
+// command buffer; above it the runtime falls back to a host sync (slow but
+// correct). Callers that can compute their fan-out cheaply ahead of time may
+// gate on this to skip building descriptors that would only fall back.
+constexpr uint32_t kMaxV2VMultiCopies = 1024;
+
 // Copies the contents from a virtual memory area to another virtual memory area.
 // copies: vector of tuples (src_vaddr, dst_vaddr, size)
 RBLNRetCode rbln_memcpy_v2v_multi(

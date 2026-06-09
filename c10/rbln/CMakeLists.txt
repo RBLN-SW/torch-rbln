@@ -19,6 +19,7 @@ set(headers
   RBLNHooksInterface.h
   RBLNLogging.h
   RBLNMacros.h
+  RBLNSupportedDtypes.h
   RBLNV2VBatch.h
 )
 add_library(${target}
