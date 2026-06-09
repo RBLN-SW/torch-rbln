@@ -31,7 +31,7 @@ import pytest
 import torch
 import vllm_rbln  # noqa: F401
 
-from test.utils import run_in_isolated_process
+from test.utils import is_rebel_device, run_in_isolated_process
 
 
 # NOTE: do NOT import ``torch.testing._internal.common_utils`` at module level.
@@ -134,7 +134,10 @@ def _vllm_generate_worker(
     # Always TP=1 on the vLLM engine; RSD fan-out is driven by
     # ``VLLM_RBLN_TP_SIZE`` (set in ``_run_case``), keeping the test
     # single-process and off the RCCL multi-worker path.
-    # ``gpu_memory_utilization=0.5`` caps KV-cache blocks for tight CI NPU mem.
+    # ``gpu_memory_utilization`` sizes the KV-cache pool. REBEL has 140 GB DRAM, so
+    # the ATOM-tuned 0.5 (= 70 GB) massively over-allocates it (~66 GiB for a 1B
+    # model); at that size eager strided KV writes hit deep vmem addresses the v2v
+    # engine rejects, then OOM. 0.1 (~10 GiB) is plenty here; ATOM (16 GB) keeps 0.5.
     llm_kwargs: dict = dict(
         model=cfg.model_id,
         dtype="float16",
@@ -146,7 +149,7 @@ def _vllm_generate_worker(
         tensor_parallel_size=1,
         trust_remote_code=cfg.trust_remote_code,
         enforce_eager=enforce_eager,
-        gpu_memory_utilization=0.5,
+        gpu_memory_utilization=0.1 if is_rebel_device() else 0.5,
     )
     # TP>1 only — see ``_PATCHED_WORKER_CLS`` above.
     if tp_size > 1:
@@ -193,6 +196,8 @@ def _vllm_generate_worker(
 def _skip_if_not_enough_npus(tp_size: int) -> None:
     if tp_size <= 1:
         return
+    if is_rebel_device():
+        pytest.skip("TP>1 is not supported on the REBEL (CR) lineup yet (single device = quad chiplet)")
     n_phys = torch.rbln.physical_device_count()
     if n_phys < tp_size:
         pytest.skip(f"Requires at least {tp_size} physical devices, found {n_phys}")

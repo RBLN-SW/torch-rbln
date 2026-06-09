@@ -23,7 +23,7 @@ from torch.testing._internal.common_device_type import dtypes, instantiate_devic
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 from transformers import AutoConfig, AutoTokenizer
 
-from test.utils import run_in_isolated_process, SUPPORTED_DTYPES
+from test.utils import is_rebel_device, run_in_isolated_process, SUPPORTED_DTYPES
 
 
 class ModelType(Enum):
@@ -871,6 +871,8 @@ class TestLlamaRSDTP(TestLlamaBase):
     def test_rsd_tensor_parallel(self, dtype, model_type, tp_size, use_inputs_embeds):
         """RSD graph mode, TP1/TP2 with RBLN I/O only (CPU host I/O for this path is not exercised)."""
         if tp_size >= 2:
+            if is_rebel_device():
+                pytest.skip("TP>1 is not supported on the REBEL (CR) lineup yet (single device = quad chiplet)")
             n_phys = torch.rbln.physical_device_count()
             if n_phys < tp_size:
                 pytest.skip(f"Requires at least {tp_size} physical devices, found {n_phys}")
@@ -892,6 +894,8 @@ class TestLlamaRSDTP(TestLlamaBase):
     def test_past_key_values_valid(self, dtype, model_type, tp_size):
         """Validate past_key_values after prefill then decode; isolated process (TP matches RBLN_NPUS_PER_DEVICE)."""
         if tp_size >= 2:
+            if is_rebel_device():
+                pytest.skip("TP>1 is not supported on the REBEL (CR) lineup yet (single device = quad chiplet)")
             n_phys = torch.rbln.physical_device_count()
             if n_phys < tp_size:
                 pytest.skip(f"Requires at least {tp_size} physical devices, found {n_phys}")

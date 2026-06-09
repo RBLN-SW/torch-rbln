@@ -86,6 +86,24 @@ def requires_physical_devices(num_devices):
     )
 
 
+def is_rebel_device() -> bool:
+    """True on the REBEL lineup (RBLN-CR03/CR13/CR23).
+
+    REBEL differs from ATOM in ways the model suite must account for: TP>1 is
+    not supported yet (a single device is a quad chiplet, 1->4), and its 140 GB
+    DRAM makes vLLM's default ``gpu_memory_utilization`` KV-cache budget
+    oversized. Returns False when the NPU name can't be queried.
+    """
+    try:
+        from rebel.device_info import get_npu_name
+
+        name = (get_npu_name(0) or "").upper()
+    except Exception:
+        return False
+    # ATOM = RBLN-CA*, REBEL = RBLN-CR* (CR03/CR13/CR23).
+    return name.startswith("RBLN-CR")
+
+
 def spawn_target_with_clean_exit(rank: int, test_func, *args) -> None:
     """Run ``test_func`` under ``mp.spawn`` and force a clean exit on success.
 
