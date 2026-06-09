@@ -390,8 +390,7 @@ void memcpy_v2v_async(void* rbln_dst_data, const void* rbln_src_data, size_t nby
 void synchronize(c10::DeviceIndex device_index) {
   RBLN_LOG_DEBUG("Synchronizing device {}", static_cast<int>(device_index));
   check_device_index(device_index);
-  const auto torch_device_id =
-      static_cast<uint32_t>(static_cast<unsigned char>(device_index));
+  const auto torch_device_id = static_cast<uint32_t>(static_cast<unsigned char>(device_index));
   RBLN_CHECK(!::rbln::rbln_device_synchronize(torch_device_id));
 }
 
