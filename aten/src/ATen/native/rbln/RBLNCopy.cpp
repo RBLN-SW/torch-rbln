@@ -192,10 +192,8 @@ void copy_impl_rbln_async(const at::Tensor& src, const at::Tensor& dst) {
   // Async only supported for direct copies (same size, dtype, both contiguous).
   // Non-direct copies require CPU-side staging which needs synchronous data access.
   if (!direct_copy) {
+    // The sync fallback drains in-flight async transfers in the runtime (rbln_vmem_api).
     RBLN_LOG_DEBUG("Non-direct copy, falling back to sync");
-    // Drain pending async transfers so the sync fallback doesn't race with them.
-    const auto rbln_device = src_device.is_privateuseone() ? src_device : dst_device;
-    c10::rbln::synchronize(rbln_device.index());
     copy_impl_rbln(src, dst);
     return;
   }
@@ -228,9 +226,7 @@ at::Tensor _copy_from_rbln(const at::Tensor& src, const at::Tensor& dst, bool no
   if (non_blocking) {
     copy_impl_rbln_async(src, dst);
   } else {
-    // Drain pending async transfers before sync copy so the vmem state machine is consistent.
-    const auto rbln_device = src.device().is_privateuseone() ? src.device() : dst.device();
-    c10::rbln::synchronize(rbln_device.index());
+    // Sync copy; the runtime (rbln_vmem_api) drains in-flight async transfers first.
     copy_impl_rbln(src, dst);
   }
 
