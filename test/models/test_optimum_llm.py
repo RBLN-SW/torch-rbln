@@ -406,7 +406,11 @@ def _validate_kv_layer_after_prefill(
         f"copy_ from past_key_values layer {layer_idx} to another RBLN tensor should preserve values",
     )
 
-    small = layer_tensor[:, :, :4, :4]
+    # str() of an RBLN-device tensor runs the tensor formatter, which on torch
+    # 2.11 can hit the stricter cpu_fallback mutable-alias check on .out ops
+    # (e.g. aten::mul.out) and raise. Move to CPU first so this repr smoke-check
+    # works on both torch 2.10 and 2.11 (matches the sibling check below).
+    small = layer_tensor.to("cpu")[:, :, :4, :4]
     # print(small)
     print(f"layer {layer_idx}: assert str(small slice) contains 'tensor'")
     self.assertIn("tensor", str(small).lower())
