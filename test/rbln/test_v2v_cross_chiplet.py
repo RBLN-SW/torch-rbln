@@ -24,6 +24,7 @@ import torch
 import torch_rbln  # noqa: F401
 from test.utils import is_rebel_device
 
+
 GIB = 1 << 30
 
 
