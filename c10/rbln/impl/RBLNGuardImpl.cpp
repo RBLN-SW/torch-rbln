@@ -93,4 +93,63 @@ c10::Stream RBLNGuardImpl::exchangeStream(c10::Stream stream) const {
   return original_stream;
 }
 
+namespace {
+
+// Opaque payload behind the void* handles in the event API: the device the
+// event was last recorded on, or -1 while never recorded.
+struct RBLNEvent {
+  c10::DeviceIndex device_index = -1;
+
+  bool recorded() const {
+    return device_index >= 0;
+  }
+};
+
+void drain_if_recorded(void* event) {
+  const auto* rbln_event = static_cast<const RBLNEvent*>(event);
+  if (rbln_event != nullptr && rbln_event->recorded()) {
+    c10::rbln::synchronize(rbln_event->device_index);
+  }
+}
+
+} // namespace
+
+void RBLNGuardImpl::record(
+    void** event,
+    const c10::Stream& stream,
+    c10::DeviceIndex device_index,
+    c10::EventFlag flag) const {
+  (void)flag; // RBLN events carry no timing.
+  if (*event == nullptr) {
+    *event = new RBLNEvent();
+  }
+  auto* rbln_event = static_cast<RBLNEvent*>(*event);
+  rbln_event->device_index = device_index >= 0 ? device_index : stream.device_index();
+  RBLN_LOG_DEBUG("Recorded event on device {}", static_cast<int>(rbln_event->device_index));
+}
+
+void RBLNGuardImpl::block(void* event, const c10::Stream& stream) const {
+  (void)stream; // Single in-order queue: a host-side drain orders everything.
+  drain_if_recorded(event);
+}
+
+bool RBLNGuardImpl::queryEvent(void* event) const {
+  drain_if_recorded(event);
+  return true;
+}
+
+void RBLNGuardImpl::synchronizeEvent(void* event) const {
+  drain_if_recorded(event);
+}
+
+void RBLNGuardImpl::destroyEvent(void* event, c10::DeviceIndex device_index) const noexcept {
+  (void)device_index;
+  delete static_cast<RBLNEvent*>(event);
+}
+
+void RBLNGuardImpl::synchronizeDevice(c10::DeviceIndex device_index) const {
+  RBLN_LOG_DEBUG("Synchronizing device {}", static_cast<int>(device_index));
+  c10::rbln::synchronize(device_index);
+}
+
 } // namespace c10::rbln::impl

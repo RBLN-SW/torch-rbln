@@ -26,7 +26,14 @@ __all__ = [
     "device",
     "device_of",
     "device_summary",
+    "Event",
 ]
+
+# RBLN device events, e.g. to synchronize a `non_blocking` copy into a pinned
+# host tensor before reading it (mirrors the `torch.cuda.Event` pattern).
+# RBLN has a single in-order copy queue, so waiting on an event drains the
+# device queue; `enable_timing` is not supported.
+Event = torch.Event
 
 
 def current_device() -> int:
