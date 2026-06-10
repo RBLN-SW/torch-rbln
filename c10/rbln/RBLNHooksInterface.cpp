@@ -3,6 +3,7 @@
 #include <c10/rbln/RBLNGenerator.h>
 #include <c10/rbln/RBLNHooksInterface.h>
 #include <c10/rbln/RBLNLogging.h>
+#include <c10/rbln/RBLNPinnedAllocator.h>
 #include <c10/util/CallOnce.h>
 
 namespace c10::rbln {
@@ -91,6 +92,14 @@ void RBLNHooksInterface::resizePrivateUse1Bytes(const c10::Storage& storage, siz
   RBLN_LOG_DEBUG("Updating storage with new data pointer and nbytes");
   storage.set_data_ptr_noswap(std::move(new_data_ptr));
   storage.set_nbytes(new_nbytes);
+}
+
+c10::Allocator* RBLNHooksInterface::getPinnedMemoryAllocator() const {
+  return c10::rbln::get_pinned_memory_allocator();
+}
+
+bool RBLNHooksInterface::isPinnedPtr(const void* data) const {
+  return c10::rbln::is_pinned_ptr(data);
 }
 
 at::Generator RBLNHooksInterface::getNewGenerator(c10::DeviceIndex device_index) const {
