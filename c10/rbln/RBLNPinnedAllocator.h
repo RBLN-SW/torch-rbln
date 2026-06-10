@@ -9,10 +9,8 @@ namespace c10::rbln {
  * @brief Returns the host allocator backing CPU tensors created with
  * `pin_memory=True` while the RBLN backend is the active accelerator.
  *
- * The RBLN UMD has no DMA-mapped host allocation API yet, so allocations are
- * page-aligned host memory page-locked via best-effort `mlock`. This keeps
- * the full `pin_memory` UX working with standard semantics; when the runtime
- * grows a pinned-host API, only this allocator changes.
+ * The UMD has no DMA-mapped host allocation API yet, so this is page-aligned
+ * host memory with best-effort `mlock`; swap in the UMD API here when it lands.
  *
  * @return The pinned host allocator. Never null.
  */

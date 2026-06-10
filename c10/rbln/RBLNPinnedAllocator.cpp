@@ -12,9 +12,7 @@ namespace c10::rbln {
 
 namespace {
 
-// Allocation base -> size. Ordered so any interior pointer can be matched via
-// upper_bound; protected by a mutex because tensors are allocated and freed
-// from arbitrary threads (e.g. DataLoader pin-memory workers).
+// Allocation base -> size; ordered so interior pointers match via upper_bound.
 std::mutex pinned_registry_mutex;
 std::map<uintptr_t, size_t> pinned_registry;
 
@@ -42,11 +40,8 @@ struct RBLNPinnedAllocator final : public c10::Allocator {
   /**
    * @brief Allocates page-aligned host memory and page-locks it (best effort).
    *
-   * The DataPtr device is CPU: pinned tensors are host tensors regardless of
-   * the accelerator that pins them.
-   *
    * @param nbytes The number of bytes to allocate.
-   * @return A data pointer to the pinned host memory.
+   * @return A data pointer to the pinned host memory (device is CPU).
    */
   c10::DataPtr allocate(size_t nbytes) override {
     void* data = nullptr;
@@ -55,9 +50,7 @@ struct RBLNPinnedAllocator final : public c10::Allocator {
       if (posix_memalign(&data, page_size, nbytes) != 0) {
         TORCH_CHECK(false, "Failed to allocate ", nbytes, " bytes of pinned host memory");
       }
-      // mlock keeps the pages resident, which is all "pinned" can mean until
-      // the UMD exposes DMA-mapped host allocation. Failure (RLIMIT_MEMLOCK)
-      // is non-fatal: the tensor still works and stays semantically pinned.
+      // RLIMIT_MEMLOCK failure is non-fatal: stays semantically pinned.
       if (mlock(data, nbytes) != 0) {
         RBLN_LOG_DEBUG("mlock of {} bytes failed (errno={}); continuing unlocked", nbytes, errno);
       }

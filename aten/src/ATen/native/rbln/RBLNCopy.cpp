@@ -13,7 +13,6 @@
 #include <rebel/runtime/api/rbln_runtime_api.h>
 
 #include <cstddef>
-#include <cstdlib>
 
 namespace at::native::rbln {
 
@@ -206,19 +205,11 @@ void copy_impl_rbln_async(const at::Tensor& src, const at::Tensor& dst) {
     return;
   }
 
-  // CUDA semantics: async dispatch only when the host side is pinned. A
-  // pageable host tensor is read/written by plain CPU code that never passes
-  // through RBLN, so nothing can drain a still-pending transfer before the
-  // access; downgrading to a sync copy makes such code correct by
-  // construction. Pinned host memory opts in to true async (caller
-  // synchronizes before touching it). Set TORCH_RBLN_PAGEABLE_ASYNC=1 to
-  // restore unconditional async dispatch during migration.
-  static const bool pageable_async = []() {
-    const auto* env = std::getenv("TORCH_RBLN_PAGEABLE_ASYNC");
-    return env != nullptr && env[0] == '1';
-  }();
+  // CUDA semantics: async only when the host side is pinned. Host reads never
+  // pass through RBLN, so nothing can drain a pending transfer first — sync
+  // for pageable makes that safe; pinned opts in (caller synchronizes).
   const at::Tensor& host = src_device.is_cpu() ? src : dst;
-  if (!pageable_async && host.device().is_cpu() && !c10::rbln::is_pinned_ptr(host.data_ptr())) {
+  if (host.device().is_cpu() && !c10::rbln::is_pinned_ptr(host.data_ptr())) {
     RBLN_LOG_DEBUG("Pageable host tensor, downgrading non_blocking copy to sync");
     copy_impl_rbln(src, dst);
     return;
