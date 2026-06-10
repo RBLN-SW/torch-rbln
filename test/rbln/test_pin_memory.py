@@ -107,6 +107,19 @@ class TestPinMemoryCopy(TestCase):
         torch.rbln.synchronize()
         self.assertEqual(dst, src)
 
+    def test_pageable_non_blocking_safe_without_sync(self, device):
+        # CUDA semantics: a non_blocking copy to pageable host downgrades to
+        # sync, so reading the result immediately (no synchronize) is correct.
+        src = torch.randn(256, 256)
+        dev = src.to(device)
+        host = dev.to("cpu", non_blocking=True)
+        self.assertEqual(host, src)
+
+    def test_pageable_non_blocking_h2d(self, device):
+        src = torch.randn(128, 128)
+        dev = src.to(device, non_blocking=True)
+        self.assertEqual(dev.cpu(), src)
+
 
 instantiate_device_type_tests(TestPinMemoryCopy, globals(), only_for="privateuse1")
 

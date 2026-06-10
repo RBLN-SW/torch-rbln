@@ -9,9 +9,11 @@
 #include <c10/rbln/RBLNFallbackConfig.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
+#include <c10/rbln/RBLNPinnedAllocator.h>
 #include <rebel/runtime/api/rbln_runtime_api.h>
 
 #include <cstddef>
+#include <cstdlib>
 
 namespace at::native::rbln {
 
@@ -201,6 +203,24 @@ void copy_impl_rbln_async(const at::Tensor& src, const at::Tensor& dst) {
   const auto nbytes = at::detail::computeStorageNbytes(src.sizes(), src.strides(), src.element_size());
   if (nbytes == 0) {
     RBLN_LOG_DEBUG("No bytes to copy");
+    return;
+  }
+
+  // CUDA semantics: async dispatch only when the host side is pinned. A
+  // pageable host tensor is read/written by plain CPU code that never passes
+  // through RBLN, so nothing can drain a still-pending transfer before the
+  // access; downgrading to a sync copy makes such code correct by
+  // construction. Pinned host memory opts in to true async (caller
+  // synchronizes before touching it). Set TORCH_RBLN_PAGEABLE_ASYNC=1 to
+  // restore unconditional async dispatch during migration.
+  static const bool pageable_async = []() {
+    const auto* env = std::getenv("TORCH_RBLN_PAGEABLE_ASYNC");
+    return env != nullptr && env[0] == '1';
+  }();
+  const at::Tensor& host = src_device.is_cpu() ? src : dst;
+  if (!pageable_async && host.device().is_cpu() && !c10::rbln::is_pinned_ptr(host.data_ptr())) {
+    RBLN_LOG_DEBUG("Pageable host tensor, downgrading non_blocking copy to sync");
+    copy_impl_rbln(src, dst);
     return;
   }
 
