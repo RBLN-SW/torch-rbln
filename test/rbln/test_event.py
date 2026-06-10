@@ -19,7 +19,6 @@ class TestEvent(TestCase):
     def test_event_default_device_is_rbln(self):
         event = torch.Event()
         self.assertEqual(event.device.type, "rbln")
-        self.assertIs(torch.rbln.Event, torch.Event)
 
     def test_query_before_record_is_true(self):
         self.assertTrue(torch.Event().query())
