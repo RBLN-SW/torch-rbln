@@ -14,6 +14,7 @@ set(sources
   native/rbln/fast_paths/rsqrt_fp32.cpp
   native/rbln/fast_paths/pow_squared_fp32.cpp
   native/rbln/fast_paths/mean_lastdim_fp32.cpp
+  native/rbln/fast_paths/int_elementwise.cpp
 )
 set(headers
   native/rbln/RBLNCPUFallback.h

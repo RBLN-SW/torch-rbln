@@ -1110,7 +1110,7 @@ class AllreduceRBLNWork : public RBLNWork {
       // Handle remainder with padding (only copy the unaligned tail)
       if (needs_padding) {
         const auto device = c10::Device(c10::kPrivateUse1, static_cast<c10::DeviceIndex>(device_id_));
-        const auto options = c10::TensorOptions().device(device).dtype(c10::kHalf);
+        const auto options = c10::TensorOptions().device(device).dtype(input_flat.scalar_type());
         auto padded_tensor = at::empty({static_cast<int64_t>(align_numel)}, options);
 
         // Copy only the remainder elements to padded tensor
@@ -1608,6 +1608,7 @@ class BarrierRBLNWork : public RBLNWork {
       // Create a dummy tensor on RBLN device for all ranks
       // All ranks must have the same tensor shape and type for broadcast
       // RCCL requires 128-byte alignment, so use 64 float16 elements = 128 bytes
+      // Barrier value is discarded; the hardcoded `float16` is independent of the user's dtype.
       constexpr int64_t BARRIER_ALIGNED_NUMEL = RCCL_ALLGATHER_ALIGNMENT / sizeof(at::Half);
       const auto device = c10::Device(c10::kPrivateUse1, static_cast<c10::DeviceIndex>(device_id_));
       const auto options = c10::TensorOptions().device(device).dtype(c10::kHalf);

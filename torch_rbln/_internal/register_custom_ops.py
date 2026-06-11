@@ -124,8 +124,8 @@ def paged_attn_prefill_rbln(*args, **kwargs):
     # warning emitted via ``_maybe_warn_view_fallback``).
     (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
 
-    # Result shape matches Q's user-visible (post-view) shape.
-    result_tensor = torch.empty(args[0].shape, dtype=torch.float16, device=args[0].device)
+    # Result shape, dtype, and device match Q's user-visible (post-view) form.
+    result_tensor = torch.empty_like(args[0], memory_format=torch.contiguous_format)
     assert result_tensor.size(-1) % 64 == 0
 
     with out_tensor_context(result_tensor):
@@ -181,7 +181,7 @@ def paged_attn_decode_rbln(*args, **kwargs):
 
     (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
 
-    result_tensor = torch.empty(args[0].shape, dtype=torch.float16, device=args[0].device)
+    result_tensor = torch.empty_like(args[0], memory_format=torch.contiguous_format)
     assert result_tensor.size(-1) % 64 == 0
 
     with out_tensor_context(result_tensor):
@@ -251,7 +251,7 @@ def paged_causal_attn_prefill_rbln(*args, **kwargs):
 
     (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
 
-    result_tensor = torch.empty(args[0].shape, dtype=torch.float16, device=args[0].device)
+    result_tensor = torch.empty_like(args[0], memory_format=torch.contiguous_format)
     assert result_tensor.size(-1) % 64 == 0
 
     with out_tensor_context(result_tensor):
@@ -314,7 +314,7 @@ def paged_causal_attn_decode_rbln(*args, **kwargs):
 
     (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
 
-    result_tensor = torch.empty(args[0].shape, dtype=torch.float16, device=args[0].device)
+    result_tensor = torch.empty_like(args[0], memory_format=torch.contiguous_format)
     assert result_tensor.size(-1) % 64 == 0
 
     with out_tensor_context(result_tensor):
@@ -371,7 +371,7 @@ def flash_attention_naive_prefill_rbln(*args, **kwargs):
 
     (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
 
-    result_tensor = torch.empty(args[0].shape, dtype=torch.float16, device=args[0].device)
+    result_tensor = torch.empty_like(args[0], memory_format=torch.contiguous_format)
     assert result_tensor.size(-1) % 64 == 0
 
     helper.set_out_tensor(result_tensor)
@@ -424,7 +424,7 @@ def flash_attention_naive_decode_rbln(*args, **kwargs):
 
     (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
 
-    result_tensor = torch.empty(args[0].shape, dtype=torch.float16, device=args[0].device)
+    result_tensor = torch.empty_like(args[0], memory_format=torch.contiguous_format)
     assert result_tensor.size(-1) % 64 == 0
 
     helper.set_out_tensor(result_tensor)

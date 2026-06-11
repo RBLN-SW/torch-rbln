@@ -9,7 +9,16 @@ from typing import Optional, Union
 import torch
 from torch.utils._pytree import tree_flatten, tree_unflatten
 
+import torch_rbln._C as _C
 from torch_rbln._internal.log_utils import rbln_log_cpu_fallback, rbln_log_warn
+
+
+class SupportedDtypes:
+    """Per-path supported dtype tuples for RBLN device dispatch."""
+
+    dispatch: tuple[torch.dtype, ...] = _C._dispatch_dtypes()
+    sdpa: tuple[torch.dtype, ...] = _C._sdpa_dtypes()
+    amp: tuple[torch.dtype, ...] = _C._amp_dtypes()
 
 
 def _estimate_mm_shape(shape1, shape2):
@@ -1707,7 +1716,7 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
             **kwargs_filtered,
         )
 
-    # fp16 div with rounding_mode trunc/floor: the device kernel returns wrong
+    # Supported-dtype div with rounding_mode trunc/floor: the device kernel returns wrong
     # values for entire output rows (not ULP drift), so route it to cpu_fallback.
     # Plain div (no rounding_mode) and fp32 div are unaffected. (verified
     # 2026-05-07: trunc on (357,789), row 338 came back all 0.0/-0.0)
@@ -1715,7 +1724,7 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
         rmode = kwargs_filtered.get("rounding_mode")
         if rmode in ("trunc", "floor"):
             for a in args:
-                if isinstance(a, torch.Tensor) and a.dtype == torch.float16:
+                if isinstance(a, torch.Tensor) and a.dtype in SupportedDtypes.dispatch:
                     return cpu_fallback_path(
                         op_callable,
                         args,
@@ -1819,8 +1828,9 @@ def is_cpu_fallback_cases(args):
        then runs the original torch.add eagerly; that eager call dispatches again and hits our add_rbln
        -> same path repeats -> infinite recursion. So when TorchDispatchMode is on, we fall back to CPU
        and never enter the compile path.
-    2. **Data Type Mismatch:** If any of the input tensors are not of the `torch.float16` data type,
-       which the `rbln` device is designed to handle.
+    2. **Unsupported or Mismatched Data Types**: If any input tensor's dtype is not in ``SupportedDtypes.dispatch``,
+       or if the inputs mix different supported dtypes. The RBLN compute path requires all tensors to share the
+       same supported dtype.
     3. **Scalar Tensors**: If all input tensors are scalar tensors, rebel-compiler falls back to host ops.
     4. **Storage Offset**: If any tensor has `storage_offset != 0`, fall back to CPU.
     5. **NaN/Inf Values**: When not in deploy mode, if any input tensor contains NaN or Inf values,
@@ -1862,10 +1872,14 @@ def is_cpu_fallback_cases(args):
     if not tensor_args:
         return False
 
-    # 2: RBLN device can only handle float16 dtype
+    # 2: fall back to the CPU if any input tensor has an unsupported dtype, or if input tensors have mismatched dtypes
     if "dtype" not in disabled_cases:
-        if any(a.dtype != torch.float16 for a in tensor_args):
+        first_dtype = tensor_args[0].dtype
+        if first_dtype not in SupportedDtypes.dispatch:
             return True
+        for i in range(1, len(tensor_args)):
+            if tensor_args[i].dtype != first_dtype:
+                return True
 
     # 3: fall back to the CPU if all input tensors are scalar tensors
     if "scalar" not in disabled_cases:
@@ -1985,7 +1999,7 @@ def can_use_out_tensor_directly(args: tuple, kwargs: dict) -> bool:
     2. Tensor is neither empty nor scalar
     3. Tensor is contiguous
     4. Tensor has zero storage offset
-    5. dtype is float16
+    5. dtype is in ``SupportedDtypes.dispatch``
 
     Args:
         args (tuple): Positional arguments for in-place operation check.
@@ -1998,18 +2012,12 @@ def can_use_out_tensor_directly(args: tuple, kwargs: dict) -> bool:
     if out_tensor is None or out_tensor.data_ptr() == 0:
         return False
 
-    # Check conditions:
-    # 1. Not inplace operation
-    # 2. Neither empty nor scalar
-    # 3. Contiguous
-    # 4. Zero storage offset
-    # 5. dtype is float16
     return (
         not is_inplace_op(args, kwargs)
         and ((out_tensor.numel() > 0) and len(out_tensor.size()) > 0)
         and out_tensor.is_contiguous()
         and (out_tensor.storage_offset() == 0)
-        and (out_tensor.dtype == torch.float16)
+        and out_tensor.dtype in SupportedDtypes.dispatch
     )
 
 

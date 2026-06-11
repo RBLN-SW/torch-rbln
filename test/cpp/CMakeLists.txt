@@ -5,6 +5,7 @@ set(sources
   core/RBLNDeviceGuardTest.cpp
   core/RBLNFunctionsTest.cpp
   core/RBLNLoggingTest.cpp
+  core/RBLNSupportedDtypesTest.cpp
   core/RBLNTensorUtilsTest.cpp
   core/RBLNV2VBatchTest.cpp
 )
