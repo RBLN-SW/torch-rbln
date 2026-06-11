@@ -29,6 +29,8 @@ class TestDeviceManagementAPIs(TestCase):
         self.assertTrue(callable(torch.rbln.current_device))
         self.assertTrue(hasattr(torch.rbln, "set_device"))
         self.assertTrue(callable(torch.rbln.set_device))
+        self.assertTrue(hasattr(torch.rbln, "synchronize"))
+        self.assertTrue(callable(torch.rbln.synchronize))
 
     def test_device_count(self):
         count = torch.rbln.device_count()
@@ -44,6 +46,23 @@ class TestDeviceManagementAPIs(TestCase):
         device = torch.rbln.current_device()
         self.assertIsInstance(device, int)
         self.assertGreaterEqual(device, 0)
+
+    def test_synchronize(self):
+        # Default (no arg) — uses current device.
+        torch.rbln.synchronize()
+        # Explicit forms.
+        torch.rbln.synchronize(0)
+        torch.rbln.synchronize(torch.device("rbln:0"))
+        torch.rbln.synchronize("rbln:0")
+
+        # After an async copy, synchronize must wait for completion: subsequent
+        # reads see the final value.
+        device = torch.device("rbln:0")
+        src = torch.arange(1024, dtype=torch.float32, device=device)
+        dst = torch.empty_like(src).zero_()
+        dst.copy_(src, non_blocking=True)
+        torch.rbln.synchronize()
+        self.assertEqual(dst.cpu(), src.cpu())
 
 
 @pytest.mark.test_set_ci
