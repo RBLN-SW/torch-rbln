@@ -3,8 +3,10 @@ set(sources
   core/RBLNAllocatorTest.cpp
   core/RBLNCopyOpTest.cpp
   core/RBLNDeviceGuardTest.cpp
+  core/RBLNEventTest.cpp
   core/RBLNFunctionsTest.cpp
   core/RBLNLoggingTest.cpp
+  core/RBLNPinnedAllocatorTest.cpp
   core/RBLNSupportedDtypesTest.cpp
   core/RBLNTensorUtilsTest.cpp
   core/RBLNV2VBatchTest.cpp

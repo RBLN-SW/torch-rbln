@@ -9,6 +9,7 @@
 #include <c10/rbln/RBLNFallbackConfig.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
+#include <c10/rbln/RBLNPinnedAllocator.h>
 #include <rebel/runtime/api/rbln_runtime_api.h>
 
 #include <cstddef>
@@ -181,22 +182,64 @@ void copy_impl_rbln(const at::Tensor& src, const at::Tensor& dst) {
 
 } // namespace
 
+void copy_impl_rbln_async(const at::Tensor& src, const at::Tensor& dst) {
+  RBLN_SCOPE_GUARD();
+  RBLN_LOG_DEBUG("Attempting async copy");
+
+  const auto src_device = src.device();
+  const auto dst_device = dst.device();
+  const auto direct_copy = is_direct_copy(src, dst);
+
+  // Async only supported for direct copies (same size, dtype, both contiguous).
+  // Non-direct copies require CPU-side staging which needs synchronous data access.
+  if (!direct_copy) {
+    // The sync fallback drains in-flight async transfers in the runtime (rbln_vmem_api).
+    RBLN_LOG_DEBUG("Non-direct copy, falling back to sync");
+    copy_impl_rbln(src, dst);
+    return;
+  }
+
+  const auto nbytes = at::detail::computeStorageNbytes(src.sizes(), src.strides(), src.element_size());
+  if (nbytes == 0) {
+    RBLN_LOG_DEBUG("No bytes to copy");
+    return;
+  }
+
+  // CUDA semantics: async only when the host side is pinned. Host reads never
+  // pass through RBLN, so nothing can drain a pending transfer first — sync
+  // for pageable makes that safe; pinned opts in (caller synchronizes).
+  const at::Tensor& host = src_device.is_cpu() ? src : dst;
+  if (host.device().is_cpu() && !c10::rbln::is_pinned_ptr(host.data_ptr())) {
+    RBLN_LOG_DEBUG("Pageable host tensor, downgrading non_blocking copy to sync");
+    copy_impl_rbln(src, dst);
+    return;
+  }
+
+  if (src_device.is_cpu() && dst_device.is_privateuseone()) {
+    RBLN_LOG_DEBUG("Async CPU -> RBLN");
+    c10::rbln::memcpy_h2v_async(dst.data_ptr(), src.data_ptr(), nbytes);
+  } else if (src_device.is_privateuseone() && dst_device.is_cpu()) {
+    RBLN_LOG_DEBUG("Async RBLN -> CPU");
+    c10::rbln::memcpy_v2h_async(dst.data_ptr(), src.data_ptr(), nbytes);
+  } else if (src_device.is_privateuseone() && dst_device.is_privateuseone()) {
+    RBLN_LOG_DEBUG("Async RBLN -> RBLN");
+    c10::rbln::memcpy_v2v_async(dst.data_ptr(), src.data_ptr(), nbytes);
+  } else {
+    RBLN_CHECK(
+        false, "Tensor copy from {} device to {} device is not supported", c10::str(src_device), c10::str(dst_device));
+  }
+}
+
 at::Tensor _copy_from_rbln(const at::Tensor& src, const at::Tensor& dst, bool non_blocking) {
   RBLN_SCOPE_GUARD();
   RBLN_LOG_DEBUG("src_data={}, dst_data={}", fmt::ptr(src.data_ptr()), fmt::ptr(dst.data_ptr()));
 
   if (non_blocking) {
-    if (c10::rbln::is_fallback_disabled("non_blocking_copy")) {
-      RBLN_CHECK(
-          false,
-          "Non-blocking copy is not supported on RBLN devices. "
-          "To enable fallback to blocking copy, remove 'non_blocking_copy' from `TORCH_RBLN_DISABLE_FALLBACK`.");
-    } else {
-      RBLN_WARN_ONCE("Non-blocking copy is not supported, falling back to blocking copy");
-    }
+    copy_impl_rbln_async(src, dst);
+  } else {
+    // Sync copy; the runtime (rbln_vmem_api) drains in-flight async transfers first.
+    copy_impl_rbln(src, dst);
   }
-
-  copy_impl_rbln(src, dst);
 
   return dst;
 }

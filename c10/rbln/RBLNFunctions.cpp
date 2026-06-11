@@ -322,6 +322,78 @@ void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes) {
   }
 }
 
+void memcpy_h2v_async(void* rbln_dst_data, const void* cpu_src_data, size_t nbytes) {
+  RBLN_LOG_DEBUG(
+      "dst_rbln_data={}, src_cpu_data={}, nbytes={}", fmt::ptr(rbln_dst_data), fmt::ptr(cpu_src_data), nbytes);
+  RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
+  RBLN_CHECK(cpu_src_data != nullptr, "cpu_src_data cannot be nullptr");
+  RBLN_CHECK(rbln_dst_data != nullptr, "rbln_dst_data cannot be nullptr");
+
+  const auto src_host_ptr = reinterpret_cast<uintptr_t>(cpu_src_data);
+  const auto dst_vaddr = reinterpret_cast<uint64_t>(rbln_dst_data);
+  const auto size = static_cast<uint64_t>(nbytes);
+  uint64_t handle = 0;
+  RBLN_LOG_DEBUG(
+      "Calling rbln_memcpy_h2v_async: src_host_ptr={:#x}, dst_vaddr={:#x}, size={}", src_host_ptr, dst_vaddr, size);
+  RBLN_CHECK(!::rbln::rbln_memcpy_h2v_async(src_host_ptr, dst_vaddr, size, &handle));
+  RBLN_LOG_DEBUG("H2V async dispatched (handle={}, 0=sync fallback)", handle);
+}
+
+void memcpy_v2h_async(void* cpu_dst_data, const void* rbln_src_data, size_t nbytes) {
+  RBLN_LOG_DEBUG(
+      "dst_cpu_data={}, src_rbln_data={}, nbytes={}", fmt::ptr(cpu_dst_data), fmt::ptr(rbln_src_data), nbytes);
+  RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
+  RBLN_CHECK(rbln_src_data != nullptr, "rbln_src_data cannot be nullptr");
+  RBLN_CHECK(cpu_dst_data != nullptr, "cpu_dst_data cannot be nullptr");
+
+  const auto src_vaddr = reinterpret_cast<uint64_t>(rbln_src_data);
+  const auto dst_host_ptr = reinterpret_cast<uintptr_t>(cpu_dst_data);
+  const auto size = static_cast<uint64_t>(nbytes);
+  uint64_t handle = 0;
+  RBLN_LOG_DEBUG(
+      "Calling rbln_memcpy_v2h_async: src_vaddr={:#x}, dst_host_ptr={:#x}, size={}", src_vaddr, dst_host_ptr, size);
+  RBLN_CHECK(!::rbln::rbln_memcpy_v2h_async(src_vaddr, dst_host_ptr, size, &handle));
+  RBLN_LOG_DEBUG("V2H async dispatched (handle={}, 0=sync fallback)", handle);
+}
+
+void memcpy_v2v_async(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes) {
+  RBLN_LOG_DEBUG(
+      "dst_rbln_data={}, src_rbln_data={}, nbytes={}", fmt::ptr(rbln_dst_data), fmt::ptr(rbln_src_data), nbytes);
+  RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
+  RBLN_CHECK(rbln_src_data != nullptr, "rbln_src_data cannot be nullptr");
+  RBLN_CHECK(rbln_dst_data != nullptr, "rbln_dst_data cannot be nullptr");
+
+  const auto src_vaddr = reinterpret_cast<uint64_t>(rbln_src_data);
+  const auto dst_vaddr = reinterpret_cast<uint64_t>(rbln_dst_data);
+  const auto size = static_cast<uint64_t>(nbytes);
+
+  uint32_t src_torch_device_id = 0;
+  uint32_t dst_torch_device_id = 0;
+  RBLN_CHECK(!::rbln::rbln_get_torch_device_id_from_vaddr(src_vaddr, src_torch_device_id));
+  RBLN_CHECK(!::rbln::rbln_get_torch_device_id_from_vaddr(dst_vaddr, dst_torch_device_id));
+
+  if (src_torch_device_id != dst_torch_device_id) {
+    // rbln_memcpy_v2v_async only handles same-device copies; cross-device needs
+    // a host bounce, which we cannot do async without owning a buffer past return.
+    RBLN_LOG_DEBUG("Cross-device v2v, falling back to sync memcpy_v2v");
+    memcpy_v2v(rbln_dst_data, rbln_src_data, nbytes);
+    return;
+  }
+
+  uint64_t handle = 0;
+  RBLN_LOG_DEBUG(
+      "Calling rbln_memcpy_v2v_async: src_vaddr={:#x}, dst_vaddr={:#x}, size={}", src_vaddr, dst_vaddr, size);
+  RBLN_CHECK(!::rbln::rbln_memcpy_v2v_async(src_vaddr, dst_vaddr, size, &handle));
+  RBLN_LOG_DEBUG("V2V async dispatched (handle={}, 0=sync fallback)", handle);
+}
+
+void synchronize(c10::DeviceIndex device_index) {
+  RBLN_LOG_DEBUG("Synchronizing device {}", static_cast<int>(device_index));
+  check_device_index(device_index);
+  const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
+  RBLN_CHECK(!::rbln::rbln_device_synchronize(torch_device_id));
+}
+
 void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies) {
   if (copies.empty()) {
     return;
