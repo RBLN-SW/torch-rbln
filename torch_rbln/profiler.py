@@ -65,6 +65,7 @@ from __future__ import annotations
 import ctypes
 import time
 from typing import Any, Callable, Optional  # noqa: UP035
+from typing_extensions import Self
 
 
 __all__ = ["explain", "explain_steady", "RBLNExplain", "RBLNDiff", "profile", "RBLNProfile"]
@@ -510,7 +511,7 @@ class RBLNExplain:
             self._trace_by_op = {}
         return self
 
-    def __enter__(self) -> RBLNExplain:
+    def __enter__(self) -> Self:
         return self.start()
 
     def __exit__(self, *exc: Any) -> None:

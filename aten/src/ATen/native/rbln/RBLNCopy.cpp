@@ -9,8 +9,8 @@
 #include <c10/rbln/RBLNFallbackConfig.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
-#include <rebel/runtime/api/rbln_runtime_api.h>
 #include <c10/rbln/RBLNProfiler.h>
+#include <rebel/runtime/api/rbln_runtime_api.h>
 
 #include <cstddef>
 
