@@ -33,7 +33,8 @@ void raw_pinned_delete(void* data) {
   if (nbytes > 0) {
     munlock(data, nbytes); // best-effort, mirrors the mlock in allocate
   }
-  std::free(data);
+  // Allocator deleters work on raw pointers from posix_memalign; RAII does not apply.
+  std::free(data); // NOLINT(cppcoreguidelines-no-malloc)
 }
 
 struct RBLNPinnedAllocator final : public c10::Allocator {

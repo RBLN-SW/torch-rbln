@@ -114,11 +114,8 @@ void drain_if_recorded(void* event) {
 
 } // namespace
 
-void RBLNGuardImpl::record(
-    void** event,
-    const c10::Stream& stream,
-    c10::DeviceIndex device_index,
-    c10::EventFlag flag) const {
+void RBLNGuardImpl::record(void** event, const c10::Stream& stream, c10::DeviceIndex device_index, c10::EventFlag flag)
+    const {
   (void)flag; // RBLN events carry no timing.
   if (*event == nullptr) {
     *event = new RBLNEvent();
