@@ -306,7 +306,11 @@ void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes) {
     RBLN_LOG_DEBUG("Performing same-device copy");
 
     RBLN_LOG_DEBUG("Calling rbln_memcpy_v2v: src_vaddr={:#x}, dst_vaddr={:#x}, size={}", src_vaddr, dst_vaddr, size);
-    RBLN_CHECK(!::rbln::rbln_memcpy_v2v(src_vaddr, dst_vaddr, size));
+    // Tag the failure so `at::native::rbln::submit_or_fallback` can route a
+    // rejected same-device copy to its CPU fallback (the batched path already
+    // emits "rbln_memcpy_v2v_multi failed"; the per-entry path was message-less
+    // and escaped the gate as a hard crash).
+    RBLN_CHECK(!::rbln::rbln_memcpy_v2v(src_vaddr, dst_vaddr, size), "rbln_memcpy_v2v failed");
   } else {
     RBLN_LOG_DEBUG("Performing cross-device copy");
 

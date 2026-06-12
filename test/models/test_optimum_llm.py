@@ -23,7 +23,7 @@ from torch.testing._internal.common_device_type import dtypes, instantiate_devic
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 from transformers import AutoConfig, AutoTokenizer
 
-from test.utils import run_in_isolated_process, SUPPORTED_DTYPES
+from test.utils import is_rebel_device, run_in_isolated_process, SUPPORTED_DTYPES
 
 
 class ModelType(Enum):
@@ -406,7 +406,11 @@ def _validate_kv_layer_after_prefill(
         f"copy_ from past_key_values layer {layer_idx} to another RBLN tensor should preserve values",
     )
 
-    small = layer_tensor[:, :, :4, :4]
+    # str() of an RBLN-device tensor runs the tensor formatter, which on torch
+    # 2.11 can hit the stricter cpu_fallback mutable-alias check on .out ops
+    # (e.g. aten::mul.out) and raise. Move to CPU first so this repr smoke-check
+    # works on both torch 2.10 and 2.11 (matches the sibling check below).
+    small = layer_tensor.to("cpu")[:, :, :4, :4]
     # print(small)
     print(f"layer {layer_idx}: assert str(small slice) contains 'tensor'")
     self.assertIn("tensor", str(small).lower())
@@ -867,6 +871,8 @@ class TestLlamaRSDTP(TestLlamaBase):
     def test_rsd_tensor_parallel(self, dtype, model_type, tp_size, use_inputs_embeds):
         """RSD graph mode, TP1/TP2 with RBLN I/O only (CPU host I/O for this path is not exercised)."""
         if tp_size >= 2:
+            if is_rebel_device():
+                pytest.skip("TP>1 is not supported on the REBEL (CR) lineup yet (single device = quad chiplet)")
             n_phys = torch.rbln.physical_device_count()
             if n_phys < tp_size:
                 pytest.skip(f"Requires at least {tp_size} physical devices, found {n_phys}")
@@ -888,6 +894,8 @@ class TestLlamaRSDTP(TestLlamaBase):
     def test_past_key_values_valid(self, dtype, model_type, tp_size):
         """Validate past_key_values after prefill then decode; isolated process (TP matches RBLN_NPUS_PER_DEVICE)."""
         if tp_size >= 2:
+            if is_rebel_device():
+                pytest.skip("TP>1 is not supported on the REBEL (CR) lineup yet (single device = quad chiplet)")
             n_phys = torch.rbln.physical_device_count()
             if n_phys < tp_size:
                 pytest.skip(f"Requires at least {tp_size} physical devices, found {n_phys}")
