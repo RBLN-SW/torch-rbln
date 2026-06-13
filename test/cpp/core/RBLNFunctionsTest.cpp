@@ -295,7 +295,9 @@ TEST_F(RBLNFunctionsTest, GetTorchDeviceId) {
     // The lightweight helper must report the owning device...
     EXPECT_EQ(c10::rbln::get_torch_device_id(data), device_index);
     // ...and agree with the full get_memory_info() round-trip it replaces.
-    EXPECT_EQ(c10::rbln::get_torch_device_id(data), static_cast<c10::DeviceIndex>(c10::rbln::get_memory_info(data).torch_device_id));
+    EXPECT_EQ(
+        c10::rbln::get_torch_device_id(data),
+        static_cast<c10::DeviceIndex>(c10::rbln::get_memory_info(data).torch_device_id));
 
     c10::rbln::free(data);
   }
