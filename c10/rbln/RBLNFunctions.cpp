@@ -386,10 +386,8 @@ void memcpy_v2v_async(void* rbln_dst_data, const void* rbln_src_data, size_t nby
   const auto dst_vaddr = reinterpret_cast<uint64_t>(rbln_dst_data);
   const auto size = static_cast<uint64_t>(nbytes);
 
-  uint32_t src_torch_device_id = 0;
-  uint32_t dst_torch_device_id = 0;
-  RBLN_CHECK(!::rbln::rbln_get_torch_device_id_from_vaddr(src_vaddr, src_torch_device_id));
-  RBLN_CHECK(!::rbln::rbln_get_torch_device_id_from_vaddr(dst_vaddr, dst_torch_device_id));
+  const auto src_torch_device_id = get_torch_device_id(rbln_src_data);
+  const auto dst_torch_device_id = get_torch_device_id(rbln_dst_data);
 
   if (src_torch_device_id != dst_torch_device_id) {
     // rbln_memcpy_v2v_async only handles same-device copies; cross-device needs

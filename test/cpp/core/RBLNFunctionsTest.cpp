@@ -285,6 +285,27 @@ TEST_F(RBLNFunctionsTest, GetUninitializedMemoryInfo) {
   }
 }
 
+TEST_F(RBLNFunctionsTest, GetTorchDeviceId) {
+  const auto device_count = c10::rbln::get_device_count();
+  EXPECT_GE(device_count, 1);
+  for (c10::DeviceIndex device_index = 0; device_index < device_count; ++device_index) {
+    const auto data = c10::rbln::malloc(device_index, size_1gib_);
+    EXPECT_TRUE(data != nullptr);
+
+    // The lightweight helper must report the owning device...
+    EXPECT_EQ(c10::rbln::get_torch_device_id(data), device_index);
+    // ...and agree with the full get_memory_info() round-trip it replaces.
+    EXPECT_EQ(c10::rbln::get_torch_device_id(data), static_cast<c10::DeviceIndex>(c10::rbln::get_memory_info(data).torch_device_id));
+
+    c10::rbln::free(data);
+  }
+}
+
+TEST_F(RBLNFunctionsTest, GetTorchDeviceIdNullPtr) {
+  void* data = nullptr;
+  EXPECT_THROW(c10::rbln::get_torch_device_id(data), c10::Error);
+}
+
 TEST_F(RBLNFunctionsTest, Synchronize) {
   const auto device_count = c10::rbln::get_device_count();
   EXPECT_GE(device_count, 1);
