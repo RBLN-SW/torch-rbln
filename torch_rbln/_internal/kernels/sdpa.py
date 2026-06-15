@@ -293,105 +293,7 @@ def _sdpa_cpu_fallback(
     return result_cpu.to(original_dtype).to(original_device)
 
 
-# --- RBLN Compiled Modules ---
-
-
-def _compile_sdpa_attn_weights_fn(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    attn_mask: Optional[torch.Tensor] = None,
-    scale: Optional[float] = None,
-) -> torch.Tensor:
-    """Compile wrapper for: Q @ K^T * scale + mask -> softmax -> attn_weights.
-
-    Note: Causal mask is now passed via attn_mask parameter instead of being
-    created inside the module. This avoids RBLN memory allocation issues
-    when tensors are created inside torch.compile'd graphs.
-    """
-    # Handle GQA (4D only)
-    if query.dim() == 4:
-        q_heads, k_heads = query.size(1), key.size(1)
-        if q_heads != k_heads:
-            key = _repeat_kv(key, q_heads // k_heads)
-
-    if scale is None:
-        scale = 1.0 / math.sqrt(query.size(-1))
-
-    attn_weights = torch.matmul(query, key.transpose(-2, -1)) * scale
-
-    # Causal mask is now pre-computed and merged into attn_mask
-    if attn_mask is not None:
-        attn_weights = attn_weights + attn_mask
-
-    attn_weights = torch.softmax(attn_weights, dim=-1)
-
-    return attn_weights
-
-
-def _compile_sdpa_output_fn(
-    attn_weights: torch.Tensor,
-    value: torch.Tensor,
-    dropout_p: float = 0.0,
-) -> torch.Tensor:
-    """Compile wrapper for: attn_weights @ V -> output."""
-    # Handle GQA (4D only)
-    if attn_weights.dim() == 4 and value.dim() == 4:
-        a_heads, v_heads = attn_weights.size(1), value.size(1)
-        if a_heads != v_heads:
-            value = _repeat_kv(value, a_heads // v_heads)
-
-    if dropout_p > 0.0:
-        attn_weights = torch.dropout(attn_weights, dropout_p, train=True)
-
-    output = torch.matmul(attn_weights, value)
-
-    return output
-
-
 # --- RBLN Forward Computation ---
-
-
-def _sdpa_compute_attn_weights(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    attn_mask: Optional[torch.Tensor],
-    is_causal: bool,
-    scale: float,
-) -> torch.Tensor:
-    """Compute attention weights using RBLN compiled graph.
-
-    Causal mask is created outside the compiled graph to avoid RBLN memory issues.
-    """
-    from torch_rbln.device.context_holder import out_tensor_context
-
-    if is_cpu_fallback_cases((query, key)):
-        return _sdpa_attn_weights_fallback(query, key, attn_mask, is_causal, scale)
-
-    query = query.contiguous()
-    key = key.contiguous()
-
-    # Create causal mask OUTSIDE compiled graph to avoid RBLN memory issues
-    causal_mask = None
-    if is_causal:
-        L, S = query.size(-2), key.size(-2)
-        causal_mask = _create_causal_mask(L, S, query.dtype, query.device)
-
-    # Merge attn_mask and causal_mask
-    attn_mask = _convert_bool_mask_to_float(attn_mask, query.dtype, query.device)
-    merged_mask = _merge_masks(attn_mask, causal_mask)
-    if merged_mask is not None:
-        merged_mask = merged_mask.contiguous()
-
-    with out_tensor_context():
-        compiled = compile_rbln_cached(
-            _compile_sdpa_attn_weights_fn,
-            dynamic=False,
-            options={"disable_logger": True},
-            device_cache_key=query.device.index,
-        )
-        external_result = compiled(query, key, attn_mask=merged_mask, scale=scale)
-
-    return external_result
 
 
 def _sdpa_attn_weights_fallback(
@@ -435,32 +337,6 @@ def _sdpa_attn_weights_fallback(
     return attn_weights.to(original_dtype).to(original_device)
 
 
-def _sdpa_compute_output(
-    attn_weights: torch.Tensor,
-    value: torch.Tensor,
-    dropout_p: float,
-) -> torch.Tensor:
-    """Compute output using RBLN compiled graph."""
-    from torch_rbln.device.context_holder import out_tensor_context
-
-    if is_cpu_fallback_cases((attn_weights, value)):
-        return _sdpa_output_fallback(attn_weights, value, dropout_p)
-
-    attn_weights = attn_weights.contiguous()
-    value = value.contiguous()
-
-    with out_tensor_context():
-        compiled = compile_rbln_cached(
-            _compile_sdpa_output_fn,
-            dynamic=False,
-            options={"disable_logger": True},
-            device_cache_key=attn_weights.device.index,
-        )
-        external_result = compiled(attn_weights, value, dropout_p=dropout_p)
-
-    return external_result
-
-
 def _sdpa_output_fallback(
     attn_weights: torch.Tensor,
     value: torch.Tensor,
@@ -487,130 +363,7 @@ def _sdpa_output_fallback(
     return output.to(original_dtype).to(original_device)
 
 
-# --- RBLN Backward Compiled Modules ---
-
-
-def _compile_sdpa_grad_value_fn(attn_weights: torch.Tensor, grad_output: torch.Tensor) -> torch.Tensor:
-    """Compile wrapper for: grad_V = attn_weights^T @ grad_output"""
-    result = torch.matmul(attn_weights.transpose(-2, -1), grad_output)
-    return result
-
-
-def _compile_sdpa_grad_scores_fn(
-    grad_output: torch.Tensor,
-    value: torch.Tensor,
-    attn_weights: torch.Tensor,
-    scale: float,
-) -> torch.Tensor:
-    """Compile wrapper for: grad_scores = softmax_backward(grad_output @ V^T, attn_weights) * scale"""
-    grad_attn_weights = torch.matmul(grad_output, value.transpose(-2, -1))
-    sum_term = (grad_attn_weights * attn_weights).sum(dim=-1, keepdim=True)
-    grad_scores = attn_weights * (grad_attn_weights - sum_term) * scale
-    return grad_scores
-
-
-def _compile_sdpa_grad_query_fn(grad_scores: torch.Tensor, key: torch.Tensor) -> torch.Tensor:
-    """Compile wrapper for: grad_Q = grad_scores @ K"""
-    result = torch.matmul(grad_scores, key)
-    return result
-
-
-def _compile_sdpa_grad_key_fn(grad_scores: torch.Tensor, query: torch.Tensor) -> torch.Tensor:
-    """Compile wrapper for: grad_K = grad_scores^T @ Q"""
-    result = torch.matmul(grad_scores.transpose(-2, -1), query)
-    return result
-
-
 # --- RBLN Backward Computation ---
-
-
-def _sdpa_backward_compiled(
-    grad_output: torch.Tensor,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    attn_weights: torch.Tensor,
-    scale: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """SDPA backward using 4 compiled graphs."""
-    from torch_rbln.device.context_holder import out_tensor_context
-
-    S = key.size(-2)
-
-    # Handle GQA (4D only)
-    gqa_enabled = False
-    num_kv_heads_orig = None
-    n_rep = 1
-    if query.dim() == 4:
-        q_heads = query.size(1)
-        num_kv_heads_orig = key.size(1)
-        gqa_enabled = q_heads != num_kv_heads_orig
-        if gqa_enabled:
-            n_rep = q_heads // num_kv_heads_orig
-            key_expanded = _repeat_kv(key, n_rep)
-            value_expanded = _repeat_kv(value, n_rep)
-        else:
-            key_expanded = key
-            value_expanded = value
-    else:
-        key_expanded = key
-        value_expanded = value
-
-    args = (grad_output, query, key, value, attn_weights)
-    if is_cpu_fallback_cases(args):
-        return _sdpa_backward_fallback(grad_output, query, key, value, attn_weights, scale)
-
-    grad_output = grad_output.contiguous()
-    query = query.contiguous()
-    key_expanded = key_expanded.contiguous()
-    value_expanded = value_expanded.contiguous()
-    attn_weights = attn_weights.contiguous()
-
-    with out_tensor_context():
-        # Graph 1: grad_V = attn_weights^T @ grad_output
-        compiled_grad_v = compile_rbln_cached(
-            _compile_sdpa_grad_value_fn,
-            dynamic=False,
-            options={"disable_logger": True},
-            device_cache_key=grad_output.device.index,
-        )
-        grad_value = compiled_grad_v(attn_weights, grad_output)
-
-        # Graph 2: grad_scores = softmax_backward * scale
-        compiled_grad_scores = compile_rbln_cached(
-            _compile_sdpa_grad_scores_fn,
-            dynamic=False,
-            options={"disable_logger": True},
-            device_cache_key=grad_output.device.index,
-        )
-        grad_scores = compiled_grad_scores(grad_output, value_expanded, attn_weights, scale)
-
-        # Graph 3: grad_Q = grad_scores @ K
-        grad_scores = grad_scores.contiguous()
-        compiled_grad_q = compile_rbln_cached(
-            _compile_sdpa_grad_query_fn,
-            dynamic=False,
-            options={"disable_logger": True},
-            device_cache_key=grad_output.device.index,
-        )
-        grad_query = compiled_grad_q(grad_scores, key_expanded)
-
-        # Graph 4: grad_K = grad_scores^T @ Q
-        compiled_grad_k = compile_rbln_cached(
-            _compile_sdpa_grad_key_fn,
-            dynamic=False,
-            options={"disable_logger": True},
-            device_cache_key=grad_output.device.index,
-        )
-        grad_key = compiled_grad_k(grad_scores, query)
-
-    # Handle GQA gradient reduction
-    if gqa_enabled:
-        batch, head_dim = grad_key.size(0), grad_key.size(-1)
-        grad_key = grad_key.view(batch, num_kv_heads_orig, n_rep, S, head_dim).sum(dim=2)
-        grad_value = grad_value.view(batch, num_kv_heads_orig, n_rep, S, head_dim).sum(dim=2)
-
-    return grad_query, grad_key, grad_value
 
 
 def _sdpa_backward_fallback(
@@ -666,6 +419,182 @@ def _sdpa_backward_fallback(
     )
 
 
+# --- RBLN Fused (single-graph) Forward/Backward ---
+# These collapse the staged forward (2 graphs) and backward (4 graphs) into a
+# single compiled graph each. The rebel-compiler error that originally forced
+# the staging no longer reproduces; fusing removes the cross-graph
+# materialization of the [B, H, L, S] attn_weights / grad_scores intermediates
+# and the extra per-graph dispatch + host<->device round-trips.
+
+
+def _compile_sdpa_fused_fwd_fn(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attn_mask: Optional[torch.Tensor] = None,
+    scale: Optional[float] = None,
+    dropout_p: float = 0.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Single-graph SDPA forward: Q @ K^T * scale + mask -> softmax -> @ V.
+
+    Returns (output, attn_weights). attn_weights (pre-dropout softmax output) is
+    returned so the backward graph can reuse it via the existing data_ptr cache.
+    """
+    # Handle GQA (4D only) inside the graph
+    if query.dim() == 4:
+        q_heads, k_heads = query.size(1), key.size(1)
+        if q_heads != k_heads:
+            n_rep = q_heads // k_heads
+            key = _repeat_kv(key, n_rep)
+            value = _repeat_kv(value, n_rep)
+
+    if scale is None:
+        scale = 1.0 / math.sqrt(query.size(-1))
+
+    attn_weights = torch.matmul(query, key.transpose(-2, -1)) * scale
+    if attn_mask is not None:
+        attn_weights = attn_weights + attn_mask
+    attn_weights = torch.softmax(attn_weights, dim=-1)
+
+    if dropout_p > 0.0:
+        output = torch.matmul(torch.dropout(attn_weights, dropout_p, train=True), value)
+    else:
+        output = torch.matmul(attn_weights, value)
+
+    return output, attn_weights
+
+
+def _sdpa_compute_fused_fwd(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attn_mask: Optional[torch.Tensor],
+    is_causal: bool,
+    scale: float,
+    dropout_p: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute SDPA forward in a single RBLN graph; returns (output, attn_weights).
+
+    Causal mask is created outside the compiled graph to avoid RBLN memory issues.
+    """
+    from torch_rbln.device.context_holder import out_tensor_context
+
+    if is_cpu_fallback_cases((query, key, value)):
+        attn_weights = _sdpa_attn_weights_fallback(query, key, attn_mask, is_causal, scale)
+        output = _sdpa_output_fallback(attn_weights, value, dropout_p)
+        return output, attn_weights
+
+    query = query.contiguous()
+    key = key.contiguous()
+    value = value.contiguous()
+
+    # Create causal mask OUTSIDE compiled graph to avoid RBLN memory issues
+    causal_mask = None
+    if is_causal:
+        L, S = query.size(-2), key.size(-2)
+        causal_mask = _create_causal_mask(L, S, query.dtype, query.device)
+
+    attn_mask = _convert_bool_mask_to_float(attn_mask, query.dtype, query.device)
+    merged_mask = _merge_masks(attn_mask, causal_mask)
+    if merged_mask is not None:
+        merged_mask = merged_mask.contiguous()
+
+    with out_tensor_context():
+        compiled = compile_rbln_cached(
+            _compile_sdpa_fused_fwd_fn,
+            dynamic=False,
+            options={"disable_logger": True},
+            device_cache_key=query.device.index,
+        )
+        output, attn_weights = compiled(query, key, value, merged_mask, scale, dropout_p)
+
+    return output, attn_weights
+
+
+def _compile_sdpa_fused_bwd_fn(
+    grad_output: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attn_weights: torch.Tensor,
+    scale: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Single-graph SDPA backward: grad_query, grad_key, grad_value.
+
+    key/value are already GQA-expanded by the caller; GQA gradient reduction is
+    done outside the graph.
+    """
+    grad_value = torch.matmul(attn_weights.transpose(-2, -1), grad_output)
+    grad_attn_weights = torch.matmul(grad_output, value.transpose(-2, -1))
+    sum_term = (grad_attn_weights * attn_weights).sum(dim=-1, keepdim=True)
+    grad_scores = attn_weights * (grad_attn_weights - sum_term) * scale
+    grad_query = torch.matmul(grad_scores, key)
+    grad_key = torch.matmul(grad_scores.transpose(-2, -1), query)
+    return grad_query, grad_key, grad_value
+
+
+def _sdpa_backward_fused(
+    grad_output: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attn_weights: torch.Tensor,
+    scale: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """SDPA backward using a single compiled graph (replaces the 4-graph path)."""
+    from torch_rbln.device.context_holder import out_tensor_context
+
+    S = key.size(-2)
+
+    # Handle GQA (4D only) - expand outside the graph
+    gqa_enabled = False
+    num_kv_heads_orig = None
+    n_rep = 1
+    if query.dim() == 4:
+        q_heads = query.size(1)
+        num_kv_heads_orig = key.size(1)
+        gqa_enabled = q_heads != num_kv_heads_orig
+        if gqa_enabled:
+            n_rep = q_heads // num_kv_heads_orig
+            key_expanded = _repeat_kv(key, n_rep)
+            value_expanded = _repeat_kv(value, n_rep)
+        else:
+            key_expanded = key
+            value_expanded = value
+    else:
+        key_expanded = key
+        value_expanded = value
+
+    args = (grad_output, query, key, value, attn_weights)
+    if is_cpu_fallback_cases(args):
+        return _sdpa_backward_fallback(grad_output, query, key, value, attn_weights, scale)
+
+    grad_output = grad_output.contiguous()
+    query = query.contiguous()
+    key_expanded = key_expanded.contiguous()
+    value_expanded = value_expanded.contiguous()
+    attn_weights = attn_weights.contiguous()
+
+    with out_tensor_context():
+        compiled = compile_rbln_cached(
+            _compile_sdpa_fused_bwd_fn,
+            dynamic=False,
+            options={"disable_logger": True},
+            device_cache_key=grad_output.device.index,
+        )
+        grad_query, grad_key, grad_value = compiled(
+            grad_output, query, key_expanded, value_expanded, attn_weights, scale
+        )
+
+    # Handle GQA gradient reduction
+    if gqa_enabled:
+        batch, head_dim = grad_key.size(0), grad_key.size(-1)
+        grad_key = grad_key.view(batch, num_kv_heads_orig, n_rep, S, head_dim).sum(dim=2)
+        grad_value = grad_value.view(batch, num_kv_heads_orig, n_rep, S, head_dim).sum(dim=2)
+
+    return grad_query, grad_key, grad_value
+
+
 # --- Main Entry Points ---
 def scaled_dot_product_fused_attention_overrideable_rbln(
     query: torch.Tensor,
@@ -712,8 +641,9 @@ def scaled_dot_product_fused_attention_overrideable_rbln(
         attn_bias = _convert_bool_mask_to_float(attn_bias, query.dtype, query.device)
         computed_scale = scale if scale is not None else 1.0 / math.sqrt(query.size(-1))
 
-        attn_weights = _sdpa_compute_attn_weights(query, key, attn_bias, is_causal, computed_scale)
-        output = _sdpa_compute_output(attn_weights, value, dropout_p)
+        output, attn_weights = _sdpa_compute_fused_fwd(
+            query, key, value, attn_bias, is_causal, computed_scale, dropout_p
+        )
         _cache_attn_weights(output, attn_weights)
 
     # Auxiliary tensors for interface (shape depends on input dims)
@@ -795,7 +725,7 @@ def scaled_dot_product_fused_attention_overrideable_backward_rbln(
             grad_out, query, key, value, attn_weights, computed_scale
         )
     else:
-        grad_query, grad_key, grad_value = _sdpa_backward_compiled(
+        grad_query, grad_key, grad_value = _sdpa_backward_fused(
             grad_out, query, key, value, attn_weights, computed_scale
         )
 
