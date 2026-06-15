@@ -10,7 +10,19 @@ import torch.nn as nn
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, subtest, TestCase
 
-from test.utils import configure_master_port_for_rccl_tests, set_deterministic_seeds, spawn_target_with_clean_exit
+from test.utils import (
+    configure_master_port_for_rccl_tests,
+    set_deterministic_seeds,
+    spawn_target_with_clean_exit,
+    SUPPORTED_DTYPES,
+)
+
+
+# Reduction collectives (allreduce, send/recv) drift from sequential by
+# fp16/bf16 accumulation-order rounding past the default ``atol`` of
+# ``assert_close``.
+REDUCTION_ATOL = 0.02
+REDUCTION_RTOL = 0.01
 
 
 def setup_environment(rank: int, world_size: int) -> None:
@@ -20,7 +32,7 @@ def setup_environment(rank: int, world_size: int) -> None:
     torch.rbln.set_device(rank)
 
 
-def run_default_group_allreduce_test(rank: int, world_size: int, backend: str) -> None:
+def run_default_group_allreduce_test(rank: int, world_size: int, backend: str, dtype: torch.dtype) -> None:
     """Test default group allreduce with tensor parallel linear."""
     setup_environment(rank, world_size)
     dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
@@ -68,10 +80,10 @@ def run_default_group_allreduce_test(rank: int, world_size: int, backend: str) -
         output_size = 256
         batch_size = 64
 
-        tp_model = TensorParallelLinear(input_size, output_size, world_size, rank).to(device).half()
+        tp_model = TensorParallelLinear(input_size, output_size, world_size, rank).to(device=device, dtype=dtype)
 
         if rank == 0:
-            seq_model = SequentialLinear(input_size, output_size).to(device).half()
+            seq_model = SequentialLinear(input_size, output_size).to(device=device, dtype=dtype)
             tp_weight = tp_model.linear.weight.data.clone()
             dist.all_reduce(tp_weight, op=dist.ReduceOp.SUM)
             seq_model.linear.weight.data = tp_weight
@@ -80,19 +92,13 @@ def run_default_group_allreduce_test(rank: int, world_size: int, backend: str) -
             dist.all_reduce(tp_weight, op=dist.ReduceOp.SUM)
 
         set_deterministic_seeds(123)
-        input_data = torch.randn(batch_size, input_size, device=device, dtype=torch.float16)
+        input_data = torch.randn(batch_size, input_size, device=device, dtype=dtype)
 
         tp_output = tp_model(input_data)
 
         if rank == 0:
             seq_output = seq_model(input_data)
-            # TP(all_reduce) vs sequential is the same math in a different
-            # accumulation order; fp16 over input_size=1024 drifts ~0.0156
-            # (measured, stable across runs) on a max output magnitude of ~2.3.
-            # The previous max_diff < 1e-3 bound was unreachable for this fp16
-            # accumulation and red the suite on REBEL. Bound it by an explicit
-            # tolerance (atol 0.02 ≈ 2.3x the measured drift, rtol 0.01).
-            torch.testing.assert_close(tp_output, seq_output, rtol=0.01, atol=0.02)
+            torch.testing.assert_close(tp_output, seq_output, rtol=REDUCTION_RTOL, atol=REDUCTION_ATOL)
 
         dist.barrier()
 
@@ -100,19 +106,18 @@ def run_default_group_allreduce_test(rank: int, world_size: int, backend: str) -
         dist.destroy_process_group()
 
 
-def run_pp2_test(rank: int, world_size: int, backend: str) -> None:
+def run_pp2_test(rank: int, world_size: int, backend: str, dtype: torch.dtype) -> None:
     """Test PP=2 pipeline parallel example."""
     setup_environment(rank, world_size)
     dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
 
     try:
-        DTYPE = torch.float16
 
         class SequentialModel(nn.Module):
             def __init__(self, input_size, hidden_size, output_size):
                 super().__init__()
-                self.layer1 = nn.Linear(input_size, hidden_size, bias=False, dtype=DTYPE)
-                self.layer2 = nn.Linear(hidden_size, output_size, bias=False, dtype=DTYPE)
+                self.layer1 = nn.Linear(input_size, hidden_size, bias=False, dtype=dtype)
+                self.layer2 = nn.Linear(hidden_size, output_size, bias=False, dtype=dtype)
 
             def forward(self, x):
                 x = self.layer1(x)
@@ -126,10 +131,10 @@ def run_pp2_test(rank: int, world_size: int, backend: str) -> None:
                 self.stage_id = stage_id
 
                 if stage_id == 0:
-                    self.layer = nn.Linear(input_size, hidden_size, bias=False, dtype=DTYPE)
+                    self.layer = nn.Linear(input_size, hidden_size, bias=False, dtype=dtype)
                     self.has_activation = True
                 elif stage_id == 1:
-                    self.layer = nn.Linear(hidden_size, output_size, bias=False, dtype=DTYPE)
+                    self.layer = nn.Linear(hidden_size, output_size, bias=False, dtype=dtype)
                     self.has_activation = False
                 else:
                     raise ValueError(f"Invalid stage_id: {stage_id}")
@@ -168,7 +173,7 @@ def run_pp2_test(rank: int, world_size: int, backend: str) -> None:
                         batch_size = x.shape[0]
                         hidden_size = self.stage.layer.in_features
                         input_shape = (batch_size, hidden_size)
-                        received_tensor = torch.zeros(input_shape, dtype=DTYPE, device=x.device)
+                        received_tensor = torch.zeros(input_shape, dtype=dtype, device=x.device)
                         dist.recv(received_tensor, src=self.prev_rank)
                         output = self.stage(received_tensor)
                     else:
@@ -187,7 +192,7 @@ def run_pp2_test(rank: int, world_size: int, backend: str) -> None:
         device = torch.device("rbln", rank)
 
         set_deterministic_seeds(42)
-        input_tensor = torch.randn(batch_size, input_size, dtype=DTYPE, device=device)
+        input_tensor = torch.randn(batch_size, input_size, dtype=dtype, device=device)
 
         if rank == 0:
             sequential_model = SequentialModel(input_size, hidden_size, output_size).to(device)
@@ -212,10 +217,9 @@ def run_pp2_test(rank: int, world_size: int, backend: str) -> None:
         pp_output = pp_model(input_tensor)
 
         if rank == 0:
-            pp_output_received = torch.empty(sequential_output.shape, device=device, dtype=DTYPE)
+            pp_output_received = torch.empty(sequential_output.shape, device=device, dtype=dtype)
             dist.recv(pp_output_received, src=1)
-            is_same_relaxed = torch.allclose(pp_output_received, sequential_output, atol=1e-2)
-            assert is_same_relaxed, "PP model output does not match Sequential model output"
+            torch.testing.assert_close(pp_output_received, sequential_output)
         else:
             dist.send(pp_output, dst=0)
 
@@ -225,7 +229,9 @@ def run_pp2_test(rank: int, world_size: int, backend: str) -> None:
         dist.destroy_process_group()
 
 
-def run_single_linear_allgather_default_group_test(rank: int, world_size: int, backend: str) -> None:
+def run_single_linear_allgather_default_group_test(
+    rank: int, world_size: int, backend: str, dtype: torch.dtype
+) -> None:
     """Test single linear layer with allgather, default group."""
     setup_environment(rank, world_size)
     dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
@@ -236,8 +242,6 @@ def run_single_linear_allgather_default_group_test(rank: int, world_size: int, b
             if not tensor.is_contiguous():
                 tensor = tensor.contiguous()
             return [tensor[i] for i in range(tensor.shape[0])]
-
-        DTYPE = torch.float16
 
         IN_DIM_0 = 1
         IN_DIM_1 = 128
@@ -255,7 +259,7 @@ def run_single_linear_allgather_default_group_test(rank: int, world_size: int, b
                 self.rank = rank
                 self.group = group
                 self.out_features_per_partition = out_features // world_size
-                self.linear = nn.Linear(in_features, self.out_features_per_partition, dtype=DTYPE)
+                self.linear = nn.Linear(in_features, self.out_features_per_partition, dtype=dtype)
 
             def forward(self, x):
                 src_rank_in_group = dist.get_global_rank(self.group, 0)
@@ -266,7 +270,7 @@ def run_single_linear_allgather_default_group_test(rank: int, world_size: int, b
                     partial_output = partial_output.contiguous()
 
                 gathered_output_shape = (self.world_size,) + partial_output.shape
-                t = torch.empty(gathered_output_shape, device=device, dtype=DTYPE)
+                t = torch.empty(gathered_output_shape, device=device, dtype=dtype)
                 gathered_outputs = tensor_to_view_list(t)
 
                 dist.all_gather(gathered_outputs, partial_output, group=self.group)
@@ -288,7 +292,7 @@ def run_single_linear_allgather_default_group_test(rank: int, world_size: int, b
             def __init__(self, hidden_dim_1, hidden_dim_2):
                 super().__init__()
                 self.layers = nn.Sequential(
-                    nn.Linear(hidden_dim_1, hidden_dim_2, dtype=DTYPE),
+                    nn.Linear(hidden_dim_1, hidden_dim_2, dtype=dtype),
                 )
 
             def forward(self, x):
@@ -306,7 +310,7 @@ def run_single_linear_allgather_default_group_test(rank: int, world_size: int, b
         data = None
         if rank == 0:
             sequential_model = SequentialModel(IN_DIM_1, OUT_DIM_1).to(device=device)
-            data = torch.randn((IN_DIM_0, IN_DIM_1), dtype=DTYPE, device=device)
+            data = torch.randn((IN_DIM_0, IN_DIM_1), dtype=dtype, device=device)
             output_seq = sequential_model(data)
 
         if rank < tensor_world_size:
@@ -334,8 +338,8 @@ def run_single_linear_allgather_default_group_test(rank: int, world_size: int, b
             dist.send(l1_bias_split_1, dst=1, group=tensor_groups[0])
 
         elif rank == 1:
-            l1_weight = torch.empty((OUT_DIM_1 // 2, IN_DIM_1), device=device, dtype=DTYPE)
-            l1_bias = torch.empty(OUT_DIM_1 // 2, device=device, dtype=DTYPE)
+            l1_weight = torch.empty((OUT_DIM_1 // 2, IN_DIM_1), device=device, dtype=dtype)
+            l1_bias = torch.empty(OUT_DIM_1 // 2, device=device, dtype=dtype)
 
             dist.recv(l1_weight, src=0, group=tensor_groups[0])
             dist.recv(l1_bias, src=0, group=tensor_groups[0])
@@ -349,14 +353,13 @@ def run_single_linear_allgather_default_group_test(rank: int, world_size: int, b
         if rank == 0:
             output_tp_pp = model(data)
         elif rank == 1:
-            data_dummy = torch.empty((IN_DIM_0, IN_DIM_1), device=device, dtype=DTYPE)
+            data_dummy = torch.empty((IN_DIM_0, IN_DIM_1), device=device, dtype=dtype)
             output_tp_pp = model(data_dummy)
 
         if rank == 0:
             final_tp_pp_cpu = output_tp_pp.cpu()
             output_seq_cpu = output_seq.cpu()
-            is_same_relaxed = torch.allclose(final_tp_pp_cpu, output_seq_cpu, atol=1e-2)
-            assert is_same_relaxed, "TP+PP result does not match Sequential result"
+            torch.testing.assert_close(final_tp_pp_cpu, output_seq_cpu)
 
         dist.barrier()
 
@@ -364,13 +367,14 @@ def run_single_linear_allgather_default_group_test(rank: int, world_size: int, b
         dist.destroy_process_group()
 
 
-def run_two_linear_bias_default_group_send_recv_test(rank: int, world_size: int, backend: str) -> None:
+def run_two_linear_bias_default_group_send_recv_test(
+    rank: int, world_size: int, backend: str, dtype: torch.dtype
+) -> None:
     """Test two linear layers with bias, default group, send/recv."""
     setup_environment(rank, world_size)
     dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
 
     try:
-        DTYPE = torch.float16
 
         class TensorParallelLinear(nn.Module):
             def __init__(self, in_features, out_features, world_size, rank, group, is_output_layer=False):
@@ -382,10 +386,10 @@ def run_two_linear_bias_default_group_send_recv_test(rank: int, world_size: int,
 
                 if not is_output_layer:
                     self.out_features_per_partition = out_features // world_size
-                    self.linear = nn.Linear(in_features, self.out_features_per_partition, dtype=DTYPE)
+                    self.linear = nn.Linear(in_features, self.out_features_per_partition, dtype=dtype)
                 else:
                     self.in_features_per_partition = in_features // world_size
-                    self.linear = nn.Linear(self.in_features_per_partition, out_features, dtype=DTYPE)
+                    self.linear = nn.Linear(self.in_features_per_partition, out_features, dtype=dtype)
 
             def forward(self, x):
                 if not self.is_output_layer:
@@ -414,8 +418,8 @@ def run_two_linear_bias_default_group_send_recv_test(rank: int, world_size: int,
             def __init__(self, hidden_dim_1, hidden_dim_2, hidden_dim_3):
                 super().__init__()
                 self.layers = nn.Sequential(
-                    nn.Linear(hidden_dim_1, hidden_dim_2, dtype=DTYPE),
-                    nn.Linear(hidden_dim_2, hidden_dim_3, dtype=DTYPE),
+                    nn.Linear(hidden_dim_1, hidden_dim_2, dtype=dtype),
+                    nn.Linear(hidden_dim_2, hidden_dim_3, dtype=dtype),
                 )
 
             def forward(self, x):
@@ -438,7 +442,7 @@ def run_two_linear_bias_default_group_send_recv_test(rank: int, world_size: int,
         data = None
         if rank == 0:
             sequential_model = SequentialModel(512, 2048, 256).to(device=device)
-            data = torch.randn((64, 512), dtype=DTYPE, device=device)
+            data = torch.randn((64, 512), dtype=dtype, device=device)
             output_seq = sequential_model(data)
 
         if rank < tensor_world_size:
@@ -491,24 +495,24 @@ def run_two_linear_bias_default_group_send_recv_test(rank: int, world_size: int,
             dist.send(l2_bias, dst=3)
 
         elif rank == 1:
-            l1_weight = torch.empty((1024, 512), device=device, dtype=DTYPE)
-            l1_bias = torch.empty(1024, device=device, dtype=DTYPE)
+            l1_weight = torch.empty((1024, 512), device=device, dtype=dtype)
+            l1_bias = torch.empty(1024, device=device, dtype=dtype)
             dist.recv(l1_weight, src=0)
             dist.recv(l1_bias, src=0)
             model.layers[0].linear.weight.data.copy_(l1_weight)
             model.layers[0].linear.bias.data.copy_(l1_bias)
 
         elif rank == 2:
-            l2_weight = torch.empty((256, 1024), device=device, dtype=DTYPE)
-            l2_bias = torch.empty(256, device=device, dtype=DTYPE)
+            l2_weight = torch.empty((256, 1024), device=device, dtype=dtype)
+            l2_bias = torch.empty(256, device=device, dtype=dtype)
             dist.recv(l2_weight, src=0)
             dist.recv(l2_bias, src=0)
             model.layers[0].linear.weight.data.copy_(l2_weight)
             model.layers[0].linear.bias.data.copy_(l2_bias)
 
         elif rank == 3:
-            l2_weight = torch.empty((256, 1024), device=device, dtype=DTYPE)
-            l2_bias = torch.empty(256, device=device, dtype=DTYPE)
+            l2_weight = torch.empty((256, 1024), device=device, dtype=dtype)
+            l2_bias = torch.empty(256, device=device, dtype=dtype)
             dist.recv(l2_weight, src=0)
             dist.recv(l2_bias, src=0)
             model.layers[0].linear.weight.data.copy_(l2_weight)
@@ -522,28 +526,27 @@ def run_two_linear_bias_default_group_send_recv_test(rank: int, world_size: int,
             dist.send(output_tp_pp, dst=2)
             dist.send(output_seq, dst=2)
         elif rank == 1:
-            data_dummy = torch.empty((64, 512), device=device, dtype=DTYPE)
+            data_dummy = torch.empty((64, 512), device=device, dtype=dtype)
             output_tp_pp = model(data_dummy)
             dist.send(output_tp_pp, dst=3)
         elif rank == 2:
-            output_tp_pp_recv = torch.empty((64, 1024), device=device, dtype=DTYPE)
+            output_tp_pp_recv = torch.empty((64, 1024), device=device, dtype=dtype)
             dist.recv(output_tp_pp_recv, src=0)
             input_from_stage1 = output_tp_pp_recv
             output_tp_pp = model(input_from_stage1)
         elif rank == 3:
-            output_tp_pp_recv = torch.empty((64, 1024), device=device, dtype=DTYPE)
+            output_tp_pp_recv = torch.empty((64, 1024), device=device, dtype=dtype)
             dist.recv(output_tp_pp_recv, src=1)
             input_from_stage1 = output_tp_pp_recv
             output_tp_pp = model(input_from_stage1)
 
         if rank == 2:
-            output_seq = torch.empty((64, 256), device=device, dtype=DTYPE)
+            output_seq = torch.empty((64, 256), device=device, dtype=dtype)
             dist.recv(output_seq, src=0)
 
             final_tp_pp_cpu = output_tp_pp.cpu()
             output_seq_cpu = output_seq.cpu()
-            is_same_relaxed = torch.allclose(final_tp_pp_cpu, output_seq_cpu, atol=1e-2)
-            assert is_same_relaxed, "TP+PP result does not match Sequential result"
+            torch.testing.assert_close(final_tp_pp_cpu, output_seq_cpu, atol=REDUCTION_ATOL, rtol=REDUCTION_RTOL)
 
         dist.barrier()
 
@@ -551,13 +554,14 @@ def run_two_linear_bias_default_group_send_recv_test(rank: int, world_size: int,
         dist.destroy_process_group()
 
 
-def run_two_linear_no_bias_default_group_send_recv_test(rank: int, world_size: int, backend: str) -> None:
+def run_two_linear_no_bias_default_group_send_recv_test(
+    rank: int, world_size: int, backend: str, dtype: torch.dtype
+) -> None:
     """Test two linear layers without bias, default group, send/recv."""
     setup_environment(rank, world_size)
     dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
 
     try:
-        DTYPE = torch.float16
 
         class TensorParallelLinear(nn.Module):
             def __init__(self, in_features, out_features, world_size, rank, group, is_output_layer=False):
@@ -569,10 +573,10 @@ def run_two_linear_no_bias_default_group_send_recv_test(rank: int, world_size: i
 
                 if not is_output_layer:
                     self.out_features_per_partition = out_features // world_size
-                    self.linear = nn.Linear(in_features, self.out_features_per_partition, bias=False, dtype=DTYPE)
+                    self.linear = nn.Linear(in_features, self.out_features_per_partition, bias=False, dtype=dtype)
                 else:
                     self.in_features_per_partition = in_features // world_size
-                    self.linear = nn.Linear(self.in_features_per_partition, out_features, bias=False, dtype=DTYPE)
+                    self.linear = nn.Linear(self.in_features_per_partition, out_features, bias=False, dtype=dtype)
 
             def forward(self, x):
                 if not self.is_output_layer:
@@ -600,8 +604,8 @@ def run_two_linear_no_bias_default_group_send_recv_test(rank: int, world_size: i
             def __init__(self, hidden_dim_1, hidden_dim_2, hidden_dim_3):
                 super().__init__()
                 self.layers = nn.Sequential(
-                    nn.Linear(hidden_dim_1, hidden_dim_2, bias=False, dtype=DTYPE),
-                    nn.Linear(hidden_dim_2, hidden_dim_3, bias=False, dtype=DTYPE),
+                    nn.Linear(hidden_dim_1, hidden_dim_2, bias=False, dtype=dtype),
+                    nn.Linear(hidden_dim_2, hidden_dim_3, bias=False, dtype=dtype),
                 )
 
             def forward(self, x):
@@ -624,7 +628,7 @@ def run_two_linear_no_bias_default_group_send_recv_test(rank: int, world_size: i
         data = None
         if rank == 0:
             sequential_model = SequentialModel(512, 2048, 256).to(device=device)
-            data = torch.randn((64, 512), dtype=DTYPE, device=device)
+            data = torch.randn((64, 512), dtype=dtype, device=device)
             output_seq = sequential_model(data)
 
         if rank < tensor_world_size:
@@ -664,17 +668,17 @@ def run_two_linear_no_bias_default_group_send_recv_test(rank: int, world_size: i
             dist.send(l2_weight_split_1, dst=3)
 
         elif rank == 1:
-            l1_weight = torch.empty((1024, 512), device=device, dtype=DTYPE)
+            l1_weight = torch.empty((1024, 512), device=device, dtype=dtype)
             dist.recv(l1_weight, src=0)
             model.layers[0].linear.weight.data.copy_(l1_weight)
 
         elif rank == 2:
-            l2_weight = torch.empty((256, 1024), device=device, dtype=DTYPE)
+            l2_weight = torch.empty((256, 1024), device=device, dtype=dtype)
             dist.recv(l2_weight, src=0)
             model.layers[0].linear.weight.data.copy_(l2_weight)
 
         elif rank == 3:
-            l2_weight = torch.empty((256, 1024), device=device, dtype=DTYPE)
+            l2_weight = torch.empty((256, 1024), device=device, dtype=dtype)
             dist.recv(l2_weight, src=0)
             model.layers[0].linear.weight.data.copy_(l2_weight)
 
@@ -686,28 +690,27 @@ def run_two_linear_no_bias_default_group_send_recv_test(rank: int, world_size: i
             dist.send(output_tp_pp, dst=2)
             dist.send(output_seq, dst=2)
         elif rank == 1:
-            data_dummy = torch.empty((64, 512), device=device, dtype=DTYPE)
+            data_dummy = torch.empty((64, 512), device=device, dtype=dtype)
             output_tp_pp = model(data_dummy)
             dist.send(output_tp_pp, dst=3)
         elif rank == 2:
-            output_tp_pp_recv = torch.empty((64, 1024), device=device, dtype=DTYPE)
+            output_tp_pp_recv = torch.empty((64, 1024), device=device, dtype=dtype)
             dist.recv(output_tp_pp_recv, src=0)
             input_from_stage1 = output_tp_pp_recv
             output_tp_pp = model(input_from_stage1)
         elif rank == 3:
-            output_tp_pp_recv = torch.empty((64, 1024), device=device, dtype=DTYPE)
+            output_tp_pp_recv = torch.empty((64, 1024), device=device, dtype=dtype)
             dist.recv(output_tp_pp_recv, src=1)
             input_from_stage1 = output_tp_pp_recv
             output_tp_pp = model(input_from_stage1)
 
         if rank == 2:
-            output_seq = torch.empty((64, 256), device=device, dtype=DTYPE)
+            output_seq = torch.empty((64, 256), device=device, dtype=dtype)
             dist.recv(output_seq, src=0)
 
             final_tp_pp_cpu = output_tp_pp.cpu()
             output_seq_cpu = output_seq.cpu()
-            is_same_relaxed = torch.allclose(final_tp_pp_cpu, output_seq_cpu, atol=1e-2)
-            assert is_same_relaxed, "TP+PP result does not match Sequential result"
+            torch.testing.assert_close(final_tp_pp_cpu, output_seq_cpu, atol=REDUCTION_ATOL, rtol=REDUCTION_RTOL)
 
         dist.barrier()
 
@@ -715,13 +718,12 @@ def run_two_linear_no_bias_default_group_send_recv_test(rank: int, world_size: i
         dist.destroy_process_group()
 
 
-def run_two_linear_bias_subgroup_send_recv_test(rank: int, world_size: int, backend: str) -> None:
+def run_two_linear_bias_subgroup_send_recv_test(rank: int, world_size: int, backend: str, dtype: torch.dtype) -> None:
     """Test two linear layers with bias, subgroup, send/recv."""
     setup_environment(rank, world_size)
     dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
 
     try:
-        DTYPE = torch.float16
 
         class TensorParallelLinear(nn.Module):
             def __init__(self, in_features, out_features, world_size, rank, group, is_output_layer=False):
@@ -733,10 +735,10 @@ def run_two_linear_bias_subgroup_send_recv_test(rank: int, world_size: int, back
 
                 if not is_output_layer:
                     self.out_features_per_partition = out_features // world_size
-                    self.linear = nn.Linear(in_features, self.out_features_per_partition, dtype=DTYPE)
+                    self.linear = nn.Linear(in_features, self.out_features_per_partition, dtype=dtype)
                 else:
                     self.in_features_per_partition = in_features // world_size
-                    self.linear = nn.Linear(self.in_features_per_partition, out_features, dtype=DTYPE)
+                    self.linear = nn.Linear(self.in_features_per_partition, out_features, dtype=dtype)
 
             def forward(self, x):
                 if not self.is_output_layer:
@@ -765,8 +767,8 @@ def run_two_linear_bias_subgroup_send_recv_test(rank: int, world_size: int, back
             def __init__(self, hidden_dim_1, hidden_dim_2, hidden_dim_3):
                 super().__init__()
                 self.layers = nn.Sequential(
-                    nn.Linear(hidden_dim_1, hidden_dim_2, dtype=DTYPE),
-                    nn.Linear(hidden_dim_2, hidden_dim_3, dtype=DTYPE),
+                    nn.Linear(hidden_dim_1, hidden_dim_2, dtype=dtype),
+                    nn.Linear(hidden_dim_2, hidden_dim_3, dtype=dtype),
                 )
 
             def forward(self, x):
@@ -792,7 +794,7 @@ def run_two_linear_bias_subgroup_send_recv_test(rank: int, world_size: int, back
         data = None
         if rank == 0:
             sequential_model = SequentialModel(512, 2048, 256).to(device=device)
-            data = torch.randn((64, 512), dtype=DTYPE, device=device)
+            data = torch.randn((64, 512), dtype=dtype, device=device)
             output_seq = sequential_model(data)
 
         if rank < tensor_world_size:
@@ -855,8 +857,8 @@ def run_two_linear_bias_subgroup_send_recv_test(rank: int, world_size: int, back
             dist.send(l2_bias, dst=3)
 
         elif rank == 1:
-            l1_weight = torch.empty((1024, 512), device=device, dtype=DTYPE)
-            l1_bias = torch.empty(1024, device=device, dtype=DTYPE)
+            l1_weight = torch.empty((1024, 512), device=device, dtype=dtype)
+            l1_bias = torch.empty(1024, device=device, dtype=dtype)
 
             dist.recv(l1_weight, group_src=0, group=tensor_group)
             dist.recv(l1_bias, group_src=0, group=tensor_group)
@@ -865,8 +867,8 @@ def run_two_linear_bias_subgroup_send_recv_test(rank: int, world_size: int, back
             model.layers[0].linear.bias.data.copy_(l1_bias)
 
         elif rank == 2:
-            l2_weight = torch.empty((256, 1024), device=device, dtype=DTYPE)
-            l2_bias = torch.empty(256, device=device, dtype=DTYPE)
+            l2_weight = torch.empty((256, 1024), device=device, dtype=dtype)
+            l2_bias = torch.empty(256, device=device, dtype=dtype)
 
             dist.recv(l2_weight, group_src=0, group=pipe_group)
             dist.recv(l2_bias, group_src=0, group=pipe_group)
@@ -875,8 +877,8 @@ def run_two_linear_bias_subgroup_send_recv_test(rank: int, world_size: int, back
             model.layers[0].linear.bias.data.copy_(l2_bias)
 
         elif rank == 3:
-            l2_weight = torch.empty((256, 1024), device=device, dtype=DTYPE)
-            l2_bias = torch.empty(256, device=device, dtype=DTYPE)
+            l2_weight = torch.empty((256, 1024), device=device, dtype=dtype)
+            l2_bias = torch.empty(256, device=device, dtype=dtype)
 
             dist.recv(l2_weight, src=0)
             dist.recv(l2_bias, src=0)
@@ -894,14 +896,14 @@ def run_two_linear_bias_subgroup_send_recv_test(rank: int, world_size: int, back
             dist.send(output_tp_pp, group_dst=1, group=pipe_group)
             dist.send(output_seq, group_dst=1, group=pipe_group)
         elif rank == 1:
-            data_dummy = torch.empty((64, 512), device=device, dtype=DTYPE)
+            data_dummy = torch.empty((64, 512), device=device, dtype=dtype)
 
             output_tp_pp = model(data_dummy)
 
             # Use pipe group for rank 1 -> rank 3 communication
             dist.send(output_tp_pp, group_dst=1, group=pipe_group)
         elif rank == 2:
-            output_tp_pp_recv = torch.empty((64, 1024), device=device, dtype=DTYPE)
+            output_tp_pp_recv = torch.empty((64, 1024), device=device, dtype=dtype)
 
             # Use pipe group for rank 2 <- rank 0 communication
             dist.recv(output_tp_pp_recv, group_src=0, group=pipe_group)
@@ -909,7 +911,7 @@ def run_two_linear_bias_subgroup_send_recv_test(rank: int, world_size: int, back
             input_from_stage1 = output_tp_pp_recv
             output_tp_pp = model(input_from_stage1)
         elif rank == 3:
-            output_tp_pp_recv = torch.empty((64, 1024), device=device, dtype=DTYPE)
+            output_tp_pp_recv = torch.empty((64, 1024), device=device, dtype=dtype)
 
             # Use pipe group for rank 3 <- rank 1 communication
             dist.recv(output_tp_pp_recv, group_src=0, group=pipe_group)
@@ -918,18 +920,16 @@ def run_two_linear_bias_subgroup_send_recv_test(rank: int, world_size: int, back
             output_tp_pp = model(input_from_stage1)
 
         if rank == 2:
-            output_seq = torch.empty((64, 256), device=device, dtype=DTYPE)
+            output_seq = torch.empty((64, 256), device=device, dtype=dtype)
 
             # Use pipe group for rank 2 <- rank 0 communication
             dist.recv(output_seq, group_src=0, group=pipe_group)
 
-            # Move to CPU for comparison to avoid RBLN compilation of allclose
+            # Move to CPU for comparison to avoid RBLN compilation overhead
             final_tp_pp_cpu = output_tp_pp.cpu()
             output_seq_cpu = output_seq.cpu()
 
-            # Check with different tolerance levels
-            is_same_relaxed = torch.allclose(final_tp_pp_cpu, output_seq_cpu, atol=1e-2)
-            assert is_same_relaxed, "TP+PP result does not match Sequential result"
+            torch.testing.assert_close(final_tp_pp_cpu, output_seq_cpu, atol=REDUCTION_ATOL, rtol=REDUCTION_RTOL)
 
         dist.barrier()
 
@@ -937,13 +937,14 @@ def run_two_linear_bias_subgroup_send_recv_test(rank: int, world_size: int, back
         dist.destroy_process_group()
 
 
-def run_two_linear_bias_relu_subgroup_send_recv_test(rank: int, world_size: int, backend: str) -> None:
+def run_two_linear_bias_relu_subgroup_send_recv_test(
+    rank: int, world_size: int, backend: str, dtype: torch.dtype
+) -> None:
     """Test two linear layers with bias and ReLU, subgroup, send/recv."""
     setup_environment(rank, world_size)
     dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
 
     try:
-        DTYPE = torch.float16
 
         class TensorParallelLinear(nn.Module):
             def __init__(self, in_features, out_features, world_size, rank, group, is_output_layer=False):
@@ -955,10 +956,10 @@ def run_two_linear_bias_relu_subgroup_send_recv_test(rank: int, world_size: int,
 
                 if not is_output_layer:
                     self.out_features_per_partition = out_features // world_size
-                    self.linear = nn.Linear(in_features, self.out_features_per_partition, dtype=DTYPE)
+                    self.linear = nn.Linear(in_features, self.out_features_per_partition, dtype=dtype)
                 else:
                     self.in_features_per_partition = in_features // world_size
-                    self.linear = nn.Linear(self.in_features_per_partition, out_features, dtype=DTYPE)
+                    self.linear = nn.Linear(self.in_features_per_partition, out_features, dtype=dtype)
 
             def forward(self, x):
                 if not self.is_output_layer:
@@ -987,9 +988,9 @@ def run_two_linear_bias_relu_subgroup_send_recv_test(rank: int, world_size: int,
             def __init__(self, hidden_dim_1, hidden_dim_2, hidden_dim_3):
                 super().__init__()
                 self.layers = nn.Sequential(
-                    nn.Linear(hidden_dim_1, hidden_dim_2, dtype=DTYPE),
+                    nn.Linear(hidden_dim_1, hidden_dim_2, dtype=dtype),
                     nn.ReLU(),
-                    nn.Linear(hidden_dim_2, hidden_dim_3, dtype=DTYPE),
+                    nn.Linear(hidden_dim_2, hidden_dim_3, dtype=dtype),
                 )
 
             def forward(self, x):
@@ -1015,7 +1016,7 @@ def run_two_linear_bias_relu_subgroup_send_recv_test(rank: int, world_size: int,
         data = None
         if rank == 0:
             sequential_model = SequentialModel(512, 2048, 256).to(device=device)
-            data = torch.randn((64, 512), dtype=DTYPE, device=device)
+            data = torch.randn((64, 512), dtype=dtype, device=device)
             output_seq = sequential_model(data)
 
         if rank < tensor_world_size:
@@ -1077,8 +1078,8 @@ def run_two_linear_bias_relu_subgroup_send_recv_test(rank: int, world_size: int,
             dist.send(l2_bias, dst=3)
 
         elif rank == 1:
-            l1_weight = torch.empty((1024, 512), device=device, dtype=DTYPE)
-            l1_bias = torch.empty(1024, device=device, dtype=DTYPE)
+            l1_weight = torch.empty((1024, 512), device=device, dtype=dtype)
+            l1_bias = torch.empty(1024, device=device, dtype=dtype)
 
             dist.recv(l1_weight, src=0, group=tensor_group)
             dist.recv(l1_bias, src=0, group=tensor_group)
@@ -1087,8 +1088,8 @@ def run_two_linear_bias_relu_subgroup_send_recv_test(rank: int, world_size: int,
             model.layers[0].linear.bias.data.copy_(l1_bias)
 
         elif rank == 2:
-            l2_weight = torch.empty((256, 1024), device=device, dtype=DTYPE)
-            l2_bias = torch.empty(256, device=device, dtype=DTYPE)
+            l2_weight = torch.empty((256, 1024), device=device, dtype=dtype)
+            l2_bias = torch.empty(256, device=device, dtype=dtype)
 
             dist.recv(l2_weight, group_src=0, group=pipe_group)
             dist.recv(l2_bias, group_src=0, group=pipe_group)
@@ -1097,8 +1098,8 @@ def run_two_linear_bias_relu_subgroup_send_recv_test(rank: int, world_size: int,
             model.layers[1].linear.bias.data.copy_(l2_bias)
 
         elif rank == 3:
-            l2_weight = torch.empty((256, 1024), device=device, dtype=DTYPE)
-            l2_bias = torch.empty(256, device=device, dtype=DTYPE)
+            l2_weight = torch.empty((256, 1024), device=device, dtype=dtype)
+            l2_bias = torch.empty(256, device=device, dtype=dtype)
 
             dist.recv(l2_weight, src=0)
             dist.recv(l2_bias, src=0)
@@ -1116,14 +1117,14 @@ def run_two_linear_bias_relu_subgroup_send_recv_test(rank: int, world_size: int,
             dist.send(output_tp_pp, group_dst=1, group=pipe_group)
             dist.send(output_seq, group_dst=1, group=pipe_group)
         elif rank == 1:
-            data_dummy = torch.empty((64, 512), device=device, dtype=DTYPE)
+            data_dummy = torch.empty((64, 512), device=device, dtype=dtype)
 
             output_tp_pp = model(data_dummy)
 
             # Use pipe group for rank 1 -> rank 3 communication
             dist.send(output_tp_pp, group_dst=1, group=pipe_group)
         elif rank == 2:
-            output_tp_pp_recv = torch.empty((64, 1024), device=device, dtype=DTYPE)
+            output_tp_pp_recv = torch.empty((64, 1024), device=device, dtype=dtype)
 
             # Use pipe group for rank 2 <- rank 0 communication
             dist.recv(output_tp_pp_recv, group_src=0, group=pipe_group)
@@ -1131,7 +1132,7 @@ def run_two_linear_bias_relu_subgroup_send_recv_test(rank: int, world_size: int,
             input_from_stage1 = output_tp_pp_recv
             output_tp_pp = model(input_from_stage1)
         elif rank == 3:
-            output_tp_pp_recv = torch.empty((64, 1024), device=device, dtype=DTYPE)
+            output_tp_pp_recv = torch.empty((64, 1024), device=device, dtype=dtype)
 
             # Use pipe group for rank 3 <- rank 1 communication
             dist.recv(output_tp_pp_recv, group_src=0, group=pipe_group)
@@ -1140,18 +1141,16 @@ def run_two_linear_bias_relu_subgroup_send_recv_test(rank: int, world_size: int,
             output_tp_pp = model(input_from_stage1)
 
         if rank == 2:
-            output_seq = torch.empty((64, 256), device=device, dtype=DTYPE)
+            output_seq = torch.empty((64, 256), device=device, dtype=dtype)
 
             # Use pipe group for rank 2 <- rank 0 communication
             dist.recv(output_seq, group_src=0, group=pipe_group)
 
-            # Move to CPU for comparison to avoid RBLN compilation of allclose
+            # Move to CPU for comparison to avoid RBLN compilation overhead
             final_tp_pp_cpu = output_tp_pp.cpu()
             output_seq_cpu = output_seq.cpu()
 
-            # Check with different tolerance levels
-            is_same_relaxed = torch.allclose(final_tp_pp_cpu, output_seq_cpu, atol=1e-2)
-            assert is_same_relaxed, "TP+PP result does not match Sequential result"
+            torch.testing.assert_close(final_tp_pp_cpu, output_seq_cpu, atol=REDUCTION_ATOL, rtol=REDUCTION_RTOL)
 
         dist.barrier()
 
@@ -1159,7 +1158,9 @@ def run_two_linear_bias_relu_subgroup_send_recv_test(rank: int, world_size: int,
         dist.destroy_process_group()
 
 
-def run_two_linear_bias_allgather_subgroup_send_recv_test(rank: int, world_size: int, backend: str) -> None:
+def run_two_linear_bias_allgather_subgroup_send_recv_test(
+    rank: int, world_size: int, backend: str, dtype: torch.dtype
+) -> None:
     """Test two linear layers with bias, ReLU, allgather, subgroup, send/recv."""
     setup_environment(rank, world_size)
     dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
@@ -1171,8 +1172,6 @@ def run_two_linear_bias_allgather_subgroup_send_recv_test(rank: int, world_size:
                 tensor = tensor.contiguous()
             return [tensor[i] for i in range(tensor.shape[0])]
 
-        DTYPE = torch.float16
-
         class TensorParallelLinear(nn.Module):
             def __init__(self, in_features, out_features, world_size, rank, group, contiguous_output=False):
                 super().__init__()
@@ -1183,7 +1182,7 @@ def run_two_linear_bias_allgather_subgroup_send_recv_test(rank: int, world_size:
 
                 # Column-wise splitting: split output features
                 self.out_features_per_partition = out_features // world_size
-                self.linear = nn.Linear(in_features, self.out_features_per_partition, dtype=DTYPE)
+                self.linear = nn.Linear(in_features, self.out_features_per_partition, dtype=dtype)
 
             def forward(self, x):
                 # Broadcast input to all ranks in the group
@@ -1200,11 +1199,11 @@ def run_two_linear_bias_allgather_subgroup_send_recv_test(rank: int, world_size:
                 # All-gather the partial outputs from all ranks
                 if self.contiguous_output:
                     gathered_output_shape = (self.world_size,) + partial_output.shape
-                    t = torch.empty(gathered_output_shape, device=device, dtype=DTYPE)
+                    t = torch.empty(gathered_output_shape, device=device, dtype=dtype)
                     gathered_outputs = tensor_to_view_list(t)
                 else:
                     gathered_outputs = [
-                        torch.empty(partial_output.shape, device=device, dtype=DTYPE) for _ in range(self.world_size)
+                        torch.empty(partial_output.shape, device=device, dtype=dtype) for _ in range(self.world_size)
                     ]
 
                 dist.all_gather(gathered_outputs, partial_output, group=self.group)
@@ -1228,8 +1227,8 @@ def run_two_linear_bias_allgather_subgroup_send_recv_test(rank: int, world_size:
             def __init__(self, hidden_dim_1, hidden_dim_2, hidden_dim_3):
                 super().__init__()
                 self.layers = nn.Sequential(
-                    nn.Linear(hidden_dim_1, hidden_dim_2, dtype=DTYPE),
-                    nn.Linear(hidden_dim_2, hidden_dim_3, dtype=DTYPE),
+                    nn.Linear(hidden_dim_1, hidden_dim_2, dtype=dtype),
+                    nn.Linear(hidden_dim_2, hidden_dim_3, dtype=dtype),
                 )
 
             def forward(self, x):
@@ -1255,14 +1254,14 @@ def run_two_linear_bias_allgather_subgroup_send_recv_test(rank: int, world_size:
         data = None
         if rank == 0:
             sequential_model = SequentialModel(512, 2048, 256).to(device=device)
-            data = torch.randn((64, 512), dtype=DTYPE, device=device)
+            data = torch.randn((64, 512), dtype=dtype, device=device)
             output_seq = sequential_model(data)
 
         if rank < tensor_world_size:
             layers = [TensorParallelLinear(512, 2048, tensor_world_size, rank, tensor_group)]
             model = PipelineStage(layers, rank).to(device=device)
         else:
-            layers = [nn.Linear(2048, 256, dtype=DTYPE)]
+            layers = [nn.Linear(2048, 256, dtype=dtype)]
             model = PipelineStage(layers, rank).to(device=device)
 
         dist.barrier()
@@ -1315,8 +1314,8 @@ def run_two_linear_bias_allgather_subgroup_send_recv_test(rank: int, world_size:
             dist.send(l2_bias, dst=3)
 
         elif rank == 1:
-            l1_weight = torch.empty((1024, 512), device=device, dtype=DTYPE)
-            l1_bias = torch.empty(1024, device=device, dtype=DTYPE)
+            l1_weight = torch.empty((1024, 512), device=device, dtype=dtype)
+            l1_bias = torch.empty(1024, device=device, dtype=dtype)
 
             dist.recv(l1_weight, group_src=0, group=tensor_group)
             dist.recv(l1_bias, group_src=0, group=tensor_group)
@@ -1325,8 +1324,8 @@ def run_two_linear_bias_allgather_subgroup_send_recv_test(rank: int, world_size:
             model.layers[0].linear.bias.data.copy_(l1_bias)
 
         elif rank == 2:
-            l2_weight = torch.empty((256, 2048), device=device, dtype=DTYPE)
-            l2_bias = torch.empty(256, device=device, dtype=DTYPE)
+            l2_weight = torch.empty((256, 2048), device=device, dtype=dtype)
+            l2_bias = torch.empty(256, device=device, dtype=dtype)
 
             dist.recv(l2_weight, group_src=0, group=pipe_group)
             dist.recv(l2_bias, group_src=0, group=pipe_group)
@@ -1335,8 +1334,8 @@ def run_two_linear_bias_allgather_subgroup_send_recv_test(rank: int, world_size:
             model.layers[0].bias.data.copy_(l2_bias)
 
         elif rank == 3:
-            l2_weight = torch.empty((256, 2048), device=device, dtype=DTYPE)
-            l2_bias = torch.empty(256, device=device, dtype=DTYPE)
+            l2_weight = torch.empty((256, 2048), device=device, dtype=dtype)
+            l2_bias = torch.empty(256, device=device, dtype=dtype)
 
             dist.recv(l2_weight, src=0)
             dist.recv(l2_bias, src=0)
@@ -1354,12 +1353,12 @@ def run_two_linear_bias_allgather_subgroup_send_recv_test(rank: int, world_size:
             dist.send(output_tp_pp, group_dst=1, group=pipe_group)
             dist.send(output_seq, group_dst=1, group=pipe_group)
         elif rank == 1:
-            data_dummy = torch.empty((64, 512), device=device, dtype=DTYPE)
+            data_dummy = torch.empty((64, 512), device=device, dtype=dtype)
 
             output_tp_pp = model(data_dummy)
             # Rank 1 only runs model, no send/recv
         elif rank == 2:
-            output_tp_pp_recv = torch.empty((64, 2048), device=device, dtype=DTYPE)
+            output_tp_pp_recv = torch.empty((64, 2048), device=device, dtype=dtype)
 
             # Use pipe group for rank 2 <- rank 0 communication
             dist.recv(output_tp_pp_recv, group_src=0, group=pipe_group)
@@ -1368,23 +1367,21 @@ def run_two_linear_bias_allgather_subgroup_send_recv_test(rank: int, world_size:
         elif rank == 3:
             # Rank 3 receives input through broadcast in TensorParallelLinear forward
             # The input will be broadcasted from rank 2 in the TensorParallelLinear forward
-            output_tp_pp_recv = torch.empty((64, 2048), device=device, dtype=DTYPE)
+            output_tp_pp_recv = torch.empty((64, 2048), device=device, dtype=dtype)
 
             output_tp_pp = model(output_tp_pp_recv)
 
         if rank == 2:
-            output_seq = torch.empty((64, 256), device=device, dtype=DTYPE)
+            output_seq = torch.empty((64, 256), device=device, dtype=dtype)
 
             # Use pipe group for rank 2 <- rank 0 communication
             dist.recv(output_seq, group_src=0, group=pipe_group)
 
-            # Move to CPU for comparison to avoid RBLN compilation of allclose
+            # Move to CPU for comparison to avoid RBLN compilation overhead
             final_tp_pp_cpu = output_tp_pp.cpu()
             output_seq_cpu = output_seq.cpu()
 
-            # Check with different tolerance levels
-            is_same_relaxed = torch.allclose(final_tp_pp_cpu, output_seq_cpu, atol=1e-2)
-            assert is_same_relaxed, "TP+PP result does not match Sequential result"
+            torch.testing.assert_close(final_tp_pp_cpu, output_seq_cpu, atol=REDUCTION_ATOL, rtol=REDUCTION_RTOL)
 
         dist.barrier()
 
@@ -1432,12 +1429,16 @@ class TestTPPPRBLNBase(TestCase):
 class TestDefaultGroupAllReduceRBLN(TestTPPPRBLNBase):
     """Test cases for default group allreduce operations."""
 
+    @parametrize("dtype", SUPPORTED_DTYPES)
     @parametrize("c10d_async_env", TestTPPPRBLNBase.c10d_async_envs)
-    def test_default_group_allreduce_2ranks(self, c10d_async_env):
+    def test_default_group_allreduce_2ranks(self, dtype, c10d_async_env):
         """Test default group allreduce with 2 ranks."""
 
         self.run_c10d_test(
-            c10d_async_env, self.world_size_2, run_default_group_allreduce_test, (self.world_size_2, self.backend)
+            c10d_async_env,
+            self.world_size_2,
+            run_default_group_allreduce_test,
+            (self.world_size_2, self.backend, dtype),
         )
 
 
@@ -1445,8 +1446,9 @@ class TestDefaultGroupAllReduceRBLN(TestTPPPRBLNBase):
 class TestSingleLinearAllgatherDefaultGroupRBLN(TestTPPPRBLNBase):
     """Test cases for single linear layer with allgather, default group."""
 
+    @parametrize("dtype", SUPPORTED_DTYPES)
     @parametrize("c10d_async_env", TestTPPPRBLNBase.c10d_async_envs)
-    def test_single_linear_allgather_default_group(self, c10d_async_env):
+    def test_single_linear_allgather_default_group(self, dtype, c10d_async_env):
         """Test single linear layer with allgather, default group."""
         if self.should_skip_multi_rank_tests():
             self.skipTest("Requires world_size > 1")
@@ -1455,7 +1457,7 @@ class TestSingleLinearAllgatherDefaultGroupRBLN(TestTPPPRBLNBase):
             c10d_async_env,
             self.world_size_2,
             run_single_linear_allgather_default_group_test,
-            (self.world_size_2, self.backend),
+            (self.world_size_2, self.backend, dtype),
         )
 
 
@@ -1463,21 +1465,23 @@ class TestSingleLinearAllgatherDefaultGroupRBLN(TestTPPPRBLNBase):
 class TestPP2RBLN(TestTPPPRBLNBase):
     """Test cases for PP=2 pipeline parallel operations."""
 
+    @parametrize("dtype", SUPPORTED_DTYPES)
     @parametrize("c10d_async_env", TestTPPPRBLNBase.c10d_async_envs)
-    def test_pp2_pipeline_parallel(self, c10d_async_env):
+    def test_pp2_pipeline_parallel(self, dtype, c10d_async_env):
         """Test PP=2 pipeline parallel."""
         if self.should_skip_multi_rank_tests():
             self.skipTest("Requires world_size > 1")
 
-        self.run_c10d_test(c10d_async_env, self.world_size_2, run_pp2_test, (self.world_size_2, self.backend))
+        self.run_c10d_test(c10d_async_env, self.world_size_2, run_pp2_test, (self.world_size_2, self.backend, dtype))
 
 
 @pytest.mark.single_worker
 class TestTwoLinearBiasDefaultGroupRBLN(TestTPPPRBLNBase):
     """Test cases for two linear layers with bias, default group, send/recv."""
 
+    @parametrize("dtype", SUPPORTED_DTYPES)
     @parametrize("c10d_async_env", TestTPPPRBLNBase.c10d_async_envs)
-    def test_two_linear_bias_default_group_send_recv(self, c10d_async_env):
+    def test_two_linear_bias_default_group_send_recv(self, dtype, c10d_async_env):
         """Test two linear layers with bias, default group, send/recv."""
         if self.should_skip_4rank_tests():
             self.skipTest("Requires at least 4 devices")
@@ -1486,7 +1490,7 @@ class TestTwoLinearBiasDefaultGroupRBLN(TestTPPPRBLNBase):
             c10d_async_env,
             self.world_size_4,
             run_two_linear_bias_default_group_send_recv_test,
-            (self.world_size_4, self.backend),
+            (self.world_size_4, self.backend, dtype),
         )
 
 
@@ -1494,8 +1498,9 @@ class TestTwoLinearBiasDefaultGroupRBLN(TestTPPPRBLNBase):
 class TestTwoLinearNoBiasDefaultGroupRBLN(TestTPPPRBLNBase):
     """Test cases for two linear layers without bias, default group, send/recv."""
 
+    @parametrize("dtype", SUPPORTED_DTYPES)
     @parametrize("c10d_async_env", TestTPPPRBLNBase.c10d_async_envs)
-    def test_two_linear_no_bias_default_group_send_recv(self, c10d_async_env):
+    def test_two_linear_no_bias_default_group_send_recv(self, dtype, c10d_async_env):
         """Test two linear layers without bias, default group, send/recv."""
         if self.should_skip_4rank_tests():
             self.skipTest("Requires at least 4 devices")
@@ -1503,7 +1508,7 @@ class TestTwoLinearNoBiasDefaultGroupRBLN(TestTPPPRBLNBase):
             c10d_async_env,
             self.world_size_4,
             run_two_linear_no_bias_default_group_send_recv_test,
-            (self.world_size_4, self.backend),
+            (self.world_size_4, self.backend, dtype),
         )
 
 
@@ -1511,8 +1516,9 @@ class TestTwoLinearNoBiasDefaultGroupRBLN(TestTPPPRBLNBase):
 class TestTwoLinearBiasSubgroupRBLN(TestTPPPRBLNBase):
     """Test cases for two linear layers with bias, subgroup, send/recv."""
 
+    @parametrize("dtype", SUPPORTED_DTYPES)
     @parametrize("c10d_async_env", TestTPPPRBLNBase.c10d_async_envs)
-    def test_two_linear_bias_subgroup_send_recv(self, c10d_async_env):
+    def test_two_linear_bias_subgroup_send_recv(self, dtype, c10d_async_env):
         """Test two linear layers with bias, subgroup, send/recv."""
         if self.should_skip_4rank_tests():
             self.skipTest("Requires at least 4 devices")
@@ -1521,7 +1527,7 @@ class TestTwoLinearBiasSubgroupRBLN(TestTPPPRBLNBase):
             c10d_async_env,
             self.world_size_4,
             run_two_linear_bias_subgroup_send_recv_test,
-            (self.world_size_4, self.backend),
+            (self.world_size_4, self.backend, dtype),
         )
 
 
@@ -1529,8 +1535,9 @@ class TestTwoLinearBiasSubgroupRBLN(TestTPPPRBLNBase):
 class TestTwoLinearBiasReluSubgroupRBLN(TestTPPPRBLNBase):
     """Test cases for two linear layers with bias and ReLU, subgroup, send/recv."""
 
+    @parametrize("dtype", SUPPORTED_DTYPES)
     @parametrize("c10d_async_env", TestTPPPRBLNBase.c10d_async_envs)
-    def test_two_linear_bias_relu_subgroup_send_recv(self, c10d_async_env):
+    def test_two_linear_bias_relu_subgroup_send_recv(self, dtype, c10d_async_env):
         """Test two linear layers with bias and ReLU, subgroup, send/recv."""
         if self.should_skip_4rank_tests():
             self.skipTest("Requires at least 4 devices")
@@ -1539,7 +1546,7 @@ class TestTwoLinearBiasReluSubgroupRBLN(TestTPPPRBLNBase):
             c10d_async_env,
             self.world_size_4,
             run_two_linear_bias_relu_subgroup_send_recv_test,
-            (self.world_size_4, self.backend),
+            (self.world_size_4, self.backend, dtype),
         )
 
 
@@ -1547,8 +1554,9 @@ class TestTwoLinearBiasReluSubgroupRBLN(TestTPPPRBLNBase):
 class TestTwoLinearBiasAllgatherSubgroupRBLN(TestTPPPRBLNBase):
     """Test cases for two linear layers with bias, allgather, subgroup, send/recv."""
 
+    @parametrize("dtype", SUPPORTED_DTYPES)
     @parametrize("c10d_async_env", TestTPPPRBLNBase.c10d_async_envs)
-    def test_two_linear_bias_allgather_subgroup_send_recv(self, c10d_async_env):
+    def test_two_linear_bias_allgather_subgroup_send_recv(self, dtype, c10d_async_env):
         """Test two linear layers with bias, allgather, subgroup, send/recv."""
         if self.should_skip_4rank_tests():
             self.skipTest("Requires at least 4 devices")
@@ -1557,7 +1565,7 @@ class TestTwoLinearBiasAllgatherSubgroupRBLN(TestTPPPRBLNBase):
             c10d_async_env,
             self.world_size_4,
             run_two_linear_bias_allgather_subgroup_send_recv_test,
-            (self.world_size_4, self.backend),
+            (self.world_size_4, self.backend, dtype),
         )
 
 

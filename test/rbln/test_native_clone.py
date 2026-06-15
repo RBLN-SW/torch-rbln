@@ -50,6 +50,7 @@ class TestCloneRBLNDirectD2D(TestCase):
             (torch.int64, (10,)),
             (torch.int32, (3, 4)),
             (torch.float16, (2, 3, 4)),
+            (torch.bfloat16, (2, 3, 4)),
         ],
     )
     def test_arange_view(self, dtype, shape):

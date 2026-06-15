@@ -378,7 +378,7 @@ def _validate_kv_layer_after_prefill(
     """Validate one layer's key or value cache after prefill: copy to CPU/RBLN, print slice;
     optionally in-place update and return test_vals (for key only)."""
     self.assertEqual(layer_tensor.dim(), 4)
-    self.assertEqual(layer_tensor.dtype, torch.float16, msg="KV cache should be float16")
+    self.assertIn(layer_tensor.dtype, SUPPORTED_DTYPES, msg="KV cache tensor has an unsupported dtype")
 
     print(f"layer {layer_idx}: copy cache to CPU and check shape")
     cpu_t = layer_tensor.to("cpu")

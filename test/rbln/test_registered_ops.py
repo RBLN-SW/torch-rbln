@@ -21,6 +21,16 @@ from test.utils import requires_logical_devices, SUPPORTED_DTYPES
 ATOL = 0.01
 RTOL = 0.01
 
+# Matmul-family ops (linear, addmm, bmm, etc.) need looser atol/rtol than the
+# defaults — rounding accumulates along the K dimension. Unlisted dtypes fall
+# back to (ATOL, RTOL). The error concentrates at near-zero outputs (bound by
+# atol, not rtol); bf16's atol is set 4x fp16's to match its 8-bit mantissa
+# vs fp16's 11.
+MATMUL_TOLERANCES: dict[torch.dtype, tuple[float, float]] = {
+    torch.float16: (0.1, 0.1),
+    torch.bfloat16: (0.4, 0.1),
+}
+
 
 # Various test shapes for comprehensive testing
 TEST_SHAPES = [
@@ -931,20 +941,14 @@ class TestRegisteredPythonOps(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("n,m,p", [(10, 20, 30), (5, 10, 15)])
     def test_addmm(self, dtype, n, m, p):
-        """Test addmm op
-
-        Note: float16 precision limits require relaxed tolerance for matrix multiplication.
-        """
+        """Test addmm op — matmul accumulated error needs the relaxed ``MATMUL_TOLERANCES``."""
         mat1 = torch.randn([n, m], dtype=dtype, device=self.rbln_device)
         mat2 = torch.randn([m, p], dtype=dtype, device=self.rbln_device)
         vec = torch.randn([n, p], dtype=dtype, device=self.rbln_device)
         result = torch.addmm(vec, mat1, mat2)
         expected = torch.addmm(vec.cpu(), mat1.cpu(), mat2.cpu())
-        if dtype == torch.float16:
-            # Use relaxed tolerance for float16 matrix multiplication
-            self.assertEqual(result.cpu(), expected.cpu(), atol=0.1, rtol=0.1)
-        else:
-            self.assertEqual(result.cpu(), expected.cpu(), atol=ATOL, rtol=RTOL)
+        atol, rtol = MATMUL_TOLERANCES.get(dtype, (ATOL, RTOL))
+        self.assertEqual(result.cpu(), expected.cpu(), atol=atol, rtol=rtol)
         self.assertEqual(result.device, self.rbln_device)
         self.assertEqual(result.dtype, expected.dtype)
         self.assertEqual(result.shape, expected.shape)
@@ -952,11 +956,7 @@ class TestRegisteredPythonOps(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("batch_size,in_features,out_features", [(3, 64, 32), (5, 128, 64), (10, 32, 16)])
     def test_linear(self, dtype, batch_size, in_features, out_features):
-        """Test linear op
-
-        Note: float16 precision limits require relaxed tolerance for linear operations
-        (which internally use matrix multiplication).
-        """
+        """Test linear op — matmul accumulated error needs the relaxed ``MATMUL_TOLERANCES``."""
         # linear(input, weight, bias) computes input @ weight.T + bias
         # input: (batch_size, in_features)
         # weight: (out_features, in_features)
@@ -967,11 +967,8 @@ class TestRegisteredPythonOps(TestCase):
         bias = torch.randn([out_features], dtype=dtype, device=self.rbln_device)
         result = torch.nn.functional.linear(x, weight, bias)
         expected = torch.nn.functional.linear(x.cpu(), weight.cpu(), bias.cpu())
-        if dtype == torch.float16:
-            # Use relaxed tolerance for float16 linear operations
-            self.assertEqual(result.cpu(), expected.cpu(), atol=0.1, rtol=0.1)
-        else:
-            self.assertEqual(result.cpu(), expected.cpu(), atol=ATOL, rtol=RTOL)
+        atol, rtol = MATMUL_TOLERANCES.get(dtype, (ATOL, RTOL))
+        self.assertEqual(result.cpu(), expected.cpu(), atol=atol, rtol=rtol)
         self.assertEqual(result.device, self.rbln_device)
         self.assertEqual(result.dtype, expected.dtype)
         self.assertEqual(result.shape, expected.shape)
@@ -986,11 +983,9 @@ class TestRegisteredPythonOps(TestCase):
         ],
     )
     def test_linear_backward(self, dtype, batch_size, in_features, out_features, output_mask):
-        """Test linear_backward op
+        """Test linear_backward op — matmul accumulated error needs the relaxed ``MATMUL_TOLERANCES``.
 
-        Note: float16 precision limits require relaxed tolerance for linear backward operations.
-        CPU doesn't have direct linear_backward implementation, so we compute expected values
-        using the same logic as the RBLN implementation.
+        CPU has no direct linear_backward; the reference is computed inline.
         """
 
         def _linear_backward_cpu(input_tensor, grad_output, weight, output_mask):
@@ -1016,10 +1011,8 @@ class TestRegisteredPythonOps(TestCase):
         # Compare each element of the tuple
         for i, (r, e) in enumerate(zip(result, expected)):
             if r is not None and e is not None:
-                if dtype == torch.float16:
-                    self.assertEqual(r.cpu(), e.cpu(), atol=0.1, rtol=0.1)
-                else:
-                    self.assertEqual(r.cpu(), e.cpu(), atol=ATOL, rtol=RTOL)
+                atol, rtol = MATMUL_TOLERANCES.get(dtype, (ATOL, RTOL))
+                self.assertEqual(r.cpu(), e.cpu(), atol=atol, rtol=rtol)
                 self.assertEqual(r.device, self.rbln_device)
                 self.assertEqual(r.dtype, e.dtype)
             elif r is None and e is None:
@@ -1316,13 +1309,16 @@ class TestBinaryOpsBroadcast(TestCase):
             )
         self.assertEqual(result.device, self.rbln_device)
 
+    # add/sub need a looser tolerance: on REBEL NPU, the compiler computes
+    # in bf16 even for fp16 inputs, so catastrophic cancellation (a ≈ -b)
+    # leaks ~1 bf16 ULP into the small result.
     @parametrize("lhs_shape,rhs_shape", BROADCAST_PATTERNS)
     def test_add_broadcast(self, lhs_shape, rhs_shape):
-        self._check(torch.add, lhs_shape, rhs_shape)
+        self._check(torch.add, lhs_shape, rhs_shape, atol=0.02, rtol=0.02)
 
     @parametrize("lhs_shape,rhs_shape", BROADCAST_PATTERNS)
     def test_sub_broadcast(self, lhs_shape, rhs_shape):
-        self._check(torch.sub, lhs_shape, rhs_shape)
+        self._check(torch.sub, lhs_shape, rhs_shape, atol=0.02, rtol=0.02)
 
     @parametrize("lhs_shape,rhs_shape", BROADCAST_PATTERNS)
     def test_mul_broadcast(self, lhs_shape, rhs_shape):
@@ -1903,7 +1899,10 @@ class TestRegisteredPythonOpsMultiDevice(TestCase):
         y = torch.randn(shape, dtype=dtype, device=device)
         result = x + y
         expected = x.cpu() + y.cpu()
-        self.assertEqual(result.cpu(), expected.cpu(), atol=ATOL, rtol=RTOL)
+        # Looser tolerance: on REBEL NPU, the compiler computes in bf16 even
+        # for fp16 inputs, so catastrophic cancellation (a ≈ -b) leaks ~1
+        # bf16 ULP into the small result.
+        self.assertEqual(result.cpu(), expected.cpu(), atol=0.02, rtol=0.02)
         self.assertEqual(result.device, device)
         self.assertEqual(result.dtype, expected.dtype)
 
