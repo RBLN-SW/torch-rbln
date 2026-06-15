@@ -5,6 +5,7 @@ from importlib.metadata import PackageNotFoundError, version
 from typing import Any  # noqa: UP035
 
 from torch_rbln._internal.env_utils import is_diagnose_mode
+from torch_rbln._internal.log_utils import rbln_log_debug
 from torch_rbln._internal.tvm_libinfo import get_dll_directories, get_dll_directory_candidates
 
 
@@ -25,6 +26,16 @@ def torch_backends_entry_point() -> None:
     if status != "uninitialized":
         return
     status = "initializing"
+
+    # Default to weight-free compilation (weights applied at runtime, not baked into
+    # the .rbln artifact) — the more torch-like behavior. "on" is rebel's canonical
+    # value; set it only when the user hasn't, so RBLN_WEIGHT_FREE=off still wins.
+    if "RBLN_WEIGHT_FREE" not in os.environ:
+        os.environ["RBLN_WEIGHT_FREE"] = "on"
+        rbln_log_debug(
+            "Defaulting RBLN_WEIGHT_FREE='on' (weight-free compilation); set RBLN_WEIGHT_FREE=off to opt out."
+        )
+
     try:
         # Import torch early so libtorch.so / libc10.so are loaded before our
         # native extensions (which link against them).  When the wheel is built
