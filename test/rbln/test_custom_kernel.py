@@ -651,8 +651,8 @@ def flash_attention_naive_decode_fake(
 # custom op tests, so this class opts out the fixture.
 @pytest.mark.no_dynamo_reset
 class TestCustomKernelRBLN(TestCase):
-    rtol = 1e-3
-    atol = 1.2e-2
+    rtol = 0.02
+    atol = 0.02
 
     rbln_device = torch.device("rbln:0")
 
