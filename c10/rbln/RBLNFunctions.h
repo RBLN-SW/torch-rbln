@@ -89,7 +89,24 @@ C10_RBLN_API void set_device_index(c10::DeviceIndex device_index);
 C10_RBLN_API c10::DeviceIndex exchange_device_index(c10::DeviceIndex device_index);
 
 /**
+ * @brief Returns the torch device id backing a device pointer.
+ *
+ * Lightweight counterpart to get_memory_info() for the common case where only
+ * the owning device is needed: it calls rbln_get_torch_device_id_from_vaddr()
+ * directly and avoids the full VMemory JSON round-trip that get_memory_info()
+ * performs. Prefer this on performance hot paths.
+ *
+ * @param data A pointer to device memory.
+ * @return The torch device id (as a c10::DeviceIndex) backing the pointer.
+ */
+C10_RBLN_API c10::DeviceIndex get_torch_device_id(const void* data);
+
+/**
  * @brief Retrieves memory information for a given data pointer.
+ *
+ * @note This performs a full VMemory JSON round-trip and is expensive — keep it
+ * off performance hot paths. When only the owning device is needed, use
+ * get_torch_device_id() instead.
  *
  * @param data A pointer to device memory.
  * @return Memory information associated with the given data pointer.
