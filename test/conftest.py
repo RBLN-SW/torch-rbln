@@ -95,12 +95,12 @@ def enable_eager_malloc(monkeypatch):
 # REBEL-failing tests keyed by fully expanded name -> (test file, reason). Keying on
 # the name pins one parametrization across separate ``@parametrize`` axes, which a
 # per-parameter mark cannot.
-_REBEL_XFAILS = {
-    "test_allgather_float16_unaligned_size_67109568_c10d_async_env_0_rbln": (
-        "test/distributed/test_process_group.py",
-        "REBEL: float16 unaligned all-gather fails at size 67109568 (64 MiB)",
-    ),
-}
+#
+# The float16 unaligned all-gather at size 67109568 (64 MiB) used to be xfailed
+# here; it is now fixed (AllGather is chunked to a CS-safe size, see
+# RCCL_ALLGATHER_MAX_OUTPUT_BYTES in ProcessGroupRBLN.cpp / fsw-inference#324),
+# so its strict-xfail entry was removed.
+_REBEL_XFAILS: dict[str, tuple[str, str]] = {}
 
 
 def pytest_collection_modifyitems(items):
