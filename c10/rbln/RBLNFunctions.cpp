@@ -183,9 +183,26 @@ c10::DeviceIndex exchange_device_index(c10::DeviceIndex device_index) {
   return original_device_index;
 }
 
+c10::DeviceIndex get_torch_device_id(const void* data) {
+  RBLN_LOG_DEBUG("data={}", fmt::ptr(data));
+  RBLN_CHECK(data != nullptr, "data cannot be nullptr");
+
+  const auto vaddr = reinterpret_cast<uint64_t>(data);
+  uint32_t torch_device_id = 0;
+  RBLN_CHECK(!::rbln::rbln_get_torch_device_id_from_vaddr(vaddr, torch_device_id));
+  return static_cast<c10::DeviceIndex>(torch_device_id);
+}
+
 ::rbln::MemoryInfo get_memory_info(const void* data) {
   RBLN_LOG_DEBUG("data={}", fmt::ptr(data));
   RBLN_CHECK(data != nullptr, "data cannot be nullptr");
+  // get_memory_info() does a full VMemory JSON serialize+parse round-trip on
+  // every call. Warn so unexpected hot-path callers are easy to spot in logs;
+  // when only the device id is needed, get_torch_device_id() is the cheap path.
+  RBLN_LOG_WARN(
+      "get_memory_info({}) performs a full VMemory JSON round-trip (slow) — avoid on performance hot paths; "
+      "use get_torch_device_id() when only the device id is needed",
+      fmt::ptr(data));
 
   const auto vaddr = reinterpret_cast<uint64_t>(data);
   ::rbln::MemoryInfo memory_info;
@@ -294,10 +311,8 @@ void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes) {
   const auto dst_vaddr = reinterpret_cast<uint64_t>(rbln_dst_data);
   const auto size = static_cast<uint64_t>(nbytes);
 
-  uint32_t src_torch_device_id = 0;
-  uint32_t dst_torch_device_id = 0;
-  RBLN_CHECK(!::rbln::rbln_get_torch_device_id_from_vaddr(src_vaddr, src_torch_device_id));
-  RBLN_CHECK(!::rbln::rbln_get_torch_device_id_from_vaddr(dst_vaddr, dst_torch_device_id));
+  const auto src_torch_device_id = get_torch_device_id(rbln_src_data);
+  const auto dst_torch_device_id = get_torch_device_id(rbln_dst_data);
 
   RBLN_LOG_DEBUG(
       "src=rbln:{}, dst=rbln:{}", static_cast<int>(src_torch_device_id), static_cast<int>(dst_torch_device_id));
@@ -371,10 +386,8 @@ void memcpy_v2v_async(void* rbln_dst_data, const void* rbln_src_data, size_t nby
   const auto dst_vaddr = reinterpret_cast<uint64_t>(rbln_dst_data);
   const auto size = static_cast<uint64_t>(nbytes);
 
-  uint32_t src_torch_device_id = 0;
-  uint32_t dst_torch_device_id = 0;
-  RBLN_CHECK(!::rbln::rbln_get_torch_device_id_from_vaddr(src_vaddr, src_torch_device_id));
-  RBLN_CHECK(!::rbln::rbln_get_torch_device_id_from_vaddr(dst_vaddr, dst_torch_device_id));
+  const auto src_torch_device_id = get_torch_device_id(rbln_src_data);
+  const auto dst_torch_device_id = get_torch_device_id(rbln_dst_data);
 
   if (src_torch_device_id != dst_torch_device_id) {
     // rbln_memcpy_v2v_async only handles same-device copies; cross-device needs

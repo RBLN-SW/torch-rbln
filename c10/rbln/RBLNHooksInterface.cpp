@@ -44,12 +44,7 @@ bool RBLNHooksInterface::hasRBLN() const {
 
 c10::Device RBLNHooksInterface::getDeviceFromPtr(void* data) const {
   RBLN_LOG_DEBUG("data={}", fmt::ptr(data));
-
-  const auto memory_info = c10::rbln::get_memory_info(data);
-  RBLN_LOG_DEBUG("memory_info={}", c10::rbln::to_string(memory_info));
-
-  const auto torch_device_id = memory_info.torch_device_id;
-  const auto device_index = static_cast<c10::DeviceIndex>(torch_device_id);
+  const auto device_index = c10::rbln::get_torch_device_id(data);
   const auto device = c10::Device(c10::kPrivateUse1, device_index);
   RBLN_LOG_DEBUG("device={}", c10::str(device));
   return device;

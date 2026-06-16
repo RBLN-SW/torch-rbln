@@ -27,21 +27,19 @@ class BaseTestNonZeroStorageOffset(TestCase):
     ALLOW_CONTIGUOUS_FOR_NONZERO_OFFSET = True
 
     def assertEqual(self, x, y, *args, **kwargs):
-        # fp16 view-on-device adds a cast(f16↔cf16) round-trip on every view-aware
-        # op (`cast → strided_slice → cast`); custom_float16 has fewer mantissa bits
-        # than fp16, so each round-trip introduces ~1 ULP drift per element.
-        # Multi-stage view chains (chunk + transpose, slice + permute + reshape
-        # etc.) accumulate that drift across stages and trip the default-tight
-        # assertEqual tolerance even though the device computation is correct.
-        # Apply a custom_float16-aware tolerance for fp16 tensor compares — same scale
-        # the test_ops.py 30584d2 tolerance block uses for elementwise fp16 ops.
+        # View-on-device adds a cast round-trip on every view-aware op (e.g.,
+        # fp16 ↔ custom_float16 for fp16 inputs); the round-trip can lose
+        # mantissa bits and accumulate ~1 ULP drift per stage. Multi-stage
+        # view chains (chunk + transpose, slice + permute + reshape, etc.)
+        # compound the drift past the default tolerance. Use the test_ops.py
+        # elementwise tolerance for catalog-dtype compares.
         if (
             "rtol" not in kwargs
             and "atol" not in kwargs
             and isinstance(x, torch.Tensor)
             and isinstance(y, torch.Tensor)
-            and x.dtype is torch.float16
-            and y.dtype is torch.float16
+            and x.dtype == y.dtype
+            and x.dtype in SUPPORTED_DTYPES
         ):
             kwargs.setdefault("rtol", 0.005)
             kwargs.setdefault("atol", 0.05)

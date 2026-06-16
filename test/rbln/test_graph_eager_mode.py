@@ -105,7 +105,8 @@ class TestGraphMode(TestCase):
 
         self._run_eager_and_graph_mode(model, (x,))
 
-    def test_linear_to_linear(self):
+    @dtypes(*SUPPORTED_DTYPES)
+    def test_linear_to_linear(self, dtype):
         """Test that graph mode and eager mode produce same results for complex linear layers."""
 
         class Net(nn.Module):
@@ -113,12 +114,12 @@ class TestGraphMode(TestCase):
                 super().__init__()
                 self.l1 = nn.Linear(16, 32)
                 self.relu = nn.ReLU()
-                self.l2 = nn.Linear(32, 10).to(torch.float16)
+                self.l2 = nn.Linear(32, 10).to(dtype)
 
             def forward(self, x):
                 x = self.l1(x)
                 x = self.relu(x)
-                x = x.to(dtype=torch.float16)
+                x = x.to(dtype=dtype)
                 return self.l2(x)
 
         model = Net().to(self.rbln_device)
@@ -126,7 +127,8 @@ class TestGraphMode(TestCase):
 
         self._run_eager_and_graph_mode(model, (x,))
 
-    def test_layernorm_mixed_precision(self):
+    @dtypes(*SUPPORTED_DTYPES)
+    def test_layernorm_mixed_precision(self, dtype):
         """Test that graph mode and eager mode produce same results for layernorm with mixed precision."""
 
         class Net(nn.Module):
@@ -135,12 +137,12 @@ class TestGraphMode(TestCase):
                 self.ln = nn.LayerNorm(32)
 
             def forward(self, x):
-                x = x.to(torch.float16)
+                x = x.to(dtype)
                 x = self.ln(x.to(torch.float32))
-                return x.to(torch.float16)
+                return x.to(dtype)
 
         model = Net().to(self.rbln_device)
-        x = torch.randn([6, 32], dtype=torch.float16, device=self.rbln_device)
+        x = torch.randn([6, 32], dtype=dtype, device=self.rbln_device)
 
         self._run_eager_and_graph_mode(model, (x,))
 

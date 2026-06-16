@@ -4,7 +4,7 @@ import pytest
 import torch
 
 import torch_rbln
-from test.utils import set_deterministic_seeds
+from test.utils import set_deterministic_seeds, xfail_rebel
 from torch_rbln._internal.log_utils import rbln_log_debug
 
 
@@ -90,3 +90,31 @@ def enable_eager_malloc(monkeypatch):
     original_env = os.getenv("TORCH_RBLN_EAGER_MALLOC", "")
     rbln_log_debug(f"Setting TORCH_RBLN_EAGER_MALLOC=1 (was '{original_env}')")
     monkeypatch.setenv("TORCH_RBLN_EAGER_MALLOC", "1")
+
+
+# REBEL-failing tests keyed by fully expanded name -> (test file, reason). Keying on
+# the name pins one parametrization across separate ``@parametrize`` axes, which a
+# per-parameter mark cannot.
+_REBEL_XFAILS = {
+    "test_allgather_float16_unaligned_size_67109568_c10d_async_env_0_rbln": (
+        "test/distributed/test_process_group.py",
+        "REBEL: float16 unaligned all-gather fails at size 67109568 (64 MiB)",
+    ),
+}
+
+
+def pytest_collection_modifyitems(items):
+    matched = set()
+    for item in items:
+        entry = _REBEL_XFAILS.get(item.name)
+        if entry is not None:
+            _, reason = entry
+            item.add_marker(xfail_rebel(reason))
+            matched.add(item.name)
+
+    # Key whose file was collected but whose name no longer matches = stale (renamed or
+    # re-parametrized); fail loudly instead of silently dropping the xfail.
+    collected_files = {item.nodeid.split("::", 1)[0] for item in items}
+    stale = [name for name, (path, _) in _REBEL_XFAILS.items() if name not in matched and path in collected_files]
+    if stale:
+        raise pytest.UsageError(f"Stale _REBEL_XFAILS keys (file collected, name unmatched): {stale}")

@@ -27,21 +27,21 @@ bool contains(const Arr& arr, const T& value) {
 }
 
 TEST_F(RBLNSupportedDtypesTest, DispatchCatalogContents) {
-  constexpr c10::ScalarType kExpected[] = {c10::kHalf};
+  constexpr c10::ScalarType kExpected[] = {c10::kHalf, c10::kBFloat16};
   for (const auto scalar_type : kExpected) {
     EXPECT_TRUE(contains(c10::rbln::kDispatchDtypes, scalar_type));
   }
 }
 
 TEST_F(RBLNSupportedDtypesTest, SdpaCatalogContents) {
-  constexpr c10::ScalarType kExpected[] = {c10::kHalf};
+  constexpr c10::ScalarType kExpected[] = {c10::kHalf, c10::kBFloat16};
   for (const auto scalar_type : kExpected) {
     EXPECT_TRUE(contains(c10::rbln::kSdpaDtypes, scalar_type));
   }
 }
 
 TEST_F(RBLNSupportedDtypesTest, AmpCatalogContents) {
-  constexpr c10::ScalarType kExpected[] = {c10::kHalf};
+  constexpr c10::ScalarType kExpected[] = {c10::kHalf, c10::kBFloat16};
   for (const auto scalar_type : kExpected) {
     EXPECT_TRUE(contains(c10::rbln::kAmpDtypes, scalar_type));
   }
@@ -68,7 +68,6 @@ TEST_F(RBLNSupportedDtypesTest, IsDispatchDtypeAcceptsAdmitted) {
 TEST_F(RBLNSupportedDtypesTest, IsDispatchDtypeRejectsUnsupported) {
   constexpr c10::ScalarType kUnsupported[] = {
       c10::kFloat,
-      c10::kBFloat16,
       c10::kInt,
       c10::kLong,
       c10::kBool,

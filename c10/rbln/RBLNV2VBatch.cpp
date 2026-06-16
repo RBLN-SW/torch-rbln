@@ -34,14 +34,14 @@ inline void update_homogeneity(bool& homogeneous, c10::DeviceIndex& anchor, cons
   if (!homogeneous) {
     return;
   }
-  const auto s = static_cast<c10::DeviceIndex>(get_memory_info(src).torch_device_id);
+  const auto s = get_torch_device_id(src);
   if (anchor < 0) {
     anchor = s;
   } else if (anchor != s) {
     homogeneous = false;
     return;
   }
-  const auto d = static_cast<c10::DeviceIndex>(get_memory_info(dst).torch_device_id);
+  const auto d = get_torch_device_id(dst);
   if (s != d) {
     homogeneous = false;
   }

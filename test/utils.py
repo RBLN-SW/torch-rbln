@@ -1,3 +1,4 @@
+import functools
 import multiprocessing
 import os
 import random
@@ -88,22 +89,58 @@ def requires_physical_devices(num_devices):
     )
 
 
-def is_rebel_device() -> bool:
-    """True on the REBEL lineup (RBLN-CR03/CR13/CR23).
+def _arch_from_npu_name(name: str) -> str:
+    """Map an RBLN NPU name to a device family: ``RBLN-CA*`` -> ``"atom"``,
+    ``RBLN-CR*`` -> ``"rebel"``, anything else -> ``"unknown"``.
+    """
+    name = name.upper()
+    if name.startswith("RBLN-CA"):
+        return "atom"
+    if name.startswith("RBLN-CR"):
+        return "rebel"
+    return "unknown"
 
-    REBEL differs from ATOM in ways the model suite must account for: TP>1 is
-    not supported yet (a single device is a quad chiplet, 1->4), and its 140 GB
-    DRAM makes vLLM's default ``gpu_memory_utilization`` KV-cache budget
-    oversized. Returns False when the NPU name can't be queried.
+
+@functools.lru_cache(maxsize=1)
+def get_device_arch() -> str:
+    """Identify the current NPU family (``"atom"``/``"rebel"``/``"unknown"``) via
+    ``get_npu_name`` from ``rebel-compiler`` (cached). Returns ``"unknown"`` if the
+    NPU name can't be queried.
     """
     try:
         from rebel.device_info import get_npu_name
 
-        name = (get_npu_name(0) or "").upper()
+        return _arch_from_npu_name(get_npu_name(0) or "")
     except Exception:
-        return False
-    # ATOM = RBLN-CA*, REBEL = RBLN-CR* (CR03/CR13/CR23).
-    return name.startswith("RBLN-CR")
+        return "unknown"
+
+
+def is_atom_device() -> bool:
+    """True on the ATOM lineup (``RBLN-CA*``); thin wrapper over :func:`get_device_arch`."""
+    return get_device_arch() == "atom"
+
+
+def is_rebel_device() -> bool:
+    """True on the REBEL lineup (``RBLN-CR*``); thin wrapper over :func:`get_device_arch`."""
+    return get_device_arch() == "rebel"
+
+
+def xfail_atom(reason: str):
+    """Strict xfail on ATOM, inert elsewhere.
+
+    An unexpected pass fails the suite, signalling the marker can be removed
+    once ATOM gains support.
+    """
+    return pytest.mark.xfail(condition=is_atom_device(), reason=reason, strict=True)
+
+
+def xfail_rebel(reason: str):
+    """Strict xfail on REBEL, inert elsewhere.
+
+    An unexpected pass fails the suite, signalling the marker can be removed
+    once REBEL gains support.
+    """
+    return pytest.mark.xfail(condition=is_rebel_device(), reason=reason, strict=True)
 
 
 def spawn_target_with_clean_exit(rank: int, test_func, *args) -> None:
