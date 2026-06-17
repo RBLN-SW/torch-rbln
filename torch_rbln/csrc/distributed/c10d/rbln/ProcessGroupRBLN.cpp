@@ -67,8 +67,20 @@ constexpr size_t RCCL_ALLREDUCE_MAX_BYTES_PER_RANK = 1ULL * 1024ULL * 1024ULL;
 constexpr size_t RCCL_REDUCE_SCATTER_MAX_BYTES_PER_WORLD = 32ULL * 1024ULL * 1024ULL;
 constexpr size_t RCCL_MAX_BYTES_PER_REDUCE_SCATTER_OP = 2ULL * 1024ULL * 1024ULL;
 constexpr size_t RCCL_MAX_COMMAND_BUFFER_SUB_COMMANDS_COUNT = 15ULL;
-// AllGather size limit: output size <= 1GB (can be performed in a single allgather operation)
-constexpr size_t RCCL_ALLGATHER_MAX_OUTPUT_BYTES = 1ULL * 1024ULL * 1024ULL * 1024ULL;
+// AllGather per-call output-size limit (drives the chunked multi-call path).
+//
+// The REBEL/UMD AllGather builds its *entire* command stream into a single
+// fixed-size CS chunk (RCCL_CS_CHUNK_SIZE = 32 KiB) and ships exactly that many
+// bytes to the device. A transfer large enough that its per-page DMA
+// descriptors overflow 32 KiB has the tail descriptors silently dropped, so the
+// recv-buffer tail is left stale (or the op errors with -ENOMEM). Empirically
+// (world_size = 2) a 256 MiB output already overflows on REBEL while 128 MiB is
+// safe — see fsw-inference#324. CS size scales with the per-call *output* bytes,
+// so capping each AllGather call's output keeps the generated CS within budget;
+// anything larger is split into <= this many bytes per call by the chunked path
+// below. 64 MiB leaves ~2x margin under the observed overflow point and absorbs
+// the per-step sync/header overhead for larger world sizes.
+constexpr size_t RCCL_ALLGATHER_MAX_OUTPUT_BYTES = 64ULL * 1024ULL * 1024ULL;
 
 /**
  * @brief Get element size for RCCL operations based on dtype
