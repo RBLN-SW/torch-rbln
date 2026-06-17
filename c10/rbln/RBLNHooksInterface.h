@@ -48,6 +48,23 @@ struct C10_RBLN_API RBLNHooksInterface : public at::PrivateUse1HooksInterface {
   bool hasPrimaryContext(c10::DeviceIndex device_index) const override;
 
   /**
+   * @brief Returns the host allocator used for CPU tensors created with
+   * `pin_memory=True` while RBLN is the active accelerator.
+   *
+   * @return The pinned host allocator. Never null.
+   */
+  c10::Allocator* getPinnedMemoryAllocator() const override;
+
+  /**
+   * @brief Checks whether the given host pointer was allocated by the pinned
+   * host allocator. This function should NEVER throw.
+   *
+   * @param data A host pointer.
+   * @return True if the pointer belongs to a pinned allocation.
+   */
+  bool isPinnedPtr(const void* data) const override;
+
+  /**
    * @brief Resizes the storage to the specified number of bytes.
    *
    * @param storage The storage to resize.

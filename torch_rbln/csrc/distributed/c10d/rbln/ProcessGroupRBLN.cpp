@@ -34,6 +34,9 @@
 #include <torch/torch.h>
 #include <torch_rbln/csrc/distributed/c10d/rbln/ProcessGroupRBLN.hpp>
 #include <torch_rbln/csrc/distributed/c10d/rbln/RcclUniqueIdForC10d.hpp>
+// TEMPORARY: remove together with RdmaIpAutoDiscovery.{hpp,cpp} once
+// librbln-ccl performs RoCE GID auto-discovery internally.
+#include <torch_rbln/csrc/distributed/c10d/rbln/RdmaIpAutoDiscovery.hpp>
 
 #include <cstring>
 
@@ -49,9 +52,13 @@ namespace {
 // RCCL Alignment Constants
 // ============================================================================
 
-// RCCL alignment constraints vary by operation type
-constexpr size_t RCCL_ALLGATHER_ALIGNMENT = 128ULL; // AllGather: 128 bytes
-constexpr size_t RCCL_ALLREDUCE_ALIGNMENT = 512ULL; // AllReduce: 512 bytes
+// Per-op driver alignment requirements (RCCL_DATA_ALIGNSIZE_FOR_CS).
+// v3.0.0 enforced 512 B for CS-based AllReduce/ReduceScatter and 128 B for
+// AllGather; v3.1+ relaxed CS alignment to 128 B. Keep these at the tighter
+// historical values so a single torch-rbln build runs against either driver
+// generation — 512-aligned trivially satisfies the newer 128 B requirement.
+constexpr size_t RCCL_ALLGATHER_ALIGNMENT = 128ULL;
+constexpr size_t RCCL_ALLREDUCE_ALIGNMENT = 512ULL;
 constexpr size_t RCCL_REDUCE_SCATTER_ALIGNMENT = RCCL_ALLREDUCE_ALIGNMENT;
 
 // AllReduce size limit: data_size / world_size <= 1MB (temporary driver limitation)
@@ -60,8 +67,20 @@ constexpr size_t RCCL_ALLREDUCE_MAX_BYTES_PER_RANK = 1ULL * 1024ULL * 1024ULL;
 constexpr size_t RCCL_REDUCE_SCATTER_MAX_BYTES_PER_WORLD = 32ULL * 1024ULL * 1024ULL;
 constexpr size_t RCCL_MAX_BYTES_PER_REDUCE_SCATTER_OP = 2ULL * 1024ULL * 1024ULL;
 constexpr size_t RCCL_MAX_COMMAND_BUFFER_SUB_COMMANDS_COUNT = 15ULL;
-// AllGather size limit: output size <= 1GB (can be performed in a single allgather operation)
-constexpr size_t RCCL_ALLGATHER_MAX_OUTPUT_BYTES = 1ULL * 1024ULL * 1024ULL * 1024ULL;
+// AllGather per-call output-size limit (drives the chunked multi-call path).
+//
+// The REBEL/UMD AllGather builds its *entire* command stream into a single
+// fixed-size CS chunk (RCCL_CS_CHUNK_SIZE = 32 KiB) and ships exactly that many
+// bytes to the device. A transfer large enough that its per-page DMA
+// descriptors overflow 32 KiB has the tail descriptors silently dropped, so the
+// recv-buffer tail is left stale (or the op errors with -ENOMEM). Empirically
+// (world_size = 2) a 256 MiB output already overflows on REBEL while 128 MiB is
+// safe — see fsw-inference#324. CS size scales with the per-call *output* bytes,
+// so capping each AllGather call's output keeps the generated CS within budget;
+// anything larger is split into <= this many bytes per call by the chunked path
+// below. 64 MiB leaves ~2x margin under the observed overflow point and absorbs
+// the per-step sync/header overhead for larger world sizes.
+constexpr size_t RCCL_ALLGATHER_MAX_OUTPUT_BYTES = 64ULL * 1024ULL * 1024ULL;
 
 /**
  * @brief Get element size for RCCL operations based on dtype
@@ -1103,7 +1122,7 @@ class AllreduceRBLNWork : public RBLNWork {
       // Handle remainder with padding (only copy the unaligned tail)
       if (needs_padding) {
         const auto device = c10::Device(c10::kPrivateUse1, static_cast<c10::DeviceIndex>(device_id_));
-        const auto options = c10::TensorOptions().device(device).dtype(c10::kHalf);
+        const auto options = c10::TensorOptions().device(device).dtype(input_flat.scalar_type());
         auto padded_tensor = at::empty({static_cast<int64_t>(align_numel)}, options);
 
         // Copy only the remainder elements to padded tensor
@@ -1363,42 +1382,61 @@ class ReduceScatterRBLNWork : public RBLNWork {
       // ========================================================================
       // Step 3-1: Process unaligned remainder portion if exists
       if (needs_padding) {
-        // Step 3-1-1: Calculate output pointer for remainder
-        out_ptr = static_cast<char*>(output.data_ptr()) + (out_numel_offset * elem_size);
         size_t remainder_recv_numel = recv_numel - input_numel_offset;
         RBLN_CHECK(
             remainder_send_numel == remainder_recv_numel * worldSize_,
             "remainder_send_numel != remainder_recv_numel * worldSize_");
 
-        // Step 3-1-2: Calculate aligned size for padded remainder tensor
-        size_t aligned_up_remainder_send_numel =
-            (remainder_send_numel + align_unit_numel - 1) / align_unit_numel * align_unit_numel;
-        // Step 3-1-3: Create temporary tensor for padded remainder
+        // Step 3-1-1: Align the per-rank recv stride. The driver enforces
+        // (recv_count * elem_size) % RCCL_DATA_ALIGNSIZE_FOR_CS == 0; aligning
+        // only the total send size is insufficient because each rank's segment
+        // boundary must land on the alignment too.
+        const size_t aligned_up_remainder_recv_numel =
+            (remainder_recv_numel + align_unit_numel - 1) / align_unit_numel * align_unit_numel;
+        const size_t aligned_up_remainder_send_numel = aligned_up_remainder_recv_numel * worldSize_;
+
+        // Step 3-1-2: Allocate aligned send/recv staging tensors. A separate
+        // recv buffer is required because the real output has room for only
+        // remainder_recv_numel elements past out_numel_offset — writing the
+        // aligned-up count directly would overrun the output storage.
         at::Tensor remainder_tensor =
             torch::empty({static_cast<int64_t>(aligned_up_remainder_send_numel)}, inputs_[i][0].options());
+        at::Tensor padded_output_tensor =
+            torch::empty({static_cast<int64_t>(aligned_up_remainder_recv_numel)}, output.options());
 
-        // Step 3-1-4: Copy remainder portions from all input tensors to padded tensor
+        // Step 3-1-3: Pack each rank's tail into the send tensor at the aligned
+        // stride. Padding bytes inside each segment are reduced but their
+        // results are dropped when copying back, so leaving them uninitialized
+        // is safe.
         size_t offset = 0;
         for (const auto& input_tensor : inputs_[i]) {
           auto input_tensor_flatten = input_tensor.flatten();
           auto input_send_tensor_slice = input_tensor_flatten.slice(0, input_numel_offset, recv_numel);
           auto remainder_tensor_slice = remainder_tensor.slice(0, offset, offset + remainder_recv_numel);
           remainder_tensor_slice.copy_(input_send_tensor_slice);
-          offset += remainder_recv_numel;
+          offset += aligned_up_remainder_recv_numel;
         }
 
-        // Step 3-1-5: Execute ReduceScatter on padded remainder
+        // Step 3-1-4: Execute ReduceScatter on the aligned padded remainder.
         ensureRcclReduceMemory(remainder_tensor);
+        ensureRcclReduceMemory(padded_output_tensor);
         RBLNRetCode ret = rccl_->ReduceScatter(
             std::vector<void*>{remainder_tensor.data_ptr()},
-            out_ptr,
-            static_cast<int>(remainder_recv_numel),
+            padded_output_tensor.data_ptr(),
+            static_cast<int>(aligned_up_remainder_recv_numel),
             rcclDataType_,
             rcclReduceOp_,
             0,
             nullptr);
         RBLN_CHECK(
             ret == RBLNRetCode_SUCCESS, "RCCL ReduceScatter (padded remainder) failed: {}", static_cast<int>(ret));
+
+        // Step 3-1-5: Copy back only the unpadded portion to the real output.
+        auto output_flat = output.flatten();
+        auto output_remainder_slice = output_flat.slice(0, out_numel_offset, recv_numel);
+        auto padded_output_slice = padded_output_tensor.slice(0, 0, remainder_recv_numel);
+        output_remainder_slice.copy_(padded_output_slice);
+
         RBLN_LOG_DEBUG("RCCL ReduceScatter (padded remainder) completed successfully");
       }
     }
@@ -1582,6 +1620,7 @@ class BarrierRBLNWork : public RBLNWork {
       // Create a dummy tensor on RBLN device for all ranks
       // All ranks must have the same tensor shape and type for broadcast
       // RCCL requires 128-byte alignment, so use 64 float16 elements = 128 bytes
+      // Barrier value is discarded; the hardcoded `float16` is independent of the user's dtype.
       constexpr int64_t BARRIER_ALIGNED_NUMEL = RCCL_ALLGATHER_ALIGNMENT / sizeof(at::Half);
       const auto device = c10::Device(c10::kPrivateUse1, static_cast<c10::DeviceIndex>(device_id_));
       const auto options = c10::TensorOptions().device(device).dtype(c10::kHalf);
@@ -1653,6 +1692,11 @@ ProcessGroupRBLN::ProcessGroupRBLN(
       backendName_(RBLN_BACKEND_NAME),
       global_ranks_in_group_(global_ranks_in_group),
       glooBackend_(std::move(glooBackend)) {
+  // TEMPORARY: auto-fill RBLN_RDMA_IP before InitRBLNWork runs
+  // PrepareContextAndExportMem (which is when librbln-ccl reads the env).
+  // Remove this call once librbln-ccl performs the discovery internally.
+  ::torch_rbln::detail::MaybeAutoDiscoverRbnRdmaIp();
+
   c10::rbln::get_device_count();
 
   // Check environment variable for sync/async mode

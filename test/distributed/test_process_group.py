@@ -585,7 +585,21 @@ class TestAllGatherRBLN(TestProcessGroupRBLNBase):
         )
 
     @parametrize(
-        "size", [256, 512, (512 * KiB), MiB, (2 * MiB), (4 * MiB), (8 * MiB), (16 * MiB), (32 * MiB), (64 * MiB)]
+        "size",
+        [
+            256,
+            512,
+            (512 * KiB),
+            MiB,
+            (2 * MiB),
+            (4 * MiB),
+            (8 * MiB),
+            (16 * MiB),
+            (32 * MiB),
+            (64 * MiB),
+            (256 * MiB),
+            (512 * MiB),
+        ],
     )
     @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
     def test_allgather_float16_aligned(self, size, c10d_async_env):
@@ -604,6 +618,8 @@ class TestAllGatherRBLN(TestProcessGroupRBLNBase):
             (16 * MiB + 176),  # unaligned 16 MiB
             (32 * MiB + 352),  # unaligned 32 MiB
             (64 * MiB + 704),  # unaligned 64 MiB
+            (256 * MiB + 2816),  # unaligned 256 MiB
+            (512 * MiB + 5632),  # unaligned 512 MiB
         ],
     )
     @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)

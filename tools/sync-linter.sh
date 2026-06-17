@@ -3,7 +3,7 @@
 #
 # Usage:
 #   ./sync-linter.sh              # Sync using default version from torch-rbln/pyproject.toml
-#   ./sync-linter.sh v2.10.0      # Sync from the given PyTorch tag
+#   ./sync-linter.sh v2.11.0      # Sync from the given PyTorch tag
 #
 set -e
 
@@ -19,7 +19,7 @@ else
   exit 1
 fi
 
-# Default version: parse torch version (e.g. 2.10.0) from pyproject.toml and use as tag v2.10.0
+# Default version: parse torch version (e.g. 2.11.0) from pyproject.toml and use as tag v2.11.0
 TORCH_VER=$(grep -E 'torch==[0-9]+\.[0-9]+\.[0-9]+' "$PYPROJECT" | head -1 | sed -E 's/.*torch==([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
 VERSION="${1:-v${TORCH_VER}}"
 

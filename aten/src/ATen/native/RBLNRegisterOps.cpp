@@ -2,8 +2,11 @@
 #include <ATen/core/VariableHooksInterface.h>
 #include <ATen/native/rbln/RBLNCPUFallback.h>
 #include <ATen/native/rbln/RBLNCopy.h>
+#include <ATen/native/rbln/RBLNRepeat.h>
 #include <ATen/native/rbln/RBLNResize.h>
+#include <ATen/native/rbln/RBLNTensorAdvancedIndexing.h>
 #include <ATen/native/rbln/RBLNTensorFactories.h>
+#include <ATen/native/rbln/RBLNTensorShape.h>
 #include <ATen/native/transformers/attention.h>
 #include <ATen/native/transformers/sdp_utils_cpp.h>
 #include <c10/rbln/RBLNFallbackConfig.h>
@@ -134,8 +137,14 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   m.impl("_copy_from_and_resize", TORCH_FN(at::native::rbln::_copy_from_and_resize_rbln));
   m.impl("empty.memory_format", TORCH_FN(at::native::rbln::empty_rbln));
   m.impl("empty_strided", TORCH_FN(at::native::rbln::empty_strided_rbln));
+  m.impl("zero_", TORCH_FN(at::native::rbln::zero_rbln_));
   m.impl("resize_", TORCH_FN(at::native::rbln::resize_rbln_));
   m.impl("set_.source_Storage_storage_offset", TORCH_FN(at::native::rbln::set_storage_rbln_));
+  m.impl("index_select", TORCH_FN(at::native::rbln::index_select_rbln));
+  m.impl("index_select.out", TORCH_FN(at::native::rbln::index_select_out_rbln));
+  m.impl("index_copy.out", TORCH_FN(at::native::rbln::index_copy_out_rbln));
+  m.impl("repeat_interleave.Tensor", TORCH_FN(at::native::rbln::repeat_interleave_Tensor_rbln));
+  m.impl("cat.out", TORCH_FN(at::native::rbln::cat_out_rbln));
 
   // View operations (metadata-only, no device computation)
   // These operations only manipulate tensor metadata and do not require
@@ -159,7 +168,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   m.impl("min.dim_min", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("flip", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("cumsum.out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
-  m.impl("arange.start_out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
+  m.impl("arange.start_out", TORCH_FN(at::native::rbln::arange_start_out_rbln));
 
   // Operations used in pytest (temporary CPU fallbacks)
   // These are registered to manage unsupported operations encountered during pytest runs.
@@ -169,11 +178,12 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   // Operations not supported on the RBLN device (CPU fallback)
   // Scalar and tensor manipulation
   m.impl("trunc.out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
-  m.impl("_local_scalar_dense", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
-  m.impl("fill_.Scalar", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
+  m.impl("_local_scalar_dense", TORCH_FN(at::native::rbln::_local_scalar_dense_rbln));
+  m.impl("fill_.Scalar", TORCH_FN(at::native::rbln::fill_scalar_rbln_));
+  m.impl("clone", TORCH_FN(at::native::rbln::clone_rbln));
   m.impl("fill_.Tensor", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("equal", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
-  m.impl("_efficientzerotensor", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
+  m.impl("_efficientzerotensor", TORCH_FN(at::native::rbln::_efficientzerotensor_rbln));
   m.impl("native_dropout", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
 
   // Random number generation
@@ -190,17 +200,12 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   m.impl("masked_scatter_", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("index.Tensor_out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("_index_put_impl_", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
-  // Note: index_select doesn't work on device if arg(index) is a tensor
-  m.impl("index_select", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
-  m.impl("index_select.out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("index_add.out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
-  m.impl("index_copy.out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("index_fill_.int_Scalar", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("gather.out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("scatter.src_out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("put_", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("nonzero", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
-  m.impl("cat.out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
 
   // Bitwise operations
   m.impl("bitwise_and.out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());

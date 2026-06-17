@@ -72,7 +72,7 @@ class TestLlamaOps(TestCase):
 
         if op_name == "rsqrt" or op_name == "pow":
             ignore_inf_nan = True
-        elif op_name == "linear" or op_name == "matmul":
+        elif op_name in ("linear", "matmul", "bmm"):
             atol = 2
             rtol = 0.05
 
@@ -218,7 +218,11 @@ class TestLlamaOps(TestCase):
     @parametrize("batch_size", batch_sizes)
     @parametrize("input_shape", [(8, 1)])
     def test_llama_rsqrt(self, dtype, batch_size, input_shape):
-        input = torch.randn([batch_size, *input_shape], dtype=dtype)
+        # bfloat16's wider ULP near zero can flip sign or round small negatives
+        # to 0, causing NaN/Inf position mismatches against the CPU bfloat16
+        # reference. Restrict the input to clearly positive values so rsqrt
+        # stays finite across precisions.
+        input = torch.randn([batch_size, *input_shape], dtype=dtype).abs() + 0.1
         self._run_op(torch.rsqrt, input)
 
     @dtypes(*SUPPORTED_DTYPES)

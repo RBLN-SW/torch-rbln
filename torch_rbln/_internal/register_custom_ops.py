@@ -3,81 +3,36 @@ import math
 import torch
 
 from torch_rbln._internal.compile_cache import compile_rbln_cached
-from torch_rbln._internal.env_utils import use_device_group_tensor_parallel_size
 from torch_rbln._internal.ops_utils import (
-    can_use_out_tensor_directly,
+    compile_and_run_view_aware,
     cpu_fallback_path,
     extract_device_id_from_inputs,
     finalize_output_tensor,
+    get_view_op_module,
     handle_empty_binary,
     is_cpu_fallback_cases,
     is_type_promotion_allowed,
-    prepare_args_for_contiguous,
+    prepare_args_view_aware,
 )
 
 
-class OpModule_softmax(torch.nn.Module):
-    def forward(self, *args, **kwargs):
-        return torch.softmax(*args, **kwargs)
-
-
-_softmax_op_module = OpModule_softmax().eval()
-
-
 def custom_softmax_out_rbln(self, dim: int, half_to_float: bool, *, out=None):
-    from torch_rbln.device.context_holder import out_tensor_context
-
-    result_tensor = None
-
     if is_cpu_fallback_cases(self):
-        result = cpu_fallback_path(torch.softmax, (self,), result=out, op_name="aten::softmax", dim=dim)
-        result_tensor = result
+        result_tensor = cpu_fallback_path(torch.softmax, (self,), result=out, op_name="aten::softmax", dim=dim)
     else:
-        self = self.contiguous()
-
-        # Prepare result tensor and compile options based on out_tensor availability
-        # Base compile options: always include eager_mode for eager execution context
-        compile_options = {"disable_logger": True}
-        # By default, eager mode ops use tp_size=1 due to current compiler structure.
-        # If TORCH_RBLN_USE_DEVICE_TP=ON, eager mode ops will follow
-        # the logical device size (RBLN_NPUS_PER_DEVICE) like torch.compile operations.
-        if not use_device_group_tensor_parallel_size():
-            compile_options["tensor_parallel_size"] = 1
-
-        if out is None:
-            result_tensor = None
-        else:
-            # Check if out_tensor can be used directly by compiler
-            can_use_out_tensor_directly_flag = can_use_out_tensor_directly((self,), dict({"dim": dim}, out=out))
-
-            if can_use_out_tensor_directly_flag:
-                # Use out tensor directly - compiler will write results here
-                result_tensor = out
-            else:
-                result_tensor = None
-
-        with out_tensor_context(result_tensor):
-            compiled = compile_rbln_cached(
-                _softmax_op_module,
-                dynamic=False,
-                options=compile_options,
-                device_cache_key=self.device.index,
-            )
-            external_result = compiled(self, dim=dim)
-            if result_tensor is None:
-                result_tensor = external_result
-            elif isinstance(external_result, torch.Tensor) and (external_result.data_ptr() != result_tensor.data_ptr()):
-                result_tensor.copy_(external_result)
+        # ``dim`` is a positional kwarg (int) — passed through to torch.softmax
+        # inside the wrapper OpModule. View-aware path detects any non-contig
+        # ``self`` and lowers the view step (permute / narrow / etc.) on
+        # device alongside softmax.
+        result_tensor = compile_and_run_view_aware(
+            torch.softmax,
+            "aten::softmax",
+            (self,),
+            {"dim": dim},
+            out,
+        )
 
     finalize_output_tensor(out, result_tensor, result_tensor.shape, tuple(self), {})
-
-
-class OpModule_pow(torch.nn.Module):
-    def forward(self, *args, **kwargs):
-        return torch.pow(*args, **kwargs)
-
-
-_pow_op_module = OpModule_pow().eval()
 
 
 def _is_integer_exponent(exponent) -> bool:
@@ -88,8 +43,6 @@ def _is_integer_exponent(exponent) -> bool:
 
 
 def pow_tensor_scalar_out_rbln(self, exponent, *, out):
-    from torch_rbln.device.context_holder import out_tensor_context
-
     # pow.Tensor_Scalar: exponent must be scalar (int/float), not tensor
     if isinstance(exponent, torch.Tensor):
         raise RuntimeError("pow.Tensor_Scalar expects scalar exponent (int/float), not tensor.")
@@ -100,55 +53,23 @@ def pow_tensor_scalar_out_rbln(self, exponent, *, out):
     if self.dtype != out.dtype and not is_type_promotion_allowed((self,), out):
         raise RuntimeError(f"Unsafe cast: input has dtype {self.dtype} but output tensor has dtype {out.dtype}.")
 
-    result_tensor = None
-
     if self.numel() == 0:
         result_tensor, _ = handle_empty_binary((self,))
     elif not _is_integer_exponent(exponent) or is_cpu_fallback_cases((self, exponent)):
         result_tensor = cpu_fallback_path(torch.pow, (self, exponent), result=out, op_name="aten::pow")
     else:
-        self = self.contiguous()
-
-        compile_options = {"disable_logger": True}
-        if not use_device_group_tensor_parallel_size():
-            compile_options["tensor_parallel_size"] = 1
-
-        can_use_out_tensor_directly_flag = can_use_out_tensor_directly((self, exponent), {"out": out})
-
-        if can_use_out_tensor_directly_flag:
-            result_tensor = out
-        else:
-            result_tensor = None
-
-        with out_tensor_context(result_tensor):
-            compiled = compile_rbln_cached(
-                _pow_op_module,
-                dynamic=False,
-                options=compile_options,
-                device_cache_key=self.device.index,
-            )
-            external_result = compiled(self, exponent)
-            if result_tensor is None:
-                result_tensor = external_result
-            elif isinstance(external_result, torch.Tensor) and (external_result.data_ptr() != result_tensor.data_ptr()):
-                result_tensor.copy_(external_result)
+        # ``exponent`` is a Python scalar so it flows through unchanged; the
+        # view-aware helper detects any non-contig ``self`` and dispatches the
+        # view step on device alongside pow.
+        result_tensor = compile_and_run_view_aware(
+            torch.pow,
+            "aten::pow",
+            (self, exponent),
+            {},
+            out,
+        )
 
     finalize_output_tensor(out, result_tensor, result_tensor.shape, (self,), {})
-
-
-def custom_zero__rbln(self):
-    # zeros op is compilable in RBLN, but due to its in-place nature it has problems with graph
-    # capture, so it is always processed on the host.
-    # Optimization: mark the VMemory as EMPTY_INIT_WITH_ZERO without allocating any host memory.
-    # - NPU write-first (e.g. KV-cache output): zero transfer is skipped entirely.
-    # - NPU read-first: zeros are transferred via a temporary buffer at transfer time and freed.
-    # This avoids permanent host allocation for large tensors such as KV-cache.
-    if self.numel() == 0:
-        return
-
-    from torch_rbln._C import _mark_zeros
-
-    _mark_zeros(self.data_ptr())
 
 
 class custom_rbln_paged_attn_prefill(torch.nn.Module):
@@ -186,41 +107,36 @@ def paged_attn_prefill_rbln(*args, **kwargs):
             f"Custom kernel with prefill must batch size of {name} must be 1, but got shape {tensor.shape}"
         )
 
-    # origin_dim = args[0].size(-1)
-    (contig_args, contig_kwargs), changed_any = prepare_args_for_contiguous(args, kwargs)
-
-    # The K/V cache tensors (args[4], args[5]) are allocated externally, often
-    # as placeholders. This prefill operation is the first time they are populated.
-    # We must explicitly set their metadata dtype to custom_float16 here, as the
-    # underlying kernel will fill the cache with data in the custom_float16 format,
-    # regardless of the tensor's original torch.dtype.
-    k_cache = contig_args[4]
-    v_cache = contig_args[5]
-
-    # [Compiler Constraint] Check K/V cache alignment.
-    # Due to current compiler limitations, the K/V-cache tensors
-    # must be allocated externally with their last dimension being a multiple of 64.
-    # This alignment is required for the optimized kernel to function correctly.
-    assert k_cache.size(-1) % 64 == 0, (
-        f"The last dimension of K-cache must be a multiple of 64, but got shape {k_cache.shape}"
+    # K/V cache alignment must be checked on the user-visible shape (caches are
+    # always contig in production; if they are non-contig views the recipe
+    # would have changed the underlying base shape — caller bug — but we keep
+    # the assert against ``args[K]`` so the error message is still meaningful).
+    assert args[4].size(-1) % 64 == 0, (
+        f"The last dimension of K-cache must be a multiple of 64, but got shape {args[4].shape}"
     )
-    assert v_cache.size(-1) % 64 == 0, (
-        f"The last dimension of V-cache must be a multiple of 64, but got shape {v_cache.shape}"
+    assert args[5].size(-1) % 64 == 0, (
+        f"The last dimension of V-cache must be a multiple of 64, but got shape {args[5].shape}"
     )
 
-    # Create aligned result tensor with 64-byte alignment for last dimension
-    result_tensor = torch.empty(contig_args[0].shape, dtype=torch.float16, device=contig_args[0].device)
+    # View-aware arg prep: pure-permute / single-step views become an explicit
+    # aten op inside the wrapper OpModule's forward; the rebel-backend lowers
+    # them on device. Other views fall back to ``.contiguous()`` (one-time
+    # warning emitted via ``_maybe_warn_view_fallback``).
+    (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
+
+    # Result shape, dtype, and device match Q's user-visible (post-view) form.
+    result_tensor = torch.empty_like(args[0], memory_format=torch.contiguous_format)
     assert result_tensor.size(-1) % 64 == 0
 
     with out_tensor_context(result_tensor):
-        # tensor_parallel_size=1 is hardcoded due to custom kernel compiler constraints.
+        op_module = get_view_op_module(_paged_attn_prefill_op_module, view_recipes)
         compiled = compile_rbln_cached(
-            _paged_attn_prefill_op_module,
+            op_module,
             dynamic=False,
             options={"disable_logger": True, "tensor_parallel_size": 1},
-            device_cache_key=extract_device_id_from_inputs(*contig_args, **contig_kwargs),
+            device_cache_key=(extract_device_id_from_inputs(*view_args, **view_kwargs), view_recipes),
         )
-        external_result = compiled(*contig_args, **contig_kwargs)
+        external_result = compiled(*view_args, **view_kwargs)
         if result_tensor is None:
             result_tensor = external_result
         elif isinstance(external_result, torch.Tensor) and (external_result.data_ptr() != result_tensor.data_ptr()):
@@ -256,35 +172,27 @@ def paged_attn_decode_rbln(*args, **kwargs):
     if len(args) != 10:
         raise RuntimeError("paged_attn_prefill takes 10 inputs.")
 
-    (contig_args, contig_kwargs), changed_any = prepare_args_for_contiguous(args, kwargs)
-
-    k_cache = contig_args[4]
-    v_cache = contig_args[5]
-
-    # [Compiler Constraint] Check K/V cache alignment.
-    # Due to current compiler limitations, the K/V-cache tensors
-    # must be allocated externally with their last dimension being a multiple of 64.
-    # This alignment is required for the optimized kernel to function correctly.
-    assert k_cache.size(-1) % 64 == 0, (
-        f"The last dimension of K-cache must be a multiple of 64, but got shape {k_cache.shape}"
+    assert args[4].size(-1) % 64 == 0, (
+        f"The last dimension of K-cache must be a multiple of 64, but got shape {args[4].shape}"
     )
-    assert v_cache.size(-1) % 64 == 0, (
-        f"The last dimension of V-cache must be a multiple of 64, but got shape {v_cache.shape}"
+    assert args[5].size(-1) % 64 == 0, (
+        f"The last dimension of V-cache must be a multiple of 64, but got shape {args[5].shape}"
     )
 
-    # Create aligned result tensor with 64-byte alignment for last dimension
-    result_tensor = torch.empty(contig_args[0].shape, dtype=torch.float16, device=contig_args[0].device)
+    (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
+
+    result_tensor = torch.empty_like(args[0], memory_format=torch.contiguous_format)
     assert result_tensor.size(-1) % 64 == 0
 
     with out_tensor_context(result_tensor):
-        # tensor_parallel_size=1 is hardcoded due to custom kernel compiler constraints.
+        op_module = get_view_op_module(_paged_attn_decode_op_module, view_recipes)
         compiled = compile_rbln_cached(
-            _paged_attn_decode_op_module,
+            op_module,
             dynamic=False,
             options={"disable_logger": True, "tensor_parallel_size": 1},
-            device_cache_key=extract_device_id_from_inputs(*contig_args, **contig_kwargs),
+            device_cache_key=(extract_device_id_from_inputs(*view_args, **view_kwargs), view_recipes),
         )
-        external_result = compiled(*contig_args, **contig_kwargs)
+        external_result = compiled(*view_args, **view_kwargs)
         if result_tensor is None:
             result_tensor = external_result
         elif isinstance(external_result, torch.Tensor) and (external_result.data_ptr() != result_tensor.data_ptr()):
@@ -328,49 +236,33 @@ def paged_causal_attn_prefill_rbln(*args, **kwargs):
     if len(args) < 10 or len(args) > 11:
         raise RuntimeError(f"paged_causal_attn_prefill takes 10 or 11 inputs, but got {len(args)}.")
 
-    # Check if batch size (dim=0) is 1 for Q, K, and V tensors.
-    # This kernel is constrained to operate on a batch size of 1.
     for i, name in enumerate(["Query (q)", "Key (k)", "Value (v)"]):
         tensor = args[i]
         assert tensor.size(0) == 1, (
             f"Custom kernel with prefill must batch size of {name} must be 1, but got shape {tensor.shape}"
         )
 
-    # origin_dim = args[0].size(-1)
-    (contig_args, contig_kwargs), changed_any = prepare_args_for_contiguous(args, kwargs)
-
-    # The K/V cache tensors (args[3], args[4]) are allocated externally, often
-    # as placeholders. This prefill operation is the first time they are populated.
-    # We must explicitly set their metadata dtype to custom_float16 here, as the
-    # underlying kernel will fill the cache with data in the custom_float16 format,
-    # regardless of the tensor's original torch.dtype.
-    k_cache = contig_args[3]
-    v_cache = contig_args[4]
-
-    # [Compiler Constraint] Check K/V cache alignment.
-    # Due to current compiler limitations, the K/V-cache tensors
-    # must be allocated externally with their last dimension being a multiple of 64.
-    # This alignment is required for the optimized kernel to function correctly.
-    assert k_cache.size(-1) % 64 == 0, (
-        f"The last dimension of K-cache must be a multiple of 64, but got shape {k_cache.shape}"
+    assert args[3].size(-1) % 64 == 0, (
+        f"The last dimension of K-cache must be a multiple of 64, but got shape {args[3].shape}"
     )
-    assert v_cache.size(-1) % 64 == 0, (
-        f"The last dimension of V-cache must be a multiple of 64, but got shape {v_cache.shape}"
+    assert args[4].size(-1) % 64 == 0, (
+        f"The last dimension of V-cache must be a multiple of 64, but got shape {args[4].shape}"
     )
 
-    # Create aligned result tensor with 64-byte alignment for last dimension
-    result_tensor = torch.empty(contig_args[0].shape, dtype=torch.float16, device=contig_args[0].device)
+    (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
+
+    result_tensor = torch.empty_like(args[0], memory_format=torch.contiguous_format)
     assert result_tensor.size(-1) % 64 == 0
 
     with out_tensor_context(result_tensor):
-        # tensor_parallel_size=1 is hardcoded due to custom kernel compiler constraints.
+        op_module = get_view_op_module(_paged_causal_attn_prefill_op_module, view_recipes)
         compiled = compile_rbln_cached(
-            _paged_causal_attn_prefill_op_module,
+            op_module,
             dynamic=False,
             options={"disable_logger": True, "tensor_parallel_size": 1},
-            device_cache_key=extract_device_id_from_inputs(*contig_args, **contig_kwargs),
+            device_cache_key=(extract_device_id_from_inputs(*view_args, **view_kwargs), view_recipes),
         )
-        external_result = compiled(*contig_args, **contig_kwargs)
+        external_result = compiled(*view_args, **view_kwargs)
         if result_tensor is None:
             result_tensor = external_result
         elif isinstance(external_result, torch.Tensor) and (external_result.data_ptr() != result_tensor.data_ptr()):
@@ -413,35 +305,27 @@ def paged_causal_attn_decode_rbln(*args, **kwargs):
     if len(args) < 9 or len(args) > 10:
         raise RuntimeError(f"paged_causal_attn_decode takes 9 or 10 inputs, but got {len(args)}.")
 
-    (contig_args, contig_kwargs), changed_any = prepare_args_for_contiguous(args, kwargs)
-
-    k_cache = contig_args[3]
-    v_cache = contig_args[4]
-
-    # [Compiler Constraint] Check K/V cache alignment.
-    # Due to current compiler limitations, the K/V-cache tensors
-    # must be allocated externally with their last dimension being a multiple of 64.
-    # This alignment is required for the optimized kernel to function correctly.
-    assert k_cache.size(-1) % 64 == 0, (
-        f"The last dimension of K-cache must be a multiple of 64, but got shape {k_cache.shape}"
+    assert args[3].size(-1) % 64 == 0, (
+        f"The last dimension of K-cache must be a multiple of 64, but got shape {args[3].shape}"
     )
-    assert v_cache.size(-1) % 64 == 0, (
-        f"The last dimension of V-cache must be a multiple of 64, but got shape {v_cache.shape}"
+    assert args[4].size(-1) % 64 == 0, (
+        f"The last dimension of V-cache must be a multiple of 64, but got shape {args[4].shape}"
     )
 
-    # Create aligned result tensor with 64-byte alignment for last dimension
-    result_tensor = torch.empty(contig_args[0].shape, dtype=torch.float16, device=contig_args[0].device)
+    (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
+
+    result_tensor = torch.empty_like(args[0], memory_format=torch.contiguous_format)
     assert result_tensor.size(-1) % 64 == 0
 
     with out_tensor_context(result_tensor):
-        # tensor_parallel_size=1 is hardcoded due to custom kernel compiler constraints.
+        op_module = get_view_op_module(_paged_causal_attn_decode_op_module, view_recipes)
         compiled = compile_rbln_cached(
-            _paged_causal_attn_decode_op_module,
+            op_module,
             dynamic=False,
             options={"disable_logger": True, "tensor_parallel_size": 1},
-            device_cache_key=extract_device_id_from_inputs(*contig_args, **contig_kwargs),
+            device_cache_key=(extract_device_id_from_inputs(*view_args, **view_kwargs), view_recipes),
         )
-        external_result = compiled(*contig_args, **contig_kwargs)
+        external_result = compiled(*view_args, **view_kwargs)
         if result_tensor is None:
             result_tensor = external_result
         elif isinstance(external_result, torch.Tensor) and (external_result.data_ptr() != result_tensor.data_ptr()):
@@ -481,24 +365,25 @@ def flash_attention_naive_prefill_rbln(*args, **kwargs):
             f"flash_attention_naive_prefill batch size of {name} must be 1, but got shape {tensor.shape}"
         )
 
-    (contig_args, contig_kwargs), changed_any = prepare_args_for_contiguous(args, kwargs)
-
-    kv_cache = contig_args[3]
-    assert kv_cache.size(-1) % 64 == 0, (
-        f"The last dimension of kv_cache must be a multiple of 64, but got shape {kv_cache.shape}"
+    assert args[3].size(-1) % 64 == 0, (
+        f"The last dimension of kv_cache must be a multiple of 64, but got shape {args[3].shape}"
     )
 
-    result_tensor = torch.empty(contig_args[0].shape, dtype=torch.float16, device=contig_args[0].device)
+    (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
+
+    result_tensor = torch.empty_like(args[0], memory_format=torch.contiguous_format)
     assert result_tensor.size(-1) % 64 == 0
 
     helper.set_out_tensor(result_tensor)
+    base_module = custom_rbln_flash_attention_naive_prefill()
+    op_module = get_view_op_module(base_module, view_recipes)
     compiled = torch.compile(
-        custom_rbln_flash_attention_naive_prefill(),
+        op_module,
         backend="rbln",
         dynamic=False,
         options={"disable_logger": True, "tensor_parallel_size": 1},
     )
-    external_result = compiled(*contig_args, **contig_kwargs)
+    external_result = compiled(*view_args, **view_kwargs)
     if result_tensor is None:
         result_tensor = external_result
     elif isinstance(external_result, torch.Tensor) and (external_result.data_ptr() != result_tensor.data_ptr()):
@@ -533,24 +418,25 @@ def flash_attention_naive_decode_rbln(*args, **kwargs):
     if len(args) < 9 or len(args) > 10:
         raise RuntimeError(f"flash_attention_naive_decode takes 9 or 10 inputs (optional sinks), but got {len(args)}.")
 
-    (contig_args, contig_kwargs), changed_any = prepare_args_for_contiguous(args, kwargs)
-
-    kv_cache = contig_args[3]
-    assert kv_cache.size(-1) % 64 == 0, (
-        f"The last dimension of kv_cache must be a multiple of 64, but got shape {kv_cache.shape}"
+    assert args[3].size(-1) % 64 == 0, (
+        f"The last dimension of kv_cache must be a multiple of 64, but got shape {args[3].shape}"
     )
 
-    result_tensor = torch.empty(contig_args[0].shape, dtype=torch.float16, device=contig_args[0].device)
+    (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
+
+    result_tensor = torch.empty_like(args[0], memory_format=torch.contiguous_format)
     assert result_tensor.size(-1) % 64 == 0
 
     helper.set_out_tensor(result_tensor)
+    base_module = custom_rbln_flash_attention_naive_decode()
+    op_module = get_view_op_module(base_module, view_recipes)
     compiled = torch.compile(
-        custom_rbln_flash_attention_naive_decode(),
+        op_module,
         backend="rbln",
         dynamic=False,
         options={"disable_logger": True, "tensor_parallel_size": 1},
     )
-    external_result = compiled(*contig_args, **contig_kwargs)
+    external_result = compiled(*view_args, **view_kwargs)
     if result_tensor is None:
         result_tensor = external_result
     elif isinstance(external_result, torch.Tensor) and (external_result.data_ptr() != result_tensor.data_ptr()):

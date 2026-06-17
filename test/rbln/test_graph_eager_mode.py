@@ -105,7 +105,8 @@ class TestGraphMode(TestCase):
 
         self._run_eager_and_graph_mode(model, (x,))
 
-    def test_linear_to_linear(self):
+    @dtypes(*SUPPORTED_DTYPES)
+    def test_linear_to_linear(self, dtype):
         """Test that graph mode and eager mode produce same results for complex linear layers."""
 
         class Net(nn.Module):
@@ -113,12 +114,12 @@ class TestGraphMode(TestCase):
                 super().__init__()
                 self.l1 = nn.Linear(16, 32)
                 self.relu = nn.ReLU()
-                self.l2 = nn.Linear(32, 10).to(torch.float16)
+                self.l2 = nn.Linear(32, 10).to(dtype)
 
             def forward(self, x):
                 x = self.l1(x)
                 x = self.relu(x)
-                x = x.to(dtype=torch.float16)
+                x = x.to(dtype=dtype)
                 return self.l2(x)
 
         model = Net().to(self.rbln_device)
@@ -126,7 +127,8 @@ class TestGraphMode(TestCase):
 
         self._run_eager_and_graph_mode(model, (x,))
 
-    def test_layernorm_mixed_precision(self):
+    @dtypes(*SUPPORTED_DTYPES)
+    def test_layernorm_mixed_precision(self, dtype):
         """Test that graph mode and eager mode produce same results for layernorm with mixed precision."""
 
         class Net(nn.Module):
@@ -135,12 +137,12 @@ class TestGraphMode(TestCase):
                 self.ln = nn.LayerNorm(32)
 
             def forward(self, x):
-                x = x.to(torch.float16)
+                x = x.to(dtype)
                 x = self.ln(x.to(torch.float32))
-                return x.to(torch.float16)
+                return x.to(dtype)
 
         model = Net().to(self.rbln_device)
-        x = torch.randn([6, 32], dtype=torch.float16, device=self.rbln_device)
+        x = torch.randn([6, 32], dtype=dtype, device=self.rbln_device)
 
         self._run_eager_and_graph_mode(model, (x,))
 
@@ -412,8 +414,61 @@ class TestGraphEagerMode(TestCase):
         self.assertEqual(eager_out.cpu(), graph_out.cpu(), atol=ATOL, rtol=RTOL)
 
 
+@pytest.mark.test_set_ci
+class TestRecompileWeightHandling(TestCase):
+    """Test cases for weight handling when a module is rebuilt and recompiled under a fixed seed."""
+
+    rbln_device = torch.device("rbln:0")
+
+    class Net(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = nn.Linear(128, 128)
+
+        def forward(self, x):
+            return self.linear(x)
+
+    @dtypes(*SUPPORTED_DTYPES)
+    def test_reseed_recompile_in_loop(self, dtype):
+        """Test that reseeding and recompiling a rebuilt module each iteration produces consistent results."""
+        x = torch.ones([128, 128], device=self.rbln_device, dtype=dtype)
+
+        graph_outs = []
+        for _ in range(2):
+            torch.manual_seed(0)
+            model = self.Net().to(device=self.rbln_device, dtype=dtype)
+
+            eager_out = model(x)
+            compiled_model = torch.compile(model, backend="rbln", dynamic=False)
+            graph_out = compiled_model(x)
+
+            self.assertEqual(eager_out.cpu(), graph_out.cpu(), atol=ATOL, rtol=RTOL)
+            graph_outs.append(graph_out.cpu())
+
+        # Identical seeds → identical weights → identical compiled output.
+        self.assertEqual(graph_outs[0], graph_outs[1], atol=ATOL, rtol=RTOL)
+
+    @dtypes(*SUPPORTED_DTYPES)
+    def test_identical_weights_distinct_models(self, dtype):
+        """Test that two separately built modules with identical weights both compile and match."""
+        x = torch.ones([128, 128], device=self.rbln_device, dtype=dtype)
+
+        torch.manual_seed(0)
+        model_a = self.Net().to(device=self.rbln_device, dtype=dtype)
+        torch.manual_seed(0)
+        model_b = self.Net().to(device=self.rbln_device, dtype=dtype)
+
+        self.assertEqual(model_a.linear.weight.cpu(), model_b.linear.weight.cpu())
+
+        out_a = torch.compile(model_a, backend="rbln", dynamic=False)(x)
+        out_b = torch.compile(model_b, backend="rbln", dynamic=False)(x)
+
+        self.assertEqual(out_a.cpu(), out_b.cpu(), atol=ATOL, rtol=RTOL)
+
+
 instantiate_device_type_tests(TestGraphMode, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestGraphEagerMode, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestRecompileWeightHandling, globals(), only_for="privateuse1")
 
 if __name__ == "__main__":
     run_tests()

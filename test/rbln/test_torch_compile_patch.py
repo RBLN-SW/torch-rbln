@@ -674,6 +674,78 @@ class TestCompiledFunctionWrapper(TestCase):
 
 
 @pytest.mark.test_set_ci
+class TestChromiumEventStatePreservation(TestCase):
+    """Reproduces the ``build_guards`` crash caused by a nested op-compile.
+
+    Each RBLN ATen-op fallback is itself ``torch.compile``-d, so dispatching one during
+    an outer compile's ``build_guards`` re-enters dynamo. dynamo wraps every ``_compile``
+    in ``chromium_event_timed(reset_event_log_on_exit=True)``; on exit it calls
+    ``ChromiumEventLogger.reset()`` -> ``stack.clear()`` on a thread-local, shared stack.
+    The nested op-compile's exit therefore wipes the *outer* compile's events, and the
+    outer ``build_guards`` then crashes with "No toplevel event active" when it logs
+    ``guard_latency_us``. ``CompiledFunctionWrapper`` snapshots and restores that stack so
+    the outer compile survives.
+    """
+
+    @requires_logical_devices(1)
+    def test_rbln_op_in_build_guards_does_not_break_outer_compile(self):
+        """End-to-end reproduction of the real crash with an actual RBLN device op.
+
+        Reproduces the production scenario on real ``rbln`` tensors: an outer
+        ``torch.compile`` is mid-``build_guards`` (a live metrics context + a "dynamo"
+        chromium toplevel) when guard evaluation dispatches a tensor op. Dispatching an
+        ATen op on an ``rbln`` tensor goes through the RBLN op fallback
+        (``register_ops`` -> ``compile_rbln_cached`` -> ``torch.compile(backend="rbln")``,
+        wrapped in ``CompiledFunctionWrapper``), i.e. a genuine nested dynamo ``_compile``
+        whose ``reset_event_log_on_exit`` clears the shared, thread-local chromium stack.
+        ``build_guards`` then logs ``guard_latency_us`` via
+        ``CompileEventLogger.increment_toplevel``.
+
+        Without PR #65 the nested op-compile wipes the outer "dynamo" event, so
+        ``get_outermost_event()`` returns ``None`` and ``increment_toplevel`` raises
+        ``RuntimeError: No toplevel event active``. With the snapshot/restore in
+        ``CompiledFunctionWrapper.__call__`` the outer event survives and the call succeeds.
+        """
+        try:
+            from torch._dynamo.utils import (
+                chromium_event_timed,
+                CompileEventLogger,
+                get_chromium_event_logger,
+                get_metrics_context,
+            )
+        except ImportError:
+            self.skipTest("chromium/metrics-context internals not available in this torch version")
+
+        log = get_chromium_event_logger()
+
+        # Force a compile-cache miss so the op dispatch below actually triggers a nested
+        # dynamo _compile (and thus reset_event_log_on_exit), not a cache hit.
+        torch._dynamo.reset()
+        clear_rbln_compile_cache()
+
+        # Real RBLN device tensors; dispatching torch.add on them runs the actual op
+        # fallback, which compiles via torch.compile(backend="rbln") under the hood.
+        x = torch.randn(8, device="rbln:0", dtype=torch.float16)
+
+        try:
+            with get_metrics_context():  # outer compile's metrics context (survives nested reset)
+                # Outer compile's "dynamo" toplevel, as present during build_guards.
+                with chromium_event_timed("dynamo", reset_event_log_on_exit=False, log_pt2_compile_event=True):
+                    torch.add(x, x)  # real RBLN op -> nested torch.compile(backend="rbln")
+
+                    # The outer toplevel must outlive the nested op-compile's reset.
+                    self.assertIsNotNone(
+                        log.get_outermost_event(),
+                        "outer 'dynamo' chromium event was wiped by the nested RBLN op-compile",
+                    )
+                    # The exact call build_guards makes; raises "No toplevel event active"
+                    # without the fix.
+                    CompileEventLogger.increment_toplevel("guard_latency_us", 5)
+        except TypeError:
+            self.skipTest("chromium_event_timed signature differs in this torch version")
+
+
+@pytest.mark.test_set_ci
 class TestTorchCompileMonkeyPatch(TestCase):
     """Tests for torch.compile monkey patching."""
 

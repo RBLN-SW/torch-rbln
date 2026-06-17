@@ -3,6 +3,7 @@
 #include <c10/rbln/RBLNGenerator.h>
 #include <c10/rbln/RBLNHooksInterface.h>
 #include <c10/rbln/RBLNLogging.h>
+#include <c10/rbln/RBLNPinnedAllocator.h>
 #include <c10/util/CallOnce.h>
 
 namespace c10::rbln {
@@ -43,12 +44,7 @@ bool RBLNHooksInterface::hasRBLN() const {
 
 c10::Device RBLNHooksInterface::getDeviceFromPtr(void* data) const {
   RBLN_LOG_DEBUG("data={}", fmt::ptr(data));
-
-  const auto memory_info = c10::rbln::get_memory_info(data);
-  RBLN_LOG_DEBUG("memory_info={}", c10::rbln::to_string(memory_info));
-
-  const auto torch_device_id = memory_info.torch_device_id;
-  const auto device_index = static_cast<c10::DeviceIndex>(torch_device_id);
+  const auto device_index = c10::rbln::get_torch_device_id(data);
   const auto device = c10::Device(c10::kPrivateUse1, device_index);
   RBLN_LOG_DEBUG("device={}", c10::str(device));
   return device;
@@ -91,6 +87,14 @@ void RBLNHooksInterface::resizePrivateUse1Bytes(const c10::Storage& storage, siz
   RBLN_LOG_DEBUG("Updating storage with new data pointer and nbytes");
   storage.set_data_ptr_noswap(std::move(new_data_ptr));
   storage.set_nbytes(new_nbytes);
+}
+
+c10::Allocator* RBLNHooksInterface::getPinnedMemoryAllocator() const {
+  return c10::rbln::get_pinned_memory_allocator();
+}
+
+bool RBLNHooksInterface::isPinnedPtr(const void* data) const {
+  return c10::rbln::is_pinned_ptr(data);
 }
 
 at::Generator RBLNHooksInterface::getNewGenerator(c10::DeviceIndex device_index) const {

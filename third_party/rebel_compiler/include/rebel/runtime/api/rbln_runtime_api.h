@@ -212,12 +212,50 @@ RBLNRetCode rbln_free(uint64_t vaddr);
 // in-place zeroing of large tensors (e.g. KV-cache) to avoid host memory pressure.
 RBLNRetCode rbln_mark_zeros(uint64_t vaddr);
 
+// Enables or disables process-wide file offloading for vmemory user views.
+// When enabled, host-side regions backing RBLN tensors may be paged out to disk to reduce host
+// memory pressure (e.g. for large weight or KV-cache tensors). The setting applies to all RBLN
+// devices initialized in the current process and takes effect for subsequent vmemory operations;
+// existing user views are not migrated by the toggle itself.
+RBLNRetCode rbln_set_file_offloading_enabled(bool enabled);
+
 RBLNRetCode rbln_set_memory_info(uint64_t vaddr, DataType user_dtype, DataType physical_dtype,
                                  const std::vector<int64_t>& shape);
 RBLNRetCode rbln_set_raw_memory_alloc(uint64_t vaddr, uint64_t size);
 
 // Retrieves detailed information for the vmemory entry.
 RBLNRetCode rbln_get_memory_info(uint64_t vaddr, MemoryInfo& memory_info_out);
+
+// Returns the torch_device_id from a vaddr.
+RBLNRetCode rbln_get_torch_device_id_from_vaddr(uint64_t vaddr, uint32_t& torch_device_id_out);
+
+// Borrow a host pointer into the rbln virtual memory at `vaddr`. Triggers a
+// device→host sync if the device view is currently authoritative; allocates
+// host backing if none exists. After this call the host buffer is read-ready.
+// The borrow MUST be released via `rbln_v_return_borrowed` with the returned
+// `borrow_id_out`.
+//
+// Light counterpart of `rebel::torch::rbln_v_borrow_host_ptr` declared in
+// `<rebel/torch/rbln_vmem_api.h>`. Distinct from the heavy variant only in
+// return convention (RBLNRetCode vs Status); free of vmemory_manager.h
+// dependencies so it is safe to call from torch-rbln without dragging in
+// absl / model headers.
+RBLNRetCode rbln_v_borrow_host_ptr(uint64_t vaddr, uint64_t size, uintptr_t& host_ptr_out,
+                                   uint64_t& borrow_id_out);
+
+// Acquire a host pointer for **overwrite-only** access. Same lifecycle as
+// `rbln_v_borrow_host_ptr` (must be released via `rbln_v_return_borrowed`),
+// but the device→host transfer is skipped even when the entry is
+// physical-latest. Callers MUST overwrite the entire region before any
+// consumer reads it; otherwise the host view will contain stale data.
+// State transitions to USER_VIEW_IS_LATEST on return.
+RBLNRetCode rbln_v_acquire_host_ptr_for_overwrite(uint64_t vaddr, uint64_t size,
+                                                  uintptr_t& host_ptr_out, uint64_t& borrow_id_out);
+
+// Release a previously borrowed host pointer. If `updated` is true, marks the
+// host view as the latest source of truth; the next device consumer performs
+// a lazy host→device copy.
+RBLNRetCode rbln_v_return_borrowed(uint64_t borrow_id, bool updated);
 
 // Copies the contents from host memory to the virtual memory area.
 RBLNRetCode rbln_memcpy_h2v(uintptr_t src_host_ptr, uint64_t dst_vaddr, uint64_t size);
@@ -227,6 +265,41 @@ RBLNRetCode rbln_memcpy_v2h(uint64_t src_vaddr, uintptr_t dst_host_ptr, uint64_t
 
 // Copies the contents from a virtual memory area to another virtual memory area.
 RBLNRetCode rbln_memcpy_v2v(uint64_t src_vaddr, uint64_t dst_vaddr, uint64_t size);
+
+// Maximum number of per-destination sub-copies that rbln_memcpy_v2v_multi
+// dispatches on-device. At or below this count the copies go through the device
+// command buffer; above it the runtime falls back to a host sync (slow but
+// correct). Callers that can compute their fan-out cheaply ahead of time may
+// gate on this to skip building descriptors that would only fall back.
+constexpr uint32_t kMaxV2VMultiCopies = 1024;
+
+// Copies the contents from a virtual memory area to another virtual memory area.
+// copies: vector of tuples (src_vaddr, dst_vaddr, size)
+RBLNRetCode rbln_memcpy_v2v_multi(
+    const std::vector<std::tuple<uint64_t, uint64_t, uint64_t>>& copies);
+
+// Async variants. *handle_out == 0 means a synchronous (fast-path-ineligible) completion;
+// else rbln_transfer_wait before reading dst. Sync copy APIs don't chain on the stream —
+// wait/synchronize before a sync copy on the same vaddr.
+//
+// Ordering contract: between an async dispatch and its rbln_transfer_wait, do NOT issue any
+// other copy that touches the SAME device area (not just the same vaddr — distinct vaddrs in
+// one vmem entry share its area, hence the same cached command buffer). The finalize step
+// reads the area's MRU command-buffer entry, which an intervening copy would rotate, so an
+// unaligned D2H bounce would land at the wrong host address.
+RBLNRetCode rbln_memcpy_v2h_async(uint64_t src_vaddr, uintptr_t dst_host_ptr, uint64_t size,
+                                  uint64_t* handle_out);
+RBLNRetCode rbln_memcpy_h2v_async(uintptr_t src_host_ptr, uint64_t dst_vaddr, uint64_t size,
+                                  uint64_t* handle_out);
+RBLNRetCode rbln_memcpy_v2v_async(uint64_t src_vaddr, uint64_t dst_vaddr, uint64_t size,
+                                  uint64_t* handle_out);
+RBLNRetCode rbln_memcpy_v2v_multi_async(
+    const std::vector<std::tuple<uint64_t, uint64_t, uint64_t>>& copies, uint64_t* handle_out);
+
+// No-op if handle == 0.
+RBLNRetCode rbln_transfer_wait(uint64_t handle);
+
+RBLNRetCode rbln_device_synchronize(uint32_t torch_device_id);
 
 // Casts and copies the contents from host memory to the virtual memory area. The contents at
 // the host memory are assumed to be in `from_dtype` and will be converted to `to_dtype`. The

@@ -34,4 +34,26 @@ C10_RBLN_API at::Tensor get_cpu_copy_of_rbln_tensor(const at::Tensor& self);
  */
 C10_RBLN_API at::Tensor create_tensor_from_ptr(uint64_t data_ptr, c10::IntArrayRef sizes, c10::ScalarType dtype);
 
+/**
+ * @brief True iff `a` and `b` reference the same logical view: same storage
+ * data pointer, same storage_offset, and same strides.
+ *
+ * Used by kernels that may receive `out == self` via in-place dispatch
+ * (e.g. `index_copy_`) or that want to short-circuit self-aliased copies
+ * inside the strided v2v engine. Callers are responsible for any size
+ * comparison they care about.
+ */
+inline bool is_same_view(const at::Tensor& a, const at::Tensor& b) {
+  if (!a.has_storage() || !b.has_storage()) {
+    return false;
+  }
+  if (a.storage().data() != b.storage().data()) {
+    return false;
+  }
+  if (a.storage_offset() != b.storage_offset()) {
+    return false;
+  }
+  return a.strides() == b.strides();
+}
+
 } // namespace at::native::rbln

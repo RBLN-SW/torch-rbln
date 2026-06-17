@@ -1,12 +1,18 @@
 // TODO: The previous copy optimizations based on physical shape and physical dtype were removed during
 // v-memory integration. Revisit these optimizations in a future pass.
 #include <ATen/native/rbln/RBLNCopy.h>
+#include <ATen/native/rbln/RBLNStrideUtils.h>
+#include <ATen/native/rbln/RBLNStridedV2V.h>
 #include <ATen/native/rbln/RBLNTensorUtils.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/empty_strided.h>
 #include <c10/rbln/RBLNFallbackConfig.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
+#include <c10/rbln/RBLNPinnedAllocator.h>
+#include <rebel/runtime/api/rbln_runtime_api.h>
+
+#include <cstddef>
 
 namespace at::native::rbln {
 
@@ -103,21 +109,38 @@ void tensor_copy_from_rbln_to_rbln(const at::Tensor& rbln_src, const at::Tensor&
   RBLN_LOG_DEBUG("src_data={}, dst_data={}", fmt::ptr(rbln_src.data_ptr()), fmt::ptr(rbln_dst.data_ptr()));
   RBLN_CHECK(rbln_src.device().is_privateuseone() && rbln_dst.device().is_privateuseone());
 
-  const auto direct_copy = is_direct_copy(rbln_src, rbln_dst);
-  if (direct_copy) {
+  if (is_direct_copy(rbln_src, rbln_dst)) {
     RBLN_LOG_DEBUG("Directly copying RBLN src to RBLN dst");
 
     auto* dst_data = rbln_dst.data_ptr();
     const auto* src_data = rbln_src.data_ptr();
     const auto nbytes = at::detail::computeStorageNbytes(rbln_src.sizes(), rbln_src.strides(), rbln_src.element_size());
     c10::rbln::memcpy_v2v(dst_data, src_data, nbytes);
-  } else {
-    RBLN_LOG_DEBUG("Creating CPU copy of RBLN src");
-    const auto cpu_src = at::native::rbln::get_cpu_copy_of_rbln_tensor(rbln_src);
-
-    RBLN_LOG_DEBUG("Copying CPU copy to RBLN dst");
-    tensor_copy_from_cpu_to_rbln(cpu_src, rbln_dst);
+    return;
   }
+
+  // Strided copy: route to the on-device v2v engine while the outer iteration
+  // count stays within the runtime per-dst v2v cap (::rbln::kMaxV2VMultiCopies,
+  // the single source shared with the runtime); above it the engine fans out to
+  // a host fallback anyway, so bounce via host here.
+  if (rbln_src.sizes() == rbln_dst.sizes() && rbln_src.scalar_type() == rbln_dst.scalar_type() &&
+      rbln_src.device() == rbln_dst.device()) {
+    const auto inner_start = common_inner_start(rbln_src.sizes(), rbln_src.strides(), rbln_dst.strides());
+    int64_t outer_count = 1;
+    for (int64_t i = 0; i < inner_start; ++i) {
+      outer_count *= rbln_src.size(i);
+    }
+    if (outer_count <= static_cast<int64_t>(::rbln::kMaxV2VMultiCopies)) {
+      strided_v2v_copy(rbln_dst, rbln_src);
+      return;
+    }
+  }
+
+  RBLN_LOG_DEBUG("Creating CPU copy of RBLN src");
+  const auto cpu_src = at::native::rbln::get_cpu_copy_of_rbln_tensor(rbln_src);
+
+  RBLN_LOG_DEBUG("Copying CPU copy to RBLN dst");
+  tensor_copy_from_cpu_to_rbln(cpu_src, rbln_dst);
 }
 
 void copy_impl_rbln(const at::Tensor& src, const at::Tensor& dst) {
@@ -159,22 +182,64 @@ void copy_impl_rbln(const at::Tensor& src, const at::Tensor& dst) {
 
 } // namespace
 
+void copy_impl_rbln_async(const at::Tensor& src, const at::Tensor& dst) {
+  RBLN_SCOPE_GUARD();
+  RBLN_LOG_DEBUG("Attempting async copy");
+
+  const auto src_device = src.device();
+  const auto dst_device = dst.device();
+  const auto direct_copy = is_direct_copy(src, dst);
+
+  // Async only supported for direct copies (same size, dtype, both contiguous).
+  // Non-direct copies require CPU-side staging which needs synchronous data access.
+  if (!direct_copy) {
+    // The sync fallback drains in-flight async transfers in the runtime (rbln_vmem_api).
+    RBLN_LOG_DEBUG("Non-direct copy, falling back to sync");
+    copy_impl_rbln(src, dst);
+    return;
+  }
+
+  const auto nbytes = at::detail::computeStorageNbytes(src.sizes(), src.strides(), src.element_size());
+  if (nbytes == 0) {
+    RBLN_LOG_DEBUG("No bytes to copy");
+    return;
+  }
+
+  // CUDA semantics: async only when the host side is pinned. Host reads never
+  // pass through RBLN, so nothing can drain a pending transfer first — sync
+  // for pageable makes that safe; pinned opts in (caller synchronizes).
+  const at::Tensor& host = src_device.is_cpu() ? src : dst;
+  if (host.device().is_cpu() && !c10::rbln::is_pinned_ptr(host.data_ptr())) {
+    RBLN_LOG_DEBUG("Pageable host tensor, downgrading non_blocking copy to sync");
+    copy_impl_rbln(src, dst);
+    return;
+  }
+
+  if (src_device.is_cpu() && dst_device.is_privateuseone()) {
+    RBLN_LOG_DEBUG("Async CPU -> RBLN");
+    c10::rbln::memcpy_h2v_async(dst.data_ptr(), src.data_ptr(), nbytes);
+  } else if (src_device.is_privateuseone() && dst_device.is_cpu()) {
+    RBLN_LOG_DEBUG("Async RBLN -> CPU");
+    c10::rbln::memcpy_v2h_async(dst.data_ptr(), src.data_ptr(), nbytes);
+  } else if (src_device.is_privateuseone() && dst_device.is_privateuseone()) {
+    RBLN_LOG_DEBUG("Async RBLN -> RBLN");
+    c10::rbln::memcpy_v2v_async(dst.data_ptr(), src.data_ptr(), nbytes);
+  } else {
+    RBLN_CHECK(
+        false, "Tensor copy from {} device to {} device is not supported", c10::str(src_device), c10::str(dst_device));
+  }
+}
+
 at::Tensor _copy_from_rbln(const at::Tensor& src, const at::Tensor& dst, bool non_blocking) {
   RBLN_SCOPE_GUARD();
   RBLN_LOG_DEBUG("src_data={}, dst_data={}", fmt::ptr(src.data_ptr()), fmt::ptr(dst.data_ptr()));
 
   if (non_blocking) {
-    if (c10::rbln::is_fallback_disabled("non_blocking_copy")) {
-      RBLN_CHECK(
-          false,
-          "Non-blocking copy is not supported on RBLN devices. "
-          "To enable fallback to blocking copy, remove 'non_blocking_copy' from `TORCH_RBLN_DISABLE_FALLBACK`.");
-    } else {
-      RBLN_WARN_ONCE("Non-blocking copy is not supported, falling back to blocking copy");
-    }
+    copy_impl_rbln_async(src, dst);
+  } else {
+    // Sync copy; the runtime (rbln_vmem_api) drains in-flight async transfers first.
+    copy_impl_rbln(src, dst);
   }
-
-  copy_impl_rbln(src, dst);
 
   return dst;
 }
@@ -194,6 +259,63 @@ at::Tensor _copy_from_and_resize_rbln(const at::Tensor& src, const at::Tensor& d
   copy_impl_rbln(src, dst);
 
   return dst;
+}
+
+at::Tensor clone_rbln(const at::Tensor& self, std::optional<c10::MemoryFormat> memory_format) {
+  RBLN_SCOPE_GUARD();
+  // aten::clone's default is MemoryFormat::Preserve, which is a *directive*
+  // (allocate the output with whatever layout best preserves the source's
+  // observable strides), not a concrete storage layout you can hand to
+  // ``at::empty``. Mirror PyTorch's reference resolution before allocating:
+  //   * Preserve + dense contiguous source → Contiguous
+  //   * Preserve + channels_last source → ChannelsLast (2D/3D)
+  //   * Preserve + arbitrary strided view → empty_strided(self.sizes(),
+  //     self.strides()) so the output observes identical strides
+  // For anything else the user explicitly named (Contiguous, ChannelsLast,
+  // ChannelsLast3d) we pass it through to ``at::empty`` as before.
+  const auto mf_req = memory_format.value_or(c10::MemoryFormat::Preserve);
+  const size_t nbytes = static_cast<size_t>(self.numel()) * self.element_size();
+
+  // Direct-d2d eligibility: contiguous storage layout, zero storage offset,
+  // and the user view spans the entire storage. When all three hold the
+  // source elements are contiguous in storage, so a single
+  // c10::rbln::memcpy_v2v moves them to a freshly allocated output without
+  // going through aten::copy_'s dispatch + TensorIterator path.
+  const bool direct_d2d_eligible = self.is_contiguous() && self.storage_offset() == 0 &&
+      static_cast<int64_t>(self.storage().nbytes()) == self.numel() * self.element_size();
+
+  at::Tensor out;
+  if (mf_req == c10::MemoryFormat::Preserve) {
+    if (self.is_non_overlapping_and_dense()) {
+      // Strided dense source: replay the strides on a fresh buffer so the
+      // clone observes identical layout.
+      out = at::empty_strided(self.sizes(), self.strides(), self.options());
+    } else if (self.is_contiguous(at::MemoryFormat::ChannelsLast)) {
+      out = at::empty(self.sizes(), self.options().memory_format(at::MemoryFormat::ChannelsLast));
+    } else if (self.is_contiguous(at::MemoryFormat::ChannelsLast3d)) {
+      out = at::empty(self.sizes(), self.options().memory_format(at::MemoryFormat::ChannelsLast3d));
+    } else {
+      out = at::empty(self.sizes(), self.options().memory_format(at::MemoryFormat::Contiguous));
+    }
+  } else {
+    out = at::empty(self.sizes(), self.options().memory_format(mf_req));
+  }
+
+  if (direct_d2d_eligible && nbytes > 0 && out.is_contiguous() && out.strides() == self.strides()) {
+    // Bypass aten::copy_ dispatch — write directly into the fresh output
+    // buffer. Both self and out live on the same RBLN device (Tensor::options
+    // preserves device), so this is always a same-device v2v. Require
+    // matching strides so the byte order is identical; if the requested
+    // memory format reshuffles strides (e.g. Preserve on a strided view
+    // gives empty_strided with non-contig strides), fall through to the
+    // copy_ path which honours strides.
+    c10::rbln::memcpy_v2v(out.data_ptr(), self.data_ptr(), nbytes);
+  } else {
+    // Non-contig / partial-storage view: keep the default composite path
+    // so aten::copy_'s TensorIterator handles the strided gather.
+    out.copy_(self);
+  }
+  return out;
 }
 
 } // namespace at::native::rbln

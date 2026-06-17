@@ -26,6 +26,25 @@ class BaseTestNonZeroStorageOffset(TestCase):
     # Flag to enable contiguous() call for non-zero storage offset tensors that are contiguous
     ALLOW_CONTIGUOUS_FOR_NONZERO_OFFSET = True
 
+    def assertEqual(self, x, y, *args, **kwargs):
+        # View-on-device adds a cast round-trip on every view-aware op (e.g.,
+        # fp16 ↔ custom_float16 for fp16 inputs); the round-trip can lose
+        # mantissa bits and accumulate ~1 ULP drift per stage. Multi-stage
+        # view chains (chunk + transpose, slice + permute + reshape, etc.)
+        # compound the drift past the default tolerance. Use the test_ops.py
+        # elementwise tolerance for catalog-dtype compares.
+        if (
+            "rtol" not in kwargs
+            and "atol" not in kwargs
+            and isinstance(x, torch.Tensor)
+            and isinstance(y, torch.Tensor)
+            and x.dtype == y.dtype
+            and x.dtype in SUPPORTED_DTYPES
+        ):
+            kwargs.setdefault("rtol", 0.005)
+            kwargs.setdefault("atol", 0.05)
+        return super().assertEqual(x, y, *args, **kwargs)
+
     def _check_storage_offset(self, tensor, expected_offset_min=0, msg=""):
         """Helper to check storage offset."""
         actual_offset = tensor.storage_offset()
