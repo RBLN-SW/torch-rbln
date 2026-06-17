@@ -31,7 +31,7 @@ import pytest
 import torch
 import vllm_rbln  # noqa: F401
 
-from test.utils import is_rebel_device, run_in_isolated_process, SUPPORTED_DTYPES, xfail_rebel
+from test.utils import is_rebel_device, run_in_isolated_process, SUPPORTED_DTYPES
 
 
 # NOTE: do NOT import ``torch.testing._internal.common_utils`` at module level.
@@ -248,7 +248,15 @@ def _run_case(model_key: str, tp_size: int, enforce_eager: bool, dtype: torch.dt
         mp.setenv("VLLM_RBLN_SAMPLER", "1")
         mp.setenv("VLLM_RBLN_COMPILE_STRICT_MODE", "1")
         mp.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
-        mp.setenv("RBLN_KERNEL_MODE", "triton")
+        # REBEL graph compile: triton custom-kernel mode hits a rebel-compiler
+        # bug (RTOSA ExpandContribCustomOps has no bf16 branch), so use the
+        # string-kernel path + device tensors. ATOM and eager keep triton.
+        rebel_graph = is_rebel_device() and not enforce_eager
+        if rebel_graph:
+            mp.delenv("RBLN_KERNEL_MODE", raising=False)
+            mp.setenv("VLLM_RBLN_USE_DEVICE_TENSOR", "1")
+        else:
+            mp.setenv("RBLN_KERNEL_MODE", "triton")
         mp.setenv("RBLN_PV_OPT", "1")
         # RSD fan-out (1 worker → ``tp_size`` physical NPUs merged into one
         # logical device). vllm engine stays at ``tensor_parallel_size=1``.
@@ -292,7 +300,6 @@ def _run_case(model_key: str, tp_size: int, enforce_eager: bool, dtype: torch.dt
 @pytest.mark.usefixtures("enable_deploy_mode")
 @pytest.mark.parametrize("dtype", SUPPORTED_DTYPES)
 @pytest.mark.parametrize("model_key", list(MODEL_CONFIGS.keys()))
-@xfail_rebel(reason="REBEL: vllm-rbln graph-mode compilation fails at TP=1")
 def test_vllm_llm_graph_tp1(model_key, dtype):
     """Graph mode (torch.compile) TP=1 — primary device-tensor validation."""
     _run_case(model_key=model_key, tp_size=1, enforce_eager=False, dtype=dtype)
