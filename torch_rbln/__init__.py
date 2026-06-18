@@ -165,6 +165,10 @@ def _create_process_group_rbln(dist_backend_opts, pg_options):
     """
     import torch_rbln._C
 
+    from torch_rbln._internal.rdma_env import _apply_control_plane_ips
+
+    _apply_control_plane_ips()
+
     # Extract parameters from dist_backend_opts
     store = dist_backend_opts.store
     group_rank = dist_backend_opts.group_rank
