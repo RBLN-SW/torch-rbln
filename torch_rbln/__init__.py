@@ -5,7 +5,7 @@ from importlib.metadata import PackageNotFoundError, version
 from typing import Any  # noqa: UP035
 
 from torch_rbln._internal.env_utils import is_diagnose_mode
-from torch_rbln._internal.log_utils import rbln_log_debug
+from torch_rbln._internal.log_utils import rbln_log_info
 from torch_rbln._internal.tvm_libinfo import get_dll_directories, get_dll_directory_candidates
 
 
@@ -32,8 +32,14 @@ def torch_backends_entry_point() -> None:
     # value; set it only when the user hasn't, so RBLN_WEIGHT_FREE=off still wins.
     if "RBLN_WEIGHT_FREE" not in os.environ:
         os.environ["RBLN_WEIGHT_FREE"] = "on"
-        rbln_log_debug(
+        rbln_log_info(
             "Defaulting RBLN_WEIGHT_FREE='on' (weight-free compilation); set RBLN_WEIGHT_FREE=off to opt out."
+        )
+    elif os.environ["RBLN_WEIGHT_FREE"].lower() == "off":
+        # Weight-free is the torch-like default; surface only the opt-out (the exception).
+        rbln_log_info(
+            "RBLN_WEIGHT_FREE=off: weight-free compilation disabled; using weight-baked "
+            "compilation (the default is weight-free)."
         )
 
     try:
@@ -45,8 +51,6 @@ def torch_backends_entry_point() -> None:
         import torch
 
         # Load shared objects ##################################################
-        global library_names, libraries
-
         # Ensure dependent shared library is loaded before importing native extension
         find_and_load_tvm_library("librbln.so")
 
