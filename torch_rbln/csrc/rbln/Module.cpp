@@ -112,6 +112,15 @@ void register_internal_api(py::module_& module) {
       },
       "Internal: mark RBLN virtual memory as zero-initialized (no host alloc)");
 
+  // Set target tensor's device-alloc layout (NT/WT kind + dtype) to match ref,
+  // without copying data. Used by torch_rbln.set_device_layout_like().
+  module.def(
+      "_set_device_layout_like",
+      [](const at::Tensor& target, const at::Tensor& ref) {
+        c10::rbln::set_device_layout_like(target.data_ptr(), ref.data_ptr());
+      },
+      "Internal: configure target's device layout like ref (no data copy)");
+
   // Logging utilities
   module.def("_log_cpu_fallback", &c10::rbln::log_cpu_fallback, "Internal: log CPU fallback");
 

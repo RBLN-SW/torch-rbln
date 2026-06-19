@@ -121,6 +121,21 @@ C10_RBLN_API ::rbln::MemoryInfo get_memory_info(const void* data);
 C10_RBLN_API bool is_eager_malloc();
 
 /**
+ * @brief Configure ``target``'s device allocation to the same physical layout
+ *        (NT/WT kind + dtype) as ``ref``, without copying data.
+ *
+ * A subsequent device-to-device copy between ``target`` and ``ref`` then takes
+ * the fast path, which requires both sides to share the same layout kind.
+ * ``ref`` must already be device-resident (have a physical view). Used to make
+ * a staging buffer match a KV cache's (with-transform) layout so the H2D
+ * staging fill + D2D scatter stay on the fast path.
+ *
+ * @param target_data Destination tensor's data ptr (rbln vaddr) to configure.
+ * @param ref_data    Reference tensor's data ptr whose layout is mirrored.
+ */
+C10_RBLN_API void set_device_layout_like(void* target_data, const void* ref_data);
+
+/**
  * @brief Allocates memory on the specified RBLN device.
  *
  * This function allocates a contiguous block of memory on the given RBLN
