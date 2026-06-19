@@ -13,6 +13,8 @@
 #include <rebel/runtime/api/rbln_runtime_api.h>
 
 #include <cstddef>
+#include <utility>
+#include <vector>
 
 namespace at::native::rbln {
 
@@ -316,6 +318,44 @@ at::Tensor clone_rbln(const at::Tensor& self, std::optional<c10::MemoryFormat> m
     out.copy_(self);
   }
   return out;
+}
+
+void _foreach_copy__rbln(at::TensorList self, at::TensorList src, bool non_blocking) {
+  RBLN_SCOPE_GUARD();
+
+  RBLN_CHECK(
+      self.size() == src.size(),
+      "_foreach_copy_: self and src lists must have equal length ({} vs {})",
+      self.size(),
+      src.size());
+
+  // Batch every conversion-free, same-device, same-shape pair into one
+  // V2VBatch so all N copies flush through a single rbln_memcpy_v2v_multi
+  // submit — the write-side mirror of cat's gather. Lets a scatter into N
+  // separate per-layer tensors collapse from N submits to 1. Pairs needing
+  // broadcast / dtype cast / cross-device fall back to a plain per-pair copy_.
+  c10::rbln::V2VBatch batch;
+  std::vector<std::pair<at::Tensor, at::Tensor>> batched;
+  batched.reserve(self.size());
+  for (size_t i = 0; i < self.size(); ++i) {
+    const at::Tensor& dst = self[i];
+    const at::Tensor& s = src[i];
+    const bool v2v_eligible = dst.device().is_privateuseone() && s.device().is_privateuseone() &&
+        dst.device() == s.device() && dst.scalar_type() == s.scalar_type() &&
+        dst.sizes() == s.sizes() && dst.numel() > 0;
+    if (v2v_eligible) {
+      strided_v2v_copy(dst, s, batch);
+      batched.emplace_back(dst, s);
+    } else {
+      dst.copy_(s, non_blocking);
+    }
+  }
+
+  submit_or_fallback(batch, "_foreach_copy_", [&] {
+    for (const auto& pair : batched) {
+      pair.first.copy_(pair.second.cpu());
+    }
+  });
 }
 
 } // namespace at::native::rbln
