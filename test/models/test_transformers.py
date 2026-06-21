@@ -1,5 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
+import inspect
 import os
 
 import pandas as pd
@@ -15,6 +16,34 @@ from test.utils import SUPPORTED_DTYPES
 
 
 TORCH_RBLN_SAVE_PATH = os.getenv("TORCH_RBLN_SAVE_PATH", os.getcwd())
+
+
+def _slice_lm_head_to_last_token(model):
+    """Slice lm_head to the last token for full-sequence-logits models.
+
+    Custom modeling files like EXAONE predate HF's ``logits_to_keep`` and run
+    ``lm_head`` over the whole sequence. Generation only uses the last token, so
+    this is behavior-preserving; it also keeps the lm_head output small enough to
+    avoid the REBEL 4-chiplet >504MiB cross-chiplet gather corruption
+    (fsw-inference#339). No-op for models that already slice (llama/qwen).
+    """
+    if "logits_to_keep" in inspect.signature(type(model).forward).parameters:
+        return
+    lm_head = getattr(model, "lm_head", None)
+    if not isinstance(lm_head, torch.nn.Module):
+        return
+
+    class _LastTokenLMHead(torch.nn.Module):
+        def __init__(self, inner):
+            super().__init__()
+            self.inner = inner
+
+        def forward(self, hidden_states):
+            if hidden_states.dim() >= 2 and hidden_states.shape[-2] > 1:
+                hidden_states = hidden_states[..., -1:, :]
+            return self.inner(hidden_states)
+
+    model.lm_head = _LastTokenLMHead(lm_head)
 
 
 class TestCausalLMBase(TestCase):
@@ -43,6 +72,7 @@ class TestCausalLMBase(TestCase):
             **config_kwargs,
         )
         model.to(device)
+        _slice_lm_head_to_last_token(model)
         self.assertEqual(model.config.dtype, config_kwargs["dtype"])
         self.assertEqual(model.config._attn_implementation, config_kwargs["attn_implementation"])
         self.assertEqual(model.config.num_hidden_layers, config_kwargs["num_hidden_layers"])
