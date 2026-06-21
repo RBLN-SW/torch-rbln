@@ -22,10 +22,8 @@ def _slice_lm_head_to_last_token(model):
     """Slice lm_head to the last token for full-sequence-logits models.
 
     Custom modeling files like EXAONE predate HF's ``logits_to_keep`` and run
-    ``lm_head`` over the whole sequence. Generation only uses the last token, so
-    this is behavior-preserving; it also keeps the lm_head output small enough to
-    avoid the REBEL 4-chiplet >504MiB cross-chiplet gather corruption
-    (fsw-inference#339). No-op for models that already slice (llama/qwen).
+    ``lm_head`` over the whole sequence.
+    No-op for models that already slice (llama/qwen).
     """
     if "logits_to_keep" in inspect.signature(type(model).forward).parameters:
         return
