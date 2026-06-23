@@ -20,8 +20,12 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 from test.utils import SUPPORTED_DTYPES
 
 
-ATOL = 1e-4
-RTOL = 1e-4
+# ``test_eager_matches_graph`` compares eager and graph execution on the
+# same device (no CPU reference); the only source of disagreement is
+# accumulation/fusion order. On REBEL NPU, the compiler computes in bf16,
+# so fp16 inputs drift by ~1 bf16 ULP between the two fusion paths.
+ATOL = 0.01
+RTOL = 0.01
 
 
 class _SmallNet(nn.Module):

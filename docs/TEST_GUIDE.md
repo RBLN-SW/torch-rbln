@@ -548,7 +548,7 @@ def test_linear(self, device, batch_size):
 #### Stack decorators for cross-product parametrization
 
 ```python
-@parametrize("dtype", [torch.float16, torch.float32])
+@parametrize("dtype", [torch.bfloat16, torch.float16])
 @parametrize("batch_size", [1, 2, 4])
 @parametrize("seq_len", [16, 128])
 def test_forward(self, device, dtype, batch_size, seq_len):

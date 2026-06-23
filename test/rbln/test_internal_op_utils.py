@@ -281,22 +281,25 @@ class TestInternalOpUtils(TestCase):
     # =========================================================================
 
     def test_supported_dtypes_dispatch(self):
-        """Tuple of ``float16``; unsupported dtypes are absent."""
+        """Tuple of ``float16`` and ``bfloat16``; excludes other dtypes."""
         self.assertIsInstance(SupportedDtypes.dispatch, tuple)
+        self.assertIn(torch.bfloat16, SupportedDtypes.dispatch)
         self.assertIn(torch.float16, SupportedDtypes.dispatch)
         self.assertNotIn(torch.float32, SupportedDtypes.dispatch)
         self.assertNotIn(torch.bool, SupportedDtypes.dispatch)
 
     def test_supported_dtypes_sdpa(self):
-        """Tuple of ``float16``; the SDPA path must stay float-only."""
+        """Tuple of ``float16`` and ``bfloat16``; the SDPA path must stay float-only."""
         self.assertIsInstance(SupportedDtypes.sdpa, tuple)
+        self.assertIn(torch.bfloat16, SupportedDtypes.sdpa)
         self.assertIn(torch.float16, SupportedDtypes.sdpa)
         self.assertNotIn(torch.float32, SupportedDtypes.sdpa)
         self.assertNotIn(torch.int32, SupportedDtypes.sdpa)
 
     def test_supported_dtypes_amp(self):
-        """Tuple of ``float16``; the AMP autocast path must stay float-only."""
+        """Tuple of ``float16`` and ``bfloat16``; the AMP autocast path must stay float-only."""
         self.assertIsInstance(SupportedDtypes.amp, tuple)
+        self.assertIn(torch.bfloat16, SupportedDtypes.amp)
         self.assertIn(torch.float16, SupportedDtypes.amp)
         self.assertNotIn(torch.float32, SupportedDtypes.amp)
         self.assertNotIn(torch.int32, SupportedDtypes.amp)
@@ -330,6 +333,11 @@ class TestInternalOpUtils(TestCase):
         fp16_tensor = torch.tensor([1.0, 2.0], dtype=torch.float16, device="rbln")
         self.assertFalse(is_cpu_fallback_cases((fp16_tensor,)))
 
+    def test_is_cpu_fallback_cases_dtype_bfloat16(self):
+        """``bfloat16`` non-scalar tensor passes the dtype gate."""
+        bf16_tensor = torch.tensor([1.0, 2.0], dtype=torch.bfloat16, device="rbln")
+        self.assertFalse(is_cpu_fallback_cases((bf16_tensor,)))
+
     def test_is_cpu_fallback_cases_dtype_unsupported(self):
         """Unsupported dtype (e.g. ``float32``) falls back to CPU."""
         unsupported_fp32_tensor = torch.tensor([1.0, 2.0], dtype=torch.float32, device="rbln")
@@ -340,6 +348,13 @@ class TestInternalOpUtils(TestCase):
         supported_fp16_tensor = torch.tensor([1.0, 2.0], dtype=torch.float16, device="rbln")
         unsupported_fp32_tensor = torch.tensor([3.0, 4.0], dtype=torch.float32, device="rbln")
         self.assertTrue(is_cpu_fallback_cases((supported_fp16_tensor, unsupported_fp32_tensor)))
+
+    def test_is_cpu_fallback_cases_dtype_mixed_supported(self):
+        """``float16`` + ``bfloat16`` falls back even though each is individually supported:
+        the compute path requires all tensor args to share the same dtype."""
+        fp16_tensor = torch.tensor([1.0, 2.0], dtype=torch.float16, device="rbln")
+        bf16_tensor = torch.tensor([3.0, 4.0], dtype=torch.bfloat16, device="rbln")
+        self.assertTrue(is_cpu_fallback_cases((fp16_tensor, bf16_tensor)))
 
     def test_is_cpu_fallback_cases_trace(self):
         """When sys.gettrace() is set (e.g. pdb, coverage), is_cpu_fallback_cases returns True (0a)."""

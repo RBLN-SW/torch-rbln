@@ -8,6 +8,7 @@ set(sources
   RBLNGenerator.cpp
   RBLNHooksInterface.cpp
   RBLNLogging.cpp
+  RBLNPinnedAllocator.cpp
   RBLNV2VBatch.cpp
 )
 set(headers
@@ -19,6 +20,7 @@ set(headers
   RBLNHooksInterface.h
   RBLNLogging.h
   RBLNMacros.h
+  RBLNPinnedAllocator.h
   RBLNSupportedDtypes.h
   RBLNV2VBatch.h
 )

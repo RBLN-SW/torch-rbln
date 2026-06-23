@@ -12,6 +12,10 @@ from torch.testing._internal.common_utils import parametrize, run_tests, TestCas
 from test.utils import SUPPORTED_DTYPES
 
 
+ATOL = 0.01
+RTOL = 0.01
+
+
 @pytest.mark.test_set_ci
 class TestOpCaching(TestCase):
     rbln_device = torch.device("rbln:0")
@@ -53,8 +57,8 @@ class TestOpCaching(TestCase):
         new_rbln_out = torch.abs(rbln_tensor)  # No recompilation
         self.assertEqual(torch._dynamo.utils.counters["stats"]["unique_graphs"], 1)
 
-        self.assertEqual(rbln_out, cpu_out)
-        self.assertEqual(new_rbln_out, cpu_out)
+        self.assertEqual(rbln_out, cpu_out, atol=ATOL, rtol=RTOL)
+        self.assertEqual(new_rbln_out, cpu_out, atol=ATOL, rtol=RTOL)
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_different_shape_recompilation(self, dtype):
@@ -82,11 +86,41 @@ class TestOpCaching(TestCase):
         different_shape_rbln_out = torch.abs(different_shape_rbln_tensor)  # Recompilation
         self.assertEqual(torch._dynamo.utils.counters["stats"]["unique_graphs"], 2)
 
-        self.assertEqual(rbln_out, cpu_out)
-        self.assertEqual(different_shape_rbln_out, different_shape_cpu_out)
+        self.assertEqual(rbln_out, cpu_out, atol=ATOL, rtol=RTOL)
+        self.assertEqual(different_shape_rbln_out, different_shape_cpu_out, atol=ATOL, rtol=RTOL)
+
+    @dtypes(*SUPPORTED_DTYPES)
+    @parametrize("shape", shapes)
+    def test_no_recompilation_across_instances(self, dtype, shape):
+        cpu_tensor = torch.randn(shape, dtype=dtype, device="cpu")
+        cpu_out = torch.abs(cpu_tensor)
+
+        rbln_tensor = cpu_tensor.to(self.rbln_device)
+        new_rbln_tensor = cpu_tensor.to(self.rbln_device)
+
+        self._reset_dynamo_counters()
+
+        rbln_out = torch.abs(rbln_tensor)  # Initial compilation
+        self.assertEqual(torch._dynamo.utils.counters["stats"]["unique_graphs"], 1)
+
+        self.assertEqual(new_rbln_tensor.dtype, rbln_tensor.dtype)
+        self.assertEqual(new_rbln_tensor.size(), rbln_tensor.size())
+        self.assertEqual(new_rbln_tensor.stride(), rbln_tensor.stride())
+        self.assertEqual(new_rbln_tensor.storage_offset(), rbln_tensor.storage_offset())
+        new_rbln_out = torch.abs(new_rbln_tensor)  # No recompilation
+        self.assertEqual(torch._dynamo.utils.counters["stats"]["unique_graphs"], 1)
+
+        self.assertEqual(rbln_out, cpu_out, atol=ATOL, rtol=RTOL)
+        self.assertEqual(new_rbln_out, cpu_out, atol=ATOL, rtol=RTOL)
 
     @parametrize("shape", shapes)
     def test_custom_float16_reuse(self, shape):
+        """A tensor produced by a device op carries the internal
+        ``custom_float16`` representation; it must share the compiled graph
+        with a freshly moved fp16 tensor (no recompilation). Sibling
+        ``test_no_recompilation_across_instances`` only covers two identical
+        ``.to(device)`` copies — it never exercises the fp16 ↔
+        ``custom_float16`` guard equivalence this test locks in."""
         fp16_cpu_tensor = torch.randn(shape, dtype=torch.float16, device="cpu")
         cpu_out = torch.abs(fp16_cpu_tensor)
 
@@ -105,8 +139,8 @@ class TestOpCaching(TestCase):
         new_rbln_out = torch.abs(cf16_rbln_tensor)  # No recompilation
         self.assertEqual(torch._dynamo.utils.counters["stats"]["unique_graphs"], 1)
 
-        self.assertEqual(rbln_out, cpu_out)
-        self.assertEqual(new_rbln_out, cpu_out)
+        self.assertEqual(rbln_out, cpu_out, atol=ATOL, rtol=RTOL)
+        self.assertEqual(new_rbln_out, cpu_out, atol=ATOL, rtol=RTOL)
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_unaligned_shape_uses_cpu_fallback(self, dtype):
@@ -140,7 +174,7 @@ class TestOpCaching(TestCase):
         _ = torch.abs(rbln_tensor)
         self.assertEqual(torch._dynamo.utils.counters["stats"]["unique_graphs"], 0)
 
-        self.assertEqual(rbln_out, cpu_out)
+        self.assertEqual(rbln_out, cpu_out, atol=ATOL, rtol=RTOL)
 
 
 instantiate_device_type_tests(TestOpCaching, globals(), only_for="privateuse1")
