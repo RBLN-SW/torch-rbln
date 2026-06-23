@@ -117,6 +117,24 @@ void register_internal_api(py::module_& module) {
   module.def(
       "_set_device_layout_like",
       [](const at::Tensor& target, const at::Tensor& ref) {
+        // Validate before handing raw data_ptr()s to the runtime, which expects
+        // RBLN vaddrs. A CPU/other-backend pointer would otherwise reach the
+        // runtime as a bogus vaddr. dtype must match: the runtime derives the
+        // element count from target's byte size divided by ref's element size,
+        // so a differing dtype would re-type the device alloc out from under
+        // target's tensor metadata.
+        TORCH_CHECK(
+            target.device().is_privateuseone(), "set_device_layout_like: target must be an RBLN tensor, got ",
+            target.device());
+        TORCH_CHECK(
+            ref.device().is_privateuseone(), "set_device_layout_like: ref must be an RBLN tensor, got ", ref.device());
+        TORCH_CHECK(
+            target.device() == ref.device(), "set_device_layout_like: target and ref must be on the same device (got ",
+            target.device(), " and ", ref.device(), ")");
+        TORCH_CHECK(
+            target.scalar_type() == ref.scalar_type(),
+            "set_device_layout_like: target and ref must have the same dtype (got ", target.scalar_type(), " and ",
+            ref.scalar_type(), ")");
         c10::rbln::set_device_layout_like(target.data_ptr(), ref.data_ptr());
       },
       "Internal: configure target's device layout like ref (no data copy)");
