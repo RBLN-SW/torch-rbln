@@ -60,6 +60,34 @@ class TestSetDeviceLayoutLike:
         with pytest.raises(RuntimeError, match="same dtype"):
             torch.rbln.set_device_layout_like(target, ref)
 
+    def test_offset_view_target_raises(self):
+        """A storage_offset>0 view's data_ptr() is base+offset, which the runtime
+        can't resolve — reject with a clear error instead of a cryptic vaddr
+        failure."""
+        base = torch.empty(64, dtype=torch.float16, device=DEVICE)
+        view = base[8:24]
+        assert view.storage_offset() != 0
+        ref = torch.empty(16, dtype=torch.float16, device=DEVICE)
+        with pytest.raises(RuntimeError, match="whole base"):
+            torch.rbln.set_device_layout_like(view, ref)
+
+    def test_narrowing_view_target_raises(self):
+        """A storage_offset==0 view that doesn't span its storage (``base[:k]``):
+        data_ptr() matches the base, but the runtime would size the layout from
+        the whole allocation, not the view — reject it."""
+        base = torch.empty(64, dtype=torch.float16, device=DEVICE)
+        view = base[:16]
+        assert view.storage_offset() == 0 and view.is_contiguous()
+        ref = torch.empty(16, dtype=torch.float16, device=DEVICE)
+        with pytest.raises(RuntimeError, match="whole base"):
+            torch.rbln.set_device_layout_like(view, ref)
+
+    def test_view_ref_raises(self):
+        target = torch.empty(16, dtype=torch.float16, device=DEVICE)
+        ref_view = torch.empty(64, dtype=torch.float16, device=DEVICE)[:16]
+        with pytest.raises(RuntimeError, match="whole base"):
+            torch.rbln.set_device_layout_like(target, ref_view)
+
 
 if __name__ == "__main__":
     from torch.testing._internal.common_utils import run_tests

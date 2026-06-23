@@ -89,6 +89,19 @@ void register_public_device_api(py::module_& module) {
       "Get the complete device topology.");
 }
 
+// set_device_layout_like operates on a whole device allocation: the runtime keys
+// vmem by the base vaddr and sizes the layout from the entire allocation, so a
+// view (non-zero storage_offset, or not spanning its storage) would fail a
+// cryptic vaddr lookup or silently re-lay-out the full buffer. Require the base.
+void check_base_rbln_tensor(const at::Tensor& t, const char* name) {
+  TORCH_CHECK(
+      t.device().is_privateuseone(), "set_device_layout_like: ", name, " must be an RBLN tensor, got ", t.device());
+  TORCH_CHECK(
+      t.storage_offset() == 0 && t.is_contiguous() &&
+          static_cast<int64_t>(t.storage().nbytes()) == t.numel() * t.element_size(),
+      "set_device_layout_like: ", name, " must be a whole base (non-view) RBLN tensor");
+}
+
 /**
  * @brief Register internal API functions with Python
  *
@@ -118,13 +131,10 @@ void register_internal_api(py::module_& module) {
       "_set_device_layout_like",
       [](const at::Tensor& target, const at::Tensor& ref) {
         // Validate before passing raw data_ptr()s to the runtime (which expects
-        // RBLN vaddrs). dtype must match: the runtime sizes target's alloc by
-        // ref's element size, so a mismatch re-types the buffer under target.
-        TORCH_CHECK(
-            target.device().is_privateuseone(), "set_device_layout_like: target must be an RBLN tensor, got ",
-            target.device());
-        TORCH_CHECK(
-            ref.device().is_privateuseone(), "set_device_layout_like: ref must be an RBLN tensor, got ", ref.device());
+        // base RBLN vaddrs). dtype must match: the runtime sizes target's alloc
+        // by ref's element size, so a mismatch re-types the buffer under target.
+        check_base_rbln_tensor(target, "target");
+        check_base_rbln_tensor(ref, "ref");
         TORCH_CHECK(
             target.device() == ref.device(), "set_device_layout_like: target and ref must be on the same device (got ",
             target.device(), " and ", ref.device(), ")");
