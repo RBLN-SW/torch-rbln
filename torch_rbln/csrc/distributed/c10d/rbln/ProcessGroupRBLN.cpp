@@ -542,6 +542,19 @@ class InitRBLNWork : public RBLNWork {
       return;
     }
 
+    // No NPU: nothing to initialize and no peer to rendezvous with. Skip RCCL
+    // init so a world_size > 1 group (and the DeviceMesh on it) can be built for
+    // graph capture. Collectives are captured symbolically and only run at
+    // runtime on real NPUs; an eager collective here fails on uninitialized rccl_.
+    if (c10::rbln::get_device_count() == 0) {
+      RBLN_LOG_INFO(
+          "No NPU detected; skipping RCCL init (rank={} size={}). "
+          "Collectives execute only at runtime on real NPUs.",
+          rank_,
+          size_);
+      return;
+    }
+
     RBLN_CHECK(rccl_ != nullptr, "InitRBLNWork: rccl_ is null");
     RBLN_CHECK(pg_ != nullptr, "InitRBLNWork: pg_ is null");
 

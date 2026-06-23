@@ -281,9 +281,23 @@ void DeviceMappingManager::initialize() {
     RBLN_LOG_DEBUG("Initializing RBLN device mapping");
 
     int device_count = 0;
+    // A failed query (SDK/driver not loadable) stays fatal; "query succeeded,
+    // found 0 NPUs" is handled below.
     RBLN_CHECK(!rbln_get_device_count(&device_count));
     const int physical_device_count = device_count;
     RBLN_LOG_DEBUG("Found {} physical NPU(s)", physical_device_count);
+
+    // No physical NPU: register 0 logical devices instead of failing (like
+    // torch.cuda.device_count()==0 on a CPU-only host). Device use fails at the
+    // point of use, so a model can still be traced/compiled without an NPU.
+    if (physical_device_count == 0) {
+      RBLN_LOG_INFO(
+          "No physical NPU detected; initializing with 0 logical device(s). "
+          "Device access will fail at the point of use.");
+      device_count_ = 0;
+      buildDeviceTopology();
+      return;
+    }
 
     // Check RBLN NPU mapping env (RBLN_DEVICE_MAP takes priority over RBLN_NPUS_PER_DEVICE)
     RblnNpuMappingEnvDisplay env_display = getRblnNpuMappingEnvDisplay();
