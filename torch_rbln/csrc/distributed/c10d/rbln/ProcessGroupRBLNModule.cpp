@@ -1,3 +1,4 @@
+#include <torch/csrc/Exceptions.h>
 #include <torch/csrc/distributed/c10d/Backend.hpp>
 #include <torch/csrc/distributed/c10d/Store.hpp>
 #include <torch/csrc/utils/object_ptr.h>
@@ -68,6 +69,11 @@ using intrusive_ptr_no_gil_destructor_class_ = py::class_<T, IntrusivePtrNoGilDe
 namespace torch_rbln::distributed {
 
 PyObject* initialize_process_group_rbln_bindings(PyObject* _unused, PyObject* noargs) { // NOLINT
+  // Raw PyMethodDef (METH_NOARGS) lives outside pybind11's exception trampoline;
+  // the body can throw (python_error, import/cast, class registration) on e.g.
+  // version-skewed torch. Without this guard a C++ exception unwinds across the
+  // C ABI and std::terminates. HANDLE_TH_ERRORS converts it to a Python error.
+  HANDLE_TH_ERRORS
   // Import the main torch_rbln._C module
   auto torch_rbln_module = THPObjectPtr(PyImport_ImportModule("torch_rbln._C"));
   if (!torch_rbln_module) {
@@ -180,6 +186,7 @@ PyObject* initialize_process_group_rbln_bindings(PyObject* _unused, PyObject* no
           "Get the current sequence number for the group");
 
   Py_RETURN_TRUE;
+  END_HANDLE_TH_ERRORS
 }
 
 // Method definitions for the distributed module

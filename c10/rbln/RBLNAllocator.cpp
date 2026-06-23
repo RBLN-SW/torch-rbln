@@ -6,10 +6,12 @@ namespace c10::rbln {
 
 namespace {
 
+// Runs from the noexcept DataPtr deleter: use the non-throwing free so a
+// teardown-time deallocation failure degrades to a warning, not std::terminate.
 void raw_delete(void* data) {
   if (data != nullptr) {
     RBLN_LOG_DEBUG("Freeing memory at {}", fmt::ptr(data));
-    c10::rbln::free(data);
+    c10::rbln::free_nothrow(data);
   }
 }
 

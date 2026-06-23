@@ -7,7 +7,6 @@
 
 #include <cstdlib>
 #include <cstring>
-#include <limits>
 #include <vector>
 
 namespace c10::rbln {
@@ -18,9 +17,9 @@ namespace {
 thread_local c10::DeviceIndex current_device_index_ = 0;
 
 void check_device_index(c10::DeviceIndex device_index) {
-  constexpr auto max_device_index = std::numeric_limits<c10::DeviceIndex>::max();
-  RBLN_CHECK(
-      device_index <= max_device_index, "Overflowed logical device index (rbln:", static_cast<int>(device_index), ")");
+  // Dropped a dead upper-bound check (device_index is a c10::DeviceIndex, so
+  // `<= max()` is always true). An invalid/negative index is rejected by the
+  // OOB-safe isDeviceAssigned() set lookup below.
   auto& manager = DeviceMappingManager::getInstance();
   // No logical devices: selecting one is pure bookkeeping (nothing to validate);
   // actual device use still fails at the point of use.
@@ -90,8 +89,13 @@ int to_device_id(c10::DeviceIndex device_index) {
       "If this host has no NPU, device tensors/ops require hardware (compilation does not); otherwise "
       "check RBLN_DEVICES and that the NPU driver is available.",
       static_cast<int>(device_index));
-  const auto device_id = static_cast<int>(static_cast<unsigned char>(device_index));
-  return device_id;
+  // Cast directly — do NOT round through `unsigned char`, which would alias a
+  // stray negative index to a real id (e.g. -1 -> 255).
+  RBLN_CHECK(
+      device_index >= 0,
+      "Internal error: negative logical device index ({}) reached to_device_id",
+      static_cast<int>(device_index));
+  return static_cast<int>(device_index);
 }
 
 } // namespace
@@ -170,6 +174,8 @@ c10::DeviceIndex get_device_index() {
 
 void set_device_index(c10::DeviceIndex device_index) {
   RBLN_LOG_DEBUG("logical device=rbln:{}", static_cast<int>(device_index));
+  // A negative index is the "keep current device" sentinel (CUDA convention;
+  // Python maps device=None to it): intentional no-op. Only >= 0 is validated.
   if (device_index >= 0) {
     RBLN_LOG_DEBUG(
         "Setting current logical device: rbln:{} -> rbln:{}",
@@ -284,6 +290,19 @@ void free(void* data) {
   const auto vaddr = reinterpret_cast<uint64_t>(data);
   RBLN_LOG_DEBUG("Calling rbln_free: vaddr={:#x}", vaddr);
   RBLN_CHECK(!::rbln::rbln_free(vaddr));
+}
+
+void free_nothrow(void* data) noexcept {
+  // Non-throwing free for the noexcept DataPtr deleter. rbln_free is extern "C"
+  // (returns a code, never throws) and RBLN_WARN_NOTHROW is itself nothrow, so
+  // the body can't throw — log a failed free instead of throwing like free().
+  if (data == nullptr) {
+    return;
+  }
+  const auto vaddr = reinterpret_cast<uint64_t>(data);
+  if (::rbln::rbln_free(vaddr) != 0) {
+    RBLN_WARN_NOTHROW("rbln_free failed for vaddr={:#x}; leaking rather than aborting", vaddr);
+  }
 }
 
 void memcpy_h2v(void* rbln_dst_data, const void* cpu_src_data, size_t nbytes) {
