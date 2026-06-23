@@ -89,10 +89,9 @@ void register_public_device_api(py::module_& module) {
       "Get the complete device topology.");
 }
 
-// set_device_layout_like operates on a whole device allocation: the runtime keys
-// vmem by the base vaddr and sizes the layout from the entire allocation, so a
-// view (non-zero storage_offset, or not spanning its storage) would fail a
-// cryptic vaddr lookup or silently re-lay-out the full buffer. Require the base.
+// set_device_layout_like operates on a whole tensor allocation, so a view
+// (non-zero storage_offset, or not spanning its storage) is rejected up front
+// with a clear error instead of misbehaving downstream.
 void check_base_rbln_tensor(const at::Tensor& t, const char* name) {
   TORCH_CHECK(
       t.device().is_privateuseone(), "set_device_layout_like: ", name, " must be an RBLN tensor, got ", t.device());
@@ -125,14 +124,14 @@ void register_internal_api(py::module_& module) {
       },
       "Internal: mark RBLN virtual memory as zero-initialized (no host alloc)");
 
-  // Set target tensor's device-alloc layout (NT/WT kind + dtype) to match ref,
-  // without copying data. Used by torch_rbln.set_device_layout_like().
+  // Set target's device-allocation layout to match ref's, without copying data.
+  // Used by torch_rbln.set_device_layout_like().
   module.def(
       "_set_device_layout_like",
       [](const at::Tensor& target, const at::Tensor& ref) {
-        // Validate before passing raw data_ptr()s to the runtime (which expects
-        // base RBLN vaddrs). dtype must match: the runtime sizes target's alloc
-        // by ref's element size, so a mismatch re-types the buffer under target.
+        // Validate inputs up front so misuse fails with a clear error. dtype
+        // must match: a mismatch would reinterpret target's buffer as a
+        // different dtype.
         check_base_rbln_tensor(target, "target");
         check_base_rbln_tensor(ref, "ref");
         TORCH_CHECK(
