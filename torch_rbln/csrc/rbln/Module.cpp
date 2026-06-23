@@ -117,12 +117,9 @@ void register_internal_api(py::module_& module) {
   module.def(
       "_set_device_layout_like",
       [](const at::Tensor& target, const at::Tensor& ref) {
-        // Validate before handing raw data_ptr()s to the runtime, which expects
-        // RBLN vaddrs. A CPU/other-backend pointer would otherwise reach the
-        // runtime as a bogus vaddr. dtype must match: the runtime derives the
-        // element count from target's byte size divided by ref's element size,
-        // so a differing dtype would re-type the device alloc out from under
-        // target's tensor metadata.
+        // Validate before passing raw data_ptr()s to the runtime (which expects
+        // RBLN vaddrs). dtype must match: the runtime sizes target's alloc by
+        // ref's element size, so a mismatch re-types the buffer under target.
         TORCH_CHECK(
             target.device().is_privateuseone(), "set_device_layout_like: target must be an RBLN tensor, got ",
             target.device());
