@@ -56,6 +56,10 @@ at::Tensor clone_rbln(
  * write-side mirror of cat/stack's gather), so a scatter into N separate
  * per-layer tensors collapses from N submits to 1. Non-batchable pairs
  * (broadcast / dtype cast / cross-device) fall back to a plain per-pair copy_.
+ *
+ * Batching is order-free, so when copies alias across pairs (a destination
+ * overlapping another pair's source or destination) the op falls back to a
+ * sequential per-pair copy_ loop to preserve list-order semantics.
  */
 void _foreach_copy__rbln(at::TensorList self, at::TensorList src, bool non_blocking);
 
