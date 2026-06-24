@@ -98,7 +98,9 @@ void check_base_rbln_tensor(const at::Tensor& t, const char* name) {
   TORCH_CHECK(
       t.storage_offset() == 0 && t.is_contiguous() &&
           static_cast<int64_t>(t.storage().nbytes()) == t.numel() * t.element_size(),
-      "set_device_layout_like: ", name, " must be a whole base (non-view) RBLN tensor");
+      "set_device_layout_like: ",
+      name,
+      " must be a whole base (non-view) RBLN tensor");
 }
 
 /**
@@ -135,12 +137,19 @@ void register_internal_api(py::module_& module) {
         check_base_rbln_tensor(target, "target");
         check_base_rbln_tensor(ref, "ref");
         TORCH_CHECK(
-            target.device() == ref.device(), "set_device_layout_like: target and ref must be on the same device (got ",
-            target.device(), " and ", ref.device(), ")");
+            target.device() == ref.device(),
+            "set_device_layout_like: target and ref must be on the same device (got ",
+            target.device(),
+            " and ",
+            ref.device(),
+            ")");
         TORCH_CHECK(
             target.scalar_type() == ref.scalar_type(),
-            "set_device_layout_like: target and ref must have the same dtype (got ", target.scalar_type(), " and ",
-            ref.scalar_type(), ")");
+            "set_device_layout_like: target and ref must have the same dtype (got ",
+            target.scalar_type(),
+            " and ",
+            ref.scalar_type(),
+            ")");
         c10::rbln::set_device_layout_like(target.data_ptr(), ref.data_ptr());
       },
       "Internal: configure target's device layout like ref (no data copy)");

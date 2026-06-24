@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import pytest
 import torch
+
 import torch_rbln  # noqa: F401  # binds the RBLN device + torch.rbln namespace
+
 
 DEVICE = torch.device("rbln:0")
 

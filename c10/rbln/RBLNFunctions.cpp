@@ -292,8 +292,8 @@ void set_device_layout_like(void* target_data, const void* ref_data) {
   const auto target_vaddr = reinterpret_cast<uint64_t>(target_data);
   const auto ref_vaddr = reinterpret_cast<uint64_t>(ref_data);
   RBLN_LOG_DEBUG("set_device_layout_like: target={:#x} ref={:#x}", target_vaddr, ref_vaddr);
-  RBLN_CHECK(!::rbln::rbln_set_device_alloc_layout_like(target_vaddr, ref_vaddr),
-             "rbln_set_device_alloc_layout_like failed");
+  RBLN_CHECK(
+      !::rbln::rbln_set_device_alloc_layout_like(target_vaddr, ref_vaddr), "rbln_set_device_alloc_layout_like failed");
 }
 
 void memcpy_h2v(void* rbln_dst_data, const void* cpu_src_data, size_t nbytes) {
