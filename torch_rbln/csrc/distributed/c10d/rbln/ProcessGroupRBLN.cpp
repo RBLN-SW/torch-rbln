@@ -1755,7 +1755,7 @@ ProcessGroupRBLN::ProcessGroupRBLN(
       // Default group: initialize the map and assign device_id_
       // Direct cast (see to_device_id): an unsigned-char round-trip would alias a
       // stray negative index to a real id.
-      device_id_ = static_cast<int>(c10::rbln::get_device_index());
+      device_id_ = static_cast<int>(c10::rbln::get_device_index()); // NOLINT(bugprone-signed-char-misuse)
       global_rank_to_device_id_in_default_group[global_rank_] = device_id_;
       default_group_initialized = true;
     } else {

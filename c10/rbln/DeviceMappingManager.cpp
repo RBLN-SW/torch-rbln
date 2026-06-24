@@ -159,7 +159,8 @@ void DeviceMappingManager::registerLogicalDevice(int logical_device_index, const
   // Register the logical device with its physical NPU indices
   // Need a non-const copy for rbln_register_device_id which requires int*
   std::vector<int> physical_ids_copy = physical_ids;
-  const int rc = rbln_register_device_id(logical_device_index, physical_ids_copy.data(), physical_ids_copy.size());
+  const int rc = rbln_register_device_id(
+      logical_device_index, physical_ids_copy.data(), static_cast<int>(physical_ids_copy.size()));
   RBLN_CHECK(
       rc == 0,
       "rbln_register_device_id failed for rbln:{} on physical NPU(s) [{}] (rc={}); the device(s) may be in use by "
