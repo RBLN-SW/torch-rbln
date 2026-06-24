@@ -2183,6 +2183,12 @@ c10::intrusive_ptr<Work> ProcessGroupRBLN::send(std::vector<at::Tensor>& tensors
   assertNonEmpty(invalidArgument, tensors);
   assertLayoutMatch(invalidArgument, tensors);
   assertTypeAndSizesMatch(invalidArgument, tensors);
+  if (dstRank < 0 || dstRank >= size_) {
+    invalidArgument(c10::str("invalid dstRank ", dstRank, " (world size ", size_, ")"));
+  }
+  if (dstRank == rank_) {
+    invalidArgument(c10::str("cannot send to self (rank ", rank_, ")"));
+  }
 
   const auto& device = tensors[0].device();
   if (device.is_cpu()) {
@@ -2207,6 +2213,12 @@ c10::intrusive_ptr<Work> ProcessGroupRBLN::recv(std::vector<at::Tensor>& tensors
   assertNonEmpty(invalidArgument, tensors);
   assertLayoutMatch(invalidArgument, tensors);
   assertTypeAndSizesMatch(invalidArgument, tensors);
+  if (srcRank < 0 || srcRank >= size_) {
+    invalidArgument(c10::str("invalid srcRank ", srcRank, " (world size ", size_, ")"));
+  }
+  if (srcRank == rank_) {
+    invalidArgument(c10::str("cannot recv from self (rank ", rank_, ")"));
+  }
 
   const auto& device = tensors[0].device();
   if (device.is_cpu()) {

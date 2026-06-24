@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <cstdlib>
+#include <exception>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -14,6 +15,18 @@ namespace c10::rbln {
 namespace {
 
 std::atomic<RblnDeviceMappingInitializedCallback> g_device_mapping_initialized_cb{nullptr};
+
+// Parse an int from a user-supplied env value, turning std::stoi's context-free
+// std::invalid_argument / std::out_of_range into an actionable error naming the
+// variable and the bad value.
+int parseEnvInt(const std::string& value, const char* var_name) {
+  try {
+    return std::stoi(value);
+  } catch (const std::exception&) {
+    RBLN_CHECK(false, "{}='{}' is not a valid integer", var_name, value);
+  }
+  return 0; // unreachable: RBLN_CHECK always throws
+}
 
 } // namespace
 
@@ -97,7 +110,7 @@ std::vector<std::vector<int>> DeviceMappingManager::parseDeviceMap(const std::st
     while (pos < len && device_map_str[pos] != ']') {
       if (device_map_str[pos] == ',') {
         if (!num_str.empty()) {
-          group.push_back(std::stoi(num_str));
+          group.push_back(parseEnvInt(num_str, "RBLN_DEVICE_MAP"));
           num_str.clear();
         }
         pos++;
@@ -117,7 +130,7 @@ std::vector<std::vector<int>> DeviceMappingManager::parseDeviceMap(const std::st
 
     // Add last number if any
     if (!num_str.empty()) {
-      group.push_back(std::stoi(num_str));
+      group.push_back(parseEnvInt(num_str, "RBLN_DEVICE_MAP"));
     }
 
     // Expect ']'
@@ -310,7 +323,7 @@ void DeviceMappingManager::initialize() {
       // If RBLN_NPUS_PER_DEVICE is not set, default to 1 (1:1 mapping)
       int npus_per_device = 1;
       if (env_display.npus_per_device != "-" && !env_display.npus_per_device.empty()) {
-        npus_per_device = std::stoi(env_display.npus_per_device);
+        npus_per_device = parseEnvInt(env_display.npus_per_device, "RBLN_NPUS_PER_DEVICE");
         RBLN_CHECK(npus_per_device > 0, "RBLN_NPUS_PER_DEVICE must be a positive integer");
         // Validate: must be one of the allowed base sizes
         RBLN_CHECK(
