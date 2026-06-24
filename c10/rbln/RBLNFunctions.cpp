@@ -22,6 +22,11 @@ void check_device_index(c10::DeviceIndex device_index) {
   RBLN_CHECK(
       device_index <= max_device_index, "Overflowed logical device index (rbln:", static_cast<int>(device_index), ")");
   auto& manager = DeviceMappingManager::getInstance();
+  // No logical devices: selecting one is pure bookkeeping (nothing to validate);
+  // actual device use still fails at the point of use.
+  if (manager.getLogicalDeviceCount() == 0) {
+    return;
+  }
   if (!manager.isDeviceAssigned(device_index)) {
     const auto env_display = getRblnNpuMappingEnvDisplay();
     RBLN_CHECK(
@@ -76,6 +81,15 @@ std::string to_string(::rbln::DataType rbln_dtype) {
 }
 
 int to_device_id(c10::DeviceIndex device_index) {
+  // Shared precursor to every device-touching runtime call (alloc, synchronize,
+  // memory stats, ...). With no NPU, fail here with one clear message before
+  // reaching the runtime, which may not handle an unregistered device.
+  RBLN_CHECK(
+      DeviceMappingManager::getInstance().getLogicalDeviceCount() > 0,
+      "Cannot use rbln:{}: no logical device available (this process sees 0 RBLN device(s)). "
+      "If this host has no NPU, device tensors/ops require hardware (compilation does not); otherwise "
+      "check RBLN_DEVICES and that the NPU driver is available.",
+      static_cast<int>(device_index));
   const auto device_id = static_cast<int>(static_cast<unsigned char>(device_index));
   return device_id;
 }
@@ -226,6 +240,8 @@ void* malloc(c10::DeviceIndex device_index, size_t nbytes) {
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
   check_device_index(device_index);
 
+  // to_device_id() enforces that a device is actually available (device_count >
+  // 0), so allocation fails cleanly here on a host with no NPU.
   const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
   const auto size = static_cast<uint64_t>(nbytes);
   uint64_t vaddr = 0;
