@@ -135,6 +135,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   // Operations that use the device runtime API
   m.impl("_copy_from", TORCH_FN(at::native::rbln::_copy_from_rbln));
   m.impl("_copy_from_and_resize", TORCH_FN(at::native::rbln::_copy_from_and_resize_rbln));
+  m.impl("_foreach_copy_", TORCH_FN(at::native::rbln::_foreach_copy__rbln));
   m.impl("empty.memory_format", TORCH_FN(at::native::rbln::empty_rbln));
   m.impl("empty_strided", TORCH_FN(at::native::rbln::empty_strided_rbln));
   m.impl("zero_", TORCH_FN(at::native::rbln::zero_rbln_));
