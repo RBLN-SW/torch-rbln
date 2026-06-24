@@ -79,9 +79,11 @@ class TestNoDevice(TestCase):
         self.assertEqual(rbln_memory.memory_reserved(), 0)
 
     def test_is_initialized_tracks_set_device(self):
-        """``is_initialized()`` exists (DeviceMesh requires it) and flips on ``set_device``.
+        """``is_initialized()`` exists (DeviceMesh requires it).
 
-        Run in a fresh subprocess so the process-wide flag starts False.
+        With a device it starts False and flips True on ``set_device``; with no device
+        it reports True so DeviceMesh skips its auto-select path. Run in a fresh
+        subprocess so the process-wide flag starts from its default.
         """
         script = textwrap.dedent(
             f"""
@@ -89,10 +91,14 @@ class TestNoDevice(TestCase):
             sys.path.insert(0, {_PROJECT_ROOT!r})
             import torch, torch_rbln
             assert isinstance(torch.rbln.is_initialized(), bool)
-            assert torch.rbln.is_initialized() is False, "should start uninitialized"
             if torch.rbln.device_count() > 0:
+                assert torch.rbln.is_initialized() is False, "should start uninitialized with a device"
                 torch.rbln.set_device(0)
                 assert torch.rbln.is_initialized() is True, "set_device should initialize"
+            else:
+                # No device: is_initialized() reports True so DeviceMesh skips auto-select
+                # (get_rank() % device_count()==0 / set_device both fail with no NPU).
+                assert torch.rbln.is_initialized() is True, "no-device should report initialized"
             print("INIT_OK")
             """
         )
