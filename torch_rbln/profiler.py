@@ -62,7 +62,6 @@ Usage::
 
 from __future__ import annotations
 
-import ctypes
 import time
 from typing import Any, Callable, Optional  # noqa: UP035
 from typing_extensions import Self
@@ -324,90 +323,61 @@ def _reset_trace() -> None:
         fn()
 
 
-# --- runtime (rebel-compiler) counters via ctypes from the loaded librbln -----
-_rt_fns: Optional[dict] = None
-_rt_resolved = False
+# --- runtime (rebel-compiler) counters via the linked _C extension (pybind) -----
+# Read through torch_rbln._C (which links librbln) rather than dlsym'ing librbln by
+# ctypes: one typed channel, consistent with every other runtime signal here. Each
+# getter returns Python-native values (lists of (count, bytes) / tuples), no marshal.
+# Per-reason axes are POSITIONAL; their meaning is mapped on THIS (torch) side — no
+# internal classification name crosses over from the runtime.
+
+# Reject-axis presentation: mirrors the runtime V2VRejectReason axis POSITIONALLY
+# (must match its order). Only an audience tag + a user-facing label live here;
+# every internal reason is collapsed into one bucket and NEVER named to the user (the
+# runtime's internal classification does not leak into torch). index 0 = none/unused.
+_REJECT_AUDIENCE = ("none", "user", "internal", "internal", "user", "internal", "internal", "internal", "internal")
+_REJECT_LABEL = {1: "src_not_on_device", 4: "dtype_mismatch"}
+_REJECT_FIX = {
+    "src_not_on_device": "establish device residency before the copy",
+    "dtype_mismatch": "align the src/dst dtype",
+}
 
 
-def _runtime_fns():
-    global _rt_fns, _rt_resolved
-    if _rt_resolved:
-        return _rt_fns
-    _rt_resolved = True
-    u64p = ctypes.POINTER(ctypes.c_uint64)
-    for loader in (lambda: ctypes.CDLL(None), lambda: ctypes.CDLL("librbln.so")):
-        try:
-            lib = loader()
-            hidden = lib.rbln_prof_get_v2v_hidden_d2h  # core hidden-d2h signal; required
-        except (OSError, AttributeError):
-            continue
-        hidden.restype = None
-        hidden.argtypes = [u64p, u64p, ctypes.c_uint32]
-        fns = {"hidden": hidden}
-        try:
-            mem = lib.rbln_prof_get_memory  # device-memory gauge; optional (newer runtime)
-            mem.restype = None
-            mem.argtypes = [u64p, u64p]
-            fns["memory"] = mem
-        except (OSError, AttributeError):
-            pass  # older runtime without the gauge -> memory reported pending, not zero
-        try:
-            # REAL device->host transfers (count, bytes) emitted by the v-mem manager
-            # at every real d2h primitive; the authoritative real-vs-host-served signal
-            # (a host-served copy never reaches it). Optional (newer runtime).
-            hs = lib.rbln_prof_get_host_sync_d2h
-            hs.restype = None
-            hs.argtypes = [u64p, u64p]
-            fns["host_sync"] = hs
-        except (OSError, AttributeError):
-            pass
-        try:
-            # REAL host->device transfers (count, bytes): the lazy push at the
-            # device-consume boundary (a graph consuming host-latest data). Symmetric
-            # to host_sync (d2h); the authoritative real-vs-host-served signal for the
-            # push direction. Optional (newer runtime).
-            hsh = lib.rbln_prof_get_host_sync_h2d
-            hsh.restype = None
-            hsh.argtypes = [u64p, u64p]
-            fns["host_sync_h2d"] = hsh
-        except (OSError, AttributeError):
-            pass
-        _rt_fns = fns
-        return _rt_fns
-    _rt_fns = None
-    return None
+def _rt_prof(name: str):
+    """Resolve a runtime-counter binding on _C, or None if the loaded _C/librbln
+    predates it (graceful degradation -> signal reports pending, never a false zero)."""
+    try:
+        import torch_rbln._C as _C
+    except Exception:
+        return None
+    return getattr(_C, name, None)
 
 
 def _read_runtime() -> Optional[dict]:
-    """Snapshot of runtime counters, or None if the loaded librbln lacks them.
+    """Snapshot of runtime (rebel-compiler) counters via _C, or None if unavailable.
 
-    ``hidden_count`` (the hidden-d2h cause breakdown) is the core signal. The
-    ``mem_cur``/``mem_peak`` device-memory gauge is present only on a runtime
-    that exposes ``rbln_prof_get_memory``; on an older one it is omitted and
-    reported as pending — never a false zero."""
-    fns = _runtime_fns()
-    if fns is None:
+    ``hidden_count`` (the hidden-d2h cause breakdown) is the core signal. ``reject_*``
+    (WHY a fast v2v plan was rejected), the ``host_sync_*`` real-transfer counters, and
+    the ``mem_*`` device-memory gauge are each present only on a runtime that exposes
+    them; on an older one they are omitted (reported pending — never a false zero)."""
+    hidden = _rt_prof("_rt_prof_hidden")
+    if hidden is None:
         return None
-    n = len(_RUNTIME_REASONS)
-    rc = (ctypes.c_uint64 * n)()
-    rb = (ctypes.c_uint64 * n)()
-    fns["hidden"](rc, rb, n)
-    out: dict[str, Any] = {"hidden_count": [int(rc[i]) for i in range(n)]}
-    if "memory" in fns:
-        cur, peak = ctypes.c_uint64(), ctypes.c_uint64()
-        fns["memory"](ctypes.byref(cur), ctypes.byref(peak))
-        out["mem_cur"] = int(cur.value)
-        out["mem_peak"] = int(peak.value)
-    if "host_sync" in fns:
-        hc, hb = ctypes.c_uint64(), ctypes.c_uint64()
-        fns["host_sync"](ctypes.byref(hc), ctypes.byref(hb))
-        out["host_sync_count"] = int(hc.value)
-        out["host_sync_bytes"] = int(hb.value)
-    if "host_sync_h2d" in fns:
-        hc, hb = ctypes.c_uint64(), ctypes.c_uint64()
-        fns["host_sync_h2d"](ctypes.byref(hc), ctypes.byref(hb))
-        out["host_sync_h2d_count"] = int(hc.value)
-        out["host_sync_h2d_bytes"] = int(hb.value)
+    h = hidden()  # [(count, bytes), ...] positional by src-state cause
+    out: dict[str, Any] = {"hidden_count": [c for c, _b in h], "hidden_bytes": [b for _c, b in h]}
+    rej = _rt_prof("_rt_prof_reject")
+    if rej is not None:
+        r = rej()  # [(count, bytes), ...] positional by V2VRejectReason
+        out["reject_count"] = [c for c, _b in r]
+        out["reject_bytes"] = [b for _c, b in r]
+    hs = _rt_prof("_rt_prof_host_sync")
+    if hs is not None:
+        (dc, db), (hc, hb) = hs()  # [0] = d2h, [1] = h2d
+        out["host_sync_count"], out["host_sync_bytes"] = dc, db
+        out["host_sync_h2d_count"], out["host_sync_h2d_bytes"] = hc, hb
+    mem = _rt_prof("_rt_prof_memory")
+    if mem is not None:
+        cur, peak = mem()
+        out["mem_cur"], out["mem_peak"] = cur, peak
     return out
 
 
@@ -502,6 +472,9 @@ class RBLNExplain:
             if "host_sync_h2d_count" in rt1 and "host_sync_h2d_count" in self._rt0:
                 self._rt["host_sync_h2d_count"] = rt1["host_sync_h2d_count"] - self._rt0["host_sync_h2d_count"]
                 self._rt["host_sync_h2d_bytes"] = rt1["host_sync_h2d_bytes"] - self._rt0["host_sync_h2d_bytes"]
+            if "reject_count" in rt1 and "reject_count" in self._rt0:
+                self._rt["reject_count"] = [a - b for a, b in zip(rt1["reject_count"], self._rt0["reject_count"])]
+                self._rt["reject_bytes"] = [a - b for a, b in zip(rt1["reject_bytes"], self._rt0["reject_bytes"])]
         else:
             self._rt = None
         if self._trace:
@@ -566,6 +539,26 @@ class RBLNExplain:
                 out["runtime_residency"]["real_host_sync_h2d"] = {
                     "count": self._rt["host_sync_h2d_count"],
                     "bytes": self._rt["host_sync_h2d_bytes"],
+                }
+            if "reject_count" in self._rt:
+                # WHY a fast v2v plan was rejected, grouped by who can act: user-
+                # actionable reasons individually; every other reason collapsed into one
+                # "internal" bucket (the runtime's internal classification is never named).
+                user_rej: dict[str, dict[str, int]] = {}
+                int_c = int_b = 0
+                rc, rb = self._rt["reject_count"], self._rt["reject_bytes"]
+                for i in range(len(rc)):
+                    if rc[i] <= 0:
+                        continue
+                    aud = _REJECT_AUDIENCE[i] if i < len(_REJECT_AUDIENCE) else "internal"
+                    if aud == "user":
+                        user_rej[_REJECT_LABEL[i]] = {"count": rc[i], "bytes": rb[i]}
+                    elif aud != "none":
+                        int_c += rc[i]
+                        int_b += rb[i]
+                out["runtime_residency"]["reject"] = {
+                    "user_actionable": user_rej,
+                    "internal_fallback": {"count": int_c, "bytes": int_b},
                 }
             pending = [
                 "finer hidden-sync cause (dtype/align/chunks)",
@@ -692,6 +685,26 @@ class RBLNExplain:
             for n, vv in rr["by_reason"].items():
                 if vv["count"]:
                     rows.append([f"runtime/v2v_slow:{n}", str(vv["count"]), "-", _FIX_SHORT["v2v_slow"]])
+            rj = rr.get("reject")
+            if rj:
+                for label, vv in rj["user_actionable"].items():
+                    rows.append(
+                        [
+                            f"runtime/v2v_reject:{label}",
+                            str(vv["count"]),
+                            _fmt_bytes(vv["bytes"]),
+                            _REJECT_FIX.get(label, ""),
+                        ]
+                    )
+                if rj["internal_fallback"]["count"]:
+                    rows.append(
+                        [
+                            "runtime/v2v_reject:internal_fallback",
+                            str(rj["internal_fallback"]["count"]),
+                            "-",
+                            "internal runtime fallback (not user-actionable)",
+                        ]
+                    )
         disp = d["dispatch"]
         if disp["cpu_fallback"]:
             rows.append(["dispatch/cpu_fallback", str(disp["cpu_fallback"]), "-", _FIX_SHORT["cpu_fallback"]])
