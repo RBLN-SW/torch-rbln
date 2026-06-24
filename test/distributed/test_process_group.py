@@ -160,6 +160,43 @@ def run_scatter_test(rank: int, world_size: int, backend: str, root: int, dtype:
         dist.destroy_process_group()
 
 
+def run_scatter_shared_logical_device_test(rank: int, world_size: int, backend: str, root: int, dim0: int = 32) -> None:
+    """Regression for the ScatterRBLNWork rank/device_id namespace conflation.
+
+    Per-rank ``RBLN_DEVICES`` makes every rank see its own physical NPU as logical
+    rbln:0, so ``device_id == 0`` on every rank while the PG rank varies. With
+    ``root != 0`` the buggy ``rank_ == root_`` check (rank_ wrongly taken from
+    device_id) misroutes the root/receiver branch. RBLN_DEVICES must be set before
+    any RBLN device access (the mapping is initialized lazily).
+    """
+    os.environ["RBLN_DEVICES"] = str(rank)
+    os.environ["LOCAL_RANK"] = str(rank)
+    os.environ["WORLD_SIZE"] = str(world_size)
+    torch.rbln.set_device(0)  # every rank's only local device is logical rbln:0
+    dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+    device = torch.device("rbln", 0)
+
+    try:
+        if rank == root:
+            input_list = [
+                torch.full([dim0], float(i + 1), dtype=torch.float16, device=device) for i in range(world_size)
+            ]
+        else:
+            input_list = None
+        output = torch.zeros(dim0, dtype=torch.float16, device=device)
+
+        dist.scatter(output, input_list, src=root)
+
+        expected = torch.full_like(output, float(rank + 1))
+        torch.testing.assert_close(
+            output.cpu(),
+            expected.cpu(),
+            msg=f"scatter misrouted on rank {rank} (root={root}); ScatterRBLNWork rank_/device_id conflation?",
+        )
+    finally:
+        dist.destroy_process_group()
+
+
 def run_send_recv_test(rank: int, world_size: int, backend: str, src: int, dst: int, dtype: torch.dtype) -> None:
     """Test send/recv operation between source and destination ranks with specified dtype."""
     setup_environment(rank, world_size)
@@ -561,6 +598,25 @@ class TestScatterRBLN(TestProcessGroupRBLNBase):
 
         self.run_c10d_test(
             c10d_async_env, self.world_size, run_scatter_test, (self.world_size, self.backend, rank, dtype, dim0)
+        )
+
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_scatter_ranks_share_logical_device(self, c10d_async_env):
+        """Regression: scatter with root != 0 when every rank's local device is rbln:0.
+
+        Per-rank RBLN_DEVICES makes device_id == 0 on every rank, so ScatterRBLNWork
+        must use the PG rank (not device_id) for its root branch. Requires one
+        physical NPU per rank.
+        """
+        if self.should_skip_multi_rank_tests():
+            self.skipTest("Requires world_size > 1")
+
+        root = 1  # non-zero root exposes the rank vs device_id conflation
+        self.run_c10d_test(
+            c10d_async_env,
+            self.world_size,
+            run_scatter_shared_logical_device_test,
+            (self.world_size, self.backend, root),
         )
 
 
