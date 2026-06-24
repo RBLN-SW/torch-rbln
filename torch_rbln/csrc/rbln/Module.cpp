@@ -191,6 +191,61 @@ void register_internal_api(py::module_& module) {
       },
       "PROFILER: per-site (count, bytes) of hidden host bounces, in BounceSite order");
   module.def("_profiler_reset_bounces", &c10::rbln::prof::reset_bounces, "PROFILER: reset hidden-bounce counters");
+
+  // PROFILER: runtime (rebel-compiler) hidden-overhead counters, read from librbln
+  // via its public C-API. Per-reason axes are POSITIONAL — their meaning is an
+  // internal classification interpreted Python-side, so no internal name crosses
+  // this boundary. See rbln_runtime_api.h / third_party/rebel_compiler.
+  module.def(
+      "_rt_prof_hidden",
+      []() {
+        const uint32_t n = c10::rbln::rt_prof_hidden_num();
+        std::vector<uint64_t> c(n, uint64_t{0}), b(n, uint64_t{0});
+        c10::rbln::rt_prof_hidden_get(c.data(), b.data(), n);
+        std::vector<std::pair<uint64_t, uint64_t>> out;
+        out.reserve(n);
+        for (uint32_t i = 0; i < n; ++i) {
+          out.emplace_back(c[i], b[i]);
+        }
+        return out;
+      },
+      "PROFILER: per-cause (count,bytes) of runtime hidden d2h, positional");
+  module.def(
+      "_rt_prof_reject",
+      []() {
+        const uint32_t n = c10::rbln::rt_prof_reject_num();
+        std::vector<uint64_t> c(n, uint64_t{0}), b(n, uint64_t{0});
+        c10::rbln::rt_prof_reject_get(c.data(), b.data(), n);
+        std::vector<std::pair<uint64_t, uint64_t>> out;
+        out.reserve(n);
+        for (uint32_t i = 0; i < n; ++i) {
+          out.emplace_back(c[i], b[i]);
+        }
+        return out;
+      },
+      "PROFILER: per-reason (count,bytes) of v2v plan reject, positional");
+  module.def(
+      "_rt_prof_host_sync",
+      []() {
+        uint64_t dc = 0, db = 0, hc = 0, hb = 0;
+        c10::rbln::rt_prof_host_sync_d2h(&dc, &db);
+        c10::rbln::rt_prof_host_sync_h2d(&hc, &hb);
+        std::vector<std::pair<uint64_t, uint64_t>> out{{dc, db}, {hc, hb}}; // [0]=d2h, [1]=h2d
+        return out;
+      },
+      "PROFILER: [(d2h_count,d2h_bytes),(h2d_count,h2d_bytes)] real device<->host transfers");
+  module.def(
+      "_rt_prof_memory",
+      []() {
+        uint64_t cur = 0, peak = 0;
+        c10::rbln::rt_prof_memory(&cur, &peak);
+        return std::make_pair(cur, peak);
+      },
+      "PROFILER: (current,peak) device-memory gauge (process-global, both alloc paths)");
+  module.def(
+      "_rt_prof_reset",
+      []() { c10::rbln::rt_prof_reset(); },
+      "PROFILER: reset runtime hidden/reject/host-sync counters for an explain region");
   module.def(
       "_register_cpp_shim",
       &torch_rbln::shim::register_cpp_shim,

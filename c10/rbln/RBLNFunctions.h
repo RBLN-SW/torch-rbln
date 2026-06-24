@@ -409,4 +409,19 @@ C10_RBLN_API void rt_timing_enable(bool on);
 C10_RBLN_API void rt_timing_reset();
 C10_RBLN_API void rt_timing_get(uint64_t* out);
 
+// torch.rbln.explain() runtime-counter reads — thin pass-throughs to librbln's
+// public C-API (see rebel/runtime/api/rbln_runtime_api.h). Process-global, lazy.
+// These are LINKED (not dlsym'd): a librbln lacking them fails extension load, so
+// the vendored header and the runtime are kept version-aligned (third_party/).
+// The per-reason axes are positional; their meaning is interpreted Python-side, so
+// no internal classification name crosses this boundary.
+C10_RBLN_API uint32_t rt_prof_hidden_num();
+C10_RBLN_API void rt_prof_hidden_get(uint64_t* counts, uint64_t* bytes, uint32_t n);
+C10_RBLN_API uint32_t rt_prof_reject_num();
+C10_RBLN_API void rt_prof_reject_get(uint64_t* counts, uint64_t* bytes, uint32_t n);
+C10_RBLN_API void rt_prof_host_sync_d2h(uint64_t* count, uint64_t* bytes);
+C10_RBLN_API void rt_prof_host_sync_h2d(uint64_t* count, uint64_t* bytes);
+C10_RBLN_API void rt_prof_memory(uint64_t* current, uint64_t* peak);
+C10_RBLN_API void rt_prof_reset();
+
 } // namespace c10::rbln

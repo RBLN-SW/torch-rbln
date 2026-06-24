@@ -70,6 +70,36 @@ void rt_timing_get(uint64_t* out) {
   }
 }
 
+// torch.rbln.explain() runtime-counter reads. Thin pass-throughs to librbln's
+// public C-API (rbln_prof_*, declared in rbln_runtime_api.h via RBLNFunctions.h).
+uint32_t rt_prof_hidden_num() {
+  return rbln_prof_v2v_hidden_num_reasons();
+}
+void rt_prof_hidden_get(uint64_t* counts, uint64_t* bytes, uint32_t n) {
+  rbln_prof_get_v2v_hidden_d2h(counts, bytes, n);
+}
+uint32_t rt_prof_reject_num() {
+  return rbln_prof_v2v_reject_num_reasons();
+}
+void rt_prof_reject_get(uint64_t* counts, uint64_t* bytes, uint32_t n) {
+  rbln_prof_get_v2v_reject(counts, bytes, n);
+}
+void rt_prof_host_sync_d2h(uint64_t* count, uint64_t* bytes) {
+  rbln_prof_get_host_sync_d2h(count, bytes);
+}
+void rt_prof_host_sync_h2d(uint64_t* count, uint64_t* bytes) {
+  rbln_prof_get_host_sync_h2d(count, bytes);
+}
+void rt_prof_memory(uint64_t* current, uint64_t* peak) {
+  rbln_prof_get_memory(current, peak);
+}
+void rt_prof_reset() {
+  rbln_prof_reset_v2v_hidden_d2h();
+  rbln_prof_reset_v2v_reject();
+  rbln_prof_reset_host_sync_d2h();
+  rbln_prof_reset_host_sync_h2d();
+}
+
 namespace {
 
 // Default current logical device is 0
