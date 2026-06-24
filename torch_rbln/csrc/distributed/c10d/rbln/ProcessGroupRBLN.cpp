@@ -1480,6 +1480,7 @@ class ScatterRBLNWork : public RBLNWork {
       uint32_t tag,
       uint64_t seq,
       std::shared_ptr<::rbln::Rccl> rccl,
+      int rank,
       int device_id,
       int world_size)
       : RBLNWork(
@@ -1493,8 +1494,12 @@ class ScatterRBLNWork : public RBLNWork {
         root_(root),
         tag_(tag),
         rccl_(std::move(rccl)),
+        // rank_ is the process-group rank (used for the rank_ == root_ branch);
+        // it must NOT be device_id — they are different namespaces (e.g. every
+        // rank sees a single local device rbln:0, so device_id is 0 everywhere).
+        // (init order matches member declaration: rank_, device_id_)
+        rank_(rank),
         device_id_(device_id),
-        rank_(device_id),
         world_size_(world_size) {}
 
   ~ScatterRBLNWork() override = default;
@@ -1749,7 +1754,10 @@ ProcessGroupRBLN::ProcessGroupRBLN(
     if (global_ranks_in_group_.empty()) {
       RBLN_CHECK(!default_group_initialized, "Default group must be initialized here");
       // Default group: initialize the map and assign device_id_
-      device_id_ = static_cast<int>(static_cast<unsigned char>(c10::rbln::get_device_index()));
+      // Direct cast (not through unsigned char): get_device_index() is a
+      // validated non-negative logical index; the unsigned-char round-trip would
+      // alias a stray negative to a real id (matches the to_device_id() fix).
+      device_id_ = static_cast<int>(c10::rbln::get_device_index());
       global_rank_to_device_id_in_default_group[global_rank_] = device_id_;
       default_group_initialized = true;
     } else {
@@ -2167,7 +2175,8 @@ c10::intrusive_ptr<Work> ProcessGroupRBLN::scatter(
 
   auto tag = nextTag();
   auto seq = nextSeq();
-  auto work = c10::make_intrusive<ScatterRBLNWork>(outputs, inputs, opts.rootRank, tag, seq, rccl_, device_id_, size_);
+  auto work =
+      c10::make_intrusive<ScatterRBLNWork>(outputs, inputs, opts.rootRank, tag, seq, rccl_, rank_, device_id_, size_);
 
   enqueueOrExecute(work);
   return work;
