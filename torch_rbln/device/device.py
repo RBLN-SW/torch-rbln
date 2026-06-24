@@ -87,12 +87,16 @@ def is_available() -> bool:
 
 
 def is_initialized() -> bool:
-    """Whether an RBLN device has been selected in this process (torch.cuda parity).
+    """Whether the RBLN device subsystem is ready for ``torch.distributed`` setup.
 
-    Flips to True on the first :func:`set_device`. ``torch.distributed`` DeviceMesh
-    queries this during setup.
+    True once a device has been selected (:func:`set_device`) or when there are no
+    devices at all (``device_count() == 0``). The no-device case matters for
+    DeviceMesh: ``init_device_mesh`` auto-selects via ``get_rank() % device_count()``
+    (or ``set_device``) when this is False, which divides by zero / raises on a host
+    with no NPU. Reporting "initialized" there makes DeviceMesh skip that path, so
+    compile-only / meta-tensor distributed work builds without hardware.
     """
-    return _initialized
+    return _initialized or device_count() == 0
 
 
 def get_amp_supported_dtype() -> List[torch.dtype]:
