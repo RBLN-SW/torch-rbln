@@ -160,9 +160,8 @@ C10_RBLN_API void free(void* data);
 /**
  * @brief Non-throwing free() for `noexcept` contexts (the c10 DataPtr deleter).
  *
- * The deleter runs from std::unique_ptr's noexcept destructor, so a throwing
- * free() there would std::terminate. On failure this logs (RBLN_WARN_NOTHROW)
- * instead of throwing — teardown-time dealloc failures are non-fatal.
+ * The deleter runs in a noexcept destructor, so a throwing free() would
+ * std::terminate; this logs on failure instead.
  */
 C10_RBLN_API void free_nothrow(void* data) noexcept;
 

@@ -87,14 +87,11 @@ def is_available() -> bool:
 
 
 def is_initialized() -> bool:
-    """Whether the RBLN device subsystem is ready for ``torch.distributed`` setup.
+    """True once :func:`set_device` has run, or when there are no devices at all.
 
-    True once a device has been selected (:func:`set_device`) or when there are no
-    devices at all (``device_count() == 0``). The no-device case matters for
-    DeviceMesh: ``init_device_mesh`` auto-selects via ``get_rank() % device_count()``
-    (or ``set_device``) when this is False, which divides by zero / raises on a host
-    with no NPU. Reporting "initialized" there makes DeviceMesh skip that path, so
-    compile-only / meta-tensor distributed work builds without hardware.
+    The no-device case is deliberate (not a bug): it makes ``torch.distributed``'s
+    ``init_device_mesh`` skip its ``get_rank() % device_count()`` auto-select,
+    which would otherwise fail on a host with no NPU.
     """
     return _initialized or device_count() == 0
 

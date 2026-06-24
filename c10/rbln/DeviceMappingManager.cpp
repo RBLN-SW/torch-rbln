@@ -17,9 +17,8 @@ namespace {
 
 std::atomic<RblnDeviceMappingInitializedCallback> g_device_mapping_initialized_cb{nullptr};
 
-// Parse an int from a user-supplied env value, turning std::stoi's context-free
-// std::invalid_argument / std::out_of_range into an actionable error naming the
-// variable and the bad value.
+// Parse an int from a user env value; turn std::stoi's context-free throw into
+// an actionable error naming the variable and the bad value.
 int parseEnvInt(const std::string& value, const char* var_name) {
   size_t pos = 0;
   int result = 0;

@@ -17,9 +17,8 @@ namespace {
 thread_local c10::DeviceIndex current_device_index_ = 0;
 
 void check_device_index(c10::DeviceIndex device_index) {
-  // Dropped a dead upper-bound check (device_index is a c10::DeviceIndex, so
-  // `<= max()` is always true). An invalid/negative index is rejected by the
-  // OOB-safe isDeviceAssigned() set lookup below.
+  // Dropped a dead `<= max()` check (always true for an int8 DeviceIndex); an
+  // invalid/negative index is caught by the OOB-safe isDeviceAssigned() lookup.
   auto& manager = DeviceMappingManager::getInstance();
   // No logical devices: selecting one is pure bookkeeping (nothing to validate);
   // actual device use still fails at the point of use.
@@ -314,9 +313,8 @@ void free(void* data) {
 }
 
 void free_nothrow(void* data) noexcept {
-  // Non-throwing free for the noexcept DataPtr deleter. rbln_free is extern "C"
-  // (returns a code, never throws) and RBLN_WARN_NOTHROW is itself nothrow, so
-  // the body can't throw — log a failed free instead of throwing like free().
+  // Non-throwing free for the noexcept DataPtr deleter: rbln_free is extern "C"
+  // and RBLN_WARN_NOTHROW is itself nothrow, so no try/catch is needed.
   if (data == nullptr) {
     return;
   }

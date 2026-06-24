@@ -48,12 +48,9 @@ helper. See ``torch_rbln._C._pybind_instance_raw_ptr`` in
 Type gate
 ---------
 The raw-pointer trick is only valid for a pybind11 simple-layout
-``PyRblnSyncRuntime``. Any other object (rebel refactor / version skew)
-would still yield a non-null integer that the C++ side caches and later
-dereferences, segfaulting. :func:`install_pending` therefore checks the
-handle's type (:func:`_is_expected_runtime_handle`) before extracting the
-pointer; on mismatch it skips the cache and ops use the safe pybind path.
-A fully robust ABI handshake is a rebel-compiler follow-up.
+``PyRblnSyncRuntime``; any other object yields a non-null garbage pointer that
+segfaults on use. :func:`install_pending` checks the handle type before
+extracting and skips the cache on mismatch (the safe pybind path still works).
 """
 
 from __future__ import annotations
@@ -92,9 +89,8 @@ def _expected_runtime_type() -> type:
 
 
 def _is_expected_runtime_handle(handle: Any) -> bool:
-    """True iff ``handle`` is rebel's ``PyRblnSyncRuntime`` (the type the raw-ptr
-    bridge assumes). If rebel renamed/moved the class the import fails and we
-    skip the fast path rather than trust a wrong layout. When unsure: False.
+    """True iff ``handle`` is rebel's ``PyRblnSyncRuntime`` (what the raw-ptr
+    bridge assumes). On a rename/move the import fails and we skip the cache.
     """
     if handle is None:
         return False
