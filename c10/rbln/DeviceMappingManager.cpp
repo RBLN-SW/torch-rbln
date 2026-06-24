@@ -160,7 +160,14 @@ void DeviceMappingManager::registerLogicalDevice(int logical_device_index, const
   // Register the logical device with its physical NPU indices
   // Need a non-const copy for rbln_register_device_id which requires int*
   std::vector<int> physical_ids_copy = physical_ids;
-  RBLN_CHECK(!rbln_register_device_id(logical_device_index, physical_ids_copy.data(), physical_ids_copy.size()));
+  const int rc = rbln_register_device_id(logical_device_index, physical_ids_copy.data(), physical_ids_copy.size());
+  RBLN_CHECK(
+      rc == 0,
+      "rbln_register_device_id failed for rbln:{} on physical NPU(s) [{}] (rc={}); the device(s) may be in use by "
+      "another process or hold stale allocations. Free the device(s) or adjust RBLN_DEVICES.",
+      logical_device_index,
+      fmt::join(physical_ids_copy, ","),
+      rc);
   assigned_devices_.insert(static_cast<c10::DeviceIndex>(logical_device_index));
 
   // Store mapping information
@@ -305,7 +312,10 @@ void DeviceMappingManager::initialize() {
     int device_count = 0;
     // A failed query (SDK/driver not loadable) stays fatal; "query succeeded,
     // found 0 NPUs" is handled below.
-    RBLN_CHECK(!rbln_get_device_count(&device_count));
+    RBLN_CHECK(
+        !rbln_get_device_count(&device_count),
+        "rbln_get_device_count failed; the RBLN SDK/driver may not be loadable — ensure the SDK is installed "
+        "and the kernel driver is loaded");
     const int physical_device_count = device_count;
     RBLN_LOG_DEBUG("Found {} physical NPU(s)", physical_device_count);
 

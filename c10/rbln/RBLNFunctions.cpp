@@ -160,7 +160,10 @@ c10::DeviceIndex get_physical_device_count() {
   // Directly query the runtime API for physical device count
   // This bypasses the RSD mode logic and always returns the actual physical count
   int device_count = 0;
-  RBLN_CHECK(!rbln_get_device_count(&device_count));
+  RBLN_CHECK(
+      !rbln_get_device_count(&device_count),
+      "rbln_get_device_count failed; no NPU is visible — check that the device is present, the rbln kernel "
+      "driver is loaded, and the device is not held by another process");
 
   const auto physical_device_count = static_cast<c10::DeviceIndex>(device_count);
   RBLN_LOG_DEBUG("physical_NPU_count={}", static_cast<int>(physical_device_count));
@@ -209,7 +212,11 @@ c10::DeviceIndex get_torch_device_id(const void* data) {
 
   const auto vaddr = reinterpret_cast<uint64_t>(data);
   uint32_t torch_device_id = 0;
-  RBLN_CHECK(!::rbln::rbln_get_torch_device_id_from_vaddr(vaddr, torch_device_id));
+  RBLN_CHECK(
+      !::rbln::rbln_get_torch_device_id_from_vaddr(vaddr, torch_device_id),
+      "rbln_get_torch_device_id_from_vaddr failed for vaddr={:#x}; the pointer may not be RBLN device memory or may "
+      "be stale",
+      vaddr);
   return static_cast<c10::DeviceIndex>(torch_device_id);
 }
 
@@ -227,7 +234,10 @@ c10::DeviceIndex get_torch_device_id(const void* data) {
   const auto vaddr = reinterpret_cast<uint64_t>(data);
   ::rbln::MemoryInfo memory_info;
   RBLN_LOG_DEBUG("Calling rbln_get_memory_info: vaddr={:#x}", vaddr);
-  RBLN_CHECK(!::rbln::rbln_get_memory_info(vaddr, memory_info));
+  RBLN_CHECK(
+      !::rbln::rbln_get_memory_info(vaddr, memory_info),
+      "rbln_get_memory_info failed for vaddr={:#x}; the pointer may not be RBLN device memory or may be stale",
+      vaddr);
   RBLN_LOG_DEBUG("memory_info={}", to_string(memory_info));
   return memory_info;
 }
@@ -258,14 +268,22 @@ void* malloc(c10::DeviceIndex device_index, size_t nbytes) {
         static_cast<int>(device_index),
         torch_device_id,
         size);
-    RBLN_CHECK(!::rbln::rbln_malloc_eager(torch_device_id, size, vaddr));
+    RBLN_CHECK(
+        !::rbln::rbln_malloc_eager(torch_device_id, size, vaddr),
+        "rbln_malloc_eager failed (rbln:{}, {} bytes); the device may be out of memory or hold stale allocations",
+        static_cast<int>(device_index),
+        size);
   } else {
     RBLN_LOG_DEBUG(
         "Calling rbln_malloc_lazy: rbln:{}, torch_device_id={}, size={}",
         static_cast<int>(device_index),
         torch_device_id,
         size);
-    RBLN_CHECK(!::rbln::rbln_malloc_lazy(torch_device_id, size, vaddr));
+    RBLN_CHECK(
+        !::rbln::rbln_malloc_lazy(torch_device_id, size, vaddr),
+        "rbln_malloc_lazy failed (rbln:{}, {} bytes); the device may be out of memory or hold stale allocations",
+        static_cast<int>(device_index),
+        size);
   }
 
   auto* data = reinterpret_cast<void*>(vaddr); // NOLINT(performance-no-int-to-ptr)
@@ -289,7 +307,10 @@ void free(void* data) {
 
   const auto vaddr = reinterpret_cast<uint64_t>(data);
   RBLN_LOG_DEBUG("Calling rbln_free: vaddr={:#x}", vaddr);
-  RBLN_CHECK(!::rbln::rbln_free(vaddr));
+  RBLN_CHECK(
+      !::rbln::rbln_free(vaddr),
+      "rbln_free failed for vaddr={:#x} (device may have been reset/lost, or the address was already freed)",
+      vaddr);
 }
 
 void free_nothrow(void* data) noexcept {
@@ -317,7 +338,11 @@ void memcpy_h2v(void* rbln_dst_data, const void* cpu_src_data, size_t nbytes) {
   const auto size = static_cast<uint64_t>(nbytes);
   RBLN_LOG_DEBUG(
       "Calling rbln_memcpy_h2v: src_host_ptr={:#x}, dst_vaddr={:#x}, size={}", src_host_ptr, dst_vaddr, size);
-  RBLN_CHECK(!::rbln::rbln_memcpy_h2v(src_host_ptr, dst_vaddr, size));
+  RBLN_CHECK(
+      !::rbln::rbln_memcpy_h2v(src_host_ptr, dst_vaddr, size),
+      "rbln_memcpy_h2v failed ({} bytes, dst vaddr={:#x}); the device may be busy or faulted",
+      size,
+      dst_vaddr);
 }
 
 void memcpy_v2h(void* cpu_dst_data, const void* rbln_src_data, size_t nbytes) {
@@ -332,7 +357,11 @@ void memcpy_v2h(void* cpu_dst_data, const void* rbln_src_data, size_t nbytes) {
   const auto size = static_cast<uint64_t>(nbytes);
   RBLN_LOG_DEBUG(
       "Calling rbln_memcpy_v2h: src_vaddr={:#x}, dst_host_ptr={:#x}, size={}", src_vaddr, dst_host_ptr, size);
-  RBLN_CHECK(!::rbln::rbln_memcpy_v2h(src_vaddr, dst_host_ptr, size));
+  RBLN_CHECK(
+      !::rbln::rbln_memcpy_v2h(src_vaddr, dst_host_ptr, size),
+      "rbln_memcpy_v2h failed ({} bytes, src vaddr={:#x}); the device may be busy or faulted",
+      size,
+      src_vaddr);
 }
 
 void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes) {
@@ -370,9 +399,17 @@ void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes) {
     const auto host_ptr = reinterpret_cast<uintptr_t>(host_buffer_data);
 
     RBLN_LOG_DEBUG("Calling rbln_memcpy_v2h: src_vaddr={:#x}, dst_host_ptr={:#x}, size={}", src_vaddr, host_ptr, size);
-    RBLN_CHECK(!::rbln::rbln_memcpy_v2h(src_vaddr, host_ptr, size));
+    RBLN_CHECK(
+        !::rbln::rbln_memcpy_v2h(src_vaddr, host_ptr, size),
+        "rbln_memcpy_v2h failed during cross-device transfer ({} bytes, src vaddr={:#x})",
+        size,
+        src_vaddr);
     RBLN_LOG_DEBUG("Calling rbln_memcpy_h2v: src_host_ptr={:#x}, dst_vaddr={:#x}, size={}", host_ptr, dst_vaddr, size);
-    RBLN_CHECK(!::rbln::rbln_memcpy_h2v(host_ptr, dst_vaddr, size));
+    RBLN_CHECK(
+        !::rbln::rbln_memcpy_h2v(host_ptr, dst_vaddr, size),
+        "rbln_memcpy_h2v failed during cross-device transfer ({} bytes, dst vaddr={:#x})",
+        size,
+        dst_vaddr);
   }
 }
 
@@ -389,7 +426,11 @@ void memcpy_h2v_async(void* rbln_dst_data, const void* cpu_src_data, size_t nbyt
   uint64_t handle = 0;
   RBLN_LOG_DEBUG(
       "Calling rbln_memcpy_h2v_async: src_host_ptr={:#x}, dst_vaddr={:#x}, size={}", src_host_ptr, dst_vaddr, size);
-  RBLN_CHECK(!::rbln::rbln_memcpy_h2v_async(src_host_ptr, dst_vaddr, size, &handle));
+  RBLN_CHECK(
+      !::rbln::rbln_memcpy_h2v_async(src_host_ptr, dst_vaddr, size, &handle),
+      "rbln_memcpy_h2v_async failed ({} bytes, dst vaddr={:#x}); the device may be busy or faulted",
+      size,
+      dst_vaddr);
   RBLN_LOG_DEBUG("H2V async dispatched (handle={}, 0=sync fallback)", handle);
 }
 
@@ -406,7 +447,11 @@ void memcpy_v2h_async(void* cpu_dst_data, const void* rbln_src_data, size_t nbyt
   uint64_t handle = 0;
   RBLN_LOG_DEBUG(
       "Calling rbln_memcpy_v2h_async: src_vaddr={:#x}, dst_host_ptr={:#x}, size={}", src_vaddr, dst_host_ptr, size);
-  RBLN_CHECK(!::rbln::rbln_memcpy_v2h_async(src_vaddr, dst_host_ptr, size, &handle));
+  RBLN_CHECK(
+      !::rbln::rbln_memcpy_v2h_async(src_vaddr, dst_host_ptr, size, &handle),
+      "rbln_memcpy_v2h_async failed ({} bytes, src vaddr={:#x}); the device may be busy or faulted",
+      size,
+      src_vaddr);
   RBLN_LOG_DEBUG("V2H async dispatched (handle={}, 0=sync fallback)", handle);
 }
 
@@ -435,7 +480,12 @@ void memcpy_v2v_async(void* rbln_dst_data, const void* rbln_src_data, size_t nby
   uint64_t handle = 0;
   RBLN_LOG_DEBUG(
       "Calling rbln_memcpy_v2v_async: src_vaddr={:#x}, dst_vaddr={:#x}, size={}", src_vaddr, dst_vaddr, size);
-  RBLN_CHECK(!::rbln::rbln_memcpy_v2v_async(src_vaddr, dst_vaddr, size, &handle));
+  RBLN_CHECK(
+      !::rbln::rbln_memcpy_v2v_async(src_vaddr, dst_vaddr, size, &handle),
+      "rbln_memcpy_v2v_async failed ({} bytes, src vaddr={:#x}, dst vaddr={:#x}); the device may be busy or faulted",
+      size,
+      src_vaddr,
+      dst_vaddr);
   RBLN_LOG_DEBUG("V2V async dispatched (handle={}, 0=sync fallback)", handle);
 }
 
@@ -443,7 +493,10 @@ void synchronize(c10::DeviceIndex device_index) {
   RBLN_LOG_DEBUG("Synchronizing device {}", static_cast<int>(device_index));
   check_device_index(device_index);
   const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
-  RBLN_CHECK(!::rbln::rbln_device_synchronize(torch_device_id));
+  RBLN_CHECK(
+      !::rbln::rbln_device_synchronize(torch_device_id),
+      "rbln_device_synchronize failed for rbln:{} (device may be busy or in a faulted state)",
+      static_cast<int>(device_index));
 }
 
 void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies) {
@@ -610,7 +663,10 @@ void empty_cache(const c10::Device& device) {
 
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_empty_cache: device_id={}", device_id);
-  RBLN_CHECK(!rbln_empty_cache(device_id));
+  RBLN_CHECK(
+      !rbln_empty_cache(device_id),
+      "rbln_empty_cache failed for rbln:{} (device may be busy or in a faulted state)",
+      static_cast<int>(device_index));
 }
 
 std::map<std::string, uint64_t> memory_stats(const c10::Device& device) {
@@ -634,7 +690,10 @@ void reset_accumulated_memory_stats(const c10::Device& device) {
 
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_reset_accumulated_memory_stats: device_id={}", device_id);
-  RBLN_CHECK(!rbln_reset_accumulated_memory_stats(device_id));
+  RBLN_CHECK(
+      !rbln_reset_accumulated_memory_stats(device_id),
+      "rbln_reset_accumulated_memory_stats failed for rbln:{}",
+      static_cast<int>(device_index));
 }
 
 void reset_peak_memory_stats(const c10::Device& device) {
@@ -644,12 +703,18 @@ void reset_peak_memory_stats(const c10::Device& device) {
 
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_reset_peak_memory_stats: device_id={}", device_id);
-  RBLN_CHECK(!rbln_reset_peak_memory_stats(device_id));
+  RBLN_CHECK(
+      !rbln_reset_peak_memory_stats(device_id),
+      "rbln_reset_peak_memory_stats failed for rbln:{}",
+      static_cast<int>(device_index));
 }
 
 void set_file_offloading_enabled(bool enabled) {
   RBLN_LOG_DEBUG("Calling rbln_set_file_offloading_enabled: enabled={}", enabled);
-  RBLN_CHECK(!::rbln::rbln_set_file_offloading_enabled(enabled));
+  RBLN_CHECK(
+      !::rbln::rbln_set_file_offloading_enabled(enabled),
+      "rbln_set_file_offloading_enabled failed (enabled={})",
+      enabled);
 }
 
 } // namespace c10::rbln
