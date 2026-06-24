@@ -58,6 +58,7 @@ A fully robust ABI handshake is a rebel-compiler follow-up.
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Any
 
 import torch
@@ -79,21 +80,28 @@ def _raw_cpp_ptr(pybound_instance: Any) -> int:
     return int(raw)
 
 
-# pybind type name of rebel's runtime handle; gating on it catches a
-# renamed/replaced handle before we trust the raw-pointer read (see docstring).
-_EXPECTED_RUNTIME_TYPE_NAME = "PyRblnSyncRuntime"
+@lru_cache(maxsize=1)
+def _expected_runtime_type() -> type:
+    """rebel's ``PyRblnSyncRuntime`` — the only type the raw-ptr bridge accepts.
+
+    Imported from the same place rebel's own ``base_runtime.py`` uses it.
+    """
+    from rebel._C import PyRblnSyncRuntime
+
+    return PyRblnSyncRuntime
 
 
 def _is_expected_runtime_handle(handle: Any) -> bool:
-    """True iff ``handle`` is the rebel runtime type the raw-ptr bridge expects.
-
-    Conservative type-name check: rejects a None/wrong/refactored handle. It
-    can't catch a same-named type with a different ABI (offset skew) — that
-    needs a rebel-side accessor (follow-up). When unsure, returns False.
+    """True iff ``handle`` is rebel's ``PyRblnSyncRuntime`` (the type the raw-ptr
+    bridge assumes). If rebel renamed/moved the class the import fails and we
+    skip the fast path rather than trust a wrong layout. When unsure: False.
     """
     if handle is None:
         return False
-    return type(handle).__name__ == _EXPECTED_RUNTIME_TYPE_NAME
+    try:
+        return isinstance(handle, _expected_runtime_type())
+    except Exception:
+        return False
 
 
 _DTYPE_KEY = {

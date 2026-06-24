@@ -4,6 +4,7 @@
 #include <rebel/runtime/api/rbln_runtime_api.h>
 
 #include <atomic>
+#include <cctype>
 #include <cstdlib>
 #include <exception>
 #include <sstream>
@@ -20,12 +21,20 @@ std::atomic<RblnDeviceMappingInitializedCallback> g_device_mapping_initialized_c
 // std::invalid_argument / std::out_of_range into an actionable error naming the
 // variable and the bad value.
 int parseEnvInt(const std::string& value, const char* var_name) {
+  size_t pos = 0;
+  int result = 0;
   try {
-    return std::stoi(value);
+    result = std::stoi(value, &pos);
   } catch (const std::exception&) {
     RBLN_CHECK(false, "{}='{}' is not a valid integer", var_name, value);
   }
-  return 0; // unreachable: RBLN_CHECK always throws
+  // std::stoi parses only a leading prefix ("1abc" -> 1); reject any trailing
+  // non-whitespace so a malformed value errors instead of being truncated.
+  while (pos < value.size() && (std::isspace(static_cast<unsigned char>(value[pos])) != 0)) {
+    ++pos;
+  }
+  RBLN_CHECK(pos == value.size(), "{}='{}' is not a valid integer", var_name, value);
+  return result;
 }
 
 } // namespace
