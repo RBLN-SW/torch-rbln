@@ -20,6 +20,7 @@ __all__ = [
     "device_count",
     "physical_device_count",
     "is_available",
+    "is_initialized",
     "get_amp_supported_dtype",
     "set_device",
     "synchronize",
@@ -29,13 +30,24 @@ __all__ = [
 ]
 
 
+# Whether this process has selected an RBLN device (torch.cuda-style lazy-init
+# flag). DeviceMesh reads it to decide whether to auto-select a per-rank device.
+_initialized: bool = False
+
+
 def current_device() -> int:
     """
     Get the index of the currently selected RBLN device.
 
+    Raises:
+        RuntimeError: if no RBLN device is available (mirrors
+            ``torch.cuda.current_device()`` on a host with no accelerator).
+
     Returns:
         int: The index of the currently selected RBLN device.
     """
+    if device_count() == 0:
+        raise RuntimeError("No RBLN devices are available")
     return torch_rbln._C.current_device()
 
 
@@ -72,6 +84,15 @@ def is_available() -> bool:
         bool: True if at least one RBLN device is available, False otherwise.
     """
     return device_count() > 0
+
+
+def is_initialized() -> bool:
+    """Whether an RBLN device has been selected in this process (torch.cuda parity).
+
+    Flips to True on the first :func:`set_device`. ``torch.distributed`` DeviceMesh
+    queries this during setup.
+    """
+    return _initialized
 
 
 def get_amp_supported_dtype() -> List[torch.dtype]:
@@ -120,9 +141,13 @@ def set_device(device: Union[int, torch.device, str]) -> None:
         >>> torch.rbln.set_device(0)  # Set device 0 as current
         >>> torch.rbln.set_device(torch.device("rbln:1"))  # Set device 1 as current
     """
+    global _initialized
     device_idx = _get_device_index(device, optional=True)
     if device_idx >= 0:
+        if device_count() == 0:  # torch.cuda parity: selecting a device needs hardware
+            raise RuntimeError("No RBLN devices are available")
         torch_rbln._C.set_device(device_idx)
+        _initialized = True
 
 
 def _get_device_index(device: Any, optional: bool = False) -> int:
@@ -171,6 +196,8 @@ def _exchange_device(device: Union[int, torch.device]) -> int:
     device_idx = _get_device_index(device)
     if device_idx < 0:
         return -1
+    if device_count() == 0:  # torch.cuda parity: selecting a device needs hardware
+        raise RuntimeError("No RBLN devices are available")
     prev_device_idx = torch_rbln._C._exchange_device(device_idx)
     return prev_device_idx
 
