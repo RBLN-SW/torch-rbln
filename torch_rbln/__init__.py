@@ -5,7 +5,6 @@ from importlib.metadata import PackageNotFoundError, version
 from typing import Any  # noqa: UP035
 
 from torch_rbln._internal.env_utils import is_diagnose_mode
-from torch_rbln._internal.log_utils import rbln_log_info
 from torch_rbln._internal.tvm_libinfo import get_dll_directories, get_dll_directory_candidates
 
 
@@ -19,28 +18,6 @@ libraries: list[ctypes.CDLL] = []
 status: str = "uninitialized"
 
 
-def _apply_weight_free_default() -> None:
-    """Default ``RBLN_WEIGHT_FREE`` to ``on`` (weight-free, the torch-like default) when
-    the user hasn't set it; an explicit value always wins. Weight-free keeps weights as
-    host tensors applied to the runtime at load time instead of baking them into the
-    ``.rbln`` artifact; ``on`` is rebel's canonical value.
-
-    Logged at INFO so the decision is discoverable at ``TORCH_RBLN_LOG_LEVEL=INFO``
-    without spamming the default (``WARNING``) level. Weight-free is the norm, so the
-    opt-out (``off``) gets its own note. Extracted as a pure helper so the selection
-    logic is unit-testable in-process (no subprocess needed)."""
-    if "RBLN_WEIGHT_FREE" not in os.environ:
-        os.environ["RBLN_WEIGHT_FREE"] = "on"
-        rbln_log_info(
-            "Defaulting RBLN_WEIGHT_FREE='on' (weight-free compilation); set RBLN_WEIGHT_FREE=off to opt out."
-        )
-    elif os.environ["RBLN_WEIGHT_FREE"].lower() == "off":
-        rbln_log_info(
-            "RBLN_WEIGHT_FREE=off: weight-free compilation disabled; using weight-baked "
-            "compilation (the default is weight-free)."
-        )
-
-
 def torch_backends_entry_point() -> None:
     # Begin initialization #####################################################
     # For once call
@@ -48,9 +25,6 @@ def torch_backends_entry_point() -> None:
     if status != "uninitialized":
         return
     status = "initializing"
-
-    _apply_weight_free_default()
-
     try:
         # Import torch early so libtorch.so / libc10.so are loaded before our
         # native extensions (which link against them).  When the wheel is built
@@ -60,7 +34,7 @@ def torch_backends_entry_point() -> None:
         import torch
 
         # Load shared objects ##################################################
-        global library_names, libraries  # noqa: F824  (kept for documentation; both are mutated in place)
+        global library_names, libraries
 
         # Ensure dependent shared library is loaded before importing native extension
         find_and_load_tvm_library("librbln.so")
