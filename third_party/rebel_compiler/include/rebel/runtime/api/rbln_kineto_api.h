@@ -78,9 +78,6 @@ typedef struct {
 // pointer it receives is valid only until it returns.
 typedef void (*RblnKinetoExportSink)(const RblnKinetoExport* exp, void* user_data);
 
-// Opaque per-scope exporter handle.
-typedef struct RblnKinetoExporter RblnKinetoExporter;
-
 /**
  * @brief Reports whether the rbln profiler runtime is currently active.
  *
@@ -91,35 +88,15 @@ typedef struct RblnKinetoExporter RblnKinetoExporter;
 RBLNRetCode rbln_kineto_is_active(int32_t* active_out);
 
 /**
- * @brief Creates a per-scope exporter handle.
- *
- * @param exporter_out [out] Receives the new handle, owned by the caller.
- *
- * @return 0 on success, or an error code on failure.
- */
-RBLNRetCode rbln_kineto_exporter_create(RblnKinetoExporter** exporter_out);
-
-/**
- * @brief Destroys an exporter handle created by rbln_kineto_exporter_create.
- *
- * @param exporter [in] Handle to destroy; may be NULL.
- *
- * @return 0 on success, or an error code on failure.
- */
-RBLNRetCode rbln_kineto_exporter_destroy(RblnKinetoExporter* exporter);
-
-/**
  * @brief Begins one profiling scope.
  *
  * @details Discards any data captured before this call and starts a fresh
  * capture. Trace output is written under the directory named by the
  * RBLN_PROFILER_DIR environment variable.
  *
- * @param exporter [in] Exporter handle for this scope.
- *
  * @return 0 on success, or an error code on failure.
  */
-RBLNRetCode rbln_kineto_begin_scope(RblnKinetoExporter* exporter);
+RBLNRetCode rbln_kineto_begin_scope(void);
 
 /**
  * @brief Ends one profiling scope and delivers its result.
@@ -130,15 +107,13 @@ RBLNRetCode rbln_kineto_begin_scope(RblnKinetoExporter* exporter);
  * `*exported_out` is set to 0; otherwise it is set to 1. The scope is reset for
  * reuse afterward.
  *
- * @param exporter [in] Exporter handle for this scope.
  * @param sink [in] Callback that receives the export.
  * @param user_data [in] Opaque pointer passed through to `sink`.
  * @param exported_out [out] Set to 1 if `sink` was invoked, 0 otherwise.
  *
  * @return 0 on success, or an error code on failure.
  */
-RBLNRetCode rbln_kineto_end_scope_and_export(RblnKinetoExporter* exporter,
-                                             RblnKinetoExportSink sink, void* user_data,
+RBLNRetCode rbln_kineto_end_scope_and_export(RblnKinetoExportSink sink, void* user_data,
                                              int32_t* exported_out);
 
 #ifdef __cplusplus

@@ -47,13 +47,8 @@ int64_t now_ns(std::chrono::system_clock::time_point tp) {
 
 class RblnActivityProfilerSession : public ::libkineto::IActivityProfilerSession {
  public:
-  RblnActivityProfilerSession() {
-    rbln_kineto_exporter_create(&exporter_);
-  }
-  ~RblnActivityProfilerSession() override {
-    if (exporter_)
-      rbln_kineto_exporter_destroy(exporter_);
-  }
+  RblnActivityProfilerSession() = default;
+  ~RblnActivityProfilerSession() override = default;
   RblnActivityProfilerSession(const RblnActivityProfilerSession&) = delete;
   RblnActivityProfilerSession& operator=(const RblnActivityProfilerSession&) = delete;
 
@@ -64,7 +59,7 @@ class RblnActivityProfilerSession : public ::libkineto::IActivityProfilerSession
     anchor_steady_ns_ = now_ns(std::chrono::steady_clock::now());
     anchor_system_ns_ = now_ns(std::chrono::system_clock::now());
     start_ts_ns_ = anchor_system_ns_;
-    rbln_kineto_begin_scope(exporter_);
+    rbln_kineto_begin_scope();
   }
 
   void stop() override {
@@ -72,7 +67,7 @@ class RblnActivityProfilerSession : public ::libkineto::IActivityProfilerSession
     clock_offset_ns_ = anchor_system_ns_ - anchor_steady_ns_;
     projected_ = ProjectedKinetoTrace{};
     int32_t exported = 0;
-    rbln_kineto_end_scope_and_export(exporter_, &sink_thunk, this, &exported);
+    rbln_kineto_end_scope_and_export(&sink_thunk, this, &exported);
     status_ = ::libkineto::TraceStatus::READY;
   }
 
@@ -120,7 +115,6 @@ class RblnActivityProfilerSession : public ::libkineto::IActivityProfilerSession
     static_cast<RblnActivityProfilerSession*>(user_data)->on_export(exp);
   }
 
-  ::RblnKinetoExporter* exporter_ = nullptr;
   ProjectedKinetoTrace projected_;
   int64_t anchor_steady_ns_ = 0;
   int64_t anchor_system_ns_ = 0;
