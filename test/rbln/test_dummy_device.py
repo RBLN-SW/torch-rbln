@@ -39,7 +39,8 @@ def test_reports_logical_device_but_no_physical():
     proc = _run_with_dummy(
         """
         import torch, torch_rbln
-        assert torch.rbln.device_count() >= 1, torch.rbln.device_count()
+        # default count is 1 (no RBLN_DEVICE_MAP set)
+        assert torch.rbln.device_count() == 1, torch.rbln.device_count()
         assert torch.rbln.is_available() is True
         # physical count must not query the runtime in dummy mode; reports 0.
         assert torch.rbln.physical_device_count() == 0, torch.rbln.physical_device_count()
@@ -138,6 +139,38 @@ def test_device_map_preserves_tp_shape():
     )
     _assert_ok(proc)
     assert "OK" in proc.stdout
+
+
+def test_boolean_spellings():
+    # RBLN_DUMMY_DEVICE is a boolean flag (shared with the rebel runtime); the
+    # logical count comes from RBLN_DEVICE_MAP (default 1), not this value.
+    for truthy in ("1", "true", "on", "yes"):
+        proc = _run_with_dummy(
+            "import torch, torch_rbln; "
+            "assert torch.rbln.is_dummy_device() is True; "
+            "assert torch.rbln.device_count() == 1; print('OK')",
+            env_extra={"RBLN_DUMMY_DEVICE": truthy},
+        )
+        _assert_ok(proc)
+        assert "OK" in proc.stdout
+
+    import os
+
+    for falsy in ("0", "false", "off"):
+        env = dict(os.environ)
+        env["RBLN_DUMMY_DEVICE"] = falsy
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import torch, torch_rbln; assert torch.rbln.is_dummy_device() is False; print('OK')",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        _assert_ok(proc)
+        assert "OK" in proc.stdout
 
 
 def test_is_dummy_device_api():

@@ -6,7 +6,6 @@
 #include <rebel/runtime/memory_stats.h>
 
 #include <atomic>
-#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -342,25 +341,11 @@ bool is_eager_malloc() {
 }
 
 bool is_dummy_device() {
-  // Cheap, total, runtime-free: dummy mode is requested iff RBLN_DUMMY_DEVICE is
-  // a positive integer. Deliberately does NOT go through DeviceMappingManager —
-  // its init queries the runtime on a non-dummy host and would throw without a
-  // driver, which must not happen for a plain predicate. Cached on first call.
-  static const bool dummy = []() {
-    const char* env = std::getenv("RBLN_DUMMY_DEVICE");
-    if (env == nullptr || env[0] == '\0') {
-      return false;
-    }
-    char* end = nullptr;
-    const long value = std::strtol(env, &end, 10);
-    if (end == env) {
-      return false; // no leading integer
-    }
-    while (std::isspace(static_cast<unsigned char>(*end)) != 0) {
-      ++end; // tolerate trailing whitespace (matches parseEnvInt)
-    }
-    return *end == '\0' && value > 0;
-  }();
+  // Cheap, total, runtime-free predicate via the shared RBLN_DUMMY_DEVICE parser,
+  // so it is classified identically to DeviceMappingManager. Deliberately does
+  // NOT go through DeviceMappingManager (whose init queries the runtime and would
+  // throw without a driver). Cached on first call.
+  static const bool dummy = dummyDeviceEnabled();
   return dummy;
 }
 

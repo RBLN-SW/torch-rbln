@@ -233,11 +233,11 @@ class C10_RBLN_API DeviceMappingManager {
   /**
    * @brief Resolve the host-backed dummy device layout from the environment.
    *
-   * Returns nullopt when dummy mode is disabled (RBLN_DUMMY_DEVICE unset/<=0).
-   * Otherwise returns one physical-id group per logical device: from
-   * RBLN_DEVICE_MAP when set (preserving the RSD/TP shape — group sizes), else
-   * RBLN_DUMMY_DEVICE single-NPU groups. The ids are shape markers only; no real
-   * NPU backs them and they are not range-validated against hardware.
+   * Returns nullopt when dummy mode is disabled. Otherwise returns one
+   * physical-id group per logical device: from RBLN_DEVICE_MAP when set
+   * (preserving the RSD/TP shape — group sizes), else a single logical device.
+   * The ids are shape markers only; no real NPU backs them and they are not
+   * range-validated against hardware.
    */
   std::optional<std::vector<std::vector<int>>> getDummyDeviceGroups();
 
@@ -291,5 +291,17 @@ struct RblnNpuMappingEnvDisplay {
  * @brief Get current process's RBLN NPU mapping env (RBLN_DEVICE_MAP, RBLN_NPUS_PER_DEVICE) for display.
  */
 C10_RBLN_API RblnNpuMappingEnvDisplay getRblnNpuMappingEnvDisplay();
+
+/**
+ * @brief Whether RBLN_DUMMY_DEVICE is enabled — the single boolean parser shared
+ * by is_dummy_device() and dummy-device initialization.
+ *
+ * RBLN_DUMMY_DEVICE is a boolean flag owned by the rebel runtime, which
+ * validates it at startup and aborts on a non-boolean value; this only has to
+ * recognize the truthy spellings (1/true/t/yes/y/on, case-insensitive). The
+ * dummy logical device count comes from RBLN_DEVICE_MAP (or defaults to 1), NOT
+ * from this flag. Runtime-free; never throws.
+ */
+C10_RBLN_API bool dummyDeviceEnabled();
 
 } // namespace c10::rbln

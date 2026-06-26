@@ -177,26 +177,27 @@ allocator and memory transfers are served from host memory, so device tensors
 can be constructed and a model traced/compiled (e.g. on a CI or compiler box)
 even though no hardware is present.
 
+`RBLN_DUMMY_DEVICE` is a **boolean** flag (shared with the rebel runtime, which
+validates it at startup): `1/true/t/yes/y/on` enable it, `0/false/...` and unset
+disable it. The number of host-backed logical devices comes from
+`RBLN_DEVICE_MAP` (its group count), defaulting to 1.
+
 ```bash
 # 1 host-backed logical device
 export RBLN_DUMMY_DEVICE=1
 
-# N host-backed logical devices
-export RBLN_DUMMY_DEVICE=4
-
 # Preserve an RSD/TP layout for compilation (group count + sizes honored)
-export RBLN_DUMMY_DEVICE=1 RBLN_DEVICE_MAP="[0,1],[2,3]"
+export RBLN_DUMMY_DEVICE=1 RBLN_DEVICE_MAP="[0,1],[2,3]"   # 2 logical devices, TP=2
 ```
 
 - Forced regardless of physical NPU presence; checked before any runtime query,
   so a host with no SDK/driver still works.
-- `device_count()` reports the dummy logical device count; `physical_device_count()`
-  stays `0`. The logical count is the `RBLN_DEVICE_MAP` group count when set,
-  otherwise the integer value of `RBLN_DUMMY_DEVICE`. `RBLN_DEVICE_MAP` is
-  validated as far as is possible without hardware — group sizes against the
-  allowed sizes (1, 2, 4, 8, 16, 32) and duplicate physical ids are rejected —
-  but physical-id ranges are **not** checked, so a map valid under dummy is not
-  guaranteed to be valid on a specific machine.
+- `device_count()` reports the dummy logical device count (the `RBLN_DEVICE_MAP`
+  group count when set, otherwise 1); `physical_device_count()` stays `0`.
+  `RBLN_DEVICE_MAP` is validated as far as is possible without hardware — group
+  sizes against the allowed sizes (1, 2, 4, 8, 16, 32) and duplicate physical ids
+  are rejected — but physical-id ranges are **not** checked, so a map valid under
+  dummy is not guaranteed to be valid on a specific machine.
 - **Scope**: device tensor construction, host/device copies, and `torch.compile`
   tracing/compilation. Out of scope (still require an NPU and will fail): actual
   kernel / compiled-graph **execution**, distributed collectives, and

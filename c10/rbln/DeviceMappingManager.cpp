@@ -94,6 +94,25 @@ RblnNpuMappingEnvDisplay getRblnNpuMappingEnvDisplay() {
   };
 }
 
+bool dummyDeviceEnabled() {
+  const char* env = std::getenv("RBLN_DUMMY_DEVICE");
+  if (env == nullptr || env[0] == '\0') {
+    return false;
+  }
+  // Mirror rebel's ParseBool truthy set (it already rejected non-boolean values
+  // at startup, so only these and the falsy spellings can reach here).
+  std::string s(env);
+  const auto first = s.find_first_not_of(" \t\n\r\f\v");
+  if (first == std::string::npos) {
+    return false;
+  }
+  s = s.substr(first, s.find_last_not_of(" \t\n\r\f\v") - first + 1);
+  for (char& c : s) {
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  }
+  return s == "1" || s == "true" || s == "t" || s == "yes" || s == "y" || s == "on";
+}
+
 std::vector<std::vector<int>> DeviceMappingManager::parseDeviceMap(const std::string& device_map_str) {
   // Grammar (whitespace-insensitive): groups := group (',' group)* ;
   //   group := '[' number (',' number)* ']' . Empty elements/groups and trailing
@@ -323,18 +342,13 @@ void DeviceMappingManager::initializeFromNpusPerDevice(int npus_per_device, int 
 }
 
 std::optional<std::vector<std::vector<int>>> DeviceMappingManager::getDummyDeviceGroups() {
-  const char* dummy_env = std::getenv("RBLN_DUMMY_DEVICE");
-  if (dummy_env == nullptr || dummy_env[0] == '\0') {
+  if (!dummyDeviceEnabled()) {
     return std::nullopt;
   }
-  const int requested = parseEnvInt(std::string(dummy_env), "RBLN_DUMMY_DEVICE");
-  if (requested <= 0) {
-    return std::nullopt; // 0 / negative disables dummy mode
-  }
-  // RBLN_DEVICE_MAP, when present, defines the layout even in dummy mode
-  // (mirrors the real-path priority). Keeping the group sizes preserves the
-  // RSD/TP shape so torch.compile's auto TP sizing still works; the ids are not
-  // validated against hardware (there is none).
+  // RBLN_DEVICE_MAP, when present, defines the layout (and RSD/TP shape) even in
+  // dummy mode — group sizes are preserved so torch.compile's auto TP sizing
+  // still works; ids are not range-validated against hardware (there is none).
+  // Otherwise default to a single host-backed logical device (TP=1).
   const char* map_env = std::getenv("RBLN_DEVICE_MAP");
   if (map_env != nullptr && map_env[0] != '\0') {
     auto groups = parseDeviceMap(std::string(map_env));
@@ -342,14 +356,7 @@ std::optional<std::vector<std::vector<int>>> DeviceMappingManager::getDummyDevic
       return groups;
     }
   }
-  // No map: `requested` single-NPU logical devices, so each topology entry has a
-  // non-empty physical-id list (TP=1) rather than an empty one.
-  std::vector<std::vector<int>> groups;
-  groups.reserve(static_cast<size_t>(requested));
-  for (int i = 0; i < requested; ++i) {
-    groups.push_back({i});
-  }
-  return groups;
+  return std::vector<std::vector<int>>{{0}};
 }
 
 void DeviceMappingManager::initializeDummyDevices(const std::vector<std::vector<int>>& groups) {
