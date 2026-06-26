@@ -286,6 +286,16 @@ void free(void* data) {
   RBLN_CHECK(!::rbln::rbln_free(vaddr));
 }
 
+void set_device_layout_like(void* target_data, const void* ref_data) {
+  RBLN_CHECK(target_data != nullptr, "set_device_layout_like: target is nullptr");
+  RBLN_CHECK(ref_data != nullptr, "set_device_layout_like: ref is nullptr");
+  const auto target_vaddr = reinterpret_cast<uint64_t>(target_data);
+  const auto ref_vaddr = reinterpret_cast<uint64_t>(ref_data);
+  RBLN_LOG_DEBUG("set_device_layout_like: target={:#x} ref={:#x}", target_vaddr, ref_vaddr);
+  RBLN_CHECK(
+      !::rbln::rbln_set_device_alloc_layout_like(target_vaddr, ref_vaddr), "rbln_set_device_alloc_layout_like failed");
+}
+
 void memcpy_h2v(void* rbln_dst_data, const void* cpu_src_data, size_t nbytes) {
   RBLN_LOG_DEBUG(
       "dst_rbln_data={}, src_cpu_data={}, nbytes={}", fmt::ptr(rbln_dst_data), fmt::ptr(cpu_src_data), nbytes);

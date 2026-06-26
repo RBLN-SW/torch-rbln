@@ -15,6 +15,7 @@ import torch_rbln._C
 
 __all__ = [
     "empty_cache",
+    "set_device_layout_like",
     "max_memory_allocated",
     "max_memory_reserved",
     "memory_allocated",
@@ -44,6 +45,21 @@ def _normalize_device(device: Optional[Union[int, str, torch.device]]) -> torch.
         return torch.device(device)
     else:
         return device
+
+
+def set_device_layout_like(target: torch.Tensor, ref: torch.Tensor) -> None:
+    """Configure ``target``'s device-allocation layout to match ``ref`` (no copy).
+
+    Both must be RBLN tensors with the same dtype, on the same device, and each a
+    *whole base allocation* — not a view/slice.  ``ref`` must be device-resident.
+    ``target`` adopts ``ref``'s layout and dtype while keeping its own size; no
+    data is transferred.  A subsequent device-to-device copy between ``target``
+    and ``ref`` then stays on the fast path.
+
+    Typical use: make a host→device staging buffer match a KV cache's layout so
+    the bulk upload and the per-slot device-to-device scatter are both fast.
+    """
+    torch_rbln._C._set_device_layout_like(target, ref)
 
 
 def _no_rbln_device() -> bool:

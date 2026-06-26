@@ -223,6 +223,11 @@ RBLNRetCode rbln_set_memory_info(uint64_t vaddr, DataType user_dtype, DataType p
                                  const std::vector<int64_t>& shape);
 RBLNRetCode rbln_set_raw_memory_alloc(uint64_t vaddr, uint64_t size);
 
+// Configure target_vaddr's device allocation to the same physical layout kind (NT/WT) and dtype as
+// ref_vaddr's (size from target), without copying data. Lets a subsequent target<->ref D2D take the
+// fast path (which requires matching layout kinds). ref must already have a physical view.
+RBLNRetCode rbln_set_device_alloc_layout_like(uint64_t target_vaddr, uint64_t ref_vaddr);
+
 // Retrieves detailed information for the vmemory entry.
 RBLNRetCode rbln_get_memory_info(uint64_t vaddr, MemoryInfo& memory_info_out);
 
