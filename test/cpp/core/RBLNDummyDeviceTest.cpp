@@ -24,17 +24,20 @@
 #include <cstring>
 
 namespace {
-// Force dummy mode before main(), i.e. before the singleton initializes.
+// Force dummy mode before main(), i.e. before the singleton initializes. Two
+// logical devices (RBLN_DEVICE_MAP) so the pointer->device registry is testable.
 [[maybe_unused]] const int kSetDummyEnv = []() {
   setenv("RBLN_DUMMY_DEVICE", "1", /*overwrite=*/1);
+  setenv("RBLN_DEVICE_MAP", "[0],[1]", /*overwrite=*/1);
   return 0;
 }();
 } // namespace
 
-TEST(RBLNDummyDeviceTest, ReportsLogicalDevice) {
+TEST(RBLNDummyDeviceTest, ReportsLogicalButNoPhysicalDevice) {
   EXPECT_TRUE(c10::rbln::is_dummy_device());
-  // Default count is 1 (no RBLN_DEVICE_MAP set in this test).
-  EXPECT_GE(c10::rbln::get_device_count(), 1);
+  EXPECT_EQ(c10::rbln::get_device_count(), 2); // RBLN_DEVICE_MAP group count
+  // physical count must not query the runtime (no NPU); reports 0.
+  EXPECT_EQ(c10::rbln::get_physical_device_count(), 0);
 }
 
 TEST(RBLNDummyDeviceTest, AllocateAndTransferOnHost) {
@@ -62,6 +65,38 @@ TEST(RBLNDummyDeviceTest, AllocateAndTransferOnHost) {
 
   c10::rbln::free(dev);
   c10::rbln::free(dev2);
+}
+
+TEST(RBLNDummyDeviceTest, GetTorchDeviceIdReportsOwningDevice) {
+  // The pointer's owning device must be the one it was allocated on, not the
+  // current device.
+  void* d0 = c10::rbln::malloc(/*device_index=*/0, 16);
+  void* d1 = c10::rbln::malloc(/*device_index=*/1, 16);
+  ASSERT_NE(d0, nullptr);
+  ASSERT_NE(d1, nullptr);
+  EXPECT_EQ(c10::rbln::get_torch_device_id(d0), 0);
+  EXPECT_EQ(c10::rbln::get_torch_device_id(d1), 1);
+  c10::rbln::free(d0);
+  c10::rbln::free(d1);
+}
+
+TEST(RBLNDummyDeviceTest, V2VHandlesOverlap) {
+  // copy_ can alias; v2v must use memmove, not memcpy (overlap is otherwise UB).
+  constexpr size_t kN = 8;
+  auto* buf = static_cast<int32_t*>(c10::rbln::malloc(/*device_index=*/0, kN * sizeof(int32_t)));
+  ASSERT_NE(buf, nullptr);
+  for (int32_t i = 0; i < static_cast<int32_t>(kN); ++i) {
+    buf[i] = i;
+  }
+  // Shift right by one within the same buffer (dst overlaps src).
+  c10::rbln::memcpy_v2v(buf + 1, buf, (kN - 1) * sizeof(int32_t));
+  const int32_t expected[kN] = {0, 0, 1, 2, 3, 4, 5, 6};
+  for (size_t i = 0; i < kN; ++i) {
+    EXPECT_EQ(buf[i], expected[i]) << "at index " << i;
+  }
+  // Self-copy must be a safe no-op.
+  EXPECT_NO_THROW(c10::rbln::memcpy_v2v(buf, buf, kN * sizeof(int32_t)));
+  c10::rbln::free(buf);
 }
 
 TEST(RBLNDummyDeviceTest, BorrowHostPtrIsIdentity) {

@@ -41,8 +41,8 @@ def test_reports_logical_device_but_no_physical():
         import torch, torch_rbln
         assert torch.rbln.device_count() >= 1, torch.rbln.device_count()
         assert torch.rbln.is_available() is True
-        # physical count stays honest (0 when no NPU; whatever the box really has)
-        assert torch.rbln.physical_device_count() >= 0
+        # physical count must not query the runtime in dummy mode; reports 0.
+        assert torch.rbln.physical_device_count() == 0, torch.rbln.physical_device_count()
         print("OK")
         """
     )
@@ -117,6 +117,33 @@ def test_device_count_honors_device_map_group_count():
     )
     _assert_ok(proc)
     assert "OK" in proc.stdout
+
+
+def test_device_map_preserves_tp_shape():
+    # RBLN_DEVICE_MAP group sizes must survive so torch.compile's auto TP sizing
+    # still works (topology keeps non-empty physical-id lists in dummy mode).
+    proc = _run_with_dummy(
+        """
+        import torch, torch_rbln
+        from torch_rbln._internal.rsd_utils import (
+            auto_determine_tensor_parallel_size,
+            get_physical_device_ids,
+        )
+        assert get_physical_device_ids(0) == [0, 1], get_physical_device_ids(0)
+        assert auto_determine_tensor_parallel_size(0) == 2
+        assert auto_determine_tensor_parallel_size(1) == 2
+        print("OK")
+        """,
+        env_extra={"RBLN_DEVICE_MAP": "[0,1],[2,3]"},
+    )
+    _assert_ok(proc)
+    assert "OK" in proc.stdout
+
+
+# NOTE: overlap/self-copy safety of the dummy v2v path (memmove, not memcpy) is
+# covered in test/cpp/core/RBLNDummyDeviceTest.cpp::V2VHandlesOverlap — PyTorch's
+# copy_ guards against aliasing storage before dispatch, so the overlap cannot be
+# driven from the Python layer.
 
 
 if __name__ == "__main__":

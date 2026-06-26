@@ -4,6 +4,7 @@
 #include <c10/rbln/RBLNMacros.h>
 #include <c10/util/CallOnce.h>
 #include <array>
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -241,19 +242,20 @@ class C10_RBLN_API DeviceMappingManager {
   void initializeFromNpusPerDevice(int npus_per_device, int physical_device_count);
 
   /**
-   * @brief Resolve the requested host-backed dummy logical device count.
+   * @brief Resolve the host-backed dummy device layout from the environment.
    *
-   * Reads RBLN_DUMMY_DEVICE: its integer value (>= 1) enables dummy mode and
-   * sets the count. When RBLN_DEVICE_MAP is also set its group count takes
-   * priority (mirroring the real-path priority); physical NPU ids are not
-   * validated. Returns 0 when dummy mode is disabled (unset / <= 0).
+   * Returns nullopt when dummy mode is disabled (RBLN_DUMMY_DEVICE unset/<=0).
+   * Otherwise returns one physical-id group per logical device: from
+   * RBLN_DEVICE_MAP when set (preserving the RSD/TP shape — group sizes), else
+   * RBLN_DUMMY_DEVICE single-NPU groups. The ids are shape markers only; no real
+   * NPU backs them and they are not range-validated against hardware.
    */
-  int getDummyDeviceCount();
+  std::optional<std::vector<std::vector<int>>> getDummyDeviceGroups();
 
   /**
-   * @brief Register N host-backed logical devices with no physical NPU backing.
+   * @brief Register host-backed logical devices (one per group) with no NPU.
    */
-  void initializeDummyDevices(int dummy_device_count);
+  void initializeDummyDevices(const std::vector<std::vector<int>>& groups);
 
   /**
    * @brief Check if the number of physical NPUs per logical device is valid (must be in BASE_SIZES).

@@ -7,6 +7,8 @@
 #include <cctype>
 #include <cstdlib>
 #include <exception>
+#include <limits>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -319,43 +321,59 @@ void DeviceMappingManager::initializeFromNpusPerDevice(int npus_per_device, int 
   collectUnusedDevices(physical_device_used, physical_device_count);
 }
 
-int DeviceMappingManager::getDummyDeviceCount() {
+std::optional<std::vector<std::vector<int>>> DeviceMappingManager::getDummyDeviceGroups() {
   const char* dummy_env = std::getenv("RBLN_DUMMY_DEVICE");
   if (dummy_env == nullptr || dummy_env[0] == '\0') {
-    return 0;
+    return std::nullopt;
   }
   const int requested = parseEnvInt(std::string(dummy_env), "RBLN_DUMMY_DEVICE");
   if (requested <= 0) {
-    return 0; // 0 / negative disables dummy mode
+    return std::nullopt; // 0 / negative disables dummy mode
   }
-  // RBLN_DEVICE_MAP, when present, defines the logical device count even in
-  // dummy mode (mirrors the real-path priority over a plain count). Physical
-  // NPU ids inside the map are NOT validated here — there is no hardware.
+  // RBLN_DEVICE_MAP, when present, defines the layout even in dummy mode
+  // (mirrors the real-path priority). Keeping the group sizes preserves the
+  // RSD/TP shape so torch.compile's auto TP sizing still works; the ids are not
+  // validated against hardware (there is none).
   const char* map_env = std::getenv("RBLN_DEVICE_MAP");
   if (map_env != nullptr && map_env[0] != '\0') {
-    const auto groups = parseDeviceMap(std::string(map_env));
+    auto groups = parseDeviceMap(std::string(map_env));
     if (!groups.empty()) {
-      return static_cast<int>(groups.size());
+      return groups;
     }
   }
-  return requested;
+  // No map: `requested` single-NPU logical devices, so each topology entry has a
+  // non-empty physical-id list (TP=1) rather than an empty one.
+  std::vector<std::vector<int>> groups;
+  groups.reserve(static_cast<size_t>(requested));
+  for (int i = 0; i < requested; ++i) {
+    groups.push_back({i});
+  }
+  return groups;
 }
 
-void DeviceMappingManager::initializeDummyDevices(int dummy_device_count) {
+void DeviceMappingManager::initializeDummyDevices(const std::vector<std::vector<int>>& groups) {
+  constexpr auto kMaxDeviceIndex = static_cast<size_t>(std::numeric_limits<c10::DeviceIndex>::max());
+  RBLN_CHECK(
+      groups.size() <= kMaxDeviceIndex,
+      "RBLN_DUMMY_DEVICE/RBLN_DEVICE_MAP requests {} logical devices, exceeding the maximum of {}",
+      groups.size(),
+      kMaxDeviceIndex);
   RBLN_LOG_INFO(
       "RBLN_DUMMY_DEVICE active: presenting {} host-backed logical device(s), 0 physical NPU. "
       "Tensor construction and compilation run on host memory; actual execution (kernels / compiled "
       "graphs) still requires an NPU.",
-      dummy_device_count);
+      groups.size());
   dummy_mode_ = true;
-  for (int i = 0; i < dummy_device_count; ++i) {
-    assigned_devices_.insert(static_cast<c10::DeviceIndex>(i));
+  for (size_t i = 0; i < groups.size(); ++i) {
+    const auto logical_index = static_cast<c10::DeviceIndex>(i);
+    assigned_devices_.insert(logical_index);
     DeviceMapping mapping;
-    mapping.logical_device = static_cast<c10::DeviceIndex>(i);
-    // No physical NPU backing in dummy mode; physical_device_ids stays empty.
+    mapping.logical_device = logical_index;
+    // Shape markers only (RSD/TP sizing); no real NPU backs these ids.
+    mapping.physical_device_ids = groups[i];
     device_mapping_table_.emplace_back(std::move(mapping));
   }
-  device_count_ = static_cast<c10::DeviceIndex>(dummy_device_count);
+  device_count_ = static_cast<c10::DeviceIndex>(groups.size());
   buildDeviceTopology();
 }
 
@@ -366,8 +384,8 @@ void DeviceMappingManager::initialize() {
     // Explicit opt-in (RBLN_DUMMY_DEVICE), forced regardless of physical NPU
     // presence. Checked before any runtime query so a host with no SDK/driver
     // can still construct device tensors and compile.
-    if (const int dummy_device_count = getDummyDeviceCount(); dummy_device_count > 0) {
-      initializeDummyDevices(dummy_device_count);
+    if (auto dummy_groups = getDummyDeviceGroups()) {
+      initializeDummyDevices(*dummy_groups);
       return;
     }
 

@@ -170,6 +170,34 @@ torch.rbln.device_summary()
 +-------------------+-------------------+----------------------+
 ```
 
+### RBLN_DUMMY_DEVICE
+
+Development / compile-only mode for hosts **without an NPU**. When set, the
+allocator and memory transfers are served from host memory, so device tensors
+can be constructed and a model traced/compiled (e.g. on a CI or compiler box)
+even though no hardware is present.
+
+```bash
+# 1 host-backed logical device
+export RBLN_DUMMY_DEVICE=1
+
+# N host-backed logical devices
+export RBLN_DUMMY_DEVICE=4
+
+# Preserve an RSD/TP layout for compilation (group count + sizes honored)
+export RBLN_DUMMY_DEVICE=1 RBLN_DEVICE_MAP="[0,1],[2,3]"
+```
+
+- Forced regardless of physical NPU presence; checked before any runtime query,
+  so a host with no SDK/driver still works.
+- `device_count()` reports the dummy logical device count; `physical_device_count()`
+  stays `0`. The logical count is the `RBLN_DEVICE_MAP` group count when set,
+  otherwise the integer value of `RBLN_DUMMY_DEVICE`.
+- **Compile-only**: tensor construction, transfers, and `torch.compile` tracing
+  work; actual kernel / compiled-graph **execution** still requires an NPU and
+  will fail. `torch.rbln.is_available()` returns `True` in this mode — treat it
+  as a development flag, not real hardware availability.
+
 ## Tensor Parallel Configuration
 
 The following environment variables control tensor parallel behavior for `torch.compile` operations and eager mode ops.

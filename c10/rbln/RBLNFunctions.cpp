@@ -7,6 +7,8 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <unordered_map>
 #include <vector>
 
 namespace c10::rbln {
@@ -15,6 +17,29 @@ namespace {
 
 // Default current logical device is 0
 thread_local c10::DeviceIndex current_device_index_ = 0;
+
+// Dummy mode only: maps each host-backed allocation to the logical device it was
+// allocated on, so get_torch_device_id() reports the pointer's owning device
+// rather than the current one. Guarded by is_dummy_device(); never touched on
+// the real-device path.
+std::mutex dummy_alloc_mutex_;
+std::unordered_map<const void*, c10::DeviceIndex> dummy_alloc_devices_;
+
+void dummy_register_alloc(const void* data, c10::DeviceIndex device_index) {
+  const std::lock_guard<std::mutex> lock(dummy_alloc_mutex_);
+  dummy_alloc_devices_[data] = device_index;
+}
+
+void dummy_unregister_alloc(const void* data) {
+  const std::lock_guard<std::mutex> lock(dummy_alloc_mutex_);
+  dummy_alloc_devices_.erase(data);
+}
+
+c10::DeviceIndex dummy_lookup_device(const void* data) {
+  const std::lock_guard<std::mutex> lock(dummy_alloc_mutex_);
+  const auto it = dummy_alloc_devices_.find(data);
+  return it != dummy_alloc_devices_.end() ? it->second : get_device_index();
+}
 
 void check_device_index(c10::DeviceIndex device_index) {
   // Dropped a dead `<= max()` check (always true for an int8 DeviceIndex); an
@@ -156,6 +181,11 @@ c10::DeviceIndex get_device_count() {
 }
 
 c10::DeviceIndex get_physical_device_count() {
+  if (is_dummy_device()) {
+    // Dummy mode must not touch the runtime (the host may have no SDK/driver);
+    // there is no physical NPU, so report 0.
+    return 0;
+  }
   // Directly query the runtime API for physical device count
   // This bypasses the RSD mode logic and always returns the actual physical count
   int device_count = 0;
@@ -210,8 +240,9 @@ c10::DeviceIndex get_torch_device_id(const void* data) {
   RBLN_CHECK(data != nullptr, "data cannot be nullptr");
 
   if (is_dummy_device()) {
-    // Host pointers carry no device id; report the current logical device.
-    return get_device_index();
+    // Resolve the device recorded at allocation (falls back to current device
+    // for pointers we did not allocate).
+    return dummy_lookup_device(data);
   }
 
   const auto vaddr = reinterpret_cast<uint64_t>(data);
@@ -269,9 +300,11 @@ void* malloc(c10::DeviceIndex device_index, size_t nbytes) {
 
   if (is_dummy_device()) {
     // No NPU: back the device tensor with host memory so the copies below are
-    // plain memcpy and tensors can be built/compiled without hardware.
+    // plain memmove and tensors can be built/compiled without hardware. Record
+    // the owning device so get_torch_device_id() can resolve it later.
     void* data = std::malloc(nbytes); // NOLINT(cppcoreguidelines-no-malloc)
     RBLN_CHECK(data != nullptr, "dummy host allocation failed ({} bytes)", nbytes);
+    dummy_register_alloc(data, device_index);
     return data;
   }
 
@@ -331,6 +364,7 @@ void free(void* data) {
   RBLN_CHECK(data != nullptr, "data cannot be nullptr");
 
   if (is_dummy_device()) {
+    dummy_unregister_alloc(data);
     std::free(data); // NOLINT(cppcoreguidelines-no-malloc)
     return;
   }
@@ -350,6 +384,7 @@ void free_nothrow(void* data) noexcept {
     return;
   }
   if (is_dummy_device()) {
+    dummy_unregister_alloc(data);
     std::free(data); // NOLINT(cppcoreguidelines-no-malloc)
     return;
   }
@@ -377,7 +412,7 @@ void memcpy_h2v(void* rbln_dst_data, const void* cpu_src_data, size_t nbytes) {
   RBLN_CHECK(rbln_dst_data != nullptr, "rbln_dst_data cannot be nullptr");
 
   if (is_dummy_device()) {
-    std::memcpy(rbln_dst_data, cpu_src_data, nbytes);
+    std::memmove(rbln_dst_data, cpu_src_data, nbytes);
     return;
   }
 
@@ -401,7 +436,7 @@ void memcpy_v2h(void* cpu_dst_data, const void* rbln_src_data, size_t nbytes) {
   RBLN_CHECK(cpu_dst_data != nullptr, "cpu_dst_data cannot be nullptr");
 
   if (is_dummy_device()) {
-    std::memcpy(cpu_dst_data, rbln_src_data, nbytes);
+    std::memmove(cpu_dst_data, rbln_src_data, nbytes);
     return;
   }
 
@@ -425,7 +460,7 @@ void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes) {
   RBLN_CHECK(rbln_dst_data != nullptr, "rbln_dst_data cannot be nullptr");
 
   if (is_dummy_device()) {
-    std::memcpy(rbln_dst_data, rbln_src_data, nbytes);
+    std::memmove(rbln_dst_data, rbln_src_data, nbytes);
     return;
   }
 
@@ -479,7 +514,7 @@ void memcpy_h2v_async(void* rbln_dst_data, const void* cpu_src_data, size_t nbyt
   RBLN_CHECK(rbln_dst_data != nullptr, "rbln_dst_data cannot be nullptr");
 
   if (is_dummy_device()) {
-    std::memcpy(rbln_dst_data, cpu_src_data, nbytes);
+    std::memmove(rbln_dst_data, cpu_src_data, nbytes);
     return;
   }
 
@@ -505,7 +540,7 @@ void memcpy_v2h_async(void* cpu_dst_data, const void* rbln_src_data, size_t nbyt
   RBLN_CHECK(cpu_dst_data != nullptr, "cpu_dst_data cannot be nullptr");
 
   if (is_dummy_device()) {
-    std::memcpy(cpu_dst_data, rbln_src_data, nbytes);
+    std::memmove(cpu_dst_data, rbln_src_data, nbytes);
     return;
   }
 
@@ -531,7 +566,7 @@ void memcpy_v2v_async(void* rbln_dst_data, const void* rbln_src_data, size_t nby
   RBLN_CHECK(rbln_dst_data != nullptr, "rbln_dst_data cannot be nullptr");
 
   if (is_dummy_device()) {
-    std::memcpy(rbln_dst_data, rbln_src_data, nbytes);
+    std::memmove(rbln_dst_data, rbln_src_data, nbytes);
     return;
   }
 
@@ -585,7 +620,7 @@ void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies) {
       RBLN_CHECK(c.nbytes > 0, "memcpy_v2v_multi: nbytes must be positive");
       RBLN_CHECK(c.src != nullptr, "memcpy_v2v_multi: src cannot be nullptr");
       RBLN_CHECK(c.dst != nullptr, "memcpy_v2v_multi: dst cannot be nullptr");
-      std::memcpy(c.dst, c.src, c.nbytes);
+      std::memmove(c.dst, c.src, c.nbytes);
     }
     return;
   }
