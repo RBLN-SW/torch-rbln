@@ -11,6 +11,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace c10::rbln {
@@ -364,16 +365,24 @@ void DeviceMappingManager::initializeDummyDevices(const std::vector<std::vector<
       "graphs) still requires an NPU.",
       groups.size());
   dummy_mode_ = true;
+  std::unordered_set<int> used_physical_ids;
   for (size_t i = 0; i < groups.size(); ++i) {
-    // Validate group size (TP shape) against the real path's allowed sizes so a
-    // config that compiles under dummy also runs on hardware; only the physical
-    // id *range* check is skipped (there is no NPU).
+    // Validate group size (TP shape) and reject duplicate physical ids — both
+    // are enforceable without hardware, so a config that parses under dummy
+    // matches what the real path accepts. Only the physical-id *range* check is
+    // skipped (there is no NPU to range-check against).
     RBLN_CHECK(
         isValidDeviceGroupSize(groups[i].size()),
         "RBLN_DEVICE_MAP group for rbln:{} has {} physical NPU(s); valid sizes are {}.",
         i,
         groups[i].size(),
         getValidSizesString());
+    for (int phy_id : groups[i]) {
+      RBLN_CHECK(
+          used_physical_ids.insert(phy_id).second,
+          "Physical NPU {} is assigned to more than one logical device in RBLN_DEVICE_MAP",
+          phy_id);
+    }
     const auto logical_index = static_cast<c10::DeviceIndex>(i);
     assigned_devices_.insert(logical_index);
     DeviceMapping mapping;

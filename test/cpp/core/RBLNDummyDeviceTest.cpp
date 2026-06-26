@@ -128,11 +128,29 @@ TEST(RBLNDummyDeviceTest, BorrowHostPtrIsIdentity) {
   ASSERT_NE(dev, nullptr);
 
   const auto borrow = c10::rbln::borrow_host_ptr(dev, kBytes);
-  // The host pointer is the device pointer itself; borrow_id is the no-op
-  // sentinel.
+  // Host pointer is the device pointer itself; borrow_id is non-zero per the
+  // BorrowedHostPtr contract (return_borrowed no-ops in dummy mode).
   EXPECT_EQ(borrow.host_ptr, reinterpret_cast<uintptr_t>(dev));
-  EXPECT_EQ(borrow.borrow_id, 0U);
+  EXPECT_NE(borrow.borrow_id, 0U);
   ASSERT_NO_THROW(c10::rbln::return_borrowed(borrow.borrow_id, /*updated=*/true));
+
+  c10::rbln::free(dev);
+}
+
+TEST(RBLNDummyDeviceTest, CopyAndBorrowRejectOutOfBounds) {
+  constexpr size_t kBytes = 4 * sizeof(int32_t);
+  void* dev = c10::rbln::malloc(/*device_index=*/0, kBytes);
+  ASSERT_NE(dev, nullptr);
+  int32_t host[8] = {};
+
+  // A transfer larger than the allocation must throw, not OOB-access host memory.
+  EXPECT_THROW(c10::rbln::memcpy_h2v(dev, host, kBytes * 2), c10::Error);
+  EXPECT_THROW(c10::rbln::memcpy_v2h(host, dev, kBytes * 2), c10::Error);
+  // A borrow beyond the allocation must throw.
+  EXPECT_THROW(c10::rbln::borrow_host_ptr(dev, kBytes * 2), c10::Error);
+  // An unknown device pointer must throw.
+  int32_t stack = 0;
+  EXPECT_THROW(c10::rbln::memcpy_v2h(host, &stack, sizeof(int32_t)), c10::Error);
 
   c10::rbln::free(dev);
 }

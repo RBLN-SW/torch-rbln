@@ -20,6 +20,7 @@ __all__ = [
     "device_count",
     "physical_device_count",
     "is_available",
+    "is_dummy_device",
     "is_initialized",
     "get_amp_supported_dtype",
     "set_device",
@@ -84,6 +85,17 @@ def is_available() -> bool:
         bool: True if at least one RBLN device is available, False otherwise.
     """
     return device_count() > 0
+
+
+def is_dummy_device() -> bool:
+    """Whether host-backed dummy device mode (``RBLN_DUMMY_DEVICE``) is active.
+
+    In dummy mode there is no NPU: tensors are host-backed so a model can be
+    constructed and compiled, but execution still requires hardware. Use this to
+    distinguish a compile-only dummy from real availability, since
+    :func:`is_available` returns ``True`` in both cases.
+    """
+    return torch_rbln._C.is_dummy_device()
 
 
 def is_initialized() -> bool:

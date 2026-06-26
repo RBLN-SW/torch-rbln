@@ -5,6 +5,7 @@
 #include <c10/util/CallOnce.h>
 #include <rebel/runtime/memory_stats.h>
 
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -59,6 +60,37 @@ c10::DeviceIndex dummy_lookup_device(const void* data) {
       false,
       "get_torch_device_id: {:#x} is not within any RBLN_DUMMY_DEVICE allocation (stale pointer or not device memory)",
       addr);
+}
+
+// True iff [data, data+nbytes) lies fully within a single live allocation.
+bool dummy_range_ok(const void* data, size_t nbytes) {
+  const auto addr = reinterpret_cast<uintptr_t>(data);
+  const std::lock_guard<std::mutex> lock(dummy_alloc_mutex_);
+  auto it = dummy_allocs_.upper_bound(addr);
+  if (it == dummy_allocs_.begin()) {
+    return false;
+  }
+  --it; // greatest base <= addr
+  const auto end = it->first + it->second.nbytes;
+  return addr < end && nbytes <= end - addr;
+}
+
+// Throwing device-pointer bounds check for dummy copy/borrow paths — keeps the
+// host backing from doing OOB reads/writes that the real runtime would reject.
+void dummy_check_range(const void* data, size_t nbytes) {
+  RBLN_CHECK(
+      dummy_range_ok(data, nbytes),
+      "RBLN_DUMMY_DEVICE: device pointer {} + {} bytes is not within a live allocation (stale or out of bounds)",
+      fmt::ptr(data),
+      nbytes);
+}
+
+// Synthetic non-zero borrow ids for dummy mode: satisfies the BorrowedHostPtr
+// contract (a successful borrow returns a non-zero id). return_borrowed() no-ops
+// in dummy mode, so the value only needs to be non-zero.
+std::atomic<uint64_t> dummy_borrow_counter_{0};
+uint64_t next_dummy_borrow_id() {
+  return dummy_borrow_counter_.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
 void check_device_index(c10::DeviceIndex device_index) {
@@ -442,6 +474,7 @@ void memcpy_h2v(void* rbln_dst_data, const void* cpu_src_data, size_t nbytes) {
   RBLN_CHECK(rbln_dst_data != nullptr, "rbln_dst_data cannot be nullptr");
 
   if (is_dummy_device()) {
+    dummy_check_range(rbln_dst_data, nbytes);
     std::memmove(rbln_dst_data, cpu_src_data, nbytes);
     return;
   }
@@ -466,6 +499,7 @@ void memcpy_v2h(void* cpu_dst_data, const void* rbln_src_data, size_t nbytes) {
   RBLN_CHECK(cpu_dst_data != nullptr, "cpu_dst_data cannot be nullptr");
 
   if (is_dummy_device()) {
+    dummy_check_range(rbln_src_data, nbytes);
     std::memmove(cpu_dst_data, rbln_src_data, nbytes);
     return;
   }
@@ -490,6 +524,8 @@ void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes) {
   RBLN_CHECK(rbln_dst_data != nullptr, "rbln_dst_data cannot be nullptr");
 
   if (is_dummy_device()) {
+    dummy_check_range(rbln_dst_data, nbytes);
+    dummy_check_range(rbln_src_data, nbytes);
     std::memmove(rbln_dst_data, rbln_src_data, nbytes);
     return;
   }
@@ -544,6 +580,7 @@ void memcpy_h2v_async(void* rbln_dst_data, const void* cpu_src_data, size_t nbyt
   RBLN_CHECK(rbln_dst_data != nullptr, "rbln_dst_data cannot be nullptr");
 
   if (is_dummy_device()) {
+    dummy_check_range(rbln_dst_data, nbytes);
     std::memmove(rbln_dst_data, cpu_src_data, nbytes);
     return;
   }
@@ -570,6 +607,7 @@ void memcpy_v2h_async(void* cpu_dst_data, const void* rbln_src_data, size_t nbyt
   RBLN_CHECK(cpu_dst_data != nullptr, "cpu_dst_data cannot be nullptr");
 
   if (is_dummy_device()) {
+    dummy_check_range(rbln_src_data, nbytes);
     std::memmove(cpu_dst_data, rbln_src_data, nbytes);
     return;
   }
@@ -596,6 +634,8 @@ void memcpy_v2v_async(void* rbln_dst_data, const void* rbln_src_data, size_t nby
   RBLN_CHECK(rbln_dst_data != nullptr, "rbln_dst_data cannot be nullptr");
 
   if (is_dummy_device()) {
+    dummy_check_range(rbln_dst_data, nbytes);
+    dummy_check_range(rbln_src_data, nbytes);
     std::memmove(rbln_dst_data, rbln_src_data, nbytes);
     return;
   }
@@ -650,6 +690,8 @@ void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies) {
       RBLN_CHECK(c.nbytes > 0, "memcpy_v2v_multi: nbytes must be positive");
       RBLN_CHECK(c.src != nullptr, "memcpy_v2v_multi: src cannot be nullptr");
       RBLN_CHECK(c.dst != nullptr, "memcpy_v2v_multi: dst cannot be nullptr");
+      dummy_check_range(c.dst, c.nbytes);
+      dummy_check_range(c.src, c.nbytes);
       std::memmove(c.dst, c.src, c.nbytes);
     }
     return;
@@ -669,14 +711,15 @@ void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies) {
 }
 
 // In dummy mode the pointer already IS host memory, so a borrow is the identity
-// (borrow_id 0 is the "no live borrow" sentinel, so return_borrowed is a no-op).
+// (host_ptr == the pointer) with a synthetic non-zero id; return_borrowed no-ops.
 BorrowedHostPtr borrow_host_ptr(const void* rbln_data, size_t nbytes) {
   RBLN_LOG_DEBUG("rbln_data={}, nbytes={}", fmt::ptr(rbln_data), nbytes);
   RBLN_CHECK(rbln_data != nullptr, "rbln_data cannot be nullptr");
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
 
   if (is_dummy_device()) {
-    return BorrowedHostPtr{reinterpret_cast<uintptr_t>(rbln_data), 0};
+    dummy_check_range(rbln_data, nbytes);
+    return BorrowedHostPtr{reinterpret_cast<uintptr_t>(rbln_data), next_dummy_borrow_id()};
   }
 
   const auto vaddr = reinterpret_cast<uint64_t>(rbln_data);
@@ -697,7 +740,10 @@ std::optional<BorrowedHostPtr> try_borrow_host_ptr(const void* rbln_data, size_t
     return std::nullopt;
   }
   if (is_dummy_device()) {
-    return BorrowedHostPtr{reinterpret_cast<uintptr_t>(rbln_data), 0};
+    if (!dummy_range_ok(rbln_data, nbytes)) {
+      return std::nullopt;
+    }
+    return BorrowedHostPtr{reinterpret_cast<uintptr_t>(rbln_data), next_dummy_borrow_id()};
   }
   const auto vaddr = reinterpret_cast<uint64_t>(rbln_data);
   const auto size = static_cast<uint64_t>(nbytes);
@@ -718,7 +764,8 @@ BorrowedHostPtr acquire_host_ptr_for_overwrite(void* rbln_data, size_t nbytes) {
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
 
   if (is_dummy_device()) {
-    return BorrowedHostPtr{reinterpret_cast<uintptr_t>(rbln_data), 0};
+    dummy_check_range(rbln_data, nbytes);
+    return BorrowedHostPtr{reinterpret_cast<uintptr_t>(rbln_data), next_dummy_borrow_id()};
   }
 
   const auto vaddr = reinterpret_cast<uint64_t>(rbln_data);
@@ -739,7 +786,10 @@ std::optional<BorrowedHostPtr> try_acquire_host_ptr_for_overwrite(void* rbln_dat
     return std::nullopt;
   }
   if (is_dummy_device()) {
-    return BorrowedHostPtr{reinterpret_cast<uintptr_t>(rbln_data), 0};
+    if (!dummy_range_ok(rbln_data, nbytes)) {
+      return std::nullopt;
+    }
+    return BorrowedHostPtr{reinterpret_cast<uintptr_t>(rbln_data), next_dummy_borrow_id()};
   }
   const auto vaddr = reinterpret_cast<uint64_t>(rbln_data);
   const auto size = static_cast<uint64_t>(nbytes);
@@ -759,6 +809,10 @@ void return_borrowed(uint64_t borrow_id, bool updated) {
   // borrow_id == 0 is a "no live borrow" sentinel — see header. Cleanup
   // paths may call this unconditionally over entries that were skipped.
   if (borrow_id == 0) {
+    return;
+  }
+  if (is_dummy_device()) {
+    // Dummy borrows are identity host views; nothing to release.
     return;
   }
   RBLN_LOG_DEBUG("borrow_id={}, updated={}", borrow_id, updated);

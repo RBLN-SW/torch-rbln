@@ -140,6 +140,37 @@ def test_device_map_preserves_tp_shape():
     assert "OK" in proc.stdout
 
 
+def test_is_dummy_device_api():
+    proc = _run_with_dummy("import torch, torch_rbln; assert torch.rbln.is_dummy_device() is True; print('OK')")
+    _assert_ok(proc)
+    assert "OK" in proc.stdout
+
+
+def test_is_dummy_device_false_without_env():
+    import os
+
+    env = dict(os.environ)
+    env.pop("RBLN_DUMMY_DEVICE", None)
+    proc = subprocess.run(
+        [sys.executable, "-c", "import torch, torch_rbln; assert torch.rbln.is_dummy_device() is False; print('OK')"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    _assert_ok(proc)
+    assert "OK" in proc.stdout
+
+
+def test_device_map_rejects_duplicate_physical_id():
+    # Duplicate ids are rejectable without hardware; dummy must reject like real.
+    proc = _run_with_dummy(
+        "import torch, torch_rbln; torch.rbln.device_count()",
+        env_extra={"RBLN_DEVICE_MAP": "[0],[0]"},
+    )
+    assert proc.returncode != 0
+    assert "more than one logical device" in (proc.stdout + proc.stderr).lower()
+
+
 def test_device_map_rejects_invalid_group_size():
     # TP=3 is not an allowed group size; dummy must reject it like real hardware
     # so a config that compiles under dummy also runs on an NPU.
