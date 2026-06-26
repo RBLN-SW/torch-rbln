@@ -135,6 +135,17 @@ C10_RBLN_API bool is_eager_malloc();
 C10_RBLN_API void set_device_layout_like(void* target_data, const void* ref_data);
 
 /**
+ * @brief Whether host-backed dummy device mode is active (RBLN_DUMMY_DEVICE).
+ *
+ * When true, the allocation and transfer functions below run on host memory
+ * instead of the RBLN runtime, so device tensors can be built and compiled
+ * without an NPU (execution still needs hardware). Cached after the first call.
+ *
+ * @return true if dummy device mode is enabled, false otherwise.
+ */
+C10_RBLN_API bool is_dummy_device();
+
+/**
  * @brief Allocates memory on the specified RBLN device.
  *
  * This function allocates a contiguous block of memory on the given RBLN

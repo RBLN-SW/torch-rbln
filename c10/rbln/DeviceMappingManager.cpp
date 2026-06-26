@@ -319,9 +319,57 @@ void DeviceMappingManager::initializeFromNpusPerDevice(int npus_per_device, int 
   collectUnusedDevices(physical_device_used, physical_device_count);
 }
 
+int DeviceMappingManager::getDummyDeviceCount() {
+  const char* dummy_env = std::getenv("RBLN_DUMMY_DEVICE");
+  if (dummy_env == nullptr || dummy_env[0] == '\0') {
+    return 0;
+  }
+  const int requested = parseEnvInt(std::string(dummy_env), "RBLN_DUMMY_DEVICE");
+  if (requested <= 0) {
+    return 0; // 0 / negative disables dummy mode
+  }
+  // RBLN_DEVICE_MAP, when present, defines the logical device count even in
+  // dummy mode (mirrors the real-path priority over a plain count). Physical
+  // NPU ids inside the map are NOT validated here — there is no hardware.
+  const char* map_env = std::getenv("RBLN_DEVICE_MAP");
+  if (map_env != nullptr && map_env[0] != '\0') {
+    const auto groups = parseDeviceMap(std::string(map_env));
+    if (!groups.empty()) {
+      return static_cast<int>(groups.size());
+    }
+  }
+  return requested;
+}
+
+void DeviceMappingManager::initializeDummyDevices(int dummy_device_count) {
+  RBLN_LOG_INFO(
+      "RBLN_DUMMY_DEVICE active: presenting {} host-backed logical device(s), 0 physical NPU. "
+      "Tensor construction and compilation run on host memory; actual execution (kernels / compiled "
+      "graphs) still requires an NPU.",
+      dummy_device_count);
+  dummy_mode_ = true;
+  for (int i = 0; i < dummy_device_count; ++i) {
+    assigned_devices_.insert(static_cast<c10::DeviceIndex>(i));
+    DeviceMapping mapping;
+    mapping.logical_device = static_cast<c10::DeviceIndex>(i);
+    // No physical NPU backing in dummy mode; physical_device_ids stays empty.
+    device_mapping_table_.emplace_back(std::move(mapping));
+  }
+  device_count_ = static_cast<c10::DeviceIndex>(dummy_device_count);
+  buildDeviceTopology();
+}
+
 void DeviceMappingManager::initialize() {
   c10::call_once(init_flag_, [this]() {
     RBLN_LOG_DEBUG("Initializing RBLN device mapping");
+
+    // Explicit opt-in (RBLN_DUMMY_DEVICE), forced regardless of physical NPU
+    // presence. Checked before any runtime query so a host with no SDK/driver
+    // can still construct device tensors and compile.
+    if (const int dummy_device_count = getDummyDeviceCount(); dummy_device_count > 0) {
+      initializeDummyDevices(dummy_device_count);
+      return;
+    }
 
     int device_count = 0;
     // A failed query (SDK/driver not loadable) stays fatal; "query succeeded,

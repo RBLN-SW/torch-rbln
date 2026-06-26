@@ -150,6 +150,17 @@ class C10_RBLN_API DeviceMappingManager {
   }
 
   /**
+   * @brief Whether host-backed dummy device mode is active (RBLN_DUMMY_DEVICE).
+   *
+   * Logical devices have no physical NPU; allocation/transfers run on host
+   * memory so tensors can be built and compiled without hardware. Execution
+   * still needs a real NPU.
+   */
+  bool isDummyMode() const {
+    return dummy_mode_;
+  }
+
+  /**
    * @brief Check if a logical device index is assigned.
    * @param device_index The logical device index (rbln:N).
    * @return True if the device is assigned, false otherwise.
@@ -230,6 +241,21 @@ class C10_RBLN_API DeviceMappingManager {
   void initializeFromNpusPerDevice(int npus_per_device, int physical_device_count);
 
   /**
+   * @brief Resolve the requested host-backed dummy logical device count.
+   *
+   * Reads RBLN_DUMMY_DEVICE: its integer value (>= 1) enables dummy mode and
+   * sets the count. When RBLN_DEVICE_MAP is also set its group count takes
+   * priority (mirroring the real-path priority); physical NPU ids are not
+   * validated. Returns 0 when dummy mode is disabled (unset / <= 0).
+   */
+  int getDummyDeviceCount();
+
+  /**
+   * @brief Register N host-backed logical devices with no physical NPU backing.
+   */
+  void initializeDummyDevices(int dummy_device_count);
+
+  /**
    * @brief Check if the number of physical NPUs per logical device is valid (must be in BASE_SIZES).
    */
   bool isValidDeviceGroupSize(size_t size) const;
@@ -247,6 +273,7 @@ class C10_RBLN_API DeviceMappingManager {
   // Member Variables
 
   c10::DeviceIndex device_count_ = 0;
+  bool dummy_mode_ = false;
   std::unordered_set<c10::DeviceIndex> assigned_devices_;
   std::vector<DeviceMapping> device_mapping_table_;
   std::vector<int> unused_physical_devices_;

@@ -4,6 +4,7 @@ set(sources
   core/RBLNCopyOpTest.cpp
   core/RBLNDeviceGuardTest.cpp
   core/RBLNNoDeviceTest.cpp
+  core/RBLNDummyDeviceTest.cpp
   core/RBLNEventTest.cpp
   core/RBLNFunctionsTest.cpp
   core/RBLNLoggingTest.cpp
