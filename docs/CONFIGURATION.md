@@ -178,9 +178,10 @@ can be constructed and a model traced/compiled (e.g. on a CI or compiler box)
 even though no hardware is present.
 
 `RBLN_DUMMY_DEVICE` is a **boolean** flag (shared with the rebel runtime, which
-validates it at startup): `1/true/t/yes/y/on` enable it, `0/false/...` and unset
-disable it. The number of host-backed logical devices comes from
-`RBLN_DEVICE_MAP` (its group count), defaulting to 1.
+validates it at startup): `1/true/t/yes/y/on` enable it, `0/false/f/no/n/off`
+and unset disable it, and any other value (e.g. `4`) aborts at startup. The
+number of host-backed logical devices comes from `RBLN_DEVICE_MAP` (its group
+count), defaulting to 1.
 
 ```bash
 # 1 host-backed logical device

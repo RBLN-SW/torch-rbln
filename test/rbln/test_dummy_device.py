@@ -9,6 +9,7 @@ singleton reads it once at init), so each case runs in a fresh subprocess with
 the env set.
 """
 
+import os
 import subprocess
 import sys
 import textwrap
@@ -16,10 +17,20 @@ import textwrap
 import pytest
 
 
-def _run_with_dummy(snippet: str, env_extra: dict | None = None) -> subprocess.CompletedProcess:
-    import os
+def _clean_env() -> dict:
+    """A hermetic env copy for subprocess tests.
 
+    Another test module (test_find_and_load_tvm_library) sets
+    ``TORCH_RBLN_DIAGNOSE=1`` at import and never restores it; strip it so these
+    tests behave identically regardless of collection order.
+    """
     env = dict(os.environ)
+    env.pop("TORCH_RBLN_DIAGNOSE", None)
+    return env
+
+
+def _run_with_dummy(snippet: str, env_extra: dict | None = None) -> subprocess.CompletedProcess:
+    env = _clean_env()
     env["RBLN_DUMMY_DEVICE"] = "1"
     if env_extra:
         env.update(env_extra)
@@ -155,10 +166,8 @@ def test_boolean_spellings():
         _assert_ok(proc)
         assert "OK" in proc.stdout
 
-    import os
-
     for falsy in ("0", "false", "f", "off", "no", "n"):
-        env = dict(os.environ)
+        env = _clean_env()
         env["RBLN_DUMMY_DEVICE"] = falsy
         proc = subprocess.run(
             [
@@ -179,9 +188,7 @@ def test_invalid_value_fails_fast(invalid):
     # RBLN_DUMMY_DEVICE is boolean, NOT an integer device count. A non-boolean
     # value is rejected loudly by the rebel runtime at startup (process aborts on
     # import) rather than silently disabling dummy mode — pin that contract.
-    import os
-
-    env = dict(os.environ)
+    env = _clean_env()
     env["RBLN_DUMMY_DEVICE"] = invalid
     proc = subprocess.run(
         [sys.executable, "-c", "import torch, torch_rbln"],
@@ -200,9 +207,7 @@ def test_is_dummy_device_api():
 
 
 def test_is_dummy_device_false_without_env():
-    import os
-
-    env = dict(os.environ)
+    env = _clean_env()
     env.pop("RBLN_DUMMY_DEVICE", None)
     proc = subprocess.run(
         [sys.executable, "-c", "import torch, torch_rbln; assert torch.rbln.is_dummy_device() is False; print('OK')"],
