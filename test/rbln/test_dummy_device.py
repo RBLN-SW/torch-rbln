@@ -20,12 +20,17 @@ import pytest
 def _clean_env() -> dict:
     """A hermetic env copy for subprocess tests.
 
-    Another test module (test_find_and_load_tvm_library) sets
-    ``TORCH_RBLN_DIAGNOSE=1`` at import and never restores it; strip it so these
-    tests behave identically regardless of collection order.
+    Strips external state these tests must not inherit:
+      - TORCH_RBLN_DIAGNOSE: another test module (test_find_and_load_tvm_library)
+        sets it at import (it disables backend init) and never restores it, so it
+        leaks into the pytest process and then into ``os.environ`` here.
+      - RBLN_DEVICE_MAP / RBLN_NPUS_PER_DEVICE: a parent shell/CI mapping would
+        change the dummy logical device count; tests assume the default of 1 and
+        set their own map via ``env_extra`` when they need one.
     """
     env = dict(os.environ)
-    env.pop("TORCH_RBLN_DIAGNOSE", None)
+    for key in ("TORCH_RBLN_DIAGNOSE", "RBLN_DEVICE_MAP", "RBLN_NPUS_PER_DEVICE"):
+        env.pop(key, None)
     return env
 
 
