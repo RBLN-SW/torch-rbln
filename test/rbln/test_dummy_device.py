@@ -143,8 +143,9 @@ def test_device_map_preserves_tp_shape():
 
 def test_boolean_spellings():
     # RBLN_DUMMY_DEVICE is a boolean flag (shared with the rebel runtime); the
-    # logical count comes from RBLN_DEVICE_MAP (default 1), not this value.
-    for truthy in ("1", "true", "on", "yes"):
+    # logical count comes from RBLN_DEVICE_MAP (default 1), not this value. Cover
+    # the full truthy/falsy spellings the parser recognizes.
+    for truthy in ("1", "true", "t", "on", "yes", "y"):
         proc = _run_with_dummy(
             "import torch, torch_rbln; "
             "assert torch.rbln.is_dummy_device() is True; "
@@ -156,7 +157,7 @@ def test_boolean_spellings():
 
     import os
 
-    for falsy in ("0", "false", "off"):
+    for falsy in ("0", "false", "f", "off", "no", "n"):
         env = dict(os.environ)
         env["RBLN_DUMMY_DEVICE"] = falsy
         proc = subprocess.run(
@@ -171,6 +172,25 @@ def test_boolean_spellings():
         )
         _assert_ok(proc)
         assert "OK" in proc.stdout
+
+
+@pytest.mark.parametrize("invalid", ["4", "2", "maybe"])
+def test_invalid_value_fails_fast(invalid):
+    # RBLN_DUMMY_DEVICE is boolean, NOT an integer device count. A non-boolean
+    # value is rejected loudly by the rebel runtime at startup (process aborts on
+    # import) rather than silently disabling dummy mode — pin that contract.
+    import os
+
+    env = dict(os.environ)
+    env["RBLN_DUMMY_DEVICE"] = invalid
+    proc = subprocess.run(
+        [sys.executable, "-c", "import torch, torch_rbln"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode != 0
+    assert "boolean" in (proc.stdout + proc.stderr).lower()
 
 
 def test_is_dummy_device_api():
