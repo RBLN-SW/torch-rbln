@@ -182,6 +182,26 @@ def test_device_map_rejects_invalid_group_size():
     assert "valid sizes" in (proc.stdout + proc.stderr).lower()
 
 
+def test_torch_compile_tracing_smoke():
+    # Dummy mode's purpose is the no-NPU compile path. A custom backend that does
+    # not lower to the device confirms dynamo can fakify and trace over dummy rbln
+    # tensors (full rebel compilation is execution-triggered and validated via the
+    # vLLM VLLM_RBLN_COMPILE_ONLY flow, which writes artifacts without executing).
+    proc = _run_with_dummy(
+        """
+        import torch, torch_rbln
+        def backend(gm, example_inputs):
+            return gm.forward  # eager replay; ops fall back to CPU in dummy mode
+        f = torch.compile(lambda x: x * 2 + 1, backend=backend, fullgraph=True)
+        x = torch.ones(4, device="rbln:0")
+        assert f(x).cpu().tolist() == [3.0, 3.0, 3.0, 3.0]
+        print("OK")
+        """
+    )
+    _assert_ok(proc)
+    assert "OK" in proc.stdout
+
+
 # NOTE: overlap/self-copy safety of the dummy v2v path (memmove, not memcpy) is
 # covered in test/cpp/core/RBLNDummyDeviceTest.cpp::V2VHandlesOverlap — PyTorch's
 # copy_ guards against aliasing storage before dispatch, so the overlap cannot be

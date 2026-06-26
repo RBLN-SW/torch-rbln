@@ -364,7 +364,6 @@ void DeviceMappingManager::initializeDummyDevices(const std::vector<std::vector<
       "Tensor construction and compilation run on host memory; actual execution (kernels / compiled "
       "graphs) still requires an NPU.",
       groups.size());
-  dummy_mode_ = true;
   std::unordered_set<int> used_physical_ids;
   for (size_t i = 0; i < groups.size(); ++i) {
     // Validate group size (TP shape) and reject duplicate physical ids — both
