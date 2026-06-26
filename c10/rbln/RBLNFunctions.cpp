@@ -5,10 +5,11 @@
 #include <c10/util/CallOnce.h>
 #include <rebel/runtime/memory_stats.h>
 
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <mutex>
-#include <unordered_map>
 #include <vector>
 
 namespace c10::rbln {
@@ -18,27 +19,46 @@ namespace {
 // Default current logical device is 0
 thread_local c10::DeviceIndex current_device_index_ = 0;
 
-// Dummy mode only: maps each host-backed allocation to the logical device it was
-// allocated on, so get_torch_device_id() reports the pointer's owning device
-// rather than the current one. Guarded by is_dummy_device(); never touched on
-// the real-device path.
+// Dummy mode only: tracks each host-backed allocation [base, base+nbytes) and
+// its logical device, so get_torch_device_id() can resolve an interior/view
+// pointer to its owning device (matching the real vaddr lookup) and free() can
+// reject stale/double frees. Guarded by is_dummy_device(); never touched on the
+// real-device path. Ordered map enables the range lookup.
+struct DummyAlloc {
+  size_t nbytes;
+  c10::DeviceIndex device;
+};
 std::mutex dummy_alloc_mutex_;
-std::unordered_map<const void*, c10::DeviceIndex> dummy_alloc_devices_;
+std::map<uintptr_t, DummyAlloc> dummy_allocs_;
 
-void dummy_register_alloc(const void* data, c10::DeviceIndex device_index) {
+void dummy_register_alloc(const void* data, size_t nbytes, c10::DeviceIndex device_index) {
   const std::lock_guard<std::mutex> lock(dummy_alloc_mutex_);
-  dummy_alloc_devices_[data] = device_index;
+  dummy_allocs_[reinterpret_cast<uintptr_t>(data)] = DummyAlloc{nbytes, device_index};
 }
 
-void dummy_unregister_alloc(const void* data) {
+// Erase by base pointer; returns false if it was not a live allocation
+// (unknown / already freed).
+bool dummy_take_alloc(const void* data) {
   const std::lock_guard<std::mutex> lock(dummy_alloc_mutex_);
-  dummy_alloc_devices_.erase(data);
+  return dummy_allocs_.erase(reinterpret_cast<uintptr_t>(data)) > 0;
 }
 
+// Resolve any address within a live allocation to its owning logical device;
+// throws on a stale / non-device pointer (parity with the real vaddr lookup).
 c10::DeviceIndex dummy_lookup_device(const void* data) {
+  const auto addr = reinterpret_cast<uintptr_t>(data);
   const std::lock_guard<std::mutex> lock(dummy_alloc_mutex_);
-  const auto it = dummy_alloc_devices_.find(data);
-  return it != dummy_alloc_devices_.end() ? it->second : get_device_index();
+  auto it = dummy_allocs_.upper_bound(addr); // first base > addr
+  if (it != dummy_allocs_.begin()) {
+    --it; // greatest base <= addr
+    if (addr < it->first + it->second.nbytes) {
+      return it->second.device;
+    }
+  }
+  RBLN_CHECK(
+      false,
+      "get_torch_device_id: {:#x} is not within any RBLN_DUMMY_DEVICE allocation (stale pointer or not device memory)",
+      addr);
 }
 
 void check_device_index(c10::DeviceIndex device_index) {
@@ -240,8 +260,7 @@ c10::DeviceIndex get_torch_device_id(const void* data) {
   RBLN_CHECK(data != nullptr, "data cannot be nullptr");
 
   if (is_dummy_device()) {
-    // Resolve the device recorded at allocation (falls back to current device
-    // for pointers we did not allocate).
+    // Range lookup so interior/view pointers resolve to the owning device.
     return dummy_lookup_device(data);
   }
 
@@ -258,6 +277,9 @@ c10::DeviceIndex get_torch_device_id(const void* data) {
 ::rbln::MemoryInfo get_memory_info(const void* data) {
   RBLN_LOG_DEBUG("data={}", fmt::ptr(data));
   RBLN_CHECK(data != nullptr, "data cannot be nullptr");
+  // Backed by runtime v-memory only; the dummy host backing has no such entry.
+  RBLN_CHECK(
+      !is_dummy_device(), "get_memory_info is not available in RBLN_DUMMY_DEVICE mode (no runtime-backed v-memory)");
   // get_memory_info() does a full VMemory JSON serialize+parse round-trip on
   // every call. Warn so unexpected hot-path callers are easy to spot in logs;
   // when only the device id is needed, get_torch_device_id() is the cheap path.
@@ -304,7 +326,7 @@ void* malloc(c10::DeviceIndex device_index, size_t nbytes) {
     // the owning device so get_torch_device_id() can resolve it later.
     void* data = std::malloc(nbytes); // NOLINT(cppcoreguidelines-no-malloc)
     RBLN_CHECK(data != nullptr, "dummy host allocation failed ({} bytes)", nbytes);
-    dummy_register_alloc(data, device_index);
+    dummy_register_alloc(data, nbytes, device_index);
     return data;
   }
 
@@ -364,7 +386,12 @@ void free(void* data) {
   RBLN_CHECK(data != nullptr, "data cannot be nullptr");
 
   if (is_dummy_device()) {
-    dummy_unregister_alloc(data);
+    // Reject stale/double frees before std::free (which would abort) — parity
+    // with rbln_free's bad-address error.
+    RBLN_CHECK(
+        dummy_take_alloc(data),
+        "dummy free: {} is not a live allocation (stale pointer or double free)",
+        fmt::ptr(data));
     std::free(data); // NOLINT(cppcoreguidelines-no-malloc)
     return;
   }
@@ -384,8 +411,11 @@ void free_nothrow(void* data) noexcept {
     return;
   }
   if (is_dummy_device()) {
-    dummy_unregister_alloc(data);
-    std::free(data); // NOLINT(cppcoreguidelines-no-malloc)
+    if (dummy_take_alloc(data)) {
+      std::free(data); // NOLINT(cppcoreguidelines-no-malloc)
+    } else {
+      RBLN_WARN_NOTHROW("dummy free: {} is not a live allocation; leaking rather than aborting", fmt::ptr(data));
+    }
     return;
   }
   const auto vaddr = reinterpret_cast<uint64_t>(data);

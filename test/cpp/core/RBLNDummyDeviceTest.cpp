@@ -12,9 +12,12 @@
 //
 // Contract with RBLN_DUMMY_DEVICE=1:
 //   - device_count() reports N >= 1 logical device(s) (vs. the no-device path,
-//     which reports 0); physical_device_count() is unaffected (still honest);
+//     which reports 0); physical_device_count() reports 0 without querying the
+//     runtime (no NPU);
 //   - allocation, h2v/v2h/v2v transfers, and host-pointer borrows succeed on
 //     host memory rather than failing at the point of use;
+//   - get_torch_device_id() resolves a pointer (incl. interior/view) to its
+//     owning device; free() rejects stale/double frees;
 //   - synchronize is a no-op (host transfers are synchronous).
 #include <c10/rbln/DeviceMappingManager.h>
 #include <c10/rbln/RBLNFunctions.h>
@@ -55,7 +58,7 @@ TEST(RBLNDummyDeviceTest, AllocateAndTransferOnHost) {
   ASSERT_NO_THROW(c10::rbln::memcpy_v2h(dst, dev, kBytes));
   EXPECT_EQ(0, std::memcmp(src, dst, kBytes));
 
-  // Same-"device" v2v is a plain host memcpy.
+  // Same-"device" v2v is a plain host memmove.
   void* dev2 = c10::rbln::malloc(/*device_index=*/0, kBytes);
   ASSERT_NE(dev2, nullptr);
   ASSERT_NO_THROW(c10::rbln::memcpy_v2v(dev2, dev, kBytes));
@@ -68,16 +71,36 @@ TEST(RBLNDummyDeviceTest, AllocateAndTransferOnHost) {
 }
 
 TEST(RBLNDummyDeviceTest, GetTorchDeviceIdReportsOwningDevice) {
-  // The pointer's owning device must be the one it was allocated on, not the
-  // current device.
-  void* d0 = c10::rbln::malloc(/*device_index=*/0, 16);
-  void* d1 = c10::rbln::malloc(/*device_index=*/1, 16);
+  // The owning device is the one a pointer was allocated on, not the current
+  // device — and an interior/view pointer resolves to the same allocation.
+  auto* d0 = static_cast<char*>(c10::rbln::malloc(/*device_index=*/0, 64));
+  auto* d1 = static_cast<char*>(c10::rbln::malloc(/*device_index=*/1, 64));
   ASSERT_NE(d0, nullptr);
   ASSERT_NE(d1, nullptr);
   EXPECT_EQ(c10::rbln::get_torch_device_id(d0), 0);
   EXPECT_EQ(c10::rbln::get_torch_device_id(d1), 1);
+  EXPECT_EQ(c10::rbln::get_torch_device_id(d1 + 16), 1); // interior/view pointer
+  EXPECT_EQ(c10::rbln::get_torch_device_id(d1 + 63), 1); // last byte
   c10::rbln::free(d0);
   c10::rbln::free(d1);
+  // After free the pointer is unknown -> throws (parity with the real lookup).
+  EXPECT_THROW(c10::rbln::get_torch_device_id(d0), c10::Error);
+}
+
+TEST(RBLNDummyDeviceTest, FreeRejectsStaleAndDoubleFree) {
+  void* p = c10::rbln::malloc(/*device_index=*/0, 32);
+  ASSERT_NE(p, nullptr);
+  ASSERT_NO_THROW(c10::rbln::free(p)); // first free succeeds
+  EXPECT_THROW(c10::rbln::free(p), c10::Error); // double free rejected (no abort)
+  int stack_var = 0;
+  EXPECT_THROW(c10::rbln::free(&stack_var), c10::Error); // unknown pointer rejected
+}
+
+TEST(RBLNDummyDeviceTest, GetMemoryInfoUnavailable) {
+  void* p = c10::rbln::malloc(/*device_index=*/0, 16);
+  ASSERT_NE(p, nullptr);
+  EXPECT_THROW(c10::rbln::get_memory_info(p), c10::Error);
+  c10::rbln::free(p);
 }
 
 TEST(RBLNDummyDeviceTest, V2VHandlesOverlap) {

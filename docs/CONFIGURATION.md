@@ -192,11 +192,15 @@ export RBLN_DUMMY_DEVICE=1 RBLN_DEVICE_MAP="[0,1],[2,3]"
   so a host with no SDK/driver still works.
 - `device_count()` reports the dummy logical device count; `physical_device_count()`
   stays `0`. The logical count is the `RBLN_DEVICE_MAP` group count when set,
-  otherwise the integer value of `RBLN_DUMMY_DEVICE`.
-- **Compile-only**: tensor construction, transfers, and `torch.compile` tracing
-  work; actual kernel / compiled-graph **execution** still requires an NPU and
-  will fail. `torch.rbln.is_available()` returns `True` in this mode — treat it
-  as a development flag, not real hardware availability.
+  otherwise the integer value of `RBLN_DUMMY_DEVICE`. `RBLN_DEVICE_MAP` group
+  sizes are validated against the real allowed sizes (1, 2, 4, 8, 16, 32), so a
+  TP shape that compiles under dummy also runs on hardware.
+- **Scope**: device tensor construction, host/device copies, and `torch.compile`
+  tracing/compilation. Out of scope (still require an NPU and will fail): actual
+  kernel / compiled-graph **execution**, distributed collectives, and
+  runtime-only introspection such as `get_memory_info`.
+- `torch.rbln.is_available()` returns `True` in this mode — treat it as a
+  development flag, not real hardware availability.
 
 ## Tensor Parallel Configuration
 

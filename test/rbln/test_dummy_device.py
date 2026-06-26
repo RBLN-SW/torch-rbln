@@ -140,6 +140,17 @@ def test_device_map_preserves_tp_shape():
     assert "OK" in proc.stdout
 
 
+def test_device_map_rejects_invalid_group_size():
+    # TP=3 is not an allowed group size; dummy must reject it like real hardware
+    # so a config that compiles under dummy also runs on an NPU.
+    proc = _run_with_dummy(
+        "import torch, torch_rbln; torch.rbln.device_count()",
+        env_extra={"RBLN_DEVICE_MAP": "[0,1,2]"},
+    )
+    assert proc.returncode != 0
+    assert "valid sizes" in (proc.stdout + proc.stderr).lower()
+
+
 # NOTE: overlap/self-copy safety of the dummy v2v path (memmove, not memcpy) is
 # covered in test/cpp/core/RBLNDummyDeviceTest.cpp::V2VHandlesOverlap — PyTorch's
 # copy_ guards against aliasing storage before dispatch, so the overlap cannot be

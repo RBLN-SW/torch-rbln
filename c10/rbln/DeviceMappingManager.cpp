@@ -365,6 +365,15 @@ void DeviceMappingManager::initializeDummyDevices(const std::vector<std::vector<
       groups.size());
   dummy_mode_ = true;
   for (size_t i = 0; i < groups.size(); ++i) {
+    // Validate group size (TP shape) against the real path's allowed sizes so a
+    // config that compiles under dummy also runs on hardware; only the physical
+    // id *range* check is skipped (there is no NPU).
+    RBLN_CHECK(
+        isValidDeviceGroupSize(groups[i].size()),
+        "RBLN_DEVICE_MAP group for rbln:{} has {} physical NPU(s); valid sizes are {}.",
+        i,
+        groups[i].size(),
+        getValidSizesString());
     const auto logical_index = static_cast<c10::DeviceIndex>(i);
     assigned_devices_.insert(logical_index);
     DeviceMapping mapping;
