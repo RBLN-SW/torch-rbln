@@ -121,7 +121,13 @@ void submit_or_fallback(c10::rbln::V2VBatch& batch, const char* op_name, std::fu
   } catch (const c10::Error& e) {
     const std::string_view error_message = e.what();
     // TODO: Replace substring match with a typed exception when the wrapper API allows.
-    if (error_message.find("rbln_memcpy_v2v_multi failed") == std::string_view::npos) {
+    // Route both v2v backend rejections to the CPU fallback: the batched path
+    // throws "rbln_memcpy_v2v_multi failed", and when it drains per-entry the
+    // same-device path throws "rbln_memcpy_v2v failed". (The runtime rejects v2v
+    // into interior offsets of large untyped pool allocations — e.g. vLLM's KV
+    // cache; the host-bounce CPU fallback writes those correctly.)
+    if (error_message.find("rbln_memcpy_v2v_multi failed") == std::string_view::npos &&
+        error_message.find("rbln_memcpy_v2v failed") == std::string_view::npos) {
       throw; // validation error — propagate
     }
     if (c10::rbln::is_fallback_disabled("strided_copy_error")) {

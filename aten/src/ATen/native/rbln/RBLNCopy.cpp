@@ -14,6 +14,8 @@
 #include <rebel/runtime/api/rbln_runtime_api.h>
 
 #include <cstddef>
+#include <utility>
+#include <vector>
 
 namespace at::native::rbln {
 
@@ -357,6 +359,136 @@ at::Tensor clone_rbln(const at::Tensor& self, std::optional<c10::MemoryFormat> m
     out.copy_(self);
   }
   return out;
+}
+
+namespace {
+
+// Byte extent [lo, hi) that `t` actually addresses, from sizes/strides — so
+// disjoint slices of one storage (e.g. kv_cache[0] vs kv_cache[1]) report
+// non-overlapping ranges. Negative strides extend `lo`; +1 makes it half-open.
+struct ByteRange {
+  const char* lo;
+  const char* hi;
+};
+
+ByteRange tensor_byte_range(const at::Tensor& t) {
+  const char* base = static_cast<const char*>(t.data_ptr());
+  const int64_t elsize = t.element_size();
+  int64_t lo_elems = 0;
+  int64_t hi_elems = 0;
+  const auto sizes = t.sizes();
+  const auto strides = t.strides();
+  for (size_t d = 0; d < sizes.size(); ++d) {
+    if (sizes[d] <= 1) {
+      continue;
+    }
+    const int64_t step = (sizes[d] - 1) * strides[d];
+    if (step >= 0) {
+      hi_elems += step;
+    } else {
+      lo_elems += step;
+    }
+  }
+  return {base + lo_elems * elsize, base + (hi_elems + 1) * elsize};
+}
+
+bool ranges_overlap(const ByteRange& a, const ByteRange& b) {
+  return a.lo < b.hi && b.lo < a.hi;
+}
+
+// The batched path submits eligible copies together (unordered) and after the
+// inline fallback copies, so it matches list-order copy_ only when copies don't
+// alias across pairs. Returns true on any cross-pair overlap — a destination
+// hitting another pair's source (RAW/WAR) or destination (WAW). Within-pair
+// (self[i]/src[i]) is left to copy_. Only same-device live tensors can alias.
+bool foreach_copy_reorder_unsafe(at::TensorList self, at::TensorList src) {
+  const size_t n = self.size();
+  std::vector<ByteRange> dst_range(n);
+  std::vector<ByteRange> src_range(n);
+  std::vector<bool> dst_live(n, false);
+  std::vector<bool> src_live(n, false);
+  std::vector<c10::DeviceIndex> dst_dev(n, -1);
+  std::vector<c10::DeviceIndex> src_dev(n, -1);
+  for (size_t i = 0; i < n; ++i) {
+    if (self[i].device().is_privateuseone() && self[i].numel() > 0) {
+      dst_range[i] = tensor_byte_range(self[i]);
+      dst_live[i] = true;
+      dst_dev[i] = self[i].device().index();
+    }
+    if (src[i].device().is_privateuseone() && src[i].numel() > 0) {
+      src_range[i] = tensor_byte_range(src[i]);
+      src_live[i] = true;
+      src_dev[i] = src[i].device().index();
+    }
+  }
+  for (size_t i = 0; i < n; ++i) {
+    if (!dst_live[i]) {
+      continue;
+    }
+    for (size_t j = 0; j < n; ++j) {
+      if (j == i) {
+        continue;
+      }
+      // WAW: this destination overlaps another pair's destination.
+      if (dst_live[j] && dst_dev[i] == dst_dev[j] && ranges_overlap(dst_range[i], dst_range[j])) {
+        return true;
+      }
+      // RAW / WAR: this destination overlaps another pair's source.
+      if (src_live[j] && dst_dev[i] == src_dev[j] && ranges_overlap(dst_range[i], src_range[j])) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+} // namespace
+
+void _foreach_copy__rbln(at::TensorList self, at::TensorList src, bool non_blocking) {
+  RBLN_SCOPE_GUARD();
+
+  RBLN_CHECK(
+      self.size() == src.size(),
+      "_foreach_copy_: self and src lists must have equal length ({} vs {})",
+      self.size(),
+      src.size());
+
+  // Cross-pair aliasing would make the batch's reordering observable; fall back
+  // to an ordered copy_ loop. The common disjoint scatter keeps the fast path.
+  if (foreach_copy_reorder_unsafe(self, src)) {
+    for (size_t i = 0; i < self.size(); ++i) {
+      self[i].copy_(src[i], non_blocking);
+    }
+    return;
+  }
+
+  // Batch every conversion-free, same-device, same-shape pair into one
+  // V2VBatch so all N copies flush through a single rbln_memcpy_v2v_multi
+  // submit — the write-side mirror of cat's gather. Lets a scatter into N
+  // separate per-layer tensors collapse from N submits to 1. Pairs needing
+  // broadcast / dtype cast / cross-device fall back to a plain per-pair copy_.
+  c10::rbln::V2VBatch batch;
+  std::vector<std::pair<at::Tensor, at::Tensor>> batched;
+  batched.reserve(self.size());
+  for (size_t i = 0; i < self.size(); ++i) {
+    const at::Tensor& dst = self[i];
+    const at::Tensor& s = src[i];
+    const bool v2v_eligible = dst.device().is_privateuseone() && s.device().is_privateuseone() &&
+        dst.device() == s.device() && dst.scalar_type() == s.scalar_type() && dst.sizes() == s.sizes() &&
+        dst.numel() > 0;
+    if (v2v_eligible) {
+      strided_v2v_copy(dst, s, batch);
+      batched.emplace_back(dst, s);
+    } else {
+      dst.copy_(s, non_blocking);
+    }
+  }
+
+  submit_or_fallback(batch, "_foreach_copy_", [&] {
+    for (const auto& pair : batched) {
+      pair.first.copy_(pair.second.cpu());
+    }
+  });
 }
 
 } // namespace at::native::rbln

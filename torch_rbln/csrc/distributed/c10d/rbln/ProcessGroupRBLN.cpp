@@ -67,8 +67,20 @@ constexpr size_t RCCL_ALLREDUCE_MAX_BYTES_PER_RANK = 1ULL * 1024ULL * 1024ULL;
 constexpr size_t RCCL_REDUCE_SCATTER_MAX_BYTES_PER_WORLD = 32ULL * 1024ULL * 1024ULL;
 constexpr size_t RCCL_MAX_BYTES_PER_REDUCE_SCATTER_OP = 2ULL * 1024ULL * 1024ULL;
 constexpr size_t RCCL_MAX_COMMAND_BUFFER_SUB_COMMANDS_COUNT = 15ULL;
-// AllGather size limit: output size <= 1GB (can be performed in a single allgather operation)
-constexpr size_t RCCL_ALLGATHER_MAX_OUTPUT_BYTES = 1ULL * 1024ULL * 1024ULL * 1024ULL;
+// AllGather per-call output-size limit (drives the chunked multi-call path).
+//
+// The REBEL/UMD AllGather builds its *entire* command stream into a single
+// fixed-size CS chunk (RCCL_CS_CHUNK_SIZE = 32 KiB) and ships exactly that many
+// bytes to the device. A transfer large enough that its per-page DMA
+// descriptors overflow 32 KiB has the tail descriptors silently dropped, so the
+// recv-buffer tail is left stale (or the op errors with -ENOMEM). Empirically
+// (world_size = 2) a 256 MiB output already overflows on REBEL while 128 MiB is
+// safe — see fsw-inference#324. CS size scales with the per-call *output* bytes,
+// so capping each AllGather call's output keeps the generated CS within budget;
+// anything larger is split into <= this many bytes per call by the chunked path
+// below. 64 MiB leaves ~2x margin under the observed overflow point and absorbs
+// the per-step sync/header overhead for larger world sizes.
+constexpr size_t RCCL_ALLGATHER_MAX_OUTPUT_BYTES = 64ULL * 1024ULL * 1024ULL;
 
 /**
  * @brief Get element size for RCCL operations based on dtype
@@ -527,6 +539,19 @@ class InitRBLNWork : public RBLNWork {
     RECORD_FUNCTION("rbln::init", std::vector<c10::IValue>());
 
     if (size_ == 1) {
+      return;
+    }
+
+    // No NPU: nothing to initialize and no peer to rendezvous with. Skip RCCL
+    // init so a world_size > 1 group (and the DeviceMesh on it) can be built for
+    // graph capture. Collectives are captured symbolically and only run at
+    // runtime on real NPUs; an eager collective here fails on uninitialized rccl_.
+    if (c10::rbln::get_device_count() == 0) {
+      RBLN_LOG_INFO(
+          "No NPU detected; skipping RCCL init (rank={} size={}). "
+          "Collectives execute only at runtime on real NPUs.",
+          rank_,
+          size_);
       return;
     }
 
@@ -1455,6 +1480,7 @@ class ScatterRBLNWork : public RBLNWork {
       uint32_t tag,
       uint64_t seq,
       std::shared_ptr<::rbln::Rccl> rccl,
+      int rank,
       int device_id,
       int world_size)
       : RBLNWork(
@@ -1468,8 +1494,11 @@ class ScatterRBLNWork : public RBLNWork {
         root_(root),
         tag_(tag),
         rccl_(std::move(rccl)),
+        // rank_ is the process-group rank (drives the rank_ == root_ branch); it
+        // must NOT be device_id — different namespaces (every rank may see local
+        // device rbln:0, so device_id is 0 everywhere).
+        rank_(rank),
         device_id_(device_id),
-        rank_(device_id),
         world_size_(world_size) {}
 
   ~ScatterRBLNWork() override = default;
@@ -1724,7 +1753,9 @@ ProcessGroupRBLN::ProcessGroupRBLN(
     if (global_ranks_in_group_.empty()) {
       RBLN_CHECK(!default_group_initialized, "Default group must be initialized here");
       // Default group: initialize the map and assign device_id_
-      device_id_ = static_cast<int>(static_cast<unsigned char>(c10::rbln::get_device_index()));
+      // Direct cast (see to_device_id): an unsigned-char round-trip would alias a
+      // stray negative index to a real id.
+      device_id_ = static_cast<int>(c10::rbln::get_device_index()); // NOLINT(bugprone-signed-char-misuse)
       global_rank_to_device_id_in_default_group[global_rank_] = device_id_;
       default_group_initialized = true;
     } else {
@@ -2142,7 +2173,8 @@ c10::intrusive_ptr<Work> ProcessGroupRBLN::scatter(
 
   auto tag = nextTag();
   auto seq = nextSeq();
-  auto work = c10::make_intrusive<ScatterRBLNWork>(outputs, inputs, opts.rootRank, tag, seq, rccl_, device_id_, size_);
+  auto work =
+      c10::make_intrusive<ScatterRBLNWork>(outputs, inputs, opts.rootRank, tag, seq, rccl_, rank_, device_id_, size_);
 
   enqueueOrExecute(work);
   return work;
@@ -2158,6 +2190,12 @@ c10::intrusive_ptr<Work> ProcessGroupRBLN::send(std::vector<at::Tensor>& tensors
   assertNonEmpty(invalidArgument, tensors);
   assertLayoutMatch(invalidArgument, tensors);
   assertTypeAndSizesMatch(invalidArgument, tensors);
+  if (dstRank < 0 || dstRank >= size_) {
+    invalidArgument(c10::str("invalid dstRank ", dstRank, " (world size ", size_, ")"));
+  }
+  if (dstRank == rank_) {
+    invalidArgument(c10::str("cannot send to self (rank ", rank_, ")"));
+  }
 
   const auto& device = tensors[0].device();
   if (device.is_cpu()) {
@@ -2182,6 +2220,12 @@ c10::intrusive_ptr<Work> ProcessGroupRBLN::recv(std::vector<at::Tensor>& tensors
   assertNonEmpty(invalidArgument, tensors);
   assertLayoutMatch(invalidArgument, tensors);
   assertTypeAndSizesMatch(invalidArgument, tensors);
+  if (srcRank < 0 || srcRank >= size_) {
+    invalidArgument(c10::str("invalid srcRank ", srcRank, " (world size ", size_, ")"));
+  }
+  if (srcRank == rank_) {
+    invalidArgument(c10::str("cannot recv from self (rank ", rank_, ")"));
+  }
 
   const auto& device = tensors[0].device();
   if (device.is_cpu()) {

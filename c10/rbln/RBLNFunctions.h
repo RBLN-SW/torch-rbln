@@ -89,7 +89,24 @@ C10_RBLN_API void set_device_index(c10::DeviceIndex device_index);
 C10_RBLN_API c10::DeviceIndex exchange_device_index(c10::DeviceIndex device_index);
 
 /**
+ * @brief Returns the torch device id backing a device pointer.
+ *
+ * Lightweight counterpart to get_memory_info() for the common case where only
+ * the owning device is needed: it calls rbln_get_torch_device_id_from_vaddr()
+ * directly and avoids the full VMemory JSON round-trip that get_memory_info()
+ * performs. Prefer this on performance hot paths.
+ *
+ * @param data A pointer to device memory.
+ * @return The torch device id (as a c10::DeviceIndex) backing the pointer.
+ */
+C10_RBLN_API c10::DeviceIndex get_torch_device_id(const void* data);
+
+/**
  * @brief Retrieves memory information for a given data pointer.
+ *
+ * @note This performs a full VMemory JSON round-trip and is expensive — keep it
+ * off performance hot paths. When only the owning device is needed, use
+ * get_torch_device_id() instead.
  *
  * @param data A pointer to device memory.
  * @return Memory information associated with the given data pointer.
@@ -102,6 +119,20 @@ C10_RBLN_API ::rbln::MemoryInfo get_memory_info(const void* data);
  * @return true if eager memory allocation is enabled, false otherwise.
  */
 C10_RBLN_API bool is_eager_malloc();
+
+/**
+ * @brief Configure ``target``'s device allocation to match ``ref``'s layout and
+ *        dtype, without copying data.
+ *
+ * A subsequent device-to-device copy between ``target`` and ``ref`` then stays
+ * on the fast path. ``ref`` must already be device-resident. Used to make a
+ * staging buffer match a KV cache's layout so the upload and the per-slot
+ * device-to-device scatter are both fast.
+ *
+ * @param target_data Destination tensor's device pointer to configure.
+ * @param ref_data    Reference tensor's device pointer whose layout is mirrored.
+ */
+C10_RBLN_API void set_device_layout_like(void* target_data, const void* ref_data);
 
 /**
  * @brief Allocates memory on the specified RBLN device.
@@ -139,6 +170,14 @@ C10_RBLN_API void mark_zeros(const void* rbln_data);
  * @param data A pointer to device memory previously allocated by malloc().
  */
 C10_RBLN_API void free(void* data);
+
+/**
+ * @brief Non-throwing free() for `noexcept` contexts (the c10 DataPtr deleter).
+ *
+ * The deleter runs in a noexcept destructor, so a throwing free() would
+ * std::terminate; this logs on failure instead.
+ */
+C10_RBLN_API void free_nothrow(void* data) noexcept;
 
 /**
  * @brief Copies data from host memory to device memory.

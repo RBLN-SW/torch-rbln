@@ -552,16 +552,25 @@ bool is_nan_inf_check_disabled() {
   return v == 1;
 }
 
-// fp16 NaN/Inf bit-pattern check.
+// fp16/bf16 NaN/Inf bit-pattern check.
 //
-// IEEE 754 binary16: 1 sign + 5 exponent + 10 mantissa.
-// Both NaN and Inf have all-ones in the exponent field (bits 14..10), i.e.
-// ``(raw & 0x7C00) == 0x7C00``. NaN distinguishes itself by a non-zero
-// mantissa; Inf has mantissa==0. We don't care about the distinction for
-// fallback routing — either value means "rbln runtime cannot handle this".
+// Both formats encode NaN/Inf as "exponent field all-ones"; only the field
+// width differs (fp16: 5 bits at offset 10, mask ``0x7C00``; bf16: 8 bits
+// at offset 7, mask ``0x7F80``). NaN distinguishes itself by a non-zero
+// mantissa, Inf has mantissa==0 — we don't care about the distinction for
+// fallback routing, either value means "rbln runtime cannot handle this".
 inline bool fp16_has_nan_or_inf(const uint16_t* data, size_t n) noexcept {
   for (size_t i = 0; i < n; ++i) {
     if ((data[i] & 0x7C00) == 0x7C00) {
+      return true;
+    }
+  }
+  return false;
+}
+
+inline bool bf16_has_nan_or_inf(const uint16_t* data, size_t n) noexcept {
+  for (size_t i = 0; i < n; ++i) {
+    if ((data[i] & 0x7F80) == 0x7F80) {
       return true;
     }
   }
@@ -573,6 +582,8 @@ inline ScannerFn scanner_for(c10::ScalarType scalar_type) {
   switch (scalar_type) {
     case c10::kHalf:
       return fp16_has_nan_or_inf;
+    case c10::kBFloat16:
+      return bf16_has_nan_or_inf;
     default:
       TORCH_INTERNAL_ASSERT(false, "missing scanner for ScalarType");
   }
@@ -583,9 +594,9 @@ inline ScannerFn scanner_for(c10::ScalarType scalar_type) {
 // will trigger a D2H sync (this is the price of catching NaN/Inf in
 // just-computed device data — matches AS-IS Python ``to_cpu(args)`` cost).
 //
-// Returns false for: undefined / empty / non-fp16 / non-contiguous tensors.
-// fp16 is the only dtype the shim path admits (non-fp16 is short-circuited
-// earlier in ``quick_fallback_check``); ``skip_dtype_args`` slots are
+// Returns false for: undefined / empty / dtype outside the dispatch
+// catalog / non-contiguous tensors. Non-catalog dtypes are short-circuited
+// earlier in ``quick_fallback_check``; ``skip_dtype_args`` slots are
 // typically bool/int (eq/ne ``cond`` etc.) which cannot carry NaN/Inf.
 // Non-contiguous tensors are skipped here because the warm-cache key
 // requires contig + offset=0 anyway — the non-contig case will miss and
@@ -641,7 +652,7 @@ bool tensor_has_nan_or_inf(const at::Tensor& t) {
 
 // Cheap C++-side pre-check mirroring the cheap branches of
 // torch_rbln._internal.ops_utils.is_cpu_fallback_cases():
-//   2. dtype != float16 on any input tensor
+//   2. dtype outside the dispatch catalog on any input tensor
 //   3. all input tensors are scalar (ndim == 0)
 //   4. any input tensor is_contiguous() with storage_offset != 0
 //   5. NaN/Inf in any input tensor  (non-deploy mode only; mirrors the
@@ -691,8 +702,9 @@ int quick_fallback_check(
     // gates that skip args from the shortcut counter. We want to catch
     // NaN/Inf in any defined non-write-alias input — including wrapped
     // 0-dim values such as ``tensor + math.nan``. tensor_has_nan_or_inf
-    // internally filters non-fp16 (the only dtype that can encode NaN/Inf
-    // on the shim path).
+    // internally filters out dtypes outside the dispatch catalog (catalog
+    // dtypes — fp16/bf16 — are the ones that can encode NaN/Inf on the
+    // shim path).
     if (nan_inf_scan_enabled && !nan_inf_found && tensor_has_nan_or_inf(t)) {
       nan_inf_found = true;
     }
@@ -1177,8 +1189,9 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
   const auto& skip_dtype_args = entry->skip_dtype_args;
   const char* op_name_intern = entry->op_name_intern;
 
-  // The C++ precheck identifies cheap "must fallback" cases (real non-fp16
-  // input or all-0-dim) and short-circuits straight into cpu_fallback_rbln,
+  // The C++ precheck identifies cheap "must fallback" cases (input dtype
+  // outside the dispatch catalog or all-0-dim) and short-circuits straight
+  // into cpu_fallback_rbln,
   // bypassing the pybind hop into the Python wrapper. The wrapped-0-dim
   // case (e.g. `tensor + 1.0` where PyTorch wraps `1.0` as a 0-dim CPU
   // tensor with `is_wrapped_number`) is intentionally excluded from the

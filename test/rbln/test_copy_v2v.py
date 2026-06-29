@@ -148,7 +148,7 @@ class TestCopyV2V(TestCase):
         dst_dev.copy_(src_t)
         _eq(dst_dev, src_cpu.permute(*perm).contiguous())
 
-    @dtypes(torch.float16)
+    @dtypes(*ENGINE_DTYPES)
     @parametrize("perm", [(2, 0, 1), (1, 2, 0), (0, 2, 1)])
     def test_engine_permute_3d(self, dtype, perm):
         src_cpu = _arange_like((2, 3, 4), dtype)
@@ -194,7 +194,7 @@ class TestCopyV2V(TestCase):
         dst_dev.copy_(expanded)
         _eq(dst_dev, src_cpu.expand(4, 8).contiguous())
 
-    @dtypes(torch.float16)
+    @dtypes(*ENGINE_DTYPES)
     def test_engine_broadcast_inner(self, dtype):
         """stride==0 on the innermost non-size-1 dim — engine must NOT absorb
         it into the inner contig block."""
