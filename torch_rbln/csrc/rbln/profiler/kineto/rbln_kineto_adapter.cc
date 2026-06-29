@@ -1,8 +1,8 @@
-// libkineto plugin coupling a torch.profiler scope with one rbln profiling
-// scope, through the rbln_kineto_* C-ABI (rebel/runtime/api/rbln_kineto_api.h).
+// libkineto plugin coupling a torch.profiler session with one rbln profiling
+// session, through the rbln_kineto_* C-ABI (rebel/runtime/api/rbln_kineto_api.h).
 // start()/stop() drive the exporter via the C API
 
-#include "torch_rbln/csrc/rbln/profiler/kineto/rbln_kineto_adapter.h"
+#include <torch_rbln/csrc/rbln/profiler/kineto/rbln_kineto_adapter.h>
 
 #include <kineto/ActivityType.h>
 #include <kineto/Config.h>
@@ -19,12 +19,10 @@
 #include <string>
 #include <vector>
 
-#include "rebel/runtime/api/rbln_kineto_api.h"
-#include "torch_rbln/csrc/rbln/profiler/kineto/rbln_kineto_emitter.h"
+#include <rebel/runtime/api/rbln_kineto_api.h>
+#include <torch_rbln/csrc/rbln/profiler/kineto/rbln_kineto_emitter.h>
 
-namespace rbln {
-namespace profiler {
-namespace kineto {
+namespace rbln::profiler::kineto {
 
 namespace {
 
@@ -54,12 +52,12 @@ class RblnActivityProfilerSession : public ::libkineto::IActivityProfilerSession
 
   void start() override {
     status_ = ::libkineto::TraceStatus::RECORDING;
-    // (steady, system) anchor at scope open; exported slices carry steady_clock ns,
+    // (steady, system) anchor at session open; exported slices carry steady_clock ns,
     // so we add (system - steady) at projection time to convert them to system time.
     anchor_steady_ns_ = now_ns(std::chrono::steady_clock::now());
     anchor_system_ns_ = now_ns(std::chrono::system_clock::now());
     start_ts_ns_ = anchor_system_ns_;
-    rbln_kineto_begin_scope();
+    rbln_kineto_begin_session();
   }
 
   void stop() override {
@@ -67,7 +65,7 @@ class RblnActivityProfilerSession : public ::libkineto::IActivityProfilerSession
     clock_offset_ns_ = anchor_system_ns_ - anchor_steady_ns_;
     projected_ = ProjectedKinetoTrace{};
     int32_t exported = 0;
-    rbln_kineto_end_scope_and_export(&sink_thunk, this, &exported);
+    rbln_kineto_end_session_and_export(&sink_thunk, this, &exported);
     status_ = ::libkineto::TraceStatus::READY;
   }
 
@@ -175,6 +173,4 @@ void register_rbln_kineto_profiler() {
   ::libkineto::api().registerProfilerFactory(&create_rbln_profiler);
 }
 
-} // namespace kineto
-} // namespace profiler
-} // namespace rbln
+} // namespace rbln::profiler::kineto

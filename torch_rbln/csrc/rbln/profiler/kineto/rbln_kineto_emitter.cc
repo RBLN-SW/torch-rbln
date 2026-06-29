@@ -1,13 +1,11 @@
 // C-ABI -> libkineto assembly
 
-#include "torch_rbln/csrc/rbln/profiler/kineto/rbln_kineto_emitter.h"
+#include <torch_rbln/csrc/rbln/profiler/kineto/rbln_kineto_emitter.h>
 
 #include <cstdint>
 #include <string>
 
-namespace rbln {
-namespace profiler {
-namespace kineto {
+namespace rbln::profiler::kineto {
 
 namespace {
 
@@ -45,19 +43,21 @@ void convert_export_to_kineto(
   out->device_infos.reserve(exp->devices_count);
   for (uint32_t i = 0; i < exp->devices_count; ++i) {
     const RblnKinetoDevice& dev = exp->devices[i];
-    out->device_infos.emplace_back(/*id=*/dev.pid,
-                                   /*sortIndex=*/kRblnDeviceSortIndex + dev.pid,
-                                   /*name=*/std::string(dev.name ? dev.name : ""),
-                                   /*label=*/std::string());
+    out->device_infos.emplace_back(
+        /*id=*/dev.pid,
+        /*sortIndex=*/kRblnDeviceSortIndex + dev.pid,
+        /*name=*/std::string(dev.name ? dev.name : ""),
+        /*label=*/std::string());
   }
 
   out->resource_infos.reserve(exp->lanes_count);
   for (uint32_t i = 0; i < exp->lanes_count; ++i) {
     const RblnKinetoLane& lane = exp->lanes[i];
-    out->resource_infos.emplace_back(/*deviceId=*/lane.device_pid,
-                                     /*id=*/lane.resource_tid,
-                                     /*sortIndex=*/lane.resource_tid,
-                                     /*name=*/std::string(lane.name ? lane.name : ""));
+    out->resource_infos.emplace_back(
+        /*deviceId=*/lane.device_pid,
+        /*id=*/lane.resource_tid,
+        /*sortIndex=*/lane.resource_tid,
+        /*name=*/std::string(lane.name ? lane.name : ""));
   }
 
   out->activities.reserve(exp->slices_count);
@@ -95,6 +95,4 @@ void convert_export_to_kineto(
   }
 }
 
-} // namespace kineto
-} // namespace profiler
-} // namespace rbln
+} // namespace rbln::profiler::kineto

@@ -11,11 +11,9 @@
 #include <cstdint>
 #include <vector>
 
-#include "rebel/runtime/api/rbln_kineto_api.h"
+#include <rebel/runtime/api/rbln_kineto_api.h>
 
-namespace rbln {
-namespace profiler {
-namespace kineto {
+namespace rbln::profiler::kineto {
 
 // Sort-priority base for rbln device rows: keeps them below host CPU rows in the
 // Perfetto UI; each sorts at base + pid so multi-node rows keep node order.
@@ -37,8 +35,6 @@ void convert_export_to_kineto(
     const ::libkineto::TraceSpan& span,
     ProjectedKinetoTrace* out);
 
-} // namespace kineto
-} // namespace profiler
-} // namespace rbln
+} // namespace rbln::profiler::kineto
 
 #endif // TORCH_RBLN_PROFILER_KINETO_RBLN_KINETO_EMITTER_H

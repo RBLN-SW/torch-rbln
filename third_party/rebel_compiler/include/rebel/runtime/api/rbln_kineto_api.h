@@ -1,14 +1,13 @@
 #ifndef REBEL_RUNTIME_API_RBLN_KINETO_API_H
 #define REBEL_RUNTIME_API_RBLN_KINETO_API_H
 
-// C-ABI for delivering one rbln profiler scope to an external consumer. It maps
+// C-ABI for delivering one rbln profiler session to an external consumer. It maps
 // onto the Perfetto / chrome-trace model: a Device is a "process" row, a Lane a
 // "thread" sub-row, and Slices are the timed bars laid on a lane. Returned as
 // flat device/lane/slice arrays linked by id.
 
+#include <rebel/runtime/api/rbln_retcode.h>
 #include <stdint.h>
-
-#include "rebel/runtime/api/rbln_retcode.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -62,7 +61,7 @@ typedef struct {
   RblnKinetoActivityKind kind;  // activity class (categories are display-only)
 } RblnKinetoSlice;
 
-// The full result of one profiling scope, delivered to the sink in one call.
+// The full result of one profiling session, delivered to the sink in one call.
 // Every pointer below (and every string it reaches) is valid ONLY for the
 // duration of the sink call; copy anything that must outlive it.
 typedef struct {
@@ -74,7 +73,7 @@ typedef struct {
   uint32_t slices_count;
 } RblnKinetoExport;
 
-// Callback invoked once per scope with the fully materialized export. Every
+// Callback invoked once per session with the fully materialized export. Every
 // pointer it receives is valid only until it returns.
 typedef void (*RblnKinetoExportSink)(const RblnKinetoExport* exp, void* user_data);
 
@@ -88,7 +87,7 @@ typedef void (*RblnKinetoExportSink)(const RblnKinetoExport* exp, void* user_dat
 RBLNRetCode rbln_kineto_is_active(int32_t* active_out);
 
 /**
- * @brief Begins one profiling scope.
+ * @brief Begins one profiling session.
  *
  * @details Discards any data captured before this call and starts a fresh
  * capture. Trace output is written under the directory named by the
@@ -96,15 +95,15 @@ RBLNRetCode rbln_kineto_is_active(int32_t* active_out);
  *
  * @return 0 on success, or an error code on failure.
  */
-RBLNRetCode rbln_kineto_begin_scope(void);
+RBLNRetCode rbln_kineto_begin_session(void);
 
 /**
- * @brief Ends one profiling scope and delivers its result.
+ * @brief Ends one profiling session and delivers its result.
  *
  * @details Invokes `sink` exactly once, synchronously, with the materialized
  * export before returning; all pointers passed to `sink` are valid only during
- * that call. If the scope captured nothing, `sink` is not called and
- * `*exported_out` is set to 0; otherwise it is set to 1. The scope is reset for
+ * that call. If the session captured nothing, `sink` is not called and
+ * `*exported_out` is set to 0; otherwise it is set to 1. The session is reset for
  * reuse afterward.
  *
  * @param sink [in] Callback that receives the export.
@@ -113,8 +112,8 @@ RBLNRetCode rbln_kineto_begin_scope(void);
  *
  * @return 0 on success, or an error code on failure.
  */
-RBLNRetCode rbln_kineto_end_scope_and_export(RblnKinetoExportSink sink, void* user_data,
-                                             int32_t* exported_out);
+RBLNRetCode rbln_kineto_end_session_and_export(RblnKinetoExportSink sink, void* user_data,
+                                               int32_t* exported_out);
 
 #ifdef __cplusplus
 }
