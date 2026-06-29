@@ -6,21 +6,15 @@ namespace c10::rbln {
 
 namespace {
 
-// Runs from the noexcept DataPtr deleter, so it must not throw: free_nothrow()
-// degrades a teardown-time deallocation failure to a warning instead of
-// std::terminate. The debug log is the only other throw site (fmt / sink can
-// throw, e.g. bad_alloc), so it is swallowed too — marking the function noexcept
-// alone would only convert such a throw into a terminate, not prevent it.
+// Runs from the noexcept DataPtr deleter, so it must not throw. free_nothrow()
+// is itself noexcept (it degrades a teardown-time deallocation failure to a
+// warning instead of std::terminate), so the deleter is throw-free. Deliberately
+// no debug log here: RBLN_LOG_DEBUG can throw when debug logging is enabled
+// (fmt / sink, e.g. bad_alloc), which would terminate the noexcept deleter.
 void raw_delete(void* data) noexcept {
-  if (data == nullptr) {
-    return;
+  if (data != nullptr) {
+    c10::rbln::free_nothrow(data);
   }
-  try {
-    RBLN_LOG_DEBUG("Freeing memory at {}", fmt::ptr(data));
-  } catch (...) {
-    // Logging is what failed; there is nothing safe to do from the deleter.
-  }
-  c10::rbln::free_nothrow(data);
 }
 
 } // namespace
