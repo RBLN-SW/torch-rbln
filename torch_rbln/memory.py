@@ -15,6 +15,7 @@ import torch_rbln._C
 
 __all__ = [
     "empty_cache",
+    "set_device_layout_like",
     "max_memory_allocated",
     "max_memory_reserved",
     "memory_allocated",
@@ -46,6 +47,26 @@ def _normalize_device(device: Optional[Union[int, str, torch.device]]) -> torch.
         return device
 
 
+def set_device_layout_like(target: torch.Tensor, ref: torch.Tensor) -> None:
+    """Configure ``target``'s device-allocation layout to match ``ref`` (no copy).
+
+    Both must be RBLN tensors with the same dtype, on the same device, and each a
+    *whole base allocation* — not a view/slice.  ``ref`` must be device-resident.
+    ``target`` adopts ``ref``'s layout and dtype while keeping its own size; no
+    data is transferred.  A subsequent device-to-device copy between ``target``
+    and ``ref`` then stays on the fast path.
+
+    Typical use: make a host→device staging buffer match a KV cache's layout so
+    the bulk upload and the per-slot device-to-device scatter are both fast.
+    """
+    torch_rbln._C._set_device_layout_like(target, ref)
+
+
+def _no_rbln_device() -> bool:
+    """No RBLN device available; memory-management ops no-op when True (torch.cuda parity)."""
+    return torch_rbln._C.device_count() == 0
+
+
 def empty_cache(device: Optional[Union[int, str, torch.device]] = None) -> None:
     """
     Release all unoccupied cached memory currently held by the caching allocator.
@@ -73,6 +94,9 @@ def empty_cache(device: Optional[Union[int, str, torch.device]] = None) -> None:
     from torch_rbln._internal.ops_utils import view_recipe_cache_reset
 
     view_recipe_cache_reset()
+    # No NPU: host caches above still dropped, but skip the device-side flush.
+    if _no_rbln_device():
+        return
     torch_rbln._C.empty_cache(device)
 
 
@@ -97,6 +121,9 @@ def memory_stats(device: Optional[Union[int, str, torch.device]] = None) -> Dict
     Returns:
         Dict[str, int]: A dictionary containing memory statistics.
     """
+    # No NPU: no allocator -> empty stats (memory_allocated() etc. then read 0).
+    if _no_rbln_device():
+        return {}
     device = _normalize_device(device)
     return torch_rbln._C.memory_stats(device)
 
@@ -167,6 +194,8 @@ def reset_accumulated_memory_stats(device: Optional[Union[int, str, torch.device
         device (Optional[Union[int, str, torch.device]]): The device to reset stats for.
             If None, uses the current device. Defaults to None.
     """
+    if _no_rbln_device():
+        return
     device = _normalize_device(device)
     torch_rbln._C.reset_accumulated_memory_stats(device)
 
@@ -181,6 +210,8 @@ def reset_peak_memory_stats(device: Optional[Union[int, str, torch.device]] = No
         device (Optional[Union[int, str, torch.device]]): The device to reset stats for.
             If None, uses the current device. Defaults to None.
     """
+    if _no_rbln_device():
+        return
     device = _normalize_device(device)
     torch_rbln._C.reset_peak_memory_stats(device)
 
