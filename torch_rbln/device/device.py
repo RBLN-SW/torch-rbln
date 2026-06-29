@@ -92,6 +92,9 @@ def is_initialized() -> bool:
     The no-device case is deliberate (not a bug): it makes ``torch.distributed``'s
     ``init_device_mesh`` skip its ``get_rank() % device_count()`` auto-select,
     which would otherwise fail on a host with no NPU.
+
+    Note: this calls :func:`device_count`, so the first invocation initializes and
+    freezes the RBLN device mapping from the current ``RBLN_*`` environment.
     """
     return _initialized or device_count() == 0
 
