@@ -87,12 +87,16 @@ def is_available() -> bool:
 
 
 def is_initialized() -> bool:
-    """Whether an RBLN device has been selected in this process (torch.cuda parity).
+    """True once :func:`set_device` has run, or when there are no devices at all.
 
-    Flips to True on the first :func:`set_device`. ``torch.distributed`` DeviceMesh
-    queries this during setup.
+    The no-device case is deliberate (not a bug): it makes ``torch.distributed``'s
+    ``init_device_mesh`` skip its ``get_rank() % device_count()`` auto-select,
+    which would otherwise fail on a host with no NPU.
+
+    Note: this calls :func:`device_count`, so the first invocation initializes and
+    freezes the RBLN device mapping from the current ``RBLN_*`` environment.
     """
-    return _initialized
+    return _initialized or device_count() == 0
 
 
 def get_amp_supported_dtype() -> List[torch.dtype]:

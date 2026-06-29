@@ -172,6 +172,14 @@ C10_RBLN_API void mark_zeros(const void* rbln_data);
 C10_RBLN_API void free(void* data);
 
 /**
+ * @brief Non-throwing free() for `noexcept` contexts (the c10 DataPtr deleter).
+ *
+ * The deleter runs in a noexcept destructor, so a throwing free() would
+ * std::terminate; this logs on failure instead.
+ */
+C10_RBLN_API void free_nothrow(void* data) noexcept;
+
+/**
  * @brief Copies data from host memory to device memory.
  *
  * This function performs a synchronous copy operation from host memory to

@@ -279,7 +279,14 @@ void register_internal_api(py::module_& module) {
         // Layout: [PyObject_HEAD][void* instance_ptr][...]. Read the void*
         // immediately past the head.
         const auto* slot = reinterpret_cast<const uintptr_t*>(reinterpret_cast<const char*>(obj) + sizeof(PyObject));
-        return *slot;
+        const uintptr_t raw = *slot;
+        // A real object pointer is pointer-aligned; a misaligned value means we
+        // read garbage (wrong layout / ABI skew the Python type-name gate can't
+        // catch). Return 0 so the caller skips the warm-cache fast path.
+        if ((raw % alignof(void*)) != 0) {
+          return 0;
+        }
+        return raw;
       },
       "Internal: extract the raw C++ pointer held by a pybind11 simple-layout instance");
 
