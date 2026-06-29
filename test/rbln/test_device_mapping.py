@@ -492,6 +492,39 @@ class TestDeviceMappingEnvVars(TestCase):
         self.assertNotEqual(result.returncode, 0, "Should fail with invalid-sized group")
         self.assertIn("valid sizes", result.stderr.lower() or result.stdout.lower())
 
+    def test_device_map_malformed_rejected(self):
+        """Malformed RBLN_DEVICE_MAP must be rejected by the parser, not silently truncated.
+
+        Each value reaches the parser only when a physical NPU is present (the no-device
+        path returns 0 before parsing), so this needs >= 1 physical device. The parse
+        error fires during init (the subprocess's device_count() query), before any
+        physical-id range check, so a single device is enough for every case.
+        """
+        physical_count = torch.rbln.physical_device_count()
+        if physical_count < 1:
+            self.skipTest("Requires at least one physical RBLN device to reach the parser")
+        malformed = [
+            "[]",  # empty group
+            "[0,]",  # trailing comma inside a group
+            "[,0]",  # leading comma inside a group
+            "[0,,1]",  # empty list element
+            "[0],,[1]",  # double comma between groups
+            "[0],[1],",  # trailing comma after the last group
+            ",[0]",  # leading comma before the first group
+            "[0]extra",  # trailing garbage after a group
+            "[0",  # unterminated group
+        ]
+        for device_map in malformed:
+            with self.subTest(device_map=device_map):
+                result = run_test_with_env({"RBLN_DEVICE_MAP": device_map}, self.run_device_map_malformed_error_impl)
+                self.assertNotEqual(
+                    result.returncode,
+                    0,
+                    f"{device_map!r} should be rejected. STDOUT: {result.stdout}\nSTDERR: {result.stderr}",
+                )
+                out = ((result.stderr or "") + (result.stdout or "")).lower()
+                self.assertIn("invalid rbln_device_map", out, f"{device_map!r}: unexpected error output\n{out}")
+
     def test_device_map_out_of_range_error_message(self):
         """Test that RBLN_DEVICE_MAP out-of-range shows improved error with env and device_summary hint."""
         physical_count = torch.rbln.physical_device_count()
@@ -1135,6 +1168,15 @@ class TestDeviceMappingEnvVars(TestCase):
         self.assertIsNotNone(device_map, "Environment variable should be set")
         # The actual error checking happens in C++ code during initialization
         # If initialization succeeded, that's a bug
+        pass  # noqa: PIE790
+
+    def run_device_map_malformed_error_impl(self):
+        """Implementation: malformed RBLN_DEVICE_MAP fails during device-mapping init."""
+        device_map = os.getenv("RBLN_DEVICE_MAP")
+        if device_map is None:
+            self.skipTest("This test must be run via wrapper test with environment variables set")
+        # The parse error fires during init (triggered when the test module's
+        # instantiate_device_type_tests queries device_count); reaching here is a bug.
         pass  # noqa: PIE790
 
     def run_device_map_out_of_range_error_impl(self):

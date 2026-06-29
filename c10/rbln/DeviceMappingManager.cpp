@@ -92,64 +92,78 @@ RblnNpuMappingEnvDisplay getRblnNpuMappingEnvDisplay() {
 }
 
 std::vector<std::vector<int>> DeviceMappingManager::parseDeviceMap(const std::string& device_map_str) {
+  // Grammar (whitespace-insensitive): groups := group (',' group)* ;
+  //   group := '[' number (',' number)* ']' . Empty elements/groups and trailing
+  // commas at either level are rejected so a malformed map errors loudly instead
+  // of being silently truncated (e.g. "[0,]" / "[]" / "[0],,[1]" / "[0],[1],").
   std::vector<std::vector<int>> result;
+  const size_t len = device_map_str.length();
   size_t pos = 0;
-  size_t len = device_map_str.length();
 
-  while (pos < len) {
-    // Skip whitespace
-    while (pos < len && (device_map_str[pos] == ' ' || device_map_str[pos] == ',')) {
+  auto skip_spaces = [&]() {
+    while (pos < len && device_map_str[pos] == ' ') {
       pos++;
     }
+  };
 
-    if (pos >= len)
-      break;
+  skip_spaces();
+  // An empty / whitespace-only value means "no explicit mapping"; callers fall
+  // back to a default layout. Any non-empty value must be fully well-formed.
+  if (pos >= len) {
+    return result;
+  }
 
-    // Expect '['
-    if (device_map_str[pos] != '[') {
-      RBLN_CHECK(false, "Invalid RBLN_DEVICE_MAP format. Expected '[' at position {}. Format: \"[0,1],[2,3]\"", pos);
-    }
-    pos++; // Skip '['
+  while (true) {
+    // ---- one group: '[' number (',' number)* ']' ----
+    RBLN_CHECK(
+        device_map_str[pos] == '[',
+        "Invalid RBLN_DEVICE_MAP format. Expected '[' at position {} (format: \"[0,1],[2,3]\")",
+        pos);
+    pos++; // consume '['
 
     std::vector<int> group;
     std::string num_str;
+    bool expect_number = true; // a number is required after '[' and after each ','
 
-    // Parse numbers until ']'
-    while (pos < len && device_map_str[pos] != ']') {
-      if (device_map_str[pos] == ',') {
-        if (!num_str.empty()) {
-          group.push_back(parseEnvInt(num_str, "RBLN_DEVICE_MAP"));
-          num_str.clear();
-        }
-        pos++;
-      } else if (device_map_str[pos] == ' ') {
-        pos++;
-      } else if (device_map_str[pos] >= '0' && device_map_str[pos] <= '9') {
-        num_str += device_map_str[pos];
-        pos++;
-      } else {
-        RBLN_CHECK(
-            false,
-            "Invalid RBLN_DEVICE_MAP format. Unexpected character '{}' at position {}",
-            device_map_str[pos],
-            pos);
+    while (true) {
+      skip_spaces();
+      RBLN_CHECK(pos < len, "Invalid RBLN_DEVICE_MAP format. Unterminated group; expected ']' before end of value");
+      const char ch = device_map_str[pos];
+      if (ch == ']') {
+        // "[]" or a trailing ',' before ']' leaves expect_number set.
+        RBLN_CHECK(!expect_number, "Invalid RBLN_DEVICE_MAP format. Empty group or trailing ',' at position {}", pos);
+        break;
       }
+      if (ch == ',') {
+        RBLN_CHECK(
+            !expect_number, "Invalid RBLN_DEVICE_MAP format. Empty list element (unexpected ',') at position {}", pos);
+        group.push_back(parseEnvInt(num_str, "RBLN_DEVICE_MAP"));
+        num_str.clear();
+        expect_number = true;
+        pos++;
+        continue;
+      }
+      RBLN_CHECK(
+          ch >= '0' && ch <= '9', "Invalid RBLN_DEVICE_MAP format. Unexpected character '{}' at position {}", ch, pos);
+      num_str += ch;
+      expect_number = false;
+      pos++;
     }
+    // Commit the final number (group is non-empty: expect_number is false at ']').
+    group.push_back(parseEnvInt(num_str, "RBLN_DEVICE_MAP"));
+    result.emplace_back(std::move(group));
+    pos++; // consume ']'
 
-    // Add last number if any
-    if (!num_str.empty()) {
-      group.push_back(parseEnvInt(num_str, "RBLN_DEVICE_MAP"));
+    // ---- separator: end of string, or ',' followed by another group ----
+    skip_spaces();
+    if (pos >= len) {
+      break;
     }
-
-    // Expect ']'
-    if (pos >= len || device_map_str[pos] != ']') {
-      RBLN_CHECK(false, "Invalid RBLN_DEVICE_MAP format. Expected ']' at position {}", pos);
-    }
-    pos++; // Skip ']'
-
-    if (!group.empty()) {
-      result.emplace_back(std::move(group));
-    }
+    RBLN_CHECK(
+        device_map_str[pos] == ',', "Invalid RBLN_DEVICE_MAP format. Expected ',' between groups at position {}", pos);
+    pos++; // consume ','
+    skip_spaces();
+    RBLN_CHECK(pos < len, "Invalid RBLN_DEVICE_MAP format. Trailing ',' with no group after it");
   }
 
   return result;
