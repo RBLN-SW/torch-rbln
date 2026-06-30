@@ -4,7 +4,7 @@
 
 `torch.rbln.explain()` answers one question: **"What did my code make the RBLN backend do that I never asked for and cannot see?"**
 
-A normal PyTorch op — `a.copy_(b)`, `torch.cat`, an indexing write, a forward pass — can silently round-trip the host (NPU→CPU→NPU), fall back to a CPU kernel, or recompile a graph. None of that shows up in your Python code; it just makes things slower for reasons that are invisible. `explain()` counts those hidden events, attributes the **cause**, prints a one-line **fix**, and (opt-in) points at the **where** in your source.
+A normal PyTorch op — `a.copy_(b)`, `torch.cat`, an indexing write, a forward pass — can silently round-trip the host (NPU→CPU→NPU), fall back to a CPU kernel, or recompile a graph. None of that shows up in your Python code; it just makes things slower for reasons that are invisible. `explain()` counts those hidden events, attributes the **cause**, prints a one-line **note** (a *fix* on the rows you can act on, a heads-up on the runtime-internal ones), and (opt-in) points at the **where** in your source.
 
 Think of it as `torch._dynamo.explain()` or JAX's `transfer_guard` for the RBLN device — **a hidden-overhead explainer, not a timing profiler.**
 
@@ -59,7 +59,7 @@ Signal                            Count    Bytes  Note                          
 host_bounce/copy_d2d_host_bounce   1000  9.77 KB  make contiguous, or v2v engine
 dispatch/cpu_fallback              2000        -  graph mode / native kernel / dtype
 --------------------------------  -----  -------  ----------------------------------
-    physical d2h (real transfer): 0 — host_bounce above was served on host          (5)
+    physical d2h (real transfer): 0 — served on host, no device crossing          (5)
     cpu_fallback: aten::sub.out 1000, aten::mul.out 500, aten::clamp.out 500  (Σ 10885 µs wall)  (6)
       why: dtype-not-fp16 2000                                                       (7)
       no fast-path handler (optimization candidates): aten::sub.out, aten::mul.out, aten::clamp.out  (8)
@@ -71,7 +71,7 @@ dispatch/cpu_fallback              2000        -  graph mode / native kernel / d
 2. **(E) Host oversubscription** — a *resource fact*. The worker may run on far fewer CPU cores than it has threads (here 8 threads pinned to 1 core), so its tiny serial host ops get preempted and per-op latency inflates. This is an **environment amplifier**, not a per-op bug — see §6.
 3. **(B) Rebel-runtime time** — how much of the region was spent *inside* librbln (the runtime: `borrow`/`v2v`/`h2v`/`acquire`/`return`/`v2h`), each shown as `µs(calls)`. The `%` is of the **wrapped region's** wall, so it reads as "runtime vs torch-side dispatch" only when the region is host-bound; a region that includes the device forward shows a tiny `%` because device compute dominates the wall (not because dispatch is cheap). See §6.
 4. **The signal table.** Each fired signal: `Count` (how many times), `Bytes` (how much moved through host, if applicable), `Note` (terse what-to-change for the rows you can act on; for runtime-internal rows it is a notification, not a to-do). This is the core.
-5. **Real device→host qualifier.** The torch-side `host_bounce` is a *copy-path* count — it is blind to whether the data actually crossed the device boundary. The runtime's authoritative witness here says `0` real d2h → **the bounce was served on the host, no device crossing → low cost, not a leak.** (If it said `>0`, real bytes crossed.)
+5. **Real device→host qualifier.** The torch-side `host_bounce` is a *copy-path* count — it is blind to whether the data actually crossed the device boundary. The runtime's authoritative witness here says `physical d2h: 0` → **the bounce was served on the host, no device crossing → low cost, not a leak.** (If it said `>0`, real bytes crossed.)
 6. **`cpu_fallback` by op** + `(Σ … µs wall)`: which ops ran on CPU and the total fallback wall time (a *weak, noisy* A/B signal — inflated under oversubscription, not a per-op absolute; see §10).
 7. **`why`**: the reason each fallback fired — `dtype-not-fp16` (the op's dtype is outside the device dispatch policy), `nan/inf input`, or `all-scalar inputs`.
 8. **(A) `no fast-path handler`**: of the ops that fell back, which ones have **no CPU fast-path handler** — i.e. your **optimization candidates** (registered ops already bypass the slow boxed path).
@@ -113,7 +113,7 @@ Signal                            Count  Bytes  Note
 --------------------------------  -----  -----  ----------------------------------
 host_bounce/copy_d2d_host_bounce      1    8 B  make contiguous, or v2v engine
 --------------------------------  -----  -----  ----------------------------------
-    physical d2h (real transfer): 0 — host_bounce above was served on host
+    physical d2h (real transfer): 0 — served on host, no device crossing
 ```
 
 **(G4) A REAL device→host crossing — RED, real bytes.** The contrast to G3: here the source was device-only and the layout couldn't be planned on-device, so the runtime did a **genuine DMA** — `physical d2h (real transfer): 1 copies, 512 B`. This is the expensive kind; the count/bytes are non-zero because data actually left the device.
@@ -124,7 +124,7 @@ host_bounce/copy_d2d_host_bounce      1    8 B  make contiguous, or v2v engine
 ------------------  -----  -----  -------------------------------------
 Signal              Count  Bytes  Note
 ------------------  -----  -----  -------------------------------------
-runtime/v2v_slow        1  512 B  device v2v served via host round-trip
+runtime/v2v_slow        1  512 B  real device->host DMA (costly)
 ------------------  -----  -----  -------------------------------------
     state: src_device_only_real_d2h 1
     reject: dtype_mismatch 1 -> align the src/dst dtype
@@ -156,7 +156,7 @@ dispatch/recompile         33      -  stabilize shapes, or graph mode
   (clean) no hidden overhead
 ```
 
-**(G7) A real vLLM decode step (device-tensor mode) — the capstone.** This is a 400-step steady-decode window of a Llama-1B run with `VLLM_RBLN_USE_DEVICE_TENSOR=1`, captured with `trace=True`. It shows nearly every signal at once: the attention-metadata integer math falling back (`sub`/`mul`/`clamp`, `dtype-not-fp16`), the `positions[idx]` gather going host-slow (`v2v_slow` + the `copy_d2d_host_bounce`), all **host-served** (`real d2h: 0`), under a worker pinned to one core (oversubscription), with the rebel-runtime share and the exact source lines:
+**(G7) A real vLLM decode step (device-tensor mode) — the capstone.** This is a 400-step steady-decode window of a Llama-1B run with `VLLM_RBLN_USE_DEVICE_TENSOR=1`, captured with `trace=True`. It shows nearly every signal at once: the attention-metadata integer math falling back (`sub`/`mul`/`clamp`, `dtype-not-fp16`), the `positions[idx]` gather going host-slow (`v2v_slow` + the `copy_d2d_host_bounce`), all **host-served** (`physical d2h: 0`), under a worker pinned to one core (oversubscription), with the rebel-runtime share and the exact source lines:
 
 ```
 [BAD ]  RBLN EXPLAIN — RED   (wall 5790.68 ms · mem 5.06 GB peak)
@@ -167,12 +167,12 @@ dispatch/recompile         33      -  stabilize shapes, or graph mode
 Signal                                  Count     Bytes  Note
 --------------------------------------  -----  --------  ----------------------------------
 host_bounce/copy_d2d_host_bounce         1600  12.59 KB  make contiguous, or v2v engine
-runtime/v2v_slow                          796         -  device v2v served via host round-trip
+runtime/v2v_slow                          796         -  served on host, no DMA (low cost)
 dispatch/cpu_fallback                    1600         -  graph mode / native kernel / dtype
 --------------------------------------  -----  --------  ----------------------------------
     state: src_not_on_device 796
     reject: internal_fallback 796 (runtime-internal, not user-fixable)
-    physical d2h (real transfer): 0 — host_bounce above was served on host
+    physical d2h (real transfer): 0 — served on host, no device crossing
     cpu_fallback: aten::sub.out 800, aten::mul.out 400, aten::clamp.out 400   (Σ 41084 µs wall)
       why: dtype-not-fp16 1600
       at aten::sub.out: rbln_model_runner.py:1276(_prepare_inputs) <- rbln_model_runner.py(execute_model)
@@ -183,7 +183,7 @@ dispatch/cpu_fallback                    1600         -  graph mode / native ker
 
 How to read G7 in 30 seconds:
 
-- **RED**, driven by `host_bounce` (1600) + `v2v_slow` (796). Both are **host-served** (`real d2h: 0`) — no DMA, so the cost is host-side machinery, not data movement.
+- **RED**, driven by `host_bounce` (1600) + `v2v_slow` (796). Both are **host-served** (`physical d2h: 0`) — no DMA, so the cost is host-side machinery, not data movement.
 - **What**: `cpu_fallback` is the integer metadata math (`sub`/`mul`/`clamp`, all `dtype-not-fp16`); `v2v_slow`/`bounce` is the `positions[idx]` gather. Per 400 steps: 4 fallbacks + ~2 gathers + 4 bounces per step.
 - **Where**: the `at …` lines pin it to `flash_attention.py:1126/1147/1148` (the metadata builder) and `rbln_model_runner.py:1276` (logits). All of it is one cluster.
 - **Context**: the `! oversubscription` warning flags that these per-op costs may be inflated by CPU contention (worker on 1 core / 8 threads) — check affinity before micro-optimizing. The `rebel runtime` share here is tiny (0.4%) because this region wraps the device forward; the takeaway is still that the runtime is cheap per call, so the lever is the dispatched-op count / dtype, not the runtime.
@@ -237,7 +237,7 @@ These are deliberately **facts, NOT verdict drivers** (they inform, they don't a
 | `rebel_runtime` (B) — time in librbln | splits host cost into runtime vs torch-dispatch | tells you *where* to fix, doesn't itself accuse |
 | `real_host_sync_h2d` push | the lazy push that feeds a device graph | a push to feed a graph is *expected*, unlike an unwanted d2h pull |
 
-This separation is the point: a RED is something to fix; a fact is context that helps you decide *how*.
+This separation is the point: a RED is something to **inspect and account for** (a fix where the row says you can, a cost to acknowledge where it's runtime-internal); a fact is context that helps you decide *how*.
 
 > **What `device_memory` actually counts.** It reads the rebel runtime's `BufferAllocator` gauge (`rbln_prof_get_memory`): the high-water of the **total physical device bytes the allocator holds — regular *and* cached buffers** — decremented only when a buffer is physically freed, *not* when a tensor is released back to the cache. So it is a **reserved / footprint** number that includes idle cached buffers, not a *live-tensor* number; the "live device bytes" phrasing in the source comment is imprecise. It is also distinct from `torch.rbln.memory_stats()`, which is the c10-layer caching-allocator view one level above (separate `allocated` = live / `reserved` / `active` / `cached` stats). If you need the live-vs-reserved split, read `memory_stats()`; explain surfaces only the reserved footprint. So when dt=1 shows a higher `mem peak` than dt=0, that is a *reserved* difference (the device-tensor glue holds more buffers), not "2× more live tensors".
 
@@ -308,8 +308,8 @@ print(early.diff(later).report())
 | --- | --- | --- |
 | `! host oversubscription` | host ops inflated by CPU contention | fix affinity / `OMP_NUM_THREADS` first — before any per-op work |
 | `cpu_fallback` + `no fast-path handler: <ops>` | those ops run on CPU with the full boxed tax | add a `fast_paths/*.cpp` handler for them, or keep that metadata on CPU |
-| `host_bounce/*` with `real d2h > 0` | real bytes crossed the host | make the copy contiguous / route through the v2v engine |
-| `host_bounce/*` with `real d2h: 0` | host-served, no device crossing | low priority; the machinery overhead is small |
+| `host_bounce` or `v2v_slow` with `physical d2h > 0` | real bytes crossed the host | make the copy contiguous / route through the v2v engine |
+| `host_bounce` or `v2v_slow` with `physical d2h: 0` | host-served, no device crossing | low priority; the machinery overhead is small |
 | `dispatch/recompile` recurring (via `diff`) | shapes aren't stabilizing | pad/bucket to a fixed shape so the warm cache hits |
 | `rebel runtime` is a large % | the runtime itself is the cost | optimize the runtime path |
 | `rebel runtime` is a small % | torch-side dispatch dominates | reduce dispatched-op count; runtime micro-opt won't help |

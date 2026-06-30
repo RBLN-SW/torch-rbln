@@ -718,20 +718,20 @@ class RBLNExplain:
             # ONE event row for the slow-path v2v copies. The src-state axis, the
             # reject-cause axis, and the real transfer are the SAME events seen three
             # ways, so they are sublines below (not peer rows -- adding their counts
-            # would double-count). Magnitude = the real device->host transfer if any,
-            # else the host-served copy volume.
+            # would double-count). The Note states the COST VERDICT up-front so the row
+            # reads at a glance: a REAL device->host DMA (the costly kind, the thing to
+            # fix) vs a copy served on host (through host memory, no crossing -> low cost).
+            # The exact witness (count/bytes) is the "physical d2h" subline below.
             if rr["total_count"]:
-                phys = rr.get("real_host_sync_d2h") or {}
+                phys = rr.get("real_host_sync_d2h")
                 hidden_bytes = sum(v.get("bytes", 0) for v in rr["by_reason"].values())
-                mag = phys["bytes"] if phys.get("count") else hidden_bytes
-                rows.append(
-                    [
-                        "runtime/v2v_slow",
-                        str(rr["total_count"]),
-                        _fmt_bytes(mag) if mag else "-",
-                        "device v2v served via host round-trip",
-                    ]
-                )
+                if phys is None:  # runtime exposes the cause but not the real-transfer witness
+                    note, mag = "fell to host slow path", hidden_bytes
+                elif phys.get("count"):
+                    note, mag = "real device->host DMA (costly)", phys["bytes"]
+                else:
+                    note, mag = "served on host, no DMA (low cost)", hidden_bytes
+                rows.append(["runtime/v2v_slow", str(rr["total_count"]), _fmt_bytes(mag) if mag else "-", note])
         disp = d["dispatch"]
         if disp["cpu_fallback"]:
             rows.append(["dispatch/cpu_fallback", str(disp["cpu_fallback"]), "-", _FIX_SHORT["cpu_fallback"]])
@@ -767,14 +767,17 @@ class RBLNExplain:
                 lines.append(f"    reject: {' · '.join(rparts)}")
 
         # Authoritative REAL device->host the manager performed (the headline magnitude's
-        # source). 0 real with a host_bounce means the bounce was served on host (no
-        # device crossing) -> low cost, not a leak.
+        # source). 0 real means the slow copy/bounce above was served on host (no device
+        # crossing) -> low cost, not a leak. Shown whenever a host_bounce OR a runtime
+        # v2v_slow fired -- both put a byte count on the table whose meaning (real DMA vs
+        # host-served) only this line settles, so it must accompany either one.
         rhs = rr.get("real_host_sync_d2h") if rr.get("available") else None
-        if rhs is not None and (rhs["count"] or d["hidden_host_bounce"]["total_count"]):
+        served_on_host = bool(d["hidden_host_bounce"]["total_count"] or (rr.get("available") and rr.get("total_count")))
+        if rhs is not None and (rhs["count"] or served_on_host):
             if rhs["count"]:
                 lines.append(f"    physical d2h (real transfer): {rhs['count']} copies, {_fmt_bytes(rhs['bytes'])}")
             else:
-                lines.append("    physical d2h (real transfer): 0 — host_bounce above was served on host")
+                lines.append("    physical d2h (real transfer): 0 — served on host, no device crossing")
 
         # attribution sub-lines (which ops, and WHY) — compact, under the table.
         def _top(m: dict) -> str:
@@ -888,13 +891,42 @@ class RBLNDiff:
         rows.append(("recompile", da["dispatch"]["recompile_miss"], db["dispatch"]["recompile_miss"]))
         return rows
 
+    @staticmethod
+    def _sig_bytes(dump: dict[str, Any], name: str) -> Optional[int]:
+        """Host-traffic byte magnitude for a signal in one region's dump, or None if the
+        signal carries no byte measure (cpu_fallback/recompile are counts, not transfers).
+        Mirrors the single-region row magnitude: a real device->host transfer if one
+        happened, else the host-served copy volume -- so the diff can rank by COST, not
+        just recurrence (a 12 KB host-served loop and a 12 GB one read identically by count)."""
+        if name == "host_bounce":
+            return dump["hidden_host_bounce"]["total_bytes"]
+        rr = dump.get("runtime_residency") or {}
+        if not rr.get("available"):
+            return None
+        if name == "runtime/v2v_slow":
+            phys = rr.get("real_host_sync_d2h") or {}
+            if phys.get("count"):
+                return phys["bytes"]
+            return sum(v.get("bytes", 0) for v in rr["by_reason"].values())
+        if name == "runtime/physical_d2h":
+            return (rr.get("real_host_sync_d2h") or {}).get("bytes", 0)
+        if name == "runtime/h2d_push":
+            return (rr.get("real_host_sync_h2d") or {}).get("bytes", 0)
+        return None
+
     def dump(self) -> dict[str, Any]:
-        """{'signals': {name: {'a','b'}}, 'persists'|'gone'|'appeared': [names],
-        'persists_by_op': [{signal, op, count, at}], 'device_memory': {...}}.
-        ``persists`` (present in ``b``) is the actionable, recurring set."""
+        """{'signals': {name: {'a','b'[,'a_bytes','b_bytes']}}, 'persists'|'gone'|'appeared':
+        [names], 'persists_by_op': [{signal, op, count, at}], 'device_memory': {...}}.
+        ``persists`` (present in ``b``) is the actionable, recurring set. Byte-carrying
+        signals also carry ``a_bytes``/``b_bytes`` (the host-traffic magnitude) so a
+        recurring cost can be ranked by size, not just by recurrence."""
         out: dict[str, Any] = {"signals": {}, "persists": [], "gone": [], "appeared": [], "persists_by_op": []}
         for name, av, bv in self._rows():
-            out["signals"][name] = {"a": av, "b": bv}
+            sig: dict[str, int] = {"a": av, "b": bv}
+            ab, bb = self._sig_bytes(self._a, name), self._sig_bytes(self._b, name)
+            if ab is not None or bb is not None:
+                sig["a_bytes"], sig["b_bytes"] = ab or 0, bb or 0
+            out["signals"][name] = sig
             if bv > 0:
                 out["persists"].append(name)
             elif av > 0:
@@ -926,8 +958,12 @@ class RBLNDiff:
         for name, vv in d["signals"].items():
             av, bv = vv["a"], vv["b"]
             mark = "*** PERSISTS" if bv > 0 else ("gone in B" if av > 0 else "")
-            rows.append([name, str(av), str(bv), mark])
-        lines += _table(["Signal", "A", "B", ""], rows, ["l", "r", "r", "l"])
+            # Byte magnitude per region for byte-carrying signals ("-" for count-only
+            # signals like cpu_fallback) -> a persisting cost shows its SIZE, so you can
+            # tell a recurring 12 KB host-served loop from a 12 GB one at a glance.
+            ab, bb = vv.get("a_bytes"), vv.get("b_bytes")
+            rows.append([name, str(av), str(bv), _fmt_bytes(ab) if ab else "-", _fmt_bytes(bb) if bb else "-", mark])
+        lines += _table(["Signal", "A", "B", "A bytes", "B bytes", ""], rows, ["l", "r", "r", "r", "r", "l"])
         pbo = d.get("persists_by_op") or []
         if pbo:
             lines.append("")
