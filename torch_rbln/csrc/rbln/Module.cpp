@@ -90,6 +90,20 @@ void register_public_device_api(py::module_& module) {
       "Get the complete device topology.");
 }
 
+// set_device_layout_like operates on a whole tensor allocation, so a view
+// (non-zero storage_offset, or not spanning its storage) is rejected up front
+// with a clear error instead of misbehaving downstream.
+void check_base_rbln_tensor(const at::Tensor& t, const char* name) {
+  TORCH_CHECK(
+      t.device().is_privateuseone(), "set_device_layout_like: ", name, " must be an RBLN tensor, got ", t.device());
+  TORCH_CHECK(
+      t.storage_offset() == 0 && t.is_contiguous() &&
+          static_cast<int64_t>(t.storage().nbytes()) == t.numel() * t.element_size(),
+      "set_device_layout_like: ",
+      name,
+      " must be a whole base (non-view) RBLN tensor");
+}
+
 /**
  * @brief Register internal API functions with Python
  *
@@ -112,6 +126,34 @@ void register_internal_api(py::module_& module) {
         c10::rbln::mark_zeros(reinterpret_cast<const void*>(vaddr)); // NOLINT(performance-no-int-to-ptr)
       },
       "Internal: mark RBLN virtual memory as zero-initialized (no host alloc)");
+
+  // Set target's device-allocation layout to match ref's, without copying data.
+  // Used by torch_rbln.set_device_layout_like().
+  module.def(
+      "_set_device_layout_like",
+      [](const at::Tensor& target, const at::Tensor& ref) {
+        // Validate inputs up front so misuse fails with a clear error. dtype
+        // must match: a mismatch would reinterpret target's buffer as a
+        // different dtype.
+        check_base_rbln_tensor(target, "target");
+        check_base_rbln_tensor(ref, "ref");
+        TORCH_CHECK(
+            target.device() == ref.device(),
+            "set_device_layout_like: target and ref must be on the same device (got ",
+            target.device(),
+            " and ",
+            ref.device(),
+            ")");
+        TORCH_CHECK(
+            target.scalar_type() == ref.scalar_type(),
+            "set_device_layout_like: target and ref must have the same dtype (got ",
+            target.scalar_type(),
+            " and ",
+            ref.scalar_type(),
+            ")");
+        c10::rbln::set_device_layout_like(target.data_ptr(), ref.data_ptr());
+      },
+      "Internal: configure target's device layout like ref (no data copy)");
 
   // Logging utilities
   module.def("_log_cpu_fallback", &c10::rbln::log_cpu_fallback, "Internal: log CPU fallback");
@@ -238,7 +280,14 @@ void register_internal_api(py::module_& module) {
         // Layout: [PyObject_HEAD][void* instance_ptr][...]. Read the void*
         // immediately past the head.
         const auto* slot = reinterpret_cast<const uintptr_t*>(reinterpret_cast<const char*>(obj) + sizeof(PyObject));
-        return *slot;
+        const uintptr_t raw = *slot;
+        // A real object pointer is pointer-aligned; a misaligned value means we
+        // read garbage (wrong layout / ABI skew the Python type-name gate can't
+        // catch). Return 0 so the caller skips the warm-cache fast path.
+        if ((raw % alignof(void*)) != 0) {
+          return 0;
+        }
+        return raw;
       },
       "Internal: extract the raw C++ pointer held by a pybind11 simple-layout instance");
 

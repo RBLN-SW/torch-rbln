@@ -76,6 +76,14 @@ c10::DeviceIndex RBLNGuardImpl::deviceCount() const noexcept {
   } catch (const c10::Error& error) {
     RBLN_WARN_NOTHROW("Failed to get device count, returning 0: {}", error.msg());
     return 0;
+  } catch (const std::exception& e) {
+    // First call lazily parses RBLN_DEVICE_MAP / RBLN_NPUS_PER_DEVICE via
+    // std::stoi, which throws std (not c10::Error); uncaught here -> terminate.
+    RBLN_WARN_NOTHROW("Failed to get device count, returning 0 (std::exception): {}", e.what());
+    return 0;
+  } catch (...) {
+    RBLN_WARN_NOTHROW("Failed to get device count, returning 0: unknown exception");
+    return 0;
   }
 }
 

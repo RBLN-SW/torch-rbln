@@ -492,6 +492,39 @@ class TestDeviceMappingEnvVars(TestCase):
         self.assertNotEqual(result.returncode, 0, "Should fail with invalid-sized group")
         self.assertIn("valid sizes", result.stderr.lower() or result.stdout.lower())
 
+    def test_device_map_malformed_rejected(self):
+        """Malformed RBLN_DEVICE_MAP must be rejected by the parser, not silently truncated.
+
+        Each value reaches the parser only when a physical NPU is present (the no-device
+        path returns 0 before parsing), so this needs >= 1 physical device. The parse
+        error fires during init (the subprocess's device_count() query), before any
+        physical-id range check, so a single device is enough for every case.
+        """
+        physical_count = torch.rbln.physical_device_count()
+        if physical_count < 1:
+            self.skipTest("Requires at least one physical RBLN device to reach the parser")
+        malformed = [
+            "[]",  # empty group
+            "[0,]",  # trailing comma inside a group
+            "[,0]",  # leading comma inside a group
+            "[0,,1]",  # empty list element
+            "[0],,[1]",  # double comma between groups
+            "[0],[1],",  # trailing comma after the last group
+            ",[0]",  # leading comma before the first group
+            "[0]extra",  # trailing garbage after a group
+            "[0",  # unterminated group
+        ]
+        for device_map in malformed:
+            with self.subTest(device_map=device_map):
+                result = run_test_with_env({"RBLN_DEVICE_MAP": device_map}, self.run_device_map_malformed_error_impl)
+                self.assertNotEqual(
+                    result.returncode,
+                    0,
+                    f"{device_map!r} should be rejected. STDOUT: {result.stdout}\nSTDERR: {result.stderr}",
+                )
+                out = ((result.stderr or "") + (result.stdout or "")).lower()
+                self.assertIn("invalid rbln_device_map", out, f"{device_map!r}: unexpected error output\n{out}")
+
     def test_device_map_out_of_range_error_message(self):
         """Test that RBLN_DEVICE_MAP out-of-range shows improved error with env and device_summary hint."""
         physical_count = torch.rbln.physical_device_count()
@@ -543,28 +576,20 @@ class TestDeviceMappingEnvVars(TestCase):
         self.assertIn("RBLN_DEVICE_MAP=", out, "Error should show RBLN_DEVICE_MAP env")
         self.assertIn("RBLN_NPUS_PER_DEVICE=", out, "Error should show RBLN_NPUS_PER_DEVICE env")
 
-    def test_torch_ones_device_rbln_errors_with_nonexistent_rbln_devices_filter(self):
-        """Invalid RBLN_DEVICES must fail with a clear Python error (subprocess), not abort.
+    def test_nonexistent_rbln_devices_yields_zero_visible_devices(self):
+        """nonexistent RBLN_DEVICES -> device_count() == 0 (not a hard failure at import).
 
-        The harness imports ``torch.testing._internal.common_utils``, which probes PrivateUse1
-        availability, so the failure often appears at import time rather than at ``torch.ones``.
+        A device id that does not exist is filtered out by the runtime, so the process sees 0
+        logical devices and stays usable for compile-only work; actually using an rbln device
+        then raises a clear, catchable error (verified inside the subprocess impl).
         """
         physical_count = torch.rbln.physical_device_count()
         if physical_count < 1:
             self.skipTest("This test requires at least one physical RBLN device in the system")
-        # ID that does not exist on the host: runtime rejects RBLN_DEVICES before tensor creation.
         env_vars = {"RBLN_DEVICES": "99999"}
-        result = run_test_with_env(env_vars, self.run_torch_ones_rbln_nonexistent_devices_filter_impl)
-        self.assertNotEqual(result.returncode, 0, "Expected failure when RBLN_DEVICES is invalid")
-        out = (result.stderr or "") + (result.stdout or "")
-        lowered = out.lower()
-        self.assertTrue(
-            "no logical device" in lowered
-            or "not assigned" in lowered
-            or "out of range" in lowered
-            or "not available" in lowered
-            or "rbln_devices" in lowered,
-            f"Expected mapping/device error in output; got stdout+stderr:\n{out}",
+        result = run_test_with_env(env_vars, self.run_nonexistent_rbln_devices_zero_count_impl)
+        self.assertEqual(
+            result.returncode, 0, f"Subprocess test failed. STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
         )
 
     def test_device_map_valid_size_8(self):
@@ -1145,6 +1170,15 @@ class TestDeviceMappingEnvVars(TestCase):
         # If initialization succeeded, that's a bug
         pass  # noqa: PIE790
 
+    def run_device_map_malformed_error_impl(self):
+        """Implementation: malformed RBLN_DEVICE_MAP fails during device-mapping init."""
+        device_map = os.getenv("RBLN_DEVICE_MAP")
+        if device_map is None:
+            self.skipTest("This test must be run via wrapper test with environment variables set")
+        # The parse error fires during init (triggered when the test module's
+        # instantiate_device_type_tests queries device_count); reaching here is a bug.
+        pass  # noqa: PIE790
+
     def run_device_map_out_of_range_error_impl(self):
         """Implementation: Trigger RBLN_DEVICE_MAP out-of-range error (fails at import/init)."""
         device_map = os.getenv("RBLN_DEVICE_MAP")
@@ -1170,12 +1204,17 @@ class TestDeviceMappingEnvVars(TestCase):
         # With NPUS_PER_DEVICE=2 and 2 devices we have 1 logical device (rbln:0). Use rbln:1.
         torch.tensor([1], device="rbln:1", dtype=torch.float32)
 
-    def run_torch_ones_rbln_nonexistent_devices_filter_impl(self):
-        """Implementation: invalid RBLN_DEVICES; may fail at import (TestCase) or at torch.ones."""
+    def run_nonexistent_rbln_devices_zero_count_impl(self):
+        """Implementation: nonexistent RBLN_DEVICES -> 0 visible devices; using rbln then raises."""
         if os.getenv("RBLN_DEVICES") != "99999":
             self.skipTest("This test must be run via wrapper with RBLN_DEVICES=99999")
-        # If the subprocess survived imports, exercise the same path as a minimal user script.
-        torch.ones([1], device="rbln")
+        # New contract: a device id that does not exist is filtered out by the runtime, so the
+        # process sees 0 logical devices (compile-only stays possible) instead of failing hard.
+        self.assertEqual(torch.rbln.device_count(), 0)
+        self.assertFalse(torch.rbln.is_available())
+        # Actually using an rbln device then raises a clear, catchable error (not an abort).
+        with self.assertRaises(RuntimeError):
+            torch.ones([1], device="rbln")
 
     def run_device_map_valid_size_8_impl(self):
         """Implementation: Test RBLN_DEVICE_MAP with size 8 group."""
