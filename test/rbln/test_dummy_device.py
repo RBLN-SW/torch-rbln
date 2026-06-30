@@ -143,12 +143,12 @@ def test_device_map_preserves_tp_shape():
         """
         import torch, torch_rbln
         from torch_rbln._internal.rsd_utils import (
-            auto_determine_tensor_parallel_size,
+            auto_determine_num_devices,
             get_physical_device_ids,
         )
         assert get_physical_device_ids(0) == [0, 1], get_physical_device_ids(0)
-        assert auto_determine_tensor_parallel_size(0) == 2
-        assert auto_determine_tensor_parallel_size(1) == 2
+        assert auto_determine_num_devices(0) == 2
+        assert auto_determine_num_devices(1) == 2
         print("OK")
         """,
         env_extra={"RBLN_DEVICE_MAP": "[0,1],[2,3]"},
