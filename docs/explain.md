@@ -26,7 +26,7 @@ p.verdict()             # {'status': 'GREEN'|'AMBER'|'RED', ...}  -> CI gate
 p.dump()                # full dict (every number) -> programmatic use
 ```
 
-That is the whole loop: **wrap → read the verdict → read the table → act on the Fix column.**
+That is the whole loop: **wrap → read the verdict → read the table → act on the Note column** (for the rows you can act on — some rows are runtime-internal notifications, see §below).
 
 ## 3. The API
 
@@ -54,12 +54,12 @@ A real report (an integer-metadata region) annotated line by line:
   rebel runtime: 4367.3 us in librbln (6.6% of wall) -- acquire 1051.0(3000) · ...  (3)
 
 --------------------------------  -----  -------  ----------------------------------
-Signal                            Count    Bytes  Fix                                (4)
+Signal                            Count    Bytes  Note                               (4)
 --------------------------------  -----  -------  ----------------------------------
 host_bounce/copy_d2d_host_bounce   1000  9.77 KB  make contiguous, or v2v engine
 dispatch/cpu_fallback              2000        -  graph mode / native kernel / dtype
 --------------------------------  -----  -------  ----------------------------------
-    real device->host (runtime): 0 — host_bounce above was served on host          (5)
+    physical d2h (real transfer): 0 — host_bounce above was served on host          (5)
     cpu_fallback: aten::sub.out 1000, aten::mul.out 500, aten::clamp.out 500  (Σ 10885 µs wall)  (6)
       why: dtype-not-fp16 2000                                                       (7)
       no fast-path handler (optimization candidates): aten::sub.out, aten::mul.out, aten::clamp.out  (8)
@@ -70,7 +70,7 @@ dispatch/cpu_fallback              2000        -  graph mode / native kernel / d
 1. **Verdict + level.** `[ OK ]` GREEN / `[WARN]` AMBER / `[BAD ]` RED. `wall` is the region's wall-clock (a reference, not the point of the tool). `mem … peak` is the device-memory high-water mark — the rebel `BufferAllocator`'s **total physical device bytes, including cached/idle buffers held for reuse** (a *reserved footprint*, not just live tensors); see §6.
 2. **(E) Host oversubscription** — a *resource fact*. The worker may run on far fewer CPU cores than it has threads (here 8 threads pinned to 1 core), so its tiny serial host ops get preempted and per-op latency inflates. This is an **environment amplifier**, not a per-op bug — see §6.
 3. **(B) Rebel-runtime time** — how much of the region was spent *inside* librbln (the runtime: `borrow`/`v2v`/`h2v`/`acquire`/`return`/`v2h`), each shown as `µs(calls)`. The `%` is of the **wrapped region's** wall, so it reads as "runtime vs torch-side dispatch" only when the region is host-bound; a region that includes the device forward shows a tiny `%` because device compute dominates the wall (not because dispatch is cheap). See §6.
-4. **The signal table.** Each fired signal: `Count` (how many times), `Bytes` (how much moved through host, if applicable), `Fix` (terse what-to-change). This is the core.
+4. **The signal table.** Each fired signal: `Count` (how many times), `Bytes` (how much moved through host, if applicable), `Note` (terse what-to-change for the rows you can act on; for runtime-internal rows it is a notification, not a to-do). This is the core.
 5. **Real device→host qualifier.** The torch-side `host_bounce` is a *copy-path* count — it is blind to whether the data actually crossed the device boundary. The runtime's authoritative witness here says `0` real d2h → **the bounce was served on the host, no device crossing → low cost, not a leak.** (If it said `>0`, real bytes crossed.)
 6. **`cpu_fallback` by op** + `(Σ … µs wall)`: which ops ran on CPU and the total fallback wall time (a *weak, noisy* A/B signal — inflated under oversubscription, not a per-op absolute; see §10).
 7. **`why`**: the reason each fallback fired — `dtype-not-fp16` (the op's dtype is outside the device dispatch policy), `nan/inf input`, or `all-scalar inputs`.
@@ -94,7 +94,7 @@ The example above is one shape. Below is the range you'll actually see, from cle
 [WARN]  RBLN EXPLAIN — AMBER   (wall 0.28 ms · mem 128.00 MB peak)
 
 ----------------------  -----  -----  ----------------------------------
-Signal                  Count  Bytes  Fix
+Signal                  Count  Bytes  Note
 ----------------------  -----  -----  ----------------------------------
 dispatch/cpu_fallback       1      -  graph mode / native kernel / dtype
 ----------------------  -----  -----  ----------------------------------
@@ -103,33 +103,37 @@ dispatch/cpu_fallback       1      -  graph mode / native kernel / dtype
       no fast-path handler (optimization candidates): aten::add.out
 ```
 
-**(G3) A host-served bounce — RED, but cheap.** An `int64 → int32` device cast round-trips host memory (a `copy_d2d_host_bounce`), but `real device->host (runtime): 0` says it **never actually crossed the device boundary** — the runtime served it on the host. RED (a host round-trip did occur) but the bytes (8 B) and cost are tiny. This is the int-cast in the sampler (`sampled.to(torch.int32)`).
+**(G3) A host-served bounce — RED, but cheap.** An `int64 → int32` device cast round-trips host memory (a `copy_d2d_host_bounce`), but `physical d2h (real transfer): 0` says it **never actually crossed the device boundary** — the runtime served it on the host. RED (a host round-trip did occur) but the bytes (8 B) and cost are tiny. This is the int-cast in the sampler (`sampled.to(torch.int32)`).
 
 ```
 [BAD ]  RBLN EXPLAIN — RED   (wall 0.19 ms · mem 128.00 MB peak)
 
 --------------------------------  -----  -----  ----------------------------------
-Signal                            Count  Bytes  Fix
+Signal                            Count  Bytes  Note
 --------------------------------  -----  -----  ----------------------------------
 host_bounce/copy_d2d_host_bounce      1    8 B  make contiguous, or v2v engine
 --------------------------------  -----  -----  ----------------------------------
-    real device->host (runtime): 0 — host_bounce above was served on host
+    physical d2h (real transfer): 0 — host_bounce above was served on host
 ```
 
-**(G4) A REAL device→host crossing — RED, real bytes.** The contrast to G3: here the source was device-only and the layout couldn't be planned on-device, so the runtime did a **genuine DMA** — `real device->host (runtime): 1 copies, 512 B`. This is the expensive kind; the count/bytes are non-zero because data actually left the device.
+**(G4) A REAL device→host crossing — RED, real bytes.** The contrast to G3: here the source was device-only and the layout couldn't be planned on-device, so the runtime did a **genuine DMA** — `physical d2h (real transfer): 1 copies, 512 B`. This is the expensive kind; the count/bytes are non-zero because data actually left the device.
 
 ```
 [BAD ]  RBLN EXPLAIN — RED   (wall 0.51 ms · mem 4.91 GB peak)
 
-------------------------------------------  -----  -----  --------------------------------
-Signal                                      Count  Bytes  Fix
-------------------------------------------  -----  -----  --------------------------------
-runtime/v2v_slow:src_device_only_real_d2h       1      -  establish device residency first
-------------------------------------------  -----  -----  --------------------------------
-    real device->host (runtime): 1 copies, 512 B
+------------------  -----  -----  -------------------------------------
+Signal              Count  Bytes  Note
+------------------  -----  -----  -------------------------------------
+runtime/v2v_slow        1  512 B  device v2v served via host round-trip
+------------------  -----  -----  -------------------------------------
+    state: src_device_only_real_d2h 1
+    reject: dtype_mismatch 1 -> align the src/dst dtype
+    physical d2h (real transfer): 1 copies, 512 B
 ```
 
-> G3 vs G4 is the single most important distinction: a `host_bounce` is a *copy-path* count (blind to residency); the `real device->host` line is the *authoritative DMA witness*. `0` = served on host (cheap); `>0` = real crossing (the thing to fix).
+> One `runtime/v2v_slow` event with sublines: the `state:` axis (where the bytes went), the `reject:` axis (WHY the fast plan was rejected — here `dtype_mismatch`, which you CAN act on; an internal reason would read `internal_fallback … runtime-internal`), and the authoritative `physical d2h` transfer. They are the same event seen three ways — do not add their counts.
+
+> G3 vs G4 is the single most important distinction: a `host_bounce` is a *copy-path* count (blind to residency); the `physical d2h` line is the *authoritative DMA witness*. `0` = served on host (cheap); `>0` = real crossing (the thing to fix).
 
 **(G5) Recompiles in the steady loop — AMBER.** A decode step recompiles 33 graphs — `neg.out` recompiles **every token** (RoPE `rotate_half`). A cold first compile is expected; recurring recompiles are not. Confirm recurrence with `diff` (§8) before acting.
 
@@ -137,7 +141,7 @@ runtime/v2v_slow:src_device_only_real_d2h       1      -  establish device resid
 [WARN]  RBLN EXPLAIN — AMBER   (wall 234.10 ms · mem 4.91 GB peak)
 
 ----------------------  -----  -----  -------------------------------
-Signal                  Count  Bytes  Fix
+Signal                  Count  Bytes  Note
 ----------------------  -----  -----  -------------------------------
 dispatch/recompile         33      -  stabilize shapes, or graph mode
 ----------------------  -----  -----  -------------------------------
@@ -160,13 +164,15 @@ dispatch/recompile         33      -  stabilize shapes, or graph mode
   rebel runtime: 24673.0 us in librbln (0.4% of wall) -- h2v 7289.0(3600) · acquire 5455.0(2400) · v2v_multi 4140.0(400) · return 3488.0(4400) · borrow 2250.0(2000) · v2h 2051.0(1600)
 
 --------------------------------------  -----  --------  ----------------------------------
-Signal                                  Count     Bytes  Fix
+Signal                                  Count     Bytes  Note
 --------------------------------------  -----  --------  ----------------------------------
 host_bounce/copy_d2d_host_bounce         1600  12.59 KB  make contiguous, or v2v engine
-runtime/v2v_slow:src_not_on_device        796         -  establish device residency first
+runtime/v2v_slow                          796         -  device v2v served via host round-trip
 dispatch/cpu_fallback                    1600         -  graph mode / native kernel / dtype
 --------------------------------------  -----  --------  ----------------------------------
-    real device->host (runtime): 0 — host_bounce above was served on host
+    state: src_not_on_device 796
+    reject: internal_fallback 796 (runtime-internal, not user-fixable)
+    physical d2h (real transfer): 0 — host_bounce above was served on host
     cpu_fallback: aten::sub.out 800, aten::mul.out 400, aten::clamp.out 400   (Σ 41084 µs wall)
       why: dtype-not-fp16 1600
       at aten::sub.out: rbln_model_runner.py:1276(_prepare_inputs) <- rbln_model_runner.py(execute_model)
@@ -196,9 +202,12 @@ Every signal is a thing the backend did behind a normal op. The table gives the 
 | `host_bounce/copy_h2d_noncontig_dst` | torch | host→device write into a non-contiguous device dst | write into a contiguous buffer first, then h2d | contiguous staging, then h2d |
 | `host_bounce/strided_v2v_cpu_fallback` | torch | a strided v2v (cat/index/copy_) fell back to a host CPU op | the device v2v engine rejected the geometry | lower outer_count / fatter contiguous inner block |
 | `host_bounce/v2v_batch_to_per_entry` | torch | a batched v2v was rejected to per-entry copies | batch geometry exceeded the per-dst limit | check `kMaxV2VMultiCopies` / batch geometry |
-| `runtime/v2v_slow:src_not_on_device` | rebel | a device v2v fell to the host slow path because the source was host-latest | the copy could not stay on device | establish device residency before the copy |
-| `runtime/v2v_slow:src_device_only_real_d2h` | rebel | device-only source forced a real d2h (layout unplannable) | a real device→host transfer happened | fix dtype/alignment, keep ≤30 chunks |
-| `runtime/v2v_slow:src_synced_host_served` | rebel | src already on host+device; a host memcpy, no transfer | usually benign | (no action needed) |
+| `runtime/v2v_slow` | rebel | a device v2v fell to the host slow path; ONE event row with `state:` / `reject:` / `physical d2h` sublines (the same event, three views — don't add their counts) | a device copy did not stay on device | see the sublines below |
+| ↳ `state: src_not_on_device` | rebel | the source was host-latest | (state axis) | keep the source on device |
+| ↳ `state: src_device_only_real_d2h` | rebel | device-only source forced a real d2h | (state axis) a real device→host transfer happened | — |
+| ↳ `state: src_synced_host_served` | rebel | src on host+device; host memcpy, no transfer | (state axis) usually benign | — |
+| ↳ `reject: <user reason>` (e.g. `dtype_mismatch`) | rebel | WHY the fast plan was rejected, when you can act | user-actionable | align dtype / alignment / ≤30 chunks |
+| ↳ `reject: internal_fallback` | rebel | WHY the fast plan was rejected, runtime-internal (non-deterministic detail) | a notification, NOT a to-do | not user-fixable; see `dump['…']['debug']` if recurring |
 | `dispatch/cpu_fallback` | torch | an op ran on CPU (fp16-only NPU can't run it) | the per-op tax for non-device dtypes (e.g. int metadata) | graph mode / native rbln kernel / fix dtype — see (A) candidates |
 | `dispatch/recompile` | torch | a graph (re)compiled (warm-cache miss) | a cold first compile is expected; **repeated** recompiles in a steady loop are not | stabilize shapes (pad/bucket) for warm-cache reuse, or graph mode |
 
@@ -213,9 +222,9 @@ And the auxiliary readouts (in `dump()`):
 
 ## 6. Verdict vs. facts — what turns it RED, and what doesn't
 
-The **verdict** (`GREEN`/`AMBER`/`RED`) is driven ONLY by *hidden host overhead you can act on*:
+The **verdict** (`GREEN`/`AMBER`/`RED`) is driven ONLY by *hidden host overhead* — overhead you issued as a normal op and cannot see. The verdict flags that the cost **exists**; **who can act on it** is a separate axis shown in the row's `Note`/sublines — RED does **not** imply *you* can fix it (some of it is runtime-internal):
 
-- **RED** — a host bounce fired, or a runtime `v2v_slow` event fired (any reason). A device copy did not stay on device. *Caveat:* `v2v_slow` includes `src_synced_host_served`, which is benign (host memcpy, no transfer), so a RED driven **only** by that reason is usually not actionable (see §11). Use the `real device→host` count to tell a true crossing from a host-served copy.
+- **RED** — a host bounce fired, or a runtime `v2v_slow` event fired (any reason). A device copy did not stay on device. The `v2v_slow` sublines decompose it: the `reject:` axis says whether the cause is **user-actionable** (e.g. `dtype_mismatch`) or **runtime-internal** (`internal_fallback`, a notification, not a to-do), and `physical d2h` is the authoritative real transfer. *Caveat:* `v2v_slow` includes `src_synced_host_served` (host memcpy, no transfer), so a RED driven **only** by that is usually low-cost (see §11).
 - **AMBER** — only `cpu_fallback` and/or `recompile` fired (ran on CPU / recompiled, but no host bounce or v2v_slow).
 - **GREEN** — none of the above.
 
@@ -273,7 +282,7 @@ print(early.diff(later).report())
 
 ## 9. Cases & corner cases (seen in practice)
 
-**(a) Host-served bounce — RED but cheap.** An `int64 → int32` device cast bounces (`copy_d2d_host_bounce`), but the qualifier reads `real device->host (runtime): 0 — served on host`. The copy went *through* host memory but **never crossed the device boundary** (no DMA). It's RED (a host round-trip did happen) but low-cost. The `real_*_sync` counters are how you tell a true device crossing from a host-served copy.
+**(a) Host-served bounce — RED but cheap.** An `int64 → int32` device cast bounces (`copy_d2d_host_bounce`), but the qualifier reads `physical d2h (real transfer): 0 — served on host`. The copy went *through* host memory but **never crossed the device boundary** (no DMA). It's RED (a host round-trip did happen) but low-cost. The `real_*_sync` counters are how you tell a true device crossing from a host-served copy.
 
 **(b) Integer metadata fallback.** Attention/sampling metadata math (`positions[idx]`, `cs - pidx*len`, `clamp(...)`, `query_start_loc[1:]-1`) on device tensors shows up as `cpu_fallback` with `why: dtype-not-fp16` — the fp16-only NPU can't run integer ops, so they run on CPU. The (A) line lists which lack a fast-path handler = the candidates to accelerate (or to keep on CPU).
 

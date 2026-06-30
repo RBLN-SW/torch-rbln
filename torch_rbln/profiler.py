@@ -91,17 +91,6 @@ _RUNTIME_REASONS: tuple[tuple[str, str], ...] = (
     ("src_synced_host_served", "src already on host+device; host memcpy, no transfer (usually benign)"),
 )
 
-# Terse, per-src-state Fix for the report column. The generic "establish device
-# residency first" is wrong for an already-synced src (it is on the device), so each
-# src-state reason carries its own short remedy instead of one blanket string.
-_RUNTIME_FIX_SHORT: dict[str, str] = {
-    "src_not_on_device": "keep src on device",
-    # This is the src-STATE axis (where bytes went), not WHY the plan was rejected --
-    # the reject reason lives on the reject axis. So state the transfer, not a cause.
-    "src_device_only_real_d2h": "device-only src -> real d2h (see reject axis for why)",
-    "src_synced_host_served": "host memcpy; usually benign",
-}
-
 # Static cause -> one-line REMEDY ("what to change"). Read only at report()/
 # verdict() time, so it adds zero runtime cost. The runtime v2v-slow reasons
 # carry their own fix text in _RUNTIME_REASONS and are not duplicated here.
@@ -164,6 +153,19 @@ def _collect_remedies(d: dict[str, Any]) -> list[dict[str, str]]:
         for n, vv in rr["by_reason"].items():
             if vv["count"]:
                 fixes.append({"signal": f"runtime/v2v_slow:{n}", "fix": rfix[n]})
+        # Reject axis (so help()/dump()['remedies'] resolve the v2v_reject:* signals the
+        # report shows): user-actionable reasons carry their fix; the internal bucket is a
+        # notification, not a to-do.
+        rj = rr.get("reject") or {}
+        for lbl in rj.get("user_actionable", {}):
+            fixes.append({"signal": f"runtime/v2v_reject:{lbl}", "fix": _REJECT_FIX.get(lbl, "")})
+        if rj.get("internal_fallback", {}).get("count"):
+            fixes.append(
+                {
+                    "signal": "runtime/v2v_reject:internal_fallback",
+                    "fix": "runtime-internal fallback; not user-fixable (a notification, not a to-do)",
+                }
+            )
     disp = d["dispatch"]
     if disp["cpu_fallback"]:
         fixes.append({"signal": "dispatch/cpu_fallback", "fix": _REMEDY["cpu_fallback"]})
@@ -475,7 +477,8 @@ class RBLNExplain:
         )
         if self._rt0 is not None and rt1 is not None:
             hc = [a - b for a, b in zip(rt1["hidden_count"], self._rt0["hidden_count"])]
-            self._rt = {"hidden_count": hc}
+            hb = [a - b for a, b in zip(rt1["hidden_bytes"], self._rt0["hidden_bytes"])]
+            self._rt = {"hidden_count": hc, "hidden_bytes": hb}
             if "mem_cur" in rt1:
                 # memory is a process-level high-water gauge (a level, not a delta)
                 self._rt["mem_cur"] = rt1["mem_cur"]
@@ -537,7 +540,10 @@ class RBLNExplain:
             out["runtime_residency"] = {
                 "available": True,
                 "total_count": sum(self._rt["hidden_count"]),
-                "by_reason": {n: {"count": c} for (n, _f), c in zip(_RUNTIME_REASONS, self._rt["hidden_count"])},
+                "by_reason": {
+                    n: {"count": c, "bytes": b}
+                    for (n, _f), c, b in zip(_RUNTIME_REASONS, self._rt["hidden_count"], self._rt["hidden_bytes"])
+                },
             }
             if "host_sync_count" in self._rt:
                 # authoritative REAL device->host this region (manager-emitted). A host
@@ -574,10 +580,11 @@ class RBLNExplain:
                     "user_actionable": user_rej,
                     "internal_fallback": {"count": int_c, "bytes": int_b},
                 }
-                # Raw per-index reject axis (every nonzero V2VRejectReason, regardless of
-                # audience) so the exact fired reason is visible for diagnosis/tuning.
-                out["runtime_residency"]["reject_raw"] = {
-                    i: {"count": rc[i], "bytes": rb[i]} for i in range(len(rc)) if rc[i] > 0
+                # Diagnostic only -- NOT a stable surface. Raw per-index reject axis is
+                # enum-order dependent (the runtime's internal classification), so it lives
+                # under "debug" and must not be treated as a CI contract.
+                out["runtime_residency"]["debug"] = {
+                    "reject_raw_by_index": {i: {"count": rc[i], "bytes": rb[i]} for i in range(len(rc)) if rc[i] > 0}
                 }
             pending = [
                 "finer hidden-sync cause (dtype/align/chunks)",
@@ -631,14 +638,13 @@ class RBLNExplain:
         runtime_hidden = rr["total_count"] if rr["available"] else 0
         if runtime_hidden > 0:
             status = "RED"
-            # Lead with the authoritative cost: a real device<->host transfer the manager
-            # performed to serve the fallback. Runtime-internal (not user-fixable); shown so
-            # a large hidden cost is not masked by a per-src-state "usually benign" note.
+            # Lead with the authoritative cost: the real device->host transfer the manager
+            # performed to serve the fallback. State the magnitude as a runtime-side fact;
+            # whether it is user-avoidable depends on the reject reason (reject axis), so do
+            # not blanket-label it "not user-fixable" here.
             rd = rr.get("real_host_sync_d2h")
             if rd and rd["count"]:
-                reasons.append(
-                    f"runtime-internal d2h: {rd['count']}x, {_fmt_bytes(rd['bytes'])} (runtime-side, not user-fixable)"
-                )
+                reasons.append(f"runtime-side physical d2h: {rd['count']}x, {_fmt_bytes(rd['bytes'])}")
             fix = dict(_RUNTIME_REASONS)
             for n, vv in rr["by_reason"].items():
                 if vv["count"]:
@@ -709,36 +715,23 @@ class RBLNExplain:
                     [f"host_bounce/{name}", str(vv["count"]), _fmt_bytes(vv["bytes"]), _FIX_SHORT.get(name, "")]
                 )
         if rr["available"]:
-            for n, vv in rr["by_reason"].items():
-                if vv["count"]:
-                    rows.append(
-                        [
-                            f"runtime/v2v_slow:{n}",
-                            str(vv["count"]),
-                            "-",
-                            _RUNTIME_FIX_SHORT.get(n, _FIX_SHORT["v2v_slow"]),
-                        ]
-                    )
-            rj = rr.get("reject")
-            if rj:
-                for label, vv in rj["user_actionable"].items():
-                    rows.append(
-                        [
-                            f"runtime/v2v_reject:{label}",
-                            str(vv["count"]),
-                            _fmt_bytes(vv["bytes"]),
-                            _REJECT_FIX.get(label, ""),
-                        ]
-                    )
-                if rj["internal_fallback"]["count"]:
-                    rows.append(
-                        [
-                            "runtime/v2v_reject:internal_fallback",
-                            str(rj["internal_fallback"]["count"]),
-                            _fmt_bytes(rj["internal_fallback"]["bytes"]),
-                            "runtime-internal (FYI) - cost shown, not user-fixable",
-                        ]
-                    )
+            # ONE event row for the slow-path v2v copies. The src-state axis, the
+            # reject-cause axis, and the real transfer are the SAME events seen three
+            # ways, so they are sublines below (not peer rows -- adding their counts
+            # would double-count). Magnitude = the real device->host transfer if any,
+            # else the host-served copy volume.
+            if rr["total_count"]:
+                phys = rr.get("real_host_sync_d2h") or {}
+                hidden_bytes = sum(v.get("bytes", 0) for v in rr["by_reason"].values())
+                mag = phys["bytes"] if phys.get("count") else hidden_bytes
+                rows.append(
+                    [
+                        "runtime/v2v_slow",
+                        str(rr["total_count"]),
+                        _fmt_bytes(mag) if mag else "-",
+                        "device v2v served via host round-trip",
+                    ]
+                )
         disp = d["dispatch"]
         if disp["cpu_fallback"]:
             rows.append(["dispatch/cpu_fallback", str(disp["cpu_fallback"]), "-", _FIX_SHORT["cpu_fallback"]])
@@ -754,15 +747,34 @@ class RBLNExplain:
         lines.append("")
         lines += _table(["Signal", "Count", "Bytes", "Note"], rows, ["l", "r", "r", "l"])
 
-        # Qualify the torch-side host_bounce (a copy-PATH count, blind to residency)
-        # with the v-mem manager's authoritative REAL device->host count: 0 real means
-        # the bounce was served on the host (no device crossing) -> low cost, not a leak.
+        # Sublines of the single runtime/v2v_slow row above: the SAME events by src
+        # state and by reject cause, plus the authoritative real transfer. Counts here
+        # decompose the one event row -- they are not additional events.
+        if rr.get("available") and rr["total_count"]:
+            st = " · ".join(f"{n} {v['count']}" for n, v in rr["by_reason"].items() if v["count"])
+            if st:
+                lines.append(f"    state: {st}")
+            rj = rr.get("reject") or {}
+            rparts = [
+                f"{lbl} {v['count']} -> {_REJECT_FIX.get(lbl, '')}" for lbl, v in rj.get("user_actionable", {}).items()
+            ]
+            if rj.get("internal_fallback", {}).get("count"):
+                rparts.append(
+                    f"internal_fallback {rj['internal_fallback']['count']} "
+                    "(runtime-internal, not user-fixable; see dump['runtime_residency']['debug'] if recurring)"
+                )
+            if rparts:
+                lines.append(f"    reject: {' · '.join(rparts)}")
+
+        # Authoritative REAL device->host the manager performed (the headline magnitude's
+        # source). 0 real with a host_bounce means the bounce was served on host (no
+        # device crossing) -> low cost, not a leak.
         rhs = rr.get("real_host_sync_d2h") if rr.get("available") else None
         if rhs is not None and (rhs["count"] or d["hidden_host_bounce"]["total_count"]):
             if rhs["count"]:
-                lines.append(f"    real device->host (runtime): {rhs['count']} copies, {_fmt_bytes(rhs['bytes'])}")
+                lines.append(f"    physical d2h (real transfer): {rhs['count']} copies, {_fmt_bytes(rhs['bytes'])}")
             else:
-                lines.append("    real device->host (runtime): 0 — host_bounce above was served on host")
+                lines.append("    physical d2h (real transfer): 0 — host_bounce above was served on host")
 
         # attribution sub-lines (which ops, and WHY) — compact, under the table.
         def _top(m: dict) -> str:
@@ -825,6 +837,10 @@ class RBLNExplain:
         rfix = dict(_RUNTIME_REASONS)
         if key in rfix:
             return rfix[key]
+        if key in _REJECT_FIX:
+            return _REJECT_FIX[key]
+        if key == "internal_fallback":
+            return "runtime-internal fallback; not user-fixable (a notification, not a to-do)"
         return next((f["fix"] for f in fixes if signal in f["signal"]), f"no remedy for '{signal}'")
 
     def diff(self, other: RBLNExplain) -> RBLNDiff:
@@ -858,6 +874,12 @@ class RBLNDiff:
         ra, rb = da["runtime_residency"], db["runtime_residency"]
         if ra.get("available") and rb.get("available"):
             rows.append(("runtime/v2v_slow", ra["total_count"], rb["total_count"]))
+            # The authoritative real device->host transfer (the v2v_slow magnitude). Tracked
+            # so a recurring internal-fallback cost shows up in the diff, not just its count.
+            da_d2h = (ra.get("real_host_sync_d2h") or {}).get("count", 0)
+            db_d2h = (rb.get("real_host_sync_d2h") or {}).get("count", 0)
+            if da_d2h or db_d2h:
+                rows.append(("runtime/physical_d2h", da_d2h, db_d2h))
             ha = (ra.get("real_host_sync_h2d") or {}).get("count", 0)
             hbv = (rb.get("real_host_sync_h2d") or {}).get("count", 0)
             if ha or hbv:
