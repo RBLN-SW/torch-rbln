@@ -297,33 +297,76 @@ def test_offload_is_noop():
     assert "OK" in proc.stdout
 
 
-def test_npus_per_device_sets_single_group_tp():
+@pytest.mark.parametrize("npus_per_device", [1, 2, 4, 8])
+def test_npus_per_device_sets_single_group_tp(npus_per_device):
     # RBLN_NPUS_PER_DEVICE=N (no RBLN_DEVICE_MAP) -> one logical device of size N (TP=N).
+    # Sizes valid on both dev and deploy builds; the group is host-only indices in
+    # dummy mode, so no NPU is needed to materialize a width-N device.
     proc = _run_with_dummy(
         """
+        import os
         import torch, torch_rbln
         from torch_rbln._internal.rsd_utils import auto_determine_num_devices, get_physical_device_ids
+        n = int(os.environ["RBLN_NPUS_PER_DEVICE"])
         assert torch.rbln.device_count() == 1, torch.rbln.device_count()
-        assert get_physical_device_ids(0) == [0, 1, 2, 3], get_physical_device_ids(0)
-        assert auto_determine_num_devices(0) == 4
+        assert get_physical_device_ids(0) == list(range(n)), get_physical_device_ids(0)
+        assert auto_determine_num_devices(0) == n
         torch.tensor(1.0, device="rbln:0")  # device of size N is usable
         print("OK")
         """,
-        env_extra={"RBLN_NPUS_PER_DEVICE": "4"},
+        env_extra={"RBLN_NPUS_PER_DEVICE": str(npus_per_device)},
     )
     _assert_ok(proc)
     assert "OK" in proc.stdout
 
 
-def test_torch_compile_compile_only_produces_artifact():
+@pytest.mark.parametrize(
+    ("device_map", "expected_count", "expected_ids0"),
+    [
+        ("[0]", 1, [0]),  # single device, TP=1
+        ("[0],[1]", 2, [0]),  # two devices, TP=1 each
+        ("[0,1]", 1, [0, 1]),  # single device, TP=2
+        ("[0,1,2,3]", 1, [0, 1, 2, 3]),  # single device, TP=4
+        ("[0,1],[2,3]", 2, [0, 1]),  # two devices, TP=2 each
+    ],
+)
+def test_device_map_shapes(device_map, expected_count, expected_ids0):
+    # RBLN_DEVICE_MAP shape must survive into the dummy topology: the logical-device
+    # count and per-device TP shape (physical ids of device 0) match real hardware,
+    # so a config that compiles under dummy also runs on an NPU.
+    proc = _run_with_dummy(
+        """
+        import os
+        import torch, torch_rbln
+        from torch_rbln._internal.rsd_utils import get_physical_device_ids
+        count = int(os.environ["EXP_COUNT"])
+        ids0 = [int(x) for x in os.environ["EXP_IDS0"].split(",")]
+        assert torch.rbln.device_count() == count, torch.rbln.device_count()
+        assert get_physical_device_ids(0) == ids0, get_physical_device_ids(0)
+        torch.tensor(1.0, device=f"rbln:{count - 1}")  # highest index is usable
+        print("OK")
+        """,
+        env_extra={
+            "RBLN_DEVICE_MAP": device_map,
+            "EXP_COUNT": str(expected_count),
+            "EXP_IDS0": ",".join(str(i) for i in expected_ids0),
+        },
+    )
+    _assert_ok(proc)
+    assert "OK" in proc.stdout
+
+
+@pytest.mark.parametrize("npu", ["RBLN-CA25", "RBLN-CR03"])
+def test_torch_compile_compile_only_produces_artifact(npu):
     # End-to-end integrity: on a no-NPU host, dummy device + the (pinned) compiler
-    # compile a model and write a .rbln artifact via compile-only. Execution still
-    # needs an NPU, so the call CPU-falls-back or raises; the artifact is the
-    # contract under test.
+    # compile a model and write a .rbln artifact via compile-only, for each target
+    # SoC. Execution still needs an NPU, so the call CPU-falls-back or raises; the
+    # artifact is the contract under test.
     proc = _run_with_dummy(
         """
         import glob, os, tempfile
         import torch, torch_rbln
+        npu = os.environ["RBLN_DUMMY_TEST_NPU"]
         cache = tempfile.mkdtemp(prefix="rbln_dummy_compile_")
 
         class Net(torch.nn.Module):
@@ -337,14 +380,15 @@ def test_torch_compile_compile_only_produces_artifact():
                 m,
                 backend="rbln",
                 dynamic=False,
-                options={"mode": ["compile_only"], "cache_dir": cache, "npu": "RBLN-CA25"},
+                options={"mode": ["compile_only"], "cache_dir": cache, "npu": npu},
             )(x)
         except Exception:
             pass
         arts = glob.glob(os.path.join(cache, "*.rbln"))
         assert len(arts) == 1 and os.path.getsize(arts[0]) > 0, arts
         print("OK")
-        """
+        """,
+        env_extra={"RBLN_DUMMY_TEST_NPU": npu, "RBLN_TARGET_SOC": npu},
     )
     _assert_ok(proc)
     assert "OK" in proc.stdout
