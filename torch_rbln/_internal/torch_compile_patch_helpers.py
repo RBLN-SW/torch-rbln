@@ -145,10 +145,13 @@ def recompile_with_num_devices(model, compile_kwargs, num_devices, original_comp
 
 
 def get_num_devices_from_options(compile_kwargs):
-    """Extract ``num_devices`` from compile options.
+    """Read the caller-pinned device count from compile options.
 
-    ``num_devices`` takes precedence; ``tensor_parallel_size`` is accepted as a
-    deprecated alias.
+    Used only to detect whether the caller explicitly set a device count, so
+    auto-determination and failover do not override an explicit choice. Both
+    ``num_devices`` and the legacy ``tensor_parallel_size`` are recognized
+    (``num_devices`` wins); canonicalizing the option for the backend is the
+    backend's responsibility, not this function's.
     """
     compile_options = compile_kwargs.get("options", {})
     if not isinstance(compile_options, dict):
