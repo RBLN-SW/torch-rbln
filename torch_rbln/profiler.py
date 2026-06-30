@@ -91,6 +91,17 @@ _RUNTIME_REASONS: tuple[tuple[str, str], ...] = (
     ("src_synced_host_served", "src already on host+device; host memcpy, no transfer (usually benign)"),
 )
 
+# Terse, per-src-state Fix for the report column. The generic "establish device
+# residency first" is wrong for an already-synced src (it is on the device), so each
+# src-state reason carries its own short remedy instead of one blanket string.
+_RUNTIME_FIX_SHORT: dict[str, str] = {
+    "src_not_on_device": "keep src on device",
+    # This is the src-STATE axis (where bytes went), not WHY the plan was rejected --
+    # the reject reason lives on the reject axis. So state the transfer, not a cause.
+    "src_device_only_real_d2h": "device-only src -> real d2h (see reject axis for why)",
+    "src_synced_host_served": "host memcpy; usually benign",
+}
+
 # Static cause -> one-line REMEDY ("what to change"). Read only at report()/
 # verdict() time, so it adds zero runtime cost. The runtime v2v-slow reasons
 # carry their own fix text in _RUNTIME_REASONS and are not duplicated here.
@@ -331,9 +342,12 @@ def _reset_trace() -> None:
 # internal classification name crosses over from the runtime.
 
 # Reject-axis presentation: mirrors the runtime V2VRejectReason axis POSITIONALLY
-# (must match its order). Only an audience tag + a user-facing label live here;
-# every internal reason is collapsed into one bucket and NEVER named to the user (the
-# runtime's internal classification does not leak into torch). index 0 = none/unused.
+# (must match its order). Only user-actionable reasons are named; every "internal"
+# reason is collapsed into one bucket and not named, because the internal reject reason
+# is a non-deterministic runtime detail (the same op can hit a different reason by
+# residency/layout state) that the user cannot act on -- naming it would imply false
+# actionability. The collapsed bucket is a magnitude-carrying notification, not a to-do.
+# index 0 = none/unused.
 _REJECT_AUDIENCE = ("none", "user", "internal", "internal", "user", "internal", "internal", "internal", "internal")
 _REJECT_LABEL = {1: "src_not_on_device", 4: "dtype_mismatch"}
 _REJECT_FIX = {
@@ -560,6 +574,11 @@ class RBLNExplain:
                     "user_actionable": user_rej,
                     "internal_fallback": {"count": int_c, "bytes": int_b},
                 }
+                # Raw per-index reject axis (every nonzero V2VRejectReason, regardless of
+                # audience) so the exact fired reason is visible for diagnosis/tuning.
+                out["runtime_residency"]["reject_raw"] = {
+                    i: {"count": rc[i], "bytes": rb[i]} for i in range(len(rc)) if rc[i] > 0
+                }
             pending = [
                 "finer hidden-sync cause (dtype/align/chunks)",
                 "hidden host-sync on the TVM graph-exec path (side-effect h2v)",
@@ -612,6 +631,14 @@ class RBLNExplain:
         runtime_hidden = rr["total_count"] if rr["available"] else 0
         if runtime_hidden > 0:
             status = "RED"
+            # Lead with the authoritative cost: a real device<->host transfer the manager
+            # performed to serve the fallback. Runtime-internal (not user-fixable); shown so
+            # a large hidden cost is not masked by a per-src-state "usually benign" note.
+            rd = rr.get("real_host_sync_d2h")
+            if rd and rd["count"]:
+                reasons.append(
+                    f"runtime-internal d2h: {rd['count']}x, {_fmt_bytes(rd['bytes'])} (runtime-side, not user-fixable)"
+                )
             fix = dict(_RUNTIME_REASONS)
             for n, vv in rr["by_reason"].items():
                 if vv["count"]:
@@ -684,7 +711,14 @@ class RBLNExplain:
         if rr["available"]:
             for n, vv in rr["by_reason"].items():
                 if vv["count"]:
-                    rows.append([f"runtime/v2v_slow:{n}", str(vv["count"]), "-", _FIX_SHORT["v2v_slow"]])
+                    rows.append(
+                        [
+                            f"runtime/v2v_slow:{n}",
+                            str(vv["count"]),
+                            "-",
+                            _RUNTIME_FIX_SHORT.get(n, _FIX_SHORT["v2v_slow"]),
+                        ]
+                    )
             rj = rr.get("reject")
             if rj:
                 for label, vv in rj["user_actionable"].items():
@@ -701,8 +735,8 @@ class RBLNExplain:
                         [
                             "runtime/v2v_reject:internal_fallback",
                             str(rj["internal_fallback"]["count"]),
-                            "-",
-                            "internal runtime fallback (not user-actionable)",
+                            _fmt_bytes(rj["internal_fallback"]["bytes"]),
+                            "runtime-internal (FYI) - cost shown, not user-fixable",
                         ]
                     )
         disp = d["dispatch"]
@@ -718,7 +752,7 @@ class RBLNExplain:
             return "\n".join(lines)
 
         lines.append("")
-        lines += _table(["Signal", "Count", "Bytes", "Fix"], rows, ["l", "r", "r", "l"])
+        lines += _table(["Signal", "Count", "Bytes", "Note"], rows, ["l", "r", "r", "l"])
 
         # Qualify the torch-side host_bounce (a copy-PATH count, blind to residency)
         # with the v-mem manager's authoritative REAL device->host count: 0 real means
