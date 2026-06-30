@@ -305,10 +305,9 @@ C10_RBLN_API void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies);
  * meaning "no live borrow" so cleanup paths can pre-fill a zero in a vector
  * and call `return_borrowed` unconditionally for skipped entries.
  *
- * In RBLN_DUMMY_DEVICE mode the borrow is an identity host view: the id is
- * non-zero (honoring the contract) but `return_borrowed` is a no-op — there is
- * no ledger, so double-release is not detected and `updated=false` does NOT roll
- * back writes already made through the pointer.
+ * In RBLN_DUMMY_DEVICE mode the borrow is an identity host view (non-zero id,
+ * `return_borrowed` no-ops): double-release is not detected and `updated=false`
+ * does not roll back writes.
  */
 struct BorrowedHostPtr {
   uintptr_t host_ptr;

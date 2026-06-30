@@ -20,11 +20,9 @@ namespace {
 // Default current logical device is 0
 thread_local c10::DeviceIndex current_device_index_ = 0;
 
-// Dummy mode only: tracks each host-backed allocation [base, base+nbytes) and
-// its logical device, so get_torch_device_id() can resolve an interior/view
-// pointer to its owning device (matching the real vaddr lookup) and free() can
-// reject stale/double frees. Guarded by is_dummy_device(); never touched on the
-// real-device path. Ordered map enables the range lookup.
+// Dummy mode only: base -> {nbytes, device} for each host allocation, so an
+// interior/view pointer resolves to its owning device and free() rejects
+// stale/double frees. Ordered map enables the range lookup.
 struct DummyAlloc {
   size_t nbytes;
   c10::DeviceIndex device;
@@ -85,9 +83,8 @@ void dummy_check_range(const void* data, size_t nbytes) {
       nbytes);
 }
 
-// Synthetic non-zero borrow ids for dummy mode: satisfies the BorrowedHostPtr
-// contract (a successful borrow returns a non-zero id). return_borrowed() no-ops
-// in dummy mode, so the value only needs to be non-zero.
+// Non-zero borrow ids for dummy mode (BorrowedHostPtr requires non-zero on
+// success); return_borrowed() is a no-op, so the value only needs to be non-zero.
 std::atomic<uint64_t> dummy_borrow_counter_{0};
 uint64_t next_dummy_borrow_id() {
   return dummy_borrow_counter_.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -341,10 +338,8 @@ bool is_eager_malloc() {
 }
 
 bool is_dummy_device() {
-  // Cheap, total, runtime-free predicate via the shared RBLN_DUMMY_DEVICE parser,
-  // so it is classified identically to DeviceMappingManager. Deliberately does
-  // NOT go through DeviceMappingManager (whose init queries the runtime and would
-  // throw without a driver). Cached on first call.
+  // Runtime-free: reads the RBLN_DUMMY_DEVICE flag directly, not via
+  // DeviceMappingManager (whose init would query the runtime). Cached.
   static const bool dummy = dummyDeviceEnabled();
   return dummy;
 }

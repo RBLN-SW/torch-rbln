@@ -99,8 +99,8 @@ bool dummyDeviceEnabled() {
   if (env == nullptr || env[0] == '\0') {
     return false;
   }
-  // Mirror rebel's ParseBool truthy set (it already rejected non-boolean values
-  // at startup, so only these and the falsy spellings can reach here).
+  // Truthy spellings of the RBLN_DUMMY_DEVICE boolean flag (non-boolean values
+  // are already rejected by the runtime at startup).
   std::string s(env);
   const auto first = s.find_first_not_of(" \t\n\r\f\v");
   if (first == std::string::npos) {
@@ -345,10 +345,8 @@ std::optional<std::vector<std::vector<int>>> DeviceMappingManager::getDummyDevic
   if (!dummyDeviceEnabled()) {
     return std::nullopt;
   }
-  // RBLN_DEVICE_MAP, when present, defines the layout (and RSD/TP shape) even in
-  // dummy mode — group sizes are preserved so torch.compile's auto TP sizing
-  // still works; ids are not range-validated against hardware (there is none).
-  // Otherwise default to a single host-backed logical device (TP=1).
+  // RBLN_DEVICE_MAP defines the layout (group sizes = TP shape) even in dummy
+  // mode; ids are not range-checked (no hardware). Default: one device (TP=1).
   const char* map_env = std::getenv("RBLN_DEVICE_MAP");
   if (map_env != nullptr && map_env[0] != '\0') {
     auto groups = parseDeviceMap(std::string(map_env));
