@@ -1,3 +1,5 @@
+# Owner(s): ["module: PrivateUse1"]
+
 """Host-backed dummy device contract (RBLN_DUMMY_DEVICE=1).
 
 Dummy mode is an explicit opt-in that lets torch-rbln construct device tensors
@@ -313,6 +315,41 @@ def test_npus_per_device_sets_single_group_tp():
     assert "OK" in proc.stdout
 
 
+def test_torch_compile_compile_only_produces_artifact():
+    # End-to-end integrity: on a no-NPU host, dummy device + the (pinned) compiler
+    # compile a model and write a .rbln artifact via compile-only. Execution still
+    # needs an NPU, so the call CPU-falls-back or raises; the artifact is the
+    # contract under test.
+    proc = _run_with_dummy(
+        """
+        import glob, os, tempfile
+        import torch, torch_rbln
+        cache = tempfile.mkdtemp(prefix="rbln_dummy_compile_")
+
+        class Net(torch.nn.Module):
+            def forward(self, x):
+                return torch.relu(x) * 2.0 + 1.0
+
+        m = Net().eval().to("rbln:0")
+        x = torch.tensor([-1.0, 0.0, 1.0, 2.0], device="rbln:0")
+        try:
+            torch.compile(
+                m,
+                backend="rbln",
+                dynamic=False,
+                options={"mode": ["compile_only"], "cache_dir": cache, "npu": "RBLN-CA25"},
+            )(x)
+        except Exception:
+            pass
+        arts = glob.glob(os.path.join(cache, "*.rbln"))
+        assert len(arts) == 1 and os.path.getsize(arts[0]) > 0, arts
+        print("OK")
+        """
+    )
+    _assert_ok(proc)
+    assert "OK" in proc.stdout
+
+
 # NOTE: overlap/self-copy safety of the dummy v2v path (memmove, not memcpy) is
 # covered in test/cpp/core/RBLNDummyDeviceTest.cpp::V2VHandlesOverlap — PyTorch's
 # copy_ guards against aliasing storage before dispatch, so the overlap cannot be
@@ -320,4 +357,6 @@ def test_npus_per_device_sets_single_group_tp():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    from torch.testing._internal.common_utils import run_tests
+
+    run_tests()
