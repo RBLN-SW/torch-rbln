@@ -25,6 +25,8 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <optional>
+#include <vector>
 
 namespace {
 // Force dummy mode before main(), i.e. before the singleton initializes. Two
@@ -157,4 +159,83 @@ TEST(RBLNDummyDeviceTest, CopyAndBorrowRejectOutOfBounds) {
 
 TEST(RBLNDummyDeviceTest, SynchronizeIsNoOp) {
   EXPECT_NO_THROW(c10::rbln::synchronize(/*device_index=*/0));
+}
+
+TEST(RBLNDummyDeviceTest, AsyncTransfersOnHost) {
+  // The async transfers are synchronous host memmoves in dummy mode (no handle,
+  // no runtime); same data and bounds contract as the sync variants.
+  constexpr size_t kBytes = 4 * sizeof(float);
+  void* a = c10::rbln::malloc(/*device_index=*/0, kBytes);
+  void* b = c10::rbln::malloc(/*device_index=*/0, kBytes);
+  ASSERT_NE(a, nullptr);
+  ASSERT_NE(b, nullptr);
+
+  const float src[4] = {1.0F, -2.0F, 3.5F, 42.0F};
+  float dst[4] = {0, 0, 0, 0};
+  ASSERT_NO_THROW(c10::rbln::memcpy_h2v_async(a, src, kBytes));
+  ASSERT_NO_THROW(c10::rbln::memcpy_v2v_async(b, a, kBytes));
+  ASSERT_NO_THROW(c10::rbln::memcpy_v2h_async(dst, b, kBytes));
+  EXPECT_EQ(0, std::memcmp(src, dst, kBytes));
+
+  EXPECT_THROW(c10::rbln::memcpy_h2v_async(a, src, kBytes * 2), c10::Error);
+
+  c10::rbln::free(a);
+  c10::rbln::free(b);
+}
+
+TEST(RBLNDummyDeviceTest, V2VMultiOnHost) {
+  constexpr size_t kBytes = 4 * sizeof(int32_t);
+  auto* src = static_cast<int32_t*>(c10::rbln::malloc(/*device_index=*/0, kBytes));
+  auto* d0 = static_cast<int32_t*>(c10::rbln::malloc(/*device_index=*/0, kBytes));
+  auto* d1 = static_cast<int32_t*>(c10::rbln::malloc(/*device_index=*/0, kBytes));
+  ASSERT_NE(src, nullptr);
+  ASSERT_NE(d0, nullptr);
+  ASSERT_NE(d1, nullptr);
+  for (int32_t i = 0; i < 4; ++i) {
+    src[i] = i + 1;
+  }
+
+  EXPECT_NO_THROW(c10::rbln::memcpy_v2v_multi({})); // empty is a no-op
+  std::vector<c10::rbln::V2VCopyOp> copies = {{d0, src, kBytes}, {d1, src, kBytes}};
+  ASSERT_NO_THROW(c10::rbln::memcpy_v2v_multi(copies));
+  EXPECT_EQ(0, std::memcmp(src, d0, kBytes));
+  EXPECT_EQ(0, std::memcmp(src, d1, kBytes));
+
+  // An out-of-bounds entry is rejected.
+  std::vector<c10::rbln::V2VCopyOp> bad = {{d0, src, kBytes * 2}};
+  EXPECT_THROW(c10::rbln::memcpy_v2v_multi(bad), c10::Error);
+
+  c10::rbln::free(src);
+  c10::rbln::free(d0);
+  c10::rbln::free(d1);
+}
+
+TEST(RBLNDummyDeviceTest, TryBorrowAndAcquireAreIdentity) {
+  constexpr size_t kBytes = 2 * sizeof(int32_t);
+  void* dev = c10::rbln::malloc(/*device_index=*/0, kBytes);
+  ASSERT_NE(dev, nullptr);
+  const auto addr = reinterpret_cast<uintptr_t>(dev);
+
+  // try_borrow / acquire / try_acquire are all identity host views with a
+  // non-zero borrow id in dummy mode.
+  const auto tb = c10::rbln::try_borrow_host_ptr(dev, kBytes);
+  ASSERT_TRUE(tb.has_value());
+  EXPECT_EQ(tb->host_ptr, addr);
+  EXPECT_NE(tb->borrow_id, 0U);
+  c10::rbln::return_borrowed(tb->borrow_id, /*updated=*/false);
+
+  const auto acq = c10::rbln::acquire_host_ptr_for_overwrite(dev, kBytes);
+  EXPECT_EQ(acq.host_ptr, addr);
+  EXPECT_NE(acq.borrow_id, 0U);
+  c10::rbln::return_borrowed(acq.borrow_id, /*updated=*/true);
+
+  const auto ta = c10::rbln::try_acquire_host_ptr_for_overwrite(dev, kBytes);
+  ASSERT_TRUE(ta.has_value());
+  EXPECT_EQ(ta->host_ptr, addr);
+
+  // try_* return nullopt (no throw) for an out-of-range request.
+  EXPECT_FALSE(c10::rbln::try_borrow_host_ptr(dev, kBytes * 2).has_value());
+  EXPECT_FALSE(c10::rbln::try_acquire_host_ptr_for_overwrite(dev, kBytes * 2).has_value());
+
+  c10::rbln::free(dev);
 }
