@@ -354,6 +354,24 @@ std::optional<std::vector<std::vector<int>>> DeviceMappingManager::getDummyDevic
       return groups;
     }
   }
+  // No RBLN_DEVICE_MAP: honor RBLN_NPUS_PER_DEVICE=N as a single logical device of
+  // size N (TP=N), matching the real single-logical-device RSD case. Default TP=1.
+  const auto env_display = getRblnNpuMappingEnvDisplay();
+  if (env_display.npus_per_device != "-" && !env_display.npus_per_device.empty()) {
+    const int npus_per_device = parseEnvInt(env_display.npus_per_device, "RBLN_NPUS_PER_DEVICE");
+    RBLN_CHECK(npus_per_device > 0, "RBLN_NPUS_PER_DEVICE must be a positive integer, got {}", npus_per_device);
+    RBLN_CHECK(
+        isValidDeviceGroupSize(static_cast<size_t>(npus_per_device)),
+        "RBLN_NPUS_PER_DEVICE must be one of the valid sizes: {}. Got {}.",
+        getValidSizesString(),
+        npus_per_device);
+    std::vector<int> group;
+    group.reserve(static_cast<size_t>(npus_per_device));
+    for (int i = 0; i < npus_per_device; ++i) {
+      group.push_back(i);
+    }
+    return std::vector<std::vector<int>>{group};
+  }
   return std::vector<std::vector<int>>{{0}};
 }
 

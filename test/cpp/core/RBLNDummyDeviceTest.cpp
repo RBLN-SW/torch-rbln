@@ -239,3 +239,26 @@ TEST(RBLNDummyDeviceTest, TryBorrowAndAcquireAreIdentity) {
 
   c10::rbln::free(dev);
 }
+
+TEST(RBLNDummyDeviceTest, SetDeviceLayoutLikeIsNoOp) {
+  // No device-side layout in dummy mode: same-device live allocations no-op;
+  // cross-device or stale pointers are rejected (no runtime call).
+  void* a = c10::rbln::malloc(/*device_index=*/0, 64);
+  void* b = c10::rbln::malloc(/*device_index=*/0, 64);
+  void* c = c10::rbln::malloc(/*device_index=*/1, 64);
+  ASSERT_NE(a, nullptr);
+  ASSERT_NE(b, nullptr);
+  ASSERT_NE(c, nullptr);
+  EXPECT_NO_THROW(c10::rbln::set_device_layout_like(a, b));
+  EXPECT_THROW(c10::rbln::set_device_layout_like(a, c), c10::Error);
+  c10::rbln::free(a);
+  c10::rbln::free(b);
+  c10::rbln::free(c);
+  EXPECT_THROW(c10::rbln::set_device_layout_like(a, a), c10::Error); // stale
+}
+
+TEST(RBLNDummyDeviceTest, SetFileOffloadingIsNoOp) {
+  // File offloading is a runtime feature; enable/disable are no-ops in dummy mode.
+  EXPECT_NO_THROW(c10::rbln::set_file_offloading_enabled(true));
+  EXPECT_NO_THROW(c10::rbln::set_file_offloading_enabled(false));
+}

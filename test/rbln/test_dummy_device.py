@@ -265,6 +265,54 @@ def test_torch_compile_tracing_smoke():
     assert "OK" in proc.stdout
 
 
+def test_set_device_layout_like_is_noop():
+    # Runtime-free in dummy mode: same-device whole allocations -> no-op (no NPU).
+    proc = _run_with_dummy(
+        """
+        import torch, torch_rbln
+        target = torch.empty(4, device="rbln:0")
+        ref = torch.empty(4, device="rbln:0")
+        torch.rbln.set_device_layout_like(target, ref)
+        print("OK")
+        """
+    )
+    _assert_ok(proc)
+    assert "OK" in proc.stdout
+
+
+def test_offload_is_noop():
+    # torch.rbln.offload() must not touch the runtime in dummy mode.
+    proc = _run_with_dummy(
+        """
+        import torch, torch_rbln
+        with torch.rbln.offload():
+            t = torch.tensor([1.0, 2.0], device="rbln:0")
+        assert t.cpu().tolist() == [1.0, 2.0]
+        print("OK")
+        """
+    )
+    _assert_ok(proc)
+    assert "OK" in proc.stdout
+
+
+def test_npus_per_device_sets_single_group_tp():
+    # RBLN_NPUS_PER_DEVICE=N (no RBLN_DEVICE_MAP) -> one logical device of size N (TP=N).
+    proc = _run_with_dummy(
+        """
+        import torch, torch_rbln
+        from torch_rbln._internal.rsd_utils import auto_determine_num_devices, get_physical_device_ids
+        assert torch.rbln.device_count() == 1, torch.rbln.device_count()
+        assert get_physical_device_ids(0) == [0, 1, 2, 3], get_physical_device_ids(0)
+        assert auto_determine_num_devices(0) == 4
+        torch.tensor(1.0, device="rbln:0")  # device of size N is usable
+        print("OK")
+        """,
+        env_extra={"RBLN_NPUS_PER_DEVICE": "4"},
+    )
+    _assert_ok(proc)
+    assert "OK" in proc.stdout
+
+
 # NOTE: overlap/self-copy safety of the dummy v2v path (memmove, not memcpy) is
 # covered in test/cpp/core/RBLNDummyDeviceTest.cpp::V2VHandlesOverlap — PyTorch's
 # copy_ guards against aliasing storage before dispatch, so the overlap cannot be
