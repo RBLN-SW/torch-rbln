@@ -91,7 +91,7 @@ def _register_rbln_backend() -> bool:
 def patch_torch_compile() -> None:
     """
     Monkey patch torch.compile() to automatically register the RBLN backend on first use
-    and add automatic tensor parallel size determination and failover support.
+    and add automatic num_devices determination and tensor-parallel failover support.
 
     This patch wraps torch.compile() to ensure the RBLN backend is registered before
     the first compilation. The registration is lazy (happens on first call) to avoid
