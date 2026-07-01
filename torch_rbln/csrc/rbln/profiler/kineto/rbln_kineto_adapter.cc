@@ -4,6 +4,8 @@
 
 #include <torch_rbln/csrc/rbln/profiler/kineto/rbln_kineto_adapter.h>
 
+#include <c10/rbln/RBLNLogging.h>
+
 #include <kineto/ActivityType.h>
 #include <kineto/Config.h>
 #include <kineto/GenericTraceActivity.h>
@@ -51,21 +53,41 @@ class RblnActivityProfilerSession : public ::libkineto::IActivityProfilerSession
   RblnActivityProfilerSession& operator=(const RblnActivityProfilerSession&) = delete;
 
   void start() override {
-    status_ = ::libkineto::TraceStatus::RECORDING;
     // (steady, system) anchor at session open; exported slices carry steady_clock ns,
     // so we add (system - steady) at projection time to convert them to system time.
     anchor_steady_ns_ = now_ns(std::chrono::steady_clock::now());
     anchor_system_ns_ = now_ns(std::chrono::system_clock::now());
     start_ts_ns_ = anchor_system_ns_;
-    rbln_kineto_begin_session();
+    const RBLNRetCode ret = rbln_kineto_begin_session();
+    if (ret != RBLNRetCode_SUCCESS) {
+      RBLN_LOG_WARN(
+          "rbln_kineto_begin_session failed with error code: {}; skipping rbln profiling for this session",
+          static_cast<int>(ret));
+      status_ = ::libkineto::TraceStatus::ERROR;
+      return;
+    }
+    session_started_ = true;
+    status_ = ::libkineto::TraceStatus::RECORDING;
   }
 
   void stop() override {
+    if (!session_started_) {
+      status_ = ::libkineto::TraceStatus::ERROR;
+      return;
+    }
+    session_started_ = false;
     status_ = ::libkineto::TraceStatus::PROCESSING;
     clock_offset_ns_ = anchor_system_ns_ - anchor_steady_ns_;
     projected_ = ProjectedKinetoTrace{};
     int32_t exported = 0;
-    rbln_kineto_end_session_and_export(&sink_thunk, this, &exported);
+    const RBLNRetCode ret = rbln_kineto_end_session_and_export(&sink_thunk, this, &exported);
+    if (ret != RBLNRetCode_SUCCESS) {
+      RBLN_LOG_WARN(
+          "rbln_kineto_end_session_and_export failed with error code: {}; dropping rbln trace for this session",
+          static_cast<int>(ret));
+      status_ = ::libkineto::TraceStatus::ERROR;
+      return;
+    }
     status_ = ::libkineto::TraceStatus::READY;
   }
 
@@ -118,6 +140,7 @@ class RblnActivityProfilerSession : public ::libkineto::IActivityProfilerSession
   int64_t anchor_system_ns_ = 0;
   int64_t clock_offset_ns_ = 0;
   int64_t start_ts_ns_ = 0; // metadata-event timestamp for device/resource rows
+  bool session_started_ = false; // begin_session succeeded; gates stop()'s end call
 };
 
 class RblnActivityProfiler : public ::libkineto::IActivityProfiler {
@@ -143,7 +166,12 @@ class RblnActivityProfiler : public ::libkineto::IActivityProfiler {
     // always includes PRIVATEUSE1_RUNTIME/DRIVER in its default set, so the request
     // can't tell us whether the user actually wants rbln profiling.
     int32_t active = 0;
-    rbln_kineto_is_active(&active);
+    const RBLNRetCode ret = rbln_kineto_is_active(&active);
+    if (ret != RBLNRetCode_SUCCESS) {
+      RBLN_LOG_WARN(
+          "rbln_kineto_is_active failed with error code: {}; not creating a profiling session", static_cast<int>(ret));
+      return nullptr;
+    }
     if (!active)
       return nullptr;
     return std::make_unique<RblnActivityProfilerSession>();
