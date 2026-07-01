@@ -429,5 +429,62 @@ class TestProfilerHostCostContext(TestCase):
         self.assertEqual(rt["total_ns"], 0)
 
 
+@pytest.mark.test_set_ci
+class TestProfilerReportFormat(TestCase):
+    """Output-format contract: torch.profiler-style, ASCII, torch-parity time units."""
+
+    def test_fmt_time_matches_torch_format_time(self):
+        # Adaptive us/ms/s with 3 decimals, no space, ASCII "us" -- byte-identical to
+        # torch.autograd.profiler_util._format_time (explain reads like a torch table).
+        from torch_rbln.profiler import _fmt_time
+
+        self.assertEqual(_fmt_time(500), "0.500us")
+        self.assertEqual(_fmt_time(190_000), "190.000us")
+        self.assertEqual(_fmt_time(66_430_000), "66.430ms")
+        self.assertEqual(_fmt_time(5_790_680_000), "5.791s")
+
+    def test_note_prefixes_split_action_from_fact(self):
+        from torch_rbln.profiler import _fix, _fyi
+
+        self.assertEqual(_fix("make contiguous"), "fix: make contiguous")
+        self.assertEqual(_fyi("served on host"), "fyi: served on host")
+        self.assertEqual(_fix(""), "")  # empty note stays empty (no bare prefix)
+        self.assertEqual(_fyi(""), "")
+
+    def test_table_uses_double_dash_for_na_and_is_ascii(self):
+        from torch_rbln.profiler import _table
+
+        out = "\n".join(
+            _table(
+                ["Signal", "Count", "Bytes", "Note"],
+                [["dispatch/cpu_fallback", "3", "--", "fix: graph mode"]],
+                ["l", "r", "r", "l"],
+            )
+        )
+        self.assertIn("--", out)  # torch's not-applicable token
+        self.assertTrue(out.isascii())  # no Unicode glyphs (log/Slack safe)
+
+    def test_repr_before_stop_is_placeholder_not_report(self):
+        # __repr__ mirrors torch._dynamo.explain's ExplainOutput (object renders as its
+        # report), but a still-open region has no data yet -> a safe placeholder, no crash.
+        p = torch.rbln.explain()
+        self.assertIn("active", repr(p))
+
+    def test_str_equals_report_after_region(self):
+        with torch.rbln.explain() as p:
+            pass
+        self.assertEqual(str(p), p.report())  # print(p) == print(p.report())
+
+    def test_report_is_ascii_and_header_labels(self):
+        with torch.rbln.explain() as p:
+            x = torch.randn(8, 8, device=DEV, dtype=torch.float16)
+            _ = x + 1
+        rep = p.report()
+        self.assertTrue(rep.isascii())  # P6: ASCII-only output
+        self.assertIn("RBLN EXPLAIN", rep)
+        if "mem " in rep:
+            self.assertIn("peak (process)", rep)  # P5: gauge is process-wide, labeled
+
+
 if __name__ == "__main__":
     run_tests()

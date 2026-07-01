@@ -405,8 +405,25 @@ def _fmt_bytes(b: float) -> str:
     return f"{b:.2f} GB"
 
 
-def _fmt_ms(ns: float) -> str:
-    return f"{ns / 1e6:.2f} ms"
+def _fmt_time(ns: float) -> str:
+    # Mirror torch.profiler's _format_time (adaptive us/ms/s) so explain reads like a
+    # torch profiler table. ASCII "us" (not the Unicode micro sign) for log/Slack safety.
+    us = ns / 1e3
+    if us >= 1e6:
+        return f"{us / 1e6:.3f}s"
+    if us >= 1e3:
+        return f"{us / 1e3:.3f}ms"
+    return f"{us:.3f}us"
+
+
+# Note-column prefixes: split what the user can ACT on (fix:) from a fact/notification
+# (fyi:). torch tables have no advice column, so this is explain-specific — kept ASCII.
+def _fix(note: str) -> str:
+    return f"fix: {note}" if note else ""
+
+
+def _fyi(note: str) -> str:
+    return f"fyi: {note}" if note else ""
 
 
 def _table(headers: list[str], rows: list[list[str]], aligns: list[str]) -> list[str]:
@@ -431,8 +448,14 @@ def _table(headers: list[str], rows: list[list[str]], aligns: list[str]) -> list
 
 
 class RBLNExplain:
-    """A hidden-overhead explain region. Use via :func:`explain` as a context manager. All flow
-    numbers are deltas over the region; memory is read as a level/high-water mark."""
+    """A hidden-overhead explain region. Use via :func:`explain` as a context manager.
+
+    All flow numbers are deltas over the region window, but the underlying counters are
+    PROCESS-GLOBAL: the delta sums activity from ALL threads that ran during the region,
+    not just the calling thread. Concurrent device work (e.g. a background transfer or
+    worker thread) is therefore included in the delta — attribute accordingly when
+    profiling a multi-threaded run (vLLM, DataLoader workers, ...). Memory is read as a
+    process-wide level/high-water mark, not a per-region delta."""
 
     def __init__(self, trace: bool = False) -> None:
         self._b0 = self._d0 = self._rt0 = self._wall0 = self._f0 = self._r0 = self._fr0 = None
@@ -507,6 +530,15 @@ class RBLNExplain:
     def __exit__(self, *exc: Any) -> None:
         self.stop()
 
+    def __repr__(self) -> str:
+        # Like torch._dynamo.explain()'s ExplainOutput: the object renders as its report,
+        # so `print(p)` works. NOT auto-printed on __exit__ (torch.profiler doesn't either).
+        if self._bounces is None:  # region still open — stop() not called yet
+            return f"<RBLNExplain active (trace={self._trace}); read the report after the region closes>"
+        return self.report()
+
+    __str__ = __repr__
+
     # -- readout -------------------------------------------------------------
     def dump(self) -> dict[str, Any]:
         assert self._bounces is not None, "region not stopped"
@@ -546,16 +578,18 @@ class RBLNExplain:
                 },
             }
             if "host_sync_count" in self._rt:
-                # authoritative REAL device->host this region (manager-emitted). A host
-                # bounce with 0 real d2h was served on host (no device crossing).
+                # REAL device->host this region (manager-emitted): a host bounce with 0 real
+                # d2h was served on host (no device crossing). Covers synchronous + async-
+                # fallback transfers; a deliberate pinned non_blocking copy takes the async
+                # DMA path (uncounted by the runtime), out of scope by design (see docs §6).
                 out["runtime_residency"]["real_host_sync_d2h"] = {
                     "count": self._rt["host_sync_count"],
                     "bytes": self._rt["host_sync_bytes"],
                 }
             if "host_sync_h2d_count" in self._rt:
-                # authoritative REAL host->device this region (manager-emitted): the lazy
-                # push at the device-consume boundary. Reveals glue that pushes host-latest
-                # data onto the device for a graph to consume -- invisible to the d2h counter.
+                # REAL host->device this region (manager-emitted): the lazy push at the
+                # device-consume boundary -- glue that pushes host-latest data onto the device
+                # for a graph to consume. Same scope caveat as real_host_sync_d2h above.
                 out["runtime_residency"]["real_host_sync_h2d"] = {
                     "count": self._rt["host_sync_h2d_count"],
                     "bytes": self._rt["host_sync_h2d_bytes"],
@@ -638,17 +672,16 @@ class RBLNExplain:
         runtime_hidden = rr["total_count"] if rr["available"] else 0
         if runtime_hidden > 0:
             status = "RED"
-            # Lead with the authoritative cost: the real device->host transfer the manager
-            # performed to serve the fallback. State the magnitude as a runtime-side fact;
-            # whether it is user-avoidable depends on the reject reason (reject axis), so do
-            # not blanket-label it "not user-fixable" here.
+            # Lead with the real d2h the manager performed to serve the fallback, as a
+            # magnitude fact -- whether it is user-avoidable is the reject axis's job, not
+            # a blanket label here.
             rd = rr.get("real_host_sync_d2h")
             if rd and rd["count"]:
                 reasons.append(f"runtime-side physical d2h: {rd['count']}x, {_fmt_bytes(rd['bytes'])}")
             fix = dict(_RUNTIME_REASONS)
             for n, vv in rr["by_reason"].items():
                 if vv["count"]:
-                    reasons.append(f"runtime hidden d2h [{n}]: {vv['count']}x — {fix[n]}")
+                    reasons.append(f"runtime hidden d2h [{n}]: {vv['count']}x - {fix[n]}")
         if disp["recompile_miss"] > 0:
             status = "RED" if status == "RED" else "AMBER"
             reasons.append(f"recompile/cold-compile: {disp['recompile_miss']}x")
@@ -674,9 +707,9 @@ class RBLNExplain:
         remedy prose is in dump()['remedies'] / help(signal), not dumped here."""
         d, v = self.dump(), self.verdict()
         mark = {"GREEN": "[ OK ]", "AMBER": "[WARN]", "RED": "[BAD ]"}[v["status"]]
-        head = f"{mark}  RBLN EXPLAIN — {v['status']}   (wall {_fmt_ms(d['wall_ns'])}"
+        head = f"{mark}  RBLN EXPLAIN - {v['status']}   (wall {_fmt_time(d['wall_ns'])}"
         if "device_memory" in d:
-            head += f" · mem {_fmt_bytes(d['device_memory']['peak_bytes'])} peak"
+            head += f" | mem {_fmt_bytes(d['device_memory']['peak_bytes'])} peak (process)"
         head += ")"
         lines = [head]
 
@@ -694,7 +727,7 @@ class RBLNExplain:
         rtm = d.get("rebel_runtime")
         if rtm and rtm["total_ns"]:
             bp = sorted(rtm["by_primitive"].items(), key=lambda kv: -kv[1]["ns"])
-            top = " · ".join(f"{n} {v['ns'] / 1000:.1f}({v['calls']})" for n, v in bp[:6])
+            top = " | ".join(f"{n} {v['ns'] / 1000:.1f}({v['calls']})" for n, v in bp[:6])
             lines.append(
                 f"  rebel runtime: {rtm['total_ns'] / 1000:.1f} us in librbln"
                 f" ({rtm['wall_fraction'] * 100:.1f}% of wall) -- {top}"
@@ -712,16 +745,14 @@ class RBLNExplain:
         for name, vv in d["hidden_host_bounce"]["by_site"].items():
             if vv["count"]:
                 rows.append(
-                    [f"host_bounce/{name}", str(vv["count"]), _fmt_bytes(vv["bytes"]), _FIX_SHORT.get(name, "")]
+                    [f"host_bounce/{name}", str(vv["count"]), _fmt_bytes(vv["bytes"]), _fix(_FIX_SHORT.get(name, ""))]
                 )
         if rr["available"]:
-            # ONE event row for the slow-path v2v copies. The src-state axis, the
-            # reject-cause axis, and the real transfer are the SAME events seen three
-            # ways, so they are sublines below (not peer rows -- adding their counts
-            # would double-count). The Note states the COST VERDICT up-front so the row
-            # reads at a glance: a REAL device->host DMA (the costly kind, the thing to
-            # fix) vs a copy served on host (through host memory, no crossing -> low cost).
-            # The exact witness (count/bytes) is the "physical d2h" subline below.
+            # ONE event row for the slow-path v2v copies. The src-state axis, reject axis,
+            # and real transfer are the SAME events seen three ways -> sublines below, not
+            # peer rows (adding their counts would double-count). The Note states the cost
+            # verdict at a glance: real d2h DMA (costly) vs served on host (no crossing, low
+            # cost); the exact witness is the "physical d2h" subline.
             if rr["total_count"]:
                 phys = rr.get("real_host_sync_d2h")
                 hidden_bytes = sum(v.get("bytes", 0) for v in rr["by_reason"].values())
@@ -731,12 +762,12 @@ class RBLNExplain:
                     note, mag = "real device->host DMA (costly)", phys["bytes"]
                 else:
                     note, mag = "served on host, no DMA (low cost)", hidden_bytes
-                rows.append(["runtime/v2v_slow", str(rr["total_count"]), _fmt_bytes(mag) if mag else "-", note])
+                rows.append(["runtime/v2v_slow", str(rr["total_count"]), _fmt_bytes(mag) if mag else "--", _fyi(note)])
         disp = d["dispatch"]
         if disp["cpu_fallback"]:
-            rows.append(["dispatch/cpu_fallback", str(disp["cpu_fallback"]), "-", _FIX_SHORT["cpu_fallback"]])
+            rows.append(["dispatch/cpu_fallback", str(disp["cpu_fallback"]), "--", _fix(_FIX_SHORT["cpu_fallback"])])
         if disp["recompile_miss"]:
-            rows.append(["dispatch/recompile", str(disp["recompile_miss"]), "-", _FIX_SHORT["recompile"]])
+            rows.append(["dispatch/recompile", str(disp["recompile_miss"]), "--", _fix(_FIX_SHORT["recompile"])])
 
         if not rows:
             lines.append("  (clean) no hidden overhead")
@@ -751,7 +782,7 @@ class RBLNExplain:
         # state and by reject cause, plus the authoritative real transfer. Counts here
         # decompose the one event row -- they are not additional events.
         if rr.get("available") and rr["total_count"]:
-            st = " · ".join(f"{n} {v['count']}" for n, v in rr["by_reason"].items() if v["count"])
+            st = " | ".join(f"{n} {v['count']}" for n, v in rr["by_reason"].items() if v["count"])
             if st:
                 lines.append(f"    state: {st}")
             rj = rr.get("reject") or {}
@@ -764,7 +795,7 @@ class RBLNExplain:
                     "(runtime-internal, not user-fixable; see dump['runtime_residency']['debug'] if recurring)"
                 )
             if rparts:
-                lines.append(f"    reject: {' · '.join(rparts)}")
+                lines.append(f"    reject: {' | '.join(rparts)}")
 
         # Authoritative REAL device->host the manager performed (the headline magnitude's
         # source). 0 real means the slow copy/bounce above was served on host (no device
@@ -777,7 +808,7 @@ class RBLNExplain:
             if rhs["count"]:
                 lines.append(f"    physical d2h (real transfer): {rhs['count']} copies, {_fmt_bytes(rhs['bytes'])}")
             else:
-                lines.append("    physical d2h (real transfer): 0 — served on host, no device crossing")
+                lines.append("    physical d2h (real transfer): 0 - served on host, no device crossing")
 
         # attribution sub-lines (which ops, and WHY) — compact, under the table.
         def _top(m: dict) -> str:
@@ -804,7 +835,7 @@ class RBLNExplain:
             fb_ns = d["dispatch"].get("cpu_fallback_ns", 0)
             # the COST -- distinguishes "many cheap fallbacks (path overhead)" from
             # "few expensive ones (hidden transfer)"; only shown when the loaded _C exposes it.
-            cost = f"   (Σ {fb_ns / 1000:.0f} µs wall)" if fb_ns else ""
+            cost = f"   (sum {fb_ns / 1000:.0f} us wall)" if fb_ns else ""
             lines.append(f"    cpu_fallback: {_top(fbo)}{cost}")
         fr = d.get("cpu_fallback_reasons") or {}
         if fr:
@@ -958,11 +989,11 @@ class RBLNDiff:
         for name, vv in d["signals"].items():
             av, bv = vv["a"], vv["b"]
             mark = "*** PERSISTS" if bv > 0 else ("gone in B" if av > 0 else "")
-            # Byte magnitude per region for byte-carrying signals ("-" for count-only
+            # Byte magnitude per region for byte-carrying signals ("--" for count-only
             # signals like cpu_fallback) -> a persisting cost shows its SIZE, so you can
             # tell a recurring 12 KB host-served loop from a 12 GB one at a glance.
             ab, bb = vv.get("a_bytes"), vv.get("b_bytes")
-            rows.append([name, str(av), str(bv), _fmt_bytes(ab) if ab else "-", _fmt_bytes(bb) if bb else "-", mark])
+            rows.append([name, str(av), str(bv), _fmt_bytes(ab) if ab else "--", _fmt_bytes(bb) if bb else "--", mark])
         lines += _table(["Signal", "A", "B", "A bytes", "B bytes", ""], rows, ["l", "r", "r", "r", "r", "l"])
         pbo = d.get("persists_by_op") or []
         if pbo:
@@ -975,6 +1006,11 @@ class RBLNDiff:
             lines.append("")
             lines.append("  nothing persisted into B (no recurring overhead across your two points)")
         return "\n".join(lines)
+
+    def __repr__(self) -> str:
+        return self.report()
+
+    __str__ = __repr__
 
 
 def explain(trace: bool = False) -> RBLNExplain:
