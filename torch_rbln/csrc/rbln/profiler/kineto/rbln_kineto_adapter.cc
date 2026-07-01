@@ -58,6 +58,7 @@ class RblnActivityProfilerSession : public ::libkineto::IActivityProfilerSession
     anchor_steady_ns_ = now_ns(std::chrono::steady_clock::now());
     anchor_system_ns_ = now_ns(std::chrono::system_clock::now());
     start_ts_ns_ = anchor_system_ns_;
+    clock_offset_ns_ = anchor_system_ns_ - anchor_steady_ns_;
     const RBLNRetCode ret = rbln_kineto_begin_session();
     if (ret != RBLNRetCode_SUCCESS) {
       RBLN_LOG_WARN(
@@ -77,7 +78,6 @@ class RblnActivityProfilerSession : public ::libkineto::IActivityProfilerSession
     }
     session_started_ = false;
     status_ = ::libkineto::TraceStatus::PROCESSING;
-    clock_offset_ns_ = anchor_system_ns_ - anchor_steady_ns_;
     projected_ = ProjectedKinetoTrace{};
     int32_t exported = 0;
     const RBLNRetCode ret = rbln_kineto_end_session_and_export(&sink_thunk, this, &exported);
