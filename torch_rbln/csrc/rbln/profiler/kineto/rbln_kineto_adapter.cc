@@ -123,11 +123,7 @@ class RblnActivityProfilerSession : public ::libkineto::IActivityProfilerSession
   }
 
   std::unique_ptr<::libkineto::CpuTraceBuffer> getTraceBuffer() override {
-    auto buf = std::make_unique<::libkineto::CpuTraceBuffer>();
-    for (const auto& act : projected_.activities) {
-      buf->emplace_activity(act);
-    }
-    return buf;
+    return nullptr;
   }
 
  private:
