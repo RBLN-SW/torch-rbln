@@ -34,8 +34,6 @@ def torch_backends_entry_point() -> None:
         import torch
 
         # Load shared objects ##################################################
-        global library_names, libraries
-
         # Ensure dependent shared library is loaded before importing native extension
         find_and_load_tvm_library("librbln.so")
 
@@ -164,7 +162,6 @@ def _create_process_group_rbln(dist_backend_opts, pg_options):
         ProcessGroupRBLN: A new ProcessGroupRBLN instance
     """
     import torch_rbln._C
-
     from torch_rbln._internal.rdma_env import _apply_control_plane_ips
 
     _apply_control_plane_ips()
