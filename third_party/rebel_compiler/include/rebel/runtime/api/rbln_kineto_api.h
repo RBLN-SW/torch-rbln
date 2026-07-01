@@ -57,7 +57,6 @@ typedef struct {
   int64_t end_steady_ns;
   const RblnKinetoAnnotation* annotations;  // array of `annotations_count`
   uint32_t annotations_count;
-  int64_t corr_id;              // correlation id, or 0 if unset
   RblnKinetoActivityKind kind;  // activity class (categories are display-only)
 } RblnKinetoSlice;
 

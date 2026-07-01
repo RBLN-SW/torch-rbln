@@ -69,7 +69,6 @@ void convert_export_to_kineto(
     act.endTime = s.end_steady_ns + clock_offset_ns;
     act.device = s.device_pid;
     act.resource = s.resource_tid;
-    act.id = static_cast<int32_t>(s.corr_id);
 
     std::string joined;
     for (uint32_t c = 0; c < s.categories_count; ++c) {
