@@ -23,7 +23,7 @@ def custom_transpose_rbln(self, dim0: int, dim1: int, out=None):
         compiled = compile_rbln_cached(
             _transpose_op_module,
             dynamic=False,
-            options={"disable_logger": True, "tensor_parallel_size": 1},
+            options={"disable_logger": True, "num_devices": 1},
             device_cache_key=self.device.index,
         )
         external_result = compiled(self, dim0=dim0, dim1=dim1)
