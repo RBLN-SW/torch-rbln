@@ -66,6 +66,105 @@ aten_impl = torch.library.Library('aten', 'IMPL')
 DEBUG_MODE = torch.version.debug
 """
 
+    def generate_foreach_optimizer_fallbacks(self) -> str:
+        """
+        Generate RBLN registrations for TensorList foreach ops used by AdamW.
+
+        PyTorch's PrivateUse1 default for these foreach ops is a composite
+        implementation. On RBLN tensors that can route each item through the
+        regular per-tensor graph path, which is unsafe for optimizer state
+        updates. Keep the TensorList operation atomic by using CPU foreach
+        kernels and copying back only the mutable first TensorList.
+        """
+        return """
+
+def _foreach_cpu_inplace(op_callable, op_name, tensor_list, *args, **kwargs):
+    rbln_log_cpu_fallback(op_name)
+    cpu_tensor_list = to_cpu(list(tensor_list))
+    cpu_args = to_cpu(args)
+    cpu_kwargs = to_cpu(kwargs)
+
+    op_callable(cpu_tensor_list, *cpu_args, **cpu_kwargs)
+
+    for dst, src in zip(tensor_list, cpu_tensor_list):
+        dst.copy_(src)
+
+
+def _foreach_cpu_out(op_callable, op_name, tensor_list, *args, **kwargs):
+    rbln_log_cpu_fallback(op_name)
+    cpu_tensor_list = to_cpu(list(tensor_list))
+    cpu_args = to_cpu(args)
+    cpu_kwargs = to_cpu(kwargs)
+    cpu_result = op_callable(cpu_tensor_list, *cpu_args, **cpu_kwargs)
+
+    device_id = extract_device_id_from_inputs(tensor_list, *args, **kwargs)
+    assert device_id is not None, "device_id should be found from rbln tensors"
+    return [item.to(f"rbln:{device_id}") for item in cpu_result]
+
+
+def foreach_add_rbln(*args, **kwargs):
+    return _foreach_cpu_out(torch._foreach_add, "aten::_foreach_add", *args, **kwargs)
+
+
+def foreach_add_inplace_rbln(*args, **kwargs):
+    return _foreach_cpu_inplace(torch._foreach_add_, "aten::_foreach_add_", *args, **kwargs)
+
+
+def foreach_mul_rbln(*args, **kwargs):
+    return _foreach_cpu_out(torch._foreach_mul, "aten::_foreach_mul", *args, **kwargs)
+
+
+def foreach_mul_inplace_rbln(*args, **kwargs):
+    return _foreach_cpu_inplace(torch._foreach_mul_, "aten::_foreach_mul_", *args, **kwargs)
+
+
+def foreach_div_inplace_rbln(*args, **kwargs):
+    return _foreach_cpu_inplace(torch._foreach_div_, "aten::_foreach_div_", *args, **kwargs)
+
+
+def foreach_lerp_inplace_rbln(*args, **kwargs):
+    return _foreach_cpu_inplace(torch._foreach_lerp_, "aten::_foreach_lerp_", *args, **kwargs)
+
+
+def foreach_addcmul_inplace_rbln(*args, **kwargs):
+    return _foreach_cpu_inplace(torch._foreach_addcmul_, "aten::_foreach_addcmul_", *args, **kwargs)
+
+
+def foreach_addcdiv_inplace_rbln(*args, **kwargs):
+    return _foreach_cpu_inplace(torch._foreach_addcdiv_, "aten::_foreach_addcdiv_", *args, **kwargs)
+
+
+def foreach_sqrt_rbln(*args, **kwargs):
+    return _foreach_cpu_out(torch._foreach_sqrt, "aten::_foreach_sqrt", *args, **kwargs)
+
+
+def foreach_sqrt_inplace_rbln(*args, **kwargs):
+    return _foreach_cpu_inplace(torch._foreach_sqrt_, "aten::_foreach_sqrt_", *args, **kwargs)
+
+"""
+
+    def generate_foreach_optimizer_registrations(self) -> str:
+        """Generate registrations for AdamW foreach optimizer ops."""
+        return """
+
+for _overload in ("List", "Scalar", "ScalarList", "Tensor"):
+    aten_impl.impl(f"_foreach_add.{_overload}", foreach_add_rbln, "PrivateUse1")
+    aten_impl.impl(f"_foreach_add_.{_overload}", foreach_add_inplace_rbln, "PrivateUse1")
+    aten_impl.impl(f"_foreach_mul.{_overload}", foreach_mul_rbln, "PrivateUse1")
+    aten_impl.impl(f"_foreach_mul_.{_overload}", foreach_mul_inplace_rbln, "PrivateUse1")
+    aten_impl.impl(f"_foreach_div_.{_overload}", foreach_div_inplace_rbln, "PrivateUse1")
+
+for _overload in ("List", "Scalar", "ScalarList"):
+    aten_impl.impl(f"_foreach_lerp_.{_overload}", foreach_lerp_inplace_rbln, "PrivateUse1")
+
+for _overload in ("Scalar", "ScalarList", "Tensor"):
+    aten_impl.impl(f"_foreach_addcmul_.{_overload}", foreach_addcmul_inplace_rbln, "PrivateUse1")
+    aten_impl.impl(f"_foreach_addcdiv_.{_overload}", foreach_addcdiv_inplace_rbln, "PrivateUse1")
+
+aten_impl.impl("_foreach_sqrt", foreach_sqrt_rbln, "PrivateUse1")
+aten_impl.impl("_foreach_sqrt_", foreach_sqrt_inplace_rbln, "PrivateUse1")
+"""
+
     def _registration_line(self, operator_name: Any, kernel_name: str) -> str:
         """
         Return the dispatcher-registration snippet for `operator_name`.
@@ -147,6 +246,7 @@ _register_cpp_shim("aten::{operator_name}", {kernel_name})"""
         """
         # Step 1: Generate header (imports, setup)
         code_blocks = self.generate_header()
+        code_blocks += self.generate_foreach_optimizer_fallbacks()
         general_kernel_name_table: Dict[str, str] = {}
         operator_register_code = ""
 
@@ -227,4 +327,5 @@ _register_cpp_shim("aten::{operator_name}", {kernel_name})"""
 
         # Step 4: Place code to register operator at the bottom of register_ops.py
         code_blocks += operator_register_code
+        code_blocks += self.generate_foreach_optimizer_registrations()
         return code_blocks
