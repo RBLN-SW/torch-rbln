@@ -50,6 +50,34 @@ main    ────○──────────●────────
                                                                          (CD)
 ```
 
+## Branch and Tag Protection
+
+The branches and tags above are protected by [GitHub repository rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets), so changes reach them through pull requests and the release automation rather than direct pushes. This keeps releases reproducible and ensures only CI-validated changes are promoted. Force pushes are blocked on every protected ref, and only the actors noted below can create or delete them.
+
+| Ref(s)            | How changes are made    |
+|-------------------|-------------------------|
+| `dev`, `main`     | Pull requests only      |
+| `rc`, `backmerge` | Release automation only |
+| `v*` tags         | Release automation only |
+
+**`dev` and `main`** accept changes only through pull requests, which must pass required reviews and status checks — the CI workflow for `dev`, the Release workflow for `main`. Repository admins can bypass these merge requirements when needed (for example, to land an urgent fix), but no one — admins included — can push to these branches directly.
+
+**`rc` and `backmerge`** are maintained entirely by the release automation: the nightly job syncs `rc` from `dev`, and the backmerge automation updates `backmerge` from `main`. No one else can update them, so contributors never push to these branches.
+
+**`v*` tags** are created only by the release automation, and pushing a `v*` tag triggers the CD workflow. No one else can create, move, or delete a `v*` tag, so every published version corresponds to a tag created on a validated `main` commit.
+
+### Merge methods
+
+The merge method depends on the branch pair:
+
+| Pull request      | Merge method          |
+|-------------------|-----------------------|
+| `feature → dev`   | Squash and merge      |
+| `rc → main`       | Create a merge commit |
+| `backmerge → dev` | Create a merge commit |
+
+`rc → main` and `backmerge → dev` use a merge commit so the release commit on `main` and its version tag stay reachable from `dev`, which setuptools-scm relies on to derive correct development versions. Every other pull request is squash-merged.
+
 ## Versioning
 
 torch-rbln releases align with the [RBLN SDK](https://docs.rbln.ai/) — each release version matches the corresponding SDK version.
