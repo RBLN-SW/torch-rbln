@@ -1689,7 +1689,7 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     (``ops_utils`` is imported broadly).
     """
     from torch_rbln._internal.compile_cache import compile_rbln_cached
-    from torch_rbln._internal.env_utils import use_device_group_tensor_parallel_size
+    from torch_rbln._internal.env_utils import use_device_group_num_devices
     from torch_rbln._internal.warm_cache import (
         consume_force_recompile as _consume_warm_cache_force_recompile,
         install_pending as _install_warm_cache_pending,
@@ -1756,8 +1756,8 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     has_views = any(r is not None for r in view_recipes)
 
     compile_options = {"disable_logger": True}
-    if not use_device_group_tensor_parallel_size():
-        compile_options["tensor_parallel_size"] = 1
+    if not use_device_group_num_devices():
+        compile_options["num_devices"] = 1
     _runtime_holder = []
     compile_options["_runtime_holder"] = _runtime_holder
 

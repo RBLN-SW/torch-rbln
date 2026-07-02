@@ -42,9 +42,9 @@ def get_physical_device_ids(device_id: int) -> Optional[list[int]]:
     return entry.physical_device_ids
 
 
-def auto_determine_tensor_parallel_size(device_id: Optional[int]) -> Optional[int]:
+def auto_determine_num_devices(device_id: Optional[int]) -> Optional[int]:
     """
-    Automatically determine tensor_parallel_size based on RSD environment variables.
+    Automatically determine num_devices based on RSD environment variables.
 
     This function reads RBLN_NPUS_PER_DEVICE or RBLN_DEVICE_MAP environment variables
     to determine the number of physical NPUs mapped to the given logical device.
@@ -65,7 +65,7 @@ def auto_determine_tensor_parallel_size(device_id: Optional[int]) -> Optional[in
 
     Note:
         This function is used by torch.compile backend to automatically set
-        tensor_parallel_size when not explicitly provided.
+        num_devices when not explicitly provided.
     """
     # Use device_id=0 as default if not provided
     target_device_id = device_id if device_id is not None else 0
