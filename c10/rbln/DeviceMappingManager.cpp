@@ -4,7 +4,9 @@
 #include <rebel/runtime/api/rbln_runtime_api.h>
 
 #include <atomic>
+#include <cctype>
 #include <cstdlib>
+#include <exception>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -14,6 +16,25 @@ namespace c10::rbln {
 namespace {
 
 std::atomic<RblnDeviceMappingInitializedCallback> g_device_mapping_initialized_cb{nullptr};
+
+// Parse an int from a user env value; turn std::stoi's context-free throw into
+// an actionable error naming the variable and the bad value.
+int parseEnvInt(const std::string& value, const char* var_name) {
+  size_t pos = 0;
+  int result = 0;
+  try {
+    result = std::stoi(value, &pos);
+  } catch (const std::exception&) {
+    RBLN_CHECK(false, "{}='{}' is not a valid integer", var_name, value);
+  }
+  // std::stoi parses only a leading prefix ("1abc" -> 1); reject any trailing
+  // non-whitespace so a malformed value errors instead of being truncated.
+  while (pos < value.size() && (std::isspace(static_cast<unsigned char>(value[pos])) != 0)) {
+    ++pos;
+  }
+  RBLN_CHECK(pos == value.size(), "{}='{}' is not a valid integer", var_name, value);
+  return result;
+}
 
 } // namespace
 
@@ -71,64 +92,78 @@ RblnNpuMappingEnvDisplay getRblnNpuMappingEnvDisplay() {
 }
 
 std::vector<std::vector<int>> DeviceMappingManager::parseDeviceMap(const std::string& device_map_str) {
+  // Grammar (whitespace-insensitive): groups := group (',' group)* ;
+  //   group := '[' number (',' number)* ']' . Empty elements/groups and trailing
+  // commas at either level are rejected so a malformed map errors loudly instead
+  // of being silently truncated (e.g. "[0,]" / "[]" / "[0],,[1]" / "[0],[1],").
   std::vector<std::vector<int>> result;
+  const size_t len = device_map_str.length();
   size_t pos = 0;
-  size_t len = device_map_str.length();
 
-  while (pos < len) {
-    // Skip whitespace
-    while (pos < len && (device_map_str[pos] == ' ' || device_map_str[pos] == ',')) {
+  auto skip_spaces = [&]() {
+    while (pos < len && device_map_str[pos] == ' ') {
       pos++;
     }
+  };
 
-    if (pos >= len)
-      break;
+  skip_spaces();
+  // An empty / whitespace-only value means "no explicit mapping"; callers fall
+  // back to a default layout. Any non-empty value must be fully well-formed.
+  if (pos >= len) {
+    return result;
+  }
 
-    // Expect '['
-    if (device_map_str[pos] != '[') {
-      RBLN_CHECK(false, "Invalid RBLN_DEVICE_MAP format. Expected '[' at position {}. Format: \"[0,1],[2,3]\"", pos);
-    }
-    pos++; // Skip '['
+  while (true) {
+    // ---- one group: '[' number (',' number)* ']' ----
+    RBLN_CHECK(
+        device_map_str[pos] == '[',
+        "Invalid RBLN_DEVICE_MAP format. Expected '[' at position {} (format: \"[0,1],[2,3]\")",
+        pos);
+    pos++; // consume '['
 
     std::vector<int> group;
     std::string num_str;
+    bool expect_number = true; // a number is required after '[' and after each ','
 
-    // Parse numbers until ']'
-    while (pos < len && device_map_str[pos] != ']') {
-      if (device_map_str[pos] == ',') {
-        if (!num_str.empty()) {
-          group.push_back(std::stoi(num_str));
-          num_str.clear();
-        }
-        pos++;
-      } else if (device_map_str[pos] == ' ') {
-        pos++;
-      } else if (device_map_str[pos] >= '0' && device_map_str[pos] <= '9') {
-        num_str += device_map_str[pos];
-        pos++;
-      } else {
-        RBLN_CHECK(
-            false,
-            "Invalid RBLN_DEVICE_MAP format. Unexpected character '{}' at position {}",
-            device_map_str[pos],
-            pos);
+    while (true) {
+      skip_spaces();
+      RBLN_CHECK(pos < len, "Invalid RBLN_DEVICE_MAP format. Unterminated group; expected ']' before end of value");
+      const char ch = device_map_str[pos];
+      if (ch == ']') {
+        // "[]" or a trailing ',' before ']' leaves expect_number set.
+        RBLN_CHECK(!expect_number, "Invalid RBLN_DEVICE_MAP format. Empty group or trailing ',' at position {}", pos);
+        break;
       }
+      if (ch == ',') {
+        RBLN_CHECK(
+            !expect_number, "Invalid RBLN_DEVICE_MAP format. Empty list element (unexpected ',') at position {}", pos);
+        group.push_back(parseEnvInt(num_str, "RBLN_DEVICE_MAP"));
+        num_str.clear();
+        expect_number = true;
+        pos++;
+        continue;
+      }
+      RBLN_CHECK(
+          ch >= '0' && ch <= '9', "Invalid RBLN_DEVICE_MAP format. Unexpected character '{}' at position {}", ch, pos);
+      num_str += ch;
+      expect_number = false;
+      pos++;
     }
+    // Commit the final number (group is non-empty: expect_number is false at ']').
+    group.push_back(parseEnvInt(num_str, "RBLN_DEVICE_MAP"));
+    result.emplace_back(std::move(group));
+    pos++; // consume ']'
 
-    // Add last number if any
-    if (!num_str.empty()) {
-      group.push_back(std::stoi(num_str));
+    // ---- separator: end of string, or ',' followed by another group ----
+    skip_spaces();
+    if (pos >= len) {
+      break;
     }
-
-    // Expect ']'
-    if (pos >= len || device_map_str[pos] != ']') {
-      RBLN_CHECK(false, "Invalid RBLN_DEVICE_MAP format. Expected ']' at position {}", pos);
-    }
-    pos++; // Skip ']'
-
-    if (!group.empty()) {
-      result.emplace_back(std::move(group));
-    }
+    RBLN_CHECK(
+        device_map_str[pos] == ',', "Invalid RBLN_DEVICE_MAP format. Expected ',' between groups at position {}", pos);
+    pos++; // consume ','
+    skip_spaces();
+    RBLN_CHECK(pos < len, "Invalid RBLN_DEVICE_MAP format. Trailing ',' with no group after it");
   }
 
   return result;
@@ -138,7 +173,15 @@ void DeviceMappingManager::registerLogicalDevice(int logical_device_index, const
   // Register the logical device with its physical NPU indices
   // Need a non-const copy for rbln_register_device_id which requires int*
   std::vector<int> physical_ids_copy = physical_ids;
-  RBLN_CHECK(!rbln_register_device_id(logical_device_index, physical_ids_copy.data(), physical_ids_copy.size()));
+  const int rc = rbln_register_device_id(
+      logical_device_index, physical_ids_copy.data(), static_cast<int>(physical_ids_copy.size()));
+  RBLN_CHECK(
+      rc == 0,
+      "rbln_register_device_id failed for rbln:{} on physical NPU(s) [{}] (rc={}); the device(s) may be in use by "
+      "another process or hold stale allocations. Free the device(s) or adjust RBLN_DEVICES.",
+      logical_device_index,
+      fmt::join(physical_ids_copy, ","),
+      rc);
   assigned_devices_.insert(static_cast<c10::DeviceIndex>(logical_device_index));
 
   // Store mapping information
@@ -283,7 +326,10 @@ void DeviceMappingManager::initialize() {
     int device_count = 0;
     // A failed query (SDK/driver not loadable) stays fatal; "query succeeded,
     // found 0 NPUs" is handled below.
-    RBLN_CHECK(!rbln_get_device_count(&device_count));
+    RBLN_CHECK(
+        !rbln_get_device_count(&device_count),
+        "rbln_get_device_count failed; the RBLN SDK/driver may not be loadable — ensure the SDK is installed "
+        "and the kernel driver is loaded");
     const int physical_device_count = device_count;
     RBLN_LOG_DEBUG("Found {} physical NPU(s)", physical_device_count);
 
@@ -310,7 +356,7 @@ void DeviceMappingManager::initialize() {
       // If RBLN_NPUS_PER_DEVICE is not set, default to 1 (1:1 mapping)
       int npus_per_device = 1;
       if (env_display.npus_per_device != "-" && !env_display.npus_per_device.empty()) {
-        npus_per_device = std::stoi(env_display.npus_per_device);
+        npus_per_device = parseEnvInt(env_display.npus_per_device, "RBLN_NPUS_PER_DEVICE");
         RBLN_CHECK(npus_per_device > 0, "RBLN_NPUS_PER_DEVICE must be a positive integer");
         // Validate: must be one of the allowed base sizes
         RBLN_CHECK(

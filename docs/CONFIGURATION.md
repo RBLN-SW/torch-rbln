@@ -176,7 +176,7 @@ The following environment variables control tensor parallel behavior for `torch.
 
 ### TORCH_RBLN_USE_TP_FAILOVER
 
-Enables automatic tensor parallel failover. When a RuntimeError occurs during execution with `tensor_parallel_size > 1`, the system automatically retries with `tp_size=1` on the root NPU of the device group.
+Enables automatic tensor parallel failover. When a RuntimeError occurs during execution with `num_devices > 1`, the system automatically retries with `num_devices=1` on the root NPU of the device group.
 
 This is useful for models that don't support tensor parallelism, allowing them to run on a single NPU within an aggregated device group without manual intervention.
 
@@ -186,32 +186,32 @@ export TORCH_RBLN_USE_TP_FAILOVER=OFF  # disable (default: OFF)
 ```
 
 **Behavior:**
-- When set to ON and a RuntimeError occurs with `tp > 1`:
+- When set to ON and a RuntimeError occurs with `num_devices > 1`:
   1. The system logs a warning message indicating the failover attempt
-  2. The model is recompiled with `tensor_parallel_size=1`
+  2. The model is recompiled with `num_devices=1`
   3. Execution continues on the root NPU of the device group
 - When set to OFF or unset (default), RuntimeErrors are propagated as-is
 
 **Example scenario:**
 With `RBLN_NPUS_PER_DEVICE=4` (4 NPUs per logical device):
-- Initial compilation attempts `tp=4`
+- Initial compilation attempts `num_devices=4`
 - If the model doesn't support TP, a RuntimeError occurs
-- With failover enabled, the system retries with `tp=1` on NPU 0
+- With failover enabled, the system retries with `num_devices=1` on NPU 0
 
 ### TORCH_RBLN_USE_DEVICE_TP
 
-Controls whether eager mode operations use the device group's tensor parallel size instead of `tp_size=1`.
+Controls whether eager mode operations use the device group's `num_devices` instead of `num_devices=1`.
 
-By default, eager mode ops (operations outside of `torch.compile`) use `tp_size=1`. When this environment variable is set to ON, eager mode ops will follow the logical device size defined by `RBLN_NPUS_PER_DEVICE` or `RBLN_DEVICE_MAP`, matching the behavior of `torch.compile` operations.
+By default, eager mode ops (operations outside of `torch.compile`) use `num_devices=1`. When this environment variable is set to ON, eager mode ops will follow the logical device size defined by `RBLN_NPUS_PER_DEVICE` or `RBLN_DEVICE_MAP`, matching the behavior of `torch.compile` operations.
 
 ```bash
-export TORCH_RBLN_USE_DEVICE_TP=ON   # use device group tp size
-export TORCH_RBLN_USE_DEVICE_TP=OFF  # use tp_size=1 for eager ops (default: OFF)
+export TORCH_RBLN_USE_DEVICE_TP=ON   # use device group num_devices
+export TORCH_RBLN_USE_DEVICE_TP=OFF  # use num_devices=1 for eager ops (default: OFF)
 ```
 
 **Behavior:**
-- When set to ON: Eager mode ops use the device group's tensor parallel size (e.g., `tp=4` with `RBLN_NPUS_PER_DEVICE=4`)
-- When set to OFF or unset (default): Eager mode ops use `tp_size=1`
+- When set to ON: Eager mode ops use the device group's `num_devices` (e.g., `num_devices=4` with `RBLN_NPUS_PER_DEVICE=4`)
+- When set to OFF or unset (default): Eager mode ops use `num_devices=1`
 
 **Use case:**
 This is useful when you want consistent tensor parallel behavior across both eager and compiled operations, particularly in mixed execution scenarios.

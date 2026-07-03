@@ -45,13 +45,17 @@ Python ABI we link against; the Python side just calls the C++
 helper. See ``torch_rbln._C._pybind_instance_raw_ptr`` in
 ``torch_rbln/csrc/rbln/Module.cpp``.
 
-Mismatched layouts raise at install time (the recovered pointer
-fails its first method dispatch via ctypes), so the cache stays
-empty instead of issuing a bad pointer to rebel.
+Type gate
+---------
+The raw-pointer trick is only valid for a pybind11 simple-layout
+``PyRblnSyncRuntime``; any other object yields a non-null garbage pointer that
+segfaults on use. :func:`install_pending` checks the handle type before
+extracting and skips the cache on mismatch (the safe pybind path still works).
 """
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Any
 
 import torch
@@ -71,6 +75,29 @@ def _raw_cpp_ptr(pybound_instance: Any) -> int:
             "warm_cache: unexpected null C++ pointer extracted from pybind instance; layout assumption may be wrong"
         )
     return int(raw)
+
+
+@lru_cache(maxsize=1)
+def _expected_runtime_type() -> type:
+    """rebel's ``PyRblnSyncRuntime`` — the only type the raw-ptr bridge accepts.
+
+    Imported from the same place rebel's own ``base_runtime.py`` uses it.
+    """
+    from rebel._C import PyRblnSyncRuntime
+
+    return PyRblnSyncRuntime
+
+
+def _is_expected_runtime_handle(handle: Any) -> bool:
+    """True iff ``handle`` is rebel's ``PyRblnSyncRuntime`` (what the raw-ptr
+    bridge assumes). On a rename/move the import fails and we skip the cache.
+    """
+    if handle is None:
+        return False
+    try:
+        return isinstance(handle, _expected_runtime_type())
+    except Exception:
+        return False
 
 
 _DTYPE_KEY = {
@@ -96,7 +123,12 @@ def install_pending(runtime_holder: list, outputs: Any) -> bool:
         return False
 
     dyn_runtime = runtime_holder[-1]
-    runtime_handle = dyn_runtime._runtime_handle
+    runtime_handle = getattr(dyn_runtime, "_runtime_handle", None)
+    # Type gate (see module docstring): skip the fast path on a wrong/changed
+    # handle rather than cache a pointer we'd dereference blindly -> segfault.
+    if not _is_expected_runtime_handle(runtime_handle):
+        runtime_holder.clear()
+        return False
     try:
         raw_ptr = _raw_cpp_ptr(runtime_handle)
     except RuntimeError:

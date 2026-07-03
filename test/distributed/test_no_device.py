@@ -100,7 +100,12 @@ class TestNoDeviceDistributed(TestCase):
 
     @unittest.skipIf(_HAS_NPU, _NEEDS_NO_NPU)
     def test_device_mesh_world_size_1_without_npu(self):
-        """init_device_mesh("rbln", (1,)) must build with no NPU (DeviceMesh's device_count()==0 skip)."""
+        """init_device_mesh("rbln", (1,)) must build with no NPU.
+
+        is_initialized() reports True on a no-device host, so DeviceMesh skips its
+        auto-select path (which would otherwise divide by device_count()==0 or call
+        set_device(), both of which fail with no NPU).
+        """
         mp.spawn(spawn_target_with_clean_exit, args=(_mesh_worker, 1), nprocs=1, join=True)
 
     @unittest.skipIf(_HAS_NPU, _NEEDS_NO_NPU)

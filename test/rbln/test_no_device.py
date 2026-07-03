@@ -79,9 +79,11 @@ class TestNoDevice(TestCase):
         self.assertEqual(rbln_memory.memory_reserved(), 0)
 
     def test_is_initialized_tracks_set_device(self):
-        """``is_initialized()`` exists (DeviceMesh requires it) and flips on ``set_device``.
+        """``is_initialized()`` exists (DeviceMesh requires it).
 
-        Run in a fresh subprocess so the process-wide flag starts False.
+        With a device it starts False and flips True on ``set_device``; with no device
+        it reports True so DeviceMesh skips its auto-select path. Run in a fresh
+        subprocess so the process-wide flag starts from its default.
         """
         script = textwrap.dedent(
             f"""
@@ -89,10 +91,14 @@ class TestNoDevice(TestCase):
             sys.path.insert(0, {_PROJECT_ROOT!r})
             import torch, torch_rbln
             assert isinstance(torch.rbln.is_initialized(), bool)
-            assert torch.rbln.is_initialized() is False, "should start uninitialized"
             if torch.rbln.device_count() > 0:
+                assert torch.rbln.is_initialized() is False, "should start uninitialized with a device"
                 torch.rbln.set_device(0)
                 assert torch.rbln.is_initialized() is True, "set_device should initialize"
+            else:
+                # No device: is_initialized() reports True so DeviceMesh skips auto-select
+                # (get_rank() % device_count()==0 / set_device both fail with no NPU).
+                assert torch.rbln.is_initialized() is True, "no-device should report initialized"
             print("INIT_OK")
             """
         )
@@ -102,6 +108,38 @@ class TestNoDevice(TestCase):
         self.assertTrue(
             result.returncode == 0 and "INIT_OK" in result.stdout,
             f"is_initialized() semantics wrong (rc={result.returncode})\n"
+            f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}",
+        )
+
+    def test_is_initialized_first_call_triggers_lazy_init(self):
+        """``is_initialized()`` must be correct as the *first* RBLN call of a process.
+
+        It triggers device-mapping lazy-init via ``device_count()``; the existing
+        ``test_is_initialized_tracks_set_device`` calls ``device_count()`` first, so
+        it would not catch a regression where ``is_initialized()`` alone fails to
+        initialize. Here it is the very first RBLN access: no device -> True (so
+        DeviceMesh skips auto-select), with a device -> False (set_device not run).
+        """
+        script = textwrap.dedent(
+            f"""
+            import sys
+            sys.path.insert(0, {_PROJECT_ROOT!r})
+            import torch, torch_rbln
+            first = torch.rbln.is_initialized()  # first RBLN call: must lazy-init, not crash
+            assert isinstance(first, bool)
+            if torch.rbln.device_count() > 0:
+                assert first is False, "with a device, first is_initialized() must be False"
+            else:
+                assert first is True, "with no device, first is_initialized() must be True"
+            print("FIRST_OK")
+            """
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script], cwd=_PROJECT_ROOT, capture_output=True, text=True, timeout=90
+        )
+        self.assertTrue(
+            result.returncode == 0 and "FIRST_OK" in result.stdout,
+            f"is_initialized()-first semantics wrong (rc={result.returncode})\n"
             f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}",
         )
 
