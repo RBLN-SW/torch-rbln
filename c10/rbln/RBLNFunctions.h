@@ -135,13 +135,9 @@ C10_RBLN_API bool is_eager_malloc();
 C10_RBLN_API void set_device_layout_like(void* target_data, const void* ref_data);
 
 /**
- * @brief Whether host-backed dummy device mode is active (RBLN_DUMMY_DEVICE).
- *
- * When true, the allocation and transfer functions below run on host memory
- * instead of the RBLN runtime, so device tensors can be built and compiled
- * without an NPU (execution still needs hardware). Cached after the first call.
- *
- * @return true if dummy device mode is enabled, false otherwise.
+ * @brief Whether RBLN_DUMMY_DEVICE mode is active: a host-backed logical device
+ * with no NPU, so tensors can be built and compiled without hardware (execution
+ * still needs one). Cached after the first call.
  */
 C10_RBLN_API bool is_dummy_device();
 
@@ -304,10 +300,6 @@ C10_RBLN_API void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies);
  * returns a non-zero `borrow_id`; the value `0` is reserved as a sentinel
  * meaning "no live borrow" so cleanup paths can pre-fill a zero in a vector
  * and call `return_borrowed` unconditionally for skipped entries.
- *
- * In RBLN_DUMMY_DEVICE mode the borrow is an identity host view (non-zero id,
- * `return_borrowed` no-ops): double-release is not detected and `updated=false`
- * does not roll back writes.
  */
 struct BorrowedHostPtr {
   uintptr_t host_ptr;

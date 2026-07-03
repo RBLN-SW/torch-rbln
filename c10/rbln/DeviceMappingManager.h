@@ -4,7 +4,6 @@
 #include <c10/rbln/RBLNMacros.h>
 #include <c10/util/CallOnce.h>
 #include <array>
-#include <optional>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -231,20 +230,12 @@ class C10_RBLN_API DeviceMappingManager {
   void initializeFromNpusPerDevice(int npus_per_device, int physical_device_count);
 
   /**
-   * @brief Resolve the host-backed dummy device layout from the environment.
+   * @brief Register host-backed logical devices (RBLN_DUMMY_DEVICE) with no NPU.
    *
-   * Returns nullopt when dummy mode is disabled. Otherwise returns one
-   * physical-id group per logical device: from RBLN_DEVICE_MAP when set
-   * (preserving the RSD/TP shape — group sizes), else a single logical device.
-   * The ids are shape markers only; no real NPU backs them and they are not
-   * range-validated against hardware.
+   * Layout comes from RBLN_DEVICE_MAP / RBLN_NPUS_PER_DEVICE (or a single
+   * device); physical ids are shape markers only and are not range-checked.
    */
-  std::optional<std::vector<std::vector<int>>> getDummyDeviceGroups();
-
-  /**
-   * @brief Register host-backed logical devices (one per group) with no NPU.
-   */
-  void initializeDummyDevices(const std::vector<std::vector<int>>& groups);
+  void initializeDummyDevices();
 
   /**
    * @brief Check if the number of physical NPUs per logical device is valid (must be in BASE_SIZES).
@@ -293,14 +284,9 @@ struct RblnNpuMappingEnvDisplay {
 C10_RBLN_API RblnNpuMappingEnvDisplay getRblnNpuMappingEnvDisplay();
 
 /**
- * @brief Whether RBLN_DUMMY_DEVICE is enabled — the single boolean parser shared
- * by is_dummy_device() and dummy-device initialization.
- *
- * RBLN_DUMMY_DEVICE is a boolean flag owned by the rebel runtime, which
- * validates it at startup and aborts on a non-boolean value; this only has to
- * recognize the truthy spellings (1/true/t/yes/y/on, case-insensitive). The
- * dummy logical device count comes from RBLN_DEVICE_MAP (or defaults to 1), NOT
- * from this flag. Runtime-free; never throws.
+ * @brief Whether RBLN_DUMMY_DEVICE is enabled (truthy spellings only; the rebel
+ * runtime already rejects non-boolean values). Runtime-free; never throws.
+ * The logical device count comes from RBLN_DEVICE_MAP, not this flag.
  */
 C10_RBLN_API bool dummyDeviceEnabled();
 

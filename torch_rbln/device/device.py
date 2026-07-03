@@ -88,12 +88,10 @@ def is_available() -> bool:
 
 
 def is_dummy_device() -> bool:
-    """Whether host-backed dummy device mode (``RBLN_DUMMY_DEVICE``) is active.
+    """Whether ``RBLN_DUMMY_DEVICE`` (host-backed, no NPU) mode is active.
 
-    In dummy mode there is no NPU: tensors are host-backed so a model can be
-    constructed and compiled, but execution still requires hardware. Use this to
-    distinguish a compile-only dummy from real availability, since
-    :func:`is_available` returns ``True`` in both cases.
+    ``is_available()`` is ``True`` in both dummy and real modes, so use this to
+    tell a compile-only dummy device apart from real NPU availability.
     """
     return torch_rbln._C.is_dummy_device()
 
