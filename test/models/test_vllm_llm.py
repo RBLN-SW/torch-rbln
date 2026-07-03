@@ -406,6 +406,114 @@ def test_vllm_compile_only_no_npu_via_dummy(tmp_path):
     assert "OK artifacts=" in proc.stdout, proc.stdout
 
 
+# Phase 2 of the dummy-compile -> real-run round trip: load the artifacts phase 1
+# built on a dummy device onto a real NPU and generate. Asserts nothing was
+# recompiled (the .rbln set is unchanged) so we know the dummy-built artifact
+# actually ran, and that the output matches the CPU-reference expectation.
+_REAL_RUN_FROM_CACHE_WORKER = """
+import glob, os
+import torch_rbln  # noqa: F401
+import torch
+
+assert torch.rbln.is_dummy_device() is False, "phase 2 must use a real device"
+assert torch.rbln.physical_device_count() > 0, "phase 2 needs a real NPU"
+
+from vllm import LLM, SamplingParams
+
+pat = os.path.join(os.environ["VLLM_CACHE_ROOT"], "rbln", "**", "*.rbln")
+before = set(glob.glob(pat, recursive=True))
+assert before, "phase 1 wrote no artifacts to load"
+
+llm = LLM(
+    model=os.environ["RBLN_TEST_MODEL_ID"],
+    dtype="float16",
+    max_model_len=2048,
+    block_size=1024,
+    enable_chunked_prefill=True,
+    max_num_batched_tokens=128,
+    max_num_seqs=1,
+    tensor_parallel_size=1,
+    enforce_eager=False,
+    gpu_memory_utilization=0.1,
+)
+try:
+    out = llm.generate(["The capital of France is"], SamplingParams(temperature=0.0, max_tokens=5))
+    text = out[0].outputs[0].text
+finally:
+    llm.llm_engine.engine_core.shutdown()
+
+new = set(glob.glob(pat, recursive=True)) - before
+assert not new, f"recompiled on the real device instead of loading the dummy-built artifacts: {new}"
+assert text == os.environ["RBLN_TEST_EXPECTED"], f"unexpected generation: {text!r}"
+print(f"OK text={text!r}")
+"""
+
+
+@pytest.mark.test_set_ci
+@pytest.mark.single_worker
+def test_vllm_dummy_compiled_runs_on_real_npu(tmp_path):
+    """Full promise of dummy mode: compile with no NPU, run on a real one.
+
+    Phase 1 builds the model's .rbln artifacts on a dummy (no-NPU) device;
+    phase 2 loads those exact artifacts on a real NPU and generates, asserting
+    the output matches the reference and that nothing was recompiled. Skipped
+    when no NPU is available to run against.
+    """
+    probe = subprocess.run(
+        [sys.executable, "-c", "from rebel._C import get_npu_name; print(get_npu_name(0) or '')"],
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
+    if not probe.stdout.strip():
+        pytest.skip("no NPU available to run the dummy-compiled artifacts")
+
+    cache = str(tmp_path / "vllm_cache")
+    model_id = MODEL_CONFIGS["qwen3_0_6b"].model_id
+    expected = EXPECTED_TEXT[("qwen3_0_6b", 1, "graph", torch.float16)]
+
+    # Phase 1: dummy compile-only -> shared cache (no real device touched).
+    p1_env = dict(os.environ)
+    for key in ("RBLN_DEVICES", "RBLN_DEVICE_MAP", "RBLN_NPUS_PER_DEVICE"):
+        p1_env.pop(key, None)
+    p1_env.update(
+        RBLN_DUMMY_DEVICE="1",
+        RBLN_TARGET_SOC="RBLN-CA25",
+        VLLM_RBLN_USE_VLLM_MODEL="1",
+        VLLM_RBLN_COMPILE_ONLY="1",
+        VLLM_CACHE_ROOT=cache,
+        RBLN_TEST_MODEL_ID=model_id,
+    )
+    p1 = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(_COMPILE_ONLY_DUMMY_WORKER)],
+        env=p1_env,
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
+    assert p1.returncode == 0, f"phase 1 (dummy compile) failed:\nSTDOUT:\n{p1.stdout}\nSTDERR:\n{p1.stderr}"
+
+    # Phase 2: load those dummy-built artifacts on the real NPU and generate.
+    p2_env = dict(os.environ)
+    for key in ("RBLN_DUMMY_DEVICE", "RBLN_TARGET_SOC", "VLLM_RBLN_COMPILE_ONLY"):
+        p2_env.pop(key, None)
+    p2_env.update(
+        VLLM_RBLN_USE_VLLM_MODEL="1",
+        VLLM_CACHE_ROOT=cache,
+        RBLN_TEST_MODEL_ID=model_id,
+        RBLN_TEST_EXPECTED=expected,
+    )
+    p2 = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(_REAL_RUN_FROM_CACHE_WORKER)],
+        env=p2_env,
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
+    assert p2.returncode == 0, f"phase 2 (real-NPU run) failed:\nSTDOUT:\n{p2.stdout}\nSTDERR:\n{p2.stderr}"
+    assert "OK text=" in p2.stdout, p2.stdout
+
+
 if __name__ == "__main__":
     # See module-level NOTE for why we don't use ``common_utils.run_tests``.
     raise SystemExit("Run this module via pytest: pytest test/models/test_vllm_llm.py")
