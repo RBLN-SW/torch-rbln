@@ -1,10 +1,15 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""Host-backed dummy device contract (RBLN_DUMMY_DEVICE=1).
+"""Dummy device contract (RBLN_DUMMY_DEVICE=1).
 
 Dummy mode is an explicit opt-in that lets torch-rbln construct device tensors
-and run memory transfers on host memory, so a model can be traced/compiled on a
-host with no NPU. It is forced regardless of physical NPU presence.
+and run memory transfers with no NPU present, so a model can be traced/compiled
+on a host without hardware. Allocations and copies are backed by rebel's
+v-memory host mirror through a dummy runtime context; torch adds no host-memory
+shim of its own. It is forced regardless of physical NPU presence.
+
+Dummy mode registers the device against RBLN_TARGET_SOC (there is no NPU to
+probe for the SoC), so RBLN_TARGET_SOC must be set alongside RBLN_DUMMY_DEVICE.
 
 RBLN_DUMMY_DEVICE must be set before ``import torch_rbln`` (the device-mapping
 singleton reads it once at init), so each case runs in a fresh subprocess with
@@ -48,6 +53,10 @@ def _clean_env() -> dict:
 def _run_with_dummy(snippet: str, env_extra: dict | None = None) -> subprocess.CompletedProcess:
     env = _clean_env()
     env["RBLN_DUMMY_DEVICE"] = "1"
+    # Dummy mode registers the device with the runtime, which resolves the target
+    # SoC from RBLN_TARGET_SOC (no NPU to probe). Provide a default; tests may
+    # override via env_extra.
+    env["RBLN_TARGET_SOC"] = "RBLN-CA25"
     if env_extra:
         env.update(env_extra)
     return subprocess.run(
@@ -277,23 +286,9 @@ def test_torch_compile_tracing_smoke():
     assert "OK" in proc.stdout
 
 
-def test_set_device_layout_like_is_noop():
-    # Runtime-free in dummy mode: same-device whole allocations -> no-op (no NPU).
-    proc = _run_with_dummy(
-        """
-        import torch, torch_rbln
-        target = torch.empty(4, device="rbln:0")
-        ref = torch.empty(4, device="rbln:0")
-        torch.rbln.set_device_layout_like(target, ref)
-        print("OK")
-        """
-    )
-    _assert_ok(proc)
-    assert "OK" in proc.stdout
-
-
-def test_offload_is_noop():
-    # torch.rbln.offload() must not touch the runtime in dummy mode.
+def test_offload_runs_in_dummy_mode():
+    # torch.rbln.offload() flips a runtime flag; on the dummy context it is a safe
+    # no-op and tensor allocation inside the block still works.
     proc = _run_with_dummy(
         """
         import torch, torch_rbln
@@ -366,25 +361,19 @@ def test_device_map_shapes(device_map, expected_count, expected_ids0):
     assert "OK" in proc.stdout
 
 
-# A physical device id past any realistic host's range. Mapping user device 0 ->
-# this id makes rblnGetDeviceInfo() miss, so get_npu_name(0) returns None -- i.e.
-# a *genuine no-NPU host*, reproduced even on a machine that physically has NPUs.
-# RBLN_DUMMY_DEVICE keeps tensor/alloc host-backed; only the NPU-name probe is
-# forced to miss. Without dummy, this same setup dies at the first device op (see
-# test_dummy_is_required_no_silent_cpu), which is the intended behavior.
-_NO_NPU_DEVICES = "999"
+# A physical device id past any realistic host's range. With RBLN_TARGET_SOC set,
+# dummy registration takes the SoC from the env instead of probing hardware, so
+# this id is a pure shape marker and no real NPU is ever touched -- the no-device
+# path is exercised even on a machine that physically has NPUs.
+_NO_NPU_MAP = "[99]"
 
 
 _COMPILE_ONLY_SNIPPET = """
 import glob, os, tempfile
 import torch, torch_rbln
-from rebel._C import get_npu_name
-
-# Precondition: this really is a no-NPU view (get_npu_name misses).
-assert get_npu_name(0) is None, get_npu_name(0)
 
 cache = tempfile.mkdtemp(prefix="rbln_dummy_compile_")
-opts = {{"mode": ["compile_only"], "cache_dir": cache}}
+opts = {"mode": ["compile_only"], "cache_dir": cache}
 npu = os.environ.get("RBLN_DUMMY_TEST_NPU")
 if npu:
     opts["npu"] = npu
@@ -397,43 +386,53 @@ class Net(torch.nn.Module):
 
 m = Net().eval().to("rbln:0")
 x = torch.tensor([-1.0, 0.0, 1.0, 2.0], device="rbln:0")
-try:
+try:  # compile_only writes the artifact; the call itself errors (no real device)
     torch.compile(m, backend="rbln", dynamic=False, options=opts)(x)
 except Exception as e:
     print("COMPILE_EXC:", type(e).__name__, str(e))
 arts = glob.glob(os.path.join(cache, "*.rbln"))
-{assertion}
+assert len(arts) == 1 and os.path.getsize(arts[0]) > 0, arts
 print("OK")
 """
 
 
-@pytest.mark.parametrize("npu", ["RBLN-CA25", "RBLN-CR03"])
-def test_compile_only_targets_npu_option_on_no_npu_host(npu):
-    # No NPU (dummy + out-of-range RBLN_DEVICES => get_npu_name is None) and no
-    # RBLN_TARGET_SOC: the compile target is resolved *solely* from the
-    # torch.compile `npu` option, and a .rbln artifact is written for that SoC.
+def test_compile_only_uses_target_soc_when_no_npu_option():
+    # No `npu` option: the compile target is resolved from RBLN_TARGET_SOC (the SoC
+    # dummy mode registers against), and a .rbln artifact is written for it.
     proc = _run_with_dummy(
-        _COMPILE_ONLY_SNIPPET.format(assertion="assert len(arts) == 1 and os.path.getsize(arts[0]) > 0, arts"),
-        env_extra={"RBLN_DUMMY_TEST_NPU": npu, "RBLN_DEVICES": _NO_NPU_DEVICES},
+        _COMPILE_ONLY_SNIPPET,
+        env_extra={"RBLN_TARGET_SOC": "RBLN-CA25", "RBLN_DEVICE_MAP": _NO_NPU_MAP},
     )
     _assert_ok(proc)
     assert "OK" in proc.stdout
-    # The artifact is compiled for the requested SoC, not some probed/default one.
-    assert f"Target NPU: {npu}" in (proc.stdout + proc.stderr), proc.stderr
+    # Compiled for the registered SoC, no mismatch warning.
+    out = proc.stdout + proc.stderr
+    assert "Target NPU: RBLN-CA25" in out, proc.stderr
+    assert "differs from" not in out, proc.stderr
 
 
-def test_compile_only_without_npu_option_fails_fast_on_no_npu_host():
-    # No NPU, no `npu` option, no RBLN_TARGET_SOC: nothing identifies a target
-    # SoC, so ensure_valid_npu raises instead of silently defaulting -- no
-    # artifact is produced.
+def test_compile_only_npu_option_overrides_target_soc():
+    # An explicit `npu` option wins over RBLN_TARGET_SOC: the artifact targets the
+    # requested SoC and rebel warns that it differs from the registered machine SoC.
     proc = _run_with_dummy(
-        _COMPILE_ONLY_SNIPPET.format(assertion="assert not arts, arts"),
-        env_extra={"RBLN_DEVICES": _NO_NPU_DEVICES},
+        _COMPILE_ONLY_SNIPPET,
+        env_extra={
+            "RBLN_TARGET_SOC": "RBLN-CA25",
+            "RBLN_DUMMY_TEST_NPU": "RBLN-CR03",
+            "RBLN_DEVICE_MAP": _NO_NPU_MAP,
+        },
     )
     _assert_ok(proc)
     assert "OK" in proc.stdout
-    # Failed for the right reason: unresolved target SoC, not some other error.
-    assert "Please specify `npu`" in proc.stdout, proc.stdout
+    out = proc.stdout + proc.stderr
+    assert "Target NPU: RBLN-CR03" in out, proc.stderr
+    assert "differs from" in out, proc.stderr
+
+
+# An out-of-range system device id: RBLN_DEVICES remaps user device 0 onto it, the
+# probe misses, and 0 logical devices remain (distinct from RBLN_DEVICE_MAP, which
+# declares a logical device that only fails when actually opened).
+_NO_NPU_DEVICES = "999"
 
 
 def test_dummy_is_required_no_silent_cpu():
@@ -527,10 +526,7 @@ import glob, os
 import torch, torch_rbln
 from rebel._C import get_npu_name
 
-npu = get_npu_name(0)
-if npu is None:  # genuine no-NPU host: nothing to run the artifacts on -> skip
-    print("SKIP_NO_NPU")
-    raise SystemExit(0)
+npu = get_npu_name(0)  # dummy mode: resolves to RBLN_TARGET_SOC (the real machine SoC)
 print("NPU", npu)
 """
     + _DECODER_MODEL
@@ -585,20 +581,27 @@ print("OK")
 
 def test_dummy_compiled_prefill_decode_runs_on_real_npu(tmp_path):
     # End-to-end purpose of dummy mode: prefill/decode graphs compiled with no NPU
-    # must load and run correctly on a real NPU. Compile both graphs (compile-only)
-    # in a dummy subprocess, then load + run prefill->decode (KV cache handed from
-    # prefill into decode) in a non-dummy (real device) subprocess and check the
-    # argmax equals the CPU reference. NPU presence is detected inside the
-    # subprocesses (get_npu_name), so this module stays free of a parent-process
-    # torch_rbln import; skipped with no NPU.
-    cache = str(tmp_path / "cache")
-
-    proc = _run_with_dummy(_DECODER_COMPILE.format(cache=cache))
-    _assert_ok(proc)
-    if "SKIP_NO_NPU" in proc.stdout:
+    # (allocations host-backed by rebel v-memory, no device opened) must load and run
+    # correctly on a real NPU. Detect the real NPU first (non-dummy probe), compile
+    # both graphs for exactly that SoC in a dummy subprocess, then load + run
+    # prefill->decode (KV cache handed from prefill into decode) on the real device
+    # and check the argmax equals the CPU reference. Skipped when there is no NPU.
+    probe = subprocess.run(
+        [sys.executable, "-c", "from rebel._C import get_npu_name; print(get_npu_name(0) or '')"],
+        env=_clean_env(),
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
+    npu = probe.stdout.strip()
+    if not npu:
         pytest.skip("no NPU available to compile/run the decoder against")
+
+    cache = str(tmp_path / "cache")
+    # Dummy compile targets the real machine SoC via RBLN_TARGET_SOC; no NPU is opened.
+    proc = _run_with_dummy(_DECODER_COMPILE.format(cache=cache), env_extra={"RBLN_TARGET_SOC": npu})
+    _assert_ok(proc)
     assert "OK" in proc.stdout
-    npu = next(ln.split(maxsplit=1)[1] for ln in proc.stdout.splitlines() if ln.startswith("NPU "))
 
     env = _clean_env()  # non-dummy: the real NPU loads and runs the dummy-built graphs
     proc = subprocess.run(
@@ -610,12 +613,6 @@ def test_dummy_compiled_prefill_decode_runs_on_real_npu(tmp_path):
     )
     _assert_ok(proc)
     assert "OK" in proc.stdout
-
-
-# NOTE: overlap/self-copy safety of the dummy v2v path (memmove, not memcpy) is
-# covered in test/cpp/core/RBLNDummyDeviceTest.cpp::V2VHandlesOverlap — PyTorch's
-# copy_ guards against aliasing storage before dispatch, so the overlap cannot be
-# driven from the Python layer.
 
 
 if __name__ == "__main__":

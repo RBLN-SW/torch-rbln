@@ -20,76 +20,6 @@ namespace {
 // Default current logical device is 0
 thread_local c10::DeviceIndex current_device_index_ = 0;
 
-// Dummy mode only: base -> {nbytes, device} for each host allocation, so an
-// interior/view pointer resolves to its owning device and free() rejects
-// stale/double frees. Ordered map enables the range lookup.
-struct DummyAlloc {
-  size_t nbytes;
-  c10::DeviceIndex device;
-};
-std::mutex dummy_alloc_mutex_;
-std::map<uintptr_t, DummyAlloc> dummy_allocs_;
-
-void dummy_register_alloc(const void* data, size_t nbytes, c10::DeviceIndex device_index) {
-  const std::lock_guard<std::mutex> lock(dummy_alloc_mutex_);
-  dummy_allocs_[reinterpret_cast<uintptr_t>(data)] = DummyAlloc{nbytes, device_index};
-}
-
-// Erase by base pointer; returns false if it was not a live allocation
-// (unknown / already freed).
-bool dummy_take_alloc(const void* data) {
-  const std::lock_guard<std::mutex> lock(dummy_alloc_mutex_);
-  return dummy_allocs_.erase(reinterpret_cast<uintptr_t>(data)) > 0;
-}
-
-// Resolve any address within a live allocation to its owning logical device;
-// throws on a stale / non-device pointer (parity with the real vaddr lookup).
-c10::DeviceIndex dummy_lookup_device(const void* data) {
-  const auto addr = reinterpret_cast<uintptr_t>(data);
-  const std::lock_guard<std::mutex> lock(dummy_alloc_mutex_);
-  auto it = dummy_allocs_.upper_bound(addr); // first base > addr
-  if (it != dummy_allocs_.begin()) {
-    --it; // greatest base <= addr
-    if (addr < it->first + it->second.nbytes) {
-      return it->second.device;
-    }
-  }
-  RBLN_CHECK(
-      false,
-      "get_torch_device_id: {:#x} is not within any RBLN_DUMMY_DEVICE allocation (stale pointer or not device memory)",
-      addr);
-}
-
-// True iff [data, data+nbytes) lies fully within a single live allocation.
-bool dummy_range_ok(const void* data, size_t nbytes) {
-  const auto addr = reinterpret_cast<uintptr_t>(data);
-  const std::lock_guard<std::mutex> lock(dummy_alloc_mutex_);
-  auto it = dummy_allocs_.upper_bound(addr);
-  if (it == dummy_allocs_.begin()) {
-    return false;
-  }
-  --it; // greatest base <= addr
-  const auto end = it->first + it->second.nbytes;
-  return addr < end && nbytes <= end - addr;
-}
-
-// Throwing device-pointer bounds check for dummy copy/borrow paths — keeps the
-// host backing from doing OOB reads/writes that the real runtime would reject.
-void dummy_check_range(const void* data, size_t nbytes) {
-  RBLN_CHECK(
-      dummy_range_ok(data, nbytes),
-      "RBLN_DUMMY_DEVICE: device pointer {} + {} bytes is not within a live allocation (stale or out of bounds)",
-      fmt::ptr(data),
-      nbytes);
-}
-
-// Non-zero borrow ids for dummy mode (BorrowedHostPtr requires non-zero on
-// success); return_borrowed() is a no-op, so the value only needs to be non-zero.
-std::atomic<uint64_t> dummy_borrow_counter_{0};
-uint64_t next_dummy_borrow_id() {
-  return dummy_borrow_counter_.fetch_add(1, std::memory_order_relaxed) + 1;
-}
-
 void check_device_index(c10::DeviceIndex device_index) {
   // Dropped a dead `<= max()` check (always true for an int8 DeviceIndex); an
   // invalid/negative index is caught by the OOB-safe isDeviceAssigned() lookup.
@@ -288,11 +218,6 @@ c10::DeviceIndex get_torch_device_id(const void* data) {
   RBLN_LOG_DEBUG("data={}", fmt::ptr(data));
   RBLN_CHECK(data != nullptr, "data cannot be nullptr");
 
-  if (is_dummy_device()) {
-    // Range lookup so interior/view pointers resolve to the owning device.
-    return dummy_lookup_device(data);
-  }
-
   const auto vaddr = reinterpret_cast<uint64_t>(data);
   uint32_t torch_device_id = 0;
   RBLN_CHECK(
@@ -306,9 +231,6 @@ c10::DeviceIndex get_torch_device_id(const void* data) {
 ::rbln::MemoryInfo get_memory_info(const void* data) {
   RBLN_LOG_DEBUG("data={}", fmt::ptr(data));
   RBLN_CHECK(data != nullptr, "data cannot be nullptr");
-  // Backed by runtime v-memory only; the dummy host backing has no such entry.
-  RBLN_CHECK(
-      !is_dummy_device(), "get_memory_info is not available in RBLN_DUMMY_DEVICE mode (no runtime-backed v-memory)");
   // get_memory_info() does a full VMemory JSON serialize+parse round-trip on
   // every call. Warn so unexpected hot-path callers are easy to spot in logs;
   // when only the device id is needed, get_torch_device_id() is the cheap path.
@@ -348,16 +270,6 @@ void* malloc(c10::DeviceIndex device_index, size_t nbytes) {
   RBLN_LOG_DEBUG("logical device=rbln:{}, nbytes={}", static_cast<int>(device_index), nbytes);
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
   check_device_index(device_index);
-
-  if (is_dummy_device()) {
-    // No NPU: back the device tensor with host memory so the copies below are
-    // plain memmove and tensors can be built/compiled without hardware. Record
-    // the owning device so get_torch_device_id() can resolve it later.
-    void* data = std::malloc(nbytes); // NOLINT(cppcoreguidelines-no-malloc)
-    RBLN_CHECK(data != nullptr, "dummy host allocation failed ({} bytes)", nbytes);
-    dummy_register_alloc(data, nbytes, device_index);
-    return data;
-  }
 
   // to_device_id() enforces that a device is actually available (device_count >
   // 0), so allocation fails cleanly here on a host with no NPU.
@@ -399,12 +311,6 @@ void mark_zeros(const void* rbln_data) {
   RBLN_LOG_DEBUG("rbln_data={}", fmt::ptr(rbln_data));
   RBLN_CHECK(rbln_data != nullptr, "rbln_data cannot be nullptr");
 
-  if (is_dummy_device()) {
-    // No size here to memset; the factory layer (zero_/_efficientzerotensor)
-    // does the host memset in dummy mode.
-    return;
-  }
-
   const auto vaddr = reinterpret_cast<uint64_t>(rbln_data);
   RBLN_CHECK(!::rbln::rbln_mark_zeros(vaddr), "rbln_mark_zeros failed for vaddr={:#x}", vaddr);
   RBLN_LOG_DEBUG("vaddr={:#x} marked as zero-initialized", vaddr);
@@ -413,17 +319,6 @@ void mark_zeros(const void* rbln_data) {
 void free(void* data) {
   RBLN_LOG_DEBUG("data={}", fmt::ptr(data));
   RBLN_CHECK(data != nullptr, "data cannot be nullptr");
-
-  if (is_dummy_device()) {
-    // Reject stale/double frees before std::free (which would abort) — parity
-    // with rbln_free's bad-address error.
-    RBLN_CHECK(
-        dummy_take_alloc(data),
-        "dummy free: {} is not a live allocation (stale pointer or double free)",
-        fmt::ptr(data));
-    std::free(data); // NOLINT(cppcoreguidelines-no-malloc)
-    return;
-  }
 
   const auto vaddr = reinterpret_cast<uint64_t>(data);
   RBLN_LOG_DEBUG("Calling rbln_free: vaddr={:#x}", vaddr);
@@ -439,14 +334,6 @@ void free_nothrow(void* data) noexcept {
   if (data == nullptr) {
     return;
   }
-  if (is_dummy_device()) {
-    if (dummy_take_alloc(data)) {
-      std::free(data); // NOLINT(cppcoreguidelines-no-malloc)
-    } else {
-      RBLN_WARN_NOTHROW("dummy free: {} is not a live allocation; leaking rather than aborting", fmt::ptr(data));
-    }
-    return;
-  }
   const auto vaddr = reinterpret_cast<uint64_t>(data);
   if (::rbln::rbln_free(vaddr) != 0) {
     RBLN_WARN_NOTHROW("rbln_free failed for vaddr={:#x}; leaking rather than aborting", vaddr);
@@ -457,11 +344,8 @@ void set_device_layout_like(void* target_data, const void* ref_data) {
   RBLN_CHECK(target_data != nullptr, "set_device_layout_like: target is nullptr");
   RBLN_CHECK(ref_data != nullptr, "set_device_layout_like: ref is nullptr");
   if (is_dummy_device()) {
-    // Host buffers have no device allocation layout to mirror; verify both
-    // pointers are live allocations on the same device, then no-op.
-    RBLN_CHECK(
-        dummy_lookup_device(target_data) == dummy_lookup_device(ref_data),
-        "set_device_layout_like: target and ref are on different dummy devices");
+    // Matching a device-physical allocation layout is meaningless without a
+    // real device; the host-backed buffers have no such layout. No-op.
     return;
   }
   const auto target_vaddr = reinterpret_cast<uint64_t>(target_data);
@@ -477,12 +361,6 @@ void memcpy_h2v(void* rbln_dst_data, const void* cpu_src_data, size_t nbytes) {
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
   RBLN_CHECK(cpu_src_data != nullptr, "cpu_src_data cannot be nullptr");
   RBLN_CHECK(rbln_dst_data != nullptr, "rbln_dst_data cannot be nullptr");
-
-  if (is_dummy_device()) {
-    dummy_check_range(rbln_dst_data, nbytes);
-    std::memmove(rbln_dst_data, cpu_src_data, nbytes);
-    return;
-  }
 
   const auto src_host_ptr = reinterpret_cast<uintptr_t>(cpu_src_data);
   const auto dst_vaddr = reinterpret_cast<uint64_t>(rbln_dst_data);
@@ -503,12 +381,6 @@ void memcpy_v2h(void* cpu_dst_data, const void* rbln_src_data, size_t nbytes) {
   RBLN_CHECK(rbln_src_data != nullptr, "rbln_src_data cannot be nullptr");
   RBLN_CHECK(cpu_dst_data != nullptr, "cpu_dst_data cannot be nullptr");
 
-  if (is_dummy_device()) {
-    dummy_check_range(rbln_src_data, nbytes);
-    std::memmove(cpu_dst_data, rbln_src_data, nbytes);
-    return;
-  }
-
   const auto src_vaddr = reinterpret_cast<uint64_t>(rbln_src_data);
   const auto dst_host_ptr = reinterpret_cast<uintptr_t>(cpu_dst_data);
   const auto size = static_cast<uint64_t>(nbytes);
@@ -527,13 +399,6 @@ void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes) {
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
   RBLN_CHECK(rbln_src_data != nullptr, "rbln_src_data cannot be nullptr");
   RBLN_CHECK(rbln_dst_data != nullptr, "rbln_dst_data cannot be nullptr");
-
-  if (is_dummy_device()) {
-    dummy_check_range(rbln_dst_data, nbytes);
-    dummy_check_range(rbln_src_data, nbytes);
-    std::memmove(rbln_dst_data, rbln_src_data, nbytes);
-    return;
-  }
 
   const auto src_vaddr = reinterpret_cast<uint64_t>(rbln_src_data);
   const auto dst_vaddr = reinterpret_cast<uint64_t>(rbln_dst_data);
@@ -584,12 +449,6 @@ void memcpy_h2v_async(void* rbln_dst_data, const void* cpu_src_data, size_t nbyt
   RBLN_CHECK(cpu_src_data != nullptr, "cpu_src_data cannot be nullptr");
   RBLN_CHECK(rbln_dst_data != nullptr, "rbln_dst_data cannot be nullptr");
 
-  if (is_dummy_device()) {
-    dummy_check_range(rbln_dst_data, nbytes);
-    std::memmove(rbln_dst_data, cpu_src_data, nbytes);
-    return;
-  }
-
   const auto src_host_ptr = reinterpret_cast<uintptr_t>(cpu_src_data);
   const auto dst_vaddr = reinterpret_cast<uint64_t>(rbln_dst_data);
   const auto size = static_cast<uint64_t>(nbytes);
@@ -611,12 +470,6 @@ void memcpy_v2h_async(void* cpu_dst_data, const void* rbln_src_data, size_t nbyt
   RBLN_CHECK(rbln_src_data != nullptr, "rbln_src_data cannot be nullptr");
   RBLN_CHECK(cpu_dst_data != nullptr, "cpu_dst_data cannot be nullptr");
 
-  if (is_dummy_device()) {
-    dummy_check_range(rbln_src_data, nbytes);
-    std::memmove(cpu_dst_data, rbln_src_data, nbytes);
-    return;
-  }
-
   const auto src_vaddr = reinterpret_cast<uint64_t>(rbln_src_data);
   const auto dst_host_ptr = reinterpret_cast<uintptr_t>(cpu_dst_data);
   const auto size = static_cast<uint64_t>(nbytes);
@@ -637,13 +490,6 @@ void memcpy_v2v_async(void* rbln_dst_data, const void* rbln_src_data, size_t nby
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
   RBLN_CHECK(rbln_src_data != nullptr, "rbln_src_data cannot be nullptr");
   RBLN_CHECK(rbln_dst_data != nullptr, "rbln_dst_data cannot be nullptr");
-
-  if (is_dummy_device()) {
-    dummy_check_range(rbln_dst_data, nbytes);
-    dummy_check_range(rbln_src_data, nbytes);
-    std::memmove(rbln_dst_data, rbln_src_data, nbytes);
-    return;
-  }
 
   const auto src_vaddr = reinterpret_cast<uint64_t>(rbln_src_data);
   const auto dst_vaddr = reinterpret_cast<uint64_t>(rbln_dst_data);
@@ -675,10 +521,6 @@ void memcpy_v2v_async(void* rbln_dst_data, const void* rbln_src_data, size_t nby
 void synchronize(c10::DeviceIndex device_index) {
   RBLN_LOG_DEBUG("Synchronizing device {}", static_cast<int>(device_index));
   check_device_index(device_index);
-  if (is_dummy_device()) {
-    // Host-backed transfers are synchronous; nothing to drain.
-    return;
-  }
   const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
   RBLN_CHECK(
       !::rbln::rbln_device_synchronize(torch_device_id),
@@ -688,17 +530,6 @@ void synchronize(c10::DeviceIndex device_index) {
 
 void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies) {
   if (copies.empty()) {
-    return;
-  }
-  if (is_dummy_device()) {
-    for (const auto& c : copies) {
-      RBLN_CHECK(c.nbytes > 0, "memcpy_v2v_multi: nbytes must be positive");
-      RBLN_CHECK(c.src != nullptr, "memcpy_v2v_multi: src cannot be nullptr");
-      RBLN_CHECK(c.dst != nullptr, "memcpy_v2v_multi: dst cannot be nullptr");
-      dummy_check_range(c.dst, c.nbytes);
-      dummy_check_range(c.src, c.nbytes);
-      std::memmove(c.dst, c.src, c.nbytes);
-    }
     return;
   }
   std::vector<std::tuple<uint64_t, uint64_t, uint64_t>> rbln_copies;
@@ -715,17 +546,10 @@ void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies) {
   RBLN_CHECK(!::rbln::rbln_memcpy_v2v_multi(rbln_copies), "rbln_memcpy_v2v_multi failed");
 }
 
-// In dummy mode the pointer already IS host memory, so a borrow is the identity
-// (host_ptr == the pointer) with a synthetic non-zero id; return_borrowed no-ops.
 BorrowedHostPtr borrow_host_ptr(const void* rbln_data, size_t nbytes) {
   RBLN_LOG_DEBUG("rbln_data={}, nbytes={}", fmt::ptr(rbln_data), nbytes);
   RBLN_CHECK(rbln_data != nullptr, "rbln_data cannot be nullptr");
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
-
-  if (is_dummy_device()) {
-    dummy_check_range(rbln_data, nbytes);
-    return BorrowedHostPtr{reinterpret_cast<uintptr_t>(rbln_data), next_dummy_borrow_id()};
-  }
 
   const auto vaddr = reinterpret_cast<uint64_t>(rbln_data);
   const auto size = static_cast<uint64_t>(nbytes);
@@ -743,12 +567,6 @@ BorrowedHostPtr borrow_host_ptr(const void* rbln_data, size_t nbytes) {
 std::optional<BorrowedHostPtr> try_borrow_host_ptr(const void* rbln_data, size_t nbytes) {
   if (rbln_data == nullptr || nbytes == 0) {
     return std::nullopt;
-  }
-  if (is_dummy_device()) {
-    if (!dummy_range_ok(rbln_data, nbytes)) {
-      return std::nullopt;
-    }
-    return BorrowedHostPtr{reinterpret_cast<uintptr_t>(rbln_data), next_dummy_borrow_id()};
   }
   const auto vaddr = reinterpret_cast<uint64_t>(rbln_data);
   const auto size = static_cast<uint64_t>(nbytes);
@@ -768,11 +586,6 @@ BorrowedHostPtr acquire_host_ptr_for_overwrite(void* rbln_data, size_t nbytes) {
   RBLN_CHECK(rbln_data != nullptr, "rbln_data cannot be nullptr");
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
 
-  if (is_dummy_device()) {
-    dummy_check_range(rbln_data, nbytes);
-    return BorrowedHostPtr{reinterpret_cast<uintptr_t>(rbln_data), next_dummy_borrow_id()};
-  }
-
   const auto vaddr = reinterpret_cast<uint64_t>(rbln_data);
   const auto size = static_cast<uint64_t>(nbytes);
   uintptr_t host_ptr = 0;
@@ -789,12 +602,6 @@ BorrowedHostPtr acquire_host_ptr_for_overwrite(void* rbln_data, size_t nbytes) {
 std::optional<BorrowedHostPtr> try_acquire_host_ptr_for_overwrite(void* rbln_data, size_t nbytes) {
   if (rbln_data == nullptr || nbytes == 0) {
     return std::nullopt;
-  }
-  if (is_dummy_device()) {
-    if (!dummy_range_ok(rbln_data, nbytes)) {
-      return std::nullopt;
-    }
-    return BorrowedHostPtr{reinterpret_cast<uintptr_t>(rbln_data), next_dummy_borrow_id()};
   }
   const auto vaddr = reinterpret_cast<uint64_t>(rbln_data);
   const auto size = static_cast<uint64_t>(nbytes);
@@ -816,10 +623,6 @@ void return_borrowed(uint64_t borrow_id, bool updated) {
   if (borrow_id == 0) {
     return;
   }
-  if (is_dummy_device()) {
-    // Dummy borrows are identity host views; nothing to release.
-    return;
-  }
   RBLN_LOG_DEBUG("borrow_id={}, updated={}", borrow_id, updated);
   RBLN_CHECK(
       !::rbln::rbln_v_return_borrowed(borrow_id, updated),
@@ -832,11 +635,6 @@ c10::CachingDeviceAllocator::DeviceStats get_device_stats(const c10::Device& dev
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
   const auto device_index = device.index();
   check_device_index(device_index);
-
-  if (is_dummy_device()) {
-    // No runtime allocator in dummy mode; report empty stats.
-    return c10::CachingDeviceAllocator::DeviceStats{};
-  }
 
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_get_memory_stats: device_id={}", device_id);
@@ -892,10 +690,6 @@ void empty_cache(const c10::Device& device) {
   const auto device_index = device.index();
   check_device_index(device_index);
 
-  if (is_dummy_device()) {
-    return; // host malloc/free are immediate; no runtime cache to flush
-  }
-
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_empty_cache: device_id={}", device_id);
   RBLN_CHECK(
@@ -908,10 +702,6 @@ std::map<std::string, uint64_t> memory_stats(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
   const auto device_index = device.index();
   check_device_index(device_index);
-
-  if (is_dummy_device()) {
-    return {}; // no runtime allocator stats in dummy mode
-  }
 
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_get_memory_stats: rbln:{}, device_id={}", static_cast<int>(device_index), device_id);
@@ -927,10 +717,6 @@ void reset_accumulated_memory_stats(const c10::Device& device) {
   const auto device_index = device.index();
   check_device_index(device_index);
 
-  if (is_dummy_device()) {
-    return; // no runtime allocator stats in dummy mode
-  }
-
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_reset_accumulated_memory_stats: device_id={}", device_id);
   RBLN_CHECK(
@@ -944,10 +730,6 @@ void reset_peak_memory_stats(const c10::Device& device) {
   const auto device_index = device.index();
   check_device_index(device_index);
 
-  if (is_dummy_device()) {
-    return; // no runtime allocator stats in dummy mode
-  }
-
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_reset_peak_memory_stats: device_id={}", device_id);
   RBLN_CHECK(
@@ -957,10 +739,6 @@ void reset_peak_memory_stats(const c10::Device& device) {
 }
 
 void set_file_offloading_enabled(bool enabled) {
-  if (is_dummy_device()) {
-    // File offloading is a runtime feature; no-op without a runtime (dummy mode).
-    return;
-  }
   RBLN_LOG_DEBUG("Calling rbln_set_file_offloading_enabled: enabled={}", enabled);
   RBLN_CHECK(
       !::rbln::rbln_set_file_offloading_enabled(enabled),

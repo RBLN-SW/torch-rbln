@@ -406,12 +406,7 @@ void DeviceMappingManager::initializeDummyDevices(const std::vector<std::vector<
           phy_id);
     }
     const auto logical_index = static_cast<c10::DeviceIndex>(i);
-    assigned_devices_.insert(logical_index);
-    DeviceMapping mapping;
-    mapping.logical_device = logical_index;
-    // Shape markers only (RSD/TP sizing); no real NPU backs these ids.
-    mapping.physical_device_ids = groups[i];
-    device_mapping_table_.emplace_back(std::move(mapping));
+    registerLogicalDevice(static_cast<int>(logical_index), groups[i]);
   }
   device_count_ = static_cast<c10::DeviceIndex>(groups.size());
   buildDeviceTopology();

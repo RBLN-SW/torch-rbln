@@ -107,11 +107,6 @@ at::Tensor _efficientzerotensor_rbln(
   if (rbln_out.numel() == 0) {
     return rbln_out;
   }
-  if (c10::rbln::is_dummy_device()) {
-    // mark_zeros is a dummy no-op; zero the host backing directly.
-    std::memset(rbln_out.storage().mutable_data(), 0, rbln_out.storage().nbytes());
-    return rbln_out;
-  }
   c10::rbln::mark_zeros(rbln_out.data_ptr());
   return rbln_out;
 }
@@ -119,11 +114,6 @@ at::Tensor _efficientzerotensor_rbln(
 at::Tensor& zero_rbln_(at::Tensor& self) {
   RBLN_SCOPE_GUARD();
   if (self.numel() == 0) {
-    return self;
-  }
-  if (c10::rbln::is_dummy_device()) {
-    // Mirror mark_zeros (zeros the whole backing entry) on host memory.
-    std::memset(self.storage().mutable_data(), 0, self.storage().nbytes());
     return self;
   }
   c10::rbln::mark_zeros(self.data_ptr());
