@@ -465,20 +465,23 @@ def test_vllm_dummy_compiled_runs_on_real_npu(tmp_path):
         text=True,
         errors="replace",
     )
-    if not probe.stdout.strip():
+    npu = probe.stdout.strip()
+    if not npu:
         pytest.skip("no NPU available to run the dummy-compiled artifacts")
 
     cache = str(tmp_path / "vllm_cache")
     model_id = MODEL_CONFIGS["qwen3_0_6b"].model_id
     expected = EXPECTED_TEXT[("qwen3_0_6b", 1, "graph", torch.float16)]
 
-    # Phase 1: dummy compile-only -> shared cache (no real device touched).
+    # Phase 1: dummy compile-only -> shared cache (no real device touched). Compile
+    # for the SoC the phase-2 device actually is (RBLN-CA25, RBLN-CR03, ...) so the
+    # artifact hash matches and phase 2 loads it instead of recompiling.
     p1_env = dict(os.environ)
     for key in ("RBLN_DEVICES", "RBLN_DEVICE_MAP", "RBLN_NPUS_PER_DEVICE"):
         p1_env.pop(key, None)
     p1_env.update(
         RBLN_DUMMY_DEVICE="1",
-        RBLN_TARGET_SOC="RBLN-CA25",
+        RBLN_TARGET_SOC=npu,
         VLLM_RBLN_USE_VLLM_MODEL="1",
         VLLM_RBLN_COMPILE_ONLY="1",
         VLLM_CACHE_ROOT=cache,

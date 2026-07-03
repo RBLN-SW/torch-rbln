@@ -1,3 +1,10 @@
+// NOTE: excluded from the build (see test/cpp/CMakeLists.txt). These tests
+// assert the old torch host-backing contract (host malloc, interior-pointer
+// registry, get_memory_info-unavailable, direct pointer deref) that no longer
+// exists now that dummy allocations route through rebel's v-memory. They fail
+// at runtime and need a rewrite against the vmem contract; until then the dummy
+// behavior is covered by test/rbln/test_dummy_device.py.
+//
 // Tests for the host-backed dummy device contract (RBLN_DUMMY_DEVICE=1).
 //
 // Dummy mode is an explicit opt-in that lets torch-rbln construct device
