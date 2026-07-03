@@ -468,6 +468,100 @@ def test_dummy_is_required_no_silent_cpu():
     assert "OK" in proc.stdout
 
 
+# Model shared by the compile (dummy) and run (real device) steps below. Same seed
+# => identical weights in both subprocesses, so the NPU output can be checked
+# against the CPU reference computed in the run step.
+_ARTIFACT_MODEL = """
+torch.manual_seed(0)
+
+
+class _Net(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.l1 = torch.nn.Linear(4, 8)
+        self.l2 = torch.nn.Linear(8, 4)
+
+    def forward(self, x):
+        return self.l2(torch.relu(self.l1(x)))
+
+
+_INPUT = [[0.5, -1.0, 2.0, 0.25]]
+"""
+
+_ARTIFACT_COMPILE = (
+    """
+import glob, os
+import torch, torch_rbln
+from rebel._C import get_npu_name
+
+npu = get_npu_name(0)
+if npu is None:  # genuine no-NPU host: nothing to run the artifact on -> skip
+    print("SKIP_NO_NPU")
+    raise SystemExit(0)
+print("NPU", npu)
+"""
+    + _ARTIFACT_MODEL
+    + """
+try:  # compile_only writes the artifact, then the call errors (no real device)
+    torch.compile(_Net().eval().to("rbln:0"), backend="rbln", dynamic=False,
+        options={{"mode": ["compile_only"], "cache_dir": {cache!r}, "npu": npu}})(
+        torch.tensor(_INPUT, device="rbln:0"))
+except Exception:
+    pass
+assert glob.glob(os.path.join({cache!r}, "*.rbln")), "no artifact produced"
+print("OK")
+"""
+)
+
+_ARTIFACT_RUN = (
+    """
+import glob, os
+import torch, torch_rbln
+"""
+    + _ARTIFACT_MODEL
+    + """
+model = _Net().eval()
+ref = model(torch.tensor(_INPUT)).flatten().tolist()
+before = set(glob.glob(os.path.join({cache!r}, "*.rbln")))
+out = torch.compile(model.to("rbln:0"), backend="rbln", dynamic=False,
+    options={{"cache_dir": {cache!r}, "npu": {npu!r}}})(torch.tensor(_INPUT, device="rbln:0"))
+after = set(glob.glob(os.path.join({cache!r}, "*.rbln")))
+assert not (after - before), "recompiled instead of loading the dummy-built artifact"
+got = out.cpu().flatten().tolist()
+assert all(abs(a - b) < 1e-2 for a, b in zip(got, ref)), (got, ref)
+print("OK")
+"""
+)
+
+
+def test_dummy_compiled_artifact_runs_on_real_npu(tmp_path):
+    # End-to-end purpose of dummy mode: an artifact compiled with no NPU must load
+    # and run correctly on a real NPU. Compile-only in a dummy subprocess, then load
+    # + run the same .rbln in a non-dummy (real device) subprocess and compare to the
+    # CPU reference. NPU presence is detected inside the subprocesses (get_npu_name),
+    # so this module stays free of a parent-process torch_rbln import; skipped with
+    # no NPU.
+    cache = str(tmp_path / "cache")
+
+    proc = _run_with_dummy(_ARTIFACT_COMPILE.format(cache=cache))
+    _assert_ok(proc)
+    if "SKIP_NO_NPU" in proc.stdout:
+        pytest.skip("no NPU available to compile/run the artifact against")
+    assert "OK" in proc.stdout
+    npu = next(ln.split(maxsplit=1)[1] for ln in proc.stdout.splitlines() if ln.startswith("NPU "))
+
+    env = _clean_env()  # non-dummy: the real NPU loads and runs the dummy-built artifact
+    proc = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(_ARTIFACT_RUN.format(cache=cache, npu=npu))],
+        env=env,
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
+    _assert_ok(proc)
+    assert "OK" in proc.stdout
+
+
 # NOTE: overlap/self-copy safety of the dummy v2v path (memmove, not memcpy) is
 # covered in test/cpp/core/RBLNDummyDeviceTest.cpp::V2VHandlesOverlap — PyTorch's
 # copy_ guards against aliasing storage before dispatch, so the overlap cannot be
