@@ -468,91 +468,141 @@ def test_dummy_is_required_no_silent_cpu():
     assert "OK" in proc.stdout
 
 
-# Model shared by the compile (dummy) and run (real device) steps below. Same seed
-# => identical weights in both subprocesses, so the NPU output can be checked
-# against the CPU reference computed in the run step.
-_ARTIFACT_MODEL = """
+# Decoder (embedding + causal self-attention with a KV cache + MLP + LM head)
+# shared by the compile (dummy) and run (real device) steps below. Same seed =>
+# identical weights in both subprocesses, so the NPU argmax can be checked against
+# the CPU reference. Two graphs mirror real inference: prefill (whole prompt) and
+# decode (one token, consuming the prefill KV cache).
+_DECODER_MODEL = """
 torch.manual_seed(0)
+_VOCAB, _D, _H, _HD, _L = 64, 32, 4, 8, 6
 
 
-class _Net(torch.nn.Module):
+class _Decoder(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.l1 = torch.nn.Linear(4, 8)
-        self.l2 = torch.nn.Linear(8, 4)
+        self.emb = torch.nn.Embedding(_VOCAB, _D)
+        self.ln = torch.nn.LayerNorm(_D)
+        self.qkv = torch.nn.Linear(_D, 3 * _D)
+        self.o = torch.nn.Linear(_D, _D)
+        self.ln2 = torch.nn.LayerNorm(_D)
+        self.fc1 = torch.nn.Linear(_D, 4 * _D)
+        self.fc2 = torch.nn.Linear(4 * _D, _D)
+        self.lnf = torch.nn.LayerNorm(_D)
+        self.head = torch.nn.Linear(_D, _VOCAB)
 
-    def forward(self, x):
-        return self.l2(torch.relu(self.l1(x)))
+    def _qkv(self, h):
+        b, t = h.shape[0], h.shape[1]
+        q, k, v = self.qkv(h).split(_D, dim=2)
+        return tuple(z.view(b, t, _H, _HD).transpose(1, 2) for z in (q, k, v))
+
+    def _tail(self, x, a):
+        b, t = a.shape[0], a.shape[2]
+        x = x + self.o(a.transpose(1, 2).reshape(b, t, _D))
+        x = x + self.fc2(torch.nn.functional.gelu(self.fc1(self.ln2(x))))
+        return self.head(self.lnf(x))
+
+    def prefill(self, ids):
+        x = self.emb(ids)
+        q, k, v = self._qkv(self.ln(x))
+        a = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True)
+        return self._tail(x, a), k, v
+
+    def decode(self, ids, past_k, past_v):
+        x = self.emb(ids)
+        q, k, v = self._qkv(self.ln(x))
+        k = torch.cat([past_k, k], dim=2)
+        v = torch.cat([past_v, v], dim=2)
+        a = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=False)
+        return self._tail(x, a), k, v
 
 
-_INPUT = [[0.5, -1.0, 2.0, 0.25]]
+_IDS = [list(range(1, _L + 1))]
+_DTOK = [[7]]
 """
 
-_ARTIFACT_COMPILE = (
+_DECODER_COMPILE = (
     """
 import glob, os
 import torch, torch_rbln
 from rebel._C import get_npu_name
 
 npu = get_npu_name(0)
-if npu is None:  # genuine no-NPU host: nothing to run the artifact on -> skip
+if npu is None:  # genuine no-NPU host: nothing to run the artifacts on -> skip
     print("SKIP_NO_NPU")
     raise SystemExit(0)
 print("NPU", npu)
 """
-    + _ARTIFACT_MODEL
+    + _DECODER_MODEL
     + """
-try:  # compile_only writes the artifact, then the call errors (no real device)
-    torch.compile(_Net().eval().to("rbln:0"), backend="rbln", dynamic=False,
-        options={{"mode": ["compile_only"], "cache_dir": {cache!r}, "npu": npu}})(
-        torch.tensor(_INPUT, device="rbln:0"))
+m = _Decoder().eval().to("rbln:0")
+opt = {{"mode": ["compile_only"], "cache_dir": {cache!r}, "npu": npu}}
+try:  # compile_only writes each artifact; the call itself errors (no real device)
+    torch.compile(m.prefill, backend="rbln", dynamic=False, options=opt)(
+        torch.tensor(_IDS, device="rbln:0"))
 except Exception:
     pass
-assert glob.glob(os.path.join({cache!r}, "*.rbln")), "no artifact produced"
+try:  # distinct past_k/past_v so the graph matches the run (aliasing would specialize)
+    pk = torch.zeros(1, _H, _L, _HD, device="rbln:0")
+    pv = torch.zeros(1, _H, _L, _HD, device="rbln:0")
+    torch.compile(m.decode, backend="rbln", dynamic=False, options=opt)(
+        torch.tensor(_DTOK, device="rbln:0"), pk, pv)
+except Exception:
+    pass
+assert len(glob.glob(os.path.join({cache!r}, "*.rbln"))) == 2, "expected 2 artifacts (prefill+decode)"
 print("OK")
 """
 )
 
-_ARTIFACT_RUN = (
+_DECODER_RUN = (
     """
 import glob, os
 import torch, torch_rbln
 """
-    + _ARTIFACT_MODEL
+    + _DECODER_MODEL
     + """
-model = _Net().eval()
-ref = model(torch.tensor(_INPUT)).flatten().tolist()
+m = _Decoder().eval()
+# CPU reference (same seed => same weights as the compiled model)
+lp, k, v = m.prefill(torch.tensor(_IDS))
+ld, _, _ = m.decode(torch.tensor(_DTOK), k, v)
+want = (int(lp[0, -1].argmax()), int(ld[0, -1].argmax()))
+
+m = m.to("rbln:0")
+opt = {{"cache_dir": {cache!r}, "npu": {npu!r}}}
+prefill = torch.compile(m.prefill, backend="rbln", dynamic=False, options=opt)
+decode = torch.compile(m.decode, backend="rbln", dynamic=False, options=opt)
 before = set(glob.glob(os.path.join({cache!r}, "*.rbln")))
-out = torch.compile(model.to("rbln:0"), backend="rbln", dynamic=False,
-    options={{"cache_dir": {cache!r}, "npu": {npu!r}}})(torch.tensor(_INPUT, device="rbln:0"))
+lp2, k2, v2 = prefill(torch.tensor(_IDS, device="rbln:0"))
+ld2, _, _ = decode(torch.tensor(_DTOK, device="rbln:0"), k2, v2)
 after = set(glob.glob(os.path.join({cache!r}, "*.rbln")))
-assert not (after - before), "recompiled instead of loading the dummy-built artifact"
-got = out.cpu().flatten().tolist()
-assert all(abs(a - b) < 1e-2 for a, b in zip(got, ref)), (got, ref)
+assert not (after - before), "recompiled instead of loading the dummy-built artifacts"
+got = (int(lp2[0, -1].argmax().cpu()), int(ld2[0, -1].argmax().cpu()))
+assert got == want, (got, want)
 print("OK")
 """
 )
 
 
-def test_dummy_compiled_artifact_runs_on_real_npu(tmp_path):
-    # End-to-end purpose of dummy mode: an artifact compiled with no NPU must load
-    # and run correctly on a real NPU. Compile-only in a dummy subprocess, then load
-    # + run the same .rbln in a non-dummy (real device) subprocess and compare to the
-    # CPU reference. NPU presence is detected inside the subprocesses (get_npu_name),
-    # so this module stays free of a parent-process torch_rbln import; skipped with
-    # no NPU.
+def test_dummy_compiled_prefill_decode_runs_on_real_npu(tmp_path):
+    # End-to-end purpose of dummy mode: prefill/decode graphs compiled with no NPU
+    # must load and run correctly on a real NPU. Compile both graphs (compile-only)
+    # in a dummy subprocess, then load + run prefill->decode (KV cache handed from
+    # prefill into decode) in a non-dummy (real device) subprocess and check the
+    # argmax equals the CPU reference. NPU presence is detected inside the
+    # subprocesses (get_npu_name), so this module stays free of a parent-process
+    # torch_rbln import; skipped with no NPU.
     cache = str(tmp_path / "cache")
 
-    proc = _run_with_dummy(_ARTIFACT_COMPILE.format(cache=cache))
+    proc = _run_with_dummy(_DECODER_COMPILE.format(cache=cache))
     _assert_ok(proc)
     if "SKIP_NO_NPU" in proc.stdout:
-        pytest.skip("no NPU available to compile/run the artifact against")
+        pytest.skip("no NPU available to compile/run the decoder against")
     assert "OK" in proc.stdout
     npu = next(ln.split(maxsplit=1)[1] for ln in proc.stdout.splitlines() if ln.startswith("NPU "))
 
-    env = _clean_env()  # non-dummy: the real NPU loads and runs the dummy-built artifact
+    env = _clean_env()  # non-dummy: the real NPU loads and runs the dummy-built graphs
     proc = subprocess.run(
-        [sys.executable, "-c", textwrap.dedent(_ARTIFACT_RUN.format(cache=cache, npu=npu))],
+        [sys.executable, "-c", textwrap.dedent(_DECODER_RUN.format(cache=cache, npu=npu))],
         env=env,
         capture_output=True,
         text=True,
