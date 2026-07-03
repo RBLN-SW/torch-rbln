@@ -29,9 +29,18 @@ def _clean_env() -> dict:
       - RBLN_DEVICE_MAP / RBLN_NPUS_PER_DEVICE: a parent shell/CI mapping would
         change the dummy logical device count; tests assume the default of 1 and
         set their own map via ``env_extra`` when they need one.
+      - RBLN_TARGET_SOC / RBLN_DEVICES: both feed get_npu_name() and thus the
+        resolved compile target; a parent-set value would flip the no-NPU cases
+        below. Tests set these explicitly via ``env_extra`` when they need them.
     """
     env = dict(os.environ)
-    for key in ("TORCH_RBLN_DIAGNOSE", "RBLN_DEVICE_MAP", "RBLN_NPUS_PER_DEVICE"):
+    for key in (
+        "TORCH_RBLN_DIAGNOSE",
+        "RBLN_DEVICE_MAP",
+        "RBLN_NPUS_PER_DEVICE",
+        "RBLN_TARGET_SOC",
+        "RBLN_DEVICES",
+    ):
         env.pop(key, None)
     return env
 
@@ -46,6 +55,7 @@ def _run_with_dummy(snippet: str, env_extra: dict | None = None) -> subprocess.C
         env=env,
         capture_output=True,
         text=True,
+        errors="replace",  # compiler logs may contain non-UTF-8 bytes
     )
 
 
@@ -356,39 +366,103 @@ def test_device_map_shapes(device_map, expected_count, expected_ids0):
     assert "OK" in proc.stdout
 
 
+# A physical device id past any realistic host's range. Mapping user device 0 ->
+# this id makes rblnGetDeviceInfo() miss, so get_npu_name(0) returns None -- i.e.
+# a *genuine no-NPU host*, reproduced even on a machine that physically has NPUs.
+# RBLN_DUMMY_DEVICE keeps tensor/alloc host-backed; only the NPU-name probe is
+# forced to miss. Without dummy, this same setup dies at the first device op (see
+# test_dummy_is_required_no_silent_cpu), which is the intended behavior.
+_NO_NPU_DEVICES = "999"
+
+
+_COMPILE_ONLY_SNIPPET = """
+import glob, os, tempfile
+import torch, torch_rbln
+from rebel._C import get_npu_name
+
+# Precondition: this really is a no-NPU view (get_npu_name misses).
+assert get_npu_name(0) is None, get_npu_name(0)
+
+cache = tempfile.mkdtemp(prefix="rbln_dummy_compile_")
+opts = {{"mode": ["compile_only"], "cache_dir": cache}}
+npu = os.environ.get("RBLN_DUMMY_TEST_NPU")
+if npu:
+    opts["npu"] = npu
+
+
+class Net(torch.nn.Module):
+    def forward(self, x):
+        return torch.relu(x) * 2.0 + 1.0
+
+
+m = Net().eval().to("rbln:0")
+x = torch.tensor([-1.0, 0.0, 1.0, 2.0], device="rbln:0")
+try:
+    torch.compile(m, backend="rbln", dynamic=False, options=opts)(x)
+except Exception as e:
+    print("COMPILE_EXC:", type(e).__name__, str(e))
+arts = glob.glob(os.path.join(cache, "*.rbln"))
+{assertion}
+print("OK")
+"""
+
+
 @pytest.mark.parametrize("npu", ["RBLN-CA25", "RBLN-CR03"])
-def test_torch_compile_compile_only_produces_artifact(npu):
-    # End-to-end integrity: on a no-NPU host, dummy device + the (pinned) compiler
-    # compile a model and write a .rbln artifact via compile-only, for each target
-    # SoC. Execution still needs an NPU, so the call CPU-falls-back or raises; the
-    # artifact is the contract under test.
+def test_compile_only_targets_npu_option_on_no_npu_host(npu):
+    # No NPU (dummy + out-of-range RBLN_DEVICES => get_npu_name is None) and no
+    # RBLN_TARGET_SOC: the compile target is resolved *solely* from the
+    # torch.compile `npu` option, and a .rbln artifact is written for that SoC.
     proc = _run_with_dummy(
-        """
-        import glob, os, tempfile
-        import torch, torch_rbln
-        npu = os.environ["RBLN_DUMMY_TEST_NPU"]
-        cache = tempfile.mkdtemp(prefix="rbln_dummy_compile_")
+        _COMPILE_ONLY_SNIPPET.format(assertion="assert len(arts) == 1 and os.path.getsize(arts[0]) > 0, arts"),
+        env_extra={"RBLN_DUMMY_TEST_NPU": npu, "RBLN_DEVICES": _NO_NPU_DEVICES},
+    )
+    _assert_ok(proc)
+    assert "OK" in proc.stdout
+    # The artifact is compiled for the requested SoC, not some probed/default one.
+    assert f"Target NPU: {npu}" in (proc.stdout + proc.stderr), proc.stderr
 
-        class Net(torch.nn.Module):
-            def forward(self, x):
-                return torch.relu(x) * 2.0 + 1.0
 
-        m = Net().eval().to("rbln:0")
-        x = torch.tensor([-1.0, 0.0, 1.0, 2.0], device="rbln:0")
-        try:
-            torch.compile(
-                m,
-                backend="rbln",
-                dynamic=False,
-                options={"mode": ["compile_only"], "cache_dir": cache, "npu": npu},
-            )(x)
-        except Exception:
-            pass
-        arts = glob.glob(os.path.join(cache, "*.rbln"))
-        assert len(arts) == 1 and os.path.getsize(arts[0]) > 0, arts
-        print("OK")
-        """,
-        env_extra={"RBLN_DUMMY_TEST_NPU": npu, "RBLN_TARGET_SOC": npu},
+def test_compile_only_without_npu_option_fails_fast_on_no_npu_host():
+    # No NPU, no `npu` option, no RBLN_TARGET_SOC: nothing identifies a target
+    # SoC, so ensure_valid_npu raises instead of silently defaulting -- no
+    # artifact is produced.
+    proc = _run_with_dummy(
+        _COMPILE_ONLY_SNIPPET.format(assertion="assert not arts, arts"),
+        env_extra={"RBLN_DEVICES": _NO_NPU_DEVICES},
+    )
+    _assert_ok(proc)
+    assert "OK" in proc.stdout
+    # Failed for the right reason: unresolved target SoC, not some other error.
+    assert "Please specify `npu`" in proc.stdout, proc.stdout
+
+
+def test_dummy_is_required_no_silent_cpu():
+    # The out-of-range RBLN_DEVICES leaves 0 logical devices. WITHOUT dummy mode
+    # the first device op must fail loudly (no silent host fallback) -- dummy is
+    # an explicit opt-in, not an implicit no-NPU shim.
+    env = _clean_env()
+    env.pop("RBLN_DUMMY_DEVICE", None)
+    env["RBLN_DEVICES"] = _NO_NPU_DEVICES
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent(
+                """
+                import torch, torch_rbln
+                try:
+                    torch.tensor([1.0], device="rbln:0")
+                except RuntimeError as e:
+                    assert "no logical device" in str(e), str(e)
+                    print("OK")
+                else:
+                    raise AssertionError("expected RuntimeError: no logical device")
+                """
+            ),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
     )
     _assert_ok(proc)
     assert "OK" in proc.stdout
