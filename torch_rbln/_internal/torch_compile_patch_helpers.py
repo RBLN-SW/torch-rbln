@@ -162,6 +162,17 @@ def get_num_devices_from_options(compile_kwargs):
     return num_devices
 
 
+def _is_compile_only(compile_kwargs) -> bool:
+    """Whether torch.compile requested mode=compile_only (build artifacts, no run)."""
+    options = compile_kwargs.get("options", {})
+    if not isinstance(options, dict):
+        return False
+    mode = options.get("mode")
+    if isinstance(mode, (list, tuple)):
+        return "compile_only" in mode
+    return mode == "compile_only"
+
+
 def _resolve_current_num_devices(device_id, compile_kwargs):
     """Resolve the ``num_devices`` currently in use for this compiled function.
 
@@ -380,6 +391,19 @@ class CompiledFunctionWrapper:
             _exit_rbln_compile_op()
 
     def _call_impl(self, *args, **kwargs):
+        # RBLN_DUMMY_DEVICE is compile-only (no NPU): a compiled graph cannot be
+        # executed on it — the dummy runtime would silently return zeros. Fail
+        # loudly here instead. compile_only builds are allowed through (they only
+        # write the .rbln artifact; the zero output is never used).
+        import torch_rbln._C
+
+        if torch_rbln._C.is_dummy_device() and not _is_compile_only(self._compile_kwargs):
+            raise RuntimeError(
+                "Cannot execute a compiled graph on RBLN_DUMMY_DEVICE (no NPU). "
+                "Use options={'mode': ['compile_only']} to build artifacts, or run "
+                "on a host with a real NPU."
+            )
+
         # Extract device_id for TP operations
         device_id = extract_device_id_from_inputs(*args, **kwargs)
 

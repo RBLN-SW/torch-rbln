@@ -429,6 +429,29 @@ def test_compile_only_npu_option_overrides_target_soc():
     assert "differs from" in out, proc.stderr
 
 
+def test_compiled_graph_execution_fails_fast():
+    # Dummy mode is compile-only: EXECUTING a compiled graph (no compile_only)
+    # must raise a clear error rather than silently returning zeros (the dummy
+    # runtime cannot run kernels). The guard fires before compilation.
+    proc = _run_with_dummy(
+        """
+        import torch, torch_rbln
+        m = torch.nn.Linear(4, 4).eval().to("rbln:0")
+        f = torch.compile(m, backend="rbln", dynamic=False, options={"npu": "RBLN-CA25"})
+        try:
+            f(torch.ones(1, 4, device="rbln:0"))
+        except RuntimeError as e:
+            assert "RBLN_DUMMY_DEVICE" in str(e), str(e)
+            print("OK")
+        else:
+            raise AssertionError("expected RuntimeError executing a compiled graph on dummy")
+        """,
+        env_extra={"RBLN_DEVICE_MAP": _NO_NPU_MAP},
+    )
+    _assert_ok(proc)
+    assert "OK" in proc.stdout
+
+
 # An out-of-range system device id: RBLN_DEVICES remaps user device 0 onto it, the
 # probe misses, and 0 logical devices remain (distinct from RBLN_DEVICE_MAP, which
 # declares a logical device that only fails when actually opened).
