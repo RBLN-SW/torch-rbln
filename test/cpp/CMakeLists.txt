@@ -4,8 +4,7 @@ set(sources
   core/RBLNCopyOpTest.cpp
   core/RBLNDeviceGuardTest.cpp
   core/RBLNNoDeviceTest.cpp
-  # RBLNDummyDeviceTest.cpp: obsolete under vmem backing; rewrite pending.
-  # core/RBLNDummyDeviceTest.cpp
+  core/RBLNDummyDeviceTest.cpp
   core/RBLNEventTest.cpp
   core/RBLNFunctionsTest.cpp
   core/RBLNLoggingTest.cpp
