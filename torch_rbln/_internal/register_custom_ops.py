@@ -133,7 +133,7 @@ def paged_attn_prefill_rbln(*args, **kwargs):
         compiled = compile_rbln_cached(
             op_module,
             dynamic=False,
-            options={"disable_logger": True, "tensor_parallel_size": 1},
+            options={"disable_logger": True, "num_devices": 1},
             device_cache_key=(extract_device_id_from_inputs(*view_args, **view_kwargs), view_recipes),
         )
         external_result = compiled(*view_args, **view_kwargs)
@@ -189,7 +189,7 @@ def paged_attn_decode_rbln(*args, **kwargs):
         compiled = compile_rbln_cached(
             op_module,
             dynamic=False,
-            options={"disable_logger": True, "tensor_parallel_size": 1},
+            options={"disable_logger": True, "num_devices": 1},
             device_cache_key=(extract_device_id_from_inputs(*view_args, **view_kwargs), view_recipes),
         )
         external_result = compiled(*view_args, **view_kwargs)
@@ -259,7 +259,7 @@ def paged_causal_attn_prefill_rbln(*args, **kwargs):
         compiled = compile_rbln_cached(
             op_module,
             dynamic=False,
-            options={"disable_logger": True, "tensor_parallel_size": 1},
+            options={"disable_logger": True, "num_devices": 1},
             device_cache_key=(extract_device_id_from_inputs(*view_args, **view_kwargs), view_recipes),
         )
         external_result = compiled(*view_args, **view_kwargs)
@@ -322,7 +322,7 @@ def paged_causal_attn_decode_rbln(*args, **kwargs):
         compiled = compile_rbln_cached(
             op_module,
             dynamic=False,
-            options={"disable_logger": True, "tensor_parallel_size": 1},
+            options={"disable_logger": True, "num_devices": 1},
             device_cache_key=(extract_device_id_from_inputs(*view_args, **view_kwargs), view_recipes),
         )
         external_result = compiled(*view_args, **view_kwargs)
@@ -381,7 +381,7 @@ def flash_attention_naive_prefill_rbln(*args, **kwargs):
         op_module,
         backend="rbln",
         dynamic=False,
-        options={"disable_logger": True, "tensor_parallel_size": 1},
+        options={"disable_logger": True, "num_devices": 1},
     )
     external_result = compiled(*view_args, **view_kwargs)
     if result_tensor is None:
@@ -434,7 +434,7 @@ def flash_attention_naive_decode_rbln(*args, **kwargs):
         op_module,
         backend="rbln",
         dynamic=False,
-        options={"disable_logger": True, "tensor_parallel_size": 1},
+        options={"disable_logger": True, "num_devices": 1},
     )
     external_result = compiled(*view_args, **view_kwargs)
     if result_tensor is None:
