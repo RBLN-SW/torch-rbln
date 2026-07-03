@@ -23,6 +23,9 @@ Matrix
 """
 
 import os
+import subprocess
+import sys
+import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -326,6 +329,81 @@ def test_vllm_llm_eager_tp1(model_key, dtype):
     """Eager mode TP=1 — sanity check non-compile path. Greedy decode should
     match graph-mode TP1 (eager workaround envs set in ``_run_case``)."""
     _run_case(model_key=model_key, tp_size=1, enforce_eager=True, dtype=dtype)
+
+
+# ---------------------------------------------------------------------------
+# No-NPU compile-only (RBLN_DUMMY_DEVICE)
+# ---------------------------------------------------------------------------
+
+# vLLM's native path (VLLM_RBLN_USE_VLLM_MODEL=1) under VLLM_RBLN_COMPILE_ONLY=1
+# builds each graph and writes its .rbln artifact to the compile cache without
+# executing -- the runtime is constructed on a dummy device, so no NPU is needed.
+# This is the reason RBLN_DUMMY_DEVICE exists: compile a servable model on a host
+# with no hardware. Run in a subprocess with the dummy env set before ``import
+# torch`` (rebel snapshots RBLN_* at import). Dummy mode host-backs the device
+# (physical count stays 0), so no real NPU is used even on a machine that has one.
+_COMPILE_ONLY_DUMMY_WORKER = """
+import glob, os
+import torch_rbln  # noqa: F401  (registers the dummy PrivateUse1 device)
+import torch
+
+assert torch.rbln.is_dummy_device() is True, "dummy mode is not active"
+assert torch.rbln.physical_device_count() == 0, torch.rbln.physical_device_count()
+
+from vllm import LLM
+
+# compile_only builds artifacts during engine init; no generate() -> no execution.
+LLM(
+    model=os.environ["RBLN_TEST_MODEL_ID"],
+    dtype="float16",
+    max_model_len=2048,
+    block_size=1024,
+    enable_chunked_prefill=True,
+    max_num_batched_tokens=128,
+    max_num_seqs=1,
+    tensor_parallel_size=1,
+    enforce_eager=False,
+    gpu_memory_utilization=0.1,
+)
+arts = glob.glob(os.path.join(os.environ["VLLM_CACHE_ROOT"], "rbln", "**", "*.rbln"), recursive=True)
+assert arts, "compile-only produced no .rbln artifacts"
+print(f"OK artifacts={len(arts)}")
+"""
+
+
+@pytest.mark.test_set_ci
+@pytest.mark.single_worker
+def test_vllm_compile_only_no_npu_via_dummy(tmp_path):
+    """vLLM native-path compile-only on a no-NPU host (RBLN_DUMMY_DEVICE).
+
+    The point of dummy mode: vLLM can build a servable model's .rbln artifacts
+    with no NPU present. Needs no real device (forced onto a non-existent one),
+    so it runs anywhere vllm-rbln is importable, including a CPU-only host.
+    """
+    env = dict(os.environ)
+    # rebel snapshots RBLN_* at import. Drop any inherited device mapping so vLLM
+    # sets its own (user 0 -> system 0); a stale RBLN_DEVICE_MAP conflicts with
+    # that and makes device_count() fail. Dummy mode host-backs the device
+    # regardless (physical count stays 0), so no real NPU is used.
+    for key in ("RBLN_DEVICES", "RBLN_DEVICE_MAP", "RBLN_NPUS_PER_DEVICE"):
+        env.pop(key, None)
+    env.update(
+        RBLN_DUMMY_DEVICE="1",
+        RBLN_TARGET_SOC="RBLN-CA25",
+        VLLM_RBLN_USE_VLLM_MODEL="1",
+        VLLM_RBLN_COMPILE_ONLY="1",
+        VLLM_CACHE_ROOT=str(tmp_path / "vllm_cache"),
+        RBLN_TEST_MODEL_ID=MODEL_CONFIGS["qwen3_0_6b"].model_id,
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(_COMPILE_ONLY_DUMMY_WORKER)],
+        env=env,
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
+    assert proc.returncode == 0, f"compile-only worker failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+    assert "OK artifacts=" in proc.stdout, proc.stdout
 
 
 if __name__ == "__main__":
