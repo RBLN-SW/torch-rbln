@@ -200,10 +200,11 @@ export RBLN_DUMMY_DEVICE=1 RBLN_DEVICE_MAP="[0,1],[2,3]"   # 2 logical devices, 
   sizes against the allowed sizes (1, 2, 4, 8, 16, 32) and duplicate physical ids
   are rejected — but physical-id ranges are **not** checked, so a map valid under
   dummy is not guaranteed to be valid on a specific machine.
-- **Scope**: device tensor construction, host/device copies, and `torch.compile`
-  tracing/compilation. Out of scope (still require an NPU and will fail): actual
-  kernel / compiled-graph **execution**, distributed collectives, and
-  runtime-only introspection such as `get_memory_info`.
+- **Scope**: device tensor construction, host/device copies, and compile-only
+  `torch.compile` (building artifacts). Executing a compiled graph raises a clear
+  error — there is no NPU to run it — while eager ops fall back to CPU.
+  Distributed collectives still require real hardware, and memory-stat APIs
+  (`memory_stats`, `memory_allocated`, ...) report zeros rather than real usage.
 - `torch.rbln.is_available()` returns `True` in this mode — treat it as a
   development flag, not real hardware availability.
 
