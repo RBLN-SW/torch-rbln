@@ -37,10 +37,12 @@ if(_REBEL_USE_EXTERNAL OR _REBEL_HOME)
   message(STATUS "FindRebel: EXTERNAL (REBEL_HOME) -- include: ${rebel_include_dir}, library: ${rebel_library_path}")
 # 2) Vendored: use third_party/rebel_compiler/include (external dependency vendored in-tree)
 else()
-  if(NOT EXISTS "${REBEL_INCLUDE_DIR_VENDORED}/rebel/runtime/api/rbln_runtime_api.h")
+  if(NOT EXISTS "${REBEL_INCLUDE_DIR_VENDORED}/rebel/runtime/api/rbln_runtime_api.h"
+     OR NOT EXISTS "${REBEL_INCLUDE_DIR_VENDORED}/rebel/runtime/api/rbln_kineto_api.h")
     message(FATAL_ERROR
       "FindRebel: Vendored Rebel headers not found at ${REBEL_INCLUDE_DIR_VENDORED}. "
-      "Ensure third_party/rebel_compiler/include/rebel/runtime/ is present.")
+      "Ensure the API headers are present under "
+      "third_party/rebel_compiler/include/rebel/runtime/.")
   endif()
   set(rebel_include_dir "${REBEL_INCLUDE_DIR_VENDORED}")
   find_package(Python3 COMPONENTS Interpreter REQUIRED)

@@ -1,6 +1,7 @@
 #ifndef REBEL_RUNTIME_API_RBLN_RUNTIME_API_H
 #define REBEL_RUNTIME_API_RBLN_RUNTIME_API_H
 
+#include <rebel/runtime/api/rbln_retcode.h>
 #include <stdint.h>
 
 #include <string>
@@ -15,12 +16,6 @@ class MemoryStats;
 
 extern "C" {
 #endif
-
-typedef enum {
-  RBLNRetCode_SUCCESS = 0,
-  RBLNRetCode_FAILURE,
-  RBLNRetCode_INVALID,
-} RBLNRetCode;
 
 typedef enum {
   RBLNMemcpyType_H2D = 0,
@@ -283,15 +278,10 @@ constexpr uint32_t kMaxV2VMultiCopies = 1024;
 RBLNRetCode rbln_memcpy_v2v_multi(
     const std::vector<std::tuple<uint64_t, uint64_t, uint64_t>>& copies);
 
-// Async variants. *handle_out == 0 means a synchronous (fast-path-ineligible) completion;
-// else rbln_transfer_wait before reading dst. Sync copy APIs don't chain on the stream —
-// wait/synchronize before a sync copy on the same vaddr.
-//
-// Ordering contract: between an async dispatch and its rbln_transfer_wait, do NOT issue any
-// other copy that touches the SAME device area (not just the same vaddr — distinct vaddrs in
-// one vmem entry share its area, hence the same cached command buffer). The finalize step
-// reads the area's MRU command-buffer entry, which an intervening copy would rotate, so an
-// unaligned D2H bounce would land at the wrong host address.
+// Async variants. *handle_out == 0 means a synchronous (fast-path-ineligible) completion; else
+// rbln_transfer_wait (or rbln_device_synchronize) before reading dst — there is no auto-sync on
+// host read. The same vaddr/area may be re-copied while a transfer is in flight (finalize is
+// per-handle, not MRU-order). Sync copy APIs drain the device's in-flight transfers first.
 RBLNRetCode rbln_memcpy_v2h_async(uint64_t src_vaddr, uintptr_t dst_host_ptr, uint64_t size,
                                   uint64_t* handle_out);
 RBLNRetCode rbln_memcpy_h2v_async(uintptr_t src_host_ptr, uint64_t dst_vaddr, uint64_t size,
