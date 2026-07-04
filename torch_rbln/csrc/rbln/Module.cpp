@@ -13,6 +13,7 @@
 #include <torch_rbln/csrc/distributed/c10d/rbln/ProcessGroupRBLNModule.hpp>
 #include <torch_rbln/csrc/rbln/DispatchShim.h>
 #include <torch_rbln/csrc/rbln/WarmCache.h>
+#include <torch_rbln/csrc/rbln/profiler/kineto/rbln_kineto_adapter.h>
 #include <exception>
 #include <vector>
 
@@ -538,6 +539,7 @@ extern "C" PyObject* initModule() {
   register_public_device_api(python_module);
   register_internal_api(python_module);
   register_supported_dtypes_api(python_module);
+  rbln::profiler::kineto::register_rbln_kineto_profiler();
 
   c10::rbln::register_rbln_device_mapping_initialized_callback([]() {
     py::gil_scoped_acquire gil;
