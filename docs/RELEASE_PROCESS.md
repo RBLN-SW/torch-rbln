@@ -82,15 +82,18 @@ The merge method depends on the branch pair:
 
 torch-rbln releases align with the [RBLN SDK](https://docs.rbln.ai/) — each release version matches the corresponding SDK version.
 
-Versions are derived from git tags using [setuptools-scm](https://setuptools-scm.readthedocs.io/). Tags use the format `v<major>.<minor>.<patch>[rc<N>]`, where the optional `rc<N>` suffix marks a release candidate build.
+Versions are derived from git tags using [setuptools-scm](https://setuptools-scm.readthedocs.io/). Tags use the format `v<major>.<minor>.<patch>` with an optional `rc<N>` (release candidate) or `.post<N>` (post-release) suffix.
 
-| Source                 | Example Tag      | Resulting Version      |
-|------------------------|------------------|------------------------|
-| On a release tag       | `v0.10.0`        | `0.10.0`               |
-| On a release candidate | `v0.10.0rc0`     | `0.10.0rc0`            |
-| 5 commits past a tag   | `v0.10.0rc0` + 5 | `0.10.1.dev5+g1a2b3c4` |
+| Source                     | Example Tag         | Resulting Version            |
+|----------------------------|---------------------|------------------------------|
+| On a release candidate     | `v0.10.0rc0`        | `0.10.0rc0`                  |
+| On a release tag           | `v0.10.0`           | `0.10.0`                     |
+| On a post-release          | `v0.10.0.post0`     | `0.10.0.post0`               |
+| 5 commits past a candidate | `v0.10.0rc0` + 5    | `0.10.0rc1.dev5+g1a2b3c4`    |
+| 5 commits past a release   | `v0.10.0` + 5       | `0.10.1.dev5+g1a2b3c4`       |
+| 5 commits past a post      | `v0.10.0.post0` + 5 | `0.10.0.post1.dev5+g1a2b3c4` |
 
-Development builds between tags carry a `.devN+g<commit>` suffix so they sort below the next release.
+Development builds between tags anticipate the next release and carry a `.devN+g<sha>` suffix, so they sort below it.
 
 ## Release Lifecycle
 

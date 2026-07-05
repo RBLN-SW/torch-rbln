@@ -47,13 +47,8 @@ build-backend = "hatchling.build"
 # ==============================================================================
 
 [tool.hatch.version]
-# Version is computed by tools/get_version.py, which calls setuptools-scm
-# with custom version_scheme and local_scheme callables:
-# - On a tag (distance=0): preserve the tag version as-is, including pre-release
-#   e.g. v0.10.0a0 → 0.10.0a0,  v0.10.0 → 0.10.0
-# - Off a tag (distance>0): strip pre-release, bump patch, append .devN+gCOMMIT
-#   e.g. v0.10.0a0, dist=5 → 0.10.1.dev5+g1234abc
-#        v0.10.0,   dist=5 → 0.10.1.dev5+g1234abc
+# Version is derived from git tags by setuptools-scm.
+# See `docs/RELEASE_PROCESS.md` for the tag-to-version mapping.
 source = "code"
 path = "tools/get_version.py"
 expression = "compute_version()"
