@@ -10,6 +10,7 @@ This document describes the GitHub Actions workflows that power the automated te
 | Release (`release.yaml`)               | PRs and pushes to `main`      | Pre-release validation              | Linting + all tests except `test_set_experimental`/`test_set_perf` |
 | CD (`cd.yaml`)                         | Version tags (`v*`)           | Build and publish release artifacts | Deployment pipeline                                                |
 | Check PR Title (`check_pr_title.yaml`) | PR opened, edited, or updated | Enforce Conventional Commits format | —                                                                  |
+| Lint workflows (`lint_workflows.yaml`) | PRs; pushes to `main`/`dev`   | Lint the workflow files             | —                                                                  |
 
 CI, Release, and CD workflows delegate to a shared [Event Dispatch](#event-dispatch-mechanism) mechanism that sends events to infrastructure with physical RBLN NPU devices.
 
@@ -23,6 +24,7 @@ CI, Release, and CD workflows delegate to a shared [Event Dispatch](#event-dispa
 | Release        | To `main`                       | To `main`          | Yes (by ref and SHA) | Yes (except `workflow_dispatch`) |
 | CD             | —                               | Tags matching `v*` | Yes (by ref and SHA) | **No**                           |
 | Check PR Title | On open, edit, sync, reopen     | —                  | —                    | Yes                              |
+| Lint workflows | All PRs                         | To `main`/`dev`    | —                    | Yes                              |
 
 CI and Release runs are grouped by PR number (or SHA for pushes); a new push cancels the in-progress run. Manually triggered runs (`workflow_dispatch`) are never cancelled. CD runs are also never cancelled — once a deployment starts, it runs to completion. Check PR Title runs are grouped by PR number and always cancel the in-progress run.
 
@@ -90,6 +92,14 @@ The workflow uses [`amannn/action-semantic-pull-request`](https://github.com/ama
 **Allowed types:** `feat`, `fix`, `refactor`, `perf`, `docs`, `test`, `build`, `ci`, `chore`
 
 If the title is invalid, the workflow uses [`marocchino/sticky-pull-request-comment`](https://github.com/marocchino/sticky-pull-request-comment) to post a sticky comment on the PR explaining the required format. The comment is automatically deleted once the title is corrected.
+
+---
+
+## Lint Workflows
+
+**File:** [`.github/workflows/lint_workflows.yaml`](../.github/workflows/lint_workflows.yaml)
+
+This workflow runs `actionlint`, `yamllint`, and `zizmor` on the workflow files (see [Linting](LINTING.md)).
 
 ---
 

@@ -1,0 +1,68 @@
+name: Lint workflows
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main, dev]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint_workflows:
+    name: Lint workflows
+    if: ${{ github.repository_owner == vars.TORCH_RBLN_REPO_OWNER }}
+    runs-on: ${{ vars.TORCH_RBLN_RUNNER_EXTERNAL }}
+    container:
+      image: ${{ vars.TORCH_RBLN_IMAGE_NAME }}:${{ vars.TORCH_RBLN_IMAGE_TAG }}-py3.12
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GIT_PAT }}
+    env:
+      GIT_CONFIG_COUNT: '1'
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: ${{ github.workspace }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+
+      - name: Install workflow lint tools
+        run: |
+          set -euo pipefail
+
+          uv venv .venv-lint
+          uv pip install --group lint --python .venv-lint/bin/python
+          echo "${PWD}/.venv-lint/bin" >> "${GITHUB_PATH}"
+
+      - name: Run actionlint
+        run: |
+          set -euo pipefail
+
+          actionlint
+
+      - name: Run yamllint
+        run: |
+          set -euo pipefail
+
+          yamllint --strict .github/
+
+      - name: Run zizmor
+        run: |
+          set -euo pipefail
+
+          zizmor --offline .github/
+    timeout-minutes: 15
