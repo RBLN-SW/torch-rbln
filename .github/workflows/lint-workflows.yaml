@@ -22,15 +22,16 @@ jobs:
     name: Lint workflows
     if: ${{ github.repository_owner == vars.TORCH_RBLN_REPO_OWNER }}
     runs-on: ${{ vars.TORCH_RBLN_RUNNER_EXTERNAL }}
+    env:
+      GIT_CONFIG_COUNT: '1'
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: ${{ github.workspace }}
+    timeout-minutes: 15
     container:
       image: ${{ vars.TORCH_RBLN_IMAGE_NAME }}:${{ vars.TORCH_RBLN_IMAGE_TAG }}-py3.12
       credentials:
         username: ${{ github.repository_owner }}
         password: ${{ secrets.GIT_PAT }}
-    env:
-      GIT_CONFIG_COUNT: '1'
-      GIT_CONFIG_KEY_0: safe.directory
-      GIT_CONFIG_VALUE_0: ${{ github.workspace }}
     steps:
       - name: Check out repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
@@ -65,4 +66,3 @@ jobs:
           set -euo pipefail
 
           zizmor --offline .github/
-    timeout-minutes: 15

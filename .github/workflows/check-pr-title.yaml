@@ -16,6 +16,12 @@ jobs:
     name: Check PR title
     if: ${{ github.repository_owner == vars.TORCH_RBLN_REPO_OWNER }}
     runs-on: ${{ vars.TORCH_RBLN_RUNNER_EXTERNAL }}
+    timeout-minutes: 10
+    container:
+      image: ${{ vars.TORCH_RBLN_IMAGE_NAME }}:${{ vars.TORCH_RBLN_IMAGE_TAG }}-py3.12
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GIT_PAT }}
     steps:
       - name: Check Conventional Commits format
         id: pr_title_lint
