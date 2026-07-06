@@ -616,9 +616,7 @@ class RBLNExplain:
         out["trace_by_op"] = dict(self._trace_by_op or {})  # (A) WHERE; {} unless trace=True
         if self._rt is not None:
             hc, hbytes = self._rt["hidden_count"], self._rt["hidden_bytes"]
-            by_reason = {
-                n: {"count": c, "bytes": b} for (n, _f), c, b in zip(_RUNTIME_REASONS, hc, hbytes)
-            }
+            by_reason = {n: {"count": c, "bytes": b} for (n, _f), c, b in zip(_RUNTIME_REASONS, hc, hbytes)}
             # (#3) the runtime OWNS this axis and reports its own length; if its enum grows past
             # what we name, fold the unnamed tail into one bucket instead of dropping it (mirrors
             # the reject axis) so sum(by_reason) always equals total_count -- never under-count.
