@@ -1,9 +1,4 @@
-"""
-Monkey patches for torch_rbln.
-
-This module contains all monkey patches applied to PyTorch to enable RBLN functionality.
-Patches are organized by functionality and include proper error handling and idempotency checks.
-"""
+"""Monkey patches applied to PyTorch to enable RBLN functionality."""
 
 import warnings
 
@@ -20,54 +15,31 @@ _original_dynamo_reset = None
 
 
 def _is_backend_registered(backend_name: str) -> bool:
-    """
-    Check if a backend is already registered with torch._dynamo.
-
-    Args:
-        backend_name: Name of the backend to check.
-
-    Returns:
-        True if the backend is registered, False otherwise.
-    """
+    """Whether backend_name is registered with torch._dynamo."""
     try:
         import torch
 
-        # Try to list backends - this may not be available in all PyTorch versions
         if hasattr(torch._dynamo, "list_backends"):
-            backends = torch._dynamo.list_backends()
-            return backend_name in backends
-
-        # Fallback: try to get the backend directly
+            return backend_name in torch._dynamo.list_backends()
         if hasattr(torch._dynamo, "backends"):
             return backend_name in torch._dynamo.backends
-
-        # If we can't check, assume it's not registered
         return False
     except Exception:
-        # If anything fails, assume not registered
         return False
 
 
 def _register_rbln_backend() -> bool:
-    """
-    Register the RBLN backend with torch._dynamo.
-
-    Returns:
-        True if registration was successful, False otherwise.
-    """
+    """Register the RBLN backend with torch._dynamo; True on success."""
     global _rbln_backend_registered
 
-    # Check if already registered
     if _rbln_backend_registered or _is_backend_registered("rbln"):
         _rbln_backend_registered = True
         return True
 
     try:
-        # Import rebel_compiler's torch_compile module to register backend
-        # This will execute the register_backend calls at module level
+        # Importing registers 'rbln' via module-level register_backend() side effects.
         import rebel.core.torch_compile  # noqa: F401
 
-        # Verify registration succeeded
         if _is_backend_registered("rbln"):
             _rbln_backend_registered = True
             return True
@@ -149,14 +121,7 @@ def patch_torch_compile() -> None:
 
 
 def apply_all_patches() -> None:
-    """
-    Apply all monkey patches for RBLN functionality.
-
-    This function applies patches in the correct order:
-    1. torch.compile() patch
-
-    Idempotent: Safe to call multiple times.
-    """
+    """Apply all RBLN monkey patches. Idempotent."""
     patch_torch_compile()
 
 

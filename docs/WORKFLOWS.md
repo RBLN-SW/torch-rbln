@@ -9,7 +9,8 @@ This document describes the GitHub Actions workflows that power the automated te
 | CI (`ci.yaml`)                         | PRs and pushes to `dev`       | Fast feedback on every change       | Linting + `test_set_ci`-marked tests                               |
 | Release (`release.yaml`)               | PRs and pushes to `main`      | Pre-release validation              | Linting + all tests except `test_set_experimental`/`test_set_perf` |
 | CD (`cd.yaml`)                         | Version tags (`v*`)           | Build and publish release artifacts | Deployment pipeline                                                |
-| Check PR Title (`check_pr_title.yaml`) | PR opened, edited, or updated | Enforce Conventional Commits format | —                                                                  |
+| Check PR Title (`check-pr-title.yaml`) | PR opened, edited, or updated | Enforce Conventional Commits format | —                                                                  |
+| Lint workflows (`lint-workflows.yaml`) | PRs; pushes to `main`/`dev`   | Lint the workflow files             | —                                                                  |
 
 CI, Release, and CD workflows delegate to a shared [Event Dispatch](#event-dispatch-mechanism) mechanism that sends events to infrastructure with physical RBLN NPU devices.
 
@@ -17,14 +18,15 @@ CI, Release, and CD workflows delegate to a shared [Event Dispatch](#event-dispa
 
 ## Triggers and Concurrency
 
-| Workflow       | `pull_request`                  | `push`             | `workflow_dispatch`  | Cancel in-progress?              |
-|----------------|---------------------------------|--------------------|----------------------|----------------------------------|
-| CI             | To any branch **except** `main` | To `dev`           | Yes (by ref and SHA) | Yes (except `workflow_dispatch`) |
-| Release        | To `main`                       | To `main`          | Yes (by ref and SHA) | Yes (except `workflow_dispatch`) |
-| CD             | —                               | Tags matching `v*` | Yes (by ref and SHA) | **No**                           |
-| Check PR Title | On open, edit, sync, reopen     | —                  | —                    | Yes                              |
+| Workflow       | `pull_request`                  | `push`             | Cancel in-progress? |
+|----------------|---------------------------------|--------------------|---------------------|
+| CI             | To any branch **except** `main` | To `dev`           | Yes                 |
+| Release        | To `main`                       | To `main`          | Yes                 |
+| CD             | —                               | Tags matching `v*` | **No**              |
+| Check PR Title | On open, edit, sync, reopen     | —                  | Yes                 |
+| Lint workflows | All PRs                         | To `main`/`dev`    | Yes                 |
 
-CI and Release runs are grouped by PR number (or SHA for pushes); a new push cancels the in-progress run. Manually triggered runs (`workflow_dispatch`) are never cancelled. CD runs are also never cancelled — once a deployment starts, it runs to completion. Check PR Title runs are grouped by PR number and always cancel the in-progress run.
+CI and Release runs are grouped by PR number (or SHA for pushes); a new push cancels the in-progress run. CD runs are never cancelled — once a deployment starts, it runs to completion. Check PR Title runs are grouped by PR number and always cancel the in-progress run.
 
 ---
 
@@ -77,7 +79,7 @@ The CD workflow builds and publishes release artifacts after code has passed bot
 
 ## Check PR Title Workflow
 
-**File:** [`.github/workflows/check_pr_title.yaml`](../.github/workflows/check_pr_title.yaml)
+**File:** [`.github/workflows/check-pr-title.yaml`](../.github/workflows/check-pr-title.yaml)
 
 The Check PR Title workflow enforces the [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) format on all pull request titles. It triggers whenever a PR is opened, edited, synchronized, or reopened.
 
@@ -93,9 +95,17 @@ If the title is invalid, the workflow uses [`marocchino/sticky-pull-request-comm
 
 ---
 
+## Lint Workflows
+
+**File:** [`.github/workflows/lint-workflows.yaml`](../.github/workflows/lint-workflows.yaml)
+
+This workflow runs `actionlint`, `yamllint`, and `zizmor` on the workflow files (see [Linting](LINTING.md)).
+
+---
+
 ## Event Dispatch Mechanism
 
-**File:** [`.github/workflows/dispatch_event.yaml`](../.github/workflows/dispatch_event.yaml)
+**File:** [`.github/workflows/_dispatch-event.yaml`](../.github/workflows/_dispatch-event.yaml)
 
 CI, Release, and CD workflows delegate to an internal hardware-backed automation flow via GitHub [repository dispatch](https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#repository_dispatch).
 This is necessary because testing `torch-rbln` requires access to physical RBLN NPU hardware hosted on dedicated infrastructure.
