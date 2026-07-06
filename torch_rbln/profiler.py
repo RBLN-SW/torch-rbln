@@ -62,12 +62,26 @@ Usage::
 
 from __future__ import annotations
 
+import threading
 import time
+import warnings
 from typing import Any, Callable, Optional  # noqa: UP035
 from typing_extensions import Self
 
 
 __all__ = ["explain", "explain_steady", "RBLNExplain", "RBLNDiff", "profile", "RBLNProfile"]
+
+
+# explain() regions drive PROCESS-GLOBAL instrumentation: the (B) rebel-runtime timer
+# gate (RBLNFunctions.cpp) and the trace gate/map (DispatchShim.cpp) are single globals.
+# Regions must therefore not overlap. A thread-safe refcount lets the FIRST/outermost
+# region own the reset+enable and the LAST one disable, so a nested or concurrent region
+# never resets the owner's timer/trace nor disables its measurement mid-flight. (The
+# per-op counters are per-region deltas regardless; concurrent deltas can still cross-
+# contaminate -- a global-counter limit noted for callers, not fixable here.)
+_region_lock = threading.Lock()
+_active_regions = 0  # regions currently open (timer refcount)
+_active_trace = 0  # open regions that requested trace (trace-gate refcount)
 
 
 # Must match the BounceSite enum order in c10/rbln/RBLNProfiler.h.
@@ -464,16 +478,43 @@ class RBLNExplain:
         self._trace = trace
         self._trace_by_op: Optional[dict] = None
         self._rt_timing: Optional[list[tuple[int, int]]] = None  # (B) per-primitive librbln (ns, calls)
+        self._t0_timing: Optional[list[tuple[int, int]]] = None  # (B) start snapshot -> region delta
+        self._counted = False  # this region incremented the global refcount (release once, in stop)
         self._wall_ns = 0
 
     def start(self) -> RBLNExplain:
-        if self._trace:
-            _set_trace(True)
-            _reset_trace()  # region-local captures (the C++ map dedups per op)
-        # (B) gate the librbln boundary timers ON for this region only (off => one
-        # relaxed atomic load per boundary call, no clock read -> ON==OFF preserved).
-        _rt_timing_reset()
-        _rt_timing_enable(True)
+        global _active_regions, _active_trace
+        # Own the process-global gates under the refcount: only the FIRST region enables
+        # (and the LAST disables, in stop) so a nested/concurrent region cannot reset or
+        # disable the owner's timer/trace. An overlapping region warns and shares the
+        # owner's window (its own (B) timer/trace are then not isolated).
+        with _region_lock:
+            overlapping = _active_regions > 0
+            if self._trace:
+                if _active_trace == 0:
+                    _set_trace(True)
+                    _reset_trace()  # trace owner: region-local captures (C++ map dedups per op)
+                _active_trace += 1
+            if _active_regions == 0:
+                # (B) gate the librbln boundary timers ON (off => one relaxed atomic load per
+                # boundary call, no clock read -> ON==OFF preserved). Owner reset keeps it bounded.
+                _rt_timing_reset()
+                _rt_timing_enable(True)
+            _active_regions += 1
+            self._counted = True
+        if overlapping:
+            warnings.warn(
+                "torch.rbln.explain(): this region overlaps another active region (nested or "
+                "concurrent). Per-op counters are per-region deltas, but the (B) rebel-runtime "
+                "timer and trace are process-global and reflect the outermost/first region's "
+                "window; concurrent counter deltas may also be cross-contaminated. Avoid "
+                "overlapping regions.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+        # Snapshot t0 for every signal (timer included) -> the region value is a delta, so it
+        # nests safely without a per-region reset.
+        self._t0_timing = _read_rt_timing()
         self._b0 = _read_bounces()
         self._d0 = _read_dispatch()
         self._f0 = _read_fallback_by_op()
@@ -484,44 +525,61 @@ class RBLNExplain:
         return self
 
     def stop(self) -> RBLNExplain:
-        self._wall_ns = time.perf_counter_ns() - self._wall0
-        self._rt_timing = _read_rt_timing()  # (B) region totals (reset at start)
-        _rt_timing_enable(False)
-        b1, d1, rt1 = _read_bounces(), _read_dispatch(), _read_runtime()
-        self._bounces = [(c1 - c0, by1 - by0) for (c0, by0), (c1, by1) in zip(self._b0, b1)]
-        self._dispatch = tuple(x1 - x0 for x0, x1 in zip(self._d0, d1))
-        f1 = _read_fallback_by_op()
-        self._fallback_by_op = {op: f1[op] - self._f0.get(op, 0) for op in f1 if f1[op] - self._f0.get(op, 0) > 0}
-        r1 = _read_recompile_by_op()
-        self._recompile_by_op = {op: r1[op] - self._r0.get(op, 0) for op in r1 if r1[op] - self._r0.get(op, 0) > 0}
-        fr1 = _read_fallback_reasons()
-        self._fallback_reasons = (
-            [b - a for a, b in zip(self._fr0, fr1)] if self._fr0 and fr1 and len(fr1) == len(self._fr0) else []
-        )
-        if self._rt0 is not None and rt1 is not None:
-            hc = [a - b for a, b in zip(rt1["hidden_count"], self._rt0["hidden_count"])]
-            hb = [a - b for a, b in zip(rt1["hidden_bytes"], self._rt0["hidden_bytes"])]
-            self._rt = {"hidden_count": hc, "hidden_bytes": hb}
-            if "mem_cur" in rt1:
-                # memory is a process-level high-water gauge (a level, not a delta)
-                self._rt["mem_cur"] = rt1["mem_cur"]
-                self._rt["mem_peak"] = rt1["mem_peak"]
-            if "host_sync_count" in rt1 and "host_sync_count" in self._rt0:
-                self._rt["host_sync_count"] = rt1["host_sync_count"] - self._rt0["host_sync_count"]
-                self._rt["host_sync_bytes"] = rt1["host_sync_bytes"] - self._rt0["host_sync_bytes"]
-            if "host_sync_h2d_count" in rt1 and "host_sync_h2d_count" in self._rt0:
-                self._rt["host_sync_h2d_count"] = rt1["host_sync_h2d_count"] - self._rt0["host_sync_h2d_count"]
-                self._rt["host_sync_h2d_bytes"] = rt1["host_sync_h2d_bytes"] - self._rt0["host_sync_h2d_bytes"]
-            if "reject_count" in rt1 and "reject_count" in self._rt0:
-                self._rt["reject_count"] = [a - b for a, b in zip(rt1["reject_count"], self._rt0["reject_count"])]
-                self._rt["reject_bytes"] = [a - b for a, b in zip(rt1["reject_bytes"], self._rt0["reject_bytes"])]
-        else:
-            self._rt = None
-        if self._trace:
-            self._trace_by_op = _read_trace_by_op()
-            _set_trace(False)
-        else:
-            self._trace_by_op = {}
+        global _active_regions, _active_trace
+        try:
+            self._wall_ns = time.perf_counter_ns() - self._wall0
+            t1 = _read_rt_timing()  # (B) region delta vs the t0 snapshot (no per-region reset)
+            if self._t0_timing is not None and t1 is not None and len(t1) == len(self._t0_timing):
+                self._rt_timing = [(n1 - n0, c1 - c0) for (n0, c0), (n1, c1) in zip(self._t0_timing, t1)]
+            else:
+                self._rt_timing = t1
+            b1, d1, rt1 = _read_bounces(), _read_dispatch(), _read_runtime()
+            self._bounces = [(c1 - c0, by1 - by0) for (c0, by0), (c1, by1) in zip(self._b0, b1)]
+            self._dispatch = tuple(x1 - x0 for x0, x1 in zip(self._d0, d1))
+            f1 = _read_fallback_by_op()
+            self._fallback_by_op = {op: f1[op] - self._f0.get(op, 0) for op in f1 if f1[op] - self._f0.get(op, 0) > 0}
+            r1 = _read_recompile_by_op()
+            self._recompile_by_op = {op: r1[op] - self._r0.get(op, 0) for op in r1 if r1[op] - self._r0.get(op, 0) > 0}
+            fr1 = _read_fallback_reasons()
+            self._fallback_reasons = (
+                [b - a for a, b in zip(self._fr0, fr1)] if self._fr0 and fr1 and len(fr1) == len(self._fr0) else []
+            )
+            if self._rt0 is not None and rt1 is not None:
+                hc = [a - b for a, b in zip(rt1["hidden_count"], self._rt0["hidden_count"])]
+                hb = [a - b for a, b in zip(rt1["hidden_bytes"], self._rt0["hidden_bytes"])]
+                self._rt = {"hidden_count": hc, "hidden_bytes": hb}
+                if "mem_cur" in rt1:
+                    # memory is a process-level high-water gauge (a level, not a delta)
+                    self._rt["mem_cur"] = rt1["mem_cur"]
+                    self._rt["mem_peak"] = rt1["mem_peak"]
+                if "host_sync_count" in rt1 and "host_sync_count" in self._rt0:
+                    self._rt["host_sync_count"] = rt1["host_sync_count"] - self._rt0["host_sync_count"]
+                    self._rt["host_sync_bytes"] = rt1["host_sync_bytes"] - self._rt0["host_sync_bytes"]
+                if "host_sync_h2d_count" in rt1 and "host_sync_h2d_count" in self._rt0:
+                    self._rt["host_sync_h2d_count"] = rt1["host_sync_h2d_count"] - self._rt0["host_sync_h2d_count"]
+                    self._rt["host_sync_h2d_bytes"] = rt1["host_sync_h2d_bytes"] - self._rt0["host_sync_h2d_bytes"]
+                if "reject_count" in rt1 and "reject_count" in self._rt0:
+                    self._rt["reject_count"] = [a - b for a, b in zip(rt1["reject_count"], self._rt0["reject_count"])]
+                    self._rt["reject_bytes"] = [a - b for a, b in zip(rt1["reject_bytes"], self._rt0["reject_bytes"])]
+            else:
+                self._rt = None
+            self._trace_by_op = _read_trace_by_op() if self._trace else {}
+        finally:
+            # (#3) ALWAYS release ownership and drop the global gates, even if a readout above
+            # raised -- else the (B) timer / trace leak ON into the next region. The LAST region
+            # out disables; a nested/concurrent region only decrements (the owner keeps the gate).
+            with _region_lock:
+                if self._counted:
+                    self._counted = False
+                    if self._trace:
+                        _active_trace -= 1
+                        if _active_trace <= 0:
+                            _active_trace = 0
+                            _set_trace(False)
+                    _active_regions -= 1
+                    if _active_regions <= 0:
+                        _active_regions = 0
+                        _rt_timing_enable(False)
         return self
 
     def __enter__(self) -> Self:
