@@ -15,6 +15,7 @@ try:
 except Exception:  # pragma: no cover - torch internals may move
     _get_chromium_event_logger = None
 
+from torch_rbln._internal.dummy_device import raise_if_dummy_execution
 from torch_rbln._internal.env_utils import is_fallback_disabled, use_tp_failover
 from torch_rbln._internal.log_utils import rbln_log_error, rbln_log_warn
 from torch_rbln._internal.ops_utils import extract_device_id_from_inputs, to_cpu
@@ -391,18 +392,10 @@ class CompiledFunctionWrapper:
             _exit_rbln_compile_op()
 
     def _call_impl(self, *args, **kwargs):
-        # RBLN_DUMMY_DEVICE is compile-only (no NPU): a compiled graph cannot be
-        # executed on it — the dummy runtime would silently return zeros. Fail
-        # loudly here instead. compile_only builds are allowed through (they only
-        # write the .rbln artifact; the zero output is never used).
-        import torch_rbln._C
-
-        if torch_rbln._C.is_dummy_device() and not _is_compile_only(self._compile_kwargs):
-            raise RuntimeError(
-                "Cannot execute a compiled graph on RBLN_DUMMY_DEVICE (no NPU). "
-                "Use options={'mode': ['compile_only']} to build artifacts, or run "
-                "on a host with a real NPU."
-            )
+        # A compiled graph is NPU-only; executing it on RBLN_DUMMY_DEVICE would
+        # silently return zeros. Reject it through the shared policy gate (compile_only
+        # builds are exempt — they only write the artifact).
+        raise_if_dummy_execution("a compiled graph", compile_only=_is_compile_only(self._compile_kwargs))
 
         # Extract device_id for TP operations
         device_id = extract_device_id_from_inputs(*args, **kwargs)

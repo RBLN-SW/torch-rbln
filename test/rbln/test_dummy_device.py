@@ -530,6 +530,46 @@ def test_compile_only_decorator_form_is_allowed():
     assert "OK" in proc.stdout
 
 
+def test_eager_device_dtype_op_execution_fails_fast():
+    # An eager op on a device dtype (fp16/bf16) is NPU-bound, so on RBLN_DUMMY_DEVICE it
+    # must fail fast like a compiled graph -- and consistently, regardless of tensor
+    # shape (the 64-alignment CPU-fallback must not make an aligned tensor raise while an
+    # unaligned one silently runs). Both shapes below must raise.
+    proc = _run_with_dummy(
+        """
+        import torch, torch_rbln
+        for shape in [(4, 64), (4, 8)]:  # aligned and unaligned last dim
+            a = torch.ones(*shape, device="rbln:0", dtype=torch.float16)
+            try:
+                torch.softmax(a, dim=-1)
+            except RuntimeError as e:
+                assert "RBLN_DUMMY_DEVICE" in str(e), str(e)
+            else:
+                raise AssertionError(f"expected RuntimeError for eager device-dtype op {shape}")
+        print("OK")
+        """,
+        env_extra={"RBLN_DEVICE_MAP": _NO_NPU_MAP},
+    )
+    _assert_ok(proc)
+    assert "OK" in proc.stdout
+
+
+def test_eager_host_dtype_op_runs_on_cpu():
+    # A host dtype (fp32) never runs on the NPU -- even on real hardware it CPU-falls-back.
+    # Dummy mode must keep that behavior (not reject it), so the result matches CPU.
+    proc = _run_with_dummy(
+        """
+        import torch, torch_rbln
+        a = torch.ones(4, 8, device="rbln:0", dtype=torch.float32)
+        assert (a + a).cpu().tolist() == [[2.0] * 8] * 4
+        print("OK")
+        """,
+        env_extra={"RBLN_DEVICE_MAP": _NO_NPU_MAP},
+    )
+    _assert_ok(proc)
+    assert "OK" in proc.stdout
+
+
 # An out-of-range system device id: RBLN_DEVICES remaps user device 0 onto it, the
 # probe misses, and 0 logical devices remain (distinct from RBLN_DEVICE_MAP, which
 # declares a logical device that only fails when actually opened).
