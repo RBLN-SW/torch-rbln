@@ -378,8 +378,8 @@ RBLNRetCode rbln_memcpy_h2v_cast(uintptr_t src_host_ptr, uint64_t dst_vaddr, uin
 // `to_dtype` and copied to the `dst_host_ptr`. However, if the user dtype of the vmemory area
 // corresponding to src_vaddr is `from_dtype` and the device dtype is `to_dtype`, the data is copied
 // directly from device memory to dst_host_ptr without conversion. This characteristic can be used
-// to resolve precision loss issues between custom_float16 and float16. This can be useful when the user
-// wants the raw custom_float16 contents to avoid the precision loss.
+// to resolve precision loss issues between custom_float16 and float16. This can be useful when the
+// user wants the raw custom_float16 contents to avoid the precision loss.
 RBLNRetCode rbln_memcpy_v2h_cast(uint64_t src_vaddr, uintptr_t dst_host_ptr, uint64_t size,
                                  DataType from_dtype, DataType to_dtype);
 
