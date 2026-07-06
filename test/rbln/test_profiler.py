@@ -507,39 +507,34 @@ class TestProfilerReportFormat(TestCase):
 
 @pytest.mark.test_set_ci
 class TestProfilerRegionSafety(TestCase):
-    """Regions drive process-global instrumentation; a refcount owns it and cleanup is
-    guaranteed on exception (so nested/concurrent regions and mid-region errors are safe)."""
+    """Regions own process-global instrumentation, so they must not overlap. A guard raises
+    on overlap, and cleanup is guaranteed on any error (failed start OR mid-region raise)."""
 
-    def test_refcount_released_on_exception(self):
-        # stop()'s try/finally releases the global refcount even if the body raises,
-        # so the timer/trace gate never leaks ON into the next region.
+    def test_region_released_on_exception(self):
+        # start()+stop() release the global guard/gate via try/finally even if the body
+        # raises, so instrumentation never leaks ON into the next region.
         from torch_rbln import profiler as _prof
 
-        self.assertEqual(_prof._active_regions, 0)
+        self.assertFalse(_prof._active)
         with self.assertRaises(ValueError):
             with torch.rbln.explain():
                 _ = torch.ones(4, 4, device=DEV, dtype=torch.int32) + 1
                 raise ValueError("boom")
-        self.assertEqual(_prof._active_regions, 0)  # released despite the exception
+        self.assertFalse(_prof._active)  # released despite the exception
 
-    def test_nested_region_warns_and_preserves_outer(self):
-        # A nested region warns and must NOT reset/disable the outer region's timer/trace.
-        import warnings as _w
-
+    def test_overlapping_region_raises(self):
+        # Regions must not overlap: a nested (or concurrent) region raises rather than
+        # silently corrupting the open region's timer/trace/counters. The outer region
+        # still releases the guard on the way out.
         from torch_rbln import profiler as _prof
 
-        with _w.catch_warnings(record=True) as rec:
-            _w.simplefilter("always")
-            with torch.rbln.explain() as outer:
-                self.assertEqual(_prof._active_regions, 1)
-                with torch.rbln.explain():
-                    self.assertEqual(_prof._active_regions, 2)  # nested counted
-                    _ = torch.ones(4, 4, device=DEV, dtype=torch.int32) + 1
-                self.assertEqual(_prof._active_regions, 1)  # inner released, outer still owns
-                _ = torch.ones(4, 4, device=DEV, dtype=torch.int32) + 1  # outer keeps measuring
-        self.assertEqual(_prof._active_regions, 0)
-        self.assertTrue(any(issubclass(x.category, RuntimeWarning) for x in rec))
-        self.assertIsInstance(outer.dump(), dict)  # outer not corrupted by the nested region
+        self.assertFalse(_prof._active)
+        with self.assertRaises(RuntimeError):
+            with torch.rbln.explain():
+                self.assertTrue(_prof._active)
+                with torch.rbln.explain():  # overlap -> raises on start
+                    pass
+        self.assertFalse(_prof._active)  # outer released on the way out
 
 
 if __name__ == "__main__":

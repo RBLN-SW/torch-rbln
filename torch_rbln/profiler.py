@@ -64,7 +64,6 @@ from __future__ import annotations
 
 import threading
 import time
-import warnings
 from typing import Any, Callable, Optional  # noqa: UP035
 from typing_extensions import Self
 
@@ -72,16 +71,14 @@ from typing_extensions import Self
 __all__ = ["explain", "explain_steady", "RBLNExplain", "RBLNDiff", "profile", "RBLNProfile"]
 
 
-# explain() regions drive PROCESS-GLOBAL instrumentation: the (B) rebel-runtime timer
-# gate (RBLNFunctions.cpp) and the trace gate/map (DispatchShim.cpp) are single globals.
-# Regions must therefore not overlap. A thread-safe refcount lets the FIRST/outermost
-# region own the reset+enable and the LAST one disable, so a nested or concurrent region
-# never resets the owner's timer/trace nor disables its measurement mid-flight. (The
-# per-op counters are per-region deltas regardless; concurrent deltas can still cross-
-# contaminate -- a global-counter limit noted for callers, not fixable here.)
+# explain() drives PROCESS-GLOBAL instrumentation: the (B) rebel-runtime timer gate
+# (RBLNFunctions.cpp) and the trace gate/map (DispatchShim.cpp) are single globals, and
+# the counters are read as deltas. A region owns that global state for its duration, so
+# regions MUST NOT overlap. Rather than build per-region views over shared singletons
+# (refcounts/snapshots), we keep one honest contract -- a single, non-overlapping,
+# single-thread region -- enforced by a guard that raises on overlap.
 _region_lock = threading.Lock()
-_active_regions = 0  # regions currently open (timer refcount)
-_active_trace = 0  # open regions that requested trace (trace-gate refcount)
+_active = False  # a region is currently open (regions must not overlap)
 
 
 # Must match the BounceSite enum order in c10/rbln/RBLNProfiler.h.
@@ -166,7 +163,10 @@ def _collect_remedies(d: dict[str, Any]) -> list[dict[str, str]]:
         rfix = dict(_RUNTIME_REASONS)
         for n, vv in rr["by_reason"].items():
             if vv["count"]:
-                fixes.append({"signal": f"runtime/v2v_slow:{n}", "fix": rfix[n]})
+                # rfix has no entry for the "unattributed" tail bucket -> honest placeholder,
+                # never a KeyError.
+                fix = rfix.get(n, "runtime reason not named by this torch-rbln build; update to attribute it")
+                fixes.append({"signal": f"runtime/v2v_slow:{n}", "fix": fix})
         # Reject axis (so help()/dump()['remedies'] resolve the v2v_reject:* signals the
         # report shows): user-actionable reasons carry their fix; the internal bucket is a
         # notification, not a to-do.
@@ -478,61 +478,61 @@ class RBLNExplain:
         self._trace = trace
         self._trace_by_op: Optional[dict] = None
         self._rt_timing: Optional[list[tuple[int, int]]] = None  # (B) per-primitive librbln (ns, calls)
-        self._t0_timing: Optional[list[tuple[int, int]]] = None  # (B) start snapshot -> region delta
-        self._counted = False  # this region incremented the global refcount (release once, in stop)
+        self._holds = False  # this region owns the global instrumentation (release exactly once)
         self._wall_ns = 0
 
     def start(self) -> RBLNExplain:
-        global _active_regions, _active_trace
-        # Own the process-global gates under the refcount: only the FIRST region enables
-        # (and the LAST disables, in stop) so a nested/concurrent region cannot reset or
-        # disable the owner's timer/trace. An overlapping region warns and shares the
-        # owner's window (its own (B) timer/trace are then not isolated).
+        global _active
+        # Claim the process-global instrumentation. Regions must not overlap; a second
+        # (nested or concurrent) region raises rather than silently corrupting the open
+        # one's timer/trace/counters.
         with _region_lock:
-            overlapping = _active_regions > 0
+            if _active:
+                raise RuntimeError(
+                    "torch.rbln.explain() regions must not overlap (nested or concurrent): the "
+                    "(B) timer, trace and counters are process-global. Close the open region first."
+                )
+            _active = True
+            self._holds = True
+        # We now own the gate. Enable it and take the start baselines; if ANY of that raises,
+        # release before propagating so a failed start never leaks the gate/guard (#2).
+        try:
             if self._trace:
-                if _active_trace == 0:
-                    _set_trace(True)
-                    _reset_trace()  # trace owner: region-local captures (C++ map dedups per op)
-                _active_trace += 1
-            if _active_regions == 0:
-                # (B) gate the librbln boundary timers ON (off => one relaxed atomic load per
-                # boundary call, no clock read -> ON==OFF preserved). Owner reset keeps it bounded.
-                _rt_timing_reset()
-                _rt_timing_enable(True)
-            _active_regions += 1
-            self._counted = True
-        if overlapping:
-            warnings.warn(
-                "torch.rbln.explain(): this region overlaps another active region (nested or "
-                "concurrent). Per-op counters are per-region deltas, but the (B) rebel-runtime "
-                "timer and trace are process-global and reflect the outermost/first region's "
-                "window; concurrent counter deltas may also be cross-contaminated. Avoid "
-                "overlapping regions.",
-                RuntimeWarning,
-                stacklevel=3,
-            )
-        # Snapshot t0 for every signal (timer included) -> the region value is a delta, so it
-        # nests safely without a per-region reset.
-        self._t0_timing = _read_rt_timing()
-        self._b0 = _read_bounces()
-        self._d0 = _read_dispatch()
-        self._f0 = _read_fallback_by_op()
-        self._r0 = _read_recompile_by_op()
-        self._fr0 = _read_fallback_reasons()
-        self._rt0 = _read_runtime()
-        self._wall0 = time.perf_counter_ns()
+                _set_trace(True)
+                _reset_trace()  # region-local captures (the C++ map dedups per op)
+            # (B) off => one relaxed atomic load per boundary call, no clock read (ON==OFF).
+            _rt_timing_reset()
+            _rt_timing_enable(True)
+            self._b0 = _read_bounces()
+            self._d0 = _read_dispatch()
+            self._f0 = _read_fallback_by_op()
+            self._r0 = _read_recompile_by_op()
+            self._fr0 = _read_fallback_reasons()
+            self._rt0 = _read_runtime()
+            self._wall0 = time.perf_counter_ns()
+        except BaseException:
+            self._release()
+            raise
         return self
 
+    def _release(self) -> None:
+        """Disable the global instrumentation and release the region guard, exactly once.
+        Called from stop()'s finally AND from a failed start() -- so neither a mid-readout
+        error nor a start failure leaks the (B) timer / trace gate into the next region."""
+        global _active
+        with _region_lock:
+            if not self._holds:
+                return
+            self._holds = False
+            _rt_timing_enable(False)
+            if self._trace:
+                _set_trace(False)
+            _active = False
+
     def stop(self) -> RBLNExplain:
-        global _active_regions, _active_trace
         try:
             self._wall_ns = time.perf_counter_ns() - self._wall0
-            t1 = _read_rt_timing()  # (B) region delta vs the t0 snapshot (no per-region reset)
-            if self._t0_timing is not None and t1 is not None and len(t1) == len(self._t0_timing):
-                self._rt_timing = [(n1 - n0, c1 - c0) for (n0, c0), (n1, c1) in zip(self._t0_timing, t1)]
-            else:
-                self._rt_timing = t1
+            self._rt_timing = _read_rt_timing()  # (B) region totals (reset at start)
             b1, d1, rt1 = _read_bounces(), _read_dispatch(), _read_runtime()
             self._bounces = [(c1 - c0, by1 - by0) for (c0, by0), (c1, by1) in zip(self._b0, b1)]
             self._dispatch = tuple(x1 - x0 for x0, x1 in zip(self._d0, d1))
@@ -565,21 +565,7 @@ class RBLNExplain:
                 self._rt = None
             self._trace_by_op = _read_trace_by_op() if self._trace else {}
         finally:
-            # (#3) ALWAYS release ownership and drop the global gates, even if a readout above
-            # raised -- else the (B) timer / trace leak ON into the next region. The LAST region
-            # out disables; a nested/concurrent region only decrements (the owner keeps the gate).
-            with _region_lock:
-                if self._counted:
-                    self._counted = False
-                    if self._trace:
-                        _active_trace -= 1
-                        if _active_trace <= 0:
-                            _active_trace = 0
-                            _set_trace(False)
-                    _active_regions -= 1
-                    if _active_regions <= 0:
-                        _active_regions = 0
-                        _rt_timing_enable(False)
+            self._release()  # always drop the gate + release the guard, even if a readout raised
         return self
 
     def __enter__(self) -> Self:
@@ -627,13 +613,21 @@ class RBLNExplain:
         }
         out["trace_by_op"] = dict(self._trace_by_op or {})  # (A) WHERE; {} unless trace=True
         if self._rt is not None:
+            hc, hbytes = self._rt["hidden_count"], self._rt["hidden_bytes"]
+            by_reason = {
+                n: {"count": c, "bytes": b} for (n, _f), c, b in zip(_RUNTIME_REASONS, hc, hbytes)
+            }
+            # (#3) the runtime OWNS this axis and reports its own length; if its enum grows past
+            # what we name, fold the unnamed tail into one bucket instead of dropping it (mirrors
+            # the reject axis) so sum(by_reason) always equals total_count -- never under-count.
+            n_named = len(_RUNTIME_REASONS)
+            extra_c, extra_b = sum(hc[n_named:]), sum(hbytes[n_named:])
+            if extra_c:
+                by_reason["unattributed"] = {"count": extra_c, "bytes": extra_b}
             out["runtime_residency"] = {
                 "available": True,
-                "total_count": sum(self._rt["hidden_count"]),
-                "by_reason": {
-                    n: {"count": c, "bytes": b}
-                    for (n, _f), c, b in zip(_RUNTIME_REASONS, self._rt["hidden_count"], self._rt["hidden_bytes"])
-                },
+                "total_count": sum(hc),
+                "by_reason": by_reason,
             }
             if "host_sync_count" in self._rt:
                 # REAL device->host this region (manager-emitted): a host bounce with 0 real
