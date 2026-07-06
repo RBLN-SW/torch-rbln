@@ -248,6 +248,15 @@ class C10_RBLN_API DeviceMappingManager {
   std::string getValidSizesString() const;
 
   /**
+   * @brief Hardware-independent validation of a logical->physical device group layout,
+   * shared by the RBLN_DEVICE_MAP (real) and RBLN_DUMMY_DEVICE paths: bounds the logical
+   * device count, requires a valid group size, and rejects a physical id assigned to more
+   * than one logical device. The physical-id range check needs a physical device count and
+   * stays in the real path.
+   */
+  void validateDeviceGroups(const std::vector<std::vector<int>>& groups) const;
+
+  /**
    * @brief Build and cache the device topology.
    */
   void buildDeviceTopology();

@@ -84,6 +84,34 @@ std::string DeviceMappingManager::getValidSizesString() const {
   return ss.str();
 }
 
+void DeviceMappingManager::validateDeviceGroups(const std::vector<std::vector<int>>& groups) const {
+  // Hardware-independent checks shared by the real (RBLN_DEVICE_MAP / RBLN_NPUS_PER_DEVICE)
+  // and dummy paths. The physical-id *range* check needs a physical device count and so
+  // stays in the real path (initializeFromDeviceMap).
+  constexpr auto kMaxDeviceIndex = static_cast<size_t>(std::numeric_limits<c10::DeviceIndex>::max());
+  RBLN_CHECK(
+      groups.size() <= kMaxDeviceIndex,
+      "RBLN_DEVICE_MAP/RBLN_NPUS_PER_DEVICE requests {} logical devices, exceeding the maximum of {}",
+      groups.size(),
+      kMaxDeviceIndex);
+
+  std::unordered_set<int> used_physical_ids;
+  for (size_t i = 0; i < groups.size(); ++i) {
+    RBLN_CHECK(
+        isValidDeviceGroupSize(groups[i].size()),
+        "Logical device rbln:{} has {} physical NPU(s); valid sizes are {}.",
+        i,
+        groups[i].size(),
+        getValidSizesString());
+    for (int phy_id : groups[i]) {
+      RBLN_CHECK(
+          used_physical_ids.insert(phy_id).second,
+          "Physical NPU {} is assigned to more than one logical device",
+          phy_id);
+    }
+  }
+}
+
 RblnNpuMappingEnvDisplay getRblnNpuMappingEnvDisplay() {
   const char* map_env = std::getenv("RBLN_DEVICE_MAP");
   const char* npus_env = std::getenv("RBLN_NPUS_PER_DEVICE");
@@ -232,22 +260,16 @@ void DeviceMappingManager::initializeFromDeviceMap(const std::string& device_map
 
   RBLN_CHECK(!device_groups.empty(), "RBLN_DEVICE_MAP must contain at least one logical device mapping");
 
+  // Shape / duplicate-id / count validation shared with the dummy path.
+  validateDeviceGroups(device_groups);
+
   RblnNpuMappingEnvDisplay env_display = getRblnNpuMappingEnvDisplay();
   std::vector<bool> physical_device_used(physical_device_count, false);
   int logical_device_index = 0;
 
   for (const auto& group : device_groups) {
-    RBLN_CHECK(!group.empty(), "Each logical device mapping in RBLN_DEVICE_MAP must contain at least one physical NPU");
-
-    // Validate mapping size: physical NPUs per logical device must be one of the allowed base sizes
-    RBLN_CHECK(
-        isValidDeviceGroupSize(group.size()),
-        "Each logical device mapping in RBLN_DEVICE_MAP must contain a valid number of physical NPUs. "
-        "Valid sizes are: {}. Mapping with {} physical NPU(s) is invalid.",
-        getValidSizesString(),
-        group.size());
-
-    // Validate physical NPU IDs (each mapping lists physical NPU indices for one logical device)
+    // Physical-id range check + usage tracking for unused-device collection (needs
+    // hardware, so it stays here rather than in validateDeviceGroups).
     for (int phy_id : group) {
       if (phy_id < 0 || phy_id >= physical_device_count) {
         std::string map_display = env_display.device_map;
@@ -264,8 +286,6 @@ void DeviceMappingManager::initializeFromDeviceMap(const std::string& device_map
             map_display,
             env_display.npus_per_device);
       }
-      RBLN_CHECK(
-          !physical_device_used[phy_id], "Physical NPU {} is already assigned to another logical device", phy_id);
       physical_device_used[phy_id] = true;
     }
 
@@ -363,33 +383,16 @@ void DeviceMappingManager::initializeDummyDevices() {
     groups = {group};
   }
 
-  constexpr auto kMaxDeviceIndex = static_cast<size_t>(std::numeric_limits<c10::DeviceIndex>::max());
-  RBLN_CHECK(
-      groups.size() <= kMaxDeviceIndex,
-      "RBLN_DUMMY_DEVICE/RBLN_DEVICE_MAP requests {} logical devices, exceeding the maximum of {}",
-      groups.size(),
-      kMaxDeviceIndex);
+  // Shape / duplicate-id / count validation shared with the real path; the physical-id
+  // range check is skipped (there is no NPU to range them against).
+  validateDeviceGroups(groups);
+
   RBLN_LOG_INFO(
       "RBLN_DUMMY_DEVICE active: {} host-backed logical device(s), 0 physical NPU. "
       "Tensor construction/compilation run on host memory; execution still needs an NPU.",
       groups.size());
 
-  // Reject invalid group sizes and duplicate physical ids (both enforceable
-  // without hardware); only the physical-id range check is skipped (no NPU).
-  std::unordered_set<int> used_physical_ids;
   for (size_t i = 0; i < groups.size(); ++i) {
-    RBLN_CHECK(
-        isValidDeviceGroupSize(groups[i].size()),
-        "RBLN_DEVICE_MAP group for rbln:{} has {} physical NPU(s); valid sizes are {}.",
-        i,
-        groups[i].size(),
-        getValidSizesString());
-    for (int phy_id : groups[i]) {
-      RBLN_CHECK(
-          used_physical_ids.insert(phy_id).second,
-          "Physical NPU {} is assigned to more than one logical device in RBLN_DEVICE_MAP",
-          phy_id);
-    }
     registerLogicalDevice(static_cast<int>(i), groups[i]);
   }
   device_count_ = static_cast<c10::DeviceIndex>(groups.size());
