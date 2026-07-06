@@ -531,21 +531,25 @@ def test_compile_only_decorator_form_is_allowed():
 
 
 def test_eager_device_dtype_op_execution_fails_fast():
-    # An eager op on a device dtype (fp16/bf16) is NPU-bound, so on RBLN_DUMMY_DEVICE it
-    # must fail fast like a compiled graph -- and consistently, regardless of tensor
-    # shape (the 64-alignment CPU-fallback must not make an aligned tensor raise while an
-    # unaligned one silently runs). Both shapes below must raise.
+    # Eager ops that reach the RBLN device-compile path are NPU-bound, so on
+    # RBLN_DUMMY_DEVICE they must fail fast like a compiled graph. Cover the axes that
+    # each route to that gate: both device dtypes (fp16/bf16), unary (softmax) and binary
+    # (add) ops, and aligned + unaligned last dims (the 64-alignment CPU-fallback must not
+    # make an aligned tensor raise while an unaligned one silently runs). All must raise.
     proc = _run_with_dummy(
         """
         import torch, torch_rbln
-        for shape in [(4, 64), (4, 8)]:  # aligned and unaligned last dim
-            a = torch.ones(*shape, device="rbln:0", dtype=torch.float16)
-            try:
-                torch.softmax(a, dim=-1)
-            except RuntimeError as e:
-                assert "RBLN_DUMMY_DEVICE" in str(e), str(e)
-            else:
-                raise AssertionError(f"expected RuntimeError for eager device-dtype op {shape}")
+        for dt in (torch.float16, torch.bfloat16):
+            for shape in [(4, 64), (4, 8)]:  # aligned and unaligned last dim
+                a = torch.ones(*shape, device="rbln:0", dtype=dt)
+                b = torch.ones(*shape, device="rbln:0", dtype=dt)
+                for op in (lambda: torch.softmax(a, dim=-1), lambda: a + b):
+                    try:
+                        op()
+                    except RuntimeError as e:
+                        assert "RBLN_DUMMY_DEVICE" in str(e), str(e)
+                    else:
+                        raise AssertionError(f"expected RuntimeError on dummy for {dt} {shape}")
         print("OK")
         """,
         env_extra={"RBLN_DEVICE_MAP": _NO_NPU_MAP},

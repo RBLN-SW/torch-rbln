@@ -1688,24 +1688,26 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     Imports are deferred into the body to avoid a load-time circular import
     (``ops_utils`` is imported broadly).
     """
-    from torch_rbln._internal.compile_cache import compile_rbln_cached
+    # Policy precondition, checked before any device-compile machinery is imported or
+    # run: this is the device-compute entry (only supported dtypes reach here; host-dtype
+    # / unsupported ops already took cpu_fallback_path). On RBLN_DUMMY_DEVICE that means an
+    # NPU-bound eager op with no NPU, so reject it through the shared policy gate — same
+    # rule as a compiled graph, and independent of the 64-alignment fallback below so the
+    # behavior does not depend on tensor shape. depth > 0 means we are nested inside a
+    # compile op (e.g. an artifact build); those must proceed so builds still work.
     from torch_rbln._internal.dummy_device import raise_if_dummy_execution
-    from torch_rbln._internal.env_utils import use_device_group_num_devices
     from torch_rbln._internal.torch_compile_patch_helpers import get_rbln_compile_op_depth
+
+    if get_rbln_compile_op_depth() == 0:
+        raise_if_dummy_execution(f"the eager op {op_name}" if op_name else "an eager op")
+
+    from torch_rbln._internal.compile_cache import compile_rbln_cached
+    from torch_rbln._internal.env_utils import use_device_group_num_devices
     from torch_rbln._internal.warm_cache import (
         consume_force_recompile as _consume_warm_cache_force_recompile,
         install_pending as _install_warm_cache_pending,
     )
     from torch_rbln.device.context_holder import out_tensor_context
-
-    # This is the device-compute entry (only supported dtypes reach here; host-dtype /
-    # unsupported ops already took cpu_fallback_path). On RBLN_DUMMY_DEVICE that means an
-    # NPU-bound eager op with no NPU, so reject it through the shared policy gate — same
-    # rule as a compiled graph, and independent of the 64-alignment fallback below so the
-    # behavior does not depend on tensor shape. depth > 0 means we are nested inside a
-    # compile op (e.g. an artifact build); those must proceed so builds still work.
-    if get_rbln_compile_op_depth() == 0:
-        raise_if_dummy_execution(f"the eager op {op_name}" if op_name else "an eager op")
 
     # Device 64-elem-align fallback: a last-dim not a multiple of 64 makes the
     # rebel pipeline wrap the device fn with host-only contrib_aligned_pad /
