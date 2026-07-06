@@ -49,7 +49,7 @@ class TestProfilerCopyBounce(TestCase):
         # still flag a hidden d2h if device residency isn't established for these
         # freshly-created tensors — that is a real finding, not a test failure —
         # so we assert only the torch-side invariant here, and let
-        # test_empty_region_is_green cover the unconditional-GREEN case.
+        # test_empty_region_is_clean cover the unconditional-clean case.
         with torch.rbln.explain() as p:
             x = torch.randn(64, 64, device=DEV, dtype=torch.float16)
             y = torch.empty(64, 64, device=DEV, dtype=torch.float16)
@@ -59,15 +59,15 @@ class TestProfilerCopyBounce(TestCase):
     def test_d2d_int_cast_bounces_with_bytes(self):
         # An int-dtype device->device cast (int64->int32) cannot use the fp16 on-device
         # v2v engine, so it round-trips the host -> explain shows copy_d2d_host_bounce
-        # with bytes and a RED verdict. (A plain non-contiguous fp16 slice copy no longer
-        # bounces here -- the runtime's strided v2v now handles it fully on-device.)
+        # with bytes, so the region is not clean. (A plain non-contiguous fp16 slice copy
+        # no longer bounces here -- the runtime's strided v2v now handles it on-device.)
         s = torch.tensor([3, 4, 5, 6], dtype=torch.int64).to(DEV)
         with torch.rbln.explain() as p:
             _ = s.to(torch.int32)
         hb = p.dump()["hidden_host_bounce"]
         self.assertGreaterEqual(hb["by_site"]["copy_d2d_host_bounce"]["count"], 1)
         self.assertGreater(hb["total_bytes"], 0)  # real bytes were moved through host
-        self.assertEqual(p.verdict()["status"], "RED")
+        self.assertFalse(p.verdict()["clean"])  # a host bounce fired -> not clean
 
 
 @pytest.mark.test_set_ci
@@ -84,7 +84,7 @@ class TestProfilerDispatchSignals(TestCase):
         # many-cheap fallbacks from few-expensive ones. >= 0 (0 only on a _C predating it).
         self.assertIn("cpu_fallback_ns", disp)
         self.assertGreaterEqual(disp["cpu_fallback_ns"], 0)
-        self.assertIn(p.verdict()["status"], ("AMBER", "RED"))
+        self.assertFalse(p.verdict()["clean"])  # ran on CPU -> not clean
 
     def test_A_recompile_counted(self):
         # First use of an unusual shape forces a compile; the profiler must count
@@ -95,7 +95,7 @@ class TestProfilerDispatchSignals(TestCase):
             x = torch.randn(29, 31, device=DEV, dtype=torch.float16)
             _ = x + x
         self.assertGreaterEqual(p.dump()["dispatch"]["recompile_miss"], 1)
-        self.assertIn(p.verdict()["status"], ("AMBER", "RED"))  # a compile -> not GREEN
+        self.assertFalse(p.verdict()["clean"])  # a compile happened -> not clean
 
 
 @pytest.mark.test_set_ci
@@ -242,10 +242,12 @@ class TestProfilerTruthfulnessAndScope(TestCase):
         for forbidden in ("command_stream", "cs_count", "padding", "fragmentation"):
             self.assertNotIn(forbidden, keys)
 
-    def test_empty_region_is_green(self):
+    def test_empty_region_is_clean(self):
+        # No hidden event fired -> clean. ``clean`` is a FACT ("did anything fire"),
+        # not a RED/AMBER/GREEN severity grade (the tool observes, it does not grade).
         with torch.rbln.explain() as p:
             pass
-        self.assertEqual(p.verdict()["status"], "GREEN")
+        self.assertTrue(p.verdict()["clean"])
         self.assertEqual(p.verdict()["hidden_host_bounces"], 0)
 
     def test_regions_are_independent_deltas(self):
@@ -273,6 +275,23 @@ class TestProfilerApi(TestCase):
         self.assertIn("runtime_residency", d)
         self.assertIn("pending_runtime_signals", d)
 
+    def test_verdict_is_factual_not_graded(self):
+        # The tool OBSERVES; it does not grade. verdict() carries a factual ``clean``
+        # flag (+ ``reasons``) and NO RED/AMBER/GREEN ``status``. report() shows a
+        # factual [clean]/[overhead] marker, never a severity colour.
+        with torch.rbln.explain() as p:
+            a = torch.ones(16, 16, device=DEV, dtype=torch.int32)  # int32 -> cpu_fallback
+            _ = a + a
+        v = p.verdict()
+        self.assertIn("clean", v)
+        self.assertNotIn("status", v)  # no RED/AMBER/GREEN grade
+        self.assertIsInstance(v["clean"], bool)
+        self.assertFalse(v["clean"])  # a fallback fired
+        rep = p.report()
+        self.assertIn("[overhead]", rep)
+        for banned in ("[ OK ]", "[WARN]", "[BAD ]", "RBLN EXPLAIN - RED", "GREEN", "AMBER"):
+            self.assertNotIn(banned, rep)
+
     def test_explain_steady_isolates_cold_compile(self):
         # explain_steady profiles the WARM (steady-state) call. A stable-shape op
         # compiles once (cold) then hits the warm cache, so steady-state recompile
@@ -280,7 +299,7 @@ class TestProfilerApi(TestCase):
         a = torch.randn(48, 48, device=DEV, dtype=torch.float16)
         cold, warm = torch.rbln.explain_steady(lambda: a + a, warmup=3, return_cold=True)
         self.assertLessEqual(warm.dump()["dispatch"]["recompile_miss"], cold.dump()["dispatch"]["recompile_miss"])
-        self.assertIn(warm.verdict()["status"], ("GREEN", "AMBER", "RED"))
+        self.assertIsInstance(warm.verdict()["clean"], bool)
 
     def test_A_where_traceback_is_opt_in(self):
         # (A) WHERE: default explain() captures NO call-site (opt-in => adds

@@ -43,9 +43,9 @@ Usage::
 
     with torch.rbln.explain() as p:
         model(x)
-    print(p.report())  # torch.profiler-style table, verdict first
+    print(p.report())  # torch.profiler-style table, [clean]/[overhead] marker + facts
     p.dump()  # dict for CI gates
-    p.verdict()  # {'status': 'GREEN'|'AMBER'|'RED', ...}
+    p.verdict()  # {'clean': bool, 'reasons': [...], ...}  (a fact, not a severity grade)
 
     with torch.rbln.explain(trace=True) as p:  # opt-in: WHERE each fallback/recompile originates
         model(x)
@@ -665,13 +665,10 @@ class RBLNExplain:
         d = self.dump()
         hb, disp, rr = d["hidden_host_bounce"], d["dispatch"], d["runtime_residency"]
         reasons: list[str] = []
-        status = "GREEN"
         if hb["total_count"] > 0:
-            status = "RED"
             reasons.append(f"hidden host bounce (torch-side): {hb['total_count']}x, {_fmt_bytes(hb['total_bytes'])}")
         runtime_hidden = rr["total_count"] if rr["available"] else 0
         if runtime_hidden > 0:
-            status = "RED"
             # Lead with the real d2h the manager performed to serve the fallback, as a
             # magnitude fact -- whether it is user-avoidable is the reject axis's job, not
             # a blanket label here.
@@ -683,15 +680,17 @@ class RBLNExplain:
                 if vv["count"]:
                     reasons.append(f"runtime hidden d2h [{n}]: {vv['count']}x - {fix[n]}")
         if disp["recompile_miss"] > 0:
-            status = "RED" if status == "RED" else "AMBER"
             reasons.append(f"recompile/cold-compile: {disp['recompile_miss']}x")
         if disp["cpu_fallback"] > 0:
-            status = "RED" if status == "RED" else "AMBER"
             reasons.append(f"cpu_fallback: {disp['cpu_fallback']}x (ran on CPU)")
-        if not reasons:
+        # ``clean`` is a FACT (did any hidden event fire), NOT a severity grade. explain
+        # does not colour-judge how bad an event is -- a host bounce can be free -- so a
+        # RED/AMBER/GREEN would be a guess. Cost lives in the table (Bytes/Note) + reasons.
+        clean = not reasons
+        if clean:
             reasons.append("no hidden host bounce, no CPU fallback, no recompile")
         return {
-            "status": status,
+            "clean": clean,
             "hidden_host_bounces": hb["total_count"],
             "hidden_host_bounce_bytes": hb["total_bytes"],
             "runtime_hidden_d2h": runtime_hidden if rr["available"] else None,
@@ -706,8 +705,10 @@ class RBLNExplain:
         """Verdict-first report. The terse fix is inline (Fix column); the full
         remedy prose is in dump()['remedies'] / help(signal), not dumped here."""
         d, v = self.dump(), self.verdict()
-        mark = {"GREEN": "[ OK ]", "AMBER": "[WARN]", "RED": "[BAD ]"}[v["status"]]
-        head = f"{mark}  RBLN EXPLAIN - {v['status']}   (wall {_fmt_time(d['wall_ns'])}"
+        # A FACTUAL marker (did anything hidden fire), NOT a severity grade: explain
+        # states what happened and lets you judge cost from the table's Bytes/Note.
+        mark = "[clean]" if v["clean"] else "[overhead]"
+        head = f"{mark}  RBLN EXPLAIN   (wall {_fmt_time(d['wall_ns'])}"
         if "device_memory" in d:
             head += f" | mem {_fmt_bytes(d['device_memory']['peak_bytes'])} peak (process)"
         head += ")"
