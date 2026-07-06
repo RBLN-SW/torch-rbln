@@ -130,8 +130,25 @@ def patch_torch_compile() -> None:
                     original_torch_compile,
                     kwargs.copy(),
                 )
-            # fallthrough for model is not provided (e.g. torch.compile(backend="rbln"))
-            return compiled_fn
+
+            # No model given: this is the factory/decorator form, e.g.
+            #   f = torch.compile(backend="rbln")(fn)   or   @torch.compile(backend="rbln")
+            # Here `compiled_fn` is torch's *decorator*; returning it as-is would hand back
+            # a compiled callable that never passes through CompiledFunctionWrapper, so RBLN
+            # failover, CPU fallback, and the RBLN_DUMMY_DEVICE execution guard would all be
+            # skipped for this form. Return our own decorator that wraps the eventual compiled
+            # function exactly like the model-provided path above.
+            torch_decorator = compiled_fn
+
+            def rbln_compile_decorator(model):
+                return CompiledFunctionWrapper(
+                    torch_decorator(model),
+                    model,
+                    original_torch_compile,
+                    kwargs.copy(),
+                )
+
+            return rbln_compile_decorator
 
         # Apply patch
         torch.compile = wrapper

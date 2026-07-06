@@ -452,6 +452,59 @@ def test_compiled_graph_execution_fails_fast():
     assert "OK" in proc.stdout
 
 
+def test_compiled_graph_decorator_form_execution_fails_fast():
+    # Same guard as test_compiled_graph_execution_fails_fast, but reached through the
+    # factory/decorator form: torch.compile(backend="rbln")(m) (identical code path to
+    # @torch.compile(backend="rbln")). This form passes no model positionally, so unless
+    # the patch wraps the eventual compiled function it would bypass CompiledFunctionWrapper
+    # -- and thus this guard -- and silently return zeros on the dummy runtime. It must fail
+    # loudly too.
+    proc = _run_with_dummy(
+        """
+        import torch, torch_rbln
+        m = torch.nn.Linear(4, 4).eval().to("rbln:0")
+        f = torch.compile(backend="rbln", dynamic=False, options={"npu": "RBLN-CA25"})(m)
+        try:
+            f(torch.ones(1, 4, device="rbln:0"))
+        except RuntimeError as e:
+            assert "RBLN_DUMMY_DEVICE" in str(e), str(e)
+            print("OK")
+        else:
+            raise AssertionError("expected RuntimeError executing a compiled graph on dummy")
+        """,
+        env_extra={"RBLN_DEVICE_MAP": _NO_NPU_MAP},
+    )
+    _assert_ok(proc)
+    assert "OK" in proc.stdout
+
+
+def test_compile_only_decorator_form_is_allowed():
+    # The guard must exempt an explicit compile_only build even through the decorator form,
+    # mirroring the positional compile_only path: it writes the artifact and does not raise.
+    proc = _run_with_dummy(
+        """
+        import glob, os, tempfile
+        import torch, torch_rbln
+
+        cache = tempfile.mkdtemp(prefix="rbln_dummy_compile_")
+        opts = {"mode": ["compile_only"], "cache_dir": cache, "npu": "RBLN-CA25"}
+        m = torch.nn.Linear(4, 4).eval().to("rbln:0")
+        f = torch.compile(backend="rbln", dynamic=False, options=opts)(m)
+        try:  # compile_only writes the artifact; the call itself may error (no real device)
+            f(torch.ones(1, 4, device="rbln:0"))
+        except RuntimeError as e:
+            # A compile_only build must never be rejected by the dummy execution guard.
+            assert "RBLN_DUMMY_DEVICE" not in str(e), str(e)
+        arts = glob.glob(os.path.join(cache, "*.rbln"))
+        assert len(arts) == 1 and os.path.getsize(arts[0]) > 0, arts
+        print("OK")
+        """,
+        env_extra={"RBLN_DEVICE_MAP": _NO_NPU_MAP},
+    )
+    _assert_ok(proc)
+    assert "OK" in proc.stdout
+
+
 # An out-of-range system device id: RBLN_DEVICES remaps user device 0 onto it, the
 # probe misses, and 0 logical devices remain (distinct from RBLN_DEVICE_MAP, which
 # declares a logical device that only fails when actually opened).
