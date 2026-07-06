@@ -549,12 +549,12 @@ class TestProfilerRuntimeContract(TestCase):
         from torch_rbln.profiler import (
             _BOUNCE_SITES,
             _FALLBACK_REASON_NAMES,
-            _RT_PRIMS,
-            _RUNTIME_REASONS,
             _read_bounces,
             _read_fallback_reasons,
             _read_rt_timing,
             _read_runtime,
+            _RT_PRIMS,
+            _RUNTIME_REASONS,
         )
 
         # BounceSite: core binding, always present.
