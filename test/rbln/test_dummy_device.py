@@ -478,6 +478,31 @@ def test_compiled_graph_decorator_form_execution_fails_fast():
     assert "OK" in proc.stdout
 
 
+def test_compiled_graph_keyword_model_execution_fails_fast():
+    # torch.compile(model=m, backend="rbln") passes the model as a keyword, so it never
+    # lands in *args. It must still be treated as model-provided (wrapped in
+    # CompiledFunctionWrapper), not mistaken for the no-model decorator form; otherwise the
+    # caller gets a decorator back instead of a compiled callable. Executing it in dummy
+    # mode must fail fast just like the positional form.
+    proc = _run_with_dummy(
+        """
+        import torch, torch_rbln
+        m = torch.nn.Linear(4, 4).eval().to("rbln:0")
+        f = torch.compile(model=m, backend="rbln", dynamic=False, options={"npu": "RBLN-CA25"})
+        try:
+            f(torch.ones(1, 4, device="rbln:0"))
+        except RuntimeError as e:
+            assert "RBLN_DUMMY_DEVICE" in str(e), str(e)
+            print("OK")
+        else:
+            raise AssertionError("expected RuntimeError executing a compiled graph on dummy")
+        """,
+        env_extra={"RBLN_DEVICE_MAP": _NO_NPU_MAP},
+    )
+    _assert_ok(proc)
+    assert "OK" in proc.stdout
+
+
 def test_compile_only_decorator_form_is_allowed():
     # The guard must exempt an explicit compile_only build even through the decorator form,
     # mirroring the positional compile_only path: it writes the artifact and does not raise.
