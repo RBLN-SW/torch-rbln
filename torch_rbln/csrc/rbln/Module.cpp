@@ -59,6 +59,10 @@ void register_public_device_api(py::module_& module) {
       &c10::rbln::get_physical_device_count,
       "Get the number of physical devices (ignores RSD mode).");
   module.def(
+      "is_dummy_device",
+      &c10::rbln::is_dummy_device,
+      "Whether host-backed dummy device mode (RBLN_DUMMY_DEVICE) is active.");
+  module.def(
       "_exchange_device",
       &c10::rbln::exchange_device_index,
       "Exchange the current device and return the original device.");
