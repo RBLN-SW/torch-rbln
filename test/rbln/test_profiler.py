@@ -465,7 +465,7 @@ class TestProfilerReportFormat(TestCase):
     def test_note_prefixes_split_action_from_fact(self):
         from torch_rbln.profiler import _fix, _fyi
 
-        self.assertEqual(_fix("make contiguous"), "fix: make contiguous")
+        self.assertEqual(_fix("make contiguous"), "try: make contiguous")
         self.assertEqual(_fyi("served on host"), "fyi: served on host")
         self.assertEqual(_fix(""), "")  # empty note stays empty (no bare prefix)
         self.assertEqual(_fyi(""), "")
@@ -476,7 +476,7 @@ class TestProfilerReportFormat(TestCase):
         out = "\n".join(
             _table(
                 ["Signal", "Count", "Bytes", "Note"],
-                [["dispatch/cpu_fallback", "3", "--", "fix: graph mode"]],
+                [["dispatch/cpu_fallback", "3", "--", "try: graph mode"]],
                 ["l", "r", "r", "l"],
             )
         )

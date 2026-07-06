@@ -140,7 +140,7 @@ _FIX_SHORT: dict[str, str] = {
     "copy_h2d_noncontig_dst": "contiguous staging, then h2d",
     "strided_v2v_cpu_fallback": "lower outer_count / fatter inner",
     "v2v_batch_to_per_entry": "check kMaxV2VMultiCopies / batch geom",
-    "cpu_fallback": "graph mode / native kernel / dtype",
+    "cpu_fallback": "graph mode, or a supported dtype",
     "recompile": "stabilize shapes, or graph mode",
     "v2v_slow": "establish device residency first",
 }
@@ -430,10 +430,12 @@ def _fmt_time(ns: float) -> str:
     return f"{us:.3f}us"
 
 
-# Note-column prefixes: split what the user can ACT on (fix:) from a fact/notification
-# (fyi:). torch tables have no advice column, so this is explain-specific — kept ASCII.
+# Note-column prefixes: split a SUGGESTED action (try:) from a fact/notification (fyi:).
+# "try:" (not "fix:") is deliberate -- the advice is a starting point, not a guaranteed fix;
+# it may not fit a given workload. torch tables have no advice column, so this is
+# explain-specific -- kept ASCII.
 def _fix(note: str) -> str:
-    return f"fix: {note}" if note else ""
+    return f"try: {note}" if note else ""
 
 
 def _fyi(note: str) -> str:
