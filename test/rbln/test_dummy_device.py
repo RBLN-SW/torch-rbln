@@ -574,6 +574,28 @@ def test_eager_host_dtype_op_runs_on_cpu():
     assert "OK" in proc.stdout
 
 
+def test_set_device_layout_like_raises_in_dummy_without_materialized_ref():
+    # Not special-cased for dummy: a plain tensor has no device physical view, so the op
+    # raises a catchable RuntimeError (same precondition a real NPU raises), not a no-op.
+    proc = _run_with_dummy(
+        """
+        import torch, torch_rbln
+        a = torch.empty(64, device="rbln:0", dtype=torch.float16)
+        b = torch.empty(64, device="rbln:0", dtype=torch.float16)
+        try:
+            torch.rbln.set_device_layout_like(a, b)
+        except RuntimeError as e:
+            assert "physical view" in str(e) or "set_device_alloc_layout_like" in str(e), str(e)
+            print("OK")
+        else:
+            raise AssertionError("expected RuntimeError (ref has no materialized physical view)")
+        """,
+        env_extra={"RBLN_DEVICE_MAP": _NO_NPU_MAP},
+    )
+    _assert_ok(proc)
+    assert "OK" in proc.stdout
+
+
 # An out-of-range system device id: RBLN_DEVICES remaps user device 0 onto it, the
 # probe misses, and 0 logical devices remain (distinct from RBLN_DEVICE_MAP, which
 # declares a logical device that only fails when actually opened).

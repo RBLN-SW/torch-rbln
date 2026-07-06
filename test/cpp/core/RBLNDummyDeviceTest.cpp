@@ -193,14 +193,14 @@ TEST(RBLNDummyDeviceTest, SynchronizeIsNoOp) {
   EXPECT_NO_THROW(c10::rbln::synchronize(/*device_index=*/0));
 }
 
-TEST(RBLNDummyDeviceTest, SetDeviceLayoutLikeIsNoOp) {
-  // Matching a device-physical allocation layout has no meaning for a
-  // host-backed buffer, so the op is a no-op (never touches the runtime).
+TEST(RBLNDummyDeviceTest, SetDeviceLayoutLikeRaisesGracefullyWithoutMaterializedRef) {
+  // Not special-cased for dummy: without a materialized ref (physical view) the op raises
+  // a catchable c10::Error -- same precondition as a real NPU, not a no-op or a crash.
   void* a = c10::rbln::malloc(/*device_index=*/0, 64);
   void* b = c10::rbln::malloc(/*device_index=*/0, 64);
   ASSERT_NE(a, nullptr);
   ASSERT_NE(b, nullptr);
-  EXPECT_NO_THROW(c10::rbln::set_device_layout_like(a, b));
+  EXPECT_THROW(c10::rbln::set_device_layout_like(a, b), c10::Error);
   c10::rbln::free(a);
   c10::rbln::free(b);
 }

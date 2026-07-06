@@ -343,11 +343,6 @@ void free_nothrow(void* data) noexcept {
 void set_device_layout_like(void* target_data, const void* ref_data) {
   RBLN_CHECK(target_data != nullptr, "set_device_layout_like: target is nullptr");
   RBLN_CHECK(ref_data != nullptr, "set_device_layout_like: ref is nullptr");
-  if (is_dummy_device()) {
-    // Matching a device-physical allocation layout is meaningless without a
-    // real device; the host-backed buffers have no such layout. No-op.
-    return;
-  }
   const auto target_vaddr = reinterpret_cast<uint64_t>(target_data);
   const auto ref_vaddr = reinterpret_cast<uint64_t>(ref_data);
   RBLN_LOG_DEBUG("set_device_layout_like: target={:#x} ref={:#x}", target_vaddr, ref_vaddr);
