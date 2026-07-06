@@ -537,5 +537,65 @@ class TestProfilerRegionSafety(TestCase):
         self.assertFalse(_prof._active)  # outer released on the way out
 
 
+@pytest.mark.test_set_ci
+class TestProfilerRuntimeContract(TestCase):
+    """Guard the positional contracts with the (closed) rebel-compiler runtime. If a probe's
+    cardinality drifts (a reason/primitive/site added or removed), these FAIL in CI --
+    *detection* -- instead of the Python mapping silently truncating (zip) or absorbing
+    (the 'unattributed' bucket) the change. An equal-cardinality reorder is NOT catchable
+    from here; that still relies on the rebel-compiler pin + the 1:1 vendored-header sync."""
+
+    def test_positional_axis_lengths_match_runtime(self):
+        from torch_rbln.profiler import (
+            _BOUNCE_SITES,
+            _FALLBACK_REASON_NAMES,
+            _RT_PRIMS,
+            _RUNTIME_REASONS,
+            _read_bounces,
+            _read_fallback_reasons,
+            _read_rt_timing,
+            _read_runtime,
+        )
+
+        # BounceSite: core binding, always present.
+        self.assertEqual(
+            len(_read_bounces()), len(_BOUNCE_SITES), "BounceSite count drifted; sync _BOUNCE_SITES with RBLNProfiler.h"
+        )
+        # RtIdx primitives (if the (B) timer binding is present).
+        rt = _read_rt_timing()
+        if rt is not None:
+            self.assertEqual(len(rt), len(_RT_PRIMS), "RtIdx count drifted; sync _RT_PRIMS with RBLNFunctions.cpp")
+        # cpu_fallback reason histogram (if the binding is present).
+        fr = _read_fallback_reasons()
+        if fr:
+            self.assertEqual(len(fr), len(_FALLBACK_REASON_NAMES), "fallback-reason count drifted; sync names")
+        # runtime hidden-d2h reason axis (if the runtime exposes it): our names must cover it
+        # exactly, else extras fold into the 'unattributed' bucket (see the unit test below).
+        rtd = _read_runtime()
+        if rtd is not None:
+            self.assertEqual(
+                len(rtd["hidden_count"]),
+                len(_RUNTIME_REASONS),
+                "runtime hidden-reason count drifted; sync _RUNTIME_REASONS with the runtime axis",
+            )
+
+    def test_unattributed_bucket_preserves_unknown_runtime_reasons(self):
+        # If the runtime axis GROWS past what we name, dump() must fold the unnamed tail into an
+        # 'unattributed' bucket (never drop it) so sum(by_reason) == total_count. Device-free:
+        # inject internal state and read dump() directly.
+        from torch_rbln.profiler import _BOUNCE_SITES
+
+        p = torch.rbln.explain()
+        p._bounces = [(0, 0)] * len(_BOUNCE_SITES)
+        p._dispatch = (0, 0, 0, 0, 0, 0, 0)
+        p._fallback_by_op, p._recompile_by_op, p._fallback_reasons = {}, {}, []
+        p._trace_by_op, p._rt_timing, p._wall_ns = {}, None, 1
+        p._rt = {"hidden_count": [5, 0, 2, 9], "hidden_bytes": [50, 0, 20, 90]}  # 4th index = unnamed reason
+        rr = p.dump()["runtime_residency"]
+        self.assertIn("unattributed", rr["by_reason"])
+        self.assertEqual(rr["by_reason"]["unattributed"]["count"], 9)
+        self.assertEqual(sum(v["count"] for v in rr["by_reason"].values()), rr["total_count"])  # nothing dropped
+
+
 if __name__ == "__main__":
     run_tests()
