@@ -5,8 +5,12 @@
 #include <c10/util/CallOnce.h>
 #include <rebel/runtime/memory_stats.h>
 
+#include <atomic>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <map>
+#include <mutex>
 #include <vector>
 
 #include <array>
@@ -173,8 +177,8 @@ int to_device_id(c10::DeviceIndex device_index) {
   RBLN_CHECK(
       DeviceMappingManager::getInstance().getLogicalDeviceCount() > 0,
       "Cannot use rbln:{}: no logical device available (this process sees 0 RBLN device(s)). "
-      "If this host has no NPU, device tensors/ops require hardware (compilation does not); otherwise "
-      "check RBLN_DEVICES and that the NPU driver is available.",
+      "If this host has no NPU, set RBLN_DUMMY_DEVICE=1 for host-backed tensors/compilation "
+      "(execution still needs hardware); otherwise check RBLN_DEVICES and that the NPU driver is available.",
       static_cast<int>(device_index));
   // Cast directly — do NOT round through `unsigned char`, which would alias a
   // stray negative index to a real id (e.g. -1 -> 255).
@@ -244,6 +248,11 @@ c10::DeviceIndex get_device_count() {
 }
 
 c10::DeviceIndex get_physical_device_count() {
+  if (is_dummy_device()) {
+    // Dummy mode must not touch the runtime (the host may have no SDK/driver);
+    // there is no physical NPU, so report 0.
+    return 0;
+  }
   // Directly query the runtime API for physical device count
   // This bypasses the RSD mode logic and always returns the actual physical count
   int device_count = 0;
@@ -336,6 +345,13 @@ bool is_eager_malloc() {
   }();
   RBLN_LOG_DEBUG("eager_malloc={}", eager_malloc);
   return eager_malloc;
+}
+
+bool is_dummy_device() {
+  // Runtime-free: reads the RBLN_DUMMY_DEVICE flag directly, not via
+  // DeviceMappingManager (whose init would query the runtime). Cached.
+  static const bool dummy = dummyDeviceEnabled();
+  return dummy;
 }
 
 void* malloc(c10::DeviceIndex device_index, size_t nbytes) {

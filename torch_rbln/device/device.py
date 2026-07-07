@@ -20,6 +20,7 @@ __all__ = [
     "device_count",
     "physical_device_count",
     "is_available",
+    "is_dummy_device",
     "is_initialized",
     "get_amp_supported_dtype",
     "set_device",
@@ -84,6 +85,15 @@ def is_available() -> bool:
         bool: True if at least one RBLN device is available, False otherwise.
     """
     return device_count() > 0
+
+
+def is_dummy_device() -> bool:
+    """Whether ``RBLN_DUMMY_DEVICE`` (host-backed, no NPU) mode is active.
+
+    ``is_available()`` is ``True`` in both dummy and real modes, so use this to
+    tell a compile-only dummy device apart from real NPU availability.
+    """
+    return torch_rbln._C.is_dummy_device()
 
 
 def is_initialized() -> bool:

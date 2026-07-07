@@ -135,6 +135,13 @@ C10_RBLN_API bool is_eager_malloc();
 C10_RBLN_API void set_device_layout_like(void* target_data, const void* ref_data);
 
 /**
+ * @brief Whether RBLN_DUMMY_DEVICE mode is active: a host-backed logical device
+ * with no NPU, so tensors can be built and compiled without hardware (execution
+ * still needs one). Cached after the first call.
+ */
+C10_RBLN_API bool is_dummy_device();
+
+/**
  * @brief Allocates memory on the specified RBLN device.
  *
  * This function allocates a contiguous block of memory on the given RBLN

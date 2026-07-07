@@ -170,6 +170,46 @@ torch.rbln.device_summary()
 +-------------------+-------------------+----------------------+
 ```
 
+### RBLN_DUMMY_DEVICE
+
+Development / compile-only mode for hosts **without an NPU**. When set, the
+allocator and memory transfers are served from host memory, so device tensors
+can be constructed and a model traced/compiled (e.g. on a CI or compiler box)
+even though no hardware is present.
+
+`RBLN_DUMMY_DEVICE` is a **boolean** flag (shared with the rebel runtime, which
+validates it at startup): `1/true/t/yes/y/on` enable it, `0/false/f/no/n/off`
+and unset disable it, and any other value (e.g. `4`) aborts at startup. The
+host-backed logical-device layout comes from `RBLN_DEVICE_MAP` (its group count
+and sizes). Without `RBLN_DEVICE_MAP`, `RBLN_NPUS_PER_DEVICE=N` yields a single
+logical device of size N (TP=N); with neither set, one device (TP=1).
+
+```bash
+# 1 host-backed logical device
+export RBLN_DUMMY_DEVICE=1
+
+# Preserve an RSD/TP layout for compilation (group count + sizes honored)
+export RBLN_DUMMY_DEVICE=1 RBLN_DEVICE_MAP="[0,1],[2,3]"   # 2 logical devices, TP=2
+```
+
+- Forced regardless of physical NPU presence; checked before any runtime query,
+  so a host with no SDK/driver still works.
+- `device_count()` reports the dummy logical device count (the `RBLN_DEVICE_MAP`
+  group count when set, otherwise 1); `physical_device_count()` stays `0`.
+  `RBLN_DEVICE_MAP` is validated as far as is possible without hardware — group
+  sizes against the allowed sizes (1, 2, 4, 8, 16, 32) and duplicate physical ids
+  are rejected — but physical-id ranges are **not** checked, so a map valid under
+  dummy is not guaranteed to be valid on a specific machine.
+- **Scope**: device tensor construction, host/device copies, and compile-only
+  `torch.compile` (building artifacts). Anything that must run on the NPU raises a
+  clear error — a compiled graph, or an eager op on a device dtype (fp16/bf16) — since
+  there is no NPU to run it. Host-side ops (e.g. fp32, which never runs on the NPU even
+  with real hardware) fall back to CPU exactly as they would on a real device.
+  Distributed collectives still require real hardware, and memory-stat APIs
+  (`memory_stats`, `memory_allocated`, ...) report zeros rather than real usage.
+- `torch.rbln.is_available()` returns `True` in this mode — treat it as a
+  development flag, not real hardware availability.
+
 ## Tensor Parallel Configuration
 
 The following environment variables control tensor parallel behavior for `torch.compile` operations and eager mode ops.
