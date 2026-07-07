@@ -852,20 +852,12 @@ class RBLNExplain:
         head += ")"
         lines = [head]
 
-        # -- clean path: say WHAT was checked, and that clean != fast ----------
-        if v["clean"]:
-            checked = ["host_bounce"]
-            if rr.get("available"):  # only claim v2v_slow when the region could observe it
-                checked.append("v2v_slow")
-            checked += ["cpu_fallback", "recompile"]
-            lines.append(f"  checked: {', '.join(checked)} -- none fired")
-            lines.append('  note: clean = no hidden host overhead, not "fast"')
-            if not rr.get("available"):
-                lines.append(_RT_UNAVAIL)
-            return "\n".join(lines)
-
-        # -- context (host oversubscription, rebel-runtime share): amplifiers/facts,
-        #    each wrapped to stay self-contained and short (P1-5) ---------------
+        # -- context (host oversubscription, rebel-runtime share, h2d push):
+        #    amplifiers/facts, each wrapped to stay self-contained and short (P1-5).
+        #    Built for BOTH paths -- these are facts that happened regardless of whether
+        #    any hidden signal fired, so a clean region still surfaces them (e.g. an h2d
+        #    push is expected glue, not overhead -- it must not vanish just because the
+        #    region is otherwise clean). --------------------------------------
         ctx: list[str] = []
         ht = d.get("host_threads") or {}
         if ht.get("oversubscribed"):
@@ -891,6 +883,18 @@ class RBLNExplain:
         if ctx:
             lines.append("")
             lines += ctx
+
+        # -- clean path: say WHAT was checked, and that clean != fast ----------
+        if v["clean"]:
+            checked = ["host_bounce"]
+            if rr.get("available"):  # only claim v2v_slow when the region could observe it
+                checked.append("v2v_slow")
+            checked += ["cpu_fallback", "recompile"]
+            lines.append(f"  checked: {', '.join(checked)} -- none fired")
+            lines.append('  note: clean = no hidden host overhead, not "fast"')
+            if not rr.get("available"):
+                lines.append(_RT_UNAVAIL)
+            return "\n".join(lines)
 
         # -- cost verdict source: the region-global physical-d2h witness -------
         # It cannot attribute per row, so: witness==0 -> every byte row is low-cost;
