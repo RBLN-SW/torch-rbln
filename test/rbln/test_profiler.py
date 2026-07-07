@@ -355,7 +355,9 @@ class TestProfilerApi(TestCase):
         tbo = d["trace_by_op"]
         self.assertIn("copy_d2d_host_bounce", tbo)  # the bounce site was captured
         self.assertIn("_do_bounce", tbo["copy_d2d_host_bounce"])  # user's call-site frame
-        self.assertIn("at host_bounce/d2d_copy", on.report())  # display label of copy_d2d_host_bounce
+        rep = on.report()
+        self.assertIn("host_bounce/d2d_copy:", rep)  # grouped detail block header (display label)
+        self.assertIn("_do_bounce", rep)  # the captured call-site is shown under it
 
     def test_diff_reports_only_what_changed_between_two_regions(self):
         # explain doesn't know lifecycle; diff compares two regions the USER places.
@@ -508,8 +510,63 @@ class TestProfilerReportFormat(TestCase):
         rep = p.report()
         self.assertTrue(rep.isascii())  # P6: ASCII-only output
         self.assertIn("RBLN EXPLAIN", rep)
+        self.assertIn("region wall", rep)  # P1-5: the wall label carries the 'region' qualifier
         if "mem " in rep:
-            self.assertIn("peak (reserved)", rep)  # P5: device BufferAllocator reserved footprint, labeled
+            self.assertIn("peak, reserved", rep)  # P0-3: device BufferAllocator reserved footprint, labeled
+
+    def test_report_format_contract(self):
+        # Lock the P1 report shape without needing hardware: feed a canned dump through the
+        # real verdict()/report() and assert the structural contract (grouped blocks, the
+        # >> witness line, fixed row order, region-wall label, thousands separators).
+        import types
+
+        from torch_rbln import profiler as _p
+
+        gb, kb = 1024**3, 1024
+        dump = {
+            "wall_ns": 5_791_000_000,
+            "device_memory": {"peak_bytes": 5 * gb, "current_bytes": 4 * gb},
+            "host_threads": {"oversubscribed": True, "intended_threads": 8, "cores": 1},
+            "rebel_runtime": {
+                "total_ns": 24_673_000,
+                "wall_fraction": 0.004,
+                "by_primitive": {"h2v": {"ns": 7_289_000, "calls": 3600}, "acquire": {"ns": 5_455_000, "calls": 2400}},
+            },
+            "hidden_host_bounce": {
+                "by_site": {"copy_d2d_host_bounce": {"count": 1600, "bytes": 12 * kb}},
+                "total_count": 1600,
+                "total_bytes": 12 * kb,
+            },
+            "runtime_residency": {
+                "available": True,
+                "total_count": 796,
+                "by_reason": {"src_not_on_device": {"count": 796, "bytes": 0}},
+                "real_host_sync_d2h": {"count": 0, "bytes": 0},
+                "reject": {"user_actionable": {}, "internal_fallback": {"count": 796, "bytes": 0}},
+            },
+            "dispatch": {"cpu_fallback": 1600, "recompile_miss": 0, "cpu_fallback_ns": 41_084_000},
+            "cpu_fallback_by_op": {"aten::sub.out": 800},
+            "cpu_fallback_reasons": {"dtype-not-fp16": 1600},
+            "trace_by_op": {},
+            "notes": [],
+        }
+        o = types.SimpleNamespace()
+        o.dump = lambda: dump
+        o.verdict = types.MethodType(_p.RBLNExplain.verdict, o)
+        rep = _p.RBLNExplain.report(o)
+
+        self.assertTrue(rep.isascii())
+        self.assertIn("[overhead: 3 signals]", rep)  # marker carries a factual signal-kind count
+        self.assertIn("region wall", rep)  # P1-5
+        self.assertIn("device mem 5.00 GB peak, reserved", rep)  # P0-3
+        self.assertIn("host_bounce/d2d_copy", rep)  # P1-6 trimmed label
+        self.assertIn("1,600", rep)  # P1-7 thousands separators
+        self.assertIn("no DMA (low cost)", rep)  # P1-2 cost verdict leads the Note
+        self.assertIn(">> physical d2h (real transfer): 0", rep)  # P1-3 promoted witness line
+        self.assertIn("dispatch/cpu_fallback:", rep)  # P1-1 grouped detail block
+        # P1-4 fixed category order (NOT sorted by cost): host_bounce -> runtime -> dispatch
+        self.assertLess(rep.index("host_bounce/d2d_copy"), rep.index("runtime/v2v_slow"))
+        self.assertLess(rep.index("runtime/v2v_slow"), rep.index("dispatch/cpu_fallback"))
 
 
 @pytest.mark.test_set_ci

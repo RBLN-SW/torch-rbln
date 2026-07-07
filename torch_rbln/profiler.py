@@ -133,7 +133,7 @@ _REMEDY: dict[str, str] = {
 
 
 # Terse inline "what to change" shown in the report's Fix column. The full prose
-# lives in _REMEDY, surfaced on demand via dump()["remedies"] / RBLNExplain.help().
+# lives in _REMEDY, surfaced on demand via dump()["notes"] / RBLNExplain.help().
 _FIX_SHORT: dict[str, str] = {
     "copy_d2d_host_bounce": "make contiguous, or v2v engine",
     "copy_h2d_staging": "keep src on-device / stage once",
@@ -148,8 +148,8 @@ _FIX_SHORT: dict[str, str] = {
 _RT_UNAVAIL = "  note: runtime signals not exposed by the loaded librbln (install a recent rebel-compiler)"
 
 
-def _collect_remedies(d: dict[str, Any]) -> list[dict[str, str]]:
-    """Map the signals that actually fired in this region to their one-line fix.
+def _collect_notes(d: dict[str, Any]) -> list[dict[str, str]]:
+    """Map the signals that actually fired in this region to their one-line note.
 
     Returned in priority order (host bounce -> runtime cause -> dispatch) so the
     most impactful change is listed first. Pure lookup over the already-computed
@@ -166,7 +166,7 @@ def _collect_remedies(d: dict[str, Any]) -> list[dict[str, str]]:
                 # by_reason keys are exactly _RUNTIME_REASONS (dump() fails fast on axis
                 # drift), so rfix[n] always resolves.
                 fixes.append({"signal": f"runtime/v2v_slow:{n}", "fix": rfix[n]})
-        # Reject axis (so help()/dump()['remedies'] resolve the v2v_reject:* signals the
+        # Reject axis (so help()/dump()['notes'] resolve the v2v_reject:* signals the
         # report shows): user-actionable reasons carry their fix; the internal bucket is a
         # notification, not a to-do.
         rj = rr.get("reject") or {}
@@ -411,12 +411,11 @@ def _read_runtime() -> Optional[dict]:
 
 
 def _fmt_bytes(b: float) -> str:
-    # Mirror torch.profiler's _format_memory unit casing (b/Kb/Mb/Gb) for format parity.
-    for unit in ("b", "Kb", "Mb", "Gb"):
-        if abs(b) < 1024 or unit == "Gb":
-            return f"{b:.2f} {unit}" if unit != "b" else f"{int(b)} b"
+    for unit in ("B", "KB", "MB", "GB"):
+        if abs(b) < 1024 or unit == "GB":
+            return f"{b:.2f} {unit}" if unit != "B" else f"{int(b)} B"
         b /= 1024
-    return f"{b:.2f} Gb"
+    return f"{b:.2f} GB"
 
 
 def _fmt_time(ns: float) -> str:
@@ -443,10 +442,64 @@ def _fyi(note: str) -> str:
 
 
 def _site_label(name: str) -> str:
-    # Display-only: the runtime key 'copy_d2d_host_bounce' already sits under a
-    # 'host_bounce/' prefix, so "bounce" reads twice and it is the widest table cell.
-    # Show the shorter 'd2d_copy'; the underlying data/dump key is unchanged.
-    return "d2d_copy" if name == "copy_d2d_host_bounce" else name
+    # Display-only trim: the 'host_bounce/' namespace already carries "copy"/"bounce",
+    # so the raw site keys read redundantly and are the widest table cell. Shorten for
+    # the report; the underlying data/dump keys (by_site, _REMEDY) are unchanged.
+    return {
+        "copy_d2d_host_bounce": "d2d_copy",
+        "copy_h2d_staging": "h2d_staging",
+        "copy_h2d_noncontig_dst": "h2d_noncontig_dst",
+    }.get(name, name)
+
+
+def _thousands(n: int) -> str:
+    return f"{n:,}"
+
+
+def _short_op(op: str) -> str:
+    # Drop the 'aten::' namespace for compact candidate lists (the per-op lines keep it).
+    return op.removeprefix("aten::")
+
+
+def _short_path(callsite: str) -> str:
+    """Tail-truncate long file paths in an ``at`` call-site string so the informative
+    end (``.../parent/file.py:line(fn)``) survives without a full absolute path. Applied
+    only at report time; ``dump()['trace_by_op']`` keeps the raw string."""
+    import re
+
+    def _trim(m) -> str:
+        path = m.group(0)
+        parts = path.split("/")
+        return path if len(parts) <= 2 else ".../" + "/".join(parts[-2:])
+
+    # Match path-like runs ending in a component (kept greedy on the dir portion).
+    return re.sub(r"(?:[\w.\-]+/){2,}[\w.\-]+", _trim, callsite)
+
+
+def _fmt_dur(ns: float) -> str:
+    # Compact 1-decimal form for the per-primitive breakdown ('7.3ms'); headline totals
+    # use the adaptive _fmt_time. Sub-ms primitives fall back to whole microseconds.
+    us = ns / 1e3
+    return f"{us / 1e3:.1f}ms" if us >= 1e3 else f"{us:.0f}us"
+
+
+def _op_block(by_op: dict, tbo: dict, limit: int = 8) -> list[str]:
+    """Per-op detail lines for a dispatch signal -- ``op  count  at call-site`` column-
+    aligned within the block (alignment is per-block, not across blocks). The call-site
+    is shown only when captured (``with_stack=True``)."""
+    items = list(by_op.items())[:limit]
+    if not items:
+        return []
+    ow = max(len(op) for op, _ in items)
+    cw = max(len(_thousands(c)) for _, c in items)
+    out = []
+    for op, c in items:
+        at = f"  at {_short_path(tbo[op])}" if op in tbo else ""
+        out.append(f"    {op.ljust(ow)}  {_thousands(c).rjust(cw)}{at}")
+    extra = len(by_op) - len(items)
+    if extra > 0:
+        out.append(f"    +{extra} more")
+    return out
 
 
 def _table(headers: list[str], rows: list[list[str]], aligns: list[str]) -> list[str]:
@@ -462,7 +515,7 @@ def _table(headers: list[str], rows: list[list[str]], aligns: list[str]) -> list
         out = []
         for c in range(cols):
             out.append(cells[c].rjust(widths[c]) if aligns[c] == "r" else cells[c].ljust(widths[c]))
-        return "  ".join(out)
+        return "  ".join(out).rstrip()  # trim padding on the trailing (left-aligned) column
 
     lines = [sep, fmt_row(headers), sep]
     lines += [fmt_row(r) for r in rows]
@@ -596,7 +649,8 @@ class RBLNExplain:
 
     # -- readout -------------------------------------------------------------
     def dump(self) -> dict[str, Any]:
-        assert self._bounces is not None, "region not stopped"
+        if self._bounces is None:
+            raise RuntimeError("region is still open -- exit the with-block or call stop() before dump()/report()")
         per_site = {n: {"count": c, "bytes": by} for (n, _d), (c, by) in zip(_BOUNCE_SITES, self._bounces)}
         hb_count = sum(self._bounces[i][0] for i in _HOST_BOUNCE_SITES)
         hb_bytes = sum(self._bounces[i][1] for i in _HOST_BOUNCE_SITES)
@@ -724,7 +778,7 @@ class RBLNExplain:
                 "by_primitive": by_prim,
             }
 
-        out["remedies"] = _collect_remedies(out)
+        out["notes"] = _collect_notes(out)
         return out
 
     def verdict(self) -> dict[str, Any]:
@@ -764,21 +818,23 @@ class RBLNExplain:
             "cpu_fallbacks": disp["cpu_fallback"],
             "recompiles": disp["recompile_miss"],
             "reasons": reasons,
-            "remedies": d.get("remedies", []),
+            "notes": d.get("notes", []),
         }
 
     def report(self) -> str:
-        """Verdict-first report. The terse fix is inline (Fix column); the full
-        remedy prose is in dump()['remedies'] / help(signal), not dumped here."""
+        """Verdict-first report. Each byte-carrying row's Note leads with the cost
+        verdict (from the region-global physical-d2h witness); detail blocks are grouped
+        under their parent signal; the full note prose is in dump()['notes'] / help()."""
         d, v = self.dump(), self.verdict()
-        # A FACTUAL marker (did anything hidden fire), NOT a severity grade: explain
-        # states what happened and lets you judge cost from the table's Bytes/Note.
+        rr = d["runtime_residency"]
+
+        # -- header: [clean]/[overhead: N] marker + region facts --------------
         if v["clean"]:
             mark = "[clean]"
         else:
-            # Count distinct hidden signals that fired (host bounce / runtime d2h /
-            # cpu_fallback / recompile) so the marker carries a glanceable magnitude
-            # while staying a fact, not a severity grade.
+            # N = how many KINDS of hidden signal fired (host bounce / runtime d2h /
+            # cpu_fallback / recompile). A count, NOT a severity grade -- the tool never
+            # ranks how bad; cost is read from the table Bytes/Note and the >> witness.
             nsig = sum(
                 (
                     v["hidden_host_bounces"] > 0,
@@ -788,176 +844,168 @@ class RBLNExplain:
                 )
             )
             mark = f"[overhead: {nsig} signal{'' if nsig == 1 else 's'}]"
-        head = f"{mark}  RBLN EXPLAIN   (wall {_fmt_time(d['wall_ns'])}"
+        head = f"{mark}  RBLN EXPLAIN   (region wall {_fmt_time(d['wall_ns'])}"
         if "device_memory" in d:
             # rebel BufferAllocator reserved footprint (incl. cached/idle buffers held
             # for reuse), a device-side high-water mark -- NOT host process RSS.
-            head += f" | device mem {_fmt_bytes(d['device_memory']['peak_bytes'])} peak (reserved)"
+            head += f" | device mem {_fmt_bytes(d['device_memory']['peak_bytes'])} peak, reserved"
         head += ")"
         lines = [head]
 
-        # (E) host CPU oversubscription -- an environment amplifier of ALL host
-        # overhead (worker pinned to few cores while OMP/numba keep many threads).
-        # Shown up-front because it inflates per-op latency without any per-op bug.
-        ht = d.get("host_threads") or {}
-        if ht.get("oversubscribed"):
-            lines.append(
-                f"  ! host oversubscription: {ht['intended_threads']} threads on {ht['cores']} core(s)"
-                " -> per-op host latency may be inflated (tune affinity / OMP_NUM_THREADS)"
-            )
-        # (B) rebel-runtime (librbln) boundary time: how much of the region is the
-        # runtime itself (borrow/v2v/h2v...) vs torch-side dispatch. A region FACT.
-        rtm = d.get("rebel_runtime")
-        if rtm and rtm["total_ns"]:
-            bp = sorted(rtm["by_primitive"].items(), key=lambda kv: -kv[1]["ns"])
-            top = " | ".join(f"{n} {v['ns'] / 1000:.1f}({v['calls']})" for n, v in bp[:6])
-            lines.append(
-                f"  rebel runtime: {_fmt_time(rtm['total_ns'])} in librbln"
-                f" ({rtm['wall_fraction'] * 100:.1f}% of wall) -- {top}"
-            )
-
-        rr = d["runtime_residency"]
-        # host->device push (runtime): the lazy push at the device-consume boundary.
-        # A region FACT shown up-front for A/B comparison; it does NOT drive the verdict
-        # (a push to feed a graph is expected, unlike an unwanted d2h pull). This was
-        # invisible before the h2d counter existed -> device-tensor glue cost shows here.
-        rhh = rr.get("real_host_sync_h2d") if rr.get("available") else None
-        if rhh is not None and rhh["count"]:
-            lines.append(f"  host->device push (runtime): {rhh['count']} pushes, {_fmt_bytes(rhh['bytes'])}")
-        rows: list[list[str]] = []
-        for name, vv in d["hidden_host_bounce"]["by_site"].items():
-            if vv["count"]:
-                rows.append(
-                    [
-                        f"host_bounce/{_site_label(name)}",
-                        str(vv["count"]),
-                        _fmt_bytes(vv["bytes"]),
-                        _fix(_FIX_SHORT.get(name, "")),
-                    ]
-                )
-        if rr["available"]:
-            # ONE event row for the slow-path v2v copies. The src-state axis, reject axis,
-            # and real transfer are the SAME events seen three ways -> sublines below, not
-            # peer rows (adding their counts would double-count). The Note states the cost
-            # verdict at a glance: real d2h DMA (costly) vs served on host (no crossing, low
-            # cost); the exact witness is the "physical d2h" subline.
-            if rr["total_count"]:
-                phys = rr.get("real_host_sync_d2h")
-                hidden_bytes = sum(v.get("bytes", 0) for v in rr["by_reason"].values())
-                # The Bytes cell means different things per state (physical DMA bytes vs
-                # host-path bytes); name the semantic in the Note so rows stay comparable.
-                # A genuine 0 renders as "0 b" (a measured fact) -- never "--", which is the
-                # not-applicable token reserved for count-only rows (e.g. dispatch).
-                if phys is None:  # runtime exposes the cause but not the real-transfer witness
-                    note, mag = "fell to host slow path (bytes: host path)", hidden_bytes
-                elif phys.get("count"):
-                    note, mag = "real device->host DMA (costly) (bytes: physical d2h)", phys["bytes"]
-                else:
-                    note, mag = "served on host, no DMA (low cost) (bytes: host path)", hidden_bytes
-                rows.append(["runtime/v2v_slow", str(rr["total_count"]), _fmt_bytes(mag), _fyi(note)])
-        disp = d["dispatch"]
-        if disp["cpu_fallback"]:
-            rows.append(["dispatch/cpu_fallback", str(disp["cpu_fallback"]), "--", _fix(_FIX_SHORT["cpu_fallback"])])
-        if disp["recompile_miss"]:
-            rows.append(["dispatch/recompile", str(disp["recompile_miss"]), "--", _fix(_FIX_SHORT["recompile"])])
-
-        if not rows:
-            lines.append("  (clean) no hidden overhead")
-            if not rr["available"]:
+        # -- clean path: say WHAT was checked, and that clean != fast ----------
+        if v["clean"]:
+            checked = ["host_bounce"]
+            if rr.get("available"):  # only claim v2v_slow when the region could observe it
+                checked.append("v2v_slow")
+            checked += ["cpu_fallback", "recompile"]
+            lines.append(f"  checked: {', '.join(checked)} -- none fired")
+            lines.append('  note: clean = no hidden host overhead, not "fast"')
+            if not rr.get("available"):
                 lines.append(_RT_UNAVAIL)
             return "\n".join(lines)
 
+        # -- context (host oversubscription, rebel-runtime share): amplifiers/facts,
+        #    each wrapped to stay self-contained and short (P1-5) ---------------
+        ctx: list[str] = []
+        ht = d.get("host_threads") or {}
+        if ht.get("oversubscribed"):
+            cores = ht["cores"]
+            ctx.append(
+                f"  ! host oversubscription: {ht['intended_threads']} threads / {cores} "
+                f"core{'' if cores == 1 else 's'} -> host latency may be inflated"
+            )
+            ctx.append("    (tune affinity / OMP_NUM_THREADS)")
+        rtm = d.get("rebel_runtime")
+        if rtm and rtm["total_ns"]:
+            bp = sorted(rtm["by_primitive"].items(), key=lambda kv: -kv[1]["ns"])
+            top = "  ".join(f"{n} {_fmt_dur(pv['ns'])}/{pv['calls']}" for n, pv in bp[:4])
+            more = f"  +{len(bp) - 4} more" if len(bp) > 4 else ""
+            ctx.append(
+                f"  rebel runtime: {_fmt_time(rtm['total_ns'])} in librbln "
+                f"({rtm['wall_fraction'] * 100:.1f}% of region wall)"
+            )
+            ctx.append(f"    {top}{more}")
+        rhh = rr.get("real_host_sync_h2d") if rr.get("available") else None
+        if rhh is not None and rhh["count"]:
+            ctx.append(f"  host->device push (runtime): {rhh['count']} pushes, {_fmt_bytes(rhh['bytes'])}")
+        if ctx:
+            lines.append("")
+            lines += ctx
+
+        # -- cost verdict source: the region-global physical-d2h witness -------
+        # It cannot attribute per row, so: witness==0 -> every byte row is low-cost;
+        # witness>0 with exactly one byte row -> that row is the costly one; witness>0
+        # with several -> rows defer to the >> line (no false per-row blame).
+        phys = rr.get("real_host_sync_d2h") if rr.get("available") else None
+        witness = phys["count"] if phys else 0
+        bounce_sites = [(n, vv) for n, vv in d["hidden_host_bounce"]["by_site"].items() if vv["count"]]
+        v2v_fired = bool(rr.get("available") and rr.get("total_count"))
+        n_byte_rows = len(bounce_sites) + (1 if v2v_fired else 0)
+
+        def _verdict() -> str:
+            if witness == 0:
+                return "no DMA (low cost)"
+            if n_byte_rows == 1:
+                return "real d2h DMA (costly)"
+            return "see physical d2h below"
+
+        # -- the signal table: fixed category order (host_bounce -> runtime ->
+        #    dispatch); cost verdict leads the Note on every byte-carrying row --
+        rows: list[list[str]] = []
+        for name, vv in bounce_sites:
+            short = _FIX_SHORT.get(name, "")
+            note = f"{_verdict()} | {_fix(short)}" if short else _verdict()
+            rows.append([f"host_bounce/{_site_label(name)}", _thousands(vv["count"]), _fmt_bytes(vv["bytes"]), note])
+        if v2v_fired:
+            # ONE event row. Bytes is host-path volume ONLY (one semantic); the physical
+            # DMA magnitude, if any, lives on the >> line. v2v's remedy is per reject-cause,
+            # shown in the detail block, so the row Note is just the cost verdict.
+            host_path_bytes = sum(x.get("bytes", 0) for x in rr["by_reason"].values())
+            rows.append(["runtime/v2v_slow", _thousands(rr["total_count"]), _fmt_bytes(host_path_bytes), _verdict()])
+        disp = d["dispatch"]
+        if disp["cpu_fallback"]:
+            rows.append(
+                ["dispatch/cpu_fallback", _thousands(disp["cpu_fallback"]), "--", _fix(_FIX_SHORT["cpu_fallback"])]
+            )
+        if disp["recompile_miss"]:
+            rows.append(["dispatch/recompile", _thousands(disp["recompile_miss"]), "--", _fix(_FIX_SHORT["recompile"])])
+
         lines.append("")
         lines += _table(["Signal", "Count", "Bytes", "Note"], rows, ["l", "r", "r", "l"])
+        lines.append("")
 
-        # Sublines of the single runtime/v2v_slow row above: the SAME events by src
-        # state and by reject cause, plus the authoritative real transfer. Counts here
-        # decompose the one event row -- they are not additional events.
-        if rr.get("available") and rr["total_count"]:
-            st = " | ".join(f"{n} {v['count']}" for n, v in rr["by_reason"].items() if v["count"])
+        tbo = d.get("trace_by_op") or {}  # op/site -> call-site, only with with_stack=True
+
+        # -- detail blocks: grouped under their parent signal, in table order --
+        for name, _vv in bounce_sites:  # (1) host_bounce: the bounce call-site (stack only)
+            if name in tbo:
+                lines.append(f"  host_bounce/{_site_label(name)}:")
+                lines.append(f"    at {_short_path(tbo[name])}")
+                lines.append("")
+        if v2v_fired:  # (2) v2v_slow: the src-state axis + the reject (who-can-act) axis
+            lines.append("  runtime/v2v_slow:")
+            st = "  ".join(f"{n} {_thousands(x['count'])}" for n, x in rr["by_reason"].items() if x["count"])
             if st:
-                lines.append(f"    state: {st}")
+                lines.append(f"    state:  {st}")
             rj = rr.get("reject") or {}
             rparts = [
-                f"{lbl} {v['count']} -> {_REJECT_FIX.get(lbl, '')}" for lbl, v in rj.get("user_actionable", {}).items()
+                f"{lbl} {_thousands(x['count'])} -> {_REJECT_FIX.get(lbl, '')}"
+                for lbl, x in rj.get("user_actionable", {}).items()
             ]
             if rj.get("internal_fallback", {}).get("count"):
                 rparts.append(
-                    f"internal_fallback {rj['internal_fallback']['count']} "
-                    "(runtime-internal, not user-fixable; see dump['runtime_residency']['debug'] if recurring)"
+                    f"internal_fallback {_thousands(rj['internal_fallback']['count'])} "
+                    "(runtime-internal, not user-fixable)"
                 )
             if rparts:
                 lines.append(f"    reject: {' | '.join(rparts)}")
-
-        # Authoritative REAL device->host the manager performed (the headline magnitude's
-        # source). 0 real means the slow copy/bounce above was served on host (no device
-        # crossing) -> low cost, not a leak. Shown whenever a host_bounce OR a runtime
-        # v2v_slow fired -- both put a byte count on the table whose meaning (real DMA vs
-        # host-served) only this line settles, so it must accompany either one.
-        rhs = rr.get("real_host_sync_d2h") if rr.get("available") else None
-        served_on_host = bool(d["hidden_host_bounce"]["total_count"] or (rr.get("available") and rr.get("total_count")))
-        if rhs is not None and (rhs["count"] or served_on_host):
-            if rhs["count"]:
-                lines.append(f"    physical d2h (real transfer): {rhs['count']} copies, {_fmt_bytes(rhs['bytes'])}")
-            else:
-                lines.append("    physical d2h (real transfer): 0 - served on host, no device crossing")
-
-        # attribution sub-lines (which ops, and WHY) — compact, under the table.
-        def _top(m: dict) -> str:
-            items = list(m.items())
-            shown = ", ".join(f"{op} {c}" for op, c in items[:8])
-            return shown + ("" if len(items) <= 8 else f", +{len(items) - 8} more")
-
-        tbo = d.get("trace_by_op") or {}  # (A) WHERE: op/bounce-site -> call-site, only when with_stack=True
-
-        def _where(by_op: dict) -> None:
-            for op in list(by_op)[:3]:
-                if op in tbo:
-                    lines.append(f"      at {op}: {tbo[op]}")
-
-        # (A) WHERE for bounces: with_stack=True keys the bounced copy's call-site under
-        # the site name -> show it so the user can locate the host round-trip itself
-        # (previously only fallback/recompile had a call-site; bounces were unlocatable).
-        for _bname, _bv in d["hidden_host_bounce"]["by_site"].items():
-            if _bv["count"] and _bname in tbo:
-                # 4-space (top-level attribution, sibling of 'physical d2h') so it is not
-                # orphaned when only bounces fire -- there is no 'host_bounce:' parent
-                # subline the way 'cpu_fallback:' parents the fallback 'at' lines.
-                lines.append(f"    at host_bounce/{_site_label(_bname)}: {tbo[_bname]}")
-
+            lines.append("")
         fbo = d.get("cpu_fallback_by_op") or {}
-        if fbo:
-            fb_ns = d["dispatch"].get("cpu_fallback_ns", 0)
-            # the COST -- distinguishes "many cheap fallbacks (path overhead)" from
-            # "few expensive ones (hidden transfer)"; only shown when the loaded _C exposes it.
-            cost = f"   (sum {_fmt_time(fb_ns)} wall)" if fb_ns else ""
-            lines.append(f"    cpu_fallback: {_top(fbo)}{cost}")
-        fr = d.get("cpu_fallback_reasons") or {}
-        if fr:
-            lines.append("      why: " + ", ".join(f"{n} {c}" for n, c in fr.items()))
-        _where(fbo)
-        # (A) of the fallback ops, which have NO CPU fast-path handler -> the
-        # actionable optimization candidates (add a fast_paths/*.cpp handler).
-        unaccel = d.get("cpu_fallback_unaccelerated") or []
-        if unaccel:
-            shown = ", ".join(unaccel[:8]) + ("" if len(unaccel) <= 8 else f", +{len(unaccel) - 8} more")
-            lines.append(f"      no fast-path handler (optimization candidates): {shown}")
+        if fbo:  # (3) cpu_fallback: per-op count + call-site (aligned), why, candidates
+            fb_ns = disp.get("cpu_fallback_ns", 0)
+            cost = f"  (sum {_fmt_time(fb_ns)} wall)" if fb_ns else ""
+            lines.append(f"  dispatch/cpu_fallback:{cost}")
+            lines += _op_block(fbo, tbo)
+            fr = d.get("cpu_fallback_reasons") or {}
+            if fr:
+                lines.append("    why: " + ", ".join(f"{n} {_thousands(c)}" for n, c in fr.items()))
+            unaccel = d.get("cpu_fallback_unaccelerated") or []
+            if unaccel:
+                shown = ", ".join(_short_op(o) for o in unaccel[:8]) + (
+                    "" if len(unaccel) <= 8 else f", +{len(unaccel) - 8} more"
+                )
+                lines.append(f"    candidates (no fast-path handler): {shown}")
+            lines.append("")
         rbo = d.get("recompile_by_op") or {}
-        if rbo:
-            lines.append(f"    recompile: {_top(rbo)}")
-        _where(rbo)
+        if rbo:  # (4) recompile
+            lines.append("  dispatch/recompile:")
+            lines += _op_block(rbo, tbo)
+            lines.append("")
+
+        # -- the single most important line, promoted out of the pile + scoped -
+        if bounce_sites or v2v_fired:
+            if witness:
+                scope = " (see runtime/v2v_slow)" if v2v_fired else ""
+                lines.append(
+                    f"  >> physical d2h (real transfer): {phys['count']} copies, {_fmt_bytes(phys['bytes'])}"
+                    f" -- real device crossing{scope}"
+                )
+            else:
+                lines.append("  >> physical d2h (real transfer): 0 -- everything above served on host, no crossing")
+            lines.append("")
+
         if (fbo or rbo) and not tbo:
-            lines.append("      where? -> rerun with explain(with_stack=True)")
+            lines.append("  where? -> rerun with explain(with_stack=True)")
         if not rr["available"]:
             lines.append(_RT_UNAVAIL)
-        lines.append("  (full fix detail -> p.help(signal) or dump()['remedies'])")
+        lines.append("  (detail: p.help(signal) | raw: p.dump())")
         return "\n".join(lines)
 
     def help(self, signal: Optional[str] = None) -> str:
         """Full remedy prose. No arg: the fix for every fired signal. With a
         signal (bare cause or report label like 'dispatch/cpu_fallback'): just
         that one."""
-        fixes = self.dump().get("remedies", [])
+        fixes = self.dump().get("notes", [])
         if signal is None:
             return "\n".join(f"{f['signal']}: {f['fix']}" for f in fixes) or "no hidden overhead"
         key = signal.rsplit("/", 1)[-1].rsplit(":", 1)[-1]
@@ -977,8 +1025,12 @@ class RBLNExplain:
         an early call vs a later steady call. explain cannot tell a one-time cost
         from a recurring one on its own (it does not know your run structure);
         placing the two regions is how YOU supply that. See :class:`RBLNDiff`."""
-        assert self._bounces is not None, "this region is not stopped"
-        assert other._bounces is not None, "the other region is not stopped"
+        # Errors are UI: a bare assert vanishes under -O and its message doesn't say what
+        # to do. Raise something actionable instead.
+        if self._bounces is None:
+            raise RuntimeError("region 'a' is still open -- exit its with-block or call stop() before diff()")
+        if other._bounces is None:
+            raise RuntimeError("region 'b' is still open -- exit its with-block or call stop() before diff()")
         return RBLNDiff(self, other)
 
 
@@ -1083,7 +1135,7 @@ class RBLNDiff:
         rows = []
         for name, vv in d["signals"].items():
             av, bv = vv["a"], vv["b"]
-            mark = "*** PERSISTS" if bv > 0 else ("gone in B" if av > 0 else "")
+            mark = ">> persists" if bv > 0 else ("gone in B" if av > 0 else "")
             # Byte magnitude per region for byte-carrying signals ("--" for count-only
             # signals like cpu_fallback) -> a persisting cost shows its SIZE, so you can
             # tell a recurring 12 KB host-served loop from a 12 GB one at a glance.
@@ -1093,7 +1145,7 @@ class RBLNDiff:
         pbo = d.get("persists_by_op") or []
         if pbo:
             lines.append("")
-            lines.append("  PERSISTS across your two points -> recurring overhead, act on these:")
+            lines.append("  >> persists across your two points -> recurring overhead, act on these:")
             for e in pbo[:8]:
                 at = f"  @ {e['at']}" if e.get("at") else ""
                 lines.append(f"    {e['signal']}: {e['op']} {e['count']}{at}")
