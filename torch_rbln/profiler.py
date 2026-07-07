@@ -163,10 +163,9 @@ def _collect_remedies(d: dict[str, Any]) -> list[dict[str, str]]:
         rfix = dict(_RUNTIME_REASONS)
         for n, vv in rr["by_reason"].items():
             if vv["count"]:
-                # rfix has no entry for the "unattributed" tail bucket -> honest placeholder,
-                # never a KeyError.
-                fix = rfix.get(n, "runtime reason not named by this torch-rbln build; update to attribute it")
-                fixes.append({"signal": f"runtime/v2v_slow:{n}", "fix": fix})
+                # by_reason keys are exactly _RUNTIME_REASONS (dump() fails fast on axis
+                # drift), so rfix[n] always resolves.
+                fixes.append({"signal": f"runtime/v2v_slow:{n}", "fix": rfix[n]})
         # Reject axis (so help()/dump()['remedies'] resolve the v2v_reject:* signals the
         # report shows): user-actionable reasons carry their fix; the internal bucket is a
         # notification, not a to-do.
@@ -616,14 +615,19 @@ class RBLNExplain:
         out["trace_by_op"] = dict(self._trace_by_op or {})  # (A) WHERE; {} unless trace=True
         if self._rt is not None:
             hc, hbytes = self._rt["hidden_count"], self._rt["hidden_bytes"]
+            # (#3) the runtime hidden-reason axis is a positional ABI contract, not partially-
+            # interpretable user data: report keys like src_not_on_device are only truthful if the
+            # order/count/meaning line up 1:1 with _RUNTIME_REASONS. A length mismatch means this
+            # torch-rbln build and the loaded librbln are out of sync -- fail loudly rather than
+            # silently truncate (zip) or invent an "unattributed" bucket that report()/verdict()
+            # would then have to false-interpret. The axis-length canary guards this in CI too.
+            if len(hc) != len(_RUNTIME_REASONS):
+                raise RuntimeError(
+                    f"runtime hidden-reason axis drifted (runtime reports {len(hc)} reasons, "
+                    f"this build names {len(_RUNTIME_REASONS)}); "
+                    "torch-rbln and rebel-compiler/librbln are out of sync"
+                )
             by_reason = {n: {"count": c, "bytes": b} for (n, _f), c, b in zip(_RUNTIME_REASONS, hc, hbytes)}
-            # (#3) the runtime OWNS this axis and reports its own length; if its enum grows past
-            # what we name, fold the unnamed tail into one bucket instead of dropping it (mirrors
-            # the reject axis) so sum(by_reason) always equals total_count -- never under-count.
-            n_named = len(_RUNTIME_REASONS)
-            extra_c, extra_b = sum(hc[n_named:]), sum(hbytes[n_named:])
-            if extra_c:
-                by_reason["unattributed"] = {"count": extra_c, "bytes": extra_b}
             out["runtime_residency"] = {
                 "available": True,
                 "total_count": sum(hc),

@@ -541,9 +541,9 @@ class TestProfilerRegionSafety(TestCase):
 class TestProfilerRuntimeContract(TestCase):
     """Guard the positional contracts with the (closed) rebel-compiler runtime. If a probe's
     cardinality drifts (a reason/primitive/site added or removed), these FAIL in CI --
-    *detection* -- instead of the Python mapping silently truncating (zip) or absorbing
-    (the 'unattributed' bucket) the change. An equal-cardinality reorder is NOT catchable
-    from here; that still relies on the rebel-compiler pin + the 1:1 vendored-header sync."""
+    *detection* -- instead of the Python mapping silently truncating (zip) or mislabelling
+    counts. An equal-cardinality reorder is NOT catchable from here; that still relies on the
+    rebel-compiler pin + the 1:1 vendored-header sync."""
 
     def test_positional_axis_lengths_match_runtime(self):
         from torch_rbln.profiler import (
@@ -570,7 +570,7 @@ class TestProfilerRuntimeContract(TestCase):
         if fr:
             self.assertEqual(len(fr), len(_FALLBACK_REASON_NAMES), "fallback-reason count drifted; sync names")
         # runtime hidden-d2h reason axis (if the runtime exposes it): our names must cover it
-        # exactly, else extras fold into the 'unattributed' bucket (see the unit test below).
+        # exactly -- dump() fails fast on any mismatch (see the unit test below).
         rtd = _read_runtime()
         if rtd is not None:
             self.assertEqual(
@@ -579,22 +579,39 @@ class TestProfilerRuntimeContract(TestCase):
                 "runtime hidden-reason count drifted; sync _RUNTIME_REASONS with the runtime axis",
             )
 
-    def test_unattributed_bucket_preserves_unknown_runtime_reasons(self):
-        # If the runtime axis GROWS past what we name, dump() must fold the unnamed tail into an
-        # 'unattributed' bucket (never drop it) so sum(by_reason) == total_count. Device-free:
-        # inject internal state and read dump() directly.
-        from torch_rbln.profiler import _BOUNCE_SITES
+    def test_dump_fails_fast_on_runtime_reason_axis_drift(self):
+        # The hidden-reason axis is a positional ABI contract: report keys like src_not_on_device
+        # are only truthful if count/order/meaning line up 1:1 with _RUNTIME_REASONS. If the loaded
+        # librbln reports a different reason count, dump() must fail loudly (this build and the
+        # runtime are out of sync) rather than truncate or mislabel. Device-free: inject internal
+        # state and read dump() directly.
+        from torch_rbln.profiler import _BOUNCE_SITES, _RUNTIME_REASONS
 
         p = torch.rbln.explain()
         p._bounces = [(0, 0)] * len(_BOUNCE_SITES)
         p._dispatch = (0, 0, 0, 0, 0, 0, 0)
         p._fallback_by_op, p._recompile_by_op, p._fallback_reasons = {}, {}, []
         p._trace_by_op, p._rt_timing, p._wall_ns = {}, None, 1
-        p._rt = {"hidden_count": [5, 0, 2, 9], "hidden_bytes": [50, 0, 20, 90]}  # 4th index = unnamed reason
+        drifted = len(_RUNTIME_REASONS) + 1  # runtime enum grew past what this build names
+        p._rt = {"hidden_count": [0] * drifted, "hidden_bytes": [0] * drifted}
+        with self.assertRaisesRegex(RuntimeError, "out of sync"):
+            p.dump()
+
+    def test_dump_maps_every_named_runtime_reason(self):
+        # The happy path: an exactly-matching axis maps 1:1 to named reasons, nothing dropped.
+        from torch_rbln.profiler import _BOUNCE_SITES, _RUNTIME_REASONS
+
+        p = torch.rbln.explain()
+        p._bounces = [(0, 0)] * len(_BOUNCE_SITES)
+        p._dispatch = (0, 0, 0, 0, 0, 0, 0)
+        p._fallback_by_op, p._recompile_by_op, p._fallback_reasons = {}, {}, []
+        p._trace_by_op, p._rt_timing, p._wall_ns = {}, None, 1
+        n = len(_RUNTIME_REASONS)
+        counts = list(range(1, n + 1))
+        p._rt = {"hidden_count": counts, "hidden_bytes": [c * 10 for c in counts]}
         rr = p.dump()["runtime_residency"]
-        self.assertIn("unattributed", rr["by_reason"])
-        self.assertEqual(rr["by_reason"]["unattributed"]["count"], 9)
-        self.assertEqual(sum(v["count"] for v in rr["by_reason"].values()), rr["total_count"])  # nothing dropped
+        self.assertEqual(set(rr["by_reason"]), {name for name, _fix in _RUNTIME_REASONS})
+        self.assertEqual(sum(v["count"] for v in rr["by_reason"].values()), rr["total_count"])
 
 
 if __name__ == "__main__":
