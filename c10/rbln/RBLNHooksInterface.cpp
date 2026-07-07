@@ -32,14 +32,11 @@ bool RBLNHooksInterface::isAvailable() const {
 }
 
 bool RBLNHooksInterface::hasRBLN() const {
-  try {
-    const bool has_rbln = (c10::rbln::get_device_count() > 0);
-    RBLN_LOG_DEBUG("has_rbln={}", has_rbln);
-    return has_rbln;
-  } catch (const c10::Error& error) {
-    RBLN_LOG_DEBUG("Failed to get device count, returning false: {}", error.msg());
-    return false;
-  }
+  // isAvailable() must never throw (accelerator-hooks contract); runtime_available()
+  // is nothrow and already true in dummy mode.
+  const bool has_rbln = c10::rbln::runtime_available();
+  RBLN_LOG_DEBUG("has_rbln={}", has_rbln);
+  return has_rbln;
 }
 
 c10::Device RBLNHooksInterface::getDeviceFromPtr(void* data) const {
@@ -53,8 +50,10 @@ c10::Device RBLNHooksInterface::getDeviceFromPtr(void* data) const {
 bool RBLNHooksInterface::hasPrimaryContext(c10::DeviceIndex device_index) const {
   RBLN_LOG_DEBUG("device_index={}", static_cast<int>(device_index));
 
-  const auto device_count = c10::rbln::get_device_count();
-  const bool has_context = device_index >= 0 && device_index < device_count;
+  // thunk_loadable() first so a missing runtime (incl. dummy) is a clean false (no
+  // segfault); throwing get_device_count() keeps a malformed config loud.
+  const bool has_context =
+      device_index >= 0 && c10::rbln::thunk_loadable() && device_index < c10::rbln::get_device_count();
   RBLN_LOG_DEBUG("has_context={}", has_context);
   return has_context;
 }

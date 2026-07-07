@@ -5,6 +5,8 @@
 #include <c10/util/CallOnce.h>
 #include <rebel/runtime/memory_stats.h>
 
+#include <dlfcn.h> // dlopen() probe for librbln-thunk.so (runtime-liveness gate)
+
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
@@ -266,11 +268,76 @@ bool is_dummy_device() {
   return dummy;
 }
 
+// --- Device-runtime liveness ------------------------------------------------
+// torch-rbln lazily dlopen()s librbln-thunk.so on the first device op; if it is
+// absent (compile/CPU-only/CI hosts) or unmapped at shutdown, a raw rbln_* call
+// null-derefs -> uncatchable SEGFAULT (CUDA merely returns an error code). Every
+// runtime-touching leaf gates on runtime_available(): best-effort ops no-op,
+// mandatory ops throw via require_runtime(), and nothing segfaults.
+
+// Cached nothrow probe: is librbln-thunk.so loadable? Same unversioned name
+// librbln.so uses (no ".so.N" version coupling); RTLD_LOCAL so a probe does not
+// promote thunk symbols globally. Public so initialized()/hasPrimaryContext() can
+// gate the throwing get_device_count() on it (config parsing is thunk-free, so a
+// malformed RBLN_DEVICE_MAP still throws while a missing runtime yields false).
+bool thunk_loadable() noexcept {
+  static const bool loadable = []() noexcept {
+    return ::dlopen("librbln-thunk.so", RTLD_LAZY | RTLD_LOCAL) != nullptr;
+  }();
+  return loadable;
+}
+
+namespace {
+
+std::atomic<bool> runtime_shutting_down_{false}; // set at teardown via a Python atexit hook
+
+// Mandatory-op guard: a clean throw instead of a SEGFAULT (no-device is reported
+// separately by to_device_id()). librbln-thunk.so is required even in dummy mode.
+void require_runtime(const char* op) {
+  RBLN_CHECK(
+      !runtime_shutting_down_.load(std::memory_order_relaxed), "Cannot {}: the RBLN runtime is shutting down.", op);
+  RBLN_CHECK(
+      thunk_loadable(),
+      "Cannot {}: the RBLN device runtime (librbln-thunk.so) is not loadable; install the RBLN SDK/runtime "
+      "(required even in RBLN_DUMMY_DEVICE mode).",
+      op);
+}
+
+} // namespace
+
+c10::DeviceIndex get_device_count_nothrow() noexcept {
+  // Nothrow view of get_device_count() for the liveness gate; failures map to 0.
+  try {
+    return get_device_count();
+  } catch (const std::exception& e) {
+    RBLN_WARN_NOTHROW("get_device_count failed, treating as 0 device(s): {}", e.what());
+    return 0;
+  } catch (...) {
+    RBLN_WARN_NOTHROW("get_device_count failed, treating as 0 device(s): unknown exception");
+    return 0;
+  }
+}
+
+void set_runtime_shutting_down(bool value) noexcept {
+  runtime_shutting_down_.store(value, std::memory_order_relaxed);
+}
+
+bool runtime_available() noexcept {
+  // Will an rbln_* call be serviced safely now? Needs the thunk loadable and not
+  // shutting down -- true in dummy mode too (dummy host-backs via the runtime, so it
+  // needs librbln-thunk.so); a real device additionally needs a device present.
+  return !runtime_shutting_down_.load(std::memory_order_relaxed) && thunk_loadable() &&
+      (is_dummy_device() || get_device_count_nothrow() > 0);
+}
+
 void* malloc(c10::DeviceIndex device_index, size_t nbytes) {
   RBLN_LOG_DEBUG("logical device=rbln:{}, nbytes={}", static_cast<int>(device_index), nbytes);
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
   check_device_index(device_index);
 
+  // Mandatory op -> clean throw (not SEGFAULT) when the real runtime is unavailable
+  // (no-op in dummy). malloc is the gateway, so this stops a workload up front.
+  require_runtime("allocate device memory");
   // to_device_id() enforces that a device is actually available (device_count >
   // 0), so allocation fails cleanly here on a host with no NPU.
   const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
@@ -320,6 +387,7 @@ void free(void* data) {
   RBLN_LOG_DEBUG("data={}", fmt::ptr(data));
   RBLN_CHECK(data != nullptr, "data cannot be nullptr");
 
+  require_runtime("free device memory");
   const auto vaddr = reinterpret_cast<uint64_t>(data);
   RBLN_LOG_DEBUG("Calling rbln_free: vaddr={:#x}", vaddr);
   RBLN_CHECK(
@@ -332,6 +400,15 @@ void free_nothrow(void* data) noexcept {
   // Non-throwing free for the noexcept DataPtr deleter: rbln_free is extern "C"
   // and RBLN_WARN_NOTHROW is itself nothrow, so no try/catch is needed.
   if (data == nullptr) {
+    return;
+  }
+  // Real host with an absent/torn-down runtime: rbln_free would deref a dead
+  // runtime -> SEGFAULT; leak instead. Uses the cheap primitives, NOT
+  // runtime_available(), so this noexcept deleter avoids get_device_count()'s
+  // GIL/Python side effects at teardown (dummy host-backs the free, so proceed).
+  if (!is_dummy_device() && (runtime_shutting_down_.load(std::memory_order_relaxed) || !thunk_loadable())) {
+    RBLN_WARN_NOTHROW(
+        "rbln_free skipped for {}: RBLN runtime unavailable; leaking rather than crashing", fmt::ptr(data));
     return;
   }
   const auto vaddr = reinterpret_cast<uint64_t>(data);
@@ -515,6 +592,10 @@ void memcpy_v2v_async(void* rbln_dst_data, const void* rbln_src_data, size_t nby
 
 void synchronize(c10::DeviceIndex device_index) {
   RBLN_LOG_DEBUG("Synchronizing device {}", static_cast<int>(device_index));
+  // Best-effort: nothing to drain when the runtime is unavailable.
+  if (!runtime_available()) {
+    return;
+  }
   check_device_index(device_index);
   const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
   RBLN_CHECK(
@@ -628,9 +709,12 @@ void return_borrowed(uint64_t borrow_id, bool updated) {
 
 c10::CachingDeviceAllocator::DeviceStats get_device_stats(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
+  // Best-effort query: empty stats when the runtime is unavailable.
+  if (!runtime_available()) {
+    return c10::CachingDeviceAllocator::DeviceStats{};
+  }
   const auto device_index = device.index();
   check_device_index(device_index);
-
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_get_memory_stats: device_id={}", device_id);
   const auto memory_stats = rbln_get_memory_stats(device_id);
@@ -682,9 +766,12 @@ c10::CachingDeviceAllocator::DeviceStats get_device_stats(const c10::Device& dev
 
 void empty_cache(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
+  // Best-effort: nothing to flush when the runtime is unavailable.
+  if (!runtime_available()) {
+    return;
+  }
   const auto device_index = device.index();
   check_device_index(device_index);
-
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_empty_cache: device_id={}", device_id);
   RBLN_CHECK(
@@ -695,9 +782,12 @@ void empty_cache(const c10::Device& device) {
 
 std::map<std::string, uint64_t> memory_stats(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
+  // Best-effort query: empty when the runtime is unavailable.
+  if (!runtime_available()) {
+    return {};
+  }
   const auto device_index = device.index();
   check_device_index(device_index);
-
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_get_memory_stats: rbln:{}, device_id={}", static_cast<int>(device_index), device_id);
   const auto stats = rbln_get_memory_stats(device_id);
@@ -709,9 +799,12 @@ std::map<std::string, uint64_t> memory_stats(const c10::Device& device) {
 
 void reset_accumulated_memory_stats(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
+  // Best-effort: nothing to reset when the runtime is unavailable.
+  if (!runtime_available()) {
+    return;
+  }
   const auto device_index = device.index();
   check_device_index(device_index);
-
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_reset_accumulated_memory_stats: device_id={}", device_id);
   RBLN_CHECK(
@@ -722,9 +815,13 @@ void reset_accumulated_memory_stats(const c10::Device& device) {
 
 void reset_peak_memory_stats(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
+  // Best-effort: nothing to reset when the runtime is unavailable. (The generic
+  // torch.accelerator.reset_*() have no Python init-guard, so this gate matters.)
+  if (!runtime_available()) {
+    return;
+  }
   const auto device_index = device.index();
   check_device_index(device_index);
-
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_reset_peak_memory_stats: device_id={}", device_id);
   RBLN_CHECK(

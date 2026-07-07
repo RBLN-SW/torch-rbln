@@ -68,9 +68,11 @@ struct RBLNAllocator final : public c10::DeviceAllocator {
   }
 
   bool initialized() override {
-    // RBLN runtime initializes lazily on first allocation; device availability
-    // is a sufficient proxy for readiness.
-    const bool is_initialized = (c10::rbln::get_device_count() > 0);
+    // Gates torch.accelerator.empty_cache()/memory_stats(). thunk_loadable() first
+    // so a missing runtime (incl. dummy) is false, not a segfault; throwing
+    // get_device_count() keeps a malformed config loud (config parse is thunk-free).
+    const bool is_initialized =
+        c10::rbln::thunk_loadable() && (c10::rbln::is_dummy_device() || c10::rbln::get_device_count() > 0);
     RBLN_LOG_DEBUG("is_initialized={}", is_initialized);
     return is_initialized;
   }

@@ -142,6 +142,34 @@ C10_RBLN_API void set_device_layout_like(void* target_data, const void* ref_data
 C10_RBLN_API bool is_dummy_device();
 
 /**
+ * @brief Nothrow view of get_device_count() (returns 0 on any failure), for the
+ * liveness predicates that must never throw.
+ */
+C10_RBLN_API c10::DeviceIndex get_device_count_nothrow() noexcept;
+
+/**
+ * @brief Cached nothrow probe: is librbln-thunk.so loadable? Availability signals
+ * gate the throwing get_device_count() on this, so a missing runtime degrades to
+ * false without a segfault while a malformed config still throws loudly.
+ */
+C10_RBLN_API bool thunk_loadable() noexcept;
+
+/**
+ * @brief Single source of truth: will an rbln_* call be serviced safely now? Needs
+ * librbln-thunk.so loadable and not shutting down (dummy mode too -- it host-backs
+ * via the runtime); a real device also needs a device present. False when the
+ * runtime is absent/torn down. Never throws. CUDA parity.
+ */
+C10_RBLN_API bool runtime_available() noexcept;
+
+/**
+ * @brief Mark the runtime as shutting down so late frees / best-effort ops stop
+ * dispatching into a possibly-unmapped librbln-thunk.so. Wired to a Python atexit
+ * hook; safe to call repeatedly.
+ */
+C10_RBLN_API void set_runtime_shutting_down(bool value) noexcept;
+
+/**
  * @brief Allocates memory on the specified RBLN device.
  *
  * This function allocates a contiguous block of memory on the given RBLN
