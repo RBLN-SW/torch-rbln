@@ -442,9 +442,8 @@ def _fyi(note: str) -> str:
 
 
 def _site_label(name: str) -> str:
-    # Display-only trim: the 'host_bounce/' namespace already carries "copy"/"bounce",
-    # so the raw site keys read redundantly and are the widest table cell. Shorten for
-    # the report; the underlying data/dump keys (by_site, _REMEDY) are unchanged.
+    # Display-only trim (the 'host_bounce/' prefix already carries "copy"/"bounce", and
+    # these are the widest table cell); dump/data keys are unchanged.
     return {
         "copy_d2d_host_bounce": "d2d_copy",
         "copy_h2d_staging": "h2d_staging",
@@ -832,9 +831,8 @@ class RBLNExplain:
         if v["clean"]:
             mark = "[clean]"
         else:
-            # N = how many KINDS of hidden signal fired (host bounce / runtime d2h /
-            # cpu_fallback / recompile). A count, NOT a severity grade -- the tool never
-            # ranks how bad; cost is read from the table Bytes/Note and the >> witness.
+            # N = how many KINDS fired (bounce/runtime-d2h/fallback/recompile); a count,
+            # not a severity grade (cost lives in the table + the >> line).
             nsig = sum(
                 (
                     v["hidden_host_bounces"] > 0,
@@ -846,18 +844,14 @@ class RBLNExplain:
             mark = f"[overhead: {nsig} signal{'' if nsig == 1 else 's'}]"
         head = f"{mark}  RBLN EXPLAIN   (region wall {_fmt_time(d['wall_ns'])}"
         if "device_memory" in d:
-            # rebel BufferAllocator reserved footprint (incl. cached/idle buffers held
-            # for reuse), a device-side high-water mark -- NOT host process RSS.
+            # rebel BufferAllocator reserved footprint (device high-water), not host RSS.
             head += f" | device mem {_fmt_bytes(d['device_memory']['peak_bytes'])} peak, reserved"
         head += ")"
         lines = [head]
 
-        # -- context (host oversubscription, rebel-runtime share, h2d push):
-        #    amplifiers/facts, each wrapped to stay self-contained and short (P1-5).
-        #    Built for BOTH paths -- these are facts that happened regardless of whether
-        #    any hidden signal fired, so a clean region still surfaces them (e.g. an h2d
-        #    push is expected glue, not overhead -- it must not vanish just because the
-        #    region is otherwise clean). --------------------------------------
+        # -- context facts (oversubscription, rebel-runtime, h2d push): built for BOTH
+        #    paths -- they happened regardless of any signal, so a clean region shows them
+        #    too (an h2d push is expected glue, not overhead).
         ctx: list[str] = []
         ht = d.get("host_threads") or {}
         if ht.get("oversubscribed"):
@@ -896,10 +890,9 @@ class RBLNExplain:
                 lines.append(_RT_UNAVAIL)
             return "\n".join(lines)
 
-        # -- cost verdict source: the region-global physical-d2h witness -------
-        # It cannot attribute per row, so: witness==0 -> every byte row is low-cost;
-        # witness>0 with exactly one byte row -> that row is the costly one; witness>0
-        # with several -> rows defer to the >> line (no false per-row blame).
+        # -- cost verdict from the region-global physical-d2h witness (can't attribute
+        #    per row): 0 -> all low-cost; >0 & one byte row -> that row is costly;
+        #    >0 & several -> defer to the >> line (no false per-row blame).
         phys = rr.get("real_host_sync_d2h") if rr.get("available") else None
         witness = phys["count"] if phys else 0
         bounce_sites = [(n, vv) for n, vv in d["hidden_host_bounce"]["by_site"].items() if vv["count"]]
@@ -921,9 +914,8 @@ class RBLNExplain:
             note = f"{_verdict()} | {_fix(short)}" if short else _verdict()
             rows.append([f"host_bounce/{_site_label(name)}", _thousands(vv["count"]), _fmt_bytes(vv["bytes"]), note])
         if v2v_fired:
-            # ONE event row. Bytes is host-path volume ONLY (one semantic); the physical
-            # DMA magnitude, if any, lives on the >> line. v2v's remedy is per reject-cause,
-            # shown in the detail block, so the row Note is just the cost verdict.
+            # Bytes = host-path volume only (one semantic); physical DMA lives on the >>
+            # line. Remedy is per reject-cause in the block, so the Note is just the verdict.
             host_path_bytes = sum(x.get("bytes", 0) for x in rr["by_reason"].values())
             rows.append(["runtime/v2v_slow", _thousands(rr["total_count"]), _fmt_bytes(host_path_bytes), _verdict()])
         disp = d["dispatch"]
