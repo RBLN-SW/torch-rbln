@@ -47,7 +47,7 @@ Usage::
     p.dump()  # dict for CI gates
     p.verdict()  # {'clean': bool, 'reasons': [...], ...}  (a fact, not a severity grade)
 
-    with torch.rbln.explain(trace=True) as p:  # opt-in: WHERE each fallback/recompile originates
+    with torch.rbln.explain(with_stack=True) as p:  # opt-in: WHERE each fallback/recompile originates
         model(x)
     print(p.report())  # adds an "at <file:line(func)>" line per offending op
 
@@ -333,7 +333,7 @@ def _read_trace_by_op() -> dict[str, str]:
 
 def _set_trace(on: bool) -> None:
     """Flip the C++ capture gate. No-op on a _C that predates the binding (so a
-    trace=True request on an old build degrades to no call-sites, not an error)."""
+    with_stack=True request on an old build degrades to no call-sites, not an error)."""
     import torch_rbln._C as _C
 
     fn = getattr(_C, "_explain_set_trace", None)
@@ -411,11 +411,12 @@ def _read_runtime() -> Optional[dict]:
 
 
 def _fmt_bytes(b: float) -> str:
-    for unit in ("B", "KB", "MB", "GB"):
-        if abs(b) < 1024 or unit == "GB":
-            return f"{b:.2f} {unit}" if unit != "B" else f"{int(b)} B"
+    # Mirror torch.profiler's _format_memory unit casing (b/Kb/Mb/Gb) for format parity.
+    for unit in ("b", "Kb", "Mb", "Gb"):
+        if abs(b) < 1024 or unit == "Gb":
+            return f"{b:.2f} {unit}" if unit != "b" else f"{int(b)} b"
         b /= 1024
-    return f"{b:.2f} GB"
+    return f"{b:.2f} Gb"
 
 
 def _fmt_time(ns: float) -> str:
@@ -439,6 +440,13 @@ def _fix(note: str) -> str:
 
 def _fyi(note: str) -> str:
     return f"fyi: {note}" if note else ""
+
+
+def _site_label(name: str) -> str:
+    # Display-only: the runtime key 'copy_d2d_host_bounce' already sits under a
+    # 'host_bounce/' prefix, so "bounce" reads twice and it is the widest table cell.
+    # Show the shorter 'd2d_copy'; the underlying data/dump key is unchanged.
+    return "d2d_copy" if name == "copy_d2d_host_bounce" else name
 
 
 def _table(headers: list[str], rows: list[list[str]], aligns: list[str]) -> list[str]:
@@ -472,11 +480,13 @@ class RBLNExplain:
     profiling a multi-threaded run (vLLM, DataLoader workers, ...). Memory is read as a
     process-wide level/high-water mark, not a per-region delta."""
 
-    def __init__(self, trace: bool = False) -> None:
+    def __init__(self, with_stack: bool = False, *, trace: Optional[bool] = None) -> None:
+        if trace is not None:  # deprecated back-compat alias for with_stack
+            with_stack = trace
         self._b0 = self._d0 = self._rt0 = self._wall0 = self._f0 = self._r0 = self._fr0 = None
         self._bounces = self._dispatch = self._rt = self._fallback_by_op = self._recompile_by_op = None
         self._fallback_reasons = None
-        self._trace = trace
+        self._trace = with_stack
         self._trace_by_op: Optional[dict] = None
         self._rt_timing: Optional[list[tuple[int, int]]] = None  # (B) per-primitive librbln (ns, calls)
         self._holds = False  # this region owns the global instrumentation (release exactly once)
@@ -612,7 +622,7 @@ class RBLNExplain:
         out["cpu_fallback_reasons"] = {
             n: c for n, c in zip(_FALLBACK_REASON_NAMES, self._fallback_reasons or []) if c > 0
         }
-        out["trace_by_op"] = dict(self._trace_by_op or {})  # (A) WHERE; {} unless trace=True
+        out["trace_by_op"] = dict(self._trace_by_op or {})  # (A) WHERE; {} unless with_stack=True
         if self._rt is not None:
             hc, hbytes = self._rt["hidden_count"], self._rt["hidden_bytes"]
             # (#3) the runtime hidden-reason axis is a positional ABI contract, not partially-
@@ -763,10 +773,26 @@ class RBLNExplain:
         d, v = self.dump(), self.verdict()
         # A FACTUAL marker (did anything hidden fire), NOT a severity grade: explain
         # states what happened and lets you judge cost from the table's Bytes/Note.
-        mark = "[clean]" if v["clean"] else "[overhead]"
+        if v["clean"]:
+            mark = "[clean]"
+        else:
+            # Count distinct hidden signals that fired (host bounce / runtime d2h /
+            # cpu_fallback / recompile) so the marker carries a glanceable magnitude
+            # while staying a fact, not a severity grade.
+            nsig = sum(
+                (
+                    v["hidden_host_bounces"] > 0,
+                    bool(v["runtime_hidden_d2h"]),
+                    v["cpu_fallbacks"] > 0,
+                    v["recompiles"] > 0,
+                )
+            )
+            mark = f"[overhead: {nsig} signal{'' if nsig == 1 else 's'}]"
         head = f"{mark}  RBLN EXPLAIN   (wall {_fmt_time(d['wall_ns'])}"
         if "device_memory" in d:
-            head += f" | mem {_fmt_bytes(d['device_memory']['peak_bytes'])} peak (process)"
+            # rebel BufferAllocator reserved footprint (incl. cached/idle buffers held
+            # for reuse), a device-side high-water mark -- NOT host process RSS.
+            head += f" | device mem {_fmt_bytes(d['device_memory']['peak_bytes'])} peak (reserved)"
         head += ")"
         lines = [head]
 
@@ -786,7 +812,7 @@ class RBLNExplain:
             bp = sorted(rtm["by_primitive"].items(), key=lambda kv: -kv[1]["ns"])
             top = " | ".join(f"{n} {v['ns'] / 1000:.1f}({v['calls']})" for n, v in bp[:6])
             lines.append(
-                f"  rebel runtime: {rtm['total_ns'] / 1000:.1f} us in librbln"
+                f"  rebel runtime: {_fmt_time(rtm['total_ns'])} in librbln"
                 f" ({rtm['wall_fraction'] * 100:.1f}% of wall) -- {top}"
             )
 
@@ -802,7 +828,12 @@ class RBLNExplain:
         for name, vv in d["hidden_host_bounce"]["by_site"].items():
             if vv["count"]:
                 rows.append(
-                    [f"host_bounce/{name}", str(vv["count"]), _fmt_bytes(vv["bytes"]), _fix(_FIX_SHORT.get(name, ""))]
+                    [
+                        f"host_bounce/{_site_label(name)}",
+                        str(vv["count"]),
+                        _fmt_bytes(vv["bytes"]),
+                        _fix(_FIX_SHORT.get(name, "")),
+                    ]
                 )
         if rr["available"]:
             # ONE event row for the slow-path v2v copies. The src-state axis, reject axis,
@@ -813,13 +844,17 @@ class RBLNExplain:
             if rr["total_count"]:
                 phys = rr.get("real_host_sync_d2h")
                 hidden_bytes = sum(v.get("bytes", 0) for v in rr["by_reason"].values())
+                # The Bytes cell means different things per state (physical DMA bytes vs
+                # host-path bytes); name the semantic in the Note so rows stay comparable.
+                # A genuine 0 renders as "0 b" (a measured fact) -- never "--", which is the
+                # not-applicable token reserved for count-only rows (e.g. dispatch).
                 if phys is None:  # runtime exposes the cause but not the real-transfer witness
-                    note, mag = "fell to host slow path", hidden_bytes
+                    note, mag = "fell to host slow path (bytes: host path)", hidden_bytes
                 elif phys.get("count"):
-                    note, mag = "real device->host DMA (costly)", phys["bytes"]
+                    note, mag = "real device->host DMA (costly) (bytes: physical d2h)", phys["bytes"]
                 else:
-                    note, mag = "served on host, no DMA (low cost)", hidden_bytes
-                rows.append(["runtime/v2v_slow", str(rr["total_count"]), _fmt_bytes(mag) if mag else "--", _fyi(note)])
+                    note, mag = "served on host, no DMA (low cost) (bytes: host path)", hidden_bytes
+                rows.append(["runtime/v2v_slow", str(rr["total_count"]), _fmt_bytes(mag), _fyi(note)])
         disp = d["dispatch"]
         if disp["cpu_fallback"]:
             rows.append(["dispatch/cpu_fallback", str(disp["cpu_fallback"]), "--", _fix(_FIX_SHORT["cpu_fallback"])])
@@ -873,26 +908,29 @@ class RBLNExplain:
             shown = ", ".join(f"{op} {c}" for op, c in items[:8])
             return shown + ("" if len(items) <= 8 else f", +{len(items) - 8} more")
 
-        tbo = d.get("trace_by_op") or {}  # (A) WHERE: op/bounce-site -> call-site, only when trace=True
+        tbo = d.get("trace_by_op") or {}  # (A) WHERE: op/bounce-site -> call-site, only when with_stack=True
 
         def _where(by_op: dict) -> None:
             for op in list(by_op)[:3]:
                 if op in tbo:
                     lines.append(f"      at {op}: {tbo[op]}")
 
-        # (A) WHERE for bounces: trace=True keys the bounced copy's call-site under
+        # (A) WHERE for bounces: with_stack=True keys the bounced copy's call-site under
         # the site name -> show it so the user can locate the host round-trip itself
         # (previously only fallback/recompile had a call-site; bounces were unlocatable).
         for _bname, _bv in d["hidden_host_bounce"]["by_site"].items():
             if _bv["count"] and _bname in tbo:
-                lines.append(f"      at host_bounce/{_bname}: {tbo[_bname]}")
+                # 4-space (top-level attribution, sibling of 'physical d2h') so it is not
+                # orphaned when only bounces fire -- there is no 'host_bounce:' parent
+                # subline the way 'cpu_fallback:' parents the fallback 'at' lines.
+                lines.append(f"    at host_bounce/{_site_label(_bname)}: {tbo[_bname]}")
 
         fbo = d.get("cpu_fallback_by_op") or {}
         if fbo:
             fb_ns = d["dispatch"].get("cpu_fallback_ns", 0)
             # the COST -- distinguishes "many cheap fallbacks (path overhead)" from
             # "few expensive ones (hidden transfer)"; only shown when the loaded _C exposes it.
-            cost = f"   (sum {fb_ns / 1000:.0f} us wall)" if fb_ns else ""
+            cost = f"   (sum {_fmt_time(fb_ns)} wall)" if fb_ns else ""
             lines.append(f"    cpu_fallback: {_top(fbo)}{cost}")
         fr = d.get("cpu_fallback_reasons") or {}
         if fr:
@@ -909,7 +947,7 @@ class RBLNExplain:
             lines.append(f"    recompile: {_top(rbo)}")
         _where(rbo)
         if (fbo or rbo) and not tbo:
-            lines.append("      where? -> rerun with explain(trace=True)")
+            lines.append("      where? -> rerun with explain(with_stack=True)")
         if not rr["available"]:
             lines.append(_RT_UNAVAIL)
         lines.append("  (full fix detail -> p.help(signal) or dump()['remedies'])")
@@ -1070,14 +1108,19 @@ class RBLNDiff:
     __str__ = __repr__
 
 
-def explain(trace: bool = False) -> RBLNExplain:
+def explain(with_stack: bool = False, *, trace: Optional[bool] = None) -> RBLNExplain:
     """Return a hidden-overhead explain region, usable as a context manager.
 
-    With ``trace=True`` (opt-in; OFF by default, so a plain region adds nothing to
+    With ``with_stack=True`` (opt-in; OFF by default, so a plain region adds nothing to
     any path), the FIRST time each op falls back / recompiles its Python call-site
     is captured (deduped per op) and shown as an ``at <file:line(func)>`` line in
-    the report — telling you WHERE in your model the hidden overhead originates."""
-    return RBLNExplain(trace=trace)
+    the report — telling you WHERE in your model the hidden overhead originates.
+
+    ``trace=`` is a deprecated back-compat alias for ``with_stack=`` (torch names this
+    feature ``with_stack`` in ``torch.profiler.profile``); it still works."""
+    if trace is not None:
+        with_stack = trace
+    return RBLNExplain(with_stack=with_stack)
 
 
 # Backward-compatible aliases. The tool was originally exposed as ``profile``;
@@ -1093,7 +1136,8 @@ def explain_steady(
     warmup: int = 2,
     return_cold: bool = False,
     as_diff: bool = False,
-    trace: bool = False,
+    with_stack: bool = False,
+    trace: Optional[bool] = None,
 ) -> RBLNExplain | tuple[RBLNExplain, RBLNExplain] | RBLNDiff:
     """Convenience: capture two regions around ``fn`` — the FIRST call it makes
     and a later call after ``warmup`` more — so you can compare them.
@@ -1121,14 +1165,16 @@ def explain_steady(
         d = torch.rbln.explain_steady(lambda: model(x), warmup=2, as_diff=True)
         print(d.report())  # what PERSISTS is the overhead that recurs across the two calls
     """
-    cold = RBLNExplain(trace=trace).start()
+    if trace is not None:  # deprecated back-compat alias for with_stack
+        with_stack = trace
+    cold = RBLNExplain(with_stack=with_stack).start()
     try:
         fn()
     finally:
         cold.stop()
     for _ in range(max(0, warmup)):
         fn()
-    warm = RBLNExplain(trace=trace).start()
+    warm = RBLNExplain(with_stack=with_stack).start()
     try:
         fn()
     finally:

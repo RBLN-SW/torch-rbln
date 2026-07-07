@@ -185,8 +185,8 @@ class TestProfilerTruthfulnessAndScope(TestCase):
             self.assertIn("d2h", pending)
 
     def test_E_device_memory_gauge(self):
-        # Pure allocation (no compute) — the gauge is a process-level high-water
-        # mark, so it reads a sane non-zero peak >= current.
+        # Pure allocation (no compute) — the gauge is the device BufferAllocator's
+        # reserved high-water mark, so it reads a sane non-zero peak >= current.
         with torch.rbln.explain() as p:
             _ = torch.empty(2048, 2048, device=DEV, dtype=torch.float16)
         d = p.dump()
@@ -288,7 +288,7 @@ class TestProfilerApi(TestCase):
         self.assertIsInstance(v["clean"], bool)
         self.assertFalse(v["clean"])  # a fallback fired
         rep = p.report()
-        self.assertIn("[overhead]", rep)
+        self.assertIn("[overhead:", rep)  # marker carries a factual signal count, e.g. "[overhead: 1 signal]"
         for banned in ("[ OK ]", "[WARN]", "[BAD ]", "RBLN EXPLAIN - RED", "GREEN", "AMBER"):
             self.assertNotIn(banned, rep)
 
@@ -303,7 +303,7 @@ class TestProfilerApi(TestCase):
 
     def test_A_where_traceback_is_opt_in(self):
         # (A) WHERE: default explain() captures NO call-site (opt-in => adds
-        # nothing); explain(trace=True) captures the Python call-site of the op.
+        # nothing); explain(with_stack=True) captures the Python call-site of the op.
         def _do_fallback():
             a = torch.ones(16, 16, device=DEV, dtype=torch.int32)  # int32 -> cpu_fallback
             return a + a
@@ -316,15 +316,22 @@ class TestProfilerApi(TestCase):
 
         if not hasattr(_C, "_explain_set_trace"):
             self.skipTest("trace capture not exposed by this _C build")
-        with torch.rbln.explain(trace=True) as on:
+        with torch.rbln.explain(with_stack=True) as on:
             _do_fallback()
         tbo = on.dump()["trace_by_op"]
         self.assertIn("aten::add.out", tbo)
         self.assertIn("_do_fallback", tbo["aten::add.out"])  # the user's call-site frame
 
+    def test_with_stack_trace_is_deprecated_alias(self):
+        # with_stack= is the torch-parity name; trace= is kept as a back-compat alias
+        # and must set the same capture gate.
+        self.assertTrue(torch.rbln.explain(trace=True)._trace)
+        self.assertTrue(torch.rbln.explain(with_stack=True)._trace)
+        self.assertFalse(torch.rbln.explain()._trace)
+
     def test_A_where_traces_bounce_site(self):
         # (A) WHERE also covers host BOUNCES (not just cpu_fallback/recompile): with
-        # trace=True the bounced copy's Python call-site is captured under the site
+        # with_stack=True the bounced copy's Python call-site is captured under the site
         # name, so the report can point at the offending copy. Previously a bounce was
         # counted but unlocatable. OFF by default (a plain region captures nothing).
         import torch_rbln._C as _C
@@ -340,7 +347,7 @@ class TestProfilerApi(TestCase):
             _do_bounce()
         self.assertEqual(off.dump()["trace_by_op"], {})  # opt-in: nothing unless asked
 
-        with torch.rbln.explain(trace=True) as on:
+        with torch.rbln.explain(with_stack=True) as on:
             _do_bounce()
         d = on.dump()
         if d["hidden_host_bounce"]["by_site"]["copy_d2d_host_bounce"]["count"] < 1:
@@ -348,7 +355,7 @@ class TestProfilerApi(TestCase):
         tbo = d["trace_by_op"]
         self.assertIn("copy_d2d_host_bounce", tbo)  # the bounce site was captured
         self.assertIn("_do_bounce", tbo["copy_d2d_host_bounce"])  # user's call-site frame
-        self.assertIn("at host_bounce/copy_d2d_host_bounce", on.report())
+        self.assertIn("at host_bounce/d2d_copy", on.report())  # display label of copy_d2d_host_bounce
 
     def test_diff_reports_only_what_changed_between_two_regions(self):
         # explain doesn't know lifecycle; diff compares two regions the USER places.
@@ -502,7 +509,7 @@ class TestProfilerReportFormat(TestCase):
         self.assertTrue(rep.isascii())  # P6: ASCII-only output
         self.assertIn("RBLN EXPLAIN", rep)
         if "mem " in rep:
-            self.assertIn("peak (process)", rep)  # P5: gauge is process-wide, labeled
+            self.assertIn("peak (reserved)", rep)  # P5: device BufferAllocator reserved footprint, labeled
 
 
 @pytest.mark.test_set_ci
