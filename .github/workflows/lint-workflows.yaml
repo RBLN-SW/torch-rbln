@@ -21,7 +21,7 @@ jobs:
   lint_workflows:
     name: Lint workflows
     if: ${{ github.repository_owner == vars.TORCH_RBLN_REPO_OWNER }}
-    runs-on: ${{ vars.TORCH_RBLN_RUNNER_EXTERNAL }}
+    runs-on: ${{ vars.TORCH_RBLN_RUNNER_CPU_SMALL }}
     env:
       GIT_CONFIG_COUNT: '1'
       GIT_CONFIG_KEY_0: safe.directory
