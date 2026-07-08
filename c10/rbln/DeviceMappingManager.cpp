@@ -410,13 +410,25 @@ void DeviceMappingManager::initialize() {
       return;
     }
 
+    // Querying the count needs librbln-thunk.so; if it is not loadable (compile /
+    // CPU-only / CI hosts with no SDK) a raw rbln_* call would SEGFAULT. Route into
+    // the same 0-device path as a host with no NPU, so get_device_count() degrades
+    // to a clean 0 (torch.cuda parity) and use fails at the point of use.
+    if (!c10::rbln::thunk_loadable()) {
+      RBLN_LOG_INFO(
+          "RBLN runtime (librbln-thunk.so) not loadable; initializing with 0 logical device(s). "
+          "Device access will fail at the point of use.");
+      device_count_ = 0;
+      buildDeviceTopology();
+      return;
+    }
+
     int device_count = 0;
-    // A failed query (SDK/driver not loadable) stays fatal; "query succeeded,
-    // found 0 NPUs" is handled below.
+    // The thunk is loadable but the query failed (kernel driver not loaded / device
+    // unavailable): fatal. "Query succeeded, found 0 NPUs" is handled below.
     RBLN_CHECK(
         !rbln_get_device_count(&device_count),
-        "rbln_get_device_count failed; the RBLN SDK/driver may not be loadable — ensure the SDK is installed "
-        "and the kernel driver is loaded");
+        "rbln_get_device_count failed; the RBLN kernel driver may not be loaded or the device is unavailable");
     const int physical_device_count = device_count;
     RBLN_LOG_DEBUG("Found {} physical NPU(s)", physical_device_count);
 
