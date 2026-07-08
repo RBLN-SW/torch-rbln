@@ -148,25 +148,15 @@ C10_RBLN_API bool is_dummy_device();
 C10_RBLN_API c10::DeviceIndex get_device_count_nothrow() noexcept;
 
 /**
- * @brief Is the RBLN device runtime (librbln-thunk.so) loaded and usable? Nothrow
- * wrapper over librbln's rbln_runtime_available(). Availability signals gate the
- * throwing get_device_count() on this, so a missing runtime degrades to false
- * without a segfault; a malformed config still throws when the runtime is present.
- */
-C10_RBLN_API bool runtime_loaded() noexcept;
-
-/**
- * @brief Single source of truth: will an rbln_* call be serviced safely now? Needs
- * librbln-thunk.so loadable and not shutting down (dummy mode too -- it host-backs
- * via the runtime); a real device also needs a device present. False when the
- * runtime is absent/torn down. Never throws. CUDA parity.
+ * @brief Single source of truth: can an rbln_* call be serviced safely now?
+ * Runtime loaded (librbln's rbln_runtime_available()), not shutting down, and a
+ * device present -- dummy included (it host-backs via the runtime). Never throws.
  */
 C10_RBLN_API bool runtime_available() noexcept;
 
 /**
  * @brief Mark the runtime as shutting down so late frees / best-effort ops stop
- * dispatching into a possibly-unmapped librbln-thunk.so. Wired to a Python atexit
- * hook; safe to call repeatedly.
+ * dispatching into a possibly-unmapped runtime. Wired to a Python atexit hook.
  */
 C10_RBLN_API void set_runtime_shutting_down(bool value) noexcept;
 

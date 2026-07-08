@@ -403,22 +403,19 @@ void DeviceMappingManager::initialize() {
   c10::call_once(init_flag_, [this]() {
     RBLN_LOG_DEBUG("Initializing RBLN device mapping");
 
-    // Enumeration touches the runtime in BOTH modes -- the real path calls
-    // rbln_get_device_count(), and dummy host-backs via rbln_register_device_id() --
-    // so if librbln-thunk.so is not loadable (compile / CPU-only / CI hosts) a raw
-    // rbln_* call would SEGFAULT. Checked before the dummy branch too: degrade to 0
-    // logical devices (torch.cuda parity), so use fails cleanly at the point of use.
-    if (!c10::rbln::runtime_loaded()) {
+    // Enumeration hits the runtime in both modes (real: rbln_get_device_count();
+    // dummy: rbln_register_device_id()), so without the runtime a raw rbln_* call
+    // would SEGFAULT. Checked before the dummy branch too: degrade to 0 devices.
+    if (!rbln_runtime_available()) {
       RBLN_LOG_INFO(
-          "RBLN runtime (librbln-thunk.so) not loadable; initializing with 0 logical device(s). "
+          "RBLN runtime (librbln-thunk.so) not loaded; initializing with 0 logical device(s). "
           "Device access will fail at the point of use.");
       device_count_ = 0;
       buildDeviceTopology();
       return;
     }
 
-    // Explicit opt-in for host-backed dummy devices: no NPU needed, but the runtime
-    // (checked above) is -- dummy materializes tensors through it.
+    // Dummy: host-backed, no NPU, but still needs the runtime (checked above).
     if (dummyDeviceEnabled()) {
       initializeDummyDevices();
       return;

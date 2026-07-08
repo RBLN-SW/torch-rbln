@@ -68,11 +68,11 @@ struct RBLNAllocator final : public c10::DeviceAllocator {
   }
 
   bool initialized() override {
-    // Gates torch.accelerator.empty_cache()/memory_stats(). runtime_loaded() first
-    // so a missing runtime (incl. dummy) is false, not a segfault; throwing
-    // get_device_count() keeps a malformed config loud when the runtime is present.
+    // Gates torch.accelerator.empty_cache()/memory_stats(). Runtime check first so a
+    // missing runtime is false (not a segfault); throwing get_device_count() keeps a
+    // malformed config loud when the runtime is present.
     const bool is_initialized =
-        c10::rbln::runtime_loaded() && (c10::rbln::is_dummy_device() || c10::rbln::get_device_count() > 0);
+        rbln_runtime_available() && (c10::rbln::is_dummy_device() || c10::rbln::get_device_count() > 0);
     RBLN_LOG_DEBUG("is_initialized={}", is_initialized);
     return is_initialized;
   }

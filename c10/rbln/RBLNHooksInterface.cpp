@@ -32,8 +32,7 @@ bool RBLNHooksInterface::isAvailable() const {
 }
 
 bool RBLNHooksInterface::hasRBLN() const {
-  // isAvailable() must never throw (accelerator-hooks contract); runtime_available()
-  // is nothrow and already true in dummy mode.
+  // Nothrow (accelerator-hooks contract must not throw); true in dummy mode too.
   const bool has_rbln = c10::rbln::runtime_available();
   RBLN_LOG_DEBUG("has_rbln={}", has_rbln);
   return has_rbln;
@@ -50,10 +49,10 @@ c10::Device RBLNHooksInterface::getDeviceFromPtr(void* data) const {
 bool RBLNHooksInterface::hasPrimaryContext(c10::DeviceIndex device_index) const {
   RBLN_LOG_DEBUG("device_index={}", static_cast<int>(device_index));
 
-  // runtime_loaded() first so a missing runtime (incl. dummy) is a clean false (no
-  // segfault); throwing get_device_count() keeps a malformed config loud when present.
+  // Runtime check first so a missing runtime is a clean false (no segfault); throwing
+  // get_device_count() keeps a malformed config loud when the runtime is present.
   const bool has_context =
-      device_index >= 0 && c10::rbln::runtime_loaded() && device_index < c10::rbln::get_device_count();
+      device_index >= 0 && rbln_runtime_available() && device_index < c10::rbln::get_device_count();
   RBLN_LOG_DEBUG("has_context={}", has_context);
   return has_context;
 }

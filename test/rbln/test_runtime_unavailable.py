@@ -91,7 +91,8 @@ class TestRuntimeUnavailable(TestCase):
             assert isinstance(torch.rbln.device_count(), int)  # still nothrow
 
             d = torch.device("rbln", 0)
-            # RBLN-direct best-effort leaves: no-op, must not raise or crash.
+            # Best-effort leaves no-op; synchronize no-ops under teardown too (it throws
+            # on a live no-device host -- see test_runtime_absent).
             C.empty_cache(d)
             C.synchronize(0)
             C.reset_peak_memory_stats(d)
@@ -154,11 +155,12 @@ class TestRuntimeUnavailable(TestCase):
             assert torch.rbln.device_count() == 0, "runtime-absent must degrade to 0 devices, not segfault"
             assert torch.rbln.is_available() is False
             C.set_device_index(0)  # bookkeeping only: must not throw or segfault
-            try:
-                torch.empty(4, device="rbln:0")  # use fails cleanly at the point of use
-                raise AssertionError("allocation must raise with no device")
-            except RuntimeError:
-                pass
+            for use in (lambda: torch.empty(4, device="rbln:0"), lambda: C.synchronize(0)):
+                try:
+                    use()  # device use fails cleanly at the point of use (torch.cuda parity)
+                    raise AssertionError("device use must raise with no device/runtime")
+                except RuntimeError:
+                    pass
             print("RUNTIME_ABSENT_OK")
             """
         )

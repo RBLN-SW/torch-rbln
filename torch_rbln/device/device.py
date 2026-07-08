@@ -80,13 +80,10 @@ def physical_device_count() -> int:
 def is_available() -> bool:
     """Whether RBLN is usable as an accelerator (``torch.cuda.is_available()`` parity).
 
-    ``True`` when the device runtime (``librbln-thunk.so``, required even in dummy
-    mode) is loadable with a device; ``False`` when it is absent/torn down. With the
-    runtime present, raises on a malformed ``RBLN_*`` config (like :func:`device_count`),
+    ``False`` when the runtime is absent/torn down or no device is present. Raises on a
+    malformed ``RBLN_*`` config when the runtime is present (like :func:`device_count`),
     which torch's ``is_privateuse1_backend_available()`` relies on.
     """
-    # device_count() raises on a malformed RBLN_* config when the runtime is present
-    # (loud); runtime_available() reflects liveness (runtime loaded, not shutting down).
     return torch_rbln._C.device_count() > 0 and torch_rbln._C.runtime_available()
 
 
