@@ -73,8 +73,8 @@ void register_public_device_api(py::module_& module) {
   module.def(
       "thunk_loadable",
       &c10::rbln::thunk_loadable,
-      "Whether librbln-thunk.so is loadable (cheap dlopen probe); False on a compile/CPU-only host. "
-      "Never raises.");
+      "Whether the RBLN device runtime (librbln-thunk.so) is loaded/usable, via librbln's "
+      "rbln_runtime_available(); False on a compile/CPU-only host. Never raises.");
   module.def(
       "_set_runtime_shutting_down",
       &c10::rbln::set_runtime_shutting_down,

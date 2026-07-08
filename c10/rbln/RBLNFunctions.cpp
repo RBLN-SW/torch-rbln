@@ -5,8 +5,6 @@
 #include <c10/util/CallOnce.h>
 #include <rebel/runtime/memory_stats.h>
 
-#include <dlfcn.h> // dlopen() probe for librbln-thunk.so (runtime-liveness gate)
-
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
@@ -269,23 +267,21 @@ bool is_dummy_device() {
 }
 
 // --- Device-runtime liveness ------------------------------------------------
-// torch-rbln lazily dlopen()s librbln-thunk.so on the first device op; if it is
-// absent (compile/CPU-only/CI hosts) or unmapped at shutdown, a raw rbln_* call
+// librbln.so loads librbln-thunk.so (the device driver); it is absent on
+// compile/CPU-only/CI hosts and unmapped at shutdown, when a raw rbln_* call
 // null-derefs -> uncatchable SEGFAULT (CUDA merely returns an error code). Every
 // runtime-touching leaf gates on runtime_available(): best-effort ops no-op,
 // mandatory ops throw via require_runtime(), and nothing segfaults.
 
-// Cached nothrow probe: is librbln-thunk.so loadable? Same unversioned name
-// librbln.so uses (no ".so.N" version coupling); RTLD_LOCAL so a probe does not
-// promote thunk symbols globally. Public so initialized()/hasPrimaryContext() can
-// gate the throwing get_device_count() on it: with the thunk loadable a malformed
+// Is the RBLN device runtime (librbln-thunk.so) loaded and usable? Delegates to
+// librbln's own rbln_runtime_available(), which reports the actual thunk-load state
+// (symbols resolved at librbln static-init) -- authoritative and safe to call when
+// the thunk is absent. Public so initialized()/hasPrimaryContext() can gate the
+// throwing get_device_count() on it: with the runtime present a malformed
 // RBLN_DEVICE_MAP still throws (config parse runs); with it absent, enumeration
 // degrades to 0 before parse, so a missing runtime yields false without segfaulting.
 bool thunk_loadable() noexcept {
-  static const bool loadable = []() noexcept {
-    return ::dlopen("librbln-thunk.so", RTLD_LAZY | RTLD_LOCAL) != nullptr;
-  }();
-  return loadable;
+  return rbln_runtime_available();
 }
 
 namespace {
