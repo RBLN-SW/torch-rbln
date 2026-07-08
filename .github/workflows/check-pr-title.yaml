@@ -15,7 +15,7 @@ jobs:
   check_pr_title:
     name: Check PR title
     if: ${{ github.repository_owner == vars.TORCH_RBLN_REPO_OWNER }}
-    runs-on: ${{ vars.TORCH_RBLN_RUNNER_EXTERNAL }}
+    runs-on: ${{ vars.TORCH_RBLN_RUNNER_CPU_SMALL }}
     timeout-minutes: 10
     container:
       image: ${{ vars.TORCH_RBLN_IMAGE_NAME }}:${{ vars.TORCH_RBLN_IMAGE_TAG }}-py3.12
@@ -23,6 +23,17 @@ jobs:
         username: ${{ github.repository_owner }}
         password: ${{ secrets.GIT_PAT }}
     steps:
+      # The novolume runner doesn't mount event.json into the container, so recreate it.
+      - name: Recreate event payload
+        env:
+          EVENT_JSON: ${{ toJSON(github.event) }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$(dirname "${GITHUB_EVENT_PATH}")"
+          echo "${EVENT_JSON}" > "${GITHUB_EVENT_PATH}"
+
       - name: Check Conventional Commits format
         id: pr_title_lint
         env:

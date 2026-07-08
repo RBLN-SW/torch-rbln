@@ -9,6 +9,7 @@ This document describes the GitHub Actions workflows that power the automated te
 | CI (`ci.yaml`)                         | PRs and pushes to `dev`       | Fast feedback on every change       | Linting + `test_set_ci`-marked tests                               |
 | Release (`release.yaml`)               | PRs and pushes to `main`      | Pre-release validation              | Linting + all tests except `test_set_experimental`/`test_set_perf` |
 | CD (`cd.yaml`)                         | Version tags (`v*`)           | Build and publish release artifacts | Deployment pipeline                                                |
+| Build (`build.yaml`)                   | PRs; manual dispatch          | Build and publish the wheel         | —                                                                  |
 | Check PR Title (`check-pr-title.yaml`) | PR opened, edited, or updated | Enforce Conventional Commits format | —                                                                  |
 | Lint workflows (`lint-workflows.yaml`) | PRs; pushes to `main`/`dev`   | Lint the workflow files             | —                                                                  |
 
@@ -23,10 +24,11 @@ CI, Release, and CD workflows delegate to a shared [Event Dispatch](#event-dispa
 | CI             | To any branch **except** `main` | To `dev`           | Yes                 |
 | Release        | To `main`                       | To `main`          | Yes                 |
 | CD             | —                               | Tags matching `v*` | **No**              |
+| Build          | All PRs                         | —                  | PRs only            |
 | Check PR Title | On open, edit, sync, reopen     | —                  | Yes                 |
 | Lint workflows | All PRs                         | To `main`/`dev`    | Yes                 |
 
-CI and Release runs are grouped by PR number (or SHA for pushes); a new push cancels the in-progress run. CD runs are never cancelled — once a deployment starts, it runs to completion. Check PR Title runs are grouped by PR number and always cancel the in-progress run.
+CI and Release runs are grouped by PR number (or SHA for pushes); a new push cancels the in-progress run. CD runs are never cancelled — once a deployment starts, it runs to completion. Check PR Title runs are grouped by PR number and always cancel the in-progress run. Build also runs on manual `workflow_dispatch`; its PR runs are grouped by PR number and cancel superseded commits, while dispatch runs are grouped by run ID and always complete.
 
 ---
 
@@ -74,6 +76,16 @@ python test/run_tests.py --test_mode=release  # -m "not (test_set_experimental o
 **File:** [`.github/workflows/cd.yaml`](../.github/workflows/cd.yaml)
 
 The CD workflow builds and publishes release artifacts after code has passed both CI and Release testing. It dispatches a `torch-rbln-cd` event and focuses on artifact generation and deployment rather than test execution.
+
+---
+
+## Build Workflow
+
+**File:** [`.github/workflows/build.yaml`](../.github/workflows/build.yaml)
+
+The Build workflow builds the `torch-rbln` wheel and publishes it to the internal package index, on every pull request and on manual `workflow_dispatch`. Unlike CI, Release, and CD, it builds in a container instead of dispatching to RBLN NPU hardware.
+
+The entrypoint fans out a `python_version` × `build_type` matrix to the reusable [`_build-wheel.yaml`](../.github/workflows/_build-wheel.yaml), which pins `rebel-compiler`, builds the wheel, publishes it, and verifies it installs in a clean environment. PRs build `Release`; a manual dispatch can select `Release`, `Debug`, or both via `build_types`.
 
 ---
 
