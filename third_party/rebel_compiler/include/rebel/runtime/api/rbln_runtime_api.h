@@ -144,6 +144,61 @@ RBLNRetCode rbln_reset_accumulated_memory_stats(int device_id);
  */
 RBLNRetCode rbln_reset_peak_memory_stats(int device_id);
 
+/* --- torch.rbln.explain() telemetry counters (process-global, lazy read) ---------
+ * Always-on, near-zero-cost counters of HIDDEN host overhead a device program paid
+ * without asking — device<->host round-trips behind a plain device copy. Recorded
+ * only on already-slow paths, so enabling a reader costs nothing (ON == OFF). Stable
+ * C symbols so an out-of-process reader (torch.rbln.explain) can resolve them by
+ * name. Per-reason values are POSITIONAL; an index's meaning is an internal
+ * classification interpreted by torch.rbln.explain — callers must not hard-code it.
+ */
+
+/**
+ * @brief Per-cause count+bytes of device->host round-trips the runtime performed to
+ *        service a device-to-device copy (overhead invisible from the program).
+ *        Causes are classified by source residency.
+ *
+ * @param counts [out] per-cause counts; array sized to rbln_prof_v2v_hidden_num_reasons().
+ * @param bytes  [out] per-cause byte volume; same size.
+ * @param n_reasons [in] capacity of the arrays.
+ */
+void rbln_prof_get_v2v_hidden_d2h(uint64_t* counts, uint64_t* bytes, uint32_t n_reasons);
+uint32_t rbln_prof_v2v_hidden_num_reasons();
+void rbln_prof_reset_v2v_hidden_d2h();
+
+/**
+ * @brief Per-reason count+bytes for why a device-to-device copy could not stay on
+ *        device and fell back to a host round-trip. The reason index is an opaque
+ *        internal classification (interpreted/grouped by torch.rbln.explain).
+ *
+ * @param counts [out] per-reason counts; array sized to rbln_prof_v2v_reject_num_reasons().
+ * @param bytes  [out] per-reason byte volume; same size.
+ * @param n_reasons [in] capacity of the arrays.
+ */
+void rbln_prof_get_v2v_reject(uint64_t* counts, uint64_t* bytes, uint32_t n_reasons);
+uint32_t rbln_prof_v2v_reject_num_reasons();
+void rbln_prof_reset_v2v_reject();
+
+/**
+ * @brief Count+bytes of real device<->host transfers the runtime actually performed
+ *        (d2h / h2d). Distinguishes a copy that truly crossed the device from one
+ *        served on the host (where these stay 0).
+ */
+void rbln_prof_get_host_sync_d2h(uint64_t* count, uint64_t* bytes);
+void rbln_prof_reset_host_sync_d2h();
+void rbln_prof_get_host_sync_h2d(uint64_t* count, uint64_t* bytes);
+void rbln_prof_reset_host_sync_h2d();
+
+/**
+ * @brief Live device-memory gauge: current and high-water-peak bytes the runtime
+ *        holds. Process-global and counts BOTH allocation paths — direct device
+ *        allocations AND the caching allocator. This is distinct from (and not
+ *        redundant with) the per-device, caching-allocator-scoped
+ *        rbln_get_memory_stats(): it also includes direct device allocations (e.g.
+ *        weights) that MemoryStats does not see. A resource gauge (no reset).
+ */
+void rbln_prof_get_memory(uint64_t* current_bytes, uint64_t* peak_bytes);
+
 #ifdef __cplusplus
 }
 
@@ -334,8 +389,8 @@ RBLNRetCode rbln_memcpy_h2v_cast(uintptr_t src_host_ptr, uint64_t dst_vaddr, uin
 // `to_dtype` and copied to the `dst_host_ptr`. However, if the user dtype of the vmemory area
 // corresponding to src_vaddr is `from_dtype` and the device dtype is `to_dtype`, the data is copied
 // directly from device memory to dst_host_ptr without conversion. This characteristic can be used
-// to resolve precision loss issues between custom_float16 and float16. This can be useful when the user
-// wants the raw custom_float16 contents to avoid the precision loss.
+// to resolve precision loss issues between custom_float16 and float16. This can be useful when the
+// user wants the raw custom_float16 contents to avoid the precision loss.
 RBLNRetCode rbln_memcpy_v2h_cast(uint64_t src_vaddr, uintptr_t dst_host_ptr, uint64_t size,
                                  DataType from_dtype, DataType to_dtype);
 

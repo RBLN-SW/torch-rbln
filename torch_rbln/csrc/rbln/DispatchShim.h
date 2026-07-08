@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 namespace torch_rbln::shim {
@@ -42,9 +43,40 @@ void register_cpp_shim(
 //   n_miss       - cold/miss path (Python compile via py_fn)
 //   ns_warm_hit  - cumulative ns inside warm-cache hit path (~all in rebel run)
 //   ns_miss      - cumulative ns inside miss path (Python compile + first run)
-std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t> diag_dump_dispatch_paths();
+//   ns_fallback  - cumulative ns inside cpu_fallback_rbln (the COST of fallbacks,
+//                  so the report can separate many-cheap from few-expensive)
+std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t> diag_dump_dispatch_paths();
 void diag_reset_dispatch_paths();
 uint64_t diag_dump_align_fastpath_count();
+
+// DIAG/PROFILER: per-op CPU-fallback attribution (op_name -> fallback count),
+// non-zero entries only. Recorded on the already-slow fallback branch only (one
+// relaxed atomic via a pointer cached on the op's ShimEntry; warm/fast path
+// untouched), read lazily under registry_mutex. Lets torch.rbln.profile() turn
+// the aggregate cpu_fallback count into "which ops fell back".
+std::vector<std::pair<std::string, uint64_t>> diag_dump_fallback_by_op();
+void diag_reset_fallback_by_op();
+
+// DIAG/PROFILER: per-op warm-cache MISS (recompile) attribution (op_name ->
+// count), non-zero only. Same low-overhead scheme as the fallback counter
+// (one relaxed atomic on the already-slow miss branch). Lets the profiler turn
+// the aggregate recompile_miss count into "which op-shapes keep recompiling".
+std::vector<std::pair<std::string, uint64_t>> diag_dump_recompile_by_op();
+void diag_reset_recompile_by_op();
+
+// DIAG/PROFILER: cpu_fallback reason histogram, counts for reason codes 1..3:
+// [dtype-not-fp16, nan/inf input, all-scalar]. Recorded on the fallback branch
+// only (reason already computed by quick_fallback_check) -> ON==OFF preserved.
+std::vector<uint64_t> diag_dump_fallback_reasons();
+void diag_reset_fallback_reasons();
+
+// DIAG/PROFILER (A) WHERE: opt-in Python call-site capture. OFF by default
+// (default explain() pays nothing). When enabled, the slow fallback/miss branch
+// captures the user's call-site ONCE per op (deduped, GIL-safe). dump returns
+// (op_name -> "file:line(func) <- ..."); reset clears between regions.
+void diag_set_trace_enabled(bool on);
+std::vector<std::pair<std::string, std::string>> diag_dump_trace_by_op();
+void diag_reset_trace_by_op();
 
 // DIAG: per-segment timers inside the warm-cache hit path. Returns
 // (n_hits, ns_lookup, ns_io_build, ns_gil, ns_prep_in, ns_prep_out, ns_run,

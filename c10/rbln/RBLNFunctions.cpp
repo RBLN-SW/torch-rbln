@@ -13,7 +13,95 @@
 #include <mutex>
 #include <vector>
 
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+
 namespace c10::rbln {
+
+// rt-timing: time spent inside librbln boundary calls, for the explain profiler's
+// "rebel runtime vs torch dispatch" split. Gated: when disabled each boundary call
+// pays one relaxed atomic load (no clock read), so ON==OFF latency holds; an explain
+// region flips it on for its duration. Index order MUST match kRtTimingN / the
+// Python _RT_PRIMS tuple.
+namespace {
+enum RtIdx : std::uint8_t { RT_V2V = 0, RT_V2V_MULTI, RT_BORROW, RT_ACQUIRE, RT_RETURN, RT_V2H, RT_H2V, RT_N };
+static_assert(static_cast<std::size_t>(RT_N) == kRtTimingN, "RtIdx count must match kRtTimingN in the header");
+std::atomic<bool> g_rt_enabled{false};
+struct RtAcc {
+  std::atomic<uint64_t> ns{0};
+  std::atomic<uint64_t> cnt{0};
+};
+RtAcc* rt_accs() {
+  static std::array<RtAcc, RT_N> accs;
+  return accs.data();
+}
+struct RtTimer {
+  int idx;
+  bool on;
+  std::chrono::steady_clock::time_point t0;
+  explicit RtTimer(int i) : idx(i), on(g_rt_enabled.load(std::memory_order_relaxed)) {
+    if (on) {
+      t0 = std::chrono::steady_clock::now();
+    }
+  }
+  ~RtTimer() {
+    if (!on) {
+      return;
+    }
+    const auto dt = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+    rt_accs()[idx].ns.fetch_add(static_cast<uint64_t>(dt), std::memory_order_relaxed);
+    rt_accs()[idx].cnt.fetch_add(1, std::memory_order_relaxed);
+  }
+};
+} // namespace
+
+void rt_timing_enable(bool on) {
+  g_rt_enabled.store(on, std::memory_order_relaxed);
+}
+void rt_timing_reset() {
+  for (std::size_t i = 0; i < kRtTimingN; ++i) {
+    rt_accs()[i].ns.store(0, std::memory_order_relaxed);
+    rt_accs()[i].cnt.store(0, std::memory_order_relaxed);
+  }
+}
+void rt_timing_get(uint64_t* out) {
+  for (std::size_t i = 0; i < kRtTimingN; ++i) {
+    out[2 * i] = rt_accs()[i].ns.load(std::memory_order_relaxed);
+    out[2 * i + 1] = rt_accs()[i].cnt.load(std::memory_order_relaxed);
+  }
+}
+
+// torch.rbln.explain() runtime-counter reads. Thin pass-throughs to librbln's
+// public C-API (rbln_prof_*, declared in rbln_runtime_api.h via RBLNFunctions.h).
+uint32_t rt_prof_hidden_num() {
+  return rbln_prof_v2v_hidden_num_reasons();
+}
+void rt_prof_hidden_get(uint64_t* counts, uint64_t* bytes, uint32_t n) {
+  rbln_prof_get_v2v_hidden_d2h(counts, bytes, n);
+}
+uint32_t rt_prof_reject_num() {
+  return rbln_prof_v2v_reject_num_reasons();
+}
+void rt_prof_reject_get(uint64_t* counts, uint64_t* bytes, uint32_t n) {
+  rbln_prof_get_v2v_reject(counts, bytes, n);
+}
+void rt_prof_host_sync_d2h(uint64_t* count, uint64_t* bytes) {
+  rbln_prof_get_host_sync_d2h(count, bytes);
+}
+void rt_prof_host_sync_h2d(uint64_t* count, uint64_t* bytes) {
+  rbln_prof_get_host_sync_h2d(count, bytes);
+}
+void rt_prof_memory(uint64_t* current, uint64_t* peak) {
+  rbln_prof_get_memory(current, peak);
+}
+void rt_prof_reset() {
+  rbln_prof_reset_v2v_hidden_d2h();
+  rbln_prof_reset_v2v_reject();
+  rbln_prof_reset_host_sync_d2h();
+  rbln_prof_reset_host_sync_h2d();
+}
 
 namespace {
 
@@ -412,6 +500,7 @@ void set_device_layout_like(void* target_data, const void* ref_data) {
 }
 
 void memcpy_h2v(void* rbln_dst_data, const void* cpu_src_data, size_t nbytes) {
+  RtTimer _rt(RT_H2V);
   RBLN_LOG_DEBUG(
       "dst_rbln_data={}, src_cpu_data={}, nbytes={}", fmt::ptr(rbln_dst_data), fmt::ptr(cpu_src_data), nbytes);
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
@@ -431,6 +520,7 @@ void memcpy_h2v(void* rbln_dst_data, const void* cpu_src_data, size_t nbytes) {
 }
 
 void memcpy_v2h(void* cpu_dst_data, const void* rbln_src_data, size_t nbytes) {
+  RtTimer _rt(RT_V2H);
   RBLN_LOG_DEBUG(
       "dst_cpu_data={}, src_rbln_data={}, nbytes={}", fmt::ptr(cpu_dst_data), fmt::ptr(rbln_src_data), nbytes);
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
@@ -450,6 +540,7 @@ void memcpy_v2h(void* cpu_dst_data, const void* rbln_src_data, size_t nbytes) {
 }
 
 void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes) {
+  RtTimer _rt(RT_V2V);
   RBLN_LOG_DEBUG(
       "dst_rbln_data={}, src_rbln_data={}, nbytes={}", fmt::ptr(rbln_dst_data), fmt::ptr(rbln_src_data), nbytes);
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
@@ -594,6 +685,7 @@ void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies) {
   if (copies.empty()) {
     return;
   }
+  RtTimer _rt(RT_V2V_MULTI);
   std::vector<std::tuple<uint64_t, uint64_t, uint64_t>> rbln_copies;
   rbln_copies.reserve(copies.size());
   for (const auto& c : copies) {
@@ -609,6 +701,7 @@ void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies) {
 }
 
 BorrowedHostPtr borrow_host_ptr(const void* rbln_data, size_t nbytes) {
+  RtTimer _rt(RT_BORROW);
   RBLN_LOG_DEBUG("rbln_data={}, nbytes={}", fmt::ptr(rbln_data), nbytes);
   RBLN_CHECK(rbln_data != nullptr, "rbln_data cannot be nullptr");
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
@@ -630,6 +723,7 @@ std::optional<BorrowedHostPtr> try_borrow_host_ptr(const void* rbln_data, size_t
   if (rbln_data == nullptr || nbytes == 0) {
     return std::nullopt;
   }
+  RtTimer _rt(RT_BORROW);
   const auto vaddr = reinterpret_cast<uint64_t>(rbln_data);
   const auto size = static_cast<uint64_t>(nbytes);
   uintptr_t host_ptr = 0;
@@ -644,6 +738,7 @@ std::optional<BorrowedHostPtr> try_borrow_host_ptr(const void* rbln_data, size_t
 }
 
 BorrowedHostPtr acquire_host_ptr_for_overwrite(void* rbln_data, size_t nbytes) {
+  RtTimer _rt(RT_ACQUIRE);
   RBLN_LOG_DEBUG("rbln_data={}, nbytes={}", fmt::ptr(rbln_data), nbytes);
   RBLN_CHECK(rbln_data != nullptr, "rbln_data cannot be nullptr");
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
@@ -665,6 +760,7 @@ std::optional<BorrowedHostPtr> try_acquire_host_ptr_for_overwrite(void* rbln_dat
   if (rbln_data == nullptr || nbytes == 0) {
     return std::nullopt;
   }
+  RtTimer _rt(RT_ACQUIRE);
   const auto vaddr = reinterpret_cast<uint64_t>(rbln_data);
   const auto size = static_cast<uint64_t>(nbytes);
   uintptr_t host_ptr = 0;
@@ -685,6 +781,7 @@ void return_borrowed(uint64_t borrow_id, bool updated) {
   if (borrow_id == 0) {
     return;
   }
+  RtTimer _rt(RT_RETURN);
   RBLN_LOG_DEBUG("borrow_id={}, updated={}", borrow_id, updated);
   RBLN_CHECK(
       !::rbln::rbln_v_return_borrowed(borrow_id, updated),

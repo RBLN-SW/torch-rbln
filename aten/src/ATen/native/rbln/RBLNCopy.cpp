@@ -10,6 +10,7 @@
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNPinnedAllocator.h>
+#include <c10/rbln/RBLNProfiler.h>
 #include <rebel/runtime/api/rbln_runtime_api.h>
 
 #include <cstddef>
@@ -19,6 +20,20 @@
 namespace at::native::rbln {
 
 namespace {
+
+// Recursion guard: a non-direct rbln->rbln copy_ services itself by a v2h
+// (get_cpu_copy_of_rbln_tensor) followed by a cpu->rbln copy. We count that
+// round-trip ONCE (kRbln2RblnIndirect); this flag suppresses the inner cpu->rbln
+// staging / noncontig counters so a single copy_ is not double-counted.
+thread_local int g_indirect_d2d_depth = 0;
+struct IndirectD2DGuard {
+  IndirectD2DGuard() {
+    ++g_indirect_d2d_depth;
+  }
+  ~IndirectD2DGuard() {
+    --g_indirect_d2d_depth;
+  }
+};
 
 bool is_direct_copy(const at::Tensor& src, const at::Tensor& dst) {
   const bool same_sizes = (src.sizes() == dst.sizes());
@@ -50,6 +65,14 @@ void tensor_copy_from_cpu_to_rbln(const at::Tensor& cpu_src, const at::Tensor& r
       RBLN_LOG_DEBUG("Preparing contiguous CPU src matching dst sizes/dtype");
       auto prepared_cpu_src = cpu_src;
       if (!same_sizes || !same_dtype || !cpu_src.is_contiguous()) {
+        // PROFILER (cold branch): hidden staging alloc + CPU copy before h2v,
+        // forced by a broadcast / dtype / contiguity mismatch on the cpu src.
+        // Suppressed when nested inside an rbln->rbln indirect copy (counted once there).
+        if (g_indirect_d2d_depth == 0) {
+          c10::rbln::prof::record_bounce(
+              c10::rbln::prof::BounceSite::kCpu2RblnStaging,
+              static_cast<uint64_t>(rbln_dst.numel()) * rbln_dst.element_size());
+        }
         prepared_cpu_src =
             at::empty(dst_sizes, dst_dtype, std::nullopt, c10::Device(c10::kCPU), false, c10::MemoryFormat::Contiguous);
 
@@ -67,6 +90,14 @@ void tensor_copy_from_cpu_to_rbln(const at::Tensor& cpu_src, const at::Tensor& r
           prepared_cpu_src.sizes(), prepared_cpu_src.strides(), prepared_cpu_src.element_size());
       c10::rbln::memcpy_h2v(dst_data, src_data, nbytes);
     } else {
+      // PROFILER (cold branch): a non-contiguous rbln dst is pulled to host
+      // (hidden v2h), written on CPU, then copied back (h2v). Suppressed when
+      // nested inside an rbln->rbln indirect copy (counted once there).
+      if (g_indirect_d2d_depth == 0) {
+        c10::rbln::prof::record_bounce(
+            c10::rbln::prof::BounceSite::kCpu2RblnNoncontigDst,
+            static_cast<uint64_t>(rbln_dst.numel()) * rbln_dst.element_size());
+      }
       RBLN_LOG_DEBUG("Creating CPU copy of non-contiguous RBLN dst");
       auto cpu_dst = at::native::rbln::get_cpu_copy_of_rbln_tensor(rbln_dst);
 
@@ -138,10 +169,20 @@ void tensor_copy_from_rbln_to_rbln(const at::Tensor& rbln_src, const at::Tensor&
     }
   }
 
+  // PROFILER (cold branch): reaching here is a non-direct device->device copy_
+  // that round-trips host — v2h (get_cpu_copy_of_rbln_tensor) then h2v (the
+  // headline "hidden host bounce", e.g. #94 KV partial-block copy). The direct
+  // and on-device strided-v2v paths above both return first, so this fall-through
+  // always means a real host bounce. Count incident + bytes; IndirectD2DGuard
+  // suppresses the inner cpu->rbln staging counters so it is not double-counted.
+  c10::rbln::prof::record_bounce(
+      c10::rbln::prof::BounceSite::kRbln2RblnIndirect,
+      static_cast<uint64_t>(rbln_src.numel()) * rbln_src.element_size());
   RBLN_LOG_DEBUG("Creating CPU copy of RBLN src");
   const auto cpu_src = at::native::rbln::get_cpu_copy_of_rbln_tensor(rbln_src);
 
   RBLN_LOG_DEBUG("Copying CPU copy to RBLN dst");
+  const IndirectD2DGuard guard;
   tensor_copy_from_cpu_to_rbln(cpu_src, rbln_dst);
 }
 
