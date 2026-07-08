@@ -164,6 +164,21 @@ class TestRuntimeUnavailable(TestCase):
         )
         _assert_ok(self, result, "THUNK_ABSENT_OK")
 
+        # Dummy is NOT exempt: it host-backs via the runtime (DeviceMappingManager's
+        # rbln_register_device_id), so with the thunk absent enumeration must also
+        # degrade to 0 -- not segfault -- at init, BEFORE any shutdown flag is set.
+        # This covers the init/register path the flag-based tests cannot reach.
+        result = _run_subprocess(
+            """
+            assert C.is_dummy_device() is True and C.thunk_loadable() is False
+            assert torch.rbln.device_count() == 0, "dummy + absent thunk must degrade to 0, not segfault"
+            assert torch.rbln.is_available() is False
+            print("DUMMY_THUNK_ABSENT_OK")
+            """,
+            env_extra={"RBLN_DUMMY_DEVICE": "1"},
+        )
+        _assert_ok(self, result, "DUMMY_THUNK_ABSENT_OK")
+
     def test_dummy_with_runtime_proceeds(self):
         """Dummy mode (``RBLN_DUMMY_DEVICE``) delegates host-backing to the runtime, so
         with a loadable ``librbln-thunk.so`` device ops proceed and materialize -- the

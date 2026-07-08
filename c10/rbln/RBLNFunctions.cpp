@@ -278,8 +278,9 @@ bool is_dummy_device() {
 // Cached nothrow probe: is librbln-thunk.so loadable? Same unversioned name
 // librbln.so uses (no ".so.N" version coupling); RTLD_LOCAL so a probe does not
 // promote thunk symbols globally. Public so initialized()/hasPrimaryContext() can
-// gate the throwing get_device_count() on it (config parsing is thunk-free, so a
-// malformed RBLN_DEVICE_MAP still throws while a missing runtime yields false).
+// gate the throwing get_device_count() on it: with the thunk loadable a malformed
+// RBLN_DEVICE_MAP still throws (config parse runs); with it absent, enumeration
+// degrades to 0 before parse, so a missing runtime yields false without segfaulting.
 bool thunk_loadable() noexcept {
   static const bool loadable = []() noexcept {
     return ::dlopen("librbln-thunk.so", RTLD_LAZY | RTLD_LOCAL) != nullptr;

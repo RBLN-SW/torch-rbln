@@ -403,23 +403,24 @@ void DeviceMappingManager::initialize() {
   c10::call_once(init_flag_, [this]() {
     RBLN_LOG_DEBUG("Initializing RBLN device mapping");
 
-    // Explicit opt-in, checked before any runtime query so a host with no
-    // SDK/driver can still construct device tensors and compile.
-    if (dummyDeviceEnabled()) {
-      initializeDummyDevices();
-      return;
-    }
-
-    // Querying the count needs librbln-thunk.so; if it is not loadable (compile /
-    // CPU-only / CI hosts with no SDK) a raw rbln_* call would SEGFAULT. Route into
-    // the same 0-device path as a host with no NPU, so get_device_count() degrades
-    // to a clean 0 (torch.cuda parity) and use fails at the point of use.
+    // Enumeration touches the runtime in BOTH modes -- the real path calls
+    // rbln_get_device_count(), and dummy host-backs via rbln_register_device_id() --
+    // so if librbln-thunk.so is not loadable (compile / CPU-only / CI hosts) a raw
+    // rbln_* call would SEGFAULT. Checked before the dummy branch too: degrade to 0
+    // logical devices (torch.cuda parity), so use fails cleanly at the point of use.
     if (!c10::rbln::thunk_loadable()) {
       RBLN_LOG_INFO(
           "RBLN runtime (librbln-thunk.so) not loadable; initializing with 0 logical device(s). "
           "Device access will fail at the point of use.");
       device_count_ = 0;
       buildDeviceTopology();
+      return;
+    }
+
+    // Explicit opt-in for host-backed dummy devices: no NPU needed, but the runtime
+    // (checked above) is -- dummy materializes tensors through it.
+    if (dummyDeviceEnabled()) {
+      initializeDummyDevices();
       return;
     }
 

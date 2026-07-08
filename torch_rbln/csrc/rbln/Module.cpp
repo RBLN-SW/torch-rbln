@@ -52,9 +52,9 @@ void add_py_method_definitions(std::vector<PyMethodDef>& method_vector, PyMethod
  */
 void register_public_device_api(py::module_& module) {
   module.def("current_device", &c10::rbln::get_device_index, "Get the current device.");
-  // Throwing on purpose: "no hardware -> 0" is already graceful inside
-  // get_device_count(), but a malformed RBLN_DEVICE_MAP must be rejected loudly
-  // (config error, not graceful degradation). The nothrow variant is internal-only.
+  // Throwing on purpose: "no hardware/runtime -> 0" is already graceful inside
+  // get_device_count(), but a malformed RBLN_DEVICE_MAP with the runtime present must
+  // be rejected loudly (config error, not graceful degradation). Nothrow variant is internal-only.
   module.def("device_count", &c10::rbln::get_device_count, "Get the number of devices.");
   module.def("set_device", &c10::rbln::set_device_index, "Set the current device.");
   module.def(
