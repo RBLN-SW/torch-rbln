@@ -267,9 +267,9 @@ bool is_dummy_device() {
 }
 
 // --- Device-runtime liveness ------------------------------------------------
-// librbln.so loads librbln-thunk.so (the driver); absent (compile/CPU-only/CI) or
-// unmapped at shutdown, a raw rbln_* call SEGFAULTs. Runtime-touching leaves gate on
-// runtime_available(), built on librbln's own rbln_runtime_available().
+// The device runtime (driver) is loaded lazily and is absent on compile/CPU-only/CI
+// hosts or unmapped at shutdown, when a raw rbln_* call SEGFAULTs. Runtime-touching
+// leaves gate on runtime_available(), built on librbln's own rbln_runtime_available().
 
 namespace {
 
@@ -287,7 +287,7 @@ void require_runtime(const char* op) {
       !runtime_shutting_down_.load(std::memory_order_relaxed), "Cannot {}: the RBLN runtime is shutting down.", op);
   RBLN_CHECK(
       rbln_runtime_available(),
-      "Cannot {}: the RBLN device runtime (librbln-thunk.so) is not loaded; install the RBLN SDK/runtime "
+      "Cannot {}: the RBLN device runtime is not loaded; install the RBLN SDK/runtime "
       "(required even in RBLN_DUMMY_DEVICE mode).",
       op);
 }

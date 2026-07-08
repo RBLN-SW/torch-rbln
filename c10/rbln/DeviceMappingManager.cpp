@@ -408,7 +408,7 @@ void DeviceMappingManager::initialize() {
     // would SEGFAULT. Checked before the dummy branch too: degrade to 0 devices.
     if (!rbln_runtime_available()) {
       RBLN_LOG_INFO(
-          "RBLN runtime (librbln-thunk.so) not loaded; initializing with 0 logical device(s). "
+          "RBLN runtime not loaded; initializing with 0 logical device(s). "
           "Device access will fail at the point of use.");
       device_count_ = 0;
       buildDeviceTopology();

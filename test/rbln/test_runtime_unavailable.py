@@ -1,14 +1,13 @@
 # Owner(s): ["module: PrivateUse1"]
 
 """Device-runtime liveness gate: torch-rbln must degrade like ``torch.cuda`` when
-the device runtime (``librbln-thunk.so``) is absent or torn down, and must NEVER
+the device runtime is absent or torn down, and must NEVER
 segfault.
 
-Background: torch-rbln links ``librbln.so``, which loads the device runtime
-``librbln-thunk.so``. When the runtime is missing (compile / CPU-only / CI nodes)
-or has been unmapped at interpreter shutdown, a raw ``rbln_*`` call dereferences a
-null handle and SEGFAULTs -- unlike CUDA, where a missing
-driver merely returns an error code. ``c10::rbln::runtime_available()`` is the
+Background: torch-rbln links ``librbln.so``, which loads the device runtime lazily.
+When the runtime is missing (compile / CPU-only / CI nodes) or has been unmapped at
+interpreter shutdown, a raw ``rbln_*`` call dereferences a null handle and SEGFAULTs
+-- unlike CUDA, where a missing driver merely returns an error code. ``c10::rbln::runtime_available()`` is the
 single source of truth that lets best-effort ops no-op, mandatory ops raise a
 clean error, and availability probes return False without raising.
 
@@ -140,15 +139,15 @@ class TestRuntimeUnavailable(TestCase):
         _assert_ok(self, result, "TOGGLE_OK")
 
     def test_runtime_absent_degrades_to_zero_devices(self):
-        """When librbln-thunk.so is genuinely absent, device enumeration degrades to
+        """When the RBLN runtime is genuinely absent, device enumeration degrades to
         0 (nothrow) and is_available() is False -- never a SEGFAULT -- mirroring
         torch.cuda on a host with no driver. The fix is at the source
-        (DeviceMappingManager gates the raw rbln_get_device_count() on runtime_loaded),
+        (DeviceMappingManager gates the raw rbln_get_device_count() on rbln_runtime_available()),
         so a missing runtime collapses into the well-tested no-device path. Skipped where
         the runtime is present (e.g. device-bearing CI); the shutdown-flag tests above
         cover the torn-down half of the gate hardware-free."""
         if torch_rbln._C.runtime_loaded() or torch_rbln._C.is_dummy_device():
-            self.skipTest("requires a host with librbln-thunk.so absent")
+            self.skipTest("requires a host with the RBLN runtime absent")
         result = _run_subprocess(
             """
             assert C.runtime_loaded() is False
@@ -183,7 +182,7 @@ class TestRuntimeUnavailable(TestCase):
 
     def test_dummy_with_runtime_proceeds(self):
         """Dummy mode (``RBLN_DUMMY_DEVICE``) delegates host-backing to the runtime, so
-        with a loadable ``librbln-thunk.so`` device ops proceed and materialize -- the
+        with the runtime loaded, device ops proceed and materialize -- the
         gate passes rather than no-ops."""
         result = _run_subprocess(
             """
@@ -200,7 +199,7 @@ class TestRuntimeUnavailable(TestCase):
 
     def test_dummy_without_runtime_is_gated(self):
         """Dummy mode is NOT exempt from the gate: it host-backs via the runtime, so
-        librbln-thunk.so is still required. When the runtime is unavailable (simulated
+        the runtime is still required. When the runtime is unavailable (simulated
         by the shutdown flag, standing in for a missing runtime), the gate fires --
         best-effort ops no-op and allocation raises a clean error, never a SEGFAULT."""
         result = _run_subprocess(
