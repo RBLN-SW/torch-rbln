@@ -85,8 +85,8 @@ def is_available() -> bool:
     runtime present, raises on a malformed ``RBLN_*`` config (like :func:`device_count`),
     which torch's ``is_privateuse1_backend_available()`` relies on.
     """
-    # device_count() raises on a malformed RBLN_* config when the thunk is present
-    # (loud); runtime_available() reflects liveness (thunk loadable, not shutting down).
+    # device_count() raises on a malformed RBLN_* config when the runtime is present
+    # (loud); runtime_available() reflects liveness (runtime loaded, not shutting down).
     return torch_rbln._C.device_count() > 0 and torch_rbln._C.runtime_available()
 
 

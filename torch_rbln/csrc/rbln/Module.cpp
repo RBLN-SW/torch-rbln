@@ -71,8 +71,8 @@ void register_public_device_api(py::module_& module) {
       "Whether the RBLN device runtime (librbln-thunk.so) is loadable/live and a device exists. "
       "Single source of truth for device-runtime liveness; never raises.");
   module.def(
-      "thunk_loadable",
-      &c10::rbln::thunk_loadable,
+      "runtime_loaded",
+      &c10::rbln::runtime_loaded,
       "Whether the RBLN device runtime (librbln-thunk.so) is loaded/usable, via librbln's "
       "rbln_runtime_available(); False on a compile/CPU-only host. Never raises.");
   module.def(

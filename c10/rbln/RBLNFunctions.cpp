@@ -274,13 +274,13 @@ bool is_dummy_device() {
 // mandatory ops throw via require_runtime(), and nothing segfaults.
 
 // Is the RBLN device runtime (librbln-thunk.so) loaded and usable? Delegates to
-// librbln's own rbln_runtime_available(), which reports the actual thunk-load state
+// librbln's own rbln_runtime_available(), which reports the actual runtime-load state
 // (symbols resolved at librbln static-init) -- authoritative and safe to call when
-// the thunk is absent. Public so initialized()/hasPrimaryContext() can gate the
+// the runtime is absent. Public so initialized()/hasPrimaryContext() can gate the
 // throwing get_device_count() on it: with the runtime present a malformed
 // RBLN_DEVICE_MAP still throws (config parse runs); with it absent, enumeration
 // degrades to 0 before parse, so a missing runtime yields false without segfaulting.
-bool thunk_loadable() noexcept {
+bool runtime_loaded() noexcept {
   return rbln_runtime_available();
 }
 
@@ -288,11 +288,11 @@ namespace {
 
 std::atomic<bool> runtime_shutting_down_{false}; // set at teardown via a Python atexit hook
 
-// True when the runtime cannot be touched at all -- absent thunk or teardown -- as
+// True when the runtime cannot be touched at all -- absent runtime or teardown -- as
 // distinct from "no device present", which to_device_id() reports loudly. Lets a
 // teardown-safe op no-op without masking a genuine no-device error.
 bool runtime_torn_down() noexcept {
-  return runtime_shutting_down_.load(std::memory_order_relaxed) || !thunk_loadable();
+  return runtime_shutting_down_.load(std::memory_order_relaxed) || !runtime_loaded();
 }
 
 // Mandatory-op guard: a clean throw instead of a SEGFAULT (no-device is reported
@@ -301,7 +301,7 @@ void require_runtime(const char* op) {
   RBLN_CHECK(
       !runtime_shutting_down_.load(std::memory_order_relaxed), "Cannot {}: the RBLN runtime is shutting down.", op);
   RBLN_CHECK(
-      thunk_loadable(),
+      runtime_loaded(),
       "Cannot {}: the RBLN device runtime (librbln-thunk.so) is not loadable; install the RBLN SDK/runtime "
       "(required even in RBLN_DUMMY_DEVICE mode).",
       op);
@@ -327,10 +327,10 @@ void set_runtime_shutting_down(bool value) noexcept {
 }
 
 bool runtime_available() noexcept {
-  // Will an rbln_* call be serviced safely now? Needs the thunk loadable and not
+  // Will an rbln_* call be serviced safely now? Needs the runtime loaded and not
   // shutting down -- true in dummy mode too (dummy host-backs via the runtime, so it
   // needs librbln-thunk.so); a real device additionally needs a device present.
-  return !runtime_shutting_down_.load(std::memory_order_relaxed) && thunk_loadable() &&
+  return !runtime_shutting_down_.load(std::memory_order_relaxed) && runtime_loaded() &&
       (is_dummy_device() || get_device_count_nothrow() > 0);
 }
 
@@ -410,7 +410,7 @@ void free_nothrow(void* data) noexcept {
   // leak instead. Dummy host-backs frees via the runtime too, so it is gated the
   // same way. Uses the cheap primitives, NOT runtime_available(), so this noexcept
   // deleter avoids get_device_count()'s GIL/Python side effects at teardown.
-  if (runtime_shutting_down_.load(std::memory_order_relaxed) || !thunk_loadable()) {
+  if (runtime_shutting_down_.load(std::memory_order_relaxed) || !runtime_loaded()) {
     RBLN_WARN_NOTHROW(
         "rbln_free skipped for {}: RBLN runtime unavailable; leaking rather than crashing", fmt::ptr(data));
     return;
@@ -596,7 +596,7 @@ void memcpy_v2v_async(void* rbln_dst_data, const void* rbln_src_data, size_t nby
 
 void synchronize(c10::DeviceIndex device_index) {
   RBLN_LOG_DEBUG("Synchronizing device {}", static_cast<int>(device_index));
-  // Nothing to drain if the runtime is torn down (shutdown / absent thunk): no-op
+  // Nothing to drain if the runtime is torn down (shutdown / absent runtime): no-op
   // rather than segfault. A genuine no-device host still throws via to_device_id()
   // below (torch.cuda.synchronize() parity; see RBLNNoDeviceTest).
   if (runtime_torn_down()) {

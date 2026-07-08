@@ -50,10 +50,10 @@ c10::Device RBLNHooksInterface::getDeviceFromPtr(void* data) const {
 bool RBLNHooksInterface::hasPrimaryContext(c10::DeviceIndex device_index) const {
   RBLN_LOG_DEBUG("device_index={}", static_cast<int>(device_index));
 
-  // thunk_loadable() first so a missing runtime (incl. dummy) is a clean false (no
+  // runtime_loaded() first so a missing runtime (incl. dummy) is a clean false (no
   // segfault); throwing get_device_count() keeps a malformed config loud when present.
   const bool has_context =
-      device_index >= 0 && c10::rbln::thunk_loadable() && device_index < c10::rbln::get_device_count();
+      device_index >= 0 && c10::rbln::runtime_loaded() && device_index < c10::rbln::get_device_count();
   RBLN_LOG_DEBUG("has_context={}", has_context);
   return has_context;
 }

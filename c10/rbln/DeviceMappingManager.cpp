@@ -408,7 +408,7 @@ void DeviceMappingManager::initialize() {
     // so if librbln-thunk.so is not loadable (compile / CPU-only / CI hosts) a raw
     // rbln_* call would SEGFAULT. Checked before the dummy branch too: degrade to 0
     // logical devices (torch.cuda parity), so use fails cleanly at the point of use.
-    if (!c10::rbln::thunk_loadable()) {
+    if (!c10::rbln::runtime_loaded()) {
       RBLN_LOG_INFO(
           "RBLN runtime (librbln-thunk.so) not loadable; initializing with 0 logical device(s). "
           "Device access will fail at the point of use.");
@@ -425,7 +425,7 @@ void DeviceMappingManager::initialize() {
     }
 
     int device_count = 0;
-    // The thunk is loadable but the query failed (kernel driver not loaded / device
+    // The runtime is loaded but the query failed (kernel driver not loaded / device
     // unavailable): fatal. "Query succeeded, found 0 NPUs" is handled below.
     RBLN_CHECK(
         !rbln_get_device_count(&device_count),

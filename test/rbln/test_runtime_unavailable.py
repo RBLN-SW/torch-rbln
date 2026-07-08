@@ -4,15 +4,15 @@
 the device runtime (``librbln-thunk.so``) is absent or torn down, and must NEVER
 segfault.
 
-Background: torch-rbln links ``librbln.so``, which lazily ``dlopen()``s
-``librbln-thunk.so`` on the first device op. When the thunk is missing (compile /
-CPU-only / CI nodes) or has been unmapped at interpreter shutdown, a raw thunk
-call dereferences a null handle and SEGFAULTs -- unlike CUDA, where a missing
+Background: torch-rbln links ``librbln.so``, which loads the device runtime
+``librbln-thunk.so``. When the runtime is missing (compile / CPU-only / CI nodes)
+or has been unmapped at interpreter shutdown, a raw ``rbln_*`` call dereferences a
+null handle and SEGFAULTs -- unlike CUDA, where a missing
 driver merely returns an error code. ``c10::rbln::runtime_available()`` is the
 single source of truth that lets best-effort ops no-op, mandatory ops raise a
 clean error, and availability probes return False without raising.
 
-These tests exercise the whole gate WITHOUT removing the thunk by flipping the
+These tests exercise the whole gate WITHOUT an actually-absent runtime by flipping the
 process-wide "shutting down" flag (``_set_runtime_shutting_down``), which forces
 ``runtime_available()`` to False. That makes the contract testable on any host,
 with or without an NPU. Each test runs in a fresh subprocess so the process-wide
@@ -68,10 +68,10 @@ class TestRuntimeUnavailable(TestCase):
     def test_bindings_exist_and_never_raise(self):
         """The liveness predicate and shutdown hook are exposed and total (nothrow)."""
         self.assertTrue(hasattr(torch_rbln._C, "runtime_available"))
-        self.assertTrue(hasattr(torch_rbln._C, "thunk_loadable"))
+        self.assertTrue(hasattr(torch_rbln._C, "runtime_loaded"))
         self.assertTrue(hasattr(torch_rbln._C, "_set_runtime_shutting_down"))
         self.assertIsInstance(torch_rbln._C.runtime_available(), bool)
-        self.assertIsInstance(torch_rbln._C.thunk_loadable(), bool)
+        self.assertIsInstance(torch_rbln._C.runtime_loaded(), bool)
         # device_count() / is_available() must never raise (CUDA contract).
         self.assertIsInstance(torch.rbln.device_count(), int)
         self.assertIsInstance(torch.rbln.is_available(), bool)
@@ -138,20 +138,20 @@ class TestRuntimeUnavailable(TestCase):
         )
         _assert_ok(self, result, "TOGGLE_OK")
 
-    def test_thunk_absent_degrades_to_zero_devices(self):
+    def test_runtime_absent_degrades_to_zero_devices(self):
         """When librbln-thunk.so is genuinely absent, device enumeration degrades to
         0 (nothrow) and is_available() is False -- never a SEGFAULT -- mirroring
         torch.cuda on a host with no driver. The fix is at the source
-        (DeviceMappingManager gates the raw rbln_get_device_count() on thunk_loadable),
-        so thunk-absent collapses into the well-tested no-device path. Skipped where
-        the thunk is present (e.g. device-bearing CI); the shutdown-flag tests above
+        (DeviceMappingManager gates the raw rbln_get_device_count() on runtime_loaded),
+        so a missing runtime collapses into the well-tested no-device path. Skipped where
+        the runtime is present (e.g. device-bearing CI); the shutdown-flag tests above
         cover the torn-down half of the gate hardware-free."""
-        if torch_rbln._C.thunk_loadable() or torch_rbln._C.is_dummy_device():
+        if torch_rbln._C.runtime_loaded() or torch_rbln._C.is_dummy_device():
             self.skipTest("requires a host with librbln-thunk.so absent")
         result = _run_subprocess(
             """
-            assert C.thunk_loadable() is False
-            assert torch.rbln.device_count() == 0, "thunk-absent must degrade to 0 devices, not segfault"
+            assert C.runtime_loaded() is False
+            assert torch.rbln.device_count() == 0, "runtime-absent must degrade to 0 devices, not segfault"
             assert torch.rbln.is_available() is False
             C.set_device_index(0)  # bookkeeping only: must not throw or segfault
             try:
@@ -159,25 +159,25 @@ class TestRuntimeUnavailable(TestCase):
                 raise AssertionError("allocation must raise with no device")
             except RuntimeError:
                 pass
-            print("THUNK_ABSENT_OK")
+            print("RUNTIME_ABSENT_OK")
             """
         )
-        _assert_ok(self, result, "THUNK_ABSENT_OK")
+        _assert_ok(self, result, "RUNTIME_ABSENT_OK")
 
         # Dummy is NOT exempt: it host-backs via the runtime (DeviceMappingManager's
-        # rbln_register_device_id), so with the thunk absent enumeration must also
+        # rbln_register_device_id), so with the runtime absent enumeration must also
         # degrade to 0 -- not segfault -- at init, BEFORE any shutdown flag is set.
         # This covers the init/register path the flag-based tests cannot reach.
         result = _run_subprocess(
             """
-            assert C.is_dummy_device() is True and C.thunk_loadable() is False
-            assert torch.rbln.device_count() == 0, "dummy + absent thunk must degrade to 0, not segfault"
+            assert C.is_dummy_device() is True and C.runtime_loaded() is False
+            assert torch.rbln.device_count() == 0, "dummy + absent runtime must degrade to 0, not segfault"
             assert torch.rbln.is_available() is False
-            print("DUMMY_THUNK_ABSENT_OK")
+            print("DUMMY_RUNTIME_ABSENT_OK")
             """,
             env_extra={"RBLN_DUMMY_DEVICE": "1"},
         )
-        _assert_ok(self, result, "DUMMY_THUNK_ABSENT_OK")
+        _assert_ok(self, result, "DUMMY_RUNTIME_ABSENT_OK")
 
     def test_dummy_with_runtime_proceeds(self):
         """Dummy mode (``RBLN_DUMMY_DEVICE``) delegates host-backing to the runtime, so
@@ -186,7 +186,7 @@ class TestRuntimeUnavailable(TestCase):
         result = _run_subprocess(
             """
             assert C.is_dummy_device() is True
-            assert C.runtime_available() is True, "dummy with a loadable thunk must be available"
+            assert C.runtime_available() is True, "dummy with a loaded runtime must be available"
             assert torch.rbln.is_available() is True
             t = torch.zeros(4, device="rbln:0")
             assert t.cpu().tolist() == [0.0, 0.0, 0.0, 0.0]
@@ -199,12 +199,12 @@ class TestRuntimeUnavailable(TestCase):
     def test_dummy_without_runtime_is_gated(self):
         """Dummy mode is NOT exempt from the gate: it host-backs via the runtime, so
         librbln-thunk.so is still required. When the runtime is unavailable (simulated
-        by the shutdown flag, standing in for a missing thunk), the gate fires --
+        by the shutdown flag, standing in for a missing runtime), the gate fires --
         best-effort ops no-op and allocation raises a clean error, never a SEGFAULT."""
         result = _run_subprocess(
             """
             assert C.is_dummy_device() is True
-            C._set_runtime_shutting_down(True)  # stand-in for an unavailable runtime (e.g. no thunk)
+            C._set_runtime_shutting_down(True)  # stand-in for an unavailable runtime (e.g. no runtime .so)
             assert C.runtime_available() is False, "dummy must not bypass the runtime gate"
             assert torch.rbln.is_available() is False
             d = torch.device("rbln", 0)
@@ -224,7 +224,7 @@ class TestRuntimeUnavailable(TestCase):
     def test_mandatory_op_raises_clean_error_not_segfault(self):
         """Allocation is a mandatory op: when the runtime is unavailable it must raise
         a clean, catchable RuntimeError (not SEGFAULT). Needs a real device so the
-        allocation would otherwise reach the thunk."""
+        allocation would otherwise reach the runtime."""
         result = _run_subprocess(
             """
             assert torch.rbln.device_count() > 0 and not C.is_dummy_device()
@@ -241,7 +241,7 @@ class TestRuntimeUnavailable(TestCase):
 
     @requires_physical_devices(1)
     def test_runtime_available_true_on_healthy_host(self):
-        """With a device present and the thunk loaded, runtime_available() is True and
+        """With a device present and the runtime loaded, runtime_available() is True and
         best-effort ops actually run (not gated off)."""
         result = _run_subprocess(
             """

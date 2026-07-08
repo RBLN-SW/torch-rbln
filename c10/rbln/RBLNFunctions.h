@@ -151,9 +151,9 @@ C10_RBLN_API c10::DeviceIndex get_device_count_nothrow() noexcept;
  * @brief Is the RBLN device runtime (librbln-thunk.so) loaded and usable? Nothrow
  * wrapper over librbln's rbln_runtime_available(). Availability signals gate the
  * throwing get_device_count() on this, so a missing runtime degrades to false
- * without a segfault; a malformed config still throws when the thunk is present.
+ * without a segfault; a malformed config still throws when the runtime is present.
  */
-C10_RBLN_API bool thunk_loadable() noexcept;
+C10_RBLN_API bool runtime_loaded() noexcept;
 
 /**
  * @brief Single source of truth: will an rbln_* call be serviced safely now? Needs
