@@ -354,13 +354,66 @@ bool is_dummy_device() {
   return dummy;
 }
 
+// --- Device-runtime liveness ------------------------------------------------
+// The device runtime (driver) is loaded lazily and is absent on compile/CPU-only/CI
+// hosts or unmapped at shutdown, when a raw rbln_* call SEGFAULTs. Runtime-touching
+// leaves gate on runtime_available(), built on librbln's own rbln_runtime_available().
+
+namespace {
+
+std::atomic<bool> runtime_shutting_down_{false}; // set at teardown via a Python atexit hook
+
+// Torn down (shutting down or driver absent) vs "no device present" (reported by
+// to_device_id()): teardown-safe ops no-op only on the former.
+bool runtime_torn_down() noexcept {
+  return runtime_shutting_down_.load(std::memory_order_relaxed) || !rbln_runtime_available();
+}
+
+// Mandatory-op guard: clean throw, never a SEGFAULT. Required even in dummy mode.
+void require_runtime(const char* op) {
+  RBLN_CHECK(
+      !runtime_shutting_down_.load(std::memory_order_relaxed), "Cannot {}: the RBLN runtime is shutting down.", op);
+  RBLN_CHECK(
+      rbln_runtime_available(),
+      "Cannot {}: the RBLN device runtime is not loaded; install the RBLN SDK/runtime "
+      "(required even in RBLN_DUMMY_DEVICE mode).",
+      op);
+}
+
+} // namespace
+
+c10::DeviceIndex get_device_count_nothrow() noexcept {
+  // Nothrow view of get_device_count() for the liveness gate; failures map to 0.
+  try {
+    return get_device_count();
+  } catch (const std::exception& e) {
+    RBLN_WARN_NOTHROW("get_device_count failed, treating as 0 device(s): {}", e.what());
+    return 0;
+  } catch (...) {
+    RBLN_WARN_NOTHROW("get_device_count failed, treating as 0 device(s): unknown exception");
+    return 0;
+  }
+}
+
+void set_runtime_shutting_down(bool value) noexcept {
+  runtime_shutting_down_.store(value, std::memory_order_relaxed);
+}
+
+bool runtime_available() noexcept {
+  // Driver loaded, not shutting down, a device present (dummy needs the driver too,
+  // but no NPU). Single source of truth; never throws. CUDA parity.
+  return !runtime_shutting_down_.load(std::memory_order_relaxed) && rbln_runtime_available() &&
+      (is_dummy_device() || get_device_count_nothrow() > 0);
+}
+
 void* malloc(c10::DeviceIndex device_index, size_t nbytes) {
   RBLN_LOG_DEBUG("logical device=rbln:{}, nbytes={}", static_cast<int>(device_index), nbytes);
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
   check_device_index(device_index);
 
-  // to_device_id() enforces that a device is actually available (device_count >
-  // 0), so allocation fails cleanly here on a host with no NPU.
+  // Allocation is the gateway: clean throw (not SEGFAULT) if the runtime is gone;
+  // to_device_id() then throws on a host with no device.
+  require_runtime("allocate device memory");
   const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
   const auto size = static_cast<uint64_t>(nbytes);
   uint64_t vaddr = 0;
@@ -408,6 +461,7 @@ void free(void* data) {
   RBLN_LOG_DEBUG("data={}", fmt::ptr(data));
   RBLN_CHECK(data != nullptr, "data cannot be nullptr");
 
+  require_runtime("free device memory");
   const auto vaddr = reinterpret_cast<uint64_t>(data);
   RBLN_LOG_DEBUG("Calling rbln_free: vaddr={:#x}", vaddr);
   RBLN_CHECK(
@@ -417,9 +471,16 @@ void free(void* data) {
 }
 
 void free_nothrow(void* data) noexcept {
-  // Non-throwing free for the noexcept DataPtr deleter: rbln_free is extern "C"
-  // and RBLN_WARN_NOTHROW is itself nothrow, so no try/catch is needed.
+  // Noexcept deleter: rbln_free and RBLN_WARN_NOTHROW are both nothrow.
   if (data == nullptr) {
+    return;
+  }
+  // Torn-down runtime: rbln_free would deref a dead runtime -> SEGFAULT; leak instead.
+  // Uses runtime_torn_down() (cheap), not runtime_available(), to avoid
+  // get_device_count()'s GIL/Python side effects in the deleter at teardown.
+  if (runtime_torn_down()) {
+    RBLN_WARN_NOTHROW(
+        "rbln_free skipped for {}: RBLN runtime unavailable; leaking rather than crashing", fmt::ptr(data));
     return;
   }
   const auto vaddr = reinterpret_cast<uint64_t>(data);
@@ -606,6 +667,12 @@ void memcpy_v2v_async(void* rbln_dst_data, const void* rbln_src_data, size_t nby
 
 void synchronize(c10::DeviceIndex device_index) {
   RBLN_LOG_DEBUG("Synchronizing device {}", static_cast<int>(device_index));
+  // No-op only during teardown (runtime may be unmapped); otherwise a missing device
+  // -- no driver or no NPU -- throws via to_device_id() (torch.cuda.synchronize()
+  // parity; see RBLNNoDeviceTest). No raw call is reached before that throw.
+  if (runtime_shutting_down_.load(std::memory_order_relaxed)) {
+    return;
+  }
   check_device_index(device_index);
   const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
   RBLN_CHECK(
@@ -725,9 +792,12 @@ void return_borrowed(uint64_t borrow_id, bool updated) {
 
 c10::CachingDeviceAllocator::DeviceStats get_device_stats(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
+  // Best-effort query: empty stats when the runtime is unavailable.
+  if (!runtime_available()) {
+    return c10::CachingDeviceAllocator::DeviceStats{};
+  }
   const auto device_index = device.index();
   check_device_index(device_index);
-
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_get_memory_stats: device_id={}", device_id);
   const auto memory_stats = rbln_get_memory_stats(device_id);
@@ -779,9 +849,12 @@ c10::CachingDeviceAllocator::DeviceStats get_device_stats(const c10::Device& dev
 
 void empty_cache(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
+  // Best-effort: nothing to flush when the runtime is unavailable.
+  if (!runtime_available()) {
+    return;
+  }
   const auto device_index = device.index();
   check_device_index(device_index);
-
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_empty_cache: device_id={}", device_id);
   RBLN_CHECK(
@@ -792,9 +865,12 @@ void empty_cache(const c10::Device& device) {
 
 std::map<std::string, uint64_t> memory_stats(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
+  // Best-effort query: empty when the runtime is unavailable.
+  if (!runtime_available()) {
+    return {};
+  }
   const auto device_index = device.index();
   check_device_index(device_index);
-
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_get_memory_stats: rbln:{}, device_id={}", static_cast<int>(device_index), device_id);
   const auto stats = rbln_get_memory_stats(device_id);
@@ -806,9 +882,12 @@ std::map<std::string, uint64_t> memory_stats(const c10::Device& device) {
 
 void reset_accumulated_memory_stats(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
+  // Best-effort: nothing to reset when the runtime is unavailable.
+  if (!runtime_available()) {
+    return;
+  }
   const auto device_index = device.index();
   check_device_index(device_index);
-
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_reset_accumulated_memory_stats: device_id={}", device_id);
   RBLN_CHECK(
@@ -819,9 +898,13 @@ void reset_accumulated_memory_stats(const c10::Device& device) {
 
 void reset_peak_memory_stats(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
+  // Best-effort no-op when unavailable (torch.accelerator.reset_peak has no Python
+  // init-guard, so the leaf gate is the only protection).
+  if (!runtime_available()) {
+    return;
+  }
   const auto device_index = device.index();
   check_device_index(device_index);
-
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_reset_peak_memory_stats: device_id={}", device_id);
   RBLN_CHECK(
@@ -832,6 +915,11 @@ void reset_peak_memory_stats(const c10::Device& device) {
 
 void set_file_offloading_enabled(bool enabled) {
   RBLN_LOG_DEBUG("Calling rbln_set_file_offloading_enabled: enabled={}", enabled);
+  // Reachable without an allocation (torch.rbln.offload()), so gated directly:
+  // best-effort no-op when the runtime is unavailable.
+  if (!runtime_available()) {
+    return;
+  }
   RBLN_CHECK(
       !::rbln::rbln_set_file_offloading_enabled(enabled),
       "rbln_set_file_offloading_enabled failed (enabled={})",

@@ -142,6 +142,25 @@ C10_RBLN_API void set_device_layout_like(void* target_data, const void* ref_data
 C10_RBLN_API bool is_dummy_device();
 
 /**
+ * @brief Nothrow view of get_device_count() (returns 0 on any failure), for the
+ * liveness predicates that must never throw.
+ */
+C10_RBLN_API c10::DeviceIndex get_device_count_nothrow() noexcept;
+
+/**
+ * @brief Single source of truth: can an rbln_* call be serviced safely now?
+ * Runtime loaded (librbln's rbln_runtime_available()), not shutting down, and a
+ * device present -- dummy included (it host-backs via the runtime). Never throws.
+ */
+C10_RBLN_API bool runtime_available() noexcept;
+
+/**
+ * @brief Mark the runtime as shutting down so late frees / best-effort ops stop
+ * dispatching into a possibly-unmapped runtime. Wired to a Python atexit hook.
+ */
+C10_RBLN_API void set_runtime_shutting_down(bool value) noexcept;
+
+/**
  * @brief Allocates memory on the specified RBLN device.
  *
  * This function allocates a contiguous block of memory on the given RBLN

@@ -403,20 +403,30 @@ void DeviceMappingManager::initialize() {
   c10::call_once(init_flag_, [this]() {
     RBLN_LOG_DEBUG("Initializing RBLN device mapping");
 
-    // Explicit opt-in, checked before any runtime query so a host with no
-    // SDK/driver can still construct device tensors and compile.
+    // Enumeration hits the runtime in both modes (real: rbln_get_device_count();
+    // dummy: rbln_register_device_id()), so without the runtime a raw rbln_* call
+    // would SEGFAULT. Checked before the dummy branch too: degrade to 0 devices.
+    if (!rbln_runtime_available()) {
+      RBLN_LOG_INFO(
+          "RBLN runtime not loaded; initializing with 0 logical device(s). "
+          "Device access will fail at the point of use.");
+      device_count_ = 0;
+      buildDeviceTopology();
+      return;
+    }
+
+    // Dummy: host-backed, no NPU, but still needs the runtime (checked above).
     if (dummyDeviceEnabled()) {
       initializeDummyDevices();
       return;
     }
 
     int device_count = 0;
-    // A failed query (SDK/driver not loadable) stays fatal; "query succeeded,
-    // found 0 NPUs" is handled below.
+    // The runtime is loaded but the query failed (kernel driver not loaded / device
+    // unavailable): fatal. "Query succeeded, found 0 NPUs" is handled below.
     RBLN_CHECK(
         !rbln_get_device_count(&device_count),
-        "rbln_get_device_count failed; the RBLN SDK/driver may not be loadable — ensure the SDK is installed "
-        "and the kernel driver is loaded");
+        "rbln_get_device_count failed; the RBLN kernel driver may not be loaded or the device is unavailable");
     const int physical_device_count = device_count;
     RBLN_LOG_DEBUG("Found {} physical NPU(s)", physical_device_count);
 

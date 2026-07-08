@@ -53,6 +53,8 @@ void add_py_method_definitions(std::vector<PyMethodDef>& method_vector, PyMethod
  */
 void register_public_device_api(py::module_& module) {
   module.def("current_device", &c10::rbln::get_device_index, "Get the current device.");
+  // Throws on a malformed RBLN_DEVICE_MAP (config error); "no hardware/runtime -> 0"
+  // is already graceful inside get_device_count().
   module.def("device_count", &c10::rbln::get_device_count, "Get the number of devices.");
   module.def("set_device", &c10::rbln::set_device_index, "Set the current device.");
   module.def(
@@ -63,6 +65,19 @@ void register_public_device_api(py::module_& module) {
       "is_dummy_device",
       &c10::rbln::is_dummy_device,
       "Whether host-backed dummy device mode (RBLN_DUMMY_DEVICE) is active.");
+  module.def(
+      "runtime_available",
+      &c10::rbln::runtime_available,
+      "Single source of truth for device-runtime liveness (loaded, not shutting down, a device exists). "
+      "Never raises.");
+  module.def(
+      "runtime_loaded",
+      &rbln_runtime_available,
+      "Whether the RBLN device runtime is loaded (librbln's rbln_runtime_available()). Never raises.");
+  module.def(
+      "_set_runtime_shutting_down",
+      &c10::rbln::set_runtime_shutting_down,
+      "Mark the RBLN runtime as shutting down so late ops stop dispatching into it.");
   module.def(
       "_exchange_device",
       &c10::rbln::exchange_device_index,

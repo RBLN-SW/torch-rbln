@@ -1,0 +1,43 @@
+name: Build
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      python_versions:
+        description: Python versions (3.10-3.13), as a JSON array
+        type: string
+        required: true
+        default: '["3.12"]'
+      build_types:
+        description: Build types (Release, Debug), as a JSON array
+        type: string
+        required: true
+        default: '["Release"]'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    if: ${{ github.repository_owner == vars.TORCH_RBLN_REPO_OWNER }}
+    strategy:
+      matrix:
+        python_version: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.python_versions || '["3.12"]') }}
+        build_type: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.build_types || '["Release"]') }}
+      fail-fast: false
+    uses: ./.github/workflows/_build-wheel.yaml
+    with:
+      torch_rbln_sha: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      python_version: ${{ matrix.python_version }}
+      build_type: ${{ matrix.build_type }}
+    secrets:
+      GIT_PAT: ${{ secrets.GIT_PAT }}
+      INTERNAL_INDEX_URL: ${{ secrets.INTERNAL_INDEX_URL }}
+      INTERNAL_INDEX_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
+      INTERNAL_INDEX_PASSWORD: ${{ secrets.INTERNAL_INDEX_PASSWORD }}

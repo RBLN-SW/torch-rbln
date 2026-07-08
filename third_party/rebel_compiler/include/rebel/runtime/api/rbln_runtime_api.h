@@ -53,6 +53,17 @@ RBLNRetCode rbln_register_device_id(int torch_device_id, int* device_ids, int nu
 RBLNRetCode rbln_get_device_count(int* count);
 
 /**
+ * @brief Reports whether the device runtime (driver) is loaded and usable.
+ *
+ * The driver is loaded lazily and is absent on compile/CPU-only/CI hosts.
+ * Callers gate device ops on this so a missing runtime degrades gracefully
+ * instead of segfaulting. Never throws.
+ *
+ * @return true if the runtime is available; false otherwise.
+ */
+bool rbln_runtime_available(void);
+
+/**
  * @brief Allocates memory on the device, with caching allocator enabled.
  *
  * @details It is an alias to the `rbln_malloc_cache` function.
