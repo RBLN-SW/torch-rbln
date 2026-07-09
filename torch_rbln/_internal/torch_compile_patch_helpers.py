@@ -15,6 +15,7 @@ try:
 except Exception:  # pragma: no cover - torch internals may move
     _get_chromium_event_logger = None
 
+from torch_rbln._internal.dummy_device import raise_if_dummy_execution
 from torch_rbln._internal.env_utils import is_fallback_disabled, use_tp_failover
 from torch_rbln._internal.log_utils import rbln_log_error, rbln_log_warn
 from torch_rbln._internal.ops_utils import extract_device_id_from_inputs, to_cpu
@@ -160,6 +161,17 @@ def get_num_devices_from_options(compile_kwargs):
     if num_devices is None:
         num_devices = compile_options.get("tensor_parallel_size")
     return num_devices
+
+
+def _is_compile_only(compile_kwargs) -> bool:
+    """Whether torch.compile requested mode=compile_only (build artifacts, no run)."""
+    options = compile_kwargs.get("options", {})
+    if not isinstance(options, dict):
+        return False
+    mode = options.get("mode")
+    if isinstance(mode, (list, tuple)):
+        return "compile_only" in mode
+    return mode == "compile_only"
 
 
 def _resolve_current_num_devices(device_id, compile_kwargs):
@@ -380,6 +392,11 @@ class CompiledFunctionWrapper:
             _exit_rbln_compile_op()
 
     def _call_impl(self, *args, **kwargs):
+        # A compiled graph is NPU-only; executing it on RBLN_DUMMY_DEVICE would
+        # silently return zeros. Reject it through the shared policy gate (compile_only
+        # builds are exempt — they only write the artifact).
+        raise_if_dummy_execution("a compiled graph", compile_only=_is_compile_only(self._compile_kwargs))
+
         # Extract device_id for TP operations
         device_id = extract_device_id_from_inputs(*args, **kwargs)
 

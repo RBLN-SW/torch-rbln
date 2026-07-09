@@ -57,6 +57,15 @@ def torch_backends_entry_point() -> None:
 
         torch._register_device_module("rbln", torch_rbln.device)
 
+        # At interpreter teardown, mark the runtime as shutting down so late frees /
+        # best-effort ops stop dispatching into a possibly-unmapped runtime (which
+        # would SEGFAULT). Best-effort defense; mirrors CUDA teardown handling.
+        import atexit
+
+        import torch_rbln._C
+
+        atexit.register(torch_rbln._C._set_runtime_shutting_down, True)
+
         # Import operators #####################################################
         import torch_rbln._internal.register_ops
 

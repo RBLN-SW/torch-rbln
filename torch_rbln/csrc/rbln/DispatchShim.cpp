@@ -6,6 +6,7 @@
 #include <ATen/native/rbln/RBLNCPUFallback.h>
 #include <ATen/ops/empty.h>
 #include <c10/rbln/RBLNFunctions.h>
+#include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNSupportedDtypes.h>
 #include <torch/csrc/jit/python/pybind_utils.h>
 #include <torch/library.h>
@@ -16,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <array>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -38,6 +40,11 @@ std::atomic<uint64_t> g_diag_n_warm_hit{0}; // warm-cache fast path hit
 std::atomic<uint64_t> g_diag_n_miss{0}; // Python compile (miss) path
 std::atomic<uint64_t> g_diag_ns_warm_hit{0}; // total ns inside warm-cache hit path
 std::atomic<uint64_t> g_diag_ns_miss{0}; // total ns inside miss path
+std::atomic<uint64_t> g_diag_ns_fallback{0}; // total ns inside cpu_fallback_rbln (the COST, not just count)
+// cpu_fallback reason histogram. index = reason code from quick_fallback_check
+// (1=dtype-not-fp16, 2=nan/inf input, 3=all-scalar). Bumped on the fallback
+// branch only (the reason is already computed there) -> ON==OFF preserved.
+std::array<std::atomic<uint64_t>, 4> g_fallback_reason{};
 std::atomic<uint64_t> g_diag_n_align_fastpath{0}; // align fast-path hits → cpu_fallback
 
 // Warm-cache hit path per-segment timers. Accumulated only on successful hits
@@ -52,14 +59,15 @@ std::atomic<uint64_t> g_diag_warm_ns_run{0};
 std::atomic<uint64_t> g_diag_warm_ns_finalize{0};
 } // namespace
 
-std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t> diag_dump_dispatch_paths() {
+std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t> diag_dump_dispatch_paths() {
   return std::make_tuple(
       g_diag_n_total.load(std::memory_order_relaxed),
       g_diag_n_fallback.load(std::memory_order_relaxed),
       g_diag_n_warm_hit.load(std::memory_order_relaxed),
       g_diag_n_miss.load(std::memory_order_relaxed),
       g_diag_ns_warm_hit.load(std::memory_order_relaxed),
-      g_diag_ns_miss.load(std::memory_order_relaxed));
+      g_diag_ns_miss.load(std::memory_order_relaxed),
+      g_diag_ns_fallback.load(std::memory_order_relaxed));
 }
 
 uint64_t diag_dump_align_fastpath_count() {
@@ -73,6 +81,7 @@ void diag_reset_dispatch_paths() {
   g_diag_n_miss.store(0, std::memory_order_relaxed);
   g_diag_ns_warm_hit.store(0, std::memory_order_relaxed);
   g_diag_ns_miss.store(0, std::memory_order_relaxed);
+  g_diag_ns_fallback.store(0, std::memory_order_relaxed);
   g_diag_n_align_fastpath.store(0, std::memory_order_relaxed);
 }
 
@@ -144,6 +153,12 @@ struct ShimEntry {
   std::vector<size_t> skip_dtype_args;
   SchemaCache schema_cache; // lazily filled
   const char* op_name_intern = nullptr; // stable pointer for WarmCache keys
+  // Cached pointer into fallback_by_op() for this op; bumped lock-free on the
+  // already-slow fallback branch. Raw ptr keeps ShimEntry an aggregate / movable
+  // (the registry stores it by value via move-assign).
+  std::atomic<uint64_t>* fallback_ctr = nullptr;
+  // Same idea for the warm-cache miss (recompile) path -> recompile_by_op().
+  std::atomic<uint64_t>* recompile_ctr = nullptr;
 };
 
 // Leaky singletons: these hold pybind11::object (registry) and torch::Library
@@ -168,6 +183,82 @@ std::vector<std::unique_ptr<torch::Library>>& installed_libs() {
 std::mutex& registry_mutex() {
   static std::mutex m;
   return m;
+}
+
+// Per-op CPU-fallback counts, keyed by the interned op-name pointer (stable +
+// deduplicated by intern_op_name). Heap-allocated atomics so each ShimEntry can
+// cache a raw pointer (fallback_ctr) and bump it lock-free on the fallback
+// branch. Populated/looked-up under registry_mutex at register time (import,
+// before any dispatch); survives op re-registration. Leaky singleton to match
+// registry() teardown semantics.
+std::unordered_map<const char*, std::unique_ptr<std::atomic<uint64_t>>>& fallback_by_op() {
+  static auto* m = new std::unordered_map<const char*, std::unique_ptr<std::atomic<uint64_t>>>();
+  return *m;
+}
+
+// Per-op warm-cache MISS (recompile) counts. Same scheme as fallback_by_op():
+// the bump lives on the already-slow miss branch (Python compile), so it does
+// not touch the warm-cache hit fast path.
+std::unordered_map<const char*, std::unique_ptr<std::atomic<uint64_t>>>& recompile_by_op() {
+  static auto* m = new std::unordered_map<const char*, std::unique_ptr<std::atomic<uint64_t>>>();
+  return *m;
+}
+
+// (A) WHERE: opt-in Python call-site capture. OFF by default -> default explain()
+// is byte-identical overhead. When on, capture the user's call-site for an op
+// ONCE (deduped per op), and ONLY on the already-slow fallback / miss branch.
+std::atomic<bool> g_trace_enabled{false};
+std::mutex& trace_mutex() {
+  static std::mutex m;
+  return m;
+}
+std::unordered_map<std::string, std::string>& trace_by_op() {
+  static auto* m = new std::unordered_map<std::string, std::string>();
+  return *m;
+}
+
+void capture_site(const std::string& op_name) {
+  {
+    std::lock_guard<std::mutex> lk(trace_mutex());
+    if (trace_by_op().find(op_name) != trace_by_op().end()) {
+      return; // already captured -> no GIL / no Python
+    }
+  }
+  if (!Py_IsInitialized()) {
+    return;
+  }
+  // The dispatcher may have released the GIL before this boxed branch; acquire
+  // it before ANY Python access (no-op if this thread already holds it).
+  pybind11::gil_scoped_acquire gil;
+  std::string site;
+  try {
+    pybind11::list stack = pybind11::module_::import("traceback").attr("extract_stack")();
+    const auto n = static_cast<pybind11::ssize_t>(pybind11::len(stack));
+    int shown = 0;
+    for (pybind11::ssize_t i = n - 1; i >= 0 && shown < 2; --i) {
+      pybind11::object fr = stack[static_cast<size_t>(i)];
+      const std::string fname = pybind11::str(fr.attr("filename"));
+      const long lineno = fr.attr("lineno").cast<long>();
+      const std::string func = pybind11::str(fr.attr("name"));
+      const auto slash = fname.rfind('/');
+      const std::string base = (slash == std::string::npos) ? fname : fname.substr(slash + 1);
+      if (!site.empty()) {
+        site += " <- ";
+      }
+      site += base;
+      site += ":";
+      site += std::to_string(lineno);
+      site += "(";
+      site += func;
+      site += ")";
+      ++shown;
+    }
+  } catch (const pybind11::error_already_set&) {
+    PyErr_Clear();
+    return;
+  }
+  std::lock_guard<std::mutex> lk(trace_mutex());
+  trace_by_op().emplace(op_name, site);
 }
 
 ShimEntry* find_shim_entry(const std::string& op_name) {
@@ -582,7 +673,10 @@ bool tensor_has_nan_or_inf(const at::Tensor& t) {
 // path, not CPU. If we counted wrapped 0-dim against the shortcut here, we
 // would force the shortcut for the most common binary-op-with-python-scalar
 // case and bypass the compile-path that the test suite expects.
-bool quick_fallback_check(
+// Returns 0 = no fallback, else the reason code (1=dtype-not-fp16, 2=nan/inf
+// input, 3=all-scalar). The reason is already decided here; returning it instead
+// of a bool lets the caller attribute WHY at zero extra cost.
+int quick_fallback_check(
     torch::jit::Stack* stack,
     const SchemaCache& cache,
     const std::vector<size_t>& skip_dtype_args) {
@@ -633,16 +727,16 @@ bool quick_fallback_check(
     }
     has_input_tensor = true;
     if (!c10::rbln::is_dispatch_dtype(t.scalar_type())) {
-      return true;
+      return 1; // dtype-not-fp16 (dtype outside the dispatch policy)
     }
     if (t.dim() != 0) {
       all_input_scalar = false;
     }
   }
   if (nan_inf_found) {
-    return true;
+    return 2; // nan/inf in input (non-deploy debug scan)
   }
-  return has_input_tensor && all_input_scalar;
+  return (has_input_tensor && all_input_scalar) ? 3 : 0; // 3 = all-scalar inputs
 }
 
 // ---------------------------------------------------------------------------
@@ -1111,10 +1205,21 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
   // Earlier bugs that motivated disabling this shortcut have been fixed at
   // the borrow site: write-alias args are skipped from the borrow loop and
   // the borrow_resize_case is gated on contiguity (see RBLNCPUFallback.cpp).
-  const bool would_fallback = quick_fallback_check(stack, cache, skip_dtype_args);
-  if (would_fallback) {
+  const int fb_reason = quick_fallback_check(stack, cache, skip_dtype_args);
+  if (fb_reason != 0) {
     g_diag_n_fallback.fetch_add(1, std::memory_order_relaxed);
+    g_fallback_reason[fb_reason].fetch_add(1, std::memory_order_relaxed); // WHY (same slow branch)
+    if (entry->fallback_ctr != nullptr) {
+      entry->fallback_ctr->fetch_add(1, std::memory_order_relaxed); // per-op attribution (same slow branch)
+    }
+    if (g_trace_enabled.load(std::memory_order_relaxed)) {
+      capture_site(op_name); // (A) WHERE: opt-in, deduped, GIL-safe; off by default
+    }
+    const uint64_t _fb_t0 = now_ns();
     ::at::native::rbln::cpu_fallback_rbln(op, stack);
+    // COST of the fallback (wall ns), so the report can tell "many cheap fallbacks
+    // (path overhead)" from "few expensive ones (hidden transfer)". Same slow branch.
+    g_diag_ns_fallback.fetch_add(now_ns() - _fb_t0, std::memory_order_relaxed);
     return;
   }
 
@@ -1152,6 +1257,12 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
   // the end of this function (even on failure / exception) to avoid leaking
   // into subsequent unrelated ops on the same thread.
   g_diag_n_miss.fetch_add(1, std::memory_order_relaxed);
+  if (entry->recompile_ctr != nullptr) {
+    entry->recompile_ctr->fetch_add(1, std::memory_order_relaxed); // per-op attribution (same slow miss branch)
+  }
+  if (g_trace_enabled.load(std::memory_order_relaxed)) {
+    capture_site(op_name); // (A) WHERE: opt-in, deduped, GIL-safe; off by default
+  }
   const uint64_t _diag_miss_t0 = now_ns();
   struct MissScopeTimer {
     uint64_t t0;
@@ -1258,6 +1369,21 @@ void register_cpp_shim(const std::string& op_name, pybind11::object py_fn, const
 
   const bool first_time = registry().find(op_name) == registry().end();
   registry()[op_name] = ShimEntry{std::move(py_fn), skip_dtype_args, SchemaCache{}, interned};
+  // Wire up the per-op fallback counter (heap atomic, keyed by interned name so
+  // it survives re-registration). The move-assign above reset fallback_ctr to
+  // null, so re-point it here.
+  {
+    auto& slot = fallback_by_op()[interned];
+    if (!slot) {
+      slot = std::make_unique<std::atomic<uint64_t>>(0);
+    }
+    registry()[op_name].fallback_ctr = slot.get();
+    auto& rslot = recompile_by_op()[interned];
+    if (!rslot) {
+      rslot = std::make_unique<std::atomic<uint64_t>>(0);
+    }
+    registry()[op_name].recompile_ctr = rslot.get();
+  }
   if (!first_time) {
     // Same op re-registered (e.g. codegen re-run during tests): reuse existing
     // Library entry, just refresh the stored Python callable above.
@@ -1273,6 +1399,122 @@ void register_cpp_shim(const std::string& op_name, pybind11::object py_fn, const
   const std::string overload = strip_namespace(op_name);
   lib->impl(overload.c_str(), torch::CppFunction::makeFromBoxedFunction<&generic_shim_boxed>());
   installed_libs().push_back(std::move(lib));
+}
+
+std::vector<std::pair<std::string, uint64_t>> diag_dump_fallback_by_op() {
+  std::vector<std::pair<std::string, uint64_t>> out;
+  std::lock_guard<std::mutex> lk(registry_mutex());
+  for (const auto& kv : registry()) {
+    const ShimEntry& e = kv.second;
+    if (e.fallback_ctr != nullptr) {
+      const uint64_t c = e.fallback_ctr->load(std::memory_order_relaxed);
+      if (c != 0) {
+        out.emplace_back(kv.first, c);
+      }
+    }
+  }
+  return out;
+}
+
+void diag_reset_fallback_by_op() {
+  std::lock_guard<std::mutex> lk(registry_mutex());
+  for (auto& kv : fallback_by_op()) {
+    if (kv.second) {
+      kv.second->store(0, std::memory_order_relaxed);
+    }
+  }
+}
+
+std::vector<std::pair<std::string, uint64_t>> diag_dump_recompile_by_op() {
+  std::vector<std::pair<std::string, uint64_t>> out;
+  std::lock_guard<std::mutex> lk(registry_mutex());
+  for (const auto& kv : registry()) {
+    const ShimEntry& e = kv.second;
+    if (e.recompile_ctr != nullptr) {
+      const uint64_t c = e.recompile_ctr->load(std::memory_order_relaxed);
+      if (c != 0) {
+        out.emplace_back(kv.first, c);
+      }
+    }
+  }
+  return out;
+}
+
+void diag_reset_recompile_by_op() {
+  std::lock_guard<std::mutex> lk(registry_mutex());
+  for (auto& kv : recompile_by_op()) {
+    if (kv.second) {
+      kv.second->store(0, std::memory_order_relaxed);
+    }
+  }
+}
+
+std::vector<uint64_t> diag_dump_fallback_reasons() {
+  // counts for reason codes 1..3: [dtype-not-fp16, nan/inf input, all-scalar].
+  return {
+      g_fallback_reason[1].load(std::memory_order_relaxed),
+      g_fallback_reason[2].load(std::memory_order_relaxed),
+      g_fallback_reason[3].load(std::memory_order_relaxed),
+  };
+}
+
+void diag_reset_fallback_reasons() {
+  for (auto& r : g_fallback_reason) {
+    r.store(0, std::memory_order_relaxed);
+  }
+}
+
+// (A) WHERE for bounces: c10::record_bounce calls this (when installed) with the
+// BounceSite ordinal. Map it to the report label and reuse capture_site, so a
+// bounced copy_ gets its Python call-site keyed by the site name in trace_by_op
+// (the report shows "at ..." under the bounce row). noexcept: it is invoked from
+// c10's noexcept record_bounce, so it must never let an exception escape. The
+// names + order mirror BounceSite and profiler.py's _BOUNCE_SITES.
+static void bounce_site_capture(uint8_t site) noexcept {
+  if (!g_trace_enabled.load(std::memory_order_relaxed)) {
+    return;
+  }
+  static constexpr std::array<const char*, 5> kNames = {
+      "copy_d2d_host_bounce",
+      "copy_h2d_staging",
+      "copy_h2d_noncontig_dst",
+      "strided_v2v_cpu_fallback",
+      "v2v_batch_to_per_entry"};
+  if (site >= kNames.size()) {
+    return;
+  }
+  // This hook runs inside c10's noexcept record_bounce, so it must never throw.
+  // capture_site can (mutex / map alloc); swallow — a diagnostic hook failing is
+  // not worth aborting the run.
+  try {
+    capture_site(kNames[site]);
+  } catch (...) {
+    return;
+  }
+}
+
+// (A) WHERE: opt-in call-site capture. enable() flips the gate the slow branches
+// read; dump returns (op_name -> "file:line(func) <- ...") for the ops that fired
+// while enabled; reset clears between regions. Also (un)installs the bounce hook
+// in c10 so bounced copies capture their call-site too (ON==OFF: null when off).
+void diag_set_trace_enabled(bool on) {
+  g_trace_enabled.store(on, std::memory_order_relaxed);
+  c10::rbln::prof::set_bounce_capture_fn(on ? &bounce_site_capture : nullptr);
+}
+
+std::vector<std::pair<std::string, std::string>> diag_dump_trace_by_op() {
+  std::vector<std::pair<std::string, std::string>> out;
+  std::lock_guard<std::mutex> lk(trace_mutex());
+  out.reserve(trace_by_op().size());
+  for (const auto& kv : trace_by_op()) {
+    out.emplace_back(kv.first, kv.second);
+  }
+  return out;
+}
+
+void diag_reset_trace_by_op() {
+  std::lock_guard<std::mutex> lk(trace_mutex());
+  trace_by_op().clear();
 }
 
 // ---------------------------------------------------------------------------

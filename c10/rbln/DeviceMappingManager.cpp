@@ -7,8 +7,10 @@
 #include <cctype>
 #include <cstdlib>
 #include <exception>
+#include <limits>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace c10::rbln {
@@ -82,6 +84,34 @@ std::string DeviceMappingManager::getValidSizesString() const {
   return ss.str();
 }
 
+void DeviceMappingManager::validateDeviceGroups(const std::vector<std::vector<int>>& groups) const {
+  // Hardware-independent checks shared by the real (RBLN_DEVICE_MAP / RBLN_NPUS_PER_DEVICE)
+  // and dummy paths. The physical-id *range* check needs a physical device count and so
+  // stays in the real path (initializeFromDeviceMap).
+  constexpr auto kMaxDeviceIndex = static_cast<size_t>(std::numeric_limits<c10::DeviceIndex>::max());
+  RBLN_CHECK(
+      groups.size() <= kMaxDeviceIndex,
+      "RBLN_DEVICE_MAP/RBLN_NPUS_PER_DEVICE requests {} logical devices, exceeding the maximum of {}",
+      groups.size(),
+      kMaxDeviceIndex);
+
+  std::unordered_set<int> used_physical_ids;
+  for (size_t i = 0; i < groups.size(); ++i) {
+    RBLN_CHECK(
+        isValidDeviceGroupSize(groups[i].size()),
+        "Logical device rbln:{} has {} physical NPU(s); valid sizes are {}.",
+        i,
+        groups[i].size(),
+        getValidSizesString());
+    for (int phy_id : groups[i]) {
+      RBLN_CHECK(
+          used_physical_ids.insert(phy_id).second,
+          "Physical NPU {} is assigned to more than one logical device",
+          phy_id);
+    }
+  }
+}
+
 RblnNpuMappingEnvDisplay getRblnNpuMappingEnvDisplay() {
   const char* map_env = std::getenv("RBLN_DEVICE_MAP");
   const char* npus_env = std::getenv("RBLN_NPUS_PER_DEVICE");
@@ -89,6 +119,25 @@ RblnNpuMappingEnvDisplay getRblnNpuMappingEnvDisplay() {
       (map_env && map_env[0] != '\0' ? std::string(map_env) : "-"),
       (npus_env && npus_env[0] != '\0' ? std::string(npus_env) : "-"),
   };
+}
+
+bool dummyDeviceEnabled() {
+  const char* env = std::getenv("RBLN_DUMMY_DEVICE");
+  if (env == nullptr || env[0] == '\0') {
+    return false;
+  }
+  // Truthy spellings of the RBLN_DUMMY_DEVICE boolean flag (non-boolean values
+  // are already rejected by the runtime at startup).
+  std::string s(env);
+  const auto first = s.find_first_not_of(" \t\n\r\f\v");
+  if (first == std::string::npos) {
+    return false;
+  }
+  s = s.substr(first, s.find_last_not_of(" \t\n\r\f\v") - first + 1);
+  for (char& c : s) {
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  }
+  return s == "1" || s == "true" || s == "t" || s == "yes" || s == "y" || s == "on";
 }
 
 std::vector<std::vector<int>> DeviceMappingManager::parseDeviceMap(const std::string& device_map_str) {
@@ -211,22 +260,16 @@ void DeviceMappingManager::initializeFromDeviceMap(const std::string& device_map
 
   RBLN_CHECK(!device_groups.empty(), "RBLN_DEVICE_MAP must contain at least one logical device mapping");
 
+  // Shape / duplicate-id / count validation shared with the dummy path.
+  validateDeviceGroups(device_groups);
+
   RblnNpuMappingEnvDisplay env_display = getRblnNpuMappingEnvDisplay();
   std::vector<bool> physical_device_used(physical_device_count, false);
   int logical_device_index = 0;
 
   for (const auto& group : device_groups) {
-    RBLN_CHECK(!group.empty(), "Each logical device mapping in RBLN_DEVICE_MAP must contain at least one physical NPU");
-
-    // Validate mapping size: physical NPUs per logical device must be one of the allowed base sizes
-    RBLN_CHECK(
-        isValidDeviceGroupSize(group.size()),
-        "Each logical device mapping in RBLN_DEVICE_MAP must contain a valid number of physical NPUs. "
-        "Valid sizes are: {}. Mapping with {} physical NPU(s) is invalid.",
-        getValidSizesString(),
-        group.size());
-
-    // Validate physical NPU IDs (each mapping lists physical NPU indices for one logical device)
+    // Physical-id range check + usage tracking for unused-device collection (needs
+    // hardware, so it stays here rather than in validateDeviceGroups).
     for (int phy_id : group) {
       if (phy_id < 0 || phy_id >= physical_device_count) {
         std::string map_display = env_display.device_map;
@@ -243,8 +286,6 @@ void DeviceMappingManager::initializeFromDeviceMap(const std::string& device_map
             map_display,
             env_display.npus_per_device);
       }
-      RBLN_CHECK(
-          !physical_device_used[phy_id], "Physical NPU {} is already assigned to another logical device", phy_id);
       physical_device_used[phy_id] = true;
     }
 
@@ -319,17 +360,73 @@ void DeviceMappingManager::initializeFromNpusPerDevice(int npus_per_device, int 
   collectUnusedDevices(physical_device_used, physical_device_count);
 }
 
+void DeviceMappingManager::initializeDummyDevices() {
+  // Layout from RBLN_DEVICE_MAP (TP shape preserved), else RBLN_NPUS_PER_DEVICE as
+  // one logical device of size N, else a single device. IDs are shape markers; no
+  // NPU backs them, so they are not range-checked against hardware.
+  std::vector<std::vector<int>> groups;
+  if (const char* map_env = std::getenv("RBLN_DEVICE_MAP"); map_env != nullptr && map_env[0] != '\0') {
+    groups = parseDeviceMap(std::string(map_env));
+  }
+  if (groups.empty()) {
+    int npus_per_device = 1;
+    const auto env_display = getRblnNpuMappingEnvDisplay();
+    if (env_display.npus_per_device != "-" && !env_display.npus_per_device.empty()) {
+      npus_per_device = parseEnvInt(env_display.npus_per_device, "RBLN_NPUS_PER_DEVICE");
+      RBLN_CHECK(npus_per_device > 0, "RBLN_NPUS_PER_DEVICE must be a positive integer, got {}", npus_per_device);
+    }
+    std::vector<int> group;
+    group.reserve(static_cast<size_t>(npus_per_device));
+    for (int i = 0; i < npus_per_device; ++i) {
+      group.push_back(i);
+    }
+    groups = {group};
+  }
+
+  // Shape / duplicate-id / count validation shared with the real path; the physical-id
+  // range check is skipped (there is no NPU to range them against).
+  validateDeviceGroups(groups);
+
+  RBLN_LOG_INFO(
+      "RBLN_DUMMY_DEVICE active: {} host-backed logical device(s), 0 physical NPU. "
+      "Tensor construction/compilation run on host memory; execution still needs an NPU.",
+      groups.size());
+
+  for (size_t i = 0; i < groups.size(); ++i) {
+    registerLogicalDevice(static_cast<int>(i), groups[i]);
+  }
+  device_count_ = static_cast<c10::DeviceIndex>(groups.size());
+  buildDeviceTopology();
+}
+
 void DeviceMappingManager::initialize() {
   c10::call_once(init_flag_, [this]() {
     RBLN_LOG_DEBUG("Initializing RBLN device mapping");
 
+    // Enumeration hits the runtime in both modes (real: rbln_get_device_count();
+    // dummy: rbln_register_device_id()), so without the runtime a raw rbln_* call
+    // would SEGFAULT. Checked before the dummy branch too: degrade to 0 devices.
+    if (!rbln_runtime_available()) {
+      RBLN_LOG_INFO(
+          "RBLN runtime not loaded; initializing with 0 logical device(s). "
+          "Device access will fail at the point of use.");
+      device_count_ = 0;
+      buildDeviceTopology();
+      return;
+    }
+
+    // Dummy: host-backed, no NPU, but still needs the runtime (checked above).
+    if (dummyDeviceEnabled()) {
+      initializeDummyDevices();
+      return;
+    }
+
     int device_count = 0;
-    // A failed query (SDK/driver not loadable) stays fatal; "query succeeded,
-    // found 0 NPUs" is handled below.
+    // The runtime is loaded but the query failed (kernel driver not loaded / device
+    // unavailable): fatal. "Query succeeded, found 0 NPUs" is handled below.
     RBLN_CHECK(
         !rbln_get_device_count(&device_count),
-        "rbln_get_device_count failed; the RBLN SDK/driver may not be loadable — ensure the SDK is installed "
-        "and the kernel driver is loaded");
+        "rbln_get_device_count failed; the RBLN kernel driver may not be loaded or the device is unavailable");
     const int physical_device_count = device_count;
     RBLN_LOG_DEBUG("Found {} physical NPU(s)", physical_device_count);
 

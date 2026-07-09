@@ -9,6 +9,7 @@ set(sources
   RBLNHooksInterface.cpp
   RBLNLogging.cpp
   RBLNPinnedAllocator.cpp
+  RBLNProfiler.cpp
   RBLNV2VBatch.cpp
 )
 set(headers
@@ -21,6 +22,7 @@ set(headers
   RBLNLogging.h
   RBLNMacros.h
   RBLNPinnedAllocator.h
+  RBLNProfiler.h
   RBLNSupportedDtypes.h
   RBLNV2VBatch.h
 )

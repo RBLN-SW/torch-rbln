@@ -6,12 +6,14 @@
 #include <c10/rbln/RBLNFallbackConfig.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
+#include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNSupportedDtypes.h>
 #include <torch/csrc/Dtype.h>
 #include <torch/csrc/utils/pybind.h>
 #include <torch_rbln/csrc/distributed/c10d/rbln/ProcessGroupRBLNModule.hpp>
 #include <torch_rbln/csrc/rbln/DispatchShim.h>
 #include <torch_rbln/csrc/rbln/WarmCache.h>
+#include <torch_rbln/csrc/rbln/profiler/kineto/rbln_kineto_adapter.h>
 #include <exception>
 #include <vector>
 
@@ -51,12 +53,31 @@ void add_py_method_definitions(std::vector<PyMethodDef>& method_vector, PyMethod
  */
 void register_public_device_api(py::module_& module) {
   module.def("current_device", &c10::rbln::get_device_index, "Get the current device.");
+  // Throws on a malformed RBLN_DEVICE_MAP (config error); "no hardware/runtime -> 0"
+  // is already graceful inside get_device_count().
   module.def("device_count", &c10::rbln::get_device_count, "Get the number of devices.");
   module.def("set_device", &c10::rbln::set_device_index, "Set the current device.");
   module.def(
       "physical_device_count",
       &c10::rbln::get_physical_device_count,
       "Get the number of physical devices (ignores RSD mode).");
+  module.def(
+      "is_dummy_device",
+      &c10::rbln::is_dummy_device,
+      "Whether host-backed dummy device mode (RBLN_DUMMY_DEVICE) is active.");
+  module.def(
+      "runtime_available",
+      &c10::rbln::runtime_available,
+      "Single source of truth for device-runtime liveness (loaded, not shutting down, a device exists). "
+      "Never raises.");
+  module.def(
+      "runtime_loaded",
+      &rbln_runtime_available,
+      "Whether the RBLN device runtime is loaded (librbln's rbln_runtime_available()). Never raises.");
+  module.def(
+      "_set_runtime_shutting_down",
+      &c10::rbln::set_runtime_shutting_down,
+      "Mark the RBLN runtime as shutting down so late ops stop dispatching into it.");
   module.def(
       "_exchange_device",
       &c10::rbln::exchange_device_index,
@@ -168,6 +189,42 @@ void register_internal_api(py::module_& module) {
   module.def(
       "_dispatch_shim_diag_reset", &torch_rbln::shim::diag_reset_dispatch_paths, "DIAG: reset dispatch path counters");
   module.def(
+      "_dispatch_fallback_by_op",
+      &torch_rbln::shim::diag_dump_fallback_by_op,
+      "DIAG/PROFILER: per-op CPU-fallback counts (list of (op_name, count), non-zero only)");
+  module.def(
+      "_dispatch_fallback_by_op_reset",
+      &torch_rbln::shim::diag_reset_fallback_by_op,
+      "DIAG/PROFILER: reset per-op CPU-fallback counts");
+  module.def(
+      "_dispatch_recompile_by_op",
+      &torch_rbln::shim::diag_dump_recompile_by_op,
+      "DIAG/PROFILER: per-op warm-cache miss (recompile) counts (list of (op_name, count), non-zero only)");
+  module.def(
+      "_dispatch_recompile_by_op_reset",
+      &torch_rbln::shim::diag_reset_recompile_by_op,
+      "DIAG/PROFILER: reset per-op recompile counts");
+  module.def(
+      "_dispatch_fallback_reasons",
+      &torch_rbln::shim::diag_dump_fallback_reasons,
+      "DIAG/PROFILER: cpu_fallback reason counts [dtype-not-fp16, nan/inf input, all-scalar]");
+  module.def(
+      "_dispatch_fallback_reasons_reset",
+      &torch_rbln::shim::diag_reset_fallback_reasons,
+      "DIAG/PROFILER: reset cpu_fallback reason counts");
+  module.def(
+      "_explain_set_trace",
+      &torch_rbln::shim::diag_set_trace_enabled,
+      "DIAG/PROFILER (A) WHERE: enable/disable opt-in call-site capture (off by default)");
+  module.def(
+      "_explain_trace_by_op",
+      &torch_rbln::shim::diag_dump_trace_by_op,
+      "DIAG/PROFILER (A) WHERE: per-op captured call-site (list of (op_name, site))");
+  module.def(
+      "_explain_trace_by_op_reset",
+      &torch_rbln::shim::diag_reset_trace_by_op,
+      "DIAG/PROFILER (A) WHERE: reset captured call-sites");
+  module.def(
       "_dispatch_shim_align_fastpath_count",
       &torch_rbln::shim::diag_dump_align_fastpath_count,
       "DIAG: count of align-penalty fast-path hits");
@@ -180,6 +237,77 @@ void register_internal_api(py::module_& module) {
       "_dispatch_shim_warm_segments_reset",
       &torch_rbln::shim::diag_reset_warm_segments,
       "DIAG: reset warm-cache hit per-segment timers");
+
+  // PROFILER: hidden host-bounce / fallback counters (always-on, cold-path only).
+  // Returns per-site (count, bytes) in BounceSite enum order. See RBLNProfiler.h.
+  module.def(
+      "_profiler_dump_bounces",
+      []() {
+        const auto s = c10::rbln::prof::dump_bounces();
+        std::vector<std::pair<uint64_t, uint64_t>> out;
+        out.reserve(static_cast<size_t>(c10::rbln::prof::kNumBounceSites));
+        for (int i = 0; i < c10::rbln::prof::kNumBounceSites; ++i) {
+          out.emplace_back(s.count[i], s.bytes[i]);
+        }
+        return out;
+      },
+      "PROFILER: per-site (count, bytes) of hidden host bounces, in BounceSite order");
+  module.def("_profiler_reset_bounces", &c10::rbln::prof::reset_bounces, "PROFILER: reset hidden-bounce counters");
+
+  // PROFILER: runtime (rebel-compiler) hidden-overhead counters, read from librbln
+  // via its public C-API. Per-reason axes are POSITIONAL — their meaning is an
+  // internal classification interpreted Python-side, so no internal name crosses
+  // this boundary. See rbln_runtime_api.h / third_party/rebel_compiler.
+  module.def(
+      "_rt_prof_hidden",
+      []() {
+        const uint32_t n = c10::rbln::rt_prof_hidden_num();
+        std::vector<uint64_t> c(n, uint64_t{0}), b(n, uint64_t{0});
+        c10::rbln::rt_prof_hidden_get(c.data(), b.data(), n);
+        std::vector<std::pair<uint64_t, uint64_t>> out;
+        out.reserve(n);
+        for (uint32_t i = 0; i < n; ++i) {
+          out.emplace_back(c[i], b[i]);
+        }
+        return out;
+      },
+      "PROFILER: per-cause (count,bytes) of runtime hidden d2h, positional");
+  module.def(
+      "_rt_prof_reject",
+      []() {
+        const uint32_t n = c10::rbln::rt_prof_reject_num();
+        std::vector<uint64_t> c(n, uint64_t{0}), b(n, uint64_t{0});
+        c10::rbln::rt_prof_reject_get(c.data(), b.data(), n);
+        std::vector<std::pair<uint64_t, uint64_t>> out;
+        out.reserve(n);
+        for (uint32_t i = 0; i < n; ++i) {
+          out.emplace_back(c[i], b[i]);
+        }
+        return out;
+      },
+      "PROFILER: per-reason (count,bytes) of v2v plan reject, positional");
+  module.def(
+      "_rt_prof_host_sync",
+      []() {
+        uint64_t dc = 0, db = 0, hc = 0, hb = 0;
+        c10::rbln::rt_prof_host_sync_d2h(&dc, &db);
+        c10::rbln::rt_prof_host_sync_h2d(&hc, &hb);
+        std::vector<std::pair<uint64_t, uint64_t>> out{{dc, db}, {hc, hb}}; // [0]=d2h, [1]=h2d
+        return out;
+      },
+      "PROFILER: [(d2h_count,d2h_bytes),(h2d_count,h2d_bytes)] real device<->host transfers");
+  module.def(
+      "_rt_prof_memory",
+      []() {
+        uint64_t cur = 0, peak = 0;
+        c10::rbln::rt_prof_memory(&cur, &peak);
+        return std::make_pair(cur, peak);
+      },
+      "PROFILER: (current,peak) device-memory gauge (process-global, both alloc paths)");
+  module.def(
+      "_rt_prof_reset",
+      []() { c10::rbln::rt_prof_reset(); },
+      "PROFILER: reset runtime hidden/reject/host-sync counters for an explain region");
   module.def(
       "_register_cpp_shim",
       &torch_rbln::shim::register_cpp_shim,
@@ -255,6 +383,28 @@ void register_internal_api(py::module_& module) {
         return at::native::rbln::CPUFastPathRegistry::instance().has_handler_for_op(op_name);
       },
       "Internal: returns True iff a CPU fast-path handler is registered for the given op name");
+
+  // (B) explain: rebel-runtime (librbln) boundary timing. Gated so it is OFF
+  // (one relaxed atomic load per boundary call) unless an explain region enables
+  // it; lets the profiler split host overhead into runtime vs torch-side dispatch.
+  module.def(
+      "_rt_timing_enable",
+      [](bool on) { c10::rbln::rt_timing_enable(on); },
+      "Internal: enable/disable librbln boundary timing for an explain region");
+  module.def("_rt_timing_reset", []() { c10::rbln::rt_timing_reset(); }, "Internal: zero the librbln boundary timers");
+  module.def(
+      "_rt_timing_get",
+      []() {
+        std::vector<uint64_t> buf(2 * c10::rbln::kRtTimingN, uint64_t{0});
+        c10::rbln::rt_timing_get(buf.data());
+        std::vector<std::pair<uint64_t, uint64_t>> out;
+        out.reserve(c10::rbln::kRtTimingN);
+        for (std::size_t i = 0; i < c10::rbln::kRtTimingN; ++i) {
+          out.emplace_back(buf[2 * i], buf[2 * i + 1]);
+        }
+        return out;
+      },
+      "Internal: per-primitive (ns, calls) spent inside librbln boundary calls this region");
 
   // Pybind11 instance raw-pointer extractor.
   //
@@ -408,6 +558,7 @@ extern "C" PyObject* initModule() {
   register_public_device_api(python_module);
   register_internal_api(python_module);
   register_supported_dtypes_api(python_module);
+  rbln::profiler::kineto::register_rbln_kineto_profiler();
 
   c10::rbln::register_rbln_device_mapping_initialized_callback([]() {
     py::gil_scoped_acquire gil;

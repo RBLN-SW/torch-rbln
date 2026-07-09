@@ -4,6 +4,7 @@
 #include <ATen/native/rbln/RBLNTensorUtils.h>
 #include <c10/rbln/RBLNFallbackConfig.h>
 #include <c10/rbln/RBLNLogging.h>
+#include <c10/rbln/RBLNProfiler.h>
 #include <c10/util/Exception.h>
 
 #include <cstdint>
@@ -137,6 +138,9 @@ void submit_or_fallback(c10::rbln::V2VBatch& batch, const char* op_name, std::fu
         "Underlying error: {}",
         op_name,
         error_message);
+    // PROFILER (cold branch): a strided v2v (cat / index_select / index_copy /
+    // copy_) was rejected on device and fell back to a host CPU op.
+    c10::rbln::prof::record_bounce(c10::rbln::prof::BounceSite::kStridedV2VFallback, 0);
     cpu_fallback();
   }
 }

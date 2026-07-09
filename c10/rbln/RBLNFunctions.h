@@ -135,6 +135,32 @@ C10_RBLN_API bool is_eager_malloc();
 C10_RBLN_API void set_device_layout_like(void* target_data, const void* ref_data);
 
 /**
+ * @brief Whether RBLN_DUMMY_DEVICE mode is active: a host-backed logical device
+ * with no NPU, so tensors can be built and compiled without hardware (execution
+ * still needs one). Cached after the first call.
+ */
+C10_RBLN_API bool is_dummy_device();
+
+/**
+ * @brief Nothrow view of get_device_count() (returns 0 on any failure), for the
+ * liveness predicates that must never throw.
+ */
+C10_RBLN_API c10::DeviceIndex get_device_count_nothrow() noexcept;
+
+/**
+ * @brief Single source of truth: can an rbln_* call be serviced safely now?
+ * Runtime loaded (librbln's rbln_runtime_available()), not shutting down, and a
+ * device present -- dummy included (it host-backs via the runtime). Never throws.
+ */
+C10_RBLN_API bool runtime_available() noexcept;
+
+/**
+ * @brief Mark the runtime as shutting down so late frees / best-effort ops stop
+ * dispatching into a possibly-unmapped runtime. Wired to a Python atexit hook.
+ */
+C10_RBLN_API void set_runtime_shutting_down(bool value) noexcept;
+
+/**
  * @brief Allocates memory on the specified RBLN device.
  *
  * This function allocates a contiguous block of memory on the given RBLN
@@ -433,5 +459,34 @@ C10_RBLN_API void reset_peak_memory_stats(const c10::Device& device);
  * @param enabled If true, enable file offloading; if false, disable it.
  */
 C10_RBLN_API void set_file_offloading_enabled(bool enabled);
+
+/**
+ * @brief Diagnostic: time spent inside librbln boundary calls (borrow / v2v /
+ * h2v / ...), so a profiler can split host overhead into "rebel runtime" vs
+ * "torch-side dispatch". Gated: when disabled each boundary call pays only one
+ * relaxed atomic load (no clock read), preserving ON==OFF latency; an explain
+ * region flips it on for its duration. ``rt_timing_get`` fills ``2 * kRtTimingN``
+ * uint64 slots as ``[ns, calls]`` per primitive (order matches the internal
+ * RtIdx enum: v2v, v2v_multi, borrow, acquire, return, v2h, h2v).
+ */
+constexpr std::size_t kRtTimingN = 7;
+C10_RBLN_API void rt_timing_enable(bool on);
+C10_RBLN_API void rt_timing_reset();
+C10_RBLN_API void rt_timing_get(uint64_t* out);
+
+// torch.rbln.explain() runtime-counter reads — thin pass-throughs to librbln's
+// public C-API (see rebel/runtime/api/rbln_runtime_api.h). Process-global, lazy.
+// These are LINKED (not dlsym'd): a librbln lacking them fails extension load, so
+// the vendored header and the runtime are kept version-aligned (third_party/).
+// The per-reason axes are positional; their meaning is interpreted Python-side, so
+// no internal classification name crosses this boundary.
+C10_RBLN_API uint32_t rt_prof_hidden_num();
+C10_RBLN_API void rt_prof_hidden_get(uint64_t* counts, uint64_t* bytes, uint32_t n);
+C10_RBLN_API uint32_t rt_prof_reject_num();
+C10_RBLN_API void rt_prof_reject_get(uint64_t* counts, uint64_t* bytes, uint32_t n);
+C10_RBLN_API void rt_prof_host_sync_d2h(uint64_t* count, uint64_t* bytes);
+C10_RBLN_API void rt_prof_host_sync_h2d(uint64_t* count, uint64_t* bytes);
+C10_RBLN_API void rt_prof_memory(uint64_t* current, uint64_t* peak);
+C10_RBLN_API void rt_prof_reset();
 
 } // namespace c10::rbln

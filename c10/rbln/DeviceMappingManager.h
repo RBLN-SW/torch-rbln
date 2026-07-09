@@ -230,6 +230,14 @@ class C10_RBLN_API DeviceMappingManager {
   void initializeFromNpusPerDevice(int npus_per_device, int physical_device_count);
 
   /**
+   * @brief Register host-backed logical devices (RBLN_DUMMY_DEVICE) with no NPU.
+   *
+   * Layout comes from RBLN_DEVICE_MAP / RBLN_NPUS_PER_DEVICE (or a single
+   * device); physical ids are shape markers only and are not range-checked.
+   */
+  void initializeDummyDevices();
+
+  /**
    * @brief Check if the number of physical NPUs per logical device is valid (must be in BASE_SIZES).
    */
   bool isValidDeviceGroupSize(size_t size) const;
@@ -238,6 +246,15 @@ class C10_RBLN_API DeviceMappingManager {
    * @brief Get a string representation of valid sizes for error messages.
    */
   std::string getValidSizesString() const;
+
+  /**
+   * @brief Hardware-independent validation of a logical->physical device group layout,
+   * shared by the RBLN_DEVICE_MAP (real) and RBLN_DUMMY_DEVICE paths: bounds the logical
+   * device count, requires a valid group size, and rejects a physical id assigned to more
+   * than one logical device. The physical-id range check needs a physical device count and
+   * stays in the real path.
+   */
+  void validateDeviceGroups(const std::vector<std::vector<int>>& groups) const;
 
   /**
    * @brief Build and cache the device topology.
@@ -274,5 +291,12 @@ struct RblnNpuMappingEnvDisplay {
  * @brief Get current process's RBLN NPU mapping env (RBLN_DEVICE_MAP, RBLN_NPUS_PER_DEVICE) for display.
  */
 C10_RBLN_API RblnNpuMappingEnvDisplay getRblnNpuMappingEnvDisplay();
+
+/**
+ * @brief Whether RBLN_DUMMY_DEVICE is enabled (truthy spellings only; the rebel
+ * runtime already rejects non-boolean values). Runtime-free; never throws.
+ * The logical device count comes from RBLN_DEVICE_MAP, not this flag.
+ */
+C10_RBLN_API bool dummyDeviceEnabled();
 
 } // namespace c10::rbln

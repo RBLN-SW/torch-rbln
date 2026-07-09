@@ -20,6 +20,7 @@ __all__ = [
     "device_count",
     "physical_device_count",
     "is_available",
+    "is_dummy_device",
     "is_initialized",
     "get_amp_supported_dtype",
     "set_device",
@@ -77,13 +78,22 @@ def physical_device_count() -> int:
 
 
 def is_available() -> bool:
-    """
-    Check if any RBLN devices are available.
+    """Whether RBLN is usable as an accelerator (``torch.cuda.is_available()`` parity).
 
-    Returns:
-        bool: True if at least one RBLN device is available, False otherwise.
+    ``False`` when the runtime is absent/torn down or no device is present. Raises on a
+    malformed ``RBLN_*`` config when the runtime is present (like :func:`device_count`),
+    which torch's ``is_privateuse1_backend_available()`` relies on.
     """
-    return device_count() > 0
+    return torch_rbln._C.device_count() > 0 and torch_rbln._C.runtime_available()
+
+
+def is_dummy_device() -> bool:
+    """Whether ``RBLN_DUMMY_DEVICE`` (host-backed, no NPU) mode is active.
+
+    ``is_available()`` is ``True`` in both dummy and real modes, so use this to
+    tell a compile-only dummy device apart from real NPU availability.
+    """
+    return torch_rbln._C.is_dummy_device()
 
 
 def is_initialized() -> bool:
