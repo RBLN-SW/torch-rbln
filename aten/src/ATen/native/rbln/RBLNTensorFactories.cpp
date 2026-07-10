@@ -231,9 +231,26 @@ at::Tensor& fill_scalar_rbln_(at::Tensor& self, const at::Scalar& value) {
 
   const auto nbytes = static_cast<size_t>(self.numel()) * self.element_size();
   const auto borrow = c10::rbln::borrow_host_ptr(self.data_ptr(), nbytes);
-  void* host_ptr = reinterpret_cast<void*>(borrow.host_ptr);
 
+  // ``fill_host_typed`` does a checked cast that throws on overflow (e.g.
+  // fill_(128) into int8). Guard the borrow so the throw can't skip
+  // return_borrowed and leak it; the happy path disarms and returns explicitly.
+  struct BorrowGuard {
+    uint64_t id;
+    bool armed = true;
+    ~BorrowGuard() {
+      if (armed) {
+        try {
+          c10::rbln::return_borrowed(id, /*updated=*/false);
+        } catch (...) {
+        }
+      }
+    }
+  } guard{borrow.borrow_id};
+
+  void* host_ptr = reinterpret_cast<void*>(borrow.host_ptr);
   const bool handled = fill_host_typed(host_ptr, self.numel(), self.scalar_type(), value);
+  guard.armed = false;
   c10::rbln::return_borrowed(borrow.borrow_id, /*updated=*/handled);
   // ``fill_host_typed_supports`` already vetted the dtype above, so the
   // call above should always succeed. Keep a defensive fallback for the
