@@ -94,6 +94,12 @@ def empty_cache(device: Optional[Union[int, str, torch.device]] = None) -> None:
     from torch_rbln._internal.ops_utils import view_recipe_cache_reset
 
     view_recipe_cache_reset()
+    # Backstop for the SDPA attn-weights cache: entries are normally popped by the
+    # backward, but a forward-under-grad with no backward would strand one. Lazy
+    # import avoids a load-time cycle.
+    from torch_rbln._internal.kernels.sdpa import _clear_attn_weights_cache
+
+    _clear_attn_weights_cache()
     # No NPU: host caches above still dropped, but skip the device-side flush.
     if _no_rbln_device():
         return

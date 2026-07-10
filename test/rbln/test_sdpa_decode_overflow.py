@@ -8,6 +8,7 @@ import math
 
 import pytest
 import torch
+import torch.nn.functional as F
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
@@ -243,6 +244,58 @@ class TestSDPADecodeOverflow(TestCase):
 
         needs_fallback, reason = needs_sdpa_shape_fallback(query, key)
         self.assertFalse(needs_fallback, "Aligned prefill shapes should not trigger fallback")
+
+    def test_dropout_with_grad_rejected(self):
+        """dropout_p > 0 + autograd must fail loudly: the backward recomputes
+        softmax without the forward mask, so it would return a wrong gradient."""
+        q = torch.randn(1, 2, 4, 8, dtype=torch.float32, device="rbln", requires_grad=True)
+        k = torch.randn(1, 2, 4, 8, dtype=torch.float32, device="rbln")
+        v = torch.randn(1, 2, 4, 8, dtype=torch.float32, device="rbln")
+        with self.assertRaises(NotImplementedError):
+            F.scaled_dot_product_attention(q, k, v, dropout_p=0.5)
+
+    def test_dropout_without_grad_allowed(self):
+        """dropout_p > 0 without autograd (inference) still works — only the grad
+        path is rejected."""
+        q = torch.randn(1, 2, 4, 8, dtype=torch.float32, device="rbln")
+        k = torch.randn(1, 2, 4, 8, dtype=torch.float32, device="rbln")
+        v = torch.randn(1, 2, 4, 8, dtype=torch.float32, device="rbln")
+        with torch.no_grad():
+            out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.5)
+        self.assertEqual(tuple(out.shape), (1, 2, 4, 8))
+
+    def test_grad_without_dropout_allowed(self):
+        """Autograd with dropout_p == 0 still works."""
+        q = torch.randn(1, 2, 4, 8, dtype=torch.float32, device="rbln", requires_grad=True)
+        k = torch.randn(1, 2, 4, 8, dtype=torch.float32, device="rbln")
+        v = torch.randn(1, 2, 4, 8, dtype=torch.float32, device="rbln")
+        out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
+        out.sum().backward()
+        self.assertTrue(torch.isfinite(q.grad).all().item())
+
+    def test_inference_does_not_leak_attn_weights_cache(self):
+        """SDPA under no_grad must not accumulate attn-weights cache entries —
+        nothing pops them in inference, so caching leaks a device tensor per call."""
+        from torch_rbln._internal.kernels import sdpa as sdpa_mod
+
+        sdpa_mod._clear_attn_weights_cache()
+        with torch.no_grad():
+            for _ in range(4):
+                q = torch.randn(1, 4, 32, 64, dtype=torch.float16, device="rbln")
+                k = torch.randn(1, 4, 32, 64, dtype=torch.float16, device="rbln")
+                v = torch.randn(1, 4, 32, 64, dtype=torch.float16, device="rbln")
+                F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
+        self.assertEqual(len(sdpa_mod._sdpa_attn_weights_cache), 0)
+
+    def test_empty_cache_clears_attn_weights_cache(self):
+        """memory.empty_cache() flushes the SDPA cache as a backstop for a
+        forward-under-grad whose backward never runs."""
+        import torch_rbln
+        from torch_rbln._internal.kernels import sdpa as sdpa_mod
+
+        sdpa_mod._sdpa_attn_weights_cache[123456] = torch.zeros(2, device="rbln")
+        torch_rbln.memory.empty_cache()
+        self.assertEqual(len(sdpa_mod._sdpa_attn_weights_cache), 0)
 
 
 instantiate_device_type_tests(TestSDPADecodeOverflow, globals(), only_for="privateuse1")

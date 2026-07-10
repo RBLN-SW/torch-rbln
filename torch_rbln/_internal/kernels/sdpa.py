@@ -694,6 +694,26 @@ def scaled_dot_product_fused_attention_overrideable_rbln(
     """
     validate_sdpa_input(query, key, value, attn_bias, dropout_p, is_causal, scale)
 
+    # Whether a real backward will run. Computed on the ORIGINAL inputs (the later
+    # .contiguous()/mask conversions can build tensors that drop requires_grad).
+    # Gates the dropout+grad reject and the attn-weights caching below.
+    needs_backward = torch.is_grad_enabled() and (
+        query.requires_grad
+        or key.requires_grad
+        or value.requires_grad
+        or (attn_bias is not None and attn_bias.requires_grad)
+    )
+
+    # Dropout + autograd is unsupported: the forward applies dropout, but the
+    # backward recomputes softmax without the mask, so the gradient would be for a
+    # different (no-dropout) computation. Fail loudly instead of returning it.
+    if dropout_p > 0.0 and needs_backward:
+        raise NotImplementedError(
+            "RBLN SDPA does not support dropout_p > 0 with autograd (the backward cannot "
+            "reproduce the forward dropout mask). Use dropout_p=0.0, run under no_grad()/"
+            "eval(), or apply dropout outside scaled_dot_product_attention."
+        )
+
     # Check RBLN capability
     can_use, reason = can_use_rbln_sdpa(query, key, value, attn_bias, dropout_p, is_causal, scale, enable_gqa=False)
     if not can_use:
@@ -714,7 +734,10 @@ def scaled_dot_product_fused_attention_overrideable_rbln(
 
         attn_weights = _sdpa_compute_attn_weights(query, key, attn_bias, is_causal, computed_scale)
         output = _sdpa_compute_output(attn_weights, value, dropout_p)
-        _cache_attn_weights(output, attn_weights)
+        # Only cache for a real backward — inference never pops the cache, so
+        # unconditional caching leaks a device tensor per call.
+        if needs_backward:
+            _cache_attn_weights(output, attn_weights)
 
     # Auxiliary tensors for interface (shape depends on input dims)
     if query.dim() == 4:
