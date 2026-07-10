@@ -49,3 +49,9 @@ class TestPhysicalShape:
         pv = torch.rbln.physical_shape(out)
         assert pv != ()
         assert math.prod(pv) >= out.numel()
+
+
+if __name__ == "__main__":
+    from torch.testing._internal.common_utils import run_tests
+
+    run_tests()
