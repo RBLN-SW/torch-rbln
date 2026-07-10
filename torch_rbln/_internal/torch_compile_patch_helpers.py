@@ -7,6 +7,7 @@ auto-determination, tensor-parallel failover support, and CPU fallback functiona
 
 import functools
 import threading
+import types
 
 import torch
 
@@ -333,7 +334,22 @@ class CompiledFunctionWrapper:
         # lookups don't get silently redirected to the wrapped object.
         if name.startswith("__") and name.endswith("__"):
             raise AttributeError(name)
-        return getattr(object.__getattribute__(self, "_original_fn"), name)
+        model = object.__getattribute__(self, "_original_fn")
+        attr = getattr(model, name)
+        # Self-returning nn.Module methods (eval/train/to/cpu/half/requires_grad_/
+        # ...) return the wrapped model. Re-wrap the return so `compiled =
+        # compiled.eval()` keeps the wrapper — and its guard/failover — instead of
+        # silently unwrapping to the bare model. Only bound methods are intercepted;
+        # submodules, parameters and tensors pass through untouched.
+        if isinstance(attr, types.MethodType):
+
+            @functools.wraps(attr)
+            def keep_wrapper(*args, **kwargs):
+                result = attr(*args, **kwargs)
+                return self if result is model else result
+
+            return keep_wrapper
+        return attr
 
     def __get__(self, obj, objtype=None):
         # Descriptor protocol so `@torch.compile(backend="rbln")` on an instance

@@ -691,8 +691,21 @@ class TestCompiledFunctionWrapper(TestCase):
         __getattr__ delegates unknown attributes to the wrapped model."""
         model = torch.nn.Linear(4, 4)
         wrapper = CompiledFunctionWrapper(lambda *a, **k: None, model, Mock(), compile_kwargs={})
-        self.assertIs(wrapper.eval(), model)  # nn.Module.eval() returns self
         self.assertEqual(list(wrapper.state_dict().keys()), list(model.state_dict().keys()))
+        self.assertEqual(len(list(wrapper.parameters())), len(list(model.parameters())))
+
+    def test_wrapper_self_returning_methods_keep_wrapper(self):
+        """Self-returning nn.Module methods (eval/train/to) must return the wrapper,
+        not the bare model — else `compiled = compiled.eval()` silently drops the
+        guard/failover. The mode toggle still lands on the wrapped model."""
+        model = torch.nn.Linear(4, 4)
+        wrapper = CompiledFunctionWrapper(lambda *a, **k: None, model, Mock(), compile_kwargs={})
+        self.assertIs(wrapper.eval(), wrapper)
+        self.assertFalse(model.training)  # toggle reached the model
+        self.assertIs(wrapper.train(), wrapper)
+        self.assertTrue(model.training)
+        self.assertIs(wrapper.to("cpu"), wrapper)
+        # Non-self-returning delegates still return their real values.
         self.assertEqual(len(list(wrapper.parameters())), len(list(model.parameters())))
 
     @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
