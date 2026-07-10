@@ -745,6 +745,23 @@ class TestCompiledFunctionWrapper(TestCase):
         self.assertTrue(wrapper._failover_attempted)
         self.assertFalse(hasattr(model, "_failover_attempted"))
 
+    def test_wrapper_over_plain_function_keeps_attrs_local(self):
+        """A plain-function target has no attribute state to sync, so writes must stay on the
+        wrapper — not leak onto the function object or get shared across wrappers over the
+        same function. Only nn.Module targets are delegated to."""
+
+        def fn(*args, **kwargs):
+            return None
+
+        w1 = CompiledFunctionWrapper(fn, fn, Mock(), compile_kwargs={})
+        w2 = CompiledFunctionWrapper(fn, fn, Mock(), compile_kwargs={})
+        w1.custom_flag = 1
+        self.assertEqual(w1.custom_flag, 1)
+        self.assertFalse(hasattr(fn, "custom_flag"))  # not written onto the function
+        self.assertFalse(hasattr(w2, "custom_flag"))  # not shared with another wrapper over fn
+        del w1.custom_flag
+        self.assertFalse(hasattr(w1, "custom_flag"))
+
     @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
     def test_wrapper_binds_self_as_method_descriptor(self, mock_auto):
         """@torch.compile(backend="rbln") on an instance method: __get__ must bind

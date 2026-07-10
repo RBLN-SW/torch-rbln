@@ -355,16 +355,29 @@ class CompiledFunctionWrapper:
         # leaking onto the model.
         if name in type(self)._WRAPPER_OWN_ATTRS or hasattr(type(self), name):
             object.__setattr__(self, name, value)
+            return
+        model = object.__getattribute__(self, "_original_fn")
+        # Only delegate to an nn.Module target: it has real attribute state to keep in sync
+        # (training flag, params, buffers). A plain-function target has no such state, and
+        # writing onto the function object would be meaningless and would leak/share state
+        # across wrappers over the same function — keep it on the wrapper instead.
+        if isinstance(model, torch.nn.Module):
+            setattr(model, name, value)
         else:
-            setattr(object.__getattribute__(self, "_original_fn"), name, value)
+            object.__setattr__(self, name, value)
 
     def __delattr__(self, name):
         # Symmetric with __setattr__: own bookkeeping / wrapper-class names are deleted from
-        # the wrapper, everything else from the wrapped model.
+        # the wrapper; a real attribute is deleted from the wrapped model only when it is an
+        # nn.Module, otherwise from the wrapper.
         if name in type(self)._WRAPPER_OWN_ATTRS or hasattr(type(self), name):
             object.__delattr__(self, name)
+            return
+        model = object.__getattribute__(self, "_original_fn")
+        if isinstance(model, torch.nn.Module):
+            delattr(model, name)
         else:
-            delattr(object.__getattribute__(self, "_original_fn"), name)
+            object.__delattr__(self, name)
 
     def __getattr__(self, name):
         # Only fires for attributes not found on the wrapper. Delegate to the
