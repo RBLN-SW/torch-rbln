@@ -318,6 +318,21 @@ class CompiledFunctionWrapper:
 
     """
 
+    # The wrapper's own bookkeeping attributes. Every other attribute set on the wrapper is
+    # delegated to the wrapped model (see __setattr__), so these must be listed here to keep
+    # them on the wrapper itself.
+    _WRAPPER_OWN_ATTRS = frozenset(
+        {
+            "_compiled_fn",
+            "_original_fn",
+            "_original_compile_fn",
+            "_compile_kwargs",
+            "_max_retries",
+            "_auto_num_devices_determined",
+            "_failover_attempted",
+        }
+    )
+
     def __init__(self, compiled_fn, original_fn, original_compile_fn, compile_kwargs=None):
         self._compiled_fn = compiled_fn
         self._original_fn = original_fn
@@ -326,6 +341,30 @@ class CompiledFunctionWrapper:
         self._max_retries = 1
         self._auto_num_devices_determined = False
         self._failover_attempted = False
+
+    def __setattr__(self, name, value):
+        # Mirror __getattr__'s read delegation for writes: the wrapper's own bookkeeping
+        # stays on the wrapper, but everything else (the training flag, parameter/buffer
+        # swaps, arbitrary user attrs) is set on the wrapped model — the actually-executed
+        # object — so it can't silently diverge onto the wrapper. Delegating to the model's
+        # __setattr__ also lets nn.Module register a Parameter/Module/buffer properly.
+        #
+        # "Own" = the bookkeeping attrs above OR anything the wrapper class defines (methods,
+        # class attrs); keeping the latter on the wrapper lets e.g.
+        # mock.patch.object(wrapper, "_try_tp_failover") shadow the method here instead of
+        # leaking onto the model.
+        if name in type(self)._WRAPPER_OWN_ATTRS or hasattr(type(self), name):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(object.__getattribute__(self, "_original_fn"), name, value)
+
+    def __delattr__(self, name):
+        # Symmetric with __setattr__: own bookkeeping / wrapper-class names are deleted from
+        # the wrapper, everything else from the wrapped model.
+        if name in type(self)._WRAPPER_OWN_ATTRS or hasattr(type(self), name):
+            object.__delattr__(self, name)
+        else:
+            delattr(object.__getattribute__(self, "_original_fn"), name)
 
     def __getattr__(self, name):
         # Only fires for attributes not found on the wrapper. Delegate to the

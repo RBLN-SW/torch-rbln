@@ -708,6 +708,43 @@ class TestCompiledFunctionWrapper(TestCase):
         # Non-self-returning delegates still return their real values.
         self.assertEqual(len(list(wrapper.parameters())), len(list(model.parameters())))
 
+    def test_wrapper_setattr_delegates_to_model(self):
+        """Writes to the wrapper (training flag, parameter swap, arbitrary attrs) must land on
+        the wrapped model — the actually-executed object — not diverge onto the wrapper."""
+        model = torch.nn.Linear(4, 4)
+        wrapper = CompiledFunctionWrapper(lambda *a, **k: None, model, Mock(), compile_kwargs={})
+
+        wrapper.training = False
+        self.assertFalse(model.training)  # write reached the model...
+        self.assertFalse(wrapper.training)  # ...and the read reflects it
+
+        # A parameter swap must register on the model as a real Parameter.
+        new_weight = torch.nn.Parameter(torch.zeros(4, 4))
+        wrapper.weight = new_weight
+        self.assertIs(model.weight, new_weight)
+        self.assertIn("weight", dict(model.named_parameters()))
+
+        # Arbitrary user attribute delegates too.
+        wrapper.custom_flag = 123
+        self.assertEqual(model.custom_flag, 123)
+
+    def test_wrapper_delattr_delegates_to_model(self):
+        """`del compiled.attr` must remove it from the wrapped model."""
+        model = torch.nn.Linear(4, 4)
+        wrapper = CompiledFunctionWrapper(lambda *a, **k: None, model, Mock(), compile_kwargs={})
+        wrapper.custom_flag = 7
+        self.assertEqual(model.custom_flag, 7)
+        del wrapper.custom_flag
+        self.assertFalse(hasattr(model, "custom_flag"))
+
+    def test_wrapper_own_attrs_stay_on_wrapper(self):
+        """The wrapper's bookkeeping must not leak onto the wrapped model."""
+        model = torch.nn.Linear(4, 4)
+        wrapper = CompiledFunctionWrapper(lambda *a, **k: None, model, Mock(), compile_kwargs={})
+        wrapper._failover_attempted = True
+        self.assertTrue(wrapper._failover_attempted)
+        self.assertFalse(hasattr(model, "_failover_attempted"))
+
     @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
     def test_wrapper_binds_self_as_method_descriptor(self, mock_auto):
         """@torch.compile(backend="rbln") on an instance method: __get__ must bind
