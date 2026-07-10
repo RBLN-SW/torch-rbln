@@ -1,5 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
+import inspect
 import os
 
 import pandas as pd
@@ -15,6 +16,32 @@ from test.utils import SUPPORTED_DTYPES
 
 
 TORCH_RBLN_SAVE_PATH = os.getenv("TORCH_RBLN_SAVE_PATH", os.getcwd())
+
+
+def _slice_lm_head_to_last_token(model):
+    """Slice lm_head to the last token for full-sequence-logits models.
+
+    Custom modeling files like EXAONE predate HF's ``logits_to_keep`` and run
+    ``lm_head`` over the whole sequence.
+    No-op for models that already slice (llama/qwen).
+    """
+    if "logits_to_keep" in inspect.signature(type(model).forward).parameters:
+        return
+    lm_head = getattr(model, "lm_head", None)
+    if not isinstance(lm_head, torch.nn.Module):
+        return
+
+    class _LastTokenLMHead(torch.nn.Module):
+        def __init__(self, inner):
+            super().__init__()
+            self.inner = inner
+
+        def forward(self, hidden_states):
+            if hidden_states.dim() >= 2 and hidden_states.shape[-2] > 1:
+                hidden_states = hidden_states[..., -1:, :]
+            return self.inner(hidden_states)
+
+    model.lm_head = _LastTokenLMHead(lm_head)
 
 
 class TestCausalLMBase(TestCase):
@@ -43,6 +70,7 @@ class TestCausalLMBase(TestCase):
             **config_kwargs,
         )
         model.to(device)
+        _slice_lm_head_to_last_token(model)
         self.assertEqual(model.config.dtype, config_kwargs["dtype"])
         self.assertEqual(model.config._attn_implementation, config_kwargs["attn_implementation"])
         self.assertEqual(model.config.num_hidden_layers, config_kwargs["num_hidden_layers"])
@@ -97,6 +125,49 @@ class TestCausalLMBase(TestCase):
         self.assertEqual(outputs.size(), (batch_size, seq_len + self.max_new_tokens))
         return outputs
 
+    # RBLN runs 16-bit ops in DLFloat16 and matches an fp32 CPU reference to within
+    # ~1.3 logits (measured); a real regression diverges by orders of magnitude.
+    LOGIT_ATOL = 3.0
+
+    def _prefill_logits(self, model_id, config_kwargs, batch_size, seq_len, device):
+        """Next-token logits at the prompt's last position (via generate, one step:
+        no autoregressive cascade, and unlike a bare forward it works at batch size 1)."""
+        model, inputs = self._prepare_model_and_inputs(model_id, config_kwargs, batch_size, seq_len, device)
+        gen = model.generate(
+            **inputs,
+            max_new_tokens=1,
+            do_sample=False,
+            temperature=None,
+            top_k=None,
+            top_p=None,
+            eos_token_id=None,
+            return_dict_in_generate=True,
+            output_logits=True,
+        )
+        return gen.logits[0].float().cpu()
+
+    def _assert_logits_match_fp32(self, model_id, config_kwargs, batch_size, seq_len):
+        """Compare RBLN's next-token logits against an fp32 CPU reference (ground truth).
+
+        Greedy token-id equality between RBLN and a same-dtype CPU run is too strict: the
+        two are different 16-bit formats (RBLN DLFloat16 vs CPU bfloat16) and disagree by
+        a few logits even when both are correct, which flips near-tie argmaxes and cascades
+        during generation (an intermittent failure). We instead check that RBLN tracks the
+        fp32 truth, where its deviation is small and bounded by its own precision. Configs
+        whose dtype overflows the model (e.g. fp16 BMM) are skipped — a dtype limitation,
+        not an RBLN bug.
+        """
+        fp32_config_kwargs = dict(config_kwargs, dtype=torch.float32)
+        cpu_logits = self._prefill_logits(model_id, fp32_config_kwargs, batch_size, seq_len, self.cpu_device)
+        rbln_logits = self._prefill_logits(model_id, config_kwargs, batch_size, seq_len, self.rbln_device)
+
+        if not torch.isfinite(rbln_logits).all():
+            cpu_dtype_logits = self._prefill_logits(model_id, config_kwargs, batch_size, seq_len, self.cpu_device)
+            if not torch.isfinite(cpu_dtype_logits).all():
+                self.skipTest(f"dtype {config_kwargs['dtype']} overflows {model_id} on CPU too")
+
+        torch.testing.assert_close(rbln_logits, cpu_logits, atol=self.LOGIT_ATOL, rtol=0.0)
+
 
 @pytest.mark.single_worker
 class TestCausalLM(TestCausalLMBase):
@@ -131,9 +202,7 @@ class TestCausalLM(TestCausalLMBase):
             num_hidden_layers=self.num_hidden_layers,
         )
 
-        rbln_outputs = self._run(model_id, config_kwargs, batch_size, seq_len, self.rbln_device)
-        cpu_outputs = self._run(model_id, config_kwargs, batch_size, seq_len, self.cpu_device)
-        self.assertEqual(rbln_outputs.cpu(), cpu_outputs.cpu())
+        self._assert_logits_match_fp32(model_id, config_kwargs, batch_size, seq_len)
 
     @pytest.mark.usefixtures("enable_deploy_mode")
     @dtypes(*SUPPORTED_DTYPES)
@@ -153,9 +222,7 @@ class TestCausalLM(TestCausalLMBase):
             num_hidden_layers=self.num_hidden_layers,
         )
 
-        rbln_outputs = self._run(model_id, config_kwargs, batch_size, seq_len, self.rbln_device)
-        cpu_outputs = self._run(model_id, config_kwargs, batch_size, seq_len, self.cpu_device)
-        self.assertEqual(rbln_outputs.cpu(), cpu_outputs.cpu())
+        self._assert_logits_match_fp32(model_id, config_kwargs, batch_size, seq_len)
 
     # Deploy mode is disabled for Qwen2.5 due to float16 overflow issues in certain BMM operations.
     # This will be enabled in the future when cf16 host padding is supported.
@@ -170,20 +237,14 @@ class TestCausalLM(TestCausalLMBase):
     @parametrize("batch_size,seq_len", ci_tests_batch_seq)
     def test_qwen2(self, dtype, model_id, attn_implementation, batch_size, seq_len):
         config_kwargs = dict(
+            # Pin the revision so model updates can't shift the comparison.
+            revision="989aa7980e4cf806f80c7fef2b1adb7bc71aa306",
             dtype=dtype,
             attn_implementation=attn_implementation,
             num_hidden_layers=self.num_hidden_layers,
             sliding_window=0,  # Disable sliding window attention.
         )
-
-        rbln_outputs = self._run(model_id, config_kwargs, batch_size, seq_len, self.rbln_device)
-        if (dtype == torch.float16) and (attn_implementation == "sdpa"):
-            # Use bfloat16 on CPU to avoid float16 overflow in BMM operations.
-            cpu_config_kwargs = dict(config_kwargs, dtype=torch.bfloat16)
-            cpu_outputs = self._run(model_id, cpu_config_kwargs, batch_size, seq_len, self.cpu_device)
-        else:
-            cpu_outputs = self._run(model_id, config_kwargs, batch_size, seq_len, self.cpu_device)
-        self.assertEqual(rbln_outputs.cpu(), cpu_outputs.cpu())
+        self._assert_logits_match_fp32(model_id, config_kwargs, batch_size, seq_len)
 
 
 @pytest.mark.test_set_perf

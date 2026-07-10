@@ -19,7 +19,7 @@ dependencies = [
   "PyYAML>=6,<7",
   "scipy>=1.14.0",
   "libcst>=1.2.0",
-  "torch==2.10.0+cpu"
+  "torch==2.11.0+cpu"
 ]
 
 [project.entry-points]
@@ -37,8 +37,8 @@ requires = [
   "cmake>=3.18,<4.0",
   "mypy>=1.13.0,<1.14.0",
   "ninja>=1.11.1.3,<1.11.2",
-  "rebel-compiler>=0.10.4,<0.20.0",
-  "torch==2.10.0+cpu"
+  "rebel-compiler>=0.11.0,<0.20.0",
+  "torch==2.11.0+cpu"
 ]
 build-backend = "hatchling.build"
 
@@ -47,13 +47,8 @@ build-backend = "hatchling.build"
 # ==============================================================================
 
 [tool.hatch.version]
-# Version is computed by tools/get_version.py, which calls setuptools-scm
-# with custom version_scheme and local_scheme callables:
-# - On a tag (distance=0): preserve the tag version as-is, including pre-release
-#   e.g. v0.10.0a0 → 0.10.0a0,  v0.10.0 → 0.10.0
-# - Off a tag (distance>0): strip pre-release, bump patch, append .devN+gCOMMIT
-#   e.g. v0.10.0a0, dist=5 → 0.10.1.dev5+g1234abc
-#        v0.10.0,   dist=5 → 0.10.1.dev5+g1234abc
+# Version is derived from git tags by setuptools-scm.
+# See `docs/RELEASE_PROCESS.md` for the tag-to-version mapping.
 source = "code"
 path = "tools/get_version.py"
 expression = "compute_version()"
@@ -154,7 +149,7 @@ rebel-compiler = { index = "rbln" }
 build = [
   "cmake>=3.18",
   "editables>=0.5",
-  "rebel-compiler>=0.10.4,<0.20.0",
+  "rebel-compiler>=0.11.0,<0.20.0",
   "setuptools-scm>=8.0",
   "hatchling>=1.25",
   "mypy>=1.13.0,<1.14.0",
@@ -162,6 +157,7 @@ build = [
   "pip>=24.3.1,<24.4"
 ]
 lint = [
+  "actionlint-py>=1.7.12.24,<1.8.0",
   "black>=24.2.0,<25.0.0",
   "click>=8.1.8,<8.2.0",
   "cmakelint>=1.4.1,<1.5",
@@ -204,7 +200,9 @@ lint = [
   "types-setuptools>=75.8.0.20250110,<75.8.1.0",
   "types-tabulate>=0.8.8,<0.9.0",
   "types-urllib3>=1.26.25.14,<1.26.26.0",
-  "usort>=1.0.8.post1,<1.1.0"
+  "usort>=1.0.8.post1,<1.1.0",
+  "yamllint>=1.38.0,<1.39.0",
+  "zizmor>=1.26.1,<1.27.0"
 ]
 dev = [
   { include-group = "build" },

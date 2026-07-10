@@ -114,7 +114,7 @@ The value is a **comma-separated list** of fallback case names to disable:
 | `dispatch_mode`  | Falls back to CPU when a non-infra `TorchDispatchMode` is active | Skips the check — risks infinite recursion                    |
 | `trace`          | Falls back to CPU when a Python trace is active (e.g. pdb, coverage) | Skips the check — compile may run under tracer              |
 | `reentrant`      | Falls back to CPU when already inside RBLN compile op (e.g. print/repr, nested op); logs a warning | Skips the check — risks infinite recursion                 |
-| `dtype`          | Falls back when any input tensor is not `torch.float16`          | Sends non-float16 tensors to RBLN — may produce wrong results |
+| `dtype`          | Falls back on unsupported or mismatched tensor dtypes            | Sends such tensors to RBLN — may produce wrong results        |
 | `scalar`         | Falls back when all input tensors are 0-dim scalars              | Sends scalar ops to RBLN — may fail in rebel-compiler         |
 | `storage_offset` | Falls back when a contiguous tensor has `storage_offset != 0`    | Sends offset tensors to RBLN — may read wrong data            |
 | `nan_inf`        | Falls back when inputs contain NaN or Inf (non-deploy mode only) | Skips the NaN/Inf scan — invalid values reach the device      |
@@ -170,13 +170,53 @@ torch.rbln.device_summary()
 +-------------------+-------------------+----------------------+
 ```
 
+### RBLN_DUMMY_DEVICE
+
+Development / compile-only mode for hosts **without an NPU**. When set, the
+allocator and memory transfers are served from host memory, so device tensors
+can be constructed and a model traced/compiled (e.g. on a CI or compiler box)
+even though no hardware is present.
+
+`RBLN_DUMMY_DEVICE` is a **boolean** flag (shared with the rebel runtime, which
+validates it at startup): `1/true/t/yes/y/on` enable it, `0/false/f/no/n/off`
+and unset disable it, and any other value (e.g. `4`) aborts at startup. The
+host-backed logical-device layout comes from `RBLN_DEVICE_MAP` (its group count
+and sizes). Without `RBLN_DEVICE_MAP`, `RBLN_NPUS_PER_DEVICE=N` yields a single
+logical device of size N (TP=N); with neither set, one device (TP=1).
+
+```bash
+# 1 host-backed logical device
+export RBLN_DUMMY_DEVICE=1
+
+# Preserve an RSD/TP layout for compilation (group count + sizes honored)
+export RBLN_DUMMY_DEVICE=1 RBLN_DEVICE_MAP="[0,1],[2,3]"   # 2 logical devices, TP=2
+```
+
+- Forced regardless of physical NPU presence; checked before any runtime query,
+  so a host with no SDK/driver still works.
+- `device_count()` reports the dummy logical device count (the `RBLN_DEVICE_MAP`
+  group count when set, otherwise 1); `physical_device_count()` stays `0`.
+  `RBLN_DEVICE_MAP` is validated as far as is possible without hardware — group
+  sizes against the allowed sizes (1, 2, 4, 8, 16, 32) and duplicate physical ids
+  are rejected — but physical-id ranges are **not** checked, so a map valid under
+  dummy is not guaranteed to be valid on a specific machine.
+- **Scope**: device tensor construction, host/device copies, and compile-only
+  `torch.compile` (building artifacts). Anything that must run on the NPU raises a
+  clear error — a compiled graph, or an eager op on a device dtype (fp16/bf16) — since
+  there is no NPU to run it. Host-side ops (e.g. fp32, which never runs on the NPU even
+  with real hardware) fall back to CPU exactly as they would on a real device.
+  Distributed collectives still require real hardware, and memory-stat APIs
+  (`memory_stats`, `memory_allocated`, ...) report zeros rather than real usage.
+- `torch.rbln.is_available()` returns `True` in this mode — treat it as a
+  development flag, not real hardware availability.
+
 ## Tensor Parallel Configuration
 
 The following environment variables control tensor parallel behavior for `torch.compile` operations and eager mode ops.
 
 ### TORCH_RBLN_USE_TP_FAILOVER
 
-Enables automatic tensor parallel failover. When a RuntimeError occurs during execution with `tensor_parallel_size > 1`, the system automatically retries with `tp_size=1` on the root NPU of the device group.
+Enables automatic tensor parallel failover. When a RuntimeError occurs during execution with `num_devices > 1`, the system automatically retries with `num_devices=1` on the root NPU of the device group.
 
 This is useful for models that don't support tensor parallelism, allowing them to run on a single NPU within an aggregated device group without manual intervention.
 
@@ -186,32 +226,32 @@ export TORCH_RBLN_USE_TP_FAILOVER=OFF  # disable (default: OFF)
 ```
 
 **Behavior:**
-- When set to ON and a RuntimeError occurs with `tp > 1`:
+- When set to ON and a RuntimeError occurs with `num_devices > 1`:
   1. The system logs a warning message indicating the failover attempt
-  2. The model is recompiled with `tensor_parallel_size=1`
+  2. The model is recompiled with `num_devices=1`
   3. Execution continues on the root NPU of the device group
 - When set to OFF or unset (default), RuntimeErrors are propagated as-is
 
 **Example scenario:**
 With `RBLN_NPUS_PER_DEVICE=4` (4 NPUs per logical device):
-- Initial compilation attempts `tp=4`
+- Initial compilation attempts `num_devices=4`
 - If the model doesn't support TP, a RuntimeError occurs
-- With failover enabled, the system retries with `tp=1` on NPU 0
+- With failover enabled, the system retries with `num_devices=1` on NPU 0
 
 ### TORCH_RBLN_USE_DEVICE_TP
 
-Controls whether eager mode operations use the device group's tensor parallel size instead of `tp_size=1`.
+Controls whether eager mode operations use the device group's `num_devices` instead of `num_devices=1`.
 
-By default, eager mode ops (operations outside of `torch.compile`) use `tp_size=1`. When this environment variable is set to ON, eager mode ops will follow the logical device size defined by `RBLN_NPUS_PER_DEVICE` or `RBLN_DEVICE_MAP`, matching the behavior of `torch.compile` operations.
+By default, eager mode ops (operations outside of `torch.compile`) use `num_devices=1`. When this environment variable is set to ON, eager mode ops will follow the logical device size defined by `RBLN_NPUS_PER_DEVICE` or `RBLN_DEVICE_MAP`, matching the behavior of `torch.compile` operations.
 
 ```bash
-export TORCH_RBLN_USE_DEVICE_TP=ON   # use device group tp size
-export TORCH_RBLN_USE_DEVICE_TP=OFF  # use tp_size=1 for eager ops (default: OFF)
+export TORCH_RBLN_USE_DEVICE_TP=ON   # use device group num_devices
+export TORCH_RBLN_USE_DEVICE_TP=OFF  # use num_devices=1 for eager ops (default: OFF)
 ```
 
 **Behavior:**
-- When set to ON: Eager mode ops use the device group's tensor parallel size (e.g., `tp=4` with `RBLN_NPUS_PER_DEVICE=4`)
-- When set to OFF or unset (default): Eager mode ops use `tp_size=1`
+- When set to ON: Eager mode ops use the device group's `num_devices` (e.g., `num_devices=4` with `RBLN_NPUS_PER_DEVICE=4`)
+- When set to OFF or unset (default): Eager mode ops use `num_devices=1`
 
 **Use case:**
 This is useful when you want consistent tensor parallel behavior across both eager and compiled operations, particularly in mixed execution scenarios.

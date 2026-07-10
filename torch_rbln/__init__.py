@@ -34,8 +34,6 @@ def torch_backends_entry_point() -> None:
         import torch
 
         # Load shared objects ##################################################
-        global library_names, libraries
-
         # Ensure dependent shared library is loaded before importing native extension
         find_and_load_tvm_library("librbln.so")
 
@@ -58,6 +56,15 @@ def torch_backends_entry_point() -> None:
         import torch_rbln.device
 
         torch._register_device_module("rbln", torch_rbln.device)
+
+        # At interpreter teardown, mark the runtime as shutting down so late frees /
+        # best-effort ops stop dispatching into a possibly-unmapped runtime (which
+        # would SEGFAULT). Best-effort defense; mirrors CUDA teardown handling.
+        import atexit
+
+        import torch_rbln._C
+
+        atexit.register(torch_rbln._C._set_runtime_shutting_down, True)
 
         # Import operators #####################################################
         import torch_rbln._internal.register_ops
@@ -164,6 +171,9 @@ def _create_process_group_rbln(dist_backend_opts, pg_options):
         ProcessGroupRBLN: A new ProcessGroupRBLN instance
     """
     import torch_rbln._C
+    from torch_rbln._internal.rdma_env import _apply_control_plane_ips
+
+    _apply_control_plane_ips()
 
     # Extract parameters from dist_backend_opts
     store = dist_backend_opts.store

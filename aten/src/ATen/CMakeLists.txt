@@ -1,6 +1,7 @@
 set(target torch_rbln)
 set(sources
   native/rbln/RBLNCPUFallback.cpp
+  native/rbln/RBLNCPUFastPaths.cpp
   native/rbln/RBLNCopy.cpp
   native/rbln/RBLNRepeat.cpp
   native/rbln/RBLNResize.cpp
@@ -10,9 +11,14 @@ set(sources
   native/rbln/RBLNTensorShape.cpp
   native/rbln/RBLNTensorUtils.cpp
   native/RBLNRegisterOps.cpp
+  native/rbln/fast_paths/rsqrt_fp32.cpp
+  native/rbln/fast_paths/pow_squared_fp32.cpp
+  native/rbln/fast_paths/mean_lastdim_fp32.cpp
+  native/rbln/fast_paths/int_elementwise.cpp
 )
 set(headers
   native/rbln/RBLNCPUFallback.h
+  native/rbln/RBLNCPUFastPaths.h
   native/rbln/RBLNCopy.h
   native/rbln/RBLNIndexUtils.h
   native/rbln/RBLNRepeat.h
@@ -41,6 +47,10 @@ set_target_properties(${target} PROPERTIES
 target_include_directories(${target} SYSTEM PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
   $<INSTALL_INTERFACE:include>
+)
+
+target_include_directories(${target} SYSTEM PRIVATE
+  ${REBEL_INCLUDE_DIRS}
 )
 
 install(TARGETS ${target}

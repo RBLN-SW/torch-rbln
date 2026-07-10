@@ -12,6 +12,7 @@ from typing import Any, List, Union  # noqa: UP035
 import torch
 
 import torch_rbln._C
+from torch_rbln._internal.ops_utils import SupportedDtypes
 
 
 __all__ = [
@@ -19,21 +20,35 @@ __all__ = [
     "device_count",
     "physical_device_count",
     "is_available",
+    "is_dummy_device",
+    "is_initialized",
     "get_amp_supported_dtype",
     "set_device",
+    "synchronize",
     "device",
     "device_of",
     "device_summary",
 ]
 
 
+# Whether this process has selected an RBLN device (torch.cuda-style lazy-init
+# flag). DeviceMesh reads it to decide whether to auto-select a per-rank device.
+_initialized: bool = False
+
+
 def current_device() -> int:
     """
     Get the index of the currently selected RBLN device.
 
+    Raises:
+        RuntimeError: if no RBLN device is available (mirrors
+            ``torch.cuda.current_device()`` on a host with no accelerator).
+
     Returns:
         int: The index of the currently selected RBLN device.
     """
+    if device_count() == 0:
+        raise RuntimeError("No RBLN devices are available")
     return torch_rbln._C.current_device()
 
 
@@ -63,13 +78,35 @@ def physical_device_count() -> int:
 
 
 def is_available() -> bool:
-    """
-    Check if any RBLN devices are available.
+    """Whether RBLN is usable as an accelerator (``torch.cuda.is_available()`` parity).
 
-    Returns:
-        bool: True if at least one RBLN device is available, False otherwise.
+    ``False`` when the runtime is absent/torn down or no device is present. Raises on a
+    malformed ``RBLN_*`` config when the runtime is present (like :func:`device_count`),
+    which torch's ``is_privateuse1_backend_available()`` relies on.
     """
-    return device_count() > 0
+    return torch_rbln._C.device_count() > 0 and torch_rbln._C.runtime_available()
+
+
+def is_dummy_device() -> bool:
+    """Whether ``RBLN_DUMMY_DEVICE`` (host-backed, no NPU) mode is active.
+
+    ``is_available()`` is ``True`` in both dummy and real modes, so use this to
+    tell a compile-only dummy device apart from real NPU availability.
+    """
+    return torch_rbln._C.is_dummy_device()
+
+
+def is_initialized() -> bool:
+    """True once :func:`set_device` has run, or when there are no devices at all.
+
+    The no-device case is deliberate (not a bug): it makes ``torch.distributed``'s
+    ``init_device_mesh`` skip its ``get_rank() % device_count()`` auto-select,
+    which would otherwise fail on a host with no NPU.
+
+    Note: this calls :func:`device_count`, so the first invocation initializes and
+    freezes the RBLN device mapping from the current ``RBLN_*`` environment.
+    """
+    return _initialized or device_count() == 0
 
 
 def get_amp_supported_dtype() -> List[torch.dtype]:
@@ -78,11 +115,29 @@ def get_amp_supported_dtype() -> List[torch.dtype]:
 
     Returns:
         List[torch.dtype]: A list of data types supported by AMP.
-
-    Note:
-        This function currently returns only `torch.float16`. It may need review to include other processable data types.
     """
-    return [torch.float16]  # TODO: Needs review regarding processable dtypes
+    return list(SupportedDtypes.amp)
+
+
+def synchronize(device: Union[int, torch.device, str, None] = None) -> None:
+    """Wait for all pending async transfers on the given RBLN device.
+
+    If no device is specified, the current device is used.
+
+    Args:
+        device (torch.device or int or str, optional): The device to synchronize.
+            Defaults to the current device.
+
+    Example::
+        >>> import torch
+        >>> cpu_tensor = rbln_tensor.to("cpu", non_blocking=True)
+        >>> torch.rbln.synchronize()  # wait for the transfer to complete
+    """
+    if device is None:
+        device_idx = current_device()
+    else:
+        device_idx = _get_device_index(device)
+    torch_rbln._C.synchronize(device_idx)
 
 
 def set_device(device: Union[int, torch.device, str]) -> None:
@@ -100,9 +155,13 @@ def set_device(device: Union[int, torch.device, str]) -> None:
         >>> torch.rbln.set_device(0)  # Set device 0 as current
         >>> torch.rbln.set_device(torch.device("rbln:1"))  # Set device 1 as current
     """
+    global _initialized
     device_idx = _get_device_index(device, optional=True)
     if device_idx >= 0:
+        if device_count() == 0:  # torch.cuda parity: selecting a device needs hardware
+            raise RuntimeError("No RBLN devices are available")
         torch_rbln._C.set_device(device_idx)
+        _initialized = True
 
 
 def _get_device_index(device: Any, optional: bool = False) -> int:
@@ -151,6 +210,8 @@ def _exchange_device(device: Union[int, torch.device]) -> int:
     device_idx = _get_device_index(device)
     if device_idx < 0:
         return -1
+    if device_count() == 0:  # torch.cuda parity: selecting a device needs hardware
+        raise RuntimeError("No RBLN devices are available")
     prev_device_idx = torch_rbln._C._exchange_device(device_idx)
     return prev_device_idx
 

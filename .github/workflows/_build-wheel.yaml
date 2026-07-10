@@ -1,0 +1,213 @@
+name: Build wheel
+
+on:
+  workflow_call:
+    inputs:
+      torch_rbln_sha:
+        description: Git commit SHA
+        type: string
+        required: true
+      python_version:
+        description: Python version (3.10-3.13)
+        type: string
+        required: true
+      build_type:
+        description: Build type (Release, Debug)
+        type: string
+        required: true
+    secrets:
+      GIT_PAT:
+        description: Personal access token
+        required: true
+      INTERNAL_INDEX_URL:
+        description: Internal package index URL
+        required: true
+      INTERNAL_INDEX_USERNAME:
+        description: Internal package index username
+        required: true
+      INTERNAL_INDEX_PASSWORD:
+        description: Internal package index password
+        required: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build wheel
+    if: ${{ github.repository_owner == vars.TORCH_RBLN_REPO_OWNER }}
+    runs-on: ${{ vars.TORCH_RBLN_RUNNER_CPU_LARGE }}
+    env:
+      GIT_CONFIG_COUNT: '1'
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: ${{ github.workspace }}
+    timeout-minutes: 60
+    container:
+      image: ${{ vars.TORCH_RBLN_IMAGE_BUILD_NAME }}:${{ vars.TORCH_RBLN_IMAGE_BUILD_TAG }}-py${{ inputs.python_version }}  # zizmor: ignore[unpinned-images] internal mutable tag, no digest to pin
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GIT_PAT }}
+    steps:
+      - name: Validate build type
+        env:
+          BUILD_TYPE: ${{ inputs.build_type }}
+        run: |
+          set -euo pipefail
+
+          case "${BUILD_TYPE}" in
+            Release | Debug) ;;
+            *) echo "::error::Invalid build_type '${BUILD_TYPE}'; allowed: Release, Debug"; exit 1 ;;
+          esac
+
+      - name: Check out torch-rbln repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          ref: ${{ inputs.torch_rbln_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+
+      - name: Check uv and Python versions
+        env:
+          PYTHON_VERSION: ${{ inputs.python_version }}
+        run: |
+          set -euo pipefail
+
+          echo "::notice::uv binary: $(command -v uv)"
+          uv --version
+          echo "::notice::python binary: $(command -v python3)"
+          python3 --version
+
+          detected_python_version="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+          if [[ "${detected_python_version}" != "${PYTHON_VERSION}" ]]; then
+            echo "::error::Python ${detected_python_version} does not match python_version ${PYTHON_VERSION}"
+            exit 1
+          fi
+
+      - name: Build wheel
+        env:
+          TORCH_RBLN_BUILD_TYPE: ${{ inputs.build_type }}
+          UV_INDEX: rbln=${{ secrets.INTERNAL_INDEX_URL }}
+          UV_INDEX_RBLN_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
+          UV_INDEX_RBLN_PASSWORD: ${{ secrets.INTERNAL_INDEX_PASSWORD }}
+          UV_BUILD_CONSTRAINT: constraints-build-dev.txt
+        run: |
+          set -euo pipefail
+
+          [[ -f /etc/os-release ]] && . /etc/os-release
+          case "${ID:-}:${ID_LIKE:-}" in
+            *debian* | *ubuntu*) export CC=gcc-13 CXX=g++-13 ;;
+            *) source /opt/rh/gcc-toolset-13/enable ;;
+          esac
+          cxx="${CXX:-g++}"
+          echo "::notice::C++ compiler: $(command -v "${cxx}")"
+          "${cxx}" --version
+          echo "::notice::target: $("${cxx}" -dumpmachine)"
+
+          uv build --wheel
+
+      - name: Read built wheel version
+        id: read_version
+        env:
+          PYTHON_VERSION: ${{ inputs.python_version }}
+        run: |
+          set -euo pipefail
+
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          shopt -u nullglob
+          if [[ "${#wheels[@]}" -ne 1 ]]; then
+            echo "::error::Expected exactly one wheel in dist/, found ${#wheels[@]}: ${wheels[*]}"
+            exit 1
+          fi
+          wheel="${wheels[0]}"
+
+          # Wheel filename fields (PEP 427): {name}-{version}-{python}-{abi}-{platform}.
+          version="$(basename "${wheel}" | cut -d- -f2)"
+          python_tag="$(basename "${wheel}" | cut -d- -f3)"
+          if [[ "${python_tag}" != "cp${PYTHON_VERSION//./}" ]]; then
+            echo "::error::Wheel Python tag '${python_tag}' does not match python_version ${PYTHON_VERSION}"
+            exit 1
+          fi
+
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "::notice::Built torch-rbln==${version}"
+
+      - name: Publish wheel to internal package index
+        env:
+          TORCH_RBLN_VERSION: ${{ steps.read_version.outputs.version }}
+          INTERNAL_INDEX_URL: ${{ secrets.INTERNAL_INDEX_URL }}
+          UV_PUBLISH_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
+          UV_PUBLISH_PASSWORD: ${{ secrets.INTERNAL_INDEX_PASSWORD }}
+        run: |  # zizmor: ignore[use-trusted-publishing] internal index uses username/password auth, not OIDC
+          set -euo pipefail
+
+          # curl authenticates its index query via ~/.netrc.
+          index_host="${INTERNAL_INDEX_URL#*://}"
+          index_host="${index_host%%/*}"
+          umask 077
+          cat > "${HOME}/.netrc" <<EOF
+          machine ${index_host}
+          login ${UV_PUBLISH_USERNAME}
+          password ${UV_PUBLISH_PASSWORD}
+          EOF
+
+          # Publish each version once; skip if it's already on the index.
+          wheel_name="$(basename dist/*.whl)"
+          if curl -fsSL --netrc "${INTERNAL_INDEX_URL%/}/torch-rbln/" | grep -qF -- "${wheel_name}"; then
+            echo "::notice::torch-rbln==${TORCH_RBLN_VERSION} is already on the internal package index; skipping publish"
+          else
+            uv publish --publish-url "${INTERNAL_INDEX_URL}" dist/*.whl
+            echo "::notice::Published torch-rbln==${TORCH_RBLN_VERSION} to the internal package index"
+          fi
+
+      - name: Verify wheel installation
+        env:
+          TORCH_RBLN_VERSION: ${{ steps.read_version.outputs.version }}
+          BUILD_TYPE: ${{ inputs.build_type }}
+          UV_INDEX: https://download.pytorch.org/whl/cpu rbln=${{ secrets.INTERNAL_INDEX_URL }}
+          UV_INDEX_STRATEGY: unsafe-best-match
+          UV_INDEX_RBLN_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
+          UV_INDEX_RBLN_PASSWORD: ${{ secrets.INTERNAL_INDEX_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          uv venv verify-install/.venv
+          uv pip install \
+            --python verify-install/.venv/bin/python \
+            --constraint constraints-build-dev.txt \
+            rebel-compiler \
+            "torch-rbln==${TORCH_RBLN_VERSION}"
+
+          # `python -` puts cwd on sys.path; cd out of the repo root so the source doesn't shadow the installed wheel.
+          cd verify-install
+          .venv/bin/python - <<'PY'
+          import os
+
+          import rebel
+          import torch
+          import torch_rbln
+
+          expected_version = os.environ["TORCH_RBLN_VERSION"]
+          build_type = os.environ["BUILD_TYPE"]
+          print(f"torch={torch.__version__} torch_rbln={torch_rbln.__version__} rebel={rebel.__version__}")
+
+          assert torch_rbln.__version__ == expected_version, (
+              f"torch-rbln version mismatch: expected {expected_version}, got {torch_rbln.__version__}"
+          )
+          if build_type == "Debug":
+              assert "debug" in torch_rbln.__version__, (
+                  f"Debug build is missing its debug marker: {torch_rbln.__version__}"
+              )
+          else:
+              assert "debug" not in torch_rbln.__version__, (
+                  f"Release build must not carry a debug marker: {torch_rbln.__version__}"
+              )
+          print(f"::notice::Verified torch-rbln=={torch_rbln.__version__} ({build_type})")
+          PY

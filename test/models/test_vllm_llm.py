@@ -23,6 +23,9 @@ Matrix
 """
 
 import os
+import subprocess
+import sys
+import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -31,7 +34,7 @@ import pytest
 import torch
 import vllm_rbln  # noqa: F401
 
-from test.utils import run_in_isolated_process
+from test.utils import is_rebel_device, run_in_isolated_process, SUPPORTED_DTYPES
 
 
 # NOTE: do NOT import ``torch.testing._internal.common_utils`` at module level.
@@ -95,15 +98,20 @@ PROMPT = "The capital of France is"
 MAX_TOKENS = 5
 
 
-# Greedy-decode (temperature=0) expected outputs. Key: (model, tp, mode).
+# Greedy-decode (temperature=0) expected outputs. Key: (model, tp, mode, dtype).
 # ``None`` falls back to non-empty + shape checks. Captured on RBLN-CA25 with
 # rebel-compiler dev329 + vllm-rbln device_tensor_rebased; drift = regression.
-EXPECTED_TEXT: dict[tuple[str, int, str], Optional[str]] = {
-    ("llama_3_2_1b", 1, "graph"): " Paris. The Eiff",
-    ("qwen2_5_1_5b", 1, "graph"): " Paris. The capital of",
-    ("qwen3_0_6b", 1, "graph"): " Paris. The capital of",
-    ("llama_3_2_1b", 1, "eager"): " Paris. The Eiff",
-    ("llama_3_2_1b", 2, "graph"): " Paris. The Eiff",
+EXPECTED_TEXT: dict[tuple[str, int, str, torch.dtype], Optional[str]] = {
+    ("llama_3_2_1b", 1, "graph", torch.float16): " Paris. The Eiff",
+    ("llama_3_2_1b", 1, "graph", torch.bfloat16): " Paris. The Eiff",
+    ("qwen2_5_1_5b", 1, "graph", torch.float16): " Paris. The capital of",
+    ("qwen2_5_1_5b", 1, "graph", torch.bfloat16): " Paris. The capital of",
+    ("qwen3_0_6b", 1, "graph", torch.float16): " Paris. The capital of",
+    ("qwen3_0_6b", 1, "graph", torch.bfloat16): " Paris. The capital of",
+    ("llama_3_2_1b", 1, "eager", torch.float16): " Paris. The Eiff",
+    ("llama_3_2_1b", 1, "eager", torch.bfloat16): " Paris. The Eiff",
+    ("llama_3_2_1b", 2, "graph", torch.float16): " Paris. The Eiff",
+    ("llama_3_2_1b", 2, "graph", torch.bfloat16): " Paris. The Eiff",
 }
 
 
@@ -116,6 +124,7 @@ def _vllm_generate_worker(
     model_key: str,
     tp_size: int,
     enforce_eager: bool,
+    dtype: torch.dtype,
     expected_text: Optional[str],
     prompt: str,
     max_tokens: int,
@@ -134,10 +143,14 @@ def _vllm_generate_worker(
     # Always TP=1 on the vLLM engine; RSD fan-out is driven by
     # ``VLLM_RBLN_TP_SIZE`` (set in ``_run_case``), keeping the test
     # single-process and off the RCCL multi-worker path.
-    # ``gpu_memory_utilization=0.5`` caps KV-cache blocks for tight CI NPU mem.
+    # ``gpu_memory_utilization`` sizes the KV-cache pool. REBEL has 140 GB DRAM, so
+    # the ATOM-tuned 0.5 (= 70 GB) massively over-allocates it (~66 GiB for a 1B
+    # model); at that size eager strided KV writes hit deep vmem addresses the v2v
+    # engine rejects, then OOM. 0.1 (~10 GiB) is plenty here; ATOM (16 GB) keeps 0.5.
     llm_kwargs: dict = dict(
         model=cfg.model_id,
-        dtype="float16",
+        # vLLM expects the dtype as a string name (e.g., "float16", "bfloat16"), not a torch.dtype.
+        dtype=str(dtype).removeprefix("torch."),
         max_model_len=cfg.max_model_len,
         block_size=cfg.block_size,
         enable_chunked_prefill=True,
@@ -146,7 +159,7 @@ def _vllm_generate_worker(
         tensor_parallel_size=1,
         trust_remote_code=cfg.trust_remote_code,
         enforce_eager=enforce_eager,
-        gpu_memory_utilization=0.5,
+        gpu_memory_utilization=0.1 if is_rebel_device() else 0.5,
     )
     # TP>1 only — see ``_PATCHED_WORKER_CLS`` above.
     if tp_size > 1:
@@ -172,7 +185,7 @@ def _vllm_generate_worker(
         llm.llm_engine.engine_core.shutdown()
 
     mode = "eager" if enforce_eager else "graph"
-    print(f"[vllm_llm_test] model={model_key} tp={tp_size} mode={mode} text={gen_text!r} ids={gen_ids}")
+    print(f"[vllm_llm_test] model={model_key} tp={tp_size} mode={mode} dtype={dtype} text={gen_text!r} ids={gen_ids}")
 
     assert len(gen_text) > 0, "generated text should not be empty"
     assert len(gen_ids) == max_tokens, "greedy decode should fill max_tokens"
@@ -180,7 +193,7 @@ def _vllm_generate_worker(
 
     if expected_text is not None:
         assert gen_text == expected_text, (
-            f"vLLM RBLN output mismatch for {model_key} tp{tp_size} {mode}. "
+            f"vLLM RBLN output mismatch for {model_key} tp{tp_size} {mode} {dtype}. "
             f"Expected: {expected_text!r}, Got: {gen_text!r}"
         )
 
@@ -193,19 +206,21 @@ def _vllm_generate_worker(
 def _skip_if_not_enough_npus(tp_size: int) -> None:
     if tp_size <= 1:
         return
+    if is_rebel_device():
+        pytest.skip("TP>1 is not supported on the REBEL (CR) lineup yet (single device = quad chiplet)")
     n_phys = torch.rbln.physical_device_count()
     if n_phys < tp_size:
         pytest.skip(f"Requires at least {tp_size} physical devices, found {n_phys}")
 
 
-def _run_case(model_key: str, tp_size: int, enforce_eager: bool) -> None:
+def _run_case(model_key: str, tp_size: int, enforce_eager: bool, dtype: torch.dtype) -> None:
     cfg = MODEL_CONFIGS[model_key]
     if tp_size > cfg.max_npus:
         pytest.skip(f"{model_key} matrix entry restricted to <={cfg.max_npus} NPUs, got tp={tp_size}")
     _skip_if_not_enough_npus(tp_size)
 
     mode = "eager" if enforce_eager else "graph"
-    expected_text = EXPECTED_TEXT.get((model_key, tp_size, mode))
+    expected_text = EXPECTED_TEXT.get((model_key, tp_size, mode, dtype))
 
     with pytest.MonkeyPatch.context() as mp:
         # Set RBLN_DEVICES (and RBLN_NPUS_PER_DEVICE for RSD) in the parent
@@ -236,7 +251,15 @@ def _run_case(model_key: str, tp_size: int, enforce_eager: bool) -> None:
         mp.setenv("VLLM_RBLN_SAMPLER", "1")
         mp.setenv("VLLM_RBLN_COMPILE_STRICT_MODE", "1")
         mp.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
-        mp.setenv("RBLN_KERNEL_MODE", "triton")
+        # REBEL graph compile: triton custom-kernel mode hits a rebel-compiler
+        # bug (RTOSA ExpandContribCustomOps has no bf16 branch), so use the
+        # string-kernel path + device tensors. ATOM and eager keep triton.
+        rebel_graph = is_rebel_device() and not enforce_eager
+        if rebel_graph:
+            mp.delenv("RBLN_KERNEL_MODE", raising=False)
+            mp.setenv("VLLM_RBLN_USE_DEVICE_TENSOR", "1")
+        else:
+            mp.setenv("RBLN_KERNEL_MODE", "triton")
         mp.setenv("RBLN_PV_OPT", "1")
         # RSD fan-out (1 worker → ``tp_size`` physical NPUs merged into one
         # logical device). vllm engine stays at ``tensor_parallel_size=1``.
@@ -263,6 +286,7 @@ def _run_case(model_key: str, tp_size: int, enforce_eager: bool) -> None:
             model_key,
             tp_size,
             enforce_eager,
+            dtype,
             expected_text,
             PROMPT,
             MAX_TOKENS,
@@ -276,29 +300,221 @@ def _run_case(model_key: str, tp_size: int, enforce_eager: bool) -> None:
 
 @pytest.mark.test_set_ci
 @pytest.mark.single_worker
+@pytest.mark.usefixtures("enable_deploy_mode")
+@pytest.mark.parametrize("dtype", SUPPORTED_DTYPES)
 @pytest.mark.parametrize("model_key", list(MODEL_CONFIGS.keys()))
-def test_vllm_llm_graph_tp1(enable_deploy_mode, model_key):
+def test_vllm_llm_graph_tp1(model_key, dtype):
     """Graph mode (torch.compile) TP=1 — primary device-tensor validation."""
-    _run_case(model_key=model_key, tp_size=1, enforce_eager=False)
+    _run_case(model_key=model_key, tp_size=1, enforce_eager=False, dtype=dtype)
 
 
 @pytest.mark.test_set_ci
 @pytest.mark.single_worker
+@pytest.mark.usefixtures("enable_deploy_mode")
+@pytest.mark.parametrize("dtype", SUPPORTED_DTYPES)
 @pytest.mark.parametrize("model_key", ["llama_3_2_1b"])
-def test_vllm_llm_graph_tp2(enable_deploy_mode, model_key):
+def test_vllm_llm_graph_tp2(model_key, dtype):
     """Graph mode RSD=2 — 1 vLLM worker over 2 physical NPUs via
     ``VLLM_RBLN_TP_SIZE=2``. Skipped if <2 NPUs. Does not exercise the
     RCCL multi-worker collective path (separate axis)."""
-    _run_case(model_key=model_key, tp_size=2, enforce_eager=False)
+    _run_case(model_key=model_key, tp_size=2, enforce_eager=False, dtype=dtype)
 
 
 @pytest.mark.test_set_ci
 @pytest.mark.single_worker
+@pytest.mark.usefixtures("enable_deploy_mode")
+@pytest.mark.parametrize("dtype", SUPPORTED_DTYPES)
 @pytest.mark.parametrize("model_key", ["llama_3_2_1b"])
-def test_vllm_llm_eager_tp1(enable_deploy_mode, model_key):
+def test_vllm_llm_eager_tp1(model_key, dtype):
     """Eager mode TP=1 — sanity check non-compile path. Greedy decode should
     match graph-mode TP1 (eager workaround envs set in ``_run_case``)."""
-    _run_case(model_key=model_key, tp_size=1, enforce_eager=True)
+    _run_case(model_key=model_key, tp_size=1, enforce_eager=True, dtype=dtype)
+
+
+# ---------------------------------------------------------------------------
+# No-NPU compile-only (RBLN_DUMMY_DEVICE)
+# ---------------------------------------------------------------------------
+
+# vLLM's native path (VLLM_RBLN_USE_VLLM_MODEL=1) under VLLM_RBLN_COMPILE_ONLY=1
+# builds each graph and writes its .rbln artifact to the compile cache without
+# executing -- the runtime is constructed on a dummy device, so no NPU is needed.
+# This is the reason RBLN_DUMMY_DEVICE exists: compile a servable model on a host
+# with no hardware. Run in a subprocess with the dummy env set before ``import
+# torch`` (rebel snapshots RBLN_* at import). Dummy mode host-backs the device
+# (physical count stays 0), so no real NPU is used even on a machine that has one.
+_COMPILE_ONLY_DUMMY_WORKER = """
+import glob, os
+import torch_rbln  # noqa: F401  (registers the dummy PrivateUse1 device)
+import torch
+
+assert torch.rbln.is_dummy_device() is True, "dummy mode is not active"
+assert torch.rbln.physical_device_count() == 0, torch.rbln.physical_device_count()
+
+from vllm import LLM
+
+# compile_only builds artifacts during engine init; no generate() -> no execution.
+LLM(
+    model=os.environ["RBLN_TEST_MODEL_ID"],
+    dtype="float16",
+    max_model_len=2048,
+    block_size=1024,
+    enable_chunked_prefill=True,
+    max_num_batched_tokens=128,
+    max_num_seqs=1,
+    tensor_parallel_size=1,
+    enforce_eager=False,
+    gpu_memory_utilization=0.1,
+)
+arts = glob.glob(os.path.join(os.environ["VLLM_CACHE_ROOT"], "rbln", "**", "*.rbln"), recursive=True)
+assert arts, "compile-only produced no .rbln artifacts"
+print(f"OK artifacts={len(arts)}")
+"""
+
+
+@pytest.mark.test_set_ci
+@pytest.mark.single_worker
+def test_vllm_compile_only_no_npu_via_dummy(tmp_path):
+    """vLLM native-path compile-only on a no-NPU host (RBLN_DUMMY_DEVICE).
+
+    The point of dummy mode: vLLM can build a servable model's .rbln artifacts
+    with no NPU present. Needs no real device (forced onto a non-existent one),
+    so it runs anywhere vllm-rbln is importable, including a CPU-only host.
+    """
+    env = dict(os.environ)
+    # rebel snapshots RBLN_* at import. Drop any inherited device mapping so vLLM
+    # sets its own (user 0 -> system 0); a stale RBLN_DEVICE_MAP conflicts with
+    # that and makes device_count() fail. Dummy mode host-backs the device
+    # regardless (physical count stays 0), so no real NPU is used.
+    for key in ("RBLN_DEVICES", "RBLN_DEVICE_MAP", "RBLN_NPUS_PER_DEVICE"):
+        env.pop(key, None)
+    env.update(
+        RBLN_DUMMY_DEVICE="1",
+        RBLN_TARGET_SOC="RBLN-CA25",
+        VLLM_RBLN_USE_VLLM_MODEL="1",
+        VLLM_RBLN_COMPILE_ONLY="1",
+        VLLM_CACHE_ROOT=str(tmp_path / "vllm_cache"),
+        RBLN_TEST_MODEL_ID=MODEL_CONFIGS["qwen3_0_6b"].model_id,
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(_COMPILE_ONLY_DUMMY_WORKER)],
+        env=env,
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
+    assert proc.returncode == 0, f"compile-only worker failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+    assert "OK artifacts=" in proc.stdout, proc.stdout
+
+
+# Phase 2 of the dummy-compile -> real-run round trip: load the artifacts phase 1
+# built on a dummy device onto a real NPU and generate. Asserts nothing was
+# recompiled (the .rbln set is unchanged) so we know the dummy-built artifact
+# actually ran, and that the output matches the CPU-reference expectation.
+_REAL_RUN_FROM_CACHE_WORKER = """
+import glob, os
+import torch_rbln  # noqa: F401
+import torch
+
+assert torch.rbln.is_dummy_device() is False, "phase 2 must use a real device"
+assert torch.rbln.physical_device_count() > 0, "phase 2 needs a real NPU"
+
+from vllm import LLM, SamplingParams
+
+pat = os.path.join(os.environ["VLLM_CACHE_ROOT"], "rbln", "**", "*.rbln")
+before = set(glob.glob(pat, recursive=True))
+assert before, "phase 1 wrote no artifacts to load"
+
+llm = LLM(
+    model=os.environ["RBLN_TEST_MODEL_ID"],
+    dtype="float16",
+    max_model_len=2048,
+    block_size=1024,
+    enable_chunked_prefill=True,
+    max_num_batched_tokens=128,
+    max_num_seqs=1,
+    tensor_parallel_size=1,
+    enforce_eager=False,
+    gpu_memory_utilization=0.1,
+)
+try:
+    out = llm.generate(["The capital of France is"], SamplingParams(temperature=0.0, max_tokens=5))
+    text = out[0].outputs[0].text
+finally:
+    llm.llm_engine.engine_core.shutdown()
+
+new = set(glob.glob(pat, recursive=True)) - before
+assert not new, f"recompiled on the real device instead of loading the dummy-built artifacts: {new}"
+assert text == os.environ["RBLN_TEST_EXPECTED"], f"unexpected generation: {text!r}"
+print(f"OK text={text!r}")
+"""
+
+
+@pytest.mark.test_set_ci
+@pytest.mark.single_worker
+def test_vllm_dummy_compiled_runs_on_real_npu(tmp_path):
+    """Full promise of dummy mode: compile with no NPU, run on a real one.
+
+    Phase 1 builds the model's .rbln artifacts on a dummy (no-NPU) device;
+    phase 2 loads those exact artifacts on a real NPU and generates, asserting
+    the output matches the reference and that nothing was recompiled. Skipped
+    when no NPU is available to run against.
+    """
+    probe = subprocess.run(
+        [sys.executable, "-c", "from rebel._C import get_npu_name; print(get_npu_name(0) or '')"],
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
+    npu = probe.stdout.strip()
+    if not npu:
+        pytest.skip("no NPU available to run the dummy-compiled artifacts")
+
+    cache = str(tmp_path / "vllm_cache")
+    model_id = MODEL_CONFIGS["qwen3_0_6b"].model_id
+    expected = EXPECTED_TEXT[("qwen3_0_6b", 1, "graph", torch.float16)]
+
+    # Phase 1: dummy compile-only -> shared cache (no real device touched). Compile
+    # for the SoC the phase-2 device actually is (RBLN-CA25, RBLN-CR03, ...) so the
+    # artifact hash matches and phase 2 loads it instead of recompiling.
+    p1_env = dict(os.environ)
+    for key in ("RBLN_DEVICES", "RBLN_DEVICE_MAP", "RBLN_NPUS_PER_DEVICE"):
+        p1_env.pop(key, None)
+    p1_env.update(
+        RBLN_DUMMY_DEVICE="1",
+        RBLN_TARGET_SOC=npu,
+        VLLM_RBLN_USE_VLLM_MODEL="1",
+        VLLM_RBLN_COMPILE_ONLY="1",
+        VLLM_CACHE_ROOT=cache,
+        RBLN_TEST_MODEL_ID=model_id,
+    )
+    p1 = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(_COMPILE_ONLY_DUMMY_WORKER)],
+        env=p1_env,
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
+    assert p1.returncode == 0, f"phase 1 (dummy compile) failed:\nSTDOUT:\n{p1.stdout}\nSTDERR:\n{p1.stderr}"
+
+    # Phase 2: load those dummy-built artifacts on the real NPU and generate.
+    p2_env = dict(os.environ)
+    for key in ("RBLN_DUMMY_DEVICE", "RBLN_TARGET_SOC", "VLLM_RBLN_COMPILE_ONLY"):
+        p2_env.pop(key, None)
+    p2_env.update(
+        VLLM_RBLN_USE_VLLM_MODEL="1",
+        VLLM_CACHE_ROOT=cache,
+        RBLN_TEST_MODEL_ID=model_id,
+        RBLN_TEST_EXPECTED=expected,
+    )
+    p2 = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(_REAL_RUN_FROM_CACHE_WORKER)],
+        env=p2_env,
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
+    assert p2.returncode == 0, f"phase 2 (real-NPU run) failed:\nSTDOUT:\n{p2.stdout}\nSTDERR:\n{p2.stderr}"
+    assert "OK text=" in p2.stdout, p2.stdout
 
 
 if __name__ == "__main__":

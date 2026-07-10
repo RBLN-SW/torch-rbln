@@ -6,10 +6,14 @@ namespace c10::rbln {
 
 namespace {
 
-void raw_delete(void* data) {
+// Runs from the noexcept DataPtr deleter, so it must not throw. free_nothrow()
+// is itself noexcept (it degrades a teardown-time deallocation failure to a
+// warning instead of std::terminate), so the deleter is throw-free. Deliberately
+// no debug log here: RBLN_LOG_DEBUG can throw when debug logging is enabled
+// (fmt / sink, e.g. bad_alloc), which would terminate the noexcept deleter.
+void raw_delete(void* data) noexcept {
   if (data != nullptr) {
-    RBLN_LOG_DEBUG("Freeing memory at {}", fmt::ptr(data));
-    c10::rbln::free(data);
+    c10::rbln::free_nothrow(data);
   }
 }
 
@@ -64,9 +68,11 @@ struct RBLNAllocator final : public c10::DeviceAllocator {
   }
 
   bool initialized() override {
-    // RBLN runtime initializes lazily on first allocation; device availability
-    // is a sufficient proxy for readiness.
-    const bool is_initialized = (c10::rbln::get_device_count() > 0);
+    // Gates torch.accelerator.empty_cache()/memory_stats(). Runtime check first so a
+    // missing runtime is false (not a segfault); throwing get_device_count() keeps a
+    // malformed config loud when the runtime is present.
+    const bool is_initialized =
+        rbln_runtime_available() && (c10::rbln::is_dummy_device() || c10::rbln::get_device_count() > 0);
     RBLN_LOG_DEBUG("is_initialized={}", is_initialized);
     return is_initialized;
   }

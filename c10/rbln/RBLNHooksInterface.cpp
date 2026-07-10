@@ -3,6 +3,7 @@
 #include <c10/rbln/RBLNGenerator.h>
 #include <c10/rbln/RBLNHooksInterface.h>
 #include <c10/rbln/RBLNLogging.h>
+#include <c10/rbln/RBLNPinnedAllocator.h>
 #include <c10/util/CallOnce.h>
 
 namespace c10::rbln {
@@ -31,24 +32,15 @@ bool RBLNHooksInterface::isAvailable() const {
 }
 
 bool RBLNHooksInterface::hasRBLN() const {
-  try {
-    const bool has_rbln = (c10::rbln::get_device_count() > 0);
-    RBLN_LOG_DEBUG("has_rbln={}", has_rbln);
-    return has_rbln;
-  } catch (const c10::Error& error) {
-    RBLN_LOG_DEBUG("Failed to get device count, returning false: {}", error.msg());
-    return false;
-  }
+  // Nothrow (accelerator-hooks contract must not throw); true in dummy mode too.
+  const bool has_rbln = c10::rbln::runtime_available();
+  RBLN_LOG_DEBUG("has_rbln={}", has_rbln);
+  return has_rbln;
 }
 
 c10::Device RBLNHooksInterface::getDeviceFromPtr(void* data) const {
   RBLN_LOG_DEBUG("data={}", fmt::ptr(data));
-
-  const auto memory_info = c10::rbln::get_memory_info(data);
-  RBLN_LOG_DEBUG("memory_info={}", c10::rbln::to_string(memory_info));
-
-  const auto torch_device_id = memory_info.torch_device_id;
-  const auto device_index = static_cast<c10::DeviceIndex>(torch_device_id);
+  const auto device_index = c10::rbln::get_torch_device_id(data);
   const auto device = c10::Device(c10::kPrivateUse1, device_index);
   RBLN_LOG_DEBUG("device={}", c10::str(device));
   return device;
@@ -57,8 +49,10 @@ c10::Device RBLNHooksInterface::getDeviceFromPtr(void* data) const {
 bool RBLNHooksInterface::hasPrimaryContext(c10::DeviceIndex device_index) const {
   RBLN_LOG_DEBUG("device_index={}", static_cast<int>(device_index));
 
-  const auto device_count = c10::rbln::get_device_count();
-  const bool has_context = device_index >= 0 && device_index < device_count;
+  // Runtime check first so a missing runtime is a clean false (no segfault); throwing
+  // get_device_count() keeps a malformed config loud when the runtime is present.
+  const bool has_context =
+      device_index >= 0 && rbln_runtime_available() && device_index < c10::rbln::get_device_count();
   RBLN_LOG_DEBUG("has_context={}", has_context);
   return has_context;
 }
@@ -91,6 +85,14 @@ void RBLNHooksInterface::resizePrivateUse1Bytes(const c10::Storage& storage, siz
   RBLN_LOG_DEBUG("Updating storage with new data pointer and nbytes");
   storage.set_data_ptr_noswap(std::move(new_data_ptr));
   storage.set_nbytes(new_nbytes);
+}
+
+c10::Allocator* RBLNHooksInterface::getPinnedMemoryAllocator() const {
+  return c10::rbln::get_pinned_memory_allocator();
+}
+
+bool RBLNHooksInterface::isPinnedPtr(const void* data) const {
+  return c10::rbln::is_pinned_ptr(data);
 }
 
 at::Generator RBLNHooksInterface::getNewGenerator(c10::DeviceIndex device_index) const {

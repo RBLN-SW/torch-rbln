@@ -11,7 +11,7 @@ import torch
 
 from torch_rbln._internal.compile_cache import compile_rbln_cached
 from torch_rbln._internal.log_utils import rbln_log_cpu_fallback
-from torch_rbln._internal.ops_utils import is_cpu_fallback_cases, to_cpu
+from torch_rbln._internal.ops_utils import is_cpu_fallback_cases, SupportedDtypes, to_cpu
 
 
 # --- Attention Weights Cache for Overrideable SDPA ---
@@ -51,13 +51,12 @@ def _any_tensor_subclass(*tensors: torch.Tensor) -> bool:
 
 
 # --- RBLN SDPA Constraints ---
-# HW supports: 3D/4D tensors, float16, 64-byte aligned shapes
+# HW supports: 3D/4D tensors, dtypes in ``SupportedDtypes.sdpa``, 64-byte aligned shapes
 # PyTorch overrideable path requires 4D; non-4D uses SDPBackend::math
 
-RBLN_SDPA_SUPPORTED_DTYPES = {torch.float16}
 RBLN_SDPA_MIN_DIM = 3
 RBLN_SDPA_MAX_DIM = 4
-_RBLN_SDPA_SHAPE_ALIGNMENT = 32  # 64 bytes / 2 bytes (float16)
+_RBLN_SDPA_SHAPE_ALIGNMENT = 32  # 64 bytes / 2 bytes (the supported low-precision floats are all 2 bytes)
 
 
 def needs_sdpa_shape_fallback(
@@ -149,9 +148,11 @@ def can_use_rbln_sdpa(
     except (AttributeError, TypeError):
         pass
 
-    # Only float16 supported on RBLN
-    if query.dtype not in RBLN_SDPA_SUPPORTED_DTYPES:
+    if query.dtype not in SupportedDtypes.sdpa:
         return False, f"dtype {query.dtype} not supported"
+
+    if key.dtype != query.dtype or value.dtype != query.dtype:
+        return False, f"Q/K/V dtype mismatch (query {query.dtype}, key {key.dtype}, value {value.dtype})"
 
     if dropout_p > 0.0 and (query.requires_grad or key.requires_grad or value.requires_grad):
         return False, "dropout with gradients"
@@ -241,6 +242,11 @@ def _merge_masks(
 # --- CPU Fallback (using PyTorch's native SDPA) ---
 
 
+def _sdpa_fallback_compute_dtype(input_dtype: torch.dtype) -> torch.dtype:
+    """Upcast SDPA-supported dtypes to ``float32`` so the CPU fallback matches math-backend SDPA precision."""
+    return torch.float32 if input_dtype in SupportedDtypes.sdpa else input_dtype
+
+
 def _sdpa_cpu_fallback(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -266,9 +272,7 @@ def _sdpa_cpu_fallback(
 
     original_dtype = query.dtype
     original_device = query.device
-
-    # Upcast float16 → float32 to prevent overflow in Q @ K^T
-    compute_dtype = torch.float32 if original_dtype == torch.float16 else original_dtype
+    compute_dtype = _sdpa_fallback_compute_dtype(original_dtype)
 
     query_cpu = to_cpu(query).to(compute_dtype)
     key_cpu = to_cpu(key).to(compute_dtype)
@@ -401,9 +405,9 @@ def _sdpa_attn_weights_fallback(
     L, S = query.size(-2), key.size(-2)
     original_dtype = query.dtype
     original_device = query.device
+    compute_dtype = _sdpa_fallback_compute_dtype(original_dtype)
 
-    # Upcast float16 → float32 to prevent overflow in Q @ K^T
-    compute_dtype = torch.float32 if original_dtype == torch.float16 else original_dtype
+    attn_mask = _convert_bool_mask_to_float(attn_mask, compute_dtype, original_device)
 
     q_cpu = to_cpu(query).to(compute_dtype)
     k_cpu = to_cpu(key).to(compute_dtype)
@@ -465,9 +469,7 @@ def _sdpa_output_fallback(
     """CPU fallback for SDPA output. Upcasts float16 to float32 for numerical consistency."""
     original_dtype = attn_weights.dtype
     original_device = attn_weights.device
-
-    # Upcast float16 → float32 for numerical consistency
-    compute_dtype = torch.float32 if original_dtype == torch.float16 else original_dtype
+    compute_dtype = _sdpa_fallback_compute_dtype(original_dtype)
 
     weights_cpu = to_cpu(attn_weights).to(compute_dtype)
     v_cpu = to_cpu(value).to(compute_dtype)
@@ -623,9 +625,7 @@ def _sdpa_backward_fallback(
     S = key.size(-2)
     original_device = grad_output.device
     original_dtype = grad_output.dtype
-
-    # Upcast float16 → float32 to prevent overflow
-    compute_dtype = torch.float32 if original_dtype == torch.float16 else original_dtype
+    compute_dtype = _sdpa_fallback_compute_dtype(original_dtype)
 
     grad_output_cpu = to_cpu(grad_output).to(compute_dtype)
     query_cpu = to_cpu(query).to(compute_dtype)

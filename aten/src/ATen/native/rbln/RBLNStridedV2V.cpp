@@ -4,6 +4,7 @@
 #include <ATen/native/rbln/RBLNTensorUtils.h>
 #include <c10/rbln/RBLNFallbackConfig.h>
 #include <c10/rbln/RBLNLogging.h>
+#include <c10/rbln/RBLNProfiler.h>
 #include <c10/util/Exception.h>
 
 #include <cstdint>
@@ -120,7 +121,13 @@ void submit_or_fallback(c10::rbln::V2VBatch& batch, const char* op_name, std::fu
   } catch (const c10::Error& e) {
     const std::string_view error_message = e.what();
     // TODO: Replace substring match with a typed exception when the wrapper API allows.
-    if (error_message.find("rbln_memcpy_v2v_multi failed") == std::string_view::npos) {
+    // Route both v2v backend rejections to the CPU fallback: the batched path
+    // throws "rbln_memcpy_v2v_multi failed", and when it drains per-entry the
+    // same-device path throws "rbln_memcpy_v2v failed". (The runtime rejects v2v
+    // into interior offsets of large untyped pool allocations — e.g. vLLM's KV
+    // cache; the host-bounce CPU fallback writes those correctly.)
+    if (error_message.find("rbln_memcpy_v2v_multi failed") == std::string_view::npos &&
+        error_message.find("rbln_memcpy_v2v failed") == std::string_view::npos) {
       throw; // validation error — propagate
     }
     if (c10::rbln::is_fallback_disabled("strided_copy_error")) {
@@ -131,6 +138,9 @@ void submit_or_fallback(c10::rbln::V2VBatch& batch, const char* op_name, std::fu
         "Underlying error: {}",
         op_name,
         error_message);
+    // PROFILER (cold branch): a strided v2v (cat / index_select / index_copy /
+    // copy_) was rejected on device and fell back to a host CPU op.
+    c10::rbln::prof::record_bounce(c10::rbln::prof::BounceSite::kStridedV2VFallback, 0);
     cpu_fallback();
   }
 }

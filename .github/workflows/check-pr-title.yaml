@@ -1,4 +1,4 @@
-name: "Check PR title"
+name: Check PR title
 
 on:
   pull_request:
@@ -13,17 +13,34 @@ concurrency:
 
 jobs:
   check_pr_title:
-    name: "Check PR title"
+    name: Check PR title
     if: ${{ github.repository_owner == vars.TORCH_RBLN_REPO_OWNER }}
-    runs-on: ${{ vars.TORCH_RBLN_RUNNER_EXTERNAL }}
+    runs-on: ${{ vars.TORCH_RBLN_RUNNER_CPU_SMALL }}
+    timeout-minutes: 10
+    container:
+      image: ${{ vars.TORCH_RBLN_IMAGE_NAME }}:${{ vars.TORCH_RBLN_IMAGE_TAG }}-py3.12
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GIT_PAT }}
     steps:
-      - name: "Check Conventional Commits format"
+      # The novolume runner doesn't mount event.json into the container, so recreate it.
+      - name: Recreate event payload
+        env:
+          EVENT_JSON: ${{ toJSON(github.event) }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$(dirname "${GITHUB_EVENT_PATH}")"
+          echo "${EVENT_JSON}" > "${GITHUB_EVENT_PATH}"
+
+      - name: Check Conventional Commits format
         id: pr_title_lint
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        uses: Wandalen/wretry.action@v3
+        uses: Wandalen/wretry.action@e68c23e6309f2871ca8ae4763e7629b9c258e1ea  # v3.8.0
         with:
-          action: amannn/action-semantic-pull-request@v5
+          action: amannn/action-semantic-pull-request@0723387faaf9b38adef4775cd42cfd5155ed6017  # v5.5.3
           attempt_limit: 5
           attempt_delay: 5000
           with: |
@@ -42,11 +59,11 @@ jobs:
             subjectPatternError: |
               The subject "{subject}" found in the pull request title "{title}" must start with a lowercase letter and not end with a period.
 
-      - name: "Post comment on invalid PR title"
+      - name: Post comment on invalid PR title
         if: ${{ always() && steps.pr_title_lint.outcome == 'failure' }}
-        uses: Wandalen/wretry.action@v3
+        uses: Wandalen/wretry.action@e68c23e6309f2871ca8ae4763e7629b9c258e1ea  # v3.8.0
         with:
-          action: marocchino/sticky-pull-request-comment@v2
+          action: marocchino/sticky-pull-request-comment@773744901bac0e8cbb5a0dc842800d45e9b2b405  # v2.9.4
           attempt_limit: 5
           attempt_delay: 5000
           with: |
@@ -62,11 +79,11 @@ jobs:
               ${{ fromJSON(steps.pr_title_lint.outputs.outputs || '{}').error_message }}
               ```
 
-      - name: "Delete comment on valid PR title"
+      - name: Delete comment on valid PR title
         if: ${{ always() && steps.pr_title_lint.outcome == 'success' }}
-        uses: Wandalen/wretry.action@v3
+        uses: Wandalen/wretry.action@e68c23e6309f2871ca8ae4763e7629b9c258e1ea  # v3.8.0
         with:
-          action: marocchino/sticky-pull-request-comment@v2
+          action: marocchino/sticky-pull-request-comment@773744901bac0e8cbb5a0dc842800d45e9b2b405  # v2.9.4
           attempt_limit: 5
           attempt_delay: 5000
           with: |

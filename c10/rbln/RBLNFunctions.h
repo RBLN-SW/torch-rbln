@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -88,7 +89,24 @@ C10_RBLN_API void set_device_index(c10::DeviceIndex device_index);
 C10_RBLN_API c10::DeviceIndex exchange_device_index(c10::DeviceIndex device_index);
 
 /**
+ * @brief Returns the torch device id backing a device pointer.
+ *
+ * Lightweight counterpart to get_memory_info() for the common case where only
+ * the owning device is needed: it calls rbln_get_torch_device_id_from_vaddr()
+ * directly and avoids the full VMemory JSON round-trip that get_memory_info()
+ * performs. Prefer this on performance hot paths.
+ *
+ * @param data A pointer to device memory.
+ * @return The torch device id (as a c10::DeviceIndex) backing the pointer.
+ */
+C10_RBLN_API c10::DeviceIndex get_torch_device_id(const void* data);
+
+/**
  * @brief Retrieves memory information for a given data pointer.
+ *
+ * @note This performs a full VMemory JSON round-trip and is expensive — keep it
+ * off performance hot paths. When only the owning device is needed, use
+ * get_torch_device_id() instead.
  *
  * @param data A pointer to device memory.
  * @return Memory information associated with the given data pointer.
@@ -101,6 +119,46 @@ C10_RBLN_API ::rbln::MemoryInfo get_memory_info(const void* data);
  * @return true if eager memory allocation is enabled, false otherwise.
  */
 C10_RBLN_API bool is_eager_malloc();
+
+/**
+ * @brief Configure ``target``'s device allocation to match ``ref``'s layout and
+ *        dtype, without copying data.
+ *
+ * A subsequent device-to-device copy between ``target`` and ``ref`` then stays
+ * on the fast path. ``ref`` must already be device-resident. Used to make a
+ * staging buffer match a KV cache's layout so the upload and the per-slot
+ * device-to-device scatter are both fast.
+ *
+ * @param target_data Destination tensor's device pointer to configure.
+ * @param ref_data    Reference tensor's device pointer whose layout is mirrored.
+ */
+C10_RBLN_API void set_device_layout_like(void* target_data, const void* ref_data);
+
+/**
+ * @brief Whether RBLN_DUMMY_DEVICE mode is active: a host-backed logical device
+ * with no NPU, so tensors can be built and compiled without hardware (execution
+ * still needs one). Cached after the first call.
+ */
+C10_RBLN_API bool is_dummy_device();
+
+/**
+ * @brief Nothrow view of get_device_count() (returns 0 on any failure), for the
+ * liveness predicates that must never throw.
+ */
+C10_RBLN_API c10::DeviceIndex get_device_count_nothrow() noexcept;
+
+/**
+ * @brief Single source of truth: can an rbln_* call be serviced safely now?
+ * Runtime loaded (librbln's rbln_runtime_available()), not shutting down, and a
+ * device present -- dummy included (it host-backs via the runtime). Never throws.
+ */
+C10_RBLN_API bool runtime_available() noexcept;
+
+/**
+ * @brief Mark the runtime as shutting down so late frees / best-effort ops stop
+ * dispatching into a possibly-unmapped runtime. Wired to a Python atexit hook.
+ */
+C10_RBLN_API void set_runtime_shutting_down(bool value) noexcept;
 
 /**
  * @brief Allocates memory on the specified RBLN device.
@@ -140,6 +198,14 @@ C10_RBLN_API void mark_zeros(const void* rbln_data);
 C10_RBLN_API void free(void* data);
 
 /**
+ * @brief Non-throwing free() for `noexcept` contexts (the c10 DataPtr deleter).
+ *
+ * The deleter runs in a noexcept destructor, so a throwing free() would
+ * std::terminate; this logs on failure instead.
+ */
+C10_RBLN_API void free_nothrow(void* data) noexcept;
+
+/**
  * @brief Copies data from host memory to device memory.
  *
  * This function performs a synchronous copy operation from host memory to
@@ -177,6 +243,50 @@ C10_RBLN_API void memcpy_v2h(void* cpu_dst_data, const void* rbln_src_data, size
 C10_RBLN_API void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes);
 
 /**
+ * @brief Asynchronously copies data from host memory to device memory.
+ *
+ * Falls back to synchronous copy when async is not possible (e.g., when
+ * the vmem entry does not have a simple device layout).
+ *
+ * @param rbln_dst_data A pointer to the destination device memory.
+ * @param cpu_src_data A pointer to the source host memory.
+ * @param nbytes The number of bytes to copy (must be positive).
+ */
+C10_RBLN_API void memcpy_h2v_async(void* rbln_dst_data, const void* cpu_src_data, size_t nbytes);
+
+/**
+ * @brief Asynchronously copies data from device memory to host memory.
+ *
+ * Falls back to synchronous copy when async is not possible (e.g., when
+ * the vmem entry does not have a simple device layout).
+ *
+ * @param cpu_dst_data A pointer to the destination host memory.
+ * @param rbln_src_data A pointer to the source device memory.
+ * @param nbytes The number of bytes to copy (must be positive).
+ */
+C10_RBLN_API void memcpy_v2h_async(void* cpu_dst_data, const void* rbln_src_data, size_t nbytes);
+
+/**
+ * @brief Asynchronously copies data between two device memory regions.
+ *
+ * Same-device copies use the async runtime entrypoint. Cross-device copies
+ * fall back to synchronous memcpy_v2v (host-bounce), matching the sync
+ * version's case split.
+ *
+ * @param rbln_dst_data A pointer to the destination device memory.
+ * @param rbln_src_data A pointer to the source device memory.
+ * @param nbytes The number of bytes to copy (must be positive).
+ */
+C10_RBLN_API void memcpy_v2v_async(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes);
+
+/**
+ * @brief Waits for all pending async transfers on the given device to complete.
+ *
+ * @param device_index The RBLN device to synchronize.
+ */
+C10_RBLN_API void synchronize(c10::DeviceIndex device_index);
+
+/**
  * @brief Descriptor for one device-to-device slab copy used by memcpy_v2v_multi.
  */
 struct C10_RBLN_API V2VCopyOp {
@@ -200,6 +310,95 @@ struct C10_RBLN_API V2VCopyOp {
  * entries yield undefined behaviour.
  */
 C10_RBLN_API void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies);
+
+/**
+ * @brief Result of a borrow_host_ptr / acquire_host_ptr_for_overwrite call.
+ *
+ * The borrow id MUST be passed back to `return_borrowed` exactly once to
+ * release the underlying virtual-memory entry. A successful borrow always
+ * returns a non-zero `borrow_id`; the value `0` is reserved as a sentinel
+ * meaning "no live borrow" so cleanup paths can pre-fill a zero in a vector
+ * and call `return_borrowed` unconditionally for skipped entries.
+ */
+struct BorrowedHostPtr {
+  uintptr_t host_ptr;
+  uint64_t borrow_id;
+};
+
+/**
+ * @brief Borrow a host pointer into the rbln virtual memory backing
+ * `rbln_data`. Triggers a device→host sync if the device view is currently
+ * authoritative; allocates host backing if none exists. After this call the
+ * host buffer is read-ready.
+ *
+ * The borrow MUST be released via `return_borrowed(result.borrow_id, ...)`.
+ *
+ * @param rbln_data A pointer to rbln-device memory (typically tensor data_ptr).
+ *        Must not be nullptr.
+ * @param nbytes Number of bytes to borrow. Must be positive — callers with a
+ *        legitimate zero-byte case must short-circuit before invoking.
+ * @return Host pointer + non-zero borrow id; throws c10::Error via RBLN_CHECK
+ *         on failure (invalid args, rebel-side error).
+ */
+C10_RBLN_API BorrowedHostPtr borrow_host_ptr(const void* rbln_data, size_t nbytes);
+
+/**
+ * @brief Non-throwing variant of `borrow_host_ptr`. Returns `std::nullopt` when
+ * the runtime rejects the borrow (e.g. the backing entry is in a sub-state with
+ * no host-mappable user view), instead of throwing. Use this where a borrow
+ * failure is an expected, recoverable condition with a copy-based fallback —
+ * it scopes failure handling to exactly the borrow call (other errors still
+ * surface normally) rather than swallowing a broad c10::Error catch.
+ *
+ * @return Host pointer + non-zero borrow id on success; `std::nullopt` if the
+ *         runtime could not provide an in-place host view. Invalid args
+ *         (nullptr / zero nbytes) also return `std::nullopt`.
+ */
+C10_RBLN_API std::optional<BorrowedHostPtr> try_borrow_host_ptr(const void* rbln_data, size_t nbytes);
+
+/**
+ * @brief Acquire a host pointer for **overwrite-only** access into the rbln
+ * virtual memory backing `rbln_data`. Same lifecycle as `borrow_host_ptr`,
+ * but the device→host transfer is skipped even when the entry is
+ * physical-latest.
+ *
+ * IMPORTANT: callers MUST overwrite **the entire borrowed region** before
+ * `return_borrowed(..., updated=true)`; otherwise the region surfaces stale
+ * bytes to subsequent device consumers. Use `borrow_host_ptr` instead if a
+ * partial overwrite is intended.
+ *
+ * @param rbln_data A pointer to rbln-device memory. Must not be nullptr.
+ * @param nbytes Number of bytes to acquire (must be positive).
+ * @return Host pointer + non-zero borrow id; throws c10::Error via RBLN_CHECK
+ *         on failure.
+ */
+C10_RBLN_API BorrowedHostPtr acquire_host_ptr_for_overwrite(void* rbln_data, size_t nbytes);
+
+/**
+ * @brief Non-throwing variant of `acquire_host_ptr_for_overwrite`. Returns
+ * `std::nullopt` when the runtime rejects the acquire (same recoverable
+ * sub-states as `try_borrow_host_ptr`) instead of throwing. Use this where the
+ * caller has a copy-based fallback (e.g. a fresh `at::empty` + writeback).
+ *
+ * @return Host pointer + non-zero borrow id on success; `std::nullopt` if the
+ *         runtime could not provide an in-place host view. Invalid args
+ *         (nullptr / zero nbytes) also return `std::nullopt`.
+ */
+C10_RBLN_API std::optional<BorrowedHostPtr> try_acquire_host_ptr_for_overwrite(void* rbln_data, size_t nbytes);
+
+/**
+ * @brief Release a previously borrowed host pointer.
+ *
+ * @param borrow_id The id returned from `borrow_host_ptr` /
+ *        `acquire_host_ptr_for_overwrite`. The value `0` is the
+ *        "no live borrow" sentinel and is treated as a no-op so cleanup
+ *        paths can release vectors of optional borrows uniformly.
+ * @param updated If true, marks the host view as the latest source of truth;
+ *        the next device consumer performs a lazy host→device copy. Must be
+ *        true after a successful `acquire_host_ptr_for_overwrite` write
+ *        sequence; otherwise the overwritten bytes are discarded.
+ */
+C10_RBLN_API void return_borrowed(uint64_t borrow_id, bool updated);
 
 /**
  * @brief Returns comprehensive device memory statistics.
@@ -260,5 +459,34 @@ C10_RBLN_API void reset_peak_memory_stats(const c10::Device& device);
  * @param enabled If true, enable file offloading; if false, disable it.
  */
 C10_RBLN_API void set_file_offloading_enabled(bool enabled);
+
+/**
+ * @brief Diagnostic: time spent inside librbln boundary calls (borrow / v2v /
+ * h2v / ...), so a profiler can split host overhead into "rebel runtime" vs
+ * "torch-side dispatch". Gated: when disabled each boundary call pays only one
+ * relaxed atomic load (no clock read), preserving ON==OFF latency; an explain
+ * region flips it on for its duration. ``rt_timing_get`` fills ``2 * kRtTimingN``
+ * uint64 slots as ``[ns, calls]`` per primitive (order matches the internal
+ * RtIdx enum: v2v, v2v_multi, borrow, acquire, return, v2h, h2v).
+ */
+constexpr std::size_t kRtTimingN = 7;
+C10_RBLN_API void rt_timing_enable(bool on);
+C10_RBLN_API void rt_timing_reset();
+C10_RBLN_API void rt_timing_get(uint64_t* out);
+
+// torch.rbln.explain() runtime-counter reads — thin pass-throughs to librbln's
+// public C-API (see rebel/runtime/api/rbln_runtime_api.h). Process-global, lazy.
+// These are LINKED (not dlsym'd): a librbln lacking them fails extension load, so
+// the vendored header and the runtime are kept version-aligned (third_party/).
+// The per-reason axes are positional; their meaning is interpreted Python-side, so
+// no internal classification name crosses this boundary.
+C10_RBLN_API uint32_t rt_prof_hidden_num();
+C10_RBLN_API void rt_prof_hidden_get(uint64_t* counts, uint64_t* bytes, uint32_t n);
+C10_RBLN_API uint32_t rt_prof_reject_num();
+C10_RBLN_API void rt_prof_reject_get(uint64_t* counts, uint64_t* bytes, uint32_t n);
+C10_RBLN_API void rt_prof_host_sync_d2h(uint64_t* count, uint64_t* bytes);
+C10_RBLN_API void rt_prof_host_sync_h2d(uint64_t* count, uint64_t* bytes);
+C10_RBLN_API void rt_prof_memory(uint64_t* current, uint64_t* peak);
+C10_RBLN_API void rt_prof_reset();
 
 } // namespace c10::rbln

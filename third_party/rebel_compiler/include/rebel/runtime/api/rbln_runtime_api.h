@@ -1,6 +1,7 @@
 #ifndef REBEL_RUNTIME_API_RBLN_RUNTIME_API_H
 #define REBEL_RUNTIME_API_RBLN_RUNTIME_API_H
 
+#include <rebel/runtime/api/rbln_retcode.h>
 #include <stdint.h>
 
 #include <string>
@@ -15,12 +16,6 @@ class MemoryStats;
 
 extern "C" {
 #endif
-
-typedef enum {
-  RBLNRetCode_SUCCESS = 0,
-  RBLNRetCode_FAILURE,
-  RBLNRetCode_INVALID,
-} RBLNRetCode;
 
 typedef enum {
   RBLNMemcpyType_H2D = 0,
@@ -56,6 +51,17 @@ RBLNRetCode rbln_register_device_id(int torch_device_id, int* device_ids, int nu
  * @return 0 on success, or an error code on failure.
  */
 RBLNRetCode rbln_get_device_count(int* count);
+
+/**
+ * @brief Reports whether the device runtime (driver) is loaded and usable.
+ *
+ * The driver is loaded lazily and is absent on compile/CPU-only/CI hosts.
+ * Callers gate device ops on this so a missing runtime degrades gracefully
+ * instead of segfaulting. Never throws.
+ *
+ * @return true if the runtime is available; false otherwise.
+ */
+bool rbln_runtime_available(void);
 
 /**
  * @brief Allocates memory on the device, with caching allocator enabled.
@@ -137,6 +143,61 @@ RBLNRetCode rbln_reset_accumulated_memory_stats(int device_id);
  * @return 0 on success, or an error code on failure.
  */
 RBLNRetCode rbln_reset_peak_memory_stats(int device_id);
+
+/* --- torch.rbln.explain() telemetry counters (process-global, lazy read) ---------
+ * Always-on, near-zero-cost counters of HIDDEN host overhead a device program paid
+ * without asking — device<->host round-trips behind a plain device copy. Recorded
+ * only on already-slow paths, so enabling a reader costs nothing (ON == OFF). Stable
+ * C symbols so an out-of-process reader (torch.rbln.explain) can resolve them by
+ * name. Per-reason values are POSITIONAL; an index's meaning is an internal
+ * classification interpreted by torch.rbln.explain — callers must not hard-code it.
+ */
+
+/**
+ * @brief Per-cause count+bytes of device->host round-trips the runtime performed to
+ *        service a device-to-device copy (overhead invisible from the program).
+ *        Causes are classified by source residency.
+ *
+ * @param counts [out] per-cause counts; array sized to rbln_prof_v2v_hidden_num_reasons().
+ * @param bytes  [out] per-cause byte volume; same size.
+ * @param n_reasons [in] capacity of the arrays.
+ */
+void rbln_prof_get_v2v_hidden_d2h(uint64_t* counts, uint64_t* bytes, uint32_t n_reasons);
+uint32_t rbln_prof_v2v_hidden_num_reasons();
+void rbln_prof_reset_v2v_hidden_d2h();
+
+/**
+ * @brief Per-reason count+bytes for why a device-to-device copy could not stay on
+ *        device and fell back to a host round-trip. The reason index is an opaque
+ *        internal classification (interpreted/grouped by torch.rbln.explain).
+ *
+ * @param counts [out] per-reason counts; array sized to rbln_prof_v2v_reject_num_reasons().
+ * @param bytes  [out] per-reason byte volume; same size.
+ * @param n_reasons [in] capacity of the arrays.
+ */
+void rbln_prof_get_v2v_reject(uint64_t* counts, uint64_t* bytes, uint32_t n_reasons);
+uint32_t rbln_prof_v2v_reject_num_reasons();
+void rbln_prof_reset_v2v_reject();
+
+/**
+ * @brief Count+bytes of real device<->host transfers the runtime actually performed
+ *        (d2h / h2d). Distinguishes a copy that truly crossed the device from one
+ *        served on the host (where these stay 0).
+ */
+void rbln_prof_get_host_sync_d2h(uint64_t* count, uint64_t* bytes);
+void rbln_prof_reset_host_sync_d2h();
+void rbln_prof_get_host_sync_h2d(uint64_t* count, uint64_t* bytes);
+void rbln_prof_reset_host_sync_h2d();
+
+/**
+ * @brief Live device-memory gauge: current and high-water-peak bytes the runtime
+ *        holds. Process-global and counts BOTH allocation paths — direct device
+ *        allocations AND the caching allocator. This is distinct from (and not
+ *        redundant with) the per-device, caching-allocator-scoped
+ *        rbln_get_memory_stats(): it also includes direct device allocations (e.g.
+ *        weights) that MemoryStats does not see. A resource gauge (no reset).
+ */
+void rbln_prof_get_memory(uint64_t* current_bytes, uint64_t* peak_bytes);
 
 #ifdef __cplusplus
 }
@@ -223,6 +284,11 @@ RBLNRetCode rbln_set_memory_info(uint64_t vaddr, DataType user_dtype, DataType p
                                  const std::vector<int64_t>& shape);
 RBLNRetCode rbln_set_raw_memory_alloc(uint64_t vaddr, uint64_t size);
 
+// Configure target_vaddr's device allocation to the same physical layout kind (NT/WT) and dtype as
+// ref_vaddr's (size from target), without copying data. Lets a subsequent target<->ref D2D take the
+// fast path (which requires matching layout kinds). ref must already have a physical view.
+RBLNRetCode rbln_set_device_alloc_layout_like(uint64_t target_vaddr, uint64_t ref_vaddr);
+
 // Retrieves detailed information for the vmemory entry.
 RBLNRetCode rbln_get_memory_info(uint64_t vaddr, MemoryInfo& memory_info_out);
 
@@ -266,10 +332,35 @@ RBLNRetCode rbln_memcpy_v2h(uint64_t src_vaddr, uintptr_t dst_host_ptr, uint64_t
 // Copies the contents from a virtual memory area to another virtual memory area.
 RBLNRetCode rbln_memcpy_v2v(uint64_t src_vaddr, uint64_t dst_vaddr, uint64_t size);
 
+// Maximum number of per-destination sub-copies that rbln_memcpy_v2v_multi
+// dispatches on-device. At or below this count the copies go through the device
+// command buffer; above it the runtime falls back to a host sync (slow but
+// correct). Callers that can compute their fan-out cheaply ahead of time may
+// gate on this to skip building descriptors that would only fall back.
+constexpr uint32_t kMaxV2VMultiCopies = 1024;
+
 // Copies the contents from a virtual memory area to another virtual memory area.
 // copies: vector of tuples (src_vaddr, dst_vaddr, size)
 RBLNRetCode rbln_memcpy_v2v_multi(
     const std::vector<std::tuple<uint64_t, uint64_t, uint64_t>>& copies);
+
+// Async variants. *handle_out == 0 means a synchronous (fast-path-ineligible) completion; else
+// rbln_transfer_wait (or rbln_device_synchronize) before reading dst — there is no auto-sync on
+// host read. The same vaddr/area may be re-copied while a transfer is in flight (finalize is
+// per-handle, not MRU-order). Sync copy APIs drain the device's in-flight transfers first.
+RBLNRetCode rbln_memcpy_v2h_async(uint64_t src_vaddr, uintptr_t dst_host_ptr, uint64_t size,
+                                  uint64_t* handle_out);
+RBLNRetCode rbln_memcpy_h2v_async(uintptr_t src_host_ptr, uint64_t dst_vaddr, uint64_t size,
+                                  uint64_t* handle_out);
+RBLNRetCode rbln_memcpy_v2v_async(uint64_t src_vaddr, uint64_t dst_vaddr, uint64_t size,
+                                  uint64_t* handle_out);
+RBLNRetCode rbln_memcpy_v2v_multi_async(
+    const std::vector<std::tuple<uint64_t, uint64_t, uint64_t>>& copies, uint64_t* handle_out);
+
+// No-op if handle == 0.
+RBLNRetCode rbln_transfer_wait(uint64_t handle);
+
+RBLNRetCode rbln_device_synchronize(uint32_t torch_device_id);
 
 // Casts and copies the contents from host memory to the virtual memory area. The contents at
 // the host memory are assumed to be in `from_dtype` and will be converted to `to_dtype`. The
@@ -298,8 +389,8 @@ RBLNRetCode rbln_memcpy_h2v_cast(uintptr_t src_host_ptr, uint64_t dst_vaddr, uin
 // `to_dtype` and copied to the `dst_host_ptr`. However, if the user dtype of the vmemory area
 // corresponding to src_vaddr is `from_dtype` and the device dtype is `to_dtype`, the data is copied
 // directly from device memory to dst_host_ptr without conversion. This characteristic can be used
-// to resolve precision loss issues between custom_float16 and float16. This can be useful when the user
-// wants the raw custom_float16 contents to avoid the precision loss.
+// to resolve precision loss issues between custom_float16 and float16. This can be useful when the
+// user wants the raw custom_float16 contents to avoid the precision loss.
 RBLNRetCode rbln_memcpy_v2h_cast(uint64_t src_vaddr, uintptr_t dst_host_ptr, uint64_t size,
                                  DataType from_dtype, DataType to_dtype);
 

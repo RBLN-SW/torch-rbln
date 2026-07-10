@@ -1,9 +1,4 @@
-"""
-Monkey patches for torch_rbln.
-
-This module contains all monkey patches applied to PyTorch to enable RBLN functionality.
-Patches are organized by functionality and include proper error handling and idempotency checks.
-"""
+"""Monkey patches applied to PyTorch to enable RBLN functionality."""
 
 import warnings
 
@@ -20,54 +15,31 @@ _original_dynamo_reset = None
 
 
 def _is_backend_registered(backend_name: str) -> bool:
-    """
-    Check if a backend is already registered with torch._dynamo.
-
-    Args:
-        backend_name: Name of the backend to check.
-
-    Returns:
-        True if the backend is registered, False otherwise.
-    """
+    """Whether backend_name is registered with torch._dynamo."""
     try:
         import torch
 
-        # Try to list backends - this may not be available in all PyTorch versions
         if hasattr(torch._dynamo, "list_backends"):
-            backends = torch._dynamo.list_backends()
-            return backend_name in backends
-
-        # Fallback: try to get the backend directly
+            return backend_name in torch._dynamo.list_backends()
         if hasattr(torch._dynamo, "backends"):
             return backend_name in torch._dynamo.backends
-
-        # If we can't check, assume it's not registered
         return False
     except Exception:
-        # If anything fails, assume not registered
         return False
 
 
 def _register_rbln_backend() -> bool:
-    """
-    Register the RBLN backend with torch._dynamo.
-
-    Returns:
-        True if registration was successful, False otherwise.
-    """
+    """Register the RBLN backend with torch._dynamo; True on success."""
     global _rbln_backend_registered
 
-    # Check if already registered
     if _rbln_backend_registered or _is_backend_registered("rbln"):
         _rbln_backend_registered = True
         return True
 
     try:
-        # Import rebel_compiler's torch_compile module to register backend
-        # This will execute the register_backend calls at module level
+        # Importing registers 'rbln' via module-level register_backend() side effects.
         import rebel.core.torch_compile  # noqa: F401
 
-        # Verify registration succeeded
         if _is_backend_registered("rbln"):
             _rbln_backend_registered = True
             return True
@@ -91,7 +63,7 @@ def _register_rbln_backend() -> bool:
 def patch_torch_compile() -> None:
     """
     Monkey patch torch.compile() to automatically register the RBLN backend on first use
-    and add automatic tensor parallel size determination and failover support.
+    and add automatic num_devices determination and tensor-parallel failover support.
 
     This patch wraps torch.compile() to ensure the RBLN backend is registered before
     the first compilation. The registration is lazy (happens on first call) to avoid
@@ -120,18 +92,29 @@ def patch_torch_compile() -> None:
             if not is_rbln_backend(backend):
                 return original_torch_compile(*args, **kwargs)
 
-            # RBLN backend: compile and wrap if model provided
-            original_fn = args[0] if args else None
-            compiled_fn = original_torch_compile(*args, **kwargs)
-            if args:
-                return CompiledFunctionWrapper(
-                    compiled_fn,
-                    original_fn,
-                    original_torch_compile,
-                    kwargs.copy(),
-                )
-            # fallthrough for model is not provided (e.g. torch.compile(backend="rbln"))
-            return compiled_fn
+            # Detect the model from either call form: torch.compile(m, ...) passes it in
+            # args[0]; torch.compile(model=m, ...) passes it in kwargs. Normalize it out of
+            # kwargs so the compile options stored on CompiledFunctionWrapper (reused for
+            # failover recompiles) never carry a stray model= that would clash with the
+            # positional model on recompile.
+            model = args[0] if args else kwargs.pop("model", None)
+
+            # Model provided (either form): wrap the compiled callable so RBLN failover,
+            # CPU fallback, and the RBLN_DUMMY_DEVICE execution guard apply.
+            if model is not None:
+                compiled_fn = original_torch_compile(model, **kwargs)
+                return CompiledFunctionWrapper(compiled_fn, model, original_torch_compile, kwargs.copy())
+
+            # No model: factory/decorator form, e.g.
+            #   f = torch.compile(backend="rbln")(fn)   or   @torch.compile(backend="rbln")
+            # torch returns a *decorator* here; wrap the eventual compiled fn so the same
+            # guard/failover/fallback apply to this form as to the model path above.
+            torch_decorator = original_torch_compile(**kwargs)
+
+            def rbln_compile_decorator(m):
+                return CompiledFunctionWrapper(torch_decorator(m), m, original_torch_compile, kwargs.copy())
+
+            return rbln_compile_decorator
 
         # Apply patch
         torch.compile = wrapper
@@ -149,14 +132,7 @@ def patch_torch_compile() -> None:
 
 
 def apply_all_patches() -> None:
-    """
-    Apply all monkey patches for RBLN functionality.
-
-    This function applies patches in the correct order:
-    1. torch.compile() patch
-
-    Idempotent: Safe to call multiple times.
-    """
+    """Apply all RBLN monkey patches. Idempotent."""
     patch_torch_compile()
 
 

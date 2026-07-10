@@ -135,8 +135,10 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   // Operations that use the device runtime API
   m.impl("_copy_from", TORCH_FN(at::native::rbln::_copy_from_rbln));
   m.impl("_copy_from_and_resize", TORCH_FN(at::native::rbln::_copy_from_and_resize_rbln));
+  m.impl("_foreach_copy_", TORCH_FN(at::native::rbln::_foreach_copy__rbln));
   m.impl("empty.memory_format", TORCH_FN(at::native::rbln::empty_rbln));
   m.impl("empty_strided", TORCH_FN(at::native::rbln::empty_strided_rbln));
+  m.impl("zero_", TORCH_FN(at::native::rbln::zero_rbln_));
   m.impl("resize_", TORCH_FN(at::native::rbln::resize_rbln_));
   m.impl("set_.source_Storage_storage_offset", TORCH_FN(at::native::rbln::set_storage_rbln_));
   m.impl("index_select", TORCH_FN(at::native::rbln::index_select_rbln));
@@ -167,7 +169,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   m.impl("min.dim_min", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("flip", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("cumsum.out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
-  m.impl("arange.start_out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
+  m.impl("arange.start_out", TORCH_FN(at::native::rbln::arange_start_out_rbln));
 
   // Operations used in pytest (temporary CPU fallbacks)
   // These are registered to manage unsupported operations encountered during pytest runs.
@@ -177,11 +179,12 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   // Operations not supported on the RBLN device (CPU fallback)
   // Scalar and tensor manipulation
   m.impl("trunc.out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
-  m.impl("_local_scalar_dense", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
-  m.impl("fill_.Scalar", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
+  m.impl("_local_scalar_dense", TORCH_FN(at::native::rbln::_local_scalar_dense_rbln));
+  m.impl("fill_.Scalar", TORCH_FN(at::native::rbln::fill_scalar_rbln_));
+  m.impl("clone", TORCH_FN(at::native::rbln::clone_rbln));
   m.impl("fill_.Tensor", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("equal", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
-  m.impl("_efficientzerotensor", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
+  m.impl("_efficientzerotensor", TORCH_FN(at::native::rbln::_efficientzerotensor_rbln));
   m.impl("native_dropout", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
 
   // Random number generation

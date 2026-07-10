@@ -4,9 +4,13 @@
 #include <rebel/runtime/api/rbln_runtime_api.h>
 
 #include <atomic>
+#include <cctype>
 #include <cstdlib>
+#include <exception>
+#include <limits>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace c10::rbln {
@@ -14,6 +18,25 @@ namespace c10::rbln {
 namespace {
 
 std::atomic<RblnDeviceMappingInitializedCallback> g_device_mapping_initialized_cb{nullptr};
+
+// Parse an int from a user env value; turn std::stoi's context-free throw into
+// an actionable error naming the variable and the bad value.
+int parseEnvInt(const std::string& value, const char* var_name) {
+  size_t pos = 0;
+  int result = 0;
+  try {
+    result = std::stoi(value, &pos);
+  } catch (const std::exception&) {
+    RBLN_CHECK(false, "{}='{}' is not a valid integer", var_name, value);
+  }
+  // std::stoi parses only a leading prefix ("1abc" -> 1); reject any trailing
+  // non-whitespace so a malformed value errors instead of being truncated.
+  while (pos < value.size() && (std::isspace(static_cast<unsigned char>(value[pos])) != 0)) {
+    ++pos;
+  }
+  RBLN_CHECK(pos == value.size(), "{}='{}' is not a valid integer", var_name, value);
+  return result;
+}
 
 } // namespace
 
@@ -61,6 +84,34 @@ std::string DeviceMappingManager::getValidSizesString() const {
   return ss.str();
 }
 
+void DeviceMappingManager::validateDeviceGroups(const std::vector<std::vector<int>>& groups) const {
+  // Hardware-independent checks shared by the real (RBLN_DEVICE_MAP / RBLN_NPUS_PER_DEVICE)
+  // and dummy paths. The physical-id *range* check needs a physical device count and so
+  // stays in the real path (initializeFromDeviceMap).
+  constexpr auto kMaxDeviceIndex = static_cast<size_t>(std::numeric_limits<c10::DeviceIndex>::max());
+  RBLN_CHECK(
+      groups.size() <= kMaxDeviceIndex,
+      "RBLN_DEVICE_MAP/RBLN_NPUS_PER_DEVICE requests {} logical devices, exceeding the maximum of {}",
+      groups.size(),
+      kMaxDeviceIndex);
+
+  std::unordered_set<int> used_physical_ids;
+  for (size_t i = 0; i < groups.size(); ++i) {
+    RBLN_CHECK(
+        isValidDeviceGroupSize(groups[i].size()),
+        "Logical device rbln:{} has {} physical NPU(s); valid sizes are {}.",
+        i,
+        groups[i].size(),
+        getValidSizesString());
+    for (int phy_id : groups[i]) {
+      RBLN_CHECK(
+          used_physical_ids.insert(phy_id).second,
+          "Physical NPU {} is assigned to more than one logical device",
+          phy_id);
+    }
+  }
+}
+
 RblnNpuMappingEnvDisplay getRblnNpuMappingEnvDisplay() {
   const char* map_env = std::getenv("RBLN_DEVICE_MAP");
   const char* npus_env = std::getenv("RBLN_NPUS_PER_DEVICE");
@@ -70,65 +121,98 @@ RblnNpuMappingEnvDisplay getRblnNpuMappingEnvDisplay() {
   };
 }
 
-std::vector<std::vector<int>> DeviceMappingManager::parseDeviceMap(const std::string& device_map_str) {
-  std::vector<std::vector<int>> result;
-  size_t pos = 0;
-  size_t len = device_map_str.length();
+bool dummyDeviceEnabled() {
+  const char* env = std::getenv("RBLN_DUMMY_DEVICE");
+  if (env == nullptr || env[0] == '\0') {
+    return false;
+  }
+  // Truthy spellings of the RBLN_DUMMY_DEVICE boolean flag (non-boolean values
+  // are already rejected by the runtime at startup).
+  std::string s(env);
+  const auto first = s.find_first_not_of(" \t\n\r\f\v");
+  if (first == std::string::npos) {
+    return false;
+  }
+  s = s.substr(first, s.find_last_not_of(" \t\n\r\f\v") - first + 1);
+  for (char& c : s) {
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  }
+  return s == "1" || s == "true" || s == "t" || s == "yes" || s == "y" || s == "on";
+}
 
-  while (pos < len) {
-    // Skip whitespace
-    while (pos < len && (device_map_str[pos] == ' ' || device_map_str[pos] == ',')) {
+std::vector<std::vector<int>> DeviceMappingManager::parseDeviceMap(const std::string& device_map_str) {
+  // Grammar (whitespace-insensitive): groups := group (',' group)* ;
+  //   group := '[' number (',' number)* ']' . Empty elements/groups and trailing
+  // commas at either level are rejected so a malformed map errors loudly instead
+  // of being silently truncated (e.g. "[0,]" / "[]" / "[0],,[1]" / "[0],[1],").
+  std::vector<std::vector<int>> result;
+  const size_t len = device_map_str.length();
+  size_t pos = 0;
+
+  auto skip_spaces = [&]() {
+    while (pos < len && device_map_str[pos] == ' ') {
       pos++;
     }
+  };
 
-    if (pos >= len)
-      break;
+  skip_spaces();
+  // An empty / whitespace-only value means "no explicit mapping"; callers fall
+  // back to a default layout. Any non-empty value must be fully well-formed.
+  if (pos >= len) {
+    return result;
+  }
 
-    // Expect '['
-    if (device_map_str[pos] != '[') {
-      RBLN_CHECK(false, "Invalid RBLN_DEVICE_MAP format. Expected '[' at position {}. Format: \"[0,1],[2,3]\"", pos);
-    }
-    pos++; // Skip '['
+  while (true) {
+    // ---- one group: '[' number (',' number)* ']' ----
+    RBLN_CHECK(
+        device_map_str[pos] == '[',
+        "Invalid RBLN_DEVICE_MAP format. Expected '[' at position {} (format: \"[0,1],[2,3]\")",
+        pos);
+    pos++; // consume '['
 
     std::vector<int> group;
     std::string num_str;
+    bool expect_number = true; // a number is required after '[' and after each ','
 
-    // Parse numbers until ']'
-    while (pos < len && device_map_str[pos] != ']') {
-      if (device_map_str[pos] == ',') {
-        if (!num_str.empty()) {
-          group.push_back(std::stoi(num_str));
-          num_str.clear();
-        }
-        pos++;
-      } else if (device_map_str[pos] == ' ') {
-        pos++;
-      } else if (device_map_str[pos] >= '0' && device_map_str[pos] <= '9') {
-        num_str += device_map_str[pos];
-        pos++;
-      } else {
-        RBLN_CHECK(
-            false,
-            "Invalid RBLN_DEVICE_MAP format. Unexpected character '{}' at position {}",
-            device_map_str[pos],
-            pos);
+    while (true) {
+      skip_spaces();
+      RBLN_CHECK(pos < len, "Invalid RBLN_DEVICE_MAP format. Unterminated group; expected ']' before end of value");
+      const char ch = device_map_str[pos];
+      if (ch == ']') {
+        // "[]" or a trailing ',' before ']' leaves expect_number set.
+        RBLN_CHECK(!expect_number, "Invalid RBLN_DEVICE_MAP format. Empty group or trailing ',' at position {}", pos);
+        break;
       }
+      if (ch == ',') {
+        RBLN_CHECK(
+            !expect_number, "Invalid RBLN_DEVICE_MAP format. Empty list element (unexpected ',') at position {}", pos);
+        group.push_back(parseEnvInt(num_str, "RBLN_DEVICE_MAP"));
+        num_str.clear();
+        expect_number = true;
+        pos++;
+        continue;
+      }
+      RBLN_CHECK(
+          ch >= '0' && ch <= '9', "Invalid RBLN_DEVICE_MAP format. Unexpected character '{}' at position {}", ch, pos);
+      num_str += ch;
+      expect_number = false;
+      pos++;
     }
+    // Commit the final number (group is non-empty: expect_number is false at ']').
+    group.push_back(parseEnvInt(num_str, "RBLN_DEVICE_MAP"));
+    result.emplace_back(std::move(group));
+    pos++; // consume ']'
 
-    // Add last number if any
-    if (!num_str.empty()) {
-      group.push_back(std::stoi(num_str));
+    // ---- separator: end of string, or ',' followed by another group ----
+    skip_spaces();
+    if (pos >= len) {
+      break;
     }
-
-    // Expect ']'
-    if (pos >= len || device_map_str[pos] != ']') {
-      RBLN_CHECK(false, "Invalid RBLN_DEVICE_MAP format. Expected ']' at position {}", pos);
-    }
-    pos++; // Skip ']'
-
-    if (!group.empty()) {
-      result.emplace_back(std::move(group));
-    }
+    RBLN_CHECK(
+        device_map_str[pos] == ',', "Invalid RBLN_DEVICE_MAP format. Expected ',' between groups at position {}", pos);
+    pos++; // consume ','
+    skip_spaces();
+    RBLN_CHECK(pos < len, "Invalid RBLN_DEVICE_MAP format. Trailing ',' with no group after it");
   }
 
   return result;
@@ -138,7 +222,15 @@ void DeviceMappingManager::registerLogicalDevice(int logical_device_index, const
   // Register the logical device with its physical NPU indices
   // Need a non-const copy for rbln_register_device_id which requires int*
   std::vector<int> physical_ids_copy = physical_ids;
-  RBLN_CHECK(!rbln_register_device_id(logical_device_index, physical_ids_copy.data(), physical_ids_copy.size()));
+  const int rc = rbln_register_device_id(
+      logical_device_index, physical_ids_copy.data(), static_cast<int>(physical_ids_copy.size()));
+  RBLN_CHECK(
+      rc == 0,
+      "rbln_register_device_id failed for rbln:{} on physical NPU(s) [{}] (rc={}); the device(s) may be in use by "
+      "another process or hold stale allocations. Free the device(s) or adjust RBLN_DEVICES.",
+      logical_device_index,
+      fmt::join(physical_ids_copy, ","),
+      rc);
   assigned_devices_.insert(static_cast<c10::DeviceIndex>(logical_device_index));
 
   // Store mapping information
@@ -168,22 +260,16 @@ void DeviceMappingManager::initializeFromDeviceMap(const std::string& device_map
 
   RBLN_CHECK(!device_groups.empty(), "RBLN_DEVICE_MAP must contain at least one logical device mapping");
 
+  // Shape / duplicate-id / count validation shared with the dummy path.
+  validateDeviceGroups(device_groups);
+
   RblnNpuMappingEnvDisplay env_display = getRblnNpuMappingEnvDisplay();
   std::vector<bool> physical_device_used(physical_device_count, false);
   int logical_device_index = 0;
 
   for (const auto& group : device_groups) {
-    RBLN_CHECK(!group.empty(), "Each logical device mapping in RBLN_DEVICE_MAP must contain at least one physical NPU");
-
-    // Validate mapping size: physical NPUs per logical device must be one of the allowed base sizes
-    RBLN_CHECK(
-        isValidDeviceGroupSize(group.size()),
-        "Each logical device mapping in RBLN_DEVICE_MAP must contain a valid number of physical NPUs. "
-        "Valid sizes are: {}. Mapping with {} physical NPU(s) is invalid.",
-        getValidSizesString(),
-        group.size());
-
-    // Validate physical NPU IDs (each mapping lists physical NPU indices for one logical device)
+    // Physical-id range check + usage tracking for unused-device collection (needs
+    // hardware, so it stays here rather than in validateDeviceGroups).
     for (int phy_id : group) {
       if (phy_id < 0 || phy_id >= physical_device_count) {
         std::string map_display = env_display.device_map;
@@ -200,8 +286,6 @@ void DeviceMappingManager::initializeFromDeviceMap(const std::string& device_map
             map_display,
             env_display.npus_per_device);
       }
-      RBLN_CHECK(
-          !physical_device_used[phy_id], "Physical NPU {} is already assigned to another logical device", phy_id);
       physical_device_used[phy_id] = true;
     }
 
@@ -276,14 +360,87 @@ void DeviceMappingManager::initializeFromNpusPerDevice(int npus_per_device, int 
   collectUnusedDevices(physical_device_used, physical_device_count);
 }
 
+void DeviceMappingManager::initializeDummyDevices() {
+  // Layout from RBLN_DEVICE_MAP (TP shape preserved), else RBLN_NPUS_PER_DEVICE as
+  // one logical device of size N, else a single device. IDs are shape markers; no
+  // NPU backs them, so they are not range-checked against hardware.
+  std::vector<std::vector<int>> groups;
+  if (const char* map_env = std::getenv("RBLN_DEVICE_MAP"); map_env != nullptr && map_env[0] != '\0') {
+    groups = parseDeviceMap(std::string(map_env));
+  }
+  if (groups.empty()) {
+    int npus_per_device = 1;
+    const auto env_display = getRblnNpuMappingEnvDisplay();
+    if (env_display.npus_per_device != "-" && !env_display.npus_per_device.empty()) {
+      npus_per_device = parseEnvInt(env_display.npus_per_device, "RBLN_NPUS_PER_DEVICE");
+      RBLN_CHECK(npus_per_device > 0, "RBLN_NPUS_PER_DEVICE must be a positive integer, got {}", npus_per_device);
+    }
+    std::vector<int> group;
+    group.reserve(static_cast<size_t>(npus_per_device));
+    for (int i = 0; i < npus_per_device; ++i) {
+      group.push_back(i);
+    }
+    groups = {group};
+  }
+
+  // Shape / duplicate-id / count validation shared with the real path; the physical-id
+  // range check is skipped (there is no NPU to range them against).
+  validateDeviceGroups(groups);
+
+  RBLN_LOG_INFO(
+      "RBLN_DUMMY_DEVICE active: {} host-backed logical device(s), 0 physical NPU. "
+      "Tensor construction/compilation run on host memory; execution still needs an NPU.",
+      groups.size());
+
+  for (size_t i = 0; i < groups.size(); ++i) {
+    registerLogicalDevice(static_cast<int>(i), groups[i]);
+  }
+  device_count_ = static_cast<c10::DeviceIndex>(groups.size());
+  buildDeviceTopology();
+}
+
 void DeviceMappingManager::initialize() {
   c10::call_once(init_flag_, [this]() {
     RBLN_LOG_DEBUG("Initializing RBLN device mapping");
 
+    // Enumeration hits the runtime in both modes (real: rbln_get_device_count();
+    // dummy: rbln_register_device_id()), so without the runtime a raw rbln_* call
+    // would SEGFAULT. Checked before the dummy branch too: degrade to 0 devices.
+    if (!rbln_runtime_available()) {
+      RBLN_LOG_INFO(
+          "RBLN runtime not loaded; initializing with 0 logical device(s). "
+          "Device access will fail at the point of use.");
+      device_count_ = 0;
+      buildDeviceTopology();
+      return;
+    }
+
+    // Dummy: host-backed, no NPU, but still needs the runtime (checked above).
+    if (dummyDeviceEnabled()) {
+      initializeDummyDevices();
+      return;
+    }
+
     int device_count = 0;
-    RBLN_CHECK(!rbln_get_device_count(&device_count));
+    // The runtime is loaded but the query failed (kernel driver not loaded / device
+    // unavailable): fatal. "Query succeeded, found 0 NPUs" is handled below.
+    RBLN_CHECK(
+        !rbln_get_device_count(&device_count),
+        "rbln_get_device_count failed; the RBLN kernel driver may not be loaded or the device is unavailable");
     const int physical_device_count = device_count;
     RBLN_LOG_DEBUG("Found {} physical NPU(s)", physical_device_count);
+
+    // No physical NPU: register 0 logical devices instead of failing (like
+    // torch.cuda.device_count()==0 on a CPU-only host). Device use fails at the
+    // point of use, so a model can still be traced/compiled without an NPU.
+    if (physical_device_count == 0) {
+      RBLN_LOG_INFO(
+          "No physical NPU detected; initializing with 0 logical device(s). "
+          "Device access will fail at the point of use.");
+      device_count_ = 0;
+      buildDeviceTopology();
+      return;
+    }
 
     // Check RBLN NPU mapping env (RBLN_DEVICE_MAP takes priority over RBLN_NPUS_PER_DEVICE)
     RblnNpuMappingEnvDisplay env_display = getRblnNpuMappingEnvDisplay();
@@ -296,7 +453,7 @@ void DeviceMappingManager::initialize() {
       // If RBLN_NPUS_PER_DEVICE is not set, default to 1 (1:1 mapping)
       int npus_per_device = 1;
       if (env_display.npus_per_device != "-" && !env_display.npus_per_device.empty()) {
-        npus_per_device = std::stoi(env_display.npus_per_device);
+        npus_per_device = parseEnvInt(env_display.npus_per_device, "RBLN_NPUS_PER_DEVICE");
         RBLN_CHECK(npus_per_device > 0, "RBLN_NPUS_PER_DEVICE must be a positive integer");
         // Validate: must be one of the allowed base sizes
         RBLN_CHECK(

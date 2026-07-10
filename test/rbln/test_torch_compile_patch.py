@@ -20,13 +20,13 @@ from torch_rbln._internal.ops_utils import extract_device_id_from_inputs
 from torch_rbln._internal.torch_compile_patch_helpers import (
     _convert_result_to_device,
     attempt_cpu_fallback,
-    auto_determine_tp_if_needed,
+    auto_determine_num_devices_if_needed,
     CompiledFunctionWrapper,
     extract_device_from_inputs,
-    get_tensor_parallel_size_from_options,
+    get_num_devices_from_options,
     handle_tp_failover,
     is_rbln_backend,
-    recompile_with_tp_size,
+    recompile_with_num_devices,
     should_attempt_failover,
 )
 
@@ -103,29 +103,41 @@ class TestTorchCompilePatchHelpers(TestCase):
         device_id = extract_device_id_from_inputs(t, 42, "hello")
         self.assertIsNone(device_id)
 
-    def test_get_tensor_parallel_size_from_options_with_tp_size(self):
-        """Test extracting tensor_parallel_size from compile_kwargs."""
+    def test_get_num_devices_from_options_with_num_devices(self):
+        """Test extracting num_devices from compile_kwargs."""
+        compile_kwargs = {"options": {"num_devices": 4}}
+        num_devices = get_num_devices_from_options(compile_kwargs)
+        self.assertEqual(num_devices, 4)
+
+    def test_get_num_devices_from_options_legacy_alias(self):
+        """The deprecated `tensor_parallel_size` alias is still accepted as a fallback."""
         compile_kwargs = {"options": {"tensor_parallel_size": 4}}
-        tp_size = get_tensor_parallel_size_from_options(compile_kwargs)
-        self.assertEqual(tp_size, 4)
+        num_devices = get_num_devices_from_options(compile_kwargs)
+        self.assertEqual(num_devices, 4)
 
-    def test_get_tensor_parallel_size_from_options_without_tp_size(self):
-        """Test that None is returned when tp_size is not set."""
+    def test_get_num_devices_from_options_num_devices_wins_over_alias(self):
+        """`num_devices` takes precedence when both keys are present."""
+        compile_kwargs = {"options": {"num_devices": 4, "tensor_parallel_size": 8}}
+        num_devices = get_num_devices_from_options(compile_kwargs)
+        self.assertEqual(num_devices, 4)
+
+    def test_get_num_devices_from_options_without_num_devices(self):
+        """Test that None is returned when num_devices is not set."""
         compile_kwargs = {"options": {}}
-        tp_size = get_tensor_parallel_size_from_options(compile_kwargs)
-        self.assertIsNone(tp_size)
+        num_devices = get_num_devices_from_options(compile_kwargs)
+        self.assertIsNone(num_devices)
 
-    def test_get_tensor_parallel_size_from_options_no_options(self):
+    def test_get_num_devices_from_options_no_options(self):
         """Test that None is returned when options key is missing."""
         compile_kwargs = {}
-        tp_size = get_tensor_parallel_size_from_options(compile_kwargs)
-        self.assertIsNone(tp_size)
+        num_devices = get_num_devices_from_options(compile_kwargs)
+        self.assertIsNone(num_devices)
 
-    def test_get_tensor_parallel_size_from_options_non_dict_options(self):
+    def test_get_num_devices_from_options_non_dict_options(self):
         """Test that None is returned when options is not a dict."""
         compile_kwargs = {"options": "not_a_dict"}
-        tp_size = get_tensor_parallel_size_from_options(compile_kwargs)
-        self.assertIsNone(tp_size)
+        num_devices = get_num_devices_from_options(compile_kwargs)
+        self.assertIsNone(num_devices)
 
     def test_convert_result_to_device_single_tensor(self):
         """Test converting single tensor result to target device."""
@@ -255,56 +267,58 @@ class TestTorchCompilePatchHelpers(TestCase):
 class TestTensorParallelFunctions(TestCase):
     """Tests for tensor parallel related functions."""
 
-    def test_recompile_with_tp_size(self):
-        """Test recompile_with_tp_size updates compile_kwargs correctly."""
+    def test_recompile_with_num_devices(self):
+        """Test recompile_with_num_devices updates compile_kwargs correctly."""
         mock_compile_fn = Mock(return_value="recompiled_fn")
         mock_model = Mock()
         compile_kwargs = {"backend": "rbln", "options": {"some_option": "value"}}
 
-        result = recompile_with_tp_size(mock_model, compile_kwargs, tp_size=4, original_compile_fn=mock_compile_fn)
+        result = recompile_with_num_devices(
+            mock_model, compile_kwargs, num_devices=4, original_compile_fn=mock_compile_fn
+        )
 
         # Verify compile function was called with updated options
         mock_compile_fn.assert_called_once()
         call_args = mock_compile_fn.call_args
         self.assertEqual(call_args[0][0], mock_model)
         self.assertEqual(call_args[1]["backend"], "rbln")
-        self.assertEqual(call_args[1]["options"]["tensor_parallel_size"], 4)
+        self.assertEqual(call_args[1]["options"]["num_devices"], 4)
         self.assertEqual(call_args[1]["options"]["some_option"], "value")
         self.assertEqual(result, "recompiled_fn")
 
-    def test_recompile_with_tp_size_no_existing_options(self):
-        """Test recompile_with_tp_size with no existing options."""
+    def test_recompile_with_num_devices_no_existing_options(self):
+        """Test recompile_with_num_devices with no existing options."""
         mock_compile_fn = Mock(return_value="recompiled_fn")
         mock_model = Mock()
         compile_kwargs = {"backend": "rbln"}
 
-        recompile_with_tp_size(mock_model, compile_kwargs, tp_size=2, original_compile_fn=mock_compile_fn)
+        recompile_with_num_devices(mock_model, compile_kwargs, num_devices=2, original_compile_fn=mock_compile_fn)
 
         call_args = mock_compile_fn.call_args
-        self.assertEqual(call_args[1]["options"]["tensor_parallel_size"], 2)
+        self.assertEqual(call_args[1]["options"]["num_devices"], 2)
 
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_tensor_parallel_size")
-    def test_auto_determine_tp_if_needed_when_not_set(self, mock_auto_tp):
-        """Test auto_determine_tp_if_needed when tp_size is not set."""
+    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices")
+    def test_auto_determine_num_devices_if_needed_when_not_set(self, mock_auto_tp):
+        """Test auto_determine_num_devices_if_needed when num_devices is not set."""
         mock_auto_tp.return_value = 4
         mock_compile_fn = Mock(return_value="recompiled_fn")
         mock_model = Mock()
         compile_kwargs = {"backend": "rbln"}
 
-        result = auto_determine_tp_if_needed(
+        result = auto_determine_num_devices_if_needed(
             mock_model, compile_kwargs, device_id=0, original_compile_fn=mock_compile_fn
         )
 
         mock_auto_tp.assert_called_once_with(0)
         self.assertEqual(result, "recompiled_fn")
 
-    def test_auto_determine_tp_if_needed_when_already_set(self):
-        """Test auto_determine_tp_if_needed when tp_size is already set."""
+    def test_auto_determine_num_devices_if_needed_when_already_set(self):
+        """Test auto_determine_num_devices_if_needed when num_devices is already set."""
         mock_compile_fn = Mock()
         mock_model = Mock()
-        compile_kwargs = {"options": {"tensor_parallel_size": 2}}
+        compile_kwargs = {"options": {"num_devices": 2}}
 
-        result = auto_determine_tp_if_needed(
+        result = auto_determine_num_devices_if_needed(
             mock_model, compile_kwargs, device_id=0, original_compile_fn=mock_compile_fn
         )
 
@@ -312,15 +326,15 @@ class TestTensorParallelFunctions(TestCase):
         mock_compile_fn.assert_not_called()
         self.assertIsNone(result)
 
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_tensor_parallel_size")
-    def test_auto_determine_tp_if_needed_when_auto_tp_fails(self, mock_auto_tp):
-        """Test auto_determine_tp_if_needed when auto-determination fails."""
+    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices")
+    def test_auto_determine_num_devices_if_needed_when_auto_tp_fails(self, mock_auto_tp):
+        """Test auto_determine_num_devices_if_needed when auto-determination fails."""
         mock_auto_tp.return_value = None
         mock_compile_fn = Mock()
         mock_model = Mock()
         compile_kwargs = {}
 
-        result = auto_determine_tp_if_needed(
+        result = auto_determine_num_devices_if_needed(
             mock_model, compile_kwargs, device_id=0, original_compile_fn=mock_compile_fn
         )
 
@@ -333,7 +347,7 @@ class TestTensorParallelFunctions(TestCase):
         mock_enable_failover.return_value = True
         compile_kwargs = {}
 
-        result = should_attempt_failover(device_id=0, compile_kwargs=compile_kwargs, current_tp=4)
+        result = should_attempt_failover(device_id=0, compile_kwargs=compile_kwargs, current_num_devices=4)
 
         self.assertTrue(result)
 
@@ -343,42 +357,42 @@ class TestTensorParallelFunctions(TestCase):
         mock_enable_failover.return_value = False
         compile_kwargs = {}
 
-        result = should_attempt_failover(device_id=0, compile_kwargs=compile_kwargs, current_tp=4)
+        result = should_attempt_failover(device_id=0, compile_kwargs=compile_kwargs, current_num_devices=4)
 
         self.assertFalse(result)
 
     @patch("torch_rbln._internal.torch_compile_patch_helpers.use_tp_failover")
     def test_should_attempt_failover_tp_is_one(self, mock_enable_failover):
-        """Test should_attempt_failover when current_tp is 1."""
+        """Test should_attempt_failover when current_num_devices is 1."""
         mock_enable_failover.return_value = True
         compile_kwargs = {}
 
-        result = should_attempt_failover(device_id=0, compile_kwargs=compile_kwargs, current_tp=1)
+        result = should_attempt_failover(device_id=0, compile_kwargs=compile_kwargs, current_num_devices=1)
 
         self.assertFalse(result)
 
     @patch("torch_rbln._internal.torch_compile_patch_helpers.use_tp_failover")
     def test_should_attempt_failover_explicit_tp_one(self, mock_enable_failover):
-        """Test should_attempt_failover when tp_size=1 is explicitly set."""
+        """Test should_attempt_failover when num_devices=1 is explicitly set."""
         mock_enable_failover.return_value = True
-        compile_kwargs = {"options": {"tensor_parallel_size": 1}}
+        compile_kwargs = {"options": {"num_devices": 1}}
 
-        result = should_attempt_failover(device_id=0, compile_kwargs=compile_kwargs, current_tp=4)
+        result = should_attempt_failover(device_id=0, compile_kwargs=compile_kwargs, current_num_devices=4)
 
         self.assertFalse(result)
 
     @patch("torch_rbln._internal.torch_compile_patch_helpers.use_tp_failover")
     def test_should_attempt_failover_explicit_tp_gt_one(self, mock_enable_failover):
-        """Test should_attempt_failover when tp_size>1 is explicitly set."""
+        """Test should_attempt_failover when num_devices>1 is explicitly set."""
         mock_enable_failover.return_value = True
-        compile_kwargs = {"options": {"tensor_parallel_size": 2}}
+        compile_kwargs = {"options": {"num_devices": 2}}
 
-        result = should_attempt_failover(device_id=0, compile_kwargs=compile_kwargs, current_tp=2)
+        result = should_attempt_failover(device_id=0, compile_kwargs=compile_kwargs, current_num_devices=2)
 
         self.assertFalse(result)
 
     @patch("torch_rbln._internal.torch_compile_patch_helpers.get_physical_device_ids")
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_tensor_parallel_size")
+    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices")
     @patch("torch_rbln._internal.torch_compile_patch_helpers.use_tp_failover")
     def test_handle_tp_failover_success(self, mock_enable_failover, mock_auto_tp, mock_get_devices):
         """Test handle_tp_failover successfully recompiles with tp=1."""
@@ -409,12 +423,12 @@ class TestTensorParallelFunctions(TestCase):
         self.assertIsNone(result)
 
     @patch("torch_rbln._internal.torch_compile_patch_helpers.use_tp_failover")
-    def test_handle_tp_failover_respects_explicit_tp_size(self, mock_enable_failover):
+    def test_handle_tp_failover_respects_explicit_num_devices(self, mock_enable_failover):
         """Test handle_tp_failover does not override explicit caller TP settings."""
         mock_enable_failover.return_value = True
         mock_compile_fn = Mock()
         mock_model = Mock()
-        compile_kwargs = {"options": {"tensor_parallel_size": 4}}
+        compile_kwargs = {"options": {"num_devices": 4}}
 
         result = handle_tp_failover(mock_model, compile_kwargs, device_id=0, original_compile_fn=mock_compile_fn)
 
@@ -426,7 +440,7 @@ class TestTensorParallelFunctions(TestCase):
 class TestCompiledFunctionWrapper(TestCase):
     """Tests for CompiledFunctionWrapper class."""
 
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_tp_if_needed")
+    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
     def test_wrapper_successful_execution(self, mock_auto_determine):
         """Test that wrapper correctly executes compiled function on success."""
         mock_auto_determine.return_value = None  # No recompilation needed
@@ -443,7 +457,7 @@ class TestCompiledFunctionWrapper(TestCase):
         result = wrapper(t)
         self.assertEqual(result.item(), 10)
 
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_tp_if_needed")
+    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
     @patch("torch_rbln._internal.torch_compile_patch_helpers.use_tp_failover")
     def test_wrapper_cpu_fallback_on_error(self, mock_enable_failover, mock_auto_determine):
         """Test that wrapper falls back to CPU on error."""
@@ -466,7 +480,7 @@ class TestCompiledFunctionWrapper(TestCase):
             self.assertEqual(result.device.type, "rbln")
             self.assertEqual(result.tolist(), [2.0, 3.0])
 
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_tp_if_needed")
+    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
     @patch("torch_rbln._internal.torch_compile_patch_helpers.use_tp_failover")
     def test_wrapper_cpu_fallback_handles_cpu_first_inputs_and_nested_outputs(
         self,
@@ -500,7 +514,7 @@ class TestCompiledFunctionWrapper(TestCase):
         self.assertEqual(result["result"][1][0].device.type, "rbln")
         self.assertEqual(result["result"][0].cpu().tolist(), [4.0, 6.0])
 
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_tp_if_needed")
+    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
     @patch("torch_rbln._internal.torch_compile_patch_helpers.use_tp_failover")
     def test_wrapper_cpu_fallback_raises_without_rbln_inputs(
         self,
@@ -526,7 +540,7 @@ class TestCompiledFunctionWrapper(TestCase):
 
         self.assertIn("requires at least one RBLN tensor input", str(ctx.exception))
 
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_tp_if_needed")
+    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
     @patch("torch_rbln._internal.torch_compile_patch_helpers.use_tp_failover")
     def test_wrapper_raises_when_compile_error_fallback_disabled(self, mock_enable_failover, mock_auto_determine):
         """Test that wrapper raises exception when 'compile_error' fallback is disabled."""
@@ -548,7 +562,7 @@ class TestCompiledFunctionWrapper(TestCase):
                 wrapper(t)
             self.assertIn("Compilation error", str(ctx.exception))
 
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_tp_if_needed")
+    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
     def test_wrapper_recompile_retry_success(self, mock_auto_determine):
         """Test that wrapper retries on recompile limit and succeeds."""
         try:
@@ -578,7 +592,7 @@ class TestCompiledFunctionWrapper(TestCase):
             mock_reset.assert_called_once()
             self.assertEqual(call_count[0], 2)
 
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_tp_if_needed")
+    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
     def test_wrapper_recompile_retry_then_fallback(self, mock_auto_determine):
         """Test that wrapper falls back to CPU after max retries."""
         try:
@@ -606,7 +620,7 @@ class TestCompiledFunctionWrapper(TestCase):
                 # Should fall back to CPU
                 self.assertEqual(result.item(), 15.0)
 
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_tp_if_needed")
+    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
     def test_wrapper_auto_determine_tp_on_first_call(self, mock_auto_determine):
         """Test that TP auto-determination happens only once on first call."""
 
@@ -633,7 +647,7 @@ class TestCompiledFunctionWrapper(TestCase):
         wrapper(t)
         mock_auto_determine.assert_called_once()  # Still only once
 
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_tp_if_needed")
+    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
     def test_wrapper_tp_failover_on_runtime_error(self, mock_auto_determine):
         """Test that TP failover is triggered on RuntimeError."""
         mock_auto_determine.return_value = None
@@ -891,13 +905,13 @@ class TestTorchCompileMonkeyPatch(TestCase):
             first = compile_rbln_cached(
                 model,
                 dynamic=False,
-                options={"disable_logger": True, "tensor_parallel_size": 1},
+                options={"disable_logger": True, "num_devices": 1},
                 device_cache_key=0,
             )
             second = compile_rbln_cached(
                 model,
                 dynamic=False,
-                options={"disable_logger": True, "tensor_parallel_size": 1},
+                options={"disable_logger": True, "num_devices": 1},
                 device_cache_key=0,
             )
 
@@ -1003,7 +1017,7 @@ class TestTorchCompileMonkeyPatch(TestCase):
 
         self.assertEqual(mock_compile.call_count, 2)
 
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_tp_if_needed")
+    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
     def test_patch_torch_compile_wrapper_integration(self, mock_auto_determine):
         """Test CompiledFunctionWrapper integration with torch.compile."""
         mock_auto_determine.return_value = None

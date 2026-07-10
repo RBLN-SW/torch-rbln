@@ -8,6 +8,8 @@ set(sources
   RBLNGenerator.cpp
   RBLNHooksInterface.cpp
   RBLNLogging.cpp
+  RBLNPinnedAllocator.cpp
+  RBLNProfiler.cpp
   RBLNV2VBatch.cpp
 )
 set(headers
@@ -19,6 +21,9 @@ set(headers
   RBLNHooksInterface.h
   RBLNLogging.h
   RBLNMacros.h
+  RBLNPinnedAllocator.h
+  RBLNProfiler.h
+  RBLNSupportedDtypes.h
   RBLNV2VBatch.h
 )
 add_library(${target}

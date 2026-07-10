@@ -42,4 +42,50 @@ at::Tensor empty_strided_rbln(
   std::optional<c10::Device> device_opt,
   std::optional<bool> pin_memory_opt);
 
+/**
+ * @brief RBLN-native impl of `aten::_efficientzerotensor`.
+ *
+ * Returns an RBLN tensor with the requested shape/dtype that reads as all
+ * zeros. The CPU fallback path crashes when redispatching this op (no tensor
+ * inputs but a Device IValue, see RBLNCPUFallback redispatchBoxed) — handling
+ * it directly here lets `sgn_backward`-style autograd paths return zero
+ * gradients without going through cpu_fallback_rbln.
+ */
+at::Tensor _efficientzerotensor_rbln(
+  c10::SymIntArrayRef sizes,
+  std::optional<c10::ScalarType> dtype_opt,
+  std::optional<c10::Layout> layout_opt,
+  std::optional<c10::Device> device_opt,
+  std::optional<bool> pin_memory_opt);
+
+/**
+ * @brief In-place zero of an RBLN tensor.
+ *
+ * Marks the v-memory backing as EMPTY_INIT_WITH_ZERO via `mark_zeros`. No
+ * host buffer is allocated, no host-to-device transfer is issued, no actual
+ * write happens — zeros materialise lazily on the first NPU read, or are
+ * skipped entirely when the first access is a write (KV-cache output
+ * pattern). Replaces the prior Python `custom_zero__rbln` shim.
+ */
+at::Tensor& zero_rbln_(at::Tensor& self);
+
+// Native impl of aten::fill_.Scalar — borrow host pointer + typed std::fill_n
+// + return_borrowed(updated=true). Bypasses cpu_fallback_rbln's redispatchBoxed
+// + TensorIterator path. Contiguous self only (asserts otherwise).
+at::Tensor& fill_scalar_rbln_(at::Tensor& self, const at::Scalar& value);
+
+// Native impl of aten::arange.start_out — acquire_host_ptr_for_overwrite
+// (D2H skipped, write-only), host-fill out[i] = start + i*step, then
+// return_borrowed(updated=true). `out` is assumed already sized.
+at::Tensor& arange_start_out_rbln(
+    const at::Scalar& start,
+    const at::Scalar& end,
+    const at::Scalar& step,
+    at::Tensor& out);
+
+// Native impl of aten::_local_scalar_dense — 1-element tensor → Python scalar
+// (= `.item()`). D2H is unavoidable (we need the value on host) but we skip
+// cpu_fallback_rbln's schema cache + redispatch overhead. Read-only borrow.
+at::Scalar _local_scalar_dense_rbln(const at::Tensor& self);
+
 } // namespace at::native::rbln
