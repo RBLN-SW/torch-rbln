@@ -180,11 +180,13 @@ python -m pytest test/distributed/ -m "test_set_perf"
 python -m pytest test/models/test_transformers.py -k "batch_size_2"
 python -m pytest test/ -m "test_set_ci" -k "not float32"
 
-# Parallel execution
-python -m pytest test/rbln/ --numprocesses=16
+# Parallel execution -- exclude single_worker tests (the collection guard rejects them
+# under -n>1); run those in a separate serial pass. `run_tests.py` does this split for you.
+python -m pytest test/rbln/ -m "not single_worker" --numprocesses=16
+python -m pytest test/rbln/ -m "single_worker"          # serial companion (no -n)
 
 # Serial execution (required for some tests)
-python -m pytest test/internal/test_memory_stats.py --numprocesses=1
+python -m pytest test/internal/test_memory_stats.py
 
 # Collect tests without running (verify selection)
 python -m pytest test/rbln/ --co -q
