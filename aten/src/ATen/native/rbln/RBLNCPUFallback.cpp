@@ -476,15 +476,20 @@ void cpu_fallback_rbln(
   // undersized out= the CPU kernel tries to GROW throws "not resizable" (shrink is
   // metadata-only and already handled in Step 3). Catch that one error, swap the
   // pure-out(s) to resizable CPU storage, and retry once; Step 3's resize-writeback
-  // grows the rbln out. Pure-out ops are functional, so the retry is side-effect-
-  // free, and the correctly-sized hot path never throws.
+  // grows the rbln out. The retry re-runs the whole kernel, so it is safe only when
+  // every write alias is a pure-out: a non-pure-out mutable alias may already have
+  // been mutated in place before the throw, and re-running would double-apply it.
   bool has_pure_out_borrow = false;
+  bool has_other_mutable_alias = false;
   for (size_t i = 0; i < tensor_args.size(); ++i) {
-    if (borrow_ids[i] != 0 && schema_info.is_pure_out[tensor_args_indices[i]]) {
-      has_pure_out_borrow = true;
-      break;
+    const auto arg_idx = tensor_args_indices[i];
+    if (schema_info.is_pure_out[arg_idx]) {
+      has_pure_out_borrow = has_pure_out_borrow || (borrow_ids[i] != 0);
+    } else if (schema_info.is_write_alias[arg_idx]) {
+      has_other_mutable_alias = true;
     }
   }
+  const bool grow_retry_safe = has_pure_out_borrow && !has_other_mutable_alias;
 
   auto run_cpu_kernel = [&]() {
     auto fast_path_fn = CPUFastPathRegistry::instance().try_get(op.schema());
@@ -494,7 +499,7 @@ void cpu_fallback_rbln(
     }
   };
 
-  if (has_pure_out_borrow) {
+  if (grow_retry_safe) {
     const std::vector<c10::IValue> stack_snapshot = *stack;
     try {
       run_cpu_kernel();
@@ -502,13 +507,13 @@ void cpu_fallback_rbln(
       if (std::string(e.what()).find("not resizable") == std::string::npos) {
         throw; // unrelated failure (dtype/device/etc.) — propagate unchanged
       }
-      // Swap each borrowed pure-out to fresh resizable CPU storage and retry.
+      // Release each borrowed pure-out, then swap it to fresh resizable CPU
+      // storage. A release failure means the borrow is still live: let it
+      // propagate rather than zeroing the id, which would strand the borrow and
+      // fail a later free/finalizer. The id is cleared only after a clean release.
       for (size_t i = 0; i < tensor_args.size(); ++i) {
         if (borrow_ids[i] != 0 && schema_info.is_pure_out[tensor_args_indices[i]]) {
-          try {
-            c10::rbln::return_borrowed(borrow_ids[i], /*updated=*/false);
-          } catch (...) {
-          }
+          c10::rbln::return_borrowed(borrow_ids[i], /*updated=*/false);
           borrow_ids[i] = 0;
           cpu_tensors[i] = at::empty(tensor_args[i].sizes(), tensor_args[i].options().device(at::kCPU));
         }
