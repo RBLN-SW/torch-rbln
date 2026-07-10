@@ -24,6 +24,9 @@ import textwrap
 import pytest
 
 
+pytestmark = pytest.mark.test_set_ci
+
+
 def _clean_env() -> dict:
     """A hermetic env copy for subprocess tests.
 
@@ -746,6 +749,7 @@ print("OK")
 )
 
 
+@pytest.mark.single_worker
 def test_dummy_compiled_prefill_decode_runs_on_real_npu(tmp_path):
     # End-to-end purpose of dummy mode: prefill/decode graphs compiled with no NPU
     # (allocations host-backed by rebel v-memory, no device opened) must load and run
