@@ -686,6 +686,34 @@ class TestCompiledFunctionWrapper(TestCase):
                 self.assertEqual(result.item(), 12)
                 self.assertTrue(recompiled_called[0])
 
+    def test_wrapper_delegates_module_attributes(self):
+        """torch.compile(nn.Module) must keep state_dict()/eval()/parameters() —
+        __getattr__ delegates unknown attributes to the wrapped model."""
+        model = torch.nn.Linear(4, 4)
+        wrapper = CompiledFunctionWrapper(lambda *a, **k: None, model, Mock(), compile_kwargs={})
+        self.assertIs(wrapper.eval(), model)  # nn.Module.eval() returns self
+        self.assertEqual(list(wrapper.state_dict().keys()), list(model.state_dict().keys()))
+        self.assertEqual(len(list(wrapper.parameters())), len(list(model.parameters())))
+
+    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
+    def test_wrapper_binds_self_as_method_descriptor(self, mock_auto):
+        """@torch.compile(backend="rbln") on an instance method: __get__ must bind
+        the instance as the first argument, and class access returns the wrapper."""
+        mock_auto.return_value = None
+        seen = {}
+
+        def echo(*args, **kwargs):
+            seen["args"] = args
+            return args
+
+        class C:
+            method = CompiledFunctionWrapper(echo, echo, Mock(), compile_kwargs={})
+
+        c = C()
+        c.method(torch.tensor([1], device="rbln"))
+        self.assertIs(seen["args"][0], c)  # self bound
+        self.assertIsInstance(C.method, CompiledFunctionWrapper)  # class access returns wrapper
+
 
 @pytest.mark.test_set_ci
 class TestChromiumEventStatePreservation(TestCase):
@@ -1016,6 +1044,17 @@ class TestTorchCompileMonkeyPatch(TestCase):
             )
 
         self.assertEqual(mock_compile.call_count, 2)
+
+    def test_dynamo_reset_clears_warm_cache(self):
+        """torch._dynamo.reset must also flush the C++ warm cache, not just the
+        Python compile cache — else a stale runtime is executed directly after
+        reset, bypassing Dynamo."""
+        patch_torch_compile()
+        from torch_rbln._internal import warm_cache
+
+        with patch.object(warm_cache, "clear") as mock_clear:
+            torch._dynamo.reset()
+            mock_clear.assert_called_once()
 
     @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
     def test_patch_torch_compile_wrapper_integration(self, mock_auto_determine):

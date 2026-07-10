@@ -5,6 +5,7 @@ This module contains utilities for wrapping compiled functions with num_devices
 auto-determination, tensor-parallel failover support, and CPU fallback functionality.
 """
 
+import functools
 import threading
 
 import torch
@@ -324,6 +325,23 @@ class CompiledFunctionWrapper:
         self._max_retries = 1
         self._auto_num_devices_determined = False
         self._failover_attempted = False
+
+    def __getattr__(self, name):
+        # Only fires for attributes not found on the wrapper. Delegate to the
+        # wrapped model/callable so torch.compile(nn.Module) keeps state_dict(),
+        # eval(), parameters(), etc. Dunders are excluded so copy/pickle protocol
+        # lookups don't get silently redirected to the wrapped object.
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        return getattr(object.__getattribute__(self, "_original_fn"), name)
+
+    def __get__(self, obj, objtype=None):
+        # Descriptor protocol so `@torch.compile(backend="rbln")` on an instance
+        # method binds `self`. Only affects class-attribute use; a wrapper stored
+        # as a plain object or instance attribute is unaffected.
+        if obj is None:
+            return self
+        return functools.partial(self.__call__, obj)
 
     def _try_tp_failover(self, device_id):
         """Try tensor parallel failover on RuntimeError."""

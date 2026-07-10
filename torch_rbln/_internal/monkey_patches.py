@@ -125,6 +125,13 @@ def patch_torch_compile() -> None:
 
         def reset_wrapper(*args, **kwargs):
             clear_rbln_compile_cache()
+            # torch._dynamo.reset() means "forget all compiled state". Also flush
+            # the C++ warm cache — otherwise a matching input profile still hits a
+            # stale runtime directly after reset, bypassing the cleared Python
+            # cache and Dynamo. Lazy import avoids an import cycle.
+            from torch_rbln._internal import warm_cache
+
+            warm_cache.clear()
             return original_dynamo_reset(*args, **kwargs)
 
         torch._dynamo.reset = reset_wrapper
