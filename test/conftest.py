@@ -58,9 +58,45 @@ def reset_caching_allocator(request):
         device = torch.device("rbln", idx)
         rbln_log_debug(f"Releasing RBLN caching allocator blocks on {device}")
         try:
+            # Drain in-flight device work first: empty_cache() without a prior sync can race
+            # async ops left by a previous test and surface later as a misattributed error.
+            torch.rbln.synchronize(idx)
             torch_rbln.memory.empty_cache(device)
         except Exception as exc:
             rbln_log_debug(f"empty_cache({device}) failed: {exc}")
+
+
+# =============================================================================
+# Global-state leak guards (autouse): keep one test's process-scoped mutations
+# from leaking into later tests on the same xdist worker.
+# =============================================================================
+@pytest.fixture(scope="function", autouse=True)
+def restore_current_device():
+    """Restore the selected RBLN device after each test, so a test that calls set_device()
+    cannot leak the selection into later tests on the same worker."""
+    try:
+        saved = torch.rbln.current_device() if torch_rbln.device.device_count() > 0 else None
+    except Exception:
+        saved = None
+    yield
+    if saved is not None:
+        try:
+            torch.rbln.set_device(saved)
+        except Exception as exc:
+            rbln_log_debug(f"restore current device -> {saved} failed: {exc}")
+
+
+@pytest.fixture(scope="function", autouse=True)
+def keep_torch_compile_patches():
+    """Re-apply torch_rbln's import-time torch.compile / torch._dynamo.reset patches if a
+    test removed or swapped them, so later tests (and the autouse reset_dynamo above) keep
+    the RBLN wrappers rather than the bare originals."""
+    yield
+    import torch_rbln._internal.monkey_patches as mp
+
+    if not (mp._torch_compile_patched and mp._torch_dynamo_reset_patched):
+        rbln_log_debug("Re-applying RBLN torch.compile patches leaked-off by a prior test")
+        mp.apply_all_patches()
 
 
 # =============================================================================
@@ -103,7 +139,22 @@ def enable_eager_malloc(monkeypatch):
 _REBEL_XFAILS: dict[str, tuple[str, str]] = {}
 
 
-def pytest_collection_modifyitems(items):
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config, items):
+    # Defense-in-depth for single_worker: those tests must run in a dedicated serial pass
+    # (test/run_tests.py splits them out). A raw parallel `pytest -n<N>` that collects them
+    # without `-m "not single_worker"` lands them on parallel workers and corrupts shared
+    # process/runtime state -- fail at collection instead of flaking later. trylast so this
+    # runs after pytest's own -m/-k deselection (the serial pass filters them out first).
+    if config.getoption("dist", "no") != "no":
+        offenders = [it.nodeid for it in items if it.get_closest_marker("single_worker")]
+        if offenders:
+            shown = ", ".join(offenders[:5]) + (f" (+{len(offenders) - 5} more)" if len(offenders) > 5 else "")
+            raise pytest.UsageError(
+                "single_worker test(s) selected under a parallel xdist run; isolate them with "
+                f"-m 'not single_worker' (or run via test/run_tests.py): {shown}"
+            )
+
     matched = set()
     for item in items:
         entry = _REBEL_XFAILS.get(item.name)

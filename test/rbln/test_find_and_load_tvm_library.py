@@ -10,7 +10,10 @@ and optional env (REBEL_HOME, LD_LIBRARY_PATH, PYTHONPATH).
 import os
 
 
-# Avoid running torch_backends_entry_point on import (would load librbln.so)
+# Gate torch_backends_entry_point during our import of torch_rbln (it would otherwise load
+# librbln.so). Restore the flag right after the import so it does not leak into other test
+# modules collected on the same xdist worker (env_utils reads TORCH_RBLN_DIAGNOSE live).
+_prev_diagnose = os.environ.get("TORCH_RBLN_DIAGNOSE")
 os.environ["TORCH_RBLN_DIAGNOSE"] = "1"
 
 from unittest.mock import patch
@@ -20,6 +23,12 @@ from torch.testing._internal.common_device_type import instantiate_device_type_t
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 import torch_rbln
+
+
+if _prev_diagnose is None:
+    os.environ.pop("TORCH_RBLN_DIAGNOSE", None)
+else:
+    os.environ["TORCH_RBLN_DIAGNOSE"] = _prev_diagnose
 
 
 @pytest.mark.test_set_ci
