@@ -464,6 +464,22 @@ class TestMemoryStats(TestCase):
         # Memory may not be freed immediately due to caching allocator
 ```
 
+> **Rule — never process-cache an env flag that tests toggle per-test.** xdist workers
+> are long-lived processes that run many tests in sequence. A function-scoped fixture
+> (`enable_deploy_mode`, `enable_eager_malloc`, `monkeypatch.setenv`, `patch.dict`) sets an
+> env var for one test, but if C++/Python reads it *once* and caches it in a
+> `static`/`@lru_cache` for the process lifetime, the **first** value latches into the whole
+> worker and leaks into every later test on it — an intermittent, order-dependent failure
+> that only shows up when xdist happens to schedule the toggling test first (e.g. the
+> `test_runtime_hidden_d2h` / eager-malloc flake). Read such flags **live** (`std::getenv`
+> per call — see `is_deploy_mode()` / `is_nan_inf_check_disabled()` in `DispatchShim.cpp`),
+> and if a Python `@lru_cache` gate must respond to per-test env, `cache_clear()` it in the
+> fixture's teardown.
+>
+> The same applies to any other process-global state a test mutates (selected device,
+> `torch.compile` patches): restore it, or rely on the autouse guards in `test/conftest.py`
+> (`restore_current_device`, `keep_torch_compile_patches`) that repair it after each test.
+
 ### Custom Kernel Test Template
 
 For testing custom RBLN operators registered via `torch.library.custom_op`:

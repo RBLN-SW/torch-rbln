@@ -498,58 +498,41 @@ bool align_penalty_fast_path_check(torch::jit::Stack* stack, const SchemaCache& 
 }
 
 // ---------------------------------------------------------------------------
-// Env-cached deploy / nan_inf-disable gates
+// Deploy / nan_inf-disable gates
 // ---------------------------------------------------------------------------
 //
-// Both flags are read once at first access (lazy init) and cached for the
-// process lifetime. Matches the Python-side semantics: `is_rbln_deploy()`
-// (env_utils.py) checks ``TORCH_RBLN_DEPLOY == "ON"``;
-// ``_parse_disabled_fallback_cases`` (ops_utils.py) is ``@lru_cache(maxsize=1)``
-// on ``TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK`` with ``"all"`` / ``"nan_inf"``
-// disabling the NaN/Inf branch.
+// Read live from the environment on every call -- NOT process-cached. Tests toggle
+// these per-test via function-scoped fixtures (enable_deploy_mode; patch.dict on
+// TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK), so a static cache would latch the first
+// value into the whole xdist worker and leak into later tests. See docs/TEST_GUIDE.md.
 bool is_deploy_mode() {
-  static std::atomic<int> cached{-1};
-  int v = cached.load(std::memory_order_relaxed);
-  if (v < 0) {
-    const char* env = std::getenv("TORCH_RBLN_DEPLOY");
-    v = (env != nullptr && std::strcmp(env, "ON") == 0) ? 1 : 0;
-    cached.store(v, std::memory_order_relaxed);
-  }
-  return v == 1;
+  const char* env = std::getenv("TORCH_RBLN_DEPLOY");
+  return env != nullptr && std::strcmp(env, "ON") == 0;
 }
 
 bool is_nan_inf_check_disabled() {
-  static std::atomic<int> cached{-1};
-  int v = cached.load(std::memory_order_relaxed);
-  if (v < 0) {
-    const char* env = std::getenv("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK");
-    bool disabled = false;
-    if (env != nullptr) {
-      std::string s = env;
-      size_t start = 0;
-      while (start <= s.size()) {
-        size_t end = s.find(',', start);
-        if (end == std::string::npos)
-          end = s.size();
-        std::string token = s.substr(start, end - start);
-        const auto l = token.find_first_not_of(" \t");
-        const auto r = token.find_last_not_of(" \t");
-        if (l != std::string::npos) {
-          token = token.substr(l, r - l + 1);
-        } else {
-          token.clear();
-        }
-        if (token == "all" || token == "nan_inf") {
-          disabled = true;
-          break;
-        }
-        start = end + 1;
-      }
+  const char* env = std::getenv("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK");
+  if (env == nullptr)
+    return false;
+  std::string s = env;
+  size_t start = 0;
+  while (start <= s.size()) {
+    size_t end = s.find(',', start);
+    if (end == std::string::npos)
+      end = s.size();
+    std::string token = s.substr(start, end - start);
+    const auto l = token.find_first_not_of(" \t");
+    const auto r = token.find_last_not_of(" \t");
+    if (l != std::string::npos) {
+      token = token.substr(l, r - l + 1);
+    } else {
+      token.clear();
     }
-    v = disabled ? 1 : 0;
-    cached.store(v, std::memory_order_relaxed);
+    if (token == "all" || token == "nan_inf")
+      return true;
+    start = end + 1;
   }
-  return v == 1;
+  return false;
 }
 
 // fp16/bf16 NaN/Inf bit-pattern check.
