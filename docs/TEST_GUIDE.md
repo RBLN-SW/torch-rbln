@@ -147,11 +147,11 @@ Each suite maps to specific test directories:
 
 ```text
 --test_mode=ci (default)
-            → -m "test_set_ci and single_worker"  (serial, no xdist)
+            → -m "test_set_ci and single_worker"  (serial, --numprocesses=1)
               + -m "test_set_ci and not single_worker"  (parallel, --numprocesses=16)
 
 --test_mode=release
-            → -m "not (test_set_experimental or test_set_perf) and single_worker"  (serial, no xdist)
+            → -m "not (test_set_experimental or test_set_perf) and single_worker"  (serial, --numprocesses=1)
               + -m "not (test_set_experimental or test_set_perf) and not single_worker"  (parallel, --numprocesses=16)
 ```
 
