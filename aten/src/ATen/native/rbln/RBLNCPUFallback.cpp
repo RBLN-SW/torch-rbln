@@ -480,13 +480,20 @@ void cpu_fallback_rbln(
   // every write alias is a pure-out: a non-pure-out mutable alias may already have
   // been mutated in place before the throw, and re-running would double-apply it.
   bool has_pure_out_borrow = false;
-  bool has_other_mutable_alias = false;
   for (size_t i = 0; i < tensor_args.size(); ++i) {
-    const auto arg_idx = tensor_args_indices[i];
-    if (schema_info.is_pure_out[arg_idx]) {
-      has_pure_out_borrow = has_pure_out_borrow || (borrow_ids[i] != 0);
-    } else if (schema_info.is_write_alias[arg_idx]) {
+    if (borrow_ids[i] != 0 && schema_info.is_pure_out[tensor_args_indices[i]]) {
+      has_pure_out_borrow = true;
+      break;
+    }
+  }
+  // Scan the whole schema, not just tensor_args: is_write_alias is set for every
+  // arg kind, so this also catches a mutable Tensor[]/Tensor?[] (e.g. a foreach
+  // self list) that the tensor_args loop above would miss.
+  bool has_other_mutable_alias = false;
+  for (size_t k = 0; k < schema_info.is_write_alias.size(); ++k) {
+    if (schema_info.is_write_alias[k] && !schema_info.is_pure_out[k]) {
       has_other_mutable_alias = true;
+      break;
     }
   }
   const bool grow_retry_safe = has_pure_out_borrow && !has_other_mutable_alias;
