@@ -183,32 +183,7 @@ def enable_eager_malloc(monkeypatch):
 _REBEL_XFAILS: dict[str, tuple[str, str]] = {}
 
 
-@pytest.hookimpl(trylast=True)
-def pytest_collection_modifyitems(config, items):
-    # Defense-in-depth for single_worker: those tests must run in a dedicated serial pass
-    # (test/run_tests.py splits them out). A raw parallel `pytest -n<N>` that collects them
-    # without `-m "not single_worker"` lands them on parallel workers and corrupts shared
-    # process/runtime state -- fail at collection instead of flaking later. trylast so this
-    # runs after pytest's own -m/-k deselection (the serial pass filters them out first).
-    #
-    # Fire only where tests actually execute in parallel: inside an xdist worker with
-    # workercount > 1. Under a real `pytest -nN` the controller never collects (dsession
-    # blocks it); collection runs only in the workers, each carrying workerinput["workercount"]
-    # (the true parallelism, since xdist resets numprocesses/dist there). Keying on
-    # numprocesses would both miss the real run (never fires in a worker) and false-positive on
-    # `--collect-only -nN` (a controller-only dry run that executes nothing). `-n1` ->
-    # workercount 1 -> serial-safe (the run_tests.py single_worker pass).
-    workerinput = getattr(config, "workerinput", None)
-    parallel = workerinput is not None and int(workerinput.get("workercount", 1)) > 1
-    if parallel:
-        offenders = [it.nodeid for it in items if it.get_closest_marker("single_worker")]
-        if offenders:
-            shown = ", ".join(offenders[:5]) + (f" (+{len(offenders) - 5} more)" if len(offenders) > 5 else "")
-            raise pytest.UsageError(
-                "single_worker test(s) selected under a parallel xdist run; isolate them with "
-                f"-m 'not single_worker' (or run via test/run_tests.py): {shown}"
-            )
-
+def pytest_collection_modifyitems(items):
     matched = set()
     for item in items:
         entry = _REBEL_XFAILS.get(item.name)

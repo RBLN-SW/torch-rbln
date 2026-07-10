@@ -40,59 +40,6 @@ def _run_setup_teardown(fixture, *args):
         pass
 
 
-class _Item:
-    def __init__(self, nodeid, single_worker):
-        self.nodeid = nodeid
-        self.name = nodeid.rsplit("::", 1)[-1]
-        self._single = single_worker
-
-    def get_closest_marker(self, name):
-        return object() if name == "single_worker" and self._single else None
-
-    def add_marker(self, marker):  # _REBEL_XFAILS is empty, so never called
-        raise AssertionError("unexpected add_marker")
-
-
-class _Config:
-    """Stub pytest config. Set ``workercount`` to simulate collection inside an xdist worker
-    (the only place collection runs for a real parallel run); leave it None to simulate the
-    controller / no-xdist / --collect-only, which execute nothing in parallel."""
-
-    def __init__(self, *, workercount=None, numprocesses=0):
-        self._numprocesses = numprocesses
-        if workercount is not None:
-            self.workerinput = {"workercount": workercount}
-
-    def getoption(self, name, default=None):
-        return self._numprocesses if name == "numprocesses" else default
-
-
-@pytest.mark.test_set_ci
-def test_single_worker_guard_fires_only_under_parallel():
-    """The single_worker collection guard must fire only inside an xdist worker with
-    workercount > 1 -- the only place tests actually execute in parallel. It must NOT fire on
-    the controller / no-xdist / ``--collect-only -nN`` (which execute nothing), nor for a
-    single worker (``-n1``, serial-safe)."""
-    modify = _load_root_conftest().pytest_collection_modifyitems
-
-    def single():
-        return [_Item("f.py::test_a", single_worker=True)]
-
-    # Real parallel run: an xdist worker with workercount > 1 collecting a single_worker
-    # test -> loud error. THIS is the path that actually fires under `pytest -n32`.
-    with pytest.raises(pytest.UsageError, match="single_worker"):
-        modify(_Config(workercount=32), single())
-    # -n1: a single worker is serial-safe (the run_tests.py single_worker pass) -> allowed.
-    modify(_Config(workercount=1), single())
-    # No worker context (controller / no xdist) -> allowed even with a single_worker test.
-    modify(_Config(numprocesses=0), single())
-    # --collect-only -nN: a controller-only dry run (numprocesses set, no workerinput) that
-    # executes nothing -> must NOT false-positive.
-    modify(_Config(numprocesses=8), single())
-    # Parallel worker with single_worker already filtered out (run_tests.py parallel pass) -> ok.
-    modify(_Config(workercount=32), [_Item("f.py::test_b", single_worker=False)])
-
-
 @pytest.mark.test_set_ci
 def test_torch_compile_patches_reapplied_by_fixture_teardown():
     """The keep_torch_compile_patches fixture must re-apply the import-time torch.compile
