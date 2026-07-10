@@ -58,26 +58,34 @@ def reset_caching_allocator(request):
         rbln_log_debug(f"device_count() failed; skipping caching allocator reset: {exc}")
         return
 
-    # Collect every device's cleanup failure and raise them together at the end, so one
-    # device's fault can't mask another's and nothing is silently swallowed.
-    errors: list[str] = []
-    # Drain first so an async fault is attributed to this test (not a later one).
+    # Drain first so an async fault is attributed to this test, not a later one. Collect
+    # every device's failure so one device can't mask another's.
+    sync_errors = []
     for idx in range(num_devices):
         try:
             torch.rbln.synchronize(idx)
         except Exception as exc:  # noqa: BLE001 - aggregated and re-raised below
-            errors.append(f"synchronize(rbln:{idx}): {exc!r}")
-    # Release cached blocks regardless of the drain outcome, so the next test starts with
-    # an unfragmented pool even when the drain failed.
+            sync_errors.append(f"synchronize(rbln:{idx}): {exc!r}")
+
+    # If any drain failed, do NOT flush: a faulted/undrained device may still have in-flight
+    # DMA referencing its blocks, so freeing them re-opens the async-buffer/free race this
+    # drain guards against -- and empty_cache() additionally clears the *process-global*
+    # WarmCache. Surface the drain errors and stop.
+    if sync_errors:
+        raise RuntimeError("RBLN device drain failed:\n  " + "\n  ".join(sync_errors))
+
+    # All drains succeeded -> safe to release cached blocks so the next test starts with an
+    # unfragmented pool. Aggregate flush failures too (nothing hidden).
+    flush_errors = []
     for idx in range(num_devices):
         device = torch.device("rbln", idx)
         rbln_log_debug(f"Releasing RBLN caching allocator blocks on {device}")
         try:
             torch_rbln.memory.empty_cache(device)
         except Exception as exc:  # noqa: BLE001 - aggregated and re-raised below
-            errors.append(f"empty_cache(rbln:{idx}): {exc!r}")
-    if errors:
-        raise RuntimeError("RBLN caching-allocator teardown failed:\n  " + "\n  ".join(errors))
+            flush_errors.append(f"empty_cache(rbln:{idx}): {exc!r}")
+    if flush_errors:
+        raise RuntimeError("RBLN caching-allocator flush failed:\n  " + "\n  ".join(flush_errors))
 
 
 # =============================================================================
@@ -100,10 +108,10 @@ def restore_current_device():
     # set_device mutates) via sys.modules rather than a `from ... import device`.
     _dev = sys.modules[torch_rbln.device.set_device.__module__]
 
-    try:
-        saved = _dev.current_device() if _dev.device_count() > 0 else None
-    except Exception:
-        saved = None
+    # Fail loud on a snapshot failure too: device_count() returns 0 (never raises) when there
+    # is no device, so an exception here is a real fault (e.g. malformed RBLN_* config) that
+    # should surface, not be swallowed into a silent no-op teardown.
+    saved = _dev.current_device() if _dev.device_count() > 0 else None
     saved_initialized = _dev._initialized
     yield
     if saved is None:
@@ -183,19 +191,15 @@ def pytest_collection_modifyitems(config, items):
     # process/runtime state -- fail at collection instead of flaking later. trylast so this
     # runs after pytest's own -m/-k deselection (the serial pass filters them out first).
     #
-    # Detect a genuine parallel run by WORKER COUNT, not xdist's dist mode. Under a real
-    # `pytest -nN` the controller never collects (dsession blocks it); collection runs only
-    # inside each worker, where xdist resets numprocesses=None / dist="no" -- so a
-    # numprocesses/dist check would always read "serial" there and never fire. The worker
-    # instead carries workerinput["workercount"] (the true parallelism). Fall back to
-    # numprocesses only off-worker (controller / no xdist / --collect-only, which skips the
-    # distributed session). `-n1` -> workercount 1 -> serial-safe (the single_worker pass).
+    # Fire only where tests actually execute in parallel: inside an xdist worker with
+    # workercount > 1. Under a real `pytest -nN` the controller never collects (dsession
+    # blocks it); collection runs only in the workers, each carrying workerinput["workercount"]
+    # (the true parallelism, since xdist resets numprocesses/dist there). Keying on
+    # numprocesses would both miss the real run (never fires in a worker) and false-positive on
+    # `--collect-only -nN` (a controller-only dry run that executes nothing). `-n1` ->
+    # workercount 1 -> serial-safe (the run_tests.py single_worker pass).
     workerinput = getattr(config, "workerinput", None)
-    if workerinput is not None:
-        parallel = int(workerinput.get("workercount", 1)) > 1
-    else:
-        numprocesses = config.getoption("numprocesses", 0) or 0
-        parallel = numprocesses > 1 if isinstance(numprocesses, int) else True
+    parallel = workerinput is not None and int(workerinput.get("workercount", 1)) > 1
     if parallel:
         offenders = [it.nodeid for it in items if it.get_closest_marker("single_worker")]
         if offenders:

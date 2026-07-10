@@ -55,8 +55,8 @@ class _Item:
 
 class _Config:
     """Stub pytest config. Set ``workercount`` to simulate collection inside an xdist worker
-    (where numprocesses/dist are reset, so the guard must read workerinput); leave it None to
-    simulate the controller / no-xdist / --collect-only, where only ``numprocesses`` is seen."""
+    (the only place collection runs for a real parallel run); leave it None to simulate the
+    controller / no-xdist / --collect-only, which execute nothing in parallel."""
 
     def __init__(self, *, workercount=None, numprocesses=0):
         self._numprocesses = numprocesses
@@ -69,10 +69,10 @@ class _Config:
 
 @pytest.mark.test_set_ci
 def test_single_worker_guard_fires_only_under_parallel():
-    """The single_worker collection guard must key on the WORKER COUNT read from
-    workerinput. Under a real ``pytest -nN`` the controller never collects; collection runs
-    only inside workers, where xdist resets numprocesses=None/dist="no" -- so a
-    numprocesses/dist check would never fire. ``-n1`` (workercount 1) is serial-safe."""
+    """The single_worker collection guard must fire only inside an xdist worker with
+    workercount > 1 -- the only place tests actually execute in parallel. It must NOT fire on
+    the controller / no-xdist / ``--collect-only -nN`` (which execute nothing), nor for a
+    single worker (``-n1``, serial-safe)."""
     modify = _load_root_conftest().pytest_collection_modifyitems
 
     def single():
@@ -84,12 +84,11 @@ def test_single_worker_guard_fires_only_under_parallel():
         modify(_Config(workercount=32), single())
     # -n1: a single worker is serial-safe (the run_tests.py single_worker pass) -> allowed.
     modify(_Config(workercount=1), single())
-    # Controller / no xdist (no workerinput): numprocesses is the signal. 0 -> allowed.
+    # No worker context (controller / no xdist) -> allowed even with a single_worker test.
     modify(_Config(numprocesses=0), single())
-    # --collect-only -nN dry run (runs on the controller, distributed session skipped) still
-    # catches misuse via numprocesses.
-    with pytest.raises(pytest.UsageError, match="single_worker"):
-        modify(_Config(numprocesses=8), single())
+    # --collect-only -nN: a controller-only dry run (numprocesses set, no workerinput) that
+    # executes nothing -> must NOT false-positive.
+    modify(_Config(numprocesses=8), single())
     # Parallel worker with single_worker already filtered out (run_tests.py parallel pass) -> ok.
     modify(_Config(workercount=32), [_Item("f.py::test_b", single_worker=False)])
 
@@ -197,40 +196,56 @@ def test_restore_current_device_propagates_restore_failure():
         _dev._initialized = saved_flag
 
 
-@pytest.mark.test_set_ci
-@pytest.mark.no_caching_allocator_reset  # the real autouse fixture must not call the patched fns
-def test_caching_allocator_teardown_reports_all_cleanup_errors(monkeypatch):
-    """Teardown must fail loud and aggregate every device-cleanup error: a synchronize
-    failure (an async fault this test left) is not swallowed or misreported, the flush still
-    runs so the next test starts clean, and an empty_cache failure is surfaced too."""
-    conftest = _load_root_conftest()
-
+class _FakeReq:
     class _Node:
         @staticmethod
         def get_closest_marker(name):
             return None
 
-    class _Req:
-        node = _Node()
+    node = _Node()
 
+
+@pytest.mark.test_set_ci
+@pytest.mark.no_caching_allocator_reset  # the real autouse fixture must not call the patched fns
+def test_caching_allocator_teardown_fails_loud_and_skips_flush_on_sync_error(monkeypatch):
+    """A drain (synchronize) failure means the device may still have in-flight DMA, so the
+    teardown must fail loud AND NOT flush -- freeing a faulted device's blocks would re-open
+    the async-buffer race (and empty_cache clears the process-global WarmCache)."""
+    conftest = _load_root_conftest()
+    flushed = []
     monkeypatch.setattr(torch_rbln.device, "device_count", lambda: 1)
 
     def _sync_boom(idx):
         raise RuntimeError("sync fault")
 
+    monkeypatch.setattr(torch.rbln, "synchronize", _sync_boom)
+    monkeypatch.setattr(torch_rbln.memory, "empty_cache", lambda device: flushed.append(device))
+
+    gen = conftest.reset_caching_allocator.__wrapped__(_FakeReq())
+    next(gen)  # setup: yields
+    with pytest.raises(RuntimeError, match="sync fault"):
+        next(gen)  # teardown: drain fails -> raise, flush skipped
+    assert flushed == []  # flush must be skipped when the drain failed
+
+
+@pytest.mark.test_set_ci
+@pytest.mark.no_caching_allocator_reset
+def test_caching_allocator_teardown_reports_flush_error(monkeypatch):
+    """When the drain succeeds, the flush runs; an empty_cache failure must be surfaced
+    (aggregated), not hidden."""
+    conftest = _load_root_conftest()
+    monkeypatch.setattr(torch_rbln.device, "device_count", lambda: 1)
+    monkeypatch.setattr(torch.rbln, "synchronize", lambda idx: None)
+
     def _flush_boom(device):
         raise RuntimeError("flush fault")
 
-    monkeypatch.setattr(torch.rbln, "synchronize", _sync_boom)
     monkeypatch.setattr(torch_rbln.memory, "empty_cache", _flush_boom)
 
-    gen = conftest.reset_caching_allocator.__wrapped__(_Req())
+    gen = conftest.reset_caching_allocator.__wrapped__(_FakeReq())
     next(gen)  # setup: yields
-    with pytest.raises(RuntimeError) as excinfo:
-        next(gen)  # teardown: both fail -> aggregated and raised
-    msg = str(excinfo.value)
-    assert "sync fault" in msg  # drain failure surfaced (not misreported)
-    assert "flush fault" in msg  # flush ran despite the drain failure, and surfaced too
+    with pytest.raises(RuntimeError, match="flush fault"):
+        next(gen)  # teardown: drain ok -> flush runs -> its failure surfaced
 
 
 def _with_env(var, value, fn):
