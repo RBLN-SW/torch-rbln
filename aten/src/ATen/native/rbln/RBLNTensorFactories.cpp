@@ -250,8 +250,10 @@ at::Tensor& fill_scalar_rbln_(at::Tensor& self, const at::Scalar& value) {
 
   void* host_ptr = reinterpret_cast<void*>(borrow.host_ptr);
   const bool handled = fill_host_typed(host_ptr, self.numel(), self.scalar_type(), value);
-  guard.armed = false;
+  // Return while still armed, then disarm: if this explicit return throws, the
+  // guard's dtor retries (updated=false) rather than leaking the borrow.
   c10::rbln::return_borrowed(borrow.borrow_id, /*updated=*/handled);
+  guard.armed = false;
   // ``fill_host_typed_supports`` already vetted the dtype above, so the
   // call above should always succeed. Keep a defensive fallback for the
   // (hypothetical) case where the two predicates diverge.
