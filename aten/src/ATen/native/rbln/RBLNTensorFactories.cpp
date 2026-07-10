@@ -183,7 +183,10 @@ bool fill_host_typed(void* host_ptr, int64_t numel, c10::ScalarType st, const at
 // auto-vectorises), then commits via return_borrowed(updated=true). The
 // device→host transfer is implicit in borrow_host_ptr (we use the read variant
 // rather than acquire_host_ptr_for_overwrite because partial-view writes need
-// the rest of the storage to remain intact).
+// the rest of the storage to remain intact). A contiguous offset view (e.g.
+// base[2:4], where zero_ routes here) borrows correctly: data_ptr() is an
+// interior vaddr and the runtime returns host_ptr = allocation base + offset
+// with the range bounds-checked, so we write only the view's bytes.
 //
 // Only contiguous tensors are handled. Non-contiguous fills (rare on the
 // Llama-1B vLLM hot path: 0 occurrences in measurement) trip the assert; the
