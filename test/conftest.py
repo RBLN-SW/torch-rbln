@@ -58,19 +58,26 @@ def reset_caching_allocator(request):
         rbln_log_debug(f"device_count() failed; skipping caching allocator reset: {exc}")
         return
 
-    # Drain first, fail-loud: a synchronize error is a real device fault this test left
-    # behind and must not be hidden.
+    # Collect every device's cleanup failure and raise them together at the end, so one
+    # device's fault can't mask another's and nothing is silently swallowed.
+    errors: list[str] = []
+    # Drain first so an async fault is attributed to this test (not a later one).
     for idx in range(num_devices):
-        torch.rbln.synchronize(idx)
-
-    # Then release cached blocks (best-effort).
+        try:
+            torch.rbln.synchronize(idx)
+        except Exception as exc:  # noqa: BLE001 - aggregated and re-raised below
+            errors.append(f"synchronize(rbln:{idx}): {exc!r}")
+    # Release cached blocks regardless of the drain outcome, so the next test starts with
+    # an unfragmented pool even when the drain failed.
     for idx in range(num_devices):
         device = torch.device("rbln", idx)
         rbln_log_debug(f"Releasing RBLN caching allocator blocks on {device}")
         try:
             torch_rbln.memory.empty_cache(device)
-        except Exception as exc:
-            rbln_log_debug(f"empty_cache({device}) failed: {exc}")
+        except Exception as exc:  # noqa: BLE001 - aggregated and re-raised below
+            errors.append(f"empty_cache(rbln:{idx}): {exc!r}")
+    if errors:
+        raise RuntimeError("RBLN caching-allocator teardown failed:\n  " + "\n  ".join(errors))
 
 
 # =============================================================================
@@ -84,8 +91,10 @@ def restore_current_device():
 
     Snapshot both, then only issue the low-level set_device when the index actually changed:
     calling it unconditionally flips ``_initialized`` False->True (set_device sets it) on
-    tests that never touched the device, which is itself a leak. The saved ``_initialized``
-    is restored last so the fixture leaves the flag exactly as the test found it."""
+    tests that never touched the device, which is itself a leak. Restore the index and the
+    flag in lockstep and fail loud if the index restore fails -- a half-restored device
+    (index moved, flag rolled back to the old value) would silently mislead every later
+    test on this worker, so surface it as a teardown error instead of swallowing it."""
     # The `torch_rbln.device` package re-exports a `device` class that shadows the
     # `device` submodule, so reach the module (which owns the `_initialized` global that
     # set_device mutates) via sys.modules rather than a `from ... import device`.
@@ -97,12 +106,14 @@ def restore_current_device():
         saved = None
     saved_initialized = _dev._initialized
     yield
-    if saved is not None:
-        try:
-            if _dev.current_device() != saved:
-                _dev.set_device(saved)
-        except Exception as exc:
-            rbln_log_debug(f"restore current device -> {saved} failed: {exc}")
+    if saved is None:
+        _dev._initialized = saved_initialized
+        return
+    # Do NOT swallow a restore failure: if current_device()/set_device() raise, let it
+    # propagate as a teardown error rather than rolling back only the flag. The flag is
+    # restored only after the index restore succeeds, so the two never diverge.
+    if _dev.current_device() != saved:
+        _dev.set_device(saved)
     _dev._initialized = saved_initialized
 
 
@@ -114,8 +125,13 @@ def keep_torch_compile_patches():
     yield
     import torch_rbln._internal.monkey_patches as mp
 
-    if not (mp._torch_compile_patched and mp._torch_dynamo_reset_patched):
+    # patches_active() checks callable identity (not just the bookkeeping flags), so a test
+    # that rebinds torch.compile to something else is caught and the RBLN wrappers restored.
+    if not mp.patches_active():
         rbln_log_debug("Re-applying RBLN torch.compile patches leaked-off by a prior test")
+        # remove first: patch_torch_compile() is a no-op while the flags still read
+        # "patched", so a silent rebind would otherwise survive apply_all_patches().
+        mp.remove_all_patches()
         mp.apply_all_patches()
 
 
@@ -167,12 +183,19 @@ def pytest_collection_modifyitems(config, items):
     # process/runtime state -- fail at collection instead of flaking later. trylast so this
     # runs after pytest's own -m/-k deselection (the serial pass filters them out first).
     #
-    # Key on the worker count, not dist: `-n1` also flips xdist into dist=load, but a single
-    # worker is serial-safe and is exactly how run_tests.py runs the single_worker pass, so
-    # a dist-based check would wrongly reject it. numprocesses is the resolved worker count
-    # (0/None when xdist is off); a non-int (unresolved 'auto'/'logical') means many workers.
-    numprocesses = config.getoption("numprocesses", 0) or 0
-    parallel = numprocesses > 1 if isinstance(numprocesses, int) else True
+    # Detect a genuine parallel run by WORKER COUNT, not xdist's dist mode. Under a real
+    # `pytest -nN` the controller never collects (dsession blocks it); collection runs only
+    # inside each worker, where xdist resets numprocesses=None / dist="no" -- so a
+    # numprocesses/dist check would always read "serial" there and never fire. The worker
+    # instead carries workerinput["workercount"] (the true parallelism). Fall back to
+    # numprocesses only off-worker (controller / no xdist / --collect-only, which skips the
+    # distributed session). `-n1` -> workercount 1 -> serial-safe (the single_worker pass).
+    workerinput = getattr(config, "workerinput", None)
+    if workerinput is not None:
+        parallel = int(workerinput.get("workercount", 1)) > 1
+    else:
+        numprocesses = config.getoption("numprocesses", 0) or 0
+        parallel = numprocesses > 1 if isinstance(numprocesses, int) else True
     if parallel:
         offenders = [it.nodeid for it in items if it.get_closest_marker("single_worker")]
         if offenders:

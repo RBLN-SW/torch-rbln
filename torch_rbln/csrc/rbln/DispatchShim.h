@@ -103,4 +103,10 @@ bool install_warmcache_from_pending(
     uint32_t num_outputs,
     const std::vector<std::tuple<std::vector<int64_t>, std::string, bool>>& out_profiles);
 
+// TEST-ONLY accessors for the deploy / nan_inf-disable env gates. They read the environment
+// live (no process cache); a regression test uses these to assert a set -> unset -> set
+// toggle is observed, so the cache can never be reintroduced unnoticed.
+bool test_read_deploy_mode();
+bool test_read_nan_inf_check_disabled();
+
 } // namespace torch_rbln::shim

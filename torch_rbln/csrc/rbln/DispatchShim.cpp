@@ -1345,6 +1345,16 @@ std::string strip_namespace(const std::string& op_name) {
 // Public API
 // ---------------------------------------------------------------------------
 
+// TEST-ONLY: expose the live deploy / nan_inf-disable env gates so a regression test can
+// assert they are read live (set -> unset -> set) and never process-cached again.
+bool test_read_deploy_mode() {
+  return is_deploy_mode();
+}
+
+bool test_read_nan_inf_check_disabled() {
+  return is_nan_inf_check_disabled();
+}
+
 void register_cpp_shim(const std::string& op_name, pybind11::object py_fn, const std::vector<size_t>& skip_dtype_args) {
   std::lock_guard<std::mutex> lk(registry_mutex());
 

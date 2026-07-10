@@ -116,7 +116,10 @@ def patch_torch_compile() -> None:
 
             return rbln_compile_decorator
 
-        # Apply patch
+        # Tag the wrapper so a leak guard can verify torch.compile IS the RBLN wrapper by
+        # identity, not just trust the _torch_compile_patched flag (a test may rebind
+        # torch.compile to something else without going through remove_all_patches).
+        wrapper._rbln_patch_marker = True
         torch.compile = wrapper
         _torch_compile_patched = True
 
@@ -127,8 +130,25 @@ def patch_torch_compile() -> None:
             clear_rbln_compile_cache()
             return original_dynamo_reset(*args, **kwargs)
 
+        reset_wrapper._rbln_patch_marker = True
         torch._dynamo.reset = reset_wrapper
         _torch_dynamo_reset_patched = True
+
+
+def patches_active() -> bool:
+    """Whether the RBLN torch.compile / torch._dynamo.reset patches are actually installed.
+
+    Checks callable identity (the ``_rbln_patch_marker`` tag), not just the bookkeeping
+    flags, so a test that rebinds ``torch.compile`` to something else without calling
+    remove_all_patches() is still detected as having lost the patches."""
+    import torch
+
+    return (
+        _torch_compile_patched
+        and _torch_dynamo_reset_patched
+        and getattr(torch.compile, "_rbln_patch_marker", False)
+        and getattr(torch._dynamo.reset, "_rbln_patch_marker", False)
+    )
 
 
 def apply_all_patches() -> None:

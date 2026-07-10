@@ -105,9 +105,9 @@ class TestDispatchShimNanInfFallback(TestCase):
     ``nan_inf`` / ``all``) so the warm-cache hot path cannot bypass it after
     the first clean call installs an entry for the shape.
 
-    These tests assume the default non-deploy environment (the env-cached
-    gates are initialised on first dispatch; running the suite with
-    ``TORCH_RBLN_DEPLOY=ON`` skips the scan and these checks no longer hold
+    These tests assume the default non-deploy environment (the deploy / nan_inf-disable
+    gates are read live from the environment on each dispatch, not process-cached; running
+    the suite with ``TORCH_RBLN_DEPLOY=ON`` skips the scan and these checks no longer hold
     — that's the intended deploy-mode behaviour and matches AS-IS).
     """
 

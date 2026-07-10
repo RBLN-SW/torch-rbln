@@ -7,6 +7,7 @@ later tests on the same pytest-xdist worker (the class of bug behind the intermi
 profiler / pinned-copy CI failures)."""
 
 import importlib.util
+import os
 import sys
 
 import pytest
@@ -53,10 +54,14 @@ class _Item:
 
 
 class _Config:
-    """Stub config exposing only ``numprocesses`` (the resolved xdist worker count)."""
+    """Stub pytest config. Set ``workercount`` to simulate collection inside an xdist worker
+    (where numprocesses/dist are reset, so the guard must read workerinput); leave it None to
+    simulate the controller / no-xdist / --collect-only, where only ``numprocesses`` is seen."""
 
-    def __init__(self, numprocesses):
+    def __init__(self, *, workercount=None, numprocesses=0):
         self._numprocesses = numprocesses
+        if workercount is not None:
+            self.workerinput = {"workercount": workercount}
 
     def getoption(self, name, default=None):
         return self._numprocesses if name == "numprocesses" else default
@@ -64,50 +69,61 @@ class _Config:
 
 @pytest.mark.test_set_ci
 def test_single_worker_guard_fires_only_under_parallel():
-    """The single_worker collection guard must key on worker COUNT, not xdist's dist mode:
-    ``-n1`` also flips xdist into dist=load but a single worker is serial-safe (it is how
-    run_tests.py runs the single_worker pass), so only >1 worker may reject a single_worker
-    test."""
+    """The single_worker collection guard must key on the WORKER COUNT read from
+    workerinput. Under a real ``pytest -nN`` the controller never collects; collection runs
+    only inside workers, where xdist resets numprocesses=None/dist="no" -- so a
+    numprocesses/dist check would never fire. ``-n1`` (workercount 1) is serial-safe."""
     modify = _load_root_conftest().pytest_collection_modifyitems
 
     def single():
         return [_Item("f.py::test_a", single_worker=True)]
 
-    # >1 worker (genuine parallel) collecting a single_worker test -> loud error.
+    # Real parallel run: an xdist worker with workercount > 1 collecting a single_worker
+    # test -> loud error. THIS is the path that actually fires under `pytest -n32`.
+    with pytest.raises(pytest.UsageError, match="single_worker"):
+        modify(_Config(workercount=32), single())
+    # -n1: a single worker is serial-safe (the run_tests.py single_worker pass) -> allowed.
+    modify(_Config(workercount=1), single())
+    # Controller / no xdist (no workerinput): numprocesses is the signal. 0 -> allowed.
+    modify(_Config(numprocesses=0), single())
+    # --collect-only -nN dry run (runs on the controller, distributed session skipped) still
+    # catches misuse via numprocesses.
     with pytest.raises(pytest.UsageError, match="single_worker"):
         modify(_Config(numprocesses=8), single())
-    # -n1: dist=load but a single worker is serial-safe -> allowed (regression for the
-    # broken serial pass).
-    modify(_Config(numprocesses=1), single())
-    # xdist off (0 / None) -> allowed.
-    modify(_Config(numprocesses=0), single())
-    modify(_Config(numprocesses=None), single())
-    # Parallel run with single_worker already filtered out (run_tests.py parallel pass) -> ok.
-    modify(_Config(numprocesses=8), [_Item("f.py::test_b", single_worker=False)])
+    # Parallel worker with single_worker already filtered out (run_tests.py parallel pass) -> ok.
+    modify(_Config(workercount=32), [_Item("f.py::test_b", single_worker=False)])
 
 
 @pytest.mark.test_set_ci
 def test_torch_compile_patches_reapplied_by_fixture_teardown():
-    """The keep_torch_compile_patches autouse fixture must re-apply the import-time
-    torch.compile patches in teardown when a test removed them -- exercised through the
-    fixture's own teardown, not by calling apply_all_patches() directly."""
+    """The keep_torch_compile_patches fixture must re-apply the import-time torch.compile
+    patches in teardown when a test removed OR silently rebound them -- detected by callable
+    identity (patches_active), not just the bookkeeping flags. Exercised through the fixture."""
     conftest = _load_root_conftest()
     try:
+        # (a) hard removal -> patches_active() False -> teardown restores.
         mp.remove_all_patches()
-        assert not mp._torch_compile_patched
+        assert not mp.patches_active()
         _run_setup_teardown(conftest.keep_torch_compile_patches)
-        assert mp._torch_compile_patched
-        assert mp._torch_dynamo_reset_patched
+        assert mp.patches_active()
+        # (b) silent rebind: flag still reads "patched", but torch.compile is no longer the
+        # RBLN wrapper. The identity check must catch it and the fixture must restore it.
+        torch.compile = lambda *a, **k: None
+        assert mp._torch_compile_patched  # flag disagrees with reality...
+        assert not mp.patches_active()  # ...identity check does not
+        _run_setup_teardown(conftest.keep_torch_compile_patches)
+        assert mp.patches_active()
     finally:
-        if not (mp._torch_compile_patched and mp._torch_dynamo_reset_patched):
+        if not mp.patches_active():
+            mp.remove_all_patches()
             mp.apply_all_patches()
 
 
 @pytest.mark.test_set_ci
 def test_restore_current_device_does_not_leak_initialized():
-    """restore_current_device must not flip ``_initialized`` on a test that never touched
-    the device: it snapshots the flag at setup and restores it in teardown, and skips the
-    low-level set_device when the current index is unchanged."""
+    """restore_current_device must not flip ``_initialized`` on a test that never touched the
+    device: it snapshots the flag and restores it, and skips set_device when the index is
+    unchanged."""
     conftest = _load_root_conftest()
     saved = _dev._initialized
     try:
@@ -118,11 +134,75 @@ def test_restore_current_device_does_not_leak_initialized():
         _dev._initialized = saved
 
 
+# The device functions are patched directly on the module (not via the monkeypatch fixture)
+# and restored in a finally inside the test body, so they are back to real BEFORE the real
+# autouse restore_current_device fixture tears down and would otherwise call the mock.
 @pytest.mark.test_set_ci
-@pytest.mark.no_caching_allocator_reset  # the real autouse fixture must not call the patched sync
-def test_caching_allocator_teardown_fails_loud_on_sync_error(monkeypatch):
-    """A synchronize() failure in teardown (a real device fault the test left behind) must
-    propagate, not be swallowed and misreported as an empty_cache failure in a later test."""
+def test_restore_current_device_restores_changed_index():
+    """When a test moves the current device index, restore_current_device must set it back in
+    teardown -- and only then (device-independent via patched device functions)."""
+    conftest = _load_root_conftest()
+    state = {"idx": 0}
+    set_calls = []
+    orig = (_dev.device_count, _dev.current_device, _dev.set_device)
+    try:
+        _dev.device_count = lambda: 2
+        _dev.current_device = lambda: state["idx"]
+
+        def _set(i):
+            state["idx"] = i
+            set_calls.append(i)
+
+        _dev.set_device = _set
+        gen = conftest.restore_current_device.__wrapped__()
+        next(gen)  # setup: saved = current_device() = 0
+        state["idx"] = 1  # a "test" moved the current device
+        try:
+            next(gen)  # teardown: current_device() 1 != 0 -> set_device(0)
+        except StopIteration:
+            pass
+        assert set_calls == [0]
+        assert state["idx"] == 0
+    finally:
+        _dev.device_count, _dev.current_device, _dev.set_device = orig
+
+
+@pytest.mark.test_set_ci
+def test_restore_current_device_propagates_restore_failure():
+    """A device-index restore failure must propagate as a teardown error, not be swallowed
+    while _initialized is rolled back -- which would hand later tests a mismatched
+    (index moved, flag old) state."""
+    conftest = _load_root_conftest()
+    state = {"idx": 0}
+    orig = (_dev.device_count, _dev.current_device, _dev.set_device)
+    saved_flag = _dev._initialized
+    try:
+        _dev.device_count = lambda: 2
+        _dev.current_device = lambda: state["idx"]
+
+        def _boom(i):
+            raise RuntimeError("synthetic set_device failure")
+
+        _dev.set_device = _boom
+        _dev._initialized = False  # pre-test flag
+        gen = conftest.restore_current_device.__wrapped__()
+        next(gen)  # setup snapshots saved_initialized = False
+        state["idx"] = 1  # test moved the device...
+        _dev._initialized = True  # ...and initialized it
+        with pytest.raises(RuntimeError, match="synthetic set_device failure"):
+            next(gen)  # teardown: set_device raises before the flag rollback
+        assert _dev._initialized is True  # NOT rolled back to the pre-test False
+    finally:
+        _dev.device_count, _dev.current_device, _dev.set_device = orig
+        _dev._initialized = saved_flag
+
+
+@pytest.mark.test_set_ci
+@pytest.mark.no_caching_allocator_reset  # the real autouse fixture must not call the patched fns
+def test_caching_allocator_teardown_reports_all_cleanup_errors(monkeypatch):
+    """Teardown must fail loud and aggregate every device-cleanup error: a synchronize
+    failure (an async fault this test left) is not swallowed or misreported, the flush still
+    runs so the next test starts clean, and an empty_cache failure is surfaced too."""
     conftest = _load_root_conftest()
 
     class _Node:
@@ -135,15 +215,57 @@ def test_caching_allocator_teardown_fails_loud_on_sync_error(monkeypatch):
 
     monkeypatch.setattr(torch_rbln.device, "device_count", lambda: 1)
 
-    def _boom(idx):
-        raise RuntimeError("synthetic device fault")
+    def _sync_boom(idx):
+        raise RuntimeError("sync fault")
 
-    monkeypatch.setattr(torch.rbln, "synchronize", _boom)
+    def _flush_boom(device):
+        raise RuntimeError("flush fault")
+
+    monkeypatch.setattr(torch.rbln, "synchronize", _sync_boom)
+    monkeypatch.setattr(torch_rbln.memory, "empty_cache", _flush_boom)
 
     gen = conftest.reset_caching_allocator.__wrapped__(_Req())
-    next(gen)  # setup: just yields
-    with pytest.raises(RuntimeError, match="synthetic device fault"):
-        next(gen)  # teardown: drain -> synchronize raises -> propagates loudly
+    next(gen)  # setup: yields
+    with pytest.raises(RuntimeError) as excinfo:
+        next(gen)  # teardown: both fail -> aggregated and raised
+    msg = str(excinfo.value)
+    assert "sync fault" in msg  # drain failure surfaced (not misreported)
+    assert "flush fault" in msg  # flush ran despite the drain failure, and surfaced too
+
+
+def _with_env(var, value, fn):
+    """Run fn() with env var set to value (None = unset), then restore the prior value."""
+    old = os.environ.get(var)
+    try:
+        if value is None:
+            os.environ.pop(var, None)
+        else:
+            os.environ[var] = value
+        return fn()
+    finally:
+        if old is None:
+            os.environ.pop(var, None)
+        else:
+            os.environ[var] = old
+
+
+@pytest.mark.test_set_ci
+def test_deploy_and_nan_inf_gates_read_env_live():
+    """The C++ deploy / nan_inf-disable gates must read the environment live (no process
+    cache), so a set -> unset -> set toggle is observed every time. A static cache would
+    latch the first value into the whole xdist worker and leak across tests."""
+    deploy = torch_rbln._C._is_deploy_mode
+    nan_inf = torch_rbln._C._is_nan_inf_check_disabled
+
+    # deploy: ON -> unset -> ON must track live each time.
+    assert _with_env("TORCH_RBLN_DEPLOY", "ON", deploy) is True
+    assert _with_env("TORCH_RBLN_DEPLOY", None, deploy) is False
+    assert _with_env("TORCH_RBLN_DEPLOY", "ON", deploy) is True
+
+    # nan_inf disable: "nan_inf" -> unset -> "all" must track live each time.
+    assert _with_env("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK", "nan_inf", nan_inf) is True
+    assert _with_env("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK", None, nan_inf) is False
+    assert _with_env("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK", "all", nan_inf) is True
 
 
 if __name__ == "__main__":

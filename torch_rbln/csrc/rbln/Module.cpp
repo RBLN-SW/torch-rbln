@@ -138,6 +138,15 @@ void register_internal_api(py::module_& module) {
   module.def(
       "_create_tensor_from_ptr", &at::native::rbln::create_tensor_from_ptr, "Internal: create tensor from device ptr");
 
+  // TEST-ONLY: live reads of the deploy / nan_inf-disable env gates, so a regression test
+  // can assert they are not process-cached (set -> unset -> set is observed).
+  module.def(
+      "_is_deploy_mode", &torch_rbln::shim::test_read_deploy_mode, "Internal(test): live TORCH_RBLN_DEPLOY gate");
+  module.def(
+      "_is_nan_inf_check_disabled",
+      &torch_rbln::shim::test_read_nan_inf_check_disabled,
+      "Internal(test): live TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK nan_inf gate");
+
   // Mark the virtual memory as logically zero-initialized without allocating host memory.
   // Preferred implementation of aten::zero_ for large RBLN tensors (e.g. KV-cache).
   module.def(
