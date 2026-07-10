@@ -116,6 +116,16 @@ at::Tensor& zero_rbln_(at::Tensor& self) {
   if (self.numel() == 0) {
     return self;
   }
+  // `mark_zeros` takes only a vaddr (no offset/size) and flips
+  // EMPTY_INIT_WITH_ZERO on the whole enclosing allocation, so it is correct
+  // only when `self` spans that allocation. A partial/offset view (e.g.
+  // base[2:4]) would otherwise zero the entire tensor; route those through
+  // fill_(0), which writes just the view's byte range.
+  const bool covers_whole_allocation = self.is_contiguous() && self.storage_offset() == 0 &&
+      static_cast<size_t>(self.numel()) * self.element_size() == self.storage().nbytes();
+  if (!covers_whole_allocation) {
+    return fill_scalar_rbln_(self, 0);
+  }
   c10::rbln::mark_zeros(self.data_ptr());
   return self;
 }

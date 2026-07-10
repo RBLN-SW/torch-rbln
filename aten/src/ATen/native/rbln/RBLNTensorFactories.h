@@ -61,11 +61,12 @@ at::Tensor _efficientzerotensor_rbln(
 /**
  * @brief In-place zero of an RBLN tensor.
  *
- * Marks the v-memory backing as EMPTY_INIT_WITH_ZERO via `mark_zeros`. No
- * host buffer is allocated, no host-to-device transfer is issued, no actual
- * write happens — zeros materialise lazily on the first NPU read, or are
- * skipped entirely when the first access is a write (KV-cache output
- * pattern). Replaces the prior Python `custom_zero__rbln` shim.
+ * When `self` spans its whole backing allocation, marks the v-memory as
+ * EMPTY_INIT_WITH_ZERO via `mark_zeros`: no host buffer, no transfer — zeros
+ * materialise lazily on the first NPU read, or are skipped when the first
+ * access is a write (KV-cache pattern). Partial/offset views (e.g. `base[2:4]`)
+ * route through `fill_scalar_rbln_(self, 0)`, since `mark_zeros` has no
+ * offset/size and would zero the enclosing allocation.
  */
 at::Tensor& zero_rbln_(at::Tensor& self);
 
