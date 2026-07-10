@@ -1,4 +1,5 @@
 import os
+import sys
 
 import pytest
 import torch
@@ -37,13 +38,16 @@ def reset_dynamo(request):
 # =============================================================================
 @pytest.fixture(scope="function", autouse=True)
 def reset_caching_allocator(request):
-    """Release the RBLN caching allocator's cached blocks before each test.
+    """Drain this test's in-flight device work, then release the RBLN caching allocator's
+    cached blocks -- both in teardown.
 
-    Without this, freed small blocks from prior tests accumulate in the
-    caching allocator and fragment the pool, so later tests can fail to
-    allocate large contiguous blocks. Mirrors the TorchDynamo reset above;
-    opt out per-test with the ``no_caching_allocator_reset`` marker.
+    Draining (synchronize) runs in this test's teardown, not the next test's setup, so an
+    async error surfaces here (attributed to the test that caused it) and fails loudly
+    rather than being swallowed and misreported as an empty_cache failure in an unrelated
+    later test. Releasing cached blocks then keeps freed small blocks from fragmenting the
+    pool for the next test. Opt out per-test with the ``no_caching_allocator_reset`` marker.
     """
+    yield
     if request.node.get_closest_marker("no_caching_allocator_reset"):
         rbln_log_debug("Skipping RBLN caching allocator reset")
         return
@@ -54,13 +58,16 @@ def reset_caching_allocator(request):
         rbln_log_debug(f"device_count() failed; skipping caching allocator reset: {exc}")
         return
 
+    # Drain first, fail-loud: a synchronize error is a real device fault this test left
+    # behind and must not be hidden.
+    for idx in range(num_devices):
+        torch.rbln.synchronize(idx)
+
+    # Then release cached blocks (best-effort).
     for idx in range(num_devices):
         device = torch.device("rbln", idx)
         rbln_log_debug(f"Releasing RBLN caching allocator blocks on {device}")
         try:
-            # Drain in-flight device work first: empty_cache() without a prior sync can race
-            # async ops left by a previous test and surface later as a misattributed error.
-            torch.rbln.synchronize(idx)
             torch_rbln.memory.empty_cache(device)
         except Exception as exc:
             rbln_log_debug(f"empty_cache({device}) failed: {exc}")
@@ -72,18 +79,31 @@ def reset_caching_allocator(request):
 # =============================================================================
 @pytest.fixture(scope="function", autouse=True)
 def restore_current_device():
-    """Restore the selected RBLN device after each test, so a test that calls set_device()
-    cannot leak the selection into later tests on the same worker."""
+    """Restore the RBLN device selection AND the lazy-init flag after each test, so a test
+    that calls set_device() cannot leak either into later tests on the same worker.
+
+    Snapshot both, then only issue the low-level set_device when the index actually changed:
+    calling it unconditionally flips ``_initialized`` False->True (set_device sets it) on
+    tests that never touched the device, which is itself a leak. The saved ``_initialized``
+    is restored last so the fixture leaves the flag exactly as the test found it."""
+    # The `torch_rbln.device` package re-exports a `device` class that shadows the
+    # `device` submodule, so reach the module (which owns the `_initialized` global that
+    # set_device mutates) via sys.modules rather than a `from ... import device`.
+    _dev = sys.modules[torch_rbln.device.set_device.__module__]
+
     try:
-        saved = torch.rbln.current_device() if torch_rbln.device.device_count() > 0 else None
+        saved = _dev.current_device() if _dev.device_count() > 0 else None
     except Exception:
         saved = None
+    saved_initialized = _dev._initialized
     yield
     if saved is not None:
         try:
-            torch.rbln.set_device(saved)
+            if _dev.current_device() != saved:
+                _dev.set_device(saved)
         except Exception as exc:
             rbln_log_debug(f"restore current device -> {saved} failed: {exc}")
+    _dev._initialized = saved_initialized
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -146,7 +166,14 @@ def pytest_collection_modifyitems(config, items):
     # without `-m "not single_worker"` lands them on parallel workers and corrupts shared
     # process/runtime state -- fail at collection instead of flaking later. trylast so this
     # runs after pytest's own -m/-k deselection (the serial pass filters them out first).
-    if config.getoption("dist", "no") != "no":
+    #
+    # Key on the worker count, not dist: `-n1` also flips xdist into dist=load, but a single
+    # worker is serial-safe and is exactly how run_tests.py runs the single_worker pass, so
+    # a dist-based check would wrongly reject it. numprocesses is the resolved worker count
+    # (0/None when xdist is off); a non-int (unresolved 'auto'/'logical') means many workers.
+    numprocesses = config.getoption("numprocesses", 0) or 0
+    parallel = numprocesses > 1 if isinstance(numprocesses, int) else True
+    if parallel:
         offenders = [it.nodeid for it in items if it.get_closest_marker("single_worker")]
         if offenders:
             shown = ", ".join(offenders[:5]) + (f" (+{len(offenders) - 5} more)" if len(offenders) > 5 else "")

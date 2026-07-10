@@ -59,10 +59,15 @@ def _run_pytest(
     print("-" * 120)
     subprocess.run(collect_cmd, check=False)
 
-    # Run the actual tests
-    run_cmd = [*base_cmd, f"--numprocesses={workers}"]
+    # Run the actual tests. Only hand the run to xdist for a genuine parallel run:
+    # --numprocesses=1 still flips xdist into dist=load (a 1-worker parallel run), which
+    # trips the single_worker collection guard. Omit it so the serial pass runs in-process.
+    run_cmd = list(base_cmd)
+    worker_label = f"--numprocesses={workers}" if workers > 1 else "serial"
+    if workers > 1:
+        run_cmd.append(f"--numprocesses={workers}")
     print(f"\n{'-' * 120}")
-    print(f"Running: pytest {test_dir}  -m '{marker}'  --numprocesses={workers}")
+    print(f"Running: pytest {test_dir}  -m '{marker}'  [{worker_label}]")
     print("-" * 120)
     return_code = subprocess.run(run_cmd, check=False).returncode
     print("-" * 120)
