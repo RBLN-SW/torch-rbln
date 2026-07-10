@@ -339,10 +339,11 @@ c10::DeviceIndex get_torch_device_id(const void* data) {
 }
 
 bool is_eager_malloc() {
-  static const bool eager_malloc = []() {
-    const auto* env = std::getenv("TORCH_RBLN_EAGER_MALLOC");
-    return (env != nullptr) ? (std::string(env) == "1") : false;
-  }();
+  // Read live, not a process-lifetime static: enable_eager_malloc toggles this per-test
+  // (test/conftest.py); a static cache latches the first value into the whole xdist worker
+  // and leaks eager into later tests. Safe: only malloc() reads it, free is mode-agnostic.
+  const auto* env = std::getenv("TORCH_RBLN_EAGER_MALLOC");
+  const bool eager_malloc = (env != nullptr) && (std::string(env) == "1");
   RBLN_LOG_DEBUG("eager_malloc={}", eager_malloc);
   return eager_malloc;
 }
