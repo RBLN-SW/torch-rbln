@@ -472,10 +472,55 @@ void cpu_fallback_rbln(
     }
   } _borrow_guard{borrow_ids, tensorlist_borrow_ids};
 
-  auto fast_path_fn = CPUFastPathRegistry::instance().try_get(op.schema());
-  const bool fast_path_taken = fast_path_fn != nullptr && fast_path_fn(cpu_tensors, stack, arguments_begin);
-  if (!fast_path_taken) {
-    op.redispatchBoxed(c10::DispatchKeySet(cpu_dispatch_key), stack);
+  // A pure-out borrow wraps the rbln out in a non-resizable from_blob view, so an
+  // undersized out= the CPU kernel tries to GROW throws "not resizable" (shrink is
+  // metadata-only and already handled in Step 3). Catch that one error, swap the
+  // pure-out(s) to resizable CPU storage, and retry once; Step 3's resize-writeback
+  // grows the rbln out. Pure-out ops are functional, so the retry is side-effect-
+  // free, and the correctly-sized hot path never throws.
+  bool has_pure_out_borrow = false;
+  for (size_t i = 0; i < tensor_args.size(); ++i) {
+    if (borrow_ids[i] != 0 && schema_info.is_pure_out[tensor_args_indices[i]]) {
+      has_pure_out_borrow = true;
+      break;
+    }
+  }
+
+  auto run_cpu_kernel = [&]() {
+    auto fast_path_fn = CPUFastPathRegistry::instance().try_get(op.schema());
+    const bool fast_path_taken = fast_path_fn != nullptr && fast_path_fn(cpu_tensors, stack, arguments_begin);
+    if (!fast_path_taken) {
+      op.redispatchBoxed(c10::DispatchKeySet(cpu_dispatch_key), stack);
+    }
+  };
+
+  if (has_pure_out_borrow) {
+    const std::vector<c10::IValue> stack_snapshot = *stack;
+    try {
+      run_cpu_kernel();
+    } catch (const c10::Error& e) {
+      if (std::string(e.what()).find("not resizable") == std::string::npos) {
+        throw; // unrelated failure (dtype/device/etc.) — propagate unchanged
+      }
+      // Swap each borrowed pure-out to fresh resizable CPU storage and retry.
+      for (size_t i = 0; i < tensor_args.size(); ++i) {
+        if (borrow_ids[i] != 0 && schema_info.is_pure_out[tensor_args_indices[i]]) {
+          try {
+            c10::rbln::return_borrowed(borrow_ids[i], /*updated=*/false);
+          } catch (...) {
+          }
+          borrow_ids[i] = 0;
+          cpu_tensors[i] = at::empty(tensor_args[i].sizes(), tensor_args[i].options().device(at::kCPU));
+        }
+      }
+      *stack = stack_snapshot; // redispatchBoxed consumed the args; restore them
+      for (const auto i : c10::irange(tensor_args_indices.size())) {
+        (*stack)[arguments_begin + tensor_args_indices[i]] = c10::IValue(cpu_tensors[i]);
+      }
+      run_cpu_kernel();
+    }
+  } else {
+    run_cpu_kernel();
   }
 
   // Step 3: mutable-alias write-back.

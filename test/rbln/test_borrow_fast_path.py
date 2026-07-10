@@ -48,6 +48,28 @@ class TestBorrowFastPath(TestCase):
         self.assertEqual(y.device.type, "rbln")
         self.assertEqual(tuple(y.shape), (16,))
 
+    def test_pure_out_undersized_grows(self) -> None:
+        """Undersized pure ``out=`` (borrowed as a non-resizable from_blob) must
+        GROW to the result shape, not raise "not resizable". Result stays correct,
+        grown, and the same ``out`` tensor. ``sin`` is a CPU-fallback op."""
+        x = torch.arange(8, dtype=torch.float32, device="rbln")
+        out = torch.empty(1, dtype=torch.float32, device="rbln")  # undersized -> grow
+        with pytest.warns(UserWarning):
+            ret = torch.sin(x, out=out)
+        self.assertEqual(tuple(ret.shape), (8,))
+        self.assertTrue(ret is out)
+        self.assertEqual(ret.to("cpu"), torch.sin(torch.arange(8, dtype=torch.float32)))
+
+    def test_pure_out_oversized_shrinks(self) -> None:
+        """The already-working shrink counterpart: an oversized ``out=`` is
+        narrowed via from_blob metadata shrink and its size synced back."""
+        x = torch.arange(8, dtype=torch.float32, device="rbln")
+        out = torch.empty(16, dtype=torch.float32, device="rbln")  # oversized -> shrink
+        with pytest.warns(UserWarning):
+            ret = torch.sin(x, out=out)
+        self.assertEqual(tuple(ret.shape), (8,))
+        self.assertEqual(ret.to("cpu"), torch.sin(torch.arange(8, dtype=torch.float32)))
+
     def test_borrow_rejected_falls_back_to_copy(self) -> None:
         """Regression: a 0-K matmul yields an all-zero (5, 10) output. Writing
         it into an ``out=`` tensor that already carries a host user view (from
