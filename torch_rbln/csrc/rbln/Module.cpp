@@ -175,6 +175,18 @@ void register_internal_api(py::module_& module) {
       },
       "Internal: configure target's device layout like ref (no data copy)");
 
+  // Compiler-assigned physical shape of a tensor's allocation (may differ from
+  // the logical shape; empty when no physical view is bound). Resolves a view
+  // to its owning allocation via the existing get_memory_info().
+  module.def(
+      "_physical_shape",
+      [](const at::Tensor& t) -> std::vector<int64_t> {
+        TORCH_CHECK(t.device().is_privateuseone(), "physical_shape: tensor must be an RBLN tensor, got ", t.device());
+        return c10::rbln::get_memory_info(t.data_ptr()).physical_shape;
+      },
+      "Internal: compiler-assigned physical shape of an RBLN tensor "
+      "(empty if no physical view is bound yet)");
+
   // Logging utilities
   module.def("_log_cpu_fallback", &c10::rbln::log_cpu_fallback, "Internal: log CPU fallback");
 
