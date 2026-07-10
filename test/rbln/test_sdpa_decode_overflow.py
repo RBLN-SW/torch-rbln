@@ -301,6 +301,37 @@ class TestSDPADecodeOverflow(TestCase):
         torch_rbln.memory.empty_cache()
         self.assertEqual(len(sdpa_mod._sdpa_attn_weights_cache), 0)
 
+    def test_grad_forward_then_backward_pops_cache(self):
+        """Fast-path cache lifecycle: a forward under autograd caches attn_weights, and the
+        matching backward pops it — the cache returns to empty with no manual flush."""
+        from torch_rbln._internal.kernels import sdpa as sdpa_mod
+
+        sdpa_mod._clear_attn_weights_cache()
+        q = torch.randn(1, 4, 32, 64, dtype=torch.float16, device="rbln", requires_grad=True)
+        k = torch.randn(1, 4, 32, 64, dtype=torch.float16, device="rbln")
+        v = torch.randn(1, 4, 32, 64, dtype=torch.float16, device="rbln")
+        out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
+        self.assertGreaterEqual(len(sdpa_mod._sdpa_attn_weights_cache), 1)  # forward cached
+        out.sum().backward()
+        self.assertEqual(len(sdpa_mod._sdpa_attn_weights_cache), 0)  # backward popped it
+
+    def test_grad_forward_without_backward_strands_until_empty_cache(self):
+        """A forward under autograd whose backward never runs strands its cache entry (the
+        data_ptr key stays); empty_cache() is the backstop that reclaims it."""
+        import torch_rbln
+        from torch_rbln._internal.kernels import sdpa as sdpa_mod
+
+        sdpa_mod._clear_attn_weights_cache()
+        q = torch.randn(1, 4, 32, 64, dtype=torch.float16, device="rbln", requires_grad=True)
+        k = torch.randn(1, 4, 32, 64, dtype=torch.float16, device="rbln")
+        v = torch.randn(1, 4, 32, 64, dtype=torch.float16, device="rbln")
+        out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
+        self.assertGreaterEqual(len(sdpa_mod._sdpa_attn_weights_cache), 1)
+        del out  # discard the autograd graph; the backward never runs
+        self.assertGreaterEqual(len(sdpa_mod._sdpa_attn_weights_cache), 1)  # still stranded
+        torch_rbln.memory.empty_cache()
+        self.assertEqual(len(sdpa_mod._sdpa_attn_weights_cache), 0)  # backstop reclaimed it
+
 
 instantiate_device_type_tests(TestSDPADecodeOverflow, globals(), only_for="privateuse1")
 
