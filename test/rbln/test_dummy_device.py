@@ -8,8 +8,8 @@ on a host without hardware. Allocations and copies are backed by rebel's
 v-memory host mirror through a dummy runtime context; torch adds no host-memory
 shim of its own. It is forced regardless of physical NPU presence.
 
-Dummy mode registers the device against RBLN_TARGET_SOC (there is no NPU to
-probe for the SoC), so RBLN_TARGET_SOC must be set alongside RBLN_DUMMY_DEVICE.
+Dummy mode registers the device against RBLN_FORCE_NPU_NAME (there is no NPU to
+probe for the SoC), so RBLN_FORCE_NPU_NAME must be set alongside RBLN_DUMMY_DEVICE.
 
 RBLN_DUMMY_DEVICE must be set before ``import torch_rbln`` (the device-mapping
 singleton reads it once at init), so each case runs in a fresh subprocess with
@@ -24,6 +24,9 @@ import textwrap
 import pytest
 
 
+pytestmark = pytest.mark.test_set_ci
+
+
 def _clean_env() -> dict:
     """A hermetic env copy for subprocess tests.
 
@@ -34,7 +37,7 @@ def _clean_env() -> dict:
       - RBLN_DEVICE_MAP / RBLN_NPUS_PER_DEVICE: a parent shell/CI mapping would
         change the dummy logical device count; tests assume the default of 1 and
         set their own map via ``env_extra`` when they need one.
-      - RBLN_TARGET_SOC / RBLN_DEVICES: both feed get_npu_name() and thus the
+      - RBLN_FORCE_NPU_NAME / RBLN_DEVICES: both feed get_npu_name() and thus the
         resolved compile target; a parent-set value would flip the no-NPU cases
         below. Tests set these explicitly via ``env_extra`` when they need them.
     """
@@ -43,7 +46,7 @@ def _clean_env() -> dict:
         "TORCH_RBLN_DIAGNOSE",
         "RBLN_DEVICE_MAP",
         "RBLN_NPUS_PER_DEVICE",
-        "RBLN_TARGET_SOC",
+        "RBLN_FORCE_NPU_NAME",
         "RBLN_DEVICES",
     ):
         env.pop(key, None)
@@ -54,9 +57,9 @@ def _run_with_dummy(snippet: str, env_extra: dict | None = None) -> subprocess.C
     env = _clean_env()
     env["RBLN_DUMMY_DEVICE"] = "1"
     # Dummy mode registers the device with the runtime, which resolves the target
-    # SoC from RBLN_TARGET_SOC (no NPU to probe). Provide a default; tests may
+    # SoC from RBLN_FORCE_NPU_NAME (no NPU to probe). Provide a default; tests may
     # override via env_extra.
-    env["RBLN_TARGET_SOC"] = "RBLN-CA25"
+    env["RBLN_FORCE_NPU_NAME"] = "RBLN-CA25"
     if env_extra:
         env.update(env_extra)
     return subprocess.run(
@@ -361,7 +364,7 @@ def test_device_map_shapes(device_map, expected_count, expected_ids0):
     assert "OK" in proc.stdout
 
 
-# A physical device id past any realistic host's range. With RBLN_TARGET_SOC set,
+# A physical device id past any realistic host's range. With RBLN_FORCE_NPU_NAME set,
 # dummy registration takes the SoC from the env instead of probing hardware, so
 # this id is a pure shape marker and no real NPU is ever touched -- the no-device
 # path is exercised even on a machine that physically has NPUs.
@@ -396,12 +399,12 @@ print("OK")
 """
 
 
-def test_compile_only_uses_target_soc_when_no_npu_option():
-    # No `npu` option: the compile target is resolved from RBLN_TARGET_SOC (the SoC
+def test_compile_only_uses_force_npu_name_when_no_npu_option():
+    # No `npu` option: the compile target is resolved from RBLN_FORCE_NPU_NAME (the SoC
     # dummy mode registers against), and a .rbln artifact is written for it.
     proc = _run_with_dummy(
         _COMPILE_ONLY_SNIPPET,
-        env_extra={"RBLN_TARGET_SOC": "RBLN-CA25", "RBLN_DEVICE_MAP": _NO_NPU_MAP},
+        env_extra={"RBLN_FORCE_NPU_NAME": "RBLN-CA25", "RBLN_DEVICE_MAP": _NO_NPU_MAP},
     )
     _assert_ok(proc)
     assert "OK" in proc.stdout
@@ -411,13 +414,13 @@ def test_compile_only_uses_target_soc_when_no_npu_option():
     assert "differs from" not in out, proc.stderr
 
 
-def test_compile_only_npu_option_overrides_target_soc():
-    # An explicit `npu` option wins over RBLN_TARGET_SOC: the artifact targets the
+def test_compile_only_npu_option_overrides_force_npu_name():
+    # An explicit `npu` option wins over RBLN_FORCE_NPU_NAME: the artifact targets the
     # requested SoC and rebel warns that it differs from the registered machine SoC.
     proc = _run_with_dummy(
         _COMPILE_ONLY_SNIPPET,
         env_extra={
-            "RBLN_TARGET_SOC": "RBLN-CA25",
+            "RBLN_FORCE_NPU_NAME": "RBLN-CA25",
             "RBLN_DUMMY_TEST_NPU": "RBLN-CR03",
             "RBLN_DEVICE_MAP": _NO_NPU_MAP,
         },
@@ -693,7 +696,7 @@ import glob, os
 import torch, torch_rbln
 from rebel._C import get_npu_name
 
-npu = get_npu_name(0)  # dummy mode: resolves to RBLN_TARGET_SOC (the real machine SoC)
+npu = get_npu_name(0)  # dummy mode: resolves to RBLN_FORCE_NPU_NAME (the real machine SoC)
 print("NPU", npu)
 """
     + _DECODER_MODEL
@@ -746,6 +749,7 @@ print("OK")
 )
 
 
+@pytest.mark.single_worker
 def test_dummy_compiled_prefill_decode_runs_on_real_npu(tmp_path):
     # End-to-end purpose of dummy mode: prefill/decode graphs compiled with no NPU
     # (allocations host-backed by rebel v-memory, no device opened) must load and run
@@ -765,8 +769,8 @@ def test_dummy_compiled_prefill_decode_runs_on_real_npu(tmp_path):
         pytest.skip("no NPU available to compile/run the decoder against")
 
     cache = str(tmp_path / "cache")
-    # Dummy compile targets the real machine SoC via RBLN_TARGET_SOC; no NPU is opened.
-    proc = _run_with_dummy(_DECODER_COMPILE.format(cache=cache), env_extra={"RBLN_TARGET_SOC": npu})
+    # Dummy compile targets the real machine SoC via RBLN_FORCE_NPU_NAME; no NPU is opened.
+    proc = _run_with_dummy(_DECODER_COMPILE.format(cache=cache), env_extra={"RBLN_FORCE_NPU_NAME": npu})
     _assert_ok(proc)
     assert "OK" in proc.stdout
 

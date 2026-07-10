@@ -125,7 +125,7 @@ class TestCausalLMBase(TestCase):
         self.assertEqual(outputs.size(), (batch_size, seq_len + self.max_new_tokens))
         return outputs
 
-    # RBLN runs 16-bit ops in DLFloat16 and matches an fp32 CPU reference to within
+    # RBLN runs 16-bit ops in custom float and matches an fp32 CPU reference to within
     # ~1.3 logits (measured); a real regression diverges by orders of magnitude.
     LOGIT_ATOL = 3.0
 
@@ -150,7 +150,7 @@ class TestCausalLMBase(TestCase):
         """Compare RBLN's next-token logits against an fp32 CPU reference (ground truth).
 
         Greedy token-id equality between RBLN and a same-dtype CPU run is too strict: the
-        two are different 16-bit formats (RBLN DLFloat16 vs CPU bfloat16) and disagree by
+        two are different 16-bit formats (RBLN custom float vs CPU bfloat16) and disagree by
         a few logits even when both are correct, which flips near-tie argmaxes and cascades
         during generation (an intermittent failure). We instead check that RBLN tracks the
         fp32 truth, where its deviation is small and bounded by its own precision. Configs

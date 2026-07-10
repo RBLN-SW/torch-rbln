@@ -389,7 +389,7 @@ def test_vllm_compile_only_no_npu_via_dummy(tmp_path):
         env.pop(key, None)
     env.update(
         RBLN_DUMMY_DEVICE="1",
-        RBLN_TARGET_SOC="RBLN-CA25",
+        RBLN_FORCE_NPU_NAME="RBLN-CA25",
         VLLM_RBLN_USE_VLLM_MODEL="1",
         VLLM_RBLN_COMPILE_ONLY="1",
         VLLM_CACHE_ROOT=str(tmp_path / "vllm_cache"),
@@ -481,7 +481,7 @@ def test_vllm_dummy_compiled_runs_on_real_npu(tmp_path):
         p1_env.pop(key, None)
     p1_env.update(
         RBLN_DUMMY_DEVICE="1",
-        RBLN_TARGET_SOC=npu,
+        RBLN_FORCE_NPU_NAME=npu,
         VLLM_RBLN_USE_VLLM_MODEL="1",
         VLLM_RBLN_COMPILE_ONLY="1",
         VLLM_CACHE_ROOT=cache,
@@ -498,7 +498,7 @@ def test_vllm_dummy_compiled_runs_on_real_npu(tmp_path):
 
     # Phase 2: load those dummy-built artifacts on the real NPU and generate.
     p2_env = dict(os.environ)
-    for key in ("RBLN_DUMMY_DEVICE", "RBLN_TARGET_SOC", "VLLM_RBLN_COMPILE_ONLY"):
+    for key in ("RBLN_DUMMY_DEVICE", "RBLN_FORCE_NPU_NAME", "VLLM_RBLN_COMPILE_ONLY"):
         p2_env.pop(key, None)
     p2_env.update(
         VLLM_RBLN_USE_VLLM_MODEL="1",
