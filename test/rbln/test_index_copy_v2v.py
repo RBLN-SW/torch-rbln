@@ -319,6 +319,16 @@ class TestIndexCopyV2V(TestCase):
         with pytest.raises((IndexError, RuntimeError), match="out of range|out of bounds"):
             torch.index_copy(self_dev, 0, idx_dev, src_dev)
 
+    def test_empty_self_along_indexed_dim_oob_rejected(self):
+        """self empty on the INDEXED axis (extent 0): every index is out of range
+        and must raise, not be swallowed by the empty-self early return.
+        (Contrast test_empty_self_along_dim: empty on a non-indexed axis.)"""
+        self_dev = _to_dev(torch.empty((0, 3), dtype=torch.float32))
+        src_dev = _to_dev(torch.zeros((1, 3), dtype=torch.float32))
+        idx_dev = torch.tensor([0], dtype=torch.int64, device=DEVICE)
+        with pytest.raises((IndexError, RuntimeError), match="out of range|out of bounds"):
+            torch.index_copy(self_dev, 0, idx_dev, src_dev)
+
     def test_dim_out_of_range_rejected(self):
         self_dev = _to_dev(_arange((3, 4), torch.float32))
         src_dev = _to_dev(_arange((1, 4), torch.float32))
