@@ -230,6 +230,22 @@ def test_deploy_and_nan_inf_gates_read_env_live():
     assert _with_env("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK", "all", nan_inf) is True
 
 
+@pytest.mark.test_set_ci
+def test_python_disabled_fallback_gate_reads_env_live():
+    """The Python cold-path gate must read the env live too, matching the C++ warm-path gate
+    (else warm/cold dispatch disagree and the value latches across an xdist worker). It was
+    previously @lru_cache'd."""
+    from torch_rbln._internal.ops_utils import _parse_disabled_fallback_cases
+
+    def has_nan_inf():
+        return "nan_inf" in _parse_disabled_fallback_cases()
+
+    # "nan_inf" -> unset -> "all" must each be observed live (no lru_cache latch).
+    assert _with_env("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK", "nan_inf", has_nan_inf) is True
+    assert _with_env("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK", None, has_nan_inf) is False
+    assert _with_env("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK", "all", has_nan_inf) is True
+
+
 if __name__ == "__main__":
     from torch.testing._internal.common_utils import run_tests
 
