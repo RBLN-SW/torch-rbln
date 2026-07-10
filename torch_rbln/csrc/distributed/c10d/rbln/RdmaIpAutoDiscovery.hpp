@@ -1,10 +1,9 @@
 // =============================================================================
-// TEMPORARY: auto-discover RBLN_RDMA_IP from /sys/class/infiniband RoCE v2 GIDs.
+// TEMPORARY: resolve RBLN_RDMA_IP from RBLN_RDMA_HCA when set; otherwise no-op.
 //
-// This is a workaround for the period before librbln-ccl performs the
-// discovery internally. Once the native runtime can resolve the local RoCE
-// IPv4 itself (mirroring NCCL's ncclIbGetGidIndex), this file pair must be
-// removed.
+// This is a workaround for the period before librbln-ccl resolves the RDMA
+// IP from RBLN_RDMA_HCA internally (ssw-common-umd PR #1930). Once the native
+// runtime performs that resolution itself, this file pair must be removed.
 //
 // Removal procedure (all steps in a single commit):
 //   1. Delete this file and RdmaIpAutoDiscovery.cpp.
