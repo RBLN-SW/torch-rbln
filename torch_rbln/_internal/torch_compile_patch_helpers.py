@@ -318,81 +318,53 @@ class CompiledFunctionWrapper:
 
     """
 
-    # The wrapper's own bookkeeping attributes. Every other attribute set on the wrapper is
-    # delegated to the wrapped model (see __setattr__), so these must be listed here to keep
-    # them on the wrapper itself.
-    _WRAPPER_OWN_ATTRS = frozenset(
-        {
-            "_compiled_fn",
-            "_original_fn",
-            "_original_compile_fn",
-            "_compile_kwargs",
-            "_max_retries",
-            "_auto_num_devices_determined",
-            "_failover_attempted",
-        }
-    )
-
     def __init__(self, compiled_fn, original_fn, original_compile_fn, compile_kwargs=None):
-        self._compiled_fn = compiled_fn
-        self._original_fn = original_fn
-        self._original_compile_fn = original_compile_fn
-        self._compile_kwargs = compile_kwargs or {}
-        self._max_retries = 1
-        self._auto_num_devices_determined = False
-        self._failover_attempted = False
+        # object.__setattr__ so __setattr__'s delegation (which reads _original_fn) isn't
+        # triggered before the fields exist. Each field lands in __dict__ and is thereafter
+        # treated as the wrapper's own -- no hand-maintained field list to keep in sync.
+        object.__setattr__(self, "_compiled_fn", compiled_fn)
+        object.__setattr__(self, "_original_fn", original_fn)
+        object.__setattr__(self, "_original_compile_fn", original_compile_fn)
+        object.__setattr__(self, "_compile_kwargs", compile_kwargs or {})
+        object.__setattr__(self, "_max_retries", 1)
+        object.__setattr__(self, "_auto_num_devices_determined", False)
+        object.__setattr__(self, "_failover_attempted", False)
+
+    def _is_own_attr(self, name):
+        # Own = an existing instance field or anything the wrapper class defines (methods,
+        # `forward`). Keeps e.g. patch.object(wrapper, "_try_tp_failover") shadowing the
+        # method here rather than leaking onto the model.
+        return name in self.__dict__ or hasattr(type(self), name)
 
     def __setattr__(self, name, value):
-        # Mirror __getattr__'s read delegation for writes: the wrapper's own bookkeeping
-        # stays on the wrapper, but everything else (the training flag, parameter/buffer
-        # swaps, arbitrary user attrs) is set on the wrapped model — the actually-executed
-        # object — so it can't silently diverge onto the wrapper. Delegating to the model's
-        # __setattr__ also lets nn.Module register a Parameter/Module/buffer properly.
-        #
-        # "Own" = the bookkeeping attrs above OR anything the wrapper class defines (methods,
-        # class attrs); keeping the latter on the wrapper lets e.g.
-        # mock.patch.object(wrapper, "_try_tp_failover") shadow the method here instead of
-        # leaking onto the model.
-        if name in type(self)._WRAPPER_OWN_ATTRS or hasattr(type(self), name):
+        # Own state stays on the wrapper; everything else is delegated to the wrapped model,
+        # but only an nn.Module (which has training/param/buffer state to keep in sync). A
+        # plain-function target has none, so keep the attr on the wrapper.
+        if self._is_own_attr(name):
             object.__setattr__(self, name, value)
-            return
-        model = object.__getattribute__(self, "_original_fn")
-        # Only delegate to an nn.Module target: it has real attribute state to keep in sync
-        # (training flag, params, buffers). A plain-function target has no such state, and
-        # writing onto the function object would be meaningless and would leak/share state
-        # across wrappers over the same function — keep it on the wrapper instead.
-        if isinstance(model, torch.nn.Module):
-            setattr(model, name, value)
+        elif isinstance(self._original_fn, torch.nn.Module):
+            setattr(self._original_fn, name, value)
         else:
             object.__setattr__(self, name, value)
 
     def __delattr__(self, name):
-        # Symmetric with __setattr__: own bookkeeping / wrapper-class names are deleted from
-        # the wrapper; a real attribute is deleted from the wrapped model only when it is an
-        # nn.Module, otherwise from the wrapper.
-        if name in type(self)._WRAPPER_OWN_ATTRS or hasattr(type(self), name):
+        if self._is_own_attr(name):
             object.__delattr__(self, name)
-            return
-        model = object.__getattribute__(self, "_original_fn")
-        if isinstance(model, torch.nn.Module):
-            delattr(model, name)
+        elif isinstance(self._original_fn, torch.nn.Module):
+            delattr(self._original_fn, name)
         else:
             object.__delattr__(self, name)
 
     def __getattr__(self, name):
-        # Only fires for attributes not found on the wrapper. Delegate to the
-        # wrapped model/callable so torch.compile(nn.Module) keeps state_dict(),
-        # eval(), parameters(), etc. Dunders are excluded so copy/pickle protocol
-        # lookups don't get silently redirected to the wrapped object.
+        # Fires only for attributes missing on the wrapper: delegate reads to the wrapped
+        # model/callable (state_dict/eval/parameters/...). Dunders are excluded so
+        # copy/pickle protocol lookups aren't redirected.
         if name.startswith("__") and name.endswith("__"):
             raise AttributeError(name)
         model = object.__getattribute__(self, "_original_fn")
         attr = getattr(model, name)
-        # Self-returning nn.Module methods (eval/train/to/cpu/half/requires_grad_/
-        # ...) return the wrapped model. Re-wrap the return so `compiled =
-        # compiled.eval()` keeps the wrapper — and its guard/failover — instead of
-        # silently unwrapping to the bare model. Only bound methods are intercepted;
-        # submodules, parameters and tensors pass through untouched.
+        # Re-wrap a bound method that returns the model (eval/train/to/...) so
+        # `compiled = compiled.eval()` keeps the wrapper, not the bare model.
         if isinstance(attr, types.MethodType):
 
             @functools.wraps(attr)
@@ -412,10 +384,8 @@ class CompiledFunctionWrapper:
         return functools.partial(self.__call__, obj)
 
     def forward(self, *args, **kwargs):
-        # Route an explicit `compiled.forward(...)` through the wrapper's compiled path
-        # (guard / failover / CPU fallback), exactly like calling the wrapper directly.
-        # Without this, __getattr__ would delegate `forward` to the wrapped module and
-        # silently bypass compilation. Defined on the class so __getattr__ never sees it.
+        # Route an explicit .forward(...) through the compiled path, like calling the wrapper
+        # directly -- else __getattr__ would delegate it to the module and bypass compilation.
         return self(*args, **kwargs)
 
     def _try_tp_failover(self, device_id):

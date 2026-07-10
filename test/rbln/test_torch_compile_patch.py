@@ -695,9 +695,8 @@ class TestCompiledFunctionWrapper(TestCase):
         self.assertEqual(len(list(wrapper.parameters())), len(list(model.parameters())))
 
     def test_wrapper_self_returning_methods_keep_wrapper(self):
-        """Self-returning nn.Module methods (eval/train/to) must return the wrapper,
-        not the bare model — else `compiled = compiled.eval()` silently drops the
-        guard/failover. The mode toggle still lands on the wrapped model."""
+        """Self-returning methods (eval/train/to) return the wrapper, not the bare model, and
+        the mode toggle still lands on the model."""
         model = torch.nn.Linear(4, 4)
         wrapper = CompiledFunctionWrapper(lambda *a, **k: None, model, Mock(), compile_kwargs={})
         self.assertIs(wrapper.eval(), wrapper)
@@ -709,8 +708,8 @@ class TestCompiledFunctionWrapper(TestCase):
         self.assertEqual(len(list(wrapper.parameters())), len(list(model.parameters())))
 
     def test_wrapper_setattr_delegates_to_model(self):
-        """Writes to the wrapper (training flag, parameter swap, arbitrary attrs) must land on
-        the wrapped model — the actually-executed object — not diverge onto the wrapper."""
+        """Writes (training flag, parameter swap, arbitrary attrs) land on the wrapped model,
+        not the wrapper."""
         model = torch.nn.Linear(4, 4)
         wrapper = CompiledFunctionWrapper(lambda *a, **k: None, model, Mock(), compile_kwargs={})
 
@@ -746,9 +745,8 @@ class TestCompiledFunctionWrapper(TestCase):
         self.assertFalse(hasattr(model, "_failover_attempted"))
 
     def test_wrapper_over_plain_function_keeps_attrs_local(self):
-        """A plain-function target has no attribute state to sync, so writes must stay on the
-        wrapper — not leak onto the function object or get shared across wrappers over the
-        same function. Only nn.Module targets are delegated to."""
+        """With a plain-function target (not nn.Module), writes stay on the wrapper -- not
+        leaked onto the function or shared across wrappers over the same function."""
 
         def fn(*args, **kwargs):
             return None
