@@ -763,6 +763,27 @@ class TestCompiledFunctionWrapper(TestCase):
         self.assertFalse(hasattr(w1, "custom_flag"))
 
     @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
+    def test_wrapper_forward_routes_through_compiled_path(self, mock_auto):
+        """`compiled.forward(...)` must run the wrapper's compiled path, not delegate to the
+        wrapped module's raw forward and bypass compilation/guard/failover."""
+        mock_auto.return_value = None  # keep our recording compiled_fn as _compiled_fn
+        seen = []
+
+        class _M(torch.nn.Module):
+            def forward(self, x):
+                seen.append("raw_forward")  # the bypass — must NOT be reached
+                return x
+
+        def compiled_fn(*args, **kwargs):
+            seen.append("compiled")
+            return args[0] if args else None
+
+        wrapper = CompiledFunctionWrapper(compiled_fn, _M(), Mock(), compile_kwargs={})
+        wrapper.forward(torch.tensor([1], device="rbln"))
+        self.assertIn("compiled", seen)  # went through the compiled path
+        self.assertNotIn("raw_forward", seen)  # did not bypass to raw module.forward
+
+    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
     def test_wrapper_binds_self_as_method_descriptor(self, mock_auto):
         """@torch.compile(backend="rbln") on an instance method: __get__ must bind
         the instance as the first argument, and class access returns the wrapper."""

@@ -411,6 +411,13 @@ class CompiledFunctionWrapper:
             return self
         return functools.partial(self.__call__, obj)
 
+    def forward(self, *args, **kwargs):
+        # Route an explicit `compiled.forward(...)` through the wrapper's compiled path
+        # (guard / failover / CPU fallback), exactly like calling the wrapper directly.
+        # Without this, __getattr__ would delegate `forward` to the wrapped module and
+        # silently bypass compilation. Defined on the class so __getattr__ never sees it.
+        return self(*args, **kwargs)
+
     def _try_tp_failover(self, device_id):
         """Try tensor parallel failover on RuntimeError."""
         if self._failover_attempted:
