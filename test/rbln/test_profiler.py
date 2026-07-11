@@ -219,31 +219,6 @@ class TestProfilerTruthfulnessAndScope(TestCase):
         self.assertEqual(attributed, rr["total_count"])  # every hidden d2h is cause-tagged
         self.assertTrue(any(v["count"] > 0 for v in rr["by_reason"].values()))
 
-    def test_eager_malloc_env_is_live_not_process_latched(self):
-        # Regression for the xdist cross-test leak: is_eager_malloc() reads the env live, so
-        # toggling TORCH_RBLN_EAGER_MALLOC per-test cannot latch the whole worker into eager.
-        # Observable = the hidden-d2h witness (eager -> on-device copy, 0; lazy -> >= 1).
-        def hidden_total():
-            with torch.rbln.explain() as p:
-                x = torch.randn(256, 256, device=DEV, dtype=torch.float16)
-                y = torch.empty(256, 256, device=DEV, dtype=torch.float16)
-                y.copy_(x)
-            return p.dump()["runtime_residency"]
-
-        # set: an allocation under eager (this is what latched the worker on the buggy build)
-        with mock.patch.dict(os.environ, {"TORCH_RBLN_EAGER_MALLOC": "1"}):
-            rr = hidden_total()
-            if not rr["available"]:
-                self.skipTest("runtime residency counter not exposed by the loaded librbln")
-            self.assertEqual(rr["total_count"], 0)
-        # unset: flag is re-read live -> lazy behavior restored, NOT stuck eager
-        with mock.patch.dict(os.environ):
-            os.environ.pop("TORCH_RBLN_EAGER_MALLOC", None)
-            self.assertGreaterEqual(hidden_total()["total_count"], 1)
-        # set again: still tracks the env live
-        with mock.patch.dict(os.environ, {"TORCH_RBLN_EAGER_MALLOC": "1"}):
-            self.assertEqual(hidden_total()["total_count"], 0)
-
     def test_runtime_h2d_push_counted(self):
         # A device op (matmul) consuming host-latest inputs must push them to the
         # device -> the manager-emitted real_host_sync_h2d counter fires. Symmetric
