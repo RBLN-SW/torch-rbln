@@ -5,6 +5,7 @@ Backward: uses cached attn_weights from forward
 """
 
 import math
+import weakref
 from typing import Optional
 
 import torch
@@ -20,10 +21,23 @@ from torch_rbln._internal.ops_utils import is_cpu_fallback_cases, SupportedDtype
 _sdpa_attn_weights_cache: dict[int, torch.Tensor] = {}
 
 
+def _evict_attn_weights_if_current(key: int, attn_weights: torch.Tensor) -> None:
+    """Drop the cached entry when its output tensor is collected, unless the key has since
+    been taken over by a newer entry (identity guard against data_ptr reuse)."""
+    if _sdpa_attn_weights_cache.get(key) is attn_weights:
+        del _sdpa_attn_weights_cache[key]
+
+
 def _cache_attn_weights(output: torch.Tensor, attn_weights: torch.Tensor) -> None:
-    """Cache attention weights using output tensor's data_ptr as key."""
+    """Cache attention weights under the output tensor's data_ptr for the matching backward.
+
+    A backward normally pops the entry, but grad-enabled inference (``eval()`` does not turn
+    autograd off) can discard the output without ever running one. Tie the entry's lifetime to
+    ``output``: when it is collected, a finalizer evicts the entry instead of stranding the
+    attn_weights tensor for the process lifetime."""
     key = output.data_ptr()
     _sdpa_attn_weights_cache[key] = attn_weights
+    weakref.finalize(output, _evict_attn_weights_if_current, key, attn_weights)
 
 
 def _get_cached_attn_weights(output: torch.Tensor) -> Optional[torch.Tensor]:

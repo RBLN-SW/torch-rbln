@@ -322,6 +322,62 @@ class TestSDPADecodeOverflow(TestCase):
         out.sum().backward()  # still available -> device backward, not a cache-miss fallback
         self.assertEqual(len(sdpa_mod._sdpa_attn_weights_cache), 0)
 
+    def test_grad_forward_without_backward_evicts_on_output_gc(self):
+        """The gap eval() leaves open: eval() does not disable autograd, so a grad-enabled
+        forward caches attn_weights, but discarding the output without a backward means nothing
+        pops it. Collecting the output must fire the finalizer that evicts the entry, instead
+        of stranding a device tensor for the process lifetime."""
+        import gc
+
+        from torch_rbln._internal.kernels import sdpa as sdpa_mod
+
+        sdpa_mod._clear_attn_weights_cache()
+        q = torch.randn(1, 4, 32, 64, dtype=torch.float16, device="rbln", requires_grad=True)
+        k = torch.randn(1, 4, 32, 64, dtype=torch.float16, device="rbln")
+        v = torch.randn(1, 4, 32, 64, dtype=torch.float16, device="rbln")
+        out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)  # grad enabled -> cached
+        self.assertGreaterEqual(len(sdpa_mod._sdpa_attn_weights_cache), 1)
+        del out  # discard the output without ever running backward
+        gc.collect()
+        self.assertEqual(len(sdpa_mod._sdpa_attn_weights_cache), 0)  # finalizer evicted it
+
+    def test_attn_weights_cache_finalizer_lifetime(self):
+        """Device-independent unit check of the cache lifetime: (a) an abandoned output's
+        finalizer evicts its entry, (b) a backward-style pop still returns the weights, and
+        (c) the identity guard keeps a newer entry that reused the data_ptr key."""
+        import gc
+
+        from torch_rbln._internal.kernels import sdpa as sdpa_mod
+
+        sdpa_mod._clear_attn_weights_cache()
+
+        # (a) abandoned output -> finalizer evicts.
+        out = torch.zeros(4, 4)
+        key = out.data_ptr()
+        sdpa_mod._cache_attn_weights(out, torch.ones(4, 4))
+        self.assertIn(key, sdpa_mod._sdpa_attn_weights_cache)
+        del out
+        gc.collect()
+        self.assertNotIn(key, sdpa_mod._sdpa_attn_weights_cache)
+
+        # (b) pop (the backward path) still returns the cached weights.
+        out2 = torch.zeros(4, 4)
+        aw = torch.ones(4, 4)
+        sdpa_mod._cache_attn_weights(out2, aw)
+        self.assertIs(sdpa_mod._get_cached_attn_weights(out2), aw)
+
+        # (c) a newer entry occupying a reused data_ptr key survives the older finalizer.
+        out3 = torch.zeros(4, 4)
+        key3 = out3.data_ptr()
+        sdpa_mod._cache_attn_weights(out3, torch.ones(4, 4))
+        newer = torch.full((4, 4), 2.0)
+        sdpa_mod._sdpa_attn_weights_cache[key3] = newer  # simulate data_ptr reuse
+        del out3
+        gc.collect()
+        self.assertIs(sdpa_mod._sdpa_attn_weights_cache.get(key3), newer)
+
+        sdpa_mod._clear_attn_weights_cache()
+
 
 instantiate_device_type_tests(TestSDPADecodeOverflow, globals(), only_for="privateuse1")
 
