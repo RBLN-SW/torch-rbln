@@ -41,12 +41,11 @@ def reset_caching_allocator(request):
     """Drain this test's in-flight device work, then release the RBLN caching allocator's
     cached blocks -- both in teardown.
 
-    Draining (synchronize) runs in this test's teardown, not the next test's setup, so an
-    async error surfaces here (attributed to the test that caused it) and fails loudly
-    rather than being swallowed and misreported as an empty_cache failure in an unrelated
-    later test. Releasing cached blocks then keeps freed small blocks from fragmenting the
-    pool for the next test. Opt out per-test with the ``no_caching_allocator_reset`` marker.
-    """
+    Draining (synchronize) in this test's teardown attributes an async error to the test
+    that caused it, instead of misreporting it against an unrelated later test. Releasing
+    cached blocks then keeps the pool unfragmented for the next test. Opt out with the
+    ``no_caching_allocator_reset`` marker -- which then leaves this test's blocks/in-flight
+    work for the next test to inherit (cleaned only at that next test's teardown)."""
     yield
     if request.node.get_closest_marker("no_caching_allocator_reset"):
         rbln_log_debug("Skipping RBLN caching allocator reset")
@@ -94,15 +93,13 @@ def reset_caching_allocator(request):
 # =============================================================================
 @pytest.fixture(scope="function", autouse=True)
 def restore_current_device():
-    """Restore the RBLN device selection AND the lazy-init flag after each test, so a test
-    that calls set_device() cannot leak either into later tests on the same worker.
+    """Restore the RBLN device selection and the lazy-init flag after each test, so a test
+    that called set_device() cannot leak either into later tests on the same worker.
 
-    Snapshot both, then only issue the low-level set_device when the index actually changed:
-    calling it unconditionally flips ``_initialized`` False->True (set_device sets it) on
-    tests that never touched the device, which is itself a leak. Restore the index and the
-    flag in lockstep and fail loud if the index restore fails -- a half-restored device
-    (index moved, flag rolled back to the old value) would silently mislead every later
-    test on this worker, so surface it as a teardown error instead of swallowing it."""
+    Only re-issue set_device when the index actually changed -- calling it unconditionally
+    would itself flip ``_initialized`` False->True and leak that. Restore index and flag in
+    lockstep; if the index restore fails, let it propagate (a half-restored device would
+    silently mislead later tests) rather than rolling back only the flag."""
     # The `torch_rbln.device` package re-exports a `device` class that shadows the
     # `device` submodule, so reach the module (which owns the `_initialized` global that
     # set_device mutates) via sys.modules rather than a `from ... import device`.
@@ -117,9 +114,7 @@ def restore_current_device():
     if saved is None:
         _dev._initialized = saved_initialized
         return
-    # Do NOT swallow a restore failure: if current_device()/set_device() raise, let it
-    # propagate as a teardown error rather than rolling back only the flag. The flag is
-    # restored only after the index restore succeeds, so the two never diverge.
+    # Restore the flag only after the index restore succeeds, so the two never diverge.
     if _dev.current_device() != saved:
         _dev.set_device(saved)
     _dev._initialized = saved_initialized

@@ -180,9 +180,9 @@ python -m pytest test/distributed/ -m "test_set_perf"
 python -m pytest test/models/test_transformers.py -k "batch_size_2"
 python -m pytest test/ -m "test_set_ci" -k "not float32"
 
-# Parallel execution. single_worker tests should ideally run in a separate serial pass
-# (`run_tests.py` does this split for you); exclude them here if you want to be safe.
-python -m pytest test/rbln/ --numprocesses=16
+# Parallel execution. single_worker tests must run in a separate serial pass
+# (`run_tests.py` does this split for you), so exclude them from the parallel run.
+python -m pytest test/rbln/ -m "not single_worker" --numprocesses=16
 
 # Serial execution (required for some tests)
 python -m pytest test/internal/test_memory_stats.py
