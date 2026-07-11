@@ -522,7 +522,9 @@ void cpu_fallback_rbln(
         if (borrow_ids[i] != 0 && schema_info.is_pure_out[tensor_args_indices[i]]) {
           c10::rbln::return_borrowed(borrow_ids[i], /*updated=*/false);
           borrow_ids[i] = 0;
-          cpu_tensors[i] = at::empty(tensor_args[i].sizes(), tensor_args[i].options().device(at::kCPU));
+          // Zero-sized: the retry grow-resizes from an empty tensor, so it does not re-emit
+          // the "output was resized" warning the first attempt already produced (count stays 1).
+          cpu_tensors[i] = at::empty({0}, tensor_args[i].options().device(at::kCPU));
         }
       }
       *stack = stack_snapshot; // redispatchBoxed consumed the args; restore them

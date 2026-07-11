@@ -16,6 +16,8 @@ op produces correct results (a copy-elision regression would manifest as
 wrong values or a crash).
 """
 
+import warnings
+
 import pytest
 import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
@@ -50,12 +52,16 @@ class TestBorrowFastPath(TestCase):
 
     def test_pure_out_undersized_grows(self) -> None:
         """Undersized pure ``out=`` (borrowed as a non-resizable from_blob) must
-        GROW to the result shape, not raise "not resizable". Result stays correct,
-        grown, and the same ``out`` tensor. ``sin`` is a CPU-fallback op."""
+        GROW to the result shape, not raise "not resizable". The grow-retry re-runs the
+        CPU kernel on a fresh zero-sized tensor, so the "output was resized" warning fires
+        exactly once (not once per attempt). ``sin`` is a CPU-fallback op."""
         x = torch.arange(8, dtype=torch.float32, device="rbln")
         out = torch.empty(1, dtype=torch.float32, device="rbln")  # undersized -> grow
-        with pytest.warns(UserWarning):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
             ret = torch.sin(x, out=out)
+        resized = [w for w in caught if issubclass(w.category, UserWarning) and "was resized" in str(w.message)]
+        self.assertEqual(len(resized), 1, f"resize warning should fire once, got {len(resized)}")
         self.assertEqual(tuple(ret.shape), (8,))
         self.assertTrue(ret is out)
         self.assertEqual(ret.to("cpu"), torch.sin(torch.arange(8, dtype=torch.float32)))
