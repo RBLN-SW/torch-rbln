@@ -800,6 +800,22 @@ class TestCompiledFunctionWrapper(TestCase):
         self.assertIs(seen["args"][0], c)  # self bound
         self.assertIsInstance(C.method, CompiledFunctionWrapper)  # class access returns wrapper
 
+    def test_wrapper_module_not_bound_as_method_descriptor(self):
+        """A compiled nn.Module (or other callable object) stored as a class attribute must
+        NOT get the owner bound as its first arg: __get__ returns the wrapper as-is. Regression
+        -- the descriptor used to prepend the owner unconditionally, so `H().model(x)` would
+        call the module as `model(H(), x)` instead of `model(x)`."""
+        model = torch.nn.Linear(4, 4)
+        wrapper = CompiledFunctionWrapper(lambda *a, **k: None, model, Mock(), compile_kwargs={})
+
+        class Holder:
+            m = wrapper
+
+        # Instance access fires the descriptor but must return the wrapper itself, not a
+        # functools.partial that would inject the Holder instance as the first positional arg.
+        self.assertIs(Holder().m, wrapper)
+        self.assertIs(Holder.m, wrapper)  # class access likewise returns the wrapper
+
 
 @pytest.mark.test_set_ci
 class TestChromiumEventStatePreservation(TestCase):
