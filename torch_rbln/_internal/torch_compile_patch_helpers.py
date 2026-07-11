@@ -376,13 +376,11 @@ class CompiledFunctionWrapper:
         return attr
 
     def __get__(self, obj, objtype=None):
-        # Descriptor protocol so `@torch.compile(backend="rbln")` on a *method* binds `self`.
-        # Bind only when the wrapped target is a function/method (the method case); a compiled
-        # nn.Module or other callable object stored as a class attribute is returned as-is --
-        # otherwise we'd wrongly prepend the owner instance as its first positional arg (e.g.
-        # `class H: m = torch.compile(nn.Linear(...))`; `H().m(x)` would call `Linear(H(), x)`).
-        # Only affects class-attribute use; an instance-attribute wrapper never triggers this.
-        if obj is None or not isinstance(self._original_fn, (types.FunctionType, types.MethodType)):
+        # Descriptor: bind the owner only for a decorated *function* target (the usual
+        # `@torch.compile` on a method). A compiled nn.Module / callable object -- or an
+        # already-bound method -- is returned unchanged, so the owner is not injected as a
+        # spurious first argument (and a bound method is not bound a second time).
+        if obj is None or not isinstance(self._original_fn, types.FunctionType):
             return self
         return functools.partial(self.__call__, obj)
 

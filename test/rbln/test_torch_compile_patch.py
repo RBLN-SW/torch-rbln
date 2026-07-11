@@ -4,6 +4,7 @@
 Test suite for torch_compile_patch_helpers module.
 """
 
+import types
 from contextlib import nullcontext
 from unittest.mock import Mock, patch
 
@@ -815,6 +816,25 @@ class TestCompiledFunctionWrapper(TestCase):
         # functools.partial that would inject the Holder instance as the first positional arg.
         self.assertIs(Holder().m, wrapper)
         self.assertIs(Holder.m, wrapper)  # class access likewise returns the wrapper
+
+    def test_wrapper_bound_method_target_not_rebound(self):
+        """A wrapper whose target is an already-bound method must NOT get the owner re-bound:
+        __get__ returns it as-is, so the original receiver stays the only bound self (binding
+        again would inject the holder as a second, spurious first arg)."""
+
+        class Target:
+            def method(self, x):
+                return x
+
+        target = Target()
+        self.assertIsInstance(target.method, types.MethodType)  # precondition: already bound
+        wrapper = CompiledFunctionWrapper(lambda *a, **k: None, target.method, Mock(), compile_kwargs={})
+
+        class Holder:
+            m = wrapper
+
+        self.assertIs(Holder().m, wrapper)  # not re-bound to the Holder instance
+        self.assertIs(Holder.m, wrapper)
 
 
 @pytest.mark.test_set_ci
