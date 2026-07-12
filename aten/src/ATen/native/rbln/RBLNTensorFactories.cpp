@@ -188,10 +188,10 @@ bool fill_host_typed(void* host_ptr, int64_t numel, c10::ScalarType st, const at
 // interior vaddr and the runtime returns host_ptr = allocation base + offset
 // with the range bounds-checked, so we write only the view's bytes.
 //
-// Only contiguous tensors are handled. Non-contiguous fills (rare on the
-// Llama-1B vLLM hot path: 0 occurrences in measurement) trip the assert; the
-// proper extension is stride iteration in this function — we leave that as
-// a follow-up if/when the assert fires.
+// Only contiguous tensors take this fast path; a non-contiguous self (or an
+// unsupported dtype) routes through the standard CPU fallback instead (see the
+// is_contiguous() guard below). Stride iteration here is a possible future
+// extension.
 // Cheap dtype check that mirrors ``fill_host_typed``'s case set. Used so we
 // can decide whether the borrow-and-fill fast path is viable *before*
 // acquiring the host-pointer (which has its own cost). When this returns

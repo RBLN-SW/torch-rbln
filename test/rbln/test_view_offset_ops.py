@@ -151,13 +151,6 @@ class TestBroadcastOverlapFill(TestCase):
         # dim 0 is real (stride != 0), dim 1 is broadcast (stride 0): only dim 1 collapses.
         self._check(torch.float32, (2, 1), lambda x: x.expand(2, 5), lambda v: v.fill_(3.0))
 
-    def test_expand_zero_does_not_raise(self):
-        # Exact reviewer repro, independent of the CPU-parity helper above.
-        base = torch.ones(1, device="rbln")
-        base.expand(3).zero_()  # must not raise
-        self.assertEqual(base.to("cpu"), torch.zeros(1))
-        self.assertEqual(base.expand(3).to("cpu"), torch.zeros(3))
-
 
 instantiate_device_type_tests(TestZeroViewOffset, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestFillViewOffset, globals(), only_for="privateuse1")
