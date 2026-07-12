@@ -120,24 +120,6 @@ def restore_current_device():
     _dev._initialized = saved_initialized
 
 
-@pytest.fixture(scope="function", autouse=True)
-def keep_torch_compile_patches():
-    """Re-apply torch_rbln's import-time torch.compile / torch._dynamo.reset patches if a
-    test removed or swapped them, so later tests (and the autouse reset_dynamo above) keep
-    the RBLN wrappers rather than the bare originals."""
-    yield
-    import torch_rbln._internal.monkey_patches as mp
-
-    # patches_active() checks callable identity (not just the bookkeeping flags), so a test
-    # that rebinds torch.compile to something else is caught and the RBLN wrappers restored.
-    if not mp.patches_active():
-        rbln_log_debug("Re-applying RBLN torch.compile patches leaked-off by a prior test")
-        # remove first: patch_torch_compile() is a no-op while the flags still read
-        # "patched", so a silent rebind would otherwise survive apply_all_patches().
-        mp.remove_all_patches()
-        mp.apply_all_patches()
-
-
 # =============================================================================
 # Environment variable isolation fixtures
 # =============================================================================

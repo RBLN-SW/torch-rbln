@@ -777,16 +777,21 @@ class TestTorchCompileMonkeyPatch(TestCase):
         clear_rbln_compile_cache()
 
     def tearDown(self):
-        """Restore original torch.compile and torch._dynamo.reset after tests."""
+        """Restore torch.compile / torch._dynamo.reset, then re-apply the RBLN patches.
+
+        This class's tests deliberately unpatch to the bare originals; without re-applying,
+        later tests on the same worker would run against the un-patched functions. Re-applying
+        here fixes that at the source (so no global autouse guard is needed)."""
         torch.compile = self._original_compile
         torch._dynamo.reset = self._original_dynamo_reset
         clear_rbln_compile_cache()
-        # Reset patch state
         import torch_rbln._internal.monkey_patches as mp
 
+        # Reset the bookkeeping to un-patched, then re-apply from a clean slate.
         mp._torch_compile_patched = False
         mp._torch_dynamo_reset_patched = False
         mp._rbln_backend_registered = False
+        mp.apply_all_patches()
 
     def _make_paged_attn_inputs(self):
         q = torch.zeros((1, 1, 1, 1, 64), device="rbln:0", dtype=torch.float16)

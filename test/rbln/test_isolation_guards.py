@@ -14,7 +14,6 @@ import pytest
 import torch
 
 import torch_rbln
-import torch_rbln._internal.monkey_patches as mp
 
 
 # The `torch_rbln.device` package re-exports a `device` class that shadows the `device`
@@ -38,31 +37,6 @@ def _run_setup_teardown(fixture, *args):
         next(gen)  # teardown, past yield
     except StopIteration:
         pass
-
-
-@pytest.mark.test_set_ci
-def test_torch_compile_patches_reapplied_by_fixture_teardown():
-    """The keep_torch_compile_patches fixture must re-apply the import-time torch.compile
-    patches in teardown when a test removed OR silently rebound them -- detected by callable
-    identity (patches_active), not just the bookkeeping flags. Exercised through the fixture."""
-    conftest = _load_root_conftest()
-    try:
-        # (a) hard removal -> patches_active() False -> teardown restores.
-        mp.remove_all_patches()
-        assert not mp.patches_active()
-        _run_setup_teardown(conftest.keep_torch_compile_patches)
-        assert mp.patches_active()
-        # (b) silent rebind: flag still reads "patched", but torch.compile is no longer the
-        # RBLN wrapper. The identity check must catch it and the fixture must restore it.
-        torch.compile = lambda *a, **k: None
-        assert mp._torch_compile_patched  # flag disagrees with reality...
-        assert not mp.patches_active()  # ...identity check does not
-        _run_setup_teardown(conftest.keep_torch_compile_patches)
-        assert mp.patches_active()
-    finally:
-        if not mp.patches_active():
-            mp.remove_all_patches()
-            mp.apply_all_patches()
 
 
 @pytest.mark.test_set_ci

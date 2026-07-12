@@ -12,9 +12,6 @@ _torch_dynamo_reset_patched: bool = False
 _rbln_backend_registered: bool = False
 _original_torch_compile = None
 _original_dynamo_reset = None
-# The exact wrapper objects we installed, for an identity check in patches_active().
-_rbln_compile_wrapper = None
-_rbln_reset_wrapper = None
 
 
 def _is_backend_registered(backend_name: str) -> bool:
@@ -73,7 +70,6 @@ def patch_torch_compile() -> None:
     import-time dependencies.
     """
     global _original_dynamo_reset, _original_torch_compile, _torch_compile_patched, _torch_dynamo_reset_patched
-    global _rbln_compile_wrapper, _rbln_reset_wrapper
 
     import torch
 
@@ -120,12 +116,7 @@ def patch_torch_compile() -> None:
 
             return rbln_compile_decorator
 
-        # Keep a reference to the exact wrapper we install so a leak guard can verify
-        # torch.compile IS this object by identity, not just trust the
-        # _torch_compile_patched flag (a test may rebind torch.compile without going
-        # through remove_all_patches).
         torch.compile = wrapper
-        _rbln_compile_wrapper = wrapper
         _torch_compile_patched = True
 
     if not _torch_dynamo_reset_patched:
@@ -136,24 +127,7 @@ def patch_torch_compile() -> None:
             return original_dynamo_reset(*args, **kwargs)
 
         torch._dynamo.reset = reset_wrapper
-        _rbln_reset_wrapper = reset_wrapper
         _torch_dynamo_reset_patched = True
-
-
-def patches_active() -> bool:
-    """Whether the RBLN torch.compile / torch._dynamo.reset patches are actually installed.
-
-    Checks that the live callables ARE the exact wrapper objects we installed (identity),
-    not just the bookkeeping flags -- so a test that rebinds ``torch.compile`` to something
-    else without calling remove_all_patches() is still detected as having lost the patches."""
-    import torch
-
-    return (
-        _torch_compile_patched
-        and _torch_dynamo_reset_patched
-        and torch.compile is _rbln_compile_wrapper
-        and torch._dynamo.reset is _rbln_reset_wrapper
-    )
 
 
 def apply_all_patches() -> None:
