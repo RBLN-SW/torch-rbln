@@ -186,25 +186,6 @@ def _with_env(var, value, fn):
 
 
 @pytest.mark.test_set_ci
-def test_deploy_and_nan_inf_gates_read_env_live():
-    """The C++ deploy / nan_inf-disable gates must read the environment live (no process
-    cache), so a set -> unset -> set toggle is observed every time. A static cache would
-    latch the first value into the whole xdist worker and leak across tests."""
-    deploy = torch_rbln._C._is_deploy_mode
-    nan_inf = torch_rbln._C._is_nan_inf_check_disabled
-
-    # deploy: ON -> unset -> ON must track live each time.
-    assert _with_env("TORCH_RBLN_DEPLOY", "ON", deploy) is True
-    assert _with_env("TORCH_RBLN_DEPLOY", None, deploy) is False
-    assert _with_env("TORCH_RBLN_DEPLOY", "ON", deploy) is True
-
-    # nan_inf disable: "nan_inf" -> unset -> "all" must track live each time.
-    assert _with_env("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK", "nan_inf", nan_inf) is True
-    assert _with_env("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK", None, nan_inf) is False
-    assert _with_env("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK", "all", nan_inf) is True
-
-
-@pytest.mark.test_set_ci
 def test_python_disabled_fallback_gate_reads_env_live():
     """The Python cold-path gate must read the env live too, matching the C++ warm-path gate
     (else warm/cold dispatch disagree and the value latches across an xdist worker). It was

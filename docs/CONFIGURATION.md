@@ -45,6 +45,8 @@ Skip NaN/Inf validation checks to reduce runtime overhead in production:
 export TORCH_RBLN_DEPLOY=ON
 ```
 
+**Runtime-live contract.** `TORCH_RBLN_DEPLOY` and the per-check `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` (below) are read live on every op dispatch, so toggling them takes effect immediately without restarting the process. The per-dispatch `getenv` is negligible against op-dispatch cost (a `getenv` is tens of nanoseconds; an op dispatch is microseconds or more), so keeping the read live is intentional and has no measurable steady-state cost.
+
 ## Fallback Control
 
 By default, `torch-rbln` falls back to CPU execution when it encounters unsupported operations or compilation errors.

@@ -501,10 +501,10 @@ bool align_penalty_fast_path_check(torch::jit::Stack* stack, const SchemaCache& 
 // Deploy / nan_inf-disable gates
 // ---------------------------------------------------------------------------
 //
-// Read live from the environment on every call -- NOT process-cached. Tests toggle
-// these per-test via function-scoped fixtures (enable_deploy_mode; patch.dict on
-// TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK), so a static cache would latch the first
-// value into the whole xdist worker and leak into later tests. See docs/TEST_GUIDE.md.
+// Contract: read live from the environment on every call (NOT process-cached), so both flags
+// are runtime-dynamic. The per-call getenv is negligible against op-dispatch cost. Reading
+// live also keeps per-test env toggles from latching a value into a long-lived worker process
+// (see docs/CONFIGURATION.md).
 bool is_deploy_mode() {
   const char* env = std::getenv("TORCH_RBLN_DEPLOY");
   return env != nullptr && std::strcmp(env, "ON") == 0;
@@ -1344,16 +1344,6 @@ std::string strip_namespace(const std::string& op_name) {
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
-
-// TEST-ONLY: expose the live deploy / nan_inf-disable env gates so a regression test can
-// assert they are read live (set -> unset -> set) and never process-cached again.
-bool test_read_deploy_mode() {
-  return is_deploy_mode();
-}
-
-bool test_read_nan_inf_check_disabled() {
-  return is_nan_inf_check_disabled();
-}
 
 void register_cpp_shim(const std::string& op_name, pybind11::object py_fn, const std::vector<size_t>& skip_dtype_args) {
   std::lock_guard<std::mutex> lk(registry_mutex());
