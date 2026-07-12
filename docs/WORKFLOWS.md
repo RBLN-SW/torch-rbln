@@ -137,7 +137,11 @@ The event is dispatched to a separate repository (configured via `vars.TORCH_RBL
 
 ## Automated Dependency Updates
 
-A nightly workflow tracks the latest `rebel-compiler` development build (not an official release) and automatically creates or updates a PR on `dev` when a newer build is available. Review and merge it once CI passes.
+**File:** [`.github/workflows/update-rebel-compiler-dependency.yaml`](../.github/workflows/update-rebel-compiler-dependency.yaml)
+
+This workflow runs on a daily schedule and tracks the latest `rebel-compiler` production build. When a newer one is available, it creates or updates a pull request against `dev` for a maintainer to review and merge.
+
+It can also be run manually via `workflow_dispatch`, optionally pinning a specific `rebel_compiler_version` instead of resolving the latest.
 
 ---
 

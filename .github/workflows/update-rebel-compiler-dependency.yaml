@@ -1,0 +1,150 @@
+name: Update rebel-compiler dependency
+
+on:
+  schedule:
+    # Daily 09:00 KST (00:00 UTC)
+    - cron: 0 0 * * *
+  workflow_dispatch:
+    inputs:
+      rebel_compiler_version:
+        description: rebel-compiler version to pin (leave empty to resolve the latest production build)
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  update_rebel_compiler_dependency:
+    name: Update rebel-compiler dependency
+    if: ${{ github.repository_owner == vars.TORCH_RBLN_REPO_OWNER }}
+    runs-on: ${{ vars.TORCH_RBLN_RUNNER_CPU_SMALL }}
+    timeout-minutes: 15
+    container:
+      image: ghcr.io/rebellions-sw/rbln-test:0.11.0-ubuntu22.04-py3.12
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GIT_PAT }}
+    env:
+      GIT_CONFIG_COUNT: '1'
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: ${{ github.workspace }}
+      TARGET_BRANCH: dev
+    steps:
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+
+      - name: Resolve rebel-compiler version
+        id: resolve_rebel_compiler_version
+        env:
+          UV_INDEX: rebel-compiler=https://nexus.mgmt.rbln.in/repository/pypi-compiler-nightly-prod/simple/
+          UV_INDEX_REBEL_COMPILER_USERNAME: ${{ secrets.REBEL_COMPILER_INDEX_USERNAME }}
+          UV_INDEX_REBEL_COMPILER_PASSWORD: ${{ secrets.REBEL_COMPILER_INDEX_PASSWORD }}
+          REBEL_COMPILER_VERSION: ${{ inputs.rebel_compiler_version }}
+        run: |
+          set -euo pipefail
+
+          if [[ -n "${REBEL_COMPILER_VERSION}" ]]; then
+            target_version="${REBEL_COMPILER_VERSION}"
+            manual_override=true
+            echo "::notice::Using explicitly requested rebel-compiler version: ${target_version}"
+          else
+            target_version="$(printf 'rebel-compiler\n' \
+              | uv pip compile - --no-deps --prerelease allow --no-header --no-annotate \
+              | sed -n 's/^rebel-compiler==//p')"
+            if [[ -z "${target_version}" ]]; then
+              echo "::error::Failed to resolve rebel-compiler from the index"
+              exit 1
+            fi
+            manual_override=false
+            echo "::notice::Resolved latest rebel-compiler version: ${target_version}"
+          fi
+
+          echo "target_version=${target_version}" >> "${GITHUB_OUTPUT}"
+          echo "manual_override=${manual_override}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check out torch-rbln repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          ref: ${{ env.TARGET_BRANCH }}
+          persist-credentials: false
+
+      - name: Update rebel-compiler pin if outdated
+        id: update_rebel_compiler_pin
+        env:
+          TARGET_VERSION: ${{ steps.resolve_rebel_compiler_version.outputs.target_version }}
+          MANUAL_OVERRIDE: ${{ steps.resolve_rebel_compiler_version.outputs.manual_override }}
+        run: |
+          set -euo pipefail
+
+          count=$(grep -cE '^rebel-compiler==' constraints-build-dev.txt || true)
+          if [[ "${count}" -ne 1 ]]; then
+            echo "::error::Expected exactly 1 'rebel-compiler==' line, found ${count}"
+            exit 1
+          fi
+
+          current_version=$(grep -E '^rebel-compiler==' constraints-build-dev.txt | sed 's/^rebel-compiler==//')
+          echo "::notice::Target rebel-compiler version:  ${TARGET_VERSION}"
+          echo "::notice::Current rebel-compiler version: ${current_version}"
+
+          if [[ "${current_version}" == "${TARGET_VERSION}" ]]; then
+            echo "::notice::Already pinned to target version. No update required."
+            echo "changed=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          # A production pin (.prod) holds unless the resolved version is strictly newer;
+          # any other pin, or an explicit manual version, always updates below.
+          if [[ "${MANUAL_OVERRIDE}" != "true" && "${current_version}" == *".prod"* ]]; then
+            if ! CURRENT_VERSION="${current_version}" python3 <<'PY'
+          import os, re, sys
+
+          prod_re = re.compile(r"([0-9]+(?:\.[0-9]+)*)\.dev([0-9]+)\+g[0-9a-f]{8}\.prod$")
+
+          def version_key(version):
+              match = prod_re.search(version)
+              return (tuple(int(p) for p in match.group(1).split(".")), int(match.group(2))) if match else None
+
+          target = version_key(os.environ["TARGET_VERSION"])
+          current = version_key(os.environ["CURRENT_VERSION"])
+          sys.exit(0 if target and current and target > current else 1)
+          PY
+            then
+              echo "::warning::Current production pin '${current_version}' is at or ahead of the resolved version '${TARGET_VERSION}'. No update required."
+              echo "changed=false" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+          fi
+
+          sed -i -E "s|^rebel-compiler==.*$|rebel-compiler==${TARGET_VERSION}|" constraints-build-dev.txt
+          cat constraints-build-dev.txt
+
+          echo "changed=true" >> "${GITHUB_OUTPUT}"
+
+      - name: Create or update pull request
+        if: ${{ steps.update_rebel_compiler_pin.outputs.changed == 'true' }}
+        uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676  # v7.0.11
+        env:
+          TARGET_VERSION: ${{ steps.resolve_rebel_compiler_version.outputs.target_version }}
+        with:
+          token: ${{ secrets.GIT_PAT }}
+          add-paths: constraints-build-dev.txt
+          commit-message: "chore: update rebel-compiler to ${{ env.TARGET_VERSION }}"
+          committer: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>
+          author: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>
+          branch: update-rebel-compiler
+          base: ${{ env.TARGET_BRANCH }}
+          title: "chore: update rebel-compiler to ${{ env.TARGET_VERSION }}"
+          body: |
+            Updates the `rebel-compiler` dependency to `${{ env.TARGET_VERSION }}`.
+
+            This PR was automatically created by the dependency-update workflow. If the new version needs code changes to pass CI, push them to this branch before merging.
