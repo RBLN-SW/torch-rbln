@@ -29,6 +29,9 @@ carries the hidden-overhead signals plus the memory gauge, and EXCLUDES the
 out-of-scope dispatch/utilization counters.
 """
 
+import os
+from unittest import mock
+
 import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
@@ -197,20 +200,23 @@ class TestProfilerTruthfulnessAndScope(TestCase):
         self.assertGreater(m["peak_bytes"], 0)
 
     def test_runtime_hidden_d2h_is_cause_tagged(self):
-        # A plain contiguous copy_ of a freshly-created tensor bounces at the
-        # RUNTIME level (torch-side sees nothing). The profiler must not only
-        # count it but attribute the CAUSE — and every incident must map to a
-        # named reason (no unattributed/unknown).
-        with torch.rbln.explain() as p:
-            x = torch.randn(256, 256, device=DEV, dtype=torch.float16)
-            y = torch.empty(256, 256, device=DEV, dtype=torch.float16)
-            y.copy_(x)
+        # Deterministic witness for the runtime hidden-d2h path. Pin lazy allocation
+        # (delenv EAGER_MALLOC) so a freshly-created host-latest src forces the runtime's
+        # src_not_on_device v2v hidden d2h; under eager-malloc the copy completes on-device
+        # with 0 hidden d2h, so this must not depend on ambient env. Assert the profiler both
+        # counts the incident AND attributes every one to a named reason (no unattributed).
+        with mock.patch.dict(os.environ):
+            os.environ.pop("TORCH_RBLN_EAGER_MALLOC", None)
+            with torch.rbln.explain() as p:
+                x = torch.randn(256, 256, device=DEV, dtype=torch.float16)
+                y = torch.empty(256, 256, device=DEV, dtype=torch.float16)
+                y.copy_(x)
         rr = p.dump()["runtime_residency"]
         if not rr["available"]:
             self.skipTest("runtime residency counter not exposed by the loaded librbln")
         self.assertGreaterEqual(rr["total_count"], 1)
         attributed = sum(v["count"] for v in rr["by_reason"].values())
-        self.assertEqual(attributed, rr["total_count"])  # no unattributed hidden d2h
+        self.assertEqual(attributed, rr["total_count"])  # every hidden d2h is cause-tagged
         self.assertTrue(any(v["count"] > 0 for v in rr["by_reason"].values()))
 
     def test_runtime_h2d_push_counted(self):
@@ -607,7 +613,7 @@ class TestProfilerRuntimeContract(TestCase):
     cardinality drifts (a reason/primitive/site added or removed), these FAIL in CI --
     *detection* -- instead of the Python mapping silently truncating (zip) or mislabelling
     counts. An equal-cardinality reorder is NOT catchable from here; that still relies on the
-    rebel-compiler pin + the 1:1 vendored-header sync."""
+    rebel-compiler pin keeping the wheel's headers and runtime in lockstep."""
 
     def test_positional_axis_lengths_match_runtime(self):
         from torch_rbln.profiler import (

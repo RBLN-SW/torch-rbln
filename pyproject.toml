@@ -88,7 +88,6 @@ include = [
   "torch_rbln/csrc/**/*.h",
   "torch_rbln/csrc/**/*.hpp",
   "torch_rbln/csrc/**/CMakeLists.txt",
-  "third_party/rebel_compiler/include/**/*.h",
   "hatch_build.py",
   "pyproject.toml",
   "README.md",
@@ -186,7 +185,7 @@ lint = [
   "ruamel-yaml>=0.17.4,<0.18.0",
   "ruff>=0.9.1,<0.10",
   "setuptools>=70.0.0,<78.0.0",
-  "shellcheck-py>=0.7.2.1,<0.7.3.0",
+  "shellcheck-py>=0.11.0.1,<0.11.1.0",
   "sympy>=1.13.1,<1.14.0",
   "tabulate>=0.9.0,<0.10.0",
   "toml>=0.10.2,<0.11.0",
@@ -368,6 +367,5 @@ markers = [
     "test_set_experimental: [test set] marks tests for experimental features (deselect with `-m \"not test_set_experimental\"`)",
     "test_set_perf: [test set] marks performance tests (select with `-m test_set_perf`)",
     "no_dynamo_reset: skips autouse TorchDynamo reset fixture",
-    "no_caching_allocator_reset: skips autouse RBLN caching-allocator reset fixture",
     "single_worker: marks tests that must run on a single worker (select with `-m single_worker`)",
 ]

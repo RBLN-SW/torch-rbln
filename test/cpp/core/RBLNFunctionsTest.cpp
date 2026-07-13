@@ -3,7 +3,9 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <string>
 
 class RBLNFunctionsTest : public ::testing::Test {
  protected:
@@ -94,13 +96,26 @@ TEST_F(RBLNFunctionsTest, ExchangeInvalidDeviceIndex) {
 }
 
 TEST_F(RBLNFunctionsTest, IsEagerMalloc) {
-  const auto is_eager_malloc = c10::rbln::is_eager_malloc();
+  // is_eager_malloc() reads the env on every call, so toggling it is observed each time.
+  // A process-lifetime cache would latch the first value (the xdist cross-test leak this
+  // guards against), so assert set -> unset -> set flips the result live.
+  const char* saved = std::getenv("TORCH_RBLN_EAGER_MALLOC");
+  const bool had = saved != nullptr;
+  const std::string saved_str = had ? saved : "";
 
-  const auto* env = std::getenv("TORCH_RBLN_EAGER_MALLOC");
-  if ((env != nullptr) && (std::string(env) == "1")) {
-    EXPECT_TRUE(is_eager_malloc);
+  setenv("TORCH_RBLN_EAGER_MALLOC", "1", /*overwrite=*/1);
+  EXPECT_TRUE(c10::rbln::is_eager_malloc());
+  unsetenv("TORCH_RBLN_EAGER_MALLOC");
+  EXPECT_FALSE(c10::rbln::is_eager_malloc());
+  setenv("TORCH_RBLN_EAGER_MALLOC", "1", /*overwrite=*/1);
+  EXPECT_TRUE(c10::rbln::is_eager_malloc());
+  setenv("TORCH_RBLN_EAGER_MALLOC", "0", /*overwrite=*/1); // only exactly "1" is eager
+  EXPECT_FALSE(c10::rbln::is_eager_malloc());
+
+  if (had) {
+    setenv("TORCH_RBLN_EAGER_MALLOC", saved_str.c_str(), /*overwrite=*/1);
   } else {
-    EXPECT_FALSE(is_eager_malloc);
+    unsetenv("TORCH_RBLN_EAGER_MALLOC");
   }
 }
 
