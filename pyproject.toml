@@ -88,7 +88,6 @@ include = [
   "torch_rbln/csrc/**/*.h",
   "torch_rbln/csrc/**/*.hpp",
   "torch_rbln/csrc/**/CMakeLists.txt",
-  "third_party/rebel_compiler/include/**/*.h",
   "hatch_build.py",
   "pyproject.toml",
   "README.md",

@@ -613,7 +613,7 @@ class TestProfilerRuntimeContract(TestCase):
     cardinality drifts (a reason/primitive/site added or removed), these FAIL in CI --
     *detection* -- instead of the Python mapping silently truncating (zip) or mislabelling
     counts. An equal-cardinality reorder is NOT catchable from here; that still relies on the
-    rebel-compiler pin + the 1:1 vendored-header sync."""
+    rebel-compiler pin keeping the wheel's headers and runtime in lockstep."""
 
     def test_positional_axis_lengths_match_runtime(self):
         from torch_rbln.profiler import (

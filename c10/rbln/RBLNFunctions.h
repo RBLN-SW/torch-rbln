@@ -476,8 +476,9 @@ C10_RBLN_API void rt_timing_get(uint64_t* out);
 
 // torch.rbln.explain() runtime-counter reads — thin pass-throughs to librbln's
 // public C-API (see rebel/runtime/api/rbln_runtime_api.h). Process-global, lazy.
-// These are LINKED (not dlsym'd): a librbln lacking them fails extension load, so
-// the vendored header and the runtime are kept version-aligned (third_party/).
+// These are LINKED (not dlsym'd): a librbln lacking them fails extension load.
+// Build-time headers and library are resolved from the same source -- the
+// rebel-compiler wheel or a REBEL_HOME tree -- so the linked ABI matches.
 // The per-reason axes are positional; their meaning is interpreted Python-side, so
 // no internal classification name crosses this boundary.
 C10_RBLN_API uint32_t rt_prof_hidden_num();
