@@ -270,6 +270,8 @@ These fixtures are defined in `test/conftest.py` and apply automatically to ever
 | `set_seeds`                      | function | **Yes** | Sets `torch.manual_seed(0)`, `np.random.seed(0)`, `random.seed(0)` for deterministic reproducibility          |
 | `reset_dynamo`                   | function | **Yes** | Calls `torch._dynamo.reset()` before each test. Skipped if test is marked with `@pytest.mark.no_dynamo_reset` |
 | `disable_compile_error_fallback` | function | **Yes** | Appends `compile_error` to `TORCH_RBLN_DISABLE_FALLBACK` env var                                              |
+| `reset_caching_allocator`        | function | **Yes** | Drains in-flight device work then releases the RBLN caching-allocator blocks in teardown; fails loud and skips the flush if the drain faults |
+| `restore_current_device`         | function | **Yes** | Restores the selected RBLN device and lazy-init flag after each test so a `set_device()` can't leak into later tests |
 | `enable_deploy_mode`             | function | No      | Sets `TORCH_RBLN_DEPLOY=ON`. Apply with `@pytest.mark.usefixtures("enable_deploy_mode")`                      |
 | `enable_eager_malloc`            | function | No      | Sets `TORCH_RBLN_EAGER_MALLOC=1`. Apply with `@pytest.mark.usefixtures("enable_eager_malloc")`                |
 

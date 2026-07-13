@@ -124,20 +124,22 @@ def test_caching_allocator_teardown_fails_loud_and_skips_flush_on_sync_error(mon
     the async-buffer race (and empty_cache clears the process-global WarmCache)."""
     conftest = _load_root_conftest()
     flushed = []
-    monkeypatch.setattr(torch_rbln.device, "device_count", lambda: 1)
 
     def _sync_boom(idx):
         raise RuntimeError("sync fault")
 
-    monkeypatch.setattr(torch.rbln, "synchronize", _sync_boom)
-    monkeypatch.setattr(torch_rbln.memory, "empty_cache", lambda device: flushed.append(device))
+    # context() restores the patches on block exit -- success OR assertion failure -- before
+    # the real autouse reset_caching_allocator teardown runs, so it never calls the patched fns.
+    with monkeypatch.context() as m:
+        m.setattr(torch_rbln.device, "device_count", lambda: 1)
+        m.setattr(torch.rbln, "synchronize", _sync_boom)
+        m.setattr(torch_rbln.memory, "empty_cache", lambda device: flushed.append(device))
 
-    gen = conftest.reset_caching_allocator.__wrapped__()
-    next(gen)  # setup: yields
-    with pytest.raises(RuntimeError, match="sync fault"):
-        next(gen)  # teardown: drain fails -> raise, flush skipped
-    assert flushed == []  # flush must be skipped when the drain failed
-    monkeypatch.undo()  # restore the patched fns before the real autouse teardown runs
+        gen = conftest.reset_caching_allocator.__wrapped__()
+        next(gen)  # setup: yields
+        with pytest.raises(RuntimeError, match="sync fault"):
+            next(gen)  # teardown: drain fails -> raise, flush skipped
+        assert flushed == []  # flush must be skipped when the drain failed
 
 
 @pytest.mark.test_set_ci
@@ -145,19 +147,20 @@ def test_caching_allocator_teardown_reports_flush_error(monkeypatch):
     """When the drain succeeds, the flush runs; an empty_cache failure must be surfaced
     (aggregated), not hidden."""
     conftest = _load_root_conftest()
-    monkeypatch.setattr(torch_rbln.device, "device_count", lambda: 1)
-    monkeypatch.setattr(torch.rbln, "synchronize", lambda idx: None)
 
     def _flush_boom(device):
         raise RuntimeError("flush fault")
 
-    monkeypatch.setattr(torch_rbln.memory, "empty_cache", _flush_boom)
+    # context() restores the patches on block exit before the real autouse teardown runs.
+    with monkeypatch.context() as m:
+        m.setattr(torch_rbln.device, "device_count", lambda: 1)
+        m.setattr(torch.rbln, "synchronize", lambda idx: None)
+        m.setattr(torch_rbln.memory, "empty_cache", _flush_boom)
 
-    gen = conftest.reset_caching_allocator.__wrapped__()
-    next(gen)  # setup: yields
-    with pytest.raises(RuntimeError, match="flush fault"):
-        next(gen)  # teardown: drain ok -> flush runs -> its failure surfaced
-    monkeypatch.undo()  # restore the patched fns before the real autouse teardown runs
+        gen = conftest.reset_caching_allocator.__wrapped__()
+        next(gen)  # setup: yields
+        with pytest.raises(RuntimeError, match="flush fault"):
+            next(gen)  # teardown: drain ok -> flush runs -> its failure surfaced
 
 
 def _with_env(var, value, fn):
