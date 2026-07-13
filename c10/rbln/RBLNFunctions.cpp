@@ -340,7 +340,11 @@ c10::DeviceIndex get_torch_device_id(const void* data) {
 
 bool is_eager_malloc() {
   // Read live per call (not a process-lifetime static) so the value reflects the current
-  // environment. Safe: only malloc() consults it and free is mode-agnostic.
+  // environment. getenv is not thread-safe against a concurrent setenv/putenv, but this is
+  // safe here: only malloc() consults it, free is mode-agnostic (so an env change between an
+  // allocation and its free can't cause an alloc/free mismatch), and the env is not mutated
+  // concurrently with allocation (prod fixes it at startup; tests toggle it only at quiescent
+  // points, single-threaded per worker).
   const auto* env = std::getenv("TORCH_RBLN_EAGER_MALLOC");
   const bool eager_malloc = (env != nullptr) && (std::strcmp(env, "1") == 0);
   RBLN_LOG_DEBUG("eager_malloc={}", eager_malloc);
