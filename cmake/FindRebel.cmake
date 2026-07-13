@@ -5,9 +5,10 @@
 #   REBEL_LIBRARIES     - Libraries to link with Rebel (librbln.so)
 #
 # Both headers and librbln.so are required at build time so that C code
-# linking against the Rebel ABI builds correctly. Headers come from
-# third_party/rebel_compiler/include (vendored) or REBEL_HOME (external).
-# The .so comes from the same locations (e.g. REBEL_HOME/build or tvm site-packages).
+# linking against the Rebel ABI builds correctly. By default headers and the
+# .so both come from the installed rebel-compiler wheel in site-packages
+# (rebel/include and tvm/, shipped from the same build). REBEL_HOME switches to
+# an external Rebel tree (rebel/include and build/).
 
 cmake_minimum_required(VERSION 3.18 FATAL_ERROR)
 
@@ -17,9 +18,6 @@ include(FindPackageHandleStandardArgs)
 # Capture env vars once to avoid fragile if() parsing with empty values
 set(_REBEL_USE_EXTERNAL "$ENV{RBLN_USE_EXTERNAL_REBEL_COMPILER}")
 set(_REBEL_HOME "$ENV{REBEL_HOME}")
-
-# Vendored: minimal Rebel runtime headers in third_party (same layout: rebel/runtime/api/rbln_runtime_api.h)
-set(REBEL_INCLUDE_DIR_VENDORED ${CMAKE_SOURCE_DIR}/third_party/rebel_compiler/include)
 
 set(rebel_include_dir "")
 set(rebel_library_path "")
@@ -35,24 +33,25 @@ if(_REBEL_USE_EXTERNAL OR _REBEL_HOME)
   set(rebel_include_dir "${_REBEL_HOME}/rebel/include")
   set(rebel_library_path "${_REBEL_HOME}/build")
   message(STATUS "FindRebel: EXTERNAL (REBEL_HOME) -- include: ${rebel_include_dir}, library: ${rebel_library_path}")
-# 2) Vendored: use third_party/rebel_compiler/include (external dependency vendored in-tree)
+# 2) Installed wheel: both headers (rebel/include) and librbln.so (tvm/) ship
+#    inside the rebel-compiler wheel in site-packages, from the same build.
 else()
-  if(NOT EXISTS "${REBEL_INCLUDE_DIR_VENDORED}/rebel/runtime/api/rbln_runtime_api.h"
-     OR NOT EXISTS "${REBEL_INCLUDE_DIR_VENDORED}/rebel/runtime/api/rbln_kineto_api.h")
-    message(FATAL_ERROR
-      "FindRebel: Vendored Rebel headers not found at ${REBEL_INCLUDE_DIR_VENDORED}. "
-      "Ensure the API headers are present under "
-      "third_party/rebel_compiler/include/rebel/runtime/.")
-  endif()
-  set(rebel_include_dir "${REBEL_INCLUDE_DIR_VENDORED}")
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
   execute_process(
     COMMAND ${Python3_EXECUTABLE} -c "import sysconfig; print(sysconfig.get_paths()['purelib'])"
     OUTPUT_VARIABLE PYTHON_SITE_PACKAGES
     OUTPUT_STRIP_TRAILING_WHITESPACE
   )
+  set(rebel_include_dir "${PYTHON_SITE_PACKAGES}/rebel/include")
   set(rebel_library_path "${PYTHON_SITE_PACKAGES}/tvm")
-  message(STATUS "FindRebel: VENDORED (c10/rbln/rebel/include) -- include: ${rebel_include_dir}, library: ${rebel_library_path}")
+  if(NOT EXISTS "${rebel_include_dir}/rebel/runtime/api/rbln_runtime_api.h"
+     OR NOT EXISTS "${rebel_include_dir}/rebel/runtime/api/rbln_kineto_api.h")
+    message(FATAL_ERROR
+      "FindRebel: Rebel runtime headers not found at ${rebel_include_dir}. "
+      "Install a rebel-compiler wheel that ships headers under rebel/include "
+      "(>=0.11.1.dev322), or set REBEL_HOME for an external Rebel tree.")
+  endif()
+  message(STATUS "FindRebel: WHEEL (site-packages) -- include: ${rebel_include_dir}, library: ${rebel_library_path}")
 endif()
 
 find_path(${PACKAGE_NAME}_INCLUDE_DIR
