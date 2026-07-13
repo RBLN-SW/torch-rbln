@@ -712,9 +712,9 @@ def scaled_dot_product_fused_attention_overrideable_rbln(
     """
     validate_sdpa_input(query, key, value, attn_bias, dropout_p, is_causal, scale)
 
-    # Whether a real backward will run. Computed on the ORIGINAL inputs (the later
-    # .contiguous()/mask conversions can build tensors that drop requires_grad).
-    # Gates the attn-weights caching below (only cache when a backward will consume it).
+    # Whether a backward may run (grad enabled and an input needs grad — not a guarantee it
+    # runs). Computed on the ORIGINAL inputs (the later .contiguous()/mask conversions can
+    # build tensors that drop requires_grad). Gates the attn-weights caching below.
     needs_backward = torch.is_grad_enabled() and (
         query.requires_grad
         or key.requires_grad
