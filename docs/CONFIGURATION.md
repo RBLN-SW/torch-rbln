@@ -45,7 +45,7 @@ Skip NaN/Inf validation checks to reduce runtime overhead in production:
 export TORCH_RBLN_DEPLOY=ON
 ```
 
-**Runtime-live contract.** `TORCH_RBLN_DEPLOY` and the per-check `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` (below) are read live on every op dispatch, so toggling them takes effect immediately without restarting the process. The per-dispatch `getenv` is negligible against op-dispatch cost (a `getenv` is tens of nanoseconds; an op dispatch is microseconds or more), so keeping the read live is intentional and has no measurable steady-state cost.
+**Runtime behavior.** `TORCH_RBLN_DEPLOY` and `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` are read on each operator dispatch, so changes affect subsequent dispatches without restarting the process. Modify these variables only when no RBLN operator dispatch is in progress; concurrent environment mutation and dispatch are unsupported.
 
 ## Fallback Control
 
@@ -87,7 +87,7 @@ unset TORCH_RBLN_DISABLE_FALLBACK
 
 > **⚠️ WARNING: This is a development-only option. Do NOT use in production or deploy environments. Disabling CPU fallback cases can cause silent numerical corruption, hangs, or crashes on unsupported inputs.**
 
-Selectively disables individual CPU fallback checks in eager-mode operator dispatch. When set, the specified checks are skipped and the operation is sent directly to the RBLN device even if it would normally fall back to CPU. A runtime warning is emitted every time this variable is detected.
+Selectively disables individual CPU fallback checks in eager-mode operator dispatch. When set, the specified checks are skipped and the operation is sent directly to the RBLN device even if it would normally fall back to CPU. A runtime warning is emitted once per process the first time this variable is observed.
 
 ```bash
 # Disable only the NaN/Inf check (e.g. to benchmark without the scan overhead)

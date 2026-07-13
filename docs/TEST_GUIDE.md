@@ -477,9 +477,10 @@ class TestMemoryStats(TestCase):
 > and if a Python `@lru_cache` gate must respond to per-test env, `cache_clear()` it in the
 > fixture's teardown.
 >
-> The same applies to any other process-global state a test mutates (selected device,
-> `torch.compile` patches): restore it, or rely on the autouse guards in `test/conftest.py`
-> (`restore_current_device`, `keep_torch_compile_patches`) that repair it after each test.
+> The same applies to any other process-global state a test mutates. Restore it in the
+> test's own teardown (e.g. `TestTorchCompileMonkeyPatch.tearDown` re-installs the original
+> `torch.compile` wrappers it patched), or — for the selected RBLN device — rely on the
+> autouse `restore_current_device` guard in `test/conftest.py` that repairs it after each test.
 
 ### Custom Kernel Test Template
 
