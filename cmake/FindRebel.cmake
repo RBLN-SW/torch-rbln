@@ -44,10 +44,12 @@ else()
   )
   set(rebel_include_dir "${PYTHON_SITE_PACKAGES}/rebel/include")
   set(rebel_library_path "${PYTHON_SITE_PACKAGES}/tvm")
-  # Check every header the extension includes directly, so a partially-packaged
-  # wheel is diagnosed here rather than as a compile error later.
+  # Check the full runtime header set the extension pulls in (directly or
+  # transitively), so a partially-packaged wheel is diagnosed here rather than
+  # as a compile error later.
   if(NOT EXISTS "${rebel_include_dir}/rebel/runtime/api/rbln_runtime_api.h"
      OR NOT EXISTS "${rebel_include_dir}/rebel/runtime/api/rbln_kineto_api.h"
+     OR NOT EXISTS "${rebel_include_dir}/rebel/runtime/api/rbln_retcode.h"
      OR NOT EXISTS "${rebel_include_dir}/rebel/runtime/memory_stats.h"
      OR NOT EXISTS "${rebel_include_dir}/rebel/runtime/distributed/rbln_rccl.h")
     message(FATAL_ERROR
@@ -59,12 +61,8 @@ else()
   message(STATUS "FindRebel: WHEEL (site-packages) -- include: ${rebel_include_dir}, library: ${rebel_library_path}")
 endif()
 
-# Re-resolve from scratch every configure. find_path/find_library skip the
-# search when their cache entry already holds a non-NOTFOUND value, so a build
-# tree first configured against the old vendored layout (or a different
-# REBEL_HOME/wheel mode) would keep a now-deleted path and pass configure while
-# failing at compile. Clearing the entries forces resolution against the paths
-# computed above.
+# find_path/find_library skip the search when their cache entry is already set,
+# so drop paths cached from an earlier vendored, wheel, or external config.
 unset(${PACKAGE_NAME}_INCLUDE_DIR CACHE)
 unset(${PACKAGE_NAME}_LIBRARY CACHE)
 
