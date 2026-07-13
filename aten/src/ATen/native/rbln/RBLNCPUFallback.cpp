@@ -522,11 +522,10 @@ void cpu_fallback_rbln(
         if (borrow_ids[i] != 0 && schema_info.is_pure_out[tensor_args_indices[i]]) {
           c10::rbln::return_borrowed(borrow_ids[i], /*updated=*/false);
           borrow_ids[i] = 0;
-          // Zero-sized: the retry grow-resizes from an empty tensor, so it emits no
-          // additional "output was resized" warning beyond whatever the first attempt
-          // produced. (That warning is TORCH_WARN_ONCE, so the first attempt itself may
-          // emit 0 if it already fired earlier in the process — the point is the retry
-          // adds none.)
+          // Zero-sized: the retry grow-resizes from an empty (numel==0) tensor, and the
+          // "output was resized" warning only fires when resizing a NON-empty output, so
+          // the retry emits no additional warning. The first attempt already emitted the
+          // single warning (the resize check runs before the "not resizable" throw).
           cpu_tensors[i] = at::empty({0}, tensor_args[i].options().device(at::kCPU));
         }
       }
