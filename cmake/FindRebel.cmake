@@ -1,7 +1,7 @@
 # - Try to find Rebel
 # Once done, this will define
 #   REBEL_FOUND         - True if Rebel headers and librbln.so are found
-#   REBEL_INCLUDE_DIRS  - Include directories for Rebel (vendored or external)
+#   REBEL_INCLUDE_DIRS  - Include directories for Rebel (wheel or external)
 #   REBEL_LIBRARIES     - Libraries to link with Rebel (librbln.so)
 #
 # Both headers and librbln.so are required at build time so that C code
@@ -27,7 +27,7 @@ if(_REBEL_USE_EXTERNAL OR _REBEL_HOME)
   if(NOT _REBEL_USE_EXTERNAL OR NOT _REBEL_HOME)
     message(FATAL_ERROR
       "FindRebel: RBLN_USE_EXTERNAL_REBEL_COMPILER and REBEL_HOME must be set together. "
-      "Either set both (for external rebel) or neither (for vendored). "
+      "Either set both (for an external rebel tree) or neither (for the installed wheel). "
       "Current: RBLN_USE_EXTERNAL_REBEL_COMPILER=${_REBEL_USE_EXTERNAL}, REBEL_HOME=${_REBEL_HOME}")
   endif()
   set(rebel_include_dir "${_REBEL_HOME}/rebel/include")
@@ -44,15 +44,29 @@ else()
   )
   set(rebel_include_dir "${PYTHON_SITE_PACKAGES}/rebel/include")
   set(rebel_library_path "${PYTHON_SITE_PACKAGES}/tvm")
+  # Check every header the extension includes directly, so a partially-packaged
+  # wheel is diagnosed here rather than as a compile error later.
   if(NOT EXISTS "${rebel_include_dir}/rebel/runtime/api/rbln_runtime_api.h"
-     OR NOT EXISTS "${rebel_include_dir}/rebel/runtime/api/rbln_kineto_api.h")
+     OR NOT EXISTS "${rebel_include_dir}/rebel/runtime/api/rbln_kineto_api.h"
+     OR NOT EXISTS "${rebel_include_dir}/rebel/runtime/memory_stats.h"
+     OR NOT EXISTS "${rebel_include_dir}/rebel/runtime/distributed/rbln_rccl.h")
     message(FATAL_ERROR
-      "FindRebel: Rebel runtime headers not found at ${rebel_include_dir}. "
+      "FindRebel: Rebel runtime headers not found under ${rebel_include_dir}. "
       "Install a rebel-compiler wheel that ships headers under rebel/include "
-      "(>=0.11.1.dev322), or set REBEL_HOME for an external Rebel tree.")
+      "(>=0.11.1.dev322), or build against an external Rebel tree by setting "
+      "both RBLN_USE_EXTERNAL_REBEL_COMPILER and REBEL_HOME.")
   endif()
   message(STATUS "FindRebel: WHEEL (site-packages) -- include: ${rebel_include_dir}, library: ${rebel_library_path}")
 endif()
+
+# Re-resolve from scratch every configure. find_path/find_library skip the
+# search when their cache entry already holds a non-NOTFOUND value, so a build
+# tree first configured against the old vendored layout (or a different
+# REBEL_HOME/wheel mode) would keep a now-deleted path and pass configure while
+# failing at compile. Clearing the entries forces resolution against the paths
+# computed above.
+unset(${PACKAGE_NAME}_INCLUDE_DIR CACHE)
+unset(${PACKAGE_NAME}_LIBRARY CACHE)
 
 find_path(${PACKAGE_NAME}_INCLUDE_DIR
   NAMES rebel/runtime/api/rbln_runtime_api.h
