@@ -72,7 +72,10 @@ at::Tensor& zero_rbln_(at::Tensor& self);
 
 // Native impl of aten::fill_.Scalar — borrow host pointer + typed std::fill_n
 // + return_borrowed(updated=true). Bypasses cpu_fallback_rbln's redispatchBoxed
-// + TensorIterator path. Contiguous self only (asserts otherwise).
+// + TensorIterator path. The fast path is taken for a contiguous self with a
+// supported dtype; broadcast-overlap (stride-0) views collapse to a non-overlapping
+// view, and non-contiguous or unsupported-dtype self routes through the CPU
+// fallback (no hard assert).
 at::Tensor& fill_scalar_rbln_(at::Tensor& self, const at::Scalar& value);
 
 // Native impl of aten::arange.start_out — acquire_host_ptr_for_overwrite
