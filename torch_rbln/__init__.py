@@ -195,6 +195,17 @@ def _create_process_group_rbln(dist_backend_opts, pg_options):
 def _initialize_kineto_profiler() -> None:
     """Register the rbln torch.profiler (kineto) bridge."""
     try:
+        from rebel.device_info import get_npu_name
+
+        npu = (get_npu_name(0) or "").upper()
+    except Exception:
+        npu = ""
+
+    if npu.startswith("RBLN-CA"):  # ATOM
+        warnings.warn("rbln torch.profiler activities are not supported on ATOM and will be skipped", stacklevel=2)
+        return
+
+    try:
         import torch_rbln._C
 
         torch_rbln._C._register_kineto_profiler()
