@@ -331,10 +331,17 @@ struct BorrowedHostPtr {
  * authoritative; allocates host backing if none exists. After this call the
  * host buffer is read-ready.
  *
+ * `rbln_data` may be an interior vaddr — a view into the middle of an allocation
+ * (e.g. a tensor with a non-zero storage offset). The borrow is offset-correct:
+ * the runtime resolves it against the enclosing allocation and returns
+ * `host_ptr = allocation_base + (rbln_data - allocation_base)`. The range
+ * `[rbln_data, rbln_data + nbytes)` must fit within that allocation, else the
+ * borrow fails.
+ *
  * The borrow MUST be released via `return_borrowed(result.borrow_id, ...)`.
  *
- * @param rbln_data A pointer to rbln-device memory (typically tensor data_ptr).
- *        Must not be nullptr.
+ * @param rbln_data A pointer to rbln-device memory (typically tensor data_ptr;
+ *        an interior/offset vaddr is fine). Must not be nullptr.
  * @param nbytes Number of bytes to borrow. Must be positive — callers with a
  *        legitimate zero-byte case must short-circuit before invoking.
  * @return Host pointer + non-zero borrow id; throws c10::Error via RBLN_CHECK
