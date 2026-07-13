@@ -26,13 +26,26 @@ def _cache_attn_weights(output: torch.Tensor, attn_weights: torch.Tensor) -> Non
     The forward only caches when a backward will consume it (see ``needs_backward``), and the
     backward pops the entry — so inference never accumulates entries. A rare grad-enabled
     forward whose backward never runs (e.g. ``eval()`` does not turn autograd off) leaves one
-    entry, but it is bounded by output-address reuse: the next forward/backward that reuses the
-    same data_ptr overwrites or pops it. The entry's lifetime is deliberately NOT tied to the
+    entry, but it is bounded by output-address reuse: any later forward that reuses the same
+    data_ptr either overwrites it (a caching forward) or drops it (a non-caching forward, via
+    ``_discard_cached_attn_weights``), so a subsequent backward can never pop stale weights
+    left by a different forward. The entry's lifetime is deliberately NOT tied to the
     ``output`` wrapper (e.g. via ``weakref.finalize``): the wrapper can be collected while the
     autograd graph still holds the tensor for a pending backward, so an output-wrapper evictor
     would drop a still-needed entry and downgrade backward to a CPU recompute."""
     key = output.data_ptr()
     _sdpa_attn_weights_cache[key] = attn_weights
+
+
+def _discard_cached_attn_weights(output: torch.Tensor) -> None:
+    """Drop any cached entry keyed on this output's data_ptr.
+
+    A forward that does NOT cache (CPU fallback, or a fast-path inference forward) must still
+    clear a stale entry that an earlier grad forward left at this address when its output was
+    freed and the address reused. Otherwise this forward's backward would pop the earlier
+    forward's weights (data_ptr reuse) and either raise a shape error or, worse, compute a
+    silently wrong gradient from the wrong attn_weights."""
+    _sdpa_attn_weights_cache.pop(output.data_ptr(), None)
 
 
 def _get_cached_attn_weights(output: torch.Tensor) -> Optional[torch.Tensor]:
@@ -727,6 +740,7 @@ def scaled_dot_product_fused_attention_overrideable_rbln(
     if not can_use:
         rbln_log_cpu_fallback(f"sdpa_overrideable ({reason})")
         output = _sdpa_cpu_fallback(query, key, value, attn_bias, dropout_p, is_causal, scale, enable_gqa=False)
+        attn_weights = None
     else:
         if not query.is_contiguous():
             query = query.contiguous()
@@ -742,10 +756,16 @@ def scaled_dot_product_fused_attention_overrideable_rbln(
 
         attn_weights = _sdpa_compute_attn_weights(query, key, attn_bias, is_causal, computed_scale)
         output = _sdpa_compute_output(attn_weights, value, dropout_p)
-        # Only cache for a real backward — inference never pops the cache, so
-        # unconditional caching leaks a device tensor per call.
-        if needs_backward:
-            _cache_attn_weights(output, attn_weights)
+
+    # Cache keyed on output.data_ptr(): only when a real backward will pop it (inference never
+    # pops, so unconditional caching would leak a device tensor per call). A forward that does
+    # NOT cache — CPU fallback, or a fast-path inference forward — must DROP any entry a prior
+    # grad forward left at this now-reused address; otherwise this op's backward could pop the
+    # other forward's weights and raise a shape error or compute a silently wrong gradient.
+    if needs_backward and attn_weights is not None:
+        _cache_attn_weights(output, attn_weights)
+    else:
+        _discard_cached_attn_weights(output)
 
     # Auxiliary tensors for interface (shape depends on input dims)
     if query.dim() == 4:

@@ -329,6 +329,28 @@ class TestSDPADecodeOverflow(TestCase):
         self.assertEqual(len(sdpa_mod._sdpa_attn_weights_cache), 0)  # backward popped it
         self.assertTrue(torch.isfinite(q.grad).all().item())
 
+    def test_noncaching_forward_discards_stale_entry_at_reused_address(self):
+        """A grad forward whose backward never ran leaves an entry keyed on its output's
+        address. If a later CPU-fallback or inference forward reuses that address it does not
+        cache, so it must DROP the stale entry — otherwise its own backward would pop the
+        earlier forward's weights (data_ptr reuse) and raise a shape error or compute a
+        silently wrong gradient. Exercised deterministically at the cache layer (real address
+        reuse is nondeterministic)."""
+        from torch_rbln._internal.kernels import sdpa as sdpa_mod
+
+        sdpa_mod._clear_attn_weights_cache()
+        # Abandoned grad forward A cached its weights at address P; no backward ran.
+        out_A = torch.zeros(4, 4)
+        weights_A = torch.ones(2, 2)  # deliberately a different shape than a later op would use
+        sdpa_mod._cache_attn_weights(out_A, weights_A)
+        self.assertIs(sdpa_mod._sdpa_attn_weights_cache.get(out_A.data_ptr()), weights_A)
+
+        # A later non-caching forward reuses address P for its output (same object stands in
+        # for allocator reuse). It must drop the stale entry so its backward misses -> recompute.
+        out_B = out_A
+        sdpa_mod._discard_cached_attn_weights(out_B)
+        self.assertIsNone(sdpa_mod._get_cached_attn_weights(out_B))
+
     def test_empty_cache_preserves_pending_backward_cache(self):
         """empty_cache() must NOT drop a live SDPA entry that a pending backward still needs
         (else forward -> empty_cache() -> backward silently downgrades to a CPU recompute)."""
