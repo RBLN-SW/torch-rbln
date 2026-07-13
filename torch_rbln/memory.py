@@ -98,8 +98,9 @@ def empty_cache(device: Optional[Union[int, str, torch.device]] = None) -> None:
     # entry is still live and needed, so a global flush would silently downgrade a
     # forward -> empty_cache() -> backward sequence to a CPU recompute. Inference never
     # caches (the forward only caches when a backward will run), so there is no inference
-    # leak to reclaim; a rare grad-forward-with-no-backward entry is bounded by output-address
-    # reuse and is popped on the next backward that reuses the address.
+    # leak to reclaim; grad-forward-with-no-backward entries linger only until their output
+    # address is reused (then overwritten/dropped by the next forward there, or popped by a
+    # backward that reuses it) -- see the cache-lifetime note in kernels/sdpa.py.
     # No NPU: host caches above still dropped, but skip the device-side flush.
     if _no_rbln_device():
         return

@@ -24,27 +24,23 @@ def _cache_attn_weights(output: torch.Tensor, attn_weights: torch.Tensor) -> Non
     """Cache attention weights under the output tensor's data_ptr for the matching backward.
 
     The forward only caches when a backward will consume it (see ``needs_backward``), and the
-    backward pops the entry — so inference never accumulates entries. A rare grad-enabled
-    forward whose backward never runs (e.g. ``eval()`` does not turn autograd off) leaves one
-    entry, but it is bounded by output-address reuse: any later forward that reuses the same
-    data_ptr either overwrites it (a caching forward) or drops it (a non-caching forward, via
-    ``_discard_cached_attn_weights``), so a subsequent backward can never pop stale weights
-    left by a different forward. The entry's lifetime is deliberately NOT tied to the
-    ``output`` wrapper (e.g. via ``weakref.finalize``): the wrapper can be collected while the
-    autograd graph still holds the tensor for a pending backward, so an output-wrapper evictor
-    would drop a still-needed entry and downgrade backward to a CPU recompute."""
+    backward pops the entry — so inference never accumulates entries. A grad-enabled forward
+    whose backward never runs (``eval()`` does not turn autograd off) leaves its entry behind;
+    repeated such forwards at distinct addresses can leave several. Each lingers only until its
+    data_ptr is reused, at which point the next forward either overwrites it (a caching forward)
+    or drops it (a non-caching forward, via ``_discard_cached_attn_weights``) — so a backward
+    can never pop stale weights left by a *different* forward. The lifetime is deliberately NOT
+    tied to the ``output`` wrapper (e.g. ``weakref.finalize``): the wrapper can be collected
+    while the autograd graph still holds the tensor for a pending backward, so an output-wrapper
+    evictor would drop a still-needed entry and downgrade backward to a CPU recompute."""
     key = output.data_ptr()
     _sdpa_attn_weights_cache[key] = attn_weights
 
 
 def _discard_cached_attn_weights(output: torch.Tensor) -> None:
-    """Drop any cached entry keyed on this output's data_ptr.
-
-    A forward that does NOT cache (CPU fallback, or a fast-path inference forward) must still
-    clear a stale entry that an earlier grad forward left at this address when its output was
-    freed and the address reused. Otherwise this forward's backward would pop the earlier
-    forward's weights (data_ptr reuse) and either raise a shape error or, worse, compute a
-    silently wrong gradient from the wrong attn_weights."""
+    """Drop any entry at this output's data_ptr. A non-caching forward (CPU fallback / fast-path
+    inference) calls this so a stale entry at a reused address can't be popped by its backward —
+    rationale in ``_cache_attn_weights``."""
     _sdpa_attn_weights_cache.pop(output.data_ptr(), None)
 
 
@@ -726,18 +722,16 @@ def scaled_dot_product_fused_attention_overrideable_rbln(
         or (attn_bias is not None and attn_bias.requires_grad)
     )
 
-    # Dropout + autograd is rejected, not silently approximated. The forward applies dropout to
-    # attn_weights, but the backward recomputes softmax from the pre-dropout weights and does not
-    # reproduce the forward dropout mask / 1/(1-p) scaling (philox_seed/offset are not threaded
-    # into the backward), so the gradient would be of a different function. Fail loudly instead.
-    # Covers attn_bias-only grad too (needs_backward includes it). The upstream SDPA OpInfo
-    # dropout sample is xfail'd for this in test/ops (see the sdpa dropout+grad skip).
+    # Dropout + autograd is rejected, not silently approximated: the backward recomputes softmax
+    # from the pre-dropout weights and can't reproduce the forward dropout mask / 1/(1-p) scaling
+    # (philox_seed/offset aren't threaded through), so the gradient would be of a different
+    # function. needs_backward includes attn_bias, so attn_bias-only grad is covered too. (The
+    # dropout_p>0 OpInfo samples are dropped for SDPA in test/filters.py so test_ops stays green.)
     if dropout_p > 0.0 and needs_backward:
         raise NotImplementedError(
             "RBLN SDPA does not support dropout_p > 0 with autograd (the backward cannot "
             "reproduce the forward dropout mask, so the gradient would be wrong). Use "
-            "dropout_p=0.0, run under no_grad()/eval(), or apply dropout outside "
-            "scaled_dot_product_attention."
+            "dropout_p=0.0, or run inference under torch.no_grad() / torch.inference_mode()."
         )
 
     # Check RBLN capability
@@ -762,11 +756,9 @@ def scaled_dot_product_fused_attention_overrideable_rbln(
         attn_weights = _sdpa_compute_attn_weights(query, key, attn_bias, is_causal, computed_scale)
         output = _sdpa_compute_output(attn_weights, value, dropout_p)
 
-    # Cache keyed on output.data_ptr(): only when a real backward will pop it (inference never
-    # pops, so unconditional caching would leak a device tensor per call). A forward that does
-    # NOT cache — CPU fallback, or a fast-path inference forward — must DROP any entry a prior
-    # grad forward left at this now-reused address; otherwise this op's backward could pop the
-    # other forward's weights and raise a shape error or compute a silently wrong gradient.
+    # Cache only when a backward will pop it (inference never pops -> unconditional caching would
+    # leak a device tensor per call); a non-caching forward instead drops any stale entry at this
+    # (possibly reused) address. Rationale in _cache_attn_weights / _discard_cached_attn_weights.
     if needs_backward and attn_weights is not None:
         _cache_attn_weights(output, attn_weights)
     else:

@@ -6,6 +6,7 @@ from unittest import SkipTest
 import torch
 from tools.codegen.parser import YamlParser
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
+from torch.testing._internal.common_methods_invocations import op_db
 from torchgen.model import dispatch_keys
 
 from test.utils import SUPPORTED_DTYPES
@@ -44,18 +45,28 @@ _ops_without_forward_ad_support = {
     "nn.functional.linear",  # torch.compile path loses forward AD context
 }
 
-# Per-op tests that can't run because the RBLN implementation rejects a specific OpInfo
-# sample they iterate. SDPA raises NotImplementedError on the dropout+grad sample (index 10):
-# the backward can't reproduce the forward dropout mask, so dropout+autograd is rejected
-# rather than returning a silently wrong gradient (see sdpa.py). ``test_dtypes`` is already
-# covered by the global ``_skipped_tests`` entry above for the same sample.
-_ops_unsupported_sample_tests = {
-    "nn.functional.scaled_dot_product_attention": {
-        "test_backward",
-        "test_variant_consistency_eager",
-        "test_noncontiguous_samples",
-    },
-}
+
+# RBLN SDPA rejects dropout + autograd (the backward can't reproduce the forward dropout mask,
+# so it raises rather than return a silently wrong gradient — see sdpa.py). The upstream SDPA
+# OpInfo mixes dropout_p>0 samples in with the rest, so those samples raise and would error
+# backward/variant/noncontiguous tests. Drop ONLY the dropout_p>0 samples from the SDPA OpInfo
+# so the dropout_p==0 / supported-dtype coverage of those tests is kept (a whole-method skip
+# would lose it). ``test_dtypes`` stays globally skipped via ``_skipped_tests`` above.
+def _drop_dropout_grad_samples(op):
+    _orig_sample_inputs = op.sample_inputs_func
+
+    @wraps(_orig_sample_inputs)
+    def _without_dropout(*args, **kwargs):
+        for sample in _orig_sample_inputs(*args, **kwargs):
+            if not sample.kwargs.get("dropout_p", 0.0):
+                yield sample
+
+    op.sample_inputs_func = _without_dropout
+
+
+for _op in op_db:
+    if _op.name == "nn.functional.scaled_dot_product_attention":
+        _drop_dropout_grad_samples(_op)
 
 _ops_with_related_runtime_tests = [
     "clone",
@@ -223,10 +234,6 @@ def _skip_if_not_implemented(fn):
         # Skip forward AD tests for operators without support
         if fn.__name__ == "test_forward_ad" and op_name in _ops_without_forward_ad_support:
             raise SkipTest(f"Skipping {fn.__name__} for {op_name}: forward AD not supported on RBLN")
-
-        # Skip tests that iterate an OpInfo sample the RBLN op rejects (e.g. SDPA dropout+grad).
-        if fn.__name__ in _ops_unsupported_sample_tests.get(op_name, ()):
-            raise SkipTest(f"Skipping {fn.__name__} for {op_name}: RBLN rejects a required OpInfo sample")
 
         for name, value in bound_args.arguments.items():
             # `op` restriction
