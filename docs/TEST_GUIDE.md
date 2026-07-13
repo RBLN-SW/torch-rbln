@@ -180,11 +180,12 @@ python -m pytest test/distributed/ -m "test_set_perf"
 python -m pytest test/models/test_transformers.py -k "batch_size_2"
 python -m pytest test/ -m "test_set_ci" -k "not float32"
 
-# Parallel execution
-python -m pytest test/rbln/ --numprocesses=16
+# Parallel execution. single_worker tests must run in a separate serial pass
+# (`run_tests.py` does this split for you), so exclude them from the parallel run.
+python -m pytest test/rbln/ -m "not single_worker" --numprocesses=16
 
 # Serial execution (required for some tests)
-python -m pytest test/internal/test_memory_stats.py --numprocesses=1
+python -m pytest test/internal/test_memory_stats.py
 
 # Collect tests without running (verify selection)
 python -m pytest test/rbln/ --co -q
@@ -269,6 +270,8 @@ These fixtures are defined in `test/conftest.py` and apply automatically to ever
 | `set_seeds`                      | function | **Yes** | Sets `torch.manual_seed(0)`, `np.random.seed(0)`, `random.seed(0)` for deterministic reproducibility          |
 | `reset_dynamo`                   | function | **Yes** | Calls `torch._dynamo.reset()` before each test. Skipped if test is marked with `@pytest.mark.no_dynamo_reset` |
 | `disable_compile_error_fallback` | function | **Yes** | Appends `compile_error` to `TORCH_RBLN_DISABLE_FALLBACK` env var                                              |
+| `reset_caching_allocator`        | function | **Yes** | Drains in-flight device work then releases the RBLN caching-allocator blocks in teardown; fails loud and skips the flush if the drain faults |
+| `restore_current_device`         | function | **Yes** | Restores the selected RBLN device and lazy-init flag after each test so a `set_device()` can't leak into later tests |
 | `enable_deploy_mode`             | function | No      | Sets `TORCH_RBLN_DEPLOY=ON`. Apply with `@pytest.mark.usefixtures("enable_deploy_mode")`                      |
 | `enable_eager_malloc`            | function | No      | Sets `TORCH_RBLN_EAGER_MALLOC=1`. Apply with `@pytest.mark.usefixtures("enable_eager_malloc")`                |
 
@@ -463,6 +466,23 @@ class TestMemoryStats(TestCase):
         del x
         # Memory may not be freed immediately due to caching allocator
 ```
+
+> **Rule — never process-cache an env flag that tests toggle per-test.** xdist workers
+> are long-lived processes that run many tests in sequence. A function-scoped fixture
+> (`enable_deploy_mode`, `enable_eager_malloc`, `monkeypatch.setenv`, `patch.dict`) sets an
+> env var for one test, but if C++/Python reads it *once* and caches it in a
+> `static`/`@lru_cache` for the process lifetime, the **first** value latches into the whole
+> worker and leaks into every later test on it — an intermittent, order-dependent failure
+> that only shows up when xdist happens to schedule the toggling test first (e.g. the
+> `test_runtime_hidden_d2h` / eager-malloc flake). Read such flags **live** (`std::getenv`
+> per call — see `is_deploy_mode()` / `is_nan_inf_check_disabled()` in `DispatchShim.cpp`),
+> and if a Python `@lru_cache` gate must respond to per-test env, `cache_clear()` it in the
+> fixture's teardown.
+>
+> The same applies to any other process-global state a test mutates. Restore it in the
+> test's own teardown (e.g. `TestTorchCompileMonkeyPatch.tearDown` re-installs the original
+> `torch.compile` wrappers it patched), or — for the selected RBLN device — rely on the
+> autouse `restore_current_device` guard in `test/conftest.py` that repairs it after each test.
 
 ### Custom Kernel Test Template
 

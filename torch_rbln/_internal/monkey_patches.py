@@ -116,7 +116,6 @@ def patch_torch_compile() -> None:
 
             return rbln_compile_decorator
 
-        # Apply patch
         torch.compile = wrapper
         _torch_compile_patched = True
 
