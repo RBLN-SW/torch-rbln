@@ -309,6 +309,12 @@ void register_internal_api(py::module_& module) {
       "_set_file_offloading_enabled",
       &c10::rbln::set_file_offloading_enabled,
       "Internal: enable or disable process-wide RBLN vmemory file offloading.");
+
+  // torch.profiler (kineto) integration
+  module.def(
+      "_register_kineto_profiler",
+      &rbln::profiler::kineto::register_rbln_kineto_profiler,
+      "Internal: register the rbln torch.profiler (kineto) bridge");
 }
 
 py::tuple supported_dtypes_to_tuple(c10::ArrayRef<c10::ScalarType> scalar_types) {
@@ -413,7 +419,6 @@ extern "C" PyObject* initModule() {
   register_public_device_api(python_module);
   register_internal_api(python_module);
   register_supported_dtypes_api(python_module);
-  rbln::profiler::kineto::register_rbln_kineto_profiler();
 
   c10::rbln::register_rbln_device_mapping_initialized_callback([]() {
     py::gil_scoped_acquire gil;
