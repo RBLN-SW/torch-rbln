@@ -47,7 +47,7 @@ jobs:
       GIT_CONFIG_VALUE_0: ${{ github.workspace }}
     timeout-minutes: 60
     container:
-      image: ${{ vars.TORCH_RBLN_IMAGE_BUILD_NAME }}:${{ vars.TORCH_RBLN_IMAGE_BUILD_TAG }}-py${{ inputs.python_version }}  # zizmor: ignore[unpinned-images] internal mutable tag, no digest to pin
+      image: ghcr.io/rebellions-sw/rbln-build:0.11.0-ubi9-py${{ inputs.python_version }}  # zizmor: ignore[unpinned-images]
       credentials:
         username: ${{ github.repository_owner }}
         password: ${{ secrets.GIT_PAT }}
@@ -145,7 +145,7 @@ jobs:
           INTERNAL_INDEX_URL: ${{ secrets.INTERNAL_INDEX_URL }}
           UV_PUBLISH_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
           UV_PUBLISH_PASSWORD: ${{ secrets.INTERNAL_INDEX_PASSWORD }}
-        run: |  # zizmor: ignore[use-trusted-publishing] internal index uses username/password auth, not OIDC
+        run: |  # zizmor: ignore[use-trusted-publishing]
           set -euo pipefail
 
           # curl authenticates its index query via ~/.netrc.

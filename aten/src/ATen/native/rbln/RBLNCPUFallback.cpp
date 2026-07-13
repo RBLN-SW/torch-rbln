@@ -204,12 +204,12 @@ at::Tensor borrow_rbln_as_cpu(const at::Tensor& t, uint64_t& borrow_id_out) {
     return {};
   }
   if (t.storage_offset() != 0) {
-    // Contiguous offset view (e.g. `x[1:]`): `data_ptr()` points into the
-    // middle of the allocation, but `rbln_v_borrow_host_ptr` resolves the
-    // borrow against the backing allocation, not an interior vaddr — so the
-    // returned host view would not be offset-correct. Route through the copy
-    // path until interior-offset borrows are supported. (offset==0 contig is
-    // the only safe borrow shape.)
+    // Contiguous offset view (e.g. `x[1:]`): interior borrows ARE offset-correct.
+    // The runtime's BorrowVirtualAtHost bounds-checks [vaddr, vaddr+size) against
+    // the enclosing allocation and returns host_ptr = base + (vaddr - base); the
+    // native fill_/zero_ path relies on exactly this. We still copy here in the
+    // generic boxed fallback — a deliberate conservative scope, not a correctness
+    // limit — to avoid re-validating interior-offset out= writeback per op.
     return {};
   }
 
@@ -387,8 +387,9 @@ void cpu_fallback_rbln(
       // the kernel writes straight into vmem (no writeback memcpy); Step 3 issues
       // release_borrowed(updated=true). Guards: contiguous + offset 0 + nonzero
       // bytes + RBLN device — from_blob's fixed-size mapping can't resize_(), and
-      // offset 0 matches borrow_rbln_as_cpu (interior vaddrs aren't offset-resolved
-      // by the runtime borrow). Anything else falls back to fresh empty.
+      // offset 0 keeps this in step with borrow_rbln_as_cpu's conservative scope
+      // (interior borrows are themselves offset-correct). Anything else falls back
+      // to fresh empty.
       auto& rbln_out = tensor_args[i];
       const uint64_t nbytes = rbln_out.nbytes();
       // try_acquire (not acquire): the overwrite borrow can be rejected for the

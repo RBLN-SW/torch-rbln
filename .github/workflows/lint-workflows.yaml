@@ -28,7 +28,7 @@ jobs:
       GIT_CONFIG_VALUE_0: ${{ github.workspace }}
     timeout-minutes: 15
     container:
-      image: ${{ vars.TORCH_RBLN_IMAGE_NAME }}:${{ vars.TORCH_RBLN_IMAGE_TAG }}-py3.12
+      image: ghcr.io/rebellions-sw/rbln-test:0.11.0-ubuntu22.04-py3.12
       credentials:
         username: ${{ github.repository_owner }}
         password: ${{ secrets.GIT_PAT }}

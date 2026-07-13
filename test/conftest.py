@@ -1,4 +1,5 @@
 import os
+import sys
 
 import pytest
 import torch
@@ -6,6 +7,19 @@ import torch
 import torch_rbln
 from test.utils import set_deterministic_seeds, xfail_rebel
 from torch_rbln._internal.log_utils import rbln_log_debug
+
+
+# Set (per worker process) when an RBLN device drain fails in reset_caching_allocator: the
+# device is faulted, so the rest of this worker's tests are skipped rather than run against it.
+_rbln_device_poisoned = False
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    """Skip (before any fixture) once the device faulted on this worker: a fixture setup would
+    torch._dynamo.reset() and free runtime buffers the faulted device may still be using."""
+    if _rbln_device_poisoned:
+        pytest.skip("RBLN device drain failed earlier on this worker; skipping to avoid the faulted device")
 
 
 # =============================================================================
@@ -36,17 +50,16 @@ def reset_dynamo(request):
 # RBLN caching-allocator reset fixture (autouse)
 # =============================================================================
 @pytest.fixture(scope="function", autouse=True)
-def reset_caching_allocator(request):
-    """Release the RBLN caching allocator's cached blocks before each test.
+def reset_caching_allocator():
+    """Drain this test's in-flight device work, then release the RBLN caching allocator's
+    cached blocks -- both in teardown.
 
-    Without this, freed small blocks from prior tests accumulate in the
-    caching allocator and fragment the pool, so later tests can fail to
-    allocate large contiguous blocks. Mirrors the TorchDynamo reset above;
-    opt out per-test with the ``no_caching_allocator_reset`` marker.
-    """
-    if request.node.get_closest_marker("no_caching_allocator_reset"):
-        rbln_log_debug("Skipping RBLN caching allocator reset")
-        return
+    Draining (synchronize) in this test's teardown attributes an async error to the test
+    that caused it, instead of misreporting it against an unrelated later test. Releasing
+    cached blocks then keeps the pool unfragmented for the next test. This always runs (no
+    opt-out marker): skipping it would leave a test's blocks/in-flight work for the next,
+    unrelated test to inherit -- the cross-test leak this fixture exists to prevent."""
+    yield
 
     try:
         num_devices = torch_rbln.device.device_count()
@@ -54,13 +67,75 @@ def reset_caching_allocator(request):
         rbln_log_debug(f"device_count() failed; skipping caching allocator reset: {exc}")
         return
 
+    # Drain first so an async fault is attributed to this test, not a later one. Collect
+    # every device's failure so one device can't mask another's.
+    sync_errors = []
+    for idx in range(num_devices):
+        try:
+            torch.rbln.synchronize(idx)
+        except Exception as exc:  # noqa: BLE001 - aggregated and re-raised below
+            sync_errors.append(f"synchronize(rbln:{idx}): {exc!r}")
+
+    # Drain failed: the device is faulted and may still have in-flight DMA, so don't free its
+    # blocks/WarmCache (re-opens the async-buffer race). Poison the worker so its remaining
+    # tests skip before any fixture runs -- else the next reset_dynamo would flush the WarmCache
+    # and free those buffers anyway (see pytest_runtest_setup) -- then surface the error.
+    if sync_errors:
+        global _rbln_device_poisoned
+        _rbln_device_poisoned = True
+        raise RuntimeError("RBLN device drain failed:\n  " + "\n  ".join(sync_errors))
+
+    # Clean drain. Drop the SDPA attn-weights cache before flushing -- production empty_cache()
+    # keeps it (pending backward), but there is none across a test boundary; see memory.py. Lazy
+    # import avoids a load-time cycle.
+    from torch_rbln._internal.kernels.sdpa import _clear_attn_weights_cache
+
+    _clear_attn_weights_cache()
+
+    # Release cached blocks so the next test starts unfragmented. Aggregate flush failures too.
+    flush_errors = []
     for idx in range(num_devices):
         device = torch.device("rbln", idx)
         rbln_log_debug(f"Releasing RBLN caching allocator blocks on {device}")
         try:
             torch_rbln.memory.empty_cache(device)
-        except Exception as exc:
-            rbln_log_debug(f"empty_cache({device}) failed: {exc}")
+        except Exception as exc:  # noqa: BLE001 - aggregated and re-raised below
+            flush_errors.append(f"empty_cache(rbln:{idx}): {exc!r}")
+    if flush_errors:
+        raise RuntimeError("RBLN caching-allocator flush failed:\n  " + "\n  ".join(flush_errors))
+
+
+# =============================================================================
+# Global-state leak guards (autouse): keep one test's process-scoped mutations
+# from leaking into later tests on the same xdist worker.
+# =============================================================================
+@pytest.fixture(scope="function", autouse=True)
+def restore_current_device():
+    """Restore the RBLN device selection and the lazy-init flag after each test, so a test
+    that called set_device() cannot leak either into later tests on the same worker.
+
+    Only re-issue set_device when the index actually changed -- calling it unconditionally
+    would itself flip ``_initialized`` False->True and leak that. Restore index and flag in
+    lockstep; if the index restore fails, let it propagate (a half-restored device would
+    silently mislead later tests) rather than rolling back only the flag."""
+    # The `torch_rbln.device` package re-exports a `device` class that shadows the
+    # `device` submodule, so reach the module (which owns the `_initialized` global that
+    # set_device mutates) via sys.modules rather than a `from ... import device`.
+    _dev = sys.modules[torch_rbln.device.set_device.__module__]
+
+    # Fail loud on a snapshot failure too: device_count() returns 0 (never raises) when there
+    # is no device, so an exception here is a real fault (e.g. malformed RBLN_* config) that
+    # should surface, not be swallowed into a silent no-op teardown.
+    saved = _dev.current_device() if _dev.device_count() > 0 else None
+    saved_initialized = _dev._initialized
+    yield
+    if saved is None:
+        _dev._initialized = saved_initialized
+        return
+    # Restore the flag only after the index restore succeeds, so the two never diverge.
+    if _dev.current_device() != saved:
+        _dev.set_device(saved)
+    _dev._initialized = saved_initialized
 
 
 # =============================================================================

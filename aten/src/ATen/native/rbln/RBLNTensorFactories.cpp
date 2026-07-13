@@ -116,6 +116,16 @@ at::Tensor& zero_rbln_(at::Tensor& self) {
   if (self.numel() == 0) {
     return self;
   }
+  // `mark_zeros` takes only a vaddr (no offset/size) and flips
+  // EMPTY_INIT_WITH_ZERO on the whole enclosing allocation, so it is correct
+  // only when `self` spans that allocation. A partial/offset view (e.g.
+  // base[2:4]) would otherwise zero the entire tensor; route those through
+  // fill_(0), which writes just the view's byte range.
+  const bool covers_whole_allocation = self.is_contiguous() && self.storage_offset() == 0 &&
+      static_cast<size_t>(self.numel()) * self.element_size() == self.storage().nbytes();
+  if (!covers_whole_allocation) {
+    return fill_scalar_rbln_(self, 0);
+  }
   c10::rbln::mark_zeros(self.data_ptr());
   return self;
 }
@@ -173,12 +183,15 @@ bool fill_host_typed(void* host_ptr, int64_t numel, c10::ScalarType st, const at
 // auto-vectorises), then commits via return_borrowed(updated=true). The
 // device→host transfer is implicit in borrow_host_ptr (we use the read variant
 // rather than acquire_host_ptr_for_overwrite because partial-view writes need
-// the rest of the storage to remain intact).
+// the rest of the storage to remain intact). A contiguous offset view (e.g.
+// base[2:4], where zero_ routes here) borrows correctly: data_ptr() is an
+// interior vaddr and the runtime returns host_ptr = allocation base + offset
+// with the range bounds-checked, so we write only the view's bytes.
 //
-// Only contiguous tensors are handled. Non-contiguous fills (rare on the
-// Llama-1B vLLM hot path: 0 occurrences in measurement) trip the assert; the
-// proper extension is stride iteration in this function — we leave that as
-// a follow-up if/when the assert fires.
+// Only contiguous tensors take this fast path; a non-contiguous self (or an
+// unsupported dtype) routes through the standard CPU fallback instead (see the
+// is_contiguous() guard below). Stride iteration here is a possible future
+// extension.
 // Cheap dtype check that mirrors ``fill_host_typed``'s case set. Used so we
 // can decide whether the borrow-and-fill fast path is viable *before*
 // acquiring the host-pointer (which has its own cost). When this returns
@@ -221,6 +234,30 @@ at::Tensor& fill_scalar_rbln_(at::Tensor& self, const at::Scalar& value) {
   if (self.numel() == 0) {
     return self;
   }
+  // Broadcast/expand view: a size>1 dim with stride 0 aliases many logical elements onto a
+  // single storage element (internal overlap). A scalar fill is still well-defined — every
+  // aliased element takes the same value, matching CPU's overlap-tolerant fill_ — but the
+  // copy_-based fallback below would throw ("more than one element ... refers to a single
+  // memory location"). Collapse each stride-0 dim to size 1 so each distinct storage element
+  // is written exactly once, then fill that non-overlapping view.
+  bool has_broadcast_overlap = false;
+  for (int64_t d = 0; d < self.dim(); ++d) {
+    if (self.size(d) > 1 && self.stride(d) == 0) {
+      has_broadcast_overlap = true;
+      break;
+    }
+  }
+  if (has_broadcast_overlap) {
+    at::Tensor collapsed = self;
+    for (int64_t d = 0; d < self.dim(); ++d) {
+      if (self.size(d) > 1 && self.stride(d) == 0) {
+        collapsed = collapsed.narrow(d, 0, 1);
+      }
+    }
+    fill_scalar_rbln_(collapsed, value);
+    return self;
+  }
+
   // Fast path is restricted to contiguous tensors with a dtype the typed
   // ``std::fill_n`` cascade in ``fill_host_typed`` covers. Anything else
   // (non-contig views — strided OpInfo samples — and complex / quantized

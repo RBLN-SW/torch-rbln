@@ -10,7 +10,7 @@
 //
 // The env MUST be set before the DeviceMappingManager singleton initializes (it
 // reads the flags once at init). A file-scope static initializer sets them
-// before main(). RBLN_TARGET_SOC is set too: with no NPU to probe, dummy
+// before main(). RBLN_FORCE_NPU_NAME is set too: with no NPU to probe, dummy
 // registration resolves the target SoC from it.
 #include <c10/rbln/DeviceMappingManager.h>
 #include <c10/rbln/RBLNFunctions.h>
@@ -26,7 +26,7 @@ namespace {
 [[maybe_unused]] const int kSetDummyEnv = []() {
   setenv("RBLN_DUMMY_DEVICE", "1", /*overwrite=*/1);
   setenv("RBLN_DEVICE_MAP", "[0],[1]", /*overwrite=*/1);
-  setenv("RBLN_TARGET_SOC", "RBLN-CA25", /*overwrite=*/1);
+  setenv("RBLN_FORCE_NPU_NAME", "RBLN-CA25", /*overwrite=*/1);
   return 0;
 }();
 } // namespace

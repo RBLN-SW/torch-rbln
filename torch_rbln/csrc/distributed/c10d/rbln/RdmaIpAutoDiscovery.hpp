@@ -1,10 +1,9 @@
 // =============================================================================
-// TEMPORARY: auto-discover RBLN_RDMA_IP from /sys/class/infiniband RoCE v2 GIDs.
+// TEMPORARY: resolve RBLN_RDMA_IP from RBLN_RDMA_HCA when set; otherwise no-op.
 //
-// This is a workaround for the period before librbln-ccl performs the
-// discovery internally. Once the native runtime can resolve the local RoCE
-// IPv4 itself (mirroring NCCL's ncclIbGetGidIndex), this file pair must be
-// removed.
+// This is a workaround for the period before librbln-ccl resolves the RDMA
+// IP from RBLN_RDMA_HCA internally (ssw-common-umd PR #1930). Once the native
+// runtime performs that resolution itself, this file pair must be removed.
 //
 // Removal procedure (all steps in a single commit):
 //   1. Delete this file and RdmaIpAutoDiscovery.cpp.
@@ -26,14 +25,28 @@
 // every `rbln::MemoryInfo` / `rbln::DataType` reference inside c10d code.
 namespace torch_rbln::detail {
 
-// Auto-fill RBLN_RDMA_IP by probing /sys/class/infiniband for a RoCE v2
-// capable device whose port is ACTIVE and whose netdev has an IPv4 matching
-// the GID table. Idempotent (c10::once_flag inside). Respects pre-set
-// RBLN_RDMA_IP (does not overwrite). Set RBLN_DISABLE_AUTO_RDMA_IP=1 to skip.
-// Never throws: when no IP can be found, logs a warning (if RCCL_PORT_GEN
-// is set) or an info diagnostic (otherwise) and lets librbln-ccl decide
-// whether to fail at RCCL init -- recent librbln-ccl no longer requires
-// RBLN_RDMA_IP on single-node runs.
+// Resolve RBLN_RDMA_IP for the running process. Resolution priority:
+//
+//   1. RBLN_RDMA_IP already set -- no-op (caller-provided value wins).
+//   2. RBLN_RDMA_HCA set -- HCA device name as listed under
+//      /sys/class/infiniband (e.g. "rocep99s0", "mlx5_0"); an
+//      optional ":<port>" / "/<port>" suffix is parsed and ignored.
+//      The HCA's first bound netdev is resolved to an IPv4 and
+//      written to RBLN_RDMA_IP. Failure is logged but non-fatal.
+//      Mirrors ssw-common-umd PR #1930 in librbln-ccl.
+//   3. RBLN_RDMA_HCA unset -- do nothing; RBLN_RDMA_IP stays unset.
+//
+// No auto-discovery: picking an HCA across mixed-vendor hosts is the
+// caller's responsibility (e.g. RBLN_RDMA_HCA=rocep99s0 to pin a
+// Broadcom NIC over a co-located Intel iRDMA one).
+//
+// Idempotent (c10::once_flag inside). Set RBLN_DISABLE_AUTO_RDMA_IP=1
+// to skip every step above and leave the environment alone.
+//
+// Never throws: when no IP can be resolved, logs a warning (if
+// RCCL_PORT_GEN is set) or an info diagnostic (otherwise) and lets
+// librbln-ccl decide whether to fail at RCCL init -- recent
+// librbln-ccl no longer requires RBLN_RDMA_IP on single-node runs.
 void MaybeAutoDiscoverRbnRdmaIp();
 
 } // namespace torch_rbln::detail
