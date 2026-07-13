@@ -32,27 +32,29 @@
 
 set -euo pipefail
 
-readonly SCRIPT_DIR="$(realpath "$(dirname "$0")")"
-readonly PROJECT_ROOT="$(realpath "$SCRIPT_DIR/../..")"
+SCRIPT_DIR="$(realpath "$(dirname "$0")")"
+readonly SCRIPT_DIR
+PROJECT_ROOT="$(realpath "${SCRIPT_DIR}/../..")"
+readonly PROJECT_ROOT
 
 # ----- arg parsing ----------------------------------------------------------
 
 DRY_RUN=0
 for arg in "$@"; do
-  case "$arg" in
+  case "${arg}" in
     --dry-run) DRY_RUN=1 ;;
     -h|--help)
       sed -n '2,30p' "$0"
       exit 0
       ;;
-    *) echo "Unknown option: $arg" >&2; exit 1 ;;
+    *) echo "Unknown option: ${arg}" >&2; exit 1 ;;
   esac
 done
 
 # ----- helpers --------------------------------------------------------------
 
 run() {
-  if [ "$DRY_RUN" -eq 1 ]; then
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
     echo "[dry-run] $*"
     return 0
   fi
@@ -60,7 +62,7 @@ run() {
 }
 
 pip_install() {
-  if [ "${UV:-0}" = "1" ]; then
+  if [[ "${UV:-0}" = "1" ]]; then
     run uv pip install "$@"
   else
     run python -m pip install "$@"
@@ -117,7 +119,7 @@ vllm_wheel_index_from_pyproject() {
   # Read the vllm-cpu index URL out of vllm-rbln's pyproject.toml so we don't
   # have to keep a separate vllm version pinned in this script.
   local pyproject="$1"
-  python - "$pyproject" <<'PY'
+  python - "${pyproject}" <<'PY'
 import sys, tomllib, pathlib
 data = tomllib.loads(pathlib.Path(sys.argv[1]).read_text())
 for idx in data.get("tool", {}).get("uv", {}).get("index", []):
@@ -131,34 +133,34 @@ PY
 install_vllm_rbln() {
   local repo="${VLLM_RBLN_REPO:-https://github.com/rbln-sw/vllm-rbln.git}"
   local ref="${VLLM_RBLN_REF:-origin/chan/remove_cpu_offload}"
-  local dir="${VLLM_RBLN_DIR:-$PROJECT_ROOT/vllm-rbln}"
+  local dir="${VLLM_RBLN_DIR:-${PROJECT_ROOT}/vllm-rbln}"
 
-  log_step "vllm-rbln (clone + editable install at $ref)"
+  log_step "vllm-rbln (clone + editable install at ${ref})"
 
-  if [ ! -d "$dir/.git" ]; then
-    echo "Cloning $repo into $dir..."
-    run git clone "$repo" "$dir"
+  if [[ ! -d "${dir}/.git" ]]; then
+    echo "Cloning ${repo} into ${dir}..."
+    run git clone "${repo}" "${dir}"
   fi
-  echo "Checking out $ref in $dir..."
-  if [ "$DRY_RUN" -eq 1 ]; then
-    echo "[dry-run] (cd $dir && git fetch origin --prune && git checkout --detach $ref)"
+  echo "Checking out ${ref} in ${dir}..."
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "[dry-run] (cd ${dir} && git fetch origin --prune && git checkout --detach ${ref})"
   else
-    (cd "$dir" && git fetch origin --prune && git checkout --detach "$ref")
+    (cd "${dir}" && git fetch origin --prune && git checkout --detach "${ref}")
   fi
 
   local vllm_index
-  if [ "$DRY_RUN" -eq 1 ]; then
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
     vllm_index="<resolved-from-pyproject-at-runtime>"
   else
-    vllm_index="$(vllm_wheel_index_from_pyproject "$dir/pyproject.toml")"
-    echo "Resolved vllm wheel index from vllm-rbln pyproject: $vllm_index"
+    vllm_index="$(vllm_wheel_index_from_pyproject "${dir}/pyproject.toml")"
+    echo "Resolved vllm wheel index from vllm-rbln pyproject: ${vllm_index}"
   fi
 
   # The rbln index is needed so pip can resolve vllm-rbln's transitive
   # ``optimum-rbln`` pin; transformers + other ordinary PyPI packages come
   # from the default index.
-  pip_install -e "$dir" \
-    --extra-index-url "$vllm_index" \
+  pip_install -e "${dir}" \
+    --extra-index-url "${vllm_index}" \
     --extra-index-url https://pypi.rbln.ai/simple/ \
     --extra-index-url https://download.pytorch.org/whl/cpu
 }
