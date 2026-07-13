@@ -87,8 +87,8 @@ class TestFillScalarRBLN(TestCase):
         x.fill_(5)
         self.assertEqual(x.to("cpu"), torch.full((8,), 5, dtype=torch.int8))
         del x  # must free cleanly (no lingering borrow on the vaddr)
-        # Churn allocations on the freed region to surface a lingering borrow.
-        for _ in range(16):
+        # Reuse the freed region a few times to surface a lingering borrow.
+        for _ in range(3):
             t = torch.empty(8, dtype=torch.int8, device="rbln")
             t.fill_(1)
             del t

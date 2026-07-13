@@ -258,10 +258,12 @@ at::Tensor& index_copy_out_rbln(
 
   // Bounds-check before the empty-work early return so an out-of-range index
   // still raises when the output is empty (matching CPU) instead of being
-  // swallowed — but only when there is data to copy. With an empty source
-  // (source.numel() == 0) CPU skips the check and returns the empty result, so
-  // gate on it (e.g. self=(3,0), idx=[5], source=(1,0) must not raise, whereas an
-  // empty source only arises here alongside an empty self/output).
+  // swallowed — but only when there is data to copy. CPU validates index
+  // bounds only when source.numel() > 0; with an empty source it returns the
+  // (empty) result without checking, even for a non-empty out-of-range index
+  // (e.g. self=(3,0), idx=[5], source=(1,0) does not raise on CPU — and an
+  // empty source can pair with a non-empty self, e.g. self=(5,3), idx=[],
+  // source=(0,3)). Gate on source.numel() to match.
   const int64_t axis_extent = self.size(axis);
   if (source.numel() > 0) {
     for (int64_t v : idx_host) {
