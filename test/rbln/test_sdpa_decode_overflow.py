@@ -245,14 +245,21 @@ class TestSDPADecodeOverflow(TestCase):
         needs_fallback, reason = needs_sdpa_shape_fallback(query, key)
         self.assertFalse(needs_fallback, "Aligned prefill shapes should not trigger fallback")
 
+    # fp16 + a 32-aligned (batch, heads, seq, head_dim) shape so these hit the real RBLN SDPA
+    # fast path (float32 / unaligned shapes silently route to the CPU fallback and would test
+    # nothing RBLN-specific). The reject itself is dtype/shape-independent -- it runs before the
+    # capability check -- but exercising the fast path is what makes the "allowed" cases meaningful.
+    _ALIGNED_SHAPE = (1, 4, 32, 64)
+
+    def _aligned(self, requires_grad=False):
+        return torch.randn(self._ALIGNED_SHAPE, dtype=torch.float16, device="rbln", requires_grad=requires_grad)
+
     def test_dropout_with_grad_rejected(self):
         """dropout_p > 0 + autograd must fail loudly, not return a silently wrong gradient: the
         backward recomputes softmax from the pre-dropout weights and does not reproduce the
         forward dropout mask / 1/(1-p) scaling, so it would be the gradient of a different
         function."""
-        q = torch.randn(1, 2, 4, 8, dtype=torch.float32, device="rbln", requires_grad=True)
-        k = torch.randn(1, 2, 4, 8, dtype=torch.float32, device="rbln")
-        v = torch.randn(1, 2, 4, 8, dtype=torch.float32, device="rbln")
+        q, k, v = self._aligned(requires_grad=True), self._aligned(), self._aligned()
         with self.assertRaises(NotImplementedError):
             F.scaled_dot_product_attention(q, k, v, dropout_p=0.5)
 
@@ -260,28 +267,26 @@ class TestSDPADecodeOverflow(TestCase):
         """The reject covers a graph required only through attn_bias — q/k/v need not require
         grad — since needs_backward includes attn_bias.requires_grad (the gate that previously
         checked only q/k/v)."""
-        q = torch.randn(1, 2, 4, 8, dtype=torch.float32, device="rbln")
-        k = torch.randn(1, 2, 4, 8, dtype=torch.float32, device="rbln")
-        v = torch.randn(1, 2, 4, 8, dtype=torch.float32, device="rbln")
-        bias = torch.zeros(1, 2, 4, 4, dtype=torch.float32, device="rbln", requires_grad=True)
+        q, k, v = self._aligned(), self._aligned(), self._aligned()
+        bias = torch.zeros(1, 4, 32, 32, dtype=torch.float16, device="rbln", requires_grad=True)
         with self.assertRaises(NotImplementedError):
             F.scaled_dot_product_attention(q, k, v, attn_mask=bias, dropout_p=0.5)
 
     def test_dropout_without_grad_allowed(self):
-        """dropout_p > 0 without autograd (inference) works and, per the cache-leak fix, must
-        not cache attn-weights (nothing would pop them)."""
-        q = torch.randn(1, 2, 4, 8, dtype=torch.float32, device="rbln")
-        k = torch.randn(1, 2, 4, 8, dtype=torch.float32, device="rbln")
-        v = torch.randn(1, 2, 4, 8, dtype=torch.float32, device="rbln")
+        """dropout_p > 0 without autograd (inference) runs on the fast path and, per the
+        cache-leak fix, must not cache attn-weights (nothing would pop them)."""
+        from torch_rbln._internal.kernels import sdpa as sdpa_mod
+
+        sdpa_mod._clear_attn_weights_cache()
+        q, k, v = self._aligned(), self._aligned(), self._aligned()
         with torch.no_grad():
             out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.5)
-        self.assertEqual(tuple(out.shape), (1, 2, 4, 8))
+        self.assertEqual(tuple(out.shape), self._ALIGNED_SHAPE)
+        self.assertEqual(len(sdpa_mod._sdpa_attn_weights_cache), 0)  # inference must not cache
 
     def test_grad_without_dropout_allowed(self):
-        """Autograd with dropout_p == 0 still works."""
-        q = torch.randn(1, 2, 4, 8, dtype=torch.float32, device="rbln", requires_grad=True)
-        k = torch.randn(1, 2, 4, 8, dtype=torch.float32, device="rbln")
-        v = torch.randn(1, 2, 4, 8, dtype=torch.float32, device="rbln")
+        """Autograd with dropout_p == 0 runs on the fast path (dropout is the only rejected case)."""
+        q, k, v = self._aligned(requires_grad=True), self._aligned(), self._aligned()
         out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
         out.sum().backward()
         self.assertTrue(torch.isfinite(q.grad).all().item())

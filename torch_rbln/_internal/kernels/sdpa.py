@@ -23,7 +23,7 @@ _sdpa_attn_weights_cache: dict[int, torch.Tensor] = {}
 def _cache_attn_weights(output: torch.Tensor, attn_weights: torch.Tensor) -> None:
     """Cache attention weights under the output tensor's data_ptr for the matching backward.
 
-    The forward only caches when a backward will consume it (see ``needs_backward``), and the
+    The forward only caches when a backward may consume it (see ``needs_backward``), and the
     backward pops the entry — so inference never accumulates entries. A grad-enabled forward
     whose backward never runs (``eval()`` does not turn autograd off) leaves its entry behind;
     repeated such forwards at distinct addresses can leave several. Each lingers only until its
@@ -725,8 +725,7 @@ def scaled_dot_product_fused_attention_overrideable_rbln(
     # Dropout + autograd is rejected, not silently approximated: the backward recomputes softmax
     # from the pre-dropout weights and can't reproduce the forward dropout mask / 1/(1-p) scaling
     # (philox_seed/offset aren't threaded through), so the gradient would be of a different
-    # function. needs_backward includes attn_bias, so attn_bias-only grad is covered too. (The
-    # dropout_p>0 OpInfo samples are dropped for SDPA in test/filters.py so test_ops stays green.)
+    # function. needs_backward includes attn_bias, so attn_bias-only grad is covered too.
     if dropout_p > 0.0 and needs_backward:
         raise NotImplementedError(
             "RBLN SDPA does not support dropout_p > 0 with autograd (the backward cannot "
@@ -756,9 +755,10 @@ def scaled_dot_product_fused_attention_overrideable_rbln(
         attn_weights = _sdpa_compute_attn_weights(query, key, attn_bias, is_causal, computed_scale)
         output = _sdpa_compute_output(attn_weights, value, dropout_p)
 
-    # Cache only when a backward will pop it (inference never pops -> unconditional caching would
-    # leak a device tensor per call); a non-caching forward instead drops any stale entry at this
-    # (possibly reused) address. Rationale in _cache_attn_weights / _discard_cached_attn_weights.
+    # Cache only when a backward may consume it (needs_backward = grad enabled + an input needs
+    # grad, not a guarantee backward runs); inference never pops, so unconditional caching would
+    # leak. A non-caching forward instead drops any stale entry at this (possibly reused) address.
+    # Rationale in _cache_attn_weights / _discard_cached_attn_weights.
     if needs_backward and attn_weights is not None:
         _cache_attn_weights(output, attn_weights)
     else:
