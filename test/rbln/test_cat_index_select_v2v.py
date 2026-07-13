@@ -603,10 +603,12 @@ class TestIndexSelectV2V(TestCase):
             torch.index_select(to_dev(a_cpu), 0, bad_idx)
 
     def test_index_select_empty_self_oob_index_rejected(self):
-        """self empty on the indexed axis (extent 0): any index is out of range
-        and must raise, not resize out to (1,3) and return it uninitialized."""
+        """self empty on the indexed axis (extent 0): any index is out of range and must
+        raise like CPU, not resize out to (1,3) and return it uninitialized."""
         empty_self = torch.empty((0, 3), dtype=torch.float32)
         idx = torch.tensor([0], dtype=torch.long)
+        with pytest.raises(RuntimeError):
+            torch.index_select(empty_self, 0, idx)  # CPU parity
         with pytest.raises(RuntimeError):
             torch.index_select(to_dev(empty_self), 0, idx)
 
@@ -620,10 +622,12 @@ class TestIndexSelectV2V(TestCase):
         _check(got, expected)
 
     def test_index_select_empty_output_oob_index_rejected(self):
-        """self (3,0): index 5 exceeds extent 3 and must raise even though the
+        """self (3,0): index 5 exceeds extent 3 and must raise like CPU even though the
         output would be empty (numel()==0 must not swallow it)."""
         empty_self = torch.empty((3, 0), dtype=torch.float32)
         idx = torch.tensor([5], dtype=torch.long)
+        with pytest.raises(RuntimeError):
+            torch.index_select(empty_self, 0, idx)  # CPU parity
         with pytest.raises(RuntimeError):
             torch.index_select(to_dev(empty_self), 0, idx)
 

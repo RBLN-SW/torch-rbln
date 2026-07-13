@@ -214,6 +214,22 @@ at::Tensor& fill_scalar_via_cpu(at::Tensor& self, const at::Scalar& value) {
   self.copy_(self_cpu);
   return self;
 }
+
+// RAII for a host borrow: if the scope exits via a throw (e.g. Scalar::to<T>()'s checked
+// cast overflowing), return the borrow (updated=false) so it isn't leaked. The happy path
+// returns explicitly then disarms.
+struct BorrowGuard {
+  uint64_t id;
+  bool armed = true;
+  ~BorrowGuard() {
+    if (armed) {
+      try {
+        c10::rbln::return_borrowed(id, /*updated=*/false);
+      } catch (...) {
+      }
+    }
+  }
+};
 } // namespace
 
 at::Tensor& fill_scalar_rbln_(at::Tensor& self, const at::Scalar& value) {
@@ -232,21 +248,9 @@ at::Tensor& fill_scalar_rbln_(at::Tensor& self, const at::Scalar& value) {
   const auto nbytes = static_cast<size_t>(self.numel()) * self.element_size();
   const auto borrow = c10::rbln::borrow_host_ptr(self.data_ptr(), nbytes);
 
-  // ``fill_host_typed`` does a checked cast that throws on overflow (e.g.
-  // fill_(128) into int8). Guard the borrow so the throw can't skip
-  // return_borrowed and leak it; the happy path disarms and returns explicitly.
-  struct BorrowGuard {
-    uint64_t id;
-    bool armed = true;
-    ~BorrowGuard() {
-      if (armed) {
-        try {
-          c10::rbln::return_borrowed(id, /*updated=*/false);
-        } catch (...) {
-        }
-      }
-    }
-  } guard{borrow.borrow_id};
+  // fill_host_typed's checked cast can throw on overflow (e.g. fill_(128) into int8);
+  // guard the borrow so the throw can't skip return_borrowed and leak it.
+  BorrowGuard guard{borrow.borrow_id};
 
   void* host_ptr = reinterpret_cast<void*>(borrow.host_ptr);
   const bool handled = fill_host_typed(host_ptr, self.numel(), self.scalar_type(), value);
@@ -327,6 +331,9 @@ at::Tensor& arange_start_out_rbln(
   const auto nbytes = static_cast<size_t>(out.numel()) * out.element_size();
   const auto borrow = c10::rbln::acquire_host_ptr_for_overwrite(out.data_ptr(), nbytes);
   void* host_ptr = reinterpret_cast<void*>(borrow.host_ptr);
+  // start.to<T>()/step.to<T>() below are checked casts that can throw on overflow; guard the
+  // borrow so a throw can't skip return_borrowed and leak it.
+  BorrowGuard guard{borrow.borrow_id};
 
   switch (st) {
     case at::kLong:
@@ -353,9 +360,11 @@ at::Tensor& arange_start_out_rbln(
     default:
       // dtype_supported gate above rules this branch out.
       c10::rbln::return_borrowed(borrow.borrow_id, /*updated=*/false);
+      guard.armed = false;
       return cpu_fallback_for_arange();
   }
   c10::rbln::return_borrowed(borrow.borrow_id, /*updated=*/true);
+  guard.armed = false;
   return out;
 }
 
