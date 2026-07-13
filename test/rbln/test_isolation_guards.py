@@ -117,17 +117,7 @@ def test_restore_current_device_propagates_restore_failure():
         _dev._initialized = saved_flag
 
 
-class _FakeReq:
-    class _Node:
-        @staticmethod
-        def get_closest_marker(name):
-            return None
-
-    node = _Node()
-
-
 @pytest.mark.test_set_ci
-@pytest.mark.no_caching_allocator_reset  # the real autouse fixture must not call the patched fns
 def test_caching_allocator_teardown_fails_loud_and_skips_flush_on_sync_error(monkeypatch):
     """A drain (synchronize) failure means the device may still have in-flight DMA, so the
     teardown must fail loud AND NOT flush -- freeing a faulted device's blocks would re-open
@@ -142,15 +132,15 @@ def test_caching_allocator_teardown_fails_loud_and_skips_flush_on_sync_error(mon
     monkeypatch.setattr(torch.rbln, "synchronize", _sync_boom)
     monkeypatch.setattr(torch_rbln.memory, "empty_cache", lambda device: flushed.append(device))
 
-    gen = conftest.reset_caching_allocator.__wrapped__(_FakeReq())
+    gen = conftest.reset_caching_allocator.__wrapped__()
     next(gen)  # setup: yields
     with pytest.raises(RuntimeError, match="sync fault"):
         next(gen)  # teardown: drain fails -> raise, flush skipped
     assert flushed == []  # flush must be skipped when the drain failed
+    monkeypatch.undo()  # restore the patched fns before the real autouse teardown runs
 
 
 @pytest.mark.test_set_ci
-@pytest.mark.no_caching_allocator_reset
 def test_caching_allocator_teardown_reports_flush_error(monkeypatch):
     """When the drain succeeds, the flush runs; an empty_cache failure must be surfaced
     (aggregated), not hidden."""
@@ -163,10 +153,11 @@ def test_caching_allocator_teardown_reports_flush_error(monkeypatch):
 
     monkeypatch.setattr(torch_rbln.memory, "empty_cache", _flush_boom)
 
-    gen = conftest.reset_caching_allocator.__wrapped__(_FakeReq())
+    gen = conftest.reset_caching_allocator.__wrapped__()
     next(gen)  # setup: yields
     with pytest.raises(RuntimeError, match="flush fault"):
         next(gen)  # teardown: drain ok -> flush runs -> its failure surfaced
+    monkeypatch.undo()  # restore the patched fns before the real autouse teardown runs
 
 
 def _with_env(var, value, fn):

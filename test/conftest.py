@@ -37,19 +37,16 @@ def reset_dynamo(request):
 # RBLN caching-allocator reset fixture (autouse)
 # =============================================================================
 @pytest.fixture(scope="function", autouse=True)
-def reset_caching_allocator(request):
+def reset_caching_allocator():
     """Drain this test's in-flight device work, then release the RBLN caching allocator's
     cached blocks -- both in teardown.
 
     Draining (synchronize) in this test's teardown attributes an async error to the test
     that caused it, instead of misreporting it against an unrelated later test. Releasing
-    cached blocks then keeps the pool unfragmented for the next test. Opt out with the
-    ``no_caching_allocator_reset`` marker -- which then leaves this test's blocks/in-flight
-    work for the next test to inherit (cleaned only at that next test's teardown)."""
+    cached blocks then keeps the pool unfragmented for the next test. This always runs (no
+    opt-out marker): skipping it would leave a test's blocks/in-flight work for the next,
+    unrelated test to inherit -- the cross-test leak this fixture exists to prevent."""
     yield
-    if request.node.get_closest_marker("no_caching_allocator_reset"):
-        rbln_log_debug("Skipping RBLN caching allocator reset")
-        return
 
     try:
         num_devices = torch_rbln.device.device_count()
