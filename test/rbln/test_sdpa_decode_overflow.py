@@ -305,6 +305,30 @@ class TestSDPADecodeOverflow(TestCase):
         out.sum().backward()
         self.assertEqual(len(sdpa_mod._sdpa_attn_weights_cache), 0)  # backward popped it
 
+    def test_grad_forward_anonymous_output_survives_until_backward(self):
+        """Regression: an SDPA output that is an anonymous graph intermediate (never bound to
+        a live Python variable) must keep its attn-weights cache entry until the backward that
+        consumes it. Tying the entry's lifetime to the output wrapper (e.g. a
+        ``weakref.finalize`` evictor) would drop it when the unreferenced wrapper is collected
+        and silently downgrade backward to a CPU recompute — the failure mode for
+        ``loss = sdpa(q, k, v).sum(); loss.backward()``, where the output is never named."""
+        import gc
+
+        from torch_rbln._internal.kernels import sdpa as sdpa_mod
+
+        sdpa_mod._clear_attn_weights_cache()
+        q = torch.randn(1, 4, 32, 64, dtype=torch.float16, device="rbln", requires_grad=True)
+        k = torch.randn(1, 4, 32, 64, dtype=torch.float16, device="rbln")
+        v = torch.randn(1, 4, 32, 64, dtype=torch.float16, device="rbln")
+        # Output is never bound to a name: only `loss` (via the autograd graph) keeps it
+        # alive; its Python wrapper is unreferenced and eligible for collection now.
+        loss = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0).sum()
+        gc.collect()  # would fire an output-wrapper finalizer, if one existed
+        self.assertGreaterEqual(len(sdpa_mod._sdpa_attn_weights_cache), 1)  # entry survives for backward
+        loss.backward()  # cache hit -> device backward, not a cache-miss CPU recompute
+        self.assertEqual(len(sdpa_mod._sdpa_attn_weights_cache), 0)  # backward popped it
+        self.assertTrue(torch.isfinite(q.grad).all().item())
+
     def test_empty_cache_preserves_pending_backward_cache(self):
         """empty_cache() must NOT drop a live SDPA entry that a pending backward still needs
         (else forward -> empty_cache() -> backward silently downgrades to a CPU recompute)."""
