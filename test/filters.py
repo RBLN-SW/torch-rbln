@@ -44,6 +44,19 @@ _ops_without_forward_ad_support = {
     "nn.functional.linear",  # torch.compile path loses forward AD context
 }
 
+# Per-op tests that can't run because the RBLN implementation rejects a specific OpInfo
+# sample they iterate. SDPA raises NotImplementedError on the dropout+grad sample (index 10):
+# the backward can't reproduce the forward dropout mask, so dropout+autograd is rejected
+# rather than returning a silently wrong gradient (see sdpa.py). ``test_dtypes`` is already
+# covered by the global ``_skipped_tests`` entry above for the same sample.
+_ops_unsupported_sample_tests = {
+    "nn.functional.scaled_dot_product_attention": {
+        "test_backward",
+        "test_variant_consistency_eager",
+        "test_noncontiguous_samples",
+    },
+}
+
 _ops_with_related_runtime_tests = [
     "clone",
     "contiguous",
@@ -210,6 +223,10 @@ def _skip_if_not_implemented(fn):
         # Skip forward AD tests for operators without support
         if fn.__name__ == "test_forward_ad" and op_name in _ops_without_forward_ad_support:
             raise SkipTest(f"Skipping {fn.__name__} for {op_name}: forward AD not supported on RBLN")
+
+        # Skip tests that iterate an OpInfo sample the RBLN op rejects (e.g. SDPA dropout+grad).
+        if fn.__name__ in _ops_unsupported_sample_tests.get(op_name, ()):
+            raise SkipTest(f"Skipping {fn.__name__} for {op_name}: RBLN rejects a required OpInfo sample")
 
         for name, value in bound_args.arguments.items():
             # `op` restriction

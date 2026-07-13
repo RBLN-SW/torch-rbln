@@ -726,14 +726,19 @@ def scaled_dot_product_fused_attention_overrideable_rbln(
         or (attn_bias is not None and attn_bias.requires_grad)
     )
 
-    # TODO(dropout+grad): with dropout_p > 0 under autograd the gradient is imperfect — the
-    # forward applies dropout to attn_weights, but the backward recomputes softmax from the
-    # cached pre-dropout weights and does not reproduce the forward mask (we don't yet thread
-    # philox_seed/philox_offset into the backward). We intentionally do NOT reject this path:
-    # rejecting broke the upstream SDPA OpInfo dropout sample, and RBLN is inference-focused
-    # so this training-only case is a known limitation, not a hard error. Revisit — regenerate
-    # the dropout mask in the backward from the philox state — when dropout+grad on RBLN
-    # becomes a real use case.
+    # Dropout + autograd is rejected, not silently approximated. The forward applies dropout to
+    # attn_weights, but the backward recomputes softmax from the pre-dropout weights and does not
+    # reproduce the forward dropout mask / 1/(1-p) scaling (philox_seed/offset are not threaded
+    # into the backward), so the gradient would be of a different function. Fail loudly instead.
+    # Covers attn_bias-only grad too (needs_backward includes it). The upstream SDPA OpInfo
+    # dropout sample is xfail'd for this in test/ops (see the sdpa dropout+grad skip).
+    if dropout_p > 0.0 and needs_backward:
+        raise NotImplementedError(
+            "RBLN SDPA does not support dropout_p > 0 with autograd (the backward cannot "
+            "reproduce the forward dropout mask, so the gradient would be wrong). Use "
+            "dropout_p=0.0, run under no_grad()/eval(), or apply dropout outside "
+            "scaled_dot_product_attention."
+        )
 
     # Check RBLN capability
     can_use, reason = can_use_rbln_sdpa(query, key, value, attn_bias, dropout_p, is_causal, scale, enable_gqa=False)

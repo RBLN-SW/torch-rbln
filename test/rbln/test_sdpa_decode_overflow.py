@@ -245,18 +245,27 @@ class TestSDPADecodeOverflow(TestCase):
         needs_fallback, reason = needs_sdpa_shape_fallback(query, key)
         self.assertFalse(needs_fallback, "Aligned prefill shapes should not trigger fallback")
 
-    def test_dropout_with_grad_runs_without_rejecting(self):
-        """dropout_p > 0 + autograd must NOT be rejected (a hard reject broke the upstream
-        SDPA OpInfo dropout sample). It runs and yields a finite gradient. The gradient is a
-        known imperfect approximation on RBLN — the backward doesn't reproduce the forward
-        dropout mask; see the dropout+grad TODO in sdpa.py."""
+    def test_dropout_with_grad_rejected(self):
+        """dropout_p > 0 + autograd must fail loudly, not return a silently wrong gradient: the
+        backward recomputes softmax from the pre-dropout weights and does not reproduce the
+        forward dropout mask / 1/(1-p) scaling, so it would be the gradient of a different
+        function."""
         q = torch.randn(1, 2, 4, 8, dtype=torch.float32, device="rbln", requires_grad=True)
         k = torch.randn(1, 2, 4, 8, dtype=torch.float32, device="rbln")
         v = torch.randn(1, 2, 4, 8, dtype=torch.float32, device="rbln")
-        out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.5)  # must not raise
-        out.sum().backward()
-        self.assertEqual(tuple(out.shape), (1, 2, 4, 8))
-        self.assertTrue(torch.isfinite(q.grad).all().item())
+        with self.assertRaises(NotImplementedError):
+            F.scaled_dot_product_attention(q, k, v, dropout_p=0.5)
+
+    def test_dropout_with_attn_bias_grad_rejected(self):
+        """The reject covers a graph required only through attn_bias — q/k/v need not require
+        grad — since needs_backward includes attn_bias.requires_grad (the gate that previously
+        checked only q/k/v)."""
+        q = torch.randn(1, 2, 4, 8, dtype=torch.float32, device="rbln")
+        k = torch.randn(1, 2, 4, 8, dtype=torch.float32, device="rbln")
+        v = torch.randn(1, 2, 4, 8, dtype=torch.float32, device="rbln")
+        bias = torch.zeros(1, 2, 4, 4, dtype=torch.float32, device="rbln", requires_grad=True)
+        with self.assertRaises(NotImplementedError):
+            F.scaled_dot_product_attention(q, k, v, attn_mask=bias, dropout_p=0.5)
 
     def test_dropout_without_grad_allowed(self):
         """dropout_p > 0 without autograd (inference) works and, per the cache-leak fix, must
