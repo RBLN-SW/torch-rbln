@@ -522,8 +522,11 @@ void cpu_fallback_rbln(
         if (borrow_ids[i] != 0 && schema_info.is_pure_out[tensor_args_indices[i]]) {
           c10::rbln::return_borrowed(borrow_ids[i], /*updated=*/false);
           borrow_ids[i] = 0;
-          // Zero-sized: the retry grow-resizes from an empty tensor, so it does not re-emit
-          // the "output was resized" warning the first attempt already produced (count stays 1).
+          // Zero-sized: the retry grow-resizes from an empty tensor, so it emits no
+          // additional "output was resized" warning beyond whatever the first attempt
+          // produced. (That warning is TORCH_WARN_ONCE, so the first attempt itself may
+          // emit 0 if it already fired earlier in the process — the point is the retry
+          // adds none.)
           cpu_tensors[i] = at::empty({0}, tensor_args[i].options().device(at::kCPU));
         }
       }
@@ -541,9 +544,10 @@ void cpu_fallback_rbln(
   // - Legacy: copy the fresh CPU result at cpu_tensors[i] back into the rbln out.
   // - Borrow, in-place (borrow_id != 0): the kernel already wrote into the host
   //   ptr aliasing rbln vmem; just mark the borrow updated for lazy device sync.
-  // - Borrow, resized-empty: a functional wrapper passed an empty out (numel=0)
-  //   that couldn't be borrowed, so resize the rbln out, borrow its now-sized
-  //   vmem, memcpy the CPU content, and return updated — replacing the eager H2D.
+  // - Borrow, resized-empty: an empty out (numel=0) that couldn't be borrowed —
+  //   from a functional wrapper or an explicit empty out= — so resize the rbln
+  //   out, borrow its now-sized vmem, memcpy the CPU content, and return updated
+  //   — replacing the eager H2D.
   std::vector<bool> borrow_write(tensor_args.size(), false);
   for (const auto i : c10::irange(tensor_args_indices.size())) {
     if (!schema_info.is_write_alias[tensor_args_indices[i]]) {

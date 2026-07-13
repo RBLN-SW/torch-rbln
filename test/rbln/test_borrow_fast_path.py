@@ -51,10 +51,10 @@ class TestBorrowFastPath(TestCase):
         self.assertEqual(tuple(y.shape), (16,))
 
     def test_pure_out_undersized_grows(self) -> None:
-        """Undersized pure ``out=`` (borrowed as a non-resizable from_blob) must
-        GROW to the result shape, not raise "not resizable". The grow-retry re-runs the
-        CPU kernel on a fresh zero-sized tensor, so the "output was resized" warning fires
-        exactly once (not once per attempt). ``sin`` is a CPU-fallback op."""
+        """Undersized pure ``out=`` (borrowed as a non-resizable from_blob) must GROW
+        to the result shape instead of raising "not resizable", and the "output was
+        resized" warning fires once across the retry, not once per attempt. ``sin`` is
+        a CPU-fallback op."""
         x = torch.arange(8, dtype=torch.float32, device="rbln")
         out = torch.empty(1, dtype=torch.float32, device="rbln")  # undersized -> grow
         with warnings.catch_warnings(record=True) as caught:
