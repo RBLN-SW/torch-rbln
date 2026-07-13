@@ -250,64 +250,56 @@ class TestDispatchShimGateLiveRead(TestCase):
     entry). A re-introduced static cache in *either* gate would latch the first value and
     fail its toggle. The two gates are separate functions, so they need separate toggles."""
 
+    _GATE_ENVS = ("TORCH_RBLN_DEPLOY", "TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK")
+
     def _nan_add(self, n):
-        # All-NaN fp16 input, last dim 32-aligned so the device path is eligible once the
-        # scan is skipped. The value doesn't affect compilation, so the device path still
-        # compiles and primes the warm cache.
+        # All-NaN fp16 input with a 64-aligned last dim so the device path is eligible once the
+        # scan is off (the NaN value doesn't affect compilation).
         x = torch.full((n,), float("nan"), dtype=torch.float16, device="rbln")
         y = torch.ones(n, dtype=torch.float16, device="rbln")
         (x + y).to("cpu")
 
-    def _assert_gate_read_live(self, enable_scan_off) -> None:
-        """Toggle a gate OFF(scan on) -> ON(scan off) -> OFF(scan on) and assert the warm
-        cache is primed only while the scan is off. ``enable_scan_off()`` mutates os.environ
-        to disable the scan; the caller runs under ``mock.patch.dict`` so it is restored."""
+    def _assert_gate_read_live(self, env_name, scan_off_value) -> None:
+        """Toggle one gate off -> on -> off in a single process and assert the warm cache is
+        primed only while the scan is off. Both gate envs are cleared at each baseline so
+        ambient state can't skip the scan; ``env_name=scan_off_value`` disables it."""
         import os
 
         if not _C._warmcache_is_enabled():
             self.skipTest("warm cache disabled; the device-path install is unobservable")
 
-        # Neutral baseline: both gate envs cleared so the scan is ON regardless of ambient env.
-        os.environ.pop("TORCH_RBLN_DEPLOY", None)
-        os.environ.pop("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK", None)
+        def scan_on_baseline():
+            for env in self._GATE_ENVS:
+                os.environ.pop(env, None)
+
+        scan_on_baseline()
         _C._warmcache_clear()
         base = _C._warmcache_size()
-        self._nan_add(128)  # scan ON -> NaN pre-check -> CPU fallback -> no warm entry
-        self.assertEqual(_C._warmcache_size(), base, "scan-on NaN op must fall back, not prime the warm cache")
+        self._nan_add(128)
+        self.assertEqual(_C._warmcache_size(), base, "scan on: NaN op must fall back, not prime the cache")
 
-        enable_scan_off()
-        self._nan_add(128)  # scan OFF -> device path -> warm entry installed
-        self.assertGreater(
-            _C._warmcache_size(),
-            base,
-            "disabling the scan must take the device path; a latched static gate would still fall back",
-        )
+        os.environ[env_name] = scan_off_value
+        self._nan_add(128)
+        self.assertGreater(_C._warmcache_size(), base, f"{env_name} live: scan off must take the device path")
         after_off = _C._warmcache_size()
 
-        os.environ.pop("TORCH_RBLN_DEPLOY", None)
-        os.environ.pop("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK", None)
-        self._nan_add(192)  # scan ON again, fresh shape -> live re-read -> fallback -> no new entry
-        self.assertEqual(
-            _C._warmcache_size(),
-            after_off,
-            "gate read live: a fresh-shape NaN op must fall back again once the scan is re-enabled",
-        )
+        scan_on_baseline()
+        self._nan_add(192)  # fresh shape
+        self.assertEqual(_C._warmcache_size(), after_off, f"{env_name} live: scan re-enabled must fall back again")
 
     def test_deploy_gate_read_live_per_dispatch(self) -> None:
         import os
         from unittest import mock
 
         with mock.patch.dict(os.environ):  # restores the full environment on exit
-            self._assert_gate_read_live(lambda: os.environ.__setitem__("TORCH_RBLN_DEPLOY", "ON"))
+            self._assert_gate_read_live("TORCH_RBLN_DEPLOY", "ON")
 
     def test_nan_inf_disable_gate_read_live_per_dispatch(self) -> None:
         import os
         from unittest import mock
 
         with mock.patch.dict(os.environ):  # restores the full environment on exit
-            self._assert_gate_read_live(
-                lambda: os.environ.__setitem__("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK", "nan_inf")
-            )
+            self._assert_gate_read_live("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK", "nan_inf")
 
 
 instantiate_device_type_tests(TestDispatchShimWrappedScalar, globals(), only_for="privateuse1")
