@@ -163,6 +163,20 @@ def test_caching_allocator_teardown_reports_flush_error(monkeypatch):
             next(gen)  # teardown: drain ok -> flush runs -> its failure surfaced
 
 
+@pytest.mark.test_set_ci
+def test_drain_failure_poisons_worker_so_rest_is_skipped():
+    """Once a drain failure poisons the worker, pytest_runtest_setup must skip subsequent tests
+    (before any fixture runs) so they don't touch the faulted device. Driven on a fresh conftest
+    instance so it can't poison the real session running this test."""
+    conftest = _load_root_conftest()
+    assert conftest._rbln_device_poisoned is False
+    conftest.pytest_runtest_setup(object())  # not poisoned -> must not skip
+
+    conftest._rbln_device_poisoned = True
+    with pytest.raises(pytest.skip.Exception):
+        conftest.pytest_runtest_setup(object())
+
+
 def _with_env(var, value, fn):
     """Run fn() with env var set to value (None = unset), then restore the prior value."""
     old = os.environ.get(var)

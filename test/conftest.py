@@ -9,6 +9,20 @@ from test.utils import set_deterministic_seeds, xfail_rebel
 from torch_rbln._internal.log_utils import rbln_log_debug
 
 
+# Set (per worker process) when an RBLN device drain fails in reset_caching_allocator: the
+# device is faulted, so the rest of this worker's tests are skipped rather than run against it.
+_rbln_device_poisoned = False
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    """Skip before any fixture runs once the device has faulted on this worker. Running the
+    setup would call torch._dynamo.reset() etc., freeing runtime buffers the faulted device may
+    still reference; skipping here keeps them alive and avoids re-touching the device."""
+    if _rbln_device_poisoned:
+        pytest.skip("RBLN device drain failed earlier on this worker; skipping to avoid the faulted device")
+
+
 # =============================================================================
 # Deterministic seed fixture (autouse)
 # =============================================================================
@@ -68,10 +82,26 @@ def reset_caching_allocator():
     # drain guards against -- and empty_cache() additionally clears the *process-global*
     # WarmCache. Surface the drain errors and stop.
     if sync_errors:
+        # The device faulted and may still have in-flight DMA. Poison this worker so its
+        # remaining tests skip (see pytest_runtest_setup) rather than run their setup, which
+        # would reset/free runtime buffers the faulted device still references -- e.g.
+        # torch._dynamo.reset flushes the WarmCache, re-opening the async-buffer race this
+        # drain guards against. Surface the drain errors and stop.
+        global _rbln_device_poisoned
+        _rbln_device_poisoned = True
         raise RuntimeError("RBLN device drain failed:\n  " + "\n  ".join(sync_errors))
 
-    # All drains succeeded -> safe to release cached blocks so the next test starts with an
-    # unfragmented pool. Aggregate flush failures too (nothing hidden).
+    # All drains succeeded. Drop the SDPA attn-weights cache before flushing: production
+    # empty_cache() deliberately keeps it (a pending backward may still need it), but across a
+    # test boundary there is no such backward, so a forward-only/grad test that left an entry
+    # would otherwise strand its device attn_weights into the next test. Lazy import avoids a
+    # load-time import cycle.
+    from torch_rbln._internal.kernels.sdpa import _clear_attn_weights_cache
+
+    _clear_attn_weights_cache()
+
+    # Release cached blocks so the next test starts with an unfragmented pool. Aggregate flush
+    # failures too (nothing hidden).
     flush_errors = []
     for idx in range(num_devices):
         device = torch.device("rbln", idx)
