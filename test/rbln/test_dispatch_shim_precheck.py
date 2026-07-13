@@ -238,10 +238,60 @@ class TestDispatchShimNanInfFallback(TestCase):
         self.assertTrue(torch.isnan(result).all())
 
 
+@pytest.mark.test_set_ci
+class TestDispatchShimDeployGateLiveRead(TestCase):
+    """The deploy gate (``is_deploy_mode`` in ``DispatchShim.cpp``) is read live on every
+    dispatch, NOT cached in a process-lifetime ``static``. Toggling ``TORCH_RBLN_DEPLOY``
+    inside one process must change whether the NaN/Inf pre-check runs, which is observable
+    via the warm cache: with deploy OFF a NaN input takes the CPU fallback (which never
+    primes the warm cache), while with deploy ON the scan is skipped and the op takes the
+    device path (which installs a warm-cache entry). A re-introduced static cache would
+    latch the first observed value and fail the toggle."""
+
+    def test_deploy_gate_read_live_per_dispatch(self) -> None:
+        import os
+        from unittest import mock
+
+        def nan_add(n):
+            # All-NaN fp16 input, last dim 32-aligned so the device path is eligible once the
+            # scan is skipped. Value doesn't affect compilation, so deploy-on still compiles.
+            x = torch.full((n,), float("nan"), dtype=torch.float16, device="rbln")
+            y = torch.ones(n, dtype=torch.float16, device="rbln")
+            (x + y).to("cpu")
+
+        if not _C._warmcache_is_enabled():
+            self.skipTest("warm cache disabled; the device-path install is unobservable")
+
+        with mock.patch.dict(os.environ):  # restores the full environment on exit
+            _C._warmcache_clear()
+            os.environ.pop("TORCH_RBLN_DEPLOY", None)
+            base = _C._warmcache_size()
+            nan_add(128)  # deploy OFF -> NaN pre-check -> CPU fallback -> no warm entry
+            self.assertEqual(_C._warmcache_size(), base, "deploy-off NaN op must fall back, not prime the warm cache")
+
+            os.environ["TORCH_RBLN_DEPLOY"] = "ON"
+            nan_add(128)  # deploy ON -> scan skipped -> device path -> warm entry installed
+            self.assertGreater(
+                _C._warmcache_size(),
+                base,
+                "deploy-on must skip the scan and take the device path; a latched static gate would still fall back",
+            )
+            after_on = _C._warmcache_size()
+
+            os.environ.pop("TORCH_RBLN_DEPLOY", None)
+            nan_add(192)  # deploy OFF again, fresh shape -> live re-read -> fallback -> no new entry
+            self.assertEqual(
+                _C._warmcache_size(),
+                after_on,
+                "deploy read live: a fresh-shape NaN op must fall back again, not compile on the device",
+            )
+
+
 instantiate_device_type_tests(TestDispatchShimWrappedScalar, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestDispatchShimAllScalarFallback, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestDispatchShimDtypeMismatch, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestDispatchShimNanInfFallback, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestDispatchShimDeployGateLiveRead, globals(), only_for="privateuse1")
 
 
 if __name__ == "__main__":
