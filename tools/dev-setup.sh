@@ -4,7 +4,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 show_help() {
     cat << 'HELP'
@@ -70,7 +70,7 @@ check_rebel_index_access() {
     rbln_ok=$?
     set -e
 
-    if [ "$rbln_ok" -eq 0 ]; then
+    if [[ "${rbln_ok}" -eq 0 ]]; then
         return 0
     fi
 
@@ -95,11 +95,11 @@ check_rebel_index_access() {
 mode_pypi() {
     local do_clean=""
     local arg_extra_index_url=""
-    while [ $# -gt 0 ]; do
+    while [[ $# -gt 0 ]]; do
         case "$1" in
             --clean) do_clean=1; shift ;;
             --extra-index-url)
-                if [ -z "${2:-}" ]; then
+                if [[ -z "${2:-}" ]]; then
                     echo "❌ --extra-index-url requires a URL"
                     exit 1
                 fi
@@ -115,24 +115,24 @@ mode_pypi() {
     done
 
     echo "📦 Setting up with PyPI rebel-compiler..."
-    cd "$PROJECT_ROOT"
+    cd "${PROJECT_ROOT}"
 
-    if [ -n "$do_clean" ]; then
+    if [[ -n "${do_clean}" ]]; then
         echo "🧹 Cleaning build artifacts..."
         rm -rf build
         echo "   Removed build/"
     fi
 
     # If custom env vars are set, show them and prompt before continuing
-    if [ -n "${PYTHONPATH:-}" ] || [ -n "${LD_LIBRARY_PATH:-}" ]; then
+    if [[ -n "${PYTHONPATH:-}" ]] || [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
         echo ""
         echo "⚠️  Custom environment variables are set (may affect install or runtime):"
         echo "────────────────────────────────────────────────────────────────────────"
-        [ -n "${PYTHONPATH:-}" ]     && echo "  PYTHONPATH=${PYTHONPATH}"
-        [ -n "${LD_LIBRARY_PATH:-}" ] && echo "  LD_LIBRARY_PATH=${LD_LIBRARY_PATH}"
+        [[ -n "${PYTHONPATH:-}" ]]     && echo "  PYTHONPATH=${PYTHONPATH}"
+        [[ -n "${LD_LIBRARY_PATH:-}" ]] && echo "  LD_LIBRARY_PATH=${LD_LIBRARY_PATH}"
         echo "────────────────────────────────────────────────────────────────────────"
         echo ""
-        if [ -t 0 ]; then
+        if [[ -t 0 ]]; then
             read -r -p "Continue with these env vars? [y/N] " answer
             case "${answer:-n}" in
                 [yY]|[yY][eE][sS]) echo "Proceeding with current env." ;;
@@ -166,69 +166,69 @@ mode_pypi() {
 
     # Install rebel-compiler: optional extra index + constraints-build-dev.txt; on 401/auth failure fall back to pypi.rbln.ai
     # Extra index sources: --extra-index-url, or uv's UV_INDEX / UV_EXTRA_INDEX_URL (see uv env docs), or prompt (TTY).
-    if [ -f constraints-build-dev.txt ]; then
+    if [[ -f constraints-build-dev.txt ]]; then
         rebel_extra_index="${arg_extra_index_url}"
         uv_extra_index_env=0
-        if [ -z "$rebel_extra_index" ] && { [ -n "${UV_INDEX:-}" ] || [ -n "${UV_EXTRA_INDEX_URL:-}" ]; }; then
+        if [[ -z "${rebel_extra_index}" ]] && { [[ -n "${UV_INDEX:-}" ]] || [[ -n "${UV_EXTRA_INDEX_URL:-}" ]]; }; then
             uv_extra_index_env=1
         fi
-        if [ -z "$rebel_extra_index" ] && [ "$uv_extra_index_env" -eq 0 ] && [ -t 0 ]; then
+        if [[ -z "${rebel_extra_index}" ]] && [[ "${uv_extra_index_env}" -eq 0 ]] && [[ -t 0 ]]; then
             echo ""
             read -r -p "Extra PyPI index URL for rebel-compiler (constraints-build-dev; empty = pypi.rbln.ai only): " rebel_extra_index
             echo ""
         fi
 
-        if [ -n "$rebel_extra_index" ]; then
+        if [[ -n "${rebel_extra_index}" ]]; then
             echo "Running: uv pip install -c constraints-build-dev.txt rebel-compiler (--extra-index-url / prompt)"
             set +e
-            REBEL_OUTPUT=$(uv pip install --extra-index-url "$rebel_extra_index" \
+            REBEL_OUTPUT=$(uv pip install --extra-index-url "${rebel_extra_index}" \
                 -c constraints-build-dev.txt rebel-compiler 2>&1)
             REBEL_EXIT=$?
             set -e
 
-            if [ "$REBEL_EXIT" -eq 0 ]; then
-                echo "$REBEL_OUTPUT"
+            if [[ "${REBEL_EXIT}" -eq 0 ]]; then
+                echo "${REBEL_OUTPUT}"
             else
-                if echo "$REBEL_OUTPUT" | grep -qE "401|Unauthorized|could not be queried|lack of valid authentication"; then
+                if echo "${REBEL_OUTPUT}" | grep -qE "401|Unauthorized|could not be queried|lack of valid authentication"; then
                     echo ""
                     echo "⚠️  Extra index failed due to missing or invalid credentials (e.g. 401 Unauthorized)."
                     echo "    Your environment does not have access to that index."
                     echo "    Falling back to pypi.rbln.ai (rebel-compiler version from lock)."
                     echo ""
                     echo "--- uv output (extra index attempt) ---"
-                    echo "$REBEL_OUTPUT"
+                    echo "${REBEL_OUTPUT}"
                     echo "--- end uv output ---"
                     echo ""
                     echo "Running: uv pip install rebel-compiler (pypi.rbln.ai)"
                     uv pip install --extra-index-url https://pypi.rbln.ai/simple/ rebel-compiler
                 else
-                    echo "$REBEL_OUTPUT" >&2
+                    echo "${REBEL_OUTPUT}" >&2
                     exit 1
                 fi
             fi
-        elif [ "$uv_extra_index_env" -eq 1 ]; then
+        elif [[ "${uv_extra_index_env}" -eq 1 ]]; then
             echo "Running: uv pip install -c constraints-build-dev.txt rebel-compiler (UV_INDEX / UV_EXTRA_INDEX_URL)"
             set +e
             REBEL_OUTPUT=$(uv pip install -c constraints-build-dev.txt rebel-compiler 2>&1)
             REBEL_EXIT=$?
             set -e
 
-            if [ "$REBEL_EXIT" -eq 0 ]; then
-                echo "$REBEL_OUTPUT"
+            if [[ "${REBEL_EXIT}" -eq 0 ]]; then
+                echo "${REBEL_OUTPUT}"
             else
-                if echo "$REBEL_OUTPUT" | grep -qE "401|Unauthorized|could not be queried|lack of valid authentication"; then
+                if echo "${REBEL_OUTPUT}" | grep -qE "401|Unauthorized|could not be queried|lack of valid authentication"; then
                     echo ""
                     echo "⚠️  Extra index failed due to missing or invalid credentials (e.g. 401 Unauthorized)."
                     echo "    Falling back to pypi.rbln.ai (rebel-compiler version from lock)."
                     echo ""
                     echo "--- uv output (extra index attempt) ---"
-                    echo "$REBEL_OUTPUT"
+                    echo "${REBEL_OUTPUT}"
                     echo "--- end uv output ---"
                     echo ""
                     echo "Running: uv pip install rebel-compiler (pypi.rbln.ai)"
                     uv pip install --extra-index-url https://pypi.rbln.ai/simple/ rebel-compiler
                 else
-                    echo "$REBEL_OUTPUT" >&2
+                    echo "${REBEL_OUTPUT}" >&2
                     exit 1
                 fi
             fi
@@ -251,53 +251,53 @@ mode_pypi() {
 }
 
 mode_external() {
-    local clean_flag=""
+    local clean_flag=()
 
-    if [ "$1" = "--clean" ]; then
-        clean_flag="--clean"
+    if [[ "$1" = "--clean" ]]; then
+        clean_flag=(--clean)
     fi
 
-    if [ -z "$REBEL_HOME" ]; then
+    if [[ -z "${REBEL_HOME}" ]]; then
         echo "❌ REBEL_HOME is not set"
         echo ""
         echo "Usage:"
         echo "  export REBEL_HOME=/path/to/rebel_compiler"
-        echo "  ./tools/dev-setup.sh external $clean_flag"
+        echo "  ./tools/dev-setup.sh external ${clean_flag[*]}"
         exit 1
     fi
 
     echo "🔗 Setting up with external rebel-compiler from REBEL_HOME..."
-    echo "REBEL_HOME: $REBEL_HOME"
+    echo "REBEL_HOME: ${REBEL_HOME}"
 
-    cd "$PROJECT_ROOT"
-    ./tools/build-with-external-rebel.sh $clean_flag
+    cd "${PROJECT_ROOT}"
+    ./tools/build-with-external-rebel.sh "${clean_flag[@]}"
 
     echo "✅ Setup complete with external rebel-compiler!"
 }
 
 # Main
-cd "$PROJECT_ROOT"
+cd "${PROJECT_ROOT}"
 
 MODE="${1:-pypi}"
 shift || true
 
 # pypi and custom modes must not be run with REBEL_HOME set (use external mode instead)
-if [ -n "${REBEL_HOME:-}" ]; then
-    if [ "$MODE" = "pypi" ] || [ "$MODE" = "custom" ]; then
-        echo "❌ REBEL_HOME is set (REBEL_HOME=$REBEL_HOME)"
+if [[ -n "${REBEL_HOME:-}" ]]; then
+    if [[ "${MODE}" = "pypi" ]] || [[ "${MODE}" = "custom" ]]; then
+        echo "❌ REBEL_HOME is set (REBEL_HOME=${REBEL_HOME})"
         echo "   pypi and custom modes ignore REBEL_HOME and may cause confusion."
         echo ""
         echo "   To use the compiler at REBEL_HOME, run:"
         echo "     ./tools/dev-setup.sh external [--clean]"
         echo ""
-        echo "   To run $MODE mode, unset REBEL_HOME first:"
+        echo "   To run ${MODE} mode, unset REBEL_HOME first:"
         echo "     unset REBEL_HOME"
-        printf '     ./tools/dev-setup.sh %s %s\n' "$MODE" "$*"
+        printf '     ./tools/dev-setup.sh %s %s\n' "${MODE}" "$*"
         exit 1
     fi
 fi
 
-case "$MODE" in
+case "${MODE}" in
     pypi)
         mode_pypi "$@"
         ;;
@@ -308,7 +308,7 @@ case "$MODE" in
         show_help
         ;;
     *)
-        echo "❌ Unknown mode: $MODE"
+        echo "❌ Unknown mode: ${MODE}"
         echo ""
         show_help
         exit 1

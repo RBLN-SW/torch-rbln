@@ -14,7 +14,6 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 from torch.utils._python_dispatch import TorchDispatchMode
 
 from torch_rbln._internal.ops_utils import (
-    _parse_disabled_fallback_cases,
     broadcast_args_general,
     can_use_out_tensor_directly,
     cpu_fallback_path,
@@ -376,17 +375,13 @@ class TestInternalOpUtils(TestCase):
         """When TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK=trace, trace check is skipped."""
         t = torch.tensor([1.0, 2.0], dtype=torch.float16, device="rbln")
         args = (t,)
-        _parse_disabled_fallback_cases.cache_clear()
-        try:
-            with patch.dict(os.environ, {"TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK": "trace"}, clear=False):
-                _parse_disabled_fallback_cases.cache_clear()
-                with patch("sys.gettrace", return_value=lambda *a, **k: None):
-                    self.assertFalse(
-                        is_cpu_fallback_cases(args),
-                        "With trace disabled via env, gettrace() set should not trigger fallback",
-                    )
-        finally:
-            _parse_disabled_fallback_cases.cache_clear()
+        # The gate reads the env live, so patch.dict alone is enough (no cache to clear).
+        with patch.dict(os.environ, {"TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK": "trace"}, clear=False):
+            with patch("sys.gettrace", return_value=lambda *a, **k: None):
+                self.assertFalse(
+                    is_cpu_fallback_cases(args),
+                    "With trace disabled via env, gettrace() set should not trigger fallback",
+                )
 
     def test_is_cpu_fallback_cases_reentrant(self):
         """When already inside RBLN compile op (depth > 0), is_cpu_fallback_cases returns True and logs warning (6)."""
@@ -409,20 +404,16 @@ class TestInternalOpUtils(TestCase):
         """When TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK=reentrant, reentrancy check is skipped."""
         t = torch.tensor([1.0, 2.0], dtype=torch.float16, device="rbln")
         args = (t,)
-        _parse_disabled_fallback_cases.cache_clear()
-        try:
-            with patch.dict(os.environ, {"TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK": "reentrant"}, clear=False):
-                _parse_disabled_fallback_cases.cache_clear()
-                with patch(
-                    "torch_rbln._internal.torch_compile_patch_helpers.get_rbln_compile_op_depth",
-                    return_value=1,
-                ):
-                    self.assertFalse(
-                        is_cpu_fallback_cases(args),
-                        "With reentrant disabled via env, depth > 0 should not trigger fallback",
-                    )
-        finally:
-            _parse_disabled_fallback_cases.cache_clear()
+        # The gate reads the env live, so patch.dict alone is enough (no cache to clear).
+        with patch.dict(os.environ, {"TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK": "reentrant"}, clear=False):
+            with patch(
+                "torch_rbln._internal.torch_compile_patch_helpers.get_rbln_compile_op_depth",
+                return_value=1,
+            ):
+                self.assertFalse(
+                    is_cpu_fallback_cases(args),
+                    "With reentrant disabled via env, depth > 0 should not trigger fallback",
+                )
 
     # =========================================================================
     # is_inplace_op tests

@@ -105,9 +105,9 @@ class TestDispatchShimNanInfFallback(TestCase):
     ``nan_inf`` / ``all``) so the warm-cache hot path cannot bypass it after
     the first clean call installs an entry for the shape.
 
-    These tests assume the default non-deploy environment (the env-cached
-    gates are initialised on first dispatch; running the suite with
-    ``TORCH_RBLN_DEPLOY=ON`` skips the scan and these checks no longer hold
+    These tests assume the default non-deploy environment (the deploy / nan_inf-disable
+    gates are read live from the environment on each dispatch, not process-cached; running
+    the suite with ``TORCH_RBLN_DEPLOY=ON`` skips the scan and these checks no longer hold
     — that's the intended deploy-mode behaviour and matches AS-IS).
     """
 
@@ -238,10 +238,71 @@ class TestDispatchShimNanInfFallback(TestCase):
         self.assertTrue(torch.isnan(result).all())
 
 
+@pytest.mark.test_set_ci
+class TestDispatchShimGateLiveRead(TestCase):
+    """Both NaN/Inf-scan gates -- ``TORCH_RBLN_DEPLOY`` (``is_deploy_mode``) and
+    ``TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK`` (``is_nan_inf_check_disabled``) in
+    ``DispatchShim.cpp`` -- are read live per dispatch, not cached in a process-lifetime
+    ``static``. A re-introduced static cache in either would latch the first value and fail
+    its toggle. They are separate functions, so each is toggled separately."""
+
+    _GATE_ENVS = ("TORCH_RBLN_DEPLOY", "TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK")
+
+    def _nan_add(self, n):
+        # All-NaN fp16 input with a 64-aligned last dim so the device path is eligible once the
+        # scan is off (the NaN value doesn't affect compilation).
+        x = torch.full((n,), float("nan"), dtype=torch.float16, device="rbln")
+        y = torch.ones(n, dtype=torch.float16, device="rbln")
+        (x + y).to("cpu")
+
+    def _assert_gate_read_live(self, env_name, scan_off_value) -> None:
+        """Toggle one gate off -> on -> off in a single process and assert the warm cache is
+        primed only while the scan is off. Both gate envs are cleared at each baseline so
+        ambient state can't skip the scan; ``env_name=scan_off_value`` disables it."""
+        import os
+
+        if not _C._warmcache_is_enabled():
+            self.skipTest("warm cache disabled; the device-path install is unobservable")
+
+        def scan_on_baseline():
+            for env in self._GATE_ENVS:
+                os.environ.pop(env, None)
+
+        scan_on_baseline()
+        _C._warmcache_clear()
+        base = _C._warmcache_size()
+        self._nan_add(128)
+        self.assertEqual(_C._warmcache_size(), base, "scan on: NaN op must fall back, not prime the cache")
+
+        os.environ[env_name] = scan_off_value
+        self._nan_add(128)
+        self.assertGreater(_C._warmcache_size(), base, f"{env_name} live: scan off must take the device path")
+        after_off = _C._warmcache_size()
+
+        scan_on_baseline()
+        self._nan_add(192)  # fresh shape
+        self.assertEqual(_C._warmcache_size(), after_off, f"{env_name} live: scan re-enabled must fall back again")
+
+    def test_deploy_gate_read_live_per_dispatch(self) -> None:
+        import os
+        from unittest import mock
+
+        with mock.patch.dict(os.environ):  # restores the full environment on exit
+            self._assert_gate_read_live("TORCH_RBLN_DEPLOY", "ON")
+
+    def test_nan_inf_disable_gate_read_live_per_dispatch(self) -> None:
+        import os
+        from unittest import mock
+
+        with mock.patch.dict(os.environ):  # restores the full environment on exit
+            self._assert_gate_read_live("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK", "nan_inf")
+
+
 instantiate_device_type_tests(TestDispatchShimWrappedScalar, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestDispatchShimAllScalarFallback, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestDispatchShimDtypeMismatch, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestDispatchShimNanInfFallback, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestDispatchShimGateLiveRead, globals(), only_for="privateuse1")
 
 
 if __name__ == "__main__":

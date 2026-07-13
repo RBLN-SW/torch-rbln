@@ -3,7 +3,6 @@ import os
 import sys
 import warnings
 from collections.abc import Sequence
-from functools import lru_cache
 from typing import Optional, Union
 
 import torch
@@ -1812,17 +1811,29 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
 _ALL_FALLBACK_CASES = frozenset({"dispatch_mode", "reentrant", "trace", "dtype", "scalar", "storage_offset", "nan_inf"})
 
 
-@lru_cache(maxsize=1)
+_warned_disable_fallback = False
+
+
 def _parse_disabled_fallback_cases() -> frozenset:
     """
-    Parse `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` environment variable into a frozenset of disabled cases.
+    Parse `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` into a frozenset of disabled cases.
+
+    Read live (NOT lru_cached): the C++ dispatch gate (DispatchShim.is_nan_inf_check_disabled)
+    reads the same env live, so caching here would let the Python cold path and the C++ warm
+    path disagree, and would latch the first value across a whole xdist worker (tests toggle
+    it per-test via patch.dict). This is the cold/miss path, so re-parsing per call is
+    negligible. Warn once per process (not once per call) via a module flag.
     """
+    global _warned_disable_fallback
     env = os.getenv("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK")
     if env is None:
         return frozenset()
-    warnings.warn(
-        "Enabling `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` may lead to unexpected behavior. Do NOT use in production."
-    )
+    if not _warned_disable_fallback:
+        warnings.warn(
+            "Enabling `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` may lead to unexpected behavior. "
+            "Do NOT use in production."
+        )
+        _warned_disable_fallback = True
     cases = frozenset(c.strip() for c in env.split(",") if c.strip())
     return _ALL_FALLBACK_CASES if ("all" in cases) else (cases & _ALL_FALLBACK_CASES)
 
