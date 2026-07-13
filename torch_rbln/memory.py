@@ -96,11 +96,10 @@ def empty_cache(device: Optional[Union[int, str, torch.device]] = None) -> None:
     view_recipe_cache_reset()
     # NB: the SDPA attn-weights cache is deliberately NOT flushed here. A pending backward's
     # entry is still live and needed, so a global flush would silently downgrade a
-    # forward -> empty_cache() -> backward sequence to a CPU recompute. Inference never
-    # caches (the forward only caches when a backward will run), so there is no inference
-    # leak to reclaim; grad-forward-with-no-backward entries linger only until their output
-    # address is reused (then overwritten/dropped by the next forward there, or popped by a
-    # backward that reuses it) -- see the cache-lifetime note in kernels/sdpa.py.
+    # forward -> empty_cache() -> backward sequence to a CPU recompute. Inference never caches
+    # (the forward caches only when a backward may run), so there is no inference leak to
+    # reclaim; a grad-forward-with-no-backward entry lingers only until the next forward that
+    # reuses its output address overwrites or discards it -- see kernels/sdpa.py.
     # No NPU: host caches above still dropped, but skip the device-side flush.
     if _no_rbln_device():
         return
