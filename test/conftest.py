@@ -16,9 +16,8 @@ _rbln_device_poisoned = False
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_setup(item):
-    """Skip before any fixture runs once the device has faulted on this worker. Running the
-    setup would call torch._dynamo.reset() etc., freeing runtime buffers the faulted device may
-    still reference; skipping here keeps them alive and avoids re-touching the device."""
+    """Skip (before any fixture) once the device faulted on this worker: a fixture setup would
+    torch._dynamo.reset() and free runtime buffers the faulted device may still be using."""
     if _rbln_device_poisoned:
         pytest.skip("RBLN device drain failed earlier on this worker; skipping to avoid the faulted device")
 
@@ -77,31 +76,23 @@ def reset_caching_allocator():
         except Exception as exc:  # noqa: BLE001 - aggregated and re-raised below
             sync_errors.append(f"synchronize(rbln:{idx}): {exc!r}")
 
-    # If any drain failed, do NOT flush: a faulted/undrained device may still have in-flight
-    # DMA referencing its blocks, so freeing them re-opens the async-buffer/free race this
-    # drain guards against -- and empty_cache() additionally clears the *process-global*
-    # WarmCache. Surface the drain errors and stop.
+    # Drain failed: the device is faulted and may still have in-flight DMA, so don't free its
+    # blocks/WarmCache (re-opens the async-buffer race). Poison the worker so its remaining
+    # tests skip before any fixture runs -- else the next reset_dynamo would flush the WarmCache
+    # and free those buffers anyway (see pytest_runtest_setup) -- then surface the error.
     if sync_errors:
-        # The device faulted and may still have in-flight DMA. Poison this worker so its
-        # remaining tests skip (see pytest_runtest_setup) rather than run their setup, which
-        # would reset/free runtime buffers the faulted device still references -- e.g.
-        # torch._dynamo.reset flushes the WarmCache, re-opening the async-buffer race this
-        # drain guards against. Surface the drain errors and stop.
         global _rbln_device_poisoned
         _rbln_device_poisoned = True
         raise RuntimeError("RBLN device drain failed:\n  " + "\n  ".join(sync_errors))
 
-    # All drains succeeded. Drop the SDPA attn-weights cache before flushing: production
-    # empty_cache() deliberately keeps it (a pending backward may still need it), but across a
-    # test boundary there is no such backward, so a forward-only/grad test that left an entry
-    # would otherwise strand its device attn_weights into the next test. Lazy import avoids a
-    # load-time import cycle.
+    # Clean drain. Drop the SDPA attn-weights cache before flushing -- production empty_cache()
+    # keeps it (pending backward), but there is none across a test boundary; see memory.py. Lazy
+    # import avoids a load-time cycle.
     from torch_rbln._internal.kernels.sdpa import _clear_attn_weights_cache
 
     _clear_attn_weights_cache()
 
-    # Release cached blocks so the next test starts with an unfragmented pool. Aggregate flush
-    # failures too (nothing hidden).
+    # Release cached blocks so the next test starts unfragmented. Aggregate flush failures too.
     flush_errors = []
     for idx in range(num_devices):
         device = torch.device("rbln", idx)

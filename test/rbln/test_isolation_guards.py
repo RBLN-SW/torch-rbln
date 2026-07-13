@@ -9,6 +9,7 @@ profiler / pinned-copy CI failures)."""
 import importlib.util
 import os
 import sys
+from pathlib import Path
 
 import pytest
 import torch
@@ -22,7 +23,9 @@ _dev = sys.modules[torch_rbln.device.set_device.__module__]
 
 
 def _load_root_conftest():
-    spec = importlib.util.spec_from_file_location("rbln_root_conftest", "test/conftest.py")
+    # Path-relative (not cwd-relative): test/rbln/test_isolation_guards.py -> test/conftest.py.
+    conftest_path = Path(__file__).resolve().parents[1] / "conftest.py"
+    spec = importlib.util.spec_from_file_location("rbln_root_conftest", conftest_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -164,17 +167,46 @@ def test_caching_allocator_teardown_reports_flush_error(monkeypatch):
 
 
 @pytest.mark.test_set_ci
-def test_drain_failure_poisons_worker_so_rest_is_skipped():
-    """Once a drain failure poisons the worker, pytest_runtest_setup must skip subsequent tests
-    (before any fixture runs) so they don't touch the faulted device. Driven on a fresh conftest
-    instance so it can't poison the real session running this test."""
+def test_drain_failure_poisons_worker_and_skips_rest(monkeypatch):
+    """End-to-end: a drain failure in teardown sets the poison flag, and pytest_runtest_setup
+    then skips (before any fixture). Driven on a fresh conftest instance so the real session
+    isn't poisoned."""
     conftest = _load_root_conftest()
-    assert conftest._rbln_device_poisoned is False
-    conftest.pytest_runtest_setup(object())  # not poisoned -> must not skip
 
-    conftest._rbln_device_poisoned = True
+    def _sync_boom(idx):
+        raise RuntimeError("sync fault")
+
+    with monkeypatch.context() as m:
+        m.setattr(torch_rbln.device, "device_count", lambda: 1)
+        m.setattr(torch.rbln, "synchronize", _sync_boom)
+        gen = conftest.reset_caching_allocator.__wrapped__()
+        next(gen)
+        with pytest.raises(RuntimeError, match="sync fault"):
+            next(gen)  # teardown drain fails -> poisons this (fresh) conftest
+
+    assert conftest._rbln_device_poisoned is True
     with pytest.raises(pytest.skip.Exception):
-        conftest.pytest_runtest_setup(object())
+        conftest.pytest_runtest_setup(object())  # a subsequent test's setup now skips
+
+
+@pytest.mark.test_set_ci
+def test_clean_teardown_order_sync_then_sdpa_clear_then_flush(monkeypatch):
+    """A clean drain must run synchronize -> drop the SDPA cache -> empty_cache, so the cache's
+    device tensors are released before the flush that reclaims their blocks."""
+    import torch_rbln._internal.kernels.sdpa as sdpa_mod
+
+    conftest = _load_root_conftest()
+    calls = []
+    with monkeypatch.context() as m:
+        m.setattr(torch_rbln.device, "device_count", lambda: 1)
+        m.setattr(torch.rbln, "synchronize", lambda idx: calls.append("sync"))
+        m.setattr(sdpa_mod, "_clear_attn_weights_cache", lambda: calls.append("sdpa_clear"))
+        m.setattr(torch_rbln.memory, "empty_cache", lambda device: calls.append("flush"))
+        gen = conftest.reset_caching_allocator.__wrapped__()
+        next(gen)
+        with pytest.raises(StopIteration):
+            next(gen)  # teardown runs to completion
+    assert calls == ["sync", "sdpa_clear", "flush"]
 
 
 def _with_env(var, value, fn):

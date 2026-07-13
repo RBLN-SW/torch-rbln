@@ -240,15 +240,11 @@ class TestDispatchShimNanInfFallback(TestCase):
 
 @pytest.mark.test_set_ci
 class TestDispatchShimGateLiveRead(TestCase):
-    """The NaN/Inf pre-check is gated by two independent env flags read live on every
-    dispatch (NOT cached in a process-lifetime ``static``): ``TORCH_RBLN_DEPLOY``
-    (``is_deploy_mode``) and ``TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK`` containing
-    ``nan_inf``/``all`` (``is_nan_inf_check_disabled``), both in ``DispatchShim.cpp``.
-    Toggling either inside one process must change whether the scan runs, observed via the
-    warm cache: with the scan ON a NaN input takes the CPU fallback (which never primes the
-    warm cache); with it OFF the op takes the device path (which installs a warm-cache
-    entry). A re-introduced static cache in *either* gate would latch the first value and
-    fail its toggle. The two gates are separate functions, so they need separate toggles."""
+    """Both NaN/Inf-scan gates -- ``TORCH_RBLN_DEPLOY`` (``is_deploy_mode``) and
+    ``TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK`` (``is_nan_inf_check_disabled``) in
+    ``DispatchShim.cpp`` -- are read live per dispatch, not cached in a process-lifetime
+    ``static``. A re-introduced static cache in either would latch the first value and fail
+    its toggle. They are separate functions, so each is toggled separately."""
 
     _GATE_ENVS = ("TORCH_RBLN_DEPLOY", "TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK")
 
