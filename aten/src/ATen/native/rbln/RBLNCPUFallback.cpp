@@ -9,6 +9,7 @@
 #include <ATen/native/rbln/RBLNTensorUtils.h>
 
 #include <c10/rbln/RBLNFunctions.h>
+#include <c10/util/SmallVector.h>
 
 #ifndef AT_PER_OPERATOR_HEADERS
 #include <ATen/Functions.h>
@@ -508,7 +509,11 @@ void cpu_fallback_rbln(
   };
 
   if (grow_retry_safe) {
-    const std::vector<c10::IValue> stack_snapshot = *stack;
+    // redispatchBoxed consumes the stack, so snapshot the args up front to restore
+    // for the grow-retry. Stack-inlined (8 covers any pure-out op's arg count) to
+    // skip the heap alloc on this per-pure-out fallback path; the IValue copies are
+    // unavoidable refcount bumps.
+    c10::SmallVector<c10::IValue, 8> stack_snapshot(stack->begin(), stack->end());
     try {
       run_cpu_kernel();
     } catch (const c10::Error& e) {
@@ -528,7 +533,7 @@ void cpu_fallback_rbln(
           cpu_tensors[i] = at::empty({0}, tensor_args[i].options().device(at::kCPU));
         }
       }
-      *stack = stack_snapshot; // redispatchBoxed consumed the args; restore them
+      stack->assign(stack_snapshot.begin(), stack_snapshot.end()); // restore the consumed args
       for (const auto i : c10::irange(tensor_args_indices.size())) {
         (*stack)[arguments_begin + tensor_args_indices[i]] = c10::IValue(cpu_tensors[i]);
       }
