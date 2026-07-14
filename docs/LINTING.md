@@ -1,26 +1,47 @@
 # Linting
 
-A Git `pre-commit` hook runs linting automatically on commit. Initialize `lintrunner` once:
+## Source linting
+
+[Source linting](WORKFLOWS.md#lint-workflow) runs `lintrunner` over the source tree.
+
+Install dependencies and initialize `lintrunner` once:
 
 ```bash
-source .venv/bin/activate
-lintrunner init
+uv sync --no-install-project
+uv run --no-sync lintrunner init
 ```
 
-After initialization, linting runs on every `git commit`. To manually lint and auto-fix:
+For C++ changes, `clang-tidy` needs the Rebel runtime headers and a compile database. Install the build-pinned rebel-compiler, then configure CMake:
 
 ```bash
-lintrunner -m main -a
+uv pip install --constraint constraints-build-dev.txt rebel-compiler
+uv run --no-sync cmake -GNinja -B build -S . \
+  -DBUILD_SHARED_LIBS=ON \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=torch_rbln
+```
+
+To lint and auto-fix changed files:
+
+```bash
+uv run --no-sync lintrunner -m origin/main -a
 ```
 
 ## Workflow linting
 
-[Workflow linting](WORKFLOWS.md#lint-workflows) runs [`actionlint`](https://github.com/rhysd/actionlint), [`yamllint`](https://github.com/adrienverge/yamllint), and [`zizmor`](https://github.com/zizmorcore/zizmor) on the workflow files. To run them locally:
+[Workflow linting](WORKFLOWS.md#lint-workflow) runs [`actionlint`](https://github.com/rhysd/actionlint), [`yamllint`](https://github.com/adrienverge/yamllint), and [`zizmor`](https://github.com/zizmorcore/zizmor) on the workflow files.
+
+Install dependencies once:
 
 ```bash
+uv venv
 uv pip install --group lint
+```
 
-actionlint
-yamllint --strict .github/
-zizmor --offline .github/
+To run them locally:
+
+```bash
+uv run --no-sync actionlint
+uv run --no-sync yamllint --strict .github/
+uv run --no-sync zizmor --offline .github/
 ```
