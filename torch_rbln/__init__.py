@@ -195,9 +195,10 @@ def _create_process_group_rbln(dist_backend_opts, pg_options):
 def _initialize_kineto_profiler() -> None:
     """Register the rbln torch.profiler (kineto) bridge."""
     from torch_rbln._internal.device_arch_utils import is_atom_device
+    from torch_rbln._internal.log_utils import rbln_log_info
 
     if is_atom_device():
-        warnings.warn("rbln torch.profiler activities are not supported on ATOM and will be skipped", stacklevel=2)
+        rbln_log_info("rbln torch.profiler activities are not supported on ATOM and will be skipped")
         return
 
     try:
