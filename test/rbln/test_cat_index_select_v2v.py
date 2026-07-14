@@ -602,6 +602,35 @@ class TestIndexSelectV2V(TestCase):
         with pytest.raises(RuntimeError):
             torch.index_select(to_dev(a_cpu), 0, bad_idx)
 
+    def test_index_select_empty_self_oob_index_rejected(self):
+        """self empty on the indexed axis (extent 0): any index is out of range and must
+        raise like CPU, not resize out to (1,3) and return it uninitialized."""
+        empty_self = torch.empty((0, 3), dtype=torch.float32)
+        idx = torch.tensor([0], dtype=torch.long)
+        with pytest.raises(RuntimeError):
+            torch.index_select(empty_self, 0, idx)  # CPU parity
+        with pytest.raises(RuntimeError):
+            torch.index_select(to_dev(empty_self), 0, idx)
+
+    def test_index_select_empty_output_valid_index(self):
+        """self (3,0): extent-3 axis makes index [0] valid with empty output
+        (1,0) — must NOT raise (bounds fix must not reject valid indices)."""
+        empty_self = torch.empty((3, 0), dtype=torch.float32)
+        idx = torch.tensor([0], dtype=torch.long)
+        expected = torch.index_select(empty_self, 0, idx)
+        got = torch.index_select(to_dev(empty_self), 0, idx)
+        _check(got, expected)
+
+    def test_index_select_empty_output_oob_index_rejected(self):
+        """self (3,0): index 5 exceeds extent 3 and must raise like CPU even though the
+        output would be empty (numel()==0 must not swallow it)."""
+        empty_self = torch.empty((3, 0), dtype=torch.float32)
+        idx = torch.tensor([5], dtype=torch.long)
+        with pytest.raises(RuntimeError):
+            torch.index_select(empty_self, 0, idx)  # CPU parity
+        with pytest.raises(RuntimeError):
+            torch.index_select(to_dev(empty_self), 0, idx)
+
 
 instantiate_device_type_tests(TestCatV2V, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestIndexSelectV2V, globals(), only_for="privateuse1")

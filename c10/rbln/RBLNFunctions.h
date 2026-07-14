@@ -331,10 +331,17 @@ struct BorrowedHostPtr {
  * authoritative; allocates host backing if none exists. After this call the
  * host buffer is read-ready.
  *
+ * `rbln_data` may be an interior vaddr — a view into the middle of an allocation
+ * (e.g. a tensor with a non-zero storage offset). The borrow is offset-correct:
+ * the runtime resolves it against the enclosing allocation and returns
+ * `host_ptr = allocation_base + (rbln_data - allocation_base)`. The range
+ * `[rbln_data, rbln_data + nbytes)` must fit within that allocation, else the
+ * borrow fails.
+ *
  * The borrow MUST be released via `return_borrowed(result.borrow_id, ...)`.
  *
- * @param rbln_data A pointer to rbln-device memory (typically tensor data_ptr).
- *        Must not be nullptr.
+ * @param rbln_data A pointer to rbln-device memory (typically tensor data_ptr;
+ *        an interior/offset vaddr is fine). Must not be nullptr.
  * @param nbytes Number of bytes to borrow. Must be positive — callers with a
  *        legitimate zero-byte case must short-circuit before invoking.
  * @return Host pointer + non-zero borrow id; throws c10::Error via RBLN_CHECK
@@ -476,8 +483,9 @@ C10_RBLN_API void rt_timing_get(uint64_t* out);
 
 // torch.rbln.explain() runtime-counter reads — thin pass-throughs to librbln's
 // public C-API (see rebel/runtime/api/rbln_runtime_api.h). Process-global, lazy.
-// These are LINKED (not dlsym'd): a librbln lacking them fails extension load, so
-// the vendored header and the runtime are kept version-aligned (third_party/).
+// These are LINKED (not dlsym'd): a librbln lacking them fails extension load.
+// Build-time headers and library are resolved from the same source -- the
+// rebel-compiler wheel or a REBEL_HOME tree -- so the linked ABI matches.
 // The per-reason axes are positional; their meaning is interpreted Python-side, so
 // no internal classification name crosses this boundary.
 C10_RBLN_API uint32_t rt_prof_hidden_num();
