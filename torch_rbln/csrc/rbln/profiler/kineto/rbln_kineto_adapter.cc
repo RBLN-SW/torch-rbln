@@ -168,8 +168,11 @@ class RblnActivityProfiler : public ::libkineto::IActivityProfiler {
           "rbln_kineto_is_active failed with error code: {}; not creating a profiling session", static_cast<int>(ret));
       return nullptr;
     }
-    if (!active)
+    if (!active) {
+      RBLN_LOG_INFO("rbln profiling is not active; skipping rbln activities for this torch.profiler session");
       return nullptr;
+    }
+    RBLN_LOG_DEBUG("rbln profiling is active; creating a profiling session");
     return std::make_unique<RblnActivityProfilerSession>();
   }
 
