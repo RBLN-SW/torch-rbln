@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <vector>
@@ -415,25 +416,31 @@ bool runtime_available() noexcept {
 // device_allocator populated on first use. Backs initialized()/hasPrimaryContext() and
 // gates the best-effort memory ops, so a process with the runtime + a mapping but no live
 // context (e.g. a vLLM EngineCore parent) reports uninitialized. Set-once, lock-free.
-// Not reset across fork: RBLN-in-fork-child is unsupported (contexts don't survive fork).
+// RBLN device use after fork is unsupported; bad-fork detection is not implemented yet
+// (the mask is inherited stale in a fork child).
 namespace {
-std::atomic<uint64_t> g_context_init_mask{0};
-constexpr c10::DeviceIndex kMaxTrackedDevices = 64; // one bit per logical device
+// Two 64-bit words cover the full valid DeviceIndex range. DeviceMappingManager caps
+// logical devices at numeric_limits<DeviceIndex>::max(), so valid indices are
+// [0, max) = [0, 126] and index 127 is never a device — no valid device is silently
+// untracked (the earlier single-word tracker dropped indices 64+).
+constexpr c10::DeviceIndex kMaxTrackedDevices = std::numeric_limits<c10::DeviceIndex>::max(); // 127
+std::array<std::atomic<uint64_t>, 2> g_context_init_mask{}; // 128 bits
 } // namespace
 
 void mark_device_context_initialized(c10::DeviceIndex device_index) noexcept {
   if (device_index >= 0 && device_index < kMaxTrackedDevices) {
-    g_context_init_mask.fetch_or(uint64_t{1} << device_index, std::memory_order_relaxed);
+    g_context_init_mask[device_index >> 6].fetch_or(uint64_t{1} << (device_index & 63), std::memory_order_relaxed);
   }
 }
 
 bool device_context_initialized(c10::DeviceIndex device_index) noexcept {
   return device_index >= 0 && device_index < kMaxTrackedDevices &&
-      ((g_context_init_mask.load(std::memory_order_relaxed) >> device_index) & 1U) != 0;
+      ((g_context_init_mask[device_index >> 6].load(std::memory_order_relaxed) >> (device_index & 63)) & 1U) != 0;
 }
 
 bool any_device_context_initialized() noexcept {
-  return g_context_init_mask.load(std::memory_order_relaxed) != 0;
+  return (g_context_init_mask[0].load(std::memory_order_relaxed) |
+          g_context_init_mask[1].load(std::memory_order_relaxed)) != 0;
 }
 
 void* malloc(c10::DeviceIndex device_index, size_t nbytes) {
@@ -827,16 +834,8 @@ c10::CachingDeviceAllocator::DeviceStats get_device_stats(const c10::Device& dev
   if (!runtime_available()) {
     return c10::CachingDeviceAllocator::DeviceStats{};
   }
-  // Two-level context gate (see empty_cache): empty stats when this process/device has no
-  // allocator state; an invalid index still throws once the allocator is in use.
-  if (!any_device_context_initialized()) {
-    return c10::CachingDeviceAllocator::DeviceStats{};
-  }
   const auto device_index = device.index();
   check_device_index(device_index);
-  if (!device_context_initialized(device_index)) {
-    return c10::CachingDeviceAllocator::DeviceStats{};
-  }
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_get_memory_stats: device_id={}", device_id);
   const auto memory_stats = rbln_get_memory_stats(device_id);
@@ -888,14 +887,11 @@ c10::CachingDeviceAllocator::DeviceStats get_device_stats(const c10::Device& dev
 
 void empty_cache(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
-  // Best-effort: nothing to flush when the runtime is unavailable.
-  if (!runtime_available()) {
-    return;
-  }
-  // Two-level context gate (CUDA parity): no allocator state anywhere → no-op (a no-context
-  // parent or malformed config; never dispatches); otherwise validate the index (invalid
-  // throws) and skip a device this process never used.
-  if (!any_device_context_initialized()) {
+  // Two-level context gate (CUDA parity). Check the context flag FIRST: no allocator state
+  // anywhere → no-op (a no-context parent or malformed config; never dispatches, and this
+  // avoids runtime_available()/device enumeration triggering device registration as a side
+  // effect). Otherwise validate the index (invalid throws) and skip a device never used here.
+  if (!any_device_context_initialized() || !runtime_available()) {
     return;
   }
   const auto device_index = device.index();
@@ -921,15 +917,8 @@ std::map<std::string, uint64_t> memory_stats(const c10::Device& device) {
   if (!runtime_available()) {
     return {};
   }
-  // Two-level context gate (see empty_cache).
-  if (!any_device_context_initialized()) {
-    return {};
-  }
   const auto device_index = device.index();
   check_device_index(device_index);
-  if (!device_context_initialized(device_index)) {
-    return {};
-  }
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_get_memory_stats: rbln:{}, device_id={}", static_cast<int>(device_index), device_id);
   const auto stats = rbln_get_memory_stats(device_id);
@@ -941,12 +930,8 @@ std::map<std::string, uint64_t> memory_stats(const c10::Device& device) {
 
 void reset_accumulated_memory_stats(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
-  // Best-effort: nothing to reset when the runtime is unavailable.
-  if (!runtime_available()) {
-    return;
-  }
-  // Two-level context gate (see empty_cache).
-  if (!any_device_context_initialized()) {
+  // Two-level context gate (see empty_cache); context flag first.
+  if (!any_device_context_initialized() || !runtime_available()) {
     return;
   }
   const auto device_index = device.index();
@@ -967,14 +952,9 @@ void reset_accumulated_memory_stats(const c10::Device& device) {
 
 void reset_peak_memory_stats(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
-  // Best-effort no-op when unavailable (torch.accelerator.reset_peak has no Python
-  // init-guard, so the leaf gate is the only protection).
-  if (!runtime_available()) {
-    return;
-  }
-  // Two-level context gate (see empty_cache). This is also the only guard for the generic
-  // torch.accelerator.reset_peak path (no Python init-guard upstream).
-  if (!any_device_context_initialized()) {
+  // Two-level context gate (see empty_cache); context flag first. This is also the only
+  // guard for the generic torch.accelerator.reset_peak path (no Python init-guard upstream).
+  if (!any_device_context_initialized() || !runtime_available()) {
     return;
   }
   const auto device_index = device.index();

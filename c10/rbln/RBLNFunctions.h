@@ -168,7 +168,8 @@ C10_RBLN_API void set_runtime_shutting_down(bool value) noexcept;
  * such allocator/context state exists. They gate the best-effort memory ops and back
  * initialized()/hasPrimaryContext(), so a process with the runtime + a device mapping
  * but no live context (e.g. a vLLM EngineCore parent) is correctly reported as
- * uninitialized. Set-once, monotonic, nothrow. Not reset across fork.
+ * uninitialized. Set-once, monotonic, nothrow. RBLN device use after fork is
+ * unsupported; bad-fork detection is not implemented yet.
  */
 C10_RBLN_API void mark_device_context_initialized(c10::DeviceIndex device_index) noexcept;
 C10_RBLN_API bool device_context_initialized(c10::DeviceIndex device_index) noexcept;
