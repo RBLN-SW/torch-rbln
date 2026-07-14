@@ -1,6 +1,7 @@
 #include <c10/core/Allocator.h>
 #include <c10/core/CachingDeviceAllocator.h>
 #include <c10/rbln/RBLNFunctions.h>
+#include <c10/rbln/RBLNHooksInterface.h>
 #include <gtest/gtest.h>
 
 class RBLNAllocatorTest : public ::testing::Test {
@@ -88,8 +89,50 @@ TEST_F(RBLNAllocatorTest, IsDeviceAllocator) {
 }
 
 TEST_F(RBLNAllocatorTest, Initialized) {
+  // CUDA parity: initialized() reflects per-process allocator state, so it is true only
+  // after this process has actually allocated (a device/mapping existing is not enough).
+  // The uninitialized-process case (false before any allocation) is covered in a fresh
+  // subprocess by test/rbln/test_runtime_unavailable.py.
   auto* device_allocator = GetDeviceAllocator();
+  const auto data = c10::GetAllocator(c10::kPrivateUse1)->allocate(1024);
+  EXPECT_NE(data.get(), nullptr);
   EXPECT_TRUE(device_allocator->initialized());
+}
+
+// The per-process context flag backs initialized() and hasPrimaryContext(): a bit is
+// set on the first successful allocation on a device. (The uninitialized case — false
+// before any allocation — needs a fresh process; see test_runtime_unavailable.py.)
+TEST_F(RBLNAllocatorTest, DeviceContextTracksAllocation) {
+  // Out-of-range / negative indices are always false (bounded bitmask, nothrow).
+  EXPECT_FALSE(c10::rbln::device_context_initialized(-1));
+  EXPECT_FALSE(c10::rbln::device_context_initialized(64));
+
+  const auto idx = c10::rbln::get_device_index();
+  const auto data = c10::GetAllocator(c10::kPrivateUse1)->allocate(1024);
+  EXPECT_NE(data.get(), nullptr);
+  EXPECT_TRUE(c10::rbln::device_context_initialized(idx));
+  EXPECT_TRUE(c10::rbln::any_device_context_initialized());
+
+  // hasPrimaryContext() is per-device and mirrors the flag (CUDA parity).
+  auto* hooks = c10::rbln::get_rbln_hooks();
+  EXPECT_TRUE(hooks->hasPrimaryContext(idx));
+  EXPECT_FALSE(hooks->hasPrimaryContext(-1));
+  EXPECT_FALSE(hooks->hasPrimaryContext(64));
+}
+
+// A shutting-down runtime has no usable context, so hasPrimaryContext() must report
+// false even for a device this process allocated on (folds in the liveness check).
+TEST_F(RBLNAllocatorTest, HasPrimaryContextFalseDuringShutdown) {
+  const auto idx = c10::rbln::get_device_index();
+  const auto data = c10::GetAllocator(c10::kPrivateUse1)->allocate(1024);
+  EXPECT_NE(data.get(), nullptr);
+  auto* hooks = c10::rbln::get_rbln_hooks();
+  EXPECT_TRUE(hooks->hasPrimaryContext(idx));
+
+  c10::rbln::set_runtime_shutting_down(true);
+  EXPECT_FALSE(hooks->hasPrimaryContext(idx));
+  c10::rbln::set_runtime_shutting_down(false); // restore (process-global flag)
+  EXPECT_TRUE(hooks->hasPrimaryContext(idx));
 }
 
 TEST_F(RBLNAllocatorTest, EmptyCache) {
@@ -139,6 +182,9 @@ TEST_F(RBLNAllocatorTest, GetDeviceStats) {
 TEST_F(RBLNAllocatorTest, GetDeviceStatsInvalidIndex) {
   auto* device_allocator = GetDeviceAllocator();
   const auto device_count = c10::rbln::get_device_count();
+  // Once the allocator is in use, an invalid device index is a real error (CUDA parity).
+  const auto data = c10::GetAllocator(c10::kPrivateUse1)->allocate(1024);
+  EXPECT_NE(data.get(), nullptr);
 
   // Negative index should throw.
   EXPECT_THROW(device_allocator->getDeviceStats(-1), c10::Error);
@@ -154,6 +200,9 @@ TEST_F(RBLNAllocatorTest, ResetAccumulatedStats) {
 TEST_F(RBLNAllocatorTest, ResetAccumulatedStatsInvalidIndex) {
   auto* device_allocator = GetDeviceAllocator();
   const auto device_count = c10::rbln::get_device_count();
+  // Once the allocator is in use, an invalid device index is a real error (CUDA parity).
+  const auto data = c10::GetAllocator(c10::kPrivateUse1)->allocate(1024);
+  EXPECT_NE(data.get(), nullptr);
 
   EXPECT_THROW(device_allocator->resetAccumulatedStats(-1), c10::Error);
   EXPECT_THROW(device_allocator->resetAccumulatedStats(device_count), c10::Error);
@@ -167,6 +216,9 @@ TEST_F(RBLNAllocatorTest, ResetPeakStats) {
 TEST_F(RBLNAllocatorTest, ResetPeakStatsInvalidIndex) {
   auto* device_allocator = GetDeviceAllocator();
   const auto device_count = c10::rbln::get_device_count();
+  // Once the allocator is in use, an invalid device index is a real error (CUDA parity).
+  const auto data = c10::GetAllocator(c10::kPrivateUse1)->allocate(1024);
+  EXPECT_NE(data.get(), nullptr);
 
   EXPECT_THROW(device_allocator->resetPeakStats(-1), c10::Error);
   EXPECT_THROW(device_allocator->resetPeakStats(device_count), c10::Error);

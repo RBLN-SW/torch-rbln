@@ -161,6 +161,20 @@ C10_RBLN_API bool runtime_available() noexcept;
 C10_RBLN_API void set_runtime_shutting_down(bool value) noexcept;
 
 /**
+ * @brief Per-process device-context tracking (CUDA parity with device_allocator).
+ *
+ * mark_device_context_initialized() records that THIS process has successfully
+ * allocated device memory on a logical device; the query functions report whether
+ * such allocator/context state exists. They gate the best-effort memory ops and back
+ * initialized()/hasPrimaryContext(), so a process with the runtime + a device mapping
+ * but no live context (e.g. a vLLM EngineCore parent) is correctly reported as
+ * uninitialized. Set-once, monotonic, nothrow. Not reset across fork.
+ */
+C10_RBLN_API void mark_device_context_initialized(c10::DeviceIndex device_index) noexcept;
+C10_RBLN_API bool device_context_initialized(c10::DeviceIndex device_index) noexcept;
+C10_RBLN_API bool any_device_context_initialized() noexcept;
+
+/**
  * @brief Allocates memory on the specified RBLN device.
  *
  * This function allocates a contiguous block of memory on the given RBLN
