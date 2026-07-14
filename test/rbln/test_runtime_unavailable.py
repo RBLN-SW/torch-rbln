@@ -19,8 +19,10 @@ flag never leaks into other tests.
 """
 
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 
 import pytest
@@ -239,6 +241,80 @@ class TestRuntimeUnavailable(TestCase):
             """
         )
         _assert_ok(self, result, "MALLOC_OK")
+
+    @requires_physical_devices(1)
+    def test_best_effort_ops_degrade_when_runtime_call_fails(self):
+        """With the runtime AVAILABLE, a best-effort runtime call that returns non-zero
+        (the reported crash: a no-context process makes the runtime fail rbln_empty_cache)
+        must degrade to a warning, not abort the caller (torch.cuda parity). An LD_PRELOAD
+        shim forces the non-zero rc so the contract is testable on healthy hardware;
+        reset_peak / reset_accumulated share the leaf and are covered too."""
+        cc = shutil.which("cc") or shutil.which("gcc")
+        if cc is None:
+            self.skipTest("needs a C compiler to build the failure-injection shim")
+        with tempfile.TemporaryDirectory() as tmp:
+            src = os.path.join(tmp, "fail_shim.c")
+            so = os.path.join(tmp, "fail_shim.so")
+            # librbln exports these with C linkage; LD_PRELOAD interposes them so the
+            # best-effort leaves see rc != 0 without any real fault.
+            with open(src, "w") as handle:
+                handle.write(
+                    "int rbln_empty_cache(int d){(void)d;return 1;}\n"
+                    "int rbln_reset_peak_memory_stats(int d){(void)d;return 1;}\n"
+                    "int rbln_reset_accumulated_memory_stats(int d){(void)d;return 1;}\n"
+                )
+            build = subprocess.run([cc, "-shared", "-fPIC", "-o", so, src], capture_output=True, text=True)
+            if build.returncode != 0:
+                self.skipTest(f"could not build failure-injection shim: {build.stderr}")
+            result = _run_subprocess(
+                """
+                assert torch.rbln.device_count() > 0 and C.runtime_available() is True
+                t = torch.ones(64, device="rbln:0"); _ = (t + t).sum().item()  # establish a real context
+                # rbln_empty_cache / rbln_reset_* now return non-zero (LD_PRELOAD shim);
+                # every entry point must degrade to a warning, not raise.
+                torch.accelerator.empty_cache()                      # generic accelerator path (vLLM shutdown)
+                torch.accelerator.reset_peak_memory_stats()          # no Python init-guard: leaf gate is the only protection
+                torch.accelerator.reset_accumulated_memory_stats(0)
+                d = torch.device("rbln", 0)
+                C.empty_cache(d); C.reset_peak_memory_stats(d); C.reset_accumulated_memory_stats(d)
+                print("DEGRADE_OK")
+                """,
+                env_extra={"LD_PRELOAD": so},
+            )
+            _assert_ok(self, result, "DEGRADE_OK")
+            # Non-vacuous: prove the failure path was actually taken (the leaf warned)
+            # rather than the shim silently not interposing.
+            self.assertIn(
+                "skipping cache flush",
+                result.stderr,
+                f"expected the degraded-empty_cache warning (failure path not exercised?)\n--- stderr ---\n{result.stderr}",
+            )
+
+    @requires_physical_devices(1)
+    def test_memory_ops_nothrow_on_malformed_config(self):
+        """The allocator's initialized() predicate (which gates torch.accelerator memory
+        ops) must stay total. A malformed RBLN_NPUS_PER_DEVICE makes the internal
+        device-count lookup throw; the predicate must swallow it and report
+        not-initialized so empty_cache no-ops instead of aborting the caller. The
+        misconfig still surfaces at real device use."""
+        result = _run_subprocess(
+            """
+            # Malformed config: the device-count lookup throws internally. The nothrow
+            # predicate must NOT propagate that -- it reports not-initialized.
+            assert torch._C._accelerator_isAllocatorInitialized() is False, "predicate must be nothrow + not-initialized"
+            torch.accelerator.empty_cache()               # gated off -> no-op, must not raise
+            torch.accelerator.reset_peak_memory_stats()
+            # The misconfig is still surfaced when a device is actually used.
+            try:
+                torch.ones(4, device="rbln:0")
+                raise AssertionError("malformed config must raise at the point of real device use")
+            except Exception:
+                pass
+            print("MALFORMED_OK")
+            """,
+            env_extra={"RBLN_NPUS_PER_DEVICE": "3", "RBLN_DEVICE_MAP": None},
+        )
+        _assert_ok(self, result, "MALFORMED_OK")
 
     @requires_physical_devices(1)
     def test_runtime_available_true_on_healthy_host(self):

@@ -861,10 +861,15 @@ void empty_cache(const c10::Device& device) {
   check_device_index(device_index);
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_empty_cache: device_id={}", device_id);
-  RBLN_CHECK(
-      !rbln_empty_cache(device_id),
-      "rbln_empty_cache failed for rbln:{} (device may be busy or in a faulted state)",
-      static_cast<int>(device_index));
+  // Best-effort: a failed cache flush must not abort the caller (CUDA parity — empty_cache
+  // never raises). A process with no live context makes the runtime fail here, and
+  // cleanup/teardown paths call this; warn instead. A real fault resurfaces at the next
+  // mandatory op (malloc/copy/execute, all hard-checked).
+  if (rbln_empty_cache(device_id)) {
+    RBLN_WARN_NOTHROW(
+        "rbln_empty_cache failed for rbln:{} (device may be busy or in a faulted state); skipping cache flush",
+        static_cast<int>(device_index));
+  }
 }
 
 std::map<std::string, uint64_t> memory_stats(const c10::Device& device) {
@@ -894,10 +899,11 @@ void reset_accumulated_memory_stats(const c10::Device& device) {
   check_device_index(device_index);
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_reset_accumulated_memory_stats: device_id={}", device_id);
-  RBLN_CHECK(
-      !rbln_reset_accumulated_memory_stats(device_id),
-      "rbln_reset_accumulated_memory_stats failed for rbln:{}",
-      static_cast<int>(device_index));
+  // Best-effort (see empty_cache): a failed reset carries no correctness meaning; warn, don't throw.
+  if (rbln_reset_accumulated_memory_stats(device_id)) {
+    RBLN_WARN_NOTHROW(
+        "rbln_reset_accumulated_memory_stats failed for rbln:{}; skipping reset", static_cast<int>(device_index));
+  }
 }
 
 void reset_peak_memory_stats(const c10::Device& device) {
@@ -911,10 +917,11 @@ void reset_peak_memory_stats(const c10::Device& device) {
   check_device_index(device_index);
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_reset_peak_memory_stats: device_id={}", device_id);
-  RBLN_CHECK(
-      !rbln_reset_peak_memory_stats(device_id),
-      "rbln_reset_peak_memory_stats failed for rbln:{}",
-      static_cast<int>(device_index));
+  // Best-effort (see empty_cache): a failed reset carries no correctness meaning; warn, don't throw.
+  if (rbln_reset_peak_memory_stats(device_id)) {
+    RBLN_WARN_NOTHROW(
+        "rbln_reset_peak_memory_stats failed for rbln:{}; skipping reset", static_cast<int>(device_index));
+  }
 }
 
 void set_file_offloading_enabled(bool enabled) {
