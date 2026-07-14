@@ -19,8 +19,10 @@ flag never leaks into other tests.
 """
 
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 
 import pytest
@@ -58,6 +60,21 @@ def _assert_ok(self, result: subprocess.CompletedProcess, marker: str) -> None:
         f"runtime-liveness contract failed (rc={result.returncode})\n"
         f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}",
     )
+
+
+def _build_ld_preload_shim(tmp_dir: str, c_source: str):
+    """Compile a tiny LD_PRELOAD shim that interposes librbln's C-linkage entry points
+    (used to force / observe the runtime calls). Returns the .so path, or None if no C
+    compiler is available (test skips)."""
+    cc = shutil.which("cc") or shutil.which("gcc")
+    if cc is None:
+        return None
+    src = os.path.join(tmp_dir, "shim.c")
+    so = os.path.join(tmp_dir, "shim.so")
+    with open(src, "w") as handle:
+        handle.write(c_source)
+    build = subprocess.run([cc, "-shared", "-fPIC", "-o", so, src], capture_output=True, text=True)
+    return so if build.returncode == 0 else None
 
 
 @pytest.mark.test_set_ci
@@ -241,21 +258,173 @@ class TestRuntimeUnavailable(TestCase):
         _assert_ok(self, result, "MALLOC_OK")
 
     @requires_physical_devices(1)
+    def test_best_effort_ops_noop_without_live_context(self):
+        """The reported regression: a process with the runtime + a device mapping but NO
+        live context (no allocation yet — the vLLM EngineCore parent) must NOT dispatch
+        the runtime call. empty_cache/reset_* are gated by the per-process context flag
+        (initialized()/hasPrimaryContext()), so they no-op without fabricating a context.
+        Proven with a shim that records whether rbln_empty_cache is actually invoked."""
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = os.path.join(tmp, "called")
+            # Shim records an invocation of any of the gated ops; if the gate works, none
+            # are ever called (the marker file is never created).
+            so = _build_ld_preload_shim(
+                tmp,
+                "#include <stdio.h>\n#include <stdlib.h>\n"
+                'static void mark(void){const char*p=getenv("SHIM_MARKER"); if(p){FILE*f=fopen(p,"a"); if(f)fclose(f);}}\n'
+                "int rbln_empty_cache(int d){(void)d; mark(); return 0;}\n"
+                "int rbln_reset_peak_memory_stats(int d){(void)d; mark(); return 0;}\n"
+                "int rbln_reset_accumulated_memory_stats(int d){(void)d; mark(); return 0;}\n",
+            )
+            if so is None:
+                self.skipTest("needs a C compiler to build the LD_PRELOAD shim")
+            result = _run_subprocess(
+                """
+                assert torch.rbln.device_count() > 0 and C.runtime_available() is True
+                assert torch._C._accelerator_isAllocatorInitialized() is False, "no allocation yet -> not initialized"
+                d = torch.device("rbln", 0)
+                torch.accelerator.empty_cache()               # generic accelerator path (vLLM shutdown)
+                torch.accelerator.reset_peak_memory_stats()
+                torch.accelerator.reset_accumulated_memory_stats(0)
+                C.empty_cache(d); C.reset_peak_memory_stats(d); C.reset_accumulated_memory_stats(d)  # direct C API too
+                print("NOCTX_OK")
+                """,
+                env_extra={"LD_PRELOAD": so, "SHIM_MARKER": marker},
+            )
+            _assert_ok(self, result, "NOCTX_OK")
+            self.assertFalse(
+                os.path.exists(marker),
+                "a best-effort runtime op was dispatched despite no live context — the context gate failed",
+            )
+
+    @requires_physical_devices(1)
+    def test_best_effort_ops_propagate_live_context_failure(self):
+        """Once this process has a live context (after an allocation), a genuine runtime
+        failure in a best-effort op IS surfaced (CUDA parity — cudaFree failures in an
+        initialized allocator propagate), not silently swallowed. Injected with an
+        LD_PRELOAD shim forcing the C entry points to return non-zero."""
+        with tempfile.TemporaryDirectory() as tmp:
+            so = _build_ld_preload_shim(
+                tmp,
+                "int rbln_empty_cache(int d){(void)d;return 1;}\n"
+                "int rbln_reset_peak_memory_stats(int d){(void)d;return 1;}\n"
+                "int rbln_reset_accumulated_memory_stats(int d){(void)d;return 1;}\n",
+            )
+            if so is None:
+                self.skipTest("needs a C compiler to build the LD_PRELOAD shim")
+            result = _run_subprocess(
+                """
+                t = torch.ones(64, device="rbln:0"); _ = (t + t).sum().item()   # establish a live context
+                d = torch.device("rbln", 0)
+                ops = {
+                    "empty_cache": lambda: torch.accelerator.empty_cache(),
+                    "reset_peak": lambda: torch.accelerator.reset_peak_memory_stats(),
+                    "reset_accum": lambda: torch.accelerator.reset_accumulated_memory_stats(0),
+                    "C.empty_cache": lambda: C.empty_cache(d),
+                    "C.reset_peak": lambda: C.reset_peak_memory_stats(d),
+                    "C.reset_accum": lambda: C.reset_accumulated_memory_stats(d),
+                }
+                swallowed, bad_msg = [], []
+                for name, fn in ops.items():
+                    try:
+                        fn(); swallowed.append(name)
+                    except RuntimeError as exc:
+                        if "rc=1" not in str(exc):  # the injected non-zero rc must be reported
+                            bad_msg.append(name + ": " + str(exc)[:60])
+                assert not swallowed, "runtime failure silently swallowed on a live context: " + ",".join(swallowed)
+                assert not bad_msg, "error missing injected rc=1: " + "; ".join(bad_msg)
+                print("PROPAGATE_OK")
+                """,
+                env_extra={"LD_PRELOAD": so},
+            )
+            _assert_ok(self, result, "PROPAGATE_OK")
+
+    @requires_physical_devices(1)
+    def test_memory_ops_nothrow_on_malformed_config(self):
+        """The initialized()/hasPrimaryContext() predicates that gate torch.accelerator
+        memory ops must stay total. A malformed RBLN_NPUS_PER_DEVICE makes the internal
+        device-count lookup throw; the predicate swallows it and reports not-initialized,
+        so empty_cache no-ops instead of aborting the caller. The misconfig still surfaces
+        at real device use."""
+        result = _run_subprocess(
+            """
+            assert torch._C._accelerator_isAllocatorInitialized() is False, "predicate must be nothrow + not-initialized"
+            torch.accelerator.empty_cache()               # gated off -> no-op, must not raise
+            torch.accelerator.reset_peak_memory_stats()
+            try:
+                torch.ones(4, device="rbln:0")
+            except RuntimeError as exc:
+                assert "valid sizes" in str(exc), str(exc)   # misconfig surfaces at real device use
+            else:
+                raise AssertionError("malformed config must raise at the point of real device use")
+            print("MALFORMED_OK")
+            """,
+            env_extra={"RBLN_NPUS_PER_DEVICE": "3", "RBLN_DEVICE_MAP": None},
+        )
+        _assert_ok(self, result, "MALFORMED_OK")
+
+    @requires_physical_devices(1)
+    def test_dummy_malformed_config_memory_ops_noop(self):
+        """Dummy mode must not short-circuit the context gate: with a malformed config and
+        no allocation, the memory ops still no-op (not-initialized), and the misconfig
+        surfaces only at real device use. Covered for both malformed-config env vars
+        (RBLN_NPUS_PER_DEVICE and RBLN_DEVICE_MAP — same validateDeviceGroups path)."""
+        script = """
+            assert C.is_dummy_device() is True
+            assert torch._C._accelerator_isAllocatorInitialized() is False
+            torch.accelerator.empty_cache()               # no live context -> no-op, must not raise
+            torch.accelerator.reset_peak_memory_stats()
+            try:
+                torch.zeros(4, device="rbln:0")
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("dummy + malformed config must raise at real device use")
+            print("DUMMY_MALFORMED_OK")
+            """
+        # A bad group size (3) via each of the two mapping env vars.
+        for env_extra in (
+            {"RBLN_DUMMY_DEVICE": "1", "RBLN_NPUS_PER_DEVICE": "3", "RBLN_DEVICE_MAP": None},
+            {"RBLN_DUMMY_DEVICE": "1", "RBLN_DEVICE_MAP": "[0,1,2]", "RBLN_NPUS_PER_DEVICE": None},
+        ):
+            result = _run_subprocess(script, env_extra=env_extra)
+            _assert_ok(self, result, "DUMMY_MALFORMED_OK")
+
+    @requires_physical_devices(1)
     def test_runtime_available_true_on_healthy_host(self):
-        """With a device present and the runtime loaded, runtime_available() is True and
+        """With a device present, the runtime loaded, and this process having allocated,
         best-effort ops actually run (not gated off)."""
         result = _run_subprocess(
             """
             assert torch.rbln.device_count() > 0
             assert C.runtime_available() is True, "healthy host with a device must be available"
             assert torch.rbln.is_available() is True
+            t = torch.ones(64, device="rbln:0"); _ = (t + t).sum().item()   # establish a live context
             d = torch.device("rbln", 0)
             C.empty_cache(d)  # real flush, must not raise
-            assert isinstance(C.memory_stats(d), dict)
+            assert isinstance(C.memory_stats(d), dict) and len(C.memory_stats(d)) > 0
             print("HEALTHY_OK")
             """
         )
         _assert_ok(self, result, "HEALTHY_OK")
+
+    @requires_physical_devices(1)
+    def test_lazy_allocation_initializes_context(self):
+        """Invariant confirmed on real hardware: in default lazy-malloc mode, a single
+        torch.empty() marks the process initialized and the best-effort ops then run
+        (the runtime pool/context is created at registration, before malloc)."""
+        result = _run_subprocess(
+            """
+            t = torch.empty(1, device="rbln:0")   # default lazy VMemory entry (no eager malloc)
+            assert torch._C._accelerator_isAllocatorInitialized() is True, "lazy alloc must initialize the context"
+            torch.accelerator.empty_cache()
+            torch.accelerator.reset_peak_memory_stats()
+            assert len(torch.accelerator.memory.memory_stats(0)) > 0
+            print("LAZY_OK")
+            """,
+            env_extra={"TORCH_RBLN_EAGER_MALLOC": None},  # ensure lazy mode
+        )
+        _assert_ok(self, result, "LAZY_OK")
 
 
 if __name__ == "__main__":
