@@ -68,11 +68,15 @@ struct RBLNAllocator final : public c10::DeviceAllocator {
   }
 
   bool initialized() override {
-    // Gates torch.accelerator.empty_cache()/memory_stats(). Runtime check first so a
-    // missing runtime is false (not a segfault); throwing get_device_count() keeps a
-    // malformed config loud when the runtime is present.
-    const bool is_initialized =
-        rbln_runtime_available() && (c10::rbln::is_dummy_device() || c10::rbln::get_device_count() > 0);
+    // Gates torch.accelerator.empty_cache()/memory_stats(). CUDA parity: true only once
+    // THIS process has actually created allocator state (a successful device malloc),
+    // not merely because a device/mapping exists — so a process with the runtime but no
+    // live context (e.g. a vLLM EngineCore parent) reports false and those ops no-op
+    // instead of dispatching into a contextless runtime. Nothrow (torch calls this as a
+    // predicate, incl. cleanup paths, where a throw would abort the caller).
+    // Context flag first: a cleanup predicate must not trigger device enumeration/registration
+    // as a side effect when this process has no context.
+    const bool is_initialized = c10::rbln::any_device_context_initialized() && c10::rbln::runtime_available();
     RBLN_LOG_DEBUG("is_initialized={}", is_initialized);
     return is_initialized;
   }

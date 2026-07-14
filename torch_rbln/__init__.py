@@ -91,6 +91,9 @@ def torch_backends_entry_point() -> None:
 
         # Note: torch.compile monkey patch is applied in apply_all_patches() above
 
+        # Register torch.profiler (kineto) bridge ##############################
+        _initialize_kineto_profiler()
+
         # Initialize distributed support #######################################
         _initialize_distributed_bindings()
     except Exception:
@@ -196,6 +199,23 @@ def _create_process_group_rbln(dist_backend_opts, pg_options):
     return torch_rbln._C._distributed_c10d.ProcessGroupRBLN(
         store, group_rank, group_size, group_id, global_ranks_in_group, timeout, gloo_backend=gloo_backend
     )
+
+
+def _initialize_kineto_profiler() -> None:
+    """Register the rbln torch.profiler (kineto) bridge."""
+    from torch_rbln._internal.device_arch_utils import is_atom_device
+    from torch_rbln._internal.log_utils import rbln_log_info
+
+    if is_atom_device():
+        rbln_log_info("rbln torch.profiler activities are not supported on ATOM and will be skipped")
+        return
+
+    try:
+        import torch_rbln._C
+
+        torch_rbln._C._register_kineto_profiler()
+    except Exception as e:
+        warnings.warn(f"Failed to register rbln kineto profiler: {e}", stacklevel=2)
 
 
 def _initialize_distributed_bindings() -> None:

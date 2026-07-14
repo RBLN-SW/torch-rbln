@@ -9,6 +9,7 @@
 #include <ATen/native/rbln/RBLNTensorUtils.h>
 
 #include <c10/rbln/RBLNFunctions.h>
+#include <c10/util/SmallVector.h>
 
 #ifndef AT_PER_OPERATOR_HEADERS
 #include <ATen/Functions.h>
@@ -473,19 +474,83 @@ void cpu_fallback_rbln(
     }
   } _borrow_guard{borrow_ids, tensorlist_borrow_ids};
 
-  auto fast_path_fn = CPUFastPathRegistry::instance().try_get(op.schema());
-  const bool fast_path_taken = fast_path_fn != nullptr && fast_path_fn(cpu_tensors, stack, arguments_begin);
-  if (!fast_path_taken) {
-    op.redispatchBoxed(c10::DispatchKeySet(cpu_dispatch_key), stack);
+  // A pure-out borrow wraps the rbln out in a non-resizable from_blob view, so an
+  // undersized out= the CPU kernel tries to GROW throws "not resizable" (shrink is
+  // metadata-only and already handled in Step 3). Catch that one error, swap the
+  // pure-out(s) to resizable CPU storage, and retry once; Step 3's resize-writeback
+  // grows the rbln out. The retry re-runs the whole kernel, so it is safe only when
+  // every write alias is a pure-out: a non-pure-out mutable alias may already have
+  // been mutated in place before the throw, and re-running would double-apply it.
+  bool has_pure_out_borrow = false;
+  for (size_t i = 0; i < tensor_args.size(); ++i) {
+    if (borrow_ids[i] != 0 && schema_info.is_pure_out[tensor_args_indices[i]]) {
+      has_pure_out_borrow = true;
+      break;
+    }
+  }
+  // Scan the whole schema, not just tensor_args: is_write_alias is set for every
+  // arg kind, so this also catches a mutable Tensor[]/Tensor?[] (e.g. a foreach
+  // self list) that the tensor_args loop above would miss.
+  bool has_other_mutable_alias = false;
+  for (size_t k = 0; k < schema_info.is_write_alias.size(); ++k) {
+    if (schema_info.is_write_alias[k] && !schema_info.is_pure_out[k]) {
+      has_other_mutable_alias = true;
+      break;
+    }
+  }
+  const bool grow_retry_safe = has_pure_out_borrow && !has_other_mutable_alias;
+
+  auto run_cpu_kernel = [&]() {
+    auto fast_path_fn = CPUFastPathRegistry::instance().try_get(op.schema());
+    const bool fast_path_taken = fast_path_fn != nullptr && fast_path_fn(cpu_tensors, stack, arguments_begin);
+    if (!fast_path_taken) {
+      op.redispatchBoxed(c10::DispatchKeySet(cpu_dispatch_key), stack);
+    }
+  };
+
+  if (grow_retry_safe) {
+    // redispatchBoxed consumes the stack, so snapshot the args up front to restore
+    // for the grow-retry. Stack-inlined (8 covers any pure-out op's arg count) to
+    // skip the heap alloc on this per-pure-out fallback path; the IValue copies are
+    // unavoidable refcount bumps.
+    c10::SmallVector<c10::IValue, 8> stack_snapshot(stack->begin(), stack->end());
+    try {
+      run_cpu_kernel();
+    } catch (const c10::Error& e) {
+      if (std::string(e.what()).find("not resizable") == std::string::npos) {
+        throw; // unrelated failure (dtype/device/etc.) — propagate unchanged
+      }
+      // Release each borrowed pure-out, then swap it to fresh resizable CPU
+      // storage. A release failure means the borrow is still live: let it
+      // propagate rather than zeroing the id, which would strand the borrow and
+      // fail a later free/finalizer. The id is cleared only after a clean release.
+      for (size_t i = 0; i < tensor_args.size(); ++i) {
+        if (borrow_ids[i] != 0 && schema_info.is_pure_out[tensor_args_indices[i]]) {
+          c10::rbln::return_borrowed(borrow_ids[i], /*updated=*/false);
+          borrow_ids[i] = 0;
+          // Swap in an empty (numel==0) tensor: the "output was resized" warning fires only
+          // when resizing a NON-empty output, so the grow-retry emits no additional warning.
+          cpu_tensors[i] = at::empty({0}, tensor_args[i].options().device(at::kCPU));
+        }
+      }
+      stack->assign(stack_snapshot.begin(), stack_snapshot.end()); // restore the consumed args
+      for (const auto i : c10::irange(tensor_args_indices.size())) {
+        (*stack)[arguments_begin + tensor_args_indices[i]] = c10::IValue(cpu_tensors[i]);
+      }
+      run_cpu_kernel();
+    }
+  } else {
+    run_cpu_kernel();
   }
 
   // Step 3: mutable-alias write-back.
   // - Legacy: copy the fresh CPU result at cpu_tensors[i] back into the rbln out.
   // - Borrow, in-place (borrow_id != 0): the kernel already wrote into the host
   //   ptr aliasing rbln vmem; just mark the borrow updated for lazy device sync.
-  // - Borrow, resized-empty: a functional wrapper passed an empty out (numel=0)
-  //   that couldn't be borrowed, so resize the rbln out, borrow its now-sized
-  //   vmem, memcpy the CPU content, and return updated — replacing the eager H2D.
+  // - Borrow, resized-empty: an empty out (numel=0) that couldn't be borrowed —
+  //   from a functional wrapper or an explicit empty out= — so resize the rbln
+  //   out, borrow its now-sized vmem, memcpy the CPU content, and return updated
+  //   — replacing the eager H2D.
   std::vector<bool> borrow_write(tensor_args.size(), false);
   for (const auto i : c10::irange(tensor_args_indices.size())) {
     if (!schema_info.is_write_alias[tensor_args_indices[i]]) {

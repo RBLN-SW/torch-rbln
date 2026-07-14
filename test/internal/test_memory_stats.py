@@ -641,6 +641,14 @@ class TestAcceleratorMemoryAPI(TestCase):
         if torch.accelerator.current_accelerator().type != "rbln":
             self.skipTest("Current accelerator is not RBLN")
 
+        # Establish allocator state so the torch.accelerator memory APIs report full stats.
+        # Before the first allocation the allocator is uninitialized, and upstream's
+        # torch.accelerator.memory_stats() returns an empty dict via its init guard — so
+        # without this warmup these tests would be order-dependent (only passing when an
+        # earlier test in the process happened to allocate first).
+        warmup = torch.empty(1, device="rbln:0")
+        del warmup
+
         # Ensure a clean stats baseline before each test.
         torch.accelerator.empty_cache()
         torch.accelerator.reset_accumulated_memory_stats()

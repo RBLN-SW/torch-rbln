@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <vector>
@@ -410,6 +411,38 @@ bool runtime_available() noexcept {
       (is_dummy_device() || get_device_count_nothrow() > 0);
 }
 
+// --- Per-process device-context tracking ------------------------------------
+// A per-logical-device bit set on the first successful device malloc, mirroring CUDA's
+// device_allocator populated on first use. Backs initialized()/hasPrimaryContext() and
+// gates the best-effort memory ops, so a process with the runtime + a mapping but no live
+// context (e.g. a vLLM EngineCore parent) reports uninitialized. Set-once, lock-free.
+// RBLN device use after fork is unsupported; bad-fork detection is not implemented yet
+// (the mask is inherited stale in a fork child).
+namespace {
+// Two 64-bit words cover the full valid DeviceIndex range. DeviceMappingManager caps
+// logical devices at numeric_limits<DeviceIndex>::max(), so valid indices are
+// [0, max) = [0, 126] and index 127 is never a device — no valid device is silently
+// untracked (the earlier single-word tracker dropped indices 64+).
+constexpr c10::DeviceIndex kMaxTrackedDevices = std::numeric_limits<c10::DeviceIndex>::max(); // 127
+std::array<std::atomic<uint64_t>, 2> g_context_init_mask{}; // 128 bits
+} // namespace
+
+void mark_device_context_initialized(c10::DeviceIndex device_index) noexcept {
+  if (device_index >= 0 && device_index < kMaxTrackedDevices) {
+    g_context_init_mask[device_index >> 6].fetch_or(uint64_t{1} << (device_index & 63), std::memory_order_relaxed);
+  }
+}
+
+bool device_context_initialized(c10::DeviceIndex device_index) noexcept {
+  return device_index >= 0 && device_index < kMaxTrackedDevices &&
+      ((g_context_init_mask[device_index >> 6].load(std::memory_order_relaxed) >> (device_index & 63)) & 1U) != 0;
+}
+
+bool any_device_context_initialized() noexcept {
+  return (g_context_init_mask[0].load(std::memory_order_relaxed) |
+          g_context_init_mask[1].load(std::memory_order_relaxed)) != 0;
+}
+
 void* malloc(c10::DeviceIndex device_index, size_t nbytes) {
   RBLN_LOG_DEBUG("logical device=rbln:{}, nbytes={}", static_cast<int>(device_index), nbytes);
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
@@ -449,6 +482,7 @@ void* malloc(c10::DeviceIndex device_index, size_t nbytes) {
   auto* data = reinterpret_cast<void*>(vaddr); // NOLINT(performance-no-int-to-ptr)
   RBLN_LOG_DEBUG("data={}", fmt::ptr(data));
   RBLN_CHECK(data != nullptr, "data cannot be nullptr");
+  mark_device_context_initialized(device_index); // this process now owns context on this device
   return data;
 }
 
@@ -853,18 +887,28 @@ c10::CachingDeviceAllocator::DeviceStats get_device_stats(const c10::Device& dev
 
 void empty_cache(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
-  // Best-effort: nothing to flush when the runtime is unavailable.
-  if (!runtime_available()) {
+  // Two-level context gate (CUDA parity). Check the context flag FIRST: no allocator state
+  // anywhere → no-op (a no-context parent or malformed config; never dispatches, and this
+  // avoids runtime_available()/device enumeration triggering device registration as a side
+  // effect). Otherwise validate the index (invalid throws) and skip a device never used here.
+  if (!any_device_context_initialized() || !runtime_available()) {
     return;
   }
   const auto device_index = device.index();
   check_device_index(device_index);
+  if (!device_context_initialized(device_index)) {
+    return;
+  }
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_empty_cache: device_id={}", device_id);
+  // Live context: surface a genuine failure (CUDA parity — an initialized allocator
+  // propagates real errors); rc included for diagnosis.
+  const auto rc = rbln_empty_cache(device_id);
   RBLN_CHECK(
-      !rbln_empty_cache(device_id),
-      "rbln_empty_cache failed for rbln:{} (device may be busy or in a faulted state)",
-      static_cast<int>(device_index));
+      !rc,
+      "rbln_empty_cache failed for rbln:{} (rc={}); the device may be busy or in a faulted state",
+      static_cast<int>(device_index),
+      static_cast<int>(rc));
 }
 
 std::map<std::string, uint64_t> memory_stats(const c10::Device& device) {
@@ -886,35 +930,47 @@ std::map<std::string, uint64_t> memory_stats(const c10::Device& device) {
 
 void reset_accumulated_memory_stats(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
-  // Best-effort: nothing to reset when the runtime is unavailable.
-  if (!runtime_available()) {
+  // Two-level context gate (see empty_cache); context flag first.
+  if (!any_device_context_initialized() || !runtime_available()) {
     return;
   }
   const auto device_index = device.index();
   check_device_index(device_index);
+  if (!device_context_initialized(device_index)) {
+    return;
+  }
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_reset_accumulated_memory_stats: device_id={}", device_id);
+  // Live context: surface a genuine failure (a silent success would mislead the caller).
+  const auto rc = rbln_reset_accumulated_memory_stats(device_id);
   RBLN_CHECK(
-      !rbln_reset_accumulated_memory_stats(device_id),
-      "rbln_reset_accumulated_memory_stats failed for rbln:{}",
-      static_cast<int>(device_index));
+      !rc,
+      "rbln_reset_accumulated_memory_stats failed for rbln:{} (rc={})",
+      static_cast<int>(device_index),
+      static_cast<int>(rc));
 }
 
 void reset_peak_memory_stats(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
-  // Best-effort no-op when unavailable (torch.accelerator.reset_peak has no Python
-  // init-guard, so the leaf gate is the only protection).
-  if (!runtime_available()) {
+  // Two-level context gate (see empty_cache); context flag first. This is also the only
+  // guard for the generic torch.accelerator.reset_peak path (no Python init-guard upstream).
+  if (!any_device_context_initialized() || !runtime_available()) {
     return;
   }
   const auto device_index = device.index();
   check_device_index(device_index);
+  if (!device_context_initialized(device_index)) {
+    return;
+  }
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_reset_peak_memory_stats: device_id={}", device_id);
+  // Live context: surface a genuine failure.
+  const auto rc = rbln_reset_peak_memory_stats(device_id);
   RBLN_CHECK(
-      !rbln_reset_peak_memory_stats(device_id),
-      "rbln_reset_peak_memory_stats failed for rbln:{}",
-      static_cast<int>(device_index));
+      !rc,
+      "rbln_reset_peak_memory_stats failed for rbln:{} (rc={})",
+      static_cast<int>(device_index),
+      static_cast<int>(rc));
 }
 
 void set_file_offloading_enabled(bool enabled) {
