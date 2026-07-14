@@ -1,0 +1,68 @@
+name: Lint
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main, dev]
+  push:
+    branches: [dev]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  lint_source:
+    strategy:
+      fail-fast: false
+      matrix:
+        python_version: ${{ fromJSON(github.base_ref == 'main' && '["3.10", "3.11", "3.12", "3.13"]' || '["3.12"]') }}
+    uses: ./.github/workflows/_lint-source.yaml
+    with:
+      torch_rbln_sha: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      python_version: ${{ matrix.python_version }}
+      lint_all_files: ${{ github.base_ref == 'main' }}
+    secrets:
+      GIT_PAT: ${{ secrets.GIT_PAT }}
+      INTERNAL_INDEX_URL: ${{ secrets.INTERNAL_INDEX_URL }}
+      INTERNAL_INDEX_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
+      INTERNAL_INDEX_PASSWORD: ${{ secrets.INTERNAL_INDEX_PASSWORD }}
+
+  lint_workflows:
+    uses: ./.github/workflows/_lint-workflows.yaml
+    with:
+      torch_rbln_sha: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+    secrets:
+      GIT_PAT: ${{ secrets.GIT_PAT }}
+
+  lint_gate:
+    name: Lint
+    if: ${{ always() && github.repository_owner == vars.TORCH_RBLN_REPO_OWNER }}
+    needs: [lint_source, lint_workflows]
+    runs-on: ${{ vars.TORCH_RBLN_RUNNER_CPU_SMALL }}
+    timeout-minutes: 10
+    container:
+      image: ghcr.io/rebellions-sw/rbln-test:0.11.0-ubuntu22.04-py3.12
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GIT_PAT }}
+    steps:
+      - name: Verify lint results
+        env:
+          SOURCE_RESULT: ${{ needs.lint_source.result }}
+          WORKFLOWS_RESULT: ${{ needs.lint_workflows.result }}
+        run: |
+          set -euo pipefail
+
+          if [ "${SOURCE_RESULT}" != "success" ] || [ "${WORKFLOWS_RESULT}" != "success" ]; then
+            echo "::error::Lint failed (source=${SOURCE_RESULT}, workflows=${WORKFLOWS_RESULT})"
+            exit 1
+          fi
+          echo "::notice::All lint checks passed"

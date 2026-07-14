@@ -82,14 +82,16 @@ at::Tensor& index_select_out_rbln(const at::Tensor& self, int64_t dim, const at:
 
   const int64_t axis = dim < 0 ? dim + rank : dim;
 
-  if (n_out == 0 || self.numel() == 0) {
-    return out;
-  }
-
-  // Bounds-check the index once on host.
+  // Bounds-check before the empty-work early return: an out-of-range index must
+  // raise (matching CPU) even when self/out are empty, else it silently returns
+  // uninitialized data (e.g. empty self (0,3) resized to (1,3)).
   const int64_t axis_extent = self.size(axis);
   for (int64_t v : idx_host) {
     RBLN_CHECK(v >= 0 && v < axis_extent, "index_select: index value {} out of range [0, {})", v, axis_extent);
+  }
+
+  if (n_out == 0 || self.numel() == 0) {
+    return out;
   }
 
   // Per-run slab copy: self.narrow(axis, run.value, run.length) is a view with
@@ -254,6 +256,21 @@ at::Tensor& index_copy_out_rbln(
     return out;
   }
 
+  // Bounds-check before the empty-work early return so an out-of-range index
+  // still raises when the output is empty (matching CPU) instead of being
+  // swallowed — but only when there is data to copy. CPU validates index
+  // bounds only when source.numel() > 0; with an empty source it returns the
+  // (empty) result without checking, even for a non-empty out-of-range index
+  // (e.g. self=(3,0), idx=[5], source=(1,0) does not raise on CPU — and an
+  // empty source can pair with a non-empty self, e.g. self=(5,3), idx=[],
+  // source=(0,3)). Gate on source.numel() to match.
+  const int64_t axis_extent = self.size(axis);
+  if (source.numel() > 0) {
+    for (int64_t v : idx_host) {
+      RBLN_CHECK(v >= 0 && v < axis_extent, "index_copy: index value {} out of range [0, {})", v, axis_extent);
+    }
+  }
+
   // Empty index: out := self (or no-op if they already alias).
   if (n_idx == 0 || self.numel() == 0) {
     if (self.numel() > 0 && !is_same_view(out, self)) {
@@ -262,17 +279,15 @@ at::Tensor& index_copy_out_rbln(
     return out;
   }
 
-  // Bounds-check index values once on host, and detect duplicates in the same
-  // pass. Duplicates make Phase 2's per-run dst slices overlap on the axis,
-  // which the batched v2v API rejects (it may reorder/parallelise entries, so
-  // overlapping ranges are undefined behaviour by contract). When duplicates
-  // exist we fall off the batched path and submit each run as its own v2v —
-  // sequential per-run calls preserve PyTorch's last-write-wins semantics.
-  const int64_t axis_extent = self.size(axis);
+  // Detect duplicate indices in one pass (bounds already checked above).
+  // Duplicates make Phase 2's per-run dst slices overlap on the axis, which the
+  // batched v2v API rejects (it may reorder/parallelise entries, so overlapping
+  // ranges are undefined behaviour by contract). When duplicates exist we fall
+  // off the batched path and submit each run as its own v2v — sequential per-run
+  // calls preserve PyTorch's last-write-wins semantics.
   std::vector<bool> seen(static_cast<size_t>(axis_extent), false);
   bool has_duplicate_index = false;
   for (int64_t v : idx_host) {
-    RBLN_CHECK(v >= 0 && v < axis_extent, "index_copy: index value {} out of range [0, {})", v, axis_extent);
     if (seen[static_cast<size_t>(v)]) {
       has_duplicate_index = true;
     } else {

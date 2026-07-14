@@ -76,6 +76,23 @@ class TestFillScalarRBLN(TestCase):
         x.fill_(-1)
         self.assertEqual(x.numel(), 0)
 
+    def test_overflow_conversion_raises_without_leaking_borrow(self):
+        """A checked-cast overflow (128 into int8) throws between the borrow and
+        its return; the RAII guard must still release it, else the next free leaks
+        the vmem. Assert it raises and the tensor stays usable (re-fill + churn)."""
+        x = torch.empty(8, dtype=torch.int8, device="rbln")
+        with pytest.raises(RuntimeError, match="overflow"):
+            x.fill_(128)  # 128 > int8 max (127)
+        # Borrow was released on the exception path: the tensor is still usable.
+        x.fill_(5)
+        self.assertEqual(x.to("cpu"), torch.full((8,), 5, dtype=torch.int8))
+        del x  # must free cleanly (no lingering borrow on the vaddr)
+        # Reuse the freed region a few times to surface a lingering borrow.
+        for _ in range(3):
+            t = torch.empty(8, dtype=torch.int8, device="rbln")
+            t.fill_(1)
+            del t
+
 
 instantiate_device_type_tests(TestFillScalarRBLN, globals(), only_for="privateuse1")
 

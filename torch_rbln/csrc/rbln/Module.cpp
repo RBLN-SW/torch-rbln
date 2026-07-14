@@ -257,7 +257,7 @@ void register_internal_api(py::module_& module) {
   // PROFILER: runtime (rebel-compiler) hidden-overhead counters, read from librbln
   // via its public C-API. Per-reason axes are POSITIONAL — their meaning is an
   // internal classification interpreted Python-side, so no internal name crosses
-  // this boundary. See rbln_runtime_api.h / third_party/rebel_compiler.
+  // this boundary. See rebel/runtime/api/rbln_runtime_api.h (rebel-compiler wheel).
   module.def(
       "_rt_prof_hidden",
       []() {

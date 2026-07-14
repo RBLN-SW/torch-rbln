@@ -1,0 +1,126 @@
+name: Lint source
+
+on:
+  workflow_call:
+    inputs:
+      torch_rbln_sha:
+        description: Git commit SHA
+        type: string
+        required: true
+      python_version:
+        description: Python version to lint under (3.10-3.13)
+        type: string
+        required: true
+      lint_all_files:
+        description: Lint every tracked file instead of only changed files
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      GIT_PAT:
+        description: Personal access token
+        required: true
+      INTERNAL_INDEX_URL:
+        description: Internal package index URL
+        required: true
+      INTERNAL_INDEX_USERNAME:
+        description: Internal package index username
+        required: true
+      INTERNAL_INDEX_PASSWORD:
+        description: Internal package index password
+        required: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  lint_source:
+    name: Lint source (py${{ inputs.python_version }})
+    if: ${{ github.repository_owner == vars.TORCH_RBLN_REPO_OWNER }}
+    runs-on: ${{ vars.TORCH_RBLN_RUNNER_CPU_SMALL }}
+    env:
+      GIT_CONFIG_COUNT: '1'
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: ${{ github.workspace }}
+    timeout-minutes: 60
+    container:
+      image: ghcr.io/rebellions-sw/rbln-build:0.11.0-ubi9-py${{ inputs.python_version }}  # zizmor: ignore[unpinned-images]
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GIT_PAT }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          ref: ${{ inputs.torch_rbln_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+
+      - name: Install dependencies
+        env:
+          UV_INDEX: rbln=${{ secrets.INTERNAL_INDEX_URL }}
+          UV_INDEX_RBLN_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
+          UV_INDEX_RBLN_PASSWORD: ${{ secrets.INTERNAL_INDEX_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          # clang-tidy needs the Rebel runtime headers, which ship only in the build-pinned rebel-compiler.
+          uv sync --no-install-project --no-install-package rebel-compiler
+          uv pip install --constraint constraints-build-dev.txt rebel-compiler
+
+      - name: Cache linter binaries
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        with:
+          path: .lintbin
+          # The binaries are native tools, not Python-specific.
+          key: lintbin-${{ hashFiles('tools/linter/adapters/s3_init_config.json') }}
+
+      - name: Initialize linters
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60  # v4.0.0
+        with:
+          timeout_minutes: 15
+          max_attempts: 2
+          command: uv run --no-sync lintrunner init
+
+      - name: Configure CMake for clang-tidy
+        run: |
+          set -euo pipefail
+
+          [[ -f /etc/os-release ]] && . /etc/os-release
+          case "${ID:-}:${ID_LIKE:-}" in
+            *debian* | *ubuntu*) export CC=gcc-13 CXX=g++-13 ;;
+            *) source /opt/rh/gcc-toolset-13/enable ;;
+          esac
+
+          uv run --no-sync cmake -GNinja -B build -S . \
+            -DBUILD_SHARED_LIBS=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=torch_rbln
+
+      - name: Run lintrunner
+        env:
+          LINT_ALL_FILES: ${{ inputs.lint_all_files }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+
+          if [ "${LINT_ALL_FILES}" = "true" ]; then
+            uv run --no-sync lintrunner --paths-cmd='git ls-files'
+          else
+            if [ "${EVENT_NAME}" = "pull_request" ]; then
+              git fetch --no-tags origin "${BASE_REF}"
+              diff_base="origin/${BASE_REF}"
+            else
+              diff_base="${BEFORE_SHA}"
+            fi
+            uv run --no-sync lintrunner -m "${diff_base}"
+          fi

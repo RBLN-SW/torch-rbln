@@ -1,10 +1,16 @@
 name: Lint workflows
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
-  push:
-    branches: [main, dev]
+  workflow_call:
+    inputs:
+      torch_rbln_sha:
+        description: Git commit SHA
+        type: string
+        required: true
+    secrets:
+      GIT_PAT:
+        description: Personal access token
+        required: true
 
 permissions:
   contents: read
@@ -12,10 +18,6 @@ permissions:
 defaults:
   run:
     shell: bash
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   lint_workflows:
@@ -28,7 +30,7 @@ jobs:
       GIT_CONFIG_VALUE_0: ${{ github.workspace }}
     timeout-minutes: 15
     container:
-      image: ${{ vars.TORCH_RBLN_IMAGE_NAME }}:${{ vars.TORCH_RBLN_IMAGE_TAG }}-py3.12
+      image: ghcr.io/rebellions-sw/rbln-test:0.11.0-ubuntu22.04-py3.12
       credentials:
         username: ${{ github.repository_owner }}
         password: ${{ secrets.GIT_PAT }}
@@ -36,33 +38,33 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
+          ref: ${{ inputs.torch_rbln_sha }}
           persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
 
-      - name: Install workflow lint tools
+      - name: Install dependencies
         run: |
           set -euo pipefail
 
-          uv venv .venv-lint
-          uv pip install --group lint --python .venv-lint/bin/python
-          echo "${PWD}/.venv-lint/bin" >> "${GITHUB_PATH}"
+          uv venv
+          uv pip install --group lint
 
       - name: Run actionlint
         run: |
           set -euo pipefail
 
-          actionlint
+          uv run --no-sync actionlint
 
       - name: Run yamllint
         run: |
           set -euo pipefail
 
-          yamllint --strict .github/
+          uv run --no-sync yamllint --strict .github/
 
       - name: Run zizmor
         run: |
           set -euo pipefail
 
-          zizmor --offline .github/
+          uv run --no-sync zizmor --offline .github/

@@ -319,6 +319,28 @@ class TestIndexCopyV2V(TestCase):
         with pytest.raises((IndexError, RuntimeError), match="out of range|out of bounds"):
             torch.index_copy(self_dev, 0, idx_dev, src_dev)
 
+    def test_empty_self_along_indexed_dim_oob_rejected(self):
+        """self empty on the INDEXED axis (extent 0): every index is out of range
+        and must raise, not be swallowed by the empty-self early return.
+        (Contrast test_empty_self_along_dim: empty on a non-indexed axis.)"""
+        self_dev = _to_dev(torch.empty((0, 3), dtype=torch.float32))
+        src_dev = _to_dev(torch.zeros((1, 3), dtype=torch.float32))
+        idx_dev = torch.tensor([0], dtype=torch.int64, device=DEVICE)
+        with pytest.raises((IndexError, RuntimeError), match="out of range|out of bounds"):
+            torch.index_copy(self_dev, 0, idx_dev, src_dev)
+
+    def test_empty_source_oob_index_not_rejected(self):
+        """self empty on a NON-indexed axis => source is empty too (numel 0). CPU
+        skips the index bounds check and returns the empty result, so an out-of-range
+        index must NOT raise here (contrast test_empty_self_along_indexed_dim_oob_rejected,
+        where source is non-empty). Regression for the index_copy bounds parity."""
+        self_cpu = torch.zeros((3, 0), dtype=torch.float32)
+        src_cpu = torch.zeros((1, 0), dtype=torch.float32)
+        idx_cpu = torch.tensor([5], dtype=torch.int64)  # 5 >= self.size(0)=3, but nothing to copy
+        expected = torch.index_copy(self_cpu, 0, idx_cpu, src_cpu)  # CPU: (3, 0), no raise
+        got = torch.index_copy(_to_dev(self_cpu), 0, _to_dev(idx_cpu), _to_dev(src_cpu))
+        _eq(got, expected)
+
     def test_dim_out_of_range_rejected(self):
         self_dev = _to_dev(_arange((3, 4), torch.float32))
         src_dev = _to_dev(_arange((1, 4), torch.float32))

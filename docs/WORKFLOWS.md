@@ -11,7 +11,7 @@ This document describes the GitHub Actions workflows that power the automated te
 | CD (`cd.yaml`)                         | Version tags (`v*`)           | Build and publish release artifacts | Deployment pipeline                                                |
 | Build (`build.yaml`)                   | PRs; manual dispatch          | Build and publish the wheel         | —                                                                  |
 | Check PR Title (`check-pr-title.yaml`) | PR opened, edited, or updated | Enforce Conventional Commits format | —                                                                  |
-| Lint workflows (`lint-workflows.yaml`) | PRs; pushes to `main`/`dev`   | Lint the workflow files             | —                                                                  |
+| Lint (`lint.yaml`)                     | PRs; pushes to `dev`          | Lint the source tree and workflows  | —                                                                  |
 
 CI, Release, and CD workflows delegate to a shared [Event Dispatch](#event-dispatch-mechanism) mechanism that sends events to infrastructure with physical RBLN NPU devices.
 
@@ -26,9 +26,9 @@ CI, Release, and CD workflows delegate to a shared [Event Dispatch](#event-dispa
 | CD             | —                               | Tags matching `v*` | **No**              |
 | Build          | All PRs                         | —                  | PRs only            |
 | Check PR Title | On open, edit, sync, reopen     | —                  | Yes                 |
-| Lint workflows | All PRs                         | To `main`/`dev`    | Yes                 |
+| Lint           | To `main` or `dev`              | To `dev`           | Yes                 |
 
-CI and Release runs are grouped by PR number (or SHA for pushes); a new push cancels the in-progress run. CD runs are never cancelled — once a deployment starts, it runs to completion. Check PR Title runs are grouped by PR number and always cancel the in-progress run. Build also runs on manual `workflow_dispatch`; its PR runs are grouped by PR number and cancel superseded commits, while dispatch runs are grouped by run ID and always complete.
+CI, Release, and Lint runs are grouped by PR number (or SHA for pushes); a new push cancels the in-progress run. CD runs are never cancelled — once a deployment starts, it runs to completion. Check PR Title runs are grouped by PR number and always cancel the in-progress run. Build also runs on manual `workflow_dispatch`; its PR runs are grouped by PR number and cancel superseded commits, while dispatch runs are grouped by run ID and always complete.
 
 ---
 
@@ -107,11 +107,16 @@ If the title is invalid, the workflow uses [`marocchino/sticky-pull-request-comm
 
 ---
 
-## Lint Workflows
+## Lint Workflow
 
-**File:** [`.github/workflows/lint-workflows.yaml`](../.github/workflows/lint-workflows.yaml)
+**File:** [`.github/workflows/lint.yaml`](../.github/workflows/lint.yaml)
 
-This workflow runs `actionlint`, `yamllint`, and `zizmor` on the workflow files (see [Linting](LINTING.md)).
+The Lint workflow runs on pull requests to `main` or `dev` and on pushes to `dev`, fanning out to two reusable workflows:
+
+- [`_lint-source.yaml`](../.github/workflows/_lint-source.yaml) runs `lintrunner` over the source tree (see [Linting](LINTING.md)). A pull request to `main` (release validation) lints every tracked file across Python 3.10–3.13; pull requests and pushes to `dev` lint only the changed files on 3.12, for fast feedback.
+- [`_lint-workflows.yaml`](../.github/workflows/_lint-workflows.yaml) runs `actionlint`, `yamllint`, and `zizmor` on the workflow files.
+
+A final `Lint` job aggregates both, so branch protection has one stable check even as the source matrix varies by branch.
 
 ---
 
@@ -137,7 +142,11 @@ The event is dispatched to a separate repository (configured via `vars.TORCH_RBL
 
 ## Automated Dependency Updates
 
-A nightly workflow tracks the latest `rebel-compiler` development build (not an official release) and automatically creates or updates a PR on `dev` when a newer build is available. Review and merge it once CI passes.
+**File:** [`.github/workflows/update-rebel-compiler-dependency.yaml`](../.github/workflows/update-rebel-compiler-dependency.yaml)
+
+This workflow runs on a daily schedule and tracks the latest `rebel-compiler` production build. When a newer one is available, it creates or updates a pull request against `dev` for a maintainer to review and merge.
+
+It can also be run manually via `workflow_dispatch`, optionally pinning a specific `rebel_compiler_version` instead of resolving the latest.
 
 ---
 
@@ -146,4 +155,4 @@ A nightly workflow tracks the latest `rebel-compiler` development build (not an 
 - [Release Process](RELEASE_PROCESS.md) — Branch model, versioning, tagging, and publication
 - [Contributing Guide](CONTRIBUTING.md) — PR requirements and merge policy
 - [Test Guide](TEST_GUIDE.md) — Test infrastructure, markers, and `run_tests.py` usage
-- [Linting](LINTING.md) — Code style and pre-commit hooks
+- [Linting](LINTING.md) — `lintrunner` and the workflow linters
