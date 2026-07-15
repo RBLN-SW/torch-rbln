@@ -56,6 +56,13 @@ struct RBLNGuardImpl final : public c10::impl::DeviceGuardImplInterface {
   c10::DeviceIndex deviceCount() const noexcept override;
 
   /**
+   * @brief Reports supported dtypes (backs torch.accelerator.get_device_capability).
+   *
+   * Advertises only the natively-dispatched dtypes (fp16/bf16); CPU-fallback dtypes are excluded.
+   */
+  c10::DeviceCapability getDeviceCapability(c10::Device device) const override;
+
+  /**
    * @brief Returns the current stream for the input device.
    *
    * @param device The input device.

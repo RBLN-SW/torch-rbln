@@ -29,22 +29,40 @@ __all__ = [
 
 def _normalize_device(device: Optional[Union[int, str, torch.device]]) -> torch.device:
     """
-    Normalize device input to torch.device object.
+    Normalize a device argument to a concrete ``rbln`` ``torch.device``.
+
+    ``None``, ``"rbln"``, and ``torch.device("rbln")`` resolve to the current
+    device. A bare int is treated as an ``rbln`` index. Non-``rbln`` devices
+    (``"cpu"``, ``"cuda:0"``, …) and out-of-range indices are rejected.
 
     Args:
-        device: Device specification (int, str, torch.device, or None)
+        device: Device specification (int, str, torch.device, or None).
 
     Returns:
-        torch.device: Normalized device object
+        torch.device: An ``rbln`` device with a concrete, in-range index.
     """
     if device is None:
         return torch.device("rbln", torch_rbln._C.current_device())
-    elif isinstance(device, int):
-        return torch.device(f"rbln:{device}")
+    if isinstance(device, bool):  # bool is an int subclass; reject to avoid rbln:0/1 surprises
+        raise TypeError(f"device must be None, int, str, or torch.device, not bool ({device!r})")
+    if isinstance(device, int):
+        dev = torch.device("rbln", device)
     elif isinstance(device, str):
-        return torch.device(device)
+        dev = torch.device(device)
+    elif isinstance(device, torch.device):
+        dev = device
     else:
-        return device
+        raise TypeError(f"device must be None, int, str, or torch.device, got {type(device).__name__}")
+
+    if dev.type != "rbln":
+        raise ValueError(f"Expected an 'rbln' device, got '{dev.type}' (from {device!r})")
+
+    index = dev.index if dev.index is not None else torch_rbln._C.current_device()
+    # Only range-check when devices exist; on a no-device host callers no-op.
+    count = torch_rbln._C.device_count()
+    if count > 0 and not (0 <= index < count):
+        raise ValueError(f"rbln device index {index} is out of range [0, {count})")
+    return torch.device("rbln", index)
 
 
 def set_device_layout_like(target: torch.Tensor, ref: torch.Tensor) -> None:
@@ -104,15 +122,11 @@ def memory_stats(device: Optional[Union[int, str, torch.device]] = None) -> Dict
     """
     Return a dictionary of accelerator device memory allocator statistics.
 
-    The returned dictionary contains various memory statistics including:
-    - allocated_bytes: current, peak, allocated, freed
-    - reserved_bytes: current, peak, allocated, freed
-    - active_bytes: current, peak
-    - cached_bytes: current, peak
-    - num_alloc_retries: number of allocation retries
-    - num_ooms: number of out-of-memory errors
-    - num_device_alloc: number of device allocations
-    - num_device_free: number of device frees
+    The returned dictionary contains various memory statistics. Keys are the
+    RBLN allocator's dotted names, e.g.:
+    - allocated.current, allocated.peak, allocated.total_allocated, allocated.total_freed
+    - reserved.current, reserved.peak, reserved.total_allocated, reserved.total_freed
+    - active.current, active.peak
 
     Args:
         device (Optional[Union[int, str, torch.device]]): The device to query.
@@ -139,7 +153,7 @@ def memory_allocated(device: Optional[Union[int, str, torch.device]] = None) -> 
     Returns:
         int: The current memory allocated in bytes.
     """
-    return memory_stats(device).get("allocated_bytes.all.current", 0)
+    return memory_stats(device).get("allocated.current", 0)
 
 
 def max_memory_allocated(device: Optional[Union[int, str, torch.device]] = None) -> int:
@@ -153,7 +167,7 @@ def max_memory_allocated(device: Optional[Union[int, str, torch.device]] = None)
     Returns:
         int: The maximum memory allocated in bytes.
     """
-    return memory_stats(device).get("allocated_bytes.all.peak", 0)
+    return memory_stats(device).get("allocated.peak", 0)
 
 
 def memory_reserved(device: Optional[Union[int, str, torch.device]] = None) -> int:
@@ -167,7 +181,7 @@ def memory_reserved(device: Optional[Union[int, str, torch.device]] = None) -> i
     Returns:
         int: The current memory reserved in bytes.
     """
-    return memory_stats(device).get("reserved_bytes.all.current", 0)
+    return memory_stats(device).get("reserved.current", 0)
 
 
 def max_memory_reserved(device: Optional[Union[int, str, torch.device]] = None) -> int:
@@ -181,7 +195,7 @@ def max_memory_reserved(device: Optional[Union[int, str, torch.device]] = None) 
     Returns:
         int: The maximum memory reserved in bytes.
     """
-    return memory_stats(device).get("reserved_bytes.all.peak", 0)
+    return memory_stats(device).get("reserved.peak", 0)
 
 
 def reset_accumulated_memory_stats(device: Optional[Union[int, str, torch.device]] = None) -> None:

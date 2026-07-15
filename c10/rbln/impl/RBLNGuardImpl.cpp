@@ -2,6 +2,8 @@
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/impl/RBLNGuardImpl.h>
 
+#include <c10/core/DeviceCapability.h>
+
 #include <exception>
 
 namespace c10::rbln::impl {
@@ -85,6 +87,16 @@ c10::DeviceIndex RBLNGuardImpl::deviceCount() const noexcept {
     RBLN_WARN_NOTHROW("Failed to get device count, returning 0: unknown exception");
     return 0;
   }
+}
+
+c10::DeviceCapability RBLNGuardImpl::getDeviceCapability(c10::Device /*device*/) const {
+  // Native-dispatch dtypes only (fp16/bf16); CPU-fallback dtypes are not device
+  // capabilities. Mirrors kDispatchDtypes in c10/rbln/RBLNSupportedDtypes.h.
+  c10::DeviceCapability capability;
+  capability.capability_data.capability_bits = 0;
+  capability.capability_data.supported_scalar_types.has_Half = 1;
+  capability.capability_data.supported_scalar_types.has_BFloat16 = 1;
+  return capability;
 }
 
 c10::Stream RBLNGuardImpl::getStream(c10::Device device) const {
