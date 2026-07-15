@@ -11,7 +11,12 @@ namespace c10::rbln {
 // don't leak into `sdpa` or `amp`, which must stay float-only.
 inline constexpr std::array<c10::ScalarType, 2> kDispatchDtypes = {c10::kHalf, c10::kBFloat16};
 inline constexpr std::array<c10::ScalarType, 2> kSdpaDtypes = {c10::kHalf, c10::kBFloat16};
-inline constexpr std::array<c10::ScalarType, 2> kAmpDtypes = {c10::kHalf, c10::kBFloat16};
+// AMP autocast is not implemented yet: no AutocastPrivateUse1 cast policy is
+// registered, so dispatching an op under torch.autocast("rbln") would hit a
+// missing kernel (NotImplementedError). Advertise an empty set so torch
+// disables autocast with a warning instead of crashing. Restore the float
+// dtypes once AutocastPrivateUse1 is registered.
+inline constexpr std::array<c10::ScalarType, 0> kAmpDtypes = {};
 
 constexpr bool is_dispatch_dtype(c10::ScalarType s) noexcept {
   for (const auto d : kDispatchDtypes) {
