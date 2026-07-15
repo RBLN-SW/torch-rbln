@@ -22,9 +22,9 @@ import warnings
 
 import pytest
 import torch
-import torch_rbln  # noqa: F401  (registers the rbln device module + autocast plumbing)
 from torch.testing._internal.common_utils import run_tests, TestCase
 
+import torch_rbln  # noqa: F401  (registers the rbln device module + autocast plumbing)
 from torch_rbln._internal.ops_utils import SupportedDtypes
 
 
