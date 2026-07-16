@@ -529,12 +529,13 @@ class TestMemoryStats(TestCase):
         """None device arguments must normalize to the current logical device."""
         expected_device = torch.device("rbln:1")
         stats = {
-            "allocated_bytes.all.current": 128,
-            "reserved_bytes.all.current": 256,
+            "allocated.current": 128,
+            "reserved.current": 256,
         }
 
         with (
             patch("torch_rbln.memory.torch_rbln._C.current_device", return_value=1),
+            patch("torch_rbln.memory._no_rbln_device", return_value=False),
             patch(
                 "torch_rbln.memory.torch_rbln._C.memory_stats",
                 return_value=stats,
@@ -545,6 +546,7 @@ class TestMemoryStats(TestCase):
 
         with (
             patch("torch_rbln.memory.torch_rbln._C.current_device", return_value=1),
+            patch("torch_rbln.memory._no_rbln_device", return_value=False),
             patch(
                 "torch_rbln.memory.torch_rbln._C.memory_stats",
                 return_value=stats,
@@ -555,6 +557,7 @@ class TestMemoryStats(TestCase):
 
         with (
             patch("torch_rbln.memory.torch_rbln._C.current_device", return_value=1),
+            patch("torch_rbln.memory._no_rbln_device", return_value=False),
             patch(
                 "torch_rbln.memory.torch_rbln._C.memory_stats",
                 return_value=stats,
@@ -569,6 +572,7 @@ class TestMemoryStats(TestCase):
 
         with (
             patch("torch_rbln.memory.torch_rbln._C.current_device", return_value=1),
+            patch("torch_rbln.memory._no_rbln_device", return_value=False),
             patch(
                 "torch_rbln.memory.torch_rbln._C.empty_cache",
             ) as mock_empty_cache,
@@ -583,6 +587,7 @@ class TestMemoryStats(TestCase):
 
         with (
             patch("torch_rbln.memory.torch_rbln._C.current_device", return_value=1),
+            patch("torch_rbln.memory._no_rbln_device", return_value=False),
             patch(
                 "torch_rbln.memory.torch_rbln._C.reset_peak_memory_stats",
             ) as mock_reset_peak,
