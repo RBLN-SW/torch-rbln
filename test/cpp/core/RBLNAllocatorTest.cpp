@@ -157,12 +157,13 @@ TEST_F(RBLNAllocatorTest, EmptyCache) {
   EXPECT_NO_THROW(device_allocator->emptyCache());
 }
 
-// Regression guard for the device-less empty_cache() "span all devices" contract:
-// its device selection (initialized_device_indices) must cover *every* initialized
-// device, not just the current one (a current-device-only regression drops the rest).
-// The per-device release itself is unobservable here — the runtime exposes memory
-// stats for node 0 only — so we assert the selection includes a non-current device.
-TEST_F(RBLNAllocatorTest, EmptyCacheSpansNonCurrentInitializedDevice) {
+// Regression guard for the device-less empty_cache() "span all devices" contract: it
+// must dispatch to *every* initialized device, not just the current one. Per-device
+// release is unobservable here (the runtime exposes memory stats for node 0 only), so
+// a test hook records which devices emptyCache() actually dispatches to and we assert
+// a non-current initialized device is among them (a current-device-only regression
+// would drop it). Exercises emptyCache() itself, not just the selection helper.
+TEST_F(RBLNAllocatorTest, EmptyCacheDispatchesToNonCurrentInitializedDevice) {
   if (c10::rbln::get_device_count() < 2) {
     GTEST_SKIP() << "needs >= 2 devices to exercise a non-current device";
   }
@@ -179,9 +180,13 @@ TEST_F(RBLNAllocatorTest, EmptyCacheSpansNonCurrentInitializedDevice) {
     EXPECT_NE(d0.get(), nullptr);
   }
 
-  const auto indices = c10::rbln::initialized_device_indices();
+  std::vector<c10::DeviceIndex> dispatched;
+  c10::rbln::set_empty_cache_device_hook_for_testing([&](c10::DeviceIndex i) { dispatched.push_back(i); });
+  GetDeviceAllocator()->emptyCache();
+  c10::rbln::set_empty_cache_device_hook_for_testing(nullptr); // restore real flush
+
   const auto contains = [&](c10::DeviceIndex i) {
-    for (const auto x : indices) {
+    for (const auto x : dispatched) {
       if (x == i) {
         return true;
       }
@@ -189,7 +194,7 @@ TEST_F(RBLNAllocatorTest, EmptyCacheSpansNonCurrentInitializedDevice) {
     return false;
   };
   EXPECT_TRUE(contains(0));
-  EXPECT_TRUE(contains(1)) << "empty_cache() would skip non-current initialized device 1";
+  EXPECT_TRUE(contains(1)) << "emptyCache() skipped non-current initialized device 1 (current-device-only regression)";
 }
 
 // recordStream must be a safe no-op — RBLN has no stream-based async execution.

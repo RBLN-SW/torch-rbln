@@ -88,22 +88,27 @@ class TestRblnMemoryHelpers(TestCase):
 
     @pytest.mark.test_set_ci
     def test_accelerator_memory_stats_uninitialized_device_reports_zero_not_raise(self):
-        # Same parity guarantee on the generic torch.accelerator path, which routes to
-        # the C10 getDeviceStats() hook -- a separate code path from
-        # torch.rbln.memory_stats(). An uninitialized valid device reports zero, not raise.
+        # The generic torch.accelerator path routes to the C10 getDeviceStats() hook --
+        # a separate code path from torch.rbln.memory_stats(). It must report zero (not
+        # raise) for a valid, uninitialized device index.
         count = torch.rbln.device_count()
         if count < 2:
             self.skipTest("needs a second, never-allocated device index")
-        idx = count - 1
-        # The regression is that this raised INIT_INVALID_ARGUMENT; the guarantee is a
-        # clean return. An uninitialized device yields empty stats; any populated entry
-        # must be zero.
-        stats = torch.accelerator.memory_stats(idx)  # must not raise
+        # Initialize the allocator with a live device-0 allocation first: otherwise
+        # torch.accelerator short-circuits to an empty dict *before* reaching
+        # getDeviceStats(), making the check below vacuous. With it initialized, querying
+        # an uninitialized index actually exercises getDeviceStats() (populated zeros).
+        keep = torch.randn(1024, 1024, device="rbln:0", dtype=torch.float16)
+        _ = keep + keep
+        idx = count - 1  # highest index: not touched by other tests in this worker
+        stats = torch.accelerator.memory_stats(idx)  # must not raise (regression: INIT_INVALID_ARGUMENT)
         self.assertIsInstance(stats, dict)
+        self.assertGreater(len(stats), 0, "getDeviceStats() was not exercised (accelerator returned an empty dict)")
         self.assertTrue(
             all(v == 0 for v in stats.values() if isinstance(v, int)),
             msg=f"expected zero stats for uninitialized rbln:{idx}, got nonzero entries",
         )
+        del keep
 
 
 @pytest.mark.single_worker
@@ -151,15 +156,14 @@ class TestAcceleratorEmptyCache(TestCase):
     other workers' allocations.
 
     Note: the all-devices span — ``empty_cache()`` walking *every* initialized
-    device, not just the current one — is intentionally not asserted here.
+    device, not just the current one — is not asserted at the Python level.
     Confirming a non-current device was released means reading its reserved bytes,
-    but the rbln runtime's per-node memory-stats query only supports node 0:
-    ``memory_reserved(idx > 0)`` reports 0 for every device index > 0 (the runtime
-    rejects the query and the backend reports zero for CUDA parity — see
-    test_memory_stats_unqueryable_device_reports_zero_not_raise), even for a device
-    holding live memory. So the multi-device release is unobservable through the
-    stats API on current hardware; that loop stays covered by the C++ review of
-    RBLNAllocator::emptyCache()'s per-device iteration."""
+    but the rbln runtime's per-node memory-stats query supports node 0 only, so on a
+    device index > 0 ``memory_reserved()`` either raises (an initialized device, the
+    runtime rejects the query) or reads 0 (an uninitialized device, the gate) — never
+    the real figure. The all-device dispatch is instead covered in C++ by
+    ``RBLNAllocatorTest.EmptyCacheDispatchesToNonCurrentInitializedDevice``, which
+    observes emptyCache()'s per-device calls directly."""
 
     @staticmethod
     def _hold_then_free_reserved(device):

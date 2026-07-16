@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -185,6 +186,23 @@ C10_RBLN_API bool any_device_context_initialized() noexcept;
  * only). Empty when no context is initialized. Order is ascending by index.
  */
 C10_RBLN_API std::vector<c10::DeviceIndex> initialized_device_indices();
+
+/**
+ * @brief Flush the cache of every initialized device (device-less empty_cache()).
+ *
+ * Backs RBLNAllocator::emptyCache(). Iterates initialized_device_indices() and calls
+ * empty_cache() per device — the "span all initialized devices, not just the current
+ * one" contract (CUDA/XPU parity). When a test observer is installed
+ * (set_empty_cache_device_hook_for_testing), it is invoked per device *instead of* the
+ * real flush, so a test can assert the dispatch without touching the runtime.
+ */
+C10_RBLN_API void empty_cache_all_initialized_devices();
+
+/**
+ * @brief Test seam: observe/override the per-device dispatch of
+ * empty_cache_all_initialized_devices(). Pass nullptr to restore the real flush.
+ */
+C10_RBLN_API void set_empty_cache_device_hook_for_testing(std::function<void(c10::DeviceIndex)> hook);
 
 /**
  * @brief Allocates memory on the specified RBLN device.
