@@ -296,12 +296,10 @@ class TestInternalOpUtils(TestCase):
         self.assertNotIn(torch.int32, SupportedDtypes.sdpa)
 
     def test_supported_dtypes_amp(self):
-        """Tuple of ``float16`` and ``bfloat16``; the AMP autocast path must stay float-only."""
+        """Empty: AMP autocast is not implemented (no AutocastPrivateUse1 policy),
+        so the catalog advertises no dtypes and torch disables autocast."""
         self.assertIsInstance(SupportedDtypes.amp, tuple)
-        self.assertIn(torch.bfloat16, SupportedDtypes.amp)
-        self.assertIn(torch.float16, SupportedDtypes.amp)
-        self.assertNotIn(torch.float32, SupportedDtypes.amp)
-        self.assertNotIn(torch.int32, SupportedDtypes.amp)
+        self.assertEqual(SupportedDtypes.amp, ())
 
     def test_get_amp_supported_dtype_matches_catalog(self):
         """``get_amp_supported_dtype()`` delegates to ``SupportedDtypes.amp``."""
