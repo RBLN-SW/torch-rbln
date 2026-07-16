@@ -1,5 +1,6 @@
 #include <c10/rbln/RBLNHooksInterface.h>
 #include <c10/rbln/RBLNLogging.h>
+#include <c10/rbln/RBLNSupportedDtypes.h>
 #include <c10/rbln/impl/RBLNGuardImpl.h>
 
 #include <c10/core/DeviceCapability.h>
@@ -89,13 +90,47 @@ c10::DeviceIndex RBLNGuardImpl::deviceCount() const noexcept {
   }
 }
 
-c10::DeviceCapability RBLNGuardImpl::getDeviceCapability(c10::Device /*device*/) const {
-  // Native-dispatch dtypes only (fp16/bf16); CPU-fallback dtypes are not device
-  // capabilities. Mirrors kDispatchDtypes in c10/rbln/RBLNSupportedDtypes.h.
+c10::DeviceCapability RBLNGuardImpl::getDeviceCapability(c10::Device device) const {
+  // Validate the requested index so a stale/out-of-range device can't silently
+  // report a capability. A no-device host (count == 0) skips the range check.
+  const auto count = deviceCount();
+  if (count > 0) {
+    const auto index = device.has_index() ? device.index() : c10::rbln::get_device_index();
+    TORCH_CHECK(
+        index >= 0 && index < count,
+        "rbln device index ",
+        static_cast<int>(index),
+        " is out of range [0, ",
+        static_cast<int>(count),
+        ")");
+  }
+
+  // Capability = the dtypes RBLN can allocate and type-convert on device
+  // (allocation + conversion, per the upstream torch.accelerator contract),
+  // which is broader than native-op dispatch. See kCapabilityDtypes.
   c10::DeviceCapability capability;
   capability.capability_data.capability_bits = 0;
-  capability.capability_data.supported_scalar_types.has_Half = 1;
-  capability.capability_data.supported_scalar_types.has_BFloat16 = 1;
+  for (const auto scalar_type : c10::rbln::kCapabilityDtypes) {
+    switch (scalar_type) {
+      case c10::kHalf:
+        capability.capability_data.supported_scalar_types.has_Half = 1;
+        break;
+      case c10::kBFloat16:
+        capability.capability_data.supported_scalar_types.has_BFloat16 = 1;
+        break;
+      case c10::kFloat:
+        capability.capability_data.supported_scalar_types.has_Float = 1;
+        break;
+      case c10::kInt:
+        capability.capability_data.supported_scalar_types.has_Int = 1;
+        break;
+      case c10::kLong:
+        capability.capability_data.supported_scalar_types.has_Long = 1;
+        break;
+      default:
+        TORCH_CHECK(false, "unhandled capability dtype ", c10::toString(scalar_type));
+    }
+  }
   return capability;
 }
 

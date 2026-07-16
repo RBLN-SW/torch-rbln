@@ -7,8 +7,9 @@ Covers:
   (``allocated.current`` etc.), not the CUDA-style ``allocated_bytes.all.current``.
 - Device-argument normalization (accept None/int/str/torch.device, reject
   non-rbln devices and out-of-range indices).
-- ``torch.accelerator.get_device_capability()`` advertising the natively
-  dispatched dtypes.
+- ``torch.accelerator.get_device_capability()`` advertising the dtypes RBLN can
+  allocate and type-convert on device (allocation + conversion, not native-op
+  dispatch).
 - PrivateUse1 storage resize-to-zero.
 - ``torch.accelerator.empty_cache()`` (no device arg) spanning every
   initialized device.
@@ -60,14 +61,19 @@ class TestRblnMemoryHelpers(TestCase):
 
 
 class TestDeviceCapability(TestCase):
-    """``torch.accelerator.get_device_capability()`` reports the native dtypes."""
+    """``torch.accelerator.get_device_capability()`` reports allocation/conversion dtypes."""
 
     @pytest.mark.test_set_ci
-    def test_supported_dtypes_are_native_floats(self):
+    def test_supported_dtypes_are_allocatable_and_convertible(self):
         cap = torch.accelerator.get_device_capability()
         self.assertIn("supported_dtypes", cap)
-        # RBLN dispatches fp16/bf16 natively; fallback-only dtypes are excluded.
-        self.assertEqual(set(cap["supported_dtypes"]), {torch.float16, torch.bfloat16})
+        # Capability = dtypes RBLN can allocate and type-convert on device
+        # (per the upstream contract this is independent of native-op dispatch),
+        # matching the v2v/copy engine set (ENGINE_DTYPES in test/utils_v2v.py).
+        self.assertEqual(
+            set(cap["supported_dtypes"]),
+            {torch.float16, torch.bfloat16, torch.float32, torch.int32, torch.int64},
+        )
 
 
 class TestStorageResizeToZero(TestCase):
@@ -81,19 +87,50 @@ class TestStorageResizeToZero(TestCase):
         self.assertEqual(storage.nbytes(), 0)
 
 
+@pytest.mark.single_worker
 class TestAcceleratorEmptyCache(TestCase):
-    """Device-less ``torch.accelerator.empty_cache()`` iterates all initialized devices."""
+    """Device-less ``torch.accelerator.empty_cache()`` releases cached memory on
+    every initialized device — not just the current one, and not a no-op."""
+
+    @staticmethod
+    def _hold_then_free_reserved(device):
+        # Allocate then free a large buffer. The caching allocator keeps the
+        # freed block as *reserved* (freeing alone does not return it to the
+        # runtime), so reserved stays high until empty_cache() releases it.
+        buf = torch.empty(16 * 1024 * 1024, device=device, dtype=torch.float16)  # 32 MiB
+        buf.add_(1.0)
+        del buf
+        return torch.rbln.memory_reserved(device)
 
     @pytest.mark.test_set_ci
-    def test_generic_empty_cache_runs(self):
-        # Materialize then free so the allocator holds cache, then call the
-        # device-less generic empty_cache: it walks every initialized device and
-        # must complete without error (with one device it iterates once).
-        scratch = torch.randn(512, 512, device="rbln:0", dtype=torch.float16)
-        _ = scratch + scratch
-        del scratch
+    def test_empty_cache_releases_current_device(self):
+        reserved_cached = self._hold_then_free_reserved("rbln:0")
         torch.accelerator.empty_cache()
-        self.assertGreaterEqual(torch.rbln.memory_reserved(), 0)
+        # Must actually release the cached block; a no-op or query-only
+        # implementation would leave reserved unchanged.
+        self.assertLess(torch.rbln.memory_reserved("rbln:0"), reserved_cached)
+
+    @pytest.mark.test_set_ci
+    def test_empty_cache_spans_all_initialized_devices(self):
+        # The device-less form must walk *every* initialized device, so a
+        # current-device-only regression is caught. Needs >= 2 usable devices
+        # (multi-node hardware); degrades to skip on single-node hosts.
+        if torch.rbln.device_count() < 2:
+            self.skipTest("requires >= 2 rbln devices")
+        indices = (0, 1)
+        reserved_cached = {}
+        for idx in indices:
+            try:
+                reserved_cached[idx] = self._hold_then_free_reserved(idx)
+            except RuntimeError as exc:  # device not usable on this host
+                self.skipTest(f"rbln:{idx} memory ops unavailable: {exc}")
+        torch.accelerator.empty_cache()
+        for idx in indices:
+            self.assertLess(
+                torch.rbln.memory_reserved(idx),
+                reserved_cached[idx],
+                msg=f"empty_cache() did not release device {idx} (current-device-only regression)",
+            )
 
 
 if __name__ == "__main__":

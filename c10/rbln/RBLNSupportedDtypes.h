@@ -18,6 +18,14 @@ inline constexpr std::array<c10::ScalarType, 2> kSdpaDtypes = {c10::kHalf, c10::
 // dtypes once AutocastPrivateUse1 is registered.
 inline constexpr std::array<c10::ScalarType, 0> kAmpDtypes = {};
 
+// torch.accelerator device-capability dtypes: the set RBLN can *allocate* and
+// *type-convert* on device. Per the upstream contract this is independent of
+// which ops dispatch natively, so it is broader than kDispatchDtypes and
+// includes fp32/int32/int64. Must match the v2v/copy engine set
+// (ENGINE_DTYPES in test/utils_v2v.py).
+inline constexpr std::array<c10::ScalarType, 5> kCapabilityDtypes = {
+    c10::kHalf, c10::kBFloat16, c10::kFloat, c10::kInt, c10::kLong};
+
 constexpr bool is_dispatch_dtype(c10::ScalarType s) noexcept {
   for (const auto d : kDispatchDtypes) {
     if (s == d) {
