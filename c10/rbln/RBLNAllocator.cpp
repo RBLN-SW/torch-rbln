@@ -89,15 +89,10 @@ struct RBLNAllocator final : public c10::DeviceAllocator {
    * mempool_id is ignored (no per-mempool scoping).
    */
   void emptyCache(c10::MempoolId_t /*mempool_id*/) override {
-    // Context flag first so an unused device isn't enumerated/registered.
-    if (!c10::rbln::any_device_context_initialized()) {
-      return;
-    }
-    const auto device_count = c10::rbln::get_device_count();
-    for (c10::DeviceIndex idx = 0; idx < device_count; ++idx) {
-      if (!c10::rbln::device_context_initialized(idx)) {
-        continue;
-      }
+    // Flush *every* initialized device, not just the current one (CUDA/XPU parity).
+    // Device selection is a tested seam (initialized_device_indices); it context-gates
+    // internally so an unused device isn't enumerated/registered.
+    for (const auto idx : c10::rbln::initialized_device_indices()) {
       const auto device = c10::Device(c10::kPrivateUse1, idx);
       RBLN_LOG_DEBUG("Emptying cache for {}", c10::str(device));
       c10::rbln::empty_cache(device);

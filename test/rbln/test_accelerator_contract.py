@@ -33,19 +33,22 @@ class TestRblnMemoryHelpers(TestCase):
 
     @pytest.mark.test_set_ci
     def test_memory_helpers_match_stats_and_are_nonzero(self):
-        torch.rbln.empty_cache()
-        torch.rbln.reset_peak_memory_stats()
+        # Pin to device 0 explicitly. The helpers/reset default to the *current*
+        # device, which is not guaranteed to be 0 (another test may have changed it),
+        # so allocating on rbln:0 but querying no-arg would be flaky.
+        torch.rbln.empty_cache(0)
+        torch.rbln.reset_peak_memory_stats(0)
 
         keep = torch.randn(1024, 1024, device="rbln:0", dtype=torch.float16)
         _ = keep + keep
 
-        stats = torch.rbln.memory_stats()
-        self.assertEqual(torch.rbln.memory_allocated(), stats.get("allocated.current", 0))
-        self.assertEqual(torch.rbln.max_memory_allocated(), stats.get("allocated.peak", 0))
-        self.assertEqual(torch.rbln.memory_reserved(), stats.get("reserved.current", 0))
-        self.assertEqual(torch.rbln.max_memory_reserved(), stats.get("reserved.peak", 0))
+        stats = torch.rbln.memory_stats(0)
+        self.assertEqual(torch.rbln.memory_allocated(0), stats.get("allocated.current", 0))
+        self.assertEqual(torch.rbln.max_memory_allocated(0), stats.get("allocated.peak", 0))
+        self.assertEqual(torch.rbln.memory_reserved(0), stats.get("reserved.current", 0))
+        self.assertEqual(torch.rbln.max_memory_reserved(0), stats.get("reserved.peak", 0))
         # Regression: the CUDA-style key made these return 0 despite a live allocation.
-        self.assertGreater(torch.rbln.memory_allocated(), 0)
+        self.assertGreater(torch.rbln.memory_allocated(0), 0)
         del keep
 
     @pytest.mark.test_set_ci
@@ -66,20 +69,41 @@ class TestRblnMemoryHelpers(TestCase):
             torch.rbln.memory_stats(torch.rbln.device_count())  # first out-of-range index
 
     @pytest.mark.test_set_ci
-    def test_memory_stats_unqueryable_device_reports_zero_not_raise(self):
-        # CUDA parity: memory_stats() must not throw for a *valid* device index.
-        # The rbln runtime exposes per-node memory stats for node 0 only, so
-        # rbln_get_memory_stats() rejects any device index > 0 with
-        # INIT_INVALID_ARGUMENT (Invalid node_id) -- even for a device holding live
-        # memory. The backend absorbs that failure and reports zero stats instead of
-        # propagating, matching torch.cuda.memory_stats on an unqueryable device.
+    def test_memory_stats_uninitialized_device_reports_zero_not_raise(self):
+        # CUDA parity: memory_stats() must not throw for a *valid* device index this
+        # process has not allocated on. It reports zero (like torch.cuda.memory_stats
+        # on an uninitialized device) via the device_context_initialized gate, instead
+        # of hitting the runtime, whose per-node stats query rejects such a device
+        # (INIT_INVALID_ARGUMENT). (An *initialized* device index > 0 is a separate,
+        # runtime-limited case that still surfaces its error -- the runtime supports
+        # per-node stats for node 0 only -- so it is intentionally not asserted here.)
         count = torch.rbln.device_count()
         if count < 2:
-            self.skipTest("needs a device index > 0 to exercise the unqueryable path")
+            self.skipTest("needs a second, never-allocated device index")
+        # Highest index: not touched by other tests in this (single) worker process.
         idx = count - 1
         self.assertIsInstance(torch.rbln.memory_stats(idx), dict)  # must not raise
         self.assertEqual(torch.rbln.memory_allocated(idx), 0)
         self.assertEqual(torch.rbln.memory_reserved(idx), 0)
+
+    @pytest.mark.test_set_ci
+    def test_accelerator_memory_stats_uninitialized_device_reports_zero_not_raise(self):
+        # Same parity guarantee on the generic torch.accelerator path, which routes to
+        # the C10 getDeviceStats() hook -- a separate code path from
+        # torch.rbln.memory_stats(). An uninitialized valid device reports zero, not raise.
+        count = torch.rbln.device_count()
+        if count < 2:
+            self.skipTest("needs a second, never-allocated device index")
+        idx = count - 1
+        # The regression is that this raised INIT_INVALID_ARGUMENT; the guarantee is a
+        # clean return. An uninitialized device yields empty stats; any populated entry
+        # must be zero.
+        stats = torch.accelerator.memory_stats(idx)  # must not raise
+        self.assertIsInstance(stats, dict)
+        self.assertTrue(
+            all(v == 0 for v in stats.values() if isinstance(v, int)),
+            msg=f"expected zero stats for uninitialized rbln:{idx}, got nonzero entries",
+        )
 
 
 @pytest.mark.single_worker

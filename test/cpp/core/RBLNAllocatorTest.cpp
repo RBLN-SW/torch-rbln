@@ -157,6 +157,41 @@ TEST_F(RBLNAllocatorTest, EmptyCache) {
   EXPECT_NO_THROW(device_allocator->emptyCache());
 }
 
+// Regression guard for the device-less empty_cache() "span all devices" contract:
+// its device selection (initialized_device_indices) must cover *every* initialized
+// device, not just the current one (a current-device-only regression drops the rest).
+// The per-device release itself is unobservable here — the runtime exposes memory
+// stats for node 0 only — so we assert the selection includes a non-current device.
+TEST_F(RBLNAllocatorTest, EmptyCacheSpansNonCurrentInitializedDevice) {
+  if (c10::rbln::get_device_count() < 2) {
+    GTEST_SKIP() << "needs >= 2 devices to exercise a non-current device";
+  }
+  auto* allocator = c10::GetAllocator(c10::kPrivateUse1);
+  // Initialize a non-current device (index 1), then make device 0 current again.
+  c10::rbln::set_device_index(1);
+  {
+    const auto d1 = allocator->allocate(1024);
+    EXPECT_NE(d1.get(), nullptr);
+  }
+  c10::rbln::set_device_index(0);
+  {
+    const auto d0 = allocator->allocate(1024);
+    EXPECT_NE(d0.get(), nullptr);
+  }
+
+  const auto indices = c10::rbln::initialized_device_indices();
+  const auto contains = [&](c10::DeviceIndex i) {
+    for (const auto x : indices) {
+      if (x == i) {
+        return true;
+      }
+    }
+    return false;
+  };
+  EXPECT_TRUE(contains(0));
+  EXPECT_TRUE(contains(1)) << "empty_cache() would skip non-current initialized device 1";
+}
+
 // recordStream must be a safe no-op — RBLN has no stream-based async execution.
 TEST_F(RBLNAllocatorTest, RecordStreamIsNoOp) {
   auto* device_allocator = GetDeviceAllocator();
