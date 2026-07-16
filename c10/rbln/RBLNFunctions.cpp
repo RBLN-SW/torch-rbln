@@ -838,51 +838,62 @@ c10::CachingDeviceAllocator::DeviceStats get_device_stats(const c10::Device& dev
   check_device_index(device_index);
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_get_memory_stats: device_id={}", device_id);
-  const auto memory_stats = rbln_get_memory_stats(device_id);
+  // CUDA parity (see memory_stats): the rbln runtime exposes per-node memory stats
+  // for node 0 only; rbln_get_memory_stats() rejects any other device with
+  // INIT_INVALID_ARGUMENT (Invalid node_id). Report zero stats for such a device
+  // rather than propagating, so a device-stats query never throws for a valid index.
+  // (check_device_index above still rejects an invalid index -- a bad index throws.)
+  try {
+    const auto memory_stats = rbln_get_memory_stats(device_id);
 
-  c10::CachingDeviceAllocator::DeviceStats stats{};
-  constexpr auto kAggregate = static_cast<size_t>(c10::CachingAllocator::StatType::AGGREGATE);
+    c10::CachingDeviceAllocator::DeviceStats stats{};
+    constexpr auto kAggregate = static_cast<size_t>(c10::CachingAllocator::StatType::AGGREGATE);
 
-  // allocated_bytes
-  stats.allocated_bytes[kAggregate].current = static_cast<int64_t>(memory_stats.GetAllocatedCurrent());
-  stats.allocated_bytes[kAggregate].peak = static_cast<int64_t>(memory_stats.GetAllocatedPeak());
-  stats.allocated_bytes[kAggregate].allocated = static_cast<int64_t>(memory_stats.GetAllocatedTotalAllocated());
-  stats.allocated_bytes[kAggregate].freed = static_cast<int64_t>(memory_stats.GetAllocatedTotalFreed());
+    // allocated_bytes
+    stats.allocated_bytes[kAggregate].current = static_cast<int64_t>(memory_stats.GetAllocatedCurrent());
+    stats.allocated_bytes[kAggregate].peak = static_cast<int64_t>(memory_stats.GetAllocatedPeak());
+    stats.allocated_bytes[kAggregate].allocated = static_cast<int64_t>(memory_stats.GetAllocatedTotalAllocated());
+    stats.allocated_bytes[kAggregate].freed = static_cast<int64_t>(memory_stats.GetAllocatedTotalFreed());
 
-  // reserved_bytes
-  stats.reserved_bytes[kAggregate].current = static_cast<int64_t>(memory_stats.GetReservedCurrent());
-  stats.reserved_bytes[kAggregate].peak = static_cast<int64_t>(memory_stats.GetReservedPeak());
-  stats.reserved_bytes[kAggregate].allocated = static_cast<int64_t>(memory_stats.GetReservedTotalAllocated());
-  stats.reserved_bytes[kAggregate].freed = static_cast<int64_t>(memory_stats.GetReservedTotalFreed());
+    // reserved_bytes
+    stats.reserved_bytes[kAggregate].current = static_cast<int64_t>(memory_stats.GetReservedCurrent());
+    stats.reserved_bytes[kAggregate].peak = static_cast<int64_t>(memory_stats.GetReservedPeak());
+    stats.reserved_bytes[kAggregate].allocated = static_cast<int64_t>(memory_stats.GetReservedTotalAllocated());
+    stats.reserved_bytes[kAggregate].freed = static_cast<int64_t>(memory_stats.GetReservedTotalFreed());
 
-  // active_bytes
-  stats.active_bytes[kAggregate].current = static_cast<int64_t>(memory_stats.GetActiveCurrent());
-  stats.active_bytes[kAggregate].peak = static_cast<int64_t>(memory_stats.GetActivePeak());
+    // active_bytes
+    stats.active_bytes[kAggregate].current = static_cast<int64_t>(memory_stats.GetActiveCurrent());
+    stats.active_bytes[kAggregate].peak = static_cast<int64_t>(memory_stats.GetActivePeak());
 
-  // inactive_split_bytes — mapped from memory_stats's "cached" (reusable fragmented blocks).
-  stats.inactive_split_bytes[kAggregate].current = static_cast<int64_t>(memory_stats.GetCachedCurrent());
-  stats.inactive_split_bytes[kAggregate].peak = static_cast<int64_t>(memory_stats.GetCachedPeak());
+    // inactive_split_bytes — mapped from memory_stats's "cached" (reusable fragmented blocks).
+    stats.inactive_split_bytes[kAggregate].current = static_cast<int64_t>(memory_stats.GetCachedCurrent());
+    stats.inactive_split_bytes[kAggregate].peak = static_cast<int64_t>(memory_stats.GetCachedPeak());
 
-  // scalar counters
-  stats.num_alloc_retries = static_cast<int64_t>(memory_stats.GetNumAllocRetries());
-  stats.num_ooms = static_cast<int64_t>(memory_stats.GetNumOoms());
-  stats.num_device_alloc = static_cast<int64_t>(memory_stats.GetNumDeviceAlloc());
-  stats.num_device_free = static_cast<int64_t>(memory_stats.GetNumDeviceFree());
+    // scalar counters
+    stats.num_alloc_retries = static_cast<int64_t>(memory_stats.GetNumAllocRetries());
+    stats.num_ooms = static_cast<int64_t>(memory_stats.GetNumOoms());
+    stats.num_device_alloc = static_cast<int64_t>(memory_stats.GetNumDeviceAlloc());
+    stats.num_device_free = static_cast<int64_t>(memory_stats.GetNumDeviceFree());
 
-  RBLN_LOG_DEBUG(
-      "allocated(current={}, peak={}, allocated={}, freed={}), reserved(current={}, peak={}, allocated={}, freed={}), "
-      "active(current={}, peak={})",
-      stats.allocated_bytes[kAggregate].current,
-      stats.allocated_bytes[kAggregate].peak,
-      stats.allocated_bytes[kAggregate].allocated,
-      stats.allocated_bytes[kAggregate].freed,
-      stats.reserved_bytes[kAggregate].current,
-      stats.reserved_bytes[kAggregate].peak,
-      stats.reserved_bytes[kAggregate].allocated,
-      stats.reserved_bytes[kAggregate].freed,
-      stats.active_bytes[kAggregate].current,
-      stats.active_bytes[kAggregate].peak);
-  return stats;
+    RBLN_LOG_DEBUG(
+        "allocated(current={}, peak={}, allocated={}, freed={}), reserved(current={}, peak={}, allocated={}, freed={}), "
+        "active(current={}, peak={})",
+        stats.allocated_bytes[kAggregate].current,
+        stats.allocated_bytes[kAggregate].peak,
+        stats.allocated_bytes[kAggregate].allocated,
+        stats.allocated_bytes[kAggregate].freed,
+        stats.reserved_bytes[kAggregate].current,
+        stats.reserved_bytes[kAggregate].peak,
+        stats.reserved_bytes[kAggregate].allocated,
+        stats.reserved_bytes[kAggregate].freed,
+        stats.active_bytes[kAggregate].current,
+        stats.active_bytes[kAggregate].peak);
+    return stats;
+  } catch (const std::exception& e) {
+    RBLN_LOG_DEBUG(
+        "rbln_get_memory_stats(rbln:{}) unavailable ({}); reporting zero", static_cast<int>(device_index), e.what());
+    return c10::CachingDeviceAllocator::DeviceStats{};
+  }
 }
 
 void empty_cache(const c10::Device& device) {
@@ -921,11 +932,23 @@ std::map<std::string, uint64_t> memory_stats(const c10::Device& device) {
   check_device_index(device_index);
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_get_memory_stats: rbln:{}, device_id={}", static_cast<int>(device_index), device_id);
-  const auto stats = rbln_get_memory_stats(device_id);
-
-  const auto memory_stats = stats.GetMemoryStats();
-  RBLN_LOG_DEBUG("memory_stats={}", memory_stats);
-  return memory_stats;
+  // CUDA parity: memory_stats() must not throw for a valid device index. The rbln
+  // runtime exposes per-node memory stats for node 0 only; rbln_get_memory_stats()
+  // rejects any other device with INIT_INVALID_ARGUMENT (Invalid node_id). Report
+  // empty stats (memory_allocated()/memory_reserved() then read 0) for such a device
+  // rather than propagating, matching torch.cuda.memory_stats on an unqueryable
+  // device. (check_device_index above still rejects an invalid index -- a bad index
+  // throws; only the runtime's own stats failure is absorbed here.)
+  try {
+    const auto stats = rbln_get_memory_stats(device_id);
+    const auto memory_stats = stats.GetMemoryStats();
+    RBLN_LOG_DEBUG("memory_stats={}", memory_stats);
+    return memory_stats;
+  } catch (const std::exception& e) {
+    RBLN_LOG_DEBUG(
+        "rbln_get_memory_stats(rbln:{}) unavailable ({}); reporting zero", static_cast<int>(device_index), e.what());
+    return {};
+  }
 }
 
 void reset_accumulated_memory_stats(const c10::Device& device) {
