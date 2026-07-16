@@ -105,9 +105,8 @@ c10::DeviceCapability RBLNGuardImpl::getDeviceCapability(c10::Device device) con
         ")");
   }
 
-  // Capability = the dtypes RBLN can allocate and type-convert on device
-  // (allocation + conversion, per the upstream torch.accelerator contract),
-  // which is broader than native-op dispatch. See kCapabilityDtypes.
+  // Capability = the dtypes resident in device memory (allocation/conversion
+  // capability, not native-op dispatch). See kCapabilityDtypes.
   c10::DeviceCapability capability;
   capability.capability_data.capability_bits = 0;
   for (const auto scalar_type : c10::rbln::kCapabilityDtypes) {
@@ -117,15 +116,6 @@ c10::DeviceCapability RBLNGuardImpl::getDeviceCapability(c10::Device device) con
         break;
       case c10::kBFloat16:
         capability.capability_data.supported_scalar_types.has_BFloat16 = 1;
-        break;
-      case c10::kFloat:
-        capability.capability_data.supported_scalar_types.has_Float = 1;
-        break;
-      case c10::kInt:
-        capability.capability_data.supported_scalar_types.has_Int = 1;
-        break;
-      case c10::kLong:
-        capability.capability_data.supported_scalar_types.has_Long = 1;
         break;
       default:
         TORCH_CHECK(false, "unhandled capability dtype ", c10::toString(scalar_type));

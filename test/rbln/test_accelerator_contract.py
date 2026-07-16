@@ -22,8 +22,12 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 import torch_rbln  # noqa: F401 -- registers the rbln device + torch.rbln namespace
 
 
+@pytest.mark.single_worker
 class TestRblnMemoryHelpers(TestCase):
-    """``torch.rbln.memory_*`` must read the RBLN allocator's dotted stat keys."""
+    """``torch.rbln.memory_*`` must read the RBLN allocator's dotted stat keys.
+
+    Single-worker: mutates the global allocator (empty_cache / peak reset) and
+    compares stats across calls, so it must not race other workers' allocations."""
 
     @pytest.mark.test_set_ci
     def test_memory_helpers_match_stats_and_are_nonzero(self):
@@ -60,20 +64,29 @@ class TestRblnMemoryHelpers(TestCase):
             torch.rbln.memory_stats(torch.rbln.device_count())  # first out-of-range index
 
 
+@pytest.mark.single_worker
 class TestDeviceCapability(TestCase):
-    """``torch.accelerator.get_device_capability()`` reports allocation/conversion dtypes."""
+    """``get_device_capability()`` reports dtypes resident in device memory
+    (fp16/bf16); other dtypes are CPU-backed even under device="rbln".
+    Single-worker: measures global device memory."""
 
     @pytest.mark.test_set_ci
-    def test_supported_dtypes_are_allocatable_and_convertible(self):
-        cap = torch.accelerator.get_device_capability()
-        self.assertIn("supported_dtypes", cap)
-        # Capability = dtypes RBLN can allocate and type-convert on device
-        # (per the upstream contract this is independent of native-op dispatch),
-        # matching the v2v/copy engine set (ENGINE_DTYPES in test/utils_v2v.py).
-        self.assertEqual(
-            set(cap["supported_dtypes"]),
-            {torch.float16, torch.bfloat16, torch.float32, torch.int32, torch.int64},
-        )
+    def test_capability_reports_device_resident_dtypes(self):
+        supported = torch.accelerator.get_device_capability()["supported_dtypes"]
+        self.assertEqual(set(supported), {torch.float16, torch.bfloat16})
+        # Each advertised dtype must actually occupy device memory (a compute op
+        # materializes it on the NPU); a CPU-backed dtype would report 0 bytes.
+        for dtype in supported:
+            torch.rbln.empty_cache()
+            before = torch.rbln.memory_allocated(0)
+            scratch = torch.empty(1024 * 1024, dtype=dtype, device="rbln:0")
+            scratch.add_(1)
+            self.assertGreater(
+                torch.rbln.memory_allocated(0) - before,
+                0,
+                msg=f"advertised {dtype} is not resident in device memory",
+            )
+            del scratch
 
 
 class TestStorageResizeToZero(TestCase):
@@ -90,7 +103,10 @@ class TestStorageResizeToZero(TestCase):
 @pytest.mark.single_worker
 class TestAcceleratorEmptyCache(TestCase):
     """Device-less ``torch.accelerator.empty_cache()`` releases cached memory on
-    every initialized device — not just the current one, and not a no-op."""
+    every initialized device — not just the current one, and not a no-op.
+
+    Single-worker: asserts on global reserved-memory changes, so it must not race
+    other workers' allocations."""
 
     @staticmethod
     def _hold_then_free_reserved(device):
@@ -118,12 +134,18 @@ class TestAcceleratorEmptyCache(TestCase):
         if torch.rbln.device_count() < 2:
             self.skipTest("requires >= 2 rbln devices")
         indices = (0, 1)
-        reserved_cached = {}
+        # Skip (don't fail) if a device isn't a usable memory node here (single-node
+        # boxes report count>=2 but only node 0 works); any other error propagates
+        # so a genuine regression isn't masked.
         for idx in indices:
             try:
-                reserved_cached[idx] = self._hold_then_free_reserved(idx)
-            except RuntimeError as exc:  # device not usable on this host
-                self.skipTest(f"rbln:{idx} memory ops unavailable: {exc}")
+                torch.rbln.memory_stats(idx)
+            except RuntimeError as exc:
+                if "node_id" not in str(exc):
+                    raise
+                self.skipTest(f"rbln:{idx} is not a usable memory node on this host: {exc}")
+        # Regression surface below is unguarded.
+        reserved_cached = {idx: self._hold_then_free_reserved(idx) for idx in indices}
         torch.accelerator.empty_cache()
         for idx in indices:
             self.assertLess(
