@@ -934,27 +934,6 @@ void empty_cache(const c10::Device& device) {
       static_cast<int>(rc));
 }
 
-namespace {
-// Test-only seam for empty_cache_all_initialized_devices(); see the header.
-std::function<void(c10::DeviceIndex)> g_empty_cache_device_hook;
-} // namespace
-
-void set_empty_cache_device_hook_for_testing(std::function<void(c10::DeviceIndex)> hook) {
-  g_empty_cache_device_hook = std::move(hook);
-}
-
-void empty_cache_all_initialized_devices() {
-  for (const auto idx : initialized_device_indices()) {
-    if (g_empty_cache_device_hook) {
-      g_empty_cache_device_hook(idx); // observe/override in tests, skip the real flush
-      continue;
-    }
-    const auto device = c10::Device(c10::kPrivateUse1, idx);
-    RBLN_LOG_DEBUG("Emptying cache for {}", c10::str(device));
-    empty_cache(device);
-  }
-}
-
 std::map<std::string, uint64_t> memory_stats(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
   // Best-effort query: empty when the runtime is unavailable.

@@ -161,9 +161,10 @@ class TestAcceleratorEmptyCache(TestCase):
     but the rbln runtime's per-node memory-stats query supports node 0 only, so on a
     device index > 0 ``memory_reserved()`` either raises (an initialized device, the
     runtime rejects the query) or reads 0 (an uninitialized device, the gate) — never
-    the real figure. The all-device dispatch is instead covered in C++ by
-    ``RBLNAllocatorTest.EmptyCacheDispatchesToNonCurrentInitializedDevice``, which
-    observes emptyCache()'s per-device calls directly."""
+    the real figure. The all-device selection is instead covered in C++ by
+    ``RBLNAllocatorTest.EmptyCacheSpansNonCurrentInitializedDevice`` (emptyCache()
+    iterates ``initialized_device_indices()``, asserted to include a non-current
+    device)."""
 
     @staticmethod
     def _hold_then_free_reserved(device):
