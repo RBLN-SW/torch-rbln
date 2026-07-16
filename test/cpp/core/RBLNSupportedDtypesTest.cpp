@@ -56,8 +56,7 @@ TEST_F(RBLNSupportedDtypesTest, SdpaCatalogIsFloatOnly) {
 TEST_F(RBLNSupportedDtypesTest, CapabilityCatalogContents) {
   // Allocation/conversion capability is broader than native dispatch: it also
   // covers fp32/int32/int64 (the v2v/copy engine dtypes).
-  constexpr c10::ScalarType kExpected[] = {
-      c10::kHalf, c10::kBFloat16, c10::kFloat, c10::kInt, c10::kLong};
+  constexpr c10::ScalarType kExpected[] = {c10::kHalf, c10::kBFloat16, c10::kFloat, c10::kInt, c10::kLong};
   for (const auto scalar_type : kExpected) {
     EXPECT_TRUE(contains(c10::rbln::kCapabilityDtypes, scalar_type));
   }
