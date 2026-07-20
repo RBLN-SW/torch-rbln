@@ -173,13 +173,23 @@ class TestCausalLMBase(TestCase):
 class TestCausalLM(TestCausalLMBase):
     """Test correctness of causal language model outputs across various configurations."""
 
-    # CI runs only a representative subset (batch_size=2, seq_len=1024);
-    # release tests cover all batch_size x seq_len combinations.
+    # Pin the EXAONE HF revision (shared by test_exaone and test_large_model_tiling) so
+    # model-hub updates can't shift the comparison.
+    _EXAONE_REVISION = "e949c91dec92095908d34e6b560af77dd0c993f8"
+
+    # Small models (Llama-1B, Qwen-1.5B) are cheap to compile, so they sweep the full
+    # batch x seq grid in release; CI runs only the representative point (batch=2, seq=1024).
     ci_tests_batch_seq = [
         subtest((bs, sl), decorators=[pytest.mark.test_set_ci] if (bs, sl) == (2, 1024) else [])
         for bs in TestCausalLMBase.batch_sizes
         for sl in TestCausalLMBase.seq_lens
     ]
+
+    # Large models (Llama-3B, EXAONE-2.4B) share the small models' code paths but are 3-5x
+    # slower to compile and dominate the release run. They exercise only the representative
+    # point (the full attn x dtype matrix, which is also the CI set) plus a single largest-shape
+    # tiling smoke (test_large_model_tiling) -- not the full batch x seq grid.
+    representative_batch_seq = [subtest((2, 1024), decorators=[pytest.mark.test_set_ci])]
 
     @pytest.mark.usefixtures("enable_deploy_mode")
     @dtypes(*SUPPORTED_DTYPES)
@@ -190,12 +200,12 @@ class TestCausalLM(TestCausalLMBase):
         ],
     )
     @parametrize("attn_implementation", TestCausalLMBase.attn_implementations)
-    @parametrize("batch_size,seq_len", ci_tests_batch_seq)
+    @parametrize("batch_size,seq_len", representative_batch_seq)
     def test_exaone(self, dtype, model_id, attn_implementation, batch_size, seq_len):
         config_kwargs = dict(
             # Set a specific revision to avoid compatibility issues with the latest transformers version.
             # This can be removed when the transformers version is updated to 5.1.0 or higher.
-            revision="e949c91dec92095908d34e6b560af77dd0c993f8",
+            revision=self._EXAONE_REVISION,
             trust_remote_code=True,
             dtype=dtype,
             attn_implementation=attn_implementation,
@@ -210,7 +220,6 @@ class TestCausalLM(TestCausalLMBase):
         "model_id",
         [
             "meta-llama/Llama-3.2-1B-Instruct",
-            "meta-llama/Llama-3.2-3B-Instruct",
         ],
     )
     @parametrize("attn_implementation", TestCausalLMBase.attn_implementations)
@@ -223,6 +232,21 @@ class TestCausalLM(TestCausalLMBase):
         )
 
         self._assert_logits_match_fp32(model_id, config_kwargs, batch_size, seq_len)
+
+    # Llama-3B is the same architecture as Llama-1B (swept in full above) but far slower to
+    # compile, so it only runs the representative point across the full attn x dtype matrix.
+    @pytest.mark.usefixtures("enable_deploy_mode")
+    @dtypes(*SUPPORTED_DTYPES)
+    @parametrize("attn_implementation", TestCausalLMBase.attn_implementations)
+    @parametrize("batch_size,seq_len", representative_batch_seq)
+    def test_llama_3b(self, dtype, attn_implementation, batch_size, seq_len):
+        config_kwargs = dict(
+            dtype=dtype,
+            attn_implementation=attn_implementation,
+            num_hidden_layers=self.num_hidden_layers,
+        )
+
+        self._assert_logits_match_fp32("meta-llama/Llama-3.2-3B-Instruct", config_kwargs, batch_size, seq_len)
 
     # Deploy mode is disabled for Qwen2.5 due to float16 overflow issues in certain BMM operations.
     # This will be enabled in the future when cf16 host padding is supported.
@@ -245,6 +269,29 @@ class TestCausalLM(TestCausalLMBase):
             sliding_window=0,  # Disable sliding window attention.
         )
         self._assert_logits_match_fp32(model_id, config_kwargs, batch_size, seq_len)
+
+    # The largest shape (batch=4, seq=1024) is where size-specific tiling/memory issues surface.
+    # The small models cover attn/dtype/shape breadth; here we smoke only the largest shape once
+    # per large model (fp16, sdpa) so that large-shape coverage isn't lost when their full grid is
+    # dropped. Release-only (no CI marker) -- the representative point carries the CI coverage.
+    @pytest.mark.usefixtures("enable_deploy_mode")
+    @dtypes(torch.float16)
+    @parametrize(
+        "model_id",
+        [
+            "meta-llama/Llama-3.2-3B-Instruct",
+            "LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct",
+        ],
+    )
+    def test_large_model_tiling(self, dtype, model_id):
+        config_kwargs = dict(
+            dtype=dtype,
+            attn_implementation="sdpa",
+            num_hidden_layers=self.num_hidden_layers,
+        )
+        if "EXAONE" in model_id:
+            config_kwargs.update(revision=self._EXAONE_REVISION, trust_remote_code=True)
+        self._assert_logits_match_fp32(model_id, config_kwargs, batch_size=4, seq_len=1024)
 
 
 @pytest.mark.test_set_perf
