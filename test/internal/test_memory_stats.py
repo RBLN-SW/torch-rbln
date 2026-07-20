@@ -40,6 +40,14 @@ class TestMemoryStats(TestCase):
         # Clear any existing state to ensure test isolation (matching C++ test)
         # Use try-except to handle potential initialization issues
         try:
+            # torch.rbln.memory_stats() reports {} for a device this process has not
+            # allocated on (CUDA parity, via the device_context_initialized gate). This
+            # class reads the dotted stat keys directly (e.g. stats["allocated.current"]),
+            # so initialize the device context with a throwaway allocation first — else
+            # the first read below KeyErrors on the empty dict. (Mirrors the warmup in
+            # TestAcceleratorMemoryAPI.setUp for the torch.accelerator path.)
+            warmup = torch.empty(1, device=self.device, dtype=torch.float16)
+            del warmup
             torch.rbln.empty_cache(self.device)
             torch.rbln.reset_accumulated_memory_stats(self.device)
             torch.rbln.reset_peak_memory_stats(self.device)
