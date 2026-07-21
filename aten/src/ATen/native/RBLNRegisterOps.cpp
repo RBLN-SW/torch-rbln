@@ -144,6 +144,8 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   m.impl("index_select", TORCH_FN(at::native::rbln::index_select_rbln));
   m.impl("index_select.out", TORCH_FN(at::native::rbln::index_select_out_rbln));
   m.impl("index_copy.out", TORCH_FN(at::native::rbln::index_copy_out_rbln));
+  // Native for a single index on one axis (== index_select); other forms fall back to CPU inside the kernel.
+  m.impl("index.Tensor_out", torch::CppFunction::makeFromBoxedFunction<&at::native::rbln::index_out_rbln>());
   m.impl("repeat_interleave.Tensor", TORCH_FN(at::native::rbln::repeat_interleave_Tensor_rbln));
   m.impl("cat.out", TORCH_FN(at::native::rbln::cat_out_rbln));
 
@@ -199,7 +201,6 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   m.impl("masked_select", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("masked_select.out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("masked_scatter_", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
-  m.impl("index.Tensor_out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("_index_put_impl_", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("index_add.out", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl("index_fill_.int_Scalar", torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());

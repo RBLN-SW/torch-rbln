@@ -116,9 +116,11 @@ _ops_with_public_api_name_mismatch = [
 
 # Ops with a native RBLN kernel that are not declared in our native_functions.yaml
 # (the kernels are registered manually in RBLNRegisterOps.cpp). Hardcoded so opinfo
-# discovery picks them up.
+# discovery picks them up. ``__getitem__`` is the upstream OpInfo that exercises
+# aten::index.Tensor (advanced indexing) — the op served by index_out_rbln.
 _ops_with_rbln_native_kernel = [
     "cat",
+    "__getitem__",
     "index_copy",
     "index_select",
     "repeat_interleave",

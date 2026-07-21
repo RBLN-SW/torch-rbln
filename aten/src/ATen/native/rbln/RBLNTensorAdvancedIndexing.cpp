@@ -2,13 +2,17 @@
 
 #include <ATen/MemoryOverlap.h>
 #include <ATen/core/Tensor.h>
+#include <ATen/core/stack.h> // torch::jit::drop / push
 #include <ATen/native/Resize.h>
+#include <ATen/native/rbln/RBLNCPUFallback.h>
 #include <ATen/native/rbln/RBLNIndexUtils.h>
 #include <ATen/native/rbln/RBLNStridedV2V.h>
 #include <ATen/native/rbln/RBLNTensorUtils.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/index_copy.h>
 #include <ATen/ops/index_select.h>
+#include <ATen/ops/nonzero.h>
+#include <ATen/ops/where.h>
 #include <c10/rbln/RBLNFallbackConfig.h>
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNV2VBatch.h>
@@ -138,6 +142,123 @@ at::Tensor index_select_rbln(const at::Tensor& self, int64_t dim, const at::Tens
 
   at::Tensor out = at::empty(out_shape, self.options().memory_format(c10::MemoryFormat::Contiguous));
   return index_select_out_rbln(self, dim, index, out);
+}
+
+// ===========================================================================
+// index.Tensor_out (advanced indexing) — native white-list fast-path
+// ===========================================================================
+//
+// White-list = a SINGLE index on one axis (all other slots `None`), which is a
+// plain on-device gather: each output element is a contiguous slice of `self`,
+// so the whole thing reduces to `self.index_select(axis, flat_idx)` (native
+// v2v) and writes straight into the pre-allocated `out`:
+//   - integer index of rank >= 1 (1-D / N-D): `flat_idx = idx.reshape(-1)`;
+//     `out` is `self`'s shape with `axis` replaced by `idx`'s shape, so viewing
+//     it with `axis` flattened is exactly the index_select output. (A 0-D index
+//     does not reach here — `x[scalar]` decomposes to select upstream.)
+//   - 1-D boolean mask over `axis`: `flat_idx` = its True positions.
+//
+// The fast path is taken only when `out` already has the exact expected shape
+// (else the resize the .out contract may require is left to the fallback).
+//
+// Everything else (multiple index tensors, N-D / non-leading masks, broadcasting,
+// non-contiguous `self`) stays on the CPU fallback. Boxed so that path can reuse
+// `cpu_fallback_rbln`. The functional `index.Tensor` (`x[idx]`) reaches this via
+// the CompositeExplicitAutogradNonFunctional out wrapper.
+void index_out_rbln(const c10::OperatorHandle& op, torch::jit::Stack* stack) {
+  // aten::index.Tensor_out(Tensor self, Tensor?[] indices, *, Tensor(a!) out)
+  const int64_t num_args = static_cast<int64_t>(op.schema().arguments().size());
+  const int64_t base = static_cast<int64_t>(stack->size()) - num_args;
+  const at::Tensor self = (*stack)[base].toTensor();
+  const c10::List<c10::optional<at::Tensor>> indices = (*stack)[base + 1].toOptionalTensorList();
+
+  // Find the single non-None index and its axis (its position in `indices` is
+  // the indexed dim; leading `None`s shift it, e.g. `x[:, idx]` -> axis 1).
+  int64_t axis = -1;
+  int64_t num_present = 0;
+  for (size_t i = 0; i < indices.size(); ++i) {
+    const c10::optional<at::Tensor> e = indices.get(i);
+    if (e.has_value() && e->defined()) {
+      ++num_present;
+      axis = static_cast<int64_t>(i);
+    }
+  }
+
+  // `self.numel() > 0`: an empty `self` (some dim is 0) makes advanced indexing a
+  //   no-op that skips bounds checks (e.g. empty(3,0)[[3]] -> (1,0), no IndexError);
+  //   leave that to the fallback rather than replicate the special case.
+  // `indices.size() <= self.dim()`: more index slots than dims is "too many
+  //   indices" (IndexError); the fallback raises it correctly.
+  const bool eligible = num_present == 1 && self.defined() && self.numel() > 0 && self.device().is_privateuseone() &&
+      self.is_contiguous() && static_cast<int64_t>(indices.size()) <= self.dim() && axis >= 0 && axis < self.dim();
+
+  if (eligible) {
+    const at::Tensor idx = indices.get(axis).value();
+    at::Tensor out = (*stack)[base + 2].toTensor();
+    const auto st = idx.scalar_type();
+
+    // Build the 1-D integer index along `axis` (host-side: the index is tiny and
+    // index_select copies it to host anyway, so no net v2h added) together with
+    // the exact output shape aten::index.Tensor must produce for this form.
+    at::Tensor flat_idx;
+    std::vector<int64_t> expected;
+    bool fast = false;
+    if ((st == at::kLong || st == at::kInt) && idx.dim() >= 1) {
+      // integer index of rank >= 1: out = self[:axis] + idx.shape + self[axis+1:]
+      // (a 0-D index does not reach here — it decomposes to select upstream).
+      flat_idx = idx.reshape({-1});
+      // Host-side and widened to int64: the negative-wrap add and the bounds
+      // compare below must not overflow int32 when an axis exceeds INT32_MAX.
+      flat_idx = (flat_idx.is_cpu() ? flat_idx.contiguous() : flat_idx.cpu().contiguous()).to(at::kLong);
+      // advanced indexing wraps negatives; index_select does not.
+      if (flat_idx.numel() > 0 && flat_idx.lt(0).any().item<bool>())
+        flat_idx = at::where(flat_idx.lt(0), flat_idx + self.size(axis), flat_idx);
+      for (int64_t d = 0; d < axis; ++d)
+        expected.push_back(self.size(d));
+      for (int64_t d = 0; d < idx.dim(); ++d)
+        expected.push_back(idx.size(d));
+      for (int64_t d = axis + 1; d < self.dim(); ++d)
+        expected.push_back(self.size(d));
+      fast = true;
+    } else if (st == at::kBool && idx.dim() == 1 && idx.size(0) == self.size(axis)) {
+      // 1-D boolean mask over `axis`: out = self[:axis] + (K,) + self[axis+1:]
+      const at::Tensor mask_cpu = idx.is_cpu() ? idx.contiguous() : idx.cpu().contiguous();
+      flat_idx = mask_cpu.nonzero().squeeze(-1); // True positions -> (K,)
+      for (int64_t d = 0; d < axis; ++d)
+        expected.push_back(self.size(d));
+      expected.push_back(flat_idx.numel());
+      for (int64_t d = axis + 1; d < self.dim(); ++d)
+        expected.push_back(self.size(d));
+      fast = true;
+    }
+
+    // Take the fast path only when `out` already has the exact shape aten::index
+    // would produce — the structured .out contract may otherwise require a resize
+    // that only the CPU fallback performs. `out` is contiguous, so a view with
+    // `axis` flattened aliases it and index_select writes into its storage.
+    if (fast && out.defined() && out.is_contiguous() && out.sizes().equals(expected)) {
+      // Advanced indexing raises IndexError (not a plain RuntimeError) when an
+      // index is out of range; match that before delegating to index_select.
+      TORCH_CHECK_INDEX(
+          flat_idx.numel() == 0 ||
+              (flat_idx.ge(0).all().item<bool>() && flat_idx.lt(self.size(axis)).all().item<bool>()),
+          "index out of bounds for dimension ",
+          axis,
+          " with size ",
+          self.size(axis));
+      std::vector<int64_t> vshape = self.sizes().vec();
+      vshape[axis] = flat_idx.numel();
+      at::Tensor out_view = out.view(vshape);
+      index_select_out_rbln(self, axis, flat_idx, out_view);
+      torch::jit::drop(*stack, static_cast<size_t>(num_args));
+      torch::jit::push(*stack, std::move(out));
+      return;
+    }
+  }
+
+  // Not white-listed -> identical to the previous (pre-kernel) behaviour.
+  c10::rbln::log_cpu_fallback(op.schema().name());
+  at::native::rbln::cpu_fallback_rbln(op, stack);
 }
 
 // ===========================================================================
