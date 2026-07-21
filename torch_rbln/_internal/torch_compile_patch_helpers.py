@@ -5,7 +5,9 @@ This module contains utilities for wrapping compiled functions with num_devices
 auto-determination, tensor-parallel failover support, and CPU fallback functionality.
 """
 
+import functools
 import threading
+import types
 
 import torch
 
@@ -317,13 +319,75 @@ class CompiledFunctionWrapper:
     """
 
     def __init__(self, compiled_fn, original_fn, original_compile_fn, compile_kwargs=None):
-        self._compiled_fn = compiled_fn
-        self._original_fn = original_fn
-        self._original_compile_fn = original_compile_fn
-        self._compile_kwargs = compile_kwargs or {}
-        self._max_retries = 1
-        self._auto_num_devices_determined = False
-        self._failover_attempted = False
+        # object.__setattr__ so __setattr__'s delegation (which reads _original_fn) isn't
+        # triggered before the fields exist. Each field lands in __dict__ and is thereafter
+        # treated as the wrapper's own -- no hand-maintained field list to keep in sync.
+        object.__setattr__(self, "_compiled_fn", compiled_fn)
+        object.__setattr__(self, "_original_fn", original_fn)
+        object.__setattr__(self, "_original_compile_fn", original_compile_fn)
+        object.__setattr__(self, "_compile_kwargs", compile_kwargs or {})
+        object.__setattr__(self, "_max_retries", 1)
+        object.__setattr__(self, "_auto_num_devices_determined", False)
+        object.__setattr__(self, "_failover_attempted", False)
+
+    def _is_own_attr(self, name):
+        # Own = an existing instance field or anything the wrapper class defines (methods,
+        # `forward`). Keeps e.g. patch.object(wrapper, "_try_tp_failover") shadowing the
+        # method here rather than leaking onto the model.
+        return name in self.__dict__ or hasattr(type(self), name)
+
+    def __setattr__(self, name, value):
+        # Own state stays on the wrapper; everything else is delegated to the wrapped model,
+        # but only an nn.Module (which has training/param/buffer state to keep in sync). A
+        # plain-function target has none, so keep the attr on the wrapper.
+        if self._is_own_attr(name):
+            object.__setattr__(self, name, value)
+        elif isinstance(self._original_fn, torch.nn.Module):
+            setattr(self._original_fn, name, value)
+        else:
+            object.__setattr__(self, name, value)
+
+    def __delattr__(self, name):
+        if self._is_own_attr(name):
+            object.__delattr__(self, name)
+        elif isinstance(self._original_fn, torch.nn.Module):
+            delattr(self._original_fn, name)
+        else:
+            object.__delattr__(self, name)
+
+    def __getattr__(self, name):
+        # Fires only for attributes missing on the wrapper: delegate reads to the wrapped
+        # model/callable (state_dict/eval/parameters/...). Dunders are excluded so
+        # copy/pickle protocol lookups aren't redirected.
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        model = object.__getattribute__(self, "_original_fn")
+        attr = getattr(model, name)
+        # Re-wrap a bound method that returns the model (eval/train/to/...) so
+        # `compiled = compiled.eval()` keeps the wrapper, not the bare model.
+        if isinstance(attr, types.MethodType):
+
+            @functools.wraps(attr)
+            def keep_wrapper(*args, **kwargs):
+                result = attr(*args, **kwargs)
+                return self if result is model else result
+
+            return keep_wrapper
+        return attr
+
+    def __get__(self, obj, objtype=None):
+        # Descriptor: bind the owner only for a decorated *function* target (the usual
+        # `@torch.compile` on a method). A compiled nn.Module / callable object -- or an
+        # already-bound method -- is returned unchanged, so the owner is not injected as a
+        # spurious first argument (and a bound method is not bound a second time).
+        if obj is None or not isinstance(self._original_fn, types.FunctionType):
+            return self
+        return functools.partial(self.__call__, obj)
+
+    def forward(self, *args, **kwargs):
+        # Route an explicit .forward(...) through the compiled path, like calling the wrapper
+        # directly -- else __getattr__ would delegate it to the module and bypass compilation.
+        return self(*args, **kwargs)
 
     def _try_tp_failover(self, device_id):
         """Try tensor parallel failover on RuntimeError."""

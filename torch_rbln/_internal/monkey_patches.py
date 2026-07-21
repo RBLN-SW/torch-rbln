@@ -124,6 +124,17 @@ def patch_torch_compile() -> None:
 
         def reset_wrapper(*args, **kwargs):
             clear_rbln_compile_cache()
+            # torch._dynamo.reset() means "forget all compiled state". Also flush
+            # the C++ warm cache — otherwise a matching input profile still hits a
+            # stale runtime directly after reset, bypassing the cleared Python
+            # cache and Dynamo. Lazy import avoids an import cycle.
+            #
+            # Caveat: the flush can drop the last reference to a warm runtime and
+            # free its device buffers. Drain in-flight work (torch.rbln.synchronize)
+            # before reset(); resetting a device with pending DMA is undefined.
+            from torch_rbln._internal import warm_cache
+
+            warm_cache.clear()
             return original_dynamo_reset(*args, **kwargs)
 
         torch._dynamo.reset = reset_wrapper
@@ -151,6 +162,11 @@ def remove_all_patches() -> None:
         torch._dynamo.reset = _original_dynamo_reset
 
     clear_rbln_compile_cache()
+    # Mirror reset_wrapper's teardown: drop the C++ warm cache's runtime
+    # references too, so removal fully undoes apply. Lazy import avoids a cycle.
+    from torch_rbln._internal import warm_cache
+
+    warm_cache.clear()
     _torch_compile_patched = False
     _torch_dynamo_reset_patched = False
     _rbln_backend_registered = False

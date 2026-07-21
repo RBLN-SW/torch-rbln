@@ -4,6 +4,7 @@
 Test suite for torch_compile_patch_helpers module.
 """
 
+import types
 from contextlib import nullcontext
 from unittest.mock import Mock, patch
 
@@ -686,6 +687,155 @@ class TestCompiledFunctionWrapper(TestCase):
                 self.assertEqual(result.item(), 12)
                 self.assertTrue(recompiled_called[0])
 
+    def test_wrapper_delegates_module_attributes(self):
+        """torch.compile(nn.Module) must keep state_dict()/eval()/parameters() —
+        __getattr__ delegates unknown attributes to the wrapped model."""
+        model = torch.nn.Linear(4, 4)
+        wrapper = CompiledFunctionWrapper(lambda *a, **k: None, model, Mock(), compile_kwargs={})
+        self.assertEqual(list(wrapper.state_dict().keys()), list(model.state_dict().keys()))
+        self.assertEqual(len(list(wrapper.parameters())), len(list(model.parameters())))
+
+    def test_wrapper_self_returning_methods_keep_wrapper(self):
+        """Self-returning methods (eval/train/to) return the wrapper, not the bare model, and
+        the mode toggle still lands on the model."""
+        model = torch.nn.Linear(4, 4)
+        wrapper = CompiledFunctionWrapper(lambda *a, **k: None, model, Mock(), compile_kwargs={})
+        self.assertIs(wrapper.eval(), wrapper)
+        self.assertFalse(model.training)  # toggle reached the model
+        self.assertIs(wrapper.train(), wrapper)
+        self.assertTrue(model.training)
+        self.assertIs(wrapper.to("cpu"), wrapper)
+        # Non-self-returning delegates still return their real values.
+        self.assertEqual(len(list(wrapper.parameters())), len(list(model.parameters())))
+
+    def test_wrapper_setattr_delegates_to_model(self):
+        """Writes (training flag, parameter swap, arbitrary attrs) land on the wrapped model,
+        not the wrapper."""
+        model = torch.nn.Linear(4, 4)
+        wrapper = CompiledFunctionWrapper(lambda *a, **k: None, model, Mock(), compile_kwargs={})
+
+        wrapper.training = False
+        self.assertFalse(model.training)  # write reached the model...
+        self.assertFalse(wrapper.training)  # ...and the read reflects it
+
+        # A parameter swap must register on the model as a real Parameter.
+        new_weight = torch.nn.Parameter(torch.zeros(4, 4))
+        wrapper.weight = new_weight
+        self.assertIs(model.weight, new_weight)
+        self.assertIn("weight", dict(model.named_parameters()))
+
+        # Arbitrary user attribute delegates too.
+        wrapper.custom_flag = 123
+        self.assertEqual(model.custom_flag, 123)
+
+    def test_wrapper_delattr_delegates_to_model(self):
+        """`del compiled.attr` must remove it from the wrapped model."""
+        model = torch.nn.Linear(4, 4)
+        wrapper = CompiledFunctionWrapper(lambda *a, **k: None, model, Mock(), compile_kwargs={})
+        wrapper.custom_flag = 7
+        self.assertEqual(model.custom_flag, 7)
+        del wrapper.custom_flag
+        self.assertFalse(hasattr(model, "custom_flag"))
+
+    def test_wrapper_own_attrs_stay_on_wrapper(self):
+        """The wrapper's bookkeeping must not leak onto the wrapped model."""
+        model = torch.nn.Linear(4, 4)
+        wrapper = CompiledFunctionWrapper(lambda *a, **k: None, model, Mock(), compile_kwargs={})
+        wrapper._failover_attempted = True
+        self.assertTrue(wrapper._failover_attempted)
+        self.assertFalse(hasattr(model, "_failover_attempted"))
+
+    def test_wrapper_over_plain_function_keeps_attrs_local(self):
+        """With a plain-function target (not nn.Module), writes stay on the wrapper -- not
+        leaked onto the function or shared across wrappers over the same function."""
+
+        def fn(*args, **kwargs):
+            return None
+
+        w1 = CompiledFunctionWrapper(fn, fn, Mock(), compile_kwargs={})
+        w2 = CompiledFunctionWrapper(fn, fn, Mock(), compile_kwargs={})
+        w1.custom_flag = 1
+        self.assertEqual(w1.custom_flag, 1)
+        self.assertFalse(hasattr(fn, "custom_flag"))  # not written onto the function
+        self.assertFalse(hasattr(w2, "custom_flag"))  # not shared with another wrapper over fn
+        del w1.custom_flag
+        self.assertFalse(hasattr(w1, "custom_flag"))
+
+    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
+    def test_wrapper_forward_routes_through_compiled_path(self, mock_auto):
+        """`compiled.forward(...)` must run the wrapper's compiled path, not delegate to the
+        wrapped module's raw forward and bypass compilation/guard/failover."""
+        mock_auto.return_value = None  # keep our recording compiled_fn as _compiled_fn
+        seen = []
+
+        class _M(torch.nn.Module):
+            def forward(self, x):
+                seen.append("raw_forward")  # the bypass — must NOT be reached
+                return x
+
+        def compiled_fn(*args, **kwargs):
+            seen.append("compiled")
+            return args[0] if args else None
+
+        wrapper = CompiledFunctionWrapper(compiled_fn, _M(), Mock(), compile_kwargs={})
+        wrapper.forward(torch.tensor([1], device="rbln"))
+        self.assertIn("compiled", seen)  # went through the compiled path
+        self.assertNotIn("raw_forward", seen)  # did not bypass to raw module.forward
+
+    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
+    def test_wrapper_binds_self_as_method_descriptor(self, mock_auto):
+        """@torch.compile(backend="rbln") on an instance method: __get__ must bind
+        the instance as the first argument, and class access returns the wrapper."""
+        mock_auto.return_value = None
+        seen = {}
+
+        def echo(*args, **kwargs):
+            seen["args"] = args
+            return args
+
+        class C:
+            method = CompiledFunctionWrapper(echo, echo, Mock(), compile_kwargs={})
+
+        c = C()
+        c.method(torch.tensor([1], device="rbln"))
+        self.assertIs(seen["args"][0], c)  # self bound
+        self.assertIsInstance(C.method, CompiledFunctionWrapper)  # class access returns wrapper
+
+    def test_wrapper_module_not_bound_as_method_descriptor(self):
+        """A compiled nn.Module (or other callable object) stored as a class attribute must
+        NOT get the owner bound as its first arg: __get__ returns the wrapper as-is. Regression
+        -- the descriptor used to prepend the owner unconditionally, so `H().model(x)` would
+        call the module as `model(H(), x)` instead of `model(x)`."""
+        model = torch.nn.Linear(4, 4)
+        wrapper = CompiledFunctionWrapper(lambda *a, **k: None, model, Mock(), compile_kwargs={})
+
+        class Holder:
+            m = wrapper
+
+        # Instance access fires the descriptor but must return the wrapper itself, not a
+        # functools.partial that would inject the Holder instance as the first positional arg.
+        self.assertIs(Holder().m, wrapper)
+        self.assertIs(Holder.m, wrapper)  # class access likewise returns the wrapper
+
+    def test_wrapper_bound_method_target_not_rebound(self):
+        """A wrapper whose target is an already-bound method must NOT get the owner re-bound:
+        __get__ returns it as-is, so the original receiver stays the only bound self (binding
+        again would inject the holder as a second, spurious first arg)."""
+
+        class Target:
+            def method(self, x):
+                return x
+
+        target = Target()
+        self.assertIsInstance(target.method, types.MethodType)  # precondition: already bound
+        wrapper = CompiledFunctionWrapper(lambda *a, **k: None, target.method, Mock(), compile_kwargs={})
+
+        class Holder:
+            m = wrapper
+
+        self.assertIs(Holder().m, wrapper)  # not re-bound to the Holder instance
+        self.assertIs(Holder.m, wrapper)
+
 
 @pytest.mark.test_set_ci
 class TestChromiumEventStatePreservation(TestCase):
@@ -1021,6 +1171,17 @@ class TestTorchCompileMonkeyPatch(TestCase):
             )
 
         self.assertEqual(mock_compile.call_count, 2)
+
+    def test_dynamo_reset_clears_warm_cache(self):
+        """torch._dynamo.reset must also flush the C++ warm cache, not just the
+        Python compile cache — else a stale runtime is executed directly after
+        reset, bypassing Dynamo."""
+        patch_torch_compile()
+        from torch_rbln._internal import warm_cache
+
+        with patch.object(warm_cache, "clear") as mock_clear:
+            torch._dynamo.reset()
+            mock_clear.assert_called_once()
 
     @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
     def test_patch_torch_compile_wrapper_integration(self, mock_auto_determine):
