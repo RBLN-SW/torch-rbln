@@ -16,6 +16,8 @@ op produces correct results (a copy-elision regression would manifest as
 wrong values or a crash).
 """
 
+import warnings
+
 import pytest
 import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
@@ -47,6 +49,32 @@ class TestBorrowFastPath(TestCase):
         y = torch.sigmoid(x.float())
         self.assertEqual(y.device.type, "rbln")
         self.assertEqual(tuple(y.shape), (16,))
+
+    def test_pure_out_undersized_grows(self) -> None:
+        """Undersized pure ``out=`` (borrowed as a non-resizable from_blob) must GROW
+        to the result shape instead of raising "not resizable", and the "output was
+        resized" warning fires once across the retry, not once per attempt. ``sin`` is
+        a CPU-fallback op."""
+        x = torch.arange(8, dtype=torch.float32, device="rbln")
+        out = torch.empty(1, dtype=torch.float32, device="rbln")  # undersized -> grow
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            ret = torch.sin(x, out=out)
+        resized = [w for w in caught if issubclass(w.category, UserWarning) and "was resized" in str(w.message)]
+        self.assertEqual(len(resized), 1, f"resize warning should fire once, got {len(resized)}")
+        self.assertEqual(tuple(ret.shape), (8,))
+        self.assertTrue(ret is out)
+        self.assertEqual(ret.to("cpu"), torch.sin(torch.arange(8, dtype=torch.float32)))
+
+    def test_pure_out_oversized_shrinks(self) -> None:
+        """The already-working shrink counterpart: an oversized ``out=`` is
+        narrowed via from_blob metadata shrink and its size synced back."""
+        x = torch.arange(8, dtype=torch.float32, device="rbln")
+        out = torch.empty(16, dtype=torch.float32, device="rbln")  # oversized -> shrink
+        with pytest.warns(UserWarning):
+            ret = torch.sin(x, out=out)
+        self.assertEqual(tuple(ret.shape), (8,))
+        self.assertEqual(ret.to("cpu"), torch.sin(torch.arange(8, dtype=torch.float32)))
 
     def test_borrow_rejected_falls_back_to_copy(self) -> None:
         """Regression: a 0-K matmul yields an all-zero (5, 10) output. Writing

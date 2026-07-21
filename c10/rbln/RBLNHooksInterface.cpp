@@ -49,10 +49,12 @@ c10::Device RBLNHooksInterface::getDeviceFromPtr(void* data) const {
 bool RBLNHooksInterface::hasPrimaryContext(c10::DeviceIndex device_index) const {
   RBLN_LOG_DEBUG("device_index={}", static_cast<int>(device_index));
 
-  // Runtime check first so a missing runtime is a clean false (no segfault); throwing
-  // get_device_count() keeps a malformed config loud when the runtime is present.
-  const bool has_context =
-      device_index >= 0 && rbln_runtime_available() && device_index < c10::rbln::get_device_count();
+  // CUDA parity: a primary context exists for a device only once THIS process has used it
+  // (a successful allocation), not merely because the device exists. Per-device and nothrow
+  // (torch consults this from cleanup/autograd paths, where a throw would abort the caller).
+  // Context flag first so an unused device doesn't trigger device enumeration/registration;
+  // runtime_available() then folds in the shutdown/liveness check.
+  const bool has_context = c10::rbln::device_context_initialized(device_index) && c10::rbln::runtime_available();
   RBLN_LOG_DEBUG("has_context={}", has_context);
   return has_context;
 }
