@@ -69,6 +69,15 @@ class TestRblnMemoryHelpers(TestCase):
             torch.rbln.memory_stats(torch.rbln.device_count())  # first out-of-range index
 
     @pytest.mark.test_set_ci
+    def test_memory_stats_rejects_malformed_device_strings(self):
+        # torch's canonical device grammar rejects these; a bare partition(":") + int()
+        # would accept them (int() tolerates "+0"/"00"/" 0"/"0_0"), so "rbln:" typos must
+        # not silently resolve to the current device.
+        for bad in ("rbln:", "rbln:+0", "rbln:00", "rbln: 0", "rbln:0_0", "rbln:0:0"):
+            with self.assertRaises(ValueError, msg=f"{bad!r} was accepted as a valid device"):
+                torch.rbln.memory_stats(bad)
+
+    @pytest.mark.test_set_ci
     def test_memory_stats_rejects_int8_wrapped_index(self):
         # torch.device's index is an int8_t: raw 256 wraps to 0, 257 to 1, 255 to -1
         # (current device). Such values must be rejected from the original int/str, not

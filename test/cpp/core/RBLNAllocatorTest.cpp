@@ -4,6 +4,36 @@
 #include <c10/rbln/RBLNHooksInterface.h>
 #include <gtest/gtest.h>
 
+#include <cstdlib>
+#include <string>
+
+namespace {
+// Forces TORCH_RBLN_EAGER_MALLOC for its scope and restores the prior value on exit (all
+// paths, including GTEST_SKIP), so toggling eager malloc can't leak into later tests.
+class ScopedEagerMalloc {
+ public:
+  explicit ScopedEagerMalloc(const char* value) {
+    const char* saved = std::getenv("TORCH_RBLN_EAGER_MALLOC");
+    had_ = saved != nullptr;
+    if (had_) {
+      saved_ = saved;
+    }
+    setenv("TORCH_RBLN_EAGER_MALLOC", value, /*overwrite=*/1);
+  }
+  ~ScopedEagerMalloc() {
+    if (had_) {
+      setenv("TORCH_RBLN_EAGER_MALLOC", saved_.c_str(), /*overwrite=*/1);
+    } else {
+      unsetenv("TORCH_RBLN_EAGER_MALLOC");
+    }
+  }
+
+ private:
+  bool had_;
+  std::string saved_;
+};
+} // namespace
+
 class RBLNAllocatorTest : public ::testing::Test {
  protected:
   static void SetUpTestSuite() {
@@ -170,6 +200,11 @@ TEST_F(RBLNAllocatorTest, EmptyCacheSpansNonCurrentInitializedDevice) {
   constexpr size_t kAggregate = static_cast<size_t>(c10::CachingAllocator::StatType::AGGREGATE);
   auto* allocator = GetDeviceAllocator();
 
+  // Force eager malloc so the allocation below reserves device memory (a lazy malloc would
+  // stage on the host and leave reserved at 0, silently voiding the assertion).
+  const ScopedEagerMalloc eager("1");
+  ASSERT_TRUE(c10::rbln::is_eager_malloc());
+
   // Build a cached block on device 0, then measure its reserved bytes while still current.
   c10::rbln::set_device_index(0);
   {
@@ -177,9 +212,7 @@ TEST_F(RBLNAllocatorTest, EmptyCacheSpansNonCurrentInitializedDevice) {
     EXPECT_NE(d0.get(), nullptr);
   }
   const auto reserved_before = allocator->getDeviceStats(0).reserved_bytes[kAggregate].current;
-  if (reserved_before <= 0) {
-    GTEST_SKIP() << "allocator retained no reserved block on device 0 to observe (lazy malloc)";
-  }
+  ASSERT_GT(reserved_before, 0) << "eager allocation reserved no device memory on device 0";
 
   // Make device 1 current so device 0 is the non-current initialized device.
   c10::rbln::set_device_index(1);

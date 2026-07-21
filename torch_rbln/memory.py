@@ -40,18 +40,22 @@ def _normalize_device(device: Optional[Union[int, str, torch.device]]) -> torch.
     if isinstance(device, bool):  # bool is an int subclass; reject to avoid rbln:0/1 surprises
         raise TypeError(f"device must be None, int, str, or torch.device, not bool ({device!r})")
 
-    # Resolve the index as a Python int *before* building a torch.device. Its index field
-    # is an int8_t, so torch.device("rbln", 256) silently wraps to rbln:0 and would slip
-    # past the range check below. A torch.device passed in has already wrapped and cannot
-    # be recovered, so the raw int/str forms are validated from the original value here.
+    # torch.device's index field is an int8_t, so torch.device("rbln", 256) silently wraps
+    # to rbln:0 and would slip past the range check below. Read the index from the raw int
+    # or the original string suffix rather than a constructed device's .index. (A torch.device
+    # passed in has already wrapped and cannot be recovered, so it is validated as-is.)
     if isinstance(device, int):
         dtype, index = "rbln", device
     elif isinstance(device, str):
-        dtype, _, suffix = device.partition(":")
+        # torch.device validates the canonical grammar (rejects "rbln:", "rbln:00",
+        # "rbln: 0", "rbln:0_0", … that int() would silently accept); the index still
+        # comes from the raw suffix so "rbln:256" is range-checked, not wrap-normalized.
         try:
-            index = int(suffix) if suffix else None
-        except ValueError:
-            raise ValueError(f"Invalid rbln device string {device!r}") from None
+            dtype = torch.device(device).type
+        except RuntimeError:
+            raise ValueError(f"Invalid device string {device!r}") from None
+        _, sep, suffix = device.partition(":")
+        index = int(suffix) if sep else None
     elif isinstance(device, torch.device):
         dtype, index = device.type, device.index
     else:
