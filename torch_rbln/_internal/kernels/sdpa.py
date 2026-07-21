@@ -172,9 +172,6 @@ def can_use_rbln_sdpa(
     if key.dtype != query.dtype or value.dtype != query.dtype:
         return False, f"Q/K/V dtype mismatch (query {query.dtype}, key {key.dtype}, value {value.dtype})"
 
-    if dropout_p > 0.0 and (query.requires_grad or key.requires_grad or value.requires_grad):
-        return False, "dropout with gradients"
-
     if query.dim() == 4 and key.dim() == 4:
         q_heads, k_heads = query.size(1), key.size(1)
         if q_heads != k_heads and q_heads % k_heads != 0:
