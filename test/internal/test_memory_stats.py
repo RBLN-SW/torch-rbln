@@ -37,23 +37,22 @@ class TestMemoryStats(TestCase):
         self.device_id = 0
         self.device = f"rbln:{self.device_id}"
 
-        # Clear any existing state to ensure test isolation (matching C++ test)
-        # Use try-except to handle potential initialization issues
-        try:
-            # torch.rbln.memory_stats() reports {} for a device this process has not
-            # allocated on (CUDA parity, via the device_context_initialized gate). This
-            # class reads the dotted stat keys directly (e.g. stats["allocated.current"]),
-            # so initialize the device context with a throwaway allocation first — else
-            # the first read below KeyErrors on the empty dict. (Mirrors the warmup in
-            # TestAcceleratorMemoryAPI.setUp for the torch.accelerator path.)
-            warmup = torch.empty(1, device=self.device, dtype=torch.float16)
-            del warmup
-            torch.rbln.empty_cache(self.device)
-            torch.rbln.reset_accumulated_memory_stats(self.device)
-            torch.rbln.reset_peak_memory_stats(self.device)
-        except Exception as e:
-            # If memory functions are not available, skip the test
-            self.skipTest(f"Memory functions not available: {e}")
+        # Skip only when there is no device to test; a warmup/reset failure below is a
+        # real regression and must fail the suite, not be swallowed into a skip.
+        if torch.rbln.device_count() == 0:
+            self.skipTest("no rbln device available")
+
+        # torch.rbln.memory_stats() reports {} for a device this process has not
+        # allocated on (CUDA parity, via the device_context_initialized gate). This
+        # class reads the dotted stat keys directly (e.g. stats["allocated.current"]),
+        # so initialize the device context with a throwaway allocation first — else
+        # the first read below KeyErrors on the empty dict. (Mirrors the warmup in
+        # TestAcceleratorMemoryAPI.setUp for the torch.accelerator path.)
+        warmup = torch.empty(1, device=self.device, dtype=torch.float16)
+        del warmup
+        torch.rbln.empty_cache(self.device)
+        torch.rbln.reset_accumulated_memory_stats(self.device)
+        torch.rbln.reset_peak_memory_stats(self.device)
 
         # rebel-compiler's caching allocator rounds every allocation up to a
         # fixed page granularity (4KB in recent runtimes). Probe it here so the

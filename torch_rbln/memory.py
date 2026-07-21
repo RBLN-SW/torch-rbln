@@ -34,30 +34,34 @@ def _normalize_device(device: Optional[Union[int, str, torch.device]]) -> torch.
     ``None``, ``"rbln"``, and ``torch.device("rbln")`` resolve to the current
     device. A bare int is treated as an ``rbln`` index. Non-``rbln`` devices
     (``"cpu"``, ``"cuda:0"``, …) and out-of-range indices are rejected.
-
-    Args:
-        device: Device specification (int, str, torch.device, or None).
-
-    Returns:
-        torch.device: An ``rbln`` device with a concrete, in-range index.
     """
     if device is None:
         return torch.device("rbln", torch_rbln._C.current_device())
     if isinstance(device, bool):  # bool is an int subclass; reject to avoid rbln:0/1 surprises
         raise TypeError(f"device must be None, int, str, or torch.device, not bool ({device!r})")
+
+    # Resolve the index as a Python int *before* building a torch.device. Its index field
+    # is an int8_t, so torch.device("rbln", 256) silently wraps to rbln:0 and would slip
+    # past the range check below. A torch.device passed in has already wrapped and cannot
+    # be recovered, so the raw int/str forms are validated from the original value here.
     if isinstance(device, int):
-        dev = torch.device("rbln", device)
+        dtype, index = "rbln", device
     elif isinstance(device, str):
-        dev = torch.device(device)
+        dtype, _, suffix = device.partition(":")
+        try:
+            index = int(suffix) if suffix else None
+        except ValueError:
+            raise ValueError(f"Invalid rbln device string {device!r}") from None
     elif isinstance(device, torch.device):
-        dev = device
+        dtype, index = device.type, device.index
     else:
         raise TypeError(f"device must be None, int, str, or torch.device, got {type(device).__name__}")
 
-    if dev.type != "rbln":
-        raise ValueError(f"Expected an 'rbln' device, got '{dev.type}' (from {device!r})")
+    if dtype != "rbln":
+        raise ValueError(f"Expected an 'rbln' device, got '{dtype}' (from {device!r})")
+    if index is None:
+        index = torch_rbln._C.current_device()
 
-    index = dev.index if dev.index is not None else torch_rbln._C.current_device()
     # Only range-check when devices exist; on a no-device host callers no-op.
     count = torch_rbln._C.device_count()
     if count > 0 and not (0 <= index < count):
@@ -91,6 +95,10 @@ def empty_cache(device: Optional[Union[int, str, torch.device]] = None) -> None:
 
     This function releases cached memory blocks that are not currently in use,
     allowing them to be used by other applications or returned to the system.
+
+    Unlike the generic ``torch.accelerator.empty_cache()`` (which drains only the
+    caching allocator), this also drops the WarmCache and view-recipe caches, so it
+    releases everything the caller is not still holding.
 
     Args:
         device (Optional[Union[int, str, torch.device]]): The device to empty cache for.

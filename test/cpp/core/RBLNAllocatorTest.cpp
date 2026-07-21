@@ -157,29 +157,42 @@ TEST_F(RBLNAllocatorTest, EmptyCache) {
   EXPECT_NO_THROW(device_allocator->emptyCache());
 }
 
-// Regression guard for the device-less empty_cache() "span all devices" contract:
-// emptyCache() iterates initialized_device_indices(), which must include *every*
-// initialized device, not just the current one (a current-device-only regression drops
-// the rest). Per-device release is unobservable here (the runtime exposes memory stats
-// for node 0 only), so we assert the selection includes a non-current initialized device.
+// Regression guard for the device-less empty_cache() "span all devices" contract
+// (CUDA/XPU parity): emptyCache() must release *every* initialized device, not just the
+// current one. Device 0 is left non-current with a cached (freed-but-reserved) block, so a
+// current-device-only regression leaves that block intact — asserted released here.
+// Device 0's reserved bytes are observable (the runtime exposes per-node stats for node 0
+// only); the selection seam is additionally checked via initialized_device_indices().
 TEST_F(RBLNAllocatorTest, EmptyCacheSpansNonCurrentInitializedDevice) {
   if (c10::rbln::get_device_count() < 2) {
     GTEST_SKIP() << "needs >= 2 devices to exercise a non-current device";
   }
-  auto* allocator = c10::GetAllocator(c10::kPrivateUse1);
-  // Initialize a non-current device (index 1), then make device 0 current again.
+  constexpr size_t kAggregate = static_cast<size_t>(c10::CachingAllocator::StatType::AGGREGATE);
+  auto* allocator = GetDeviceAllocator();
+
+  // Build a cached block on device 0, then measure its reserved bytes while still current.
+  c10::rbln::set_device_index(0);
+  {
+    const auto d0 = allocator->allocate(32ULL << 20);
+    EXPECT_NE(d0.get(), nullptr);
+  }
+  const auto reserved_before = allocator->getDeviceStats(0).reserved_bytes[kAggregate].current;
+  if (reserved_before <= 0) {
+    GTEST_SKIP() << "allocator retained no reserved block on device 0 to observe (lazy malloc)";
+  }
+
+  // Make device 1 current so device 0 is the non-current initialized device.
   c10::rbln::set_device_index(1);
   {
     const auto d1 = allocator->allocate(1024);
     EXPECT_NE(d1.get(), nullptr);
   }
-  c10::rbln::set_device_index(0);
-  {
-    const auto d0 = allocator->allocate(1024);
-    EXPECT_NE(d0.get(), nullptr);
-  }
-  // Sanity-check emptyCache() runs over the multi-device selection without throwing.
-  EXPECT_NO_THROW(GetDeviceAllocator()->emptyCache());
+
+  EXPECT_NO_THROW(allocator->emptyCache());
+
+  // Device 0 (non-current) must have been released too, not just the current device.
+  EXPECT_LT(allocator->getDeviceStats(0).reserved_bytes[kAggregate].current, reserved_before)
+      << "emptyCache() left non-current device 0 reserved (current-device-only regression)";
 
   const auto indices = c10::rbln::initialized_device_indices();
   const auto contains = [&](c10::DeviceIndex i) {
@@ -191,8 +204,7 @@ TEST_F(RBLNAllocatorTest, EmptyCacheSpansNonCurrentInitializedDevice) {
     return false;
   };
   EXPECT_TRUE(contains(0));
-  EXPECT_TRUE(contains(1))
-      << "initialized_device_indices() dropped non-current device 1 (current-device-only regression)";
+  EXPECT_TRUE(contains(1)) << "initialized_device_indices() dropped non-current device 1";
 }
 
 // recordStream must be a safe no-op — RBLN has no stream-based async execution.

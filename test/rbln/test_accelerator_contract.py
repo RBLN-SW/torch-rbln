@@ -69,6 +69,17 @@ class TestRblnMemoryHelpers(TestCase):
             torch.rbln.memory_stats(torch.rbln.device_count())  # first out-of-range index
 
     @pytest.mark.test_set_ci
+    def test_memory_stats_rejects_int8_wrapped_index(self):
+        # torch.device's index is an int8_t: raw 256 wraps to 0, 257 to 1, 255 to -1
+        # (current device). Such values must be rejected from the original int/str, not
+        # normalized to an in-range device by the silent wrap.
+        count = torch.rbln.device_count()
+        wrapped = [255, 256, 257, "rbln:255", "rbln:256", 256 + max(count - 1, 0)]
+        for bad in wrapped:
+            with self.assertRaises(ValueError, msg=f"{bad!r} slipped past the range check"):
+                torch.rbln.memory_stats(bad)
+
+    @pytest.mark.test_set_ci
     def test_memory_stats_uninitialized_device_reports_zero_not_raise(self):
         # CUDA parity: memory_stats() must not throw for a *valid* device index this
         # process has not allocated on. It reports zero (like torch.cuda.memory_stats
@@ -118,22 +129,28 @@ class TestDeviceCapability(TestCase):
     Single-worker: measures global device memory."""
 
     @pytest.mark.test_set_ci
-    def test_capability_reports_device_resident_dtypes(self):
-        supported = torch.accelerator.get_device_capability()["supported_dtypes"]
-        self.assertEqual(set(supported), {torch.float16, torch.bfloat16})
-        # Each advertised dtype must actually occupy device memory (a compute op
-        # materializes it on the NPU); a CPU-backed dtype would report 0 bytes.
-        for dtype in supported:
+    def test_capability_matches_device_resident_dtypes(self):
+        # Probe a candidate set spanning both advertised (fp16/bf16) and unadvertised
+        # (fp32/int) dtypes, classify each by whether a compute op materializes it in
+        # device memory, and require the advertised set to equal the resident set — so a
+        # dtype that is resident but missing from the advertisement is caught too, not
+        # just the reverse.
+        advertised = set(torch.accelerator.get_device_capability()["supported_dtypes"])
+        candidates = [torch.float16, torch.bfloat16, torch.float32, torch.int32, torch.int64]
+        resident = set()
+        for dtype in candidates:
             torch.rbln.empty_cache()
             before = torch.rbln.memory_allocated(0)
             scratch = torch.empty(1024 * 1024, dtype=dtype, device="rbln:0")
             scratch.add_(1)
-            self.assertGreater(
-                torch.rbln.memory_allocated(0) - before,
-                0,
-                msg=f"advertised {dtype} is not resident in device memory",
-            )
+            if torch.rbln.memory_allocated(0) - before > 0:
+                resident.add(dtype)
             del scratch
+        self.assertEqual(
+            advertised,
+            resident,
+            msg=f"advertised dtypes {advertised} disagree with device-resident dtypes {resident}",
+        )
 
 
 class TestStorageResizeToZero(TestCase):
