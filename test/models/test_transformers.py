@@ -55,6 +55,10 @@ class TestCausalLMBase(TestCase):
     seq_lens = [16, 128, 1024]
     max_new_tokens = 2  # Run prefill & decode phase once each.
 
+    # Pin the EXAONE HF revision (shared by every EXAONE test here, incl. TestCausalLMPerf)
+    # so model-hub updates can't shift the comparison.
+    _EXAONE_REVISION = "e949c91dec92095908d34e6b560af77dd0c993f8"
+
     def _prepare_model_and_inputs(
         self,
         model_id: str,
@@ -169,7 +173,7 @@ class TestCausalLMBase(TestCase):
         torch.testing.assert_close(rbln_logits, cpu_logits, atol=self.LOGIT_ATOL, rtol=0.0)
 
 
-def _small_model_cover_array():
+def _small_model_cover_array(mark_ci=True):
     """Strength-2 (pairwise) covering array over dtype x attn x (batch, seq) for the small models.
 
     The full 4-way cross product (2 dtype x 2 attn x 9 shapes = 36 cases/model) re-runs paths the
@@ -185,7 +189,8 @@ def _small_model_cover_array():
 
     Only the 3-/4-way interactions are dropped. Non-corner shapes get one row per dtype, rotating
     the dtype<->attn pairing across shapes so all attn x dtype combinations are spread over the
-    small shapes too. The (2, 1024) rows carry the test_set_ci marker, keeping the CI set unchanged.
+    small shapes too. The (2, 1024) rows carry the test_set_ci marker unless mark_ci=False (the
+    release-only variant used where another model already covers the family's CI slot).
     """
     shapes = [(bs, sl) for bs in TestCausalLMBase.batch_sizes for sl in TestCausalLMBase.seq_lens]
     attns = TestCausalLMBase.attn_implementations
@@ -210,7 +215,7 @@ def _small_model_cover_array():
                 subtest(
                     (dtype, attn, bs, sl),
                     name=f"{attn}_b{bs}_s{sl}",
-                    decorators=[pytest.mark.test_set_ci] if is_ci else [],
+                    decorators=[pytest.mark.test_set_ci] if (is_ci and mark_ci) else [],
                 )
             )
     return array
@@ -220,14 +225,15 @@ def _small_model_cover_array():
 class TestCausalLM(TestCausalLMBase):
     """Test correctness of causal language model outputs across various configurations."""
 
-    # Pin the EXAONE HF revision (shared by test_exaone and test_large_model_tiling) so
-    # model-hub updates can't shift the comparison.
-    _EXAONE_REVISION = "e949c91dec92095908d34e6b560af77dd0c993f8"
-
     # Small models (Llama-1B, Qwen-1.5B) run a pairwise covering array over dtype x attn x
     # (batch, seq) instead of the full 4-way cross product (36 -> 22 cases/model); see
-    # _small_model_cover_array for the exact coverage guarantee. CI runs only the (2, 1024) point.
+    # _small_model_cover_array for the exact coverage guarantee.
+    #
+    # CI runs one model per family at the representative point (2, 1024): Qwen-1.5B here and
+    # Llama-3B for the Llama family (test_llama_3b) -- the larger geometry surfaces failures
+    # first. Llama-1B keeps its full covering array but release-only (no CI marker).
     small_model_cover_array = _small_model_cover_array()
+    small_model_cover_array_release_only = _small_model_cover_array(mark_ci=False)
 
     # Large models (Llama-3B, EXAONE-2.4B) share the small models' code paths but are 3-5x
     # slower to compile and dominate the release run. They exercise only the representative
@@ -259,7 +265,7 @@ class TestCausalLM(TestCausalLMBase):
         self._assert_logits_match_fp32(model_id, config_kwargs, batch_size, seq_len)
 
     @pytest.mark.usefixtures("enable_deploy_mode")
-    @parametrize("dtype,attn_implementation,batch_size,seq_len", small_model_cover_array)
+    @parametrize("dtype,attn_implementation,batch_size,seq_len", small_model_cover_array_release_only)
     def test_llama(self, dtype, attn_implementation, batch_size, seq_len):
         config_kwargs = dict(
             dtype=dtype,
@@ -269,8 +275,9 @@ class TestCausalLM(TestCausalLMBase):
 
         self._assert_logits_match_fp32("meta-llama/Llama-3.2-1B-Instruct", config_kwargs, batch_size, seq_len)
 
-    # Llama-3B is the same architecture as Llama-1B (swept in full above) but far slower to
-    # compile, so it only runs the representative point across the full attn x dtype matrix.
+    # Llama-3B is the same architecture as Llama-1B (full covering array above) but far slower to
+    # compile. It is the Llama family's CI slot: the representative point across the full attn x
+    # dtype matrix (the larger geometry surfaces failures first).
     @pytest.mark.usefixtures("enable_deploy_mode")
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("attn_implementation", TestCausalLMBase.attn_implementations)
@@ -413,7 +420,7 @@ class TestCausalLMPerf(TestCausalLMBase):
     @parametrize("seq_len", TestCausalLMBase.seq_lens)
     def test_exaone(self, dtype, model_id, attn_implementation, batch_size, seq_len):
         config_kwargs = dict(
-            revision="e949c91dec92095908d34e6b560af77dd0c993f8",
+            revision=self._EXAONE_REVISION,
             trust_remote_code=True,
             dtype=dtype,
             attn_implementation=attn_implementation,
