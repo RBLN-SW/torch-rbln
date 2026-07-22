@@ -40,21 +40,15 @@ TEST_F(RBLNSupportedDtypesTest, SdpaCatalogContents) {
   }
 }
 
-TEST_F(RBLNSupportedDtypesTest, AmpCatalogContents) {
-  constexpr c10::ScalarType kExpected[] = {c10::kHalf, c10::kBFloat16};
-  for (const auto scalar_type : kExpected) {
-    EXPECT_TRUE(contains(c10::rbln::kAmpDtypes, scalar_type));
-  }
+TEST_F(RBLNSupportedDtypesTest, AmpCatalogIsEmpty) {
+  // AMP autocast is not implemented yet (no AutocastPrivateUse1 cast policy), so
+  // the catalog advertises no dtypes and torch disables autocast instead of
+  // dispatching to a missing kernel. See RBLNSupportedDtypes.h.
+  EXPECT_TRUE(c10::rbln::kAmpDtypes.empty());
 }
 
 TEST_F(RBLNSupportedDtypesTest, SdpaCatalogIsFloatOnly) {
   for (const auto scalar_type : c10::rbln::kSdpaDtypes) {
-    EXPECT_TRUE(c10::isFloatingType(scalar_type));
-  }
-}
-
-TEST_F(RBLNSupportedDtypesTest, AmpCatalogIsFloatOnly) {
-  for (const auto scalar_type : c10::rbln::kAmpDtypes) {
     EXPECT_TRUE(c10::isFloatingType(scalar_type));
   }
 }
@@ -79,6 +73,6 @@ TEST_F(RBLNSupportedDtypesTest, IsDispatchDtypeRejectsUnsupported) {
 
 static_assert(!c10::rbln::kDispatchDtypes.empty(), "dispatch dtype catalog must not be empty");
 static_assert(!c10::rbln::kSdpaDtypes.empty(), "SDPA dtype catalog must not be empty");
-static_assert(!c10::rbln::kAmpDtypes.empty(), "AMP dtype catalog must not be empty");
+static_assert(c10::rbln::kAmpDtypes.empty(), "AMP dtype catalog is intentionally empty until autocast is implemented");
 static_assert(c10::rbln::is_dispatch_dtype(c10::kHalf), "is_dispatch_dtype must be constexpr");
 static_assert(!c10::rbln::is_dispatch_dtype(c10::kFloat), "is_dispatch_dtype must be constexpr");

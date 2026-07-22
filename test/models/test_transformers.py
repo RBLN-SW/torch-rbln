@@ -55,6 +55,10 @@ class TestCausalLMBase(TestCase):
     seq_lens = [16, 128, 1024]
     max_new_tokens = 2  # Run prefill & decode phase once each.
 
+    # Pin the EXAONE HF revision (shared by every EXAONE test here, incl. TestCausalLMPerf)
+    # so model-hub updates can't shift the comparison.
+    _EXAONE_REVISION = "e949c91dec92095908d34e6b560af77dd0c993f8"
+
     def _prepare_model_and_inputs(
         self,
         model_id: str,
@@ -169,17 +173,73 @@ class TestCausalLMBase(TestCase):
         torch.testing.assert_close(rbln_logits, cpu_logits, atol=self.LOGIT_ATOL, rtol=0.0)
 
 
+def _small_model_cover_array(mark_ci=True):
+    """Strength-2 (pairwise) covering array over dtype x attn x (batch, seq) for the small models.
+
+    The full 4-way cross product (2 dtype x 2 attn x 9 shapes = 36 cases/model) re-runs paths the
+    op-level and CI tests already cover point-by-point. This replaces it with a covering array of
+    22 cases/model that still guarantees:
+
+      * every (batch, seq) shape is compiled at least once (9 shapes -- each is a distinct
+        compiled artifact / tiling),
+      * every dtype and every attn runs (1-way),
+      * every attn x shape, dtype x shape, and attn x dtype pair appears (2-way),
+      * a full dtype x attn corner at the two largest shapes -- the CI point (2, 1024) and the
+        max shape (4, 1024), where numeric overflow / tiling issues concentrate.
+
+    Only the 3-/4-way interactions are dropped. Non-corner shapes get one row per dtype, rotating
+    the dtype<->attn pairing across shapes so all attn x dtype combinations are spread over the
+    small shapes too. The (2, 1024) rows carry the test_set_ci marker unless mark_ci=False (the
+    release-only variant used where another model already covers the family's CI slot).
+    """
+    shapes = [(bs, sl) for bs in TestCausalLMBase.batch_sizes for sl in TestCausalLMBase.seq_lens]
+    attns = TestCausalLMBase.attn_implementations
+    full_corner_shapes = {(2, 1024), (4, 1024)}
+    n_dtype, n_attn = len(SUPPORTED_DTYPES), len(attns)
+
+    array = []
+    rotate = 0
+    for bs, sl in shapes:
+        if (bs, sl) in full_corner_shapes:
+            combos = [(dtype, attn) for dtype in SUPPORTED_DTYPES for attn in attns]
+        else:
+            combos = [
+                (SUPPORTED_DTYPES[(rotate + j) % n_dtype], attns[j % n_attn]) for j in range(max(n_dtype, n_attn))
+            ]
+            rotate += 1
+        is_ci = (bs, sl) == (2, 1024)
+        for dtype, attn in combos:
+            # Omit dtype from the subtest name: instantiate_device_type_tests appends it,
+            # which keeps the ids unique (e.g. ..._eager_b2_s1024_privateuse1_float16).
+            array.append(
+                subtest(
+                    (dtype, attn, bs, sl),
+                    name=f"{attn}_b{bs}_s{sl}",
+                    decorators=[pytest.mark.test_set_ci] if (is_ci and mark_ci) else [],
+                )
+            )
+    return array
+
+
 @pytest.mark.single_worker
 class TestCausalLM(TestCausalLMBase):
     """Test correctness of causal language model outputs across various configurations."""
 
-    # CI runs only a representative subset (batch_size=2, seq_len=1024);
-    # release tests cover all batch_size x seq_len combinations.
-    ci_tests_batch_seq = [
-        subtest((bs, sl), decorators=[pytest.mark.test_set_ci] if (bs, sl) == (2, 1024) else [])
-        for bs in TestCausalLMBase.batch_sizes
-        for sl in TestCausalLMBase.seq_lens
-    ]
+    # Small models (Llama-1B, Qwen-1.5B) run a pairwise covering array over dtype x attn x
+    # (batch, seq) instead of the full 4-way cross product (36 -> 22 cases/model); see
+    # _small_model_cover_array for the exact coverage guarantee.
+    #
+    # CI runs one model per family at the representative point (2, 1024): Qwen-1.5B here and
+    # Llama-3B for the Llama family (test_llama_3b) -- the larger geometry surfaces failures
+    # first. Llama-1B keeps its full covering array but release-only (no CI marker).
+    small_model_cover_array = _small_model_cover_array()
+    small_model_cover_array_release_only = _small_model_cover_array(mark_ci=False)
+
+    # Large models (Llama-3B, EXAONE-2.4B) share the small models' code paths but are 3-5x
+    # slower to compile and dominate the release run. They exercise only the representative
+    # point (the full attn x dtype matrix, which is also the CI set) plus a single largest-shape
+    # tiling smoke (test_large_model_tiling) -- not the full batch x seq grid.
+    representative_batch_seq = [subtest((2, 1024), decorators=[pytest.mark.test_set_ci])]
 
     @pytest.mark.usefixtures("enable_deploy_mode")
     @dtypes(*SUPPORTED_DTYPES)
@@ -190,12 +250,12 @@ class TestCausalLM(TestCausalLMBase):
         ],
     )
     @parametrize("attn_implementation", TestCausalLMBase.attn_implementations)
-    @parametrize("batch_size,seq_len", ci_tests_batch_seq)
+    @parametrize("batch_size,seq_len", representative_batch_seq)
     def test_exaone(self, dtype, model_id, attn_implementation, batch_size, seq_len):
         config_kwargs = dict(
             # Set a specific revision to avoid compatibility issues with the latest transformers version.
             # This can be removed when the transformers version is updated to 5.1.0 or higher.
-            revision="e949c91dec92095908d34e6b560af77dd0c993f8",
+            revision=self._EXAONE_REVISION,
             trust_remote_code=True,
             dtype=dtype,
             attn_implementation=attn_implementation,
@@ -205,37 +265,36 @@ class TestCausalLM(TestCausalLMBase):
         self._assert_logits_match_fp32(model_id, config_kwargs, batch_size, seq_len)
 
     @pytest.mark.usefixtures("enable_deploy_mode")
-    @dtypes(*SUPPORTED_DTYPES)
-    @parametrize(
-        "model_id",
-        [
-            "meta-llama/Llama-3.2-1B-Instruct",
-            "meta-llama/Llama-3.2-3B-Instruct",
-        ],
-    )
-    @parametrize("attn_implementation", TestCausalLMBase.attn_implementations)
-    @parametrize("batch_size,seq_len", ci_tests_batch_seq)
-    def test_llama(self, dtype, model_id, attn_implementation, batch_size, seq_len):
+    @parametrize("dtype,attn_implementation,batch_size,seq_len", small_model_cover_array_release_only)
+    def test_llama(self, dtype, attn_implementation, batch_size, seq_len):
         config_kwargs = dict(
             dtype=dtype,
             attn_implementation=attn_implementation,
             num_hidden_layers=self.num_hidden_layers,
         )
 
-        self._assert_logits_match_fp32(model_id, config_kwargs, batch_size, seq_len)
+        self._assert_logits_match_fp32("meta-llama/Llama-3.2-1B-Instruct", config_kwargs, batch_size, seq_len)
+
+    # Llama-3B is the same architecture as Llama-1B (full covering array above) but far slower to
+    # compile. It is the Llama family's CI slot: the representative point across the full attn x
+    # dtype matrix (the larger geometry surfaces failures first).
+    @pytest.mark.usefixtures("enable_deploy_mode")
+    @dtypes(*SUPPORTED_DTYPES)
+    @parametrize("attn_implementation", TestCausalLMBase.attn_implementations)
+    @parametrize("batch_size,seq_len", representative_batch_seq)
+    def test_llama_3b(self, dtype, attn_implementation, batch_size, seq_len):
+        config_kwargs = dict(
+            dtype=dtype,
+            attn_implementation=attn_implementation,
+            num_hidden_layers=self.num_hidden_layers,
+        )
+
+        self._assert_logits_match_fp32("meta-llama/Llama-3.2-3B-Instruct", config_kwargs, batch_size, seq_len)
 
     # Deploy mode is disabled for Qwen2.5 due to float16 overflow issues in certain BMM operations.
     # This will be enabled in the future when cf16 host padding is supported.
-    @dtypes(*SUPPORTED_DTYPES)
-    @parametrize(
-        "model_id",
-        [
-            "Qwen/Qwen2.5-1.5B-Instruct",
-        ],
-    )
-    @parametrize("attn_implementation", TestCausalLMBase.attn_implementations)
-    @parametrize("batch_size,seq_len", ci_tests_batch_seq)
-    def test_qwen2(self, dtype, model_id, attn_implementation, batch_size, seq_len):
+    @parametrize("dtype,attn_implementation,batch_size,seq_len", small_model_cover_array)
+    def test_qwen2(self, dtype, attn_implementation, batch_size, seq_len):
         config_kwargs = dict(
             # Pin the revision so model updates can't shift the comparison.
             revision="989aa7980e4cf806f80c7fef2b1adb7bc71aa306",
@@ -244,7 +303,30 @@ class TestCausalLM(TestCausalLMBase):
             num_hidden_layers=self.num_hidden_layers,
             sliding_window=0,  # Disable sliding window attention.
         )
-        self._assert_logits_match_fp32(model_id, config_kwargs, batch_size, seq_len)
+        self._assert_logits_match_fp32("Qwen/Qwen2.5-1.5B-Instruct", config_kwargs, batch_size, seq_len)
+
+    # The largest shape (batch=4, seq=1024) is where size-specific tiling/memory issues surface.
+    # The small models cover attn/dtype/shape breadth; here we smoke only the largest shape once
+    # per large model (fp16, sdpa) so that large-shape coverage isn't lost when their full grid is
+    # dropped. Release-only (no CI marker) -- the representative point carries the CI coverage.
+    @pytest.mark.usefixtures("enable_deploy_mode")
+    @dtypes(torch.float16)
+    @parametrize(
+        "model_id",
+        [
+            "meta-llama/Llama-3.2-3B-Instruct",
+            "LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct",
+        ],
+    )
+    def test_large_model_tiling(self, dtype, model_id):
+        config_kwargs = dict(
+            dtype=dtype,
+            attn_implementation="sdpa",
+            num_hidden_layers=self.num_hidden_layers,
+        )
+        if "EXAONE" in model_id:
+            config_kwargs.update(revision=self._EXAONE_REVISION, trust_remote_code=True)
+        self._assert_logits_match_fp32(model_id, config_kwargs, batch_size=4, seq_len=1024)
 
 
 @pytest.mark.test_set_perf
@@ -338,7 +420,7 @@ class TestCausalLMPerf(TestCausalLMBase):
     @parametrize("seq_len", TestCausalLMBase.seq_lens)
     def test_exaone(self, dtype, model_id, attn_implementation, batch_size, seq_len):
         config_kwargs = dict(
-            revision="e949c91dec92095908d34e6b560af77dd0c993f8",
+            revision=self._EXAONE_REVISION,
             trust_remote_code=True,
             dtype=dtype,
             attn_implementation=attn_implementation,

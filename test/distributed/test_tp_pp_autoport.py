@@ -19,6 +19,8 @@ import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
+from test.utils import is_atom_device
+
 
 _TARGET_MODULE = "test.distributed.test_tp_pp"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -51,6 +53,10 @@ def _invoke_test_tp_pp(env_overrides: dict) -> subprocess.CompletedProcess:
 
 @pytest.mark.test_set_ci
 @pytest.mark.single_worker
+@pytest.mark.skipif(
+    is_atom_device(),
+    reason="autoport concurrency path is REBEL-only; ATOM does not run the RCCL RDMA autoport init",
+)
 class TestTPPPAutoportConcurrent(TestCase):
     """Run test_tp_pp.py concurrently on two disjoint device partitions."""
 
