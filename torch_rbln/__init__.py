@@ -202,14 +202,16 @@ def _create_process_group_rbln(dist_backend_opts, pg_options):
 
 
 def _initialize_kineto_profiler() -> None:
-    """Register the rbln torch.profiler (kineto) bridge."""
-    from torch_rbln._internal.device_arch_utils import is_atom_device
-    from torch_rbln._internal.log_utils import rbln_log_info
+    """Register the rbln torch.profiler (kineto) bridge (a runtime-free libkineto
+    factory registration).
 
-    if is_atom_device():
-        rbln_log_info("rbln torch.profiler activities are not supported on ATOM and will be skipped")
-        return
-
+    Do NOT query the device arch here (e.g. ``is_atom_device()``): ``get_npu_name`` seals
+    ``RBLN_DEVICES`` in the rbln runtime, and a vLLM data-parallel worker remaps
+    ``RBLN_DEVICES`` *after* import -> ``RBLN_DEVICES environment variable changed at
+    runtime (Sealed)``. ATOM is gated by the runtime instead: ``rbln_kineto_is_active()``
+    (which the C++ profiler ``configure()`` checks) reports inactive on ATOM
+    (rebel-compiler #12079), so no rbln session is created there.
+    """
     try:
         import torch_rbln._C
 
