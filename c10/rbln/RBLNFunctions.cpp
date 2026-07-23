@@ -443,6 +443,22 @@ bool any_device_context_initialized() noexcept {
           g_context_init_mask[1].load(std::memory_order_relaxed)) != 0;
 }
 
+std::vector<c10::DeviceIndex> initialized_device_indices() {
+  std::vector<c10::DeviceIndex> indices;
+  // Context flag first: nothing initialized anywhere -> empty, and skip
+  // get_device_count() so we don't enumerate/register devices as a side effect.
+  if (!any_device_context_initialized()) {
+    return indices;
+  }
+  const auto device_count = get_device_count();
+  for (c10::DeviceIndex idx = 0; idx < device_count; ++idx) {
+    if (device_context_initialized(idx)) {
+      indices.push_back(idx);
+    }
+  }
+  return indices;
+}
+
 void* malloc(c10::DeviceIndex device_index, size_t nbytes) {
   RBLN_LOG_DEBUG("logical device=rbln:{}, nbytes={}", static_cast<int>(device_index), nbytes);
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
@@ -836,6 +852,13 @@ c10::CachingDeviceAllocator::DeviceStats get_device_stats(const c10::Device& dev
   }
   const auto device_index = device.index();
   check_device_index(device_index);
+  // CUDA parity (see memory_stats): report zero stats for a valid device this process
+  // has not allocated on, matching PyTorch's generic path (empty only for an
+  // uninitialized allocator). An initialized device still queries the runtime, so
+  // genuine failures surface rather than being masked as zero.
+  if (!device_context_initialized(device_index)) {
+    return c10::CachingDeviceAllocator::DeviceStats{};
+  }
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_get_memory_stats: device_id={}", device_id);
   const auto memory_stats = rbln_get_memory_stats(device_id);
@@ -919,10 +942,19 @@ std::map<std::string, uint64_t> memory_stats(const c10::Device& device) {
   }
   const auto device_index = device.index();
   check_device_index(device_index);
+  // CUDA parity: report empty stats for a valid device this process has not allocated
+  // on (memory_allocated()/memory_reserved() then read 0), matching PyTorch's generic
+  // path, which returns empty only for an uninitialized allocator. An initialized
+  // device still queries the runtime, so genuine failures surface -- device 0 works;
+  // the runtime rejects per-node stats for a device index > 0 (INIT_INVALID_ARGUMENT,
+  // Invalid node_id), and fixing that is a runtime-side change, not a swallow here.
+  // (check_device_index above still rejects an invalid index -- a bad index throws.)
+  if (!device_context_initialized(device_index)) {
+    return {};
+  }
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_get_memory_stats: rbln:{}, device_id={}", static_cast<int>(device_index), device_id);
   const auto stats = rbln_get_memory_stats(device_id);
-
   const auto memory_stats = stats.GetMemoryStats();
   RBLN_LOG_DEBUG("memory_stats={}", memory_stats);
   return memory_stats;

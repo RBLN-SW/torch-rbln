@@ -61,7 +61,8 @@ bool RBLNHooksInterface::hasPrimaryContext(c10::DeviceIndex device_index) const 
 
 void RBLNHooksInterface::resizePrivateUse1Bytes(const c10::Storage& storage, size_t new_nbytes) const {
   RBLN_LOG_DEBUG("storage={}, new_nbytes={}", fmt::ptr(&storage), new_nbytes);
-  RBLN_CHECK(new_nbytes > 0, "New nbytes must be positive, but got {}", new_nbytes);
+  // new_nbytes == 0 is a valid request (e.g. untyped_storage().resize_(0)); the
+  // branch below already handles the zero-size case (null DataPtr, nbytes = 0).
   RBLN_CHECK(storage.resizable(), "Storage must be resizable");
   auto* allocator = storage.allocator();
   RBLN_CHECK(allocator != nullptr, "Cannot resize storage without allocator");

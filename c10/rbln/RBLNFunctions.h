@@ -176,6 +176,17 @@ C10_RBLN_API bool device_context_initialized(c10::DeviceIndex device_index) noex
 C10_RBLN_API bool any_device_context_initialized() noexcept;
 
 /**
+ * @brief Logical device indices this process has initialized (a live context on).
+ *
+ * The set of devices the device-less torch.accelerator.empty_cache() must flush —
+ * every initialized device, not just the current one (CUDA/XPU parity). Extracted
+ * as a seam so the "span all initialized devices" selection is unit-testable without
+ * observing per-device runtime state (the runtime exposes memory stats for node 0
+ * only). Empty when no context is initialized. Order is ascending by index.
+ */
+C10_RBLN_API std::vector<c10::DeviceIndex> initialized_device_indices();
+
+/**
  * @brief Allocates memory on the specified RBLN device.
  *
  * This function allocates a contiguous block of memory on the given RBLN

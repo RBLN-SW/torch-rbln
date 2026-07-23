@@ -18,6 +18,12 @@ inline constexpr std::array<c10::ScalarType, 2> kSdpaDtypes = {c10::kHalf, c10::
 // dtypes once AutocastPrivateUse1 is registered.
 inline constexpr std::array<c10::ScalarType, 0> kAmpDtypes = {};
 
+// torch.accelerator device-capability dtypes (backs get_device_capability):
+// dtypes actually resident in RBLN device memory. Other dtypes accept
+// device="rbln" but are CPU-backed (0 device bytes), so they are not a device
+// capability. Empirically only fp16/bf16 (verified in test_accelerator_contract.py).
+inline constexpr std::array<c10::ScalarType, 2> kCapabilityDtypes = {c10::kHalf, c10::kBFloat16};
+
 constexpr bool is_dispatch_dtype(c10::ScalarType s) noexcept {
   for (const auto d : kDispatchDtypes) {
     if (s == d) {
