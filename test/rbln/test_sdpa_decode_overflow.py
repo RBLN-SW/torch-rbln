@@ -8,6 +8,7 @@ import math
 
 import pytest
 import torch
+import torch.nn.functional as F
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
@@ -243,6 +244,143 @@ class TestSDPADecodeOverflow(TestCase):
 
         needs_fallback, reason = needs_sdpa_shape_fallback(query, key)
         self.assertFalse(needs_fallback, "Aligned prefill shapes should not trigger fallback")
+
+    # fp16 + a 32-aligned (batch, heads, seq, head_dim) shape so these hit the real RBLN SDPA
+    # fast path (float32 / unaligned shapes silently route to the CPU fallback and would test
+    # nothing RBLN-specific). The reject itself is dtype/shape-independent -- it runs before the
+    # capability check -- but exercising the fast path is what makes the "allowed" cases meaningful.
+    _ALIGNED_SHAPE = (1, 4, 32, 64)
+
+    def _aligned(self, requires_grad=False):
+        return torch.randn(self._ALIGNED_SHAPE, dtype=torch.float16, device="rbln", requires_grad=requires_grad)
+
+    def test_dropout_with_grad_rejected(self):
+        """dropout_p > 0 + autograd must fail loudly, not return a silently wrong gradient: the
+        backward recomputes softmax from the pre-dropout weights and does not reproduce the
+        forward dropout mask / 1/(1-p) scaling, so it would be the gradient of a different
+        function."""
+        q, k, v = self._aligned(requires_grad=True), self._aligned(), self._aligned()
+        with self.assertRaises(NotImplementedError):
+            F.scaled_dot_product_attention(q, k, v, dropout_p=0.5)
+
+    def test_dropout_with_attn_bias_grad_rejected(self):
+        """The reject covers a graph required only through attn_bias — q/k/v need not require
+        grad — since needs_backward includes attn_bias.requires_grad (the gate that previously
+        checked only q/k/v)."""
+        q, k, v = self._aligned(), self._aligned(), self._aligned()
+        bias = torch.zeros(1, 4, 32, 32, dtype=torch.float16, device="rbln", requires_grad=True)
+        with self.assertRaises(NotImplementedError):
+            F.scaled_dot_product_attention(q, k, v, attn_mask=bias, dropout_p=0.5)
+
+    def test_dropout_without_grad_allowed(self):
+        """dropout_p > 0 without autograd (inference) runs on the fast path and, per the
+        cache-leak fix, must not cache attn-weights (nothing would pop them)."""
+        from torch_rbln._internal.kernels import sdpa as sdpa_mod
+
+        sdpa_mod._clear_attn_weights_cache()
+        q, k, v = self._aligned(), self._aligned(), self._aligned()
+        with torch.no_grad():
+            out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.5)
+        self.assertEqual(tuple(out.shape), self._ALIGNED_SHAPE)
+        self.assertEqual(len(sdpa_mod._sdpa_attn_weights_cache), 0)  # inference must not cache
+
+    def test_grad_without_dropout_allowed(self):
+        """Autograd with dropout_p == 0 runs on the fast path (dropout is the only rejected case)."""
+        q, k, v = self._aligned(requires_grad=True), self._aligned(), self._aligned()
+        out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
+        out.sum().backward()
+        self.assertTrue(torch.isfinite(q.grad).all().item())
+
+    def test_inference_does_not_leak_attn_weights_cache(self):
+        """SDPA under no_grad must not accumulate attn-weights cache entries —
+        nothing pops them in inference, so caching leaks a device tensor per call."""
+        from torch_rbln._internal.kernels import sdpa as sdpa_mod
+
+        sdpa_mod._clear_attn_weights_cache()
+        with torch.no_grad():
+            for _ in range(4):
+                q = torch.randn(1, 4, 32, 64, dtype=torch.float16, device="rbln")
+                k = torch.randn(1, 4, 32, 64, dtype=torch.float16, device="rbln")
+                v = torch.randn(1, 4, 32, 64, dtype=torch.float16, device="rbln")
+                F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
+        self.assertEqual(len(sdpa_mod._sdpa_attn_weights_cache), 0)
+
+    def test_grad_forward_then_backward_pops_cache(self):
+        """Fast-path cache lifecycle: a forward under autograd caches attn_weights, and the
+        matching backward pops it — the cache returns to empty on its own."""
+        from torch_rbln._internal.kernels import sdpa as sdpa_mod
+
+        sdpa_mod._clear_attn_weights_cache()
+        q = torch.randn(1, 4, 32, 64, dtype=torch.float16, device="rbln", requires_grad=True)
+        k = torch.randn(1, 4, 32, 64, dtype=torch.float16, device="rbln")
+        v = torch.randn(1, 4, 32, 64, dtype=torch.float16, device="rbln")
+        out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
+        self.assertGreaterEqual(len(sdpa_mod._sdpa_attn_weights_cache), 1)  # forward cached
+        out.sum().backward()
+        self.assertEqual(len(sdpa_mod._sdpa_attn_weights_cache), 0)  # backward popped it
+
+    def test_grad_forward_anonymous_output_survives_until_backward(self):
+        """Regression: an SDPA output that is an anonymous graph intermediate (never bound to
+        a live Python variable) must keep its attn-weights cache entry until the backward that
+        consumes it. Tying the entry's lifetime to the output wrapper (e.g. a
+        ``weakref.finalize`` evictor) would drop it when the unreferenced wrapper is collected
+        and silently downgrade backward to a CPU recompute — the failure mode for
+        ``loss = sdpa(q, k, v).sum(); loss.backward()``, where the output is never named."""
+        import gc
+
+        from torch_rbln._internal.kernels import sdpa as sdpa_mod
+
+        sdpa_mod._clear_attn_weights_cache()
+        q = torch.randn(1, 4, 32, 64, dtype=torch.float16, device="rbln", requires_grad=True)
+        k = torch.randn(1, 4, 32, 64, dtype=torch.float16, device="rbln")
+        v = torch.randn(1, 4, 32, 64, dtype=torch.float16, device="rbln")
+        # Output is never bound to a name: only `loss` (via the autograd graph) keeps it
+        # alive; its Python wrapper is unreferenced and eligible for collection now.
+        loss = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0).sum()
+        gc.collect()  # would fire an output-wrapper finalizer, if one existed
+        self.assertGreaterEqual(len(sdpa_mod._sdpa_attn_weights_cache), 1)  # entry survives for backward
+        loss.backward()  # cache hit -> device backward, not a cache-miss CPU recompute
+        self.assertEqual(len(sdpa_mod._sdpa_attn_weights_cache), 0)  # backward popped it
+        self.assertTrue(torch.isfinite(q.grad).all().item())
+
+    def test_noncaching_forward_discards_stale_entry_at_reused_address(self):
+        """A grad forward whose backward never ran leaves an entry keyed on its output's
+        address. If a later CPU-fallback or inference forward reuses that address it does not
+        cache, so it must DROP the stale entry — otherwise its own backward would pop the
+        earlier forward's weights (data_ptr reuse) and raise a shape error or compute a
+        silently wrong gradient. Exercised deterministically at the cache layer (real address
+        reuse is nondeterministic)."""
+        from torch_rbln._internal.kernels import sdpa as sdpa_mod
+
+        sdpa_mod._clear_attn_weights_cache()
+        # Abandoned grad forward A cached its weights at address P; no backward ran.
+        out_A = torch.zeros(4, 4)
+        weights_A = torch.ones(2, 2)  # deliberately a different shape than a later op would use
+        sdpa_mod._cache_attn_weights(out_A, weights_A)
+        self.assertIs(sdpa_mod._sdpa_attn_weights_cache.get(out_A.data_ptr()), weights_A)
+
+        # A later non-caching forward reuses address P for its output (same object stands in
+        # for allocator reuse). It must drop the stale entry so its backward misses -> recompute.
+        out_B = out_A
+        sdpa_mod._discard_cached_attn_weights(out_B)
+        self.assertIsNone(sdpa_mod._get_cached_attn_weights(out_B))
+
+    def test_empty_cache_preserves_pending_backward_cache(self):
+        """empty_cache() must NOT drop a live SDPA entry that a pending backward still needs
+        (else forward -> empty_cache() -> backward silently downgrades to a CPU recompute)."""
+        import torch_rbln
+        from torch_rbln._internal.kernels import sdpa as sdpa_mod
+
+        sdpa_mod._clear_attn_weights_cache()
+        q = torch.randn(1, 4, 32, 64, dtype=torch.float16, device="rbln", requires_grad=True)
+        k = torch.randn(1, 4, 32, 64, dtype=torch.float16, device="rbln")
+        v = torch.randn(1, 4, 32, 64, dtype=torch.float16, device="rbln")
+        out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
+        self.assertGreaterEqual(len(sdpa_mod._sdpa_attn_weights_cache), 1)  # forward cached
+        torch_rbln.memory.empty_cache()  # must not evict the pending-backward entry
+        self.assertGreaterEqual(len(sdpa_mod._sdpa_attn_weights_cache), 1)
+        out.sum().backward()  # still available -> device backward, not a cache-miss fallback
+        self.assertEqual(len(sdpa_mod._sdpa_attn_weights_cache), 0)
 
 
 instantiate_device_type_tests(TestSDPADecodeOverflow, globals(), only_for="privateuse1")
