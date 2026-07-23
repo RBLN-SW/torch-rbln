@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ATen/core/Tensor.h>
+#include <ATen/native/CPUFallback.h> // c10::OperatorHandle, torch::jit::Stack
 
 // Mirrors aten/src/ATen/native/TensorAdvancedIndexing.cpp upstream — the file
 // that hosts index_select / index_copy / index_add / index_put / gather /
@@ -24,6 +25,17 @@ at::Tensor& index_select_out_rbln(
 
 /// Non-out overload: allocates a fresh contiguous output and delegates.
 at::Tensor index_select_rbln(const at::Tensor& self, int64_t dim, const at::Tensor& index);
+
+// ---------------------------------------------------------------------------
+// index.Tensor_out (advanced indexing) — native white-list fast-path
+//
+// Boxed kernel: runs natively (via index_select) for a SINGLE index on one axis
+// — an integer index of any rank, or a 1-D boolean mask — and falls back to CPU
+// for every other form (multiple indices, non-leading masks, non-contiguous
+// self). See the .cpp.
+// ---------------------------------------------------------------------------
+
+void index_out_rbln(const c10::OperatorHandle& op, torch::jit::Stack* stack);
 
 // ---------------------------------------------------------------------------
 // index_copy
