@@ -702,6 +702,32 @@ class TestIndexTensorV2V(TestCase):
         idx2d = torch.tensor([[0, 2], [1, 0]], dtype=torch.long)
         _check(to_dev(src)[:, idx2d.to(DEVICE)], src[:, idx2d])
 
+    # -- white-listed native path: transposed / permuted N-D index -------------
+    # A non-contiguous index makes the wrapper hand the kernel a non-contig `out`;
+    # the native path must still gather (via a staging buffer) rather than fall back.
+
+    def test_index_nd_integer_transposed(self):
+        src = torch.arange(30, dtype=torch.float32).reshape(5, 6)
+        idx = torch.tensor([[1, 2], [3, 0], [2, 4]], dtype=torch.long)
+        idx_t = idx.t()  # (2, 3), non-contiguous -> non-contig result `out`
+        assert not src[idx_t].is_contiguous(), "test must exercise a non-contig out"
+        _check(to_dev(src)[idx.to(DEVICE).t()], src[idx_t])
+
+    def test_index_nd_integer_permuted(self):
+        src = torch.arange(10, dtype=torch.float32)
+        idx = (torch.arange(24, dtype=torch.long) % 10).reshape(2, 3, 4)
+        idx_p = idx.permute(2, 0, 1)  # (4, 2, 3), non-contiguous
+        assert not src[idx_p].is_contiguous(), "test must exercise a non-contig out"
+        _check(to_dev(src)[idx.to(DEVICE).permute(2, 0, 1)], src[idx_p])
+
+    def test_index_nd_integer_transposed_mid_axis(self):
+        """`x[:, idx_t]` — transposed N-D index on a non-leading axis."""
+        src = torch.arange(4 * 6, dtype=torch.float32).reshape(4, 6)
+        idx = torch.tensor([[1, 2, 0], [3, 0, 5]], dtype=torch.long)
+        idx_t = idx.t()  # (3, 2), non-contiguous
+        assert not src[:, idx_t].is_contiguous(), "test must exercise a non-contig out"
+        _check(to_dev(src)[:, idx.to(DEVICE).t()], src[:, idx_t])
+
     # -- white-listed native path: 1-D boolean mask ----------------------------
 
     def test_index_bool_mask(self):
@@ -775,6 +801,18 @@ class TestIndexTensorV2V(TestCase):
         r = torch.tensor([0, 2, 4]).to(DEVICE)
         c = torch.tensor([1, 3, 5]).to(DEVICE)
         self.assertFalse(self._ran_native_gather(lambda: to_dev(src)[r, c]))
+
+    def test_index_transposed_nd_routes_native_via_staging(self):
+        """A transposed N-D index makes the wrapper allocate a non-contiguous
+        `out`; the native path must gather into a staging buffer rather than fall
+        back. Asserting the result is non-contig AND the native primitive ran pins
+        down the staging branch specifically."""
+        src = torch.arange(30, dtype=torch.float16).reshape(5, 6)
+        idx = torch.tensor([[1, 2], [3, 0], [2, 4]], dtype=torch.long)
+        assert not src[idx.t()].is_contiguous(), "test must exercise a non-contig out"
+        got = to_dev(src)[idx.to(DEVICE).t()]
+        self.assertFalse(got.is_contiguous(), "a non-contig out must reach the kernel")
+        self.assertTrue(self._ran_native_gather(lambda: to_dev(src)[idx.to(DEVICE).t()]))
 
 
 instantiate_device_type_tests(TestCatV2V, globals(), only_for="privateuse1")

@@ -232,11 +232,13 @@ void index_out_rbln(const c10::OperatorHandle& op, torch::jit::Stack* stack) {
       fast = true;
     }
 
-    // Take the fast path only when `out` already has the exact shape aten::index
-    // would produce — the structured .out contract may otherwise require a resize
-    // that only the CPU fallback performs. `out` is contiguous, so a view with
-    // `axis` flattened aliases it and index_select writes into its storage.
-    if (fast && out.defined() && out.is_contiguous() && out.sizes().equals(expected)) {
+    // Fast path only when `out` already has the shape aten::index would produce —
+    // a mismatch means the .out contract wants a resize only the fallback does.
+    // `out` may be non-contiguous: a transposed / permuted N-D index makes the
+    // functional wrapper allocate it with the index's strides. Contiguous `out` is
+    // written in place (a flattened-axis view aliases its storage); otherwise the
+    // gather goes to a contiguous staging buffer copied into `out`'s layout.
+    if (fast && out.defined() && out.sizes().equals(expected)) {
       // Advanced indexing raises IndexError (not a plain RuntimeError) when an
       // index is out of range; match that before delegating to index_select.
       TORCH_CHECK_INDEX(
@@ -248,8 +250,16 @@ void index_out_rbln(const c10::OperatorHandle& op, torch::jit::Stack* stack) {
           self.size(axis));
       std::vector<int64_t> vshape = self.sizes().vec();
       vshape[axis] = flat_idx.numel();
-      at::Tensor out_view = out.view(vshape);
-      index_select_out_rbln(self, axis, flat_idx, out_view);
+      if (out.is_contiguous()) {
+        at::Tensor out_view = out.view(vshape);
+        index_select_out_rbln(self, axis, flat_idx, out_view);
+      } else {
+        // Gather into a contiguous buffer, then copy into `out`'s strided layout
+        // (mirrors index_select_out_rbln's own non-contig handling).
+        at::Tensor staging = at::empty(vshape, out.options().memory_format(c10::MemoryFormat::Contiguous));
+        index_select_out_rbln(self, axis, flat_idx, staging);
+        out.copy_(staging.view(expected));
+      }
       torch::jit::drop(*stack, static_cast<size_t>(num_args));
       torch::jit::push(*stack, std::move(out));
       return;
