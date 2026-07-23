@@ -805,14 +805,19 @@ class TestIndexTensorV2V(TestCase):
     def test_index_transposed_nd_routes_native_via_staging(self):
         """A transposed N-D index makes the wrapper allocate a non-contiguous
         `out`; the native path must gather into a staging buffer rather than fall
-        back. Asserting the result is non-contig AND the native primitive ran pins
-        down the staging branch specifically."""
+        back to CPU.
+
+        The index is kept on CPU on purpose. A *device* non-contiguous index would
+        emit `v2v_multi` from its own `reshape(-1)` clone before the routing
+        decision, masking a fallback (the gather signal and the reshape signal
+        would be indistinguishable). With a CPU index that reshape is host-side, so
+        the only device `v2v_multi` is the gather itself — the decisive
+        native-vs-fallback signal."""
         src = torch.arange(30, dtype=torch.float16).reshape(5, 6)
-        idx = torch.tensor([[1, 2], [3, 0], [2, 4]], dtype=torch.long)
-        assert not src[idx.t()].is_contiguous(), "test must exercise a non-contig out"
-        got = to_dev(src)[idx.to(DEVICE).t()]
-        self.assertFalse(got.is_contiguous(), "a non-contig out must reach the kernel")
-        self.assertTrue(self._ran_native_gather(lambda: to_dev(src)[idx.to(DEVICE).t()]))
+        idx_t = torch.tensor([[1, 2], [3, 0], [2, 4]], dtype=torch.long).t()  # CPU, non-contig
+        src_dev = to_dev(src)
+        self.assertFalse(src_dev[idx_t].is_contiguous(), "test must exercise a non-contig out")
+        self.assertTrue(self._ran_native_gather(lambda: src_dev[idx_t]))
 
 
 instantiate_device_type_tests(TestCatV2V, globals(), only_for="privateuse1")
