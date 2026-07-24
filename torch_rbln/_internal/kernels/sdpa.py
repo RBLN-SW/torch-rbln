@@ -21,9 +21,27 @@ _sdpa_attn_weights_cache: dict[int, torch.Tensor] = {}
 
 
 def _cache_attn_weights(output: torch.Tensor, attn_weights: torch.Tensor) -> None:
-    """Cache attention weights using output tensor's data_ptr as key."""
+    """Cache attention weights under the output tensor's data_ptr for the matching backward.
+
+    The forward only caches when a backward may consume it (see ``needs_backward``), and the
+    backward pops the entry — so inference never accumulates entries. A grad-enabled forward
+    whose backward never runs (``eval()`` does not turn autograd off) leaves its entry behind;
+    repeated such forwards at distinct addresses can leave several. Each lingers only until its
+    data_ptr is reused, at which point the next forward either overwrites it (a caching forward)
+    or drops it (a non-caching forward, via ``_discard_cached_attn_weights``) — so a backward
+    can never pop stale weights left by a *different* forward. The lifetime is deliberately NOT
+    tied to the ``output`` wrapper (e.g. ``weakref.finalize``): the wrapper can be collected
+    while the autograd graph still holds the tensor for a pending backward, so an output-wrapper
+    evictor would drop a still-needed entry and downgrade backward to a CPU recompute."""
     key = output.data_ptr()
     _sdpa_attn_weights_cache[key] = attn_weights
+
+
+def _discard_cached_attn_weights(output: torch.Tensor) -> None:
+    """Drop any entry at this output's data_ptr. A non-caching forward (CPU fallback / fast-path
+    inference) calls this so a stale entry at a reused address can't be popped by its backward —
+    rationale in ``_cache_attn_weights``."""
+    _sdpa_attn_weights_cache.pop(output.data_ptr(), None)
 
 
 def _get_cached_attn_weights(output: torch.Tensor) -> Optional[torch.Tensor]:
@@ -153,9 +171,6 @@ def can_use_rbln_sdpa(
 
     if key.dtype != query.dtype or value.dtype != query.dtype:
         return False, f"Q/K/V dtype mismatch (query {query.dtype}, key {key.dtype}, value {value.dtype})"
-
-    if dropout_p > 0.0 and (query.requires_grad or key.requires_grad or value.requires_grad):
-        return False, "dropout with gradients"
 
     if query.dim() == 4 and key.dim() == 4:
         q_heads, k_heads = query.size(1), key.size(1)
@@ -694,11 +709,33 @@ def scaled_dot_product_fused_attention_overrideable_rbln(
     """
     validate_sdpa_input(query, key, value, attn_bias, dropout_p, is_causal, scale)
 
+    # Whether a backward may run (grad enabled and an input needs grad — not a guarantee it
+    # runs). Computed on the ORIGINAL inputs (the later .contiguous()/mask conversions can
+    # build tensors that drop requires_grad). Gates the attn-weights caching below.
+    needs_backward = torch.is_grad_enabled() and (
+        query.requires_grad
+        or key.requires_grad
+        or value.requires_grad
+        or (attn_bias is not None and attn_bias.requires_grad)
+    )
+
+    # Dropout + autograd is rejected, not silently approximated: the backward recomputes softmax
+    # from the pre-dropout weights and can't reproduce the forward dropout mask / 1/(1-p) scaling
+    # (philox_seed/offset aren't threaded through), so the gradient would be of a different
+    # function. needs_backward includes attn_bias, so attn_bias-only grad is covered too.
+    if dropout_p > 0.0 and needs_backward:
+        raise NotImplementedError(
+            "RBLN SDPA does not support dropout_p > 0 with autograd (the backward cannot "
+            "reproduce the forward dropout mask, so the gradient would be wrong). Use "
+            "dropout_p=0.0, or run inference under torch.no_grad() / torch.inference_mode()."
+        )
+
     # Check RBLN capability
     can_use, reason = can_use_rbln_sdpa(query, key, value, attn_bias, dropout_p, is_causal, scale, enable_gqa=False)
     if not can_use:
         rbln_log_cpu_fallback(f"sdpa_overrideable ({reason})")
         output = _sdpa_cpu_fallback(query, key, value, attn_bias, dropout_p, is_causal, scale, enable_gqa=False)
+        attn_weights = None
     else:
         if not query.is_contiguous():
             query = query.contiguous()
@@ -714,7 +751,15 @@ def scaled_dot_product_fused_attention_overrideable_rbln(
 
         attn_weights = _sdpa_compute_attn_weights(query, key, attn_bias, is_causal, computed_scale)
         output = _sdpa_compute_output(attn_weights, value, dropout_p)
+
+    # Cache only when a backward may consume it (needs_backward = grad enabled + an input needs
+    # grad, not a guarantee backward runs); inference never pops, so unconditional caching would
+    # leak. A non-caching forward instead drops any stale entry at this (possibly reused) address.
+    # Rationale in _cache_attn_weights / _discard_cached_attn_weights.
+    if needs_backward and attn_weights is not None:
         _cache_attn_weights(output, attn_weights)
+    else:
+        _discard_cached_attn_weights(output)
 
     # Auxiliary tensors for interface (shape depends on input dims)
     if query.dim() == 4:

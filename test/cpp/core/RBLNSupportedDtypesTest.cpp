@@ -53,6 +53,14 @@ TEST_F(RBLNSupportedDtypesTest, SdpaCatalogIsFloatOnly) {
   }
 }
 
+TEST_F(RBLNSupportedDtypesTest, CapabilityCatalogContents) {
+  // Device-resident dtypes only (fp16/bf16); other dtypes are CPU-backed.
+  constexpr c10::ScalarType kExpected[] = {c10::kHalf, c10::kBFloat16};
+  for (const auto scalar_type : kExpected) {
+    EXPECT_TRUE(contains(c10::rbln::kCapabilityDtypes, scalar_type));
+  }
+}
+
 TEST_F(RBLNSupportedDtypesTest, IsDispatchDtypeAcceptsAdmitted) {
   for (const auto scalar_type : c10::rbln::kDispatchDtypes) {
     EXPECT_TRUE(c10::rbln::is_dispatch_dtype(scalar_type));
@@ -74,5 +82,6 @@ TEST_F(RBLNSupportedDtypesTest, IsDispatchDtypeRejectsUnsupported) {
 static_assert(!c10::rbln::kDispatchDtypes.empty(), "dispatch dtype catalog must not be empty");
 static_assert(!c10::rbln::kSdpaDtypes.empty(), "SDPA dtype catalog must not be empty");
 static_assert(c10::rbln::kAmpDtypes.empty(), "AMP dtype catalog is intentionally empty until autocast is implemented");
+static_assert(!c10::rbln::kCapabilityDtypes.empty(), "capability dtype catalog must not be empty");
 static_assert(c10::rbln::is_dispatch_dtype(c10::kHalf), "is_dispatch_dtype must be constexpr");
 static_assert(!c10::rbln::is_dispatch_dtype(c10::kFloat), "is_dispatch_dtype must be constexpr");

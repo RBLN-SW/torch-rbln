@@ -4,6 +4,36 @@
 #include <c10/rbln/RBLNHooksInterface.h>
 #include <gtest/gtest.h>
 
+#include <cstdlib>
+#include <string>
+
+namespace {
+// Forces TORCH_RBLN_EAGER_MALLOC for its scope and restores the prior value on exit (all
+// paths, including GTEST_SKIP), so toggling eager malloc can't leak into later tests.
+class ScopedEagerMalloc {
+ public:
+  explicit ScopedEagerMalloc(const char* value) {
+    const char* saved = std::getenv("TORCH_RBLN_EAGER_MALLOC");
+    had_ = saved != nullptr;
+    if (had_) {
+      saved_ = saved;
+    }
+    setenv("TORCH_RBLN_EAGER_MALLOC", value, /*overwrite=*/1);
+  }
+  ~ScopedEagerMalloc() {
+    if (had_) {
+      setenv("TORCH_RBLN_EAGER_MALLOC", saved_.c_str(), /*overwrite=*/1);
+    } else {
+      unsetenv("TORCH_RBLN_EAGER_MALLOC");
+    }
+  }
+
+ private:
+  bool had_;
+  std::string saved_;
+};
+} // namespace
+
 class RBLNAllocatorTest : public ::testing::Test {
  protected:
   static void SetUpTestSuite() {
@@ -155,6 +185,59 @@ TEST_F(RBLNAllocatorTest, EmptyCache) {
   const auto data = c10::GetAllocator(c10::kPrivateUse1)->allocate(1024);
   EXPECT_NE(data.get(), nullptr);
   EXPECT_NO_THROW(device_allocator->emptyCache());
+}
+
+// Regression guard for the device-less empty_cache() "span all devices" contract
+// (CUDA/XPU parity): emptyCache() must release *every* initialized device, not just the
+// current one. Device 0 is left non-current with a cached (freed-but-reserved) block, so a
+// current-device-only regression leaves that block intact — asserted released here.
+// Device 0's reserved bytes are observable (the runtime exposes per-node stats for node 0
+// only); the selection seam is additionally checked via initialized_device_indices().
+TEST_F(RBLNAllocatorTest, EmptyCacheSpansNonCurrentInitializedDevice) {
+  if (c10::rbln::get_device_count() < 2) {
+    GTEST_SKIP() << "needs >= 2 devices to exercise a non-current device";
+  }
+  constexpr size_t kAggregate = static_cast<size_t>(c10::CachingAllocator::StatType::AGGREGATE);
+  auto* allocator = GetDeviceAllocator();
+
+  // Force eager malloc so the allocation below reserves device memory (a lazy malloc would
+  // stage on the host and leave reserved at 0, silently voiding the assertion).
+  const ScopedEagerMalloc eager("1");
+  ASSERT_TRUE(c10::rbln::is_eager_malloc());
+
+  // Build a cached block on device 0, then measure its reserved bytes while still current.
+  c10::rbln::set_device_index(0);
+  {
+    const auto d0 = allocator->allocate(32ULL << 20);
+    EXPECT_NE(d0.get(), nullptr);
+  }
+  const auto reserved_before = allocator->getDeviceStats(0).reserved_bytes[kAggregate].current;
+  ASSERT_GT(reserved_before, 0) << "eager allocation reserved no device memory on device 0";
+
+  // Make device 1 current so device 0 is the non-current initialized device.
+  c10::rbln::set_device_index(1);
+  {
+    const auto d1 = allocator->allocate(1024);
+    EXPECT_NE(d1.get(), nullptr);
+  }
+
+  EXPECT_NO_THROW(allocator->emptyCache());
+
+  // Device 0 (non-current) must have been released too, not just the current device.
+  EXPECT_LT(allocator->getDeviceStats(0).reserved_bytes[kAggregate].current, reserved_before)
+      << "emptyCache() left non-current device 0 reserved (current-device-only regression)";
+
+  const auto indices = c10::rbln::initialized_device_indices();
+  const auto contains = [&](c10::DeviceIndex i) {
+    for (const auto x : indices) {
+      if (x == i) {
+        return true;
+      }
+    }
+    return false;
+  };
+  EXPECT_TRUE(contains(0));
+  EXPECT_TRUE(contains(1)) << "initialized_device_indices() dropped non-current device 1";
 }
 
 // recordStream must be a safe no-op — RBLN has no stream-based async execution.

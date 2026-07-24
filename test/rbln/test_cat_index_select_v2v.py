@@ -632,8 +632,226 @@ class TestIndexSelectV2V(TestCase):
             torch.index_select(to_dev(empty_self), 0, idx)
 
 
+# ---------------------------------------------------------------------------
+# index.Tensor (advanced indexing)
+#
+# `x[idx]` lowers to aten::index.Tensor and reaches the native `index.Tensor_out`
+# kernel through the composite out wrapper. The kernel serves any SINGLE index on
+# one axis natively (via the v2v index_select) — an integer index of any rank, or
+# a 1-D boolean mask — and hands every other form (multiple index tensors,
+# non-leading masks, non-contiguous self) to the CPU fallback. Both paths must
+# match the CPU reference bit-for-bit.
+# ---------------------------------------------------------------------------
+
+
+def _index_at_axis(x: torch.Tensor, axis: int, idx: torch.Tensor) -> torch.Tensor:
+    """`x[:, ..., idx, ...]` with `idx` placed on `axis` (all other slots full)."""
+    a = axis % x.dim()
+    key: list = [slice(None)] * a + [idx]
+    return x[tuple(key)]
+
+
+@pytest.mark.test_set_ci
+@pytest.mark.usefixtures("enable_deploy_mode")
+class TestIndexTensorV2V(TestCase):
+    """Tests for the native `aten::index.Tensor` white-list fast-path (a single
+    index on one axis -> v2v `index_select`) and its CPU fallback for the
+    non-white-listed advanced-indexing forms."""
+
+    def _check_bracket(self, src_cpu: torch.Tensor, idx: torch.Tensor) -> None:
+        """`src[idx]` on device (idx on CPU) vs the CPU reference."""
+        _check(to_dev(src_cpu)[idx], src_cpu[idx])
+
+    def _ran_native_gather(self, fn) -> bool:
+        """Whether `fn` ran the native v2v index_select gather rather than the CPU
+        fallback. index.Tensor_out is registered, so the dispatch-shim fallback
+        counter never fires for it and gives no routing signal; we instead probe
+        the runtime primitive the native gather emits (`v2v_multi`). This is an
+        implementation-detail signal, used only to guard against a silent
+        regression back to the fallback."""
+        with torch.rbln.explain() as p:
+            fn()
+        return "v2v_multi" in p.dump().get("rebel_runtime", {}).get("by_primitive", {})
+
+    # -- white-listed native path: single 1-D integer index --------------------
+
+    @dtypes(torch.float16, torch.bfloat16, torch.float32, torch.int32)
+    def test_index_basic_dim0(self, dtype):
+        src = torch.arange(30, dtype=dtype).reshape(5, 6)
+        self._check_bracket(src, torch.tensor([3, 0, 4, 1], dtype=torch.long))
+
+    @parametrize("axis", [0, 1, 2, -1])
+    def test_index_all_dims(self, axis):
+        src = torch.arange(2 * 3 * 4, dtype=torch.float32).reshape(2, 3, 4)
+        idx = torch.tensor([1, 0, 1], dtype=torch.long)
+        _check(_index_at_axis(to_dev(src), axis, idx), _index_at_axis(src, axis, idx))
+
+    def test_index_scattered(self):
+        src = torch.arange(100, dtype=torch.float32).reshape(10, 10)
+        self._check_bracket(src, torch.tensor([7, 2, 9, 0, 5, 5, 7], dtype=torch.long))
+
+    def test_index_consecutive(self):
+        src = torch.arange(8 * 16, dtype=torch.bfloat16).reshape(8, 16)
+        self._check_bracket(src, torch.arange(3, dtype=torch.long))
+
+    def test_index_empty(self):
+        src = torch.arange(20, dtype=torch.float32).reshape(4, 5)
+        self._check_bracket(src, torch.tensor([], dtype=torch.long))
+
+    def test_index_negative_wrap(self):
+        """Advanced indexing wraps negatives; the kernel must match (it normalises
+        before delegating to index_select, which rejects negatives)."""
+        src = torch.arange(30, dtype=torch.float32).reshape(5, 6)
+        self._check_bracket(src, torch.tensor([-1, -5, 2, -2], dtype=torch.long))
+
+    def test_index_int32(self):
+        src = torch.arange(30, dtype=torch.float32).reshape(5, 6)
+        self._check_bracket(src, torch.tensor([4, 0, 2], dtype=torch.int32))
+
+    def test_index_idx_on_device(self):
+        src = torch.arange(30, dtype=torch.float32).reshape(5, 6)
+        idx = torch.tensor([4, 0, 2], dtype=torch.long)
+        _check(to_dev(src)[idx.to(DEVICE)], src[idx])
+
+    def test_index_repeat(self):
+        src = torch.arange(20, dtype=torch.float16).reshape(4, 5)
+        self._check_bracket(src, torch.tensor([2, 2, 2, 2], dtype=torch.long))
+
+    # -- white-listed native path: N-D and 0-D integer index -------------------
+
+    def test_index_nd_integer(self):
+        """N-D integer index: out = idx.shape + self.shape[1:] (flatten -> gather
+        -> reshape). Includes a repeat to exercise the flattened gather."""
+        src = torch.arange(30, dtype=torch.float32).reshape(5, 6)
+        idx2d = torch.tensor([[1, 2], [3, 0], [2, 2]], dtype=torch.long)
+        self._check_bracket(src, idx2d)
+
+    def test_index_nd_integer_mid_axis(self):
+        src = torch.arange(2 * 3 * 4, dtype=torch.float32).reshape(2, 3, 4)
+        idx2d = torch.tensor([[0, 2], [1, 0]], dtype=torch.long)
+        _check(to_dev(src)[:, idx2d.to(DEVICE)], src[:, idx2d])
+
+    # -- white-listed native path: transposed / permuted N-D index -------------
+    # A non-contiguous index makes the wrapper hand the kernel a non-contig `out`;
+    # the native path must still gather (via a staging buffer) rather than fall back.
+
+    def test_index_nd_integer_transposed(self):
+        src = torch.arange(30, dtype=torch.float32).reshape(5, 6)
+        idx = torch.tensor([[1, 2], [3, 0], [2, 4]], dtype=torch.long)
+        idx_t = idx.t()  # (2, 3), non-contiguous -> non-contig result `out`
+        assert not src[idx_t].is_contiguous(), "test must exercise a non-contig out"
+        _check(to_dev(src)[idx.to(DEVICE).t()], src[idx_t])
+
+    def test_index_nd_integer_permuted(self):
+        src = torch.arange(10, dtype=torch.float32)
+        idx = (torch.arange(24, dtype=torch.long) % 10).reshape(2, 3, 4)
+        idx_p = idx.permute(2, 0, 1)  # (4, 2, 3), non-contiguous
+        assert not src[idx_p].is_contiguous(), "test must exercise a non-contig out"
+        _check(to_dev(src)[idx.to(DEVICE).permute(2, 0, 1)], src[idx_p])
+
+    def test_index_nd_integer_transposed_mid_axis(self):
+        """`x[:, idx_t]` — transposed N-D index on a non-leading axis."""
+        src = torch.arange(4 * 6, dtype=torch.float32).reshape(4, 6)
+        idx = torch.tensor([[1, 2, 0], [3, 0, 5]], dtype=torch.long)
+        idx_t = idx.t()  # (3, 2), non-contiguous
+        assert not src[:, idx_t].is_contiguous(), "test must exercise a non-contig out"
+        _check(to_dev(src)[:, idx.to(DEVICE).t()], src[:, idx_t])
+
+    # -- white-listed native path: 1-D boolean mask ----------------------------
+
+    def test_index_bool_mask(self):
+        src = torch.arange(30, dtype=torch.float32).reshape(5, 6)
+        mask = torch.tensor([True, False, True, False, True])
+        _check(to_dev(src)[mask.to(DEVICE)], src[mask])
+
+    def test_index_bool_mask_mid_axis(self):
+        """`x[:, mask]` — 1-D mask over a non-leading axis."""
+        src = torch.arange(30, dtype=torch.float32).reshape(5, 6)
+        mask = torch.tensor([True, False, True, True, False, True])  # len == axis 1
+        _check(to_dev(src)[:, mask.to(DEVICE)], src[:, mask])
+
+    # -- non-white-listed: CPU fallback, must still match the reference ---------
+
+    def test_index_two_tensor_fallback(self):
+        src = torch.arange(30, dtype=torch.float32).reshape(5, 6)
+        r = torch.tensor([0, 2, 4], dtype=torch.long)
+        c = torch.tensor([1, 3, 5], dtype=torch.long)
+        _check(to_dev(src)[r.to(DEVICE), c.to(DEVICE)], src[r, c])
+
+    def test_index_full_mask_fallback(self):
+        """A full-shape mask selects individual elements (data-dependent, scalar
+        picks) -> CPU fallback."""
+        src = torch.arange(30, dtype=torch.float32).reshape(5, 6)
+        mask = src > 12
+        _check(to_dev(src)[mask.to(DEVICE)], src[mask])
+
+    def test_index_noncontiguous_self_fallback(self):
+        """Non-contiguous `self` is not white-listed -> CPU fallback."""
+        src = torch.arange(30, dtype=torch.float32).reshape(5, 6).t()  # (6, 5), non-contig
+        self._check_bracket(src, torch.tensor([1, 4, 0], dtype=torch.long))
+
+    def test_index_empty_self_fallback(self):
+        """An empty non-indexed dim makes indexing a no-op with no bounds check
+        (empty(3, 0)[[3]] -> (1, 0)); must match CPU, not raise."""
+        src = torch.empty(3, 0, dtype=torch.float32)
+        self._check_bracket(src, torch.tensor([3], dtype=torch.long))
+
+    # -- semantics parity with upstream advanced indexing ----------------------
+
+    def test_index_out_of_bounds_raises_indexerror(self):
+        """Out-of-range index raises IndexError (not a plain RuntimeError)."""
+        src = torch.arange(30, dtype=torch.float32).reshape(5, 6)
+        with self.assertRaises(IndexError):
+            to_dev(src)[torch.tensor([5]).to(DEVICE)]  # 5 == size(0)
+        with self.assertRaises(IndexError):
+            to_dev(src)[torch.tensor([-6]).to(DEVICE)]  # -6 < -size(0)
+
+    def test_index_too_many_indices_raises(self):
+        """More index slots than dims is 'too many indices' -> IndexError."""
+        src = to_dev(torch.arange(6, dtype=torch.float32).reshape(2, 3))
+        with self.assertRaises(IndexError):
+            torch.ops.aten.index.Tensor(src, [torch.tensor([0]).to(DEVICE), None, None])
+
+    # -- routing: white-listed forms take the native gather; others fall back ---
+
+    def test_index_routes_native(self):
+        """The white-listed forms must actually run the native gather (not just
+        return the right values via the fallback)."""
+        src = torch.arange(30, dtype=torch.float16).reshape(5, 6)
+        self.assertTrue(self._ran_native_gather(lambda: to_dev(src)[torch.tensor([1, 2, 3]).to(DEVICE)]))
+        self.assertTrue(self._ran_native_gather(lambda: to_dev(src)[torch.tensor([[1, 2], [3, 0]]).to(DEVICE)]))
+        self.assertTrue(
+            self._ran_native_gather(lambda: to_dev(src)[torch.tensor([True, False, True, False, True]).to(DEVICE)])
+        )
+
+    def test_index_fallback_not_native(self):
+        """A non-white-listed form must NOT take the native gather."""
+        src = torch.arange(30, dtype=torch.float16).reshape(5, 6)
+        r = torch.tensor([0, 2, 4]).to(DEVICE)
+        c = torch.tensor([1, 3, 5]).to(DEVICE)
+        self.assertFalse(self._ran_native_gather(lambda: to_dev(src)[r, c]))
+
+    def test_index_transposed_nd_routes_native_via_staging(self):
+        """A transposed N-D index makes the wrapper allocate a non-contiguous
+        `out`; the native path must gather into a staging buffer rather than fall
+        back to CPU.
+
+        The index is kept on CPU on purpose. A *device* non-contiguous index would
+        emit `v2v_multi` from its own `reshape(-1)` clone before the routing
+        decision, masking a fallback (the gather signal and the reshape signal
+        would be indistinguishable). With a CPU index that reshape is host-side, so
+        the only device `v2v_multi` is the gather itself — the decisive
+        native-vs-fallback signal."""
+        src = torch.arange(30, dtype=torch.float16).reshape(5, 6)
+        idx_t = torch.tensor([[1, 2], [3, 0], [2, 4]], dtype=torch.long).t()  # CPU, non-contig
+        src_dev = to_dev(src)
+        self.assertFalse(src_dev[idx_t].is_contiguous(), "test must exercise a non-contig out")
+        self.assertTrue(self._ran_native_gather(lambda: src_dev[idx_t]))
+
+
 instantiate_device_type_tests(TestCatV2V, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestIndexSelectV2V, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestIndexTensorV2V, globals(), only_for="privateuse1")
 
 
 if __name__ == "__main__":

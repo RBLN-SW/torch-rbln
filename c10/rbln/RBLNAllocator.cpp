@@ -82,18 +82,21 @@ struct RBLNAllocator final : public c10::DeviceAllocator {
   }
 
   /**
-   * @brief Empties the memory cache for the specified memory pool.
+   * @brief Flushes the cache for every initialized device.
    *
-   * RBLN does not support per-mempool scoping, so this function will flush the cache for the current device
-   * regardless of the mempool_id provided.
-   *
-   * @param mempool_id The identifier for the memory pool to flush.
+   * Backs the device-less torch.accelerator.empty_cache() (all-device, CUDA/XPU
+   * parity); torch.rbln.empty_cache(device) stays per-device via a separate path.
+   * mempool_id is ignored (no per-mempool scoping).
    */
   void emptyCache(c10::MempoolId_t /*mempool_id*/) override {
-    const auto current_device_index = c10::rbln::get_device_index();
-    const auto current_device = c10::Device(c10::kPrivateUse1, current_device_index);
-    RBLN_LOG_DEBUG("Emptying cache for {}", c10::str(current_device));
-    c10::rbln::empty_cache(current_device);
+    // Flush *every* initialized device, not just the current one (CUDA/XPU parity).
+    // initialized_device_indices() context-gates internally (an unused device isn't
+    // enumerated/registered) and is unit-tested for the "span all devices" selection.
+    for (const auto idx : c10::rbln::initialized_device_indices()) {
+      const auto device = c10::Device(c10::kPrivateUse1, idx);
+      RBLN_LOG_DEBUG("Emptying cache for {}", c10::str(device));
+      c10::rbln::empty_cache(device);
+    }
   }
 
   /**

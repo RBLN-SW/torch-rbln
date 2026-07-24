@@ -29,22 +29,48 @@ __all__ = [
 
 def _normalize_device(device: Optional[Union[int, str, torch.device]]) -> torch.device:
     """
-    Normalize device input to torch.device object.
+    Normalize a device argument to a concrete ``rbln`` ``torch.device``.
 
-    Args:
-        device: Device specification (int, str, torch.device, or None)
-
-    Returns:
-        torch.device: Normalized device object
+    ``None``, ``"rbln"``, and ``torch.device("rbln")`` resolve to the current
+    device. A bare int is treated as an ``rbln`` index. Non-``rbln`` devices
+    (``"cpu"``, ``"cuda:0"``, …) and out-of-range indices are rejected.
     """
     if device is None:
         return torch.device("rbln", torch_rbln._C.current_device())
-    elif isinstance(device, int):
-        return torch.device(f"rbln:{device}")
+    if isinstance(device, bool):  # bool is an int subclass; reject to avoid rbln:0/1 surprises
+        raise TypeError(f"device must be None, int, str, or torch.device, not bool ({device!r})")
+
+    # torch.device's index field is an int8_t, so torch.device("rbln", 256) silently wraps
+    # to rbln:0 and would slip past the range check below. Read the index from the raw int
+    # or the original string suffix rather than a constructed device's .index. (A torch.device
+    # passed in has already wrapped and cannot be recovered, so it is validated as-is.)
+    if isinstance(device, int):
+        dtype, index = "rbln", device
     elif isinstance(device, str):
-        return torch.device(device)
+        # torch.device validates the canonical grammar (rejects "rbln:", "rbln:00",
+        # "rbln: 0", "rbln:0_0", … that int() would silently accept); the index still
+        # comes from the raw suffix so "rbln:256" is range-checked, not wrap-normalized.
+        try:
+            dtype = torch.device(device).type
+        except RuntimeError:
+            raise ValueError(f"Invalid device string {device!r}") from None
+        _, sep, suffix = device.partition(":")
+        index = int(suffix) if sep else None
+    elif isinstance(device, torch.device):
+        dtype, index = device.type, device.index
     else:
-        return device
+        raise TypeError(f"device must be None, int, str, or torch.device, got {type(device).__name__}")
+
+    if dtype != "rbln":
+        raise ValueError(f"Expected an 'rbln' device, got '{dtype}' (from {device!r})")
+    if index is None:
+        index = torch_rbln._C.current_device()
+
+    # Only range-check when devices exist; on a no-device host callers no-op.
+    count = torch_rbln._C.device_count()
+    if count > 0 and not (0 <= index < count):
+        raise ValueError(f"rbln device index {index} is out of range [0, {count})")
+    return torch.device("rbln", index)
 
 
 def set_device_layout_like(target: torch.Tensor, ref: torch.Tensor) -> None:
@@ -74,6 +100,10 @@ def empty_cache(device: Optional[Union[int, str, torch.device]] = None) -> None:
     This function releases cached memory blocks that are not currently in use,
     allowing them to be used by other applications or returned to the system.
 
+    Unlike the generic ``torch.accelerator.empty_cache()`` (which drains only the
+    caching allocator), this also drops the WarmCache and view-recipe caches, so it
+    releases everything the caller is not still holding.
+
     Args:
         device (Optional[Union[int, str, torch.device]]): The device to empty cache for.
             If None, uses the current device. Defaults to None.
@@ -94,6 +124,12 @@ def empty_cache(device: Optional[Union[int, str, torch.device]] = None) -> None:
     from torch_rbln._internal.ops_utils import view_recipe_cache_reset
 
     view_recipe_cache_reset()
+    # NB: the SDPA attn-weights cache is deliberately NOT flushed here. A pending backward's
+    # entry is still live and needed, so a global flush would silently downgrade a
+    # forward -> empty_cache() -> backward sequence to a CPU recompute. Inference never caches
+    # (the forward caches only when a backward may run), so there is no inference leak to
+    # reclaim; a grad-forward-with-no-backward entry lingers only until the next forward that
+    # reuses its output address overwrites or discards it -- see kernels/sdpa.py.
     # No NPU: host caches above still dropped, but skip the device-side flush.
     if _no_rbln_device():
         return
@@ -104,15 +140,11 @@ def memory_stats(device: Optional[Union[int, str, torch.device]] = None) -> Dict
     """
     Return a dictionary of accelerator device memory allocator statistics.
 
-    The returned dictionary contains various memory statistics including:
-    - allocated_bytes: current, peak, allocated, freed
-    - reserved_bytes: current, peak, allocated, freed
-    - active_bytes: current, peak
-    - cached_bytes: current, peak
-    - num_alloc_retries: number of allocation retries
-    - num_ooms: number of out-of-memory errors
-    - num_device_alloc: number of device allocations
-    - num_device_free: number of device frees
+    The returned dictionary contains various memory statistics. Keys are the
+    RBLN allocator's dotted names, e.g.:
+    - allocated.current, allocated.peak, allocated.total_allocated, allocated.total_freed
+    - reserved.current, reserved.peak, reserved.total_allocated, reserved.total_freed
+    - active.current, active.peak
 
     Args:
         device (Optional[Union[int, str, torch.device]]): The device to query.
@@ -139,7 +171,7 @@ def memory_allocated(device: Optional[Union[int, str, torch.device]] = None) -> 
     Returns:
         int: The current memory allocated in bytes.
     """
-    return memory_stats(device).get("allocated_bytes.all.current", 0)
+    return memory_stats(device).get("allocated.current", 0)
 
 
 def max_memory_allocated(device: Optional[Union[int, str, torch.device]] = None) -> int:
@@ -153,7 +185,7 @@ def max_memory_allocated(device: Optional[Union[int, str, torch.device]] = None)
     Returns:
         int: The maximum memory allocated in bytes.
     """
-    return memory_stats(device).get("allocated_bytes.all.peak", 0)
+    return memory_stats(device).get("allocated.peak", 0)
 
 
 def memory_reserved(device: Optional[Union[int, str, torch.device]] = None) -> int:
@@ -167,7 +199,7 @@ def memory_reserved(device: Optional[Union[int, str, torch.device]] = None) -> i
     Returns:
         int: The current memory reserved in bytes.
     """
-    return memory_stats(device).get("reserved_bytes.all.current", 0)
+    return memory_stats(device).get("reserved.current", 0)
 
 
 def max_memory_reserved(device: Optional[Union[int, str, torch.device]] = None) -> int:
@@ -181,7 +213,7 @@ def max_memory_reserved(device: Optional[Union[int, str, torch.device]] = None) 
     Returns:
         int: The maximum memory reserved in bytes.
     """
-    return memory_stats(device).get("reserved_bytes.all.peak", 0)
+    return memory_stats(device).get("reserved.peak", 0)
 
 
 def reset_accumulated_memory_stats(device: Optional[Union[int, str, torch.device]] = None) -> None:

@@ -6,6 +6,7 @@ from unittest import SkipTest
 import torch
 from tools.codegen.parser import YamlParser
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
+from torch.testing._internal.common_methods_invocations import op_db
 from torchgen.model import dispatch_keys
 
 from test.utils import SUPPORTED_DTYPES
@@ -43,6 +44,32 @@ _skipped_tests = {
 _ops_without_forward_ad_support = {
     "nn.functional.linear",  # torch.compile path loses forward AD context
 }
+
+
+# RBLN SDPA rejects dropout + autograd only (the backward can't reproduce the forward dropout
+# mask, so it raises rather than return a silently wrong gradient — see sdpa.py). Drop exactly
+# that OpInfo sample -- dropout_p>0 requested WITH requires_grad on an RBLN device -- so the
+# grad/consistency tests skip only the unsupported case and keep every other sample intact:
+# forward-only (requires_grad=False) dropout, all non-dropout samples, and any CPU
+# instantiation of the shared OpInfo. ``test_dtypes`` stays globally skipped via
+# ``_skipped_tests`` above.
+def _drop_dropout_grad_samples(op):
+    _orig_sample_inputs = op.sample_inputs_func
+
+    @wraps(_orig_sample_inputs)
+    def _filtered(op_info, device, dtype, requires_grad=False, **kwargs):
+        is_rbln = "rbln" in str(device) or "privateuse1" in str(device)
+        for sample in _orig_sample_inputs(op_info, device, dtype, requires_grad=requires_grad, **kwargs):
+            if is_rbln and requires_grad and sample.kwargs.get("dropout_p", 0.0):
+                continue  # dropout + autograd is rejected on RBLN; skip just this sample
+            yield sample
+
+    op.sample_inputs_func = _filtered
+
+
+for _op in op_db:
+    if _op.name == "nn.functional.scaled_dot_product_attention":
+        _drop_dropout_grad_samples(_op)
 
 _ops_with_related_runtime_tests = [
     "clone",
@@ -116,9 +143,11 @@ _ops_with_public_api_name_mismatch = [
 
 # Ops with a native RBLN kernel that are not declared in our native_functions.yaml
 # (the kernels are registered manually in RBLNRegisterOps.cpp). Hardcoded so opinfo
-# discovery picks them up.
+# discovery picks them up. ``__getitem__`` is the upstream OpInfo that exercises
+# aten::index.Tensor (advanced indexing) — the op served by index_out_rbln.
 _ops_with_rbln_native_kernel = [
     "cat",
+    "__getitem__",
     "index_copy",
     "index_select",
     "repeat_interleave",
