@@ -23,6 +23,7 @@ struct C10_RBLN_API RBLNGeneratorImpl : public GeneratorImpl {
 
   uint64_t seed_;
   uint64_t offset_;
+  c10::intrusive_ptr<GeneratorImpl> cpu_generator_;
 };
 
 } // namespace at
