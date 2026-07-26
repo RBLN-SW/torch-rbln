@@ -14,6 +14,10 @@ RBLNGeneratorImpl::RBLNGeneratorImpl(DeviceIndex device_index)
   cpu_generator_->set_current_seed(seed_);
 }
 
+at::Generator RBLNGeneratorImpl::get_fallback_generator() const {
+  return at::Generator(cpu_generator_);
+}
+
 void RBLNGeneratorImpl::set_current_seed(uint64_t seed) {
   seed_ = seed;
   cpu_generator_->set_current_seed(seed);

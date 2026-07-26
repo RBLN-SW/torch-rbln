@@ -10,6 +10,8 @@ struct C10_RBLN_API RBLNGeneratorImpl : public GeneratorImpl {
   RBLNGeneratorImpl(DeviceIndex device_index = -1);
   ~RBLNGeneratorImpl() override = default;
 
+  at::Generator get_fallback_generator() const;
+
  private:
   // Overridden from GeneratorImpl:
   void set_current_seed(uint64_t seed) override;

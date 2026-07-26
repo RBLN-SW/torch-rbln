@@ -9,6 +9,7 @@
 #include <ATen/native/rbln/RBLNTensorUtils.h>
 
 #include <c10/rbln/RBLNFunctions.h>
+#include <c10/rbln/RBLNGenerator.h>
 #include <c10/util/SmallVector.h>
 
 #ifndef AT_PER_OPERATOR_HEADERS
@@ -45,6 +46,7 @@ enum class CpuFbArgKind : uint8_t {
   TensorList,
   OptionalTensorList,
   Device,
+  OptionalGenerator,
 };
 
 struct CpuFbSchemaInfo {
@@ -94,11 +96,18 @@ const CpuFbSchemaInfo& get_or_populate_schema_info(const c10::FunctionSchema& sc
       info.arg_kind[i] = CpuFbArgKind::TensorList;
     } else if (type->isSubtypeOf(*ListType::ofOptionalTensors())) {
       info.arg_kind[i] = CpuFbArgKind::OptionalTensorList;
-    } else if (auto opt = type->cast<OptionalType>(); opt && opt->getElementType()->isSubtypeOf(*TensorType::get())) {
-      info.arg_kind[i] = CpuFbArgKind::OptionalTensor;
     } else if (type->kind() == TypeKind::DeviceObjType) {
       info.arg_kind[i] = CpuFbArgKind::Device;
+    } else if (type->kind() == TypeKind::OptionalType) {
+      auto opt = type->cast<OptionalType>();
+      auto elem_type = opt->getElementType();
+      if (elem_type->isSubtypeOf(*TensorType::get())) {
+        info.arg_kind[i] = CpuFbArgKind::OptionalTensor;
+      } else if (elem_type->kind() == TypeKind::GeneratorType) {
+        info.arg_kind[i] = CpuFbArgKind::OptionalGenerator;
+      }
     }
+
     const auto* alias = a.alias_info();
     const bool is_w = (alias != nullptr && alias->isWrite());
     info.is_write_alias[i] = is_w;
@@ -343,6 +352,13 @@ void cpu_fallback_rbln(
         tgt_device = ivalue.toDevice();
         (*stack)[arguments_begin + idx] = c10::IValue(c10::Device(kCPU));
         break;
+      case CpuFbArgKind::OptionalGenerator: {
+        if (ivalue.isGenerator()) {
+          auto g = static_cast<RBLNGeneratorImpl*>(ivalue.toGenerator().unsafeGetGeneratorImpl());
+          (*stack)[arguments_begin + idx] = c10::IValue(g->get_fallback_generator());
+        }
+        break;
+      }
       case CpuFbArgKind::Other:
         break; // unreachable — gated above
     }
