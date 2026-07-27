@@ -103,6 +103,10 @@ at::Generator RBLNHooksInterface::getNewGenerator(c10::DeviceIndex device_index)
   return at::make_generator<at::RBLNGeneratorImpl>(device_index);
 }
 
+const at::Generator& RBLNHooksInterface::getDefaultGenerator(c10::DeviceIndex device_index) const {
+  return c10::rbln::get_default_rbln_generator(device_index);
+}
+
 at::PrivateUse1HooksInterface* get_rbln_hooks() {
   static const std::unique_ptr<at::PrivateUse1HooksInterface> rbln_hooks = []() {
     // Called from shared-library registration during dlopen(). Avoid logging here:

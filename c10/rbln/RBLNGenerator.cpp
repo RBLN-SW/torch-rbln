@@ -2,7 +2,9 @@
 #include <ATen/Utils.h>
 #include <ATen/core/GeneratorForPrivateuseone.h>
 #include <ATen/detail/PrivateUse1HooksInterface.h>
+#include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNGenerator.h>
+#include <c10/rbln/RBLNLogging.h>
 
 namespace at {
 
@@ -90,3 +92,38 @@ RBLNGeneratorImpl* RBLNGeneratorImpl::clone_impl() const {
 }
 
 } // namespace at
+
+namespace c10::rbln {
+
+at::Generator make_rbln_generator(c10::DeviceIndex device_index) {
+  RBLN_LOG_DEBUG("device_index={}", static_cast<int>(device_index));
+  return at::make_generator<at::RBLNGeneratorImpl>(device_index);
+}
+
+const at::Generator& get_default_rbln_generator(c10::DeviceIndex device_index) {
+  static const std::vector<at::Generator> generators = [] {
+    const auto device_count = get_device_count();
+
+    std::vector<at::Generator> result;
+    result.reserve(device_count);
+
+    for (c10::DeviceIndex i = 0; i < device_count; ++i) {
+      auto generator = make_rbln_generator(i);
+      generator.seed();
+      result.emplace_back(std::move(generator));
+    }
+
+    return result;
+  }();
+
+  auto idx = device_index;
+  if (idx == -1) {
+    idx = get_device_index();
+  }
+
+  TORCH_CHECK(idx >= 0 && idx < static_cast<c10::DeviceIndex>(generators.size()), "Invalid RBLN device index: ", idx);
+
+  return generators[idx];
+}
+
+} // namespace c10::rbln
