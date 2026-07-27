@@ -38,6 +38,8 @@ uint64_t RBLNGeneratorImpl::current_seed() const {
 }
 
 uint64_t RBLNGeneratorImpl::seed() {
+  auto random_seed = cpu_generator_->seed();
+  seed_ = random_seed;
   return seed_;
 }
 
