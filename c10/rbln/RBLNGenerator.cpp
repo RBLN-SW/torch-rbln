@@ -48,7 +48,7 @@ void RBLNGeneratorImpl::set_state(const c10::TensorImpl& new_state) {
 
   TORCH_CHECK(new_state.dtype() == at::kByte, "RBLN generator state must be a ByteTensor, but got ", new_state.dtype());
 
-  const auto* state_ptr = new_state.data();
+  const auto* state_ptr = static_cast<const uint8_t*>(new_state.data());
 
   std::memcpy(&seed_, state_ptr, sizeof(seed_));
 
