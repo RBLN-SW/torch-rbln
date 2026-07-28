@@ -94,6 +94,34 @@ class TestFileOffloading(TestCase):
 
         self.assertEqual(torch_rbln_memory._offload_depth, 0)
 
+    # ------------------------------------------------------------------
+    # Temp storage release
+    # ------------------------------------------------------------------
+    def test_release_offload_temp_storage_surface(self):
+        """``release_offload_temp_storage`` is exposed and reports a file count."""
+        from torch_rbln.memory import release_offload_temp_storage  # noqa: F401
+
+        self.assertIn("release_offload_temp_storage", torch_rbln_memory.__all__)
+        self.assertTrue(hasattr(torch.rbln, "release_offload_temp_storage"))
+
+        num_removed = torch.rbln.release_offload_temp_storage()
+        self.assertIsInstance(num_removed, int)
+        self.assertGreaterEqual(num_removed, 0)
+
+    def test_release_offload_temp_storage_is_idempotent(self):
+        """Releasing twice is safe; the second call has nothing left to remove."""
+        torch.rbln.release_offload_temp_storage()
+        self.assertEqual(torch.rbln.release_offload_temp_storage(), 0)
+
+    def test_offload_usable_after_release(self):
+        """A release does not wedge the flag: offload() still works afterwards."""
+        torch.rbln.release_offload_temp_storage()
+
+        with torch.rbln.offload():
+            self.assertEqual(torch_rbln_memory._offload_depth, 1)
+
+        self.assertEqual(torch_rbln_memory._offload_depth, 0)
+
 
 if __name__ == "__main__":
     run_tests()
