@@ -20,6 +20,7 @@ at::Generator RBLNGeneratorImpl::get_fallback_generator() const {
 }
 
 void RBLNGeneratorImpl::set_current_seed(uint64_t seed) {
+  std::lock_guard<std::mutex> lock(cpu_generator_->mutex_);
   seed_ = seed;
   cpu_generator_->set_current_seed(seed);
 }
@@ -33,10 +34,12 @@ uint64_t RBLNGeneratorImpl::get_offset() const {
 }
 
 uint64_t RBLNGeneratorImpl::current_seed() const {
+  std::lock_guard<std::mutex> lock(cpu_generator_->mutex_);
   return seed_;
 }
 
 uint64_t RBLNGeneratorImpl::seed() {
+  std::lock_guard<std::mutex> lock(cpu_generator_->mutex_);
   auto random_seed = cpu_generator_->seed();
   seed_ = random_seed;
   return seed_;
@@ -46,6 +49,8 @@ void RBLNGeneratorImpl::set_state(const c10::TensorImpl& new_state) {
   TORCH_CHECK(new_state.device().is_cpu(), "RBLN generator state must be a CPU tensor, but got ", new_state.device());
 
   TORCH_CHECK(new_state.dtype() == at::kByte, "RBLN generator state must be a ByteTensor, but got ", new_state.dtype());
+
+  std::lock_guard<std::mutex> lock(cpu_generator_->mutex_);
 
   const auto* state_ptr = static_cast<const uint8_t*>(new_state.data());
 
@@ -60,6 +65,8 @@ void RBLNGeneratorImpl::set_state(const c10::TensorImpl& new_state) {
 }
 
 c10::intrusive_ptr<c10::TensorImpl> RBLNGeneratorImpl::get_state() const {
+  std::lock_guard<std::mutex> lock(cpu_generator_->mutex_);
+
   auto fallback_state = cpu_generator_->get_state();
 
   TORCH_INTERNAL_ASSERT(fallback_state->device().is_cpu(), "CPU fallback generator state must be on CPU");
