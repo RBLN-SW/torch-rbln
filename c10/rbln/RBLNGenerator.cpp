@@ -48,9 +48,8 @@ uint64_t RBLNGeneratorImpl::current_seed() const {
 }
 
 uint64_t RBLNGeneratorImpl::seed() {
-  std::lock_guard<std::mutex> lock(cpu_generator_->mutex_);
-  auto random_seed = cpu_generator_->seed();
-  seed_ = random_seed;
+  auto random_seed = c10::detail::getNonDeterministicRandom();
+  this->set_current_seed(random_seed);
   return seed_;
 }
 
