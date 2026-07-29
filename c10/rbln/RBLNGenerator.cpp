@@ -6,6 +6,15 @@
 #include <c10/rbln/RBLNGenerator.h>
 #include <c10/rbln/RBLNLogging.h>
 
+namespace {
+
+int64_t fallback_state_size() {
+  static const int64_t size = at::CPUGeneratorImpl().get_state()->numel();
+  return size;
+}
+
+} // namespace
+
 namespace at {
 
 RBLNGeneratorImpl::RBLNGeneratorImpl(DeviceIndex device_index)
@@ -46,9 +55,21 @@ uint64_t RBLNGeneratorImpl::seed() {
 }
 
 void RBLNGeneratorImpl::set_state(const c10::TensorImpl& new_state) {
+  const int64_t expected_size = fallback_state_size() + static_cast<int64_t>(sizeof(seed_));
+
   TORCH_CHECK(new_state.device().is_cpu(), "RBLN generator state must be a CPU tensor, but got ", new_state.device());
 
   TORCH_CHECK(new_state.dtype() == at::kByte, "RBLN generator state must be a ByteTensor, but got ", new_state.dtype());
+
+  TORCH_CHECK(new_state.is_contiguous(), "RBLN generator state must be contiguous");
+
+  TORCH_CHECK(
+      new_state.numel() == expected_size,
+      "RBLN generator state has invalid size: expected ",
+      expected_size,
+      " bytes, but got ",
+      new_state.numel(),
+      " bytes");
 
   std::lock_guard<std::mutex> lock(cpu_generator_->mutex_);
 
