@@ -93,6 +93,10 @@ RBLNGeneratorImpl* RBLNGeneratorImpl::clone_impl() const {
   return gen;
 }
 
+DeviceType RBLNGeneratorImpl::device_type() {
+  return DeviceType::PrivateUse1;
+}
+
 } // namespace at
 
 namespace c10::rbln {

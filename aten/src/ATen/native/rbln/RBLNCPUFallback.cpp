@@ -353,10 +353,10 @@ void cpu_fallback_rbln(
         (*stack)[arguments_begin + idx] = c10::IValue(c10::Device(kCPU));
         break;
       case CpuFbArgKind::OptionalGenerator: {
-        if (ivalue.isGenerator()) {
-          auto g = static_cast<RBLNGeneratorImpl*>(ivalue.toGenerator().unsafeGetGeneratorImpl());
-          (*stack)[arguments_begin + idx] = c10::IValue(g->get_fallback_generator());
-        }
+        const at::Generator arg_or_default_generator =
+            ivalue.isGenerator() ? ivalue.toGenerator() : c10::rbln::get_default_rbln_generator(-1);
+        auto g = check_generator<RBLNGeneratorImpl>(arg_or_default_generator);
+        (*stack)[arguments_begin + idx] = c10::IValue(g->get_fallback_generator());
         break;
       }
       case CpuFbArgKind::Other:

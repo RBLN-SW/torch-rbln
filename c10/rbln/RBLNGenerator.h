@@ -11,6 +11,7 @@ struct C10_RBLN_API RBLNGeneratorImpl : public GeneratorImpl {
   ~RBLNGeneratorImpl() override = default;
 
   at::Generator get_fallback_generator() const;
+  static c10::DeviceType device_type();
 
  private:
   // Overridden from GeneratorImpl:

@@ -104,6 +104,7 @@ at::Generator RBLNHooksInterface::getNewGenerator(c10::DeviceIndex device_index)
 }
 
 const at::Generator& RBLNHooksInterface::getDefaultGenerator(c10::DeviceIndex device_index) const {
+  RBLN_LOG_DEBUG("device_index={}", static_cast<int>(device_index));
   return c10::rbln::get_default_rbln_generator(device_index);
 }
 
