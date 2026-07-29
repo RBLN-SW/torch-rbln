@@ -11,7 +11,6 @@ namespace at {
 RBLNGeneratorImpl::RBLNGeneratorImpl(DeviceIndex device_index)
     : GeneratorImpl(Device(DeviceType::PrivateUse1, device_index), DispatchKeySet(c10::DispatchKey::PrivateUse1)),
       seed_(0),
-      offset_(0),
       cpu_generator_(make_intrusive<CPUGeneratorImpl>()) {
   cpu_generator_->set_current_seed(seed_);
 }
@@ -26,11 +25,11 @@ void RBLNGeneratorImpl::set_current_seed(uint64_t seed) {
 }
 
 void RBLNGeneratorImpl::set_offset(uint64_t offset) {
-  offset_ = offset;
+  TORCH_CHECK(false, "RBLN Generator does not use offset");
 }
 
 uint64_t RBLNGeneratorImpl::get_offset() const {
-  return offset_;
+  TORCH_CHECK(false, "RBLN Generator does not use offset");
 }
 
 uint64_t RBLNGeneratorImpl::current_seed() const {
@@ -52,13 +51,10 @@ void RBLNGeneratorImpl::set_state(const c10::TensorImpl& new_state) {
 
   std::memcpy(&seed_, state_ptr, sizeof(seed_));
 
-  std::memcpy(&offset_, state_ptr + sizeof(seed_), sizeof(offset_));
-
   auto fallback_state = at::empty(
-      {static_cast<int64_t>(new_state.numel() - (sizeof(seed_) + sizeof(offset_)))},
-      at::TensorOptions().dtype(at::kByte).device(at::kCPU));
+      {static_cast<int64_t>(new_state.numel() - sizeof(seed_))}, at::TensorOptions().dtype(at::kByte).device(at::kCPU));
 
-  std::memcpy(fallback_state.data_ptr<uint8_t>(), state_ptr + sizeof(seed_) + sizeof(offset_), fallback_state.numel());
+  std::memcpy(fallback_state.data_ptr<uint8_t>(), state_ptr + sizeof(seed_), fallback_state.numel());
 
   cpu_generator_->set_state(*fallback_state.unsafeGetTensorImpl());
 }
@@ -73,16 +69,14 @@ c10::intrusive_ptr<c10::TensorImpl> RBLNGeneratorImpl::get_state() const {
   const auto fallback_state_numel = fallback_state->numel();
 
   auto state = at::empty(
-      {static_cast<int64_t>(sizeof(seed_) + sizeof(offset_) + fallback_state_numel)},
+      {static_cast<int64_t>(sizeof(seed_) + fallback_state_numel)},
       at::TensorOptions().dtype(at::kByte).device(at::kCPU));
 
   auto* state_ptr = state.data_ptr<uint8_t>();
 
   std::memcpy(state_ptr, &seed_, sizeof(seed_));
 
-  std::memcpy(state_ptr + sizeof(seed_), &offset_, sizeof(offset_));
-
-  std::memcpy(state_ptr + sizeof(seed_) + sizeof(offset_), fallback_state->data(), fallback_state_numel);
+  std::memcpy(state_ptr + sizeof(seed_), fallback_state->data(), fallback_state_numel);
 
   return state.getIntrusivePtr();
 }
