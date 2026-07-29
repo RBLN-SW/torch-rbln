@@ -303,6 +303,7 @@ void cpu_fallback_rbln(
   // wrapped via the v-mem borrow path; zeros indicate the legacy `to_cpu`
   // fallback (used for non-rbln tensors, contiguity-guard skips, etc.).
   std::vector<std::vector<uint64_t>> tensorlist_borrow_ids;
+  std::optional<size_t> generator_arg_idx = std::nullopt;
 
   // Step 1: convert all non-CPU tensor inputs into CPU tensors and stage them on
   // the stack at the correct indices, switching on the cached per-arg schema kind.
@@ -353,10 +354,7 @@ void cpu_fallback_rbln(
         (*stack)[arguments_begin + idx] = c10::IValue(c10::Device(kCPU));
         break;
       case CpuFbArgKind::OptionalGenerator: {
-        const at::Generator arg_or_default_generator =
-            ivalue.isGenerator() ? ivalue.toGenerator() : c10::rbln::get_default_rbln_generator(-1);
-        auto g = check_generator<RBLNGeneratorImpl>(arg_or_default_generator);
-        (*stack)[arguments_begin + idx] = c10::IValue(g->get_fallback_generator());
+        generator_arg_idx = idx;
         break;
       }
       case CpuFbArgKind::Other:
@@ -443,6 +441,38 @@ void cpu_fallback_rbln(
   for (const auto i : c10::irange(tensor_args_indices.size())) {
     auto idx = tensor_args_indices[i];
     (*stack)[arguments_begin + idx] = c10::IValue(cpu_tensors[i]);
+  }
+
+  if (generator_arg_idx.has_value()) {
+    if (tgt_device == std::nullopt) {
+      tgt_device = compute_target_device(tensor_args, tensorlist_args);
+    }
+
+    c10::DeviceIndex tgt_index = tgt_device.has_value() ? tgt_device->index() : static_cast<c10::DeviceIndex>(-1);
+    if (tgt_index == -1) {
+      tgt_index = c10::rbln::get_device_index();
+    }
+
+    const auto& ivalue = arguments[generator_arg_idx.value()];
+    RBLNGeneratorImpl* arg_or_default_generator_ptr = nullptr;
+    if (ivalue.isGenerator()) {
+      arg_or_default_generator_ptr = check_generator<RBLNGeneratorImpl>(ivalue.toGenerator());
+      const auto gen_index = arg_or_default_generator_ptr->device().index();
+      TORCH_CHECK(
+          gen_index == tgt_index,
+          "Expected a generator on device rbln:",
+          static_cast<int>(tgt_index),
+          " for operator ",
+          op.schema().operator_name(),
+          ", but got a generator on device rbln:",
+          static_cast<int>(gen_index));
+    } else {
+      arg_or_default_generator_ptr =
+          check_generator<RBLNGeneratorImpl>(c10::rbln::get_default_rbln_generator(tgt_index));
+    }
+
+    (*stack)[arguments_begin + generator_arg_idx.value()] =
+        c10::IValue(arg_or_default_generator_ptr->get_fallback_generator());
   }
 
   // Step 2: call the underlying CPU implementation.

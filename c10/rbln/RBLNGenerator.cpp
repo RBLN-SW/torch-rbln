@@ -13,12 +13,18 @@ int64_t fallback_state_size() {
   return size;
 }
 
+c10::DeviceIndex resolve_device_index(c10::DeviceIndex device_index) {
+  return device_index == -1 ? c10::rbln::get_device_index() : device_index;
+}
+
 } // namespace
 
 namespace at {
 
 RBLNGeneratorImpl::RBLNGeneratorImpl(DeviceIndex device_index)
-    : GeneratorImpl(Device(DeviceType::PrivateUse1, device_index), DispatchKeySet(c10::DispatchKey::PrivateUse1)),
+    : GeneratorImpl(
+          Device(DeviceType::PrivateUse1, resolve_device_index(device_index)),
+          DispatchKeySet(c10::DispatchKey::PrivateUse1)),
       seed_(0),
       cpu_generator_(make_intrusive<CPUGeneratorImpl>()) {
   cpu_generator_->set_current_seed(seed_);
