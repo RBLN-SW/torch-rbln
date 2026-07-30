@@ -1205,6 +1205,119 @@ class TestTorchCompileMonkeyPatch(TestCase):
         self.assertEqual(result.tolist(), [2, 4, 6])
 
 
+@pytest.mark.test_set_ci
+class TestDynamoGuardReprPatch(TestCase):
+    """Guard build must not materialize tensor values via ``repr``, and
+    user-facing ``repr(tensor)`` must stay unchanged. See fsw-inference#413."""
+
+    def setUp(self):
+        from torch._dynamo.guards import GuardBuilder
+
+        import torch_rbln._internal.monkey_patches as mp
+
+        # apply_all_patches() ran at torch_rbln import; pull the true originals
+        # from module state rather than the already-wrapped current values.
+        self._orig_repr = mp._original_tensor_repr if mp._original_tensor_repr is not None else torch.Tensor.__repr__
+        self._orig_id_match = (
+            mp._original_id_match_unchecked
+            if mp._original_id_match_unchecked is not None
+            else GuardBuilder.id_match_unchecked
+        )
+
+    def tearDown(self):
+        from torch._dynamo.guards import GuardBuilder
+
+        import torch_rbln._internal.monkey_patches as mp
+
+        # Restore bare originals, then re-apply from a clean slate so later tests
+        # on the same worker keep the patch (mirrors TestTorchCompileMonkeyPatch).
+        torch.Tensor.__repr__ = self._orig_repr
+        GuardBuilder.id_match_unchecked = self._orig_id_match
+        mp._dynamo_guard_repr_patched = False
+        mp.apply_all_patches()
+
+    def test_patch_is_idempotent(self):
+        import torch_rbln._internal.monkey_patches as mp
+
+        mp.patch_dynamo_guard_repr()
+        first = torch.Tensor.__repr__
+        mp.patch_dynamo_guard_repr()
+        self.assertIs(first, torch.Tensor.__repr__)
+
+    def test_user_repr_is_unchanged(self):
+        """Outside guard build, repr must be the untouched value repr."""
+        import torch_rbln._internal.monkey_patches as mp
+
+        mp.patch_dynamo_guard_repr()
+        t = torch.arange(6.0).reshape(2, 3)
+        self.assertEqual(repr(t), self._orig_repr(t))
+        self.assertIn("1.", repr(t))
+
+    def test_guard_scope_returns_type_not_value(self):
+        """With the guard-build flag set, repr must return the type (no value)."""
+        import torch_rbln._internal.monkey_patches as mp
+
+        mp.patch_dynamo_guard_repr()
+        t = torch.arange(6.0).reshape(2, 3)
+        mp._guard_repr_tls.active = True
+        try:
+            self.assertEqual(repr(t), repr(type(t)))
+        finally:
+            mp._guard_repr_tls.active = False
+        # Flag restored -> value repr again.
+        self.assertEqual(repr(t), self._orig_repr(t))
+
+    def test_remove_all_patches_restores(self):
+        from torch._dynamo.guards import GuardBuilder
+
+        import torch_rbln._internal.monkey_patches as mp
+
+        mp.patch_dynamo_guard_repr()
+        self.assertIsNot(torch.Tensor.__repr__, self._orig_repr)
+        self.assertIsNot(GuardBuilder.id_match_unchecked, self._orig_id_match)
+
+        remove_all_patches()
+
+        self.assertIs(torch.Tensor.__repr__, self._orig_repr)
+        self.assertIs(GuardBuilder.id_match_unchecked, self._orig_id_match)
+        self.assertFalse(mp._dynamo_guard_repr_patched)
+
+    def test_compile_does_not_repr_param_value_during_guard_build(self) -> None:
+        """End-to-end: compiling a fn that guards on a Parameter must not
+        materialize the Parameter value, and output must stay correct."""
+        import torch_rbln._internal.monkey_patches as mp
+
+        mp.patch_dynamo_guard_repr()
+
+        real_repr = mp._original_tensor_repr  # wrapper delegates here when flag off
+        assert real_repr is not None
+        value_repr_ids: list[int] = []
+
+        def repr_spy(tensor: torch.Tensor, *args: object, **kwargs: object) -> str:
+            value_repr_ids.append(id(tensor))
+            return real_repr(tensor, *args, **kwargs)
+
+        base_compile = mp._original_torch_compile or torch.compile
+        base_reset = mp._original_dynamo_reset or torch._dynamo.reset
+        param = torch.nn.Parameter(torch.randn(16, 16))
+        x = torch.randn(16, 16)
+
+        def fn(inp: torch.Tensor) -> torch.Tensor:
+            return inp @ param
+
+        mp._original_tensor_repr = repr_spy
+        try:
+            base_reset()
+            out = base_compile(fn, backend="eager", fullgraph=True)(x)
+        finally:
+            mp._original_tensor_repr = real_repr
+            base_reset()
+
+        self.assertEqual(out, fn(x))
+        # The guard on `param` must never materialize its value during guard build.
+        self.assertNotIn(id(param), value_repr_ids)
+
+
 instantiate_device_type_tests(TestTorchCompilePatchHelpers, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestTensorParallelFunctions, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestCompiledFunctionWrapper, globals(), only_for="privateuse1")

@@ -1,5 +1,6 @@
 """Monkey patches applied to PyTorch to enable RBLN functionality."""
 
+import threading
 import warnings
 
 from torch_rbln._internal.compile_cache import clear_rbln_compile_cache
@@ -12,6 +13,10 @@ _torch_dynamo_reset_patched: bool = False
 _rbln_backend_registered: bool = False
 _original_torch_compile = None
 _original_dynamo_reset = None
+_dynamo_guard_repr_patched: bool = False
+_original_id_match_unchecked = None
+_original_tensor_repr = None
+_guard_repr_tls = threading.local()
 
 
 def _is_backend_registered(backend_name: str) -> bool:
@@ -141,9 +146,56 @@ def patch_torch_compile() -> None:
         _torch_dynamo_reset_patched = True
 
 
+def patch_dynamo_guard_repr() -> None:
+    """Keep Dynamo guard build from materializing tensor values via ``repr``.
+
+    Substitute value->type only during guard build; user ``repr(tensor)`` is
+    unchanged. Backport of the pytorch-main fix; a no-op on torch >= 2.13.
+    See rebellions-sw/fsw-inference#413.
+    """
+    global _original_id_match_unchecked, _original_tensor_repr, _dynamo_guard_repr_patched
+    if _dynamo_guard_repr_patched:
+        return
+
+    import torch
+
+    # Fixed upstream in torch 2.13 (id_match_unchecked reprs the type, not the
+    # value), so there is nothing to patch there. 2.11 and 2.12 still repr(val).
+    if torch.__version__ >= (2, 13):
+        return
+
+    try:
+        from torch._dynamo.guards import GuardBuilder
+    except Exception as e:  # pragma: no cover
+        warnings.warn(f"Could not patch Dynamo guard repr: {e}", stacklevel=2)
+        return
+
+    _original_id_match_unchecked = GuardBuilder.id_match_unchecked
+    _original_tensor_repr = torch.Tensor.__repr__
+
+    def _id_match_unchecked(self, guard, recompile_hint=None):
+        prev = getattr(_guard_repr_tls, "active", False)
+        _guard_repr_tls.active = True
+        try:
+            return _original_id_match_unchecked(self, guard, recompile_hint)
+        finally:
+            _guard_repr_tls.active = prev
+
+    def _tensor_repr(self, *args, **kwargs):
+        # Guard build only needs the type; avoid materializing the tensor.
+        if getattr(_guard_repr_tls, "active", False):
+            return repr(type(self))
+        return _original_tensor_repr(self, *args, **kwargs)
+
+    GuardBuilder.id_match_unchecked = _id_match_unchecked
+    torch.Tensor.__repr__ = _tensor_repr
+    _dynamo_guard_repr_patched = True
+
+
 def apply_all_patches() -> None:
     """Apply all RBLN monkey patches. Idempotent."""
     patch_torch_compile()
+    patch_dynamo_guard_repr()
 
 
 def remove_all_patches() -> None:
@@ -153,6 +205,7 @@ def remove_all_patches() -> None:
     WARNING: This function is primarily for testing purposes.
     """
     global _rbln_backend_registered, _torch_compile_patched, _torch_dynamo_reset_patched
+    global _dynamo_guard_repr_patched
 
     import torch
 
@@ -160,6 +213,13 @@ def remove_all_patches() -> None:
         torch.compile = _original_torch_compile
     if _original_dynamo_reset is not None:
         torch._dynamo.reset = _original_dynamo_reset
+
+    if _dynamo_guard_repr_patched:
+        from torch._dynamo.guards import GuardBuilder
+
+        GuardBuilder.id_match_unchecked = _original_id_match_unchecked
+        torch.Tensor.__repr__ = _original_tensor_repr
+        _dynamo_guard_repr_patched = False
 
     clear_rbln_compile_cache()
     # Mirror reset_wrapper's teardown: drop the C++ warm cache's runtime
