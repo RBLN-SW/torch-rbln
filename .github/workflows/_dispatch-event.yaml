@@ -30,7 +30,7 @@ permissions:
 jobs:
   dispatch_event:
     name: Dispatch event for ${{ inputs.event_type }}
-    if: ${{ github.repository_owner == vars.TORCH_RBLN_REPO_OWNER }}
+    if: ${{ github.repository_owner == 'RBLN-SW' }}
     runs-on: ${{ vars.TORCH_RBLN_RUNNER_CPU_SMALL }}
     timeout-minutes: 60
     container:

@@ -16,7 +16,6 @@ concurrency:
 
 jobs:
   dispatch_torch_rbln_ci:
-    if: ${{ github.repository_owner == vars.TORCH_RBLN_REPO_OWNER }}
     uses: ./.github/workflows/_dispatch-event.yaml
     with:
       event_name: ${{ github.event_name }}
