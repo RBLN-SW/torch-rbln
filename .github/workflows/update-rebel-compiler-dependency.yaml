@@ -26,7 +26,7 @@ defaults:
 jobs:
   update_rebel_compiler_dependency:
     name: Update rebel-compiler dependency
-    if: ${{ github.repository_owner == vars.TORCH_RBLN_REPO_OWNER }}
+    if: ${{ github.repository_owner == 'RBLN-SW' }}
     runs-on: ${{ vars.TORCH_RBLN_RUNNER_CPU_SMALL }}
     timeout-minutes: 15
     container:
