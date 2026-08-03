@@ -44,7 +44,7 @@ jobs:
 
   lint_gate:
     name: Lint
-    if: ${{ always() && github.repository_owner == vars.TORCH_RBLN_REPO_OWNER }}
+    if: ${{ always() && github.repository_owner == 'RBLN-SW' }}
     needs: [lint_source, lint_workflows]
     runs-on: ${{ vars.TORCH_RBLN_RUNNER_CPU_SMALL }}
     timeout-minutes: 10
