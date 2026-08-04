@@ -1,9 +1,9 @@
 # PyTorch RBLN
 <div align="center">
 <picture>
-  <source srcset="docs/img/torch-rbln-white.png" media="(prefers-color-scheme: dark)">
-  <source srcset="docs/img/torch-rbln-black.png" media="(prefers-color-scheme: light)">
-  <img src="docs/img/torch-rbln-black.png" alt="PyTorch RBLN" width="90%">
+  <source srcset="https://raw.githubusercontent.com/RBLN-SW/torch-rbln/main/docs/img/torch-rbln-white.png" media="(prefers-color-scheme: dark)">
+  <source srcset="https://raw.githubusercontent.com/RBLN-SW/torch-rbln/main/docs/img/torch-rbln-black.png" media="(prefers-color-scheme: light)">
+  <img src="https://raw.githubusercontent.com/RBLN-SW/torch-rbln/main/docs/img/torch-rbln-black.png" alt="PyTorch RBLN" width="90%">
 </picture>
 
 [![PyPI version](https://badge.fury.io/py/torch-rbln.svg)](https://badge.fury.io/py/torch-rbln)
