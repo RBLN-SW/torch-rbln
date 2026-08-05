@@ -22,7 +22,7 @@ defaults:
 jobs:
   lint_workflows:
     name: Lint workflows
-    if: ${{ github.repository_owner == vars.TORCH_RBLN_REPO_OWNER }}
+    if: ${{ github.repository_owner == 'RBLN-SW' }}
     runs-on: ${{ vars.TORCH_RBLN_RUNNER_CPU_SMALL }}
     env:
       GIT_CONFIG_COUNT: '1'

@@ -25,7 +25,6 @@ concurrency:
 
 jobs:
   build:
-    if: ${{ github.repository_owner == vars.TORCH_RBLN_REPO_OWNER }}
     strategy:
       matrix:
         python_version: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.python_versions || '["3.12"]') }}
