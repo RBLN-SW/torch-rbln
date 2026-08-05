@@ -22,6 +22,8 @@ The flag and the depth counter are both process-local, so each pytest-xdist
 worker is isolated; the class does not need ``single_worker``.
 """
 
+from unittest.mock import patch
+
 import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
@@ -107,6 +109,13 @@ class TestFileOffloading(TestCase):
         num_removed = torch.rbln.release_offload_temp_storage()
         self.assertIsInstance(num_removed, int)
         self.assertGreaterEqual(num_removed, 0)
+
+    def test_release_offload_temp_storage_returns_binding_count(self):
+        """The wrapper is a pass-through: the binding's count is returned unchanged."""
+        with patch.object(torch_rbln_C, "_release_offload_temp_storage", return_value=7) as mock_release:
+            self.assertEqual(torch.rbln.release_offload_temp_storage(), 7)
+
+        mock_release.assert_called_once_with()
 
     def test_release_offload_temp_storage_is_idempotent(self):
         """Releasing twice is safe; the second call has nothing left to remove."""
