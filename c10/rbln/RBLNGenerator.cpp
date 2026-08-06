@@ -80,7 +80,8 @@ void RBLNGeneratorImpl::set_state(const c10::TensorImpl& new_state) {
 
   const auto* state_ptr = static_cast<const uint8_t*>(new_state.data());
 
-  std::memcpy(&seed_, state_ptr, sizeof(seed_));
+  uint64_t new_seed;
+  std::memcpy(&new_seed, state_ptr, sizeof(new_seed));
 
   auto fallback_state = at::empty(
       {static_cast<int64_t>(new_state.numel() - sizeof(seed_))}, at::TensorOptions().dtype(at::kByte).device(at::kCPU));
@@ -88,6 +89,7 @@ void RBLNGeneratorImpl::set_state(const c10::TensorImpl& new_state) {
   std::memcpy(fallback_state.data_ptr<uint8_t>(), state_ptr + sizeof(seed_), fallback_state.numel());
 
   cpu_generator_->set_state(*fallback_state.unsafeGetTensorImpl());
+  seed_ = new_seed;
 }
 
 c10::intrusive_ptr<c10::TensorImpl> RBLNGeneratorImpl::get_state() const {
