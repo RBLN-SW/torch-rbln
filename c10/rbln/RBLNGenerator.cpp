@@ -80,7 +80,7 @@ void RBLNGeneratorImpl::set_state(const c10::TensorImpl& new_state) {
 
   const auto* state_ptr = static_cast<const uint8_t*>(new_state.data());
 
-  uint64_t new_seed;
+  uint64_t new_seed = 0;
   std::memcpy(&new_seed, state_ptr, sizeof(new_seed));
 
   auto fallback_state = at::empty(
