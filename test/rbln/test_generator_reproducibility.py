@@ -19,7 +19,8 @@ Coverage:
   4. Isolation — RBLN random ops do not consume the global CPU RNG stream,
      and CPU random ops do not consume the RBLN default generator stream.
 
-  5. Validation — generators from another backend are rejected with a clear
+  5. Validation — generators from another backend or wrong device index are
+     rejected with a clear
      error; malformed RNG state blobs (wrong device, wrong dtype, too short,
      wrong size, non-contiguous) are rejected, and a failed ``set_state``
      leaves the generator unmodified.
@@ -256,6 +257,27 @@ class TestGeneratorValidation(TestCase):
         h = torch.Generator(device="rbln").manual_seed(13)
         self.assertEqual(_sample(generator=g).cpu(), _sample(generator=h).cpu())
 
+    def test_set_state_rejects_non_cpu_state(self):
+        # set_state consumes a CPU ByteTensor; a device-resident state blob
+        # must be rejected before any header reads.
+        g = torch.Generator(device="rbln")
+        good_numel = g.get_state().numel()
+        rbln_state = torch.zeros(good_numel, dtype=torch.uint8, device="rbln")
+
+        with self.assertRaisesRegex(RuntimeError, "(?i)cpu|device"):
+            g.set_state(rbln_state)
+
+    def test_get_state_contract(self):
+        # The blob round-tripped by get/set_state and torch.random.fork_rng
+        # must be a contiguous CPU ByteTensor of a stable size.
+        g = torch.Generator(device="rbln").manual_seed(7)
+        state = g.get_state()
+
+        self.assertEqual(state.device.type, "cpu")
+        self.assertEqual(state.dtype, torch.uint8)
+        self.assertTrue(state.is_contiguous())
+        self.assertEqual(state.numel(), torch.Generator(device="rbln").get_state().numel())
+
 
 @pytest.mark.test_set_ci
 @unittest.skipUnless(RBLN_DEVICE_COUNT >= 2, "requires at least 2 RBLN devices")
@@ -314,6 +336,15 @@ class TestMultiDeviceGenerator(TestCase):
 
         for x, y in zip(xs, ys):
             self.assertEqual(x.cpu(), y.cpu())
+
+    def test_rejects_wrong_device_index_generator(self):
+        # Wrong-index rejection is a distinct check from wrong-backend
+        # rejection: check_generator passes (it IS an RBLNGeneratorImpl),
+        # and the device-index TORCH_CHECK must fire instead.
+        g1 = torch.Generator(device="rbln:1").manual_seed(1234)
+
+        with self.assertRaisesRegex(RuntimeError, "(?i)device|rbln"):
+            _sample(device="rbln:0", generator=g1)
 
 
 @pytest.mark.test_set_ci
@@ -404,6 +435,167 @@ class TestGeneratorThreadSafety(TestCase):
         g.manual_seed(42)
         h = torch.Generator(device="rbln").manual_seed(42)
         self.assertEqual(_sample(generator=g).cpu(), _sample(generator=h).cpu())
+
+
+@pytest.mark.test_set_ci
+class TestFallbackBorrowSafety(TestCase):
+    """Regression tests for borrow release when generator validation throws.
+
+    The CPU fallback borrows tensor args off the stack before the generator
+    argument is validated. If check_generator / the device-index TORCH_CHECK
+    throws, the BorrowReleaseGuard must release those borrows; otherwise the
+    next free on a still-borrowed vaddr throws from a noexcept ~TensorImpl
+    deleter and terminates the process. A factory op like randint carries no
+    tensor inputs and cannot exercise this path, so these tests use in-place
+    ops whose `self` is borrowed at the time of the throw.
+    """
+
+    def _assert_tensor_still_healthy(self, x):
+        # The failed call must not have leaked x's borrow: x must remain
+        # readable and writable, and freeing it (plus fresh alloc/free
+        # churn) must not crash the process.
+        x.fill_(0)
+        self.assertEqual(x.cpu(), torch.zeros_like(x, device="cpu"))
+        del x
+        for _ in range(4):
+            t = torch.empty(1024, device="rbln")
+            del t
+
+    def test_failed_generator_check_releases_borrows(self):
+        x = torch.empty(64, device="rbln")
+        cpu_g = torch.Generator(device="cpu").manual_seed(1234)
+
+        with self.assertRaisesRegex(RuntimeError, "(?i)rbln|privateuse"):
+            x.uniform_(generator=cpu_g)
+
+        self._assert_tensor_still_healthy(x)
+
+    def test_failed_generator_check_releases_tensorlist_borrows(self):
+        # Same throw point, but with additional borrowed tensor args in the
+        # stack (weights input to multinomial) beyond the output.
+        weights = torch.ones(32, device="rbln")
+        cpu_g = torch.Generator(device="cpu").manual_seed(1234)
+
+        with self.assertRaises(RuntimeError):
+            torch.multinomial(weights, 8, replacement=True, generator=cpu_g)
+
+        self._assert_tensor_still_healthy(weights)
+
+    @unittest.skipUnless(RBLN_DEVICE_COUNT >= 2, "requires at least 2 RBLN devices")
+    def test_failed_device_index_check_releases_borrows(self):
+        # The second throw site in the generator block: an RBLN generator
+        # whose device index does not match the op's target device.
+        x = torch.empty(64, device="rbln:0")
+        g1 = torch.Generator(device="rbln:1").manual_seed(1234)
+
+        with self.assertRaises(RuntimeError):
+            x.uniform_(generator=g1)
+
+        self._assert_tensor_still_healthy(x)
+
+
+@pytest.mark.test_set_ci
+class TestGeneratorCoverageBreadth(TestCase):
+    """Broader op coverage and mid-stream state semantics."""
+
+    # Generator-consuming fallback ops beyond randint. Each entry must hit
+    # the OptionalGenerator path in get_or_populate_schema_info for its own
+    # schema. Factory-style and in-place ops are both represented.
+    _OPS = {
+        "rand": lambda device, g: torch.rand(64, device=device, generator=g),
+        "randperm": lambda device, g: torch.randperm(64, device=device, generator=g),
+        "uniform_": lambda device, g: torch.empty(64, device=device).uniform_(generator=g),
+        "normal_": lambda device, g: torch.empty(64, device=device).normal_(generator=g),
+        "multinomial": lambda device, g: torch.multinomial(
+            torch.ones(64, device=device), 16, replacement=True, generator=g
+        ),
+    }
+
+    def test_ops_reproducible_with_same_seed(self):
+        for name, op in self._OPS.items():
+            with self.subTest(op=name):
+                g0 = torch.Generator(device="rbln").manual_seed(1234)
+                g1 = torch.Generator(device="rbln").manual_seed(1234)
+
+                self.assertEqual(op("rbln", g0).cpu(), op("rbln", g1).cpu())
+
+    def test_ops_match_cpu_stream_with_same_seed(self):
+        # The fallback runs the CPU kernel against the associated fallback
+        # CPU generator, so an equally seeded pure-CPU run must match.
+        for name, op in self._OPS.items():
+            with self.subTest(op=name):
+                rbln_g = torch.Generator(device="rbln").manual_seed(4242)
+                cpu_g = torch.Generator(device="cpu").manual_seed(4242)
+
+                self.assertEqual(op("rbln", rbln_g).cpu(), op("cpu", cpu_g))
+
+    def test_ops_reproducible_via_default_generator(self):
+        for name, op in self._OPS.items():
+            with self.subTest(op=name):
+                torch.rbln.manual_seed(31337)
+                x = op("rbln", None)
+
+                torch.rbln.manual_seed(31337)
+                y = op("rbln", None)
+
+                self.assertEqual(x.cpu(), y.cpu())
+
+    def test_mid_stream_state_transplant(self):
+        # Snapshot a generator mid-stream (not at its initial state) and
+        # transplant it into a fresh generator: the continuation must match.
+        # This is the case that actually verifies the fallback CPU state is
+        # captured, not just the seed header.
+        g0 = torch.Generator(device="rbln").manual_seed(2718)
+        _ = _sample(generator=g0, n=100)  # advance past the initial state
+        snapshot = g0.get_state()
+        x = _sample(generator=g0, n=50)
+
+        g1 = torch.Generator(device="rbln")  # different seed, different state
+        g1.set_state(snapshot)
+        y = _sample(generator=g1, n=50)
+
+        self.assertEqual(x.cpu(), y.cpu())
+
+    def test_mid_stream_default_rng_state_transplant(self):
+        # Same mid-stream semantics through the module-level default path.
+        torch.rbln.manual_seed(1618)
+        _ = _sample(n=100)
+        snapshot = torch.rbln.get_rng_state()
+        x = _sample(n=50)
+
+        torch.rbln.manual_seed(0)  # deliberately clobber
+        torch.rbln.set_rng_state(snapshot)
+        y = _sample(n=50)
+
+        self.assertEqual(x.cpu(), y.cpu())
+
+    def test_concurrent_generators_are_independent(self):
+        # Two threads sampling from two distinct generators must each
+        # reproduce their own serial sequence: the shared-mutex fix must
+        # provide correctness without cross-generator interference.
+        results = {}
+
+        def worker(tag, seed):
+            g = torch.Generator(device="rbln").manual_seed(seed)
+            results[tag] = [torch.rand(256, device="rbln", generator=g).cpu() for _ in range(50)]
+
+        threads = [
+            threading.Thread(target=worker, args=("a", 111)),
+            threading.Thread(target=worker, args=("b", 222)),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        for tag, seed in (("a", 111), ("b", 222)):
+            g = torch.Generator(device="rbln").manual_seed(seed)
+            for step, expected in enumerate(results[tag]):
+                self.assertEqual(
+                    torch.rand(256, device="rbln", generator=g).cpu(),
+                    expected,
+                    msg=f"thread {tag} diverged from serial replay at step {step}",
+                )
 
 
 instantiate_device_type_tests(TestGeneratorBasic, globals(), only_for="privateuse1")
