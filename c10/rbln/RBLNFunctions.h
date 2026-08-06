@@ -460,6 +460,17 @@ C10_RBLN_API void empty_cache(const c10::Device& device);
 C10_RBLN_API std::map<std::string, uint64_t> memory_stats(const c10::Device& device);
 
 /**
+ * @brief Returns memory allocator statistics broken down per chiplet.
+ *
+ * Same keys as memory_stats(), each prefixed with "chiplet.<i>.". A device runs out
+ * on its heaviest chiplet, which the aggregate memory_stats() hides.
+ *
+ * @param device The input device.
+ * @return A map containing per-chiplet memory statistics.
+ */
+C10_RBLN_API std::map<std::string, uint64_t> memory_stats_per_chiplet(const c10::Device& device);
+
+/**
  * @brief Resets the "accumulated" (historical) stats tracked by the current accelerator memory allocator.
  *
  * @param device The input device.

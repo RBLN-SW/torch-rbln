@@ -960,6 +960,33 @@ std::map<std::string, uint64_t> memory_stats(const c10::Device& device) {
   return memory_stats;
 }
 
+std::map<std::string, uint64_t> memory_stats_per_chiplet(const c10::Device& device) {
+  RBLN_LOG_DEBUG("logical device={}", c10::str(device));
+  // Same availability/initialization gates as memory_stats().
+  if (!runtime_available()) {
+    return {};
+  }
+  const auto device_index = device.index();
+  check_device_index(device_index);
+  if (!device_context_initialized(device_index)) {
+    return {};
+  }
+  const auto device_id = to_device_id(device_index);
+  RBLN_LOG_DEBUG(
+      "Calling rbln_get_memory_stats_per_chiplet: rbln:{}, device_id={}", static_cast<int>(device_index), device_id);
+  const auto per_chiplet = rbln_get_memory_stats_per_chiplet(device_id);
+
+  std::map<std::string, uint64_t> out;
+  for (size_t i = 0; i < per_chiplet.size(); ++i) {
+    const auto prefix = "chiplet." + std::to_string(i) + ".";
+    for (const auto& [key, value] : per_chiplet[i].GetMemoryStats()) {
+      out[prefix + key] = value;
+    }
+  }
+  RBLN_LOG_DEBUG("memory_stats_per_chiplet={}", out);
+  return out;
+}
+
 void reset_accumulated_memory_stats(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
   // Two-level context gate (see empty_cache); context flag first.

@@ -21,6 +21,8 @@ __all__ = [
     "memory_allocated",
     "memory_reserved",
     "memory_stats",
+    "memory_stats_per_chiplet",
+    "memory_summary",
     "offload",
     "reset_accumulated_memory_stats",
     "reset_peak_memory_stats",
@@ -158,6 +160,83 @@ def memory_stats(device: Optional[Union[int, str, torch.device]] = None) -> Dict
         return {}
     device = _normalize_device(device)
     return torch_rbln._C.memory_stats(device)
+
+
+def memory_stats_per_chiplet(
+    device: Optional[Union[int, str, torch.device]] = None,
+) -> Dict[str, int]:
+    """
+    Return memory allocator statistics broken down per chiplet.
+
+    Same keys as :func:`memory_stats`, each prefixed with ``chiplet.<i>.`` -- e.g.
+    ``chiplet.0.allocated.current``. A device runs out on its heaviest chiplet, which
+    the aggregate :func:`memory_stats` hides.
+
+    Args:
+        device (Optional[Union[int, str, torch.device]]): The device to query.
+            If None, uses the current device. Defaults to None.
+
+    Returns:
+        Dict[str, int]: A dictionary containing per-chiplet memory statistics.
+    """
+    if _no_rbln_device():
+        return {}
+    device = _normalize_device(device)
+    return torch_rbln._C.memory_stats_per_chiplet(device)
+
+
+def memory_summary(device: Optional[Union[int, str, torch.device]] = None) -> str:
+    """
+    Return a human-readable printout of the current memory allocator statistics.
+
+    Rows are per chiplet, so an imbalance is visible at a glance.
+
+    Args:
+        device (Optional[Union[int, str, torch.device]]): The device to query.
+            If None, uses the current device. Defaults to None.
+
+    Returns:
+        str: The formatted table, or a short notice when no stats are available.
+    """
+    per_chiplet = memory_stats_per_chiplet(device)
+    if not per_chiplet:
+        return "torch_rbln memory summary: no statistics (no RBLN device or allocator uninitialized)\n"
+
+    chiplets = sorted({int(key.split(".")[1]) for key in per_chiplet})
+    columns = [
+        ("allocated.current", "allocated"),
+        ("allocated.peak", "alloc peak"),
+        ("reserved.current", "reserved"),
+        ("reserved.peak", "resv peak"),
+        ("active.current", "active"),
+        ("cached.current", "cached"),
+    ]
+
+    def mib(value: int) -> str:
+        return f"{value / 1024 ** 2:.1f}"
+
+    header = f"{'chiplet':>8}" + "".join(f"{label:>13}" for _, label in columns)
+    lines = [
+        f"torch_rbln memory summary (device={_normalize_device(device)}, MiB)",
+        header,
+        "-" * len(header),
+    ]
+    for chiplet in chiplets:
+        cells = "".join(
+            f"{mib(per_chiplet.get(f'chiplet.{chiplet}.{key}', 0)):>13}" for key, _ in columns
+        )
+        lines.append(f"{chiplet:>8}" + cells)
+    totals = "".join(
+        f"{mib(sum(per_chiplet.get(f'chiplet.{c}.{key}', 0) for c in chiplets)):>13}"
+        for key, _ in columns
+    )
+    lines.append("-" * len(header))
+    lines.append(f"{'total':>8}" + totals)
+
+    retries = sum(per_chiplet.get(f"chiplet.{c}.num_alloc_retries", 0) for c in chiplets)
+    ooms = sum(per_chiplet.get(f"chiplet.{c}.num_ooms", 0) for c in chiplets)
+    lines.append(f"alloc retries: {retries}   ooms: {ooms}")
+    return "\n".join(lines) + "\n"
 
 
 def memory_allocated(device: Optional[Union[int, str, torch.device]] = None) -> int:
