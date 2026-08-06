@@ -1747,6 +1747,12 @@ ProcessGroupRBLN::ProcessGroupRBLN(
   static std::mutex map_mutex;
   static bool default_group_initialized = false;
   device_id_ = -1;
+  // RCCL is handed device_id_ directly, bypassing to_device_id(), so the logical devices
+  // must be registered with the runtime here -- otherwise RCCL is asked to initialize a
+  // device this process never claimed and fails with "RCCL Init failed with error code: 1".
+  // Device registration is deferred until first use so that availability queries do not
+  // claim NPUs; see DeviceMappingManager's plan/commit note.
+  c10::rbln::commit_device_mapping();
   // Initialize device_id_ based on default group or sub group
   {
     std::lock_guard<std::mutex> lock(map_mutex);

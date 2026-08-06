@@ -32,6 +32,42 @@ struct C10_RBLN_API RBLNHooksInterface : public at::PrivateUse1HooksInterface {
   bool hasRBLN() const;
 
   /**
+   * @brief Number of logical RBLN devices, for the generic accelerator APIs.
+   *
+   * Without this override the base implementation returns 0, so every C++ consumer of
+   * at::accelerator::deviceCount() is told there are no devices while
+   * torch.rbln.device_count() reports the real number. Nothrow: ATen/DeviceAccelerator.h
+   * states deviceCount() "is *REQUIRED* to not raise any exception".
+   */
+  c10::DeviceIndex deviceCount() const override;
+
+  /**
+   * @brief Currently selected logical device.
+   *
+   * The base implementation is TORCH_CHECK(false, "Backend doesn't support ..."), which
+   * makes torch._C._accelerator_hooks_get_current_device() raise on an RBLN host.
+   */
+  c10::DeviceIndex getCurrentDevice() const override;
+
+  /**
+   * @brief Select a logical device (bookkeeping only; no context is created).
+   */
+  void setCurrentDevice(c10::DeviceIndex device) const override;
+
+  /**
+   * @brief Select a logical device and return the previously selected one.
+   */
+  c10::DeviceIndex exchangeDevice(c10::DeviceIndex device) const override;
+
+  /**
+   * @brief exchangeDevice() that must not create a device context.
+   *
+   * Selecting a device on RBLN is pure bookkeeping -- the context is created on the
+   * first allocation -- so this is identical to exchangeDevice().
+   */
+  c10::DeviceIndex maybeExchangeDevice(c10::DeviceIndex device) const override;
+
+  /**
    * @brief Returns the device of the input device pointer.
    *
    * @param data A pointer to the device memory.

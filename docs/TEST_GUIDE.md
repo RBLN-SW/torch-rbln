@@ -58,6 +58,7 @@ test/
 │   ├── test_multi_device.py               # Multi-device tensor movement and cross-device operations
 │   ├── test_non_zero_storage_offset.py    # Correct handling of tensors with non-zero storage offsets
 │   ├── test_op_caching.py                 # Operator caching / graph-reuse behavior
+│   ├── test_privateuse1_contract.py       # PrivateUse1 backend contract conformance (one test per upstream clause)
 │   ├── test_rbln_apis.py                  # RBLN Python APIs
 │   ├── test_registered_ops.py             # All natively registered and fallback ops from RBLNRegisterOps.cpp / register_ops.py
 │   ├── test_sdpa_decode_overflow.py       # SDPA decode-phase overflow detection and fallback behavior
@@ -348,6 +349,35 @@ from test.filters import custom_instantiate_device_type_tests
 
 custom_instantiate_device_type_tests(TestCommon, globals(), only_for="privateuse1")
 ```
+
+### Contract Conformance Tests
+
+`test/rbln/test_privateuse1_contract.py` is organized differently from the rest of the
+suite, on purpose. PyTorch does not merely *offer* the `torch.rbln` module and the RBLN
+accelerator hooks — it **calls into them**, from paths that have nothing to do with
+wanting an NPU (`DataLoader(pin_memory=True)`, `torch.load(map_location=...)`, importing
+`torch.testing._internal.common_utils`). Upstream states the rules those call sites rely
+on, e.g. `ATen/detail/AcceleratorHooksInterface.h`:
+
+> `isAvailable()` — "This function should NEVER throw. This function should NOT initialize
+> the context on any device."
+
+Each test in that file pins **exactly one** such clause and cites its upstream source in
+the docstring, so a torch upgrade or a newly discovered call site fails on the clause
+rather than on a downstream symptom.
+
+Two conventions are specific to it:
+
+- **Every probe runs in a fresh subprocess** (`run_probe`), because the state involved is
+  process-global and one-shot: the RBLN runtime seals `RBLN_DEVICES` on its first
+  device-resolving call, and device contexts last for the process lifetime. It cannot use
+  `run_in_isolated_process()` from `test/utils.py`, which needs a picklable callable, runs
+  after `torch_rbln` is already imported, and captures no output — the probes must set
+  `RBLN_*` *before* the import and inspect stdout/stderr. This mirrors
+  `test_import_rbln_devices_seal.py`.
+- **A clause not satisfied yet is a `strict=True` xfail** naming the work that closes it,
+  rather than being omitted. `xfail_strict = true` is already the project default, so an
+  unexpected pass fails the suite and signals that the marker should be removed.
 
 ---
 

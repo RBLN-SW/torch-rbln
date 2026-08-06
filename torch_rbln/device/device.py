@@ -42,19 +42,30 @@ def current_device() -> int:
 
     Raises:
         RuntimeError: if no RBLN device is available (mirrors
-            ``torch.cuda.current_device()`` on a host with no accelerator).
+            ``torch.cuda.current_device()`` on a host with no accelerator), or with the
+            detailed ``RBLN_*`` configuration error when the mapping is malformed.
 
     Returns:
         int: The index of the currently selected RBLN device.
     """
-    if device_count() == 0:
-        raise RuntimeError("No RBLN devices are available")
+    # Point of use: raise in full detail here, since :func:`device_count` is a quiet
+    # probe (``c10::cuda::device_count_ensure_non_zero()`` plays the same role).
+    torch_rbln._C.device_count_ensure_non_zero()
     return torch_rbln._C.current_device()
 
 
 def device_count() -> int:
-    """
-    Get the number of available RBLN devices.
+    """Number of RBLN logical devices. Never raises (``torch.cuda`` parity).
+
+    Returns ``0`` when the runtime is absent, no NPU is visible, or the ``RBLN_*``
+    configuration is malformed; the malformed case also warns once. torch treats
+    enumeration as infallible -- ``ATen/DeviceAccelerator.h`` says ``deviceCount()``
+    "is *REQUIRED* to not raise any exception", and ``c10/cuda/CUDAFunctions.h`` keeps
+    ``device_count() noexcept`` with a separate throwing
+    ``device_count_ensure_non_zero()``.
+
+    The detailed configuration error is not lost: it is raised by
+    :func:`current_device`, :func:`set_device` and by any actual device allocation.
 
     Returns:
         int: The number of available RBLN devices.
@@ -71,6 +82,12 @@ def physical_device_count() -> int:
     this function always returns the physical device count, even when RSD mode
     is active (which makes device_count() return 1).
 
+    Note: this queries the runtime directly, which resolves and therefore *seals*
+    ``RBLN_DEVICES`` -- a later change to that variable is rejected, in this process and
+    in any it forks. Prefer :func:`device_count` / :func:`is_available` in code that runs
+    before a launcher has assigned devices; see ``TORCH_RBLN_AVAILABILITY_PROBE`` in
+    docs/CONFIGURATION.md.
+
     Returns:
         int: The number of physical RBLN devices.
     """
@@ -80,11 +97,21 @@ def physical_device_count() -> int:
 def is_available() -> bool:
     """Whether RBLN is usable as an accelerator (``torch.cuda.is_available()`` parity).
 
-    ``False`` when the runtime is absent/torn down or no device is present. Raises on a
-    malformed ``RBLN_*`` config when the runtime is present (like :func:`device_count`),
-    which torch's ``is_privateuse1_backend_available()`` relies on.
+    **Never raises.** ``False`` when the runtime is absent or torn down, no device is
+    present, or the ``RBLN_*`` configuration is malformed. ``torch.xpu.is_available()``
+    documents "This function never throws" and ``torch.cuda.is_available()`` "never
+    throws and returns 0 if the driver is missing or can't be initialized".
+
+    This matters beyond RBLN code: torch evaluates it while importing
+    ``torch.testing._internal.common_utils`` (``TEST_PRIVATEUSE1``), inside
+    ``torch._utils._get_available_device_type()``, and in ``DataLoader(pin_memory=True)``
+    via ``torch.accelerator.is_available()``. A raise there breaks callers that never
+    asked for an NPU.
+
+    Bound to the same C++ predicate as ``RBLNHooksInterface::hasRBLN()``, so the Python
+    and C++ answers cannot diverge.
     """
-    return torch_rbln._C.device_count() > 0 and torch_rbln._C.runtime_available()
+    return torch_rbln._C.is_available()
 
 
 def is_dummy_device() -> bool:
@@ -103,8 +130,10 @@ def is_initialized() -> bool:
     ``init_device_mesh`` skip its ``get_rank() % device_count()`` auto-select,
     which would otherwise fail on a host with no NPU.
 
-    Note: this calls :func:`device_count`, so the first invocation initializes and
-    freezes the RBLN device mapping from the current ``RBLN_*`` environment.
+    Note: this calls :func:`device_count`, which *plans* the RBLN device mapping from the
+    current ``RBLN_*`` environment. It does not claim an NPU or freeze the mapping -- both
+    happen on first device use -- so a launcher may still assign ``RBLN_DEVICES``
+    afterwards.
     """
     return _initialized or device_count() == 0
 
@@ -158,8 +187,9 @@ def set_device(device: Union[int, torch.device, str]) -> None:
     global _initialized
     device_idx = _get_device_index(device, optional=True)
     if device_idx >= 0:
-        if device_count() == 0:  # torch.cuda parity: selecting a device needs hardware
-            raise RuntimeError("No RBLN devices are available")
+        # torch.cuda parity: selecting a device needs hardware. Point of use, so the
+        # detailed RBLN_* configuration error surfaces here rather than a bare "0".
+        torch_rbln._C.device_count_ensure_non_zero()
         torch_rbln._C.set_device(device_idx)
         _initialized = True
 
@@ -210,8 +240,8 @@ def _exchange_device(device: Union[int, torch.device]) -> int:
     device_idx = _get_device_index(device)
     if device_idx < 0:
         return -1
-    if device_count() == 0:  # torch.cuda parity: selecting a device needs hardware
-        raise RuntimeError("No RBLN devices are available")
+    # torch.cuda parity: selecting a device needs hardware (see :func:`set_device`).
+    torch_rbln._C.device_count_ensure_non_zero()
     prev_device_idx = torch_rbln._C._exchange_device(device_idx)
     return prev_device_idx
 

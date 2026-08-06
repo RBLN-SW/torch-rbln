@@ -248,10 +248,17 @@ def test_is_dummy_device_false_without_env():
     assert "OK" in proc.stdout
 
 
+# A malformed map is surfaced by the point-of-use entry point, not by device_count():
+# enumeration is a quiet probe that reports 0 (see test_privateuse1_contract.py), while
+# device_count_ensure_non_zero() -- the torch.rbln.current_device() / set_device() /
+# allocation path -- raises with the detail. Both cases below are rejectable without
+# hardware, which is why they can assert under dummy.
+
+
 def test_device_map_rejects_duplicate_physical_id():
     # Duplicate ids are rejectable without hardware; dummy must reject like real.
     proc = _run_with_dummy(
-        "import torch, torch_rbln; torch.rbln.device_count()",
+        "import torch, torch_rbln; torch_rbln._C.device_count_ensure_non_zero()",
         env_extra={"RBLN_DEVICE_MAP": "[0],[0]"},
     )
     assert proc.returncode != 0
@@ -262,11 +269,22 @@ def test_device_map_rejects_invalid_group_size():
     # TP=3 is not an allowed group size; dummy must reject it like real hardware
     # so a config that compiles under dummy also runs on an NPU.
     proc = _run_with_dummy(
-        "import torch, torch_rbln; torch.rbln.device_count()",
+        "import torch, torch_rbln; torch_rbln._C.device_count_ensure_non_zero()",
         env_extra={"RBLN_DEVICE_MAP": "[0,1,2]"},
     )
     assert proc.returncode != 0
     assert "valid sizes" in (proc.stdout + proc.stderr).lower()
+
+
+def test_device_count_stays_quiet_on_a_malformed_map():
+    # The counterpart: the same malformed map must NOT make enumeration raise, or every
+    # co-tenant that merely asks whether an NPU exists inherits the failure.
+    proc = _run_with_dummy(
+        "import torch, torch_rbln; print('COUNT', torch.rbln.device_count(), torch.rbln.is_available())",
+        env_extra={"RBLN_DEVICE_MAP": "[0,1,2]"},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "COUNT 0 False" in proc.stdout
 
 
 def test_torch_compile_tracing_smoke():

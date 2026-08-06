@@ -175,6 +175,13 @@ int to_device_id(c10::DeviceIndex device_index) {
   // Shared precursor to every device-touching runtime call (alloc, synchronize,
   // memory stats, ...). With no NPU, fail here with one clear message before
   // reaching the runtime, which may not handle an unregistered device.
+  //
+  // Also the commit point: reaching here means the process has decided to use a device,
+  // so this is where the planned logical devices are claimed with the runtime
+  // (rbln_register_device_id) and RBLN_DEVICES is frozen. Idempotent, and deliberately
+  // not done by is_available()/device_count() -- see DeviceMappingManager's plan/commit
+  // note. check_device_index() stays plan-only: selecting a device is bookkeeping.
+  DeviceMappingManager::getInstance().commit();
   RBLN_CHECK(
       DeviceMappingManager::getInstance().getLogicalDeviceCount() > 0,
       "Cannot use rbln:{}: no logical device available (this process sees 0 RBLN device(s)). "
@@ -385,14 +392,23 @@ void require_runtime(const char* op) {
       op);
 }
 
+// c10::Error::what() appends "Exception raised from ..." plus a full C++ backtrace.
+// Keep only the human-readable first line for warnings on nothrow paths.
+std::string first_line(std::string_view text) {
+  return std::string(text.substr(0, text.find('\n')));
+}
+
 } // namespace
 
 c10::DeviceIndex get_device_count_nothrow() noexcept {
   // Nothrow view of get_device_count() for the liveness gate; failures map to 0.
+  // Warn once, first line only: e.what() carries the C++ stack trace, and this runs on
+  // the availability path that every co-tenant process walks. The full text is still
+  // raised verbatim by device_count_ensure_non_zero() and by the allocation path.
   try {
     return get_device_count();
   } catch (const std::exception& e) {
-    RBLN_WARN_NOTHROW("get_device_count failed, treating as 0 device(s): {}", e.what());
+    RBLN_WARN_NOTHROW("get_device_count failed, treating as 0 device(s): {}", first_line(e.what()));
     return 0;
   } catch (...) {
     RBLN_WARN_NOTHROW("get_device_count failed, treating as 0 device(s): unknown exception");
@@ -400,15 +416,37 @@ c10::DeviceIndex get_device_count_nothrow() noexcept {
   }
 }
 
+c10::DeviceIndex device_count_ensure_non_zero() {
+  // Throwing counterpart of the noexcept query, named after c10::cuda's
+  // device_count_ensure_non_zero(). This is where a malformed RBLN_* config becomes a
+  // loud, detailed error: the availability path stays quiet, the point of use does not.
+  const auto device_count = get_device_count();
+  RBLN_CHECK(
+      device_count > 0,
+      "No RBLN devices are available (0 logical device(s)). Check that an NPU is present, the rbln kernel driver "
+      "is loaded, and RBLN_DEVICES / RBLN_DEVICE_MAP / RBLN_NPUS_PER_DEVICE select at least one device.");
+  return device_count;
+}
+
+void commit_device_mapping() {
+  DeviceMappingManager::getInstance().commit();
+}
+
 void set_runtime_shutting_down(bool value) noexcept {
   runtime_shutting_down_.store(value, std::memory_order_relaxed);
 }
 
 bool runtime_available() noexcept {
-  // Driver loaded, not shutting down, a device present (dummy needs the driver too,
-  // but no NPU). Single source of truth; never throws. CUDA parity.
+  // Driver loaded, not shutting down, at least one usable logical device. Single source
+  // of truth for "is RBLN available": bound to Python is_available() and to
+  // RBLNHooksInterface::hasRBLN(), so the two can never disagree. Never throws.
+  //
+  // Dummy mode is NOT short-circuited. It used to be, to avoid the enumeration side
+  // effect, but that made is_available() report True for a dummy device whose mapping
+  // had failed to build -- available yet unusable. Dummy has no NPU to claim, and the
+  // mapping still has to be valid for anything to work.
   return !runtime_shutting_down_.load(std::memory_order_relaxed) && rbln_runtime_available() &&
-      (is_dummy_device() || get_device_count_nothrow() > 0);
+      get_device_count_nothrow() > 0;
 }
 
 // --- Per-process device-context tracking ------------------------------------

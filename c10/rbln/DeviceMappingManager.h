@@ -2,8 +2,8 @@
 
 #include <c10/core/Device.h>
 #include <c10/rbln/RBLNMacros.h>
-#include <c10/util/CallOnce.h>
 #include <array>
+#include <mutex>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -126,18 +126,48 @@ class C10_RBLN_API DeviceMappingManager {
    */
   static DeviceMappingManager& getInstance();
 
-  // Initialization
+  // Initialization is two stages:
+  //
+  //   plan   Parse RBLN_DEVICES / RBLN_DEVICE_MAP / RBLN_NPUS_PER_DEVICE, validate the
+  //          layout, compute the logical->physical table. Claims no NPU. Run by
+  //          availability and enumeration queries.
+  //   commit rbln_register_device_id() per planned logical device -- documented as
+  //          "Initializes devices to be used for NPU executions", i.e. it opens a
+  //          context on every mapped NPU. Deferred to the first actual device use.
+  //
+  // torch calls is_available()/device_count() from paths that never asked for an NPU
+  // (DataLoader(pin_memory=True), torch.load(map_location=...), importing
+  // torch.testing._internal.common_utils), so claiming hardware there would take NPUs
+  // from co-tenant processes. ATen/detail/AcceleratorHooksInterface.h states the rule:
+  // isAvailable() "should NOT initialize the context on any device".
+  //
+  // Planning still seals RBLN_DEVICES, because the visible NPU count can only come from
+  // rbln_get_device_count(). Tracked in rebellions-sw/fsw-inference#475.
 
   /**
-   * @brief Initialize device mapping from environment variables.
+   * @brief Plan the device mapping from the environment (no NPU is claimed).
    *
-   * This function is automatically called during singleton construction,
-   * so explicit calls are typically not necessary. It is thread-safe and
-   * will only initialize once, even if called multiple times. It reads
-   * RBLN_DEVICE_MAP or RBLN_NPUS_PER_DEVICE environment variables to set
-   * up the device mapping.
+   * Thread-safe and idempotent. Kept for callers that want to force planning; every
+   * query method plans on demand, so explicit calls are typically unnecessary.
    */
   void initialize();
+
+  /**
+   * @brief Claim the planned logical devices with the runtime, and freeze the plan.
+   *
+   * Idempotent. Called from to_device_id(), the shared precursor to every
+   * device-touching runtime call, so the claim happens exactly when the process first
+   * commits to using a device. Raises if the plan is invalid or a registration fails.
+   */
+  void commit();
+
+  /**
+   * @brief Whether the planned devices have been claimed with the runtime.
+   *
+   * Once committed the plan is frozen: later RBLN_* environment edits are ignored
+   * rather than silently changing the mapping under live allocations.
+   */
+  bool isCommitted() const;
 
   // Public Query Methods
 
@@ -146,6 +176,7 @@ class C10_RBLN_API DeviceMappingManager {
    * @return The number of logical devices (rbln:0 .. rbln:N-1).
    */
   c10::DeviceIndex getLogicalDeviceCount() const {
+    ensurePlanned();
     return device_count_;
   }
 
@@ -155,6 +186,7 @@ class C10_RBLN_API DeviceMappingManager {
    * @return True if the device is assigned, false otherwise.
    */
   bool isDeviceAssigned(c10::DeviceIndex device_index) const {
+    ensurePlanned();
     return assigned_devices_.find(device_index) != assigned_devices_.end();
   }
 
@@ -170,6 +202,7 @@ class C10_RBLN_API DeviceMappingManager {
    * @return Vector of unused physical NPU indices.
    */
   std::vector<int> getUnusedPhysicalDeviceIds() const {
+    ensurePlanned();
     return unused_physical_devices_;
   }
 
@@ -178,6 +211,7 @@ class C10_RBLN_API DeviceMappingManager {
    * @return Reference to the device mapping table.
    */
   const std::vector<DeviceMapping>& getDeviceMappingTable() const {
+    ensurePlanned();
     return device_mapping_table_;
   }
 
@@ -186,6 +220,7 @@ class C10_RBLN_API DeviceMappingManager {
    * @return Reference to the cached device topology.
    */
   const DeviceTopology& getDeviceTopology() const {
+    ensurePlanned();
     return device_topology_;
   }
 
@@ -207,27 +242,57 @@ class C10_RBLN_API DeviceMappingManager {
    * @param device_map_str Format: "[0,1],[2,3,4,5]" (each bracket is one logical device mapping)
    * @return Vector of vectors: each inner vector is the physical NPU indices for one logical device
    */
-  std::vector<std::vector<int>> parseDeviceMap(const std::string& device_map_str);
+  static std::vector<std::vector<int>> parseDeviceMap(const std::string& device_map_str);
 
   /**
-   * @brief Register one logical device with its physical NPU indices.
+   * @brief Record one logical device -> physical NPU mapping. Bookkeeping only.
+   *
+   * Deliberately does NOT call rbln_register_device_id(); commit() does that later.
    */
-  void registerLogicalDevice(int logical_device_index, const std::vector<int>& physical_ids);
+  void planLogicalDevice(int logical_device_index, const std::vector<int>& physical_ids) const;
+
+  /**
+   * @brief Build the plan if it is missing or stale. Thread-safe, idempotent.
+   *
+   * A failed plan is remembered (not retried): rethrowing a stored error keeps a
+   * malformed RBLN_* config from re-running validation on every query. Until commit()
+   * the plan is rebuilt whenever the RBLN_* environment changes, matching
+   * torch/cuda/__init__.py: "Do not cache the device count prior to CUDA
+   * initialization, because the number of devices can change due to changes to
+   * CUDA_VISIBLE_DEVICES setting prior to CUDA initialization." A vLLM worker assigns
+   * RBLN_DEVICES after import, and this is what lets that assignment take effect.
+   */
+  void ensurePlanned() const;
+
+  /**
+   * @brief ensurePlanned() for callers that already hold plan_mutex_.
+   */
+  void ensurePlannedLocked() const;
+
+  /**
+   * @brief Build the plan from the current environment. Caller holds plan_mutex_.
+   */
+  void buildPlan() const;
+
+  /**
+   * @brief The RBLN_* environment the plan depends on, as a comparable string.
+   */
+  static std::string envSignature();
 
   /**
    * @brief Collect unused physical NPU indices based on usage tracking.
    */
-  void collectUnusedDevices(const std::vector<bool>& physical_device_used, int physical_device_count);
+  void collectUnusedDevices(const std::vector<bool>& physical_device_used, int physical_device_count) const;
 
   /**
    * @brief Initialize RBLN NPU mapping from RBLN_DEVICE_MAP environment variable.
    */
-  void initializeFromDeviceMap(const std::string& device_map_str, int physical_device_count);
+  void initializeFromDeviceMap(const std::string& device_map_str, int physical_device_count) const;
 
   /**
    * @brief Initialize RBLN NPU mapping from RBLN_NPUS_PER_DEVICE environment variable.
    */
-  void initializeFromNpusPerDevice(int npus_per_device, int physical_device_count);
+  void initializeFromNpusPerDevice(int npus_per_device, int physical_device_count) const;
 
   /**
    * @brief Register host-backed logical devices (RBLN_DUMMY_DEVICE) with no NPU.
@@ -235,7 +300,7 @@ class C10_RBLN_API DeviceMappingManager {
    * Layout comes from RBLN_DEVICE_MAP / RBLN_NPUS_PER_DEVICE (or a single
    * device); physical ids are shape markers only and are not range-checked.
    */
-  void initializeDummyDevices();
+  void initializeDummyDevices() const;
 
   /**
    * @brief Check if the number of physical NPUs per logical device is valid (must be in BASE_SIZES).
@@ -259,16 +324,23 @@ class C10_RBLN_API DeviceMappingManager {
   /**
    * @brief Build and cache the device topology.
    */
-  void buildDeviceTopology();
+  void buildDeviceTopology() const;
 
   // Member Variables
 
-  c10::DeviceIndex device_count_ = 0;
-  std::unordered_set<c10::DeviceIndex> assigned_devices_;
-  std::vector<DeviceMapping> device_mapping_table_;
-  std::vector<int> unused_physical_devices_;
-  DeviceTopology device_topology_;
-  c10::once_flag init_flag_;
+  // Guards every member below. The plan is a lazy cache rebuilt on demand, hence
+  // `mutable` on state a const query may refresh.
+  mutable std::mutex plan_mutex_;
+  mutable bool planned_ = false;
+  mutable bool committed_ = false;
+  mutable std::string plan_signature_; // envSignature() the current plan was built from
+  mutable std::string plan_error_; // non-empty: the plan is invalid, rethrown on query
+
+  mutable c10::DeviceIndex device_count_ = 0;
+  mutable std::unordered_set<c10::DeviceIndex> assigned_devices_;
+  mutable std::vector<DeviceMapping> device_mapping_table_;
+  mutable std::vector<int> unused_physical_devices_;
+  mutable DeviceTopology device_topology_;
 };
 
 /** Invoked once after device mapping topology is built (e.g. torch_rbln._C registers a Python logger). */

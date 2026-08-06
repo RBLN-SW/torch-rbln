@@ -32,10 +32,40 @@ bool RBLNHooksInterface::isAvailable() const {
 }
 
 bool RBLNHooksInterface::hasRBLN() const {
-  // Nothrow (accelerator-hooks contract must not throw); true in dummy mode too.
+  // Nothrow (accelerator-hooks contract must not throw). Same predicate the Python
+  // torch.rbln.is_available() is bound to, so the two answers cannot diverge. True in
+  // dummy mode as well, provided the dummy mapping actually built.
   const bool has_rbln = c10::rbln::runtime_available();
   RBLN_LOG_DEBUG("has_rbln={}", has_rbln);
   return has_rbln;
+}
+
+c10::DeviceIndex RBLNHooksInterface::deviceCount() const {
+  // Nothrow (see header): the generic accelerator APIs treat enumeration as infallible.
+  const auto device_count = c10::rbln::get_device_count_nothrow();
+  RBLN_LOG_DEBUG("device_count={}", static_cast<int>(device_count));
+  return device_count;
+}
+
+c10::DeviceIndex RBLNHooksInterface::getCurrentDevice() const {
+  const auto device_index = c10::rbln::get_device_index();
+  RBLN_LOG_DEBUG("device_index={}", static_cast<int>(device_index));
+  return device_index;
+}
+
+void RBLNHooksInterface::setCurrentDevice(c10::DeviceIndex device) const {
+  RBLN_LOG_DEBUG("device_index={}", static_cast<int>(device));
+  c10::rbln::set_device_index(device);
+}
+
+c10::DeviceIndex RBLNHooksInterface::exchangeDevice(c10::DeviceIndex device) const {
+  RBLN_LOG_DEBUG("device_index={}", static_cast<int>(device));
+  return c10::rbln::exchange_device_index(device);
+}
+
+c10::DeviceIndex RBLNHooksInterface::maybeExchangeDevice(c10::DeviceIndex device) const {
+  // Identical to exchangeDevice(): device selection never creates a context here.
+  return exchangeDevice(device);
 }
 
 c10::Device RBLNHooksInterface::getDeviceFromPtr(void* data) const {

@@ -126,6 +126,25 @@ The value is a **comma-separated list** of fallback case names to disable:
 
 By default, each physical NPU is mapped 1:1 to a logical device (**Direct Mapping**). To group multiple physical NPUs into a single logical device for RSD (Rebellions Scalable Design), use one of the following environment variables.
 
+### When the mapping takes effect
+
+The mapping is resolved in two stages:
+
+| Stage | What happens | Triggered by |
+|-------|--------------|--------------|
+| **Plan** | The variables below are parsed and validated and the logical→physical table is computed. No NPU is claimed. | `torch.rbln.is_available()`, `torch.rbln.device_count()`, other queries |
+| **Commit** | Each planned logical device is registered with the runtime, opening a context on every mapped NPU. The mapping is then frozen. | First actual device use — an allocation, `set_device()`, `synchronize()` |
+
+Until commit, editing the variables still changes the mapping; after commit it is fixed
+for the process lifetime. This matches `torch.cuda`, which likewise refuses to cache its
+device count "prior to CUDA initialization, because the number of devices can change due
+to changes to `CUDA_VISIBLE_DEVICES`".
+
+> **Note.** Planning queries the runtime for the visible NPU count, which *seals*
+> `RBLN_DEVICES`: a later change is rejected, in this process and in any it forks. Set
+> `RBLN_DEVICES` before the process starts. Tracked in
+> [rebellions-sw/fsw-inference#475](https://github.com/rebellions-sw/fsw-inference/issues/475).
+
 ### RBLN_NPUS_PER_DEVICE
 
 Groups physical NPUs uniformly. Must be one of: `1`, `2`, `4`, `8`, `16`, `32`.

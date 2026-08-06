@@ -191,6 +191,40 @@ C10_RBLN_API int get_scope_depth();
   } while (0)
 
 /**
+ * @brief RBLN_CHECK that throws without logging. Same message, no console output.
+ *
+ * For failures on paths a *probe* may legitimately walk into -- device-mapping
+ * validation reached from is_available()/device_count(). RBLN_CHECK logs
+ * c10::Error::what(), which embeds the C++ stack trace, to stdout before throwing,
+ * and that log is not gated by RBLN_LOG_LEVEL. A co-tenant that catches the
+ * exception (torch's contract requires availability queries not to throw, so it
+ * must) still gets ~16 lines of trace in its console.
+ *
+ * Throwing IS the report: the message travels in the exception, so whoever lets it
+ * escape prints it, and whoever catches it decided it was expected.
+ *
+ * Consequence worth knowing: a malformed-config failure is quiet even when it surfaces
+ * at the point of use, because that is the *same* stored plan error being rethrown --
+ * device_count_ensure_non_zero() never reaches its own RBLN_CHECK. The detail is not
+ * lost (it is in the exception, and get_device_count_nothrow() warns once for callers
+ * that swallow it), but do not expect a logged trace there. Failures that are genuinely
+ * use errors rather than configuration errors -- an unassigned device index in
+ * check_device_index(), a bad allocation -- keep using RBLN_CHECK and still log.
+ *
+ * @code
+ * RBLN_CHECK_QUIET(condition, "Error message with value: {}", value);
+ * @endcode
+ */
+#define RBLN_CHECK_QUIET(condition, ...)                                                                   \
+  do {                                                                                                     \
+    if (C10_UNLIKELY_OR_CONST(!(condition))) {                                                             \
+      const auto format_ = c10::rbln::detail::format_log_message(__VA_ARGS__);                             \
+      throw c10::Error(                                                                                    \
+          {__func__, __FILE__, static_cast<uint32_t>(__LINE__)}, TORCH_CHECK_MSG(condition, "", format_)); \
+    }                                                                                                      \
+  } while (0)
+
+/**
  * @brief Macro for debug-level checking specific to RBLN.
  *
  * This macro is enabled only in debug builds. It is useful for checks that are too expensive to perform in release
