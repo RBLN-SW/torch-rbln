@@ -494,6 +494,16 @@ C10_RBLN_API void reset_peak_memory_stats(const c10::Device& device);
 C10_RBLN_API void set_file_offloading_enabled(bool enabled);
 
 /**
+ * @brief Removes this process's file-offloading temp files and directories.
+ *
+ * Runtime teardown does this too, so call it only when shutdown may be killed first. Offloaded
+ * RBLN tensors must not be used afterwards.
+ *
+ * @return The number of temp files removed; 0 when the runtime is unavailable.
+ */
+C10_RBLN_API uint64_t release_offload_temp_storage();
+
+/**
  * @brief Diagnostic: time spent inside librbln boundary calls (borrow / v2v /
  * h2v / ...), so a profiler can split host overhead into "rebel runtime" vs
  * "torch-side dispatch". Gated: when disabled each boundary call pays only one

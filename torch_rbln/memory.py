@@ -22,6 +22,7 @@ __all__ = [
     "memory_reserved",
     "memory_stats",
     "offload",
+    "release_offload_temp_storage",
     "reset_accumulated_memory_stats",
     "reset_peak_memory_stats",
 ]
@@ -283,3 +284,17 @@ def offload() -> Iterator[None]:
             _offload_depth -= 1
             if _offload_depth == 0:
                 torch_rbln._C._set_file_offloading_enabled(False)
+
+
+def release_offload_temp_storage() -> int:
+    """
+    Remove this process's file offloading temp files and directories.
+
+    :func:`offload` writes into a per-process directory under ``RBLN_OFFLOAD_DIR`` (default
+    ``$HOME/.cache/rbln_cache/offload``) that the runtime removes on teardown. Call this on a
+    shutdown path that may be killed first. Offloaded tensors must not be used afterwards.
+
+    Returns:
+        int: The number of temp files removed.
+    """
+    return torch_rbln._C._release_offload_temp_storage()

@@ -22,6 +22,8 @@ The flag and the depth counter are both process-local, so each pytest-xdist
 worker is isolated; the class does not need ``single_worker``.
 """
 
+from unittest.mock import patch
+
 import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
@@ -91,6 +93,41 @@ class TestFileOffloading(TestCase):
             with torch.rbln.offload():
                 self.assertEqual(torch_rbln_memory._offload_depth, 1)
                 raise RuntimeError("boom")
+
+        self.assertEqual(torch_rbln_memory._offload_depth, 0)
+
+    # ------------------------------------------------------------------
+    # Temp storage release
+    # ------------------------------------------------------------------
+    def test_release_offload_temp_storage_surface(self):
+        """``release_offload_temp_storage`` is exposed and reports a file count."""
+        from torch_rbln.memory import release_offload_temp_storage  # noqa: F401
+
+        self.assertIn("release_offload_temp_storage", torch_rbln_memory.__all__)
+        self.assertTrue(hasattr(torch.rbln, "release_offload_temp_storage"))
+
+        num_removed = torch.rbln.release_offload_temp_storage()
+        self.assertIsInstance(num_removed, int)
+        self.assertGreaterEqual(num_removed, 0)
+
+    def test_release_offload_temp_storage_returns_binding_count(self):
+        """The wrapper is a pass-through: the binding's count is returned unchanged."""
+        with patch.object(torch_rbln_C, "_release_offload_temp_storage", return_value=7) as mock_release:
+            self.assertEqual(torch.rbln.release_offload_temp_storage(), 7)
+
+        mock_release.assert_called_once_with()
+
+    def test_release_offload_temp_storage_is_idempotent(self):
+        """Releasing twice is safe; the second call has nothing left to remove."""
+        torch.rbln.release_offload_temp_storage()
+        self.assertEqual(torch.rbln.release_offload_temp_storage(), 0)
+
+    def test_offload_usable_after_release(self):
+        """A release does not wedge the flag: offload() still works afterwards."""
+        torch.rbln.release_offload_temp_storage()
+
+        with torch.rbln.offload():
+            self.assertEqual(torch_rbln_memory._offload_depth, 1)
 
         self.assertEqual(torch_rbln_memory._offload_depth, 0)
 

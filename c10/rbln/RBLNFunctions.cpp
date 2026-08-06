@@ -1018,4 +1018,16 @@ void set_file_offloading_enabled(bool enabled) {
       enabled);
 }
 
+uint64_t release_offload_temp_storage() {
+  RBLN_LOG_DEBUG("Calling rbln_release_offload_temp_storage");
+  // Shutdown-path call, so gated the same way as the offload toggle above.
+  if (!runtime_available()) {
+    return 0;
+  }
+  uint64_t num_files_removed = 0;
+  RBLN_CHECK(
+      !::rbln::rbln_release_offload_temp_storage(&num_files_removed), "rbln_release_offload_temp_storage failed");
+  return num_files_removed;
+}
+
 } // namespace c10::rbln

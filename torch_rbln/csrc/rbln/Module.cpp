@@ -455,6 +455,11 @@ void register_internal_api(py::module_& module) {
       &c10::rbln::set_file_offloading_enabled,
       "Internal: enable or disable process-wide RBLN vmemory file offloading.");
 
+  module.def(
+      "_release_offload_temp_storage",
+      &c10::rbln::release_offload_temp_storage,
+      "Internal: remove this process's file offloading temp files and directories.");
+
   // torch.profiler (kineto) integration
   module.def(
       "_register_kineto_profiler",
