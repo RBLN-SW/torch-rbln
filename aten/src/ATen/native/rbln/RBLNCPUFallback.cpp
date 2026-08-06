@@ -370,6 +370,44 @@ void cpu_fallback_rbln(
   std::vector<uint64_t> borrow_ids(tensor_args.size(), 0);
   std::vector<at::Tensor> cpu_tensors(tensor_args.size());
 
+  // If anything below throws (e.g. dtype-mismatched or wrong-device out=),
+  // the borrows above must still be released — else the next free on
+  // a still-borrowed vaddr fails, and since c10::rbln::free throws from
+  // a ~TensorImpl (noexcept) deleter that escalates to std::terminate.
+  // The RAII guard releases any still-live borrow (updated=false) on
+  // destruction; Step 4 zeroes borrow_ids on the happy path, so the guard
+  // is then a no-op.
+  struct BorrowReleaseGuard {
+    std::vector<uint64_t>& borrow_ids;
+    std::vector<std::vector<uint64_t>>& tensorlist_borrow_ids;
+    ~BorrowReleaseGuard() {
+      for (auto& bid : borrow_ids) {
+        if (bid != 0) {
+          try {
+            c10::rbln::return_borrowed(bid, /*updated=*/false);
+          } catch (...) {
+            // Best-effort: dtor is noexcept by default. Swallow runtime
+            // rejections so we don't escalate one borrow-release failure into
+            // std::terminate; the original exception that triggered cleanup
+            // is more useful for diagnosis.
+          }
+          bid = 0;
+        }
+      }
+      for (auto& bids : tensorlist_borrow_ids) {
+        for (auto& bid : bids) {
+          if (bid != 0) {
+            try {
+              c10::rbln::return_borrowed(bid, /*updated=*/false);
+            } catch (...) {
+            }
+            bid = 0;
+          }
+        }
+      }
+    }
+  } _borrow_guard{borrow_ids, tensorlist_borrow_ids};
+
   for (size_t i = 0; i < tensor_args.size(); ++i) {
     // Skip the borrow fast path for write-alias outputs (`out=`): from_blob's
     // fixed-size storage can't be resized, so the CPU op's resize path (wrong-shape
@@ -483,43 +521,6 @@ void cpu_fallback_rbln(
   // the borrowed out buffer, and replaces the stack; on no-match it returns
   // false and we fall through to the boxed dispatcher.
   //
-  // If Step 2/3 throws (e.g. dtype-mismatched or wrong-device out=), the borrows
-  // above must still be released — else the next free on a still-borrowed vaddr
-  // fails, and since c10::rbln::free throws from a ~TensorImpl (noexcept) deleter
-  // that escalates to std::terminate. The RAII guard releases any still-live
-  // borrow (updated=false) on destruction; Step 4 zeroes borrow_ids on the happy
-  // path, so the guard is then a no-op.
-  struct BorrowReleaseGuard {
-    std::vector<uint64_t>& borrow_ids;
-    std::vector<std::vector<uint64_t>>& tensorlist_borrow_ids;
-    ~BorrowReleaseGuard() {
-      for (auto& bid : borrow_ids) {
-        if (bid != 0) {
-          try {
-            c10::rbln::return_borrowed(bid, /*updated=*/false);
-          } catch (...) {
-            // Best-effort: dtor is noexcept by default. Swallow runtime
-            // rejections so we don't escalate one borrow-release failure into
-            // std::terminate; the original exception that triggered cleanup
-            // is more useful for diagnosis.
-          }
-          bid = 0;
-        }
-      }
-      for (auto& bids : tensorlist_borrow_ids) {
-        for (auto& bid : bids) {
-          if (bid != 0) {
-            try {
-              c10::rbln::return_borrowed(bid, /*updated=*/false);
-            } catch (...) {
-            }
-            bid = 0;
-          }
-        }
-      }
-    }
-  } _borrow_guard{borrow_ids, tensorlist_borrow_ids};
-
   // A pure-out borrow wraps the rbln out in a non-resizable from_blob view, so an
   // undersized out= the CPU kernel tries to GROW throws "not resizable" (shrink is
   // metadata-only and already handled in Step 3). Catch that one error, swap the
