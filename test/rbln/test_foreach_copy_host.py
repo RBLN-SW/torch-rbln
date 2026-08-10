@@ -165,21 +165,116 @@ class TestForeachCopyHost(TestCase):
 
     def test_mixed_with_ineligible_pairs(self):
         """dtype-cast and broadcast pairs still take per-pair copy_; the eligible
-        ones around them must be unaffected."""
+        ones around them must be unaffected.
+
+        The broadcast source is passed at its real shape ``(1,)`` so the sizes
+        genuinely differ — an already-``expand``ed source would match the
+        destination's sizes and quietly take the batched path instead, testing
+        nothing about the fallback.
+        """
         ok_src = _arange((4,), torch.float32)
         ok_dst = _to_dev(torch.zeros(4, dtype=torch.float32))
 
         cast_src = _arange((4,), torch.float64)  # needs a real conversion
         cast_dst = _to_dev(torch.zeros(4, dtype=torch.float32))
 
-        bcast_src = torch.tensor([5.0], dtype=torch.float32).expand(4)
+        bcast_src = torch.tensor([5.0], dtype=torch.float32)  # shape (1,) -> broadcast
         bcast_dst = _to_dev(torch.zeros(4, dtype=torch.float32))
 
         torch._foreach_copy_([ok_dst, cast_dst, bcast_dst], [ok_src, cast_src, bcast_src])
 
         _eq(ok_dst, ok_src)
         _eq(cast_dst, cast_src.to(torch.float32))
-        _eq(bcast_dst, bcast_src.contiguous())
+        _eq(bcast_dst, bcast_src.expand(4).contiguous())
+
+    def test_broadcast_source_at_matching_size_is_batched(self):
+        """A stride-0 SOURCE already expanded to the destination's shape is
+        batch-eligible, and must replicate rather than copy only its first slab.
+
+        Distinct from the fallback case above: sources are pure reads, so the
+        runtime permits repeated reads of the same host bytes.
+        """
+        src = torch.tensor([7.0, 8.0], dtype=torch.float32).expand(5, 2)
+        dst = _to_dev(torch.zeros(5, 2, dtype=torch.float32))
+        torch._foreach_copy_([dst], [src])
+        _eq(dst, src.contiguous())
+
+    # ---- destinations the batch must refuse ----
+
+    def test_internally_overlapping_dst_is_rejected(self):
+        """An ``expand``ed destination maps several elements onto one address.
+        Batch entries are unordered, so which write survives is arbitrary —
+        ``copy_`` refuses such a destination and the batch must refuse it too
+        rather than silently producing one of the possible results. Checked in
+        all three directions since the guard sits in the shared eligibility.
+        """
+        cases = {
+            "h2v": (_to_dev(torch.zeros(1)).expand(4), _arange((4,), torch.float32)),
+            "v2h": (torch.zeros(1).expand(4), _to_dev(_arange((4,), torch.float32))),
+            "v2v": (
+                _to_dev(torch.zeros(1)).expand(4),
+                _to_dev(_arange((4,), torch.float32)),
+            ),
+        }
+        for name, (dst, src) in cases.items():
+            with self.subTest(direction=name):
+                with pytest.raises(RuntimeError, match="refers to a single memory location"):
+                    torch._foreach_copy_([dst], [src])
+
+    def test_pairs_before_a_throwing_pair_still_land(self):
+        """A pair rejected mid-list must not swallow the ones already queued.
+
+        Eligible pairs are deferred to a submit, so without flushing before the
+        rejection the earlier destinations would stay untouched — a partial-side-
+        effect difference from the sequential path.
+        """
+        ok_src = _arange((4,), torch.float32)
+        ok_dst = _to_dev(torch.zeros(4, dtype=torch.float32))
+        bad_dst = _to_dev(torch.zeros(1)).expand(4)
+
+        with pytest.raises(RuntimeError, match="refers to a single memory location"):
+            torch._foreach_copy_([ok_dst, bad_dst], [ok_src, _arange((4,), torch.float32)])
+
+        _eq(ok_dst, ok_src)
+
+    # ---- the descriptor-size gate ----
+
+    def test_tiny_descriptor_pair_is_not_batched(self):
+        """A pair that fans out to element-sized descriptors must NOT be batched.
+
+        A transposed source has no jointly contiguous suffix, so batching it
+        would emit one descriptor per element — measured ~4000x slower than the
+        staged bulk copy, and hundreds of MiB of descriptors for a 4 MiB payload.
+        The gate sends it to ``copy_`` instead, so no ``h2v_multi`` appears.
+        """
+        n = 128
+        src = _arange((n, n), torch.float32).t()  # innermost stride n -> no suffix
+        dst = _to_dev(torch.zeros(n, n, dtype=torch.float32))
+
+        with torch.rbln.explain() as p:
+            torch._foreach_copy_([dst], [src])
+        calls = _prim_calls(p.dump())
+
+        self.assertEqual(calls.get("h2v_multi", 0), 0, f"tiny descriptors must not batch: {calls}")
+        _eq(dst, src.contiguous())
+
+    def test_contiguous_pairs_batch_regardless_of_size(self):
+        """Small CONTIGUOUS pairs stay batched: each contributes one descriptor,
+        so the batch replaces N submits with one (the weight-load shape, measured
+        ~3x faster). The size gate applies only to pairs that fan out.
+        """
+        n_pairs = 16
+        srcs = [_arange((64,), torch.float32) + i for i in range(n_pairs)]  # 256 B each
+        dsts = [_to_dev(torch.zeros(64, dtype=torch.float32)) for _ in range(n_pairs)]
+
+        with torch.rbln.explain() as p:
+            torch._foreach_copy_(dsts, srcs)
+        calls = _prim_calls(p.dump())
+
+        self.assertEqual(calls.get("h2v_multi", 0), 1, f"contiguous pairs must batch: {calls}")
+        self.assertEqual(calls.get("h2v", 0), 0, f"{calls}")
+        for got, want in zip(dsts, srcs):
+            _eq(got, want)
 
     def test_empty_lists_rejected_upstream(self):
         """Empty tensor lists are rejected by PyTorch before reaching the RBLN

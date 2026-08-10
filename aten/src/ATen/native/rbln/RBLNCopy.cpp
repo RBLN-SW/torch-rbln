@@ -1,5 +1,6 @@
 // TODO: The previous copy optimizations based on physical shape and physical dtype were removed during
 // v-memory integration. Revisit these optimizations in a future pass.
+#include <ATen/MemoryOverlap.h>
 #include <ATen/native/rbln/RBLNCopy.h>
 #include <ATen/native/rbln/RBLNStrideUtils.h>
 #include <ATen/native/rbln/RBLNStridedHostCopy.h>
@@ -35,6 +36,13 @@ struct IndirectD2DGuard {
     --g_indirect_d2d_depth;
   }
 };
+
+// Descriptor floor for batching a pair that fans out. Above the measured
+// crossover (4-16 KiB on h2v/float32) with margin: too low reintroduces the
+// per-descriptor regression, too high only forgoes a win. Contiguous pairs are
+// exempt — they contribute one descriptor each, so batching them is a submit-count
+// win regardless of size. See the gate in _foreach_copy__rbln.
+constexpr size_t kMinBatchedDescriptorBytes = 64 * 1024;
 
 bool is_direct_copy(const at::Tensor& src, const at::Tensor& dst) {
   const bool same_sizes = (src.sizes() == dst.sizes());
@@ -500,13 +508,49 @@ void _foreach_copy__rbln(at::TensorList self, at::TensorList src, bool non_block
   std::vector<std::pair<at::Tensor, at::Tensor>> v2h_batched;
   v2v_batched.reserve(self.size());
 
+  // Flush everything queued so far. Called before an inline copy_ so the
+  // observable order matches the list: without it a pair deferred to submit
+  // could be skipped entirely when a later inline copy_ throws, leaving its
+  // destination untouched where the sequential path would have written it.
+  const auto flush_pending = [&] {
+    submit_or_fallback(v2v_batch, "_foreach_copy_", [&] {
+      for (const auto& pair : v2v_batched) {
+        pair.first.copy_(pair.second.cpu());
+      }
+    });
+    submit_or_fallback(h2v_batch, "_foreach_copy_", [&] {
+      for (const auto& pair : h2v_batched) {
+        pair.first.copy_(pair.second);
+      }
+    });
+    submit_or_fallback(v2h_batch, "_foreach_copy_", [&] {
+      for (const auto& pair : v2h_batched) {
+        pair.first.copy_(pair.second);
+      }
+    });
+    v2v_batched.clear();
+    h2v_batched.clear();
+    v2h_batched.clear();
+  };
+
   for (size_t i = 0; i < self.size(); ++i) {
     const at::Tensor& dst = self[i];
     const at::Tensor& s = src[i];
     const bool convertible = dst.scalar_type() == s.scalar_type() && dst.sizes() == s.sizes() && dst.numel() > 0;
     if (!convertible) {
+      flush_pending();
       dst.copy_(s, non_blocking);
       continue;
+    }
+    // A destination that maps several logical elements onto one address (an
+    // expand()ed view) cannot be written by a batch: the entries are unordered,
+    // so which write survives is arbitrary. copy_ rejects such a destination
+    // outright, and the batch must not silently accept what copy_ refuses.
+    // Flush first so the pairs before this one still land, then raise the
+    // standard error rather than a bespoke one.
+    if (at::has_internal_overlap(dst) != at::MemOverlap::No) {
+      flush_pending();
+      at::assert_no_internal_overlap(dst);
     }
     const bool dst_dev = dst.device().is_privateuseone();
     const bool src_dev = s.device().is_privateuseone();
@@ -517,10 +561,40 @@ void _foreach_copy__rbln(at::TensorList self, at::TensorList src, bool non_block
     // per-pair path is genuinely asynchronous (RBLNCopy's async copy downgrades
     // to sync for pageable host memory). The multi entrypoints are sync-only, so
     // batching such a pair would trade a real overlap for a submit count.
-    // Leave those on copy_ until an async multi variant exists.
+    // Caveat: in a mixed list a later sync submit drains the in-flight transfer
+    // anyway, so this only preserves the overlap when every pair takes it.
     const bool host_side_pinned_async = non_blocking &&
         ((dst_dev && src_cpu && c10::rbln::is_pinned_ptr(s.data_ptr())) ||
          (src_dev && dst_cpu && c10::rbln::is_pinned_ptr(dst.data_ptr())));
+
+    // Batching pays off on two different axes, and only one of them needs a
+    // guard. A contiguous pair contributes exactly one descriptor, so batching
+    // N of them replaces N submits with one — always a win (measured ~3x at 1 KiB
+    // tensors, which is the weight-load shape). A pair that fans out is competing
+    // instead against copy_'s single bulk DMA over a staged buffer, and there the
+    // per-descriptor cost decides: measured 6.5x SLOWER at 1 KiB descriptors and
+    // ~4000x slower for the element-per-descriptor case a transpose produces.
+    // So gate the fan-out case on descriptor size and leave contiguous pairs
+    // alone.
+    //
+    // The threshold sits above the measured crossover (between 4 and 16 KiB on
+    // h2v/float32) with margin, because the two directions of error are not
+    // symmetric: too low reintroduces the regression, too high only forgoes a
+    // win. It also bounds the descriptor vectors — with a floor of 64 KiB their
+    // memory cannot exceed ~0.1% of the payload, which is what makes the
+    // transpose OOM case structurally impossible rather than merely unlikely.
+    const auto fan = copy_fan_out(
+        dst.sizes(),
+        s.strides(),
+        dst.strides(),
+        static_cast<size_t>(dst.element_size()),
+        dst.is_contiguous() && s.is_contiguous(),
+        dst.numel());
+    if (fan.outer_count > 1 && fan.inner_block_bytes < kMinBatchedDescriptorBytes) {
+      flush_pending();
+      dst.copy_(s, non_blocking);
+      continue;
+    }
 
     if (dst_dev && src_dev && dst.device() == s.device()) {
       strided_v2v_copy(dst, s, v2v_batch);
@@ -532,27 +606,14 @@ void _foreach_copy__rbln(at::TensorList self, at::TensorList src, bool non_block
       strided_v2h_copy(dst, s, v2h_batch);
       v2h_batched.emplace_back(dst, s);
     } else {
+      flush_pending();
       dst.copy_(s, non_blocking);
     }
   }
 
   // The host tensors enqueued above are all caller-owned list entries, alive for
   // the duration of this call, so no keep_alive registration is needed here.
-  submit_or_fallback(v2v_batch, "_foreach_copy_", [&] {
-    for (const auto& pair : v2v_batched) {
-      pair.first.copy_(pair.second.cpu());
-    }
-  });
-  submit_or_fallback(h2v_batch, "_foreach_copy_", [&] {
-    for (const auto& pair : h2v_batched) {
-      pair.first.copy_(pair.second);
-    }
-  });
-  submit_or_fallback(v2h_batch, "_foreach_copy_", [&] {
-    for (const auto& pair : v2h_batched) {
-      pair.first.copy_(pair.second);
-    }
-  });
+  flush_pending();
 }
 
 } // namespace at::native::rbln
