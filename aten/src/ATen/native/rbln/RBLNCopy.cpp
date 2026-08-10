@@ -2,6 +2,7 @@
 // v-memory integration. Revisit these optimizations in a future pass.
 #include <ATen/native/rbln/RBLNCopy.h>
 #include <ATen/native/rbln/RBLNStrideUtils.h>
+#include <ATen/native/rbln/RBLNStridedHostCopy.h>
 #include <ATen/native/rbln/RBLNStridedV2V.h>
 #include <ATen/native/rbln/RBLNTensorUtils.h>
 #include <ATen/ops/empty.h>
@@ -400,25 +401,40 @@ bool ranges_overlap(const ByteRange& a, const ByteRange& b) {
 // inline fallback copies, so it matches list-order copy_ only when copies don't
 // alias across pairs. Returns true on any cross-pair overlap — a destination
 // hitting another pair's source (RAW/WAR) or destination (WAW). Within-pair
-// (self[i]/src[i]) is left to copy_. Only same-device live tensors can alias.
+// (self[i]/src[i]) is left to copy_.
+//
+// Host tensors are tracked alongside device ones. They have to be: the h2v/v2h
+// runtime entrypoints require destination ranges to be disjoint and do not
+// validate it, so for a device->host batch this check is the ONLY thing standing
+// between an aliased destination list and a silently wrong result. Ranges on
+// different devices can never alias, and CPU is its own address space — hence
+// keying on the full c10::Device rather than just the index.
+//
+// Quadratic in the pair count, which holds at the sizes this op sees: each
+// comparison is a handful of integer tests, so even a thousand pairs stays in
+// the low milliseconds next to transfers that move real payload. Worth a sorted
+// sweep only if a caller turns up with a fan-out far beyond that.
 bool foreach_copy_reorder_unsafe(at::TensorList self, at::TensorList src) {
   const size_t n = self.size();
   std::vector<ByteRange> dst_range(n);
   std::vector<ByteRange> src_range(n);
   std::vector<bool> dst_live(n, false);
   std::vector<bool> src_live(n, false);
-  std::vector<c10::DeviceIndex> dst_dev(n, -1);
-  std::vector<c10::DeviceIndex> src_dev(n, -1);
+  std::vector<c10::Device> dst_dev(n, c10::Device(c10::kCPU));
+  std::vector<c10::Device> src_dev(n, c10::Device(c10::kCPU));
+  const auto trackable = [](const at::Tensor& t) {
+    return (t.device().is_privateuseone() || t.device().is_cpu()) && t.numel() > 0;
+  };
   for (size_t i = 0; i < n; ++i) {
-    if (self[i].device().is_privateuseone() && self[i].numel() > 0) {
+    if (trackable(self[i])) {
       dst_range[i] = tensor_byte_range(self[i]);
       dst_live[i] = true;
-      dst_dev[i] = self[i].device().index();
+      dst_dev[i] = self[i].device();
     }
-    if (src[i].device().is_privateuseone() && src[i].numel() > 0) {
+    if (trackable(src[i])) {
       src_range[i] = tensor_byte_range(src[i]);
       src_live[i] = true;
-      src_dev[i] = src[i].device().index();
+      src_dev[i] = src[i].device();
     }
   }
   for (size_t i = 0; i < n; ++i) {
@@ -462,31 +478,79 @@ void _foreach_copy__rbln(at::TensorList self, at::TensorList src, bool non_block
     return;
   }
 
-  // Batch every conversion-free, same-device, same-shape pair into one
-  // V2VBatch so all N copies flush through a single rbln_memcpy_v2v_multi
-  // submit — the write-side mirror of cat's gather. Lets a scatter into N
-  // separate per-layer tensors collapse from N submits to 1. Pairs needing
-  // broadcast / dtype cast / cross-device fall back to a plain per-pair copy_.
-  c10::rbln::V2VBatch batch;
-  std::vector<std::pair<at::Tensor, at::Tensor>> batched;
-  batched.reserve(self.size());
+  // Batch every conversion-free, same-shape pair so N copies flush through one
+  // runtime submit instead of N. Three directions get their own batch:
+  //
+  //   rbln -> rbln   V2VBatch   the write-side mirror of cat's gather; a scatter
+  //                             into N per-layer tensors collapses to 1 submit
+  //   cpu  -> rbln   H2VBatch   weight load / load_state_dict fan-out
+  //   rbln -> cpu    V2HBatch   the gather direction, which had no batched path
+  //
+  // Pairs needing broadcast or a dtype cast still fall back to a per-pair copy_:
+  // the multi entrypoints move bytes and do not convert.
+  //
+  // Cross-device is not a disqualifier for the host directions: H2VBatch /
+  // V2HBatch split per device instead of host-bouncing. Only rbln->rbln with
+  // mismatched devices stays ineligible.
+  c10::rbln::V2VBatch v2v_batch;
+  c10::rbln::H2VBatch h2v_batch;
+  c10::rbln::V2HBatch v2h_batch;
+  std::vector<std::pair<at::Tensor, at::Tensor>> v2v_batched;
+  std::vector<std::pair<at::Tensor, at::Tensor>> h2v_batched;
+  std::vector<std::pair<at::Tensor, at::Tensor>> v2h_batched;
+  v2v_batched.reserve(self.size());
+
   for (size_t i = 0; i < self.size(); ++i) {
     const at::Tensor& dst = self[i];
     const at::Tensor& s = src[i];
-    const bool v2v_eligible = dst.device().is_privateuseone() && s.device().is_privateuseone() &&
-        dst.device() == s.device() && dst.scalar_type() == s.scalar_type() && dst.sizes() == s.sizes() &&
-        dst.numel() > 0;
-    if (v2v_eligible) {
-      strided_v2v_copy(dst, s, batch);
-      batched.emplace_back(dst, s);
+    const bool convertible = dst.scalar_type() == s.scalar_type() && dst.sizes() == s.sizes() && dst.numel() > 0;
+    if (!convertible) {
+      dst.copy_(s, non_blocking);
+      continue;
+    }
+    const bool dst_dev = dst.device().is_privateuseone();
+    const bool src_dev = s.device().is_privateuseone();
+    const bool dst_cpu = dst.device().is_cpu();
+    const bool src_cpu = s.device().is_cpu();
+
+    // A pinned host buffer with non_blocking=True is the one case where the
+    // per-pair path is genuinely asynchronous (RBLNCopy's async copy downgrades
+    // to sync for pageable host memory). The multi entrypoints are sync-only, so
+    // batching such a pair would trade a real overlap for a submit count.
+    // Leave those on copy_ until an async multi variant exists.
+    const bool host_side_pinned_async = non_blocking &&
+        ((dst_dev && src_cpu && c10::rbln::is_pinned_ptr(s.data_ptr())) ||
+         (src_dev && dst_cpu && c10::rbln::is_pinned_ptr(dst.data_ptr())));
+
+    if (dst_dev && src_dev && dst.device() == s.device()) {
+      strided_v2v_copy(dst, s, v2v_batch);
+      v2v_batched.emplace_back(dst, s);
+    } else if (dst_dev && src_cpu && !host_side_pinned_async) {
+      strided_h2v_copy(dst, s, h2v_batch);
+      h2v_batched.emplace_back(dst, s);
+    } else if (src_dev && dst_cpu && !host_side_pinned_async) {
+      strided_v2h_copy(dst, s, v2h_batch);
+      v2h_batched.emplace_back(dst, s);
     } else {
       dst.copy_(s, non_blocking);
     }
   }
 
-  submit_or_fallback(batch, "_foreach_copy_", [&] {
-    for (const auto& pair : batched) {
+  // The host tensors enqueued above are all caller-owned list entries, alive for
+  // the duration of this call, so no keep_alive registration is needed here.
+  submit_or_fallback(v2v_batch, "_foreach_copy_", [&] {
+    for (const auto& pair : v2v_batched) {
       pair.first.copy_(pair.second.cpu());
+    }
+  });
+  submit_or_fallback(h2v_batch, "_foreach_copy_", [&] {
+    for (const auto& pair : h2v_batched) {
+      pair.first.copy_(pair.second);
+    }
+  });
+  submit_or_fallback(v2h_batch, "_foreach_copy_", [&] {
+    for (const auto& pair : v2h_batched) {
+      pair.first.copy_(pair.second);
     }
   });
 }
