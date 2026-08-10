@@ -413,6 +413,38 @@ class TestForeachCopyHost(TestCase):
         for got, want in zip(dst_cpu, src_cpu):
             self.assertTrue(torch.equal(got, want))
 
+    def test_oversized_batch_is_split_across_capped_submits(self):
+        """One bulk call carries at most 16 entries / 8 MiB — past that the
+        runtime's job never completes and the per-entry retry cannot recover. So
+        40 pairs of 1 MiB land in five calls, and 8 pairs stay one.
+        """
+        one_mib = (1 << 20) // 4  # float32 elements
+        for n_pairs, want_calls in ((8, 1), (40, 5)):
+            src_cpu = [_arange((one_mib,), torch.float32) + i for i in range(n_pairs)]
+            src_dev = [_to_dev(s) for s in src_cpu]
+            dst_cpu = [torch.zeros(one_mib, dtype=torch.float32) for _ in range(n_pairs)]
+            dst_dev = [_to_dev(torch.zeros(one_mib, dtype=torch.float32)) for _ in range(n_pairs)]
+
+            with torch.rbln.explain() as p:
+                torch._foreach_copy_(dst_cpu, src_dev)
+            calls = _prim_calls(p.dump())
+            self.assertEqual(
+                calls.get("v2h_multi", 0), want_calls, f"{n_pairs} pairs of 1MiB: expected {want_calls}, got {calls}"
+            )
+            self.assertEqual(calls.get("v2h", 0), 0, f"splitting must not degrade to per-entry: {calls}")
+            for got, want in zip(dst_cpu, src_cpu):
+                self.assertTrue(torch.equal(got, want))
+
+            with torch.rbln.explain() as p:
+                torch._foreach_copy_(dst_dev, src_cpu)
+            calls = _prim_calls(p.dump())
+            self.assertEqual(
+                calls.get("h2v_multi", 0), want_calls, f"{n_pairs} pairs of 1MiB: expected {want_calls}, got {calls}"
+            )
+            self.assertEqual(calls.get("h2v", 0), 0, f"splitting must not degrade to per-entry: {calls}")
+            for got, want in zip(dst_dev, src_cpu):
+                _eq(got, want)
+
     def test_mixed_directions_use_one_submit_each(self):
         """A list spanning all three directions costs one submit per direction —
         three total, not one per pair."""

@@ -14,8 +14,15 @@ namespace c10::rbln {
 
 namespace {
 
+// Work one bulk call may carry. Past it the runtime's job never completes: the
+// device reports SYS_KERNEL_TIMEOUT and cancels the context, so the per-entry
+// retry below cannot recover either. Measured on lmcache's D2H store: 24
+// entries / 12 MiB pass, 32 / 16 MiB start timing out. See the commit message.
+constexpr size_t kMaxBulkEntries = 16;
+constexpr size_t kMaxBulkBytes = size_t{8} * 1024 * 1024;
+
 /**
- * @brief Flush one homogeneous group, falling back to per-entry on rejection.
+ * @brief Submit one group as a single bulk call, per-entry on rejection.
  *
  * Mirrors V2VBatch::submit's retry: the bulk entrypoint enforces stricter
  * inter-copy invariants than the single-copy path, so a geometry the per-entry
@@ -26,10 +33,7 @@ namespace {
  * retry is sound under an API that documents no rollback.
  */
 template <typename Desc, typename BulkFn, typename OneFn>
-void flush_group(const std::vector<Desc>& group, const char* who, const BulkFn& bulk, const OneFn& one) {
-  if (group.empty()) {
-    return;
-  }
+void submit_one_call(const std::vector<Desc>& group, const char* who, const BulkFn& bulk, const OneFn& one) {
   try {
     bulk(group);
     return;
@@ -45,6 +49,45 @@ void flush_group(const std::vector<Desc>& group, const char* who, const BulkFn& 
   }
   for (const auto& e : group) {
     one(e);
+  }
+}
+
+/**
+ * @brief Flush one homogeneous group, in as few bulk calls as the cap allows.
+ */
+template <typename Desc, typename BulkFn, typename OneFn>
+void flush_group(const std::vector<Desc>& group, const char* who, const BulkFn& bulk, const OneFn& one) {
+  if (group.empty()) {
+    return;
+  }
+  size_t total = 0;
+  for (const auto& e : group) {
+    total += e.nbytes;
+  }
+  if (group.size() <= kMaxBulkEntries && total <= kMaxBulkBytes) {
+    submit_one_call(group, who, bulk, one);
+    return;
+  }
+  RBLN_LOG_DEBUG(
+      "{}::submit splitting {} entries / {} bytes to stay under the cap ({} entries, {} bytes)",
+      who,
+      group.size(),
+      total,
+      kMaxBulkEntries,
+      kMaxBulkBytes);
+  for (size_t i = 0; i < group.size();) {
+    size_t j = i + 1; // one entry always goes, however large
+    size_t bytes = group[i].nbytes;
+    while (j < group.size() && j - i < kMaxBulkEntries && bytes + group[j].nbytes <= kMaxBulkBytes) {
+      bytes += group[j].nbytes;
+      ++j;
+    }
+    submit_one_call(
+        std::vector<Desc>(group.begin() + static_cast<ptrdiff_t>(i), group.begin() + static_cast<ptrdiff_t>(j)),
+        who,
+        bulk,
+        one);
+    i = j;
   }
 }
 
