@@ -132,6 +132,7 @@ prerelease = "if-necessary-or-explicit"
 index = [
   { name = "pypi", url = "https://pypi.org/simple/", default = true },
   { name = "pytorch-cpu", url = "https://download.pytorch.org/whl/cpu", explicit = true },
+  { name = "pytorch-nightly-cpu", url = "https://download.pytorch.org/whl/nightly/cpu", explicit = true },
   { name = "rbln", url = "https://pypi.rbln.ai/simple/", explicit = true },
 ]
 
