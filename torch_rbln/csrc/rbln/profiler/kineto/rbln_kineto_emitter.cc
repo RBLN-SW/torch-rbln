@@ -39,6 +39,9 @@ const char* slice_annotation(const RblnKinetoSlice& s, const char* name) {
   return nullptr;
 }
 
+// Kernels would multiply the arrows; only the workload slices carry one.
+bool is_dst_slice(const RblnKinetoSlice& s) { return s.kind == RBLN_KINETO_KIND_RUNTIME; }
+
 // Region -> device ac2g arrows, keyed by launch_id so they bind across the async gap.
 // Requires out->activities[i] to be slice i (the caller projects them in order).
 void add_flow_arrows(const RblnKinetoExport* exp, int64_t clock_offset_ns,
@@ -59,8 +62,7 @@ void add_flow_arrows(const RblnKinetoExport* exp, int64_t clock_offset_ns,
   uint64_t arrows = 0, skipped_no_launch_id = 0, skipped_no_launch = 0;
   for (uint32_t i = 0; i < exp->slices_count; ++i) {
     const RblnKinetoSlice& s = exp->slices[i];
-    // Kernels would multiply the arrows; only the workload slices carry one.
-    if (s.kind != RBLN_KINETO_KIND_RUNTIME)
+    if (!is_dst_slice(s))
       continue;
     const char* launch_id_str = slice_annotation(s, RBLN_KINETO_ANN_LAUNCH_ID);
     if (!launch_id_str) {
