@@ -221,6 +221,52 @@ class TestForeachCopyHost(TestCase):
                 with pytest.raises(RuntimeError, match="refers to a single memory location"):
                     torch._foreach_copy_([dst], [src])
 
+    def test_same_view_pairs_are_no_ops_even_when_overlapping(self):
+        """``copy_`` returns early when destination and source are the same view
+        (aliased, same offset/strides/sizes/dtype) — BEFORE its overlap check. So
+        an ``expand``ed identity pair is a no-op in eager, not an error, and the
+        batch must agree. Both forms count: the same tensor twice, and two
+        distinct tensors describing the same view.
+        """
+        base = _to_dev(_arange((1,), torch.float32))
+        expanded = base.expand(4)
+        same_view = base.expand(4)
+        before = expanded.cpu()
+
+        cases = {
+            "identity": (expanded, expanded),
+            "distinct-same-view": (expanded, same_view),
+        }
+        for name, (dst, src) in cases.items():
+            with self.subTest(form=name):
+                torch._foreach_copy_([dst], [src])
+                _eq(dst, before)
+
+    def test_partially_overlapping_dst_is_not_batched(self):
+        """A destination whose own rows overlap violates the runtime's
+        disjoint-destination contract, but ``has_internal_overlap`` cannot prove
+        it (``TooHard``) so ``assert_no_internal_overlap`` lets it through. It
+        must not reach the batch, where entry order is arbitrary.
+
+        Rows are 64 KiB so the descriptor-size gate does not filter this out.
+        """
+        elems_per_row = 16 * 1024
+        stride = elems_per_row // 2
+        storage = _to_dev(torch.zeros(elems_per_row + stride, dtype=torch.float32))
+        dst = storage.as_strided((2, elems_per_row), (stride, 1))
+        src = _arange((2, elems_per_row), torch.float32) + 1.0
+
+        with torch.rbln.explain() as p:
+            torch._foreach_copy_([dst], [src])
+        calls = _prim_calls(p.dump())
+
+        self.assertEqual(calls.get("h2v_multi", 0), 0, f"overlapping dst must not batch: {calls}")
+        # Only the regions written by exactly one row are well defined; the
+        # overlapping middle depends on write order, which this test does not pin.
+        got = storage.cpu()
+        _eq(_to_dev(got[:stride]), src[0][:stride])
+        _eq(_to_dev(got[elems_per_row:]), src[1][stride:])
+
     def test_pairs_before_a_throwing_pair_still_land(self):
         """A pair rejected mid-list must not swallow the ones already queued.
 

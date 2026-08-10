@@ -542,15 +542,31 @@ void _foreach_copy__rbln(at::TensorList self, at::TensorList src, bool non_block
       dst.copy_(s, non_blocking);
       continue;
     }
-    // A destination that maps several logical elements onto one address (an
-    // expand()ed view) cannot be written by a batch: the entries are unordered,
-    // so which write survives is arbitrary. copy_ rejects such a destination
-    // outright, and the batch must not silently accept what copy_ refuses.
-    // Flush first so the pairs before this one still land, then raise the
-    // standard error rather than a bespoke one.
-    if (at::has_internal_overlap(dst) != at::MemOverlap::No) {
+    // copy_ returns early when destination and source describe the same view,
+    // before it looks at overlap at all, so an expand()ed identity pair is a
+    // no-op there rather than an error. Match that: the batch must not reject
+    // what copy_ accepts.
+    if (is_same_view(dst, s)) {
+      continue;
+    }
+    // A destination that maps several logical elements onto one address cannot
+    // be written by a batch: entries are unordered, so which write survives is
+    // arbitrary. Flush first so the pairs before this one still land.
+    //
+    //   Yes      an expand()ed view. copy_ refuses it, so raise its error.
+    //   TooHard  has_internal_overlap gives up on gappy strides. Decide what
+    //            can be decided cheaply: a destination that may alias itself
+    //            goes down the per-pair path, which writes in a defined order,
+    //            while one that merely has gaps stays batchable.
+    const auto overlap = at::has_internal_overlap(dst);
+    if (overlap == at::MemOverlap::Yes) {
       flush_pending();
       at::assert_no_internal_overlap(dst);
+    }
+    if (overlap == at::MemOverlap::TooHard && view_may_self_overlap(dst.sizes(), dst.strides())) {
+      flush_pending();
+      dst.copy_(s, non_blocking);
+      continue;
     }
     const bool dst_dev = dst.device().is_privateuseone();
     const bool src_dev = s.device().is_privateuseone();
@@ -583,17 +599,26 @@ void _foreach_copy__rbln(at::TensorList self, at::TensorList src, bool non_block
     // win. It also bounds the descriptor vectors — with a floor of 64 KiB their
     // memory cannot exceed ~0.1% of the payload, which is what makes the
     // transpose OOM case structurally impossible rather than merely unlikely.
-    const auto fan = copy_fan_out(
-        dst.sizes(),
-        s.strides(),
-        dst.strides(),
-        static_cast<size_t>(dst.element_size()),
-        dst.is_contiguous() && s.is_contiguous(),
-        dst.numel());
-    if (fan.outer_count > 1 && fan.inner_block_bytes < kMinBatchedDescriptorBytes) {
-      flush_pending();
-      dst.copy_(s, non_blocking);
-      continue;
+    //
+    // The gate is a host-direction policy. A v2v pair has no staged bulk DMA to
+    // compete with: the per-pair path issues the same on-device strided copy
+    // and, above the runtime's per-destination cap, round-trips the host, while
+    // the batch falls back to per-entry device copies. Gating v2v would trade
+    // one submit for N and can turn a device-side copy into a host bounce.
+    const bool host_direction = (dst_dev && src_cpu) || (src_dev && dst_cpu);
+    if (host_direction) {
+      const auto fan = copy_fan_out(
+          dst.sizes(),
+          s.strides(),
+          dst.strides(),
+          static_cast<size_t>(dst.element_size()),
+          dst.is_contiguous() && s.is_contiguous(),
+          dst.numel());
+      if (fan.outer_count > 1 && fan.inner_block_bytes < kMinBatchedDescriptorBytes) {
+        flush_pending();
+        dst.copy_(s, non_blocking);
+        continue;
+      }
     }
 
     if (dst_dev && src_dev && dst.device() == s.device()) {
