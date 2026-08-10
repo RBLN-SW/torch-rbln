@@ -41,10 +41,11 @@ import tempfile
 import pytest
 import torch
 import torch.nn as nn
-from torch.profiler import ProfilerActivity, profile
+from torch.profiler import profile, ProfilerActivity
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 import torch_rbln  # noqa: F401  -- registers the rbln device + the kineto bridge
+
 
 DEVICE = torch.device("rbln:0")
 DTYPE = torch.float16
