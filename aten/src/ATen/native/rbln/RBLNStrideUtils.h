@@ -100,4 +100,50 @@ inline bool advance_multi_index(std::vector<int64_t>& idx, c10::IntArrayRef oute
   return false;
 }
 
+/**
+ * @brief How a (dst, src) pair decomposes for the batched copy engines.
+ *
+ * `outer_count` is the number of descriptors the pair expands to and
+ * `inner_block_bytes` the size of each. `outer_count == 1` means the pair is one
+ * contiguous slab.
+ *
+ * Callers use this to decide whether batching is worth it before building any
+ * descriptors, which is the only cheap point to decide: the expansion itself is
+ * what costs memory when a pair fans out to millions of entries.
+ */
+struct CopyFanOut {
+  int64_t outer_count;
+  size_t inner_block_bytes;
+};
+
+/**
+ * @brief Compute the fan-out for a pair with these sizes / strides.
+ *
+ * Mirrors what the strided copy kernels do, so a gate built on this sees exactly
+ * the decomposition the kernel will produce. `both_contiguous` short-circuits
+ * the common case where the whole payload is one slab.
+ */
+inline CopyFanOut copy_fan_out(
+    c10::IntArrayRef sizes,
+    c10::IntArrayRef src_strides,
+    c10::IntArrayRef dst_strides,
+    size_t elem_size,
+    bool both_contiguous,
+    int64_t numel) {
+  if (both_contiguous || sizes.empty()) {
+    return {1, static_cast<size_t>(numel) * elem_size};
+  }
+  const int64_t rank = static_cast<int64_t>(sizes.size());
+  const int64_t inner_start = common_inner_start(sizes, src_strides, dst_strides);
+  int64_t inner_elems = 1;
+  for (int64_t i = inner_start; i < rank; ++i) {
+    inner_elems *= sizes[i];
+  }
+  int64_t outer_count = 1;
+  for (int64_t i = 0; i < inner_start; ++i) {
+    outer_count *= sizes[i];
+  }
+  return {outer_count, static_cast<size_t>(inner_elems) * elem_size};
+}
+
 } // namespace at::native::rbln
