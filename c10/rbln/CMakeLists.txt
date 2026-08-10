@@ -5,6 +5,7 @@ set(sources
   RBLNAllocator.cpp
   RBLNFallbackConfig.cpp
   RBLNFunctions.cpp
+  RBLNHostBatch.cpp
   RBLNGenerator.cpp
   RBLNHooksInterface.cpp
   RBLNLogging.cpp
@@ -17,6 +18,7 @@ set(headers
   DeviceMappingManager.h
   RBLNFallbackConfig.h
   RBLNFunctions.h
+  RBLNHostBatch.h
   RBLNGenerator.h
   RBLNHooksInterface.h
   RBLNLogging.h
@@ -25,6 +27,7 @@ set(headers
   RBLNProfiler.h
   RBLNSupportedDtypes.h
   RBLNV2VBatch.h
+  detail/RBLNCopyBatchImpl.h
 )
 add_library(${target}
   ${sources}
