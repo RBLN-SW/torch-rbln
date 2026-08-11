@@ -67,9 +67,8 @@ jobs:
             requirement="torch==${TORCH_VERSION}"
           fi
 
-          # Resolving even an explicit version normalizes it to what the index actually
-          # serves (`2.14.0.dev20260810` -> `2.14.0.dev20260810+cpu`), which the smoke
-          # test compares against `torch.__version__`.
+          # Resolved even when explicit: normalizes `2.14.0.dev20260810` to the
+          # `+cpu` version the smoke test compares against `torch.__version__`.
           target_version="$(printf '%s\n' "${requirement}" \
             | uv pip compile - --no-config --no-deps --no-header --no-annotate \
                 --prerelease allow --default-index "${PYTORCH_NIGHTLY_INDEX_URL}" \
@@ -141,7 +140,6 @@ jobs:
             exit 1
           fi
 
-          # Wheel filename fields (PEP 427): {name}-{version}-{python}-{abi}-{platform}.
           version="$(basename "${wheels[0]}" | cut -d- -f2)"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "::notice::Built torch-rbln==${version}"
