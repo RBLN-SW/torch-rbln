@@ -158,7 +158,7 @@ It can also be run manually via `workflow_dispatch`, optionally pinning a specif
 
 Everyday CI builds against the release pin (`torch==2.11.0+cpu`). This workflow additionally builds and smoke-tests `torch-rbln` against the **latest PyTorch nightly CPU wheel** every day at 14:00 KST (05:00 UTC), so an upstream breaking change surfaces within a day instead of at the next `torch` bump. Tracking PyTorch `main` in CI is the outstanding prerequisite for enlisting the repository in PyTorch's Cross-Repository CI Relay (CRCR).
 
-Scheduled runs use the default branch (`dev`); a manual `workflow_dispatch` tests whichever ref it is started from, and can pin an explicit `torch_version` and `python_version` instead of the defaults (latest nightly, Python 3.12).
+Scheduled runs use the default branch (`dev`); a manual `workflow_dispatch` tests whichever ref it is started from, and can pin an explicit `torch_version` and `python_version` instead of the defaults (latest nightly, Python 3.12). An explicit `torch_version` is still resolved against the nightly index, so it may be given with or without the `+cpu` local suffix and fails fast if the index does not serve it.
 
 Steps:
 
