@@ -110,7 +110,6 @@ jobs:
           UV_INDEX_RBLN_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
           UV_INDEX_RBLN_PASSWORD: ${{ secrets.INTERNAL_INDEX_PASSWORD }}
           UV_BUILD_CONSTRAINT: constraints-build-dev.txt
-          UV_PRERELEASE: allow
         run: |
           set -euo pipefail
 
@@ -149,7 +148,6 @@ jobs:
           UV_INDEX_STRATEGY: unsafe-best-match
           UV_INDEX_RBLN_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
           UV_INDEX_RBLN_PASSWORD: ${{ secrets.INTERNAL_INDEX_PASSWORD }}
-          UV_PRERELEASE: allow
         run: |
           set -euo pipefail
 
