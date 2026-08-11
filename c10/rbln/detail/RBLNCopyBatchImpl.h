@@ -4,8 +4,9 @@
 // outside c10/rbln/*.cpp: it exposes the pending storage the public headers hide
 // behind a pimpl.
 //
-// Only the mechanical part of a batch is shared — pending storage, device
-// homogeneity, reset and destructor behaviour. submit() is not: v2v drops to
+// Only the mechanical part of a batch is shared — pending storage, the row-major
+// expansion of a strided description, device homogeneity, reset and destructor
+// behaviour. submit() is not: v2v drops to
 // per-entry (host-bouncing) copies once entries span devices and carries a
 // runtime-rejection retry, while h2v/v2h split into one bulk submit per device.
 
@@ -86,6 +87,18 @@ inline void update_homogeneity(bool& homogeneous, c10::DeviceIndex& anchor, cons
   }
 }
 
+// Walk a multi-index in row-major order. Returns false when wrapping back to
+// all zeros (iteration exhausted).
+inline bool advance_index(std::vector<int64_t>& idx, c10::IntArrayRef sizes) {
+  for (int64_t d = static_cast<int64_t>(sizes.size()) - 1; d >= 0; --d) {
+    if (++idx[d] < sizes[d]) {
+      return true;
+    }
+    idx[d] = 0;
+  }
+  return false;
+}
+
 /** @brief Record one contiguous slab copy. nbytes == 0 is a no-op. */
 template <typename Desc, DeviceAnchor kAnchor>
 inline void enqueue_one(BatchState<Desc>& st, const char* who, void* dst, const void* src, size_t nbytes) {
@@ -96,6 +109,73 @@ inline void enqueue_one(BatchState<Desc>& st, const char* who, void* dst, const 
   }
   update_homogeneity<kAnchor>(st.homogeneous, st.anchor, src, dst);
   st.pending.push_back({dst, src, nbytes});
+}
+
+/**
+ * @brief Expand a strided description into `prod(outer_sizes)` flat entries.
+ *
+ * Entry k at outer index idx[] has dst_off = sum_d idx[d]*dst_byte_strides[d] and
+ * likewise for src. A stride of 0 is preserved, which is what makes a broadcast
+ * source replicate instead of collapsing to its first slab. The IntArrayRefs are
+ * read during this call only.
+ */
+template <typename Desc, DeviceAnchor kAnchor>
+inline void enqueue_strided_impl(
+    BatchState<Desc>& st,
+    const char* who,
+    void* dst,
+    const void* src,
+    size_t inner_block_bytes,
+    c10::IntArrayRef outer_sizes,
+    c10::IntArrayRef src_byte_strides,
+    c10::IntArrayRef dst_byte_strides) {
+  RBLN_CHECK(dst != nullptr, "{}::enqueue_strided: dst is nullptr", who);
+  RBLN_CHECK(src != nullptr, "{}::enqueue_strided: src is nullptr", who);
+  RBLN_CHECK(
+      outer_sizes.size() == src_byte_strides.size() && outer_sizes.size() == dst_byte_strides.size(),
+      "{}::enqueue_strided: size/stride length mismatch (outer={}, src={}, dst={})",
+      who,
+      outer_sizes.size(),
+      src_byte_strides.size(),
+      dst_byte_strides.size());
+
+  if (inner_block_bytes == 0) {
+    return;
+  }
+
+  // Degenerate: no outer dims → single slab.
+  if (outer_sizes.empty()) {
+    enqueue_one<Desc, kAnchor>(st, who, dst, src, inner_block_bytes);
+    return;
+  }
+
+  // Reject zero-extent outer dims (would yield zero work but a 0 in sizes
+  // means the caller produced a 0-numel tensor — they should have early-returned).
+  int64_t outer_count = 1;
+  for (int64_t s : outer_sizes) {
+    RBLN_CHECK(s > 0, "{}::enqueue_strided: outer_sizes must be all positive, got {}", who, c10::str(outer_sizes));
+    outer_count *= s;
+  }
+
+  st.pending.reserve(st.pending.size() + static_cast<size_t>(outer_count));
+
+  // All N expanded entries share the same base pointers — one lookup suffices.
+  update_homogeneity<kAnchor>(st.homogeneous, st.anchor, src, dst);
+
+  auto* dst_base = static_cast<uint8_t*>(dst);
+  const auto* src_base = static_cast<const uint8_t*>(src);
+
+  std::vector<int64_t> idx(outer_sizes.size(), 0);
+  for (int64_t o = 0; o < outer_count; ++o) {
+    int64_t src_off = 0;
+    int64_t dst_off = 0;
+    for (size_t d = 0; d < outer_sizes.size(); ++d) {
+      src_off += idx[d] * src_byte_strides[d];
+      dst_off += idx[d] * dst_byte_strides[d];
+    }
+    st.pending.push_back({dst_base + dst_off, src_base + src_off, inner_block_bytes});
+    advance_index(idx, outer_sizes);
+  }
 }
 
 /**
