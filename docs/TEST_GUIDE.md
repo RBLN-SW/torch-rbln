@@ -49,6 +49,7 @@ test/
 ├── utils.py      # Shared test utilities (seed helpers, device-count skip markers, SUPPORTED_DTYPES)
 │
 ├── rbln/                                  # RBLN backend-specific tests
+│   ├── test_abi_check.py                  # rebel ABI handshake between this build and the loaded librbln.so
 │   ├── test_custom_kernel.py              # RBLN custom kernels
 │   ├── test_device_mapping.py             # Device mapping and topology APIs
 │   ├── test_find_and_load_tvm_library.py  # Error handling when librbln.so cannot be found

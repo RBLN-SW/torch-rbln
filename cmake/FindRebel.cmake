@@ -3,6 +3,8 @@
 #   REBEL_FOUND         - True if Rebel headers and librbln.so are found
 #   REBEL_INCLUDE_DIRS  - Include directories for Rebel (wheel or external)
 #   REBEL_LIBRARIES     - Libraries to link with Rebel (librbln.so)
+#   REBEL_ABI_CURRENT   - RBLN_ABI_CURRENT read out of rbln_abi.h, or "" when the
+#                         Rebel being built against predates the ABI handshake
 #
 # Both headers and librbln.so are required at build time so that C code
 # linking against the Rebel ABI builds correctly. By default headers and the
@@ -92,6 +94,46 @@ if(REBEL_FOUND)
   set(REBEL_INCLUDE_DIRS ${${PACKAGE_NAME}_INCLUDE_DIR})
   set(REBEL_LIBRARIES ${${PACKAGE_NAME}_LIBRARY})
 endif()
+
+# ABI snapshot #################################################################
+# Record RBLN_ABI_CURRENT of the Rebel we build against; torch_rbln compares that
+# frozen copy against the librbln.so it actually loads (torch_rbln/_internal/abi_check.py).
+# MIN_SUPPORTED is not read here: it describes what a future runtime still accepts,
+# so it can only be queried from the .so at import time. A missing header means the
+# Rebel predates the handshake (rebel_compiler #12426) -- not a build error, just no
+# snapshot to check against.
+set(REBEL_ABI_CURRENT "")
+set(_rebel_abi_header "${REBEL_INCLUDE_DIRS}/rebel/runtime/api/rbln_abi.h")
+if(EXISTS "${_rebel_abi_header}")
+  # Swapping a wheel in place keeps the same header path, so make its contents a
+  # configure dependency or the snapshot silently goes stale.
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_rebel_abi_header}")
+
+  file(STRINGS "${_rebel_abi_header}" _rebel_abi_lines
+    REGEX "^[ \t]*#[ \t]*define[ \t]+RBLN_ABI_CURRENT[ \t]+[0-9]+[ \t]*$")
+  if(NOT _rebel_abi_lines)
+    message(FATAL_ERROR
+      "FindRebel: ${_rebel_abi_header} exists but defines no integer RBLN_ABI_CURRENT. "
+      "Refusing to build a wheel whose recorded ABI would be wrong.")
+  endif()
+  list(GET _rebel_abi_lines 0 _rebel_abi_line)
+  string(REGEX REPLACE "^[ \t]*#[ \t]*define[ \t]+RBLN_ABI_CURRENT[ \t]+([0-9]+)[ \t]*$" "\\1"
+    REBEL_ABI_CURRENT "${_rebel_abi_line}")
+  if(REBEL_ABI_CURRENT STREQUAL "0")
+    message(FATAL_ERROR
+      "FindRebel: ${_rebel_abi_header} declares RBLN_ABI_CURRENT 0. Zero is not a valid "
+      "contract number (torch-rbln reads it as 'no snapshot recorded').")
+  endif()
+  message(STATUS "FindRebel: rebel ABI snapshot -- RBLN_ABI_CURRENT=${REBEL_ABI_CURRENT}")
+else()
+  message(WARNING
+    "FindRebel: no ${_rebel_abi_header} -- this Rebel predates the ABI version handshake. "
+    "The resulting torch-rbln records no ABI snapshot, so it cannot detect at import time "
+    "that it was loaded against an incompatible librbln.so.")
+endif()
+unset(_rebel_abi_header)
+unset(_rebel_abi_lines)
+unset(_rebel_abi_line)
 
 mark_as_advanced(
   ${PACKAGE_NAME}_INCLUDE_DIR

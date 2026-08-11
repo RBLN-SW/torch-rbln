@@ -202,6 +202,58 @@ def _rebel_compiler_info() -> dict[str, Any]:
     return out
 
 
+def _rebel_abi_info() -> dict[str, Any]:
+    """Build-time ABI snapshot versus what librbln.so reports here.
+
+    Loads librbln.so the same way the real import does, so these are the numbers the
+    handshake would actually compare.
+    """
+    out: dict[str, Any] = {
+        "built_abi": None,
+        "check_disabled": False,
+        "librbln_path": None,
+        "runtime_min_supported": None,
+        "runtime_current": None,
+        "verdict": None,
+        "error": None,
+    }
+    try:
+        from torch_rbln._internal import abi_check
+
+        out["built_abi"] = abi_check.get_built_abi()
+        out["check_disabled"] = abi_check.is_abi_check_disabled()
+    except Exception as e:
+        out["error"] = f"abi_check unavailable: {e}"
+        return out
+
+    try:
+        from torch_rbln import find_and_load_tvm_library
+
+        lib = find_and_load_tvm_library("librbln.so")
+    except Exception as e:
+        out["error"] = f"could not load librbln.so: {e}"
+        return out
+
+    out["librbln_path"] = getattr(lib, "_name", None)
+    try:
+        window = abi_check.read_runtime_abi(lib)
+    except Exception as e:
+        out["error"] = f"could not read ABI symbols: {e}"
+        return out
+
+    if window is None:
+        out["verdict"] = "runtime predates the ABI handshake (no version symbols)"
+        return out
+
+    out["runtime_min_supported"], out["runtime_current"] = window
+    if out["built_abi"] is None:
+        out["verdict"] = "no build-time snapshot to compare against"
+        return out
+    reason = abi_check.abi_mismatch_reason(out["built_abi"], window[0], window[1])
+    out["verdict"] = "OK" if reason is None else f"MISMATCH -- {reason}"
+    return out
+
+
 def _search_paths_with_libs() -> list[dict[str, Any]]:
     """For each candidate directory: path, exists, and which RBLN libs are present."""
     candidates = get_dll_directory_candidates()
@@ -315,6 +367,7 @@ def collect_diagnostics() -> dict[str, Any]:
     d = {
         "torch_rbln": _torch_rbln_info(),
         "rebel_compiler": _rebel_compiler_info(),
+        "rebel_abi": _rebel_abi_info(),
         "env": _env_snapshot(),
         "tvm": _tvm_info(),
         "search_paths": _search_paths_with_libs(),
@@ -368,6 +421,32 @@ def format_diagnostics(d: dict[str, Any] | None = None, verbose: bool = True) ->
             lines.append(f"  installed at: {rc['installed_location']}")
     else:
         lines.append("  not installed" + (f" ({rc.get('error', '')})" if rc.get("error") else ""))
+    lines.extend(
+        [
+            "",
+            "rebel ABI handshake:",
+        ]
+    )
+    abi = d.get("rebel_abi") or {}
+    built_abi = abi.get("built_abi")
+    lines.append(
+        f"  built against ABI: {built_abi}"
+        if built_abi is not None
+        else "  built against ABI: (none recorded — built against a pre-handshake rebel-compiler)"
+    )
+    if abi.get("librbln_path"):
+        lines.append(f"  librbln.so: {abi['librbln_path']}")
+    if abi.get("runtime_current") is not None:
+        lines.append(
+            f"  runtime accepts: {abi.get('runtime_min_supported')}..{abi.get('runtime_current')} "
+            f"(min_supported..current)"
+        )
+    if abi.get("verdict"):
+        lines.append(f"  verdict: {abi['verdict']}")
+    if abi.get("check_disabled"):
+        lines.append("  >>> check is DISABLED via TORCH_RBLN_SKIP_ABI_CHECK; import will not enforce it.")
+    if abi.get("error"):
+        lines.append(f"  error: {abi['error']}")
     lines.extend(
         [
             "",

@@ -4,6 +4,7 @@ import warnings
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any  # noqa: UP035
 
+from torch_rbln._internal.abi_check import check_librbln_abi
 from torch_rbln._internal.env_utils import is_diagnose_mode
 from torch_rbln._internal.tvm_libinfo import get_dll_directories, get_dll_directory_candidates
 
@@ -35,7 +36,13 @@ def torch_backends_entry_point() -> None:
 
         # Load shared objects ##################################################
         # Ensure dependent shared library is loaded before importing native extension
-        find_and_load_tvm_library("librbln.so")
+        librbln = find_and_load_tvm_library("librbln.so")
+
+        # Verify the rebel ABI contract while librbln.so is the only rebel code loaded.
+        # Past this point our extensions bind to its entry points and a mismatch stops
+        # being reportable: CPython opens them RTLD_NOW, so a missing symbol aborts the
+        # import as `undefined symbol`.
+        check_librbln_abi(librbln)
 
         # Import native extension module (e.g., torch_rbln.so)
         current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -104,7 +111,7 @@ def torch_backends_entry_point() -> None:
     status = "initialized"
 
 
-def find_and_load_tvm_library(target_name: str) -> None:
+def find_and_load_tvm_library(target_name: str) -> ctypes.CDLL:
     """
     Search for a shared library (.so) file in known tvm lib paths and load it with ctypes.
 
@@ -113,6 +120,10 @@ def find_and_load_tvm_library(target_name: str) -> None:
 
     Args:
         target_name (str): The name of the shared library to find and load (e.g., 'librbln.so').
+
+    Returns:
+        ctypes.CDLL: The loaded handle, so the caller can resolve symbols on it
+            (the ABI handshake reads librbln.so's version entry points this way).
 
     Raises:
         FileNotFoundError: If the library is not found in any known site-packages paths.
@@ -124,8 +135,7 @@ def find_and_load_tvm_library(target_name: str) -> None:
             if target_name in files:
                 so_path = os.path.join(root, target_name)
                 try:
-                    ctypes.CDLL(so_path, ctypes.RTLD_GLOBAL)
-                    return
+                    return ctypes.CDLL(so_path, ctypes.RTLD_GLOBAL)
                 except OSError as e:
                     raise OSError(f"Failed to load {target_name} at {so_path}: {e}") from e
 

@@ -257,3 +257,45 @@ export TORCH_RBLN_USE_DEVICE_TP=OFF  # use num_devices=1 for eager ops (default:
 
 **Use case:**
 This is useful when you want consistent tensor parallel behavior across both eager and compiled operations, particularly in mixed execution scenarios.
+
+## rebel ABI Handshake
+
+`torch-rbln` and `librbln.so` agree on an integer interface contract. `rebel-compiler`
+declares two numbers in `rebel/runtime/api/rbln_abi.h` and exports both as C entry
+points:
+
+| Number | Meaning |
+|--------|---------|
+| `RBLN_ABI_CURRENT` | the interface number this `librbln.so` implements |
+| `RBLN_ABI_MIN_SUPPORTED` | the oldest consumer contract it still accepts |
+
+`torch-rbln` owns no number of its own. Its build records a *snapshot* of
+`RBLN_ABI_CURRENT` from the header it compiled against, and `import torch_rbln` checks
+that snapshot against the `librbln.so` it actually loads, before any other rebel entry
+point is used:
+
+```
+rbln_abi_min_supported() <= <snapshot> <= rbln_abi_current()
+```
+
+Outside that window the import fails with an `RBLN ABI mismatch` message naming the
+`librbln.so` in use and both versions. Two cases warn and continue instead, because
+neither can produce a verdict: a `librbln.so` that predates the handshake and exports
+no version symbols, and a `torch-rbln` built against a `rebel-compiler` that shipped no
+`rbln_abi.h`.
+
+Run `python -m torch_rbln.diagnose` to see the snapshot, the runtime window, and the
+verdict for the current environment.
+
+### TORCH_RBLN_SKIP_ABI_CHECK
+
+Skips the handshake entirely.
+
+```bash
+export TORCH_RBLN_SKIP_ABI_CHECK=1   # accepts 1 / ON / TRUE / YES
+```
+
+This is an escape hatch for unblocking a machine while a matching wheel is built. It
+suppresses the diagnosis, not the incompatibility: the mismatch it hides is what would
+otherwise surface as an `undefined symbol` import crash or as corruption inside the
+runtime.
