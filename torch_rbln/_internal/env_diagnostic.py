@@ -4,17 +4,15 @@ Helps users debug "Cannot find libraries: librbln.so / librbln_runtime.so" and
 environment-override issues (REBEL_HOME, PYTHONPATH, LD_LIBRARY_PATH).
 """
 
+import ctypes
 import os
 import re
 import subprocess
 import sys
 from typing import Any
 
-from torch_rbln._internal.tvm_libinfo import get_dll_directory_candidates
+from torch_rbln._internal.rbln_runtime_lib import loaded_runtime_libraries, RUNTIME_LIB_NAME, runtime_library_candidates
 
-
-# Libraries that rebel-compiler / torch-rbln may need (searched in tvm lib paths).
-RBLN_LIB_NAMES = ("librbln.so", "librbln_runtime.so")
 
 # Environment variables that affect where we look for .so files.
 ENV_VARS = (
@@ -22,8 +20,6 @@ ENV_VARS = (
     "LD_LIBRARY_PATH",
     "DYLD_LIBRARY_PATH",
     "PYTHONPATH",
-    "TVM_LIBRARY_PATH",
-    "TVM_HOME",
     "PATH",
 )
 
@@ -63,12 +59,12 @@ def _env_snapshot() -> dict[str, Any]:
     return {k: os.environ.get(k, "") for k in ENV_VARS}
 
 
-def _tvm_info() -> dict[str, Any]:
-    """Which tvm package is loaded and where."""
+def _package_location(name: str) -> dict[str, Any]:
+    """Where a package would be imported from, without importing it."""
     try:
         import importlib.util
 
-        spec = importlib.util.find_spec("tvm")
+        spec = importlib.util.find_spec(name)
         if spec is None:
             return {"found": False, "origin": None, "submodule_search_locations": None}
         locations = getattr(spec, "submodule_search_locations", None)
@@ -202,37 +198,50 @@ def _rebel_compiler_info() -> dict[str, Any]:
     return out
 
 
-def _search_paths_with_libs() -> list[dict[str, Any]]:
-    """For each candidate directory: path, exists, and which RBLN libs are present."""
-    candidates = get_dll_directory_candidates()
-    result = []
-    for path, exists in candidates:
-        entry: dict[str, Any] = {"path": path, "exists": exists, "libs": {}}
-        if exists:
-            try:
-                for name in RBLN_LIB_NAMES:
-                    full = os.path.join(path, name)
-                    entry["libs"][name] = os.path.isfile(full)
-                    if not entry["libs"][name]:
-                        for root, _, files in os.walk(path):
-                            if os.path.relpath(root, path).count(os.sep) > 1:
-                                break
-                            if name in files:
-                                entry["libs"][name] = True
-                                break
-            except OSError:
-                entry["libs"] = dict.fromkeys(RBLN_LIB_NAMES, False)
-        else:
-            entry["libs"] = dict.fromkeys(RBLN_LIB_NAMES, False)
-        result.append(entry)
-    return result
+def _runtime_lib_candidates() -> list[dict[str, Any]]:
+    """Every candidate path considered for librbln.so: path, where it came from, and existence."""
+    return [
+        {"path": path, "source": source, "exists": os.path.isfile(path)}
+        for path, source in runtime_library_candidates()
+    ]
+
+
+_VERSION_SYMBOL = "REBEL_COMPILER_VERSION"
+
+
+def _runtime_library_version(path: str) -> str | None:
+    """Read ``REBEL_COMPILER_VERSION`` from an already-mapped library.
+
+    ``RTLD_NOLOAD``: a reference to the existing mapping, never a second copy.
+    """
+    try:
+        lib = ctypes.CDLL(path, mode=os.RTLD_NOLOAD | ctypes.RTLD_GLOBAL)
+        raw = ctypes.c_char_p.in_dll(lib, _VERSION_SYMBOL).value
+    except (OSError, ValueError):
+        return None
+    return raw.decode(errors="replace") if raw is not None else None
+
+
+def _runtime_lib_state() -> dict[str, Any]:
+    """Which librbln.so this process mapped, and the version it reports.
+
+    Only the one library. rebel-compiler also ships librbln_runtime.so, a runtime-only build its
+    loader can take instead, but the two cannot both be mapped: loading the second aborts the
+    process in its constructors (verified). So there is no state in which reporting both would
+    tell a reader anything the abort has not already.
+    """
+    loaded = loaded_runtime_libraries()
+    return {
+        "loaded": loaded,
+        "version": _runtime_library_version(loaded[0]) if loaded else None,
+    }
 
 
 def _resolve_so_paths(d: dict[str, Any]) -> list[dict[str, Any]]:
     """Resolve paths for libtorch, libtorch_rbln, librbln (and related) and get GCC version from ELF .comment."""
     result: list[dict[str, Any]] = []
     tr = d.get("torch_rbln") or {}
-    search_paths = d.get("search_paths") or []
+    candidates = d.get("runtime_lib_candidates") or []
 
     # libtorch.so — from torch package
     libtorch_path: str | None = None
@@ -278,27 +287,16 @@ def _resolve_so_paths(d: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
 
-    # librbln.so — first path in search_paths that contains it
+    # librbln.so — the mapped one if this process loaded it, else the first candidate that exists
     librbln_path = None
-    for entry in search_paths:
-        if not entry.get("libs", {}).get("librbln.so"):
-            continue
-        p = os.path.join(entry["path"], "librbln.so")
-        if os.path.isfile(p):
-            librbln_path = os.path.realpath(p)
-            break
-        # May be in a subdir (e.g. build/Release)
-        try:
-            for root, _, files in os.walk(entry["path"]):
-                if "librbln.so" in files:
-                    librbln_path = os.path.realpath(os.path.join(root, "librbln.so"))
-                    break
-                if os.path.relpath(root, entry["path"]).count(os.sep) >= 2:
-                    break
-            if librbln_path:
+    loaded = (d.get("runtime_lib") or {}).get("loaded") or []
+    if loaded:
+        librbln_path = os.path.realpath(loaded[0])
+    else:
+        for entry in candidates:
+            if entry["exists"]:
+                librbln_path = os.path.realpath(entry["path"])
                 break
-        except OSError:
-            continue
     result.append(
         {
             "name": "librbln.so",
@@ -311,13 +309,15 @@ def _resolve_so_paths(d: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def collect_diagnostics() -> dict[str, Any]:
-    """Gather env snapshot, tvm info, and search paths with lib presence."""
+    """Gather env snapshot, compiler package locations, and runtime-library resolution state."""
+    candidates = _runtime_lib_candidates()
     d = {
         "torch_rbln": _torch_rbln_info(),
         "rebel_compiler": _rebel_compiler_info(),
         "env": _env_snapshot(),
-        "tvm": _tvm_info(),
-        "search_paths": _search_paths_with_libs(),
+        "rebel": _package_location("rebel"),
+        "runtime_lib": _runtime_lib_state(),
+        "runtime_lib_candidates": candidates,
         "python_executable": sys.executable,
         "sys_path": list(sys.path),
     }
@@ -394,27 +394,33 @@ def format_diagnostics(d: dict[str, Any] | None = None, verbose: bool = True) ->
     lines.extend(
         [
             "",
-            "TVM package:",
+            "Compiler packages (import locations):",
         ]
     )
-    tvm = d["tvm"]
-    if tvm.get("found"):
-        lines.append(f"  origin: {tvm.get('origin', 'N/A')}")
-        lines.append(f"  submodule_search_locations: {tvm.get('submodule_search_locations')}")
+    rebel_pkg = d.get("rebel") or {}
+    if rebel_pkg.get("found"):
+        lines.append(f"  rebel: {rebel_pkg.get('submodule_search_locations') or rebel_pkg.get('origin', 'N/A')}")
     else:
-        lines.append("  not found" + (f" ({tvm.get('error', '')})" if tvm.get("error") else ""))
+        lines.append("  rebel: not found" + (f" ({rebel_pkg.get('error', '')})" if rebel_pkg.get("error") else ""))
+    runtime_lib = d.get("runtime_lib") or {}
     lines.extend(
         [
             "",
-            "Search paths used for librbln.so / librbln_runtime.so:",
+            "RBLN runtime library:",
+            f"  loaded: {', '.join(runtime_lib.get('loaded') or []) or 'none'}",
+            f"  version: {runtime_lib.get('version') or 'N/A'}",
         ]
     )
-    for entry in d["search_paths"]:
-        path = entry["path"]
+    lines.extend(
+        [
+            "",
+            f"Candidates considered for {RUNTIME_LIB_NAME} (in order):",
+        ]
+    )
+    for entry in d.get("runtime_lib_candidates") or []:
         exists = "exists" if entry["exists"] else "MISSING"
-        libs = " ".join(f"{name}={('yes' if entry['libs'].get(name) else 'no')}" for name in RBLN_LIB_NAMES)
-        lines.append(f"  [{exists}] {path}")
-        lines.append(f"    {libs}")
+        lines.append(f"  [{exists}] {entry['path']}")
+        lines.append(f"    from: {entry['source']}")
     lines.extend(
         [
             "",

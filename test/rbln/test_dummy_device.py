@@ -31,9 +31,8 @@ def _clean_env() -> dict:
     """A hermetic env copy for subprocess tests.
 
     Strips external state these tests must not inherit:
-      - TORCH_RBLN_DIAGNOSE: another test module (test_find_and_load_tvm_library)
-        sets it at import (it disables backend init) and never restores it, so it
-        leaks into the pytest process and then into ``os.environ`` here.
+      - TORCH_RBLN_DIAGNOSE: a test module that gates backend init sets it at import
+        and may leak it into the pytest process and then into ``os.environ`` here.
       - RBLN_DEVICE_MAP / RBLN_NPUS_PER_DEVICE: a parent shell/CI mapping would
         change the dummy logical device count; tests assume the default of 1 and
         set their own map via ``env_extra`` when they need one.
