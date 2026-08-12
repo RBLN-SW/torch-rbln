@@ -109,9 +109,9 @@ class TestRblnRuntimeLibResolve(TestCase):
         self.assertIn("record", source)
 
     def test_a_leftover_build_tree_does_not_outrank_the_record(self):
-        # A source checkout that was built once keeps <src>/build/librbln.so around forever. It
-        # answers only when the record does not, or it would shadow a distribution that names the
-        # file exactly -- the state a relocating rebel-compiler leaves behind.
+        # A source checkout that was built once keeps <src>/build/librbln.so around forever, so it
+        # answers only when the record does not -- otherwise it shadows a distribution that names
+        # the file exactly.
         root = self._make_root()
         stale = self._make_lib("build", "librbln.so", root=root)
         shipped = self._make_lib("site", "new_home", "librbln.so", root=root)
@@ -131,7 +131,7 @@ class TestRblnRuntimeLibResolve(TestCase):
 
     def test_an_editable_install_falls_back_to_the_build_tree(self):
         # pip install -e <src>/python: the package is <src>/python/rebel, the library <src>/build,
-        # and the distribution records neither -- which is why this tier exists at all.
+        # and the distribution records neither.
         library = self._make_lib("build", "librbln.so")
         source_root = os.path.dirname(os.path.dirname(library))
         with (
@@ -168,9 +168,8 @@ class TestRblnRuntimeLibRecord(TestCase):
     """What the build takes from the same record."""
 
     def test_the_install_relative_directory_is_the_whole_recorded_path(self):
-        # Whatever the record says, not a component of it. rebel-compiler's target layout nests the
-        # library one level deeper (rebel/lib), so comparing against the last directory alone would
-        # start failing at exactly the relocation this is built to survive.
+        # Whatever the record says, not a component of it: rebel-compiler's target layout nests the
+        # library one level deeper (rebel/lib).
         library = "/fake/site/rebel/lib/librbln.so"
         with (
             patch.object(rbln_runtime_lib, "_rebel_package_anchor", return_value="/fake/site"),

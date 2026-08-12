@@ -226,9 +226,8 @@ def _runtime_lib_state() -> dict[str, Any]:
     """Which librbln.so this process mapped, and the version it reports.
 
     Only the one library. rebel-compiler also ships librbln_runtime.so, a runtime-only build its
-    loader can take instead, but the two cannot both be mapped: loading the second aborts the
-    process in its constructors (verified). So there is no state in which reporting both would
-    tell a reader anything the abort has not already.
+    loader can take instead of this one, but the two cannot both be mapped -- loading the second
+    aborts the process in its constructors.
     """
     loaded = loaded_runtime_libraries()
     return {

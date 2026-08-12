@@ -1,16 +1,15 @@
 """Locating and loading the RBLN runtime shared library (``librbln.so``).
 
-This was a vendored copy of ``tvm/_ffi/libinfo.py``, so torch-rbln followed TVM's directory list
-to land on the file rebel-compiler loads. That coupling goes away as rebel-compiler drops TVM,
-and the copy had drifted: it walked every ``PATH`` and ``LD_LIBRARY_PATH`` entry recursively.
-
-The library is now the one the ``rebel-compiler`` distribution recorded installing, anchored on
-the ``rebel`` package this interpreter imports. Recorded paths are relative to the install root,
+The library is the one the ``rebel-compiler`` distribution recorded installing, anchored on the
+``rebel`` package this interpreter imports. Recorded paths are relative to the install root,
 which is also what the install RPATH is written against, so one record answers where the library
 is, where it sits relative to the package, and where the headers are.
 
 ``LD_LIBRARY_PATH`` is the override: the dynamic loader and rebel-compiler's loader both honour
 it, so all three sides land on the same file.
+
+Kept small and stdlib-only -- ``tools/find_rebel_runtime.py`` loads it by path during the build,
+before torch_rbln exists, so anything it reaches for has to work then too.
 """
 
 import ctypes
@@ -78,8 +77,7 @@ def _record_candidates(entry: object, anchor: str | None) -> Iterator[str]:
 def record_relative_dir(path: str) -> str | None:
     """Directory holding ``path`` relative to the install root, or None if it is not recorded.
 
-    A recorded path already expresses the relationship the install RPATH is written against, so
-    nothing is reconstructed from whichever site-packages the build ran out of.
+    A recorded path already expresses the relationship the install RPATH is written against.
     """
     resolved = os.path.realpath(path)
     anchor = _rebel_package_anchor()

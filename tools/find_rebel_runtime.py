@@ -5,13 +5,12 @@ Runs the same resolver torch-rbln uses at import time, so the build links agains
 that will actually be loaded and neither side hard-codes where rebel-compiler keeps it. Loaded
 by path because torch_rbln cannot be imported before it is built.
 
-Every answer comes from the rebel-compiler distribution's own record of what it installed, whose
-paths are already relative to the install root -- the same relationship the install RPATH is
-written against. Nothing is reconstructed from whichever site-packages the build runs out of,
-which a PEP 517 overlay or a split purelib/platlib would get wrong.
+Every answer comes from the rebel-compiler distribution's record of what it installed, whose
+paths are already relative to the install root -- the relationship the install RPATH is written
+against.
 
-Prints ``KEY=VALUE`` lines for CMake: LIBRARY, LIBRARY_DIR, LIBRARY_RELDIR (empty
-when the library is not recorded, e.g. an external tree) and INCLUDE_DIR.
+Prints ``KEY=VALUE`` lines for CMake: LIBRARY, LIBRARY_DIR, LIBRARY_RELDIR (empty when the
+library is not recorded, e.g. an external tree) and INCLUDE_DIR.
 """
 
 import argparse
