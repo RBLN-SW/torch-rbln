@@ -51,7 +51,6 @@ test/
 ├── rbln/                                  # RBLN backend-specific tests
 │   ├── test_custom_kernel.py              # RBLN custom kernels
 │   ├── test_device_mapping.py             # Device mapping and topology APIs
-│   ├── test_find_and_load_tvm_library.py  # Error handling when librbln.so cannot be found
 │   ├── test_graph_eager_mode.py           # Numerical agreement between torch.compile graph mode and eager mode
 │   ├── test_internal_op_utils.py          # Internal op utilities
 │   ├── test_llama_ops.py                  # Core ops used in LLaMA-family models
@@ -59,6 +58,7 @@ test/
 │   ├── test_non_zero_storage_offset.py    # Correct handling of tensors with non-zero storage offsets
 │   ├── test_op_caching.py                 # Operator caching / graph-reuse behavior
 │   ├── test_rbln_apis.py                  # RBLN Python APIs
+│   ├── test_rbln_runtime_lib.py           # librbln.so resolution order and single-copy/version checks
 │   ├── test_registered_ops.py             # All natively registered and fallback ops from RBLNRegisterOps.cpp / register_ops.py
 │   ├── test_sdpa_decode_overflow.py       # SDPA decode-phase overflow detection and fallback behavior
 │   ├── test_tensor_copy.py                # Tensor copy operations across directions (H2D, D2H, D2D) and dtypes

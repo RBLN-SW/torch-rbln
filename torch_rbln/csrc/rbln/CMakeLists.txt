@@ -13,7 +13,7 @@ target_link_libraries(${target} PUBLIC torch_rbln ${TORCH_PYTHON_LIBRARY})
 set_target_properties(${target} PROPERTIES
   OUTPUT_NAME _C
   PREFIX ""
-  INSTALL_RPATH "$ORIGIN/lib:$ORIGIN/../tvm:$ORIGIN/../torch/lib"
+  INSTALL_RPATH "$ORIGIN/lib:$ORIGIN/../${REBEL_RUNTIME_RELDIR}:$ORIGIN/../torch/lib"
 )
 install(TARGETS ${target}
   DESTINATION .

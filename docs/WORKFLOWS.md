@@ -87,7 +87,7 @@ The CD workflow builds and publishes release artifacts after code has passed bot
 
 The Build workflow builds the `torch-rbln` wheel and publishes it to the internal package index, on every pull request and on manual `workflow_dispatch`. Unlike CI, Release, and CD, it builds in a container instead of dispatching to RBLN NPU hardware.
 
-The entrypoint fans out a `python_version` × `build_type` matrix to the reusable [`_build-wheel.yaml`](../.github/workflows/_build-wheel.yaml), which pins `rebel-compiler`, builds the wheel, publishes it, and verifies it installs in a clean environment. PRs build `Release`; a manual dispatch can select `Release`, `Debug`, or both via `build_types`.
+The entrypoint fans out a `python_version` × `build_type` matrix to the reusable [`_build-wheel.yaml`](../.github/workflows/_build-wheel.yaml), which pins `rebel-compiler`, builds the wheel, verifies the built artifact in a clean environment, publishes it, and then checks the published version resolves from the index. PRs build `Release`; a manual dispatch can select `Release`, `Debug`, or both via `build_types`.
 
 ---
 
