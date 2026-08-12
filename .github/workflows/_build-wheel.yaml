@@ -139,6 +139,99 @@ jobs:
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "::notice::Built torch-rbln==${version}"
 
+      - name: Verify the built wheel
+        env:
+          TORCH_RBLN_VERSION: ${{ steps.read_version.outputs.version }}
+          BUILD_TYPE: ${{ inputs.build_type }}
+          UV_INDEX: https://download.pytorch.org/whl/cpu rbln=${{ secrets.INTERNAL_INDEX_URL }}
+          UV_INDEX_STRATEGY: unsafe-best-match
+          UV_INDEX_RBLN_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
+          UV_INDEX_RBLN_PASSWORD: ${{ secrets.INTERNAL_INDEX_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          uv venv verify-install/.venv
+          uv pip install \
+            --python verify-install/.venv/bin/python \
+            --constraint constraints-build-dev.txt \
+            rebel-compiler \
+            dist/*.whl
+
+          # `python -` puts cwd on sys.path; cd out of the repo root so the source doesn't shadow the installed wheel.
+          cd verify-install
+          .venv/bin/python - <<'PY'
+          import os
+
+          import rebel
+          import torch
+          import torch_rbln
+
+          expected_version = os.environ["TORCH_RBLN_VERSION"]
+          build_type = os.environ["BUILD_TYPE"]
+          print(f"torch={torch.__version__} torch_rbln={torch_rbln.__version__} rebel={rebel.__version__}")
+
+          assert torch_rbln.__version__ == expected_version, (
+              f"torch-rbln version mismatch: expected {expected_version}, got {torch_rbln.__version__}"
+          )
+          if build_type == "Debug":
+              assert "debug" in torch_rbln.__version__, (
+                  f"Debug build is missing its debug marker: {torch_rbln.__version__}"
+              )
+          else:
+              assert "debug" not in torch_rbln.__version__, (
+                  f"Release build must not carry a debug marker: {torch_rbln.__version__}"
+              )
+          print(f"::notice::Verified torch-rbln=={torch_rbln.__version__} ({build_type})")
+          PY
+
+          # The import above cannot check the install RPATH: torch_rbln ctypes-loads librbln.so
+          # before the extension, so the extension resolves it by SONAME against an already-mapped
+          # library and RUNPATH is never consulted. Load the extension on its own so a wrong RPATH
+          # fails here, not in whatever loads it without going through torch_rbln.
+          #
+          # Autoload off, because torch.backends autoloading is on by default and would import
+          # torch_rbln -- and with it librbln.so -- out of `import torch` alone. LD_LIBRARY_PATH
+          # cleared, because the loader consults it ahead of RUNPATH: an inherited one would
+          # satisfy the dependency and leave the RUNPATH untested again.
+          env -u LD_LIBRARY_PATH TORCH_DEVICE_BACKEND_AUTOLOAD=0 .venv/bin/python - <<'PY'
+          import ctypes
+          import os
+          import re
+          from importlib.metadata import distribution
+
+          import torch  # noqa: F401  -- so libtorch resolves by SONAME, leaving librbln.so to RUNPATH
+
+          def mapped_runtime_libs():
+              with open("/proc/self/maps") as maps:
+                  return sorted({os.path.realpath(p) for p in re.findall(r"/\S*librbln\.so", maps.read())})
+
+          # Assert the precondition rather than assume it: if anything mapped librbln.so already,
+          # the load below proves nothing and this check would pass no matter what the RPATH said.
+          already = mapped_runtime_libs()
+          if already:
+              raise SystemExit(f"::error::librbln.so was already mapped ({already}); RPATH untested")
+
+          # Read the record here rather than through torch_rbln._internal.rbln_runtime_lib:
+          # importing that runs torch_backends_entry_point(), which maps the library itself.
+          expected = os.path.realpath(
+              str(next(f for f in distribution("rebel-compiler").files if f.name == "librbln.so").locate())
+          )
+
+          library = str(next(f for f in distribution("torch-rbln").files if f.name == "libtorch_rbln.so").locate())
+          try:
+              ctypes.CDLL(library)
+          except OSError as e:
+              raise SystemExit(f"::error::install RPATH does not resolve librbln.so: {e}") from e
+
+          # Loading is not the property under test. Any librbln.so on the loader's search path
+          # satisfies the NEEDED entry, so a wrong RUNPATH passes as long as some copy is findable
+          # somewhere; what it has to do is reach the one rebel-compiler installed.
+          mapped = mapped_runtime_libs()
+          if mapped != [expected]:
+              raise SystemExit(f"::error::RUNPATH resolved {mapped}, expected [{expected}]")
+          print(f"::notice::Verified the install RPATH of {library} -> {expected}")
+          PY
+
       - name: Publish wheel to internal package index
         env:
           TORCH_RBLN_VERSION: ${{ steps.read_version.outputs.version }}
@@ -167,10 +260,9 @@ jobs:
             echo "::notice::Published torch-rbln==${TORCH_RBLN_VERSION} to the internal package index"
           fi
 
-      - name: Verify wheel installation
+      - name: Verify the published wheel resolves from the index
         env:
           TORCH_RBLN_VERSION: ${{ steps.read_version.outputs.version }}
-          BUILD_TYPE: ${{ inputs.build_type }}
           UV_INDEX: https://download.pytorch.org/whl/cpu rbln=${{ secrets.INTERNAL_INDEX_URL }}
           UV_INDEX_STRATEGY: unsafe-best-match
           UV_INDEX_RBLN_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
@@ -178,36 +270,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          uv venv verify-install/.venv
+          # The artifact was verified before publishing; this checks the other half, which that
+          # cannot: that the upload landed and the version we built is resolvable by name. It is
+          # the first thing a consumer hits, and it fails for reasons of its own -- a rejected
+          # upload, or a version string the index does not end up serving.
+          uv venv verify-index/.venv
           uv pip install \
-            --python verify-install/.venv/bin/python \
+            --python verify-index/.venv/bin/python \
             --constraint constraints-build-dev.txt \
             rebel-compiler \
             "torch-rbln==${TORCH_RBLN_VERSION}"
 
-          # `python -` puts cwd on sys.path; cd out of the repo root so the source doesn't shadow the installed wheel.
-          cd verify-install
+          # `python -` puts cwd on sys.path; stay out of the repo root so the source tree does not
+          # shadow what we just installed.
+          cd verify-index
           .venv/bin/python - <<'PY'
-          import os
-
-          import rebel
-          import torch
           import torch_rbln
 
-          expected_version = os.environ["TORCH_RBLN_VERSION"]
-          build_type = os.environ["BUILD_TYPE"]
-          print(f"torch={torch.__version__} torch_rbln={torch_rbln.__version__} rebel={rebel.__version__}")
-
-          assert torch_rbln.__version__ == expected_version, (
-              f"torch-rbln version mismatch: expected {expected_version}, got {torch_rbln.__version__}"
-          )
-          if build_type == "Debug":
-              assert "debug" in torch_rbln.__version__, (
-                  f"Debug build is missing its debug marker: {torch_rbln.__version__}"
-              )
-          else:
-              assert "debug" not in torch_rbln.__version__, (
-                  f"Release build must not carry a debug marker: {torch_rbln.__version__}"
-              )
-          print(f"::notice::Verified torch-rbln=={torch_rbln.__version__} ({build_type})")
+          print(f"::notice::Installed torch-rbln=={torch_rbln.__version__} from the internal index")
           PY

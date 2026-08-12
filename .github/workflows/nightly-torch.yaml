@@ -1,0 +1,245 @@
+name: Nightly PyTorch
+
+on:
+  schedule:
+    # Daily 14:00 KST (05:00 UTC)
+    - cron: 0 5 * * *
+  workflow_dispatch:
+    inputs:
+      python_version:
+        description: Python version (3.10-3.13)
+        type: string
+        required: false
+        default: '3.12'
+      torch_version:
+        description: PyTorch nightly version to pin (leave empty to resolve the latest nightly)
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PYTORCH_NIGHTLY_INDEX_NAME: pytorch-nightly-cpu
+  PYTORCH_NIGHTLY_INDEX_URL: https://download.pytorch.org/whl/nightly/cpu
+  TEST_VENV: nightly-test/.venv
+
+jobs:
+  nightly_torch:
+    name: Build and test against PyTorch nightly
+    if: ${{ github.repository_owner == 'RBLN-SW' }}
+    runs-on: ${{ vars.TORCH_RBLN_RUNNER_CPU_LARGE }}
+    env:
+      GIT_CONFIG_COUNT: '1'
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: ${{ github.workspace }}
+      RBLN_FORCE_NPU_NAME: RBLN-CA25
+    timeout-minutes: 90
+    container:
+      image: ghcr.io/rebellions-sw/rbln-build:0.11.0-ubi9-py${{ inputs.python_version || '3.12' }}  # zizmor: ignore[unpinned-images]
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GIT_PAT }}
+    steps:
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+
+      # Resolved before checkout so the repository's release-pinned uv configuration
+      # cannot influence which wheel is picked.
+      - name: Resolve PyTorch nightly version
+        id: resolve_torch_version
+        env:
+          TORCH_VERSION: ${{ inputs.torch_version }}
+        run: |
+          set -euo pipefail
+
+          requirement=torch
+          if [[ -n "${TORCH_VERSION}" ]]; then
+            requirement="torch==${TORCH_VERSION}"
+          fi
+
+          # Resolved even when explicit: normalizes `2.14.0.dev20260810` to the
+          # `+cpu` version the smoke test compares against `torch.__version__`.
+          target_version="$(printf '%s\n' "${requirement}" \
+            | uv pip compile - --no-config --no-deps --no-header --no-annotate \
+                --prerelease allow --default-index "${PYTORCH_NIGHTLY_INDEX_URL}" \
+            | sed -n 's/^torch==//p')"
+          if [[ -z "${target_version}" ]]; then
+            echo "::error::Failed to resolve ${requirement} from ${PYTORCH_NIGHTLY_INDEX_URL}"
+            exit 1
+          fi
+
+          echo "target_version=${target_version}" >> "${GITHUB_OUTPUT}"
+          echo "::notice::Testing against torch==${target_version}"
+
+      - name: Check out torch-rbln repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Repoint torch dependency to the nightly wheel
+        env:
+          TORCH_VERSION: ${{ steps.resolve_torch_version.outputs.target_version }}
+        run: |
+          set -euo pipefail
+
+          python3 tools/replace_depends.py \
+            --source torch \
+            --target "torch==${TORCH_VERSION}" \
+            --pyproject-path pyproject.toml \
+            --set-index "${PYTORCH_NIGHTLY_INDEX_NAME}"
+
+          if ! grep -qF "\"torch==${TORCH_VERSION}\"" pyproject.toml; then
+            echo "::error::Failed to repoint the torch dependency to ${TORCH_VERSION}"
+            exit 1
+          fi
+          grep -nE '"torch==|^torch = ' pyproject.toml
+
+      - name: Build wheel
+        env:
+          TORCH_RBLN_BUILD_TYPE: Release
+          UV_INDEX: rbln=${{ secrets.INTERNAL_INDEX_URL }}
+          UV_INDEX_RBLN_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
+          UV_INDEX_RBLN_PASSWORD: ${{ secrets.INTERNAL_INDEX_PASSWORD }}
+          UV_BUILD_CONSTRAINT: constraints-build-dev.txt
+        run: |
+          set -euo pipefail
+
+          [[ -f /etc/os-release ]] && . /etc/os-release
+          case "${ID:-}:${ID_LIKE:-}" in
+            *debian* | *ubuntu*) export CC=gcc-13 CXX=g++-13 ;;
+            *) source /opt/rh/gcc-toolset-13/enable ;;
+          esac
+          cxx="${CXX:-g++}"
+          echo "::notice::C++ compiler: $(command -v "${cxx}")"
+          "${cxx}" --version
+
+          uv build --wheel
+
+      - name: Read built wheel version
+        id: read_version
+        run: |
+          set -euo pipefail
+
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          shopt -u nullglob
+          if [[ "${#wheels[@]}" -ne 1 ]]; then
+            echo "::error::Expected exactly one wheel in dist/, found ${#wheels[@]}: ${wheels[*]}"
+            exit 1
+          fi
+
+          version="$(basename "${wheels[0]}" | cut -d- -f2)"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "::notice::Built torch-rbln==${version}"
+
+      - name: Install the wheel into a clean environment
+        env:
+          UV_INDEX: ${{ env.PYTORCH_NIGHTLY_INDEX_URL }} rbln=${{ secrets.INTERNAL_INDEX_URL }}
+          UV_INDEX_STRATEGY: unsafe-best-match
+          UV_INDEX_RBLN_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
+          UV_INDEX_RBLN_PASSWORD: ${{ secrets.INTERNAL_INDEX_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          uv venv "${TEST_VENV}"
+          uv pip install \
+            --python "${TEST_VENV}/bin/python" \
+            --constraint constraints-build-dev.txt \
+            rebel-compiler \
+            expecttest \
+            numpy \
+            pytest \
+            pytest-xdist \
+            dist/*.whl
+
+      - name: Smoke-test the installed wheel
+        env:
+          TORCH_RBLN_VERSION: ${{ steps.read_version.outputs.version }}
+          TORCH_VERSION: ${{ steps.resolve_torch_version.outputs.target_version }}
+          RBLN_DUMMY_DEVICE: '1'
+        run: |
+          set -euo pipefail
+
+          # `python -` puts cwd on sys.path; run outside the repository root so the source
+          # tree does not shadow the installed wheel.
+          cd nightly-test
+          .venv/bin/python - <<'PY'
+          import os
+
+          import torch
+
+          import torch_rbln  # noqa: F401
+
+          expected_torch_rbln = os.environ["TORCH_RBLN_VERSION"]
+          expected_torch = os.environ["TORCH_VERSION"]
+          print(f"torch={torch.__version__} torch_rbln={torch_rbln.__version__}")
+
+          assert torch_rbln.__version__ == expected_torch_rbln, (
+              f"torch-rbln version mismatch: expected {expected_torch_rbln}, got {torch_rbln.__version__}"
+          )
+          assert torch.__version__ == expected_torch, (
+              f"torch version mismatch: expected {expected_torch}, got {torch.__version__}"
+          )
+          assert torch.rbln.device_count() == 1, f"expected 1 logical device, got {torch.rbln.device_count()}"
+          assert torch.rbln.physical_device_count() == 0, (
+              f"expected 0 physical devices, got {torch.rbln.physical_device_count()}"
+          )
+
+          cpu_tensor = torch.arange(16, dtype=torch.float32).reshape(4, 4)
+          device_tensor = cpu_tensor.to("rbln")
+          assert device_tensor.device.type == "rbln", device_tensor.device
+          torch.testing.assert_close(device_tensor.cpu(), cpu_tensor)
+          torch.testing.assert_close((device_tensor + device_tensor).cpu(), cpu_tensor * 2)
+
+          print(f"::notice::Smoke test passed: torch-rbln=={torch_rbln.__version__} on torch {torch.__version__}")
+          PY
+
+      # Both suites manage RBLN_DUMMY_DEVICE themselves: test_dummy_device sets it per
+      # subprocess, and test_no_device requires device_count() == 0.
+      - name: Run no-NPU test suites
+        run: |
+          set -euo pipefail
+
+          "${TEST_VENV}/bin/python" -m pytest \
+            test/rbln/test_dummy_device.py \
+            test/distributed/test_no_device.py \
+            -m test_set_ci \
+            --numprocesses=1
+
+      - name: Report results
+        if: ${{ always() }}
+        env:
+          TORCH_VERSION: ${{ steps.resolve_torch_version.outputs.target_version }}
+          TORCH_RBLN_VERSION: ${{ steps.read_version.outputs.version }}
+          PYTHON_VERSION: ${{ inputs.python_version || '3.12' }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## Nightly PyTorch build"
+            echo
+            echo "| Item | Value |"
+            echo "| --- | --- |"
+            echo "| Status | \`${JOB_STATUS}\` |"
+            echo "| torch | \`${TORCH_VERSION:-unresolved}\` |"
+            echo "| torch-rbln | \`${TORCH_RBLN_VERSION:-not built}\` |"
+            echo "| Python | \`${PYTHON_VERSION}\` |"
+            echo "| Commit | \`${GITHUB_SHA}\` |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          if [[ "${JOB_STATUS}" != "success" ]]; then
+            echo "::error::torch-rbln failed to build or test against torch ${TORCH_VERSION:-unresolved}"
+          fi

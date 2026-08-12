@@ -141,6 +141,21 @@ class TestRuntimeUnavailable(TestCase):
         )
         _assert_ok(self, result, "OFFLOAD_OK")
 
+    def test_release_offload_temp_storage_no_ops_when_runtime_unavailable(self):
+        """torch.rbln.release_offload_temp_storage() runs on the shutdown path, after the
+        runtime may already be gone, so it is gated like the offload toggle: it reports 0
+        files removed instead of dereferencing a dead runtime handle."""
+        result = _run_subprocess(
+            """
+            C._set_runtime_shutting_down(True)
+            assert C.runtime_available() is False
+            assert torch.rbln.release_offload_temp_storage() == 0
+            assert C._release_offload_temp_storage() == 0
+            print("RELEASE_OK")
+            """
+        )
+        _assert_ok(self, result, "RELEASE_OK")
+
     def test_flag_toggles_runtime_available(self):
         """Setting / clearing the shutdown flag flips runtime_available() and restores it."""
         result = _run_subprocess(

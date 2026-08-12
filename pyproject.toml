@@ -31,7 +31,10 @@ dependencies = [
 
 [build-system]
 requires = [
-  "hatchling>=1.25.0",
+  # Upper bound: hatchling 1.32 emits Metadata-Version 2.5, which the twine that
+  # publishes these wheels (6.1.0) rejects as invalid. Lift once the publisher
+  # understands 2.5.
+  "hatchling>=1.25.0,<1.32",
   "setuptools-scm>=8.0",
   "PyYAML>=6,<7",
   "cmake>=3.18,<4.0",
@@ -132,6 +135,7 @@ prerelease = "if-necessary-or-explicit"
 index = [
   { name = "pypi", url = "https://pypi.org/simple/", default = true },
   { name = "pytorch-cpu", url = "https://download.pytorch.org/whl/cpu", explicit = true },
+  { name = "pytorch-nightly-cpu", url = "https://download.pytorch.org/whl/nightly/cpu", explicit = true },
   { name = "rbln", url = "https://pypi.rbln.ai/simple/", explicit = true },
 ]
 
@@ -150,7 +154,7 @@ build = [
   "editables>=0.5",
   "rebel-compiler>=0.11.1,<0.20.0",
   "setuptools-scm>=8.0",
-  "hatchling>=1.25",
+  "hatchling>=1.25,<1.32",  # see the build-system pin
   "mypy>=1.13.0,<1.14.0",
   "ninja>=1.11",
   "pip>=24.3.1,<24.4"
