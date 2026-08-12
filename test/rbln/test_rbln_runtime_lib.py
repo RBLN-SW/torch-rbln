@@ -167,11 +167,30 @@ class TestRblnRuntimeLibResolve(TestCase):
 class TestRblnRuntimeLibRecord(TestCase):
     """What the build takes from the same record."""
 
-    def test_the_install_relative_directory_comes_from_the_record(self):
-        # The install RPATH is written against the directory the package sits in, which a recorded
-        # path already expresses -- no arithmetic against whichever site-packages the build ran in.
+    def test_the_install_relative_directory_is_the_whole_recorded_path(self):
+        # Whatever the record says, not a component of it. rebel-compiler's target layout nests the
+        # library one level deeper (rebel/lib), so comparing against the last directory alone would
+        # start failing at exactly the relocation this is built to survive.
+        library = "/fake/site/rebel/lib/librbln.so"
+        with (
+            patch.object(rbln_runtime_lib, "_rebel_package_anchor", return_value="/fake/site"),
+            patch.object(
+                rbln_runtime_lib,
+                "_record_entries",
+                return_value=[_record("rebel/lib/librbln.so", library)],
+            ),
+        ):
+            self.assertEqual(rbln_runtime_lib.record_relative_dir(library), os.path.join("rebel", "lib"))
+
+    def test_the_installed_library_is_under_its_recorded_directory(self):
+        # The same rule against the real install, at whatever depth it happens to sit.
         library, _ = rbln_runtime_lib.resolve_runtime_library()
-        self.assertEqual(rbln_runtime_lib.record_relative_dir(library), os.path.basename(os.path.dirname(library)))
+        reldir = rbln_runtime_lib.record_relative_dir(library)
+        self.assertIsNotNone(reldir)
+        self.assertTrue(
+            os.path.realpath(library).endswith(os.path.join(reldir, os.path.basename(library))),
+            f"{library} does not sit under the recorded {reldir}",
+        )
 
     def test_a_library_outside_the_record_has_no_relative_directory(self):
         self.assertIsNone(rbln_runtime_lib.record_relative_dir("/nowhere/librbln.so"))
