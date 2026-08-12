@@ -12,6 +12,7 @@ This document describes the GitHub Actions workflows that power the automated te
 | Build (`build.yaml`)                   | PRs; manual dispatch          | Build and publish the wheel         | —                                                                  |
 | Check PR Title (`check-pr-title.yaml`) | PR opened, edited, or updated | Enforce Conventional Commits format | —                                                                  |
 | Lint (`lint.yaml`)                     | PRs; pushes to `dev`          | Lint the source tree and workflows  | —                                                                  |
+| Nightly PyTorch (`nightly-torch.yaml`) | Daily cron; manual dispatch   | Track the PyTorch nightly wheel     | No-NPU smoke tests (`RBLN_DUMMY_DEVICE=1`)                         |
 
 CI, Release, and CD workflows delegate to a shared [Event Dispatch](#event-dispatch-mechanism) mechanism that sends events to infrastructure with physical RBLN NPU devices.
 
@@ -27,6 +28,7 @@ CI, Release, and CD workflows delegate to a shared [Event Dispatch](#event-dispa
 | Build          | All PRs                         | —                  | PRs only            |
 | Check PR Title | On open, edit, sync, reopen     | —                  | Yes                 |
 | Lint           | To `main` or `dev`              | To `dev`           | Yes                 |
+| Nightly PyTorch| —                               | —                  | **No**              |
 
 CI, Release, and Lint runs are grouped by PR number (or SHA for pushes); a new push cancels the in-progress run. CD runs are never cancelled — once a deployment starts, it runs to completion. Check PR Title runs are grouped by PR number and always cancel the in-progress run. Build also runs on manual `workflow_dispatch`; its PR runs are grouped by PR number and cancel superseded commits, while dispatch runs are grouped by run ID and always complete.
 
@@ -147,6 +149,26 @@ The event is dispatched to a separate repository (configured via `vars.TORCH_RBL
 This workflow runs on a daily schedule and tracks the latest `rebel-compiler` production build. When a newer one is available, it creates or updates a pull request against `dev` for a maintainer to review and merge.
 
 It can also be run manually via `workflow_dispatch`, optionally pinning a specific `rebel_compiler_version` instead of resolving the latest.
+
+---
+
+## Nightly PyTorch Workflow
+
+**File:** [`.github/workflows/nightly-torch.yaml`](../.github/workflows/nightly-torch.yaml)
+
+Everyday CI builds against the release pin (`torch==2.11.0+cpu`). This workflow additionally builds and smoke-tests `torch-rbln` against the **latest PyTorch nightly CPU wheel** every day at 14:00 KST (05:00 UTC), so an upstream breaking change surfaces within a day instead of at the next `torch` bump. Tracking PyTorch `main` in CI is the outstanding prerequisite for enlisting the repository in PyTorch's Cross-Repository CI Relay (CRCR).
+
+Scheduled runs use the default branch (`dev`); a manual `workflow_dispatch` tests whichever ref it is started from, and can pin an explicit `torch_version` and `python_version` instead of the defaults (latest nightly, Python 3.12). An explicit `torch_version` is still resolved against the nightly index, so it may be given with or without the `+cpu` local suffix and fails fast if the index does not serve it.
+
+Steps:
+
+1. **Resolve** the latest nightly version from `https://download.pytorch.org/whl/nightly/cpu`, before checkout so the repository's release-pinned uv configuration cannot influence the result.
+2. **Repoint** the `torch` pin via [`tools/replace_depends.py`](../tools/replace_depends.py) — it rewrites `[project].dependencies` and `[build-system].requires`, and points `[tool.uv.sources].torch` at the `pytorch-nightly-cpu` index declared in `pyproject.toml`. The edit is local to the run and never committed.
+3. **Build** the wheel with the same container, compiler setup, and `constraints-build-dev.txt` build constraint as [`_build-wheel.yaml`](../.github/workflows/_build-wheel.yaml), but **without publishing** it to the internal package index.
+4. **Test** on a CPU-only runner with no NPU attached, using `RBLN_DUMMY_DEVICE=1` (see [Configuration](CONFIGURATION.md#rbln_dummy_device)):
+   - a smoke script that installs the built wheel into a clean venv and checks the versions, the dummy device topology, a host↔device round-trip, and one eager op;
+   - the no-NPU test suites `test/rbln/test_dummy_device.py` and `test/distributed/test_no_device.py` (each manages `RBLN_DUMMY_DEVICE` itself, so it is not set for this step).
+5. **Report** the resolved `torch` version, the built `torch-rbln` version, and the outcome to the job summary, with an error annotation on failure.
 
 ---
 
