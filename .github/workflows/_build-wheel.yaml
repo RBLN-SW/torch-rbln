@@ -139,35 +139,7 @@ jobs:
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "::notice::Built torch-rbln==${version}"
 
-      - name: Publish wheel to internal package index
-        env:
-          TORCH_RBLN_VERSION: ${{ steps.read_version.outputs.version }}
-          INTERNAL_INDEX_URL: ${{ secrets.INTERNAL_INDEX_URL }}
-          UV_PUBLISH_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
-          UV_PUBLISH_PASSWORD: ${{ secrets.INTERNAL_INDEX_PASSWORD }}
-        run: |  # zizmor: ignore[use-trusted-publishing]
-          set -euo pipefail
-
-          # curl authenticates its index query via ~/.netrc.
-          index_host="${INTERNAL_INDEX_URL#*://}"
-          index_host="${index_host%%/*}"
-          umask 077
-          cat > "${HOME}/.netrc" <<EOF
-          machine ${index_host}
-          login ${UV_PUBLISH_USERNAME}
-          password ${UV_PUBLISH_PASSWORD}
-          EOF
-
-          # Publish each version once; skip if it's already on the index.
-          wheel_name="$(basename dist/*.whl)"
-          if curl -fsSL --netrc "${INTERNAL_INDEX_URL%/}/torch-rbln/" | grep -qF -- "${wheel_name}"; then
-            echo "::notice::torch-rbln==${TORCH_RBLN_VERSION} is already on the internal package index; skipping publish"
-          else
-            uv publish --publish-url "${INTERNAL_INDEX_URL}" dist/*.whl
-            echo "::notice::Published torch-rbln==${TORCH_RBLN_VERSION} to the internal package index"
-          fi
-
-      - name: Verify wheel installation
+      - name: Verify the built wheel
         env:
           TORCH_RBLN_VERSION: ${{ steps.read_version.outputs.version }}
           BUILD_TYPE: ${{ inputs.build_type }}
@@ -183,7 +155,7 @@ jobs:
             --python verify-install/.venv/bin/python \
             --constraint constraints-build-dev.txt \
             rebel-compiler \
-            "torch-rbln==${TORCH_RBLN_VERSION}"
+            dist/*.whl
 
           # `python -` puts cwd on sys.path; cd out of the repo root so the source doesn't shadow the installed wheel.
           cd verify-install
@@ -211,3 +183,63 @@ jobs:
               )
           print(f"::notice::Verified torch-rbln=={torch_rbln.__version__} ({build_type})")
           PY
+
+          # The import above cannot check the install RPATH: torch_rbln ctypes-loads librbln.so
+          # before the extension, so the extension resolves it by SONAME against an already-mapped
+          # library and RUNPATH is never consulted. Load the extension on its own so a wrong RPATH
+          # fails here, not in whatever loads it without going through torch_rbln.
+          #
+          # Autoload off, because torch.backends autoloading is on by default and would import
+          # torch_rbln -- and with it librbln.so -- out of `import torch` alone.
+          TORCH_DEVICE_BACKEND_AUTOLOAD=0 .venv/bin/python - <<'PY'
+          import ctypes
+          import re
+          from importlib.metadata import distribution
+
+          import torch  # noqa: F401  -- so libtorch resolves by SONAME, leaving librbln.so to RUNPATH
+
+          def mapped_runtime_libs():
+              with open("/proc/self/maps") as maps:
+                  return sorted(set(re.findall(r"/\S*librbln\.so", maps.read())))
+
+          # Assert the precondition rather than assume it: if anything mapped librbln.so already,
+          # the load below proves nothing and this check would pass no matter what the RPATH said.
+          already = mapped_runtime_libs()
+          if already:
+              raise SystemExit(f"::error::librbln.so was already mapped ({already}); RPATH untested")
+
+          library = str(next(f for f in distribution("torch-rbln").files if f.name == "libtorch_rbln.so").locate())
+          try:
+              ctypes.CDLL(library)
+          except OSError as e:
+              raise SystemExit(f"::error::install RPATH does not resolve librbln.so: {e}") from e
+          print(f"::notice::Verified the install RPATH of {library} -> {mapped_runtime_libs()}")
+          PY
+
+      - name: Publish wheel to internal package index
+        env:
+          TORCH_RBLN_VERSION: ${{ steps.read_version.outputs.version }}
+          INTERNAL_INDEX_URL: ${{ secrets.INTERNAL_INDEX_URL }}
+          UV_PUBLISH_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
+          UV_PUBLISH_PASSWORD: ${{ secrets.INTERNAL_INDEX_PASSWORD }}
+        run: |  # zizmor: ignore[use-trusted-publishing]
+          set -euo pipefail
+
+          # curl authenticates its index query via ~/.netrc.
+          index_host="${INTERNAL_INDEX_URL#*://}"
+          index_host="${index_host%%/*}"
+          umask 077
+          cat > "${HOME}/.netrc" <<EOF
+          machine ${index_host}
+          login ${UV_PUBLISH_USERNAME}
+          password ${UV_PUBLISH_PASSWORD}
+          EOF
+
+          # Publish each version once; skip if it's already on the index.
+          wheel_name="$(basename dist/*.whl)"
+          if curl -fsSL --netrc "${INTERNAL_INDEX_URL%/}/torch-rbln/" | grep -qF -- "${wheel_name}"; then
+            echo "::notice::torch-rbln==${TORCH_RBLN_VERSION} is already on the internal package index; skipping publish"
+          else
+            uv publish --publish-url "${INTERNAL_INDEX_URL}" dist/*.whl
+            echo "::notice::Published torch-rbln==${TORCH_RBLN_VERSION} to the internal package index"
+          fi
