@@ -190,9 +190,12 @@ jobs:
           # fails here, not in whatever loads it without going through torch_rbln.
           #
           # Autoload off, because torch.backends autoloading is on by default and would import
-          # torch_rbln -- and with it librbln.so -- out of `import torch` alone.
-          TORCH_DEVICE_BACKEND_AUTOLOAD=0 .venv/bin/python - <<'PY'
+          # torch_rbln -- and with it librbln.so -- out of `import torch` alone. LD_LIBRARY_PATH
+          # cleared, because the loader consults it ahead of RUNPATH: an inherited one would
+          # satisfy the dependency and leave the RUNPATH untested again.
+          env -u LD_LIBRARY_PATH TORCH_DEVICE_BACKEND_AUTOLOAD=0 .venv/bin/python - <<'PY'
           import ctypes
+          import os
           import re
           from importlib.metadata import distribution
 
@@ -200,7 +203,7 @@ jobs:
 
           def mapped_runtime_libs():
               with open("/proc/self/maps") as maps:
-                  return sorted(set(re.findall(r"/\S*librbln\.so", maps.read())))
+                  return sorted({os.path.realpath(p) for p in re.findall(r"/\S*librbln\.so", maps.read())})
 
           # Assert the precondition rather than assume it: if anything mapped librbln.so already,
           # the load below proves nothing and this check would pass no matter what the RPATH said.
@@ -208,12 +211,25 @@ jobs:
           if already:
               raise SystemExit(f"::error::librbln.so was already mapped ({already}); RPATH untested")
 
+          # Read the record here rather than through torch_rbln._internal.rbln_runtime_lib:
+          # importing that runs torch_backends_entry_point(), which maps the library itself.
+          expected = os.path.realpath(
+              str(next(f for f in distribution("rebel-compiler").files if f.name == "librbln.so").locate())
+          )
+
           library = str(next(f for f in distribution("torch-rbln").files if f.name == "libtorch_rbln.so").locate())
           try:
               ctypes.CDLL(library)
           except OSError as e:
               raise SystemExit(f"::error::install RPATH does not resolve librbln.so: {e}") from e
-          print(f"::notice::Verified the install RPATH of {library} -> {mapped_runtime_libs()}")
+
+          # Loading is not the property under test. Any librbln.so on the loader's search path
+          # satisfies the NEEDED entry, so a wrong RUNPATH passes as long as some copy is findable
+          # somewhere; what it has to do is reach the one rebel-compiler installed.
+          mapped = mapped_runtime_libs()
+          if mapped != [expected]:
+              raise SystemExit(f"::error::RUNPATH resolved {mapped}, expected [{expected}]")
+          print(f"::notice::Verified the install RPATH of {library} -> {expected}")
           PY
 
       - name: Publish wheel to internal package index
