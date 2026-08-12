@@ -243,3 +243,33 @@ jobs:
             uv publish --publish-url "${INTERNAL_INDEX_URL}" dist/*.whl
             echo "::notice::Published torch-rbln==${TORCH_RBLN_VERSION} to the internal package index"
           fi
+
+      - name: Verify the published wheel resolves from the index
+        env:
+          TORCH_RBLN_VERSION: ${{ steps.read_version.outputs.version }}
+          UV_INDEX: https://download.pytorch.org/whl/cpu rbln=${{ secrets.INTERNAL_INDEX_URL }}
+          UV_INDEX_STRATEGY: unsafe-best-match
+          UV_INDEX_RBLN_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
+          UV_INDEX_RBLN_PASSWORD: ${{ secrets.INTERNAL_INDEX_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          # The artifact was verified before publishing; this checks the other half, which that
+          # cannot: that the upload landed and the version we built is resolvable by name. It is
+          # the first thing a consumer hits, and it fails for reasons of its own -- a rejected
+          # upload, or a version string the index does not end up serving.
+          uv venv verify-index/.venv
+          uv pip install \
+            --python verify-index/.venv/bin/python \
+            --constraint constraints-build-dev.txt \
+            rebel-compiler \
+            "torch-rbln==${TORCH_RBLN_VERSION}"
+
+          # `python -` puts cwd on sys.path; stay out of the repo root so the source tree does not
+          # shadow what we just installed.
+          cd verify-index
+          .venv/bin/python - <<'PY'
+          import torch_rbln
+
+          print(f"::notice::Installed torch-rbln=={torch_rbln.__version__} from the internal index")
+          PY
