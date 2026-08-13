@@ -128,7 +128,7 @@ def check_librbln_abi(lib: ctypes.CDLL | None) -> str:
     extensions resolve as they load.
 
     Args:
-        lib: the librbln.so handle returned by ``find_and_load_tvm_library``.
+        lib: a handle on the mapped librbln.so.
 
     Returns:
         str: one of the ``VERDICT_*`` values.

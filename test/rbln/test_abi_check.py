@@ -8,6 +8,7 @@ fail-open cases (pre-handshake runtime, no build-time snapshot), the opt-out
 env var, and that the librbln.so installed here actually agrees with this build.
 """
 
+import ctypes
 import os
 
 
@@ -23,8 +24,8 @@ try:
     from torch.testing._internal.common_device_type import instantiate_device_type_tests
     from torch.testing._internal.common_utils import run_tests, TestCase
 
-    import torch_rbln
-    from torch_rbln._internal import abi_check
+    import torch_rbln  # noqa: F401  -- gated import, keeps the backend from initialising here
+    from torch_rbln._internal import abi_check, rbln_runtime_lib
 finally:
     # Restore in a finally so a failing gated import cannot leak DIAGNOSE onto the worker.
     if _prev_diagnose is None:
@@ -197,17 +198,23 @@ class TestCheckLibrblnAbi(TestCase):
                 self.assertFalse(abi_check.is_abi_check_disabled(), f"value={value!r}")
 
 
+def _mapped_librbln(case):
+    """A handle on the librbln.so the import path maps, or skip if it is not installed."""
+    try:
+        path = rbln_runtime_lib.load_runtime_library()
+    except FileNotFoundError as e:
+        case.skipTest(f"librbln.so not installed: {e}")
+    return ctypes.CDLL(path, mode=os.RTLD_NOLOAD | ctypes.RTLD_GLOBAL)
+
+
 @pytest.mark.test_set_ci
 class TestInstalledCombination(TestCase):
     """The librbln.so installed on this machine against the wheel under test."""
 
-    def test_find_and_load_returns_a_usable_handle(self):
-        # The handshake reads symbols off this return value; a None would silently
-        # turn every check into the pre-ABI fail-open path.
-        try:
-            lib = torch_rbln.find_and_load_tvm_library("librbln.so")
-        except FileNotFoundError as e:
-            self.skipTest(f"librbln.so not installed: {e}")
+    def test_the_mapped_library_gives_a_usable_handle(self):
+        # The handshake reads symbols off this handle; a None would silently turn every
+        # check into the pre-ABI fail-open path.
+        lib = _mapped_librbln(self)
         self.assertIsNotNone(lib)
         self.assertTrue(getattr(lib, "_name", "").endswith("librbln.so"))
 
@@ -215,10 +222,7 @@ class TestInstalledCombination(TestCase):
         built = abi_check.get_built_abi()
         if built is None:
             self.skipTest("this torch-rbln recorded no ABI snapshot (pre-handshake rebel-compiler)")
-        try:
-            lib = torch_rbln.find_and_load_tvm_library("librbln.so")
-        except FileNotFoundError as e:
-            self.skipTest(f"librbln.so not installed: {e}")
+        lib = _mapped_librbln(self)
         window = abi_check.read_runtime_abi(lib)
         if window is None:
             self.skipTest("installed librbln.so predates the ABI handshake")
