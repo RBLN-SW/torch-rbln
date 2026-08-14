@@ -39,8 +39,10 @@ const char* slice_annotation(const RblnKinetoSlice& s, const char* name) {
   return nullptr;
 }
 
-// Kernels would multiply the arrows; only the workload slices carry one.
-bool is_dst_slice(const RblnKinetoSlice& s) { return s.kind == RBLN_KINETO_KIND_RUNTIME; }
+// Kernels would multiply the arrows; only the workload and collective slices carry one.
+bool is_dst_slice(const RblnKinetoSlice& s) {
+  return s.kind == RBLN_KINETO_KIND_RUNTIME || s.kind == RBLN_KINETO_KIND_COLLECTIVE;
+}
 
 // Region -> device ac2g arrows, keyed by launch_id so they bind across the async gap.
 // Requires out->activities[i] to be slice i (the caller projects them in order).
