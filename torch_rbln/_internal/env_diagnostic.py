@@ -11,7 +11,12 @@ import subprocess
 import sys
 from typing import Any
 
-from torch_rbln._internal.rbln_runtime_lib import loaded_runtime_libraries, RUNTIME_LIB_NAME, runtime_library_candidates
+from torch_rbln._internal.rbln_runtime_lib import (
+    load_runtime_library,
+    loaded_runtime_libraries,
+    RUNTIME_LIB_NAME,
+    runtime_library_candidates,
+)
 
 
 # Environment variables that affect where we look for .so files.
@@ -236,6 +241,65 @@ def _runtime_lib_state() -> dict[str, Any]:
     }
 
 
+def _rebel_abi_info() -> dict[str, Any]:
+    """Build-time ABI snapshot versus what librbln.so reports here.
+
+    Loads librbln.so the same way the real import does, so these are the numbers the
+    handshake would actually compare.
+    """
+    out: dict[str, Any] = {
+        "built_abi": None,
+        "check_disabled": False,
+        "librbln_path": None,
+        "runtime_min_supported": None,
+        "runtime_current": None,
+        "verdict": None,
+        "error": None,
+    }
+    try:
+        from torch_rbln._internal import abi_check
+
+        out["built_abi"] = abi_check.get_built_abi()
+        out["check_disabled"] = abi_check.is_abi_check_disabled()
+    except Exception as e:
+        out["error"] = f"abi_check unavailable: {e}"
+        return out
+
+    try:
+        path = load_runtime_library()
+    except Exception as e:
+        out["error"] = f"could not load librbln.so: {e}"
+        return out
+
+    out["librbln_path"] = path
+    lib = abi_check.open_mapped_runtime(path)
+    if lib is None:
+        out["error"] = f"no handle could be taken on {path}, so its ABI symbols could not be read"
+        return out
+
+    try:
+        values, missing = abi_check.read_abi_symbols(lib)
+    except Exception as e:
+        out["error"] = f"could not read ABI symbols: {e}"
+        return out
+
+    if missing:
+        out["verdict"] = (
+            "runtime predates the ABI handshake (no version symbols)"
+            if not values
+            else f"malformed runtime: exports only {', '.join(n for n in abi_check.ABI_SYMBOLS if n not in missing)}"
+        )
+        return out
+
+    out["runtime_min_supported"], out["runtime_current"] = values
+    if out["built_abi"] is None:
+        out["verdict"] = "no build-time snapshot to compare against"
+        return out
+    reason = abi_check.abi_mismatch_reason(out["built_abi"], values[0], values[1])
+    out["verdict"] = "OK" if reason is None else f"MISMATCH -- {reason}"
+    return out
+
+
 def _resolve_so_paths(d: dict[str, Any]) -> list[dict[str, Any]]:
     """Resolve paths for libtorch, libtorch_rbln, librbln (and related) and get GCC version from ELF .comment."""
     result: list[dict[str, Any]] = []
@@ -313,6 +377,7 @@ def collect_diagnostics() -> dict[str, Any]:
     d = {
         "torch_rbln": _torch_rbln_info(),
         "rebel_compiler": _rebel_compiler_info(),
+        "rebel_abi": _rebel_abi_info(),
         "env": _env_snapshot(),
         "rebel": _package_location("rebel"),
         "runtime_lib": _runtime_lib_state(),
@@ -367,6 +432,32 @@ def format_diagnostics(d: dict[str, Any] | None = None, verbose: bool = True) ->
             lines.append(f"  installed at: {rc['installed_location']}")
     else:
         lines.append("  not installed" + (f" ({rc.get('error', '')})" if rc.get("error") else ""))
+    lines.extend(
+        [
+            "",
+            "rebel ABI handshake:",
+        ]
+    )
+    abi = d.get("rebel_abi") or {}
+    built_abi = abi.get("built_abi")
+    lines.append(
+        f"  built against ABI: {built_abi}"
+        if built_abi is not None
+        else "  built against ABI: (none recorded — built against a pre-handshake rebel-compiler)"
+    )
+    if abi.get("librbln_path"):
+        lines.append(f"  librbln.so: {abi['librbln_path']}")
+    if abi.get("runtime_current") is not None:
+        lines.append(
+            f"  runtime accepts: {abi.get('runtime_min_supported')}..{abi.get('runtime_current')} "
+            f"(min_supported..current)"
+        )
+    if abi.get("verdict"):
+        lines.append(f"  verdict: {abi['verdict']}")
+    if abi.get("check_disabled"):
+        lines.append("  >>> check is DISABLED via TORCH_RBLN_SKIP_ABI_CHECK; import will not enforce it.")
+    if abi.get("error"):
+        lines.append(f"  error: {abi['error']}")
     lines.extend(
         [
             "",

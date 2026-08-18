@@ -173,7 +173,9 @@ def load_runtime_library() -> str:
     """
     already_loaded = loaded_runtime_libraries()
     if already_loaded:
-        return already_loaded[0]
+        # /proc/self/maps marks a mapping whose file is gone with " (deleted)". That marker is
+        # not part of the path and callers hand this string to dlopen, so it goes no further.
+        return already_loaded[0].removesuffix(_DELETED_SUFFIX)
 
     path, source = resolve_runtime_library()
     try:
