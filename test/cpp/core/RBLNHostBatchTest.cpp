@@ -9,23 +9,15 @@
 #include <stdexcept>
 #include <vector>
 
-// H2VBatch / V2HBatch unit tests — direct coverage of the two host<->device
-// batch abstractions without going through ATen.
+// H2VBatch / V2HBatch unit tests, without going through ATen.
 //
-// The axes mirror RBLNV2VBatchTest (empty / zero-byte / flat / strided /
-// destructor / reuse) because the buffering contract is shared, plus the two
-// axes v2v has no equivalent for:
+// Axes mirror RBLNV2VBatchTest (empty / zero-byte / flat / destructor / reuse)
+// since the buffering contract is shared, plus the two v2v has no equivalent
+// for: heterogeneous batches splitting into one bulk submit per device, and
+// keep_alive() holding a deferred host buffer until submit returns.
 //
-//   - Heterogeneous batches split into one bulk submit per device instead of
-//     dropping to a host-bouncing per-entry path. Host memory is reachable from
-//     every device, so only the device side constrains the grouping.
-//   - keep_alive() ties a host buffer's lifetime to the batch. The runtime
-//     requires host buffers to stay valid until submit returns, and the batch is
-//     deferred, so a caller that staged a temporary has to hand it over.
-//
-// Correctness is always checked by reading the destination back, so a batch that
-// silently dropped or mis-addressed an entry fails rather than passing on a
-// pending_count() that happens to look right.
+// Every case reads the destination back, so a dropped or mis-addressed entry
+// fails rather than passing on a plausible pending_count().
 
 namespace {
 
@@ -184,114 +176,6 @@ TEST_F(RBLNHostBatchTest, H2VLargeBatchExceedsV2VCap) {
 // ---------------------------------------------------------------------------
 // H2VBatch — strided expansion (shared with V2VBatch, so cover the same shapes)
 // ---------------------------------------------------------------------------
-
-TEST_F(RBLNHostBatchTest, H2VStridedEmptyOuterIsFlat) {
-  constexpr size_t n = 64;
-  const auto src_host = Ramp(n, 3);
-  const auto dst_initial = std::vector<int8_t>(n, 0);
-  void* dst = AllocAndCopyFromHost(dst_initial.data(), n);
-
-  c10::rbln::H2VBatch batch;
-  batch.enqueue_strided(dst, src_host.data(), n, {}, {}, {});
-  EXPECT_EQ(batch.pending_count(), 1u);
-  batch.submit();
-
-  EXPECT_EQ(CopyToHost(dst, n), src_host);
-  c10::rbln::free(dst);
-}
-
-// Row-major walk: a contiguous host block scattered into a device buffer whose
-// rows are further apart than the row payload (a non-contiguous device dst).
-TEST_F(RBLNHostBatchTest, H2VStridedTwoDimRowMajor) {
-  constexpr int64_t rows = 6;
-  constexpr int64_t row_bytes = 12;
-  constexpr int64_t dst_pitch = 20; // > row_bytes: gaps stay untouched
-  constexpr size_t dst_total = static_cast<size_t>(rows * dst_pitch);
-
-  const auto src_host = Ramp(static_cast<size_t>(rows * row_bytes), 1);
-  const auto dst_initial = std::vector<int8_t>(dst_total, -1);
-  void* dst = AllocAndCopyFromHost(dst_initial.data(), dst_total);
-
-  const std::vector<int64_t> outer_sizes = {rows};
-  const std::vector<int64_t> src_bs = {row_bytes};
-  const std::vector<int64_t> dst_bs = {dst_pitch};
-
-  c10::rbln::H2VBatch batch;
-  batch.enqueue_strided(dst, src_host.data(), static_cast<size_t>(row_bytes), outer_sizes, src_bs, dst_bs);
-  EXPECT_EQ(batch.pending_count(), static_cast<size_t>(rows));
-  batch.submit();
-
-  std::vector<int8_t> expected = dst_initial;
-  for (int64_t r = 0; r < rows; ++r) {
-    for (int64_t c = 0; c < row_bytes; ++c) {
-      expected[static_cast<size_t>(r * dst_pitch + c)] = src_host[static_cast<size_t>(r * row_bytes + c)];
-    }
-  }
-  EXPECT_EQ(CopyToHost(dst, dst_total), expected);
-  c10::rbln::free(dst);
-}
-
-// A src stride of 0 replicates one host block across every destination slab.
-// This is the case h2v gets for free: the runtime treats sources as pure reads,
-// so overlapping/repeated reads are explicitly allowed.
-TEST_F(RBLNHostBatchTest, H2VStridedBroadcastStrideZero) {
-  constexpr int64_t rows = 5;
-  constexpr int64_t cols = 4;
-  constexpr size_t dst_total = static_cast<size_t>(rows * cols);
-
-  std::vector<int8_t> src_host(cols);
-  for (int64_t i = 0; i < cols; ++i) {
-    src_host[static_cast<size_t>(i)] = static_cast<int8_t>(10 + i);
-  }
-  const auto dst_initial = std::vector<int8_t>(dst_total, 0);
-  void* dst = AllocAndCopyFromHost(dst_initial.data(), dst_total);
-
-  const std::vector<int64_t> outer_sizes = {rows};
-  const std::vector<int64_t> src_bs = {0}; // broadcast
-  const std::vector<int64_t> dst_bs = {cols};
-
-  c10::rbln::H2VBatch batch;
-  batch.enqueue_strided(dst, src_host.data(), static_cast<size_t>(cols), outer_sizes, src_bs, dst_bs);
-  batch.submit();
-
-  std::vector<int8_t> expected(dst_total);
-  for (int64_t r = 0; r < rows; ++r) {
-    for (int64_t c = 0; c < cols; ++c) {
-      expected[static_cast<size_t>(r * cols + c)] = src_host[static_cast<size_t>(c)];
-    }
-  }
-  EXPECT_EQ(CopyToHost(dst, dst_total), expected);
-  c10::rbln::free(dst);
-}
-
-TEST_F(RBLNHostBatchTest, H2VStridedLengthMismatchThrows) {
-  constexpr size_t n = 32;
-  const auto src_host = std::vector<int8_t>(n, 1);
-  const auto dst_initial = std::vector<int8_t>(n, 0);
-  void* dst = AllocAndCopyFromHost(dst_initial.data(), n);
-
-  c10::rbln::H2VBatch batch;
-  const std::vector<int64_t> outer_sizes = {2, 2};
-  const std::vector<int64_t> src_bs = {8}; // wrong length
-  const std::vector<int64_t> dst_bs = {8, 4};
-  EXPECT_THROW(batch.enqueue_strided(dst, src_host.data(), 4, outer_sizes, src_bs, dst_bs), c10::Error);
-
-  c10::rbln::free(dst);
-}
-
-TEST_F(RBLNHostBatchTest, H2VStridedZeroOuterExtentThrows) {
-  constexpr size_t n = 32;
-  const auto src_host = std::vector<int8_t>(n, 1);
-  const auto dst_initial = std::vector<int8_t>(n, 0);
-  void* dst = AllocAndCopyFromHost(dst_initial.data(), n);
-
-  c10::rbln::H2VBatch batch;
-  const std::vector<int64_t> outer_sizes = {0};
-  const std::vector<int64_t> zero = {0};
-  EXPECT_THROW(batch.enqueue_strided(dst, src_host.data(), 4, outer_sizes, zero, zero), c10::Error);
-
-  c10::rbln::free(dst);
-}
 
 TEST_F(RBLNHostBatchTest, H2VNullPointerThrows) {
   constexpr size_t n = 8;
@@ -548,35 +432,6 @@ TEST_F(RBLNHostBatchTest, V2HRepeatedSourceRangeIsAllowed) {
   c10::rbln::free(src);
 }
 
-TEST_F(RBLNHostBatchTest, V2HStridedTwoDimRowMajor) {
-  constexpr int64_t rows = 6;
-  constexpr int64_t row_bytes = 12;
-  constexpr int64_t src_pitch = 20; // device rows further apart than payload
-  constexpr size_t src_total = static_cast<size_t>(rows * src_pitch);
-
-  const auto src_host = Ramp(src_total, 1);
-  void* src = AllocAndCopyFromHost(src_host.data(), src_total);
-  std::vector<int8_t> dst(static_cast<size_t>(rows * row_bytes), -1);
-
-  const std::vector<int64_t> outer_sizes = {rows};
-  const std::vector<int64_t> src_bs = {src_pitch};
-  const std::vector<int64_t> dst_bs = {row_bytes};
-
-  c10::rbln::V2HBatch batch;
-  batch.enqueue_strided(dst.data(), src, static_cast<size_t>(row_bytes), outer_sizes, src_bs, dst_bs);
-  EXPECT_EQ(batch.pending_count(), static_cast<size_t>(rows));
-  batch.submit();
-
-  std::vector<int8_t> expected(static_cast<size_t>(rows * row_bytes));
-  for (int64_t r = 0; r < rows; ++r) {
-    for (int64_t c = 0; c < row_bytes; ++c) {
-      expected[static_cast<size_t>(r * row_bytes + c)] = src_host[static_cast<size_t>(r * src_pitch + c)];
-    }
-  }
-  EXPECT_EQ(dst, expected);
-  c10::rbln::free(src);
-}
-
 TEST_F(RBLNHostBatchTest, V2HLargeBatchExceedsV2VCap) {
   constexpr size_t entries = 2048; // > kMaxV2VMultiCopies (1024)
   constexpr size_t chunk = 8;
@@ -630,14 +485,10 @@ TEST_F(RBLNHostBatchTest, V2HKeepAliveHoldsUntilSubmit) {
 }
 
 // A registered destination is written, and the holder is released on submit.
-//
-// Note the deliberate shape: the caller keeps its own reference so the contents
-// can be read afterwards. Reading through a buffer the BATCH alone owns is not
-// possible by design — submit() releases the holders as it returns, so such a
-// buffer is already freed by the time submit() hands control back. The
-// batch-only-ownership guarantee (alive *until* submit) is covered by
-// V2HKeepAliveHoldsUntilSubmit; what this test adds is that registering a holder
-// does not disturb the copy itself.
+// The caller keeps its own reference so the contents are readable afterwards —
+// a batch-only buffer is already freed when submit() returns. That lifetime is
+// covered by V2HKeepAliveHoldsUntilSubmit; this adds that registering a holder
+// does not disturb the copy.
 TEST_F(RBLNHostBatchTest, V2HKeepAliveStagedDestinationIsWritten) {
   constexpr size_t n = 256;
   const auto src_host = Ramp(n, 11);
@@ -727,54 +578,14 @@ TEST_F(RBLNHostBatchTest, V2HCrossDeviceSplitSubmit) {
   c10::rbln::set_device_index(0);
 }
 
-// A strided entry whose base is on device 1 while an earlier flat entry targeted
-// device 0: the split must group the whole expanded fan-out, not just the base.
-TEST_F(RBLNHostBatchTest, H2VCrossDeviceSplitWithStridedEntry) {
-  if (c10::rbln::get_device_count() < 2) {
-    GTEST_SKIP() << "cross-device batch requires at least 2 devices";
-  }
-  constexpr int64_t rows = 4;
-  constexpr int64_t row_bytes = 16;
-  constexpr size_t flat_n = 64;
-  constexpr size_t strided_total = static_cast<size_t>(rows * row_bytes);
-
-  const auto flat_src = std::vector<int8_t>(flat_n, 55);
-  const auto strided_src = Ramp(strided_total, 1);
-  const auto seed_flat = std::vector<int8_t>(flat_n, -1);
-  const auto seed_strided = std::vector<int8_t>(strided_total, -1);
-
-  c10::rbln::set_device_index(0);
-  void* dst_flat = AllocAndCopyFromHost(seed_flat.data(), flat_n, 0);
-  void* dst_strided = AllocAndCopyFromHost(seed_strided.data(), strided_total, 1);
-
-  {
-    c10::rbln::H2VBatch batch;
-    batch.enqueue(dst_flat, flat_src.data(), flat_n);
-    const std::vector<int64_t> outer_sizes = {rows};
-    const std::vector<int64_t> bs = {row_bytes};
-    batch.enqueue_strided(dst_strided, strided_src.data(), static_cast<size_t>(row_bytes), outer_sizes, bs, bs);
-    EXPECT_EQ(batch.pending_count(), 1u + static_cast<size_t>(rows));
-    batch.submit();
-  }
-
-  EXPECT_EQ(CopyToHost(dst_flat, flat_n), flat_src);
-  EXPECT_EQ(CopyToHost(dst_strided, strided_total), strided_src);
-
-  c10::rbln::free(dst_flat);
-  c10::rbln::free(dst_strided);
-  c10::rbln::set_device_index(0);
-}
-
 // ---------------------------------------------------------------------------
 // Composite scenario — the shape an ATen consumer produces
 // ---------------------------------------------------------------------------
 
 // Round-trip a paged layout: scatter N host chunks into a strided device buffer
-// with H2VBatch, then gather it back with V2HBatch and compare. Exercises both
-// batches against the same geometry, which is how the KV offload path will use
-// them, and catches an addressing error in either direction (a wrong offset in
-// one of them would still round-trip only if both were wrong identically —
-// hence the explicit expected buffer rather than a self-comparison).
+// with H2VBatch, gather it back with V2HBatch, compare against an explicit
+// expected buffer (not a self-comparison, so a matching offset error in both
+// directions still fails). Same geometry the KV offload path uses.
 TEST_F(RBLNHostBatchTest, ScatterThenGatherRoundTrip) {
   constexpr int64_t blocks = 5;
   constexpr int64_t layers = 3;

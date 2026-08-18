@@ -1,23 +1,14 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""Tests for cross-device batching in the native ``aten::_foreach_copy_`` kernel.
+"""Host-direction (cpu<->rbln) batching in the native ``aten::_foreach_copy_``.
 
-``test_foreach_copy_v2v.py`` covers the rbln->rbln direction. This file covers
-the two host directions, which used to fall out of the batch entirely: a pair
-was only eligible when BOTH sides were on the device, so every cpu->rbln or
-rbln->cpu pair dropped to its own ``copy_`` — N dispatches for N pairs. They now
-go through ``H2VBatch`` / ``V2HBatch`` and reach the runtime once per direction.
+``test_foreach_copy_v2v.py`` covers rbln->rbln. Every test asserts both:
 
-Two things are asserted throughout:
-
-  - Correctness against list-order ``self[i].copy_(src[i])`` semantics. Batching
-    submits the eligible copies together and unordered, so a result that depends
-    on ordering must be refused (pushed to the sequential path) rather than
-    silently reordered.
-  - That the batching actually happened, via the rt-timing counters exposed by
-    ``torch.rbln.explain()``. A correct-but-unbatched implementation would pass
-    the value checks alone, which is exactly the regression this file exists to
-    catch — the counters make the dispatch count observable from Python.
+  - values against list-order ``self[i].copy_(src[i])`` semantics, since a batch
+    submits unordered and so an order-dependent result must be refused rather
+    than silently reordered;
+  - that batching happened, via the ``torch.rbln.explain()`` rt-timing counters.
+    Values alone pass on an unbatched implementation.
 """
 
 from __future__ import annotations
@@ -66,13 +57,16 @@ class TestForeachCopyHost(TestCase):
             _eq(got, want)
 
     def test_h2v_noncontiguous_device_dst(self):
-        """A strided device destination: writes land in the viewed positions and
-        the gaps keep their previous contents."""
+        """A strided device destination is not batched. Writes still land in the
+        viewed positions and the gaps keep their previous contents."""
         base = _to_dev(torch.full((5, 6), -1.0, dtype=torch.float32))
         dst_views = [base.select(1, c) for c in (1, 3)]
         src_cpu = [_arange((5,), torch.float32) + c * 10 for c in (1, 3)]
 
-        torch._foreach_copy_(dst_views, src_cpu)
+        with torch.rbln.explain() as p:
+            torch._foreach_copy_(dst_views, src_cpu)
+        calls = _prim_calls(p.dump())
+        self.assertEqual(calls.get("h2v_multi", 0), 0, f"strided dst must not batch: {calls}")
 
         want = torch.full((5, 6), -1.0, dtype=torch.float32)
         for c, s in zip((1, 3), src_cpu):
@@ -80,12 +74,15 @@ class TestForeachCopyHost(TestCase):
         _eq(base, want)
 
     def test_h2v_noncontiguous_cpu_src(self):
-        """A transposed cpu source needs no staging copy — the strided walk reads
-        it in place."""
+        """A transposed cpu source is not batched — it would emit one descriptor
+        per element. ``copy_`` stages it into one bulk DMA instead."""
         src_cpu = [_arange((4, 6), torch.float32).t(), _arange((4, 6), torch.float32).t() + 50]
         dst_dev = [_to_dev(torch.zeros(6, 4, dtype=torch.float32)) for _ in src_cpu]
 
-        torch._foreach_copy_(dst_dev, src_cpu)
+        with torch.rbln.explain() as p:
+            torch._foreach_copy_(dst_dev, src_cpu)
+        calls = _prim_calls(p.dump())
+        self.assertEqual(calls.get("h2v_multi", 0), 0, f"transposed src must not batch: {calls}")
 
         for got, want in zip(dst_dev, src_cpu):
             _eq(got, want)
@@ -118,12 +115,16 @@ class TestForeachCopyHost(TestCase):
         self.assertTrue(torch.equal(host, src_full.reshape(-1)))
 
     def test_v2h_noncontiguous_host_dst(self):
+        """A strided host destination is NOT batched — it goes to ``copy_``."""
         host = torch.full((5, 6), -1.0, dtype=torch.float32)
         dst_views = [host.select(1, c) for c in (0, 4)]
         src_cpu = [_arange((5,), torch.float32) + c for c in (0, 4)]
         src_dev = [_to_dev(s) for s in src_cpu]
 
-        torch._foreach_copy_(dst_views, src_dev)
+        with torch.rbln.explain() as p:
+            torch._foreach_copy_(dst_views, src_dev)
+        calls = _prim_calls(p.dump())
+        self.assertEqual(calls.get("v2h_multi", 0), 0, f"strided host dst must not batch: {calls}")
 
         want = torch.full((5, 6), -1.0, dtype=torch.float32)
         for c, s in zip((0, 4), src_cpu):
@@ -164,14 +165,10 @@ class TestForeachCopyHost(TestCase):
         self.assertTrue(torch.equal(v2h_dst, v2h_src_cpu))
 
     def test_mixed_with_ineligible_pairs(self):
-        """dtype-cast and broadcast pairs still take per-pair copy_; the eligible
-        ones around them must be unaffected.
-
-        The broadcast source is passed at its real shape ``(1,)`` so the sizes
-        genuinely differ — an already-``expand``ed source would match the
-        destination's sizes and quietly take the batched path instead, testing
-        nothing about the fallback.
-        """
+        """dtype-cast and broadcast pairs take per-pair copy_; the eligible ones
+        around them are unaffected. The broadcast source is passed at its real
+        shape ``(1,)`` — an already-``expand``ed one would match sizes and take
+        the batched path instead."""
         ok_src = _arange((4,), torch.float32)
         ok_dst = _to_dev(torch.zeros(4, dtype=torch.float32))
 
@@ -188,12 +185,9 @@ class TestForeachCopyHost(TestCase):
         _eq(bcast_dst, bcast_src.expand(4).contiguous())
 
     def test_broadcast_source_at_matching_size_is_batched(self):
-        """A stride-0 SOURCE already expanded to the destination's shape is
-        batch-eligible, and must replicate rather than copy only its first slab.
-
-        Distinct from the fallback case above: sources are pure reads, so the
-        runtime permits repeated reads of the same host bytes.
-        """
+        """A stride-0 source already expanded to the destination's shape is
+        batch-eligible and must replicate, not copy only its first slab. Sources
+        are pure reads, so repeated reads of the same bytes are permitted."""
         src = torch.tensor([7.0, 8.0], dtype=torch.float32).expand(5, 2)
         dst = _to_dev(torch.zeros(5, 2, dtype=torch.float32))
         torch._foreach_copy_([dst], [src])
@@ -202,12 +196,10 @@ class TestForeachCopyHost(TestCase):
     # ---- destinations the batch must refuse ----
 
     def test_internally_overlapping_dst_is_rejected(self):
-        """An ``expand``ed destination maps several elements onto one address.
-        Batch entries are unordered, so which write survives is arbitrary —
-        ``copy_`` refuses such a destination and the batch must refuse it too
-        rather than silently producing one of the possible results. Checked in
-        all three directions since the guard sits in the shared eligibility.
-        """
+        """An ``expand``ed destination maps several elements onto one address, so
+        with unordered entries the surviving write is arbitrary. ``copy_`` refuses
+        it and so must the batch. All three directions, since the guard is
+        shared."""
         cases = {
             "h2v": (_to_dev(torch.zeros(1)).expand(4), _arange((4,), torch.float32)),
             "v2h": (torch.zeros(1).expand(4), _to_dev(_arange((4,), torch.float32))),
@@ -222,12 +214,10 @@ class TestForeachCopyHost(TestCase):
                     torch._foreach_copy_([dst], [src])
 
     def test_same_view_pairs_are_no_ops_even_when_overlapping(self):
-        """``copy_`` returns early when destination and source are the same view
-        (aliased, same offset/strides/sizes/dtype) — BEFORE its overlap check. So
-        an ``expand``ed identity pair is a no-op in eager, not an error, and the
-        batch must agree. Both forms count: the same tensor twice, and two
-        distinct tensors describing the same view.
-        """
+        """``copy_`` returns early on an identical view, before its overlap check,
+        so an ``expand``ed identity pair is a no-op rather than an error and the
+        batch must agree. Both forms: the same tensor twice, and two tensors
+        describing the same view."""
         base = _to_dev(_arange((1,), torch.float32))
         expanded = base.expand(4)
         same_view = base.expand(4)
@@ -243,13 +233,11 @@ class TestForeachCopyHost(TestCase):
                 _eq(dst, before)
 
     def test_partially_overlapping_dst_is_not_batched(self):
-        """A destination whose own rows overlap violates the runtime's
-        disjoint-destination contract, but ``has_internal_overlap`` cannot prove
-        it (``TooHard``) so ``assert_no_internal_overlap`` lets it through. It
-        must not reach the batch, where entry order is arbitrary.
-
-        Rows are 64 KiB so the descriptor-size gate does not filter this out.
-        """
+        """A destination whose own rows overlap must not reach the batch, where
+        entry order is arbitrary. ``has_internal_overlap`` answers ``TooHard`` so
+        ``assert_no_internal_overlap`` lets it through; on the host directions the
+        contiguity rule refuses it first, and ``TooHard`` is what keeps the same
+        shape off the v2v batch."""
         elems_per_row = 16 * 1024
         stride = elems_per_row // 2
         storage = _to_dev(torch.zeros(elems_per_row + stride, dtype=torch.float32))
@@ -268,12 +256,9 @@ class TestForeachCopyHost(TestCase):
         _eq(_to_dev(got[elems_per_row:]), src[1][stride:])
 
     def test_pairs_before_a_throwing_pair_still_land(self):
-        """A pair rejected mid-list must not swallow the ones already queued.
-
-        Eligible pairs are deferred to a submit, so without flushing before the
-        rejection the earlier destinations would stay untouched — a partial-side-
-        effect difference from the sequential path.
-        """
+        """A pair rejected mid-list must not swallow the ones already queued:
+        without a flush before the rejection, earlier destinations would stay
+        untouched."""
         ok_src = _arange((4,), torch.float32)
         ok_dst = _to_dev(torch.zeros(4, dtype=torch.float32))
         bad_dst = _to_dev(torch.zeros(1)).expand(4)
@@ -283,32 +268,12 @@ class TestForeachCopyHost(TestCase):
 
         _eq(ok_dst, ok_src)
 
-    # ---- the descriptor-size gate ----
-
-    def test_tiny_descriptor_pair_is_not_batched(self):
-        """A pair that fans out to element-sized descriptors must NOT be batched.
-
-        A transposed source has no jointly contiguous suffix, so batching it
-        would emit one descriptor per element — measured ~4000x slower than the
-        staged bulk copy, and hundreds of MiB of descriptors for a 4 MiB payload.
-        The gate sends it to ``copy_`` instead, so no ``h2v_multi`` appears.
-        """
-        n = 128
-        src = _arange((n, n), torch.float32).t()  # innermost stride n -> no suffix
-        dst = _to_dev(torch.zeros(n, n, dtype=torch.float32))
-
-        with torch.rbln.explain() as p:
-            torch._foreach_copy_([dst], [src])
-        calls = _prim_calls(p.dump())
-
-        self.assertEqual(calls.get("h2v_multi", 0), 0, f"tiny descriptors must not batch: {calls}")
-        _eq(dst, src.contiguous())
+    # ---- the contiguity rule ----
 
     def test_contiguous_pairs_batch_regardless_of_size(self):
-        """Small CONTIGUOUS pairs stay batched: each contributes one descriptor,
-        so the batch replaces N submits with one (the weight-load shape, measured
-        ~3x faster). The size gate applies only to pairs that fan out.
-        """
+        """Contiguous pairs stay batched at any size: one descriptor each, so the
+        batch replaces N submits with one (~3x at the weight-load shape). Size
+        never enters the eligibility decision — contiguity does."""
         n_pairs = 16
         srcs = [_arange((64,), torch.float32) + i for i in range(n_pairs)]  # 256 B each
         dsts = [_to_dev(torch.zeros(64, dtype=torch.float32)) for _ in range(n_pairs)]
@@ -337,12 +302,9 @@ class TestForeachCopyHost(TestCase):
     # ---- ordering / aliasing must stay observable-equivalent ----
 
     def test_overlapping_host_destinations_stay_ordered(self):
-        """Two pairs whose HOST destinations overlap. The runtime requires
-        destination ranges to be disjoint and does not validate it, so this must
-        drop to the sequential path — batching it would make the write order
-        observable. Reference is the same op on CPU tensors, which gives
-        list-order semantics.
-        """
+        """Two pairs whose host destinations overlap must drop to the sequential
+        path: the runtime requires disjoint destinations and does not check, and
+        batching would make the write order observable."""
         src_a_cpu = torch.full((8,), 1.0, dtype=torch.float32)
         src_b_cpu = torch.full((8,), 2.0, dtype=torch.float32)
 
@@ -357,13 +319,9 @@ class TestForeachCopyHost(TestCase):
         self.assertTrue(torch.equal(host, ref), f"{host} != {ref}")
 
     def test_host_destination_aliasing_a_source_stays_ordered(self):
-        """A host destination that is also a later pair's source (RAW).
-
-        List-order semantics mean pair 1 reads what pair 0 already wrote, so the
-        second destination must end up with the NEW contents. Batching the two
-        would let pair 1 read the pre-copy bytes instead, which is the reorder
-        this case exists to rule out.
-        """
+        """A host destination that is also a later pair's source (RAW). List order
+        means pair 1 reads what pair 0 wrote, so the second destination must hold
+        the new contents; batching would let it read the pre-copy bytes."""
         nines = torch.full((8,), 9.0, dtype=torch.float32)
         shared = _arange((8,), torch.float32)
         dev_src = _to_dev(nines)
@@ -381,10 +339,8 @@ class TestForeachCopyHost(TestCase):
     # ---- the batching itself is observable ----
 
     def test_h2v_uses_one_batched_submit(self):
-        """N cpu->rbln pairs must reach the runtime through ONE h2v_multi call,
-        not N per-entry h2v calls. Without this the value assertions above would
-        pass on an unbatched implementation.
-        """
+        """N cpu->rbln pairs must reach the runtime through one h2v_multi call, not
+        N per-entry h2v calls."""
         n_pairs = 8
         src_cpu = [_arange((4, 4), torch.float32) + i for i in range(n_pairs)]
         dst_dev = [_to_dev(torch.zeros(4, 4, dtype=torch.float32)) for _ in range(n_pairs)]

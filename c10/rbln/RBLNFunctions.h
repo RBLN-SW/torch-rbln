@@ -340,11 +340,10 @@ C10_RBLN_API void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies);
 /**
  * @brief Descriptor for one host-to-device slab copy used by memcpy_h2v_multi.
  *
- * Field layout matches V2VCopyOp / V2HCopyOp, but the type is deliberately
- * distinct: on LP64 `uintptr_t` and `uint64_t` are the same type, so the three
- * runtime tuple signatures are indistinguishable and a mixed-up descriptor list
- * would compile silently and DMA a host address as a device vaddr. Keeping the
- * batches on separate named types makes that a compile error instead.
+ * Layout matches V2VCopyOp / V2HCopyOp; the type is distinct on purpose. On LP64
+ * the three runtime tuple signatures are indistinguishable, so a mixed-up list
+ * would compile and DMA a host address as a device vaddr. Separate named types
+ * make that a compile error.
  */
 struct C10_RBLN_API H2VCopyOp {
   void* dst; // device (rbln virtual address)
@@ -366,34 +365,27 @@ struct C10_RBLN_API V2HCopyOp {
 /**
  * @brief Batched host-to-device copy through rbln_memcpy_h2v_multi.
  *
- * Empty input is a no-op. Each entry must have nbytes > 0 and non-null dst/src.
+ * Empty input is a no-op. Each entry needs nbytes > 0 and non-null dst/src.
  *
- * Caller contract (NOT validated): every entry's `dst` must reside on the same
- * RBLN device. Only the device side anchors this; callers spanning several
- * devices partition per device and submit each group, which H2VBatch does
- * internally.
+ * Caller contract, none of it validated by the runtime:
+ *   - every `dst` on the same RBLN device (H2VBatch partitions to hold this)
+ *   - `dst` ranges mutually disjoint; `src` ranges may repeat or overlap
+ *   - every `src` valid and unchanged until this call returns (deferred
+ *     submitters see H2VBatch::keep_alive)
  *
- * `dst` ranges must not overlap each other (the runtime does not check).
- * `src` ranges are pure reads, so entries may repeat or overlap them freely.
- *
- * Each `src` host buffer must stay valid and unchanged until this call returns.
- * Deferred submitters that staged a temporary host buffer must keep it alive
- * (see H2VBatch::keep_alive).
- *
- * There is no cap on the entry count — the runtime splits across dispatches
- * internally. Entries are unordered with respect to each other, and on failure
- * some copies may already have been applied (no rollback).
+ * Entries are unordered and a failed call may have applied some of them (no
+ * rollback). rbln_runtime_api.h documents no entry cap, but oversized calls do
+ * time out in practice — see the cap in RBLNHostBatch.cpp.
  */
 C10_RBLN_API void memcpy_h2v_multi(const std::vector<H2VCopyOp>& copies);
 
 /**
  * @brief Batched device-to-host copy through rbln_memcpy_v2h_multi.
  *
- * Mirror of memcpy_h2v_multi with the roles swapped: `src` (device) anchors
- * homogeneity, `dst` host ranges must not overlap, and `src` device ranges may
- * repeat or overlap since they are pure reads. Same no-cap / unordered /
- * no-rollback semantics, and the same host-buffer lifetime requirement (here on
- * `dst`; see V2HBatch::keep_alive).
+ * Roles swapped: `src` (device) anchors homogeneity, `dst` host ranges must be
+ * disjoint, `src` device ranges may repeat. Same unordered / no-rollback
+ * semantics and the same lifetime requirement, here on `dst` (see
+ * V2HBatch::keep_alive).
  */
 C10_RBLN_API void memcpy_v2h_multi(const std::vector<V2HCopyOp>& copies);
 

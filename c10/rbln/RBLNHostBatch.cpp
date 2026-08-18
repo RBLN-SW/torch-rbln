@@ -14,23 +14,21 @@ namespace c10::rbln {
 
 namespace {
 
-// Work one bulk call may carry. Past it the runtime's job never completes: the
-// device reports SYS_KERNEL_TIMEOUT and cancels the context, so the per-entry
-// retry below cannot recover either. Measured on lmcache's D2H store: 24
-// entries / 12 MiB pass, 32 / 16 MiB start timing out. See the commit message.
+// Work one bulk call may carry. Past it the job never completes: the device
+// reports SYS_KERNEL_TIMEOUT and cancels the context, so the per-entry retry
+// below cannot recover either. Measured on lmcache's D2H store, 24 entries /
+// 12 MiB pass and 32 / 16 MiB start timing out.
 constexpr size_t kMaxBulkEntries = 16;
 constexpr size_t kMaxBulkBytes = size_t{8} * 1024 * 1024;
 
 /**
  * @brief Submit one group as a single bulk call, per-entry on rejection.
  *
- * Mirrors V2VBatch::submit's retry: the bulk entrypoint enforces stricter
- * inter-copy invariants than the single-copy path, so a geometry the per-entry
- * path handles fine can still be refused in bulk. Replaying per entry is safe
- * because a copy is idempotent — it is a plain write of `src` bytes over `dst`,
- * never a read-modify-write — so an entry that the failed bulk call had already
- * applied simply gets the same bytes written again. That is the only reason a
- * retry is sound under an API that documents no rollback.
+ * The bulk entrypoint enforces stricter inter-copy invariants than the
+ * single-copy path, so it can refuse a geometry per-entry handles. Replay is
+ * sound under an API documenting no rollback because a copy is idempotent: a
+ * plain write, never a read-modify-write, so a re-applied entry writes the same
+ * bytes. Mirrors V2VBatch::submit's retry.
  */
 template <typename Desc, typename BulkFn, typename OneFn>
 void submit_one_call(const std::vector<Desc>& group, const char* who, const BulkFn& bulk, const OneFn& one) {
@@ -94,10 +92,8 @@ void flush_group(const std::vector<Desc>& group, const char* who, const BulkFn& 
 /**
  * @brief Submit every entry, one bulk call per anchoring device.
  *
- * The homogeneous case — by far the common one — submits the pending vector as
- * is, with no copy and no per-entry device lookup. Only a genuinely mixed batch
- * pays the grouping pass, and it still gets one bulk call per device rather than
- * the host bounce a cross-device v2v would need.
+ * The homogeneous case submits the pending vector as is — no copy, no per-entry
+ * device lookup. Only a mixed batch pays the grouping pass.
  *
  * @param device_of Returns the anchoring (device-side) pointer of an entry.
  */
@@ -113,9 +109,7 @@ void submit_grouped(
     flush_group(st.pending, who, bulk, one);
     return;
   }
-  // Ordered map so the submit order is deterministic by device index; a batch
-  // spanning devices is rare enough that the log line is worth more than the
-  // constant factor.
+  // Ordered so submit order is deterministic by device index.
   std::map<c10::DeviceIndex, std::vector<Desc>> by_device;
   for (const auto& e : st.pending) {
     by_device[get_torch_device_id(device_of(e))].push_back(e);
@@ -132,9 +126,7 @@ constexpr const char* kV2HWho = "V2HBatch";
 
 } // namespace
 
-// ---------------------------------------------------------------------------
 // H2VBatch — host source, device destination. Only dst anchors the device.
-// ---------------------------------------------------------------------------
 
 struct H2VBatch::Impl {
   detail::BatchState<H2VCopyOp> st;
@@ -150,17 +142,6 @@ H2VBatch::~H2VBatch() {
 
 void H2VBatch::enqueue(void* dst, const void* src, size_t nbytes) {
   detail::enqueue_one<H2VCopyOp, detail::DeviceAnchor::kDstOnly>(impl_->st, kH2VWho, dst, src, nbytes);
-}
-
-void H2VBatch::enqueue_strided(
-    void* dst,
-    const void* src,
-    size_t inner_block_bytes,
-    c10::IntArrayRef outer_sizes,
-    c10::IntArrayRef src_byte_strides,
-    c10::IntArrayRef dst_byte_strides) {
-  detail::enqueue_strided_impl<H2VCopyOp, detail::DeviceAnchor::kDstOnly>(
-      impl_->st, kH2VWho, dst, src, inner_block_bytes, outer_sizes, src_byte_strides, dst_byte_strides);
 }
 
 void H2VBatch::keep_alive(std::shared_ptr<void> holder) {
@@ -197,9 +178,7 @@ size_t H2VBatch::pending_count() const {
   return impl_ ? impl_->st.pending.size() : 0;
 }
 
-// ---------------------------------------------------------------------------
 // V2HBatch — device source, host destination. Only src anchors the device.
-// ---------------------------------------------------------------------------
 
 struct V2HBatch::Impl {
   detail::BatchState<V2HCopyOp> st;
@@ -215,17 +194,6 @@ V2HBatch::~V2HBatch() {
 
 void V2HBatch::enqueue(void* dst, const void* src, size_t nbytes) {
   detail::enqueue_one<V2HCopyOp, detail::DeviceAnchor::kSrcOnly>(impl_->st, kV2HWho, dst, src, nbytes);
-}
-
-void V2HBatch::enqueue_strided(
-    void* dst,
-    const void* src,
-    size_t inner_block_bytes,
-    c10::IntArrayRef outer_sizes,
-    c10::IntArrayRef src_byte_strides,
-    c10::IntArrayRef dst_byte_strides) {
-  detail::enqueue_strided_impl<V2HCopyOp, detail::DeviceAnchor::kSrcOnly>(
-      impl_->st, kV2HWho, dst, src, inner_block_bytes, outer_sizes, src_byte_strides, dst_byte_strides);
 }
 
 void V2HBatch::keep_alive(std::shared_ptr<void> holder) {

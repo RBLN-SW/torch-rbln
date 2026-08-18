@@ -11,32 +11,22 @@ namespace c10::rbln {
 /**
  * @brief Buffered batch of pending host-to-device (h2v) copies.
  *
- * The write-side host counterpart of V2VBatch: enqueue() / enqueue_strided()
- * record copy requests, submit() flushes them through rbln_memcpy_h2v_multi.
- * Where V2VBatch has to drop to per-entry copies once entries span devices —
- * paying a host bounce — this batch splits into one bulk submit per device,
- * because host memory is reachable from every device. Batching therefore
- * survives a heterogeneous batch; only the submit count grows.
+ * Entries are grouped per device and each group is flushed as one
+ * rbln_memcpy_h2v_multi. Host memory is reachable from every device, so a
+ * heterogeneous batch stays batched — unlike V2VBatch, which must bounce
+ * through the host once entries span devices.
  *
- * Overlap: destination (device) ranges must not overlap across entries, and the
- * runtime does not check this. Source (host) ranges are pure reads, so entries
- * may repeat or overlap them freely — which is what lets a stride-0 broadcast
- * source work without special handling.
- *
- * Ordering: entries are unordered with respect to each other, and a failed
- * submit may have already applied some copies (no rollback). Callers that need
- * ordering must not put the conflicting pairs in one batch.
- *
- * Lifetime: callers must invoke submit() on success. The destructor never issues
- * backend calls (a rejection during unwind would terminate the process); it just
- * warns when pending entries remain on a normal path.
- *
- * Host buffer lifetime: the runtime requires every source host buffer to stay
- * valid and unchanged until the submit call returns. Because this batch is
- * deferred, a caller that enqueued a temporary host buffer MUST hand it to
- * keep_alive() — otherwise submit() reads freed memory.
- *
- * Threading: not thread-safe — one batch per thread.
+ * Contract:
+ *   - Destination (device) ranges must not overlap across entries; the runtime
+ *     requires this and does not check it. Source (host) ranges are pure reads
+ *     and may repeat or overlap.
+ *   - Entries are unordered, and a failed submit may have applied some of them
+ *     (no rollback). Conflicting pairs must not share a batch.
+ *   - Every source buffer must stay valid until submit() returns. A temporary
+ *     the caller does not otherwise hold must go through keep_alive().
+ *   - The destructor never calls the backend (a rejection during unwind would
+ *     terminate the process); it warns if entries are still pending.
+ *   - Not thread-safe: one batch per thread.
  */
 class C10_RBLN_API H2VBatch {
  public:
@@ -53,58 +43,22 @@ class C10_RBLN_API H2VBatch {
    *
    * @param dst    Destination device pointer (rbln virtual address).
    * @param src    Source host pointer.
-   * @param nbytes Slab size in bytes. An nbytes==0 call is a no-op.
+   * @param nbytes Slab size in bytes; 0 is a no-op.
    */
   void enqueue(void* dst, const void* src, size_t nbytes);
 
   /**
-   * @brief Enqueue a strided range — `prod(outer_sizes)` copies of
-   *        `inner_block_bytes` each, walking outer_sizes in row-major order.
+   * @brief Hold `holder` until submit() returns.
    *
-   * For outer iteration index `idx[]` the k-th call has:
-   *   dst_off = sum_d idx[d] * dst_byte_strides[d]
-   *   src_off = sum_d idx[d] * src_byte_strides[d]
-   *
-   * outer_sizes / src_byte_strides / dst_byte_strides must have identical
-   * length. When that length is zero this degenerates to a single
-   * enqueue(dst, src, inner_block_bytes).
-   *
-   * A src stride of 0 is preserved, so a broadcast host source replicates
-   * across writes instead of collapsing to its first slab.
-   *
-   * The IntArrayRefs are read during this call only; the caller does not need
-   * to keep them alive past return.
-   */
-  void enqueue_strided(
-      void* dst,
-      const void* src,
-      size_t inner_block_bytes,
-      c10::IntArrayRef outer_sizes,
-      c10::IntArrayRef src_byte_strides,
-      c10::IntArrayRef dst_byte_strides);
-
-  /**
-   * @brief Tie a host buffer's lifetime to this batch, until submit() returns.
-   *
-   * Required for any enqueued source that the caller does not otherwise keep
-   * alive across submit() — typically a staged temporary. The handle is opaque
-   * because this layer must not depend on ATen; an ATen-level caller passes a
-   * `std::shared_ptr<at::Tensor>` (or any holder whose destruction frees the
-   * buffer).
+   * The handle is opaque so this layer does not depend on ATen; an ATen caller
+   * passes a std::shared_ptr<at::Tensor> or any holder that owns the buffer.
    */
   void keep_alive(std::shared_ptr<void> holder);
 
-  /**
-   * @brief Flush queued operations to the backend. Idempotent.
-   *
-   * Entries are grouped per destination device; each group goes out as one
-   * rbln_memcpy_h2v_multi call. Releases the keep_alive holders on return.
-   */
+  /** @brief Flush pending entries, one bulk call per device. Idempotent. */
   void submit();
 
-  /**
-   * @brief Number of pending (un-submitted) flat entries. For tests / debug.
-   */
+  /** @brief Pending (un-submitted) entry count. Tests / debug. */
   size_t pending_count() const;
 
  private:
@@ -115,16 +69,10 @@ class C10_RBLN_API H2VBatch {
 /**
  * @brief Buffered batch of pending device-to-host (v2h) copies.
  *
- * Mirror of H2VBatch with the roles swapped: the source is device memory and
- * anchors the per-device grouping, while the destination is host memory.
- * Destination (host) ranges must not overlap across entries; source (device)
- * ranges are pure reads and may repeat or overlap.
- *
- * Same deferred-submit consequence for host buffer lifetime, here on the
- * destination side: a destination the caller does not keep alive across submit()
- * must be handed to keep_alive().
- *
- * See H2VBatch for the ordering, no-rollback, destructor and threading notes.
+ * Mirror of H2VBatch: the source is device memory and anchors the per-device
+ * grouping, the destination is host memory. Destination (host) ranges must not
+ * overlap; source (device) ranges may. keep_alive() applies to the destination
+ * here. See H2VBatch for the rest of the contract.
  */
 class C10_RBLN_API V2HBatch {
  public:
@@ -141,41 +89,17 @@ class C10_RBLN_API V2HBatch {
    *
    * @param dst    Destination host pointer.
    * @param src    Source device pointer (rbln virtual address).
-   * @param nbytes Slab size in bytes. An nbytes==0 call is a no-op.
+   * @param nbytes Slab size in bytes; 0 is a no-op.
    */
   void enqueue(void* dst, const void* src, size_t nbytes);
 
-  /**
-   * @brief Enqueue a strided range. See H2VBatch::enqueue_strided.
-   *
-   * A dst stride of 0 would make several entries write the same host bytes,
-   * which violates the no-overlap requirement; callers must not produce one.
-   */
-  void enqueue_strided(
-      void* dst,
-      const void* src,
-      size_t inner_block_bytes,
-      c10::IntArrayRef outer_sizes,
-      c10::IntArrayRef src_byte_strides,
-      c10::IntArrayRef dst_byte_strides);
-
-  /**
-   * @brief Tie a host buffer's lifetime to this batch, until submit() returns.
-   *        See H2VBatch::keep_alive.
-   */
+  /** @brief Hold `holder` until submit() returns. See H2VBatch::keep_alive. */
   void keep_alive(std::shared_ptr<void> holder);
 
-  /**
-   * @brief Flush queued operations to the backend. Idempotent.
-   *
-   * Entries are grouped per source device; each group goes out as one
-   * rbln_memcpy_v2h_multi call. Releases the keep_alive holders on return.
-   */
+  /** @brief Flush pending entries, one bulk call per device. Idempotent. */
   void submit();
 
-  /**
-   * @brief Number of pending (un-submitted) flat entries. For tests / debug.
-   */
+  /** @brief Pending (un-submitted) entry count. Tests / debug. */
   size_t pending_count() const;
 
  private:

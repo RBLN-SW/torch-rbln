@@ -53,26 +53,23 @@ at::Tensor clone_rbln(
  * non_blocking=False) -> ()`` — copies ``src[i]`` into ``self[i]`` for every i.
  * Conversion-free, same-shape pairs are enqueued per direction and flushed in
  * ONE submit each: ``V2VBatch`` for rbln->rbln, ``H2VBatch`` for cpu->rbln,
- * ``V2HBatch`` for rbln->cpu. A scatter into N per-layer tensors therefore
- * collapses from N submits to 1 in whichever direction it runs. Cross-device is
- * a disqualifier only for rbln->rbln; the host directions split per device.
+ * ``V2HBatch`` for rbln->cpu, so a scatter into N per-layer tensors collapses to
+ * one submit. Mismatched devices disqualify only rbln->rbln; the host directions
+ * split per device.
  *
  * Pairs left on a plain per-pair ``copy_``:
  *   - broadcast or dtype cast (the multi entrypoints move bytes, never convert)
- *   - a pair fanning out to descriptors below the batching floor, where one
- *     staged bulk DMA beats many small transfers
- *   - a pinned host buffer with ``non_blocking=True``, the only case where the
- *     per-pair path is genuinely asynchronous
+ *   - a non-contiguous pair on a host direction, where one staged bulk DMA beats
+ *     many small descriptors
+ *   - a destination that may alias itself, since batch entries are unordered
+ *     (an ``expand``ed view raises, as ``copy_`` raises)
+ *   - a pinned host buffer with ``non_blocking=True``, the only genuinely
+ *     asynchronous per-pair case
  *
- * A destination with internal overlap (an ``expand``ed view) is rejected, as
- * ``copy_`` rejects it: batch entries are unordered, so the surviving write
- * would be arbitrary.
- *
- * Batching is order-free, so when copies alias across pairs (a destination
- * overlapping another pair's source or destination) the op falls back to a
- * sequential per-pair copy_ loop to preserve list-order semantics. Queued work
- * is flushed before any inline ``copy_`` so a rejection mid-list cannot discard
- * the pairs that preceded it.
+ * Batching is order-free, so cross-pair aliasing (a destination overlapping
+ * another pair's source or destination) falls back to a sequential per-pair
+ * ``copy_`` loop. Queued work is flushed before any inline ``copy_`` so a
+ * rejection mid-list cannot discard the pairs that preceded it.
  */
 void _foreach_copy__rbln(at::TensorList self, at::TensorList src, bool non_blocking);
 
