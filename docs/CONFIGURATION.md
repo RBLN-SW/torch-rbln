@@ -279,10 +279,18 @@ rbln_abi_min_supported() <= <snapshot> <= rbln_abi_current()
 ```
 
 Outside that window the import fails with an `RBLN ABI mismatch` message naming the
-`librbln.so` in use and both versions. Two cases warn and continue instead, because
-neither can produce a verdict: a `librbln.so` that predates the handshake and exports
-no version symbols, and a `torch-rbln` built against a `rebel-compiler` that shipped no
-`rbln_abi.h`.
+`librbln.so` in use and both versions. A `librbln.so` whose two entry points contradict
+each other (`min_supported > current`) fails the same way, with or without a snapshot to
+compare against: it describes no acceptable consumer at all.
+
+Cases that leave no verdict to reach warn and continue instead:
+
+| case | why it cannot decide |
+|------|----------------------|
+| `librbln.so` exports no version symbols | it predates the handshake |
+| `librbln.so` exports only one of the two | malformed, but half a window is no window |
+| no handle can be taken on the mapped `librbln.so` | its symbols cannot be read |
+| `torch-rbln` recorded no snapshot | it was built against a `rebel-compiler` with no `rbln_abi.h` |
 
 Run `python -m torch_rbln.diagnose` to see the snapshot, the runtime window, and the
 verdict for the current environment.

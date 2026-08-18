@@ -3,12 +3,13 @@
 """
 Test the rebel ABI handshake performed when torch_rbln loads librbln.so.
 
-Covers the accept/reject window (min_supported <= built <= current), the two
-fail-open cases (pre-handshake runtime, no build-time snapshot), the opt-out
-env var, and that the librbln.so installed here actually agrees with this build.
+Covers the accept/reject window (min_supported <= built <= current), the cases that
+fail open (pre-handshake runtime, half-exported runtime, no handle on the mapped
+library, no build-time snapshot), the ones that fail closed with no snapshot at all,
+the opt-out env var, and that the librbln.so installed here agrees with this build.
 """
 
-import ctypes
+import contextlib
 import os
 
 
@@ -70,6 +71,20 @@ def _lib_with_window(min_supported: int, current: int) -> _FakeLib:
     return _FakeLib({"rbln_abi_min_supported": min_supported, "rbln_abi_current": current})
 
 
+_FAKE_PATH = "/fake/tvm/librbln.so"
+
+
+@contextlib.contextmanager
+def _runtime(lib, built_abi):
+    """check_librbln_abi against a fake librbln.so and a fixed snapshot, opt-out pinned off."""
+    with (
+        patch.dict(os.environ, _ABI_CHECK_ENABLED),
+        patch.object(abi_check, "get_built_abi", return_value=built_abi),
+        patch.object(abi_check, "open_mapped_runtime", return_value=lib),
+    ):
+        yield
+
+
 @pytest.mark.test_set_ci
 class TestAbiMismatchReason(TestCase):
     """The accept/reject window, for every combination of consumer and runtime."""
@@ -119,14 +134,40 @@ class TestReadRuntimeAbi(TestCase):
     def test_missing_both_symbols_is_pre_abi(self):
         self.assertIsNone(abi_check.read_runtime_abi(_FakeLib({})))
 
-    def test_half_exported_runtime_is_treated_as_pre_abi(self):
-        # A .so with only one of the pair is malformed, but there is still no
-        # window to validate against, so it must not become an import failure.
+    def test_half_exported_runtime_has_no_window(self):
+        # A .so with only one of the pair is malformed, but there is still no window to
+        # validate against, so read_runtime_abi reports none either way.
         self.assertIsNone(abi_check.read_runtime_abi(_FakeLib({"rbln_abi_current": 2})))
         self.assertIsNone(abi_check.read_runtime_abi(_FakeLib({"rbln_abi_min_supported": 2})))
 
     def test_no_handle_is_pre_abi(self):
         self.assertIsNone(abi_check.read_runtime_abi(None))
+
+    def test_symbols_report_which_names_were_missing(self):
+        # What separates a runtime that predates the handshake from a malformed one.
+        self.assertEqual(abi_check.read_abi_symbols(_lib_with_window(1, 4)), ([1, 4], []))
+        self.assertEqual(abi_check.read_abi_symbols(_FakeLib({})), ([], list(abi_check.ABI_SYMBOLS)))
+        self.assertEqual(
+            abi_check.read_abi_symbols(_FakeLib({"rbln_abi_current": 2})),
+            ([2], ["rbln_abi_min_supported"]),
+        )
+        self.assertEqual(abi_check.read_abi_symbols(None), ([], list(abi_check.ABI_SYMBOLS)))
+
+
+@pytest.mark.test_set_ci
+class TestOpenMappedRuntime(TestCase):
+    """Taking a handle on the library the import path already mapped."""
+
+    def test_a_path_that_cannot_be_opened_is_not_an_exception(self):
+        # /proc/self/maps can name a mapping whose file has since been replaced. The handle
+        # is what the check needs, not what the process runs on, so this must not raise --
+        # it is reached from the import path, where an OSError would kill the import.
+        self.assertIsNone(abi_check.open_mapped_runtime("/nonexistent/librbln.so"))
+        self.assertIsNone(abi_check.open_mapped_runtime("/nonexistent/librbln.so (deleted)"))
+
+    def test_no_path_gives_no_handle(self):
+        self.assertIsNone(abi_check.open_mapped_runtime(None))
+        self.assertIsNone(abi_check.open_mapped_runtime(""))
 
 
 @pytest.mark.test_set_ci
@@ -155,13 +196,13 @@ class TestCheckLibrblnAbi(TestCase):
     """End-to-end verdicts, including what does and does not block the import."""
 
     def test_in_window_passes(self):
-        with patch.dict(os.environ, _ABI_CHECK_ENABLED), patch.object(abi_check, "get_built_abi", return_value=2):
-            self.assertEqual(abi_check.check_librbln_abi(_lib_with_window(1, 3)), abi_check.VERDICT_OK)
+        with _runtime(_lib_with_window(1, 3), built_abi=2):
+            self.assertEqual(abi_check.check_librbln_abi(_FAKE_PATH), abi_check.VERDICT_OK)
 
     def test_out_of_window_raises_with_an_actionable_report(self):
-        with patch.dict(os.environ, _ABI_CHECK_ENABLED), patch.object(abi_check, "get_built_abi", return_value=5):
+        with _runtime(_lib_with_window(1, 3), built_abi=5):
             with self.assertRaises(ImportError) as ctx:
-                abi_check.check_librbln_abi(_lib_with_window(1, 3))
+                abi_check.check_librbln_abi(_FAKE_PATH)
         message = str(ctx.exception)
         self.assertIn("RBLN ABI mismatch", message)
         self.assertIn("/fake/tvm/librbln.so", message)
@@ -169,25 +210,60 @@ class TestCheckLibrblnAbi(TestCase):
         self.assertIn("python -m torch_rbln.diagnose", message)
 
     def test_pre_abi_runtime_warns_but_does_not_block(self):
-        with patch.dict(os.environ, _ABI_CHECK_ENABLED), patch.object(abi_check, "get_built_abi", return_value=2):
+        with _runtime(_FakeLib({}), built_abi=2):
             with pytest.warns(UserWarning, match="no ABI version symbols"):
-                verdict = abi_check.check_librbln_abi(_FakeLib({}))
+                verdict = abi_check.check_librbln_abi(_FAKE_PATH)
         self.assertEqual(verdict, abi_check.VERDICT_SKIPPED_PRE_ABI_RUNTIME)
 
+    def test_half_exported_runtime_warns_as_malformed_but_does_not_block(self):
+        # Distinct from the pre-ABI case: the pair ships together, so one of them alone is a
+        # broken runtime, not an old one, and the warning has to say so.
+        with _runtime(_FakeLib({"rbln_abi_current": 2}), built_abi=2):
+            with pytest.warns(UserWarning, match="malformed rather than merely old"):
+                verdict = abi_check.check_librbln_abi(_FAKE_PATH)
+        self.assertEqual(verdict, abi_check.VERDICT_SKIPPED_MALFORMED_RUNTIME)
+
+    def test_unreadable_runtime_warns_but_does_not_block(self):
+        with _runtime(None, built_abi=2):
+            with pytest.warns(UserWarning, match="no handle could be taken"):
+                verdict = abi_check.check_librbln_abi(_FAKE_PATH)
+        self.assertEqual(verdict, abi_check.VERDICT_SKIPPED_UNREADABLE_RUNTIME)
+
     def test_missing_snapshot_warns_but_does_not_block(self):
-        with patch.dict(os.environ, _ABI_CHECK_ENABLED), patch.object(abi_check, "get_built_abi", return_value=None):
+        with _runtime(_lib_with_window(1, 1), built_abi=None):
             with pytest.warns(UserWarning, match="recorded no rebel ABI number"):
-                verdict = abi_check.check_librbln_abi(_lib_with_window(1, 1))
+                verdict = abi_check.check_librbln_abi(_FAKE_PATH)
         self.assertEqual(verdict, abi_check.VERDICT_SKIPPED_NO_SNAPSHOT)
+
+    def test_a_pre_abi_runtime_and_no_snapshot_warn_once(self):
+        # Both fail open, so the actionable one wins rather than stacking two warnings.
+        with _runtime(_FakeLib({}), built_abi=None):
+            with pytest.warns(UserWarning) as record:
+                verdict = abi_check.check_librbln_abi(_FAKE_PATH)
+        self.assertEqual(verdict, abi_check.VERDICT_SKIPPED_NO_SNAPSHOT)
+        self.assertEqual(len(record), 1, [str(w.message) for w in record])
+
+    def test_self_contradicting_runtime_is_rejected_even_without_a_snapshot(self):
+        # min > current accepts no consumer at all, so there is nothing for a snapshot to
+        # decide and its absence is no reason to let the runtime through.
+        with _runtime(_lib_with_window(5, 4), built_abi=None):
+            with self.assertRaises(ImportError) as ctx:
+                abi_check.check_librbln_abi(_FAKE_PATH)
+        message = str(ctx.exception)
+        self.assertIn("inconsistent ABI window", message)
+        self.assertIn("no ABI snapshot recorded", message)
 
     def test_opt_out_skips_a_mismatch_that_would_otherwise_raise(self):
         for value in ("1", "ON", "on", "true", "yes"):
             with (
                 patch.dict(os.environ, {abi_check._SKIP_ENV: value}),
                 patch.object(abi_check, "get_built_abi", return_value=99),
+                # The opt-out has to cover every step, taking the handle included, or it
+                # cannot unblock a machine where that step is what fails.
+                patch.object(abi_check, "open_mapped_runtime", side_effect=AssertionError("opened")),
             ):
                 self.assertEqual(
-                    abi_check.check_librbln_abi(_lib_with_window(1, 1)),
+                    abi_check.check_librbln_abi(_FAKE_PATH),
                     abi_check.VERDICT_SKIPPED_DISABLED,
                     f"value={value!r}",
                 )
@@ -204,7 +280,7 @@ def _mapped_librbln(case):
         path = rbln_runtime_lib.load_runtime_library()
     except FileNotFoundError as e:
         case.skipTest(f"librbln.so not installed: {e}")
-    return ctypes.CDLL(path, mode=os.RTLD_NOLOAD | ctypes.RTLD_GLOBAL)
+    return abi_check.open_mapped_runtime(path)
 
 
 @pytest.mark.test_set_ci
@@ -234,6 +310,7 @@ class TestInstalledCombination(TestCase):
 
 instantiate_device_type_tests(TestAbiMismatchReason, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestReadRuntimeAbi, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestOpenMappedRuntime, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestGetBuiltAbi, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestCheckLibrblnAbi, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestInstalledCombination, globals(), only_for="privateuse1")

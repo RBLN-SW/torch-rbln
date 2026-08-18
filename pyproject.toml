@@ -80,6 +80,7 @@ include = [
   "c10/**/*.hpp",
   "c10/**/CMakeLists.txt",
   "cmake/**/*.cmake",
+  "cmake/**/*.in",
   "tools/**/*.py",
   "tools/**/*.sh",
   "torch_rbln/**/*.py",

@@ -267,27 +267,35 @@ def _rebel_abi_info() -> dict[str, Any]:
 
     try:
         path = load_runtime_library()
-        lib = ctypes.CDLL(path, mode=os.RTLD_NOLOAD | ctypes.RTLD_GLOBAL)
     except Exception as e:
         out["error"] = f"could not load librbln.so: {e}"
         return out
 
     out["librbln_path"] = path
+    lib = abi_check.open_mapped_runtime(path)
+    if lib is None:
+        out["error"] = f"no handle could be taken on {path}, so its ABI symbols could not be read"
+        return out
+
     try:
-        window = abi_check.read_runtime_abi(lib)
+        values, missing = abi_check.read_abi_symbols(lib)
     except Exception as e:
         out["error"] = f"could not read ABI symbols: {e}"
         return out
 
-    if window is None:
-        out["verdict"] = "runtime predates the ABI handshake (no version symbols)"
+    if missing:
+        out["verdict"] = (
+            "runtime predates the ABI handshake (no version symbols)"
+            if not values
+            else f"malformed runtime: exports only {', '.join(n for n in abi_check.ABI_SYMBOLS if n not in missing)}"
+        )
         return out
 
-    out["runtime_min_supported"], out["runtime_current"] = window
+    out["runtime_min_supported"], out["runtime_current"] = values
     if out["built_abi"] is None:
         out["verdict"] = "no build-time snapshot to compare against"
         return out
-    reason = abi_check.abi_mismatch_reason(out["built_abi"], window[0], window[1])
+    reason = abi_check.abi_mismatch_reason(out["built_abi"], values[0], values[1])
     out["verdict"] = "OK" if reason is None else f"MISMATCH -- {reason}"
     return out
 

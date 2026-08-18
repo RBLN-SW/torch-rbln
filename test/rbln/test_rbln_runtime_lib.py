@@ -200,8 +200,29 @@ class TestRblnRuntimeLibRecord(TestCase):
         self.assertTrue(os.path.isdir(include_dir), f"{include_dir} does not exist")
 
 
+@pytest.mark.test_set_ci
+class TestRblnRuntimeLibAdopt(TestCase):
+    """Adopting a librbln.so something else mapped first."""
+
+    def test_an_existing_mapping_is_adopted_without_loading_again(self):
+        with (
+            patch.object(rbln_runtime_lib, "loaded_runtime_libraries", return_value=["/opt/rebel/librbln.so"]),
+            patch.object(rbln_runtime_lib.ctypes, "CDLL", side_effect=AssertionError("loaded again")),
+        ):
+            self.assertEqual(rbln_runtime_lib.load_runtime_library(), "/opt/rebel/librbln.so")
+
+    def test_a_deleted_mapping_is_reported_as_a_path(self):
+        # /proc/self/maps marks a mapping whose file is gone with " (deleted)". The marker is
+        # not part of the path, and what this returns is handed to dlopen by the ABI check.
+        with patch.object(
+            rbln_runtime_lib, "loaded_runtime_libraries", return_value=["/opt/rebel/librbln.so (deleted)"]
+        ):
+            self.assertEqual(rbln_runtime_lib.load_runtime_library(), "/opt/rebel/librbln.so")
+
+
 instantiate_device_type_tests(TestRblnRuntimeLibResolve, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestRblnRuntimeLibRecord, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestRblnRuntimeLibAdopt, globals(), only_for="privateuse1")
 
 if __name__ == "__main__":
     run_tests()

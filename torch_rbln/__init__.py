@@ -42,8 +42,9 @@ def torch_backends_entry_point() -> None:
         # Verify the rebel ABI contract while librbln.so is the only rebel code loaded. Past
         # this point our extensions bind to its entry points and a mismatch stops being
         # reportable: CPython opens them RTLD_NOW, so a missing symbol aborts the import as
-        # `undefined symbol`. RTLD_NOLOAD takes a handle on the mapping just made, not a copy.
-        check_librbln_abi(ctypes.CDLL(librbln_path, mode=os.RTLD_NOLOAD | ctypes.RTLD_GLOBAL))
+        # `undefined symbol`. It re-opens the mapping just made RTLD_NOLOAD, never a copy, and
+        # owns that step so a handle it cannot take fails open like the rest of the check.
+        check_librbln_abi(librbln_path)
 
         # Import native extension module (e.g., torch_rbln.so)
         current_dir = os.path.dirname(os.path.abspath(__file__))
