@@ -11,7 +11,7 @@ namespace c10::rbln {
 /**
  * @brief Buffered batch of pending host-to-device (h2v) copies.
  *
- * The write-side host counterpart of V2VBatch: enqueue() / enqueue_strided()
+ * The write-side host counterpart of V2VBatch: enqueue() then submit()
  * record copy requests, submit() flushes them through rbln_memcpy_h2v_multi.
  * Where V2VBatch has to drop to per-entry copies once entries span devices —
  * paying a host bounce — this batch splits into one bulk submit per device,
@@ -56,32 +56,6 @@ class C10_RBLN_API H2VBatch {
    * @param nbytes Slab size in bytes. An nbytes==0 call is a no-op.
    */
   void enqueue(void* dst, const void* src, size_t nbytes);
-
-  /**
-   * @brief Enqueue a strided range — `prod(outer_sizes)` copies of
-   *        `inner_block_bytes` each, walking outer_sizes in row-major order.
-   *
-   * For outer iteration index `idx[]` the k-th call has:
-   *   dst_off = sum_d idx[d] * dst_byte_strides[d]
-   *   src_off = sum_d idx[d] * src_byte_strides[d]
-   *
-   * outer_sizes / src_byte_strides / dst_byte_strides must have identical
-   * length. When that length is zero this degenerates to a single
-   * enqueue(dst, src, inner_block_bytes).
-   *
-   * A src stride of 0 is preserved, so a broadcast host source replicates
-   * across writes instead of collapsing to its first slab.
-   *
-   * The IntArrayRefs are read during this call only; the caller does not need
-   * to keep them alive past return.
-   */
-  void enqueue_strided(
-      void* dst,
-      const void* src,
-      size_t inner_block_bytes,
-      c10::IntArrayRef outer_sizes,
-      c10::IntArrayRef src_byte_strides,
-      c10::IntArrayRef dst_byte_strides);
 
   /**
    * @brief Tie a host buffer's lifetime to this batch, until submit() returns.
@@ -144,20 +118,6 @@ class C10_RBLN_API V2HBatch {
    * @param nbytes Slab size in bytes. An nbytes==0 call is a no-op.
    */
   void enqueue(void* dst, const void* src, size_t nbytes);
-
-  /**
-   * @brief Enqueue a strided range. See H2VBatch::enqueue_strided.
-   *
-   * A dst stride of 0 would make several entries write the same host bytes,
-   * which violates the no-overlap requirement; callers must not produce one.
-   */
-  void enqueue_strided(
-      void* dst,
-      const void* src,
-      size_t inner_block_bytes,
-      c10::IntArrayRef outer_sizes,
-      c10::IntArrayRef src_byte_strides,
-      c10::IntArrayRef dst_byte_strides);
 
   /**
    * @brief Tie a host buffer's lifetime to this batch, until submit() returns.

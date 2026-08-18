@@ -66,13 +66,19 @@ class TestForeachCopyHost(TestCase):
             _eq(got, want)
 
     def test_h2v_noncontiguous_device_dst(self):
-        """A strided device destination: writes land in the viewed positions and
-        the gaps keep their previous contents."""
+        """A strided device destination is NOT batched — it goes to ``copy_``.
+
+        Batching is contiguous-only, so this pair leaves the batch. Writes still
+        land in the viewed positions and the gaps keep their previous contents.
+        """
         base = _to_dev(torch.full((5, 6), -1.0, dtype=torch.float32))
         dst_views = [base.select(1, c) for c in (1, 3)]
         src_cpu = [_arange((5,), torch.float32) + c * 10 for c in (1, 3)]
 
-        torch._foreach_copy_(dst_views, src_cpu)
+        with torch.rbln.explain() as p:
+            torch._foreach_copy_(dst_views, src_cpu)
+        calls = _prim_calls(p.dump())
+        self.assertEqual(calls.get("h2v_multi", 0), 0, f"strided dst must not batch: {calls}")
 
         want = torch.full((5, 6), -1.0, dtype=torch.float32)
         for c, s in zip((1, 3), src_cpu):
@@ -80,12 +86,18 @@ class TestForeachCopyHost(TestCase):
         _eq(base, want)
 
     def test_h2v_noncontiguous_cpu_src(self):
-        """A transposed cpu source needs no staging copy — the strided walk reads
-        it in place."""
+        """A transposed cpu source is NOT batched — it goes to ``copy_``.
+
+        Batching such a pair would emit one descriptor per element; ``copy_``
+        stages it into one bulk DMA instead. Values must still be correct.
+        """
         src_cpu = [_arange((4, 6), torch.float32).t(), _arange((4, 6), torch.float32).t() + 50]
         dst_dev = [_to_dev(torch.zeros(6, 4, dtype=torch.float32)) for _ in src_cpu]
 
-        torch._foreach_copy_(dst_dev, src_cpu)
+        with torch.rbln.explain() as p:
+            torch._foreach_copy_(dst_dev, src_cpu)
+        calls = _prim_calls(p.dump())
+        self.assertEqual(calls.get("h2v_multi", 0), 0, f"transposed src must not batch: {calls}")
 
         for got, want in zip(dst_dev, src_cpu):
             _eq(got, want)
@@ -118,12 +130,16 @@ class TestForeachCopyHost(TestCase):
         self.assertTrue(torch.equal(host, src_full.reshape(-1)))
 
     def test_v2h_noncontiguous_host_dst(self):
+        """A strided host destination is NOT batched — it goes to ``copy_``."""
         host = torch.full((5, 6), -1.0, dtype=torch.float32)
         dst_views = [host.select(1, c) for c in (0, 4)]
         src_cpu = [_arange((5,), torch.float32) + c for c in (0, 4)]
         src_dev = [_to_dev(s) for s in src_cpu]
 
-        torch._foreach_copy_(dst_views, src_dev)
+        with torch.rbln.explain() as p:
+            torch._foreach_copy_(dst_views, src_dev)
+        calls = _prim_calls(p.dump())
+        self.assertEqual(calls.get("v2h_multi", 0), 0, f"strided host dst must not batch: {calls}")
 
         want = torch.full((5, 6), -1.0, dtype=torch.float32)
         for c, s in zip((0, 4), src_cpu):
@@ -243,12 +259,14 @@ class TestForeachCopyHost(TestCase):
                 _eq(dst, before)
 
     def test_partially_overlapping_dst_is_not_batched(self):
-        """A destination whose own rows overlap violates the runtime's
-        disjoint-destination contract, but ``has_internal_overlap`` cannot prove
-        it (``TooHard``) so ``assert_no_internal_overlap`` lets it through. It
-        must not reach the batch, where entry order is arbitrary.
+        """A destination whose own rows overlap must not reach the batch, where
+        entry order is arbitrary.
 
-        Rows are 64 KiB so the descriptor-size gate does not filter this out.
+        ``has_internal_overlap`` cannot prove the overlap (``TooHard``) so
+        ``assert_no_internal_overlap`` lets it through. On the host directions the
+        contiguity rule refuses it first — a self-overlapping view is never
+        contiguous — so this pins the outcome, and the ``TooHard`` decision itself
+        is what keeps the same shape off the v2v batch.
         """
         elems_per_row = 16 * 1024
         stride = elems_per_row // 2
@@ -283,31 +301,13 @@ class TestForeachCopyHost(TestCase):
 
         _eq(ok_dst, ok_src)
 
-    # ---- the descriptor-size gate ----
-
-    def test_tiny_descriptor_pair_is_not_batched(self):
-        """A pair that fans out to element-sized descriptors must NOT be batched.
-
-        A transposed source has no jointly contiguous suffix, so batching it
-        would emit one descriptor per element — measured ~4000x slower than the
-        staged bulk copy, and hundreds of MiB of descriptors for a 4 MiB payload.
-        The gate sends it to ``copy_`` instead, so no ``h2v_multi`` appears.
-        """
-        n = 128
-        src = _arange((n, n), torch.float32).t()  # innermost stride n -> no suffix
-        dst = _to_dev(torch.zeros(n, n, dtype=torch.float32))
-
-        with torch.rbln.explain() as p:
-            torch._foreach_copy_([dst], [src])
-        calls = _prim_calls(p.dump())
-
-        self.assertEqual(calls.get("h2v_multi", 0), 0, f"tiny descriptors must not batch: {calls}")
-        _eq(dst, src.contiguous())
+    # ---- the contiguity rule ----
 
     def test_contiguous_pairs_batch_regardless_of_size(self):
-        """Small CONTIGUOUS pairs stay batched: each contributes one descriptor,
-        so the batch replaces N submits with one (the weight-load shape, measured
-        ~3x faster). The size gate applies only to pairs that fan out.
+        """Small CONTIGUOUS pairs stay batched regardless of size: each
+        contributes exactly one descriptor, so the batch replaces N submits with
+        one (the weight-load shape, measured ~3x faster). Size never enters the
+        eligibility decision — contiguity does.
         """
         n_pairs = 16
         srcs = [_arange((64,), torch.float32) + i for i in range(n_pairs)]  # 256 B each

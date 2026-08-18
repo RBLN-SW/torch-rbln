@@ -4,8 +4,8 @@
 
 #include <ATen/MemoryOverlap.h>
 #include <ATen/native/rbln/RBLNCopy.h>
+#include <ATen/native/rbln/RBLNHostCopy.h>
 #include <ATen/native/rbln/RBLNStrideUtils.h>
-#include <ATen/native/rbln/RBLNStridedHostCopy.h>
 #include <ATen/native/rbln/RBLNStridedV2V.h>
 #include <ATen/native/rbln/RBLNTensorUtils.h>
 #include <ATen/ops/empty.h>
@@ -38,13 +38,6 @@ struct IndirectD2DGuard {
     --g_indirect_d2d_depth;
   }
 };
-
-// Descriptor floor for batching a pair that fans out. Above the measured
-// crossover (4-16 KiB on h2v/float32) with margin: too low reintroduces the
-// per-descriptor regression, too high only forgoes a win. Contiguous pairs are
-// exempt — they contribute one descriptor each, so batching them is a submit-count
-// win regardless of size. See the gate in _foreach_copy__rbln.
-constexpr size_t kMinBatchedDescriptorBytes = 64 * 1024;
 
 bool is_direct_copy(const at::Tensor& src, const at::Tensor& dst) {
   const bool same_sizes = (src.sizes() == dst.sizes());
@@ -625,52 +618,30 @@ void _foreach_copy__rbln(at::TensorList self, at::TensorList src, bool non_block
         ((dst_dev && src_cpu && c10::rbln::is_pinned_ptr(s.data_ptr())) ||
          (src_dev && dst_cpu && c10::rbln::is_pinned_ptr(dst.data_ptr())));
 
-    // Batching pays off on two different axes, and only one of them needs a
-    // guard. A contiguous pair contributes exactly one descriptor, so batching
-    // N of them replaces N submits with one — always a win (measured ~3x at 1 KiB
-    // tensors, which is the weight-load shape). A pair that fans out is competing
-    // instead against copy_'s single bulk DMA over a staged buffer, and there the
-    // per-descriptor cost decides: measured 6.5x SLOWER at 1 KiB descriptors and
-    // ~4000x slower for the element-per-descriptor case a transpose produces.
-    // So gate the fan-out case on descriptor size and leave contiguous pairs
-    // alone.
+    // Host-direction batching is contiguous-only. A contiguous pair contributes
+    // exactly one descriptor, so batching N of them replaces N submits with one —
+    // always a win (measured ~3x at 1 KiB tensors, which is the weight-load shape).
+    // A pair that fans out competes instead against copy_'s single bulk DMA over a
+    // staged buffer, where the per-descriptor cost decides and the answer moves
+    // with descriptor size. No caller in tree produces such a host pair today, so
+    // they take the per-pair path; batching them belongs with the change that
+    // routes plain copy_ through these primitives, where the threshold can be
+    // justified against the same measurement.
     //
-    // The threshold sits above the measured crossover (between 4 and 16 KiB on
-    // h2v/float32) with margin, because the two directions of error are not
-    // symmetric: too low reintroduces the regression, too high only forgoes a
-    // win. It also bounds the descriptor vectors — with a floor of 64 KiB their
-    // memory cannot exceed ~0.1% of the payload, which is what makes the
-    // transpose OOM case structurally impossible rather than merely unlikely.
-    //
-    // The gate is a host-direction policy. A v2v pair has no staged bulk DMA to
-    // compete with: the per-pair path issues the same on-device strided copy
-    // and, above the runtime's per-destination cap, round-trips the host, while
-    // the batch falls back to per-entry device copies. Gating v2v would trade
-    // one submit for N and can turn a device-side copy into a host bounce.
-    const bool host_direction = (dst_dev && src_cpu) || (src_dev && dst_cpu);
-    if (host_direction) {
-      const auto fan = copy_fan_out(
-          dst.sizes(),
-          s.strides(),
-          dst.strides(),
-          static_cast<size_t>(dst.element_size()),
-          dst.is_contiguous() && s.is_contiguous(),
-          dst.numel());
-      if (fan.outer_count > 1 && fan.inner_block_bytes < kMinBatchedDescriptorBytes) {
-        flush_pending();
-        dst.copy_(s, non_blocking);
-        continue;
-      }
-    }
+    // v2v keeps its strided path. There the per-pair path issues the same
+    // on-device strided copy and, above the runtime's per-destination cap,
+    // round-trips the host, so refusing a strided v2v pair would trade one submit
+    // for N and can turn a device-side copy into a host bounce.
+    const bool contig_pair = dst.is_contiguous() && s.is_contiguous();
 
     if (dst_dev && src_dev && dst.device() == s.device()) {
       strided_v2v_copy(dst, s, v2v_batch);
       v2v_batched.emplace_back(dst, s);
-    } else if (dst_dev && src_cpu && !host_side_pinned_async) {
-      strided_h2v_copy(dst, s, h2v_batch);
+    } else if (dst_dev && src_cpu && contig_pair && !host_side_pinned_async) {
+      h2v_copy(dst, s, h2v_batch);
       h2v_batched.emplace_back(dst, s);
-    } else if (src_dev && dst_cpu && !host_side_pinned_async) {
-      strided_v2h_copy(dst, s, v2h_batch);
+    } else if (src_dev && dst_cpu && contig_pair && !host_side_pinned_async) {
+      v2h_copy(dst, s, v2h_batch);
       v2h_batched.emplace_back(dst, s);
     } else {
       flush_pending();

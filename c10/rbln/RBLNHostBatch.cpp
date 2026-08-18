@@ -152,17 +152,6 @@ void H2VBatch::enqueue(void* dst, const void* src, size_t nbytes) {
   detail::enqueue_one<H2VCopyOp, detail::DeviceAnchor::kDstOnly>(impl_->st, kH2VWho, dst, src, nbytes);
 }
 
-void H2VBatch::enqueue_strided(
-    void* dst,
-    const void* src,
-    size_t inner_block_bytes,
-    c10::IntArrayRef outer_sizes,
-    c10::IntArrayRef src_byte_strides,
-    c10::IntArrayRef dst_byte_strides) {
-  detail::enqueue_strided_impl<H2VCopyOp, detail::DeviceAnchor::kDstOnly>(
-      impl_->st, kH2VWho, dst, src, inner_block_bytes, outer_sizes, src_byte_strides, dst_byte_strides);
-}
-
 void H2VBatch::keep_alive(std::shared_ptr<void> holder) {
   if (holder) {
     impl_->st.keepalive.push_back(std::move(holder));
@@ -215,17 +204,6 @@ V2HBatch::~V2HBatch() {
 
 void V2HBatch::enqueue(void* dst, const void* src, size_t nbytes) {
   detail::enqueue_one<V2HCopyOp, detail::DeviceAnchor::kSrcOnly>(impl_->st, kV2HWho, dst, src, nbytes);
-}
-
-void V2HBatch::enqueue_strided(
-    void* dst,
-    const void* src,
-    size_t inner_block_bytes,
-    c10::IntArrayRef outer_sizes,
-    c10::IntArrayRef src_byte_strides,
-    c10::IntArrayRef dst_byte_strides) {
-  detail::enqueue_strided_impl<V2HCopyOp, detail::DeviceAnchor::kSrcOnly>(
-      impl_->st, kV2HWho, dst, src, inner_block_bytes, outer_sizes, src_byte_strides, dst_byte_strides);
 }
 
 void V2HBatch::keep_alive(std::shared_ptr<void> holder) {
