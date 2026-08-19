@@ -448,8 +448,15 @@ void DeviceMappingManager::initializeDummyDevices() const {
 std::string DeviceMappingManager::envSignature() {
   // Any change to one of these changes the plan. Values are length-prefixed so that
   // e.g. RBLN_DEVICES="0|" and RBLN_DEVICES="0", RBLN_DEVICE_MAP="" cannot collide.
+  //
+  // RBLN_VISIBLE_DEVICES is the runtime's shipped alias of RBLN_DEVICES (rebel's
+  // flags.cc registers it with /*alias=*/"RBLN_VISIBLE_DEVICES"), so it selects the
+  // visible NPU pool just as well. Omitting it left the plan cached against a pool the
+  // runtime had already changed: device_count() answered from the stale plan while
+  // physical_device_count(), which bypasses it, answered from the new one.
   std::string signature;
-  for (const char* name : {"RBLN_DEVICES", "RBLN_DEVICE_MAP", "RBLN_NPUS_PER_DEVICE", "RBLN_DUMMY_DEVICE"}) {
+  for (const char* name :
+       {"RBLN_DEVICES", "RBLN_VISIBLE_DEVICES", "RBLN_DEVICE_MAP", "RBLN_NPUS_PER_DEVICE", "RBLN_DUMMY_DEVICE"}) {
     const char* value = std::getenv(name);
     const std::string text = (value != nullptr) ? std::string(value) : std::string();
     signature += std::to_string(text.size());
@@ -525,14 +532,18 @@ void DeviceMappingManager::buildPlan() const {
   }
 
   // The runtime is the only authority on how many NPUs RBLN_DEVICES leaves visible.
-  // Calling it seals RBLN_DEVICES, so an availability query freezes the value for this
-  // process and everything it forks -- see rebellions-sw/fsw-inference#475. Working
-  // around that here (counting /dev/rbln* and parsing RBLN_DEVICES ourselves) was tried
-  // and rejected: it creates a second source of truth for something the runtime owns.
+  // Working around that here (counting /dev/rbln* and parsing RBLN_DEVICES ourselves) was
+  // tried and rejected: it creates a second source of truth for something the runtime owns.
+  //
+  // RBLN_DEVICES is named as a cause because the runtime's own detail does not reach us:
+  // it reports a malformed value as a status ("Invalid RBLN_DEVICES value: ...") and the C
+  // entry point narrows that to an RBLNRetCode, so the text stays in the runtime's log.
+  // Blaming only the driver would misdiagnose a bad RBLN_DEVICES / RBLN_VISIBLE_DEVICES.
   int physical_device_count = 0;
   RBLN_CHECK_QUIET(
       !rbln_get_device_count(&physical_device_count),
-      "rbln_get_device_count failed; the RBLN kernel driver may not be loaded or the device is unavailable");
+      "rbln_get_device_count failed; the RBLN kernel driver may not be loaded, the device may be unavailable, or "
+      "RBLN_DEVICES / RBLN_VISIBLE_DEVICES may hold an invalid value (the runtime logs the detail)");
   RBLN_LOG_DEBUG("Found {} physical NPU(s)", physical_device_count);
 
   // No physical NPU: plan 0 logical devices instead of failing (like

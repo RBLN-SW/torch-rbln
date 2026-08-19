@@ -128,9 +128,9 @@ class C10_RBLN_API DeviceMappingManager {
 
   // Initialization is two stages:
   //
-  //   plan   Parse RBLN_DEVICES / RBLN_DEVICE_MAP / RBLN_NPUS_PER_DEVICE, validate the
-  //          layout, compute the logical->physical table. Claims no NPU. Run by
-  //          availability and enumeration queries.
+  //   plan   Parse RBLN_DEVICES (or its RBLN_VISIBLE_DEVICES alias) / RBLN_DEVICE_MAP /
+  //          RBLN_NPUS_PER_DEVICE, validate the layout, compute the logical->physical
+  //          table. Claims no NPU. Run by availability and enumeration queries.
   //   commit rbln_register_device_id() per planned logical device -- documented as
   //          "Initializes devices to be used for NPU executions", i.e. it opens a
   //          context on every mapped NPU. Deferred to the first actual device use.
@@ -141,8 +141,13 @@ class C10_RBLN_API DeviceMappingManager {
   // from co-tenant processes. ATen/detail/AcceleratorHooksInterface.h states the rule:
   // isAvailable() "should NOT initialize the context on any device".
   //
-  // Planning still seals RBLN_DEVICES, because the visible NPU count can only come from
-  // rbln_get_device_count(). Tracked in rebellions-sw/fsw-inference#475.
+  // Commit is also the moment the runtime fixes its own RBLN_DEVICES mapping:
+  // rbln_register_device_id() reaches Context::Create, which latches it
+  // (rebellions-sw/rebel_compiler#12904). The two layers therefore freeze together, and a
+  // launcher may still assign RBLN_DEVICES after import -- including inside a fork()ed
+  // worker -- as long as it does so before the first device use. Against a runtime older
+  // than #12904 the first enumeration query latched instead, which is what
+  // rebellions-sw/fsw-inference#475 and #495 were about.
 
   /**
    * @brief Plan the device mapping from the environment (no NPU is claimed).
