@@ -30,7 +30,7 @@ The arrows drawn from that correlation are chrome-trace ``ph`` "s"/"f" events, w
 slice checks never see, so one test walks them directly: every marker owns one flow start and
 every start reaches a device slice of the same ``launch_id``.
 
-Requires a live NPU and ``RBLN_PROFILER=1`` (device profiling must be on at runtime
+Requires a live REBEL NPU and ``RBLN_PROFILER=1`` (device profiling must be on at runtime
 creation, else no device slices are recorded).
 """
 
@@ -45,6 +45,7 @@ from torch.profiler import profile, ProfilerActivity
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 import torch_rbln  # noqa: F401  -- registers the rbln device + the kineto bridge
+from test.utils import is_atom_device
 
 
 DEVICE = torch.device("rbln:0")
@@ -54,6 +55,8 @@ REGION_NAME = "Torch-Compiled Region"  # torch.compile's per-region CPU slice
 RUN_MARKER = "rbln_run"  # the run's source marker (host launch point)
 LAUNCH_ID_ARG = "launch_id"  # annotation on the source + every device slice of one run
 FLOW_CAT = "ac2g"  # category of the flow-arrow events (ph "s" start / "f" finish)
+DEVICE_CATS = ("kernel", "gpu_memcpy")
+RUNTIME_CAT = "privateuse1_runtime"
 TS_EPS_US = 1e-3  # a flow start sits on its marker's timestamp; allow json round-trip noise
 
 
@@ -78,9 +81,10 @@ class _MLP2(nn.Module):
 
 
 @pytest.fixture
-def enable_rbln_device_profiler(monkeypatch):
+def enable_rbln_device_profiler(monkeypatch, tmp_path):
     """Device profiling must be on at runtime creation for the kineto session to record slices."""
     monkeypatch.setenv("RBLN_PROFILER", "1")
+    monkeypatch.setenv("RBLN_PROFILER_DIR", str(tmp_path))
 
 
 @pytest.fixture
@@ -96,6 +100,11 @@ def async_dispatch(monkeypatch):
 
 
 @pytest.mark.test_set_ci
+@pytest.mark.single_worker
+@pytest.mark.skipif(
+    is_atom_device(),
+    reason="rbln kineto export is REBEL-only; rbln_kineto_is_active() reports inactive on ATOM",
+)
 @pytest.mark.usefixtures("enable_rbln_device_profiler")
 class TestKinetoRegionDeviceAlignment(TestCase):
     """rbln device slices must line up with the host op that launched them."""
@@ -177,6 +186,10 @@ class TestKinetoRegionDeviceAlignment(TestCase):
 
             device_slices = [e for e in group if e["name"] != RUN_MARKER]
             self.assertTrue(device_slices, f"launch {lid}: no device slices linked to the run")
+            self.assertTrue(
+                [e for e in group if e.get("cat") in DEVICE_CATS],
+                f"launch {lid}: no {DEVICE_CATS} slice carries this launch_id",
+            )
             for dev in device_slices:
                 start = float(dev["ts"])
                 end = start + float(dev.get("dur", 0.0))
@@ -250,6 +263,18 @@ class TestKinetoRegionDeviceAlignment(TestCase):
                     [self._launch_id(s) for s in landed],
                     f"flow {flow}: finish landed on {[s['name'] for s in landed]}, none of launch {lid}",
                 )
+
+            expected = [
+                sl
+                for sl in slices
+                if sl.get("cat") == RUNTIME_CAT and self._launch_id(sl) == lid and sl is not source[0]
+            ]
+            self.assertEqual(
+                len(sinks),
+                len(expected),
+                f"flow {flow} (launch {lid}): {len(sinks)} arrows for {len(expected)} runtime slices "
+                f"{[sl['name'] for sl in expected]}",
+            )
 
         self.assertFalse(finishes_by_flow, f"flow finishes with no start: {sorted(finishes_by_flow)}")
 
