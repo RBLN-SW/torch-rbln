@@ -39,13 +39,10 @@ const char* slice_annotation(const RblnKinetoSlice& s, const char* name) {
   return nullptr;
 }
 
-// Kernels would multiply the arrows; only the workload slices carry one.
 bool is_dst_slice(const RblnKinetoSlice& s) {
   return s.kind == RBLN_KINETO_KIND_RUNTIME;
 }
 
-// Region -> device ac2g arrows, keyed by launch_id so they bind across the async gap.
-// Requires out->activities[i] to be slice i (the caller projects them in order).
 void add_flow_arrows(const RblnKinetoExport* exp, int64_t clock_offset_ns,
                      const ::libkineto::TraceSpan& span, ProjectedKinetoTrace* out) {
   if (exp->host_launches_count == 0) {
@@ -53,13 +50,13 @@ void add_flow_arrows(const RblnKinetoExport* exp, int64_t clock_offset_ns,
     return;
   }
 
-  // Step 1: assign one flow id per host launch.
-  std::unordered_map<int64_t, uint32_t> flow_id_by_launch; // launch_id -> shared flow id
+  // 1. assign one flow id per host launch.
+  std::unordered_map<int64_t, uint32_t> flow_id_by_launch;
   flow_id_by_launch.reserve(exp->host_launches_count);
   for (uint32_t i = 0; i < exp->host_launches_count; ++i)
     flow_id_by_launch.emplace(exp->host_launches[i].launch_id, i + 1);
 
-  // Step 2: put that flow id on the dst slices (1:N fan).
+  // 2. put that flow id on the dst slices (1:N fan).
   std::vector<bool> wired(exp->host_launches_count, false);
   uint64_t arrows = 0, skipped_no_launch_id = 0, skipped_no_launch = 0;
   for (uint32_t i = 0; i < exp->slices_count; ++i) {
@@ -85,7 +82,7 @@ void add_flow_arrows(const RblnKinetoExport* exp, int64_t clock_offset_ns,
     ++arrows;
   }
 
-  // Step 3: put it on the source marker, only for launches whose slices got it, so none dangles.
+  // 3. put it on the source marker, only for launches whose slices got it, so none dangles.
   uint64_t sources = 0, unwired = 0;
   for (uint32_t i = 0; i < exp->host_launches_count; ++i) {
     if (!wired[i]) {
@@ -152,7 +149,6 @@ void convert_export_to_kineto(
         /*name=*/std::string(lane.name ? lane.name : ""));
   }
 
-  // Reserve capacity for all activities (slices + source markers).
   out->activities.reserve(exp->slices_count + exp->host_launches_count);
   for (uint32_t i = 0; i < exp->slices_count; ++i) {
     const RblnKinetoSlice& s = exp->slices[i];
