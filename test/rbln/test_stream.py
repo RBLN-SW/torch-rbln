@@ -72,6 +72,11 @@ class TestStream(TestCase):
         with torch.rbln.stream(None):
             self.assertEqual(torch.rbln.current_stream(), default)
 
+    def test_set_stream_rejects_a_foreign_stream(self):
+        # A foreign stream id would otherwise be read as an RBLN local stream id.
+        with self.assertRaisesRegex(RuntimeError, "expect device type"):
+            torch.rbln.set_stream(torch.Stream(device="cpu"))
+
     def test_query_and_synchronize_idle(self):
         s = torch.rbln.Stream()
         self.assertTrue(s.query())

@@ -143,6 +143,14 @@ void register_stream_api(py::module_& module) {
   module.def(
       "_exchange_stream",
       [pack](int64_t stream_id, c10::DeviceIndex device_index, int32_t device_type) {
+        // c10::Stream::unpack3 accepts any valid device type, so a foreign stream id
+        // would otherwise be read as an RBLN local stream id.
+        TORCH_CHECK(
+            static_cast<c10::DeviceType>(device_type) == c10::kPrivateUse1,
+            "torch.rbln streams expect device type ",
+            c10::DeviceTypeName(c10::kPrivateUse1),
+            ", got ",
+            c10::DeviceTypeName(static_cast<c10::DeviceType>(device_type)));
         const auto stream = c10::Stream::unpack3(
             static_cast<c10::StreamId>(stream_id), device_index, static_cast<c10::DeviceType>(device_type));
         const auto guard = VirtualGuardImpl(c10::kPrivateUse1);

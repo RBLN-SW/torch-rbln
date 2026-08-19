@@ -178,6 +178,13 @@ uint64_t to_event_handle(void* event) {
 void RBLNGuardImpl::record(void** event, const c10::Stream& stream, c10::DeviceIndex device_index, c10::EventFlag flag)
     const {
   (void)flag; // Event timing is not supported (elapsedTime is unimplemented).
+  TORCH_CHECK(
+      device_index == -1 || device_index == stream.device_index(),
+      "Event device index ",
+      device_index,
+      " does not match recording stream's device index ",
+      stream.device_index(),
+      ".");
   const auto event_device = device_index >= 0 ? device_index : stream.device_index();
   if (*event == nullptr) {
     *event = to_event_ptr(c10::rbln::event_create(event_device));
