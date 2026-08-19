@@ -82,6 +82,14 @@ struct C10_RBLN_API RBLNHooksInterface : public at::PrivateUse1HooksInterface {
    * @return A new generator instance for the specified device index.
    */
   at::Generator getNewGenerator(c10::DeviceIndex device_index) const override;
+
+  /**
+   * @brief Returns the default generator for the specified RBLN device.
+   *
+   * @param device_index The RBLN device index.
+   * @return The default generator associated with the device.
+   */
+  const at::Generator& getDefaultGenerator(c10::DeviceIndex device_index) const override;
 };
 
 struct C10_RBLN_API RBLNHooksArgs : public at::PrivateUse1HooksArgs {};

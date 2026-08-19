@@ -5,6 +5,7 @@
 #include <c10/rbln/DeviceMappingManager.h>
 #include <c10/rbln/RBLNFallbackConfig.h>
 #include <c10/rbln/RBLNFunctions.h>
+#include <c10/rbln/RBLNGenerator.h>
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNSupportedDtypes.h>
@@ -108,6 +109,13 @@ void register_public_device_api(py::module_& module) {
       "_get_device_topology",
       []() -> c10::rbln::DeviceTopology { return c10::rbln::DeviceMappingManager::getInstance().getDeviceTopology(); },
       "Get the complete device topology.");
+
+  // Reproducibility
+  module.def(
+      "get_default_generator",
+      &c10::rbln::get_default_rbln_generator,
+      py::arg("device_index") = -1,
+      "get the default generator for an RBLN device.");
 }
 
 // set_device_layout_like operates on a whole tensor allocation, so a view

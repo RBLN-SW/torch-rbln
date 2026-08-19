@@ -16,6 +16,7 @@ from torch_rbln._internal.ops_utils import SupportedDtypes
 
 
 __all__ = [
+    "_is_in_bad_fork",
     "current_device",
     "device_count",
     "physical_device_count",
@@ -34,6 +35,15 @@ __all__ = [
 # Whether this process has selected an RBLN device (torch.cuda-style lazy-init
 # flag). DeviceMesh reads it to decide whether to auto-select a per-rank device.
 _initialized: bool = False
+
+
+def _is_in_bad_fork():
+    """Return whether the current process is in a bad fork state.
+
+    RBLN does not currently maintain fork-specific accelerator state, so this
+    always returns False.
+    """
+    return False
 
 
 def current_device() -> int:
