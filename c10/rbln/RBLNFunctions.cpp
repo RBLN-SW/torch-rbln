@@ -277,7 +277,12 @@ c10::DeviceIndex get_device_index() {
   // the mapping commits can leave this thread pointing past the end of a rebuilt plan.
   // Report a device that exists; the selection is bookkeeping, so nothing has to unwind.
   // Checked on read because other threads' selections are unreachable from here.
-  const auto device_count = DeviceMappingManager::getInstance().getLogicalDeviceCount();
+  //
+  // Nothrow enumeration, not getLogicalDeviceCount(): this backs
+  // torch._C._accelerator_getDeviceIndex(), which torch calls from total predicates such as
+  // reset_peak_memory_stats(), so a malformed RBLN_* config must not raise here. It maps a
+  // failed plan to 0, and with no plan there is nothing to validate against.
+  const auto device_count = get_device_count_nothrow();
   if (device_count > 0 && current_device_index_ >= device_count) {
     RBLN_LOG_DEBUG(
         "current logical device rbln:{} is outside the {} planned device(s); reporting rbln:0",
