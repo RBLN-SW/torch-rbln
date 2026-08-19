@@ -132,6 +132,17 @@ class TestStream(TestCase):
         torch.rbln.synchronize()
         self.assertTrue(torch.allclose(y.cpu(), x.cpu() @ w_cpu, atol=1e-2, rtol=1e-2))
 
+    def test_stream_context_selects_the_stream_device(self):
+        # torch.cuda.set_stream also moves the current device, so allocations inside
+        # the context land on the stream's device. Same contract here.
+        if torch.rbln.device_count() < 2:
+            self.skipTest("needs >= 2 RBLN devices")
+        torch.rbln.set_device(0)
+        with torch.rbln.stream(torch.rbln.Stream(device=1)):
+            self.assertEqual(torch.rbln.current_device(), 1)
+            self.assertEqual(torch.zeros(4, device="rbln").device.index, 1)
+        self.assertEqual(torch.rbln.current_device(), 0)
+
     def test_multi_device_independent_streams(self):
         # Independent work on per-device streams is correct and isolated.
         if torch.rbln.device_count() < 2:

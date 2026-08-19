@@ -109,7 +109,10 @@ def default_stream(device: Any = None) -> Stream:
 
 
 def set_stream(stream: Optional[Stream]) -> None:
-    """Set the current stream (no-op if ``None``). Prefer the :func:`stream` manager."""
+    """Set the current stream (no-op if ``None``). Prefer the :func:`stream` manager.
+
+    Also selects the stream's device, matching :func:`torch.cuda.set_stream`.
+    """
     if stream is None:
         return
     torch_rbln._C._exchange_stream(stream.stream_id, stream.device_index, stream.device_type)

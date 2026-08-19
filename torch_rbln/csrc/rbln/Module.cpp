@@ -148,7 +148,14 @@ void register_stream_api(py::module_& module) {
       [pack](int64_t stream_id, c10::DeviceIndex device_index, int32_t device_type) {
         const auto stream = c10::Stream::unpack3(
             static_cast<c10::StreamId>(stream_id), device_index, static_cast<c10::DeviceType>(device_type));
-        return pack(VirtualGuardImpl(c10::kPrivateUse1).exchangeStream(stream));
+        const auto guard = VirtualGuardImpl(c10::kPrivateUse1);
+        // Selecting a stream also selects its device, as torch.cuda's setStream and
+        // torch.accelerator.set_stream both do -- otherwise a stream on another device
+        // would leave allocations going to the old one.
+        if (guard.getDevice().index() != stream.device_index()) {
+          guard.setDevice(stream.device());
+        }
+        return pack(guard.exchangeStream(stream));
       },
       "Internal: set current rbln stream; returns the previous as (stream_id, device_index, device_type)");
 }
