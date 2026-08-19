@@ -323,6 +323,27 @@ class TestForeachCopyHost(TestCase):
         for got, want in zip(dsts, srcs):
             _eq(got, want)
 
+    def test_pinned_non_blocking_pairs_stay_per_pair(self):
+        """The multi entrypoints are sync-only, so a pinned + non_blocking pair
+        keeps its per-pair async copy. The same pairs batch without the flag."""
+        srcs = [(_arange((64,), torch.float32) + i).pin_memory() for i in range(4)]
+        dsts = [_to_dev(torch.zeros(64, dtype=torch.float32)) for _ in range(4)]
+
+        with torch.rbln.explain() as p:
+            torch._foreach_copy_(dsts, srcs, non_blocking=True)
+        calls = _prim_calls(p.dump())
+        self.assertEqual(calls.get("h2v_multi", 0), 0, f"pinned async must not batch: {calls}")
+        for got, want in zip(dsts, srcs):
+            _eq(got, want)
+
+        dsts = [_to_dev(torch.zeros(64, dtype=torch.float32)) for _ in range(4)]
+        with torch.rbln.explain() as p:
+            torch._foreach_copy_(dsts, srcs)
+        calls = _prim_calls(p.dump())
+        self.assertEqual(calls.get("h2v_multi", 0), 1, f"pinned sync must batch: {calls}")
+        for got, want in zip(dsts, srcs):
+            _eq(got, want)
+
     def test_empty_lists_rejected_upstream(self):
         """Empty tensor lists are rejected by PyTorch before reaching the RBLN
         kernel, so the op is never invoked with zero pairs."""
