@@ -458,6 +458,24 @@ class TestForeachCopyHost(TestCase):
             for got, want in zip(dst_dev, src_cpu):
                 _eq(got, want)
 
+    def test_entry_cap_splits_a_batch_under_the_byte_cap(self):
+        """The 16-entry limit is the separate half of the cap: 40 entries of 64 KiB
+        total 2.5 MiB, so only the entry count can split them — three calls, not
+        one."""
+        elems = (64 << 10) // 4  # float32 elements
+        n_pairs = 40
+        srcs = [_arange((elems,), torch.float32) + i for i in range(n_pairs)]
+        dsts = [_to_dev(torch.zeros(elems, dtype=torch.float32)) for _ in range(n_pairs)]
+
+        with torch.rbln.explain() as p:
+            torch._foreach_copy_(dsts, srcs)
+        calls = _prim_calls(p.dump())
+
+        self.assertEqual(calls.get("h2v_multi", 0), 3, f"40 entries must split at 16: {calls}")
+        self.assertEqual(calls.get("h2v", 0), 0, f"splitting must not degrade to per-entry: {calls}")
+        for got, want in zip(dsts, srcs):
+            _eq(got, want)
+
     def test_entry_over_the_cap_goes_per_entry(self):
         """A single descriptor larger than the 8 MiB cap cannot be split, so it
         takes the single-copy path — which has no cap — instead of a bulk call."""

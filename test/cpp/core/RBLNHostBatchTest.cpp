@@ -147,8 +147,9 @@ TEST_F(RBLNHostBatchTest, H2VMultipleEntriesOneSubmit) {
   c10::rbln::free(dst);
 }
 
-// No cap on the entry count: the runtime splits across dispatches internally.
-// Wide enough to exceed the v2v per-destination limit, which h2v/v2h do not have.
+// Past the v2v per-destination limit, which h2v/v2h do not have, and past the
+// 16-entry bulk cap: the batch splits into many bulk calls and every entry must
+// still land.
 TEST_F(RBLNHostBatchTest, H2VLargeBatchExceedsV2VCap) {
   constexpr size_t entries = 2048; // > kMaxV2VMultiCopies (1024)
   constexpr size_t chunk = 8;
