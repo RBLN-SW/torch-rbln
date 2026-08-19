@@ -108,7 +108,10 @@ struct RBLNAllocator final : public c10::DeviceAllocator {
    * @param stream The stream to associate with the data pointer.
    */
   void recordStream(const c10::DataPtr& /*ptr*/, c10::Stream /*stream*/) override {
-    RBLN_LOG_DEBUG("recordStream is no-op because RBLN does not support stream-based asynchronous execution");
+    // No-op on purpose: the runtime tags a freed block with the (stream, seq) still in
+    // flight at its free and folds foreign seqs into the reusing stream as cross-deps,
+    // so cross-stream lifetime is already safe without the hint torch passes here.
+    RBLN_LOG_DEBUG("recordStream is a no-op; the runtime tags freed blocks with their in-flight stream");
   }
 
   /**

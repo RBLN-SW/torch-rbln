@@ -829,6 +829,9 @@ void set_current_stream(c10::Stream stream) {
 }
 
 bool query_stream(c10::Stream stream) {
+  if (runtime_shutting_down_.load(std::memory_order_relaxed)) {
+    return true; // nothing left to wait for; matches synchronize_stream's no-op
+  }
   bool done = false;
   RBLN_CHECK(
       !::rbln::rbln_stream_query(stream_to_handle(stream), &done),
@@ -857,6 +860,9 @@ uint64_t event_create(c10::DeviceIndex device_index) {
       !::rbln::rbln_event_create(torch_device_id, &handle),
       "rbln_event_create failed for rbln:{}",
       static_cast<int>(device_index));
+  // torch's "not created yet" sentinel is a null handle, so handle 0 would make
+  // every record allocate anew and every query answer "complete".
+  RBLN_CHECK(handle != 0, "rbln_event_create returned handle 0, which aliases the not-created sentinel");
   return handle;
 }
 
@@ -872,6 +878,9 @@ void event_destroy(uint64_t event) noexcept {
 }
 
 void event_record(uint64_t event, c10::Stream stream) {
+  if (runtime_shutting_down_.load(std::memory_order_relaxed)) {
+    return;
+  }
   RBLN_CHECK(
       !::rbln::rbln_event_record(event, stream_to_handle(stream)), "rbln_event_record failed (event={:#x})", event);
 }
@@ -896,6 +905,9 @@ void event_block(c10::Stream stream, uint64_t event) {
 }
 
 bool event_query(uint64_t event) {
+  if (runtime_shutting_down_.load(std::memory_order_relaxed)) {
+    return true; // nothing left to wait for; matches event_synchronize's no-op
+  }
   bool done = false;
   RBLN_CHECK(!::rbln::rbln_event_query(event, &done), "rbln_event_query failed (event={:#x})", event);
   return done;
