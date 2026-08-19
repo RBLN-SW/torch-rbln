@@ -435,6 +435,9 @@ bool foreach_copy_reorder_unsafe(at::TensorList self, at::TensorList src) {
   };
 
   const size_t n = self.size();
+  if (n < 2) {
+    return false;
+  }
   std::vector<Entry> dsts;
   std::vector<Entry> srcs;
   dsts.reserve(n);
