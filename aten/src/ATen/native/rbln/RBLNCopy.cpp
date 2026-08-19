@@ -9,7 +9,6 @@
 #include <ATen/native/rbln/RBLNTensorUtils.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/empty_strided.h>
-#include <c10/rbln/RBLNFallbackConfig.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNHostBatch.h>
 #include <c10/rbln/RBLNLogging.h>
@@ -18,8 +17,6 @@
 #include <rebel/runtime/api/rbln_runtime_api.h>
 
 #include <cstddef>
-#include <functional>
-#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -546,44 +543,6 @@ void v2h_copy(const at::Tensor& dst, const at::Tensor& src, c10::rbln::V2HBatch&
   batch.enqueue(dst.data_ptr(), src.data_ptr(), payload_bytes(dst));
 }
 
-bool is_host_copy_backend_failure(std::string_view msg) {
-  return msg.find("rbln_memcpy_h2v_multi failed") != std::string_view::npos ||
-      msg.find("rbln_memcpy_v2h_multi failed") != std::string_view::npos ||
-      msg.find("rbln_memcpy_h2v failed") != std::string_view::npos ||
-      msg.find("rbln_memcpy_v2h failed") != std::string_view::npos;
-}
-
-// Whether the runtime ever rejects a well-formed h2v/v2h batch is unknown; the
-// analogous v2v rejection needs a device destination at an interior offset of a
-// large pool allocation, which neither host direction has. The fallback makes
-// such a case slow and visible rather than fatal and silent.
-template <typename Batch>
-void submit_host_or_fallback(Batch& batch, const char* op_name, const std::function<void()>& cpu_fallback) {
-  try {
-    batch.submit();
-  } catch (const c10::Error& e) {
-    // TODO: Replace substring match with a typed exception when the wrapper API
-    // allows — mirrors the v2v path's TODO.
-    if (!is_host_copy_backend_failure(e.what())) {
-      throw;
-    }
-    if (c10::rbln::is_fallback_disabled("strided_copy_error")) {
-      throw;
-    }
-    RBLN_LOG_WARN("{}: batched host copy failed — falling back to CPU op. Underlying error: {}", op_name, e.what());
-    c10::rbln::prof::record_bounce(c10::rbln::prof::BounceSite::kStridedV2VFallback, 0);
-    cpu_fallback();
-  }
-}
-
-void submit_or_fallback(c10::rbln::H2VBatch& batch, const char* op_name, const std::function<void()>& cpu_fallback) {
-  submit_host_or_fallback(batch, op_name, cpu_fallback);
-}
-
-void submit_or_fallback(c10::rbln::V2HBatch& batch, const char* op_name, const std::function<void()>& cpu_fallback) {
-  submit_host_or_fallback(batch, op_name, cpu_fallback);
-}
-
 } // namespace
 
 void _foreach_copy__rbln(at::TensorList self, at::TensorList src, bool non_blocking) {
@@ -613,8 +572,6 @@ void _foreach_copy__rbln(at::TensorList self, at::TensorList src, bool non_block
   c10::rbln::H2VBatch h2v_batch;
   c10::rbln::V2HBatch v2h_batch;
   std::vector<std::pair<at::Tensor, at::Tensor>> v2v_batched;
-  std::vector<std::pair<at::Tensor, at::Tensor>> h2v_batched;
-  std::vector<std::pair<at::Tensor, at::Tensor>> v2h_batched;
   v2v_batched.reserve(self.size());
 
   const auto flush_pending = [&] {
@@ -623,19 +580,11 @@ void _foreach_copy__rbln(at::TensorList self, at::TensorList src, bool non_block
         pair.first.copy_(pair.second.cpu());
       }
     });
-    submit_or_fallback(h2v_batch, "_foreach_copy_", [&] {
-      for (const auto& pair : h2v_batched) {
-        pair.first.copy_(pair.second);
-      }
-    });
-    submit_or_fallback(v2h_batch, "_foreach_copy_", [&] {
-      for (const auto& pair : v2h_batched) {
-        pair.first.copy_(pair.second);
-      }
-    });
+    // No CPU fallback for the host directions: a rejected bulk call already
+    // retries per entry, which is the same transfer copy_ would issue.
+    h2v_batch.submit();
+    v2h_batch.submit();
     v2v_batched.clear();
-    h2v_batched.clear();
-    v2h_batched.clear();
   };
 
   // Every batched pair is disjoint from every other, so a per-pair copy_ may run
@@ -698,10 +647,8 @@ void _foreach_copy__rbln(at::TensorList self, at::TensorList src, bool non_block
         v2v_batched.emplace_back(dst, s);
       } else if (dst_dev && src_cpu && contig_pair && !host_side_pinned_async) {
         h2v_copy(dst, s, h2v_batch);
-        h2v_batched.emplace_back(dst, s);
       } else if (src_dev && dst_cpu && contig_pair && !host_side_pinned_async) {
         v2h_copy(dst, s, v2h_batch);
-        v2h_batched.emplace_back(dst, s);
       } else {
         dst.copy_(s, non_blocking);
       }
