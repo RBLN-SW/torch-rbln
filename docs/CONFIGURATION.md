@@ -126,6 +126,12 @@ The value is a **comma-separated list** of fallback case names to disable:
 
 By default, each physical NPU is mapped 1:1 to a logical device (**Direct Mapping**). To group multiple physical NPUs into a single logical device for RSD (Rebellions Scalable Design), use one of the following environment variables.
 
+### RBLN_DEVICES
+
+Selects which physical NPUs this process can see, as a comma-separated list of ids — the `CUDA_VISIBLE_DEVICES` analogue. `RBLN_VISIBLE_DEVICES` is an alias of it. Unset means every NPU on the host.
+
+It is owned by the runtime (`rebel-compiler`), not by torch-rbln, and everything below is expressed **relative to the devices it leaves visible**: with `RBLN_DEVICES=4,5,6,7`, `rbln:0` is physical NPU `4`, and the ids in `RBLN_DEVICE_MAP` are indices into that visible pool rather than system ids.
+
 ### When the mapping takes effect
 
 The mapping is resolved in two stages:
@@ -136,8 +142,6 @@ The mapping is resolved in two stages:
 | **Commit** | Each planned logical device is registered with the runtime, opening a context on every mapped NPU. The mapping is then frozen. | First actual device use — an allocation, `set_device()`, `synchronize()` |
 
 Until commit, editing the variables still changes the mapping; after commit it is fixed for the process lifetime. This matches `torch.cuda`, which likewise refuses to cache its device count "prior to CUDA initialization, because the number of devices can change due to changes to `CUDA_VISIBLE_DEVICES`".
-
-`RBLN_VISIBLE_DEVICES` is an alias of `RBLN_DEVICES` and takes effect on the same terms.
 
 Both layers freeze at the same moment: commit registers each logical device with the runtime, and that registration is what makes the runtime fix its own `RBLN_DEVICES` mapping. A launcher may therefore assign `RBLN_DEVICES` after import — including inside a `fork()`ed worker — as long as it does so before the process first uses a device.
 

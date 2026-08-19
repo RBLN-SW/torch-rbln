@@ -676,30 +676,40 @@ class TestUpstreamClauses(TestCase):
         self.assertEqual(p.remap, "frozen", f"device use left the mapping remappable -- {p}")
 
     @requires_acquisition_latch
-    def test_visible_devices_alias_is_honoured_after_import(self):
-        """``RBLN_VISIBLE_DEVICES`` must select the pool as well as ``RBLN_DEVICES`` does.
+    def test_device_selection_after_import_is_honoured(self):
+        """Selecting devices *after* import must change what this layer reports.
 
-        The runtime ships it as an alias of the same flag (rebel's ``flags.cc`` registers
-        ``/*alias=*/"RBLN_VISIBLE_DEVICES"``), so it renumbers the visible pool identically.
-        This layer caches its device-mapping plan and rebuilds it whenever the ``RBLN_*``
-        environment changes; leaving the alias out of that signature left the plan cached
-        against a pool the runtime had already changed, so ``device_count()`` answered from
-        the stale plan while ``physical_device_count()``, which bypasses it, answered from
-        the new one.
+        This is the point of planning separately from committing: a launcher assigns the
+        visible devices once it knows the rank, which is necessarily after ``import torch``.
+        torch/cuda/__init__.py states the same rule -- do not cache the device count "prior to
+        CUDA initialization, because the number of devices can change due to changes to
+        ``CUDA_VISIBLE_DEVICES`` setting prior to CUDA initialization".
+
+        Both names are checked because the runtime ships ``RBLN_VISIBLE_DEVICES`` as an alias
+        of the same flag (rebel's ``flags.cc`` registers ``/*alias=*/"RBLN_VISIBLE_DEVICES"``)
+        and it renumbers the pool identically. Leaving the alias out of the signature this
+        layer rebuilds its plan on left the plan cached against a pool the runtime had already
+        changed: ``device_count()`` answered from the stale plan while
+        ``physical_device_count()``, which bypasses the plan, answered from the new one.
+
+        Both answers are read for that reason -- checking only one cannot tell "the
+        assignment was honoured" from "the two disagree".
         """
-        p = run_probe(
-            """
-            before = [torch.rbln.device_count(), torch.rbln.physical_device_count()]
-            os.environ["RBLN_VISIBLE_DEVICES"] = "0"
-            rec["result"] = [before, [torch.rbln.device_count(), torch.rbln.physical_device_count()]]
-            """,
-            {},  # neither name set: the primary wins when both are, so it must be absent
-        )
-        self.assertIsNone(p.raised, f"probe raised -- {p}")
-        before, after = p.result
-        if before[0] < 2:
-            self.skipTest(f"needs at least two visible NPUs to tell the counts apart -- {p}")
-        self.assertEqual(after, [1, 1], f"RBLN_VISIBLE_DEVICES did not reach both answers -- {p}")
+        for name in ("RBLN_DEVICES", "RBLN_VISIBLE_DEVICES"):
+            with self.subTest(variable=name):
+                p = run_probe(
+                    f"""
+                    before = [torch.rbln.device_count(), torch.rbln.physical_device_count()]
+                    os.environ[{name!r}] = "0"
+                    rec["result"] = [before, [torch.rbln.device_count(), torch.rbln.physical_device_count()]]
+                    """,
+                    {},  # neither name set: the primary wins when both are, so both must be absent
+                )
+                self.assertIsNone(p.raised, f"{name}: probe raised -- {p}")
+                before, after = p.result
+                if before[0] < 2:
+                    self.skipTest(f"needs at least two visible NPUs to tell the counts apart -- {p}")
+                self.assertEqual(after, [1, 1], f"{name} did not reach both answers -- {p}")
 
     @requires_acquisition_latch
     def test_a_frozen_mapping_survives_unsetting_the_variable(self):
