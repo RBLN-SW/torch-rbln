@@ -184,14 +184,50 @@ class TestForeachCopyHost(TestCase):
         _eq(cast_dst, cast_src.to(torch.float32))
         _eq(bcast_dst, bcast_src.expand(4).contiguous())
 
-    def test_broadcast_source_at_matching_size_is_batched(self):
-        """A stride-0 source already expanded to the destination's shape is
-        batch-eligible and must replicate, not copy only its first slab. Sources
-        are pure reads, so repeated reads of the same bytes are permitted."""
+    def test_broadcast_source_at_matching_size_is_not_batched(self):
+        """A stride-0 source expanded to the destination's shape matches sizes but
+        is noncontiguous, so it takes the per-pair path and must replicate there."""
         src = torch.tensor([7.0, 8.0], dtype=torch.float32).expand(5, 2)
         dst = _to_dev(torch.zeros(5, 2, dtype=torch.float32))
-        torch._foreach_copy_([dst], [src])
+        with torch.rbln.explain() as p:
+            torch._foreach_copy_([dst], [src])
+        calls = _prim_calls(p.dump())
+        self.assertEqual(calls.get("h2v_multi", 0), 0, f"noncontiguous source must not batch: {calls}")
         _eq(dst, src.contiguous())
+
+    def test_ineligible_pair_does_not_split_the_v2v_batch(self):
+        """A pair on the per-pair path between two batchable v2v pairs must not
+        force an early submit: the two v2v pairs still share one."""
+        cases = {
+            "cast": (
+                _to_dev(torch.zeros(4, dtype=torch.float32)),
+                _to_dev(_arange((4,), torch.float64)),
+            ),
+            "zero numel": (
+                _to_dev(torch.zeros(0, 4, dtype=torch.float32)),
+                _to_dev(torch.zeros(0, 4, dtype=torch.float32)),
+            ),
+            "noncontiguous host dst": (
+                torch.zeros(2, 2, dtype=torch.float32).t(),
+                _to_dev(_arange((2, 2), torch.float32)),
+            ),
+        }
+        for name, (mid_dst, mid_src) in cases.items():
+            with self.subTest(middle=name):
+                srcs = [_to_dev(_arange((4,), torch.float32)), mid_src, _to_dev(_arange((4,), torch.float32) + 1)]
+                dsts = [
+                    _to_dev(torch.zeros(4, dtype=torch.float32)),
+                    mid_dst,
+                    _to_dev(torch.zeros(4, dtype=torch.float32)),
+                ]
+
+                with torch.rbln.explain() as p:
+                    torch._foreach_copy_(dsts, srcs)
+                calls = _prim_calls(p.dump())
+
+                self.assertEqual(calls.get("v2v_multi", 0), 1, f"v2v batch was split: {calls}")
+                _eq(dsts[0], srcs[0])
+                _eq(dsts[2], srcs[2])
 
     # ---- destinations the batch must refuse ----
 

@@ -617,8 +617,6 @@ void _foreach_copy__rbln(at::TensorList self, at::TensorList src, bool non_block
   std::vector<std::pair<at::Tensor, at::Tensor>> v2h_batched;
   v2v_batched.reserve(self.size());
 
-  // Called before any inline copy_ so a throwing pair cannot discard the
-  // deferred pairs that preceded it.
   const auto flush_pending = [&] {
     submit_or_fallback(v2v_batch, "_foreach_copy_", [&] {
       for (const auto& pair : v2v_batched) {
@@ -640,72 +638,80 @@ void _foreach_copy__rbln(at::TensorList self, at::TensorList src, bool non_block
     v2h_batched.clear();
   };
 
-  for (size_t i = 0; i < self.size(); ++i) {
-    const at::Tensor& dst = self[i];
-    const at::Tensor& s = src[i];
-    const bool convertible = dst.scalar_type() == s.scalar_type() && dst.sizes() == s.sizes() && dst.numel() > 0;
-    if (!convertible) {
-      flush_pending();
-      dst.copy_(s, non_blocking);
-      continue;
-    }
-    // copy_ returns early on an identical view, before its overlap check, so an
-    // expand()ed identity pair is a no-op there rather than an error. Match it.
-    if (is_same_view(dst, s)) {
-      continue;
-    }
-    // A destination mapping several elements onto one address cannot go in a
-    // batch: entries are unordered, so the surviving write is arbitrary.
-    //   Yes      an expand()ed view — copy_ refuses it, so raise its error.
-    //   TooHard  gappy strides. A destination that may alias itself takes the
-    //            per-pair path; one that merely has gaps stays batchable.
-    const auto overlap = at::has_internal_overlap(dst);
-    if (overlap == at::MemOverlap::Yes) {
-      flush_pending();
-      at::assert_no_internal_overlap(dst);
-    }
-    if (overlap == at::MemOverlap::TooHard && view_may_self_overlap(dst.sizes(), dst.strides())) {
-      flush_pending();
-      dst.copy_(s, non_blocking);
-      continue;
-    }
-    const bool dst_dev = dst.device().is_privateuseone();
-    const bool src_dev = s.device().is_privateuseone();
-    const bool dst_cpu = dst.device().is_cpu();
-    const bool src_cpu = s.device().is_cpu();
+  // Every batched pair is disjoint from every other, so a per-pair copy_ may run
+  // before the batches submit; only a throw has to leave the pairs enqueued so
+  // far applied. Those land in direction order, not list order — disjointness is
+  // what makes that unobservable.
+  try {
+    for (size_t i = 0; i < self.size(); ++i) {
+      const at::Tensor& dst = self[i];
+      const at::Tensor& s = src[i];
+      const bool convertible = dst.scalar_type() == s.scalar_type() && dst.sizes() == s.sizes() && dst.numel() > 0;
+      if (!convertible) {
+        dst.copy_(s, non_blocking);
+        continue;
+      }
+      // copy_ returns early on an identical view, before its overlap check, so an
+      // expand()ed identity pair is a no-op there rather than an error. Match it.
+      if (is_same_view(dst, s)) {
+        continue;
+      }
+      // A destination mapping several elements onto one address cannot go in a
+      // batch: entries are unordered, so the surviving write is arbitrary.
+      //   Yes      an expand()ed view — copy_ refuses it, so raise its error.
+      //   TooHard  gappy strides. A destination that may alias itself takes the
+      //            per-pair path; one that merely has gaps stays batchable.
+      const auto overlap = at::has_internal_overlap(dst);
+      if (overlap == at::MemOverlap::Yes) {
+        at::assert_no_internal_overlap(dst);
+      }
+      if (overlap == at::MemOverlap::TooHard && view_may_self_overlap(dst.sizes(), dst.strides())) {
+        dst.copy_(s, non_blocking);
+        continue;
+      }
+      const bool dst_dev = dst.device().is_privateuseone();
+      const bool src_dev = s.device().is_privateuseone();
+      const bool dst_cpu = dst.device().is_cpu();
+      const bool src_cpu = s.device().is_cpu();
 
-    // Pinned + non_blocking is the one genuinely asynchronous per-pair case
-    // (pageable host memory downgrades to sync). The multi entrypoints are
-    // sync-only, so batching it would trade a real overlap for a submit count.
-    // Only preserves the overlap when every pair in the list takes this path.
-    const bool host_side_pinned_async = non_blocking &&
-        ((dst_dev && src_cpu && c10::rbln::is_pinned_ptr(s.data_ptr())) ||
-         (src_dev && dst_cpu && c10::rbln::is_pinned_ptr(dst.data_ptr())));
+      // Pinned + non_blocking is the one genuinely asynchronous per-pair case
+      // (pageable host memory downgrades to sync). The multi entrypoints are
+      // sync-only, so batching it would trade a real overlap for a submit count.
+      // Only preserves the overlap when every pair in the list takes this path.
+      const bool host_side_pinned_async = non_blocking &&
+          ((dst_dev && src_cpu && c10::rbln::is_pinned_ptr(s.data_ptr())) ||
+           (src_dev && dst_cpu && c10::rbln::is_pinned_ptr(dst.data_ptr())));
 
-    // Host batching is contiguous-only: one descriptor per pair, so batching N
-    // is a submit-count win at any size (~3x at 1 KiB, the weight-load shape). A
-    // fan-out pair competes against copy_'s single staged bulk DMA instead, where
-    // per-descriptor cost decides — that belongs with the change that routes
-    // plain copy_ through these primitives.
-    //
-    // v2v keeps its strided path: there the per-pair path issues the same
-    // on-device strided copy and host-bounces above the runtime's per-destination
-    // cap, so refusing a strided pair would trade one submit for N.
-    const bool contig_pair = dst.is_contiguous() && s.is_contiguous();
+      // Host batching is contiguous-only: one descriptor per pair, so batching N
+      // is a submit-count win at any size (~3x at 1 KiB, the weight-load shape). A
+      // fan-out pair competes against copy_'s single staged bulk DMA instead, where
+      // per-descriptor cost decides — that belongs with the change that routes
+      // plain copy_ through these primitives.
+      //
+      // v2v keeps its strided path: there the per-pair path issues the same
+      // on-device strided copy and host-bounces above the runtime's per-destination
+      // cap, so refusing a strided pair would trade one submit for N.
+      const bool contig_pair = dst.is_contiguous() && s.is_contiguous();
 
-    if (dst_dev && src_dev && dst.device() == s.device()) {
-      strided_v2v_copy(dst, s, v2v_batch);
-      v2v_batched.emplace_back(dst, s);
-    } else if (dst_dev && src_cpu && contig_pair && !host_side_pinned_async) {
-      h2v_copy(dst, s, h2v_batch);
-      h2v_batched.emplace_back(dst, s);
-    } else if (src_dev && dst_cpu && contig_pair && !host_side_pinned_async) {
-      v2h_copy(dst, s, v2h_batch);
-      v2h_batched.emplace_back(dst, s);
-    } else {
-      flush_pending();
-      dst.copy_(s, non_blocking);
+      if (dst_dev && src_dev && dst.device() == s.device()) {
+        strided_v2v_copy(dst, s, v2v_batch);
+        v2v_batched.emplace_back(dst, s);
+      } else if (dst_dev && src_cpu && contig_pair && !host_side_pinned_async) {
+        h2v_copy(dst, s, h2v_batch);
+        h2v_batched.emplace_back(dst, s);
+      } else if (src_dev && dst_cpu && contig_pair && !host_side_pinned_async) {
+        v2h_copy(dst, s, v2h_batch);
+        v2h_batched.emplace_back(dst, s);
+      } else {
+        dst.copy_(s, non_blocking);
+      }
     }
+  } catch (...) {
+    try {
+      flush_pending();
+    } catch (...) {
+    }
+    throw;
   }
 
   // The host tensors enqueued above are all caller-owned list entries, alive for
