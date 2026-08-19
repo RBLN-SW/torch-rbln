@@ -245,16 +245,21 @@ void DeviceMappingManager::planLogicalDevice(int logical_device_index, const std
 }
 
 void DeviceMappingManager::commit() {
+  // Committed is the common case: every allocation re-enters here, so answer it without
+  // the mutex. Failed still has to take the lock -- it rethrows commit_error_ below.
+  if (plan_state_.load(std::memory_order_acquire) == PlanState::Committed) {
+    return;
+  }
   {
     const std::lock_guard<std::mutex> guard(plan_mutex_);
-    if (committed_) {
+    if (plan_state_.load(std::memory_order_relaxed) == PlanState::Committed) {
       return;
     }
     // A commit that failed part-way left devices claimed with no way to release them, so
     // the plan must never be rebuilt or re-registered under them: the runtime's
     // rbln_register_device_id() returns success for an id it already holds, so a retry
     // against a changed plan would bind this layer to a mapping the runtime does not have.
-    RBLN_CHECK(!commit_failed_, "{}", commit_error_);
+    RBLN_CHECK(plan_state_.load(std::memory_order_relaxed) != PlanState::Failed, "{}", commit_error_);
     ensurePlannedLocked();
     // Loud here (RBLN_CHECK, not the quiet variant): this is the point of use. Its
     // logging goes to spdlog only, so it is safe to throw from under the lock.
@@ -288,23 +293,30 @@ void DeviceMappingManager::commit() {
     } catch (const c10::Error& e) {
       // msg(), not what(): what() embeds a backtrace, and the RBLN_CHECK above would wrap
       // it in a second one on every later commit().
-      commit_failed_ = true;
       commit_error_ = e.msg();
+      plan_state_.store(PlanState::Failed, std::memory_order_release);
       throw;
     } catch (const std::exception& e) {
-      commit_failed_ = true;
       commit_error_ = e.what();
+      plan_state_.store(PlanState::Failed, std::memory_order_release);
       throw;
     }
 
-    committed_ = true;
+    // An empty plan registered nothing, so there is nothing for the freeze to protect and
+    // freezing would only make the 0-device state permanent: a later RBLN_* fix could no
+    // longer be replanned. Leave it Open; to_device_id() still raises its 0-device error.
+    if (device_mapping_table_.empty()) {
+      RBLN_LOG_DEBUG("Nothing to commit: 0 logical device(s) planned; the plan stays open");
+      return;
+    }
+
+    plan_state_.store(PlanState::Committed, std::memory_order_release);
     RBLN_LOG_DEBUG("Committed {} logical device(s) to the runtime", device_mapping_table_.size());
   }
 }
 
 bool DeviceMappingManager::isCommitted() const {
-  const std::lock_guard<std::mutex> guard(plan_mutex_);
-  return committed_;
+  return plan_state_.load(std::memory_order_acquire) == PlanState::Committed;
 }
 
 void DeviceMappingManager::collectUnusedDevices(
@@ -467,9 +479,13 @@ std::string DeviceMappingManager::envSignature() {
   // e.g. RBLN_DEVICES="0|" and RBLN_DEVICES="0", RBLN_DEVICE_MAP="" cannot collide.
   // RBLN_VISIBLE_DEVICES is the runtime's alias of RBLN_DEVICES and selects the visible
   // pool just as well, so omitting it cached the plan against a pool already changed.
+  //
+  // RBLN_DUMMY_DEVICE is deliberately absent: it is startup-only. The runtime registers it
+  // FlagMutability::Sealed, so it rejects a late change regardless of what this layer does,
+  // and is_dummy_device() caches its answer for the process. Replanning on it would have
+  // moved the mapping to dummy while those two still reported real mode.
   std::string signature;
-  for (const char* name :
-       {"RBLN_DEVICES", "RBLN_VISIBLE_DEVICES", "RBLN_DEVICE_MAP", "RBLN_NPUS_PER_DEVICE", "RBLN_DUMMY_DEVICE"}) {
+  for (const char* name : {"RBLN_DEVICES", "RBLN_VISIBLE_DEVICES", "RBLN_DEVICE_MAP", "RBLN_NPUS_PER_DEVICE"}) {
     const char* value = std::getenv(name);
     const std::string text = (value != nullptr) ? std::string(value) : std::string();
     signature += std::to_string(text.size());
@@ -480,6 +496,11 @@ std::string DeviceMappingManager::envSignature() {
 }
 
 void DeviceMappingManager::ensurePlanned() const {
+  // A frozen plan is immutable, so skip the mutex: this runs five times per allocation.
+  // plan_error_ is necessarily empty here -- commit() refuses to freeze with one set.
+  if (plan_state_.load(std::memory_order_acquire) != PlanState::Open) {
+    return;
+  }
   std::string error;
   {
     const std::lock_guard<std::mutex> guard(plan_mutex_);
@@ -493,9 +514,9 @@ void DeviceMappingManager::ensurePlanned() const {
 
 void DeviceMappingManager::ensurePlannedLocked() const {
   // Frozen once commit() has run: re-planning under live allocations would silently move
-  // logical devices out from under them. commit_failed_ counts as committed here -- a
-  // part-way failure still left devices claimed.
-  if (committed_ || commit_failed_) {
+  // logical devices out from under them. A part-way failure counts too -- it still left
+  // devices claimed.
+  if (plan_state_.load(std::memory_order_relaxed) != PlanState::Open) {
     return;
   }
   const auto signature = envSignature();

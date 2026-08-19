@@ -3,6 +3,8 @@
 #include <c10/core/Device.h>
 #include <c10/rbln/RBLNMacros.h>
 #include <array>
+#include <atomic>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <unordered_set>
@@ -148,8 +150,14 @@ class C10_RBLN_API DeviceMappingManager {
   /**
    * @brief Plan the device mapping from the environment (no NPU is claimed).
    *
-   * Thread-safe and idempotent. Kept for callers that want to force planning; every
-   * query method plans on demand, so explicit calls are typically unnecessary.
+   * Idempotent, and safe to call concurrently. Kept for callers that want to force
+   * planning; every query method plans on demand, so explicit calls are typically
+   * unnecessary.
+   *
+   * Mutating the RBLN_* environment concurrently with a query is NOT supported: before the
+   * mapping commits, a change makes the next query rebuild the plan, and the containers a
+   * getter reads are cleared to do it. Assign the RBLN_* variables from one thread, before
+   * the queries that consume them.
    */
   void initialize();
 
@@ -253,7 +261,8 @@ class C10_RBLN_API DeviceMappingManager {
   void planLogicalDevice(int logical_device_index, const std::vector<int>& physical_ids) const;
 
   /**
-   * @brief Build the plan if it is missing or stale. Thread-safe, idempotent.
+   * @brief Build the plan if it is missing or stale. Idempotent, and serialized on
+   * plan_mutex_; see initialize() for the concurrent-environment caveat.
    *
    * A failed plan is remembered (not retried): rethrowing a stored error keeps a
    * malformed RBLN_* config from re-running validation on every query. Until commit()
@@ -333,11 +342,14 @@ class C10_RBLN_API DeviceMappingManager {
   // `mutable` on state a const query may refresh.
   mutable std::mutex plan_mutex_;
   mutable bool planned_ = false;
-  mutable bool committed_ = false;
-  // Set when commit() threw part-way. Devices claimed before the failure cannot be
-  // released, so the plan is frozen and every later commit() rethrows commit_error_.
-  bool commit_failed_ = false;
-  std::string commit_error_;
+  // Committed and Failed both freeze the plan for good: Failed means commit() threw
+  // part-way, and devices claimed before the failure cannot be released. Atomic and not a
+  // bool pair because both states are read without plan_mutex_ -- once frozen the plan can
+  // never change, so the allocation path's five queries need no lock. Written under
+  // plan_mutex_; release/acquire pairs with those writes.
+  enum class PlanState : std::uint8_t { Open, Committed, Failed };
+  mutable std::atomic<PlanState> plan_state_{PlanState::Open};
+  std::string commit_error_; // Failed: the error every later commit() rethrows
   mutable std::string plan_signature_; // envSignature() the current plan was built from
   mutable std::string plan_error_; // non-empty: the plan is invalid, rethrown on query
 

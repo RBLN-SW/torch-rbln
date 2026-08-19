@@ -710,6 +710,58 @@ class TestUpstreamClauses(TestCase):
                     self.skipTest(f"needs at least two visible NPUs to tell the counts apart -- {p}")
                 self.assertEqual(after, [1, 1], f"{name} did not reach both answers -- {p}")
 
+    def test_a_zero_device_plan_is_recoverable(self):
+        """A failed device use with no devices must not freeze the mapping.
+
+        Commit freezes the plan so that a later ``RBLN_*`` change cannot renumber devices out
+        from under live allocations. With nothing planned there is nothing registered and so
+        nothing to protect, and freezing only makes the 0-device state permanent -- a launcher
+        that probed with a bad value could never recover in that process.
+        """
+        p = run_probe(
+            """
+            before = torch.rbln.device_count()
+            try:
+                torch.empty(1, dtype=torch.float16, device="rbln:0")
+                raised = None
+            except RuntimeError as e:
+                raised = str(e).splitlines()[0]
+            os.environ["RBLN_DEVICES"] = "0"
+            rec["result"] = [before, raised is not None, torch.rbln.device_count()]
+            """,
+            NO_DEVICE,
+        )
+        self.assertIsNone(p.raised, f"probe raised -- {p}")
+        before, use_failed, after = p.result
+        self.assertEqual(before, 0, f"scenario is not live -- {p}")
+        self.assertTrue(use_failed, f"device use must fail with no devices -- {p}")
+        self.assertEqual(after, 1, f"the 0-device plan was frozen and could not recover -- {p}")
+
+    @requires_acquisition_latch
+    def test_current_device_stays_inside_the_plan(self):
+        """``current_device()`` must never name a device outside the current plan.
+
+        The selection is ``thread_local`` while the plan is process-wide, so shrinking
+        ``RBLN_DEVICES`` after ``set_device()`` -- both legal before the mapping commits --
+        used to leave the selection pointing past the end of it.
+        """
+        p = run_probe(
+            """
+            before = torch.rbln.device_count()
+            if before == 2:
+                torch.rbln.set_device(1)
+                os.environ["RBLN_DEVICES"] = "0"
+            rec["result"] = [before, torch.rbln.device_count(), torch.rbln.current_device()]
+            """,
+            {"RBLN_DEVICES": "0,1"},
+        )
+        self.assertIsNone(p.raised, f"probe raised -- {p}")
+        before, count, current = p.result
+        if before != 2:
+            self.skipTest(f"needs two visible NPUs to select a device the replan drops -- {p}")
+        self.assertEqual(count, 1, f"the replan did not take effect -- {p}")
+        self.assertLess(current, count, f"current_device() is outside the plan -- {p}")
+
     @requires_acquisition_latch
     def test_a_frozen_mapping_survives_unsetting_the_variable(self):
         """Clearing ``RBLN_DEVICES`` after a device is in use must not un-freeze the mapping.

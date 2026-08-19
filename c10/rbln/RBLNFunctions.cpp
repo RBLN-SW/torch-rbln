@@ -273,6 +273,19 @@ c10::DeviceIndex get_physical_device_count() {
 }
 
 c10::DeviceIndex get_device_index() {
+  // The selection is thread_local while the plan is process-wide, so a plan rebuilt after
+  // set_device() -- an RBLN_* change before the mapping commits -- can leave this thread
+  // pointing past the end of it. Report a device that exists rather than one that does not;
+  // the selection is bookkeeping, so there is nothing to unwind. Other threads' selections
+  // are unreachable from here, which is why this is checked on read.
+  const auto device_count = DeviceMappingManager::getInstance().getLogicalDeviceCount();
+  if (device_count > 0 && current_device_index_ >= device_count) {
+    RBLN_LOG_DEBUG(
+        "current logical device rbln:{} is outside the {} planned device(s); reporting rbln:0",
+        static_cast<int>(current_device_index_),
+        static_cast<int>(device_count));
+    current_device_index_ = 0;
+  }
   RBLN_LOG_DEBUG("current logical device=rbln:{}", static_cast<int>(current_device_index_));
   return current_device_index_;
 }
