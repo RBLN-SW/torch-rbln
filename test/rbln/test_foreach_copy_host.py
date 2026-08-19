@@ -401,6 +401,28 @@ class TestForeachCopyHost(TestCase):
             for got, want in zip(dst_dev, src_cpu):
                 _eq(got, want)
 
+    def test_entry_over_the_cap_goes_per_entry(self):
+        """A single descriptor larger than the 8 MiB cap cannot be split, so it
+        takes the single-copy path — which has no cap — instead of a bulk call."""
+        elems = (12 << 20) // 4  # 12 MiB of float32
+        src_cpu = _arange((elems,), torch.float32)
+
+        dst_dev = _to_dev(torch.zeros(elems, dtype=torch.float32))
+        with torch.rbln.explain() as p:
+            torch._foreach_copy_([dst_dev], [src_cpu])
+        calls = _prim_calls(p.dump())
+        self.assertEqual(calls.get("h2v_multi", 0), 0, f"oversized entry must not use the bulk call: {calls}")
+        self.assertEqual(calls.get("h2v", 0), 1, f"{calls}")
+        _eq(dst_dev, src_cpu)
+
+        dst_cpu = torch.zeros(elems, dtype=torch.float32)
+        with torch.rbln.explain() as p:
+            torch._foreach_copy_([dst_cpu], [dst_dev])
+        calls = _prim_calls(p.dump())
+        self.assertEqual(calls.get("v2h_multi", 0), 0, f"oversized entry must not use the bulk call: {calls}")
+        self.assertEqual(calls.get("v2h", 0), 1, f"{calls}")
+        self.assertTrue(torch.equal(dst_cpu, src_cpu))
+
     def test_mixed_directions_use_one_submit_each(self):
         """A list spanning all three directions costs one submit per direction —
         three total, not one per pair."""

@@ -74,7 +74,14 @@ void flush_group(const std::vector<Desc>& group, const char* who, const BulkFn& 
       kMaxBulkEntries,
       kMaxBulkBytes);
   for (size_t i = 0; i < group.size();) {
-    size_t j = i + 1; // one entry always goes, however large
+    if (group[i].nbytes > kMaxBulkBytes) {
+      // No bulk form for a descriptor past the cap; the single-copy path has no
+      // such limit and is where this pair went before batching.
+      one(group[i]);
+      ++i;
+      continue;
+    }
+    size_t j = i + 1;
     size_t bytes = group[i].nbytes;
     while (j < group.size() && j - i < kMaxBulkEntries && bytes + group[j].nbytes <= kMaxBulkBytes) {
       bytes += group[j].nbytes;
