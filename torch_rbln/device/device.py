@@ -82,11 +82,10 @@ def physical_device_count() -> int:
     this function always returns the physical device count, even when RSD mode
     is active (which makes device_count() return 1).
 
-    Note: this queries the runtime directly, which resolves and therefore *seals*
-    ``RBLN_DEVICES`` -- a later change to that variable is rejected, in this process and
-    in any it forks. Prefer :func:`device_count` / :func:`is_available` in code that runs
-    before a launcher has assigned devices; see ``TORCH_RBLN_AVAILABILITY_PROBE`` in
-    docs/CONFIGURATION.md.
+    Note: this bypasses the device-mapping plan and asks the runtime directly, so it
+    reports the visible physical pool rather than the logical devices this process has
+    planned. It does not claim an NPU and does not freeze the mapping -- both happen on
+    first device use. See "When the mapping takes effect" in docs/CONFIGURATION.md.
 
     Returns:
         int: The number of physical RBLN devices.

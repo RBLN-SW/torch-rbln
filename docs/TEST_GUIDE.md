@@ -370,8 +370,8 @@ rather than on a downstream symptom.
 Two conventions are specific to it:
 
 - **Every probe runs in a fresh subprocess** (`run_probe`), because the state involved is
-  process-global and one-shot: the RBLN runtime seals `RBLN_DEVICES` on its first
-  device-resolving call, and device contexts last for the process lifetime. It cannot use
+  process-global and one-shot: the RBLN runtime fixes the `RBLN_DEVICES` mapping once a
+  device is acquired, and device contexts last for the process lifetime. It cannot use
   `run_in_isolated_process()` from `test/utils.py`, which needs a picklable callable, runs
   after `torch_rbln` is already imported, and captures no output — the probes must set
   `RBLN_*` *before* the import and inspect stdout/stderr. This mirrors
@@ -379,6 +379,11 @@ Two conventions are specific to it:
 - **A clause not satisfied yet is a `strict=True` xfail** naming the work that closes it,
   rather than being omitted. `xfail_strict = true` is already the project default, so an
   unexpected pass fails the suite and signals that the marker should be removed.
+- **A clause only a newer runtime can satisfy is skipped, not xfailed**, and which runtime
+  is underneath is measured rather than assumed (`runtime_freezes_on_acquisition()`).
+  torch-rbln supports `rebel-compiler>=0.11.1`, which spans both the older behaviour (the
+  mapping is fixed by the first query) and the current one (fixed on acquisition); a clause
+  that requires the latter is unsatisfiable on the former rather than broken there.
 
 ---
 

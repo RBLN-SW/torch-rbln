@@ -18,23 +18,29 @@ state involved is process-global and one-shot):
 
 ``raised``  the probe propagated an exception
 ``ctx``     the probe opened an NPU context (``rbln-stat`` reports this pid)
-``sealed``  the probe sealed ``RBLN_DEVICES`` (a later remap is rejected)
+``remap``   what a later ``RBLN_DEVICES`` remap does now: ``applied`` (still live),
+            ``frozen`` (silently ignored), ``rejected`` (raises), ``None`` (undetermined)
 
-``sealed`` is load-bearing for vLLM: ``VLLM_WORKER_MULTIPROC_METHOD`` defaults to
-``fork`` and ``RBLNWorker._init_device_env()`` remaps ``RBLN_DEVICES`` *inside* the
-forked worker. A seal taken in the parent is inherited across fork and breaks every
-worker. torch-rbln #151 was one instance; a co-tenant availability probe (LMCache
-imports ``lmcache.v1.platform`` on every start) is another.
+``remap`` is load-bearing for vLLM: ``VLLM_WORKER_MULTIPROC_METHOD`` defaults to ``fork``
+and ``RBLNWorker._init_device_env()`` remaps ``RBLN_DEVICES`` *inside* the forked worker.
+A mapping frozen in the parent is inherited across fork and breaks every worker.
+torch-rbln #151 was one instance; a co-tenant availability probe (LMCache imports
+``lmcache.v1.platform`` on every start) is another.
+
+Which runtime is underneath decides what "frozen" looks like, so it is measured, not
+assumed -- see :func:`runtime_freezes_on_acquisition`. A runtime older than
+rebellions-sw/rebel_compiler#12904 freezes the mapping on its *first query*, so the
+availability clauses below cannot hold there at all and are skipped; #12904 and later
+freeze on *acquisition*, which is what makes them assertions rather than xfails.
 
 A clause not satisfied yet is marked ``strict=True`` xfail naming the work that closes
-it; an unexpected pass means the marker should be removed. Two groups remain:
+it; an unexpected pass means the marker should be removed. One group remains:
 
-- ``fsw-inference#475`` -- the runtime seals ``RBLN_DEVICES`` on its first
-  device-resolving call, so any availability query freezes it for this process and every
-  process it forks. Not fixable from this layer.
 - ``phase 4`` -- the RNG / serialization / device-name surface of ``torch.rbln``.
 """
 
+import functools
+import glob
 import json
 import os
 import subprocess
@@ -68,7 +74,7 @@ ALL_SCENARIOS = {
 
 # Probes must assign ``rec["result"]``. They run after ``import torch, torch_rbln``.
 _RUNNER = '''\
-import json, os, shutil, subprocess, sys
+import glob, json, os, shutil, subprocess, sys
 
 sys.path.insert(0, {root!r})
 {env}
@@ -78,7 +84,7 @@ os.environ.setdefault("RBLN_LOG_LEVEL", "off")
 _real_stdout = sys.stdout
 sys.stdout = sys.stderr
 
-rec = {{"result": None, "raised": None, "ctx": None, "sealed": None}}
+rec = {{"result": None, "raised": None, "ctx": None, "remap": None}}
 
 import torch          # noqa: F401
 import torch_rbln     # noqa: F401
@@ -95,27 +101,51 @@ def _ctx_opened():
     return any(" {{}} ".format(os.getpid()) in line for line in out.splitlines())
 
 
-def _sealed():
-    """True if RBLN_DEVICES is already sealed, i.e. a later remap is rejected.
+def _remap_state():
+    """How the runtime treats a RBLN_DEVICES remap right now.
 
-    Remaps RBLN_DEVICES and then makes a device-resolving call, exactly as a vLLM DP
-    worker does after fork. The call goes through rebel (the runtime that owns the seal)
-    rather than a torch_rbln API, so this stays a measurement of the runtime rather than
-    of our own sealing behavior -- a torch_rbln entry point that stopped sealing would
-    otherwise make these checks pass for the wrong reason. Must run last: it seals.
+    ``applied``   the remap took effect -- the mapping is still live
+    ``frozen``    the remap was silently ignored -- the runtime has latched
+    ``rejected``  the remap raised -- a runtime that freezes on the first query (or, on a
+                  current one, a rejection raised by a later acquisition)
+    ``None``      undetermined (fewer than two NPUs, or an unrelated failure)
+
+    Measured by the *visible device count*, not by matching an error message: the two
+    runtimes report a frozen mapping differently (a pre-rebellions-sw/rebel_compiler#12904
+    runtime raises "changed at runtime (Sealed)" from the query itself; #12904 and later
+    ignore the new value and only reject at the next acquisition), and a message-matching
+    probe silently reports "not frozen" against the newer one.
+
+    Goes through ``rebel._C`` rather than a torch_rbln API, so this stays a measurement of
+    the runtime: a torch_rbln entry point that stopped freezing would otherwise make these
+    checks pass for the wrong reason. Must run last -- it rewrites RBLN_DEVICES.
     """
-    cur = os.environ.get("RBLN_DEVICES")
-    os.environ["RBLN_DEVICES"] = "0" if cur == "0,1" else "0,1"
-    try:
-        from rebel._C import get_npu_name
+    if len(glob.glob("/dev/rbln*")) < 2:
+        return None  # one NPU: a frozen count and a live count are the same number
+    from rebel._C import device_count
 
-        get_npu_name(0)
-        return False
+    def count(value):
+        # The alias selects the same pool, so it has to be cleared either way.
+        os.environ.pop("RBLN_VISIBLE_DEVICES", None)
+        if value is None:
+            os.environ.pop("RBLN_DEVICES", None)
+        else:
+            os.environ["RBLN_DEVICES"] = value
+        return device_count()
+
+    try:
+        one = count("0")     # live -> exactly 1
+        every = count(None)  # live -> every visible NPU (>= 2, checked above)
     except BaseException as e:
         msg = str(e)
-        if "Sealed" in msg or "changed at runtime" in msg:
-            return True
+        if "Sealed" in msg or "changed at runtime" in msg or "cannot change" in msg:
+            return "rejected"
         return None  # failed for an unrelated reason: undetermined
+    if one == every:
+        return "frozen"     # neither value reached the runtime
+    if one == 1:
+        return "applied"
+    return None
 
 
 try:
@@ -123,8 +153,8 @@ try:
 except BaseException as e:  # noqa: BLE001 - the point is to characterise failures
     rec["raised"] = "{{}}: {{}}".format(type(e).__name__, str(e).splitlines()[0][:160])
 
-rec["ctx"] = _ctx_opened()      # before _sealed(): that call itself seals
-rec["sealed"] = _sealed()
+rec["ctx"] = _ctx_opened()      # before _remap_state(): that call rewrites RBLN_DEVICES
+rec["remap"] = _remap_state()
 print(json.dumps(rec), file=_real_stdout)
 '''
 
@@ -136,12 +166,12 @@ class Probe:
         self.result = rec["result"]
         self.raised = rec["raised"]
         self.ctx = rec["ctx"]
-        self.sealed = rec["sealed"]
+        self.remap = rec["remap"]
         self.stdout = stdout
         self.stderr = stderr
 
     def __repr__(self):
-        return f"Probe(result={self.result!r}, raised={self.raised!r}, ctx={self.ctx!r}, sealed={self.sealed!r})"
+        return f"Probe(result={self.result!r}, raised={self.raised!r}, ctx={self.ctx!r}, remap={self.remap!r})"
 
     @property
     def console(self):
@@ -180,7 +210,7 @@ def run_probe(body: str, env: dict) -> Probe:
             rec = json.loads(line)
         except ValueError:
             continue
-        if isinstance(rec, dict) and "sealed" in rec:
+        if isinstance(rec, dict) and "remap" in rec:
             return Probe(rec, proc.stdout, proc.stderr)
     raise AssertionError(
         "probe harness produced no result (the child died before reporting)\n"
@@ -195,6 +225,38 @@ def xfail_until(owner: str, reason: str):
     and signals the marker should be removed.
     """
     return pytest.mark.xfail(strict=True, reason=f"[{owner}] {reason}")
+
+
+@functools.lru_cache(maxsize=1)
+def runtime_freezes_on_acquisition() -> bool:
+    """Whether the runtime freezes the ``RBLN_DEVICES`` mapping on acquisition, not on query.
+
+    rebellions-sw/rebel_compiler#12904 moved the freeze from the first ``RBLN_DEVICES``
+    read to ``Context::Create``. torch-rbln supports ``rebel-compiler>=0.11.1``, which
+    spans both behaviours, and on the older one an availability query freezes the mapping
+    no matter what this layer does -- so the clauses that require a query to leave it
+    remappable are unsatisfiable there rather than broken.
+
+    Measured once, with a probe that touches no device: on the newer runtime the remap is
+    still ``applied``, on the older one the query already froze and it is ``rejected``.
+    """
+    if len(glob.glob("/dev/rbln*")) < 2:
+        return False  # the measurement itself needs two NPUs; see _remap_state
+    try:
+        return run_probe('rec["result"] = None', HEALTHY).remap == "applied"
+    except Exception:
+        # Runs at collection time, so a broken harness must not error the whole module.
+        # Nothing is hidden by returning False: test_detects_a_frozen_mapping is not gated
+        # on this and fails loudly when the harness cannot see a freeze.
+        return False
+
+
+def requires_acquisition_latch(test):
+    """Skip a clause that only a post-#12904 runtime can satisfy."""
+    return pytest.mark.skipif(
+        not runtime_freezes_on_acquisition(),
+        reason="runtime freezes RBLN_DEVICES on the first query (pre rebel_compiler#12904)",
+    )(test)
 
 
 @pytest.mark.test_set_ci
@@ -226,18 +288,24 @@ class TestProbeHarness(TestCase):
             self.skipTest("rbln-stat unavailable; cannot observe device contexts")
         self.assertTrue(p.ctx, f"harness did not see the NPU context an allocation opens -- {p}")
 
-    def test_detects_a_seal(self):
-        """A probe that resolves a device through the runtime must be reported in ``sealed``."""
-        p = run_probe(
-            """
-            from rebel._C import get_npu_name
+    def test_detects_a_frozen_mapping(self):
+        """A probe that acquires a device must be reported as freezing the mapping.
 
-            rec["result"] = get_npu_name(0)
-            """,
+        The freeze is only observable through an *acquisition* now. Under
+        rebellions-sw/rebel_compiler#12904 a query leaves the mapping live, so the control
+        this replaced -- ``rebel._C.get_npu_name(0)``, a query -- would report "not frozen"
+        forever and every "left it remappable" clause below would pass for free.
+        """
+        p = run_probe(
+            'rec["result"] = float(torch.ones(4, dtype=torch.float16, device="rbln:0").sum().cpu())',
             HEALTHY,
         )
-        self.assertIsNone(p.raised, f"probe raised, cannot control for seal -- {p}")
-        self.assertTrue(p.sealed, f"harness did not see RBLN_DEVICES get sealed -- {p}")
+        self.assertIsNone(p.raised, f"allocation failed, cannot control for the freeze -- {p}")
+        if p.remap is None:
+            self.skipTest(f"remap state undetermined in this environment -- {p}")
+        # "rejected" on a pre-#12904 runtime, "frozen" on #12904 and later: either way the
+        # harness proved it can tell a frozen mapping from a live one.
+        self.assertIn(p.remap, ("frozen", "rejected"), f"harness did not see the mapping freeze -- {p}")
 
     def test_detects_a_cpp_traceback(self):
         """A failure from a still-loud ``RBLN_CHECK`` must be seen by ``has_cpp_traceback``.
@@ -468,6 +536,12 @@ class TestUpstreamClauses(TestCase):
     def test_manual_seed_reaches_the_backend(self):
         """``torch.manual_seed()`` must seed the RBLN generators.
 
+        Now implementable: the obvious implementation walks ``device_count()`` to build one
+        default generator per device, and that used to claim every mapped NPU as a side
+        effect, so seeding made a later vLLM start impossible
+        (rebellions-sw/fsw-inference#475). Enumeration no longer claims anything, so the
+        blocker is gone and this is a missing API rather than an impossible one.
+
         torch/random.py::_seed_custom_device requires ``_is_in_bad_fork`` **and**
         ``manual_seed_all`` on the device module; without both it warns and silently does
         nothing, so RBLN results are not reproducible from ``torch.manual_seed()``.
@@ -520,9 +594,11 @@ class TestUpstreamClauses(TestCase):
         ``get_device_properties`` and ``get_device_capability``, and frameworks reach for
         them through the device module: vLLM's XPU platform is
         ``return torch.xpu.get_device_name(device_id)`` (vllm/platforms/xpu.py:137).
-        With no RBLN equivalent, vllm-rbln calls ``rebel.get_npu_name()`` directly --
-        bypassing torch and sealing RBLN_DEVICES in whatever process asks.
-        ``RBLNGuardImpl::getDeviceCapability()`` already exists on the C++ side.
+        With no RBLN equivalent, vllm-rbln calls ``rebel.get_npu_name()`` directly, bypassing
+        torch entirely -- so a torch-level policy has nothing to apply to. (That call no
+        longer freezes the mapping, so this is now an API-surface gap rather than a
+        correctness one.) ``RBLNGuardImpl::getDeviceCapability()`` already exists on the C++
+        side.
         """
         p = run_probe(
             'rec["result"] = [n for n in ("get_device_name", "get_device_properties",'
@@ -574,6 +650,77 @@ class TestUpstreamClauses(TestCase):
         )
         self.assertFalse(p.has_cpp_traceback, f"C++ traceback leaked to the console:\n{p.console}")
 
+    # -- the counterpart clause: using a device must freeze the mapping -----
+
+    @requires_acquisition_latch
+    def test_device_use_freezes_the_mapping(self):
+        """Using a device must freeze the mapping, even though querying does not.
+
+        The clauses above all say a probe left the mapping remappable. On their own they
+        are also satisfied by a backend that never freezes it at all, which would let a
+        launcher renumber devices out from under live allocations. ``torch.cuda`` draws the
+        same line: torch/cuda/__init__.py refuses to cache the device count "prior to CUDA
+        initialization" and caches it from ``_lazy_init`` onwards.
+
+        Both layers freeze at this same moment -- ``DeviceMappingManager::commit()`` calls
+        ``rbln_register_device_id()``, which reaches ``Context::Create`` and the runtime's
+        latch -- so this also pins that they cannot drift apart.
+        """
+        p = run_probe(
+            'rec["result"] = float(torch.ones(4, dtype=torch.float16, device="rbln:0").sum().cpu())',
+            HEALTHY,
+        )
+        self.assertIsNone(p.raised, f"allocation failed -- {p}")
+        if p.remap is None:
+            self.skipTest(f"remap state undetermined in this environment -- {p}")
+        self.assertEqual(p.remap, "frozen", f"device use left the mapping remappable -- {p}")
+
+    @requires_acquisition_latch
+    def test_visible_devices_alias_is_honoured_after_import(self):
+        """``RBLN_VISIBLE_DEVICES`` must select the pool as well as ``RBLN_DEVICES`` does.
+
+        The runtime ships it as an alias of the same flag (rebel's ``flags.cc`` registers
+        ``/*alias=*/"RBLN_VISIBLE_DEVICES"``), so it renumbers the visible pool identically.
+        This layer caches its device-mapping plan and rebuilds it whenever the ``RBLN_*``
+        environment changes; leaving the alias out of that signature left the plan cached
+        against a pool the runtime had already changed, so ``device_count()`` answered from
+        the stale plan while ``physical_device_count()``, which bypasses it, answered from
+        the new one.
+        """
+        p = run_probe(
+            """
+            before = [torch.rbln.device_count(), torch.rbln.physical_device_count()]
+            os.environ["RBLN_VISIBLE_DEVICES"] = "0"
+            rec["result"] = [before, [torch.rbln.device_count(), torch.rbln.physical_device_count()]]
+            """,
+            {},  # neither name set: the primary wins when both are, so it must be absent
+        )
+        self.assertIsNone(p.raised, f"probe raised -- {p}")
+        before, after = p.result
+        if before[0] < 2:
+            self.skipTest(f"needs at least two visible NPUs to tell the counts apart -- {p}")
+        self.assertEqual(after, [1, 1], f"RBLN_VISIBLE_DEVICES did not reach both answers -- {p}")
+
+    @requires_acquisition_latch
+    def test_a_frozen_mapping_survives_unsetting_the_variable(self):
+        """Clearing ``RBLN_DEVICES`` after a device is in use must not un-freeze the mapping.
+
+        rebel_compiler#12904 checks the freeze before the environment, so an unset cannot
+        fall back to "auto-discover all devices" and quietly widen the pool under live
+        allocations. Pinned here because it is the escape hatch a remap-rejection check
+        alone would miss: unsetting is not a changed value, it is no value.
+        """
+        p = run_probe(
+            """
+            torch.ones(4, dtype=torch.float16, device="rbln:0")
+            os.environ.pop("RBLN_DEVICES", None)
+            rec["result"] = [torch.rbln.device_count(), torch.rbln.physical_device_count()]
+            """,
+            HEALTHY,  # RBLN_DEVICES="0": one device, so widening would be visible
+        )
+        self.assertIsNone(p.raised, f"probe raised -- {p}")
+        self.assertEqual(p.result, [1, 1], f"unsetting RBLN_DEVICES widened the pool -- {p}")
+
 
 @pytest.mark.test_set_ci
 @requires_physical_devices(1)
@@ -583,28 +730,34 @@ class TestExternalConsumers(TestCase):
     These are not hypotheticals: each corresponds to a reported failure.
     """
 
-    @xfail_until("fsw-inference#475", "the runtime seals RBLN_DEVICES on its first device-resolving call")
-    def test_cotenant_availability_probe_does_not_seal(self):
+    @requires_acquisition_latch
+    def test_cotenant_availability_probe_leaves_the_mapping_remappable(self):
         """A co-tenant availability probe must leave ``RBLN_DEVICES`` remappable.
 
         LMCache runs device detection while importing ``lmcache.v1.platform``, on every
-        start, in whatever process imports it -- including a vLLM parent that has not
-        yet forked its workers. Sealing there is inherited by every worker.
+        start, in whatever process imports it -- including a vLLM parent that has not yet
+        forked its workers. A mapping frozen there is inherited by every worker.
+        Reported as rebellions-sw/fsw-inference#495.
         """
         p = run_probe('rec["result"] = torch.rbln.is_available()', HEALTHY)
-        if p.sealed is None:
-            self.skipTest("seal state undetermined in this environment")
-        self.assertFalse(p.sealed, f"availability probe sealed RBLN_DEVICES -- {p}")
+        self.assertIsNone(p.raised, f"is_available() raised -- {p}")
+        if p.remap is None:
+            self.skipTest(f"remap state undetermined in this environment -- {p}")
+        self.assertEqual(p.remap, "applied", f"availability probe froze the mapping -- {p}")
 
-    @xfail_until("fsw-inference#475", "the runtime seals RBLN_DEVICES on its first device-resolving call")
+    @requires_acquisition_latch
     def test_fork_then_worker_remap_succeeds(self):
         """A forked worker must still be able to remap ``RBLN_DEVICES``.
 
         ``VLLM_WORKER_MULTIPROC_METHOD`` defaults to ``fork`` (vllm/envs.py:742) and
         ``RBLNWorker._init_device_env()`` assigns ``os.environ[RBLN_DEVICES]`` inside the
-        forked worker. The seal is inherited across fork, so a probe in the parent
+        forked worker. A frozen mapping is inherited across fork, so a probe in the parent
         breaks every worker deterministically. torch-rbln #151 was this bug via a
         different entry point.
+
+        The child reports the count it sees, not just the absence of an error: a remap that
+        is silently ignored raises nothing, so "did not fail" alone would pass against a
+        mapping the parent had already frozen.
         """
         p = run_probe(
             """
@@ -627,16 +780,18 @@ class TestExternalConsumers(TestCase):
             HEALTHY,
         )
         self.assertIsNone(p.raised, f"probe raised -- {p}")
-        self.assertNotIn("Sealed", p.result, f"forked worker could not remap -- {p}")
         self.assertNotIn("FAIL", p.result, f"forked worker could not remap -- {p}")
+        # RBLN_DEVICES="1" is one device: anything else means the parent's mapping is what
+        # the child actually got.
+        self.assertEqual(p.result, "OK:1", f"the child's remap did not take effect -- {p}")
 
-    @xfail_until("fsw-inference#475", "the runtime seals RBLN_DEVICES on its first device-resolving call")
+    @requires_acquisition_latch
     def test_cpu_dataloader_does_not_touch_the_npu(self):
-        """``DataLoader(pin_memory=True)`` must not seal or claim an NPU.
+        """``DataLoader(pin_memory=True)`` must not freeze the mapping or claim an NPU.
 
         torch/utils/data/dataloader.py:672,681 gate pinning on
-        ``torch.accelerator.is_available()``. A pure-CPU DataLoader in a vLLM parent
-        must not consume the process-wide seal or hold device contexts.
+        ``torch.accelerator.is_available()``. A pure-CPU DataLoader in a vLLM parent must
+        not freeze the process-wide mapping or hold device contexts.
         """
         p = run_probe(
             """
@@ -649,10 +804,10 @@ class TestExternalConsumers(TestCase):
         self.assertIsNone(p.raised, f"DataLoader raised -- {p}")
         # skipTest, not a silent `if ... is not None`: an unavailable measurement must not
         # quietly turn this into a test that checks nothing.
-        if p.ctx is None or p.sealed is None:
-            self.skipTest(f"ctx/seal state undetermined in this environment -- {p}")
+        if p.ctx is None or p.remap is None:
+            self.skipTest(f"ctx/remap state undetermined in this environment -- {p}")
         self.assertFalse(p.ctx, f"DataLoader opened an NPU context -- {p}")
-        self.assertFalse(p.sealed, f"DataLoader sealed RBLN_DEVICES -- {p}")
+        self.assertEqual(p.remap, "applied", f"DataLoader froze the mapping -- {p}")
 
     def test_torch_load_reports_its_own_error(self):
         """``torch.load(map_location="rbln:0")`` must fail with torch's message.
