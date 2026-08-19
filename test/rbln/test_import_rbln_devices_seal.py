@@ -15,11 +15,9 @@ torch-rbln #151 gated the kineto profiler on ``is_atom_device()`` at import, whi
 registers unconditionally; ATOM is gated by the runtime (``rbln_kineto_is_active()``
 reports inactive on ATOM, rebel-compiler #12079), not by an import-time arch query.
 
-Scope note: what this file measures is the *runtime* still accepting a remap after import.
-On a current runtime a query no longer freezes the mapping, so that alone would also pass
-for an import that did query. The torch-side half -- that nothing on the import path
-resolves a device at all -- is pinned by ``test_import_does_not_resolve_a_device`` in
-test_privateuse1_contract.py, which reads the arch cache directly.
+Scope: this file measures the runtime half -- that a remap after import is still accepted.
+The torch half, that nothing on the import path resolves a device at all, is pinned by
+``test_import_does_not_resolve_a_device`` in test_privateuse1_contract.py.
 """
 
 import os

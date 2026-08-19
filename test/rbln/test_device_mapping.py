@@ -1153,12 +1153,8 @@ class TestDeviceMappingEnvVars(TestCase):
         expected_unused = physical_count % 32
         self.assertEqual(len(unused), expected_unused)
 
-    # A malformed RBLN_* config is reported at the *point of use*, not by enumeration.
-    # These impls used to have empty bodies and relied on the error firing while the
-    # module was imported (instantiate_device_type_tests queries device_count()). That
-    # is exactly the import-time side effect the PrivateUse1 contract forbids -- torch
-    # requires device_count()/is_available() never to raise, since it calls them from
-    # CPU-only paths -- so each now names the entry point that must be loud:
+    # A malformed RBLN_* config is reported at the *point of use*, not by enumeration:
+    # torch requires device_count()/is_available() never to raise. So each impl below calls
     # device_count_ensure_non_zero(), which backs current_device()/set_device() and the
     # allocation path. See test_privateuse1_contract.py for the clause.
 

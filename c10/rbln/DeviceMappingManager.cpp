@@ -64,12 +64,11 @@ DeviceMappingManager& DeviceMappingManager::getInstance() {
   return instance;
 }
 
-// Nothing here: construction must not touch the environment or the runtime. Planning is
-// lazy (ensurePlanned) so that a throwing configuration cannot escape the constructor.
-// It used to: a function-local static whose constructor throws is re-attempted on the
+// Construction must not touch the environment or the runtime, so planning is lazy
+// (ensurePlanned): a function-local static whose constructor throws is re-attempted on the
 // next call ([stmt.dcl]/4), and c10::call_once leaves its flag unset on a throwing
-// initializer (c10/util/CallOnce.h), so a malformed RBLN_* config re-ran the whole
-// mapping init -- rbln_register_device_id() included -- on every single query.
+// initializer (c10/util/CallOnce.h), which would re-run the whole mapping init --
+// rbln_register_device_id() included -- on every query under a malformed RBLN_* config.
 DeviceMappingManager::DeviceMappingManager() = default;
 
 bool DeviceMappingManager::isValidDeviceGroupSize(size_t size) const {
@@ -289,14 +288,11 @@ void DeviceMappingManager::commit() {
             rc,
             already_claimed);
       }
-    } catch (const c10::Error& e) {
-      // msg(), not what(): what() embeds a backtrace, and the RBLN_CHECK above would wrap
-      // it in a second one on every later commit().
-      commit_error_ = e.msg();
-      plan_state_.store(PlanState::Failed, std::memory_order_release);
-      throw;
     } catch (const std::exception& e) {
-      commit_error_ = e.what();
+      // msg() is the message alone; what() embeds a backtrace, which the RBLN_CHECK that
+      // rethrows this would wrap in a second one.
+      const auto* c10_error = dynamic_cast<const c10::Error*>(&e);
+      commit_error_ = c10_error != nullptr ? c10_error->msg() : e.what();
       plan_state_.store(PlanState::Failed, std::memory_order_release);
       throw;
     }
@@ -478,9 +474,8 @@ std::string DeviceMappingManager::envSignature() {
   // RBLN_VISIBLE_DEVICES is the runtime's alias of RBLN_DEVICES and selects the visible
   // pool just as well, so omitting it cached the plan against a pool already changed.
   //
-  // RBLN_DUMMY_DEVICE is deliberately absent: it is startup-only. The runtime registers it
-  // FlagMutability::Sealed and is_dummy_device() caches for the process, so replanning on it
-  // moved the mapping to dummy while both of those still reported real mode.
+  // RBLN_DUMMY_DEVICE is deliberately absent: it is startup-only, since the runtime
+  // registers it FlagMutability::Sealed and is_dummy_device() caches for the process.
   std::string signature;
   for (const char* name : {"RBLN_DEVICES", "RBLN_VISIBLE_DEVICES", "RBLN_DEVICE_MAP", "RBLN_NPUS_PER_DEVICE"}) {
     const char* value = std::getenv(name);

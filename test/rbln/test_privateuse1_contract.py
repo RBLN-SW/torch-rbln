@@ -272,11 +272,9 @@ def requires_acquisition_latch(test):
 class TestProbeHarness(TestCase):
     """Positive controls: prove the harness can actually observe a violation.
 
-    Every clause below is expressed as "the probe did NOT do X". Such a test passes both
-    when the contract holds and when the harness has gone blind, so each of the three
-    measurements needs a case that deliberately triggers it. This is not hypothetical --
-    while this file was being written, ``has_cpp_traceback`` inspected only stderr while
-    ``RBLN_CHECK`` logs to stdout, and every "no traceback" assertion passed for free.
+    Every clause below is expressed as "the probe did NOT do X", which passes both when the
+    contract holds and when the harness has gone blind. Each of the three measurements
+    therefore needs a case that deliberately triggers it.
     """
 
     def test_detects_a_raise(self):
@@ -548,11 +546,9 @@ class TestUpstreamClauses(TestCase):
     def test_manual_seed_reaches_the_backend(self):
         """``torch.manual_seed()`` must seed the RBLN generators.
 
-        Now implementable: the obvious implementation walks ``device_count()`` to build one
-        default generator per device, and that used to claim every mapped NPU as a side
-        effect, so seeding made a later vLLM start impossible
-        (rebellions-sw/fsw-inference#475). Enumeration no longer claims anything, so the
-        blocker is gone and this is a missing API rather than an impossible one.
+        Implementable now that enumeration claims nothing: the obvious implementation walks
+        ``device_count()`` to build one generator per device, which claimed every mapped NPU
+        and so made a later vLLM start impossible (rebellions-sw/fsw-inference#475).
 
         torch/random.py::_seed_custom_device requires ``_is_in_bad_fork`` **and**
         ``manual_seed_all`` on the device module; without both it warns and silently does
@@ -644,10 +640,9 @@ class TestUpstreamClauses(TestCase):
     def test_availability_emits_no_cpp_traceback(self):
         """A swallowed availability failure must not spam a co-tenant's console.
 
-        ``RBLN_CHECK`` (c10/rbln/RBLNLogging.h:181-191) logs ``c10::Error::what()`` --
-        which embeds the C++ stack trace -- before throwing. Measured: it writes 16
-        lines to **stdout** (not stderr) and ``RBLN_LOG_LEVEL=off`` does not suppress
-        it, so catching the exception in python leaves the noise in place.
+        ``RBLN_CHECK`` (c10/rbln/RBLNLogging.h:181-191) logs ``c10::Error::what()`` -- the
+        C++ stack trace included -- to **stdout** before throwing, ungated by
+        ``RBLN_LOG_LEVEL``, so catching the exception does not suppress it.
         """
         p = run_probe(
             """
@@ -750,7 +745,7 @@ class TestUpstreamClauses(TestCase):
 
         The selection is ``thread_local`` while the plan is process-wide, so shrinking
         ``RBLN_DEVICES`` after ``set_device()`` -- both legal before the mapping commits --
-        used to leave the selection pointing past the end of it.
+        can leave the selection pointing past the end of it.
         """
         p = run_probe(
             """
@@ -793,9 +788,8 @@ class TestUpstreamClauses(TestCase):
 @pytest.mark.test_set_ci
 @requires_physical_devices(1)
 class TestExternalConsumers(TestCase):
-    """Scenarios reproducing how vLLM and LMCache actually drive this backend.
-
-    These are not hypotheticals: each corresponds to a reported failure.
+    """Scenarios reproducing how vLLM and LMCache drive this backend; each is a reported
+    failure.
     """
 
     @requires_acquisition_latch
@@ -886,10 +880,10 @@ class TestExternalConsumers(TestCase):
         """Importing ``torch_rbln`` must not resolve a device to read its architecture.
 
         torch-rbln #151 was an import-time ``is_atom_device()`` gate, which resolves device 0
-        through ``rebel.device_info.get_npu_name``. It no longer freezes ``RBLN_DEVICES``,
-        which is why this needs its own observable -- "a remap after import still works" is
-        now satisfied even by an import that queries. It still opens and closes a device node
-        per import.
+        through ``rebel.device_info.get_npu_name`` -- a device node opened and closed on every
+        import. Needs its own observable because a resolving query no longer freezes
+        ``RBLN_DEVICES``, so test_import_rbln_devices_seal.py would pass for an import that
+        queries.
 
         ``get_device_arch`` is an ``lru_cache``: an empty cache means nothing asked.
         """

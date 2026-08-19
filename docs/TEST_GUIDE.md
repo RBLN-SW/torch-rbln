@@ -367,7 +367,7 @@ Each test in that file pins **exactly one** such clause and cites its upstream s
 the docstring, so a torch upgrade or a newly discovered call site fails on the clause
 rather than on a downstream symptom.
 
-Two conventions are specific to it:
+Three conventions are specific to it:
 
 - **Every probe runs in a fresh subprocess** (`run_probe`), because the state involved is
   process-global and one-shot: the RBLN runtime fixes the `RBLN_DEVICES` mapping once a
