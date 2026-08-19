@@ -809,6 +809,30 @@ class TestExternalConsumers(TestCase):
         self.assertFalse(p.ctx, f"DataLoader opened an NPU context -- {p}")
         self.assertEqual(p.remap, "applied", f"DataLoader froze the mapping -- {p}")
 
+    def test_import_does_not_resolve_a_device(self):
+        """Importing ``torch_rbln`` must not resolve a device to read its architecture.
+
+        torch-rbln #151 was an import-time ``is_atom_device()`` gate, which resolves device 0
+        through ``rebel.device_info.get_npu_name``. That used to freeze ``RBLN_DEVICES`` and
+        so broke every forked vLLM worker; on a current runtime it no longer freezes
+        anything, which is exactly why this needs its own observable -- "a remap after import
+        still works" is now satisfied even by an import that queries.
+
+        ``get_device_arch`` is an ``lru_cache``, so an empty cache is direct evidence that
+        nothing on the import path asked. Resolving a device also opens and closes a device
+        node per import, which is reason enough to keep the import path clear of it.
+        """
+        p = run_probe(
+            """
+            from torch_rbln._internal.device_arch_utils import get_device_arch
+
+            rec["result"] = get_device_arch.cache_info().currsize
+            """,
+            HEALTHY,
+        )
+        self.assertIsNone(p.raised, f"probe raised -- {p}")
+        self.assertEqual(p.result, 0, f"import resolved a device to read its arch -- {p}")
+
     def test_torch_load_reports_its_own_error(self):
         """``torch.load(map_location="rbln:0")`` must fail with torch's message.
 

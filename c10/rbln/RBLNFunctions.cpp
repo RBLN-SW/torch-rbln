@@ -483,8 +483,9 @@ bool any_device_context_initialized() noexcept {
 
 std::vector<c10::DeviceIndex> initialized_device_indices() {
   std::vector<c10::DeviceIndex> indices;
-  // Context flag first: nothing initialized anywhere -> empty, and skip
-  // get_device_count() so we don't enumerate/register devices as a side effect.
+  // Context flag first: nothing initialized anywhere -> empty, without enumerating. Since
+  // the plan/commit split, enumeration no longer registers devices, but it still asks the
+  // runtime for the visible count, and a process with no context has nothing to report.
   if (!any_device_context_initialized()) {
     return indices;
   }
@@ -949,9 +950,10 @@ c10::CachingDeviceAllocator::DeviceStats get_device_stats(const c10::Device& dev
 void empty_cache(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
   // Two-level context gate (CUDA parity). Check the context flag FIRST: no allocator state
-  // anywhere → no-op (a no-context parent or malformed config; never dispatches, and this
-  // avoids runtime_available()/device enumeration triggering device registration as a side
-  // effect). Otherwise validate the index (invalid throws) and skip a device never used here.
+  // anywhere → no-op (a no-context parent or malformed config; never dispatches, and there
+  // is nothing to free). Enumeration is side-effect-free since the plan/commit split, so
+  // the order is about semantics, not about avoiding registration. Otherwise validate the
+  // index (invalid throws) and skip a device never used here.
   if (!any_device_context_initialized() || !runtime_available()) {
     return;
   }
