@@ -6,6 +6,7 @@ set(sources
   core/RBLNNoDeviceTest.cpp
   core/RBLNDummyDeviceTest.cpp
   core/RBLNEventTest.cpp
+  core/RBLNStreamTest.cpp
   core/RBLNFunctionsTest.cpp
   core/RBLNLoggingTest.cpp
   core/RBLNPinnedAllocatorTest.cpp

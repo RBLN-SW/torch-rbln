@@ -1,2 +1,3 @@
 # Build/dev dependency constraints (single source of truth).
-rebel-compiler==0.11.2.dev256+gc5eaca9d.prod
+# Multi-stream/event runtime build required by torch.Stream/torch.Event support.
+rebel-compiler==0.11.2.dev374+g0179acfc

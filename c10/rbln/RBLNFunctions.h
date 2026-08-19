@@ -3,6 +3,7 @@
 #include <c10/core/CachingDeviceAllocator.h>
 #include <c10/core/Device.h>
 #include <c10/core/ScalarType.h>
+#include <c10/core/Stream.h>
 #include <c10/rbln/RBLNMacros.h>
 #include <rebel/runtime/api/rbln_runtime_api.h>
 
@@ -311,6 +312,79 @@ C10_RBLN_API void memcpy_v2v_async(void* rbln_dst_data, const void* rbln_src_dat
  * @param device_index The RBLN device to synchronize.
  */
 C10_RBLN_API void synchronize(c10::DeviceIndex device_index);
+
+// Streams / events (torch.Stream / torch.Event). A c10::Stream carries the per-device
+// stream id as its StreamId (StreamId 0 is the default stream). An event surfaces as
+// its opaque handle, which is non-zero for a valid event (so it never aliases nullptr).
+
+/**
+ * @brief Returns the current stream for the device (default stream if none set).
+ */
+C10_RBLN_API c10::Stream get_current_stream(c10::DeviceIndex device_index);
+
+/**
+ * @brief Returns the device's default stream (StreamId 0).
+ */
+C10_RBLN_API c10::Stream get_default_stream(c10::DeviceIndex device_index);
+
+/**
+ * @brief Creates a fresh stream on the device. `priority` has no analogue on RBLN
+ * and is intentionally not part of this API (the guard impl ignores it).
+ */
+C10_RBLN_API c10::Stream new_stream(c10::DeviceIndex device_index);
+
+/**
+ * @brief Returns a stream from a fixed, lazily-created per-device round-robin pool
+ * (backs getStreamFromGlobalPool). Pooled streams live for the process.
+ */
+C10_RBLN_API c10::Stream get_stream_from_pool(c10::DeviceIndex device_index);
+
+/**
+ * @brief Makes `stream` the current stream on its device (thread-local).
+ */
+C10_RBLN_API void set_current_stream(c10::Stream stream);
+
+/**
+ * @brief Non-blocking: true iff all work submitted to `stream` has completed.
+ */
+C10_RBLN_API bool query_stream(c10::Stream stream);
+
+/**
+ * @brief Blocks the host until all work on `stream` has completed.
+ */
+C10_RBLN_API void synchronize_stream(c10::Stream stream);
+
+/**
+ * @brief Creates an event on the device and returns its opaque uint64 handle.
+ */
+C10_RBLN_API uint64_t event_create(c10::DeviceIndex device_index);
+
+/**
+ * @brief Destroys an event. Never throws (called from destructors); no-op on 0.
+ */
+C10_RBLN_API void event_destroy(uint64_t event) noexcept;
+
+/**
+ * @brief Snapshots `stream`'s current position into the event (re-record overwrites).
+ */
+C10_RBLN_API void event_record(uint64_t event, c10::Stream stream);
+
+/**
+ * @brief Makes `stream` wait for `event`. Same-device: does not block the host.
+ * Cross-device waits are not supported and degrade to a host-side wait on the event
+ * (correct, but serializes the host).
+ */
+C10_RBLN_API void event_block(c10::Stream stream, uint64_t event);
+
+/**
+ * @brief Non-blocking: true iff the work recorded into the event has completed.
+ */
+C10_RBLN_API bool event_query(uint64_t event);
+
+/**
+ * @brief Blocks the host until the work recorded into the event has completed.
+ */
+C10_RBLN_API void event_synchronize(uint64_t event);
 
 /**
  * @brief Descriptor for one device-to-device slab copy used by memcpy_v2v_multi.

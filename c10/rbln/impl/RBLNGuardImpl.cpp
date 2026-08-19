@@ -125,68 +125,96 @@ c10::DeviceCapability RBLNGuardImpl::getDeviceCapability(c10::Device device) con
 }
 
 c10::Stream RBLNGuardImpl::getStream(c10::Device device) const {
-  const auto current_stream = c10::Stream(c10::Stream::Default::DEFAULT, device);
-  RBLN_LOG_DEBUG("current_stream={}", c10::str(current_stream));
-  return current_stream;
+  // Called on hot paths (every StreamGuard). If the current stream can't be resolved
+  // (e.g. the device isn't initialized yet), fall back to the default stream instead
+  // of surfacing an error here.
+  try {
+    return c10::rbln::get_current_stream(device.index());
+  } catch (const std::exception& e) {
+    RBLN_LOG_DEBUG("getStream falling back to default stream: {}", e.what());
+    return c10::rbln::get_default_stream(device.index());
+  }
+}
+
+c10::Stream RBLNGuardImpl::getDefaultStream(c10::Device device) const {
+  return c10::rbln::get_default_stream(device.index());
+}
+
+c10::Stream RBLNGuardImpl::getNewStream(c10::Device device, int priority) const {
+  (void)priority; // RBLN has no stream priorities.
+  return c10::rbln::new_stream(device.index());
+}
+
+c10::Stream RBLNGuardImpl::getStreamFromGlobalPool(c10::Device device, bool isHighPriority) const {
+  (void)isHighPriority; // RBLN has no stream priorities.
+  return c10::rbln::get_stream_from_pool(device.index());
 }
 
 c10::Stream RBLNGuardImpl::exchangeStream(c10::Stream stream) const {
-  const auto current_device_index = c10::rbln::get_device_index();
-  const auto current_device = c10::Device(c10::kPrivateUse1, current_device_index);
-  const auto original_stream = c10::Stream(c10::Stream::Default::DEFAULT, current_device);
+  const auto original_stream = getStream(stream.device());
+  c10::rbln::set_current_stream(stream);
   RBLN_LOG_DEBUG("Setting current stream: {} -> {}", c10::str(original_stream), c10::str(stream));
   return original_stream;
 }
 
+bool RBLNGuardImpl::queryStream(const c10::Stream& stream) const {
+  return c10::rbln::query_stream(stream);
+}
+
+void RBLNGuardImpl::synchronizeStream(const c10::Stream& stream) const {
+  c10::rbln::synchronize_stream(stream);
+}
+
 namespace {
 
-// Opaque payload behind the void* handles in the event API: the device the
-// event was last recorded on, or -1 while never recorded.
-struct RBLNEvent {
-  c10::DeviceIndex device_index = -1;
+// The void* event handle IS the opaque event handle (see RBLNGuardImpl.h). Route the
+// int<->ptr casts through uintptr_t and keep them in one place.
+void* to_event_ptr(uint64_t handle) {
+  return reinterpret_cast<void*>(static_cast<uintptr_t>(handle)); // NOLINT(performance-no-int-to-ptr)
+}
 
-  bool recorded() const {
-    return device_index >= 0;
-  }
-};
-
-void drain_if_recorded(void* event) {
-  const auto* rbln_event = static_cast<const RBLNEvent*>(event);
-  if (rbln_event != nullptr && rbln_event->recorded()) {
-    c10::rbln::synchronize(rbln_event->device_index);
-  }
+uint64_t to_event_handle(void* event) {
+  return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(event));
 }
 
 } // namespace
 
 void RBLNGuardImpl::record(void** event, const c10::Stream& stream, c10::DeviceIndex device_index, c10::EventFlag flag)
     const {
-  (void)flag; // RBLN events carry no timing.
+  (void)flag; // Event timing is not supported (elapsedTime is unimplemented).
+  const auto event_device = device_index >= 0 ? device_index : stream.device_index();
   if (*event == nullptr) {
-    *event = new RBLNEvent();
+    // A valid event handle is non-zero, so it never aliases the "not yet created"
+    // nullptr sentinel torch checks here.
+    *event = to_event_ptr(c10::rbln::event_create(event_device));
   }
-  auto* rbln_event = static_cast<RBLNEvent*>(*event);
-  rbln_event->device_index = device_index >= 0 ? device_index : stream.device_index();
-  RBLN_LOG_DEBUG("Recorded event on device {}", static_cast<int>(rbln_event->device_index));
+  c10::rbln::event_record(to_event_handle(*event), stream);
 }
 
 void RBLNGuardImpl::block(void* event, const c10::Stream& stream) const {
-  (void)stream; // Single in-order queue: a host-side drain orders everything.
-  drain_if_recorded(event);
+  if (event == nullptr) {
+    return; // never recorded -> nothing to wait for
+  }
+  c10::rbln::event_block(stream, to_event_handle(event));
 }
 
 bool RBLNGuardImpl::queryEvent(void* event) const {
-  drain_if_recorded(event);
-  return true;
+  if (event == nullptr) {
+    return true; // never recorded -> complete
+  }
+  return c10::rbln::event_query(to_event_handle(event));
 }
 
 void RBLNGuardImpl::synchronizeEvent(void* event) const {
-  drain_if_recorded(event);
+  if (event == nullptr) {
+    return; // never recorded -> no-op
+  }
+  c10::rbln::event_synchronize(to_event_handle(event));
 }
 
 void RBLNGuardImpl::destroyEvent(void* event, c10::DeviceIndex device_index) const noexcept {
   (void)device_index;
-  delete static_cast<RBLNEvent*>(event);
+  c10::rbln::event_destroy(to_event_handle(event)); // noexcept; no-op on null (handle 0)
 }
 
 void RBLNGuardImpl::synchronizeDevice(c10::DeviceIndex device_index) const {
