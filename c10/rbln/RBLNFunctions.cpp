@@ -770,6 +770,9 @@ c10::StreamId create_stream_local_id(c10::DeviceIndex device_index) {
       !::rbln::rbln_stream_create(torch_device_id, &handle),
       "rbln_stream_create failed for rbln:{}",
       static_cast<int>(device_index));
+  // A stream exists only on a live context, so this process owns one on this device.
+  // Keeps getStream's "no context -> default stream" shortcut honest.
+  mark_device_context_initialized(device_index);
   return static_cast<c10::StreamId>(static_cast<uint32_t>(handle & 0xFFFFFFFFULL));
 }
 

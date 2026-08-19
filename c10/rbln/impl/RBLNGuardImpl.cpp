@@ -125,15 +125,15 @@ c10::DeviceCapability RBLNGuardImpl::getDeviceCapability(c10::Device device) con
 }
 
 c10::Stream RBLNGuardImpl::getStream(c10::Device device) const {
-  // Called on hot paths (every StreamGuard). If the current stream can't be resolved
-  // (e.g. the device isn't initialized yet), fall back to the default stream instead
-  // of surfacing an error here.
-  try {
-    return c10::rbln::get_current_stream(device.index());
-  } catch (const std::exception& e) {
-    RBLN_LOG_DEBUG("getStream falling back to default stream: {}", e.what());
-    return c10::rbln::get_default_stream(device.index());
+  // No context yet means there is no current stream to read, and nothing has been
+  // selected: the default stream is the answer, without a runtime call. A failure
+  // once the context exists is real -- swallowing it would silently move work off
+  // the stream the caller selected.
+  const auto index = device.has_index() ? device.index() : c10::rbln::get_device_index();
+  if (!c10::rbln::device_context_initialized(index)) {
+    return c10::rbln::get_default_stream(index);
   }
+  return c10::rbln::get_current_stream(index);
 }
 
 c10::Stream RBLNGuardImpl::getDefaultStream(c10::Device device) const {
