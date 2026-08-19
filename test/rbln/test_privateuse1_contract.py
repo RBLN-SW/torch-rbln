@@ -199,6 +199,14 @@ def run_probe(body: str, env: dict) -> Probe:
         except ValueError:
             continue
         if isinstance(rec, dict) and "remap" in rec:
+            # The record is not enough: the runner catches every exception, so a probe that
+            # reported and then died in teardown (SIGABRT out of the runtime, say) exits
+            # non-zero with a complete JSON line. Reading only the record passes that.
+            if proc.returncode != 0:
+                raise AssertionError(
+                    f"probe reported but exited abnormally (rc={proc.returncode})\n"
+                    f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
+                )
             return Probe(rec, proc.stdout, proc.stderr)
     raise AssertionError(
         "probe harness produced no result (the child died before reporting)\n"
@@ -226,6 +234,10 @@ def runtime_freezes_on_acquisition() -> bool:
 
     Measured once with a probe that touches no device: newer -> still ``applied``, older ->
     the query already froze, so ``rejected``.
+
+    Caching this for the worker's lifetime is safe under the rule against process-caching
+    env-driven state (docs/TEST_GUIDE.md): the answer is a property of the installed
+    runtime, measured in a subprocess, and no test can toggle it.
     """
     if len(glob.glob("/dev/rbln*")) < 2:
         return False  # the measurement itself needs two NPUs; see _remap_state
@@ -239,11 +251,20 @@ def runtime_freezes_on_acquisition() -> bool:
 
 
 def requires_acquisition_latch(test):
-    """Skip a clause that only a post-#12904 runtime can satisfy."""
-    return pytest.mark.skipif(
-        not runtime_freezes_on_acquisition(),
-        reason="runtime freezes RBLN_DEVICES on the first query (pre rebel_compiler#12904)",
-    )(test)
+    """Skip a clause that only a post-#12904 runtime can satisfy.
+
+    Checked when the test runs, not at decoration: the probe costs a subprocess, and a
+    collection-time check pays it on every xdist worker that merely imports this module
+    (CI runs the parallel pass at --numprocesses=16).
+    """
+
+    @functools.wraps(test)
+    def wrapper(self, *args, **kwargs):
+        if not runtime_freezes_on_acquisition():
+            self.skipTest("runtime freezes RBLN_DEVICES on the first query (pre rebel_compiler#12904)")
+        return test(self, *args, **kwargs)
+
+    return wrapper
 
 
 @pytest.mark.test_set_ci

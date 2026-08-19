@@ -334,6 +334,10 @@ class C10_RBLN_API DeviceMappingManager {
   mutable std::mutex plan_mutex_;
   mutable bool planned_ = false;
   mutable bool committed_ = false;
+  // Set when commit() threw part-way. Devices claimed before the failure cannot be
+  // released, so the plan is frozen and every later commit() rethrows commit_error_.
+  bool commit_failed_ = false;
+  std::string commit_error_;
   mutable std::string plan_signature_; // envSignature() the current plan was built from
   mutable std::string plan_error_; // non-empty: the plan is invalid, rethrown on query
 

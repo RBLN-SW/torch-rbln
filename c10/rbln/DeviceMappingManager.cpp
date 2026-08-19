@@ -250,34 +250,51 @@ void DeviceMappingManager::commit() {
     if (committed_) {
       return;
     }
+    // A commit that failed part-way left devices claimed with no way to release them, so
+    // the plan must never be rebuilt or re-registered under them: the runtime's
+    // rbln_register_device_id() returns success for an id it already holds, so a retry
+    // against a changed plan would bind this layer to a mapping the runtime does not have.
+    RBLN_CHECK(!commit_failed_, "{}", commit_error_);
     ensurePlannedLocked();
     // Loud here (RBLN_CHECK, not the quiet variant): this is the point of use. Its
     // logging goes to spdlog only, so it is safe to throw from under the lock.
     RBLN_CHECK(plan_error_.empty(), "{}", plan_error_);
 
-    for (const auto& mapping : device_mapping_table_) {
-      // Kept as DeviceIndex; widened only at each use. Binding it to an `int` local trips
-      // bugprone-signed-char-misuse, since DeviceIndex is a signed char.
-      const auto logical_device = mapping.logical_device;
-      // rbln_register_device_id takes int*, so a non-const copy is required.
-      std::vector<int> physical_ids = mapping.physical_device_ids;
-      const int rc = rbln_register_device_id(
-          static_cast<int>(logical_device), physical_ids.data(), static_cast<int>(physical_ids.size()));
-      // No rollback is possible: the runtime exposes no unregister call, so devices claimed
-      // by earlier iterations stay claimed. Name them, so the leak is visible.
-      const std::string already_claimed = (logical_device > 0)
-          ? fmt::format(
-                " Note: rbln:0..{} were already registered by this process and remain claimed.",
-                static_cast<int>(logical_device) - 1)
-          : std::string();
-      RBLN_CHECK(
-          rc == 0,
-          "rbln_register_device_id failed for rbln:{} on physical NPU(s) [{}] (rc={}); the device(s) may be in use by "
-          "another process or hold stale allocations. Free the device(s) or adjust RBLN_DEVICES.{}",
-          static_cast<int>(logical_device),
-          fmt::join(physical_ids, ","),
-          rc,
-          already_claimed);
+    try {
+      for (const auto& mapping : device_mapping_table_) {
+        // Kept as DeviceIndex; widened only at each use. Binding it to an `int` local trips
+        // bugprone-signed-char-misuse, since DeviceIndex is a signed char.
+        const auto logical_device = mapping.logical_device;
+        // rbln_register_device_id takes int*, so a non-const copy is required.
+        std::vector<int> physical_ids = mapping.physical_device_ids;
+        const int rc = rbln_register_device_id(
+            static_cast<int>(logical_device), physical_ids.data(), static_cast<int>(physical_ids.size()));
+        // No rollback is possible: the runtime exposes no unregister call, so devices claimed
+        // by earlier iterations stay claimed. Name them, so the leak is visible.
+        const std::string already_claimed = (logical_device > 0)
+            ? fmt::format(
+                  " Note: rbln:0..{} were already registered by this process and remain claimed.",
+                  static_cast<int>(logical_device) - 1)
+            : std::string();
+        RBLN_CHECK(
+            rc == 0,
+            "rbln_register_device_id failed for rbln:{} on physical NPU(s) [{}] (rc={}); the device(s) may be in use "
+            "by another process or hold stale allocations. Free the device(s) or adjust RBLN_DEVICES.{}",
+            static_cast<int>(logical_device),
+            fmt::join(physical_ids, ","),
+            rc,
+            already_claimed);
+      }
+    } catch (const c10::Error& e) {
+      // msg(), not what(): what() embeds a backtrace, and the RBLN_CHECK above would wrap
+      // it in a second one on every later commit().
+      commit_failed_ = true;
+      commit_error_ = e.msg();
+      throw;
+    } catch (const std::exception& e) {
+      commit_failed_ = true;
+      commit_error_ = e.what();
+      throw;
     }
 
     committed_ = true;
@@ -475,9 +492,10 @@ void DeviceMappingManager::ensurePlanned() const {
 }
 
 void DeviceMappingManager::ensurePlannedLocked() const {
-  // Frozen after commit(): re-planning under live allocations would silently move
-  // logical devices out from under them.
-  if (committed_) {
+  // Frozen once commit() has run: re-planning under live allocations would silently move
+  // logical devices out from under them. commit_failed_ counts as committed here -- a
+  // part-way failure still left devices claimed.
+  if (committed_ || commit_failed_) {
     return;
   }
   const auto signature = envSignature();

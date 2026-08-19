@@ -1716,6 +1716,14 @@ ProcessGroupRBLN::ProcessGroupRBLN(
 
   c10::rbln::get_device_count();
 
+  // RCCL takes device_id_ directly, bypassing to_device_id(), so registration -- deferred to
+  // first device use -- has to happen here. Without it RCCL is asked to initialize a device
+  // this process never claimed: "RCCL Init failed with error code: 1".
+  //
+  // Before the worker threads below, not after: registration throws when a device is busy,
+  // and unwinding the constructor past a joinable std::thread member calls std::terminate.
+  c10::rbln::commit_device_mapping();
+
   // Check environment variable for sync/async mode
   // TORCH_RBLN_C10D_ASYNC=1 enables async mode
   const char* async_env = std::getenv("TORCH_RBLN_C10D_ASYNC");
@@ -1747,10 +1755,6 @@ ProcessGroupRBLN::ProcessGroupRBLN(
   static std::mutex map_mutex;
   static bool default_group_initialized = false;
   device_id_ = -1;
-  // RCCL takes device_id_ directly, bypassing to_device_id(), so registration -- deferred
-  // to first device use -- has to happen here. Without it RCCL is asked to initialize a
-  // device this process never claimed: "RCCL Init failed with error code: 1".
-  c10::rbln::commit_device_mapping();
   // Initialize device_id_ based on default group or sub group
   {
     std::lock_guard<std::mutex> lock(map_mutex);

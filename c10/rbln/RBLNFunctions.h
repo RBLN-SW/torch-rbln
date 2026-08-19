@@ -142,8 +142,8 @@ C10_RBLN_API void set_device_layout_like(void* target_data, const void* ref_data
 C10_RBLN_API bool is_dummy_device();
 
 /**
- * @brief Nothrow view of get_device_count() (returns 0 on any failure). Warns once with
- * the first line only.
+ * @brief Nothrow view of get_device_count() (returns 0 on any failure). Warns with the
+ * first line of the error only, on every failure.
  *
  * Backs torch.rbln.device_count(). ATen/DeviceAccelerator.h: deviceCount() "is *REQUIRED*
  * to not raise any exception".
