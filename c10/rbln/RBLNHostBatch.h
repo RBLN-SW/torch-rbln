@@ -22,8 +22,7 @@ namespace c10::rbln {
  *     and may repeat or overlap.
  *   - Entries are unordered, and a failed submit may have applied some of them
  *     (no rollback). Conflicting pairs must not share a batch.
- *   - Every source buffer must stay valid until submit() returns. A temporary
- *     the caller does not otherwise hold must go through keep_alive().
+ *   - Every source buffer must stay valid until submit() returns.
  *   - The destructor never calls the backend (a rejection during unwind would
  *     terminate the process); it warns if entries are still pending.
  *   - Not thread-safe: one batch per thread.
@@ -47,14 +46,6 @@ class C10_RBLN_API H2VBatch {
    */
   void enqueue(void* dst, const void* src, size_t nbytes);
 
-  /**
-   * @brief Hold `holder` until submit() returns.
-   *
-   * The handle is opaque so this layer does not depend on ATen; an ATen caller
-   * passes a std::shared_ptr<at::Tensor> or any holder that owns the buffer.
-   */
-  void keep_alive(std::shared_ptr<void> holder);
-
   /** @brief Flush pending entries, one bulk call per device. Idempotent. */
   void submit();
 
@@ -71,7 +62,7 @@ class C10_RBLN_API H2VBatch {
  *
  * Mirror of H2VBatch: the source is device memory and anchors the per-device
  * grouping, the destination is host memory. Destination (host) ranges must not
- * overlap; source (device) ranges may. keep_alive() applies to the destination
+ * overlap; source (device) ranges may. The lifetime rule applies to the destination
  * here. See H2VBatch for the rest of the contract.
  */
 class C10_RBLN_API V2HBatch {
@@ -92,9 +83,6 @@ class C10_RBLN_API V2HBatch {
    * @param nbytes Slab size in bytes; 0 is a no-op.
    */
   void enqueue(void* dst, const void* src, size_t nbytes);
-
-  /** @brief Hold `holder` until submit() returns. See H2VBatch::keep_alive. */
-  void keep_alive(std::shared_ptr<void> holder);
 
   /** @brief Flush pending entries, one bulk call per device. Idempotent. */
   void submit();

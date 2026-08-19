@@ -151,19 +151,8 @@ void H2VBatch::enqueue(void* dst, const void* src, size_t nbytes) {
   detail::enqueue_one<H2VCopyOp, detail::DeviceAnchor::kDstOnly>(impl_->st, kH2VWho, dst, src, nbytes);
 }
 
-void H2VBatch::keep_alive(std::shared_ptr<void> holder) {
-  if (holder) {
-    impl_->st.keepalive.push_back(std::move(holder));
-  }
-}
-
 void H2VBatch::submit() {
   if (!impl_ || impl_->st.pending.empty()) {
-    // Still drop any holders: a caller that registered one and then enqueued
-    // nothing should not keep the buffer alive until the batch dies.
-    if (impl_) {
-      impl_->st.reset();
-    }
     return;
   }
   struct ResetGuard {
@@ -203,17 +192,8 @@ void V2HBatch::enqueue(void* dst, const void* src, size_t nbytes) {
   detail::enqueue_one<V2HCopyOp, detail::DeviceAnchor::kSrcOnly>(impl_->st, kV2HWho, dst, src, nbytes);
 }
 
-void V2HBatch::keep_alive(std::shared_ptr<void> holder) {
-  if (holder) {
-    impl_->st.keepalive.push_back(std::move(holder));
-  }
-}
-
 void V2HBatch::submit() {
   if (!impl_ || impl_->st.pending.empty()) {
-    if (impl_) {
-      impl_->st.reset();
-    }
     return;
   }
   struct ResetGuard {

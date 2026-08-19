@@ -370,8 +370,7 @@ struct C10_RBLN_API V2HCopyOp {
  * Caller contract, none of it validated by the runtime:
  *   - every `dst` on the same RBLN device (H2VBatch partitions to hold this)
  *   - `dst` ranges mutually disjoint; `src` ranges may repeat or overlap
- *   - every `src` valid and unchanged until this call returns (deferred
- *     submitters see H2VBatch::keep_alive)
+ *   - every `src` valid and unchanged until this call returns
  *
  * Entries are unordered and a failed call may have applied some of them (no
  * rollback). rbln_runtime_api.h documents no entry cap, but oversized calls do
@@ -384,8 +383,7 @@ C10_RBLN_API void memcpy_h2v_multi(const std::vector<H2VCopyOp>& copies);
  *
  * Roles swapped: `src` (device) anchors homogeneity, `dst` host ranges must be
  * disjoint, `src` device ranges may repeat. Same unordered / no-rollback
- * semantics and the same lifetime requirement, here on `dst` (see
- * V2HBatch::keep_alive).
+ * semantics and the same lifetime requirement, here on `dst`.
  */
 C10_RBLN_API void memcpy_v2h_multi(const std::vector<V2HCopyOp>& copies);
 

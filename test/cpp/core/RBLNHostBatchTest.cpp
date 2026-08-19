@@ -12,9 +12,8 @@
 // H2VBatch / V2HBatch unit tests, without going through ATen.
 //
 // Axes mirror RBLNV2VBatchTest (empty / zero-byte / flat / destructor / reuse)
-// since the buffering contract is shared, plus the two v2v has no equivalent
-// for: heterogeneous batches splitting into one bulk submit per device, and
-// keep_alive() holding a deferred host buffer until submit returns.
+// since the buffering contract is shared, plus the one v2v has no equivalent
+// for: heterogeneous batches splitting into one bulk submit per device.
 //
 // Every case reads the destination back, so a dropped or mis-addressed entry
 // fails rather than passing on a plausible pending_count().
@@ -260,86 +259,6 @@ TEST_F(RBLNHostBatchTest, H2VReuseAfterSubmitAndDoubleSubmit) {
 }
 
 // ---------------------------------------------------------------------------
-// H2VBatch — keep_alive (no v2v equivalent)
-// ---------------------------------------------------------------------------
-
-// The batch is deferred, so a caller that staged a temporary host buffer must be
-// able to hand ownership over: without this the submit would read freed memory.
-// Dropping the caller's own reference must NOT free the buffer.
-TEST_F(RBLNHostBatchTest, H2VKeepAliveHoldsUntilSubmit) {
-  bool freed = false;
-  {
-    c10::rbln::H2VBatch batch;
-    auto holder = FreeFlagHolder::make(&freed);
-    batch.keep_alive(holder);
-    holder.reset(); // caller drops its reference
-    EXPECT_FALSE(freed) << "batch must hold the staged buffer until submit()";
-    batch.submit();
-  }
-  EXPECT_TRUE(freed) << "submit() must release the keep_alive holders";
-}
-
-// A batch that registered a holder but enqueued nothing still releases it on
-// submit — otherwise the buffer would live until the batch object dies.
-TEST_F(RBLNHostBatchTest, H2VKeepAliveReleasedOnEmptySubmit) {
-  bool freed = false;
-  c10::rbln::H2VBatch batch;
-  auto holder = FreeFlagHolder::make(&freed);
-  batch.keep_alive(holder);
-  holder.reset();
-  EXPECT_FALSE(freed);
-  batch.submit(); // nothing pending
-  EXPECT_TRUE(freed);
-}
-
-// A dropped batch releases its holders too — no leak on the missing-submit path.
-TEST_F(RBLNHostBatchTest, H2VKeepAliveReleasedOnDestruction) {
-  bool freed = false;
-  {
-    c10::rbln::H2VBatch batch;
-    auto holder = FreeFlagHolder::make(&freed);
-    batch.keep_alive(holder);
-    holder.reset();
-    EXPECT_FALSE(freed);
-  }
-  EXPECT_TRUE(freed);
-}
-
-// A staged buffer actually consumed by the submit: the data must land even
-// though the caller's reference is gone before submit() runs.
-TEST_F(RBLNHostBatchTest, H2VKeepAliveStagedBufferIsReadCorrectly) {
-  constexpr size_t n = 256;
-  const auto dst_initial = std::vector<int8_t>(n, 0);
-  void* dst = AllocAndCopyFromHost(dst_initial.data(), n);
-
-  std::vector<int8_t> expected(n);
-  for (size_t i = 0; i < n; ++i) {
-    expected[i] = static_cast<int8_t>((i * 7) % 127);
-  }
-
-  {
-    c10::rbln::H2VBatch batch;
-    auto staged = std::make_shared<std::vector<int8_t>>(expected);
-    batch.enqueue(dst, staged->data(), n);
-    batch.keep_alive(staged);
-    staged.reset(); // only the batch keeps it alive now
-    batch.submit();
-  }
-
-  EXPECT_EQ(CopyToHost(dst, n), expected);
-  c10::rbln::free(dst);
-}
-
-// keep_alive(nullptr) is tolerated so callers need no branch for the
-// "nothing was staged" case.
-TEST_F(RBLNHostBatchTest, H2VKeepAliveNullIsIgnored) {
-  c10::rbln::H2VBatch batch;
-  batch.keep_alive(nullptr);
-  batch.submit();
-  EXPECT_EQ(batch.pending_count(), 0u);
-}
-
-// ---------------------------------------------------------------------------
 // V2HBatch — mirror coverage
 // ---------------------------------------------------------------------------
 
@@ -468,45 +387,6 @@ TEST_F(RBLNHostBatchTest, V2HDestructorDoesNotFlush) {
   }
 
   EXPECT_EQ(dst, dst_initial);
-  c10::rbln::free(src);
-}
-
-TEST_F(RBLNHostBatchTest, V2HKeepAliveHoldsUntilSubmit) {
-  bool freed = false;
-  {
-    c10::rbln::V2HBatch batch;
-    auto holder = FreeFlagHolder::make(&freed);
-    batch.keep_alive(holder);
-    holder.reset();
-    EXPECT_FALSE(freed) << "batch must hold the destination buffer until submit()";
-    batch.submit();
-  }
-  EXPECT_TRUE(freed);
-}
-
-// A registered destination is written, and the holder is released on submit.
-// The caller keeps its own reference so the contents are readable afterwards —
-// a batch-only buffer is already freed when submit() returns. That lifetime is
-// covered by V2HKeepAliveHoldsUntilSubmit; this adds that registering a holder
-// does not disturb the copy.
-TEST_F(RBLNHostBatchTest, V2HKeepAliveStagedDestinationIsWritten) {
-  constexpr size_t n = 256;
-  const auto src_host = Ramp(n, 11);
-  void* src = AllocAndCopyFromHost(src_host.data(), n);
-
-  auto staged = std::make_shared<std::vector<int8_t>>(n, 0);
-  std::weak_ptr<std::vector<int8_t>> observer = staged;
-  {
-    c10::rbln::V2HBatch batch;
-    batch.enqueue(staged->data(), src, n);
-    batch.keep_alive(staged); // batch takes a second reference
-    batch.submit();
-    // Batch reference dropped by submit; the caller's is still live.
-    ASSERT_FALSE(observer.expired());
-    EXPECT_EQ(*staged, src_host);
-  }
-  staged.reset();
-  EXPECT_TRUE(observer.expired()) << "no reference should outlive the caller's";
   c10::rbln::free(src);
 }
 

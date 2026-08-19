@@ -50,16 +50,10 @@ struct BatchState {
   bool homogeneous = true;
   c10::DeviceIndex anchor = -1;
 
-  // Host buffers the runtime reads (h2v src) or writes (v2h dst) during submit.
-  // enqueue only records an address and submit is deferred, so a staged
-  // temporary must be owned here. Opaque to keep this layer off ATen.
-  std::vector<std::shared_ptr<void>> keepalive;
-
   void reset() noexcept {
     pending.clear();
     homogeneous = true;
     anchor = -1;
-    keepalive.clear();
   }
 };
 

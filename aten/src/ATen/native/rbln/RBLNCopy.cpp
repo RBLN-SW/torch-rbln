@@ -524,8 +524,8 @@ size_t payload_bytes(const at::Tensor& t) {
   return static_cast<size_t>(t.numel()) * static_cast<size_t>(t.element_size());
 }
 
-// The runtime reads src during submit, which happens later; a temporary the
-// caller does not hold must go through batch.keep_alive().
+// The runtime reads src during submit, which happens later, so src must outlive
+// the batch.
 void h2v_copy(const at::Tensor& dst, const at::Tensor& src, c10::rbln::H2VBatch& batch) {
   RBLN_SCOPE_GUARD();
   RBLN_CHECK(
@@ -714,8 +714,6 @@ void _foreach_copy__rbln(at::TensorList self, at::TensorList src, bool non_block
     throw;
   }
 
-  // The host tensors enqueued above are all caller-owned list entries, alive for
-  // the duration of this call, so no keep_alive registration is needed here.
   flush_pending();
 }
 
