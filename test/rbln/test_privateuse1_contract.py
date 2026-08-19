@@ -452,6 +452,10 @@ class TestUpstreamClauses(TestCase):
         )
         self.assertIsNone(p.raised, f"probe raised -- {p}")
         hooks_count, module_count = p.result
+        # The count is pinned as well as the agreement: this scenario has exactly one device,
+        # and equality alone would also hold if both sides regressed to 0 -- which is the
+        # half of the original bug that the hooks side had.
+        self.assertEqual(module_count, 1, f"scenario is not live -- {p}")
         self.assertEqual(hooks_count, module_count, f"hooks disagree with module -- {p}")
 
     def test_hooks_get_current_device_is_implemented(self):
@@ -487,6 +491,9 @@ class TestUpstreamClauses(TestCase):
                 self.assertIsNone(p.raised, f"{name}: probe raised -- {p}")
                 py_answer, cpp_answer = p.result
                 self.assertEqual(py_answer, cpp_answer, f"{name}: split brain -- {p}")
+                # And pin the answer: agreement alone would also hold if both sides said
+                # False everywhere, which is a backend that reports itself unusable.
+                self.assertEqual(py_answer, name in ("healthy", "dummy"), f"{name}: wrong answer -- {p}")
 
     # -- torch's own entry points ------------------------------------------
 
@@ -713,10 +720,10 @@ class TestUpstreamClauses(TestCase):
     def test_a_zero_device_plan_is_recoverable(self):
         """A failed device use with no devices must not freeze the mapping.
 
-        Commit freezes the plan so that a later ``RBLN_*`` change cannot renumber devices out
-        from under live allocations. With nothing planned there is nothing registered and so
-        nothing to protect, and freezing only makes the 0-device state permanent -- a launcher
-        that probed with a bad value could never recover in that process.
+        Commit freezes the plan so a later ``RBLN_*`` change cannot renumber devices out from
+        under live allocations. With nothing planned nothing is registered, so the freeze has
+        nothing to protect and only makes the 0-device state permanent -- a launcher that
+        probed with a bad value could never recover in that process.
         """
         p = run_probe(
             """
@@ -816,35 +823,40 @@ class TestExternalConsumers(TestCase):
         breaks every worker deterministically. torch-rbln #151 was this bug via a
         different entry point.
 
-        The child reports the count it sees, not just the absence of an error: a remap that
-        is silently ignored raises nothing, so "did not fail" alone would pass against a
-        mapping the parent had already frozen.
+        The parent gets *two* devices and the child keeps *one*, so the counts differ: an
+        ignored remap leaves the child reporting the parent's 2. A same-size remap cannot tell
+        those apart, and neither can "the child did not fail" -- an ignored remap raises
+        nothing. Both counts are read because ``physical_device_count()`` asks the runtime
+        directly, so it alone would pass with this layer still serving the parent's plan.
         """
         p = run_probe(
             """
             import select
             torch.rbln.is_available()          # co-tenant probe in the parent
+            parent = torch.rbln.device_count()
             r, w = os.pipe()
             if os.fork() == 0:
                 os.close(r)
                 os.environ["RBLN_DEVICES"] = "1"       # worker remap, after fork
                 try:
-                    msg = "OK:%d" % torch_rbln._C.physical_device_count()
+                    msg = "OK:%d,%d" % (torch_rbln._C.physical_device_count(), torch.rbln.device_count())
                 except BaseException as e:
                     msg = "FAIL:" + str(e).splitlines()[0][:80]
                 os.write(w, msg.encode()[:200]); os.close(w); os._exit(0)
             os.close(w)
             ready, _, _ = select.select([r], [], [], 120)
-            rec["result"] = os.read(r, 200).decode() if ready else "TIMEOUT"
+            child = os.read(r, 200).decode() if ready else "TIMEOUT"
             os.waitpid(-1, 0)
+            rec["result"] = [parent, child]
             """,
-            HEALTHY,
+            {"RBLN_DEVICES": "0,1"},
         )
         self.assertIsNone(p.raised, f"probe raised -- {p}")
-        self.assertNotIn("FAIL", p.result, f"forked worker could not remap -- {p}")
-        # RBLN_DEVICES="1" is one device: anything else means the parent's mapping is what
-        # the child actually got.
-        self.assertEqual(p.result, "OK:1", f"the child's remap did not take effect -- {p}")
+        parent, child = p.result
+        if parent != 2:
+            self.skipTest(f"needs two visible NPUs for the child's count to differ -- {p}")
+        self.assertNotIn("FAIL", child, f"forked worker could not remap -- {p}")
+        self.assertEqual(child, "OK:1,1", f"the child kept the parent's mapping -- {p}")
 
     @requires_acquisition_latch
     def test_cpu_dataloader_does_not_touch_the_npu(self):
@@ -912,6 +924,10 @@ class TestExternalConsumers(TestCase):
             BAD_MAP,
         )
         self.assertIsNone(p.raised, f"probe harness error -- {p}")
+        # Both halves: torch's message has to be the one that surfaces, and ours must not.
+        # Asserting only the absence would also hold if _validate_device stopped raising.
+        self.assertTrue(p.result.startswith("RAISED"), f"_validate_device must reject rbln:0 -- {p}")
+        self.assertIn("torch.rbln.is_available() is False", p.result, f"not torch's message -- {p}")
         self.assertNotIn("out of range", p.result.lower(), f"backend error replaced torch's -- {p}")
 
 

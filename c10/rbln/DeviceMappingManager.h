@@ -150,14 +150,12 @@ class C10_RBLN_API DeviceMappingManager {
   /**
    * @brief Plan the device mapping from the environment (no NPU is claimed).
    *
-   * Idempotent, and safe to call concurrently. Kept for callers that want to force
-   * planning; every query method plans on demand, so explicit calls are typically
-   * unnecessary.
+   * Idempotent, and safe to call concurrently. Every query method plans on demand, so
+   * explicit calls are typically unnecessary.
    *
    * Mutating the RBLN_* environment concurrently with a query is NOT supported: before the
-   * mapping commits, a change makes the next query rebuild the plan, and the containers a
-   * getter reads are cleared to do it. Assign the RBLN_* variables from one thread, before
-   * the queries that consume them.
+   * mapping commits, a change makes the next query rebuild the plan, clearing the containers
+   * a getter reads. Assign the RBLN_* variables from one thread, before the queries.
    */
   void initialize();
 
@@ -342,11 +340,10 @@ class C10_RBLN_API DeviceMappingManager {
   // `mutable` on state a const query may refresh.
   mutable std::mutex plan_mutex_;
   mutable bool planned_ = false;
-  // Committed and Failed both freeze the plan for good: Failed means commit() threw
-  // part-way, and devices claimed before the failure cannot be released. Atomic and not a
-  // bool pair because both states are read without plan_mutex_ -- once frozen the plan can
-  // never change, so the allocation path's five queries need no lock. Written under
-  // plan_mutex_; release/acquire pairs with those writes.
+  // Both non-Open states freeze the plan for good; Failed means commit() threw part-way and
+  // the devices it claimed cannot be released. Atomic because a frozen plan can never
+  // change, so the allocation path's five queries read it without plan_mutex_. Written under
+  // the lock; release/acquire pairs with those writes.
   enum class PlanState : std::uint8_t { Open, Committed, Failed };
   mutable std::atomic<PlanState> plan_state_{PlanState::Open};
   std::string commit_error_; // Failed: the error every later commit() rethrows

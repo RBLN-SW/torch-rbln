@@ -273,11 +273,10 @@ c10::DeviceIndex get_physical_device_count() {
 }
 
 c10::DeviceIndex get_device_index() {
-  // The selection is thread_local while the plan is process-wide, so a plan rebuilt after
-  // set_device() -- an RBLN_* change before the mapping commits -- can leave this thread
-  // pointing past the end of it. Report a device that exists rather than one that does not;
-  // the selection is bookkeeping, so there is nothing to unwind. Other threads' selections
-  // are unreachable from here, which is why this is checked on read.
+  // The selection is thread_local while the plan is process-wide, so an RBLN_* change before
+  // the mapping commits can leave this thread pointing past the end of a rebuilt plan.
+  // Report a device that exists; the selection is bookkeeping, so nothing has to unwind.
+  // Checked on read because other threads' selections are unreachable from here.
   const auto device_count = DeviceMappingManager::getInstance().getLogicalDeviceCount();
   if (device_count > 0 && current_device_index_ >= device_count) {
     RBLN_LOG_DEBUG(

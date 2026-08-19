@@ -255,10 +255,9 @@ void DeviceMappingManager::commit() {
     if (plan_state_.load(std::memory_order_relaxed) == PlanState::Committed) {
       return;
     }
-    // A commit that failed part-way left devices claimed with no way to release them, so
-    // the plan must never be rebuilt or re-registered under them: the runtime's
-    // rbln_register_device_id() returns success for an id it already holds, so a retry
-    // against a changed plan would bind this layer to a mapping the runtime does not have.
+    // A part-way failure left devices claimed with no way to release them, and the runtime's
+    // rbln_register_device_id() returns success for an id it already holds -- so a retry
+    // against a rebuilt plan would bind this layer to a mapping the runtime does not have.
     RBLN_CHECK(plan_state_.load(std::memory_order_relaxed) != PlanState::Failed, "{}", commit_error_);
     ensurePlannedLocked();
     // Loud here (RBLN_CHECK, not the quiet variant): this is the point of use. Its
@@ -302,9 +301,8 @@ void DeviceMappingManager::commit() {
       throw;
     }
 
-    // An empty plan registered nothing, so there is nothing for the freeze to protect and
-    // freezing would only make the 0-device state permanent: a later RBLN_* fix could no
-    // longer be replanned. Leave it Open; to_device_id() still raises its 0-device error.
+    // An empty plan registered nothing, so the freeze has nothing to protect and would only
+    // make the 0-device state permanent. Leave it Open; to_device_id() still raises.
     if (device_mapping_table_.empty()) {
       RBLN_LOG_DEBUG("Nothing to commit: 0 logical device(s) planned; the plan stays open");
       return;
@@ -481,9 +479,8 @@ std::string DeviceMappingManager::envSignature() {
   // pool just as well, so omitting it cached the plan against a pool already changed.
   //
   // RBLN_DUMMY_DEVICE is deliberately absent: it is startup-only. The runtime registers it
-  // FlagMutability::Sealed, so it rejects a late change regardless of what this layer does,
-  // and is_dummy_device() caches its answer for the process. Replanning on it would have
-  // moved the mapping to dummy while those two still reported real mode.
+  // FlagMutability::Sealed and is_dummy_device() caches for the process, so replanning on it
+  // moved the mapping to dummy while both of those still reported real mode.
   std::string signature;
   for (const char* name : {"RBLN_DEVICES", "RBLN_VISIBLE_DEVICES", "RBLN_DEVICE_MAP", "RBLN_NPUS_PER_DEVICE"}) {
     const char* value = std::getenv(name);
