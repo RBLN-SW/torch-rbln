@@ -142,7 +142,9 @@ c10::Stream RBLNGuardImpl::getDefaultStream(c10::Device device) const {
 
 c10::Stream RBLNGuardImpl::getNewStream(c10::Device device, int priority) const {
   (void)priority; // RBLN has no stream priorities.
-  return c10::rbln::new_stream(device.index());
+  // Pooled, like CUDA's getNewStream: torch has no destroy hook for a stream, so
+  // handing out a freshly created one per call would leak it.
+  return c10::rbln::get_stream_from_pool(device.index());
 }
 
 c10::Stream RBLNGuardImpl::getStreamFromGlobalPool(c10::Device device, bool isHighPriority) const {

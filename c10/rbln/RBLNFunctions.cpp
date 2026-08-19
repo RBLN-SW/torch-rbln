@@ -757,10 +757,21 @@ c10::DeviceIndex resolve_device_index(c10::DeviceIndex device_index) {
   return device_index < 0 ? get_device_index() : device_index;
 }
 
-// Fixed per-device pool backing getStreamFromGlobalPool. RBLN has no stream
-// priorities, so one pool suffices; streams are created lazily and live for the
-// process (matching CUDA's global pool).
-constexpr int kStreamPoolSize = 32;
+// Fixed per-device pool behind every stream torch hands out. RBLN has no stream
+// priorities, so one pool suffices. Torch has no destroy hook for a stream, so
+// creating one per request would leak it and lengthen every runtime drain-all;
+// CUDA answers getNewStream from its pool for the same reason.
+constexpr size_t kStreamPoolSize = 32;
+
+c10::StreamId create_stream_local_id(c10::DeviceIndex device_index) {
+  const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
+  uint64_t handle = 0;
+  RBLN_CHECK(
+      !::rbln::rbln_stream_create(torch_device_id, &handle),
+      "rbln_stream_create failed for rbln:{}",
+      static_cast<int>(device_index));
+  return static_cast<c10::StreamId>(static_cast<uint32_t>(handle & 0xFFFFFFFFULL));
+}
 
 } // namespace
 
@@ -783,18 +794,6 @@ c10::Stream get_default_stream(c10::DeviceIndex device_index) {
   return c10::Stream(c10::Stream::DEFAULT, c10::Device(c10::kPrivateUse1, device_index));
 }
 
-c10::Stream new_stream(c10::DeviceIndex device_index) {
-  device_index = resolve_device_index(device_index);
-  check_device_index(device_index);
-  const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
-  uint64_t handle = 0;
-  RBLN_CHECK(
-      !::rbln::rbln_stream_create(torch_device_id, &handle),
-      "rbln_stream_create failed for rbln:{}",
-      static_cast<int>(device_index));
-  return stream_from_handle(device_index, handle);
-}
-
 c10::Stream get_stream_from_pool(c10::DeviceIndex device_index) {
   device_index = resolve_device_index(device_index);
   check_device_index(device_index);
@@ -806,20 +805,13 @@ c10::Stream get_stream_from_pool(c10::DeviceIndex device_index) {
   static std::map<c10::DeviceIndex, Pool> pools;
   std::lock_guard<std::mutex> lock(pool_mutex);
   auto& pool = pools[device_index];
-  if (pool.local_ids.empty()) {
-    const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
-    pool.local_ids.reserve(kStreamPoolSize);
-    for (int i = 0; i < kStreamPoolSize; ++i) {
-      uint64_t handle = 0;
-      RBLN_CHECK(
-          !::rbln::rbln_stream_create(torch_device_id, &handle),
-          "rbln_stream_create (pool) failed for rbln:{}",
-          static_cast<int>(device_index));
-      pool.local_ids.push_back(static_cast<c10::StreamId>(static_cast<uint32_t>(handle & 0xFFFFFFFFULL)));
-    }
+  // next <= size holds, so next == size means this slot has not been filled yet:
+  // one stream is created per new slot, then the pool cycles.
+  if (pool.next == pool.local_ids.size()) {
+    pool.local_ids.push_back(create_stream_local_id(device_index));
   }
   const auto local_id = pool.local_ids[pool.next];
-  pool.next = (pool.next + 1) % pool.local_ids.size();
+  pool.next = (pool.next + 1) % kStreamPoolSize;
   return c10::Stream(c10::Stream::UNSAFE, c10::Device(c10::kPrivateUse1, device_index), local_id);
 }
 

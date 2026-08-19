@@ -42,6 +42,9 @@ class Stream(torch.Stream):
     Work on the same stream runs in order; work on different streams may run
     concurrently. Mirrors :class:`torch.cuda.Stream`. ``priority`` is accepted for
     API parity but ignored (RBLN has no stream priorities).
+
+    Streams come from a fixed per-device pool and live for the process, as in
+    :mod:`torch.cuda`; past the pool size, new instances reuse earlier streams.
     """
 
     def __new__(cls, device: Any = None, priority: int = 0, **kwargs: Any) -> "Stream":  # noqa: PYI034

@@ -38,6 +38,13 @@ class TestStream(TestCase):
         self.assertNotEqual(s1.stream_id, 0)
         self.assertNotEqual(s1, s2)
 
+    def test_stream_creation_is_bounded_by_the_pool(self):
+        # Streams come from a fixed per-device pool (torch never destroys one, so an
+        # unbounded create would leak). Past the pool size, instances reuse streams.
+        ids = {torch.rbln.Stream().stream_id for _ in range(96)}
+        self.assertLessEqual(len(ids), 32)
+        self.assertNotIn(0, ids)
+
     def test_generic_torch_stream_on_rbln(self):
         # torch.Stream must work with no torch.rbln pybind — purely via the guard impl.
         s = torch.Stream(device="rbln")

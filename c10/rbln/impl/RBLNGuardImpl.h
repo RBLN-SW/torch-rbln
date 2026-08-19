@@ -81,11 +81,12 @@ struct RBLNGuardImpl final : public c10::impl::DeviceGuardImplInterface {
   c10::Stream getDefaultStream(c10::Device device) const override;
 
   /**
-   * @brief Creates and returns a fresh stream on the input device.
+   * @brief Returns a stream from the input device's pool (as CUDA does; torch has no
+   * destroy hook for a stream, so creating one per call would leak it).
    *
    * @param device The input device.
    * @param priority Ignored. RBLN has no stream priorities.
-   * @return A new stream.
+   * @return A pooled stream.
    */
   c10::Stream getNewStream(c10::Device device, int priority = 0) const override;
 

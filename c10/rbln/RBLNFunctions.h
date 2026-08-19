@@ -328,14 +328,11 @@ C10_RBLN_API c10::Stream get_current_stream(c10::DeviceIndex device_index);
 C10_RBLN_API c10::Stream get_default_stream(c10::DeviceIndex device_index);
 
 /**
- * @brief Creates a fresh stream on the device. `priority` has no analogue on RBLN
- * and is intentionally not part of this API (the guard impl ignores it).
- */
-C10_RBLN_API c10::Stream new_stream(c10::DeviceIndex device_index);
-
-/**
- * @brief Returns a stream from a fixed, lazily-created per-device round-robin pool
- * (backs getStreamFromGlobalPool). Pooled streams live for the process.
+ * @brief Returns a stream from a fixed per-device round-robin pool, creating one
+ * runtime stream per pool slot on first use. Backs both getNewStream and
+ * getStreamFromGlobalPool: torch never destroys a stream, so the pool is what keeps
+ * repeated requests from leaking. Past the pool size, requests reuse earlier streams.
+ * `priority` has no analogue on RBLN and is not part of this API.
  */
 C10_RBLN_API c10::Stream get_stream_from_pool(c10::DeviceIndex device_index);
 
