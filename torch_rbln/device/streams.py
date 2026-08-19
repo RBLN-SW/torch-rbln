@@ -1,15 +1,12 @@
 """``torch.rbln`` stream & event API (``torch.cuda`` parity).
 
 Streams and events route through the RBLN ``PrivateUse1`` device-guard
-implementation, so the backend-agnostic ``torch.Stream`` / ``torch.Event`` already
-work with ``device="rbln"``. This module adds the ``torch.cuda``-style ergonomics
-(:class:`Stream`, :class:`Event`, :func:`current_stream`, :func:`default_stream`,
-:func:`set_stream`, :func:`stream`) on top.
+implementation, so the generic ``torch.Stream`` / ``torch.Event`` already work with
+``device="rbln"``; this module adds the ``torch.cuda``-style surface on top.
 
-Three ``torch.cuda`` features have no RBLN analogue and are not supported: event
-timing (:meth:`Event.elapsed_time` raises), stream priorities (accepted but
-ignored; :meth:`Stream.priority_range` is ``(0, 0)``), and native cross-device
-event waits (they degrade to a host-side synchronize).
+Not supported: event timing (:meth:`Event.elapsed_time` raises), stream priorities
+(accepted but ignored), and native cross-device event waits (they degrade to a
+host-side synchronize).
 """
 
 from typing import Any, Optional  # noqa: UP035
@@ -43,13 +40,13 @@ class Stream(torch.Stream):
     concurrently. Mirrors :class:`torch.cuda.Stream`. ``priority`` is accepted for
     API parity but ignored (RBLN has no stream priorities).
 
-    Streams come from a fixed per-device pool and live for the process, as in
-    :mod:`torch.cuda`; past the pool size, new instances reuse earlier streams.
+    Streams come from a fixed per-device pool; past the pool size, new instances
+    reuse earlier streams (as in :mod:`torch.cuda`).
     """
 
     def __new__(cls, device: Any = None, priority: int = 0, **kwargs: Any) -> "Stream":  # noqa: PYI034
-        # Reconstruct an existing stream from its ids (current_stream/default_stream):
-        # the base wraps the ids without creating a new stream.
+        # With ids given (current_stream/default_stream), the base wraps them instead
+        # of creating a stream.
         if "stream_id" in kwargs and "device_index" in kwargs and "device_type" in kwargs:
             return super().__new__(cls, priority=priority, **kwargs)
         dev = torch.device("rbln", current_device()) if device is None else _as_rbln_device(device)
@@ -89,8 +86,6 @@ class Event(torch.Event):
         )
 
     def elapsed_time(self, other: "Event") -> float:
-        # Event timing is not supported. Raise a clear message rather than letting
-        # torch.Event.elapsed_time reject the subclass on its exact-type check.
         raise RuntimeError("RBLN does not support Event.elapsed_time (event timing is not supported).")
 
     def __repr__(self) -> str:
@@ -124,8 +119,8 @@ def set_stream(stream: Optional[Stream]) -> None:
 class StreamContext:
     r"""Context-manager that makes a stream current, restoring the previous on exit.
 
-    Mirrors :class:`torch.cuda.StreamContext`, including switching the current device
-    to the stream's device for the duration. No-op if the stream is ``None``.
+    Mirrors :class:`torch.cuda.StreamContext`: the stream's device is selected for the
+    duration. No-op if the stream is ``None``.
     """
 
     def __init__(self, stream: Optional[Stream]):

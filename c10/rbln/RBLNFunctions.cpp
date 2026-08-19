@@ -757,10 +757,8 @@ c10::DeviceIndex resolve_device_index(c10::DeviceIndex device_index) {
   return device_index < 0 ? get_device_index() : device_index;
 }
 
-// Fixed per-device pool behind every stream torch hands out. RBLN has no stream
-// priorities, so one pool suffices. Torch has no destroy hook for a stream, so
-// creating one per request would leak it and lengthen every runtime drain-all;
-// CUDA answers getNewStream from its pool for the same reason.
+// Every stream torch hands out comes from this per-device pool: there is no destroy
+// hook, so an unbounded create would leak and lengthen every runtime drain-all.
 constexpr size_t kStreamPoolSize = 32;
 
 c10::StreamId create_stream_local_id(c10::DeviceIndex device_index) {
@@ -770,9 +768,7 @@ c10::StreamId create_stream_local_id(c10::DeviceIndex device_index) {
       !::rbln::rbln_stream_create(torch_device_id, &handle),
       "rbln_stream_create failed for rbln:{}",
       static_cast<int>(device_index));
-  // A stream exists only on a live context, so this process owns one on this device.
-  // Keeps getStream's "no context -> default stream" shortcut honest.
-  mark_device_context_initialized(device_index);
+  mark_device_context_initialized(device_index); // a stream implies a live context here
   return static_cast<c10::StreamId>(static_cast<uint32_t>(handle & 0xFFFFFFFFULL));
 }
 
@@ -808,8 +804,7 @@ c10::Stream get_stream_from_pool(c10::DeviceIndex device_index) {
   static std::map<c10::DeviceIndex, Pool> pools;
   std::lock_guard<std::mutex> lock(pool_mutex);
   auto& pool = pools[device_index];
-  // next <= size holds, so next == size means this slot has not been filled yet:
-  // one stream is created per new slot, then the pool cycles.
+  // next <= size, so next == size means this slot is still empty.
   if (pool.next == pool.local_ids.size()) {
     pool.local_ids.push_back(create_stream_local_id(device_index));
   }
@@ -830,7 +825,7 @@ void set_current_stream(c10::Stream stream) {
 
 bool query_stream(c10::Stream stream) {
   if (runtime_shutting_down_.load(std::memory_order_relaxed)) {
-    return true; // nothing left to wait for; matches synchronize_stream's no-op
+    return true; // nothing left to wait for
   }
   bool done = false;
   RBLN_CHECK(
@@ -841,7 +836,6 @@ bool query_stream(c10::Stream stream) {
 }
 
 void synchronize_stream(c10::Stream stream) {
-  // Teardown-safe: skip during interpreter shutdown.
   if (runtime_shutting_down_.load(std::memory_order_relaxed)) {
     return;
   }
@@ -860,14 +854,13 @@ uint64_t event_create(c10::DeviceIndex device_index) {
       !::rbln::rbln_event_create(torch_device_id, &handle),
       "rbln_event_create failed for rbln:{}",
       static_cast<int>(device_index));
-  // torch's "not created yet" sentinel is a null handle, so handle 0 would make
-  // every record allocate anew and every query answer "complete".
+  // A null handle is torch's "not created yet" sentinel, so 0 must never be a handle.
   RBLN_CHECK(handle != 0, "rbln_event_create returned handle 0, which aliases the not-created sentinel");
   return handle;
 }
 
 void event_destroy(uint64_t event) noexcept {
-  // noexcept: called from ~Event, possibly during interpreter teardown. Never throw.
+  // Called from ~Event, possibly during interpreter teardown, so it must never throw.
   if (event == 0 || runtime_shutting_down_.load(std::memory_order_relaxed)) {
     return;
   }
@@ -906,7 +899,7 @@ void event_block(c10::Stream stream, uint64_t event) {
 
 bool event_query(uint64_t event) {
   if (runtime_shutting_down_.load(std::memory_order_relaxed)) {
-    return true; // nothing left to wait for; matches event_synchronize's no-op
+    return true; // nothing left to wait for
   }
   bool done = false;
   RBLN_CHECK(!::rbln::rbln_event_query(event, &done), "rbln_event_query failed (event={:#x})", event);

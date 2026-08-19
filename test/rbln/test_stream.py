@@ -39,8 +39,7 @@ class TestStream(TestCase):
         self.assertNotEqual(s1, s2)
 
     def test_stream_creation_is_bounded_by_the_pool(self):
-        # Streams come from a fixed per-device pool (torch never destroys one, so an
-        # unbounded create would leak). Past the pool size, instances reuse streams.
+        # Streams come from a fixed per-device pool; past its size, instances reuse one.
         ids = {torch.rbln.Stream().stream_id for _ in range(96)}
         self.assertLessEqual(len(ids), 32)
         self.assertNotIn(0, ids)
@@ -110,8 +109,7 @@ class TestStream(TestCase):
         self.assertEqual(pinned.flatten().tolist(), list(range(1024)))
 
     def test_matmul_on_non_default_stream(self):
-        # A real compute op (not just a copy) runs on a non-default stream and is
-        # correct. Confirms the current stream is honored across the dispatch path.
+        # A compute op, not just a copy, honors the current stream through dispatch.
         a = torch.randn(64, 64).to("rbln")
         b = torch.randn(64, 64).to("rbln")
         s = torch.rbln.Stream()
@@ -123,9 +121,8 @@ class TestStream(TestCase):
         self.assertTrue(torch.allclose(c.cpu(), expected, atol=1e-2, rtol=1e-2))
 
     def test_compute_gated_by_async_copy_event(self):
-        # Copy<->compute ordering across streams: a producer stream async-copies a
-        # weight matrix; a consumer stream waits on the event, then matmuls with it.
-        # The event fence is what makes the (still in-flight) copy safe to consume.
+        # Copy<->compute ordering across streams: the event fence is what makes the
+        # producer's still-in-flight copy safe for the consumer to matmul with.
         w_cpu = torch.randn(64, 64).pin_memory()
         x = torch.randn(8, 64).to("rbln")
         producer, consumer = torch.rbln.Stream(), torch.rbln.Stream()
@@ -140,8 +137,7 @@ class TestStream(TestCase):
         self.assertTrue(torch.allclose(y.cpu(), x.cpu() @ w_cpu, atol=1e-2, rtol=1e-2))
 
     def test_stream_context_selects_the_stream_device(self):
-        # torch.cuda.set_stream also moves the current device, so allocations inside
-        # the context land on the stream's device. Same contract here.
+        # Selecting a stream selects its device, so allocations land there.
         if torch.rbln.device_count() < 2:
             self.skipTest("needs >= 2 RBLN devices")
         torch.rbln.set_device(0)

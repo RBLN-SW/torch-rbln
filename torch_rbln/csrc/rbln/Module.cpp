@@ -115,11 +115,8 @@ void register_public_device_api(py::module_& module) {
  * @brief Register the low-level stream primitives backing torch.rbln streams.
  *
  * These mirror torch.cuda's _cuda_getCurrentStream / _cuda_setStream: they exchange
- * (stream_id, device_index, device_type) tuples with Python, which wraps them in
- * torch.Stream. The work is delegated to the registered PrivateUse1 guard impl via
- * VirtualGuardImpl, so this stays a thin, backend-agnostic bridge. torch.Stream /
- * torch.Event themselves need no binding (they route through the guard impl); these
- * exist only for the torch.cuda-style torch.rbln.{current_stream,set_stream,...} API.
+ * (stream_id, device_index, device_type) tuples with Python and delegate to the
+ * PrivateUse1 guard impl. torch.Stream / torch.Event need no binding of their own.
  *
  * @param module The Python module to register the functions with
  */
@@ -149,9 +146,8 @@ void register_stream_api(py::module_& module) {
         const auto stream = c10::Stream::unpack3(
             static_cast<c10::StreamId>(stream_id), device_index, static_cast<c10::DeviceType>(device_type));
         const auto guard = VirtualGuardImpl(c10::kPrivateUse1);
-        // Selecting a stream also selects its device, as torch.cuda's setStream and
-        // torch.accelerator.set_stream both do -- otherwise a stream on another device
-        // would leave allocations going to the old one.
+        // Selecting a stream also selects its device, as torch.cuda and
+        // torch.accelerator both do.
         if (guard.getDevice().index() != stream.device_index()) {
           guard.setDevice(stream.device());
         }

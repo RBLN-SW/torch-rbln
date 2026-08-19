@@ -81,8 +81,7 @@ struct RBLNGuardImpl final : public c10::impl::DeviceGuardImplInterface {
   c10::Stream getDefaultStream(c10::Device device) const override;
 
   /**
-   * @brief Returns a stream from the input device's pool (as CUDA does; torch has no
-   * destroy hook for a stream, so creating one per call would leak it).
+   * @brief Returns a stream from the input device's pool.
    *
    * @param device The input device.
    * @param priority Ignored. RBLN has no stream priorities.
@@ -121,11 +120,9 @@ struct RBLNGuardImpl final : public c10::impl::DeviceGuardImplInterface {
    */
   void synchronizeStream(const c10::Stream& stream) const override;
 
-  // Events (torch.Event). elapsedTime is intentionally left unimplemented (event
-  // timing is not supported; the base throws "Backend doesn't support elapsedTime.").
-  // Cross-device waits are not supported and degrade to a host-side wait (see
-  // block()). The opaque void* handle is non-zero for a valid event, so it never
-  // aliases nullptr.
+  // Events (torch.Event). elapsedTime stays unimplemented -- event timing is not
+  // supported, so the base throws. The opaque void* handle is non-zero for a valid
+  // event, so it never aliases nullptr.
 
   /**
    * @brief Records the event at the stream's current position (allocates on first

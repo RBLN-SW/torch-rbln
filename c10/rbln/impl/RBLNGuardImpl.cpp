@@ -125,10 +125,8 @@ c10::DeviceCapability RBLNGuardImpl::getDeviceCapability(c10::Device device) con
 }
 
 c10::Stream RBLNGuardImpl::getStream(c10::Device device) const {
-  // No context yet means there is no current stream to read, and nothing has been
-  // selected: the default stream is the answer, without a runtime call. A failure
-  // once the context exists is real -- swallowing it would silently move work off
-  // the stream the caller selected.
+  // With no context there is nothing to read and nothing can have been selected, so
+  // the default stream is the answer. Past that point a failure is real.
   const auto index = device.has_index() ? device.index() : c10::rbln::get_device_index();
   if (!c10::rbln::device_context_initialized(index)) {
     return c10::rbln::get_default_stream(index);
@@ -142,8 +140,6 @@ c10::Stream RBLNGuardImpl::getDefaultStream(c10::Device device) const {
 
 c10::Stream RBLNGuardImpl::getNewStream(c10::Device device, int priority) const {
   (void)priority; // RBLN has no stream priorities.
-  // Pooled, like CUDA's getNewStream: torch has no destroy hook for a stream, so
-  // handing out a freshly created one per call would leak it.
   return c10::rbln::get_stream_from_pool(device.index());
 }
 
@@ -155,7 +151,6 @@ c10::Stream RBLNGuardImpl::getStreamFromGlobalPool(c10::Device device, bool isHi
 c10::Stream RBLNGuardImpl::exchangeStream(c10::Stream stream) const {
   const auto original_stream = getStream(stream.device());
   c10::rbln::set_current_stream(stream);
-  RBLN_LOG_DEBUG("Setting current stream: {} -> {}", c10::str(original_stream), c10::str(stream));
   return original_stream;
 }
 
@@ -169,8 +164,7 @@ void RBLNGuardImpl::synchronizeStream(const c10::Stream& stream) const {
 
 namespace {
 
-// The void* event handle IS the opaque event handle (see RBLNGuardImpl.h). Route the
-// int<->ptr casts through uintptr_t and keep them in one place.
+// The void* handle IS the opaque event handle; the casts live here only.
 void* to_event_ptr(uint64_t handle) {
   return reinterpret_cast<void*>(static_cast<uintptr_t>(handle)); // NOLINT(performance-no-int-to-ptr)
 }
@@ -186,8 +180,6 @@ void RBLNGuardImpl::record(void** event, const c10::Stream& stream, c10::DeviceI
   (void)flag; // Event timing is not supported (elapsedTime is unimplemented).
   const auto event_device = device_index >= 0 ? device_index : stream.device_index();
   if (*event == nullptr) {
-    // A valid event handle is non-zero, so it never aliases the "not yet created"
-    // nullptr sentinel torch checks here.
     *event = to_event_ptr(c10::rbln::event_create(event_device));
   }
   c10::rbln::event_record(to_event_handle(*event), stream);
