@@ -128,26 +128,22 @@ class C10_RBLN_API DeviceMappingManager {
 
   // Initialization is two stages:
   //
-  //   plan   Parse RBLN_DEVICES (or its RBLN_VISIBLE_DEVICES alias) / RBLN_DEVICE_MAP /
-  //          RBLN_NPUS_PER_DEVICE, validate the layout, compute the logical->physical
-  //          table. Claims no NPU. Run by availability and enumeration queries.
-  //   commit rbln_register_device_id() per planned logical device -- documented as
-  //          "Initializes devices to be used for NPU executions", i.e. it opens a
-  //          context on every mapped NPU. Deferred to the first actual device use.
+  //   plan   Parse RBLN_DEVICES (alias RBLN_VISIBLE_DEVICES) / RBLN_DEVICE_MAP /
+  //          RBLN_NPUS_PER_DEVICE, validate, compute the logical->physical table.
+  //          Claims no NPU. Run by availability and enumeration queries.
+  //   commit rbln_register_device_id() per planned logical device, which opens a context
+  //          on every mapped NPU. Deferred to the first actual device use.
   //
-  // torch calls is_available()/device_count() from paths that never asked for an NPU
-  // (DataLoader(pin_memory=True), torch.load(map_location=...), importing
-  // torch.testing._internal.common_utils), so claiming hardware there would take NPUs
-  // from co-tenant processes. ATen/detail/AcceleratorHooksInterface.h states the rule:
-  // isAvailable() "should NOT initialize the context on any device".
+  // torch calls is_available()/device_count() from paths that never asked for an NPU, so
+  // claiming hardware there takes NPUs from co-tenants;
+  // ATen/detail/AcceleratorHooksInterface.h: isAvailable() "should NOT initialize the
+  // context on any device".
   //
-  // Commit is also the moment the runtime fixes its own RBLN_DEVICES mapping:
+  // Commit is also where the runtime freezes its own RBLN_DEVICES mapping:
   // rbln_register_device_id() reaches Context::Create, which latches it
-  // (rebellions-sw/rebel_compiler#12904). The two layers therefore freeze together, and a
-  // launcher may still assign RBLN_DEVICES after import -- including inside a fork()ed
-  // worker -- as long as it does so before the first device use. Against a runtime older
-  // than #12904 the first enumeration query latched instead, which is what
-  // rebellions-sw/fsw-inference#475 and #495 were about.
+  // (rebellions-sw/rebel_compiler#12904). Both layers therefore freeze together, so a
+  // launcher may still assign RBLN_DEVICES after import -- fork()ed workers included --
+  // until the first device use.
 
   /**
    * @brief Plan the device mapping from the environment (no NPU is claimed).

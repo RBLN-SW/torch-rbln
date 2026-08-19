@@ -142,13 +142,11 @@ C10_RBLN_API void set_device_layout_like(void* target_data, const void* ref_data
 C10_RBLN_API bool is_dummy_device();
 
 /**
- * @brief Nothrow view of get_device_count() (returns 0 on any failure), for the
- * liveness predicates that must never throw. Warns once with the first line only.
+ * @brief Nothrow view of get_device_count() (returns 0 on any failure). Warns once with
+ * the first line only.
  *
- * This backs the Python torch.rbln.device_count(). torch requires enumeration not to
- * raise: ATen/DeviceAccelerator.h ("deviceCount() is *REQUIRED* to not raise any
- * exception") and c10/cuda/CUDAFunctions.h ("people basically ~never want this
- * function to fail; it should just return zero").
+ * Backs torch.rbln.device_count(). ATen/DeviceAccelerator.h: deviceCount() "is *REQUIRED*
+ * to not raise any exception".
  */
 C10_RBLN_API c10::DeviceIndex get_device_count_nothrow() noexcept;
 
@@ -163,25 +161,19 @@ C10_RBLN_API c10::DeviceIndex device_count_ensure_non_zero();
 /**
  * @brief Claim the planned logical devices with the runtime (rbln_register_device_id).
  *
- * Idempotent, and normally unnecessary: to_device_id() -- the precursor to every
- * device-touching call routed through this file -- already does it. Call this
- * explicitly before handing a logical device index to the runtime through a path that
- * bypasses to_device_id(), such as RCCL initialization in ProcessGroupRBLN, which takes
- * the index straight from get_device_index(). Without it the runtime is asked to work
- * with a device this process never registered.
- *
- * Raises the detailed RBLN_* configuration error if the mapping is invalid.
+ * Idempotent, and normally unnecessary: to_device_id() already does it. Call it explicitly
+ * only on a path that hands a device index to the runtime while bypassing to_device_id(),
+ * such as RCCL init in ProcessGroupRBLN. Raises on an invalid mapping.
  */
 C10_RBLN_API void commit_device_mapping();
 
 /**
  * @brief Single source of truth: is RBLN usable as an accelerator right now?
- * Runtime loaded (librbln's rbln_runtime_available()), not shutting down, and at least
- * one usable logical device -- dummy included (it host-backs via the runtime, so the
- * mapping must still be valid). Never throws.
  *
- * Bound to both Python is_available() and RBLNHooksInterface::hasRBLN() so the two
- * cannot diverge.
+ * Runtime loaded, not shutting down, and at least one usable logical device -- dummy
+ * included, since it host-backs through the runtime and still needs a valid mapping.
+ * Never throws. Bound to both Python is_available() and RBLNHooksInterface::hasRBLN(),
+ * so the two cannot diverge.
  */
 C10_RBLN_API bool runtime_available() noexcept;
 

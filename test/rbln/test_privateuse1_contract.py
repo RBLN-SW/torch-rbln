@@ -2,41 +2,32 @@
 
 """PrivateUse1 backend contract conformance.
 
-torch does not merely *offer* the ``torch.rbln`` module and the RBLN accelerator
-hooks -- it *calls into them*, from paths that have nothing to do with wanting an
-NPU: ``DataLoader(pin_memory=True)``, ``torch.load(map_location=...)``, importing
+torch does not merely *offer* the ``torch.rbln`` module and the RBLN accelerator hooks --
+it *calls into them*, from paths that have nothing to do with wanting an NPU:
+``DataLoader(pin_memory=True)``, ``torch.load(map_location=...)``, importing
 ``torch.testing._internal.common_utils``, ``torch._utils._get_available_device_type()``.
-Those call sites assume a contract that upstream states explicitly.
 
-Every test here pins exactly ONE clause and cites its upstream source, so that a
-torch upgrade or a newly-discovered call site fails on the clause rather than on
-a downstream symptom. Historically each violation was found and patched one call
-site at a time (#100, #107, #120, #130, #151); this file exists so that stops.
+Every test pins exactly ONE upstream clause and cites its source, so a torch upgrade or a
+new call site fails on the clause rather than on a downstream symptom. Each violation used
+to be found one call site at a time (#100, #107, #120, #130, #151).
 
-Three properties are measured per probe, each in a fresh subprocess (the runtime
-state involved is process-global and one-shot):
+Three properties are measured per probe, each in a fresh subprocess (the state involved is
+process-global and one-shot):
 
 ``raised``  the probe propagated an exception
 ``ctx``     the probe opened an NPU context (``rbln-stat`` reports this pid)
-``remap``   what a later ``RBLN_DEVICES`` remap does now: ``applied`` (still live),
+``remap``   what a later ``RBLN_DEVICES`` remap does: ``applied`` (mapping still live),
             ``frozen`` (silently ignored), ``rejected`` (raises), ``None`` (undetermined)
 
 ``remap`` is load-bearing for vLLM: ``VLLM_WORKER_MULTIPROC_METHOD`` defaults to ``fork``
-and ``RBLNWorker._init_device_env()`` remaps ``RBLN_DEVICES`` *inside* the forked worker.
-A mapping frozen in the parent is inherited across fork and breaks every worker.
-torch-rbln #151 was one instance; a co-tenant availability probe (LMCache imports
-``lmcache.v1.platform`` on every start) is another.
+and ``RBLNWorker._init_device_env()`` remaps ``RBLN_DEVICES`` *inside* the forked worker, so
+a mapping frozen in the parent breaks every worker. What "frozen" looks like depends on the
+runtime, so it is measured rather than assumed -- see
+:func:`runtime_freezes_on_acquisition`.
 
-Which runtime is underneath decides what "frozen" looks like, so it is measured, not
-assumed -- see :func:`runtime_freezes_on_acquisition`. A runtime older than
-rebellions-sw/rebel_compiler#12904 freezes the mapping on its *first query*, so the
-availability clauses below cannot hold there at all and are skipped; #12904 and later
-freeze on *acquisition*, which is what makes them assertions rather than xfails.
-
-A clause not satisfied yet is marked ``strict=True`` xfail naming the work that closes
-it; an unexpected pass means the marker should be removed. One group remains:
-
-- ``phase 4`` -- the RNG / serialization / device-name surface of ``torch.rbln``.
+A clause not satisfied yet is a ``strict=True`` xfail naming the work that closes it; an
+unexpected pass means the marker should go. One group remains: ``phase 4``, the RNG /
+serialization / device-name surface of ``torch.rbln``.
 """
 
 import functools
@@ -104,21 +95,18 @@ def _ctx_opened():
 def _remap_state():
     """How the runtime treats a RBLN_DEVICES remap right now.
 
-    ``applied``   the remap took effect -- the mapping is still live
-    ``frozen``    the remap was silently ignored -- the runtime has latched
-    ``rejected``  the remap raised -- a runtime that freezes on the first query (or, on a
-                  current one, a rejection raised by a later acquisition)
-    ``None``      undetermined (fewer than two NPUs, or an unrelated failure)
+    ``applied`` took effect / ``frozen`` silently ignored / ``rejected`` raised /
+    ``None`` undetermined (fewer than two NPUs, or an unrelated failure).
 
-    Measured by the *visible device count*, not by matching an error message: the two
-    runtimes report a frozen mapping differently (a pre-rebellions-sw/rebel_compiler#12904
-    runtime raises "changed at runtime (Sealed)" from the query itself; #12904 and later
-    ignore the new value and only reject at the next acquisition), and a message-matching
-    probe silently reports "not frozen" against the newer one.
+    Measured by the *visible device count*, not by matching an error message: a
+    pre-rebellions-sw/rebel_compiler#12904 runtime raises "changed at runtime (Sealed)"
+    from the query itself, while #12904 and later ignore the new value and reject only at
+    the next acquisition -- so a message-matching probe reports "not frozen" against the
+    newer one.
 
-    Goes through ``rebel._C`` rather than a torch_rbln API, so this stays a measurement of
-    the runtime: a torch_rbln entry point that stopped freezing would otherwise make these
-    checks pass for the wrong reason. Must run last -- it rewrites RBLN_DEVICES.
+    Goes through ``rebel._C``, not a torch_rbln API: a torch_rbln entry point that stopped
+    freezing would otherwise make these checks pass for the wrong reason. Must run last --
+    it rewrites RBLN_DEVICES.
     """
     if len(glob.glob("/dev/rbln*")) < 2:
         return None  # one NPU: a frozen count and a live count are the same number
@@ -231,14 +219,13 @@ def xfail_until(owner: str, reason: str):
 def runtime_freezes_on_acquisition() -> bool:
     """Whether the runtime freezes the ``RBLN_DEVICES`` mapping on acquisition, not on query.
 
-    rebellions-sw/rebel_compiler#12904 moved the freeze from the first ``RBLN_DEVICES``
-    read to ``Context::Create``. torch-rbln supports ``rebel-compiler>=0.11.1``, which
-    spans both behaviours, and on the older one an availability query freezes the mapping
-    no matter what this layer does -- so the clauses that require a query to leave it
-    remappable are unsatisfiable there rather than broken.
+    rebellions-sw/rebel_compiler#12904 moved the freeze from the first ``RBLN_DEVICES`` read
+    to ``Context::Create``. torch-rbln supports ``rebel-compiler>=0.11.1``, which spans both,
+    and on the older one a query freezes the mapping whatever this layer does -- so clauses
+    requiring a query to leave it remappable are unsatisfiable there, not broken.
 
-    Measured once, with a probe that touches no device: on the newer runtime the remap is
-    still ``applied``, on the older one the query already froze and it is ``rejected``.
+    Measured once with a probe that touches no device: newer -> still ``applied``, older ->
+    the query already froze, so ``rejected``.
     """
     if len(glob.glob("/dev/rbln*")) < 2:
         return False  # the measurement itself needs two NPUs; see _remap_state
@@ -310,16 +297,13 @@ class TestProbeHarness(TestCase):
     def test_detects_a_cpp_traceback(self):
         """A failure from a still-loud ``RBLN_CHECK`` must be seen by ``has_cpp_traceback``.
 
-        Selecting an unassigned device index goes through ``check_device_index()``, which
-        kept plain ``RBLN_CHECK`` -- it is a use error, not something a probe walks into --
-        so it logs ``c10::Error::what()`` and the stack trace it embeds.
+        An unassigned device index goes through ``check_device_index()``, which kept plain
+        ``RBLN_CHECK`` -- a use error, not something a probe walks into -- so it logs
+        ``c10::Error::what()`` and the trace it embeds.
 
-        Note what this control does *not* use: a malformed-config failure. Those are
-        rethrown from the plan via ``RBLN_CHECK_QUIET``, so they now carry the detailed
-        message without a logged trace even at the point of use. That is intended -- the
-        exception reaches Python and gets printed there, and
-        ``get_device_count_nothrow()`` warns once for callers that swallow it -- but it
-        means a config error is the wrong thing to control with.
+        Deliberately not a malformed-config failure: those rethrow the stored plan error via
+        ``RBLN_CHECK_QUIET`` and so carry the message without a logged trace, which makes
+        them useless as a control here.
         """
         p = run_probe(
             """
@@ -591,14 +575,12 @@ class TestUpstreamClauses(TestCase):
         """``torch.rbln.get_device_name()`` and friends must exist.
 
         ``torch.cuda`` / ``torch.xpu`` both expose ``get_device_name``,
-        ``get_device_properties`` and ``get_device_capability``, and frameworks reach for
-        them through the device module: vLLM's XPU platform is
-        ``return torch.xpu.get_device_name(device_id)`` (vllm/platforms/xpu.py:137).
-        With no RBLN equivalent, vllm-rbln calls ``rebel.get_npu_name()`` directly, bypassing
-        torch entirely -- so a torch-level policy has nothing to apply to. (That call no
-        longer freezes the mapping, so this is now an API-surface gap rather than a
-        correctness one.) ``RBLNGuardImpl::getDeviceCapability()`` already exists on the C++
-        side.
+        ``get_device_properties`` and ``get_device_capability``, and frameworks reach for them
+        through the device module (vLLM's XPU platform is
+        ``torch.xpu.get_device_name(device_id)``, vllm/platforms/xpu.py:137). With no RBLN
+        equivalent, vllm-rbln calls ``rebel.get_npu_name()`` directly, bypassing torch, so a
+        torch-level policy has nothing to apply to. ``RBLNGuardImpl::getDeviceCapability()``
+        already exists on the C++ side.
         """
         p = run_probe(
             'rec["result"] = [n for n in ("get_device_name", "get_device_properties",'
@@ -680,20 +662,16 @@ class TestUpstreamClauses(TestCase):
         """Selecting devices *after* import must change what this layer reports.
 
         This is the point of planning separately from committing: a launcher assigns the
-        visible devices once it knows the rank, which is necessarily after ``import torch``.
-        torch/cuda/__init__.py states the same rule -- do not cache the device count "prior to
-        CUDA initialization, because the number of devices can change due to changes to
-        ``CUDA_VISIBLE_DEVICES`` setting prior to CUDA initialization".
+        visible devices once it knows the rank, necessarily after ``import torch``.
+        torch/cuda/__init__.py states the same rule -- do not cache the device count "prior
+        to CUDA initialization, because the number of devices can change due to changes to
+        ``CUDA_VISIBLE_DEVICES``".
 
-        Both names are checked because the runtime ships ``RBLN_VISIBLE_DEVICES`` as an alias
-        of the same flag (rebel's ``flags.cc`` registers ``/*alias=*/"RBLN_VISIBLE_DEVICES"``)
-        and it renumbers the pool identically. Leaving the alias out of the signature this
-        layer rebuilds its plan on left the plan cached against a pool the runtime had already
-        changed: ``device_count()`` answered from the stale plan while
-        ``physical_device_count()``, which bypasses the plan, answered from the new one.
-
-        Both answers are read for that reason -- checking only one cannot tell "the
-        assignment was honoured" from "the two disagree".
+        Both names, because the runtime ships ``RBLN_VISIBLE_DEVICES`` as an alias of the
+        same flag and it renumbers the pool identically. Both answers, because checking one
+        cannot tell "the assignment was honoured" from "the two disagree" -- leaving the
+        alias out of the plan signature made ``device_count()`` answer from a stale plan
+        while ``physical_device_count()``, which bypasses it, answered from the new pool.
         """
         for name in ("RBLN_DEVICES", "RBLN_VISIBLE_DEVICES"):
             with self.subTest(variable=name):
@@ -823,14 +801,12 @@ class TestExternalConsumers(TestCase):
         """Importing ``torch_rbln`` must not resolve a device to read its architecture.
 
         torch-rbln #151 was an import-time ``is_atom_device()`` gate, which resolves device 0
-        through ``rebel.device_info.get_npu_name``. That used to freeze ``RBLN_DEVICES`` and
-        so broke every forked vLLM worker; on a current runtime it no longer freezes
-        anything, which is exactly why this needs its own observable -- "a remap after import
-        still works" is now satisfied even by an import that queries.
+        through ``rebel.device_info.get_npu_name``. It no longer freezes ``RBLN_DEVICES``,
+        which is why this needs its own observable -- "a remap after import still works" is
+        now satisfied even by an import that queries. It still opens and closes a device node
+        per import.
 
-        ``get_device_arch`` is an ``lru_cache``, so an empty cache is direct evidence that
-        nothing on the import path asked. Resolving a device also opens and closes a device
-        node per import, which is reason enough to keep the import path clear of it.
+        ``get_device_arch`` is an ``lru_cache``: an empty cache means nothing asked.
         """
         p = run_probe(
             """

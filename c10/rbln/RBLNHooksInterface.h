@@ -32,38 +32,30 @@ struct C10_RBLN_API RBLNHooksInterface : public at::PrivateUse1HooksInterface {
   bool hasRBLN() const;
 
   /**
-   * @brief Number of logical RBLN devices, for the generic accelerator APIs.
+   * @brief Number of logical RBLN devices. Nothrow (ATen/DeviceAccelerator.h).
    *
-   * Without this override the base implementation returns 0, so every C++ consumer of
-   * at::accelerator::deviceCount() is told there are no devices while
-   * torch.rbln.device_count() reports the real number. Nothrow: ATen/DeviceAccelerator.h
-   * states deviceCount() "is *REQUIRED* to not raise any exception".
+   * The inherited default returns 0, so at::accelerator::deviceCount() reported no devices
+   * while torch.rbln.device_count() reported the real number.
    */
   c10::DeviceIndex deviceCount() const override;
 
   /**
    * @brief Currently selected logical device.
    *
-   * The base implementation is TORCH_CHECK(false, "Backend doesn't support ..."), which
-   * makes torch._C._accelerator_hooks_get_current_device() raise on an RBLN host.
+   * The inherited default is TORCH_CHECK(false, ...), so
+   * torch._C._accelerator_hooks_get_current_device() raised on an RBLN host.
    */
   c10::DeviceIndex getCurrentDevice() const override;
 
-  /**
-   * @brief Select a logical device (bookkeeping only; no context is created).
-   */
+  /** @brief Select a logical device (bookkeeping only; no context is created). */
   void setCurrentDevice(c10::DeviceIndex device) const override;
 
-  /**
-   * @brief Select a logical device and return the previously selected one.
-   */
+  /** @brief Select a logical device and return the previously selected one. */
   c10::DeviceIndex exchangeDevice(c10::DeviceIndex device) const override;
 
   /**
-   * @brief exchangeDevice() that must not create a device context.
-   *
-   * Selecting a device on RBLN is pure bookkeeping -- the context is created on the
-   * first allocation -- so this is identical to exchangeDevice().
+   * @brief exchangeDevice() that must not create a context. Selecting a device here is
+   * pure bookkeeping -- the context comes with the first allocation -- so they are equal.
    */
   c10::DeviceIndex maybeExchangeDevice(c10::DeviceIndex device) const override;
 

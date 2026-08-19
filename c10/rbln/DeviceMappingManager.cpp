@@ -448,12 +448,8 @@ void DeviceMappingManager::initializeDummyDevices() const {
 std::string DeviceMappingManager::envSignature() {
   // Any change to one of these changes the plan. Values are length-prefixed so that
   // e.g. RBLN_DEVICES="0|" and RBLN_DEVICES="0", RBLN_DEVICE_MAP="" cannot collide.
-  //
-  // RBLN_VISIBLE_DEVICES is the runtime's shipped alias of RBLN_DEVICES (rebel's
-  // flags.cc registers it with /*alias=*/"RBLN_VISIBLE_DEVICES"), so it selects the
-  // visible NPU pool just as well. Omitting it left the plan cached against a pool the
-  // runtime had already changed: device_count() answered from the stale plan while
-  // physical_device_count(), which bypasses it, answered from the new one.
+  // RBLN_VISIBLE_DEVICES is the runtime's alias of RBLN_DEVICES and selects the visible
+  // pool just as well, so omitting it cached the plan against a pool already changed.
   std::string signature;
   for (const char* name :
        {"RBLN_DEVICES", "RBLN_VISIBLE_DEVICES", "RBLN_DEVICE_MAP", "RBLN_NPUS_PER_DEVICE", "RBLN_DUMMY_DEVICE"}) {
@@ -531,14 +527,10 @@ void DeviceMappingManager::buildPlan() const {
     return;
   }
 
-  // The runtime is the only authority on how many NPUs RBLN_DEVICES leaves visible.
-  // Working around that here (counting /dev/rbln* and parsing RBLN_DEVICES ourselves) was
-  // tried and rejected: it creates a second source of truth for something the runtime owns.
-  //
-  // RBLN_DEVICES is named as a cause because the runtime's own detail does not reach us:
-  // it reports a malformed value as a status ("Invalid RBLN_DEVICES value: ...") and the C
-  // entry point narrows that to an RBLNRetCode, so the text stays in the runtime's log.
-  // Blaming only the driver would misdiagnose a bad RBLN_DEVICES / RBLN_VISIBLE_DEVICES.
+  // The runtime is the only authority on how many NPUs RBLN_DEVICES leaves visible;
+  // counting /dev/rbln* ourselves would be a second source of truth for something it owns.
+  // RBLN_DEVICES is named as a cause because the runtime narrows its own detail
+  // ("Invalid RBLN_DEVICES value: ...") to an RBLNRetCode, leaving only its log.
   int physical_device_count = 0;
   RBLN_CHECK_QUIET(
       !rbln_get_device_count(&physical_device_count),

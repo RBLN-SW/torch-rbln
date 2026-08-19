@@ -176,11 +176,9 @@ int to_device_id(c10::DeviceIndex device_index) {
   // memory stats, ...). With no NPU, fail here with one clear message before
   // reaching the runtime, which may not handle an unregistered device.
   //
-  // Also the commit point: reaching here means the process has decided to use a device,
-  // so this is where the planned logical devices are claimed with the runtime
-  // (rbln_register_device_id) and RBLN_DEVICES is frozen. Idempotent, and deliberately
-  // not done by is_available()/device_count() -- see DeviceMappingManager's plan/commit
-  // note. check_device_index() stays plan-only: selecting a device is bookkeeping.
+  // Also the commit point: reaching here means the process has decided to use a device, so
+  // this is where the plan is claimed with the runtime and the mapping freezes. Idempotent.
+  // check_device_index() stays plan-only -- selecting a device is bookkeeping.
   DeviceMappingManager::getInstance().commit();
   RBLN_CHECK(
       DeviceMappingManager::getInstance().getLogicalDeviceCount() > 0,
@@ -401,10 +399,9 @@ std::string first_line(std::string_view text) {
 } // namespace
 
 c10::DeviceIndex get_device_count_nothrow() noexcept {
-  // Nothrow view of get_device_count() for the liveness gate; failures map to 0.
-  // Warn once, first line only: e.what() carries the C++ stack trace, and this runs on
-  // the availability path that every co-tenant process walks. The full text is still
-  // raised verbatim by device_count_ensure_non_zero() and by the allocation path.
+  // Nothrow view of get_device_count(); failures map to 0. First line only, because
+  // e.what() carries the C++ stack trace and every co-tenant walks this path. The full
+  // text is still raised by device_count_ensure_non_zero() and by the allocation path.
   try {
     return get_device_count();
   } catch (const std::exception& e) {
@@ -437,14 +434,11 @@ void set_runtime_shutting_down(bool value) noexcept {
 }
 
 bool runtime_available() noexcept {
-  // Driver loaded, not shutting down, at least one usable logical device. Single source
-  // of truth for "is RBLN available": bound to Python is_available() and to
-  // RBLNHooksInterface::hasRBLN(), so the two can never disagree. Never throws.
+  // Driver loaded, not shutting down, at least one usable logical device. Bound to Python
+  // is_available() and to RBLNHooksInterface::hasRBLN(), so the two cannot disagree.
   //
-  // Dummy mode is NOT short-circuited. It used to be, to avoid the enumeration side
-  // effect, but that made is_available() report True for a dummy device whose mapping
-  // had failed to build -- available yet unusable. Dummy has no NPU to claim, and the
-  // mapping still has to be valid for anything to work.
+  // Dummy mode is NOT short-circuited: doing so reported True for a dummy device whose
+  // mapping had failed to build -- available yet unusable.
   return !runtime_shutting_down_.load(std::memory_order_relaxed) && rbln_runtime_available() &&
       get_device_count_nothrow() > 0;
 }
@@ -483,9 +477,8 @@ bool any_device_context_initialized() noexcept {
 
 std::vector<c10::DeviceIndex> initialized_device_indices() {
   std::vector<c10::DeviceIndex> indices;
-  // Context flag first: nothing initialized anywhere -> empty, without enumerating. Since
-  // the plan/commit split, enumeration no longer registers devices, but it still asks the
-  // runtime for the visible count, and a process with no context has nothing to report.
+  // Context flag first: nothing initialized anywhere -> empty, without asking the runtime
+  // for a count this process has nothing to report against.
   if (!any_device_context_initialized()) {
     return indices;
   }
@@ -949,11 +942,9 @@ c10::CachingDeviceAllocator::DeviceStats get_device_stats(const c10::Device& dev
 
 void empty_cache(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
-  // Two-level context gate (CUDA parity). Check the context flag FIRST: no allocator state
-  // anywhere → no-op (a no-context parent or malformed config; never dispatches, and there
-  // is nothing to free). Enumeration is side-effect-free since the plan/commit split, so
-  // the order is about semantics, not about avoiding registration. Otherwise validate the
-  // index (invalid throws) and skip a device never used here.
+  // Two-level context gate (CUDA parity). Context flag FIRST: no allocator state anywhere
+  // → no-op (a no-context parent or malformed config; nothing to free). Otherwise validate
+  // the index (invalid throws) and skip a device never used here.
   if (!any_device_context_initialized() || !runtime_available()) {
     return;
   }

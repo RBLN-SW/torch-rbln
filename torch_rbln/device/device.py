@@ -59,13 +59,11 @@ def device_count() -> int:
 
     Returns ``0`` when the runtime is absent, no NPU is visible, or the ``RBLN_*``
     configuration is malformed; the malformed case also warns once. torch treats
-    enumeration as infallible -- ``ATen/DeviceAccelerator.h`` says ``deviceCount()``
-    "is *REQUIRED* to not raise any exception", and ``c10/cuda/CUDAFunctions.h`` keeps
-    ``device_count() noexcept`` with a separate throwing
-    ``device_count_ensure_non_zero()``.
+    enumeration as infallible -- ``ATen/DeviceAccelerator.h`` says ``deviceCount()`` "is
+    *REQUIRED* to not raise any exception".
 
-    The detailed configuration error is not lost: it is raised by
-    :func:`current_device`, :func:`set_device` and by any actual device allocation.
+    The configuration error is not lost: :func:`current_device`, :func:`set_device` and any
+    device allocation raise it in full.
 
     Returns:
         int: The number of available RBLN devices.
@@ -96,19 +94,17 @@ def physical_device_count() -> int:
 def is_available() -> bool:
     """Whether RBLN is usable as an accelerator (``torch.cuda.is_available()`` parity).
 
-    **Never raises.** ``False`` when the runtime is absent or torn down, no device is
-    present, or the ``RBLN_*`` configuration is malformed. ``torch.xpu.is_available()``
-    documents "This function never throws" and ``torch.cuda.is_available()`` "never
-    throws and returns 0 if the driver is missing or can't be initialized".
+    **Never raises** (``torch.xpu.is_available()``: "This function never throws").
+    ``False`` when the runtime is absent or torn down, no device is present, or the
+    ``RBLN_*`` configuration is malformed.
 
-    This matters beyond RBLN code: torch evaluates it while importing
-    ``torch.testing._internal.common_utils`` (``TEST_PRIVATEUSE1``), inside
-    ``torch._utils._get_available_device_type()``, and in ``DataLoader(pin_memory=True)``
-    via ``torch.accelerator.is_available()``. A raise there breaks callers that never
-    asked for an NPU.
+    torch evaluates this from paths that never asked for an NPU -- importing
+    ``torch.testing._internal.common_utils`` (``TEST_PRIVATEUSE1``),
+    ``torch._utils._get_available_device_type()``, ``DataLoader(pin_memory=True)`` -- so a
+    raise here breaks unrelated callers.
 
-    Bound to the same C++ predicate as ``RBLNHooksInterface::hasRBLN()``, so the Python
-    and C++ answers cannot diverge.
+    Bound to the same C++ predicate as ``RBLNHooksInterface::hasRBLN()``, so the Python and
+    C++ answers cannot diverge.
     """
     return torch_rbln._C.is_available()
 
