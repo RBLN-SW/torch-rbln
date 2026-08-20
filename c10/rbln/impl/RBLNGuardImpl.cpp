@@ -72,22 +72,14 @@ void RBLNGuardImpl::uncheckedSetDevice(c10::Device device) const noexcept {
 }
 
 c10::DeviceIndex RBLNGuardImpl::deviceCount() const noexcept {
-  try {
-    const auto device_count = c10::rbln::get_device_count();
-    RBLN_LOG_DEBUG("device_count={}", static_cast<int>(device_count));
-    return device_count;
-  } catch (const c10::Error& error) {
-    RBLN_WARN_NOTHROW("Failed to get device count, returning 0: {}", error.msg());
-    return 0;
-  } catch (const std::exception& e) {
-    // First call lazily parses RBLN_DEVICE_MAP / RBLN_NPUS_PER_DEVICE via
-    // std::stoi, which throws std (not c10::Error); uncaught here -> terminate.
-    RBLN_WARN_NOTHROW("Failed to get device count, returning 0 (std::exception): {}", e.what());
-    return 0;
-  } catch (...) {
-    RBLN_WARN_NOTHROW("Failed to get device count, returning 0: unknown exception");
-    return 0;
-  }
+  // Delegates to the shared nothrow enumeration so the guard impl, the accelerator
+  // hooks and Python device_count() all answer from one place (and warn identically).
+  // It also swallows the std::stoi throw from lazily parsing RBLN_DEVICE_MAP /
+  // RBLN_NPUS_PER_DEVICE, which is not a c10::Error and would otherwise terminate.
+  // Deliberately no debug log: RBLN_LOG_DEBUG can throw when debug logging is enabled
+  // (fmt / sink, e.g. bad_alloc), which would terminate this noexcept override. The shared
+  // enumeration already logs on the paths that can afford it.
+  return c10::rbln::get_device_count_nothrow();
 }
 
 c10::DeviceCapability RBLNGuardImpl::getDeviceCapability(c10::Device device) const {

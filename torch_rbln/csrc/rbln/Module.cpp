@@ -53,9 +53,15 @@ void add_py_method_definitions(std::vector<PyMethodDef>& method_vector, PyMethod
  */
 void register_public_device_api(py::module_& module) {
   module.def("current_device", &c10::rbln::get_device_index, "Get the current device.");
-  // Throws on a malformed RBLN_DEVICE_MAP (config error); "no hardware/runtime -> 0"
-  // is already graceful inside get_device_count().
-  module.def("device_count", &c10::rbln::get_device_count, "Get the number of devices.");
+  // Enumeration never raises (torch treats it as infallible); a malformed RBLN_*
+  // config reports 0 with a one-line warning here and raises in full detail from
+  // device_count_ensure_non_zero() / the allocation path.
+  module.def("device_count", &c10::rbln::get_device_count_nothrow, "Get the number of devices. Never raises.");
+  module.def(
+      "device_count_ensure_non_zero",
+      &c10::rbln::device_count_ensure_non_zero,
+      "Number of devices, raising the detailed RBLN_* configuration error if there is not at least one. "
+      "For use where a device is actually required.");
   module.def("set_device", &c10::rbln::set_device_index, "Set the current device.");
   module.def(
       "physical_device_count",
@@ -66,10 +72,15 @@ void register_public_device_api(py::module_& module) {
       &c10::rbln::is_dummy_device,
       "Whether host-backed dummy device mode (RBLN_DUMMY_DEVICE) is active.");
   module.def(
+      "is_available",
+      &c10::rbln::runtime_available,
+      "Whether RBLN is usable as an accelerator: runtime loaded, not shutting down, at least one usable "
+      "logical device. The same predicate RBLNHooksInterface::hasRBLN() uses, so Python and C++ cannot "
+      "disagree. Never raises.");
+  module.def(
       "runtime_available",
       &c10::rbln::runtime_available,
-      "Single source of truth for device-runtime liveness (loaded, not shutting down, a device exists). "
-      "Never raises.");
+      "Deprecated alias of is_available(), kept for existing callers. Never raises.");
   module.def(
       "runtime_loaded",
       &rbln_runtime_available,

@@ -175,6 +175,11 @@ int to_device_id(c10::DeviceIndex device_index) {
   // Shared precursor to every device-touching runtime call (alloc, synchronize,
   // memory stats, ...). With no NPU, fail here with one clear message before
   // reaching the runtime, which may not handle an unregistered device.
+  //
+  // Also the commit point: reaching here means the process has decided to use a device, so
+  // this is where the plan is claimed with the runtime and the mapping freezes. Idempotent.
+  // check_device_index() stays plan-only -- selecting a device is bookkeeping.
+  DeviceMappingManager::getInstance().commit();
   RBLN_CHECK(
       DeviceMappingManager::getInstance().getLogicalDeviceCount() > 0,
       "Cannot use rbln:{}: no logical device available (this process sees 0 RBLN device(s)). "
@@ -268,6 +273,23 @@ c10::DeviceIndex get_physical_device_count() {
 }
 
 c10::DeviceIndex get_device_index() {
+  // The selection is thread_local while the plan is process-wide, so an RBLN_* change before
+  // the mapping commits can leave this thread pointing past the end of a rebuilt plan.
+  // Report a device that exists; the selection is bookkeeping, so nothing has to unwind.
+  // Checked on read because other threads' selections are unreachable from here.
+  //
+  // Nothrow enumeration, not getLogicalDeviceCount(): this backs
+  // torch._C._accelerator_getDeviceIndex(), which torch calls from total predicates such as
+  // reset_peak_memory_stats(), so a malformed RBLN_* config must not raise here. It maps a
+  // failed plan to 0, and with no plan there is nothing to validate against.
+  const auto device_count = get_device_count_nothrow();
+  if (device_count > 0 && current_device_index_ >= device_count) {
+    RBLN_LOG_DEBUG(
+        "current logical device rbln:{} is outside the {} planned device(s); reporting rbln:0",
+        static_cast<int>(current_device_index_),
+        static_cast<int>(device_count));
+    current_device_index_ = 0;
+  }
   RBLN_LOG_DEBUG("current logical device=rbln:{}", static_cast<int>(current_device_index_));
   return current_device_index_;
 }
@@ -385,14 +407,22 @@ void require_runtime(const char* op) {
       op);
 }
 
+// c10::Error::what() appends "Exception raised from ..." plus a full C++ backtrace.
+// Keep only the human-readable first line for warnings on nothrow paths.
+std::string first_line(std::string_view text) {
+  return std::string(text.substr(0, text.find('\n')));
+}
+
 } // namespace
 
 c10::DeviceIndex get_device_count_nothrow() noexcept {
-  // Nothrow view of get_device_count() for the liveness gate; failures map to 0.
+  // Nothrow view of get_device_count(); failures map to 0. First line only, because
+  // e.what() carries the C++ stack trace and every co-tenant walks this path. The full
+  // text is still raised by device_count_ensure_non_zero() and by the allocation path.
   try {
     return get_device_count();
   } catch (const std::exception& e) {
-    RBLN_WARN_NOTHROW("get_device_count failed, treating as 0 device(s): {}", e.what());
+    RBLN_WARN_NOTHROW("get_device_count failed, treating as 0 device(s): {}", first_line(e.what()));
     return 0;
   } catch (...) {
     RBLN_WARN_NOTHROW("get_device_count failed, treating as 0 device(s): unknown exception");
@@ -400,15 +430,40 @@ c10::DeviceIndex get_device_count_nothrow() noexcept {
   }
 }
 
+c10::DeviceIndex device_count_ensure_non_zero() {
+  // Throwing counterpart of the noexcept query, named after c10::cuda's
+  // device_count_ensure_non_zero(). This is where a malformed RBLN_* config becomes a
+  // loud, detailed error: the availability path stays quiet, the point of use does not.
+  const auto device_count = get_device_count();
+  RBLN_CHECK(
+      device_count > 0,
+      "No RBLN devices are available (0 logical device(s)). Check that an NPU is present, the rbln kernel driver "
+      "is loaded, and RBLN_DEVICES / RBLN_DEVICE_MAP / RBLN_NPUS_PER_DEVICE select at least one device.");
+  return device_count;
+}
+
+void commit_device_mapping() {
+  DeviceMappingManager::getInstance().commit();
+}
+
 void set_runtime_shutting_down(bool value) noexcept {
   runtime_shutting_down_.store(value, std::memory_order_relaxed);
 }
 
 bool runtime_available() noexcept {
-  // Driver loaded, not shutting down, a device present (dummy needs the driver too,
-  // but no NPU). Single source of truth; never throws. CUDA parity.
+  // Driver loaded, not shutting down, at least one usable logical device. Bound to Python
+  // is_available() and to RBLNHooksInterface::hasRBLN(), so the two cannot disagree.
+  //
+  // Dummy mode is NOT short-circuited: doing so reported True for a dummy device whose
+  // mapping had failed to build -- available yet unusable.
+  //
+  // A part-way commit failure is the same shape: the plan keeps its device count, but the
+  // devices it did not claim can never be claimed, so every later device use rethrows.
+  // hasFailedCommit() last: getInstance() runs the registered mapping-ready callback -- which
+  // may reach back into Python -- without a catch, so the first touch of the singleton has to
+  // happen inside get_device_count_nothrow()'s catch-all, not on this noexcept boundary.
   return !runtime_shutting_down_.load(std::memory_order_relaxed) && rbln_runtime_available() &&
-      (is_dummy_device() || get_device_count_nothrow() > 0);
+      get_device_count_nothrow() > 0 && !DeviceMappingManager::getInstance().hasFailedCommit();
 }
 
 // --- Per-process device-context tracking ------------------------------------
@@ -445,8 +500,8 @@ bool any_device_context_initialized() noexcept {
 
 std::vector<c10::DeviceIndex> initialized_device_indices() {
   std::vector<c10::DeviceIndex> indices;
-  // Context flag first: nothing initialized anywhere -> empty, and skip
-  // get_device_count() so we don't enumerate/register devices as a side effect.
+  // Context flag first: nothing initialized anywhere -> empty, without asking the runtime
+  // for a count this process has nothing to report against.
   if (!any_device_context_initialized()) {
     return indices;
   }
@@ -910,10 +965,9 @@ c10::CachingDeviceAllocator::DeviceStats get_device_stats(const c10::Device& dev
 
 void empty_cache(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
-  // Two-level context gate (CUDA parity). Check the context flag FIRST: no allocator state
-  // anywhere → no-op (a no-context parent or malformed config; never dispatches, and this
-  // avoids runtime_available()/device enumeration triggering device registration as a side
-  // effect). Otherwise validate the index (invalid throws) and skip a device never used here.
+  // Two-level context gate (CUDA parity). Context flag FIRST: no allocator state anywhere
+  // → no-op (a no-context parent or malformed config; nothing to free). Otherwise validate
+  // the index (invalid throws) and skip a device never used here.
   if (!any_device_context_initialized() || !runtime_available()) {
     return;
   }
