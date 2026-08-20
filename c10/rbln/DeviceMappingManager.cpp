@@ -309,6 +309,10 @@ void DeviceMappingManager::commit() {
   }
 }
 
+bool DeviceMappingManager::hasFailedCommit() const noexcept {
+  return plan_state_.load(std::memory_order_acquire) == PlanState::Failed;
+}
+
 bool DeviceMappingManager::isCommitted() const {
   return plan_state_.load(std::memory_order_acquire) == PlanState::Committed;
 }

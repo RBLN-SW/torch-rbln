@@ -58,7 +58,7 @@ def device_count() -> int:
     """Number of RBLN logical devices. Never raises (``torch.cuda`` parity).
 
     Returns ``0`` when the runtime is absent, no NPU is visible, or the ``RBLN_*``
-    configuration is malformed; the malformed case also warns once. torch treats
+    configuration is malformed; the malformed case also warns. torch treats
     enumeration as infallible -- ``ATen/DeviceAccelerator.h`` says ``deviceCount()`` "is
     *REQUIRED* to not raise any exception".
 

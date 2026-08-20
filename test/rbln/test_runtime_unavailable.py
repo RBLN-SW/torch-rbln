@@ -313,6 +313,40 @@ class TestRuntimeUnavailable(TestCase):
             )
 
     @requires_physical_devices(1)
+    def test_failed_commit_reports_unavailable(self):
+        """A commit that fails part-way leaves the backend unusable, so is_available() must
+        say so. Registration claims one logical device at a time and the runtime has no
+        unregister call, so a failure mid-loop is permanent: every later device use rethrows
+        the stored error. Reporting available while nothing can be used sends a caller --
+        vLLM picking a platform, LMCache picking a backend -- down a path that cannot work.
+
+        The device count may stay: it describes the planned topology, not usability.
+        Injected with a shim forcing rbln_register_device_id to fail."""
+        with tempfile.TemporaryDirectory() as tmp:
+            so = _build_ld_preload_shim(
+                tmp,
+                "int rbln_register_device_id(int t, int* d, int n){(void)t;(void)d;(void)n; return 1;}\n",
+            )
+            if so is None:
+                self.skipTest("needs a C compiler to build the LD_PRELOAD shim")
+            result = _run_subprocess(
+                """
+                assert torch.rbln.is_available() is True, "available before any device use"
+                try:
+                    torch.ones(4, dtype=torch.float16, device="rbln:0")
+                except RuntimeError as exc:
+                    assert "rbln_register_device_id failed" in str(exc), str(exc)
+                else:
+                    raise AssertionError("a failing registration must surface at the point of use")
+                assert torch.rbln.is_available() is False, "unusable backend still reports available"
+                assert C.runtime_available() is False, "python and C++ availability disagree"
+                print("FAILED_COMMIT_OK")
+                """,
+                env_extra={"LD_PRELOAD": so, "RBLN_DEVICES": "0"},
+            )
+            _assert_ok(self, result, "FAILED_COMMIT_OK")
+
+    @requires_physical_devices(1)
     def test_best_effort_ops_propagate_live_context_failure(self):
         """Once this process has a live context (after an allocation), a genuine runtime
         failure in a best-effort op IS surfaced (CUDA parity — cudaFree failures in an

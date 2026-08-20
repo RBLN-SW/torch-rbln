@@ -169,6 +169,14 @@ class C10_RBLN_API DeviceMappingManager {
   void commit();
 
   /**
+   * @brief Whether a commit failed part-way, leaving the process unable to use a device.
+   *
+   * Nothrow, for the availability predicate: the plan still reports its device count, but
+   * every later device use rethrows the stored error, so the backend is not usable.
+   */
+  bool hasFailedCommit() const noexcept;
+
+  /**
    * @brief Whether the planned devices have been claimed with the runtime.
    *
    * Once committed the plan is frozen: later RBLN_* environment edits are ignored

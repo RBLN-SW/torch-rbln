@@ -55,6 +55,12 @@ BAD_MAP = {"RBLN_DEVICES": "0", "RBLN_DEVICE_MAP": "[1],[99]"}  # map exceeds vi
 DUMMY = {"RBLN_DUMMY_DEVICE": "1"}
 DUMMY_BAD_MAP = {"RBLN_DUMMY_DEVICE": "1", "RBLN_DEVICE_MAP": "[0,1,1]"}  # group size 3 invalid
 
+# The RBLN_* variables a scenario owns. Stripped from a probe's environment so the runner's
+# own selection cannot decide the outcome.
+_SELECTION_VARS = frozenset(
+    {"RBLN_DEVICES", "RBLN_VISIBLE_DEVICES", "RBLN_DEVICE_MAP", "RBLN_NPUS_PER_DEVICE", "RBLN_DUMMY_DEVICE"}
+)
+
 ALL_SCENARIOS = {
     "healthy": HEALTHY,
     "no_device": NO_DEVICE,
@@ -69,7 +75,9 @@ import glob, json, os, shutil, subprocess, sys
 
 sys.path.insert(0, {root!r})
 {env}
-os.environ.setdefault("RBLN_LOG_LEVEL", "off")
+# ERROR, not a quieter value: RBLN_CHECK logs at ERROR and has_cpp_traceback has to see
+# it. TORCH_RBLN_LOG_LEVEL accepts only DEBUG/INFO/WARNING/ERROR and raises otherwise.
+os.environ.setdefault("TORCH_RBLN_LOG_LEVEL", "ERROR")
 
 # The probe may print; only this file descriptor carries the JSON result.
 _real_stdout = sys.stdout
@@ -184,9 +192,15 @@ def run_probe(body: str, env: dict) -> Probe:
         env=env_src,
         probe=textwrap.indent(textwrap.dedent(body).strip("\n"), "    "),
     )
+    # The scenario is the whole RBLN_* configuration: inheriting the parent's would let a
+    # device selection in the test runner's environment decide what the probe sees, which
+    # shows up as a silent skip rather than a failure.
+    child_env = {k: v for k, v in os.environ.items() if k not in _SELECTION_VARS}
+    child_env.update({k: v for k, v in env.items() if v is not None})
     proc = subprocess.run(
         [sys.executable, "-c", script],
         cwd=_PROJECT_ROOT,
+        env=child_env,
         capture_output=True,
         text=True,
         timeout=300,
@@ -641,8 +655,9 @@ class TestUpstreamClauses(TestCase):
         """A swallowed availability failure must not spam a co-tenant's console.
 
         ``RBLN_CHECK`` (c10/rbln/RBLNLogging.h:181-191) logs ``c10::Error::what()`` -- the
-        C++ stack trace included -- to **stdout** before throwing, ungated by
-        ``RBLN_LOG_LEVEL``, so catching the exception does not suppress it.
+        C++ stack trace included -- to **stdout** before throwing, at ERROR level, so no
+        ``TORCH_RBLN_LOG_LEVEL`` setting suppresses it and catching the exception does not
+        either.
         """
         p = run_probe(
             """

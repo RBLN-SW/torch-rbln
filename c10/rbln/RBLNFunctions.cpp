@@ -456,8 +456,11 @@ bool runtime_available() noexcept {
   //
   // Dummy mode is NOT short-circuited: doing so reported True for a dummy device whose
   // mapping had failed to build -- available yet unusable.
+  //
+  // A part-way commit failure is the same shape: the plan keeps its device count, but the
+  // devices it did not claim can never be claimed, so every later device use rethrows.
   return !runtime_shutting_down_.load(std::memory_order_relaxed) && rbln_runtime_available() &&
-      get_device_count_nothrow() > 0;
+      !DeviceMappingManager::getInstance().hasFailedCommit() && get_device_count_nothrow() > 0;
 }
 
 // --- Per-process device-context tracking ------------------------------------

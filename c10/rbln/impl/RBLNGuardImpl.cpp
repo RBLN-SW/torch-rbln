@@ -76,9 +76,10 @@ c10::DeviceIndex RBLNGuardImpl::deviceCount() const noexcept {
   // hooks and Python device_count() all answer from one place (and warn identically).
   // It also swallows the std::stoi throw from lazily parsing RBLN_DEVICE_MAP /
   // RBLN_NPUS_PER_DEVICE, which is not a c10::Error and would otherwise terminate.
-  const auto device_count = c10::rbln::get_device_count_nothrow();
-  RBLN_LOG_DEBUG("device_count={}", static_cast<int>(device_count));
-  return device_count;
+  // Deliberately no debug log: RBLN_LOG_DEBUG can throw when debug logging is enabled
+  // (fmt / sink, e.g. bad_alloc), which would terminate this noexcept override. The shared
+  // enumeration already logs on the paths that can afford it.
+  return c10::rbln::get_device_count_nothrow();
 }
 
 c10::DeviceCapability RBLNGuardImpl::getDeviceCapability(c10::Device device) const {
