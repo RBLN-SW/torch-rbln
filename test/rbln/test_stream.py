@@ -17,9 +17,13 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 from test.utils import assert_device_resident_dtype
 
 
-# fp16 matmul accumulates, so the device result is compared loosely.
-ATOL = 0.05
-RTOL = 0.05
+# The device computes fp16 matmuls in a narrower dlfloat, so results are compared on
+# relative error: it is scale-free, where an absolute bound needs retuning per shape.
+REL_TOL = 0.01
+
+
+def rel_err(got: torch.Tensor, ref: torch.Tensor) -> float:
+    return ((got.float() - ref.float()).norm() / ref.float().norm()).item()
 
 
 @pytest.mark.test_set_ci
@@ -139,7 +143,7 @@ class TestStream(TestCase):
             c = (a @ b).relu()
         torch.rbln.synchronize()
         expected = (a_cpu @ b_cpu).relu()
-        self.assertTrue(torch.allclose(c.cpu(), expected, atol=ATOL, rtol=RTOL))
+        self.assertLess(rel_err(c.cpu(), expected), REL_TOL)
 
     def test_compute_gated_by_async_copy_event(self):
         # Copy<->compute ordering across streams: the event fence is what makes the
@@ -156,7 +160,7 @@ class TestStream(TestCase):
             consumer.wait_event(ready)  # fence: w must be fully copied before use
             y = x @ w
         torch.rbln.synchronize()
-        self.assertTrue(torch.allclose(y.cpu(), x_cpu @ w_cpu, atol=ATOL, rtol=RTOL))
+        self.assertLess(rel_err(y.cpu(), x_cpu @ w_cpu), REL_TOL)
 
     def test_stream_context_selects_the_stream_device(self):
         # Selecting a stream selects its device, so allocations land there.
@@ -183,8 +187,8 @@ class TestStream(TestCase):
             c1 = a1 @ b1
         torch.rbln.synchronize(0)
         torch.rbln.synchronize(1)
-        self.assertTrue(torch.allclose(c0.cpu(), a0_cpu @ b0_cpu, atol=ATOL, rtol=RTOL))
-        self.assertTrue(torch.allclose(c1.cpu(), a1_cpu @ b1_cpu, atol=ATOL, rtol=RTOL))
+        self.assertLess(rel_err(c0.cpu(), a0_cpu @ b0_cpu), REL_TOL)
+        self.assertLess(rel_err(c1.cpu(), a1_cpu @ b1_cpu), REL_TOL)
 
 
 if __name__ == "__main__":
