@@ -16,21 +16,17 @@ process-global and one-shot):
 ``raised``  the probe propagated an exception
 ``ctx``     the probe opened an NPU context (``rbln-stat`` reports this pid)
 ``remap``   what a later ``RBLN_DEVICES`` remap does: ``applied`` (mapping still live),
-            ``frozen`` (silently ignored), ``rejected`` (raises), ``None`` (undetermined)
+            ``frozen`` (silently ignored), ``None`` (undetermined)
 
 ``remap`` is load-bearing for vLLM: ``VLLM_WORKER_MULTIPROC_METHOD`` defaults to ``fork``
 and ``RBLNWorker._init_device_env()`` remaps ``RBLN_DEVICES`` *inside* the forked worker, so
-a mapping frozen in the parent breaks every worker. What "frozen" looks like depends on the
-runtime, so it is measured rather than assumed -- see
-:func:`runtime_freezes_on_acquisition`.
+a mapping frozen in the parent breaks every worker.
 
 A clause not satisfied yet is a ``strict=True`` xfail naming the work that closes it; an
 unexpected pass means the marker should go. One group remains: ``phase 4``, the RNG /
 serialization / device-name surface of ``torch.rbln``.
 """
 
-import functools
-import glob
 import json
 import os
 import subprocess
@@ -102,13 +98,12 @@ def _ctx_opened():
 def _remap_state():
     """How the runtime treats a RBLN_DEVICES remap right now.
 
-    ``applied`` took effect / ``frozen`` silently ignored / ``rejected`` raised /
-    ``None`` undetermined (fewer than two NPUs, or an unrelated failure).
+    ``applied`` took effect / ``frozen`` silently ignored / ``None`` undetermined (fewer than
+    two NPUs, or an unrelated failure).
 
-    Measured by the *visible device count*, not by matching an error message: a runtime that
-    freezes on the first query raises "changed at runtime (Sealed)" from the query itself,
-    while one that freezes on acquisition ignores the new value and rejects only at the next
-    acquisition -- so a message-matching probe reports "not frozen" against the latter.
+    Measured by the *visible device count* rather than by matching an error message: a frozen
+    mapping is ignored silently and only rejected at the next acquisition, so there is no
+    message to match at this point.
 
     Goes through ``rebel._C``, not a torch_rbln API, so a torch_rbln entry point that stopped
     freezing cannot make these checks pass for the wrong reason. Must run last -- it rewrites
@@ -130,11 +125,8 @@ def _remap_state():
     try:
         one = count("0")     # live -> exactly 1
         every = count(None)  # live -> every visible NPU (>= 2, checked above)
-    except BaseException as e:
-        msg = str(e)
-        if "Sealed" in msg or "changed at runtime" in msg or "cannot change" in msg:
-            return "rejected"
-        return None  # failed for an unrelated reason: undetermined
+    except BaseException:
+        return None  # the enumeration failed: undetermined
     if one == every:
         return "frozen"     # neither value reached the runtime
     if one == 1:
@@ -235,49 +227,6 @@ def xfail_until(owner: str, reason: str):
     return pytest.mark.xfail(strict=True, reason=f"[{owner}] {reason}")
 
 
-@functools.lru_cache(maxsize=1)
-def runtime_freezes_on_acquisition() -> bool:
-    """Whether the runtime freezes the ``RBLN_DEVICES`` mapping on acquisition, not on query.
-
-    A development environment can hold a runtime that freezes at the first read instead, and
-    there a query freezes the mapping whatever this layer does -- clauses requiring a query to
-    leave it remappable are unsatisfiable rather than broken. Measured, not assumed, so the
-    distinction does not depend on knowing which runtime is installed.
-
-    Measured once with a probe that touches no device: newer -> still ``applied``, older ->
-    the query already froze, so ``rejected``.
-
-    Caching this for the worker's lifetime is safe under the rule against process-caching
-    env-driven state (docs/TEST_GUIDE.md): the answer is a property of the installed
-    runtime, measured in a subprocess, and no test can toggle it.
-    """
-    if len(glob.glob("/dev/rbln*")) < 2:
-        return False  # the measurement itself needs two NPUs; see _remap_state
-    try:
-        return run_probe('rec["result"] = None', HEALTHY).remap == "applied"
-    except Exception:
-        # Runs at collection time, so a broken harness must not error the whole module.
-        # Nothing is hidden by returning False: test_detects_a_frozen_mapping is not gated
-        # on this and fails loudly when the harness cannot see a freeze.
-        return False
-
-
-def requires_acquisition_latch(test):
-    """Skip a clause only a runtime that freezes on acquisition can satisfy.
-
-    Checked when the test runs, not at decoration: the probe costs a subprocess, and a
-    collection-time check pays it on every xdist worker that imports this module.
-    """
-
-    @functools.wraps(test)
-    def wrapper(self, *args, **kwargs):
-        if not runtime_freezes_on_acquisition():
-            self.skipTest("runtime freezes RBLN_DEVICES on the first query, not on acquisition")
-        return test(self, *args, **kwargs)
-
-    return wrapper
-
-
 @pytest.mark.test_set_ci
 @requires_physical_devices(1)
 class TestProbeHarness(TestCase):
@@ -319,9 +268,7 @@ class TestProbeHarness(TestCase):
         self.assertIsNone(p.raised, f"allocation failed, cannot control for the freeze -- {p}")
         if p.remap is None:
             self.skipTest(f"remap state undetermined in this environment -- {p}")
-        # Either way the harness proved it can tell a frozen mapping from a live one: a
-        # runtime that freezes on query reports "rejected", one that freezes later "frozen".
-        self.assertIn(p.remap, ("frozen", "rejected"), f"harness did not see the mapping freeze -- {p}")
+        self.assertEqual(p.remap, "frozen", f"harness did not see the mapping freeze -- {p}")
 
     def test_detects_a_cpp_traceback(self):
         """A failure from a still-loud ``RBLN_CHECK`` must be seen by ``has_cpp_traceback``.
@@ -667,7 +614,6 @@ class TestUpstreamClauses(TestCase):
 
     # -- the counterpart clause: using a device must freeze the mapping -----
 
-    @requires_acquisition_latch
     def test_device_use_freezes_the_mapping(self):
         """Using a device must freeze the mapping, even though querying does not.
 
@@ -690,7 +636,6 @@ class TestUpstreamClauses(TestCase):
             self.skipTest(f"remap state undetermined in this environment -- {p}")
         self.assertEqual(p.remap, "frozen", f"device use left the mapping remappable -- {p}")
 
-    @requires_acquisition_latch
     def test_device_selection_after_import_is_honoured(self):
         """Selecting devices *after* import must change what this layer reports.
 
@@ -749,7 +694,6 @@ class TestUpstreamClauses(TestCase):
         self.assertTrue(use_failed, f"device use must fail with no devices -- {p}")
         self.assertEqual(after, 1, f"the 0-device plan was frozen and could not recover -- {p}")
 
-    @requires_acquisition_latch
     def test_current_device_stays_inside_the_plan(self):
         """``current_device()`` must never name a device outside the current plan.
 
@@ -774,7 +718,6 @@ class TestUpstreamClauses(TestCase):
         self.assertEqual(count, 1, f"the replan did not take effect -- {p}")
         self.assertLess(current, count, f"current_device() is outside the plan -- {p}")
 
-    @requires_acquisition_latch
     def test_a_frozen_mapping_survives_unsetting_the_variable(self):
         """Clearing ``RBLN_DEVICES`` after a device is in use must not un-freeze the mapping.
 
@@ -802,7 +745,6 @@ class TestExternalConsumers(TestCase):
     failure.
     """
 
-    @requires_acquisition_latch
     def test_cotenant_availability_probe_leaves_the_mapping_remappable(self):
         """A co-tenant availability probe must leave ``RBLN_DEVICES`` remappable.
 
@@ -816,7 +758,6 @@ class TestExternalConsumers(TestCase):
             self.skipTest(f"remap state undetermined in this environment -- {p}")
         self.assertEqual(p.remap, "applied", f"availability probe froze the mapping -- {p}")
 
-    @requires_acquisition_latch
     def test_fork_then_worker_remap_succeeds(self):
         """A forked worker must still be able to remap ``RBLN_DEVICES``.
 
@@ -860,7 +801,6 @@ class TestExternalConsumers(TestCase):
         self.assertNotIn("FAIL", child, f"forked worker could not remap -- {p}")
         self.assertEqual(child, "OK:1,1", f"the child kept the parent's mapping -- {p}")
 
-    @requires_acquisition_latch
     def test_cpu_dataloader_does_not_touch_the_npu(self):
         """``DataLoader(pin_memory=True)`` must not freeze the mapping or claim an NPU.
 
