@@ -10,7 +10,7 @@ it *calls into them*, from paths that have nothing to do with wanting an NPU:
 Every test pins exactly ONE upstream clause and cites its source, so a torch upgrade or a
 new call site fails on the clause rather than on a downstream symptom.
 
-Three properties are measured per probe, each in a fresh subprocess (the state involved is
+Each probe runs in a fresh subprocess (the state involved is
 process-global and one-shot):
 
 ``raised``  the probe propagated an exception
@@ -110,9 +110,9 @@ def _remap_state():
     while one that freezes on acquisition ignores the new value and rejects only at the next
     acquisition -- so a message-matching probe reports "not frozen" against the latter.
 
-    Goes through ``rebel._C``, not a torch_rbln API: a torch_rbln entry point that stopped
-    freezing would otherwise make these checks pass for the wrong reason. Must run last --
-    it rewrites RBLN_DEVICES.
+    Goes through ``rebel._C``, not a torch_rbln API, so a torch_rbln entry point that stopped
+    freezing cannot make these checks pass for the wrong reason. Must run last -- it rewrites
+    RBLN_DEVICES.
     """
     if len(glob.glob("/dev/rbln*")) < 2:
         return None  # one NPU: a frozen count and a live count are the same number
@@ -265,8 +265,7 @@ def requires_acquisition_latch(test):
     """Skip a clause only a runtime that freezes on acquisition can satisfy.
 
     Checked when the test runs, not at decoration: the probe costs a subprocess, and a
-    collection-time check pays it on every xdist worker that merely imports this module
-    (CI runs the parallel pass at --numprocesses=16).
+    collection-time check pays it on every xdist worker that imports this module.
     """
 
     @functools.wraps(test)
@@ -393,11 +392,11 @@ class TestUpstreamClauses(TestCase):
     def test_device_count_never_throws(self):
         """``torch.rbln.device_count()`` must never raise.
 
-        c10/cuda/CUDAFunctions.h:19-27 -- "people basically ~never want this function
+        c10/cuda/CUDAFunctions.h -- "people basically ~never want this function
         to fail; it should just return zero if things are not working. Oblige them."
         ``device_count() noexcept`` with a separately named throwing variant
         ``device_count_ensure_non_zero()``.
-        ATen/DeviceAccelerator.h:50 -- deviceCount() "is *REQUIRED* to not raise any
+        ATen/DeviceAccelerator.h -- deviceCount() "is *REQUIRED* to not raise any
         exception."
         """
         for name, env in ALL_SCENARIOS.items():
@@ -421,7 +420,7 @@ class TestUpstreamClauses(TestCase):
     def test_is_available_opens_no_device_context(self):
         """``is_available()`` must not initialize a context on any device.
 
-        ATen/detail/AcceleratorHooksInterface.h:33-38 -- isAvailable() "should NOT
+        ATen/detail/AcceleratorHooksInterface.h -- isAvailable() "should NOT
         initialize the context on any device (result of hasPrimaryContext below
         should not change)."
 
@@ -510,7 +509,7 @@ class TestUpstreamClauses(TestCase):
 
         torch/accelerator/__init__.py delegates to the device module. DataLoader calls
         ``torch.accelerator.is_available()`` for ``pin_memory`` (torch/utils/data/
-        dataloader.py:672,681), so a raise breaks a CPU-only DataLoader.
+        dataloader.py), so a raise breaks a CPU-only DataLoader.
         """
         for name, env in ALL_SCENARIOS.items():
             with self.subTest(scenario=name):
@@ -523,7 +522,7 @@ class TestUpstreamClauses(TestCase):
     def test_get_available_device_type_never_throws(self):
         """``torch._utils._get_available_device_type()`` must never raise.
 
-        torch/_utils.py:799 calls ``custom_device_mod.is_available()``. It backs
+        torch/_utils.py calls ``custom_device_mod.is_available()``. It backs
         ``_get_device_attr`` / ``_get_all_device_indices``, used well outside RBLN code.
         """
         for name, env in ALL_SCENARIOS.items():
@@ -534,7 +533,7 @@ class TestUpstreamClauses(TestCase):
     def test_common_utils_is_importable(self):
         """``import torch.testing._internal.common_utils`` must not raise.
 
-        torch/testing/_internal/common_utils.py:1522 evaluates
+        torch/testing/_internal/common_utils.py evaluates
         ``TEST_PRIVATEUSE1 = is_privateuse1_backend_available()`` at module scope,
         which calls ``torch.rbln.is_available()``. A raise makes torch's own test
         utilities unimportable.
@@ -556,14 +555,13 @@ class TestUpstreamClauses(TestCase):
     def test_manual_seed_reaches_the_backend(self):
         """``torch.manual_seed()`` must seed the RBLN generators.
 
-        Implementable now that enumeration claims nothing: the obvious implementation walks
-        ``device_count()`` to build one generator per device, which used to claim every mapped
-        NPU and so made a later vLLM start impossible.
+        The obvious implementation walks ``device_count()`` to build one generator per device,
+        which is only viable because enumeration claims nothing.
 
         torch/random.py::_seed_custom_device requires ``_is_in_bad_fork`` **and**
         ``manual_seed_all`` on the device module; without both it warns and silently does
         nothing, so RBLN results are not reproducible from ``torch.manual_seed()``.
-        Listed as a required backend API in torch/utils/backend_registration.py:44-63.
+        Listed as a required backend API in torch/utils/backend_registration.py.
         """
         p = run_probe(
             """
@@ -591,7 +589,7 @@ class TestUpstreamClauses(TestCase):
     def test_serialization_device_index_helper_exists(self):
         """``torch.rbln._utils._get_device_index`` must exist for ``torch.load``.
 
-        torch/serialization.py:606-628 documents it as required of a privateuse1 backend
+        torch/serialization.py documents it as required of a privateuse1 backend
         ("Implement the following methods in device_module like cuda:
         device_module._utils._get_device_index(location, True), device_module.device_count()")
         and uses it to resolve ``map_location="rbln:N"``. Without it torch falls back to a
@@ -611,7 +609,7 @@ class TestUpstreamClauses(TestCase):
         ``torch.cuda`` / ``torch.xpu`` both expose ``get_device_name``,
         ``get_device_properties`` and ``get_device_capability``, and frameworks reach for them
         through the device module (vLLM's XPU platform is
-        ``torch.xpu.get_device_name(device_id)``, vllm/platforms/xpu.py:137). With no RBLN
+        ``torch.xpu.get_device_name(device_id)``, vllm/platforms/xpu.py). With no RBLN
         equivalent, vllm-rbln calls ``rebel.get_npu_name()`` directly, bypassing torch, so a
         torch-level policy has nothing to apply to. ``RBLNGuardImpl::getDeviceCapability()``
         already exists on the C++ side.
@@ -650,7 +648,7 @@ class TestUpstreamClauses(TestCase):
     def test_availability_emits_no_cpp_traceback(self):
         """A swallowed availability failure must not spam a co-tenant's console.
 
-        ``RBLN_CHECK`` (c10/rbln/RBLNLogging.h:181-191) logs ``c10::Error::what()`` -- the
+        ``RBLN_CHECK`` (c10/rbln/RBLNLogging.h) logs ``c10::Error::what()`` -- the
         C++ stack trace included -- to **stdout** before throwing, at ERROR level, so no
         ``TORCH_RBLN_LOG_LEVEL`` setting suppresses it and catching the exception does not
         either.
@@ -821,7 +819,7 @@ class TestExternalConsumers(TestCase):
     def test_fork_then_worker_remap_succeeds(self):
         """A forked worker must still be able to remap ``RBLN_DEVICES``.
 
-        ``VLLM_WORKER_MULTIPROC_METHOD`` defaults to ``fork`` (vllm/envs.py:742) and
+        ``VLLM_WORKER_MULTIPROC_METHOD`` defaults to ``fork`` (vllm/envs.py) and
         ``RBLNWorker._init_device_env()`` assigns ``os.environ[RBLN_DEVICES]`` inside the
         forked worker. A frozen mapping is inherited across fork, so a probe in the parent
         breaks every worker deterministically.
@@ -865,7 +863,7 @@ class TestExternalConsumers(TestCase):
     def test_cpu_dataloader_does_not_touch_the_npu(self):
         """``DataLoader(pin_memory=True)`` must not freeze the mapping or claim an NPU.
 
-        torch/utils/data/dataloader.py:672,681 gate pinning on
+        torch/utils/data/dataloader.py gate pinning on
         ``torch.accelerator.is_available()``. A pure-CPU DataLoader in a vLLM parent must
         not freeze the process-wide mapping or hold device contexts.
         """
@@ -905,7 +903,7 @@ class TestExternalConsumers(TestCase):
     def test_torch_load_reports_its_own_error(self):
         """``torch.load(map_location="rbln:0")`` must fail with torch's message.
 
-        torch/serialization.py:606-648 ``_validate_device`` asks the device module for
+        torch/serialization.py ``_validate_device`` asks the device module for
         ``is_available()`` and ``device_count()`` so it can raise "Attempting to
         deserialize object on a RBLN device but torch.rbln.is_available() is False".
         A backend that raises its own config error instead replaces an actionable

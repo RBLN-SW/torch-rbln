@@ -359,7 +359,7 @@ accelerator hooks, it calls into them from paths that never asked for an NPU. Ea
 pins exactly one clause upstream states and cites its source, so a torch upgrade or a new
 call site fails on the clause rather than on a downstream symptom.
 
-Two conventions are specific to it:
+Conventions specific to it:
 
 - **Every probe runs in a fresh subprocess** (`run_probe`). It cannot use
   `run_in_isolated_process()` from `test/utils.py`, which needs a picklable callable, runs

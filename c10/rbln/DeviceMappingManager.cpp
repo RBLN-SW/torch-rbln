@@ -492,7 +492,7 @@ std::string DeviceMappingManager::envSignature() {
 }
 
 void DeviceMappingManager::ensurePlanned() const {
-  // A frozen plan is immutable, so skip the mutex: this runs five times per allocation.
+  // A frozen plan is immutable, so skip the mutex: every allocation asks this repeatedly.
   // plan_error_ is necessarily empty here -- commit() refuses to freeze with one set.
   if (plan_state_.load(std::memory_order_acquire) != PlanState::Open) {
     return;
@@ -546,9 +546,8 @@ void DeviceMappingManager::ensurePlannedLocked() const {
 void DeviceMappingManager::buildPlan() const {
   RBLN_LOG_DEBUG("Planning RBLN device mapping");
 
-  // Without the runtime nothing can execute, so report 0 devices as before. Planning
-  // itself no longer needs it; commit() does, and every caller already treats "no
-  // runtime" as "no device".
+  // Without the runtime nothing can execute, so report 0 devices. Planning does not need it;
+  // commit() does, and every caller treats "no runtime" as "no device".
   if (!rbln_runtime_available()) {
     RBLN_LOG_INFO(
         "RBLN runtime not loaded; planning 0 logical device(s). Device access will fail at the point of use.");
