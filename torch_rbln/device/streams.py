@@ -5,8 +5,8 @@ implementation, so the generic ``torch.Stream`` / ``torch.Event`` already work w
 ``device="rbln"``; this module adds the ``torch.cuda``-style surface on top.
 
 Not supported: event timing (:meth:`Event.elapsed_time` raises), stream priorities
-(accepted but ignored), and native cross-device event waits (they degrade to a
-host-side synchronize).
+(accepted but ignored), :meth:`torch.Stream.native_handle`, and native cross-device
+event waits (they degrade to a host-side synchronize).
 """
 
 from typing import Any, Optional  # noqa: UP035
