@@ -239,9 +239,10 @@ def xfail_until(owner: str, reason: str):
 def runtime_freezes_on_acquisition() -> bool:
     """Whether the runtime freezes the ``RBLN_DEVICES`` mapping on acquisition, not on query.
 
-    The supported ``rebel-compiler`` range spans both behaviours, and on a runtime that
-    freezes at the first read a query does so whatever this layer does -- clauses requiring a
-    query to leave the mapping remappable are unsatisfiable there, not broken.
+    A development environment can hold a runtime that freezes at the first read instead, and
+    there a query freezes the mapping whatever this layer does -- clauses requiring a query to
+    leave it remappable are unsatisfiable rather than broken. Measured, not assumed, so the
+    distinction does not depend on knowing which runtime is installed.
 
     Measured once with a probe that touches no device: newer -> still ``applied``, older ->
     the query already froze, so ``rejected``.

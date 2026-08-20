@@ -22,29 +22,24 @@ bool RBLNHooksInterface::isBuilt() const {
   return true;
 }
 
+// The probe hooks -- isAvailable, hasRBLN, deviceCount, hasPrimaryContext -- answer
+// questions torch treats as infallible, and Python answers the same ones from the same
+// predicates. None of them logs: RBLN_LOG_DEBUG can throw when debug logging is enabled
+// (fmt / sink, e.g. bad_alloc), which would make the two disagree on a path that must not
+// fail. The hooks that select or allocate may throw by design and do log.
+
 bool RBLNHooksInterface::isAvailable() const {
-  const auto is_built = isBuilt();
-  const auto has_rbln = hasRBLN();
-  RBLN_LOG_DEBUG("is_built={}, has_rbln={}", is_built, has_rbln);
-  const bool is_available = (is_built && has_rbln);
-  RBLN_LOG_DEBUG("is_available={}", is_available);
-  return is_available;
+  return isBuilt() && hasRBLN();
 }
 
 bool RBLNHooksInterface::hasRBLN() const {
-  // Nothrow (accelerator-hooks contract must not throw). Same predicate the Python
-  // torch.rbln.is_available() is bound to, so the two answers cannot diverge. True in
-  // dummy mode as well, provided the dummy mapping actually built.
-  const bool has_rbln = c10::rbln::runtime_available();
-  RBLN_LOG_DEBUG("has_rbln={}", has_rbln);
-  return has_rbln;
+  // Same predicate the Python torch.rbln.is_available() is bound to. True in dummy mode as
+  // well, provided the dummy mapping actually built.
+  return c10::rbln::runtime_available();
 }
 
 c10::DeviceIndex RBLNHooksInterface::deviceCount() const {
-  // Nothrow (see header): the generic accelerator APIs treat enumeration as infallible.
-  const auto device_count = c10::rbln::get_device_count_nothrow();
-  RBLN_LOG_DEBUG("device_count={}", static_cast<int>(device_count));
-  return device_count;
+  return c10::rbln::get_device_count_nothrow();
 }
 
 c10::DeviceIndex RBLNHooksInterface::getCurrentDevice() const {
@@ -77,16 +72,11 @@ c10::Device RBLNHooksInterface::getDeviceFromPtr(void* data) const {
 }
 
 bool RBLNHooksInterface::hasPrimaryContext(c10::DeviceIndex device_index) const {
-  RBLN_LOG_DEBUG("device_index={}", static_cast<int>(device_index));
-
   // CUDA parity: a primary context exists for a device only once THIS process has used it
-  // (a successful allocation), not merely because the device exists. Per-device and nothrow
-  // (torch consults this from cleanup/autograd paths, where a throw would abort the caller).
-  // Context flag first so an unused device doesn't trigger device enumeration/registration;
-  // runtime_available() then folds in the shutdown/liveness check.
-  const bool has_context = c10::rbln::device_context_initialized(device_index) && c10::rbln::runtime_available();
-  RBLN_LOG_DEBUG("has_context={}", has_context);
-  return has_context;
+  // (a successful allocation), not merely because the device exists. Context flag first so
+  // an unused device does not trigger device enumeration; runtime_available() then folds in
+  // the shutdown/liveness check.
+  return c10::rbln::device_context_initialized(device_index) && c10::rbln::runtime_available();
 }
 
 void RBLNHooksInterface::resizePrivateUse1Bytes(const c10::Storage& storage, size_t new_nbytes) const {
