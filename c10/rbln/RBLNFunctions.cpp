@@ -459,8 +459,11 @@ bool runtime_available() noexcept {
   //
   // A part-way commit failure is the same shape: the plan keeps its device count, but the
   // devices it did not claim can never be claimed, so every later device use rethrows.
+  // hasFailedCommit() last: getInstance() runs the registered mapping-ready callback -- which
+  // may reach back into Python -- without a catch, so the first touch of the singleton has to
+  // happen inside get_device_count_nothrow()'s catch-all, not on this noexcept boundary.
   return !runtime_shutting_down_.load(std::memory_order_relaxed) && rbln_runtime_available() &&
-      !DeviceMappingManager::getInstance().hasFailedCommit() && get_device_count_nothrow() > 0;
+      get_device_count_nothrow() > 0 && !DeviceMappingManager::getInstance().hasFailedCommit();
 }
 
 // --- Per-process device-context tracking ------------------------------------
