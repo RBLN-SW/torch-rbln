@@ -55,6 +55,8 @@ REGION_NAME = "Torch-Compiled Region"  # torch.compile's per-region CPU slice
 RUN_MARKER = "rbln_run"  # the run's source marker (host launch point)
 LAUNCH_ID_ARG = "launch_id"  # annotation on the source + every device slice of one run
 FLOW_CAT = "ac2g"  # category of the flow-arrow events (ph "s" start / "f" finish)
+RBLN_FLOW_BASE = 0xF0000000  # the flow-id block the emitter owns
+RBLN_FLOW_SPAN = 0x01000000
 DEVICE_CATS = ("kernel", "gpu_memcpy")
 RUNTIME_CAT = "privateuse1_runtime"
 TS_EPS_US = 1e-3  # a flow start sits on its marker's timestamp; allow json round-trip noise
@@ -206,13 +208,20 @@ class TestKinetoRegionDeviceAlignment(TestCase):
         self.assertGreater(checked, 0, "no device slices were checked")
 
     def _assert_flow_arrows(self, events, min_launches):
-        """Every ``rbln_run`` marker owns one flow start, every start reaches a device slice of
-        the same ``launch_id``, and no finish dangles. The arrows are ``ph`` "s"/"f" events, so
-        the ``ph == "X"`` checks above never see them; only this one fails if they break."""
+        """Ids in our block must account for themselves: one flow start per ``rbln_run``
+        marker, each start's finishes covering exactly that launch's runtime slices, and
+        nothing left over -- so a foreign id landing inside the block breaks a count. Ids
+        outside the block are another producer's. Arrows are ``ph`` "s"/"f", which the
+        ``ph == "X"`` checks never see."""
         slices = [e for e in events if e.get("ph") == "X" and isinstance(e.get("name"), str)]
         markers = [e for e in slices if e["name"] == RUN_MARKER and self._launch_id(e) is not None]
-        starts = [e for e in events if e.get("ph") == "s" and e.get("cat") == FLOW_CAT]
-        finishes = [e for e in events if e.get("ph") == "f" and e.get("cat") == FLOW_CAT]
+        flows = [
+            e
+            for e in events
+            if e.get("cat") == FLOW_CAT and RBLN_FLOW_BASE <= int(e["id"]) < RBLN_FLOW_BASE + RBLN_FLOW_SPAN
+        ]
+        starts = [e for e in flows if e.get("ph") == "s"]
+        finishes = [e for e in flows if e.get("ph") == "f"]
 
         self.assertGreaterEqual(
             len(markers), min_launches, f"expected >= {min_launches} '{RUN_MARKER}' markers, got {len(markers)}"
@@ -220,7 +229,8 @@ class TestKinetoRegionDeviceAlignment(TestCase):
         self.assertEqual(
             len(starts),
             len(markers),
-            f"expected one '{FLOW_CAT}' flow start per '{RUN_MARKER}' marker, got {len(starts)} for {len(markers)}",
+            f"expected one '{FLOW_CAT}' flow start per '{RUN_MARKER}' marker, got {len(starts)} for {len(markers)}"
+            " -- a surplus start means another producer emits ids inside the rbln block",
         )
 
         finishes_by_flow = {}
@@ -245,8 +255,6 @@ class TestKinetoRegionDeviceAlignment(TestCase):
             )
             lid = self._launch_id(source[0])
 
-            # A start with no finish is a marker pointing nowhere; a finish with no start is an
-            # orphan arrow. Both mean the launch -> device correlation broke.
             sinks = finishes_by_flow.pop(flow, [])
             self.assertTrue(sinks, f"flow {flow} (launch {lid}): start with no finish -- arrow reaches nothing")
             for fin in sinks:

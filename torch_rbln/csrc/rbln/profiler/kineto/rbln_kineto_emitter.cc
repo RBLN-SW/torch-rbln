@@ -4,6 +4,7 @@
 
 #include <c10/rbln/RBLNLogging.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <string>
@@ -39,6 +40,13 @@ const char* slice_annotation(const RblnKinetoSlice& s, const char* name) {
   return nullptr;
 }
 
+constexpr uint32_t kRblnFlowIdBase = 0xF0000000u;
+constexpr uint32_t kRblnFlowIdSpan = 0x01000000u;
+
+uint32_t get_flow_id(uint32_t launch_index) {
+  return kRblnFlowIdBase + launch_index;
+}
+
 bool is_dst_slice(const RblnKinetoSlice& s) {
   return s.kind == RBLN_KINETO_KIND_RUNTIME;
 }
@@ -49,15 +57,19 @@ void add_flow_arrows(const RblnKinetoExport* exp, int64_t clock_offset_ns,
     RBLN_LOG_INFO("rbln flow arrows: no host launches captured; 0 arrows");
     return;
   }
+  const uint32_t assignable = std::min(exp->host_launches_count, kRblnFlowIdSpan);
+  if (assignable < exp->host_launches_count)
+    RBLN_LOG_WARN("rbln flow arrows: {} of {} host launches exceed the flow-id field; no arrow drawn",
+                  exp->host_launches_count - assignable, exp->host_launches_count);
 
   // 1. assign one flow id per host launch.
   std::unordered_map<int64_t, uint32_t> flow_id_by_launch;
-  flow_id_by_launch.reserve(exp->host_launches_count);
-  for (uint32_t i = 0; i < exp->host_launches_count; ++i)
-    flow_id_by_launch.emplace(exp->host_launches[i].launch_id, i + 1);
+  flow_id_by_launch.reserve(assignable);
+  for (uint32_t i = 0; i < assignable; ++i)
+    flow_id_by_launch.emplace(exp->host_launches[i].launch_id, get_flow_id(i));
 
   // 2. put that flow id on the dst slices (1:N fan).
-  std::vector<bool> wired(exp->host_launches_count, false);
+  std::vector<bool> wired(assignable, false);
   uint64_t arrows = 0, skipped_no_launch_id = 0, skipped_no_launch = 0;
   for (uint32_t i = 0; i < exp->slices_count; ++i) {
     const RblnKinetoSlice& s = exp->slices[i];
@@ -78,13 +90,13 @@ void add_flow_arrows(const RblnKinetoExport* exp, int64_t clock_offset_ns,
     out->activities[i].flow.id = flow_id_it->second;
     out->activities[i].flow.type = ::libkineto::kLinkAsyncCpuGpu;
     out->activities[i].flow.start = 0;
-    wired[flow_id_it->second - 1] = true;
+    wired[flow_id_it->second - kRblnFlowIdBase] = true;
     ++arrows;
   }
 
   // 3. put it on the source marker, only for launches whose slices got it, so none dangles.
   uint64_t sources = 0, unwired = 0;
-  for (uint32_t i = 0; i < exp->host_launches_count; ++i) {
+  for (uint32_t i = 0; i < assignable; ++i) {
     if (!wired[i]) {
       ++unwired;
       continue;
@@ -98,7 +110,7 @@ void add_flow_arrows(const RblnKinetoExport* exp, int64_t clock_offset_ns,
     src.endTime = ts;
     src.device = host_launch.pid;
     src.resource = host_launch.tid;
-    src.flow.id = i + 1;
+    src.flow.id = flow_id_by_launch.at(host_launch.launch_id);
     src.flow.type = ::libkineto::kLinkAsyncCpuGpu;
     src.flow.start = 1;
     src.addMetadata(RBLN_KINETO_ANN_LAUNCH_ID, std::to_string(host_launch.launch_id));
@@ -107,7 +119,7 @@ void add_flow_arrows(const RblnKinetoExport* exp, int64_t clock_offset_ns,
   }
   if (unwired)
     RBLN_LOG_WARN("rbln flow arrows: {} of {} host launches had no RUNTIME slice; no arrow drawn",
-                  unwired, exp->host_launches_count);
+                  unwired, assignable);
 
   RBLN_LOG_INFO(
       "rbln flow arrows: {} sources, {} arrows; skipped {} slices w/o launch_id, {} w/o host-launch match",
