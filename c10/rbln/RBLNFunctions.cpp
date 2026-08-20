@@ -739,6 +739,11 @@ namespace {
 
 // Pack a c10::Stream into its C-ABI handle. StreamId carries the per-device stream id.
 uint64_t stream_to_handle(const c10::Stream& stream) {
+  // The handle holds the stream id in 32 bits, so a wider id would alias another stream.
+  RBLN_CHECK(
+      stream.id() >= 0 && stream.id() <= std::numeric_limits<uint32_t>::max(),
+      "rbln stream id {} is out of range for a stream handle",
+      stream.id());
   const auto torch_device_id = static_cast<uint32_t>(to_device_id(stream.device_index()));
   const auto local_id = static_cast<uint32_t>(stream.id());
   return (static_cast<uint64_t>(torch_device_id) << 32) | local_id;

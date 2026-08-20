@@ -52,6 +52,17 @@ class Stream(torch.Stream):
         dev = torch.device("rbln", current_device()) if device is None else _as_rbln_device(device)
         return super().__new__(cls, dev, priority=priority)
 
+    def record_event(self, event: Optional["Event"] = None) -> "Event":
+        """Record ``event`` on this stream, creating an :class:`Event` if ``None``.
+
+        Overridden like :meth:`torch.cuda.Stream.record_event` so the event is an
+        rbln one; the inherited method takes only a base :class:`torch.Event`.
+        """
+        if event is None:
+            event = Event()
+        event.record(self)
+        return event
+
     @property
     def priority(self) -> int:
         return 0

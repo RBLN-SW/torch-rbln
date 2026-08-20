@@ -14,6 +14,13 @@ import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
+from test.utils import assert_device_resident_dtype
+
+
+# fp16 matmul accumulates, so the device result is compared loosely.
+ATOL = 0.05
+RTOL = 0.05
+
 
 @pytest.mark.test_set_ci
 class TestStream(TestCase):
@@ -22,6 +29,10 @@ class TestStream(TestCase):
         # do not leak the current stream into one another.
         torch.rbln.set_stream(torch.rbln.default_stream())
         super().tearDown()
+
+    def test_ordering_tests_use_a_device_resident_dtype(self):
+        # The fences below only mean something if the data lives on the device.
+        assert_device_resident_dtype(torch.float16)
 
     def test_default_stream_id_is_zero(self):
         default = torch.rbln.default_stream()
@@ -77,6 +88,11 @@ class TestStream(TestCase):
         with self.assertRaisesRegex(RuntimeError, "expect device type"):
             torch.rbln.set_stream(torch.Stream(device="cpu"))
 
+    def test_record_event_returns_an_rbln_event(self):
+        s = torch.rbln.Stream()
+        self.assertIsInstance(s.record_event(), torch.rbln.Event)
+        self.assertIsInstance(s.record_event(torch.rbln.Event()), torch.rbln.Event)
+
     def test_query_and_synchronize_idle(self):
         s = torch.rbln.Stream()
         self.assertTrue(s.query())
@@ -101,7 +117,7 @@ class TestStream(TestCase):
     def test_copy_on_stream_gated_by_event(self):
         # Non-blocking D2H on a non-default stream, gated by an event recorded on it.
         # Pinned host memory, so the event's seq wait makes the copy host-visible.
-        src = torch.arange(1024, dtype=torch.int32).reshape(-1, 1)
+        src = torch.arange(1024, dtype=torch.float16).reshape(-1, 1)
         dev = src.to("rbln")
         pinned = torch.empty_like(src, pin_memory=True)
         s = torch.rbln.Stream()
@@ -115,21 +131,22 @@ class TestStream(TestCase):
 
     def test_matmul_on_non_default_stream(self):
         # A compute op, not just a copy, honors the current stream through dispatch.
-        a = torch.randn(64, 64).to("rbln")
-        b = torch.randn(64, 64).to("rbln")
+        a_cpu, b_cpu = torch.randn(64, 64, dtype=torch.float16), torch.randn(64, 64, dtype=torch.float16)
+        a, b = a_cpu.to("rbln"), b_cpu.to("rbln")
         s = torch.rbln.Stream()
         with torch.rbln.stream(s):
             self.assertEqual(torch.rbln.current_stream(), s)
             c = (a @ b).relu()
         torch.rbln.synchronize()
-        expected = (a.cpu() @ b.cpu()).relu()
-        self.assertTrue(torch.allclose(c.cpu(), expected, atol=1e-2, rtol=1e-2))
+        expected = (a_cpu @ b_cpu).relu()
+        self.assertTrue(torch.allclose(c.cpu(), expected, atol=ATOL, rtol=RTOL))
 
     def test_compute_gated_by_async_copy_event(self):
         # Copy<->compute ordering across streams: the event fence is what makes the
         # producer's still-in-flight copy safe for the consumer to matmul with.
-        w_cpu = torch.randn(64, 64).pin_memory()
-        x = torch.randn(8, 64).to("rbln")
+        w_cpu = torch.randn(64, 64, dtype=torch.float16).pin_memory()
+        x_cpu = torch.randn(8, 64, dtype=torch.float16)
+        x = x_cpu.to("rbln")
         producer, consumer = torch.rbln.Stream(), torch.rbln.Stream()
         ready = torch.rbln.Event()
         with torch.rbln.stream(producer):
@@ -139,7 +156,7 @@ class TestStream(TestCase):
             consumer.wait_event(ready)  # fence: w must be fully copied before use
             y = x @ w
         torch.rbln.synchronize()
-        self.assertTrue(torch.allclose(y.cpu(), x.cpu() @ w_cpu, atol=1e-2, rtol=1e-2))
+        self.assertTrue(torch.allclose(y.cpu(), x_cpu @ w_cpu, atol=ATOL, rtol=RTOL))
 
     def test_stream_context_selects_the_stream_device(self):
         # Selecting a stream selects its device, so allocations land there.
@@ -155,8 +172,10 @@ class TestStream(TestCase):
         # Independent work on per-device streams is correct and isolated.
         if torch.rbln.device_count() < 2:
             self.skipTest("needs >= 2 RBLN devices")
-        a0, b0 = torch.randn(32, 32).to("rbln:0"), torch.randn(32, 32).to("rbln:0")
-        a1, b1 = torch.randn(32, 32).to("rbln:1"), torch.randn(32, 32).to("rbln:1")
+        a0_cpu, b0_cpu = torch.randn(32, 32, dtype=torch.float16), torch.randn(32, 32, dtype=torch.float16)
+        a1_cpu, b1_cpu = torch.randn(32, 32, dtype=torch.float16), torch.randn(32, 32, dtype=torch.float16)
+        a0, b0 = a0_cpu.to("rbln:0"), b0_cpu.to("rbln:0")
+        a1, b1 = a1_cpu.to("rbln:1"), b1_cpu.to("rbln:1")
         s0, s1 = torch.rbln.Stream(device=0), torch.rbln.Stream(device=1)
         with torch.rbln.stream(s0):
             c0 = a0 @ b0
@@ -164,8 +183,8 @@ class TestStream(TestCase):
             c1 = a1 @ b1
         torch.rbln.synchronize(0)
         torch.rbln.synchronize(1)
-        self.assertTrue(torch.allclose(c0.cpu(), a0.cpu() @ b0.cpu(), atol=1e-2, rtol=1e-2))
-        self.assertTrue(torch.allclose(c1.cpu(), a1.cpu() @ b1.cpu(), atol=1e-2, rtol=1e-2))
+        self.assertTrue(torch.allclose(c0.cpu(), a0_cpu @ b0_cpu, atol=ATOL, rtol=RTOL))
+        self.assertTrue(torch.allclose(c1.cpu(), a1_cpu @ b1_cpu, atol=ATOL, rtol=RTOL))
 
 
 if __name__ == "__main__":
