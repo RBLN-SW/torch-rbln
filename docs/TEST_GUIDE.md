@@ -354,36 +354,20 @@ custom_instantiate_device_type_tests(TestCommon, globals(), only_for="privateuse
 ### Contract Conformance Tests
 
 `test/rbln/test_privateuse1_contract.py` is organized differently from the rest of the
-suite, on purpose. PyTorch does not merely *offer* the `torch.rbln` module and the RBLN
-accelerator hooks — it **calls into them**, from paths that have nothing to do with
-wanting an NPU (`DataLoader(pin_memory=True)`, `torch.load(map_location=...)`, importing
-`torch.testing._internal.common_utils`). Upstream states the rules those call sites rely
-on, e.g. `ATen/detail/AcceleratorHooksInterface.h`:
+suite, on purpose: PyTorch does not merely *offer* the `torch.rbln` module and the RBLN
+accelerator hooks, it calls into them from paths that never asked for an NPU. Each test
+pins exactly one clause upstream states and cites its source, so a torch upgrade or a new
+call site fails on the clause rather than on a downstream symptom.
 
-> `isAvailable()` — "This function should NEVER throw. This function should NOT initialize
-> the context on any device."
+Two conventions are specific to it:
 
-Each test in that file pins **exactly one** such clause and cites its upstream source in
-the docstring, so a torch upgrade or a newly discovered call site fails on the clause
-rather than on a downstream symptom.
-
-Three conventions are specific to it:
-
-- **Every probe runs in a fresh subprocess** (`run_probe`), because the state involved is
-  process-global and one-shot: the RBLN runtime fixes the `RBLN_DEVICES` mapping once a
-  device is acquired, and device contexts last for the process lifetime. It cannot use
+- **Every probe runs in a fresh subprocess** (`run_probe`). It cannot use
   `run_in_isolated_process()` from `test/utils.py`, which needs a picklable callable, runs
   after `torch_rbln` is already imported, and captures no output — the probes must set
-  `RBLN_*` *before* the import and inspect stdout/stderr. This mirrors
-  `test_import_rbln_devices_seal.py`.
+  `RBLN_*` *before* the import and inspect stdout/stderr.
 - **A clause not satisfied yet is a `strict=True` xfail** naming the work that closes it,
-  rather than being omitted. `xfail_strict = true` is already the project default, so an
-  unexpected pass fails the suite and signals that the marker should be removed.
-- **A clause only a newer runtime can satisfy is skipped, not xfailed**, and which runtime
-  is underneath is measured rather than assumed (`runtime_freezes_on_acquisition()`).
-  torch-rbln supports `rebel-compiler>=0.11.1`, which spans both the older behaviour (the
-  mapping is fixed by the first query) and the current one (fixed on acquisition); a clause
-  that requires the latter is unsatisfiable on the former rather than broken there.
+  rather than being omitted. `xfail_strict = true` is the project default, so an unexpected
+  pass fails the suite and signals that the marker should be removed.
 
 ---
 

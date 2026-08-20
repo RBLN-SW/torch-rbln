@@ -141,13 +141,9 @@ The mapping is resolved in two stages:
 | **Plan** | The variables below are parsed and validated and the logical→physical table is computed. No NPU is claimed. | `torch.rbln.is_available()`, `torch.rbln.device_count()`, other queries |
 | **Commit** | Each planned logical device is registered with the runtime, opening a context on every mapped NPU. The mapping is then frozen. | First actual device use — an allocation, `synchronize()`, a collective. Selecting a device with `set_device()` does **not** commit: it is bookkeeping and claims nothing. |
 
-Until commit, editing the variables still changes the mapping; after commit it is fixed for the process lifetime. This matches `torch.cuda`, which likewise refuses to cache its device count "prior to CUDA initialization, because the number of devices can change due to changes to `CUDA_VISIBLE_DEVICES`".
+Until commit, editing the variables still changes the mapping. After commit it is fixed for the process lifetime: later changes are ignored rather than rejected, and unsetting a variable does not widen the pool back to every device. This matches `torch.cuda`, which likewise refuses to cache its device count "prior to CUDA initialization, because the number of devices can change due to changes to `CUDA_VISIBLE_DEVICES`".
 
 Both layers freeze at the same moment: commit registers each logical device with the runtime, and that registration is what makes the runtime fix its own `RBLN_DEVICES` mapping. A launcher may therefore assign `RBLN_DEVICES` after import — including inside a `fork()`ed worker — as long as it does so before the process first uses a device.
-
-> **Note.** This requires a runtime that fixes its mapping on acquisition ([rebellions-sw/rebel_compiler#12904](https://github.com/rebellions-sw/rebel_compiler/pull/12904)). Against an older one, the first availability query fixes it instead, and a later change is rejected with `RBLN_DEVICES environment variable changed at runtime (Sealed)` — in this process and in any it forks. Set `RBLN_DEVICES` before the process starts if you must support that case.
-
-After commit, changing the variables is ignored rather than honoured, and unsetting them does not widen the pool back to "all devices".
 
 ### RBLN_NPUS_PER_DEVICE
 

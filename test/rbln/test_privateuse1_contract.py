@@ -8,8 +8,7 @@ it *calls into them*, from paths that have nothing to do with wanting an NPU:
 ``torch.testing._internal.common_utils``, ``torch._utils._get_available_device_type()``.
 
 Every test pins exactly ONE upstream clause and cites its source, so a torch upgrade or a
-new call site fails on the clause rather than on a downstream symptom. Each violation used
-to be found one call site at a time (#100, #107, #120, #130, #151).
+new call site fails on the clause rather than on a downstream symptom.
 
 Three properties are measured per probe, each in a fresh subprocess (the state involved is
 process-global and one-shot):
@@ -106,11 +105,10 @@ def _remap_state():
     ``applied`` took effect / ``frozen`` silently ignored / ``rejected`` raised /
     ``None`` undetermined (fewer than two NPUs, or an unrelated failure).
 
-    Measured by the *visible device count*, not by matching an error message: a
-    pre-rebellions-sw/rebel_compiler#12904 runtime raises "changed at runtime (Sealed)"
-    from the query itself, while #12904 and later ignore the new value and reject only at
-    the next acquisition -- so a message-matching probe reports "not frozen" against the
-    newer one.
+    Measured by the *visible device count*, not by matching an error message: a runtime that
+    freezes on the first query raises "changed at runtime (Sealed)" from the query itself,
+    while one that freezes on acquisition ignores the new value and rejects only at the next
+    acquisition -- so a message-matching probe reports "not frozen" against the latter.
 
     Goes through ``rebel._C``, not a torch_rbln API: a torch_rbln entry point that stopped
     freezing would otherwise make these checks pass for the wrong reason. Must run last --
@@ -241,10 +239,9 @@ def xfail_until(owner: str, reason: str):
 def runtime_freezes_on_acquisition() -> bool:
     """Whether the runtime freezes the ``RBLN_DEVICES`` mapping on acquisition, not on query.
 
-    rebellions-sw/rebel_compiler#12904 moved the freeze from the first ``RBLN_DEVICES`` read
-    to ``Context::Create``. torch-rbln supports ``rebel-compiler>=0.11.1``, which spans both,
-    and on the older one a query freezes the mapping whatever this layer does -- so clauses
-    requiring a query to leave it remappable are unsatisfiable there, not broken.
+    The supported ``rebel-compiler`` range spans both behaviours, and on a runtime that
+    freezes at the first read a query does so whatever this layer does -- clauses requiring a
+    query to leave the mapping remappable are unsatisfiable there, not broken.
 
     Measured once with a probe that touches no device: newer -> still ``applied``, older ->
     the query already froze, so ``rejected``.
@@ -265,7 +262,7 @@ def runtime_freezes_on_acquisition() -> bool:
 
 
 def requires_acquisition_latch(test):
-    """Skip a clause that only a post-#12904 runtime can satisfy.
+    """Skip a clause only a runtime that freezes on acquisition can satisfy.
 
     Checked when the test runs, not at decoration: the probe costs a subprocess, and a
     collection-time check pays it on every xdist worker that merely imports this module
@@ -275,7 +272,7 @@ def requires_acquisition_latch(test):
     @functools.wraps(test)
     def wrapper(self, *args, **kwargs):
         if not runtime_freezes_on_acquisition():
-            self.skipTest("runtime freezes RBLN_DEVICES on the first query (pre rebel_compiler#12904)")
+            self.skipTest("runtime freezes RBLN_DEVICES on the first query, not on acquisition")
         return test(self, *args, **kwargs)
 
     return wrapper
@@ -311,10 +308,9 @@ class TestProbeHarness(TestCase):
     def test_detects_a_frozen_mapping(self):
         """A probe that acquires a device must be reported as freezing the mapping.
 
-        The freeze is only observable through an *acquisition* now. Under
-        rebellions-sw/rebel_compiler#12904 a query leaves the mapping live, so the control
-        this replaced -- ``rebel._C.get_npu_name(0)``, a query -- would report "not frozen"
-        forever and every "left it remappable" clause below would pass for free.
+        The freeze is only observable through an *acquisition*: a query leaves the mapping
+        live, so a query-based control would report "not frozen" forever and every "left it
+        remappable" clause below would pass for free.
         """
         p = run_probe(
             'rec["result"] = float(torch.ones(4, dtype=torch.float16, device="rbln:0").sum().cpu())',
@@ -323,8 +319,8 @@ class TestProbeHarness(TestCase):
         self.assertIsNone(p.raised, f"allocation failed, cannot control for the freeze -- {p}")
         if p.remap is None:
             self.skipTest(f"remap state undetermined in this environment -- {p}")
-        # "rejected" on a pre-#12904 runtime, "frozen" on #12904 and later: either way the
-        # harness proved it can tell a frozen mapping from a live one.
+        # Either way the harness proved it can tell a frozen mapping from a live one: a
+        # runtime that freezes on query reports "rejected", one that freezes later "frozen".
         self.assertIn(p.remap, ("frozen", "rejected"), f"harness did not see the mapping freeze -- {p}")
 
     def test_detects_a_cpp_traceback(self):
@@ -561,8 +557,8 @@ class TestUpstreamClauses(TestCase):
         """``torch.manual_seed()`` must seed the RBLN generators.
 
         Implementable now that enumeration claims nothing: the obvious implementation walks
-        ``device_count()`` to build one generator per device, which claimed every mapped NPU
-        and so made a later vLLM start impossible (rebellions-sw/fsw-inference#475).
+        ``device_count()`` to build one generator per device, which used to claim every mapped
+        NPU and so made a later vLLM start impossible.
 
         torch/random.py::_seed_custom_device requires ``_is_in_bad_fork`` **and**
         ``manual_seed_all`` on the device module; without both it warns and silently does
@@ -783,10 +779,10 @@ class TestUpstreamClauses(TestCase):
     def test_a_frozen_mapping_survives_unsetting_the_variable(self):
         """Clearing ``RBLN_DEVICES`` after a device is in use must not un-freeze the mapping.
 
-        rebel_compiler#12904 checks the freeze before the environment, so an unset cannot
-        fall back to "auto-discover all devices" and quietly widen the pool under live
-        allocations. Pinned here because it is the escape hatch a remap-rejection check
-        alone would miss: unsetting is not a changed value, it is no value.
+        The runtime checks the freeze before the environment, so an unset cannot fall back to
+        "auto-discover all devices" and quietly widen the pool under live allocations. Pinned
+        because it is the escape hatch a remap-rejection check alone would miss: unsetting is
+        not a changed value, it is no value.
         """
         p = run_probe(
             """
@@ -814,7 +810,6 @@ class TestExternalConsumers(TestCase):
         LMCache runs device detection while importing ``lmcache.v1.platform``, on every
         start, in whatever process imports it -- including a vLLM parent that has not yet
         forked its workers. A mapping frozen there is inherited by every worker.
-        Reported as rebellions-sw/fsw-inference#495.
         """
         p = run_probe('rec["result"] = torch.rbln.is_available()', HEALTHY)
         self.assertIsNone(p.raised, f"is_available() raised -- {p}")
@@ -829,8 +824,7 @@ class TestExternalConsumers(TestCase):
         ``VLLM_WORKER_MULTIPROC_METHOD`` defaults to ``fork`` (vllm/envs.py:742) and
         ``RBLNWorker._init_device_env()`` assigns ``os.environ[RBLN_DEVICES]`` inside the
         forked worker. A frozen mapping is inherited across fork, so a probe in the parent
-        breaks every worker deterministically. torch-rbln #151 was this bug via a
-        different entry point.
+        breaks every worker deterministically.
 
         The parent gets *two* devices and the child keeps *one*, so the counts differ: an
         ignored remap leaves the child reporting the parent's 2. A same-size remap cannot tell
@@ -894,12 +888,7 @@ class TestExternalConsumers(TestCase):
     def test_import_does_not_resolve_a_device(self):
         """Importing ``torch_rbln`` must not resolve a device to read its architecture.
 
-        torch-rbln #151 was an import-time ``is_atom_device()`` gate, which resolves device 0
-        through ``rebel.device_info.get_npu_name`` -- a device node opened and closed on every
-        import. Needs its own observable because a resolving query no longer freezes
-        ``RBLN_DEVICES``, so test_import_rbln_devices_seal.py would pass for an import that
-        queries.
-
+        Resolving one opens and closes a device node on every import.
         ``get_device_arch`` is an ``lru_cache``: an empty cache means nothing asked.
         """
         p = run_probe(

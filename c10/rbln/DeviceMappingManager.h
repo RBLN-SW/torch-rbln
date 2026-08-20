@@ -142,10 +142,9 @@ class C10_RBLN_API DeviceMappingManager {
   // context on any device".
   //
   // Commit is also where the runtime freezes its own RBLN_DEVICES mapping:
-  // rbln_register_device_id() reaches Context::Create, which latches it
-  // (rebellions-sw/rebel_compiler#12904). Both layers therefore freeze together, so a
-  // launcher may still assign RBLN_DEVICES after import -- fork()ed workers included --
-  // until the first device use.
+  // rbln_register_device_id() reaches Context::Create, which latches it. Both layers
+  // therefore freeze together, so a launcher may still assign RBLN_DEVICES after import --
+  // fork()ed workers included -- until the first device use.
 
   /**
    * @brief Plan the device mapping from the environment (no NPU is claimed).

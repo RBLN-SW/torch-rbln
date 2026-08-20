@@ -2,21 +2,12 @@
 
 """Importing torch_rbln must not freeze the ``RBLN_DEVICES`` mapping.
 
-The rbln runtime fixes the ``RBLN_DEVICES`` mapping once a device is acquired, and a
-later change is then rejected. Against a runtime older than
-rebellions-sw/rebel_compiler#12904 it fixed the mapping on its first *device-resolving
-call* instead (e.g. an NPU-name query), raising ``RBLN_DEVICES environment variable
-changed at runtime (Sealed)``. A vLLM data-parallel worker inherits a partition-wide
-``RBLN_DEVICES`` and remaps it per rank *after* import, so import must not resolve a
-device on either runtime -- which is what this file pins.
+The rbln runtime fixes the ``RBLN_DEVICES`` mapping once a device is acquired, and a later
+change is then rejected. A vLLM data-parallel worker inherits a partition-wide
+``RBLN_DEVICES`` and remaps it per rank *after* import, so import must not resolve a device.
 
-torch-rbln #151 gated the kineto profiler on ``is_atom_device()`` at import, which called
-``get_npu_name(0)`` and sealed ``RBLN_DEVICES`` (0.3.0rc0 OK, rc2 failed). The bridge now
-registers unconditionally; ATOM is gated by the runtime (``rbln_kineto_is_active()``
-reports inactive on ATOM, rebel-compiler #12079), not by an import-time arch query.
-
-Scope: this file measures the runtime half -- that a remap after import is still accepted.
-The torch half, that nothing on the import path resolves a device at all, is pinned by
+Scope: the runtime half -- that a remap after import is still accepted. The torch half, that
+nothing on the import path resolves a device at all, is pinned by
 ``test_import_does_not_resolve_a_device`` in test_privateuse1_contract.py.
 """
 
