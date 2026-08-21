@@ -952,6 +952,9 @@ void event_record(uint64_t event, c10::Stream stream) {
 }
 
 void event_block(c10::Stream stream, uint64_t event) {
+  if (runtime_shutting_down_.load(std::memory_order_relaxed)) {
+    return;
+  }
   const auto stream_handle = stream_to_handle(stream);
   if ((event >> 32) == (stream_handle >> 32)) {
     // Same device: does not block the host.
