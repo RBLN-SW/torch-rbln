@@ -33,7 +33,6 @@ class OpCategories:
 
     # TODO: need to make automatically fill 'Ops' if it figure out
     REDUCTION_OPS: Set[str] = {"sum", "mean"}
-    UNARY_OPS: Set[str] = {"silu", "rsqrt", "neg", "ceil", "abs", "log", "floor", "trunc"}
     BROADCASTABLE_OPS: Set[str] = {
         "add",
         "sub",
@@ -185,14 +184,6 @@ class OpCategories:
         ({"where"}, "where"),
         ({"addmm"}, "addmm"),
         ({"linear"}, "linear"),
-    ]
-
-    # Dtype validation mapping: (category_set, template_method_name)
-    # Maps category Set -> template method name in Validation class
-    # Order matters: checked in sequence, first match wins
-    DTYPE_VALIDATION_MAP: List[Tuple[Set[str], str]] = [  # noqa: UP035
-        (REDUCTION_OPS, "dtype_reduction"),
-        (COMPARE_OPS, "dtype_compare"),
     ]
 
     # Special out parameter names for operations that don't use standard 'out' kwarg
