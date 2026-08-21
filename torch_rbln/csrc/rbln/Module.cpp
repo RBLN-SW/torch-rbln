@@ -2,6 +2,7 @@
 #include <ATen/native/rbln/RBLNCPUFastPaths.h>
 #include <ATen/native/rbln/RBLNCopy.h>
 #include <ATen/native/rbln/RBLNTensorUtils.h>
+#include <c10/core/impl/VirtualGuardImpl.h>
 #include <c10/rbln/DeviceMappingManager.h>
 #include <c10/rbln/RBLNFallbackConfig.h>
 #include <c10/rbln/RBLNFunctions.h>
@@ -119,6 +120,59 @@ void register_public_device_api(py::module_& module) {
       "_get_device_topology",
       []() -> c10::rbln::DeviceTopology { return c10::rbln::DeviceMappingManager::getInstance().getDeviceTopology(); },
       "Get the complete device topology.");
+}
+
+/**
+ * @brief Register the low-level stream primitives backing torch.rbln streams.
+ *
+ * These mirror torch.cuda's _cuda_getCurrentStream / _cuda_setStream: they exchange
+ * (stream_id, device_index, device_type) tuples with Python and delegate to the
+ * PrivateUse1 guard impl. torch.Stream / torch.Event need no binding of their own.
+ *
+ * @param module The Python module to register the functions with
+ */
+void register_stream_api(py::module_& module) {
+  using c10::impl::VirtualGuardImpl;
+  auto pack = [](const c10::Stream& stream) {
+    return std::make_tuple(
+        static_cast<int64_t>(stream.id()),
+        static_cast<int64_t>(stream.device_index()),
+        static_cast<int64_t>(stream.device_type()));
+  };
+  module.def(
+      "_get_current_stream",
+      [pack](c10::DeviceIndex device_index) {
+        return pack(VirtualGuardImpl(c10::kPrivateUse1).getStream(c10::Device(c10::kPrivateUse1, device_index)));
+      },
+      "Internal: current rbln stream as (stream_id, device_index, device_type)");
+  module.def(
+      "_get_default_stream",
+      [pack](c10::DeviceIndex device_index) {
+        return pack(VirtualGuardImpl(c10::kPrivateUse1).getDefaultStream(c10::Device(c10::kPrivateUse1, device_index)));
+      },
+      "Internal: default rbln stream as (stream_id, device_index, device_type)");
+  module.def(
+      "_exchange_stream",
+      [pack](int64_t stream_id, c10::DeviceIndex device_index, int32_t device_type) {
+        // c10::Stream::unpack3 accepts any valid device type, so a foreign stream id
+        // would otherwise be read as an RBLN local stream id.
+        TORCH_CHECK(
+            static_cast<c10::DeviceType>(device_type) == c10::kPrivateUse1,
+            "torch.rbln streams expect device type ",
+            c10::DeviceTypeName(c10::kPrivateUse1),
+            ", got ",
+            c10::DeviceTypeName(static_cast<c10::DeviceType>(device_type)));
+        const auto stream = c10::Stream::unpack3(
+            static_cast<c10::StreamId>(stream_id), device_index, static_cast<c10::DeviceType>(device_type));
+        const auto guard = VirtualGuardImpl(c10::kPrivateUse1);
+        // Selecting a stream also selects its device, as torch.cuda and
+        // torch.accelerator both do.
+        if (guard.getDevice().index() != stream.device_index()) {
+          guard.setDevice(stream.device());
+        }
+        return pack(guard.exchangeStream(stream));
+      },
+      "Internal: set current rbln stream; returns the previous as (stream_id, device_index, device_type)");
 }
 
 // set_device_layout_like operates on a whole tensor allocation, so a view
@@ -578,6 +632,7 @@ extern "C" PyObject* initModule() {
 
   // Step 4: Register all RBLN components
   register_public_device_api(python_module);
+  register_stream_api(python_module);
   register_internal_api(python_module);
   register_supported_dtypes_api(python_module);
 
