@@ -291,10 +291,14 @@ The PyTorch test framework (`torch.testing._internal`) automatically generates d
 2. Call `instantiate_device_type_tests(TestClass, globals(), only_for="privateuse1")` at module scope.
 3. The framework generates concrete classes like `TestFooPRIVATEUSE1` with methods suffixed `_rbln`.
 
-**All test files in this project use `only_for="privateuse1"`** to generate tests exclusively for the RBLN backend, avoiding unnecessary CPU/CUDA variants.
+**Device-type tests in this project always use `only_for="privateuse1"`** to generate tests exclusively for the RBLN backend, avoiding unnecessary CPU/CUDA variants.
+
+Since that leaves exactly one device type, the instantiation earns its keep through the axes it expands — `@dtypes`, `@parametrize`, or a `device` argument — and it is required for any test that uses one.
+
+**Do not wrap a test that never touches a device.** The call deletes the template class and rebuilds it per device type, and the RBLN base is only in that list when `torch.rbln.is_available()` is true. On a host without an NPU the template is gone and nothing replaces it, so the file collects zero tests — no failure, no skip. A test that needs hardware loses nothing by that; a pure-logic test loses the ability to run where it still could. Tests asserting behavior with no device present (`test_dummy_device.py`, `test_no_device.py`) or through a subprocess (`test_import_rbln_devices_seal.py`) are plain `TestCase`.
 
 ```python
-# This call at the bottom of every test file:
+# This call at the bottom of a device-type test file:
 instantiate_device_type_tests(TestRegisteredNativeOps, globals(), only_for="privateuse1")
 
 # Generates: TestRegisteredNativeOpsPRIVATEUSE1
