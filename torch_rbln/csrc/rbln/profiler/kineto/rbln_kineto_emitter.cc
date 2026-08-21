@@ -2,8 +2,14 @@
 
 #include <torch_rbln/csrc/rbln/profiler/kineto/rbln_kineto_emitter.h>
 
+#include <c10/rbln/RBLNLogging.h>
+
+#include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace rbln::profiler::kineto {
 
@@ -23,6 +29,101 @@ namespace {
     default:
       return ActivityType::PRIVATEUSE1_RUNTIME;
   }
+}
+
+const char* slice_annotation(const RblnKinetoSlice& s, const char* name) {
+  for (uint32_t a = 0; a < s.annotations_count; ++a) {
+    const RblnKinetoAnnotation& ann = s.annotations[a];
+    if (ann.name && ann.value && std::string(ann.name) == name)
+      return ann.value;
+  }
+  return nullptr;
+}
+
+constexpr uint32_t kRblnFlowIdBase = 0xF0000000u;
+constexpr uint32_t kRblnFlowIdSpan = 0x01000000u;
+
+uint32_t get_flow_id(uint32_t launch_index) {
+  return kRblnFlowIdBase + launch_index;
+}
+
+bool is_dst_slice(const RblnKinetoSlice& s) {
+  return s.kind == RBLN_KINETO_KIND_RUNTIME;
+}
+
+void add_flow_arrows(const RblnKinetoExport* exp, int64_t clock_offset_ns,
+                     const ::libkineto::TraceSpan& span, ProjectedKinetoTrace* out) {
+  if (exp->host_launches_count == 0) {
+    RBLN_LOG_INFO("rbln flow arrows: no host launches captured; 0 arrows");
+    return;
+  }
+  const uint32_t assignable = std::min(exp->host_launches_count, kRblnFlowIdSpan);
+  if (assignable < exp->host_launches_count)
+    RBLN_LOG_WARN("rbln flow arrows: {} of {} host launches exceed the flow-id field; no arrow drawn",
+                  exp->host_launches_count - assignable, exp->host_launches_count);
+
+  // 1. assign one flow id per host launch.
+  std::unordered_map<int64_t, uint32_t> flow_id_by_launch;
+  flow_id_by_launch.reserve(assignable);
+  for (uint32_t i = 0; i < assignable; ++i)
+    flow_id_by_launch.emplace(exp->host_launches[i].launch_id, get_flow_id(i));
+
+  // 2. put that flow id on the dst slices (1:N fan).
+  std::vector<bool> wired(assignable, false);
+  uint64_t arrows = 0, skipped_no_launch_id = 0, skipped_no_launch = 0;
+  for (uint32_t i = 0; i < exp->slices_count; ++i) {
+    const RblnKinetoSlice& s = exp->slices[i];
+    if (!is_dst_slice(s))
+      continue;
+    const char* launch_id_str = slice_annotation(s, RBLN_KINETO_ANN_LAUNCH_ID);
+    if (!launch_id_str) {
+      ++skipped_no_launch_id;
+      continue;
+    }
+    const int64_t launch_id = std::strtoll(launch_id_str, nullptr, 10);
+    auto flow_id_it = flow_id_by_launch.find(launch_id);
+    if (flow_id_it == flow_id_by_launch.end()) {
+      ++skipped_no_launch;
+      continue;
+    }
+
+    out->activities[i].flow.id = flow_id_it->second;
+    out->activities[i].flow.type = ::libkineto::kLinkAsyncCpuGpu;
+    out->activities[i].flow.start = 0;
+    wired[flow_id_it->second - kRblnFlowIdBase] = true;
+    ++arrows;
+  }
+
+  // 3. put it on the source marker, only for launches whose slices got it, so none dangles.
+  uint64_t sources = 0, unwired = 0;
+  for (uint32_t i = 0; i < assignable; ++i) {
+    if (!wired[i]) {
+      ++unwired;
+      continue;
+    }
+    const RblnKinetoHostLaunch& host_launch = exp->host_launches[i];
+    ::libkineto::GenericTraceActivity src(
+        span, ::libkineto::ActivityType::PRIVATEUSE1_RUNTIME,
+        std::string(host_launch.name ? host_launch.name : ""));
+    const int64_t ts = host_launch.steady_ns + clock_offset_ns;
+    src.startTime = ts;
+    src.endTime = ts;
+    src.device = host_launch.pid;
+    src.resource = host_launch.tid;
+    src.flow.id = flow_id_by_launch.at(host_launch.launch_id);
+    src.flow.type = ::libkineto::kLinkAsyncCpuGpu;
+    src.flow.start = 1;
+    src.addMetadata(RBLN_KINETO_ANN_LAUNCH_ID, std::to_string(host_launch.launch_id));
+    out->activities.push_back(std::move(src));
+    ++sources;
+  }
+  if (unwired)
+    RBLN_LOG_WARN("rbln flow arrows: {} of {} host launches had no RUNTIME slice; no arrow drawn",
+                  unwired, assignable);
+
+  RBLN_LOG_INFO(
+      "rbln flow arrows: {} sources, {} arrows; skipped {} slices w/o launch_id, {} w/o host-launch match",
+      sources, arrows, skipped_no_launch_id, skipped_no_launch);
 }
 
 } // namespace
@@ -60,7 +161,7 @@ void convert_export_to_kineto(
         /*name=*/std::string(lane.name ? lane.name : ""));
   }
 
-  out->activities.reserve(exp->slices_count);
+  out->activities.reserve(exp->slices_count + exp->host_launches_count);
   for (uint32_t i = 0; i < exp->slices_count; ++i) {
     const RblnKinetoSlice& s = exp->slices[i];
     const ::libkineto::ActivityType act_type = kind_to_activity_type(s.kind);
@@ -92,6 +193,8 @@ void convert_export_to_kineto(
     }
     out->activities.push_back(std::move(act));
   }
+
+  add_flow_arrows(exp, clock_offset_ns, span, out);
 }
 
 } // namespace rbln::profiler::kineto

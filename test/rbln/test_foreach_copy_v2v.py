@@ -38,6 +38,14 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 from test.utils_v2v import arange as _arange, ENGINE_DTYPES, eq as _eq, to_dev as _to_dev
 
 
+def _prim_calls(report: dict) -> dict[str, int]:
+    """Per-primitive runtime call counts from an explain() dump."""
+    rt = report.get("rebel_runtime")
+    if rt is None:
+        return {}
+    return {name: int(v["calls"]) for name, v in rt.get("by_primitive", {}).items()}
+
+
 @pytest.mark.test_set_ci
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestForeachCopyV2V(TestCase):
@@ -244,6 +252,48 @@ class TestForeachCopyV2V(TestCase):
         a = _to_dev(a0)
         torch._foreach_copy_([a], [a])
         _eq(a, a0)
+
+    # ---- the descriptor-size gate is a host-direction policy ----
+
+    def test_small_slab_v2v_pairs_stay_batched(self):
+        """The descriptor-size gate exists because a fan-out host pair competes
+        with ``copy_``'s single staged bulk DMA. v2v has no such competitor: the
+        per-pair path issues the same on-device strided copy, so gating v2v only
+        trades one submit for N.
+        """
+        n_pairs = 4
+        rows, cols, stride = 4, 8, 12
+        bigs = [_to_dev(torch.zeros(rows, stride, dtype=torch.float32)) for _ in range(n_pairs)]
+        dsts = [b[:, :cols] for b in bigs]
+        srcs = [_to_dev(_arange((rows, cols), torch.float32) + i) for i in range(n_pairs)]
+
+        with torch.rbln.explain() as p:
+            torch._foreach_copy_(dsts, srcs)
+        calls = _prim_calls(p.dump())
+
+        self.assertEqual(calls.get("v2v_multi", 0), 1, f"small-slab v2v must stay batched: {calls}")
+        for i, dst in enumerate(dsts):
+            _eq(dst, _arange((rows, cols), torch.float32) + i)
+
+    def test_large_fanout_v2v_pair_does_not_bounce_through_host(self):
+        """Above the runtime's per-destination v2v cap the batch falls back to
+        per-entry device copies, while ``copy_``'s strided path round-trips the
+        host. Sending such a pair to ``copy_`` turns a device-side copy into the
+        hidden host bounce the profiler exists to report.
+        """
+        rows = 1024 + 8  # ::rbln::kMaxV2VMultiCopies is 1024
+        cols, stride = 4, 6
+        big = _to_dev(torch.zeros(rows, stride, dtype=torch.float32))
+        dst = big[:, :cols]
+        src = _to_dev(_arange((rows, cols), torch.float32) + 1)
+
+        with torch.rbln.explain() as p:
+            torch._foreach_copy_([dst], [src])
+        dump = p.dump()
+
+        site = dump["hidden_host_bounce"]["by_site"].get("copy_d2d_host_bounce", {"count": 0})
+        self.assertEqual(int(site["count"]), 0, f"v2v must stay on device: {site}")
+        _eq(dst, _arange((rows, cols), torch.float32) + 1)
 
 
 instantiate_device_type_tests(TestForeachCopyV2V, globals(), only_for="privateuse1")
