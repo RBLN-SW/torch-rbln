@@ -361,6 +361,56 @@ struct C10_RBLN_API V2VCopyOp {
 C10_RBLN_API void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies);
 
 /**
+ * @brief Descriptor for one host-to-device slab copy used by memcpy_h2v_multi.
+ *
+ * Layout matches V2VCopyOp / V2HCopyOp; the type is distinct on purpose. On LP64
+ * the three runtime tuple signatures are indistinguishable, so a mixed-up list
+ * would compile and DMA a host address as a device vaddr. Separate named types
+ * make that a compile error.
+ */
+struct C10_RBLN_API H2VCopyOp {
+  void* dst; // device (rbln virtual address)
+  const void* src; // host
+  size_t nbytes;
+};
+
+/**
+ * @brief Descriptor for one device-to-host slab copy used by memcpy_v2h_multi.
+ *
+ * See H2VCopyOp for why this is a distinct type rather than a shared struct.
+ */
+struct C10_RBLN_API V2HCopyOp {
+  void* dst; // host
+  const void* src; // device (rbln virtual address)
+  size_t nbytes;
+};
+
+/**
+ * @brief Batched host-to-device copy through rbln_memcpy_h2v_multi.
+ *
+ * Empty input is a no-op. Each entry needs nbytes > 0 and non-null dst/src.
+ *
+ * Caller contract, none of it validated by the runtime:
+ *   - every `dst` on the same RBLN device (H2VBatch partitions to hold this)
+ *   - `dst` ranges mutually disjoint; `src` ranges may repeat or overlap
+ *   - every `src` valid and unchanged until this call returns
+ *
+ * Entries are unordered and a failed call may have applied some of them (no
+ * rollback). rbln_runtime_api.h documents no entry cap, but oversized calls do
+ * time out in practice — see the cap in RBLNHostBatch.cpp.
+ */
+C10_RBLN_API void memcpy_h2v_multi(const std::vector<H2VCopyOp>& copies);
+
+/**
+ * @brief Batched device-to-host copy through rbln_memcpy_v2h_multi.
+ *
+ * Roles swapped: `src` (device) anchors homogeneity, `dst` host ranges must be
+ * disjoint, `src` device ranges may repeat. Same unordered / no-rollback
+ * semantics and the same lifetime requirement, here on `dst`.
+ */
+C10_RBLN_API void memcpy_v2h_multi(const std::vector<V2HCopyOp>& copies);
+
+/**
  * @brief Result of a borrow_host_ptr / acquire_host_ptr_for_overwrite call.
  *
  * The borrow id MUST be passed back to `return_borrowed` exactly once to
@@ -533,9 +583,10 @@ C10_RBLN_API uint64_t release_offload_temp_storage();
  * relaxed atomic load (no clock read), preserving ON==OFF latency; an explain
  * region flips it on for its duration. ``rt_timing_get`` fills ``2 * kRtTimingN``
  * uint64 slots as ``[ns, calls]`` per primitive (order matches the internal
- * RtIdx enum: v2v, v2v_multi, borrow, acquire, return, v2h, h2v).
+ * RtIdx enum: v2v, v2v_multi, borrow, acquire, return, v2h, h2v, v2h_multi,
+ * h2v_multi). New primitives are appended so existing slot indices stay put.
  */
-constexpr std::size_t kRtTimingN = 7;
+constexpr std::size_t kRtTimingN = 9;
 C10_RBLN_API void rt_timing_enable(bool on);
 C10_RBLN_API void rt_timing_reset();
 C10_RBLN_API void rt_timing_get(uint64_t* out);

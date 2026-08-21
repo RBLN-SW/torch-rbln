@@ -88,7 +88,11 @@ _BOUNCE_SITES: tuple[tuple[str, str], ...] = (
     ("copy_h2d_noncontig_dst", "copy_: non-contiguous rbln dst pulled to host"),
     ("strided_v2v_cpu_fallback", "cat/index/copy_: strided v2v fell back to CPU"),
     ("v2v_batch_to_per_entry", "batched v2v rejected -> per-entry"),
+    ("host_batch_to_per_entry", "batched h2v/v2h rejected -> per-entry"),
 )
+# Which sites are genuine host round-trips. The two batch->per-entry sites are
+# not: they already move host<->device (or stay device-side), so the incident is
+# a lost batching win, not an added bounce.
 _HOST_BOUNCE_SITES = (0, 1, 2, 3)
 
 # cpu_fallback reason names; index matches the runtime histogram order (the WHY
@@ -121,6 +125,10 @@ _REMEDY: dict[str, str] = {
     "v2v_batch_to_per_entry": (
         "batched v2v rejected to per-entry; check the per-dst limit (kMaxV2VMultiCopies) and batch geometry"
     ),
+    "host_batch_to_per_entry": (
+        "batched h2v/v2h rejected to per-entry; check for overlapping destination ranges in one batch "
+        "(the runtime requires them disjoint and does not validate it)"
+    ),
     "cpu_fallback": (
         "op ran on CPU; prefer graph mode (torch.compile backend='rbln'), add a native rbln kernel, or fix "
         "an unsupported dtype -- host-only ops (argmax/sampling) are expected"
@@ -140,6 +148,7 @@ _FIX_SHORT: dict[str, str] = {
     "copy_h2d_noncontig_dst": "contiguous staging, then h2d",
     "strided_v2v_cpu_fallback": "lower outer_count / fatter inner",
     "v2v_batch_to_per_entry": "check kMaxV2VMultiCopies / batch geom",
+    "host_batch_to_per_entry": "check for overlapping dst ranges",
     "cpu_fallback": "graph mode, or a supported dtype",
     "recompile": "stabilize shapes, or graph mode",
     "v2v_slow": "establish device residency first",
@@ -285,8 +294,9 @@ def _host_thread_info() -> dict[str, Any]:
 
 
 # --- (B) rebel-runtime (librbln) boundary time, gated on the explain region ----
-# Order MUST match the C++ RtIdx enum in c10/rbln/RBLNFunctions.cpp.
-_RT_PRIMS = ("v2v", "v2v_multi", "borrow", "acquire", "return", "v2h", "h2v")
+# Order MUST match the C++ RtIdx enum in c10/rbln/RBLNFunctions.cpp. New
+# primitives are appended there, so append here too — never insert.
+_RT_PRIMS = ("v2v", "v2v_multi", "borrow", "acquire", "return", "v2h", "h2v", "v2h_multi", "h2v_multi")
 
 
 def _rt_timing_enable(on: bool) -> None:

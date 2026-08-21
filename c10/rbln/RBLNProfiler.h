@@ -39,6 +39,7 @@ enum class BounceSite : uint8_t {
   kCpu2RblnNoncontigDst, // copy_: non-contig rbln dst pulled to host + h2v   (RBLNCopy.cpp)
   kStridedV2VFallback, // strided_v2v_copy -> dst.copy_(src.cpu()) bounce   (RBLNStridedV2V.cpp)
   kV2VBatchToPerEntry, // batched memcpy_v2v_multi rejected -> per-entry     (RBLNV2VBatch.cpp)
+  kHostBatchToPerEntry, // batched h2v/v2h_multi rejected -> per-entry       (RBLNHostBatch.cpp)
   kNumBounceSites,
 };
 

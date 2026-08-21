@@ -27,7 +27,20 @@ namespace c10::rbln {
 // region flips it on for its duration. Index order MUST match kRtTimingN / the
 // Python _RT_PRIMS tuple.
 namespace {
-enum RtIdx : std::uint8_t { RT_V2V = 0, RT_V2V_MULTI, RT_BORROW, RT_ACQUIRE, RT_RETURN, RT_V2H, RT_H2V, RT_N };
+enum RtIdx : std::uint8_t {
+  RT_V2V = 0,
+  RT_V2V_MULTI,
+  RT_BORROW,
+  RT_ACQUIRE,
+  RT_RETURN,
+  RT_V2H,
+  RT_H2V,
+  // Appended, never inserted: rt_timing_get() exposes these by slot index, so
+  // reordering silently remaps every existing reader's columns.
+  RT_V2H_MULTI,
+  RT_H2V_MULTI,
+  RT_N
+};
 static_assert(static_cast<std::size_t>(RT_N) == kRtTimingN, "RtIdx count must match kRtTimingN in the header");
 std::atomic<bool> g_rt_enabled{false};
 struct RtAcc {
@@ -807,6 +820,49 @@ void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies) {
   RBLN_LOG_DEBUG("Calling rbln_memcpy_v2v_multi: n_copies={}", copies.size());
   // Error message matched by `at::native::rbln::submit_or_fallback` to gate CPU fallback — keep stable.
   RBLN_CHECK(!::rbln::rbln_memcpy_v2v_multi(rbln_copies), "rbln_memcpy_v2v_multi failed");
+}
+
+void memcpy_h2v_multi(const std::vector<H2VCopyOp>& copies) {
+  if (copies.empty()) {
+    return;
+  }
+  RtTimer _rt(RT_H2V_MULTI);
+  // Runtime tuple is (src_host_ptr, dst_vaddr, size). This is the one boundary
+  // where the named descriptor's type distinction is erased — see H2VCopyOp.
+  std::vector<std::tuple<uintptr_t, uint64_t, uint64_t>> rbln_copies;
+  rbln_copies.reserve(copies.size());
+  for (const auto& c : copies) {
+    RBLN_CHECK(c.nbytes > 0, "memcpy_h2v_multi: nbytes must be positive");
+    RBLN_CHECK(c.src != nullptr, "memcpy_h2v_multi: src cannot be nullptr");
+    RBLN_CHECK(c.dst != nullptr, "memcpy_h2v_multi: dst cannot be nullptr");
+    rbln_copies.emplace_back(
+        reinterpret_cast<uintptr_t>(c.src), reinterpret_cast<uint64_t>(c.dst), static_cast<uint64_t>(c.nbytes));
+  }
+  RBLN_LOG_DEBUG("Calling rbln_memcpy_h2v_multi: n_copies={}", copies.size());
+  // Error message matched by `at::native::rbln::submit_or_fallback` to gate the
+  // CPU fallback — keep stable.
+  RBLN_CHECK(!::rbln::rbln_memcpy_h2v_multi(rbln_copies), "rbln_memcpy_h2v_multi failed");
+}
+
+void memcpy_v2h_multi(const std::vector<V2HCopyOp>& copies) {
+  if (copies.empty()) {
+    return;
+  }
+  RtTimer _rt(RT_V2H_MULTI);
+  // Runtime tuple is (src_vaddr, dst_host_ptr, size). See memcpy_h2v_multi.
+  std::vector<std::tuple<uint64_t, uintptr_t, uint64_t>> rbln_copies;
+  rbln_copies.reserve(copies.size());
+  for (const auto& c : copies) {
+    RBLN_CHECK(c.nbytes > 0, "memcpy_v2h_multi: nbytes must be positive");
+    RBLN_CHECK(c.src != nullptr, "memcpy_v2h_multi: src cannot be nullptr");
+    RBLN_CHECK(c.dst != nullptr, "memcpy_v2h_multi: dst cannot be nullptr");
+    rbln_copies.emplace_back(
+        reinterpret_cast<uint64_t>(c.src), reinterpret_cast<uintptr_t>(c.dst), static_cast<uint64_t>(c.nbytes));
+  }
+  RBLN_LOG_DEBUG("Calling rbln_memcpy_v2h_multi: n_copies={}", copies.size());
+  // Error message matched by `at::native::rbln::submit_or_fallback` to gate the
+  // CPU fallback — keep stable.
+  RBLN_CHECK(!::rbln::rbln_memcpy_v2h_multi(rbln_copies), "rbln_memcpy_v2h_multi failed");
 }
 
 BorrowedHostPtr borrow_host_ptr(const void* rbln_data, size_t nbytes) {
