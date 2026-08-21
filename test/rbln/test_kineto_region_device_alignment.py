@@ -45,7 +45,7 @@ from torch.profiler import profile, ProfilerActivity
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 import torch_rbln  # noqa: F401  -- registers the rbln device + the kineto bridge
-from test.utils import is_atom_device
+from test.utils import is_atom_device, is_rebel_device
 
 
 DEVICE = torch.device("rbln:0")
@@ -103,6 +103,15 @@ def async_dispatch(monkeypatch):
 
 @pytest.mark.test_set_ci
 @pytest.mark.single_worker
+# Not xfail_rebel(): that helper is strict, and the fault is host-dependent, so a REBEL host
+# that does create the runtime must not fail the job on XPASS. `-rEfX` still reports the XPASS,
+# which is the signal to drop this marker.
+@pytest.mark.xfail(
+    condition=is_rebel_device(),
+    reason="create_runtime(activate_profiler=True) faults on the REBEL CI hosts "
+    "(Create query pool / System Passes); re-enable once the runtime carries the fix",
+    strict=False,
+)
 @pytest.mark.skipif(
     is_atom_device(),
     reason="rbln kineto export is REBEL-only; rbln_kineto_is_active() reports inactive on ATOM",
