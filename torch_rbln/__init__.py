@@ -161,10 +161,9 @@ def _initialize_kineto_profiler() -> None:
     """Register the rbln torch.profiler (kineto) bridge (a runtime-free libkineto
     factory registration).
 
-    Do NOT query the device arch here (e.g. ``is_atom_device()``): ``get_npu_name`` seals
-    ``RBLN_DEVICES`` in the rbln runtime, and a vLLM data-parallel worker remaps
-    ``RBLN_DEVICES`` *after* import -> ``RBLN_DEVICES environment variable changed at
-    runtime (Sealed)``. ATOM is gated by the runtime instead: ``rbln_kineto_is_active()``
+    Do NOT query the device arch here (e.g. ``is_atom_device()``): ``get_npu_name`` resolves
+    a device, opening and closing a device node on every import. ATOM is gated by the runtime
+    instead: ``rbln_kineto_is_active()``
     (which the C++ profiler ``configure()`` checks) reports inactive on ATOM
     (rebel-compiler #12079), so no rbln session is created there.
     """

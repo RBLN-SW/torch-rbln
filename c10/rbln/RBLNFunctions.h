@@ -143,15 +143,38 @@ C10_RBLN_API void set_device_layout_like(void* target_data, const void* ref_data
 C10_RBLN_API bool is_dummy_device();
 
 /**
- * @brief Nothrow view of get_device_count() (returns 0 on any failure), for the
- * liveness predicates that must never throw.
+ * @brief Nothrow view of get_device_count() (returns 0 on any failure). Warns with the
+ * first line of the error only, on every failure.
+ *
+ * Backs torch.rbln.device_count(). ATen/DeviceAccelerator.h: deviceCount() "is *REQUIRED*
+ * to not raise any exception".
  */
 C10_RBLN_API c10::DeviceIndex get_device_count_nothrow() noexcept;
 
 /**
- * @brief Single source of truth: can an rbln_* call be serviced safely now?
- * Runtime loaded (librbln's rbln_runtime_available()), not shutting down, and a
- * device present -- dummy included (it host-backs via the runtime). Never throws.
+ * @brief Throwing counterpart, named after c10::cuda::device_count_ensure_non_zero().
+ *
+ * Raises the detailed RBLN_* configuration error, or a clear "no devices" message.
+ * Use at the point where a device is actually required; never on a probe path.
+ */
+C10_RBLN_API c10::DeviceIndex device_count_ensure_non_zero();
+
+/**
+ * @brief Claim the planned logical devices with the runtime (rbln_register_device_id).
+ *
+ * Idempotent, and normally unnecessary: to_device_id() already does it. Call it explicitly
+ * only on a path that hands a device index to the runtime while bypassing to_device_id(),
+ * such as RCCL init in ProcessGroupRBLN. Raises on an invalid mapping.
+ */
+C10_RBLN_API void commit_device_mapping();
+
+/**
+ * @brief Single source of truth: is RBLN usable as an accelerator right now?
+ *
+ * Runtime loaded, not shutting down, and at least one usable logical device -- dummy
+ * included, since it host-backs through the runtime and still needs a valid mapping.
+ * Never throws. Bound to both Python is_available() and RBLNHooksInterface::hasRBLN(),
+ * so the two cannot diverge.
  */
 C10_RBLN_API bool runtime_available() noexcept;
 
@@ -407,6 +430,56 @@ struct C10_RBLN_API V2VCopyOp {
 C10_RBLN_API void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies);
 
 /**
+ * @brief Descriptor for one host-to-device slab copy used by memcpy_h2v_multi.
+ *
+ * Layout matches V2VCopyOp / V2HCopyOp; the type is distinct on purpose. On LP64
+ * the three runtime tuple signatures are indistinguishable, so a mixed-up list
+ * would compile and DMA a host address as a device vaddr. Separate named types
+ * make that a compile error.
+ */
+struct C10_RBLN_API H2VCopyOp {
+  void* dst; // device (rbln virtual address)
+  const void* src; // host
+  size_t nbytes;
+};
+
+/**
+ * @brief Descriptor for one device-to-host slab copy used by memcpy_v2h_multi.
+ *
+ * See H2VCopyOp for why this is a distinct type rather than a shared struct.
+ */
+struct C10_RBLN_API V2HCopyOp {
+  void* dst; // host
+  const void* src; // device (rbln virtual address)
+  size_t nbytes;
+};
+
+/**
+ * @brief Batched host-to-device copy through rbln_memcpy_h2v_multi.
+ *
+ * Empty input is a no-op. Each entry needs nbytes > 0 and non-null dst/src.
+ *
+ * Caller contract, none of it validated by the runtime:
+ *   - every `dst` on the same RBLN device (H2VBatch partitions to hold this)
+ *   - `dst` ranges mutually disjoint; `src` ranges may repeat or overlap
+ *   - every `src` valid and unchanged until this call returns
+ *
+ * Entries are unordered and a failed call may have applied some of them (no
+ * rollback). rbln_runtime_api.h documents no entry cap, but oversized calls do
+ * time out in practice — see the cap in RBLNHostBatch.cpp.
+ */
+C10_RBLN_API void memcpy_h2v_multi(const std::vector<H2VCopyOp>& copies);
+
+/**
+ * @brief Batched device-to-host copy through rbln_memcpy_v2h_multi.
+ *
+ * Roles swapped: `src` (device) anchors homogeneity, `dst` host ranges must be
+ * disjoint, `src` device ranges may repeat. Same unordered / no-rollback
+ * semantics and the same lifetime requirement, here on `dst`.
+ */
+C10_RBLN_API void memcpy_v2h_multi(const std::vector<V2HCopyOp>& copies);
+
+/**
  * @brief Result of a borrow_host_ptr / acquire_host_ptr_for_overwrite call.
  *
  * The borrow id MUST be passed back to `return_borrowed` exactly once to
@@ -579,9 +652,10 @@ C10_RBLN_API uint64_t release_offload_temp_storage();
  * relaxed atomic load (no clock read), preserving ON==OFF latency; an explain
  * region flips it on for its duration. ``rt_timing_get`` fills ``2 * kRtTimingN``
  * uint64 slots as ``[ns, calls]`` per primitive (order matches the internal
- * RtIdx enum: v2v, v2v_multi, borrow, acquire, return, v2h, h2v).
+ * RtIdx enum: v2v, v2v_multi, borrow, acquire, return, v2h, h2v, v2h_multi,
+ * h2v_multi). New primitives are appended so existing slot indices stay put.
  */
-constexpr std::size_t kRtTimingN = 7;
+constexpr std::size_t kRtTimingN = 9;
 C10_RBLN_API void rt_timing_enable(bool on);
 C10_RBLN_API void rt_timing_reset();
 C10_RBLN_API void rt_timing_get(uint64_t* out);

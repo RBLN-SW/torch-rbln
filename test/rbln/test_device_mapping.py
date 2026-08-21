@@ -1051,16 +1051,11 @@ class TestDeviceMappingEnvVars(TestCase):
         self.assertEqual(len(physical_ids_1), 4)
 
     def run_npus_per_device_invalid_size_error_impl(self):
-        """Implementation: Test that invalid sizes are rejected."""
-        # This should fail during initialization in C++ code
-        # If we reach here, the test failed (should have failed earlier)
+        """Implementation: Test that invalid sizes are rejected (at the point of use)."""
         npus_per_device = os.getenv("RBLN_NPUS_PER_DEVICE")
         if npus_per_device is None:
             self.skipTest("This test must be run via wrapper test with environment variables set")
-        self.assertIsNotNone(npus_per_device, "Environment variable should be set")
-        # The actual error checking happens in C++ code during initialization
-        # If initialization succeeded, that's a bug
-        pass  # noqa: PIE790
+        torch_rbln._C.device_count_ensure_non_zero()
 
     def run_npus_per_device_valid_size_8_impl(self):
         """Implementation: Test RBLN_NPUS_PER_DEVICE=8."""
@@ -1158,43 +1153,38 @@ class TestDeviceMappingEnvVars(TestCase):
         expected_unused = physical_count % 32
         self.assertEqual(len(unused), expected_unused)
 
+    # A malformed RBLN_* config is reported at the *point of use*, not by enumeration:
+    # torch requires device_count()/is_available() never to raise. So each impl below calls
+    # device_count_ensure_non_zero(), which backs current_device()/set_device() and the
+    # allocation path. See test_privateuse1_contract.py for the clause.
+
     def run_device_map_invalid_group_size_error_impl(self):
         """Implementation: Test that invalid-sized groups are rejected."""
-        # This should fail during initialization in C++ code
-        # If we reach here, the test failed (should have failed earlier)
         device_map = os.getenv("RBLN_DEVICE_MAP")
         if device_map is None:
             self.skipTest("This test must be run via wrapper test with environment variables set")
-        self.assertIsNotNone(device_map, "Environment variable should be set")
-        # The actual error checking happens in C++ code during initialization
-        # If initialization succeeded, that's a bug
-        pass  # noqa: PIE790
+        torch_rbln._C.device_count_ensure_non_zero()
 
     def run_device_map_malformed_error_impl(self):
-        """Implementation: malformed RBLN_DEVICE_MAP fails during device-mapping init."""
+        """Implementation: malformed RBLN_DEVICE_MAP is rejected at the point of use."""
         device_map = os.getenv("RBLN_DEVICE_MAP")
         if device_map is None:
             self.skipTest("This test must be run via wrapper test with environment variables set")
-        # The parse error fires during init (triggered when the test module's
-        # instantiate_device_type_tests queries device_count); reaching here is a bug.
-        pass  # noqa: PIE790
+        torch_rbln._C.device_count_ensure_non_zero()
 
     def run_device_map_out_of_range_error_impl(self):
-        """Implementation: Trigger RBLN_DEVICE_MAP out-of-range error (fails at import/init)."""
+        """Implementation: Trigger the RBLN_DEVICE_MAP out-of-range error."""
         device_map = os.getenv("RBLN_DEVICE_MAP")
         if device_map is None:
             self.skipTest("This test must be run via wrapper test with environment variables set")
-        # Error happens during device mapping init when torch is imported; if we reach here, init
-        # succeeded (bug) or we are only checking env was set
-        pass  # noqa: PIE790
+        torch_rbln._C.device_count_ensure_non_zero()
 
     def run_npus_per_device_no_logical_device_error_impl(self):
-        """Implementation: Trigger no logical device error (fails at import/init)."""
+        """Implementation: Trigger the no-logical-device error."""
         npus = os.getenv("RBLN_NPUS_PER_DEVICE")
         if npus is None:
             self.skipTest("This test must be run via wrapper test with environment variables set")
-        # Error happens during device mapping init; if we reach here, init succeeded (bug)
-        pass  # noqa: PIE790
+        torch_rbln._C.device_count_ensure_non_zero()
 
     def run_device_index_not_assigned_error_impl(self):
         """Implementation: Trigger device index not assigned by using rbln:1 when only rbln:0 exists."""

@@ -8,6 +8,7 @@ set(sources
   core/RBLNEventTest.cpp
   core/RBLNStreamTest.cpp
   core/RBLNFunctionsTest.cpp
+  core/RBLNHostBatchTest.cpp
   core/RBLNLoggingTest.cpp
   core/RBLNPinnedAllocatorTest.cpp
   core/RBLNSupportedDtypesTest.cpp

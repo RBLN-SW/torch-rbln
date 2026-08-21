@@ -58,6 +58,7 @@ test/
 │   ├── test_multi_device.py               # Multi-device tensor movement and cross-device operations
 │   ├── test_non_zero_storage_offset.py    # Correct handling of tensors with non-zero storage offsets
 │   ├── test_op_caching.py                 # Operator caching / graph-reuse behavior
+│   ├── test_privateuse1_contract.py       # PrivateUse1 backend contract conformance (one test per upstream clause)
 │   ├── test_rbln_apis.py                  # RBLN Python APIs
 │   ├── test_rbln_runtime_lib.py           # librbln.so resolution order and single-copy/version checks
 │   ├── test_registered_ops.py             # All natively registered and fallback ops from RBLNRegisterOps.cpp / register_ops.py
@@ -349,6 +350,24 @@ from test.filters import custom_instantiate_device_type_tests
 
 custom_instantiate_device_type_tests(TestCommon, globals(), only_for="privateuse1")
 ```
+
+### Contract Conformance Tests
+
+`test/rbln/test_privateuse1_contract.py` is organized differently from the rest of the
+suite, on purpose: PyTorch does not merely *offer* the `torch.rbln` module and the RBLN
+accelerator hooks, it calls into them from paths that never asked for an NPU. Each test
+pins exactly one clause upstream states and cites its source, so a torch upgrade or a new
+call site fails on the clause rather than on a downstream symptom.
+
+Conventions specific to it:
+
+- **Every probe runs in a fresh subprocess** (`run_probe`). It cannot use
+  `run_in_isolated_process()` from `test/utils.py`, which needs a picklable callable, runs
+  after `torch_rbln` is already imported, and captures no output — the probes must set
+  `RBLN_*` *before* the import and inspect stdout/stderr.
+- **A clause not satisfied yet is a `strict=True` xfail** naming the work that closes it,
+  rather than being omitted. `xfail_strict = true` is the project default, so an unexpected
+  pass fails the suite and signals that the marker should be removed.
 
 ---
 
