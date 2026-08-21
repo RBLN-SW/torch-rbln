@@ -22,7 +22,6 @@ try:
     from unittest.mock import patch
 
     import pytest
-    from torch.testing._internal.common_device_type import instantiate_device_type_tests
     from torch.testing._internal.common_utils import run_tests, TestCase
 
     import torch_rbln  # noqa: F401  -- gated import, keeps the backend from initialising here
@@ -306,14 +305,6 @@ class TestInstalledCombination(TestCase):
             abi_check.abi_mismatch_reason(built, window[0], window[1]),
             f"installed librbln.so accepts {window[0]}..{window[1]} but this build recorded {built}",
         )
-
-
-instantiate_device_type_tests(TestAbiMismatchReason, globals(), only_for="privateuse1")
-instantiate_device_type_tests(TestReadRuntimeAbi, globals(), only_for="privateuse1")
-instantiate_device_type_tests(TestOpenMappedRuntime, globals(), only_for="privateuse1")
-instantiate_device_type_tests(TestGetBuiltAbi, globals(), only_for="privateuse1")
-instantiate_device_type_tests(TestCheckLibrblnAbi, globals(), only_for="privateuse1")
-instantiate_device_type_tests(TestInstalledCombination, globals(), only_for="privateuse1")
 
 
 if __name__ == "__main__":

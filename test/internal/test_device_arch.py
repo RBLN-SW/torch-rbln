@@ -3,7 +3,6 @@
 from unittest.mock import patch
 
 import pytest
-from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from test.utils import xfail_atom, xfail_rebel
@@ -78,11 +77,6 @@ class TestArchXfailMarkers(TestCase):
         with patch("torch_rbln._internal.device_arch_utils.get_device_arch", return_value="rebel"):
             mark = xfail_atom("ATOM: feature not yet supported")
         self.assertFalse(mark.mark.kwargs["condition"])
-
-
-instantiate_device_type_tests(TestArchFromNpuName, globals(), only_for="privateuse1")
-instantiate_device_type_tests(TestArchPredicates, globals(), only_for="privateuse1")
-instantiate_device_type_tests(TestArchXfailMarkers, globals(), only_for="privateuse1")
 
 
 if __name__ == "__main__":
