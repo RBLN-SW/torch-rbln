@@ -46,6 +46,21 @@ class C10_RBLN_API H2VBatch {
    */
   void enqueue(void* dst, const void* src, size_t nbytes);
 
+  /**
+   * @brief Enqueue `prod(outer_sizes)` copies of `inner_block_bytes`, row-major.
+   *
+   * Entry k at outer index idx[] is offset sum_d idx[d]*{dst,src}_byte_strides[d].
+   * The three arrays must have equal length; length 0 degenerates to enqueue(). A
+   * src stride of 0 is preserved, so a broadcast host source replicates.
+   */
+  void enqueue_strided(
+      void* dst,
+      const void* src,
+      size_t inner_block_bytes,
+      c10::IntArrayRef outer_sizes,
+      c10::IntArrayRef src_byte_strides,
+      c10::IntArrayRef dst_byte_strides);
+
   /** @brief Flush pending entries, one bulk call per device. Idempotent. */
   void submit();
 
@@ -83,6 +98,15 @@ class C10_RBLN_API V2HBatch {
    * @param nbytes Slab size in bytes; 0 is a no-op.
    */
   void enqueue(void* dst, const void* src, size_t nbytes);
+
+  /** @brief Enqueue a strided range. See H2VBatch::enqueue_strided. */
+  void enqueue_strided(
+      void* dst,
+      const void* src,
+      size_t inner_block_bytes,
+      c10::IntArrayRef outer_sizes,
+      c10::IntArrayRef src_byte_strides,
+      c10::IntArrayRef dst_byte_strides);
 
   /** @brief Flush pending entries, one bulk call per device. Idempotent. */
   void submit();
