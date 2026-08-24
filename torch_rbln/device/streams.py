@@ -5,8 +5,9 @@ implementation, so the generic ``torch.Stream`` / ``torch.Event`` already work w
 ``device="rbln"``; this module adds the ``torch.cuda``-style surface on top.
 
 Not supported: event timing (:meth:`Event.elapsed_time` raises), stream priorities
-(accepted but ignored), :meth:`torch.Stream.native_handle`, and native cross-device
-event waits (they degrade to a host-side synchronize).
+(accepted but ignored), :meth:`torch.Stream.native_handle`, native cross-device event
+waits (they degrade to a host-side synchronize), and cross-process event sharing
+(:meth:`Event.ipc_handle` / :meth:`Event.from_ipc_handle` raise).
 """
 
 from typing import Any, Optional  # noqa: UP035
@@ -78,8 +79,16 @@ class Stream(torch.Stream):
 
 class Event(torch.Event):
     r"""An RBLN event: a recordable marker in a stream for cross-stream ordering and
-    completion queries. Mirrors :class:`torch.cuda.Event`. ``enable_timing`` is
-    accepted for API parity, but :meth:`elapsed_time` is unsupported.
+    completion queries. Mirrors :class:`torch.cuda.Event`. ``enable_timing``,
+    ``blocking`` and ``interprocess`` are accepted for API parity and ignored, and
+    :meth:`elapsed_time` is unsupported.
+
+    Cross-process event sharing is not supported: :meth:`ipc_handle` and
+    :meth:`from_ipc_handle` are inherited from :class:`torch.Event` and raise
+    ``NotImplementedError: torch.Event ipc is not supported yet``, so
+    ``interprocess=True`` grants no capability. Both attributes are present, so a
+    capability probe that only looks them up succeeds and the failure surfaces at the
+    call.
     """
 
     def __new__(  # noqa: PYI034
