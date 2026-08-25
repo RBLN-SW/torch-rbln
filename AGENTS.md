@@ -198,7 +198,7 @@ When you believe a case is a real exception — a comment no naming can replace,
 
 Explain intent; the diff already shows what changed. Claim exactly what the code does — a check that only runs under a condition is not "the index is range-checked". Fill in **Affected Modules** and **How to Test**, link the issue, and name the layer you changed.
 
-- Open PRs as drafts. A feature branch comes from `dev` and targets `dev`; `rc` goes `dev` → `main`; a hotfix comes from `main` and targets `main`. Tags are cut on `main`, and everything is squash-merged (`docs/RELEASE_PROCESS.md`).
+- A feature branch comes from `dev` and targets `dev`; `rc` goes `dev` → `main`; a hotfix comes from `main` and targets `main`. Tags are cut on `main`, and everything is squash-merged (`docs/RELEASE_PROCESS.md`).
 - **A fix for a regression the feature itself introduced belongs in the same PR.** Split it out and whichever lands first puts mainline in the regressed state.
 - **No internal names.** A working label from the conversation that produced the change — a version number, a phase, a step — means nothing later and fossilizes in the history. Name the mechanism.
 
