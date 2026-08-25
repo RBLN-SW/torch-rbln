@@ -145,6 +145,14 @@ Read `.claude/skills/adding-an-op/SKILL.md` before starting.
 - Delete removed code completely: no renamed `_var` leftovers, no dead re-exports, no `# removed`.
 - Everything in the repository is English — code, comments, log and error messages, test names, docs, commits, PR titles and bodies. Reply to the user in the language they write in.
 
+## What not to publish
+
+This repository is public. Absolute measurements stay out of it: throughput, latency, memory footprint, and accuracy from an internal run do not belong in code, comments, tests, docs, commit messages, or PR descriptions. Benchmark scripts and `test_set_perf` tests live here; their results do not.
+
+A relative change is fine. Say that something got a third faster, not what the two numbers were, and keep the raw figures to an internal channel.
+
+`docs/CONTRIBUTING.md` asks a `perf` change for "benchmarks or measurement methodology". The methodology and the harness belong in the PR; the numbers they produced do not.
+
 ## Fix the cause, keep the diff reviewable
 
 These pull against each other, and both are real.

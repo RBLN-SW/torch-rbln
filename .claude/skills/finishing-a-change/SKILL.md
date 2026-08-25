@@ -74,6 +74,7 @@ General:
 - **`else` branches for cases that cannot happen** — should be `raise`, `assert`, or `RBLN_CHECK`
 - **Dead leftovers** — renamed `_var`, unused re-exports, `# removed` comments
 - **Anything not in English**
+- **Absolute measurements** — throughput, latency, memory, or accuracy from an internal run. Take them out; this repository is public. A relative change is fine.
 
 torch-rbln specific:
 
@@ -107,6 +108,7 @@ An empty list is a claim. Only write it if it is true.
 - You are on a feature branch off `dev`, not on `dev` or `main` itself
 - PR title in `type(scope): summary` — CI enforces it. Individual commits only need to be readable (`docs/CONTRIBUTING.md`)
 - Explain intent, not the diff. Symptom, reproducer, where to look, what you verified — the debugging path that got you there is not part of it
+- A perf change may give a relative change, never an absolute measurement
 - Say which layer you changed and which execution paths you exercised — eager, `torch.compile(backend="rbln")`, or both
 - Fill in **Affected Modules** and **How to Test** in the template, and link the issue
 - English
