@@ -391,7 +391,7 @@ void register_internal_api(py::module_& module) {
       "Internal: install a warm-cache entry from the thread-local pending key "
       "set by the shim on the way into the miss path",
       pybind11::arg("dyn_runtime"),
-      pybind11::arg("runtime_raw_ptr"),
+      pybind11::arg("runtime_handle"),
       pybind11::arg("num_inputs"),
       pybind11::arg("num_outputs"),
       pybind11::arg("out_profiles"));
@@ -470,40 +470,6 @@ void register_internal_api(py::module_& module) {
         return out;
       },
       "Internal: per-primitive (ns, calls) spent inside librbln boundary calls this region");
-
-  // Pybind11 instance raw-pointer extractor.
-  //
-  // For a pybind11 simple-layout instance (single-inheritance, standard
-  // ``unique_ptr`` / ``shared_ptr`` holder), the underlying C++ object pointer
-  // is stored directly after ``PyObject_HEAD``. We need this to bridge rebel's
-  // ``PyRblnSyncRuntime`` (built against pybind11 v2) into torch-rbln (which
-  // links pybind11 v3); the two registries are disjoint so ``py::cast<T*>``
-  // fails across DSOs.
-  //
-  // Reading the raw pointer requires knowing ``sizeof(PyObject)`` at the
-  // boundary. Doing this in C++ keeps the offset matched to the Python ABI
-  // we are compiled against, instead of a hardcoded Python-side constant
-  // that drifts on debug builds, free-threaded builds (PEP 703), or non-x86.
-  module.def(
-      "_pybind_instance_raw_ptr",
-      [](pybind11::handle h) -> uintptr_t {
-        PyObject* obj = h.ptr();
-        if (obj == nullptr) {
-          throw std::invalid_argument("_pybind_instance_raw_ptr: null handle");
-        }
-        // Layout: [PyObject_HEAD][void* instance_ptr][...]. Read the void*
-        // immediately past the head.
-        const auto* slot = reinterpret_cast<const uintptr_t*>(reinterpret_cast<const char*>(obj) + sizeof(PyObject));
-        const uintptr_t raw = *slot;
-        // A real object pointer is pointer-aligned; a misaligned value means we
-        // read garbage (wrong layout / ABI skew the Python type-name gate can't
-        // catch). Return 0 so the caller skips the warm-cache fast path.
-        if ((raw % alignof(void*)) != 0) {
-          return 0;
-        }
-        return raw;
-      },
-      "Internal: extract the raw C++ pointer held by a pybind11 simple-layout instance");
 
   // Fallback configuration
   module.def(

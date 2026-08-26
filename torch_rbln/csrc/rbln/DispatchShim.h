@@ -17,8 +17,8 @@ namespace torch_rbln::shim {
 // The shim runs a cheap pre-check in C++ (dtype, scalar-all, contig+offset). On
 // pre-check fail it calls into `at::native::rbln::cpu_fallback_rbln` directly —
 // the Python layer is never entered for that call. On pre-check pass, if a
-// matching warm-cache entry exists the shim drives rebel's PyRblnSyncRuntime
-// directly from C++ (no pybind). Only on warm-cache miss does the shim unbox
+// matching warm-cache entry exists the shim drives the rebel runtime from C++,
+// skipping the Python wrapper. Only on warm-cache miss does the shim unbox
 // the jit stack, call `py_fn` respecting the op schema's kwarg-only markers,
 // and rebox the return onto the stack.
 //
@@ -93,12 +93,12 @@ void diag_reset_warm_segments();
 // Returns true if an install actually happened (pending key was valid and
 // accepted). Safe to call when no pending context exists — returns false.
 //
-// `runtime_raw_ptr` is the opaque pointer to rebel::PyRblnSyncRuntime,
-// extracted via the pybind-simple-layout offset trick in warm_cache.py.
+// `runtime_handle` is rebel's sync-runtime object, whose `prepare_inputs` /
+// `prepare_outputs` / `run` the hit path calls.
 // `out_profiles` is a list of (shape, dtype_str, is_rbln) per output tensor.
 bool install_warmcache_from_pending(
     pybind11::object dyn_runtime,
-    pybind11::int_ runtime_raw_ptr,
+    const pybind11::object& runtime_handle,
     uint32_t num_inputs,
     uint32_t num_outputs,
     const std::vector<std::tuple<std::vector<int64_t>, std::string, bool>>& out_profiles);

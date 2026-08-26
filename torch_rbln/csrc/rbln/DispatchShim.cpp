@@ -856,10 +856,10 @@ PendingInstall take_pending() {
   return p;
 }
 
-// Hot path: look up the warm-cache entry for `key` and, on hit, drive rebel's
-// PyRblnSyncRuntime directly from C++ — no pybind, no Python wrapper. Returns
-// true iff the hit path was taken and the stack has been left with the proper
-// return value.
+// Hot path: look up the warm-cache entry for `key` and, on hit, drive the
+// rebel runtime from C++ — no Python wrapper, no Dynamo recompile check.
+// Returns true iff the hit path was taken and the stack has been left with the
+// proper return value.
 //
 // Currently supports the shape:
 //   - single output (schema.returns().size() == 1)
@@ -1052,50 +1052,33 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
 
   const uint64_t _seg_t_io_build = now_ns();
 
-  // rebel's PyRblnSyncRuntime methods are wrapped via pybind; they may set a
-  // Python exception on failure rather than throw a C++ exception. Acquire
-  // the GIL so we can both call them safely and inspect ``PyErr_Occurred``
-  // after each call to detect the soft failure path. On failure we clear
-  // the Python error and return false so the caller falls through to the
-  // pybind miss path (which routes through DynamoRuntime and performs the
-  // v-memory bookkeeping that lets the same tensor inputs succeed).
+  // The runtime's methods are called through pybind, so the GIL must be held
+  // across them. A failure arrives as ``error_already_set``; we clear it and
+  // return false so the caller falls through to the miss path (which routes
+  // through DynamoRuntime and performs the v-memory bookkeeping that lets the
+  // same tensor inputs succeed).
   pybind11::gil_scoped_acquire wc_gil;
   const uint64_t _seg_t_gil = now_ns();
   bool runtime_failed = false;
-  // Each phase timer is assigned right after its corresponding runtime call;
-  // ``runtime_failed`` short-circuits past unassigned timers into the early
-  // return below so the diag accumulators never read a stale value. Default
-  // to ``_seg_t_gil`` for the (statically dead) failure path that
-  // ``runtime_failed`` doesn't catch — keeps the code intent obvious even
-  // though the bare init is unreachable on the success/read path.
-  uint64_t _seg_t_prep_in = _seg_t_gil; // NOLINT(clang-analyzer-deadcode.DeadStores)
-  uint64_t _seg_t_prep_out = _seg_t_gil;
-  uint64_t _seg_t_run = _seg_t_gil;
+  // Each phase timer is assigned right after its corresponding runtime call.
+  // A throw skips the remaining assignments and lands in the early return
+  // below, so the diag accumulators are only read on the all-assigned path.
+  // The defaults are therefore never read; they are here so an unassigned
+  // timer holds a sane value rather than garbage.
+  // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores)
+  uint64_t _seg_t_prep_in = _seg_t_gil, _seg_t_prep_out = _seg_t_gil, _seg_t_run = _seg_t_gil;
   auto clear_and_fail = [&]() {
     if (PyErr_Occurred())
       PyErr_Clear();
     runtime_failed = true;
   };
   try {
-    entry->runtime->PrepareInputs(dev_in, cpu_in);
+    entry->prepare_inputs(dev_in, cpu_in);
     _seg_t_prep_in = now_ns();
-    if (PyErr_Occurred()) {
-      clear_and_fail();
-    }
-    if (!runtime_failed) {
-      entry->runtime->PrepareOutputs(dev_out, cpu_out);
-      _seg_t_prep_out = now_ns();
-      if (PyErr_Occurred()) {
-        clear_and_fail();
-      }
-    }
-    if (!runtime_failed) {
-      entry->runtime->Run();
-      _seg_t_run = now_ns();
-      if (PyErr_Occurred()) {
-        clear_and_fail();
-      }
-    }
+    entry->prepare_outputs(dev_out, cpu_out);
+    _seg_t_prep_out = now_ns();
+    entry->run();
+    _seg_t_run = now_ns();
   } catch (const pybind11::error_already_set&) {
     clear_and_fail();
   } catch (const std::exception&) {
@@ -1510,7 +1493,7 @@ void diag_reset_trace_by_op() {
 
 bool install_warmcache_from_pending(
     pybind11::object dyn_runtime,
-    pybind11::int_ runtime_raw_ptr,
+    const pybind11::object& runtime_handle,
     uint32_t num_inputs,
     uint32_t num_outputs,
     const std::vector<std::tuple<std::vector<int64_t>, std::string, bool>>& out_profiles) {
@@ -1540,14 +1523,15 @@ bool install_warmcache_from_pending(
 
   CacheEntry entry;
   entry.py_dyn_runtime = std::move(dyn_runtime);
-  void* runtime_void_ptr = PyLong_AsVoidPtr(runtime_raw_ptr.ptr());
-  if (runtime_void_ptr == nullptr) {
-    if (PyErr_Occurred()) {
-      PyErr_Clear();
-    }
+  // A runtime missing any of the three cannot be driven from the hit path, so
+  // refuse to install rather than cache an entry whose every hit would fail.
+  try {
+    entry.prepare_inputs = runtime_handle.attr("prepare_inputs");
+    entry.prepare_outputs = runtime_handle.attr("prepare_outputs");
+    entry.run = runtime_handle.attr("run");
+  } catch (const pybind11::error_already_set&) {
     return false;
   }
-  entry.runtime = static_cast<::rbln::PyRblnSyncRuntime*>(runtime_void_ptr);
   entry.num_inputs = num_inputs;
   entry.num_outputs = num_outputs;
   entry.out_profiles.reserve(out_profiles.size());
