@@ -1716,6 +1716,12 @@ ProcessGroupRBLN::ProcessGroupRBLN(
 
   c10::rbln::get_device_count();
 
+  // RCCL takes device_id_ directly, bypassing to_device_id(), so registration -- deferred to
+  // first device use -- has to happen here, or RCCL initializes a device this process never
+  // claimed ("RCCL Init failed with error code: 1"). Ahead of the worker threads below:
+  // registration throws, and unwinding past a joinable std::thread member terminates.
+  c10::rbln::commit_device_mapping();
+
   // Check environment variable for sync/async mode
   // TORCH_RBLN_C10D_ASYNC=1 enables async mode
   const char* async_env = std::getenv("TORCH_RBLN_C10D_ASYNC");

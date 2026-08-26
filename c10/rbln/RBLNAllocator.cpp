@@ -74,8 +74,8 @@ struct RBLNAllocator final : public c10::DeviceAllocator {
     // live context (e.g. a vLLM EngineCore parent) reports false and those ops no-op
     // instead of dispatching into a contextless runtime. Nothrow (torch calls this as a
     // predicate, incl. cleanup paths, where a throw would abort the caller).
-    // Context flag first: a cleanup predicate must not trigger device enumeration/registration
-    // as a side effect when this process has no context.
+    // Context flag first: with no context there is nothing to report, and torch calls this
+    // from cleanup paths where the enumeration would be pointless work.
     const bool is_initialized = c10::rbln::any_device_context_initialized() && c10::rbln::runtime_available();
     RBLN_LOG_DEBUG("is_initialized={}", is_initialized);
     return is_initialized;
@@ -108,7 +108,10 @@ struct RBLNAllocator final : public c10::DeviceAllocator {
    * @param stream The stream to associate with the data pointer.
    */
   void recordStream(const c10::DataPtr& /*ptr*/, c10::Stream /*stream*/) override {
-    RBLN_LOG_DEBUG("recordStream is no-op because RBLN does not support stream-based asynchronous execution");
+    // No-op on purpose: the runtime tags a freed block with the (stream, seq) still in
+    // flight at its free and folds foreign seqs into the reusing stream as cross-deps,
+    // so cross-stream lifetime is already safe without the hint torch passes here.
+    RBLN_LOG_DEBUG("recordStream is a no-op; the runtime tags freed blocks with their in-flight stream");
   }
 
   /**

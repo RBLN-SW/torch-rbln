@@ -59,8 +59,25 @@ project(torch-rbln
 # Set `TORCH_FOUND`, `TORCH_INCLUDE_DIRS`, `TORCH_LIBRARIES`, `TORCH_CXX_FLAGS`
 include(FindTorch)
 
-# Set `REBEL_FOUND`, `REBEL_INCLUDE_DIRS`, and `REBEL_LIBRARIES`
+# Set `REBEL_FOUND`, `REBEL_INCLUDE_DIRS`, `REBEL_LIBRARIES`, and `REBEL_ABI_CURRENT`
 include(FindRebel)
+
+# Freeze the ABI number for the import-time handshake in
+# torch_rbln/_internal/abi_check.py. Empty means a pre-handshake Rebel (FindRebel
+# already warned), which the consumer side reads as "no snapshot recorded".
+if(REBEL_ABI_CURRENT STREQUAL "")
+  set(REBEL_ABI_CURRENT_PY "None")
+else()
+  set(REBEL_ABI_CURRENT_PY "${REBEL_ABI_CURRENT}")
+endif()
+configure_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/cmake/abi_snapshot.py.in
+  ${CMAKE_CURRENT_BINARY_DIR}/generated/_abi_snapshot.py
+  @ONLY
+)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/generated/_abi_snapshot.py
+  DESTINATION _internal
+)
 
 # Add GoogleTest features
 include(FindGTest)

@@ -72,22 +72,14 @@ void RBLNGuardImpl::uncheckedSetDevice(c10::Device device) const noexcept {
 }
 
 c10::DeviceIndex RBLNGuardImpl::deviceCount() const noexcept {
-  try {
-    const auto device_count = c10::rbln::get_device_count();
-    RBLN_LOG_DEBUG("device_count={}", static_cast<int>(device_count));
-    return device_count;
-  } catch (const c10::Error& error) {
-    RBLN_WARN_NOTHROW("Failed to get device count, returning 0: {}", error.msg());
-    return 0;
-  } catch (const std::exception& e) {
-    // First call lazily parses RBLN_DEVICE_MAP / RBLN_NPUS_PER_DEVICE via
-    // std::stoi, which throws std (not c10::Error); uncaught here -> terminate.
-    RBLN_WARN_NOTHROW("Failed to get device count, returning 0 (std::exception): {}", e.what());
-    return 0;
-  } catch (...) {
-    RBLN_WARN_NOTHROW("Failed to get device count, returning 0: unknown exception");
-    return 0;
-  }
+  // Delegates to the shared nothrow enumeration so the guard impl, the accelerator
+  // hooks and Python device_count() all answer from one place (and warn identically).
+  // It also swallows the std::stoi throw from lazily parsing RBLN_DEVICE_MAP /
+  // RBLN_NPUS_PER_DEVICE, which is not a c10::Error and would otherwise terminate.
+  // Deliberately no debug log: RBLN_LOG_DEBUG can throw when debug logging is enabled
+  // (fmt / sink, e.g. bad_alloc), which would terminate this noexcept override. The shared
+  // enumeration already logs on the paths that can afford it.
+  return c10::rbln::get_device_count_nothrow();
 }
 
 c10::DeviceCapability RBLNGuardImpl::getDeviceCapability(c10::Device device) const {
@@ -125,68 +117,97 @@ c10::DeviceCapability RBLNGuardImpl::getDeviceCapability(c10::Device device) con
 }
 
 c10::Stream RBLNGuardImpl::getStream(c10::Device device) const {
-  const auto current_stream = c10::Stream(c10::Stream::Default::DEFAULT, device);
-  RBLN_LOG_DEBUG("current_stream={}", c10::str(current_stream));
-  return current_stream;
+  // With no context there is nothing to read and nothing can have been selected, so
+  // the default stream is the answer. Past that point a failure is real.
+  const auto index = device.has_index() ? device.index() : c10::rbln::get_device_index();
+  if (!c10::rbln::device_context_initialized(index)) {
+    return c10::rbln::get_default_stream(index);
+  }
+  return c10::rbln::get_current_stream(index);
+}
+
+c10::Stream RBLNGuardImpl::getDefaultStream(c10::Device device) const {
+  return c10::rbln::get_default_stream(device.index());
+}
+
+c10::Stream RBLNGuardImpl::getNewStream(c10::Device device, int priority) const {
+  (void)priority; // RBLN has no stream priorities.
+  return c10::rbln::get_stream_from_pool(device.index());
+}
+
+c10::Stream RBLNGuardImpl::getStreamFromGlobalPool(c10::Device device, bool isHighPriority) const {
+  (void)isHighPriority; // RBLN has no stream priorities.
+  return c10::rbln::get_stream_from_pool(device.index());
 }
 
 c10::Stream RBLNGuardImpl::exchangeStream(c10::Stream stream) const {
-  const auto current_device_index = c10::rbln::get_device_index();
-  const auto current_device = c10::Device(c10::kPrivateUse1, current_device_index);
-  const auto original_stream = c10::Stream(c10::Stream::Default::DEFAULT, current_device);
-  RBLN_LOG_DEBUG("Setting current stream: {} -> {}", c10::str(original_stream), c10::str(stream));
+  const auto original_stream = getStream(stream.device());
+  c10::rbln::set_current_stream(stream);
   return original_stream;
+}
+
+bool RBLNGuardImpl::queryStream(const c10::Stream& stream) const {
+  return c10::rbln::query_stream(stream);
+}
+
+void RBLNGuardImpl::synchronizeStream(const c10::Stream& stream) const {
+  c10::rbln::synchronize_stream(stream);
 }
 
 namespace {
 
-// Opaque payload behind the void* handles in the event API: the device the
-// event was last recorded on, or -1 while never recorded.
-struct RBLNEvent {
-  c10::DeviceIndex device_index = -1;
+// The void* handle IS the opaque event handle; the casts live here only.
+void* to_event_ptr(uint64_t handle) {
+  return reinterpret_cast<void*>(static_cast<uintptr_t>(handle)); // NOLINT(performance-no-int-to-ptr)
+}
 
-  bool recorded() const {
-    return device_index >= 0;
-  }
-};
-
-void drain_if_recorded(void* event) {
-  const auto* rbln_event = static_cast<const RBLNEvent*>(event);
-  if (rbln_event != nullptr && rbln_event->recorded()) {
-    c10::rbln::synchronize(rbln_event->device_index);
-  }
+uint64_t to_event_handle(void* event) {
+  return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(event));
 }
 
 } // namespace
 
 void RBLNGuardImpl::record(void** event, const c10::Stream& stream, c10::DeviceIndex device_index, c10::EventFlag flag)
     const {
-  (void)flag; // RBLN events carry no timing.
+  (void)flag; // Event timing is not supported (elapsedTime is unimplemented).
+  TORCH_CHECK(
+      device_index == -1 || device_index == stream.device_index(),
+      "Event device index ",
+      device_index,
+      " does not match recording stream's device index ",
+      stream.device_index(),
+      ".");
+  const auto event_device = device_index >= 0 ? device_index : stream.device_index();
   if (*event == nullptr) {
-    *event = new RBLNEvent();
+    *event = to_event_ptr(c10::rbln::event_create(event_device));
   }
-  auto* rbln_event = static_cast<RBLNEvent*>(*event);
-  rbln_event->device_index = device_index >= 0 ? device_index : stream.device_index();
-  RBLN_LOG_DEBUG("Recorded event on device {}", static_cast<int>(rbln_event->device_index));
+  c10::rbln::event_record(to_event_handle(*event), stream);
 }
 
 void RBLNGuardImpl::block(void* event, const c10::Stream& stream) const {
-  (void)stream; // Single in-order queue: a host-side drain orders everything.
-  drain_if_recorded(event);
+  if (event == nullptr) {
+    return; // never recorded -> nothing to wait for
+  }
+  c10::rbln::event_block(stream, to_event_handle(event));
 }
 
 bool RBLNGuardImpl::queryEvent(void* event) const {
-  drain_if_recorded(event);
-  return true;
+  if (event == nullptr) {
+    return true; // never recorded -> complete
+  }
+  return c10::rbln::event_query(to_event_handle(event));
 }
 
 void RBLNGuardImpl::synchronizeEvent(void* event) const {
-  drain_if_recorded(event);
+  if (event == nullptr) {
+    return; // never recorded -> no-op
+  }
+  c10::rbln::event_synchronize(to_event_handle(event));
 }
 
 void RBLNGuardImpl::destroyEvent(void* event, c10::DeviceIndex device_index) const noexcept {
   (void)device_index;
-  delete static_cast<RBLNEvent*>(event);
+  c10::rbln::event_destroy(to_event_handle(event)); // noexcept; no-op on null (handle 0)
 }
 
 void RBLNGuardImpl::synchronizeDevice(c10::DeviceIndex device_index) const {

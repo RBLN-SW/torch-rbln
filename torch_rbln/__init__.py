@@ -4,6 +4,7 @@ import warnings
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any  # noqa: UP035
 
+from torch_rbln._internal.abi_check import check_librbln_abi
 from torch_rbln._internal.env_utils import is_diagnose_mode
 from torch_rbln._internal.rbln_runtime_lib import load_runtime_library
 
@@ -36,7 +37,14 @@ def torch_backends_entry_point() -> None:
         # Load shared objects ##################################################
         # Map librbln.so before the native extensions: they declare it NEEDED by SONAME, so the
         # loader reuses this mapping instead of searching a RUNPATH baked in at build time.
-        load_runtime_library()
+        librbln_path = load_runtime_library()
+
+        # Verify the rebel ABI contract while librbln.so is the only rebel code loaded. Past
+        # this point our extensions bind to its entry points and a mismatch stops being
+        # reportable: CPython opens them RTLD_NOW, so a missing symbol aborts the import as
+        # `undefined symbol`. It re-opens the mapping just made RTLD_NOLOAD, never a copy, and
+        # owns that step so a handle it cannot take fails open like the rest of the check.
+        check_librbln_abi(librbln_path)
 
         # Import native extension module (e.g., torch_rbln.so)
         current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -153,10 +161,9 @@ def _initialize_kineto_profiler() -> None:
     """Register the rbln torch.profiler (kineto) bridge (a runtime-free libkineto
     factory registration).
 
-    Do NOT query the device arch here (e.g. ``is_atom_device()``): ``get_npu_name`` seals
-    ``RBLN_DEVICES`` in the rbln runtime, and a vLLM data-parallel worker remaps
-    ``RBLN_DEVICES`` *after* import -> ``RBLN_DEVICES environment variable changed at
-    runtime (Sealed)``. ATOM is gated by the runtime instead: ``rbln_kineto_is_active()``
+    Do NOT query the device arch here (e.g. ``is_atom_device()``): ``get_npu_name`` resolves
+    a device, opening and closing a device node on every import. ATOM is gated by the runtime
+    instead: ``rbln_kineto_is_active()``
     (which the C++ profiler ``configure()`` checks) reports inactive on ATOM
     (rebel-compiler #12079), so no rbln session is created there.
     """

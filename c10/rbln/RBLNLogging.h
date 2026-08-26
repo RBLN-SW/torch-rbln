@@ -191,6 +191,31 @@ C10_RBLN_API int get_scope_depth();
   } while (0)
 
 /**
+ * @brief RBLN_CHECK that throws without logging. Same message, no console output.
+ *
+ * For failures a probe may legitimately reach -- device-mapping validation, called from
+ * is_available()/device_count(). RBLN_CHECK logs c10::Error::what() (stack trace
+ * included) to stdout before throwing, ungated by RBLN_LOG_LEVEL, so catching the
+ * exception does not suppress it. The message rides the exception instead.
+ *
+ * Consequence: a malformed config stays quiet at the point of use too, since that
+ * rethrows the same stored plan error. get_device_count_nothrow() warns once for callers
+ * that swallow it. Use errors (unassigned device index, bad allocation) keep RBLN_CHECK.
+ *
+ * @code
+ * RBLN_CHECK_QUIET(condition, "Error message with value: {}", value);
+ * @endcode
+ */
+#define RBLN_CHECK_QUIET(condition, ...)                                                                   \
+  do {                                                                                                     \
+    if (C10_UNLIKELY_OR_CONST(!(condition))) {                                                             \
+      const auto format_ = c10::rbln::detail::format_log_message(__VA_ARGS__);                             \
+      throw c10::Error(                                                                                    \
+          {__func__, __FILE__, static_cast<uint32_t>(__LINE__)}, TORCH_CHECK_MSG(condition, "", format_)); \
+    }                                                                                                      \
+  } while (0)
+
+/**
  * @brief Macro for debug-level checking specific to RBLN.
  *
  * This macro is enabled only in debug builds. It is useful for checks that are too expensive to perform in release

@@ -126,6 +126,25 @@ The value is a **comma-separated list** of fallback case names to disable:
 
 By default, each physical NPU is mapped 1:1 to a logical device (**Direct Mapping**). To group multiple physical NPUs into a single logical device for RSD (Rebellions Scalable Design), use one of the following environment variables.
 
+### RBLN_DEVICES
+
+Selects which physical NPUs this process can see, as a comma-separated list of ids — the `CUDA_VISIBLE_DEVICES` analogue. `RBLN_VISIBLE_DEVICES` is an alias of it. Unset means every NPU on the host.
+
+It is owned by the runtime (`rebel-compiler`), not by torch-rbln, and everything below is expressed **relative to the devices it leaves visible**: with `RBLN_DEVICES=4,5,6,7`, `rbln:0` is physical NPU `4`, and the ids in `RBLN_DEVICE_MAP` are indices into that visible pool rather than system ids.
+
+### When the mapping takes effect
+
+The mapping is resolved in two stages:
+
+| Stage | What happens | Triggered by |
+|-------|--------------|--------------|
+| **Plan** | The variables below are parsed and validated and the logical→physical table is computed. No NPU is claimed. | `torch.rbln.is_available()`, `torch.rbln.device_count()`, other queries |
+| **Commit** | Each planned logical device is registered with the runtime, opening a context on every mapped NPU. The mapping is then frozen. | First actual device use — an allocation, `synchronize()`, a collective. Selecting a device with `set_device()` does **not** commit: it is bookkeeping and claims nothing. |
+
+Until commit, editing the variables still changes the mapping. After commit it is fixed for the process lifetime: later changes are ignored rather than rejected, and unsetting a variable does not widen the pool back to every device. This matches `torch.cuda`, which likewise refuses to cache its device count "prior to CUDA initialization, because the number of devices can change due to changes to `CUDA_VISIBLE_DEVICES`".
+
+Both layers freeze at the same moment: commit registers each logical device with the runtime, and that registration is what makes the runtime fix its own `RBLN_DEVICES` mapping. A launcher may therefore assign `RBLN_DEVICES` after import — including inside a `fork()`ed worker — as long as it does so before the process first uses a device.
+
 ### RBLN_NPUS_PER_DEVICE
 
 Groups physical NPUs uniformly. Must be one of: `1`, `2`, `4`, `8`, `16`, `32`.
@@ -257,3 +276,53 @@ export TORCH_RBLN_USE_DEVICE_TP=OFF  # use num_devices=1 for eager ops (default:
 
 **Use case:**
 This is useful when you want consistent tensor parallel behavior across both eager and compiled operations, particularly in mixed execution scenarios.
+
+## rebel ABI Handshake
+
+`torch-rbln` and `librbln.so` agree on an integer interface contract. `rebel-compiler`
+declares two numbers in `rebel/runtime/api/rbln_abi.h` and exports both as C entry
+points:
+
+| Number | Meaning |
+|--------|---------|
+| `RBLN_ABI_CURRENT` | the interface number this `librbln.so` implements |
+| `RBLN_ABI_MIN_SUPPORTED` | the oldest consumer contract it still accepts |
+
+`torch-rbln` owns no number of its own. Its build records a *snapshot* of
+`RBLN_ABI_CURRENT` from the header it compiled against, and `import torch_rbln` checks
+that snapshot against the `librbln.so` it actually loads, before any other rebel entry
+point is used:
+
+```
+rbln_abi_min_supported() <= <snapshot> <= rbln_abi_current()
+```
+
+Outside that window the import fails with an `RBLN ABI mismatch` message naming the
+`librbln.so` in use and both versions. A `librbln.so` whose two entry points contradict
+each other (`min_supported > current`) fails the same way, with or without a snapshot to
+compare against: it describes no acceptable consumer at all.
+
+Cases that leave no verdict to reach warn and continue instead:
+
+| case | why it cannot decide |
+|------|----------------------|
+| `librbln.so` exports no version symbols | it predates the handshake |
+| `librbln.so` exports only one of the two | malformed, but half a window is no window |
+| no handle can be taken on the mapped `librbln.so` | its symbols cannot be read |
+| `torch-rbln` recorded no snapshot | it was built against a `rebel-compiler` with no `rbln_abi.h` |
+
+Run `python -m torch_rbln.diagnose` to see the snapshot, the runtime window, and the
+verdict for the current environment.
+
+### TORCH_RBLN_SKIP_ABI_CHECK
+
+Skips the handshake entirely.
+
+```bash
+export TORCH_RBLN_SKIP_ABI_CHECK=1   # accepts 1 / ON / TRUE / YES
+```
+
+This is an escape hatch for unblocking a machine while a matching wheel is built. It
+suppresses the diagnosis, not the incompatibility: the mismatch it hides is what would
+otherwise surface as an `undefined symbol` import crash or as corruption inside the
+runtime.
