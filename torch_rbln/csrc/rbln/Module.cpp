@@ -178,13 +178,13 @@ void register_stream_api(py::module_& module) {
 // set_device_layout_like operates on a whole tensor allocation, so a view
 // (non-zero storage_offset, or not spanning its storage) is rejected up front
 // with a clear error instead of misbehaving downstream.
-void check_base_rbln_tensor(const at::Tensor& t, const char* name) {
-  TORCH_CHECK(
-      t.device().is_privateuseone(), "set_device_layout_like: ", name, " must be an RBLN tensor, got ", t.device());
+void check_base_rbln_tensor(const at::Tensor& t, const char* api, const char* name) {
+  TORCH_CHECK(t.device().is_privateuseone(), api, ": ", name, " must be an RBLN tensor, got ", t.device());
   TORCH_CHECK(
       t.storage_offset() == 0 && t.is_contiguous() &&
           static_cast<int64_t>(t.storage().nbytes()) == t.numel() * t.element_size(),
-      "set_device_layout_like: ",
+      api,
+      ": ",
       name,
       " must be a whole base (non-view) RBLN tensor");
 }
@@ -212,6 +212,16 @@ void register_internal_api(py::module_& module) {
       },
       "Internal: mark RBLN virtual memory as zero-initialized (no host alloc)");
 
+  // Materialise a tensor's device allocation up front, for a consumer that reads the physical
+  // buffers out of band. Used by torch_rbln.bind_device_memory().
+  module.def(
+      "_bind_device_memory",
+      [](const at::Tensor& tensor) {
+        check_base_rbln_tensor(tensor, "bind_device_memory", "tensor");
+        c10::rbln::bind_device_memory(tensor.data_ptr(), tensor.storage().nbytes());
+      },
+      "Internal: give an RBLN tensor a flat single-node device allocation");
+
   // Set target's device-allocation layout to match ref's, without copying data.
   // Used by torch_rbln.set_device_layout_like().
   module.def(
@@ -220,8 +230,8 @@ void register_internal_api(py::module_& module) {
         // Validate inputs up front so misuse fails with a clear error. dtype
         // must match: a mismatch would reinterpret target's buffer as a
         // different dtype.
-        check_base_rbln_tensor(target, "target");
-        check_base_rbln_tensor(ref, "ref");
+        check_base_rbln_tensor(target, "set_device_layout_like", "target");
+        check_base_rbln_tensor(ref, "set_device_layout_like", "ref");
         TORCH_CHECK(
             target.device() == ref.device(),
             "set_device_layout_like: target and ref must be on the same device (got ",

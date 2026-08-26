@@ -6,7 +6,11 @@ Test suite for tensor memory correctness.
 Validates that device operations produce correct results under non-trivial memory scenarios:
 - Storage aliasing: multiple tensors sharing the same underlying storage
 - Input/output memory independence: ensuring that input and output tensors do not share overlapping memory
+- Bound allocations: device buffers handed to a consumer that DMAs out of band
+- Huge host buffers: the host side of the same transfers
 """
+
+import gc
 
 import pytest
 import torch
@@ -198,8 +202,90 @@ class TestInputOutputTensors(TestCase):
         run_in_isolated_process(_input_output_tensor_memory_independence_worker, self.rbln_device, dtype)
 
 
+@pytest.mark.test_set_ci
+class TestBindDeviceMemory(TestCase):
+    """
+    ``torch.rbln.bind_device_memory`` materializes a tensor's device allocation, for
+    a consumer that reads the physical buffers out of band and so never runs the op
+    that would otherwise trigger the lazy bind.
+
+    Whether the memory really became physical is not observable from Python -- what
+    is checked here is that the call succeeds on the tensors it accepts, leaves them
+    usable, and rejects the ones whose base address it cannot bind.
+    """
+
+    rbln_device = torch.device("rbln:0")
+
+    def test_binds_a_whole_tensor(self):
+        t = torch.empty(4096, dtype=torch.uint8, device=self.rbln_device)
+        torch.rbln.bind_device_memory(t)
+        # The region must still behave like any other device tensor afterwards.
+        t.zero_()
+        self.assertEqual(t.cpu(), torch.zeros(4096, dtype=torch.uint8))
+
+    def test_rebinding_is_allowed(self):
+        # The collective path re-binds the same tensor before every operation, so a
+        # second bind must not fail.
+        t = torch.empty(4096, dtype=torch.uint8, device=self.rbln_device)
+        torch.rbln.bind_device_memory(t)
+        torch.rbln.bind_device_memory(t)
+
+    def test_rejects_cpu_tensor(self):
+        with self.assertRaises(RuntimeError):
+            torch.rbln.bind_device_memory(torch.empty(4096, dtype=torch.uint8))
+
+    def test_rejects_view(self):
+        # A view's data_ptr() is an interior address; binding it would configure the
+        # wrong region, so it is refused rather than silently mis-bound.
+        base = torch.empty(4096, dtype=torch.uint8, device=self.rbln_device)
+        with self.assertRaises(RuntimeError):
+            torch.rbln.bind_device_memory(base[16:])
+
+
+@pytest.mark.test_set_ci
+class TestHugeHostEmpty(TestCase):
+    """
+    ``torch.rbln.huge_host_empty`` returns host memory the device can DMA into
+    without staging through a bounce buffer and without faulting a page per
+    4 KiB mid-transfer.
+
+    Host-only: no device is involved, so these run without an NPU.
+    """
+
+    def test_returns_zeroed_uint8_tensor(self):
+        nbytes = 4 * 1024 * 1024
+        t = torch.rbln.huge_host_empty(nbytes)
+        self.assertEqual(t.device.type, "cpu")
+        self.assertEqual(t.dtype, torch.uint8)
+        self.assertEqual(t.numel(), nbytes)
+        # Zero-filled is part of the contract, though not a discriminating check:
+        # freshly mapped pages read as zero anyway, so this catches a wrapper that
+        # stopped zero-filling only by luck. The prefaulting it comes from is not
+        # observable from here.
+        self.assertTrue(bool((t == 0).all()))
+
+    def test_is_huge_page_aligned(self):
+        t = torch.rbln.huge_host_empty(4 * 1024 * 1024)
+        self.assertEqual(t.data_ptr() % (2 * 1024 * 1024), 0)
+
+    def test_buffer_outlives_its_python_handle(self):
+        # The tensor shares the allocation rather than copying it, so nothing but
+        # the buffer-protocol reference keeps it alive. If that reference were
+        # missing the write below would land in freed memory.
+        t = torch.rbln.huge_host_empty(4 * 1024 * 1024)
+        gc.collect()
+        t[:1024] = 7
+        self.assertTrue(bool((t[:1024] == 7).all()))
+        self.assertTrue(bool((t[1024:] == 0).all()))
+
+    def test_rejects_zero_size(self):
+        with self.assertRaises(ValueError):
+            torch.rbln.huge_host_empty(0)
+
+
 instantiate_device_type_tests(TestAliasedTensors, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestInputOutputTensors, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestBindDeviceMemory, globals(), only_for="privateuse1")
 
 
 if __name__ == "__main__":

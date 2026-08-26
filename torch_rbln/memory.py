@@ -14,7 +14,9 @@ import torch_rbln._C
 
 
 __all__ = [
+    "bind_device_memory",
     "empty_cache",
+    "huge_host_empty",
     "set_device_layout_like",
     "max_memory_allocated",
     "max_memory_reserved",
@@ -251,6 +253,71 @@ def reset_peak_memory_stats(device: Optional[Union[int, str, torch.device]] = No
 
 _offload_lock = threading.Lock()
 _offload_depth = 0
+
+
+def bind_device_memory(tensor: torch.Tensor) -> None:
+    """
+    Materialize ``tensor``'s device allocation instead of leaving it lazy.
+
+    A device allocation reserves a virtual address and materializes the physical
+    memory behind it on first use through a torch op. A consumer that reads those
+    physical buffers *out of band* -- a collective library, direct storage (NVMe)
+    DMA -- never runs such an op, so it would find nothing there. Call this after
+    allocating a buffer you are handing to one.
+
+    The region is laid out flat and 1:1 with no dtype transform, on the device's
+    main node -- what a consumer treating it as bytes expects. Use
+    :func:`set_device_layout_like` instead when the layout has to match another
+    tensor's. Binding an already-bound region is allowed.
+
+    Args:
+        tensor: A whole (non-view) RBLN tensor: contiguous, zero storage offset,
+            and covering its whole storage.
+
+    Raises:
+        RuntimeError: if ``tensor`` is not an RBLN tensor, is a view, or the
+            runtime rejects the allocation.
+
+    Example::
+
+        staging = torch.empty(nbytes, dtype=torch.uint8, device="rbln:0")
+        torch.rbln.bind_device_memory(staging)
+    """
+    torch_rbln._C._bind_device_memory(tensor)
+
+
+def huge_host_empty(nbytes: int) -> torch.Tensor:
+    """
+    Allocate a host buffer the device can DMA into without a staging copy.
+
+    An ordinary CPU tensor is 64 B aligned; the runtime's copy path stages any
+    host address that is not page aligned through a bounce buffer, and even an
+    aligned one pays a page fault per 4 KiB the first time the runtime resolves
+    its host addresses -- which lands in the transfer, not in setup. This returns
+    huge-page-backed memory instead, prefaulted, so neither happens.
+
+    The buffer is released when the last reference to the returned tensor (or to
+    a view of it) goes away.
+
+    Args:
+        nbytes: Size of the buffer in bytes. Must be positive.
+
+    Returns:
+        torch.Tensor: A zero-filled 1-D ``uint8`` CPU tensor of ``nbytes`` bytes,
+        sharing the buffer's memory rather than copying it.
+
+    Example::
+
+        slab = torch.rbln.huge_host_empty(1 << 30)
+        slab.view(...)  # hand to whatever consumes the host side
+    """
+    # Third Party
+    from rebel.host_memory import HugeHostBuffer
+
+    # frombuffer takes a buffer-protocol reference, which is what keeps the
+    # allocation alive for as long as the tensor is: HugeHostBuffer frees itself
+    # on collection and nothing else holds it.
+    return torch.frombuffer(HugeHostBuffer(nbytes), dtype=torch.uint8)
 
 
 @contextlib.contextmanager
