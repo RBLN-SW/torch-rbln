@@ -239,35 +239,6 @@ class TestDispatchShimNanInfFallback(TestCase):
 
 
 @pytest.mark.test_set_ci
-class TestDispatchShimWarmHitPath(TestCase):
-    """The warm-cache hit path must actually run, not merely install.
-
-    The hit path calls the rebel runtime's ``prepare_inputs`` /
-    ``prepare_outputs`` / ``run`` by name (see ``WarmCache.h``). A rename or a
-    newly required parameter on rebel's side makes every call raise, and the
-    shim then falls back to the Python wrapper: correct results, no hits. The
-    install-side assertions elsewhere in this file still pass in that state,
-    so assert on the hit counter directly.
-    """
-
-    def test_repeated_same_profile_dispatch_takes_hit_path(self) -> None:
-        x = torch.arange(64, dtype=torch.float16, device="rbln")
-        y = torch.ones(64, dtype=torch.float16, device="rbln")
-        expected = torch.arange(1, 65, dtype=torch.float16)
-
-        # The first call installs the entry; the ones after it must hit. Read
-        # the counter as a delta rather than resetting it, so the test leaves
-        # no process-global state behind.
-        self.assertEqual((x + y).to("cpu"), expected)
-        hits_before = _C._dispatch_shim_warm_segments_dump()[0]
-        for _ in range(3):
-            self.assertEqual((x + y).to("cpu"), expected)
-
-        hits_after = _C._dispatch_shim_warm_segments_dump()[0]
-        self.assertGreater(hits_after, hits_before, "warm-cache hit path never ran")
-
-
-@pytest.mark.test_set_ci
 class TestDispatchShimGateLiveRead(TestCase):
     """Both NaN/Inf-scan gates -- ``TORCH_RBLN_DEPLOY`` (``is_deploy_mode``) and
     ``TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK`` (``is_nan_inf_check_disabled``) in
@@ -331,7 +302,6 @@ instantiate_device_type_tests(TestDispatchShimWrappedScalar, globals(), only_for
 instantiate_device_type_tests(TestDispatchShimAllScalarFallback, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestDispatchShimDtypeMismatch, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestDispatchShimNanInfFallback, globals(), only_for="privateuse1")
-instantiate_device_type_tests(TestDispatchShimWarmHitPath, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestDispatchShimGateLiveRead, globals(), only_for="privateuse1")
 
 
