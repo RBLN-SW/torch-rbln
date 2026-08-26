@@ -11,13 +11,16 @@ Validates that device operations produce correct results under non-trivial memor
 """
 
 import gc
+import os
 import sys
+from unittest import mock
 
 import pytest
 import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
+import torch_rbln._C
 from test.utils import run_in_isolated_process, SUPPORTED_DTYPES
 
 
@@ -203,6 +206,15 @@ class TestInputOutputTensors(TestCase):
         run_in_isolated_process(_input_output_tensor_memory_independence_worker, self.rbln_device, dtype)
 
 
+def _device_bytes() -> int:
+    """Bytes of device memory the runtime holds right now.
+
+    Process-global and recorded at every runtime buffer alloc/free, so only a delta
+    taken across the call under test says anything.
+    """
+    return torch_rbln._C._rt_prof_memory()[0]
+
+
 def _bind_after_shutdown_worker(device):
     """Assert ``bind_device_memory`` raises rather than faulting once the runtime is down.
 
@@ -230,37 +242,65 @@ class TestBindDeviceMemory(TestCase):
     a consumer that reads the physical buffers out of band and so never runs the op
     that would otherwise trigger the lazy bind.
 
-    Whether the memory really became physical is not observable from Python -- what
-    is checked here is that the call succeeds on the tensors it accepts, leaves them
-    usable, and rejects the ones whose base address it cannot bind.
+    The runtime's device-memory gauge is what makes that observable from Python; no
+    torch op stands in for it, since an op either materializes the allocation itself
+    or -- ``zero_`` -- marks it logically zero without allocating anything.
     """
 
     rbln_device = torch.device("rbln:0")
 
+    def test_bind_allocates_the_physical_memory(self):
+        # The postcondition itself. Nothing but the bind can account for the delta:
+        # the allocation is still lazy (asserted), the device and its one-time pools
+        # are already committed by the synchronize, and no op runs on ``t``.
+        nbytes = 8 << 20
+        with mock.patch.dict(os.environ):
+            os.environ.pop("TORCH_RBLN_EAGER_MALLOC", None)  # would bind at allocation
+            torch.rbln.synchronize()
+
+            before_alloc = _device_bytes()
+            t = torch.empty(nbytes, dtype=torch.uint8, device=self.rbln_device)
+            before_bind = _device_bytes()
+            torch.rbln.bind_device_memory(t)
+            after_bind = _device_bytes()
+
+        self.assertEqual(before_bind, before_alloc, "the allocation was expected to still be lazy")
+        # The runtime may bring more along -- a slab it grew to serve this -- but not less.
+        self.assertGreaterEqual(after_bind - before_bind, nbytes)
+
     def test_binds_a_whole_tensor(self):
         t = torch.empty(4096, dtype=torch.uint8, device=self.rbln_device)
         torch.rbln.bind_device_memory(t)
-        # The region must still behave like any other device tensor afterwards.
-        t.zero_()
-        self.assertEqual(t.cpu(), torch.zeros(4096, dtype=torch.uint8))
+        # The region must still behave like any other device tensor afterwards. Not
+        # ``zero_``: that marks the allocation logically zero, and the next device read
+        # then serves zeros over whatever a consumer wrote into it out of band.
+        payload = torch.arange(4096, dtype=torch.int32).to(torch.uint8)
+        t.copy_(payload)
+        self.assertEqual(t.cpu(), payload)
 
     def test_rebinding_is_allowed(self):
         # The collective path re-binds the same tensor before every operation, so a
-        # second bind must not fail.
-        t = torch.empty(4096, dtype=torch.uint8, device=self.rbln_device)
+        # second bind must not fail -- and must not allocate the region a second time.
+        nbytes = 8 << 20
+        t = torch.empty(nbytes, dtype=torch.uint8, device=self.rbln_device)
         torch.rbln.bind_device_memory(t)
+        before = _device_bytes()
         torch.rbln.bind_device_memory(t)
+        self.assertLess(_device_bytes() - before, nbytes)
 
     def test_rejects_cpu_tensor(self):
         with self.assertRaises(RuntimeError):
             torch.rbln.bind_device_memory(torch.empty(4096, dtype=torch.uint8))
 
-    def test_rejects_view(self):
-        # A view's data_ptr() is an interior address; binding it would configure the
-        # wrong region, so it is refused rather than silently mis-bound.
+    def test_rejects_interior_view(self):
+        # A slice's data_ptr() is an interior address; binding it would configure the
+        # wrong region, so it is refused rather than silently mis-bound. A view that
+        # still spans the whole storage carries the allocation's own address and size,
+        # and is accepted.
         base = torch.empty(4096, dtype=torch.uint8, device=self.rbln_device)
         with self.assertRaises(RuntimeError):
             torch.rbln.bind_device_memory(base[16:])
+        torch.rbln.bind_device_memory(base.view(64, 64))
 
     @pytest.mark.single_worker
     def test_raises_once_runtime_is_shutting_down(self):
@@ -309,8 +349,9 @@ class TestHugeHostEmpty(TestCase):
         with self.assertRaises(ValueError):
             torch.rbln.huge_host_empty(0)
 
-    def test_rejects_size_beyond_size_t(self):
-        # Past this the provider's round-up to the alignment wraps to zero, so it
+    def test_rejects_size_above_the_supported_bound(self):
+        # The bound is ours, and stricter than the fault it exists for: near the top
+        # of a uint64 the provider's round-up to the alignment wraps to zero, so it
         # allocates nothing and then prefaults the original size over it.
         for nbytes in (sys.maxsize + 1, (1 << 64) - 1):
             with self.assertRaises(ValueError):
