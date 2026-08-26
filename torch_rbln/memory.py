@@ -81,8 +81,8 @@ def _normalize_device(device: Optional[Union[int, str, torch.device]]) -> torch.
 def set_device_layout_like(target: torch.Tensor, ref: torch.Tensor) -> None:
     """Configure ``target``'s device-allocation layout to match ``ref`` (no copy).
 
-    Both must be RBLN tensors with the same dtype, on the same device, and each a
-    *whole base allocation* — not a view/slice.  ``ref`` must be device-resident.
+    Both must be RBLN tensors with the same dtype, on the same device, and each
+    covering its whole storage.  ``ref`` must be device-resident.
     ``target`` adopts ``ref``'s layout and dtype while keeping its own size; no
     data is transferred.  A subsequent device-to-device copy between ``target``
     and ``ref`` then stays on the fast path.
@@ -273,12 +273,14 @@ def bind_device_memory(tensor: torch.Tensor) -> None:
     tensor's. Binding an already-bound region is allowed.
 
     Args:
-        tensor: A whole (non-view) RBLN tensor: contiguous, zero storage offset,
-            and covering its whole storage.
+        tensor: An RBLN tensor covering its whole storage: contiguous, with zero
+            storage offset. A view that still spans the whole storage is fine; a
+            slice or an interior view is not, since its address is not the
+            allocation's.
 
     Raises:
-        RuntimeError: if ``tensor`` is not an RBLN tensor, is a view, or the
-            runtime rejects the allocation.
+        RuntimeError: if ``tensor`` is not an RBLN tensor, does not cover its
+            whole storage, or the runtime rejects the allocation.
 
     Example::
 
@@ -296,7 +298,9 @@ def huge_host_empty(nbytes: int) -> torch.Tensor:
     host address that is not page aligned through a bounce buffer, and even an
     aligned one pays a page fault per 4 KiB the first time the runtime resolves
     its host addresses -- which lands in the transfer, not in setup. This returns
-    huge-page-backed memory instead, prefaulted, so neither happens.
+    2 MiB-aligned memory instead, prefaulted, so neither happens. It also asks
+    for transparent huge pages, but that part is best effort: with THP disabled
+    the alignment still holds and nothing is huge-page backed.
 
     The buffer is released when the last reference to the returned tensor (or to
     a view of it) goes away.

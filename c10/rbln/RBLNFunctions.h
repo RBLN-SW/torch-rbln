@@ -136,7 +136,7 @@ C10_RBLN_API bool is_eager_malloc();
  * Re-binding an already-bound region is allowed and is what the collective path does
  * before every operation.
  *
- * @param rbln_data Base pointer of an RBLN allocation (not an interior/view address).
+ * @param rbln_data Base pointer of an RBLN allocation (not an interior address).
  * @param nbytes Size of the allocation in bytes. Must be positive.
  */
 C10_RBLN_API void bind_device_memory(void* rbln_data, size_t nbytes);

@@ -175,9 +175,11 @@ void register_stream_api(py::module_& module) {
       "Internal: set current rbln stream; returns the previous as (stream_id, device_index, device_type)");
 }
 
-// set_device_layout_like operates on a whole tensor allocation, so a view
-// (non-zero storage_offset, or not spanning its storage) is rejected up front
-// with a clear error instead of misbehaving downstream.
+// Both callers configure the whole device allocation behind the tensor's base
+// address, so a tensor that does not cover its storage is rejected up front
+// instead of misbehaving downstream. Covering it is the whole contract: a torch
+// view that still spans its storage (base.view(...), base[:]) carries the
+// allocation's own address and size, and is accepted.
 void check_base_rbln_tensor(const at::Tensor& t, const char* api, const char* name) {
   TORCH_CHECK(t.device().is_privateuseone(), api, ": ", name, " must be an RBLN tensor, got ", t.device());
   TORCH_CHECK(
@@ -186,7 +188,7 @@ void check_base_rbln_tensor(const at::Tensor& t, const char* api, const char* na
       api,
       ": ",
       name,
-      " must be a whole base (non-view) RBLN tensor");
+      " must cover its whole storage (contiguous, storage_offset 0)");
 }
 
 /**
