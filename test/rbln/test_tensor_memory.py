@@ -11,6 +11,7 @@ Validates that device operations produce correct results under non-trivial memor
 """
 
 import gc
+import sys
 
 import pytest
 import torch
@@ -202,6 +203,26 @@ class TestInputOutputTensors(TestCase):
         run_in_isolated_process(_input_output_tensor_memory_independence_worker, self.rbln_device, dtype)
 
 
+def _bind_after_shutdown_worker(device):
+    """Assert ``bind_device_memory`` raises rather than faulting once the runtime is down.
+
+    Runs in a spawned process: the shutdown flag is process-global and set-once, so
+    flipping it here would poison every later test on this worker.
+    """
+    # Third Party
+    import torch
+
+    import torch_rbln._C
+
+    t = torch.empty(4096, dtype=torch.uint8, device=device)
+    torch_rbln._C._set_runtime_shutting_down(True)
+    try:
+        torch.rbln.bind_device_memory(t)
+    except RuntimeError:
+        return
+    raise AssertionError("bind_device_memory did not raise with the runtime shutting down")
+
+
 @pytest.mark.test_set_ci
 class TestBindDeviceMemory(TestCase):
     """
@@ -240,6 +261,12 @@ class TestBindDeviceMemory(TestCase):
         base = torch.empty(4096, dtype=torch.uint8, device=self.rbln_device)
         with self.assertRaises(RuntimeError):
             torch.rbln.bind_device_memory(base[16:])
+
+    @pytest.mark.single_worker
+    def test_raises_once_runtime_is_shutting_down(self):
+        # The raw runtime call would fault rather than raise past teardown, and this
+        # entry point is public, so a caller can reach it there.
+        run_in_isolated_process(_bind_after_shutdown_worker, str(self.rbln_device))
 
 
 @pytest.mark.test_set_ci
@@ -281,6 +308,19 @@ class TestHugeHostEmpty(TestCase):
     def test_rejects_zero_size(self):
         with self.assertRaises(ValueError):
             torch.rbln.huge_host_empty(0)
+
+    def test_rejects_size_beyond_size_t(self):
+        # Past this the provider's round-up to the alignment wraps to zero, so it
+        # allocates nothing and then prefaults the original size over it.
+        for nbytes in (sys.maxsize + 1, (1 << 64) - 1):
+            with self.assertRaises(ValueError):
+                torch.rbln.huge_host_empty(nbytes)
+
+    def test_rejects_negative_and_non_integer(self):
+        with self.assertRaises(ValueError):
+            torch.rbln.huge_host_empty(-1)
+        with self.assertRaises(TypeError):
+            torch.rbln.huge_host_empty(4096.0)
 
 
 instantiate_device_type_tests(TestAliasedTensors, globals(), only_for="privateuse1")

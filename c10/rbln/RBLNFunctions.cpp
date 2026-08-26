@@ -614,6 +614,10 @@ void free_nothrow(void* data) noexcept {
 void bind_device_memory(void* rbln_data, size_t nbytes) {
   RBLN_CHECK(rbln_data != nullptr, "bind_device_memory: rbln_data is nullptr");
   RBLN_CHECK(nbytes > 0, "bind_device_memory: nbytes must be positive, but got {}", nbytes);
+  // Unlike the other vmem-configuring leaves here, this one is reachable from a public Python
+  // entry point at any time, teardown included, where the raw rbln_* call would SEGFAULT
+  // rather than raise.
+  require_runtime("bind device memory");
   const auto vaddr = reinterpret_cast<uint64_t>(rbln_data);
   RBLN_LOG_DEBUG("bind_device_memory: vaddr={:#x} nbytes={}", vaddr, nbytes);
   RBLN_CHECK(

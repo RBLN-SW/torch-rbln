@@ -5,6 +5,8 @@ cache management, memory statistics, and memory monitoring capabilities.
 """
 
 import contextlib
+import operator
+import sys
 import threading
 from typing import Dict, Iterator, Optional, Union  # noqa: UP035
 
@@ -300,11 +302,16 @@ def huge_host_empty(nbytes: int) -> torch.Tensor:
     a view of it) goes away.
 
     Args:
-        nbytes: Size of the buffer in bytes. Must be positive.
+        nbytes: Size of the buffer in bytes. Must be in ``1..sys.maxsize``.
 
     Returns:
         torch.Tensor: A zero-filled 1-D ``uint8`` CPU tensor of ``nbytes`` bytes,
         sharing the buffer's memory rather than copying it.
+
+    Raises:
+        TypeError: if ``nbytes`` is not an integer.
+        ValueError: if ``nbytes`` is outside ``1..sys.maxsize``.
+        MemoryError: if the allocation fails.
 
     Example::
 
@@ -313,6 +320,16 @@ def huge_host_empty(nbytes: int) -> torch.Tensor:
     """
     # Third Party
     from rebel.host_memory import HugeHostBuffer
+
+    # Bound the request to what a size_t can carry. Past that the provider's
+    # round-up to the alignment wraps to zero, which allocates nothing and then
+    # prefaults the original size over it -- a segfault instead of an error.
+    # Reported upstream; this is the range check this API owes its callers either
+    # way. `operator.index` rather than `int()`, so a float is a TypeError rather
+    # than a silent truncation.
+    nbytes = operator.index(nbytes)
+    if not 0 < nbytes <= sys.maxsize:
+        raise ValueError(f"nbytes must be in 1..{sys.maxsize}, but got {nbytes}")
 
     # frombuffer takes a buffer-protocol reference, which is what keeps the
     # allocation alive for as long as the tensor is: HugeHostBuffer frees itself
