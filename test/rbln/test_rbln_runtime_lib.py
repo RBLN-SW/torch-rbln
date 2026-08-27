@@ -7,9 +7,13 @@ decides, with LD_LIBRARY_PATH as the one override, and that nothing guesses at a
 of that record.
 """
 
+import json
 import os
 import shutil
+import sys
 import tempfile
+import types
+from importlib.metadata import PackageNotFoundError
 from unittest.mock import patch
 
 import pytest
@@ -27,6 +31,35 @@ def _record(name: str, located: str):
             return located
 
     return _Entry(name)
+
+
+def _dist(direct_url: str | None = None, files: list | None = None):
+    """A stand-in for the installed distribution, carrying only what the resolver reads."""
+
+    class _Dist:
+        def __init__(self):
+            self.files = files or []
+
+        def read_text(self, name: str) -> str | None:
+            return direct_url if name == "direct_url.json" else None
+
+    return _Dist()
+
+
+def _editable_url(source_root: str) -> str:
+    """What an installer writes to direct_url.json for `pip/uv install -e <source_root>`."""
+    return json.dumps({"url": f"file://{source_root}", "dir_info": {"editable": True}})
+
+
+class _ImportHook:
+    """A redirecting editable install's finder, holding the map of files its build installed."""
+
+    def __init__(self, directory: str, known_wheel_files: dict):
+        self.dir = directory
+        self.known_wheel_files = known_wheel_files
+
+    def find_spec(self, fullname, path=None, target=None):  # noqa: ARG002
+        return None
 
 
 @pytest.mark.test_set_ci
@@ -79,7 +112,7 @@ class TestRblnRuntimeLibResolve(TestCase):
         anchor = os.path.dirname(os.path.dirname(imported))
         with (
             self._isolated_env(),
-            patch.object(rbln_runtime_lib, "_rebel_package_anchor", return_value=anchor),
+            patch.object(rbln_runtime_lib, "_rebel_package_anchors", return_value=[anchor]),
             patch.object(
                 rbln_runtime_lib,
                 "_record_entries",
@@ -97,7 +130,7 @@ class TestRblnRuntimeLibResolve(TestCase):
         anchor = os.path.dirname(os.path.dirname(library))
         with (
             self._isolated_env(),
-            patch.object(rbln_runtime_lib, "_rebel_package_anchor", return_value=anchor),
+            patch.object(rbln_runtime_lib, "_rebel_package_anchors", return_value=[anchor]),
             patch.object(
                 rbln_runtime_lib,
                 "_record_entries",
@@ -119,7 +152,7 @@ class TestRblnRuntimeLibResolve(TestCase):
         self.assertTrue(os.path.isfile(stale), "the leftover build tree must exist to compete")
         with (
             self._isolated_env(),
-            patch.object(rbln_runtime_lib, "_rebel_package_anchor", return_value=anchor),
+            patch.object(rbln_runtime_lib, "_rebel_package_anchors", return_value=[anchor]),
             patch.object(
                 rbln_runtime_lib,
                 "_record_entries",
@@ -136,7 +169,9 @@ class TestRblnRuntimeLibResolve(TestCase):
         source_root = os.path.dirname(os.path.dirname(library))
         with (
             self._isolated_env(),
-            patch.object(rbln_runtime_lib, "_rebel_package_anchor", return_value=os.path.join(source_root, "python")),
+            patch.object(
+                rbln_runtime_lib, "_rebel_package_anchors", return_value=[os.path.join(source_root, "python")]
+            ),
             patch.object(rbln_runtime_lib, "_record_entries", return_value=[]),
         ):
             path, source = rbln_runtime_lib.resolve_runtime_library()
@@ -146,7 +181,7 @@ class TestRblnRuntimeLibResolve(TestCase):
     def test_missing_library_reports_what_was_tried(self):
         with (
             self._isolated_env(),
-            patch.object(rbln_runtime_lib, "_rebel_package_anchor", return_value="/nonexistent/anchor"),
+            patch.object(rbln_runtime_lib, "_rebel_package_anchors", return_value=["/nonexistent/anchor"]),
             patch.object(rbln_runtime_lib, "_record_entries", return_value=[]),
         ):
             with self.assertRaises(FileNotFoundError) as ctx:
@@ -156,6 +191,92 @@ class TestRblnRuntimeLibResolve(TestCase):
         self.assertIn("/nonexistent/build/librbln.so (from rebel source build tree)", message)
         self.assertIn("LD_LIBRARY_PATH", message)
         self.assertIn("python -m torch_rbln.diagnose", message)
+
+    def test_every_search_location_is_tried_whatever_order_they_arrive_in(self):
+        # An editable install reports its search locations out of a set holding both the source
+        # tree and the build tree, so their order changes from process to process. Both orders have
+        # to reach the same library, or resolution is a coin flip.
+        root = self._make_root()
+        library = self._make_lib("build", "librbln.so", root=root)
+        locations = [
+            os.path.join(root, "python", "rebel"),
+            os.path.join(root, "python", "build", "skbuild", "rebel"),
+        ]
+        for ordered in (locations, list(reversed(locations))):
+            spec = types.SimpleNamespace(submodule_search_locations=ordered)
+            with (
+                self._isolated_env(),
+                patch.object(rbln_runtime_lib.importlib.util, "find_spec", return_value=spec),
+                patch.object(rbln_runtime_lib, "_record_entries", return_value=[]),
+            ):
+                path, source = rbln_runtime_lib.resolve_runtime_library()
+            self.assertEqual(path, library, f"locations in the order {ordered} resolved elsewhere")
+            self.assertEqual(source, "rebel source build tree")
+
+    def test_an_import_hook_names_the_library_outright(self):
+        # A redirecting editable install carries the map of files its build installed, so the
+        # library is named rather than guessed at -- and it outranks the record because that hook
+        # is what `import rebel` goes through.
+        root = self._make_root()
+        library = self._make_lib("staging", "lib", "librbln.so", root=root)
+        recorded = self._make_lib("site-packages", "lib", "librbln.so", root=root)
+        hook = _ImportHook(
+            directory=os.path.join(root, "staging"),
+            known_wheel_files={"lib.librbln": os.path.join("lib", "librbln.so")},
+        )
+        sys.meta_path.insert(0, hook)
+        self.addCleanup(sys.meta_path.remove, hook)
+        with (
+            self._isolated_env(),
+            patch.object(rbln_runtime_lib, "_record_entries", return_value=[_record("lib/librbln.so", recorded)]),
+        ):
+            path, source = rbln_runtime_lib.resolve_runtime_library()
+        self.assertEqual(path, library)
+        self.assertEqual(source, "editable install import hook")
+
+    def test_an_editable_install_uses_the_directory_it_was_installed_from(self):
+        # PEP 610 records the checkout an editable install points at, which is the only exact
+        # statement of where it lives: rebel-compiler installs from <source>/python and builds into
+        # <source>/build, and the record names no library to go by.
+        root = self._make_root()
+        library = self._make_lib("build", "librbln.so", root=root)
+        with (
+            self._isolated_env(),
+            patch.object(
+                rbln_runtime_lib,
+                "distribution",
+                return_value=_dist(_editable_url(os.path.join(root, "python"))),
+            ),
+            patch.object(rbln_runtime_lib, "_rebel_package_anchors", return_value=[]),
+        ):
+            path, source = rbln_runtime_lib.resolve_runtime_library()
+        self.assertEqual(path, library)
+        self.assertEqual(source, "editable install source tree")
+
+    def test_a_non_editable_install_is_not_read_as_a_source_directory(self):
+        # direct_url.json also describes an install from a wheel URL; only the editable flag makes
+        # the recorded directory a checkout to look under.
+        with patch.object(
+            rbln_runtime_lib,
+            "distribution",
+            return_value=_dist(json.dumps({"url": "https://example.invalid/rebel_compiler.whl"})),
+        ):
+            self.assertIsNone(rbln_runtime_lib._editable_source_root())
+
+    def test_an_absent_distribution_is_named_as_the_reason(self):
+        # With nothing installed there is no candidate to report, and a bare list of paths reads as
+        # a path problem. The message has to name the interpreter that is missing the package.
+        with (
+            self._isolated_env(),
+            patch.object(rbln_runtime_lib, "distribution", side_effect=PackageNotFoundError("rebel-compiler")),
+            patch.object(rbln_runtime_lib, "_rebel_package_anchors", return_value=["/site-packages"]),
+        ):
+            with self.assertRaises(FileNotFoundError) as ctx:
+                rbln_runtime_lib.resolve_runtime_library()
+        message = str(ctx.exception)
+        self.assertIn("No rebel-compiler distribution is installed for", message)
+        self.assertIn(sys.executable, message)
+        self.assertIn("/site-packages", message)
 
     def test_empty_path_entries_are_dropped(self):
         # A doubled separator used to resolve to the current working directory.
@@ -172,7 +293,7 @@ class TestRblnRuntimeLibRecord(TestCase):
         # library one level deeper (rebel/lib).
         library = "/fake/site/rebel/lib/librbln.so"
         with (
-            patch.object(rbln_runtime_lib, "_rebel_package_anchor", return_value="/fake/site"),
+            patch.object(rbln_runtime_lib, "_rebel_package_anchors", return_value=["/fake/site"]),
             patch.object(
                 rbln_runtime_lib,
                 "_record_entries",
