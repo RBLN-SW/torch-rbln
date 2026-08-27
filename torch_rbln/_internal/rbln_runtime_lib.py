@@ -5,11 +5,10 @@ The library is the one the ``rebel-compiler`` distribution recorded installing, 
 which is also what the install RPATH is written against, so one record answers where the library
 is, where it sits relative to the package, and where the headers are.
 
-An editable install records no library, so two statements the install itself makes answer instead:
-the import hook it registers names the files the build installed, and ``direct_url.json`` records
-the directory the install came from, whose build output sits where rebel-compiler puts it by
-default. Both are checked against the ``rebel`` package this interpreter imports, so a second
-checkout cannot answer for the one in use.
+Every candidate comes from where that package sits, because rebel-compiler loads the library
+relative to its own files too: a second copy answering here would be mapped alongside the one
+rebel loads, leaving two runtimes -- two allocators, two device registries -- in one process, which
+nothing downstream can detect when both were built from the same version.
 
 ``LD_LIBRARY_PATH`` is the override: the dynamic loader and rebel-compiler's loader both honour
 it, so all three sides land on the same file.
@@ -20,7 +19,6 @@ before torch_rbln exists, so anything it reaches for has to work then too.
 
 import ctypes
 import importlib.util
-import json
 import os
 import sys
 from collections.abc import Iterator
@@ -33,10 +31,6 @@ _COMPILER_DIST_NAME = "rebel-compiler"
 _MAPS_PATH = "/proc/self/maps"
 _DELETED_SUFFIX = " (deleted)"
 
-# PEP 610: what an installer records about where it installed a distribution from.
-_DIRECT_URL_FILE = "direct_url.json"
-_FILE_URL_PREFIX = "file://"
-
 # The distribution's record of what it installed
 
 
@@ -47,23 +41,31 @@ def _split_env_paths(name: str) -> list[str]:
 
 
 def _rebel_package_anchors() -> list[str]:
-    """Directories holding the ``rebel`` package this interpreter would import.
+    """Directories holding the ``rebel`` package this interpreter would import, first one first.
 
     ``find_spec`` because importing rebel pulls in torch. Anchoring on the imported package keeps
     an editable install, or a stray copy elsewhere, from answering for the one in use.
 
-    Every location, sorted, rather than the first one: an editable install reports its search
-    locations from a set holding both the source tree and the build tree, so which one comes first
-    changes from process to process and taking one of them made resolution a coin flip.
+    ``origin`` leads: it names the ``__init__.py`` that will run, so it says which tree provides
+    rebel even when several are on the path. The search locations follow only when there is no
+    origin -- a namespace package, which a directory left behind by an uninstall also produces.
+    They arrive from a set for an editable install, holding both the source tree and the build
+    tree, so their order changes from process to process and taking one of them was a coin flip.
     """
     try:
         spec = importlib.util.find_spec("rebel")
     except (ImportError, ValueError):
         return []
-    locations = getattr(spec, "submodule_search_locations", None) if spec else None
-    if not locations:
+    if spec is None:
         return []
-    return sorted({os.path.dirname(location) for location in locations})
+    anchors = []
+    if spec.origin:
+        anchors.append(os.path.dirname(os.path.dirname(spec.origin)))
+    for location in sorted(spec.submodule_search_locations or ()):
+        directory = os.path.dirname(location)
+        if directory not in anchors:
+            anchors.append(directory)
+    return anchors
 
 
 def _dist_files() -> list:
@@ -81,12 +83,30 @@ def _record_entries() -> list:
 
 
 def _record_candidates(entry: object, anchors: list[str]) -> Iterator[str]:
-    """Both ways a recorded entry can name a file: under an anchor, and where it was installed."""
+    """Both ways a recorded entry can name a file: under an anchor, and where it was installed.
+
+    Where it was installed counts only when that is the tree the imported package comes from. A
+    distribution recorded elsewhere -- a wheel installed in site-packages while a checkout on
+    PYTHONPATH provides the package -- names the library belonging to its own Python, and
+    rebel-compiler will load that checkout's library rather than this one.
+    """
     for anchor in anchors:
         yield os.path.join(anchor, str(entry))
     located = entry.locate()  # type: ignore[attr-defined]
-    if located is not None:
+    if located is not None and _inside_an_anchor(str(located), anchors):
         yield str(located)
+
+
+def _inside_an_anchor(path: str, anchors: list[str]) -> bool:
+    """Whether ``path`` sits in a directory the ``rebel`` package is installed in.
+
+    No anchor at all -- nothing imports rebel -- leaves a candidate standing: it is then the only
+    statement anything has made about where the library is.
+    """
+    if not anchors:
+        return True
+    resolved = os.path.realpath(path)
+    return any(resolved.startswith(os.path.realpath(anchor) + os.sep) for anchor in anchors)
 
 
 def record_relative_dir(path: str) -> str | None:
@@ -109,9 +129,10 @@ def record_include_dir() -> str | None:
     header = next((e for e in _dist_files() if str(e).endswith(".h") and marker in str(e)), None)
     if header is None:
         return None
-    under = [os.path.join(anchor, str(header).split(marker)[0], "include") for anchor in _rebel_package_anchors()]
+    anchors = _rebel_package_anchors()
+    under = [os.path.join(anchor, str(header).split(marker)[0], "include") for anchor in anchors]
     located = header.locate()
-    if located is not None:
+    if located is not None and _inside_an_anchor(str(located), anchors):
         under.append(str(located).split(marker)[0] + os.sep + "include")
     if not under:
         return None
@@ -119,84 +140,7 @@ def record_include_dir() -> str | None:
     return next((path for path in under if os.path.isdir(path)), under[0])
 
 
-# What an editable install says about itself
-
-
-def _editable_source_root() -> str | None:
-    """Directory an editable rebel-compiler install was installed from, None when it is not one.
-
-    An editable install records no library of its own, and PEP 610 leaves the directory it was
-    installed from in ``direct_url.json`` -- the one exact statement of where the checkout, and
-    with it the C++ build output, lives.
-    """
-    try:
-        recorded = distribution(_COMPILER_DIST_NAME).read_text(_DIRECT_URL_FILE)
-    except (PackageNotFoundError, OSError):
-        return None
-    try:
-        described = json.loads(recorded) if recorded else None
-    except ValueError:
-        return None
-    if not isinstance(described, dict):
-        return None
-    directory = described.get("dir_info")
-    url = described.get("url")
-    if not isinstance(directory, dict) or not directory.get("editable"):
-        return None
-    if not isinstance(url, str) or not url.startswith(_FILE_URL_PREFIX):
-        return None
-    from urllib.parse import unquote  # not at module scope: this runs at `import torch`
-
-    return unquote(url[len(_FILE_URL_PREFIX) :])
-
-
-def _import_hook_libraries() -> Iterator[str]:
-    """Library paths an editable install's import hook already holds.
-
-    A hook that redirects imports into a build tree carries the map of files the build installed,
-    and the library is one of them -- named outright, so it holds even when the build output was
-    configured somewhere this could not have guessed. Which hook it is goes unchecked here; the
-    caller decides whether what a candidate names belongs to the install in use.
-    """
-    for finder in list(sys.meta_path):
-        base = getattr(finder, "dir", None)
-        for attribute in ("known_wheel_files", "known_source_files"):
-            mapping = getattr(finder, attribute, None)
-            if not isinstance(mapping, dict):
-                continue
-            for target in mapping.values():
-                if not isinstance(target, str) or os.path.basename(target) != RUNTIME_LIB_NAME:
-                    continue
-                if os.path.isabs(target):
-                    yield target
-                elif isinstance(base, str):
-                    yield os.path.join(base, target)
-
-
 # Resolution
-
-
-# Both channels below have to answer for the install that provides the ``rebel`` in use: pairing a
-# second checkout's runtime with this interpreter's rebel is what the ABI handshake cannot catch
-# when the two were built from the same version. Which relation says so differs by channel, since
-# one names a file and the other names a directory to derive one from. No importable ``rebel`` at
-# all leaves both standing -- a candidate is then the only statement anything has made.
-
-
-def _sits_beside_the_imported_package(path: str, anchors: list[str]) -> bool:
-    """Whether ``path`` is inside the directory the ``rebel`` package is installed in."""
-    if not anchors:
-        return True
-    resolved = os.path.realpath(path)
-    return any(resolved.startswith(os.path.realpath(anchor) + os.sep) for anchor in anchors)
-
-
-def _holds_the_imported_package(root: str, anchors: list[str]) -> bool:
-    """Whether the checkout ``root`` is the one the ``rebel`` package is imported from."""
-    if not anchors:
-        return True
-    prefix = os.path.realpath(root) + os.sep
-    return any((os.path.realpath(anchor) + os.sep).startswith(prefix) for anchor in anchors)
 
 
 def _iter_runtime_library_candidates() -> Iterator[tuple[str, str]]:
@@ -218,27 +162,13 @@ def _iter_runtime_library_candidates() -> Iterator[tuple[str, str]]:
 
     anchors = _rebel_package_anchors()
 
-    # Ahead of the record: an editable install's hook takes `import rebel` over from site-packages,
-    # so what it holds is what this interpreter would load.
-    for path in _import_hook_libraries():
-        if _sits_beside_the_imported_package(path, anchors):
-            yield from emit(path, "editable install import hook")
-
     for entry in _record_entries():
         for candidate in _record_candidates(entry, anchors):
             yield from emit(candidate, f"{_COMPILER_DIST_NAME} record")
 
-    # Editable install: the record names no library, so the checkout it points at answers instead.
-    # rebel-compiler installs from <source>/python and its REBEL_BUILD_DIR defaults to ../build.
-    # Only when the imported package sits under that checkout: metadata naming a different one
-    # would pair this interpreter's rebel with another checkout's runtime.
-    root = _editable_source_root()
-    if root is not None and _holds_the_imported_package(root, anchors):
-        candidate = os.path.join(os.path.dirname(root), "build", RUNTIME_LIB_NAME)
-        yield from emit(candidate, "editable install source tree")
-
-    # Last: the same build tree derived from where the package sits, for a checkout that reached
-    # this interpreter without being installed at all. Behind everything that states a path.
+    # An editable install records no library, and neither does a checkout that reached this
+    # interpreter without being installed at all. rebel-compiler builds into <source>/build and
+    # loads it from there itself, relative to its own files.
     for anchor in anchors:
         yield from emit(os.path.join(os.path.dirname(anchor), "build", RUNTIME_LIB_NAME), "rebel source build tree")
 
