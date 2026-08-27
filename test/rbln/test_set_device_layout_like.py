@@ -6,7 +6,7 @@ The op configures ``target``'s device allocation to match a device-resident
 ``ref``'s layout and dtype, without copying data, so a later ``target`` <->
 ``ref`` device-to-device copy stays on the fast path. The binding validates its
 inputs first: both must be RBLN tensors, on the same device, with the same
-dtype, and each a whole base allocation (not a view) — a dtype mismatch would
+dtype, and each covering its whole storage — a dtype mismatch would
 reinterpret ``target``'s buffer as a different dtype.
 
 Coverage: API visibility, and the rejected-input paths.
@@ -60,29 +60,29 @@ class TestSetDeviceLayoutLike:
             torch.rbln.set_device_layout_like(target, ref)
 
     def test_offset_view_target_raises(self):
-        """A storage_offset>0 view is not a whole base allocation and is rejected
-        with a clear error."""
+        """A storage_offset>0 view does not cover its storage and is rejected with
+        a clear error."""
         base = torch.empty(64, dtype=torch.float16, device=DEVICE)
         view = base[8:24]
         assert view.storage_offset() != 0
         ref = torch.empty(16, dtype=torch.float16, device=DEVICE)
-        with pytest.raises(RuntimeError, match="whole base"):
+        with pytest.raises(RuntimeError, match="whole storage"):
             torch.rbln.set_device_layout_like(view, ref)
 
     def test_narrowing_view_target_raises(self):
         """A storage_offset==0 view that doesn't span its storage (``base[:k]``)
-        is still not a whole base allocation — reject it."""
+        still does not cover it — reject it."""
         base = torch.empty(64, dtype=torch.float16, device=DEVICE)
         view = base[:16]
         assert view.storage_offset() == 0 and view.is_contiguous()
         ref = torch.empty(16, dtype=torch.float16, device=DEVICE)
-        with pytest.raises(RuntimeError, match="whole base"):
+        with pytest.raises(RuntimeError, match="whole storage"):
             torch.rbln.set_device_layout_like(view, ref)
 
     def test_view_ref_raises(self):
         target = torch.empty(16, dtype=torch.float16, device=DEVICE)
         ref_view = torch.empty(64, dtype=torch.float16, device=DEVICE)[:16]
-        with pytest.raises(RuntimeError, match="whole base"):
+        with pytest.raises(RuntimeError, match="whole storage"):
             torch.rbln.set_device_layout_like(target, ref_view)
 
 

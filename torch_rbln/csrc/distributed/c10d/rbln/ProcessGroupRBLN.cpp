@@ -276,9 +276,11 @@ void ensureRcclRawMemory(const at::Tensor& tensor) {
   if (!mem_info) {
     return;
   }
-  RBLN_CHECK(
-      rbln::rbln_set_raw_memory_alloc(mem_info->key_vaddr, tensor.storage().nbytes()) == RBLNRetCode_SUCCESS,
-      "Failed to allocate RCCL raw memory");
+  // key_vaddr rather than data_ptr(): a view's data_ptr() is an interior address, and the
+  // binding covers the whole enclosing allocation.
+  c10::rbln::bind_device_memory(
+      reinterpret_cast<void*>(mem_info->key_vaddr), // NOLINT(performance-no-int-to-ptr)
+      tensor.storage().nbytes());
 }
 
 /**
@@ -333,9 +335,9 @@ void ensureContiguousRcclRawMemory(const std::vector<at::Tensor>& tensors) {
   for (const auto& tensor : tensors) {
     auto mem_info = getRcclMemoryInfo(tensor);
     TORCH_CHECK(mem_info, "ensureContiguousRcclRawMemory: tensor must be tracked by VMemoryManager");
-    TORCH_CHECK(
-        rbln::rbln_set_raw_memory_alloc(mem_info->key_vaddr, tensor.storage().nbytes()) == RBLNRetCode_SUCCESS,
-        "Failed to allocate RCCL raw memory");
+    c10::rbln::bind_device_memory(
+        reinterpret_cast<void*>(mem_info->key_vaddr), // NOLINT(performance-no-int-to-ptr)
+        tensor.storage().nbytes());
   }
 }
 
