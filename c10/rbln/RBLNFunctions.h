@@ -3,6 +3,7 @@
 #include <c10/core/CachingDeviceAllocator.h>
 #include <c10/core/Device.h>
 #include <c10/core/ScalarType.h>
+#include <c10/core/Stream.h>
 #include <c10/rbln/RBLNMacros.h>
 #include <rebel/runtime/api/rbln_runtime_api.h>
 
@@ -119,6 +120,26 @@ C10_RBLN_API ::rbln::MemoryInfo get_memory_info(const void* data);
  * @return true if eager memory allocation is enabled, false otherwise.
  */
 C10_RBLN_API bool is_eager_malloc();
+
+/**
+ * @brief Give the vmem region at ``rbln_data`` a flat single-node device allocation.
+ *
+ * A device allocation reserves a virtual address and materialises the physical memory
+ * behind it lazily, on first use through a torch op. A consumer that reads those physical
+ * buffers out of band -- a collective library, direct storage (NVMe) DMA -- never runs
+ * such an op, so it would find nothing there. This materialises the allocation up front.
+ *
+ * The layout is flat and 1:1, with no dtype transform, on the device's main node: the
+ * shape a consumer that treats the region as bytes expects. Use set_device_layout_like()
+ * instead when the region has to match another tensor's layout.
+ *
+ * Re-binding an already-bound region is allowed and is what the collective path does
+ * before every operation.
+ *
+ * @param rbln_data Base pointer of an RBLN allocation (not an interior address).
+ * @param nbytes Size of the allocation in bytes. Must be positive.
+ */
+C10_RBLN_API void bind_device_memory(void* rbln_data, size_t nbytes);
 
 /**
  * @brief Configure ``target``'s device allocation to match ``ref``'s layout and
@@ -334,6 +355,74 @@ C10_RBLN_API void memcpy_v2v_async(void* rbln_dst_data, const void* rbln_src_dat
  * @param device_index The RBLN device to synchronize.
  */
 C10_RBLN_API void synchronize(c10::DeviceIndex device_index);
+
+// Streams / events (torch.Stream / torch.Event). A c10::Stream carries the per-device
+// stream id as its StreamId (StreamId 0 is the default stream). An event surfaces as
+// its opaque handle, which is non-zero for a valid event (so it never aliases nullptr).
+
+/**
+ * @brief Returns the current stream for the device (default stream if none set).
+ */
+C10_RBLN_API c10::Stream get_current_stream(c10::DeviceIndex device_index);
+
+/**
+ * @brief Returns the device's default stream (StreamId 0).
+ */
+C10_RBLN_API c10::Stream get_default_stream(c10::DeviceIndex device_index);
+
+/**
+ * @brief Returns a stream from a fixed per-device round-robin pool, filled one slot at
+ * a time. Past the pool size, requests reuse earlier streams. Priorities do not exist
+ * on RBLN and are not part of this API.
+ */
+C10_RBLN_API c10::Stream get_stream_from_pool(c10::DeviceIndex device_index);
+
+/**
+ * @brief Makes `stream` the current stream on its device (thread-local).
+ */
+C10_RBLN_API void set_current_stream(c10::Stream stream);
+
+/**
+ * @brief Non-blocking: true iff all work submitted to `stream` has completed.
+ */
+C10_RBLN_API bool query_stream(c10::Stream stream);
+
+/**
+ * @brief Blocks the host until all work on `stream` has completed.
+ */
+C10_RBLN_API void synchronize_stream(c10::Stream stream);
+
+/**
+ * @brief Creates an event on the device and returns its opaque uint64 handle.
+ */
+C10_RBLN_API uint64_t event_create(c10::DeviceIndex device_index);
+
+/**
+ * @brief Destroys an event. Never throws (called from destructors); no-op on 0.
+ */
+C10_RBLN_API void event_destroy(uint64_t event) noexcept;
+
+/**
+ * @brief Snapshots `stream`'s current position into the event (re-record overwrites).
+ */
+C10_RBLN_API void event_record(uint64_t event, c10::Stream stream);
+
+/**
+ * @brief Makes `stream` wait for `event`. Same-device: does not block the host.
+ * Cross-device waits are not supported and degrade to a host-side wait on the event
+ * (correct, but serializes the host).
+ */
+C10_RBLN_API void event_block(c10::Stream stream, uint64_t event);
+
+/**
+ * @brief Non-blocking: true iff the work recorded into the event has completed.
+ */
+C10_RBLN_API bool event_query(uint64_t event);
+
+/**
+ * @brief Blocks the host until the work recorded into the event has completed.
+ */
+C10_RBLN_API void event_synchronize(uint64_t event);
 
 /**
  * @brief Descriptor for one device-to-device slab copy used by memcpy_v2v_multi.

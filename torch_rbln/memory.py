@@ -5,6 +5,8 @@ cache management, memory statistics, and memory monitoring capabilities.
 """
 
 import contextlib
+import operator
+import sys
 import threading
 from typing import Dict, Iterator, Optional, Union  # noqa: UP035
 
@@ -14,7 +16,9 @@ import torch_rbln._C
 
 
 __all__ = [
+    "bind_device_memory",
     "empty_cache",
+    "huge_host_empty",
     "set_device_layout_like",
     "max_memory_allocated",
     "max_memory_reserved",
@@ -77,8 +81,8 @@ def _normalize_device(device: Optional[Union[int, str, torch.device]]) -> torch.
 def set_device_layout_like(target: torch.Tensor, ref: torch.Tensor) -> None:
     """Configure ``target``'s device-allocation layout to match ``ref`` (no copy).
 
-    Both must be RBLN tensors with the same dtype, on the same device, and each a
-    *whole base allocation* — not a view/slice.  ``ref`` must be device-resident.
+    Both must be RBLN tensors with the same dtype, on the same device, and each
+    covering its whole storage.  ``ref`` must be device-resident.
     ``target`` adopts ``ref``'s layout and dtype while keeping its own size; no
     data is transferred.  A subsequent device-to-device copy between ``target``
     and ``ref`` then stays on the fast path.
@@ -251,6 +255,90 @@ def reset_peak_memory_stats(device: Optional[Union[int, str, torch.device]] = No
 
 _offload_lock = threading.Lock()
 _offload_depth = 0
+
+
+def bind_device_memory(tensor: torch.Tensor) -> None:
+    """
+    Materialize ``tensor``'s device allocation instead of leaving it lazy.
+
+    A device allocation reserves a virtual address and materializes the physical
+    memory behind it on first use through a torch op. A consumer that reads those
+    physical buffers *out of band* -- a collective library, direct storage (NVMe)
+    DMA -- never runs such an op, so it would find nothing there. Call this after
+    allocating a buffer you are handing to one.
+
+    The region is laid out flat and 1:1 with no dtype transform, on the device's
+    main node -- what a consumer treating it as bytes expects. Use
+    :func:`set_device_layout_like` instead when the layout has to match another
+    tensor's. Binding an already-bound region is allowed.
+
+    Args:
+        tensor: An RBLN tensor covering its whole storage: contiguous, with zero
+            storage offset. A view that still spans the whole storage is fine; a
+            slice or an interior view is not, since its address is not the
+            allocation's.
+
+    Raises:
+        RuntimeError: if ``tensor`` is not an RBLN tensor, does not cover its
+            whole storage, or the runtime rejects the allocation.
+
+    Example::
+
+        staging = torch.empty(nbytes, dtype=torch.uint8, device="rbln:0")
+        torch.rbln.bind_device_memory(staging)
+    """
+    torch_rbln._C._bind_device_memory(tensor)
+
+
+def huge_host_empty(nbytes: int) -> torch.Tensor:
+    """
+    Allocate a host buffer the device can DMA into without a staging copy.
+
+    An ordinary CPU tensor is 64 B aligned; the runtime's copy path stages any
+    host address that is not page aligned through a bounce buffer, and even an
+    aligned one pays a page fault per 4 KiB the first time the runtime resolves
+    its host addresses -- which lands in the transfer, not in setup. This returns
+    2 MiB-aligned memory instead, prefaulted, so neither happens. It also asks
+    for transparent huge pages, but that part is best effort: with THP disabled
+    the alignment still holds and nothing is huge-page backed.
+
+    The buffer is released when the last reference to the returned tensor (or to
+    a view of it) goes away.
+
+    Args:
+        nbytes: Size of the buffer in bytes. Must be in ``1..sys.maxsize``.
+
+    Returns:
+        torch.Tensor: A zero-filled 1-D ``uint8`` CPU tensor of ``nbytes`` bytes,
+        sharing the buffer's memory rather than copying it.
+
+    Raises:
+        TypeError: if ``nbytes`` is not an integer.
+        ValueError: if ``nbytes`` is outside ``1..sys.maxsize``.
+        MemoryError: if the allocation fails.
+
+    Example::
+
+        slab = torch.rbln.huge_host_empty(1 << 30)
+        slab.view(...)  # hand to whatever consumes the host side
+    """
+    # Third Party
+    from rebel.host_memory import HugeHostBuffer
+
+    # Bound the request to what a size_t can carry. Past that the provider's
+    # round-up to the alignment wraps to zero, which allocates nothing and then
+    # prefaults the original size over it -- a segfault instead of an error.
+    # Reported upstream; this is the range check this API owes its callers either
+    # way. `operator.index` rather than `int()`, so a float is a TypeError rather
+    # than a silent truncation.
+    nbytes = operator.index(nbytes)
+    if not 0 < nbytes <= sys.maxsize:
+        raise ValueError(f"nbytes must be in 1..{sys.maxsize}, but got {nbytes}")
+
+    # frombuffer takes a buffer-protocol reference, which is what keeps the
+    # allocation alive for as long as the tensor is: HugeHostBuffer frees itself
+    # on collection and nothing else holds it.
+    return torch.frombuffer(HugeHostBuffer(nbytes), dtype=torch.uint8)
 
 
 @contextlib.contextmanager
