@@ -1060,6 +1060,7 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
   pybind11::gil_scoped_acquire wc_gil;
   const uint64_t _seg_t_gil = now_ns();
   bool runtime_failed = false;
+  bool contract_broken = false;
   // Each phase timer is assigned right after its corresponding runtime call.
   // A throw skips the remaining assignments and lands in the early return
   // below, so the diag accumulators are only read on the all-assigned path.
@@ -1079,12 +1080,27 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
     _seg_t_prep_out = now_ns();
     entry->run();
     _seg_t_run = now_ns();
-  } catch (const pybind11::error_already_set&) {
+  } catch (const pybind11::error_already_set& e) {
+    // TypeError is the arity/type mismatch pybind raises before the runtime's
+    // body runs: the call this build makes no longer fits rebel's runtime.
+    // Unlike the profile-specific failures below, that holds for every profile.
+    contract_broken = e.matches(PyExc_TypeError);
     clear_and_fail();
   } catch (const std::exception&) {
     clear_and_fail();
   } catch (...) {
     clear_and_fail();
+  }
+  if (contract_broken) {
+    // Recompiling reinstalls the same call, so retrying costs a compile per
+    // dispatch and never succeeds. Shut the fast path off for the process
+    // instead; results come from the Python wrapper, which is correct. The
+    // flag is consumed by ``warm_cache.install_pending``, which can name what
+    // diverged because it holds the contract declaration.
+    WarmCache::instance().set_enabled(false);
+    WarmCache::instance().clear();
+    WarmCache::mark_contract_break();
+    return false;
   }
   if (runtime_failed) {
     // The runtime that we cached cannot serve this profile after all (e.g.
@@ -1493,9 +1509,9 @@ void diag_reset_trace_by_op() {
 
 bool install_warmcache_from_pending(
     pybind11::object dyn_runtime,
-    const pybind11::object& runtime_handle,
-    uint32_t num_inputs,
-    uint32_t num_outputs,
+    pybind11::object prepare_inputs,
+    pybind11::object prepare_outputs,
+    pybind11::object run,
     const std::vector<std::tuple<std::vector<int64_t>, std::string, bool>>& out_profiles) {
   PendingInstall p = take_pending();
   if (!p.valid)
@@ -1523,17 +1539,9 @@ bool install_warmcache_from_pending(
 
   CacheEntry entry;
   entry.py_dyn_runtime = std::move(dyn_runtime);
-  // A runtime missing any of the three cannot be driven from the hit path, so
-  // refuse to install rather than cache an entry whose every hit would fail.
-  try {
-    entry.prepare_inputs = runtime_handle.attr("prepare_inputs");
-    entry.prepare_outputs = runtime_handle.attr("prepare_outputs");
-    entry.run = runtime_handle.attr("run");
-  } catch (const pybind11::error_already_set&) {
-    return false;
-  }
-  entry.num_inputs = num_inputs;
-  entry.num_outputs = num_outputs;
+  entry.prepare_inputs = std::move(prepare_inputs);
+  entry.prepare_outputs = std::move(prepare_outputs);
+  entry.run = std::move(run);
   entry.out_profiles.reserve(out_profiles.size());
   for (const auto& tup : out_profiles) {
     OutputProfile op;

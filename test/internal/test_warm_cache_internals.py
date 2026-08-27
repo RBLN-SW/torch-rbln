@@ -15,13 +15,14 @@ generated Python wrappers depend on:
 """
 
 import threading
+from unittest import mock
 
 import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torch_rbln import _C  # type: ignore[attr-defined]
-from torch_rbln._internal import warm_cache
+from torch_rbln._internal import rebel_contract, warm_cache
 
 
 # Most suites here exercise the C++ warm-cache's process-wide / thread-local
@@ -216,9 +217,9 @@ class TestWarmCacheHitPath(TestCase):
 class TestWarmCacheHandleGate(TestCase):
     """Which runtime handles the hit path accepts.
 
-    The hit path calls three methods by name, so a handle is usable exactly
-    when it carries all three. The gate runs before an entry is cached, which
-    is what keeps a rebel-side rename from reaching the C++ side at all.
+    The hit path calls the methods ``rebel_contract`` declares, so a handle is usable exactly
+    when it carries all of them. The gate runs before an entry is cached, which is what keeps a
+    rebel-side rename from reaching the C++ side at all.
     """
 
     class _Runtime:
@@ -226,35 +227,36 @@ class TestWarmCacheHandleGate(TestCase):
         def prepare_outputs(self, *a, **k): ...
         def run(self, *a, **k): ...
 
-    def test_handle_with_all_three_methods_is_accepted(self) -> None:
-        self.assertTrue(warm_cache._is_drivable_runtime_handle(self._Runtime()))
+    def test_handle_with_every_declared_method_is_accepted(self) -> None:
+        methods = rebel_contract.runtime_methods(self._Runtime())
+        self.assertIsNotNone(methods)
+        self.assertEqual(len(methods), len(rebel_contract.RUNTIME_METHODS))
 
     def test_handle_missing_any_method_is_refused(self) -> None:
-        for name in ("prepare_inputs", "prepare_outputs", "run"):
+        for name in rebel_contract.RUNTIME_METHODS:
             handle = self._Runtime()
             setattr(handle, name, None)  # shadows the class method
-            self.assertFalse(
-                warm_cache._is_drivable_runtime_handle(handle),
+            self.assertIsNone(
+                rebel_contract.runtime_methods(handle),
                 f"a handle whose {name} is not callable must be refused",
             )
 
     def test_absent_handle_is_refused(self) -> None:
-        self.assertFalse(warm_cache._is_drivable_runtime_handle(None))
-        self.assertFalse(warm_cache._is_drivable_runtime_handle(object()))
+        self.assertIsNone(rebel_contract.runtime_methods(None))
+        self.assertIsNone(rebel_contract.runtime_methods(object()))
 
 
 @pytest.mark.test_set_ci
 class TestWarmCacheContractBreak(TestCase):
     """A runtime that rejects the hit path's call must cost only the fast path.
 
-    A runtime whose ``prepare_inputs`` no longer accepts this call shape has to
-    stay harmless: correct results, on the Python wrapper path, for as long as
-    it takes torch-rbln to catch up. That guarantee is what lets rebel merge
-    without waiting for a matching torch-rbln, so assert it rather than assume
-    it.
+    A runtime whose ``prepare_inputs`` no longer accepts this call shape has to stay harmless:
+    correct results, on the Python wrapper path, for as long as it takes torch-rbln to catch up.
+    That guarantee is what lets rebel merge without waiting for a matching torch-rbln, so assert
+    it rather than assume it.
 
-    The stand-in raises ``TypeError``, which is what pybind raises when the
-    argument count no longer matches.
+    ``TypeError`` is what pybind raises when the argument count no longer matches, and it is the
+    signal the shim reads as "this build's call no longer fits", so the rejection uses it.
     """
 
     SHAPE = 192  # 64-aligned and unused elsewhere, so the first call compiles
@@ -263,30 +265,27 @@ class TestWarmCacheContractBreak(TestCase):
         self._orig_install = _C._warmcache_install_pending
         self.addCleanup(setattr, _C, "_warmcache_install_pending", self._orig_install)
         self.addCleanup(_C._warmcache_clear)
+        # A break disables the cache for the process; later tests need it back.
+        self.addCleanup(_C._warmcache_set_enabled, True)
+        self.addCleanup(_C._warmcache_take_contract_break)
+
+    def _install_a_rejecting_prepare_inputs(self) -> None:
+        def rejecting(*a, **k):
+            raise TypeError("prepare_inputs(): incompatible function arguments")
+
+        def install(*, dyn_runtime, prepare_inputs, **kw):
+            return self._orig_install(dyn_runtime=dyn_runtime, prepare_inputs=rejecting, **kw)
+
+        _C._warmcache_install_pending = install
 
     def test_rejected_call_keeps_values_and_stops_hitting(self) -> None:
-        class RejectingHandle:
-            """Delegates everything except the call the hit path makes first."""
-
-            def __init__(self, inner):
-                self._inner = inner
-
-            def prepare_inputs(self, *a, **k):
-                raise TypeError("prepare_inputs(): incompatible function arguments")
-
-            def __getattr__(self, name):
-                return getattr(self._inner, name)
-
-        def install_with_rejecting_handle(*, dyn_runtime, runtime_handle, **kw):
-            return self._orig_install(dyn_runtime=dyn_runtime, runtime_handle=RejectingHandle(runtime_handle), **kw)
-
-        _C._warmcache_install_pending = install_with_rejecting_handle
+        self._install_a_rejecting_prepare_inputs()
 
         x = torch.arange(self.SHAPE, dtype=torch.float16, device="rbln")
         y = torch.ones(self.SHAPE, dtype=torch.float16, device="rbln")
         expected = torch.arange(1, self.SHAPE + 1, dtype=torch.float16)
 
-        # First call installs the rejecting handle; the rest would hit it.
+        # First call installs the rejecting method; the rest would hit it.
         self.assertEqual((x + y).to("cpu"), expected)
         hits_before = _C._dispatch_shim_warm_segments_dump()[0]
         for _ in range(4):
@@ -294,6 +293,41 @@ class TestWarmCacheContractBreak(TestCase):
 
         hits_after = _C._dispatch_shim_warm_segments_dump()[0]
         self.assertEqual(hits_after, hits_before, "a rejected call was counted as a hit")
+
+    def test_rejected_call_stops_the_fast_path_instead_of_retrying(self) -> None:
+        # Without this, every dispatch erases the entry and forces a recompile that reinstalls
+        # the same rejected call -- correct results at the cost of a compile per dispatch.
+        self._install_a_rejecting_prepare_inputs()
+
+        x = torch.arange(self.SHAPE, dtype=torch.float16, device="rbln")
+        y = torch.ones(self.SHAPE, dtype=torch.float16, device="rbln")
+
+        self.assertTrue(_C._warmcache_is_enabled())
+        for _ in range(3):
+            (x + y).to("cpu")
+        self.assertFalse(_C._warmcache_is_enabled(), "a rejected call left the fast path armed")
+
+    def test_the_break_reaches_the_user_through_the_dispatch_path(self) -> None:
+        # The whole handoff: the C++ hit path flags the break, install_pending consumes the flag
+        # on the miss that follows, and the report comes out of Python -- which is where the
+        # contract declaration is, and so the only side that can name what changed.
+        self._install_a_rejecting_prepare_inputs()
+
+        x = torch.arange(self.SHAPE, dtype=torch.float16, device="rbln")
+        y = torch.ones(self.SHAPE, dtype=torch.float16, device="rbln")
+
+        (x + y).to("cpu")  # installs the rejecting method
+        with self.assertWarns(RuntimeWarning) as caught:
+            for _ in range(3):
+                (x + y).to("cpu")
+        self.assertIn("warm cache is off", str(caught.warning))
+
+    def test_the_report_names_the_divergence(self) -> None:
+        divergence = rebel_contract.Divergence("rebel.made_up:entry", rebel_contract.BROKEN, "not there")
+        with mock.patch.object(rebel_contract, "verify", return_value=[divergence]):
+            with self.assertWarns(RuntimeWarning) as caught:
+                warm_cache._warn_contract_break()
+        self.assertIn("rebel.made_up:entry", str(caught.warning))
 
 
 if __name__ == "__main__":

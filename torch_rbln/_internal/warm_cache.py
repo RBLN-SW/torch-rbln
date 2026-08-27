@@ -7,45 +7,59 @@ warm cache), the C++ shim:
   1. Saves a thread-local "pending" `CacheKey` built from the live args.
   2. Calls the generated Python wrapper (e.g. ``add_out_rbln``) via pybind.
 
-The Python wrapper's ``else`` branch (device path) now passes an empty
+The Python wrapper's ``else`` branch (device path) passes an empty
 ``_runtime_holder`` list via the compile ``options``. After the first
-backend compile, rebel's ``rbln_backend`` appends the
-``DynamoRuntime`` that owns the compiled sync runtime to this list. The generated wrapper then calls :func:`install_pending` with
-that runtime and the post-compile output-tensor profiles.
+backend compile, rebel's ``rbln_backend`` appends the ``DynamoRuntime``
+that owns the compiled sync runtime to this list. The generated wrapper
+then calls :func:`install_pending` with that runtime and the
+post-compile output-tensor profiles.
 
-:func:`install_pending` packs the output profiles into the shape the
-C++ side expects and hands them, with the runtime handle, to
-``torch_rbln._C._warmcache_install_pending``. The C++ side matches
-against the pending key it saved on the way in and inserts a
-:class:`CacheEntry` keyed by (op name, input profile, scalars, device
-index).
+:func:`install_pending` resolves the runtime's ``prepare_inputs`` /
+``prepare_outputs`` / ``run`` through
+:mod:`torch_rbln._internal.rebel_contract`, which declares those names
+and is the only place they are spelled, and hands the bound methods and
+the output profiles to ``torch_rbln._C._warmcache_install_pending``. The
+C++ side matches against the pending key it saved on the way in and
+inserts a :class:`CacheEntry` keyed by (op name, input profile, scalars,
+device index).
 
 Subsequent dispatches of the same op with a matching input profile hit
-the warm cache on the C++ side, which calls the handle's
-``prepare_inputs`` / ``prepare_outputs`` / ``run`` — no Python wrapper,
-no Dynamo recompile check.
+the warm cache on the C++ side, which calls those three bound methods —
+no Python wrapper, no Dynamo recompile check.
+
+A hit that raises ``TypeError`` means rebel's runtime no longer accepts
+this build's call. The C++ side then disables the cache for the process
+and flags it; :func:`install_pending` consumes the flag and reports which
+declared names diverged.
 """
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 import torch
 
 import torch_rbln._C as _C
+from torch_rbln._internal import rebel_contract
 
 
-# What the C++ hit path calls on the runtime handle; see WarmCache.h.
-_RUNTIME_METHODS = ("prepare_inputs", "prepare_outputs", "run")
+def _warn_contract_break() -> None:
+    """Report the rebel divergence that turned the warm cache off.
 
-
-def _is_drivable_runtime_handle(handle: Any) -> bool:
-    """True iff the C++ hit path can drive ``handle``.
-
-    The three methods are the whole contract; a handle missing any of them is
-    skipped so the op stays on the (correct, slower) Python wrapper path.
+    The C++ hit path sets the flag once and disables the cache in the same step, so this runs
+    at most once per process. The divergence list comes from the contract declaration, which is
+    why the message can name what changed instead of only that something did.
     """
-    return all(callable(getattr(handle, name, None)) for name in _RUNTIME_METHODS)
+    divergences = rebel_contract.verify()
+    detail = "\n  ".join(str(d) for d in divergences) or "rebel_contract.verify() found no divergence"
+    warnings.warn(
+        f"The RBLN warm cache is off for this process: rebel's runtime rejected the call this "
+        f"torch-rbln makes, so eager ops take the slower Python path and results are unaffected. "
+        f"Against the installed rebel-compiler:\n  {detail}",
+        RuntimeWarning,
+        stacklevel=2,
+    )
 
 
 _DTYPE_KEY = {
@@ -65,14 +79,21 @@ def install_pending(runtime_holder: list, outputs: Any) -> bool:
     # Hot codegen-injected path: skip work whenever WarmCache is disabled.
     # `_warmcache_is_enabled` is one C call; cheaper than the rest of this
     # function and makes WC OFF nearly free on the cold path.
-    if not runtime_holder or not _C._warmcache_is_enabled():
+    if not _C._warmcache_is_enabled():
+        # The break disables the cache, and the miss it falls through to reaches here with an
+        # empty holder (nothing recompiled), so the flag has to be read before that early exit.
+        if _C._warmcache_take_contract_break():
+            _warn_contract_break()
         if runtime_holder:
             runtime_holder.clear()
         return False
+    if not runtime_holder:
+        return False
 
     dyn_runtime = runtime_holder[-1]
-    runtime_handle = getattr(dyn_runtime, "_runtime_handle", None)
-    if not _is_drivable_runtime_handle(runtime_handle):
+    runtime_handle = getattr(dyn_runtime, rebel_contract.RUNTIME_HANDLE_ATTR, None)
+    methods = rebel_contract.runtime_methods(runtime_handle)
+    if methods is None:
         runtime_holder.clear()
         return False
 
@@ -91,14 +112,12 @@ def install_pending(runtime_holder: list, outputs: Any) -> bool:
         runtime_holder.clear()
         return False
 
-    num_inputs = getattr(dyn_runtime, "_num_inputs", 0)
-    num_outputs = getattr(dyn_runtime, "_num_outputs", len(profiles))
-
+    prepare_inputs, prepare_outputs, run = methods
     ok = _C._warmcache_install_pending(
         dyn_runtime=dyn_runtime,
-        runtime_handle=runtime_handle,
-        num_inputs=num_inputs,
-        num_outputs=num_outputs,
+        prepare_inputs=prepare_inputs,
+        prepare_outputs=prepare_outputs,
+        run=run,
         out_profiles=profiles,
     )
     # Drop the harvested DynamoRuntime so subsequent compile invocations on the

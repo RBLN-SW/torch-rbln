@@ -146,16 +146,13 @@ struct CacheEntry {
   pybind11::object py_dyn_runtime;
 
   // The rebel runtime's bound methods, resolved once at install so a hit pays
-  // a call and not an attribute lookup. Calling by name rather than linking
-  // rebel's C++ symbols keeps torch-rbln off a contract nothing guarantees:
-  // those signatures ship in no header, and adding a parameter renames the
-  // symbol a build would have linked.
+  // a call and not an attribute lookup. They arrive already bound from
+  // ``torch_rbln._internal.rebel_contract``, which declares the names and is
+  // the only place they are spelled; nothing here names a rebel symbol.
   pybind11::object prepare_inputs;
   pybind11::object prepare_outputs;
   pybind11::object run;
 
-  uint32_t num_inputs{0};
-  uint32_t num_outputs{0};
   c10::SmallVector<OutputProfile, 2> out_profiles;
 };
 
@@ -222,6 +219,14 @@ class WarmCache {
   // Python wrapper consumes (and clears) the flag exactly once.
   static bool consume_force_recompile();
   static void request_force_recompile();
+
+  // Contract break: a hit raised TypeError, so rebel's runtime no longer accepts
+  // the call this build makes. Recompiling cannot fix that, so ``find`` is shut
+  // off for the process rather than erasing and rebuilding an entry whose every
+  // hit would fail the same way. Process-global, consumed once by the Python
+  // install path, which reports which rebel names diverged.
+  static bool take_contract_break();
+  static void mark_contract_break();
 
  private:
   WarmCache() = default;

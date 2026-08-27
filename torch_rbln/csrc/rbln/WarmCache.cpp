@@ -175,4 +175,16 @@ void WarmCache::request_force_recompile() {
   t_force_recompile = true;
 }
 
+namespace {
+std::atomic<bool> g_contract_break{false};
+} // namespace
+
+bool WarmCache::take_contract_break() {
+  return g_contract_break.exchange(false, std::memory_order_relaxed);
+}
+
+void WarmCache::mark_contract_break() {
+  g_contract_break.store(true, std::memory_order_relaxed);
+}
+
 } // namespace torch_rbln::warmcache

@@ -93,14 +93,14 @@ void diag_reset_warm_segments();
 // Returns true if an install actually happened (pending key was valid and
 // accepted). Safe to call when no pending context exists — returns false.
 //
-// `runtime_handle` is rebel's sync-runtime object, whose `prepare_inputs` /
-// `prepare_outputs` / `run` the hit path calls.
+// The three bound methods are the rebel runtime's, resolved by name in
+// `torch_rbln._internal.rebel_contract` — the only place those names are spelled.
 // `out_profiles` is a list of (shape, dtype_str, is_rbln) per output tensor.
 bool install_warmcache_from_pending(
     pybind11::object dyn_runtime,
-    const pybind11::object& runtime_handle,
-    uint32_t num_inputs,
-    uint32_t num_outputs,
+    pybind11::object prepare_inputs,
+    pybind11::object prepare_outputs,
+    pybind11::object run,
     const std::vector<std::tuple<std::vector<int64_t>, std::string, bool>>& out_profiles);
 
 } // namespace torch_rbln::shim

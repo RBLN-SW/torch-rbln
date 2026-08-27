@@ -391,10 +391,16 @@ void register_internal_api(py::module_& module) {
       "Internal: install a warm-cache entry from the thread-local pending key "
       "set by the shim on the way into the miss path",
       pybind11::arg("dyn_runtime"),
-      pybind11::arg("runtime_handle"),
-      pybind11::arg("num_inputs"),
-      pybind11::arg("num_outputs"),
+      pybind11::arg("prepare_inputs"),
+      pybind11::arg("prepare_outputs"),
+      pybind11::arg("run"),
       pybind11::arg("out_profiles"));
+
+  module.def(
+      "_warmcache_take_contract_break",
+      []() { return torch_rbln::warmcache::WarmCache::take_contract_break(); },
+      "Internal: true once if a warm-cache hit found rebel's runtime no longer accepts "
+      "the call this build makes; clears the flag");
 
   module.def(
       "_warmcache_set_enabled",
