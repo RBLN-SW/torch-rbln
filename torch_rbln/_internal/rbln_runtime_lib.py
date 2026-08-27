@@ -6,8 +6,10 @@ which is also what the install RPATH is written against, so one record answers w
 is, where it sits relative to the package, and where the headers are.
 
 An editable install records no library, so two statements the install itself makes answer instead:
-the import hook it registers, which names the files it installed, and the source directory
-``direct_url.json`` records it was installed from. Both are exact; neither depends on a layout.
+the import hook it registers names the files the build installed, and ``direct_url.json`` records
+the directory the install came from, whose build output sits where rebel-compiler puts it by
+default. Both are checked against the ``rebel`` package this interpreter imports, so a second
+checkout cannot answer for the one in use.
 
 ``LD_LIBRARY_PATH`` is the override: the dynamic loader and rebel-compiler's loader both honour
 it, so all three sides land on the same file.
@@ -104,11 +106,17 @@ def record_relative_dir(path: str) -> str | None:
 def record_include_dir() -> str | None:
     """Include directory the distribution installed, located through a recorded header."""
     marker = f"{os.sep}include{os.sep}"
-    recorded = next((str(e) for e in _dist_files() if str(e).endswith(".h") and marker in str(e)), None)
-    anchors = _rebel_package_anchors()
-    if recorded is None or not anchors:
+    header = next((e for e in _dist_files() if str(e).endswith(".h") and marker in str(e)), None)
+    if header is None:
         return None
-    return os.path.join(anchors[0], recorded.split(marker)[0], "include")
+    under = [os.path.join(anchor, str(header).split(marker)[0], "include") for anchor in _rebel_package_anchors()]
+    located = header.locate()
+    if located is not None:
+        under.append(str(located).split(marker)[0] + os.sep + "include")
+    if not under:
+        return None
+    # The build links against this; a directory that does not exist fails the CMake find instead.
+    return next((path for path in under if os.path.isdir(path)), under[0])
 
 
 # What an editable install says about itself
@@ -147,7 +155,8 @@ def _import_hook_libraries() -> Iterator[str]:
 
     A hook that redirects imports into a build tree carries the map of files the build installed,
     and the library is one of them -- named outright, so it holds even when the build output was
-    configured somewhere this could not have guessed.
+    configured somewhere this could not have guessed. Which hook it is goes unchecked here; the
+    caller decides whether what a candidate names belongs to the install in use.
     """
     for finder in list(sys.meta_path):
         base = getattr(finder, "dir", None)
@@ -167,6 +176,29 @@ def _import_hook_libraries() -> Iterator[str]:
 # Resolution
 
 
+# Both channels below have to answer for the install that provides the ``rebel`` in use: pairing a
+# second checkout's runtime with this interpreter's rebel is what the ABI handshake cannot catch
+# when the two were built from the same version. Which relation says so differs by channel, since
+# one names a file and the other names a directory to derive one from. No importable ``rebel`` at
+# all leaves both standing -- a candidate is then the only statement anything has made.
+
+
+def _sits_beside_the_imported_package(path: str, anchors: list[str]) -> bool:
+    """Whether ``path`` is inside the directory the ``rebel`` package is installed in."""
+    if not anchors:
+        return True
+    resolved = os.path.realpath(path)
+    return any(resolved.startswith(os.path.realpath(anchor) + os.sep) for anchor in anchors)
+
+
+def _holds_the_imported_package(root: str, anchors: list[str]) -> bool:
+    """Whether the checkout ``root`` is the one the ``rebel`` package is imported from."""
+    if not anchors:
+        return True
+    prefix = os.path.realpath(root) + os.sep
+    return any((os.path.realpath(anchor) + os.sep).startswith(prefix) for anchor in anchors)
+
+
 def _iter_runtime_library_candidates() -> Iterator[tuple[str, str]]:
     """Yield ``(path, source)`` candidates lazily, most authoritative first.
 
@@ -184,20 +216,24 @@ def _iter_runtime_library_candidates() -> Iterator[tuple[str, str]]:
     for directory in _split_env_paths("LD_LIBRARY_PATH"):
         yield from emit(os.path.join(directory, RUNTIME_LIB_NAME), "LD_LIBRARY_PATH")
 
+    anchors = _rebel_package_anchors()
+
     # Ahead of the record: an editable install's hook takes `import rebel` over from site-packages,
     # so what it holds is what this interpreter would load.
     for path in _import_hook_libraries():
-        yield from emit(path, "editable install import hook")
+        if _sits_beside_the_imported_package(path, anchors):
+            yield from emit(path, "editable install import hook")
 
-    anchors = _rebel_package_anchors()
     for entry in _record_entries():
         for candidate in _record_candidates(entry, anchors):
             yield from emit(candidate, f"{_COMPILER_DIST_NAME} record")
 
     # Editable install: the record names no library, so the checkout it points at answers instead.
     # rebel-compiler installs from <source>/python and its REBEL_BUILD_DIR defaults to ../build.
+    # Only when the imported package sits under that checkout: metadata naming a different one
+    # would pair this interpreter's rebel with another checkout's runtime.
     root = _editable_source_root()
-    if root is not None:
+    if root is not None and _holds_the_imported_package(root, anchors):
         candidate = os.path.join(os.path.dirname(root), "build", RUNTIME_LIB_NAME)
         yield from emit(candidate, "editable install source tree")
 
