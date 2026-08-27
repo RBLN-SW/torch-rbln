@@ -170,6 +170,40 @@ unset(_rebel_abi_header)
 unset(_rebel_abi_lines)
 unset(_rebel_abi_line)
 
+# The rebel Python surface torch-rbln drives is declared in torch_rbln/_internal/rebel_contract.py
+# and is not covered by RBLN_ABI_CURRENT. Report divergence here so whoever moves the rebel pin
+# sees it at configure time. rebel lands interface changes first and torch-rbln follows, so this
+# never fails the build -- both kinds are warnings, neither is an error.
+set(_rebel_contract_checker "${CMAKE_CURRENT_LIST_DIR}/../tools/check_rebel_contract.py")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_rebel_contract_checker}")
+execute_process(
+  COMMAND ${_rebel_python} "${_rebel_contract_checker}"
+  OUTPUT_VARIABLE _rebel_contract_output
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  ERROR_QUIET
+  TIMEOUT 120
+)
+if(_rebel_contract_output)
+  string(REPLACE "\n" ";" _rebel_contract_lines "${_rebel_contract_output}")
+  foreach(_line IN LISTS _rebel_contract_lines)
+    if(_line MATCHES "^BROKEN=(.+)$")
+      message(WARNING
+        "FindRebel: this rebel-compiler no longer provides what torch-rbln calls -- ${CMAKE_MATCH_1}. "
+        "Update torch_rbln/_internal/rebel_contract.py and its call site.")
+    elseif(_line MATCHES "^DRIFTED=(.+)$")
+      message(WARNING
+        "FindRebel: this rebel-compiler grew a parameter torch-rbln does not pass -- ${CMAKE_MATCH_1}. "
+        "The call still works on rebel's default; decide whether to follow it and record the "
+        "answer in torch_rbln/_internal/rebel_contract.py.")
+    elseif(_line MATCHES "^ERROR=(.+)$")
+      message(STATUS "FindRebel: rebel contract not checked -- ${CMAKE_MATCH_1}")
+    endif()
+  endforeach()
+  unset(_rebel_contract_lines)
+endif()
+unset(_rebel_contract_checker)
+unset(_rebel_contract_output)
+
 mark_as_advanced(
   ${PACKAGE_NAME}_INCLUDE_DIR
   ${PACKAGE_NAME}_LIBRARY

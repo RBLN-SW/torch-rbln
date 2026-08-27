@@ -371,6 +371,23 @@ def _resolve_so_paths(d: dict[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
+def _rebel_contract_info() -> dict[str, Any]:
+    """How the installed rebel differs from the Python surface torch-rbln declares it calls.
+
+    Reported here rather than at import: verifying the contract imports rebel submodules, and
+    rebel's own import triggers torch's backend autoload, which imports torch_rbln -- running it
+    there would re-enter a half-initialized rebel and report a break that is not one.
+    """
+    out: dict[str, Any] = {"divergences": [], "error": None}
+    try:
+        from torch_rbln._internal import rebel_contract
+
+        out["divergences"] = [str(d) for d in rebel_contract.verify()]
+    except Exception as e:
+        out["error"] = f"rebel_contract unavailable: {e}"
+    return out
+
+
 def collect_diagnostics() -> dict[str, Any]:
     """Gather env snapshot, compiler package locations, and runtime-library resolution state."""
     candidates = _runtime_lib_candidates()
@@ -378,6 +395,7 @@ def collect_diagnostics() -> dict[str, Any]:
         "torch_rbln": _torch_rbln_info(),
         "rebel_compiler": _rebel_compiler_info(),
         "rebel_abi": _rebel_abi_info(),
+        "rebel_contract": _rebel_contract_info(),
         "env": _env_snapshot(),
         "rebel": _package_location("rebel"),
         "runtime_lib": _runtime_lib_state(),
@@ -458,6 +476,17 @@ def format_diagnostics(d: dict[str, Any] | None = None, verbose: bool = True) ->
         lines.append("  >>> check is DISABLED via TORCH_RBLN_SKIP_ABI_CHECK; import will not enforce it.")
     if abi.get("error"):
         lines.append(f"  error: {abi['error']}")
+
+    lines.extend(["", "rebel Python surface (torch_rbln/_internal/rebel_contract.py):"])
+    contract = d.get("rebel_contract") or {}
+    if contract.get("error"):
+        lines.append(f"  error: {contract['error']}")
+    elif not contract.get("divergences"):
+        lines.append("  matches what this torch-rbln calls")
+    else:
+        for divergence in contract["divergences"]:
+            lines.append(f"  {divergence}")
+
     lines.extend(
         [
             "",

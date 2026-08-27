@@ -14,7 +14,10 @@ so a rebel parameter that gained a default must not fail this suite.
 """
 
 import ast
+import shutil
+import subprocess
 import sys
+import tempfile
 import types
 from pathlib import Path
 
@@ -188,6 +191,50 @@ class TestImportChokepoint(TestCase):
     def test_a_rebel_import_inside_a_string_is_not_an_import(self):
         tree = ast.parse('SCRIPT = """\nfrom rebel._C import get_npu_name\n"""\n')
         self.assertEqual([n for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))], [])
+
+
+@pytest.mark.test_set_ci
+class TestConfigureTimeReport(TestCase):
+    """``tools/check_rebel_contract.py``, whose output FindRebel.cmake matches line by line."""
+
+    def _run(self, contract_source):
+        contract = Path(self._tmp) / "torch_rbln" / "_internal"
+        contract.mkdir(parents=True)
+        (contract / "rebel_contract.py").write_text(contract_source)
+        (Path(self._tmp) / "tools").mkdir()
+        checker = Path(self._tmp) / "tools" / "check_rebel_contract.py"
+        checker.write_text((_REPO_ROOT / "tools" / "check_rebel_contract.py").read_text())
+        return subprocess.run([sys.executable, str(checker)], capture_output=True, text=True)
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self._tmp, True)
+
+    def test_clean_contract_prints_nothing(self):
+        result = self._run("def verify():\n    return []\n")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "")
+
+    def test_each_divergence_is_one_matchable_line(self):
+        result = self._run(
+            "class D:\n"
+            "    kind = 'DRIFTED'\n"
+            "    name = 'rebel.x:y'\n"
+            "    detail = 'grew\\ndefaulted'\n"
+            "def verify():\n"
+            "    return [D(), D()]\n"
+        )
+        lines = result.stdout.splitlines()
+        self.assertEqual(len(lines), 2, result.stdout)
+        for line in lines:
+            self.assertTrue(line.startswith("DRIFTED=rebel.x:y: "), line)
+
+    def test_a_broken_check_reports_and_still_exits_zero(self):
+        # The build must not stop because the contract check itself could not run.
+        result = self._run("raise RuntimeError('boom\\nsecond line')\n")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(len(result.stdout.splitlines()), 1, result.stdout)
+        self.assertTrue(result.stdout.startswith("ERROR="), result.stdout)
 
 
 def _sync_runtime_type():
