@@ -193,13 +193,15 @@ class TestRblnRuntimeLibResolve(TestCase):
 
     def test_every_search_location_is_tried_whatever_order_they_arrive_in(self):
         # An editable install reports its search locations out of a set holding both the source
-        # tree and the build tree, so their order changes from process to process. Both orders have
-        # to reach the same library, or resolution is a coin flip.
+        # tree and the build tree, so their order changes from process to process. Every one has to
+        # be tried whichever arrives first, or resolution is a coin flip.
+        #
+        # The location that leads nowhere sorts first, so trying only one of them fails here.
         root = self._make_root()
-        library = self._make_lib("build", "librbln.so", root=root)
+        library = self._make_lib("checkout", "build", "librbln.so", root=root)
         locations = [
-            os.path.join(root, "python", "rebel"),
-            os.path.join(root, "python", "build", "skbuild", "rebel"),
+            os.path.join(root, "build_tree", "rebel"),
+            os.path.join(root, "checkout", "python", "rebel"),
         ]
         for ordered in (locations, list(reversed(locations))):
             spec = types.SimpleNamespace(submodule_search_locations=ordered)
