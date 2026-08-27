@@ -9,13 +9,33 @@ of that record.
 
 import os
 import shutil
+import sys
 import tempfile
+import types
+import unittest
+from importlib.metadata import distribution, PackageNotFoundError
 from unittest.mock import patch
 
 import pytest
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torch_rbln._internal import rbln_runtime_lib
+
+
+def _compiler_is_installed() -> bool:
+    """Whether this environment has a rebel-compiler distribution for the resolver to find.
+
+    The rest of this file synthesizes what it needs, so it runs on a host with no compiler and no
+    device. Only the checks against the real install depend on one.
+    """
+    try:
+        distribution("rebel-compiler")
+    except PackageNotFoundError:
+        return False
+    return True
+
+
+_NEEDS_COMPILER = unittest.skipUnless(_compiler_is_installed(), "needs an installed rebel-compiler")
 
 
 def _record(name: str, located: str):
@@ -56,6 +76,7 @@ class TestRblnRuntimeLibResolve(TestCase):
             pass
         return path
 
+    @_NEEDS_COMPILER
     def test_resolves_to_an_existing_library(self):
         path, source = rbln_runtime_lib.resolve_runtime_library()
         self.assertTrue(os.path.isfile(path), f"{path} (from {source}) does not exist")
@@ -78,7 +99,7 @@ class TestRblnRuntimeLibResolve(TestCase):
         anchor = os.path.dirname(os.path.dirname(imported))
         with (
             self._isolated_env(),
-            patch.object(rbln_runtime_lib, "_rebel_package_anchor", return_value=anchor),
+            patch.object(rbln_runtime_lib, "_rebel_package_anchors", return_value=[anchor]),
             patch.object(
                 rbln_runtime_lib,
                 "_record_entries",
@@ -96,7 +117,7 @@ class TestRblnRuntimeLibResolve(TestCase):
         anchor = os.path.dirname(os.path.dirname(library))
         with (
             self._isolated_env(),
-            patch.object(rbln_runtime_lib, "_rebel_package_anchor", return_value=anchor),
+            patch.object(rbln_runtime_lib, "_rebel_package_anchors", return_value=[anchor]),
             patch.object(
                 rbln_runtime_lib,
                 "_record_entries",
@@ -110,15 +131,16 @@ class TestRblnRuntimeLibResolve(TestCase):
     def test_a_leftover_build_tree_does_not_outrank_the_record(self):
         # A source checkout that was built once keeps <src>/build/librbln.so around forever, so it
         # answers only when the record does not -- otherwise it shadows a distribution that names
-        # the file exactly.
+        # the file exactly. The distribution installed the package in use here, so its record
+        # speaks for it.
         root = self._make_root()
         stale = self._make_lib("build", "librbln.so", root=root)
         shipped = self._make_lib("site", "new_home", "librbln.so", root=root)
-        anchor = os.path.join(root, "python")
+        anchor = os.path.join(root, "site")
         self.assertTrue(os.path.isfile(stale), "the leftover build tree must exist to compete")
         with (
             self._isolated_env(),
-            patch.object(rbln_runtime_lib, "_rebel_package_anchor", return_value=anchor),
+            patch.object(rbln_runtime_lib, "_rebel_package_anchors", return_value=[anchor]),
             patch.object(
                 rbln_runtime_lib,
                 "_record_entries",
@@ -128,6 +150,28 @@ class TestRblnRuntimeLibResolve(TestCase):
             path, _ = rbln_runtime_lib.resolve_runtime_library()
         self.assertEqual(path, shipped)
 
+    def test_a_record_from_another_tree_does_not_answer_for_the_imported_package(self):
+        # A wheel installed in site-packages while a checkout on PYTHONPATH provides the package:
+        # the recorded library belongs to the wheel's Python, and rebel-compiler loads the one
+        # beside its own files -- the checkout's. Taking the recorded one maps both.
+        root = self._make_root()
+        checkout_build = self._make_lib("checkout", "build", "librbln.so", root=root)
+        installed = self._make_lib("site-packages", "shipped", "librbln.so", root=root)
+        anchor = os.path.join(root, "checkout", "python")
+        self.assertTrue(os.path.isfile(installed), "the installed library must exist to compete")
+        with (
+            self._isolated_env(),
+            patch.object(rbln_runtime_lib, "_rebel_package_anchors", return_value=[anchor]),
+            patch.object(
+                rbln_runtime_lib,
+                "_record_entries",
+                return_value=[_record("shipped/librbln.so", installed)],
+            ),
+        ):
+            path, source = rbln_runtime_lib.resolve_runtime_library()
+        self.assertEqual(path, checkout_build)
+        self.assertEqual(source, "rebel source build tree")
+
     def test_an_editable_install_falls_back_to_the_build_tree(self):
         # pip install -e <src>/python: the package is <src>/python/rebel, the library <src>/build,
         # and the distribution records neither.
@@ -135,7 +179,51 @@ class TestRblnRuntimeLibResolve(TestCase):
         source_root = os.path.dirname(os.path.dirname(library))
         with (
             self._isolated_env(),
-            patch.object(rbln_runtime_lib, "_rebel_package_anchor", return_value=os.path.join(source_root, "python")),
+            patch.object(
+                rbln_runtime_lib, "_rebel_package_anchors", return_value=[os.path.join(source_root, "python")]
+            ),
+            patch.object(rbln_runtime_lib, "_record_entries", return_value=[]),
+        ):
+            path, source = rbln_runtime_lib.resolve_runtime_library()
+        self.assertEqual(path, library)
+        self.assertEqual(source, "rebel source build tree")
+
+    def test_the_origin_decides_which_tree_provides_the_library(self):
+        # An editable install reports its search locations out of a set holding both the source
+        # tree and the build tree, so their order changes from process to process. ``origin`` names
+        # the __init__.py that will run: one value, and the tree rebel-compiler loads beside.
+        # Both trees hold a library, and the one that does not provide rebel sorts first, so an
+        # order-based choice picks the wrong file rather than merely trying it.
+        root = self._make_root()
+        library = self._make_lib("checkout", "build", "librbln.so", root=root)
+        elsewhere = self._make_lib("another", "build", "librbln.so", root=root)
+        package = os.path.join(root, "checkout", "python", "rebel")
+        staging = os.path.join(root, "another", "python", "rebel")
+        self.assertTrue(os.path.isfile(elsewhere), "the other tree's library must exist to compete")
+        for locations in ([package, staging], [staging, package]):
+            spec = types.SimpleNamespace(
+                origin=os.path.join(package, "__init__.py"), submodule_search_locations=locations
+            )
+            with (
+                self._isolated_env(),
+                patch.object(rbln_runtime_lib.importlib.util, "find_spec", return_value=spec),
+                patch.object(rbln_runtime_lib, "_record_entries", return_value=[]),
+            ):
+                path, source = rbln_runtime_lib.resolve_runtime_library()
+            self.assertEqual(path, library, f"locations in the order {locations} resolved elsewhere")
+            self.assertEqual(source, "rebel source build tree")
+
+    def test_the_search_locations_answer_when_there_is_no_origin(self):
+        # A directory an uninstall left behind imports as a namespace package: no origin, and the
+        # search locations are all there is to go on.
+        root = self._make_root()
+        library = self._make_lib("checkout", "build", "librbln.so", root=root)
+        spec = types.SimpleNamespace(
+            origin=None, submodule_search_locations=[os.path.join(root, "checkout", "python", "rebel")]
+        )
+        with (
+            self._isolated_env(),
+            patch.object(rbln_runtime_lib.importlib.util, "find_spec", return_value=spec),
             patch.object(rbln_runtime_lib, "_record_entries", return_value=[]),
         ):
             path, source = rbln_runtime_lib.resolve_runtime_library()
@@ -145,7 +233,7 @@ class TestRblnRuntimeLibResolve(TestCase):
     def test_missing_library_reports_what_was_tried(self):
         with (
             self._isolated_env(),
-            patch.object(rbln_runtime_lib, "_rebel_package_anchor", return_value="/nonexistent/anchor"),
+            patch.object(rbln_runtime_lib, "_rebel_package_anchors", return_value=["/nonexistent/anchor"]),
             patch.object(rbln_runtime_lib, "_record_entries", return_value=[]),
         ):
             with self.assertRaises(FileNotFoundError) as ctx:
@@ -155,6 +243,21 @@ class TestRblnRuntimeLibResolve(TestCase):
         self.assertIn("/nonexistent/build/librbln.so (from rebel source build tree)", message)
         self.assertIn("LD_LIBRARY_PATH", message)
         self.assertIn("python -m torch_rbln.diagnose", message)
+
+    def test_an_absent_distribution_is_named_as_the_reason(self):
+        # With nothing installed there is no candidate to report, and a bare list of paths reads as
+        # a path problem. The message has to name the interpreter that is missing the package.
+        with (
+            self._isolated_env(),
+            patch.object(rbln_runtime_lib, "distribution", side_effect=PackageNotFoundError("rebel-compiler")),
+            patch.object(rbln_runtime_lib, "_rebel_package_anchors", return_value=["/site-packages"]),
+        ):
+            with self.assertRaises(FileNotFoundError) as ctx:
+                rbln_runtime_lib.resolve_runtime_library()
+        message = str(ctx.exception)
+        self.assertIn("No rebel-compiler distribution is installed for", message)
+        self.assertIn(sys.executable, message)
+        self.assertIn("/site-packages", message)
 
     def test_empty_path_entries_are_dropped(self):
         # A doubled separator used to resolve to the current working directory.
@@ -171,7 +274,7 @@ class TestRblnRuntimeLibRecord(TestCase):
         # library one level deeper (rebel/lib).
         library = "/fake/site/rebel/lib/librbln.so"
         with (
-            patch.object(rbln_runtime_lib, "_rebel_package_anchor", return_value="/fake/site"),
+            patch.object(rbln_runtime_lib, "_rebel_package_anchors", return_value=["/fake/site"]),
             patch.object(
                 rbln_runtime_lib,
                 "_record_entries",
@@ -180,6 +283,7 @@ class TestRblnRuntimeLibRecord(TestCase):
         ):
             self.assertEqual(rbln_runtime_lib.record_relative_dir(library), os.path.join("rebel", "lib"))
 
+    @_NEEDS_COMPILER
     def test_the_installed_library_is_under_its_recorded_directory(self):
         # The same rule against the real install, at whatever depth it happens to sit.
         library, _ = rbln_runtime_lib.resolve_runtime_library()
@@ -193,6 +297,7 @@ class TestRblnRuntimeLibRecord(TestCase):
     def test_a_library_outside_the_record_has_no_relative_directory(self):
         self.assertIsNone(rbln_runtime_lib.record_relative_dir("/nowhere/librbln.so"))
 
+    @_NEEDS_COMPILER
     def test_the_include_directory_comes_from_a_recorded_header(self):
         include_dir = rbln_runtime_lib.record_include_dir()
         self.assertIsNotNone(include_dir)

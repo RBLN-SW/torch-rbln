@@ -5,6 +5,11 @@ The library is the one the ``rebel-compiler`` distribution recorded installing, 
 which is also what the install RPATH is written against, so one record answers where the library
 is, where it sits relative to the package, and where the headers are.
 
+Every candidate comes from where that package sits, because rebel-compiler loads the library
+relative to its own files too: a second copy answering here would be mapped alongside the one
+rebel loads, leaving two runtimes -- two allocators, two device registries -- in one process, which
+nothing downstream can detect when both were built from the same version.
+
 ``LD_LIBRARY_PATH`` is the override: the dynamic loader and rebel-compiler's loader both honour
 it, so all three sides land on the same file.
 
@@ -35,20 +40,32 @@ def _split_env_paths(name: str) -> list[str]:
     return [entry for entry in (part.strip() for part in value.split(os.pathsep)) if entry]
 
 
-def _rebel_package_anchor() -> str | None:
-    """Directory holding the ``rebel`` package this interpreter would import, or None.
+def _rebel_package_anchors() -> list[str]:
+    """Directories holding the ``rebel`` package this interpreter would import, first one first.
 
     ``find_spec`` because importing rebel pulls in torch. Anchoring on the imported package keeps
     an editable install, or a stray copy elsewhere, from answering for the one in use.
+
+    ``origin`` leads: it names the ``__init__.py`` that will run, so it says which tree provides
+    rebel even when several are on the path. The search locations follow only when there is no
+    origin -- a namespace package, which a directory left behind by an uninstall also produces.
+    They arrive from a set for an editable install, holding both the source tree and the build
+    tree, so their order changes from process to process and taking one of them was a coin flip.
     """
     try:
         spec = importlib.util.find_spec("rebel")
     except (ImportError, ValueError):
-        return None
-    locations = getattr(spec, "submodule_search_locations", None) if spec else None
-    if not locations:
-        return None
-    return os.path.dirname(locations[0])
+        return []
+    if spec is None:
+        return []
+    anchors = []
+    if spec.origin:
+        anchors.append(os.path.dirname(os.path.dirname(spec.origin)))
+    for location in sorted(spec.submodule_search_locations or ()):
+        directory = os.path.dirname(location)
+        if directory not in anchors:
+            anchors.append(directory)
+    return anchors
 
 
 def _dist_files() -> list:
@@ -65,13 +82,31 @@ def _record_entries() -> list:
     return [entry for entry in _dist_files() if os.path.basename(str(entry)) == RUNTIME_LIB_NAME]
 
 
-def _record_candidates(entry: object, anchor: str | None) -> Iterator[str]:
-    """Both ways a recorded entry can name a file: under the anchor, and where it was installed."""
-    if anchor is not None:
+def _record_candidates(entry: object, anchors: list[str]) -> Iterator[str]:
+    """Both ways a recorded entry can name a file: under an anchor, and where it was installed.
+
+    Where it was installed counts only when that is the tree the imported package comes from. A
+    distribution recorded elsewhere -- a wheel installed in site-packages while a checkout on
+    PYTHONPATH provides the package -- names the library belonging to its own Python, and
+    rebel-compiler will load that checkout's library rather than this one.
+    """
+    for anchor in anchors:
         yield os.path.join(anchor, str(entry))
     located = entry.locate()  # type: ignore[attr-defined]
-    if located is not None:
+    if located is not None and _inside_an_anchor(str(located), anchors):
         yield str(located)
+
+
+def _inside_an_anchor(path: str, anchors: list[str]) -> bool:
+    """Whether ``path`` sits in a directory the ``rebel`` package is installed in.
+
+    No anchor at all -- nothing imports rebel -- leaves a candidate standing: it is then the only
+    statement anything has made about where the library is.
+    """
+    if not anchors:
+        return True
+    resolved = os.path.realpath(path)
+    return any(resolved.startswith(os.path.realpath(anchor) + os.sep) for anchor in anchors)
 
 
 def record_relative_dir(path: str) -> str | None:
@@ -80,9 +115,9 @@ def record_relative_dir(path: str) -> str | None:
     A recorded path already expresses the relationship the install RPATH is written against.
     """
     resolved = os.path.realpath(path)
-    anchor = _rebel_package_anchor()
+    anchors = _rebel_package_anchors()
     for entry in _record_entries():
-        for candidate in _record_candidates(entry, anchor):
+        for candidate in _record_candidates(entry, anchors):
             if os.path.realpath(candidate) == resolved:
                 return os.path.dirname(str(entry))
     return None
@@ -90,15 +125,19 @@ def record_relative_dir(path: str) -> str | None:
 
 def record_include_dir() -> str | None:
     """Include directory the distribution installed, located through a recorded header."""
-    anchor = _rebel_package_anchor()
-    if anchor is None:
-        return None
     marker = f"{os.sep}include{os.sep}"
-    for entry in _dist_files():
-        name = str(entry)
-        if name.endswith(".h") and marker in name:
-            return os.path.join(anchor, name.split(marker)[0], "include")
-    return None
+    header = next((e for e in _dist_files() if str(e).endswith(".h") and marker in str(e)), None)
+    if header is None:
+        return None
+    anchors = _rebel_package_anchors()
+    under = [os.path.join(anchor, str(header).split(marker)[0], "include") for anchor in anchors]
+    located = header.locate()
+    if located is not None and _inside_an_anchor(str(located), anchors):
+        under.append(str(located).split(marker)[0] + os.sep + "include")
+    if not under:
+        return None
+    # The build links against this; a directory that does not exist fails the CMake find instead.
+    return next((path for path in under if os.path.isdir(path)), under[0])
 
 
 # Resolution
@@ -121,20 +160,37 @@ def _iter_runtime_library_candidates() -> Iterator[tuple[str, str]]:
     for directory in _split_env_paths("LD_LIBRARY_PATH"):
         yield from emit(os.path.join(directory, RUNTIME_LIB_NAME), "LD_LIBRARY_PATH")
 
-    anchor = _rebel_package_anchor()
+    anchors = _rebel_package_anchors()
+
     for entry in _record_entries():
-        for candidate in _record_candidates(entry, anchor):
+        for candidate in _record_candidates(entry, anchors):
             yield from emit(candidate, f"{_COMPILER_DIST_NAME} record")
 
-    # Editable install: the package is <source>/python/rebel, the library <source>/build, and the
-    # record names neither. Behind the record so a leftover build tree cannot shadow it.
-    if anchor is not None:
+    # An editable install records no library, and neither does a checkout that reached this
+    # interpreter without being installed at all. rebel-compiler builds into <source>/build and
+    # loads it from there itself, relative to its own files.
+    for anchor in anchors:
         yield from emit(os.path.join(os.path.dirname(anchor), "build", RUNTIME_LIB_NAME), "rebel source build tree")
 
 
 def runtime_library_candidates() -> list[tuple[str, str]]:
     """Every candidate path, in order, unfiltered by existence. For diagnostics."""
     return list(_iter_runtime_library_candidates())
+
+
+def _absent_distribution_note() -> str:
+    """Say it outright when nothing was found because rebel-compiler is not installed here.
+
+    Every candidate is derived from an install, so with no install there is nothing to report but
+    where this interpreter looked -- which reads like a path problem unless it says otherwise.
+    """
+    try:
+        distribution(_COMPILER_DIST_NAME)
+    except PackageNotFoundError:
+        anchors = _rebel_package_anchors()
+        resolves = f"`rebel` resolves under {', '.join(anchors)}" if anchors else "`rebel` does not import"
+        return f" No {_COMPILER_DIST_NAME} distribution is installed for {sys.executable} ({resolves})."
+    return ""
 
 
 def resolve_runtime_library() -> tuple[str, str]:
@@ -149,12 +205,12 @@ def resolve_runtime_library() -> tuple[str, str]:
             return path, source
         tried.append((path, source))
 
-    listed = "; ".join(f"{path} (from {source})" for path, source in tried[:10])
+    listed = "; ".join(f"{path} (from {source})" for path, source in tried[:10]) or "nothing"
     env_hint = "; ".join(
         f"{name}={os.environ[name][:80]}" for name in ("LD_LIBRARY_PATH", "PYTHONPATH") if os.environ.get(name)
     )
     raise FileNotFoundError(
-        f"Could not find {RUNTIME_LIB_NAME}. Tried (in order): {listed}"
+        f"Could not find {RUNTIME_LIB_NAME}.{_absent_distribution_note()} Tried (in order): {listed}"
         + (" ..." if len(tried) > 10 else "")
         + ". Install the rebel-compiler package, or put the directory holding the library on "
         "LD_LIBRARY_PATH."
