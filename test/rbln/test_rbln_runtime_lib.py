@@ -17,7 +17,6 @@ from importlib.metadata import PackageNotFoundError
 from unittest.mock import patch
 
 import pytest
-from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torch_rbln._internal import rbln_runtime_lib
@@ -340,10 +339,6 @@ class TestRblnRuntimeLibAdopt(TestCase):
         ):
             self.assertEqual(rbln_runtime_lib.load_runtime_library(), "/opt/rebel/librbln.so")
 
-
-instantiate_device_type_tests(TestRblnRuntimeLibResolve, globals(), only_for="privateuse1")
-instantiate_device_type_tests(TestRblnRuntimeLibRecord, globals(), only_for="privateuse1")
-instantiate_device_type_tests(TestRblnRuntimeLibAdopt, globals(), only_for="privateuse1")
 
 if __name__ == "__main__":
     run_tests()
