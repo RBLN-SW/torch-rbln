@@ -3,6 +3,7 @@
 import threading
 import warnings
 
+from torch_rbln._internal import rebel_contract
 from torch_rbln._internal.compile_cache import clear_rbln_compile_cache
 from torch_rbln._internal.torch_compile_patch_helpers import CompiledFunctionWrapper, is_rbln_backend
 
@@ -42,8 +43,7 @@ def _register_rbln_backend() -> bool:
         return True
 
     try:
-        # Importing registers 'rbln' via module-level register_backend() side effects.
-        import rebel.core.torch_compile  # noqa: F401
+        rebel_contract.register_torch_compile_backend()
 
         if _is_backend_registered("rbln"):
             _rbln_backend_registered = True

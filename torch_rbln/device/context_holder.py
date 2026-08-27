@@ -1,9 +1,9 @@
 from contextlib import contextmanager
 
-from rebel.core.torch_eager import eager_execution_helper
+from torch_rbln._internal import rebel_contract
 
 
-helper = eager_execution_helper()
+helper = rebel_contract.eager_execution_helper()
 
 
 @contextmanager

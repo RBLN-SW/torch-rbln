@@ -2,6 +2,8 @@
 
 import functools
 
+from torch_rbln._internal import rebel_contract
+
 
 __all__ = ["get_device_arch", "is_atom_device", "is_rebel_device"]
 
@@ -25,9 +27,7 @@ def get_device_arch() -> str:
     NPU name can't be queried.
     """
     try:
-        from rebel.device_info import get_npu_name
-
-        return _arch_from_npu_name(get_npu_name(0) or "")
+        return _arch_from_npu_name(rebel_contract.get_npu_name(0))
     except Exception:
         return "unknown"
 

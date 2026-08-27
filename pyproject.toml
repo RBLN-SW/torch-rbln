@@ -289,6 +289,7 @@ ignore = [
 ]
 select = [
     "B",
+    "TID251",
     "B904",
     "C4",
     "G",
@@ -351,9 +352,17 @@ select = [
     "UP"
 ]
 
+# Every rebel-compiler name torch-rbln uses is declared in
+# torch_rbln/_internal/rebel_contract.py, which is the only module that may import rebel.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"rebel".msg = "declare it in torch_rbln/_internal/rebel_contract.py and reach it through that module"
+
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = [
     "F401"
+]
+"torch_rbln/_internal/rebel_contract.py" = [
+    "TID251"
 ]
 
 
