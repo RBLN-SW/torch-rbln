@@ -64,7 +64,7 @@ These issue types represent development tasks that are typically addressed throu
 - **fix:** Tracks the resolution of known bugs.
 - **perf:** Implement improvements focused on performance (e.g., latency, memory, throughput). Include benchmarks or measurement methodology if available.
 - **refactor:** Improve readability, maintainability, or consistency without altering external behavior. Includes renaming, modularization, or dependency cleanup.
-- **docs:** Improve or add documentation. Includes README, usage guides, code comments, and tutorials. See [docs](docs/) for existing guides.
+- **docs:** Improve or add documentation. Includes README, usage guides, code comments, and tutorials. See [docs](https://github.com/RBLN-SW/torch-rbln/tree/main/docs) for existing guides.
 - **other:** Any development-related task that doesn't fit the above categories. Use sparingly; consider proposing a new label if recurring themes emerge.
 
 Please choose labels appropriately when opening an issue.
