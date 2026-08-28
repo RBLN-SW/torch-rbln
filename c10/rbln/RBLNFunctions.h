@@ -268,6 +268,35 @@ C10_RBLN_API void mark_zeros(const void* rbln_data);
 C10_RBLN_API void free(void* data);
 
 /**
+ * @brief Cross-process handle of the device allocation backing an RBLN pointer.
+ *
+ * `fd` is a dma-buf covering the whole containing allocation [base_dva, base_dva + size);
+ * the pointer's bytes start at `offset` inside it. The caller owns `fd`.
+ */
+struct DeviceMemoryExport {
+  uint64_t base_dva;
+  uint64_t size;
+  uint64_t offset;
+  int fd;
+};
+
+/**
+ * @brief Exports the device allocation backing `rbln_data` as a dma-buf handle.
+ *
+ * The memory must be resident on device as one flat allocation (eager or bound). The exporter
+ * must keep the tensor alive while any importer uses it.
+ */
+C10_RBLN_API DeviceMemoryExport export_device_memory(const void* rbln_data);
+
+/**
+ * @brief Imports a dma-buf exported by another process on the same device.
+ *
+ * Returns an RBLN pointer covering `nbytes` from the imported base; release it with free().
+ * Requires the device's DRM accel node to be openable by this process.
+ */
+C10_RBLN_API void* import_device_memory(c10::DeviceIndex device_index, int fd, size_t nbytes);
+
+/**
  * @brief Non-throwing free() for `noexcept` contexts (the c10 DataPtr deleter).
  *
  * The deleter runs in a noexcept destructor, so a throwing free() would

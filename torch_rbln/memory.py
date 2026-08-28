@@ -8,7 +8,7 @@ import contextlib
 import operator
 import sys
 import threading
-from typing import Dict, Iterator, Optional, Union  # noqa: UP035
+from typing import Dict, Iterator, NamedTuple, Optional, Union  # noqa: UP035
 
 import torch
 
@@ -17,7 +17,10 @@ import torch_rbln._C
 
 __all__ = [
     "bind_device_memory",
+    "DeviceMemoryHandle",
     "empty_cache",
+    "export_device_memory",
+    "import_device_memory",
     "huge_host_empty",
     "set_device_layout_like",
     "max_memory_allocated",
@@ -255,6 +258,88 @@ def reset_peak_memory_stats(device: Optional[Union[int, str, torch.device]] = No
 
 _offload_lock = threading.Lock()
 _offload_depth = 0
+
+
+class DeviceMemoryHandle(NamedTuple):
+    """Cross-process handle of an RBLN tensor's device allocation (see :func:`export_device_memory`)."""
+
+    fd: int
+    """dma-buf fd covering the whole containing allocation. Owned by the holder; pass to another
+    process with fd-passing (``multiprocessing.reduction.send_handle`` / ``SCM_RIGHTS``)."""
+    size: int
+    """Size in bytes of the allocation behind ``fd``."""
+    offset: int
+    """Byte offset of the tensor's data inside the allocation."""
+    base_dva: int
+    """Device address of the allocation in the exporting process (diagnostic only)."""
+    shape: torch.Size
+    dtype: torch.dtype
+    device_index: int
+
+
+def export_device_memory(tensor: torch.Tensor) -> DeviceMemoryHandle:
+    """
+    Export ``tensor``'s device allocation as a dma-buf handle another process can import.
+
+    The tensor must cover its whole storage (contiguous, zero storage offset) and is
+    materialized on device first (as :func:`bind_device_memory` does). The exporter must
+    keep ``tensor`` alive for as long as any importer uses the handle, and must
+    ``os.close(handle.fd)`` once it has been passed on.
+
+    Args:
+        tensor: An RBLN tensor covering its whole storage.
+
+    Returns:
+        A :class:`DeviceMemoryHandle`. Pass ``fd`` to the other process with fd-passing;
+        the remaining fields are plain ints and pickle as-is.
+    """
+    if tensor.device.type != "rbln":
+        raise RuntimeError(f"export_device_memory: expected an rbln tensor, got {tensor.device}")
+    torch_rbln._C._bind_device_memory(tensor)
+    base_dva, size, offset, fd = torch_rbln._C._export_device_memory(tensor)
+    return DeviceMemoryHandle(
+        fd=fd,
+        size=size,
+        offset=offset,
+        base_dva=base_dva,
+        shape=tensor.shape,
+        dtype=tensor.dtype,
+        device_index=tensor.device.index,
+    )
+
+
+def import_device_memory(
+    fd: int,
+    size: int,
+    offset: int,
+    shape,
+    dtype: torch.dtype,
+    device: Optional[Union[int, str, torch.device]] = None,
+) -> torch.Tensor:
+    """
+    Import a dma-buf exported by :func:`export_device_memory` in another process.
+
+    The returned tensor views ``shape``/``dtype`` at ``offset`` inside the imported
+    allocation and owns the import: dropping the last reference releases the mapping.
+    ``fd`` is not consumed; close it after this call. Importing requires the device's
+    DRM accel node (``/dev/accel/accelN``) to be openable by this process.
+
+    Args:
+        fd: The dma-buf fd received from the exporting process.
+        size: ``handle.size`` from the exporter.
+        offset: ``handle.offset`` from the exporter.
+        shape: Shape of the tensor to view.
+        dtype: dtype of the tensor to view.
+        device: The rbln device the memory lives on. Must be the same physical
+            device as the exporter's. Defaults to the current device.
+    """
+    dev = _normalize_device(device)
+    nbytes = torch.tensor([], dtype=dtype).element_size() * int(torch.Size(shape).numel())
+    if offset + nbytes > size:
+        raise RuntimeError(
+            f"import_device_memory: view of {nbytes} bytes at offset {offset} exceeds the imported {size} bytes"
+        )
+    return torch_rbln._C._import_device_memory(dev.index, fd, size, offset, list(shape), dtype)
 
 
 def bind_device_memory(tensor: torch.Tensor) -> None:

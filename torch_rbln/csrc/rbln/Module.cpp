@@ -224,6 +224,31 @@ void register_internal_api(py::module_& module) {
       },
       "Internal: give an RBLN tensor a flat single-node device allocation");
 
+  // Cross-process device memory handle. Used by torch_rbln.export_device_memory() /
+  // import_device_memory().
+  module.def(
+      "_export_device_memory",
+      [](const at::Tensor& tensor) {
+        check_base_rbln_tensor(tensor, "export_device_memory", "tensor");
+        const auto h = c10::rbln::export_device_memory(tensor.data_ptr());
+        return py::make_tuple(h.base_dva, h.size, h.offset, h.fd);
+      },
+      "Internal: export an RBLN tensor's device allocation as (base_dva, size, offset, dma_buf_fd)");
+  module.def(
+      "_import_device_memory",
+      [](c10::DeviceIndex device_index,
+         int fd,
+         uint64_t size,
+         uint64_t offset,
+         std::vector<int64_t> sizes,
+         c10::ScalarType dtype) {
+        void* base = c10::rbln::import_device_memory(device_index, fd, static_cast<size_t>(size));
+        const auto base_ptr = reinterpret_cast<uint64_t>(base);
+        TORCH_CHECK(offset < size, "import_device_memory: offset ", offset, " is outside the imported ", size, " bytes");
+        return at::native::rbln::create_owning_tensor_from_ptr(base_ptr, base_ptr + offset, sizes, dtype);
+      },
+      "Internal: import a dma-buf fd as an owning RBLN tensor viewing (offset, sizes, dtype)");
+
   // Set target's device-allocation layout to match ref's, without copying data.
   // Used by torch_rbln.set_device_layout_like().
   module.def(
