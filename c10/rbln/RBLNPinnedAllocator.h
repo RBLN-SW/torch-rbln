@@ -53,6 +53,33 @@ C10_RBLN_API bool is_pinned_ptr(const void* data);
 C10_RBLN_API void ensure_pinned_registered(const void* data, int torch_device_id) noexcept;
 
 /**
+ * @brief Registers a caller-owned host buffer as pinned: the RBLN counterpart of
+ * cudaHostRegister for memory this allocator did not hand out (a shared-memory pool, a
+ * cache's slab). The range enters the same registry as allocator memory, so is_pinned_ptr()
+ * reports it (non_blocking copies go async) and it is registered with every initialized
+ * device now and with any later device on its first copy. Overlapping a live range is an
+ * error; the caller keeps ownership of the memory and must unregister before freeing it.
+ *
+ * Runtime registration is best effort as everywhere else: without it (UMD < 3.5) the range
+ * is still "pinned" for torch's purposes and copies take their usual path.
+ *
+ * @param data Start of the buffer (page alignment is not required for the pin itself, but
+ *   only page-aligned copy operands take the device-VA path).
+ * @param nbytes Length in bytes; must be positive.
+ * @throws c10::Error on a null pointer, zero length, or overlap with a registered range.
+ */
+C10_RBLN_API void register_host_memory(void* data, size_t nbytes);
+
+/**
+ * @brief Reverses register_host_memory(). `data` must be the exact start passed to it.
+ * Unregisters from every device the range was registered with (the runtime drains the
+ * device's pending transfers first).
+ *
+ * @throws c10::Error if `data` is not a live external registration.
+ */
+C10_RBLN_API void unregister_host_memory(void* data);
+
+/**
  * @brief Whether the pinned allocation containing `data` is registered with the runtime
  * for `torch_device_id`. Diagnostic; false for anything that is not pinned.
  */

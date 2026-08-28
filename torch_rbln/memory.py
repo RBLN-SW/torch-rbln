@@ -19,6 +19,9 @@ __all__ = [
     "bind_device_memory",
     "empty_cache",
     "huge_host_empty",
+    "is_pinned_address",
+    "register_host_memory",
+    "unregister_host_memory",
     "set_device_layout_like",
     "max_memory_allocated",
     "max_memory_reserved",
@@ -339,6 +342,64 @@ def huge_host_empty(nbytes: int) -> torch.Tensor:
     # allocation alive for as long as the tensor is: HugeHostBuffer frees itself
     # on collection and nothing else holds it.
     return torch.frombuffer(HugeHostBuffer(nbytes), dtype=torch.uint8)
+
+
+def register_host_memory(address: int, nbytes: int) -> None:
+    """
+    Pin a caller-owned host buffer for RBLN DMA -- the counterpart of ``cudaHostRegister``.
+
+    ``torch.empty(..., pin_memory=True)`` pins memory it allocates; this pins memory that
+    already exists -- a shared-memory pool another process created, a cache's slab, a
+    ``HugeHostBuffer``. Afterwards the range counts as pinned: ``Tensor.is_pinned()`` is true
+    for a tensor over it, a ``non_blocking`` copy goes asynchronous, and every host<->device
+    copy whose page-aligned operand lies inside it is recorded against the buffer's device VA,
+    so the kernel reuses one pin instead of pinning the pages on each command buffer. The
+    range is registered with every RBLN device this process has initialized, and with a
+    device initialized later on its first copy.
+
+    The pin is best effort on the runtime side: without host registration in the runtime
+    (UMD < 3.5, ``RBLN_HOST_MEMORY_REGISTER=0``) the range is still pinned for torch's
+    purposes and copies take their usual path.
+
+    The caller keeps ownership of the memory: unregister before freeing it, and only after
+    every copy that references it has completed (as with ``cudaHostUnregister``).
+
+    Args:
+        address: Start of the buffer (e.g. ``tensor.data_ptr()`` or ``HugeHostBuffer.address``).
+        nbytes: Length in bytes.
+
+    Raises:
+        RuntimeError: on a null address, zero length, or overlap with a live pinned range.
+
+    Example::
+
+        pool = torch.frombuffer(shm.buf, dtype=torch.uint8)
+        torch.rbln.register_host_memory(pool.data_ptr(), pool.numel())
+        ...
+        torch.rbln.unregister_host_memory(pool.data_ptr())
+    """
+    torch_rbln._C._register_host_memory(operator.index(address), operator.index(nbytes))
+
+
+def unregister_host_memory(address: int) -> None:
+    """
+    Undo :func:`register_host_memory`. ``address`` must be the exact start passed to it.
+
+    Pending transfers on the registered devices are drained first.
+
+    Raises:
+        RuntimeError: if ``address`` is not the start of a live registration.
+    """
+    torch_rbln._C._unregister_host_memory(operator.index(address))
+
+
+def is_pinned_address(address: int) -> bool:
+    """
+    Whether ``address`` lies inside a pinned host range -- one from the pinned allocator
+    (``pin_memory=True``) or one registered with :func:`register_host_memory`. Any offset
+    inside the range counts. Never raises; a null or foreign address is ``False``.
+    """
+    return bool(torch_rbln._C._is_pinned_ptr(operator.index(address)))
 
 
 @contextlib.contextmanager
