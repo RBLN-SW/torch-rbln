@@ -611,9 +611,29 @@ void free_nothrow(void* data) noexcept {
   }
 }
 
+void bind_device_memory(void* rbln_data, size_t nbytes) {
+  RBLN_CHECK(rbln_data != nullptr, "bind_device_memory: rbln_data is nullptr");
+  RBLN_CHECK(nbytes > 0, "bind_device_memory: nbytes must be positive, but got {}", nbytes);
+  // Reachable from a public Python entry point at any time, teardown included, where the raw
+  // rbln_* call would SEGFAULT rather than raise. The vmem-configuring leaves that only run
+  // downstream of an allocation do not repeat the check: malloc already made it.
+  require_runtime("bind device memory");
+  const auto vaddr = reinterpret_cast<uint64_t>(rbln_data);
+  RBLN_LOG_DEBUG("bind_device_memory: vaddr={:#x} nbytes={}", vaddr, nbytes);
+  RBLN_CHECK(
+      !::rbln::rbln_set_raw_memory_alloc(vaddr, static_cast<uint64_t>(nbytes)),
+      "rbln_set_raw_memory_alloc failed (vaddr={:#x}, {} bytes); the pointer may not be RBLN device memory or the "
+      "device may be out of memory",
+      vaddr,
+      nbytes);
+}
+
 void set_device_layout_like(void* target_data, const void* ref_data) {
   RBLN_CHECK(target_data != nullptr, "set_device_layout_like: target is nullptr");
   RBLN_CHECK(ref_data != nullptr, "set_device_layout_like: ref is nullptr");
+  // Same reason as bind_device_memory: a public Python entry point, so nothing
+  // upstream has established that the runtime is loaded.
+  require_runtime("set the device layout");
   const auto target_vaddr = reinterpret_cast<uint64_t>(target_data);
   const auto ref_vaddr = reinterpret_cast<uint64_t>(ref_data);
   RBLN_LOG_DEBUG("set_device_layout_like: target={:#x} ref={:#x}", target_vaddr, ref_vaddr);

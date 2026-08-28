@@ -122,6 +122,26 @@ C10_RBLN_API ::rbln::MemoryInfo get_memory_info(const void* data);
 C10_RBLN_API bool is_eager_malloc();
 
 /**
+ * @brief Give the vmem region at ``rbln_data`` a flat single-node device allocation.
+ *
+ * A device allocation reserves a virtual address and materialises the physical memory
+ * behind it lazily, on first use through a torch op. A consumer that reads those physical
+ * buffers out of band -- a collective library, direct storage (NVMe) DMA -- never runs
+ * such an op, so it would find nothing there. This materialises the allocation up front.
+ *
+ * The layout is flat and 1:1, with no dtype transform, on the device's main node: the
+ * shape a consumer that treats the region as bytes expects. Use set_device_layout_like()
+ * instead when the region has to match another tensor's layout.
+ *
+ * Re-binding an already-bound region is allowed and is what the collective path does
+ * before every operation.
+ *
+ * @param rbln_data Base pointer of an RBLN allocation (not an interior address).
+ * @param nbytes Size of the allocation in bytes. Must be positive.
+ */
+C10_RBLN_API void bind_device_memory(void* rbln_data, size_t nbytes);
+
+/**
  * @brief Configure ``target``'s device allocation to match ``ref``'s layout and
  *        dtype, without copying data.
  *
