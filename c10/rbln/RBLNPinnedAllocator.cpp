@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <vector>
@@ -23,6 +24,8 @@ struct PinnedRange {
   size_t nbytes = 0;
   // Runtime (torch) device ids the range is registered with, ascending.
   std::vector<int> registered_devices;
+  // Caller-owned memory registered through register_host_memory(): never freed here.
+  bool external = false;
 };
 
 // Allocation base -> range; ordered so interior pointers match via upper_bound.
@@ -91,6 +94,29 @@ void register_range_on(uintptr_t base, size_t nbytes, int torch_device_id) noexc
   RBLN_LOG_DEBUG("Registered pinned host memory {:#x} ({} bytes) on torch_device_id={}", base, nbytes, torch_device_id);
 }
 
+// Unregister `range` (starting at `data`) from every device it was registered with. The
+// runtime drains pending transfers on unregister, so the pages are not handed back while a
+// DMA may still target them. Skipped once the runtime is torn down -- the context release
+// covered the KMD side already.
+void unregister_range_everywhere(void* data, const PinnedRange& range) noexcept {
+  if (range.registered_devices.empty() || !rbln_runtime_available()) {
+    return;
+  }
+  for (int torch_device_id : range.registered_devices) {
+    if (::rbln::rbln_host_unregister(static_cast<uint32_t>(torch_device_id), reinterpret_cast<uintptr_t>(data)) !=
+        RBLNRetCode_SUCCESS) {
+      RBLN_LOG_DEBUG("rbln_host_unregister({}) failed on torch_device_id={}", fmt::ptr(data), torch_device_id);
+    }
+  }
+}
+
+// Register [base, base + nbytes) on every device this process has initialized.
+void register_range_on_initialized_devices(uintptr_t base, size_t nbytes) noexcept {
+  for (const auto device_index : initialized_device_indices()) {
+    register_range_on(base, nbytes, static_cast<int>(device_index));
+  }
+}
+
 void raw_pinned_delete(void* data) {
   if (data == nullptr) {
     return;
@@ -105,17 +131,7 @@ void raw_pinned_delete(void* data) {
       pinned_registry.erase(it);
     }
   }
-  // Unregister before freeing: the runtime drains pending transfers on unregister, so the
-  // pages are not returned to libc while a DMA may still target them. Skipped once the
-  // runtime is torn down -- the context release covered the KMD side already.
-  if (!range.registered_devices.empty() && rbln_runtime_available()) {
-    for (int torch_device_id : range.registered_devices) {
-      if (::rbln::rbln_host_unregister(static_cast<uint32_t>(torch_device_id), reinterpret_cast<uintptr_t>(data)) !=
-          RBLNRetCode_SUCCESS) {
-        RBLN_LOG_DEBUG("rbln_host_unregister({}) failed on torch_device_id={}", fmt::ptr(data), torch_device_id);
-      }
-    }
-  }
+  unregister_range_everywhere(data, range);
   if (range.nbytes > 0) {
     munlock(data, range.nbytes); // best-effort, mirrors the mlock in allocate
     if (range.nbytes >= kHugePage) {
@@ -160,9 +176,7 @@ struct RBLNPinnedAllocator final : public c10::Allocator {
       }
       // Registration wants the whole allocation, page-multiple and aligned, which is what
       // alloc_bytes is; the tensor's nbytes may end mid-page.
-      for (const auto device_index : initialized_device_indices()) {
-        register_range_on(reinterpret_cast<uintptr_t>(data), alloc_bytes, static_cast<int>(device_index));
-      }
+      register_range_on_initialized_devices(reinterpret_cast<uintptr_t>(data), alloc_bytes);
     }
     return c10::DataPtr(data, data, &raw_pinned_delete, c10::Device(c10::kCPU));
   }
@@ -216,6 +230,56 @@ void ensure_pinned_registered(const void* data, int torch_device_id) noexcept {
     nbytes = it->second.nbytes;
   }
   register_range_on(base, nbytes, torch_device_id);
+}
+
+void register_host_memory(void* data, size_t nbytes) {
+  TORCH_CHECK(data != nullptr, "register_host_memory: data cannot be nullptr");
+  TORCH_CHECK(nbytes > 0, "register_host_memory: nbytes must be positive");
+  const auto base = reinterpret_cast<uintptr_t>(data);
+  {
+    const std::lock_guard<std::mutex> guard(pinned_registry_mutex);
+    // Overlap with any live range (allocator or external) is refused: two registrations of
+    // one page would need two runtime pins and an ambiguous reverse lookup.
+    auto next = pinned_registry.lower_bound(base);
+    TORCH_CHECK(
+        next == pinned_registry.end() || next->first >= base + nbytes,
+        "register_host_memory: [",
+        fmt::ptr(data),
+        ", +",
+        nbytes,
+        ") overlaps a registered range");
+    if (next != pinned_registry.begin()) {
+      auto prev = std::prev(next);
+      TORCH_CHECK(
+          prev->first + prev->second.nbytes <= base,
+          "register_host_memory: [",
+          fmt::ptr(data),
+          ", +",
+          nbytes,
+          ") overlaps a registered range");
+    }
+    pinned_registry.emplace(base, PinnedRange{nbytes, {}, /*external=*/true});
+  }
+  RBLN_LOG_DEBUG("Registered external host memory {} ({} bytes)", fmt::ptr(data), nbytes);
+  register_range_on_initialized_devices(base, nbytes);
+}
+
+void unregister_host_memory(void* data) {
+  TORCH_CHECK(data != nullptr, "unregister_host_memory: data cannot be nullptr");
+  PinnedRange range;
+  {
+    const std::lock_guard<std::mutex> guard(pinned_registry_mutex);
+    auto it = pinned_registry.find(reinterpret_cast<uintptr_t>(data));
+    TORCH_CHECK(
+        it != pinned_registry.end() && it->second.external,
+        "unregister_host_memory: ",
+        fmt::ptr(data),
+        " is not the start of a range registered with register_host_memory");
+    range = std::move(it->second);
+    pinned_registry.erase(it);
+  }
+  unregister_range_everywhere(data, range);
+  RBLN_LOG_DEBUG("Unregistered external host memory {}", fmt::ptr(data));
 }
 
 bool pinned_ptr_registered_on(const void* data, int torch_device_id) noexcept {

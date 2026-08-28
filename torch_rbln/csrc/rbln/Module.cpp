@@ -8,6 +8,7 @@
 #include <c10/rbln/RBLNFallbackConfig.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
+#include <c10/rbln/RBLNPinnedAllocator.h>
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNSupportedDtypes.h>
 #include <torch/csrc/Dtype.h>
@@ -230,6 +231,28 @@ void register_internal_api(py::module_& module) {
         c10::rbln::bind_device_memory(tensor.data_ptr(), tensor.storage().nbytes());
       },
       "Internal: give an RBLN tensor a flat single-node device allocation");
+
+  // Pin a caller-owned host buffer for device DMA (cudaHostRegister counterpart). Used by
+  // torch_rbln.register_host_memory() / unregister_host_memory().
+  module.def(
+      "_register_host_memory",
+      [](uint64_t address, uint64_t nbytes) {
+        c10::rbln::register_host_memory(
+            reinterpret_cast<void*>(address), static_cast<size_t>(nbytes)); // NOLINT(performance-no-int-to-ptr)
+      },
+      "Internal: register a host address range as pinned for RBLN DMA");
+  module.def(
+      "_unregister_host_memory",
+      [](uint64_t address) {
+        c10::rbln::unregister_host_memory(reinterpret_cast<void*>(address)); // NOLINT(performance-no-int-to-ptr)
+      },
+      "Internal: undo _register_host_memory");
+  module.def(
+      "_is_pinned_ptr",
+      [](uint64_t address) {
+        return c10::rbln::is_pinned_ptr(reinterpret_cast<const void*>(address)); // NOLINT(performance-no-int-to-ptr)
+      },
+      "Internal: whether a host address lies in a pinned (allocator or registered) range");
 
   // Set target's device-allocation layout to match ref's, without copying data.
   // Used by torch_rbln.set_device_layout_like().

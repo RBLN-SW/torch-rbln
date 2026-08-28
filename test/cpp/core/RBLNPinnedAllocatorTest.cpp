@@ -1,9 +1,11 @@
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNPinnedAllocator.h>
+#include <c10/util/Exception.h>
 #include <gtest/gtest.h>
 
 #include <cstdint>
 #include <cstring>
+#include <vector>
 
 class RBLNPinnedAllocatorTest : public ::testing::Test {};
 
@@ -142,4 +144,51 @@ TEST_F(RBLNPinnedAllocatorRegisterTest, RegisteredCopyRoundTrips) {
   c10::rbln::memcpy_v2h(d, dev, nbytes);
   c10::rbln::free(dev);
   EXPECT_EQ(std::memcmp(s, d, nbytes), 0);
+}
+
+// --- register_host_memory: caller-owned memory ---------------------------------------
+
+TEST(RBLNRegisterHostMemoryTest, RegisteredRangeIsPinnedUntilUnregistered) {
+  std::vector<uint8_t> buf(3 * 4096);
+  auto* base = buf.data();
+  EXPECT_FALSE(c10::rbln::is_pinned_ptr(base));
+  c10::rbln::register_host_memory(base, buf.size());
+  EXPECT_TRUE(c10::rbln::is_pinned_ptr(base));
+  EXPECT_TRUE(c10::rbln::is_pinned_ptr(base + buf.size() - 1));
+  EXPECT_FALSE(c10::rbln::is_pinned_ptr(base + buf.size()));
+  c10::rbln::unregister_host_memory(base);
+  EXPECT_FALSE(c10::rbln::is_pinned_ptr(base));
+}
+
+TEST(RBLNRegisterHostMemoryTest, RejectsOverlapNullAndUnknown) {
+  std::vector<uint8_t> buf(2 * 4096);
+  auto* base = buf.data();
+  c10::rbln::register_host_memory(base, buf.size());
+  EXPECT_THROW(c10::rbln::register_host_memory(base + 4096, 4096), c10::Error);
+  EXPECT_THROW(c10::rbln::register_host_memory(base - 1, 2), c10::Error);
+  EXPECT_THROW(c10::rbln::unregister_host_memory(base + 4096), c10::Error);
+  c10::rbln::unregister_host_memory(base);
+  EXPECT_THROW(c10::rbln::unregister_host_memory(base), c10::Error);
+  EXPECT_THROW(c10::rbln::register_host_memory(nullptr, 4096), c10::Error);
+  EXPECT_THROW(c10::rbln::register_host_memory(base, 0), c10::Error);
+}
+
+TEST(RBLNRegisterHostMemoryTest, AllocatorMemoryIsNotExternal) {
+  auto data_ptr = c10::rbln::get_pinned_memory_allocator()->allocate(4096);
+  EXPECT_THROW(c10::rbln::register_host_memory(data_ptr.get(), 4096), c10::Error);
+  EXPECT_THROW(c10::rbln::unregister_host_memory(data_ptr.get()), c10::Error);
+  EXPECT_TRUE(c10::rbln::is_pinned_ptr(data_ptr.get()));
+}
+
+TEST_F(RBLNPinnedAllocatorRegisterTest, ExternalRangeIsRegisteredWithTheDevice) {
+  std::vector<uint8_t> storage(3 * 4096 + 4095);
+  // Page-align the start so the device-VA path applies.
+  auto base = reinterpret_cast<uintptr_t>(storage.data());
+  base = (base + 4095) & ~uintptr_t{4095};
+  auto* data = reinterpret_cast<uint8_t*>(base);
+  c10::rbln::register_host_memory(data, 3 * 4096);
+  EXPECT_TRUE(c10::rbln::pinned_ptr_registered_on(data, 0));
+  EXPECT_TRUE(c10::rbln::pinned_ptr_registered_on(data + 4096, 0));
+  c10::rbln::unregister_host_memory(data);
+  EXPECT_FALSE(c10::rbln::pinned_ptr_registered_on(data, 0));
 }
