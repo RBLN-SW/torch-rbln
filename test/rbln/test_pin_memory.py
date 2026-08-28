@@ -120,6 +120,28 @@ class TestPinMemoryCopy(TestCase):
         dev = src.to(device, non_blocking=True)
         self.assertEqual(dev.cpu(), src)
 
+    def test_pinned_huge_buffer_round_trip(self, device):
+        # >= 2 MiB pinned allocations take the huge-page branch of the pinned allocator
+        # and, on a runtime with host registration, are copied by device VA. Either way
+        # the bytes must round-trip, including a trailing partial page.
+        n = (2 << 20) // 2 + 1024  # float16 elements: 2 MiB + 2 KiB
+        src = torch.randn(n).to(torch.float16).pin_memory()
+        self.assertEqual(src.data_ptr() % (2 << 20), 0)
+        dev = src.to(device, non_blocking=True)
+        dst = torch.empty_like(src, pin_memory=True)
+        dst.copy_(dev, non_blocking=True)
+        torch.rbln.synchronize()
+        self.assertEqual(dst, src)
+
+    def test_pinned_allocated_before_device_use_round_trips(self, device):
+        # A pinned buffer that predates the device's first use is registered lazily by
+        # the copy; the result is the same as for one allocated afterwards.
+        pinned = torch.arange(4096, dtype=torch.float16).pin_memory()
+        dev = pinned.to(device)
+        back = torch.empty_like(pinned, pin_memory=True)
+        back.copy_(dev)
+        self.assertEqual(back, pinned)
+
 
 instantiate_device_type_tests(TestPinMemoryCopy, globals(), only_for="privateuse1")
 
