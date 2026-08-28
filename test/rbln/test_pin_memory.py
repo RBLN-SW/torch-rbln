@@ -143,7 +143,70 @@ class TestPinMemoryCopy(TestCase):
         self.assertEqual(back, pinned)
 
 
+@pytest.mark.test_set_ci
+class TestRegisterHostMemory(TestCase):
+    """torch.rbln.register_host_memory: pinning memory torch did not allocate."""
+
+    def test_register_marks_range_pinned(self):
+        buf = torch.empty(4096 * 3, dtype=torch.uint8)  # pageable
+        self.assertFalse(buf.is_pinned())
+        torch.rbln.register_host_memory(buf.data_ptr(), buf.numel())
+        try:
+            self.assertTrue(buf.is_pinned())
+            self.assertTrue(torch.rbln.is_pinned_address(buf.data_ptr() + 4096 + 17))
+            self.assertFalse(torch.rbln.is_pinned_address(buf.data_ptr() + buf.numel()))
+        finally:
+            torch.rbln.unregister_host_memory(buf.data_ptr())
+        self.assertFalse(buf.is_pinned())
+
+    def test_overlap_and_unknown_address_are_errors(self):
+        buf = torch.empty(4096 * 2, dtype=torch.uint8)
+        torch.rbln.register_host_memory(buf.data_ptr(), buf.numel())
+        try:
+            with self.assertRaises(RuntimeError):
+                torch.rbln.register_host_memory(buf.data_ptr() + 4096, 4096)
+            with self.assertRaises(RuntimeError):
+                torch.rbln.unregister_host_memory(buf.data_ptr() + 4096)
+        finally:
+            torch.rbln.unregister_host_memory(buf.data_ptr())
+        with self.assertRaises(RuntimeError):
+            torch.rbln.unregister_host_memory(buf.data_ptr())
+        with self.assertRaises(RuntimeError):
+            torch.rbln.register_host_memory(0, 4096)
+        with self.assertRaises(RuntimeError):
+            torch.rbln.register_host_memory(buf.data_ptr(), 0)
+
+    def test_pinned_allocator_memory_cannot_be_reregistered(self):
+        t = torch.empty(4096, pin_memory=True)
+        with self.assertRaises(RuntimeError):
+            torch.rbln.register_host_memory(t.data_ptr(), 4096)
+        with self.assertRaises(RuntimeError):  # not an external registration
+            torch.rbln.unregister_host_memory(t.data_ptr())
+        self.assertTrue(t.is_pinned())
+
+
+@pytest.mark.test_set_ci
+class TestRegisterHostMemoryCopy(TestCase):
+    def test_registered_buffer_round_trips_non_blocking(self, device):
+        # A huge_host_empty slab registered after the fact behaves like pinned memory:
+        # non_blocking copies go async and the data round-trips.
+        nbytes = (2 << 20) + 4096
+        slab = torch.rbln.huge_host_empty(nbytes)
+        torch.rbln.register_host_memory(slab.data_ptr(), nbytes)
+        try:
+            src = slab.view(torch.float16)
+            src.copy_(torch.randn(src.numel(), dtype=torch.float16))
+            dev = src.to(device, non_blocking=True)
+            back = torch.empty_like(src, pin_memory=True)
+            back.copy_(dev, non_blocking=True)
+            torch.rbln.synchronize()
+            self.assertEqual(back, src)
+        finally:
+            torch.rbln.unregister_host_memory(slab.data_ptr())
+
+
 instantiate_device_type_tests(TestPinMemoryCopy, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestRegisterHostMemoryCopy, globals(), only_for="privateuse1")
 
 if __name__ == "__main__":
     run_tests()
