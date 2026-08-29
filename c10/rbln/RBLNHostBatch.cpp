@@ -15,19 +15,10 @@ namespace c10::rbln {
 
 namespace {
 
-// Work one bulk call of *pageable* host memory may carry. Past it the job never
-// completes: the kernel pins every raw host operand of a command buffer at
-// rblnEndCommandBuffer(), and pinning more than this per CB runs into the device's
-// SYS_KERNEL_TIMEOUT, which cancels the context so the per-entry retry below
-// cannot recover either. Measured on lmcache's D2H store, 24 entries / 12 MiB
-// pass and 32 / 16 MiB start timing out.
-//
-// Pinned host memory (the pinned allocator, register_host_memory) is exempt: it
-// is already registered with the runtime and addressed by device VA, so End()
-// pins nothing, and the runtime splits the call into command buffers of at most
-// its own per-CB copy count itself. Handing it the whole group lets it coalesce
-// adjacent descriptors and dispatch far fewer round trips -- a 268 MiB gather
-// of 4 MiB pieces runs at 39 GB/s as one call against 28 GB/s in 8 MiB calls.
+// Caps for *pageable* host memory: the kernel pins every raw host operand at
+// rblnEndCommandBuffer(), and more than this per CB hits SYS_KERNEL_TIMEOUT (measured:
+// 24 entries / 12 MiB pass, 32 / 16 MiB time out). Pinned memory is exempt -- it is
+// addressed by device VA, and one call lets the runtime coalesce descriptors.
 constexpr size_t kMaxBulkEntries = 16;
 constexpr size_t kMaxBulkBytes = size_t{8} * 1024 * 1024;
 

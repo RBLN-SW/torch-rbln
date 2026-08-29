@@ -42,9 +42,7 @@ std::map<uintptr_t, PinnedRange>::iterator find_containing_locked(uintptr_t addr
   return addr < it->first + it->second.nbytes ? it : pinned_registry.end();
 }
 
-// Whether the loaded runtime can register host memory for `torch_device_id`. Cached per
-// device: the answer only depends on the thunk, a flag read at startup, and the device
-// being real, none of which change within a process.
+// Whether the runtime can register host memory for `torch_device_id` (cached per device).
 bool host_register_supported(int torch_device_id) noexcept {
   static std::mutex mutex;
   static std::map<int, bool> cache;
@@ -66,9 +64,7 @@ bool host_register_supported(int torch_device_id) noexcept {
   return supported;
 }
 
-// Register [base, base + nbytes) on `torch_device_id`. Caller holds no lock; the range
-// entry is updated under the registry lock only on success so a concurrent copy never
-// sees a device that is not actually registered.
+// Register [base, base + nbytes) on `torch_device_id`; the range entry is updated only on success.
 void register_range_on(uintptr_t base, size_t nbytes, int torch_device_id) noexcept {
   if (!host_register_supported(torch_device_id)) {
     return;
@@ -94,10 +90,7 @@ void register_range_on(uintptr_t base, size_t nbytes, int torch_device_id) noexc
   RBLN_LOG_DEBUG("Registered pinned host memory {:#x} ({} bytes) on torch_device_id={}", base, nbytes, torch_device_id);
 }
 
-// Unregister `range` (starting at `data`) from every device it was registered with. The
-// runtime drains pending transfers on unregister, so the pages are not handed back while a
-// DMA may still target them. Skipped once the runtime is torn down -- the context release
-// covered the KMD side already.
+// Unregister `range` from every device it was registered with (skipped once the runtime is gone).
 void unregister_range_everywhere(void* data, const PinnedRange& range) noexcept {
   if (range.registered_devices.empty() || !rbln_runtime_available()) {
     return;
@@ -154,8 +147,7 @@ struct RBLNPinnedAllocator final : public c10::Allocator {
     void* data = nullptr;
     if (nbytes > 0) {
       static const size_t page_size = static_cast<size_t>(sysconf(_SC_PAGESIZE));
-      // From 2 MiB up, align to and advise huge pages: fewer, larger pins for the DMA
-      // engine and the kernel alike. Below that a page is the natural unit.
+      // From 2 MiB up, align to and advise huge pages (fewer, larger pins).
       const bool huge = nbytes >= kHugePage;
       const size_t alignment = huge ? kHugePage : page_size;
       const size_t alloc_bytes = huge ? (nbytes + kHugePage - 1) / kHugePage * kHugePage : nbytes;
@@ -174,8 +166,6 @@ struct RBLNPinnedAllocator final : public c10::Allocator {
         const std::lock_guard<std::mutex> guard(pinned_registry_mutex);
         pinned_registry.emplace(reinterpret_cast<uintptr_t>(data), PinnedRange{alloc_bytes, {}});
       }
-      // Registration wants the whole allocation, page-multiple and aligned, which is what
-      // alloc_bytes is; the tensor's nbytes may end mid-page.
       register_range_on_initialized_devices(reinterpret_cast<uintptr_t>(data), alloc_bytes);
     }
     return c10::DataPtr(data, data, &raw_pinned_delete, c10::Device(c10::kCPU));
@@ -238,8 +228,7 @@ void register_host_memory(void* data, size_t nbytes) {
   const auto base = reinterpret_cast<uintptr_t>(data);
   {
     const std::lock_guard<std::mutex> guard(pinned_registry_mutex);
-    // Overlap with any live range (allocator or external) is refused: two registrations of
-    // one page would need two runtime pins and an ambiguous reverse lookup.
+    // Overlap with a live range is refused.
     auto next = pinned_registry.lower_bound(base);
     TORCH_CHECK(
         next == pinned_registry.end() || next->first >= base + nbytes,

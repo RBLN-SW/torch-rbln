@@ -346,37 +346,19 @@ def huge_host_empty(nbytes: int) -> torch.Tensor:
 
 def register_host_memory(address: int, nbytes: int) -> None:
     """
-    Pin a caller-owned host buffer for RBLN DMA -- the counterpart of ``cudaHostRegister``.
+    Pin a caller-owned host buffer for RBLN DMA (the counterpart of ``cudaHostRegister``).
 
-    ``torch.empty(..., pin_memory=True)`` pins memory it allocates; this pins memory that
-    already exists -- a shared-memory pool another process created, a cache's slab, a
-    ``HugeHostBuffer``. Afterwards the range counts as pinned: ``Tensor.is_pinned()`` is true
-    for a tensor over it, a ``non_blocking`` copy goes asynchronous, and every host<->device
-    copy whose page-aligned operand lies inside it is recorded against the buffer's device VA,
-    so the kernel reuses one pin instead of pinning the pages on each command buffer. The
-    range is registered with every RBLN device this process has initialized, and with a
-    device initialized later on its first copy.
-
-    The pin is best effort on the runtime side: without host registration in the runtime
-    (UMD < 3.5, ``RBLN_HOST_MEMORY_REGISTER=0``) the range is still pinned for torch's
-    purposes and copies take their usual path.
-
-    The caller keeps ownership of the memory: unregister before freeing it, and only after
-    every copy that references it has completed (as with ``cudaHostUnregister``).
+    The range then counts as pinned (``is_pinned()``, async ``non_blocking`` copies) and is
+    registered with the runtime on every initialized RBLN device, so copies inside it reuse
+    one pin instead of pinning per command buffer. Unregister before freeing the memory and
+    only after the copies that reference it completed.
 
     Args:
-        address: Start of the buffer (e.g. ``tensor.data_ptr()`` or ``HugeHostBuffer.address``).
+        address: Start of the buffer (``tensor.data_ptr()``, ``HugeHostBuffer.address``).
         nbytes: Length in bytes.
 
     Raises:
         RuntimeError: on a null address, zero length, or overlap with a live pinned range.
-
-    Example::
-
-        pool = torch.frombuffer(shm.buf, dtype=torch.uint8)
-        torch.rbln.register_host_memory(pool.data_ptr(), pool.numel())
-        ...
-        torch.rbln.unregister_host_memory(pool.data_ptr())
     """
     torch_rbln._C._register_host_memory(operator.index(address), operator.index(nbytes))
 
@@ -394,11 +376,7 @@ def unregister_host_memory(address: int) -> None:
 
 
 def is_pinned_address(address: int) -> bool:
-    """
-    Whether ``address`` lies inside a pinned host range -- one from the pinned allocator
-    (``pin_memory=True``) or one registered with :func:`register_host_memory`. Any offset
-    inside the range counts. Never raises; a null or foreign address is ``False``.
-    """
+    """Whether ``address`` lies inside a pinned or registered host range (never raises)."""
     return bool(torch_rbln._C._is_pinned_ptr(operator.index(address)))
 
 
