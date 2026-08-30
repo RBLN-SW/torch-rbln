@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include <ATen/MemoryOverlap.h>
+#include <ATen/native/rbln/RBLNCompiledPermute.h>
 #include <ATen/native/rbln/RBLNCopy.h>
 #include <ATen/native/rbln/RBLNStrideUtils.h>
 #include <ATen/native/rbln/RBLNStridedV2V.h>
@@ -317,6 +318,11 @@ void tensor_copy_from_rbln_to_rbln(const at::Tensor& rbln_src, const at::Tensor&
   // a host fallback anyway, so bounce via host here.
   if (rbln_src.sizes() == rbln_dst.sizes() && rbln_src.scalar_type() == rbln_dst.scalar_type() &&
       rbln_src.device() == rbln_dst.device()) {
+    // A large permuted source walks one strided range per contiguous inner block (256 B for a
+    // head<->token swap); a compiled program moves the same bytes ~100x faster.
+    if (try_compiled_permute_copy(rbln_dst, rbln_src)) {
+      return;
+    }
     const auto inner_start = common_inner_start(rbln_src.sizes(), rbln_src.strides(), rbln_dst.strides());
     int64_t outer_count = 1;
     for (int64_t i = 0; i < inner_start; ++i) {
