@@ -1,5 +1,6 @@
 #include <ATen/native/rbln/RBLNCPUFallback.h>
 #include <ATen/native/rbln/RBLNCPUFastPaths.h>
+#include <ATen/native/rbln/RBLNCompiledPermute.h>
 #include <ATen/native/rbln/RBLNCopy.h>
 #include <ATen/native/rbln/RBLNTensorUtils.h>
 #include <c10/core/impl/VirtualGuardImpl.h>
@@ -201,6 +202,12 @@ void check_base_rbln_tensor(const at::Tensor& t, const char* api, const char* na
  * @param module The Python module to register the functions with
  */
 void register_internal_api(py::module_& module) {
+  // The compiler is driven from Python, so the native side reaches it through this hook.
+  at::native::rbln::set_compiled_permute_impl(
+      [](const at::Tensor& src, at::IntArrayRef dims, int64_t slot, const at::Tensor& out) {
+        py::gil_scoped_acquire gil;
+        py::module_::import("torch_rbln.compiled_permute").attr("compiled_permute")(src, dims.vec(), slot, out);
+      });
   // Tensor creation and manipulation functions
   module.def(
       "_create_tensor_from_ptr", &at::native::rbln::create_tensor_from_ptr, "Internal: create tensor from device ptr");
