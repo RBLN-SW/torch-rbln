@@ -4,9 +4,9 @@
 //
 // Goal: on warm shim calls (cache hit), bypass the Python wrapper entirely
 // and drive the rebel runtime directly from C++ through rbln_exec_api.h. This
-// eliminates the per-call pybind roundtrip + Python wrapper overhead
-// (~100-200us, dominated by is_cpu_fallback_cases and compile_rbln_cached
-// lookup on the Python side).
+// eliminates the per-call pybind roundtrip + Python wrapper overhead, which
+// is dominated by is_cpu_fallback_cases and the compile_rbln_cached lookup on
+// the Python side.
 //
 // Architecture:
 //   - On first call of a shim op with a given input profile, the Python
@@ -14,9 +14,7 @@
 //     the DynamoRuntime. It then installs an entry into this cache via the
 //     pybind-exposed install(...) API.
 //   - On subsequent calls with a matching input profile, the shim looks up
-//     the entry and drives one execution through the C ABI:
-//     rbln_rt_begin_io_patch_batch, rbln_rt_prepare_inputs,
-//     rbln_rt_prepare_outputs, rbln_rt_end_io_patch_batch, rbln_rt_run.
+//     the entry and drives one execution through the C ABI.
 //   - Entries are keyed by (schema-name, per-Tensor-input profile, per-Scalar
 //     value). Shape/dtype/device changes produce a different key and trigger
 //     a miss (fall back to Python, which in turn repopulates the cache for
@@ -144,15 +142,13 @@ struct OutputProfile {
 };
 
 struct CacheEntry {
-  // Strong references to the two Python objects the borrowed handle below
-  // depends on: the DynamoRuntime and the sync-runtime it owns. Holding the
-  // runtime itself and not just its owner means a DynamoRuntime that rebinds
-  // its attribute cannot pull the handle out from under an installed entry.
+  // The runtime is held as well as the DynamoRuntime that owns it: `runtime`
+  // below is borrowed from the former, and an owner that rebinds its attribute
+  // would otherwise drop it while an installed entry still points at it.
   pybind11::object py_dyn_runtime;
   pybind11::object py_runtime_handle;
 
-  // Borrowed handle for rbln_exec_api.h, taken from the runtime's
-  // ``native_handle()``. Valid only while `py_runtime_handle` is alive.
+  // Borrowed from `py_runtime_handle`'s native_handle(); valid only while it is.
   RblnSyncRuntime runtime{nullptr};
 
   c10::SmallVector<OutputProfile, 2> out_profiles;

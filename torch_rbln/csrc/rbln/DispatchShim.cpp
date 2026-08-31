@@ -1057,29 +1057,24 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
 
   const uint64_t _seg_t_io_build = now_ns();
 
-  // One execution, in the order rbln_exec_api.h documents: begin the IO-patch
-  // batch, bind inputs, bind outputs, close the batch, run. The batch is not
-  // decoration — closing it is the only thing that re-exports CCL memory that
-  // input binding moved, and it coalesces the CS-buffer DMAs that binding
-  // triggers into one upload per buffer.
+  // The IO-patch batch is not optional: closing it is the only thing that
+  // re-exports CCL memory that input binding moved, and it also coalesces the
+  // CS-buffer DMAs binding triggers into one upload per buffer.
   //
-  // `stale = nullptr` is the value a caller that does not track tensor
-  // identity across calls must pass: it re-binds every input. Passing an empty
-  // list instead would *assert* that nothing changed since the previous call,
-  // and this path cannot promise that — it caches by input profile, so two
-  // different tensors with the same shape and dtype share an entry.
+  // `stale = nullptr` is what a caller that does not track tensor identity
+  // across calls has to pass — it re-binds every input. An empty list would
+  // instead assert that nothing changed since the previous call, which this
+  // path cannot promise: it caches by input profile, so two different tensors
+  // of the same shape and dtype share an entry.
   //
-  // No GIL is taken: the C ABI raises no Python exception and calls nothing in
-  // the interpreter, and nothing else on this path touches a py::object. A
-  // failure arrives as a return code, and we return false so the caller falls
-  // through to the pybind miss path (which routes through DynamoRuntime and
-  // performs the v-memory bookkeeping that lets the same tensor inputs
-  // succeed).
+  // No GIL: the C ABI raises no Python exception and enters no interpreter
+  // code, and nothing else here touches a py::object. A failure arrives as a
+  // return code, and we return false so the caller falls through to the pybind
+  // miss path, which routes through DynamoRuntime and performs the v-memory
+  // bookkeeping that lets the same tensor inputs succeed.
   //
-  // Phase timers are assigned right after their call; a failure short-circuits
-  // into the early return below, so the diag accumulators only ever read the
-  // fully-assigned success path. The initializers are there so an unassigned
-  // timer holds a sane value rather than garbage.
+  // A failure short-circuits into that early return, so the diag accumulators
+  // below only ever read the fully-assigned success path.
   uint64_t _seg_t_prep_in = _seg_t_io_build;
   uint64_t _seg_t_prep_out = _seg_t_io_build;
   uint64_t _seg_t_end = _seg_t_io_build;
@@ -1155,8 +1150,8 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
   g_diag_warm_n_hits.fetch_add(1, std::memory_order_relaxed);
   g_diag_warm_ns_lookup.fetch_add(_seg_t_lookup - _seg_t0, std::memory_order_relaxed);
   g_diag_warm_ns_io_build.fetch_add(_seg_t_io_build - _seg_t_lookup, std::memory_order_relaxed);
-  // Both halves of the IO-patch batch land in one segment; they bracket the
-  // two binds rather than sitting next to each other.
+  // Both halves of the batch land in one segment; they bracket the two binds
+  // rather than sitting next to each other.
   g_diag_warm_ns_batch.fetch_add(
       (_seg_t_begin - _seg_t_io_build) + (_seg_t_end - _seg_t_prep_out), std::memory_order_relaxed);
   g_diag_warm_ns_prep_in.fetch_add(_seg_t_prep_in - _seg_t_begin, std::memory_order_relaxed);
@@ -1568,7 +1563,9 @@ bool install_warmcache_from_pending(
   // reference to the object it came from for as long as it holds the pointer.
   // A runtime that does not offer it cannot be driven from the hit path at
   // all, so refuse to install rather than cache an entry whose every hit would
-  // fail.
+  // fail: the op keeps running, on the Python wrapper path. Both shapes that
+  // says so — error_already_set for a missing or raising attribute, cast_error
+  // for a return value that is not an integer — derive from std::exception.
   entry.py_runtime_handle = runtime_handle;
   try {
     entry.runtime = reinterpret_cast<RblnSyncRuntime>(runtime_handle.attr("native_handle")().cast<uintptr_t>());

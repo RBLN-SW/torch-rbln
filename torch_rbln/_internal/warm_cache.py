@@ -47,13 +47,9 @@ import torch
 import torch_rbln._C as _C
 
 
-# The runtime method the C++ hit path is driven through; see WarmCache.h.
-_NATIVE_HANDLE = "native_handle"
-
-
 def _is_drivable_runtime_handle(handle: Any) -> bool:
     """True iff the C++ hit path can take a native handle off ``handle``."""
-    return callable(getattr(handle, _NATIVE_HANDLE, None))
+    return callable(getattr(handle, "native_handle", None))
 
 
 _DTYPE_KEY = {

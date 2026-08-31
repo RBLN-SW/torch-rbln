@@ -230,6 +230,7 @@ class TestWarmCacheHandleGate(TestCase):
 
 
 @pytest.mark.test_set_ci
+@pytest.mark.single_worker
 class TestWarmCacheContractBreak(TestCase):
     """A runtime the hit path cannot take a handle off must stay harmless.
 
