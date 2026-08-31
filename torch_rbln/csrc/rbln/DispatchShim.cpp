@@ -1563,18 +1563,27 @@ bool install_warmcache_from_pending(
   // reference to the object it came from for as long as it holds the pointer.
   // A runtime that does not offer it cannot be driven from the hit path at
   // all, so refuse to install rather than cache an entry whose every hit would
-  // fail: the op keeps running, on the Python wrapper path. Both shapes that
-  // says so — error_already_set for a missing or raising attribute, cast_error
-  // for a return value that is not an integer — derive from std::exception.
+  // fail: the op keeps running, on the Python wrapper path. A missing or
+  // raising attribute arrives as error_already_set; a return value that is not
+  // an integer makes PyLong_AsVoidPtr return null with a Python error set.
+  //
+  // PyLong_AsVoidPtr rather than a cast off ``.cast<uintptr_t>()``: CPython
+  // owns the integer-to-pointer conversion, which keeps an int-to-ptr
+  // reinterpret_cast out of this translation unit.
   entry.py_runtime_handle = runtime_handle;
+  void* native = nullptr;
   try {
-    entry.runtime = reinterpret_cast<RblnSyncRuntime>(runtime_handle.attr("native_handle")().cast<uintptr_t>());
-  } catch (const std::exception&) {
+    native = PyLong_AsVoidPtr(runtime_handle.attr("native_handle")().ptr());
+  } catch (const pybind11::error_already_set&) {
     return false;
   }
-  if (entry.runtime == nullptr) {
+  if (native == nullptr) {
+    if (PyErr_Occurred()) {
+      PyErr_Clear();
+    }
     return false;
   }
+  entry.runtime = static_cast<RblnSyncRuntime>(native);
   entry.out_profiles.reserve(out_profiles.size());
   for (const auto& tup : out_profiles) {
     OutputProfile op;
