@@ -1,6 +1,5 @@
 # Build/dev dependency constraints (single source of truth).
-# TEMPORARY: a build of rebel_compiler#13235, which is not on rebel's dev branch yet.
-# It is what declares rbln_exec_api.h and raises RBLN_ABI_CURRENT to 3, so the warm-cache
-# hit path can be built against the C ABI instead of rebel's internal C++ symbols.
-# Restore a production pin once 13235 ships in a release.
-rebel-compiler==0.11.3.dev112+g9bb2161a
+# TEMPORARY: a dev build. rbln_exec_api.h (rebel_compiler#13235) is on rebel's dev branch
+# but not in a release yet, and this build also carries the multi-device execution fix
+# (#13303) that the warm-cache tests need. Restore a production pin once both ship.
+rebel-compiler==0.11.3.dev160+g0ebb3f84
