@@ -151,7 +151,7 @@ mode_pypi() {
         python ./tools/replace_depends.py \
             --pyproject-path ./pyproject.toml \
             --source "rebel-compiler" \
-            --target "rebel-compiler>=0.10.1,<0.20.0" \
+            --target "rebel-compiler>=0.11.2,<0.20.0" \
             --set-index rbln
         rm -f uv.lock
     fi

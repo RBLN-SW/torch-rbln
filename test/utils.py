@@ -50,6 +50,18 @@ def configure_master_port_for_rccl_tests(default_port: str = _DEFAULT_DISTRIBUTE
     os.environ.setdefault("MASTER_PORT", default_port)
 
 
+def assert_device_resident_dtype(dtype: torch.dtype) -> None:
+    """Fail unless the device advertises `dtype` as device-resident.
+
+    Only fp16/bf16 are (`kCapabilityDtypes`); another dtype accepts ``device="rbln"``
+    but stays host-backed, so an ordering test written on it would run entirely on the
+    host and pass with a broken fence. Per-tensor byte counting cannot stand in for
+    this: allocation is lazy and small elementwise ops take CPU fast paths.
+    """
+    advertised = torch.accelerator.get_device_capability()["supported_dtypes"]
+    assert dtype in advertised, f"{dtype} is not device-resident; advertised: {advertised}"
+
+
 def set_deterministic_seeds(seed: int):
     """Set deterministic seeds for reproducibility.
 

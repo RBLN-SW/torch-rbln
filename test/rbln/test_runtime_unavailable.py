@@ -141,6 +141,21 @@ class TestRuntimeUnavailable(TestCase):
         )
         _assert_ok(self, result, "OFFLOAD_OK")
 
+    def test_release_offload_temp_storage_no_ops_when_runtime_unavailable(self):
+        """torch.rbln.release_offload_temp_storage() runs on the shutdown path, after the
+        runtime may already be gone, so it is gated like the offload toggle: it reports 0
+        files removed instead of dereferencing a dead runtime handle."""
+        result = _run_subprocess(
+            """
+            C._set_runtime_shutting_down(True)
+            assert C.runtime_available() is False
+            assert torch.rbln.release_offload_temp_storage() == 0
+            assert C._release_offload_temp_storage() == 0
+            print("RELEASE_OK")
+            """
+        )
+        _assert_ok(self, result, "RELEASE_OK")
+
     def test_flag_toggles_runtime_available(self):
         """Setting / clearing the shutdown flag flips runtime_available() and restores it."""
         result = _run_subprocess(
@@ -296,6 +311,40 @@ class TestRuntimeUnavailable(TestCase):
                 os.path.exists(marker),
                 "a best-effort runtime op was dispatched despite no live context — the context gate failed",
             )
+
+    @requires_physical_devices(1)
+    def test_failed_commit_reports_unavailable(self):
+        """A commit that fails part-way leaves the backend unusable, so is_available() must
+        say so. Registration claims one logical device at a time and the runtime has no
+        unregister call, so a failure mid-loop is permanent: every later device use rethrows
+        the stored error. Reporting available while nothing can be used sends a caller --
+        vLLM picking a platform, LMCache picking a backend -- down a path that cannot work.
+
+        The device count may stay: it describes the planned topology, not usability.
+        Injected with a shim forcing rbln_register_device_id to fail."""
+        with tempfile.TemporaryDirectory() as tmp:
+            so = _build_ld_preload_shim(
+                tmp,
+                "int rbln_register_device_id(int t, int* d, int n){(void)t;(void)d;(void)n; return 1;}\n",
+            )
+            if so is None:
+                self.skipTest("needs a C compiler to build the LD_PRELOAD shim")
+            result = _run_subprocess(
+                """
+                assert torch.rbln.is_available() is True, "available before any device use"
+                try:
+                    torch.ones(4, dtype=torch.float16, device="rbln:0")
+                except RuntimeError as exc:
+                    assert "rbln_register_device_id failed" in str(exc), str(exc)
+                else:
+                    raise AssertionError("a failing registration must surface at the point of use")
+                assert torch.rbln.is_available() is False, "unusable backend still reports available"
+                assert C.runtime_available() is False, "python and C++ availability disagree"
+                print("FAILED_COMMIT_OK")
+                """,
+                env_extra={"LD_PRELOAD": so, "RBLN_DEVICES": "0"},
+            )
+            _assert_ok(self, result, "FAILED_COMMIT_OK")
 
     @requires_physical_devices(1)
     def test_best_effort_ops_propagate_live_context_failure(self):

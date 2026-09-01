@@ -4,8 +4,9 @@ import warnings
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any  # noqa: UP035
 
+from torch_rbln._internal.abi_check import check_librbln_abi
 from torch_rbln._internal.env_utils import is_diagnose_mode
-from torch_rbln._internal.tvm_libinfo import get_dll_directories, get_dll_directory_candidates
+from torch_rbln._internal.rbln_runtime_lib import load_runtime_library
 
 
 try:
@@ -34,8 +35,16 @@ def torch_backends_entry_point() -> None:
         import torch
 
         # Load shared objects ##################################################
-        # Ensure dependent shared library is loaded before importing native extension
-        find_and_load_tvm_library("librbln.so")
+        # Map librbln.so before the native extensions: they declare it NEEDED by SONAME, so the
+        # loader reuses this mapping instead of searching a RUNPATH baked in at build time.
+        librbln_path = load_runtime_library()
+
+        # Verify the rebel ABI contract while librbln.so is the only rebel code loaded. Past
+        # this point our extensions bind to its entry points and a mismatch stops being
+        # reportable: CPython opens them RTLD_NOW, so a missing symbol aborts the import as
+        # `undefined symbol`. It re-opens the mapping just made RTLD_NOLOAD, never a copy, and
+        # owns that step so a handle it cannot take fails open like the rest of the check.
+        check_librbln_abi(librbln_path)
 
         # Import native extension module (e.g., torch_rbln.so)
         current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -104,59 +113,6 @@ def torch_backends_entry_point() -> None:
     status = "initialized"
 
 
-def find_and_load_tvm_library(target_name: str) -> None:
-    """
-    Search for a shared library (.so) file in known tvm lib paths and load it with ctypes.
-
-    This function iterates through directories listed by 'tvm_libinfo'. If the target
-    shared library is found, it attempts to load it using `ctypes.CDLL`.
-
-    Args:
-        target_name (str): The name of the shared library to find and load (e.g., 'librbln.so').
-
-    Raises:
-        FileNotFoundError: If the library is not found in any known site-packages paths.
-        OSError: If the library is found but fails to load via ctypes.
-    """
-    search_paths = get_dll_directories()
-    for base in search_paths:
-        for root, _, files in os.walk(base):
-            if target_name in files:
-                so_path = os.path.join(root, target_name)
-                try:
-                    ctypes.CDLL(so_path, ctypes.RTLD_GLOBAL)
-                    return
-                except OSError as e:
-                    raise OSError(f"Failed to load {target_name} at {so_path}: {e}") from e
-
-    if target_name == "librbln.so":
-        candidates = get_dll_directory_candidates()
-        searched = [p for p, _ in candidates]
-        diag_note = (
-            " Run 'python -m torch_rbln.diagnose' (or "
-            "'TORCH_RBLN_DIAGNOSE=1 python -m torch_rbln.diagnose' if import fails) "
-            "for full environment diagnostics."
-        )
-        env_hint = []
-        for var in ("REBEL_HOME", "LD_LIBRARY_PATH", "PYTHONPATH"):
-            v = os.environ.get(var, "")
-            if v:
-                env_hint.append(f"{var}={v[:80]}{'...' if len(v) > 80 else ''}")
-        if env_hint:
-            env_str = "; ".join(env_hint)
-            diag_note += f" Relevant env: {env_str}."
-        raise FileNotFoundError(
-            "Could not find librbln.so. "
-            "Searched directories (in order): "
-            + ", ".join(searched[:10])
-            + (" ..." if len(searched) > 10 else "")
-            + ". "
-            "Please install the REBEL compiler (rebel-compiler package) or fix REBEL_HOME/LD_LIBRARY_PATH/PYTHONPATH."
-            + diag_note
-        )
-    raise FileNotFoundError(f"{target_name} not found in any known site-packages path.")
-
-
 def _create_process_group_rbln(dist_backend_opts, pg_options):
     """
     Create a ProcessGroupRBLN instance for distributed training.
@@ -205,10 +161,9 @@ def _initialize_kineto_profiler() -> None:
     """Register the rbln torch.profiler (kineto) bridge (a runtime-free libkineto
     factory registration).
 
-    Do NOT query the device arch here (e.g. ``is_atom_device()``): ``get_npu_name`` seals
-    ``RBLN_DEVICES`` in the rbln runtime, and a vLLM data-parallel worker remaps
-    ``RBLN_DEVICES`` *after* import -> ``RBLN_DEVICES environment variable changed at
-    runtime (Sealed)``. ATOM is gated by the runtime instead: ``rbln_kineto_is_active()``
+    Do NOT query the device arch here (e.g. ``is_atom_device()``): ``get_npu_name`` resolves
+    a device, opening and closing a device node on every import. ATOM is gated by the runtime
+    instead: ``rbln_kineto_is_active()``
     (which the C++ profiler ``configure()`` checks) reports inactive on ATOM
     (rebel-compiler #12079), so no rbln session is created there.
     """

@@ -15,6 +15,12 @@
 
 namespace c10::rbln {
 
+// Every failure here uses RBLN_CHECK_QUIET, not RBLN_CHECK: mapping init is reached
+// from is_available()/device_count(), which torch requires never to throw, so callers
+// catch. RBLN_CHECK would still log c10::Error::what() -- stack trace included -- to
+// the console of every co-tenant process that merely asked whether an NPU exists.
+// The message rides the exception; the point of use logs it when it matters.
+
 namespace {
 
 std::atomic<RblnDeviceMappingInitializedCallback> g_device_mapping_initialized_cb{nullptr};
@@ -27,14 +33,14 @@ int parseEnvInt(const std::string& value, const char* var_name) {
   try {
     result = std::stoi(value, &pos);
   } catch (const std::exception&) {
-    RBLN_CHECK(false, "{}='{}' is not a valid integer", var_name, value);
+    RBLN_CHECK_QUIET(false, "{}='{}' is not a valid integer", var_name, value);
   }
   // std::stoi parses only a leading prefix ("1abc" -> 1); reject any trailing
   // non-whitespace so a malformed value errors instead of being truncated.
   while (pos < value.size() && (std::isspace(static_cast<unsigned char>(value[pos])) != 0)) {
     ++pos;
   }
-  RBLN_CHECK(pos == value.size(), "{}='{}' is not a valid integer", var_name, value);
+  RBLN_CHECK_QUIET(pos == value.size(), "{}='{}' is not a valid integer", var_name, value);
   return result;
 }
 
@@ -58,9 +64,12 @@ DeviceMappingManager& DeviceMappingManager::getInstance() {
   return instance;
 }
 
-DeviceMappingManager::DeviceMappingManager() {
-  initialize();
-}
+// Construction must not touch the environment or the runtime, so planning is lazy
+// (ensurePlanned): a function-local static whose constructor throws is re-attempted on the
+// next call ([stmt.dcl]/4), and c10::call_once leaves its flag unset on a throwing
+// initializer (c10/util/CallOnce.h), which would re-run the whole mapping init --
+// rbln_register_device_id() included -- on every query under a malformed RBLN_* config.
+DeviceMappingManager::DeviceMappingManager() = default;
 
 bool DeviceMappingManager::isValidDeviceGroupSize(size_t size) const {
   for (const auto& base_size : BASE_SIZES) {
@@ -89,7 +98,7 @@ void DeviceMappingManager::validateDeviceGroups(const std::vector<std::vector<in
   // and dummy paths. The physical-id *range* check needs a physical device count and so
   // stays in the real path (initializeFromDeviceMap).
   constexpr auto kMaxDeviceIndex = static_cast<size_t>(std::numeric_limits<c10::DeviceIndex>::max());
-  RBLN_CHECK(
+  RBLN_CHECK_QUIET(
       groups.size() <= kMaxDeviceIndex,
       "RBLN_DEVICE_MAP/RBLN_NPUS_PER_DEVICE requests {} logical devices, exceeding the maximum of {}",
       groups.size(),
@@ -97,14 +106,14 @@ void DeviceMappingManager::validateDeviceGroups(const std::vector<std::vector<in
 
   std::unordered_set<int> used_physical_ids;
   for (size_t i = 0; i < groups.size(); ++i) {
-    RBLN_CHECK(
+    RBLN_CHECK_QUIET(
         isValidDeviceGroupSize(groups[i].size()),
         "Logical device rbln:{} has {} physical NPU(s); valid sizes are {}.",
         i,
         groups[i].size(),
         getValidSizesString());
     for (int phy_id : groups[i]) {
-      RBLN_CHECK(
+      RBLN_CHECK_QUIET(
           used_physical_ids.insert(phy_id).second,
           "Physical NPU {} is assigned to more than one logical device",
           phy_id);
@@ -164,7 +173,7 @@ std::vector<std::vector<int>> DeviceMappingManager::parseDeviceMap(const std::st
 
   while (true) {
     // ---- one group: '[' number (',' number)* ']' ----
-    RBLN_CHECK(
+    RBLN_CHECK_QUIET(
         device_map_str[pos] == '[',
         "Invalid RBLN_DEVICE_MAP format. Expected '[' at position {} (format: \"[0,1],[2,3]\")",
         pos);
@@ -176,15 +185,17 @@ std::vector<std::vector<int>> DeviceMappingManager::parseDeviceMap(const std::st
 
     while (true) {
       skip_spaces();
-      RBLN_CHECK(pos < len, "Invalid RBLN_DEVICE_MAP format. Unterminated group; expected ']' before end of value");
+      RBLN_CHECK_QUIET(
+          pos < len, "Invalid RBLN_DEVICE_MAP format. Unterminated group; expected ']' before end of value");
       const char ch = device_map_str[pos];
       if (ch == ']') {
         // "[]" or a trailing ',' before ']' leaves expect_number set.
-        RBLN_CHECK(!expect_number, "Invalid RBLN_DEVICE_MAP format. Empty group or trailing ',' at position {}", pos);
+        RBLN_CHECK_QUIET(
+            !expect_number, "Invalid RBLN_DEVICE_MAP format. Empty group or trailing ',' at position {}", pos);
         break;
       }
       if (ch == ',') {
-        RBLN_CHECK(
+        RBLN_CHECK_QUIET(
             !expect_number, "Invalid RBLN_DEVICE_MAP format. Empty list element (unexpected ',') at position {}", pos);
         group.push_back(parseEnvInt(num_str, "RBLN_DEVICE_MAP"));
         num_str.clear();
@@ -192,7 +203,7 @@ std::vector<std::vector<int>> DeviceMappingManager::parseDeviceMap(const std::st
         pos++;
         continue;
       }
-      RBLN_CHECK(
+      RBLN_CHECK_QUIET(
           ch >= '0' && ch <= '9', "Invalid RBLN_DEVICE_MAP format. Unexpected character '{}' at position {}", ch, pos);
       num_str += ch;
       expect_number = false;
@@ -208,45 +219,107 @@ std::vector<std::vector<int>> DeviceMappingManager::parseDeviceMap(const std::st
     if (pos >= len) {
       break;
     }
-    RBLN_CHECK(
+    RBLN_CHECK_QUIET(
         device_map_str[pos] == ',', "Invalid RBLN_DEVICE_MAP format. Expected ',' between groups at position {}", pos);
     pos++; // consume ','
     skip_spaces();
-    RBLN_CHECK(pos < len, "Invalid RBLN_DEVICE_MAP format. Trailing ',' with no group after it");
+    RBLN_CHECK_QUIET(pos < len, "Invalid RBLN_DEVICE_MAP format. Trailing ',' with no group after it");
   }
 
   return result;
 }
 
-void DeviceMappingManager::registerLogicalDevice(int logical_device_index, const std::vector<int>& physical_ids) {
-  // Register the logical device with its physical NPU indices
-  // Need a non-const copy for rbln_register_device_id which requires int*
-  std::vector<int> physical_ids_copy = physical_ids;
-  const int rc = rbln_register_device_id(
-      logical_device_index, physical_ids_copy.data(), static_cast<int>(physical_ids_copy.size()));
-  RBLN_CHECK(
-      rc == 0,
-      "rbln_register_device_id failed for rbln:{} on physical NPU(s) [{}] (rc={}); the device(s) may be in use by "
-      "another process or hold stale allocations. Free the device(s) or adjust RBLN_DEVICES.",
-      logical_device_index,
-      fmt::join(physical_ids_copy, ","),
-      rc);
+void DeviceMappingManager::planLogicalDevice(int logical_device_index, const std::vector<int>& physical_ids) const {
+  // Bookkeeping only. rbln_register_device_id() lives in commit(); see the class
+  // comment for why an availability query must not reach it.
   assigned_devices_.insert(static_cast<c10::DeviceIndex>(logical_device_index));
 
-  // Store mapping information
   DeviceMapping mapping;
   mapping.logical_device = static_cast<c10::DeviceIndex>(logical_device_index);
   mapping.physical_device_ids = physical_ids;
   device_mapping_table_.emplace_back(std::move(mapping));
 
-  // Log the registration
   RBLN_LOG_DEBUG(
-      "Registered logical device {} with physical NPU IDs: {}", logical_device_index, fmt::join(physical_ids, ","));
+      "Planned logical device {} with physical NPU IDs: {}", logical_device_index, fmt::join(physical_ids, ","));
+}
+
+void DeviceMappingManager::commit() {
+  // Committed is the common case: every allocation re-enters here, so answer it without
+  // the mutex. Failed still has to take the lock -- it rethrows commit_error_ below.
+  if (plan_state_.load(std::memory_order_acquire) == PlanState::Committed) {
+    return;
+  }
+  {
+    const std::lock_guard<std::mutex> guard(plan_mutex_);
+    if (plan_state_.load(std::memory_order_relaxed) == PlanState::Committed) {
+      return;
+    }
+    // A part-way failure left devices claimed with no way to release them, and the runtime's
+    // rbln_register_device_id() returns success for an id it already holds -- so a retry
+    // against a rebuilt plan would bind this layer to a mapping the runtime does not have.
+    RBLN_CHECK(plan_state_.load(std::memory_order_relaxed) != PlanState::Failed, "{}", commit_error_);
+    ensurePlannedLocked();
+    // Loud here (RBLN_CHECK, not the quiet variant): this is the point of use. Its
+    // logging goes to spdlog only, so it is safe to throw from under the lock.
+    RBLN_CHECK(plan_error_.empty(), "{}", plan_error_);
+
+    try {
+      for (const auto& mapping : device_mapping_table_) {
+        // Kept as DeviceIndex; widened only at each use. Binding it to an `int` local trips
+        // bugprone-signed-char-misuse, since DeviceIndex is a signed char.
+        const auto logical_device = mapping.logical_device;
+        // rbln_register_device_id takes int*, so a non-const copy is required.
+        std::vector<int> physical_ids = mapping.physical_device_ids;
+        const int rc = rbln_register_device_id(
+            static_cast<int>(logical_device), physical_ids.data(), static_cast<int>(physical_ids.size()));
+        // No rollback is possible: the runtime exposes no unregister call, so devices claimed
+        // by earlier iterations stay claimed. Name them, so the leak is visible.
+        const std::string already_claimed = (logical_device > 0)
+            ? fmt::format(
+                  " Note: rbln:0..{} were already registered by this process and remain claimed.",
+                  static_cast<int>(logical_device) - 1)
+            : std::string();
+        RBLN_CHECK(
+            rc == 0,
+            "rbln_register_device_id failed for rbln:{} on physical NPU(s) [{}] (rc={}); the device(s) may be in use "
+            "by another process or hold stale allocations. Free the device(s) or adjust RBLN_DEVICES.{}",
+            static_cast<int>(logical_device),
+            fmt::join(physical_ids, ","),
+            rc,
+            already_claimed);
+      }
+    } catch (const std::exception& e) {
+      // msg() is the message alone; what() embeds a backtrace, which the RBLN_CHECK that
+      // rethrows this would wrap in a second one.
+      const auto* c10_error = dynamic_cast<const c10::Error*>(&e);
+      commit_error_ = c10_error != nullptr ? c10_error->msg() : e.what();
+      plan_state_.store(PlanState::Failed, std::memory_order_release);
+      throw;
+    }
+
+    // An empty plan registered nothing, so the freeze has nothing to protect and would only
+    // make the 0-device state permanent. Leave it Open; to_device_id() still raises.
+    if (device_mapping_table_.empty()) {
+      RBLN_LOG_DEBUG("Nothing to commit: 0 logical device(s) planned; the plan stays open");
+      return;
+    }
+
+    plan_state_.store(PlanState::Committed, std::memory_order_release);
+    RBLN_LOG_DEBUG("Committed {} logical device(s) to the runtime", device_mapping_table_.size());
+  }
+}
+
+bool DeviceMappingManager::hasFailedCommit() const noexcept {
+  return plan_state_.load(std::memory_order_acquire) == PlanState::Failed;
+}
+
+bool DeviceMappingManager::isCommitted() const {
+  return plan_state_.load(std::memory_order_acquire) == PlanState::Committed;
 }
 
 void DeviceMappingManager::collectUnusedDevices(
     const std::vector<bool>& physical_device_used,
-    int physical_device_count) {
+    int physical_device_count) const {
   for (int i = 0; i < physical_device_count; ++i) {
     if (!physical_device_used[i]) {
       unused_physical_devices_.push_back(i);
@@ -254,11 +327,11 @@ void DeviceMappingManager::collectUnusedDevices(
   }
 }
 
-void DeviceMappingManager::initializeFromDeviceMap(const std::string& device_map_str, int physical_device_count) {
+void DeviceMappingManager::initializeFromDeviceMap(const std::string& device_map_str, int physical_device_count) const {
   RBLN_LOG_INFO("Using RBLN_DEVICE_MAP mode");
   std::vector<std::vector<int>> device_groups = parseDeviceMap(device_map_str);
 
-  RBLN_CHECK(!device_groups.empty(), "RBLN_DEVICE_MAP must contain at least one logical device mapping");
+  RBLN_CHECK_QUIET(!device_groups.empty(), "RBLN_DEVICE_MAP must contain at least one logical device mapping");
 
   // Shape / duplicate-id / count validation shared with the dummy path.
   validateDeviceGroups(device_groups);
@@ -276,7 +349,7 @@ void DeviceMappingManager::initializeFromDeviceMap(const std::string& device_map
         if (map_display.size() > 80) {
           map_display = map_display.substr(0, 77) + "...";
         }
-        RBLN_CHECK(
+        RBLN_CHECK_QUIET(
             false,
             "Physical NPU {} out of range (this process has {} physical NPU(s), valid 0..{}). "
             "Env RBLN_DEVICE_MAP={}, RBLN_NPUS_PER_DEVICE={}.",
@@ -290,7 +363,7 @@ void DeviceMappingManager::initializeFromDeviceMap(const std::string& device_map
     }
 
     // Register this logical device with its physical NPU indices
-    registerLogicalDevice(logical_device_index, group);
+    planLogicalDevice(logical_device_index, group);
     logical_device_index++;
   }
 
@@ -300,7 +373,7 @@ void DeviceMappingManager::initializeFromDeviceMap(const std::string& device_map
   collectUnusedDevices(physical_device_used, physical_device_count);
 }
 
-void DeviceMappingManager::initializeFromNpusPerDevice(int npus_per_device, int physical_device_count) {
+void DeviceMappingManager::initializeFromNpusPerDevice(int npus_per_device, int physical_device_count) const {
   if (npus_per_device == 1) {
     RBLN_LOG_INFO("Using default 1:1 mapping (RBLN_NPUS_PER_DEVICE=1)");
   } else {
@@ -326,7 +399,7 @@ void DeviceMappingManager::initializeFromNpusPerDevice(int npus_per_device, int 
     // Only register if we have a complete set of NPUs for one logical device (size == npus_per_device)
     // Incomplete mappings (remaining physical NPUs < npus_per_device) will be marked as unused
     if (static_cast<int>(physical_ids.size()) == npus_per_device) {
-      registerLogicalDevice(logical_device_index, physical_ids);
+      planLogicalDevice(logical_device_index, physical_ids);
       logical_device_index++;
     } else {
       // Incomplete logical device mapping: mark these physical NPUs as unused
@@ -346,7 +419,7 @@ void DeviceMappingManager::initializeFromNpusPerDevice(int npus_per_device, int 
 
   if (device_count_ == 0) {
     RblnNpuMappingEnvDisplay env_display = getRblnNpuMappingEnvDisplay();
-    RBLN_CHECK(
+    RBLN_CHECK_QUIET(
         false,
         "No logical device (this process has {} physical NPU(s), need {} per logical device). "
         "Env RBLN_DEVICE_MAP={}, RBLN_NPUS_PER_DEVICE={}.",
@@ -360,7 +433,7 @@ void DeviceMappingManager::initializeFromNpusPerDevice(int npus_per_device, int 
   collectUnusedDevices(physical_device_used, physical_device_count);
 }
 
-void DeviceMappingManager::initializeDummyDevices() {
+void DeviceMappingManager::initializeDummyDevices() const {
   // Layout from RBLN_DEVICE_MAP (TP shape preserved), else RBLN_NPUS_PER_DEVICE as
   // one logical device of size N, else a single device. IDs are shape markers; no
   // NPU backs them, so they are not range-checked against hardware.
@@ -373,7 +446,7 @@ void DeviceMappingManager::initializeDummyDevices() {
     const auto env_display = getRblnNpuMappingEnvDisplay();
     if (env_display.npus_per_device != "-" && !env_display.npus_per_device.empty()) {
       npus_per_device = parseEnvInt(env_display.npus_per_device, "RBLN_NPUS_PER_DEVICE");
-      RBLN_CHECK(npus_per_device > 0, "RBLN_NPUS_PER_DEVICE must be a positive integer, got {}", npus_per_device);
+      RBLN_CHECK_QUIET(npus_per_device > 0, "RBLN_NPUS_PER_DEVICE must be a positive integer, got {}", npus_per_device);
     }
     std::vector<int> group;
     group.reserve(static_cast<size_t>(npus_per_device));
@@ -393,85 +466,151 @@ void DeviceMappingManager::initializeDummyDevices() {
       groups.size());
 
   for (size_t i = 0; i < groups.size(); ++i) {
-    registerLogicalDevice(static_cast<int>(i), groups[i]);
+    planLogicalDevice(static_cast<int>(i), groups[i]);
   }
   device_count_ = static_cast<c10::DeviceIndex>(groups.size());
   buildDeviceTopology();
 }
 
-void DeviceMappingManager::initialize() {
-  c10::call_once(init_flag_, [this]() {
-    RBLN_LOG_DEBUG("Initializing RBLN device mapping");
+std::string DeviceMappingManager::envSignature() {
+  // Any change to one of these changes the plan. Values are length-prefixed so that
+  // e.g. RBLN_DEVICES="0|" and RBLN_DEVICES="0", RBLN_DEVICE_MAP="" cannot collide.
+  // RBLN_VISIBLE_DEVICES is the runtime's alias of RBLN_DEVICES and selects the visible
+  // pool just as well, so omitting it cached the plan against a pool already changed.
+  //
+  // RBLN_DUMMY_DEVICE is deliberately absent: it is startup-only, since the runtime
+  // registers it FlagMutability::Sealed and is_dummy_device() caches for the process.
+  std::string signature;
+  for (const char* name : {"RBLN_DEVICES", "RBLN_VISIBLE_DEVICES", "RBLN_DEVICE_MAP", "RBLN_NPUS_PER_DEVICE"}) {
+    const char* value = std::getenv(name);
+    const std::string text = (value != nullptr) ? std::string(value) : std::string();
+    signature += std::to_string(text.size());
+    signature += ':';
+    signature += text;
+  }
+  return signature;
+}
 
-    // Enumeration hits the runtime in both modes (real: rbln_get_device_count();
-    // dummy: rbln_register_device_id()), so without the runtime a raw rbln_* call
-    // would SEGFAULT. Checked before the dummy branch too: degrade to 0 devices.
-    if (!rbln_runtime_available()) {
-      RBLN_LOG_INFO(
-          "RBLN runtime not loaded; initializing with 0 logical device(s). "
-          "Device access will fail at the point of use.");
-      device_count_ = 0;
-      buildDeviceTopology();
-      return;
-    }
+void DeviceMappingManager::ensurePlanned() const {
+  // A frozen plan is immutable, so skip the mutex: every allocation asks this repeatedly.
+  // plan_error_ is necessarily empty here -- commit() refuses to freeze with one set.
+  if (plan_state_.load(std::memory_order_acquire) != PlanState::Open) {
+    return;
+  }
+  std::string error;
+  {
+    const std::lock_guard<std::mutex> guard(plan_mutex_);
+    ensurePlannedLocked();
+    error = plan_error_;
+  }
+  // Rethrown here rather than inside the lock so that every query method reports a
+  // malformed RBLN_* config identically, and get_device_count_nothrow() can map it to 0.
+  RBLN_CHECK_QUIET(error.empty(), "{}", error);
+}
 
-    // Dummy: host-backed, no NPU, but still needs the runtime (checked above).
-    if (dummyDeviceEnabled()) {
-      initializeDummyDevices();
-      return;
-    }
+void DeviceMappingManager::ensurePlannedLocked() const {
+  // Frozen once commit() has run: re-planning under live allocations would silently move
+  // logical devices out from under them. A part-way failure counts too -- it still left
+  // devices claimed.
+  if (plan_state_.load(std::memory_order_relaxed) != PlanState::Open) {
+    return;
+  }
+  const auto signature = envSignature();
+  if (planned_ && signature == plan_signature_) {
+    return;
+  }
 
-    int device_count = 0;
-    // The runtime is loaded but the query failed (kernel driver not loaded / device
-    // unavailable): fatal. "Query succeeded, found 0 NPUs" is handled below.
-    RBLN_CHECK(
-        !rbln_get_device_count(&device_count),
-        "rbln_get_device_count failed; the RBLN kernel driver may not be loaded or the device is unavailable");
-    const int physical_device_count = device_count;
-    RBLN_LOG_DEBUG("Found {} physical NPU(s)", physical_device_count);
+  device_count_ = 0;
+  assigned_devices_.clear();
+  device_mapping_table_.clear();
+  unused_physical_devices_.clear();
+  plan_error_.clear();
+  plan_signature_ = signature;
+  planned_ = true;
 
-    // No physical NPU: register 0 logical devices instead of failing (like
-    // torch.cuda.device_count()==0 on a CPU-only host). Device use fails at the
-    // point of use, so a model can still be traced/compiled without an NPU.
-    if (physical_device_count == 0) {
-      RBLN_LOG_INFO(
-          "No physical NPU detected; initializing with 0 logical device(s). "
-          "Device access will fail at the point of use.");
-      device_count_ = 0;
-      buildDeviceTopology();
-      return;
-    }
-
-    // Check RBLN NPU mapping env (RBLN_DEVICE_MAP takes priority over RBLN_NPUS_PER_DEVICE)
-    RblnNpuMappingEnvDisplay env_display = getRblnNpuMappingEnvDisplay();
-
-    if (env_display.device_map != "-" && !env_display.device_map.empty()) {
-      // RBLN_DEVICE_MAP mode: use explicit mapping
-      initializeFromDeviceMap(env_display.device_map, physical_device_count);
-    } else {
-      // RBLN_NPUS_PER_DEVICE mode: map physical NPUs to logical devices by count
-      // If RBLN_NPUS_PER_DEVICE is not set, default to 1 (1:1 mapping)
-      int npus_per_device = 1;
-      if (env_display.npus_per_device != "-" && !env_display.npus_per_device.empty()) {
-        npus_per_device = parseEnvInt(env_display.npus_per_device, "RBLN_NPUS_PER_DEVICE");
-        RBLN_CHECK(npus_per_device > 0, "RBLN_NPUS_PER_DEVICE must be a positive integer");
-        // Validate: must be one of the allowed base sizes
-        RBLN_CHECK(
-            isValidDeviceGroupSize(static_cast<size_t>(npus_per_device)),
-            "RBLN_NPUS_PER_DEVICE must be one of the valid sizes: {}. Got {} which is invalid.",
-            getValidSizesString(),
-            npus_per_device);
-      }
-      initializeFromNpusPerDevice(npus_per_device, physical_device_count);
-    }
-
-    // Build and cache the device mapping summary
+  try {
+    buildPlan();
+  } catch (const std::exception& e) {
+    // Remembered, not rethrown from here: query methods raise it, the nothrow ones map
+    // it to "0 devices". Storing it is what keeps a malformed config from re-running
+    // validation (and, before the plan/commit split, device registration) per call.
+    plan_error_ = e.what();
+    device_count_ = 0;
+    assigned_devices_.clear();
+    device_mapping_table_.clear();
+    unused_physical_devices_.clear();
     buildDeviceTopology();
-  });
+  }
+}
+
+void DeviceMappingManager::buildPlan() const {
+  RBLN_LOG_DEBUG("Planning RBLN device mapping");
+
+  // Without the runtime nothing can execute, so report 0 devices. Planning does not need it;
+  // commit() does, and every caller treats "no runtime" as "no device".
+  if (!rbln_runtime_available()) {
+    RBLN_LOG_INFO(
+        "RBLN runtime not loaded; planning 0 logical device(s). Device access will fail at the point of use.");
+    buildDeviceTopology();
+    return;
+  }
+
+  // Dummy: host-backed, no NPU. Physical ids are shape markers, so no probe is needed.
+  if (dummyDeviceEnabled()) {
+    initializeDummyDevices();
+    return;
+  }
+
+  // The runtime is the only authority on how many NPUs RBLN_DEVICES leaves visible;
+  // counting /dev/rbln* ourselves would be a second source of truth for something it owns.
+  // RBLN_DEVICES is named as a cause because the runtime narrows its own detail
+  // ("Invalid RBLN_DEVICES value: ...") to an RBLNRetCode, leaving only its log.
+  int physical_device_count = 0;
+  RBLN_CHECK_QUIET(
+      !rbln_get_device_count(&physical_device_count),
+      "rbln_get_device_count failed; the RBLN kernel driver may not be loaded, the device may be unavailable, or "
+      "RBLN_DEVICES / RBLN_VISIBLE_DEVICES may hold an invalid value (the runtime logs the detail)");
+  RBLN_LOG_DEBUG("Found {} physical NPU(s)", physical_device_count);
+
+  // No physical NPU: plan 0 logical devices instead of failing (like
+  // torch.cuda.device_count() == 0 on a CPU-only host). Device use fails at the point of
+  // use, so a model can still be traced/compiled without an NPU.
+  if (physical_device_count <= 0) {
+    RBLN_LOG_INFO(
+        "No physical NPU detected; planning 0 logical device(s). Device access will fail at the point of use.");
+    buildDeviceTopology();
+    return;
+  }
+
+  // RBLN_DEVICE_MAP takes priority over RBLN_NPUS_PER_DEVICE.
+  const RblnNpuMappingEnvDisplay env_display = getRblnNpuMappingEnvDisplay();
+  if (env_display.device_map != "-" && !env_display.device_map.empty()) {
+    initializeFromDeviceMap(env_display.device_map, physical_device_count);
+  } else {
+    // Unset RBLN_NPUS_PER_DEVICE means 1 (a 1:1 mapping).
+    int npus_per_device = 1;
+    if (env_display.npus_per_device != "-" && !env_display.npus_per_device.empty()) {
+      npus_per_device = parseEnvInt(env_display.npus_per_device, "RBLN_NPUS_PER_DEVICE");
+      RBLN_CHECK_QUIET(npus_per_device > 0, "RBLN_NPUS_PER_DEVICE must be a positive integer");
+      RBLN_CHECK_QUIET(
+          isValidDeviceGroupSize(static_cast<size_t>(npus_per_device)),
+          "RBLN_NPUS_PER_DEVICE must be one of the valid sizes: {}. Got {} which is invalid.",
+          getValidSizesString(),
+          npus_per_device);
+    }
+    initializeFromNpusPerDevice(npus_per_device, physical_device_count);
+  }
+
+  buildDeviceTopology();
+}
+
+void DeviceMappingManager::initialize() {
+  ensurePlanned();
 }
 
 std::vector<int> DeviceMappingManager::getPhysicalDeviceIds(c10::DeviceIndex logical_device_index) const {
-  RBLN_CHECK(
+  ensurePlanned();
+  RBLN_CHECK_QUIET(
       logical_device_index >= 0 && logical_device_index < static_cast<c10::DeviceIndex>(device_mapping_table_.size()),
       "Invalid logical device index: {}",
       static_cast<int>(logical_device_index));
@@ -480,7 +619,7 @@ std::vector<int> DeviceMappingManager::getPhysicalDeviceIds(c10::DeviceIndex log
   return mapping.physical_device_ids;
 }
 
-void DeviceMappingManager::buildDeviceTopology() {
+void DeviceMappingManager::buildDeviceTopology() const {
   device_topology_.entries_.clear();
   device_topology_.unused_physical_device_ids_.clear();
 
@@ -488,7 +627,9 @@ void DeviceMappingManager::buildDeviceTopology() {
   for (c10::DeviceIndex i = 0; i < device_count_; ++i) {
     DeviceTopologyEntry entry;
     entry.logical_device_index_ = static_cast<int>(static_cast<unsigned char>(i));
-    entry.physical_device_ids_ = getPhysicalDeviceIds(i);
+    // Read the table directly: the public getter plans on demand, and this runs while
+    // the plan lock is already held.
+    entry.physical_device_ids_ = device_mapping_table_[static_cast<size_t>(i)].physical_device_ids;
     entry.is_aggregated_ = entry.physical_device_ids_.size() > 1;
     device_topology_.entries_.emplace_back(std::move(entry));
   }

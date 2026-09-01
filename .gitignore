@@ -10,6 +10,7 @@
 
 # Generated code & installed outputs
 /torch_rbln/_C/__init__.pyi
+/torch_rbln/_internal/_abi_snapshot.py
 /torch_rbln/_internal/register_ops.py
 /torch_rbln/include/
 /torch_rbln/lib/

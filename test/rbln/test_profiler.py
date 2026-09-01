@@ -440,7 +440,7 @@ class TestProfilerHostCostContext(TestCase):
         self.assertGreaterEqual(rt["total_ns"], 0)
         self.assertGreaterEqual(rt["wall_fraction"], 0.0)
         self.assertLessEqual(rt["wall_fraction"], 1.0)
-        prims = {"v2v", "v2v_multi", "borrow", "acquire", "return", "v2h", "h2v"}
+        prims = {"v2v", "v2v_multi", "borrow", "acquire", "return", "v2h", "h2v", "v2h_multi", "h2v_multi"}
         for prim, vv in rt["by_primitive"].items():
             self.assertIn(prim, prims)
             self.assertGreater(vv["calls"], 0)

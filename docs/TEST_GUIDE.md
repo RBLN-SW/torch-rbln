@@ -49,16 +49,18 @@ test/
 ├── utils.py      # Shared test utilities (seed helpers, device-count skip markers, SUPPORTED_DTYPES)
 │
 ├── rbln/                                  # RBLN backend-specific tests
+│   ├── test_abi_check.py                  # rebel ABI handshake between this build and the loaded librbln.so
 │   ├── test_custom_kernel.py              # RBLN custom kernels
 │   ├── test_device_mapping.py             # Device mapping and topology APIs
-│   ├── test_find_and_load_tvm_library.py  # Error handling when librbln.so cannot be found
 │   ├── test_graph_eager_mode.py           # Numerical agreement between torch.compile graph mode and eager mode
 │   ├── test_internal_op_utils.py          # Internal op utilities
 │   ├── test_llama_ops.py                  # Core ops used in LLaMA-family models
 │   ├── test_multi_device.py               # Multi-device tensor movement and cross-device operations
 │   ├── test_non_zero_storage_offset.py    # Correct handling of tensors with non-zero storage offsets
 │   ├── test_op_caching.py                 # Operator caching / graph-reuse behavior
+│   ├── test_privateuse1_contract.py       # PrivateUse1 backend contract conformance (one test per upstream clause)
 │   ├── test_rbln_apis.py                  # RBLN Python APIs
+│   ├── test_rbln_runtime_lib.py           # librbln.so resolution order and single-copy/version checks
 │   ├── test_registered_ops.py             # All natively registered and fallback ops from RBLNRegisterOps.cpp / register_ops.py
 │   ├── test_sdpa_decode_overflow.py       # SDPA decode-phase overflow detection and fallback behavior
 │   ├── test_tensor_copy.py                # Tensor copy operations across directions (H2D, D2H, D2D) and dtypes
@@ -289,10 +291,14 @@ The PyTorch test framework (`torch.testing._internal`) automatically generates d
 2. Call `instantiate_device_type_tests(TestClass, globals(), only_for="privateuse1")` at module scope.
 3. The framework generates concrete classes like `TestFooPRIVATEUSE1` with methods suffixed `_rbln`.
 
-**All test files in this project use `only_for="privateuse1"`** to generate tests exclusively for the RBLN backend, avoiding unnecessary CPU/CUDA variants.
+**Device-type tests in this project always use `only_for="privateuse1"`** to generate tests exclusively for the RBLN backend, avoiding unnecessary CPU/CUDA variants.
+
+Since that leaves exactly one device type, the instantiation earns its keep through the axes it expands — `@dtypes`, `@parametrize`, or a `device` argument — and it is required for any test that uses one.
+
+**Do not wrap a test that never touches a device.** The call deletes the template class and rebuilds it per device type, and the RBLN base is only in that list when `torch.rbln.is_available()` is true. On a host without an NPU the template is gone and nothing replaces it, so the file collects zero tests — no failure, no skip. A test that needs hardware loses nothing by that; a pure-logic test loses the ability to run where it still could. Tests asserting behavior with no device present (`test_dummy_device.py`, `test_no_device.py`) or through a subprocess (`test_import_rbln_devices_seal.py`) are plain `TestCase`.
 
 ```python
-# This call at the bottom of every test file:
+# This call at the bottom of a device-type test file:
 instantiate_device_type_tests(TestRegisteredNativeOps, globals(), only_for="privateuse1")
 
 # Generates: TestRegisteredNativeOpsPRIVATEUSE1
@@ -348,6 +354,24 @@ from test.filters import custom_instantiate_device_type_tests
 
 custom_instantiate_device_type_tests(TestCommon, globals(), only_for="privateuse1")
 ```
+
+### Contract Conformance Tests
+
+`test/rbln/test_privateuse1_contract.py` is organized differently from the rest of the
+suite, on purpose: PyTorch does not merely *offer* the `torch.rbln` module and the RBLN
+accelerator hooks, it calls into them from paths that never asked for an NPU. Each test
+pins exactly one clause upstream states and cites its source, so a torch upgrade or a new
+call site fails on the clause rather than on a downstream symptom.
+
+Conventions specific to it:
+
+- **Every probe runs in a fresh subprocess** (`run_probe`). It cannot use
+  `run_in_isolated_process()` from `test/utils.py`, which needs a picklable callable, runs
+  after `torch_rbln` is already imported, and captures no output — the probes must set
+  `RBLN_*` *before* the import and inspect stdout/stderr.
+- **A clause not satisfied yet is a `strict=True` xfail** naming the work that closes it,
+  rather than being omitted. `xfail_strict = true` is the project default, so an unexpected
+  pass fails the suite and signals that the marker should be removed.
 
 ---
 

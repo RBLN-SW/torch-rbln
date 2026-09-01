@@ -266,6 +266,12 @@ class CMakeBuildHook(BuildHookInterface):
         if register_ops.exists():
             _include(register_ops)
 
+        # Generated _abi_snapshot.py (gitignored but required): without it in the
+        # wheel the import-time ABI handshake has nothing to compare the runtime with.
+        abi_snapshot = torch_rbln_dir / "_internal" / "_abi_snapshot.py"
+        if abi_snapshot.exists():
+            _include(abi_snapshot)
+
         build_data["pure_python"] = False
         manylinux_platform = self._get_manylinux_platform_tag()
         if manylinux_platform:
