@@ -616,6 +616,11 @@ C10_RBLN_API void empty_cache(const c10::Device& device);
 /**
  * @brief Returns a dictionary of accelerator device memory allocator statistics.
  *
+ * Scope is the caching allocator of the context THIS process holds on `device`, the
+ * same scope torch.cuda.memory_stats() reports. It counts every physical NPU the
+ * logical device maps to, but not direct device allocations (weights), and not another
+ * process using the same NPU. For a device-wide figure, use rbln-smi.
+ *
  * @param device The input device.
  * @return A map containing memory statistics.
  */
@@ -624,8 +629,14 @@ C10_RBLN_API std::map<std::string, uint64_t> memory_stats(const c10::Device& dev
 /**
  * @brief Returns memory allocator statistics broken down per chiplet.
  *
- * Same keys as memory_stats(), each prefixed with "chiplet.<i>.". A device runs out
- * on its heaviest chiplet, which the aggregate memory_stats() hides.
+ * Same keys as memory_stats(), each prefixed with "npu.<n>.chiplet.<c>.". A device runs
+ * out on its heaviest chiplet, which the aggregate memory_stats() hides. npu.<n> is the
+ * n-th physical NPU of this logical device (see RBLN_NPUS_PER_DEVICE), so a 1:1 mapping
+ * yields npu.0 only.
+ *
+ * Scope is the caching allocator of this process's context on `device`. Weights and
+ * other direct device allocations are not counted, and a second process on the same
+ * NPU is invisible here -- see memory_stats().
  *
  * @param device The input device.
  * @return A map containing per-chiplet memory statistics.
