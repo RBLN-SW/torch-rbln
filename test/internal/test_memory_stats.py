@@ -1008,8 +1008,9 @@ class TestPerChipletMemoryStats(TestCase):
     def test_breakdown_sums_to_aggregate(self):
         """The breakdown must account for exactly what memory_stats() aggregates.
 
-        This is what catches a device/node coordinate mismatch: reporting one NPU of a
-        multi-NPU logical device leaves the two disagreeing.
+        Under a 1:1 mapping the outer axis is 1, so this cannot catch a multi-NPU
+        coordinate mismatch on its own -- the runtime's own multi-node tests cover that
+        axis. Here it pins the current/peak relationship the summary documents.
         """
         tensor = torch.empty(512 * 1024, dtype=torch.float16, device=self.device)
         try:
@@ -1018,6 +1019,10 @@ class TestPerChipletMemoryStats(TestCase):
             for stat in ("allocated.current", "reserved.current", "active.current"):
                 total = sum(v for k, v in per_chiplet.items() if k.endswith("." + stat))
                 self.assertEqual(aggregate[stat], total, f"{stat} disagrees with the breakdown")
+            # Peaks are per chiplet, so their sum bounds the joint peak from above.
+            # memory_summary()'s total row inherits that, and its docstring says so.
+            summed_peak = sum(v for k, v in per_chiplet.items() if k.endswith(".allocated.peak"))
+            self.assertGreaterEqual(summed_peak, aggregate["allocated.peak"])
         finally:
             del tensor
 

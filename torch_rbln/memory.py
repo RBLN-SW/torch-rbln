@@ -101,18 +101,6 @@ def _no_rbln_device() -> bool:
     return torch_rbln._C.device_count() == 0
 
 
-def _physical_npu_ids(device: torch.device) -> str:
-    """Physical NPU ids behind a logical device, for the memory_summary() scope line."""
-    try:
-        topology = torch_rbln._C._get_device_topology()
-        for entry in topology.entries:
-            if entry.logical_device_index == device.index:
-                return "[" + ", ".join(str(pid) for pid in entry.physical_device_ids) + "]"
-    except Exception:
-        pass
-    return "[unknown]"
-
-
 def empty_cache(device: Optional[Union[int, str, torch.device]] = None) -> None:
     """
     Release all unoccupied cached memory currently held by the caching allocator.
@@ -231,9 +219,15 @@ def memory_summary(device: Optional[Union[int, str, torch.device]] = None) -> st
     Returns:
         str: The formatted table, or a short notice when no stats are available.
     """
+    no_stats = "torch_rbln memory summary: no statistics (no RBLN device or allocator uninitialized)\n"
+    if _no_rbln_device():
+        return no_stats
+    # Resolve once: the header must name the device the numbers came from, and on the
+    # device=None path a second resolution could land on a different current device.
+    device = _normalize_device(device)
     per_chiplet = memory_stats_per_chiplet(device)
     if not per_chiplet:
-        return "torch_rbln memory summary: no statistics (no RBLN device or allocator uninitialized)\n"
+        return no_stats
 
     rows = sorted({(int(k.split(".")[1]), int(k.split(".")[3])) for k in per_chiplet})
     columns = [
@@ -251,12 +245,16 @@ def memory_summary(device: Optional[Union[int, str, torch.device]] = None) -> st
     def stat(npu: int, chiplet: int, key: str) -> int:
         return per_chiplet.get(f"npu.{npu}.chiplet.{chiplet}.{key}", 0)
 
-    device = _normalize_device(device)
+    # Local import: rsd_utils pulls in torch_rbln.device, which star-imports this module.
+    from torch_rbln._internal.rsd_utils import get_physical_device_ids
+
+    physical = get_physical_device_ids(device.index)
+    npus = "[ " + ", ".join(str(pid) for pid in physical) + " ]" if physical else "[unknown]"
+
     header = f"{'npu':>5}{'chiplet':>9}" + "".join(f"{label:>13}" for _, label in columns)
     lines = [
         f"torch_rbln memory summary (device={device}, MiB)",
-        f"scope: pid {os.getpid()}, physical NPU {_physical_npu_ids(device)} "
-        "-- caching allocator only, this process only",
+        f"scope: pid {os.getpid()}, physical NPU {npus} -- caching allocator only, this process only",
         header,
         "-" * len(header),
     ]
