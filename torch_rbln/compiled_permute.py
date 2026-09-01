@@ -11,15 +11,6 @@ _entries: dict = {}
 _verified: set = set()
 
 
-def _integer_view(t: torch.Tensor) -> torch.Tensor:
-    # The compiler rounds floating point through a 16-bit device format; integers move verbatim.
-    row_bytes = t.shape[-1] * t.element_size()
-    for dtype in (torch.int32, torch.int16, torch.uint8):
-        if row_bytes % torch.empty((), dtype=dtype).element_size() == 0:
-            return t.view(dtype)
-    raise AssertionError("unreachable")
-
-
 def _entry(shape: tuple, dtype: torch.dtype, device: torch.device, dims: tuple, slot: int):
     """The compiled program for this permutation and the holder its runtime lands in."""
     key = (shape, dtype, device.index, dims, slot)
@@ -71,17 +62,16 @@ def compiled_permute(
     if out is not None and (list(out.shape) != shape or out.dtype != src.dtype):
         raise ValueError(f"compiled_permute: out must be {shape} of {src.dtype}")
 
-    packed = _integer_view(src)
-    program, holder = _entry(tuple(packed.shape), packed.dtype, src.device, tuple(dims), slot)
+    program, holder = _entry(tuple(src.shape), src.dtype, src.device, tuple(dims), slot)
     if out is None:
-        result = program(packed).view(src.dtype).view(shape)
+        result = program(src)
     else:
         if not holder:
-            program(packed)  # compiles, and publishes the runtime this call needs
-        holder[0].run(packed, out=[_integer_view(out)])
+            program(src)  # compiles, and publishes the runtime this call needs
+        holder[0].run(src, out=[out])
         result = out
 
-    key = (tuple(packed.shape), packed.dtype, tuple(dims))
+    key = (tuple(src.shape), src.dtype, tuple(dims))
     if key not in _verified:
         if not torch.equal(result.cpu(), src.cpu().permute(dims)):
             raise RuntimeError(
