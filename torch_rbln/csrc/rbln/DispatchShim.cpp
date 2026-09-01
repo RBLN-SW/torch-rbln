@@ -880,10 +880,8 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
   if (!entry)
     return false;
 
-  // Build the input binding in the order tensor inputs appear on the stack.
-  // rbln_exec_api.h takes (index, vaddr) as parallel arrays; the hit path is
-  // device-only — a CPU output bails out below — so the host-pointer arrays it
-  // also accepts stay empty.
+  // Input binding, in the order tensor inputs appear on the stack. Device-only:
+  // a CPU output bails out below, so the host arrays stay empty.
   c10::SmallVector<uint32_t, 8> in_idx_buf;
   c10::SmallVector<uint64_t, 8> in_vaddr_buf;
 
@@ -1054,14 +1052,8 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
 
   const uint64_t _seg_t_io_build = now_ns();
 
-  // No GIL: the C ABI raises no Python exception and enters no interpreter
-  // code, and nothing else here touches a py::object. A failure arrives as a
-  // return code, and we return false so the caller falls through to the pybind
-  // miss path, which routes through DynamoRuntime and performs the v-memory
-  // bookkeeping that lets the same tensor inputs succeed.
-  //
-  // A failure short-circuits into that early return, so the diag accumulators
-  // below only ever read the fully-assigned success path.
+  // No GIL and no py::object below this point. A failure short-circuits to the
+  // early return, so the diag accumulators only read a fully-assigned path.
   uint64_t _seg_t_prep_out = _seg_t_io_build;
   uint64_t _seg_t_run = _seg_t_io_build;
 
@@ -1523,18 +1515,11 @@ bool install_warmcache_from_pending(
 
   CacheEntry entry;
   entry.py_dyn_runtime = std::move(dyn_runtime);
-  // ``native_handle()`` is rebel's declared way to reach the runtime from C
-  // (rbln_exec_api.h); the handle it returns is borrowed, so the entry holds a
-  // reference to the object it came from for as long as it holds the pointer.
-  // A runtime that does not offer it cannot be driven from the hit path at
-  // all, so refuse to install rather than cache an entry whose every hit would
-  // fail: the op keeps running, on the Python wrapper path. A missing or
-  // raising attribute arrives as error_already_set; a return value that is not
-  // an integer makes PyLong_AsVoidPtr return null with a Python error set.
-  //
-  // PyLong_AsVoidPtr rather than a cast off ``.cast<uintptr_t>()``: CPython
-  // owns the integer-to-pointer conversion, which keeps an int-to-ptr
-  // reinterpret_cast out of this translation unit.
+  // ``native_handle()`` is rebel's declared way to reach the runtime from C,
+  // and the handle it returns is borrowed — so the entry holds a reference to
+  // the object it came from. A runtime that does not offer one cannot be driven
+  // from the hit path, so refuse to install; the op keeps running on the Python
+  // wrapper path.
   entry.py_runtime_handle = runtime_handle;
   void* native = nullptr;
   try {

@@ -24,18 +24,9 @@ index).
 Subsequent dispatches of the same op with a matching input profile hit
 the warm cache on the C++ side, which drives one execution through
 rebel's C ABI (``rbln_exec_api.h``) — no pybind hop, no Python wrapper,
-no Dynamo recompile check.
-
-Reaching the runtime from C
----------------------------
-The C ABI takes an opaque ``RblnSyncRuntime``, and the declared way to
-obtain one is the runtime's ``native_handle()``. The C++ side calls it
-at install time and keeps a reference to the object it came from, since
-the handle is borrowed and only valid while that object lives. A
-runtime without ``native_handle()`` cannot be driven from the hit path,
-so :func:`install_pending` skips the cache rather than installing an
-entry whose every hit would fail — the op stays on the correct, slower
-Python wrapper path.
+no Dynamo recompile check. Driving it needs the runtime's
+``native_handle()``; :func:`install_pending` skips the cache for a
+runtime without one, leaving the op on the Python wrapper path.
 """
 
 from __future__ import annotations
