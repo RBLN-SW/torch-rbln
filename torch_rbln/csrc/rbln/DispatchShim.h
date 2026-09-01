@@ -79,11 +79,11 @@ std::vector<std::pair<std::string, std::string>> diag_dump_trace_by_op();
 void diag_reset_trace_by_op();
 
 // DIAG: per-segment timers inside the warm-cache hit path. Returns
-// (n_hits, ns_lookup, ns_io_build, ns_gil, ns_prep_in, ns_prep_out, ns_run,
+// (n_hits, ns_lookup, ns_io_build, ns_prep_in, ns_prep_out, ns_run,
 //  ns_finalize). Counts/accumulates only when the hit path returns true; early
 // failures (find miss, ptr==0, runtime soft-fail) are excluded so per-segment
 // averages reflect successful warm-path calls only.
-std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t> diag_dump_warm_segments();
+std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t> diag_dump_warm_segments();
 void diag_reset_warm_segments();
 
 // Called by the Python wrapper after a successful miss-path compile to install

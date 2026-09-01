@@ -51,7 +51,6 @@ std::atomic<uint64_t> g_diag_n_align_fastpath{0}; // align fast-path hits → cp
 std::atomic<uint64_t> g_diag_warm_n_hits{0};
 std::atomic<uint64_t> g_diag_warm_ns_lookup{0};
 std::atomic<uint64_t> g_diag_warm_ns_io_build{0};
-std::atomic<uint64_t> g_diag_warm_ns_batch{0};
 std::atomic<uint64_t> g_diag_warm_ns_prep_in{0};
 std::atomic<uint64_t> g_diag_warm_ns_prep_out{0};
 std::atomic<uint64_t> g_diag_warm_ns_run{0};
@@ -84,12 +83,11 @@ void diag_reset_dispatch_paths() {
   g_diag_n_align_fastpath.store(0, std::memory_order_relaxed);
 }
 
-std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t> diag_dump_warm_segments() {
+std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t> diag_dump_warm_segments() {
   return std::make_tuple(
       g_diag_warm_n_hits.load(std::memory_order_relaxed),
       g_diag_warm_ns_lookup.load(std::memory_order_relaxed),
       g_diag_warm_ns_io_build.load(std::memory_order_relaxed),
-      g_diag_warm_ns_batch.load(std::memory_order_relaxed),
       g_diag_warm_ns_prep_in.load(std::memory_order_relaxed),
       g_diag_warm_ns_prep_out.load(std::memory_order_relaxed),
       g_diag_warm_ns_run.load(std::memory_order_relaxed),
@@ -100,7 +98,6 @@ void diag_reset_warm_segments() {
   g_diag_warm_n_hits.store(0, std::memory_order_relaxed);
   g_diag_warm_ns_lookup.store(0, std::memory_order_relaxed);
   g_diag_warm_ns_io_build.store(0, std::memory_order_relaxed);
-  g_diag_warm_ns_batch.store(0, std::memory_order_relaxed);
   g_diag_warm_ns_prep_in.store(0, std::memory_order_relaxed);
   g_diag_warm_ns_prep_out.store(0, std::memory_order_relaxed);
   g_diag_warm_ns_run.store(0, std::memory_order_relaxed);
@@ -1057,16 +1054,6 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
 
   const uint64_t _seg_t_io_build = now_ns();
 
-  // The IO-patch batch is not optional: closing it is the only thing that
-  // re-exports CCL memory that input binding moved, and it also coalesces the
-  // CS-buffer DMAs binding triggers into one upload per buffer.
-  //
-  // `stale = nullptr` is what a caller that does not track tensor identity
-  // across calls has to pass — it re-binds every input. An empty list would
-  // instead assert that nothing changed since the previous call, which this
-  // path cannot promise: it caches by input profile, so two different tensors
-  // of the same shape and dtype share an entry.
-  //
   // No GIL: the C ABI raises no Python exception and enters no interpreter
   // code, and nothing else here touches a py::object. A failure arrives as a
   // return code, and we return false so the caller falls through to the pybind
@@ -1075,27 +1062,18 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
   //
   // A failure short-circuits into that early return, so the diag accumulators
   // below only ever read the fully-assigned success path.
-  uint64_t _seg_t_prep_in = _seg_t_io_build;
   uint64_t _seg_t_prep_out = _seg_t_io_build;
-  uint64_t _seg_t_end = _seg_t_io_build;
   uint64_t _seg_t_run = _seg_t_io_build;
 
-  const bool batch_open = rbln_rt_begin_io_patch_batch(entry->runtime) == RBLNRetCode_SUCCESS;
-  const uint64_t _seg_t_begin = now_ns();
-  bool runtime_failed = !batch_open;
-  if (!runtime_failed) {
-    runtime_failed = rbln_rt_prepare_inputs(
-                         entry->runtime,
-                         in_idx_buf.data(),
-                         in_vaddr_buf.data(),
-                         in_idx_buf.size(),
-                         /*host_idx=*/nullptr,
-                         /*host_ptr=*/nullptr,
-                         /*host_count=*/0,
-                         /*stale=*/nullptr,
-                         /*stale_count=*/0) != RBLNRetCode_SUCCESS;
-    _seg_t_prep_in = now_ns();
-  }
+  bool runtime_failed = rbln_rt_prepare_inputs(
+                            entry->runtime,
+                            in_idx_buf.data(),
+                            in_vaddr_buf.data(),
+                            in_idx_buf.size(),
+                            /*host_idx=*/nullptr,
+                            /*host_ptr=*/nullptr,
+                            /*host_count=*/0) != RBLNRetCode_SUCCESS;
+  const uint64_t _seg_t_prep_in = now_ns();
   if (!runtime_failed) {
     runtime_failed = rbln_rt_prepare_outputs(
                          entry->runtime,
@@ -1106,15 +1084,6 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
                          /*host_ptr=*/nullptr,
                          /*host_count=*/0) != RBLNRetCode_SUCCESS;
     _seg_t_prep_out = now_ns();
-  }
-  // Close the batch even when a bind failed: `begin` left deferred patching
-  // state on the runtime, and abandoning it would strand the next execution's
-  // binding behind it.
-  if (batch_open) {
-    if (rbln_rt_end_io_patch_batch(entry->runtime) != RBLNRetCode_SUCCESS) {
-      runtime_failed = true;
-    }
-    _seg_t_end = now_ns();
   }
   if (!runtime_failed) {
     runtime_failed = rbln_rt_run(entry->runtime) != RBLNRetCode_SUCCESS;
@@ -1150,13 +1119,9 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
   g_diag_warm_n_hits.fetch_add(1, std::memory_order_relaxed);
   g_diag_warm_ns_lookup.fetch_add(_seg_t_lookup - _seg_t0, std::memory_order_relaxed);
   g_diag_warm_ns_io_build.fetch_add(_seg_t_io_build - _seg_t_lookup, std::memory_order_relaxed);
-  // Both halves of the batch land in one segment; they bracket the two binds
-  // rather than sitting next to each other.
-  g_diag_warm_ns_batch.fetch_add(
-      (_seg_t_begin - _seg_t_io_build) + (_seg_t_end - _seg_t_prep_out), std::memory_order_relaxed);
-  g_diag_warm_ns_prep_in.fetch_add(_seg_t_prep_in - _seg_t_begin, std::memory_order_relaxed);
+  g_diag_warm_ns_prep_in.fetch_add(_seg_t_prep_in - _seg_t_io_build, std::memory_order_relaxed);
   g_diag_warm_ns_prep_out.fetch_add(_seg_t_prep_out - _seg_t_prep_in, std::memory_order_relaxed);
-  g_diag_warm_ns_run.fetch_add(_seg_t_run - _seg_t_end, std::memory_order_relaxed);
+  g_diag_warm_ns_run.fetch_add(_seg_t_run - _seg_t_prep_out, std::memory_order_relaxed);
   g_diag_warm_ns_finalize.fetch_add(_seg_t_finalize - _seg_t_run, std::memory_order_relaxed);
   return true;
 }

@@ -309,7 +309,7 @@ void register_internal_api(py::module_& module) {
       "_dispatch_shim_warm_segments_dump",
       &torch_rbln::shim::diag_dump_warm_segments,
       "DIAG: warm-cache hit per-segment timers (n_hits, ns_lookup, ns_io_build, "
-      "ns_batch, ns_prep_in, ns_prep_out, ns_run, ns_finalize)");
+      "ns_prep_in, ns_prep_out, ns_run, ns_finalize)");
   module.def(
       "_dispatch_shim_warm_segments_reset",
       &torch_rbln::shim::diag_reset_warm_segments,
