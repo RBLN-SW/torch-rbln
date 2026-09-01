@@ -246,7 +246,7 @@ def memory_summary(device: Optional[Union[int, str, torch.device]] = None) -> st
     ]
 
     def mib(value: int) -> str:
-        return f"{value / 1024 ** 2:.1f}"
+        return f"{value / 1024**2:.1f}"
 
     def stat(npu: int, chiplet: int, key: str) -> int:
         return per_chiplet.get(f"npu.{npu}.chiplet.{chiplet}.{key}", 0)
@@ -263,9 +263,7 @@ def memory_summary(device: Optional[Union[int, str, torch.device]] = None) -> st
     for npu, chiplet in rows:
         cells = "".join(f"{mib(stat(npu, chiplet, key)):>13}" for key, _ in columns)
         lines.append(f"{npu:>5}{chiplet:>9}" + cells)
-    totals = "".join(
-        f"{mib(sum(stat(npu, chiplet, key) for npu, chiplet in rows)):>13}" for key, _ in columns
-    )
+    totals = "".join(f"{mib(sum(stat(npu, chiplet, key) for npu, chiplet in rows)):>13}" for key, _ in columns)
     lines.append("-" * len(header))
     lines.append(f"{'total':>14}" + totals)
 
