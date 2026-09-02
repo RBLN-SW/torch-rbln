@@ -90,25 +90,19 @@ def _ctx_opened():
 def _remap_counts():
     """Visible device count with RBLN_DEVICES set to one device, then unset.
 
-    A live mapping answers ``[1, every visible NPU]``; a frozen one answers the same number
-    twice. Measured by the count rather than by matching an error message: a frozen mapping is
-    ignored silently and only rejected at the next acquisition, so there is no message to match
-    at this point.
-
-    Returns the two numbers rather than a verdict. Reading them as "frozen" needs the physical
-    pool, which only a process that has not latched anything can report, so
-    :attr:`Probe.remap` draws the conclusion parent-side.
-
+    A live mapping answers ``[1, every visible NPU]``, a frozen one the same number twice.
+    Counted rather than matched against an error message: a frozen mapping is ignored silently
+    and only rejected at the next acquisition. The verdict is drawn parent-side
+    (:attr:`Probe.remap`), which is where the pool the counts mean anything against is known.
     Goes through ``rebel._C``, not a torch_rbln API, so a torch_rbln entry point that stopped
     freezing cannot make these checks pass for the wrong reason.
 
-    Measured in a forked child, because reading the counts means rewriting RBLN_DEVICES and
-    the probe body may have left threads running (``DataLoader(pin_memory=True)`` keeps a
-    pin-memory thread alive). setenv/unsetenv beside another thread's getenv is a data race,
-    and c10/rbln/DeviceMappingManager.h rules out mutating RBLN_* alongside a query at all.
-    The seal this measures is inherited across fork, so the child reads the parent's latch
-    state while its own edits stay private to it -- which also drops the "must run last"
-    constraint the in-process version had.
+    Runs in a forked child: reading the counts rewrites RBLN_DEVICES, the probe body may have
+    left threads running (``DataLoader(pin_memory=True)`` keeps a pin-memory thread), and
+    setenv/unsetenv beside another thread's getenv is a data race --
+    c10/rbln/DeviceMappingManager.h rules out mutating RBLN_* alongside a query at all. The
+    seal is inherited across fork, so the child reads the parent's latch state while its own
+    edits stay private to it.
     """
     from rebel._C import device_count
 
@@ -124,8 +118,8 @@ def _remap_counts():
     read_fd, write_fd = os.pipe()
     child = os.fork()
     if child == 0:
-        # os._exit throughout: the child must not run the parent's atexit hooks, flush its
-        # buffers, or unwind into pytest. A failed measurement is reported as none at all.
+        # os._exit: the child must not run the runner's atexit hooks, flush its buffers, or
+        # print a second record. A failed measurement is reported as no measurement.
         try:
             os.close(read_fd)
             payload = json.dumps([count(DEV0), count(None)])
@@ -163,7 +157,12 @@ except BaseException as e:  # noqa: BLE001 - the point is to characterise failur
     rec["raised"] = "{{}}: {{}}".format(type(e).__name__, str(e).splitlines()[0][:160])
 
 rec["ctx"] = _ctx_opened()
-rec["remap_counts"] = _remap_counts()
+try:
+    rec["remap_counts"] = _remap_counts()
+except BaseException:
+    # The counts are one field; losing them must not cost the record. Without this a fork
+    # that fails (EAGAIN under a full process table) reads as "the probe never reported".
+    rec["remap_counts"] = None
 print(json.dumps(rec), file=_real_stdout)
 '''
 
