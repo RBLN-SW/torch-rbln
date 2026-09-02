@@ -182,11 +182,12 @@ print(json.dumps({"ids": [i for i in range(127) if npu_is_available(i)]}))
 def _host_pool() -> tuple:
     """Every physical NPU id on this host, scanned in a process of its own.
 
-    The reference a remap verdict is judged against, and it has to be another process. The runtime's RBLN_DEVICES seal is process-local, so once
-    anything here has used a device an in-process query answers with the sealed value --
-    ``physical_device_count()`` included, since it is the same ``rbln_get_device_count()`` the
-    probe measures -- and the state under test would be deciding its own gate. Stripping the
-    selection variables is what makes the answer the host rather than a selection of it.
+    The reference a remap verdict is judged against, and it has to be another process. The
+    runtime's RBLN_DEVICES seal is process-local, so once anything here has used a device an
+    in-process query answers with the sealed value -- ``physical_device_count()`` included,
+    since it is the same ``rbln_get_device_count()`` the probe measures -- and the state under
+    test would be deciding its own gate. Stripping the selection variables is what makes the
+    answer the host rather than a selection of it.
 
     Empty when the runtime, the driver or the NPUs are absent, and when the scan itself fails:
     callers then treat every remap verdict as undetermined.
