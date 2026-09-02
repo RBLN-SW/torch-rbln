@@ -43,28 +43,11 @@ from test.utils import requires_physical_devices
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# --- scenarios ---------------------------------------------------------------
-# Each is an ``RBLN_*`` environment a real deployment can be in. A contract clause
-# has to hold in all of them, not just on a healthy host.
-HEALTHY = {"RBLN_DEVICES": "0"}
-NO_DEVICE = {"RBLN_DEVICES": "99999"}  # visible-device filter matches nothing
-BAD_MAP = {"RBLN_DEVICES": "0", "RBLN_DEVICE_MAP": "[1],[99]"}  # map exceeds visible NPUs
-DUMMY = {"RBLN_DUMMY_DEVICE": "1"}
-DUMMY_BAD_MAP = {"RBLN_DUMMY_DEVICE": "1", "RBLN_DEVICE_MAP": "[0,1,1]"}  # group size 3 invalid
-
 # The RBLN_* variables a scenario owns. Stripped from a probe's environment so the runner's
 # own selection cannot decide the outcome.
 _SELECTION_VARS = frozenset(
     {"RBLN_DEVICES", "RBLN_VISIBLE_DEVICES", "RBLN_DEVICE_MAP", "RBLN_NPUS_PER_DEVICE", "RBLN_DUMMY_DEVICE"}
 )
-
-ALL_SCENARIOS = {
-    "healthy": HEALTHY,
-    "no_device": NO_DEVICE,
-    "bad_map": BAD_MAP,
-    "dummy": DUMMY,
-    "dummy_bad_map": DUMMY_BAD_MAP,
-}
 
 # Probes must assign ``rec["result"]``. They run after ``import torch, torch_rbln``.
 _RUNNER = '''\
@@ -79,6 +62,13 @@ os.environ.setdefault("TORCH_RBLN_LOG_LEVEL", "ERROR")
 # The probe may print; only this file descriptor carries the JSON result.
 _real_stdout = sys.stdout
 sys.stdout = sys.stderr
+
+# The ids this job may use, as the parent measured them. Nothing here assumes id 0 is ours.
+# DEV1 falls back to DEV0 so a body can name a second device without an index error; a
+# scenario that needs two really present is gated on the count it reads back.
+POOL = {pool!r}
+DEV0 = str(POOL[0]) if POOL else "0"
+DEV1 = str(POOL[1]) if len(POOL) > 1 else DEV0
 
 rec = {{"result": None, "raised": None, "ctx": None, "remap_counts": None}}
 
@@ -138,7 +128,7 @@ def _remap_counts():
         # buffers, or unwind into pytest. A failed measurement is reported as none at all.
         try:
             os.close(read_fd)
-            payload = json.dumps([count("0"), count(None)])
+            payload = json.dumps([count(DEV0), count(None)])
         except BaseException:
             payload = "null"
         try:
@@ -193,7 +183,7 @@ print(json.dumps({"ids": [i for i in range(127) if npu_is_available(i)]}))
 def _host_pool() -> tuple:
     """Every physical NPU id on this host, scanned in a process of its own.
 
-    It has to be another process. The runtime's RBLN_DEVICES seal is process-local, so once
+    The reference a remap verdict is judged against, and it has to be another process. The runtime's RBLN_DEVICES seal is process-local, so once
     anything here has used a device an in-process query answers with the sealed value --
     ``physical_device_count()`` included, since it is the same ``rbln_get_device_count()`` the
     probe measures -- and the state under test would be deciding its own gate. Stripping the
@@ -227,15 +217,13 @@ def _host_pool() -> tuple:
 
 @functools.lru_cache(maxsize=1)
 def _visible_pool() -> tuple:
-    """Physical NPU ids this job may use: the host pool, narrowed to the runner's selection.
+    """Physical NPU ids this job may touch: the host pool, narrowed to the runner's selection.
 
-    The reference every remap verdict is judged against, and what the scenarios select from.
-    A CI step allocated one NPU out of several is the case that matters: judged against the
-    host it would read a legitimate 1-and-1 as a freeze, and a scenario picking an id off the
-    host would claim an NPU that belongs to a co-tenant job.
-
-    The runner's selection is a bound on which ids are ours; it never decides what a scenario
-    *sets*, which is the whole point of stripping it from the probe's environment.
+    Which devices are ours, not how many are observable -- :attr:`Probe.remap` is judged
+    against :func:`_host_pool`. The narrowing is what keeps a scenario from naming an NPU that
+    a co-tenant job was allocated: the runner's selection bounds the ids the scenarios pick,
+    while never deciding what a scenario *sets*, which is the point of stripping it from the
+    probe's environment.
     """
     host = _host_pool()
     selected = os.environ.get("RBLN_DEVICES") or os.environ.get("RBLN_VISIBLE_DEVICES")
@@ -246,6 +234,37 @@ def _visible_pool() -> tuple:
     except ValueError:
         return host  # a malformed selection is the runtime's to reject, not ours
     return tuple(i for i in ids if i in host)
+
+
+def _pool_devices(count: int) -> str:
+    """The first ``count`` ids of this job's pool, as an ``RBLN_DEVICES`` value.
+
+    Not hard-coded ``"0"``: where this job was allocated other NPUs, id 0 is a co-tenant's, so
+    a scenario naming it would measure the wrong pool and claim a device that is not ours.
+    Counting from 0 when the pool is unknown (no runtime, no driver) keeps the scenarios
+    constructible on a host where they cannot run anyway.
+    """
+    pool = _visible_pool() or tuple(range(count))
+    return ",".join(str(i) for i in pool[:count])
+
+
+# --- scenarios ---------------------------------------------------------------
+# Each is an ``RBLN_*`` environment a real deployment can be in. A contract clause
+# has to hold in all of them, not just on a healthy host.
+HEALTHY = {"RBLN_DEVICES": _pool_devices(1)}
+TWO_DEVICES = {"RBLN_DEVICES": _pool_devices(2)}
+NO_DEVICE = {"RBLN_DEVICES": "99999"}  # visible-device filter matches nothing
+BAD_MAP = {"RBLN_DEVICES": _pool_devices(1), "RBLN_DEVICE_MAP": "[1],[99]"}  # map exceeds visible NPUs
+DUMMY = {"RBLN_DUMMY_DEVICE": "1"}
+DUMMY_BAD_MAP = {"RBLN_DUMMY_DEVICE": "1", "RBLN_DEVICE_MAP": "[0,1,1]"}  # group size 3 invalid
+
+ALL_SCENARIOS = {
+    "healthy": HEALTHY,
+    "no_device": NO_DEVICE,
+    "bad_map": BAD_MAP,
+    "dummy": DUMMY,
+    "dummy_bad_map": DUMMY_BAD_MAP,
+}
 
 
 class Probe:
@@ -273,11 +292,13 @@ class Probe:
         ``None`` means undetermined, not benign: with fewer than two usable NPUs a live mapping
         and a frozen one report the same count, so nothing can be concluded either way.
 
-        The reference is :func:`_visible_pool`, not ``/dev/rbln*``. A container can expose more
-        device nodes than it grants -- a Buildkite step asking for ``npu: count: 1`` on a
-        multi-NPU host -- and counting nodes there reads a legitimate 1-and-1 as a freeze.
+        Judged against :func:`_host_pool`, which is what the *probe* can enumerate: it runs
+        with the runner's selection stripped, and its second count unsets RBLN_DEVICES. Not
+        against ``/dev/rbln*`` -- a container can show more device nodes than the runtime can
+        use, a Buildkite step asking for ``npu: count: 1`` among them, and counting nodes there
+        reads a legitimate 1-and-1 as a freeze.
         """
-        if self.remap_counts is None or len(_visible_pool()) < 2:
+        if self.remap_counts is None or len(_host_pool()) < 2:
             return None
         one, every = self.remap_counts
         if one == every:
@@ -307,6 +328,7 @@ def run_probe(body: str, env: dict) -> Probe:
     script = _RUNNER.format(
         root=_PROJECT_ROOT,
         env=env_src,
+        pool=list(_visible_pool()),
         probe=textwrap.indent(textwrap.dedent(body).strip("\n"), "    "),
     )
     # The scenario is the whole RBLN_* configuration: inheriting the parent's would let a
@@ -810,7 +832,7 @@ class TestUpstreamClauses(TestCase):
                 raised = None
             except RuntimeError as e:
                 raised = str(e).splitlines()[0]
-            os.environ["RBLN_DEVICES"] = "0"
+            os.environ["RBLN_DEVICES"] = DEV0
             rec["result"] = [before, raised is not None, torch.rbln.device_count()]
             """,
             NO_DEVICE,
@@ -833,10 +855,10 @@ class TestUpstreamClauses(TestCase):
             before = torch.rbln.device_count()
             if before == 2:
                 torch.rbln.set_device(1)
-                os.environ["RBLN_DEVICES"] = "0"
+                os.environ["RBLN_DEVICES"] = DEV0
             rec["result"] = [before, torch.rbln.device_count(), torch.rbln.current_device()]
             """,
-            {"RBLN_DEVICES": "0,1"},
+            TWO_DEVICES,
         )
         self.assertIsNone(p.raised, f"probe raised -- {p}")
         before, count, current = p.result
@@ -907,7 +929,7 @@ class TestExternalConsumers(TestCase):
             r, w = os.pipe()
             if os.fork() == 0:
                 os.close(r)
-                os.environ["RBLN_DEVICES"] = "1"       # worker remap, after fork
+                os.environ["RBLN_DEVICES"] = DEV1          # worker remap, after fork
                 try:
                     msg = "OK:%d,%d" % (torch_rbln._C.physical_device_count(), torch.rbln.device_count())
                 except BaseException as e:
@@ -919,7 +941,7 @@ class TestExternalConsumers(TestCase):
             os.waitpid(-1, 0)
             rec["result"] = [parent, child]
             """,
-            {"RBLN_DEVICES": "0,1"},
+            TWO_DEVICES,
         )
         self.assertIsNone(p.raised, f"probe raised -- {p}")
         parent, child = p.result
