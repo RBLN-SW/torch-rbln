@@ -68,7 +68,7 @@ ALL_SCENARIOS = {
 
 # Probes must assign ``rec["result"]``. They run after ``import torch, torch_rbln``.
 _RUNNER = '''\
-import json, os, shutil, subprocess, sys
+import json, os, select, shutil, subprocess, sys
 
 sys.path.insert(0, {root!r})
 {env}
@@ -110,8 +110,15 @@ def _remap_counts():
     :attr:`Probe.remap` draws the conclusion parent-side.
 
     Goes through ``rebel._C``, not a torch_rbln API, so a torch_rbln entry point that stopped
-    freezing cannot make these checks pass for the wrong reason. Must run last -- it rewrites
-    RBLN_DEVICES.
+    freezing cannot make these checks pass for the wrong reason.
+
+    Measured in a forked child, because reading the counts means rewriting RBLN_DEVICES and
+    the probe body may have left threads running (``DataLoader(pin_memory=True)`` keeps a
+    pin-memory thread alive). setenv/unsetenv beside another thread's getenv is a data race,
+    and c10/rbln/DeviceMappingManager.h rules out mutating RBLN_* alongside a query at all.
+    The seal this measures is inherited across fork, so the child reads the parent's latch
+    state while its own edits stay private to it -- which also drops the "must run last"
+    constraint the in-process version had.
     """
     from rebel._C import device_count
 
@@ -124,10 +131,40 @@ def _remap_counts():
             os.environ["RBLN_DEVICES"] = value
         return device_count()
 
+    read_fd, write_fd = os.pipe()
+    child = os.fork()
+    if child == 0:
+        # os._exit throughout: the child must not run the parent's atexit hooks, flush its
+        # buffers, or unwind into pytest. A failed measurement is reported as none at all.
+        try:
+            os.close(read_fd)
+            payload = json.dumps([count("0"), count(None)])
+        except BaseException:
+            payload = "null"
+        try:
+            os.write(write_fd, payload.encode())
+        except BaseException:
+            pass
+        os._exit(0)
+    os.close(write_fd)
     try:
-        return [count("0"), count(None)]
+        # A hang here would cost the whole record: run_probe would time out with no JSON line
+        # to read, so the wait is bounded and a silent child means "undetermined".
+        ready, _, _ = select.select([read_fd], [], [], 120)
+        raw = os.read(read_fd, 200).decode() if ready else ""
     except BaseException:
-        return None  # the enumeration failed: undetermined
+        raw = ""
+    finally:
+        os.close(read_fd)
+        try:
+            os.waitpid(child, 0)
+        except BaseException:
+            pass
+    try:
+        counts = json.loads(raw)
+    except ValueError:
+        return None
+    return counts if isinstance(counts, list) else None
 
 
 try:
@@ -135,7 +172,7 @@ try:
 except BaseException as e:  # noqa: BLE001 - the point is to characterise failures
     rec["raised"] = "{{}}: {{}}".format(type(e).__name__, str(e).splitlines()[0][:160])
 
-rec["ctx"] = _ctx_opened()      # before _remap_counts(): that call rewrites RBLN_DEVICES
+rec["ctx"] = _ctx_opened()
 rec["remap_counts"] = _remap_counts()
 print(json.dumps(rec), file=_real_stdout)
 '''
