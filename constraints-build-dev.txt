@@ -1,5 +1,2 @@
 # Build/dev dependency constraints (single source of truth).
-# TEMPORARY: a dev build. rbln_exec_api.h (rebel_compiler#13235) is on rebel's dev branch
-# but not in a release yet, and this build also carries the multi-device execution fix
-# (#13303) that the warm-cache tests need. Restore a production pin once both ship.
-rebel-compiler==0.11.3.dev160+g0ebb3f84
+rebel-compiler==0.11.3.dev160+g0ebb3f84.prod
