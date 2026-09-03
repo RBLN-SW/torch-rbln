@@ -73,6 +73,17 @@ def pow_tensor_scalar_out_rbln(self, exponent, *, out):
     finalize_output_tensor(out, result_tensor, result_tensor.shape, (self,), {})
 
 
+def _dispatch_custom_kernel(op_module, args, view_recipes):
+    """Compile the kernel module through the rebel backend and run it."""
+    compiled = compile_rbln_cached(
+        op_module,
+        dynamic=False,
+        options={"disable_logger": True, "num_devices": 1},
+        device_cache_key=(extract_device_id_from_inputs(*args), view_recipes),
+    )
+    return compiled(*args)
+
+
 class custom_rbln_paged_attn_prefill(torch.nn.Module):
     def forward(self, *args, **kwargs):
         # TODO: rtosa.multiply cannot accept tensor scalar value. scale must be constant tensor.
@@ -95,8 +106,6 @@ _paged_attn_prefill_op_module = custom_rbln_paged_attn_prefill().eval()
 
 
 def paged_attn_prefill_rbln(*args, **kwargs):
-    from torch_rbln.device.context_holder import out_tensor_context
-
     if len(args) != 10:
         raise RuntimeError("paged_attn_prefill takes 10 inputs.")
 
@@ -125,25 +134,10 @@ def paged_attn_prefill_rbln(*args, **kwargs):
     # warning emitted via ``_maybe_warn_view_fallback``).
     (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
 
-    # Result shape, dtype, and device match Q's user-visible (post-view) form.
-    result_tensor = torch.empty_like(args[0], memory_format=torch.contiguous_format)
-    assert result_tensor.size(-1) % 64 == 0
+    assert args[0].size(-1) % 64 == 0
 
-    with out_tensor_context(result_tensor):
-        op_module = get_view_op_module(_paged_attn_prefill_op_module, view_recipes)
-        compiled = compile_rbln_cached(
-            op_module,
-            dynamic=False,
-            options={"disable_logger": True, "num_devices": 1},
-            device_cache_key=(extract_device_id_from_inputs(*view_args, **view_kwargs), view_recipes),
-        )
-        external_result = compiled(*view_args, **view_kwargs)
-        if result_tensor is None:
-            result_tensor = external_result
-        elif isinstance(external_result, torch.Tensor) and (external_result.data_ptr() != result_tensor.data_ptr()):
-            result_tensor.copy_(external_result)
-
-    return result_tensor
+    op_module = get_view_op_module(_paged_attn_prefill_op_module, view_recipes)
+    return _dispatch_custom_kernel(op_module, view_args, view_recipes)
 
 
 class custom_rbln_paged_attn_decode(torch.nn.Module):
@@ -168,8 +162,6 @@ _paged_attn_decode_op_module = custom_rbln_paged_attn_decode().eval()
 
 
 def paged_attn_decode_rbln(*args, **kwargs):
-    from torch_rbln.device.context_holder import out_tensor_context
-
     if len(args) != 10:
         raise RuntimeError("paged_attn_prefill takes 10 inputs.")
 
@@ -182,24 +174,10 @@ def paged_attn_decode_rbln(*args, **kwargs):
 
     (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
 
-    result_tensor = torch.empty_like(args[0], memory_format=torch.contiguous_format)
-    assert result_tensor.size(-1) % 64 == 0
+    assert args[0].size(-1) % 64 == 0
 
-    with out_tensor_context(result_tensor):
-        op_module = get_view_op_module(_paged_attn_decode_op_module, view_recipes)
-        compiled = compile_rbln_cached(
-            op_module,
-            dynamic=False,
-            options={"disable_logger": True, "num_devices": 1},
-            device_cache_key=(extract_device_id_from_inputs(*view_args, **view_kwargs), view_recipes),
-        )
-        external_result = compiled(*view_args, **view_kwargs)
-        if result_tensor is None:
-            result_tensor = external_result
-        elif isinstance(external_result, torch.Tensor) and (external_result.data_ptr() != result_tensor.data_ptr()):
-            result_tensor.copy_(external_result)
-
-    return result_tensor
+    op_module = get_view_op_module(_paged_attn_decode_op_module, view_recipes)
+    return _dispatch_custom_kernel(op_module, view_args, view_recipes)
 
 
 class custom_rbln_paged_causal_attn_prefill(torch.nn.Module):
@@ -231,8 +209,6 @@ _paged_causal_attn_prefill_op_module = custom_rbln_paged_causal_attn_prefill().e
 
 
 def paged_causal_attn_prefill_rbln(*args, **kwargs):
-    from torch_rbln.device.context_holder import out_tensor_context
-
     # paged_causal_attn_prefill: q, k, v, kcache, vcache, seq, scale, block_table, block_size, is_bidirectional, mask (optional)
     if len(args) < 10 or len(args) > 11:
         raise RuntimeError(f"paged_causal_attn_prefill takes 10 or 11 inputs, but got {len(args)}.")
@@ -252,24 +228,10 @@ def paged_causal_attn_prefill_rbln(*args, **kwargs):
 
     (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
 
-    result_tensor = torch.empty_like(args[0], memory_format=torch.contiguous_format)
-    assert result_tensor.size(-1) % 64 == 0
+    assert args[0].size(-1) % 64 == 0
 
-    with out_tensor_context(result_tensor):
-        op_module = get_view_op_module(_paged_causal_attn_prefill_op_module, view_recipes)
-        compiled = compile_rbln_cached(
-            op_module,
-            dynamic=False,
-            options={"disable_logger": True, "num_devices": 1},
-            device_cache_key=(extract_device_id_from_inputs(*view_args, **view_kwargs), view_recipes),
-        )
-        external_result = compiled(*view_args, **view_kwargs)
-        if result_tensor is None:
-            result_tensor = external_result
-        elif isinstance(external_result, torch.Tensor) and (external_result.data_ptr() != result_tensor.data_ptr()):
-            result_tensor.copy_(external_result)
-
-    return result_tensor
+    op_module = get_view_op_module(_paged_causal_attn_prefill_op_module, view_recipes)
+    return _dispatch_custom_kernel(op_module, view_args, view_recipes)
 
 
 class custom_rbln_paged_causal_attn_decode(torch.nn.Module):
@@ -300,8 +262,6 @@ _paged_causal_attn_decode_op_module = custom_rbln_paged_causal_attn_decode().eva
 
 
 def paged_causal_attn_decode_rbln(*args, **kwargs):
-    from torch_rbln.device.context_holder import out_tensor_context
-
     # paged_causal_attn_decode: q, k, v, kcache, vcache, seq, scale, block_table, block_size, mask (optional)
     if len(args) < 9 or len(args) > 10:
         raise RuntimeError(f"paged_causal_attn_decode takes 9 or 10 inputs, but got {len(args)}.")
@@ -315,24 +275,10 @@ def paged_causal_attn_decode_rbln(*args, **kwargs):
 
     (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
 
-    result_tensor = torch.empty_like(args[0], memory_format=torch.contiguous_format)
-    assert result_tensor.size(-1) % 64 == 0
+    assert args[0].size(-1) % 64 == 0
 
-    with out_tensor_context(result_tensor):
-        op_module = get_view_op_module(_paged_causal_attn_decode_op_module, view_recipes)
-        compiled = compile_rbln_cached(
-            op_module,
-            dynamic=False,
-            options={"disable_logger": True, "num_devices": 1},
-            device_cache_key=(extract_device_id_from_inputs(*view_args, **view_kwargs), view_recipes),
-        )
-        external_result = compiled(*view_args, **view_kwargs)
-        if result_tensor is None:
-            result_tensor = external_result
-        elif isinstance(external_result, torch.Tensor) and (external_result.data_ptr() != result_tensor.data_ptr()):
-            result_tensor.copy_(external_result)
-
-    return result_tensor
+    op_module = get_view_op_module(_paged_causal_attn_decode_op_module, view_recipes)
+    return _dispatch_custom_kernel(op_module, view_args, view_recipes)
 
 
 class custom_rbln_flash_attention_naive_prefill(torch.nn.Module):
@@ -354,9 +300,10 @@ class custom_rbln_flash_attention_naive_prefill(torch.nn.Module):
         return torch.ops.rbln_custom_ops.flash_attention_naive_prefill(*call_args)
 
 
-def flash_attention_naive_prefill_rbln(*args, **kwargs):
-    from torch_rbln.device.context_holder import helper
+_flash_attention_naive_prefill_op_module = custom_rbln_flash_attention_naive_prefill().eval()
 
+
+def flash_attention_naive_prefill_rbln(*args, **kwargs):
     if len(args) < 9 or len(args) > 10:
         raise RuntimeError(f"flash_attention_naive_prefill takes 9 or 10 inputs (optional sinks), but got {len(args)}.")
 
@@ -372,26 +319,10 @@ def flash_attention_naive_prefill_rbln(*args, **kwargs):
 
     (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
 
-    result_tensor = torch.empty_like(args[0], memory_format=torch.contiguous_format)
-    assert result_tensor.size(-1) % 64 == 0
+    assert args[0].size(-1) % 64 == 0
 
-    helper.set_out_tensor(result_tensor)
-    base_module = custom_rbln_flash_attention_naive_prefill()
-    op_module = get_view_op_module(base_module, view_recipes)
-    compiled = torch.compile(
-        op_module,
-        backend="rbln",
-        dynamic=False,
-        options={"disable_logger": True, "num_devices": 1},
-    )
-    external_result = compiled(*view_args, **view_kwargs)
-    if result_tensor is None:
-        result_tensor = external_result
-    elif isinstance(external_result, torch.Tensor) and (external_result.data_ptr() != result_tensor.data_ptr()):
-        result_tensor.copy_(external_result)
-    helper.clear_out_tensor()
-
-    return result_tensor
+    op_module = get_view_op_module(_flash_attention_naive_prefill_op_module, view_recipes)
+    return _dispatch_custom_kernel(op_module, view_args, view_recipes)
 
 
 class custom_rbln_flash_attention_naive_decode(torch.nn.Module):
@@ -413,9 +344,10 @@ class custom_rbln_flash_attention_naive_decode(torch.nn.Module):
         return torch.ops.rbln_custom_ops.flash_attention_naive_decode(*call_args)
 
 
-def flash_attention_naive_decode_rbln(*args, **kwargs):
-    from torch_rbln.device.context_holder import helper
+_flash_attention_naive_decode_op_module = custom_rbln_flash_attention_naive_decode().eval()
 
+
+def flash_attention_naive_decode_rbln(*args, **kwargs):
     if len(args) < 9 or len(args) > 10:
         raise RuntimeError(f"flash_attention_naive_decode takes 9 or 10 inputs (optional sinks), but got {len(args)}.")
 
@@ -425,26 +357,10 @@ def flash_attention_naive_decode_rbln(*args, **kwargs):
 
     (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
 
-    result_tensor = torch.empty_like(args[0], memory_format=torch.contiguous_format)
-    assert result_tensor.size(-1) % 64 == 0
+    assert args[0].size(-1) % 64 == 0
 
-    helper.set_out_tensor(result_tensor)
-    base_module = custom_rbln_flash_attention_naive_decode()
-    op_module = get_view_op_module(base_module, view_recipes)
-    compiled = torch.compile(
-        op_module,
-        backend="rbln",
-        dynamic=False,
-        options={"disable_logger": True, "num_devices": 1},
-    )
-    external_result = compiled(*view_args, **view_kwargs)
-    if result_tensor is None:
-        result_tensor = external_result
-    elif isinstance(external_result, torch.Tensor) and (external_result.data_ptr() != result_tensor.data_ptr()):
-        result_tensor.copy_(external_result)
-    helper.clear_out_tensor()
-
-    return result_tensor
+    op_module = get_view_op_module(_flash_attention_naive_decode_op_module, view_recipes)
+    return _dispatch_custom_kernel(op_module, view_args, view_recipes)
 
 
 def _materialize(t: torch.Tensor) -> torch.Tensor:
