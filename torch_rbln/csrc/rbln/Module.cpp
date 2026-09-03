@@ -271,14 +271,11 @@ void register_internal_api(py::module_& module) {
       "_get_memory_info",
       [](const at::Tensor& tensor) {
         check_base_rbln_tensor(tensor, "physical_layout", "tensor");
-        ::rbln::MemoryInfo info;
-        TORCH_CHECK(
-            ::rbln::rbln_get_memory_info(reinterpret_cast<uint64_t>(tensor.data_ptr()), info) == RBLNRetCode_SUCCESS,
-            "physical_layout: rbln_get_memory_info failed for tensor on ",
-            tensor.device());
+        const ::rbln::MemoryInfo info = c10::rbln::get_memory_info(tensor.data_ptr());
+        // Tuple order matches torch_rbln.memory.PhysicalShard(node_id, chiplet_id, nbytes, device_addr, shape).
         py::list areas;
         for (const auto& area : info.device_areas) {
-          areas.append(py::make_tuple(area.node_id, area.chiplet_id, area.device_addr, area.size, area.shape));
+          areas.append(py::make_tuple(area.node_id, area.chiplet_id, area.size, area.device_addr, area.shape));
         }
         py::dict out;
         out["user_dtype"] = rbln_data_type_name(info.user_dtype);

@@ -315,6 +315,7 @@ class PhysicalLayout:
     logical_dtype: torch.dtype
     physical_shape: tuple[int, ...]
     physical_dtype: Union[torch.dtype, str]
+    physical_itemsize: int
     shards: tuple[PhysicalShard, ...]
 
     def nbytes_per_chiplet(self) -> Dict[tuple[int, int], int]:
@@ -357,12 +358,16 @@ def physical_layout(tensor: torch.Tensor) -> PhysicalLayout:
     1:1 binding has no transform and reports the logical values. Each shard's
     ``shape`` is the part of that physical tensor placed in its area, so a
     4-way head split of ``(4, 16, 1, 128, 2048)`` reports ``(4, 4, 1, 128, 2048)``
-    per shard while a 4-way replication reports the full shape four times. A physical
-    dtype torch has no equivalent for (``DLFloat16``) is returned by its runtime
-    name.
+    per shard while a 4-way replication reports the full shape four times.
+    fp16 / bf16 tensors are usually stored as ``CustomFloat16`` (DLFloat16) on
+    the device, which torch has no dtype for: ``physical_dtype`` is then the
+    runtime name, and ``physical_itemsize`` carries the element size either way.
+
+    Diagnostic call: the runtime answers it through a full serialization of the
+    allocation's bookkeeping. Read it once after warm-up, not per step.
 
     Returns:
-        PhysicalLayout: logical and physical shape/dtype plus one shard per area.
+        PhysicalLayout: logical and physical shape/dtype/itemsize plus one shard per area.
 
     Raises:
         RuntimeError: if ``tensor`` is not an RBLN tensor, does not cover its
@@ -387,10 +392,31 @@ def physical_layout(tensor: torch.Tensor) -> PhysicalLayout:
     if info["physical_shape"]:
         physical_shape = tuple(info["physical_shape"])
         physical_dtype = _RUNTIME_DTYPE_TO_TORCH.get(info["physical_dtype"], info["physical_dtype"])
+        physical_itemsize = _RUNTIME_DTYPE_ITEMSIZE[info["physical_dtype"]]
     else:
         physical_shape, physical_dtype = tuple(tensor.shape), tensor.dtype
-    return PhysicalLayout(tuple(tensor.shape), tensor.dtype, physical_shape, physical_dtype, shards)
+        physical_itemsize = tensor.element_size()
+    return PhysicalLayout(tuple(tensor.shape), tensor.dtype, physical_shape, physical_dtype, physical_itemsize, shards)
 
+
+_RUNTIME_DTYPE_ITEMSIZE: Dict[str, int] = {
+    "Bool": 1,
+    "UInt8": 1,
+    "Int8": 1,
+    "Int16": 2,
+    "Int32": 4,
+    "Int64": 8,
+    "Float16": 2,
+    "Float32": 4,
+    "Float64": 8,
+    "Float8_e4m3": 1,
+    "Float8_e5m2": 1,
+    "BFloat16": 2,
+    "CustomFloat16": 2,
+    "Complex32": 4,
+    "Complex64": 8,
+    "Complex128": 16,
+}
 
 _RUNTIME_DTYPE_TO_TORCH: Dict[str, torch.dtype] = {
     "Bool": torch.bool,

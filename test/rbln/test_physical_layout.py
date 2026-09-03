@@ -16,16 +16,26 @@ import pytest
 import torch
 
 import torch_rbln  # noqa: F401  # binds the RBLN device + torch.rbln namespace
+from test.utils import requires_logical_devices
 
 
 DEVICE = torch.device("rbln:0")
 
 
 @pytest.mark.test_set_ci
-class TestPhysicalLayout:
-    def test_api_visible(self):
-        assert callable(torch.rbln.physical_layout)
+def test_api_visible():
+    assert callable(torch.rbln.physical_layout)
 
+
+@pytest.mark.test_set_ci
+def test_cpu_tensor_raises():
+    with pytest.raises(RuntimeError, match="RBLN tensor"):
+        torch.rbln.physical_layout(torch.empty(16))
+
+
+@pytest.mark.test_set_ci
+@requires_logical_devices(1)
+class TestPhysicalLayoutOnDevice:
     def test_bound_flat_buffer_is_one_shard(self):
         nbytes = 1 << 20
         t = torch.empty(nbytes, dtype=torch.uint8, device=DEVICE)
@@ -38,6 +48,7 @@ class TestPhysicalLayout:
         # flat 1:1 binding: no transform, so the physical view is the logical one
         assert layout.physical_shape == (nbytes,)
         assert layout.physical_dtype == torch.uint8
+        assert layout.physical_itemsize == 1
         assert len(layout.shards) == 1
         (shard,) = layout.shards
         assert shard.node_id == 0
@@ -59,7 +70,7 @@ class TestPhysicalLayout:
         assert all(s.nbytes > 0 for s in layout.shards)
 
         physical_numel = math.prod(layout.physical_shape)
-        physical_itemsize = torch.empty((), dtype=layout.physical_dtype).element_size()
+        physical_itemsize = layout.physical_itemsize  # physical_dtype may be a runtime-only name
         assert physical_numel >= out.numel()
         # each shard's shape is the slice of the physical tensor that fills its area
         for shard in layout.shards:
@@ -74,10 +85,6 @@ class TestPhysicalLayout:
         t = torch.empty(16, dtype=torch.float16, device=DEVICE)
         with pytest.raises(RuntimeError, match="no device memory"):
             torch.rbln.physical_layout(t)
-
-    def test_cpu_tensor_raises(self):
-        with pytest.raises(RuntimeError, match="RBLN tensor"):
-            torch.rbln.physical_layout(torch.empty(16))
 
     def test_interior_view_raises(self):
         t = torch.empty(64, dtype=torch.uint8, device=DEVICE)
