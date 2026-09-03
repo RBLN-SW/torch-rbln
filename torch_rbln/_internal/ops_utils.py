@@ -998,6 +998,14 @@ def _construct_synthetic_base(t: torch.Tensor):
 # ============================================================================
 
 
+def _contiguous_strides(shape):
+    """Row-major strides for ``shape``."""
+    st = [1] * len(shape)
+    for i in range(len(shape) - 2, -1, -1):
+        st[i] = st[i + 1] * shape[i + 1]
+    return tuple(st)
+
+
 def _simulate_recipe(shape, stride, offset, recipe):
     """Apply each step in ``recipe`` to (shape, stride, offset) metadata
     and return the new ``(shape, stride, offset)`` tuple.
@@ -1048,6 +1056,23 @@ def _simulate_recipe(shape, stride, offset, recipe):
                 return None
             del s[d]
             del st[d]
+        elif op == "reshape":
+            # Only a pure view when the current layout is contiguous from offset 0 --
+            # that is exactly when the new shape's strides follow from its sizes. On any
+            # other layout a reshape has to copy, which a recipe cannot express.
+            new_shape = tuple(step[1])
+            if tuple(_contiguous_strides(tuple(s))) != tuple(st) or o != 0:
+                return None
+            total = 1
+            for x in s:
+                total *= x
+            new_total = 1
+            for x in new_shape:
+                new_total *= x
+            if new_total != total or any(x < 1 for x in new_shape):
+                return None
+            s = list(new_shape)
+            st = list(_contiguous_strides(new_shape))
         elif op == "unsqueeze":
             d = step[1]
             if d < 0 or d > len(s):
@@ -1202,6 +1227,22 @@ def _gen_step_candidates(cur, target):
             if cur_s[d] == 1:
                 for new_size in target_expand_sizes:
                     yield ("expand", d, new_size)
+
+    # Reshape. A merge or a split is a pure view only on a contiguous, offset-0
+    # layout, so that is the only state worth proposing one from -- which is also the
+    # common one, since a base is contiguous by construction and a leading reshape is
+    # how callers flatten before permuting (``kv.view(rows, heads, block, dim)``).
+    # Both families are bounded by the target's own shape, so the frontier stays small.
+    if cur_o == 0 and cur_st == _contiguous_strides(cur_s):
+        if len(cur_s) > len(tgt_s) and len(cur_s) >= 2:
+            for d in range(len(cur_s) - 1):
+                yield ("reshape", cur_s[:d] + (cur_s[d] * cur_s[d + 1],) + cur_s[d + 2 :])
+        if len(cur_s) < len(tgt_s):
+            tgt_sizes = {x for x in tgt_s if x > 1}
+            for d, sz in enumerate(cur_s):
+                for a in tgt_sizes:
+                    if a < sz and sz % a == 0 and (sz // a) in tgt_sizes:
+                        yield ("reshape", cur_s[:d] + (a, sz // a) + cur_s[d + 1 :])
 
     # Select: cur has more dims, a non-size-1 dim is being indexed away.
     if len(cur_s) > len(tgt_s):
