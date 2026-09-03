@@ -8,7 +8,7 @@ on:
         type: string
         required: true
       python_version:
-        description: Python version to lint under (3.10-3.13)
+        description: Python version to lint under (3.10-3.14)
         type: string
         required: true
       lint_all_files:

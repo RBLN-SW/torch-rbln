@@ -8,7 +8,7 @@ on:
         type: string
         required: true
       python_version:
-        description: Python version (3.10-3.13)
+        description: Python version (3.10-3.14)
         type: string
         required: true
       build_type:

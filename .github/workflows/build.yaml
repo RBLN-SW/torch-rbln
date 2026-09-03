@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       python_versions:
-        description: Python versions (3.10-3.13), as a JSON array
+        description: Python versions (3.10-3.14), as a JSON array
         type: string
         required: true
         default: '["3.12"]'

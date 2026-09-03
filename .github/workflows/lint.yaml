@@ -23,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python_version: ${{ fromJSON(github.base_ref == 'main' && '["3.10", "3.11", "3.12", "3.13"]' || '["3.12"]') }}
+        python_version: ${{ fromJSON(github.base_ref == 'main' && '["3.10", "3.11", "3.12", "3.13", "3.14"]' || '["3.12"]') }}
     uses: ./.github/workflows/_lint-source.yaml
     with:
       torch_rbln_sha: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
