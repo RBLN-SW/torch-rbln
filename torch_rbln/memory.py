@@ -8,6 +8,7 @@ import contextlib
 import operator
 import sys
 import threading
+from dataclasses import dataclass
 from typing import Dict, Iterator, Optional, Union  # noqa: UP035
 
 import torch
@@ -26,6 +27,9 @@ __all__ = [
     "memory_reserved",
     "memory_stats",
     "offload",
+    "physical_layout",
+    "PhysicalLayout",
+    "PhysicalShard",
     "release_offload_temp_storage",
     "reset_accumulated_memory_stats",
     "reset_peak_memory_stats",
@@ -288,6 +292,124 @@ def bind_device_memory(tensor: torch.Tensor) -> None:
         torch.rbln.bind_device_memory(staging)
     """
     torch_rbln._C._bind_device_memory(tensor)
+
+
+@dataclass(frozen=True)
+class PhysicalShard:
+    """One device-memory area a tensor occupies: where it sits, how many bytes, and which
+    part of the physical tensor -- its sliced shape when sharded, the whole physical shape
+    when replicated, ``()`` for a flat byte buffer."""
+
+    node_id: int
+    chiplet_id: int
+    nbytes: int
+    device_addr: int
+    shape: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class PhysicalLayout:
+    """Where a tensor's bytes physically sit on the device, per (node, chiplet) area."""
+
+    logical_shape: tuple[int, ...]
+    logical_dtype: torch.dtype
+    physical_shape: tuple[int, ...]
+    physical_dtype: Union[torch.dtype, str]
+    shards: tuple[PhysicalShard, ...]
+
+    def nbytes_per_chiplet(self) -> Dict[tuple[int, int], int]:
+        """Bytes occupied per ``(node_id, chiplet_id)``; chiplets holding no shard are absent."""
+        out: Dict[tuple[int, int], int] = {}
+        for shard in self.shards:
+            key = (shard.node_id, shard.chiplet_id)
+            out[key] = out.get(key, 0) + shard.nbytes
+        return out
+
+
+def physical_layout(tensor: torch.Tensor) -> PhysicalLayout:
+    """
+    Report where ``tensor``'s bytes physically sit on the device.
+
+    A device tensor is one virtual allocation whose bytes the runtime places in
+    one device-memory area per (node, chiplet) -- sharded across chiplets,
+    replicated, or a single flat area. This returns those areas as
+    :class:`PhysicalShard` entries. ``nbytes`` is the exact byte count of the
+    area as the runtime sized it; the allocator rounds each area up to its own
+    granularity (2 MiB on REBEL) when it carves device DRAM, so the footprint on
+    the device is at least that.
+
+    The layout exists only once the allocation has been materialized -- after a
+    torch op or compiled graph has bound the tensor, or after
+    :func:`bind_device_memory`. A freshly created tensor has no layout yet.
+
+    The counterpart of ``DTensor.placements``: per-chiplet sizing (e.g. KV cache
+    blocks per chiplet) and placement diagnostics read it instead of inferring
+    the split from the logical shape.
+
+    Args:
+        tensor: An RBLN tensor covering its whole storage: contiguous, with zero
+            storage offset. A slice or an interior view is rejected, since its
+            address is not the allocation's.
+
+    ``physical_shape`` / ``physical_dtype`` describe the tensor as the device
+    stores it -- after the compiler's pad / cast / reshape transform and before
+    it is split into areas -- so they can differ from the logical ones; a flat
+    1:1 binding has no transform and reports the logical values. Each shard's
+    ``shape`` is the part of that physical tensor placed in its area, so a
+    4-way head split of ``(4, 16, 1, 128, 2048)`` reports ``(4, 4, 1, 128, 2048)``
+    per shard while a 4-way replication reports the full shape four times. A physical
+    dtype torch has no equivalent for (``DLFloat16``) is returned by its runtime
+    name.
+
+    Returns:
+        PhysicalLayout: logical and physical shape/dtype plus one shard per area.
+
+    Raises:
+        RuntimeError: if ``tensor`` is not an RBLN tensor, does not cover its
+            whole storage, or has no device memory yet.
+
+    Example::
+
+        kv = torch.empty(2, num_blocks, heads, block, head_dim, dtype=torch.bfloat16, device="rbln")
+        ...  # run / warm up the compiled graph that binds it
+        per_chiplet = torch.rbln.physical_layout(kv).nbytes_per_chiplet()
+    """
+    info = torch_rbln._C._get_memory_info(tensor)
+    if not info["device_areas"]:
+        raise RuntimeError(
+            "physical_layout: tensor has no device memory yet -- run the graph that binds it or "
+            "call bind_device_memory() first"
+        )
+    shards = tuple(
+        PhysicalShard(node, chiplet, nbytes, addr, tuple(shape))
+        for node, chiplet, nbytes, addr, shape in info["device_areas"]
+    )
+    if info["physical_shape"]:
+        physical_shape = tuple(info["physical_shape"])
+        physical_dtype = _RUNTIME_DTYPE_TO_TORCH.get(info["physical_dtype"], info["physical_dtype"])
+    else:
+        physical_shape, physical_dtype = tuple(tensor.shape), tensor.dtype
+    return PhysicalLayout(tuple(tensor.shape), tensor.dtype, physical_shape, physical_dtype, shards)
+
+
+_RUNTIME_DTYPE_TO_TORCH: Dict[str, torch.dtype] = {
+    "Bool": torch.bool,
+    "UInt8": torch.uint8,
+    "Int8": torch.int8,
+    "Int16": torch.int16,
+    "Int32": torch.int32,
+    "Int64": torch.int64,
+    "Float16": torch.float16,
+    "Float32": torch.float32,
+    "Float64": torch.float64,
+    "Float8_e4m3": torch.float8_e4m3fn,
+    "Float8_e5m2": torch.float8_e5m2,
+    "BFloat16": torch.bfloat16,
+    # CustomFloat16 (DLFloat16) has no torch dtype; it falls through as its runtime name
+    "Complex32": torch.complex32,
+    "Complex64": torch.complex64,
+    "Complex128": torch.complex128,
+}
 
 
 def huge_host_empty(nbytes: int) -> torch.Tensor:
