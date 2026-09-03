@@ -352,13 +352,52 @@ c10::DeviceIndex get_torch_device_id(const void* data) {
   return static_cast<c10::DeviceIndex>(torch_device_id);
 }
 
+std::optional<c10::ScalarType> to_scalar_type(::rbln::DataType rbln_dtype) {
+  switch (rbln_dtype) {
+    case ::rbln::DataType::Bool:
+      return c10::kBool;
+    case ::rbln::DataType::UInt8:
+      return c10::kByte;
+    case ::rbln::DataType::Int8:
+      return c10::kChar;
+    case ::rbln::DataType::Int16:
+      return c10::kShort;
+    case ::rbln::DataType::Int32:
+      return c10::kInt;
+    case ::rbln::DataType::Int64:
+      return c10::kLong;
+    case ::rbln::DataType::Float16:
+      return c10::kHalf;
+    case ::rbln::DataType::Float32:
+      return c10::kFloat;
+    case ::rbln::DataType::Float64:
+      return c10::kDouble;
+    case ::rbln::DataType::Float8_e4m3:
+      return c10::kFloat8_e4m3fn;
+    case ::rbln::DataType::Float8_e5m2:
+      return c10::kFloat8_e5m2;
+    case ::rbln::DataType::BFloat16:
+      return c10::kBFloat16;
+    case ::rbln::DataType::Complex32:
+      return c10::kComplexHalf;
+    case ::rbln::DataType::Complex64:
+      return c10::kComplexFloat;
+    case ::rbln::DataType::Complex128:
+      return c10::kComplexDouble;
+    case ::rbln::DataType::Undefined:
+    case ::rbln::DataType::CustomFloat16:
+      return std::nullopt;
+  }
+  return std::nullopt;
+}
+
 ::rbln::MemoryInfo get_memory_info(const void* data) {
   RBLN_LOG_DEBUG("data={}", fmt::ptr(data));
   RBLN_CHECK(data != nullptr, "data cannot be nullptr");
   // get_memory_info() does a full VMemory JSON serialize+parse round-trip on
-  // every call. Warn so unexpected hot-path callers are easy to spot in logs;
-  // when only the device id is needed, get_torch_device_id() is the cheap path.
-  RBLN_LOG_WARN(
+  // every call; when only the device id is needed, get_torch_device_id() is the
+  // cheap path. Debug (not warn): torch.rbln.physical_layout() calls this on purpose.
+  RBLN_LOG_DEBUG(
       "get_memory_info({}) performs a full VMemory JSON round-trip (slow) — avoid on performance hot paths; "
       "use get_torch_device_id() when only the device id is needed",
       fmt::ptr(data));

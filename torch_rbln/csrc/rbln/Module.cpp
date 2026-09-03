@@ -9,7 +9,6 @@
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNSupportedDtypes.h>
-#include <rebel/runtime/api/rbln_runtime_api.h>
 #include <torch/csrc/Dtype.h>
 #include <torch/csrc/utils/pybind.h>
 #include <torch_rbln/csrc/distributed/c10d/rbln/ProcessGroupRBLNModule.hpp>
@@ -192,46 +191,6 @@ void check_base_rbln_tensor(const at::Tensor& t, const char* api, const char* na
       " must cover its whole storage (contiguous, storage_offset 0)");
 }
 
-const char* rbln_data_type_name(::rbln::DataType dtype) {
-  switch (dtype) {
-    case ::rbln::DataType::Undefined:
-      return "Undefined";
-    case ::rbln::DataType::Bool:
-      return "Bool";
-    case ::rbln::DataType::UInt8:
-      return "UInt8";
-    case ::rbln::DataType::Int8:
-      return "Int8";
-    case ::rbln::DataType::Int16:
-      return "Int16";
-    case ::rbln::DataType::Int32:
-      return "Int32";
-    case ::rbln::DataType::Int64:
-      return "Int64";
-    case ::rbln::DataType::Float16:
-      return "Float16";
-    case ::rbln::DataType::Float32:
-      return "Float32";
-    case ::rbln::DataType::Float64:
-      return "Float64";
-    case ::rbln::DataType::Float8_e4m3:
-      return "Float8_e4m3";
-    case ::rbln::DataType::Float8_e5m2:
-      return "Float8_e5m2";
-    case ::rbln::DataType::BFloat16:
-      return "BFloat16";
-    case ::rbln::DataType::CustomFloat16:
-      return "CustomFloat16";
-    case ::rbln::DataType::Complex32:
-      return "Complex32";
-    case ::rbln::DataType::Complex64:
-      return "Complex64";
-    case ::rbln::DataType::Complex128:
-      return "Complex128";
-  }
-  return "Undefined";
-}
-
 /**
  * @brief Register internal API functions with Python
  *
@@ -265,27 +224,37 @@ void register_internal_api(py::module_& module) {
       },
       "Internal: give an RBLN tensor a flat single-node device allocation");
 
-  // Physical placement of a tensor's device allocation (areas per (node, chiplet) plus the
-  // user/physical tensor meta of its transform). Used by torch_rbln.physical_layout().
+  // Physical placement of a tensor's device allocation: one dict per area, keyed like
+  // torch_rbln.memory.PhysicalShard, plus the physical tensor meta of its transform.
+  // Used by torch_rbln.physical_layout().
   module.def(
       "_get_memory_info",
       [](const at::Tensor& tensor) {
         check_base_rbln_tensor(tensor, "physical_layout", "tensor");
         const ::rbln::MemoryInfo info = c10::rbln::get_memory_info(tensor.data_ptr());
-        // Tuple order matches torch_rbln.memory.PhysicalShard(node_id, chiplet_id, nbytes, device_addr, shape).
         py::list areas;
         for (const auto& area : info.device_areas) {
-          areas.append(py::make_tuple(area.node_id, area.chiplet_id, area.size, area.device_addr, area.shape));
+          py::dict shard;
+          shard["node_id"] = area.node_id;
+          shard["chiplet_id"] = area.chiplet_id;
+          shard["nbytes"] = area.size;
+          shard["device_addr"] = area.device_addr;
+          shard["shape"] = area.shape;
+          areas.append(std::move(shard));
         }
         py::dict out;
-        out["user_dtype"] = rbln_data_type_name(info.user_dtype);
-        out["user_shape"] = info.user_shape;
-        out["physical_dtype"] = rbln_data_type_name(info.physical_dtype);
         out["physical_shape"] = info.physical_shape;
+        if (const auto scalar_type = c10::rbln::to_scalar_type(info.physical_dtype)) {
+          // Borrowed reference to a process-wide singleton, as in register_supported_dtypes_api.
+          out["physical_dtype"] =
+              py::reinterpret_borrow<py::object>(reinterpret_cast<PyObject*>(torch::getTHPDtype(*scalar_type)));
+        } else {
+          out["physical_dtype"] = py::none();
+        }
         out["device_areas"] = areas;
         return out;
       },
-      "Internal: device areas and tensor meta of an RBLN tensor's allocation");
+      "Internal: device areas and physical tensor meta of an RBLN tensor's allocation");
 
   // Set target's device-allocation layout to match ref's, without copying data.
   // Used by torch_rbln.set_device_layout_like().
