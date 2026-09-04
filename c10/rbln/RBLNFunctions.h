@@ -25,6 +25,13 @@ namespace c10::rbln {
 C10_RBLN_API ::rbln::DataType to_rbln_dtype(c10::ScalarType dtype);
 
 /**
+ * @brief Inverse of to_rbln_dtype(): the PyTorch dtype an RBLN data type maps back to.
+ *
+ * @return std::nullopt for RBLN data types torch has no dtype for (Undefined, CustomFloat16).
+ */
+C10_RBLN_API std::optional<c10::ScalarType> to_scalar_type(::rbln::DataType rbln_dtype);
+
+/**
  * @brief Converts memory information to a human-readable string.
  *
  * @param memory_info The memory information to convert.

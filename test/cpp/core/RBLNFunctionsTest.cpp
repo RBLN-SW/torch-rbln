@@ -27,6 +27,29 @@ class RBLNFunctionsTest : public ::testing::Test {
   const size_t size_16gib_ = 1ULL << 34; // The memory capacity of ATOM is 15.7 GiB.
 };
 
+TEST_F(RBLNFunctionsTest, ToScalarTypeInvertsToRblnDtype) {
+  for (const auto scalar_type :
+       {c10::kBool,
+        c10::kByte,
+        c10::kChar,
+        c10::kShort,
+        c10::kInt,
+        c10::kLong,
+        c10::kHalf,
+        c10::kFloat,
+        c10::kDouble,
+        c10::kComplexHalf,
+        c10::kComplexFloat,
+        c10::kComplexDouble,
+        c10::kBFloat16,
+        c10::kFloat8_e5m2,
+        c10::kFloat8_e4m3fn}) {
+    EXPECT_EQ(c10::rbln::to_scalar_type(c10::rbln::to_rbln_dtype(scalar_type)), scalar_type);
+  }
+  EXPECT_FALSE(c10::rbln::to_scalar_type(::rbln::DataType::Undefined).has_value());
+  EXPECT_FALSE(c10::rbln::to_scalar_type(::rbln::DataType::CustomFloat16).has_value());
+}
+
 TEST_F(RBLNFunctionsTest, GetDeviceCount) {
   const auto device_count = c10::rbln::get_device_count();
   EXPECT_GE(device_count, 1);
