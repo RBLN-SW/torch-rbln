@@ -172,6 +172,15 @@ def extract_warm_cache_key(*args, **kwargs):
     # DynamoRuntime) when input profiles change. Without shape/dtype in the key,
     # compile_rbln_cached would reuse the first compiled callable across all
     # shapes and the warm-cache install path would only ever fire once.
+    #
+    # Non-tensor arguments (``tensor + 1``, ``alpha=2``, ``rounding_mode="trunc"``)
+    # are compiled into the graph as constants, so ``a + 1`` and ``a + 2`` are
+    # different programs and need distinct entries. With one shared entry the
+    # second value runs as a Dynamo recompile inside the callable the first value
+    # created; the rebel backend then appends its runtime to that first call's
+    # ``_runtime_holder``, the current call's holder stays empty, and
+    # ``_install_warm_cache_pending`` never fires for the second value. The C++
+    # warm-cache key already separates scalar values; this keeps the two aligned.
     device_id = None
     profiles = []
     input_tensors = extract_tensors(args) + extract_tensors(kwargs)
@@ -181,7 +190,24 @@ def extract_warm_cache_key(*args, **kwargs):
         if device_id is None and tensor.device.type == "rbln":
             device_id = tensor.device.index
         profiles.append((tuple(tensor.shape), str(tensor.dtype)))
-    return (device_id, tuple(profiles))
+    scalars = tuple(_scalar_key_part(v) for v in args if not isinstance(v, torch.Tensor)) + tuple(
+        (k, _scalar_key_part(v)) for k, v in kwargs.items() if not isinstance(v, torch.Tensor)
+    )
+    return (device_id, tuple(profiles), scalars)
+
+
+def _scalar_key_part(value):
+    """Hashable, type-tagged key part for a non-tensor argument.
+
+    ``1``, ``1.0`` and ``True`` are tagged apart because they bake into different
+    graph constants; containers are keyed structurally; anything else falls back
+    to ``repr`` so the key stays hashable.
+    """
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return (type(value).__name__, value)
+    if isinstance(value, (list, tuple)):
+        return (type(value).__name__, tuple(_scalar_key_part(v) for v in value))
+    return ("repr", repr(value))
 
 
 def remove_empty_tensors(obj):
