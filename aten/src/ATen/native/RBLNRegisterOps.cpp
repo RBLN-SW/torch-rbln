@@ -130,6 +130,16 @@ TORCH_LIBRARY_IMPL(_, AutogradPrivateUse1, m) {
   m.fallback(torch::CppFunction::makeFromBoxedFunction<&autograd_fallback>());
 }
 
+// Operators this backend owns. `rbln_custom_ops` belongs to rebel-compiler, whose names
+// mirror the aten op each one converts -- `view_copy` is taken there the moment it adds a
+// converter for `aten::view_copy`, and two defs of one schema abort at import.
+TORCH_LIBRARY(torch_rbln, m) {
+  // `copy_` reaches this from C++ for a device->device copy whose source is a classifiable
+  // view; the implementation is Python because it drives the compile path. Answers false
+  // when the view cannot be replayed, leaving the caller on its existing route.
+  m.def("copy_strided_view(Tensor src, Tensor(a!) out) -> bool");
+}
+
 // ATen operations registration for the RBLN backend (PrivateUse1)
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   // Operations that use the device runtime API

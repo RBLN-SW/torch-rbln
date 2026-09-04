@@ -1238,6 +1238,9 @@ void empty_cache(const c10::Device& device) {
   if (!device_context_initialized(device_index)) {
     return;
   }
+  if (is_dummy_device()) {
+    return;
+  }
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_empty_cache: device_id={}", device_id);
   // Live context: surface a genuine failure (CUDA parity — an initialized allocator
@@ -1317,6 +1320,9 @@ void reset_accumulated_memory_stats(const c10::Device& device) {
   if (!device_context_initialized(device_index)) {
     return;
   }
+  if (is_dummy_device()) {
+    return;
+  }
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_reset_accumulated_memory_stats: device_id={}", device_id);
   // Live context: surface a genuine failure (a silent success would mislead the caller).
@@ -1338,6 +1344,9 @@ void reset_peak_memory_stats(const c10::Device& device) {
   const auto device_index = device.index();
   check_device_index(device_index);
   if (!device_context_initialized(device_index)) {
+    return;
+  }
+  if (is_dummy_device()) {
     return;
   }
   const auto device_id = to_device_id(device_index);
