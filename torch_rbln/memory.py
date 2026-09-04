@@ -155,9 +155,9 @@ def memory_stats(device: Optional[Union[int, str, torch.device]] = None) -> Dict
     - active.current, active.peak
 
     Scope, same as ``torch.cuda.memory_stats``: the caching allocator of the context
-    **this process** holds on ``device``. Weights and other direct device allocations
-    are not counted, and a second process on the same NPU is invisible here -- these
-    numbers are not the NPU's occupancy. For that, use ``rbln-smi``.
+    **this process** holds on ``device``. Other direct device allocations are not
+    counted, and a second process on the same NPU is invisible here -- these numbers
+    are not the NPU's occupancy. For that, use ``rbln-smi``.
 
     Args:
         device (Optional[Union[int, str, torch.device]]): The device to query.

@@ -634,9 +634,9 @@ C10_RBLN_API std::map<std::string, uint64_t> memory_stats(const c10::Device& dev
  * n-th physical NPU of this logical device (see RBLN_NPUS_PER_DEVICE), so a 1:1 mapping
  * yields npu.0 only.
  *
- * Scope is the caching allocator of this process's context on `device`. Weights and
- * other direct device allocations are not counted, and a second process on the same
- * NPU is invisible here -- see memory_stats().
+ * Scope is the caching allocator of this process's context on `device`. Other direct
+ * device allocations are not counted, and a second process on the same NPU is
+ * invisible here -- see memory_stats().
  *
  * @param device The input device.
  * @return A map containing per-chiplet memory statistics.
