@@ -1,4 +1,5 @@
 import math
+import threading
 
 import torch
 
@@ -457,6 +458,47 @@ def _materialize(t: torch.Tensor) -> torch.Tensor:
     return t.contiguous()
 
 
+# A compiled program binds its I/O once and repatching a large buffer's addresses costs
+# milliseconds, so a caller that alternates buffers needs one program per buffer. The
+# compile cache is keyed on (device, shapes, dtypes) and on the identity of the callable
+# under the recipe, never on an address -- so the callable is what carries the buffer
+# identity here: one distinct function object per source address, which
+# ``get_view_op_module`` then keys on. Bounded, so an unbounded caller cannot grow the
+# cache without limit; slots past the cap share a program and repatch as before.
+_MAX_COPY_SLOTS = 8
+_copy_slot_of_src: dict[int, int] = {}
+_copy_slot_ops: dict[int, object] = {0: _materialize}
+_copy_slot_lock = threading.Lock()
+
+
+def _materialize_for(src: torch.Tensor):
+    """``_materialize`` for this source buffer, one callable per address.
+
+    ``torch.compile`` caches on the code object, so each slot is compiled from its own
+    source -- the same reason ``compiled_permute`` generates one function per slot.
+    """
+    ptr = src.data_ptr()
+    with _copy_slot_lock:
+        slot = _copy_slot_of_src.get(ptr)
+        if slot is None:
+            slot = len(_copy_slot_of_src) % _MAX_COPY_SLOTS
+            _copy_slot_of_src[ptr] = slot
+        op = _copy_slot_ops.get(slot)
+        if op is None:
+            namespace: dict = {}
+            exec(  # noqa: S102
+                compile(
+                    "def _materialize_slot(t):\n    return t.contiguous()\n",
+                    f"<copy_strided_view slot {slot}>",
+                    "exec",
+                ),
+                {},
+                namespace,
+            )
+            op = _copy_slot_ops[slot] = namespace["_materialize_slot"]
+        return op
+
+
 def copy_strided_view_rbln(src, out) -> bool:
     """``out.copy_(src)`` for a strided device ``src``, as one compiled device program.
 
@@ -473,7 +515,9 @@ def copy_strided_view_rbln(src, out) -> bool:
     """
     if _detect_view_recipe(src) is None:
         return False
-    result = compile_and_run_view_aware(_materialize, "torch_rbln::copy_strided_view", (src,), {}, out)
+    result = compile_and_run_view_aware(
+        _materialize_for(src), "torch_rbln::copy_strided_view", (src,), {}, out
+    )
     if result is not None and result.data_ptr() != out.data_ptr():
         # The compile path only writes the caller's buffer for dtypes in
         # SupportedDtypes.dispatch; otherwise it hands back its own. Both are contiguous
