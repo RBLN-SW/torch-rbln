@@ -17,6 +17,7 @@ from torch_rbln._internal.ops_utils import (
     broadcast_args_general,
     can_use_out_tensor_directly,
     cpu_fallback_path,
+    extract_warm_cache_key,
     finalize_output_tensor,
     handle_empty_binary,
     handle_empty_linear,
@@ -517,6 +518,16 @@ class TestInternalOpUtils(TestCase):
         x = torch.randn(5, device="rbln")
         y = torch.randn(5, device="rbln")
         self.assertFalse(is_inplace_op((x, y), {}))
+
+    def test_warm_cache_key_keeps_tensor_values_out_of_containers(self):
+        """A tensor inside a list argument enters the key by profile, never by value."""
+        device = torch.device("rbln:0")
+        a = torch.ones(2, 64, device=device, dtype=torch.float16)
+        b = torch.zeros(2, 64, device=device, dtype=torch.float16)
+        c = torch.full((2, 64), 3.0, device=device, dtype=torch.float16)
+        self.assertEqual(extract_warm_cache_key([a, b], 0), extract_warm_cache_key([a, c], 0))
+        self.assertNotEqual(extract_warm_cache_key([a, b], 0), extract_warm_cache_key([a, b], 1))
+        self.assertNotEqual(extract_warm_cache_key([a, b], 0), extract_warm_cache_key([a], 0))
 
 
 @pytest.mark.test_set_ci

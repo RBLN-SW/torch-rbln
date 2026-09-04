@@ -201,10 +201,14 @@ def _scalar_key_part(value):
 
     ``1``, ``1.0`` and ``True`` are tagged apart because they bake into different
     graph constants; containers are keyed structurally; anything else falls back
-    to ``repr`` so the key stays hashable.
+    to ``repr`` so the key stays hashable. A tensor inside a container is a
+    placeholder: the caller already keys every tensor by shape and dtype, and
+    ``repr`` would put its values in the key and read them off the device.
     """
     if value is None or isinstance(value, (bool, int, float, str)):
         return (type(value).__name__, value)
+    if isinstance(value, torch.Tensor):
+        return ("tensor",)
     if isinstance(value, (list, tuple)):
         return (type(value).__name__, tuple(_scalar_key_part(v) for v in value))
     return ("repr", repr(value))
