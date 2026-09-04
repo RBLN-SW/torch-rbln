@@ -34,6 +34,8 @@ jobs:
       INTERNAL_INDEX_URL: ${{ secrets.INTERNAL_INDEX_URL }}
       INTERNAL_INDEX_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
       INTERNAL_INDEX_PASSWORD: ${{ secrets.INTERNAL_INDEX_PASSWORD }}
+      HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+      HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
 
   lint_workflows:
     uses: ./.github/workflows/_lint-workflows.yaml

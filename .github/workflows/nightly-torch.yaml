@@ -45,10 +45,10 @@ jobs:
       RBLN_FORCE_NPU_NAME: RBLN-CA25
     timeout-minutes: 90
     container:
-      image: ghcr.io/rebellions-sw/rbln-build:0.11.0-ubi9-py${{ inputs.python_version || '3.12' }}  # zizmor: ignore[unpinned-images]
+      image: harbor.mgmt.rbln.in/rebellions-sw/rbln-build:0.11.2-dev51-g5efce5e9a-ubi9.8-py${{ inputs.python_version || '3.12' }}  # zizmor: ignore[unpinned-images]
       credentials:
-        username: ${{ github.repository_owner }}
-        password: ${{ secrets.GIT_PAT }}
+        username: ${{ secrets.HARBOR_USERNAME }}
+        password: ${{ secrets.HARBOR_PASSWORD }}
     steps:
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
