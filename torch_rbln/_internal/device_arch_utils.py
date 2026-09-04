@@ -21,15 +21,21 @@ def _arch_from_npu_name(name: str) -> str:
 @functools.lru_cache(maxsize=1)
 def get_device_arch() -> str:
     """Identify the current NPU family (``"atom"``/``"rebel"``/``"unknown"``) via
-    ``get_npu_name`` from ``rebel-compiler`` (cached). Returns ``"unknown"`` if the
-    NPU name can't be queried.
-    """
-    try:
-        from rebel.device_info import get_npu_name
+    ``get_npu_name`` from ``rebel-compiler`` (cached).
 
-        return _arch_from_npu_name(get_npu_name(0) or "")
-    except Exception:
-        return "unknown"
+    ``"unknown"`` is what a host with no NPU gets on its own: ``get_npu_name``
+    answers ``None`` for an index no device claims, which maps to ``"unknown"``
+    without raising. So nothing here has to catch that case.
+
+    A ``get_npu_name`` that moved is the opposite, and must not arrive as the
+    same answer. Every caller of this is an architecture gate -- ``xfail_atom``,
+    ``xfail_rebel``, the per-lineup branches in the model tests -- so one
+    ``"unknown"`` turns all of them off at once, and the suite goes on
+    asserting something other than what it says it does. Let it raise.
+    """
+    from rebel.device_info import get_npu_name
+
+    return _arch_from_npu_name(get_npu_name(0) or "")
 
 
 def is_atom_device() -> bool:
