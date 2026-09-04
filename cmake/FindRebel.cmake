@@ -85,6 +85,7 @@ else()
   # transitively), so a partially-packaged wheel is diagnosed here rather than
   # as a compile error later.
   if(NOT EXISTS "${rebel_include_dir}/rebel/runtime/api/rbln_runtime_api.h"
+     OR NOT EXISTS "${rebel_include_dir}/rebel/runtime/api/rbln_exec_api.h"
      OR NOT EXISTS "${rebel_include_dir}/rebel/runtime/api/rbln_kineto_api.h"
      OR NOT EXISTS "${rebel_include_dir}/rebel/runtime/api/rbln_retcode.h"
      OR NOT EXISTS "${rebel_include_dir}/rebel/runtime/memory_stats.h"

@@ -18,7 +18,6 @@
 #include <cstring>
 
 #include <array>
-#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -52,7 +51,6 @@ std::atomic<uint64_t> g_diag_n_align_fastpath{0}; // align fast-path hits → cp
 std::atomic<uint64_t> g_diag_warm_n_hits{0};
 std::atomic<uint64_t> g_diag_warm_ns_lookup{0};
 std::atomic<uint64_t> g_diag_warm_ns_io_build{0};
-std::atomic<uint64_t> g_diag_warm_ns_gil{0};
 std::atomic<uint64_t> g_diag_warm_ns_prep_in{0};
 std::atomic<uint64_t> g_diag_warm_ns_prep_out{0};
 std::atomic<uint64_t> g_diag_warm_ns_run{0};
@@ -85,12 +83,11 @@ void diag_reset_dispatch_paths() {
   g_diag_n_align_fastpath.store(0, std::memory_order_relaxed);
 }
 
-std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t> diag_dump_warm_segments() {
+std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t> diag_dump_warm_segments() {
   return std::make_tuple(
       g_diag_warm_n_hits.load(std::memory_order_relaxed),
       g_diag_warm_ns_lookup.load(std::memory_order_relaxed),
       g_diag_warm_ns_io_build.load(std::memory_order_relaxed),
-      g_diag_warm_ns_gil.load(std::memory_order_relaxed),
       g_diag_warm_ns_prep_in.load(std::memory_order_relaxed),
       g_diag_warm_ns_prep_out.load(std::memory_order_relaxed),
       g_diag_warm_ns_run.load(std::memory_order_relaxed),
@@ -101,7 +98,6 @@ void diag_reset_warm_segments() {
   g_diag_warm_n_hits.store(0, std::memory_order_relaxed);
   g_diag_warm_ns_lookup.store(0, std::memory_order_relaxed);
   g_diag_warm_ns_io_build.store(0, std::memory_order_relaxed);
-  g_diag_warm_ns_gil.store(0, std::memory_order_relaxed);
   g_diag_warm_ns_prep_in.store(0, std::memory_order_relaxed);
   g_diag_warm_ns_prep_out.store(0, std::memory_order_relaxed);
   g_diag_warm_ns_run.store(0, std::memory_order_relaxed);
@@ -141,7 +137,7 @@ struct SchemaCache {
                                 // per-call (via ``needs_last_dim_one_broadcast``)
                                 // whether to materialize the post-broadcast
                                 // contig buffers before passing data_ptrs to
-                                // PrepareInputs. ``build_cache_key`` always
+                                // input binding. ``build_cache_key`` always
                                 // uses RAW input shapes regardless — keying on
                                 // post-broadcast shapes earlier caused
                                 // (4,8,16)+() and (4,8,16)+(4,8,1) to collide
@@ -857,9 +853,9 @@ PendingInstall take_pending() {
 }
 
 // Hot path: look up the warm-cache entry for `key` and, on hit, drive rebel's
-// PyRblnSyncRuntime directly from C++ — no pybind, no Python wrapper. Returns
-// true iff the hit path was taken and the stack has been left with the proper
-// return value.
+// rebel runtime from C++ through rbln_exec_api.h — no pybind, no Python
+// wrapper. Returns true iff the hit path was taken and the stack has been left
+// with the proper return value.
 //
 // Currently supports the shape:
 //   - single output (schema.returns().size() == 1)
@@ -884,13 +880,18 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
   if (!entry)
     return false;
 
-  // Build input-ptr map in the order tensor inputs appear on the stack.
-  std::map<uint32_t, uint64_t> dev_in;
-  std::map<uint32_t, uintptr_t> cpu_in;
+  // Input binding, in the order tensor inputs appear on the stack. Device-only:
+  // a CPU output bails out below, so the host arrays stay empty.
+  c10::SmallVector<uint32_t, 8> in_idx_buf;
+  c10::SmallVector<uint64_t, 8> in_vaddr_buf;
 
   auto arguments = torch::jit::last(stack, cache.num_args);
   at::Tensor out_tensor;
   uint32_t in_idx = 0;
+  auto bind_input = [&](const void* ptr) {
+    in_idx_buf.push_back(in_idx++);
+    in_vaddr_buf.push_back(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ptr)));
+  };
 
   // For broadcast ops: collect raw tensor inputs first, broadcast all at once,
   // then materialize each to contig (matching what mul_rbln/add_rbln do in
@@ -898,7 +899,7 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
   // compiled for the broadcast shape — would receive raw-shape data ptrs and
   // fail (size mismatch / OOB read), causing erase + permanent miss.
   // `held_tensors` keeps the materialized contig tensors alive until Run()
-  // completes (their data ptrs are what we pass to PrepareInputs).
+  // completes (their data ptrs are what we bind as inputs).
   std::vector<at::Tensor> held_tensors;
   // Decide whether warm-hit needs to materialize a post-broadcast buffer.
   //
@@ -950,7 +951,7 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
         if (ptr == nullptr) {
           return false;
         }
-        dev_in.emplace(in_idx++, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ptr)));
+        bind_input(ptr);
         held_tensors.push_back(std::move(contig));
       }
     } else {
@@ -961,7 +962,7 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
         if (ptr == nullptr) {
           return false;
         }
-        dev_in.emplace(in_idx++, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ptr)));
+        bind_input(ptr);
       }
     }
   } else {
@@ -1001,7 +1002,7 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
       }
       // Safety: a tensor with data_ptr() == 0 has no backing v-memory yet
       // (e.g. an alias produced by a previous op whose materialization is
-      // pending). Passing 0 to PrepareInputs trips the rebel runtime's
+      // pending). Binding 0 as an input trips the rebel runtime's
       // `Invalid key_vaddr=0` guard. Fall back to the pybind path so the
       // Python wrapper can force materialization (via to_cpu/contig/etc.)
       // and still produce a correct result.
@@ -1009,7 +1010,7 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
       if (ptr == nullptr) {
         return false;
       }
-      dev_in.emplace(in_idx++, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ptr)));
+      bind_input(ptr);
     }
   }
 
@@ -1041,67 +1042,44 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
     out_tensor = at::empty(op0.shape, at::TensorOptions().dtype(op0.dtype).device(device));
   }
 
-  std::map<uint32_t, uint64_t> dev_out;
-  std::map<uint32_t, uintptr_t> cpu_out;
   void* out_ptr = out_tensor.data_ptr();
   if (out_ptr == nullptr) {
-    // Same materialization concern as inputs (see dev_in loop above).
+    // Same materialization concern as inputs (see the input loop above).
     return false;
   }
-  dev_out.emplace(0u, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(out_ptr)));
+  const uint32_t out_idx = 0;
+  const uint64_t out_vaddr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(out_ptr));
 
   const uint64_t _seg_t_io_build = now_ns();
 
-  // rebel's PyRblnSyncRuntime methods are wrapped via pybind; they may set a
-  // Python exception on failure rather than throw a C++ exception. Acquire
-  // the GIL so we can both call them safely and inspect ``PyErr_Occurred``
-  // after each call to detect the soft failure path. On failure we clear
-  // the Python error and return false so the caller falls through to the
-  // pybind miss path (which routes through DynamoRuntime and performs the
-  // v-memory bookkeeping that lets the same tensor inputs succeed).
-  pybind11::gil_scoped_acquire wc_gil;
-  const uint64_t _seg_t_gil = now_ns();
-  bool runtime_failed = false;
-  // Each phase timer is assigned right after its corresponding runtime call;
-  // ``runtime_failed`` short-circuits past unassigned timers into the early
-  // return below so the diag accumulators never read a stale value. Default
-  // to ``_seg_t_gil`` for the (statically dead) failure path that
-  // ``runtime_failed`` doesn't catch — keeps the code intent obvious even
-  // though the bare init is unreachable on the success/read path.
-  uint64_t _seg_t_prep_in = _seg_t_gil; // NOLINT(clang-analyzer-deadcode.DeadStores)
-  uint64_t _seg_t_prep_out = _seg_t_gil;
-  uint64_t _seg_t_run = _seg_t_gil;
-  auto clear_and_fail = [&]() {
-    if (PyErr_Occurred())
-      PyErr_Clear();
-    runtime_failed = true;
-  };
-  try {
-    entry->runtime->PrepareInputs(dev_in, cpu_in);
-    _seg_t_prep_in = now_ns();
-    if (PyErr_Occurred()) {
-      clear_and_fail();
-    }
-    if (!runtime_failed) {
-      entry->runtime->PrepareOutputs(dev_out, cpu_out);
-      _seg_t_prep_out = now_ns();
-      if (PyErr_Occurred()) {
-        clear_and_fail();
-      }
-    }
-    if (!runtime_failed) {
-      entry->runtime->Run();
-      _seg_t_run = now_ns();
-      if (PyErr_Occurred()) {
-        clear_and_fail();
-      }
-    }
-  } catch (const pybind11::error_already_set&) {
-    clear_and_fail();
-  } catch (const std::exception&) {
-    clear_and_fail();
-  } catch (...) {
-    clear_and_fail();
+  // No GIL and no py::object below this point. A failure short-circuits to the
+  // early return, so the diag accumulators only read a fully-assigned path.
+  uint64_t _seg_t_prep_out = _seg_t_io_build;
+  uint64_t _seg_t_run = _seg_t_io_build;
+
+  bool runtime_failed = rbln_rt_prepare_inputs(
+                            entry->runtime,
+                            in_idx_buf.data(),
+                            in_vaddr_buf.data(),
+                            in_idx_buf.size(),
+                            /*host_idx=*/nullptr,
+                            /*host_ptr=*/nullptr,
+                            /*host_count=*/0) != RBLNRetCode_SUCCESS;
+  const uint64_t _seg_t_prep_in = now_ns();
+  if (!runtime_failed) {
+    runtime_failed = rbln_rt_prepare_outputs(
+                         entry->runtime,
+                         &out_idx,
+                         &out_vaddr,
+                         /*device_count=*/1,
+                         /*host_idx=*/nullptr,
+                         /*host_ptr=*/nullptr,
+                         /*host_count=*/0) != RBLNRetCode_SUCCESS;
+    _seg_t_prep_out = now_ns();
+  }
+  if (!runtime_failed) {
+    runtime_failed = rbln_rt_run(entry->runtime) != RBLNRetCode_SUCCESS;
+    _seg_t_run = now_ns();
   }
   if (runtime_failed) {
     // The runtime that we cached cannot serve this profile after all (e.g.
@@ -1133,8 +1111,7 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
   g_diag_warm_n_hits.fetch_add(1, std::memory_order_relaxed);
   g_diag_warm_ns_lookup.fetch_add(_seg_t_lookup - _seg_t0, std::memory_order_relaxed);
   g_diag_warm_ns_io_build.fetch_add(_seg_t_io_build - _seg_t_lookup, std::memory_order_relaxed);
-  g_diag_warm_ns_gil.fetch_add(_seg_t_gil - _seg_t_io_build, std::memory_order_relaxed);
-  g_diag_warm_ns_prep_in.fetch_add(_seg_t_prep_in - _seg_t_gil, std::memory_order_relaxed);
+  g_diag_warm_ns_prep_in.fetch_add(_seg_t_prep_in - _seg_t_io_build, std::memory_order_relaxed);
   g_diag_warm_ns_prep_out.fetch_add(_seg_t_prep_out - _seg_t_prep_in, std::memory_order_relaxed);
   g_diag_warm_ns_run.fetch_add(_seg_t_run - _seg_t_prep_out, std::memory_order_relaxed);
   g_diag_warm_ns_finalize.fetch_add(_seg_t_finalize - _seg_t_run, std::memory_order_relaxed);
@@ -1510,9 +1487,7 @@ void diag_reset_trace_by_op() {
 
 bool install_warmcache_from_pending(
     pybind11::object dyn_runtime,
-    pybind11::int_ runtime_raw_ptr,
-    uint32_t num_inputs,
-    uint32_t num_outputs,
+    const pybind11::object& runtime_handle,
     const std::vector<std::tuple<std::vector<int64_t>, std::string, bool>>& out_profiles) {
   PendingInstall p = take_pending();
   if (!p.valid)
@@ -1540,16 +1515,25 @@ bool install_warmcache_from_pending(
 
   CacheEntry entry;
   entry.py_dyn_runtime = std::move(dyn_runtime);
-  void* runtime_void_ptr = PyLong_AsVoidPtr(runtime_raw_ptr.ptr());
-  if (runtime_void_ptr == nullptr) {
+  // ``native_handle()`` is rebel's declared way to reach the runtime from C,
+  // and the handle it returns is borrowed — so the entry holds a reference to
+  // the object it came from. A runtime that does not offer one cannot be driven
+  // from the hit path, so refuse to install; the op keeps running on the Python
+  // wrapper path.
+  entry.py_runtime_handle = runtime_handle;
+  void* native = nullptr;
+  try {
+    native = PyLong_AsVoidPtr(runtime_handle.attr("native_handle")().ptr());
+  } catch (const pybind11::error_already_set&) {
+    return false;
+  }
+  if (native == nullptr) {
     if (PyErr_Occurred()) {
       PyErr_Clear();
     }
     return false;
   }
-  entry.runtime = static_cast<::rbln::PyRblnSyncRuntime*>(runtime_void_ptr);
-  entry.num_inputs = num_inputs;
-  entry.num_outputs = num_outputs;
+  entry.runtime = static_cast<RblnSyncRuntime>(native);
   entry.out_profiles.reserve(out_profiles.size());
   for (const auto& tup : out_profiles) {
     OutputProfile op;
