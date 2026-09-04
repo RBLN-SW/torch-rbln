@@ -20,6 +20,7 @@ __all__ = [
     "empty_cache",
     "huge_host_empty",
     "set_device_layout_like",
+    "physical_shape",
     "max_memory_allocated",
     "max_memory_reserved",
     "memory_allocated",
@@ -91,6 +92,16 @@ def set_device_layout_like(target: torch.Tensor, ref: torch.Tensor) -> None:
     the bulk upload and the per-slot device-to-device scatter are both fast.
     """
     torch_rbln._C._set_device_layout_like(target, ref)
+
+
+def physical_shape(tensor: torch.Tensor) -> "tuple[int, ...]":
+    """Compiler-assigned physical shape of an RBLN tensor's allocation.
+
+    May differ from ``tensor.shape`` (the compiler tiles/relays out); ``()`` when
+    no physical view is bound. Lets a consumer check a device tensor's on-device
+    layout against what it declared.
+    """
+    return tuple(torch_rbln._C._physical_shape(tensor))
 
 
 def _no_rbln_device() -> bool:
