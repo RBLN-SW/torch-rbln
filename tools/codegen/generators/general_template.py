@@ -132,8 +132,7 @@ class GeneralTemplates:
 
         @staticmethod
         def start(kernel_name: str) -> str:
-            """Generate function body start. No need to import
-            out_tensor_context — the helper does it lazily."""
+            """Generate function body start."""
             return f"""
 def {kernel_name}(*args, **kwargs):
 """

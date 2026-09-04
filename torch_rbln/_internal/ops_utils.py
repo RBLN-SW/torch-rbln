@@ -181,6 +181,15 @@ def extract_warm_cache_key(*args, **kwargs):
     # ``_runtime_holder``, the current call's holder stays empty, and
     # ``_install_warm_cache_pending`` never fires for the second value. The C++
     # warm-cache key already separates scalar values; this keeps the two aligned.
+    #
+    # ``compile_and_run_view_aware`` drives the cached runtime without going
+    # through the compiled callable, so the key has to separate everything the
+    # callable's guards would have recompiled for. Device, shape, dtype and the
+    # scalars and the argument identity pattern are that set: grad mode and
+    # requires_grad do not recompile this callable (checked on the device), and
+    # keying grad mode would compile every op once more under no_grad. A
+    # difference the key does miss shows up as a second runtime in the holder,
+    # which ``CompiledOp.runtime`` refuses to pick from.
     device_id = None
     profiles = []
     input_tensors = extract_tensors(args) + extract_tensors(kwargs)
@@ -193,7 +202,11 @@ def extract_warm_cache_key(*args, **kwargs):
     scalars = tuple(_scalar_key_part(v) for v in args if not isinstance(v, torch.Tensor)) + tuple(
         (k, _scalar_key_part(v)) for k, v in kwargs.items() if not isinstance(v, torch.Tensor)
     )
-    return (device_id, tuple(profiles), scalars)
+    # Dynamo folds a tensor passed twice into one graph input, so ``add(a, a)``
+    # and ``add(a, b)`` are different graphs even at equal profiles.
+    first_seen: dict[int, int] = {}
+    identity = tuple(first_seen.setdefault(id(t), i) for i, t in enumerate(input_tensors))
+    return (device_id, tuple(profiles), scalars, identity)
 
 
 def _scalar_key_part(value):
@@ -1771,13 +1784,12 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     if get_rbln_compile_op_depth() == 0:
         raise_if_dummy_execution(f"the eager op {op_name}" if op_name else "an eager op")
 
-    from torch_rbln._internal.compile_cache import compile_rbln_cached
+    from torch_rbln._internal.compile_cache import compile_rbln_cached_entry
     from torch_rbln._internal.env_utils import use_device_group_num_devices
     from torch_rbln._internal.warm_cache import (
         consume_force_recompile as _consume_warm_cache_force_recompile,
         install_pending as _install_warm_cache_pending,
     )
-    from torch_rbln.device.context_holder import out_tensor_context
 
     # Device 64-elem-align fallback: a last-dim not a multiple of 64 makes the
     # rebel pipeline wrap the device fn with host-only contrib_aligned_pad /
@@ -1841,8 +1853,7 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     compile_options = {"disable_logger": True}
     if not use_device_group_num_devices():
         compile_options["num_devices"] = 1
-    _runtime_holder = []
-    compile_options["_runtime_holder"] = _runtime_holder
+    compile_options["_runtime_holder"] = []
 
     if out_tensor is None:
         result_tensor = None
@@ -1856,27 +1867,86 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
 
     # Consume the C++ side's force-recompile flag (set when the prior
     # warm-cache hit erase'd a broken entry). On a True consumption,
-    # compile_rbln_cached drops its own cache entry for this key so the
-    # rebel backend re-instantiates and re-populates _runtime_holder so
-    # the install path below can fire again. See
+    # compile_rbln_cached_entry drops its own cache entry for this key so the
+    # rebel backend re-instantiates the runtime into a fresh holder and the
+    # install path below can fire again. See
     # ``WarmCache::request_force_recompile`` in DispatchShim.cpp.
     _force_recompile_warm = _consume_warm_cache_force_recompile()
-    with out_tensor_context(result_tensor):
-        compiled = compile_rbln_cached(
-            op_module,
-            dynamic=False,
-            options=compile_options,
-            device_cache_key=extract_warm_cache_key(*view_args, **view_kwargs),
-            force_recompile=_force_recompile_warm,
-        )
-        external_result = compiled(*view_args, **view_kwargs)
-        if result_tensor is None:
-            result_tensor = external_result
-        elif isinstance(external_result, torch.Tensor) and (external_result.data_ptr() != result_tensor.data_ptr()):
-            result_tensor.copy_(external_result)
-        if not has_views:
-            _install_warm_cache_pending(_runtime_holder, external_result)
+    entry = compile_rbln_cached_entry(
+        op_module,
+        dynamic=False,
+        options=compile_options,
+        device_cache_key=extract_warm_cache_key(*view_args, **view_kwargs),
+        force_recompile=_force_recompile_warm,
+    )
+    out_list = None if result_tensor is None else [result_tensor]
+    # The caller's ``out`` is bound as the program's output buffer, as the C++
+    # hit path binds it. A device copy into ``out`` is not the same thing: when
+    # ``out`` is host-latest (filled from the CPU, or by a CPU fallback) the
+    # runtime serves the copy on the host view and ``out`` stays off the device
+    # until something else consumes it, while a bound output is written on the
+    # device and marked device-latest.
+    tensors = extract_tensors(view_args) + extract_tensors(view_kwargs)
+    runtime = entry.runtime()
+    if runtime is not None and entry.input_order is not None:
+        # The compiled callable is skipped: the cache key separates what its
+        # guards would recompile for, so the runtime built for this key is the
+        # one this call needs.
+        outputs = runtime.run(*(tensors[i] for i in entry.input_order), out=out_list)
+        external_result = outputs[0] if len(outputs) == 1 else tuple(outputs)
+    else:
+        # First call for this key: the backend builds the runtime while the
+        # callable runs, into a buffer of its own that is dropped here. Binding
+        # ``out`` costs a second run, once, under the compile that just happened.
+        external_result = entry.compiled(*view_args, **view_kwargs)
+        runtime = entry.runtime()
+        if runtime is not None and entry.input_order is None:
+            entry.input_order = _graph_input_order(runtime, tensors)
+        if out_list is not None:
+            if runtime is not None and entry.input_order is not None:
+                runtime.run(*(tensors[i] for i in entry.input_order), out=out_list)
+            else:
+                # Either Dynamo recompiled inside the callable, so which runtime
+                # ran is unknown (see ``CompiledOp.runtime``), or the graph's
+                # inputs could not be matched to this call's tensors. ``out`` can
+                # then only be filled by copy, which leaves a host-latest ``out``
+                # on the host. The key is meant to make this unreachable.
+                if not entry.copy_fallback_warned:
+                    entry.copy_fallback_warned = True
+                    rbln_log_warn(
+                        f"{op_name}: {len(entry.runtime_holder)} runtime(s) behind one compiled callable and "
+                        f"input order {entry.input_order}; out= filled by device copy"
+                    )
+                result_tensor.copy_(external_result)
+            external_result = result_tensor
+    if result_tensor is None:
+        result_tensor = external_result
+    if not has_views:
+        # install_pending empties the list it is given; the entry keeps its own.
+        _install_warm_cache_pending(list(entry.runtime_holder), external_result)
     return result_tensor
+
+
+def _graph_input_order(runtime, tensors):
+    """Indices into ``tensors`` of the graph's inputs, in graph order, or None.
+
+    Dynamo makes a graph input of each tensor argument in the order it is
+    first used, so a view replay puts its base ahead of the other arguments,
+    and it folds away what needs no input: a tensor passed twice, a 0-dim CPU
+    constant. Rather than predict that, read it back: the runtime keeps a weak
+    reference to each tensor bound at its last run, in graph order, and right
+    after the compiled callable's first run those are this call's tensors.
+    """
+    first_seen: dict[int, int] = {}
+    for i, t in enumerate(tensors):
+        first_seen.setdefault(id(t), i)
+    order = []
+    for ref in runtime._input_binding.validated:
+        bound = ref() if ref is not None else None
+        if bound is None or id(bound) not in first_seen:
+            return None
+        order.append(first_seen[id(bound)])
+    return tuple(order)
 
 
 _ALL_FALLBACK_CASES = frozenset({"dispatch_mode", "reentrant", "trace", "dtype", "scalar", "storage_offset", "nan_inf"})
