@@ -142,6 +142,27 @@ C10_RBLN_API bool is_eager_malloc();
 C10_RBLN_API void bind_device_memory(void* rbln_data, size_t nbytes);
 
 /**
+ * @brief bind_device_memory() with the allocation placed on a chosen chiplet.
+ *
+ * Device DRAM is one pool per chiplet, and an allocation is pinned to the chiplet it
+ * names -- the runtime does not spill to another when that one fills. Every torch
+ * allocation otherwise goes to chiplet 0, so a caller that holds many large buffers
+ * (a transfer's staging set) spreads them with this. The placement survives later
+ * re-binds, including a compiled program taking the tensor as an operand.
+ *
+ * @param rbln_data Base pointer of an RBLN allocation (not an interior address).
+ * @param nbytes Size of the allocation in bytes. Must be positive.
+ * @param chiplet Chiplet index in [0, chiplet_count(device)).
+ */
+C10_RBLN_API void bind_device_memory_at(void* rbln_data, size_t nbytes, int64_t chiplet);
+
+/**
+ * @brief Number of chiplets per NPU of ``device``: the range bind_device_memory_at()
+ *        accepts. 1 on a device without chiplet-partitioned DRAM.
+ */
+C10_RBLN_API int64_t chiplet_count(const c10::Device& device);
+
+/**
  * @brief Configure ``target``'s device allocation to match ``ref``'s layout and
  *        dtype, without copying data.
  *
@@ -620,6 +641,16 @@ C10_RBLN_API void empty_cache(const c10::Device& device);
  * @return A map containing memory statistics.
  */
 C10_RBLN_API std::map<std::string, uint64_t> memory_stats(const c10::Device& device);
+
+/**
+ * @brief memory_stats() without the cross-chiplet aggregation: one map per chiplet of
+ *        ``device``'s NPU, in chiplet order.
+ *
+ * A device runs out on its heaviest chiplet, which the aggregate hides. Empty when the
+ * runtime is unavailable or the device has not allocated yet, like memory_stats().
+ */
+C10_RBLN_API std::vector<std::map<std::string, uint64_t>> memory_stats_per_chiplet(
+    const c10::Device& device);
 
 /**
  * @brief Resets the "accumulated" (historical) stats tracked by the current accelerator memory allocator.

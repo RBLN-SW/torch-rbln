@@ -111,6 +111,22 @@ at::Tensor _efficientzerotensor_rbln(
   return rbln_out;
 }
 
+void bind_device_memory_at_rbln(at::Tensor& self, int64_t chiplet) {
+  TORCH_CHECK(self.device().is_privateuseone(), "bind_device_memory_at: expected an RBLN tensor, got ", self.device());
+  // The placement configures the whole allocation behind the base address, so a tensor
+  // that does not cover its storage would configure the wrong region.
+  TORCH_CHECK(
+      self.storage_offset() == 0 && self.is_contiguous() &&
+          static_cast<int64_t>(self.storage().nbytes()) == self.numel() * self.element_size(),
+      "bind_device_memory_at: the tensor must cover its whole storage (contiguous, storage_offset 0)");
+  c10::rbln::bind_device_memory_at(self.data_ptr(), self.storage().nbytes(), chiplet);
+}
+
+int64_t chiplet_count_rbln(const at::Tensor& self) {
+  TORCH_CHECK(self.device().is_privateuseone(), "chiplet_count: expected an RBLN tensor, got ", self.device());
+  return c10::rbln::chiplet_count(self.device());
+}
+
 at::Tensor& zero_rbln_(at::Tensor& self) {
   RBLN_SCOPE_GUARD();
   if (self.numel() == 0) {

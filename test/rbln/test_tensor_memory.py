@@ -292,6 +292,68 @@ class TestBindDeviceMemory(TestCase):
         with self.assertRaises(RuntimeError):
             torch.rbln.bind_device_memory(torch.empty(4096, dtype=torch.uint8))
 
+    def test_chiplet_count_is_positive(self):
+        # Every device has at least one chiplet; a device with chiplet-partitioned DRAM
+        # reports how many pools it has. The count is the range ``chiplet=`` accepts.
+        self.assertGreaterEqual(torch.rbln.chiplet_count(self.rbln_device), 1)
+
+    def test_bind_on_a_chiplet_lands_there(self):
+        # The placement is what the per-chiplet statistics make observable: binding on
+        # chiplet k grows that chiplet's allocated bytes by the allocation and no other's.
+        n = torch.rbln.chiplet_count(self.rbln_device)
+        if n < 2:
+            self.skipTest("placement is only observable with more than one chiplet")
+        nbytes = 8 << 20
+        chiplet = n - 1
+        with mock.patch.dict(os.environ):
+            os.environ.pop("TORCH_RBLN_EAGER_MALLOC", None)  # would bind at allocation
+            torch.rbln.synchronize()
+            t = torch.empty(nbytes, dtype=torch.uint8, device=self.rbln_device)
+            before = torch.rbln.memory_stats_per_chiplet(self.rbln_device)
+            torch.rbln.bind_device_memory(t, chiplet=chiplet)
+            after = torch.rbln.memory_stats_per_chiplet(self.rbln_device)
+        self.assertEqual(len(before), n)
+        self.assertEqual(len(after), n)
+        key = "allocated.current"
+        grown = [after[i][key] - before[i][key] for i in range(n)]
+        self.assertGreaterEqual(grown[chiplet], nbytes)
+        for i in range(n):
+            if i != chiplet:
+                self.assertEqual(grown[i], 0, f"chiplet {i} grew by {grown[i]} bytes")
+
+    def test_placement_survives_a_compiled_op(self):
+        # A compiled program names chiplet 0 for its operands; binding a tensor placed
+        # elsewhere as one of them must not move it. Observable as the address staying put.
+        n = torch.rbln.chiplet_count(self.rbln_device)
+        if n < 2:
+            self.skipTest("placement is only observable with more than one chiplet")
+        # 32 MiB bf16 so the permuted copy takes the compiled path rather than the
+        # strided walk (see RBLNCopy.cpp: only bf16 is bit-exact there).
+        src = torch.empty((16, 8, 1024, 128), dtype=torch.bfloat16, device=self.rbln_device)
+        out = torch.empty((16, 1024, 8, 128), dtype=torch.bfloat16, device=self.rbln_device)
+        torch.rbln.bind_device_memory(src, chiplet=n - 1)
+        torch.rbln.bind_device_memory(out, chiplet=n - 1)
+        before = torch.rbln.memory_stats_per_chiplet(self.rbln_device)
+        out.copy_(src.permute(0, 2, 1, 3))
+        torch.rbln.synchronize()
+        after = torch.rbln.memory_stats_per_chiplet(self.rbln_device)
+        key = "allocated.current"
+        # The program brings its own buffers to chiplet 0 -- an output-sized DramTensor it
+        # allocates at load whether or not the caller supplies the output, plus command
+        # streams -- so chiplet 0 does grow by about one operand. Migrating even one
+        # operand there would add another operand on top of that.
+        operand_bytes = src.numel() * src.element_size()
+        self.assertLess(after[0][key] - before[0][key], 2 * operand_bytes)
+        # ...and the operands did not leave their chiplet.
+        self.assertGreaterEqual(after[n - 1][key], before[n - 1][key])
+
+    def test_rejects_out_of_range_chiplet(self):
+        t = torch.empty(4096, dtype=torch.uint8, device=self.rbln_device)
+        with self.assertRaises(RuntimeError):
+            torch.rbln.bind_device_memory(t, chiplet=torch.rbln.chiplet_count(self.rbln_device))
+        with self.assertRaises(ValueError):
+            torch.rbln.bind_device_memory(t, chiplet=-1)
+
     def test_rejects_interior_view(self):
         # A slice's data_ptr() is an interior address; binding it would configure the
         # wrong region, so it is refused rather than silently mis-bound. A view that
