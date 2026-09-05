@@ -70,6 +70,20 @@ at::Tensor _efficientzerotensor_rbln(
  */
 at::Tensor& zero_rbln_(at::Tensor& self);
 
+/**
+ * @brief ``torch_rbln::bind_device_memory_at``: materialise ``self``'s device allocation on
+ *        ``chiplet``. ``self`` must cover its whole storage (contiguous, storage offset 0).
+ *
+ * The dispatcher-reachable form of c10::rbln::bind_device_memory_at(), for callers that link
+ * only ATen. See that function for the placement semantics.
+ */
+void bind_device_memory_at_rbln(at::Tensor& self, int64_t chiplet);
+
+/**
+ * @brief ``torch_rbln::chiplet_count``: chiplets per NPU of ``self``'s device.
+ */
+int64_t chiplet_count_rbln(const at::Tensor& self);
+
 // Native impl of aten::fill_.Scalar — borrow host pointer + typed std::fill_n
 // + return_borrowed(updated=true). Bypasses cpu_fallback_rbln's redispatchBoxed
 // + TensorIterator path. The fast path is taken for a contiguous self with a
