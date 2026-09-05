@@ -629,6 +629,41 @@ void bind_device_memory(void* rbln_data, size_t nbytes) {
       nbytes);
 }
 
+void bind_device_memory_at(void* rbln_data, size_t nbytes, int64_t chiplet) {
+  RBLN_CHECK(rbln_data != nullptr, "bind_device_memory_at: rbln_data is nullptr");
+  RBLN_CHECK(nbytes > 0, "bind_device_memory_at: nbytes must be positive, but got {}", nbytes);
+  RBLN_CHECK(
+      chiplet >= 0 && chiplet <= std::numeric_limits<uint8_t>::max(),
+      "bind_device_memory_at: chiplet must be a small non-negative index, got {}",
+      chiplet);
+  require_runtime("bind device memory");
+  const auto vaddr = reinterpret_cast<uint64_t>(rbln_data);
+  RBLN_LOG_DEBUG("bind_device_memory_at: vaddr={:#x} nbytes={} chiplet={}", vaddr, nbytes, chiplet);
+  // The runtime validates the chiplet against the device's count and names it in the
+  // error, so a bad index fails here rather than when the allocation materialises.
+  RBLN_CHECK(
+      !::rbln::rbln_set_raw_memory_alloc_at(
+          vaddr, static_cast<uint64_t>(nbytes), /*node_id=*/0, static_cast<uint8_t>(chiplet)),
+      "rbln_set_raw_memory_alloc_at failed (vaddr={:#x}, {} bytes, chiplet {}); the chiplet may be out of "
+      "range for this device, the pointer may not be RBLN device memory, or that chiplet may be out of memory",
+      vaddr,
+      nbytes,
+      chiplet);
+}
+
+int64_t chiplet_count(const c10::Device& device) {
+  const auto device_index = device.index();
+  check_device_index(device_index);
+  require_runtime("query the chiplet count");
+  const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
+  uint32_t count = 0;
+  RBLN_CHECK(
+      !::rbln::rbln_get_num_chiplets(torch_device_id, &count),
+      "rbln_get_num_chiplets failed (rbln:{})",
+      static_cast<int>(device_index));
+  return static_cast<int64_t>(count);
+}
+
 void set_device_layout_like(void* target_data, const void* ref_data) {
   RBLN_CHECK(target_data != nullptr, "set_device_layout_like: target is nullptr");
   RBLN_CHECK(ref_data != nullptr, "set_device_layout_like: ref is nullptr");
@@ -1286,6 +1321,31 @@ std::map<std::string, uint64_t> memory_stats(const c10::Device& device) {
   const auto memory_stats = stats.GetMemoryStats();
   RBLN_LOG_DEBUG("memory_stats={}", memory_stats);
   return memory_stats;
+}
+
+std::vector<std::map<std::string, uint64_t>> memory_stats_per_chiplet(const c10::Device& device) {
+  RBLN_LOG_DEBUG("logical device={}", c10::str(device));
+  // Same gates as memory_stats(): empty rather than a throw while the runtime is
+  // unavailable or before this process has allocated on the device.
+  if (!runtime_available()) {
+    return {};
+  }
+  const auto device_index = device.index();
+  check_device_index(device_index);
+  if (!device_context_initialized(device_index)) {
+    return {};
+  }
+  const auto device_id = to_device_id(device_index);
+  RBLN_LOG_DEBUG("Calling rbln_get_memory_stats_per_chiplet: device_id={}", device_id);
+  const auto per_node = rbln_get_memory_stats_per_chiplet(device_id);
+  // A torch device maps to one NPU here; the runtime reports [node][chiplet].
+  std::vector<std::map<std::string, uint64_t>> out;
+  for (const auto& per_chiplet : per_node) {
+    for (const auto& stats : per_chiplet) {
+      out.push_back(stats.GetMemoryStats());
+    }
+  }
+  return out;
 }
 
 void reset_accumulated_memory_stats(const c10::Device& device) {

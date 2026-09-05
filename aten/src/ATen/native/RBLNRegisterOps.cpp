@@ -138,6 +138,17 @@ TORCH_LIBRARY(torch_rbln, m) {
   // view; the implementation is Python because it drives the compile path. Answers false
   // when the view cannot be replayed, leaving the caller on its existing route.
   m.def("copy_strided_view(Tensor src, Tensor(a!) out) -> bool");
+  // Placement, reachable through the dispatcher so an extension that links only ATen --
+  // LMCache's RBLN transfer -- can spread its staging buffers across chiplets without a
+  // build dependency on this library. Mirrors torch.rbln.bind_device_memory(t, chiplet=)
+  // and torch.rbln.chiplet_count().
+  m.def("bind_device_memory_at(Tensor(a!) self, int chiplet) -> ()");
+  m.def("chiplet_count(Tensor self) -> int");
+}
+
+TORCH_LIBRARY_IMPL(torch_rbln, PrivateUse1, m) {
+  m.impl("bind_device_memory_at", TORCH_FN(at::native::rbln::bind_device_memory_at_rbln));
+  m.impl("chiplet_count", TORCH_FN(at::native::rbln::chiplet_count_rbln));
 }
 
 // ATen operations registration for the RBLN backend (PrivateUse1)

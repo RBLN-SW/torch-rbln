@@ -17,6 +17,7 @@ import torch_rbln._C
 
 __all__ = [
     "bind_device_memory",
+    "chiplet_count",
     "empty_cache",
     "huge_host_empty",
     "is_pinned_address",
@@ -28,6 +29,7 @@ __all__ = [
     "memory_allocated",
     "memory_reserved",
     "memory_stats",
+    "memory_stats_per_chiplet",
     "offload",
     "release_offload_temp_storage",
     "reset_accumulated_memory_stats",
@@ -168,6 +170,24 @@ def memory_stats(device: Optional[Union[int, str, torch.device]] = None) -> Dict
     return torch_rbln._C.memory_stats(device)
 
 
+def memory_stats_per_chiplet(
+    device: Optional[Union[int, str, torch.device]] = None,
+) -> list[Dict[str, int]]:
+    """:func:`memory_stats` without the cross-chiplet aggregation.
+
+    One statistics dict per chiplet of ``device``'s NPU, in chiplet order, with
+    the same keys as :func:`memory_stats`. A device runs out of memory on its
+    heaviest chiplet, which the aggregate hides; this is how to see which one.
+    Empty when the runtime is unavailable or the device has not allocated yet.
+
+    Args:
+        device: Device to query; the current device when ``None``.
+    """
+    if _no_rbln_device():
+        return []
+    return torch_rbln._C._memory_stats_per_chiplet(_normalize_device(device).index)
+
+
 def memory_allocated(device: Optional[Union[int, str, torch.device]] = None) -> int:
     """
     Return the current accelerator device memory occupied by tensors in bytes.
@@ -260,7 +280,7 @@ _offload_lock = threading.Lock()
 _offload_depth = 0
 
 
-def bind_device_memory(tensor: torch.Tensor) -> None:
+def bind_device_memory(tensor: torch.Tensor, *, chiplet: Optional[int] = None) -> None:
     """
     Materialize ``tensor``'s device allocation instead of leaving it lazy.
 
@@ -275,22 +295,55 @@ def bind_device_memory(tensor: torch.Tensor) -> None:
     :func:`set_device_layout_like` instead when the layout has to match another
     tensor's. Binding an already-bound region is allowed.
 
+    Device DRAM is one pool per chiplet, and an allocation is pinned to the
+    chiplet it lands on -- the runtime does not spill to another chiplet when
+    that one fills. Every allocation lands on chiplet 0 unless ``chiplet`` says
+    otherwise, so a caller holding many large buffers (a transfer's staging set)
+    spreads them by passing a chiplet. The placement survives later re-binds,
+    including a compiled program taking the tensor as an operand.
+
     Args:
         tensor: An RBLN tensor covering its whole storage: contiguous, with zero
             storage offset. A view that still spans the whole storage is fine; a
             slice or an interior view is not, since its address is not the
             allocation's.
+        chiplet: Chiplet to place the allocation on, in
+            ``range(chiplet_count(tensor.device))``. ``None`` places it on
+            chiplet 0.
 
     Raises:
         RuntimeError: if ``tensor`` is not an RBLN tensor, does not cover its
-            whole storage, or the runtime rejects the allocation.
+            whole storage, ``chiplet`` is out of range for the device, or the
+            runtime rejects the allocation.
 
     Example::
 
         staging = torch.empty(nbytes, dtype=torch.uint8, device="rbln:0")
-        torch.rbln.bind_device_memory(staging)
+        torch.rbln.bind_device_memory(staging, chiplet=2)
     """
-    torch_rbln._C._bind_device_memory(tensor)
+    if chiplet is None:
+        torch_rbln._C._bind_device_memory(tensor)
+        return
+    chiplet = operator.index(chiplet)
+    if chiplet < 0:
+        raise ValueError(f"chiplet must be a non-negative index, got {chiplet}")
+    torch_rbln._C._bind_device_memory_at(tensor, chiplet)
+
+
+def chiplet_count(device: Optional[Union[int, str, torch.device]] = None) -> int:
+    """Number of chiplets per NPU of ``device``.
+
+    This is the range :func:`bind_device_memory` accepts for ``chiplet``. Device
+    DRAM is partitioned per chiplet, so it is also how many independent memory
+    pools the device has. Returns 1 on a device without chiplet-partitioned DRAM,
+    and 0 when no RBLN device is available.
+
+    Args:
+        device: Device to query; the current device when ``None``.
+    """
+    if _no_rbln_device():
+        return 0
+    return torch_rbln._C._chiplet_count(_normalize_device(device).index)
 
 
 def huge_host_empty(nbytes: int) -> torch.Tensor:
