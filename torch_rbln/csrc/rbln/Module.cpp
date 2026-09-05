@@ -224,6 +224,27 @@ void register_internal_api(py::module_& module) {
       },
       "Internal: give an RBLN tensor a flat single-node device allocation");
 
+  // bind_device_memory with the allocation placed on a chosen chiplet. Used by
+  // torch_rbln.bind_device_memory(tensor, chiplet=...).
+  module.def(
+      "_bind_device_memory_at",
+      [](const at::Tensor& tensor, int64_t chiplet) {
+        check_base_rbln_tensor(tensor, "bind_device_memory", "tensor");
+        c10::rbln::bind_device_memory_at(tensor.data_ptr(), tensor.storage().nbytes(), chiplet);
+      },
+      "Internal: give an RBLN tensor a flat device allocation on the given chiplet");
+  module.def(
+      "_chiplet_count",
+      [](c10::DeviceIndex device_index) {
+        return c10::rbln::chiplet_count(c10::Device(c10::kPrivateUse1, device_index));
+      },
+      "Internal: number of chiplets per NPU of the device");
+  module.def(
+      "_memory_stats_per_chiplet",
+      [](c10::DeviceIndex device_index) {
+        return c10::rbln::memory_stats_per_chiplet(c10::Device(c10::kPrivateUse1, device_index));
+      },
+      "Internal: memory_stats without the cross-chiplet aggregation, one dict per chiplet");
   // Set target's device-allocation layout to match ref's, without copying data.
   // Used by torch_rbln.set_device_layout_like().
   module.def(
