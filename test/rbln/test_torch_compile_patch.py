@@ -5,7 +5,6 @@ Test suite for torch_compile_patch_helpers module.
 """
 
 import types
-from contextlib import nullcontext
 from unittest.mock import Mock, patch
 
 import pytest
@@ -981,6 +980,18 @@ class TestTorchCompileMonkeyPatch(TestCase):
         block_size = 16
         return (q, k, v, k_cache, v_cache, seq, scale, block_table, block_size)
 
+    def _make_flash_attention_naive_inputs(self):
+        q = torch.zeros((1, 1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
+        k = torch.zeros((1, 1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
+        v = torch.zeros((1, 1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
+        kv_cache = torch.zeros((1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
+        mask = torch.zeros((1, 1, 1), device="rbln:0", dtype=torch.float16)
+        scale = torch.tensor(1.0)
+        seq_idx = torch.zeros((1, 1), dtype=torch.int32)
+        block_tables = torch.zeros((1, 1), dtype=torch.int32)
+        slot_mapping = torch.zeros((1, 1), dtype=torch.int32)
+        return (q, k, v, kv_cache, mask, scale, seq_idx, block_tables, slot_mapping)
+
     def test_patch_torch_compile_idempotent(self):
         """Test that patching multiple times is safe."""
         patch_torch_compile()
@@ -1097,8 +1108,8 @@ class TestTorchCompileMonkeyPatch(TestCase):
         self.assertEqual(mock_compile.call_count, 2)
 
     @requires_logical_devices(1)
-    def test_paged_attn_custom_kernel_paths_reuse_singleton_modules(self):
-        """Custom paged-attn kernels should pass stable module singletons into the compile cache."""
+    def test_custom_attn_kernel_paths_reuse_singleton_modules(self):
+        """Custom attention kernels should hand a stable module singleton to the compile cache."""
         cases = [
             (
                 register_custom_ops.paged_attn_prefill_rbln,
@@ -1120,22 +1131,28 @@ class TestTorchCompileMonkeyPatch(TestCase):
                 register_custom_ops._paged_causal_attn_decode_op_module,
                 self._make_paged_causal_attn_decode_inputs,
             ),
+            (
+                register_custom_ops.flash_attention_naive_prefill_rbln,
+                register_custom_ops._flash_attention_naive_prefill_op_module,
+                self._make_flash_attention_naive_inputs,
+            ),
+            (
+                register_custom_ops.flash_attention_naive_decode_rbln,
+                register_custom_ops._flash_attention_naive_decode_op_module,
+                self._make_flash_attention_naive_inputs,
+            ),
         ]
-
-        def fake_out_tensor_context(out_tensor=None):
-            return nullcontext()
 
         for kernel_fn, expected_module, make_inputs in cases:
             seen_models = []
 
-            def fake_compile(model, **kwargs):
-                seen_models.append(model)
-                return lambda *args, **inner_kwargs: args[0].clone()
+            def fake_dispatch(op_module, args, view_recipes):
+                seen_models.append(op_module)
+                return args[0].clone()
 
-            with patch.object(register_custom_ops, "compile_rbln_cached", side_effect=fake_compile):
-                with patch("torch_rbln.device.context_holder.out_tensor_context", new=fake_out_tensor_context):
-                    kernel_fn(*make_inputs())
-                    kernel_fn(*make_inputs())
+            with patch.object(register_custom_ops, "_dispatch_custom_kernel", side_effect=fake_dispatch):
+                kernel_fn(*make_inputs())
+                kernel_fn(*make_inputs())
 
             self.assertEqual(len(seen_models), 2)
             self.assertIs(seen_models[0], expected_module)

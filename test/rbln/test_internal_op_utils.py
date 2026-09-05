@@ -13,6 +13,7 @@ from torch.testing._internal.common_device_type import instantiate_device_type_t
 from torch.testing._internal.common_utils import run_tests, TestCase
 from torch.utils._python_dispatch import TorchDispatchMode
 
+import torch_rbln._C as _C
 from torch_rbln._internal.ops_utils import (
     broadcast_args_general,
     can_use_out_tensor_directly,
@@ -30,6 +31,31 @@ from torch_rbln._internal.ops_utils import (
     prepare_args_for_contiguous,
     SupportedDtypes,
 )
+
+
+def _is_host_latest(t: torch.Tensor) -> bool:
+    """True when ``t``'s host view is the authoritative copy.
+
+    Cloning a device tensor takes the runtime's device-to-device plan unless
+    the source is host-latest; then the runtime routes the copy through the
+    host and counts it in its hidden-copy telemetry.
+    """
+    before = sum(count for count, _bytes in _C._rt_prof_hidden())
+    t.clone()
+    torch.rbln.synchronize()
+    return sum(count for count, _bytes in _C._rt_prof_hidden()) > before
+
+
+def _host_latest_out(shape) -> torch.Tensor:
+    """A device tensor whose host view is authoritative, as a CPU->device copy leaves it."""
+    out = torch.empty(shape, device="rbln:0", dtype=torch.float16)
+    out.copy_(torch.zeros(shape, dtype=torch.float16))
+    return out
+
+
+def _h2d_bytes() -> int:
+    """Bytes the runtime has moved host->device by a real transfer so far."""
+    return _C._rt_prof_host_sync()[1][1]
 
 
 @pytest.mark.test_set_ci
@@ -536,6 +562,201 @@ class TestOutTensors(TestCase):
 
     atol = 0.01
     rtol = 0.01
+
+    def test_out_is_filled_without_the_rebel_global_out_stash(self):
+        """``out=`` is filled on the compile miss and on the warm hit without
+        rebel's process-global out-tensor stash.
+
+        The stash is one list per process: a second thread setting it between
+        our set and the runtime's read sends our result into that thread's
+        buffer. Both paths bind ``out`` as the runtime's output buffer instead,
+        the miss path through ``DynamoRuntime.run(out=)``.
+        """
+        from rebel.core.torch_eager import eager_execution_helper
+
+        device = torch.device("rbln:0")
+        x = torch.randn(3, 128, device=device, dtype=torch.float16)
+        y = torch.randn(3, 128, device=device, dtype=torch.float16)
+        reference = torch.add(x.cpu(), y.cpu())
+        stash = eager_execution_helper()
+
+        size_before = _C._warmcache_size()
+        with patch.object(stash, "set_out_tensor", wraps=stash.set_out_tensor) as set_out_tensor:
+            # First call misses the warm cache and compiles; the second hits it.
+            for _ in range(2):
+                out = torch.empty(3, 128, device=device, dtype=torch.float16)
+                out_ptr = out.data_ptr()
+                result = torch.add(x, y, out=out)
+                self.assertIs(result, out)
+                self.assertEqual(out.data_ptr(), out_ptr)
+                self.assertEqual(out.cpu(), reference, atol=self.atol, rtol=self.rtol)
+        self.assertGreater(_C._warmcache_size(), size_before, "add must take the device path, not a host fallback")
+        set_out_tensor.assert_not_called()
+        self.assertEqual(stash.out_tensors, [])
+
+    def test_host_latest_out_becomes_device_resident_on_every_path(self):
+        """An ``out`` whose host view is authoritative ends device-resident after
+        the compile miss, the C++ warm hit, and the Python path a view input takes.
+
+        Filling it by device copy would not do that: the runtime serves a copy
+        into a host-latest destination on the host view, and ``out`` reaches
+        the device only when something else consumes it. Binding it as the
+        program's output writes the device and marks it so.
+        """
+        device = torch.device("rbln:0")
+        shape = (3, 192)
+        x = torch.randn(shape, device=device, dtype=torch.float16)
+        y = torch.randn(shape, device=device, dtype=torch.float16)
+        self.assertTrue(_is_host_latest(_host_latest_out(shape)), "the probe must see the starting state")
+
+        reference = torch.sub(x.cpu(), y.cpu())
+        for path in ("compile miss", "warm hit"):
+            out = _host_latest_out(shape)
+            out_ptr = out.data_ptr()
+            torch.sub(x, y, out=out)
+            self.assertEqual(out.data_ptr(), out_ptr, path)
+            self.assertEqual(out.cpu(), reference, atol=self.atol, rtol=self.rtol, msg=path)
+            self.assertFalse(_is_host_latest(out), path)
+
+        # A permuted input never installs into the warm cache, so every call
+        # below is the Python path; from the second one on it drives the
+        # cached runtime directly. The view sits on the second argument: its
+        # replay is traced before the op, so the graph takes it first and the
+        # call's tensors reach the runtime in graph order, not argument order.
+        xv = torch.randn(shape[::-1], device=device, dtype=torch.float16).t()
+        reference = torch.sub(y.cpu(), xv.cpu())
+        outs = [_host_latest_out(shape), _host_latest_out(shape)]
+        for call in range(3):
+            out = outs[call % 2]
+            out_ptr = out.data_ptr()
+            torch.sub(y, xv, out=out)
+            self.assertEqual(out.data_ptr(), out_ptr, f"view path, call {call}")
+            self.assertEqual(out.cpu(), reference, atol=self.atol, rtol=self.rtol, msg=f"view path, call {call}")
+            self.assertFalse(_is_host_latest(out), f"view path, call {call}")
+
+        # The same tensor twice is one graph input, and the runtime is driven
+        # with one tensor. Two distinct tensors of the same shapes are another
+        # graph: reusing the first one would compute ``x + x`` for ``x + y``.
+        # With the warm cache off every hit is the Python path.
+        warm_cache_was_enabled = _C._warmcache_is_enabled()
+        _C._warmcache_set_enabled(False)
+        try:
+            reference = torch.add(x.cpu(), x.cpu())
+            for call in range(2):
+                out = _host_latest_out(shape)
+                torch.add(x, x, out=out)
+                self.assertEqual(out.cpu(), reference, atol=self.atol, rtol=self.rtol, msg=f"aliased, call {call}")
+                self.assertFalse(_is_host_latest(out), f"aliased, call {call}")
+            out = _host_latest_out(shape)
+            torch.add(x, y, out=out)
+            self.assertEqual(out.cpu(), torch.add(x.cpu(), y.cpu()), atol=self.atol, rtol=self.rtol)
+        finally:
+            _C._warmcache_set_enabled(warm_cache_was_enabled)
+
+    def test_warm_hit_binds_alternating_out_buffers(self):
+        """The C++ hit path writes whichever ``out`` each call passes and keeps its entry."""
+        device = torch.device("rbln:0")
+        shape = (5, 192)
+        x = torch.randn(shape, device=device, dtype=torch.float16)
+        y = torch.randn(shape, device=device, dtype=torch.float16)
+        reference = torch.add(x.cpu(), y.cpu())
+        torch.add(x, y, out=_host_latest_out(shape))  # compile and install
+        size = _C._warmcache_size()
+        outs = [_host_latest_out(shape), _host_latest_out(shape)]
+        for call in range(4):
+            out = outs[call % 2]
+            out_ptr = out.data_ptr()
+            torch.add(x, y, out=out)
+            self.assertEqual(out.data_ptr(), out_ptr, f"call {call}")
+            self.assertEqual(out.cpu(), reference, atol=self.atol, rtol=self.rtol, msg=f"call {call}")
+            self.assertFalse(_is_host_latest(out), f"call {call}")
+            self.assertEqual(_C._warmcache_size(), size, f"call {call}: the entry must survive a warm hit")
+
+    def test_binding_out_moves_no_bytes_to_the_device(self):
+        """Binding a host-latest or zero-initialized ``out`` as the program's
+        output transfers nothing to the device. The program overwrites all of
+        it, so the runtime skips both the push of the stale host view and the
+        zero fill it would otherwise do before the run. Checked on the C++ warm
+        hit and on the Python path a view input takes; the compile miss is left
+        out because the compile itself uploads the program.
+        """
+        device = torch.device("rbln:0")
+        shape = (3, 320)
+        x = torch.randn(shape, device=device, dtype=torch.float16)
+        y = torch.randn(shape, device=device, dtype=torch.float16)
+        xv = torch.randn(shape[::-1], device=device, dtype=torch.float16).t()
+        torch.sub(x, y, out=torch.empty(shape, device=device, dtype=torch.float16))
+        torch.sub(y, xv, out=torch.empty(shape, device=device, dtype=torch.float16))
+        torch.rbln.synchronize()
+
+        def zero_initialized_out():
+            return torch.zeros(shape, device=device, dtype=torch.float16)
+
+        paths = (
+            ("warm hit", lambda out: torch.sub(x, y, out=out), torch.sub(x.cpu(), y.cpu())),
+            ("view path", lambda out: torch.sub(y, xv, out=out), torch.sub(y.cpu(), xv.cpu())),
+        )
+        for state, make_out in (
+            ("host-latest", lambda: _host_latest_out(shape)),
+            ("zero-initialized", zero_initialized_out),
+        ):
+            for path, op, reference in paths:
+                out = make_out()
+                h2d_before = _h2d_bytes()
+                op(out)
+                torch.rbln.synchronize()
+                self.assertEqual(_h2d_bytes(), h2d_before, f"{state} out, {path}: the bind pushed host bytes")
+                self.assertEqual(out.cpu(), reference, atol=self.atol, rtol=self.rtol, msg=f"{state} out, {path}")
+                self.assertFalse(_is_host_latest(out), f"{state} out, {path}")
+
+    def test_compile_miss_with_out_keeps_no_extra_output_alive(self):
+        """The first run of a fresh compile fills the runtime's own buffer before a
+        second run binds ``out``; that first buffer must not stay allocated."""
+        device = torch.device("rbln:0")
+        shape = (3, 256)
+        xv = torch.randn(shape[::-1], device=device, dtype=torch.float16).t()  # Python path
+        y = torch.randn(shape, device=device, dtype=torch.float16)
+        torch.rbln.synchronize()
+
+        # One runtime-owned output's share of live device memory, taken on a sibling op.
+        result = torch.maximum(xv, y)
+        torch.rbln.synchronize()
+        with_result = torch.rbln.memory_allocated()
+        del result
+        torch.rbln.synchronize()
+        unit = with_result - torch.rbln.memory_allocated()
+        self.assertGreater(unit, 0, "memory_allocated must account for a runtime-owned output")
+
+        out = _host_latest_out(shape)
+        torch.minimum(xv, y, out=out)
+        torch.rbln.synchronize()
+        with_out = torch.rbln.memory_allocated()
+        del out
+        torch.rbln.synchronize()
+        # What that call left alive is the program's own buffers plus out's
+        # device view; a retained first-run output would show as a second unit.
+        self.assertEqual(with_out - torch.rbln.memory_allocated(), unit)
+
+    def test_python_path_separates_what_the_skipped_guards_would(self):
+        """On the Python path the cached runtime runs without the compiled
+        callable's guards, so the cache key must separate scalar operands, and
+        only what recompiles: one entry per scalar value, none for grad mode.
+        One runtime per entry shows no guard was missed, since a Dynamo
+        recompile inside a callable appends a second one.
+        """
+        from torch_rbln._internal.compile_cache import _compiled_op_cache
+
+        device = torch.device("rbln:0")
+        shape = (3, 320)
+        xv = torch.randn(shape[::-1], device=device, dtype=torch.float16).t()  # Python path
+        for _ in range(2):
+            self.assertEqual(torch.mul(xv, 2).cpu(), xv.cpu() * 2, atol=self.atol, rtol=self.rtol)
+            self.assertEqual(torch.mul(xv, 3).cpu(), xv.cpu() * 3, atol=self.atol, rtol=self.rtol)
+            with torch.no_grad():
+                self.assertEqual(torch.mul(xv, 2).cpu(), xv.cpu() * 2, atol=self.atol, rtol=self.rtol)
+        self.assertEqual(len(_compiled_op_cache), 2, "one compile per scalar value, none for the grad mode")
+        for entry in _compiled_op_cache.values():
+            self.assertEqual(len(entry.runtime_holder), 1)
 
     def test_add_using_contiguous_out(self):
         """Test add operation using contiguous out tensor."""
