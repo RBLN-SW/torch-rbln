@@ -14,6 +14,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel
 
 from test.utils import SUPPORTED_DTYPES
 
+from torch_rbln._internal.device_arch_utils import is_atom_device
+
 
 TORCH_RBLN_SAVE_PATH = os.getenv("TORCH_RBLN_SAVE_PATH", os.getcwd())
 
@@ -163,6 +165,18 @@ class TestCausalLMBase(TestCase):
         whose dtype overflows the model (e.g. fp16 BMM) are skipped — a dtype limitation,
         not an RBLN bug.
         """
+        # ATOM promotes bfloat16 to the device's custom float, whose range HuggingFace's causal
+        # mask value (torch.finfo(bfloat16).min) overflows into NaN rather than saturating, wiping
+        # out every eager-attention output. sdpa lowers to a fused kernel that never adds the
+        # mask this way, so only the eager cases go. test/rbln/test_bf16_range.py holds the
+        # cause and fails until it is fixed; drop this when that test starts passing.
+        if (
+            is_atom_device()
+            and config_kwargs.get("dtype") is torch.bfloat16
+            and config_kwargs.get("attn_implementation") == "eager"
+        ):
+            self.skipTest("bfloat16 x eager attention on ATOM: see test/rbln/test_bf16_range.py")
+
         fp32_config_kwargs = dict(config_kwargs, dtype=torch.float32)
         cpu_logits = self._prefill_logits(model_id, fp32_config_kwargs, batch_size, seq_len, self.cpu_device)
         rbln_logits = self._prefill_logits(model_id, config_kwargs, batch_size, seq_len, self.rbln_device)

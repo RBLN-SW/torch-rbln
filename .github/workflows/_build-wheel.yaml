@@ -8,7 +8,7 @@ on:
         type: string
         required: true
       python_version:
-        description: Python version (3.10-3.13)
+        description: Python version (3.10-3.14)
         type: string
         required: true
       build_type:
@@ -27,6 +27,12 @@ on:
         required: true
       INTERNAL_INDEX_PASSWORD:
         description: Internal package index password
+        required: true
+      HARBOR_USERNAME:
+        description: Container registry username
+        required: true
+      HARBOR_PASSWORD:
+        description: Container registry password
         required: true
 
 permissions:
@@ -47,10 +53,10 @@ jobs:
       GIT_CONFIG_VALUE_0: ${{ github.workspace }}
     timeout-minutes: 60
     container:
-      image: ghcr.io/rebellions-sw/rbln-build:0.11.0-ubi9-py${{ inputs.python_version }}  # zizmor: ignore[unpinned-images]
+      image: harbor.mgmt.rbln.in/rebellions-sw/rbln-build:0.11.2-dev51-g5efce5e9a-ubi9.8-py${{ inputs.python_version }}  # zizmor: ignore[unpinned-images]
       credentials:
-        username: ${{ github.repository_owner }}
-        password: ${{ secrets.GIT_PAT }}
+        username: ${{ secrets.HARBOR_USERNAME }}
+        password: ${{ secrets.HARBOR_PASSWORD }}
     steps:
       - name: Validate build type
         env:
