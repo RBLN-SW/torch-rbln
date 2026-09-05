@@ -53,6 +53,11 @@ def _host_latest_out(shape) -> torch.Tensor:
     return out
 
 
+def _h2d_bytes() -> int:
+    """Bytes the runtime has moved host->device by a real transfer so far."""
+    return _C._rt_prof_host_sync()[1][1]
+
+
 @pytest.mark.test_set_ci
 class TestInternalOpUtils(TestCase):
     # =========================================================================
@@ -666,6 +671,43 @@ class TestOutTensors(TestCase):
             self.assertEqual(out.cpu(), reference, atol=self.atol, rtol=self.rtol, msg=f"call {call}")
             self.assertFalse(_is_host_latest(out), f"call {call}")
             self.assertEqual(_C._warmcache_size(), size, f"call {call}: the entry must survive a warm hit")
+
+    def test_binding_out_moves_no_bytes_to_the_device(self):
+        """Binding a host-latest or zero-initialized ``out`` as the program's
+        output transfers nothing to the device. The program overwrites all of
+        it, so the runtime skips both the push of the stale host view and the
+        zero fill it would otherwise do before the run. Checked on the C++ warm
+        hit and on the Python path a view input takes; the compile miss is left
+        out because the compile itself uploads the program.
+        """
+        device = torch.device("rbln:0")
+        shape = (3, 320)
+        x = torch.randn(shape, device=device, dtype=torch.float16)
+        y = torch.randn(shape, device=device, dtype=torch.float16)
+        xv = torch.randn(shape[::-1], device=device, dtype=torch.float16).t()
+        torch.sub(x, y, out=torch.empty(shape, device=device, dtype=torch.float16))
+        torch.sub(y, xv, out=torch.empty(shape, device=device, dtype=torch.float16))
+        torch.rbln.synchronize()
+
+        def zero_initialized_out():
+            return torch.zeros(shape, device=device, dtype=torch.float16)
+
+        paths = (
+            ("warm hit", lambda out: torch.sub(x, y, out=out), torch.sub(x.cpu(), y.cpu())),
+            ("view path", lambda out: torch.sub(y, xv, out=out), torch.sub(y.cpu(), xv.cpu())),
+        )
+        for state, make_out in (
+            ("host-latest", lambda: _host_latest_out(shape)),
+            ("zero-initialized", zero_initialized_out),
+        ):
+            for path, op, reference in paths:
+                out = make_out()
+                h2d_before = _h2d_bytes()
+                op(out)
+                torch.rbln.synchronize()
+                self.assertEqual(_h2d_bytes(), h2d_before, f"{state} out, {path}: the bind pushed host bytes")
+                self.assertEqual(out.cpu(), reference, atol=self.atol, rtol=self.rtol, msg=f"{state} out, {path}")
+                self.assertFalse(_is_host_latest(out), f"{state} out, {path}")
 
     def test_compile_miss_with_out_keeps_no_extra_output_alive(self):
         """The first run of a fresh compile fills the runtime's own buffer before a
