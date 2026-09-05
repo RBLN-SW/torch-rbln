@@ -23,13 +23,21 @@ install(TARGETS ${target}
 # ---------------------------------------------------------------------------
 # Type stub generation (_C.pyi)
 #
-# stubgen imports the built _C.so to inspect its API, which requires:
+# stubgen imports the built _C.so to inspect its API, so it has to run under the interpreter
+# the extension was built for -- a `stubgen` off PATH may belong to another one. Look for the
+# console script beside that interpreter first; `-m mypy.stubgen` is not an option, because a
+# mypyc-compiled mypy has no code object to run that way. It requires:
 #   PYTHONPATH      → directory containing _C.*.so
 #   LD_LIBRARY_PATH → libtorch_rbln.so, libtorch.so, etc.
 # ---------------------------------------------------------------------------
 set(target torch_rbln_csrc_rbln_stubgen)
 
-find_program(STUBGEN stubgen REQUIRED)
+get_filename_component(_python_bin_dir "${Python3_EXECUTABLE}" DIRECTORY)
+find_program(STUBGEN NAMES stubgen HINTS "${_python_bin_dir}" NO_DEFAULT_PATH)
+if(NOT STUBGEN)
+  find_program(STUBGEN NAMES stubgen REQUIRED)
+endif()
+
 add_custom_target(${target} ALL
   DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/_C.pyi
 )
