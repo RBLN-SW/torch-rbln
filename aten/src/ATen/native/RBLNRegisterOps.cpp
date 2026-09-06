@@ -138,6 +138,10 @@ TORCH_LIBRARY(torch_rbln, m) {
   // view; the implementation is Python because it drives the compile path. Answers false
   // when the view cannot be replayed, leaving the caller on its existing route.
   m.def("copy_strided_view(Tensor src, Tensor(a!) out) -> bool");
+  // The same copy with `out` being the buffer `src` views: the program permutes it in
+  // place. Only reachable by a direct op call -- `copy_` refuses overlapping pairs -- so
+  // the alias is always the caller's intent; the Python side verifies each geometry once.
+  m.def("copy_strided_view_inplace(Tensor src, Tensor(a!) out) -> bool");
   // Placement, reachable through the dispatcher so an extension that links only ATen --
   // LMCache's RBLN transfer -- can spread its staging buffers across chiplets without a
   // build dependency on this library. Mirrors torch.rbln.bind_device_memory(t, chiplet=)

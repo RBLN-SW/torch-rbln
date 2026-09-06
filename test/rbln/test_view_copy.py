@@ -219,3 +219,72 @@ instantiate_device_type_tests(TestViewCopy, globals(), only_for="privateuse1")
 
 if __name__ == "__main__":
     run_tests()
+
+
+@pytest.mark.test_set_ci
+class TestViewCopyInPlace(TestCase):
+    """``torch_rbln::copy_strided_view_inplace``: the program permutes a buffer in its own
+    storage, so a caller that only needs the permuted layout holds one buffer, not two.
+
+    ``copy_`` never reaches this op (ATen refuses partially overlapping pairs), so it is
+    called directly, the way the LMCache transfer does. The first call for a geometry is
+    checked against an out-of-place copy inside the op; these tests check the op against
+    the host instead, so a passing verification that compared two equally wrong results
+    would still be caught.
+    """
+
+    _SHAPE = (2 * _ROWS, _HEADS, _BLOCK, _DIM)  # rows, heads, tokens, head_size
+
+    def _permute_in_place(self, host: torch.Tensor) -> torch.Tensor:
+        rows, heads, block, dim = host.shape
+        buf = _to_dev(host)
+        src = buf.view(rows, heads, block, dim).permute(0, 2, 1, 3)
+        out = buf.view(rows, block, heads, dim)
+        self.assertTrue(torch.ops.torch_rbln.copy_strided_view_inplace(src, out))
+        return buf
+
+    def test_permutes_the_buffer_in_place(self, device):
+        host = torch.randint(-1000, 1000, self._SHAPE).to(torch.bfloat16)
+        buf = self._permute_in_place(host)
+        rows, heads, block, dim = self._SHAPE
+        self.assertEqual(buf.view(rows, block, heads, dim).cpu(), host.permute(0, 2, 1, 3))
+
+    def test_repeated_calls_stay_exact_and_allocate_nothing(self, device):
+        # After the geometry's one-time verification, a call must not grow device memory:
+        # the program writes the caller's buffer, there is no output of its own to keep.
+        host = torch.randint(-1000, 1000, self._SHAPE).to(torch.bfloat16)
+        buf = self._permute_in_place(host)  # verifies the geometry
+        rows, heads, block, dim = self._SHAPE
+        for _ in range(3):
+            host = torch.randint(-1000, 1000, self._SHAPE).to(torch.bfloat16)
+            buf.copy_(host)
+            torch.rbln.synchronize()
+            before = torch.rbln.memory_allocated(buf.device)
+            src = buf.view(rows, heads, block, dim).permute(0, 2, 1, 3)
+            torch.ops.torch_rbln.copy_strided_view_inplace(src, buf.view(rows, block, heads, dim))
+            torch.rbln.synchronize()
+            self.assertEqual(torch.rbln.memory_allocated(buf.device), before)
+            self.assertEqual(buf.view(rows, block, heads, dim).cpu(), host.permute(0, 2, 1, 3))
+
+    def test_rejects_an_out_that_is_not_the_whole_buffer(self, device):
+        rows, heads, block, dim = self._SHAPE
+        buf = _to_dev(torch.zeros(self._SHAPE, dtype=torch.bfloat16))
+        src = buf.view(rows, heads, block, dim).permute(0, 2, 1, 3)
+        other = torch.empty(rows, block, heads, dim, dtype=torch.bfloat16, device=buf.device)
+        with self.assertRaisesRegex(RuntimeError, "whole buffer"):
+            torch.ops.torch_rbln.copy_strided_view_inplace(src, other)
+        with self.assertRaisesRegex(RuntimeError, "whole buffer"):
+            torch.ops.torch_rbln.copy_strided_view_inplace(src[:1], buf.view(rows, block, heads, dim)[:1])
+
+    def test_declines_an_unclassifiable_view(self, device):
+        # Same contract as copy_strided_view: False, and the buffer untouched.
+        sizes = (_ROWS, _HEADS, _BLOCK, _DIM)
+        host = torch.randint(-1000, 1000, sizes).to(torch.bfloat16)
+        buf = _to_dev(host)
+        # Strides no chain of view ops produces (see the copy_ suite above).
+        src = buf.as_strided(sizes, (100000, 20000, _DIM + 1, 1), 0)
+        self.assertFalse(torch.ops.torch_rbln.copy_strided_view_inplace(src, buf))
+        self.assertEqual(buf.cpu(), host)
+
+
+instantiate_device_type_tests(TestViewCopyInPlace, globals(), only_for="privateuse1")

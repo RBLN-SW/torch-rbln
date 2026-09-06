@@ -526,6 +526,86 @@ def copy_strided_view_rbln(src, out) -> bool:
     return True
 
 
+# Geometries (sizes, strides, storage offset, dtype, device) for which the compiled view
+# copy has been shown to permute a buffer in place correctly. Writing the buffer a program
+# reads is only correct when its schedule finishes reading a region before writing it --
+# a property of the compiler's tiling, not of anything here -- so the first in-place copy
+# of a geometry is checked against an out-of-place one and the verdict remembered.
+_inplace_view_copy_verified: dict[tuple, bool] = {}
+_inplace_view_copy_lock = threading.Lock()
+
+
+def _inplace_view_copy_key(src: torch.Tensor) -> tuple:
+    return (tuple(src.shape), tuple(src.stride()), src.storage_offset(), src.dtype, str(src.device))
+
+
+def _run_view_copy(src: torch.Tensor, out: torch.Tensor, allow_alias: bool) -> None:
+    result = compile_and_run_view_aware(
+        _materialize_for(src), "torch_rbln::copy_strided_view", (src,), {}, out, allow_alias=allow_alias
+    )
+    if result is not None and result.data_ptr() != out.data_ptr():
+        out.copy_(result)
+
+
+def _inplace_unsupported(src: torch.Tensor) -> RuntimeError:
+    return RuntimeError(
+        f"copy_strided_view_inplace: the compiled program does not permute {list(src.shape)} "
+        f"(strides {list(src.stride())}) correctly in place; use copy_strided_view with a "
+        "separate out buffer"
+    )
+
+
+def copy_strided_view_inplace_rbln(src, out) -> bool:
+    """``copy_strided_view`` where ``out`` is the very buffer ``src`` is a view of.
+
+    The program reads the buffer through ``src``'s view and writes it back in ``out``'s
+    layout, so a caller that only ever needs the permuted layout holds one staging buffer
+    instead of two. ``copy_`` never reaches this op -- ATen refuses partially overlapping
+    pairs before dispatch -- so an aliasing pair is always a caller's explicit intent.
+
+    ``out`` must be the whole storage ``src`` views: contiguous, storage offset 0, the same
+    base address and byte size. The first call for a geometry also runs the copy out of
+    place into a scratch buffer and compares; the scratch is released afterwards. That
+    check uses the caller's data, so a constant buffer proves less than a varied one.
+
+    Returns False when the detector cannot classify ``src``, leaving the caller on its
+    two-buffer route. Raises RuntimeError when ``out`` is not ``src``'s whole storage, or
+    when the program does not permute this geometry correctly in place.
+    """
+    if _detect_view_recipe(src) is None:
+        return False
+    base_ptr = src.data_ptr() - src.storage_offset() * src.element_size()
+    if (
+        out.data_ptr() != base_ptr
+        or out.storage_offset() != 0
+        or not out.is_contiguous()
+        or out.numel() * out.element_size() != src.storage().nbytes()
+    ):
+        raise RuntimeError(
+            "copy_strided_view_inplace: out must be the whole buffer src views "
+            "(contiguous, storage_offset 0, same base address and size)"
+        )
+    key = _inplace_view_copy_key(src)
+    verified = _inplace_view_copy_verified.get(key)
+    if verified is None:
+        with _inplace_view_copy_lock:
+            verified = _inplace_view_copy_verified.get(key)
+            if verified is None:
+                reference = torch.empty_like(out)
+                _run_view_copy(src, reference, allow_alias=False)
+                _run_view_copy(src, out, allow_alias=True)
+                verified = torch.equal(out.cpu(), reference.cpu())
+                del reference
+                _inplace_view_copy_verified[key] = verified
+                if not verified:
+                    raise _inplace_unsupported(src)
+                return True
+    if not verified:
+        raise _inplace_unsupported(src)
+    _run_view_copy(src, out, allow_alias=True)
+    return True
+
+
 rbln_custom_impl = torch.library.Library("rbln_custom_ops", "IMPL")  # noqa: TOR901
 rbln_custom_impl.impl("paged_attn_prefill", paged_attn_prefill_rbln, "PrivateUse1")
 rbln_custom_impl.impl("paged_attn_decode", paged_attn_decode_rbln, "PrivateUse1")
@@ -538,3 +618,4 @@ rbln_custom_impl.impl("flash_attention_naive_decode", flash_attention_naive_deco
 # the implementation lives here, because it drives the compile path.
 torch_rbln_impl = torch.library.Library("torch_rbln", "IMPL")  # noqa: TOR901
 torch_rbln_impl.impl("copy_strided_view", copy_strided_view_rbln, "PrivateUse1")
+torch_rbln_impl.impl("copy_strided_view_inplace", copy_strided_view_inplace_rbln, "PrivateUse1")
