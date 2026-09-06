@@ -40,6 +40,7 @@ enum RtIdx : std::uint8_t {
   // reordering silently remaps every existing reader's columns.
   RT_V2H_MULTI,
   RT_H2V_MULTI,
+  RT_V2V_MULTI_ASYNC,
   RT_N
 };
 static_assert(static_cast<std::size_t>(RT_N) == kRtTimingN, "RtIdx count must match kRtTimingN in the header");
@@ -1068,6 +1069,31 @@ void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies) {
   RBLN_LOG_DEBUG("Calling rbln_memcpy_v2v_multi: n_copies={}", copies.size());
   // Error message matched by `at::native::rbln::submit_or_fallback` to gate CPU fallback — keep stable.
   RBLN_CHECK(!::rbln::rbln_memcpy_v2v_multi(rbln_copies), "rbln_memcpy_v2v_multi failed");
+}
+
+void memcpy_v2v_multi_async(const std::vector<V2VCopyOp>& copies) {
+  if (copies.empty()) {
+    return;
+  }
+  RtTimer _rt(RT_V2V_MULTI_ASYNC);
+  std::vector<std::tuple<uint64_t, uint64_t, uint64_t>> rbln_copies;
+  rbln_copies.reserve(copies.size());
+  for (const auto& c : copies) {
+    RBLN_CHECK(c.nbytes > 0, "memcpy_v2v_multi_async: nbytes must be positive");
+    RBLN_CHECK(c.src != nullptr, "memcpy_v2v_multi_async: src cannot be nullptr");
+    RBLN_CHECK(c.dst != nullptr, "memcpy_v2v_multi_async: dst cannot be nullptr");
+    rbln_copies.emplace_back(
+        reinterpret_cast<uint64_t>(c.src), reinterpret_cast<uint64_t>(c.dst), static_cast<uint64_t>(c.nbytes));
+  }
+  // The runtime tracks the dispatched job itself (a later synchronous copy or synchronize
+  // touching the memory waits for it), so the handle is not kept here -- as for
+  // memcpy_v2v_async.
+  uint64_t handle = 0;
+  RBLN_LOG_DEBUG("Calling rbln_memcpy_v2v_multi_async: n_copies={}", copies.size());
+  // Same message prefix as the synchronous batch: `submit_or_fallback` matches it to gate the
+  // CPU fallback.
+  RBLN_CHECK(!::rbln::rbln_memcpy_v2v_multi_async(rbln_copies, &handle), "rbln_memcpy_v2v_multi failed (async)");
+  RBLN_LOG_DEBUG("V2V multi async dispatched (handle={}, 0=sync fallback)", handle);
 }
 
 void memcpy_h2v_multi(const std::vector<H2VCopyOp>& copies) {

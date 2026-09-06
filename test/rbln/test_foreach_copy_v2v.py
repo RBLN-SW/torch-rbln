@@ -295,6 +295,55 @@ class TestForeachCopyV2V(TestCase):
         self.assertEqual(int(site["count"]), 0, f"v2v must stay on device: {site}")
         _eq(dst, _arange((rows, cols), torch.float32) + 1)
 
+    # ---- non_blocking: the device batch is stream-ordered, not host-waited ----
+
+    def test_non_blocking_pairs_stay_batched_and_land(self):
+        """``non_blocking=True`` dispatches the device batch on the current stream
+        and returns; a synchronize afterwards sees every pair landed, and the
+        batch went through the async multi entrypoint rather than per pair."""
+        n_pairs = 8
+        srcs = [_to_dev(_arange((64, 128), torch.float32) + i) for i in range(n_pairs)]
+        dsts = [_to_dev(torch.zeros(64, 128, dtype=torch.float32)) for _ in range(n_pairs)]
+
+        with torch.rbln.explain() as p:
+            torch._foreach_copy_(dsts, srcs, non_blocking=True)
+            torch.rbln.synchronize()
+        calls = _prim_calls(p.dump())
+
+        self.assertEqual(calls.get("v2v_multi_async", 0), 1, f"non_blocking v2v must batch async: {calls}")
+        self.assertEqual(calls.get("v2v_multi", 0), 0, f"{calls}")
+        self.assertEqual(calls.get("v2v", 0), 0, f"{calls}")
+        for i, dst in enumerate(dsts):
+            _eq(dst, _arange((64, 128), torch.float32) + i)
+
+    def test_non_blocking_batch_is_ordered_before_later_stream_work(self):
+        """Work put on the stream after the batch runs after it: a compute op
+        reading the destinations, and a second copy out of them, both see the
+        landed bytes without any host wait in between."""
+        n_pairs = 4
+        srcs = [_to_dev(_arange((256, 256), torch.float32) + i) for i in range(n_pairs)]
+        dsts = [_to_dev(torch.zeros(256, 256, dtype=torch.float32)) for _ in range(n_pairs)]
+        outs = [_to_dev(torch.zeros(256, 256, dtype=torch.float32)) for _ in range(n_pairs)]
+
+        torch._foreach_copy_(dsts, srcs, non_blocking=True)
+        sums = [d.sum() for d in dsts]  # a program on the same stream
+        torch._foreach_copy_(outs, dsts, non_blocking=True)  # a second async batch reading the first's writes
+        torch.rbln.synchronize()
+
+        for i in range(n_pairs):
+            want = _arange((256, 256), torch.float32) + i
+            self.assertEqual(sums[i].cpu(), want.sum())
+            _eq(outs[i], want)
+
+    def test_synchronous_copy_waits_for_a_non_blocking_batch(self):
+        """A synchronous copy touching a destination still in flight waits for
+        the batch on the host, so the pageable-host read is the landed data."""
+        src = _to_dev(_arange((512, 512), torch.float32) + 7)
+        dst = _to_dev(torch.zeros(512, 512, dtype=torch.float32))
+        torch._foreach_copy_([dst], [src], non_blocking=True)
+        host = dst.cpu()  # synchronous device->host of a pending destination
+        self.assertEqual(host, _arange((512, 512), torch.float32) + 7)
+
 
 instantiate_device_type_tests(TestForeachCopyV2V, globals(), only_for="privateuse1")
 

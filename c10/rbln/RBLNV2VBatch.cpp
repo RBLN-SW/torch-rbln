@@ -43,7 +43,7 @@ void V2VBatch::enqueue_strided(
       impl_->st, kWho, dst, src, inner_block_bytes, outer_sizes, src_byte_strides, dst_byte_strides);
 }
 
-void V2VBatch::submit() {
+void V2VBatch::submit(bool non_blocking) {
   if (!impl_ || impl_->st.pending.empty()) {
     return;
   }
@@ -69,9 +69,14 @@ void V2VBatch::submit() {
     // to the per-entry path, which has no such inter-copy ordering
     // constraint. Correctness-equivalent to the dev path; loses the batch
     // throughput win only for the offending submit().
-    RBLN_LOG_DEBUG("V2VBatch::submit draining {} entries (batched)", impl_->st.pending.size());
+    RBLN_LOG_DEBUG(
+        "V2VBatch::submit draining {} entries (batched{})", impl_->st.pending.size(), non_blocking ? ", async" : "");
     try {
-      memcpy_v2v_multi(impl_->st.pending);
+      if (non_blocking) {
+        memcpy_v2v_multi_async(impl_->st.pending);
+      } else {
+        memcpy_v2v_multi(impl_->st.pending);
+      }
       drained = true;
     } catch (const c10::Error& e) {
       // PROFILER (cold branch): batched v2v rejected by the runtime's no-overlap

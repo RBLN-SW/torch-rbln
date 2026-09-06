@@ -733,11 +733,19 @@ void _foreach_copy__rbln(at::TensorList self, at::TensorList src, bool non_block
   v2v_batched.reserve(self.size());
 
   const auto flush_pending = [&] {
-    submit_or_fallback(v2v_batch, "_foreach_copy_", [&] {
-      for (const auto& pair : v2v_batched) {
-        pair.first.copy_(pair.second.cpu());
-      }
-    });
+    // non_blocking makes the device batch stream-ordered instead of host-waited: the
+    // call returns once the copies are dispatched, and whatever the caller puts on the
+    // stream next runs after them. A caller that stages blocks for a program and then
+    // hands them to another stream never has to stop for the copy itself.
+    submit_or_fallback(
+        v2v_batch,
+        "_foreach_copy_",
+        [&] {
+          for (const auto& pair : v2v_batched) {
+            pair.first.copy_(pair.second.cpu());
+          }
+        },
+        non_blocking);
     // No CPU fallback for the host directions: a rejected bulk call already
     // retries per entry, which is the same transfer copy_ would issue.
     h2v_batch.submit();
@@ -781,10 +789,11 @@ void _foreach_copy__rbln(at::TensorList self, at::TensorList src, bool non_block
       const bool dst_cpu = dst.device().is_cpu();
       const bool src_cpu = s.device().is_cpu();
 
-      // Pinned + non_blocking is the one genuinely asynchronous per-pair case
-      // (pageable host memory downgrades to sync). The multi entrypoints are
+      // Pinned + non_blocking is the one genuinely asynchronous per-pair host case
+      // (pageable host memory downgrades to sync). The host multi entrypoints are
       // sync-only, so batching it would trade a real overlap for a submit count.
       // Only preserves the overlap when every pair in the list takes this path.
+      // (The device batch has an async form, so v2v pairs stay batched.)
       const bool host_side_pinned_async = non_blocking &&
           ((dst_dev && src_cpu && c10::rbln::is_pinned_ptr(s.data_ptr())) ||
            (src_dev && dst_cpu && c10::rbln::is_pinned_ptr(dst.data_ptr())));

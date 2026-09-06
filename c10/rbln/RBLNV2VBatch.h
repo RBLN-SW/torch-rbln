@@ -12,9 +12,9 @@ namespace c10::rbln {
  * @brief Buffered batch of pending device-to-device (v2v) copies.
  *
  * Isolates callers from the rebel runtime's v2v API. enqueue() / enqueue_strided()
- * record copy requests; submit() flushes them through rbln_memcpy_v2v_multi when
- * every entry shares one device, or falls back to per-entry memcpy_v2v (which
- * host-bounces cross-device entries). The path is decided from bookkeeping kept
+ * record copy requests; submit() flushes them through rbln_memcpy_v2v_multi (or its
+ * stream-ordered async form) when every entry shares one device, or falls back to
+ * per-entry memcpy_v2v (which host-bounces cross-device entries). The path is decided from bookkeeping kept
  * at enqueue time, so submit() is O(N) with no extra lookups.
  *
  * When the runtime exposes a strided v2v API, enqueue_strided will forward the
@@ -75,8 +75,14 @@ class C10_RBLN_API V2VBatch {
 
   /**
    * @brief Flush queued operations to the backend. Idempotent.
+   *
+   * @param non_blocking When true and every entry shares one device, the batch is
+   *        dispatched on the current stream and this returns without waiting for
+   *        it (memcpy_v2v_multi_async); later work on the stream, and any host wait
+   *        or synchronous copy touching the memory, still sees it complete. The
+   *        per-entry fallback path is synchronous either way.
    */
-  void submit();
+  void submit(bool non_blocking = false);
 
   /**
    * @brief Number of pending (un-submitted) flat entries. For tests / debug.

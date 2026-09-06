@@ -61,10 +61,13 @@ void strided_v2v_copy(const at::Tensor& dst, const at::Tensor& src);
  * @param op_name       Op identifier used in the fallback warning log.
  * @param cpu_fallback  Callable performing the CPU-equivalent computation;
  *                      invoked only on a backend call failure.
+ * @param non_blocking  Submit the batch on the current stream without waiting
+ *                      for it (see V2VBatch::submit).
  */
 void submit_or_fallback(
     c10::rbln::V2VBatch& batch,
     const char* op_name,
-    std::function<void()> cpu_fallback);
+    std::function<void()> cpu_fallback,
+    bool non_blocking = false);
 
 } // namespace at::native::rbln

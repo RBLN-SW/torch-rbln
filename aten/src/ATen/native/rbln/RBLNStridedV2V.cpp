@@ -115,9 +115,13 @@ void strided_v2v_copy(const at::Tensor& dst, const at::Tensor& src) {
   submit_or_fallback(batch, "strided_v2v_copy", [&] { dst.copy_(src.cpu()); });
 }
 
-void submit_or_fallback(c10::rbln::V2VBatch& batch, const char* op_name, std::function<void()> cpu_fallback) {
+void submit_or_fallback(
+    c10::rbln::V2VBatch& batch,
+    const char* op_name,
+    std::function<void()> cpu_fallback,
+    bool non_blocking) {
   try {
-    batch.submit();
+    batch.submit(non_blocking);
   } catch (const c10::Error& e) {
     const std::string_view error_message = e.what();
     // TODO: Replace substring match with a typed exception when the wrapper API allows.

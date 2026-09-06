@@ -296,7 +296,18 @@ def _host_thread_info() -> dict[str, Any]:
 # --- (B) rebel-runtime (librbln) boundary time, gated on the explain region ----
 # Order MUST match the C++ RtIdx enum in c10/rbln/RBLNFunctions.cpp. New
 # primitives are appended there, so append here too — never insert.
-_RT_PRIMS = ("v2v", "v2v_multi", "borrow", "acquire", "return", "v2h", "h2v", "v2h_multi", "h2v_multi")
+_RT_PRIMS = (
+    "v2v",
+    "v2v_multi",
+    "borrow",
+    "acquire",
+    "return",
+    "v2h",
+    "h2v",
+    "v2h_multi",
+    "h2v_multi",
+    "v2v_multi_async",
+)
 
 
 def _rt_timing_enable(on: bool) -> None:

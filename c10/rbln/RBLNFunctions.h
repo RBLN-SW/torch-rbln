@@ -471,6 +471,18 @@ struct C10_RBLN_API V2VCopyOp {
 C10_RBLN_API void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies);
 
 /**
+ * @brief memcpy_v2v_multi dispatched on the current stream, without waiting for it.
+ *
+ * Same entries and caller contract as memcpy_v2v_multi. The copies complete in stream
+ * order: work dispatched on the stream afterwards runs after them, a stream that waits
+ * on an event recorded after them waits for them, and a synchronous copy or
+ * synchronize() touching the same memory waits for them on the host. The runtime
+ * itself runs the batch synchronously when it cannot dispatch it asynchronously (a
+ * destination it still has to allocate, an element conversion).
+ */
+C10_RBLN_API void memcpy_v2v_multi_async(const std::vector<V2VCopyOp>& copies);
+
+/**
  * @brief Descriptor for one host-to-device slab copy used by memcpy_h2v_multi.
  *
  * Layout matches V2VCopyOp / V2HCopyOp; the type is distinct on purpose. On LP64
@@ -706,7 +718,7 @@ C10_RBLN_API uint64_t release_offload_temp_storage();
  * RtIdx enum: v2v, v2v_multi, borrow, acquire, return, v2h, h2v, v2h_multi,
  * h2v_multi). New primitives are appended so existing slot indices stay put.
  */
-constexpr std::size_t kRtTimingN = 9;
+constexpr std::size_t kRtTimingN = 10;
 C10_RBLN_API void rt_timing_enable(bool on);
 C10_RBLN_API void rt_timing_reset();
 C10_RBLN_API void rt_timing_get(uint64_t* out);
