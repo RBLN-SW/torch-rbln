@@ -527,8 +527,25 @@ py::tuple supported_dtypes_to_tuple(c10::ArrayRef<c10::ScalarType> scalar_types)
 void register_supported_dtypes_api(py::module_& module) {
   module.def(
       "_dispatch_dtypes",
+      [] {
+        // Catalog plus the TORCH_RBLN_DISPATCH_DTYPES extension, evaluated now: the
+        // Python SupportedDtypes snapshot is taken at import, so the env var must be
+        // set before `import torch_rbln`.
+        const auto v = c10::rbln::dispatch_dtypes_rt();
+        return supported_dtypes_to_tuple(c10::ArrayRef<c10::ScalarType>(v));
+      },
+      "Internal: eager-dispatch supported dtypes (catalog + TORCH_RBLN_DISPATCH_DTYPES)");
+  module.def(
+      "_dispatch_catalog_dtypes",
       [] { return supported_dtypes_to_tuple(c10::rbln::kDispatchDtypes); },
-      "Internal: eager-dispatch supported dtypes");
+      "Internal: the built-in eager-dispatch catalog, without the TORCH_RBLN_DISPATCH_DTYPES extension");
+  module.def(
+      "_dispatch_strict_dtypes",
+      [] {
+        const auto v = c10::rbln::strict_dispatch_dtypes_rt();
+        return supported_dtypes_to_tuple(c10::ArrayRef<c10::ScalarType>(v));
+      },
+      "Internal: dtypes under strict dispatch (TORCH_RBLN_DISPATCH_STRICT), evaluated now");
   module.def(
       "_sdpa_dtypes",
       [] { return supported_dtypes_to_tuple(c10::rbln::kSdpaDtypes); },
