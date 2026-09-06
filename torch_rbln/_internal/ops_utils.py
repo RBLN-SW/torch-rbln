@@ -1702,7 +1702,7 @@ def view_recipes_for_positional(view_recipes_flat, positional_count):
     return view_recipes_flat[:positional_count]
 
 
-def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_tensor):
+def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_tensor, *, allow_alias=False):
     """Centralized view-aware rbln-compile dispatch.
 
     The single entry point used by all generated ``*_rbln`` handlers (via the
@@ -1724,6 +1724,13 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
       while the runtime is now compiled for the (different) base shape.
       Future calls re-enter Python and hit the compile_rbln_cached cache —
       ~50 µs/call overhead, still cheap relative to host materialization.
+
+    ``allow_alias`` lets ``out_tensor`` share storage with an input. By default an
+    aliasing out is not handed to the program (the program gets its own output, copied
+    back afterwards) because a program that writes a buffer it is still reading is only
+    correct for schedules that finish reading a region before writing it. A caller that
+    has established that for its geometry -- ``copy_strided_view_inplace`` verifies it
+    once per geometry -- passes True and the program writes the aliased buffer directly.
 
     Imports are deferred into the body to avoid a load-time circular import
     (``ops_utils`` is imported broadly).
@@ -1817,7 +1824,7 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     if out_tensor is None:
         result_tensor = None
     else:
-        if can_use_out_tensor_directly(view_args, dict(view_kwargs, out=out_tensor)):
+        if can_use_out_tensor_directly(view_args, dict(view_kwargs, out=out_tensor), allow_alias=allow_alias):
             result_tensor = out_tensor
         else:
             result_tensor = None
@@ -2054,13 +2061,14 @@ def is_inplace_op(args, kwargs) -> bool:
     return False
 
 
-def can_use_out_tensor_directly(args: tuple, kwargs: dict) -> bool:
+def can_use_out_tensor_directly(args: tuple, kwargs: dict, allow_alias: bool = False) -> bool:
     """
     Check if the out_tensor can be used directly by the compiler.
 
     This function checks several conditions to determine if the output tensor
     can be used directly without creating a temporary tensor:
-    1. Not an in-place operation
+    1. Not an in-place operation (waived when ``allow_alias`` is True: the caller
+       has established that the program may write a buffer it reads)
     2. Tensor is neither empty nor scalar
     3. Tensor is contiguous
     4. Tensor has zero storage offset
@@ -2069,6 +2077,7 @@ def can_use_out_tensor_directly(args: tuple, kwargs: dict) -> bool:
     Args:
         args (tuple): Positional arguments for in-place operation check.
         kwargs (dict): Keyword arguments containing 'out' key with the output tensor to check.
+        allow_alias (bool): Accept an out tensor that shares storage with an input.
 
     Returns:
         bool: True if the out_tensor can be used directly, False otherwise.
@@ -2078,7 +2087,7 @@ def can_use_out_tensor_directly(args: tuple, kwargs: dict) -> bool:
         return False
 
     return (
-        not is_inplace_op(args, kwargs)
+        (allow_alias or not is_inplace_op(args, kwargs))
         and ((out_tensor.numel() > 0) and len(out_tensor.size()) > 0)
         and out_tensor.is_contiguous()
         and (out_tensor.storage_offset() == 0)
