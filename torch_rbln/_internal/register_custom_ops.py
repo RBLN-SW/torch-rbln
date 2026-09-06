@@ -526,6 +526,109 @@ def copy_strided_view_rbln(src, out) -> bool:
     return True
 
 
+# Geometries (sizes, strides, storage offset, dtype, device) for which the compiled view
+# copy has been shown to permute a buffer in place correctly. Writing the buffer a program
+# reads is only correct when its schedule finishes reading a region before writing it --
+# a property of the compiler's tiling, not of anything here -- so the first in-place copy
+# of a geometry is checked against a host reference and the verdict remembered.
+_inplace_view_copy_verified: dict[tuple, bool] = {}
+_inplace_view_copy_lock = threading.Lock()
+
+
+def _inplace_view_copy_key(src: torch.Tensor) -> tuple:
+    return (tuple(src.shape), tuple(src.stride()), src.storage_offset(), src.dtype, str(src.device))
+
+
+def _run_view_copy(src: torch.Tensor, out: torch.Tensor, allow_alias: bool) -> None:
+    result = compile_and_run_view_aware(
+        _materialize_for(src), "torch_rbln::copy_strided_view", (src,), {}, out, allow_alias=allow_alias
+    )
+    if result is not None and result.data_ptr() != out.data_ptr():
+        # The compile path only writes the caller's buffer for dtypes in
+        # SupportedDtypes.dispatch; otherwise it hands back its own. Both are contiguous
+        # here, so this lands on copy_'s direct memcpy and cannot recurse.
+        out.copy_(result)
+
+
+def _verify_inplace_geometry(src: torch.Tensor, out: torch.Tensor) -> None:
+    """Run the first in-place copy of a geometry against a host reference, once.
+
+    The reference costs a device-to-host copy rather than a second device buffer, which
+    is what the in-place form exists to avoid. It uses the caller's data, so a constant
+    buffer proves less than a varied one.
+    """
+    key = _inplace_view_copy_key(src)
+    verified = _inplace_view_copy_verified.get(key)
+    if verified is None:
+        with _inplace_view_copy_lock:
+            verified = _inplace_view_copy_verified.get(key)
+            if verified is None:
+                # Read the source view to the host first: it is both the reference and
+                # the last chance to see the input, since the copy overwrites it.
+                reference = src.cpu()
+                _run_view_copy(src, out, allow_alias=True)
+                verified = torch.equal(out.cpu(), reference)
+                _inplace_view_copy_verified[key] = verified
+                if not verified:
+                    raise _inplace_unsupported(src)
+                return
+    if not verified:
+        raise _inplace_unsupported(src)
+    _run_view_copy(src, out, allow_alias=True)
+
+
+def _inplace_unsupported(src: torch.Tensor) -> RuntimeError:
+    return RuntimeError(
+        f"copy_strided_view(inplace=True): the compiled program does not permute "
+        f"{list(src.shape)} (strides {list(src.stride())}) correctly in place; copy into a "
+        "separate buffer instead"
+    )
+
+
+def copy_strided_view_rbln(src, out, inplace=False) -> bool:
+    """``out.copy_(src)`` for a strided device ``src``, as one compiled device program.
+
+    ``copy_``'s device->device path calls this instead of walking the copy one contiguous
+    run at a time. The view chain is replayed *inside* the compiled graph by the same
+    machinery every other view-aware op uses (``prepare_args_view_aware`` classifies it,
+    ``get_view_op_module`` replays it), so the device reads the base buffer and writes
+    ``out`` in one program -- no descriptor per run, no host round-trip. Nothing here is
+    specific to a permutation: whatever the detector can classify, this covers.
+
+    ``inplace`` says ``out`` is the very buffer ``src`` views, so the program permutes it
+    in its own storage and a caller that only needs the permuted layout holds one buffer
+    instead of two. ``copy_`` never asks for it -- ATen refuses partially overlapping
+    pairs before dispatch -- so an aliasing pair is always a caller's explicit intent.
+    ``out`` must then be the whole storage ``src`` views: contiguous, storage offset 0,
+    the same base address and byte size. Correctness rests on the compiled schedule
+    finishing its reads of a region before writing it, which is the compiler's tiling
+    rather than anything here, so the first call for a geometry is checked against a host
+    reference and a geometry that fails raises.
+
+    Returns False when the detector cannot classify ``src``, leaving the caller on its
+    existing route. Raises RuntimeError when ``inplace`` is set and ``out`` is not
+    ``src``'s whole storage, or the program does not permute that geometry in place.
+    """
+    if _detect_view_recipe(src) is None:
+        return False
+    if not inplace:
+        _run_view_copy(src, out, allow_alias=False)
+        return True
+    base_ptr = src.data_ptr() - src.storage_offset() * src.element_size()
+    if (
+        out.data_ptr() != base_ptr
+        or out.storage_offset() != 0
+        or not out.is_contiguous()
+        or out.numel() * out.element_size() != src.storage().nbytes()
+    ):
+        raise RuntimeError(
+            "copy_strided_view(inplace=True): out must be the whole buffer src views "
+            "(contiguous, storage_offset 0, same base address and size)"
+        )
+    _verify_inplace_geometry(src, out)
+    return True
+
+
 rbln_custom_impl = torch.library.Library("rbln_custom_ops", "IMPL")  # noqa: TOR901
 rbln_custom_impl.impl("paged_attn_prefill", paged_attn_prefill_rbln, "PrivateUse1")
 rbln_custom_impl.impl("paged_attn_decode", paged_attn_decode_rbln, "PrivateUse1")

@@ -63,9 +63,9 @@ bool try_view_copy(const at::Tensor& dst, const at::Tensor& src) {
   // -- the lookup is a hash probe in front of a copy of at least a full device tile.
   const auto op = c10::Dispatcher::singleton()
                       .findSchemaOrThrow("torch_rbln::copy_strided_view", "")
-                      .typed<bool(const at::Tensor&, at::Tensor&)>();
+                      .typed<bool(const at::Tensor&, at::Tensor&, bool)>();
   at::Tensor out = dst; // a Tensor is a handle; the schema's Tensor(a!) wants a mutable one
-  return op.call(src, out);
+  return op.call(src, out, /*inplace=*/false);
 }
 
 // Recursion guard: a non-direct rbln->rbln copy_ services itself by a v2h

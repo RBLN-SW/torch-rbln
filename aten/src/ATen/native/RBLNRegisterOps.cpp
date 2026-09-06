@@ -137,7 +137,11 @@ TORCH_LIBRARY(torch_rbln, m) {
   // `copy_` reaches this from C++ for a device->device copy whose source is a classifiable
   // view; the implementation is Python because it drives the compile path. Answers false
   // when the view cannot be replayed, leaving the caller on its existing route.
-  m.def("copy_strided_view(Tensor src, Tensor(a!) out) -> bool");
+  // `inplace` says `out` is the very buffer `src` views, so the program permutes it in
+  // its own storage. Only a direct call can ask for that -- `copy_` refuses overlapping
+  // pairs before dispatch -- and the alias is then the caller's intent; the Python side
+  // holds `out` to the whole storage and verifies each geometry once.
+  m.def("copy_strided_view(Tensor src, Tensor(a!) out, bool inplace=False) -> bool");
 }
 
 // ATen operations registration for the RBLN backend (PrivateUse1)
