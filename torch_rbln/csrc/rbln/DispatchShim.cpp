@@ -468,6 +468,14 @@ bool align_penalty_fast_path_check(torch::jit::Stack* stack, const SchemaCache& 
     return false;
   }
   auto args = torch::jit::last(stack, cache.num_args);
+  // Strict dispatch (TORCH_RBLN_DISPATCH_STRICT): the op must take the device path even
+  // when it pays the pad/depad penalty, so this performance routing is skipped.
+  auto unaligned_unless_strict = [](const at::Tensor& t) {
+    if (c10::rbln::is_strict_dispatch_dtype_rt(t.scalar_type())) {
+      return false;
+    }
+    return (t.size(t.dim() - 1) % 64) != 0;
+  };
   // Prefer checking the OUT tensor's last-dim — it reflects the broadcast
   // result shape, which is what the device graph would produce.
   if (cache.out_positional_idx >= 0) {
@@ -475,7 +483,7 @@ bool align_penalty_fast_path_check(torch::jit::Stack* stack, const SchemaCache& 
     if (iv.isTensor()) {
       const auto& t = iv.toTensor();
       if (t.defined() && t.dim() > 0) {
-        return (t.size(t.dim() - 1) % 64) != 0;
+        return unaligned_unless_strict(t);
       }
     }
   }
@@ -488,7 +496,7 @@ bool align_penalty_fast_path_check(torch::jit::Stack* stack, const SchemaCache& 
     const auto& t = iv.toTensor();
     if (!t.defined() || cache.is_write_alias[i] || t.dim() == 0)
       continue;
-    return (t.size(t.dim() - 1) % 64) != 0;
+    return unaligned_unless_strict(t);
   }
   return false;
 }
@@ -531,40 +539,36 @@ bool is_nan_inf_check_disabled() {
   return false;
 }
 
-// fp16/bf16 NaN/Inf bit-pattern check.
-//
-// Both formats encode NaN/Inf as "exponent field all-ones"; only the field
-// width differs (fp16: 5 bits at offset 10, mask ``0x7C00``; bf16: 8 bits
-// at offset 7, mask ``0x7F80``). NaN distinguishes itself by a non-zero
-// mantissa, Inf has mantissa==0 — we don't care about the distinction for
-// fallback routing, either value means "rbln runtime cannot handle this".
-inline bool fp16_has_nan_or_inf(const uint16_t* data, size_t n) noexcept {
+// NaN/Inf bit-pattern check. Every IEEE format encodes NaN/Inf as "exponent field
+// all-ones"; only the mask differs (fp16 ``0x7C00``, bf16 ``0x7F80``, fp32
+// ``0x7F800000``, fp64 ``0x7FF0000000000000``). NaN and Inf are not distinguished:
+// either value means "rbln runtime cannot handle this".
+template <typename Word, Word kExpMask>
+bool words_have_nan_or_inf(const void* data, size_t n) noexcept {
+  const auto* words = static_cast<const Word*>(data);
   for (size_t i = 0; i < n; ++i) {
-    if ((data[i] & 0x7C00) == 0x7C00) {
+    if ((words[i] & kExpMask) == kExpMask) {
       return true;
     }
   }
   return false;
 }
 
-inline bool bf16_has_nan_or_inf(const uint16_t* data, size_t n) noexcept {
-  for (size_t i = 0; i < n; ++i) {
-    if ((data[i] & 0x7F80) == 0x7F80) {
-      return true;
-    }
-  }
-  return false;
-}
-
-using ScannerFn = bool (*)(const uint16_t*, size_t);
+using ScannerFn = bool (*)(const void*, size_t);
+// One scanner per floating dtype the catalog or TORCH_RBLN_DISPATCH_DTYPES can admit
+// (parse_dtype_name in RBLNFunctions.cpp accepts no other floating names).
 inline ScannerFn scanner_for(c10::ScalarType scalar_type) {
   switch (scalar_type) {
     case c10::kHalf:
-      return fp16_has_nan_or_inf;
+      return words_have_nan_or_inf<uint16_t, uint16_t{0x7C00}>;
     case c10::kBFloat16:
-      return bf16_has_nan_or_inf;
+      return words_have_nan_or_inf<uint16_t, uint16_t{0x7F80}>;
+    case c10::kFloat:
+      return words_have_nan_or_inf<uint32_t, uint32_t{0x7F800000}>;
+    case c10::kDouble:
+      return words_have_nan_or_inf<uint64_t, uint64_t{0x7FF0000000000000}>;
     default:
-      TORCH_INTERNAL_ASSERT(false, "missing scanner for ScalarType");
+      TORCH_INTERNAL_ASSERT(false, "missing NaN/Inf scanner for ScalarType");
   }
 }
 
@@ -573,10 +577,12 @@ inline ScannerFn scanner_for(c10::ScalarType scalar_type) {
 // will trigger a D2H sync (this is the price of catching NaN/Inf in
 // just-computed device data — matches AS-IS Python ``to_cpu(args)`` cost).
 //
-// Returns false for: undefined / empty / dtype outside the dispatch
-// catalog / non-contiguous tensors. Non-catalog dtypes are short-circuited
-// earlier in ``quick_fallback_check``; ``skip_dtype_args`` slots are
-// typically bool/int (eq/ne ``cond`` etc.) which cannot carry NaN/Inf.
+// Returns false for: undefined / empty / dtype outside the dispatch policy or
+// not floating / non-contiguous tensors. Non-admitted dtypes are short-circuited
+// earlier in ``quick_fallback_check``; ``skip_dtype_args`` slots are typically
+// bool/int (eq/ne ``cond`` etc.) which cannot carry NaN/Inf. An admitted floating
+// dtype without a scanner is a bug, not a skip: a warm-cache hit would then run
+// the device kernel on NaN/Inf without the Python scan ever seeing the input.
 // Non-contiguous tensors are skipped here because the warm-cache key
 // requires contig + offset=0 anyway — the non-contig case will miss and
 // fall through to the Python wrapper which performs the full
@@ -587,7 +593,7 @@ bool tensor_has_nan_or_inf(const at::Tensor& t) {
   const auto numel = t.numel();
   if (numel == 0)
     return false;
-  if (!c10::rbln::is_dispatch_dtype(t.scalar_type())) {
+  if (!c10::rbln::is_dispatch_dtype_rt(t.scalar_type()) || !c10::isFloatingType(t.scalar_type())) {
     return false;
   }
   const auto scanner = scanner_for(t.scalar_type());
@@ -599,7 +605,7 @@ bool tensor_has_nan_or_inf(const at::Tensor& t) {
   if (dev_type != c10::DeviceType::PrivateUse1) {
     // CPU tensor (e.g. wrapped 0-dim scalar that didn't get unwrapped):
     // scan in place.
-    const uint16_t* data = static_cast<const uint16_t*>(t.data_ptr());
+    const void* data = t.data_ptr();
     if (data == nullptr)
       return false;
     return scanner(data, n);
@@ -618,13 +624,13 @@ bool tensor_has_nan_or_inf(const at::Tensor& t) {
   auto borrowed = c10::rbln::try_borrow_host_ptr(ptr, nbytes);
   if (!borrowed) {
     const at::Tensor cpu_copy = t.cpu();
-    const uint16_t* host_data = static_cast<const uint16_t*>(cpu_copy.data_ptr());
+    const void* host_data = cpu_copy.data_ptr();
     if (host_data == nullptr)
       return false;
     return scanner(host_data, n);
   }
   void* host_raw = reinterpret_cast<void*>(borrowed->host_ptr); // NOLINT(performance-no-int-to-ptr)
-  const bool found = scanner(static_cast<const uint16_t*>(host_raw), n);
+  const bool found = scanner(host_raw, n);
   c10::rbln::return_borrowed(borrowed->borrow_id, /*updated=*/false);
   return found;
 }
@@ -681,9 +687,7 @@ int quick_fallback_check(
     // gates that skip args from the shortcut counter. We want to catch
     // NaN/Inf in any defined non-write-alias input — including wrapped
     // 0-dim values such as ``tensor + math.nan``. tensor_has_nan_or_inf
-    // internally filters out dtypes outside the dispatch catalog (catalog
-    // dtypes — fp16/bf16 — are the ones that can encode NaN/Inf on the
-    // shim path).
+    // scans every floating dtype the dispatch policy admits and skips the rest.
     if (nan_inf_scan_enabled && !nan_inf_found && tensor_has_nan_or_inf(t)) {
       nan_inf_found = true;
     }
@@ -705,7 +709,8 @@ int quick_fallback_check(
       continue;
     }
     has_input_tensor = true;
-    if (!c10::rbln::is_dispatch_dtype(t.scalar_type())) {
+    // Catalog plus the TORCH_RBLN_DISPATCH_DTYPES extension (RBLNSupportedDtypes.h).
+    if (!c10::rbln::is_dispatch_dtype_rt(t.scalar_type())) {
       return 1; // dtype-not-fp16 (dtype outside the dispatch policy)
     }
     if (t.dim() != 0) {

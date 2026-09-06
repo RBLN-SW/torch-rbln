@@ -2,16 +2,19 @@
 #include <c10/rbln/DeviceMappingManager.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
+#include <c10/rbln/RBLNSupportedDtypes.h>
 #include <c10/util/CallOnce.h>
 #include <rebel/runtime/memory_stats.h>
 
 #include <atomic>
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 #include <array>
@@ -87,7 +90,152 @@ void rt_timing_get(uint64_t* out) {
   }
 }
 
-// torch.rbln.explain() runtime-counter reads. Thin pass-throughs to librbln's
+// ---------------------------------------------------------------------------
+// Eager-dispatch dtype catalog: runtime extension (see RBLNSupportedDtypes.h)
+// ---------------------------------------------------------------------------
+namespace {
+
+std::optional<c10::ScalarType> parse_dtype_name(std::string name) {
+  for (auto& ch : name) {
+    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+  }
+  struct Entry {
+    const char* name;
+    c10::ScalarType type;
+  };
+  static constexpr std::array<Entry, 26> kNames = {{
+      {"float32", c10::kFloat},  {"float", c10::kFloat},   {"fp32", c10::kFloat},        {"f32", c10::kFloat},
+      {"float64", c10::kDouble}, {"double", c10::kDouble}, {"fp64", c10::kDouble},       {"float16", c10::kHalf},
+      {"half", c10::kHalf},      {"fp16", c10::kHalf},     {"bfloat16", c10::kBFloat16}, {"bf16", c10::kBFloat16},
+      {"int32", c10::kInt},      {"int", c10::kInt},       {"i32", c10::kInt},           {"int64", c10::kLong},
+      {"long", c10::kLong},      {"i64", c10::kLong},      {"int16", c10::kShort},       {"short", c10::kShort},
+      {"i16", c10::kShort},      {"int8", c10::kChar},     {"i8", c10::kChar},           {"uint8", c10::kByte},
+      {"u8", c10::kByte},        {"bool", c10::kBool},
+  }};
+  for (const auto& e : kNames) {
+    if (name == e.name) {
+      return e.type;
+    }
+  }
+  return std::nullopt;
+}
+
+// Parse a comma-separated dtype list from `env_name` into a bitmask over c10::ScalarType.
+// "all" sets `all_out`. The env string is compared on every call (a short strcmp) and
+// re-parsed only when it changed, so a per-test env toggle takes effect without latching a
+// value into the process.
+struct DtypeMaskCache {
+  std::mutex mu;
+  std::string last_env;
+  bool have_last = false;
+  uint64_t mask = 0;
+  bool all = false;
+};
+
+uint64_t dtype_mask_from_env(const char* env_name, DtypeMaskCache& c, bool* all_out) {
+  const char* env = std::getenv(env_name);
+  std::lock_guard<std::mutex> lock(c.mu);
+  const std::string current = env == nullptr ? "" : env;
+  if (!c.have_last || c.last_env != current) {
+    // Parse into locals and commit only a complete result: a rejected value must
+    // not leave a partial mask behind for the next call to return silently.
+    uint64_t mask = 0;
+    bool all = false;
+    size_t start = 0;
+    while (start <= current.size()) {
+      size_t end = current.find(',', start);
+      if (end == std::string::npos) {
+        end = current.size();
+      }
+      std::string tok = current.substr(start, end - start);
+      const auto b = tok.find_first_not_of(" \t");
+      const auto e = tok.find_last_not_of(" \t");
+      if (b != std::string::npos) {
+        tok = tok.substr(b, e - b + 1);
+        if (tok == "all") {
+          all = true;
+        } else if (auto st = parse_dtype_name(tok)) {
+          mask |= uint64_t{1} << static_cast<unsigned>(*st);
+        } else {
+          TORCH_CHECK(false, env_name, ": unknown dtype name '", tok, "'");
+        }
+      }
+      start = end + 1;
+    }
+    c.have_last = true;
+    c.last_env = current;
+    c.mask = mask;
+    c.all = all;
+  }
+  if (all_out != nullptr) {
+    *all_out = c.all;
+  }
+  return c.mask;
+}
+
+// Bitmask of the extra dtypes named by TORCH_RBLN_DISPATCH_DTYPES.
+uint64_t dispatch_dtype_ext_mask() {
+  static DtypeMaskCache cache;
+  return dtype_mask_from_env("TORCH_RBLN_DISPATCH_DTYPES", cache, nullptr);
+}
+
+// Bitmask of the dtypes named by TORCH_RBLN_DISPATCH_STRICT ("all" = catalog + extension).
+uint64_t dispatch_dtype_strict_mask() {
+  static DtypeMaskCache cache;
+  bool all = false;
+  uint64_t mask = dtype_mask_from_env("TORCH_RBLN_DISPATCH_STRICT", cache, &all);
+  if (all) {
+    for (const auto d : kDispatchDtypes) {
+      mask |= uint64_t{1} << static_cast<unsigned>(d);
+    }
+    mask |= dispatch_dtype_ext_mask();
+  }
+  return mask;
+}
+
+} // namespace
+
+bool is_dispatch_dtype_rt(c10::ScalarType s) noexcept {
+  if (is_dispatch_dtype(s)) {
+    return true;
+  }
+  const auto idx = static_cast<unsigned>(s);
+  if (idx >= 64) {
+    return false;
+  }
+  return (dispatch_dtype_ext_mask() >> idx) & uint64_t{1};
+}
+
+bool is_strict_dispatch_dtype_rt(c10::ScalarType s) noexcept {
+  const auto idx = static_cast<unsigned>(s);
+  if (idx >= 64) {
+    return false;
+  }
+  return (dispatch_dtype_strict_mask() >> idx) & uint64_t{1};
+}
+
+std::vector<c10::ScalarType> strict_dispatch_dtypes_rt() {
+  std::vector<c10::ScalarType> out;
+  const uint64_t mask = dispatch_dtype_strict_mask();
+  for (unsigned i = 0; i < 64; ++i) {
+    if ((mask >> i) & uint64_t{1}) {
+      out.push_back(static_cast<c10::ScalarType>(i));
+    }
+  }
+  return out;
+}
+
+std::vector<c10::ScalarType> dispatch_dtypes_rt() {
+  std::vector<c10::ScalarType> out(kDispatchDtypes.begin(), kDispatchDtypes.end());
+  const uint64_t mask = dispatch_dtype_ext_mask();
+  for (unsigned i = 0; i < 64; ++i) {
+    if (((mask >> i) & uint64_t{1}) && !is_dispatch_dtype(static_cast<c10::ScalarType>(i))) {
+      out.push_back(static_cast<c10::ScalarType>(i));
+    }
+  }
+  return out;
+}
+
 // public C-API (rbln_prof_*, declared in rbln_runtime_api.h via RBLNFunctions.h).
 uint32_t rt_prof_hidden_num() {
   return rbln_prof_v2v_hidden_num_reasons();
