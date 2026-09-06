@@ -288,4 +288,68 @@ class TestViewCopyInPlace(TestCase):
         self.assertEqual(buf.cpu(), host)
 
 
+@pytest.mark.test_set_ci
+@pytest.mark.usefixtures("enable_deploy_mode")
+class TestViewCopyProgramSlots(TestCase):
+    """One compiled program per source address, least recently used evicted past the cap.
+
+    Rebinding a program to another buffer re-uploads its instruction streams through the
+    allocator, which waits for every transfer in flight on the device first -- so two live
+    buffers sharing a program would rebind on every call and stall a transfer pipeline on
+    each one. The policy is checked through the module's slot table: the copies themselves
+    are correct under any policy.
+    """
+
+    _SHAPE = (_ROWS, _HEADS, _BLOCK, _DIM)
+
+    def setUp(self):
+        super().setUp()
+        # Third Party
+        from torch_rbln._internal import register_custom_ops as rco
+
+        self._rco = rco
+        self._saved = (rco._MAX_COPY_SLOTS, dict(rco._copy_slot_of_src))
+
+    def tearDown(self):
+        rco = self._rco
+        rco._MAX_COPY_SLOTS = self._saved[0]
+        rco._copy_slot_of_src.clear()
+        rco._copy_slot_of_src.update(self._saved[1])
+        super().tearDown()
+
+    def _copy(self, buf: torch.Tensor) -> None:
+        out = torch.empty(_ROWS, _BLOCK, _HEADS, _DIM, dtype=buf.dtype, device=buf.device)
+        out.copy_(buf.permute(0, 2, 1, 3))
+        self.assertEqual(out.cpu(), buf.cpu().permute(0, 2, 1, 3))
+
+    def test_live_buffers_within_the_cap_keep_their_own_slot(self, device):
+        rco = self._rco
+        rco._MAX_COPY_SLOTS = 4
+        rco._copy_slot_of_src.clear()
+        bufs = [_to_dev(torch.randint(-1000, 1000, self._SHAPE).to(torch.bfloat16)) for _ in range(4)]
+        for _ in range(3):  # alternate over the whole set, as a pipeline over its staging does
+            for buf in bufs:
+                self._copy(buf)
+        slots = [rco._copy_slot_of_src[b.data_ptr()] for b in bufs]
+        self.assertEqual(sorted(slots), [0, 1, 2, 3])  # nobody moved, nobody shared
+
+    def test_past_the_cap_the_least_recently_used_address_gives_up_its_slot(self, device):
+        rco = self._rco
+        rco._MAX_COPY_SLOTS = 3
+        rco._copy_slot_of_src.clear()
+        a, b, c, d = [_to_dev(torch.randint(-1000, 1000, self._SHAPE).to(torch.bfloat16)) for _ in range(4)]
+        for buf in (a, b, c):
+            self._copy(buf)
+        self._copy(a)  # a is now the most recent; b the least
+        slot_b = rco._copy_slot_of_src[b.data_ptr()]
+        self._copy(d)
+        self.assertNotIn(b.data_ptr(), rco._copy_slot_of_src)  # b evicted
+        self.assertEqual(rco._copy_slot_of_src[d.data_ptr()], slot_b)  # d took b's slot
+        self.assertIn(a.data_ptr(), rco._copy_slot_of_src)
+        self.assertEqual(len(rco._copy_slot_of_src), 3)
+        self._copy(b)  # b comes back onto a slot of its own and still copies right
+        self.assertEqual(len(rco._copy_slot_of_src), 3)
+
+
 instantiate_device_type_tests(TestViewCopyInPlace, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestViewCopyProgramSlots, globals(), only_for="privateuse1")

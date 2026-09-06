@@ -1,5 +1,6 @@
 import math
 import threading
+from collections import OrderedDict
 
 import torch
 
@@ -458,17 +459,41 @@ def _materialize(t: torch.Tensor) -> torch.Tensor:
     return t.contiguous()
 
 
-# A compiled program binds its I/O once and repatching a large buffer's addresses costs
-# milliseconds, so a caller that alternates buffers needs one program per buffer. The
-# compile cache is keyed on (device, shapes, dtypes) and on the identity of the callable
-# under the recipe, never on an address -- so the callable is what carries the buffer
-# identity here: one distinct function object per source address, which
-# ``get_view_op_module`` then keys on. Bounded, so an unbounded caller cannot grow the
-# cache without limit; slots past the cap share a program and repatch as before.
-_MAX_COPY_SLOTS = 8
-_copy_slot_of_src: dict[int, int] = {}
-_copy_slot_ops: dict[int, object] = {0: _materialize}
+# A compiled program binds its I/O once, and rebinding it to another buffer is not a
+# cheap patch: the relocated instruction streams are re-uploaded through the allocator,
+# which first waits for every transfer still in flight on the device. A caller that
+# alternates buffers -- a transfer pipeline staging blocks in turn -- would pay that on
+# every call, and pay it with the overlap its pipeline exists for. So each source address
+# gets its own program. The compile cache is keyed on (device, shapes, dtypes) and on the
+# identity of the callable under the recipe, never on an address, so the callable is
+# what carries the buffer identity here: one distinct function object per address, which
+# ``get_view_op_module`` then keys on.
+#
+# Bounded, so an unbounded caller cannot grow the cache without limit; past the cap the
+# least recently used address gives up its slot (a program's rebind, once) rather than
+# two live addresses sharing a slot and rebinding on every call. The cap covers a
+# transfer pool of four threads, each staging into two pipeline slots of four chiplet
+# shards: 4 x 2 x 4 = 32 live buffers when a thread's two directions share them, half
+# the cap. A slot costs a compile the first time it is used (~0.5 s).
+_MAX_COPY_SLOTS = 64
+_copy_slot_of_src: OrderedDict[int, int] = OrderedDict()  # address -> slot, least recent first
+_copy_slot_ops: dict[int, object] = {}
 _copy_slot_lock = threading.Lock()
+
+
+def _copy_slot_for(ptr: int) -> int:
+    """The program slot for a source address: its own while it is one of the
+    ``_MAX_COPY_SLOTS`` most recently used, else the least recently used one's."""
+    slot = _copy_slot_of_src.get(ptr)
+    if slot is not None:
+        _copy_slot_of_src.move_to_end(ptr)
+        return slot
+    if len(_copy_slot_of_src) < _MAX_COPY_SLOTS:
+        slot = len(_copy_slot_of_src)
+    else:
+        _, slot = _copy_slot_of_src.popitem(last=False)
+    _copy_slot_of_src[ptr] = slot
+    return slot
 
 
 def _materialize_for(src: torch.Tensor):
@@ -477,12 +502,8 @@ def _materialize_for(src: torch.Tensor):
     ``torch.compile`` caches on the code object, so each slot is compiled from its own
     source -- the same reason ``compiled_permute`` generates one function per slot.
     """
-    ptr = src.data_ptr()
     with _copy_slot_lock:
-        slot = _copy_slot_of_src.get(ptr)
-        if slot is None:
-            slot = len(_copy_slot_of_src) % _MAX_COPY_SLOTS
-            _copy_slot_of_src[ptr] = slot
+        slot = _copy_slot_for(src.data_ptr())
         op = _copy_slot_ops.get(slot)
         if op is None:
             namespace: dict = {}
