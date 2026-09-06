@@ -84,6 +84,11 @@ void bind_device_memory_at_rbln(at::Tensor& self, int64_t chiplet);
  */
 int64_t chiplet_count_rbln(const at::Tensor& self);
 
+// The same two for CPU tensors, so code written against the ops runs on the host too: one
+// chiplet, nothing to place.
+void bind_device_memory_at_cpu(at::Tensor& self, int64_t chiplet);
+int64_t chiplet_count_cpu(const at::Tensor& self);
+
 // Native impl of aten::fill_.Scalar — borrow host pointer + typed std::fill_n
 // + return_borrowed(updated=true). Bypasses cpu_fallback_rbln's redispatchBoxed
 // + TensorIterator path. The fast path is taken for a contiguous self with a

@@ -351,5 +351,37 @@ class TestViewCopyProgramSlots(TestCase):
         self.assertEqual(len(rco._copy_slot_of_src), 3)
 
 
+@pytest.mark.test_set_ci
+class TestTransferOpsOnCPU(TestCase):
+    """The ops an extension borrows for a transfer -- ``copy_strided_view``,
+    ``chiplet_count``, ``bind_device_memory_at`` -- answer for CPU tensors too, so the
+    extension's own tests can run its kernel on the host: one chiplet, nothing to place,
+    and the strided copy is ``copy_`` itself.
+    """
+
+    _SHAPE = (2 * _ROWS, _HEADS, _BLOCK, _DIM)
+
+    def test_copy_strided_view_copies_a_permuted_view(self):
+        src = torch.randint(-1000, 1000, self._SHAPE).to(torch.bfloat16)
+        out = torch.empty(2 * _ROWS, _BLOCK, _HEADS, _DIM, dtype=torch.bfloat16)
+        self.assertTrue(torch.ops.torch_rbln.copy_strided_view(src.permute(0, 2, 1, 3), out, False))
+        self.assertEqual(out, src.permute(0, 2, 1, 3))
+
+    def test_copy_strided_view_permutes_a_buffer_in_place(self):
+        rows, heads, block, dim = self._SHAPE
+        host = torch.randint(-1000, 1000, self._SHAPE).to(torch.bfloat16)
+        buf = host.clone()
+        src = buf.view(rows, heads, block, dim).permute(0, 2, 1, 3)
+        self.assertTrue(torch.ops.torch_rbln.copy_strided_view(src, buf.view(rows, block, heads, dim), True))
+        self.assertEqual(buf.view(rows, block, heads, dim), host.permute(0, 2, 1, 3))
+
+    def test_a_cpu_tensor_has_one_chiplet_and_is_already_on_it(self):
+        t = torch.zeros(8)
+        self.assertEqual(torch.ops.torch_rbln.chiplet_count(t), 1)
+        torch.ops.torch_rbln.bind_device_memory_at(t, 0)  # a no-op
+        with self.assertRaisesRegex(RuntimeError, "one chiplet"):
+            torch.ops.torch_rbln.bind_device_memory_at(t, 1)
+
+
 instantiate_device_type_tests(TestViewCopyInPlace, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestViewCopyProgramSlots, globals(), only_for="privateuse1")

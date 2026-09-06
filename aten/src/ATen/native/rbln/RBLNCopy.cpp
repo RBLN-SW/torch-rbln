@@ -482,6 +482,16 @@ void copy_impl_rbln_async(const at::Tensor& src, const at::Tensor& dst) {
   }
 }
 
+bool copy_strided_view_cpu(const at::Tensor& src, at::Tensor& out, bool inplace) {
+  TORCH_CHECK(src.device().is_cpu() && out.device().is_cpu(), "copy_strided_view: expected CPU tensors here");
+  if (inplace) {
+    out.copy_(src.clone(at::MemoryFormat::Contiguous));
+  } else {
+    out.copy_(src);
+  }
+  return true;
+}
+
 at::Tensor _copy_from_rbln(const at::Tensor& src, const at::Tensor& dst, bool non_blocking) {
   RBLN_SCOPE_GUARD();
   RBLN_LOG_DEBUG("src_data={}, dst_data={}", fmt::ptr(src.data_ptr()), fmt::ptr(dst.data_ptr()));

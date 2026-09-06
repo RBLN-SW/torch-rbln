@@ -20,6 +20,10 @@ namespace at::native::rbln {
  */
 at::Tensor _copy_from_rbln(const at::Tensor& src, const at::Tensor& dst, bool non_blocking);
 
+// torch_rbln::copy_strided_view for CPU tensors: the copy itself, through a clone when
+// `out` is the buffer `src` views, since ATen refuses an overlapping pair. Always true.
+bool copy_strided_view_cpu(const at::Tensor& src, at::Tensor& out, bool inplace);
+
 /**
  * @brief Resizes the destination tensor to match the source tensor and copies data from the source tensor to the destination tensor.
  *

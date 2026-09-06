@@ -127,6 +127,17 @@ int64_t chiplet_count_rbln(const at::Tensor& self) {
   return c10::rbln::chiplet_count(self.device());
 }
 
+// A CPU tensor's memory is one pool: it has one "chiplet", and it is already there.
+void bind_device_memory_at_cpu(at::Tensor& self, int64_t chiplet) {
+  TORCH_CHECK(self.device().is_cpu(), "bind_device_memory_at: expected a CPU tensor here, got ", self.device());
+  TORCH_CHECK(chiplet == 0, "bind_device_memory_at: a CPU tensor has one chiplet, 0; got ", chiplet);
+}
+
+int64_t chiplet_count_cpu(const at::Tensor& self) {
+  TORCH_CHECK(self.device().is_cpu(), "chiplet_count: expected a CPU tensor here, got ", self.device());
+  return 1;
+}
+
 at::Tensor& zero_rbln_(at::Tensor& self) {
   RBLN_SCOPE_GUARD();
   if (self.numel() == 0) {

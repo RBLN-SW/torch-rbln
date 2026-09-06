@@ -155,6 +155,15 @@ TORCH_LIBRARY_IMPL(torch_rbln, PrivateUse1, m) {
   m.impl("chiplet_count", TORCH_FN(at::native::rbln::chiplet_count_rbln));
 }
 
+// The same ops for CPU tensors, so an extension written against them -- LMCache's transfer,
+// whose tests run its kernel on CPU tensors -- runs on the host too. A CPU tensor's memory is
+// one pool: one chiplet, nothing to place; the strided copy is `copy_` itself.
+TORCH_LIBRARY_IMPL(torch_rbln, CPU, m) {
+  m.impl("copy_strided_view", TORCH_FN(at::native::rbln::copy_strided_view_cpu));
+  m.impl("bind_device_memory_at", TORCH_FN(at::native::rbln::bind_device_memory_at_cpu));
+  m.impl("chiplet_count", TORCH_FN(at::native::rbln::chiplet_count_cpu));
+}
+
 // ATen operations registration for the RBLN backend (PrivateUse1)
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   // Operations that use the device runtime API
