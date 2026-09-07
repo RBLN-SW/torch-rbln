@@ -138,6 +138,12 @@ class OpCategories:
         "max",
         "min",
     }
+    # Softmax .out: shape-preserving, with an int dim and a bool flag. The
+    # pointwise pre-check applies unchanged (fp16, not-all-scalar, no contig
+    # offset); the scalars ride in the warm-cache key like any other shim op.
+    SHIM_SOFTMAX: Set[str] = {
+        "_softmax.out",
+    }
     # Matmul family. Earlier benches showed a small device-path overhead
     # (~2% in pybind-heavy hot loops) which is now well below noise after
     # the warm-cache path skips Python entirely on warm hits. Coverage gain
@@ -159,6 +165,7 @@ class OpCategories:
         | SHIM_REDUCTION
         | SHIM_REDUCTION_FULL
         | SHIM_MATMUL
+        | SHIM_SOFTMAX
     )
 
     # Per-op overrides of the dispatch-shim dtype check: positional arg indices
