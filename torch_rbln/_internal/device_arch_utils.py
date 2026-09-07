@@ -23,15 +23,15 @@ def get_device_arch() -> str:
     """Identify the current NPU family (``"atom"``/``"rebel"``/``"unknown"``) via
     ``get_npu_name`` from ``rebel-compiler`` (cached).
 
-    ``"unknown"`` is what a host with no NPU gets on its own: ``get_npu_name``
-    answers ``None`` for an index no device claims, which maps to ``"unknown"``
-    without raising. So nothing here has to catch that case.
+    ``"unknown"`` is reserved for a host with no NPU: the runtime's query API
+    answers ``None`` for an index no device claims and never raises for it, and
+    ``None`` maps to ``"unknown"`` without any catch here.
 
-    A ``get_npu_name`` that moved is the opposite, and must not arrive as the
-    same answer. Every caller of this is an architecture gate -- ``xfail_atom``,
-    ``xfail_rebel``, the per-lineup branches in the model tests -- so one
-    ``"unknown"`` turns all of them off at once, and the suite goes on
-    asserting something other than what it says it does. Let it raise.
+    Anything else -- the import failing, the lookup raising -- propagates.
+    Every caller of this is an architecture gate (``xfail_atom``,
+    ``xfail_rebel``, the per-lineup branches in the model tests), and a
+    swallowed failure would turn all of them off at once while the suite
+    goes on passing.
     """
     from rebel.device_info import get_npu_name
 

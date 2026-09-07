@@ -82,14 +82,16 @@ class TestArchXfailMarkers(TestCase):
 
 @pytest.mark.test_set_ci
 class TestArchResolutionFailure(TestCase):
-    """A host with no NPU and a moved ``get_npu_name`` must not look alike.
+    """Only ``None`` from the runtime is ``"unknown"``; any failure propagates.
 
-    Both used to answer ``"unknown"``, and every caller of ``get_device_arch``
-    is an architecture gate, so the second one turns all of them off at once
-    with nothing failing. Only the first is a legitimate ``"unknown"``.
+    A host with no NPU and a broken lookup used to answer the same
+    ``"unknown"``, and every caller of ``get_device_arch`` is an architecture
+    gate, so the second one turned all of them off at once with nothing
+    failing.
     """
 
     def setUp(self) -> None:
+        super().setUp()
         get_device_arch.cache_clear()
         self.addCleanup(get_device_arch.cache_clear)
 
@@ -102,6 +104,11 @@ class TestArchResolutionFailure(TestCase):
         # None in sys.modules is what CPython turns a moved module into.
         with patch.dict(sys.modules, {"rebel.device_info": None}):
             with self.assertRaises(ImportError):
+                get_device_arch()
+
+    def test_lookup_error_propagates(self) -> None:
+        with patch("rebel.device_info.get_npu_name", side_effect=RuntimeError("device query failed")):
+            with self.assertRaises(RuntimeError):
                 get_device_arch()
 
 
