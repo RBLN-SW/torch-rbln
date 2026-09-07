@@ -37,15 +37,27 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 import torch_rbln._C as _C
 
 
+def _dispatch_counts() -> tuple[int, int, int, int]:
+    """(n_total, n_fallback, n_warm_hit, n_miss) from the dispatch-shim diagnostics."""
+    d = _C._dispatch_shim_diag_dump()
+    return d[0], d[1], d[2], d[3]
+
+
 @pytest.mark.test_set_ci
 class TestDispatchShimWrappedScalar(TestCase):
-    """`tensor + 1.0` must run on RBLN, not be redirected to CPU fallback.
+    """A python-number operand is a wrapped 0-dim tensor at the dispatcher and a
+    graph constant in the compiled program.
 
-    Python scalars become 0-dim wrapped tensors at the dispatcher; if the
-    shim counted those against the "all-scalar inputs" rule the binary op
-    `add(tensor, 1.0)` would incorrectly take the fallback path and lose
-    the compile-path acceleration.
+    Two things follow for the shim. The pre-check must not count it against the
+    "all-scalar inputs" rule, or `add(tensor, 1.0)` would take the CPU fallback.
+    And the warm cache must key it by *value* and keep it out of the runtime
+    inputs: a hit that handed its host pointer to the runtime failed and erased
+    the entry, so every python-scalar op ran the Python path forever, while a
+    key that ignored the value would let `a + 2` return `a + 1`.
     """
+
+    def setUp(self) -> None:
+        _C._warmcache_clear()
 
     def test_add_tensor_python_scalar_runs_on_rbln(self) -> None:
         x = torch.arange(8, dtype=torch.float16, device="rbln")
@@ -58,6 +70,62 @@ class TestDispatchShimWrappedScalar(TestCase):
         y = x * 2.5
         self.assertEqual(y.device.type, "rbln")
         self.assertEqual(y.to("cpu"), torch.arange(8, dtype=torch.float16) * 2.5)
+
+    def test_python_scalar_warm_hits_and_keeps_entry(self) -> None:
+        for dtype in (torch.float16, torch.bfloat16):
+            with self.subTest(dtype=dtype):
+                _C._warmcache_clear()
+                a = torch.ones(1, 64, dtype=dtype, device="rbln")
+                _ = a + 1  # compile + install
+                self.assertEqual(_C._warmcache_size(), 1)
+                before = _dispatch_counts()
+                out = a + 1
+                delta = tuple(b - c for c, b in zip(before, _dispatch_counts()))
+                self.assertEqual(delta, (1, 0, 1, 0), "second `a + 1` must be a warm hit (total, fallback, hit, miss)")
+                self.assertEqual(_C._warmcache_size(), 1, "the hit must not erase the entry")
+                self.assertEqual(out.cpu(), torch.full((1, 64), 2.0, dtype=dtype))
+
+    def test_distinct_python_scalars_are_distinct_entries(self) -> None:
+        a = torch.ones(1, 64, dtype=torch.float16, device="rbln")
+        r1 = (a + 1).cpu()
+        r2 = (a + 2).cpu()
+        self.assertEqual(_C._warmcache_size(), 2, "`a + 1` and `a + 2` must not share a key")
+        before = _dispatch_counts()
+        again1 = (a + 1).cpu()
+        again2 = (a + 2).cpu()
+        _, _, warm, miss = tuple(b - c for c, b in zip(before, _dispatch_counts()))
+        self.assertEqual((warm, miss), (2, 0))
+        self.assertEqual(again1, r1)
+        self.assertEqual(again2, r2)
+        self.assertEqual(r1[0, 0].item(), 2.0)
+        self.assertEqual(r2[0, 0].item(), 3.0)
+
+    def test_int_float_and_op_scalars_do_not_collide(self) -> None:
+        a = torch.ones(1, 64, dtype=torch.float16, device="rbln")
+        self.assertEqual((a + 1).cpu()[0, 0].item(), 2.0)
+        self.assertEqual((a + 1.5).cpu()[0, 0].item(), 2.5)
+        self.assertEqual((a * 3).cpu()[0, 0].item(), 3.0)
+        self.assertEqual((a - 0.5).cpu()[0, 0].item(), 0.5)
+        self.assertEqual(_C._warmcache_size(), 4)
+        before = _dispatch_counts()
+        self.assertEqual((a + 1.5).cpu()[0, 0].item(), 2.5)
+        self.assertEqual((a * 3).cpu()[0, 0].item(), 3.0)
+        _, _, warm, miss = tuple(b - c for c, b in zip(before, _dispatch_counts()))
+        self.assertEqual((warm, miss), (2, 0))
+
+    def test_inplace_python_scalar_add(self) -> None:
+        a = torch.ones(1, 64, dtype=torch.float16, device="rbln")
+        a += 1
+        a += 1
+        self.assertEqual(a.cpu(), torch.full((1, 64), 3.0, dtype=torch.float16))
+
+    def test_zero_dim_device_tensor_stays_a_runtime_input(self) -> None:
+        a = torch.ones(1, 64, dtype=torch.float16, device="rbln")
+        s = torch.tensor(1.0, dtype=torch.float16, device="rbln")
+        self.assertEqual((a + s).cpu()[0, 0].item(), 2.0)
+        self.assertEqual((a + s).cpu()[0, 0].item(), 2.0)
+        s.fill_(3.0)
+        self.assertEqual((a + s).cpu()[0, 0].item(), 4.0, "a real 0-dim tensor is read at run time, not baked in")
 
 
 @pytest.mark.test_set_ci
