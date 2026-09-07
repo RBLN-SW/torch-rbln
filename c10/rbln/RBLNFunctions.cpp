@@ -1264,9 +1264,7 @@ std::map<std::string, uint64_t> memory_stats(const c10::Device& device) {
   // CUDA parity: report empty stats for a valid device this process has not allocated
   // on (memory_allocated()/memory_reserved() then read 0), matching PyTorch's generic
   // path, which returns empty only for an uninitialized allocator. An initialized
-  // device still queries the runtime, so genuine failures surface -- device 0 works;
-  // the runtime rejects per-node stats for a device index > 0 (INIT_INVALID_ARGUMENT,
-  // Invalid node_id), and fixing that is a runtime-side change, not a swallow here.
+  // device still queries the runtime, so genuine failures surface.
   // (check_device_index above still rejects an invalid index -- a bad index throws.)
   if (!device_context_initialized(device_index)) {
     return {};
@@ -1277,6 +1275,38 @@ std::map<std::string, uint64_t> memory_stats(const c10::Device& device) {
   const auto memory_stats = stats.GetMemoryStats();
   RBLN_LOG_DEBUG("memory_stats={}", memory_stats);
   return memory_stats;
+}
+
+std::map<std::string, uint64_t> memory_stats_per_chiplet(const c10::Device& device) {
+  RBLN_LOG_DEBUG("logical device={}", c10::str(device));
+  // Same availability/initialization gates as memory_stats().
+  if (!runtime_available()) {
+    return {};
+  }
+  const auto device_index = device.index();
+  check_device_index(device_index);
+  if (!device_context_initialized(device_index)) {
+    return {};
+  }
+  const auto device_id = to_device_id(device_index);
+  RBLN_LOG_DEBUG(
+      "Calling rbln_get_memory_stats_per_chiplet: rbln:{}, device_id={}", static_cast<int>(device_index), device_id);
+  const auto per_npu = rbln_get_memory_stats_per_chiplet(device_id);
+
+  // Both axes are in the key: a logical device is one or more physical NPUs
+  // (RBLN_NPUS_PER_DEVICE / RBLN_DEVICE_MAP), each with its own chiplets. npu.<n> is
+  // the n-th NPU of THIS logical device, not a physical NPU id.
+  std::map<std::string, uint64_t> out;
+  for (size_t npu = 0; npu < per_npu.size(); ++npu) {
+    for (size_t chiplet = 0; chiplet < per_npu[npu].size(); ++chiplet) {
+      const auto prefix = "npu." + std::to_string(npu) + ".chiplet." + std::to_string(chiplet) + ".";
+      for (const auto& [key, value] : per_npu[npu][chiplet].GetMemoryStats()) {
+        out[prefix + key] = value;
+      }
+    }
+  }
+  RBLN_LOG_DEBUG("memory_stats_per_chiplet={}", out);
+  return out;
 }
 
 void reset_accumulated_memory_stats(const c10::Device& device) {

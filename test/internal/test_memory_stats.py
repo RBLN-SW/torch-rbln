@@ -1,5 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
+import os
 from unittest.mock import patch
 
 import pytest
@@ -977,8 +978,93 @@ class TestAcceleratorMemoryAPI(TestCase):
             del tensor
 
 
+@pytest.mark.test_set_ci
+@pytest.mark.single_worker
+@pytest.mark.usefixtures("enable_eager_malloc")
+class TestPerChipletMemoryStats(TestCase):
+    """memory_stats_per_chiplet() / memory_summary()."""
+
+    def setUp(self):
+        if torch.rbln.device_count() == 0:
+            self.skipTest("no rbln device available")
+        self.device = "rbln:0"
+        # Same warmup as TestMemoryStats: the per-chiplet dict is empty until this
+        # process has a context on the device.
+        warmup = torch.empty(1, device=self.device, dtype=torch.float16)
+        del warmup
+        torch.rbln.empty_cache(self.device)
+
+    def test_key_schema(self):
+        """Keys carry both axes: npu.<n>.chiplet.<c>.<stat>."""
+        per_chiplet = torch.rbln.memory_stats_per_chiplet(self.device)
+        self.assertGreater(len(per_chiplet), 0)
+        for key in per_chiplet:
+            parts = key.split(".")
+            self.assertEqual(parts[0], "npu", f"Unexpected key format: {key}")
+            self.assertEqual(parts[2], "chiplet", f"Unexpected key format: {key}")
+            self.assertTrue(parts[1].isdigit() and parts[3].isdigit(), f"Unexpected key format: {key}")
+            self.assertIsInstance(per_chiplet[key], int)
+
+    def test_breakdown_sums_to_aggregate(self):
+        """The breakdown must account for exactly what memory_stats() aggregates.
+
+        Under a 1:1 mapping the outer axis is 1, so this cannot catch a multi-NPU
+        coordinate mismatch on its own -- the runtime's own multi-node tests cover that
+        axis. Here it pins the current/peak relationship the summary documents.
+        """
+        tensor = torch.empty(512 * 1024, dtype=torch.float16, device=self.device)
+        try:
+            aggregate = torch.rbln.memory_stats(self.device)
+            per_chiplet = torch.rbln.memory_stats_per_chiplet(self.device)
+            for stat in ("allocated.current", "reserved.current", "active.current"):
+                total = sum(v for k, v in per_chiplet.items() if k.endswith("." + stat))
+                self.assertEqual(aggregate[stat], total, f"{stat} disagrees with the breakdown")
+            # Peaks are per chiplet, so their sum bounds the joint peak from above.
+            # memory_summary()'s total row inherits that, and its docstring says so.
+            summed_peak = sum(v for k, v in per_chiplet.items() if k.endswith(".allocated.peak"))
+            self.assertGreaterEqual(summed_peak, aggregate["allocated.peak"])
+        finally:
+            del tensor
+
+    def test_summary_names_its_scope(self):
+        """The table must say the numbers are one process's allocator, not the NPU's."""
+        summary = torch.rbln.memory_summary(self.device)
+        self.assertIn("device=rbln:0", summary)
+        self.assertIn(f"pid {os.getpid()}", summary)
+        self.assertIn("caching allocator only, this process only", summary)
+        self.assertIn("npu", summary)
+        self.assertIn("chiplet", summary)
+        self.assertIn("total", summary)
+
+    def test_summary_without_device(self):
+        """No RBLN device / uninitialized allocator degrades to a notice, not a raise."""
+        with patch("torch_rbln.memory.memory_stats_per_chiplet", return_value={}):
+            summary = torch.rbln.memory_summary(self.device)
+        self.assertIn("no statistics", summary)
+
+    def test_second_logical_device(self):
+        """A logical device other than rbln:0 must be queryable.
+
+        device_id selects the runtime context; the allocator's node_id indexes that
+        context's device list. Forwarding one as the other raised "Invalid node_id"
+        here for every device but rbln:0.
+        """
+        if torch.rbln.device_count() < 2:
+            self.skipTest("needs at least 2 logical rbln devices")
+        second = "rbln:1"
+        tensor = torch.empty(512 * 1024, dtype=torch.float16, device=second)
+        try:
+            self.assertGreater(torch.rbln.memory_stats(second)["allocated.current"], 0)
+            self.assertGreater(len(torch.rbln.memory_stats_per_chiplet(second)), 0)
+            self.assertIn("device=rbln:1", torch.rbln.memory_summary(second))
+        finally:
+            del tensor
+        torch.rbln.empty_cache(second)
+
+
 instantiate_device_type_tests(TestMemoryStats, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestAcceleratorMemoryAPI, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestPerChipletMemoryStats, globals(), only_for="privateuse1")
 
 
 if __name__ == "__main__":
