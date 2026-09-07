@@ -16,6 +16,13 @@ class SupportedDtypes:
     """Per-path supported dtype tuples for RBLN device dispatch."""
 
     dispatch: tuple[torch.dtype, ...] = _C._dispatch_dtypes()
+    # Dtypes admitted only by TORCH_RBLN_DISPATCH_DTYPES. Empty unless the catalog is extended.
+    dispatch_extension: tuple[torch.dtype, ...] = tuple(
+        d for d in _C._dispatch_dtypes() if d not in _C._dispatch_catalog_dtypes()
+    )
+    # Strict dispatch (TORCH_RBLN_DISPATCH_STRICT): tensors of these dtypes skip the
+    # performance fallbacks (64-alignment) and always take the compile path.
+    strict: tuple[torch.dtype, ...] = _C._dispatch_strict_dtypes()
     sdpa: tuple[torch.dtype, ...] = _C._sdpa_dtypes()
     amp: tuple[torch.dtype, ...] = _C._amp_dtypes()
 
@@ -1760,7 +1767,13 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     def _last_dim_unaligned(t):
         return isinstance(t, torch.Tensor) and t.dim() > 0 and t.shape[-1] % 64 != 0
 
-    if any(_last_dim_unaligned(a) for a in args) or any(_last_dim_unaligned(v) for v in kwargs_filtered.values()):
+    def _strict(t):
+        # TORCH_RBLN_DISPATCH_STRICT: this dtype takes the device path even when unaligned
+        return isinstance(t, torch.Tensor) and t.dtype in SupportedDtypes.strict
+
+    if (
+        any(_last_dim_unaligned(a) for a in args) or any(_last_dim_unaligned(v) for v in kwargs_filtered.values())
+    ) and not (any(_strict(a) for a in args) or any(_strict(v) for v in kwargs_filtered.values())):
         return cpu_fallback_path(
             op_callable,
             args,
@@ -1946,6 +1959,13 @@ def is_cpu_fallback_cases(args):
             if tensor_args[i].dtype != first_dtype:
                 return True
 
+    # 2b: an operand of an extension dtype (TORCH_RBLN_DISPATCH_DTYPES) on a different device
+    #     than the others. Before the extension such a call went to the C++ boxed fallback,
+    #     which tolerates mixed devices; the compile path does not. Stock dtypes are not
+    #     affected: an empty extension keeps this branch closed.
+    if "device" not in disabled_cases and _has_mixed_device_extension_operand(tensor_args):
+        return True
+
     # 3: fall back to the CPU if all input tensors are scalar tensors
     if "scalar" not in disabled_cases:
         if all(a.ndim == 0 for a in tensor_args):
@@ -1978,6 +1998,39 @@ def is_cpu_fallback_cases(args):
     return False
 
 
+def _has_mixed_device_extension_operand(tensor_args) -> bool:
+    """The op's working dtype is an extension dtype and its operands span more than one device.
+
+    The working dtype is that of the non-bool operands: a bool tensor is a condition or mask
+    (where's cond), which the shim's dtype check skips as well, so admitting bool must not
+    re-route an op whose data operands are stock dtypes. Devices are taken over every operand,
+    condition included, because that is what the boxed fallback's first-argument rule sees.
+    """
+    extension = SupportedDtypes.dispatch_extension
+    if not extension:
+        return False
+    non_scalar = [a for a in tensor_args if a.ndim > 0]
+    data = [a for a in non_scalar if a.dtype != torch.bool] or non_scalar
+    if not data or data[0].dtype not in extension:
+        return False
+    return len({a.device for a in non_scalar}) > 1
+
+
+# Per-op count of Python-path CPU fallbacks (the C++ shim keeps its own counters for the
+# boxed/precheck fallbacks, see torch.rbln.explain). Together they list every op that still
+# leaves the device for a given dtype policy — the input the SW team needs to decide what the
+# compiler/runtime should make cheap next.
+_cpu_fallback_counts: dict[str, int] = {}
+
+
+def cpu_fallback_counts(reset: bool = False) -> dict[str, int]:
+    """Snapshot of Python-path CPU fallbacks per op name (optionally clearing it)."""
+    snap = dict(_cpu_fallback_counts)
+    if reset:
+        _cpu_fallback_counts.clear()
+    return snap
+
+
 def cpu_fallback_path(
     target_ops, args, *, result: Optional[torch.Tensor] = None, op_name: Optional[str] = None, **op_kwargs
 ):
@@ -2001,12 +2054,21 @@ def cpu_fallback_path(
     """
     if op_name is not None:
         rbln_log_cpu_fallback(op_name)
+        _cpu_fallback_counts[op_name] = _cpu_fallback_counts.get(op_name, 0) + 1
     cpu_args = to_cpu(args)
     cpu_op_kwargs = to_cpu(op_kwargs)
     result_cpu = target_ops(*cpu_args, **cpu_op_kwargs)
     if result is not None and result_cpu.size() == result.size():
         result.copy_(result_cpu)
         return result
+
+    # Mixed-device extension-dtype operands (see is_cpu_fallback_cases 2b): mirror the C++
+    # boxed fallback's convention, which handled these calls before the extension, and put
+    # the result on the first tensor argument's device. Stock dtypes keep the rule below.
+    tensor_args = extract_tensors(args)
+    if result is None and _has_mixed_device_extension_operand(tensor_args):
+        first_device = tensor_args[0].device
+        return result_cpu if first_device.type == "cpu" else result_cpu.to(first_device)
 
     # Get device_index from result tensor or from input args/op_kwargs
     # In this context, rbln tensors always have a device_index

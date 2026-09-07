@@ -326,3 +326,39 @@ This is an escape hatch for unblocking a machine while a matching wheel is built
 suppresses the diagnosis, not the incompatibility: the mismatch it hides is what would
 otherwise surface as an `undefined symbol` import crash or as corruption inside the
 runtime.
+
+## Eager-dispatch dtype catalog extension
+
+The eager shim dispatches fp16/bf16 tensors to the RBLN compile path and everything else to the CPU
+fallback. `TORCH_RBLN_DISPATCH_DTYPES` (comma-separated torch dtype names, e.g. `float32`) adds
+dtypes to that catalog. Opt-in: a float32 op on the device computes in DLFloat16 precision. It pays
+off when the float32 tensors already live on the device (a compiled graph returns float32 as dlf16
+physical bytes) and the alternative is a host round trip per op. Set it before `import torch_rbln`;
+the Python-side `SupportedDtypes.dispatch` snapshot is taken at import.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `TORCH_RBLN_DISPATCH_DTYPES` | Extra eager-dispatch dtypes (e.g. `float32`) | unset |
+
+## Strict dispatch (measure the real device path of a dtype)
+
+The eager shim has two *performance* fallbacks that send an op to the CPU even though the compile
+path could run it: the align-penalty routing in the C++ shim (unaligned last dim on elementwise ops,
+host pad/depad orchestration that dwarfs the compute on small tensors) and the 64-alignment fallback in the Python
+compile path. `TORCH_RBLN_DISPATCH_STRICT` lists dtypes for which those two fallbacks are skipped, so
+the op runs through the compile path as a first-class device op and what you measure is the true
+device-path cost of that dtype and shape, pad penalty included. Use it together with
+`TORCH_RBLN_DISPATCH_DTYPES` when the dtype is not in the catalog. Safety fallbacks (tracer, dispatch
+mode, mixed devices, dtype mismatch, NaN/Inf, reentrancy) still apply, and ops without a Python
+wrapper (the explicit CPU-fallback registrations) are unaffected; both remain visible in the fallback
+log (`TORCH_RBLN_LOG_LEVEL=INFO`) and in `torch.rbln.explain()`.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `TORCH_RBLN_DISPATCH_STRICT` | Comma-separated dtypes (or `all`) whose ops never take the alignment fallbacks | unset |
+
+Example: `TORCH_RBLN_DISPATCH_DTYPES=int32 TORCH_RBLN_DISPATCH_STRICT=int32` makes every int32 eager op
+with a Python wrapper go to the device, including [4, 3]-shaped glue that the default policy keeps on the
+host because a launch costs more than the host op. That is the point: it exposes what the compiler and
+runtime would have to make cheap (pad-free small shapes, launch latency, per-shape compile) for the
+dtype to be worth enabling by default.
