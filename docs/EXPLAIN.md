@@ -47,7 +47,7 @@ matches `torch.profiler.profile`'s parameter name; the older `trace=` still work
 
 ## 4. Reading the report
 
-A real report (an integer-metadata region) annotated line by line:
+An example report (an integer-metadata region) annotated line by line:
 
 ```
 [overhead: 2 signals]  RBLN EXPLAIN   (region wall 66.430ms | device mem 128.00 MB peak, reserved)   (1)
@@ -92,7 +92,7 @@ dispatch/cpu_fallback  2,000       --  try: graph mode, or a supported dtype
 
 The example above is one shape. Below is the range you'll actually see, from cleanest to richest. Skim them once — recognizing the *shape* of a report is most of reading it.
 
-**(G1) Clean.** Nothing hidden happened. The report names *what it checked* (so `[clean]` is trustworthy, not silent) and reminds you clean ≠ fast. (Note the 5.6 s region wall: that is real decode time. `[clean]` means "no hidden host overhead" — `explain` says nothing about device-compute time.)
+**(G1) Clean.** Nothing hidden happened. The report names *what it checked* (so `[clean]` is trustworthy, not silent) and reminds you clean ≠ fast. (Note the large region wall: `[clean]` means "no hidden host overhead" — `explain` says nothing about device-compute time.)
 
 ```
 [clean]  RBLN EXPLAIN   (region wall 5.620s | device mem 2.46 GB peak, reserved)
@@ -142,7 +142,7 @@ runtime/v2v_slow      1    0 B  real d2h DMA (costly)
 
 > G2 vs G3 is the single most important distinction: a `host_bounce`/`v2v_slow` count is a *copy-path* count (blind to residency); the `>>` physical d2h line is the real-transfer line for the copy. `0` = served on host (cheap); `>0` = real crossing (the thing to fix). (It counts **synchronous / host-served** transfers; a deliberate `non_blocking=True` copy on **pinned** host memory takes the async DMA path and is intentionally not itemized — see the note in §6.)
 
-**(G4) A real vLLM decode step (device-tensor mode) — the capstone.** This is a 400-step steady-decode window of a Llama-1B run with `VLLM_RBLN_USE_DEVICE_TENSOR=1`, captured with `with_stack=True`. It shows nearly every signal at once: the attention-metadata integer math falling back (`sub`/`mul`/`clamp`, `dtype-not-fp16`), the `positions[idx]` gather going host-slow (`v2v_slow` + the `d2d_copy` bounce), all **host-served** (`physical d2h: 0`), under a worker pinned to one core (oversubscription), with the rebel-runtime share and the exact source lines:
+**(G4) A decode step in device-tensor mode — the capstone.** Captured with `with_stack=True`, it shows nearly every signal at once: the attention-metadata integer math falling back (`sub`/`mul`/`clamp`, `dtype-not-fp16`), the `positions[idx]` gather going host-slow (`v2v_slow` + the `d2d_copy` bounce), all **host-served** (`physical d2h: 0`), under a worker pinned to one core (oversubscription), with the rebel-runtime share and the exact source lines:
 
 ```
 [overhead: 3 signals]  RBLN EXPLAIN   (region wall 5.791s | device mem 5.06 GB peak, reserved)
