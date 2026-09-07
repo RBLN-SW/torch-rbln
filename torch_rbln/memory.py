@@ -206,7 +206,11 @@ def memory_summary(device: Optional[Union[int, str, torch.device]] = None) -> st
 
     Rows are per (NPU, chiplet), so an imbalance is visible at a glance. The scope line
     under the title names what the numbers cover: they are this process's allocator, not
-    the NPU's occupancy (see :func:`memory_stats`).
+    the NPU's occupancy (see :func:`memory_stats`). The ``npus`` line spells out the
+    logical device: ``device`` is one logical device (``RBLN_NPUS_PER_DEVICE`` /
+    ``RBLN_DEVICE_MAP``), row ``npu`` n is its n-th NPU, and the listed ids index the
+    ``RBLN_VISIBLE_DEVICES``-visible pool as in :func:`torch.rbln.device_summary` -- they are
+    not system ids, so they match ``rbln-smi`` only when ``RBLN_VISIBLE_DEVICES`` is unset.
 
     Peaks are tracked per chiplet, so the peak columns of the ``total`` row bound the
     joint peak from above rather than reporting it. :func:`memory_stats` carries the
@@ -248,13 +252,15 @@ def memory_summary(device: Optional[Union[int, str, torch.device]] = None) -> st
     # Local import: rsd_utils pulls in torch_rbln.device, which star-imports this module.
     from torch_rbln._internal.rsd_utils import get_physical_device_ids
 
-    physical = get_physical_device_ids(device.index)
-    npus = "[ " + ", ".join(str(pid) for pid in physical) + " ]" if physical else "[unknown]"
+    visible = get_physical_device_ids(device.index)
+    npus = "[ " + ", ".join(str(vid) for vid in visible) + " ]" if visible else "[unknown]"
 
     header = f"{'npu':>5}{'chiplet':>9}" + "".join(f"{label:>13}" for _, label in columns)
     lines = [
         f"torch_rbln memory summary (device={device}, MiB)",
-        f"scope: pid {os.getpid()}, physical NPU {npus} -- caching allocator only, this process only",
+        f"scope: pid {os.getpid()} -- caching allocator only, this process only",
+        f"npus: logical {device} = {npus} (row npu n = n-th NPU; ids index the RBLN_VISIBLE_DEVICES-visible"
+        " pool as in device_summary(), not rbln-smi ids)",
         header,
         "-" * len(header),
     ]

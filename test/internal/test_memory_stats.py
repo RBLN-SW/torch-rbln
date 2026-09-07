@@ -1032,6 +1032,8 @@ class TestPerChipletMemoryStats(TestCase):
         self.assertIn("device=rbln:0", summary)
         self.assertIn(f"pid {os.getpid()}", summary)
         self.assertIn("caching allocator only, this process only", summary)
+        self.assertIn("npus: logical rbln:0 = [", summary)
+        self.assertIn("RBLN_VISIBLE_DEVICES-visible", summary)
         self.assertIn("npu", summary)
         self.assertIn("chiplet", summary)
         self.assertIn("total", summary)
