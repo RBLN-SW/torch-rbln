@@ -204,6 +204,15 @@ at::Tensor borrow_rbln_as_cpu(const at::Tensor& t, uint64_t& borrow_id_out) {
     // host region and corrupt reads. Caller falls back to the copy path.
     return {};
   }
+  // A borrow syncs the whole vmem entry, so borrowing a small view of a device-latest
+  // storage reads back every byte of it and leaves the storage host-latest. The copy path
+  // moves only the view: a D2H when the data is on the device, a host memcpy when it is
+  // not. Without asking where the data is, views under half the storage take the copy
+  // path: the worst case costs a memcpy of a small view, the best case saves the
+  // whole-storage round trip. Larger views keep the zero-copy borrow.
+  if (static_cast<size_t>(t.numel()) * t.element_size() * 2 < t.storage().nbytes()) {
+    return {};
+  }
   if (t.storage_offset() != 0) {
     // Contiguous offset view (e.g. `x[1:]`): interior borrows ARE offset-correct.
     // The runtime's BorrowVirtualAtHost bounds-checks [vaddr, vaddr+size) against
