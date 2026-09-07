@@ -152,13 +152,16 @@ C10_RBLN_API void bind_device_memory(void* rbln_data, size_t nbytes);
  *
  * @param rbln_data Base pointer of an RBLN allocation (not an interior address).
  * @param nbytes Size of the allocation in bytes. Must be positive.
- * @param chiplet Chiplet index in [0, chiplet_count(device)).
+ * @param chiplet Chiplet index in [0, chiplet_count(device)). Under RBLN_REBEL_CHIPLET_ID
+ *        only that chiplet is accepted; the runtime refuses any other.
  */
 C10_RBLN_API void bind_device_memory_at(void* rbln_data, size_t nbytes, int64_t chiplet);
 
 /**
  * @brief Number of chiplets per NPU of ``device``: the range bind_device_memory_at()
- *        accepts. 1 on a device without chiplet-partitioned DRAM.
+ *        accepts. 1 on a device without chiplet-partitioned DRAM. This is the runtime's
+ *        count of per-chiplet DRAM pools (device spec, or RBLN_CHIPLET_SIZE when set); it
+ *        does not shrink under RBLN_EXP_REBEL_CHIPLET_MODE=0 or RBLN_REBEL_CHIPLET_ID.
  */
 C10_RBLN_API int64_t chiplet_count(const c10::Device& device);
 
