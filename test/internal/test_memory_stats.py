@@ -1032,11 +1032,21 @@ class TestPerChipletMemoryStats(TestCase):
         self.assertIn("device=rbln:0", summary)
         self.assertIn(f"pid {os.getpid()}", summary)
         self.assertIn("caching allocator only, this process only", summary)
-        self.assertIn("npus: logical rbln:0 = [", summary)
-        self.assertIn("RBLN_VISIBLE_DEVICES-visible", summary)
+        self.assertIn("npu: physical NPU id as in device_summary()", summary)
         self.assertIn("npu", summary)
         self.assertIn("chiplet", summary)
         self.assertIn("total", summary)
+
+    def test_summary_rows_carry_physical_npu_ids(self):
+        """Row `npu` is the id device_summary() prints, not the NPU's position in the device."""
+        from torch_rbln._internal.rsd_utils import get_physical_device_ids
+
+        physical = get_physical_device_ids(0)
+        self.assertTrue(physical)
+        summary = torch.rbln.memory_summary(self.device)
+        table = summary.split("\n")[4:]
+        row_ids = sorted({int(line.split()[0]) for line in table if line.strip() and line.split()[0].isdigit()})
+        self.assertEqual(row_ids, sorted(set(physical)))
 
     def test_summary_without_device(self):
         """No RBLN device / uninitialized allocator degrades to a notice, not a raise."""

@@ -206,11 +206,10 @@ def memory_summary(device: Optional[Union[int, str, torch.device]] = None) -> st
 
     Rows are per (NPU, chiplet), so an imbalance is visible at a glance. The scope line
     under the title names what the numbers cover: they are this process's allocator, not
-    the NPU's occupancy (see :func:`memory_stats`). The ``npus`` line spells out the
-    logical device: ``device`` is one logical device (``RBLN_NPUS_PER_DEVICE`` /
-    ``RBLN_DEVICE_MAP``), row ``npu`` n is its n-th NPU, and the listed ids index the
-    ``RBLN_VISIBLE_DEVICES``-visible pool as in :func:`torch.rbln.device_summary` -- they are
-    not system ids, so they match ``rbln-smi`` only when ``RBLN_VISIBLE_DEVICES`` is unset.
+    the NPU's occupancy (see :func:`memory_stats`). The ``npu`` column is the physical NPU
+    id as :func:`torch.rbln.device_summary` prints it: relative to ``RBLN_VISIBLE_DEVICES``,
+    so it differs from ``rbln-smi`` when that variable is set. A logical device grouping
+    several NPUs (``RBLN_NPUS_PER_DEVICE`` / ``RBLN_DEVICE_MAP``) gets one row per NPU.
 
     Peaks are tracked per chiplet, so the peak columns of the ``total`` row bound the
     joint peak from above rather than reporting it. :func:`memory_stats` carries the
@@ -252,21 +251,24 @@ def memory_summary(device: Optional[Union[int, str, torch.device]] = None) -> st
     # Local import: rsd_utils pulls in torch_rbln.device, which star-imports this module.
     from torch_rbln._internal.rsd_utils import get_physical_device_ids
 
-    visible = get_physical_device_ids(device.index)
-    npus = "[ " + ", ".join(str(vid) for vid in visible) + " ]" if visible else "[unknown]"
+    # Stats keys carry the NPU's position within the logical device; print the physical
+    # id device_summary() shows instead, falling back to the position if unmapped.
+    physical = get_physical_device_ids(device.index) or []
+
+    def npu_id(npu: int) -> int:
+        return physical[npu] if npu < len(physical) else npu
 
     header = f"{'npu':>5}{'chiplet':>9}" + "".join(f"{label:>13}" for _, label in columns)
     lines = [
         f"torch_rbln memory summary (device={device}, MiB)",
         f"scope: pid {os.getpid()} -- caching allocator only, this process only",
-        f"npus: logical {device} = {npus} (row npu n = n-th NPU; ids index the RBLN_VISIBLE_DEVICES-visible"
-        " pool as in device_summary(), not rbln-smi ids)",
+        "npu: physical NPU id as in device_summary() (relative to RBLN_VISIBLE_DEVICES, may differ from rbln-smi)",
         header,
         "-" * len(header),
     ]
     for npu, chiplet in rows:
         cells = "".join(f"{mib(stat(npu, chiplet, key)):>13}" for key, _ in columns)
-        lines.append(f"{npu:>5}{chiplet:>9}" + cells)
+        lines.append(f"{npu_id(npu):>5}{chiplet:>9}" + cells)
     totals = "".join(f"{mib(sum(stat(npu, chiplet, key) for npu, chiplet in rows)):>13}" for key, _ in columns)
     lines.append("-" * len(header))
     lines.append(f"{'total':>14}" + totals)
