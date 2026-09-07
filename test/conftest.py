@@ -146,9 +146,11 @@ def restore_current_stream(restore_current_device):
     """Restore every device's current stream after each test, so a test that selected a
     non-default stream cannot leak it into later tests on the same xdist worker.
 
-    Snapshotting is a runtime query per device that claims nothing -- it opens no device
-    context -- so a test that never touches a stream pays only the query. Restore only the
-    devices whose stream moved: ``set_stream`` also selects the stream's device. Depends on
+    Reading a stream claims no device: ``RBLNGuardImpl::getStream`` answers with the default
+    stream for a device whose context is not initialized, so the snapshot reaches the runtime
+    (and with it ``to_device_id``, which commits the device mapping) only for devices already
+    in use -- and initializing a context commits the mapping anyway. Restore only the devices
+    whose stream moved: ``set_stream`` also selects the stream's device. Depends on
     ``restore_current_device`` so this teardown runs first and the device index (and the
     lazy-init flag) are put back after it."""
     count = torch.rbln.device_count()
