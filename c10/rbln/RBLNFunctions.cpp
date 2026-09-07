@@ -2,6 +2,7 @@
 #include <c10/rbln/DeviceMappingManager.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
+#include <c10/rbln/RBLNPinnedAllocator.h>
 #include <c10/util/CallOnce.h>
 #include <rebel/runtime/memory_stats.h>
 
@@ -652,6 +653,9 @@ void memcpy_h2v(void* rbln_dst_data, const void* cpu_src_data, size_t nbytes) {
   const auto src_host_ptr = reinterpret_cast<uintptr_t>(cpu_src_data);
   const auto dst_vaddr = reinterpret_cast<uint64_t>(rbln_dst_data);
   const auto size = static_cast<uint64_t>(nbytes);
+  // A pinned source is registered with the target device (once) so the copy is
+  // recorded by DVA and skips the per-command-buffer pin.
+  ensure_pinned_registered(cpu_src_data, static_cast<int>(get_torch_device_id(rbln_dst_data)));
   RBLN_LOG_DEBUG(
       "Calling rbln_memcpy_h2v: src_host_ptr={:#x}, dst_vaddr={:#x}, size={}", src_host_ptr, dst_vaddr, size);
   RBLN_CHECK(
@@ -672,6 +676,7 @@ void memcpy_v2h(void* cpu_dst_data, const void* rbln_src_data, size_t nbytes) {
   const auto src_vaddr = reinterpret_cast<uint64_t>(rbln_src_data);
   const auto dst_host_ptr = reinterpret_cast<uintptr_t>(cpu_dst_data);
   const auto size = static_cast<uint64_t>(nbytes);
+  ensure_pinned_registered(cpu_dst_data, static_cast<int>(get_torch_device_id(rbln_src_data)));
   RBLN_LOG_DEBUG(
       "Calling rbln_memcpy_v2h: src_vaddr={:#x}, dst_host_ptr={:#x}, size={}", src_vaddr, dst_host_ptr, size);
   RBLN_CHECK(
@@ -742,6 +747,7 @@ void memcpy_h2v_async(void* rbln_dst_data, const void* cpu_src_data, size_t nbyt
   const auto dst_vaddr = reinterpret_cast<uint64_t>(rbln_dst_data);
   const auto size = static_cast<uint64_t>(nbytes);
   uint64_t handle = 0;
+  ensure_pinned_registered(cpu_src_data, static_cast<int>(get_torch_device_id(rbln_dst_data)));
   RBLN_LOG_DEBUG(
       "Calling rbln_memcpy_h2v_async: src_host_ptr={:#x}, dst_vaddr={:#x}, size={}", src_host_ptr, dst_vaddr, size);
   RBLN_CHECK(
@@ -763,6 +769,7 @@ void memcpy_v2h_async(void* cpu_dst_data, const void* rbln_src_data, size_t nbyt
   const auto dst_host_ptr = reinterpret_cast<uintptr_t>(cpu_dst_data);
   const auto size = static_cast<uint64_t>(nbytes);
   uint64_t handle = 0;
+  ensure_pinned_registered(cpu_dst_data, static_cast<int>(get_torch_device_id(rbln_src_data)));
   RBLN_LOG_DEBUG(
       "Calling rbln_memcpy_v2h_async: src_vaddr={:#x}, dst_host_ptr={:#x}, size={}", src_vaddr, dst_host_ptr, size);
   RBLN_CHECK(
@@ -1041,6 +1048,7 @@ void memcpy_h2v_multi(const std::vector<H2VCopyOp>& copies) {
     RBLN_CHECK(c.nbytes > 0, "memcpy_h2v_multi: nbytes must be positive");
     RBLN_CHECK(c.src != nullptr, "memcpy_h2v_multi: src cannot be nullptr");
     RBLN_CHECK(c.dst != nullptr, "memcpy_h2v_multi: dst cannot be nullptr");
+    ensure_pinned_registered(c.src, static_cast<int>(get_torch_device_id(c.dst)));
     rbln_copies.emplace_back(
         reinterpret_cast<uintptr_t>(c.src), reinterpret_cast<uint64_t>(c.dst), static_cast<uint64_t>(c.nbytes));
   }
@@ -1062,6 +1070,7 @@ void memcpy_v2h_multi(const std::vector<V2HCopyOp>& copies) {
     RBLN_CHECK(c.nbytes > 0, "memcpy_v2h_multi: nbytes must be positive");
     RBLN_CHECK(c.src != nullptr, "memcpy_v2h_multi: src cannot be nullptr");
     RBLN_CHECK(c.dst != nullptr, "memcpy_v2h_multi: dst cannot be nullptr");
+    ensure_pinned_registered(c.dst, static_cast<int>(get_torch_device_id(c.src)));
     rbln_copies.emplace_back(
         reinterpret_cast<uint64_t>(c.src), reinterpret_cast<uintptr_t>(c.dst), static_cast<uint64_t>(c.nbytes));
   }
