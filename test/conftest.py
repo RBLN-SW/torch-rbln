@@ -139,6 +139,30 @@ def restore_current_device():
 
 
 # =============================================================================
+# Current stream
+# =============================================================================
+@pytest.fixture(scope="function", autouse=True)
+def restore_current_stream(restore_current_device):
+    """Restore every device's current stream after each test, so a test that selected a
+    non-default stream cannot leak it into later tests on the same xdist worker.
+
+    Snapshotting is a runtime query per device that claims nothing -- it opens no device
+    context -- so a test that never touches a stream pays only the query. Restore only the
+    devices whose stream moved: ``set_stream`` also selects the stream's device. Depends on
+    ``restore_current_device`` so this teardown runs first and the device index (and the
+    lazy-init flag) are put back after it."""
+    count = torch.rbln.device_count()
+    if count == 0:
+        yield
+        return
+    saved = [torch.rbln.current_stream(index) for index in range(count)]
+    yield
+    for stream in saved:
+        if torch.rbln.current_stream(stream.device_index) != stream:
+            torch.rbln.set_stream(stream)
+
+
+# =============================================================================
 # Environment variable isolation fixtures
 # =============================================================================
 @pytest.fixture(scope="function", autouse=True)

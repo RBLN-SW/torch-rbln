@@ -9,6 +9,7 @@ profiler / pinned-copy CI failures)."""
 import importlib.util
 import os
 import sys
+from collections import namedtuple
 from pathlib import Path
 
 import pytest
@@ -207,6 +208,35 @@ def test_clean_teardown_order_sync_then_sdpa_clear_then_flush(monkeypatch):
         with pytest.raises(StopIteration):
             next(gen)  # teardown runs to completion
     assert calls == ["sync", "sdpa_clear", "flush"]
+
+
+@pytest.mark.test_set_ci
+def test_restore_current_stream_restores_only_the_streams_a_test_moved(monkeypatch):
+    """A test that selects another stream must not leave it current. Devices whose stream did
+    not move are skipped: set_stream also selects the stream's device, so re-issuing it for
+    every device would move the current device instead of restoring it."""
+    conftest = _load_root_conftest()
+    stream = namedtuple("stream", "device_index stream_id")  # the fixture reads device_index and ==
+    current = {0: 0, 1: 0}
+    set_calls = []
+
+    def _set_stream(target):
+        set_calls.append(target)
+        current[target.device_index] = target.stream_id
+
+    with monkeypatch.context() as m:
+        m.setattr(torch.rbln, "device_count", lambda: 2)
+        m.setattr(torch.rbln, "current_stream", lambda index: stream(index, current[index]))
+        m.setattr(torch.rbln, "set_stream", _set_stream)
+
+        gen = conftest.restore_current_stream.__wrapped__(None)
+        next(gen)  # setup: snapshots the default stream on both devices
+        current[1] = 7  # a "test" selected another stream on rbln:1
+        with pytest.raises(StopIteration):
+            next(gen)  # teardown restores it
+
+    assert set_calls == [stream(1, 0)]
+    assert current == {0: 0, 1: 0}
 
 
 def _with_env(var, value, fn):
