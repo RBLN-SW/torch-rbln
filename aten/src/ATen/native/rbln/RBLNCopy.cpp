@@ -16,6 +16,7 @@
 
 #include <c10/rbln/RBLNProfiler.h>
 #include <rebel/runtime/api/rbln_runtime_api.h>
+#include <torch/library.h>
 
 #include <cstddef>
 #include <optional>
@@ -25,6 +26,47 @@
 namespace at::native::rbln {
 
 namespace {
+
+// A strided device->device copy whose source is a classifiable view runs as one compiled
+// device program (``torch_rbln::copy_strided_view``) instead of one descriptor per contiguous
+// run. Two conditions decide whether that program is worth reaching for, and both are
+// facts about the compiler rather than tuning knobs:
+//
+//   dtype -- everything the device does not keep as-is is rewritten to a narrower float
+//     (rebel_compiler ``isDeviceSupportedDtype``), which changes the values. ``copy_`` is
+//     not a compute op, so the compiled path has to return what the strided walk returns.
+//     Of the two dtypes the compile path dispatches, only bf16 survives that; f16 loses
+//     a mantissa bit.
+//   alignment -- the compiler lowers a tensor to the device only when its last dim is a
+//     multiple of 64 elements (``checkLastDim128BAligned``: "regardless of dtype, if
+//     greater than 8 bits, we align last dim to 64"). Unaligned, the op path falls back to
+//     a host round-trip, which is what we are trying to avoid.
+//
+// Whether the view itself can be replayed is not decided here -- the shared detector
+// answers that, and returns false through the op when it cannot.
+bool try_view_copy(const at::Tensor& dst, const at::Tensor& src) {
+  if (src.is_contiguous() || !dst.is_contiguous())
+    return false;
+  // One program reads and writes one device; a copy that crosses them is not ours.
+  if (src.device() != dst.device())
+    return false;
+  if (src.scalar_type() != at::kBFloat16 || dst.scalar_type() != src.scalar_type())
+    return false;
+  if (src.dim() == 0 || src.size(-1) % 64 != 0 || dst.size(-1) % 64 != 0)
+    return false;
+
+  // `import torch_rbln` registers the op, and an RBLN tensor cannot exist without that
+  // import, so a missing schema is a broken build rather than a case to route around --
+  // which is why this throws instead of returning false. Looked up per call, the way
+  // upstream reaches an op from C++ (ATen/native/CPUFallback.h): an OperatorHandle points
+  // into the dispatcher's table, and caching one in a static outlives nothing useful here
+  // -- the lookup is a hash probe in front of a copy of at least a full device tile.
+  const auto op = c10::Dispatcher::singleton()
+                      .findSchemaOrThrow("torch_rbln::copy_strided_view", "")
+                      .typed<bool(const at::Tensor&, at::Tensor&)>();
+  at::Tensor out = dst; // a Tensor is a handle; the schema's Tensor(a!) wants a mutable one
+  return op.call(src, out);
+}
 
 // Recursion guard: a non-direct rbln->rbln copy_ services itself by a v2h
 // (get_cpu_copy_of_rbln_tensor) followed by a cpu->rbln copy. We count that
@@ -308,6 +350,14 @@ void tensor_copy_from_rbln_to_rbln(const at::Tensor& rbln_src, const at::Tensor&
     const auto* src_data = rbln_src.data_ptr();
     const auto nbytes = at::detail::computeStorageNbytes(rbln_src.sizes(), rbln_src.strides(), rbln_src.element_size());
     c10::rbln::memcpy_v2v(dst_data, src_data, nbytes);
+    return;
+  }
+
+  // One compiled program beats both routes below when the source view is classifiable:
+  // the strided engine pays a descriptor per contiguous run, and a KV block read head-major
+  // and written token-major breaks into runs of a single row -- far past the cap, so the
+  // real alternative is the host bounce.
+  if (try_view_copy(rbln_dst, rbln_src)) {
     return;
   }
 

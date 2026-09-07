@@ -9,7 +9,7 @@
 [![PyPI version](https://badge.fury.io/py/torch-rbln.svg)](https://badge.fury.io/py/torch-rbln)
 [![License](https://img.shields.io/github/license/RBLN-SW/torch-rbln)](https://github.com/RBLN-SW/torch-rbln/blob/main/LICENSE)
 [![Documentation](https://img.shields.io/badge/docs-available-brightgreen)](https://docs.rbln.ai/latest/software/rbln_pytorch/overview.html)
-[![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-1.4-4baaaa.svg)](./docs/CODE_OF_CONDUCT.md)
+[![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-1.4-4baaaa.svg)](https://github.com/RBLN-SW/torch-rbln/blob/main/docs/CODE_OF_CONDUCT.md)
 </div>
 
 ## About
@@ -24,7 +24,7 @@ PyTorch RBLN is currently in **beta** and under active development. APIs may cha
 
 ### Prerequisites
 
-- **Python** 3.10–3.13 — see [Installation — Requirements](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html#requirements) (source build).
+- **Python** 3.10–3.14 — see [Installation — Requirements](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html#requirements) (source build).
 - **`rebel-compiler`** — required; **not** installed with **`torch-rbln`**. Use an **[RBLN Portal account](https://docs.rbln.ai/latest/supports/contact_us.html#rbln-portal)** and the RBLN package index as described in [Install pre-built wheels](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html#install).
 
 ### Install pre-built wheels
@@ -91,19 +91,19 @@ Re-run `./tools/dev-setup.sh pypi` once the file is in place.
 
 **This repository**
 
-- [Configuration](docs/CONFIGURATION.md) — environment variables and runtime options
-- [Test Guide](docs/TEST_GUIDE.md) — local test runs
-- [Linting](docs/LINTING.md) — code style and lint
-- [Third-party update](docs/THIRD_PARTY_UPDATE.md) — PyTorch pin, upstream files, `rebel-compiler` version bumps in `pyproject.toml`
-- [Release Process](docs/RELEASE_PROCESS.md) — branch model, versioning, tagging, and publication
+- [Configuration](https://github.com/RBLN-SW/torch-rbln/blob/main/docs/CONFIGURATION.md) — environment variables and runtime options
+- [Test Guide](https://github.com/RBLN-SW/torch-rbln/blob/main/docs/TEST_GUIDE.md) — local test runs
+- [Linting](https://github.com/RBLN-SW/torch-rbln/blob/main/docs/LINTING.md) — code style and lint
+- [Third-party update](https://github.com/RBLN-SW/torch-rbln/blob/main/docs/THIRD_PARTY_UPDATE.md) — PyTorch pin, upstream files, `rebel-compiler` version bumps in `pyproject.toml`
+- [Release Process](https://github.com/RBLN-SW/torch-rbln/blob/main/docs/RELEASE_PROCESS.md) — branch model, versioning, tagging, and publication
 
 ## Contributing
 
-See [docs/CONTRIBUTING.md](./docs/CONTRIBUTING.md).
+See [docs/CONTRIBUTING.md](https://github.com/RBLN-SW/torch-rbln/blob/main/docs/CONTRIBUTING.md).
 
 ## License
 
-Apache License 2.0 — see [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
+Apache License 2.0 — see [LICENSE](https://github.com/RBLN-SW/torch-rbln/blob/main/LICENSE) and [NOTICE](https://github.com/RBLN-SW/torch-rbln/blob/main/NOTICE).
 
 ## Contact
 

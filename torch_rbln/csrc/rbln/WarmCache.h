@@ -3,10 +3,10 @@
 // Warm-runtime cache for the C++ dispatch shim.
 //
 // Goal: on warm shim calls (cache hit), bypass the Python wrapper entirely
-// and drive the rebel runtime directly from C++ via PyRblnSyncRuntime. This
-// eliminates the per-call pybind roundtrip + Python wrapper overhead
-// (~100-200us, dominated by is_cpu_fallback_cases and compile_rbln_cached
-// lookup on the Python side).
+// and drive the rebel runtime directly from C++ through rbln_exec_api.h. This
+// eliminates the per-call pybind roundtrip + Python wrapper overhead, which
+// is dominated by is_cpu_fallback_cases and the compile_rbln_cached lookup on
+// the Python side.
 //
 // Architecture:
 //   - On first call of a shim op with a given input profile, the Python
@@ -14,8 +14,7 @@
 //     the DynamoRuntime. It then installs an entry into this cache via the
 //     pybind-exposed install(...) API.
 //   - On subsequent calls with a matching input profile, the shim looks up
-//     the entry and calls PyRblnSyncRuntime::{PrepareInputs, PrepareOutputs,
-//     Run} directly.
+//     the entry and drives one execution through the C ABI.
 //   - Entries are keyed by (schema-name, per-Tensor-input profile, per-Scalar
 //     value). Shape/dtype/device changes produce a different key and trigger
 //     a miss (fall back to Python, which in turn repopulates the cache for
@@ -24,8 +23,9 @@
 // Lifetime / thread-safety:
 //   - Process-global singleton cache.
 //   - Reads take a shared lock (hot path); writes take an exclusive lock.
-//   - Entries hold a strong py::object reference to the DynamoRuntime so the
-//     underlying C++ rebel::PyRblnSyncRuntime is kept alive.
+//   - Entries hold strong py::object references to the DynamoRuntime and to
+//     the sync-runtime handle it owns, so the borrowed RblnSyncRuntime stays
+//     valid for the cache's lifetime.
 //   - No eviction in V1; a raw pointer into the map is stable for the
 //     lifetime of the cache.
 
@@ -36,13 +36,12 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <map>
 #include <memory>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
 
-#include <torch_rbln/csrc/rbln/rebel_runtime_decl.h>
+#include <rebel/runtime/api/rbln_exec_api.h>
 
 namespace torch_rbln::warmcache {
 
@@ -143,16 +142,15 @@ struct OutputProfile {
 };
 
 struct CacheEntry {
-  // Strong reference to the DynamoRuntime Python object; keeps the underlying
-  // rebel PyRblnSyncRuntime alive for the cache's lifetime.
+  // The runtime is held as well as the DynamoRuntime that owns it: `runtime`
+  // below is borrowed from the former, and an owner that rebinds its attribute
+  // would otherwise drop it while an installed entry still points at it.
   pybind11::object py_dyn_runtime;
+  pybind11::object py_runtime_handle;
 
-  // Non-owning observer into the PyRblnSyncRuntime C++ instance. Raw pointer
-  // lifetime is scoped to `py_dyn_runtime`.
-  ::rbln::PyRblnSyncRuntime* runtime{nullptr};
+  // Borrowed from `py_runtime_handle`'s native_handle(); valid only while it is.
+  RblnSyncRuntime runtime{nullptr};
 
-  uint32_t num_inputs{0};
-  uint32_t num_outputs{0};
   c10::SmallVector<OutputProfile, 2> out_profiles;
 };
 

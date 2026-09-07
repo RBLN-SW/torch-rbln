@@ -115,7 +115,7 @@ If the title is invalid, the workflow uses [`marocchino/sticky-pull-request-comm
 
 The Lint workflow runs on pull requests to `main` or `dev` and on pushes to `dev`, fanning out to two reusable workflows:
 
-- [`_lint-source.yaml`](../.github/workflows/_lint-source.yaml) runs `lintrunner` over the source tree (see [Linting](LINTING.md)). A pull request to `main` (release validation) lints every tracked file across Python 3.10–3.13; pull requests and pushes to `dev` lint only the changed files on 3.12, for fast feedback.
+- [`_lint-source.yaml`](../.github/workflows/_lint-source.yaml) runs `lintrunner` over the source tree (see [Linting](LINTING.md)). A pull request to `main` (release validation) lints every tracked file across Python 3.10–3.14; pull requests and pushes to `dev` lint only the changed files on 3.12, for fast feedback.
 - [`_lint-workflows.yaml`](../.github/workflows/_lint-workflows.yaml) runs `actionlint`, `yamllint`, and `zizmor` on the workflow files.
 
 A final `Lint` job aggregates both, so branch protection has one stable check even as the source matrix varies by branch.

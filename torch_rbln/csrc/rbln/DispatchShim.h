@@ -17,8 +17,8 @@ namespace torch_rbln::shim {
 // The shim runs a cheap pre-check in C++ (dtype, scalar-all, contig+offset). On
 // pre-check fail it calls into `at::native::rbln::cpu_fallback_rbln` directly —
 // the Python layer is never entered for that call. On pre-check pass, if a
-// matching warm-cache entry exists the shim drives rebel's PyRblnSyncRuntime
-// directly from C++ (no pybind). Only on warm-cache miss does the shim unbox
+// matching warm-cache entry exists the shim drives the rebel runtime from C++
+// through rbln_exec_api.h. Only on warm-cache miss does the shim unbox
 // the jit stack, call `py_fn` respecting the op schema's kwarg-only markers,
 // and rebox the return onto the stack.
 //
@@ -79,11 +79,11 @@ std::vector<std::pair<std::string, std::string>> diag_dump_trace_by_op();
 void diag_reset_trace_by_op();
 
 // DIAG: per-segment timers inside the warm-cache hit path. Returns
-// (n_hits, ns_lookup, ns_io_build, ns_gil, ns_prep_in, ns_prep_out, ns_run,
+// (n_hits, ns_lookup, ns_io_build, ns_prep_in, ns_prep_out, ns_run,
 //  ns_finalize). Counts/accumulates only when the hit path returns true; early
 // failures (find miss, ptr==0, runtime soft-fail) are excluded so per-segment
 // averages reflect successful warm-path calls only.
-std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t> diag_dump_warm_segments();
+std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t> diag_dump_warm_segments();
 void diag_reset_warm_segments();
 
 // Called by the Python wrapper after a successful miss-path compile to install
@@ -93,14 +93,13 @@ void diag_reset_warm_segments();
 // Returns true if an install actually happened (pending key was valid and
 // accepted). Safe to call when no pending context exists — returns false.
 //
-// `runtime_raw_ptr` is the opaque pointer to rebel::PyRblnSyncRuntime,
-// extracted via the pybind-simple-layout offset trick in warm_cache.py.
+// `runtime_handle` is rebel's sync runtime; the entry takes its
+// ``native_handle()`` as the RblnSyncRuntime the hit path drives, and keeps a
+// reference to the object so that borrowed handle stays valid.
 // `out_profiles` is a list of (shape, dtype_str, is_rbln) per output tensor.
 bool install_warmcache_from_pending(
     pybind11::object dyn_runtime,
-    pybind11::int_ runtime_raw_ptr,
-    uint32_t num_inputs,
-    uint32_t num_outputs,
+    const pybind11::object& runtime_handle,
     const std::vector<std::tuple<std::vector<int64_t>, std::string, bool>>& out_profiles);
 
 } // namespace torch_rbln::shim

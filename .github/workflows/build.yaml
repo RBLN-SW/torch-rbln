@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       python_versions:
-        description: Python versions (3.10-3.13), as a JSON array
+        description: Python versions (3.10-3.14), as a JSON array
         type: string
         required: true
         default: '["3.12"]'
@@ -40,3 +40,5 @@ jobs:
       INTERNAL_INDEX_URL: ${{ secrets.INTERNAL_INDEX_URL }}
       INTERNAL_INDEX_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
       INTERNAL_INDEX_PASSWORD: ${{ secrets.INTERNAL_INDEX_PASSWORD }}
+      HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+      HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}

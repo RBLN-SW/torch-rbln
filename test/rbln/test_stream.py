@@ -17,7 +17,7 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 from test.utils import assert_device_resident_dtype
 
 
-# The device computes fp16 matmuls in a narrower dlfloat, so results are compared on
+# The device computes fp16 matmuls in a narrower custom float, so results are compared on
 # relative error: it is scale-free, where an absolute bound needs retuning per shape.
 REL_TOL = 0.01
 

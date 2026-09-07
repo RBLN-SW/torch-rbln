@@ -4,6 +4,7 @@ import torch
 
 from torch_rbln._internal.compile_cache import compile_rbln_cached
 from torch_rbln._internal.ops_utils import (
+    _detect_view_recipe,
     compile_and_run_view_aware,
     cpu_fallback_path,
     extract_device_id_from_inputs,
@@ -446,6 +447,41 @@ def flash_attention_naive_decode_rbln(*args, **kwargs):
     return result_tensor
 
 
+def _materialize(t: torch.Tensor) -> torch.Tensor:
+    """The op under the view recipe: lay the replayed view out contiguously.
+
+    ``torch.clone`` would be the obvious choice and is wrong here -- it preserves the
+    source's memory format, so cloning a permuted view hands back the same strides, not
+    the contiguous destination layout ``copy_`` was asked for.
+    """
+    return t.contiguous()
+
+
+def copy_strided_view_rbln(src, out) -> bool:
+    """``out.copy_(src)`` for a strided device ``src``, as one compiled device program.
+
+    ``copy_``'s device->device path calls this instead of walking the copy one contiguous
+    run at a time. The view chain is replayed *inside* the compiled graph by the same
+    machinery every other view-aware op uses (``prepare_args_view_aware`` classifies it,
+    ``get_view_op_module`` replays it), so the device reads the base buffer and writes
+    ``out`` in one program -- no descriptor per run, no host round-trip. Nothing here is
+    specific to a permutation: whatever the detector can classify, this covers.
+
+    Returns False when the detector cannot classify ``src``, leaving ``copy_`` on its
+    existing route. That check has to happen before ``compile_and_run_view_aware``:
+    unclassified views take ``.contiguous()`` in there, which re-enters ``copy_``.
+    """
+    if _detect_view_recipe(src) is None:
+        return False
+    result = compile_and_run_view_aware(_materialize, "torch_rbln::copy_strided_view", (src,), {}, out)
+    if result is not None and result.data_ptr() != out.data_ptr():
+        # The compile path only writes the caller's buffer for dtypes in
+        # SupportedDtypes.dispatch; otherwise it hands back its own. Both are contiguous
+        # here, so this lands on copy_'s direct memcpy and cannot recurse.
+        out.copy_(result)
+    return True
+
+
 rbln_custom_impl = torch.library.Library("rbln_custom_ops", "IMPL")  # noqa: TOR901
 rbln_custom_impl.impl("paged_attn_prefill", paged_attn_prefill_rbln, "PrivateUse1")
 rbln_custom_impl.impl("paged_attn_decode", paged_attn_decode_rbln, "PrivateUse1")
@@ -453,3 +489,8 @@ rbln_custom_impl.impl("paged_causal_attn_prefill", paged_causal_attn_prefill_rbl
 rbln_custom_impl.impl("paged_causal_attn_decode", paged_causal_attn_decode_rbln, "PrivateUse1")
 rbln_custom_impl.impl("flash_attention_naive_prefill", flash_attention_naive_prefill_rbln, "PrivateUse1")
 rbln_custom_impl.impl("flash_attention_naive_decode", flash_attention_naive_decode_rbln, "PrivateUse1")
+
+# The schema is declared in RBLNRegisterOps.cpp, in the namespace this backend owns; only
+# the implementation lives here, because it drives the compile path.
+torch_rbln_impl = torch.library.Library("torch_rbln", "IMPL")  # noqa: TOR901
+torch_rbln_impl.impl("copy_strided_view", copy_strided_view_rbln, "PrivateUse1")

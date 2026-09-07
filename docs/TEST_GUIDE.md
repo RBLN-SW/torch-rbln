@@ -372,6 +372,11 @@ Conventions specific to it:
 - **A clause not satisfied yet is a `strict=True` xfail** naming the work that closes it,
   rather than being omitted. `xfail_strict = true` is the project default, so an unexpected
   pass fails the suite and signals that the marker should be removed.
+- **The remap verdict needs a reference measurement.** With one usable NPU a live mapping and
+  a frozen one report the same device count, so `Probe.remap` is conclusive only when a pool
+  scanned in a clean process shows two or more; `/dev/rbln*` is not that count, since a
+  container can show more device nodes than the runtime can use. Scenarios name devices from
+  this job's own selection instead of assuming id 0 is theirs.
 
 ---
 

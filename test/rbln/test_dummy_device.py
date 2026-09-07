@@ -322,6 +322,23 @@ def test_offload_runs_in_dummy_mode():
     assert "OK" in proc.stdout
 
 
+def test_cache_management_is_a_noop_in_dummy_mode():
+    proc = _run_with_dummy(
+        """
+        import torch, torch_rbln
+        t = torch.zeros(1 << 20, device="rbln:0")  # marks the device context initialized
+        del t
+        torch.rbln.empty_cache(0)
+        torch.accelerator.empty_cache()
+        torch.rbln.reset_accumulated_memory_stats(0)
+        torch.rbln.reset_peak_memory_stats(0)
+        print("OK")
+        """
+    )
+    _assert_ok(proc)
+    assert "OK" in proc.stdout
+
+
 @pytest.mark.parametrize("npus_per_device", [1, 2, 4, 8])
 def test_npus_per_device_sets_single_group_tp(npus_per_device):
     # RBLN_NPUS_PER_DEVICE=N (no RBLN_DEVICE_MAP) -> one logical device of size N (TP=N).

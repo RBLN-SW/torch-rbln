@@ -9,53 +9,28 @@ warm cache), the C++ shim:
 
 The Python wrapper's ``else`` branch (device path) now passes an empty
 ``_runtime_holder`` list via the compile ``options``. After the first
-backend compile, rebel's ``rbln_backend`` appends the
-``DynamoRuntime`` that owns the compiled ``PyRblnSyncRuntime`` to this
-list. The generated wrapper then calls :func:`install_pending` with
-that runtime and the post-compile output-tensor profiles.
+backend compile, rebel's ``rbln_backend`` appends the ``DynamoRuntime``
+that owns the compiled sync runtime to this list. The generated wrapper
+then calls :func:`install_pending` with that runtime and the
+post-compile output-tensor profiles.
 
-:func:`install_pending` extracts the raw C++ pointer out of the
-``PyRblnSyncRuntime`` pybind instance (see :func:`_raw_cpp_ptr`), packs
-the output profiles into the shape the C++ side expects, and hands
-everything to ``torch_rbln._C._warmcache_install_pending``. The C++
-side matches against the pending key it saved on the way in and
-inserts a :class:`CacheEntry` keyed by (op name, input profile,
-scalars, device index).
+:func:`install_pending` packs the output profiles into the shape the
+C++ side expects and hands them, with the runtime handle, to
+``torch_rbln._C._warmcache_install_pending``. The C++ side matches
+against the pending key it saved on the way in and inserts a
+:class:`CacheEntry` keyed by (op name, input profile, scalars, device
+index).
 
-Subsequent dispatches of the same op with a matching input profile
-hit the warm cache on the C++ side and drive rebel's
-``PyRblnSyncRuntime.{PrepareInputs, PrepareOutputs, Run}`` directly —
-no pybind hop, no Python wrapper, no Dynamo recompile check.
-
-Raw pointer extraction
-----------------------
-rebel's ``_C`` module is built against pybind11 2.x while torch
-(and therefore torch-rbln) uses pybind11 3.x. Their internal type
-registries are disjoint, so ``py::cast<PyRblnSyncRuntime*>(handle)``
-fails across DSOs. We bypass the type caster by reading the C++
-instance pointer directly from the pybind instance layout: for a
-simple-layout pybind instance with a standard holder (``unique_ptr``
-or ``shared_ptr``), the first ``void*`` after ``PyObject_HEAD`` is the
-C++ instance pointer.
-
-The offset of that slot is ``sizeof(PyObject)``, which varies by
-Python build (standard vs debug, PEP 703 free-threaded, 32- vs
-64-bit). We let the C++ side compute it at compile time against the
-Python ABI we link against; the Python side just calls the C++
-helper. See ``torch_rbln._C._pybind_instance_raw_ptr`` in
-``torch_rbln/csrc/rbln/Module.cpp``.
-
-Type gate
----------
-The raw-pointer trick is only valid for a pybind11 simple-layout
-``PyRblnSyncRuntime``; any other object yields a non-null garbage pointer that
-segfaults on use. :func:`install_pending` checks the handle type before
-extracting and skips the cache on mismatch (the safe pybind path still works).
+Subsequent dispatches of the same op with a matching input profile hit
+the warm cache on the C++ side, which drives one execution through
+rebel's C ABI (``rbln_exec_api.h``) — no pybind hop, no Python wrapper,
+no Dynamo recompile check. Driving it needs the runtime's
+``native_handle()``; :func:`install_pending` skips the cache for a
+runtime without one, leaving the op on the Python wrapper path.
 """
 
 from __future__ import annotations
 
-from functools import lru_cache
 from typing import Any
 
 import torch
@@ -63,41 +38,9 @@ import torch
 import torch_rbln._C as _C
 
 
-def _raw_cpp_ptr(pybound_instance: Any) -> int:
-    """Return the raw C++ pointer held by a pybind11 instance as ``uintptr_t``.
-
-    Relies on pybind11's "simple layout" for single-inheritance types with a
-    standard holder. Verified against rebel's ``PyRblnSyncRuntime``.
-    """
-    raw = _C._pybind_instance_raw_ptr(pybound_instance)
-    if not raw:
-        raise RuntimeError(
-            "warm_cache: unexpected null C++ pointer extracted from pybind instance; layout assumption may be wrong"
-        )
-    return int(raw)
-
-
-@lru_cache(maxsize=1)
-def _expected_runtime_type() -> type:
-    """rebel's ``PyRblnSyncRuntime`` — the only type the raw-ptr bridge accepts.
-
-    Imported from the same place rebel's own ``base_runtime.py`` uses it.
-    """
-    from rebel._C import PyRblnSyncRuntime
-
-    return PyRblnSyncRuntime
-
-
-def _is_expected_runtime_handle(handle: Any) -> bool:
-    """True iff ``handle`` is rebel's ``PyRblnSyncRuntime`` (what the raw-ptr
-    bridge assumes). On a rename/move the import fails and we skip the cache.
-    """
-    if handle is None:
-        return False
-    try:
-        return isinstance(handle, _expected_runtime_type())
-    except Exception:
-        return False
+def _is_drivable_runtime_handle(handle: Any) -> bool:
+    """True iff the C++ hit path can take a native handle off ``handle``."""
+    return callable(getattr(handle, "native_handle", None))
 
 
 _DTYPE_KEY = {
@@ -124,14 +67,7 @@ def install_pending(runtime_holder: list, outputs: Any) -> bool:
 
     dyn_runtime = runtime_holder[-1]
     runtime_handle = getattr(dyn_runtime, "_runtime_handle", None)
-    # Type gate (see module docstring): skip the fast path on a wrong/changed
-    # handle rather than cache a pointer we'd dereference blindly -> segfault.
-    if not _is_expected_runtime_handle(runtime_handle):
-        runtime_holder.clear()
-        return False
-    try:
-        raw_ptr = _raw_cpp_ptr(runtime_handle)
-    except RuntimeError:
+    if not _is_drivable_runtime_handle(runtime_handle):
         runtime_holder.clear()
         return False
 
@@ -150,14 +86,9 @@ def install_pending(runtime_holder: list, outputs: Any) -> bool:
         runtime_holder.clear()
         return False
 
-    num_inputs = getattr(dyn_runtime, "_num_inputs", 0)
-    num_outputs = getattr(dyn_runtime, "_num_outputs", len(profiles))
-
     ok = _C._warmcache_install_pending(
         dyn_runtime=dyn_runtime,
-        runtime_raw_ptr=raw_ptr,
-        num_inputs=num_inputs,
-        num_outputs=num_outputs,
+        runtime_handle=runtime_handle,
         out_profiles=profiles,
     )
     # Drop the harvested DynamoRuntime so subsequent compile invocations on the
