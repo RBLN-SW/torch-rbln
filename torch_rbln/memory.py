@@ -306,12 +306,15 @@ def bind_device_memory(tensor: torch.Tensor, *, chiplet: Optional[int] = None) -
             allocation's.
         chiplet: Chiplet to place the allocation on, in
             ``range(chiplet_count(tensor.device))``. ``None`` places it on
-            chiplet 0.
+            chiplet 0. With ``RBLN_REBEL_CHIPLET_ID`` set, the runtime pins every
+            allocation to that chiplet, and only that value is accepted here;
+            any other is rejected rather than silently redirected.
 
     Raises:
         RuntimeError: if ``tensor`` is not an RBLN tensor, does not cover its
-            whole storage, ``chiplet`` is out of range for the device, or the
-            runtime rejects the allocation.
+            whole storage, ``chiplet`` is out of range for the device or
+            conflicts with ``RBLN_REBEL_CHIPLET_ID``, or the runtime rejects
+            the allocation.
 
     Example::
 
@@ -334,6 +337,13 @@ def chiplet_count(device: Optional[Union[int, str, torch.device]] = None) -> int
     DRAM is partitioned per chiplet, so it is also how many independent memory
     pools the device has. Returns 1 on a device without chiplet-partitioned DRAM,
     and 0 when no RBLN device is available.
+
+    The value is the runtime's own chiplet count: the device type's, or
+    ``RBLN_CHIPLET_SIZE`` when that override is set. It counts memory pools, not
+    execution: ``RBLN_EXP_REBEL_CHIPLET_MODE=0`` consolidates programs onto one
+    chiplet but leaves the pools, so the count stays. ``RBLN_REBEL_CHIPLET_ID``
+    pins every allocation to one chiplet; the count stays too, but
+    :func:`bind_device_memory` then accepts only that chiplet.
 
     Args:
         device: Device to query; the current device when ``None``.
