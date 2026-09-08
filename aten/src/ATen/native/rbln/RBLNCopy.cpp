@@ -362,9 +362,11 @@ void tensor_copy_from_rbln_to_rbln(const at::Tensor& rbln_src, const at::Tensor&
   }
 
   // Strided copy: route to the on-device v2v engine while the outer iteration
-  // count stays within the runtime per-dst v2v cap (::rbln::kMaxV2VMultiCopies,
-  // the single source shared with the runtime); above it the engine fans out to
-  // a host fallback anyway, so bounce via host here.
+  // count stays within ::rbln::kMaxV2VMultiCopies. A larger fan-out would still
+  // reach the device — V2VBatch::submit splits a batch at that cap — but it
+  // pays one descriptor per contiguous run, and where that stops beating the
+  // host bounce below is unmeasured, so a fan-out past the cap takes the
+  // bounce.
   if (rbln_src.sizes() == rbln_dst.sizes() && rbln_src.scalar_type() == rbln_dst.scalar_type() &&
       rbln_src.device() == rbln_dst.device()) {
     const auto inner_start = common_inner_start(rbln_src.sizes(), rbln_src.strides(), rbln_dst.strides());
