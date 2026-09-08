@@ -133,8 +133,10 @@ C10_RBLN_API bool is_eager_malloc();
  * shape a consumer that treats the region as bytes expects. Use set_device_layout_like()
  * instead when the region has to match another tensor's layout.
  *
- * Re-binding an already-bound region is allowed and is what the collective path does
- * before every operation.
+ * Re-binding an already-bound region is allowed. A region whose device view is already
+ * flat is left as it is; one that carries a different layout is re-materialized through the
+ * host, so callers that only need the bytes should check the view first (see
+ * ensureRcclRawMemory in the collective path).
  *
  * @param rbln_data Base pointer of an RBLN allocation (not an interior address).
  * @param nbytes Size of the allocation in bytes. Must be positive.

@@ -17,6 +17,7 @@
 #include <unordered_map>
 
 // C10 includes
+#include <c10/rbln/DeviceMappingManager.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/util/error.h>
@@ -263,10 +264,63 @@ std::optional<rbln::MemoryInfo> getRcclMemoryInfo(const at::Tensor& tensor) {
   return mem_info;
 }
 
+namespace {
+
+// True when the tensor's current device view already holds the user's bytes 1:1: a
+// with-transform view whose physical dtype is the tensor's dtype and whose element count covers
+// the whole storage. Such a view can be handed to a byte-copy collective as-is.
+//
+// Re-binding it flat is not a no-op: the runtime treats a flat allocation and a with-transform
+// view as different layouts, so the request re-materializes the view through the host
+// (device-to-host, reallocate, host-to-device). When the buffer is a compiled graph's static
+// output, the graph re-applies its own layout on the next run and the round trip repeats on
+// every collective. Pipeline-parallel handoffs send exactly such outputs.
+//
+// The runtime does not expose the element order (op_replay) here, so a view that permutes
+// elements while keeping dtype and count would pass this check. No such view has been observed
+// for byte-copy operands; dtype conversion and padding, the layouts that do differ in bytes, are
+// rejected below.
+bool deviceViewIsRawUserBytes(const at::Tensor& tensor, const rbln::MemoryInfo& mem_info) {
+  if (mem_info.physical_dtype == rbln::DataType::Undefined) {
+    return false; // no device view, or a flat one: bind_device_memory allocates or is a no-op
+  }
+  if (mem_info.physical_dtype != mem_info.user_dtype ||
+      mem_info.user_dtype != c10::rbln::to_rbln_dtype(tensor.scalar_type())) {
+    return false;
+  }
+  // A logical device made of several NPUs may spread one view over several device areas; the
+  // collective path reads a single area, so only a single-NPU device keeps its view.
+  if (c10::rbln::DeviceMappingManager::getInstance().getPhysicalDeviceIds(tensor.device().index()).size() != 1) {
+    return false;
+  }
+  // The device view may split a dimension into aligned tiles (e.g. [N, 3072] kept as
+  // [N, 48, 64]); that is a reshape, so compare element counts rather than shapes.
+  auto count = [](const std::vector<int64_t>& shape, size_t& out) {
+    out = 1;
+    for (auto d : shape) {
+      if (d < 0) {
+        return false;
+      }
+      out *= static_cast<size_t>(d);
+    }
+    return true;
+  };
+  size_t user_numel = 0;
+  size_t physical_numel = 0;
+  if (!count(mem_info.user_shape, user_numel) || !count(mem_info.physical_shape, physical_numel)) {
+    return false;
+  }
+  return user_numel == physical_numel && user_numel * tensor.element_size() == tensor.storage().nbytes();
+}
+
+} // namespace
+
 /**
- * @brief Prepare tensor for RCCL byte-copy operations (no dtype transform)
+ * @brief Make sure the tensor's bytes are device-resident for an RCCL byte-copy operation.
  *
- * Uses SINGLE_DEVICE_NO_TRANSFORM mode for raw byte transfers.
+ * A device view that already holds the user's bytes 1:1 is used as-is. Otherwise the
+ * enclosing allocation is bound flat (SINGLE_DEVICE_NO_TRANSFORM), which materializes it
+ * or re-lays it out as raw bytes.
  * Suitable for: AllGather, Broadcast, Send, Recv, Scatter.
  *
  * @param tensor The tensor to prepare
@@ -274,6 +328,9 @@ std::optional<rbln::MemoryInfo> getRcclMemoryInfo(const at::Tensor& tensor) {
 void ensureRcclRawMemory(const at::Tensor& tensor) {
   auto mem_info = getRcclMemoryInfo(tensor);
   if (!mem_info) {
+    return;
+  }
+  if (deviceViewIsRawUserBytes(tensor, *mem_info)) {
     return;
   }
   // key_vaddr rather than data_ptr(): a view's data_ptr() is an interior address, and the

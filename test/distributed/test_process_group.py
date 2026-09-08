@@ -256,6 +256,57 @@ def run_send_recv_test(rank: int, world_size: int, backend: str, src: int, dst: 
         dist.destroy_process_group()
 
 
+def run_send_recv_compiled_output_test(rank: int, world_size: int, backend: str) -> None:
+    """Send a compiled graph's static output and check the receiver gets the same bytes.
+
+    A compiled graph keeps its outputs in the layout the compiler chose, not as a flat
+    allocation, and re-applies that layout on every run. The byte-copy collective path must
+    hand such a view to RCCL as it is: re-binding it flat would re-materialize the buffer
+    through the host before every send. This test pins the correctness side of that
+    contract by comparing the received bytes with the sender's host copy across several
+    runs of the graph, so a layout the collective path must not treat as raw bytes shows up
+    as a mismatch here.
+    """
+    setup_environment(rank, world_size)
+    dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+    device = torch.device("rbln", rank)
+    src, dst = 0, 1
+    shape = (64, 256)
+    dtype = torch.bfloat16
+    num_rounds = 3
+
+    try:
+        if world_size < 2:
+            return
+
+        if rank == src:
+            net = torch.nn.Linear(shape[1], shape[1], bias=False).to(dtype).to(device)
+            compiled = torch.compile(net, backend="rbln", dynamic=False, options={"use_static_output": True})
+            for _ in range(num_rounds):
+                x = torch.randn(shape, dtype=dtype, device=device)
+                y = compiled(x)
+                torch.rbln.synchronize()
+                reference = y.cpu()
+                dist.send(y, dst=dst)
+                # The host copy travels over the CPU path of the same group.
+                dist.send(reference, dst=dst)
+        elif rank == dst:
+            received = torch.empty(shape, dtype=dtype, device=device)
+            for round_idx in range(num_rounds):
+                dist.recv(received, src=src)
+                reference = torch.empty(shape, dtype=dtype)
+                dist.recv(reference, src=src)
+                torch.testing.assert_close(
+                    received.cpu(),
+                    reference,
+                    rtol=0,
+                    atol=0,
+                    msg=f"compiled-output send/recv round {round_idx}: received bytes differ from the sender's copy",
+                )
+    finally:
+        dist.destroy_process_group()
+
+
 def run_allgather_test(rank: int, world_size: int, backend: str, dtype: torch.dtype, size: int) -> None:
     """Test allgather operation."""
     setup_environment(rank, world_size)
@@ -848,6 +899,15 @@ class TestSendRecvRBLN(TestProcessGroupRBLNBase):
             self.skipTest("Requires world_size > 1")
         self.run_c10d_test(
             c10d_async_env, self.world_size, run_send_recv_test, (self.world_size, self.backend, 0, 1, dtype)
+        )
+
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_send_recv_compiled_output(self, c10d_async_env):
+        """Send a compiled graph's static output from rank 0 to rank 1 and compare bytes."""
+        if self.should_skip_multi_rank_tests():
+            self.skipTest("Requires world_size > 1")
+        self.run_c10d_test(
+            c10d_async_env, self.world_size, run_send_recv_compiled_output_test, (self.world_size, self.backend)
         )
 
 
