@@ -24,6 +24,14 @@ actually runs the rebel backend (and therefore populates the holder);
 subsequent hits return the already-compiled callable without touching
 the holder. That is exactly the semantic the warm-cache bootstrap needs
 — it installs the cache entry only when the holder is populated.
+
+``RuntimeHolder`` compares by identity. Dynamo re-runs a backend only when
+the ``torch.compile`` wrapper it guarded on compares unequal to the current
+one, and that comparison includes ``options``; a plain list holder that
+install_pending had emptied would compare equal to the fresh empty one,
+Dynamo would reuse the graph, and the fresh holder would stay empty. With
+identity equality a compile-cache miss is always a real recompile, which is
+what re-installs a warm entry.
 """
 
 from __future__ import annotations
@@ -40,6 +48,15 @@ _compiled_op_cache: dict[tuple[Any, ...], Any] = {}
 
 # Key used to strip the runtime-holder side-channel from cache keys.
 _RUNTIME_HOLDER_KEY = "_runtime_holder"
+
+
+class RuntimeHolder(list):
+    """The ``_runtime_holder`` side channel; see the module docstring for why identity."""
+
+    __hash__ = object.__hash__
+
+    def __eq__(self, other: object) -> bool:
+        return self is other
 
 
 class _IdentityKey:

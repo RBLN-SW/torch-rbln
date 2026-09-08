@@ -280,5 +280,42 @@ class TestWarmCacheContractBreak(TestCase):
         self.assertEqual(hits_after, hits_before, "an entry was cached off an unusable handle")
 
 
+@pytest.mark.test_set_ci
+@pytest.mark.single_worker
+class TestWarmCacheReinstall(TestCase):
+    """A profile the C++ cache lost, or never had, must get an entry on its next miss.
+
+    The rebel backend fills ``_runtime_holder`` only when it compiles, so an
+    entry can be installed only from a Python compile-cache miss. Both caches
+    therefore have to be cleared together, and a change the C++ key sees (a
+    scalar such as ``alpha``) has to miss in the Python cache as well.
+    """
+
+    SHAPE = 320  # 64-aligned and unused elsewhere, so the first call compiles
+
+    def setUp(self) -> None:
+        self.addCleanup(_C._warmcache_clear)
+        self.x = torch.arange(self.SHAPE, dtype=torch.float16, device="rbln")
+        self.y = torch.ones(self.SHAPE, dtype=torch.float16, device="rbln")
+
+    def _hits(self) -> int:
+        return _C._dispatch_shim_warm_segments_dump()[0]
+
+    def _assert_hits_after_second_call(self, alpha: int) -> None:
+        expected = (torch.arange(self.SHAPE, dtype=torch.float16) + alpha).to(torch.float16)
+        self.assertEqual(torch.add(self.x, self.y, alpha=alpha).to("cpu"), expected)
+        hits = self._hits()
+        self.assertEqual(torch.add(self.x, self.y, alpha=alpha).to("cpu"), expected)
+        self.assertGreater(self._hits(), hits, f"second call with alpha={alpha} did not take the hit path")
+
+    def test_empty_cache_then_same_profile_reinstalls(self) -> None:
+        self._assert_hits_after_second_call(alpha=1)
+        size = _C._warmcache_size()
+        torch.rbln.empty_cache()
+        self.assertEqual(_C._warmcache_size(), 0)
+        self._assert_hits_after_second_call(alpha=1)
+        self.assertEqual(_C._warmcache_size(), size)
+
+
 if __name__ == "__main__":
     run_tests()

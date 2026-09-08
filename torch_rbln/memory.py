@@ -14,6 +14,7 @@ from typing import Dict, Iterator, Optional, Union  # noqa: UP035
 import torch
 
 import torch_rbln._C
+from torch_rbln._internal.compile_cache import clear_rbln_compile_cache
 
 
 __all__ = [
@@ -117,12 +118,16 @@ def empty_cache(device: Optional[Union[int, str, torch.device]] = None) -> None:
             If None, uses the current device. Defaults to None.
     """
     device = _normalize_device(device)
-    # WarmCache holds strong refs to DynamoRuntime instances and the rbln
-    # runtime buffers behind them. empty_cache() means "let go of everything
-    # the user isn't holding"; if we kept warm entries the freed bytes would
-    # show up unchanged in memory_stats. Clearing first puts us in the same
-    # state as the cold dispatch path — entries get re-installed naturally.
+    # WarmCache entries and the compiled callables in the Python compile cache
+    # both hold DynamoRuntime instances and the rbln runtime buffers behind
+    # them, so "let go of everything the user isn't holding" covers both.
+    # They also have to go together: the rebel backend fills a callable's
+    # ``_runtime_holder`` only when it compiles, so a warm entry can be
+    # re-installed only from a fresh compile. Dropping the C++ side alone
+    # leaves every op+profile compiled so far on the Python wrapper path for
+    # the rest of the process.
     torch_rbln._C._warmcache_clear()
+    clear_rbln_compile_cache()
     # The view-recipe cache holds only metadata-derived recipes (no device
     # buffers), so it never shows up in memory_stats — but it has no eviction
     # and grows once per distinct view geometry, so clear it here too to keep

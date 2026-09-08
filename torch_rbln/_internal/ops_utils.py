@@ -1741,7 +1741,7 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     if get_rbln_compile_op_depth() == 0:
         raise_if_dummy_execution(f"the eager op {op_name}" if op_name else "an eager op")
 
-    from torch_rbln._internal.compile_cache import compile_rbln_cached
+    from torch_rbln._internal.compile_cache import compile_rbln_cached, RuntimeHolder
     from torch_rbln._internal.env_utils import use_device_group_num_devices
     from torch_rbln._internal.warm_cache import (
         consume_force_recompile as _consume_warm_cache_force_recompile,
@@ -1811,7 +1811,7 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     compile_options = {"disable_logger": True}
     if not use_device_group_num_devices():
         compile_options["num_devices"] = 1
-    _runtime_holder = []
+    _runtime_holder = RuntimeHolder()
     compile_options["_runtime_holder"] = _runtime_holder
 
     if out_tensor is None:
