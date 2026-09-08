@@ -1,6 +1,7 @@
 # Owner(s): ["module: PrivateUse1"]
 
 import os
+from unittest import mock
 
 import pytest
 import torch
@@ -1399,10 +1400,19 @@ class TestTPPPRBLNBase(TestCase):
     ]
 
     def setUp(self):
-        os.environ["RCCL_FORCE_EXPORT_MEM"] = "1"
-        os.environ["RBLN_ROOT_IP"] = "127.0.0.1"
-        os.environ["RBLN_LOCAL_IP"] = "127.0.0.1"
-        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        # Scoped to the test: these are process-global, and patch.dict restores the whole
+        # environment -- including the MASTER_PORT the helper below adds.
+        env = mock.patch.dict(
+            os.environ,
+            {
+                "RCCL_FORCE_EXPORT_MEM": "1",
+                "RBLN_ROOT_IP": "127.0.0.1",
+                "RBLN_LOCAL_IP": "127.0.0.1",
+                "MASTER_ADDR": "127.0.0.1",
+            },
+        )
+        env.start()
+        self.addCleanup(env.stop)
         configure_master_port_for_rccl_tests()
         self.backend = "rbln-ccl"
         self.device_count = torch.rbln.device_count()
