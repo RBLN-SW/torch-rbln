@@ -99,6 +99,23 @@ PROMPT = "The capital of France is"
 MAX_TOKENS = 5
 
 
+def _model_path(model_id: str) -> str:
+    """The cached snapshot directory when the hub is offline, else ``model_id``.
+
+    huggingface_hub validates a cached snapshot against the repo's file tree when it
+    can read its tree cache; shared caches usually hold only the files inference
+    needs, so resolving through the hub fails there. The snapshot directory loads
+    without any hub call.
+    """
+    if not os.environ.get("HF_HUB_OFFLINE"):
+        return model_id
+    from huggingface_hub import try_to_load_from_cache
+
+    config = try_to_load_from_cache(model_id, "config.json")
+    assert isinstance(config, str), f"{model_id} is not in the local HF cache"
+    return os.path.dirname(config)
+
+
 # Greedy-decode (temperature=0) expected outputs. Key: (model, tp, mode, dtype).
 # ``None`` falls back to non-empty + shape checks. Captured on RBLN-CA25 with
 # rebel-compiler dev329 + vllm-rbln device_tensor_rebased; drift = regression.
@@ -149,7 +166,7 @@ def _vllm_generate_worker(
     # model); at that size eager strided KV writes hit deep vmem addresses the v2v
     # engine rejects, then OOM. 0.1 (~10 GiB) is plenty here; ATOM (16 GB) keeps 0.5.
     llm_kwargs: dict = dict(
-        model=cfg.model_id,
+        model=_model_path(cfg.model_id),
         # vLLM expects the dtype as a string name (e.g., "float16", "bfloat16"), not a torch.dtype.
         dtype=str(dtype).removeprefix("torch."),
         max_model_len=cfg.max_model_len,
@@ -398,7 +415,7 @@ def test_vllm_compile_only_no_npu_via_dummy(tmp_path):
         VLLM_RBLN_USE_VLLM_MODEL="1",
         VLLM_RBLN_COMPILE_ONLY="1",
         VLLM_CACHE_ROOT=str(tmp_path / "vllm_cache"),
-        RBLN_TEST_MODEL_ID=MODEL_CONFIGS["qwen3_0_6b"].model_id,
+        RBLN_TEST_MODEL_ID=_model_path(MODEL_CONFIGS["qwen3_0_6b"].model_id),
     )
     proc = subprocess.run(
         [sys.executable, "-c", textwrap.dedent(_COMPILE_ONLY_DUMMY_WORKER)],
@@ -479,7 +496,7 @@ def test_vllm_dummy_compiled_runs_on_real_npu(tmp_path):
         pytest.skip("no NPU available to run the dummy-compiled artifacts")
 
     cache = str(tmp_path / "vllm_cache")
-    model_id = MODEL_CONFIGS["qwen3_0_6b"].model_id
+    model_id = _model_path(MODEL_CONFIGS["qwen3_0_6b"].model_id)
     expected = EXPECTED_TEXT[("qwen3_0_6b", 1, "graph", torch.float16)]
 
     # Phase 1: dummy compile-only -> shared cache (no real device touched). Compile
