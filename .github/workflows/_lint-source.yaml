@@ -11,11 +11,14 @@ on:
         description: Python version to lint under (3.10-3.14)
         type: string
         required: true
-      lint_all_files:
-        description: Lint every tracked file instead of only changed files
-        type: boolean
-        required: false
-        default: false
+      build_type:
+        description: Build type (Release, Debug)
+        type: string
+        required: true
+      base_revision:
+        description: Revision to compute changed files from (empty means every tracked file)
+        type: string
+        required: true
     secrets:
       GIT_PAT:
         description: Personal access token
@@ -45,7 +48,7 @@ defaults:
 
 jobs:
   lint_source:
-    name: Lint source (py${{ inputs.python_version }})
+    name: Lint source
     if: ${{ github.repository_owner == 'RBLN-SW' }}
     runs-on: ${{ vars.TORCH_RBLN_RUNNER_CPU_SMALL }}
     env:
@@ -59,6 +62,20 @@ jobs:
         username: ${{ secrets.HARBOR_USERNAME }}
         password: ${{ secrets.HARBOR_PASSWORD }}
     steps:
+      - name: Validate build type
+        env:
+          BUILD_TYPE: ${{ inputs.build_type }}
+        run: |
+          set -euo pipefail
+
+          case "${BUILD_TYPE}" in
+            Release | Debug) ;;
+            *)
+              echo "::error::Invalid build_type '${BUILD_TYPE}'; allowed: Release, Debug"
+              exit 1
+              ;;
+          esac
+
       - name: Check out repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
@@ -85,7 +102,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
         with:
           path: .lintbin
-          # The binaries are native tools, not Python-specific.
+          # The binaries are native tools, independent of the Python version and build type.
           key: lintbin-${{ hashFiles('tools/linter/adapters/s3_init_config.json') }}
 
       - name: Initialize linters
@@ -96,6 +113,8 @@ jobs:
           command: uv run --no-sync lintrunner init
 
       - name: Configure CMake for clang-tidy
+        env:
+          BUILD_TYPE: ${{ inputs.build_type }}
         run: |
           set -euo pipefail
 
@@ -107,26 +126,17 @@ jobs:
 
           uv run --no-sync cmake -GNinja -B build -S . \
             -DBUILD_SHARED_LIBS=ON \
-            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
             -DCMAKE_INSTALL_PREFIX=torch_rbln
 
       - name: Run lintrunner
         env:
-          LINT_ALL_FILES: ${{ inputs.lint_all_files }}
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_REF: ${{ github.base_ref }}
-          BEFORE_SHA: ${{ github.event.before }}
+          BASE_REVISION: ${{ inputs.base_revision }}
         run: |
           set -euo pipefail
 
-          if [ "${LINT_ALL_FILES}" = "true" ]; then
+          if [ -z "${BASE_REVISION}" ]; then
             uv run --no-sync lintrunner --paths-cmd='git ls-files'
           else
-            if [ "${EVENT_NAME}" = "pull_request" ]; then
-              git fetch --no-tags origin "${BASE_REF}"
-              diff_base="origin/${BASE_REF}"
-            else
-              diff_base="${BEFORE_SHA}"
-            fi
-            uv run --no-sync lintrunner -m "${diff_base}"
+            uv run --no-sync lintrunner -m "${BASE_REVISION}"
           fi

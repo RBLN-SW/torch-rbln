@@ -4,102 +4,81 @@ This document describes the GitHub Actions workflows that power the automated te
 
 ## Overview
 
-| Workflow                               | Trigger                       | Purpose                             | Test Scope                                                         |
-|----------------------------------------|-------------------------------|-------------------------------------|--------------------------------------------------------------------|
-| CI (`ci.yaml`)                         | PRs and pushes to `dev`       | Fast feedback on every change       | Linting + `test_set_ci`-marked tests                               |
-| Release (`release.yaml`)               | PRs and pushes to `main`      | Pre-release validation              | Linting + all tests except `test_set_experimental`/`test_set_perf` |
-| CD (`cd.yaml`)                         | Version tags (`v*`)           | Build and publish release artifacts | Deployment pipeline                                                |
-| Build (`build.yaml`)                   | PRs; manual dispatch          | Build and publish the wheel         | —                                                                  |
-| Check PR Title (`check-pr-title.yaml`) | PR opened, edited, or updated | Enforce Conventional Commits format | —                                                                  |
-| Lint (`lint.yaml`)                     | PRs; pushes to `dev`          | Lint the source tree and workflows  | —                                                                  |
-| Nightly PyTorch (`nightly-torch.yaml`) | Daily cron; manual dispatch   | Track the PyTorch nightly wheel     | No-NPU smoke tests (`RBLN_DUMMY_DEVICE=1`)                         |
+The workflows below each have a trigger of their own. Files prefixed with `_` are reusable workflows they call, never triggered directly.
 
-CI, Release, and CD workflows delegate to a shared [Event Dispatch](#event-dispatch-mechanism) mechanism that sends events to infrastructure with physical RBLN NPU devices.
+| Workflow                                                                     | Purpose                                 |
+|------------------------------------------------------------------------------|-----------------------------------------|
+| Pre-merge checks (`pre-merge-checks.yaml`)                                   | Gate the proposed change                |
+| Post-merge checks (`post-merge-checks.yaml`)                                 | Confirm the integrated commit           |
+| Release checks (`release-checks.yaml`)                                       | Decide whether `main` is fit to release |
+| PR title check (`check-pr-title.yaml`)                                       | Enforce Conventional Commits format     |
+| Build (`build.yaml`)                                                         | Build and publish wheels                |
+| CD (`cd.yaml`)                                                               | Build and publish release artifacts     |
+| `rebel-compiler` dependency update (`update-rebel-compiler-dependency.yaml`) | Propose a `rebel-compiler` version bump |
+| Nightly PyTorch (`nightly-torch.yaml`)                                       | Track the PyTorch nightly wheel         |
 
 ---
 
 ## Triggers and Concurrency
 
-| Workflow       | `pull_request`                  | `push`             | Cancel in-progress? |
-|----------------|---------------------------------|--------------------|---------------------|
-| CI             | To any branch **except** `main` | To `dev`           | Yes                 |
-| Release        | To `main`                       | To `main`          | Yes                 |
-| CD             | —                               | Tags matching `v*` | **No**              |
-| Build          | All PRs                         | —                  | PRs only            |
-| Check PR Title | On open, edit, sync, reopen     | —                  | Yes                 |
-| Lint           | To `main` or `dev`              | To `dev`           | Yes                 |
-| Nightly PyTorch| —                               | —                  | **No**              |
+| Workflow                           | Trigger                     | Grouped by                       | `cancel-in-progress` |
+|------------------------------------|-----------------------------|----------------------------------|----------------------|
+| Pre-merge checks                   | All PRs                     | PR number                        | `true`               |
+| Post-merge checks                  | Pushes to `main`            | Commit SHA                       | `false`              |
+| Release checks                     | Daily 00:15 KST; manual run | Commit SHA                       | `false`              |
+| PR title check                     | All PRs, including edits    | PR number                        | `true`               |
+| Build                              | All PRs; manual run         | PR number; run ID on manual runs | `true` on PRs        |
+| CD                                 | Version tags (`v*`)         | Commit SHA                       | `false`              |
+| `rebel-compiler` dependency update | Daily 09:00 KST; manual run | Workflow name                    | `false`              |
+| Nightly PyTorch                    | Daily 14:00 KST; manual run | Workflow name                    | `false`              |
 
-CI, Release, and Lint runs are grouped by PR number (or SHA for pushes); a new push cancels the in-progress run. CD runs are never cancelled — once a deployment starts, it runs to completion. Check PR Title runs are grouped by PR number and always cancel the in-progress run. Build also runs on manual `workflow_dispatch`; its PR runs are grouped by PR number and cancel superseded commits, while dispatch runs are grouped by run ID and always complete.
+Cancelling is safe when a newer commit makes the earlier result obsolete, which is why the pull request workflows cancel. Keying on the commit SHA already isolates commits from each other, so the only runs sharing a group are repeats of one commit, and `false` lets the run in flight finish. Grouping the dependency-tracking workflows by workflow name keeps a run from overlapping its predecessor.
 
 ---
 
-## CI Workflow
+## Checks
 
-**File:** [`.github/workflows/ci.yaml`](../.github/workflows/ci.yaml)
+These workflows decide whether a change is acceptable. Pre-merge, post-merge, and release checks are the validation workflows, one at each stage of a change's lifecycle; they run their NPU tests through the shared [event dispatch mechanism](#event-dispatch-mechanism).
 
-The CI workflow provides fast feedback during everyday development and is the gatekeeper for merging into `dev`. It runs linting and the `test_set_ci`-marked test suite:
+### Pre-merge checks
+
+**File:** [`.github/workflows/pre-merge-checks.yaml`](../.github/workflows/pre-merge-checks.yaml)
+
+Pre-merge checks provide fast feedback and gate merging into `main`. They run the CI-mode suite against the pull request head:
 
 ```bash
 python test/run_tests.py  # -m "test_set_ci"
 ```
 
-This selects tests marked with `@pytest.mark.test_set_ci` — the core set of tests that should always pass. Linting runs via `lintrunner` (see [Linting](LINTING.md)) to catch style violations before tests execute. See the [Test Guide](TEST_GUIDE.md) for details on test markers and parallel/serial worker splitting.
+See the [Test Guide](TEST_GUIDE.md) for what the markers select and how tests are split across workers.
 
----
+### Post-merge checks
 
-## Release Workflow
+**File:** [`.github/workflows/post-merge-checks.yaml`](../.github/workflows/post-merge-checks.yaml)
 
-**File:** [`.github/workflows/release.yaml`](../.github/workflows/release.yaml)
+Pull requests are merged without rebasing onto the latest `main`, so pre-merge checks cannot answer whether the integrated result holds. Post-merge checks run the CI-mode suite on the `main` commit a merge produces.
 
-The Release workflow runs when code is promoted from `dev` to `main` for release. It builds and lints across all supported Python versions. It covers a broader test suite than CI, but neither is a strict superset of the other — experimental tests can run in CI but are excluded from Release:
+They also lint the whole tree rather than the changed files alone (see [Linting](#linting)), and their result is the health signal for `main` in the [Release Process](RELEASE_PROCESS.md).
+
+### Release checks
+
+**File:** [`.github/workflows/release-checks.yaml`](../.github/workflows/release-checks.yaml)
+
+Release checks decide whether the current `main` commit is fit to release (see [Release Process](RELEASE_PROCESS.md)). A manual run can validate the tip of `main` ahead of a release. They run a broader test suite than pre-merge and post-merge checks:
 
 ```bash
 python test/run_tests.py --test_mode=release  # -m "not (test_set_experimental or test_set_perf)"
 ```
 
-### Test Coverage by Workflow
-
-| Test Mode          | Marker                               | pytest Expression                                   | Workflow         | Description                                                                 |
-|--------------------|--------------------------------------|-----------------------------------------------------|------------------|-----------------------------------------------------------------------------|
-| CI tests           | `@pytest.mark.test_set_ci`           | `-m "test_set_ci"`                                  | CI               | Core tests that run on every PR — must always pass                          |
-| Release tests      | *(no marker)*                        | `-m "not (test_set_experimental or test_set_perf)"` | Release          | Extended coverage included at release time — too slow or niche for every PR |
-| Performance tests  | `@pytest.mark.test_set_perf`         | `-m "test_set_perf"`                                | *(manual)*       | Benchmarks — not included in any automated workflow                         |
-| Experimental tests | `@pytest.mark.test_set_experimental` | excluded from Release                               | CI or *(manual)* | Early-stage features — can opt into CI with `@pytest.mark.test_set_ci`      |
-
-> **Note:**
-> - **Marker overlap:** CI mode (`-m "test_set_ci"`) and Release mode (`-m "not (test_set_experimental or test_set_perf)"`) overlap but neither is a strict superset of the other. Release includes all `test_set_ci`-marked tests *plus* unmarked tests, but excludes `test_set_experimental`. A test marked with both `@pytest.mark.test_set_ci` and `@pytest.mark.test_set_experimental` will run in CI but **not** in Release.
-> - **Linting:** `lintrunner` runs in both CI and Release workflows.
-
----
-
-## CD Workflow
-
-**File:** [`.github/workflows/cd.yaml`](../.github/workflows/cd.yaml)
-
-The CD workflow builds and publishes release artifacts after code has passed both CI and Release testing. It dispatches a `torch-rbln-cd` event and focuses on artifact generation and deployment rather than test execution.
-
----
-
-## Build Workflow
-
-**File:** [`.github/workflows/build.yaml`](../.github/workflows/build.yaml)
-
-The Build workflow builds the `torch-rbln` wheel and publishes it to the internal package index, on every pull request and on manual `workflow_dispatch`. Unlike CI, Release, and CD, it builds in a container instead of dispatching to RBLN NPU hardware.
-
-The entrypoint fans out a `python_version` × `build_type` matrix to the reusable [`_build-wheel.yaml`](../.github/workflows/_build-wheel.yaml), which pins `rebel-compiler`, builds the wheel, verifies the built artifact in a clean environment, publishes it, and then checks the published version resolves from the index. PRs build `Release`; a manual dispatch can select `Release`, `Debug`, or both via `build_types`.
-
----
-
-## Check PR Title Workflow
+### PR title check
 
 **File:** [`.github/workflows/check-pr-title.yaml`](../.github/workflows/check-pr-title.yaml)
 
-The Check PR Title workflow enforces the [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) format on all pull request titles. It triggers whenever a PR is opened, edited, synchronized, or reopened.
+The PR title check enforces the [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) format on all pull request titles.
 
 The workflow uses [`amannn/action-semantic-pull-request`](https://github.com/amannn/action-semantic-pull-request) to validate the title against the following format:
 
-```
+```text
 <type>(<optional scope>): <description>
 ```
 
@@ -107,18 +86,42 @@ The workflow uses [`amannn/action-semantic-pull-request`](https://github.com/ama
 
 If the title is invalid, the workflow uses [`marocchino/sticky-pull-request-comment`](https://github.com/marocchino/sticky-pull-request-comment) to post a sticky comment on the PR explaining the required format. The comment is automatically deleted once the title is corrected.
 
+### Linting
+
+**File:** [`.github/workflows/_lint.yaml`](../.github/workflows/_lint.yaml)
+
+Each validation workflow calls `_lint.yaml` and sets the scope for its stage. That workflow fans out in turn:
+
+- [`_lint-source.yaml`](../.github/workflows/_lint-source.yaml) runs `lintrunner` over the source tree (see [Linting](LINTING.md)), once per combination of Python version and build type.
+- [`_lint-workflows.yaml`](../.github/workflows/_lint-workflows.yaml) runs `actionlint`, `yamllint`, and `zizmor` on the workflow files. It is invariant to those dimensions, so it runs once.
+
+| Workflow          | Source files      | Python version | Build type     |
+|-------------------|-------------------|----------------|----------------|
+| Pre-merge checks  | Changed in the PR | 3.12           | Release        |
+| Post-merge checks | Every tracked     | 3.12           | Release        |
+| Release checks    | Every tracked     | 3.10–3.14      | Release, Debug |
+
+`mypy` results are interpreter-specific, so release checks confirm every supported Python version. The build type selects `NDEBUG`, which decides whether `clang-tidy` sees the debug-only code paths, so linting `Release` alone never covers them. `clang-tidy` also compiles against the Python headers, so it varies along both dimensions; the matrix is therefore a full cross product rather than a separate sweep per linter.
+
 ---
 
-## Lint Workflow
+## Artifacts
 
-**File:** [`.github/workflows/lint.yaml`](../.github/workflows/lint.yaml)
+These workflows produce `torch-rbln` wheels.
 
-The Lint workflow runs on pull requests to `main` or `dev` and on pushes to `dev`, fanning out to two reusable workflows:
+### Build
 
-- [`_lint-source.yaml`](../.github/workflows/_lint-source.yaml) runs `lintrunner` over the source tree (see [Linting](LINTING.md)). A pull request to `main` (release validation) lints every tracked file across Python 3.10–3.14; pull requests and pushes to `dev` lint only the changed files on 3.12, for fast feedback.
-- [`_lint-workflows.yaml`](../.github/workflows/_lint-workflows.yaml) runs `actionlint`, `yamllint`, and `zizmor` on the workflow files.
+**File:** [`.github/workflows/build.yaml`](../.github/workflows/build.yaml)
 
-A final `Lint` job aggregates both, so branch protection has one stable check even as the source matrix varies by branch.
+Build runs in a container and dispatches nothing to RBLN NPU hardware.
+
+For each `python_version` and `build_type` combination, the entrypoint calls the reusable [`_build-wheel.yaml`](../.github/workflows/_build-wheel.yaml), which pins `rebel-compiler`, builds the wheel, verifies it in a clean environment, publishes it, and checks that the published version resolves from the index. Pull request runs build `Release` on Python 3.12; a manual run can widen both dimensions.
+
+### CD
+
+**File:** [`.github/workflows/cd.yaml`](../.github/workflows/cd.yaml)
+
+CD builds and publishes release artifacts for a tagged commit. It dispatches a `torch-rbln-cd` event.
 
 ---
 
@@ -126,39 +129,37 @@ A final `Lint` job aggregates both, so branch protection has one stable check ev
 
 **File:** [`.github/workflows/_dispatch-event.yaml`](../.github/workflows/_dispatch-event.yaml)
 
-CI, Release, and CD workflows delegate to an internal hardware-backed automation flow via GitHub [repository dispatch](https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#repository_dispatch).
-This is necessary because testing `torch-rbln` requires access to physical RBLN NPU hardware hosted on dedicated infrastructure.
+The validation workflows and CD delegate to another repository through GitHub [repository dispatch](https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#repository_dispatch). That repository runs the work on physical RBLN NPU hardware. The caller sends `torch-rbln-ci`, `torch-rbln-release`, or `torch-rbln-cd` as the dispatch event type, with this payload:
 
-The dispatch payload includes:
+| Field            | Description                                                    |
+|------------------|----------------------------------------------------------------|
+| `event_name`     | GitHub event that triggered the workflow                       |
+| `torch_rbln_ref` | Git reference to check out, e.g. `main` or `refs/tags/v0.10.0` |
+| `torch_rbln_sha` | Git commit SHA to build and test                               |
 
-| Field            | Description                                                                    |
-|------------------|--------------------------------------------------------------------------------|
-| `event_name`     | GitHub event name that triggered the workflow (`push`, `pull_request`, etc.)   |
-| `event_type`     | Dispatch type: `torch-rbln-ci`, `torch-rbln-release`, or `torch-rbln-cd`       |
-| `torch_rbln_ref` | Git reference (branch name or tag, e.g. `refs/heads/main`, `refs/tags/v1.0.0`) |
-| `torch_rbln_sha` | Git commit SHA for the exact revision to build and test                        |
-
-The event is dispatched to a separate repository (configured via `vars.TORCH_RBLN_DISPATCH_REPOSITORY`) using [`peter-evans/repository-dispatch`](https://github.com/peter-evans/repository-dispatch), which triggers the corresponding workflow on infrastructure with RBLN NPU devices.
+A [`peter-evans/repository-dispatch`](https://github.com/peter-evans/repository-dispatch) step sends the event to the repository named by `vars.TORCH_RBLN_DISPATCH_REPOSITORY`.
 
 ---
 
-## Automated Dependency Updates
+## Dependency Tracking
+
+These workflows track the latest published build of a dependency on a daily schedule.
+
+### `rebel-compiler` dependency update
 
 **File:** [`.github/workflows/update-rebel-compiler-dependency.yaml`](../.github/workflows/update-rebel-compiler-dependency.yaml)
 
-This workflow runs on a daily schedule and tracks the latest `rebel-compiler` production build. When a newer one is available, it creates or updates a pull request against `dev` for a maintainer to review and merge.
+When a newer `rebel-compiler` production build appears, this workflow creates or updates a pull request against `main` for a maintainer to review and merge.
 
 It can also be run manually via `workflow_dispatch`, optionally pinning a specific `rebel_compiler_version` instead of resolving the latest.
 
----
-
-## Nightly PyTorch Workflow
+### Nightly PyTorch
 
 **File:** [`.github/workflows/nightly-torch.yaml`](../.github/workflows/nightly-torch.yaml)
 
 Everyday CI builds against the release pin (`torch==2.11.0+cpu`). This workflow additionally builds and smoke-tests `torch-rbln` against the **latest PyTorch nightly CPU wheel** every day at 14:00 KST (05:00 UTC), so an upstream breaking change surfaces within a day instead of at the next `torch` bump. Tracking PyTorch `main` in CI is the outstanding prerequisite for enlisting the repository in PyTorch's Cross-Repository CI Relay (CRCR).
 
-Scheduled runs use the default branch (`dev`); a manual `workflow_dispatch` tests whichever ref it is started from, and can pin an explicit `torch_version` and `python_version` instead of the defaults (latest nightly, Python 3.12). An explicit `torch_version` is still resolved against the nightly index, so it may be given with or without the `+cpu` local suffix and fails fast if the index does not serve it.
+Scheduled runs use the default branch (`main`); a manual `workflow_dispatch` tests whichever ref it is started from, and can pin an explicit `torch_version` and `python_version` instead of the defaults (latest nightly, Python 3.12). An explicit `torch_version` is still resolved against the nightly index, so it may be given with or without the `+cpu` local suffix and fails fast if the index does not serve it.
 
 Steps:
 
@@ -174,7 +175,7 @@ Steps:
 
 ## Related Documentation
 
-- [Release Process](RELEASE_PROCESS.md) — Branch model, versioning, tagging, and publication
+- [Release Process](RELEASE_PROCESS.md) — Release lifecycle, versioning, tagging, and publication
 - [Contributing Guide](CONTRIBUTING.md) — PR requirements and merge policy
 - [Test Guide](TEST_GUIDE.md) — Test infrastructure, markers, and `run_tests.py` usage
 - [Linting](LINTING.md) — `lintrunner` and the workflow linters
