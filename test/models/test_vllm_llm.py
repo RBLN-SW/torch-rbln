@@ -12,7 +12,8 @@ hard-coded expected strings.
 
 Environment requirements
 ------------------------
-* ``vllm-rbln`` installed on ``origin/device_tensor_rebased`` (or descendant).
+* ``vllm-rbln`` installed on ``origin/ci/torch-rbln-model-tests`` (what
+  ``tools/test/install-test-deps.sh`` checks out).
 * ``vllm_rbln`` / ``vllm`` importable.
 
 Matrix
@@ -365,7 +366,11 @@ LLM(
     enforce_eager=False,
     gpu_memory_utilization=0.1,
 )
-arts = glob.glob(os.path.join(os.environ["VLLM_CACHE_ROOT"], "rbln", "**", "*.rbln"), recursive=True)
+root = os.path.join(os.environ["VLLM_CACHE_ROOT"], "rbln")
+# vllm-rbln writes either per-graph .rbln files or a single mega-cache bundle.
+arts = glob.glob(os.path.join(root, "**", "*.rbln"), recursive=True) + glob.glob(
+    os.path.join(root, "**", "mega_cache.bin"), recursive=True
+)
 assert arts, "compile-only produced no .rbln artifacts"
 print(f"OK artifacts={len(arts)}")
 """
@@ -420,8 +425,12 @@ assert torch.rbln.physical_device_count() > 0, "phase 2 needs a real NPU"
 
 from vllm import LLM, SamplingParams
 
-pat = os.path.join(os.environ["VLLM_CACHE_ROOT"], "rbln", "**", "*.rbln")
-before = set(glob.glob(pat, recursive=True))
+root = os.path.join(os.environ["VLLM_CACHE_ROOT"], "rbln")
+# vllm-rbln writes either per-graph .rbln files or a single mega-cache bundle.
+pats = [os.path.join(root, "**", "*.rbln"), os.path.join(root, "**", "mega_cache.bin")]
+def _artifacts():
+    return {f for pat in pats for f in glob.glob(pat, recursive=True)}
+before = _artifacts()
 assert before, "phase 1 wrote no artifacts to load"
 
 llm = LLM(
@@ -442,7 +451,7 @@ try:
 finally:
     llm.llm_engine.engine_core.shutdown()
 
-new = set(glob.glob(pat, recursive=True)) - before
+new = _artifacts() - before
 assert not new, f"recompiled on the real device instead of loading the dummy-built artifacts: {new}"
 assert text == os.environ["RBLN_TEST_EXPECTED"], f"unexpected generation: {text!r}"
 print(f"OK text={text!r}")

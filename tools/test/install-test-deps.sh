@@ -14,10 +14,9 @@
 #   1. Test runner   : pytest, pytest-xdist
 #   2. Test infra    : expecttest (for torch.testing._internal)
 #   3. Model tests   : torchvision (PyTorch CPU index) + pandas
-#   4. vllm-rbln     : git clone + editable install; vllm itself is pulled in
-#                      transitively from vllm-rbln's dependency pin so the
-#                      version stays in lockstep with vllm-rbln upstream
-#                      instead of being re-pinned here.
+#   4. vllm-rbln     : git clone + editable install; its runtime dependencies
+#                      come from its own pyproject, minus torch-rbln and torch
+#                      (the packages under test).
 #
 # Usage:
 #   ./tools/test/install-test-deps.sh [--dry-run]
@@ -25,7 +24,7 @@
 # Optional environment:
 #   UV=1                 Use ``uv pip install`` instead of ``python -m pip``.
 #   VLLM_RBLN_REPO       Override the source repo (default rbln-sw/vllm-rbln).
-#   VLLM_RBLN_REF        Override the ref (default origin/device_tensor_rebased).
+#   VLLM_RBLN_REF        Override the ref (default origin/ci/torch-rbln-model-tests).
 #   VLLM_RBLN_DIR        Override the local checkout path
 #                        (default ``$PROJECT_ROOT/vllm-rbln``).
 # =============================================================================
@@ -108,12 +107,11 @@ install_model_test_deps() {
 
 # ----- step 4: vllm-rbln ----------------------------------------------------
 #
-# vllm-rbln's device-tensor flow is not on PyPI yet, so we source-install the
-# branch directly. We do NOT install ``vllm`` separately: vllm-rbln pins the
-# right vllm version (and the matching vllm-cpu wheel index URL) in its own
-# pyproject.toml, and pip pulls vllm transitively when we install vllm-rbln
-# editable. This keeps the vllm version in lockstep with vllm-rbln's upstream
-# pin instead of duplicating it here.
+# vllm-rbln's runtime dependencies (vllm, optimum-rbln, ...) are read from its
+# pyproject.toml so nothing is re-pinned here. torch-rbln and torch are left
+# out and the editable install is ``--no-deps``: vllm-rbln bounds torch-rbln to
+# a release line that a nightly or editable torch-rbln does not satisfy, and a
+# resolving install would replace the package under test.
 
 vllm_wheel_index_from_pyproject() {
   # Read the vllm-cpu index URL out of vllm-rbln's pyproject.toml so we don't
@@ -130,9 +128,23 @@ sys.exit(f"vllm-cpu index URL not found in {sys.argv[1]}")
 PY
 }
 
+vllm_rbln_runtime_deps() {
+  # One requirement per line, environment markers kept.
+  local pyproject="$1"
+  python - "${pyproject}" <<'PY'
+import re, sys, tomllib, pathlib
+data = tomllib.loads(pathlib.Path(sys.argv[1]).read_text())
+skip = {"torch-rbln", "torch"}
+for req in data["project"]["dependencies"]:
+    name = re.split(r"[\s\[<>=!~;]", req.strip(), maxsplit=1)[0].lower().replace("_", "-")
+    if name not in skip:
+        print(req)
+PY
+}
+
 install_vllm_rbln() {
   local repo="${VLLM_RBLN_REPO:-https://github.com/rbln-sw/vllm-rbln.git}"
-  local ref="${VLLM_RBLN_REF:-origin/chan/remove_cpu_offload}"
+  local ref="${VLLM_RBLN_REF:-origin/ci/torch-rbln-model-tests}"
   local dir="${VLLM_RBLN_DIR:-${PROJECT_ROOT}/vllm-rbln}"
 
   log_step "vllm-rbln (clone + editable install at ${ref})"
@@ -156,13 +168,21 @@ install_vllm_rbln() {
     echo "Resolved vllm wheel index from vllm-rbln pyproject: ${vllm_index}"
   fi
 
-  # The rbln index is needed so pip can resolve vllm-rbln's transitive
-  # ``optimum-rbln`` pin; transformers + other ordinary PyPI packages come
-  # from the default index.
-  pip_install -e "${dir}" \
+  # The rbln index resolves vllm-rbln's ``optimum-rbln`` pin; ordinary PyPI
+  # packages come from the default index.
+  local -a deps
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    deps=("<vllm-rbln runtime deps minus torch-rbln/torch, from pyproject at runtime>")
+  else
+    local deps_text
+    deps_text="$(vllm_rbln_runtime_deps "${dir}/pyproject.toml")"
+    mapfile -t deps <<< "${deps_text}"
+  fi
+  pip_install "${deps[@]}" \
     --extra-index-url "${vllm_index}" \
     --extra-index-url https://pypi.rbln.ai/simple/ \
     --extra-index-url https://download.pytorch.org/whl/cpu
+  pip_install -e "${dir}" --no-deps
 }
 
 # ----- main -----------------------------------------------------------------
