@@ -168,7 +168,7 @@ Steps:
 3. **Build** the wheel with the same container, compiler setup, and `constraints-build-dev.txt` build constraint as [`_build-wheel.yaml`](../.github/workflows/_build-wheel.yaml), but **without publishing** it to the internal package index.
 4. **Test** on a CPU-only runner with no NPU attached, using `RBLN_DUMMY_DEVICE=1` (see [Configuration](CONFIGURATION.md#rbln_dummy_device)):
    - a smoke script that installs the built wheel into a clean venv and checks the versions, the dummy device topology, a host↔device round-trip, and one eager op;
-   - the no-NPU test suites `test/rbln/test_dummy_device.py` and `test/distributed/test_no_device.py` (each manages `RBLN_DUMMY_DEVICE` itself, so it is not set for this step).
+   - the no-NPU test suites `test/rbln/test_dummy_device.py` and `test/distributed/test_no_device.py` (each manages `RBLN_DUMMY_DEVICE` itself, so it is not set for this step), and `test/internal/test_device_arch.py`, whose architecture gates only see a host with no NPU here.
 5. **Report** the resolved `torch` version, the built `torch-rbln` version, and the outcome to the job summary, with an error annotation on failure.
 
 ---
