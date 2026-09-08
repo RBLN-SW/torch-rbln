@@ -22,7 +22,9 @@
 #                      test_vllm_llm.py with this venv's interpreter. The venv
 #                      sees the test venv's site-packages (torch, torch-rbln,
 #                      rebel-compiler, pytest) through a .pth file and adds
-#                      only the stack on top.
+#                      only the stack on top. The packages under test must stay
+#                      the test venv's copies, so the install is verified
+#                      against that before the script exits.
 #
 # Usage:
 #   ./tools/test/install-test-deps.sh [--dry-run]
@@ -177,8 +179,13 @@ install_vllm_rbln() {
   if [[ ! -x "${py}" ]]; then
     run python -m venv "${venv}"
   fi
+  # site.addsitedir rather than a bare path: it also processes the .pth files
+  # *inside* the test venv, which is how an editable install (torch-rbln built
+  # from this checkout, an external rebel-compiler) puts its source tree on the
+  # path. It appends, so the inference venv's own packages keep priority and
+  # transformers 5 still wins there.
   if [[ "${DRY_RUN}" -eq 1 ]]; then
-    echo "[dry-run] write ${venv}/<purelib>/torch-rbln-test-venv.pth -> this interpreter's purelib"
+    echo "[dry-run] write ${venv}/<purelib>/torch-rbln-test-venv.pth -> addsitedir(this interpreter's purelib)"
   else
     python - "${py}" <<'PY'
 import pathlib, subprocess, sys, sysconfig
@@ -186,7 +193,9 @@ parent = sysconfig.get_paths()["purelib"]
 child = subprocess.check_output(
     [sys.argv[1], "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"], text=True
 ).strip()
-pathlib.Path(child, "torch-rbln-test-venv.pth").write_text(parent + "\n")
+pathlib.Path(child, "torch-rbln-test-venv.pth").write_text(
+    f"import site; site.addsitedir({parent!r})\n"
+)
 PY
   fi
 
@@ -219,11 +228,92 @@ PY
     deps_text="$(vllm_rbln_runtime_deps "${dir}/pyproject.toml")"
     mapfile -t deps <<< "${deps_text}"
   fi
-  pip_install_into "${py}" "${deps[@]}" \
+  # Installed with the inference venv's own pip, never uv, whatever UV is set
+  # to: pip reads the target interpreter's sys.path, so it sees the test venv's
+  # torch and torch-rbln through the .pth above and leaves them alone. uv
+  # resolves against the venv directory only, does not see them, and pulls its
+  # own torch in as a transitive dependency of vllm.
+  run "${py}" -m pip install "${deps[@]}" \
     --extra-index-url "${vllm_index}" \
     --extra-index-url https://pypi.rbln.ai/simple/ \
     --extra-index-url https://download.pytorch.org/whl/cpu
-  pip_install_into "${py}" -e "${dir}" --no-deps
+  run "${py}" -m pip install -e "${dir}" --no-deps
+
+  verify_shared_packages "${py}"
+}
+
+# The inference venv exists to add the vLLM stack, not to re-create the packages
+# under test. A second copy of torch or torch-rbln there would be a different
+# binary from the one the rest of the suite exercises, and the extension built
+# against the test venv's torch would load the inference venv's. Fail here
+# rather than let a run report on packages nobody meant to test.
+verify_shared_packages() {
+  local py="$1"
+
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "[dry-run] verify torch / torch_rbln / rebel resolve to this interpreter"
+    return 0
+  fi
+
+  python - "${py}" <<'PY'
+import json
+import os
+import subprocess
+import sys
+import sysconfig
+import tempfile
+
+# -I so the probe measures the interpreter's own environment: no PYTHONPATH, and
+# no working directory on sys.path (a torch-rbln checkout has a ``torch`` symlink
+# at its root, and the installer is normally run from there).
+PROBE = r"""
+import json, os
+out = {}
+for name in ("torch", "torch_rbln", "rebel", "transformers"):
+    try:
+        mod = __import__(name)
+    except Exception as exc:
+        out[name] = [None, repr(exc)]
+    else:
+        path = getattr(mod, "__file__", "") or ""
+        out[name] = [getattr(mod, "__version__", None), os.path.realpath(path) if path else ""]
+print(json.dumps(out))
+"""
+
+
+def probe(interpreter):
+    # Absolute: the probe runs from a directory that is not the caller's.
+    interpreter = os.path.abspath(interpreter)
+    with tempfile.TemporaryDirectory() as neutral:
+        return json.loads(subprocess.check_output([interpreter, "-I", "-c", PROBE], text=True, cwd=neutral))
+
+
+parent = os.path.realpath(sysconfig.get_paths()["purelib"])
+child = probe(sys.argv[1])
+here = probe(sys.executable)
+
+problems = []
+for name in ("torch", "torch_rbln", "rebel"):
+    version, path = child[name]
+    if version is None:
+        problems.append("{}: not importable in the inference venv ({})".format(name, path))
+        continue
+    if path != here[name][1]:
+        problems.append("{}: {} in the inference venv, {} here".format(name, path, here[name][1]))
+    if here[name][0] is not None and version != here[name][0]:
+        problems.append("{}: {} in the inference venv, {} here".format(name, version, here[name][0]))
+
+# The whole point of the split: the inference venv must bring its own transformers.
+if child["transformers"][1] and child["transformers"][1].startswith(parent):
+    problems.append("transformers: inference venv falls back to the test venv's copy ({})".format(child["transformers"][1]))
+
+if problems:
+    sys.exit("inference venv does not share the packages under test:\n  " + "\n  ".join(problems))
+
+shared = ", ".join("{} {}".format(n, child[n][0]) for n in ("torch", "torch_rbln", "rebel"))
+print("Shared with the inference venv: " + shared)
+print("Inference venv transformers: {}".format(child["transformers"][0]))
+PY
 }
 
 # ----- main -----------------------------------------------------------------

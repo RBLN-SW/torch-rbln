@@ -429,11 +429,13 @@ def test_vllm_compile_only_no_npu_via_dummy(tmp_path):
 
 
 # Phase 2 of the dummy-compile -> real-run round trip: load the artifacts phase 1
-# built on a dummy device onto a real NPU and generate. Asserts nothing was
-# recompiled (the .rbln set is unchanged) so we know the dummy-built artifact
+# built on a dummy device onto a real NPU and generate. Asserts the artifacts are
+# byte-for-byte the ones phase 1 wrote, so we know the dummy-built artifact
 # actually ran, and that the output matches the CPU-reference expectation.
+# Content, not names: vllm-rbln recompiles into a mega-cache bundle at the path
+# it already used, which a set of names cannot tell apart from a cache hit.
 _REAL_RUN_FROM_CACHE_WORKER = """
-import glob, os
+import glob, hashlib, os
 import torch_rbln  # noqa: F401
 import torch
 
@@ -446,7 +448,12 @@ root = os.path.join(os.environ["VLLM_CACHE_ROOT"], "rbln")
 # vllm-rbln writes either per-graph .rbln files or a single mega-cache bundle.
 pats = [os.path.join(root, "**", "*.rbln"), os.path.join(root, "**", "mega_cache.bin")]
 def _artifacts():
-    return {f for pat in pats for f in glob.glob(pat, recursive=True)}
+    found = {}
+    for pat in pats:
+        for f in glob.glob(pat, recursive=True):
+            st = os.stat(f)
+            found[f] = (st.st_size, st.st_mtime_ns, hashlib.sha256(open(f, "rb").read()).hexdigest())
+    return found
 before = _artifacts()
 assert before, "phase 1 wrote no artifacts to load"
 
@@ -468,8 +475,9 @@ try:
 finally:
     llm.llm_engine.engine_core.shutdown()
 
-new = _artifacts() - before
-assert not new, f"recompiled on the real device instead of loading the dummy-built artifacts: {new}"
+after = _artifacts()
+changed = {f for f in before.keys() | after.keys() if before.get(f) != after.get(f)}
+assert not changed, f"recompiled on the real device instead of loading the dummy-built artifacts: {sorted(changed)}"
 assert text == os.environ["RBLN_TEST_EXPECTED"], f"unexpected generation: {text!r}"
 print(f"OK text={text!r}")
 """

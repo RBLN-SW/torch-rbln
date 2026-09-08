@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -179,7 +180,14 @@ _TRANSFORMERS_TESTS = ["test/models/test_transformers.py"]
 
 
 def _inference_python(project_root: Path) -> str:
-    venv_python = project_root / ".venv-inference" / "bin" / "python"
+    """The inference venv's interpreter, or this one when the split is not installed.
+
+    ``INFERENCE_VENV`` is install-test-deps.sh's override for where that venv
+    lives; both sides have to read it or a custom path installs one environment
+    and tests another.
+    """
+    venv = Path(os.environ.get("INFERENCE_VENV") or project_root / ".venv-inference")
+    venv_python = venv / "bin" / "python"
     return str(venv_python) if venv_python.exists() else sys.executable
 
 
