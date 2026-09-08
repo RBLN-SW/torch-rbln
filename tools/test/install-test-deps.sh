@@ -13,10 +13,16 @@
 # Steps (each can be skipped via env var if a CI runner already provides it):
 #   1. Test runner   : pytest, pytest-xdist
 #   2. Test infra    : expecttest (for torch.testing._internal)
-#   3. Model tests   : torchvision (PyTorch CPU index) + pandas
-#   4. vllm-rbln     : git clone + editable install; its runtime dependencies
-#                      come from its own pyproject, minus torch-rbln and torch
-#                      (the packages under test).
+#   3. Model tests   : torchvision (PyTorch CPU index), pandas, transformers 4
+#                      (the line test_transformers.py's models load under)
+#   4. inference stack: vllm-rbln (git clone + editable) and, through its
+#                      dependencies, optimum-rbln, in their own venv. That
+#                      stack pins transformers 5, so it cannot share the test
+#                      venv; test/run_tests.py runs test_optimum_llm.py and
+#                      test_vllm_llm.py with this venv's interpreter. The venv
+#                      sees the test venv's site-packages (torch, torch-rbln,
+#                      rebel-compiler, pytest) through a .pth file and adds
+#                      only the stack on top.
 #
 # Usage:
 #   ./tools/test/install-test-deps.sh [--dry-run]
@@ -27,6 +33,9 @@
 #   VLLM_RBLN_REF        Override the ref (default origin/ci/torch-rbln-model-tests).
 #   VLLM_RBLN_DIR        Override the local checkout path
 #                        (default ``$PROJECT_ROOT/vllm-rbln``).
+#   INFERENCE_VENV       Override the inference-stack venv path
+#                        (default ``$PROJECT_ROOT/.venv-inference``, where
+#                        test/run_tests.py looks for it).
 # =============================================================================
 
 set -euo pipefail
@@ -61,10 +70,17 @@ run() {
 }
 
 pip_install() {
+  pip_install_into python "$@"
+}
+
+# pip_install_into <python> <pip args...>: install into the venv of <python>.
+pip_install_into() {
+  local py="$1"
+  shift
   if [[ "${UV:-0}" = "1" ]]; then
-    run uv pip install "$@"
+    run uv pip install --python "${py}" "$@"
   else
-    run python -m pip install "$@"
+    run "${py}" -m pip install "$@"
   fi
 }
 
@@ -93,25 +109,32 @@ install_test_infra() {
 # download.pytorch.org rather than PyPI). pandas is a plain PyPI package used
 # only by test/models/test_optimum_llm.py.
 #
-# transformers and optimum-rbln are NOT installed here — they arrive
-# transitively via vllm-rbln in step 4.
+# transformers stays on the 4 line here: test_transformers.py loads EXAONE-3.5's
+# hub modeling code, which no transformers 5 release runs. optimum-rbln is not
+# installed here; every release that supports this torch pins transformers 5, so
+# it lives in the inference venv (step 4).
 
 install_model_test_deps() {
-  log_step "Model-test deps (torchvision CPU + pandas)"
+  log_step "Model-test deps (torchvision CPU + pandas + transformers 4)"
   pip_install "torchvision==0.25.0+cpu" \
     --index-url https://download.pytorch.org/whl/cpu \
     --force-reinstall \
     --no-deps
   pip_install "pandas==2.2.3"
+  pip_install "transformers<5"
 }
 
-# ----- step 4: vllm-rbln ----------------------------------------------------
+# ----- step 4: inference stack (vllm-rbln + optimum-rbln) --------------------
 #
-# vllm-rbln's runtime dependencies (vllm, optimum-rbln, ...) are read from its
-# pyproject.toml so nothing is re-pinned here. torch-rbln and torch are left
-# out and the editable install is ``--no-deps``: vllm-rbln bounds torch-rbln to
-# a release line that a nightly or editable torch-rbln does not satisfy, and a
-# resolving install would replace the package under test.
+# The stack goes into its own venv because it pins transformers 5 (see step 3).
+# The venv layers on this interpreter's site-packages through a .pth file, so
+# torch, torch-rbln, rebel-compiler and pytest are shared and only vllm-rbln
+# plus its runtime dependencies (optimum-rbln among them) are added. Those
+# dependencies are read from vllm-rbln's pyproject.toml so nothing is re-pinned
+# here. torch-rbln and torch are left out and the editable install is
+# ``--no-deps``: vllm-rbln bounds torch-rbln to a release line that a nightly or
+# editable torch-rbln does not satisfy, and a resolving install would replace
+# the package under test.
 
 vllm_wheel_index_from_pyproject() {
   # Read the vllm-cpu index URL out of vllm-rbln's pyproject.toml so we don't
@@ -146,8 +169,26 @@ install_vllm_rbln() {
   local repo="${VLLM_RBLN_REPO:-https://github.com/rbln-sw/vllm-rbln.git}"
   local ref="${VLLM_RBLN_REF:-origin/ci/torch-rbln-model-tests}"
   local dir="${VLLM_RBLN_DIR:-${PROJECT_ROOT}/vllm-rbln}"
+  local venv="${INFERENCE_VENV:-${PROJECT_ROOT}/.venv-inference}"
+  local py="${venv}/bin/python"
 
-  log_step "vllm-rbln (clone + editable install at ${ref})"
+  log_step "Inference stack: vllm-rbln (clone + editable install at ${ref}) into ${venv}"
+
+  if [[ ! -x "${py}" ]]; then
+    run python -m venv "${venv}"
+  fi
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "[dry-run] write ${venv}/<purelib>/torch-rbln-test-venv.pth -> this interpreter's purelib"
+  else
+    python - "${py}" <<'PY'
+import pathlib, subprocess, sys, sysconfig
+parent = sysconfig.get_paths()["purelib"]
+child = subprocess.check_output(
+    [sys.argv[1], "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"], text=True
+).strip()
+pathlib.Path(child, "torch-rbln-test-venv.pth").write_text(parent + "\n")
+PY
+  fi
 
   if [[ ! -d "${dir}/.git" ]]; then
     echo "Cloning ${repo} into ${dir}..."
@@ -178,11 +219,11 @@ install_vllm_rbln() {
     deps_text="$(vllm_rbln_runtime_deps "${dir}/pyproject.toml")"
     mapfile -t deps <<< "${deps_text}"
   fi
-  pip_install "${deps[@]}" \
+  pip_install_into "${py}" "${deps[@]}" \
     --extra-index-url "${vllm_index}" \
     --extra-index-url https://pypi.rbln.ai/simple/ \
     --extra-index-url https://download.pytorch.org/whl/cpu
-  pip_install -e "${dir}" --no-deps
+  pip_install_into "${py}" -e "${dir}" --no-deps
 }
 
 # ----- main -----------------------------------------------------------------
