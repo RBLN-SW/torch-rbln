@@ -30,6 +30,7 @@ uv.lock
 # Virtual environments
 venv/
 .venv/
+.venv-inference/
 
 # Compiled objects & libraries
 *.o
