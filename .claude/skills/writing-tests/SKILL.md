@@ -105,7 +105,8 @@ Run the new test against the code as it was before your change. The reliable way
 ```bash
 git worktree add ../wt-base $(git merge-base HEAD origin/main)
 git -C ../wt-base checkout $(git rev-parse HEAD) -- <your new test files>
-# a venv there the way `docs/LINTING.md` sets one up (`uv sync`, then the editable install), then:
+# its own venv, set up the way `docs/LINTING.md` shows (`uv sync`, then the editable install), then:
+(cd ../wt-base && uv run --no-sync python -c 'import torch_rbln; print(torch_rbln.__file__)')  # must be ../wt-base
 (cd ../wt-base && uv run --no-sync pytest <your new test> -x)   # must fail
 ```
 
