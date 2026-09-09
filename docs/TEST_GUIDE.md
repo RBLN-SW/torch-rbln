@@ -199,7 +199,9 @@ python -m pytest test/rbln/test_graph_eager_mode.py -s -v -x
 #### Installing Test Dependencies
 
 ```bash
-# Install everything needed to run the full suite
+# Install everything needed to run the full suite. vllm-rbln and optimum-rbln
+# land in .venv-inference (they pin transformers 5; test_transformers.py needs
+# 4), and run_tests.py runs test_optimum_llm.py / test_vllm_llm.py with it.
 ./tools/test/install-test-deps.sh
 
 # Preview what would be installed (dry-run)
