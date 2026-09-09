@@ -90,11 +90,53 @@ constexpr size_t RCCL_ALLGATHER_MAX_OUTPUT_BYTES = 64ULL * 1024ULL * 1024ULL;
 size_t getRcclElementSize(::rbln::DataType dtype) {
   switch (dtype) {
     case ::rbln::DataType::Float16:
+    case ::rbln::DataType::BFloat16:
       return 2;
     default:
       RBLN_CHECK(false, "Unsupported dtype for RCCL element size calculation");
   }
   return 0;
+}
+
+/**
+ * @brief Whether RCCL can reduce this dtype on the device.
+ *
+ * RCCL reduces two 16-bit float layouts natively: IEEE float16, which the device
+ * holds as CustomFloat16, and bfloat16, which it holds as-is. Every other dtype
+ * is reduced on the host through the Gloo backend.
+ */
+bool isRcclReduceDtype(::rbln::DataType dtype) {
+  return dtype == ::rbln::DataType::Float16 || dtype == ::rbln::DataType::BFloat16;
+}
+
+/**
+ * @brief Physical (device) dtype RCCL expects for a reducible user dtype.
+ */
+::rbln::DataType rcclReducePhysicalDtype(::rbln::DataType dtype) {
+  switch (dtype) {
+    case ::rbln::DataType::Float16:
+      return ::rbln::DataType::CustomFloat16;
+    case ::rbln::DataType::BFloat16:
+      return ::rbln::DataType::BFloat16;
+    default:
+      RBLN_CHECK(false, "RCCL reduce does not support dtype {}", static_cast<int>(dtype));
+  }
+  return dtype;
+}
+
+/**
+ * @brief RCCL data type used to reduce a reducible user dtype.
+ */
+::rbln::Rccl::RcclDataType rcclReduceDataType(::rbln::DataType dtype) {
+  switch (dtype) {
+    case ::rbln::DataType::Float16:
+      return ::rbln::Rccl::RcclDataType::RBLN_CUSTOM_FP16_TYPE;
+    case ::rbln::DataType::BFloat16:
+      return ::rbln::Rccl::RcclDataType::RCCL_BF16_TYPE;
+    default:
+      RBLN_CHECK(false, "RCCL reduce does not support dtype {}", static_cast<int>(dtype));
+  }
+  return ::rbln::Rccl::RcclDataType::RBLN_CUSTOM_FP16_TYPE;
 }
 
 // ============================================================================
@@ -154,8 +196,9 @@ size_t getRcclElementSize(::rbln::DataType dtype) {
     case at::ScalarType::Float:
     case at::ScalarType::Double:
     case at::ScalarType::Half:
-    case at::ScalarType::BFloat16:
       return ::rbln::Rccl::RcclDataType::RBLN_CUSTOM_FP16_TYPE;
+    case at::ScalarType::BFloat16:
+      return ::rbln::Rccl::RcclDataType::RCCL_BF16_TYPE;
     case at::ScalarType::Char:
     case at::ScalarType::Byte:
     case at::ScalarType::Bool:
@@ -284,11 +327,12 @@ void ensureRcclRawMemory(const at::Tensor& tensor) {
 }
 
 /**
- * @brief Prepare tensor for RCCL reduce operations (CustomFloat16 transform)
+ * @brief Prepare tensor for RCCL reduce operations
  *
- * Uses WITH_TRANSFORM mode with Float16 -> CustomFloat16 conversion.
- * This enables NPU arithmetic and supports offset access for chunked operations.
- * Suitable for: AllReduce, ReduceScatter.
+ * Registers the storage with the physical dtype RCCL reduces on (see
+ * rcclReducePhysicalDtype): float16 is transformed to CustomFloat16, bfloat16 is
+ * kept as-is. This enables NPU arithmetic and supports offset access for chunked
+ * operations. Suitable for: AllReduce, ReduceScatter.
  *
  * @param tensor The tensor to prepare
  */
@@ -315,7 +359,7 @@ void ensureRcclReduceMemory(const at::Tensor& tensor) {
   }
 
   RBLN_CHECK(
-      rbln::rbln_set_memory_info(mem_info->key_vaddr, rbln_dtype, rbln::DataType::CustomFloat16, shape) ==
+      rbln::rbln_set_memory_info(mem_info->key_vaddr, rbln_dtype, rcclReducePhysicalDtype(rbln_dtype), shape) ==
           RBLNRetCode_SUCCESS,
       "Failed to set RCCL reduce memory layout");
 }
@@ -359,7 +403,7 @@ void ensureContiguousRcclReduceMemory(const std::vector<at::Tensor>& tensors) {
     const auto rbln_dtype = c10::rbln::to_rbln_dtype(tensor.scalar_type());
     std::vector<int64_t> shape = std::vector<int64_t>(tensor.sizes().begin(), tensor.sizes().end());
     TORCH_CHECK(
-        rbln::rbln_set_memory_info(mem_info->key_vaddr, rbln_dtype, rbln::DataType::CustomFloat16, shape) ==
+        rbln::rbln_set_memory_info(mem_info->key_vaddr, rbln_dtype, rcclReducePhysicalDtype(rbln_dtype), shape) ==
             RBLNRetCode_SUCCESS,
         "Failed to set RCCL reduce memory layout");
   }
@@ -1054,11 +1098,11 @@ class AllreduceRBLNWork : public RBLNWork {
       return;
     }
 
-    // Check if input is not CUSTOM_FLOAT16
+    // Dtypes RCCL cannot reduce on the device go through the Gloo backend on the host
     const auto rbln_dtype = c10::rbln::to_rbln_dtype(inputs_[0].scalar_type());
-    if (rbln_dtype != ::rbln::DataType::Float16) {
+    if (!isRcclReduceDtype(rbln_dtype)) {
       if (glooBackend_) {
-        // Use Gloo backend for non-CUSTOM_FLOAT16 allreduce
+        // Use Gloo backend for allreduce of a dtype RCCL does not reduce
         // Copy RBLN tensor to CPU
         std::vector<at::Tensor> cpu_tensors;
         for (size_t i = 0; i < inputs_.size(); ++i) {
@@ -1072,7 +1116,7 @@ class AllreduceRBLNWork : public RBLNWork {
         opts.reduceOp = reduceOp_;
         auto work = glooBackend_->allreduce(cpu_tensors, opts);
         work->wait();
-        RBLN_LOG_DEBUG("non-CUSTOM_FLOAT16 allreduce by Gloo Backend is completed");
+        RBLN_LOG_DEBUG("allreduce by Gloo Backend is completed");
 
         size_t i = 0;
         for (auto& input : inputs_) {
@@ -1082,15 +1126,18 @@ class AllreduceRBLNWork : public RBLNWork {
       }
       RBLN_CHECK(
           false,
-          "non-CUSTOM_FLOAT16 allreduce requires a Gloo backend. "
-          "Pass gloo_backend when creating ProcessGroupRBLN, or convert tensors to custom float16 before allreduce.");
+          "allreduce of dtype {} requires a Gloo backend. "
+          "Pass gloo_backend when creating ProcessGroupRBLN, or convert tensors to float16/bfloat16 before allreduce.",
+          c10::str(inputs_[0].scalar_type()));
     }
-
-    rcclDataType_ = ::rbln::Rccl::RcclDataType::RBLN_CUSTOM_FP16_TYPE;
 
     for (const auto& input : inputs_) {
       const auto rbln_dtype = c10::rbln::to_rbln_dtype(input.scalar_type());
-      RBLN_CHECK(rbln_dtype == ::rbln::DataType::Float16, "RCCL AllReduce only supports float16 dtype");
+      RBLN_CHECK(
+          isRcclReduceDtype(rbln_dtype),
+          "RCCL AllReduce only supports float16/bfloat16 dtype, got {}",
+          c10::str(input.scalar_type()));
+      rcclDataType_ = rcclReduceDataType(rbln_dtype);
 
       const size_t elem_size = getRcclElementSize(rbln_dtype);
       const size_t align_numel = RCCL_ALLREDUCE_ALIGNMENT / elem_size;
@@ -1242,13 +1289,12 @@ class ReduceScatterRBLNWork : public RBLNWork {
         input_ptrs.push_back(t.data_ptr());
       }
 
-      ensureRcclReduceMemory(output);
       const auto rbln_dtype = c10::rbln::to_rbln_dtype(inputs_[i][0].scalar_type());
 
-      // Check if input is not FLOAT16
-      if (rbln_dtype != ::rbln::DataType::Float16) {
+      // Dtypes RCCL cannot reduce on the device go through the Gloo backend on the host
+      if (!isRcclReduceDtype(rbln_dtype)) {
         if (glooBackend_) {
-          // Use Gloo backend for non-FLOAT16 reduce_scatter
+          // Use Gloo backend for reduce_scatter of a dtype RCCL does not reduce
           std::vector<at::Tensor> cpu_inputs;
           cpu_inputs.reserve(inputs_[i].size());
           for (auto& tensor : inputs_[i]) {
@@ -1267,11 +1313,14 @@ class ReduceScatterRBLNWork : public RBLNWork {
         }
         RBLN_CHECK(
             false,
-            "non-CUSTOM_FLOAT16 reduce_scatter requires a Gloo backend. "
-            "Pass gloo_backend when creating ProcessGroupRBLN, or convert tensors to CUSTOM_FLOAT16 before reduce_scatter.");
+            "reduce_scatter of dtype {} requires a Gloo backend. "
+            "Pass gloo_backend when creating ProcessGroupRBLN, or convert tensors to float16/bfloat16 before "
+            "reduce_scatter.",
+            c10::str(inputs_[i][0].scalar_type()));
       }
 
-      rcclDataType_ = ::rbln::Rccl::RcclDataType::RBLN_CUSTOM_FP16_TYPE;
+      ensureRcclReduceMemory(output);
+      rcclDataType_ = rcclReduceDataType(rbln_dtype);
 
       auto elem_size = getRcclElementSize(rbln_dtype);
       auto recv_numel = output.numel();
