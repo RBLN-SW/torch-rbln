@@ -1105,10 +1105,9 @@ class AllreduceRBLNWork : public RBLNWork {
         // Use Gloo backend for allreduce of a dtype RCCL does not reduce
         // Copy RBLN tensor to CPU
         std::vector<at::Tensor> cpu_tensors;
-        for (size_t i = 0; i < inputs_.size(); ++i) {
-          for (auto& input : inputs_) {
-            cpu_tensors.emplace_back(input.to("cpu"));
-          }
+        cpu_tensors.reserve(inputs_.size());
+        for (auto& input : inputs_) {
+          cpu_tensors.emplace_back(input.to("cpu"));
         }
 
         // Call Gloo allreduce on CPU tensor
