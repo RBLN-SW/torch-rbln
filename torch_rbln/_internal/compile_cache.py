@@ -2,36 +2,25 @@
 
 Each shim op (``add_rbln``, ``sub_rbln``, …) calls
 :func:`compile_rbln_cached` with its own ``OpModule`` instance to get a
-torch.compile'd callable. We cache by ``(module-id, dynamic, device-id,
-options)`` so that repeated eager-path dispatches of the same op reuse
-the same compiled graph.
+torch.compile'd callable. We cache by ``(module-id, dynamic, device-cache-key,
+options, backend)`` so that repeated eager-path dispatches of the same op
+reuse the same compiled graph.
 
-``options`` handling
---------------------
-The rebel backend accepts a side-channel option ``_runtime_holder`` (a
-mutable list) into which it appends the freshly-created ``DynamoRuntime``
-on its first compile pass — used by ``torch_rbln._internal.warm_cache``
-to harvest the runtime for the C++ warm cache.
+This cache owns the compiled callables and, through Dynamo's cache for
+their graphs, the ``DynamoRuntime`` instances behind them. The C++ warm
+cache (``torch_rbln._internal.warm_cache``) only borrows those runtimes:
+an entry there is installed from the runtime a cached callable ran, so
+dropping the C++ side (``torch.rbln.empty_cache``) does not touch this
+cache and the next miss installs the same runtime again. Clearing *this*
+cache (:func:`clear_rbln_compile_cache`, from ``torch._dynamo.reset``) is
+what makes the next call run Dynamo and the rebel backend again.
 
-If we naively fed the holder's identity into the cache key, every call
-would produce a distinct key (fresh list per call) and torch.compile
-would re-trigger on every invocation. Instead we strip the holder from
-the cache key while still passing the *full* options through on miss so
-the backend can still populate it.
-
-Only the **first** miss for a given (module, options-minus-holder) key
-actually runs the rebel backend (and therefore populates the holder);
-subsequent hits return the already-compiled callable without touching
-the holder. That is exactly the semantic the warm-cache bootstrap needs
-— it installs the cache entry only when the holder is populated.
-
-``RuntimeHolder`` compares by identity. Dynamo re-runs a backend only when
-the ``torch.compile`` wrapper it guarded on compares unequal to the current
-one, and that comparison includes ``options``; a plain list holder that
-install_pending had emptied would compare equal to the fresh empty one,
-Dynamo would reuse the graph, and the fresh holder would stay empty. With
-identity equality a compile-cache miss is always a real recompile, which is
-what re-installs a warm entry.
+A cached callable is a ``torch.compile`` wrapper, and Dynamo reuses a graph
+across wrappers whose backend and ``options`` compare equal. Keep
+``options`` to plain values: an option that compares unequal on every call
+turns each miss here into a Dynamo recompile that leaves the previous
+graph, and its runtime, in Dynamo's own cache until the recompile limit
+resets everything.
 """
 
 from __future__ import annotations
@@ -45,18 +34,6 @@ import torch
 
 _compiled_op_cache_lock = threading.Lock()
 _compiled_op_cache: dict[tuple[Any, ...], Any] = {}
-
-# Key used to strip the runtime-holder side-channel from cache keys.
-_RUNTIME_HOLDER_KEY = "_runtime_holder"
-
-
-class RuntimeHolder(list):
-    """The ``_runtime_holder`` side channel; see the module docstring for why identity."""
-
-    __hash__ = object.__hash__
-
-    def __eq__(self, other: object) -> bool:
-        return self is other
 
 
 class _IdentityKey:
@@ -93,53 +70,24 @@ def _freeze_cache_value(value: Any) -> Any:
     return _IdentityKey(value)
 
 
-def _options_cache_view(options: Mapping[str, Any] | None) -> Mapping[str, Any]:
-    """Drop per-call side-channel keys from a copy of ``options``.
-
-    Currently strips ``_runtime_holder`` only, since that's the single
-    mutable identity-bearing option we use. Add more entries here if new
-    side-channels appear.
-    """
-    if not options:
-        return {}
-    return {k: v for k, v in options.items() if k != _RUNTIME_HOLDER_KEY}
-
-
 def compile_rbln_cached(
     model: Any,
     *,
     dynamic: bool = False,
     options: dict[str, Any] | None = None,
     device_cache_key: Any = None,
-    force_recompile: bool = False,
+    backend: Any = "rbln",
 ) -> Any:
-    # The cache key excludes ``_runtime_holder`` (see module docstring).
     # ``device_cache_key`` accepts any hashable; callers that want per-shape
-    # warm-cache harvesting pass a (device_index, shape_sig, dtype_sig) tuple
-    # so distinct input profiles end up in distinct compile_rbln_cached
-    # entries and therefore receive fresh ``_runtime_holder`` slots.
-    #
-    # ``force_recompile`` is set by ``compile_and_run_view_aware`` when the
-    # C++ warm-cache erase'd an entry for this key on the prior dispatch
-    # (e.g. rebel runtime soft-failed). Without this, a cache-hit would
-    # return the same compiled callable that the rebel backend has already
-    # instantiated once and does not re-instantiate again, so
-    # ``_runtime_holder`` would stay empty and ``_install_warm_cache_pending``
-    # would never fire for this op+shape again. Drop the existing entry
-    # so the miss-path below re-runs ``torch.compile``, which re-populates
-    # the holder. See ``WarmCache::request_force_recompile`` in
-    # ``torch_rbln/csrc/rbln/DispatchShim.cpp`` for the producer side.
-    cache_options = _options_cache_view(options)
+    # warm-cache entries pass a (device_index, shape_sig, dtype_sig) tuple so
+    # distinct input profiles end up in distinct compile_rbln_cached entries.
     cache_key = (
         _IdentityKey(model),
         dynamic,
         _freeze_cache_value(device_cache_key),
-        _freeze_cache_value(cache_options),
+        _freeze_cache_value(options),
+        _freeze_cache_value(backend),
     )
-
-    if force_recompile:
-        with _compiled_op_cache_lock:
-            _compiled_op_cache.pop(cache_key, None)
 
     compiled = _compiled_op_cache.get(cache_key)
     if compiled is not None:
@@ -148,8 +96,7 @@ def compile_rbln_cached(
     with _compiled_op_cache_lock:
         compiled = _compiled_op_cache.get(cache_key)
         if compiled is None:
-            # Use the *full* options on miss so the backend sees the holder.
-            compiled = torch.compile(model, backend="rbln", dynamic=dynamic, options=options)
+            compiled = torch.compile(model, backend=backend, dynamic=dynamic, options=options)
             _compiled_op_cache[cache_key] = compiled
         return compiled
 

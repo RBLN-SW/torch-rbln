@@ -14,11 +14,13 @@ generated Python wrappers depend on:
 """
 
 import threading
+from unittest import mock
 
 import pytest
-import torch  # noqa: F401  (needed to load torch_rbln._C)
+import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
+import torch_rbln
 from torch_rbln import _C  # type: ignore[attr-defined]
 from torch_rbln._internal import warm_cache
 
@@ -121,57 +123,6 @@ class TestWarmCacheBuildingGuard(TestCase):
         self.assertEqual(seen_in_thread, [False], f"Thread-local flag leaked across threads: {seen_in_thread}")
         # Original thread still has the flag set.
         self.assertTrue(_C._warmcache_is_building())
-
-
-@pytest.mark.test_set_ci
-class TestWarmCacheForceRecompileFlag(TestCase):
-    """Thread-local force-recompile signal that pairs ``try_warmcache_hit``'s
-    erase-on-failure with the next ``compile_rbln_cached`` invocation.
-
-    The C++ shim sets the flag inside ``try_warmcache_hit`` when it has to
-    ``erase`` a broken entry; ``compile_and_run_view_aware`` consumes the
-    flag and passes ``force_recompile=True`` to ``compile_rbln_cached`` so
-    the same op+shape gets a fresh ``torch.compile`` pass (which lets the
-    rebel backend re-populate ``_runtime_holder`` and install succeed
-    again). Without this pairing, the erased op+shape would stay
-    permanently on the Python wrapper path because the Python compile
-    cache returns the stale callable and the holder stays empty.
-    """
-
-    def setUp(self) -> None:
-        _C._warmcache_consume_force_recompile()
-
-    def tearDown(self) -> None:
-        _C._warmcache_consume_force_recompile()
-
-    def test_default_false(self) -> None:
-        self.assertFalse(_C._warmcache_consume_force_recompile())
-
-    def test_request_then_consume_once(self) -> None:
-        _C._warmcache_request_force_recompile()
-        self.assertTrue(_C._warmcache_consume_force_recompile())
-        # Consume is single-shot.
-        self.assertFalse(_C._warmcache_consume_force_recompile())
-
-    def test_thread_local_isolation(self) -> None:
-        """The flag must not leak across threads. If it did, an erase on
-        thread A would force unnecessary recompiles on thread B's next
-        unrelated op."""
-        _C._warmcache_request_force_recompile()
-        seen_in_thread: list[bool] = []
-        ev = threading.Event()
-
-        def worker() -> None:
-            seen_in_thread.append(_C._warmcache_consume_force_recompile())
-            ev.set()
-
-        t = threading.Thread(target=worker, daemon=True)
-        t.start()
-        ev.wait(timeout=5.0)
-        t.join(timeout=5.0)
-
-        self.assertEqual(seen_in_thread, [False], f"force-recompile flag leaked across threads: {seen_in_thread}")
-        self.assertTrue(_C._warmcache_consume_force_recompile())
 
 
 @pytest.mark.test_set_ci
@@ -280,41 +231,150 @@ class TestWarmCacheContractBreak(TestCase):
         self.assertEqual(hits_after, hits_before, "an entry was cached off an unusable handle")
 
 
-@pytest.mark.test_set_ci
-@pytest.mark.single_worker
-class TestWarmCacheReinstall(TestCase):
-    """A profile the C++ cache lost, or never had, must get an entry on its next miss.
+class _HitPathCase(TestCase):
+    """Shared plumbing: a fresh 64-aligned profile per suite, hit-counter reads, miss/hit assertions."""
 
-    The rebel backend fills ``_runtime_holder`` only when it compiles, so an
-    entry can be installed only from a Python compile-cache miss. Both caches
-    therefore have to be cleared together, and a change the C++ key sees (a
-    scalar such as ``alpha``) has to miss in the Python cache as well.
-    """
-
-    SHAPE = 320  # 64-aligned and unused elsewhere, so the first call compiles
+    SHAPE = 0  # 64-aligned and unused elsewhere, so the first call compiles
 
     def setUp(self) -> None:
         self.addCleanup(_C._warmcache_clear)
-        self.x = torch.arange(self.SHAPE, dtype=torch.float16, device="rbln")
-        self.y = torch.ones(self.SHAPE, dtype=torch.float16, device="rbln")
 
-    def _hits(self) -> int:
+    @staticmethod
+    def _hits() -> int:
         return _C._dispatch_shim_warm_segments_dump()[0]
 
-    def _assert_hits_after_second_call(self, alpha: int) -> None:
-        expected = (torch.arange(self.SHAPE, dtype=torch.float16) + alpha).to(torch.float16)
-        self.assertEqual(torch.add(self.x, self.y, alpha=alpha).to("cpu"), expected)
-        hits = self._hits()
-        self.assertEqual(torch.add(self.x, self.y, alpha=alpha).to("cpu"), expected)
-        self.assertGreater(self._hits(), hits, f"second call with alpha={alpha} did not take the hit path")
+    def _operands(self, device: str = "rbln"):
+        x = torch.arange(self.SHAPE, dtype=torch.float16, device=device)
+        y = torch.ones(self.SHAPE, dtype=torch.float16, device=device)
+        expected = torch.arange(1, self.SHAPE + 1, dtype=torch.float16)
+        return x, y, expected
 
-    def test_empty_cache_then_same_profile_reinstalls(self) -> None:
-        self._assert_hits_after_second_call(alpha=1)
+    def _assert_miss(self, x, y, expected, msg: str) -> None:
+        hits = self._hits()
+        self.assertEqual(torch.add(x, y).to("cpu"), expected)
+        self.assertEqual(self._hits(), hits, msg)
+
+    def _assert_hit(self, x, y, expected, msg: str) -> None:
+        hits = self._hits()
+        self.assertEqual(torch.add(x, y).to("cpu"), expected)
+        self.assertGreater(self._hits(), hits, msg)
+
+
+@pytest.mark.test_set_ci
+@pytest.mark.single_worker
+class TestWarmCacheReinstall(_HitPathCase):
+    """A profile whose entry was dropped must get one back on its next miss, from
+    the runtime it already has.
+
+    ``empty_cache`` drops the C++ entries; the Python compile cache keeps the
+    callable, and Dynamo keeps its graph and runtime. The re-install has to come
+    from that runtime. A re-install that compiled instead would leave the
+    previous graph and runtime in Dynamo's cache on every cycle, until the
+    recompile limit resets every compiled graph in the process.
+    """
+
+    SHAPE = 320
+    CYCLES = 8
+
+    def test_empty_cache_then_same_profile_reinstalls_the_same_runtime(self) -> None:
+        x, y, expected = self._operands()
+        self._assert_miss(x, y, expected, "first call of a fresh profile took the hit path")
+        self._assert_hit(x, y, expected, "second call did not take the hit path")
+
+        installed: list[int] = []
+        orig_install = _C._warmcache_install_pending
+
+        def recording_install(*, dyn_runtime, **kw):
+            installed.append(id(dyn_runtime))
+            return orig_install(dyn_runtime=dyn_runtime, **kw)
+
+        compiles = 0
+        orig_compile = warm_cache._compile_graph
+
+        def counting_compile(*args):
+            nonlocal compiles
+            compiles += 1
+            return orig_compile(*args)
+
+        with (
+            mock.patch.object(_C, "_warmcache_install_pending", recording_install),
+            mock.patch.object(warm_cache, "_compile_graph", counting_compile),
+        ):
+            for cycle in range(self.CYCLES):
+                size = _C._warmcache_size()
+                torch.rbln.empty_cache()
+                self.assertLess(_C._warmcache_size(), size, "empty_cache() left the entry in place")
+                self._assert_miss(x, y, expected, f"cycle {cycle}: call after empty_cache() took the hit path")
+                self._assert_hit(x, y, expected, f"cycle {cycle}: entry was not re-installed")
+
+        self.assertEqual(len(installed), self.CYCLES, "expected one install per cycle")
+        self.assertEqual(len(set(installed)), 1, "a re-install used a different runtime than the first install")
+        self.assertEqual(compiles, 0, "a re-install ran the backend again")
+
+
+@pytest.mark.test_set_ci
+@pytest.mark.single_worker
+class TestWarmCacheDeviceScope(_HitPathCase):
+    """``empty_cache(device)`` drops that device's entries and no other's.
+
+    Serving several devices from one process, a flush on one of them must not
+    put the others' ops back on the Python wrapper path.
+    """
+
+    SHAPE = 384
+
+    def setUp(self) -> None:
+        if torch_rbln._C.device_count() < 2:
+            self.skipTest("needs two RBLN devices")
+        super().setUp()
+
+    def test_clearing_one_device_keeps_the_other_hitting(self) -> None:
+        a = self._operands("rbln:0")
+        self._assert_miss(*a, "rbln:0 first call took the hit path")
+        self._assert_hit(*a, "rbln:0 second call did not hit")
+        size_after_0 = _C._warmcache_size()
+        b = self._operands("rbln:1")
+        self._assert_miss(*b, "rbln:1 first call took the hit path")
+        self._assert_hit(*b, "rbln:1 second call did not hit")
+        size_after_1 = _C._warmcache_size()
+        self.assertGreater(size_after_1, size_after_0)
+
+        torch.rbln.empty_cache(1)
+
+        self.assertEqual(_C._warmcache_size(), size_after_0, "empty_cache(1) did not drop exactly rbln:1's entries")
+        self._assert_hit(*a, "rbln:0 stopped hitting after empty_cache(1)")
+        self._assert_miss(*b, "rbln:1 hit after its entries were dropped")
+        self._assert_hit(*b, "rbln:1 was not re-installed")
+
+
+@pytest.mark.test_set_ci
+@pytest.mark.single_worker
+class TestWarmCacheRetire(_HitPathCase):
+    """A key whose hit failed at run time stays on the Python wrapper path.
+
+    The runtime that failed is the one a re-install would use again, so the
+    C++ side replaces the entry with a tombstone: values stay correct, the hit
+    counter stops for that key, the next miss does not install, and
+    ``empty_cache`` gives the key a fresh start.
+    """
+
+    SHAPE = 448
+
+    def test_failed_hit_retires_the_key_until_cleared(self) -> None:
+        x, y, expected = self._operands()
+        self._assert_miss(x, y, expected, "first call took the hit path")
+        self._assert_hit(x, y, expected, "second call did not hit")
         size = _C._warmcache_size()
+
+        _C._warmcache_inject_hit_failure()
+        self._assert_miss(x, y, expected, "a failed hit attempt was counted as a hit")
+        self.assertEqual(_C._warmcache_size(), size, "the retired key was not kept as a tombstone")
+        for i in range(3):
+            self._assert_miss(x, y, expected, f"call {i} after the failure was re-installed and hit")
+
         torch.rbln.empty_cache()
-        self.assertEqual(_C._warmcache_size(), 0)
-        self._assert_hits_after_second_call(alpha=1)
-        self.assertEqual(_C._warmcache_size(), size)
+        self._assert_miss(x, y, expected, "call after empty_cache() took the hit path")
+        self._assert_hit(x, y, expected, "the key did not get a fresh start after empty_cache()")
 
 
 if __name__ == "__main__":

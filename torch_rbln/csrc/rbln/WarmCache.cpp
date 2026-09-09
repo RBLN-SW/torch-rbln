@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -89,7 +90,7 @@ WarmCache& WarmCache::instance() {
   // reclaims the process memory at exit.
   //
   // Default ON: hot path drives rebel runtime directly from C++ on warm hits;
-  // miss-path entries that fail v-memory lookup are erased by try_warmcache_hit
+  // miss-path entries that fail v-memory lookup are retired by try_warmcache_hit
   // so cold-path correctness is preserved.
   static auto* c = [] {
     auto* p = new WarmCache();
@@ -132,12 +133,13 @@ void WarmCache::install(CacheKey key, const CacheEntry& entry) {
   map_.try_emplace(std::move(key), std::move(entry_ptr));
 }
 
-void WarmCache::erase(const CacheKey& key) {
-  // The map's strong reference drops here; any in-flight find() shared_ptr
-  // keeps the entry alive until that borrower releases. py::object
-  // destruction goes through the GIL-acquiring custom deleter.
+void WarmCache::disable(const CacheKey& key) {
+  // The map's strong reference to the old entry drops here; any in-flight
+  // find() shared_ptr keeps it alive until that borrower releases.
+  // py::object destruction goes through the GIL-acquiring custom deleter.
+  std::shared_ptr<CacheEntry> tombstone(new CacheEntry(), &cache_entry_deleter);
   std::unique_lock<std::shared_mutex> wr(mu_);
-  map_.erase(key);
+  map_.insert_or_assign(key, std::move(tombstone));
 }
 
 size_t WarmCache::size() {
@@ -145,14 +147,23 @@ size_t WarmCache::size() {
   return map_.size();
 }
 
-void WarmCache::clear() {
+void WarmCache::clear(std::optional<c10::DeviceIndex> device) {
   std::unique_lock<std::shared_mutex> wr(mu_);
-  map_.clear();
+  if (!device.has_value()) {
+    map_.clear();
+    return;
+  }
+  for (auto it = map_.begin(); it != map_.end();) {
+    const auto& inputs = it->first.inputs;
+    const bool on_device =
+        std::any_of(inputs.begin(), inputs.end(), [&](const TensorProfile& tp) { return tp.device_index == *device; });
+    it = on_device ? map_.erase(it) : std::next(it);
+  }
 }
 
 namespace {
 thread_local bool t_building_entry = false;
-thread_local bool t_force_recompile = false;
+thread_local bool t_inject_hit_failure = false;
 } // namespace
 
 bool WarmCache::is_building_entry() {
@@ -165,14 +176,14 @@ void WarmCache::exit_building() {
   t_building_entry = false;
 }
 
-bool WarmCache::consume_force_recompile() {
-  const bool v = t_force_recompile;
-  t_force_recompile = false;
-  return v;
+void WarmCache::inject_hit_failure() {
+  t_inject_hit_failure = true;
 }
 
-void WarmCache::request_force_recompile() {
-  t_force_recompile = true;
+bool WarmCache::consume_injected_hit_failure() {
+  const bool v = t_inject_hit_failure;
+  t_inject_hit_failure = false;
+  return v;
 }
 
 } // namespace torch_rbln::warmcache

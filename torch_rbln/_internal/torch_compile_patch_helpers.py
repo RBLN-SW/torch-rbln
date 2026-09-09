@@ -495,5 +495,12 @@ class CompiledFunctionWrapper:
 
 
 def is_rbln_backend(backend):
-    """Check if backend is RBLN backend."""
-    return backend == "rbln" or (callable(backend) and getattr(backend, "__name__", None) == "rbln_backend")
+    """Check if backend is RBLN backend: the name, rebel's function, or the shim's wrapper around it."""
+    if backend == "rbln":
+        return True
+    if not callable(backend):
+        return False
+    # Lazy: warm_cache needs torch_rbln._C, which is not loaded when this module is imported.
+    from torch_rbln._internal.warm_cache import eager_backend
+
+    return backend is eager_backend or getattr(backend, "__name__", None) == "rbln_backend"

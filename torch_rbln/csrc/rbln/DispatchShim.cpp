@@ -863,7 +863,11 @@ PendingInstall take_pending() {
 //                        (b) a freshly allocated tensor per the cached profile
 // Extended support (TensorLists, multi-output) can be added with parallel
 // codepaths — they're not on any shim op today.
-bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const CacheKey& key) {
+//
+// `retired` is set when `key` is, or has just been, retired to the Python
+// wrapper path (see WarmCache::disable); the caller then must not offer the
+// key for install.
+bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const CacheKey& key, bool& retired) {
   auto& wc = WarmCache::instance();
   if (!wc.is_enabled() || WarmCache::is_building_entry())
     return false;
@@ -872,13 +876,18 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
 
   const uint64_t _seg_t0 = now_ns();
   // Hold a shared_ptr to the entry for the rest of the hit path. If a peer
-  // thread ``erase``s the same key while we are mid-flight, the entry stays
+  // thread ``disable``s or ``clear``s the same key while we are mid-flight, the entry stays
   // alive until our shared_ptr goes out of scope. Without this, a raw
   // pointer ``find`` could hand back a dangling pointer.
   CacheEntryPtr entry = wc.find(key);
   const uint64_t _seg_t_lookup = now_ns();
   if (!entry)
     return false;
+  if (entry->runtime == nullptr) {
+    // Tombstone: this key stays on the Python wrapper path.
+    retired = true;
+    return false;
+  }
 
   // Input binding, in the order tensor inputs appear on the stack. Device-only:
   // a CPU output bails out below, so the host arrays stay empty.
@@ -897,7 +906,7 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
   // then materialize each to contig (matching what mul_rbln/add_rbln do in
   // their Python wrappers). Without this, the cached runtime — which was
   // compiled for the broadcast shape — would receive raw-shape data ptrs and
-  // fail (size mismatch / OOB read), causing erase + permanent miss.
+  // fail (size mismatch / OOB read), retiring the key to the Python path.
   // `held_tensors` keeps the materialized contig tensors alive until Run()
   // completes (their data ptrs are what we bind as inputs).
   std::vector<at::Tensor> held_tensors;
@@ -1057,14 +1066,18 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
   uint64_t _seg_t_prep_out = _seg_t_io_build;
   uint64_t _seg_t_run = _seg_t_io_build;
 
-  bool runtime_failed = rbln_rt_prepare_inputs(
-                            entry->runtime,
-                            in_idx_buf.data(),
-                            in_vaddr_buf.data(),
-                            in_idx_buf.size(),
-                            /*host_idx=*/nullptr,
-                            /*host_ptr=*/nullptr,
-                            /*host_count=*/0) != RBLNRetCode_SUCCESS;
+  // The test hook fails the attempt before the runtime is touched.
+  bool runtime_failed = WarmCache::consume_injected_hit_failure();
+  if (!runtime_failed) {
+    runtime_failed = rbln_rt_prepare_inputs(
+                         entry->runtime,
+                         in_idx_buf.data(),
+                         in_vaddr_buf.data(),
+                         in_idx_buf.size(),
+                         /*host_idx=*/nullptr,
+                         /*host_ptr=*/nullptr,
+                         /*host_count=*/0) != RBLNRetCode_SUCCESS;
+  }
   const uint64_t _seg_t_prep_in = now_ns();
   if (!runtime_failed) {
     runtime_failed = rbln_rt_prepare_outputs(
@@ -1082,24 +1095,16 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
     _seg_t_run = now_ns();
   }
   if (runtime_failed) {
-    // The runtime that we cached cannot serve this profile after all (e.g.
-    // input v-memory was created by an allocation path the runtime can't
-    // resolve). Drop the entry so subsequent dispatches with this key go
-    // through the pybind miss path and rebuild via DynamoRuntime, which
-    // handles the edge case correctly.
-    //
-    // Just erasing the C++ entry is not enough: the Python
-    // ``compile_rbln_cached`` still holds the compiled callable, and the
-    // rebel backend only pushes a DynamoRuntime to ``_runtime_holder`` on
-    // its first compile. A bare erase would leave the warm cache empty
-    // AND keep the Python compile cache hot, so install_pending would
-    // see an empty holder forever. Set the thread-local force-recompile
-    // flag — the same thread's next pass through
-    // ``compile_and_run_view_aware`` consumes it and forces
-    // ``compile_rbln_cached`` to skip its own cache for this key, letting
-    // the rebel backend re-instantiate and re-populate the holder.
-    WarmCache::instance().erase(key);
-    WarmCache::request_force_recompile();
+    // The cached runtime cannot serve this key from the C ABI path after
+    // all (e.g. input v-memory created by an allocation path it cannot
+    // resolve). The Python wrapper's DynamoRuntime handles those cases, so
+    // retire the key: replace the entry with a tombstone and tell the
+    // dispatcher not to set up a pending install. The Python wrapper would
+    // otherwise re-install the same runtime on this very call, and every
+    // later call would fail here again before falling back. ``clear``
+    // (torch.rbln.empty_cache) lifts the tombstone.
+    WarmCache::instance().disable(key);
+    retired = true;
     return false;
   }
 
@@ -1201,9 +1206,10 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
   // C++ directly.
   CacheKey key;
   const bool key_ok = build_cache_key(stack, cache, op_name_intern, key);
+  bool key_retired = false;
   if (key_ok) {
     const uint64_t _diag_warm_t0 = now_ns();
-    const bool hit = try_warmcache_hit(stack, cache, key);
+    const bool hit = try_warmcache_hit(stack, cache, key, key_retired);
     if (hit) {
       g_diag_n_warm_hit.fetch_add(1, std::memory_order_relaxed);
       g_diag_ns_warm_hit.fetch_add(now_ns() - _diag_warm_t0, std::memory_order_relaxed);
@@ -1212,9 +1218,10 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
   }
 
   // MISS path: set up thread-local pending install so the Python wrapper can
-  // call `_warmcache_install_pending(runtime, out_profiles)` once it finishes
-  // compile + first run. The pending context is discarded unconditionally at
-  // the end of this function (even on failure / exception) to avoid leaking
+  // call `_warmcache_install_pending(runtime, out_profiles)` once it has run
+  // the op. No pending context for a retired key: it stays on the Python
+  // wrapper path. The pending context is discarded unconditionally at the
+  // end of this function (even on failure / exception) to avoid leaking
   // into subsequent unrelated ops on the same thread.
   g_diag_n_miss.fetch_add(1, std::memory_order_relaxed);
   if (entry->recompile_ctr != nullptr) {
@@ -1230,7 +1237,7 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
       g_diag_ns_miss.fetch_add(now_ns() - t0, std::memory_order_relaxed);
     }
   } _diag_miss_guard{_diag_miss_t0};
-  if (key_ok) {
+  if (key_ok && !key_retired) {
     t_pending.valid = true;
     t_pending.op_name_intern = op_name_intern;
     t_pending.key = std::move(key);
