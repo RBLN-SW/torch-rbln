@@ -12,8 +12,9 @@ hard-coded expected strings.
 
 Environment requirements
 ------------------------
-* ``vllm-rbln`` installed on ``origin/device_tensor_rebased`` (or descendant).
-* ``vllm_rbln`` / ``vllm`` importable.
+* ``vllm-rbln`` installed on ``origin/ci/torch-rbln-model-tests`` (what
+  ``tools/test/install-test-deps.sh`` checks out, into ``.venv-inference``;
+  ``test/run_tests.py`` runs this file with that interpreter).
 
 Matrix
 ------
@@ -98,6 +99,23 @@ PROMPT = "The capital of France is"
 MAX_TOKENS = 5
 
 
+def _model_path(model_id: str) -> str:
+    """The cached snapshot directory when the hub is offline, else ``model_id``.
+
+    huggingface_hub validates a cached snapshot against the repo's file tree when it
+    can read its tree cache; shared caches usually hold only the files inference
+    needs, so resolving through the hub fails there. The snapshot directory loads
+    without any hub call.
+    """
+    if not os.environ.get("HF_HUB_OFFLINE"):
+        return model_id
+    from huggingface_hub import try_to_load_from_cache
+
+    config = try_to_load_from_cache(model_id, "config.json")
+    assert isinstance(config, str), f"{model_id} is not in the local HF cache"
+    return os.path.dirname(config)
+
+
 # Greedy-decode (temperature=0) expected outputs. Key: (model, tp, mode, dtype).
 # ``None`` falls back to non-empty + shape checks. Captured on RBLN-CA25 with
 # rebel-compiler dev329 + vllm-rbln device_tensor_rebased; drift = regression.
@@ -148,7 +166,7 @@ def _vllm_generate_worker(
     # model); at that size eager strided KV writes hit deep vmem addresses the v2v
     # engine rejects, then OOM. 0.1 (~10 GiB) is plenty here; ATOM (16 GB) keeps 0.5.
     llm_kwargs: dict = dict(
-        model=cfg.model_id,
+        model=_model_path(cfg.model_id),
         # vLLM expects the dtype as a string name (e.g., "float16", "bfloat16"), not a torch.dtype.
         dtype=str(dtype).removeprefix("torch."),
         max_model_len=cfg.max_model_len,
@@ -365,7 +383,11 @@ LLM(
     enforce_eager=False,
     gpu_memory_utilization=0.1,
 )
-arts = glob.glob(os.path.join(os.environ["VLLM_CACHE_ROOT"], "rbln", "**", "*.rbln"), recursive=True)
+root = os.path.join(os.environ["VLLM_CACHE_ROOT"], "rbln")
+# vllm-rbln writes either per-graph .rbln files or a single mega-cache bundle.
+arts = glob.glob(os.path.join(root, "**", "*.rbln"), recursive=True) + glob.glob(
+    os.path.join(root, "**", "mega_cache.bin"), recursive=True
+)
 assert arts, "compile-only produced no .rbln artifacts"
 print(f"OK artifacts={len(arts)}")
 """
@@ -393,7 +415,7 @@ def test_vllm_compile_only_no_npu_via_dummy(tmp_path):
         VLLM_RBLN_USE_VLLM_MODEL="1",
         VLLM_RBLN_COMPILE_ONLY="1",
         VLLM_CACHE_ROOT=str(tmp_path / "vllm_cache"),
-        RBLN_TEST_MODEL_ID=MODEL_CONFIGS["qwen3_0_6b"].model_id,
+        RBLN_TEST_MODEL_ID=_model_path(MODEL_CONFIGS["qwen3_0_6b"].model_id),
     )
     proc = subprocess.run(
         [sys.executable, "-c", textwrap.dedent(_COMPILE_ONLY_DUMMY_WORKER)],
@@ -407,11 +429,13 @@ def test_vllm_compile_only_no_npu_via_dummy(tmp_path):
 
 
 # Phase 2 of the dummy-compile -> real-run round trip: load the artifacts phase 1
-# built on a dummy device onto a real NPU and generate. Asserts nothing was
-# recompiled (the .rbln set is unchanged) so we know the dummy-built artifact
+# built on a dummy device onto a real NPU and generate. Asserts the artifacts are
+# byte-for-byte the ones phase 1 wrote, so we know the dummy-built artifact
 # actually ran, and that the output matches the CPU-reference expectation.
+# Content, not names: vllm-rbln recompiles into a mega-cache bundle at the path
+# it already used, which a set of names cannot tell apart from a cache hit.
 _REAL_RUN_FROM_CACHE_WORKER = """
-import glob, os
+import glob, hashlib, os
 import torch_rbln  # noqa: F401
 import torch
 
@@ -420,8 +444,17 @@ assert torch.rbln.physical_device_count() > 0, "phase 2 needs a real NPU"
 
 from vllm import LLM, SamplingParams
 
-pat = os.path.join(os.environ["VLLM_CACHE_ROOT"], "rbln", "**", "*.rbln")
-before = set(glob.glob(pat, recursive=True))
+root = os.path.join(os.environ["VLLM_CACHE_ROOT"], "rbln")
+# vllm-rbln writes either per-graph .rbln files or a single mega-cache bundle.
+pats = [os.path.join(root, "**", "*.rbln"), os.path.join(root, "**", "mega_cache.bin")]
+def _artifacts():
+    found = {}
+    for pat in pats:
+        for f in glob.glob(pat, recursive=True):
+            st = os.stat(f)
+            found[f] = (st.st_size, st.st_mtime_ns, hashlib.sha256(open(f, "rb").read()).hexdigest())
+    return found
+before = _artifacts()
 assert before, "phase 1 wrote no artifacts to load"
 
 llm = LLM(
@@ -442,8 +475,9 @@ try:
 finally:
     llm.llm_engine.engine_core.shutdown()
 
-new = set(glob.glob(pat, recursive=True)) - before
-assert not new, f"recompiled on the real device instead of loading the dummy-built artifacts: {new}"
+after = _artifacts()
+changed = {f for f in before.keys() | after.keys() if before.get(f) != after.get(f)}
+assert not changed, f"recompiled on the real device instead of loading the dummy-built artifacts: {sorted(changed)}"
 assert text == os.environ["RBLN_TEST_EXPECTED"], f"unexpected generation: {text!r}"
 print(f"OK text={text!r}")
 """
@@ -470,7 +504,7 @@ def test_vllm_dummy_compiled_runs_on_real_npu(tmp_path):
         pytest.skip("no NPU available to run the dummy-compiled artifacts")
 
     cache = str(tmp_path / "vllm_cache")
-    model_id = MODEL_CONFIGS["qwen3_0_6b"].model_id
+    model_id = _model_path(MODEL_CONFIGS["qwen3_0_6b"].model_id)
     expected = EXPECTED_TEXT[("qwen3_0_6b", 1, "graph", torch.float16)]
 
     # Phase 1: dummy compile-only -> shared cache (no real device touched). Compile
