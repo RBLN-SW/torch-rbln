@@ -212,10 +212,8 @@ UV=1 ./tools/test/install-test-deps.sh
 ```
 
 The inference venv is installed `--no-deps` from `tools/test/requirements-inference.txt`,
-a pinned export of vllm-rbln's `uv.lock` at the commit recorded in that file. torch and
-torch-rbln are absent from it on purpose: the venv shares the test venv's copies, and the
-installer verifies that nothing replaced them. To move the suite to another vllm-rbln
-commit, regenerate the file and review the diff:
+an export of vllm-rbln's `uv.lock` (minus torch and torch-rbln, which the venv shares with
+the test venv). To move to another vllm-rbln commit:
 
 ```bash
 VLLM_RBLN_REF=<ref> ./tools/test/export-inference-requirements.sh   # needs uv

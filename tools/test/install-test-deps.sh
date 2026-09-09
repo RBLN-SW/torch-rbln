@@ -22,12 +22,9 @@
 #                      test_vllm_llm.py with this venv's interpreter. The venv
 #                      sees the test venv's site-packages (torch, torch-rbln,
 #                      rebel-compiler, pytest) through a .pth file and adds
-#                      only the stack on top, installed --no-deps from the
-#                      pinned tools/test/requirements-inference.txt (exported
-#                      from vllm-rbln's uv.lock; see
-#                      export-inference-requirements.sh). The packages under
-#                      test must stay the test venv's copies, so the install
-#                      is verified against that before the script exits.
+#                      only the stack on top, --no-deps from the pinned
+#                      requirements-inference.txt. The install is verified
+#                      to have left the shared packages alone.
 #
 # Usage:
 #   ./tools/test/install-test-deps.sh [--dry-run]
@@ -36,8 +33,7 @@
 #   UV=1                 Use ``uv pip install`` instead of ``python -m pip``.
 #   VLLM_RBLN_REPO       Override the source repo (default rbln-sw/vllm-rbln).
 #   VLLM_RBLN_REF        Override the ref (default: the commit recorded in
-#                        tools/test/requirements-inference.txt, which the
-#                        pins were exported from).
+#                        requirements-inference.txt).
 #   VLLM_RBLN_DIR        Override the local checkout path
 #                        (default ``$PROJECT_ROOT/vllm-rbln``).
 #   INFERENCE_VENV       Override the inference-stack venv path
@@ -136,25 +132,19 @@ install_model_test_deps() {
 # The stack goes into its own venv because it pins transformers 5 (see step 3).
 # The venv layers on this interpreter's site-packages through a .pth file, so
 # torch, torch-rbln, rebel-compiler and pytest are shared and only vllm-rbln
-# plus its runtime dependencies (optimum-rbln among them) are added.
-#
-# Those dependencies come from requirements-inference.txt, a pinned export of
-# vllm-rbln's uv.lock with torch and torch-rbln removed, and are installed
-# --no-deps. No resolver runs, so no requirement at any depth can reach the
-# shared packages: vllm's own pin on torch names the release wheel, and a
-# resolving install replaces a locally built or debug torch with it. The
-# editable vllm-rbln install is --no-deps for the same reason (it bounds
-# torch-rbln to a release line a nightly does not satisfy).
+# plus its dependencies are added, --no-deps from requirements-inference.txt
+# (vllm-rbln's uv.lock minus torch and torch-rbln). With no resolver running,
+# no requirement at any depth can replace the shared packages: vllm pins the
+# release torch wheel, which a debug or locally built torch does not match.
 
 REQUIREMENTS_INFERENCE="${SCRIPT_DIR}/requirements-inference.txt"
 readonly REQUIREMENTS_INFERENCE
 
-# The commit the pins were exported from, recorded by export-inference-requirements.sh.
 recorded_vllm_rbln_ref() {
   local ref
   ref="$(sed -nE 's/^# vllm-rbln-ref: ([0-9a-f]+)$/\1/p' "${REQUIREMENTS_INFERENCE}")"
   if [[ -z "${ref}" ]]; then
-    echo "${REQUIREMENTS_INFERENCE} records no vllm-rbln-ref; regenerate it with export-inference-requirements.sh" >&2
+    echo "${REQUIREMENTS_INFERENCE} records no vllm-rbln-ref; run export-inference-requirements.sh" >&2
     return 1
   fi
   echo "${ref}"
@@ -170,10 +160,8 @@ install_vllm_rbln() {
 
   log_step "Inference stack: vllm-rbln (clone + editable install at ${ref}) into ${venv}"
 
-  # The export drops these; a hand edit that brings one back would make pip
-  # install a second copy next to the package under test.
   if grep -qE '^(torch|torch-rbln)==' "${REQUIREMENTS_INFERENCE}"; then
-    echo "${REQUIREMENTS_INFERENCE} lists torch or torch-rbln; regenerate it with export-inference-requirements.sh" >&2
+    echo "${REQUIREMENTS_INFERENCE} lists torch or torch-rbln; run export-inference-requirements.sh" >&2
     return 1
   fi
 
@@ -205,7 +193,6 @@ pathlib.Path(child, "torch-rbln-test-venv.pth").write_text(
 PY
   fi
 
-  # A worktree keeps .git as a file, so ask git rather than test for a directory.
   if ! git -C "${dir}" rev-parse --git-dir >/dev/null 2>&1; then
     echo "Cloning ${repo} into ${dir}..."
     run git clone "${repo}" "${dir}"
@@ -217,9 +204,8 @@ PY
     (cd "${dir}" && git fetch origin --prune && git checkout --detach "${ref}")
   fi
 
-  # The inference venv's own pip, never uv, whatever UV is set to: the index
-  # options are read from the requirements file, and pip's view of the .pth
-  # layering is what verify_shared_packages checks afterwards.
+  # The inference venv's own pip, whatever UV is set to; the index options are
+  # in the requirements file.
   run "${py}" -m pip install --no-deps --requirement "${REQUIREMENTS_INFERENCE}"
   run "${py}" -m pip install -e "${dir}" --no-deps
 
@@ -261,7 +247,7 @@ for name in ("torch", "torch_rbln", "rebel", "transformers"):
     else:
         path = getattr(mod, "__file__", "") or ""
         out[name] = [getattr(mod, "__version__", None), os.path.realpath(path) if path else ""]
-# Distributions installed in this interpreter's own site-packages (not through a .pth).
+# Distributions in this interpreter's own site-packages, not via a .pth.
 purelib = os.path.realpath(sysconfig.get_paths()["purelib"])
 own = sorted(
     dist.metadata["Name"]
@@ -295,8 +281,8 @@ for name in ("torch", "torch_rbln", "rebel"):
     if here[name][0] is not None and version != here[name][0]:
         problems.append("{}: {} in the inference venv, {} here".format(name, version, here[name][0]))
 
-# An import can resolve to the shared copy while a second distribution sits in
-# the venv (a broken or half-installed one, or a later import order): refuse it.
+# A second distribution in the venv is wrong even while the import still resolves
+# to the shared copy.
 own = {n.lower().replace("_", "-") for n in child["_own_distributions"]}
 for name in ("torch", "torch-rbln"):
     if name in own:
