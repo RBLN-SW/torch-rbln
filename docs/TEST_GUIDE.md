@@ -211,6 +211,16 @@ python -m pytest test/rbln/test_graph_eager_mode.py -s -v -x
 UV=1 ./tools/test/install-test-deps.sh
 ```
 
+The inference venv is installed `--no-deps` from `tools/test/requirements-inference.txt`,
+a pinned export of vllm-rbln's `uv.lock` at the commit recorded in that file. torch and
+torch-rbln are absent from it on purpose: the venv shares the test venv's copies, and the
+installer verifies that nothing replaced them. To move the suite to another vllm-rbln
+commit, regenerate the file and review the diff:
+
+```bash
+VLLM_RBLN_REF=<ref> ./tools/test/export-inference-requirements.sh   # needs uv
+```
+
 ### C++ Tests
 
 C++ tests use [Google Test](https://google.github.io/googletest/). They are compiled during the editable install and run via CTest:
