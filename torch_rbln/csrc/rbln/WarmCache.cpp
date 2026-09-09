@@ -9,6 +9,7 @@
 #include <cstring>
 #include <fstream>
 #include <mutex>
+#include <vector>
 
 namespace torch_rbln::warmcache {
 
@@ -107,6 +108,13 @@ namespace {
 // can happen on any thread (e.g. when a hit-path's local shared_ptr goes
 // out of scope after the calling Python thread released the GIL), so we
 // route every destruction through this deleter to guarantee GIL hold.
+//
+// Because it takes the GIL, the last reference to an entry must never drop
+// while ``mu_`` is held: a thread that already holds the GIL may be waiting
+// for ``mu_`` (``clear`` and ``size`` are called from Python), and the two
+// would wait on each other. ``disable`` and ``clear`` therefore move the
+// references they drop out of the map under the lock and release them after
+// unlocking.
 void cache_entry_deleter(CacheEntry* p) {
   if (p == nullptr) {
     return;
@@ -134,12 +142,22 @@ void WarmCache::install(CacheKey key, const CacheEntry& entry) {
 }
 
 void WarmCache::disable(const CacheKey& key) {
-  // The map's strong reference to the old entry drops here; any in-flight
-  // find() shared_ptr keeps it alive until that borrower releases.
-  // py::object destruction goes through the GIL-acquiring custom deleter.
   std::shared_ptr<CacheEntry> tombstone(new CacheEntry(), &cache_entry_deleter);
-  std::unique_lock<std::shared_mutex> wr(mu_);
-  map_.insert_or_assign(key, std::move(tombstone));
+  std::shared_ptr<CacheEntry> replaced;
+  {
+    std::unique_lock<std::shared_mutex> wr(mu_);
+    auto it = map_.find(key);
+    if (it == map_.end()) {
+      map_.emplace(key, std::move(tombstone));
+    } else {
+      replaced = std::move(it->second);
+      it->second = std::move(tombstone);
+    }
+  }
+  // ``replaced`` dies here, after the lock is released (see the deleter). The
+  // hit path that called us still holds the failed entry, so what dies here
+  // is at most a tombstone left by a concurrent failure on the same key; an
+  // in-flight find() borrower keeps its entry alive until it releases.
 }
 
 size_t WarmCache::size() {
@@ -148,16 +166,23 @@ size_t WarmCache::size() {
 }
 
 void WarmCache::clear(std::optional<c10::DeviceIndex> device) {
-  std::unique_lock<std::shared_mutex> wr(mu_);
-  if (!device.has_value()) {
-    map_.clear();
-    return;
-  }
-  for (auto it = map_.begin(); it != map_.end();) {
-    const auto& inputs = it->first.inputs;
-    const bool on_device =
-        std::any_of(inputs.begin(), inputs.end(), [&](const TensorProfile& tp) { return tp.device_index == *device; });
-    it = on_device ? map_.erase(it) : std::next(it);
+  // The dropped entries die after the lock is released (see the deleter).
+  std::vector<std::shared_ptr<CacheEntry>> dropped;
+  {
+    std::unique_lock<std::shared_mutex> wr(mu_);
+    dropped.reserve(map_.size());
+    for (auto it = map_.begin(); it != map_.end();) {
+      const auto& inputs = it->first.inputs;
+      const bool drop = !device.has_value() || std::any_of(inputs.begin(), inputs.end(), [&](const TensorProfile& tp) {
+        return tp.device_index == *device;
+      });
+      if (drop) {
+        dropped.push_back(std::move(it->second));
+        it = map_.erase(it);
+      } else {
+        ++it;
+      }
+    }
   }
 }
 

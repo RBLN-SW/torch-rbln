@@ -187,8 +187,8 @@ class WarmCache {
   // not offer it for re-install. A fresh compile would yield the same graph,
   // so re-installing could only repeat the failure. The tombstone lives
   // until ``clear``. In-flight borrowers of the old entry keep it alive
-  // through their shared_ptr; its py::object destructor runs under the GIL
-  // via the custom deleter.
+  // through their shared_ptr; whatever this call drops is released after
+  // the cache lock, because its destructor takes the GIL.
   void disable(const CacheKey& key);
 
   // Miss path. Inserts entry under `key` if not already present. Called from
