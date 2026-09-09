@@ -179,6 +179,11 @@ install_vllm_rbln() {
   if [[ ! -x "${py}" ]]; then
     run python -m venv "${venv}"
   fi
+  # A venv this script did not create may have no pip (``uv venv`` makes one
+  # without), and the install below runs the inference venv's own pip.
+  if [[ "${DRY_RUN}" -eq 0 ]] && ! "${py}" -m pip --version >/dev/null 2>&1; then
+    run "${py}" -m ensurepip
+  fi
   # site.addsitedir rather than a bare path: it also processes the .pth files
   # *inside* the test venv, which is how an editable install (torch-rbln built
   # from this checkout, an external rebel-compiler) puts its source tree on the
@@ -304,7 +309,9 @@ for name in ("torch", "torch_rbln", "rebel"):
         problems.append("{}: {} in the inference venv, {} here".format(name, version, here[name][0]))
 
 # The whole point of the split: the inference venv must bring its own transformers.
-if child["transformers"][1] and child["transformers"][1].startswith(parent):
+if child["transformers"][0] is None:
+    problems.append("transformers: not importable in the inference venv ({})".format(child["transformers"][1]))
+elif child["transformers"][1].startswith(parent):
     problems.append("transformers: inference venv falls back to the test venv's copy ({})".format(child["transformers"][1]))
 
 if problems:
