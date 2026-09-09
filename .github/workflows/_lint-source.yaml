@@ -86,6 +86,13 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
 
+      # Concurrent matrix jobs on one runner share its home directory, and uv
+      # locks the source build of this project per cache entry: with the default
+      # timeout every job but the one holding the lock fails. A cache under the
+      # job's own temp directory keeps the jobs independent.
+      - name: Keep the uv cache private to this job
+        run: echo "UV_CACHE_DIR=${RUNNER_TEMP}/uv-cache" >> "${GITHUB_ENV}"
+
       - name: Install dependencies
         env:
           UV_INDEX: rbln=${{ secrets.INTERNAL_INDEX_URL }}
