@@ -46,6 +46,8 @@ if __name__ == "__main__":
 
 The `TESTOWNERS` and `TEST_HAS_MAIN` linters reject a Python test file missing either end. C++ tests are GTest under `test/cpp/` and none of this applies to them.
 
+Read the `collected N items` line every time you run a file. `run_tests.py` counts a run that collected nothing as neither a pass nor a failure, so an exit code alone can report a test that never existed as done.
+
 **Instantiate only what has an axis.** `instantiate_device_type_tests` expands `@dtypes`, `@parametrize`, or a `device` argument, and is required for a test that uses one. Do not wrap a test that never touches a device: the call deletes the template class and rebuilds it per device type, and on a host with no NPU nothing replaces it — the file then collects zero tests, with no failure and no skip. An import guard, a subprocess check, or a contract assertion is a plain `TestCase`; follow a neighbour like `test_dummy_device.py` or `test_import_rbln_devices_seal.py`. `docs/TEST_GUIDE.md` §5 covers the mechanism.
 
 ## 4. Markers decide whether the test runs at all
@@ -61,7 +63,13 @@ The `TESTOWNERS` and `TEST_HAS_MAIN` linters reject a Python test file missing e
 
 Default to `test_set_ci`. Omit it only for a test too slow for per-commit CI, and say so in the PR.
 
-Mark `single_worker` when the test mutates state shared with other tests on the same worker — device selection, an environment variable, a global cache, or a fixed port. Several dozen tests already carry it; read one near your target before deciding you do not need it.
+`single_worker` serializes; it does not isolate. The serial pass is one xdist worker running every marked test in one process, so state still leaks from one to the next. Pick the isolation the state actually needs:
+
+- **A resource shared across processes** — a device, a fixed port, a file the runtime writes — `single_worker`.
+- **State that restores** — an env var the code reads live, the selected device — a fixture or `monkeypatch`, and no marker.
+- **State that does not restore** — an import-time effect, a `static` or `@lru_cache` latch, a device mapping that has been committed — `run_in_isolated_process` (`test/utils.py`), or a `subprocess` the way `test_import_rbln_devices_seal.py` does it.
+
+Several dozen tests carry `single_worker`; read one near your target and check which of the three it needed before copying the marker.
 
 ## 5. Process state leaks between tests
 
@@ -76,7 +84,7 @@ This is where tests in this repository most often lie.
 
 Assertion rewriting is off (`--assert=plain` in `pyproject.toml`), so a bare `assert a == b` prints no values when it fails. Use `self.assertEqual`, `torch.testing.assert_close`, or pass a message.
 
-**To assert an op ran on the device, assert it — do not infer it from the values.** An input that is not fp16 or bf16, or whose last dimension is not a multiple of 64, takes the host path, and the result then matches the CPU reference exactly; the test passes without ever reaching the kernel. `test/rbln/test_dispatch_shim_precheck.py` is the worked example from both directions: `_C._warmcache_size()` before and after, because a CPU fallback never primes the warm cache. `_C._dispatch_fallback_by_op()` gives per-op fallback counts for the same purpose.
+**To assert an op ran on the device, assert it — do not infer it from the values.** An input that is not fp16 or bf16 takes the host path on every route; in eager, a single-tensor op whose last dimension is not a multiple of 64 does too (`compile_and_run_view_aware` in `ops_utils.py`, unless the dtype is strict). The result then matches the CPU reference exactly; the test passes without ever reaching the kernel. `test/rbln/test_dispatch_shim_precheck.py` is the worked example from both directions: `_C._warmcache_size()` before and after, because a CPU fallback never primes the warm cache. `_C._dispatch_fallback_by_op()` gives per-op fallback counts for the same purpose.
 
 `xfail_strict = true`: an `xfail` that starts passing fails the suite. `xfail_rebel` / `xfail_atom` (`test/utils.py`) are the strict, architecture-conditional markers; `_REBEL_XFAILS` in `test/conftest.py` applies `xfail_rebel` by test name and detects its own stale keys. A failure that is not architecture-specific does not get an xfail.
 
@@ -92,16 +100,16 @@ If a test is flaky, find out what varies. Do not re-run it until it is green.
 
 A test that passes without the change covers nothing.
 
+Run the new test against the code as it was before your change. The reliable way is a worktree at the base commit with the test files copied in:
+
 ```bash
-git stash list                              # note what is already there
-git stash push -- <the production files you changed>
-uv run --no-sync pytest <your new test> -x   # must fail
-git stash pop                               # verify it restored what you stashed
+git worktree add ../wt-base $(git merge-base HEAD origin/main)
+git -C ../wt-base checkout $(git rev-parse HEAD) -- <your new test files>
+# a venv there the way `docs/LINTING.md` sets one up (`uv sync`, then the editable install), then:
+(cd ../wt-base && uv run --no-sync pytest <your new test> -x)   # must fail
 ```
 
-Stash only the paths your change touched, and check `git stash list` before and after — the working tree here often carries unrelated edits, and losing one of those costs more than the check is worth. If the tree is dirty enough that this is risky, run the test against the parent commit in a separate worktree instead.
-
-For a C++ change the stash is not enough — rebuild after the stash, and rebuild again after the pop, or you are testing the same binary twice.
+A stash is a shortcut with conditions: the change is Python-only, nothing else runs from this tree, and you stash only the production paths you touched — `git stash push -- <paths>`, check `git stash list` before and after, and pop. The tree here often carries unrelated edits, and losing one costs more than the check is worth. For a native change the stash is never enough: the built `.so` is the same until you rebuild, so a stash without a rebuild on both sides tests one binary twice.
 
 Watch it fail and read the failure; a test can fail for the wrong reason. If you cannot run it, say so explicitly instead of assuming it is red.
 
@@ -116,4 +124,4 @@ Watch it fail and read the failure; a test can fail for the wrong reason. If you
 - Duplicating the implementation's logic inside the test
 - Mocking a device operation that a real tensor would perform
 - A placeholder test that is skipped
-- A test diff larger than the code change it covers
+- A test that repeats an axis another test already covers, or restates the implementation — length alone is not the fault
