@@ -28,6 +28,38 @@ from torch.testing._internal.common_utils import parametrize, run_tests, TestCas
 from test.utils_v2v import arange as _arange, DEVICE, ENGINE_DTYPES, eq as _eq, to_dev as _to_dev
 
 
+def _device_latest(shape, dtype=torch.bfloat16):
+    """A tensor whose data lives on the device: a compiled graph's output.
+    ``torch.empty(...).copy_(cpu)`` would leave it host-latest, which is the
+    state these tests must not be measured in."""
+    f = torch.compile(lambda t: torch.maximum(t, t), backend="rbln", dynamic=False)
+    y = f(torch.randn(shape).to(dtype).to(DEVICE))
+    torch.rbln.synchronize()
+    return y
+
+
+def _run_and_count(fn):
+    """Run ``fn`` and report what crossed the host boundary: bytes the runtime
+    moved device->host, and how many ``rbln_memcpy_v2v_multi`` calls it made."""
+    from torch_rbln import _C
+    from torch_rbln.profiler import _read_rt_timing, _RT_PRIMS, _rt_timing_enable, _rt_timing_reset
+
+    slot = _RT_PRIMS.index("v2v_multi")
+    torch.rbln.synchronize()
+    (_, d2h_before), _ = _C._rt_prof_host_sync()
+    _rt_timing_reset()
+    _rt_timing_enable(True)
+    try:
+        fn()
+        torch.rbln.synchronize()
+    finally:
+        _rt_timing_enable(False)
+    (_, d2h_after), _ = _C._rt_prof_host_sync()
+    timing = _read_rt_timing()
+    assert timing is not None, "this build has no _rt_timing_get binding; rebuild before trusting the result"
+    return d2h_after - d2h_before, timing[slot][1]
+
+
 @pytest.mark.test_set_ci
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestIndexCopyV2V(TestCase):
@@ -148,6 +180,52 @@ class TestIndexCopyV2V(TestCase):
         expected = self_cpu.clone()
         expected.index_copy_(0, idx_cpu, src_cpu)
         _eq(self_dev, expected)
+
+    def test_in_place_on_non_contig_view_writes_only_the_indexed_rows(self):
+        """``cache = storage[:, :128]`` updated in place: only the two indexed
+        rows may be written and nothing may reach the host. The kernel used to
+        stage a non-contig ``out`` through a contig buffer and copy it back,
+        which for a storage this size meant pulling every byte to the host and
+        re-uploading it — for two rows of work."""
+        n_slots = 2048
+        storage = _device_latest((n_slots, 256))
+        expected = storage.cpu()
+        cache = storage[:, :128]
+        self.assertFalse(cache.is_contiguous())
+        idx_cpu = torch.tensor([3, n_slots - 2], dtype=torch.int64)
+        idx = _to_dev(idx_cpu)  # moved before the measurement so its h2v is not counted
+        src = _device_latest((2, 128))
+
+        moved, _ = _run_and_count(lambda: cache.index_copy_(0, idx, src))
+        self.assertEqual(moved, 0, "index_copy_ on the view pulled the storage to the host")
+
+        expected[:, :128].index_copy_(0, idx_cpu, src.cpu())
+        # Reading the storage back must move every byte: the data is still on the device.
+        read_back, _ = _run_and_count(storage.cpu)
+        self.assertEqual(read_back, storage.numel() * storage.element_size())
+        _eq(storage, expected)
+
+    def test_unique_indices_above_the_v2v_multi_cap_stay_on_device(self):
+        """Every other row of a 4096-row storage: 2048 single-row runs, twice
+        what one ``rbln_memcpy_v2v_multi`` call dispatches on the device
+        (``kMaxV2VMultiCopies`` = 1024). The batch has to split the submit —
+        one oversized call makes the runtime host-sync the whole storage and
+        leave it host-latest, so the next graph re-uploads all of it."""
+        n_rows = 2048
+        storage = _device_latest((2 * n_rows, 256))
+        expected = storage.cpu()
+        idx_cpu = torch.arange(0, 2 * n_rows, 2, dtype=torch.int64)
+        idx = _to_dev(idx_cpu)  # moved before the measurement so its h2v is not counted
+        src = _device_latest((n_rows, 256))
+
+        moved, calls = _run_and_count(lambda: storage.index_copy_(0, idx, src))
+        self.assertEqual(moved, 0, "index_copy_ above the cap pulled the storage to the host")
+        self.assertEqual(calls, 2, "2048 entries must go out as two runtime-sized calls, not one oversized one")
+
+        expected.index_copy_(0, idx_cpu, src.cpu())
+        read_back, _ = _run_and_count(storage.cpu)
+        self.assertEqual(read_back, storage.numel() * storage.element_size())
+        _eq(storage, expected)
 
     def test_in_place_returns_same_tensor(self):
         """The in-place form must return self (same Python object semantics)."""
