@@ -12,8 +12,8 @@ hard-coded expected strings.
 
 Environment requirements
 ------------------------
-* ``vllm-rbln`` installed on ``origin/ci/torch-rbln-model-tests`` (what
-  ``tools/test/install-test-deps.sh`` checks out, into ``.venv-inference``;
+* ``vllm-rbln`` at the commit recorded in ``tools/test/requirements-inference.txt``
+  (what ``tools/test/install-test-deps.sh`` checks out, into ``.venv-inference``;
   ``test/run_tests.py`` runs this file with that interpreter).
 
 Matrix
