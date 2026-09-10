@@ -398,9 +398,9 @@ void register_internal_api(py::module_& module) {
       pybind11::arg("skip_dtype_args") = std::vector<size_t>{});
 
   // Warm-cache API. The C++ shim populates a thread-local `pending` entry on
-  // every miss-path dispatch; the generated Python wrapper calls
-  // `_warmcache_install_pending` after a successful first compile + run so the
-  // runtime is cached for subsequent invocations with the same input profile.
+  // every miss-path dispatch; the Python wrapper calls
+  // `_warmcache_install_pending` with the runtime that ran, so the runtime is
+  // cached for subsequent invocations with the same input profile.
   module.def(
       "_warmcache_install_pending",
       &torch_rbln::shim::install_warmcache_from_pending,
@@ -424,8 +424,10 @@ void register_internal_api(py::module_& module) {
       "Internal: number of entries in the warm-cache (debug/bench only)");
   module.def(
       "_warmcache_clear",
-      []() { torch_rbln::warmcache::WarmCache::instance().clear(); },
-      "Internal: drop all warm-cache entries (tests / benchmarks)");
+      [](std::optional<c10::DeviceIndex> device) { torch_rbln::warmcache::WarmCache::instance().clear(device); },
+      "Internal: drop the warm-cache entries whose inputs live on `device`, or "
+      "all of them when device is None",
+      pybind11::arg("device") = pybind11::none());
   module.def(
       "_warmcache_is_building",
       []() { return torch_rbln::warmcache::WarmCache::is_building_entry(); },
@@ -440,17 +442,11 @@ void register_internal_api(py::module_& module) {
       []() { torch_rbln::warmcache::WarmCache::exit_building(); },
       "Internal: clear the miss-path reentrancy flag set by _warmcache_enter_building");
   module.def(
-      "_warmcache_consume_force_recompile",
-      []() { return torch_rbln::warmcache::WarmCache::consume_force_recompile(); },
-      "Internal: consume the thread-local force-recompile flag set by a failed "
-      "warm-cache hit. Returns True iff a flag was pending; clears it.");
-  module.def(
-      "_warmcache_request_force_recompile",
-      []() { torch_rbln::warmcache::WarmCache::request_force_recompile(); },
-      "Internal: set the thread-local force-recompile flag. Production callers "
-      "rely on the C++ shim auto-setting this on hit-failure; this binding "
-      "exists so tests can exercise the consume/clear pair without engineering "
-      "a runtime soft-failure.");
+      "_warmcache_inject_hit_failure",
+      []() { torch_rbln::warmcache::WarmCache::inject_hit_failure(); },
+      "Internal (tests): make this thread's next warm-cache hit attempt fail "
+      "before it touches the runtime, so the retire path can be exercised "
+      "without a runtime that fails.");
 
   // CPU fast-path registry introspection. Returns True iff a handler is
   // registered for the given fully-qualified op name (e.g. "aten::rsqrt.out").

@@ -253,6 +253,12 @@ class TestTorchCompilePatchHelpers(TestCase):
 
         self.assertTrue(is_rbln_backend(rbln_backend))
 
+    def test_is_rbln_backend_eager_wrapper(self):
+        """The shim's recording wrapper around rebel's backend is the RBLN backend too."""
+        from torch_rbln._internal.warm_cache import eager_backend
+
+        self.assertTrue(is_rbln_backend(eager_backend))
+
     def test_is_rbln_backend_other_backend(self):
         """Test that other backends are not detected as RBLN."""
         self.assertFalse(is_rbln_backend("inductor"))

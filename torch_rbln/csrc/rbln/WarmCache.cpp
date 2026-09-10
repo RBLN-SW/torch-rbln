@@ -3,11 +3,13 @@
 #include <fcntl.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <mutex>
+#include <vector>
 
 namespace torch_rbln::warmcache {
 
@@ -89,7 +91,7 @@ WarmCache& WarmCache::instance() {
   // reclaims the process memory at exit.
   //
   // Default ON: hot path drives rebel runtime directly from C++ on warm hits;
-  // miss-path entries that fail v-memory lookup are erased by try_warmcache_hit
+  // miss-path entries that fail v-memory lookup are retired by try_warmcache_hit
   // so cold-path correctness is preserved.
   static auto* c = [] {
     auto* p = new WarmCache();
@@ -106,6 +108,13 @@ namespace {
 // can happen on any thread (e.g. when a hit-path's local shared_ptr goes
 // out of scope after the calling Python thread released the GIL), so we
 // route every destruction through this deleter to guarantee GIL hold.
+//
+// Because it takes the GIL, the last reference to an entry must never drop
+// while ``mu_`` is held: a thread that already holds the GIL may be waiting
+// for ``mu_`` (``clear`` and ``size`` are called from Python), and the two
+// would wait on each other. ``disable`` and ``clear`` therefore move the
+// references they drop out of the map under the lock and release them after
+// unlocking.
 void cache_entry_deleter(CacheEntry* p) {
   if (p == nullptr) {
     return;
@@ -132,12 +141,23 @@ void WarmCache::install(CacheKey key, const CacheEntry& entry) {
   map_.try_emplace(std::move(key), std::move(entry_ptr));
 }
 
-void WarmCache::erase(const CacheKey& key) {
-  // The map's strong reference drops here; any in-flight find() shared_ptr
-  // keeps the entry alive until that borrower releases. py::object
-  // destruction goes through the GIL-acquiring custom deleter.
-  std::unique_lock<std::shared_mutex> wr(mu_);
-  map_.erase(key);
+void WarmCache::disable(const CacheKey& key) {
+  std::shared_ptr<CacheEntry> tombstone(new CacheEntry(), &cache_entry_deleter);
+  std::shared_ptr<CacheEntry> replaced;
+  {
+    std::unique_lock<std::shared_mutex> wr(mu_);
+    auto it = map_.find(key);
+    if (it == map_.end()) {
+      map_.emplace(key, std::move(tombstone));
+    } else {
+      replaced = std::move(it->second);
+      it->second = std::move(tombstone);
+    }
+  }
+  // ``replaced`` dies here, after the lock is released (see the deleter). The
+  // hit path that called us still holds the failed entry, so what dies here
+  // is at most a tombstone left by a concurrent failure on the same key; an
+  // in-flight find() borrower keeps its entry alive until it releases.
 }
 
 size_t WarmCache::size() {
@@ -145,14 +165,30 @@ size_t WarmCache::size() {
   return map_.size();
 }
 
-void WarmCache::clear() {
-  std::unique_lock<std::shared_mutex> wr(mu_);
-  map_.clear();
+void WarmCache::clear(std::optional<c10::DeviceIndex> device) {
+  // The dropped entries die after the lock is released (see the deleter).
+  std::vector<std::shared_ptr<CacheEntry>> dropped;
+  {
+    std::unique_lock<std::shared_mutex> wr(mu_);
+    dropped.reserve(map_.size());
+    for (auto it = map_.begin(); it != map_.end();) {
+      const auto& inputs = it->first.inputs;
+      const bool drop = !device.has_value() || std::any_of(inputs.begin(), inputs.end(), [&](const TensorProfile& tp) {
+        return tp.device_index == *device;
+      });
+      if (drop) {
+        dropped.push_back(std::move(it->second));
+        it = map_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
 }
 
 namespace {
 thread_local bool t_building_entry = false;
-thread_local bool t_force_recompile = false;
+thread_local bool t_inject_hit_failure = false;
 } // namespace
 
 bool WarmCache::is_building_entry() {
@@ -165,14 +201,14 @@ void WarmCache::exit_building() {
   t_building_entry = false;
 }
 
-bool WarmCache::consume_force_recompile() {
-  const bool v = t_force_recompile;
-  t_force_recompile = false;
-  return v;
+void WarmCache::inject_hit_failure() {
+  t_inject_hit_failure = true;
 }
 
-void WarmCache::request_force_recompile() {
-  t_force_recompile = true;
+bool WarmCache::consume_injected_hit_failure() {
+  const bool v = t_inject_hit_failure;
+  t_inject_hit_failure = false;
+  return v;
 }
 
 } // namespace torch_rbln::warmcache

@@ -9,10 +9,11 @@
 // the Python side.
 //
 // Architecture:
-//   - On first call of a shim op with a given input profile, the Python
-//     wrapper compiles the op via torch.compile(backend="rbln") and harvests
-//     the DynamoRuntime. It then installs an entry into this cache via the
-//     pybind-exposed install(...) API.
+//   - On a miss the Python wrapper runs the op through its torch.compile'd
+//     callable, records the DynamoRuntime that executed, and installs an
+//     entry for it via the pybind-exposed install(...) API. The record comes
+//     from every execution, not only from a compile, so a key whose entry
+//     was dropped (``clear``) gets one back on its next miss.
 //   - On subsequent calls with a matching input profile, the shim looks up
 //     the entry and drives one execution through the C ABI.
 //   - Entries are keyed by (schema-name, per-Tensor-input profile, per-Scalar
@@ -26,10 +27,11 @@
 //   - Entries hold strong py::object references to the DynamoRuntime and to
 //     the sync-runtime handle it owns, so the borrowed RblnSyncRuntime stays
 //     valid for the cache's lifetime.
-//   - No eviction in V1; a raw pointer into the map is stable for the
-//     lifetime of the cache.
+//   - No eviction: entries leave only through ``clear`` (all of them, or
+//     one device's) or ``disable`` (a key retired after a failed hit).
 
 #include <ATen/core/ScalarType.h>
+#include <c10/core/Device.h>
 #include <c10/util/SmallVector.h>
 #include <torch/csrc/utils/pybind.h>
 
@@ -37,6 +39,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
@@ -142,6 +145,8 @@ struct OutputProfile {
 };
 
 struct CacheEntry {
+  // A default-constructed entry (null `runtime`) is a tombstone left by
+  // ``disable``; see there.
   // The runtime is held as well as the DynamoRuntime that owns it: `runtime`
   // below is borrowed from the former, and an owner that rebinds its attribute
   // would otherwise drop it while an installed entry still points at it.
@@ -155,11 +160,11 @@ struct CacheEntry {
 };
 
 // Shared pointer to a cache entry. Returned by ``find`` so the caller can
-// safely use the entry even if another thread concurrently ``erase``s the
-// key — the entry stays alive as long as any shared_ptr references it.
-// Without this, a raw-pointer ``find`` could return a pointer that another
-// thread invalidates via ``erase`` before the caller reaches ``Run``,
-// causing a use-after-free.
+// safely use the entry even if another thread concurrently ``disable``s or
+// ``clear``s the key — the entry stays alive as long as any shared_ptr
+// references it. Without this, a raw-pointer ``find`` could return a pointer
+// that another thread invalidates before the caller reaches ``Run``, causing
+// a use-after-free.
 using CacheEntryPtr = std::shared_ptr<const CacheEntry>;
 
 // Process-global cache. Entries are created via `install` on cache miss from
@@ -169,16 +174,22 @@ class WarmCache {
   static WarmCache& instance();
 
   // Hot path. Returns a shared_ptr to the cached entry, or empty on miss.
-  // The shared_ptr keeps the entry alive across concurrent ``erase`` from
-  // peer threads (use-after-free guard).
+  // The shared_ptr keeps the entry alive across concurrent ``disable`` /
+  // ``clear`` from peer threads (use-after-free guard). A returned entry
+  // with a null ``runtime`` is a tombstone (see ``disable``).
   CacheEntryPtr find(const CacheKey& key);
 
-  // Drop a single entry — used when a hit attempt fails at runtime so the
-  // next dispatch falls through to the pybind miss path (which exercises
-  // the DynamoRuntime wrapper that handles edge-case v-memory routing).
-  // Outlives any in-flight shared_ptr borrower; the entry's py::object
-  // destructor runs under the GIL via the shared_ptr custom deleter.
-  void erase(const CacheKey& key);
+  // Retire a key whose entry failed at run time: its entry is replaced by a
+  // tombstone (an entry with a null ``runtime``). ``find`` still returns
+  // it, so the hit path can tell "never installed" from "must not be
+  // installed": the dispatcher leaves the key on the Python wrapper path,
+  // whose DynamoRuntime handles the cases the C ABI path cannot, and does
+  // not offer it for re-install. A fresh compile would yield the same graph,
+  // so re-installing could only repeat the failure. The tombstone lives
+  // until ``clear``. In-flight borrowers of the old entry keep it alive
+  // through their shared_ptr; whatever this call drops is released after
+  // the cache lock, because its destructor takes the GIL.
+  void disable(const CacheKey& key);
 
   // Miss path. Inserts entry under `key` if not already present. Called from
   // Python via pybind after a successful torch.compile. If a concurrent
@@ -195,8 +206,11 @@ class WarmCache {
     return enabled_.load(std::memory_order_relaxed);
   }
 
+  // Number of keys, tombstones included.
   size_t size();
-  void clear();
+  // Drop every entry and tombstone whose inputs live on ``device``, or all
+  // of them when no device is given.
+  void clear(std::optional<c10::DeviceIndex> device = std::nullopt);
 
   // Reentrancy guard used by the miss path: while Python is driving
   // torch.compile, any ATen dispatch that lands back on a shim op must take
@@ -207,16 +221,12 @@ class WarmCache {
   static void enter_building();
   static void exit_building();
 
-  // Force-recompile signal: set by ``try_warmcache_hit`` when it ``erase``s
-  // a broken entry so the same thread's next pass through the Python
-  // wrapper can force ``compile_rbln_cached`` to skip its own cache for
-  // this key. Without it, the Python compile cache returns the same
-  // already-compiled callable and the rebel backend does NOT re-instantiate
-  // — ``_runtime_holder`` stays empty, install never fires again, and the
-  // op stays permanently on the Python wrapper path. Thread-local; the
-  // Python wrapper consumes (and clears) the flag exactly once.
-  static bool consume_force_recompile();
-  static void request_force_recompile();
+  // Test hook: make the current thread's next hit attempt fail before it
+  // touches the runtime, as if ``rbln_rt_prepare_inputs`` had refused the
+  // inputs. Lets a test exercise ``disable`` without a runtime that fails.
+  // Thread-local, single-shot.
+  static void inject_hit_failure();
+  static bool consume_injected_hit_failure();
 
  private:
   WarmCache() = default;

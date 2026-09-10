@@ -1744,8 +1744,9 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     from torch_rbln._internal.compile_cache import compile_rbln_cached
     from torch_rbln._internal.env_utils import use_device_group_num_devices
     from torch_rbln._internal.warm_cache import (
-        consume_force_recompile as _consume_warm_cache_force_recompile,
+        eager_backend as _warm_cache_eager_backend,
         install_pending as _install_warm_cache_pending,
+        take_recorded_runtime as _take_recorded_runtime,
     )
     from torch_rbln.device.context_holder import out_tensor_context
 
@@ -1811,8 +1812,6 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     compile_options = {"disable_logger": True}
     if not use_device_group_num_devices():
         compile_options["num_devices"] = 1
-    _runtime_holder = []
-    compile_options["_runtime_holder"] = _runtime_holder
 
     if out_tensor is None:
         result_tensor = None
@@ -1824,28 +1823,24 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
 
     op_module = get_view_op_module(op_callable, view_recipes)
 
-    # Consume the C++ side's force-recompile flag (set when the prior
-    # warm-cache hit erase'd a broken entry). On a True consumption,
-    # compile_rbln_cached drops its own cache entry for this key so the
-    # rebel backend re-instantiates and re-populates _runtime_holder so
-    # the install path below can fire again. See
-    # ``WarmCache::request_force_recompile`` in DispatchShim.cpp.
-    _force_recompile_warm = _consume_warm_cache_force_recompile()
     with out_tensor_context(result_tensor):
         compiled = compile_rbln_cached(
             op_module,
             dynamic=False,
             options=compile_options,
             device_cache_key=extract_warm_cache_key(*view_args, **view_kwargs),
-            force_recompile=_force_recompile_warm,
+            backend=_warm_cache_eager_backend,
         )
         external_result = compiled(*view_args, **view_kwargs)
+        # The backend records the runtime that just ran. Take it whether or
+        # not it gets installed, so it cannot be attributed to a later op.
+        dyn_runtime = _take_recorded_runtime()
         if result_tensor is None:
             result_tensor = external_result
         elif isinstance(external_result, torch.Tensor) and (external_result.data_ptr() != result_tensor.data_ptr()):
             result_tensor.copy_(external_result)
         if not has_views:
-            _install_warm_cache_pending(_runtime_holder, external_result)
+            _install_warm_cache_pending(dyn_runtime, external_result)
     return result_tensor
 
 

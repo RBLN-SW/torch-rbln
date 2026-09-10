@@ -109,20 +109,24 @@ def empty_cache(device: Optional[Union[int, str, torch.device]] = None) -> None:
     allowing them to be used by other applications or returned to the system.
 
     Unlike the generic ``torch.accelerator.empty_cache()`` (which drains only the
-    caching allocator), this also drops the WarmCache and view-recipe caches, so it
-    releases everything the caller is not still holding.
+    caching allocator), this also drops the device's WarmCache entries and the
+    view-recipe cache, so it releases everything the caller is not still holding.
+    Compiled callables stay: the next dispatch of a dropped entry's profile takes
+    the Python wrapper path once and re-installs the entry from the runtime that
+    callable already holds, without recompiling.
 
     Args:
         device (Optional[Union[int, str, torch.device]]): The device to empty cache for.
             If None, uses the current device. Defaults to None.
     """
     device = _normalize_device(device)
-    # WarmCache holds strong refs to DynamoRuntime instances and the rbln
-    # runtime buffers behind them. empty_cache() means "let go of everything
-    # the user isn't holding"; if we kept warm entries the freed bytes would
-    # show up unchanged in memory_stats. Clearing first puts us in the same
-    # state as the cold dispatch path — entries get re-installed naturally.
-    torch_rbln._C._warmcache_clear()
+    # Only this device's WarmCache entries go, matching the allocator flush
+    # below; another device's ops keep hitting. An entry borrows the
+    # DynamoRuntime of a callable the Python compile cache keeps, so dropping
+    # it frees nothing by itself and costs one Python-path dispatch per
+    # profile to come back (see warm_cache.py). The callables stay: they are
+    # the compiled program, and clearing them would make every op recompile.
+    torch_rbln._C._warmcache_clear(device.index)
     # The view-recipe cache holds only metadata-derived recipes (no device
     # buffers), so it never shows up in memory_stats — but it has no eviction
     # and grows once per distinct view geometry, so clear it here too to keep
