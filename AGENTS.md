@@ -78,10 +78,10 @@ Verify the rebuild actually took before trusting any result. An install can skip
 - **Read the source, do not infer it.** rebel-compiler ships its headers and `librbln.so` in the wheel; PyTorch is in the venv. An answer from an issue description, a changelog, or a plausible reading of a symptom is a guess; do not state it as fact.
 - **Separate the symptom from the cause.** A narrowed symptom is not a cause. If the cause is not identified, say so.
 - **Mark what you verified and what you inferred**, in the same message.
-- **Reproduce before you fix**, and say so if you could not. The minimal reproducer is a deliverable: a standalone script another team can run without installing a model or a suite.
+- **Reproduce before you fix**, and say so if you could not. The minimal reproducer is a deliverable: a standalone script another team can run without installing a model or a suite. Not being able to reproduce — no device here, a log from another machine — is a limit to state, not a reason to stop: narrow the cause from the log and the source, write the candidate fix, run what this host can run, and hand over the command that settles it on a device. What you may not do is call it fixed before that command has run.
 - **State what you could not do** — tests you could not run, hardware you did not have, assumptions you could not check. An empty list is a claim; write it only if it is true.
 - **If you cannot finish, do not produce a plausible partial result.** Stop and say what blocked you.
-- **Tests that break after your change are your regressions.** Debug them; do not stash or revert to check whether they also fail on `main`.
+- **Tests that break after your change are yours to investigate.** Comparing base against head is how you do that — each in its own worktree with its own venv, never by stashing or reverting in the tree you work from. One venv cannot serve both: an editable install points at one checkout, so a run from the other executes the wrong code, and native artifacts mix the same way. Match Python, torch, `rebel-compiler`, and the run settings across the two, and confirm in each what `import torch_rbln` resolved to and which build it loaded. A dependency difference you are evaluating is the experiment variable — record it as one. A failure that reproduces on the base commit is reported as pre-existing, with that commit; everything else is your regression.
 
 ## Measuring
 
@@ -89,6 +89,18 @@ Verify the rebuild actually took before trusting any result. An install can skip
 - **Name a target by commit plus working-tree state**, never by branch. "main" does not say which uncommitted changes were in the tree.
 - **Fix the environment and change nothing but the thing under test.** Thread counts, allocator mode, and log level move the mean more than most changes do; log level is not cosmetic here. Change the harness and the comparison resets.
 - **A debug-only flag is not the production baseline.** A result measured with one set does not describe what ships.
+
+## Know where you are
+
+Before the first edit, record the commit and dirty state (`git log -1`, `git status --short`), the venv and the `rebel-compiler` installed in it, and whether this host has an NPU. The answer decides what a result here can mean:
+
+| Host                        | What a run here proves                                                                                                                                                                                                     |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Source only, no toolchain   | Nothing ran. Read, reason, write the patch, and say so.                                                                                                                                                                    |
+| Build host, no NPU          | Build, lint, codegen, and `RBLN_DUMMY_DEVICE=1` for tensor construction, host/device copies, and compile-only `torch.compile` (`docs/CONFIGURATION.md`). `is_available()` is `True` there and says nothing about hardware. |
+| NPU host                    | Numerics, performance, fallback attribution, distributed. Only a result from here settles a claim about the device path.                                                                                                    |
+
+Match the verification to the change: a docs change needs lint; Python logic needs the narrowest pytest target and the suite around it; a codegen or native change needs the rebuild, proof that it took, and those tests; a perf change needs a measurement with its base printed. Read the collected count, not only the exit code — `run_tests.py` counts a run that collected nothing as neither pass nor fail, and a device-type test on a host without an NPU collects nothing.
 
 ## Before saying a change is done
 
@@ -132,7 +144,7 @@ Read `.claude/skills/adding-an-op/SKILL.md` before starting.
 - **The rebel ABI handshake decides whether this build and the loaded runtime may talk.** `rebel-compiler` declares the interface it implements and the oldest consumer it accepts; the build freezes the first of those into `_abi_snapshot.py`, and `import torch_rbln` checks that the loaded `librbln.so` still accepts that snapshot before any other rebel call. We keep no number of our own — there is nothing to bump, and the snapshot is generated, so a mismatch is a build or an install to correct, never a file to edit. It moves only on a rebuild, so a stale build gives a stale verdict, and a wheel already shipped cannot follow a later raise of the minimum. `TORCH_RBLN_SKIP_ABI_CHECK` hides the diagnosis, not the incompatibility: use it to unblock a machine while a matching wheel builds, never to make an import go green. `docs/CONFIGURATION.md` has the contract.
 - **Upstream's own test is the contract**, not what the hardware happens to do. For `PrivateUse1`, `torch.accelerator`, AMP, the profiler, and pinned memory, read the corresponding test in the PyTorch repository at the pinned version and satisfy what it asserts. **When the contract is ambiguous, follow CUDA** — that is what vLLM, lmcache, and transformers are written against.
 - **CPU fallback is a product feature, not a way to make code work.** Do not add a case to `is_cpu_fallback_cases()`, route an op to `fallback_rbln`, or change a `TORCH_RBLN_DISABLE_FALLBACK` category to move a test outcome — that turns a correctness bug into a silent performance cliff. The suite force-disables `compile_error` (`test/conftest.py`) so compile failures surface.
-- **A run where a fallback fired is a failed run.** A CPU fallback compares CPU against CPU; an export that fell back to `jit.trace` gives plausible output from an untested path. Grep the log before calling a run successful, and keep the fallback disabled in minimal reproducers — drop it and the bug disappears.
+- **A fallback where the device path was under test is not a pass.** A CPU fallback compares CPU against CPU; an export that fell back to `jit.trace` gives plausible output from an untested path. Check the fallback log or the counters before calling such a run successful. An expected fallback is a result in its own right: fp32 never runs on the NPU, `_ops_with_cpu_fallback_tests` in `test/filters.py` tests the fallback itself, and dummy mode has no device to fall back from. A minimal reproducer for a device-path bug blocks the fallback that would hide it — drop that and the bug disappears. When the fallback itself is under investigation — the switch to it, the return from it, the copy at the boundary — keep the original conditions, and confirm which path actually ran rather than assuming it from the settings.
 - **A new variable of ours takes the `TORCH_RBLN_` prefix.** The bare `RBLN_*` namespace is shared: `RBLN_DEVICES` and its `RBLN_VISIBLE_DEVICES` alias belong to the runtime, `RBLN_DUMMY_DEVICE` is validated by it, and the ids in `RBLN_DEVICE_MAP` index the pool `RBLN_DEVICES` leaves visible rather than system ids. Do not add to that namespace or reinterpret what is in it.
 - **A new `TORCH_RBLN_*` variable** is read in one place — `env_utils.py`, or its C++ config object — and documented in `docs/CONFIGURATION.md`. Read it live, the way the per-dispatch flags in `DispatchShim.cpp` do. A value cached in `static` or `@lru_cache` state latches for the whole process, so a test that sets it later changes nothing and what it did set leaks into later tests on that worker — this has already cost a CI flake.
 
@@ -161,7 +173,7 @@ These pull against each other, and both are real.
 - **A diff nobody can review does not land.** When the patch keeps growing, stop and re-check the approach — that usually means the fix is in the wrong place, not that the problem is large.
 - **Do not land code with no caller.** Machinery belongs in the change that consumes it and measures it. Check who actually calls the thing before building for the general case.
 - **One tuning constant per trade-off**, and the PR carries the measurement that picks its value.
-- Reuse before you write: no new file when the code fits in one that exists, no helper called once, no abstraction for a single use. Delete the scratch files you made while iterating.
+- Reuse before you write: no new file when the code fits in one that exists, no abstraction for a single use. A helper earns its place by naming a condition the call site cannot, or by owning a resource lifetime — not by shortening one call. Delete the scratch files you made while iterating.
 
 ## Prose
 
@@ -178,19 +190,20 @@ Everything written in words — a comment, a docstring, a doc page, a PR body, a
 Read `docs/TEST_GUIDE.md` before adding a test — it is the contract for this suite, and review checks against it. `.claude/skills/writing-tests/SKILL.md` covers what goes wrong on top of it. The rules broken most often:
 
 - A test must fail without the change it covers. Verify that; do not assume it.
-- **A test with no `@pytest.mark.test_set_ci` never runs in the pre-merge checks.** It runs only in the release lane — the release checks on `main`. Mark `single_worker` when the test mutates device or process-global state.
+- **A test with no `@pytest.mark.test_set_ci` never runs in the pre-merge checks.** It runs only in the release lane — the release checks on `main`.
+- **Pick the isolation the state needs.** `single_worker` for a resource shared across processes — a device, a fixed port; a fixture or `monkeypatch` for state that restores — an env var that is read live, the selected device; `run_in_isolated_process` (`test/utils.py`) for state that does not — an import-time effect, a `static` or `@lru_cache` latch, a committed device mapping. `single_worker` only serializes: it is one xdist worker, not a fresh process, and undoes no leak.
 - Assertion rewriting is off (`--assert=plain`), so a bare `assert a == b` prints no values.
 - Do not re-run a flaky test until it goes green, and do not loosen a tolerance to make one pass.
 - Do not assert an optimization the runtime is free to change, or write an assertion a hardcoded constant would also satisfy.
-- If the test diff dwarfs the code change, cut scope.
+- A test diff larger than the change is not wrong by itself — a one-line allocator fix can need a dtype, layout, and process matrix. Say what each axis guards, and cut the tests that repeat another axis or restate the implementation.
 
 ## When a rule is in the way
 
-A deliberate deferral from earlier work is a decision, not an oversight. A test behind an `importorskip`, a dependency left uninstalled, a check postponed to CI — before you install it, run it, or "unblock" it, surface that decision and ask whether it still holds.
+A decision recorded in the tree holds until its reason is gone: an `xfail` with a reason, a skip that names its issue, a table entry with a why. Do not clear one because you could. An uninstalled dependency or an `importorskip` records no decision by itself. What makes installing one a question is the venv, not the skip — an editable checkout is the runtime for whoever else uses it, and a model dependency can move the torch or `rebel-compiler` pin. Install into a throwaway venv or worktree, or say exactly what the install changed.
 
-Not all of these carry the same weight. The rules about safety and correctness — do not edit a generated file, do not work around a layer-3 defect, do not silence a fallback, do not push without asking — are absolute. The rest are what a reviewer will raise: a single-use helper, a test diff larger than the change, a comment that restates the code. Treat those as the default and say why when you depart from one.
+Not all rules carry the same weight. Absolute: do not edit a generated file, do not work around a layer-3 defect, do not silence a fallback to move an outcome. Confirm before a pin change, a push, or work outside the task — unless the request or an approval already given in this task covers it; "raise the pin to this compiler and open the PR" is not asked twice, and a pin the change needs moves with it (see above). The rest — the shape of a helper, a comment, a test — are review defaults: apply them, and when you depart from one in a way that affects the review, say why in a sentence and move on. Do not stop to ask about those.
 
-When you believe a case is a real exception — a comment no naming can replace, a workaround whose root fix is out of scope, an edit that has to touch a generated file — stop and ask before writing the code. Do not decide it alone, and do not work around it quietly.
+Stop and ask only for what crosses an absolute rule or changes the scope beyond what was approved: a workaround for a defect whose root fix is out of scope, an edit that has to touch a generated file, a pin the task did not mention, a fix in a layer the task did not name. Do not decide those alone, and do not work around them quietly.
 
 ## Commits and PRs
 
