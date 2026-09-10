@@ -326,3 +326,13 @@ This is an escape hatch for unblocking a machine while a matching wheel is built
 suppresses the diagnosis, not the incompatibility: the mismatch it hides is what would
 otherwise surface as an `undefined symbol` import crash or as corruption inside the
 runtime.
+
+## Eager-dispatch dtype catalog (measurement knobs)
+
+Both unset by default; set before `import torch_rbln`. `docs/DTYPE_DISPATCH.md` has the
+contract and the boundaries to know before enabling a dtype.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `TORCH_RBLN_DISPATCH_DTYPES` | Extra dtypes admitted to the eager dispatch catalog (torch dtype names or aliases; an unknown name is an error) | unset |
+| `TORCH_RBLN_DISPATCH_STRICT` | Dtypes (or `all`) whose ops skip the alignment performance fallbacks and always reach the compiler | unset |
