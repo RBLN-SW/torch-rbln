@@ -445,9 +445,9 @@ content = re.sub(
 # Replace torch dependency in [project].dependencies
 # Match various formats:
 #   "torch @ file://..."
-#   "torch==2.11.0+cpu"
-#   "torch (==2.11.0+cpu)"  <- parentheses format
-#   "torch (>=2.11.0)"
+#   "torch==2.13.0+cpu"
+#   "torch (==2.13.0+cpu)"  <- parentheses format
+#   "torch (>=2.13.0)"
 content = re.sub(
     r'^\s*"torch\s*[\(@][^"]*",?\s*\n',
     f'  "{torch_dep}",\n',

@@ -19,7 +19,7 @@ dependencies = [
   "PyYAML>=6,<7",
   "scipy>=1.14.0",
   "libcst>=1.2.0",
-  "torch==2.11.0+cpu"
+  "torch==2.13.0+cpu"
 ]
 
 [project.optional-dependencies]
@@ -46,7 +46,7 @@ requires = [
   "mypy>=1.13.0,<1.14.0",
   "ninja>=1.11.1.3,<1.11.2",
   "rebel-compiler",  # [tool.uv].build-constraint-dependencies pins the version.
-  "torch==2.11.0+cpu"
+  "torch==2.13.0+cpu"
 ]
 build-backend = "hatchling.build"
 
