@@ -52,7 +52,7 @@ Two questions come before any change, and getting either wrong wastes the whole 
 
 `register_ops.py` is the one that catches people: every eager shim (`add_rbln`, `mul_rbln`, …), 1400 lines of ordinary-looking Python, gitignored. Fixing an op there works until the next build.
 
-`native_functions.yaml`, `tags.yaml`, and `test/ops/test_ops.py` are adapted from upstream PyTorch; the two YAML files name the upstream tag they came from on their first line. Keep the diff no larger than the change requires, and keep that line true when you re-sync one. A torch version bump moves three things together — `[project].dependencies`, `[build-system].requires`, and these files re-synced from the new tag (`docs/THIRD_PARTY_UPDATE.md`). `tools/linter` is maintained in-tree and refreshed by `sync-linter.sh`; do not copy it from upstream.
+`native_functions.yaml`, `tags.yaml`, and `test/ops/test_ops.py` are adapted from upstream PyTorch; the two YAML files name the upstream tag they came from on their first line. Keep the diff no larger than the change requires, and keep that line true when you re-sync one. A torch version bump moves four things together — `[project].dependencies`, `[build-system].requires`, these files re-synced from the new tag, and `tools/linter` via `./tools/sync-linter.sh` (`docs/THIRD_PARTY_UPDATE.md`). `tools/linter` is a verbatim upstream copy at the tag in `tools/linter/UPSTREAM_TAG`; the script is the only way it moves, and it only moves with the pin — do not edit it or copy it by hand.
 
 ## Commands
 
