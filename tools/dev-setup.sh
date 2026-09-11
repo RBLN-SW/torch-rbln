@@ -38,11 +38,9 @@ PYPI MODE:
 
     pip's PIP_EXTRA_INDEX_URL is not read by uv; use UV_INDEX / UV_EXTRA_INDEX_URL.
 
-BUILDING AGAINST A LOCAL rebel-compiler TREE:
-    This script only installs the rebel-compiler wheel. To link against a tree you
-    built yourself, set both RBLN_USE_EXTERNAL_REBEL_COMPILER=1 and REBEL_HOME and run
-    `uv pip install -e . --no-build-isolation` directly; cmake/FindRebel.cmake documents
-    what the tree must contain.
+LOCAL rebel-compiler TREE:
+    Not handled here. Set RBLN_USE_EXTERNAL_REBEL_COMPILER=1 and REBEL_HOME and run
+    `uv pip install -e . --no-build-isolation` yourself (see cmake/FindRebel.cmake).
 
 EXAMPLES:
     # Quick setup with PyPI (fastest)
@@ -137,18 +135,6 @@ mode_pypi() {
             echo "Non-interactive run: proceeding with current env (use a TTY to get y/N prompt)."
         fi
         echo ""
-    fi
-
-    # Ensure pyproject.toml uses PyPI rebel-compiler (not file:// custom wheel)
-    if grep -q "rebel-compiler @ file://" pyproject.toml 2>/dev/null; then
-        echo "⚠️  Detected custom rebel-compiler in pyproject.toml"
-        echo "   Restoring PyPI version..."
-        python ./tools/replace_depends.py \
-            --pyproject-path ./pyproject.toml \
-            --source "rebel-compiler" \
-            --target "rebel-compiler>=0.11.2,<0.20.0" \
-            --set-index rbln
-        rm -f uv.lock
     fi
 
     check_rebel_index_access

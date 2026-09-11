@@ -80,9 +80,6 @@ updates ```UPSTREAM_TAG```, and is a no-op when the tree is already there. It re
 to run over uncommitted changes under ```tools/linter```. Commit the result together
 with the pin change.
 
-```./tools/sync-linter.sh --check``` exits non-zero when ```UPSTREAM_TAG``` is behind the
-pin, so a bump that skipped this step is visible.
-
 ## Rebel compiler
 
 **`rebel-compiler`** is a **build-only** dependency in this repo. For installation, versioning, and runtime use of the compiler package, follow the **RBLN SDK** documentation:

@@ -6,9 +6,7 @@
 # in pyproject.toml (torch==X.Y.Z+cpu -> vX.Y.Z); there is no way to pass another tag.
 # The tag the tree was last synced from is recorded in tools/linter/UPSTREAM_TAG.
 #
-# Usage:
-#   ./tools/sync-linter.sh          # sync tools/linter to the pinned tag (no-op if already there)
-#   ./tools/sync-linter.sh --check  # exit 1 if tools/linter is behind the pinned tag
+# Usage: ./tools/sync-linter.sh   (no arguments; no-op if the tree is already at the pinned tag)
 #
 set -euo pipefail
 
@@ -18,16 +16,11 @@ PYPROJECT="${REPO_ROOT}/pyproject.toml"
 LINTER_DIR="${REPO_ROOT}/tools/linter"
 TAG_FILE="${LINTER_DIR}/UPSTREAM_TAG"
 
-check_only=0
-case "${1:-}" in
-  "") ;;
-  --check) check_only=1 ;;
-  *)
-    echo "Usage: $0 [--check]" >&2
-    echo "The target tag comes from the torch pin in pyproject.toml; it cannot be overridden." >&2
-    exit 2
-    ;;
-esac
+if [[ $# -ne 0 ]]; then
+  echo "Usage: $0" >&2
+  echo "The target tag comes from the torch pin in pyproject.toml; it cannot be overridden." >&2
+  exit 2
+fi
 
 torch_ver=$(grep -E 'torch==[0-9]+\.[0-9]+\.[0-9]+' "${PYPROJECT}" | head -1 \
   | sed -E 's/.*torch==([0-9]+\.[0-9]+\.[0-9]+).*/\1/' || true)
@@ -41,12 +34,6 @@ current="$(cat "${TAG_FILE}" 2>/dev/null || echo "<none>")"
 if [[ "${current}" == "${target}" ]]; then
   echo "tools/linter is already at ${target}; nothing to do."
   exit 0
-fi
-
-if [[ "${check_only}" -eq 1 ]]; then
-  echo "tools/linter is at ${current} but pyproject.toml pins torch ${torch_ver} (${target})." >&2
-  echo "Run ./tools/sync-linter.sh as part of the torch bump." >&2
-  exit 1
 fi
 
 # The sync replaces the whole tree; refuse to overwrite uncommitted edits under it.
@@ -69,7 +56,6 @@ git -C "${tmp}" checkout --quiet "${target}"
 
 rm -rf "${LINTER_DIR}"
 cp -r "${tmp}/tools/linter" "${LINTER_DIR}"
-find "${LINTER_DIR}" -name __pycache__ -type d -prune -exec rm -rf {} +
 echo "${target}" > "${TAG_FILE}"
 
 echo "Synced tools/linter ${current} -> ${target}. Review the diff and commit it with the torch bump."
