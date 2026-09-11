@@ -1,42 +1,61 @@
 #!/usr/bin/env bash
-# Sync tools/linter from the PyTorch repository into the current project.
+# Move tools/linter to the upstream PyTorch tag that pyproject.toml pins.
 #
-# Usage:
-#   ./sync-linter.sh              # Sync using default version from torch-rbln/pyproject.toml
-#   ./sync-linter.sh v2.11.0      # Sync from the given PyTorch tag
+# tools/linter is a verbatim copy of upstream PyTorch's tools/linter. It moves only as
+# part of a torch version bump, so the target tag is always derived from the torch pin
+# in pyproject.toml (torch==X.Y.Z+cpu -> vX.Y.Z); there is no way to pass another tag.
+# The tag the tree was last synced from is recorded in tools/linter/UPSTREAM_TAG.
 #
-set -e
+# Usage: ./tools/sync-linter.sh   (no arguments; no-op if the tree is already at the pinned tag)
+#
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-if [[ -f "${SCRIPT_DIR}/torch-rbln/pyproject.toml" ]]; then
-  PYPROJECT="${SCRIPT_DIR}/torch-rbln/pyproject.toml"
-elif [[ -f "${SCRIPT_DIR}/pyproject.toml" ]]; then
-  PYPROJECT="${SCRIPT_DIR}/pyproject.toml"
-elif [[ -f "${SCRIPT_DIR}/../pyproject.toml" ]]; then
-  PYPROJECT="${SCRIPT_DIR}/../pyproject.toml"
-else
-  echo "Cannot find torch-rbln pyproject.toml" >&2
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PYPROJECT="${REPO_ROOT}/pyproject.toml"
+LINTER_DIR="${REPO_ROOT}/tools/linter"
+TAG_FILE="${LINTER_DIR}/UPSTREAM_TAG"
+
+if [[ $# -ne 0 ]]; then
+  echo "Usage: $0" >&2
+  echo "The target tag comes from the torch pin in pyproject.toml; it cannot be overridden." >&2
+  exit 2
+fi
+
+torch_ver=$(grep -E 'torch==[0-9]+\.[0-9]+\.[0-9]+' "${PYPROJECT}" | head -1 \
+  | sed -E 's/.*torch==([0-9]+\.[0-9]+\.[0-9]+).*/\1/' || true)
+if [[ -z "${torch_ver}" ]]; then
+  echo "Cannot find a torch==X.Y.Z pin in ${PYPROJECT}" >&2
+  exit 1
+fi
+target="v${torch_ver}"
+current="$(cat "${TAG_FILE}" 2>/dev/null || echo "<none>")"
+
+if [[ "${current}" == "${target}" ]]; then
+  echo "tools/linter is already at ${target}; nothing to do."
+  exit 0
+fi
+
+# The sync replaces the whole tree; refuse to overwrite uncommitted edits under it.
+dirty="$(git -C "${REPO_ROOT}" status --porcelain -- tools/linter)"
+if [[ -n "${dirty}" ]]; then
+  echo "tools/linter has uncommitted changes; commit or discard them before syncing." >&2
   exit 1
 fi
 
-# Default version: parse torch version (e.g. 2.11.0) from pyproject.toml and use as tag v2.11.0
-TORCH_VER=$(grep -E 'torch==[0-9]+\.[0-9]+\.[0-9]+' "${PYPROJECT}" | head -1 | sed -E 's/.*torch==([0-9]+\.[0-9]+\.[0-9]+).*/\1/' || true)
-VERSION="${1:-v${TORCH_VER}}"
+tmp=$(mktemp -d)
+trap 'rm -rf "${tmp}"' EXIT
 
-TMP=$(mktemp -d)
+echo "Fetching pytorch/pytorch tools/linter at ${target}..."
+git clone --quiet --depth 1 --filter=blob:none --no-checkout \
+  https://github.com/pytorch/pytorch.git "${tmp}"
+git -C "${tmp}" sparse-checkout init --cone >/dev/null
+git -C "${tmp}" sparse-checkout set tools/linter >/dev/null
+git -C "${tmp}" fetch --quiet origin tag "${target}" --depth 1
+git -C "${tmp}" checkout --quiet "${target}"
 
-git clone --depth 1 --filter=blob:none --no-checkout \
-  https://github.com/pytorch/pytorch.git "${TMP}"
+rm -rf "${LINTER_DIR}"
+cp -r "${tmp}/tools/linter" "${LINTER_DIR}"
+echo "${target}" > "${TAG_FILE}"
 
-cd "${TMP}"
-git sparse-checkout init --cone
-git sparse-checkout set tools/linter
-git fetch origin tag "${VERSION}" --depth 1
-git checkout "${VERSION}"
-
-cd -
-
-rm -rf tools/linter
-cp -r "${TMP}/tools/linter" tools/linter
-
-echo "Synced tools/linter from PyTorch ${VERSION}"
+echo "Synced tools/linter ${current} -> ${target}. Review the diff and commit it with the torch bump."

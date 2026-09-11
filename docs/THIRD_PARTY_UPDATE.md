@@ -33,6 +33,7 @@ following together:
 | 1 | ```pyproject.toml``` `[project].dependencies` | `torch==X.Y.Z+cpu` |
 | 2 | ```pyproject.toml``` `[build-system].requires` | `torch==X.Y.Z+cpu` |
 | 3 | Upstream files (see below) | Sync from the new tag |
+| 4 | ```tools/linter``` | Run ```./tools/sync-linter.sh``` (see below) |
 
 CI Debug builds automatically derive the PyTorch git tag (`vX.Y.Z`) from the
 ```pyproject.toml``` torch version, so no additional workflow files need updating.
@@ -60,20 +61,24 @@ implementation of operations for each device backend. When updating the PyTorch 
 you must manually bring in the updated versions of these files from the upstream
 repository.
 
-### Linter (migrated from PyTorch upstream)
+### Linter (verbatim copy of PyTorch upstream)
 
-The full contents of ```third_party/pytorch/tools/linter``` have been migrated into
-```tools/linter``` in the torch-rbln repository. The linter is no longer taken from
-the PyTorch submodule; it is maintained in-tree under ```tools/linter``` (adapters,
-clang_tidy, dictionary, etc.). When updating the PyTorch version, there is no need
-to sync or copy the linter from upstream—use the in-repo ```tools/linter``` only.
+```tools/linter``` (adapters, clang_tidy, dictionary, etc.) is a verbatim copy of
+```tools/linter``` from PyTorch upstream at the tag recorded in
+```tools/linter/UPSTREAM_TAG```. It is not edited in-tree, and it moves only as part
+of a torch version bump: the target tag is always derived from the torch pin in
+```pyproject.toml``` (```torch==X.Y.Z+cpu``` → ```vX.Y.Z```) and cannot be overridden.
 
-To refresh ```tools/linter``` from PyTorch upstream (e.g. after a version bump),
-run ```sync-linter.sh``` from the repo root or from the parent of ```torch-rbln```.
-The script clones PyTorch at a given tag and copies ```tools/linter``` into the
-current tree. The **default tag** is derived from the torch version in
-```pyproject.toml``` (e.g. ```torch==2.10.0+cpu``` → tag ```v2.10.0```). You can
-override it by passing a tag: ```./sync-linter.sh v2.11.0```.
+After changing the pin (checklist items 1–2), run
+
+```
+  ./tools/sync-linter.sh
+```
+
+from anywhere. It fetches ```tools/linter``` at the pinned tag, replaces the tree,
+updates ```UPSTREAM_TAG```, and is a no-op when the tree is already there. It refuses
+to run over uncommitted changes under ```tools/linter```. Commit the result together
+with the pin change.
 
 ## Rebel compiler
 
