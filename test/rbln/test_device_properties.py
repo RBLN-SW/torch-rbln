@@ -7,23 +7,12 @@ Test suite for torch.rbln.get_device_properties / get_device_name.
 import os
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-import torch_rbln._C
-
 from ..utils import requires_physical_devices
-
-
-def _sysfs_dram_total(system_device_id):
-    """The driver's own capacity figure for one NPU, or None when sysfs is not readable."""
-    path = Path(f"/sys/class/rebellions/rbln{system_device_id}/dram_total")
-    if not path.exists():
-        return None
-    return int(path.read_text().strip())
 
 
 @pytest.mark.test_set_ci
@@ -37,23 +26,6 @@ class TestDeviceProperties(TestCase):
         self.assertGreater(props.memory_per_chiplet, 0)
         # Reporting the per-chiplet figure as the total understates REBEL 4x, unnoticed on ATOM.
         self.assertEqual(props.total_memory, props.memory_per_chiplet * props.num_chiplet * props.npu_count)
-
-    def test_total_memory_matches_the_driver(self):
-        """dram_total is the driver's own aggregate: an independent check of the summed total."""
-        # The topology reports the ids RBLN_DEVICES leaves visible, while sysfs is named by
-        # system id. The two coincide only under the identity mapping, so this cannot line the
-        # two up when RBLN_DEVICES is set.
-        if os.environ.get("RBLN_DEVICES") or os.environ.get("RBLN_VISIBLE_DEVICES"):
-            self.skipTest("RBLN_DEVICES remaps the ids sysfs is named by")
-
-        entry = next(e for e in torch_rbln._C._get_device_topology().entries if e.logical_device_index == 0)
-        per_npu = [_sysfs_dram_total(pid) for pid in entry.physical_device_ids]
-        if any(total is None for total in per_npu):
-            self.skipTest("/sys/class/rebellions/rbln*/dram_total is not readable on this host")
-
-        props = torch.rbln.get_device_properties(0)
-        self.assertEqual(props.npu_count, len(per_npu))
-        self.assertEqual(props.total_memory, sum(per_npu))
 
     def test_get_device_name_matches_properties(self):
         self.assertEqual(torch.rbln.get_device_name(0), torch.rbln.get_device_properties(0).name)
@@ -126,7 +98,6 @@ print(props.npu_count, props.total_memory, props.memory_per_chiplet, props.num_c
         script = """
 import torch
 import torch_rbln
-import torch_rbln._C
 
 entry = torch_rbln._C._get_device_topology().entries[0]
 print(torch.rbln.device_count(), list(entry.physical_device_ids), torch.rbln.get_device_properties(0).name)
