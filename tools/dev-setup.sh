@@ -14,10 +14,9 @@ USAGE:
     ./tools/dev-setup.sh <mode> [options]
 
 MODES:
-    pypi          Use PyPI rebel-compiler (default, fastest)
-    external      Use external rebel-compiler from REBEL_HOME
+    pypi          Use PyPI rebel-compiler (default)
 
-PYPI MODE (Recommended for most development):
+PYPI MODE:
     ./tools/dev-setup.sh pypi [--clean] [--extra-index-url <url>]
 
     This will:
@@ -39,11 +38,11 @@ PYPI MODE (Recommended for most development):
 
     pip's PIP_EXTRA_INDEX_URL is not read by uv; use UV_INDEX / UV_EXTRA_INDEX_URL.
 
-EXTERNAL MODE (For rebel-compiler developers):
-    export REBEL_HOME=/path/to/rebel_compiler
-    ./tools/dev-setup.sh external [--clean]
-
-    This will use build-with-external-rebel.sh
+BUILDING AGAINST A LOCAL rebel-compiler TREE:
+    This script only installs the rebel-compiler wheel. To link against a tree you
+    built yourself, set both RBLN_USE_EXTERNAL_REBEL_COMPILER=1 and REBEL_HOME and run
+    `uv pip install -e . --no-build-isolation` directly; cmake/FindRebel.cmake documents
+    what the tree must contain.
 
 EXAMPLES:
     # Quick setup with PyPI (fastest)
@@ -54,10 +53,6 @@ EXAMPLES:
 
     # PyPI with a private extra index (e.g. for constraints-build-dev.txt)
     ./tools/dev-setup.sh pypi --extra-index-url 'https://example.com/simple/'
-
-    # Use external rebel-compiler
-    export REBEL_HOME=~/rebel_compiler
-    ./tools/dev-setup.sh external --clean
 
 HELP
 }
@@ -250,59 +245,24 @@ mode_pypi() {
     echo "  python -c 'import torch_rbln; print(torch_rbln.__version__)'"
 }
 
-mode_external() {
-    local clean_flag=()
-
-    if [[ "$1" = "--clean" ]]; then
-        clean_flag=(--clean)
-    fi
-
-    if [[ -z "${REBEL_HOME}" ]]; then
-        echo "❌ REBEL_HOME is not set"
-        echo ""
-        echo "Usage:"
-        echo "  export REBEL_HOME=/path/to/rebel_compiler"
-        echo "  ./tools/dev-setup.sh external ${clean_flag[*]}"
-        exit 1
-    fi
-
-    echo "🔗 Setting up with external rebel-compiler from REBEL_HOME..."
-    echo "REBEL_HOME: ${REBEL_HOME}"
-
-    cd "${PROJECT_ROOT}"
-    ./tools/build-with-external-rebel.sh "${clean_flag[@]}"
-
-    echo "✅ Setup complete with external rebel-compiler!"
-}
-
 # Main
 cd "${PROJECT_ROOT}"
 
 MODE="${1:-pypi}"
 shift || true
 
-# pypi and custom modes must not be run with REBEL_HOME set (use external mode instead)
-if [[ -n "${REBEL_HOME:-}" ]]; then
-    if [[ "${MODE}" = "pypi" ]] || [[ "${MODE}" = "custom" ]]; then
-        echo "❌ REBEL_HOME is set (REBEL_HOME=${REBEL_HOME})"
-        echo "   pypi and custom modes ignore REBEL_HOME and may cause confusion."
-        echo ""
-        echo "   To use the compiler at REBEL_HOME, run:"
-        echo "     ./tools/dev-setup.sh external [--clean]"
-        echo ""
-        echo "   To run ${MODE} mode, unset REBEL_HOME first:"
-        echo "     unset REBEL_HOME"
-        printf '     ./tools/dev-setup.sh %s %s\n' "${MODE}" "$*"
-        exit 1
-    fi
+# pypi mode installs the rebel-compiler wheel; cmake/FindRebel.cmake would pick up an
+# external tree instead if these are set, so refuse the mix rather than build a surprise.
+if [[ "${MODE}" = "pypi" ]] && { [[ -n "${REBEL_HOME:-}" ]] || [[ -n "${RBLN_USE_EXTERNAL_REBEL_COMPILER:-}" ]]; }; then
+    echo "❌ REBEL_HOME / RBLN_USE_EXTERNAL_REBEL_COMPILER is set."
+    echo "   pypi mode builds against the installed rebel-compiler wheel, not an external tree."
+    echo "   Unset both and re-run, or build against the tree directly (see --help)."
+    exit 1
 fi
 
 case "${MODE}" in
     pypi)
         mode_pypi "$@"
-        ;;
-    external)
-        mode_external "$@"
         ;;
     -h|--help|help)
         show_help
