@@ -95,7 +95,7 @@ Re-run `./tools/dev-setup.sh pypi` once the file is in place.
 - [Test Guide](https://github.com/RBLN-SW/torch-rbln/blob/main/docs/TEST_GUIDE.md) — local test runs
 - [Linting](https://github.com/RBLN-SW/torch-rbln/blob/main/docs/LINTING.md) — code style and lint
 - [Third-party update](https://github.com/RBLN-SW/torch-rbln/blob/main/docs/THIRD_PARTY_UPDATE.md) — PyTorch pin, upstream files, `rebel-compiler` version bumps in `pyproject.toml`
-- [Release Process](https://github.com/RBLN-SW/torch-rbln/blob/main/docs/RELEASE_PROCESS.md) — branch model, versioning, tagging, and publication
+- [Release Process](https://github.com/RBLN-SW/torch-rbln/blob/main/docs/RELEASE_PROCESS.md) — release lifecycle, versioning, tagging, and publication
 
 ## Contributing
 

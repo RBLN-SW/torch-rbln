@@ -102,6 +102,10 @@ void register_public_device_api(py::module_& module) {
   module.def("empty_cache", &c10::rbln::empty_cache, "Release all unoccupied cached memory.");
   module.def("memory_stats", &c10::rbln::memory_stats, "Get memory allocator statistics.");
   module.def(
+      "memory_stats_per_chiplet",
+      &c10::rbln::memory_stats_per_chiplet,
+      "Get memory allocator statistics broken down per chiplet.");
+  module.def(
       "reset_accumulated_memory_stats", &c10::rbln::reset_accumulated_memory_stats, "Reset accumulated memory stats.");
   module.def("reset_peak_memory_stats", &c10::rbln::reset_peak_memory_stats, "Reset peak memory stats.");
 
