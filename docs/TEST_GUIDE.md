@@ -199,7 +199,9 @@ python -m pytest test/rbln/test_graph_eager_mode.py -s -v -x
 #### Installing Test Dependencies
 
 ```bash
-# Install everything needed to run the full suite
+# Install everything needed to run the full suite. vllm-rbln and optimum-rbln
+# land in .venv-inference (they pin transformers 5; test_transformers.py needs
+# 4), and run_tests.py runs test_optimum_llm.py / test_vllm_llm.py with it.
 ./tools/test/install-test-deps.sh
 
 # Preview what would be installed (dry-run)
@@ -207,6 +209,14 @@ python -m pytest test/rbln/test_graph_eager_mode.py -s -v -x
 
 # Use uv instead of pip
 UV=1 ./tools/test/install-test-deps.sh
+```
+
+The inference venv is installed `--no-deps` from `tools/test/requirements-inference.txt`,
+an export of vllm-rbln's `uv.lock` (minus torch and torch-rbln, which the venv shares with
+the test venv). To move to another vllm-rbln commit:
+
+```bash
+VLLM_RBLN_REF=<ref> ./tools/test/export-inference-requirements.sh   # needs uv
 ```
 
 ### C++ Tests
@@ -274,6 +284,7 @@ These fixtures are defined in `test/conftest.py` and apply automatically to ever
 | `disable_compile_error_fallback` | function | **Yes** | Appends `compile_error` to `TORCH_RBLN_DISABLE_FALLBACK` env var                                              |
 | `reset_caching_allocator`        | function | **Yes** | Drains in-flight device work then releases the RBLN caching-allocator blocks in teardown; fails loud and skips the flush if the drain faults |
 | `restore_current_device`         | function | **Yes** | Restores the selected RBLN device and lazy-init flag after each test so a `set_device()` can't leak into later tests |
+| `restore_current_stream`         | function | **Yes** | Restores every device's current stream after each test so a `set_stream()` can't leak into later tests               |
 | `enable_deploy_mode`             | function | No      | Sets `TORCH_RBLN_DEPLOY=ON`. Apply with `@pytest.mark.usefixtures("enable_deploy_mode")`                      |
 | `enable_eager_malloc`            | function | No      | Sets `TORCH_RBLN_EAGER_MALLOC=1`. Apply with `@pytest.mark.usefixtures("enable_eager_malloc")`                |
 
@@ -510,8 +521,9 @@ class TestMemoryStats(TestCase):
 >
 > The same applies to any other process-global state a test mutates. Restore it in the
 > test's own teardown (e.g. `TestTorchCompileMonkeyPatch.tearDown` re-installs the original
-> `torch.compile` wrappers it patched), or — for the selected RBLN device — rely on the
-> autouse `restore_current_device` guard in `test/conftest.py` that repairs it after each test.
+> `torch.compile` wrappers it patched), or — for the selected RBLN device and the current
+> stream — rely on the autouse `restore_current_device` / `restore_current_stream` guards in
+> `test/conftest.py` that repair them after each test.
 
 ### Custom Kernel Test Template
 
@@ -711,17 +723,17 @@ For the full workflow architecture, see [Workflows](WORKFLOWS.md).
 
 ### How Tests Run in CI
 
-The [CI workflow](WORKFLOWS.md#ci-workflow) triggers on every pull request (except those targeting `main`) and on pushes to `dev`. It runs `run_tests.py` in CI mode:
+The [pre-merge checks](WORKFLOWS.md#pre-merge-checks) trigger on every pull request, and the [post-merge checks](WORKFLOWS.md#post-merge-checks) on every push to `main`. Both run `run_tests.py` in CI mode:
 
 ```bash
 python test/run_tests.py  # -m "test_set_ci"
 ```
 
-This means only tests marked with `@pytest.mark.test_set_ci` are selected. **If you write a new test and want it to run in CI, you must add the `@pytest.mark.test_set_ci` marker.**
+This means only tests marked with `@pytest.mark.test_set_ci` are selected. **Without it, the pre-merge checks never run the test.**
 
 ### How Tests Run in Release
 
-The [Release workflow](WORKFLOWS.md#release-workflow) triggers on pull requests to `main` and on pushes to `main`. It runs `run_tests.py` in release mode:
+The [release checks](WORKFLOWS.md#release-checks) run daily against `main`. They run `run_tests.py` in release mode:
 
 ```bash
 python test/run_tests.py --test_mode=release  # -m "not (test_set_experimental or test_set_perf)"
@@ -733,12 +745,12 @@ This selects a broader set of tests — everything except tests marked `test_set
 
 When writing a new test, choose the marker based on when the test should run:
 
-| Test Type          | Marker                               | When It Runs                              | Guideline                                                                    |
+| Test type          | Marker                               | When it runs                              | Guideline                                                                    |
 |--------------------|--------------------------------------|-------------------------------------------|------------------------------------------------------------------------------|
-| CI tests           | `@pytest.mark.test_set_ci`           | Every PR to `dev`                         | Default choice — most tests should use this marker                           |
-| Release tests      | *(no marker)*                        | PRs to `main`                             | For tests too slow or resource-intensive for every PR, but needed at release |
+| CI tests           | `@pytest.mark.test_set_ci`           | Every PR and every `main` push            | Default choice — most tests should use this marker                           |
+| Release tests      | *(no marker)*                        | Release checks on `main`                  | For tests too slow or resource-intensive for every PR, but needed at release |
 | Performance tests  | `@pytest.mark.test_set_perf`         | Manual only (`pytest -m "test_set_perf"`) | Benchmarks and latency/throughput measurements                               |
-| Experimental tests | `@pytest.mark.test_set_experimental` | CI (with `test_set_ci` marker) or manual  | Early-stage features — excluded from Release to avoid blocking releases      |
+| Experimental tests | `@pytest.mark.test_set_experimental` | CI (with `test_set_ci` marker) or manual  | Early-stage features — excluded from release mode to avoid blocking releases |
 
 > **How this works:** CI mode runs `pytest -m "test_set_ci"`, selecting only `test_set_ci`-marked tests. Release mode runs `pytest -m "not (test_set_experimental or test_set_perf)"`, which includes all `test_set_ci`-marked tests *plus* unmarked tests, but excludes `test_set_experimental` and `test_set_perf`. The two modes overlap but neither is a strict superset of the other — a test marked with both `@pytest.mark.test_set_ci` and `@pytest.mark.test_set_experimental` will run in CI but not in Release. In practice, **most tests should be marked `@pytest.mark.test_set_ci`**. Omit the marker only when a test is intentionally too slow for per-commit CI but still valuable for pre-release validation.
 >
