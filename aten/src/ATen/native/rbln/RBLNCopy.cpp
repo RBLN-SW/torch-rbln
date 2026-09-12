@@ -87,6 +87,29 @@ struct IndirectD2DGuard {
 // the errors are asymmetric: staging a slab descriptors would have won costs ~1.3x,
 // descriptors on element-sized slabs 130x.
 constexpr size_t kMinStridedHostCopyBytes = 16 * 1024;
+// Below the crossover the plan declines and copy_ stages through the host. For a
+// device-latest dst that staging is a read-back and rewrite of the whole span, so a lower
+// crossover would pay off there; choosing it needs the residency, which this path does not
+// query, so the constant stays at the host-latest crossover.
+
+// Whether make_strided_host_plan would accept `dst` paired with a contiguous source of the
+// same shape and dtype: the inner block is then dst's own contiguous suffix and the overlap
+// rule is dst's, so the answer does not need the source to exist yet.
+bool strided_plan_possible_for_contiguous_src(const at::Tensor& dst) {
+  if (dst.numel() == 0 || dst.is_contiguous()) {
+    return false;
+  }
+  if (at::has_internal_overlap(dst) != at::MemOverlap::No && view_may_self_overlap(dst.sizes(), dst.strides())) {
+    return false;
+  }
+  const auto sizes = dst.sizes();
+  const int64_t inner_start = contig_suffix_start(sizes, dst.strides());
+  int64_t inner_block_elems = 1;
+  for (int64_t i = inner_start; i < dst.dim(); ++i) {
+    inner_block_elems *= sizes[i];
+  }
+  return static_cast<size_t>(inner_block_elems) * static_cast<size_t>(dst.element_size()) >= kMinStridedHostCopyBytes;
+}
 
 // Byte-level description of one strided pair. `inner_block_bytes` is the largest
 // run contiguous in both tensors; the outer vectors describe the iteration above
@@ -284,7 +307,39 @@ void tensor_copy_from_cpu_to_rbln(const at::Tensor& cpu_src, const at::Tensor& r
           prepared_cpu_src.sizes(), prepared_cpu_src.strides(), prepared_cpu_src.element_size());
       c10::rbln::memcpy_h2v(dst_data, src_data, nbytes);
     } else {
-      // PROFILER (cold branch): a non-contiguous rbln dst is pulled to host
+      // A shape / dtype / layout mismatch on the cpu src is what kept the strided plan
+      // above from applying. A contiguous src in the dst's shape and dtype lets the plan
+      // write the runs in place instead of staging the whole dst. The dst alone decides
+      // whether the plan can take such a src, so that is checked before converting; the
+      // converted src is reused by the staged path if the plan still declines.
+      std::optional<at::Tensor> prepared_cpu_src;
+      if ((cpu_src.sizes() != rbln_dst.sizes() || cpu_src.scalar_type() != rbln_dst.scalar_type() ||
+           !cpu_src.is_contiguous()) &&
+          strided_plan_possible_for_contiguous_src(rbln_dst)) {
+        // PROFILER (cold branch): hidden staging alloc + CPU copy of the src before h2v.
+        // Suppressed when nested inside an rbln->rbln indirect copy (counted once there).
+        if (g_indirect_d2d_depth == 0) {
+          c10::rbln::prof::record_bounce(
+              c10::rbln::prof::BounceSite::kCpu2RblnStaging,
+              static_cast<uint64_t>(rbln_dst.numel()) * rbln_dst.element_size());
+        }
+        prepared_cpu_src = at::empty(
+            rbln_dst.sizes(),
+            rbln_dst.scalar_type(),
+            std::nullopt,
+            c10::Device(c10::kCPU),
+            false,
+            c10::MemoryFormat::Contiguous);
+        prepared_cpu_src->copy_(cpu_src);
+        if (const auto plan = make_strided_host_plan(rbln_dst, *prepared_cpu_src)) {
+          RBLN_LOG_DEBUG("Strided h2v copy of a prepared src (no staging of the dst)");
+          c10::rbln::H2VBatch batch;
+          strided_host_copy<HostDir::kH2V>(rbln_dst, *prepared_cpu_src, *plan, batch, "copy_");
+          batch.submit();
+          return;
+        }
+      }
+      // PROFILER (cold branch): the non-contiguous rbln dst is pulled to the host
       // (hidden v2h), written on CPU, then copied back (h2v). Suppressed when
       // nested inside an rbln->rbln indirect copy (counted once there).
       if (g_indirect_d2d_depth == 0) {
@@ -297,7 +352,7 @@ void tensor_copy_from_cpu_to_rbln(const at::Tensor& cpu_src, const at::Tensor& r
 
       RBLN_LOG_DEBUG("Copying CPU src to CPU copy");
       // Upstream at::native::copy_() handles broadcasting, dtype conversion, and non-contiguous tensors.
-      cpu_dst.copy_(cpu_src);
+      cpu_dst.copy_(prepared_cpu_src ? *prepared_cpu_src : cpu_src);
 
       RBLN_LOG_DEBUG("Copying CPU copy back to RBLN dst");
       auto* dst_data = rbln_dst.data_ptr();

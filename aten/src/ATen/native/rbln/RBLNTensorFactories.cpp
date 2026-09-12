@@ -1,13 +1,17 @@
+#include <ATen/MemoryOverlap.h>
 #include <ATen/native/rbln/RBLNCopy.h>
+#include <ATen/native/rbln/RBLNStrideUtils.h>
 #include <ATen/native/rbln/RBLNTensorFactories.h>
 #include <ATen/native/rbln/RBLNTensorUtils.h>
 #include <c10/rbln/RBLNFunctions.h>
+#include <c10/rbln/RBLNHostBatch.h>
 #include <c10/rbln/RBLNLogging.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <vector>
 
 namespace at::native::rbln {
 
@@ -228,6 +232,67 @@ at::Tensor& fill_scalar_via_cpu(at::Tensor& self, const at::Scalar& value) {
   return self;
 }
 
+// Region fill through the runtime's host->virtual copy.
+//
+// The borrow path below materialises the whole storage on the host: a device-latest
+// tensor is read back in full, the view is filled, and the storage is left host-latest,
+// so the next device consumer uploads all of it again. Writing the view's runs through
+// the h2v copy instead lets the runtime route by the entry's own sync state, as it does
+// for every cpu->rbln copy_: a device-resident entry is written in place and stays
+// device-latest; a host-latest or empty entry is written in its user view with no
+// transfer.
+//
+// The contiguous suffix of the view's dims is one run; the dims above it are the outer
+// iteration, enqueued with a source stride of 0 so one pattern buffer feeds every run,
+// and H2VBatch splits the submit to the runtime's bulk caps. Declined, and left to the
+// paths below: a view whose runs could alias (bulk destinations must be disjoint), more
+// runs than kMaxFillRuns, or a run larger than the pattern buffer cap.
+namespace {
+constexpr int64_t kMaxFillRuns = 4096;
+constexpr size_t kMaxPatternBytes = size_t{16} << 20; // one pattern buffer per fill
+
+bool fill_region_device(at::Tensor& self, const at::Scalar& value) {
+  const auto sizes = self.sizes();
+  const auto strides = self.strides();
+  if (at::has_internal_overlap(self) != at::MemOverlap::No && view_may_self_overlap(sizes, strides)) {
+    return false;
+  }
+  const int64_t rank = self.dim();
+  const int64_t elm = self.element_size();
+  const int64_t inner_start = contig_suffix_start(sizes, strides);
+  int64_t inner_elems = 1;
+  for (int64_t i = inner_start; i < rank; ++i) {
+    inner_elems *= sizes[i];
+  }
+  int64_t outer_count = 1;
+  for (int64_t i = 0; i < inner_start; ++i) {
+    outer_count *= sizes[i];
+  }
+  if (outer_count > kMaxFillRuns) {
+    return false;
+  }
+  const size_t run_bytes = static_cast<size_t>(inner_elems) * static_cast<size_t>(elm);
+  if (run_bytes == 0 || run_bytes > kMaxPatternBytes) {
+    return false;
+  }
+  std::vector<uint8_t> pattern(run_bytes);
+  if (!fill_host_typed(pattern.data(), inner_elems, self.scalar_type(), value)) {
+    return false;
+  }
+  c10::SmallVector<int64_t, 8> outer_sizes(sizes.begin(), sizes.begin() + inner_start);
+  c10::SmallVector<int64_t, 8> src_byte_strides(static_cast<size_t>(inner_start), 0);
+  c10::SmallVector<int64_t, 8> dst_byte_strides;
+  for (int64_t i = 0; i < inner_start; ++i) {
+    dst_byte_strides.push_back(strides[i] * elm);
+  }
+  c10::rbln::H2VBatch batch;
+  batch.enqueue_strided(self.data_ptr(), pattern.data(), run_bytes, outer_sizes, src_byte_strides, dst_byte_strides);
+  batch.submit();
+  RBLN_LOG_DEBUG("fill_: region fill through h2v, runs={} run_bytes={}", outer_count, run_bytes);
+  return true;
+}
+} // namespace
+
 // RAII for a host borrow: if the scope exits via a throw (e.g. Scalar::to<T>()'s checked
 // cast overflowing), return the borrow (updated=false) so it isn't leaked. The happy path
 // returns explicitly then disarms.
@@ -271,6 +336,10 @@ at::Tensor& fill_scalar_rbln_(at::Tensor& self, const at::Scalar& value) {
       }
     }
     fill_scalar_rbln_(collapsed, value);
+    return self;
+  }
+
+  if (fill_host_typed_supports(self.scalar_type()) && fill_region_device(self, value)) {
     return self;
   }
 
