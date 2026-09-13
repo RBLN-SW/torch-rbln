@@ -22,9 +22,9 @@
 #                      test_vllm_llm.py with this venv's interpreter. The venv
 #                      sees the test venv's site-packages (torch, torch-rbln,
 #                      rebel-compiler, pytest) through a .pth file and adds
-#                      only the stack on top. The packages under test must stay
-#                      the test venv's copies, so the install is verified
-#                      against that before the script exits.
+#                      only the stack on top, --no-deps from the pinned
+#                      requirements-inference.txt. The install is verified
+#                      to have left the shared packages alone.
 #
 # Usage:
 #   ./tools/test/install-test-deps.sh [--dry-run]
@@ -32,7 +32,8 @@
 # Optional environment:
 #   UV=1                 Use ``uv pip install`` instead of ``python -m pip``.
 #   VLLM_RBLN_REPO       Override the source repo (default rbln-sw/vllm-rbln).
-#   VLLM_RBLN_REF        Override the ref (default origin/ci/torch-rbln-model-tests).
+#   VLLM_RBLN_REF        Override the ref (default: the commit recorded in
+#                        requirements-inference.txt).
 #   VLLM_RBLN_DIR        Override the local checkout path
 #                        (default ``$PROJECT_ROOT/vllm-rbln``).
 #   INFERENCE_VENV       Override the inference-stack venv path
@@ -131,50 +132,38 @@ install_model_test_deps() {
 # The stack goes into its own venv because it pins transformers 5 (see step 3).
 # The venv layers on this interpreter's site-packages through a .pth file, so
 # torch, torch-rbln, rebel-compiler and pytest are shared and only vllm-rbln
-# plus its runtime dependencies (optimum-rbln among them) are added. Those
-# dependencies are read from vllm-rbln's pyproject.toml so nothing is re-pinned
-# here. torch-rbln and torch are left out and the editable install is
-# ``--no-deps``: vllm-rbln bounds torch-rbln to a release line that a nightly or
-# editable torch-rbln does not satisfy, and a resolving install would replace
-# the package under test.
+# plus its dependencies are added, --no-deps from requirements-inference.txt
+# (vllm-rbln's uv.lock minus torch and torch-rbln). With no resolver running,
+# no requirement at any depth can replace the shared packages: vllm pins the
+# release torch wheel, which a debug or locally built torch does not match.
 
-vllm_wheel_index_from_pyproject() {
-  # Read the vllm-cpu index URL out of vllm-rbln's pyproject.toml so we don't
-  # have to keep a separate vllm version pinned in this script.
-  local pyproject="$1"
-  python - "${pyproject}" <<'PY'
-import sys, tomllib, pathlib
-data = tomllib.loads(pathlib.Path(sys.argv[1]).read_text())
-for idx in data.get("tool", {}).get("uv", {}).get("index", []):
-    if idx.get("name") == "vllm-cpu":
-        print(idx["url"])
-        sys.exit(0)
-sys.exit(f"vllm-cpu index URL not found in {sys.argv[1]}")
-PY
-}
+REQUIREMENTS_INFERENCE="${SCRIPT_DIR}/requirements-inference.txt"
+readonly REQUIREMENTS_INFERENCE
 
-vllm_rbln_runtime_deps() {
-  # One requirement per line, environment markers kept.
-  local pyproject="$1"
-  python - "${pyproject}" <<'PY'
-import re, sys, tomllib, pathlib
-data = tomllib.loads(pathlib.Path(sys.argv[1]).read_text())
-skip = {"torch-rbln", "torch"}
-for req in data["project"]["dependencies"]:
-    name = re.split(r"[\s\[<>=!~;]", req.strip(), maxsplit=1)[0].lower().replace("_", "-")
-    if name not in skip:
-        print(req)
-PY
+recorded_vllm_rbln_ref() {
+  local ref
+  ref="$(sed -nE 's/^# vllm-rbln-ref: ([0-9a-f]+)$/\1/p' "${REQUIREMENTS_INFERENCE}")"
+  if [[ -z "${ref}" ]]; then
+    echo "${REQUIREMENTS_INFERENCE} records no vllm-rbln-ref; run export-inference-requirements.sh" >&2
+    return 1
+  fi
+  echo "${ref}"
 }
 
 install_vllm_rbln() {
   local repo="${VLLM_RBLN_REPO:-https://github.com/rbln-sw/vllm-rbln.git}"
-  local ref="${VLLM_RBLN_REF:-origin/ci/torch-rbln-model-tests}"
+  local ref
+  ref="${VLLM_RBLN_REF:-$(recorded_vllm_rbln_ref)}"
   local dir="${VLLM_RBLN_DIR:-${PROJECT_ROOT}/vllm-rbln}"
   local venv="${INFERENCE_VENV:-${PROJECT_ROOT}/.venv-inference}"
   local py="${venv}/bin/python"
 
   log_step "Inference stack: vllm-rbln (clone + editable install at ${ref}) into ${venv}"
+
+  if grep -qE '^(torch|torch-rbln)==' "${REQUIREMENTS_INFERENCE}"; then
+    echo "${REQUIREMENTS_INFERENCE} lists torch or torch-rbln; run export-inference-requirements.sh" >&2
+    return 1
+  fi
 
   if [[ ! -x "${py}" ]]; then
     run python -m venv "${venv}"
@@ -204,7 +193,7 @@ pathlib.Path(child, "torch-rbln-test-venv.pth").write_text(
 PY
   fi
 
-  if [[ ! -d "${dir}/.git" ]]; then
+  if ! git -C "${dir}" rev-parse --git-dir >/dev/null 2>&1; then
     echo "Cloning ${repo} into ${dir}..."
     run git clone "${repo}" "${dir}"
   fi
@@ -215,33 +204,9 @@ PY
     (cd "${dir}" && git fetch origin --prune && git checkout --detach "${ref}")
   fi
 
-  local vllm_index
-  if [[ "${DRY_RUN}" -eq 1 ]]; then
-    vllm_index="<resolved-from-pyproject-at-runtime>"
-  else
-    vllm_index="$(vllm_wheel_index_from_pyproject "${dir}/pyproject.toml")"
-    echo "Resolved vllm wheel index from vllm-rbln pyproject: ${vllm_index}"
-  fi
-
-  # The rbln index resolves vllm-rbln's ``optimum-rbln`` pin; ordinary PyPI
-  # packages come from the default index.
-  local -a deps
-  if [[ "${DRY_RUN}" -eq 1 ]]; then
-    deps=("<vllm-rbln runtime deps minus torch-rbln/torch, from pyproject at runtime>")
-  else
-    local deps_text
-    deps_text="$(vllm_rbln_runtime_deps "${dir}/pyproject.toml")"
-    mapfile -t deps <<< "${deps_text}"
-  fi
-  # Installed with the inference venv's own pip, never uv, whatever UV is set
-  # to: pip reads the target interpreter's sys.path, so it sees the test venv's
-  # torch and torch-rbln through the .pth above and leaves them alone. uv
-  # resolves against the venv directory only, does not see them, and pulls its
-  # own torch in as a transitive dependency of vllm.
-  run "${py}" -m pip install "${deps[@]}" \
-    --extra-index-url "${vllm_index}" \
-    --extra-index-url https://pypi.rbln.ai/simple/ \
-    --extra-index-url https://download.pytorch.org/whl/cpu
+  # The inference venv's own pip, whatever UV is set to; the index options are
+  # in the requirements file.
+  run "${py}" -m pip install --no-deps --requirement "${REQUIREMENTS_INFERENCE}"
   run "${py}" -m pip install -e "${dir}" --no-deps
 
   verify_shared_packages "${py}"
@@ -272,7 +237,7 @@ import tempfile
 # no working directory on sys.path (a torch-rbln checkout has a ``torch`` symlink
 # at its root, and the installer is normally run from there).
 PROBE = r"""
-import json, os
+import importlib.metadata, json, os, sysconfig
 out = {}
 for name in ("torch", "torch_rbln", "rebel", "transformers"):
     try:
@@ -282,6 +247,14 @@ for name in ("torch", "torch_rbln", "rebel", "transformers"):
     else:
         path = getattr(mod, "__file__", "") or ""
         out[name] = [getattr(mod, "__version__", None), os.path.realpath(path) if path else ""]
+# Distributions in this interpreter's own site-packages, not via a .pth.
+purelib = os.path.realpath(sysconfig.get_paths()["purelib"])
+own = sorted(
+    dist.metadata["Name"]
+    for dist in importlib.metadata.distributions()
+    if os.path.realpath(str(dist.locate_file(""))).startswith(purelib)
+)
+out["_own_distributions"] = own
 print(json.dumps(out))
 """
 
@@ -307,6 +280,13 @@ for name in ("torch", "torch_rbln", "rebel"):
         problems.append("{}: {} in the inference venv, {} here".format(name, path, here[name][1]))
     if here[name][0] is not None and version != here[name][0]:
         problems.append("{}: {} in the inference venv, {} here".format(name, version, here[name][0]))
+
+# A second distribution in the venv is wrong even while the import still resolves
+# to the shared copy.
+own = {n.lower().replace("_", "-") for n in child["_own_distributions"]}
+for name in ("torch", "torch-rbln"):
+    if name in own:
+        problems.append("{}: a distribution is installed in the inference venv itself".format(name))
 
 # The whole point of the split: the inference venv must bring its own transformers.
 if child["transformers"][0] is None:

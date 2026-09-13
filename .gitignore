@@ -31,6 +31,8 @@ uv.lock
 venv/
 .venv/
 .venv-inference/
+# default checkout location of tools/test/install-test-deps.sh
+/vllm-rbln/
 
 # Compiled objects & libraries
 *.o
