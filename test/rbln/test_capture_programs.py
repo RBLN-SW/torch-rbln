@@ -8,9 +8,16 @@ what is observable from torch-rbln:
 
 * the surface (``torch.rbln.capture_programs`` / ``CompiledProgram`` are exposed and
   are the rebel objects, so there is one implementation);
+* the surface staying lazy, so ``import torch`` does not pull ``rebel`` in through the
+  autoload hook;
 * a torch.compile on the rbln backend inside the scope yields one program per graph
   the backend built, carrying the runtime behind the compiled callable.
 """
+
+import os
+import subprocess
+import sys
+import textwrap
 
 import pytest
 import torch
@@ -18,6 +25,9 @@ from torch.testing._internal.common_device_type import instantiate_device_type_t
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 import torch_rbln.programs as torch_rbln_programs
+
+
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 @pytest.mark.test_set_ci
@@ -34,6 +44,40 @@ class TestCaptureProgramsSurface(TestCase):
         with torch.rbln.capture_programs() as programs:
             pass
         self.assertEqual(programs, [])
+
+
+@pytest.mark.test_set_ci
+class TestCaptureProgramsLazy(TestCase):
+    def test_import_does_not_load_rebel(self):
+        """Importing torch_rbln must leave ``rebel`` out of ``sys.modules``.
+
+        ``import torch`` runs ``import torch_rbln`` through the autoload hook, so a
+        top-level rebel import here puts the dynamo backend and its custom op
+        registration on every torch user's import path. Both names in
+        ``torch_rbln.programs`` therefore resolve on first access instead.
+        """
+        script = f"""
+            import sys
+            sys.path.insert(0, {_PROJECT_ROOT!r})
+            import torch, torch_rbln  # noqa: F401
+            loaded = sorted(m for m in sys.modules if m == "rebel" or m.startswith("rebel."))
+            assert not loaded, "import pulled in " + ", ".join(loaded)
+
+            from rebel.core.program_capture import capture_programs
+            assert torch.rbln.capture_programs is capture_programs
+            print("LAZY_OK")
+        """
+        result = subprocess.run(
+            [sys.executable, "-c", textwrap.dedent(script)],
+            cwd=_PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertTrue(
+            result.returncode == 0 and "LAZY_OK" in result.stdout,
+            f"torch_rbln imported rebel eagerly\n--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}",
+        )
 
 
 @pytest.mark.test_set_ci
