@@ -23,6 +23,8 @@ import textwrap
 
 import pytest
 
+from test.utils import is_rebel_device
+
 
 pytestmark = pytest.mark.test_set_ci
 
@@ -784,6 +786,15 @@ print("OK")
 
 
 @pytest.mark.single_worker
+# Not xfail_rebel(): that helper is strict, and the fault sits in the pinned compiler, so a
+# rebel-compiler that compiles this decoder again must not fail the job on XPASS. `-rEfX`
+# still reports the XPASS, which is the signal to drop this marker.
+@pytest.mark.xfail(
+    condition=is_rebel_device(),
+    reason="known issue: the pinned rebel-compiler does not compile this decoder for the REBEL "
+    "target; drop once the pin carries a build that does",
+    strict=False,
+)
 def test_dummy_compiled_prefill_decode_runs_on_real_npu(tmp_path):
     # End-to-end purpose of dummy mode: prefill/decode graphs compiled with no NPU
     # (allocations host-backed by rebel v-memory, no device opened) must load and run
