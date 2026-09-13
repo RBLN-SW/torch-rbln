@@ -23,6 +23,8 @@ __all__ = [
     "is_dummy_device",
     "is_initialized",
     "get_amp_supported_dtype",
+    "get_device_properties",
+    "get_device_name",
     "set_device",
     "synchronize",
     "device",
@@ -141,6 +143,43 @@ def get_amp_supported_dtype() -> List[torch.dtype]:
         List[torch.dtype]: A list of data types supported by AMP.
     """
     return list(SupportedDtypes.amp)
+
+
+def get_device_properties(
+    device: Union[int, torch.device, str, None] = None,
+) -> torch_rbln._C.DeviceProperties:
+    """What the NPUs behind an RBLN logical device are (``torch.cuda`` parity).
+
+    A logical device may span several physical NPUs (``RBLN_DEVICE_MAP`` /
+    ``RBLN_NPUS_PER_DEVICE``), so ``total_memory`` sums them and ``npu_count`` says how many.
+    ``num_chiplet`` and ``memory_per_chiplet`` stay per NPU: a device runs out on its heaviest
+    chiplet, which ``total_memory`` hides, so size a pool by ``memory_per_chiplet``.
+
+    Args:
+        device (torch.device or int or str, optional): The device to query. Defaults to the
+            current device.
+
+    Raises:
+        RuntimeError: in ``RBLN_DUMMY_DEVICE`` mode (host-backed, no NPU to report on), when no
+            NPU is mapped to the index, or when the runtime cannot answer for one of them.
+
+    Example::
+        >>> import torch
+        >>> torch.rbln.get_device_properties(0).total_memory
+        150323855360
+    """
+    device_idx = current_device() if device is None else _get_device_index(device)
+    return torch_rbln._C.get_device_properties(device_idx)
+
+
+def get_device_name(device: Union[int, torch.device, str, None] = None) -> str:
+    """The NPU name behind an RBLN logical device, e.g. ``"RBLN-CA25"`` (``torch.cuda`` parity).
+
+    Args:
+        device (torch.device or int or str, optional): The device to query. Defaults to the
+            current device.
+    """
+    return get_device_properties(device).name
 
 
 def synchronize(device: Union[int, torch.device, str, None] = None) -> None:

@@ -55,6 +55,27 @@ C10_RBLN_API c10::DeviceIndex get_device_count();
 C10_RBLN_API c10::DeviceIndex get_physical_device_count();
 
 /**
+ * @brief What the NPUs behind one logical device are.
+ *
+ * total_memory sums the device's physical NPUs; num_chiplet and memory_per_chiplet stay per NPU.
+ */
+struct C10_RBLN_API DeviceProperties {
+  std::string name;
+  uint64_t total_memory = 0;
+  uint64_t memory_per_chiplet = 0;
+  uint32_t num_chiplet = 0;
+  uint32_t npu_count = 0;
+};
+
+/**
+ * @brief Reports what the logical device at device_index is, summed over its NPUs.
+ *
+ * Needs real hardware: raises in dummy mode, when no NPU is mapped to the index, when the runtime
+ * cannot answer for one of them, or when the mapping aggregates unlike NPUs.
+ */
+C10_RBLN_API DeviceProperties get_device_properties(c10::DeviceIndex device_index);
+
+/**
  * @brief Returns the currently active RBLN device.
  *
  * This function retrieves the device that is currently set as the active
