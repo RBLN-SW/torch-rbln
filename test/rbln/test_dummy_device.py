@@ -23,6 +23,8 @@ import textwrap
 
 import pytest
 
+from test.utils import is_rebel_device
+
 
 pytestmark = pytest.mark.test_set_ci
 
@@ -784,6 +786,17 @@ print("OK")
 
 
 @pytest.mark.single_worker
+# Not xfail_rebel(): that helper is strict, and the fault sits in the pinned compiler, so a
+# rebel-compiler that carries the fix must not fail the job on XPASS. `-rEfX` still reports the
+# XPASS, which is the signal to drop this marker.
+@pytest.mark.xfail(
+    condition=is_rebel_device(),
+    reason="the pinned rebel-compiler rejects the decoder's residual add on the REBEL target "
+    '("sharding directives of the operands disagree after RSD annotation", '
+    "rebellions-sw/rebel_compiler#13474); fixed by rebellions-sw/rebel_compiler#13651, "
+    "drop once the pin carries it",
+    strict=False,
+)
 def test_dummy_compiled_prefill_decode_runs_on_real_npu(tmp_path):
     # End-to-end purpose of dummy mode: prefill/decode graphs compiled with no NPU
     # (allocations host-backed by rebel v-memory, no device opened) must load and run
