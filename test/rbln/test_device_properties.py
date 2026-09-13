@@ -12,7 +12,7 @@ import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from ..utils import requires_physical_devices
+from test.utils import requires_physical_devices
 
 
 @pytest.mark.test_set_ci
