@@ -12,6 +12,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace c10::rbln {
@@ -685,6 +686,22 @@ C10_RBLN_API void reset_accumulated_memory_stats(const c10::Device& device);
  * @param device The input device.
  */
 C10_RBLN_API void reset_peak_memory_stats(const c10::Device& device);
+
+/**
+ * @brief Returns the free and total device DRAM of `device` in bytes, as (free, total).
+ *
+ * The kernel driver's figure for the NPU as a whole -- every process, not this process's
+ * caching allocator (see memory_stats()) -- which is what torch.cuda.mem_get_info() reports
+ * on CUDA. Summed over the physical NPUs of the logical device; one tensor still lives on
+ * one NPU. A reading, not a reservation. Commits the device mapping like any device use.
+ *
+ * Raises when the installed UMD/KMD does not provide the query or under RBLN_DUMMY_DEVICE:
+ * there is no figure to report, and a guess here would size a KV cache wrong.
+ *
+ * @param device The input device.
+ * @return (free bytes, total bytes).
+ */
+C10_RBLN_API std::pair<size_t, size_t> mem_get_info(const c10::Device& device);
 
 /**
  * @brief Enables or disables process-wide file offloading for RBLN virtual memory.

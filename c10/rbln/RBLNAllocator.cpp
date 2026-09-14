@@ -128,6 +128,18 @@ struct RBLNAllocator final : public c10::DeviceAllocator {
   }
 
   /**
+   * @brief Returns (free, total) device DRAM in bytes for the specified device index.
+   *
+   * Backs torch.accelerator.get_memory_info(). Device-wide as the driver reports it, not
+   * this process's allocator; see c10::rbln::mem_get_info().
+   */
+  std::pair<size_t, size_t> getMemoryInfo(c10::DeviceIndex device_index) override {
+    const auto device = c10::Device(c10::kPrivateUse1, device_index);
+    RBLN_LOG_DEBUG("Getting memory info for {}", c10::str(device));
+    return c10::rbln::mem_get_info(device);
+  }
+
+  /**
    * @brief Resets accumulated memory statistics for the specified device index.
    *
    * @param device_index The index of the device for which to reset accumulated statistics.

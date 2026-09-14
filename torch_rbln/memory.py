@@ -23,6 +23,7 @@ __all__ = [
     "set_device_layout_like",
     "max_memory_allocated",
     "max_memory_reserved",
+    "mem_get_info",
     "memory_allocated",
     "memory_reserved",
     "memory_stats",
@@ -333,6 +334,37 @@ def max_memory_reserved(device: Optional[Union[int, str, torch.device]] = None) 
         int: The maximum memory reserved in bytes.
     """
     return memory_stats(device).get("reserved.peak", 0)
+
+
+def mem_get_info(device: Optional[Union[int, str, torch.device]] = None) -> tuple[int, int]:
+    """
+    Return the free and total device DRAM of ``device`` in bytes, as ``(free, total)``.
+
+    Same contract as :func:`torch.cuda.mem_get_info`, and what
+    :func:`torch.accelerator.get_memory_info` reports for ``rbln``: the NPU's figures as the
+    kernel driver sees them, across every process -- not this process's caching allocator,
+    which :func:`memory_stats` covers. ``total`` is the pool the driver can hand out, so it
+    sits below the part's nominal DRAM. A logical device spanning several physical NPUs
+    (``RBLN_NPUS_PER_DEVICE`` / ``RBLN_DEVICE_MAP``) reports their sum; one tensor still
+    lives on one NPU.
+
+    Needs no allocation and creates no context, but commits the device mapping like any
+    device use. A reading, not a reservation: another process may allocate right after.
+
+    Args:
+        device (Optional[Union[int, str, torch.device]]): The device to query.
+            If None, uses the current device. Defaults to None.
+
+    Returns:
+        tuple[int, int]: ``(free, total)`` in bytes.
+
+    Raises:
+        RuntimeError: no RBLN device, ``RBLN_DUMMY_DEVICE`` set, or the installed UMD/KMD
+            does not provide the device memory query (older drivers).
+    """
+    device = _normalize_device(device)
+    free, total = torch_rbln._C.mem_get_info(device)
+    return free, total
 
 
 def reset_accumulated_memory_stats(device: Optional[Union[int, str, torch.device]] = None) -> None:

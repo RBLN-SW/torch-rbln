@@ -1353,6 +1353,40 @@ std::map<std::string, uint64_t> memory_stats_per_chiplet(const c10::Device& devi
   return out;
 }
 
+std::pair<size_t, size_t> mem_get_info(const c10::Device& device) {
+  RBLN_LOG_DEBUG("logical device={}", c10::str(device));
+  RBLN_CHECK(
+      runtime_available(), "Cannot query device memory for {}: no RBLN runtime or device available", c10::str(device));
+  const auto device_index = device.index();
+  check_device_index(device_index);
+  to_device_id(device_index);
+
+  // The physical ids are the runtime's coordinate (after RBLN_VISIBLE_DEVICES), as registered at commit.
+  size_t free = 0;
+  size_t total = 0;
+  for (const int physical_id : DeviceMappingManager::getInstance().getPhysicalDeviceIds(device_index)) {
+    uint64_t npu_free = 0;
+    uint64_t npu_total = 0;
+    const auto rc = rbln_get_device_memory_info(physical_id, &npu_free, &npu_total);
+    RBLN_CHECK(
+        rc != RBLNRetCode_UNSUPPORTED,
+        "Device memory info is not available for {} (physical NPU {}): the installed RBLN UMD/KMD does not "
+        "provide the device memory query, or RBLN_DUMMY_DEVICE is set. Update the driver to use mem_get_info().",
+        c10::str(device),
+        physical_id);
+    RBLN_CHECK(
+        rc == RBLNRetCode_SUCCESS,
+        "rbln_get_device_memory_info failed for {} (physical NPU {}, rc={}); see the runtime log",
+        c10::str(device),
+        physical_id,
+        static_cast<int>(rc));
+    free += npu_free;
+    total += npu_total;
+  }
+  RBLN_LOG_DEBUG("mem_get_info: free={}, total={}", free, total);
+  return {free, total};
+}
+
 void reset_accumulated_memory_stats(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
   // Two-level context gate (see empty_cache); context flag first.

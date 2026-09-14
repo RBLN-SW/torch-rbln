@@ -77,6 +77,12 @@ class TestNoDevice(TestCase):
         self.assertEqual(rbln_memory.memory_stats(), {})
         self.assertEqual(rbln_memory.memory_allocated(), 0)
         self.assertEqual(rbln_memory.memory_reserved(), 0)
+        # mem_get_info() has nothing honest to report without a device: it raises, as
+        # torch.cuda.mem_get_info() does without CUDA, for the implicit and explicit index.
+        with self.assertRaises(RuntimeError):
+            rbln_memory.mem_get_info()
+        with self.assertRaises(RuntimeError):
+            rbln_memory.mem_get_info(0)
 
     def test_is_initialized_tracks_set_device(self):
         """``is_initialized()`` exists (DeviceMesh requires it).
@@ -162,6 +168,10 @@ class TestNoDevice(TestCase):
                     pass
             m.empty_cache()  # graceful, must not raise
             assert m.memory_stats() == {{}} and m.memory_allocated() == 0
+            try:
+                m.mem_get_info(0); raise AssertionError("expected RuntimeError with no device")
+            except RuntimeError:
+                pass
             try:
                 t = torch.ones(4, dtype=torch.float16, device="rbln:0"); _ = t + t
                 raise AssertionError("expected device use to fail")

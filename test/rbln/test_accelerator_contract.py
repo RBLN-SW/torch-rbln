@@ -15,6 +15,9 @@ Covers:
 - PrivateUse1 storage resize-to-zero.
 - ``torch.accelerator.empty_cache()`` (no device arg) actually releasing cached
   memory on the current device.
+- ``torch.rbln.mem_get_info()`` / ``torch.accelerator.get_memory_info()`` reporting
+  the driver's device-wide figures, and raising -- not guessing -- where the installed
+  UMD/KMD has no such query.
 """
 
 import pytest
@@ -209,6 +212,65 @@ class TestAcceleratorEmptyCache(TestCase):
         # Must actually release the cached block; a no-op or query-only
         # implementation would leave reserved unchanged.
         self.assertLess(torch.rbln.memory_reserved("rbln:0"), reserved_cached)
+
+
+def _driver_memory_replies(logical_index):
+    """The runtime's own answer per physical NPU of ``rbln:<logical_index>``; None where the
+    installed UMD/KMD has no device memory query. Plan-only: claims no device."""
+    from rebel import get_device_memory_info
+
+    from torch_rbln._internal.rsd_utils import get_physical_device_ids
+
+    return [get_device_memory_info(pid) for pid in get_physical_device_ids(logical_index)]
+
+
+@pytest.mark.test_set_ci
+class TestMemGetInfo(TestCase):
+    """``mem_get_info()`` is the driver's device-wide reading, summed over the logical
+    device's physical NPUs, or a clear error where the driver cannot answer.
+
+    Both environments are asserted so the CUDA-parity contract holds on old and new
+    drivers alike: one test skips where the other runs."""
+
+    def setUp(self):
+        if torch.rbln.device_count() == 0:
+            self.skipTest("no rbln device available")
+        self.replies = _driver_memory_replies(0)
+
+    def test_matches_driver_totals(self):
+        if any(reply is None for reply in self.replies):
+            self.skipTest("installed UMD/KMD has no device memory-info query")
+        free, total = torch.rbln.mem_get_info(0)
+        self.assertIsInstance(free, int)
+        self.assertIsInstance(total, int)
+        self.assertEqual(total, sum(reply.total for reply in self.replies))
+        self.assertGreater(total, 0)
+        self.assertLessEqual(free, total)
+        # Same figures through the DeviceAllocator path torch.accelerator uses. `total` is
+        # static; `free` is a reading another process may move between the two calls.
+        acc_free, acc_total = torch.accelerator.get_memory_info(0)
+        self.assertEqual(acc_total, total)
+        self.assertLessEqual(acc_free, acc_total)
+
+    def test_unsupported_driver_raises(self):
+        if all(reply is not None for reply in self.replies):
+            self.skipTest("installed UMD/KMD provides the device memory-info query")
+        with self.assertRaisesRegex(RuntimeError, "does not provide the device memory query"):
+            torch.rbln.mem_get_info(0)
+        with self.assertRaisesRegex(RuntimeError, "does not provide the device memory query"):
+            torch.accelerator.get_memory_info(0)
+
+    def test_accepts_device_forms_and_rejects_non_rbln(self):
+        for bad in ("cpu", "cuda:0", torch.device("cpu")):
+            with self.assertRaises(ValueError):
+                torch.rbln.mem_get_info(bad)
+        with self.assertRaises(ValueError):
+            torch.rbln.mem_get_info(torch.rbln.device_count())
+        if any(reply is None for reply in self.replies):
+            return
+        total = torch.rbln.mem_get_info(0)[1]
+        for dev in (0, "rbln:0", torch.device("rbln", 0)):
+            self.assertEqual(torch.rbln.mem_get_info(dev)[1], total)
 
 
 if __name__ == "__main__":
