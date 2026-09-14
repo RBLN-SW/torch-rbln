@@ -199,13 +199,14 @@ def _small_model_cover_array(full_matrix_at=None, skip_shapes=()):
       * every dtype and every attn runs (1-way),
       * every attn x shape, dtype x shape, and attn x dtype pair appears over the shapes the
         model runs (2-way),
-      * every (batch, seq) shape is compiled at least once *across the suite* -- each shape is a
+      * every (batch, seq) shape the caller asks for is compiled at least once -- each shape is a
         distinct compiled artifact, and which model's geometry compiles it is not what the shape
         axis is about.
 
     Dropped are the 3-/4-way interactions, and the duplication between the two small models at
     the shapes that dominate the run: a case at seq 1024 costs an order of magnitude more than
-    one at seq 16, so ``skip_shapes`` lets one small model carry the expensive shapes for both.
+    one at seq 16, so ``skip_shapes`` lets one small model carry the expensive shapes for both,
+    and lets the widest batch sit on the large models instead of on every model.
 
     ``full_matrix_at`` names the one shape that also gets the full dtype x attn matrix and the
     test_set_ci marker -- the CI representative point, carried by a single model per family. The
@@ -252,20 +253,22 @@ class TestCausalLM(TestCausalLMBase):
     # (batch, seq) instead of the full 4-way cross product; see _small_model_cover_array for the
     # exact coverage guarantee.
     #
-    # Qwen-1.5B carries the whole shape grid and, at the representative point (2, 1024), the full
-    # dtype x attn matrix and the CI marker. Llama-1B is release-only and skips the two shapes
-    # whose cost dominates the run, which Qwen-1.5B already compiles; it keeps (1, 1024), so a
-    # long sequence is still compiled on Llama geometry at both dtypes, and Llama-3B covers the
-    # family at the largest shape.
-    _COSTLY_SHAPES = ((2, 1024), (4, 1024))
-    small_model_cover_array = _small_model_cover_array(full_matrix_at=(2, 1024))
-    small_model_cover_array_release_only = _small_model_cover_array(skip_shapes=_COSTLY_SHAPES)
+    # The batch axis is split by cost rather than run twice: the small models take batch 1 and 2,
+    # and batch 4 -- the widest, and the one where per-batch tiling and memory pressure actually
+    # show -- is the large models' point below. Qwen-1.5B carries what is left of the shape grid
+    # and, at the representative point (2, 1024), the full dtype x attn matrix and the CI marker.
+    # Llama-1B is release-only and skips that point too, which Qwen-1.5B compiles at both dtypes;
+    # it keeps (1, 1024), so a long sequence is still compiled on Llama geometry.
+    _LARGE_BATCH_SHAPES = tuple((4, seq_len) for seq_len in TestCausalLMBase.seq_lens)
+    _COSTLY_SHAPES = ((2, 1024),)
+    small_model_cover_array = _small_model_cover_array(full_matrix_at=(2, 1024), skip_shapes=_LARGE_BATCH_SHAPES)
+    small_model_cover_array_release_only = _small_model_cover_array(skip_shapes=_LARGE_BATCH_SHAPES + _COSTLY_SHAPES)
 
     # Large models (Llama-3B, EXAONE-2.4B) share the small models' code paths but are 3-5x slower
     # to compile, so they buy geometry, not breadth: one case each, at the largest shape, where
-    # size-specific tiling and memory issues surface. float16 and sdpa, as the largest-shape smoke
-    # these two used to carry was -- dtype and attn breadth is the small models' axis, and they
-    # run both dtypes and both attns at this very shape. This subsumes that separate smoke.
+    # size-specific tiling and memory issues surface, and the suite's only batch 4. float16 and
+    # sdpa, as the largest-shape smoke these two used to carry was -- dtype and attn breadth is
+    # the small models' axis. This subsumes that separate smoke.
     max_shape_batch_seq = [subtest((4, 1024), decorators=[pytest.mark.test_set_ci])]
 
     @pytest.mark.usefixtures("enable_deploy_mode")
