@@ -1786,10 +1786,7 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
 
     from torch_rbln._internal.compile_cache import compile_rbln_cached_entry
     from torch_rbln._internal.env_utils import use_device_group_num_devices
-    from torch_rbln._internal.warm_cache import (
-        consume_force_recompile as _consume_warm_cache_force_recompile,
-        install_pending as _install_warm_cache_pending,
-    )
+    from torch_rbln._internal.warm_cache import install_pending as _install_warm_cache_pending
 
     # Device 64-elem-align fallback: a last-dim not a multiple of 64 makes the
     # rebel pipeline wrap the device fn with host-only contrib_aligned_pad /
@@ -1865,19 +1862,11 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
 
     op_module = get_view_op_module(op_callable, view_recipes)
 
-    # Consume the C++ side's force-recompile flag (set when the prior
-    # warm-cache hit erase'd a broken entry). On a True consumption,
-    # compile_rbln_cached_entry drops its own cache entry for this key so the
-    # rebel backend re-instantiates the runtime into a fresh holder and the
-    # install path below can fire again. See
-    # ``WarmCache::request_force_recompile`` in DispatchShim.cpp.
-    _force_recompile_warm = _consume_warm_cache_force_recompile()
     entry = compile_rbln_cached_entry(
         op_module,
         dynamic=False,
         options=compile_options,
         device_cache_key=extract_warm_cache_key(*view_args, **view_kwargs),
-        force_recompile=_force_recompile_warm,
     )
     out_list = None if result_tensor is None else [result_tensor]
     # The caller's ``out`` is bound as the program's output buffer, as the C++
