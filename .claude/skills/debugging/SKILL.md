@@ -11,15 +11,15 @@ Two things make a session go wrong here: reproducing something other than the re
 
 Get a reproducer before changing anything, and narrow it to the smallest input that still fails.
 
-**Narrowing has a floor.** Shrink past it and the op stops reaching the device: `SUPPORTED_DTYPES` is fp16 and bf16 only, and a last dimension that is not a multiple of 64 takes the host path. Either way the result then matches CPU exactly, which reads as "the bug went away". Keep the dtype at fp16 or bf16, keep the last dimension aligned, and check after each narrowing step that the op still ran on the device.
+**Narrowing has a floor.** Shrink past it and the op stops reaching the device, the result matches CPU exactly, and that reads as "the bug went away". Two gates do this, and they do not apply everywhere. Dtype gates every route: `SUPPORTED_DTYPES` is fp16 and bf16 only. Alignment gates the eager Python route: `compile_and_run_view_aware` (`ops_utils.py`) sends a single-tensor op to CPU fallback when any tensor argument's last dimension is not a multiple of 64, unless the dtype is in the strict set. That condition does not apply to list ops such as `cat` and `stack`, to C++ kernels, or to graph mode; where those pad and where they run is decided by each implementation and by the pinned compiler — check it there, do not assume it. So the shape that reproduces an alignment bug is the unaligned one, and "making the input safe" deletes the bug. Establish which route the reported op takes for its dtype and shapes, then check after each narrowing step that it still ran where the report says it ran.
 
-**If you cannot reproduce it, stop and report that.** An untested fix for an unverified report costs a reviewer more than no patch.
+**If you cannot reproduce it, say so first — then keep going.** No device on this host, a log from another machine, a model you cannot pull: narrow the cause from the log and the source, write the candidate fix, run what this host can run (build, lint, dummy mode), and hand over the exact command that settles it on a device. What you may not do is present the fix as verified before that command has run; an untested fix labelled as tested costs a reviewer more than no patch.
 
 **The minimal reproducer is a deliverable, not a step.** When the defect goes to another team, it ships as a standalone script that runs without installing a model, a dataset, or the test suite — a reproduction that requires the whole environment will not be run by the people who have to fix it. Keep narrowing until the script is short enough to paste.
 
 **Three things tell you what actually happened**, and none of them are the returned values:
 
-- `TORCH_RBLN_LOG_LEVEL=INFO` prints ```aten::<op>` op ran on CPU instead of RBLN`` for every fallback. This is the only signal that says whether the device path was taken.
+- `TORCH_RBLN_LOG_LEVEL=INFO` prints ```aten::<op>` op ran on CPU instead of RBLN`` for every fallback. The same fact is available as a count — `_C._dispatch_fallback_by_op()` for the C++ shim, `cpu_fallback_counts()` in `ops_utils.py` for the Python route — and `_C._warmcache_size()` grows only when the device path compiled. Use whichever a script or a test can assert; the returned values say nothing.
 - `torch.rbln.explain()` attributes hidden overhead — dispatch, CPU fallback, host copies — and `with_stack=True` gives the call site. `docs/EXPLAIN.md` is the reference; read it before writing your own instrumentation.
 - `python -m torch_rbln.diagnose` (with `TORCH_RBLN_DIAGNOSE=1`) diagnoses library loading when the failure is `Cannot find libraries` or a missing `librbln.so`, rather than anything about your change.
 
@@ -42,7 +42,7 @@ Evidence that fits your hypothesis is easy to find and proves nothing — a wron
 - **State what would be true if you are wrong**, and check that specifically.
 - **Predict the output before you run.** A surprise means your model of the system is wrong, and that is the finding.
 - **The cause must explain every symptom.** A leftover unexplained detail usually means a second cause or the wrong one.
-- **Separate a flake from a regression before chasing it.** Run the same commit three times. If the failing configuration moves between runs — a different matrix leg, a different worker — it is nondeterminism, not your change. Say which one you established, and do not report a fix for a flake you only saw once.
+- **Separate a flake from a regression before chasing it.** Run the same commit three times. If the failing configuration moves between runs — a different matrix leg, a different worker — it is nondeterministic, which does not clear your change: a race, a latched flag, or a leaked device mapping that your change introduced moves around exactly like that. Run the base commit the same number of times in the same harness. Seen only on head, it is a suspected regression and goes first in the investigation — not a verdict, since a finite run cannot rule out an old flake. Record the run counts and failure rates for both, then strengthen the call by removing the change or by naming the mechanism. Say which one you established, and do not report a fix for a flake you only saw once.
 - **For a numerical bug, compare against CPU before theorizing about the kernel** — at the smallest shape that still reaches the device, not the smallest that still runs. Half the "wrong result" reports are dtype or tolerance, not the op; an exact match is the other half, and it usually means the comparison never left the host.
 
 Report which parts you verified and which you inferred. Never state a hypothesis as a fact.
@@ -83,4 +83,4 @@ Rebuild, run the reproducer again, run the tests around what you touched, and re
 
 State explicitly what you could not build, run, or reproduce; hardware or models you did not have; and anything you inferred rather than verified.
 
-Tests that broke after your change are your regressions. Debug them. Do not stash or revert to check whether they also fail on `main`.
+Tests that broke after your change are yours to investigate. Compare base against head in separate worktrees, each with its own venv on the same dependencies, as `AGENTS.md` (Evidence) says — not by stashing or reverting in the tree you run from.
