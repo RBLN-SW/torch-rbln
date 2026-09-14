@@ -266,6 +266,50 @@ c10::DeviceIndex get_device_count() {
   return device_count;
 }
 
+DeviceProperties get_device_properties(c10::DeviceIndex device_index) {
+  RBLN_CHECK(
+      !is_dummy_device(),
+      "get_device_properties() reports what the hardware says, and RBLN_DUMMY_DEVICE has no NPU behind it");
+
+  const auto physical_device_ids = DeviceMappingManager::getInstance().getPhysicalDeviceIds(device_index);
+  RBLN_CHECK(!physical_device_ids.empty(), "no NPU is mapped to rbln:{}", static_cast<int>(device_index));
+
+  DeviceProperties properties;
+  for (const int physical_device_id : physical_device_ids) {
+    RBLNDeviceProperties npu{};
+    RBLN_CHECK(
+        !rbln_get_device_properties(physical_device_id, &npu),
+        "rbln_get_device_properties failed for NPU {} behind rbln:{}; the device may be absent or held by "
+        "another process — check $rbln-smi",
+        physical_device_id,
+        static_cast<int>(device_index));
+
+    if (properties.npu_count == 0) {
+      properties.name = npu.name;
+      properties.memory_per_chiplet = npu.memory_per_chiplet;
+      properties.num_chiplet = npu.num_chiplet;
+    } else {
+      RBLN_CHECK(
+          properties.name == npu.name && properties.num_chiplet == npu.num_chiplet,
+          "rbln:{} aggregates unlike NPUs: {} with {} chiplet(s) and {} with {}",
+          static_cast<int>(device_index),
+          properties.name,
+          properties.num_chiplet,
+          npu.name,
+          npu.num_chiplet);
+    }
+    properties.total_memory += npu.total_memory;
+    properties.npu_count++;
+  }
+  RBLN_LOG_DEBUG(
+      "rbln:{} name={} total_memory={} npu_count={}",
+      static_cast<int>(device_index),
+      properties.name,
+      properties.total_memory,
+      properties.npu_count);
+  return properties;
+}
+
 c10::DeviceIndex get_physical_device_count() {
   if (is_dummy_device()) {
     // Dummy mode must not touch the runtime (the host may have no SDK/driver);
