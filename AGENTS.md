@@ -61,7 +61,7 @@ Run everything through `uv`. Never use the system `python3` or a bare `pip`.
 ```bash
 uv run --no-sync pytest test/rbln/test_tensor_copy.py -x   # narrowest target covering the change
 uv run --no-sync python test/run_tests.py --suite=core     # a whole suite, the way CI runs it
-uv run --no-sync lintrunner -m origin/dev -a               # lint and auto-fix what you changed
+uv run --no-sync lintrunner -m origin/main -a              # lint and auto-fix what you changed
 uv pip install -e . --no-build-isolation                   # rebuild — see below
 ```
 
@@ -71,7 +71,7 @@ Skip the rebuild and pytest loads the previously built `torch_rbln/_C` and `torc
 
 Verify the rebuild actually took before trusting any result. An install can skip the build step and leave the previous binary in place while reporting success; grepping the built artifact for a string only your change introduces is the cheap check.
 
-`lintrunner -m <base>` lints against a merge base; use the branch your PR targets, which CI does too (`docs/LINTING.md` shows `origin/main`, correct only for a release PR). It covers every file the PR touches, not the ones you edited this session — that difference is what gets a PR rejected by CI for a file you never opened.
+`lintrunner -m <base>` lints against a merge base; use `origin/main`, which is what CI does too. It covers every file the PR touches, not the ones you edited this session — that difference is what gets a PR rejected by CI for a file you never opened.
 
 ## Evidence
 
@@ -81,12 +81,12 @@ Verify the rebuild actually took before trusting any result. An install can skip
 - **Reproduce before you fix**, and say so if you could not. The minimal reproducer is a deliverable: a standalone script another team can run without installing a model or a suite.
 - **State what you could not do** — tests you could not run, hardware you did not have, assumptions you could not check. An empty list is a claim; write it only if it is true.
 - **If you cannot finish, do not produce a plausible partial result.** Stop and say what blocked you.
-- **Tests that break after your change are your regressions.** Debug them; do not stash or revert to check whether they also fail on `dev`.
+- **Tests that break after your change are your regressions.** Debug them; do not stash or revert to check whether they also fail on `main`.
 
 ## Measuring
 
 - **Print the base before every measurement**: the commit of torch-rbln, of rebel-compiler, and of any consumer in the loop, plus the venv and the env vars that matter. A number without its base compares to nothing later.
-- **Name a target by commit plus working-tree state**, never by branch. "dev" does not say which uncommitted changes were in the tree.
+- **Name a target by commit plus working-tree state**, never by branch. "main" does not say which uncommitted changes were in the tree.
 - **Fix the environment and change nothing but the thing under test.** Thread counts, allocator mode, and log level move the mean more than most changes do; log level is not cosmetic here. Change the harness and the comparison resets.
 - **A debug-only flag is not the production baseline.** A result measured with one set does not describe what ships.
 
@@ -178,7 +178,7 @@ Everything written in words — a comment, a docstring, a doc page, a PR body, a
 Read `docs/TEST_GUIDE.md` before adding a test — it is the contract for this suite, and review checks against it. `.claude/skills/writing-tests/SKILL.md` covers what goes wrong on top of it. The rules broken most often:
 
 - A test must fail without the change it covers. Verify that; do not assume it.
-- **A test with no `@pytest.mark.test_set_ci` does not run on a PR to `dev`.** It runs only in the release lane, on PRs to `main`. Mark `single_worker` when the test mutates device or process-global state.
+- **A test with no `@pytest.mark.test_set_ci` never runs in the pre-merge checks.** It runs only in the release lane — the release checks on `main`. Mark `single_worker` when the test mutates device or process-global state.
 - Assertion rewriting is off (`--assert=plain`), so a bare `assert a == b` prints no values.
 - Do not re-run a flaky test until it goes green, and do not loosen a tolerance to make one pass.
 - Do not assert an optimization the runtime is free to change, or write an assertion a hardcoded constant would also satisfy.
@@ -198,7 +198,7 @@ When you believe a case is a real exception — a comment no naming can replace,
 
 Explain intent; the diff already shows what changed. Claim exactly what the code does — a check that only runs under a condition is not "the index is range-checked". Fill in **Affected Modules** and **How to Test**, link the issue, and name the layer you changed.
 
-- A feature branch comes from `dev` and targets `dev`; `rc` goes `dev` → `main`; a hotfix comes from `main` and targets `main`. Tags are cut on `main`, and everything is squash-merged (`docs/RELEASE_PROCESS.md`).
+- Every branch comes from `main` and targets `main`, hotfixes included. Tags are cut on `main`, and everything is squash-merged (`docs/RELEASE_PROCESS.md`, `docs/CONTRIBUTING.md`).
 - **A fix for a regression the feature itself introduced belongs in the same PR.** Split it out and whichever lands first puts mainline in the regressed state.
 - **No internal names.** A working label from the conversation that produced the change — a version number, a phase, a step — means nothing later and fossilizes in the history. Name the mechanism.
 

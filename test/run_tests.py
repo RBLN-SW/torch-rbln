@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -41,10 +42,11 @@ def _run_pytest(
     *,
     marker: str,
     workers: int,
+    python: str = sys.executable,
 ) -> int:
     """Run pytest for a single test_dir/marker combo. Returns the exit code."""
     base_cmd = [
-        sys.executable,
+        python,
         "-m",
         "pytest",
         test_dir,
@@ -108,6 +110,7 @@ def _run_with_worker_split(
     workers: int,
     results: _TestResults,
     project_root: Path,
+    python: str = sys.executable,
 ) -> None:
     """Run single_worker (serial) then multi-worker (parallel) for each dir."""
     mode_marker = TEST_MODE_MARKERS[test_mode]
@@ -118,7 +121,7 @@ def _run_with_worker_split(
             marker = f"{mode_marker} and {worker_marker}"
             num_processes = 1 if is_single_worker else workers
             desc = f"{test_dir} [{marker}]"
-            rc = _run_pytest(abs_test_dir, marker=marker, workers=num_processes)
+            rc = _run_pytest(abs_test_dir, marker=marker, workers=num_processes, python=python)
             results.record(rc, desc)
 
 
@@ -168,6 +171,26 @@ def run_distributed_tests(
     )
 
 
+# The inference stack (vllm-rbln, optimum-rbln) pins transformers 5, and
+# test_transformers.py loads a model whose hub code needs transformers 4, so
+# install-test-deps.sh keeps the stack in its own venv and the two groups run
+# under different interpreters.
+_INFERENCE_STACK_TESTS = ["test/models/test_optimum_llm.py", "test/models/test_vllm_llm.py"]
+_TRANSFORMERS_TESTS = ["test/models/test_transformers.py"]
+
+
+def _inference_python(project_root: Path) -> str:
+    """The inference venv's interpreter, or this one when the split is not installed.
+
+    ``INFERENCE_VENV`` is install-test-deps.sh's override for where that venv
+    lives; both sides have to read it or a custom path installs one environment
+    and tests another.
+    """
+    venv = Path(os.environ.get("INFERENCE_VENV") or project_root / ".venv-inference")
+    venv_python = venv / "bin" / "python"
+    return str(venv_python) if venv_python.exists() else sys.executable
+
+
 def run_models_tests(
     test_mode: str,
     workers: int,
@@ -176,11 +199,19 @@ def run_models_tests(
 ) -> None:
     _install_model_deps(project_root)
     _run_with_worker_split(
-        ["test/models/"],
+        _TRANSFORMERS_TESTS,
         test_mode=test_mode,
         workers=workers,
         results=results,
         project_root=project_root,
+    )
+    _run_with_worker_split(
+        _INFERENCE_STACK_TESTS,
+        test_mode=test_mode,
+        workers=workers,
+        results=results,
+        project_root=project_root,
+        python=_inference_python(project_root),
     )
 
 

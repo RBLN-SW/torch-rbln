@@ -2,7 +2,7 @@
 
 ## Source linting
 
-[Source linting](WORKFLOWS.md#lint-workflow) runs `lintrunner` over the source tree.
+[Source linting](WORKFLOWS.md#linting) runs `lintrunner` over the source tree.
 
 Install dependencies and initialize `lintrunner` once:
 
@@ -21,6 +21,8 @@ uv run --no-sync cmake -GNinja -B build -S . \
   -DCMAKE_INSTALL_PREFIX=torch_rbln
 ```
 
+Release checks also lint a `Debug` configuration; reconfigure with `-DCMAKE_BUILD_TYPE=Debug` to reproduce a `clang-tidy` finding reported only under `Debug`.
+
 To lint and auto-fix changed files:
 
 ```bash
@@ -29,7 +31,7 @@ uv run --no-sync lintrunner -m origin/main -a
 
 ## Workflow linting
 
-[Workflow linting](WORKFLOWS.md#lint-workflow) runs [`actionlint`](https://github.com/rhysd/actionlint), [`yamllint`](https://github.com/adrienverge/yamllint), and [`zizmor`](https://github.com/zizmorcore/zizmor) on the workflow files.
+[Workflow linting](WORKFLOWS.md#linting) runs [`actionlint`](https://github.com/rhysd/actionlint), [`yamllint`](https://github.com/adrienverge/yamllint), and [`zizmor`](https://github.com/zizmorcore/zizmor) on the workflow files.
 
 Install dependencies once:
 

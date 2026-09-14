@@ -102,8 +102,36 @@ void register_public_device_api(py::module_& module) {
   module.def("empty_cache", &c10::rbln::empty_cache, "Release all unoccupied cached memory.");
   module.def("memory_stats", &c10::rbln::memory_stats, "Get memory allocator statistics.");
   module.def(
+      "memory_stats_per_chiplet",
+      &c10::rbln::memory_stats_per_chiplet,
+      "Get memory allocator statistics broken down per chiplet.");
+  module.def(
       "reset_accumulated_memory_stats", &c10::rbln::reset_accumulated_memory_stats, "Reset accumulated memory stats.");
   module.def("reset_peak_memory_stats", &c10::rbln::reset_peak_memory_stats, "Reset peak memory stats.");
+
+  py::class_<c10::rbln::DeviceProperties>(module, "DeviceProperties")
+      .def_readonly("name", &c10::rbln::DeviceProperties::name)
+      .def_readonly("total_memory", &c10::rbln::DeviceProperties::total_memory)
+      .def_readonly("memory_per_chiplet", &c10::rbln::DeviceProperties::memory_per_chiplet)
+      .def_readonly("num_chiplet", &c10::rbln::DeviceProperties::num_chiplet)
+      .def_readonly("npu_count", &c10::rbln::DeviceProperties::npu_count)
+      .def("__repr__", [](const c10::rbln::DeviceProperties& self) {
+        return c10::str(
+            "DeviceProperties(name='",
+            self.name,
+            "', total_memory=",
+            self.total_memory,
+            ", memory_per_chiplet=",
+            self.memory_per_chiplet,
+            ", num_chiplet=",
+            self.num_chiplet,
+            ", npu_count=",
+            self.npu_count,
+            ")");
+      });
+
+  module.def(
+      "get_device_properties", &c10::rbln::get_device_properties, "Get the hardware properties of a logical device.");
 
   // Register DeviceTopology structures
   py::class_<c10::rbln::DeviceTopologyEntry>(module, "DeviceTopologyEntry")

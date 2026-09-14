@@ -55,6 +55,27 @@ C10_RBLN_API c10::DeviceIndex get_device_count();
 C10_RBLN_API c10::DeviceIndex get_physical_device_count();
 
 /**
+ * @brief What the NPUs behind one logical device are.
+ *
+ * total_memory sums the device's physical NPUs; num_chiplet and memory_per_chiplet stay per NPU.
+ */
+struct C10_RBLN_API DeviceProperties {
+  std::string name;
+  uint64_t total_memory = 0;
+  uint64_t memory_per_chiplet = 0;
+  uint32_t num_chiplet = 0;
+  uint32_t npu_count = 0;
+};
+
+/**
+ * @brief Reports what the logical device at device_index is, summed over its NPUs.
+ *
+ * Needs real hardware: raises in dummy mode, when no NPU is mapped to the index, when the runtime
+ * cannot answer for one of them, or when the mapping aggregates unlike NPUs.
+ */
+C10_RBLN_API DeviceProperties get_device_properties(c10::DeviceIndex device_index);
+
+/**
  * @brief Returns the currently active RBLN device.
  *
  * This function retrieves the device that is currently set as the active
@@ -616,10 +637,32 @@ C10_RBLN_API void empty_cache(const c10::Device& device);
 /**
  * @brief Returns a dictionary of accelerator device memory allocator statistics.
  *
+ * Scope is the caching allocator of the context THIS process holds on `device`, the
+ * same scope torch.cuda.memory_stats() reports. It counts every physical NPU the
+ * logical device maps to, but not direct device allocations (weights), and not another
+ * process using the same NPU. For a device-wide figure, use rbln-smi.
+ *
  * @param device The input device.
  * @return A map containing memory statistics.
  */
 C10_RBLN_API std::map<std::string, uint64_t> memory_stats(const c10::Device& device);
+
+/**
+ * @brief Returns memory allocator statistics broken down per chiplet.
+ *
+ * Same keys as memory_stats(), each prefixed with "npu.<n>.chiplet.<c>.". A device runs
+ * out on its heaviest chiplet, which the aggregate memory_stats() hides. npu.<n> is the
+ * n-th physical NPU of this logical device (see RBLN_NPUS_PER_DEVICE), so a 1:1 mapping
+ * yields npu.0 only.
+ *
+ * Scope is the caching allocator of this process's context on `device`. Other direct
+ * device allocations are not counted, and a second process on the same NPU is
+ * invisible here -- see memory_stats().
+ *
+ * @param device The input device.
+ * @return A map containing per-chiplet memory statistics.
+ */
+C10_RBLN_API std::map<std::string, uint64_t> memory_stats_per_chiplet(const c10::Device& device);
 
 /**
  * @brief Resets the "accumulated" (historical) stats tracked by the current accelerator memory allocator.

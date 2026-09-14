@@ -7,8 +7,10 @@ later tests on the same pytest-xdist worker (the class of bug behind the intermi
 profiler / pinned-copy CI failures)."""
 
 import importlib.util
+import inspect
 import os
 import sys
+from collections import namedtuple
 from pathlib import Path
 
 import pytest
@@ -207,6 +209,55 @@ def test_clean_teardown_order_sync_then_sdpa_clear_then_flush(monkeypatch):
         with pytest.raises(StopIteration):
             next(gen)  # teardown runs to completion
     assert calls == ["sync", "sdpa_clear", "flush"]
+
+
+@pytest.mark.test_set_ci
+def test_stream_guard_restores_the_stream_a_test_moved_and_the_device_guard_the_index(monkeypatch):
+    """Driven through both guards, from an entry state that is not the default stream, with
+    set_stream's device selection modelled: the stream guard restores what the test found (not
+    a default) and only for the devices that moved, and restore_current_device -- which the
+    fixture argument orders after it -- puts the index back that set_stream moved."""
+    conftest = _load_root_conftest()
+    stream = namedtuple("stream", "device_index stream_id")  # the fixture reads device_index and ==
+    # The fixture argument is what orders the two teardowns; pin it rather than assume it.
+    assert "restore_current_device" in inspect.signature(conftest.restore_current_stream.__wrapped__).parameters
+
+    # rbln:0 enters on a non-default stream, so restoring the snapshot and resetting to the
+    # default are different outcomes; rbln:2 never moves.
+    state = {"device": 0, "streams": {0: 4, 1: 0, 2: 2}}
+    set_calls = []
+
+    def _set_stream(target):
+        set_calls.append(target)
+        state["streams"][target.device_index] = target.stream_id
+        state["device"] = target.device_index  # set_stream selects the stream's device
+
+    with monkeypatch.context() as m:
+        m.setattr(torch.rbln, "device_count", lambda: 3)
+        m.setattr(torch.rbln, "current_stream", lambda index: stream(index, state["streams"][index]))
+        m.setattr(torch.rbln, "set_stream", _set_stream)
+        m.setattr(_dev, "device_count", lambda: 3)
+        m.setattr(_dev, "current_device", lambda: state["device"])
+        m.setattr(_dev, "set_device", lambda index: state.__setitem__("device", index))
+        m.setattr(_dev, "_initialized", _dev._initialized)  # the device guard writes it back
+
+        device_guard = conftest.restore_current_device.__wrapped__()
+        stream_guard = conftest.restore_current_stream.__wrapped__(None)
+        next(device_guard)
+        next(stream_guard)
+
+        state["streams"][0] = 9  # a "test" selected other streams...
+        state["streams"][1] = 7
+        state["device"] = 1  # ...and the last one selected its device with it
+
+        with pytest.raises(StopIteration):
+            next(stream_guard)  # streams first; restoring rbln:1 leaves it the current device
+        with pytest.raises(StopIteration):
+            next(device_guard)  # then the index goes back
+
+    assert set_calls == [stream(0, 4), stream(1, 0)]  # rbln:2 did not move, so it is left alone
+    assert state["streams"] == {0: 4, 1: 0, 2: 2}  # restored to what the test found, not to default
+    assert state["device"] == 0
 
 
 def _with_env(var, value, fn):

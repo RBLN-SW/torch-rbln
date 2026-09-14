@@ -1,0 +1,71 @@
+name: Lint
+
+on:
+  workflow_call:
+    inputs:
+      torch_rbln_sha:
+        description: Git commit SHA
+        type: string
+        required: true
+      python_versions:
+        description: Python versions (3.10-3.14), as a JSON array
+        type: string
+        required: true
+      build_types:
+        description: Build types (Release, Debug), as a JSON array
+        type: string
+        required: true
+      base_revision:
+        description: Revision to compute changed files from (empty means every tracked file)
+        type: string
+        required: true
+    secrets:
+      GIT_PAT:
+        description: Personal access token
+        required: true
+      INTERNAL_INDEX_URL:
+        description: Internal package index URL
+        required: true
+      INTERNAL_INDEX_USERNAME:
+        description: Internal package index username
+        required: true
+      INTERNAL_INDEX_PASSWORD:
+        description: Internal package index password
+        required: true
+      HARBOR_USERNAME:
+        description: Container registry username
+        required: true
+      HARBOR_PASSWORD:
+        description: Container registry password
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint_source:
+    strategy:
+      fail-fast: false
+      matrix:
+        python_version: ${{ fromJSON(inputs.python_versions) }}
+        build_type: ${{ fromJSON(inputs.build_types) }}
+    uses: ./.github/workflows/_lint-source.yaml
+    with:
+      torch_rbln_sha: ${{ inputs.torch_rbln_sha }}
+      python_version: ${{ matrix.python_version }}
+      build_type: ${{ matrix.build_type }}
+      base_revision: ${{ inputs.base_revision }}
+    secrets:
+      GIT_PAT: ${{ secrets.GIT_PAT }}
+      INTERNAL_INDEX_URL: ${{ secrets.INTERNAL_INDEX_URL }}
+      INTERNAL_INDEX_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
+      INTERNAL_INDEX_PASSWORD: ${{ secrets.INTERNAL_INDEX_PASSWORD }}
+      HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+      HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+
+  lint_workflows:
+    uses: ./.github/workflows/_lint-workflows.yaml
+    with:
+      torch_rbln_sha: ${{ inputs.torch_rbln_sha }}
+    secrets:
+      GIT_PAT: ${{ secrets.GIT_PAT }}

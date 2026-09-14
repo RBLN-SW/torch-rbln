@@ -1,90 +1,37 @@
 # Release Process
 
-This document describes how torch-rbln releases are prepared, validated, and published. For CI/CD workflow internals, see [Workflows](WORKFLOWS.md); for PR and merge policies, see [Contributing Guide](CONTRIBUTING.md).
+This document describes how PyTorch RBLN releases are prepared, validated, and published. For CI/CD workflow internals, see [Workflows](WORKFLOWS.md); for pull request and merge policies, see [Contributing Guide](CONTRIBUTING.md).
 
 ## Overview
 
-Every release follows the same pipeline: changes integrate on `dev`, a nightly sync updates `rc` with the latest `dev` state so a current `rc → main` pull request is always ready to merge, and a version tag on `main` triggers artifact build and publication. Because the release candidate stays current, promotions to `main` happen on a steady cadence rather than as large, infrequent merges.
+PyTorch RBLN maintains a single long-lived branch, `main`. Every change reaches it through a squash-merged pull request. Release checks validate `main` daily against the release test suite, and a version tag on a validated commit triggers artifact build and publication.
 
-```
-         feature PRs        nightly sync       RC PR         version tag
-feature ─────────────► dev ──────────────► rc ───────► main ─────────────► publish
-                        ▲                                │
-                        └────────── backmerge ───────────┘
-```
-
-## Branch Model
-
-The release pipeline is built on five kinds of branches, each with a specific lifecycle:
-
-| Branch    | Lifecycle                                                    |
-|-----------|--------------------------------------------------------------|
-| `feature` | Branch from `dev` → PR to `dev`                              |
-| `dev`     | Long-lived. Everyday integration point for all feature work. |
-| `rc`      | Branch from `dev` → PR to `main`                             |
-| `hotfix`  | Branch from `main` → PR to `main`                            |
-| `main`    | Long-lived. Always release-ready. Tags are created here.     |
-
-The diagram below shows which workflow runs at each branch transition. The `(CI)`, `(Release)`, and `(CD)` labels refer to the workflows described in [Workflows](WORKFLOWS.md):
-
-```
-                  (CI)             (Release)           (CI)
-                PR to dev          PR to main        PR to dev
-                   │                   │                │
-feature        ○───●                   │                │
-              ╱     ╲                  │                │     (CI)
-             ╱       ╲                 │                │  push to dev
-dev     ────○─────────●────────○───────┼────────────────┼────●─────────────────
-                push to dev     ╲      │                │   ╱
-                    (CI)         ╲     │                │  ╱
-rc                                ○────●                │ ╱
-                (Release)               ╲               │╱
-                PR to main               ╲         ●────●  backmerge
-                    │                     ╲       ╱
-hotfix         ○────●                      ╲     ╱
-              ╱      ╲                      ╲   ╱
-             ╱        ╲                      ╲ ╱
-main    ────○──────────●──────────────────────●───────────────────────────●────
-                  push to main           push to main                     │
-                   (Release)              (Release)                      tag
-                                                                         (CD)
+```text
+                   ┌─ pre-merge checks
+                   │
+feature        ●───●
+              ╱     ╲ squash merge
+main  ───────●───────●───────────────────────●───►
+                     │                       │
+                     └─ post-merge checks    ├─ release checks
+                                             └─ version tag ───► publish
 ```
 
 ## Branch and Tag Protection
 
-The branches and tags above are protected by [GitHub repository rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets), so changes reach them through pull requests and the release automation rather than direct pushes. This keeps releases reproducible and ensures only CI-validated changes are promoted. Force pushes are blocked on every protected ref, and only the actors noted below can create or delete them.
+Separate [GitHub repository rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets) apply to the `main` branch and to the version tags.
 
-| Ref(s)            | How changes are made    |
-|-------------------|-------------------------|
-| `dev`, `main`     | Pull requests only      |
-| `rc`, `backmerge` | Release automation only |
-| `v*` tags         | Release automation only |
+`main` accepts changes only through pull requests, which must have the required approvals and passing status checks. Repository admins can bypass the merge requirements, but not even they can push to `main` directly.
 
-**`dev` and `main`** accept changes only through pull requests, which must pass required reviews and status checks — the CI workflow for `dev`, the Release workflow for `main`. Repository admins can bypass these merge requirements when needed (for example, to land an urgent fix), but no one — admins included — can push to these branches directly.
-
-**`rc` and `backmerge`** are maintained entirely by the release automation: the nightly job syncs `rc` from `dev`, and the backmerge automation updates `backmerge` from `main`. No one else can update them, so contributors never push to these branches.
-
-**`v*` tags** are created only by the release automation, and pushing a `v*` tag triggers the CD workflow. No one else can create, move, or delete a `v*` tag, so every published version corresponds to a tag created on a validated `main` commit.
-
-### Merge methods
-
-The merge method depends on the branch pair:
-
-| Pull request      | Merge method          |
-|-------------------|-----------------------|
-| `feature → dev`   | Squash and merge      |
-| `rc → main`       | Create a merge commit |
-| `backmerge → dev` | Create a merge commit |
-
-`rc → main` and `backmerge → dev` use a merge commit so the release commit on `main` and its version tag stay reachable from `dev`, which setuptools-scm relies on to derive correct development versions. Every other pull request is squash-merged.
+Version tags are created by the release automation. The ruleset prevents them from being moved or deleted, so a published version always points at the same commit.
 
 ## Versioning
 
-torch-rbln releases align with the [RBLN SDK](https://docs.rbln.ai/) — each release version matches the corresponding SDK version.
+Each PyTorch RBLN release version matches the corresponding [RBLN SDK](https://docs.rbln.ai/) version.
 
-Versions are derived from git tags using [setuptools-scm](https://setuptools-scm.readthedocs.io/). Tags use the format `v<major>.<minor>.<patch>` with an optional `rc<N>` (release candidate) or `.post<N>` (post-release) suffix.
+Versions are derived from git tags using [setuptools-scm](https://setuptools-scm.readthedocs.io/). Tags use the format `v<major>.<minor>.<patch>` with an optional `rc<N>` (release candidate) or `.post<N>` (post-release) suffix:
 
-| Source                     | Example Tag         | Resulting Version            |
+| Source                     | Example tag         | Resulting version            |
 |----------------------------|---------------------|------------------------------|
 | On a release candidate     | `v0.10.0rc0`        | `0.10.0rc0`                  |
 | On a release tag           | `v0.10.0`           | `0.10.0`                     |
@@ -93,55 +40,37 @@ Versions are derived from git tags using [setuptools-scm](https://setuptools-scm
 | 5 commits past a release   | `v0.10.0` + 5       | `0.10.1.dev5+g1a2b3c4`       |
 | 5 commits past a post      | `v0.10.0.post0` + 5 | `0.10.0.post1.dev5+g1a2b3c4` |
 
-Development builds between tags anticipate the next release and carry a `.devN+g<sha>` suffix, so they sort below it.
+Development builds between tags carry a `.devN+g<sha>` suffix and sort below the release they anticipate.
 
 ## Release Lifecycle
 
-### 1. Integration on `dev`
+### 1. Integration on `main`
 
-All changes land on `dev` through pull requests. The CI workflow validates each PR with linting and `test_set_ci`-marked tests. See [Contributing Guide](CONTRIBUTING.md) for PR requirements and merge policy.
+Pre-merge checks validate each pull request, and post-merge checks repeat that validation on the resulting `main` commit, giving it a test result of its own.
 
-### 2. Nightly sync to `rc`
+`main` is expected to stay release-ready. When a post-merge run fails, the change is reverted or fixed forward rather than left for the next release.
 
-A nightly job syncs `rc` with the latest `dev` and keeps an open pull request from `rc` to `main`. Because the sync runs every night, the `rc → main` PR stays continuously up to date, giving the release manager a fresh release candidate to merge on a regular schedule. The Release workflow runs the full test suite on this PR whenever `rc` changes, surfacing regressions before they reach `main`.
+### 2. Release validation
 
-### 3. Promotion to `main`
+Release checks run the release test suite against the current `main` commit and record the outcome there. They run daily and can also be started manually.
 
-When the release candidate is ready, the release manager merges the `rc → main` pull request. The Release workflow runs again on `main`, building and linting across all supported Python versions.
+### 3. Tagging and publication
 
-### 4. Tagging and publication
+The release manager runs the release automation to tag the validated commit. The tag triggers the CD workflow, which builds wheels for all supported Python versions and publishes them to the internal package index first, then to public PyPI.
 
-The release manager creates a `v<version>` tag on `main` — either through the [GitHub Releases UI](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository) or the command line:
+### 4. Release notes
 
-```bash
-git tag v<version>  # e.g. git tag v0.10.0
-git push origin v<version>
-```
-
-The tag triggers the CD workflow, which builds wheels for all supported Python versions and publishes them to the internal package index first, then to public PyPI.
-
-### 5. Release notes
-
-The release manager writes release notes for the new version on the [GitHub Releases](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository) page. If step 4 used the GitHub Releases UI, the notes go in alongside the tag; otherwise, they are added afterward.
-
-### 6. Backmerge to `dev`
-
-Every merge into `main` — whether from `rc` or a hotfix — triggers an automated backmerge pull request from `main` back to `dev`, keeping `dev` in sync with `main`.
+The release automation creates a [GitHub Release](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository) for the tag, with auto-generated notes covering the commits since the previous final release. It skips release candidates.
 
 ## Debug Builds
 
-Debug wheels — built against a debug variant of PyTorch — are produced alongside release wheels during release validation and nightly runs. They surface issues that only manifest under debug-mode assertions, catching bugs that would otherwise ship unnoticed.
+Debug wheels — built against a debug variant of PyTorch — are produced alongside release wheels during release checks. They surface issues that only manifest under debug-mode assertions.
 
-Debug wheels are uploaded to the internal package index for testing, using a `.debug` or `+debug` version suffix (for example, `0.10.0+debug`) to distinguish them from release wheels. They are **not** published to public PyPI.
+Debug wheels are uploaded to the internal package index with a `.debug` or `+debug` version suffix (for example, `0.10.0+debug`). They are **not** published to public PyPI.
 
 ## Hotfix
 
-When a critical issue in a released version cannot wait for the next release cycle:
-
-1. Branch from `main`.
-2. Open a pull request back to `main` — the Release workflow validates the change.
-3. Merge, then create a new patch-version tag on `main` (e.g. `v0.10.0` → `v0.10.1`) following the tagging and publication steps above.
-4. An automated backmerge PR propagates the fix back to `dev`.
+When a critical issue in a released version cannot wait for the next release, a hotfix takes the ordinary path: a pull request to `main`. After it merges, the release manager starts release checks on `main` and, once they pass, cuts a patch release (e.g. `v0.10.0` → `v0.10.1`) following the tagging and publication steps above.
 
 ## Related Documentation
 

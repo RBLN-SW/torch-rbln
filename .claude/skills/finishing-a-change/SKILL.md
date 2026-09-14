@@ -20,7 +20,7 @@ Confirm it took rather than assuming: grep the built artifact for a string only 
 ## 2. Run lint
 
 ```bash
-uv run --no-sync lintrunner -m origin/dev -a
+uv run --no-sync lintrunner -m origin/main -a
 ```
 
 Read the output. Passing means you saw it pass. C++ linting needs the compile database — see `docs/LINTING.md`. `-a` auto-fixes; re-read the diff afterwards, since it will have edited your files.
@@ -56,7 +56,7 @@ Say what else takes the path you changed, and what the change costs on it. A cop
 git diff                    # unstaged
 git diff --staged           # staged
 git status --short          # untracked files you may have meant to add
-git diff origin/dev...HEAD  # what the PR will actually show
+git diff origin/main...HEAD # what the PR will actually show
 ```
 
 General:
@@ -105,7 +105,7 @@ An empty list is a claim. Only write it if it is true.
 
 ## 7. Write the commit and PR
 
-- You are on a feature branch off `dev`, not on `dev` or `main` itself
+- You are on a feature branch off `main`, not on `main` itself
 - PR title in `type(scope): summary` — CI enforces it. Individual commits only need to be readable (`docs/CONTRIBUTING.md`)
 - Explain intent, not the diff. Symptom, reproducer, where to look, what you verified — the debugging path that got you there is not part of it
 - A perf change may give a relative change, never an absolute measurement

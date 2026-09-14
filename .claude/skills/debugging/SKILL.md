@@ -83,4 +83,4 @@ Rebuild, run the reproducer again, run the tests around what you touched, and re
 
 State explicitly what you could not build, run, or reproduce; hardware or models you did not have; and anything you inferred rather than verified.
 
-Tests that broke after your change are your regressions. Debug them. Do not stash or revert to check whether they also fail on `dev`.
+Tests that broke after your change are your regressions. Debug them. Do not stash or revert to check whether they also fail on `main`.
