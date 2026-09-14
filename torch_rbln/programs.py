@@ -13,6 +13,12 @@ the way ``torch.profiler.profile()`` collects the events inside it::
         program.name  # dynamo compile id, e.g. "0/0"
         program.device  # rbln device the runtime is bound to
         program.runtime  # the execution handle behind the callable
+        program.input_specs  # tuple[InputSpec]: name, shape, dtype, physical_placement
+        program.output_specs  # tuple[OutputSpec]: shape, dtype, physical_placement
+
+``input_specs`` / ``output_specs`` list the IO in the order ``run()`` takes and returns it.
+``physical_placement`` is set only for dynamic-shape IO and gives the device layout as one
+``ShardPlacement`` per (node, chiplet) shard.
 
 Every open scope receives each program, so nested scopes see the same programs; an
 inner scope simply sees fewer. The scope is thread-local. The implementation lives in
@@ -24,7 +30,14 @@ torch`` does not pull the ``rebel`` package in through torch's autoload hook.
 from typing import Any
 
 
-__all__ = ["capture_programs", "CompiledProgram"]  # noqa: F822  # resolved by __getattr__
+__all__ = [  # noqa: F822  # resolved by __getattr__
+    "capture_programs",
+    "CompiledProgram",
+    "InputSpec",
+    "OutputSpec",
+    "PhysicalPlacement",
+    "ShardPlacement",
+]
 
 
 def __getattr__(name: str) -> Any:
