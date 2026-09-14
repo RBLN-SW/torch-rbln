@@ -11,7 +11,8 @@ what is observable from torch-rbln:
 * the surface staying lazy, so ``import torch`` does not pull ``rebel`` in through the
   autoload hook;
 * a torch.compile on the rbln backend inside the scope yields one program per graph
-  the backend built, carrying the runtime behind the compiled callable.
+  the backend built, carrying the runtime behind the compiled callable and IO specs
+  that mirror the graph's inputs and outputs.
 """
 
 import os
@@ -33,12 +34,21 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 @pytest.mark.test_set_ci
 class TestCaptureProgramsSurface(TestCase):
     def test_exposed_on_torch_rbln(self):
-        from rebel.core.program_capture import capture_programs, CompiledProgram
+        from rebel.core import program_capture
 
-        self.assertIn("capture_programs", torch_rbln_programs.__all__)
-        self.assertIn("CompiledProgram", torch_rbln_programs.__all__)
-        self.assertIs(torch.rbln.capture_programs, capture_programs)
-        self.assertIs(torch.rbln.CompiledProgram, CompiledProgram)
+        for name in torch_rbln_programs.__all__:
+            self.assertIs(getattr(torch.rbln, name), getattr(program_capture, name))
+        self.assertEqual(
+            set(torch_rbln_programs.__all__),
+            {
+                "capture_programs",
+                "CompiledProgram",
+                "InputSpec",
+                "OutputSpec",
+                "PhysicalPlacement",
+                "ShardPlacement",
+            },
+        )
 
     def test_empty_scope_yields_empty_list(self):
         with torch.rbln.capture_programs() as programs:
@@ -104,6 +114,16 @@ class TestCaptureProgramsCompile(TestCase):
         self.assertIsInstance(program.runtime, DynamoRuntime)
         self.assertEqual(program.device, x.device)
         self.assertTrue(program.name)  # dynamo compile id, e.g. "0/0"
+
+        # The IO specs mirror the graph: two named float16 inputs, one output, nothing dynamic.
+        self.assertEqual([spec.shape for spec in program.input_specs], [(1, 3, 8, 8), (1, 3, 8, 8)])
+        self.assertEqual([spec.dtype for spec in program.input_specs], [torch.float16, torch.float16])
+        self.assertTrue(all(spec.name for spec in program.input_specs))
+        self.assertEqual([spec.shape for spec in program.output_specs], [(1, 3, 8, 8)])
+        self.assertEqual(program.output_specs[0].dtype, torch.float16)
+        for spec in (*program.input_specs, *program.output_specs):
+            self.assertIsInstance(spec, (torch.rbln.InputSpec, torch.rbln.OutputSpec))
+            self.assertIsNone(spec.physical_placement)
 
     def test_programs_outside_scope_are_not_recorded(self, device):
         compiled = torch.compile(lambda t: t * 2, backend="rbln", dynamic=False)
