@@ -57,7 +57,6 @@ from torch_rbln._internal.compile_cache import compile_rbln_cached
 from torch_rbln._internal.ops_utils import *
 from torch_rbln._internal.register_custom_ops import *
 from torch_rbln._internal.register_backward_ops import *
-from torch_rbln._internal.kernels.custom_transpose import *
 from torch_rbln._internal.kernels.sdpa import *
 from torch_rbln._internal.warm_cache import install_pending as _install_warm_cache_pending
 from torch_rbln._C import _register_cpp_shim

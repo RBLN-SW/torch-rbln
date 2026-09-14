@@ -629,6 +629,28 @@ bool tensor_has_nan_or_inf(const at::Tensor& t) {
   return found;
 }
 
+// A Python number that PyTorch wrapped into a 0-dim CPU tensor (``tensor + 1``).
+// The pybind boundary unwraps it back into a Python scalar and the Python
+// wrapper compiles it as a graph constant, so the runtime never sees it as an
+// input. The warm cache keys it by value -- ``a + 1`` and ``a + 2`` are
+// different programs -- and leaves it out of the device inputs on the hit path.
+inline bool is_wrapped_scalar(const at::Tensor& t) {
+  return t.dim() == 0 && t.unsafeGetTensorImpl()->is_wrapped_number();
+}
+
+// nullopt for a value ScalarValue cannot hold (complex): the key must miss
+// rather than collide.
+inline std::optional<ScalarValue> wrapped_scalar_value(const at::Tensor& t) {
+  const c10::Scalar s = t.item();
+  if (s.isBoolean())
+    return ScalarValue::fromBool(s.toBool());
+  if (s.isIntegral(/*includeBool=*/false))
+    return ScalarValue::fromInt(s.toLong());
+  if (s.isFloatingPoint())
+    return ScalarValue::fromFloat(s.toDouble());
+  return std::nullopt;
+}
+
 // Cheap C++-side pre-check mirroring the cheap branches of
 // torch_rbln._internal.ops_utils.is_cpu_fallback_cases():
 //   2. dtype outside the dispatch catalog on any input tensor
@@ -701,7 +723,7 @@ int quick_fallback_check(
     // Wrapped 0-dim numbers behave like Python scalars and are unwrapped by
     // the pybind boundary. Skip them from the dtype check so the shortcut
     // doesn't fire for `tensor + 1.0` etc.
-    if (t.dim() == 0 && t.unsafeGetTensorImpl()->is_wrapped_number()) {
+    if (is_wrapped_scalar(t)) {
       continue;
     }
     has_input_tensor = true;
@@ -758,7 +780,7 @@ inline bool all_input_shapes_equal(torch::jit::Stack* stack, const SchemaCache& 
     if (!iv.isTensor())
       continue;
     const auto& t = iv.toTensor();
-    if (!t.defined() || cache.is_write_alias[i])
+    if (!t.defined() || cache.is_write_alias[i] || is_wrapped_scalar(t))
       continue;
     if (!ref_set) {
       ref_shape = t.sizes();
@@ -802,6 +824,13 @@ bool build_cache_key(
         continue;
       if (cache.is_write_alias[i])
         continue; // out tensor, not part of key
+      if (is_wrapped_scalar(t)) {
+        const auto sv = wrapped_scalar_value(t);
+        if (!sv)
+          return false;
+        out_key.scalars.push_back(*sv);
+        continue;
+      }
       TensorProfile tp;
       tp.dtype = t.scalar_type();
       tp.shape.assign(t.sizes().begin(), t.sizes().end());
@@ -921,7 +950,7 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
       if (!iv.isTensor())
         continue;
       const at::Tensor& t = iv.toTensor();
-      if (!t.defined())
+      if (!t.defined() || is_wrapped_scalar(t))
         continue;
       if (cache.is_write_alias[i]) {
         // See note in the non-broadcast branch below: non-contig out= writes
@@ -971,7 +1000,7 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
       if (!iv.isTensor())
         continue;
       const at::Tensor& t = iv.toTensor();
-      if (!t.defined())
+      if (!t.defined() || is_wrapped_scalar(t))
         continue;
       if (cache.is_write_alias[i]) {
         // Non-contiguous out=view (e.g. ``torch.add(x, y, out=base.t())``)
