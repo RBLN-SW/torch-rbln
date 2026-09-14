@@ -10,16 +10,24 @@ later program that binds the same buffer must agree with that placement, or the 
 syncs the contents back to the host and re-allocates -- correct, but a host round trip of
 the whole cache on every prefill<->decode alternation.
 
-This test replays that lifecycle on a synthetic one-layer decoder with random weights (the
-model architecture is not what is under test) and checks, from the torch-rbln side only:
+The cache is built the way an engine builds it, because the shape of the allocation is what
+the sharding applies to: an untyped buffer, reinterpreted as the KV dtype and shaped
+``[blocks, heads, 1, block_size, head_dim]``. The engine then reaches into that sharded
+buffer from outside the graph -- whole reads, a partial read, a sub-block slot write,
+block-granular staging batched through ``_foreach_copy_``, and an in-device block copy the
+kernel afterwards reads through. Each of those is a different path into a buffer whose
+elements live on two NPUs.
 
-* **lifecycle** -- after the cache is warm, N decode steps run with no real device->host
-  sync, host->device traffic bounded far below the cache size, and device allocation
-  growing by far less than the cache (no re-layout, no host bounce);
-* **eager access** -- reading the sharded cache back (``.cpu()``) and overwriting one slot
-  from eager code, then decoding again, agrees with the single-NPU run;
-* **parity** -- prefill/decode logits and the final cache contents match the same sequence
-  on one NPU (``RBLN_NPUS_PER_DEVICE=1``) and track an fp32 CPU reference.
+What this checks, from the torch-rbln side only:
+
+* **lifecycle** -- the cache lands on both NPUs of the logical device; after it is warm,
+  steady decode runs with no real device->host sync, and host->device traffic and
+  device-allocation growth stay far below the cache size (no re-layout, no host bounce);
+* **engine-shaped access** -- a partial (single block) read agrees with the same region of
+  the whole read, host->device staging lands in the blocks it addressed, and a block copied
+  inside the device decodes to the same logits as the block it was copied from;
+* **parity** -- every step's logits and the cache contents match the same sequence on one
+  NPU (``RBLN_NPUS_PER_DEVICE=1``) and track an fp32 CPU reference.
 
 Each configuration runs in its own subprocess because rebel snapshots ``RBLN_*`` at import.
 A dummy-device case compiles both RSD programs for an ATOM target with no NPU, so the
@@ -45,25 +53,65 @@ from torch_rbln._internal.device_arch_utils import is_rebel_device
 
 
 # --------------------------------------------------------------------------------------
-# Model + driver, shared by every subprocess (same seed => same weights everywhere).
+# Model + cache, shared by every subprocess (same seed => same weights everywhere).
 # --------------------------------------------------------------------------------------
 
 # The cache is sized well above what a decode step legitimately allocates (its output logits
 # and kernel scratch, a few tens of KiB), so that a re-allocation of the cache stands out.
 VOCAB, KV_HEADS, Q_PER_KV, HD, MAXLEN = 64, 2, 4, 64, 1024
 D = KV_HEADS * Q_PER_KV * HD
+# One block holds the sequence; the others are what an engine stages into and copies between.
+NBLOCKS, SEQ_BLOCK, COPY_BLOCK, STAGE_BLOCKS = 4, 0, 1, (2, 3)
 PROMPT = list(range(1, 17))  # prefill length 16
 DECODE_TOKENS = [7, 3, 11, 5]  # then 4 decode steps
+# Cache positions carried back for the cross-run comparison. The sequence occupies the first
+# few; the rest of the block is zero and is checked by its own count, not element by element.
+REPORTED_POSITIONS = 32
+
+
+def new_caches(device, dtype):
+    """Allocate the KV caches the way an engine does: untyped buffers, viewed as the KV dtype.
+
+    An engine sizes its KV pool in bytes and allocates it untyped, then reinterprets it as the
+    cache dtype and shapes it ``[blocks, heads, 1, block_size, head_dim]``. That untyped buffer
+    is the allocation the sharding applies to, and every access in this test -- the graph's and
+    the engine's -- goes through a view of it.
+
+    K and V get a buffer each. An engine keeps them in one allocation and hands the kernel the
+    combined ``[2, blocks, ...]`` tensor; the paged-attention op here takes them as two
+    arguments, and two mutated graph inputs that alias one storage are rejected by the runtime.
+    """
+
+    def one():
+        elements = NBLOCKS * KV_HEADS * MAXLEN * HD
+        raw = torch.zeros(elements * torch.empty((), dtype=dtype).element_size(), dtype=torch.int8, device=device)
+        return raw, raw.view(dtype).view(NBLOCKS, KV_HEADS, 1, MAXLEN, HD)
+
+    k_raw, k_cache = one()
+    v_raw, v_cache = one()
+    return (k_raw, v_raw), k_cache, v_cache
+
+
+def step_inputs(ids, ctx, device, dtype, block=SEQ_BLOCK):
+    """Program inputs for one step: token ids, context length, mask, block table."""
+    t = len(ids)
+    mask = torch.zeros(1, 1, 1, t, MAXLEN, dtype=dtype)
+    if t > 1:  # prefill: causal over the prompt, nothing else in the cache yet
+        mask[0, 0, 0] = torch.ones(t, MAXLEN, dtype=dtype).tril()
+    else:  # decode: everything up to and including the new position
+        mask[..., : ctx + 1] = 1.0
+    table = torch.full((1,) if t > 1 else (1, 1), block, dtype=torch.int16)
+    return tuple(a.to(device) for a in (torch.tensor([ids]), torch.full((1, 1), ctx, dtype=torch.int32), mask, table))
 
 
 class Decoder(torch.nn.Module):
     """Embedding -> paged attention over a persistent KV cache -> MLP -> LM head.
 
     The attention is ``rbln_custom_ops.paged_attn_{prefill,decode}``: the kernel an engine's
-    graph mode runs, which writes the new k/v into the caches it is handed (``mutates_args``)
-    and attends over them. The caches are *inputs* of the program; ``seq`` is the context
-    length already in the cache, so prefill writes positions ``0..T-1`` and a decode step
-    writes position ``seq``. Both phases are static-shape programs (T = prompt length, T = 1).
+    graph mode runs, which writes the new k/v into the block ``block_table`` names and attends
+    over it. The caches are *inputs* of the program; ``seq`` is the context length already in
+    the block, so prefill writes positions ``0..T-1`` and a decode step writes position ``seq``.
+    Both phases are static-shape programs (T = prompt length, T = 1).
     """
 
     def __init__(self):
@@ -82,11 +130,8 @@ class Decoder(torch.nn.Module):
 
     def attention(self, q, k, v, mask, k_cache, v_cache, seq, block_table):
         scale = torch.tensor(1.0 / HD**0.5)  # the kernel takes scale as a constant tensor
-        op = (
-            torch.ops.rbln_custom_ops.paged_attn_prefill
-            if q.shape[3] > 1
-            else torch.ops.rbln_custom_ops.paged_attn_decode
-        )
+        prefill = q.shape[3] > 1
+        op = torch.ops.rbln_custom_ops.paged_attn_prefill if prefill else torch.ops.rbln_custom_ops.paged_attn_decode
         return op(q, k, v, mask, k_cache, v_cache, seq, scale, block_table, MAXLEN)
 
     def forward(self, ids, seq, mask, block_table, k_cache, v_cache):
@@ -105,37 +150,20 @@ class CPUDecoder(Decoder):
     """The same model with the paged-attention kernel spelled out in plain torch (fp32 reference)."""
 
     def attention(self, q, k, v, mask, k_cache, v_cache, seq, block_table):
+        block = int(block_table.reshape(-1)[0])
         t, pos = k.shape[3], int(seq[0, 0])
-        k_cache[:, :, :, pos : pos + t] = k
-        v_cache[:, :, :, pos : pos + t] = v
-        scores = torch.matmul(q, k_cache.transpose(3, 4)) / HD**0.5  # [1, KV, Q, T, MAXLEN]
+        k_cache[block : block + 1, :, :, pos : pos + t] = k
+        v_cache[block : block + 1, :, :, pos : pos + t] = v
+        kc, vc = k_cache[block : block + 1], v_cache[block : block + 1]
+        scores = torch.matmul(q, kc.transpose(3, 4)) / HD**0.5  # [1, KV, Q, T, MAXLEN]
         scores = scores.masked_fill(mask == 0, float("-inf"))
-        return torch.matmul(torch.softmax(scores, dim=-1), v_cache)
-
-
-def step_inputs(ids, ctx, device, dtype):
-    """Program inputs for one step: token ids, context length, mask, block table."""
-    t = len(ids)
-    mask = torch.zeros(1, 1, 1, t, MAXLEN, dtype=dtype)
-    if t > 1:  # prefill: causal over the prompt, nothing else in the cache yet
-        mask[0, 0, 0] = torch.ones(t, MAXLEN, dtype=dtype).tril()
-    else:  # decode: everything up to and including the new position
-        mask[..., : ctx + 1] = 1.0
-    block_table = torch.zeros(1, dtype=torch.int16) if t > 1 else torch.zeros(1, 1, dtype=torch.int16)
-    return tuple(
-        a.to(device) for a in (torch.tensor([ids]), torch.full((1, 1), ctx, dtype=torch.int32), mask, block_table)
-    )
-
-
-def new_caches(device, dtype):
-    k_cache = torch.zeros(1, KV_HEADS, 1, MAXLEN, HD, dtype=dtype, device=device)
-    return k_cache, torch.zeros_like(k_cache)
+        return torch.matmul(torch.softmax(scores, dim=-1), vc)
 
 
 def _cpu_reference() -> dict:
     """The same sequence in fp32 on the CPU, uncompiled."""
     m = CPUDecoder().eval()
-    k_cache, v_cache = new_caches("cpu", torch.float32)
+    _, k_cache, v_cache = new_caches("cpu", torch.float32)
     with torch.no_grad():
         prefill = m(*step_inputs(PROMPT, 0, "cpu", torch.float32), k_cache, v_cache)
         decode = []
@@ -150,7 +178,10 @@ import json, sys
 import torch, torch_rbln
 from torch_rbln._internal.rsd_utils import auto_determine_num_devices
 from torch_rbln import profiler as rprof
-from test.rbln.test_rsd_kv_cache import Decoder, new_caches, step_inputs, KV_HEADS, HD, PROMPT, DECODE_TOKENS
+from test.rbln.test_rsd_kv_cache import (
+    COPY_BLOCK, DECODE_TOKENS, Decoder, HD, KV_HEADS, PROMPT, REPORTED_POSITIONS, SEQ_BLOCK,
+    STAGE_BLOCKS, new_caches, step_inputs,
+)
 
 dtype = getattr(torch, sys.argv[1])
 npus = int(sys.argv[2])
@@ -165,14 +196,26 @@ out = {}
 def logits(t):
     return t.float().cpu()[0].tolist()
 
+def used(block):
+    # The positions the sequence occupies, plus how much of the rest of the block is non-zero:
+    # a misplaced write shows up as either a changed value here or a changed count there.
+    host = block.float().cpu()
+    return {"head": host[:, :, :REPORTED_POSITIONS].flatten().tolist(), "nonzero": int((host != 0).sum())}
+
 with torch.no_grad():
     # (A) the cache is an eager allocation; nothing has placed it on the device yet.
-    k_cache, v_cache = new_caches(dev, dtype)
-    cache_bytes = 2 * k_cache.numel() * k_cache.element_size()
+    raws, k_cache, v_cache = new_caches(dev, dtype)
+    cache_bytes = sum(r.numel() for r in raws)
 
     # (B) prefill binds the cache to the first program: the cache takes that program's
     # (sharded) placement here.
     out["prefill"] = logits(run(*step_inputs(PROMPT, 0, dev, dtype), k_cache, v_cache))
+    torch.rbln.synchronize()
+    # Sharding, through a public surface: the logical device's NPUs each hold part of it.
+    per_chiplet = torch.rbln.memory_stats_per_chiplet(dev)
+    out["npus_holding_memory"] = len(
+        {int(key.split(".")[1]) for key, value in per_chiplet.items() if key.endswith("allocated.current") and value}
+    )
 
     # (C) decode: a second program over the same cache. Warm it once (its own compile
     # and first bind), then measure a steady run of every remaining step.
@@ -195,15 +238,48 @@ with torch.no_grad():
     }
     out["decode"] = [logits(t) for t in decode]
 
-    # (D) eager access to the sharded cache: read it back, overwrite one slot from eager
-    # code, decode once more on top of the edit.
-    out["k_cache"] = k_cache.float().cpu().flatten().tolist()
+    # (D) the accesses an engine makes to this cache from outside the graph.
+    #
+    # Whole read, and the same block read on its own: a partial read of a sharded buffer has
+    # to gather the shards at an offset, which reading all of it does not exercise.
+    out["k_block"] = used(k_cache[SEQ_BLOCK])
+    whole = k_cache.float().cpu()
+    out["partial_read_matches_whole"] = bool(
+        torch.equal(k_cache[SEQ_BLOCK].float().cpu(), whole[SEQ_BLOCK])
+    )
+
+    # Block-granular staging, the shape a KV-transfer connector uses: per-block views of the
+    # cache copied in one _foreach_copy_, host to device and back. Once the cache is bound to a
+    # program it holds the device's 16-bit compute format, whose mantissa is shorter than the
+    # host dtype's, so the value comes back rounded rather than byte for byte; what has to hold
+    # is that each block landed in the block it was addressed to, which the error scale says.
+    torch.manual_seed(2)
+    staged = [torch.randn(KV_HEADS, 1, k_cache.shape[3], HD, dtype=dtype) for _ in STAGE_BLOCKS]
+    torch._foreach_copy_([k_cache[b] for b in STAGE_BLOCKS], staged)
+    out["staged_error"] = max(
+        float((k_cache[b].float().cpu() - src.float()).abs().max() / src.float().abs().max())
+        for b, src in zip(STAGE_BLOCKS, staged)
+    )
+    out["staging_left_sequence_block"] = used(k_cache[SEQ_BLOCK])
+
+    # A block copied inside the device, then decoded through: the kernel must see the same
+    # bytes in the copy as in the original, which comparing the two decodes proves end to end.
+    torch._foreach_copy_(
+        [k_cache[COPY_BLOCK], v_cache[COPY_BLOCK]], [k_cache[SEQ_BLOCK], v_cache[SEQ_BLOCK]]
+    )
+    out["block_copy_exact"] = bool(torch.equal(k_cache[COPY_BLOCK].cpu(), k_cache[SEQ_BLOCK].cpu()))
+    pos = len(PROMPT) + len(DECODE_TOKENS)
+    out["decode_from_original"] = logits(run(*step_inputs([DECODE_TOKENS[0]], pos, dev, dtype), k_cache, v_cache))
+    step = step_inputs([DECODE_TOKENS[0]], pos, dev, dtype, block=COPY_BLOCK)
+    out["decode_from_copy"] = logits(run(*step, k_cache, v_cache))
+
+    # A sub-block write from eager code -- one slot of one block -- and a decode on top of it.
     slot = len(PROMPT) - 1
     torch.manual_seed(1)
-    k_cache[:, :, :, slot].copy_(torch.randn(1, KV_HEADS, 1, HD).to(dtype=dtype, device=dev))
-    step = step_inputs([DECODE_TOKENS[0]], len(PROMPT) + len(DECODE_TOKENS), dev, dtype)
+    k_cache[SEQ_BLOCK, :, :, slot].copy_(torch.randn(KV_HEADS, 1, HD).to(dtype=dtype, device=dev))
+    step = step_inputs([DECODE_TOKENS[0]], pos + 1, dev, dtype)
     out["after_write"] = logits(run(*step, k_cache, v_cache))
-    out["k_cache_after_write"] = k_cache.float().cpu().flatten().tolist()
+    out["k_block_after_write"] = used(k_cache[SEQ_BLOCK])
 
 print("RESULT " + json.dumps(out))
 """
@@ -224,7 +300,7 @@ assert auto_determine_num_devices(0) == 2, auto_determine_num_devices(0)
 m = Decoder().eval().to(device="rbln:0", dtype=dtype)
 opt = {"mode": ["compile_only"], "cache_dir": cache_dir}
 run = torch.compile(m, backend="rbln", dynamic=False, options=opt)
-k_cache, v_cache = new_caches("rbln:0", dtype)
+_, k_cache, v_cache = new_caches("rbln:0", dtype)
 with torch.no_grad():
     for step in (step_inputs(PROMPT, 0, "rbln:0", dtype), step_inputs([DECODE_TOKENS[0]], len(PROMPT), "rbln:0", dtype)):
         try:  # compile_only writes the artifact; the call itself errors (no real device)
@@ -315,6 +391,11 @@ def test_sharded_kv_cache_lifecycle_and_parity(dtype):
     single = _run_on_device(dtype, npus=1)
     cpu = _cpu_reference()
 
+    # The cache really is spread over the logical device's NPUs; without this the rest of the
+    # test would pass just as well on a cache that landed entirely on one of them.
+    assert rsd["npus_holding_memory"] == 2, rsd["npus_holding_memory"]
+    assert single["npus_holding_memory"] == 1, single["npus_holding_memory"]
+
     # Lifecycle: steady decode over the warm, sharded cache never re-lays it out. A re-layout
     # syncs the cache to the host (a real d2h) and allocates a cache-sized replacement; the
     # legitimate per-step traffic is the step's ids/mask (a few KiB h2d) and its output logits
@@ -326,6 +407,24 @@ def test_sharded_kv_cache_lifecycle_and_parity(dtype):
     assert steady["alloc_delta"] is None or steady["alloc_delta"] < steady["cache_bytes"] // 4, (
         f"device allocation grew by a cache-sized amount during steady decode (re-allocation): {steady}"
     )
+
+    # Engine-shaped access to the sharded buffer. These are exact on any topology, so each run
+    # answers for itself rather than being compared across the two.
+    for name, res in (("RSD=2", rsd), ("1 NPU", single)):
+        assert res["partial_read_matches_whole"], f"{name}: reading one block disagrees with reading all of it"
+        # Rounding into the device's 16-bit format is a few thousandths of the data's scale; a
+        # block that landed anywhere else holds unrelated values and misses by the scale itself.
+        assert res["staged_error"] < 0.02, (
+            f"{name}: a host->device staged block does not hold what was staged into it "
+            f"(error {res['staged_error']:.3f} of the data's scale)"
+        )
+        assert res["block_copy_exact"], f"{name}: in-device block copy did not land byte for byte"
+        assert res["staging_left_sequence_block"] == res["k_block"], (
+            f"{name}: staging into spare blocks disturbed the sequence's block"
+        )
+        assert res["decode_from_copy"] == res["decode_from_original"], (
+            f"{name}: decoding through the copied block disagrees with the block it was copied from"
+        )
 
     # Tolerances are fractions of the reference's logit scale. Sharding changes only the
     # reduction order across NPUs, so RSD=2 and 1 NPU differ by 16-bit rounding of the same
@@ -344,9 +443,11 @@ def test_sharded_kv_cache_lifecycle_and_parity(dtype):
     close(rsd["prefill"], single["prefill"], pair_tol, "prefill logits: RSD=2 vs 1 NPU")
     for i, (a, b) in enumerate(zip(rsd["decode"], single["decode"])):
         close(a, b, pair_tol, f"decode step {i} logits: RSD=2 vs 1 NPU")
-    close(rsd["k_cache"], single["k_cache"], pair_tol, "K cache read back: RSD=2 vs 1 NPU")
-    close(rsd["after_write"], single["after_write"], pair_tol, "decode after eager slot write: RSD=2 vs 1 NPU")
-    close(rsd["k_cache_after_write"], single["k_cache_after_write"], pair_tol, "K cache after eager slot write")
+    close(rsd["decode_from_original"], single["decode_from_original"], pair_tol, "decode after the block copy")
+    close(rsd["after_write"], single["after_write"], pair_tol, "decode after the sub-block slot write")
+    for key in ("k_block", "k_block_after_write"):
+        assert rsd[key]["nonzero"] == single[key]["nonzero"], f"{key}: cache occupancy differs from the 1-NPU run"
+        close(rsd[key]["head"], single[key]["head"], pair_tol, f"{key}: cache contents differ from the 1-NPU run")
 
     # Both device runs track the fp32 CPU reference.
     for name, res in (("RSD=2", rsd), ("1 NPU", single)):
