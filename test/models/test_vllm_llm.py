@@ -2,9 +2,9 @@
 """
 End-to-end vllm-rbln LLM tests on the native vLLM model path.
 
-Similar in spirit to ``test_optimum_llm.py`` but exercises the native vLLM
-model path (``VLLM_RBLN_USE_VLLM_MODEL=1``) on a small matrix of
-representative vllm-rbln models as a pre-screen for downstream CI.
+Exercises the native vLLM model path (``VLLM_RBLN_USE_VLLM_MODEL=1``) on a
+small matrix of representative vllm-rbln models as a pre-screen for
+downstream CI.
 
 Models are restricted to those that run on <=4 NPUs. Sampling is greedy
 (``temperature=0``); the first few generated tokens are compared against
@@ -152,7 +152,7 @@ def _vllm_generate_worker(
     ``RBLN_DEVICES`` / ``RBLN_NPUS_PER_DEVICE`` must be set in the *parent*
     (``_run_case``) before spawn: rebel's ``librbln-thunk.so`` snapshots them
     at ``import torch``, and spawn re-imports this module before reaching this
-    body. Same pattern as ``test_optimum_llm.py::_run_test_case``.
+    body.
     """
     from vllm import LLM, SamplingParams
 
