@@ -6,16 +6,17 @@ This document describes the GitHub Actions workflows that power the automated te
 
 The workflows below each have a trigger of their own. Files prefixed with `_` are reusable workflows they call, never triggered directly.
 
-| Workflow                                                                     | Purpose                                 |
-|------------------------------------------------------------------------------|-----------------------------------------|
-| Pre-merge checks (`pre-merge-checks.yaml`)                                   | Gate the proposed change                |
-| Post-merge checks (`post-merge-checks.yaml`)                                 | Confirm the integrated commit           |
-| Release checks (`release-checks.yaml`)                                       | Decide whether `main` is fit to release |
-| PR title check (`check-pr-title.yaml`)                                       | Enforce Conventional Commits format     |
-| Build (`build.yaml`)                                                         | Build and publish wheels                |
-| CD (`cd.yaml`)                                                               | Build and publish release artifacts     |
-| `rebel-compiler` dependency update (`update-rebel-compiler-dependency.yaml`) | Propose a `rebel-compiler` version bump |
-| Nightly PyTorch (`nightly-torch.yaml`)                                       | Track the PyTorch nightly wheel         |
+| Workflow                                                                     | Purpose                                       |
+|------------------------------------------------------------------------------|-----------------------------------------------|
+| Pre-merge checks (`pre-merge-checks.yaml`)                                   | Gate the proposed change                      |
+| Post-merge checks (`post-merge-checks.yaml`)                                 | Confirm the integrated commit                 |
+| Release checks (`release-checks.yaml`)                                       | Decide whether `main` is fit to release       |
+| PR title check (`check-pr-title.yaml`)                                       | Enforce Conventional Commits format           |
+| Release (`release.yaml`)                                                     | Tag `main` HEAD and create the GitHub Release |
+| Build (`build.yaml`)                                                         | Build and publish wheels                      |
+| CD (`cd.yaml`)                                                               | Build and publish release artifacts           |
+| `rebel-compiler` dependency update (`update-rebel-compiler-dependency.yaml`) | Propose a `rebel-compiler` version bump       |
+| Nightly PyTorch (`nightly-torch.yaml`)                                       | Track the PyTorch nightly wheel               |
 
 ---
 
@@ -27,12 +28,13 @@ The workflows below each have a trigger of their own. Files prefixed with `_` ar
 | Post-merge checks                  | Pushes to `main`            | Commit SHA                       | `false`              |
 | Release checks                     | Daily 00:15 KST; manual run | Commit SHA                       | `false`              |
 | PR title check                     | All PRs, including edits    | PR number                        | `true`               |
+| Release                            | Manual run                  | Version tag                      | `false`              |
 | Build                              | All PRs; manual run         | PR number; run ID on manual runs | `true` on PRs        |
 | CD                                 | Version tags (`v*`)         | Commit SHA                       | `false`              |
 | `rebel-compiler` dependency update | Daily 09:00 KST; manual run | Workflow name                    | `false`              |
 | Nightly PyTorch                    | Daily 14:00 KST; manual run | Workflow name                    | `false`              |
 
-Cancelling is safe when a newer commit makes the earlier result obsolete, which is why the pull request workflows cancel. Keying on the commit SHA already isolates commits from each other, so the only runs sharing a group are repeats of one commit, and `false` lets the run in flight finish. Grouping the dependency-tracking workflows by workflow name keeps a run from overlapping its predecessor.
+Cancelling is safe when a newer commit makes the earlier result obsolete, which is why the pull request workflows cancel. Keying on the commit SHA already isolates commits from each other, so the only runs sharing a group are repeats of one commit, and `false` lets the run in flight finish. Grouping the dependency-tracking workflows by workflow name keeps a run from overlapping its predecessor. Grouping Release by the version tag queues a second dispatch behind the first, so only one creates the tag.
 
 ---
 
@@ -102,6 +104,16 @@ Each validation workflow calls `_lint.yaml` and sets the scope for its stage. Th
 | Release checks    | Every tracked     | 3.10–3.14      | Release, Debug |
 
 `mypy` results are interpreter-specific, so release checks confirm every supported Python version. The build type selects `NDEBUG`, which decides whether `clang-tidy` sees the debug-only code paths, so linting `Release` alone never covers them. `clang-tidy` also compiles against the Python headers, so it varies along both dimensions; the matrix is therefore a full cross product rather than a separate sweep per linter.
+
+---
+
+## Release
+
+**File:** [`.github/workflows/release.yaml`](../.github/workflows/release.yaml)
+
+Release creates a version tag at `main` HEAD and, except for a release candidate, a GitHub Release for the tag. The release manager runs it with a `version_tag` once release checks have passed (see [Release Process](RELEASE_PROCESS.md)). The tag triggers CD.
+
+Re-running the workflow for a version already tagged at `main` HEAD is safe: it skips tag creation and creates the GitHub Release only if one is missing. If the tag already points at a different commit, the run fails.
 
 ---
 

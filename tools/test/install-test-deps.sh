@@ -13,12 +13,11 @@
 # Steps (each can be skipped via env var if a CI runner already provides it):
 #   1. Test runner   : pytest, pytest-xdist
 #   2. Test infra    : expecttest (for torch.testing._internal)
-#   3. Model tests   : torchvision (PyTorch CPU index), pandas, transformers 4
-#                      (the line test_transformers.py's models load under)
-#   4. inference stack: vllm-rbln (git clone + editable) and, through its
-#                      dependencies, optimum-rbln, in their own venv. That
-#                      stack pins transformers 5, so it cannot share the test
-#                      venv; test/run_tests.py runs test_optimum_llm.py and
+#   3. Model tests   : pandas, transformers 4 (the line test_transformers.py's
+#                      models load under)
+#   4. inference stack: vllm-rbln (git clone + editable) and its dependencies
+#                      in their own venv. That stack pins transformers 5, so it
+#                      cannot share the test venv; test/run_tests.py runs
 #                      test_vllm_llm.py with this venv's interpreter. The venv
 #                      sees the test venv's site-packages (torch, torch-rbln,
 #                      rebel-compiler, pytest) through a .pth file and adds
@@ -106,28 +105,20 @@ install_test_infra() {
   pip_install "expecttest>=0.3.0,<0.4.0"
 }
 
-# ----- step 3: model-test deps (torchvision + pandas) -----------------------
+# ----- step 3: model-test deps (pandas + transformers 4) --------------------
 #
-# torchvision needs the PyTorch CPU index (the +cpu wheel must come from
-# download.pytorch.org rather than PyPI). pandas is a plain PyPI package used
-# only by test/models/test_optimum_llm.py.
+# pandas is a plain PyPI package used by test/models/test_transformers.py.
 #
 # transformers stays on the 4 line here: test_transformers.py loads EXAONE-3.5's
-# hub modeling code, which no transformers 5 release runs. optimum-rbln is not
-# installed here; every release that supports this torch pins transformers 5, so
-# it lives in the inference venv (step 4).
+# hub modeling code, which no transformers 5 release runs.
 
 install_model_test_deps() {
-  log_step "Model-test deps (torchvision CPU + pandas + transformers 4)"
-  pip_install "torchvision==0.25.0+cpu" \
-    --index-url https://download.pytorch.org/whl/cpu \
-    --force-reinstall \
-    --no-deps
+  log_step "Model-test deps (pandas + transformers 4)"
   pip_install "pandas==2.2.3"
   pip_install "transformers<5"
 }
 
-# ----- step 4: inference stack (vllm-rbln + optimum-rbln) --------------------
+# ----- step 4: inference stack (vllm-rbln) -----------------------------------
 #
 # The stack goes into its own venv because it pins transformers 5 (see step 3).
 # The venv layers on this interpreter's site-packages through a .pth file, so
