@@ -19,9 +19,9 @@ Requirements (provided by fixtures in ``test/conftest.py``):
   * ``TORCH_RBLN_DISABLE_FALLBACK`` includes ``compile_error`` (``disable_compile_error_fallback``,
     autouse) — so the runtime error surfaces instead of falling back to CPU.
 
-The full model-level path is already covered by
-``test/models/test_optimum_llm.py::TestLlamaEagerPRIVATEUSE1``; this is a fast, model-free
-supplement. It runs in a spawned process because the failure aborts the worker.
+This is a fast, model-free check of the path (the model-level eager suite that used to cover it
+was removed with test_optimum_llm.py). It runs in a spawned process because the failure aborts
+the worker.
 """
 
 import pytest
