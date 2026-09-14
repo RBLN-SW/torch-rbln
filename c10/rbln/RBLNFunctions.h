@@ -718,6 +718,17 @@ C10_RBLN_API std::pair<size_t, size_t> mem_get_info(const c10::Device& device);
 C10_RBLN_API std::map<std::string, uint64_t> mem_get_info_per_chiplet(const c10::Device& device);
 
 /**
+ * @brief Lays out the runtime's per-NPU memory replies as the mem_get_info_per_chiplet() map.
+ *
+ * `replies[n]` becomes the "npu.<n>." entries; only the first `chiplet_cnt` chiplets of each
+ * reply are emitted. Pure; this is the key/field mapping mem_get_info_per_chiplet() returns.
+ *
+ * @param replies One RBLNDeviceMemoryInfo per physical NPU of a logical device, in mapping order.
+ * @return A map from key to bytes.
+ */
+C10_RBLN_API std::map<std::string, uint64_t> per_chiplet_memory_map(const std::vector<RBLNDeviceMemoryInfo>& replies);
+
+/**
  * @brief Enables or disables process-wide file offloading for RBLN virtual memory.
  *
  * When enabled, host-side regions backing RBLN tensors may be paged out to disk to reduce

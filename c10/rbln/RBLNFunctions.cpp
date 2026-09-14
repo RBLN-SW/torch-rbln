@@ -1401,8 +1401,13 @@ std::pair<size_t, size_t> mem_get_info(const c10::Device& device) {
 
 std::map<std::string, uint64_t> mem_get_info_per_chiplet(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
+  const auto out = per_chiplet_memory_map(device_memory_info_per_npu(device));
+  RBLN_LOG_DEBUG("mem_get_info_per_chiplet={}", out);
+  return out;
+}
+
+std::map<std::string, uint64_t> per_chiplet_memory_map(const std::vector<RBLNDeviceMemoryInfo>& replies) {
   std::map<std::string, uint64_t> out;
-  const auto replies = device_memory_info_per_npu(device);
   for (size_t npu = 0; npu < replies.size(); ++npu) {
     const auto& info = replies[npu];
     const auto npu_prefix = "npu." + std::to_string(npu) + ".";
@@ -1421,7 +1426,6 @@ std::map<std::string, uint64_t> mem_get_info_per_chiplet(const c10::Device& devi
       out[prefix + "largest_free_huge"] = c.largest_free_huge;
     }
   }
-  RBLN_LOG_DEBUG("mem_get_info_per_chiplet={}", out);
   return out;
 }
 

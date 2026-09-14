@@ -262,9 +262,12 @@ class TestMemGetInfo(TestCase):
             self.assertEqual(per_chiplet[f"npu.{npu}.huge_granularity"], reply.huge_granularity)
             chiplets = [k for k in per_chiplet if k.startswith(f"npu.{npu}.chiplet.") and k.endswith(".total")]
             self.assertEqual(len(chiplets), len(reply.chiplets))
+            # `total` is static; the free figures are readings another process may move between
+            # the setUp() query and this one, so they are bounded, not matched. The exact field
+            # layout is covered by the RBLNFunctionsPerChipletMemoryMap gtest on a fixed reply.
             for c, chiplet in enumerate(reply.chiplets):
                 self.assertEqual(per_chiplet[f"npu.{npu}.chiplet.{c}.total"], chiplet.total)
-                self.assertEqual(per_chiplet[f"npu.{npu}.chiplet.{c}.largest_free_huge"], chiplet.largest_free_huge)
+                self.assertLessEqual(per_chiplet[f"npu.{npu}.chiplet.{c}.largest_free_huge"], chiplet.total)
                 self.assertLessEqual(per_chiplet[f"npu.{npu}.chiplet.{c}.largest_free"], chiplet.total)
             self.assertEqual(
                 sum(per_chiplet[f"npu.{npu}.chiplet.{c}.total"] for c in range(len(reply.chiplets))),
