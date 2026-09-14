@@ -17,7 +17,7 @@ Make sure you are in a virtual environment with `torch-rbln` installed. If you i
 This installs:
 - **Test runner:** [`pytest`](https://docs.pytest.org/), [`pytest-xdist`](https://pytest-xdist.readthedocs.io/) (parallel execution)
 - **Test infra:** [`expecttest`](https://github.com/ezyang/expecttest) (required by `torch.testing._internal`)
-- **Model-test dependencies:** transformers 4, pandas; vllm-rbln and its dependencies in a separate `.venv-inference`
+- **Model-test dependencies:** transformers 4, pandas
 
 Model tests may also require access to external model artifacts. In many OSS
 environments they are best treated as optional/manual rather than baseline
@@ -81,8 +81,7 @@ test/
 │   └── test_ops.py                        # Adapted from upstream PyTorch test_ops.py — validates op correctness on RBLN
 │
 ├── models/                                # Model-level integration tests
-│   ├── test_transformers.py               # Causal-LM logits vs an fp32 CPU reference (transformers)
-│   └── test_vllm_llm.py                   # vllm-rbln native-path end-to-end (runs in .venv-inference)
+│   └── test_transformers.py               # Causal-LM logits vs an fp32 CPU reference (transformers)
 │
 └── cpp/                                   # C++ unit tests (Google Test)
     ├── CMakeLists.txt
@@ -198,9 +197,7 @@ python -m pytest test/rbln/test_graph_eager_mode.py -s -v -x
 #### Installing Test Dependencies
 
 ```bash
-# Install everything needed to run the full suite. vllm-rbln lands in
-# .venv-inference (it pins transformers 5; test_transformers.py needs 4), and
-# run_tests.py runs test_vllm_llm.py with it.
+# Install everything needed to run the full suite.
 ./tools/test/install-test-deps.sh
 
 # Preview what would be installed (dry-run)
@@ -208,14 +205,6 @@ python -m pytest test/rbln/test_graph_eager_mode.py -s -v -x
 
 # Use uv instead of pip
 UV=1 ./tools/test/install-test-deps.sh
-```
-
-The inference venv is installed `--no-deps` from `tools/test/requirements-inference.txt`,
-an export of vllm-rbln's `uv.lock` (minus torch and torch-rbln, which the venv shares with
-the test venv). To move to another vllm-rbln commit:
-
-```bash
-VLLM_RBLN_REF=<ref> ./tools/test/export-inference-requirements.sh   # needs uv
 ```
 
 ### C++ Tests
@@ -669,7 +658,7 @@ SKIPPED: Requires at least 2 logical devices, found 1
 #### Missing Model-Test Dependencies
 
 ```
-ModuleNotFoundError: No module named 'vllm_rbln'
+ModuleNotFoundError: No module named 'transformers'
 ```
 
 **Cause:** The extra packages required by model tests are not installed.
