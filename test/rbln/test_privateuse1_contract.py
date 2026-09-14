@@ -36,6 +36,7 @@ import sys
 import textwrap
 
 import pytest
+import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from test.utils import requires_physical_devices
@@ -681,6 +682,53 @@ class TestUpstreamClauses(TestCase):
         self.assertEqual(p.result["missing"], [], f"missing from torch.rbln: {p.result['missing']}")
         offenders = [message for message in p.result["warnings"] if "does not take effect" in message]
         self.assertEqual(offenders, [], f"torch.manual_seed() does not reach RBLN -- {offenders}")
+
+    def test_rng_state_round_trips_through_the_device_module(self):
+        """``torch.rbln.get_rng_state`` / ``set_rng_state`` must exist and carry the generator's seed.
+
+        torch/utils/backend_registration.py lists ``get_rng_state(device)`` and
+        ``set_rng_state(new_state, device)`` among the APIs a privateuse1 device module must
+        provide; torch/random.py::fork_rng and torch/utils/checkpoint.py call them on the device
+        module of the tensors they see.
+        """
+        index = torch.rbln.current_device()
+        saved = torch.rbln.get_rng_state(index)
+        try:
+            seeded = torch.Generator(device=f"rbln:{index}")
+            seeded.manual_seed(2024)
+            torch.rbln.set_rng_state(seeded.get_state(), index)
+            self.assertTrue(torch.equal(torch.rbln.get_rng_state(index), seeded.get_state()))
+            # Round-tripping the bytes is not enough: a generator fed the state must report the seed.
+            restored = torch.Generator(device=f"rbln:{index}")
+            restored.set_state(torch.rbln.get_rng_state(index))
+            self.assertEqual(restored.initial_seed(), 2024)
+
+            states = torch.rbln.get_rng_state_all()
+            self.assertEqual(len(states), torch.rbln.device_count())
+            torch.rbln.set_rng_state_all(states)
+            self.assertTrue(torch.equal(torch.rbln.get_rng_state(index), states[index]))
+        finally:
+            torch.rbln.set_rng_state(saved, index)
+
+    def test_freeze_rng_state_restores_the_rbln_generator(self):
+        """``torch.testing._utils.freeze_rng_state`` must leave the RBLN generator as it found it.
+
+        From torch 2.13 the helper is accelerator-generic: it snapshots
+        ``torch.get_device_module(<current accelerator>).get_rng_state()`` on entry and sets it
+        back on exit, and every OpInfo test of a seeded op (``normal``, ``uniform``, SDPA with
+        dropout, ...) runs inside it.
+        """
+        from torch.testing._utils import freeze_rng_state
+
+        index = torch.rbln.current_device()
+        before = torch.rbln.get_rng_state(index)
+        probe = torch.Generator(device=f"rbln:{index}")
+        probe.set_state(before)
+        probe.manual_seed(probe.initial_seed() + 1)
+        with freeze_rng_state():
+            torch.rbln.set_rng_state(probe.get_state(), index)
+            self.assertFalse(torch.equal(torch.rbln.get_rng_state(index), before))
+        self.assertTrue(torch.equal(torch.rbln.get_rng_state(index), before))
 
     @xfail_until("phase 4", "torch.rbln has no _utils._get_device_index")
     def test_serialization_device_index_helper_exists(self):

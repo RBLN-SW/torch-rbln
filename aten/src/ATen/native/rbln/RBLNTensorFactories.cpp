@@ -1,3 +1,5 @@
+#include <ATen/Dispatch.h>
+#include <ATen/native/RangeUtils.h>
 #include <ATen/native/rbln/RBLNCopy.h>
 #include <ATen/native/rbln/RBLNTensorFactories.h>
 #include <ATen/native/rbln/RBLNTensorUtils.h>
@@ -316,29 +318,21 @@ void arange_fill_host(scalar_t* host_ptr, int64_t n, scalar_t start, scalar_t st
 // Native impl of aten::arange.start_out for RBLN.
 //   schema: arange.start_out(Scalar start, Scalar end, Scalar step,
 //                            *, Tensor(a!) out) -> Tensor(a!)
-// Write-only on `out`, so we use acquire_host_ptr_for_overwrite (D2H sync
-// skipped) and commit via return_borrowed(updated=true). `out` is assumed
-// already sized correctly by the caller (vllm-rbln preallocates the tensor;
-// torch.arange's meta function sizes it before dispatch).
+// Upstream sizes and validates `out` in a structured meta function that a
+// PrivateUse1 impl bypasses, so this kernel does both itself with the helper
+// the CPU kernel uses. Write-only on `out`, so we use
+// acquire_host_ptr_for_overwrite (D2H sync skipped) and commit via
+// return_borrowed(updated=true).
 at::Tensor& arange_start_out_rbln(
     const at::Scalar& start,
     const at::Scalar& end,
     const at::Scalar& step,
     at::Tensor& out) {
   RBLN_SCOPE_GUARD();
-  // Compute expected length = ceil((end - start) / step). PyTorch's native
-  // CPU/CUDA path runs through TensorIterator + a structured meta function
-  // that resizes `out`. On PrivateUse1 we own the impl, so we have to
-  // mirror that behaviour explicitly. Use double for the range arithmetic
-  // and clamp to >=0.
-  const double s_d = start.to<double>();
-  const double e_d = end.to<double>();
-  const double st_d = step.to<double>();
-  TORCH_CHECK(st_d != 0.0, "arange.start_out: step must be non-zero");
   int64_t n = 0;
-  if ((st_d > 0.0 && e_d > s_d) || (st_d < 0.0 && e_d < s_d)) {
-    n = static_cast<int64_t>(std::ceil((e_d - s_d) / st_d));
-  }
+  AT_DISPATCH_ALL_TYPES_AND2(at::kHalf, at::kBFloat16, out.scalar_type(), "arange_start_out_rbln", [&] {
+    n = at::native::compute_arange_size<scalar_t>(start, end, step);
+  });
   if (out.numel() != n) {
     out.resize_({n});
   }

@@ -117,13 +117,13 @@ Read `.claude/skills/adding-an-op/SKILL.md` before starting.
 
 ## Patching upstream PyTorch
 
-`torch_rbln/_internal/monkey_patches.py` replaces upstream symbols at import through `apply_all_patches()`: `torch.compile`, `torch._dynamo.reset`, and — on torch below 2.13 — `GuardBuilder.id_match_unchecked` and `torch.Tensor.__repr__`. A new patch follows the existing shape; `test/rbln/test_torch_compile_patch.py` asserts it.
+`torch_rbln/_internal/monkey_patches.py` replaces upstream symbols at import through `apply_all_patches()`; that function is the list of what is patched. A new patch follows the existing shape; `test/rbln/test_torch_compile_patch.py` asserts it.
 
 - **Inert for everyone else.** A non-RBLN backend must reach the original untouched, the way the `torch.compile` wrapper early-returns on `is_rbln_backend`.
-- **Narrow the global surface.** The `__repr__` patch is scoped by a thread-local to guard build only, so a user's `repr(tensor)` is unchanged. Do not replace a global unconditionally.
+- **Narrow the global surface.** Scope a replacement to the call path that needs it — a thread-local flag, a backend check — so an unrelated caller sees the original. Do not replace a global unconditionally.
 - **Idempotent, with the original saved.** Guard re-application with the module-level flag and keep the original in a module global.
 - **Every patch is undone by `remove_all_patches()`**, including the caches it warmed — `clear_rbln_compile_cache()` and `warm_cache.clear()` are part of the teardown.
-- **A backport of an upstream fix is version-gated and cites the issue**, so it becomes a no-op once upstream lands it — see the `torch.__version__ >= (2, 13)` early return.
+- **A backport of an upstream fix is version-gated and cites the issue**, so it becomes a no-op once upstream lands it. When the torch pin moves past that version, delete the backport and keep a test that pins the upstream behavior it relied on.
 - Registration is lazy: the dynamo backend registers on the first `torch.compile` call, not at import. Keep it that way — see the import rule below.
 
 ## Contracts that bite
