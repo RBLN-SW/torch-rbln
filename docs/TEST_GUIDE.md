@@ -211,6 +211,14 @@ python -m pytest test/rbln/test_graph_eager_mode.py -s -v -x
 UV=1 ./tools/test/install-test-deps.sh
 ```
 
+The inference venv is installed `--no-deps` from `tools/test/requirements-inference.txt`,
+an export of vllm-rbln's `uv.lock` (minus torch and torch-rbln, which the venv shares with
+the test venv). To move to another vllm-rbln commit:
+
+```bash
+VLLM_RBLN_REF=<ref> ./tools/test/export-inference-requirements.sh   # needs uv
+```
+
 ### C++ Tests
 
 C++ tests use [Google Test](https://google.github.io/googletest/). They are compiled during the editable install and run via CTest:
