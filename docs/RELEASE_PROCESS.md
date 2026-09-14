@@ -23,7 +23,7 @@ Separate [GitHub repository rulesets](https://docs.github.com/en/repositories/co
 
 `main` accepts changes only through pull requests, which must have the required approvals and passing status checks. Repository admins can bypass the merge requirements, but not even they can push to `main` directly.
 
-Version tags are created by the release automation. The ruleset prevents them from being moved or deleted, so a published version always points at the same commit.
+Version tags are created by the release workflow. The ruleset prevents them from being moved or deleted, so a published version always points at the same commit.
 
 ## Versioning
 
@@ -56,11 +56,11 @@ Release checks run the release test suite against the current `main` commit and 
 
 ### 3. Tagging and publication
 
-The release manager runs the release automation to tag the validated commit. The tag triggers the CD workflow, which builds wheels for all supported Python versions and publishes them to the internal package index first, then to public PyPI.
+The release manager runs the release workflow to tag the validated commit. The tag triggers the CD workflow, which builds wheels for all supported Python versions and publishes them to the internal package index first, then to public PyPI.
 
 ### 4. Release notes
 
-The release automation creates a [GitHub Release](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository) for the tag, with auto-generated notes covering the commits since the previous final release. It skips release candidates.
+The release workflow creates a [GitHub Release](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository) for the tag, with auto-generated notes covering the commits since the previous release. It skips release candidates.
 
 ## Debug Builds
 

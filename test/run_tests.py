@@ -171,11 +171,11 @@ def run_distributed_tests(
     )
 
 
-# The inference stack (vllm-rbln, optimum-rbln) pins transformers 5, and
-# test_transformers.py loads a model whose hub code needs transformers 4, so
-# install-test-deps.sh keeps the stack in its own venv and the two groups run
-# under different interpreters.
-_INFERENCE_STACK_TESTS = ["test/models/test_optimum_llm.py", "test/models/test_vllm_llm.py"]
+# The inference stack (vllm-rbln) pins transformers 5, and test_transformers.py
+# loads a model whose hub code needs transformers 4, so install-test-deps.sh
+# keeps the stack in its own venv and the two groups run under different
+# interpreters.
+_INFERENCE_STACK_TESTS = ["test/models/test_vllm_llm.py"]
 _TRANSFORMERS_TESTS = ["test/models/test_transformers.py"]
 
 
