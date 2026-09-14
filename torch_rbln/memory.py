@@ -346,10 +346,7 @@ def mem_get_info(device: Optional[Union[int, str, torch.device]] = None) -> tupl
     which :func:`memory_stats` covers. ``total`` is the pool the driver can hand out, so it
     sits below the part's nominal DRAM. A logical device spanning several physical NPUs
     (``RBLN_NPUS_PER_DEVICE`` / ``RBLN_DEVICE_MAP``) reports their sum; one tensor still
-    lives on one NPU.
-
-    Needs no allocation and creates no context, but commits the device mapping like any
-    device use. A reading, not a reservation: another process may allocate right after.
+    lives on one NPU. A reading, not a reservation: another process may allocate right after.
 
     Args:
         device (Optional[Union[int, str, torch.device]]): The device to query.

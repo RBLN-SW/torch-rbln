@@ -693,7 +693,7 @@ C10_RBLN_API void reset_peak_memory_stats(const c10::Device& device);
  * The kernel driver's figure for the NPU as a whole -- every process, not this process's
  * caching allocator (see memory_stats()) -- which is what torch.cuda.mem_get_info() reports
  * on CUDA. Summed over the physical NPUs of the logical device; one tensor still lives on
- * one NPU. A reading, not a reservation. Commits the device mapping like any device use.
+ * one NPU. A reading, not a reservation.
  *
  * Raises when the installed UMD/KMD does not provide the query or under RBLN_DUMMY_DEVICE:
  * there is no figure to report, and a guess here would size a KV cache wrong.
