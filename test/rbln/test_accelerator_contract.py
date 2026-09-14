@@ -252,6 +252,25 @@ class TestMemGetInfo(TestCase):
         self.assertEqual(acc_total, total)
         self.assertLessEqual(acc_free, acc_total)
 
+    def test_per_chiplet_matches_driver_reply(self):
+        if any(reply is None for reply in self.replies):
+            self.skipTest("installed UMD/KMD has no device memory-info query")
+        per_chiplet = torch.rbln.mem_get_info_per_chiplet(0)
+        for npu, reply in enumerate(self.replies):
+            self.assertEqual(per_chiplet[f"npu.{npu}.total"], reply.total)
+            self.assertEqual(per_chiplet[f"npu.{npu}.granularity"], reply.granularity)
+            self.assertEqual(per_chiplet[f"npu.{npu}.huge_granularity"], reply.huge_granularity)
+            chiplets = [k for k in per_chiplet if k.startswith(f"npu.{npu}.chiplet.") and k.endswith(".total")]
+            self.assertEqual(len(chiplets), len(reply.chiplets))
+            for c, chiplet in enumerate(reply.chiplets):
+                self.assertEqual(per_chiplet[f"npu.{npu}.chiplet.{c}.total"], chiplet.total)
+                self.assertEqual(per_chiplet[f"npu.{npu}.chiplet.{c}.largest_free_huge"], chiplet.largest_free_huge)
+                self.assertLessEqual(per_chiplet[f"npu.{npu}.chiplet.{c}.largest_free"], chiplet.total)
+            self.assertEqual(
+                sum(per_chiplet[f"npu.{npu}.chiplet.{c}.total"] for c in range(len(reply.chiplets))),
+                reply.total,
+            )
+
     def test_unsupported_driver_raises(self):
         if all(reply is not None for reply in self.replies):
             self.skipTest("installed UMD/KMD provides the device memory-info query")
@@ -259,6 +278,8 @@ class TestMemGetInfo(TestCase):
             torch.rbln.mem_get_info(0)
         with self.assertRaisesRegex(RuntimeError, "does not provide the device memory query"):
             torch.accelerator.get_memory_info(0)
+        with self.assertRaisesRegex(RuntimeError, "does not provide the device memory query"):
+            torch.rbln.mem_get_info_per_chiplet(0)
 
     def test_accepts_device_forms_and_rejects_non_rbln(self):
         for bad in ("cpu", "cuda:0", torch.device("cpu")):

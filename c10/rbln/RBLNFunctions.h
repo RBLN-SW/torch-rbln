@@ -704,6 +704,20 @@ C10_RBLN_API void reset_peak_memory_stats(const c10::Device& device);
 C10_RBLN_API std::pair<size_t, size_t> mem_get_info(const c10::Device& device);
 
 /**
+ * @brief Returns the driver's device-wide DRAM usage of `device` broken down per chiplet.
+ *
+ * Keys "npu.<n>.chiplet.<c>.{total,used,free,largest_free,largest_free_huge}" plus
+ * "npu.<n>.{total,used,free,granularity,huge_granularity}" for each physical NPU of the
+ * logical device; npu.<n> is the NPU's position as in memory_stats_per_chiplet(). Same
+ * scope and failure modes as mem_get_info(). A physically contiguous buffer is bounded by
+ * one chiplet's largest_free, which the device total hides.
+ *
+ * @param device The input device.
+ * @return A map from key to bytes.
+ */
+C10_RBLN_API std::map<std::string, uint64_t> mem_get_info_per_chiplet(const c10::Device& device);
+
+/**
  * @brief Enables or disables process-wide file offloading for RBLN virtual memory.
  *
  * When enabled, host-side regions backing RBLN tensors may be paged out to disk to reduce

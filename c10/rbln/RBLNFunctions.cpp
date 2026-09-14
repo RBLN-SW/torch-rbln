@@ -1353,21 +1353,21 @@ std::map<std::string, uint64_t> memory_stats_per_chiplet(const c10::Device& devi
   return out;
 }
 
-std::pair<size_t, size_t> mem_get_info(const c10::Device& device) {
-  RBLN_LOG_DEBUG("logical device={}", c10::str(device));
+namespace {
+
+// One reply per physical NPU of the logical device, in mapping order. Commits the mapping
+// (a device use); the physical ids are the runtime's coordinate (after RBLN_VISIBLE_DEVICES).
+std::vector<RBLNDeviceMemoryInfo> device_memory_info_per_npu(const c10::Device& device) {
   RBLN_CHECK(
       runtime_available(), "Cannot query device memory for {}: no RBLN runtime or device available", c10::str(device));
   const auto device_index = device.index();
   check_device_index(device_index);
   to_device_id(device_index);
 
-  // The physical ids are the runtime's coordinate (after RBLN_VISIBLE_DEVICES), as registered at commit.
-  size_t free = 0;
-  size_t total = 0;
+  std::vector<RBLNDeviceMemoryInfo> replies;
   for (const int physical_id : DeviceMappingManager::getInstance().getPhysicalDeviceIds(device_index)) {
-    uint64_t npu_free = 0;
-    uint64_t npu_total = 0;
-    const auto rc = rbln_get_device_memory_info(physical_id, &npu_free, &npu_total);
+    RBLNDeviceMemoryInfo info{};
+    const auto rc = rbln_get_device_memory_info(physical_id, &info);
     RBLN_CHECK(
         rc != RBLNRetCode_UNSUPPORTED,
         "Device memory info is not available for {} (physical NPU {}): the installed RBLN UMD/KMD does not "
@@ -1380,11 +1380,49 @@ std::pair<size_t, size_t> mem_get_info(const c10::Device& device) {
         c10::str(device),
         physical_id,
         static_cast<int>(rc));
-    free += npu_free;
-    total += npu_total;
+    replies.push_back(info);
+  }
+  return replies;
+}
+
+} // namespace
+
+std::pair<size_t, size_t> mem_get_info(const c10::Device& device) {
+  RBLN_LOG_DEBUG("logical device={}", c10::str(device));
+  size_t free = 0;
+  size_t total = 0;
+  for (const auto& info : device_memory_info_per_npu(device)) {
+    free += info.free;
+    total += info.total;
   }
   RBLN_LOG_DEBUG("mem_get_info: free={}, total={}", free, total);
   return {free, total};
+}
+
+std::map<std::string, uint64_t> mem_get_info_per_chiplet(const c10::Device& device) {
+  RBLN_LOG_DEBUG("logical device={}", c10::str(device));
+  std::map<std::string, uint64_t> out;
+  const auto replies = device_memory_info_per_npu(device);
+  for (size_t npu = 0; npu < replies.size(); ++npu) {
+    const auto& info = replies[npu];
+    const auto npu_prefix = "npu." + std::to_string(npu) + ".";
+    out[npu_prefix + "total"] = info.total;
+    out[npu_prefix + "used"] = info.used;
+    out[npu_prefix + "free"] = info.free;
+    out[npu_prefix + "granularity"] = info.granularity;
+    out[npu_prefix + "huge_granularity"] = info.huge_granularity;
+    for (uint32_t chiplet = 0; chiplet < info.chiplet_cnt; ++chiplet) {
+      const auto& c = info.chiplet[chiplet];
+      const auto prefix = npu_prefix + "chiplet." + std::to_string(chiplet) + ".";
+      out[prefix + "total"] = c.total;
+      out[prefix + "used"] = c.used;
+      out[prefix + "free"] = c.free;
+      out[prefix + "largest_free"] = c.largest_free;
+      out[prefix + "largest_free_huge"] = c.largest_free_huge;
+    }
+  }
+  RBLN_LOG_DEBUG("mem_get_info_per_chiplet={}", out);
+  return out;
 }
 
 void reset_accumulated_memory_stats(const c10::Device& device) {

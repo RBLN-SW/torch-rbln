@@ -83,6 +83,8 @@ class TestNoDevice(TestCase):
             rbln_memory.mem_get_info()
         with self.assertRaises(RuntimeError):
             rbln_memory.mem_get_info(0)
+        with self.assertRaises(RuntimeError):
+            rbln_memory.mem_get_info_per_chiplet(0)
 
     def test_is_initialized_tracks_set_device(self):
         """``is_initialized()`` exists (DeviceMesh requires it).

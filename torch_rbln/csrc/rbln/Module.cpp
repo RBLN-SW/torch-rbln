@@ -109,6 +109,10 @@ void register_public_device_api(py::module_& module) {
       "reset_accumulated_memory_stats", &c10::rbln::reset_accumulated_memory_stats, "Reset accumulated memory stats.");
   module.def("reset_peak_memory_stats", &c10::rbln::reset_peak_memory_stats, "Reset peak memory stats.");
   module.def("mem_get_info", &c10::rbln::mem_get_info, "Get (free, total) device DRAM in bytes.");
+  module.def(
+      "mem_get_info_per_chiplet",
+      &c10::rbln::mem_get_info_per_chiplet,
+      "Get the driver's device DRAM usage broken down per chiplet.");
 
   py::class_<c10::rbln::DeviceProperties>(module, "DeviceProperties")
       .def_readonly("name", &c10::rbln::DeviceProperties::name)

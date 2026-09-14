@@ -228,7 +228,7 @@ export RBLN_DUMMY_DEVICE=1 RBLN_DEVICE_MAP="[0,1],[2,3]"   # 2 logical devices, 
   with real hardware) fall back to CPU exactly as they would on a real device.
   Distributed collectives still require real hardware, and memory-stat APIs
   (`memory_stats`, `memory_allocated`, ...) report zeros rather than real usage.
-  `mem_get_info()` raises: there is no device DRAM to report.
+  `mem_get_info()` and `mem_get_info_per_chiplet()` raise: there is no device DRAM to report.
 - `torch.rbln.is_available()` returns `True` in this mode — treat it as a
   development flag, not real hardware availability.
 
