@@ -16,9 +16,10 @@ generated Python wrappers depend on:
 import threading
 
 import pytest
-import torch  # noqa: F401  (needed to load torch_rbln._C)
+import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
+import torch_rbln
 from torch_rbln import _C  # type: ignore[attr-defined]
 from torch_rbln._internal import warm_cache
 
@@ -121,57 +122,6 @@ class TestWarmCacheBuildingGuard(TestCase):
         self.assertEqual(seen_in_thread, [False], f"Thread-local flag leaked across threads: {seen_in_thread}")
         # Original thread still has the flag set.
         self.assertTrue(_C._warmcache_is_building())
-
-
-@pytest.mark.test_set_ci
-class TestWarmCacheForceRecompileFlag(TestCase):
-    """Thread-local force-recompile signal that pairs ``try_warmcache_hit``'s
-    erase-on-failure with the next ``compile_rbln_cached`` invocation.
-
-    The C++ shim sets the flag inside ``try_warmcache_hit`` when it has to
-    ``erase`` a broken entry; ``compile_and_run_view_aware`` consumes the
-    flag and passes ``force_recompile=True`` to ``compile_rbln_cached`` so
-    the same op+shape gets a fresh ``torch.compile`` pass (which lets the
-    rebel backend re-populate ``_runtime_holder`` and install succeed
-    again). Without this pairing, the erased op+shape would stay
-    permanently on the Python wrapper path because the Python compile
-    cache returns the stale callable and the holder stays empty.
-    """
-
-    def setUp(self) -> None:
-        _C._warmcache_consume_force_recompile()
-
-    def tearDown(self) -> None:
-        _C._warmcache_consume_force_recompile()
-
-    def test_default_false(self) -> None:
-        self.assertFalse(_C._warmcache_consume_force_recompile())
-
-    def test_request_then_consume_once(self) -> None:
-        _C._warmcache_request_force_recompile()
-        self.assertTrue(_C._warmcache_consume_force_recompile())
-        # Consume is single-shot.
-        self.assertFalse(_C._warmcache_consume_force_recompile())
-
-    def test_thread_local_isolation(self) -> None:
-        """The flag must not leak across threads. If it did, an erase on
-        thread A would force unnecessary recompiles on thread B's next
-        unrelated op."""
-        _C._warmcache_request_force_recompile()
-        seen_in_thread: list[bool] = []
-        ev = threading.Event()
-
-        def worker() -> None:
-            seen_in_thread.append(_C._warmcache_consume_force_recompile())
-            ev.set()
-
-        t = threading.Thread(target=worker, daemon=True)
-        t.start()
-        ev.wait(timeout=5.0)
-        t.join(timeout=5.0)
-
-        self.assertEqual(seen_in_thread, [False], f"force-recompile flag leaked across threads: {seen_in_thread}")
-        self.assertTrue(_C._warmcache_consume_force_recompile())
 
 
 @pytest.mark.test_set_ci
@@ -278,6 +228,60 @@ class TestWarmCacheContractBreak(TestCase):
 
         hits_after = _C._dispatch_shim_warm_segments_dump()[0]
         self.assertEqual(hits_after, hits_before, "an entry was cached off an unusable handle")
+
+
+@pytest.mark.test_set_ci
+@pytest.mark.single_worker
+class TestWarmCacheDeviceScope(TestCase):
+    """``empty_cache(device)`` drops that device's entries and no other's.
+
+    Serving several devices from one process, a flush on one of them must not
+    put the others' ops back on the Python wrapper path.
+    """
+
+    SHAPE = 384  # 64-aligned and unused elsewhere, so the first call compiles
+
+    def setUp(self) -> None:
+        if torch_rbln._C.device_count() < 2:
+            self.skipTest("needs two RBLN devices")
+        self.addCleanup(_C._warmcache_clear)
+
+    @staticmethod
+    def _hits() -> int:
+        return _C._dispatch_shim_warm_segments_dump()[0]
+
+    def _operands(self, device: str):
+        x = torch.arange(self.SHAPE, dtype=torch.float16, device=device)
+        y = torch.ones(self.SHAPE, dtype=torch.float16, device=device)
+        expected = torch.arange(1, self.SHAPE + 1, dtype=torch.float16)
+        return x, y, expected
+
+    def _assert_miss(self, x, y, expected, msg: str) -> None:
+        hits = self._hits()
+        self.assertEqual(torch.add(x, y).to("cpu"), expected)
+        self.assertEqual(self._hits(), hits, msg)
+
+    def _assert_hit(self, x, y, expected, msg: str) -> None:
+        hits = self._hits()
+        self.assertEqual(torch.add(x, y).to("cpu"), expected)
+        self.assertGreater(self._hits(), hits, msg)
+
+    def test_clearing_one_device_keeps_the_other_hitting(self) -> None:
+        a = self._operands("rbln:0")
+        self._assert_miss(*a, "rbln:0 first call took the hit path")
+        self._assert_hit(*a, "rbln:0 second call did not hit")
+        size_after_0 = _C._warmcache_size()
+        b = self._operands("rbln:1")
+        self._assert_miss(*b, "rbln:1 first call took the hit path")
+        self._assert_hit(*b, "rbln:1 second call did not hit")
+        self.assertGreater(_C._warmcache_size(), size_after_0)
+
+        torch.rbln.empty_cache(1)
+
+        self.assertEqual(_C._warmcache_size(), size_after_0, "empty_cache(1) did not drop exactly rbln:1's entries")
+        self._assert_hit(*a, "rbln:0 stopped hitting after empty_cache(1)")
+        self._assert_miss(*b, "rbln:1 hit after its entries were dropped")
+        self._assert_hit(*b, "rbln:1 was not re-installed")
 
 
 if __name__ == "__main__":
