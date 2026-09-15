@@ -376,11 +376,13 @@ at::Tensor& index_copy_out_rbln(
   // already shaped correctly, or when out.sizes() == self.sizes()).
   at::native::resize_output(out, self.sizes());
 
-  // Non-contig `out`: stage through a contig buffer and copy_ back at the end.
-  // The engine assumes a contig output for the "out aliasing self" detection
-  // to be unambiguous, and most upstream callers pass a contig (or freshly
-  // empty) `out` anyway.
-  if (!out.is_contiguous()) {
+  // Non-contig `out` that is not `self` itself: stage through a contig buffer
+  // and copy_ back at the end, so the positions the index does not name get
+  // self's values through one copy_ rather than a strided v2v of the whole
+  // view. The in-place form on a view (`out` is `self`) needs no initialisation:
+  // Phase 2 writes the indexed runs into the view and the rest stays as it is,
+  // so it takes the direct path below however the view is laid out.
+  if (!out.is_contiguous() && !is_same_view(out, self)) {
     auto staging = at::empty(self.sizes(), out.options().memory_format(c10::MemoryFormat::Contiguous));
     index_copy_out_rbln(self, dim, index, source, staging);
     out.copy_(staging);
