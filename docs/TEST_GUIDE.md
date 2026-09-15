@@ -768,16 +768,24 @@ Mark a test `torch_rbln_only` when a different rebel-compiler would not change i
 
 - it pins an upstream **torch** clause or a torch-facing contract, so a torch upgrade is what
   breaks it (`test_privateuse1_contract.py`);
-- it tests torch-rbln's own Python or C++ logic with no device behind it — helper functions,
-  the CPU fast-path registry (`test_torch_compile_patch.py`, `test_cpu_fast_paths.py`);
+- the thing under test is a torch-rbln gate that the test drives itself, with the runtime
+  stubbed or forced (`test_runtime_unavailable.py`);
 - it tests packaging or import behaviour — where `librbln.so` is found, what importing the
   package must not do (`test_rbln_runtime_lib.py`, `test_import_rbln_devices_seal.py`);
 - it asserts an absence at the torch level (`test_amp_autocast.py`);
+- it tests only a torch-rbln surface whose behaviour rebel-compiler covers on its own side
+  (`test_file_offloading.py`);
 - it tests the harness itself (`test_isolation_guards.py`).
 
 Mark it on the module (`pytestmark = pytest.mark.torch_rbln_only`) with a comment saying which
 of those it is; the reason is the reviewable part, not the marker. torch-rbln's own lanes run
 these tests as before — the marker only removes them from someone else's gate.
+
+Cost is part of the judgement, in one direction only: a file that costs nothing stays in the
+lane even when its subject is arguably ours, because the risk of dropping a signal outweighs
+the seconds. `test_torch_compile_patch.py` is mostly helper unit tests and still runs there —
+two of its cases drive a real compile through the rbln backend, and the whole file is a
+fraction of a second.
 
 > **How this works:** CI mode runs `pytest -m "test_set_ci"`, selecting only `test_set_ci`-marked tests. Release mode runs `pytest -m "not (test_set_experimental or test_set_perf)"`, which includes all `test_set_ci`-marked tests *plus* unmarked tests, but excludes `test_set_experimental` and `test_set_perf`. The two modes overlap but neither is a strict superset of the other — a test marked with both `@pytest.mark.test_set_ci` and `@pytest.mark.test_set_experimental` will run in CI but not in Release. In practice, **most tests should be marked `@pytest.mark.test_set_ci`**. Omit the marker only when a test is intentionally too slow for per-commit CI but still valuable for pre-release validation.
 >

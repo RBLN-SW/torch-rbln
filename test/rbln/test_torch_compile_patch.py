@@ -31,12 +31,6 @@ from torch_rbln._internal.torch_compile_patch_helpers import (
 )
 
 
-# Deselected by rebel_compiler's CI (`-m "not torch_rbln_only"`); see the marker in pyproject.
-# Unit tests for the helper functions in torch_compile_patch_helpers; they compute over
-# tensors and option dicts and never compile or reach the runtime.
-pytestmark = pytest.mark.torch_rbln_only
-
-
 @pytest.mark.test_set_ci
 class TestTorchCompilePatchHelpers(TestCase):
     """Tests for torch_compile_patch_helpers module."""

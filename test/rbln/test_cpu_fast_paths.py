@@ -28,12 +28,6 @@ import torch_rbln  # noqa: F401  (registers the rbln backend)
 import torch_rbln._C as _C
 
 
-# Deselected by rebel_compiler's CI (`-m "not torch_rbln_only"`); see the marker in pyproject.
-# The CPU fast-path registry: the ops that deliberately do NOT reach the device, and the
-# handlers torch-rbln runs for them on the host.
-pytestmark = pytest.mark.torch_rbln_only
-
-
 @pytest.mark.test_set_ci
 class TestCPUFastPathRegistration(TestCase):
     """Static-init registration check.
