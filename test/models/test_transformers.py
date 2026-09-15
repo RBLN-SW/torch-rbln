@@ -357,10 +357,15 @@ class TestCausalLMGraph(TestCausalLMBase):
     """
 
     @pytest.mark.usefixtures("enable_deploy_mode")
-    @dtypes(torch.float16)
+    @dtypes(*SUPPORTED_DTYPES)
     @parametrize("attn_implementation", TestCausalLMBase.attn_implementations)
     @parametrize("batch_size,seq_len", [subtest((1, 128), decorators=[pytest.mark.test_set_ci])])
     def test_llama(self, dtype, attn_implementation, batch_size, seq_len):
+        # Same ATOM gate as _assert_logits_match_fp32: the causal mask's finfo.min
+        # overflows the device's custom float there and wipes out eager attention.
+        if is_atom_device() and dtype is torch.bfloat16 and attn_implementation == "eager":
+            self.skipTest("bfloat16 x eager attention on ATOM: see test/rbln/test_bf16_range.py")
+
         config_kwargs = dict(
             dtype=dtype,
             attn_implementation=attn_implementation,
@@ -369,13 +374,17 @@ class TestCausalLMGraph(TestCausalLMBase):
         model, inputs = self._prepare_model_and_inputs(
             "meta-llama/Llama-3.2-1B", config_kwargs, batch_size, seq_len, self.rbln_device
         )
-        compiled = torch.compile(model, backend="rbln", dynamic=False)
 
         with torch.inference_mode():
+            # Reference before the graph: running the graph first re-lays out the weights
+            # for its own input layout, and a bfloat16 eager matmul on them then fails to
+            # bind (RUN_INTERNAL). Taking the reference first keeps this a graph test.
+            eager_logits = model(**inputs).logits
+
+            compiled = torch.compile(model, backend="rbln", dynamic=False)
             compiled(**inputs)  # compile here, so the measured call replays the program
             with torch.rbln.explain() as steady:
                 graph_logits = compiled(**inputs).logits
-            eager_logits = model(**inputs).logits
 
         # A graph that silently fell back to CPU, or recompiled on every call, still
         # returns the right logits -- assert the program actually ran on the device.
