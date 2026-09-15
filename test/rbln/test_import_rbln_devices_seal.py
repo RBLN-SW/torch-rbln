@@ -20,12 +20,6 @@ import pytest
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 
-# Deselected by rebel_compiler's CI (`-m "not torch_rbln_only"`); see the marker in pyproject.
-# About torch_rbln's own import: what importing this package must not do to the caller's
-# environment. Independent of which rebel-compiler is installed.
-pytestmark = pytest.mark.torch_rbln_only
-
-
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 

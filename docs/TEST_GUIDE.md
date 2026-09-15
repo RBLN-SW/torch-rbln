@@ -770,8 +770,10 @@ Mark a test `torch_rbln_only` when a different rebel-compiler would not change i
   breaks it (`test_privateuse1_contract.py`);
 - the thing under test is a torch-rbln gate that the test drives itself, with the runtime
   stubbed or forced (`test_runtime_unavailable.py`);
-- it tests packaging or import behaviour — where `librbln.so` is found, what importing the
-  package must not do (`test_rbln_runtime_lib.py`, `test_import_rbln_devices_seal.py`);
+- it tests packaging — where `librbln.so` is found, not what it does once loaded
+  (`test_rbln_runtime_lib.py`). Import behaviour is the counter-example: whether a remap after
+  import is still accepted is the runtime's doing, so `test_import_rbln_devices_seal.py` stays
+  in the lane;
 - it asserts an absence at the torch level (`test_amp_autocast.py`);
 - it tests only a torch-rbln surface whose behaviour rebel-compiler covers on its own side
   (`test_file_offloading.py`);
