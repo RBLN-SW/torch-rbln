@@ -96,7 +96,10 @@ void register_public_device_api(py::module_& module) {
       "Exchange the current device and return the original device.");
 
   // Synchronization
-  module.def("synchronize", &c10::rbln::synchronize, "Wait for all pending async transfers on a device.");
+  module.def(
+      "synchronize",
+      &c10::rbln::synchronize,
+      "Wait for a device's pending async transfers, then drain all of its streams.");
 
   // Memory management functions
   module.def("empty_cache", &c10::rbln::empty_cache, "Release all unoccupied cached memory.");
