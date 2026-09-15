@@ -338,6 +338,56 @@ class TestCausalLM(TestCausalLMBase):
         self._assert_logits_match_fp32("Qwen/Qwen2.5-1.5B-Instruct", config_kwargs, batch_size, seq_len)
 
 
+@pytest.mark.single_worker
+class TestCausalLMGraph(TestCausalLMBase):
+    """Run a causal language model through ``torch.compile(backend="rbln")``.
+
+    TestCausalLM compiles one program per operator, as eager dispatch reaches it.
+    This compiles the whole forward as a single program -- the path the RBLN PyTorch
+    tutorial takes, and the only one where a graph-level break shows up.
+
+    One model at one shape, over both attention implementations, which are the axis
+    that changes the traced graph rather than its geometry. Failures here are graph
+    failures; the shape and dtype grids stay in TestCausalLM.
+
+    A compile that fails does not raise on its own -- it falls back to CPU and returns
+    the right logits. conftest's autouse ``disable_compile_error_fallback`` is what
+    turns that back into an error, and without it these cases would pass while graph
+    mode was broken.
+    """
+
+    @pytest.mark.usefixtures("enable_deploy_mode")
+    @dtypes(torch.float16)
+    @parametrize("attn_implementation", TestCausalLMBase.attn_implementations)
+    @parametrize("batch_size,seq_len", [subtest((1, 128), decorators=[pytest.mark.test_set_ci])])
+    def test_llama(self, dtype, attn_implementation, batch_size, seq_len):
+        config_kwargs = dict(
+            dtype=dtype,
+            attn_implementation=attn_implementation,
+            num_hidden_layers=self.num_hidden_layers,
+        )
+        model, inputs = self._prepare_model_and_inputs(
+            "meta-llama/Llama-3.2-1B", config_kwargs, batch_size, seq_len, self.rbln_device
+        )
+        compiled = torch.compile(model, backend="rbln", dynamic=False)
+
+        with torch.inference_mode():
+            compiled(**inputs)  # compile here, so the measured call replays the program
+            with torch.rbln.explain() as steady:
+                graph_logits = compiled(**inputs).logits
+            eager_logits = model(**inputs).logits
+
+        # A graph that silently fell back to CPU, or recompiled on every call, still
+        # returns the right logits -- assert the program actually ran on the device.
+        verdict = steady.verdict()
+        self.assertEqual(verdict["cpu_fallbacks"], 0, steady.report())
+        self.assertEqual(verdict["recompiles"], 0, steady.report())
+
+        # Only the last position is comparable: the left padding carries the causal mask's
+        # minimum through lm_head, and those positions come back inf in both runs.
+        self.assertEqual(graph_logits[:, -1].argmax(-1), eager_logits[:, -1].argmax(-1))
+
+
 @pytest.mark.test_set_perf
 @pytest.mark.single_worker
 class TestCausalLMPerf(TestCausalLMBase):
@@ -478,6 +528,7 @@ class TestCausalLMPerf(TestCausalLMBase):
 
 
 instantiate_device_type_tests(TestCausalLM, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestCausalLMGraph, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestCausalLMPerf, globals(), only_for="privateuse1")
 
 
