@@ -70,21 +70,25 @@ class TestCausalLMBase(TestCase):
         device: torch.device,
     ):
         """Load a causal language model and prepare tokenized inputs on the given device."""
+        # The pinned transformers takes ``torch_dtype``; the rename to ``dtype`` lands in a
+        # later 4.x. Cases keep spelling it ``dtype``, so translate once here.
+        load_kwargs = dict(config_kwargs)
+        load_kwargs["torch_dtype"] = load_kwargs.pop("dtype")
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
             ignore_mismatched_sizes=True,
-            **config_kwargs,
+            **load_kwargs,
         )
         model.to(device)
         _slice_lm_head_to_last_token(model)
-        self.assertEqual(model.config.dtype, config_kwargs["dtype"])
+        self.assertEqual(model.config.torch_dtype, config_kwargs["dtype"])
         self.assertEqual(model.config._attn_implementation, config_kwargs["attn_implementation"])
         self.assertEqual(model.config.num_hidden_layers, config_kwargs["num_hidden_layers"])
 
         tokenizer = AutoTokenizer.from_pretrained(
             model_id,
             padding_side="left",
-            **config_kwargs,
+            **load_kwargs,
         )
         tokenizer.pad_token = tokenizer.eos_token
         tokenizer.pad_token_id = 0
