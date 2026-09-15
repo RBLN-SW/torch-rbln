@@ -200,8 +200,13 @@ class TestAcceleratorEmptyCache(TestCase):
         # Allocate then free a large buffer. The caching allocator keeps the
         # freed block as *reserved* (freeing alone does not return it to the
         # runtime), so reserved stays high until empty_cache() releases it.
+        #
+        # bind_device_memory, not an arithmetic op: an empty tensor's allocation is lazy
+        # until something materializes it, and this test needs the physical memory, not the
+        # arithmetic. Reaching it through ``add_`` compiles a kernel for a 16M-element
+        # tensor, which is most of what this test used to cost.
         buf = torch.empty(16 * 1024 * 1024, device=device, dtype=torch.float16)  # 32 MiB
-        buf.add_(1.0)
+        torch.rbln.bind_device_memory(buf)
         del buf
         return torch.rbln.memory_reserved(device)
 
