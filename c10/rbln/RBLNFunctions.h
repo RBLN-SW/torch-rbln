@@ -372,7 +372,9 @@ C10_RBLN_API void memcpy_v2h_async(void* cpu_dst_data, const void* rbln_src_data
 C10_RBLN_API void memcpy_v2v_async(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes);
 
 /**
- * @brief Waits for all pending async transfers on the given device to complete.
+ * @brief Blocks the host until the device is idle: waits the device's pending async
+ * transfers, then drains every stream on it. Wider than synchronize_stream(), which
+ * drains one stream and leaves work issued on another stream in flight.
  *
  * @param device_index The RBLN device to synchronize.
  */
