@@ -153,6 +153,44 @@ class TestGraphEagerMode(TestCase):
 
     rbln_device = torch.device("rbln:0")
 
+    @pytest.mark.usefixtures("enable_deploy_mode")
+    @dtypes(*SUPPORTED_DTYPES)
+    def test_eager_after_graph_on_the_same_weights(self, dtype):
+        """An eager operator on the weights a compiled graph has already run.
+
+        Three conditions have to hold together, and every other case in this file
+        misses at least one:
+
+        * Order. The ``_run_eager_and_graph_mode`` cases take eager first, which leaves
+          the weights in the layout eager built. Here the graph runs first.
+        * Width. Below the device threshold an operator is scheduled on the host and
+          binds no device buffer, so ``[4, 4]`` inputs pass whatever the layout is.
+        * Deploy mode. The NaN/Inf pre-dispatch scan reads the eager input on the host,
+          which materializes what this path needs; skipping the scan leaves the operator
+          to bind the device buffer itself.
+
+        The second eager call is not redundant: a weight restored into a state that is
+        right once and wrong afterwards would pass with a single call.
+        """
+        # 128, not 4: wide enough for the matmul to reach the device. Below 64 the
+        # operator is host-scheduled and this cannot fail.
+        width = 128
+        model = nn.Linear(width, width, bias=False).to(device=self.rbln_device, dtype=dtype)
+        x = torch.randn([1, width, width], dtype=dtype, device=self.rbln_device)
+
+        cpu_reference = model.cpu()(x.cpu().float().to(dtype)).float()
+        model.to(self.rbln_device)
+
+        graph_out = torch.compile(model, backend="rbln", dynamic=False)(x)
+        first_eager = model(x)
+        second_eager = model(x)
+
+        self.assertEqual(graph_out.cpu(), first_eager.cpu(), atol=ATOL, rtol=RTOL)
+        self.assertEqual(first_eager.cpu(), second_eager.cpu(), atol=0, rtol=0)
+        # Against a host reference too: a restore that returns the wrong bytes would
+        # otherwise pass, because the graph reads the same weights.
+        self.assertEqual(first_eager.cpu().float(), cpu_reference, atol=ATOL, rtol=RTOL)
+
     @dtypes(*SUPPORTED_DTYPES)
     def test_mixed_graph_eager_operations(self, dtype):
         """Test mixing graph mode and eager mode operations in sequence."""

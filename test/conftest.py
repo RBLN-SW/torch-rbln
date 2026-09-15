@@ -201,7 +201,14 @@ def enable_eager_malloc(monkeypatch):
 # here; it is now fixed (AllGather is chunked to a CS-safe size, see
 # RCCL_ALLGATHER_MAX_OUTPUT_BYTES in ProcessGroupRBLN.cpp / fsw-inference#324),
 # so its strict-xfail entry was removed.
-_REBEL_XFAILS: dict[str, tuple[str, str]] = {}
+_REBEL_XFAILS: dict[str, tuple[str, str]] = {
+    "test_eager_after_graph_on_the_same_weights_rbln_bfloat16": (
+        "test/rbln/test_graph_eager_mode.py",
+        "bfloat16 eager on weights a compiled graph re-laid out: the vmem entry reports "
+        "USER_VIEW_IS_LATEST while holding no user view, and binding the operator's input "
+        "fails the runtime's own check (RUN_INTERNAL, vmemory_manager.cc)",
+    ),
+}
 
 
 def pytest_collection_modifyitems(items):
