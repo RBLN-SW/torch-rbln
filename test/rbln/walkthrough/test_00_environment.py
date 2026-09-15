@@ -22,6 +22,11 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 import torch_rbln
 
 
+# Deselected by rebel_compiler's CI (`-m "not torch_rbln_only"`); see the marker in pyproject.
+# A walkthrough preflight: the packages are installed and import.
+pytestmark = pytest.mark.torch_rbln_only
+
+
 @pytest.mark.test_set_ci
 class TestEnvironmentVerification(TestCase):
     """Environment sanity checks (Walkthrough example 0)."""

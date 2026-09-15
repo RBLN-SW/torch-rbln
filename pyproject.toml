@@ -373,4 +373,5 @@ markers = [
     "test_set_perf: [test set] marks performance tests (select with `-m test_set_perf`)",
     "no_dynamo_reset: skips autouse TorchDynamo reset fixture",
     "single_worker: marks tests that must run on a single worker (select with `-m single_worker`)",
+    "torch_rbln_only: marks tests whose outcome does not depend on rebel-compiler -- torch-rbln's own logic, packaging, or the torch-facing contract. rebel_compiler's CI deselects these (`-m \"not torch_rbln_only\"`); torch-rbln's own lanes still run them",
 ]

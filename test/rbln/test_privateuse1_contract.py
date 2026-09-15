@@ -41,6 +41,12 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 from test.utils import requires_physical_devices
 
 
+# Deselected by rebel_compiler's CI (`-m "not torch_rbln_only"`); see the marker in pyproject.
+# Upstream torch clauses, not rebel-compiler behaviour: each probe pins something torch
+# itself does to this backend, so a torch upgrade or a new call site is what fails here.
+pytestmark = pytest.mark.torch_rbln_only
+
+
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # The RBLN_* variables a scenario owns. Stripped from a probe's environment so the runner's
