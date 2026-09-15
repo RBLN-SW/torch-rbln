@@ -202,12 +202,20 @@ def enable_eager_malloc(monkeypatch):
 # RCCL_ALLGATHER_MAX_OUTPUT_BYTES in ProcessGroupRBLN.cpp / fsw-inference#324),
 # so its strict-xfail entry was removed.
 _REBEL_XFAILS: dict[str, tuple[str, str]] = {
-    "test_eager_after_graph_on_the_same_weights_rbln_bfloat16": (
+    # An eager operator on the weights a compiled graph already ran. The graph's
+    # weight-free pass releases the source weights to the external-only state, and the
+    # device path has no restore for it, so binding the operator's input fails
+    # (RUN_INTERNAL, vmemory_manager.cc). float16 records no invertible external ref, so
+    # the release never happens there.
+    name: (
         "test/rbln/test_graph_eager_mode.py",
-        "bfloat16 eager on weights a compiled graph re-laid out: the vmem entry reports "
-        "USER_VIEW_IS_LATEST while holding no user view, and binding the operator's input "
-        "fails the runtime's own check (RUN_INTERNAL, vmemory_manager.cc)",
-    ),
+        "bfloat16 eager on weights a compiled graph released to external-only",
+    )
+    for name in (
+        "test_eager_after_graph_on_the_same_weights_weight_use_matmul_rbln_bfloat16",
+        "test_eager_after_graph_on_the_same_weights_weight_use_elementwise_rbln_bfloat16",
+        "test_graph_still_runs_after_eager_touched_its_weights_rbln_bfloat16",
+    )
 }
 
 
