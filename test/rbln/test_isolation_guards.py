@@ -19,6 +19,11 @@ import torch
 import torch_rbln
 
 
+# Deselected by rebel_compiler's CI (`-m "not torch_rbln_only"`); see the marker in pyproject.
+# Pins the test harness's own guards in test/conftest.py.
+pytestmark = pytest.mark.torch_rbln_only
+
+
 # The `torch_rbln.device` package re-exports a `device` class that shadows the `device`
 # submodule; grab the module (which owns the `_initialized` global) via sys.modules.
 _dev = sys.modules[torch_rbln.device.set_device.__module__]
