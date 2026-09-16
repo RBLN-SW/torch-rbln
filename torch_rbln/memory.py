@@ -23,6 +23,8 @@ __all__ = [
     "set_device_layout_like",
     "max_memory_allocated",
     "max_memory_reserved",
+    "mem_get_info",
+    "mem_get_info_per_chiplet",
     "memory_allocated",
     "memory_reserved",
     "memory_stats",
@@ -333,6 +335,65 @@ def max_memory_reserved(device: Optional[Union[int, str, torch.device]] = None) 
         int: The maximum memory reserved in bytes.
     """
     return memory_stats(device).get("reserved.peak", 0)
+
+
+def mem_get_info(device: Optional[Union[int, str, torch.device]] = None) -> tuple[int, int]:
+    """
+    Return the free and total device DRAM of ``device`` in bytes, as ``(free, total)``.
+
+    Same contract as :func:`torch.cuda.mem_get_info`, and what
+    :func:`torch.accelerator.get_memory_info` reports for ``rbln``: the NPU's figures as the
+    kernel driver sees them, across every process -- not this process's caching allocator,
+    which :func:`memory_stats` covers. ``total`` is the pool the driver can hand out, so it
+    sits below the part's nominal DRAM. A logical device spanning several physical NPUs
+    (``RBLN_NPUS_PER_DEVICE`` / ``RBLN_DEVICE_MAP``) reports their sum; one tensor still
+    lives on one NPU. A reading, not a reservation: another process may allocate right after.
+
+    Args:
+        device (Optional[Union[int, str, torch.device]]): The device to query.
+            If None, uses the current device. Defaults to None.
+
+    Returns:
+        tuple[int, int]: ``(free, total)`` in bytes.
+
+    Raises:
+        RuntimeError: no RBLN device, ``RBLN_DUMMY_DEVICE`` set, or the installed UMD/KMD
+            does not provide the device memory query (older drivers).
+    """
+    device = _normalize_device(device)
+    free, total = torch_rbln._C.mem_get_info(device)
+    return free, total
+
+
+def mem_get_info_per_chiplet(
+    device: Optional[Union[int, str, torch.device]] = None,
+) -> Dict[str, int]:
+    """
+    Return the driver's device DRAM usage of ``device`` broken down per chiplet, in bytes.
+
+    Same figures as :func:`mem_get_info` before summation, keyed like
+    :func:`memory_stats_per_chiplet`: ``npu.<n>.chiplet.<c>.{total,used,free,largest_free,
+    largest_free_huge}`` for each chiplet, and ``npu.<n>.{total,used,free,granularity,
+    huge_granularity}`` for each physical NPU of the logical device. ``npu.<n>`` is the
+    NPU's position within the logical device, not a physical NPU id.
+
+    Each chiplet allocates from its own pool, so a physically contiguous buffer is bounded
+    by one chiplet's ``largest_free`` (``largest_free_huge`` for the huge granule; 0 where
+    the part has none), which the device-wide ``free`` hides. ``largest_free`` may exceed
+    ``free`` in the same reply: both are estimates from a lock-free walk.
+
+    Args:
+        device (Optional[Union[int, str, torch.device]]): The device to query.
+            If None, uses the current device. Defaults to None.
+
+    Returns:
+        Dict[str, int]: A map from key to bytes.
+
+    Raises:
+        RuntimeError: same conditions as :func:`mem_get_info`.
+    """
+    device = _normalize_device(device)
+    return torch_rbln._C.mem_get_info_per_chiplet(device)
 
 
 def reset_accumulated_memory_stats(device: Optional[Union[int, str, torch.device]] = None) -> None:

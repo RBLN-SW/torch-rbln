@@ -96,7 +96,10 @@ void register_public_device_api(py::module_& module) {
       "Exchange the current device and return the original device.");
 
   // Synchronization
-  module.def("synchronize", &c10::rbln::synchronize, "Wait for all pending async transfers on a device.");
+  module.def(
+      "synchronize",
+      &c10::rbln::synchronize,
+      "Wait for a device's pending async transfers, then drain all of its streams.");
 
   // Memory management functions
   module.def("empty_cache", &c10::rbln::empty_cache, "Release all unoccupied cached memory.");
@@ -108,6 +111,11 @@ void register_public_device_api(py::module_& module) {
   module.def(
       "reset_accumulated_memory_stats", &c10::rbln::reset_accumulated_memory_stats, "Reset accumulated memory stats.");
   module.def("reset_peak_memory_stats", &c10::rbln::reset_peak_memory_stats, "Reset peak memory stats.");
+  module.def("mem_get_info", &c10::rbln::mem_get_info, "Get (free, total) device DRAM in bytes.");
+  module.def(
+      "mem_get_info_per_chiplet",
+      &c10::rbln::mem_get_info_per_chiplet,
+      "Get the driver's device DRAM usage broken down per chiplet.");
 
   py::class_<c10::rbln::DeviceProperties>(module, "DeviceProperties")
       .def_readonly("name", &c10::rbln::DeviceProperties::name)
