@@ -254,21 +254,24 @@ RBLNScopeGuard::~RBLNScopeGuard() noexcept {
 
 // NOLINTNEXTLINE(misc-use-internal-linkage) -- C10_RBLN_API in RBLNLogging.h
 void log_cpu_fallback(std::string_view full_op_name) {
+  // Level first: the dispatch shim calls this on every fallback of the ops it covers --
+  // add, mul, matmul -- so at the default level nothing here is built at all.
+  if (get_log_level() > spdlog::level::info) {
+    return;
+  }
+
   detail::log_info_message(
       detail::LogSourceLocation{__FILE__, __LINE__, __func__},
       std::string("`") + std::string(full_op_name) + "` op ran on CPU instead of RBLN");
 
-  const auto log_level = get_log_level();
-  if (log_level <= spdlog::level::info) {
-    // Emit a trace marker via Python warnings.
-    const auto warning_ = c10::Warning(
-        c10::UserWarning(),
-        {__func__, __FILE__, static_cast<uint32_t>(__LINE__)},
-        WARNING_MESSAGE_STRING("TRACE"),
-        false);
-    detail::log_warn_message(detail::LogSourceLocation{__FILE__, __LINE__, __func__}, warning_.msg());
-    c10::warn(warning_);
-  }
+  // Emit a trace marker via Python warnings.
+  const auto warning_ = c10::Warning(
+      c10::UserWarning(),
+      {__func__, __FILE__, static_cast<uint32_t>(__LINE__)},
+      WARNING_MESSAGE_STRING("TRACE"),
+      false);
+  detail::log_warn_message(detail::LogSourceLocation{__FILE__, __LINE__, __func__}, warning_.msg());
+  c10::warn(warning_);
 }
 
 int get_scope_depth() {
