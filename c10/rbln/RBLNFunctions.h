@@ -12,6 +12,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace c10::rbln {
@@ -371,7 +372,9 @@ C10_RBLN_API void memcpy_v2h_async(void* cpu_dst_data, const void* rbln_src_data
 C10_RBLN_API void memcpy_v2v_async(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes);
 
 /**
- * @brief Waits for all pending async transfers on the given device to complete.
+ * @brief Blocks the host until the device is idle: waits the device's pending async
+ * transfers, then drains every stream on it. Wider than synchronize_stream(), which
+ * drains one stream and leaves work issued on another stream in flight.
  *
  * @param device_index The RBLN device to synchronize.
  */
@@ -685,6 +688,47 @@ C10_RBLN_API void reset_accumulated_memory_stats(const c10::Device& device);
  * @param device The input device.
  */
 C10_RBLN_API void reset_peak_memory_stats(const c10::Device& device);
+
+/**
+ * @brief Returns the free and total device DRAM of `device` in bytes, as (free, total).
+ *
+ * The kernel driver's figure for the NPU as a whole -- every process, not this process's
+ * caching allocator (see memory_stats()) -- which is what torch.cuda.mem_get_info() reports
+ * on CUDA. Summed over the physical NPUs of the logical device; one tensor still lives on
+ * one NPU. A reading, not a reservation.
+ *
+ * Raises when the installed UMD/KMD does not provide the query or under RBLN_DUMMY_DEVICE:
+ * there is no figure to report, and a guess here would size a KV cache wrong.
+ *
+ * @param device The input device.
+ * @return (free bytes, total bytes).
+ */
+C10_RBLN_API std::pair<size_t, size_t> mem_get_info(const c10::Device& device);
+
+/**
+ * @brief Returns the driver's device-wide DRAM usage of `device` broken down per chiplet.
+ *
+ * Keys "npu.<n>.chiplet.<c>.{total,used,free,largest_free,largest_free_huge}" plus
+ * "npu.<n>.{total,used,free,granularity,huge_granularity}" for each physical NPU of the
+ * logical device; npu.<n> is the NPU's position as in memory_stats_per_chiplet(). Same
+ * scope and failure modes as mem_get_info(). A physically contiguous buffer is bounded by
+ * one chiplet's largest_free, which the device total hides.
+ *
+ * @param device The input device.
+ * @return A map from key to bytes.
+ */
+C10_RBLN_API std::map<std::string, uint64_t> mem_get_info_per_chiplet(const c10::Device& device);
+
+/**
+ * @brief Lays out the runtime's per-NPU memory replies as the mem_get_info_per_chiplet() map.
+ *
+ * `replies[n]` becomes the "npu.<n>." entries; only the first `chiplet_cnt` chiplets of each
+ * reply are emitted. Pure; this is the key/field mapping mem_get_info_per_chiplet() returns.
+ *
+ * @param replies One RBLNDeviceMemoryInfo per physical NPU of a logical device, in mapping order.
+ * @return A map from key to bytes.
+ */
+C10_RBLN_API std::map<std::string, uint64_t> per_chiplet_memory_map(const std::vector<RBLNDeviceMemoryInfo>& replies);
 
 /**
  * @brief Enables or disables process-wide file offloading for RBLN virtual memory.

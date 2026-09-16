@@ -189,41 +189,49 @@ class TestCausalLMBase(TestCase):
         torch.testing.assert_close(rbln_logits, cpu_logits, atol=self.LOGIT_ATOL, rtol=0.0)
 
 
-def _small_model_cover_array(mark_ci=True):
-    """Strength-2 (pairwise) covering array over dtype x attn x (batch, seq) for the small models.
+def _small_model_cover_array(full_matrix_at=None, skip_shapes=()):
+    """Strength-2 (pairwise) covering array over dtype x attn x (batch, seq) for a small model.
 
     The full 4-way cross product (2 dtype x 2 attn x 9 shapes = 36 cases/model) re-runs paths the
-    op-level and CI tests already cover point-by-point. This replaces it with a covering array of
-    22 cases/model that still guarantees:
+    op-level and CI tests already cover point-by-point. This replaces it with an array of one row
+    per dtype at each shape, rotating the dtype<->attn pairing across shapes, which guarantees:
 
-      * every (batch, seq) shape is compiled at least once (9 shapes -- each is a distinct
-        compiled artifact / tiling),
       * every dtype and every attn runs (1-way),
-      * every attn x shape, dtype x shape, and attn x dtype pair appears (2-way),
-      * a full dtype x attn corner at the two largest shapes -- the CI point (2, 1024) and the
-        max shape (4, 1024), where numeric overflow / tiling issues concentrate.
+      * every attn x shape, dtype x shape, and attn x dtype pair appears over the shapes the
+        model runs (2-way),
+      * every (batch, seq) shape the caller asks for is compiled at least once -- each shape is a
+        distinct compiled artifact, and which model's geometry compiles it is not what the shape
+        axis is about.
 
-    Only the 3-/4-way interactions are dropped. Non-corner shapes get one row per dtype, rotating
-    the dtype<->attn pairing across shapes so all attn x dtype combinations are spread over the
-    small shapes too. The (2, 1024) rows carry the test_set_ci marker unless mark_ci=False (the
-    release-only variant used where another model already covers the family's CI slot).
+    Dropped are the 3-/4-way interactions, and the duplication between the two small models at
+    the shapes that dominate the run: a case at seq 1024 costs an order of magnitude more than
+    one at seq 16, so ``skip_shapes`` lets one small model carry the expensive shapes for both,
+    and lets the widest batch sit on the large models instead of on every model.
+
+    ``full_matrix_at`` names the one shape that also gets the full dtype x attn matrix and the
+    test_set_ci marker -- the CI representative point, carried by a single model per family. The
+    3-way dtype x attn x shape is worth its cost at one point, not at every large shape. Pass None
+    for the release-only variant used where another model already covers the family's CI slot.
     """
-    shapes = [(bs, sl) for bs in TestCausalLMBase.batch_sizes for sl in TestCausalLMBase.seq_lens]
+    shapes = [
+        (bs, sl)
+        for bs in TestCausalLMBase.batch_sizes
+        for sl in TestCausalLMBase.seq_lens
+        if (bs, sl) not in skip_shapes
+    ]
     attns = TestCausalLMBase.attn_implementations
-    full_corner_shapes = {(2, 1024), (4, 1024)}
     n_dtype, n_attn = len(SUPPORTED_DTYPES), len(attns)
 
     array = []
     rotate = 0
     for bs, sl in shapes:
-        if (bs, sl) in full_corner_shapes:
+        if (bs, sl) == full_matrix_at:
             combos = [(dtype, attn) for dtype in SUPPORTED_DTYPES for attn in attns]
         else:
             combos = [
                 (SUPPORTED_DTYPES[(rotate + j) % n_dtype], attns[j % n_attn]) for j in range(max(n_dtype, n_attn))
             ]
             rotate += 1
-        is_ci = (bs, sl) == (2, 1024)
         for dtype, attn in combos:
             # Omit dtype from the subtest name: instantiate_device_type_tests appends it,
             # which keeps the ids unique (e.g. ..._eager_b2_s1024_privateuse1_float16).
@@ -231,7 +239,7 @@ def _small_model_cover_array(mark_ci=True):
                 subtest(
                     (dtype, attn, bs, sl),
                     name=f"{attn}_b{bs}_s{sl}",
-                    decorators=[pytest.mark.test_set_ci] if (is_ci and mark_ci) else [],
+                    decorators=[pytest.mark.test_set_ci] if (bs, sl) == full_matrix_at else [],
                 )
             )
     return array
@@ -242,39 +250,44 @@ class TestCausalLM(TestCausalLMBase):
     """Test correctness of causal language model outputs across various configurations."""
 
     # Small models (Llama-1B, Qwen-1.5B) run a pairwise covering array over dtype x attn x
-    # (batch, seq) instead of the full 4-way cross product (36 -> 22 cases/model); see
-    # _small_model_cover_array for the exact coverage guarantee.
+    # (batch, seq) instead of the full 4-way cross product; see _small_model_cover_array for the
+    # exact coverage guarantee.
     #
-    # CI runs one model per family at the representative point (2, 1024): Qwen-1.5B here and
-    # Llama-3B for the Llama family (test_llama_3b) -- the larger geometry surfaces failures
-    # first. Llama-1B keeps its full covering array but release-only (no CI marker).
-    small_model_cover_array = _small_model_cover_array()
-    small_model_cover_array_release_only = _small_model_cover_array(mark_ci=False)
+    # The batch axis is split by cost rather than run twice: the small models take batch 1 and 2,
+    # and batch 4 -- the widest, and the one where per-batch tiling and memory pressure actually
+    # show -- is the large models' point below. Qwen-1.5B carries what is left of the shape grid
+    # and, at the representative point (2, 1024), the full dtype x attn matrix and the CI marker.
+    # Llama-1B is release-only and skips that point too, which Qwen-1.5B compiles at both dtypes;
+    # it keeps (1, 1024), so a long sequence is still compiled on Llama geometry.
+    _LARGE_BATCH_SHAPES = tuple((4, seq_len) for seq_len in TestCausalLMBase.seq_lens)
+    _COSTLY_SHAPES = ((2, 1024),)
+    small_model_cover_array = _small_model_cover_array(full_matrix_at=(2, 1024), skip_shapes=_LARGE_BATCH_SHAPES)
+    small_model_cover_array_release_only = _small_model_cover_array(skip_shapes=_LARGE_BATCH_SHAPES + _COSTLY_SHAPES)
 
-    # Large models (Llama-3B, EXAONE-2.4B) share the small models' code paths but are 3-5x
-    # slower to compile and dominate the release run. They exercise only the representative
-    # point (the full attn x dtype matrix, which is also the CI set) plus a single largest-shape
-    # tiling smoke (test_large_model_tiling) -- not the full batch x seq grid.
-    representative_batch_seq = [subtest((2, 1024), decorators=[pytest.mark.test_set_ci])]
+    # Large models (Llama-3B, EXAONE-2.4B) share the small models' code paths but are 3-5x slower
+    # to compile, so they buy geometry, not breadth: one case each, at the largest shape, where
+    # size-specific tiling and memory issues surface, and the suite's only batch 4. float16 and
+    # sdpa, as the largest-shape smoke these two used to carry was -- dtype and attn breadth is
+    # the small models' axis. This subsumes that separate smoke.
+    max_shape_batch_seq = [subtest((4, 1024), decorators=[pytest.mark.test_set_ci])]
 
     @pytest.mark.usefixtures("enable_deploy_mode")
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(torch.float16)
     @parametrize(
         "model_id",
         [
             "LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct",
         ],
     )
-    @parametrize("attn_implementation", TestCausalLMBase.attn_implementations)
-    @parametrize("batch_size,seq_len", representative_batch_seq)
-    def test_exaone(self, dtype, model_id, attn_implementation, batch_size, seq_len):
+    @parametrize("batch_size,seq_len", max_shape_batch_seq)
+    def test_exaone(self, dtype, model_id, batch_size, seq_len):
         config_kwargs = dict(
             # Set a specific revision to avoid compatibility issues with the latest transformers version.
             # This can be removed when the transformers version is updated to 5.1.0 or higher.
             revision=self._EXAONE_REVISION,
             trust_remote_code=True,
             dtype=dtype,
-            attn_implementation=attn_implementation,
+            attn_implementation="sdpa",
             num_hidden_layers=self.num_hidden_layers,
         )
 
@@ -291,17 +304,16 @@ class TestCausalLM(TestCausalLMBase):
 
         self._assert_logits_match_fp32("meta-llama/Llama-3.2-1B-Instruct", config_kwargs, batch_size, seq_len)
 
-    # Llama-3B is the same architecture as Llama-1B (full covering array above) but far slower to
-    # compile. It is the Llama family's CI slot: the representative point across the full attn x
-    # dtype matrix (the larger geometry surfaces failures first).
+    # Llama-3B is the same architecture as Llama-1B (covering array above) but far slower to
+    # compile. It is the Llama family's CI slot: the largest shape, where the larger geometry
+    # surfaces failures first.
     @pytest.mark.usefixtures("enable_deploy_mode")
-    @dtypes(*SUPPORTED_DTYPES)
-    @parametrize("attn_implementation", TestCausalLMBase.attn_implementations)
-    @parametrize("batch_size,seq_len", representative_batch_seq)
-    def test_llama_3b(self, dtype, attn_implementation, batch_size, seq_len):
+    @dtypes(torch.float16)
+    @parametrize("batch_size,seq_len", max_shape_batch_seq)
+    def test_llama_3b(self, dtype, batch_size, seq_len):
         config_kwargs = dict(
             dtype=dtype,
-            attn_implementation=attn_implementation,
+            attn_implementation="sdpa",
             num_hidden_layers=self.num_hidden_layers,
         )
 
@@ -320,29 +332,6 @@ class TestCausalLM(TestCausalLMBase):
             sliding_window=0,  # Disable sliding window attention.
         )
         self._assert_logits_match_fp32("Qwen/Qwen2.5-1.5B-Instruct", config_kwargs, batch_size, seq_len)
-
-    # The largest shape (batch=4, seq=1024) is where size-specific tiling/memory issues surface.
-    # The small models cover attn/dtype/shape breadth; here we smoke only the largest shape once
-    # per large model (fp16, sdpa) so that large-shape coverage isn't lost when their full grid is
-    # dropped. Release-only (no CI marker) -- the representative point carries the CI coverage.
-    @pytest.mark.usefixtures("enable_deploy_mode")
-    @dtypes(torch.float16)
-    @parametrize(
-        "model_id",
-        [
-            "meta-llama/Llama-3.2-3B-Instruct",
-            "LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct",
-        ],
-    )
-    def test_large_model_tiling(self, dtype, model_id):
-        config_kwargs = dict(
-            dtype=dtype,
-            attn_implementation="sdpa",
-            num_hidden_layers=self.num_hidden_layers,
-        )
-        if "EXAONE" in model_id:
-            config_kwargs.update(revision=self._EXAONE_REVISION, trust_remote_code=True)
-        self._assert_logits_match_fp32(model_id, config_kwargs, batch_size=4, seq_len=1024)
 
 
 @pytest.mark.test_set_perf

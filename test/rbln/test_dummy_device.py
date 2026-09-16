@@ -16,6 +16,7 @@ singleton reads it once at init), so each case runs in a fresh subprocess with
 the env set.
 """
 
+import concurrent.futures
 import os
 import subprocess
 import sys
@@ -186,20 +187,24 @@ def test_boolean_spellings():
     # RBLN_DUMMY_DEVICE is a boolean flag (shared with the rebel runtime); the
     # logical count comes from RBLN_DEVICE_MAP (default 1), not this value. Cover
     # the full truthy/falsy spellings the parser recognizes.
-    for truthy in ("1", "true", "t", "on", "yes", "y"):
-        proc = _run_with_dummy(
+    #
+    # The flag is sealed at startup, so every spelling needs its own interpreter -- but they
+    # are independent, so they run at once instead of importing torch twelve times in a row.
+    truthy = ("1", "true", "t", "on", "yes", "y")
+    falsy = ("0", "false", "f", "off", "no", "n")
+
+    def run_truthy(value):
+        return _run_with_dummy(
             "import torch, torch_rbln; "
             "assert torch.rbln.is_dummy_device() is True; "
             "assert torch.rbln.device_count() == 1; print('OK')",
-            env_extra={"RBLN_DUMMY_DEVICE": truthy},
+            env_extra={"RBLN_DUMMY_DEVICE": value},
         )
-        _assert_ok(proc)
-        assert "OK" in proc.stdout
 
-    for falsy in ("0", "false", "f", "off", "no", "n"):
+    def run_falsy(value):
         env = _clean_env()
-        env["RBLN_DUMMY_DEVICE"] = falsy
-        proc = subprocess.run(
+        env["RBLN_DUMMY_DEVICE"] = value
+        return subprocess.run(
             [
                 sys.executable,
                 "-c",
@@ -209,8 +214,14 @@ def test_boolean_spellings():
             capture_output=True,
             text=True,
         )
-        _assert_ok(proc)
-        assert "OK" in proc.stdout
+
+    # Threads, because each call blocks in subprocess.run; bounded, because each child
+    # costs what a torch import costs in memory.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        for spellings, run in ((truthy, run_truthy), (falsy, run_falsy)):
+            for value, proc in zip(spellings, pool.map(run, spellings)):
+                _assert_ok(proc)
+                assert "OK" in proc.stdout, value
 
 
 @pytest.mark.parametrize("invalid", ["4", "2", "maybe"])

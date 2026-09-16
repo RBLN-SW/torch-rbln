@@ -183,7 +183,8 @@ def get_device_name(device: Union[int, torch.device, str, None] = None) -> str:
 
 
 def synchronize(device: Union[int, torch.device, str, None] = None) -> None:
-    """Wait for all pending async transfers on the given RBLN device.
+    """Wait for all work on the given RBLN device: its pending async transfers, then
+    every stream on it (``torch.cuda.synchronize`` parity).
 
     If no device is specified, the current device is used.
 

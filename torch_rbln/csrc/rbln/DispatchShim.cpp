@@ -6,6 +6,7 @@
 #include <ATen/native/rbln/RBLNCPUFallback.h>
 #include <ATen/ops/empty.h>
 #include <c10/rbln/RBLNFunctions.h>
+#include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNSupportedDtypes.h>
 #include <torch/csrc/jit/python/pybind_utils.h>
@@ -1204,6 +1205,12 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
     if (g_trace_enabled.load(std::memory_order_relaxed)) {
       capture_site(op_name); // (A) WHERE: opt-in, deduped, GIL-safe; off by default
     }
+    // Same log the ``fallback_rbln`` handler emits for an unsupported op. The
+    // shortcut below decides a fallback the Python wrapper would otherwise have
+    // decided and logged, so without this the ops it covers -- add, mul, matmul,
+    // the reductions -- are the only ones whose CPU fallback leaves no trace at
+    // any log level.
+    c10::rbln::log_cpu_fallback(op.schema().name());
     const uint64_t _fb_t0 = now_ns();
     ::at::native::rbln::cpu_fallback_rbln(op, stack);
     // COST of the fallback (wall ns), so the report can tell "many cheap fallbacks
