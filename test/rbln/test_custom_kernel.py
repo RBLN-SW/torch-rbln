@@ -1,21 +1,15 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""User-level tests for the rbln_custom_ops attention kernels, through eager dispatch.
+"""The rbln_custom_ops attention kernels through eager dispatch, against a CPU fp32 reference.
 
-torch-rbln owns the PrivateUse1 dispatch path for these ops, not their math, so these tests
-used to assert the wiring contract only -- shape, dtype, device, declared mutation, and a
-finite non-zero result. That is too weak to be worth running: a kernel that returns the right
-shape filled with the wrong numbers passes it, and the only thing it does catch, a NaN, it
-catches without saying what produced it.
+Each op has a closed form -- append k/v at the position ``seq`` names, attend over the valid part
+of that block, matmul with the values -- so the same computation on the CPU in fp32 is an
+independent oracle. It is written here rather than borrowed: rebel_compiler registers these four
+with a stub body (``torch.empty_like(q)``), so there is nothing to call.
 
-Each op has a closed form -- append k/v at the position ``seq`` names, attend over the valid
-part of that block, matmul with the values -- so the same computation on the CPU in fp32 is an
-independent reference. It is written here rather than borrowed from the op: rebel_compiler
-registers these four with a stub body (``torch.empty_like(q)``), so there is nothing to call.
-The device result is checked against it, and so is the KV cache the op mutates in place, which
-pins *where* the write landed instead of only that something changed.
+The KV cache the op mutates is compared the same way, which pins *where* the write landed.
 
-See ``test_custom_op_compile.py`` for the same op family inside a larger compiled program.
+See ``test_custom_op_compile.py`` for the same family inside a larger compiled program.
 """
 
 import math
@@ -34,20 +28,15 @@ SEQ_LEN = 256  # prompt length, and the decode phase's existing context
 NUM_Q_GROUPS, NUM_KV_HEADS, HEAD_DIM = 4, 8, 64
 SCALE = torch.tensor(1.0 / math.sqrt(HEAD_DIM))
 
-# Fractions of the reference's own scale, as in test_custom_op_compile.py. The device carries
-# 16-bit compute formats through the matmuls and the softmax, which moves the result by well
-# under a percent; a kernel that reads the wrong part of the cache, or writes the new token to
-# the wrong slot, moves it by its own scale -- one to two orders of magnitude above this bound.
+# Fractions of the reference's own scale, as in test_custom_op_compile.py. The device's 16-bit
+# compute formats move the result by well under a percent; reading the wrong part of the cache,
+# or writing the new token to the wrong slot, moves it by its own scale.
 OUTPUT_TOL_FRACTION = 0.1
 CACHE_TOL_FRACTION = 0.05
 
 
 def _close(actual, reference, tol, what):
-    """assert_close, keeping its diff summary under a line naming what was compared.
-
-    A plain ``msg=`` string replaces the whole diagnostic; a callable prepends to it, so
-    the failure says both which comparison broke and by how much.
-    """
+    """assert_close, naming the comparison above its diff summary (a plain ``msg=`` replaces it)."""
     torch.testing.assert_close(
         actual.float().cpu(),
         reference,
@@ -69,9 +58,6 @@ def _attend(q, kcache, vcache, additive_mask):
 class TestCustomKernelRBLN(TestCase):
     rbln_device = torch.device("rbln:0")
 
-    # ------------------------------------------------------------------
-    # Shared assertions
-    # ------------------------------------------------------------------
     def _assert_matches(self, out, reference, dtype, name):
         """Metadata contract, then the numbers against the fp32 CPU reference."""
         self.assertEqual(out.shape, reference.shape)
@@ -86,11 +72,8 @@ class TestCustomKernelRBLN(TestCase):
         tol = CACHE_TOL_FRACTION * float(reference_cache.abs().max())
         _close(cache, reference_cache, tol, f"{name} after the call")
 
-    # ------------------------------------------------------------------
-    # Inputs. Prefill fills an empty cache from slot 0; decode appends one
-    # token to a cache that already holds SEQ_LEN of context, one block per
-    # batch item so the block table maps batch 1 somewhere other than block 0.
-    # ------------------------------------------------------------------
+    # Prefill fills an empty cache from slot 0; decode appends one token to a cache that already
+    # holds SEQ_LEN of context, one block per batch item so batch 1 lands outside block 0.
     def _prefill_inputs(self, dtype):
         batch = 1  # the prefill kernel is specialized for batch size 1
         shape = [batch, NUM_KV_HEADS, 1, SEQ_LEN, HEAD_DIM]
@@ -125,9 +108,7 @@ class TestCustomKernelRBLN(TestCase):
     def _on_device(self, inputs):
         return {name: value.to(self.rbln_device) for name, value in inputs.items()}
 
-    # ------------------------------------------------------------------
-    # References. `mask` is the op's 0/1 validity mask; None means causal.
-    # ------------------------------------------------------------------
+    # ``mask`` is the op's 0/1 validity mask; None means causal.
     def _prefill_reference(self, inputs, mask):
         kcache, vcache = inputs["kcache"].float().clone(), inputs["vcache"].float().clone()
         block, start = int(inputs["block_table"][0]), int(inputs["seq"][0][0])
@@ -170,9 +151,6 @@ class TestCustomKernelRBLN(TestCase):
         self._assert_cache_written(device_inputs["kcache"], kcache_reference, f"{name}: kcache")
         self._assert_cache_written(device_inputs["vcache"], vcache_reference, f"{name}: vcache")
 
-    # ------------------------------------------------------------------
-    # paged_attn -- an explicit 0/1 validity mask
-    # ------------------------------------------------------------------
     @dtypes(*SUPPORTED_DTYPES)
     def test_paged_attn_prefill(self, dtype):
         inputs = self._prefill_inputs(dtype)
@@ -183,9 +161,16 @@ class TestCustomKernelRBLN(TestCase):
         device = self._on_device(inputs)
         with torch.no_grad():
             out = torch.ops.rbln_custom_ops.paged_attn_prefill(
-                device["q"], device["k"], device["v"], mask.to(self.rbln_device),
-                device["kcache"], device["vcache"], device["seq"], SCALE,
-                device["block_table"], MAX_SEQ_LENGTH,
+                device["q"],
+                device["k"],
+                device["v"],
+                mask.to(self.rbln_device),
+                device["kcache"],
+                device["vcache"],
+                device["seq"],
+                SCALE,
+                device["block_table"],
+                MAX_SEQ_LENGTH,
             )
         self._check("paged_attn_prefill", out, device, reference)
 
@@ -200,15 +185,19 @@ class TestCustomKernelRBLN(TestCase):
         device = self._on_device(inputs)
         with torch.no_grad():
             out = torch.ops.rbln_custom_ops.paged_attn_decode(
-                device["q"], device["k"], device["v"], mask.to(self.rbln_device),
-                device["kcache"], device["vcache"], device["seq"], SCALE,
-                device["block_table"], MAX_SEQ_LENGTH,
+                device["q"],
+                device["k"],
+                device["v"],
+                mask.to(self.rbln_device),
+                device["kcache"],
+                device["vcache"],
+                device["seq"],
+                SCALE,
+                device["block_table"],
+                MAX_SEQ_LENGTH,
             )
         self._check("paged_attn_decode", out, device, reference)
 
-    # ------------------------------------------------------------------
-    # paged_causal_attn -- the mask is implied by the position
-    # ------------------------------------------------------------------
     @dtypes(*SUPPORTED_DTYPES)
     def test_paged_causal_attn_prefill(self, dtype):
         inputs = self._prefill_inputs(dtype)
@@ -217,8 +206,15 @@ class TestCustomKernelRBLN(TestCase):
         device = self._on_device(inputs)
         with torch.no_grad():
             out = torch.ops.rbln_custom_ops.paged_causal_attn_prefill(
-                device["q"], device["k"], device["v"], device["kcache"], device["vcache"],
-                device["seq"], SCALE, device["block_table"], MAX_SEQ_LENGTH,
+                device["q"],
+                device["k"],
+                device["v"],
+                device["kcache"],
+                device["vcache"],
+                device["seq"],
+                SCALE,
+                device["block_table"],
+                MAX_SEQ_LENGTH,
                 False,  # is_bidirectional; always causal here, optional mask omitted
             )
         self._check("paged_causal_attn_prefill", out, device, reference)
@@ -231,15 +227,19 @@ class TestCustomKernelRBLN(TestCase):
         device = self._on_device(inputs)
         with torch.no_grad():
             out = torch.ops.rbln_custom_ops.paged_causal_attn_decode(
-                device["q"], device["k"], device["v"], device["kcache"], device["vcache"],
-                device["seq"], SCALE, device["block_table"], MAX_SEQ_LENGTH,
+                device["q"],
+                device["k"],
+                device["v"],
+                device["kcache"],
+                device["vcache"],
+                device["seq"],
+                SCALE,
+                device["block_table"],
+                MAX_SEQ_LENGTH,
             )
         self._check("paged_causal_attn_decode", out, device, reference)
 
-    # ------------------------------------------------------------------
-    # flash_attention_naive -- still pending; the reference these tests will be
-    # written against arrives with the op's single-sourcing in rebel_compiler.
-    # ------------------------------------------------------------------
+    # flash_attention_naive: the reference arrives with the op's single-sourcing in rebel_compiler.
     @dtypes(*SUPPORTED_DTYPES)
     def test_flash_attention_naive_prefill(self, dtype):
         self.skipTest("pending flash_attention_naive single-sourcing in rebel_compiler")
@@ -247,6 +247,7 @@ class TestCustomKernelRBLN(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     def test_flash_attention_naive_decode(self, dtype):
         self.skipTest("pending flash_attention_naive single-sourcing in rebel_compiler")
+
 
 instantiate_device_type_tests(TestCustomKernelRBLN, globals(), only_for="privateuse1")
 
