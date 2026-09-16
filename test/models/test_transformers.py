@@ -381,10 +381,19 @@ class TestCausalLMGraph(TestCausalLMBase):
             # bind (RUN_INTERNAL). Taking the reference first keeps this a graph test.
             eager_logits = model(**inputs).logits
 
-            compiled = torch.compile(model, backend="rbln", dynamic=False)
-            compiled(**inputs)  # compile here, so the measured call replays the program
-            with torch.rbln.explain() as steady:
-                graph_logits = compiled(**inputs).logits
+            # explain()['recompiles'] counts eager warm-cache misses, not backend rebuilds.
+            with torch.rbln.capture_programs() as warmup_programs:
+                compiled = torch.compile(model, backend="rbln", dynamic=False)
+                compiled(**inputs)
+            self.assertGreater(len(warmup_programs), 0, "warmup built no rbln program")
+            with torch.rbln.capture_programs() as replay_programs:
+                with torch.rbln.explain() as steady:
+                    graph_logits = compiled(**inputs).logits
+            self.assertEqual(
+                len(replay_programs),
+                0,
+                "the measured call rebuilt an rbln program instead of replaying",
+            )
 
         # A graph that silently fell back to CPU, or recompiled on every call, still
         # returns the right logits -- assert the program actually ran on the device.
@@ -394,7 +403,11 @@ class TestCausalLMGraph(TestCausalLMBase):
 
         # Only the last position is comparable: the left padding carries the causal mask's
         # minimum through lm_head, and those positions come back inf in both runs.
-        self.assertEqual(graph_logits[:, -1].argmax(-1), eager_logits[:, -1].argmax(-1))
+        graph_last = graph_logits[:, -1]
+        eager_last = eager_logits[:, -1]
+        self.assertTrue(bool(torch.isfinite(graph_last).all()), graph_last)
+        self.assertTrue(bool(torch.isfinite(eager_last).all()), eager_last)
+        self.assertEqual(graph_last.argmax(-1), eager_last.argmax(-1))
 
 
 @pytest.mark.test_set_perf
