@@ -83,15 +83,16 @@ def _inputs(phase: str, dtype: torch.dtype, device: torch.device | str):
     # Drawn in fp32 and cast: randn() in a 16-bit dtype is a different RNG sequence, which
     # would hand the reference and the device runs different inputs.
     x = torch.randn(b, t, HIDDEN).to(dtype)
-    # Each sequence owns NUM_PARTITIONS blocks; its prompt fills them in order.
-    kv_cache = torch.zeros(2, b * NUM_PARTITIONS, NUM_KV_HEADS, 1, PARTITION, HEAD_DIM, dtype=dtype)
+    # Each sequence owns NUM_PARTITIONS blocks; its prompt fills them in order. The block axis
+    # comes first, ahead of the K/V pair -- the layout the kernel documents.
+    kv_cache = torch.zeros(b * NUM_PARTITIONS, 2, NUM_KV_HEADS, 1, PARTITION, HEAD_DIM, dtype=dtype)
     for i in range(b):
         left = cached
         for p in range(NUM_PARTITIONS):
             n = min(left, PARTITION)
             if n <= 0:
                 break
-            kv_cache[:, i * NUM_PARTITIONS + p, :, :, :n, :] = torch.randn(2, NUM_KV_HEADS, 1, n, HEAD_DIM).to(dtype)
+            kv_cache[i * NUM_PARTITIONS + p, :, :, :, :n, :] = torch.randn(2, NUM_KV_HEADS, 1, n, HEAD_DIM).to(dtype)
             left -= n
     # seq_idx is [batch, 1], the position of the first query token -- what the engine passes
     # (``positions[query_start_loc]``). The kernel derives the per-block offsets from it.
