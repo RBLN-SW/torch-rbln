@@ -902,7 +902,7 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
 
   const uint64_t _seg_t0 = now_ns();
   // Hold a shared_ptr to the entry for the rest of the hit path. If a peer
-  // thread ``erase``s the same key while we are mid-flight, the entry stays
+  // thread ``clear``s the same key while we are mid-flight, the entry stays
   // alive until our shared_ptr goes out of scope. Without this, a raw
   // pointer ``find`` could hand back a dangling pointer.
   CacheEntryPtr entry = wc.find(key);
@@ -927,7 +927,8 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
   // then materialize each to contig (matching what mul_rbln/add_rbln do in
   // their Python wrappers). Without this, the cached runtime — which was
   // compiled for the broadcast shape — would receive raw-shape data ptrs and
-  // fail (size mismatch / OOB read), causing erase + permanent miss.
+  // fail (size mismatch / OOB read), so every dispatch of the key would pay a
+  // failed hit attempt before reaching the Python wrapper.
   // `held_tensors` keeps the materialized contig tensors alive until Run()
   // completes (their data ptrs are what we bind as inputs).
   std::vector<at::Tensor> held_tensors;
@@ -1112,24 +1113,13 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
     _seg_t_run = now_ns();
   }
   if (runtime_failed) {
-    // The runtime that we cached cannot serve this profile after all (e.g.
-    // input v-memory was created by an allocation path the runtime can't
-    // resolve). Drop the entry so subsequent dispatches with this key go
-    // through the pybind miss path and rebuild via DynamoRuntime, which
-    // handles the edge case correctly.
-    //
-    // Just erasing the C++ entry is not enough: the Python
-    // ``compile_rbln_cached`` still holds the compiled callable, and the
-    // rebel backend only pushes a DynamoRuntime to ``_runtime_holder`` on
-    // its first compile. A bare erase would leave the warm cache empty
-    // AND keep the Python compile cache hot, so install_pending would
-    // see an empty holder forever. Set the thread-local force-recompile
-    // flag — the same thread's next pass through
-    // ``compile_and_run_view_aware`` consumes it and forces
-    // ``compile_rbln_cached`` to skip its own cache for this key, letting
-    // the rebel backend re-instantiate and re-populate the holder.
-    WarmCache::instance().erase(key);
-    WarmCache::request_force_recompile();
+    // The cached runtime cannot serve this call from the C ABI path (e.g.
+    // input v-memory created by an allocation path it cannot resolve). Fall
+    // through to the pybind miss path, whose DynamoRuntime handles those
+    // cases. The entry stays: the failure belongs to the buffers this call
+    // brought, not to the entry, so a later call with the same profile gets
+    // to try the hit again. ``install`` on the miss path below is a
+    // try_emplace, so the key the Python wrapper re-offers is a no-op.
     return false;
   }
 

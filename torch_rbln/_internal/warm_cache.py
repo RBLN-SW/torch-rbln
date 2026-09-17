@@ -26,7 +26,10 @@ the warm cache on the C++ side, which drives one execution through
 rebel's C ABI (``rbln_exec_api.h``) — no pybind hop, no Python wrapper,
 no Dynamo recompile check. Driving it needs the runtime's
 ``native_handle()``; :func:`install_pending` skips the cache for a
-runtime without one, leaving the op on the Python wrapper path.
+runtime without one, leaving the op on the Python wrapper path. So does a
+hit that fails at run time: the entry stays, so a later call with the same
+profile gets to try it again, and ``install`` is a no-op for a key that is
+still cached.
 """
 
 from __future__ import annotations
@@ -115,17 +118,6 @@ def size() -> int:
     return int(_C._warmcache_size())
 
 
-def clear() -> None:
-    _C._warmcache_clear()
-
-
-def consume_force_recompile() -> bool:
-    """Consume the thread-local force-recompile flag.
-
-    Set by the C++ shim when ``try_warmcache_hit`` had to ``erase`` a
-    broken entry. ``compile_and_run_view_aware`` consumes the flag right
-    before calling ``compile_rbln_cached`` so the next compile bypasses
-    the Python compile cache for this key, re-runs ``torch.compile``, and
-    re-populates ``_runtime_holder`` so install can fire again.
-    """
-    return bool(_C._warmcache_consume_force_recompile())
+def clear(device: int | None = None) -> None:
+    """Drop the entries whose inputs live on ``device``, or all of them when ``None``."""
+    _C._warmcache_clear(device)

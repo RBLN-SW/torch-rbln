@@ -456,8 +456,10 @@ void register_internal_api(py::module_& module) {
       "Internal: number of entries in the warm-cache (debug/bench only)");
   module.def(
       "_warmcache_clear",
-      []() { torch_rbln::warmcache::WarmCache::instance().clear(); },
-      "Internal: drop all warm-cache entries (tests / benchmarks)");
+      [](std::optional<c10::DeviceIndex> device) { torch_rbln::warmcache::WarmCache::instance().clear(device); },
+      "Internal: drop the warm-cache entries whose inputs live on `device`, or "
+      "all of them when device is None",
+      pybind11::arg("device") = pybind11::none());
   module.def(
       "_warmcache_is_building",
       []() { return torch_rbln::warmcache::WarmCache::is_building_entry(); },
@@ -471,18 +473,6 @@ void register_internal_api(py::module_& module) {
       "_warmcache_exit_building",
       []() { torch_rbln::warmcache::WarmCache::exit_building(); },
       "Internal: clear the miss-path reentrancy flag set by _warmcache_enter_building");
-  module.def(
-      "_warmcache_consume_force_recompile",
-      []() { return torch_rbln::warmcache::WarmCache::consume_force_recompile(); },
-      "Internal: consume the thread-local force-recompile flag set by a failed "
-      "warm-cache hit. Returns True iff a flag was pending; clears it.");
-  module.def(
-      "_warmcache_request_force_recompile",
-      []() { torch_rbln::warmcache::WarmCache::request_force_recompile(); },
-      "Internal: set the thread-local force-recompile flag. Production callers "
-      "rely on the C++ shim auto-setting this on hit-failure; this binding "
-      "exists so tests can exercise the consume/clear pair without engineering "
-      "a runtime soft-failure.");
 
   // CPU fast-path registry introspection. Returns True iff a handler is
   // registered for the given fully-qualified op name (e.g. "aten::rsqrt.out").
