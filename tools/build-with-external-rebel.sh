@@ -10,16 +10,8 @@
 #   - rebel-compiler must be already built (rebel_install.sh completed)
 #
 # Usage:
-#   # gcc-13 (default): Use pre-built PyTorch from pip
 #   cd /path/to/torch-rbln
 #   export REBEL_HOME=/path/to/rebel_compiler
-#   ./tools/build-with-external-rebel.sh --clean
-#
-#   # gcc-12: Requires pre-built torch wheel (TORCH_WHEEL_PATH is mandatory)
-#   cd /path/to/torch-rbln
-#   export REBEL_HOME=/path/to/rebel_compiler
-#   export RBLN_GCC_VERSION=12
-#   export TORCH_WHEEL_PATH=/path/to/torch-2.11.0-cp310-cp310-linux_x86_64.whl
 #   ./tools/build-with-external-rebel.sh --clean
 #
 # Arguments:
@@ -32,13 +24,9 @@
 #   TORCH_RBLN_BUILD_TYPE  - Build type: Release (default) or Debug
 #   RBLN_SKIP_VENV         - Set to 1 to skip virtual environment creation
 #   RBLN_VENV_PATH         - Custom virtual environment path (default: .venv)
-#   RBLN_GCC_VERSION       - GCC version to use: 12 or 13 (default: 13)
-#                            - 13: Use pre-built PyTorch from pip (faster)
-#                            - 12: MUST set TORCH_WHEEL_PATH (custom torch wheel)
-#   TORCH_WHEEL_PATH       - Path to pre-built torch wheel file
-#                            REQUIRED for gcc-12 mode, ignored for gcc-13
-#                            The wheel must be built with gcc-12 and match Python version
-#                            Example: /path/to/torch-2.11.0-cp310-cp310-linux_x86_64.whl
+#
+# The build uses GCC 13 (gcc-13/g++-13 on Debian/Ubuntu, gcc-toolset-13 on
+# RHEL/CentOS/Fedora) and installs PyTorch from the PyPI CPU index.
 #
 
 set -e
@@ -46,8 +34,6 @@ set -e
 readonly build_type="${TORCH_RBLN_BUILD_TYPE:-Release}"
 readonly skip_venv="${RBLN_SKIP_VENV:-0}"
 readonly venv_path="${RBLN_VENV_PATH:-.venv}"
-readonly gcc_version="${RBLN_GCC_VERSION:-13}"  # 12 or 13
-readonly torch_wheel_path="${TORCH_WHEEL_PATH:-}"  # Optional: path to pre-built torch wheel
 
 # Parse command line arguments
 do_clean=0
@@ -227,12 +213,8 @@ check_prerequisites() {
     log_info "Build type: ${build_type}"
 }
 
-# Set up compiler (CC/CXX) only for gcc-13: Debian uses gcc-13/g++-13;
-# RHEL/CentOS/Fedora use gcc-toolset-13. For gcc-12 we use system default (no setup).
+# Debian/Ubuntu: gcc-13/g++-13. RHEL/CentOS/Fedora: gcc-toolset-13.
 setup_compiler_env() {
-    if [[ "${gcc_version}" != "13" ]]; then
-        return 0
-    fi
     if [[ -f /etc/os-release ]]; then
         # shellcheck disable=SC1091
         . /etc/os-release
@@ -441,17 +423,8 @@ EOF
 modify_pyproject() {
     log_info "Modifying pyproject.toml..."
 
-    # Determine torch dependency based on gcc version
-    local torch_dep
-    if [[ "${gcc_version}" = "12" ]] && [[ -n "${effective_torch_wheel_path}" ]]; then
-        # gcc-12: use wheel file path
-        torch_dep="torch @ file://${effective_torch_wheel_path}"
-        log_info "  Setting torch dependency to wheel: ${effective_torch_wheel_path}"
-    else
-        # gcc-13: use PyPI version
-        torch_dep="torch==2.11.0+cpu"
-        log_info "  Setting torch dependency to PyPI: torch==2.11.0+cpu"
-    fi
+    local torch_dep="torch==2.11.0+cpu"
+    log_info "  Setting torch dependency to PyPI: ${torch_dep}"
 
     python3 << EOF
 import re
@@ -519,17 +492,6 @@ configure_uv() {
     fi
 }
 
-validate_torch_wheel() {
-    local wheel_path="$1"
-
-    if [[ ! -f "${wheel_path}" ]]; then
-        log_error "Torch wheel file not found: ${wheel_path}"
-        exit 1
-    fi
-
-    log_info "Validated torch wheel: ${wheel_path}"
-}
-
 # Install rebel-compiler into the venv (scikit-build-core editable). Runs
 # after `uv sync --no-install-project` so the install isn't wiped by sync.
 #
@@ -583,8 +545,8 @@ install_rebel_python_deps() {
 build_torch_rbln() {
     log_info "Building torch-rbln..."
 
-    if [[ "${gcc_version}" = "13" ]] && { [[ -z "${CC:-}" ]] || [[ -z "${CXX:-}" ]]; }; then
-        log_error "CC and CXX must be set by setup_compiler_env (gcc_version=13)."
+    if [[ -z "${CC:-}" ]] || [[ -z "${CXX:-}" ]]; then
+        log_error "CC and CXX must be set by setup_compiler_env."
         exit 1
     fi
     export REBEL_HOME="${REBEL_HOME}"
@@ -593,22 +555,13 @@ build_torch_rbln() {
     # does a scikit-build-core editable install of rebel-compiler, and
     # FindRebel.cmake reads REBEL_HOME directly for headers/libs.
 
-    # Install torch based on gcc version
-    if [[ "${gcc_version}" = "12" ]] && [[ -n "${effective_torch_wheel_path}" ]]; then
-        # gcc-12: Install from wheel file
-        log_info "Installing PyTorch from wheel: ${effective_torch_wheel_path}"
-        pip uninstall -y torch 2>/dev/null || true
-        pip install "${effective_torch_wheel_path}"
-    else
-        # gcc-13: Install from PyPI
-        local current_torch_version
-        current_torch_version=$(pip show torch 2>/dev/null | grep "^Version:" | awk '{print $2}' || true)
+    local current_torch_version
+    current_torch_version=$(pip show torch 2>/dev/null | grep "^Version:" | awk '{print $2}' || true)
 
-        if [[ "${current_torch_version}" != "2.11.0+cpu" ]]; then
-            log_info "Installing PyTorch 2.11.0+cpu from PyPI..."
-            pip uninstall -y torch 2>/dev/null || true
-            pip install torch==2.11.0+cpu --index-url https://download.pytorch.org/whl/cpu
-        fi
+    if [[ "${current_torch_version}" != "2.11.0+cpu" ]]; then
+        log_info "Installing PyTorch 2.11.0+cpu from PyPI..."
+        pip uninstall -y torch 2>/dev/null || true
+        pip install torch==2.11.0+cpu --index-url https://download.pytorch.org/whl/cpu
     fi
 
     # Save torch version before uv sync
@@ -629,16 +582,9 @@ build_torch_rbln() {
 
     if [[ "${torch_before}" != "${torch_after}" ]]; then
         log_warn "Torch was changed by uv sync: ${torch_before} -> ${torch_after}"
-        # Reinstall correct torch
-        if [[ "${gcc_version}" = "12" ]] && [[ -n "${effective_torch_wheel_path}" ]]; then
-            log_info "Reinstalling torch from wheel..."
-            pip uninstall -y torch 2>/dev/null || true
-            pip install "${effective_torch_wheel_path}"
-        else
-            log_info "Reinstalling torch from PyPI..."
-            pip uninstall -y torch 2>/dev/null || true
-            pip install torch==2.11.0+cpu --index-url https://download.pytorch.org/whl/cpu
-        fi
+        log_info "Reinstalling torch from PyPI..."
+        pip uninstall -y torch 2>/dev/null || true
+        pip install torch==2.11.0+cpu --index-url https://download.pytorch.org/whl/cpu
     fi
 
     local torch_final
@@ -650,7 +596,7 @@ build_torch_rbln() {
     install_rebel_python_deps || return $?
 
     # Build and install torch-rbln
-    log_info "Building torch-rbln with gcc-${gcc_version}..."
+    log_info "Building torch-rbln with gcc-13..."
     CC=${CC} CXX=${CXX} TORCH_RBLN_BUILD_TYPE="${build_type}" uv pip install -e . --no-build-isolation
 
     log_info "torch-rbln installed successfully!"
@@ -724,13 +670,9 @@ print_summary() {
     echo "Configuration:"
     echo "  REBEL_HOME:      ${REBEL_HOME}"
     echo "  TORCH_RBLN_HOME: ${TORCH_RBLN_HOME}"
-    echo "  GCC version:     ${gcc_version}"
+    echo "  Compiler:        ${CC} / ${CXX}"
     echo "  Build type:      ${build_type}"
-    if [[ "${gcc_version}" = "12" ]]; then
-        echo "  PyTorch:         from wheel (${effective_torch_wheel_path})"
-    else
-        echo "  PyTorch:         2.11.0+cpu (PyPI)"
-    fi
+    echo "  PyTorch:         2.11.0+cpu (PyPI)"
     echo ""
     echo -e "${GREEN}How to use:${NC}"
     echo ""
@@ -759,31 +701,7 @@ main() {
         . "${HOME}/.bashrc"
     fi
 
-    # Set up compiler for gcc-13 (OS-aware: debian vs RHEL gcc-toolset-13)
     setup_compiler_env
-
-    # Determine effective torch_wheel_path (global for modify_pyproject)
-    effective_torch_wheel_path="${torch_wheel_path}"
-
-    # Validate gcc version and torch wheel configuration
-    if [[ "${gcc_version}" = "12" ]]; then
-        if [[ -z "${torch_wheel_path}" ]]; then
-            log_error "gcc-12 mode requires TORCH_WHEEL_PATH"
-            log_error ""
-            log_error "Usage:"
-            log_error "  export RBLN_GCC_VERSION=12"
-            log_error "  export TORCH_WHEEL_PATH=/path/to/torch-2.11.0-cpXXX-cpXXX-linux_x86_64.whl"
-            log_error "  ./tools/build-with-external-rebel.sh --clean"
-            exit 1
-        fi
-        log_info "Mode: gcc-12 + torch wheel"
-    else
-        if [[ -n "${torch_wheel_path}" ]]; then
-            log_warn "TORCH_WHEEL_PATH ignored in gcc-13 mode (use RBLN_GCC_VERSION=12 to use wheel)"
-            effective_torch_wheel_path=""
-        fi
-        log_info "Mode: gcc-13 + PyPI torch"
-    fi
 
     # Check prerequisites
     check_prerequisites
@@ -794,9 +712,6 @@ main() {
         clean_build_artifacts
         [[ "${clean_only}" -eq 1 ]] && exit 0
     fi
-
-    # Validate torch wheel if specified
-    [[ -n "${effective_torch_wheel_path}" ]] && validate_torch_wheel "${effective_torch_wheel_path}"
 
     # Build steps
     setup_virtualenv
