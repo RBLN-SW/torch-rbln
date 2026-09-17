@@ -1,29 +1,20 @@
 # Owner(s): ["module: PrivateUse1"]
 """The attention kernel an engine calls, inside a larger compiled graph.
 
-``test_custom_kernel.py`` drives the ``rbln_custom_ops`` kernels through eager dispatch, which
-compiles each op on its own and asserts the wiring contract only -- shape, dtype, declared
-mutation. An inference engine's graph mode is different: the op sits in one program together
-with the projections around it, and the KV cache is a program input it mutates in place. This
-test builds that shape -- q/kv projection -> attention -> output projection -- as one
+``test_custom_kernel.py`` compiles each ``rbln_custom_ops`` kernel on its own and asserts the
+wiring contract. An engine's graph mode is different: the op sits in one program with the
+projections around it, and the KV cache is a program input it mutates in place. This test
+builds that shape -- q/kv projection -> attention -> output projection -- as one
 ``torch.compile`` program.
 
 The kernel is ``flash_causal_attention_naive_{prefill,decode}``, the one vllm-rbln's flash
-attention backend selects for paged serving: causal attention with a block size below the model
-length, which is the default (``VLLM_RBLN_FLASH_CAUSAL_ATTN``) path. The engine passes its
-``scale`` tensor a second time for the unused ``slot_mapping`` operand, and this test does the
-same, so the call is the one the engine makes.
+backend selects for paged serving (``VLLM_RBLN_FLASH_CAUSAL_ATTN``, the default).
 
-rebel_compiler registers the op with a plain-torch body, so the same module run on the CPU in
-fp32 is an independent reference: it is the op's own definition of what the kernel computes,
-not a transcription of it. The compiled program is checked against it.
-
-Eager dispatch is run as well, and is the *second reference*, not a second kernel: torch-rbln
-registers a PrivateUse1 kernel for paged_attn_* and flash_attention_naive_*, but not for this
-family, so dispatching the op on a device tensor runs that same torch body through the device's
-eager ops. It is worth the call anyway -- it carries the device's 16-bit formats without the
-compiler ever seeing the program, so comparing it to the compiled run separates a compute
-format from wrong math, and it can be held to a tighter bound than the fp32 comparison.
+Both references are the op's own plain-torch body, the one rebel_compiler registers. On the CPU
+in fp32 it is an independent definition of what the kernel computes. Dispatched eagerly on a
+device tensor it is that same body -- torch-rbln registers no PrivateUse1 kernel for this
+family -- carrying the device's 16-bit formats without the compiler seeing the program, which
+holds the compiled run to a tighter bound than fp32 does.
 """
 
 import math
@@ -41,10 +32,9 @@ NUM_KV_HEADS, NUM_Q_GROUPS, HEAD_DIM = 2, 4, 64
 PARTITION, NUM_PARTITIONS = 128, 2  # paged: the block is shorter than the context it spans
 HIDDEN = NUM_KV_HEADS * NUM_Q_GROUPS * HEAD_DIM
 
-# Both phases run against a cache that already holds a prompt, and both reach past the first
-# block: prefill continues an earlier chunk from the block boundary, decode attends over a
-# context that spans both blocks and appends into the second. A kernel that lost the block
-# table or the position would still pass with an empty cache in one block.
+# Both phases reach past the first block: prefill continues from the block boundary, decode
+# spans both blocks and appends into the second. With an empty cache in one block, a kernel
+# that lost the block table or the position would still pass.
 PREFILL_CACHED, PREFILL_TOKENS = PARTITION, 96
 DECODE_CACHED = PARTITION + 32
 
@@ -124,11 +114,9 @@ class TestAttentionInGraph(TestCase):
             out = compiled(*graph_in)  # one program: projections + op + projection
             warm = compiled(*_inputs(phase, dtype, self.rbln_device))  # warm program, fresh cache
 
-        # Tolerances are fractions of the reference's scale. Against fp32 each device run
-        # carries the device's 16-bit compute formats through the projections and the softmax;
-        # between the two device runs only the extent of the program the compiler saw differs,
-        # so they may reassociate but not more. A kernel reading the wrong part of the cache
-        # moves the output by its own scale, an order of magnitude above either bound.
+        # Tolerances are fractions of the reference's scale: against fp32 each device run
+        # carries the device's 16-bit formats, while the two device runs differ only in how much
+        # of the program the compiler saw. A wrong cache read misses by the scale itself.
         scale = float(reference.abs().max())
         device_tol, pair_tol = 0.1 * scale, 0.05 * scale
 
