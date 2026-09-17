@@ -96,14 +96,50 @@ void register_public_device_api(py::module_& module) {
       "Exchange the current device and return the original device.");
 
   // Synchronization
-  module.def("synchronize", &c10::rbln::synchronize, "Wait for all pending async transfers on a device.");
+  module.def(
+      "synchronize",
+      &c10::rbln::synchronize,
+      "Wait for a device's pending async transfers, then drain all of its streams.");
 
   // Memory management functions
   module.def("empty_cache", &c10::rbln::empty_cache, "Release all unoccupied cached memory.");
   module.def("memory_stats", &c10::rbln::memory_stats, "Get memory allocator statistics.");
   module.def(
+      "memory_stats_per_chiplet",
+      &c10::rbln::memory_stats_per_chiplet,
+      "Get memory allocator statistics broken down per chiplet.");
+  module.def(
       "reset_accumulated_memory_stats", &c10::rbln::reset_accumulated_memory_stats, "Reset accumulated memory stats.");
   module.def("reset_peak_memory_stats", &c10::rbln::reset_peak_memory_stats, "Reset peak memory stats.");
+  module.def("mem_get_info", &c10::rbln::mem_get_info, "Get (free, total) device DRAM in bytes.");
+  module.def(
+      "mem_get_info_per_chiplet",
+      &c10::rbln::mem_get_info_per_chiplet,
+      "Get the driver's device DRAM usage broken down per chiplet.");
+
+  py::class_<c10::rbln::DeviceProperties>(module, "DeviceProperties")
+      .def_readonly("name", &c10::rbln::DeviceProperties::name)
+      .def_readonly("total_memory", &c10::rbln::DeviceProperties::total_memory)
+      .def_readonly("memory_per_chiplet", &c10::rbln::DeviceProperties::memory_per_chiplet)
+      .def_readonly("num_chiplet", &c10::rbln::DeviceProperties::num_chiplet)
+      .def_readonly("npu_count", &c10::rbln::DeviceProperties::npu_count)
+      .def("__repr__", [](const c10::rbln::DeviceProperties& self) {
+        return c10::str(
+            "DeviceProperties(name='",
+            self.name,
+            "', total_memory=",
+            self.total_memory,
+            ", memory_per_chiplet=",
+            self.memory_per_chiplet,
+            ", num_chiplet=",
+            self.num_chiplet,
+            ", npu_count=",
+            self.npu_count,
+            ")");
+      });
+
+  module.def(
+      "get_device_properties", &c10::rbln::get_device_properties, "Get the hardware properties of a logical device.");
 
   // Register DeviceTopology structures
   py::class_<c10::rbln::DeviceTopologyEntry>(module, "DeviceTopologyEntry")
@@ -420,8 +456,10 @@ void register_internal_api(py::module_& module) {
       "Internal: number of entries in the warm-cache (debug/bench only)");
   module.def(
       "_warmcache_clear",
-      []() { torch_rbln::warmcache::WarmCache::instance().clear(); },
-      "Internal: drop all warm-cache entries (tests / benchmarks)");
+      [](std::optional<c10::DeviceIndex> device) { torch_rbln::warmcache::WarmCache::instance().clear(device); },
+      "Internal: drop the warm-cache entries whose inputs live on `device`, or "
+      "all of them when device is None",
+      pybind11::arg("device") = pybind11::none());
   module.def(
       "_warmcache_is_building",
       []() { return torch_rbln::warmcache::WarmCache::is_building_entry(); },
@@ -435,18 +473,6 @@ void register_internal_api(py::module_& module) {
       "_warmcache_exit_building",
       []() { torch_rbln::warmcache::WarmCache::exit_building(); },
       "Internal: clear the miss-path reentrancy flag set by _warmcache_enter_building");
-  module.def(
-      "_warmcache_consume_force_recompile",
-      []() { return torch_rbln::warmcache::WarmCache::consume_force_recompile(); },
-      "Internal: consume the thread-local force-recompile flag set by a failed "
-      "warm-cache hit. Returns True iff a flag was pending; clears it.");
-  module.def(
-      "_warmcache_request_force_recompile",
-      []() { torch_rbln::warmcache::WarmCache::request_force_recompile(); },
-      "Internal: set the thread-local force-recompile flag. Production callers "
-      "rely on the C++ shim auto-setting this on hit-failure; this binding "
-      "exists so tests can exercise the consume/clear pair without engineering "
-      "a runtime soft-failure.");
 
   // CPU fast-path registry introspection. Returns True iff a handler is
   // registered for the given fully-qualified op name (e.g. "aten::rsqrt.out").

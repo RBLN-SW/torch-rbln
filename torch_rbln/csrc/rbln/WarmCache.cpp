@@ -3,11 +3,13 @@
 #include <fcntl.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <mutex>
+#include <vector>
 
 namespace torch_rbln::warmcache {
 
@@ -89,7 +91,7 @@ WarmCache& WarmCache::instance() {
   // reclaims the process memory at exit.
   //
   // Default ON: hot path drives rebel runtime directly from C++ on warm hits;
-  // miss-path entries that fail v-memory lookup are erased by try_warmcache_hit
+  // a hit that fails v-memory lookup falls through to the pybind miss path
   // so cold-path correctness is preserved.
   static auto* c = [] {
     auto* p = new WarmCache();
@@ -132,27 +134,35 @@ void WarmCache::install(CacheKey key, const CacheEntry& entry) {
   map_.try_emplace(std::move(key), std::move(entry_ptr));
 }
 
-void WarmCache::erase(const CacheKey& key) {
-  // The map's strong reference drops here; any in-flight find() shared_ptr
-  // keeps the entry alive until that borrower releases. py::object
-  // destruction goes through the GIL-acquiring custom deleter.
-  std::unique_lock<std::shared_mutex> wr(mu_);
-  map_.erase(key);
-}
-
 size_t WarmCache::size() {
   std::shared_lock<std::shared_mutex> rd(mu_);
   return map_.size();
 }
 
-void WarmCache::clear() {
-  std::unique_lock<std::shared_mutex> wr(mu_);
-  map_.clear();
+void WarmCache::clear(std::optional<c10::DeviceIndex> device) {
+  // The dropped entries die at the end of this function, outside the lock:
+  // their deleter takes the GIL, and a thread that already holds the GIL may
+  // be waiting for ``mu_`` (``clear`` and ``size`` are called from Python).
+  std::vector<std::shared_ptr<CacheEntry>> dropped;
+  {
+    std::unique_lock<std::shared_mutex> wr(mu_);
+    for (auto it = map_.begin(); it != map_.end();) {
+      const auto& inputs = it->first.inputs;
+      const bool drop = !device.has_value() || std::any_of(inputs.begin(), inputs.end(), [&](const TensorProfile& tp) {
+        return tp.device_index == *device;
+      });
+      if (drop) {
+        dropped.push_back(std::move(it->second));
+        it = map_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
 }
 
 namespace {
 thread_local bool t_building_entry = false;
-thread_local bool t_force_recompile = false;
 } // namespace
 
 bool WarmCache::is_building_entry() {
@@ -163,16 +173,6 @@ void WarmCache::enter_building() {
 }
 void WarmCache::exit_building() {
   t_building_entry = false;
-}
-
-bool WarmCache::consume_force_recompile() {
-  const bool v = t_force_recompile;
-  t_force_recompile = false;
-  return v;
-}
-
-void WarmCache::request_force_recompile() {
-  t_force_recompile = true;
 }
 
 } // namespace torch_rbln::warmcache

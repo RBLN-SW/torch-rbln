@@ -1,0 +1,38 @@
+name: Post-merge checks
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  lint:
+    uses: ./.github/workflows/_lint.yaml
+    with:
+      torch_rbln_sha: ${{ github.sha }}
+      python_versions: '["3.12"]'
+      build_types: '["Release"]'
+      base_revision: ''
+    secrets:
+      GIT_PAT: ${{ secrets.GIT_PAT }}
+      INTERNAL_INDEX_URL: ${{ secrets.INTERNAL_INDEX_URL }}
+      INTERNAL_INDEX_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
+      INTERNAL_INDEX_PASSWORD: ${{ secrets.INTERNAL_INDEX_PASSWORD }}
+      HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+      HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+
+  dispatch_event:
+    uses: ./.github/workflows/_dispatch-event.yaml
+    with:
+      event_name: ${{ github.event_name }}
+      event_type: torch-rbln-ci
+      torch_rbln_ref: ${{ github.ref_name }}
+      torch_rbln_sha: ${{ github.sha }}
+    secrets:
+      GIT_PAT: ${{ secrets.GIT_PAT }}

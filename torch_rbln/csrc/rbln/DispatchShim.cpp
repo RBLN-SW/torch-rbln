@@ -6,6 +6,7 @@
 #include <ATen/native/rbln/RBLNCPUFallback.h>
 #include <ATen/ops/empty.h>
 #include <c10/rbln/RBLNFunctions.h>
+#include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNSupportedDtypes.h>
 #include <torch/csrc/jit/python/pybind_utils.h>
@@ -635,6 +636,28 @@ bool tensor_has_nan_or_inf(const at::Tensor& t) {
   return found;
 }
 
+// A Python number that PyTorch wrapped into a 0-dim CPU tensor (``tensor + 1``).
+// The pybind boundary unwraps it back into a Python scalar and the Python
+// wrapper compiles it as a graph constant, so the runtime never sees it as an
+// input. The warm cache keys it by value -- ``a + 1`` and ``a + 2`` are
+// different programs -- and leaves it out of the device inputs on the hit path.
+inline bool is_wrapped_scalar(const at::Tensor& t) {
+  return t.dim() == 0 && t.unsafeGetTensorImpl()->is_wrapped_number();
+}
+
+// nullopt for a value ScalarValue cannot hold (complex): the key must miss
+// rather than collide.
+inline std::optional<ScalarValue> wrapped_scalar_value(const at::Tensor& t) {
+  const c10::Scalar s = t.item();
+  if (s.isBoolean())
+    return ScalarValue::fromBool(s.toBool());
+  if (s.isIntegral(/*includeBool=*/false))
+    return ScalarValue::fromInt(s.toLong());
+  if (s.isFloatingPoint())
+    return ScalarValue::fromFloat(s.toDouble());
+  return std::nullopt;
+}
+
 // Cheap C++-side pre-check mirroring the cheap branches of
 // torch_rbln._internal.ops_utils.is_cpu_fallback_cases():
 //   2. dtype outside the dispatch catalog on any input tensor
@@ -705,7 +728,7 @@ int quick_fallback_check(
     // Wrapped 0-dim numbers behave like Python scalars and are unwrapped by
     // the pybind boundary. Skip them from the dtype check so the shortcut
     // doesn't fire for `tensor + 1.0` etc.
-    if (t.dim() == 0 && t.unsafeGetTensorImpl()->is_wrapped_number()) {
+    if (is_wrapped_scalar(t)) {
       continue;
     }
     has_input_tensor = true;
@@ -763,7 +786,7 @@ inline bool all_input_shapes_equal(torch::jit::Stack* stack, const SchemaCache& 
     if (!iv.isTensor())
       continue;
     const auto& t = iv.toTensor();
-    if (!t.defined() || cache.is_write_alias[i])
+    if (!t.defined() || cache.is_write_alias[i] || is_wrapped_scalar(t))
       continue;
     if (!ref_set) {
       ref_shape = t.sizes();
@@ -807,6 +830,13 @@ bool build_cache_key(
         continue;
       if (cache.is_write_alias[i])
         continue; // out tensor, not part of key
+      if (is_wrapped_scalar(t)) {
+        const auto sv = wrapped_scalar_value(t);
+        if (!sv)
+          return false;
+        out_key.scalars.push_back(*sv);
+        continue;
+      }
       TensorProfile tp;
       tp.dtype = t.scalar_type();
       tp.shape.assign(t.sizes().begin(), t.sizes().end());
@@ -877,7 +907,7 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
 
   const uint64_t _seg_t0 = now_ns();
   // Hold a shared_ptr to the entry for the rest of the hit path. If a peer
-  // thread ``erase``s the same key while we are mid-flight, the entry stays
+  // thread ``clear``s the same key while we are mid-flight, the entry stays
   // alive until our shared_ptr goes out of scope. Without this, a raw
   // pointer ``find`` could hand back a dangling pointer.
   CacheEntryPtr entry = wc.find(key);
@@ -902,7 +932,8 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
   // then materialize each to contig (matching what mul_rbln/add_rbln do in
   // their Python wrappers). Without this, the cached runtime — which was
   // compiled for the broadcast shape — would receive raw-shape data ptrs and
-  // fail (size mismatch / OOB read), causing erase + permanent miss.
+  // fail (size mismatch / OOB read), so every dispatch of the key would pay a
+  // failed hit attempt before reaching the Python wrapper.
   // `held_tensors` keeps the materialized contig tensors alive until Run()
   // completes (their data ptrs are what we bind as inputs).
   std::vector<at::Tensor> held_tensors;
@@ -926,7 +957,7 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
       if (!iv.isTensor())
         continue;
       const at::Tensor& t = iv.toTensor();
-      if (!t.defined())
+      if (!t.defined() || is_wrapped_scalar(t))
         continue;
       if (cache.is_write_alias[i]) {
         // See note in the non-broadcast branch below: non-contig out= writes
@@ -976,7 +1007,7 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
       if (!iv.isTensor())
         continue;
       const at::Tensor& t = iv.toTensor();
-      if (!t.defined())
+      if (!t.defined() || is_wrapped_scalar(t))
         continue;
       if (cache.is_write_alias[i]) {
         // Non-contiguous out=view (e.g. ``torch.add(x, y, out=base.t())``)
@@ -1087,24 +1118,13 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
     _seg_t_run = now_ns();
   }
   if (runtime_failed) {
-    // The runtime that we cached cannot serve this profile after all (e.g.
-    // input v-memory was created by an allocation path the runtime can't
-    // resolve). Drop the entry so subsequent dispatches with this key go
-    // through the pybind miss path and rebuild via DynamoRuntime, which
-    // handles the edge case correctly.
-    //
-    // Just erasing the C++ entry is not enough: the Python
-    // ``compile_rbln_cached`` still holds the compiled callable, and the
-    // rebel backend only pushes a DynamoRuntime to ``_runtime_holder`` on
-    // its first compile. A bare erase would leave the warm cache empty
-    // AND keep the Python compile cache hot, so install_pending would
-    // see an empty holder forever. Set the thread-local force-recompile
-    // flag — the same thread's next pass through
-    // ``compile_and_run_view_aware`` consumes it and forces
-    // ``compile_rbln_cached`` to skip its own cache for this key, letting
-    // the rebel backend re-instantiate and re-populate the holder.
-    WarmCache::instance().erase(key);
-    WarmCache::request_force_recompile();
+    // The cached runtime cannot serve this call from the C ABI path (e.g.
+    // input v-memory created by an allocation path it cannot resolve). Fall
+    // through to the pybind miss path, whose DynamoRuntime handles those
+    // cases. The entry stays: the failure belongs to the buffers this call
+    // brought, not to the entry, so a later call with the same profile gets
+    // to try the hit again. ``install`` on the miss path below is a
+    // try_emplace, so the key the Python wrapper re-offers is a no-op.
     return false;
   }
 
@@ -1180,6 +1200,12 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
     if (g_trace_enabled.load(std::memory_order_relaxed)) {
       capture_site(op_name); // (A) WHERE: opt-in, deduped, GIL-safe; off by default
     }
+    // Same log the ``fallback_rbln`` handler emits for an unsupported op. The
+    // shortcut below decides a fallback the Python wrapper would otherwise have
+    // decided and logged, so without this the ops it covers -- add, mul, matmul,
+    // the reductions -- are the only ones whose CPU fallback leaves no trace at
+    // any log level.
+    c10::rbln::log_cpu_fallback(op.schema().name());
     const uint64_t _fb_t0 = now_ns();
     ::at::native::rbln::cpu_fallback_rbln(op, stack);
     // COST of the fallback (wall ns), so the report can tell "many cheap fallbacks

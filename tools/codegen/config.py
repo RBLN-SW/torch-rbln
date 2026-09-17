@@ -33,7 +33,6 @@ class OpCategories:
 
     # TODO: need to make automatically fill 'Ops' if it figure out
     REDUCTION_OPS: Set[str] = {"sum", "mean"}
-    UNARY_OPS: Set[str] = {"silu", "rsqrt", "neg", "ceil", "abs", "log", "floor", "trunc"}
     BROADCASTABLE_OPS: Set[str] = {
         "add",
         "sub",
@@ -138,6 +137,12 @@ class OpCategories:
         "max",
         "min",
     }
+    # Softmax .out: shape-preserving, with an int dim and a bool flag. The
+    # pointwise pre-check applies unchanged (fp16, not-all-scalar, no contig
+    # offset); the scalars ride in the warm-cache key like any other shim op.
+    SHIM_SOFTMAX: Set[str] = {
+        "_softmax.out",
+    }
     # Matmul family. Earlier benches showed a small device-path overhead
     # (~2% in pybind-heavy hot loops) which is now well below noise after
     # the warm-cache path skips Python entirely on warm hits. Coverage gain
@@ -159,6 +164,7 @@ class OpCategories:
         | SHIM_REDUCTION
         | SHIM_REDUCTION_FULL
         | SHIM_MATMUL
+        | SHIM_SOFTMAX
     )
 
     # Per-op overrides of the dispatch-shim dtype check: positional arg indices
@@ -185,14 +191,6 @@ class OpCategories:
         ({"where"}, "where"),
         ({"addmm"}, "addmm"),
         ({"linear"}, "linear"),
-    ]
-
-    # Dtype validation mapping: (category_set, template_method_name)
-    # Maps category Set -> template method name in Validation class
-    # Order matters: checked in sequence, first match wins
-    DTYPE_VALIDATION_MAP: List[Tuple[Set[str], str]] = [  # noqa: UP035
-        (REDUCTION_OPS, "dtype_reduction"),
-        (COMPARE_OPS, "dtype_compare"),
     ]
 
     # Special out parameter names for operations that don't use standard 'out' kwarg

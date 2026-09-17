@@ -10,32 +10,20 @@
 #   - torch-rbln is already installed (e.g. via tools/dev-setup.sh).
 #   - rebel-compiler is installed and usable.
 #
-# Steps (each can be skipped via env var if a CI runner already provides it):
+# Steps:
 #   1. Test runner   : pytest, pytest-xdist
 #   2. Test infra    : expecttest (for torch.testing._internal)
-#   3. Model tests   : torchvision (PyTorch CPU index) + pandas
-#   4. vllm-rbln     : git clone + editable install; vllm itself is pulled in
-#                      transitively from vllm-rbln's dependency pin so the
-#                      version stays in lockstep with vllm-rbln upstream
-#                      instead of being re-pinned here.
+#   3. Model tests   : pandas, transformers 4 (the line test_transformers.py's
+#                      models load under)
 #
 # Usage:
 #   ./tools/test/install-test-deps.sh [--dry-run]
 #
 # Optional environment:
 #   UV=1                 Use ``uv pip install`` instead of ``python -m pip``.
-#   VLLM_RBLN_REPO       Override the source repo (default rbln-sw/vllm-rbln).
-#   VLLM_RBLN_REF        Override the ref (default origin/device_tensor_rebased).
-#   VLLM_RBLN_DIR        Override the local checkout path
-#                        (default ``$PROJECT_ROOT/vllm-rbln``).
 # =============================================================================
 
 set -euo pipefail
-
-SCRIPT_DIR="$(realpath "$(dirname "$0")")"
-readonly SCRIPT_DIR
-PROJECT_ROOT="$(realpath "${SCRIPT_DIR}/../..")"
-readonly PROJECT_ROOT
 
 # ----- arg parsing ----------------------------------------------------------
 
@@ -88,81 +76,17 @@ install_test_infra() {
   pip_install "expecttest>=0.3.0,<0.4.0"
 }
 
-# ----- step 3: model-test deps (torchvision + pandas) -----------------------
+# ----- step 3: model-test deps (pandas + transformers 4) --------------------
 #
-# torchvision needs the PyTorch CPU index (the +cpu wheel must come from
-# download.pytorch.org rather than PyPI). pandas is a plain PyPI package used
-# only by test/models/test_optimum_llm.py.
+# pandas is a plain PyPI package used by test/models/test_transformers.py.
 #
-# transformers and optimum-rbln are NOT installed here — they arrive
-# transitively via vllm-rbln in step 4.
+# transformers stays on the 4 line here: test_transformers.py loads EXAONE-3.5's
+# hub modeling code, which no transformers 5 release runs.
 
 install_model_test_deps() {
-  log_step "Model-test deps (torchvision CPU + pandas)"
-  pip_install "torchvision==0.25.0+cpu" \
-    --index-url https://download.pytorch.org/whl/cpu \
-    --force-reinstall \
-    --no-deps
+  log_step "Model-test deps (pandas + transformers 4)"
   pip_install "pandas==2.2.3"
-}
-
-# ----- step 4: vllm-rbln ----------------------------------------------------
-#
-# vllm-rbln's device-tensor flow is not on PyPI yet, so we source-install the
-# branch directly. We do NOT install ``vllm`` separately: vllm-rbln pins the
-# right vllm version (and the matching vllm-cpu wheel index URL) in its own
-# pyproject.toml, and pip pulls vllm transitively when we install vllm-rbln
-# editable. This keeps the vllm version in lockstep with vllm-rbln's upstream
-# pin instead of duplicating it here.
-
-vllm_wheel_index_from_pyproject() {
-  # Read the vllm-cpu index URL out of vllm-rbln's pyproject.toml so we don't
-  # have to keep a separate vllm version pinned in this script.
-  local pyproject="$1"
-  python - "${pyproject}" <<'PY'
-import sys, tomllib, pathlib
-data = tomllib.loads(pathlib.Path(sys.argv[1]).read_text())
-for idx in data.get("tool", {}).get("uv", {}).get("index", []):
-    if idx.get("name") == "vllm-cpu":
-        print(idx["url"])
-        sys.exit(0)
-sys.exit(f"vllm-cpu index URL not found in {sys.argv[1]}")
-PY
-}
-
-install_vllm_rbln() {
-  local repo="${VLLM_RBLN_REPO:-https://github.com/rbln-sw/vllm-rbln.git}"
-  local ref="${VLLM_RBLN_REF:-origin/chan/remove_cpu_offload}"
-  local dir="${VLLM_RBLN_DIR:-${PROJECT_ROOT}/vllm-rbln}"
-
-  log_step "vllm-rbln (clone + editable install at ${ref})"
-
-  if [[ ! -d "${dir}/.git" ]]; then
-    echo "Cloning ${repo} into ${dir}..."
-    run git clone "${repo}" "${dir}"
-  fi
-  echo "Checking out ${ref} in ${dir}..."
-  if [[ "${DRY_RUN}" -eq 1 ]]; then
-    echo "[dry-run] (cd ${dir} && git fetch origin --prune && git checkout --detach ${ref})"
-  else
-    (cd "${dir}" && git fetch origin --prune && git checkout --detach "${ref}")
-  fi
-
-  local vllm_index
-  if [[ "${DRY_RUN}" -eq 1 ]]; then
-    vllm_index="<resolved-from-pyproject-at-runtime>"
-  else
-    vllm_index="$(vllm_wheel_index_from_pyproject "${dir}/pyproject.toml")"
-    echo "Resolved vllm wheel index from vllm-rbln pyproject: ${vllm_index}"
-  fi
-
-  # The rbln index is needed so pip can resolve vllm-rbln's transitive
-  # ``optimum-rbln`` pin; transformers + other ordinary PyPI packages come
-  # from the default index.
-  pip_install -e "${dir}" \
-    --extra-index-url "${vllm_index}" \
-    --extra-index-url https://pypi.rbln.ai/simple/ \
-    --extra-index-url https://download.pytorch.org/whl/cpu
+  pip_install "transformers<5"
 }
 
 # ----- main -----------------------------------------------------------------
@@ -170,7 +94,6 @@ install_vllm_rbln() {
 install_test_runner
 install_test_infra
 install_model_test_deps
-install_vllm_rbln
 
 echo
 echo "All test dependencies installed."

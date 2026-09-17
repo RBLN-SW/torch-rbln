@@ -32,8 +32,7 @@ PyTorch RBLN is currently in **beta** and under active development. APIs may cha
 **`torch-rbln`** (public wheel). Install **`torch`** from the PyTorch CPU index first, then **`torch-rbln`** from PyPI.
 
 ```bash
-pip3 install torch==2.11.0+cpu --index-url https://download.pytorch.org/whl/cpu
-pip3 install torch-rbln
+pip3 install torch-rbln --extra-index-url https://download.pytorch.org/whl/cpu
 ```
 
 For **`rebel-compiler`** and the rest of the setup, see **Prerequisites** above and [Installation](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html#install).
@@ -75,7 +74,15 @@ Then restrict its permissions (tools refuse a world-readable `.netrc`):
 chmod 600 ~/.netrc
 ```
 
-Re-run `./tools/dev-setup.sh pypi` once the file is in place.
+Alternatively, if you are using `uv`, you can provide the credentials via
+environment variables instead of `~/.netrc`:
+
+```bash
+export UV_INDEX_RBLN_USERNAME=<your-rbln-portal-id>
+export UV_INDEX_RBLN_PASSWORD=<your-rbln-portal-password>
+```
+
+Re-run `./tools/dev-setup.sh pypi` once the credentials are in place.
 
 ## Documentation
 
@@ -95,7 +102,7 @@ Re-run `./tools/dev-setup.sh pypi` once the file is in place.
 - [Test Guide](https://github.com/RBLN-SW/torch-rbln/blob/main/docs/TEST_GUIDE.md) — local test runs
 - [Linting](https://github.com/RBLN-SW/torch-rbln/blob/main/docs/LINTING.md) — code style and lint
 - [Third-party update](https://github.com/RBLN-SW/torch-rbln/blob/main/docs/THIRD_PARTY_UPDATE.md) — PyTorch pin, upstream files, `rebel-compiler` version bumps in `pyproject.toml`
-- [Release Process](https://github.com/RBLN-SW/torch-rbln/blob/main/docs/RELEASE_PROCESS.md) — branch model, versioning, tagging, and publication
+- [Release Process](https://github.com/RBLN-SW/torch-rbln/blob/main/docs/RELEASE_PROCESS.md) — release lifecycle, versioning, tagging, and publication
 
 ## Contributing
 

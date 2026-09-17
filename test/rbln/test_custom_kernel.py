@@ -11,6 +11,7 @@ and a finite/non-degenerate result — not numerical correctness.
 import math
 
 import pytest
+import rebel  # noqa: F401  -- defines the rbln_custom_ops schemas these tests call
 import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase

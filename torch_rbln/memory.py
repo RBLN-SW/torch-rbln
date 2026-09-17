@@ -6,6 +6,7 @@ cache management, memory statistics, and memory monitoring capabilities.
 
 import contextlib
 import operator
+import os
 import sys
 import threading
 from typing import Dict, Iterator, Optional, Union  # noqa: UP035
@@ -22,9 +23,13 @@ __all__ = [
     "set_device_layout_like",
     "max_memory_allocated",
     "max_memory_reserved",
+    "mem_get_info",
+    "mem_get_info_per_chiplet",
     "memory_allocated",
     "memory_reserved",
     "memory_stats",
+    "memory_stats_per_chiplet",
+    "memory_summary",
     "offload",
     "release_offload_temp_storage",
     "reset_accumulated_memory_stats",
@@ -106,8 +111,8 @@ def empty_cache(device: Optional[Union[int, str, torch.device]] = None) -> None:
     allowing them to be used by other applications or returned to the system.
 
     Unlike the generic ``torch.accelerator.empty_cache()`` (which drains only the
-    caching allocator), this also drops the WarmCache and view-recipe caches, so it
-    releases everything the caller is not still holding.
+    caching allocator), this also drops the device's WarmCache entries and the
+    view-recipe cache, so it releases everything the caller is not still holding.
 
     Args:
         device (Optional[Union[int, str, torch.device]]): The device to empty cache for.
@@ -117,9 +122,9 @@ def empty_cache(device: Optional[Union[int, str, torch.device]] = None) -> None:
     # WarmCache holds strong refs to DynamoRuntime instances and the rbln
     # runtime buffers behind them. empty_cache() means "let go of everything
     # the user isn't holding"; if we kept warm entries the freed bytes would
-    # show up unchanged in memory_stats. Clearing first puts us in the same
-    # state as the cold dispatch path — entries get re-installed naturally.
-    torch_rbln._C._warmcache_clear()
+    # show up unchanged in memory_stats. Only this device's entries go, matching
+    # the allocator flush below; another device's ops keep hitting.
+    torch_rbln._C._warmcache_clear(device.index)
     # The view-recipe cache holds only metadata-derived recipes (no device
     # buffers), so it never shows up in memory_stats — but it has no eviction
     # and grows once per distinct view geometry, so clear it here too to keep
@@ -151,6 +156,11 @@ def memory_stats(device: Optional[Union[int, str, torch.device]] = None) -> Dict
     - reserved.current, reserved.peak, reserved.total_allocated, reserved.total_freed
     - active.current, active.peak
 
+    Scope, same as ``torch.cuda.memory_stats``: the caching allocator of the context
+    **this process** holds on ``device``. Other direct device allocations are not
+    counted, and a second process on the same NPU is invisible here -- these numbers
+    are not the NPU's occupancy. For that, use ``rbln-smi``.
+
     Args:
         device (Optional[Union[int, str, torch.device]]): The device to query.
             If None, uses the current device. Defaults to None.
@@ -163,6 +173,112 @@ def memory_stats(device: Optional[Union[int, str, torch.device]] = None) -> Dict
         return {}
     device = _normalize_device(device)
     return torch_rbln._C.memory_stats(device)
+
+
+def memory_stats_per_chiplet(
+    device: Optional[Union[int, str, torch.device]] = None,
+) -> Dict[str, int]:
+    """
+    Return memory allocator statistics broken down per chiplet.
+
+    Same keys as :func:`memory_stats`, each prefixed with ``npu.<n>.chiplet.<c>.`` --
+    e.g. ``npu.0.chiplet.0.allocated.current``. A device runs out on its heaviest
+    chiplet, which the aggregate :func:`memory_stats` hides.
+
+    ``npu.<n>`` is the n-th physical NPU of this logical device (``RBLN_NPUS_PER_DEVICE``
+    / ``RBLN_DEVICE_MAP``), not a physical NPU id; a 1:1 mapping yields ``npu.0`` only.
+    Same scope as :func:`memory_stats`.
+
+    Args:
+        device (Optional[Union[int, str, torch.device]]): The device to query.
+            If None, uses the current device. Defaults to None.
+
+    Returns:
+        Dict[str, int]: A dictionary containing per-chiplet memory statistics.
+    """
+    if _no_rbln_device():
+        return {}
+    device = _normalize_device(device)
+    return torch_rbln._C.memory_stats_per_chiplet(device)
+
+
+def memory_summary(device: Optional[Union[int, str, torch.device]] = None) -> str:
+    """
+    Return a human-readable printout of the current memory allocator statistics.
+
+    Rows are per (NPU, chiplet), so an imbalance is visible at a glance. The scope line
+    under the title names what the numbers cover: they are this process's allocator, not
+    the NPU's occupancy (see :func:`memory_stats`). The ``npu`` column is the physical NPU
+    id as :func:`torch.rbln.device_summary` prints it: relative to ``RBLN_VISIBLE_DEVICES``,
+    so it differs from ``rbln-smi`` when that variable is set. A logical device grouping
+    several NPUs (``RBLN_NPUS_PER_DEVICE`` / ``RBLN_DEVICE_MAP``) gets one row per NPU.
+
+    Peaks are tracked per chiplet, so the peak columns of the ``total`` row bound the
+    joint peak from above rather than reporting it. :func:`memory_stats` carries the
+    exact joint peak.
+
+    Args:
+        device (Optional[Union[int, str, torch.device]]): The device to query.
+            If None, uses the current device. Defaults to None.
+
+    Returns:
+        str: The formatted table, or a short notice when no stats are available.
+    """
+    no_stats = "torch_rbln memory summary: no statistics (no RBLN device or allocator uninitialized)\n"
+    if _no_rbln_device():
+        return no_stats
+    # Resolve once: the header must name the device the numbers came from, and on the
+    # device=None path a second resolution could land on a different current device.
+    device = _normalize_device(device)
+    per_chiplet = memory_stats_per_chiplet(device)
+    if not per_chiplet:
+        return no_stats
+
+    rows = sorted({(int(k.split(".")[1]), int(k.split(".")[3])) for k in per_chiplet})
+    columns = [
+        ("allocated.current", "allocated"),
+        ("allocated.peak", "alloc peak"),
+        ("reserved.current", "reserved"),
+        ("reserved.peak", "resv peak"),
+        ("active.current", "active"),
+        ("cached.current", "cached"),
+    ]
+
+    def mib(value: int) -> str:
+        return f"{value / 1024**2:.1f}"
+
+    def stat(npu: int, chiplet: int, key: str) -> int:
+        return per_chiplet.get(f"npu.{npu}.chiplet.{chiplet}.{key}", 0)
+
+    # Local import: rsd_utils pulls in torch_rbln.device, which star-imports this module.
+    from torch_rbln._internal.rsd_utils import get_physical_device_ids
+
+    # Stats keys carry the NPU's position within the logical device; print the physical
+    # id device_summary() shows instead, falling back to the position if unmapped.
+    physical = get_physical_device_ids(device.index) or []
+
+    def npu_id(npu: int) -> int:
+        return physical[npu] if npu < len(physical) else npu
+
+    header = f"{'npu':>5}{'chiplet':>9}" + "".join(f"{label:>13}" for _, label in columns)
+    lines = [
+        f"torch_rbln memory summary (device={device}, MiB)",
+        f"scope: pid {os.getpid()} -- caching allocator only, this process only",
+        "npu: physical NPU id as in device_summary() (relative to RBLN_VISIBLE_DEVICES, may differ from rbln-smi)",
+        header,
+        "-" * len(header),
+    ]
+    for npu, chiplet in rows:
+        cells = "".join(f"{mib(stat(npu, chiplet, key)):>13}" for key, _ in columns)
+        lines.append(f"{npu_id(npu):>5}{chiplet:>9}" + cells)
+    totals = "".join(f"{mib(sum(stat(npu, chiplet, key) for npu, chiplet in rows)):>13}" for key, _ in columns)
+    lines.append("-" * len(header))
+    lines.append(f"{'total':>14}" + totals)
+
+    retries = sum(stat(npu, chiplet, "num_alloc_retries") for npu, chiplet in rows)
+    ooms = sum(stat(npu, chiplet, "num_ooms") for npu, chiplet in rows)
+    lines.append(f"alloc retries: {retries}   ooms: {ooms}")
+    return "\n".join(lines) + "\n"
 
 
 def memory_allocated(device: Optional[Union[int, str, torch.device]] = None) -> int:
@@ -219,6 +335,65 @@ def max_memory_reserved(device: Optional[Union[int, str, torch.device]] = None) 
         int: The maximum memory reserved in bytes.
     """
     return memory_stats(device).get("reserved.peak", 0)
+
+
+def mem_get_info(device: Optional[Union[int, str, torch.device]] = None) -> tuple[int, int]:
+    """
+    Return the free and total device DRAM of ``device`` in bytes, as ``(free, total)``.
+
+    Same contract as :func:`torch.cuda.mem_get_info`, and what
+    :func:`torch.accelerator.get_memory_info` reports for ``rbln``: the NPU's figures as the
+    kernel driver sees them, across every process -- not this process's caching allocator,
+    which :func:`memory_stats` covers. ``total`` is the pool the driver can hand out, so it
+    sits below the part's nominal DRAM. A logical device spanning several physical NPUs
+    (``RBLN_NPUS_PER_DEVICE`` / ``RBLN_DEVICE_MAP``) reports their sum; one tensor still
+    lives on one NPU. A reading, not a reservation: another process may allocate right after.
+
+    Args:
+        device (Optional[Union[int, str, torch.device]]): The device to query.
+            If None, uses the current device. Defaults to None.
+
+    Returns:
+        tuple[int, int]: ``(free, total)`` in bytes.
+
+    Raises:
+        RuntimeError: no RBLN device, ``RBLN_DUMMY_DEVICE`` set, or the installed UMD/KMD
+            does not provide the device memory query (older drivers).
+    """
+    device = _normalize_device(device)
+    free, total = torch_rbln._C.mem_get_info(device)
+    return free, total
+
+
+def mem_get_info_per_chiplet(
+    device: Optional[Union[int, str, torch.device]] = None,
+) -> Dict[str, int]:
+    """
+    Return the driver's device DRAM usage of ``device`` broken down per chiplet, in bytes.
+
+    Same figures as :func:`mem_get_info` before summation, keyed like
+    :func:`memory_stats_per_chiplet`: ``npu.<n>.chiplet.<c>.{total,used,free,largest_free,
+    largest_free_huge}`` for each chiplet, and ``npu.<n>.{total,used,free,granularity,
+    huge_granularity}`` for each physical NPU of the logical device. ``npu.<n>`` is the
+    NPU's position within the logical device, not a physical NPU id.
+
+    Each chiplet allocates from its own pool, so a physically contiguous buffer is bounded
+    by one chiplet's ``largest_free`` (``largest_free_huge`` for the huge granule; 0 where
+    the part has none), which the device-wide ``free`` hides. ``largest_free`` may exceed
+    ``free`` in the same reply: both are estimates from a lock-free walk.
+
+    Args:
+        device (Optional[Union[int, str, torch.device]]): The device to query.
+            If None, uses the current device. Defaults to None.
+
+    Returns:
+        Dict[str, int]: A map from key to bytes.
+
+    Raises:
+        RuntimeError: same conditions as :func:`mem_get_info`.
+    """
+    device = _normalize_device(device)
+    return torch_rbln._C.mem_get_info_per_chiplet(device)
 
 
 def reset_accumulated_memory_stats(device: Optional[Union[int, str, torch.device]] = None) -> None:

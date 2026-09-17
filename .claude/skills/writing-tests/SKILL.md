@@ -50,14 +50,14 @@ The `TESTOWNERS` and `TEST_HAS_MAIN` linters reject a Python test file missing e
 
 ## 4. Markers decide whether the test runs at all
 
-| Marker                 | Effect                                                                  |
-| ---------------------- | ----------------------------------------------------------------------- |
-| `test_set_ci`          | Runs on every PR to `dev`. **Without it your test runs in no PR check.** |
-| *(none)*               | Release only — PRs to `main`                                            |
-| `test_set_perf`        | Manual only                                                             |
-| `test_set_experimental`| Excluded from release                                                    |
-| `single_worker`        | Runs in the serial pass, which is still xdist at `--numprocesses=1`      |
-| `no_dynamo_reset`      | Opts out of the autouse `torch._dynamo.reset()`                         |
+| Marker                  | Effect                                                                     |
+| ----------------------- | -------------------------------------------------------------------------- |
+| `test_set_ci`           | Runs on every PR. **Without it, the pre-merge checks never run the test.** |
+| *(none)*                | Runs only in the release checks on `main`                                  |
+| `test_set_perf`         | Manual only                                                                |
+| `test_set_experimental` | Excluded from release                                                      |
+| `single_worker`         | Runs in the serial pass, which is still xdist at `--numprocesses=1`        |
+| `no_dynamo_reset`       | Opts out of the autouse `torch._dynamo.reset()`                            |
 
 Default to `test_set_ci`. Omit it only for a test too slow for per-commit CI, and say so in the PR.
 

@@ -1,5 +1,6 @@
 #include <c10/core/Allocator.h>
 #include <c10/core/CachingDeviceAllocator.h>
+#include <c10/rbln/DeviceMappingManager.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNHooksInterface.h>
 #include <gtest/gtest.h>
@@ -287,6 +288,47 @@ TEST_F(RBLNAllocatorTest, GetDeviceStatsInvalidIndex) {
   EXPECT_THROW(device_allocator->getDeviceStats(-1), c10::Error);
   // Out-of-range index should throw.
   EXPECT_THROW(device_allocator->getDeviceStats(device_count), c10::Error);
+}
+
+TEST_F(RBLNAllocatorTest, GetMemoryInfo) {
+  auto* device_allocator = GetDeviceAllocator();
+  const auto physical_ids = c10::rbln::DeviceMappingManager::getInstance().getPhysicalDeviceIds(initial_device_index_);
+  ASSERT_FALSE(physical_ids.empty());
+
+  // Ask the runtime directly for the first NPU of the device, to know which contract applies.
+  RBLNDeviceMemoryInfo npu{};
+  const auto rc = rbln_get_device_memory_info(physical_ids.front(), &npu);
+  if (rc == RBLNRetCode_UNSUPPORTED) {
+    EXPECT_THROW(device_allocator->getMemoryInfo(initial_device_index_), c10::Error);
+    GTEST_SKIP() << "installed UMD/KMD has no device memory-info query";
+  }
+  ASSERT_EQ(rc, RBLNRetCode_SUCCESS);
+
+  const auto [free, total] = device_allocator->getMemoryInfo(initial_device_index_);
+  EXPECT_GT(total, 0u);
+  EXPECT_LE(free, total);
+  // The logical device sums its NPUs, so it holds at least the first one's pool.
+  EXPECT_GE(total, npu.total);
+  if (physical_ids.size() == 1) {
+    EXPECT_EQ(total, npu.total);
+  }
+
+  const auto per_chiplet = c10::rbln::mem_get_info_per_chiplet(c10::Device(c10::kPrivateUse1, initial_device_index_));
+  EXPECT_EQ(per_chiplet.at("npu.0.total"), npu.total);
+  ASSERT_GT(npu.chiplet_cnt, 0u);
+  uint64_t chiplet_total = 0;
+  for (uint32_t c = 0; c < npu.chiplet_cnt; ++c) {
+    chiplet_total += per_chiplet.at("npu.0.chiplet." + std::to_string(c) + ".total");
+  }
+  EXPECT_EQ(chiplet_total, npu.total);
+}
+
+TEST_F(RBLNAllocatorTest, GetMemoryInfoInvalidIndex) {
+  auto* device_allocator = GetDeviceAllocator();
+  const auto device_count = c10::rbln::get_device_count();
+
+  EXPECT_THROW(device_allocator->getMemoryInfo(-1), c10::Error);
+  EXPECT_THROW(device_allocator->getMemoryInfo(device_count), c10::Error);
 }
 
 TEST_F(RBLNAllocatorTest, ResetAccumulatedStats) {

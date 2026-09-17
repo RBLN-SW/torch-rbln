@@ -38,6 +38,12 @@ import torch_rbln._C as torch_rbln_C
 import torch_rbln.memory as torch_rbln_memory
 
 
+# Deselected by rebel_compiler's CI (`-m "not torch_rbln_only"`); see the marker in pyproject.
+# Only the torch-rbln surface of ``torch.rbln.offload``; the offloading behaviour itself is
+# covered by rebel-compiler's own C++ tests, as this file's docstring says.
+pytestmark = pytest.mark.torch_rbln_only
+
+
 @pytest.mark.test_set_ci
 class TestFileOffloading(TestCase):
     def tearDown(self):
