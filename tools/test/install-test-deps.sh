@@ -76,17 +76,20 @@ install_test_infra() {
   pip_install "expecttest>=0.3.0,<0.4.0"
 }
 
-# ----- step 3: model-test deps (pandas + transformers 4) --------------------
+# ----- step 3: model-test deps (pandas + transformers) ----------------------
 #
 # pandas is a plain PyPI package used by test/models/test_transformers.py.
 #
-# transformers stays on the 4 line here: test_transformers.py loads EXAONE-3.5's
-# hub modeling code, which no transformers 5 release runs.
+# transformers is pinned to what the RBLN PyTorch tutorial requires: this suite
+# exists to keep that tutorial working, so it has to run what the tutorial runs.
+# Two more reasons the pin cannot float: graph mode stops working above 4.52
+# (4.53+ fails at runtime, 4.56+ no longer traces through torch.export), and no
+# transformers 5 release runs EXAONE-3.5's hub modeling code.
 
 install_model_test_deps() {
-  log_step "Model-test deps (pandas + transformers 4)"
+  log_step "Model-test deps (pandas + transformers)"
   pip_install "pandas==2.2.3"
-  pip_install "transformers<5"
+  pip_install "transformers==4.49.0"
 }
 
 # ----- main -----------------------------------------------------------------

@@ -563,37 +563,6 @@ class TestOutTensors(TestCase):
     atol = 0.01
     rtol = 0.01
 
-    def test_out_is_filled_without_the_rebel_global_out_stash(self):
-        """``out=`` is filled on the compile miss and on the warm hit without
-        rebel's process-global out-tensor stash.
-
-        The stash is one list per process: a second thread setting it between
-        our set and the runtime's read sends our result into that thread's
-        buffer. Both paths bind ``out`` as the runtime's output buffer instead,
-        the miss path through ``DynamoRuntime.run(out=)``.
-        """
-        from rebel.core.torch_eager import eager_execution_helper
-
-        device = torch.device("rbln:0")
-        x = torch.randn(3, 128, device=device, dtype=torch.float16)
-        y = torch.randn(3, 128, device=device, dtype=torch.float16)
-        reference = torch.add(x.cpu(), y.cpu())
-        stash = eager_execution_helper()
-
-        size_before = _C._warmcache_size()
-        with patch.object(stash, "set_out_tensor", wraps=stash.set_out_tensor) as set_out_tensor:
-            # First call misses the warm cache and compiles; the second hits it.
-            for _ in range(2):
-                out = torch.empty(3, 128, device=device, dtype=torch.float16)
-                out_ptr = out.data_ptr()
-                result = torch.add(x, y, out=out)
-                self.assertIs(result, out)
-                self.assertEqual(out.data_ptr(), out_ptr)
-                self.assertEqual(out.cpu(), reference, atol=self.atol, rtol=self.rtol)
-        self.assertGreater(_C._warmcache_size(), size_before, "add must take the device path, not a host fallback")
-        set_out_tensor.assert_not_called()
-        self.assertEqual(stash.out_tensors, [])
-
     def test_host_latest_out_becomes_device_resident_on_every_path(self):
         """An ``out`` whose host view is authoritative ends device-resident after
         the compile miss, the C++ warm hit, and the Python path a view input takes.

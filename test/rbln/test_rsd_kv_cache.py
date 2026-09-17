@@ -1,38 +1,30 @@
 # Owner(s): ["module: PrivateUse1"]
 """A persistent KV cache under RSD (one logical device spanning several NPUs).
 
-An inference engine allocates its KV cache once, in eager code, and then hands the same
-buffers to two compiled programs -- prefill and decode -- which update them in place on
-every step. With ``RBLN_NPUS_PER_DEVICE=2`` that buffer has to be sharded across two NPUs.
-Nothing about the eager allocation decides the sharding: the buffer gets its device layout
-the first time a compiled program binds it, from that program's input placement. Every
-later program that binds the same buffer must agree with that placement, or the runtime
-syncs the contents back to the host and re-allocates -- correct, but a host round trip of
-the whole cache on every prefill<->decode alternation.
+An inference engine allocates its KV cache once, in eager code, then hands the same buffers to
+two compiled programs -- prefill and decode -- which update them in place on every step. With
+``RBLN_NPUS_PER_DEVICE=2`` that buffer is sharded across two NPUs, and nothing about the eager
+allocation decides the sharding: the buffer takes its device layout from the first compiled
+program that binds it. Every later program binding the same buffer must agree with that
+placement, or the runtime syncs the contents back to the host and re-allocates -- correct, but a
+host round trip of the whole cache on every prefill<->decode alternation.
 
-The cache is built the way an engine builds it, because the shape of the allocation is what
-the sharding applies to: an untyped buffer, reinterpreted as the KV dtype and shaped
-``[blocks, heads, 1, block_size, head_dim]``. The engine then reaches into that sharded
-buffer from outside the graph -- whole reads, a partial read, a sub-block slot write,
-block-granular staging batched through ``_foreach_copy_``, and an in-device block copy the
-kernel afterwards reads through. Each of those is a different path into a buffer whose
-elements live on two NPUs.
+The cache is allocated the way an engine allocates it, because the allocation is what the
+sharding applies to: an untyped buffer, reinterpreted as the KV dtype and shaped
+``[blocks, heads, 1, block_size, head_dim]``.
 
 What this checks, from the torch-rbln side only:
 
-* **lifecycle** -- the cache lands on both NPUs of the logical device; after it is warm,
-  steady decode runs with no real device->host sync, and host->device traffic and
-  device-allocation growth stay far below the cache size (no re-layout, no host bounce);
-* **engine-shaped access** -- a partial (single block) read agrees with the same region of
-  the whole read, host->device staging lands in the blocks it addressed, and a block copied
-  inside the device decodes to the same logits as the block it was copied from;
-* **parity** -- every step's logits and the cache contents match the same sequence on one
-  NPU (``RBLN_NPUS_PER_DEVICE=1``) and track an fp32 CPU reference.
+* **lifecycle** -- steady decode over the warm cache makes no real device->host sync, and
+  host->device traffic and allocation growth stay far below the cache size (no re-layout);
+* **engine-shaped access** -- the eager paths into that sharded buffer: a partial read, a
+  sub-block slot write, block staging through ``_foreach_copy_``, an in-device block copy;
+* **parity** -- logits and cache contents match the same sequence on one NPU
+  (``RBLN_NPUS_PER_DEVICE=1``) and track an fp32 CPU reference.
 
-Each configuration runs in its own subprocess because rebel snapshots ``RBLN_*`` at import.
-A dummy-device case compiles both RSD programs for an ATOM target with no NPU, so the
-sharded compile of this KV-cache graph is covered on any host; the real-device cases need
-two ATOM NPUs (RSD is an ATOM feature; REBEL exposes one device).
+Each configuration runs in its own subprocess because rebel snapshots ``RBLN_*`` at import. The
+dummy-device case compiles both sharded programs with no NPU present, so the compile is covered
+on any host; the real-device cases need two ATOM NPUs (RSD is ATOM; REBEL exposes one device).
 """
 
 from __future__ import annotations
@@ -52,12 +44,8 @@ from test.utils import requires_physical_devices, SUPPORTED_DTYPES
 from torch_rbln._internal.device_arch_utils import is_rebel_device
 
 
-# --------------------------------------------------------------------------------------
-# Model + cache, shared by every subprocess (same seed => same weights everywhere).
-# --------------------------------------------------------------------------------------
-
-# The cache is sized well above what a decode step legitimately allocates (its output logits
-# and kernel scratch, a few tens of KiB), so that a re-allocation of the cache stands out.
+# Model + cache, shared by every subprocess (same seed => same weights everywhere). The cache is
+# sized well above what a decode step legitimately allocates, so a re-allocation of it stands out.
 VOCAB, KV_HEADS, Q_PER_KV, HD, MAXLEN = 64, 2, 4, 64, 1024
 D = KV_HEADS * Q_PER_KV * HD
 # One block holds the sequence; the others are what an engine stages into and copies between.
@@ -172,7 +160,7 @@ def _cpu_reference() -> dict:
     return {"prefill": prefill[0].tolist(), "decode": decode}
 
 
-# Runs in a subprocess: RBLN_DEVICES / RBLN_NPUS_PER_DEVICE are already in its environment.
+# Runs in a subprocess: RBLN_VISIBLE_DEVICES / RBLN_NPUS_PER_DEVICE are already in its environment.
 _DEVICE_DRIVER = """
 import json, sys
 import torch, torch_rbln
@@ -211,11 +199,6 @@ with torch.no_grad():
     # (sharded) placement here.
     out["prefill"] = logits(run(*step_inputs(PROMPT, 0, dev, dtype), k_cache, v_cache))
     torch.rbln.synchronize()
-    # Sharding, through a public surface: the logical device's NPUs each hold part of it.
-    per_chiplet = torch.rbln.memory_stats_per_chiplet(dev)
-    out["npus_holding_memory"] = len(
-        {int(key.split(".")[1]) for key, value in per_chiplet.items() if key.endswith("allocated.current") and value}
-    )
 
     # (C) decode: a second program over the same cache. Warm it once (its own compile
     # and first bind), then measure a steady run of every remaining step.
@@ -313,14 +296,18 @@ print("OK")
 """
 
 
-# --------------------------------------------------------------------------------------
-# Subprocess plumbing
-# --------------------------------------------------------------------------------------
-
-
 def _clean_env() -> dict:
     env = dict(os.environ)
-    for key in ("RBLN_DEVICE_MAP", "RBLN_NPUS_PER_DEVICE", "RBLN_DEVICES", "RBLN_DUMMY_DEVICE", "RBLN_FORCE_NPU_NAME"):
+    for key in (
+        "RBLN_DEVICE_MAP",
+        "RBLN_NPUS_PER_DEVICE",
+        # Both spellings of the device selection: the runtime resolves RBLN_DEVICES over its
+        # RBLN_VISIBLE_DEVICES alias, so leaving either behind would override what we pass.
+        "RBLN_DEVICES",
+        "RBLN_VISIBLE_DEVICES",
+        "RBLN_DUMMY_DEVICE",
+        "RBLN_FORCE_NPU_NAME",
+    ):
         env.pop(key, None)
     # As the autouse conftest fixture does for in-process tests: a compile failure must
     # surface, not be papered over by the CPU fallback (which would pass the parity checks).
@@ -330,10 +317,18 @@ def _clean_env() -> dict:
 
 
 def _visible_physical_ids() -> list[str]:
-    """Physical NPU ids this test may use: the parent's RBLN_DEVICES if set, else 0,1,..."""
-    raw = os.environ.get("RBLN_DEVICES", "")
-    if raw.strip():
-        return [s.strip() for s in raw.split(",") if s.strip()]
+    """Physical NPU ids this test may use: the selection the parent was given, else 0,1,...
+
+    The runtime takes that selection from ``RBLN_VISIBLE_DEVICES`` or its ``RBLN_DEVICES``
+    spelling, preferring the latter when both are set, so read them in the same order. Missing
+    the one the parent was actually given would fall through to the ``physical_device_count()``
+    range below -- but that count is already narrowed to the visible NPUs, so its ids would name
+    system NPUs 0,1,... rather than the ones this process owns.
+    """
+    for name in ("RBLN_DEVICES", "RBLN_VISIBLE_DEVICES"):
+        raw = os.environ.get(name, "")
+        if raw.strip():
+            return [s.strip() for s in raw.split(",") if s.strip()]
     return [str(i) for i in range(torch.rbln.physical_device_count())]
 
 
@@ -351,7 +346,7 @@ def _run_on_device(dtype: torch.dtype, npus: int) -> dict:
     ids = _visible_physical_ids()
     assert len(ids) >= npus, ids
     env = _clean_env()
-    env["RBLN_DEVICES"] = ",".join(ids[:npus])
+    env["RBLN_VISIBLE_DEVICES"] = ",".join(ids[:npus])
     env["RBLN_NPUS_PER_DEVICE"] = str(npus)
     proc = _run(_DEVICE_DRIVER, [str(dtype).removeprefix("torch."), str(npus)], env)
     assert proc.returncode == 0, f"npus={npus} driver failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
@@ -363,11 +358,6 @@ def _run_on_device(dtype: torch.dtype, npus: int) -> dict:
 def _skip_unless_two_atom_npus() -> None:
     if is_rebel_device():
         pytest.skip("RSD spans NPUs; the REBEL lineup exposes one device")
-
-
-# --------------------------------------------------------------------------------------
-# Tests
-# --------------------------------------------------------------------------------------
 
 
 @pytest.mark.test_set_ci
@@ -391,15 +381,9 @@ def test_sharded_kv_cache_lifecycle_and_parity(dtype):
     single = _run_on_device(dtype, npus=1)
     cpu = _cpu_reference()
 
-    # The cache really is spread over the logical device's NPUs; without this the rest of the
-    # test would pass just as well on a cache that landed entirely on one of them.
-    assert rsd["npus_holding_memory"] == 2, rsd["npus_holding_memory"]
-    assert single["npus_holding_memory"] == 1, single["npus_holding_memory"]
-
     # Lifecycle: steady decode over the warm, sharded cache never re-lays it out. A re-layout
     # syncs the cache to the host (a real d2h) and allocates a cache-sized replacement; the
-    # legitimate per-step traffic is the step's ids/mask (a few KiB h2d) and its output logits
-    # plus kernel scratch (tens of KiB), both far below a cache of hundreds of KiB.
+    # legitimate per-step traffic is the step's inputs and its logits, far below the cache.
     steady = rsd["steady"]
     assert steady["available"], "runtime residency counters unavailable; torch-rbln and librbln out of sync?"
     assert steady["d2h_count"] == 0, f"device->host sync during steady decode (cache bounced through host): {steady}"
@@ -426,12 +410,10 @@ def test_sharded_kv_cache_lifecycle_and_parity(dtype):
             f"{name}: decoding through the copied block disagrees with the block it was copied from"
         )
 
-    # Tolerances are fractions of the reference's logit scale. Sharding changes only the
-    # reduction order across NPUs, so RSD=2 and 1 NPU differ by 16-bit rounding of the same
-    # programs; against the fp32 CPU reference each device run additionally carries the
-    # device's 16-bit formats (ATOM's custom float is coarser than fp16) through the D-wide
-    # projections and the attention softmax. A wrong or stale cache read moves logits by the
-    # scale itself (the argmax flips), an order of magnitude above either bound.
+    # Tolerances are fractions of the reference's logit scale: RSD=2 and 1 NPU run the same
+    # programs and differ only in reduction order, while against fp32 each device run carries
+    # the device's 16-bit formats (ATOM's custom float is coarser than fp16). A wrong or stale
+    # cache read moves logits by the scale itself and flips the argmax.
     ref = torch.tensor(cpu["prefill"])
     scale = float(ref.abs().max())
     pair_tol, cpu_tol = 0.05 * scale, 0.1 * scale

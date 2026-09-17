@@ -42,7 +42,7 @@ uv run --no-sync pytest test/rbln/test_<module>.py -x
 uv run --no-sync python test/run_tests.py --suite=core
 ```
 
-Include the command and its result in your reply. "Should pass" is not a result. If you could not run them, say that instead of implying you did.
+Include the command, its result, and the collected count in your reply. "Should pass" is not a result, and neither is exit code 0 from a run that collected nothing. If you could not run them, say that instead of implying you did. On a host without an NPU, say which of these ran under `RBLN_DUMMY_DEVICE=1` — that covers construction, copies, and compile-only, not numerics (`AGENTS.md`, Know where you are).
 
 For a change to an op or a kernel, confirm the tests exercised the device path and not the host fallback — matching numbers alone do not show it. `.claude/skills/writing-tests/SKILL.md` has the check.
 
@@ -63,7 +63,7 @@ General:
 
 - **Files nobody asked for** — docs, examples, scripts, changelogs
 - **Scratch files** left over from iterating, anywhere in the tree
-- **Single-use helpers** that should be inlined
+- **Helpers that only shorten one call site** — keep one that names a condition or owns a resource lifetime
 - **Abstractions** built for one call site
 - **Comments that narrate the code**, describe your changes, or address the reader
 - **Comments added to code you did not otherwise change**
@@ -97,6 +97,7 @@ torch-rbln specific:
 State it explicitly, every time:
 
 - Tests you could not run, and why
+- Which host verified it — source only, build host with dummy mode, or an NPU — and what that host could not cover
 - Hardware, devices, or models you did not have
 - Assumptions you could not verify
 - Parts of the request you left out
