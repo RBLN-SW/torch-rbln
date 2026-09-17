@@ -70,21 +70,25 @@ class TestCausalLMBase(TestCase):
         device: torch.device,
     ):
         """Load a causal language model and prepare tokenized inputs on the given device."""
+        # The pinned transformers takes ``torch_dtype``; the rename to ``dtype`` lands in a
+        # later 4.x. Cases keep spelling it ``dtype``, so translate once here.
+        load_kwargs = dict(config_kwargs)
+        load_kwargs["torch_dtype"] = load_kwargs.pop("dtype")
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
             ignore_mismatched_sizes=True,
-            **config_kwargs,
+            **load_kwargs,
         )
         model.to(device)
         _slice_lm_head_to_last_token(model)
-        self.assertEqual(model.config.dtype, config_kwargs["dtype"])
+        self.assertEqual(model.config.torch_dtype, config_kwargs["dtype"])
         self.assertEqual(model.config._attn_implementation, config_kwargs["attn_implementation"])
         self.assertEqual(model.config.num_hidden_layers, config_kwargs["num_hidden_layers"])
 
         tokenizer = AutoTokenizer.from_pretrained(
             model_id,
             padding_side="left",
-            **config_kwargs,
+            **load_kwargs,
         )
         tokenizer.pad_token = tokenizer.eos_token
         tokenizer.pad_token_id = 0
@@ -334,6 +338,78 @@ class TestCausalLM(TestCausalLMBase):
         self._assert_logits_match_fp32("Qwen/Qwen2.5-1.5B-Instruct", config_kwargs, batch_size, seq_len)
 
 
+@pytest.mark.single_worker
+class TestCausalLMGraph(TestCausalLMBase):
+    """Run a causal language model through ``torch.compile(backend="rbln")``.
+
+    TestCausalLM compiles one program per operator, as eager dispatch reaches it.
+    This compiles the whole forward as a single program -- the path the RBLN PyTorch
+    tutorial takes, and the only one where a graph-level break shows up.
+
+    One model at one shape, over both attention implementations, which are the axis
+    that changes the traced graph rather than its geometry. Failures here are graph
+    failures; the shape and dtype grids stay in TestCausalLM.
+
+    A compile that fails does not raise on its own -- it falls back to CPU and returns
+    the right logits. conftest's autouse ``disable_compile_error_fallback`` is what
+    turns that back into an error, and without it these cases would pass while graph
+    mode was broken.
+    """
+
+    @pytest.mark.usefixtures("enable_deploy_mode")
+    @dtypes(*SUPPORTED_DTYPES)
+    @parametrize("attn_implementation", TestCausalLMBase.attn_implementations)
+    @parametrize("batch_size,seq_len", [subtest((1, 128), decorators=[pytest.mark.test_set_ci])])
+    def test_llama(self, dtype, attn_implementation, batch_size, seq_len):
+        # Same ATOM gate as _assert_logits_match_fp32: the causal mask's finfo.min
+        # overflows the device's custom float there and wipes out eager attention.
+        if is_atom_device() and dtype is torch.bfloat16 and attn_implementation == "eager":
+            self.skipTest("bfloat16 x eager attention on ATOM: see test/rbln/test_bf16_range.py")
+
+        config_kwargs = dict(
+            dtype=dtype,
+            attn_implementation=attn_implementation,
+            num_hidden_layers=self.num_hidden_layers,
+        )
+        model, inputs = self._prepare_model_and_inputs(
+            "meta-llama/Llama-3.2-1B", config_kwargs, batch_size, seq_len, self.rbln_device
+        )
+
+        with torch.inference_mode():
+            # Reference before the graph: running the graph first re-lays out the weights
+            # for its own input layout, and a bfloat16 eager matmul on them then fails to
+            # bind (RUN_INTERNAL). Taking the reference first keeps this a graph test.
+            eager_logits = model(**inputs).logits
+
+            # explain()['recompiles'] counts eager warm-cache misses, not backend rebuilds.
+            with torch.rbln.capture_programs() as warmup_programs:
+                compiled = torch.compile(model, backend="rbln", dynamic=False)
+                compiled(**inputs)
+            self.assertGreater(len(warmup_programs), 0, "warmup built no rbln program")
+            with torch.rbln.capture_programs() as replay_programs:
+                with torch.rbln.explain() as steady:
+                    graph_logits = compiled(**inputs).logits
+            self.assertEqual(
+                len(replay_programs),
+                0,
+                "the measured call rebuilt an rbln program instead of replaying",
+            )
+
+        # A graph that silently fell back to CPU, or recompiled on every call, still
+        # returns the right logits -- assert the program actually ran on the device.
+        verdict = steady.verdict()
+        self.assertEqual(verdict["cpu_fallbacks"], 0, steady.report())
+        self.assertEqual(verdict["recompiles"], 0, steady.report())
+
+        # Only the last position is comparable: the left padding carries the causal mask's
+        # minimum through lm_head, and those positions come back inf in both runs.
+        graph_last = graph_logits[:, -1]
+        eager_last = eager_logits[:, -1]
+        self.assertTrue(bool(torch.isfinite(graph_last).all()), graph_last)
+        self.assertTrue(bool(torch.isfinite(eager_last).all()), eager_last)
+        self.assertEqual(graph_last.argmax(-1), eager_last.argmax(-1))
+
+
 @pytest.mark.test_set_perf
 @pytest.mark.single_worker
 class TestCausalLMPerf(TestCausalLMBase):
@@ -474,6 +550,7 @@ class TestCausalLMPerf(TestCausalLMBase):
 
 
 instantiate_device_type_tests(TestCausalLM, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestCausalLMGraph, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestCausalLMPerf, globals(), only_for="privateuse1")
 
 

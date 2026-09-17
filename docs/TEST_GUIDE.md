@@ -17,7 +17,7 @@ Make sure you are in a virtual environment with `torch-rbln` installed. If you i
 This installs:
 - **Test runner:** [`pytest`](https://docs.pytest.org/), [`pytest-xdist`](https://pytest-xdist.readthedocs.io/) (parallel execution)
 - **Test infra:** [`expecttest`](https://github.com/ezyang/expecttest) (required by `torch.testing._internal`)
-- **Model-test dependencies:** transformers 4, pandas
+- **Model-test dependencies:** transformers 4.49.0 (the version the RBLN PyTorch tutorial pins), pandas
 
 Model tests may also require access to external model artifacts. In many OSS
 environments they are best treated as optional/manual rather than baseline
