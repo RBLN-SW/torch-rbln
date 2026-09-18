@@ -2,6 +2,7 @@
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNHostBatch.h>
 #include <c10/rbln/RBLNLogging.h>
+#include <c10/rbln/RBLNPinnedAllocator.h>
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/detail/RBLNCopyBatchImpl.h>
 
@@ -14,10 +15,10 @@ namespace c10::rbln {
 
 namespace {
 
-// Work one bulk call may carry. Past it the job never completes: the device
-// reports SYS_KERNEL_TIMEOUT and cancels the context, so the per-entry retry
-// below cannot recover either. Measured on lmcache's D2H store, 24 entries /
-// 12 MiB pass and 32 / 16 MiB start timing out.
+// Caps for *pageable* host memory: the kernel pins every raw host operand at
+// rblnEndCommandBuffer(), and more than this per CB hits SYS_KERNEL_TIMEOUT (measured:
+// 24 entries / 12 MiB pass, 32 / 16 MiB time out). Pinned memory is exempt -- it is
+// addressed by device VA, and one call lets the runtime coalesce descriptors.
 constexpr size_t kMaxBulkEntries = 16;
 constexpr size_t kMaxBulkBytes = size_t{8} * 1024 * 1024;
 
@@ -53,16 +54,26 @@ void submit_one_call(const std::vector<Desc>& group, const char* who, const Bulk
 /**
  * @brief Flush one homogeneous group, in as few bulk calls as the cap allows.
  */
-template <typename Desc, typename BulkFn, typename OneFn>
-void flush_group(const std::vector<Desc>& group, const char* who, const BulkFn& bulk, const OneFn& one) {
+template <typename Desc, typename HostFn, typename BulkFn, typename OneFn>
+void flush_group(
+    const std::vector<Desc>& group,
+    const char* who,
+    const HostFn& host_of,
+    const BulkFn& bulk,
+    const OneFn& one) {
   if (group.empty()) {
     return;
   }
   size_t total = 0;
+  bool all_pinned = true;
   for (const auto& e : group) {
     total += e.nbytes;
+    all_pinned = all_pinned && is_pinned_ptr(host_of(e));
   }
-  if (group.size() <= kMaxBulkEntries && total <= kMaxBulkBytes) {
+  if (all_pinned || (group.size() <= kMaxBulkEntries && total <= kMaxBulkBytes)) {
+    if (all_pinned && (group.size() > kMaxBulkEntries || total > kMaxBulkBytes)) {
+      RBLN_LOG_DEBUG("{}::submit {} pinned entries / {} bytes in one call (cap waived)", who, group.size(), total);
+    }
     submit_one_call(group, who, bulk, one);
     return;
   }
@@ -104,16 +115,17 @@ void flush_group(const std::vector<Desc>& group, const char* who, const BulkFn& 
  *
  * @param device_of Returns the anchoring (device-side) pointer of an entry.
  */
-template <typename Desc, typename AnchorFn, typename BulkFn, typename OneFn>
+template <typename Desc, typename AnchorFn, typename HostFn, typename BulkFn, typename OneFn>
 void submit_grouped(
     detail::BatchState<Desc>& st,
     const char* who,
     const AnchorFn& device_of,
+    const HostFn& host_of,
     const BulkFn& bulk,
     const OneFn& one) {
   if (st.homogeneous) {
     RBLN_LOG_DEBUG("{}::submit draining {} entries (single device)", who, st.pending.size());
-    flush_group(st.pending, who, bulk, one);
+    flush_group(st.pending, who, host_of, bulk, one);
     return;
   }
   // Ordered so submit order is deterministic by device index.
@@ -124,7 +136,7 @@ void submit_grouped(
   RBLN_LOG_DEBUG(
       "{}::submit draining {} entries across {} devices (split submit)", who, st.pending.size(), by_device.size());
   for (const auto& [dev, group] : by_device) {
-    flush_group(group, who, bulk, one);
+    flush_group(group, who, host_of, bulk, one);
   }
 }
 
@@ -177,6 +189,7 @@ void H2VBatch::submit() {
       impl_->st,
       kH2VWho,
       [](const H2VCopyOp& e) { return e.dst; },
+      [](const H2VCopyOp& e) { return e.src; },
       [](const std::vector<H2VCopyOp>& g) { memcpy_h2v_multi(g); },
       [](const H2VCopyOp& e) { memcpy_h2v(e.dst, e.src, e.nbytes); });
 }
@@ -229,6 +242,7 @@ void V2HBatch::submit() {
       impl_->st,
       kV2HWho,
       [](const V2HCopyOp& e) { return e.src; },
+      [](const V2HCopyOp& e) { return e.dst; },
       [](const std::vector<V2HCopyOp>& g) { memcpy_v2h_multi(g); },
       [](const V2HCopyOp& e) { memcpy_v2h(e.dst, e.src, e.nbytes); });
 }
