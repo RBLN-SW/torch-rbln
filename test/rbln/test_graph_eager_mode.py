@@ -8,7 +8,7 @@ import pytest
 import torch
 import torch.nn as nn
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
-from torch.testing._internal.common_utils import run_tests, TestCase
+from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
 from test.utils import SUPPORTED_DTYPES
 
@@ -152,6 +152,82 @@ class TestGraphEagerMode(TestCase):
     """Test cases for graph mode and eager mode compatibility with rbln backend."""
 
     rbln_device = torch.device("rbln:0")
+
+    # Wide enough for the operator to reach the device. Below 64 it is host-scheduled,
+    # binds no device buffer, and cannot exercise the weight's device residency at all --
+    # which is why this file's other cases, at [4, 4] to [8, 32], never reach this path.
+    device_width = 128
+
+    def _weight_module(self, use, dtype):
+        """A module whose parameter the graph consumes, in the two shapes that differ.
+
+        ``matmul`` puts the parameter through the compiled matmul; ``elementwise`` keeps
+        it as a bare Parameter in a multiply. The two take different transform chains to
+        the device, so a restore that only handles one would pass the other.
+        """
+        width = self.device_width
+        if use == "matmul":
+            return nn.Linear(width, width, bias=False).to(device=self.rbln_device, dtype=dtype)
+
+        class Scale(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = nn.Parameter(torch.randn(width, dtype=dtype))
+
+            def forward(self, x):
+                return self.w * x
+
+        return Scale().to(device=self.rbln_device, dtype=dtype)
+
+    @pytest.mark.usefixtures("enable_deploy_mode")
+    @dtypes(*SUPPORTED_DTYPES)
+    @parametrize("weight_use", ["matmul", "elementwise"])
+    def test_eager_after_graph_on_the_same_weights(self, dtype, weight_use):
+        """An eager operator on the weights a compiled graph has already run.
+
+        Three conditions have to hold together, and every other case in this file misses
+        at least one: the graph has to run first, the operator has to be wide enough to
+        reach the device, and deploy mode has to be on. The NaN/Inf pre-dispatch scan
+        that deploy mode skips reads the eager input on the host, which happens to
+        restore the weight on its way and hides this entirely.
+
+        The second eager call is not redundant: a weight restored into a state that is
+        right once and wrong afterwards would pass with a single call.
+        """
+        model = self._weight_module(weight_use, dtype)
+        x = torch.randn([1, self.device_width, self.device_width], dtype=dtype, device=self.rbln_device)
+
+        cpu_reference = model.cpu()(x.cpu()).float()
+        model.to(self.rbln_device)
+
+        graph_out = torch.compile(model, backend="rbln", dynamic=False)(x)
+        first_eager = model(x)
+        second_eager = model(x)
+
+        self.assertEqual(graph_out.cpu(), first_eager.cpu(), atol=ATOL, rtol=RTOL)
+        self.assertEqual(first_eager.cpu(), second_eager.cpu(), atol=0, rtol=0)
+        # Against a host reference too: comparing only against the graph would accept a
+        # restore that hands both of them the same wrong bytes.
+        self.assertEqual(first_eager.cpu().float(), cpu_reference, atol=ATOL, rtol=RTOL)
+
+    @pytest.mark.usefixtures("enable_deploy_mode")
+    @dtypes(*SUPPORTED_DTYPES)
+    def test_graph_still_runs_after_eager_touched_its_weights(self, dtype):
+        """The graph has to keep working once an eager operator has taken the weights back.
+
+        Restoring a weight for the eager path moves where its data lives. This asserts the
+        move leaves the compiled program able to run again, which the eager-only case above
+        does not cover.
+        """
+        model = self._weight_module("matmul", dtype)
+        x = torch.randn([1, self.device_width, self.device_width], dtype=dtype, device=self.rbln_device)
+        compiled = torch.compile(model, backend="rbln", dynamic=False)
+
+        before = compiled(x)
+        model(x)  # eager takes the weights back
+        after = compiled(x)
+
+        self.assertEqual(before.cpu(), after.cpu(), atol=0, rtol=0)
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_mixed_graph_eager_operations(self, dtype):
