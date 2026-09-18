@@ -54,7 +54,11 @@ class TestCausalLMBase(TestCase):
     num_hidden_layers = 1
     attn_implementations = ["eager", "sdpa"]
     batch_sizes = [1, 2, 4]
-    seq_lens = [16, 128, 1024]
+    # No 16: the SDPA kernel needs both sequence dimensions aligned
+    # (``sdpa.py:_RBLN_SDPA_SHAPE_ALIGNMENT``) and a 16-token shape is not, so it takes the CPU
+    # fallback and measures CPU attention rather than the device. Restore it once the kernel
+    # pads instead of falling back.
+    seq_lens = [128, 1024]
     max_new_tokens = 2  # Run prefill & decode phase once each.
 
     # Pin the EXAONE HF revision (shared by every EXAONE test here, incl. TestCausalLMPerf)
@@ -196,7 +200,7 @@ class TestCausalLMBase(TestCase):
 def _small_model_cover_array(full_matrix_at=None, skip_shapes=()):
     """Strength-2 (pairwise) covering array over dtype x attn x (batch, seq) for a small model.
 
-    The full 4-way cross product (2 dtype x 2 attn x 9 shapes = 36 cases/model) re-runs paths the
+    The full 4-way cross product (2 dtype x 2 attn x 6 shapes = 24 cases/model) re-runs paths the
     op-level and CI tests already cover point-by-point. This replaces it with an array of one row
     per dtype at each shape, rotating the dtype<->attn pairing across shapes, which guarantees:
 
@@ -209,7 +213,7 @@ def _small_model_cover_array(full_matrix_at=None, skip_shapes=()):
 
     Dropped are the 3-/4-way interactions, and the duplication between the two small models at
     the shapes that dominate the run: a case at seq 1024 costs an order of magnitude more than
-    one at seq 16, so ``skip_shapes`` lets one small model carry the expensive shapes for both,
+    one at seq 128, so ``skip_shapes`` lets one small model carry the expensive shapes for both,
     and lets the widest batch sit on the large models instead of on every model.
 
     ``full_matrix_at`` names the one shape that also gets the full dtype x attn matrix and the
@@ -335,6 +339,13 @@ class TestCausalLM(TestCausalLMBase):
             num_hidden_layers=self.num_hidden_layers,
             sliding_window=0,  # Disable sliding window attention.
         )
+        # Qwen2.5's Q @ K^T overflows float16, and eager runs that matmul in float16: every
+        # logit comes back NaN, on CPU as much as on RBLN. The isfinite guard in
+        # _assert_logits_match_fp32 already ends these in a skip, but only after loading the
+        # model; naming the combination keeps it visible. sdpa computes the matmul in float32.
+        if dtype is torch.float16 and attn_implementation == "eager":
+            self.skipTest("Qwen2.5 float16 x eager: Q @ K^T overflows float16 (NaN on CPU too)")
+
         self._assert_logits_match_fp32("Qwen/Qwen2.5-1.5B-Instruct", config_kwargs, batch_size, seq_len)
 
 
