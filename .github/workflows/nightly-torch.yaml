@@ -109,10 +109,12 @@ jobs:
       - name: Build wheel
         env:
           TORCH_RBLN_BUILD_TYPE: Release
-          UV_INDEX: rbln=${{ secrets.INTERNAL_INDEX_URL }}
-          UV_INDEX_RBLN_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
-          UV_INDEX_RBLN_PASSWORD: ${{ secrets.INTERNAL_INDEX_PASSWORD }}
-          UV_BUILD_CONSTRAINT: constraints-build-dev.txt
+          UV_INDEX_RBLN_USERNAME: ${{ secrets.RBLN_INDEX_USERNAME }}
+          UV_INDEX_RBLN_PASSWORD: ${{ secrets.RBLN_INDEX_PASSWORD }}
+          UV_INDEX_RBLN_NIGHTLY_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          UV_INDEX_RBLN_NIGHTLY_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+          UV_INDEX_RBLN_INTERNAL_USERNAME: ${{ secrets.RBLN_INDEX_USERNAME }}
+          UV_INDEX_RBLN_INTERNAL_PASSWORD: ${{ secrets.RBLN_INDEX_PASSWORD }}
         run: |
           set -euo pipefail
 
@@ -127,8 +129,8 @@ jobs:
 
           uv build --wheel
 
-      - name: Read built wheel version
-        id: read_version
+      - name: Read built wheel
+        id: read_built_wheel
         run: |
           set -euo pipefail
 
@@ -139,34 +141,38 @@ jobs:
             echo "::error::Expected exactly one wheel in dist/, found ${#wheels[@]}: ${wheels[*]}"
             exit 1
           fi
+          wheel="${wheels[0]}"
 
-          version="$(basename "${wheels[0]}" | cut -d- -f2)"
+          version="$(basename "${wheel}" | cut -d- -f2)"
+          echo "wheel=${wheel}" >> "${GITHUB_OUTPUT}"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
-          echo "::notice::Built torch-rbln==${version}"
+          echo "::notice::Built torch-rbln==${version} (${wheel})"
 
       - name: Install the wheel into a clean environment
         env:
-          UV_INDEX: ${{ env.PYTORCH_NIGHTLY_INDEX_URL }} rbln=${{ secrets.INTERNAL_INDEX_URL }}
-          UV_INDEX_STRATEGY: unsafe-best-match
-          UV_INDEX_RBLN_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
-          UV_INDEX_RBLN_PASSWORD: ${{ secrets.INTERNAL_INDEX_PASSWORD }}
+          TORCH_RBLN_WHEEL: ${{ steps.read_built_wheel.outputs.wheel }}
+          UV_INDEX: pytorch-nightly-cpu=${{ env.PYTORCH_NIGHTLY_INDEX_URL }}
+          UV_INDEX_RBLN_USERNAME: ${{ secrets.RBLN_INDEX_USERNAME }}
+          UV_INDEX_RBLN_PASSWORD: ${{ secrets.RBLN_INDEX_PASSWORD }}
+          UV_INDEX_RBLN_NIGHTLY_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          UV_INDEX_RBLN_NIGHTLY_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+          UV_INDEX_RBLN_INTERNAL_USERNAME: ${{ secrets.RBLN_INDEX_USERNAME }}
+          UV_INDEX_RBLN_INTERNAL_PASSWORD: ${{ secrets.RBLN_INDEX_PASSWORD }}
         run: |
           set -euo pipefail
 
           uv venv "${TEST_VENV}"
           uv pip install \
             --python "${TEST_VENV}/bin/python" \
-            --constraint constraints-build-dev.txt \
-            rebel-compiler \
             expecttest \
             numpy \
             pytest \
             pytest-xdist \
-            dist/*.whl
+            "${TORCH_RBLN_WHEEL}[runtime]"
 
       - name: Smoke-test the installed wheel
         env:
-          TORCH_RBLN_VERSION: ${{ steps.read_version.outputs.version }}
+          TORCH_RBLN_VERSION: ${{ steps.read_built_wheel.outputs.version }}
           TORCH_VERSION: ${{ steps.resolve_torch_version.outputs.target_version }}
           RBLN_DUMMY_DEVICE: '1'
         run: |
@@ -225,7 +231,7 @@ jobs:
         if: ${{ always() }}
         env:
           TORCH_VERSION: ${{ steps.resolve_torch_version.outputs.target_version }}
-          TORCH_RBLN_VERSION: ${{ steps.read_version.outputs.version }}
+          TORCH_RBLN_VERSION: ${{ steps.read_built_wheel.outputs.version }}
           PYTHON_VERSION: ${{ inputs.python_version || '3.12' }}
           JOB_STATUS: ${{ job.status }}
         run: |

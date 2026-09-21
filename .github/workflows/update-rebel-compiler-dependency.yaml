@@ -46,9 +46,9 @@ jobs:
       - name: Resolve rebel-compiler version
         id: resolve_rebel_compiler_version
         env:
-          UV_INDEX: rebel-compiler=https://nexus.mgmt.rbln.in/repository/pypi-compiler-nightly-prod/simple/
-          UV_INDEX_REBEL_COMPILER_USERNAME: ${{ secrets.REBEL_COMPILER_INDEX_USERNAME }}
-          UV_INDEX_REBEL_COMPILER_PASSWORD: ${{ secrets.REBEL_COMPILER_INDEX_PASSWORD }}
+          UV_INDEX: rbln-nightly=https://nexus.mgmt.rbln.in/repository/pypi-group-nightly/simple/
+          UV_INDEX_RBLN_NIGHTLY_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          UV_INDEX_RBLN_NIGHTLY_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
           REBEL_COMPILER_VERSION: ${{ inputs.rebel_compiler_version }}
         run: |
           set -euo pipefail
@@ -58,8 +58,9 @@ jobs:
             manual_override=true
             echo "::notice::Using explicitly requested rebel-compiler version: ${target_version}"
           else
+            # Without --no-config, the constraint pins this to the current build.
             target_version="$(printf 'rebel-compiler\n' \
-              | uv pip compile - --no-deps --prerelease allow --no-header --no-annotate \
+              | uv pip compile - --no-deps --prerelease allow --no-header --no-annotate --no-config \
               | sed -n 's/^rebel-compiler==//p')"
             if [[ -z "${target_version}" ]]; then
               echo "::error::Failed to resolve rebel-compiler from the index"
@@ -78,23 +79,23 @@ jobs:
           ref: ${{ env.TARGET_BRANCH }}
           persist-credentials: false
 
-      - name: Update rebel-compiler pin if outdated
-        id: update_rebel_compiler_pin
+      - name: Check whether rebel-compiler pin is outdated
+        id: check_rebel_compiler_pin
         env:
           TARGET_VERSION: ${{ steps.resolve_rebel_compiler_version.outputs.target_version }}
           MANUAL_OVERRIDE: ${{ steps.resolve_rebel_compiler_version.outputs.manual_override }}
         run: |
           set -euo pipefail
 
-          count=$(grep -cE '^rebel-compiler==' constraints-build-dev.txt || true)
-          if [[ "${count}" -ne 1 ]]; then
-            echo "::error::Expected exactly 1 'rebel-compiler==' line, found ${count}"
-            exit 1
-          fi
-
-          current_version=$(grep -E '^rebel-compiler==' constraints-build-dev.txt | sed 's/^rebel-compiler==//')
+          current_version="$(uv run --no-config tools/pin_rebel_compiler.py --current)"
           echo "::notice::Target rebel-compiler version:  ${TARGET_VERSION}"
           echo "::notice::Current rebel-compiler version: ${current_version}"
+
+          if [[ "${MANUAL_OVERRIDE}" != "true" && "${TARGET_VERSION}" != *prod ]]; then
+            echo "::warning::Latest rebel-compiler '${TARGET_VERSION}' is not a production build; skipping the update"
+            echo "changed=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
 
           if [[ "${current_version}" == "${TARGET_VERSION}" ]]; then
             echo "::notice::Already pinned to target version. No update required."
@@ -102,42 +103,58 @@ jobs:
             exit 0
           fi
 
-          # A production pin (.prod) holds unless the resolved version is strictly newer;
-          # any other pin, or an explicit manual version, always updates below.
-          if [[ "${MANUAL_OVERRIDE}" != "true" && "${current_version}" == *".prod"* ]]; then
-            if ! CURRENT_VERSION="${current_version}" python3 <<'PY'
-          import os, re, sys
+          if [[ "${MANUAL_OVERRIDE}" != "true" ]]; then
+            target_is_newer="$(
+              uv run --no-config --no-project --with packaging python - "${TARGET_VERSION}" "${current_version}" <<'PY'
+          import sys
 
-          prod_re = re.compile(r"([0-9]+(?:\.[0-9]+)*)\.dev([0-9]+)\+g[0-9a-f]{8}\.prod$")
+          from packaging.version import Version
 
-          def version_key(version):
-              match = prod_re.search(version)
-              return (tuple(int(p) for p in match.group(1).split(".")), int(match.group(2))) if match else None
-
-          target = version_key(os.environ["TARGET_VERSION"])
-          current = version_key(os.environ["CURRENT_VERSION"])
-          sys.exit(0 if target and current and target > current else 1)
+          # The local segment is a git hash, so a rebuild of the same public version is not newer.
+          target, current = (Version(v.split("+", 1)[0]) for v in sys.argv[1:3])
+          print("yes" if target > current else "no")
           PY
-            then
-              echo "::warning::Current production pin '${current_version}' is at or ahead of the resolved version '${TARGET_VERSION}'. No update required."
+            )"
+            if [[ "${target_is_newer}" != "yes" ]]; then
+              echo "::warning::Resolved rebel-compiler '${TARGET_VERSION}' is not newer than the current pin '${current_version}'. No update required."
               echo "changed=false" >> "${GITHUB_OUTPUT}"
               exit 0
             fi
           fi
 
-          sed -i -E "s|^rebel-compiler==.*$|rebel-compiler==${TARGET_VERSION}|" constraints-build-dev.txt
-          cat constraints-build-dev.txt
-
           echo "changed=true" >> "${GITHUB_OUTPUT}"
 
+      - name: Update rebel-compiler pin and uv.lock
+        if: ${{ steps.check_rebel_compiler_pin.outputs.changed == 'true' }}
+        env:
+          TARGET_VERSION: ${{ steps.resolve_rebel_compiler_version.outputs.target_version }}
+          UV_INDEX_RBLN_USERNAME: ${{ secrets.RBLN_INDEX_USERNAME }}
+          UV_INDEX_RBLN_PASSWORD: ${{ secrets.RBLN_INDEX_PASSWORD }}
+          UV_INDEX_RBLN_NIGHTLY_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          UV_INDEX_RBLN_NIGHTLY_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+          UV_INDEX_RBLN_INTERNAL_USERNAME: ${{ secrets.RBLN_INDEX_USERNAME }}
+          UV_INDEX_RBLN_INTERNAL_PASSWORD: ${{ secrets.RBLN_INDEX_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          uv run --no-config tools/pin_rebel_compiler.py "${TARGET_VERSION}"
+          uv lock
+
+          if git diff --quiet -- pyproject.toml uv.lock; then
+            echo "::error::Pinning ${TARGET_VERSION} left pyproject.toml and uv.lock unchanged"
+            exit 1
+          fi
+
       - name: Create or update pull request
-        if: ${{ steps.update_rebel_compiler_pin.outputs.changed == 'true' }}
+        if: ${{ steps.check_rebel_compiler_pin.outputs.changed == 'true' }}
         uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676  # v7.0.11
         env:
           TARGET_VERSION: ${{ steps.resolve_rebel_compiler_version.outputs.target_version }}
         with:
           token: ${{ secrets.GIT_PAT }}
-          add-paths: constraints-build-dev.txt
+          add-paths: |
+            pyproject.toml
+            uv.lock
           commit-message: "chore: update rebel-compiler to ${{ env.TARGET_VERSION }}"
           committer: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>
           author: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>

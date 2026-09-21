@@ -4,15 +4,7 @@ This document explains how to update the versions of third party packages in tor
 The current third party packages are:
 
 - **PyTorch** (for Debug CI builds)
-- **`rebel-compiler`** (build-only; see [PyTorch RBLN — Overview](https://docs.rbln.ai/latest/software/rbln_pytorch/overview.html) and [Installation](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html) for the package and setup; for usage and debugging workflows, see [Running and debugging with PyTorch RBLN](https://docs.rbln.ai/latest/software/rbln_pytorch/tutorial_running_n_debugging.html))
-
-## Common
-
-In order to update the version of third party packages, you edit the following file.
-
-```
-  pyproject.toml / [project] & [build-system] & [dependency-groups].build
-```
+- **`rebel-compiler`** (build dependency and optional dependency under the `runtime` extra)
 
 ## Pytorch
 
@@ -33,6 +25,7 @@ following together:
 | 1 | ```pyproject.toml``` `[project].dependencies` | `torch==X.Y.Z+cpu` |
 | 2 | ```pyproject.toml``` `[build-system].requires` | `torch==X.Y.Z+cpu` |
 | 3 | Upstream files (see below) | Sync from the new tag |
+| 4 | `uv.lock` | Regenerate with `uv lock` |
 
 CI Debug builds automatically derive the PyTorch git tag (`vX.Y.Z`) from the
 ```pyproject.toml``` torch version, so no additional workflow files need updating.
@@ -77,11 +70,33 @@ override it by passing a tag: ```./sync-linter.sh v2.11.0```.
 
 ## Rebel compiler
 
-**`rebel-compiler`** is a **build-only** dependency in this repo. For installation, versioning, and runtime use of the compiler package, follow the **RBLN SDK** documentation:
+**`rebel-compiler`** is a build dependency and an optional dependency under the `runtime` extra. For installation, versioning, and runtime use of the compiler package, follow the **RBLN SDK** documentation:
 
 - [PyTorch RBLN — Installation (quickstart)](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html#install)
 - [PyTorch RBLN — Running and debugging](https://docs.rbln.ai/latest/software/rbln_pytorch/tutorial_running_n_debugging.html)
 
-To bump the **pinned build dependency** in torch-rbln, update the version specifier in **`pyproject.toml`** in both **`[build-system].requires`** and **`[dependency-groups].build`**, and keep them aligned with each other.
+### Version update checklist
 
-> **Note:** The development build constraint is updated automatically by the [`rebel-compiler` dependency update workflow](WORKFLOWS.md#rebel-compiler-dependency-update).
+When updating the `rebel-compiler` build, change **all** of the following together:
+
+| # | Entry                                     | What to change                     |
+|---|-------------------------------------------|------------------------------------|
+| 1 | `[tool.uv].build-constraint-dependencies` | `rebel-compiler==<build>`          |
+| 2 | `[tool.uv].constraint-dependencies`       | `rebel-compiler==<build>`          |
+| 3 | `[project.optional-dependencies].runtime` | `rebel-compiler~=<public version>` |
+| 4 | `uv.lock`                                 | Regenerate with `uv lock`          |
+
+`<build>` is the pinned version with its local segment; `<public version>` is the same without it, because PEP 440 allows no local segment after `~=`.
+
+Run [`tools/pin_rebel_compiler.py`](../tools/pin_rebel_compiler.py) to rewrite the `pyproject.toml` entries, then regenerate the lockfile:
+
+```bash
+uv run tools/pin_rebel_compiler.py <build>
+uv lock
+```
+
+> **Note:** The pin is updated automatically by the [`rebel-compiler` dependency update workflow](WORKFLOWS.md#rebel-compiler-dependency-update).
+
+### Release requirement
+
+Before a final release or a post-release is tagged, the pin must be a released version, and `uv.lock` must record `pypi.rbln.ai` as the source of `rebel-compiler`. Release candidates may keep a development build. If `uv.lock` was generated before the release reached that index, `uv lock` alone keeps the old entry; re-resolve it with `uv lock --upgrade-package rebel-compiler`.

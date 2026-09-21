@@ -25,7 +25,7 @@ PyTorch RBLN is currently in **beta** and under active development. APIs may cha
 ### Prerequisites
 
 - **Python** 3.10–3.14 — see [Installation — Requirements](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html#requirements) (source build).
-- **`rebel-compiler`** — required; **not** installed with **`torch-rbln`**. Use an **[RBLN Portal account](https://docs.rbln.ai/latest/supports/contact_us.html#rbln-portal)** and the RBLN package index as described in [Install pre-built wheels](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html#install).
+- **`rebel-compiler`** — required; **not** installed with **`torch-rbln`** unless you request the **`runtime`** extra (`torch-rbln[runtime]`). Use an **[RBLN Portal account](https://docs.rbln.ai/latest/supports/contact_us.html#rbln-portal)** and the RBLN package index as described in [Install pre-built wheels](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html#install).
 
 ### Install pre-built wheels
 

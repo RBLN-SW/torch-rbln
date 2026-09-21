@@ -23,20 +23,23 @@ on:
       GIT_PAT:
         description: Personal access token
         required: true
-      INTERNAL_INDEX_URL:
-        description: Internal package index URL
-        required: true
-      INTERNAL_INDEX_USERNAME:
-        description: Internal package index username
-        required: true
-      INTERNAL_INDEX_PASSWORD:
-        description: Internal package index password
-        required: true
       HARBOR_USERNAME:
         description: Container registry username
         required: true
       HARBOR_PASSWORD:
         description: Container registry password
+        required: true
+      NEXUS_USERNAME:
+        description: Nexus package index username
+        required: true
+      NEXUS_PASSWORD:
+        description: Nexus package index password
+        required: true
+      RBLN_INDEX_USERNAME:
+        description: RBLN package index username
+        required: true
+      RBLN_INDEX_PASSWORD:
+        description: RBLN package index password
         required: true
 
 permissions:
@@ -93,15 +96,17 @@ jobs:
 
       - name: Install dependencies
         env:
-          UV_INDEX: rbln=${{ secrets.INTERNAL_INDEX_URL }}
-          UV_INDEX_RBLN_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
-          UV_INDEX_RBLN_PASSWORD: ${{ secrets.INTERNAL_INDEX_PASSWORD }}
+          UV_INDEX_RBLN_USERNAME: ${{ secrets.RBLN_INDEX_USERNAME }}
+          UV_INDEX_RBLN_PASSWORD: ${{ secrets.RBLN_INDEX_PASSWORD }}
+          UV_INDEX_RBLN_NIGHTLY_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          UV_INDEX_RBLN_NIGHTLY_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+          UV_INDEX_RBLN_INTERNAL_USERNAME: ${{ secrets.RBLN_INDEX_USERNAME }}
+          UV_INDEX_RBLN_INTERNAL_PASSWORD: ${{ secrets.RBLN_INDEX_PASSWORD }}
         run: |
           set -euo pipefail
 
           # clang-tidy needs the Rebel runtime headers, which ship only in the build-pinned rebel-compiler.
-          uv sync --no-install-project --no-install-package rebel-compiler
-          uv pip install --constraint constraints-build-dev.txt rebel-compiler
+          uv sync --locked --no-install-project
 
       - name: Cache linter binaries
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0

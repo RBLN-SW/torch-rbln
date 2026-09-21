@@ -58,6 +58,8 @@ Release checks run the release test suite against the current `main` commit and 
 
 The release manager runs the release workflow to tag the validated commit. The tag triggers the CD workflow, which builds wheels for all supported Python versions and publishes them to the internal package index first, then to public PyPI.
 
+Before tagging a final release or a post-release, the release manager checks the `rebel-compiler` pin: it must be a released version, and `uv.lock` must record `pypi.rbln.ai` as its source (see [Third-Party Update](THIRD_PARTY_UPDATE.md#release-requirement)).
+
 ### 4. Release notes
 
 The release workflow creates a [GitHub Release](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository) for the tag, with auto-generated notes covering the commits since the previous release. It skips release candidates.

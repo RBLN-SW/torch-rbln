@@ -78,7 +78,7 @@ General:
 
 torch-rbln specific:
 
-- **No stray dependency pin** — `constraints-build-dev.txt` and the `pyproject.toml` rebel-compiler range are not touched by a change that is about something else.
+- **No stray dependency pin** — the `rebel-compiler` pin in `pyproject.toml` and `uv.lock` is not touched by a change that is about something else.
 - **No edits to generated files** — `torch_rbln/_internal/register_ops.py`, `_abi_snapshot.py`, `torch_rbln/lib/`, `torch_rbln/include/`, `torch_rbln/_C/__init__.pyi`. `git status` will not warn you; they are gitignored.
 - **No new CPU fallback case** added to make something pass, and no `TORCH_RBLN_DISABLE_FALLBACK` category changed to move a test outcome.
 - **No workaround for a rebel-compiler or librbln defect.** If there is one, it is declared in the PR body with the upstream issue, and you asked before writing it.

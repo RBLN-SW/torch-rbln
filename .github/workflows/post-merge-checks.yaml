@@ -21,11 +21,12 @@ jobs:
       base_revision: ''
     secrets:
       GIT_PAT: ${{ secrets.GIT_PAT }}
-      INTERNAL_INDEX_URL: ${{ secrets.INTERNAL_INDEX_URL }}
-      INTERNAL_INDEX_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
-      INTERNAL_INDEX_PASSWORD: ${{ secrets.INTERNAL_INDEX_PASSWORD }}
       HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
       HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+      NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+      NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+      RBLN_INDEX_USERNAME: ${{ secrets.RBLN_INDEX_USERNAME }}
+      RBLN_INDEX_PASSWORD: ${{ secrets.RBLN_INDEX_PASSWORD }}
 
   dispatch_event:
     uses: ./.github/workflows/_dispatch-event.yaml

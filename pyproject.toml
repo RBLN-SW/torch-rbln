@@ -22,6 +22,11 @@ dependencies = [
   "torch==2.11.0+cpu"
 ]
 
+[project.optional-dependencies]
+runtime = [
+  "rebel-compiler~=0.11.3.dev530",
+]
+
 [project.entry-points]
 "torch.backends" = {autoload = "torch_rbln:torch_backends_entry_point"}
 
@@ -40,7 +45,7 @@ requires = [
   "cmake>=3.18,<4.0",
   "mypy>=1.13.0,<1.14.0",
   "ninja>=1.11.1.3,<1.11.2",
-  "rebel-compiler>=0.11.2,<0.20.0",
+  "rebel-compiler",  # [tool.uv].build-constraint-dependencies pins the version.
   "torch==2.11.0+cpu"
 ]
 build-backend = "hatchling.build"
@@ -124,26 +129,32 @@ skip-excluded-dirs = true
 # ==============================================================================
 
 [tool.uv]
-# Index strategy: first-index = strict/secure (use first index that has package),
-# unsafe-best-match = find best version across all indexes (potential security risk)
-index-strategy = "first-index"
-
-# Allow pre-release versions only when explicitly specified in dependency specifiers.
-# Normal resolution uses stable versions only; CI pins via replace_depends.py (pyproject.toml) + uv lock when needed.
-prerelease = "if-necessary-or-explicit"
-
-# Package indexes
+# uv build does not read the lockfile, so build-constraint-dependencies pins the build environment.
+# It must match constraint-dependencies, or the extension compiles against one build and loads another.
+build-constraint-dependencies = [
+  "rebel-compiler==0.11.3.dev530+g8bd8b8ac.prod",
+]
+constraint-dependencies = [
+  "rebel-compiler==0.11.3.dev530+g8bd8b8ac.prod",
+]
+# rebel-compiler publishes wheels for Linux only.
+environments = [
+  "sys_platform == 'linux'",
+]
+# The pypi entry is listed first so it outranks the rbln indexes; without it, PyPI ranks last as the implicit default.
 index = [
-  { name = "pypi", url = "https://pypi.org/simple/", default = true },
+  { name = "pypi", url = "https://pypi.org/simple/" },
   { name = "pytorch-cpu", url = "https://download.pytorch.org/whl/cpu", explicit = true },
   { name = "pytorch-nightly-cpu", url = "https://download.pytorch.org/whl/nightly/cpu", explicit = true },
-  { name = "rbln", url = "https://pypi.rbln.ai/simple/", explicit = true },
+  { name = "rbln", url = "https://pypi.rbln.ai/simple/" },
+  { name = "rbln-nightly", url = "https://nexus.mgmt.rbln.in/repository/pypi-group-nightly/simple/" },
+  { name = "rbln-internal", url = "https://pypi.rebellions.in/simple/" },
 ]
+# Nothing pins a package to an index, so the order above decides where each one resolves from.
+index-strategy = "unsafe-first-match"
 
-# Pin packages to specific indexes
 [tool.uv.sources]
 torch = { index = "pytorch-cpu" }
-rebel-compiler = { index = "rbln" }
 
 # ==============================================================================
 # Dependency Groups
@@ -153,7 +164,7 @@ rebel-compiler = { index = "rbln" }
 build = [
   "cmake>=3.18",
   "editables>=0.5",
-  "rebel-compiler>=0.11.2,<0.20.0",
+  "rebel-compiler",  # [tool.uv].constraint-dependencies pins the version.
   "setuptools-scm>=8.0",
   "hatchling>=1.25,<1.32",  # see the build-system pin
   "mypy>=1.13.0,<1.14.0",

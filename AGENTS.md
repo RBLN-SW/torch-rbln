@@ -33,13 +33,13 @@ Two questions come before any change, and getting either wrong wastes the whole 
 
 1. **torch-rbln Python** (`torch_rbln/`) — shims, device and memory APIs, `torch.compile` patches
 2. **torch-rbln C++** (`aten/`, `c10/`, `torch_rbln/csrc/`) — allocator, guard, copy, kernels, process group
-3. **rebel-compiler / librbln** — the compiler and runtime; a separate repository. `pyproject.toml` carries the version range, `constraints-build-dev.txt` the exact dev build pin.
+3. **rebel-compiler / librbln** — the compiler and runtime; a separate repository.
 
 - Say which layer the defect is in, and what the minimal set of changes is, before writing any of them.
 - **Do not work around a layer-3 defect in layer 1 or 2.** A guard that makes a compiler or runtime bug invisible hides it from the team that can fix it and stays here permanently.
 - When it is layer 3: reduce it to a minimal reproducer, report it to the rebel-compiler team, and say so in the PR. If the failure is architecture-specific, `xfail_rebel` / `xfail_atom` (`test/utils.py`) mark it strictly, so it fails again once the bug is fixed. A failure that is not architecture-specific does not get parked — it stays visible.
 - **The boundary runs both ways — before building machinery here, check what the pinned runtime already does.**
-- **Bump the pin when your change needs it; leave it alone when only your experiment did.** Raising `constraints-build-dev.txt` in the PR that requires a newer compiler is normal here — say in the body what the change needs from it. What does not belong is a pin you moved while trying versions, or a local-wheel path some tool wrote into `pyproject.toml`. A scheduled workflow also proposes bumps on its own, so an unexplained one reads as noise. Moving the *range* in `pyproject.toml` is a separate procedure — `docs/THIRD_PARTY_UPDATE.md` owns it and the two places that stay aligned.
+- **Bump the pin when your change needs it; leave it alone when only your experiment did.** Raising the pin in the PR that requires a newer compiler is normal here — say in the body what the change needs from it. Move it with `tools/pin_rebel_compiler.py`, then `uv lock` (`docs/THIRD_PARTY_UPDATE.md`). What does not belong is a pin you moved while trying versions, or a local-wheel path some tool wrote into `pyproject.toml` and `uv.lock`. A scheduled workflow also proposes bumps on its own, so an unexplained one reads as noise.
 - To settle which layer it is, install a different `rebel-compiler` version and rebuild. Building against a compiler source checkout is heavier and mutates this tree — ask first, and use a worktree you can throw away.
 
 **Is this file generated?** These are build outputs; the edit disappears on the next build.
@@ -52,7 +52,7 @@ Two questions come before any change, and getting either wrong wastes the whole 
 
 `register_ops.py` is the one that catches people: every eager shim (`add_rbln`, `mul_rbln`, …), 1400 lines of ordinary-looking Python, gitignored. Fixing an op there works until the next build.
 
-`native_functions.yaml`, `tags.yaml`, and `test/ops/test_ops.py` are adapted from upstream PyTorch; the two YAML files name the upstream tag they came from on their first line. Keep the diff no larger than the change requires, and keep that line true when you re-sync one. A torch version bump moves three things together — `[project].dependencies`, `[build-system].requires`, and these files re-synced from the new tag (`docs/THIRD_PARTY_UPDATE.md`). `tools/linter` is maintained in-tree and refreshed by `sync-linter.sh`; do not copy it from upstream.
+`native_functions.yaml`, `tags.yaml`, and `test/ops/test_ops.py` are adapted from upstream PyTorch; the two YAML files name the upstream tag they came from on their first line. Keep the diff no larger than the change requires, and keep that line true when you re-sync one. A torch version bump lands as one change: `[project].dependencies`, `[build-system].requires`, `uv.lock`, and these files re-synced from the new tag (`docs/THIRD_PARTY_UPDATE.md`). `tools/linter` is maintained in-tree and refreshed by `sync-linter.sh`; do not copy it from upstream.
 
 ## Commands
 
@@ -65,7 +65,7 @@ uv run --no-sync lintrunner -m origin/main -a              # lint and auto-fix w
 uv pip install -e . --no-build-isolation                   # rebuild — see below
 ```
 
-**A change under `aten/`, `c10/`, `torch_rbln/csrc/`, `CMakeLists.txt`, or `native_functions.yaml` does not reach your interpreter until you rebuild.** The build needs `rebel-compiler` present at the pin, installed with `uv pip install --constraint constraints-build-dev.txt rebel-compiler`. A link error naming `rbln::` symbols means the installed one is older than the pin — install the pinned version rather than changing code to match what you have. An `AttributeError` for a missing `torch_rbln._C` attribute means the opposite: the built extension is older than the Python tree, which is what a branch switch leaves behind. An `RBLN ABI mismatch` is a third shape — the snapshot this build recorded and the loaded `librbln.so` disagree.
+**A change under `aten/`, `c10/`, `torch_rbln/csrc/`, `CMakeLists.txt`, or `native_functions.yaml` does not reach your interpreter until you rebuild.** The build needs `rebel-compiler` present at the pin, installed with `uv sync --locked --no-install-project` (`./tools/dev-setup.sh pypi` if you cannot authenticate to the index `uv.lock` names). A link error naming `rbln::` symbols means the installed one is older than the pin — install the pinned version rather than changing code to match what you have. An `AttributeError` for a missing `torch_rbln._C` attribute means the opposite: the built extension is older than the Python tree, which is what a branch switch leaves behind. An `RBLN ABI mismatch` is a third shape — the snapshot this build recorded and the loaded `librbln.so` disagree.
 
 Skip the rebuild and pytest loads the previously built `torch_rbln/_C` and `torch_rbln/lib/*.so`: the run tests the old code and its result means nothing. A bare `ninja -C build` stages nothing into `torch_rbln/`; the install step does. The build needs GCC 13 or newer (`CC=gcc-13 CXX=g++-13`), enforced by `cmake/FindTorch.cmake`.
 
