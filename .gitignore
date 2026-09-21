@@ -24,9 +24,6 @@ __pycache__/
 .eggs/
 .python-version
 
-# Package manager lockfiles
-uv.lock
-
 # Virtual environments
 venv/
 .venv/

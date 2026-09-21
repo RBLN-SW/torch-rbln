@@ -19,20 +19,23 @@ on:
       GIT_PAT:
         description: Personal access token
         required: true
-      INTERNAL_INDEX_URL:
-        description: Internal package index URL
-        required: true
-      INTERNAL_INDEX_USERNAME:
-        description: Internal package index username
-        required: true
-      INTERNAL_INDEX_PASSWORD:
-        description: Internal package index password
-        required: true
       HARBOR_USERNAME:
         description: Container registry username
         required: true
       HARBOR_PASSWORD:
         description: Container registry password
+        required: true
+      NEXUS_USERNAME:
+        description: Nexus package index username
+        required: true
+      NEXUS_PASSWORD:
+        description: Nexus package index password
+        required: true
+      RBLN_INDEX_USERNAME:
+        description: RBLN package index username
+        required: true
+      RBLN_INDEX_PASSWORD:
+        description: RBLN package index password
         required: true
 
 permissions:
@@ -99,10 +102,12 @@ jobs:
       - name: Build wheel
         env:
           TORCH_RBLN_BUILD_TYPE: ${{ inputs.build_type }}
-          UV_INDEX: rbln=${{ secrets.INTERNAL_INDEX_URL }}
-          UV_INDEX_RBLN_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
-          UV_INDEX_RBLN_PASSWORD: ${{ secrets.INTERNAL_INDEX_PASSWORD }}
-          UV_BUILD_CONSTRAINT: constraints-build-dev.txt
+          UV_INDEX_RBLN_USERNAME: ${{ secrets.RBLN_INDEX_USERNAME }}
+          UV_INDEX_RBLN_PASSWORD: ${{ secrets.RBLN_INDEX_PASSWORD }}
+          UV_INDEX_RBLN_NIGHTLY_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          UV_INDEX_RBLN_NIGHTLY_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+          UV_INDEX_RBLN_INTERNAL_USERNAME: ${{ secrets.RBLN_INDEX_USERNAME }}
+          UV_INDEX_RBLN_INTERNAL_PASSWORD: ${{ secrets.RBLN_INDEX_PASSWORD }}
         run: |
           set -euo pipefail
 
@@ -118,8 +123,8 @@ jobs:
 
           uv build --wheel
 
-      - name: Read built wheel version
-        id: read_version
+      - name: Read built wheel
+        id: read_built_wheel
         env:
           PYTHON_VERSION: ${{ inputs.python_version }}
         run: |
@@ -142,26 +147,29 @@ jobs:
             exit 1
           fi
 
+          echo "wheel=${wheel}" >> "${GITHUB_OUTPUT}"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
-          echo "::notice::Built torch-rbln==${version}"
+          echo "::notice::Built torch-rbln==${version} (${wheel})"
 
       - name: Verify the built wheel
         env:
-          TORCH_RBLN_VERSION: ${{ steps.read_version.outputs.version }}
+          TORCH_RBLN_WHEEL: ${{ steps.read_built_wheel.outputs.wheel }}
+          TORCH_RBLN_VERSION: ${{ steps.read_built_wheel.outputs.version }}
           BUILD_TYPE: ${{ inputs.build_type }}
-          UV_INDEX: https://download.pytorch.org/whl/cpu rbln=${{ secrets.INTERNAL_INDEX_URL }}
-          UV_INDEX_STRATEGY: unsafe-best-match
-          UV_INDEX_RBLN_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
-          UV_INDEX_RBLN_PASSWORD: ${{ secrets.INTERNAL_INDEX_PASSWORD }}
+          UV_INDEX: pytorch-cpu=https://download.pytorch.org/whl/cpu
+          UV_INDEX_RBLN_USERNAME: ${{ secrets.RBLN_INDEX_USERNAME }}
+          UV_INDEX_RBLN_PASSWORD: ${{ secrets.RBLN_INDEX_PASSWORD }}
+          UV_INDEX_RBLN_NIGHTLY_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          UV_INDEX_RBLN_NIGHTLY_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+          UV_INDEX_RBLN_INTERNAL_USERNAME: ${{ secrets.RBLN_INDEX_USERNAME }}
+          UV_INDEX_RBLN_INTERNAL_PASSWORD: ${{ secrets.RBLN_INDEX_PASSWORD }}
         run: |
           set -euo pipefail
 
           uv venv verify-install/.venv
           uv pip install \
             --python verify-install/.venv/bin/python \
-            --constraint constraints-build-dev.txt \
-            rebel-compiler \
-            dist/*.whl
+            "${TORCH_RBLN_WHEEL}[runtime]"
 
           # `python -` puts cwd on sys.path; cd out of the repo root so the source doesn't shadow the installed wheel.
           cd verify-install
@@ -240,15 +248,16 @@ jobs:
 
       - name: Publish wheel to internal package index
         env:
-          TORCH_RBLN_VERSION: ${{ steps.read_version.outputs.version }}
-          INTERNAL_INDEX_URL: ${{ secrets.INTERNAL_INDEX_URL }}
-          UV_PUBLISH_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
-          UV_PUBLISH_PASSWORD: ${{ secrets.INTERNAL_INDEX_PASSWORD }}
+          TORCH_RBLN_WHEEL: ${{ steps.read_built_wheel.outputs.wheel }}
+          TORCH_RBLN_VERSION: ${{ steps.read_built_wheel.outputs.version }}
+          RBLN_INTERNAL_INDEX_URL: https://pypi.rebellions.in/simple
+          UV_PUBLISH_USERNAME: ${{ secrets.RBLN_INDEX_USERNAME }}
+          UV_PUBLISH_PASSWORD: ${{ secrets.RBLN_INDEX_PASSWORD }}
         run: |  # zizmor: ignore[use-trusted-publishing]
           set -euo pipefail
 
           # curl authenticates its index query via ~/.netrc.
-          index_host="${INTERNAL_INDEX_URL#*://}"
+          index_host="${RBLN_INTERNAL_INDEX_URL#*://}"
           index_host="${index_host%%/*}"
           umask 077
           cat > "${HOME}/.netrc" <<EOF
@@ -257,22 +266,61 @@ jobs:
           password ${UV_PUBLISH_PASSWORD}
           EOF
 
-          # Publish each version once; skip if it's already on the index.
-          wheel_name="$(basename dist/*.whl)"
-          if curl -fsSL --netrc "${INTERNAL_INDEX_URL%/}/torch-rbln/" | grep -qF -- "${wheel_name}"; then
-            echo "::notice::torch-rbln==${TORCH_RBLN_VERSION} is already on the internal package index; skipping publish"
-          else
-            uv publish --publish-url "${INTERNAL_INDEX_URL}" dist/*.whl
-            echo "::notice::Published torch-rbln==${TORCH_RBLN_VERSION} to the internal package index"
-          fi
+          # A re-upload would change the file that existing lockfiles already record by hash.
+          wheel_name="$(basename "${TORCH_RBLN_WHEEL}")"
+          listing_file="${RUNNER_TEMP}/index-listing.html"
+          http_code="$(
+            curl \
+              --location \
+              --max-time 10 \
+              --netrc \
+              --output "${listing_file}" \
+              --retry 1 \
+              --retry-all-errors \
+              --retry-delay 10 \
+              --show-error \
+              --silent \
+              --write-out '%{http_code}' \
+              "${RBLN_INTERNAL_INDEX_URL}/torch-rbln/"
+          )"
+          echo "Index listing ${RBLN_INTERNAL_INDEX_URL}/torch-rbln/ returned HTTP ${http_code}"
+          case "${http_code}" in
+            200)
+              if grep -qF -- "${wheel_name}" "${listing_file}"; then
+                echo "::notice::torch-rbln==${TORCH_RBLN_VERSION} is already on the internal package index; skipping publish"
+                exit 0
+              fi
+              echo "${wheel_name} is not in the listing; publishing it"
+              ;;
+            404)
+              echo "The index has no torch-rbln project yet; publishing the first wheel"
+              ;;
+            *)
+              echo "::error::Could not list torch-rbln on the internal package index (HTTP ${http_code})"
+              echo "::group::Response body"
+              cat "${listing_file}"
+              # ::endgroup:: must start a line, and the body might not end with a newline.
+              echo ""
+              echo "::endgroup::"
+              exit 1
+              ;;
+          esac
+
+          uv publish \
+            --publish-url "${RBLN_INTERNAL_INDEX_URL}" \
+            "${TORCH_RBLN_WHEEL}"
+          echo "::notice::Published torch-rbln==${TORCH_RBLN_VERSION} to the internal package index"
 
       - name: Verify the published wheel resolves from the index
         env:
-          TORCH_RBLN_VERSION: ${{ steps.read_version.outputs.version }}
-          UV_INDEX: https://download.pytorch.org/whl/cpu rbln=${{ secrets.INTERNAL_INDEX_URL }}
-          UV_INDEX_STRATEGY: unsafe-best-match
-          UV_INDEX_RBLN_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
-          UV_INDEX_RBLN_PASSWORD: ${{ secrets.INTERNAL_INDEX_PASSWORD }}
+          TORCH_RBLN_VERSION: ${{ steps.read_built_wheel.outputs.version }}
+          UV_INDEX: pytorch-cpu=https://download.pytorch.org/whl/cpu
+          UV_INDEX_RBLN_USERNAME: ${{ secrets.RBLN_INDEX_USERNAME }}
+          UV_INDEX_RBLN_PASSWORD: ${{ secrets.RBLN_INDEX_PASSWORD }}
+          UV_INDEX_RBLN_NIGHTLY_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          UV_INDEX_RBLN_NIGHTLY_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+          UV_INDEX_RBLN_INTERNAL_USERNAME: ${{ secrets.RBLN_INDEX_USERNAME }}
+          UV_INDEX_RBLN_INTERNAL_PASSWORD: ${{ secrets.RBLN_INDEX_PASSWORD }}
         run: |
           set -euo pipefail
 
@@ -283,9 +331,7 @@ jobs:
           uv venv verify-index/.venv
           uv pip install \
             --python verify-index/.venv/bin/python \
-            --constraint constraints-build-dev.txt \
-            rebel-compiler \
-            "torch-rbln==${TORCH_RBLN_VERSION}"
+            "torch-rbln[runtime]==${TORCH_RBLN_VERSION}"
 
           # `python -` puts cwd on sys.path; stay out of the repo root so the source tree does not
           # shadow what we just installed.

@@ -127,7 +127,7 @@ These workflows produce `torch-rbln` wheels.
 
 Build runs in a container and dispatches nothing to RBLN NPU hardware.
 
-For each `python_version` and `build_type` combination, the entrypoint calls the reusable [`_build-wheel.yaml`](../.github/workflows/_build-wheel.yaml), which pins `rebel-compiler`, builds the wheel, verifies it in a clean environment, publishes it, and checks that the published version resolves from the index. Pull request runs build `Release` on Python 3.12; a manual run can widen both dimensions.
+For each `python_version` and `build_type` combination, the entrypoint calls the reusable [`_build-wheel.yaml`](../.github/workflows/_build-wheel.yaml), which builds the wheel, verifies it in a clean environment, publishes it, and checks that the published version resolves from the index. Pull request runs build `Release` on Python 3.12; a manual run can widen both dimensions.
 
 ### CD
 
@@ -163,6 +163,8 @@ These workflows track the latest published build of a dependency on a daily sche
 
 When a newer `rebel-compiler` production build appears, this workflow creates or updates a pull request against `main` for a maintainer to review and merge.
 
+The pull request updates the pin in `pyproject.toml` and `uv.lock` (see [Third-Party Update](THIRD_PARTY_UPDATE.md#rebel-compiler)).
+
 It can also be run manually via `workflow_dispatch`, optionally pinning a specific `rebel_compiler_version` instead of resolving the latest.
 
 ### Nightly PyTorch
@@ -177,7 +179,7 @@ Steps:
 
 1. **Resolve** the latest nightly version from `https://download.pytorch.org/whl/nightly/cpu`, before checkout so the repository's release-pinned uv configuration cannot influence the result.
 2. **Repoint** the `torch` pin via [`tools/replace_depends.py`](../tools/replace_depends.py) — it rewrites `[project].dependencies` and `[build-system].requires`, and points `[tool.uv.sources].torch` at the `pytorch-nightly-cpu` index declared in `pyproject.toml`. The edit is local to the run and never committed.
-3. **Build** the wheel with the same container, compiler setup, and `constraints-build-dev.txt` build constraint as [`_build-wheel.yaml`](../.github/workflows/_build-wheel.yaml), but **without publishing** it to the internal package index.
+3. **Build** the wheel with the same container and compiler setup as [`_build-wheel.yaml`](../.github/workflows/_build-wheel.yaml), but **without publishing** it to the internal package index.
 4. **Test** on a CPU-only runner with no NPU attached, using `RBLN_DUMMY_DEVICE=1` (see [Configuration](CONFIGURATION.md#rbln_dummy_device)):
    - a smoke script that installs the built wheel into a clean venv and checks the versions, the dummy device topology, a host↔device round-trip, and one eager op;
    - the no-NPU test suites `test/rbln/test_dummy_device.py` and `test/distributed/test_no_device.py` (each manages `RBLN_DUMMY_DEVICE` itself, so it is not set for this step), and `test/internal/test_device_arch.py`, whose architecture gates only see a host with no NPU here.

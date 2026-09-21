@@ -7,14 +7,13 @@
 Install dependencies and initialize `lintrunner` once:
 
 ```bash
-uv sync --no-install-project
+uv sync --locked --no-install-project
 uv run --no-sync lintrunner init
 ```
 
-For C++ changes, `clang-tidy` needs the Rebel runtime headers and a compile database. Install the build-pinned rebel-compiler, then configure CMake:
+For C++ changes, `clang-tidy` needs a compile database and the Rebel runtime headers, which `uv sync` installs with the pinned `rebel-compiler`. Configure CMake:
 
 ```bash
-uv pip install --constraint constraints-build-dev.txt rebel-compiler
 uv run --no-sync cmake -GNinja -B build -S . \
   -DBUILD_SHARED_LIBS=ON \
   -DCMAKE_BUILD_TYPE=Release \
