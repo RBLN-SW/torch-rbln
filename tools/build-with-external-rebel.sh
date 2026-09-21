@@ -423,7 +423,7 @@ EOF
 modify_pyproject() {
     log_info "Modifying pyproject.toml..."
 
-    local torch_dep="torch==2.11.0+cpu"
+    local torch_dep="torch==2.13.0+cpu"
     log_info "  Setting torch dependency to PyPI: ${torch_dep}"
 
     python3 << EOF
@@ -558,10 +558,10 @@ build_torch_rbln() {
     local current_torch_version
     current_torch_version=$(pip show torch 2>/dev/null | grep "^Version:" | awk '{print $2}' || true)
 
-    if [[ "${current_torch_version}" != "2.11.0+cpu" ]]; then
-        log_info "Installing PyTorch 2.11.0+cpu from PyPI..."
+    if [[ "${current_torch_version}" != "2.13.0+cpu" ]]; then
+        log_info "Installing PyTorch 2.13.0+cpu from PyPI..."
         pip uninstall -y torch 2>/dev/null || true
-        pip install torch==2.11.0+cpu --index-url https://download.pytorch.org/whl/cpu
+        pip install torch==2.13.0+cpu --index-url https://download.pytorch.org/whl/cpu
     fi
 
     # Save torch version before uv sync
@@ -584,7 +584,7 @@ build_torch_rbln() {
         log_warn "Torch was changed by uv sync: ${torch_before} -> ${torch_after}"
         log_info "Reinstalling torch from PyPI..."
         pip uninstall -y torch 2>/dev/null || true
-        pip install torch==2.11.0+cpu --index-url https://download.pytorch.org/whl/cpu
+        pip install torch==2.13.0+cpu --index-url https://download.pytorch.org/whl/cpu
     fi
 
     local torch_final
@@ -672,7 +672,7 @@ print_summary() {
     echo "  TORCH_RBLN_HOME: ${TORCH_RBLN_HOME}"
     echo "  Compiler:        ${CC} / ${CXX}"
     echo "  Build type:      ${build_type}"
-    echo "  PyTorch:         2.11.0+cpu (PyPI)"
+    echo "  PyTorch:         2.13.0+cpu (PyPI)"
     echo ""
     echo -e "${GREEN}How to use:${NC}"
     echo ""

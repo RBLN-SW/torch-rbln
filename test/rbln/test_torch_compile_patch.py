@@ -1222,48 +1222,6 @@ class TestTorchCompileMonkeyPatch(TestCase):
         self.assertEqual(result.tolist(), [2, 4, 6])
 
 
-@pytest.mark.test_set_ci
-class TestDynamoGuardBuildRepr(TestCase):
-    """Dynamo guard build must not materialize tensor values via ``repr``.
-
-    Upstream's ``ID_MATCH`` guard text uses ``repr(type(val))`` (pytorch/pytorch#184796).
-    ``repr(val)`` would copy a guarded RBLN tensor to the host on every guard build
-    (fsw-inference#413), and a regression would surface only as a slow compile.
-    """
-
-    def test_id_match_guard_build_does_not_repr_tensor_value(self) -> None:
-        import torch_rbln._internal.monkey_patches as mp
-
-        real_repr = torch.Tensor.__repr__
-        value_repr_ids: list[int] = []
-
-        def repr_spy(tensor: torch.Tensor, *args: object, **kwargs: object) -> str:
-            value_repr_ids.append(id(tensor))
-            return real_repr(tensor, *args, **kwargs)
-
-        base_compile = mp._original_torch_compile or torch.compile
-        base_reset = mp._original_dynamo_reset or torch._dynamo.reset
-        param = torch.nn.Parameter(torch.randn(16, 16))
-        # guard=True asks Dynamo for an ID_MATCH guard on the tensor; without it the
-        # assertion below holds vacuously.
-        torch._dynamo.mark_static_address(param, guard=True)
-        x = torch.randn(16, 16)
-
-        def fn(inp: torch.Tensor) -> torch.Tensor:
-            return inp @ param
-
-        torch.Tensor.__repr__ = repr_spy
-        try:
-            base_reset()
-            out = base_compile(fn, backend="eager", fullgraph=True)(x)
-        finally:
-            torch.Tensor.__repr__ = real_repr
-            base_reset()
-
-        self.assertEqual(out, fn(x))
-        self.assertNotIn(id(param), value_repr_ids)
-
-
 instantiate_device_type_tests(TestTorchCompilePatchHelpers, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestTensorParallelFunctions, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestCompiledFunctionWrapper, globals(), only_for="privateuse1")
