@@ -148,9 +148,8 @@ void WarmCache::clear(std::optional<c10::DeviceIndex> device) {
     std::unique_lock<std::shared_mutex> wr(mu_);
     for (auto it = map_.begin(); it != map_.end();) {
       const auto& inputs = it->first.inputs;
-      const bool drop = !device.has_value() || std::any_of(inputs.begin(), inputs.end(), [&](const TensorProfile& tp) {
-        return tp.device_index == *device;
-      });
+      const bool drop = !device.has_value() ||
+          std::ranges::any_of(inputs, [&](const TensorProfile& tp) { return tp.device_index == *device; });
       if (drop) {
         dropped.push_back(std::move(it->second));
         it = map_.erase(it);
