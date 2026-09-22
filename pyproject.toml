@@ -24,7 +24,7 @@ dependencies = [
 
 [project.optional-dependencies]
 runtime = [
-  "rebel-compiler~=0.11.3.dev530",
+  "rebel-compiler~=0.11.3.dev535",
 ]
 
 [project.entry-points]
@@ -132,10 +132,10 @@ skip-excluded-dirs = true
 # uv build does not read the lockfile, so build-constraint-dependencies pins the build environment.
 # It must match constraint-dependencies, or the extension compiles against one build and loads another.
 build-constraint-dependencies = [
-  "rebel-compiler==0.11.3.dev530+g8bd8b8ac.prod",
+  "rebel-compiler==0.11.3.dev535+g66bbb96f.prod",
 ]
 constraint-dependencies = [
-  "rebel-compiler==0.11.3.dev530+g8bd8b8ac.prod",
+  "rebel-compiler==0.11.3.dev535+g66bbb96f.prod",
 ]
 # rebel-compiler publishes wheels for Linux only.
 environments = [
