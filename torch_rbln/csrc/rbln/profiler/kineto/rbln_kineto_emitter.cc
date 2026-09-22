@@ -144,21 +144,21 @@ void convert_export_to_kineto(
   out->device_infos.reserve(exp->devices_count);
   for (uint32_t i = 0; i < exp->devices_count; ++i) {
     const RblnKinetoDevice& dev = exp->devices[i];
-    out->device_infos.emplace_back(
+    out->device_infos.push_back(::libkineto::DeviceInfo{
         /*id=*/dev.pid,
         /*sortIndex=*/kRblnDeviceSortIndex + dev.pid,
         /*name=*/std::string(dev.name ? dev.name : ""),
-        /*label=*/std::string());
+        /*label=*/std::string()});
   }
 
   out->resource_infos.reserve(exp->lanes_count);
   for (uint32_t i = 0; i < exp->lanes_count; ++i) {
     const RblnKinetoLane& lane = exp->lanes[i];
-    out->resource_infos.emplace_back(
-        /*deviceId=*/lane.device_pid,
+    out->resource_infos.push_back(::libkineto::ResourceInfo{
         /*id=*/lane.resource_tid,
         /*sortIndex=*/lane.resource_tid,
-        /*name=*/std::string(lane.name ? lane.name : ""));
+        /*deviceId=*/lane.device_pid,
+        /*name=*/std::string(lane.name ? lane.name : "")});
   }
 
   out->activities.reserve(exp->slices_count + exp->host_launches_count);
