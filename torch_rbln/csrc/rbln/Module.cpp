@@ -622,7 +622,11 @@ extern "C" PyObject* initModule() {
 
   // Step 2: Create the module definition
   static struct PyModuleDef torch_rbln_module_definition = {
-      PyModuleDef_HEAD_INIT, "torch_rbln._C", nullptr, -1, global_method_definitions.data()};
+      .m_base = PyModuleDef_HEAD_INIT,
+      .m_name = "torch_rbln._C",
+      .m_doc = nullptr,
+      .m_size = -1,
+      .m_methods = global_method_definitions.data()};
   PyObject* created_module = PyModule_Create(&torch_rbln_module_definition);
 
   // Step 3: Initialize RBLN-specific bindings

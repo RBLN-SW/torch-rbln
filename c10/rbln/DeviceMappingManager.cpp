@@ -125,8 +125,8 @@ RblnNpuMappingEnvDisplay getRblnNpuMappingEnvDisplay() {
   const char* map_env = std::getenv("RBLN_DEVICE_MAP");
   const char* npus_env = std::getenv("RBLN_NPUS_PER_DEVICE");
   return {
-      (map_env && map_env[0] != '\0' ? std::string(map_env) : "-"),
-      (npus_env && npus_env[0] != '\0' ? std::string(npus_env) : "-"),
+      .device_map = (map_env && map_env[0] != '\0' ? std::string(map_env) : "-"),
+      .npus_per_device = (npus_env && npus_env[0] != '\0' ? std::string(npus_env) : "-"),
   };
 }
 

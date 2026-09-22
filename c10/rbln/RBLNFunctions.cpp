@@ -1131,7 +1131,7 @@ BorrowedHostPtr borrow_host_ptr(const void* rbln_data, size_t nbytes) {
       "rbln_v_borrow_host_ptr failed (vaddr={:#x}, size={}); see rebel runtime logs for details",
       vaddr,
       size);
-  return BorrowedHostPtr{host_ptr, borrow_id};
+  return BorrowedHostPtr{.host_ptr = host_ptr, .borrow_id = borrow_id};
 }
 
 std::optional<BorrowedHostPtr> try_borrow_host_ptr(const void* rbln_data, size_t nbytes) {
@@ -1149,7 +1149,7 @@ std::optional<BorrowedHostPtr> try_borrow_host_ptr(const void* rbln_data, size_t
   if (::rbln::rbln_v_borrow_host_ptr(vaddr, size, host_ptr, borrow_id)) {
     return std::nullopt;
   }
-  return BorrowedHostPtr{host_ptr, borrow_id};
+  return BorrowedHostPtr{.host_ptr = host_ptr, .borrow_id = borrow_id};
 }
 
 BorrowedHostPtr acquire_host_ptr_for_overwrite(void* rbln_data, size_t nbytes) {
@@ -1168,7 +1168,7 @@ BorrowedHostPtr acquire_host_ptr_for_overwrite(void* rbln_data, size_t nbytes) {
       "rbln_v_acquire_host_ptr_for_overwrite failed (vaddr={:#x}, size={}); see rebel runtime logs for details",
       vaddr,
       size);
-  return BorrowedHostPtr{host_ptr, borrow_id};
+  return BorrowedHostPtr{.host_ptr = host_ptr, .borrow_id = borrow_id};
 }
 
 std::optional<BorrowedHostPtr> try_acquire_host_ptr_for_overwrite(void* rbln_data, size_t nbytes) {
@@ -1187,7 +1187,7 @@ std::optional<BorrowedHostPtr> try_acquire_host_ptr_for_overwrite(void* rbln_dat
   if (::rbln::rbln_v_acquire_host_ptr_for_overwrite(vaddr, size, host_ptr, borrow_id)) {
     return std::nullopt;
   }
-  return BorrowedHostPtr{host_ptr, borrow_id};
+  return BorrowedHostPtr{.host_ptr = host_ptr, .borrow_id = borrow_id};
 }
 
 void return_borrowed(uint64_t borrow_id, bool updated) {
