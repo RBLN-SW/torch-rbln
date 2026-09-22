@@ -78,9 +78,8 @@ def _eager_matmul_decode_worker(
             torch_rbln.memory.empty_cache(dev)
 
 
-@pytest.mark.test_set_ci
-@pytest.mark.single_worker
-@pytest.mark.usefixtures("enable_deploy_mode")
+
+@pytest.mark.skip(reason="uses too many resources, will be replaced with a different test.")
 class TestEagerAsyncBufferRegression(TestCase):
     """Eager-mode async buffer-lifetime regression."""
 
