@@ -26,7 +26,9 @@ def setup_environment(rank: int, world_size: int) -> None:
     torch.rbln.set_device(rank)
 
 
-def run_allreduce_test(rank: int, world_size: int, backend: str, op: dist.ReduceOp) -> None:
+def run_allreduce_test(
+    rank: int, world_size: int, backend: str, op: dist.ReduceOp, dtype: torch.dtype = torch.float16
+) -> None:
     """Test allreduce operation with specific reduce op."""
     setup_environment(rank, world_size)
     dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
@@ -34,7 +36,7 @@ def run_allreduce_test(rank: int, world_size: int, backend: str, op: dist.Reduce
     try:
         # Create test tensor with rank-specific values
         base_value = rank + 1.0
-        tensor = torch.full([64], base_value, dtype=torch.float16, device=torch.device(f"rbln:{rank}"))
+        tensor = torch.full([64], base_value, dtype=dtype, device=torch.device(f"rbln:{rank}"))
 
         # Perform allreduce
         dist.all_reduce(tensor, op=op)
@@ -44,6 +46,32 @@ def run_allreduce_test(rank: int, world_size: int, backend: str, op: dist.Reduce
         assert tensor[0] == expected_value, (
             f"allreduce {op} failed on rank {rank}: expected={expected_value}, actual={tensor[0]}"
         )
+
+    finally:
+        dist.destroy_process_group()
+
+
+# Per-dtype magnitude for the range test: a power of two large enough that the reduced
+# sum only fits the dtype under test. The bfloat16 value overflows every 16-bit float
+# format with a narrower exponent, so a reduce that silently downcast would read as inf.
+_ALLREDUCE_RANGE_BASE = {torch.float16: 2.0**10, torch.bfloat16: 2.0**100}
+
+
+def run_allreduce_range_test(rank: int, world_size: int, backend: str, dtype: torch.dtype) -> None:
+    """Test that allreduce keeps the value range of the dtype under test."""
+    setup_environment(rank, world_size)
+    dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+
+    try:
+        base = _ALLREDUCE_RANGE_BASE[dtype]
+        tensor = torch.full([64], (rank + 1) * base, dtype=dtype, device=torch.device(f"rbln:{rank}"))
+
+        dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+
+        expected = torch.full([64], sum(range(1, world_size + 1)) * base, dtype=dtype)
+        result = tensor.cpu()
+        assert torch.isfinite(result).all(), f"allreduce range test overflowed on rank {rank}: {result[:4]}"
+        torch.testing.assert_close(result, expected, rtol=0, atol=0)
 
     finally:
         dist.destroy_process_group()
@@ -347,7 +375,9 @@ def run_allgather_into_tensor_coalesced_test(
         dist.destroy_process_group()
 
 
-def run_reduce_scatter_test(rank: int, world_size: int, backend: str, op: dist.ReduceOp, size: int) -> None:
+def run_reduce_scatter_test(
+    rank: int, world_size: int, backend: str, op: dist.ReduceOp, size: int, dtype: torch.dtype = torch.float16
+) -> None:
     """Test reduce_scatter operation with specific reduce op."""
     setup_environment(rank, world_size)
     dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
@@ -362,11 +392,11 @@ def run_reduce_scatter_test(rank: int, world_size: int, backend: str, op: dist.R
         for j in range(world_size):
             # Each tensor has values based on rank and j
             base_value = float((rank + 1) * 10 + j + 1)
-            tensor = torch.full([output_size], base_value, dtype=torch.float16, device=device)
+            tensor = torch.full([output_size], base_value, dtype=dtype, device=device)
             input_list.append(tensor)
 
         # Create output tensor
-        output = torch.zeros(output_size, dtype=torch.float16, device=device)
+        output = torch.zeros(output_size, dtype=dtype, device=device)
 
         # Perform reduce_scatter
         dist.reduce_scatter(output, input_list, op=op)
@@ -573,11 +603,23 @@ class TestBroadcastRBLN(TestProcessGroupRBLNBase):
 class TestAllReduceRBLN(TestProcessGroupRBLNBase):
     """Test cases for allreduce operations."""
 
+    @dtypes(*SUPPORTED_DTYPES)
     @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
-    def test_allreduce_sum(self, c10d_async_env):
+    def test_allreduce_sum(self, dtype, c10d_async_env):
         """Test allreduce with SUM operation."""
         self.run_c10d_test(
-            c10d_async_env, self.world_size, run_allreduce_test, (self.world_size, self.backend, dist.ReduceOp.SUM)
+            c10d_async_env,
+            self.world_size,
+            run_allreduce_test,
+            (self.world_size, self.backend, dist.ReduceOp.SUM, dtype),
+        )
+
+    @dtypes(*SUPPORTED_DTYPES)
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_allreduce_range(self, dtype, c10d_async_env):
+        """Test that allreduce preserves the value range of the dtype (no narrower intermediate)."""
+        self.run_c10d_test(
+            c10d_async_env, self.world_size, run_allreduce_range_test, (self.world_size, self.backend, dtype)
         )
 
     # NOTE: RCCL support only SUM operation
@@ -793,6 +835,26 @@ class TestReduceScatterRBLN(TestProcessGroupRBLNBase):
             (self.world_size, self.backend, dist.ReduceOp.SUM, size),
         )
 
+    @parametrize(
+        "size",
+        [
+            1,  # padded
+            64,  # single aligned call
+            (512 * KiB),
+            (MiB + 10),  # unaligned
+            1024 * 1024 * 15 // 4 + 1,  # chunked
+        ],
+    )
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_reduce_scatter_sum_bfloat16(self, size, c10d_async_env):
+        """Test reduce_scatter with SUM operation using torch.bfloat16 (native RCCL path)."""
+        self.run_c10d_test(
+            c10d_async_env,
+            self.world_size,
+            run_reduce_scatter_test,
+            (self.world_size, self.backend, dist.ReduceOp.SUM, size, torch.bfloat16),
+        )
+
     # NOTE: RCCL support only SUM operation
     # @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
     # def test_reduce_scatter_avg(self, c10d_async_env):
@@ -896,6 +958,26 @@ class TestAllReduceSizesRBLN(TestProcessGroupRBLNBase):
             self.world_size,
             run_allreduce_size_test,
             (self.world_size, self.backend, size, torch.float16),
+        )
+
+    @parametrize(
+        "size",
+        [
+            512,  # single aligned call
+            (10 * KiB),  # unaligned tail
+            MiB,
+            3407872,  # previously problematic size
+            (16 * MiB),  # chunked
+        ],
+    )
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_allreduce_bfloat16(self, size, c10d_async_env):
+        """Test allreduce with specified bytes using torch.bfloat16 (native RCCL path)."""
+        self.run_c10d_test(
+            c10d_async_env,
+            self.world_size,
+            run_allreduce_size_test,
+            (self.world_size, self.backend, size, torch.bfloat16),
         )
 
     @parametrize("size", [MiB, (4 * MiB)])
