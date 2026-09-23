@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <mutex>
 
