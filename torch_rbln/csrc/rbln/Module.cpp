@@ -260,6 +260,22 @@ void register_internal_api(py::module_& module) {
       },
       "Internal: give an RBLN tensor a flat single-node device allocation");
 
+  // Used by torch_rbln.host_register() / host_unregister().
+  module.def(
+      "_host_register",
+      [](c10::DeviceIndex device_index, uintptr_t host_ptr, size_t nbytes) {
+        return c10::rbln::host_register(
+            device_index, reinterpret_cast<const void*>(host_ptr), nbytes); // NOLINT(performance-no-int-to-ptr)
+      },
+      "Internal: pin a host range for DMA on a device");
+  module.def(
+      "_host_unregister",
+      [](c10::DeviceIndex device_index, uintptr_t host_ptr) {
+        c10::rbln::host_unregister(
+            device_index, reinterpret_cast<const void*>(host_ptr)); // NOLINT(performance-no-int-to-ptr)
+      },
+      "Internal: unpin a host range registered with _host_register");
+
   // Set target's device-allocation layout to match ref's, without copying data.
   // Used by torch_rbln.set_device_layout_like().
   module.def(

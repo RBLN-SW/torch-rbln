@@ -178,6 +178,23 @@ C10_RBLN_API void bind_device_memory(void* rbln_data, size_t nbytes);
 C10_RBLN_API void set_device_layout_like(void* target_data, const void* ref_data);
 
 /**
+ * @brief Pin a caller-owned host range for DMA on one device (cudaHostRegister's counterpart).
+ *
+ * Copies whose host operand is 4 KiB aligned and inside the range then skip the kernel's
+ * per-command-buffer pin. The caller keeps ownership: unregister before freeing the pages.
+ *
+ * @return False, with a warning, if the range stays unregistered (unsupported UMD, dummy
+ *         device, or overlap with a registered range). Copies over it still work.
+ */
+C10_RBLN_API bool host_register(c10::DeviceIndex device_index, const void* host_ptr, size_t nbytes);
+
+/**
+ * @brief Unpin a range registered with host_register(). A synchronization point: drains the
+ * device first. No-op during shutdown, where context teardown releases every range.
+ */
+C10_RBLN_API void host_unregister(c10::DeviceIndex device_index, const void* host_ptr);
+
+/**
  * @brief Whether RBLN_DUMMY_DEVICE mode is active: a host-backed logical device
  * with no NPU, so tensors can be built and compiled without hardware (execution
  * still needs one). Cached after the first call.
