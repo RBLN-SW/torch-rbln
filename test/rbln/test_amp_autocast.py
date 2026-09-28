@@ -28,6 +28,12 @@ import torch_rbln  # noqa: F401  (registers the rbln device module + autocast pl
 from torch_rbln._internal.ops_utils import SupportedDtypes
 
 
+# Deselected by rebel_compiler's CI (`-m "not torch_rbln_only"`); see the marker in pyproject.
+# Asserts an absence at the torch level: RBLN registers no autocast backend, so torch's AMP
+# surfaces have to behave a particular way. Nothing here reaches rebel-compiler.
+pytestmark = pytest.mark.torch_rbln_only
+
+
 @pytest.mark.test_set_ci
 class TestAmpCatalog(TestCase):
     """The AMP dtype catalog is empty and coherent end-to-end."""

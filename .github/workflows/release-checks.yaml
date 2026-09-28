@@ -1,0 +1,40 @@
+name: Release checks
+
+on:
+  schedule:
+    - cron: 15 15 * * *  # 00:15 KST
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  lint:
+    uses: ./.github/workflows/_lint.yaml
+    with:
+      torch_rbln_sha: ${{ github.sha }}
+      python_versions: '["3.10", "3.11", "3.12", "3.13", "3.14"]'
+      build_types: '["Release", "Debug"]'
+      base_revision: ''
+    secrets:
+      GIT_PAT: ${{ secrets.GIT_PAT }}
+      HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+      HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+      NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+      NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+      RBLN_INDEX_USERNAME: ${{ secrets.RBLN_INDEX_USERNAME }}
+      RBLN_INDEX_PASSWORD: ${{ secrets.RBLN_INDEX_PASSWORD }}
+
+  dispatch_event:
+    uses: ./.github/workflows/_dispatch-event.yaml
+    with:
+      event_name: ${{ github.event_name }}
+      event_type: torch-rbln-release
+      torch_rbln_ref: ${{ github.ref_name }}
+      torch_rbln_sha: ${{ github.sha }}
+    secrets:
+      GIT_PAT: ${{ secrets.GIT_PAT }}

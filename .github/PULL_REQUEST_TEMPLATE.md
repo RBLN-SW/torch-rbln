@@ -91,9 +91,9 @@ The PR will only be reviewed and considered for merge if the following are satis
 -->
 
 * [ ] PR title follows [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) format
-* [ ] This PR is linked to a corresponding issue — see [Contributing to torch-rbln](docs/CONTRIBUTING.md)
-* [ ] Linting passes — see [Linting](docs/LINTING.md)
-* [ ] All CI tests pass — see [CI/CD Workflows](docs/WORKFLOWS.md)
+* [ ] This PR is linked to a corresponding issue — see [Contributing to torch-rbln](https://github.com/RBLN-SW/torch-rbln/blob/main/docs/CONTRIBUTING.md)
+* [ ] Linting passes — see [Linting](https://github.com/RBLN-SW/torch-rbln/blob/main/docs/LINTING.md)
+* [ ] All CI tests pass — see [CI/CD Workflows](https://github.com/RBLN-SW/torch-rbln/blob/main/docs/WORKFLOWS.md)
 * [ ] The test method is described, and the expected result is clearly stated (if applicable)
 * [ ] Relevant documentation has been updated (if applicable)
 

@@ -14,6 +14,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel
 
 from test.utils import SUPPORTED_DTYPES
 
+from torch_rbln._internal.device_arch_utils import is_atom_device
+
 
 TORCH_RBLN_SAVE_PATH = os.getenv("TORCH_RBLN_SAVE_PATH", os.getcwd())
 
@@ -52,7 +54,11 @@ class TestCausalLMBase(TestCase):
     num_hidden_layers = 1
     attn_implementations = ["eager", "sdpa"]
     batch_sizes = [1, 2, 4]
-    seq_lens = [16, 128, 1024]
+    # No 16: the SDPA kernel needs both sequence dimensions aligned
+    # (``sdpa.py:_RBLN_SDPA_SHAPE_ALIGNMENT``) and a 16-token shape is not, so it takes the CPU
+    # fallback and measures CPU attention rather than the device. Restore it once the kernel
+    # pads instead of falling back.
+    seq_lens = [128, 1024]
     max_new_tokens = 2  # Run prefill & decode phase once each.
 
     # Pin the EXAONE HF revision (shared by every EXAONE test here, incl. TestCausalLMPerf)
@@ -68,21 +74,25 @@ class TestCausalLMBase(TestCase):
         device: torch.device,
     ):
         """Load a causal language model and prepare tokenized inputs on the given device."""
+        # The pinned transformers takes ``torch_dtype``; the rename to ``dtype`` lands in a
+        # later 4.x. Cases keep spelling it ``dtype``, so translate once here.
+        load_kwargs = dict(config_kwargs)
+        load_kwargs["torch_dtype"] = load_kwargs.pop("dtype")
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
             ignore_mismatched_sizes=True,
-            **config_kwargs,
+            **load_kwargs,
         )
         model.to(device)
         _slice_lm_head_to_last_token(model)
-        self.assertEqual(model.config.dtype, config_kwargs["dtype"])
+        self.assertEqual(model.config.torch_dtype, config_kwargs["dtype"])
         self.assertEqual(model.config._attn_implementation, config_kwargs["attn_implementation"])
         self.assertEqual(model.config.num_hidden_layers, config_kwargs["num_hidden_layers"])
 
         tokenizer = AutoTokenizer.from_pretrained(
             model_id,
             padding_side="left",
-            **config_kwargs,
+            **load_kwargs,
         )
         tokenizer.pad_token = tokenizer.eos_token
         tokenizer.pad_token_id = 0
@@ -163,6 +173,18 @@ class TestCausalLMBase(TestCase):
         whose dtype overflows the model (e.g. fp16 BMM) are skipped — a dtype limitation,
         not an RBLN bug.
         """
+        # ATOM promotes bfloat16 to the device's custom float, whose range HuggingFace's causal
+        # mask value (torch.finfo(bfloat16).min) overflows into NaN rather than saturating, wiping
+        # out every eager-attention output. sdpa lowers to a fused kernel that never adds the
+        # mask this way, so only the eager cases go. test/rbln/test_bf16_range.py holds the
+        # cause and fails until it is fixed; drop this when that test starts passing.
+        if (
+            is_atom_device()
+            and config_kwargs.get("dtype") is torch.bfloat16
+            and config_kwargs.get("attn_implementation") == "eager"
+        ):
+            self.skipTest("bfloat16 x eager attention on ATOM: see test/rbln/test_bf16_range.py")
+
         fp32_config_kwargs = dict(config_kwargs, dtype=torch.float32)
         cpu_logits = self._prefill_logits(model_id, fp32_config_kwargs, batch_size, seq_len, self.cpu_device)
         rbln_logits = self._prefill_logits(model_id, config_kwargs, batch_size, seq_len, self.rbln_device)
@@ -175,41 +197,49 @@ class TestCausalLMBase(TestCase):
         torch.testing.assert_close(rbln_logits, cpu_logits, atol=self.LOGIT_ATOL, rtol=0.0)
 
 
-def _small_model_cover_array(mark_ci=True):
-    """Strength-2 (pairwise) covering array over dtype x attn x (batch, seq) for the small models.
+def _small_model_cover_array(full_matrix_at=None, skip_shapes=()):
+    """Strength-2 (pairwise) covering array over dtype x attn x (batch, seq) for a small model.
 
-    The full 4-way cross product (2 dtype x 2 attn x 9 shapes = 36 cases/model) re-runs paths the
-    op-level and CI tests already cover point-by-point. This replaces it with a covering array of
-    22 cases/model that still guarantees:
+    The full 4-way cross product (2 dtype x 2 attn x 6 shapes = 24 cases/model) re-runs paths the
+    op-level and CI tests already cover point-by-point. This replaces it with an array of one row
+    per dtype at each shape, rotating the dtype<->attn pairing across shapes, which guarantees:
 
-      * every (batch, seq) shape is compiled at least once (9 shapes -- each is a distinct
-        compiled artifact / tiling),
       * every dtype and every attn runs (1-way),
-      * every attn x shape, dtype x shape, and attn x dtype pair appears (2-way),
-      * a full dtype x attn corner at the two largest shapes -- the CI point (2, 1024) and the
-        max shape (4, 1024), where numeric overflow / tiling issues concentrate.
+      * every attn x shape, dtype x shape, and attn x dtype pair appears over the shapes the
+        model runs (2-way),
+      * every (batch, seq) shape the caller asks for is compiled at least once -- each shape is a
+        distinct compiled artifact, and which model's geometry compiles it is not what the shape
+        axis is about.
 
-    Only the 3-/4-way interactions are dropped. Non-corner shapes get one row per dtype, rotating
-    the dtype<->attn pairing across shapes so all attn x dtype combinations are spread over the
-    small shapes too. The (2, 1024) rows carry the test_set_ci marker unless mark_ci=False (the
-    release-only variant used where another model already covers the family's CI slot).
+    Dropped are the 3-/4-way interactions, and the duplication between the two small models at
+    the shapes that dominate the run: a case at seq 1024 costs an order of magnitude more than
+    one at seq 128, so ``skip_shapes`` lets one small model carry the expensive shapes for both,
+    and lets the widest batch sit on the large models instead of on every model.
+
+    ``full_matrix_at`` names the one shape that also gets the full dtype x attn matrix and the
+    test_set_ci marker -- the CI representative point, carried by a single model per family. The
+    3-way dtype x attn x shape is worth its cost at one point, not at every large shape. Pass None
+    for the release-only variant used where another model already covers the family's CI slot.
     """
-    shapes = [(bs, sl) for bs in TestCausalLMBase.batch_sizes for sl in TestCausalLMBase.seq_lens]
+    shapes = [
+        (bs, sl)
+        for bs in TestCausalLMBase.batch_sizes
+        for sl in TestCausalLMBase.seq_lens
+        if (bs, sl) not in skip_shapes
+    ]
     attns = TestCausalLMBase.attn_implementations
-    full_corner_shapes = {(2, 1024), (4, 1024)}
     n_dtype, n_attn = len(SUPPORTED_DTYPES), len(attns)
 
     array = []
     rotate = 0
     for bs, sl in shapes:
-        if (bs, sl) in full_corner_shapes:
+        if (bs, sl) == full_matrix_at:
             combos = [(dtype, attn) for dtype in SUPPORTED_DTYPES for attn in attns]
         else:
             combos = [
                 (SUPPORTED_DTYPES[(rotate + j) % n_dtype], attns[j % n_attn]) for j in range(max(n_dtype, n_attn))
             ]
             rotate += 1
-        is_ci = (bs, sl) == (2, 1024)
         for dtype, attn in combos:
             # Omit dtype from the subtest name: instantiate_device_type_tests appends it,
             # which keeps the ids unique (e.g. ..._eager_b2_s1024_privateuse1_float16).
@@ -217,7 +247,7 @@ def _small_model_cover_array(mark_ci=True):
                 subtest(
                     (dtype, attn, bs, sl),
                     name=f"{attn}_b{bs}_s{sl}",
-                    decorators=[pytest.mark.test_set_ci] if (is_ci and mark_ci) else [],
+                    decorators=[pytest.mark.test_set_ci] if (bs, sl) == full_matrix_at else [],
                 )
             )
     return array
@@ -228,39 +258,44 @@ class TestCausalLM(TestCausalLMBase):
     """Test correctness of causal language model outputs across various configurations."""
 
     # Small models (Llama-1B, Qwen-1.5B) run a pairwise covering array over dtype x attn x
-    # (batch, seq) instead of the full 4-way cross product (36 -> 22 cases/model); see
-    # _small_model_cover_array for the exact coverage guarantee.
+    # (batch, seq) instead of the full 4-way cross product; see _small_model_cover_array for the
+    # exact coverage guarantee.
     #
-    # CI runs one model per family at the representative point (2, 1024): Qwen-1.5B here and
-    # Llama-3B for the Llama family (test_llama_3b) -- the larger geometry surfaces failures
-    # first. Llama-1B keeps its full covering array but release-only (no CI marker).
-    small_model_cover_array = _small_model_cover_array()
-    small_model_cover_array_release_only = _small_model_cover_array(mark_ci=False)
+    # The batch axis is split by cost rather than run twice: the small models take batch 1 and 2,
+    # and batch 4 -- the widest, and the one where per-batch tiling and memory pressure actually
+    # show -- is the large models' point below. Qwen-1.5B carries what is left of the shape grid
+    # and, at the representative point (2, 1024), the full dtype x attn matrix and the CI marker.
+    # Llama-1B is release-only and skips that point too, which Qwen-1.5B compiles at both dtypes;
+    # it keeps (1, 1024), so a long sequence is still compiled on Llama geometry.
+    _LARGE_BATCH_SHAPES = tuple((4, seq_len) for seq_len in TestCausalLMBase.seq_lens)
+    _COSTLY_SHAPES = ((2, 1024),)
+    small_model_cover_array = _small_model_cover_array(full_matrix_at=(2, 1024), skip_shapes=_LARGE_BATCH_SHAPES)
+    small_model_cover_array_release_only = _small_model_cover_array(skip_shapes=_LARGE_BATCH_SHAPES + _COSTLY_SHAPES)
 
-    # Large models (Llama-3B, EXAONE-2.4B) share the small models' code paths but are 3-5x
-    # slower to compile and dominate the release run. They exercise only the representative
-    # point (the full attn x dtype matrix, which is also the CI set) plus a single largest-shape
-    # tiling smoke (test_large_model_tiling) -- not the full batch x seq grid.
-    representative_batch_seq = [subtest((2, 1024), decorators=[pytest.mark.test_set_ci])]
+    # Large models (Llama-3B, EXAONE-2.4B) share the small models' code paths but are 3-5x slower
+    # to compile, so they buy geometry, not breadth: one case each, at the largest shape, where
+    # size-specific tiling and memory issues surface, and the suite's only batch 4. float16 and
+    # sdpa, as the largest-shape smoke these two used to carry was -- dtype and attn breadth is
+    # the small models' axis. This subsumes that separate smoke.
+    max_shape_batch_seq = [subtest((4, 1024), decorators=[pytest.mark.test_set_ci])]
 
     @pytest.mark.usefixtures("enable_deploy_mode")
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(torch.float16)
     @parametrize(
         "model_id",
         [
             "LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct",
         ],
     )
-    @parametrize("attn_implementation", TestCausalLMBase.attn_implementations)
-    @parametrize("batch_size,seq_len", representative_batch_seq)
-    def test_exaone(self, dtype, model_id, attn_implementation, batch_size, seq_len):
+    @parametrize("batch_size,seq_len", max_shape_batch_seq)
+    def test_exaone(self, dtype, model_id, batch_size, seq_len):
         config_kwargs = dict(
             # Set a specific revision to avoid compatibility issues with the latest transformers version.
             # This can be removed when the transformers version is updated to 5.1.0 or higher.
             revision=self._EXAONE_REVISION,
             trust_remote_code=True,
             dtype=dtype,
-            attn_implementation=attn_implementation,
+            attn_implementation="sdpa",
             num_hidden_layers=self.num_hidden_layers,
         )
 
@@ -277,17 +312,16 @@ class TestCausalLM(TestCausalLMBase):
 
         self._assert_logits_match_fp32("meta-llama/Llama-3.2-1B-Instruct", config_kwargs, batch_size, seq_len)
 
-    # Llama-3B is the same architecture as Llama-1B (full covering array above) but far slower to
-    # compile. It is the Llama family's CI slot: the representative point across the full attn x
-    # dtype matrix (the larger geometry surfaces failures first).
+    # Llama-3B is the same architecture as Llama-1B (covering array above) but far slower to
+    # compile. It is the Llama family's CI slot: the largest shape, where the larger geometry
+    # surfaces failures first.
     @pytest.mark.usefixtures("enable_deploy_mode")
-    @dtypes(*SUPPORTED_DTYPES)
-    @parametrize("attn_implementation", TestCausalLMBase.attn_implementations)
-    @parametrize("batch_size,seq_len", representative_batch_seq)
-    def test_llama_3b(self, dtype, attn_implementation, batch_size, seq_len):
+    @dtypes(torch.float16)
+    @parametrize("batch_size,seq_len", max_shape_batch_seq)
+    def test_llama_3b(self, dtype, batch_size, seq_len):
         config_kwargs = dict(
             dtype=dtype,
-            attn_implementation=attn_implementation,
+            attn_implementation="sdpa",
             num_hidden_layers=self.num_hidden_layers,
         )
 
@@ -305,30 +339,86 @@ class TestCausalLM(TestCausalLMBase):
             num_hidden_layers=self.num_hidden_layers,
             sliding_window=0,  # Disable sliding window attention.
         )
+        # Qwen2.5's Q @ K^T overflows float16, and eager runs that matmul in float16: every
+        # logit comes back NaN, on CPU as much as on RBLN. The isfinite guard in
+        # _assert_logits_match_fp32 already ends these in a skip, but only after loading the
+        # model; naming the combination keeps it visible. sdpa computes the matmul in float32.
+        if dtype is torch.float16 and attn_implementation == "eager":
+            self.skipTest("Qwen2.5 float16 x eager: Q @ K^T overflows float16 (NaN on CPU too)")
+
         self._assert_logits_match_fp32("Qwen/Qwen2.5-1.5B-Instruct", config_kwargs, batch_size, seq_len)
 
-    # The largest shape (batch=4, seq=1024) is where size-specific tiling/memory issues surface.
-    # The small models cover attn/dtype/shape breadth; here we smoke only the largest shape once
-    # per large model (fp16, sdpa) so that large-shape coverage isn't lost when their full grid is
-    # dropped. Release-only (no CI marker) -- the representative point carries the CI coverage.
+
+@pytest.mark.single_worker
+class TestCausalLMGraph(TestCausalLMBase):
+    """Run a causal language model through ``torch.compile(backend="rbln")``.
+
+    TestCausalLM compiles one program per operator, as eager dispatch reaches it.
+    This compiles the whole forward as a single program -- the path the RBLN PyTorch
+    tutorial takes, and the only one where a graph-level break shows up.
+
+    One model at one shape, over both attention implementations, which are the axis
+    that changes the traced graph rather than its geometry. Failures here are graph
+    failures; the shape and dtype grids stay in TestCausalLM.
+
+    A compile that fails does not raise on its own -- it falls back to CPU and returns
+    the right logits. conftest's autouse ``disable_compile_error_fallback`` is what
+    turns that back into an error, and without it these cases would pass while graph
+    mode was broken.
+    """
+
     @pytest.mark.usefixtures("enable_deploy_mode")
-    @dtypes(torch.float16)
-    @parametrize(
-        "model_id",
-        [
-            "meta-llama/Llama-3.2-3B-Instruct",
-            "LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct",
-        ],
-    )
-    def test_large_model_tiling(self, dtype, model_id):
+    @dtypes(*SUPPORTED_DTYPES)
+    @parametrize("attn_implementation", TestCausalLMBase.attn_implementations)
+    @parametrize("batch_size,seq_len", [subtest((1, 128), decorators=[pytest.mark.test_set_ci])])
+    def test_llama(self, dtype, attn_implementation, batch_size, seq_len):
+        # Same ATOM gate as _assert_logits_match_fp32: the causal mask's finfo.min
+        # overflows the device's custom float there and wipes out eager attention.
+        if is_atom_device() and dtype is torch.bfloat16 and attn_implementation == "eager":
+            self.skipTest("bfloat16 x eager attention on ATOM: see test/rbln/test_bf16_range.py")
+
         config_kwargs = dict(
             dtype=dtype,
-            attn_implementation="sdpa",
+            attn_implementation=attn_implementation,
             num_hidden_layers=self.num_hidden_layers,
         )
-        if "EXAONE" in model_id:
-            config_kwargs.update(revision=self._EXAONE_REVISION, trust_remote_code=True)
-        self._assert_logits_match_fp32(model_id, config_kwargs, batch_size=4, seq_len=1024)
+        model, inputs = self._prepare_model_and_inputs(
+            "meta-llama/Llama-3.2-1B", config_kwargs, batch_size, seq_len, self.rbln_device
+        )
+
+        with torch.inference_mode():
+            # Reference before the graph: running the graph first re-lays out the weights
+            # for its own input layout, and a bfloat16 eager matmul on them then fails to
+            # bind (RUN_INTERNAL). Taking the reference first keeps this a graph test.
+            eager_logits = model(**inputs).logits
+
+            # explain()['recompiles'] counts eager warm-cache misses, not backend rebuilds.
+            with torch.rbln.capture_programs() as warmup_programs:
+                compiled = torch.compile(model, backend="rbln", dynamic=False)
+                compiled(**inputs)
+            self.assertGreater(len(warmup_programs), 0, "warmup built no rbln program")
+            with torch.rbln.capture_programs() as replay_programs:
+                with torch.rbln.explain() as steady:
+                    graph_logits = compiled(**inputs).logits
+            self.assertEqual(
+                len(replay_programs),
+                0,
+                "the measured call rebuilt an rbln program instead of replaying",
+            )
+
+        # A graph that silently fell back to CPU, or recompiled on every call, still
+        # returns the right logits -- assert the program actually ran on the device.
+        verdict = steady.verdict()
+        self.assertEqual(verdict["cpu_fallbacks"], 0, steady.report())
+        self.assertEqual(verdict["recompiles"], 0, steady.report())
+
+        # Only the last position is comparable: the left padding carries the causal mask's
+        # minimum through lm_head, and those positions come back inf in both runs.
+        graph_last = graph_logits[:, -1]
+        eager_last = eager_logits[:, -1]
+        self.assertTrue(bool(torch.isfinite(graph_last).all()), graph_last)
+        self.assertTrue(bool(torch.isfinite(eager_last).all()), eager_last)
+        self.assertEqual(graph_last.argmax(-1), eager_last.argmax(-1))
 
 
 @pytest.mark.test_set_perf
@@ -471,6 +561,7 @@ class TestCausalLMPerf(TestCausalLMBase):
 
 
 instantiate_device_type_tests(TestCausalLM, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestCausalLMGraph, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestCausalLMPerf, globals(), only_for="privateuse1")
 
 

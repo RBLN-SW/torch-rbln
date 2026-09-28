@@ -18,26 +18,13 @@ MODES:
     external      Use external rebel-compiler from REBEL_HOME
 
 PYPI MODE (Recommended for most development):
-    ./tools/dev-setup.sh pypi [--clean] [--extra-index-url <url>]
+    ./tools/dev-setup.sh pypi [--clean]
 
     This will:
     - Install dependencies with uv (rebel-compiler from lock)
     - Install torch-rbln in editable mode
 
     Use --clean to remove build/ and do a fresh build (e.g. after changing C++ code).
-
-    If constraints-build-dev.txt exists, rebel-compiler is installed with that
-    constraints file plus an extra index. You can provide the index in any of these
-    ways (first match wins where applicable):
-
-    - uv built-ins: export UV_INDEX (space-separated URLs) or UV_EXTRA_INDEX_URL;
-      see https://docs.astral.sh/uv/reference/environment/
-    - This script: --extra-index-url <url> — passed to uv for the constraints-based
-      rebel-compiler install only (order with --clean is arbitrary).
-    - Interactive: if none of the above apply (TTY), you will be prompted; leave
-      empty to use only pypi.rbln.ai.
-
-    pip's PIP_EXTRA_INDEX_URL is not read by uv; use UV_INDEX / UV_EXTRA_INDEX_URL.
 
 EXTERNAL MODE (For rebel-compiler developers):
     export REBEL_HOME=/path/to/rebel_compiler
@@ -51,9 +38,6 @@ EXAMPLES:
 
     # PyPI with clean build (removes build/ and rebuilds)
     ./tools/dev-setup.sh pypi --clean
-
-    # PyPI with a private extra index (e.g. for constraints-build-dev.txt)
-    ./tools/dev-setup.sh pypi --extra-index-url 'https://example.com/simple/'
 
     # Use external rebel-compiler
     export REBEL_HOME=~/rebel_compiler
@@ -94,21 +78,12 @@ check_rebel_index_access() {
 
 mode_pypi() {
     local do_clean=""
-    local arg_extra_index_url=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --clean) do_clean=1; shift ;;
-            --extra-index-url)
-                if [[ -z "${2:-}" ]]; then
-                    echo "❌ --extra-index-url requires a URL"
-                    exit 1
-                fi
-                arg_extra_index_url="$2"
-                shift 2
-                ;;
             *)
                 echo "❌ Unknown pypi option: $1"
-                echo "   Usage: ./tools/dev-setup.sh pypi [--clean] [--extra-index-url <url>]"
+                echo "   Usage: ./tools/dev-setup.sh pypi [--clean]"
                 exit 1
                 ;;
         esac
@@ -144,101 +119,37 @@ mode_pypi() {
         echo ""
     fi
 
-    # Ensure pyproject.toml uses PyPI rebel-compiler (not file:// custom wheel)
     if grep -q "rebel-compiler @ file://" pyproject.toml 2>/dev/null; then
-        echo "⚠️  Detected custom rebel-compiler in pyproject.toml"
-        echo "   Restoring PyPI version..."
-        python ./tools/replace_depends.py \
-            --pyproject-path ./pyproject.toml \
-            --source "rebel-compiler" \
-            --target "rebel-compiler>=0.11.2,<0.20.0" \
-            --set-index rbln
-        rm -f uv.lock
+        echo "❌ pyproject.toml points rebel-compiler at a local wheel, so the pinned build cannot be installed."
+        echo "   Restore both files and re-run:"
+        echo "     git restore --source=HEAD -- pyproject.toml uv.lock"
+        exit 1
     fi
 
-    check_rebel_index_access
+    echo "Running: uv sync --locked --no-install-project"
+    local sync_output
+    if sync_output=$(uv sync --locked --no-install-project 2>&1); then
+        echo "${sync_output}"
+    elif grep -qE "Unauthorized|403 Forbidden|could not be queried|lack of valid authentication" <<<"${sync_output}"; then
+        echo ""
+        echo "⚠️  Cannot authenticate to a package index. Installing the latest"
+        echo "    rebel-compiler from pypi.rbln.ai instead of the locked build."
+        echo "────────────────────────────────────────────────────────────────────────"
+        echo "${sync_output}"
+        echo "────────────────────────────────────────────────────────────────────────"
+        echo ""
 
-    echo "Running: uv lock"
-    uv lock
+        check_rebel_index_access
 
-    echo "Running: uv sync --no-install-project"
-    uv sync --no-install-project
+        echo "Running: uv sync --locked --no-install-project --no-install-package rebel-compiler"
+        uv sync --locked --no-install-project --no-install-package rebel-compiler
 
-    # Install rebel-compiler: optional extra index + constraints-build-dev.txt; on 401/auth failure fall back to pypi.rbln.ai
-    # Extra index sources: --extra-index-url, or uv's UV_INDEX / UV_EXTRA_INDEX_URL (see uv env docs), or prompt (TTY).
-    if [[ -f constraints-build-dev.txt ]]; then
-        rebel_extra_index="${arg_extra_index_url}"
-        uv_extra_index_env=0
-        if [[ -z "${rebel_extra_index}" ]] && { [[ -n "${UV_INDEX:-}" ]] || [[ -n "${UV_EXTRA_INDEX_URL:-}" ]]; }; then
-            uv_extra_index_env=1
-        fi
-        if [[ -z "${rebel_extra_index}" ]] && [[ "${uv_extra_index_env}" -eq 0 ]] && [[ -t 0 ]]; then
-            echo ""
-            read -r -p "Extra PyPI index URL for rebel-compiler (constraints-build-dev; empty = pypi.rbln.ai only): " rebel_extra_index
-            echo ""
-        fi
-
-        if [[ -n "${rebel_extra_index}" ]]; then
-            echo "Running: uv pip install -c constraints-build-dev.txt rebel-compiler (--extra-index-url / prompt)"
-            set +e
-            REBEL_OUTPUT=$(uv pip install --extra-index-url "${rebel_extra_index}" \
-                -c constraints-build-dev.txt rebel-compiler 2>&1)
-            REBEL_EXIT=$?
-            set -e
-
-            if [[ "${REBEL_EXIT}" -eq 0 ]]; then
-                echo "${REBEL_OUTPUT}"
-            else
-                if echo "${REBEL_OUTPUT}" | grep -qE "401|Unauthorized|could not be queried|lack of valid authentication"; then
-                    echo ""
-                    echo "⚠️  Extra index failed due to missing or invalid credentials (e.g. 401 Unauthorized)."
-                    echo "    Your environment does not have access to that index."
-                    echo "    Falling back to pypi.rbln.ai (rebel-compiler version from lock)."
-                    echo ""
-                    echo "--- uv output (extra index attempt) ---"
-                    echo "${REBEL_OUTPUT}"
-                    echo "--- end uv output ---"
-                    echo ""
-                    echo "Running: uv pip install rebel-compiler (pypi.rbln.ai)"
-                    uv pip install --extra-index-url https://pypi.rbln.ai/simple/ rebel-compiler
-                else
-                    echo "${REBEL_OUTPUT}" >&2
-                    exit 1
-                fi
-            fi
-        elif [[ "${uv_extra_index_env}" -eq 1 ]]; then
-            echo "Running: uv pip install -c constraints-build-dev.txt rebel-compiler (UV_INDEX / UV_EXTRA_INDEX_URL)"
-            set +e
-            REBEL_OUTPUT=$(uv pip install -c constraints-build-dev.txt rebel-compiler 2>&1)
-            REBEL_EXIT=$?
-            set -e
-
-            if [[ "${REBEL_EXIT}" -eq 0 ]]; then
-                echo "${REBEL_OUTPUT}"
-            else
-                if echo "${REBEL_OUTPUT}" | grep -qE "401|Unauthorized|could not be queried|lack of valid authentication"; then
-                    echo ""
-                    echo "⚠️  Extra index failed due to missing or invalid credentials (e.g. 401 Unauthorized)."
-                    echo "    Falling back to pypi.rbln.ai (rebel-compiler version from lock)."
-                    echo ""
-                    echo "--- uv output (extra index attempt) ---"
-                    echo "${REBEL_OUTPUT}"
-                    echo "--- end uv output ---"
-                    echo ""
-                    echo "Running: uv pip install rebel-compiler (pypi.rbln.ai)"
-                    uv pip install --extra-index-url https://pypi.rbln.ai/simple/ rebel-compiler
-                else
-                    echo "${REBEL_OUTPUT}" >&2
-                    exit 1
-                fi
-            fi
-        else
-            echo "Running: uv pip install rebel-compiler (pypi.rbln.ai) — no extra index (constraints-build-dev not used for pip install)"
-            uv pip install --extra-index-url https://pypi.rbln.ai/simple/ rebel-compiler
-        fi
+        # Without --no-config, uv pip install applies the constraint and requests the build that just failed.
+        echo "Running: uv pip install --no-config --index rbln=https://pypi.rbln.ai/simple/ rebel-compiler"
+        uv pip install --no-config --index rbln=https://pypi.rbln.ai/simple/ rebel-compiler
     else
-        echo "Running: uv pip install rebel-compiler (pypi.rbln.ai)"
-        uv pip install --extra-index-url https://pypi.rbln.ai/simple/ rebel-compiler
+        echo "${sync_output}" >&2
+        exit 1
     fi
 
     echo "Running: uv pip install -e ."

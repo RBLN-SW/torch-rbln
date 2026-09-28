@@ -377,9 +377,9 @@ def _sdpa_compute_attn_weights(
 
     Causal mask is created outside the compiled graph to avoid RBLN memory issues.
     """
-    from torch_rbln.device.context_holder import out_tensor_context
 
     if is_cpu_fallback_cases((query, key)):
+        rbln_log_cpu_fallback("sdpa (attn_weights)")
         return _sdpa_attn_weights_fallback(query, key, attn_mask, is_causal, scale)
 
     query = query.contiguous()
@@ -397,14 +397,13 @@ def _sdpa_compute_attn_weights(
     if merged_mask is not None:
         merged_mask = merged_mask.contiguous()
 
-    with out_tensor_context():
-        compiled = compile_rbln_cached(
-            _compile_sdpa_attn_weights_fn,
-            dynamic=False,
-            options={"disable_logger": True},
-            device_cache_key=query.device.index,
-        )
-        external_result = compiled(query, key, attn_mask=merged_mask, scale=scale)
+    compiled = compile_rbln_cached(
+        _compile_sdpa_attn_weights_fn,
+        dynamic=False,
+        options={"disable_logger": True},
+        device_cache_key=query.device.index,
+    )
+    external_result = compiled(query, key, attn_mask=merged_mask, scale=scale)
 
     return external_result
 
@@ -456,22 +455,21 @@ def _sdpa_compute_output(
     dropout_p: float,
 ) -> torch.Tensor:
     """Compute output using RBLN compiled graph."""
-    from torch_rbln.device.context_holder import out_tensor_context
 
     if is_cpu_fallback_cases((attn_weights, value)):
+        rbln_log_cpu_fallback("sdpa (output)")
         return _sdpa_output_fallback(attn_weights, value, dropout_p)
 
     attn_weights = attn_weights.contiguous()
     value = value.contiguous()
 
-    with out_tensor_context():
-        compiled = compile_rbln_cached(
-            _compile_sdpa_output_fn,
-            dynamic=False,
-            options={"disable_logger": True},
-            device_cache_key=attn_weights.device.index,
-        )
-        external_result = compiled(attn_weights, value, dropout_p=dropout_p)
+    compiled = compile_rbln_cached(
+        _compile_sdpa_output_fn,
+        dynamic=False,
+        options={"disable_logger": True},
+        device_cache_key=attn_weights.device.index,
+    )
+    external_result = compiled(attn_weights, value, dropout_p=dropout_p)
 
     return external_result
 
@@ -548,7 +546,6 @@ def _sdpa_backward_compiled(
     scale: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """SDPA backward using 4 compiled graphs."""
-    from torch_rbln.device.context_holder import out_tensor_context
 
     S = key.size(-2)
 
@@ -573,6 +570,7 @@ def _sdpa_backward_compiled(
 
     args = (grad_output, query, key, value, attn_weights)
     if is_cpu_fallback_cases(args):
+        rbln_log_cpu_fallback("sdpa_backward")
         return _sdpa_backward_fallback(grad_output, query, key, value, attn_weights, scale)
 
     grad_output = grad_output.contiguous()
@@ -581,43 +579,42 @@ def _sdpa_backward_compiled(
     value_expanded = value_expanded.contiguous()
     attn_weights = attn_weights.contiguous()
 
-    with out_tensor_context():
-        # Graph 1: grad_V = attn_weights^T @ grad_output
-        compiled_grad_v = compile_rbln_cached(
-            _compile_sdpa_grad_value_fn,
-            dynamic=False,
-            options={"disable_logger": True},
-            device_cache_key=grad_output.device.index,
-        )
-        grad_value = compiled_grad_v(attn_weights, grad_output)
+    # Graph 1: grad_V = attn_weights^T @ grad_output
+    compiled_grad_v = compile_rbln_cached(
+        _compile_sdpa_grad_value_fn,
+        dynamic=False,
+        options={"disable_logger": True},
+        device_cache_key=grad_output.device.index,
+    )
+    grad_value = compiled_grad_v(attn_weights, grad_output)
 
-        # Graph 2: grad_scores = softmax_backward * scale
-        compiled_grad_scores = compile_rbln_cached(
-            _compile_sdpa_grad_scores_fn,
-            dynamic=False,
-            options={"disable_logger": True},
-            device_cache_key=grad_output.device.index,
-        )
-        grad_scores = compiled_grad_scores(grad_output, value_expanded, attn_weights, scale)
+    # Graph 2: grad_scores = softmax_backward * scale
+    compiled_grad_scores = compile_rbln_cached(
+        _compile_sdpa_grad_scores_fn,
+        dynamic=False,
+        options={"disable_logger": True},
+        device_cache_key=grad_output.device.index,
+    )
+    grad_scores = compiled_grad_scores(grad_output, value_expanded, attn_weights, scale)
 
-        # Graph 3: grad_Q = grad_scores @ K
-        grad_scores = grad_scores.contiguous()
-        compiled_grad_q = compile_rbln_cached(
-            _compile_sdpa_grad_query_fn,
-            dynamic=False,
-            options={"disable_logger": True},
-            device_cache_key=grad_output.device.index,
-        )
-        grad_query = compiled_grad_q(grad_scores, key_expanded)
+    # Graph 3: grad_Q = grad_scores @ K
+    grad_scores = grad_scores.contiguous()
+    compiled_grad_q = compile_rbln_cached(
+        _compile_sdpa_grad_query_fn,
+        dynamic=False,
+        options={"disable_logger": True},
+        device_cache_key=grad_output.device.index,
+    )
+    grad_query = compiled_grad_q(grad_scores, key_expanded)
 
-        # Graph 4: grad_K = grad_scores^T @ Q
-        compiled_grad_k = compile_rbln_cached(
-            _compile_sdpa_grad_key_fn,
-            dynamic=False,
-            options={"disable_logger": True},
-            device_cache_key=grad_output.device.index,
-        )
-        grad_key = compiled_grad_k(grad_scores, query)
+    # Graph 4: grad_K = grad_scores^T @ Q
+    compiled_grad_k = compile_rbln_cached(
+        _compile_sdpa_grad_key_fn,
+        dynamic=False,
+        options={"disable_logger": True},
+        device_cache_key=grad_output.device.index,
+    )
+    grad_key = compiled_grad_k(grad_scores, query)
 
     # Handle GQA gradient reduction
     if gqa_enabled:

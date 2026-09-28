@@ -1,26 +1,158 @@
 name: Release
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
-    branches: [main]
-  push:
-    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: Version tag (e.g., v0.10.0rc0, v0.10.0, v0.10.0.post0)
+        type: string
+        required: true
 
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ inputs.version_tag }}
+  cancel-in-progress: false
 
 jobs:
-  dispatch_torch_rbln_release:
-    uses: ./.github/workflows/_dispatch-event.yaml
-    with:
-      event_name: ${{ github.event_name }}
-      event_type: torch-rbln-release
-      torch_rbln_ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
-      torch_rbln_sha: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-    secrets:
-      GIT_PAT: ${{ secrets.GIT_PAT }}
+  release:
+    name: Release
+    if: ${{ github.repository_owner == 'RBLN-SW' }}
+    runs-on: ${{ vars.TORCH_RBLN_RUNNER_CPU_SMALL }}
+    env:
+      GIT_CONFIG_COUNT: '1'
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: ${{ github.workspace }}
+    timeout-minutes: 15
+    container:
+      image: ghcr.io/rebellions-sw/rbln-test:0.11.0-ubuntu22.04-py3.12
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GIT_PAT }}
+    steps:
+      - name: Validate version tag
+        id: validate_version_tag
+        env:
+          VERSION_TAG: ${{ inputs.version_tag }}
+        run: |
+          set -euo pipefail
+
+          # Canonical spelling only: a tag must equal the version setuptools-scm derives from it.
+          tag_pattern='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(rc(0|[1-9][0-9]*)|\.post(0|[1-9][0-9]*))?$'
+          if [[ ! "${VERSION_TAG}" =~ ${tag_pattern} ]]; then
+            echo "::error::Invalid version tag '${VERSION_TAG}': expected vMAJOR.MINOR.PATCH with an optional rcN or .postN suffix (e.g., v0.10.0rc0, v0.10.0, v0.10.0.post0)"
+            exit 1
+          fi
+
+          if [[ "${VERSION_TAG}" == *rc* ]]; then
+            tag_type="rc"
+          elif [[ "${VERSION_TAG}" == *.post* ]]; then
+            tag_type="post"
+          else
+            tag_type="final"
+          fi
+          echo "::notice::Tag type: ${tag_type}"
+          echo "tag_type=${tag_type}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve tag state
+        id: resolve_tag_state
+        env:
+          VERSION_TAG: ${{ inputs.version_tag }}
+          TAG_TYPE: ${{ steps.validate_version_tag.outputs.tag_type }}
+        run: |
+          set -euo pipefail
+
+          main_sha=$(git rev-parse HEAD)
+          echo "::notice::HEAD of main: ${main_sha}"
+          echo "main_sha=${main_sha}" >> "${GITHUB_OUTPUT}"
+
+          tag_exists="false"
+          if existing_tag_sha=$(git rev-parse -q --verify "refs/tags/${VERSION_TAG}^{commit}"); then
+            if [[ "${existing_tag_sha}" != "${main_sha}" ]]; then
+              echo "::error::Tag '${VERSION_TAG}' already exists but points at ${existing_tag_sha}, not at main HEAD ${main_sha}; pick a new version"
+              exit 1
+            fi
+            echo "::warning::Tag '${VERSION_TAG}' already exists at main HEAD; skipping tag creation"
+            tag_exists="true"
+          fi
+          echo "tag_exists=${tag_exists}" >> "${GITHUB_OUTPUT}"
+
+          # Release notes start after the previous tag with a GitHub Release,
+          # so no commit is listed twice or skipped.
+          notes_baseline=""
+          if [[ "${TAG_TYPE}" != "rc" ]]; then
+            all_tags=$(git tag --list 'v*')
+            notes_baseline=$(printf '%s\n%s\n' "${all_tags}" "${VERSION_TAG}" \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(\.post[0-9]+)?$' | sort -V -u \
+              | awk -v tag="${VERSION_TAG}" '$0 == tag { exit } { previous_tag = $0 } END { print previous_tag }')
+            echo "::notice::Release notes baseline: ${notes_baseline:-<none>}"
+          fi
+          echo "notes_baseline=${notes_baseline}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create version tag
+        if: ${{ steps.resolve_tag_state.outputs.tag_exists == 'false' }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        env:
+          VERSION_TAG: ${{ inputs.version_tag }}
+          MAIN_SHA: ${{ steps.resolve_tag_state.outputs.main_sha }}
+        with:
+          # A tag created by GITHUB_TOKEN does not trigger workflows, so cd.yaml would never fire.
+          github-token: ${{ secrets.GIT_PAT }}
+          script: |
+            const tag = process.env.VERSION_TAG;
+            const sha = process.env.MAIN_SHA;
+            await github.rest.git.createRef({
+              ...context.repo,
+              ref: `refs/tags/${tag}`,
+              sha,
+            });
+            core.notice(`Created tag '${tag}' at ${sha}`);
+
+      - name: Create GitHub Release
+        if: ${{ steps.validate_version_tag.outputs.tag_type != 'rc' }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        env:
+          VERSION_TAG: ${{ inputs.version_tag }}
+          NOTES_BASELINE: ${{ steps.resolve_tag_state.outputs.notes_baseline }}
+        with:
+          github-token: ${{ secrets.GIT_PAT }}
+          script: |
+            const tag = process.env.VERSION_TAG;
+            const baseline = process.env.NOTES_BASELINE;
+
+            try {
+              await github.rest.repos.getReleaseByTag({ ...context.repo, tag });
+              core.warning(`GitHub Release '${tag}' already exists; skipping release creation`);
+              return;
+            } catch (error) {
+              if (error.status !== 404) {
+                throw error;
+              }
+            }
+
+            // createRelease does not take previous_tag_name, so the notes are generated first.
+            const { data: notes } = await github.rest.repos.generateReleaseNotes({
+              ...context.repo,
+              tag_name: tag,
+              previous_tag_name: baseline || undefined,
+            });
+
+            await github.rest.repos.createRelease({
+              ...context.repo,
+              tag_name: tag,
+              name: tag,
+              body: notes.body,
+            });
+            core.notice(`Created GitHub Release '${tag}'`);

@@ -96,14 +96,50 @@ void register_public_device_api(py::module_& module) {
       "Exchange the current device and return the original device.");
 
   // Synchronization
-  module.def("synchronize", &c10::rbln::synchronize, "Wait for all pending async transfers on a device.");
+  module.def(
+      "synchronize",
+      &c10::rbln::synchronize,
+      "Wait for a device's pending async transfers, then drain all of its streams.");
 
   // Memory management functions
   module.def("empty_cache", &c10::rbln::empty_cache, "Release all unoccupied cached memory.");
   module.def("memory_stats", &c10::rbln::memory_stats, "Get memory allocator statistics.");
   module.def(
+      "memory_stats_per_chiplet",
+      &c10::rbln::memory_stats_per_chiplet,
+      "Get memory allocator statistics broken down per chiplet.");
+  module.def(
       "reset_accumulated_memory_stats", &c10::rbln::reset_accumulated_memory_stats, "Reset accumulated memory stats.");
   module.def("reset_peak_memory_stats", &c10::rbln::reset_peak_memory_stats, "Reset peak memory stats.");
+  module.def("mem_get_info", &c10::rbln::mem_get_info, "Get (free, total) device DRAM in bytes.");
+  module.def(
+      "mem_get_info_per_chiplet",
+      &c10::rbln::mem_get_info_per_chiplet,
+      "Get the driver's device DRAM usage broken down per chiplet.");
+
+  py::class_<c10::rbln::DeviceProperties>(module, "DeviceProperties")
+      .def_readonly("name", &c10::rbln::DeviceProperties::name)
+      .def_readonly("total_memory", &c10::rbln::DeviceProperties::total_memory)
+      .def_readonly("memory_per_chiplet", &c10::rbln::DeviceProperties::memory_per_chiplet)
+      .def_readonly("num_chiplet", &c10::rbln::DeviceProperties::num_chiplet)
+      .def_readonly("npu_count", &c10::rbln::DeviceProperties::npu_count)
+      .def("__repr__", [](const c10::rbln::DeviceProperties& self) {
+        return c10::str(
+            "DeviceProperties(name='",
+            self.name,
+            "', total_memory=",
+            self.total_memory,
+            ", memory_per_chiplet=",
+            self.memory_per_chiplet,
+            ", num_chiplet=",
+            self.num_chiplet,
+            ", npu_count=",
+            self.npu_count,
+            ")");
+      });
+
+  module.def(
+      "get_device_properties", &c10::rbln::get_device_properties, "Get the hardware properties of a logical device.");
 
   // Register DeviceTopology structures
   py::class_<c10::rbln::DeviceTopologyEntry>(module, "DeviceTopologyEntry")
@@ -334,7 +370,7 @@ void register_internal_api(py::module_& module) {
       "_dispatch_shim_warm_segments_dump",
       &torch_rbln::shim::diag_dump_warm_segments,
       "DIAG: warm-cache hit per-segment timers (n_hits, ns_lookup, ns_io_build, "
-      "ns_gil, ns_prep_in, ns_prep_out, ns_run, ns_finalize)");
+      "ns_prep_in, ns_prep_out, ns_run, ns_finalize)");
   module.def(
       "_dispatch_shim_warm_segments_reset",
       &torch_rbln::shim::diag_reset_warm_segments,
@@ -428,9 +464,7 @@ void register_internal_api(py::module_& module) {
       "Internal: install a warm-cache entry from the thread-local pending key "
       "set by the shim on the way into the miss path",
       pybind11::arg("dyn_runtime"),
-      pybind11::arg("runtime_raw_ptr"),
-      pybind11::arg("num_inputs"),
-      pybind11::arg("num_outputs"),
+      pybind11::arg("runtime_handle"),
       pybind11::arg("out_profiles"));
 
   module.def(
@@ -447,8 +481,10 @@ void register_internal_api(py::module_& module) {
       "Internal: number of entries in the warm-cache (debug/bench only)");
   module.def(
       "_warmcache_clear",
-      []() { torch_rbln::warmcache::WarmCache::instance().clear(); },
-      "Internal: drop all warm-cache entries (tests / benchmarks)");
+      [](std::optional<c10::DeviceIndex> device) { torch_rbln::warmcache::WarmCache::instance().clear(device); },
+      "Internal: drop the warm-cache entries whose inputs live on `device`, or "
+      "all of them when device is None",
+      pybind11::arg("device") = pybind11::none());
   module.def(
       "_warmcache_is_building",
       []() { return torch_rbln::warmcache::WarmCache::is_building_entry(); },
@@ -462,18 +498,6 @@ void register_internal_api(py::module_& module) {
       "_warmcache_exit_building",
       []() { torch_rbln::warmcache::WarmCache::exit_building(); },
       "Internal: clear the miss-path reentrancy flag set by _warmcache_enter_building");
-  module.def(
-      "_warmcache_consume_force_recompile",
-      []() { return torch_rbln::warmcache::WarmCache::consume_force_recompile(); },
-      "Internal: consume the thread-local force-recompile flag set by a failed "
-      "warm-cache hit. Returns True iff a flag was pending; clears it.");
-  module.def(
-      "_warmcache_request_force_recompile",
-      []() { torch_rbln::warmcache::WarmCache::request_force_recompile(); },
-      "Internal: set the thread-local force-recompile flag. Production callers "
-      "rely on the C++ shim auto-setting this on hit-failure; this binding "
-      "exists so tests can exercise the consume/clear pair without engineering "
-      "a runtime soft-failure.");
 
   // CPU fast-path registry introspection. Returns True iff a handler is
   // registered for the given fully-qualified op name (e.g. "aten::rsqrt.out").
@@ -507,40 +531,6 @@ void register_internal_api(py::module_& module) {
         return out;
       },
       "Internal: per-primitive (ns, calls) spent inside librbln boundary calls this region");
-
-  // Pybind11 instance raw-pointer extractor.
-  //
-  // For a pybind11 simple-layout instance (single-inheritance, standard
-  // ``unique_ptr`` / ``shared_ptr`` holder), the underlying C++ object pointer
-  // is stored directly after ``PyObject_HEAD``. We need this to bridge rebel's
-  // ``PyRblnSyncRuntime`` (built against pybind11 v2) into torch-rbln (which
-  // links pybind11 v3); the two registries are disjoint so ``py::cast<T*>``
-  // fails across DSOs.
-  //
-  // Reading the raw pointer requires knowing ``sizeof(PyObject)`` at the
-  // boundary. Doing this in C++ keeps the offset matched to the Python ABI
-  // we are compiled against, instead of a hardcoded Python-side constant
-  // that drifts on debug builds, free-threaded builds (PEP 703), or non-x86.
-  module.def(
-      "_pybind_instance_raw_ptr",
-      [](pybind11::handle h) -> uintptr_t {
-        PyObject* obj = h.ptr();
-        if (obj == nullptr) {
-          throw std::invalid_argument("_pybind_instance_raw_ptr: null handle");
-        }
-        // Layout: [PyObject_HEAD][void* instance_ptr][...]. Read the void*
-        // immediately past the head.
-        const auto* slot = reinterpret_cast<const uintptr_t*>(reinterpret_cast<const char*>(obj) + sizeof(PyObject));
-        const uintptr_t raw = *slot;
-        // A real object pointer is pointer-aligned; a misaligned value means we
-        // read garbage (wrong layout / ABI skew the Python type-name gate can't
-        // catch). Return 0 so the caller skips the warm-cache fast path.
-        if ((raw % alignof(void*)) != 0) {
-          return 0;
-        }
-        return raw;
-      },
-      "Internal: extract the raw C++ pointer held by a pybind11 simple-layout instance");
 
   // Fallback configuration
   module.def(
@@ -657,7 +647,11 @@ extern "C" PyObject* initModule() {
 
   // Step 2: Create the module definition
   static struct PyModuleDef torch_rbln_module_definition = {
-      PyModuleDef_HEAD_INIT, "torch_rbln._C", nullptr, -1, global_method_definitions.data()};
+      .m_base = PyModuleDef_HEAD_INIT,
+      .m_name = "torch_rbln._C",
+      .m_doc = nullptr,
+      .m_size = -1,
+      .m_methods = global_method_definitions.data()};
   PyObject* created_module = PyModule_Create(&torch_rbln_module_definition);
 
   // Step 3: Initialize RBLN-specific bindings

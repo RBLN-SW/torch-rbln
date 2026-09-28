@@ -33,6 +33,12 @@ import torch_rbln  # noqa: F401
 from test.utils import requires_physical_devices
 
 
+# Deselected by rebel_compiler's CI (`-m "not torch_rbln_only"`); see the marker in pyproject.
+# The gate under test is torch-rbln's own: these tests never run against an absent runtime, they
+# flip the process-wide shutting-down flag (and interpose librbln) to force it.
+pytestmark = pytest.mark.torch_rbln_only
+
+
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 

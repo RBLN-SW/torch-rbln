@@ -2,7 +2,7 @@
 
 """torch.accelerator stream/event conformance for the RBLN backend.
 
-Ported from PyTorch's own accelerator test suite (pytorch v2.11.0
+Ported from PyTorch's own accelerator test suite (pytorch v2.13.0
 ``test/test_accelerator.py``). These cases are device-agnostic — they drive the
 generic ``torch.accelerator`` / ``torch.Stream`` / ``torch.Event`` API, which
 routes to whichever backend is the current accelerator. On an RBLN host that is

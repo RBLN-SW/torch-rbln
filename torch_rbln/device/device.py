@@ -7,12 +7,14 @@ extension, so you can query and manage RBLN hardware just as naturally as
 you would in native PyTorch.
 """
 
-from typing import Any, List, Union  # noqa: UP035
+import threading
+from typing import Any, Dict, Iterable, List, Union  # noqa: UP035
 
 import torch
 
 import torch_rbln._C
 from torch_rbln._internal.ops_utils import SupportedDtypes
+from torch_rbln.memory import _normalize_device
 
 
 __all__ = [
@@ -23,8 +25,14 @@ __all__ = [
     "is_dummy_device",
     "is_initialized",
     "get_amp_supported_dtype",
+    "get_device_properties",
+    "get_device_name",
     "set_device",
     "synchronize",
+    "get_rng_state",
+    "get_rng_state_all",
+    "set_rng_state",
+    "set_rng_state_all",
     "device",
     "device_of",
     "device_summary",
@@ -143,8 +151,46 @@ def get_amp_supported_dtype() -> List[torch.dtype]:
     return list(SupportedDtypes.amp)
 
 
+def get_device_properties(
+    device: Union[int, torch.device, str, None] = None,
+) -> torch_rbln._C.DeviceProperties:
+    """What the NPUs behind an RBLN logical device are (``torch.cuda`` parity).
+
+    A logical device may span several physical NPUs (``RBLN_DEVICE_MAP`` /
+    ``RBLN_NPUS_PER_DEVICE``), so ``total_memory`` sums them and ``npu_count`` says how many.
+    ``num_chiplet`` and ``memory_per_chiplet`` stay per NPU: a device runs out on its heaviest
+    chiplet, which ``total_memory`` hides, so size a pool by ``memory_per_chiplet``.
+
+    Args:
+        device (torch.device or int or str, optional): The device to query. Defaults to the
+            current device.
+
+    Raises:
+        RuntimeError: in ``RBLN_DUMMY_DEVICE`` mode (host-backed, no NPU to report on), when no
+            NPU is mapped to the index, or when the runtime cannot answer for one of them.
+
+    Example::
+        >>> import torch
+        >>> torch.rbln.get_device_properties(0).total_memory
+        150323855360
+    """
+    device_idx = current_device() if device is None else _get_device_index(device)
+    return torch_rbln._C.get_device_properties(device_idx)
+
+
+def get_device_name(device: Union[int, torch.device, str, None] = None) -> str:
+    """The NPU name behind an RBLN logical device, e.g. ``"RBLN-CA25"`` (``torch.cuda`` parity).
+
+    Args:
+        device (torch.device or int or str, optional): The device to query. Defaults to the
+            current device.
+    """
+    return get_device_properties(device).name
+
+
 def synchronize(device: Union[int, torch.device, str, None] = None) -> None:
-    """Wait for all pending async transfers on the given RBLN device.
+    """Wait for all work on the given RBLN device: its pending async transfers, then
+    every stream on it (``torch.cuda.synchronize`` parity).
 
     If no device is specified, the current device is used.
 
@@ -254,6 +300,46 @@ def _maybe_exchange_device(device: int) -> int:
     if device < 0:
         return -1
     return _exchange_device(device)
+
+
+_default_generators: Dict[int, torch.Generator] = {}
+_default_generators_lock = threading.Lock()
+
+
+def _default_generator(device: Union[int, str, torch.device, None]) -> torch.Generator:
+    index = _normalize_device(device).index
+    with _default_generators_lock:
+        generator = _default_generators.get(index)
+        if generator is None:
+            generator = torch.Generator(device=f"rbln:{index}")
+            _default_generators[index] = generator
+    return generator
+
+
+def get_rng_state(device: Union[int, str, torch.device] = "rbln") -> torch.Tensor:
+    """Return the RNG state of ``device`` as a ByteTensor (``torch.cuda.get_rng_state`` parity).
+
+    ``"rbln"`` with no index means the current device. torch calls this on the current
+    accelerator's module from ``torch.random.fork_rng``, ``torch.utils.checkpoint`` and
+    ``torch.testing._utils.freeze_rng_state``.
+    """
+    return _default_generator(device).get_state()
+
+
+def get_rng_state_all() -> List[torch.Tensor]:
+    """Return the RNG state of every device, in device-index order."""
+    return [get_rng_state(index) for index in range(device_count())]
+
+
+def set_rng_state(new_state: torch.Tensor, device: Union[int, str, torch.device] = "rbln") -> None:
+    """Set the RNG state of ``device`` from a ByteTensor produced by :func:`get_rng_state`."""
+    _default_generator(device).set_state(new_state)
+
+
+def set_rng_state_all(new_states: Iterable[torch.Tensor]) -> None:
+    """Set the RNG state of every device from states ordered like :func:`get_rng_state_all`."""
+    for index, state in enumerate(new_states):
+        set_rng_state(state, index)
 
 
 class device:

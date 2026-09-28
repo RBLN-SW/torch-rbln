@@ -24,9 +24,6 @@ __pycache__/
 .eggs/
 .python-version
 
-# Package manager lockfiles
-uv.lock
-
 # Virtual environments
 venv/
 .venv/
@@ -54,6 +51,8 @@ venv/
 .cursor/
 .DS_Store
 CLAUDE.local.md
+.claude/settings.local.json
+.claude/*.lock
 
 # Linting & static analysis
 /.lintbin/

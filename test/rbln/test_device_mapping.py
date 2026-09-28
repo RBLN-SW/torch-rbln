@@ -4,6 +4,7 @@
 Test suite for RBLN device mapping functionality.
 """
 
+import concurrent.futures
 import os
 import subprocess
 import sys
@@ -514,9 +515,22 @@ class TestDeviceMappingEnvVars(TestCase):
             "[0]extra",  # trailing garbage after a group
             "[0",  # unterminated group
         ]
-        for device_map in malformed:
+        # Each value needs its own interpreter (the mapping is planned once per process),
+        # but the values do not depend on each other, so run them at once rather than
+        # paying for a torch import nine times in a row.
+        # Threads, because each call blocks in subprocess.run; bounded, because each child
+        # costs what a torch import costs in memory.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(
+                pool.map(
+                    lambda device_map: run_test_with_env(
+                        {"RBLN_DEVICE_MAP": device_map}, self.run_device_map_malformed_error_impl
+                    ),
+                    malformed,
+                )
+            )
+        for device_map, result in zip(malformed, results):
             with self.subTest(device_map=device_map):
-                result = run_test_with_env({"RBLN_DEVICE_MAP": device_map}, self.run_device_map_malformed_error_impl)
                 self.assertNotEqual(
                     result.returncode,
                     0,

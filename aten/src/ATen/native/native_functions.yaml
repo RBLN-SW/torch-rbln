@@ -1,4 +1,4 @@
-# This file is adapted from https://github.com/pytorch/pytorch/blob/v2.8.0/aten/src/ATen/native/native_functions.yaml in upstream PyTorch.
+# This file is adapted from https://github.com/pytorch/pytorch/blob/v2.13.0/aten/src/ATen/native/native_functions.yaml in upstream PyTorch.
 
 - func: add.out(Tensor self, Tensor other, *, Scalar alpha=1, Tensor(a!) out) -> Tensor(a!)
   device_check: NoCheck   # TensorIterator
@@ -62,7 +62,7 @@
 - func: silu_backward(Tensor grad_output, Tensor self) -> Tensor
   dispatch:
     PrivateUse1: silu_backward_rbln
-  tags: use_custom_kernel_rbln
+  tags: [pointwise, use_custom_kernel_rbln]
 
 - func: rsqrt.out(Tensor self, *, Tensor(a!) out) -> Tensor(a!)
   device_check: NoCheck   # TensorIterator
@@ -77,6 +77,7 @@
   device_check: NoCheck   # TensorIterator
   dispatch:
     PrivateUse1: mean_out_rbln
+  tags: reduction
 
 - func: mm.out(Tensor self, Tensor mat2, *, Tensor(a!) out) -> Tensor(a!)
   structured: True
@@ -201,22 +202,26 @@
   variants: method, function
   dispatch:
     PrivateUse1: max_rbln
+  tags: reduction
 
 - func: min(Tensor self) -> Tensor
   device_check: NoCheck   # TensorIterator
   variants: method, function
   dispatch:
     PrivateUse1: min_rbln
+  tags: reduction
 
 - func: max.unary_out(Tensor self, *, Tensor(a!) out) -> Tensor(a!)
   device_check: NoCheck   # TensorIterator
   dispatch:
     PrivateUse1: max_unary_out_rbln
+  tags: reduction
 
 - func: min.unary_out(Tensor self, *, Tensor(a!) out) -> Tensor(a!)
   device_check: NoCheck   # TensorIterator
   dispatch:
     PrivateUse1: min_unary_out_rbln
+  tags: reduction
 
 - func: maximum.out(Tensor self, Tensor other, *, Tensor(a!) out) -> Tensor(a!)
   structured: True
@@ -279,6 +284,7 @@
   device_check: NoCheck   # TensorIterator
   dispatch:
     PrivateUse1: logical_not_out_rbln
+  tags: pointwise
 
 - func: ne.Tensor_out(Tensor self, Tensor other, *, Tensor(a!) out) -> Tensor(a!)
   structured: True

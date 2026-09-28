@@ -5,7 +5,6 @@ Test suite for torch_compile_patch_helpers module.
 """
 
 import types
-from contextlib import nullcontext
 from unittest.mock import Mock, patch
 
 import pytest
@@ -981,6 +980,18 @@ class TestTorchCompileMonkeyPatch(TestCase):
         block_size = 16
         return (q, k, v, k_cache, v_cache, seq, scale, block_table, block_size)
 
+    def _make_flash_attention_naive_inputs(self):
+        q = torch.zeros((1, 1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
+        k = torch.zeros((1, 1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
+        v = torch.zeros((1, 1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
+        kv_cache = torch.zeros((1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
+        mask = torch.zeros((1, 1, 1), device="rbln:0", dtype=torch.float16)
+        scale = torch.tensor(1.0)
+        seq_idx = torch.zeros((1, 1), dtype=torch.int32)
+        block_tables = torch.zeros((1, 1), dtype=torch.int32)
+        slot_mapping = torch.zeros((1, 1), dtype=torch.int32)
+        return (q, k, v, kv_cache, mask, scale, seq_idx, block_tables, slot_mapping)
+
     def test_patch_torch_compile_idempotent(self):
         """Test that patching multiple times is safe."""
         patch_torch_compile()
@@ -1097,8 +1108,8 @@ class TestTorchCompileMonkeyPatch(TestCase):
         self.assertEqual(mock_compile.call_count, 2)
 
     @requires_logical_devices(1)
-    def test_paged_attn_custom_kernel_paths_reuse_singleton_modules(self):
-        """Custom paged-attn kernels should pass stable module singletons into the compile cache."""
+    def test_custom_attn_kernel_paths_reuse_singleton_modules(self):
+        """Custom attention kernels should hand a stable module singleton to the compile cache."""
         cases = [
             (
                 register_custom_ops.paged_attn_prefill_rbln,
@@ -1120,22 +1131,28 @@ class TestTorchCompileMonkeyPatch(TestCase):
                 register_custom_ops._paged_causal_attn_decode_op_module,
                 self._make_paged_causal_attn_decode_inputs,
             ),
+            (
+                register_custom_ops.flash_attention_naive_prefill_rbln,
+                register_custom_ops._flash_attention_naive_prefill_op_module,
+                self._make_flash_attention_naive_inputs,
+            ),
+            (
+                register_custom_ops.flash_attention_naive_decode_rbln,
+                register_custom_ops._flash_attention_naive_decode_op_module,
+                self._make_flash_attention_naive_inputs,
+            ),
         ]
-
-        def fake_out_tensor_context(out_tensor=None):
-            return nullcontext()
 
         for kernel_fn, expected_module, make_inputs in cases:
             seen_models = []
 
-            def fake_compile(model, **kwargs):
-                seen_models.append(model)
-                return lambda *args, **inner_kwargs: args[0].clone()
+            def fake_dispatch(op_module, args, view_recipes):
+                seen_models.append(op_module)
+                return args[0].clone()
 
-            with patch.object(register_custom_ops, "compile_rbln_cached", side_effect=fake_compile):
-                with patch("torch_rbln.device.context_holder.out_tensor_context", new=fake_out_tensor_context):
-                    kernel_fn(*make_inputs())
-                    kernel_fn(*make_inputs())
+            with patch.object(register_custom_ops, "_dispatch_custom_kernel", side_effect=fake_dispatch):
+                kernel_fn(*make_inputs())
+                kernel_fn(*make_inputs())
 
             self.assertEqual(len(seen_models), 2)
             self.assertIs(seen_models[0], expected_module)
@@ -1203,119 +1220,6 @@ class TestTorchCompileMonkeyPatch(TestCase):
         t = torch.tensor([1, 2, 3], device="rbln:0")
         result = wrapper(t)
         self.assertEqual(result.tolist(), [2, 4, 6])
-
-
-@pytest.mark.test_set_ci
-class TestDynamoGuardReprPatch(TestCase):
-    """Guard build must not materialize tensor values via ``repr``, and
-    user-facing ``repr(tensor)`` must stay unchanged. See fsw-inference#413."""
-
-    def setUp(self):
-        from torch._dynamo.guards import GuardBuilder
-
-        import torch_rbln._internal.monkey_patches as mp
-
-        # apply_all_patches() ran at torch_rbln import; pull the true originals
-        # from module state rather than the already-wrapped current values.
-        self._orig_repr = mp._original_tensor_repr if mp._original_tensor_repr is not None else torch.Tensor.__repr__
-        self._orig_id_match = (
-            mp._original_id_match_unchecked
-            if mp._original_id_match_unchecked is not None
-            else GuardBuilder.id_match_unchecked
-        )
-
-    def tearDown(self):
-        from torch._dynamo.guards import GuardBuilder
-
-        import torch_rbln._internal.monkey_patches as mp
-
-        # Restore bare originals, then re-apply from a clean slate so later tests
-        # on the same worker keep the patch (mirrors TestTorchCompileMonkeyPatch).
-        torch.Tensor.__repr__ = self._orig_repr
-        GuardBuilder.id_match_unchecked = self._orig_id_match
-        mp._dynamo_guard_repr_patched = False
-        mp.apply_all_patches()
-
-    def test_patch_is_idempotent(self):
-        import torch_rbln._internal.monkey_patches as mp
-
-        mp.patch_dynamo_guard_repr()
-        first = torch.Tensor.__repr__
-        mp.patch_dynamo_guard_repr()
-        self.assertIs(first, torch.Tensor.__repr__)
-
-    def test_user_repr_is_unchanged(self):
-        """Outside guard build, repr must be the untouched value repr."""
-        import torch_rbln._internal.monkey_patches as mp
-
-        mp.patch_dynamo_guard_repr()
-        t = torch.arange(6.0).reshape(2, 3)
-        self.assertEqual(repr(t), self._orig_repr(t))
-        self.assertIn("1.", repr(t))
-
-    def test_guard_scope_returns_type_not_value(self):
-        """With the guard-build flag set, repr must return the type (no value)."""
-        import torch_rbln._internal.monkey_patches as mp
-
-        mp.patch_dynamo_guard_repr()
-        t = torch.arange(6.0).reshape(2, 3)
-        mp._guard_repr_tls.active = True
-        try:
-            self.assertEqual(repr(t), repr(type(t)))
-        finally:
-            mp._guard_repr_tls.active = False
-        # Flag restored -> value repr again.
-        self.assertEqual(repr(t), self._orig_repr(t))
-
-    def test_remove_all_patches_restores(self):
-        from torch._dynamo.guards import GuardBuilder
-
-        import torch_rbln._internal.monkey_patches as mp
-
-        mp.patch_dynamo_guard_repr()
-        self.assertIsNot(torch.Tensor.__repr__, self._orig_repr)
-        self.assertIsNot(GuardBuilder.id_match_unchecked, self._orig_id_match)
-
-        remove_all_patches()
-
-        self.assertIs(torch.Tensor.__repr__, self._orig_repr)
-        self.assertIs(GuardBuilder.id_match_unchecked, self._orig_id_match)
-        self.assertFalse(mp._dynamo_guard_repr_patched)
-
-    def test_compile_does_not_repr_param_value_during_guard_build(self) -> None:
-        """End-to-end: compiling a fn that guards on a Parameter must not
-        materialize the Parameter value, and output must stay correct."""
-        import torch_rbln._internal.monkey_patches as mp
-
-        mp.patch_dynamo_guard_repr()
-
-        real_repr = mp._original_tensor_repr  # wrapper delegates here when flag off
-        assert real_repr is not None
-        value_repr_ids: list[int] = []
-
-        def repr_spy(tensor: torch.Tensor, *args: object, **kwargs: object) -> str:
-            value_repr_ids.append(id(tensor))
-            return real_repr(tensor, *args, **kwargs)
-
-        base_compile = mp._original_torch_compile or torch.compile
-        base_reset = mp._original_dynamo_reset or torch._dynamo.reset
-        param = torch.nn.Parameter(torch.randn(16, 16))
-        x = torch.randn(16, 16)
-
-        def fn(inp: torch.Tensor) -> torch.Tensor:
-            return inp @ param
-
-        mp._original_tensor_repr = repr_spy
-        try:
-            base_reset()
-            out = base_compile(fn, backend="eager", fullgraph=True)(x)
-        finally:
-            mp._original_tensor_repr = real_repr
-            base_reset()
-
-        self.assertEqual(out, fn(x))
-        # The guard on `param` must never materialize its value during guard build.
-        self.assertNotIn(id(param), value_repr_ids)
 
 
 instantiate_device_type_tests(TestTorchCompilePatchHelpers, globals(), only_for="privateuse1")

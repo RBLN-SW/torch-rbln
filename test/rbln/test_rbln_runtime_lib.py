@@ -22,6 +22,11 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 from torch_rbln._internal import rbln_runtime_lib
 
 
+# Deselected by rebel_compiler's CI (`-m "not torch_rbln_only"`); see the marker in pyproject.
+# How torch_rbln *locates* librbln.so, not what librbln does once loaded.
+pytestmark = pytest.mark.torch_rbln_only
+
+
 def _compiler_is_installed() -> bool:
     """Whether this environment has a rebel-compiler distribution for the resolver to find.
 

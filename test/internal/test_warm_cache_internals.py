@@ -16,10 +16,12 @@ generated Python wrappers depend on:
 import threading
 
 import pytest
-import torch  # noqa: F401  (needed to load torch_rbln._C)
+import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
+import torch_rbln
 from torch_rbln import _C  # type: ignore[attr-defined]
+from torch_rbln._internal import warm_cache
 
 
 # These suites exercise the C++ warm-cache's process-wide / thread-local
@@ -123,54 +125,163 @@ class TestWarmCacheBuildingGuard(TestCase):
 
 
 @pytest.mark.test_set_ci
-class TestWarmCacheForceRecompileFlag(TestCase):
-    """Thread-local force-recompile signal that pairs ``try_warmcache_hit``'s
-    erase-on-failure with the next ``compile_rbln_cached`` invocation.
+class TestWarmCacheHitPath(TestCase):
+    """Repeated dispatch of one input profile must keep taking the hit path.
 
-    The C++ shim sets the flag inside ``try_warmcache_hit`` when it has to
-    ``erase`` a broken entry; ``compile_and_run_view_aware`` consumes the
-    flag and passes ``force_recompile=True`` to ``compile_rbln_cached`` so
-    the same op+shape gets a fresh ``torch.compile`` pass (which lets the
-    rebel backend re-populate ``_runtime_holder`` and install succeed
-    again). Without this pairing, the erased op+shape would stay
-    permanently on the Python wrapper path because the Python compile
-    cache returns the stale callable and the holder stays empty.
+    The hit path drives the rebel runtime through ``rbln_exec_api.h``, reached
+    via the handle's ``native_handle()`` (see ``WarmCache.h``). If rebel drops
+    either, no entry is installed and the shim falls back to the Python
+    wrapper: results stay correct, hits stop. Nothing else in the suite can see
+    that, since correctness is unaffected.
     """
 
+    def test_repeated_same_profile_dispatch_takes_hit_path(self) -> None:
+        x = torch.arange(64, dtype=torch.float16, device="rbln")
+        y = torch.ones(64, dtype=torch.float16, device="rbln")
+        expected = torch.arange(1, 65, dtype=torch.float16)
+
+        # The first call installs the entry; the ones after it must hit. Read
+        # the counter as a delta rather than resetting it, so the test leaves
+        # no process-global state behind.
+        self.assertEqual((x + y).to("cpu"), expected)
+        hits_before = _C._dispatch_shim_warm_segments_dump()[0]
+        for _ in range(3):
+            self.assertEqual((x + y).to("cpu"), expected)
+
+        hits_after = _C._dispatch_shim_warm_segments_dump()[0]
+        self.assertGreater(hits_after, hits_before, "warm-cache hit path never ran")
+
+
+@pytest.mark.test_set_ci
+class TestWarmCacheHandleGate(TestCase):
+    """Which runtime handles the hit path accepts.
+
+    ``native_handle()`` is the whole contract on the Python side, so a handle
+    is usable exactly when it carries one. The gate runs before an entry is
+    cached, which is what keeps a rebel-side rename from reaching the C++ side
+    at all.
+    """
+
+    class _Runtime:
+        def native_handle(self):
+            return 0xDEADBEEF
+
+    def test_handle_with_native_handle_is_accepted(self) -> None:
+        self.assertTrue(warm_cache._is_drivable_runtime_handle(self._Runtime()))
+
+    def test_handle_without_callable_native_handle_is_refused(self) -> None:
+        handle = self._Runtime()
+        handle.native_handle = None  # shadows the class method
+        self.assertFalse(warm_cache._is_drivable_runtime_handle(handle))
+
+    def test_absent_handle_is_refused(self) -> None:
+        self.assertFalse(warm_cache._is_drivable_runtime_handle(None))
+        self.assertFalse(warm_cache._is_drivable_runtime_handle(object()))
+
+
+@pytest.mark.test_set_ci
+@pytest.mark.single_worker
+class TestWarmCacheContractBreak(TestCase):
+    """A runtime the hit path cannot take a handle off must stay harmless.
+
+    A runtime whose ``native_handle`` no longer answers has to cost only the
+    fast path: correct results, on the Python wrapper path, for as long as it
+    takes torch-rbln to catch up. That guarantee is what lets rebel change the
+    surface without waiting for a matching torch-rbln, so assert it rather than
+    assume it.
+    """
+
+    SHAPE = 192  # 64-aligned and unused elsewhere, so the first call compiles
+
     def setUp(self) -> None:
-        _C._warmcache_consume_force_recompile()
+        self._orig_install = _C._warmcache_install_pending
+        self.addCleanup(setattr, _C, "_warmcache_install_pending", self._orig_install)
+        self.addCleanup(_C._warmcache_clear)
 
-    def tearDown(self) -> None:
-        _C._warmcache_consume_force_recompile()
+    def test_unusable_handle_keeps_values_and_stops_hitting(self) -> None:
+        class RejectingHandle:
+            """Delegates everything except the one call install makes."""
 
-    def test_default_false(self) -> None:
-        self.assertFalse(_C._warmcache_consume_force_recompile())
+            def __init__(self, inner):
+                self._inner = inner
 
-    def test_request_then_consume_once(self) -> None:
-        _C._warmcache_request_force_recompile()
-        self.assertTrue(_C._warmcache_consume_force_recompile())
-        # Consume is single-shot.
-        self.assertFalse(_C._warmcache_consume_force_recompile())
+            def native_handle(self):
+                raise TypeError("native_handle(): incompatible function arguments")
 
-    def test_thread_local_isolation(self) -> None:
-        """The flag must not leak across threads. If it did, an erase on
-        thread A would force unnecessary recompiles on thread B's next
-        unrelated op."""
-        _C._warmcache_request_force_recompile()
-        seen_in_thread: list[bool] = []
-        ev = threading.Event()
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
 
-        def worker() -> None:
-            seen_in_thread.append(_C._warmcache_consume_force_recompile())
-            ev.set()
+        def install_with_rejecting_handle(*, dyn_runtime, runtime_handle, **kw):
+            return self._orig_install(dyn_runtime=dyn_runtime, runtime_handle=RejectingHandle(runtime_handle), **kw)
 
-        t = threading.Thread(target=worker, daemon=True)
-        t.start()
-        ev.wait(timeout=5.0)
-        t.join(timeout=5.0)
+        _C._warmcache_install_pending = install_with_rejecting_handle
 
-        self.assertEqual(seen_in_thread, [False], f"force-recompile flag leaked across threads: {seen_in_thread}")
-        self.assertTrue(_C._warmcache_consume_force_recompile())
+        x = torch.arange(self.SHAPE, dtype=torch.float16, device="rbln")
+        y = torch.ones(self.SHAPE, dtype=torch.float16, device="rbln")
+        expected = torch.arange(1, self.SHAPE + 1, dtype=torch.float16)
+
+        # The first call would have installed; the rest would have hit it.
+        self.assertEqual((x + y).to("cpu"), expected)
+        hits_before = _C._dispatch_shim_warm_segments_dump()[0]
+        for _ in range(4):
+            self.assertEqual((x + y).to("cpu"), expected, "a refused install changed the result")
+
+        hits_after = _C._dispatch_shim_warm_segments_dump()[0]
+        self.assertEqual(hits_after, hits_before, "an entry was cached off an unusable handle")
+
+
+@pytest.mark.test_set_ci
+@pytest.mark.single_worker
+class TestWarmCacheDeviceScope(TestCase):
+    """``empty_cache(device)`` drops that device's entries and no other's.
+
+    Serving several devices from one process, a flush on one of them must not
+    put the others' ops back on the Python wrapper path.
+    """
+
+    SHAPE = 384  # 64-aligned and unused elsewhere, so the first call compiles
+
+    def setUp(self) -> None:
+        if torch_rbln._C.device_count() < 2:
+            self.skipTest("needs two RBLN devices")
+        self.addCleanup(_C._warmcache_clear)
+
+    @staticmethod
+    def _hits() -> int:
+        return _C._dispatch_shim_warm_segments_dump()[0]
+
+    def _operands(self, device: str):
+        x = torch.arange(self.SHAPE, dtype=torch.float16, device=device)
+        y = torch.ones(self.SHAPE, dtype=torch.float16, device=device)
+        expected = torch.arange(1, self.SHAPE + 1, dtype=torch.float16)
+        return x, y, expected
+
+    def _assert_miss(self, x, y, expected, msg: str) -> None:
+        hits = self._hits()
+        self.assertEqual(torch.add(x, y).to("cpu"), expected)
+        self.assertEqual(self._hits(), hits, msg)
+
+    def _assert_hit(self, x, y, expected, msg: str) -> None:
+        hits = self._hits()
+        self.assertEqual(torch.add(x, y).to("cpu"), expected)
+        self.assertGreater(self._hits(), hits, msg)
+
+    def test_clearing_one_device_keeps_the_other_hitting(self) -> None:
+        a = self._operands("rbln:0")
+        self._assert_miss(*a, "rbln:0 first call took the hit path")
+        self._assert_hit(*a, "rbln:0 second call did not hit")
+        size_after_0 = _C._warmcache_size()
+        b = self._operands("rbln:1")
+        self._assert_miss(*b, "rbln:1 first call took the hit path")
+        self._assert_hit(*b, "rbln:1 second call did not hit")
+        self.assertGreater(_C._warmcache_size(), size_after_0)
+
+        torch.rbln.empty_cache(1)
+
+        self.assertEqual(_C._warmcache_size(), size_after_0, "empty_cache(1) did not drop exactly rbln:1's entries")
+        self._assert_hit(*a, "rbln:0 stopped hitting after empty_cache(1)")
+        self._assert_miss(*b, "rbln:1 hit after its entries were dropped")
+        self._assert_hit(*b, "rbln:1 was not re-installed")
 
 
 if __name__ == "__main__":

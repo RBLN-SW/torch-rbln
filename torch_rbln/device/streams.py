@@ -53,6 +53,23 @@ class Stream(torch.Stream):
         dev = torch.device("rbln", current_device()) if device is None else _as_rbln_device(device)
         return super().__new__(cls, dev, priority=priority)
 
+    def wait_event(self, event: torch.Event) -> None:
+        """Make all future work submitted to this stream wait for ``event``.
+
+        A device-side fence when ``event`` was recorded on this stream's device: the
+        call returns without blocking the host. RBLN has no cross-device fence, so an
+        event recorded on another device is waited on the host instead. Ordering holds
+        either way; what changes is that the caller is serialized.
+        """
+        super().wait_event(event)
+
+    def wait_stream(self, stream: torch.Stream) -> None:
+        """Make all future work submitted to this stream wait for the work already
+        submitted to ``stream``. Records an event on ``stream`` and waits it, so the
+        cross-device rule in :meth:`wait_event` applies here too.
+        """
+        super().wait_stream(stream)
+
     def record_event(self, event: Optional["Event"] = None) -> "Event":
         """Record ``event`` on this stream, creating an :class:`Event` if ``None``.
 

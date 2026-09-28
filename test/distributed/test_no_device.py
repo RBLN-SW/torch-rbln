@@ -14,6 +14,7 @@ regression and runs only when a device is present.
 
 import os
 import unittest
+from unittest import mock
 
 import pytest
 import torch
@@ -81,7 +82,11 @@ class TestNoDeviceDistributed(TestCase):
     """Process group / DeviceMesh / DTensor with ``device_count() == 0``."""
 
     def setUp(self) -> None:
-        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        # Scoped to the test: these are process-global, and patch.dict restores the whole
+        # environment -- including the MASTER_PORT the helper below adds.
+        env = mock.patch.dict(os.environ, {"MASTER_ADDR": "127.0.0.1"})
+        env.start()
+        self.addCleanup(env.stop)
         configure_master_port_for_rccl_tests()
 
     @unittest.skipIf(_HAS_NPU, _NEEDS_NO_NPU)

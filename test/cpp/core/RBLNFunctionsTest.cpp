@@ -5,7 +5,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
+#include <vector>
 
 class RBLNFunctionsTest : public ::testing::Test {
  protected:
@@ -599,4 +601,64 @@ TEST_F(RBLNFunctionsTest, ReturnBorrowedDoubleReleaseThrows) {
   EXPECT_THROW(c10::rbln::return_borrowed(borrowed.borrow_id, /*updated=*/false), c10::Error);
 
   c10::rbln::free(rbln_data);
+}
+
+// The key/field layout of mem_get_info_per_chiplet(), on a fixed reply rather than a live
+// reading another process can move between two queries.
+TEST(RBLNFunctionsPerChipletMemoryMap, LaysOutEveryFieldOfEveryReply) {
+  RBLNDeviceMemoryInfo npu0{};
+  npu0.total = 1000;
+  npu0.used = 300;
+  npu0.free = 700;
+  npu0.huge_granularity = 64;
+  npu0.granularity = 8;
+  npu0.chiplet_cnt = 2;
+  npu0.chiplet[0] = RBLNChipletMemoryInfo{500, 100, 400, 350, 320};
+  npu0.chiplet[1] = RBLNChipletMemoryInfo{500, 200, 300, 250, 0};
+  // Slots past chiplet_cnt carry garbage the map must not pick up.
+  npu0.chiplet[2] = RBLNChipletMemoryInfo{9, 9, 9, 9, 9};
+
+  RBLNDeviceMemoryInfo npu1{};
+  npu1.total = 2000;
+  npu1.used = 0;
+  npu1.free = 2000;
+  npu1.huge_granularity = 0;
+  npu1.granularity = 16;
+  npu1.chiplet_cnt = 1;
+  npu1.chiplet[0] = RBLNChipletMemoryInfo{2000, 0, 2000, 2000, 0};
+
+  const auto out = c10::rbln::per_chiplet_memory_map({npu0, npu1});
+
+  const std::map<std::string, uint64_t> expected = {
+      {"npu.0.total", 1000},
+      {"npu.0.used", 300},
+      {"npu.0.free", 700},
+      {"npu.0.granularity", 8},
+      {"npu.0.huge_granularity", 64},
+      {"npu.0.chiplet.0.total", 500},
+      {"npu.0.chiplet.0.used", 100},
+      {"npu.0.chiplet.0.free", 400},
+      {"npu.0.chiplet.0.largest_free", 350},
+      {"npu.0.chiplet.0.largest_free_huge", 320},
+      {"npu.0.chiplet.1.total", 500},
+      {"npu.0.chiplet.1.used", 200},
+      {"npu.0.chiplet.1.free", 300},
+      {"npu.0.chiplet.1.largest_free", 250},
+      {"npu.0.chiplet.1.largest_free_huge", 0},
+      {"npu.1.total", 2000},
+      {"npu.1.used", 0},
+      {"npu.1.free", 2000},
+      {"npu.1.granularity", 16},
+      {"npu.1.huge_granularity", 0},
+      {"npu.1.chiplet.0.total", 2000},
+      {"npu.1.chiplet.0.used", 0},
+      {"npu.1.chiplet.0.free", 2000},
+      {"npu.1.chiplet.0.largest_free", 2000},
+      {"npu.1.chiplet.0.largest_free_huge", 0},
+  };
+  EXPECT_EQ(out, expected);
+}
+
+TEST(RBLNFunctionsPerChipletMemoryMap, NoRepliesIsEmpty) {
+  EXPECT_TRUE(c10::rbln::per_chiplet_memory_map({}).empty());
 }

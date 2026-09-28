@@ -16,6 +16,7 @@
 
 #include <c10/rbln/RBLNProfiler.h>
 #include <rebel/runtime/api/rbln_runtime_api.h>
+#include <torch/library.h>
 
 #include <cstddef>
 #include <optional>
@@ -25,6 +26,47 @@
 namespace at::native::rbln {
 
 namespace {
+
+// A strided device->device copy whose source is a classifiable view runs as one compiled
+// device program (``torch_rbln::copy_strided_view``) instead of one descriptor per contiguous
+// run. Two conditions decide whether that program is worth reaching for, and both are
+// facts about the compiler rather than tuning knobs:
+//
+//   dtype -- everything the device does not keep as-is is rewritten to a narrower float
+//     (rebel_compiler ``isDeviceSupportedDtype``), which changes the values. ``copy_`` is
+//     not a compute op, so the compiled path has to return what the strided walk returns.
+//     Of the two dtypes the compile path dispatches, only bf16 survives that; f16 loses
+//     a mantissa bit.
+//   alignment -- the compiler lowers a tensor to the device only when its last dim is a
+//     multiple of 64 elements (``checkLastDim128BAligned``: "regardless of dtype, if
+//     greater than 8 bits, we align last dim to 64"). Unaligned, the op path falls back to
+//     a host round-trip, which is what we are trying to avoid.
+//
+// Whether the view itself can be replayed is not decided here -- the shared detector
+// answers that, and returns false through the op when it cannot.
+bool try_view_copy(const at::Tensor& dst, const at::Tensor& src) {
+  if (src.is_contiguous() || !dst.is_contiguous())
+    return false;
+  // One program reads and writes one device; a copy that crosses them is not ours.
+  if (src.device() != dst.device())
+    return false;
+  if (src.scalar_type() != at::kBFloat16 || dst.scalar_type() != src.scalar_type())
+    return false;
+  if (src.dim() == 0 || src.size(-1) % 64 != 0 || dst.size(-1) % 64 != 0)
+    return false;
+
+  // `import torch_rbln` registers the op, and an RBLN tensor cannot exist without that
+  // import, so a missing schema is a broken build rather than a case to route around --
+  // which is why this throws instead of returning false. Looked up per call, the way
+  // upstream reaches an op from C++ (ATen/native/CPUFallback.h): an OperatorHandle points
+  // into the dispatcher's table, and caching one in a static outlives nothing useful here
+  // -- the lookup is a hash probe in front of a copy of at least a full device tile.
+  const auto op = c10::Dispatcher::singleton()
+                      .findSchemaOrThrow("torch_rbln::copy_strided_view", "")
+                      .typed<bool(const at::Tensor&, at::Tensor&)>();
+  at::Tensor out = dst; // a Tensor is a handle; the schema's Tensor(a!) wants a mutable one
+  return op.call(src, out);
+}
 
 // Recursion guard: a non-direct rbln->rbln copy_ services itself by a v2h
 // (get_cpu_copy_of_rbln_tensor) followed by a cpu->rbln copy. We count that
@@ -45,6 +87,29 @@ struct IndirectD2DGuard {
 // the errors are asymmetric: staging a slab descriptors would have won costs ~1.3x,
 // descriptors on element-sized slabs 130x.
 constexpr size_t kMinStridedHostCopyBytes = 16 * 1024;
+// Below the crossover the plan declines and copy_ stages through the host. For a
+// device-latest dst that staging is a read-back and rewrite of the whole span, so a lower
+// crossover would pay off there; choosing it needs the residency, which this path does not
+// query, so the constant stays at the host-latest crossover.
+
+// Whether make_strided_host_plan would accept `dst` paired with a contiguous source of the
+// same shape and dtype: the inner block is then dst's own contiguous suffix and the overlap
+// rule is dst's, so the answer does not need the source to exist yet.
+bool strided_plan_possible_for_contiguous_src(const at::Tensor& dst) {
+  if (dst.numel() == 0 || dst.is_contiguous()) {
+    return false;
+  }
+  if (at::has_internal_overlap(dst) != at::MemOverlap::No && view_may_self_overlap(dst.sizes(), dst.strides())) {
+    return false;
+  }
+  const auto sizes = dst.sizes();
+  const int64_t inner_start = contig_suffix_start(sizes, dst.strides());
+  int64_t inner_block_elems = 1;
+  for (int64_t i = inner_start; i < dst.dim(); ++i) {
+    inner_block_elems *= sizes[i];
+  }
+  return static_cast<size_t>(inner_block_elems) * static_cast<size_t>(dst.element_size()) >= kMinStridedHostCopyBytes;
+}
 
 // Byte-level description of one strided pair. `inner_block_bytes` is the largest
 // run contiguous in both tensors; the outer vectors describe the iteration above
@@ -242,7 +307,39 @@ void tensor_copy_from_cpu_to_rbln(const at::Tensor& cpu_src, const at::Tensor& r
           prepared_cpu_src.sizes(), prepared_cpu_src.strides(), prepared_cpu_src.element_size());
       c10::rbln::memcpy_h2v(dst_data, src_data, nbytes);
     } else {
-      // PROFILER (cold branch): a non-contiguous rbln dst is pulled to host
+      // A shape / dtype / layout mismatch on the cpu src is what kept the strided plan
+      // above from applying. A contiguous src in the dst's shape and dtype lets the plan
+      // write the runs in place instead of staging the whole dst. The dst alone decides
+      // whether the plan can take such a src, so that is checked before converting; the
+      // converted src is reused by the staged path if the plan still declines.
+      std::optional<at::Tensor> prepared_cpu_src;
+      if ((cpu_src.sizes() != rbln_dst.sizes() || cpu_src.scalar_type() != rbln_dst.scalar_type() ||
+           !cpu_src.is_contiguous()) &&
+          strided_plan_possible_for_contiguous_src(rbln_dst)) {
+        // PROFILER (cold branch): hidden staging alloc + CPU copy of the src before h2v.
+        // Suppressed when nested inside an rbln->rbln indirect copy (counted once there).
+        if (g_indirect_d2d_depth == 0) {
+          c10::rbln::prof::record_bounce(
+              c10::rbln::prof::BounceSite::kCpu2RblnStaging,
+              static_cast<uint64_t>(rbln_dst.numel()) * rbln_dst.element_size());
+        }
+        prepared_cpu_src = at::empty(
+            rbln_dst.sizes(),
+            rbln_dst.scalar_type(),
+            std::nullopt,
+            c10::Device(c10::kCPU),
+            false,
+            c10::MemoryFormat::Contiguous);
+        prepared_cpu_src->copy_(cpu_src);
+        if (const auto plan = make_strided_host_plan(rbln_dst, *prepared_cpu_src)) {
+          RBLN_LOG_DEBUG("Strided h2v copy of a prepared src (no staging of the dst)");
+          c10::rbln::H2VBatch batch;
+          strided_host_copy<HostDir::kH2V>(rbln_dst, *prepared_cpu_src, *plan, batch, "copy_");
+          batch.submit();
+          return;
+        }
+      }
+      // PROFILER (cold branch): the non-contiguous rbln dst is pulled to the host
       // (hidden v2h), written on CPU, then copied back (h2v). Suppressed when
       // nested inside an rbln->rbln indirect copy (counted once there).
       if (g_indirect_d2d_depth == 0) {
@@ -255,7 +352,7 @@ void tensor_copy_from_cpu_to_rbln(const at::Tensor& cpu_src, const at::Tensor& r
 
       RBLN_LOG_DEBUG("Copying CPU src to CPU copy");
       // Upstream at::native::copy_() handles broadcasting, dtype conversion, and non-contiguous tensors.
-      cpu_dst.copy_(cpu_src);
+      cpu_dst.copy_(prepared_cpu_src ? *prepared_cpu_src : cpu_src);
 
       RBLN_LOG_DEBUG("Copying CPU copy back to RBLN dst");
       auto* dst_data = rbln_dst.data_ptr();
@@ -311,10 +408,20 @@ void tensor_copy_from_rbln_to_rbln(const at::Tensor& rbln_src, const at::Tensor&
     return;
   }
 
+  // One compiled program beats both routes below when the source view is classifiable:
+  // the strided engine pays a descriptor per contiguous run, and a KV block read head-major
+  // and written token-major breaks into runs of a single row -- far past the cap, so the
+  // real alternative is the host bounce.
+  if (try_view_copy(rbln_dst, rbln_src)) {
+    return;
+  }
+
   // Strided copy: route to the on-device v2v engine while the outer iteration
-  // count stays within the runtime per-dst v2v cap (::rbln::kMaxV2VMultiCopies,
-  // the single source shared with the runtime); above it the engine fans out to
-  // a host fallback anyway, so bounce via host here.
+  // count stays within ::rbln::kMaxV2VMultiCopies. A larger fan-out would still
+  // reach the device — V2VBatch::submit splits a batch at that cap — but it
+  // pays one descriptor per contiguous run, and where that stops beating the
+  // host bounce below is unmeasured, so a fan-out past the cap takes the
+  // bounce.
   if (rbln_src.sizes() == rbln_dst.sizes() && rbln_src.scalar_type() == rbln_dst.scalar_type() &&
       rbln_src.device() == rbln_dst.device()) {
     const auto inner_start = common_inner_start(rbln_src.sizes(), rbln_src.strides(), rbln_dst.strides());

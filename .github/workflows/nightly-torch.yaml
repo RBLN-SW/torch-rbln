@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       python_version:
-        description: Python version (3.10-3.13)
+        description: Python version (3.10-3.14)
         type: string
         required: false
         default: '3.12'
@@ -45,10 +45,10 @@ jobs:
       RBLN_FORCE_NPU_NAME: RBLN-CA25
     timeout-minutes: 90
     container:
-      image: ghcr.io/rebellions-sw/rbln-build:0.11.0-ubi9-py${{ inputs.python_version || '3.12' }}  # zizmor: ignore[unpinned-images]
+      image: harbor.mgmt.rbln.in/rebellions-sw/rbln-build:0.11.2-dev51-g5efce5e9a-ubi9.8-py${{ inputs.python_version || '3.12' }}  # zizmor: ignore[unpinned-images]
       credentials:
-        username: ${{ github.repository_owner }}
-        password: ${{ secrets.GIT_PAT }}
+        username: ${{ secrets.HARBOR_USERNAME }}
+        password: ${{ secrets.HARBOR_PASSWORD }}
     steps:
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
@@ -109,10 +109,12 @@ jobs:
       - name: Build wheel
         env:
           TORCH_RBLN_BUILD_TYPE: Release
-          UV_INDEX: rbln=${{ secrets.INTERNAL_INDEX_URL }}
-          UV_INDEX_RBLN_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
-          UV_INDEX_RBLN_PASSWORD: ${{ secrets.INTERNAL_INDEX_PASSWORD }}
-          UV_BUILD_CONSTRAINT: constraints-build-dev.txt
+          UV_INDEX_RBLN_USERNAME: ${{ secrets.RBLN_INDEX_USERNAME }}
+          UV_INDEX_RBLN_PASSWORD: ${{ secrets.RBLN_INDEX_PASSWORD }}
+          UV_INDEX_RBLN_NIGHTLY_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          UV_INDEX_RBLN_NIGHTLY_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+          UV_INDEX_RBLN_INTERNAL_USERNAME: ${{ secrets.RBLN_INDEX_USERNAME }}
+          UV_INDEX_RBLN_INTERNAL_PASSWORD: ${{ secrets.RBLN_INDEX_PASSWORD }}
         run: |
           set -euo pipefail
 
@@ -127,8 +129,8 @@ jobs:
 
           uv build --wheel
 
-      - name: Read built wheel version
-        id: read_version
+      - name: Read built wheel
+        id: read_built_wheel
         run: |
           set -euo pipefail
 
@@ -139,34 +141,38 @@ jobs:
             echo "::error::Expected exactly one wheel in dist/, found ${#wheels[@]}: ${wheels[*]}"
             exit 1
           fi
+          wheel="${wheels[0]}"
 
-          version="$(basename "${wheels[0]}" | cut -d- -f2)"
+          version="$(basename "${wheel}" | cut -d- -f2)"
+          echo "wheel=${wheel}" >> "${GITHUB_OUTPUT}"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
-          echo "::notice::Built torch-rbln==${version}"
+          echo "::notice::Built torch-rbln==${version} (${wheel})"
 
       - name: Install the wheel into a clean environment
         env:
-          UV_INDEX: ${{ env.PYTORCH_NIGHTLY_INDEX_URL }} rbln=${{ secrets.INTERNAL_INDEX_URL }}
-          UV_INDEX_STRATEGY: unsafe-best-match
-          UV_INDEX_RBLN_USERNAME: ${{ secrets.INTERNAL_INDEX_USERNAME }}
-          UV_INDEX_RBLN_PASSWORD: ${{ secrets.INTERNAL_INDEX_PASSWORD }}
+          TORCH_RBLN_WHEEL: ${{ steps.read_built_wheel.outputs.wheel }}
+          UV_INDEX: pytorch-nightly-cpu=${{ env.PYTORCH_NIGHTLY_INDEX_URL }}
+          UV_INDEX_RBLN_USERNAME: ${{ secrets.RBLN_INDEX_USERNAME }}
+          UV_INDEX_RBLN_PASSWORD: ${{ secrets.RBLN_INDEX_PASSWORD }}
+          UV_INDEX_RBLN_NIGHTLY_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          UV_INDEX_RBLN_NIGHTLY_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+          UV_INDEX_RBLN_INTERNAL_USERNAME: ${{ secrets.RBLN_INDEX_USERNAME }}
+          UV_INDEX_RBLN_INTERNAL_PASSWORD: ${{ secrets.RBLN_INDEX_PASSWORD }}
         run: |
           set -euo pipefail
 
           uv venv "${TEST_VENV}"
           uv pip install \
             --python "${TEST_VENV}/bin/python" \
-            --constraint constraints-build-dev.txt \
-            rebel-compiler \
             expecttest \
             numpy \
             pytest \
             pytest-xdist \
-            dist/*.whl
+            "${TORCH_RBLN_WHEEL}[runtime]"
 
       - name: Smoke-test the installed wheel
         env:
-          TORCH_RBLN_VERSION: ${{ steps.read_version.outputs.version }}
+          TORCH_RBLN_VERSION: ${{ steps.read_built_wheel.outputs.version }}
           TORCH_VERSION: ${{ steps.resolve_torch_version.outputs.target_version }}
           RBLN_DUMMY_DEVICE: '1'
         run: |
@@ -206,8 +212,10 @@ jobs:
           print(f"::notice::Smoke test passed: torch-rbln=={torch_rbln.__version__} on torch {torch.__version__}")
           PY
 
-      # Both suites manage RBLN_DUMMY_DEVICE themselves: test_dummy_device sets it per
-      # subprocess, and test_no_device requires device_count() == 0.
+      # The first two manage RBLN_DUMMY_DEVICE themselves: test_dummy_device sets it per
+      # subprocess, and test_no_device requires device_count() == 0. test_device_arch
+      # runs here because the architecture gates it covers are evaluated at collection,
+      # and this is the only runner where they see a host with no NPU.
       - name: Run no-NPU test suites
         run: |
           set -euo pipefail
@@ -215,6 +223,7 @@ jobs:
           "${TEST_VENV}/bin/python" -m pytest \
             test/rbln/test_dummy_device.py \
             test/distributed/test_no_device.py \
+            test/internal/test_device_arch.py \
             -m test_set_ci \
             --numprocesses=1
 
@@ -222,7 +231,7 @@ jobs:
         if: ${{ always() }}
         env:
           TORCH_VERSION: ${{ steps.resolve_torch_version.outputs.target_version }}
-          TORCH_RBLN_VERSION: ${{ steps.read_version.outputs.version }}
+          TORCH_RBLN_VERSION: ${{ steps.read_built_wheel.outputs.version }}
           PYTHON_VERSION: ${{ inputs.python_version || '3.12' }}
           JOB_STATUS: ${{ job.status }}
         run: |

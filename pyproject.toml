@@ -14,12 +14,17 @@ license = "Apache-2.0"
 classifiers = [
   "License :: OSI Approved :: Apache Software License",
 ]
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.10,<3.15"
 dependencies = [
   "PyYAML>=6,<7",
   "scipy>=1.14.0",
   "libcst>=1.2.0",
-  "torch==2.11.0+cpu"
+  "torch==2.13.0+cpu"
+]
+
+[project.optional-dependencies]
+runtime = [
+  "rebel-compiler~=0.11.3.dev530",
 ]
 
 [project.entry-points]
@@ -40,8 +45,8 @@ requires = [
   "cmake>=3.18,<4.0",
   "mypy>=1.13.0,<1.14.0",
   "ninja>=1.11.1.3,<1.11.2",
-  "rebel-compiler>=0.11.2,<0.20.0",
-  "torch==2.11.0+cpu"
+  "rebel-compiler",  # [tool.uv].build-constraint-dependencies pins the version.
+  "torch==2.13.0+cpu"
 ]
 build-backend = "hatchling.build"
 
@@ -124,26 +129,32 @@ skip-excluded-dirs = true
 # ==============================================================================
 
 [tool.uv]
-# Index strategy: first-index = strict/secure (use first index that has package),
-# unsafe-best-match = find best version across all indexes (potential security risk)
-index-strategy = "first-index"
-
-# Allow pre-release versions only when explicitly specified in dependency specifiers.
-# Normal resolution uses stable versions only; CI pins via replace_depends.py (pyproject.toml) + uv lock when needed.
-prerelease = "if-necessary-or-explicit"
-
-# Package indexes
+# uv build does not read the lockfile, so build-constraint-dependencies pins the build environment.
+# It must match constraint-dependencies, or the extension compiles against one build and loads another.
+build-constraint-dependencies = [
+  "rebel-compiler==0.11.3.dev530+g8bd8b8ac.prod",
+]
+constraint-dependencies = [
+  "rebel-compiler==0.11.3.dev530+g8bd8b8ac.prod",
+]
+# rebel-compiler publishes wheels for Linux only.
+environments = [
+  "sys_platform == 'linux'",
+]
+# The pypi entry is listed first so it outranks the rbln indexes; without it, PyPI ranks last as the implicit default.
 index = [
-  { name = "pypi", url = "https://pypi.org/simple/", default = true },
+  { name = "pypi", url = "https://pypi.org/simple/" },
   { name = "pytorch-cpu", url = "https://download.pytorch.org/whl/cpu", explicit = true },
   { name = "pytorch-nightly-cpu", url = "https://download.pytorch.org/whl/nightly/cpu", explicit = true },
-  { name = "rbln", url = "https://pypi.rbln.ai/simple/", explicit = true },
+  { name = "rbln", url = "https://pypi.rbln.ai/simple/" },
+  { name = "rbln-nightly", url = "https://nexus.mgmt.rbln.in/repository/pypi-group-nightly/simple/" },
+  { name = "rbln-internal", url = "https://pypi.rebellions.in/simple/" },
 ]
+# Nothing pins a package to an index, so the order above decides where each one resolves from.
+index-strategy = "unsafe-first-match"
 
-# Pin packages to specific indexes
 [tool.uv.sources]
 torch = { index = "pytorch-cpu" }
-rebel-compiler = { index = "rbln" }
 
 # ==============================================================================
 # Dependency Groups
@@ -153,7 +164,7 @@ rebel-compiler = { index = "rbln" }
 build = [
   "cmake>=3.18",
   "editables>=0.5",
-  "rebel-compiler>=0.11.2,<0.20.0",
+  "rebel-compiler",  # [tool.uv].constraint-dependencies pins the version.
   "setuptools-scm>=8.0",
   "hatchling>=1.25,<1.32",  # see the build-system pin
   "mypy>=1.13.0,<1.14.0",
@@ -168,19 +179,19 @@ lint = [
   "expecttest>=0.3.0,<0.4.0",
   "filelock>=3.16.1,<3.17.0",
   "flake8>=6.1.0,<6.2.0",
-  "flake8-bugbear>=23.3.23,<23.4.0",
+  "flake8-bugbear>=24.12.12,<24.13.0",
   "flake8-comprehensions>=3.15.0,<3.16.0",
   "flake8-executable>=2.1.3,<2.2.0",
   "flake8-logging-format>=0.9.0,<0.10.0",
   "flake8-pyi>=23.3.1,<23.4.0",
-  "flake8-simplify>=0.19.3,<0.20.0",
+  "flake8-simplify>=0.30.0,<0.31.0",
   "isort>=5.13.2,<5.14.0",
   "lintrunner>=0.12.7,<0.13.0",
   "mccabe>=0.7.0,<0.8.0",
   "mypy>=1.13.0,<1.14.0",
   "mypy-extensions>=1.0.0,<1.1.0",
-  "optree>=0.13.0,<0.14.0",
-  "pandas>=2.2.3,<2.3.0",
+  "optree>=0.17.0,<0.18.0",
+  "pandas>=2.3.3,<2.4.0",
   "pkginfo>=1.12.0,<1.13.0",
   "pycodestyle>=2.11.1,<2.12.0",
   "pyflakes>=3.1.0,<3.2.0",
@@ -373,4 +384,5 @@ markers = [
     "test_set_perf: [test set] marks performance tests (select with `-m test_set_perf`)",
     "no_dynamo_reset: skips autouse TorchDynamo reset fixture",
     "single_worker: marks tests that must run on a single worker (select with `-m single_worker`)",
+    "torch_rbln_only: marks tests whose outcome does not depend on rebel-compiler -- torch-rbln's own logic, packaging, or the torch-facing contract. rebel_compiler's CI deselects these (`-m \"not torch_rbln_only\"`); torch-rbln's own lanes still run them",
 ]

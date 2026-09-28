@@ -10,19 +10,19 @@ We value transparency, collaboration, and a safe environment for contributors. A
 
 ### Contributors
 
-1. **Fork the repository** and create your branch from `dev`.
+1. **Fork the repository** and create your branch from `main`.
 2. Make your changes with clear and concise commits.
 3. Ensure that your code follows the style and linting rules (see [Linting](LINTING.md)).
 4. If relevant, update or add new tests and documentation.
-5. Open a pull request targeting `dev` with a detailed description of your changes.
+5. Open a pull request targeting `main` with a detailed description of your changes.
 
 ### Core Contributors & Collaborators
 
-1. **Create your branch** from `dev` and work on branches within the repository.
+1. **Create your branch** from `main` and work on branches within the repository.
 2. Make your changes with clear and concise commits.
 3. Ensure that your code follows the style and linting rules (see [Linting](LINTING.md)).
 4. If relevant, update or add new tests and documentation.
-5. Open a pull request targeting `dev` with a detailed description of your changes.
+5. Open a pull request targeting `main` with a detailed description of your changes.
 
 All contributors must use **English** for issues, comments, and code.
 
@@ -64,7 +64,7 @@ These issue types represent development tasks that are typically addressed throu
 - **fix:** Tracks the resolution of known bugs.
 - **perf:** Implement improvements focused on performance (e.g., latency, memory, throughput). Include benchmarks or measurement methodology if available.
 - **refactor:** Improve readability, maintainability, or consistency without altering external behavior. Includes renaming, modularization, or dependency cleanup.
-- **docs:** Improve or add documentation. Includes README, usage guides, code comments, and tutorials. See [docs](docs/) for existing guides.
+- **docs:** Improve or add documentation. Includes README, usage guides, code comments, and tutorials. See [docs](https://github.com/RBLN-SW/torch-rbln/tree/main/docs) for existing guides.
 - **other:** Any development-related task that doesn't fit the above categories. Use sparingly; consider proposing a new label if recurring themes emerge.
 
 Please choose labels appropriately when opening an issue.
@@ -96,15 +96,7 @@ All of the following must be satisfied for a PR to be merged:
 - At least one approval from the relevant team
 - **Squash and merge** only
 
-### Automated Testing Pipeline
-
-The following events trigger automated workflows on RBLN NPU hardware:
-
-- **PRs to `dev`** — The CI workflow runs linting and `test_set_ci`-marked tests for fast feedback.
-- **PRs to `main`** — The Release workflow runs linting and the full test suite (excluding experimental and performance tests) for pre-release validation.
-- **Version tags (`v*`)** — The CD workflow builds and publishes release artifacts.
-
-All tests execute on remote infrastructure with access to physical NPU devices. Results appear as PR status checks. See [Workflows](WORKFLOWS.md) for the full architecture.
+Tests run on remote infrastructure with physical NPU devices, and their results appear as status checks on the pull request. For what happens after a change is merged, see [Release Process](RELEASE_PROCESS.md).
 
 ---
 

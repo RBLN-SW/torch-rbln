@@ -3,10 +3,10 @@
 // Warm-runtime cache for the C++ dispatch shim.
 //
 // Goal: on warm shim calls (cache hit), bypass the Python wrapper entirely
-// and drive the rebel runtime directly from C++ via PyRblnSyncRuntime. This
-// eliminates the per-call pybind roundtrip + Python wrapper overhead
-// (~100-200us, dominated by is_cpu_fallback_cases and compile_rbln_cached
-// lookup on the Python side).
+// and drive the rebel runtime directly from C++ through rbln_exec_api.h. This
+// eliminates the per-call pybind roundtrip + Python wrapper overhead, which
+// is dominated by is_cpu_fallback_cases and the compile_rbln_cached lookup on
+// the Python side.
 //
 // Architecture:
 //   - On first call of a shim op with a given input profile, the Python
@@ -14,8 +14,7 @@
 //     the DynamoRuntime. It then installs an entry into this cache via the
 //     pybind-exposed install(...) API.
 //   - On subsequent calls with a matching input profile, the shim looks up
-//     the entry and calls PyRblnSyncRuntime::{PrepareInputs, PrepareOutputs,
-//     Run} directly.
+//     the entry and drives one execution through the C ABI.
 //   - Entries are keyed by (schema-name, per-Tensor-input profile, per-Scalar
 //     value). Shape/dtype/device changes produce a different key and trigger
 //     a miss (fall back to Python, which in turn repopulates the cache for
@@ -24,25 +23,27 @@
 // Lifetime / thread-safety:
 //   - Process-global singleton cache.
 //   - Reads take a shared lock (hot path); writes take an exclusive lock.
-//   - Entries hold a strong py::object reference to the DynamoRuntime so the
-//     underlying C++ rebel::PyRblnSyncRuntime is kept alive.
-//   - No eviction in V1; a raw pointer into the map is stable for the
-//     lifetime of the cache.
+//   - Entries hold strong py::object references to the DynamoRuntime and to
+//     the sync-runtime handle it owns, so the borrowed RblnSyncRuntime stays
+//     valid for the cache's lifetime.
+//   - No eviction; entries leave only through ``clear`` (all of them, or one
+//     device's).
 
 #include <ATen/core/ScalarType.h>
+#include <c10/core/Device.h>
 #include <c10/util/SmallVector.h>
 #include <torch/csrc/utils/pybind.h>
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <map>
 #include <memory>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
 
-#include <torch_rbln/csrc/rbln/rebel_runtime_decl.h>
+#include <rebel/runtime/api/rbln_exec_api.h>
 
 namespace torch_rbln::warmcache {
 
@@ -88,13 +89,13 @@ struct ScalarValue {
   bool b{false};
 
   static ScalarValue fromInt(int64_t v) {
-    return {Tag::Int, v, 0.0, false};
+    return {.tag = Tag::Int, .i = v};
   }
   static ScalarValue fromFloat(double v) {
-    return {Tag::Float, 0, v, false};
+    return {.tag = Tag::Float, .f = v};
   }
   static ScalarValue fromBool(bool v) {
-    return {Tag::Bool, 0, 0.0, v};
+    return {.tag = Tag::Bool, .b = v};
   }
   static ScalarValue missing() {
     return {};
@@ -143,25 +144,24 @@ struct OutputProfile {
 };
 
 struct CacheEntry {
-  // Strong reference to the DynamoRuntime Python object; keeps the underlying
-  // rebel PyRblnSyncRuntime alive for the cache's lifetime.
+  // The runtime is held as well as the DynamoRuntime that owns it: `runtime`
+  // below is borrowed from the former, and an owner that rebinds its attribute
+  // would otherwise drop it while an installed entry still points at it.
   pybind11::object py_dyn_runtime;
+  pybind11::object py_runtime_handle;
 
-  // Non-owning observer into the PyRblnSyncRuntime C++ instance. Raw pointer
-  // lifetime is scoped to `py_dyn_runtime`.
-  ::rbln::PyRblnSyncRuntime* runtime{nullptr};
+  // Borrowed from `py_runtime_handle`'s native_handle(); valid only while it is.
+  RblnSyncRuntime runtime{nullptr};
 
-  uint32_t num_inputs{0};
-  uint32_t num_outputs{0};
   c10::SmallVector<OutputProfile, 2> out_profiles;
 };
 
 // Shared pointer to a cache entry. Returned by ``find`` so the caller can
-// safely use the entry even if another thread concurrently ``erase``s the
+// safely use the entry even if another thread concurrently ``clear``s the
 // key — the entry stays alive as long as any shared_ptr references it.
 // Without this, a raw-pointer ``find`` could return a pointer that another
-// thread invalidates via ``erase`` before the caller reaches ``Run``,
-// causing a use-after-free.
+// thread invalidates before the caller reaches ``Run``, causing a
+// use-after-free.
 using CacheEntryPtr = std::shared_ptr<const CacheEntry>;
 
 // Process-global cache. Entries are created via `install` on cache miss from
@@ -171,16 +171,9 @@ class WarmCache {
   static WarmCache& instance();
 
   // Hot path. Returns a shared_ptr to the cached entry, or empty on miss.
-  // The shared_ptr keeps the entry alive across concurrent ``erase`` from
-  // peer threads (use-after-free guard).
+  // The shared_ptr keeps the entry alive across a concurrent ``clear`` from
+  // a peer thread (use-after-free guard).
   CacheEntryPtr find(const CacheKey& key);
-
-  // Drop a single entry — used when a hit attempt fails at runtime so the
-  // next dispatch falls through to the pybind miss path (which exercises
-  // the DynamoRuntime wrapper that handles edge-case v-memory routing).
-  // Outlives any in-flight shared_ptr borrower; the entry's py::object
-  // destructor runs under the GIL via the shared_ptr custom deleter.
-  void erase(const CacheKey& key);
 
   // Miss path. Inserts entry under `key` if not already present. Called from
   // Python via pybind after a successful torch.compile. If a concurrent
@@ -198,7 +191,10 @@ class WarmCache {
   }
 
   size_t size();
-  void clear();
+  // Drop the entries whose inputs live on ``device``, or all of them when no
+  // device is given. An entry with no device input is dropped only by the
+  // latter; no shim op has one today (each takes at least one input tensor).
+  void clear(std::optional<c10::DeviceIndex> device = std::nullopt);
 
   // Reentrancy guard used by the miss path: while Python is driving
   // torch.compile, any ATen dispatch that lands back on a shim op must take
@@ -208,17 +204,6 @@ class WarmCache {
   static bool is_building_entry();
   static void enter_building();
   static void exit_building();
-
-  // Force-recompile signal: set by ``try_warmcache_hit`` when it ``erase``s
-  // a broken entry so the same thread's next pass through the Python
-  // wrapper can force ``compile_rbln_cached`` to skip its own cache for
-  // this key. Without it, the Python compile cache returns the same
-  // already-compiled callable and the rebel backend does NOT re-instantiate
-  // — ``_runtime_holder`` stays empty, install never fires again, and the
-  // op stays permanently on the Python wrapper path. Thread-local; the
-  // Python wrapper consumes (and clears) the flag exactly once.
-  static bool consume_force_recompile();
-  static void request_force_recompile();
 
  private:
   WarmCache() = default;

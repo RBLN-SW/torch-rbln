@@ -390,6 +390,49 @@ TEST_F(RBLNV2VBatchTest, LargeBatchedSubmit) {
   c10::rbln::free(dst);
 }
 
+// More entries than one rbln_memcpy_v2v_multi call dispatches on the device
+// (::rbln::kMaxV2VMultiCopies): submit() must issue runtime-sized calls — one
+// oversized call makes the runtime host-sync the whole entry — and the data
+// must still arrive in full.
+TEST_F(RBLNV2VBatchTest, AboveRuntimeCapSubmitsInRuntimeSizedCalls) {
+  constexpr size_t blk = 16;
+  constexpr size_t nblk = ::rbln::kMaxV2VMultiCopies + 1;
+  constexpr size_t total = blk * nblk;
+
+  std::vector<int8_t> src_host(total);
+  for (size_t i = 0; i < total; ++i) {
+    src_host[i] = static_cast<int8_t>((i * 17) % 127);
+  }
+  std::vector<int8_t> dst_initial(total, -1);
+
+  auto* src = static_cast<int8_t*>(AllocAndCopyFromHost(src_host.data(), total));
+  auto* dst = static_cast<int8_t*>(AllocAndCopyFromHost(dst_initial.data(), total));
+
+  {
+    c10::rbln::V2VBatch batch;
+    for (size_t i = 0; i < nblk; ++i) {
+      batch.enqueue(dst + i * blk, src + i * blk, blk);
+    }
+    EXPECT_EQ(batch.pending_count(), nblk);
+
+    // rt_timing_get fills [ns, calls] per primitive in RtIdx order
+    // (v2v, v2v_multi, ...), so v2v_multi's call count is slot 1's second word.
+    constexpr size_t kV2VMultiSlot = 1;
+    c10::rbln::rt_timing_reset();
+    c10::rbln::rt_timing_enable(true);
+    batch.submit();
+    c10::rbln::rt_timing_enable(false);
+    std::vector<uint64_t> timing(2 * c10::rbln::kRtTimingN);
+    c10::rbln::rt_timing_get(timing.data());
+    EXPECT_EQ(timing[2 * kV2VMultiSlot + 1], 2u) << "cap + 1 entries must go out as two runtime-sized calls";
+    EXPECT_EQ(batch.pending_count(), 0u);
+  }
+
+  EXPECT_EQ(CopyToHost(dst, total), src_host);
+  c10::rbln::free(src);
+  c10::rbln::free(dst);
+}
+
 // Multiple flat enqueues into adjacent dst slots — verifies submit doesn't
 // reorder or merge entries incorrectly.
 TEST_F(RBLNV2VBatchTest, MultipleFlatEnqueues) {

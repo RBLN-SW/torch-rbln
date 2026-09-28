@@ -93,6 +93,11 @@ class CMakeBuildHook(BuildHookInterface):
             f"-DCMAKE_BUILD_TYPE={build_type}",
             f"-DCMAKE_INSTALL_PREFIX={install_dir}",
             f"-DPython_EXECUTABLE={python_executable}",
+            # The CMake modules look the interpreter up with `find_package(Python3)`, which reads
+            # `Python3_EXECUTABLE` and ignores `Python_EXECUTABLE`. Without this, a host with more
+            # than one interpreter builds the extension against whichever `python3` is first on
+            # PATH -- a wheel tagged for the build interpreter carrying an `.so` for another one.
+            f"-DPython3_EXECUTABLE={python_executable}",
             f"-DCMAKE_MAKE_PROGRAM={ninja_path}",
             "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
         ]
