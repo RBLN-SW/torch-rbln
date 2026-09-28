@@ -1354,7 +1354,8 @@ void register_cpp_shim(const std::string& op_name, pybind11::object py_fn, const
   const char* interned = warmcache::intern_op_name(op_name);
 
   const bool first_time = registry().find(op_name) == registry().end();
-  registry()[op_name] = ShimEntry{std::move(py_fn), skip_dtype_args, SchemaCache{}, interned};
+  registry()[op_name] = ShimEntry{
+      .py_fn = std::move(py_fn), .skip_dtype_args = skip_dtype_args, .schema_cache = {}, .op_name_intern = interned};
   // Wire up the per-op fallback counter (heap atomic, keyed by interned name so
   // it survives re-registration). The move-assign above reset fallback_ctr to
   // null, so re-point it here.

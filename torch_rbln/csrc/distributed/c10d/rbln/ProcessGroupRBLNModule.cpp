@@ -190,8 +190,11 @@ PyObject* initialize_process_group_rbln_bindings(PyObject* _unused, PyObject* no
 
 // Method definitions for the distributed module
 static std::array<PyMethodDef, 2> distributed_method_definitions = {
-    {{"_c10d_rbln_init", initialize_process_group_rbln_bindings, METH_NOARGS, nullptr},
-     {nullptr, nullptr, 0, nullptr}}};
+    {{.ml_name = "_c10d_rbln_init",
+      .ml_meth = initialize_process_group_rbln_bindings,
+      .ml_flags = METH_NOARGS,
+      .ml_doc = nullptr},
+     {.ml_name = nullptr, .ml_meth = nullptr, .ml_flags = 0, .ml_doc = nullptr}}};
 
 PyMethodDef* get_distributed_method_definitions() { // NOLINT
   return distributed_method_definitions.data();

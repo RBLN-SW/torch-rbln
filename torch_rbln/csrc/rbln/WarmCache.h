@@ -89,13 +89,13 @@ struct ScalarValue {
   bool b{false};
 
   static ScalarValue fromInt(int64_t v) {
-    return {Tag::Int, v, 0.0, false};
+    return {.tag = Tag::Int, .i = v};
   }
   static ScalarValue fromFloat(double v) {
-    return {Tag::Float, 0, v, false};
+    return {.tag = Tag::Float, .f = v};
   }
   static ScalarValue fromBool(bool v) {
-    return {Tag::Bool, 0, 0.0, v};
+    return {.tag = Tag::Bool, .b = v};
   }
   static ScalarValue missing() {
     return {};

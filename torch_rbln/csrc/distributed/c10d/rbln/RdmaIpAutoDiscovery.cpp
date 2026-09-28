@@ -46,11 +46,11 @@ bool EnvTruthy(const char* name) {
     return false;
   }
   std::string s(v);
-  std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
+  std::ranges::transform(s, s.begin(), [](unsigned char c) { return std::tolower(c); });
   // Trim surrounding whitespace.
   auto not_space = [](unsigned char c) { return !std::isspace(c); };
-  s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
-  s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
+  s.erase(s.begin(), std::ranges::find_if(s, not_space));
+  s.erase(std::ranges::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
   return s == "1" || s == "true" || s == "yes" || s == "on";
 }
 
@@ -120,7 +120,7 @@ std::optional<std::string> HcaToNetdev(std::string_view hca) {
     RDMA_DIAG("{}={} resolve failed: no netdev under {}", kEnvRdmaHca, dev_name, net_root.string());
     return std::nullopt;
   }
-  std::sort(netdevs.begin(), netdevs.end());
+  std::ranges::sort(netdevs);
   std::string chosen = netdevs.front();
   if (netdevs.size() > 1) {
     std::string others;
