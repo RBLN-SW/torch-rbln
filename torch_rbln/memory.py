@@ -20,6 +20,7 @@ __all__ = [
     "bind_device_memory",
     "DeviceMemoryHandle",
     "empty_cache",
+    "empty_exportable",
     "export_device_memory",
     "import_device_memory",
     "huge_host_empty",
@@ -452,17 +453,38 @@ class DeviceMemoryHandle(NamedTuple):
     device_index: int
 
 
+def empty_exportable(
+    shape,
+    dtype: torch.dtype = torch.float32,
+    device: Optional[Union[int, str, torch.device]] = None,
+) -> torch.Tensor:
+    """
+    Allocate an uninitialized RBLN tensor that :func:`export_device_memory` can export.
+
+    Only tensors from this function can be exported. The memory is placed on device
+    right away. Allocating requires the device's DRM accel node (``/dev/accel/accelN``)
+    to be openable by this process.
+
+    Args:
+        shape: Shape of the tensor.
+        dtype: dtype of the tensor.
+        device: The rbln device to allocate on. Defaults to the current device.
+    """
+    dev = _normalize_device(device)
+    return torch_rbln._C._empty_exportable(dev.index, list(shape), dtype)
+
+
 def export_device_memory(tensor: torch.Tensor) -> DeviceMemoryHandle:
     """
     Export ``tensor``'s device allocation as a dma-buf handle another process can import.
 
-    The tensor must cover its whole storage (contiguous, zero storage offset) and is
-    materialized on device first (as :func:`bind_device_memory` does). The exporter must
-    keep ``tensor`` alive for as long as any importer uses the handle, and must
-    ``os.close(handle.fd)`` once it has been passed on.
+    The tensor must come from :func:`empty_exportable` and cover its whole storage
+    (contiguous, zero storage offset). The exporter must keep ``tensor`` alive for as
+    long as any importer uses the handle, and must ``os.close(handle.fd)`` once it has
+    been passed on.
 
     Args:
-        tensor: An RBLN tensor covering its whole storage.
+        tensor: An RBLN tensor from :func:`empty_exportable`.
 
     Returns:
         A :class:`DeviceMemoryHandle`. Pass ``fd`` to the other process with fd-passing;
@@ -470,7 +492,6 @@ def export_device_memory(tensor: torch.Tensor) -> DeviceMemoryHandle:
     """
     if tensor.device.type != "rbln":
         raise RuntimeError(f"export_device_memory: expected an rbln tensor, got {tensor.device}")
-    torch_rbln._C._bind_device_memory(tensor)
     base_dva, size, offset, fd = torch_rbln._C._export_device_memory(tensor)
     return DeviceMemoryHandle(
         fd=fd,

@@ -9,6 +9,7 @@
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNSupportedDtypes.h>
+#include <c10/util/accumulate.h>
 #include <torch/csrc/Dtype.h>
 #include <torch/csrc/utils/pybind.h>
 #include <torch_rbln/csrc/distributed/c10d/rbln/ProcessGroupRBLNModule.hpp>
@@ -270,6 +271,15 @@ void register_internal_api(py::module_& module) {
         return py::make_tuple(h.base_dva, h.size, h.offset, h.fd);
       },
       "Internal: export an RBLN tensor's device allocation as (base_dva, size, offset, dma_buf_fd)");
+  module.def(
+      "_empty_exportable",
+      [](c10::DeviceIndex device_index, std::vector<int64_t> sizes, c10::ScalarType dtype) {
+        const auto nbytes = c10::multiply_integers(sizes) * c10::elementSize(dtype);
+        void* base = c10::rbln::malloc_exportable(device_index, nbytes);
+        const auto base_ptr = reinterpret_cast<uint64_t>(base);
+        return at::native::rbln::create_owning_tensor_from_ptr(base_ptr, base_ptr, sizes, dtype);
+      },
+      "Internal: allocate an owning RBLN tensor that export_device_memory accepts");
   module.def(
       "_import_device_memory",
       [](c10::DeviceIndex device_index,

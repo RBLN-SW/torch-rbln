@@ -643,8 +643,8 @@ DeviceMemoryExport export_device_memory(const void* rbln_data) {
   DeviceMemoryExport out{0, 0, 0, -1};
   RBLN_CHECK(
       !::rbln::rbln_export_device_memory(vaddr, out.base_dva, out.size, out.offset, out.fd),
-      "rbln_export_device_memory failed for vaddr={:#x}; the tensor must be resident on device as a single flat "
-      "allocation (see torch_rbln.bind_device_memory)",
+      "rbln_export_device_memory failed for vaddr={:#x}; only tensors from torch.rbln.empty_exportable can be "
+      "exported",
       vaddr);
   RBLN_LOG_DEBUG(
       "export_device_memory: vaddr={:#x} base_dva={:#x} size={} offset={} fd={}",
@@ -654,6 +654,24 @@ DeviceMemoryExport export_device_memory(const void* rbln_data) {
       out.offset,
       out.fd);
   return out;
+}
+
+void* malloc_exportable(c10::DeviceIndex device_index, size_t nbytes) {
+  RBLN_CHECK(nbytes > 0, "malloc_exportable: nbytes must be positive, but got {}", nbytes);
+  check_device_index(device_index);
+  require_runtime("allocate exportable device memory");
+  const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
+  uint64_t vaddr = 0;
+  RBLN_CHECK(
+      !::rbln::rbln_malloc_exportable(torch_device_id, static_cast<uint64_t>(nbytes), vaddr),
+      "rbln_malloc_exportable failed (rbln:{}, {} bytes); check that /dev/accel is accessible",
+      static_cast<int>(device_index),
+      nbytes);
+  auto* data = reinterpret_cast<void*>(vaddr); // NOLINT(performance-no-int-to-ptr)
+  RBLN_CHECK(data != nullptr, "malloc_exportable returned a null pointer");
+  mark_device_context_initialized(device_index);
+  RBLN_LOG_DEBUG("malloc_exportable: rbln:{} nbytes={} -> vaddr={:#x}", static_cast<int>(device_index), nbytes, vaddr);
+  return data;
 }
 
 void* import_device_memory(c10::DeviceIndex device_index, int fd, size_t nbytes) {

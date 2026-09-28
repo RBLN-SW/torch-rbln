@@ -305,10 +305,17 @@ struct DeviceMemoryExport {
 /**
  * @brief Exports the device allocation backing `rbln_data` as a dma-buf handle.
  *
- * The memory must be resident on device as one flat allocation (eager or bound). The exporter
- * must keep the tensor alive while any importer uses it.
+ * The memory must come from malloc_exportable(). The exporter must keep the tensor alive while
+ * any importer uses it.
  */
 C10_RBLN_API DeviceMemoryExport export_device_memory(const void* rbln_data);
+
+/**
+ * @brief Allocates `nbytes` of device memory that export_device_memory() can export.
+ *
+ * Release it with free(). Requires the device's DRM accel node to be openable by this process.
+ */
+C10_RBLN_API void* malloc_exportable(c10::DeviceIndex device_index, size_t nbytes);
 
 /**
  * @brief Imports a dma-buf exported by another process on the same device.
