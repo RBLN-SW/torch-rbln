@@ -9,6 +9,7 @@
 #include <ATen/native/rbln/RBLNTensorUtils.h>
 
 #include <c10/rbln/RBLNFunctions.h>
+#include <c10/rbln/RBLNGenerator.h>
 #include <c10/util/SmallVector.h>
 
 #ifndef AT_PER_OPERATOR_HEADERS
@@ -38,6 +39,7 @@ namespace {
 // Populate under unique_lock; readers take a shared_lock. OptionalTensor (`Tensor?`,
 // e.g. linear's bias) must be classified explicitly — else the arg stays on the
 // stack as an RBLN tensor under CPU dispatch and blows up at the next hop.
+// OptionalGenerator (`Generator?`) likewise: the CPU kernel accepts only a CPU generator.
 enum class CpuFbArgKind : uint8_t {
   Other = 0,
   Tensor,
@@ -45,6 +47,7 @@ enum class CpuFbArgKind : uint8_t {
   TensorList,
   OptionalTensorList,
   Device,
+  OptionalGenerator,
 };
 
 struct CpuFbSchemaInfo {
@@ -98,6 +101,10 @@ const CpuFbSchemaInfo& get_or_populate_schema_info(const c10::FunctionSchema& sc
       info.arg_kind[i] = CpuFbArgKind::OptionalTensor;
     } else if (type->kind() == TypeKind::DeviceObjType) {
       info.arg_kind[i] = CpuFbArgKind::Device;
+    } else if (
+        type->kind() == TypeKind::OptionalType &&
+        type->castRaw<OptionalType>()->getElementType()->kind() == TypeKind::GeneratorType) {
+      info.arg_kind[i] = CpuFbArgKind::OptionalGenerator;
     }
     const auto* alias = a.alias_info();
     const bool is_w = (alias != nullptr && alias->isWrite());
@@ -303,6 +310,46 @@ void cpu_fallback_rbln(
   // wrapped via the v-mem borrow path; zeros indicate the legacy `to_cpu`
   // fallback (used for non-rbln tensors, contiguity-guard skips, etc.).
   std::vector<std::vector<uint64_t>> tensorlist_borrow_ids;
+  // Per-tensor-arg borrow ids, sized once Step 1 has collected the tensor args.
+  std::vector<uint64_t> borrow_ids;
+  std::optional<size_t> generator_idx;
+
+  // Anything that throws once a borrow is live -- the generator check after Step 1's
+  // TensorList borrows, or Steps 2/3 (e.g. dtype-mismatched or wrong-device out=) -- must
+  // still release it, else the next free on a still-borrowed vaddr fails, and since
+  // c10::rbln::free throws from a ~TensorImpl (noexcept) deleter that escalates to
+  // std::terminate. The RAII guard releases any still-live borrow (updated=false) on
+  // destruction; Step 4 zeroes the ids on the happy path, so the guard is then a no-op.
+  struct BorrowReleaseGuard {
+    std::vector<uint64_t>& borrow_ids;
+    std::vector<std::vector<uint64_t>>& tensorlist_borrow_ids;
+    ~BorrowReleaseGuard() {
+      for (auto& bid : borrow_ids) {
+        if (bid != 0) {
+          try {
+            c10::rbln::return_borrowed(bid, /*updated=*/false);
+          } catch (...) {
+            // Best-effort: dtor is noexcept by default. Swallow runtime
+            // rejections so we don't escalate one borrow-release failure into
+            // std::terminate; the original exception that triggered cleanup
+            // is more useful for diagnosis.
+          }
+          bid = 0;
+        }
+      }
+      for (auto& bids : tensorlist_borrow_ids) {
+        for (auto& bid : bids) {
+          if (bid != 0) {
+            try {
+              c10::rbln::return_borrowed(bid, /*updated=*/false);
+            } catch (...) {
+            }
+            bid = 0;
+          }
+        }
+      }
+    }
+  } _borrow_guard{borrow_ids, tensorlist_borrow_ids};
 
   // Step 1: convert all non-CPU tensor inputs into CPU tensors and stage them on
   // the stack at the correct indices, switching on the cached per-arg schema kind.
@@ -352,17 +399,44 @@ void cpu_fallback_rbln(
         tgt_device = ivalue.toDevice();
         (*stack)[arguments_begin + idx] = c10::IValue(c10::Device(kCPU));
         break;
+      case CpuFbArgKind::OptionalGenerator:
+        generator_idx = idx;
+        break;
       case CpuFbArgKind::Other:
         break; // unreachable — gated above
     }
   }
+  // Swap in the CPU generator behind the op's RBLN generator -- or behind its device's
+  // default one for None, which the CPU kernel would otherwise read as the global CPU
+  // generator that torch.rbln.manual_seed() does not seed. Skipped when the op is not on an
+  // RBLN device: a CPU op reaches here only because an RBLN generator's dispatch key routed
+  // it, and the CPU kernel rejects that generator itself; an op with no tensor or Device
+  // argument (randperm.generator) redispatches with its out tensor, and that call swaps.
+  if (generator_idx.has_value()) {
+    const auto op_device = tgt_device.has_value() ? tgt_device : compute_target_device(tensor_args, tensorlist_args);
+    if (op_device.has_value() && op_device->type() == c10::DeviceType::PrivateUse1) {
+      const auto op_index = op_device->has_index() ? op_device->index() : c10::rbln::get_device_index();
+      const auto& ivalue = arguments[*generator_idx];
+      const auto generator = ivalue.isNone() ? c10::rbln::get_default_rbln_generator(op_index) : ivalue.toGenerator();
+      auto* rbln_generator = check_generator<RBLNGeneratorImpl>(generator);
+      TORCH_CHECK(
+          generator.device().index() == op_index,
+          op.schema().operator_name(),
+          ": expected a generator on rbln:",
+          static_cast<int>(op_index),
+          ", but got one on ",
+          generator.device());
+      (*stack)[arguments_begin + *generator_idx] = c10::IValue(rbln_generator->fallback_generator());
+    }
+  }
+
   // Stage tensor args onto the stack as CPU views. We obtain a host pointer
   // into the existing vmem region (no D2H copy) and wrap it as a CPU tensor
   // via at::from_blob; borrow ids are tracked so we can release them after
   // the op runs. Slots that can't be borrowed (write-alias outputs, undefined
   // tensors, non-rbln tensors, contiguity-guard skips) fall through to the
   // batched `at::_to_cpu` copy path.
-  std::vector<uint64_t> borrow_ids(tensor_args.size(), 0);
+  borrow_ids.assign(tensor_args.size(), 0);
   std::vector<at::Tensor> cpu_tensors(tensor_args.size());
 
   for (size_t i = 0; i < tensor_args.size(); ++i) {
@@ -445,43 +519,6 @@ void cpu_fallback_rbln(
   // mean.out last-dim). On match the handler runs its own guards, writes into
   // the borrowed out buffer, and replaces the stack; on no-match it returns
   // false and we fall through to the boxed dispatcher.
-  //
-  // If Step 2/3 throws (e.g. dtype-mismatched or wrong-device out=), the borrows
-  // above must still be released — else the next free on a still-borrowed vaddr
-  // fails, and since c10::rbln::free throws from a ~TensorImpl (noexcept) deleter
-  // that escalates to std::terminate. The RAII guard releases any still-live
-  // borrow (updated=false) on destruction; Step 4 zeroes borrow_ids on the happy
-  // path, so the guard is then a no-op.
-  struct BorrowReleaseGuard {
-    std::vector<uint64_t>& borrow_ids;
-    std::vector<std::vector<uint64_t>>& tensorlist_borrow_ids;
-    ~BorrowReleaseGuard() {
-      for (auto& bid : borrow_ids) {
-        if (bid != 0) {
-          try {
-            c10::rbln::return_borrowed(bid, /*updated=*/false);
-          } catch (...) {
-            // Best-effort: dtor is noexcept by default. Swallow runtime
-            // rejections so we don't escalate one borrow-release failure into
-            // std::terminate; the original exception that triggered cleanup
-            // is more useful for diagnosis.
-          }
-          bid = 0;
-        }
-      }
-      for (auto& bids : tensorlist_borrow_ids) {
-        for (auto& bid : bids) {
-          if (bid != 0) {
-            try {
-              c10::rbln::return_borrowed(bid, /*updated=*/false);
-            } catch (...) {
-            }
-            bid = 0;
-          }
-        }
-      }
-    }
-  } _borrow_guard{borrow_ids, tensorlist_borrow_ids};
 
   // A pure-out borrow wraps the rbln out in a non-resizable from_blob view, so an
   // undersized out= the CPU kernel tries to GROW throws "not resizable" (shrink is

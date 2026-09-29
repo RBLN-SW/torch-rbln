@@ -24,7 +24,7 @@ and ``RBLNWorker._init_device_env()`` remaps ``RBLN_DEVICES`` *inside* the forke
 a mapping frozen in the parent breaks every worker.
 
 A clause not satisfied yet is a ``strict=True`` xfail naming the work that closes it; an
-unexpected pass means the marker should go. One group remains: ``phase 4``, the RNG /
+unexpected pass means the marker should go. One group remains: ``phase 4``, the
 serialization / device-name surface of ``torch.rbln``.
 """
 
@@ -655,7 +655,6 @@ class TestUpstreamClauses(TestCase):
 
     # -- backend-module surface torch looks for ------------------------------
 
-    @xfail_until("phase 4", "torch.rbln has no _is_in_bad_fork / manual_seed_all")
     def test_manual_seed_reaches_the_backend(self):
         """``torch.manual_seed()`` must seed the RBLN generators.
 
@@ -1026,6 +1025,48 @@ class TestExternalConsumers(TestCase):
             self.skipTest(f"ctx/remap state undetermined in this environment -- {p}")
         self.assertFalse(p.ctx, f"DataLoader opened an NPU context -- {p}")
         self.assertEqual(p.remap, "applied", f"DataLoader froze the mapping -- {p}")
+
+    def test_seed_before_llm_leaves_the_mapping_remappable(self):
+        """``torch.manual_seed()`` before ``LLM(...)`` must not freeze the mapping or claim an NPU.
+
+        Scripts seed first and construct the engine second; vLLM then forks workers that remap
+        ``RBLN_DEVICES``. ``torch.manual_seed`` reaches ``torch.rbln.manual_seed_all`` through
+        torch/random.py::_seed_custom_device, and ``fork_rng`` / checkpointing read the default
+        generator through ``get_rng_state``, so neither may acquire a device.
+        """
+        p = run_probe(
+            """
+            torch.manual_seed(42)
+            rec["result"] = torch.rbln.get_rng_state().numel()
+            """,
+            HEALTHY,
+        )
+        self.assertIsNone(p.raised, f"probe raised -- {p}")
+        if p.ctx is None or p.remap is None:
+            self.skipTest(f"ctx/remap state undetermined in this environment -- {p}")
+        self.assertFalse(p.ctx, f"seeding opened an NPU context -- {p}")
+        self.assertEqual(p.remap, "applied", f"seeding froze the mapping -- {p}")
+
+    def test_remap_after_seeding_seeds_the_added_device(self):
+        """A device a remap adds after ``torch.manual_seed()`` must carry that seed.
+
+        The parent sees one device when it seeds and two after the remap. A generator table
+        sized at seeding time would have no rbln:1, or would give it an unseeded generator.
+        """
+        p = run_probe(
+            """
+            torch.manual_seed(1234)
+            os.environ["RBLN_DEVICES"] = DEV0 + "," + DEV1
+            count = torch.rbln.device_count()
+            rec["result"] = [count, torch_rbln._C.get_default_generator(count - 1).initial_seed()]
+            """,
+            HEALTHY,
+        )
+        self.assertIsNone(p.raised, f"probe raised -- {p}")
+        count, seed = p.result
+        if count != 2:
+            self.skipTest(f"needs two visible NPUs for the remap to add a device -- {p}")
+        self.assertEqual(seed, 1234, f"the added device was not seeded -- {p}")
 
     def test_import_does_not_resolve_a_device(self):
         """Importing ``torch_rbln`` must not resolve a device to read its architecture.
