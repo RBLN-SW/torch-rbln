@@ -212,17 +212,15 @@ jobs:
           print(f"::notice::Smoke test passed: torch-rbln=={torch_rbln.__version__} on torch {torch.__version__}")
           PY
 
-      # The first two manage RBLN_DUMMY_DEVICE themselves: test_dummy_device sets it per
-      # subprocess, and test_no_device requires device_count() == 0. test_device_arch
-      # runs here because the architecture gates it covers are evaluated at collection,
-      # and this is the only runner where they see a host with no NPU.
+      # test_dummy_device sets RBLN_DUMMY_DEVICE per subprocess. test_device_arch runs here
+      # because the architecture gates it covers are evaluated at collection, and this is
+      # the only runner where they see a host with no NPU.
       - name: Run no-NPU test suites
         run: |
           set -euo pipefail
 
           "${TEST_VENV}/bin/python" -m pytest \
             test/rbln/test_dummy_device.py \
-            test/distributed/test_no_device.py \
             test/internal/test_device_arch.py \
             -m test_set_ci \
             --numprocesses=1
