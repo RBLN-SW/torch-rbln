@@ -15,6 +15,7 @@ Covers:
 - PrivateUse1 storage resize-to-zero.
 - ``torch.accelerator.empty_cache()`` (no device arg) actually releasing cached
   memory on the current device.
+- ``torch.accelerator.empty_host_cache()`` returning once the device is in use.
 - ``torch.rbln.mem_get_info()`` / ``torch.accelerator.get_memory_info()`` reporting
   the driver's device-wide figures, and raising -- not guessing -- where the installed
   UMD/KMD has no such query.
@@ -25,6 +26,7 @@ import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 import torch_rbln  # noqa: F401 -- registers the rbln device + torch.rbln namespace
+from test.utils import run_in_isolated_process
 
 
 @pytest.mark.single_worker
@@ -217,6 +219,25 @@ class TestAcceleratorEmptyCache(TestCase):
         # Must actually release the cached block; a no-op or query-only
         # implementation would leave reserved unchanged.
         self.assertLess(torch.rbln.memory_reserved("rbln:0"), reserved_cached)
+
+
+def _empty_host_cache_worker():
+    # The binding returns early until the device is initialized, so use it first.
+    torch.randn(16, 16).to("rbln:0")
+    pinned = torch.arange(64, dtype=torch.float32).pin_memory()
+    torch.accelerator.empty_host_cache()
+    assert pinned.is_pinned()
+    assert torch.equal(pinned, torch.arange(64, dtype=torch.float32))
+
+
+class TestAcceleratorEmptyHostCache(TestCase):
+    """``torch.accelerator.empty_host_cache()`` reads the PrivateUse1 host allocator
+    slot; with it empty, torch 2.13 segfaults (pytorch/pytorch#197593)."""
+
+    @pytest.mark.test_set_ci
+    def test_empty_host_cache_after_device_use(self):
+        # A spawned process, so a segfault fails this test instead of the worker.
+        run_in_isolated_process(_empty_host_cache_worker)
 
 
 def _driver_memory_replies(logical_index):
