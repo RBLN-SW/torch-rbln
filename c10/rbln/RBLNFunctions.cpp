@@ -676,6 +676,26 @@ void set_device_layout_like(void* target_data, const void* ref_data) {
       !::rbln::rbln_set_device_alloc_layout_like(target_vaddr, ref_vaddr), "rbln_set_device_alloc_layout_like failed");
 }
 
+namespace {
+
+// Ranges host_register() accepted, by start address. The runtime owns the pins; this
+// only lets the bulk-copy path tell a registered host operand from a pageable one.
+std::mutex g_host_registered_mutex;
+std::map<uintptr_t, size_t> g_host_registered;
+
+} // namespace
+
+bool is_host_registered(const void* host_ptr, size_t nbytes) {
+  const auto addr = reinterpret_cast<uintptr_t>(host_ptr);
+  std::lock_guard<std::mutex> lock(g_host_registered_mutex);
+  auto it = g_host_registered.upper_bound(addr);
+  if (it == g_host_registered.begin()) {
+    return false;
+  }
+  --it;
+  return addr - it->first <= it->second && nbytes <= it->second - (addr - it->first);
+}
+
 bool host_register(c10::DeviceIndex device_index, const void* host_ptr, size_t nbytes) {
   RBLN_CHECK(host_ptr != nullptr, "host_register: host_ptr is nullptr");
   RBLN_CHECK(nbytes > 0, "host_register: nbytes must be positive, but got {}", nbytes);
@@ -698,6 +718,10 @@ bool host_register(c10::DeviceIndex device_index, const void* host_ptr, size_t n
     return false;
   }
   RBLN_LOG_DEBUG("host_register: rbln:{} [{:#x}, +{})", static_cast<int>(device_index), addr, nbytes);
+  {
+    std::lock_guard<std::mutex> lock(g_host_registered_mutex);
+    g_host_registered[addr] = nbytes;
+  }
   return true;
 }
 
@@ -715,6 +739,8 @@ void host_unregister(c10::DeviceIndex device_index, const void* host_ptr) {
       "rbln_host_unregister failed for {:#x} on rbln:{}; see the runtime log",
       addr,
       static_cast<int>(device_index));
+  std::lock_guard<std::mutex> lock(g_host_registered_mutex);
+  g_host_registered.erase(addr);
 }
 
 void memcpy_h2v(void* rbln_dst_data, const void* cpu_src_data, size_t nbytes) {

@@ -197,6 +197,12 @@ C10_RBLN_API bool host_register(c10::DeviceIndex device_index, const void* host_
 C10_RBLN_API void host_unregister(c10::DeviceIndex device_index, const void* host_ptr);
 
 /**
+ * @brief Whether [host_ptr, host_ptr + nbytes) lies inside one range host_register()
+ *        accepted (on any device).
+ */
+C10_RBLN_API bool is_host_registered(const void* host_ptr, size_t nbytes);
+
+/**
  * @brief Whether RBLN_DUMMY_DEVICE mode is active: a host-backed logical device
  * with no NPU, so tensors can be built and compiled without hardware (execution
  * still needs one). Cached after the first call.

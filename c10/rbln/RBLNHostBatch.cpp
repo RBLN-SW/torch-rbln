@@ -22,7 +22,7 @@ namespace {
 // cannot recover either. Measured on lmcache's D2H store, 24 entries / 12 MiB
 // pass and 32 / 16 MiB start timing out.
 //
-// Pinned host memory (the pinned allocator, register_host_memory) is exempt: it
+// Pinned host memory (the pinned allocator, host_register) is exempt: it
 // is already registered with the runtime and addressed by device VA, so End()
 // pins nothing, and the runtime splits the call into command buffers of at most
 // its own per-CB copy count itself. Handing it the whole group lets it coalesce
@@ -77,7 +77,7 @@ void flush_group(
   bool all_pinned = true;
   for (const auto& e : group) {
     total += e.nbytes;
-    all_pinned = all_pinned && is_pinned_ptr(host_of(e));
+    all_pinned = all_pinned && (is_pinned_ptr(host_of(e)) || is_host_registered(host_of(e), e.nbytes));
   }
   if (all_pinned || (group.size() <= kMaxBulkEntries && total <= kMaxBulkBytes)) {
     if (all_pinned && (group.size() > kMaxBulkEntries || total > kMaxBulkBytes)) {
