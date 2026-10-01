@@ -19,6 +19,8 @@ import torch_rbln._C
 __all__ = [
     "bind_device_memory",
     "empty_cache",
+    "host_register",
+    "host_unregister",
     "huge_host_empty",
     "set_device_layout_like",
     "max_memory_allocated",
@@ -514,6 +516,70 @@ def huge_host_empty(nbytes: int) -> torch.Tensor:
     # allocation alive for as long as the tensor is: HugeHostBuffer frees itself
     # on collection and nothing else holds it.
     return torch.frombuffer(HugeHostBuffer(nbytes), dtype=torch.uint8)
+
+
+def host_register(ptr: int, nbytes: int, device: Optional[Union[int, str, torch.device]] = None) -> bool:
+    """
+    Pin a caller-owned host range for DMA on ``device``; the counterpart of ``cudaHostRegister``.
+
+    Copies whose host side is 4 KiB aligned and inside the range skip the kernel's
+    per-command-buffer pin, which cuts the time to issue them (not the transfer bandwidth).
+    Registration itself is costly, so register reused buffers once, not per transfer.
+
+    The caller keeps ownership: call :func:`host_unregister` before freeing the memory.
+    Register on each device the range is copied to or from.
+
+    Args:
+        ptr: Start of the range, e.g. ``tensor.data_ptr()``. Any alignment.
+        nbytes: Length in bytes, e.g. ``tensor.untyped_storage().nbytes()``.
+        device (Optional[Union[int, str, torch.device]]): The device to register on.
+            If None, uses the current device. Defaults to None.
+
+    Returns:
+        bool: True if registered. False if not -- no RBLN device, or (with a warning) an
+        unsupported runtime, a dummy device, or overlap with a registered range. Copies
+        over an unregistered range still work.
+
+    Raises:
+        TypeError: if ``ptr`` or ``nbytes`` is not an integer.
+        ValueError: if ``ptr`` or ``nbytes`` is not positive.
+
+    Example::
+
+        slab = torch.rbln.huge_host_empty(1 << 30)
+        torch.rbln.host_register(slab.data_ptr(), slab.numel())
+        ...
+        torch.rbln.host_unregister(slab.data_ptr())
+    """
+    ptr = operator.index(ptr)
+    nbytes = operator.index(nbytes)
+    if ptr <= 0:
+        raise ValueError(f"ptr must be positive, but got {ptr}")
+    if nbytes <= 0:
+        raise ValueError(f"nbytes must be positive, but got {nbytes}")
+    if _no_rbln_device():
+        return False
+    device = _normalize_device(device)
+    return torch_rbln._C._host_register(device.index, ptr, nbytes)
+
+
+def host_unregister(ptr: int, device: Optional[Union[int, str, torch.device]] = None) -> None:
+    """
+    Unpin a range registered with :func:`host_register`. A synchronization point: waits for
+    the device's pending transfers first.
+
+    Args:
+        ptr: The ``ptr`` passed to :func:`host_register`.
+        device (Optional[Union[int, str, torch.device]]): The device it was registered on.
+            If None, uses the current device. Defaults to None.
+
+    Raises:
+        TypeError: if ``ptr`` is not an integer.
+        RuntimeError: if ``ptr`` is not the start of a range registered on ``device``.
+    """
+    ptr = operator.index(ptr)
+    device = _normalize_device(device)
+    torch_rbln._C._host_unregister(device.index, ptr)
 
 
 @contextlib.contextmanager
