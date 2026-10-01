@@ -10,7 +10,7 @@ Verifies that:
   and `current_device_index()` work with RBLN.
 - The `device_index()` context manager switches the active device.
 - `torch.accelerator.memory.*` exposes the standard memory API.
-- Device memory is allocated lazily (a device op increases `memory_allocated`).
+- Device memory is taken when a tensor is created (`memory_allocated` grows by its size).
 """
 
 import pytest
@@ -62,7 +62,7 @@ class TestAcceleratorInterface(TestCase):
 
 @pytest.mark.test_set_ci
 class TestAcceleratorMemory(TestCase):
-    """Walkthrough example 4: `torch.accelerator.memory` API and lazy allocation."""
+    """Walkthrough example 4: `torch.accelerator.memory` API and device allocation."""
 
     device_index = 0
     device = torch.device("rbln:0")
@@ -86,19 +86,19 @@ class TestAcceleratorMemory(TestCase):
         self.assertIsInstance(stats, dict)
 
     @dtypes(*SUPPORTED_DTYPES)
-    def test_lazy_device_allocation_after_op(self, dtype):
-        """Running a device op should not decrease `memory_allocated`."""
+    def test_tensors_take_device_memory_when_created(self, dtype):
+        """Creating a tensor, or an op's result, grows `memory_allocated` by at least its size."""
         self._reset_memory_state()
 
         mem_before = torch.accelerator.memory.memory_allocated(self.device_index)
         a = torch.randn(128, 128, device=self.device, dtype=dtype)
         b = torch.randn(128, 128, device=self.device, dtype=dtype)
         mem_after_create = torch.accelerator.memory.memory_allocated(self.device_index)
-        _ = a + b  # Device op should materialize memory.
+        c = a + b
         mem_after_op = torch.accelerator.memory.memory_allocated(self.device_index)
 
-        self.assertGreaterEqual(mem_after_create, mem_before)
-        self.assertGreaterEqual(mem_after_op, mem_after_create)
+        self.assertGreaterEqual(mem_after_create - mem_before, a.nbytes + b.nbytes)
+        self.assertGreaterEqual(mem_after_op - mem_after_create, c.nbytes)
 
 
 instantiate_device_type_tests(TestAcceleratorInterface, globals(), only_for="privateuse1")

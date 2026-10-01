@@ -4,10 +4,9 @@ Holds the per-op tests' shared constants (``DEVICE``, ``ENGINE_DTYPES``) and
 assertion helpers (``to_dev``, ``arange``, ``eq``, ``close``) — collected
 here once so each test file stays short and diff-friendly.
 
-The env-vars these tests need (``TORCH_RBLN_DEPLOY``, optionally
-``TORCH_RBLN_EAGER_MALLOC``) are applied per-test through the
-``enable_deploy_mode`` / ``enable_eager_malloc`` fixtures defined in
-``test/conftest.py``. Apply them at the class level::
+The env-var these tests need (``TORCH_RBLN_DEPLOY``) is applied per-test through the
+``enable_deploy_mode`` fixture defined in ``test/conftest.py``. Apply it at the class
+level::
 
     @pytest.mark.usefixtures("enable_deploy_mode")
     class TestFooV2V(TestCase): ...

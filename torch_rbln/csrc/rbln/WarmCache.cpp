@@ -1,13 +1,6 @@
 #include <torch_rbln/csrc/rbln/WarmCache.h>
 
-#include <fcntl.h>
-#include <sys/types.h>
-#include <unistd.h>
 #include <algorithm>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <fstream>
 #include <mutex>
 #include <vector>
 
@@ -84,38 +77,11 @@ const char* intern_op_name(const std::string& name) {
 // ---- WarmCache singleton ----------------------------------------------------
 
 WarmCache& WarmCache::instance() {
-  // Leaky singleton: CacheEntry holds a strong pybind11::object reference to
-  // the DynamoRuntime. Running ~WarmCache after Py_Finalize() decrefs that
-  // py::object on a finalized interpreter and aborts inside libpython.
-  // Allocate with `new` so the entries outlive Python finalize; the OS
-  // reclaims the process memory at exit.
-  //
-  // Default ON: hot path drives rebel runtime directly from C++ on warm hits;
-  // a hit that fails v-memory lookup falls through to the pybind miss path
-  // so cold-path correctness is preserved.
-  static auto* c = [] {
-    auto* p = new WarmCache();
-    p->set_enabled(true);
-    return p;
-  }();
+  // Leaky: entries hold runtime objects, which must not outlive the runtime's
+  // own statics at exit.
+  static auto* c = new WarmCache();
   return *c;
 }
-
-namespace {
-// Custom deleter for CacheEntry. ``py_dyn_runtime`` holds a strong
-// pybind11::object reference; its destructor decrefs a Python object and
-// must therefore run under the GIL. The shared_ptr's last refcount drop
-// can happen on any thread (e.g. when a hit-path's local shared_ptr goes
-// out of scope after the calling Python thread released the GIL), so we
-// route every destruction through this deleter to guarantee GIL hold.
-void cache_entry_deleter(CacheEntry* p) {
-  if (p == nullptr) {
-    return;
-  }
-  pybind11::gil_scoped_acquire gil;
-  delete p;
-}
-} // namespace
 
 CacheEntryPtr WarmCache::find(const CacheKey& key) {
   if (!enabled_.load(std::memory_order_relaxed))
@@ -129,9 +95,8 @@ void WarmCache::install(CacheKey key, const CacheEntry& entry) {
   if (!enabled_.load(std::memory_order_relaxed))
     return;
   std::unique_lock<std::shared_mutex> wr(mu_);
-  std::shared_ptr<CacheEntry> entry_ptr(new CacheEntry(entry), &cache_entry_deleter);
   // First-writer-wins: if another thread beat us to it, keep the earlier one.
-  map_.try_emplace(std::move(key), std::move(entry_ptr));
+  map_.try_emplace(std::move(key), std::make_shared<CacheEntry>(entry));
 }
 
 size_t WarmCache::size() {
@@ -141,8 +106,7 @@ size_t WarmCache::size() {
 
 void WarmCache::clear(std::optional<c10::DeviceIndex> device) {
   // The dropped entries die at the end of this function, outside the lock:
-  // their deleter takes the GIL, and a thread that already holds the GIL may
-  // be waiting for ``mu_`` (``clear`` and ``size`` are called from Python).
+  // destroying an executor waits for its runs.
   std::vector<std::shared_ptr<CacheEntry>> dropped;
   {
     std::unique_lock<std::shared_mutex> wr(mu_);
@@ -158,20 +122,6 @@ void WarmCache::clear(std::optional<c10::DeviceIndex> device) {
       }
     }
   }
-}
-
-namespace {
-thread_local bool t_building_entry = false;
-} // namespace
-
-bool WarmCache::is_building_entry() {
-  return t_building_entry;
-}
-void WarmCache::enter_building() {
-  t_building_entry = true;
-}
-void WarmCache::exit_building() {
-  t_building_entry = false;
 }
 
 } // namespace torch_rbln::warmcache

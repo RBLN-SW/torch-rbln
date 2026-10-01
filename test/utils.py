@@ -1,7 +1,6 @@
 import multiprocessing
 import os
 import random
-import sys
 
 import numpy as np
 import pytest
@@ -32,34 +31,22 @@ def configure_rbln_network_for_autoport_tests() -> None:
 def configure_master_port_for_rccl_tests(default_port: str = _DEFAULT_DISTRIBUTED_MASTER_PORT) -> None:
     """Apply MASTER_PORT policy for RBLN distributed tests.
 
-    When RCCL_PORT_GEN=1, RCCL uses the autoport / unique-id init path; the
-    process group still needs MASTER_PORT for the TCP store. In that case the
-    user must set MASTER_PORT in the environment. Otherwise we set a default
-    port (without clobbering an existing MASTER_PORT).
+    The process group's TCP store listens on MASTER_PORT, through which rank 0 hands the others
+    the RCCL group id; RCCL picks its own ports into that id. A default port is set without
+    clobbering an existing MASTER_PORT, so concurrent runs keep apart by setting their own.
     """
-    if os.environ.get("RCCL_PORT_GEN") == "1":
-        if not os.environ.get("MASTER_PORT"):
-            print(
-                "RCCL_PORT_GEN=1 requires MASTER_PORT to be set in the environment "
-                f"(e.g. export MASTER_PORT=29500). Unset RCCL_PORT_GEN or set it to "
-                f"empty to use the test default ({default_port}).",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        return
     os.environ.setdefault("MASTER_PORT", default_port)
 
 
-def assert_device_resident_dtype(dtype: torch.dtype) -> None:
-    """Fail unless the device advertises `dtype` as device-resident.
+def assert_device_computed_dtype(dtype: torch.dtype) -> None:
+    """Fail unless the device advertises `dtype` as one it computes on.
 
-    Only fp16/bf16 are (`kCapabilityDtypes`); another dtype accepts ``device="rbln"``
-    but stays host-backed, so an ordering test written on it would run entirely on the
-    host and pass with a broken fence. Per-tensor byte counting cannot stand in for
-    this: allocation is lazy and small elementwise ops take CPU fast paths.
+    Only fp16/bf16 are (``get_device_capability()``). A tensor of another dtype still lives in
+    device memory, but its ops run on the host through the CPU fallback, so an ordering test
+    written on it would exercise host copies instead of device work and pass with a broken fence.
     """
     advertised = torch.accelerator.get_device_capability()["supported_dtypes"]
-    assert dtype in advertised, f"{dtype} is not device-resident; advertised: {advertised}"
+    assert dtype in advertised, f"{dtype} is not computed on the device; advertised: {advertised}"
 
 
 def set_deterministic_seeds(seed: int):

@@ -61,7 +61,7 @@ The value is a **comma-separated list** of fallback categories to disable:
 
 | Category             | Fallback behavior (default)                              | When disabled                                         |
 |----------------------|----------------------------------------------------------|-------------------------------------------------------|
-| `compile_error`      | `torch.compile` failures fall back to CPU execution      | Raises the compilation error directly                 |
+| `compile_error`      | A graph or eager op the compiler cannot build runs on CPU | Raises the compilation error directly                 |
 | `non_blocking_copy`  | Non-blocking copy silently falls back to blocking copy   | Raises an error instead of degrading to blocking copy |
 | `strided_copy_error` | Batched strided copy failures fall back to CPU execution | Raises the underlying error directly                  |
 | `unsupported_op`     | Unsupported RBLN ops silently fall back to CPU execution | Raises an error listing the unsupported operator      |
@@ -118,7 +118,6 @@ The value is a **comma-separated list** of fallback case names to disable:
 | `reentrant`      | Falls back to CPU when already inside RBLN compile op (e.g. print/repr, nested op); logs a warning | Skips the check — risks infinite recursion                 |
 | `dtype`          | Falls back on unsupported or mismatched tensor dtypes            | Sends such tensors to RBLN — may produce wrong results        |
 | `scalar`         | Falls back when all input tensors are 0-dim scalars              | Sends scalar ops to RBLN — may fail in rebel-compiler         |
-| `storage_offset` | Falls back when a contiguous tensor has `storage_offset != 0`    | Sends offset tensors to RBLN — may read wrong data            |
 | `nan_inf`        | Falls back when inputs contain NaN or Inf (non-deploy mode only) | Skips the NaN/Inf scan — invalid values reach the device      |
 | `all`            | —                                                                | Disables **all** of the above checks                          |
 
@@ -226,8 +225,9 @@ export RBLN_DUMMY_DEVICE=1 RBLN_DEVICE_MAP="[0,1],[2,3]"   # 2 logical devices, 
   clear error — a compiled graph, or an eager op on a device dtype (fp16/bf16) — since
   there is no NPU to run it. Host-side ops (e.g. fp32, which never runs on the NPU even
   with real hardware) fall back to CPU exactly as they would on a real device.
-  Distributed collectives still require real hardware, and memory-stat APIs
-  (`memory_stats`, `memory_allocated`, ...) report zeros rather than real usage.
+  Distributed collectives still require real hardware. Memory-stat APIs
+  (`memory_stats`, `memory_allocated`, ...) count the host-backed blocks the caching
+  allocator hands out, with the same rounding and caching as on a device, while
   `mem_get_info()` and `mem_get_info_per_chiplet()` raise: there is no device DRAM to report.
 - `torch.rbln.is_available()` returns `True` in this mode — treat it as a
   development flag, not real hardware availability.
@@ -260,70 +260,44 @@ With `RBLN_NPUS_PER_DEVICE=4` (4 NPUs per logical device):
 - If the model doesn't support TP, a RuntimeError occurs
 - With failover enabled, the system retries with `num_devices=1` on NPU 0
 
-### TORCH_RBLN_USE_DEVICE_TP
+## rbln ABI Check
 
-Controls whether eager mode operations use the device group's `num_devices` instead of `num_devices=1`.
+`torch-rbln` compiles against the runtime headers of the rebel-compiler tree named by
+`REBEL_HOME` (`rbln/include/rbln/**/*.h`) and runs on the `librbln_rt.so` that the `rbln`
+package maps when it is imported. Both have to come from the same headers. Their ABI id is a
+SHA-256 over every header's relative path and SHA-256, computed by the runtime's own
+`rbln/cmake/RblnAbi.cmake`:
 
-By default, eager mode ops (operations outside of `torch.compile`) use `num_devices=1`. When this environment variable is set to ON, eager mode ops will follow the logical device size defined by `RBLN_NPUS_PER_DEVICE` or `RBLN_DEVICE_MAP`, matching the behavior of `torch.compile` operations.
+- the runtime exports the id of the headers it was built with as `rbln_abi_id()`;
+- the `torch-rbln` build runs the same script over the headers it compiles against and records
+  the id in the generated `torch_rbln/_internal/_abi_snapshot.py`. Editing, adding or removing a
+  header regenerates it on the next build.
 
-```bash
-export TORCH_RBLN_USE_DEVICE_TP=ON   # use device group num_devices
-export TORCH_RBLN_USE_DEVICE_TP=OFF  # use num_devices=1 for eager ops (default: OFF)
-```
-
-**Behavior:**
-- When set to ON: Eager mode ops use the device group's `num_devices` (e.g., `num_devices=4` with `RBLN_NPUS_PER_DEVICE=4`)
-- When set to OFF or unset (default): Eager mode ops use `num_devices=1`
-
-**Use case:**
-This is useful when you want consistent tensor parallel behavior across both eager and compiled operations, particularly in mixed execution scenarios.
-
-## rebel ABI Handshake
-
-`torch-rbln` and `librbln.so` agree on an integer interface contract. `rebel-compiler`
-declares two numbers in `rebel/runtime/api/rbln_abi.h` and exports both as C entry
-points:
-
-| Number | Meaning |
-|--------|---------|
-| `RBLN_ABI_CURRENT` | the interface number this `librbln.so` implements |
-| `RBLN_ABI_MIN_SUPPORTED` | the oldest consumer contract it still accepts |
-
-`torch-rbln` owns no number of its own. Its build records a *snapshot* of
-`RBLN_ABI_CURRENT` from the header it compiled against, and `import torch_rbln` checks
-that snapshot against the `librbln.so` it actually loads, before any other rebel entry
-point is used:
-
-```
-rbln_abi_min_supported() <= <snapshot> <= rbln_abi_current()
-```
-
-Outside that window the import fails with an `RBLN ABI mismatch` message naming the
-`librbln.so` in use and both versions. A `librbln.so` whose two entry points contradict
-each other (`min_supported > current`) fails the same way, with or without a snapshot to
-compare against: it describes no acceptable consumer at all.
+`import torch_rbln` compares the two ids before it loads its own native libraries. When they
+differ, the import fails with an `RBLN ABI mismatch` message naming the runtime, both ids and the
+include directory the build used. Rebuild `torch-rbln` with `REBEL_HOME` set to the tree the
+runtime was built from, or run it with the `rbln` package of the tree it was built against.
 
 Cases that leave no verdict to reach warn and continue instead:
 
 | case | why it cannot decide |
 |------|----------------------|
-| `librbln.so` exports no version symbols | it predates the handshake |
-| `librbln.so` exports only one of the two | malformed, but half a window is no window |
-| no handle can be taken on the mapped `librbln.so` | its symbols cannot be read |
-| `torch-rbln` recorded no snapshot | it was built against a `rebel-compiler` with no `rbln_abi.h` |
+| `torch-rbln` recorded no ABI id | `_abi_snapshot.py` is missing from this install |
+| no handle can be taken on the mapped runtime | its symbols cannot be read |
+| the runtime exports no `rbln_abi_id` | it cannot say which headers it was built with |
 
-Run `python -m torch_rbln.diagnose` to see the snapshot, the runtime window, and the
-verdict for the current environment.
+Run `python -m torch_rbln.diagnose` to see where `rbln` imports from, the runtime it maps, both
+ids and the verdict for the current environment.
 
 ### TORCH_RBLN_SKIP_ABI_CHECK
 
-Skips the handshake entirely.
+Skips the check entirely.
 
 ```bash
 export TORCH_RBLN_SKIP_ABI_CHECK=1   # accepts 1 / ON / TRUE / YES
 ```
 
-This is an escape hatch for unblocking a machine while a matching wheel is built. It
+This is an escape hatch for unblocking a machine while a matching build is made. It
 suppresses the diagnosis, not the incompatibility: the mismatch it hides is what would
 otherwise surface as an `undefined symbol` import crash or as corruption inside the
 runtime.

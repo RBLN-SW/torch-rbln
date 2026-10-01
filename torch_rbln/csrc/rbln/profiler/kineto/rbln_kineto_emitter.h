@@ -1,17 +1,16 @@
 #ifndef TORCH_RBLN_PROFILER_KINETO_RBLN_KINETO_EMITTER_H
 #define TORCH_RBLN_PROFILER_KINETO_RBLN_KINETO_EMITTER_H
 
-// C-ABI -> libkineto assembly
+// Runtime activities -> libkineto assembly
 
 #include <kineto/ActivityType.h>
 #include <kineto/GenericTraceActivity.h>
 #include <kineto/IActivityProfiler.h>
 #include <kineto/TraceSpan.h>
+#include <rbln/runtime/activity.h>
 
 #include <cstdint>
 #include <vector>
-
-#include <rebel/runtime/api/rbln_kineto_api.h>
 
 namespace rbln::profiler::kineto {
 
@@ -26,11 +25,11 @@ struct ProjectedKinetoTrace {
   std::vector<::libkineto::GenericTraceActivity> activities;
 };
 
-// Assembles 'out' (cleared first) from the C export, converting each slice's
-// steady_clock time to system time by adding clock_offset_ns. All strings are
-// copied, so 'exp' can be discarded once this returns.
-void convert_export_to_kineto(
-    const RblnKinetoExport* exp,
+// Assembles 'out' (cleared first) from what the runtime recorded: a row per device, a lane
+// per kind of activity on it, and an arrow from each launch to what it ran. Times move from
+// steady_clock to system time by adding clock_offset_ns.
+void convert_activities_to_kineto(
+    const ::rbln::runtime::Activities& recorded,
     int64_t clock_offset_ns,
     const ::libkineto::TraceSpan& span,
     ProjectedKinetoTrace* out);

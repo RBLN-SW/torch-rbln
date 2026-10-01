@@ -1,103 +1,41 @@
-"""Bootstrap helpers for the C++ warm-runtime cache.
+"""Bootstrap helpers for the C++ warm-op cache.
 
 Lifecycle
 ---------
 On a shim op's miss path (C++ shim didn't find a matching entry in the
 warm cache), the C++ shim:
-  1. Saves a thread-local "pending" `CacheKey` built from the live args.
+  1. Saves a thread-local "pending" `CacheKey` built from the live args, with
+     the call's tensors.
   2. Calls the generated Python wrapper (e.g. ``add_out_rbln``) via pybind.
 
-The Python wrapper's ``else`` branch (device path) now passes an empty
-``_runtime_holder`` list via the compile ``options``. After the first
-backend compile, rebel's ``rbln_backend`` appends the ``DynamoRuntime``
-that owns the compiled sync runtime to this list. The generated wrapper
-then calls :func:`install_pending` with that runtime and the
-post-compile output-tensor profiles.
+The wrapper compiles the op into a ``torch_rbln._C._OpFunction``, runs it,
+and calls :func:`install_pending` with the function and the tensors it ran
+over. The C++ side matches those tensors to the call's by identity and inserts
+a ``CacheEntry`` keyed by (op name, input profile, scalars). A wrapper that ran
+the function over tensors of its own making (a copy, a view's base) installs
+nothing: the hit path binds the call's tensors as they are.
 
-:func:`install_pending` packs the output profiles into the shape the
-C++ side expects and hands them, with the runtime handle, to
-``torch_rbln._C._warmcache_install_pending``. The C++ side matches
-against the pending key it saved on the way in and inserts a
-:class:`CacheEntry` keyed by (op name, input profile, scalars, device
-index).
-
-Subsequent dispatches of the same op with a matching input profile hit
-the warm cache on the C++ side, which drives one execution through
-rebel's C ABI (``rbln_exec_api.h``) — no pybind hop, no Python wrapper,
-no Dynamo recompile check. Driving it needs the runtime's
-``native_handle()``; :func:`install_pending` skips the cache for a
-runtime without one, leaving the op on the Python wrapper path. So does a
-hit that fails at run time: the entry stays, so a later call with the same
-profile gets to try it again, and ``install`` is a no-op for a key that is
-still cached.
+Subsequent dispatches of the same op with a matching input profile hit the
+warm cache on the C++ side, which runs the function over the stack's tensors —
+no pybind hop, no Python wrapper. A hit whose tensors the function cannot take
+(an ``out`` of another shape) falls through to the wrapper; the entry stays.
 """
 
 from __future__ import annotations
 
-from typing import Any
-
-import torch
+from typing import Any, TYPE_CHECKING
 
 import torch_rbln._C as _C
 
 
-def _is_drivable_runtime_handle(handle: Any) -> bool:
-    """True iff the C++ hit path can take a native handle off ``handle``."""
-    return callable(getattr(handle, "native_handle", None))
+if TYPE_CHECKING:
+    import torch
 
 
-_DTYPE_KEY = {
-    torch.float16: "float16",
-    torch.float32: "float32",
-    torch.bfloat16: "bfloat16",
-    torch.int64: "int64",
-    torch.int32: "int32",
-    torch.int16: "int16",
-    torch.int8: "int8",
-    torch.uint8: "uint8",
-    torch.bool: "bool",
-}
-
-
-def install_pending(runtime_holder: list, outputs: Any) -> bool:
-    # Hot codegen-injected path: skip work whenever WarmCache is disabled.
-    # `_warmcache_is_enabled` is one C call; cheaper than the rest of this
-    # function and makes WC OFF nearly free on the cold path.
-    if not runtime_holder or not _C._warmcache_is_enabled():
-        if runtime_holder:
-            runtime_holder.clear()
+def install_pending(function: Any, tensors: list[torch.Tensor]) -> bool:
+    if not _C._warmcache_is_enabled():
         return False
-
-    dyn_runtime = runtime_holder[-1]
-    runtime_handle = getattr(dyn_runtime, "_runtime_handle", None)
-    if not _is_drivable_runtime_handle(runtime_handle):
-        runtime_holder.clear()
-        return False
-
-    if isinstance(outputs, torch.Tensor):
-        outputs = (outputs,)
-    profiles = []
-    for t in outputs:
-        if not isinstance(t, torch.Tensor):
-            continue
-        dt = _DTYPE_KEY.get(t.dtype)
-        if dt is None:
-            runtime_holder.clear()
-            return False
-        profiles.append((list(t.shape), dt, t.device.type == "rbln"))
-    if not profiles:
-        runtime_holder.clear()
-        return False
-
-    ok = _C._warmcache_install_pending(
-        dyn_runtime=dyn_runtime,
-        runtime_handle=runtime_handle,
-        out_profiles=profiles,
-    )
-    # Drop the harvested DynamoRuntime so subsequent compile invocations on the
-    # same compiled callable don't grow the list unboundedly.
-    runtime_holder.clear()
-    return bool(ok)
+    return bool(_C._warmcache_install_pending(function, tensors))
 
 
 # ---------------------------------------------------------------------------

@@ -8,10 +8,8 @@ arange(start, end, step, *, out=tensor) directly on the RBLN device:
 * Computes the expected length as ceil((end - start) / step) and resizes
   `out` to match (mirrors PyTorch's structured meta function which sizes
   the output before dispatch on CPU/CUDA).
-* Uses acquire_host_ptr_for_overwrite to skip the device→host sync
-  (write-only) and fills out[i] = start + i*step on the host pointer.
-* Commits via return_borrowed(updated=true) so the next device-side read
-  picks up the new bytes lazily.
+* Fills out[i] = start + i*step in a host buffer and writes it to `out`
+  with one host-to-device copy; `out` is never read back.
 
 These tests verify the result matches CPU `torch.arange` across all
 supported dtypes and across forward / reverse / fractional / single-step

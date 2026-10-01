@@ -14,7 +14,7 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 
 import torch_rbln._internal.register_custom_ops as register_custom_ops
 from test.utils import requires_logical_devices
-from torch_rbln._internal.compile_cache import clear_rbln_compile_cache, compile_rbln_cached
+from torch_rbln._internal.compile_cache import clear_rbln_compile_cache, compiled_op
 from torch_rbln._internal.monkey_patches import patch_torch_compile, remove_all_patches
 from torch_rbln._internal.ops_utils import extract_device_id_from_inputs
 from torch_rbln._internal.torch_compile_patch_helpers import (
@@ -1062,46 +1062,57 @@ class TestTorchCompileMonkeyPatch(TestCase):
         patch_torch_compile()
         self.assertIs(patched, torch.compile)
 
-    def test_compile_rbln_cached_reuses_compiled_callable_for_steady_state(self):
-        """Repeated eager-op compilation should hit the Python-level cache after the first call."""
+    _DEVICE = torch.device("rbln", 0)
+
+    def _compiled_op(self, model, *args):
+        return compiled_op(model, args, {}, self._DEVICE)
+
+    def test_compiled_op_reuses_the_function_of_a_profile(self):
+        """Repeated eager-op compilation should hit the Python-level cache after the first call;
+        another shape is another program."""
+        clear_rbln_compile_cache()
         model = Mock()
-        compiled_fn = Mock(name="compiled_fn")
+        with (
+            patch("torch_rbln._internal.compile_cache._npu", return_value="RBLN-CA25"),
+            patch("torch_rbln._internal.compile_cache._compile", side_effect=[Mock(), Mock()]) as mock_compile,
+        ):
+            first = self._compiled_op(model, torch.ones(4, 64), 1.0)
+            second = self._compiled_op(model, torch.zeros(4, 64), 1.0)
+            other_shape = self._compiled_op(model, torch.ones(8, 64), 1.0)
 
-        with patch("torch_rbln._internal.compile_cache.torch.compile", return_value=compiled_fn) as mock_compile:
-            first = compile_rbln_cached(
-                model,
-                dynamic=False,
-                options={"disable_logger": True, "num_devices": 1},
-                device_cache_key=0,
-            )
-            second = compile_rbln_cached(
-                model,
-                dynamic=False,
-                options={"disable_logger": True, "num_devices": 1},
-                device_cache_key=0,
-            )
+        self.assertIs(first, second)
+        self.assertIsNot(first, other_shape)
+        self.assertEqual(mock_compile.call_count, 2)
 
-        self.assertIs(first, compiled_fn)
-        self.assertIs(second, compiled_fn)
-        self.assertEqual(mock_compile.call_count, 1)
+    def test_compiled_op_keys_scalars_by_type_and_value(self):
+        """``a + 1``, ``a + 2`` and ``a + 1.0`` bake different constants."""
+        clear_rbln_compile_cache()
+        model = Mock()
+        x = torch.ones(4, 64)
+        with (
+            patch("torch_rbln._internal.compile_cache._npu", return_value="RBLN-CA25"),
+            patch("torch_rbln._internal.compile_cache._compile", side_effect=lambda *a: Mock()) as mock_compile,
+        ):
+            for scalar in (1, 2, 1.0, 1):
+                self._compiled_op(model, x, scalar)
 
-    def test_compile_rbln_cached_does_not_alias_distinct_models_with_same_raw_id(self):
+        self.assertEqual(mock_compile.call_count, 3)
+
+    def test_compiled_op_does_not_alias_distinct_models_with_same_raw_id(self):
         """Cache keys should distinguish different model objects even if raw id() collides."""
+        clear_rbln_compile_cache()
         model_a = Mock(name="model_a")
         model_b = Mock(name="model_b")
         compiled_a = Mock(name="compiled_a")
         compiled_b = Mock(name="compiled_b")
 
-        with patch("torch_rbln._internal.compile_cache.id", return_value=7, create=True):
-            with patch(
-                "torch_rbln._internal.compile_cache.torch.compile", side_effect=[compiled_a, compiled_b]
-            ) as mock_compile:
-                first = compile_rbln_cached(
-                    model_a, dynamic=False, options={"disable_logger": True}, device_cache_key=0
-                )
-                second = compile_rbln_cached(
-                    model_b, dynamic=False, options={"disable_logger": True}, device_cache_key=0
-                )
+        with (
+            patch("torch_rbln._internal.compile_cache.id", return_value=7, create=True),
+            patch("torch_rbln._internal.compile_cache._npu", return_value="RBLN-CA25"),
+            patch("torch_rbln._internal.compile_cache._compile", side_effect=[compiled_a, compiled_b]) as mock_compile,
+        ):
+            first = self._compiled_op(model_a, torch.ones(4, 64))
+            second = self._compiled_op(model_b, torch.ones(4, 64))
 
         self.assertIs(first, compiled_a)
         self.assertIs(second, compiled_b)
@@ -1146,7 +1157,7 @@ class TestTorchCompileMonkeyPatch(TestCase):
         for kernel_fn, expected_module, make_inputs in cases:
             seen_models = []
 
-            def fake_dispatch(op_module, args, view_recipes):
+            def fake_dispatch(op_module, args):
                 seen_models.append(op_module)
                 return args[0].clone()
 
@@ -1158,34 +1169,23 @@ class TestTorchCompileMonkeyPatch(TestCase):
             self.assertIs(seen_models[0], expected_module)
             self.assertIs(seen_models[1], expected_module)
 
-    def test_compile_rbln_cached_recompiles_after_dynamo_reset(self):
+    def test_compiled_op_recompiles_after_dynamo_reset(self):
         """torch._dynamo.reset should also clear the RBLN eager compile cache."""
         patch_torch_compile()
+        clear_rbln_compile_cache()
         model = Mock()
 
-        with patch("torch_rbln._internal.compile_cache.torch.compile", side_effect=[Mock(), Mock()]) as mock_compile:
-            compile_rbln_cached(
-                model,
-                dynamic=False,
-                options={"disable_logger": True},
-                device_cache_key=0,
-            )
-            compile_rbln_cached(
-                model,
-                dynamic=False,
-                options={"disable_logger": True},
-                device_cache_key=0,
-            )
+        with (
+            patch("torch_rbln._internal.compile_cache._npu", return_value="RBLN-CA25"),
+            patch("torch_rbln._internal.compile_cache._compile", side_effect=[Mock(), Mock()]) as mock_compile,
+        ):
+            self._compiled_op(model, torch.ones(4, 64))
+            self._compiled_op(model, torch.ones(4, 64))
             self.assertEqual(mock_compile.call_count, 1)
 
             torch._dynamo.reset()
 
-            compile_rbln_cached(
-                model,
-                dynamic=False,
-                options={"disable_logger": True},
-                device_cache_key=0,
-            )
+            self._compiled_op(model, torch.ones(4, 64))
 
         self.assertEqual(mock_compile.call_count, 2)
 

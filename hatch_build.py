@@ -272,7 +272,7 @@ class CMakeBuildHook(BuildHookInterface):
             _include(register_ops)
 
         # Generated _abi_snapshot.py (gitignored but required): without it in the
-        # wheel the import-time ABI handshake has nothing to compare the runtime with.
+        # wheel the import-time ABI check has nothing to compare the runtime with.
         abi_snapshot = torch_rbln_dir / "_internal" / "_abi_snapshot.py"
         if abi_snapshot.exists():
             _include(abi_snapshot)

@@ -13,7 +13,7 @@ import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from test.utils import assert_device_resident_dtype
+from test.utils import assert_device_computed_dtype
 
 
 @pytest.mark.test_set_ci
@@ -22,9 +22,9 @@ class TestEvent(TestCase):
         event = torch.Event()
         self.assertEqual(event.device.type, "rbln")
 
-    def test_ordering_tests_use_a_device_resident_dtype(self):
-        # The fences below only mean something if the data lives on the device.
-        assert_device_resident_dtype(torch.float16)
+    def test_ordering_tests_use_a_device_computed_dtype(self):
+        # The fences below only mean something if the ops run on the device.
+        assert_device_computed_dtype(torch.float16)
 
     def test_query_before_record_is_true(self):
         self.assertTrue(torch.Event().query())

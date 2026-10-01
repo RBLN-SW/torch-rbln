@@ -1,12 +1,12 @@
 # Owner(s): ["module: PrivateUse1"]
 
 """
-Concurrency smoke test for the RCCL autoport init path.
+Concurrency smoke test for RCCL's port generation.
 Spawns two concurrent invocations of ``test_tp_pp.py`` on disjoint
-``RBLN_DEVICES`` partitions with distinct ``MASTER_PORT`` values, all under
-``RCCL_PORT_GEN=1``. Both subprocess runs must complete successfully --
-this asserts that the autoport / unique-id init path lets two independent
-process groups coexist on a single host without port or device collisions.
+``RBLN_DEVICES`` partitions with distinct ``MASTER_PORT`` values. Both
+subprocess runs must complete successfully -- this asserts that the ports
+rank 0 picks into each group's id let two independent process groups coexist
+on a single host without port or device collisions.
 """
 
 import os
@@ -27,8 +27,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _MIN_DEVICES = 8
 
 _PARTITIONS = (
-    {"RCCL_PORT_GEN": "1", "RBLN_DEVICES": "0,1,2,3", "MASTER_PORT": "29604"},
-    {"RCCL_PORT_GEN": "1", "RBLN_DEVICES": "4,5,6,7", "MASTER_PORT": "29605"},
+    {"RBLN_DEVICES": "0,1,2,3", "MASTER_PORT": "29604"},
+    {"RBLN_DEVICES": "4,5,6,7", "MASTER_PORT": "29605"},
 )
 
 

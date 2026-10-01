@@ -5,11 +5,6 @@
 #include <ATen/native/CPUFallback.h>
 #include <ATen/native/rbln/RBLNCPUFallback.h>
 #include <ATen/native/rbln/RBLNCPUFastPaths.h>
-#include <ATen/native/rbln/RBLNCopy.h>
-#include <ATen/native/rbln/RBLNTensorUtils.h>
-
-#include <c10/rbln/RBLNFunctions.h>
-#include <c10/util/SmallVector.h>
 
 #ifndef AT_PER_OPERATOR_HEADERS
 #include <ATen/Functions.h>
@@ -17,15 +12,11 @@
 #include <ATen/ops/_copy_from_and_resize.h>
 #include <ATen/ops/_to_cpu.h>
 #include <ATen/ops/empty.h>
-#include <ATen/ops/from_blob.h>
 #endif
 
-#include <cstdlib>
-#include <cstring>
 #include <mutex>
 #include <shared_mutex>
 #include <sstream>
-#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -184,92 +175,6 @@ bool validate_tensor_list(const c10::List<at::Tensor>& tensorlist) {
   return flag;
 }
 
-// Borrow a host pointer from the rbln virtual memory backing `t` and wrap it
-// as a CPU tensor with the same sizes/strides. Writes the resulting borrow id
-// into `borrow_id_out` (0 means "nothing to return"). Returns an undefined
-// tensor if `t` isn't an rbln tensor — the caller falls back to the existing
-// copy-based path for that slot.
-at::Tensor borrow_rbln_as_cpu(const at::Tensor& t, uint64_t& borrow_id_out) {
-  borrow_id_out = 0;
-  if (!t.defined()) {
-    return {};
-  }
-  if (t.device().type() != c10::DeviceType::PrivateUse1) {
-    // CPU / other-device tensor: nothing to borrow.
-    return {};
-  }
-  if (!t.is_contiguous()) {
-    // Non-contiguous strided views may reach beyond `t.nbytes()` via stride
-    // arithmetic; borrowing only `numel*itemsize` would alias an undersized
-    // host region and corrupt reads. Caller falls back to the copy path.
-    return {};
-  }
-  // A borrow syncs the whole vmem entry, so borrowing a small view of a device-latest
-  // storage reads back every byte of it and leaves the storage host-latest. The copy path
-  // moves only the view: a D2H when the data is on the device, a host memcpy when it is
-  // not. Without asking where the data is, views under half the storage take the copy
-  // path: the worst case costs a memcpy of a small view, the best case saves the
-  // whole-storage round trip. Larger views keep the zero-copy borrow.
-  if (static_cast<size_t>(t.numel()) * t.element_size() * 2 < t.storage().nbytes()) {
-    return {};
-  }
-  if (t.storage_offset() != 0) {
-    // Contiguous offset view (e.g. `x[1:]`): interior borrows ARE offset-correct.
-    // The runtime's BorrowVirtualAtHost bounds-checks [vaddr, vaddr+size) against
-    // the enclosing allocation and returns host_ptr = base + (vaddr - base); the
-    // native fill_/zero_ path relies on exactly this. We still copy here in the
-    // generic boxed fallback — a deliberate conservative scope, not a correctness
-    // limit — to avoid re-validating interior-offset out= writeback per op.
-    return {};
-  }
-
-  const uint64_t nbytes = t.nbytes();
-  if (nbytes == 0) {
-    // Zero-element / empty tensor: no host region to borrow. Use an empty CPU
-    // tensor with matching dtype/shape instead.
-    return at::empty(t.sizes(), t.options().device(at::kCPU));
-  }
-
-  // Borrow can be rejected for some runtime sub-states (see try_borrow_host_ptr);
-  // return an undefined tensor (borrow_id stays 0) to route this slot through the
-  // caller's legacy at::_to_cpu copy path (the non_borrowed collection below).
-  auto borrowed = c10::rbln::try_borrow_host_ptr(t.data_ptr(), nbytes);
-  if (!borrowed) {
-    return {};
-  }
-  borrow_id_out = borrowed->borrow_id;
-  auto options = at::TensorOptions().dtype(t.dtype()).device(at::kCPU);
-  return at::from_blob(reinterpret_cast<void*>(borrowed->host_ptr), t.sizes(), t.strides(), options);
-}
-
-// TensorList variant of borrow_rbln_as_cpu. Walks each element; rbln entries
-// are borrowed (no D2H copy when host-latest), others fall through to the
-// legacy batched at::_to_cpu. Borrow ids are appended to `borrow_ids_out` so
-// the caller can release them after the op runs.
-std::vector<at::Tensor> borrow_rbln_list_as_cpu(
-    const std::vector<at::Tensor>& tensors,
-    std::vector<uint64_t>& borrow_ids_out) {
-  std::vector<at::Tensor> cpu_tensors(tensors.size());
-  std::vector<at::Tensor> leftover; // non-rbln / empty — to_cpu later
-  std::vector<size_t> leftover_indices;
-  for (size_t i = 0; i < tensors.size(); ++i) {
-    uint64_t bid = 0;
-    cpu_tensors[i] = borrow_rbln_as_cpu(tensors[i], bid);
-    borrow_ids_out.push_back(bid);
-    if (bid == 0 && !cpu_tensors[i].defined()) {
-      leftover.push_back(tensors[i]);
-      leftover_indices.push_back(i);
-    }
-  }
-  if (!leftover.empty()) {
-    auto filled = to_cpu(leftover);
-    for (size_t k = 0; k < filled.size(); ++k) {
-      cpu_tensors[leftover_indices[k]] = std::move(filled[k]);
-    }
-  }
-  return cpu_tensors;
-}
-
 } // namespace
 
 void cpu_fallback_rbln(
@@ -299,13 +204,9 @@ void cpu_fallback_rbln(
   // save converted cpu tensor for TensorList and optional TensorList
   std::vector<c10::IValue> tensorlist_cpu_args;
   std::vector<c10::IValue> optional_tensorlist_cpu_args;
-  // Per-TensorList-arg borrow-id vectors. Entries with non-zero ids are
-  // wrapped via the v-mem borrow path; zeros indicate the legacy `to_cpu`
-  // fallback (used for non-rbln tensors, contiguity-guard skips, etc.).
-  std::vector<std::vector<uint64_t>> tensorlist_borrow_ids;
 
-  // Step 1: convert all non-CPU tensor inputs into CPU tensors and stage them on
-  // the stack at the correct indices, switching on the cached per-arg schema kind.
+  // Step 1: copy all non-CPU tensor inputs into CPU tensors and stage them on the stack at
+  // the correct indices, switching on the cached per-arg schema kind.
   const auto& schema_info = get_or_populate_schema_info(op.schema());
   const auto n_args = arguments.size();
   for (size_t idx = 0; idx < n_args; ++idx) {
@@ -331,11 +232,7 @@ void cpu_fallback_rbln(
       case CpuFbArgKind::TensorList: {
         tensorlist_args.push_back(ivalue.toTensorList());
         tensorlist_args_indices.push_back(idx);
-        auto rbln_list = ivalue.toTensorVector();
-        std::vector<uint64_t> bids;
-        auto cpu_list = borrow_rbln_list_as_cpu(rbln_list, bids);
-        tensorlist_borrow_ids.push_back(std::move(bids));
-        auto cpu_ivalue = c10::IValue(c10::List<at::Tensor>(cpu_list));
+        auto cpu_ivalue = c10::IValue(c10::List<at::Tensor>(to_cpu(ivalue.toTensorVector())));
         tensorlist_cpu_args.push_back(cpu_ivalue);
         (*stack)[arguments_begin + idx] = std::move(cpu_ivalue);
         break;
@@ -356,80 +253,24 @@ void cpu_fallback_rbln(
         break; // unreachable — gated above
     }
   }
-  // Stage tensor args onto the stack as CPU views. We obtain a host pointer
-  // into the existing vmem region (no D2H copy) and wrap it as a CPU tensor
-  // via at::from_blob; borrow ids are tracked so we can release them after
-  // the op runs. Slots that can't be borrowed (write-alias outputs, undefined
-  // tensors, non-rbln tensors, contiguity-guard skips) fall through to the
-  // batched `at::_to_cpu` copy path.
-  std::vector<uint64_t> borrow_ids(tensor_args.size(), 0);
-  std::vector<at::Tensor> cpu_tensors(tensor_args.size());
 
+  // A kwarg-only `out=` is only written, so it gets fresh CPU storage instead of a copy. An
+  // in-place `self` is read too, and other output names (max.dim_max) are not audited.
+  std::vector<at::Tensor> cpu_tensors(tensor_args.size());
+  std::vector<at::Tensor> copied;
+  std::vector<size_t> copied_indices;
   for (size_t i = 0; i < tensor_args.size(); ++i) {
-    // Skip the borrow fast path for write-alias outputs (`out=`): from_blob's
-    // fixed-size storage can't be resized, so the CPU op's resize path (wrong-shape
-    // out=, broadcasting, etc.) would silently no-op. The legacy `to_cpu` path
-    // gives them fresh CPU storage that core can resize freely.
-    if (schema_info.is_write_alias[tensor_args_indices[i]]) {
-      continue;
-    }
-    cpu_tensors[i] = borrow_rbln_as_cpu(tensor_args[i], borrow_ids[i]);
-  }
-  // Fill slots that weren't borrowed (write-alias / undefined / non-rbln /
-  // contiguity guard) via the legacy batched copy. Pure `out=` slots (kwarg-only,
-  // write-alias, named "out") instead get fresh empty CPU storage: the kernel
-  // overwrites immediately, so D2H'ing the about-to-be-discarded contents is
-  // wasted bandwidth. Stay narrow — in-place ops like `add_(self, other)` have a
-  // write-alias `self` the kernel also *reads*, so empty storage would feed it
-  // garbage; only kwarg-only `out=` is guaranteed pure-output. Other output kwarg
-  // names (e.g. max.dim_max) need a per-schema audit first.
-  // (LLaMA-1B eager: freed ~22% of cpu_fallback_rbln host time — mean/rsqrt/pow.out
-  // hit the slow path 1122x each.)
-  std::vector<at::Tensor> non_borrowed;
-  std::vector<size_t> non_borrowed_indices;
-  for (size_t i = 0; i < tensor_args.size(); ++i) {
-    if (borrow_ids[i] != 0 || cpu_tensors[i].defined()) {
-      continue;
-    }
-    const bool is_pure_out = schema_info.is_pure_out[tensor_args_indices[i]];
-    if (is_pure_out && tensor_args[i].defined()) {
-      // Direct output borrow: wrap the rbln out= host backing as a CPU view so
-      // the kernel writes straight into vmem (no writeback memcpy); Step 3 issues
-      // release_borrowed(updated=true). Guards: contiguous + offset 0 + nonzero
-      // bytes + RBLN device — from_blob's fixed-size mapping can't resize_(), and
-      // offset 0 keeps this in step with borrow_rbln_as_cpu's conservative scope
-      // (interior borrows are themselves offset-correct). Anything else falls back
-      // to fresh empty.
-      auto& rbln_out = tensor_args[i];
-      const uint64_t nbytes = rbln_out.nbytes();
-      // try_acquire (not acquire): the overwrite borrow can be rejected for the
-      // same recoverable runtime sub-states as the read borrow above. On
-      // rejection fall back to a fresh CPU empty + writeback (Step 3), matching
-      // the read path's copy fallback, rather than throwing out of the op.
-      std::optional<c10::rbln::BorrowedHostPtr> borrowed;
-      if (rbln_out.device().type() == c10::DeviceType::PrivateUse1 && rbln_out.is_contiguous() &&
-          rbln_out.storage_offset() == 0 && nbytes > 0) {
-        borrowed = c10::rbln::try_acquire_host_ptr_for_overwrite(rbln_out.data_ptr(), nbytes);
-      }
-      if (borrowed) {
-        borrow_ids[i] = borrowed->borrow_id;
-        auto opts = at::TensorOptions().dtype(rbln_out.dtype()).device(at::kCPU);
-        cpu_tensors[i] =
-            at::from_blob(reinterpret_cast<void*>(borrowed->host_ptr), rbln_out.sizes(), rbln_out.strides(), opts);
-      } else {
-        // Resize-safe fallback (also the path when the acquire was rejected):
-        // fresh CPU empty, written back to rbln_out in Step 3.
-        cpu_tensors[i] = at::empty(rbln_out.sizes(), rbln_out.options().device(at::kCPU));
-      }
+    if (schema_info.is_pure_out[tensor_args_indices[i]] && tensor_args[i].defined()) {
+      cpu_tensors[i] = at::empty(tensor_args[i].sizes(), tensor_args[i].options().device(at::kCPU));
     } else {
-      non_borrowed.push_back(tensor_args[i]);
-      non_borrowed_indices.push_back(i);
+      copied.push_back(tensor_args[i]);
+      copied_indices.push_back(i);
     }
   }
-  if (!non_borrowed.empty()) {
-    auto filled = to_cpu(non_borrowed);
+  if (!copied.empty()) {
+    auto filled = to_cpu(copied);
     for (size_t k = 0; k < filled.size(); ++k) {
-      cpu_tensors[non_borrowed_indices[k]] = std::move(filled[k]);
+      cpu_tensors[copied_indices[k]] = std::move(filled[k]);
     }
   }
 
@@ -438,243 +279,45 @@ void cpu_fallback_rbln(
     (*stack)[arguments_begin + idx] = c10::IValue(cpu_tensors[i]);
   }
 
-  // Step 2: call the underlying CPU implementation.
-  //
-  // First consult CPUFastPathRegistry — fast_paths/*.cpp self-register host
-  // micro-kernels for single ops (rsqrt.out, pow.Tensor_Scalar_out exp==2,
-  // mean.out last-dim). On match the handler runs its own guards, writes into
-  // the borrowed out buffer, and replaces the stack; on no-match it returns
-  // false and we fall through to the boxed dispatcher.
-  //
-  // If Step 2/3 throws (e.g. dtype-mismatched or wrong-device out=), the borrows
-  // above must still be released — else the next free on a still-borrowed vaddr
-  // fails, and since c10::rbln::free throws from a ~TensorImpl (noexcept) deleter
-  // that escalates to std::terminate. The RAII guard releases any still-live
-  // borrow (updated=false) on destruction; Step 4 zeroes borrow_ids on the happy
-  // path, so the guard is then a no-op.
-  struct BorrowReleaseGuard {
-    std::vector<uint64_t>& borrow_ids;
-    std::vector<std::vector<uint64_t>>& tensorlist_borrow_ids;
-    ~BorrowReleaseGuard() {
-      for (auto& bid : borrow_ids) {
-        if (bid != 0) {
-          try {
-            c10::rbln::return_borrowed(bid, /*updated=*/false);
-          } catch (...) {
-            // Best-effort: dtor is noexcept by default. Swallow runtime
-            // rejections so we don't escalate one borrow-release failure into
-            // std::terminate; the original exception that triggered cleanup
-            // is more useful for diagnosis.
-          }
-          bid = 0;
-        }
-      }
-      for (auto& bids : tensorlist_borrow_ids) {
-        for (auto& bid : bids) {
-          if (bid != 0) {
-            try {
-              c10::rbln::return_borrowed(bid, /*updated=*/false);
-            } catch (...) {
-            }
-            bid = 0;
-          }
-        }
-      }
-    }
-  } _borrow_guard{borrow_ids, tensorlist_borrow_ids};
-
-  // A pure-out borrow wraps the rbln out in a non-resizable from_blob view, so an
-  // undersized out= the CPU kernel tries to GROW throws "not resizable" (shrink is
-  // metadata-only and already handled in Step 3). Catch that one error, swap the
-  // pure-out(s) to resizable CPU storage, and retry once; Step 3's resize-writeback
-  // grows the rbln out. The retry re-runs the whole kernel, so it is safe only when
-  // every write alias is a pure-out: a non-pure-out mutable alias may already have
-  // been mutated in place before the throw, and re-running would double-apply it.
-  bool has_pure_out_borrow = false;
-  for (size_t i = 0; i < tensor_args.size(); ++i) {
-    if (borrow_ids[i] != 0 && schema_info.is_pure_out[tensor_args_indices[i]]) {
-      has_pure_out_borrow = true;
-      break;
-    }
-  }
-  // Scan the whole schema, not just tensor_args: is_write_alias is set for every
-  // arg kind, so this also catches a mutable Tensor[]/Tensor?[] (e.g. a foreach
-  // self list) that the tensor_args loop above would miss.
-  bool has_other_mutable_alias = false;
-  for (size_t k = 0; k < schema_info.is_write_alias.size(); ++k) {
-    if (schema_info.is_write_alias[k] && !schema_info.is_pure_out[k]) {
-      has_other_mutable_alias = true;
-      break;
-    }
-  }
-  const bool grow_retry_safe = has_pure_out_borrow && !has_other_mutable_alias;
-
-  auto run_cpu_kernel = [&]() {
-    auto fast_path_fn = CPUFastPathRegistry::instance().try_get(op.schema());
-    const bool fast_path_taken = fast_path_fn != nullptr && fast_path_fn(cpu_tensors, stack, arguments_begin);
-    if (!fast_path_taken) {
-      op.redispatchBoxed(c10::DispatchKeySet(cpu_dispatch_key), stack);
-    }
-  };
-
-  if (grow_retry_safe) {
-    // redispatchBoxed consumes the stack, so snapshot the args up front to restore
-    // for the grow-retry. Stack-inlined (8 covers any pure-out op's arg count) to
-    // skip the heap alloc on this per-pure-out fallback path; the IValue copies are
-    // unavoidable refcount bumps.
-    c10::SmallVector<c10::IValue, 8> stack_snapshot(stack->begin(), stack->end());
-    try {
-      run_cpu_kernel();
-    } catch (const c10::Error& e) {
-      if (std::string(e.what()).find("not resizable") == std::string::npos) {
-        throw; // unrelated failure (dtype/device/etc.) — propagate unchanged
-      }
-      // Release each borrowed pure-out, then swap it to fresh resizable CPU
-      // storage. A release failure means the borrow is still live: let it
-      // propagate rather than zeroing the id, which would strand the borrow and
-      // fail a later free/finalizer. The id is cleared only after a clean release.
-      for (size_t i = 0; i < tensor_args.size(); ++i) {
-        if (borrow_ids[i] != 0 && schema_info.is_pure_out[tensor_args_indices[i]]) {
-          c10::rbln::return_borrowed(borrow_ids[i], /*updated=*/false);
-          borrow_ids[i] = 0;
-          // Swap in an empty (numel==0) tensor: the "output was resized" warning fires only
-          // when resizing a NON-empty output, so the grow-retry emits no additional warning.
-          cpu_tensors[i] = at::empty({0}, tensor_args[i].options().device(at::kCPU));
-        }
-      }
-      stack->assign(stack_snapshot.begin(), stack_snapshot.end()); // restore the consumed args
-      for (const auto i : c10::irange(tensor_args_indices.size())) {
-        (*stack)[arguments_begin + tensor_args_indices[i]] = c10::IValue(cpu_tensors[i]);
-      }
-      run_cpu_kernel();
-    }
-  } else {
-    run_cpu_kernel();
+  // Step 2: call the underlying CPU implementation. A CPUFastPathRegistry micro-kernel that
+  // accepts the op replaces the stack itself; otherwise the boxed CPU dispatcher runs it.
+  auto fast_path_fn = CPUFastPathRegistry::instance().try_get(op.schema());
+  const bool fast_path_taken = fast_path_fn != nullptr && fast_path_fn(cpu_tensors, stack, arguments_begin);
+  if (!fast_path_taken) {
+    op.redispatchBoxed(c10::DispatchKeySet(cpu_dispatch_key), stack);
   }
 
-  // Step 3: mutable-alias write-back.
-  // - Legacy: copy the fresh CPU result at cpu_tensors[i] back into the rbln out.
-  // - Borrow, in-place (borrow_id != 0): the kernel already wrote into the host
-  //   ptr aliasing rbln vmem; just mark the borrow updated for lazy device sync.
-  // - Borrow, resized-empty: an empty out (numel=0) that couldn't be borrowed —
-  //   from a functional wrapper or an explicit empty out= — so resize the rbln
-  //   out, borrow its now-sized vmem, memcpy the CPU content, and return updated
-  //   — replacing the eager H2D.
-  std::vector<bool> borrow_write(tensor_args.size(), false);
+  // Step 3: copy the mutated inputs back to their devices, resizing any the kernel resized.
   for (const auto i : c10::irange(tensor_args_indices.size())) {
-    if (!schema_info.is_write_alias[tensor_args_indices[i]]) {
-      continue;
-    }
-    if (!tensor_args[i].defined()) {
-      continue;
-    }
-    if (borrow_ids[i] != 0) {
-      // The CPU kernel may have shrink-resized cpu_tensors[i] — a from_blob
-      // view wrapping the rbln_out vmem — when the caller passed an out= with
-      // wrong shape (PyTorch's "resize with warning" path). The shrink writes
-      // the new-shape data into the borrow host_ptr, but rbln_out's tensor
-      // metadata still reports the pre-resize shape. Sync sizes so downstream
-      // consumers (and the test's shape assertion) see the resized output.
-      if (cpu_tensors[i].sizes() != tensor_args[i].sizes()) {
-        tensor_args[i].resize_(cpu_tensors[i].sizes());
-      }
-      borrow_write[i] = true;
-      continue;
-    }
-
-    // Borrow-based write-back is only safe when BOTH the cpu_out and the rbln
-    // out are contiguous. The cpu->host memcpy below copies `nbytes` of
-    // contiguous bytes; if `rbln_out` were strided/noncontiguous, the borrow
-    // would alias only the [vaddr, vaddr+nbytes) span — leaving the rest of
-    // the strided storage stale. Caller's noncontiguous out= must go through
-    // the legacy `_copy_from_and_resize` path which honors strides.
-    const bool borrow_resize_case = tensor_args[i].device().type() == c10::DeviceType::PrivateUse1 &&
-        cpu_tensors[i].defined() && cpu_tensors[i].is_contiguous() && cpu_tensors[i].nbytes() > 0 &&
-        tensor_args[i].is_contiguous();
-    bool wrote_back = false;
-    if (borrow_resize_case) {
-      auto& rbln_out = tensor_args[i];
-      if (rbln_out.sizes() != cpu_tensors[i].sizes()) {
-        rbln_out.resize_(cpu_tensors[i].sizes());
-      }
-      const uint64_t nbytes = rbln_out.nbytes();
-      if (nbytes > 0) {
-        // Acquire-for-overwrite: we immediately memcpy over the whole region, so any
-        // D2H from a stale PHYSICAL_VIEW_IS_LATEST state would be thrown away.
-        // try_acquire (not acquire): on a runtime rejection fall through to the
-        // legacy copy-based writeback below rather than throwing — symmetric
-        // with the input out= borrow's copy fallback.
-        if (auto borrowed = c10::rbln::try_acquire_host_ptr_for_overwrite(rbln_out.data_ptr(), nbytes)) {
-          std::memcpy(reinterpret_cast<void*>(borrowed->host_ptr), cpu_tensors[i].data_ptr(), nbytes);
-          c10::rbln::return_borrowed(borrowed->borrow_id, /*updated=*/true);
-          wrote_back = true;
-        }
-      } else {
-        wrote_back = true; // empty result: nothing to copy.
-      }
-    }
-    if (!wrote_back) {
+    if (schema_info.is_write_alias[tensor_args_indices[i]] && tensor_args[i].defined()) {
       at::_copy_from_and_resize(cpu_tensors[i], tensor_args[i]);
     }
   }
 
-  // We also need to explicit reapply input mutations to inputs that are lists
-  // of tensors. On the borrow path any element with a non-zero borrow id will
-  // be committed via `rbln_v_return_borrowed(updated=true)` at the release
-  // step; for those we just mark instead of doing the eager H2D copy.
-  std::vector<std::vector<bool>> tensorlist_borrow_write(tensorlist_args_indices.size());
   for (const auto i : c10::irange(tensorlist_args_indices.size())) {
     auto tensorlist_idx = tensorlist_args_indices[i];
     const AliasInfo* alias_info = schema_args[tensorlist_idx].alias_info();
-    const auto& cpu_list = tensorlist_cpu_args[i].toTensorVector();
-    tensorlist_borrow_write[i].assign(tensorlist_args[i].size(), false);
     if (alias_info != nullptr && alias_info->isWrite()) {
+      const auto& cpu_list = tensorlist_cpu_args[i].toTensorVector();
       for (const auto idx : c10::irange(tensorlist_args[i].size())) {
-        if (!cpu_list[idx].defined())
-          continue;
-        const bool is_borrowed = i < tensorlist_borrow_ids.size() && idx < tensorlist_borrow_ids[i].size() &&
-            tensorlist_borrow_ids[i][idx] != 0;
-        if (is_borrowed) {
-          tensorlist_borrow_write[i][idx] = true;
-        } else {
+        if (cpu_list[idx].defined()) {
           at::_copy_from_and_resize(cpu_list[idx], tensorlist_args[i][idx]);
         }
       }
     }
   }
 
-  // We also need to explicit reapply input mutations to inputs that are lists
-  // of optional tensors
   for (const auto i : c10::irange(optional_tensorlist_args_indices.size())) {
     auto tensorlist_idx = optional_tensorlist_args_indices[i];
     const AliasInfo* alias_info = schema_args[tensorlist_idx].alias_info();
     if (alias_info != nullptr && alias_info->isWrite()) {
-      const auto& cpu_tensors = optional_tensorlist_cpu_args[i].toOptionalTensorList();
+      const auto& cpu_list = optional_tensorlist_cpu_args[i].toOptionalTensorList();
       for (const auto idx : c10::irange(optional_tensorlist_args[i].size())) {
-        if (cpu_tensors[idx].has_value() && cpu_tensors[idx].value().defined()) {
+        if (cpu_list[idx].has_value() && cpu_list[idx].value().defined()) {
           const std::optional<at::Tensor>& optional_tensor = optional_tensorlist_args[i][idx];
-          at::_copy_from_and_resize(cpu_tensors[idx].value(), optional_tensor.value());
+          at::_copy_from_and_resize(cpu_list[idx].value(), optional_tensor.value());
         }
       }
-    }
-  }
-
-  // Release any vmem borrows issued on the input path. Write-alias inputs use
-  // `updated=true` so the rbln tensor's host view becomes the latest source of
-  // truth and the next device consumer triggers a lazy host→device sync.
-  // Zero out each id after release so the BorrowReleaseGuard above does not
-  // double-release on its way out.
-  for (size_t i = 0; i < borrow_ids.size(); ++i) {
-    c10::rbln::return_borrowed(borrow_ids[i], borrow_write[i]);
-    borrow_ids[i] = 0;
-  }
-  for (size_t i = 0; i < tensorlist_borrow_ids.size(); ++i) {
-    for (size_t k = 0; k < tensorlist_borrow_ids[i].size(); ++k) {
-      const bool upd = (i < tensorlist_borrow_write.size() && k < tensorlist_borrow_write[i].size())
-          ? tensorlist_borrow_write[i][k]
-          : false;
-      c10::rbln::return_borrowed(tensorlist_borrow_ids[i][k], upd);
-      tensorlist_borrow_ids[i][k] = 0;
     }
   }
 
@@ -783,44 +426,20 @@ void cpu_fallback_rbln(
         }
       }
       // Case (2): copy case.
-      // Copy the cpu output tensor to the original device. On the v-mem
-      // borrow path we allocate a fresh rbln tensor, borrow its host-backed
-      // view, memcpy the CPU result into it, and return the borrow with
-      // updated=true — that way the next device consumer triggers a lazy
-      // host→device sync instead of an eager H2D copy here.
+      // Copy the cpu output tensor to the original device.
 
       // We technically  might not have a target device, e.g. if you call
       // torch.cat() with an empty list In that case, we shouldn't have any
       // tensors to schlep across devices anyway.
       if (tgt_device) {
-        const bool use_borrow_out = tgt_device->type() == c10::DeviceType::PrivateUse1;
         if (returns[idx].isTensor() && returns[idx].toTensor().defined()) {
-          const auto& cpu_out = returns[idx].toTensor();
-          if (use_borrow_out && cpu_out.is_contiguous()) {
-            auto rbln_out = at::empty(cpu_out.sizes(), cpu_out.options().device(*tgt_device));
-            const uint64_t nbytes = rbln_out.nbytes();
-            if (nbytes > 0) {
-              // Acquire-for-overwrite: the tensor is a freshly-allocated at::empty;
-              // any pre-existing data (in practice there is none, but if the
-              // allocator ever caches a warm buffer the old device data is
-              // irrelevant) will be overwritten by the memcpy below.
-              auto borrowed = c10::rbln::acquire_host_ptr_for_overwrite(rbln_out.data_ptr(), nbytes);
-              std::memcpy(reinterpret_cast<void*>(borrowed.host_ptr), cpu_out.data_ptr(), nbytes);
-              c10::rbln::return_borrowed(borrowed.borrow_id, /*updated=*/true);
-            }
-            (*stack)[returns_begin + idx] = c10::IValue(rbln_out);
-          } else {
-            (*stack)[returns_begin + idx] = c10::IValue(cpu_out.to(*tgt_device));
-          }
+          (*stack)[returns_begin + idx] = c10::IValue(returns[idx].toTensor().to(*tgt_device));
         } else if (returns[idx].isTensorList() && validate_tensor_list(returns[idx].toTensorList())) {
-          // TensorList output: keep the legacy .to(device) path for now; the
-          // borrow-based write-back can be extended here if profiling shows
-          // meaningful cost.
-          const auto& cpu_tensors = returns[idx].toTensorList().vec();
+          const auto& cpu_list = returns[idx].toTensorList().vec();
           std::vector<at::Tensor> tensors;
-          tensors.reserve(cpu_tensors.size());
+          tensors.reserve(cpu_list.size());
 
-          for (const auto& tensor : cpu_tensors) {
+          for (const auto& tensor : cpu_list) {
             tensors.push_back(tensor.to(*tgt_device));
           }
           (*stack)[returns_begin + idx] = c10::IValue(c10::List<at::Tensor>(tensors));

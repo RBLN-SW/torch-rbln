@@ -166,67 +166,6 @@ def extract_device_id_from_inputs(*args, **kwargs):
     return None
 
 
-def extract_warm_cache_key(*args, **kwargs):
-    # Build a per-(device, input shape/dtype) cache key for compile_rbln_cached
-    # so the rebel backend re-runs (and the C++ warm cache picks up a fresh
-    # DynamoRuntime) when input profiles change. Without shape/dtype in the key,
-    # compile_rbln_cached would reuse the first compiled callable across all
-    # shapes and the warm-cache install path would only ever fire once.
-    #
-    # Non-tensor arguments (``tensor + 1``, ``alpha=2``, ``rounding_mode="trunc"``)
-    # are compiled into the graph as constants, so ``a + 1`` and ``a + 2`` are
-    # different programs and need distinct entries. With one shared entry the
-    # second value runs as a Dynamo recompile inside the callable the first value
-    # created; the rebel backend then appends its runtime to that first call's
-    # ``_runtime_holder``, the current call's holder stays empty, and
-    # ``_install_warm_cache_pending`` never fires for the second value. The C++
-    # warm-cache key already separates scalar values; this keeps the two aligned.
-    #
-    # ``compile_and_run_view_aware`` drives the cached runtime without going
-    # through the compiled callable, so the key has to separate everything the
-    # callable's guards would have recompiled for. Device, shape, dtype and the
-    # scalars and the argument identity pattern are that set: grad mode and
-    # requires_grad do not recompile this callable (checked on the device), and
-    # keying grad mode would compile every op once more under no_grad. A
-    # difference the key does miss shows up as a second runtime in the holder,
-    # which ``CompiledOp.runtime`` refuses to pick from.
-    device_id = None
-    profiles = []
-    input_tensors = extract_tensors(args) + extract_tensors(kwargs)
-    for tensor in input_tensors:
-        if not isinstance(tensor, torch.Tensor):
-            continue
-        if device_id is None and tensor.device.type == "rbln":
-            device_id = tensor.device.index
-        profiles.append((tuple(tensor.shape), str(tensor.dtype)))
-    scalars = tuple(_scalar_key_part(v) for v in args if not isinstance(v, torch.Tensor)) + tuple(
-        (k, _scalar_key_part(v)) for k, v in kwargs.items() if not isinstance(v, torch.Tensor)
-    )
-    # Dynamo folds a tensor passed twice into one graph input, so ``add(a, a)``
-    # and ``add(a, b)`` are different graphs even at equal profiles.
-    first_seen: dict[int, int] = {}
-    identity = tuple(first_seen.setdefault(id(t), i) for i, t in enumerate(input_tensors))
-    return (device_id, tuple(profiles), scalars, identity)
-
-
-def _scalar_key_part(value):
-    """Hashable, type-tagged key part for a non-tensor argument.
-
-    ``1``, ``1.0`` and ``True`` are tagged apart because they bake into different
-    graph constants; containers are keyed structurally; anything else falls back
-    to ``repr`` so the key stays hashable. A tensor inside a container is a
-    placeholder: the caller already keys every tensor by shape and dtype, and
-    ``repr`` would put its values in the key and read them off the device.
-    """
-    if value is None or isinstance(value, (bool, int, float, str)):
-        return (type(value).__name__, value)
-    if isinstance(value, torch.Tensor):
-        return ("tensor",)
-    if isinstance(value, (list, tuple)):
-        return (type(value).__name__, tuple(_scalar_key_part(v) for v in value))
-    return ("repr", repr(value))
-
-
 def remove_empty_tensors(obj):
     if isinstance(obj, torch.Tensor):
         return None if obj.numel() == 0 else obj
@@ -1590,7 +1529,7 @@ def prepare_args_view_aware(args, kwargs_filtered):
     """View-aware variant of ``prepare_args_for_contiguous``.
 
     For each tensor arg:
-    - contig + offset 0 → pass through (no recipe).
+    - contig → pass through (no recipe); an op reads it where it starts.
     - recognized view chain → replace with the contig base; record a recipe
       tuple of single-step view ops applied in order.
     - any other non-contig → ``.contiguous()`` (legacy fallback, one-time
@@ -1606,48 +1545,18 @@ def prepare_args_view_aware(args, kwargs_filtered):
     """
     flat_args, args_spec = tree_flatten((args, kwargs_filtered))
 
-    # Pre-pass: detect storage aliasing among tensor args. rebel-compiler's
-    # graph optimizer rejects graphs where two inputs alias the same storage
-    # (e.g. ``mm(a, a.T)`` where ``a`` and ``a.T`` are the same buffer with
-    # different stride). Force ALL aliasing tensors with non-trivial views to
-    # ``.contiguous()`` so each operand reaches the runtime as an independent
-    # contig buffer. (Observed 2026-04-30 with ``test_cf16_to_cpu_remain_cf16``.)
-    storage_ptrs = {}
-    aliased_indices = set()
-    for idx, a in enumerate(flat_args):
-        if not isinstance(a, torch.Tensor) or a.numel() == 0:
-            continue
-        ptr = a.data_ptr()
-        if ptr in storage_ptrs:
-            aliased_indices.add(idx)
-            aliased_indices.add(storage_ptrs[ptr])
-        else:
-            storage_ptrs[ptr] = idx
-
     new_flat = []
     recipes = []
     changed = False
-    for idx, a in enumerate(flat_args):
+    for a in flat_args:
         if not (isinstance(a, torch.Tensor) and a.numel() > 0):
             new_flat.append(a)
             recipes.append(None)
             continue
-        if a.is_contiguous() and a.storage_offset() == 0:
+        if a.is_contiguous():
             new_flat.append(a)
             recipes.append(None)
             continue
-        # Aliased non-contig tensors: rebel can't compile graphs where two
-        # inputs alias the same storage. Force ``.contiguous()`` for every
-        # aliased operand (independent contig buffers are safe).
-        if idx in aliased_indices:
-            new_flat.append(a.contiguous())
-            recipes.append(None)
-            changed = True
-            continue
-        # Some contiguous-but-offset>0 tensors hit the cpu_fallback path
-        # earlier (see is_cpu_fallback_cases storage_offset gate); if a
-        # caller still reaches us with offset>0 + contig, we let .contiguous()
-        # handle it. The view detector returns None in that case.
         detected = _detect_view_recipe(a)
         if detected is not None:
             base, recipe = detected
@@ -1745,14 +1654,23 @@ def view_recipes_for_positional(view_recipes_flat, positional_count):
     return view_recipes_flat[:positional_count]
 
 
+_uncompilable_warned: set = set()
+
+
+def _warn_uncompilable_once(op_name, error) -> None:
+    key = (op_name, str(error).splitlines()[0] if str(error) else "")
+    if key in _uncompilable_warned:
+        return
+    _uncompilable_warned.add(key)
+    rbln_log_warn(f"{op_name or 'an op'} runs on the CPU: the compiler cannot build it for the device ({key[1]})")
+
+
 def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_tensor):
-    """Centralized view-aware rbln-compile dispatch.
+    """Centralized view-aware device dispatch.
 
     The single entry point used by all generated ``*_rbln`` handlers (via the
     codegen template) and by hand-written custom-kernel handlers in
-    ``register_custom_ops.py``. Replaces the old verbose block of
-    ``prepare_args_for_contiguous`` + ``compile_rbln_cached`` + warm-cache
-    install with a one-liner call.
+    ``register_custom_ops.py``.
 
     Behavior:
     - Detects view recipes (permute / expand / narrow / select / reshape /
@@ -1761,184 +1679,53 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
       contig base, and a recipe tuple captures the explicit aten-op chain
       that the wrapper OpModule will apply inside its forward.
     - Builds (or reuses) the wrapper OpModule via ``get_view_op_module``.
-    - Compiles via ``compile_rbln_cached``.
-    - Skips the C++ shim warm-cache install when any view recipe was applied,
-      since the shim's pending key was built from the raw view tensor's shape,
-      while the runtime is now compiled for the (different) base shape.
-      Future calls re-enter Python and hit the compile_rbln_cached cache —
-      ~50 µs/call overhead, still cheap relative to host materialization.
+    - Compiles it for the profile of the call (``compile_cache.compiled_op``)
+      and runs it over the call's tensors, writing ``out`` in place when the
+      function can.
+    - Installs the function in the C++ warm cache unless a view recipe was
+      applied: the shim's pending key describes the view, while the function
+      takes its base. Those calls come back through Python, which finds the
+      compiled function in its own cache.
 
     Imports are deferred into the body to avoid a load-time circular import
     (``ops_utils`` is imported broadly).
     """
-    # Policy precondition, checked before any device-compile machinery is imported or
-    # run: this is the device-compute entry (only supported dtypes reach here; host-dtype
-    # / unsupported ops already took cpu_fallback_path). On RBLN_DUMMY_DEVICE that means an
-    # NPU-bound eager op with no NPU, so reject it through the shared policy gate — same
-    # rule as a compiled graph, and independent of the 64-alignment fallback below so the
-    # behavior does not depend on tensor shape. depth > 0 means we are nested inside a
-    # compile op (e.g. an artifact build); those must proceed so builds still work.
+    # On a dummy device an eager op has no NPU to run on; a build nested in a compile op
+    # (depth > 0) still proceeds.
     from torch_rbln._internal.dummy_device import raise_if_dummy_execution
     from torch_rbln._internal.torch_compile_patch_helpers import get_rbln_compile_op_depth
 
     if get_rbln_compile_op_depth() == 0:
         raise_if_dummy_execution(f"the eager op {op_name}" if op_name else "an eager op")
 
-    from torch_rbln._internal.compile_cache import compile_rbln_cached_entry
-    from torch_rbln._internal.env_utils import use_device_group_num_devices
+    from torch_rbln._internal.compile_cache import compiled_op, device_of, UncompilableOp
+    from torch_rbln._internal.env_utils import is_fallback_disabled
     from torch_rbln._internal.warm_cache import install_pending as _install_warm_cache_pending
-
-    # Device 64-elem-align fallback: a last-dim not a multiple of 64 makes the
-    # rebel pipeline wrap the device fn with host-only contrib_aligned_pad /
-    # contrib_dummy_cast ops (no RTOSA lowering), costing a base-buffer D2H+H2D
-    # round-trip (~1MB/op for LLaMA-1B rotary). cpu_fallback_path is strictly
-    # cheaper here (one D2H + host op + one H2D). Single-tensor args only: for
-    # list ops (cat/stack) the device path fuses unaligned tensors into one IR
-    # that's cheaper than per-tensor host fallback — TensorList recursion added
-    # +12% prefill. (verified 2026-05-08 via IR dump + trace counts)
-    def _last_dim_unaligned(t):
-        return isinstance(t, torch.Tensor) and t.dim() > 0 and t.shape[-1] % 64 != 0
-
-    if any(_last_dim_unaligned(a) for a in args) or any(_last_dim_unaligned(v) for v in kwargs_filtered.values()):
-        return cpu_fallback_path(
-            op_callable,
-            args,
-            result=out_tensor,
-            op_name=op_name,
-            **kwargs_filtered,
-        )
-
-    # Supported-dtype div with rounding_mode trunc/floor: the device kernel returns wrong
-    # values for entire output rows (not ULP drift), so route it to cpu_fallback.
-    # Plain div (no rounding_mode) and fp32 div are unaffected. (verified
-    # 2026-05-07: trunc on (357,789), row 338 came back all 0.0/-0.0)
-    if op_name == "aten::div":
-        rmode = kwargs_filtered.get("rounding_mode")
-        if rmode in ("trunc", "floor"):
-            for a in args:
-                if isinstance(a, torch.Tensor) and a.dtype in SupportedDtypes.dispatch:
-                    return cpu_fallback_path(
-                        op_callable,
-                        args,
-                        result=out_tensor,
-                        op_name=op_name,
-                        **kwargs_filtered,
-                    )
-
-    # Comparison ops (bool output): replaying a view recipe in-graph aborts
-    # ``build_internal`` on the negative-pad-on-bool IR sequence. Materialize
-    # view inputs to ``.contiguous()`` so the recipe path is skipped. (verified
-    # 2026-05-07: base[:3,:,:,1] eq contig (3,5,5); ``add`` on the same shapes
-    # compiles because the depad runs on fp16, not bool)
-    if op_name in {
-        "aten::eq",
-        "aten::ne",
-        "aten::gt",
-        "aten::ge",
-        "aten::lt",
-        "aten::le",
-    }:
-        args = tuple(a.contiguous() if isinstance(a, torch.Tensor) and not a.is_contiguous() else a for a in args)
-        kwargs_filtered = {
-            k: (v.contiguous() if isinstance(v, torch.Tensor) and not v.is_contiguous() else v)
-            for k, v in kwargs_filtered.items()
-        }
 
     (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs_filtered)
     has_views = any(r is not None for r in view_recipes)
 
-    compile_options = {"disable_logger": True}
-    if not use_device_group_num_devices():
-        compile_options["num_devices"] = 1
-    compile_options["_runtime_holder"] = []
-
-    if out_tensor is None:
-        result_tensor = None
-    else:
-        if can_use_out_tensor_directly(view_args, dict(view_kwargs, out=out_tensor)):
-            result_tensor = out_tensor
-        else:
-            result_tensor = None
-
+    use_out = out_tensor is not None and can_use_out_tensor_directly(view_args, dict(view_kwargs, out=out_tensor))
     op_module = get_view_op_module(op_callable, view_recipes)
-
-    entry = compile_rbln_cached_entry(
-        op_module,
-        dynamic=False,
-        options=compile_options,
-        device_cache_key=extract_warm_cache_key(*view_args, **view_kwargs),
-    )
-    out_list = None if result_tensor is None else [result_tensor]
-    # The caller's ``out`` is bound as the program's output buffer, as the C++
-    # hit path binds it. A device copy into ``out`` is not the same thing: when
-    # ``out`` is host-latest (filled from the CPU, or by a CPU fallback) the
-    # runtime serves the copy on the host view and ``out`` stays off the device
-    # until something else consumes it, while a bound output is written on the
-    # device and marked device-latest.
-    tensors = extract_tensors(view_args) + extract_tensors(view_kwargs)
-    runtime = entry.runtime()
-    if runtime is not None and entry.input_order is not None:
-        # The compiled callable is skipped: the cache key separates what its
-        # guards would recompile for, so the runtime built for this key is the
-        # one this call needs.
-        outputs = runtime.run(*(tensors[i] for i in entry.input_order), out=out_list)
-        external_result = outputs[0] if len(outputs) == 1 else tuple(outputs)
-    else:
-        # First call for this key: the backend builds the runtime while the
-        # callable runs, into a buffer of its own that is dropped here. Binding
-        # ``out`` costs a second run, once, under the compile that just happened.
-        external_result = entry.compiled(*view_args, **view_kwargs)
-        runtime = entry.runtime()
-        if runtime is not None and entry.input_order is None:
-            entry.input_order = _graph_input_order(runtime, tensors)
-        if out_list is not None:
-            if runtime is not None and entry.input_order is not None:
-                runtime.run(*(tensors[i] for i in entry.input_order), out=out_list)
-            else:
-                # Either Dynamo recompiled inside the callable, so which runtime
-                # ran is unknown (see ``CompiledOp.runtime``), or the graph's
-                # inputs could not be matched to this call's tensors. ``out`` can
-                # then only be filled by copy, which leaves a host-latest ``out``
-                # on the host. The key is meant to make this unreachable.
-                if not entry.copy_fallback_warned:
-                    entry.copy_fallback_warned = True
-                    rbln_log_warn(
-                        f"{op_name}: {len(entry.runtime_holder)} runtime(s) behind one compiled callable and "
-                        f"input order {entry.input_order}; out= filled by device copy"
-                    )
-                result_tensor.copy_(external_result)
-            external_result = result_tensor
-    if result_tensor is None:
-        result_tensor = external_result
+    device = device_of(view_args, view_kwargs)
+    try:
+        op = compiled_op(op_module, view_args, view_kwargs, device)
+    except UncompilableOp as e:
+        if is_fallback_disabled("unsupported_op" if e.unsupported else "compile_error"):
+            raise
+        _warn_uncompilable_once(op_name, e)
+        return cpu_fallback_path(op_callable, args, result=out_tensor, op_name=op_name, **kwargs_filtered)
+    tensors = op.tensors(view_args, view_kwargs)
+    result = op.run(tensors, [out_tensor] if use_out else None)
     if not has_views:
-        # install_pending empties the list it is given; the entry keeps its own.
-        _install_warm_cache_pending(list(entry.runtime_holder), external_result)
-    return result_tensor
+        _install_warm_cache_pending(op.function, tensors)
+    if use_out and result is not out_tensor:
+        out_tensor.copy_(result)
+        return out_tensor
+    return result
 
 
-def _graph_input_order(runtime, tensors):
-    """Indices into ``tensors`` of the graph's inputs, in graph order, or None.
-
-    Dynamo makes a graph input of each tensor argument in the order it is
-    first used, so a view replay puts its base ahead of the other arguments,
-    and it folds away what needs no input: a tensor passed twice, a 0-dim CPU
-    constant. Rather than predict that, read it back: the runtime keeps a weak
-    reference to each tensor bound at its last run, in graph order, and right
-    after the compiled callable's first run those are this call's tensors.
-    """
-    first_seen: dict[int, int] = {}
-    for i, t in enumerate(tensors):
-        first_seen.setdefault(id(t), i)
-    order = []
-    for ref in runtime._input_binding.validated:
-        bound = ref() if ref is not None else None
-        if bound is None or id(bound) not in first_seen:
-            return None
-        order.append(first_seen[id(bound)])
-    return tuple(order)
-
-
-_ALL_FALLBACK_CASES = frozenset({"dispatch_mode", "reentrant", "trace", "dtype", "scalar", "storage_offset", "nan_inf"})
+_ALL_FALLBACK_CASES = frozenset({"dispatch_mode", "reentrant", "trace", "dtype", "scalar", "nan_inf"})
 
 
 _warned_disable_fallback = False
@@ -1986,11 +1773,10 @@ def is_cpu_fallback_cases(args):
        or if the inputs mix different supported dtypes. The RBLN compute path requires all tensors to share the
        same supported dtype.
     3. **Scalar Tensors**: If all input tensors are scalar tensors, rebel-compiler falls back to host ops.
-    4. **Storage Offset**: If any tensor has `storage_offset != 0`, fall back to CPU.
-    5. **NaN/Inf Values**: When not in deploy mode, if any input tensor contains NaN or Inf values,
+    4. **NaN/Inf Values**: When not in deploy mode, if any input tensor contains NaN or Inf values,
        rbln cannot handle them and we need to fall back to CPU. This check converts tensors to CPU
        before checking to ensure accurate detection.
-    6. **Reentrancy** (checked last): When we're already inside an RBLN op that uses torch.compile
+    5. **Reentrancy** (checked last): When we're already inside an RBLN op that uses torch.compile
        (thread-local depth > 0), any nested dispatch (e.g. compiled graph running torch.add -> add_rbln
        again, or print/repr triggering tensor ops) must use CPU fallback to avoid infinite recursion.
        This is an unexpected path; a warning is logged when it triggers. Disable with
@@ -2021,7 +1807,7 @@ def is_cpu_fallback_cases(args):
         except ImportError:
             pass
 
-    # Checks 2-5 require tensors; bail early if none
+    # Checks 2-4 require tensors; bail early if none
     tensor_args = extract_tensors(args)
     if not tensor_args:
         return False
@@ -2040,12 +1826,7 @@ def is_cpu_fallback_cases(args):
         if all(a.ndim == 0 for a in tensor_args):
             return True
 
-    # 4: fall back to the CPU if any contiguous tensor has non-zero storage offset
-    if "storage_offset" not in disabled_cases:
-        if any(a.is_contiguous() and a.storage_offset() != 0 for a in tensor_args):
-            return True
-
-    # 5: fall back to the CPU if any tensor contains NaN/Inf values (heavy: to_cpu + scan; non-deploy only)
+    # 4: fall back to the CPU if any tensor contains NaN/Inf values (heavy: to_cpu + scan; non-deploy only)
     if "nan_inf" not in disabled_cases:
         try:
             from torch_rbln._internal.env_utils import is_rbln_deploy
@@ -2055,7 +1836,7 @@ def is_cpu_fallback_cases(args):
         except ImportError:
             pass
 
-    # 6: Reentrancy – already inside an RBLN compile op (e.g. from print/repr or from compiled graph).
+    # 5: Reentrancy – already inside an RBLN compile op (e.g. from print/repr or from compiled graph).
     #     Unexpected path; log a warning when it triggers.
     if "reentrant" not in disabled_cases:
         from torch_rbln._internal.torch_compile_patch_helpers import get_rbln_compile_op_depth

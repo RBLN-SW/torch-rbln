@@ -7,27 +7,23 @@ kernel, or recompile — for reasons the user never asked for and cannot see.
 renders a torch.profiler-style report. It is a hidden-overhead explainer (think
 ``torch._dynamo.explain`` / JAX ``transfer_guard``), NOT a timing profiler.
 
-Signals (every counter sits on an already-slow point — a host DMA or a fallback
-branch — never the fast device path; reads are lazy, so wrapping a run with
-explain() does not change its latency):
+Signals (every counter sits on an already-slow point — a host round-trip or a
+fallback branch — never the fast device path; reads are lazy, so wrapping a run
+with explain() does not change its latency):
 
   host bounce (torch-side, aten intent) : non-direct copy_ / strided fallback / etc.
-  runtime hidden-d2h cause (v2v slow)   : why a device v2v fell to host (src state)
   dispatch                              : cpu_fallback, recompile/miss, warm-hit
 
-Plus one RESOURCE gauge (NOT a hidden-overhead signal — kept because it is
-accurate and complete: every device allocation routes through BufferAllocator):
+Plus context that is NOT a hidden-overhead signal:
 
-  device memory : current live + peak high-water
+  device memory : reserved bytes of the caching allocator, current + peak high-water
+  runtime time  : time inside the runtime's copy calls (v2v / v2h / h2v and batches)
 
 Scope: explain() surfaces ONLY hidden host overhead a user issued as a normal
-op and cannot see. Generic dispatch/utilization counters (command-stream count,
-device-idle, total host-traffic bytes) are a different profiler's job
-(torch.profiler / nsys), are out of scope, and on the executed path live in the
-TVM runtime where they read ~0 here — surfacing them would mislead. The one
-hidden signal still missing — a side-effect host-sync on the TVM graph-exec path
-— is a tracked follow-up (it, not the excluded counters, is what TVM-runtime
-instrumentation is for).
+op and cannot see. Timelines and utilization (device jobs, idle time, launches)
+are torch.profiler's job: with ``RBLN_PROFILER=1`` its trace carries a row per
+NPU, a lane per kind of work (compute / copy / host / collective), and an arrow
+from each launch to the work it ran.
 
 What it does NOT know: explain observes a bounded region; it has no idea where
 that region sits in your run (first step or thousandth), how many times you will
@@ -71,7 +67,7 @@ from typing_extensions import Self
 __all__ = ["explain", "explain_steady", "RBLNExplain", "RBLNDiff", "profile", "RBLNProfile"]
 
 
-# explain() drives PROCESS-GLOBAL instrumentation: the (B) rebel-runtime timer gate
+# explain() drives PROCESS-GLOBAL instrumentation: the (B) runtime copy timer gate
 # (RBLNFunctions.cpp) and the trace gate/map (DispatchShim.cpp) are single globals, and
 # the counters are read as deltas. A region owns that global state for its duration, so
 # regions MUST NOT overlap. Rather than build per-region views over shared singletons
@@ -87,47 +83,44 @@ _BOUNCE_SITES: tuple[tuple[str, str], ...] = (
     ("copy_h2d_staging", "copy_: cpu src staged before h2v"),
     ("copy_h2d_noncontig_dst", "copy_: non-contiguous rbln dst pulled to host"),
     ("strided_v2v_cpu_fallback", "cat/index/copy_: strided v2v fell back to CPU"),
-    ("v2v_batch_to_per_entry", "batched v2v rejected -> per-entry"),
     ("host_batch_to_per_entry", "batched h2v/v2h rejected -> per-entry"),
+    ("op_arg_through_host", "op arg encoded or decoded on the host"),
 )
-# Which sites are genuine host round-trips. The two batch->per-entry sites are
-# not: they already move host<->device (or stay device-side), so the incident is
-# a lost batching win, not an added bounce.
-_HOST_BOUNCE_SITES = (0, 1, 2, 3)
+# Which sites are genuine host round-trips. The batch->per-entry site is not: it
+# already moves host<->device, so the incident is a lost batching win, not an
+# added bounce.
+_HOST_BOUNCE_SITES = (0, 1, 2, 3, 5)
 
-# cpu_fallback reason names; index matches the runtime histogram order (the WHY
+# cpu_fallback reason names; index matches the dispatch histogram order (the WHY
 # behind dispatch.cpu_fallback). See quick_fallback_check in DispatchShim.cpp.
 _FALLBACK_REASON_NAMES = ("dtype-not-fp16", "nan/inf input", "all-scalar inputs")
 
-# Must match the reason order in rebel-compiler vmemory_manager.cc.
-_RUNTIME_REASONS: tuple[tuple[str, str], ...] = (
-    ("src_not_on_device", "src not on device yet -> establish device residency before the copy"),
-    ("src_device_only_real_d2h", "src device-only; real d2h (layout unplannable: dtype/align/>30 chunks)"),
-    ("src_synced_host_served", "src already on host+device; host memcpy, no transfer (usually benign)"),
-)
-
 # Static cause -> one-line REMEDY ("what to change"). Read only at report()/
-# verdict() time, so it adds zero runtime cost. The runtime v2v-slow reasons
-# carry their own fix text in _RUNTIME_REASONS and are not duplicated here.
+# verdict() time, so it adds zero runtime cost.
 _REMEDY: dict[str, str] = {
     "copy_d2d_host_bounce": (
-        "non-contiguous device->device copy went via host; make it contiguous "
-        "(e.g. KV layout) or route it through the on-device v2v engine"
+        "device->device copy_ that casts dtype, broadcasts, or crosses devices non-contiguously went via "
+        "host; cast/broadcast where the data is produced, or make a cross-device copy contiguous"
     ),
-    "copy_h2d_staging": "cpu source staged before h2v; keep the source on-device, or stage it once and reuse",
+    "copy_h2d_staging": (
+        "cpu source converted on the host before h2v (its dtype, shape or contiguity differs from the dst); "
+        "prepare it in the dst's layout once and reuse it, or keep the source on-device"
+    ),
     "copy_h2d_noncontig_dst": (
         "host->device write into a non-contiguous device dst; write into a contiguous buffer first, then h2d"
     ),
     "strided_v2v_cpu_fallback": (
-        "strided v2v fell back to CPU; lower outer_count / use a fatter contiguous inner block "
-        "so the device engine qualifies"
-    ),
-    "v2v_batch_to_per_entry": (
-        "batched v2v rejected to per-entry; check the per-dst limit (kMaxV2VMultiCopies) and batch geometry"
+        "the runtime refused a strided device copy (cat/index/copy_), so it ran as a CPU op; "
+        "the warning logged with it carries the runtime's error"
     ),
     "host_batch_to_per_entry": (
-        "batched h2v/v2h rejected to per-entry; check for overlapping destination ranges in one batch "
-        "(the runtime requires them disjoint and does not validate it)"
+        "a batched h2v/v2h call failed and was replayed entry by entry; the warning logged with it carries "
+        "the runtime's error"
+    ),
+    "op_arg_through_host": (
+        "the compiler could not lay out an op's input or result as torch holds it (a last axis narrower than "
+        "64 elements, for one), so it was encoded or decoded on the host around the run; a wider last axis "
+        "keeps it on the device"
     ),
     "cpu_fallback": (
         "op ran on CPU; prefer graph mode (torch.compile backend='rbln'), add a native rbln kernel, or fix "
@@ -143,51 +136,35 @@ _REMEDY: dict[str, str] = {
 # Terse inline "what to change" shown in the report's Fix column. The full prose
 # lives in _REMEDY, surfaced on demand via dump()["notes"] / RBLNExplain.help().
 _FIX_SHORT: dict[str, str] = {
-    "copy_d2d_host_bounce": "make contiguous, or v2v engine",
-    "copy_h2d_staging": "keep src on-device / stage once",
+    "copy_d2d_host_bounce": "cast/broadcast at the producer",
+    "copy_h2d_staging": "prepare src in dst layout once",
     "copy_h2d_noncontig_dst": "contiguous staging, then h2d",
-    "strided_v2v_cpu_fallback": "lower outer_count / fatter inner",
-    "v2v_batch_to_per_entry": "check kMaxV2VMultiCopies / batch geom",
-    "host_batch_to_per_entry": "check for overlapping dst ranges",
+    "strided_v2v_cpu_fallback": "see the logged runtime error",
+    "host_batch_to_per_entry": "see the logged runtime error",
+    "op_arg_through_host": "widen the narrow last axis",
     "cpu_fallback": "graph mode, or a supported dtype",
     "recompile": "stabilize shapes, or graph mode",
-    "v2v_slow": "establish device residency first",
 }
 
-_RT_UNAVAIL = "  note: runtime signals not exposed by the loaded librbln (install a recent rebel-compiler)"
+# Display-only trim of the widest table cells (the 'host_bounce/' prefix already carries
+# "copy"/"bounce"); dump/data keys keep the full site name.
+_SITE_LABEL: dict[str, str] = {
+    "copy_d2d_host_bounce": "d2d_copy",
+    "copy_h2d_staging": "h2d_staging",
+    "copy_h2d_noncontig_dst": "h2d_noncontig_dst",
+}
 
 
 def _collect_notes(d: dict[str, Any]) -> list[dict[str, str]]:
     """Map the signals that actually fired in this region to their one-line note.
 
-    Returned in priority order (host bounce -> runtime cause -> dispatch) so the
-    most impactful change is listed first. Pure lookup over the already-computed
-    dump, so it costs nothing at runtime."""
+    Returned in priority order (host bounce -> dispatch) so the most impactful
+    change is listed first. Pure lookup over the already-computed dump, so it
+    costs nothing at runtime."""
     fixes: list[dict[str, str]] = []
     for name, vv in d["hidden_host_bounce"]["by_site"].items():
         if vv["count"] and name in _REMEDY:
             fixes.append({"signal": f"host_bounce/{name}", "fix": _REMEDY[name]})
-    rr = d["runtime_residency"]
-    if rr.get("available"):
-        rfix = dict(_RUNTIME_REASONS)
-        for n, vv in rr["by_reason"].items():
-            if vv["count"]:
-                # by_reason keys are exactly _RUNTIME_REASONS (dump() fails fast on axis
-                # drift), so rfix[n] always resolves.
-                fixes.append({"signal": f"runtime/v2v_slow:{n}", "fix": rfix[n]})
-        # Reject axis (so help()/dump()['notes'] resolve the v2v_reject:* signals the
-        # report shows): user-actionable reasons carry their fix; the internal bucket is a
-        # notification, not a to-do.
-        rj = rr.get("reject") or {}
-        for lbl in rj.get("user_actionable", {}):
-            fixes.append({"signal": f"runtime/v2v_reject:{lbl}", "fix": _REJECT_FIX.get(lbl, "")})
-        if rj.get("internal_fallback", {}).get("count"):
-            fixes.append(
-                {
-                    "signal": "runtime/v2v_reject:internal_fallback",
-                    "fix": "runtime-internal fallback; not user-fixable (a notification, not a to-do)",
-                }
-            )
     disp = d["dispatch"]
     if disp["cpu_fallback"]:
         fixes.append({"signal": "dispatch/cpu_fallback", "fix": _REMEDY["cpu_fallback"]})
@@ -293,10 +270,32 @@ def _host_thread_info() -> dict[str, Any]:
     return info
 
 
-# --- (B) rebel-runtime (librbln) boundary time, gated on the explain region ----
+# --- device memory: the caching allocator's reserved footprint ------------------
+def _read_device_memory() -> Optional[dict[str, int]]:
+    """Reserved bytes of the caching allocator, current and peak, summed over the
+    devices this process has allocated on; None when it has allocated on none.
+    Each device's peak is its high-water mark since start or its last
+    ``reset_peak_memory_stats``, so on several devices the sum bounds the joint peak
+    from above."""
+    import torch
+    import torch_rbln._C as _C
+
+    current = peak = devices = 0
+    for index in range(_C.device_count()):
+        stats = _C.memory_stats(torch.device("rbln", index))
+        if stats:
+            current += stats["reserved_bytes.all.current"]
+            peak += stats["reserved_bytes.all.peak"]
+            devices += 1
+    if not devices:
+        return None
+    return {"current_bytes": current, "peak_bytes": peak, "devices": devices}
+
+
+# --- (B) time inside the runtime's copy calls, gated on the explain region ------
 # Order MUST match the C++ RtIdx enum in c10/rbln/RBLNFunctions.cpp. New
 # primitives are appended there, so append here too — never insert.
-_RT_PRIMS = ("v2v", "v2v_multi", "borrow", "acquire", "return", "v2h", "h2v", "v2h_multi", "h2v_multi")
+_RT_PRIMS = ("v2v", "v2v_multi", "v2h", "h2v", "v2h_multi", "h2v_multi")
 
 
 def _rt_timing_enable(on: bool) -> None:
@@ -316,7 +315,7 @@ def _rt_timing_reset() -> None:
 
 
 def _read_rt_timing() -> Optional[list[tuple[int, int]]]:
-    """Per-primitive (ns, calls) spent inside librbln boundary calls, or None if
+    """Per-primitive (ns, calls) spent inside the runtime's copy calls, or None if
     the loaded _C predates the binding (graceful degrade)."""
     import torch_rbln._C as _C
 
@@ -359,67 +358,6 @@ def _reset_trace() -> None:
         fn()
 
 
-# --- runtime (rebel-compiler) counters via the linked _C extension (pybind) -----
-# Read through torch_rbln._C (which links librbln) rather than dlsym'ing librbln by
-# ctypes: one typed channel, consistent with every other runtime signal here. Each
-# getter returns Python-native values (lists of (count, bytes) / tuples), no marshal.
-# Per-reason axes are POSITIONAL; their meaning is mapped on THIS (torch) side — no
-# internal classification name crosses over from the runtime.
-
-# Reject-axis presentation: mirrors the runtime V2VRejectReason axis POSITIONALLY
-# (must match its order). Only user-actionable reasons are named; every "internal"
-# reason is collapsed into one bucket and not named, because the internal reject reason
-# is a non-deterministic runtime detail (the same op can hit a different reason by
-# residency/layout state) that the user cannot act on -- naming it would imply false
-# actionability. The collapsed bucket is a magnitude-carrying notification, not a to-do.
-# index 0 = none/unused.
-_REJECT_AUDIENCE = ("none", "user", "internal", "internal", "user", "internal", "internal", "internal", "internal")
-_REJECT_LABEL = {1: "src_not_on_device", 4: "dtype_mismatch"}
-_REJECT_FIX = {
-    "src_not_on_device": "establish device residency before the copy",
-    "dtype_mismatch": "align the src/dst dtype",
-}
-
-
-def _rt_prof(name: str):
-    """Resolve a runtime-counter binding on _C, or None if the loaded _C/librbln
-    predates it (graceful degradation -> signal reports pending, never a false zero)."""
-    try:
-        import torch_rbln._C as _C
-    except Exception:
-        return None
-    return getattr(_C, name, None)
-
-
-def _read_runtime() -> Optional[dict]:
-    """Snapshot of runtime (rebel-compiler) counters via _C, or None if unavailable.
-
-    ``hidden_count`` (the hidden-d2h cause breakdown) is the core signal. ``reject_*``
-    (WHY a fast v2v plan was rejected), the ``host_sync_*`` real-transfer counters, and
-    the ``mem_*`` device-memory gauge are each present only on a runtime that exposes
-    them; on an older one they are omitted (reported pending — never a false zero)."""
-    hidden = _rt_prof("_rt_prof_hidden")
-    if hidden is None:
-        return None
-    h = hidden()  # [(count, bytes), ...] positional by src-state cause
-    out: dict[str, Any] = {"hidden_count": [c for c, _b in h], "hidden_bytes": [b for _c, b in h]}
-    rej = _rt_prof("_rt_prof_reject")
-    if rej is not None:
-        r = rej()  # [(count, bytes), ...] positional by V2VRejectReason
-        out["reject_count"] = [c for c, _b in r]
-        out["reject_bytes"] = [b for _c, b in r]
-    hs = _rt_prof("_rt_prof_host_sync")
-    if hs is not None:
-        (dc, db), (hc, hb) = hs()  # [0] = d2h, [1] = h2d
-        out["host_sync_count"], out["host_sync_bytes"] = dc, db
-        out["host_sync_h2d_count"], out["host_sync_h2d_bytes"] = hc, hb
-    mem = _rt_prof("_rt_prof_memory")
-    if mem is not None:
-        cur, peak = mem()
-        out["mem_cur"], out["mem_peak"] = cur, peak
-    return out
-
-
 def _fmt_bytes(b: float) -> str:
     for unit in ("B", "KB", "MB", "GB"):
         if abs(b) < 1024 or unit == "GB":
@@ -439,26 +377,15 @@ def _fmt_time(ns: float) -> str:
     return f"{us:.3f}us"
 
 
-# Note-column prefixes: split a SUGGESTED action (try:) from a fact/notification (fyi:).
-# "try:" (not "fix:") is deliberate -- the advice is a starting point, not a guaranteed fix;
-# it may not fit a given workload. torch tables have no advice column, so this is
-# explain-specific -- kept ASCII.
+# Note-column prefix for a SUGGESTED action. "try:" (not "fix:") is deliberate -- the
+# advice is a starting point, not a guaranteed fix; it may not fit a given workload.
+# torch tables have no advice column, so this is explain-specific -- kept ASCII.
 def _fix(note: str) -> str:
     return f"try: {note}" if note else ""
 
 
-def _fyi(note: str) -> str:
-    return f"fyi: {note}" if note else ""
-
-
 def _site_label(name: str) -> str:
-    # Display-only trim (the 'host_bounce/' prefix already carries "copy"/"bounce", and
-    # these are the widest table cell); dump/data keys are unchanged.
-    return {
-        "copy_d2d_host_bounce": "d2d_copy",
-        "copy_h2d_staging": "h2d_staging",
-        "copy_h2d_noncontig_dst": "h2d_noncontig_dst",
-    }.get(name, name)
+    return _SITE_LABEL.get(name, name)
 
 
 def _thousands(n: int) -> str:
@@ -545,12 +472,13 @@ class RBLNExplain:
     def __init__(self, with_stack: bool = False, *, trace: Optional[bool] = None) -> None:
         if trace is not None:  # deprecated back-compat alias for with_stack
             with_stack = trace
-        self._b0 = self._d0 = self._rt0 = self._wall0 = self._f0 = self._r0 = self._fr0 = None
-        self._bounces = self._dispatch = self._rt = self._fallback_by_op = self._recompile_by_op = None
+        self._b0 = self._d0 = self._wall0 = self._f0 = self._r0 = self._fr0 = None
+        self._bounces = self._dispatch = self._fallback_by_op = self._recompile_by_op = None
         self._fallback_reasons = None
+        self._device_memory: Optional[dict[str, int]] = None
         self._trace = with_stack
         self._trace_by_op: Optional[dict] = None
-        self._rt_timing: Optional[list[tuple[int, int]]] = None  # (B) per-primitive librbln (ns, calls)
+        self._rt_timing: Optional[list[tuple[int, int]]] = None  # (B) per-primitive runtime copy (ns, calls)
         self._holds = False  # this region owns the global instrumentation (release exactly once)
         self._wall_ns = 0
 
@@ -581,7 +509,6 @@ class RBLNExplain:
             self._f0 = _read_fallback_by_op()
             self._r0 = _read_recompile_by_op()
             self._fr0 = _read_fallback_reasons()
-            self._rt0 = _read_runtime()
             self._wall0 = time.perf_counter_ns()
         except BaseException:
             self._release()
@@ -606,7 +533,7 @@ class RBLNExplain:
         try:
             self._wall_ns = time.perf_counter_ns() - self._wall0
             self._rt_timing = _read_rt_timing()  # (B) region totals (reset at start)
-            b1, d1, rt1 = _read_bounces(), _read_dispatch(), _read_runtime()
+            b1, d1 = _read_bounces(), _read_dispatch()
             self._bounces = [(c1 - c0, by1 - by0) for (c0, by0), (c1, by1) in zip(self._b0, b1)]
             self._dispatch = tuple(x1 - x0 for x0, x1 in zip(self._d0, d1))
             f1 = _read_fallback_by_op()
@@ -617,25 +544,7 @@ class RBLNExplain:
             self._fallback_reasons = (
                 [b - a for a, b in zip(self._fr0, fr1)] if self._fr0 and fr1 and len(fr1) == len(self._fr0) else []
             )
-            if self._rt0 is not None and rt1 is not None:
-                hc = [a - b for a, b in zip(rt1["hidden_count"], self._rt0["hidden_count"])]
-                hb = [a - b for a, b in zip(rt1["hidden_bytes"], self._rt0["hidden_bytes"])]
-                self._rt = {"hidden_count": hc, "hidden_bytes": hb}
-                if "mem_cur" in rt1:
-                    # memory is a process-level high-water gauge (a level, not a delta)
-                    self._rt["mem_cur"] = rt1["mem_cur"]
-                    self._rt["mem_peak"] = rt1["mem_peak"]
-                if "host_sync_count" in rt1 and "host_sync_count" in self._rt0:
-                    self._rt["host_sync_count"] = rt1["host_sync_count"] - self._rt0["host_sync_count"]
-                    self._rt["host_sync_bytes"] = rt1["host_sync_bytes"] - self._rt0["host_sync_bytes"]
-                if "host_sync_h2d_count" in rt1 and "host_sync_h2d_count" in self._rt0:
-                    self._rt["host_sync_h2d_count"] = rt1["host_sync_h2d_count"] - self._rt0["host_sync_h2d_count"]
-                    self._rt["host_sync_h2d_bytes"] = rt1["host_sync_h2d_bytes"] - self._rt0["host_sync_h2d_bytes"]
-                if "reject_count" in rt1 and "reject_count" in self._rt0:
-                    self._rt["reject_count"] = [a - b for a, b in zip(rt1["reject_count"], self._rt0["reject_count"])]
-                    self._rt["reject_bytes"] = [a - b for a, b in zip(rt1["reject_bytes"], self._rt0["reject_bytes"])]
-            else:
-                self._rt = None
+            self._device_memory = _read_device_memory()  # a process-level level + high-water, not a delta
             self._trace_by_op = _read_trace_by_op() if self._trace else {}
         finally:
             self._release()  # always drop the gate + release the guard, even if a readout raised
@@ -686,84 +595,8 @@ class RBLNExplain:
             n: c for n, c in zip(_FALLBACK_REASON_NAMES, self._fallback_reasons or []) if c > 0
         }
         out["trace_by_op"] = dict(self._trace_by_op or {})  # (A) WHERE; {} unless with_stack=True
-        if self._rt is not None:
-            hc, hbytes = self._rt["hidden_count"], self._rt["hidden_bytes"]
-            # (#3) the runtime hidden-reason axis is a positional ABI contract, not partially-
-            # interpretable user data: report keys like src_not_on_device are only truthful if the
-            # order/count/meaning line up 1:1 with _RUNTIME_REASONS. A length mismatch means this
-            # torch-rbln build and the loaded librbln are out of sync -- fail loudly rather than
-            # silently truncate (zip) or invent an "unattributed" bucket that report()/verdict()
-            # would then have to false-interpret. The axis-length canary guards this in CI too.
-            if len(hc) != len(_RUNTIME_REASONS):
-                raise RuntimeError(
-                    f"runtime hidden-reason axis drifted (runtime reports {len(hc)} reasons, "
-                    f"this build names {len(_RUNTIME_REASONS)}); "
-                    "torch-rbln and rebel-compiler/librbln are out of sync"
-                )
-            by_reason = {n: {"count": c, "bytes": b} for (n, _f), c, b in zip(_RUNTIME_REASONS, hc, hbytes)}
-            out["runtime_residency"] = {
-                "available": True,
-                "total_count": sum(hc),
-                "by_reason": by_reason,
-            }
-            if "host_sync_count" in self._rt:
-                # REAL device->host this region (manager-emitted): a host bounce with 0 real
-                # d2h was served on host (no device crossing). Covers synchronous + async-
-                # fallback transfers; a deliberate pinned non_blocking copy takes the async
-                # DMA path (uncounted by the runtime), out of scope by design (see docs §6).
-                out["runtime_residency"]["real_host_sync_d2h"] = {
-                    "count": self._rt["host_sync_count"],
-                    "bytes": self._rt["host_sync_bytes"],
-                }
-            if "host_sync_h2d_count" in self._rt:
-                # REAL host->device this region (manager-emitted): the lazy push at the
-                # device-consume boundary -- glue that pushes host-latest data onto the device
-                # for a graph to consume. Same scope caveat as real_host_sync_d2h above.
-                out["runtime_residency"]["real_host_sync_h2d"] = {
-                    "count": self._rt["host_sync_h2d_count"],
-                    "bytes": self._rt["host_sync_h2d_bytes"],
-                }
-            if "reject_count" in self._rt:
-                # WHY a fast v2v plan was rejected, grouped by who can act: user-
-                # actionable reasons individually; every other reason collapsed into one
-                # "internal" bucket (the runtime's internal classification is never named).
-                user_rej: dict[str, dict[str, int]] = {}
-                int_c = int_b = 0
-                rc, rb = self._rt["reject_count"], self._rt["reject_bytes"]
-                for i in range(len(rc)):
-                    if rc[i] <= 0:
-                        continue
-                    aud = _REJECT_AUDIENCE[i] if i < len(_REJECT_AUDIENCE) else "internal"
-                    if aud == "user":
-                        user_rej[_REJECT_LABEL[i]] = {"count": rc[i], "bytes": rb[i]}
-                    elif aud != "none":
-                        int_c += rc[i]
-                        int_b += rb[i]
-                out["runtime_residency"]["reject"] = {
-                    "user_actionable": user_rej,
-                    "internal_fallback": {"count": int_c, "bytes": int_b},
-                }
-                # Diagnostic only -- NOT a stable surface. Raw per-index reject axis is
-                # enum-order dependent (the runtime's internal classification), so it lives
-                # under "debug" and must not be treated as a CI contract.
-                out["runtime_residency"]["debug"] = {
-                    "reject_raw_by_index": {i: {"count": rc[i], "bytes": rb[i]} for i in range(len(rc)) if rc[i] > 0}
-                }
-            pending = [
-                "finer hidden-sync cause (dtype/align/chunks)",
-                "hidden host-sync on the TVM graph-exec path (side-effect h2v)",
-            ]
-            if "mem_cur" in self._rt:
-                out["device_memory"] = {"current_bytes": self._rt["mem_cur"], "peak_bytes": self._rt["mem_peak"]}
-            else:
-                pending.append("device memory gauge (older runtime)")
-            out["pending_runtime_signals"] = pending
-        else:
-            out["runtime_residency"] = {"available": False}
-            out["pending_runtime_signals"] = [
-                "hidden_d2h / residency (STATE)",
-                "device memory gauge",
-            ]
+        if self._device_memory is not None:
+            out["device_memory"] = dict(self._device_memory)
         # (A) which fallback ops lack a CPU fast-path handler = the optimization
         # candidates (registered ones already bypass redispatchBoxed). Omitted when
         # the _C predates the registry query (can't tell handled from un-handled).
@@ -777,11 +610,11 @@ class RBLNExplain:
         # (E) host CPU oversubscription (resource fact; amplifies all host overhead)
         out["host_threads"] = _host_thread_info()
 
-        # (B) rebel-runtime (librbln) boundary time this region, per primitive.
+        # (B) time inside the runtime's copy calls this region, per primitive.
         if self._rt_timing is not None:
             total_ns = sum(ns for ns, _c in self._rt_timing)
             by_prim = {name: {"ns": ns, "calls": cnt} for name, (ns, cnt) in zip(_RT_PRIMS, self._rt_timing) if cnt}
-            out["rebel_runtime"] = {
+            out["runtime"] = {
                 "total_ns": total_ns,
                 "wall_fraction": (total_ns / self._wall_ns) if self._wall_ns else 0.0,
                 "by_primitive": by_prim,
@@ -792,28 +625,16 @@ class RBLNExplain:
 
     def verdict(self) -> dict[str, Any]:
         d = self.dump()
-        hb, disp, rr = d["hidden_host_bounce"], d["dispatch"], d["runtime_residency"]
+        hb, disp = d["hidden_host_bounce"], d["dispatch"]
         reasons: list[str] = []
         if hb["total_count"] > 0:
-            reasons.append(f"hidden host bounce (torch-side): {hb['total_count']}x, {_fmt_bytes(hb['total_bytes'])}")
-        runtime_hidden = rr["total_count"] if rr["available"] else 0
-        if runtime_hidden > 0:
-            # Lead with the real d2h the manager performed to serve the fallback, as a
-            # magnitude fact -- whether it is user-avoidable is the reject axis's job, not
-            # a blanket label here.
-            rd = rr.get("real_host_sync_d2h")
-            if rd and rd["count"]:
-                reasons.append(f"runtime-side physical d2h: {rd['count']}x, {_fmt_bytes(rd['bytes'])}")
-            fix = dict(_RUNTIME_REASONS)
-            for n, vv in rr["by_reason"].items():
-                if vv["count"]:
-                    reasons.append(f"runtime hidden d2h [{n}]: {vv['count']}x - {fix[n]}")
+            reasons.append(f"hidden host bounce: {hb['total_count']}x, {_fmt_bytes(hb['total_bytes'])}")
         if disp["recompile_miss"] > 0:
             reasons.append(f"recompile/cold-compile: {disp['recompile_miss']}x")
         if disp["cpu_fallback"] > 0:
             reasons.append(f"cpu_fallback: {disp['cpu_fallback']}x (ran on CPU)")
         # ``clean`` is a FACT (did any hidden event fire), NOT a severity grade. explain
-        # does not colour-judge how bad an event is -- a host bounce can be free -- so a
+        # does not colour-judge how bad an event is -- a bounce of a few bytes is cheap -- so a
         # RED/AMBER/GREEN would be a guess. Cost lives in the table (Bytes/Note) + reasons.
         clean = not reasons
         if clean:
@@ -822,8 +643,6 @@ class RBLNExplain:
             "clean": clean,
             "hidden_host_bounces": hb["total_count"],
             "hidden_host_bounce_bytes": hb["total_bytes"],
-            "runtime_hidden_d2h": runtime_hidden if rr["available"] else None,
-            "runtime_hidden_by_reason": rr.get("by_reason") if rr["available"] else None,
             "cpu_fallbacks": disp["cpu_fallback"],
             "recompiles": disp["recompile_miss"],
             "reasons": reasons,
@@ -831,37 +650,31 @@ class RBLNExplain:
         }
 
     def report(self) -> str:
-        """Verdict-first report. Each byte-carrying row's Note leads with the cost
-        verdict (from the region-global physical-d2h witness); detail blocks are grouped
-        under their parent signal; the full note prose is in dump()['notes'] / help()."""
+        """torch.profiler-style report: a [clean]/[overhead] marker with the region facts,
+        then one table row per fired signal with its fix, then detail blocks grouped under
+        their parent signal. The full note prose is in dump()['notes'] / help()."""
         d, v = self.dump(), self.verdict()
-        rr = d["runtime_residency"]
 
         # -- header: [clean]/[overhead: N] marker + region facts --------------
         if v["clean"]:
             mark = "[clean]"
         else:
-            # N = how many KINDS fired (bounce/runtime-d2h/fallback/recompile); a count,
-            # not a severity grade (cost lives in the table + the >> line).
-            nsig = sum(
-                (
-                    v["hidden_host_bounces"] > 0,
-                    bool(v["runtime_hidden_d2h"]),
-                    v["cpu_fallbacks"] > 0,
-                    v["recompiles"] > 0,
-                )
-            )
+            # N = how many KINDS fired (bounce/fallback/recompile); a count, not a
+            # severity grade (cost lives in the table).
+            nsig = sum((v["hidden_host_bounces"] > 0, v["cpu_fallbacks"] > 0, v["recompiles"] > 0))
             mark = f"[overhead: {nsig} signal{'' if nsig == 1 else 's'}]"
         head = f"{mark}  RBLN EXPLAIN   (region wall {_fmt_time(d['wall_ns'])}"
-        if "device_memory" in d:
-            # rebel BufferAllocator reserved footprint (device high-water), not host RSS.
-            head += f" | device mem {_fmt_bytes(d['device_memory']['peak_bytes'])} peak, reserved"
+        mem = d.get("device_memory")
+        if mem:
+            # caching-allocator reserved footprint (device high-water), not host RSS.
+            head += f" | device mem {_fmt_bytes(mem['peak_bytes'])} peak, reserved"
+            if mem["devices"] > 1:
+                head += f" over {mem['devices']} devices"
         head += ")"
         lines = [head]
 
-        # -- context facts (oversubscription, rebel-runtime, h2d push): built for BOTH
-        #    paths -- they happened regardless of any signal, so a clean region shows them
-        #    too (an h2d push is expected glue, not overhead).
+        # -- context facts (oversubscription, runtime copy time): built for BOTH paths --
+        #    they happened regardless of any signal, so a clean region shows them too.
         ctx: list[str] = []
         ht = d.get("host_threads") or {}
         if ht.get("oversubscribed"):
@@ -871,63 +684,38 @@ class RBLNExplain:
                 f"core{'' if cores == 1 else 's'} -> host latency may be inflated"
             )
             ctx.append("    (tune affinity / OMP_NUM_THREADS)")
-        rtm = d.get("rebel_runtime")
+        rtm = d.get("runtime")
         if rtm and rtm["total_ns"]:
             bp = sorted(rtm["by_primitive"].items(), key=lambda kv: -kv[1]["ns"])
             top = "  ".join(f"{n} {_fmt_dur(pv['ns'])}/{pv['calls']}" for n, pv in bp[:4])
             more = f"  +{len(bp) - 4} more" if len(bp) > 4 else ""
             ctx.append(
-                f"  rebel runtime: {_fmt_time(rtm['total_ns'])} in librbln "
+                f"  runtime: {_fmt_time(rtm['total_ns'])} in copy calls "
                 f"({rtm['wall_fraction'] * 100:.1f}% of region wall)"
             )
             ctx.append(f"    {top}{more}")
-        rhh = rr.get("real_host_sync_h2d") if rr.get("available") else None
-        if rhh is not None and rhh["count"]:
-            ctx.append(f"  host->device push (runtime): {rhh['count']} pushes, {_fmt_bytes(rhh['bytes'])}")
         if ctx:
             lines.append("")
             lines += ctx
 
         # -- clean path: say WHAT was checked, and that clean != fast ----------
         if v["clean"]:
-            checked = ["host_bounce"]
-            if rr.get("available"):  # only claim v2v_slow when the region could observe it
-                checked.append("v2v_slow")
-            checked += ["cpu_fallback", "recompile"]
-            lines.append(f"  checked: {', '.join(checked)} -- none fired")
+            lines.append("  checked: host_bounce, cpu_fallback, recompile -- none fired")
             lines.append('  note: clean = no hidden host overhead, not "fast"')
-            if not rr.get("available"):
-                lines.append(_RT_UNAVAIL)
             return "\n".join(lines)
 
-        # -- cost verdict from the region-global physical-d2h witness (can't attribute
-        #    per row): 0 -> all low-cost; >0 & one byte row -> that row is costly;
-        #    >0 & several -> defer to the >> line (no false per-row blame).
-        phys = rr.get("real_host_sync_d2h") if rr.get("available") else None
-        witness = phys["count"] if phys else 0
+        # -- the signal table: fixed category order (host_bounce -> dispatch) --
         bounce_sites = [(n, vv) for n, vv in d["hidden_host_bounce"]["by_site"].items() if vv["count"]]
-        v2v_fired = bool(rr.get("available") and rr.get("total_count"))
-        n_byte_rows = len(bounce_sites) + (1 if v2v_fired else 0)
-
-        def _verdict() -> str:
-            if witness == 0:
-                return "no DMA (low cost)"
-            if n_byte_rows == 1:
-                return "real d2h DMA (costly)"
-            return "see physical d2h below"
-
-        # -- the signal table: fixed category order (host_bounce -> runtime ->
-        #    dispatch); cost verdict leads the Note on every byte-carrying row --
         rows: list[list[str]] = []
         for name, vv in bounce_sites:
-            short = _FIX_SHORT.get(name, "")
-            note = f"{_verdict()} | {_fix(short)}" if short else _verdict()
-            rows.append([f"host_bounce/{_site_label(name)}", _thousands(vv["count"]), _fmt_bytes(vv["bytes"]), note])
-        if v2v_fired:
-            # Bytes = host-path volume only (one semantic); physical DMA lives on the >>
-            # line. Remedy is per reject-cause in the block, so the Note is just the verdict.
-            host_path_bytes = sum(x.get("bytes", 0) for x in rr["by_reason"].values())
-            rows.append(["runtime/v2v_slow", _thousands(rr["total_count"]), _fmt_bytes(host_path_bytes), _verdict()])
+            rows.append(
+                [
+                    f"host_bounce/{_site_label(name)}",
+                    _thousands(vv["count"]),
+                    _fmt_bytes(vv["bytes"]),
+                    _fix(_FIX_SHORT.get(name, "")),
+                ]
+            )
         disp = d["dispatch"]
         if disp["cpu_fallback"]:
             rows.append(
@@ -948,26 +736,8 @@ class RBLNExplain:
                 lines.append(f"  host_bounce/{_site_label(name)}:")
                 lines.append(f"    at {_short_path(tbo[name])}")
                 lines.append("")
-        if v2v_fired:  # (2) v2v_slow: the src-state axis + the reject (who-can-act) axis
-            lines.append("  runtime/v2v_slow:")
-            st = "  ".join(f"{n} {_thousands(x['count'])}" for n, x in rr["by_reason"].items() if x["count"])
-            if st:
-                lines.append(f"    state:  {st}")
-            rj = rr.get("reject") or {}
-            rparts = [
-                f"{lbl} {_thousands(x['count'])} -> {_REJECT_FIX.get(lbl, '')}"
-                for lbl, x in rj.get("user_actionable", {}).items()
-            ]
-            if rj.get("internal_fallback", {}).get("count"):
-                rparts.append(
-                    f"internal_fallback {_thousands(rj['internal_fallback']['count'])} "
-                    "(runtime-internal, not user-fixable)"
-                )
-            if rparts:
-                lines.append(f"    reject: {' | '.join(rparts)}")
-            lines.append("")
         fbo = d.get("cpu_fallback_by_op") or {}
-        if fbo:  # (3) cpu_fallback: per-op count + call-site (aligned), why, candidates
+        if fbo:  # (2) cpu_fallback: per-op count + call-site (aligned), why, candidates
             fb_ns = disp.get("cpu_fallback_ns", 0)
             cost = f"  (sum {_fmt_time(fb_ns)} wall)" if fb_ns else ""
             lines.append(f"  dispatch/cpu_fallback:{cost}")
@@ -983,47 +753,27 @@ class RBLNExplain:
                 lines.append(f"    candidates (no fast-path handler): {shown}")
             lines.append("")
         rbo = d.get("recompile_by_op") or {}
-        if rbo:  # (4) recompile
+        if rbo:  # (3) recompile
             lines.append("  dispatch/recompile:")
             lines += _op_block(rbo, tbo)
             lines.append("")
 
-        # -- the single most important line, promoted out of the pile + scoped -
-        if bounce_sites or v2v_fired:
-            if witness:
-                scope = " (see runtime/v2v_slow)" if v2v_fired else ""
-                lines.append(
-                    f"  >> physical d2h (real transfer): {phys['count']} copies, {_fmt_bytes(phys['bytes'])}"
-                    f" -- real device crossing{scope}"
-                )
-            else:
-                lines.append("  >> physical d2h (real transfer): 0 -- everything above served on host, no crossing")
-            lines.append("")
-
-        if (fbo or rbo) and not tbo:
+        if (bounce_sites or fbo or rbo) and not tbo:
             lines.append("  where? -> rerun with explain(with_stack=True)")
-        if not rr["available"]:
-            lines.append(_RT_UNAVAIL)
         lines.append("  (detail: p.help(signal) | raw: p.dump())")
         return "\n".join(lines)
 
     def help(self, signal: Optional[str] = None) -> str:
         """Full remedy prose. No arg: the fix for every fired signal. With a
-        signal (bare cause or report label like 'dispatch/cpu_fallback'): just
-        that one."""
+        signal (bare cause or report label like 'dispatch/cpu_fallback' or
+        'host_bounce/d2d_copy'): just that one."""
         fixes = self.dump().get("notes", [])
         if signal is None:
             return "\n".join(f"{f['signal']}: {f['fix']}" for f in fixes) or "no hidden overhead"
-        key = signal.rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+        key = signal.rsplit("/", 1)[-1]
+        key = {label: name for name, label in _SITE_LABEL.items()}.get(key, key)
         if key in _REMEDY:
             return _REMEDY[key]
-        rfix = dict(_RUNTIME_REASONS)
-        if key in rfix:
-            return rfix[key]
-        if key in _REJECT_FIX:
-            return _REJECT_FIX[key]
-        if key == "internal_fallback":
-            return "runtime-internal fallback; not user-fixable (a notification, not a to-do)"
         return next((f["fix"] for f in fixes if signal in f["signal"]), f"no remedy for '{signal}'")
 
     def diff(self, other: RBLNExplain) -> RBLNDiff:
@@ -1057,45 +807,20 @@ class RBLNDiff:
 
     def _rows(self) -> list[tuple[str, int, int]]:
         da, db = self._a, self._b
-        rows = [("host_bounce", da["hidden_host_bounce"]["total_count"], db["hidden_host_bounce"]["total_count"])]
-        ra, rb = da["runtime_residency"], db["runtime_residency"]
-        if ra.get("available") and rb.get("available"):
-            rows.append(("runtime/v2v_slow", ra["total_count"], rb["total_count"]))
-            # The authoritative real device->host transfer (the v2v_slow magnitude). Tracked
-            # so a recurring internal-fallback cost shows up in the diff, not just its count.
-            da_d2h = (ra.get("real_host_sync_d2h") or {}).get("count", 0)
-            db_d2h = (rb.get("real_host_sync_d2h") or {}).get("count", 0)
-            if da_d2h or db_d2h:
-                rows.append(("runtime/physical_d2h", da_d2h, db_d2h))
-            ha = (ra.get("real_host_sync_h2d") or {}).get("count", 0)
-            hbv = (rb.get("real_host_sync_h2d") or {}).get("count", 0)
-            if ha or hbv:
-                rows.append(("runtime/h2d_push", ha, hbv))
-        rows.append(("cpu_fallback", da["dispatch"]["cpu_fallback"], db["dispatch"]["cpu_fallback"]))
-        rows.append(("recompile", da["dispatch"]["recompile_miss"], db["dispatch"]["recompile_miss"]))
-        return rows
+        return [
+            ("host_bounce", da["hidden_host_bounce"]["total_count"], db["hidden_host_bounce"]["total_count"]),
+            ("cpu_fallback", da["dispatch"]["cpu_fallback"], db["dispatch"]["cpu_fallback"]),
+            ("recompile", da["dispatch"]["recompile_miss"], db["dispatch"]["recompile_miss"]),
+        ]
 
     @staticmethod
     def _sig_bytes(dump: dict[str, Any], name: str) -> Optional[int]:
         """Host-traffic byte magnitude for a signal in one region's dump, or None if the
         signal carries no byte measure (cpu_fallback/recompile are counts, not transfers).
-        Mirrors the single-region row magnitude: a real device->host transfer if one
-        happened, else the host-served copy volume -- so the diff can rank by COST, not
-        just recurrence (a 12 KB host-served loop and a 12 GB one read identically by count)."""
+        Lets the diff rank by COST, not just recurrence (a 12 KB bounce loop and a 12 GB
+        one read identically by count)."""
         if name == "host_bounce":
             return dump["hidden_host_bounce"]["total_bytes"]
-        rr = dump.get("runtime_residency") or {}
-        if not rr.get("available"):
-            return None
-        if name == "runtime/v2v_slow":
-            phys = rr.get("real_host_sync_d2h") or {}
-            if phys.get("count"):
-                return phys["bytes"]
-            return sum(v.get("bytes", 0) for v in rr["by_reason"].values())
-        if name == "runtime/physical_d2h":
-            return (rr.get("real_host_sync_d2h") or {}).get("bytes", 0)
-        if name == "runtime/h2d_push":
-            return (rr.get("real_host_sync_h2d") or {}).get("bytes", 0)
         return None
 
     def dump(self) -> dict[str, Any]:
@@ -1144,7 +869,7 @@ class RBLNDiff:
             mark = ">> persists" if bv > 0 else ("gone in B" if av > 0 else "")
             # Byte magnitude per region for byte-carrying signals ("--" for count-only
             # signals like cpu_fallback) -> a persisting cost shows its SIZE, so you can
-            # tell a recurring 12 KB host-served loop from a 12 GB one at a glance.
+            # tell a recurring 12 KB bounce loop from a 12 GB one at a glance.
             ab, bb = vv.get("a_bytes"), vv.get("b_bytes")
             rows.append([name, str(av), str(bv), _fmt_bytes(ab) if ab else "--", _fmt_bytes(bb) if bb else "--", mark])
         lines += _table(["Signal", "A", "B", "A bytes", "B bytes", ""], rows, ["l", "r", "r", "r", "r", "l"])

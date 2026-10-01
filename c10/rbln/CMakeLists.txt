@@ -3,6 +3,7 @@ set(sources
   impl/RBLNGuardImpl.cpp
   DeviceMappingManager.cpp
   RBLNAllocator.cpp
+  RBLNCachingAllocator.cpp
   RBLNFallbackConfig.cpp
   RBLNFunctions.cpp
   RBLNHostBatch.cpp
@@ -11,11 +12,13 @@ set(sources
   RBLNLogging.cpp
   RBLNPinnedAllocator.cpp
   RBLNProfiler.cpp
+  RBLNRuntime.cpp
   RBLNV2VBatch.cpp
 )
 set(headers
   impl/RBLNGuardImpl.h
   DeviceMappingManager.h
+  RBLNCachingAllocator.h
   RBLNFallbackConfig.h
   RBLNFunctions.h
   RBLNHostBatch.h
@@ -25,6 +28,7 @@ set(headers
   RBLNMacros.h
   RBLNPinnedAllocator.h
   RBLNProfiler.h
+  RBLNRuntime.h
   RBLNSupportedDtypes.h
   RBLNV2VBatch.h
   detail/RBLNCopyBatchImpl.h

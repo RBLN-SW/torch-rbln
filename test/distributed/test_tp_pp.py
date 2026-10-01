@@ -1405,7 +1405,6 @@ class TestTPPPRBLNBase(TestCase):
         env = mock.patch.dict(
             os.environ,
             {
-                "RCCL_FORCE_EXPORT_MEM": "1",
                 "RBLN_ROOT_IP": "127.0.0.1",
                 "RBLN_LOCAL_IP": "127.0.0.1",
                 "MASTER_ADDR": "127.0.0.1",

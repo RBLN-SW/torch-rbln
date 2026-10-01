@@ -20,22 +20,22 @@ def _arch_from_npu_name(name: str) -> str:
 
 @functools.lru_cache(maxsize=1)
 def get_device_arch() -> str:
-    """Identify the current NPU family (``"atom"``/``"rebel"``/``"unknown"``) via
-    ``get_npu_name`` from ``rebel-compiler`` (cached).
+    """Identify the NPU family (``"atom"``/``"rebel"``/``"unknown"``) of RBLN
+    device 0 (cached).
 
-    ``"unknown"`` is reserved for a host with no NPU: the runtime's query API
-    answers ``None`` for an index no device claims and never raises for it, and
-    ``None`` maps to ``"unknown"`` without any catch here.
+    ``"unknown"`` is reserved for a host with no NPU to ask: no device, or the
+    host-backed ``RBLN_DUMMY_DEVICE``.
 
-    Anything else -- the import failing, the lookup raising -- propagates.
-    Every caller of this is an architecture gate (``xfail_atom``,
-    ``xfail_rebel``, the per-lineup branches in the model tests), and a
-    swallowed failure would turn all of them off at once while the suite
-    goes on passing.
+    Anything else -- the lookup raising -- propagates. Every caller of this is
+    an architecture gate (``xfail_atom``, ``xfail_rebel``, the per-lineup
+    branches in the model tests), and a swallowed failure would turn all of
+    them off at once while the suite goes on passing.
     """
-    from rebel.device_info import get_npu_name
+    import torch_rbln._C as _C
 
-    return _arch_from_npu_name(get_npu_name(0) or "")
+    if _C.is_dummy_device() or _C.device_count() == 0:
+        return "unknown"
+    return _arch_from_npu_name(_C.get_device_properties(0).name)
 
 
 def is_atom_device() -> bool:

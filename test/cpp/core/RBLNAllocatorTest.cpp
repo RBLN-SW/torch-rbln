@@ -1,39 +1,12 @@
 #include <c10/core/Allocator.h>
 #include <c10/core/CachingDeviceAllocator.h>
-#include <c10/rbln/DeviceMappingManager.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNHooksInterface.h>
 #include <gtest/gtest.h>
 
-#include <cstdlib>
+#include <cstdint>
+#include <map>
 #include <string>
-
-namespace {
-// Forces TORCH_RBLN_EAGER_MALLOC for its scope and restores the prior value on exit (all
-// paths, including GTEST_SKIP), so toggling eager malloc can't leak into later tests.
-class ScopedEagerMalloc {
- public:
-  explicit ScopedEagerMalloc(const char* value) {
-    const char* saved = std::getenv("TORCH_RBLN_EAGER_MALLOC");
-    had_ = saved != nullptr;
-    if (had_) {
-      saved_ = saved;
-    }
-    setenv("TORCH_RBLN_EAGER_MALLOC", value, /*overwrite=*/1);
-  }
-  ~ScopedEagerMalloc() {
-    if (had_) {
-      setenv("TORCH_RBLN_EAGER_MALLOC", saved_.c_str(), /*overwrite=*/1);
-    } else {
-      unsetenv("TORCH_RBLN_EAGER_MALLOC");
-    }
-  }
-
- private:
-  bool had_;
-  std::string saved_;
-};
-} // namespace
 
 class RBLNAllocatorTest : public ::testing::Test {
  protected:
@@ -47,6 +20,10 @@ class RBLNAllocatorTest : public ::testing::Test {
   void SetUp() override {
     c10::rbln::set_device_index(initial_device_index_);
     ASSERT_EQ(c10::rbln::get_device_index(), initial_device_index_);
+    // The allocator reports stats only for a device this process has allocated on.
+    {
+      const auto primer = c10::GetAllocator(c10::kPrivateUse1)->allocate(1);
+    }
   }
 
   // Returns the registered allocator cast to DeviceAllocator.
@@ -59,10 +36,23 @@ class RBLNAllocatorTest : public ::testing::Test {
     return device_allocator;
   }
 
+  // The caching allocator's torch.cuda.memory_stats()-style map of the initial device.
+  std::map<std::string, uint64_t> Stats() const {
+    return c10::rbln::memory_stats(c10::Device(c10::kPrivateUse1, initial_device_index_));
+  }
+
+  static uint64_t Stat(const std::map<std::string, uint64_t>& stats, const std::string& key) {
+    const auto it = stats.find(key);
+    EXPECT_NE(it, stats.end()) << "no stat " << key;
+    return it == stats.end() ? 0 : it->second;
+  }
+
   const c10::DeviceIndex initial_device_index_ = 0;
   const size_t size_0b_ = 0;
   const size_t size_1gib_ = 1ULL << 30;
-  const size_t size_16gib_ = 1ULL << 34; // The memory capacity of ATOM is 15.7 GiB.
+  // Large blocks are whole multiples of 2 MiB, so this request takes a 4 MiB block.
+  static constexpr size_t kLargeRequest = size_t{3} << 20;
+  static constexpr size_t kLargeBlock = size_t{4} << 20;
 };
 
 TEST_F(RBLNAllocatorTest, Allocate) {
@@ -75,19 +65,6 @@ TEST_F(RBLNAllocatorTest, Allocate) {
     const auto current_device_index = c10::rbln::get_device_index();
     EXPECT_EQ(current_device_index, device_index);
 
-    {
-      const auto data = allocator->allocate(15 * size_1gib_);
-      EXPECT_TRUE(data.get() != nullptr);
-      const auto data_device = data.device();
-      EXPECT_TRUE(data_device.is_privateuseone());
-      EXPECT_EQ(data_device.index(), current_device_index);
-
-      // If memory is allocated lazily, the following assertion may fail because CPU memory is allocated instead of NPU
-      // memory.
-      if (c10::rbln::is_eager_malloc()) {
-        EXPECT_THROW(allocator->allocate(size_1gib_), c10::Error);
-      }
-    }
     const auto data = allocator->allocate(size_1gib_);
     EXPECT_TRUE(data.get() != nullptr);
     const auto data_device = data.device();
@@ -103,13 +80,126 @@ TEST_F(RBLNAllocatorTest, AllocateZeroBytes) {
 }
 
 TEST_F(RBLNAllocatorTest, AllocateInvalidSize) {
-  auto* allocator = c10::GetAllocator(c10::kPrivateUse1);
+  auto* allocator = GetDeviceAllocator();
+  const auto before = Stats();
 
-  // If memory is allocated lazily, the following assertion may fail because CPU memory is allocated instead of NPU
-  // memory.
-  if (c10::rbln::is_eager_malloc()) {
-    EXPECT_THROW(allocator->allocate(size_16gib_), c10::Error);
+  // Every allocation is device memory, so one larger than the device fails at once: once
+  // with the cache as it was, and once more after emptying it.
+  const auto total = allocator->getMemoryInfo(initial_device_index_).second;
+  EXPECT_THROW(allocator->allocate(total + size_1gib_), c10::Error);
+
+  const auto after = Stats();
+  EXPECT_EQ(Stat(after, "num_ooms") - Stat(before, "num_ooms"), 1u);
+  EXPECT_EQ(Stat(after, "num_alloc_retries") - Stat(before, "num_alloc_retries"), 1u);
+}
+
+// A freed block goes back to the cache, and the next request of its size on the same
+// stream gets it again without asking the device for more memory.
+TEST_F(RBLNAllocatorTest, FreedBlockIsReusedOnItsStream) {
+  auto* allocator = GetDeviceAllocator();
+  allocator->emptyCache();
+
+  void* first = nullptr;
+  {
+    const auto data = allocator->allocate(kLargeRequest);
+    ASSERT_NE(data.get(), nullptr);
+    first = data.get();
   }
+  const auto before = Stats();
+  const auto again = allocator->allocate(kLargeRequest);
+  EXPECT_EQ(again.get(), first);
+  EXPECT_EQ(Stat(Stats(), "num_device_alloc"), Stat(before, "num_device_alloc"));
+}
+
+// A block freed on one stream is not handed to another stream's request, which could
+// otherwise overwrite it before the first stream is done with it.
+TEST_F(RBLNAllocatorTest, FreedBlockIsNotReusedOnAnotherStream) {
+  auto* allocator = GetDeviceAllocator();
+  allocator->emptyCache();
+
+  void* first = nullptr;
+  {
+    const auto data = allocator->allocate(kLargeRequest);
+    ASSERT_NE(data.get(), nullptr);
+    first = data.get();
+  }
+  const auto default_stream = c10::rbln::get_current_stream(initial_device_index_);
+  c10::rbln::set_current_stream(c10::rbln::get_stream_from_pool(initial_device_index_));
+  {
+    const auto other = allocator->allocate(kLargeRequest);
+    EXPECT_NE(other.get(), first);
+  }
+  c10::rbln::set_current_stream(default_stream);
+}
+
+// A block another stream used is reused once that stream has reached the point of the free.
+TEST_F(RBLNAllocatorTest, RecordedBlockIsReusedOnceTheStreamReachesTheFree) {
+  auto* allocator = GetDeviceAllocator();
+  allocator->emptyCache();
+  const auto pool_stream = c10::rbln::get_stream_from_pool(initial_device_index_);
+
+  void* first = nullptr;
+  {
+    const auto data = allocator->allocate(kLargeRequest);
+    ASSERT_NE(data.get(), nullptr);
+    first = data.get();
+    allocator->recordStream(data, pool_stream);
+  }
+  c10::rbln::synchronize_stream(pool_stream);
+  const auto again = allocator->allocate(kLargeRequest);
+  EXPECT_EQ(again.get(), first);
+}
+
+TEST_F(RBLNAllocatorTest, StatsCountBlocksAndSegments) {
+  auto* allocator = GetDeviceAllocator();
+  allocator->emptyCache();
+  const auto before = Stats();
+  const auto delta = [&before](const std::map<std::string, uint64_t>& now, const std::string& key) {
+    return Stat(now, key) - Stat(before, key);
+  };
+
+  {
+    const auto data = allocator->allocate(kLargeRequest);
+    ASSERT_NE(data.get(), nullptr);
+    const auto during = Stats();
+    EXPECT_EQ(delta(during, "allocated_bytes.all.current"), kLargeBlock);
+    EXPECT_EQ(delta(during, "allocated_bytes.large_pool.current"), kLargeBlock);
+    EXPECT_EQ(delta(during, "requested_bytes.all.current"), kLargeRequest);
+    EXPECT_EQ(delta(during, "reserved_bytes.all.current"), kLargeBlock);
+    EXPECT_EQ(delta(during, "allocation.all.current"), 1u);
+    EXPECT_EQ(delta(during, "segment.all.current"), 1u);
+    EXPECT_GE(Stat(during, "allocated_bytes.all.peak"), Stat(during, "allocated_bytes.all.current"));
+  }
+
+  // Freed, the block stays reserved in the cache.
+  const auto after_free = Stats();
+  EXPECT_EQ(delta(after_free, "allocated_bytes.all.current"), 0u);
+  EXPECT_EQ(delta(after_free, "reserved_bytes.all.current"), kLargeBlock);
+  EXPECT_EQ(delta(after_free, "allocation.all.freed"), 1u);
+}
+
+// empty_cache hands back every segment with no live block in it, and only those.
+TEST_F(RBLNAllocatorTest, EmptyCacheReleasesWholeFreeSegments) {
+  auto* allocator = GetDeviceAllocator();
+  allocator->emptyCache();
+  const auto base = Stat(Stats(), "reserved_bytes.all.current");
+
+  {
+    const auto freed = allocator->allocate(kLargeRequest);
+  }
+  EXPECT_EQ(Stat(Stats(), "reserved_bytes.all.current"), base + kLargeBlock);
+  allocator->emptyCache();
+  EXPECT_EQ(Stat(Stats(), "reserved_bytes.all.current"), base);
+
+  // Two small blocks share a segment; freeing one leaves the segment in use.
+  const auto live = allocator->allocate(1024);
+  {
+    const auto freed = allocator->allocate(1024);
+  }
+  const auto reserved = Stat(Stats(), "reserved_bytes.all.current");
+  EXPECT_GT(reserved, base);
+  allocator->emptyCache();
+  EXPECT_EQ(Stat(Stats(), "reserved_bytes.all.current"), reserved);
 }
 
 // Verify the registered allocator is a DeviceAllocator (the prerequisite for all
@@ -191,20 +281,14 @@ TEST_F(RBLNAllocatorTest, EmptyCache) {
 // Regression guard for the device-less empty_cache() "span all devices" contract
 // (CUDA/XPU parity): emptyCache() must release *every* initialized device, not just the
 // current one. Device 0 is left non-current with a cached (freed-but-reserved) block, so a
-// current-device-only regression leaves that block intact — asserted released here.
-// Device 0's reserved bytes are observable (the runtime exposes per-node stats for node 0
-// only); the selection seam is additionally checked via initialized_device_indices().
+// current-device-only regression leaves that block intact — asserted released here. The
+// selection seam is additionally checked via initialized_device_indices().
 TEST_F(RBLNAllocatorTest, EmptyCacheSpansNonCurrentInitializedDevice) {
   if (c10::rbln::get_device_count() < 2) {
     GTEST_SKIP() << "needs >= 2 devices to exercise a non-current device";
   }
   constexpr size_t kAggregate = static_cast<size_t>(c10::CachingAllocator::StatType::AGGREGATE);
   auto* allocator = GetDeviceAllocator();
-
-  // Force eager malloc so the allocation below reserves device memory (a lazy malloc would
-  // stage on the host and leave reserved at 0, silently voiding the assertion).
-  const ScopedEagerMalloc eager("1");
-  ASSERT_TRUE(c10::rbln::is_eager_malloc());
 
   // Build a cached block on device 0, then measure its reserved bytes while still current.
   c10::rbln::set_device_index(0);
@@ -213,7 +297,7 @@ TEST_F(RBLNAllocatorTest, EmptyCacheSpansNonCurrentInitializedDevice) {
     EXPECT_NE(d0.get(), nullptr);
   }
   const auto reserved_before = allocator->getDeviceStats(0).reserved_bytes[kAggregate].current;
-  ASSERT_GT(reserved_before, 0) << "eager allocation reserved no device memory on device 0";
+  ASSERT_GT(reserved_before, 0) << "the allocation reserved no device memory on device 0";
 
   // Make device 1 current so device 0 is the non-current initialized device.
   c10::rbln::set_device_index(1);
@@ -241,8 +325,8 @@ TEST_F(RBLNAllocatorTest, EmptyCacheSpansNonCurrentInitializedDevice) {
   EXPECT_TRUE(contains(1)) << "initialized_device_indices() dropped non-current device 1";
 }
 
-// recordStream must be a safe no-op — RBLN has no stream-based async execution.
-TEST_F(RBLNAllocatorTest, RecordStreamIsNoOp) {
+// recordStream of an empty DataPtr has no block to record and must be a safe no-op.
+TEST_F(RBLNAllocatorTest, RecordStreamOfNullIsNoOp) {
   auto* device_allocator = GetDeviceAllocator();
   const auto stream = c10::Stream(c10::Stream::DEFAULT, c10::Device(c10::kPrivateUse1, initial_device_index_));
   EXPECT_NO_THROW(device_allocator->recordStream(c10::DataPtr{}, stream));
@@ -292,35 +376,25 @@ TEST_F(RBLNAllocatorTest, GetDeviceStatsInvalidIndex) {
 
 TEST_F(RBLNAllocatorTest, GetMemoryInfo) {
   auto* device_allocator = GetDeviceAllocator();
-  const auto physical_ids = c10::rbln::DeviceMappingManager::getInstance().getPhysicalDeviceIds(initial_device_index_);
-  ASSERT_FALSE(physical_ids.empty());
+  const auto [free_bytes, total_bytes] = device_allocator->getMemoryInfo(initial_device_index_);
+  EXPECT_GT(total_bytes, 0u);
+  EXPECT_LE(free_bytes, total_bytes);
 
-  // Ask the runtime directly for the first NPU of the device, to know which contract applies.
-  RBLNDeviceMemoryInfo npu{};
-  const auto rc = rbln_get_device_memory_info(physical_ids.front(), &npu);
-  if (rc == RBLNRetCode_UNSUPPORTED) {
-    EXPECT_THROW(device_allocator->getMemoryInfo(initial_device_index_), c10::Error);
-    GTEST_SKIP() << "installed UMD/KMD has no device memory-info query";
-  }
-  ASSERT_EQ(rc, RBLNRetCode_SUCCESS);
-
-  const auto [free, total] = device_allocator->getMemoryInfo(initial_device_index_);
-  EXPECT_GT(total, 0u);
-  EXPECT_LE(free, total);
-  // The logical device sums its NPUs, so it holds at least the first one's pool.
-  EXPECT_GE(total, npu.total);
-  if (physical_ids.size() == 1) {
-    EXPECT_EQ(total, npu.total);
-  }
-
+  // The device-wide figure is the sum of its chiplets, NPU by NPU.
   const auto per_chiplet = c10::rbln::mem_get_info_per_chiplet(c10::Device(c10::kPrivateUse1, initial_device_index_));
-  EXPECT_EQ(per_chiplet.at("npu.0.total"), npu.total);
-  ASSERT_GT(npu.chiplet_cnt, 0u);
+  uint64_t npu_total = 0;
   uint64_t chiplet_total = 0;
-  for (uint32_t c = 0; c < npu.chiplet_cnt; ++c) {
-    chiplet_total += per_chiplet.at("npu.0.chiplet." + std::to_string(c) + ".total");
+  for (const auto& [key, value] : per_chiplet) {
+    if (key.find(".chiplet.") != std::string::npos) {
+      if (key.size() > 6 && key.compare(key.size() - 6, 6, ".total") == 0) {
+        chiplet_total += value;
+      }
+    } else if (key.size() > 6 && key.compare(key.size() - 6, 6, ".total") == 0) {
+      npu_total += value;
+    }
   }
-  EXPECT_EQ(chiplet_total, npu.total);
+  EXPECT_EQ(npu_total, total_bytes);
+  EXPECT_EQ(chiplet_total, total_bytes);
 }
 
 TEST_F(RBLNAllocatorTest, GetMemoryInfoInvalidIndex) {

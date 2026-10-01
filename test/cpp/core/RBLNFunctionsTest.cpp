@@ -1,10 +1,10 @@
 #include <c10/core/DeviceGuard.h>
+#include <c10/rbln/RBLNCachingAllocator.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
-#include <cstdlib>
-#include <cstring>
 #include <map>
 #include <string>
 #include <vector>
@@ -26,7 +26,6 @@ class RBLNFunctionsTest : public ::testing::Test {
   const c10::DeviceIndex initial_device_index_ = 0;
   const size_t size_0b_ = 0;
   const size_t size_1gib_ = 1ULL << 30;
-  const size_t size_16gib_ = 1ULL << 34; // The memory capacity of ATOM is 15.7 GiB.
 };
 
 TEST_F(RBLNFunctionsTest, GetDeviceCount) {
@@ -97,52 +96,17 @@ TEST_F(RBLNFunctionsTest, ExchangeInvalidDeviceIndex) {
   EXPECT_EQ(c10::rbln::get_device_index(), original_device_index);
 }
 
-TEST_F(RBLNFunctionsTest, IsEagerMalloc) {
-  // is_eager_malloc() reads the env on every call, so toggling it is observed each time.
-  // A process-lifetime cache would latch the first value (the xdist cross-test leak this
-  // guards against), so assert set -> unset -> set flips the result live.
-  const char* saved = std::getenv("TORCH_RBLN_EAGER_MALLOC");
-  const bool had = saved != nullptr;
-  const std::string saved_str = had ? saved : "";
-
-  setenv("TORCH_RBLN_EAGER_MALLOC", "1", /*overwrite=*/1);
-  EXPECT_TRUE(c10::rbln::is_eager_malloc());
-  unsetenv("TORCH_RBLN_EAGER_MALLOC");
-  EXPECT_FALSE(c10::rbln::is_eager_malloc());
-  setenv("TORCH_RBLN_EAGER_MALLOC", "1", /*overwrite=*/1);
-  EXPECT_TRUE(c10::rbln::is_eager_malloc());
-  setenv("TORCH_RBLN_EAGER_MALLOC", "0", /*overwrite=*/1); // only exactly "1" is eager
-  EXPECT_FALSE(c10::rbln::is_eager_malloc());
-
-  if (had) {
-    setenv("TORCH_RBLN_EAGER_MALLOC", saved_str.c_str(), /*overwrite=*/1);
-  } else {
-    unsetenv("TORCH_RBLN_EAGER_MALLOC");
-  }
-}
-
 TEST_F(RBLNFunctionsTest, MallocAndFree) {
   const auto device_count = c10::rbln::get_device_count();
   EXPECT_GE(device_count, 1);
   for (c10::DeviceIndex device_index = 0; device_index < device_count; ++device_index) {
-    const auto data_15gib = c10::rbln::malloc(device_index, 15 * size_1gib_);
-    EXPECT_TRUE(data_15gib != nullptr);
-
-    // If memory is allocated lazily, the following assertion may fail because CPU memory is allocated instead of NPU
-    // memory.
-    if (c10::rbln::is_eager_malloc()) {
-      EXPECT_THROW(c10::rbln::malloc(device_index, size_1gib_), c10::Error);
-    }
-
-    c10::rbln::free(data_15gib);
+    const auto data = c10::rbln::malloc(device_index, size_1gib_);
+    EXPECT_TRUE(data != nullptr);
+    c10::rbln::free(data);
 
     // Double free
     // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
-    EXPECT_THROW(c10::rbln::free(data_15gib), c10::Error);
-
-    const auto data_1gib = c10::rbln::malloc(device_index, size_1gib_);
-    EXPECT_TRUE(data_1gib != nullptr);
-    c10::rbln::free(data_1gib);
+    EXPECT_THROW(c10::rbln::free(data), c10::Error);
   }
 }
 
@@ -152,11 +116,9 @@ TEST_F(RBLNFunctionsTest, MallocInvalidSize) {
   for (c10::DeviceIndex device_index = 0; device_index < device_count; ++device_index) {
     EXPECT_THROW(c10::rbln::malloc(device_index, size_0b_), c10::Error);
 
-    // If memory is allocated lazily, the following assertion may fail because CPU memory is allocated instead of NPU
-    // memory.
-    if (c10::rbln::is_eager_malloc()) {
-      EXPECT_THROW(c10::rbln::malloc(device_index, size_16gib_), c10::Error);
-    }
+    // Every allocation is device memory, so one larger than the device throws at once.
+    const auto total_bytes = c10::rbln::mem_get_info(c10::Device(c10::kPrivateUse1, device_index)).second;
+    EXPECT_THROW(c10::rbln::malloc(device_index, total_bytes + size_1gib_), c10::Error);
   }
 }
 
@@ -285,39 +247,24 @@ TEST_F(RBLNFunctionsTest, MemcpyV2VMultiRejectsInvalidEntries) {
   c10::rbln::free(dst_rbln);
 }
 
-TEST_F(RBLNFunctionsTest, GetUninitializedMemoryInfo) {
+TEST_F(RBLNFunctionsTest, GetTorchDeviceId) {
   const auto device_count = c10::rbln::get_device_count();
   EXPECT_GE(device_count, 1);
   for (c10::DeviceIndex device_index = 0; device_index < device_count; ++device_index) {
-    const auto data = c10::rbln::malloc(device_index, size_1gib_);
+    auto* data = static_cast<char*>(c10::rbln::malloc(device_index, size_1gib_));
     EXPECT_TRUE(data != nullptr);
 
-    const auto memory_info = c10::rbln::get_memory_info(data);
-    EXPECT_EQ(memory_info.torch_device_id, static_cast<uint32_t>(device_index));
-    EXPECT_EQ(memory_info.user_dtype, ::rbln::DataType::Undefined);
-    EXPECT_EQ(memory_info.user_shape, std::vector<int64_t>{});
-    EXPECT_EQ(memory_info.physical_shape, std::vector<int64_t>{});
+    EXPECT_EQ(c10::rbln::get_torch_device_id(data), device_index);
+    // An interior pointer, as a view's data_ptr() is, resolves to the same device.
+    EXPECT_EQ(c10::rbln::get_torch_device_id(data + 4096), device_index);
 
     c10::rbln::free(data);
   }
 }
 
-TEST_F(RBLNFunctionsTest, GetTorchDeviceId) {
-  const auto device_count = c10::rbln::get_device_count();
-  EXPECT_GE(device_count, 1);
-  for (c10::DeviceIndex device_index = 0; device_index < device_count; ++device_index) {
-    const auto data = c10::rbln::malloc(device_index, size_1gib_);
-    EXPECT_TRUE(data != nullptr);
-
-    // The lightweight helper must report the owning device...
-    EXPECT_EQ(c10::rbln::get_torch_device_id(data), device_index);
-    // ...and agree with the full get_memory_info() round-trip it replaces.
-    EXPECT_EQ(
-        c10::rbln::get_torch_device_id(data),
-        static_cast<c10::DeviceIndex>(c10::rbln::get_memory_info(data).torch_device_id));
-
-    c10::rbln::free(data);
-  }
+TEST_F(RBLNFunctionsTest, GetTorchDeviceIdRejectsHostPointer) {
+  int host = 0;
+  EXPECT_THROW(c10::rbln::get_torch_device_id(&host), c10::Error);
 }
 
 TEST_F(RBLNFunctionsTest, GetTorchDeviceIdNullPtr) {
@@ -449,212 +396,88 @@ TEST_F(RBLNFunctionsTest, AsyncMemcpyV2VUnaligned) {
 }
 
 // ---------------------------------------------------------------------------
-// borrow_host_ptr / acquire_host_ptr_for_overwrite / return_borrowed.
-// Covers the round-trip happy path, host-write-back semantics, the
-// overwrite-acquire variant (no D2H sync), and the input-validation contracts
-// (nullptr / zero size / sentinel borrow_id).
+// fill_zeros: a device-side fill of a byte range, ordered on the current stream.
 // ---------------------------------------------------------------------------
 
-TEST_F(RBLNFunctionsTest, BorrowHostPtrRoundTrip) {
-  // Stage host-side bytes into rbln memory, then read them back via borrow.
-  const size_t nbytes = 1024;
-  std::vector<int8_t> src_cpu(nbytes, 0x5a);
+TEST_F(RBLNFunctionsTest, FillZerosClearsTheWholeRange) {
+  const size_t nbytes = 4096;
+  std::vector<int8_t> ones(nbytes, 1);
   auto rbln_data = c10::rbln::malloc(/*device_index=*/0, nbytes);
+  ASSERT_NE(rbln_data, nullptr);
+  c10::rbln::memcpy_h2v(rbln_data, ones.data(), nbytes);
+
+  c10::rbln::fill_zeros(rbln_data, nbytes);
+
+  std::vector<int8_t> dst_cpu(nbytes, 1);
+  c10::rbln::memcpy_v2h(dst_cpu.data(), rbln_data, nbytes);
+  EXPECT_EQ(dst_cpu, std::vector<int8_t>(nbytes, 0));
+  c10::rbln::free(rbln_data);
+}
+
+TEST_F(RBLNFunctionsTest, FillZerosLeavesBytesOutsideTheRange) {
+  // An interior range, as zero_ on a view passes: only [offset, offset + length) changes.
+  const size_t nbytes = 1024;
+  const size_t offset = 100;
+  const size_t length = 300;
+  std::vector<int8_t> src_cpu(nbytes);
+  for (size_t i = 0; i < nbytes; ++i) {
+    src_cpu[i] = static_cast<int8_t>(i % 127 + 1);
+  }
+  auto* rbln_data = static_cast<char*>(c10::rbln::malloc(/*device_index=*/0, nbytes));
   ASSERT_NE(rbln_data, nullptr);
   c10::rbln::memcpy_h2v(rbln_data, src_cpu.data(), nbytes);
 
-  // Borrow returns a host-readable pointer + a non-zero borrow id.
-  const auto borrowed = c10::rbln::borrow_host_ptr(rbln_data, nbytes);
-  EXPECT_NE(borrowed.host_ptr, uintptr_t{0});
-  EXPECT_NE(borrowed.borrow_id, uint64_t{0});
+  c10::rbln::fill_zeros(rbln_data + offset, length);
 
-  // Bytes match what we staged.
-  const auto* host_view = reinterpret_cast<const int8_t*>(borrowed.host_ptr);
-  for (size_t i = 0; i < nbytes; ++i) {
-    EXPECT_EQ(host_view[i], static_cast<int8_t>(0x5a)) << "mismatch at byte " << i;
-  }
-
-  c10::rbln::return_borrowed(borrowed.borrow_id, /*updated=*/false);
-  c10::rbln::free(rbln_data);
-}
-
-TEST_F(RBLNFunctionsTest, BorrowHostPtrWriteBackVisibleAfterReturn) {
-  // Borrow + mutate host buffer + return(updated=true). Subsequent v2h read
-  // must observe the host-side mutation (host view becomes the latest source
-  // of truth on return with updated=true).
-  const size_t nbytes = 64;
-  auto rbln_data = c10::rbln::malloc(/*device_index=*/0, nbytes);
-  ASSERT_NE(rbln_data, nullptr);
-
-  // Initial state: stage zeros so we have a known device-side baseline.
-  std::vector<int8_t> zeros(nbytes, 0);
-  c10::rbln::memcpy_h2v(rbln_data, zeros.data(), nbytes);
-
-  {
-    const auto borrowed = c10::rbln::borrow_host_ptr(rbln_data, nbytes);
-    auto* host_writer = reinterpret_cast<int8_t*>(borrowed.host_ptr);
-    for (size_t i = 0; i < nbytes; ++i) {
-      host_writer[i] = static_cast<int8_t>(i);
-    }
-    c10::rbln::return_borrowed(borrowed.borrow_id, /*updated=*/true);
-  }
-
+  std::vector<int8_t> expected = src_cpu;
+  std::fill(expected.begin() + offset, expected.begin() + offset + length, 0);
   std::vector<int8_t> dst_cpu(nbytes, 0);
   c10::rbln::memcpy_v2h(dst_cpu.data(), rbln_data, nbytes);
-  for (size_t i = 0; i < nbytes; ++i) {
-    EXPECT_EQ(dst_cpu[i], static_cast<int8_t>(i));
-  }
-
+  EXPECT_EQ(dst_cpu, expected);
   c10::rbln::free(rbln_data);
 }
 
-TEST_F(RBLNFunctionsTest, AcquireHostPtrForOverwriteRoundTrip) {
-  // Acquire-for-overwrite skips the device→host sync; caller must overwrite
-  // the entire region. Verify (a) the call returns a valid host pointer and
-  // (b) writing through it and returning(updated=true) makes the host bytes
-  // visible on subsequent v2h.
-  const size_t nbytes = 256;
-  auto rbln_data = c10::rbln::malloc(/*device_index=*/0, nbytes);
-  ASSERT_NE(rbln_data, nullptr);
-
-  const auto borrowed = c10::rbln::acquire_host_ptr_for_overwrite(rbln_data, nbytes);
-  EXPECT_NE(borrowed.host_ptr, uintptr_t{0});
-  EXPECT_NE(borrowed.borrow_id, uint64_t{0});
-
-  auto* host_writer = reinterpret_cast<uint8_t*>(borrowed.host_ptr);
-  std::memset(host_writer, 0xa5, nbytes);
-  c10::rbln::return_borrowed(borrowed.borrow_id, /*updated=*/true);
-
-  std::vector<uint8_t> dst_cpu(nbytes, 0);
-  c10::rbln::memcpy_v2h(dst_cpu.data(), rbln_data, nbytes);
-  for (size_t i = 0; i < nbytes; ++i) {
-    EXPECT_EQ(dst_cpu[i], 0xa5);
-  }
-
-  c10::rbln::free(rbln_data);
+TEST_F(RBLNFunctionsTest, FillZerosOfNoBytesIsNoop) {
+  EXPECT_NO_THROW(c10::rbln::fill_zeros(/*rbln_data=*/nullptr, 0));
 }
 
-TEST_F(RBLNFunctionsTest, TryAcquireHostPtrForOverwriteRoundTrip) {
-  // Non-throwing variant: on success it behaves like acquire_host_ptr_for_overwrite.
-  const size_t nbytes = 256;
-  auto rbln_data = c10::rbln::malloc(/*device_index=*/0, nbytes);
-  ASSERT_NE(rbln_data, nullptr);
-
-  auto borrowed = c10::rbln::try_acquire_host_ptr_for_overwrite(rbln_data, nbytes);
-  ASSERT_TRUE(borrowed.has_value());
-  EXPECT_NE(borrowed->host_ptr, uintptr_t{0});
-  EXPECT_NE(borrowed->borrow_id, uint64_t{0});
-
-  std::memset(reinterpret_cast<uint8_t*>(borrowed->host_ptr), 0xa5, nbytes);
-  c10::rbln::return_borrowed(borrowed->borrow_id, /*updated=*/true);
-
-  std::vector<uint8_t> dst_cpu(nbytes, 0);
-  c10::rbln::memcpy_v2h(dst_cpu.data(), rbln_data, nbytes);
-  for (size_t i = 0; i < nbytes; ++i) {
-    EXPECT_EQ(dst_cpu[i], 0xa5);
-  }
-  c10::rbln::free(rbln_data);
-}
-
-TEST_F(RBLNFunctionsTest, TryAcquireHostPtrForOverwriteInvalidArgsReturnNullopt) {
-  // The copy-fallback path in cpu_fallback_rbln relies on invalid/rejected
-  // acquires returning nullopt rather than throwing.
-  EXPECT_FALSE(c10::rbln::try_acquire_host_ptr_for_overwrite(/*rbln_data=*/nullptr, 64).has_value());
+TEST_F(RBLNFunctionsTest, FillZerosRejectsInvalidRanges) {
+  EXPECT_THROW(c10::rbln::fill_zeros(/*rbln_data=*/nullptr, 64), c10::Error);
+  int host = 0;
+  EXPECT_THROW(c10::rbln::fill_zeros(&host, sizeof(host)), c10::Error);
+  // A small block lies in a segment of kSmallSegment bytes, so a longer range runs past it.
   auto rbln_data = c10::rbln::malloc(/*device_index=*/0, 64);
   ASSERT_NE(rbln_data, nullptr);
-  EXPECT_FALSE(c10::rbln::try_acquire_host_ptr_for_overwrite(rbln_data, /*nbytes=*/0).has_value());
+  EXPECT_THROW(c10::rbln::fill_zeros(rbln_data, c10::rbln::caching::kSmallSegment + 1), c10::Error);
   c10::rbln::free(rbln_data);
 }
 
-TEST_F(RBLNFunctionsTest, BorrowRejectsNullData) {
-  EXPECT_THROW(c10::rbln::borrow_host_ptr(/*rbln_data=*/nullptr, 64), c10::Error);
-  EXPECT_THROW(c10::rbln::acquire_host_ptr_for_overwrite(/*rbln_data=*/nullptr, 64), c10::Error);
-}
+// The key layout of mem_get_info_per_chiplet(), on fixed readings rather than a live one
+// another process can move between two queries.
+TEST(RBLNFunctionsPerChipletMemoryMap, LaysOutEveryChipletOfEveryNpu) {
+  const std::vector<std::vector<c10::rbln::ChipletMemory>> npus = {
+      {{500, 400}, {500, 300}},
+      {{2000, 2000}},
+  };
 
-TEST_F(RBLNFunctionsTest, BorrowRejectsZeroSize) {
-  // Mirrors memcpy_h2v which also rejects nbytes==0. Callers that have a
-  // legitimate zero-byte case must short-circuit before reaching the wrapper.
-  auto rbln_data = c10::rbln::malloc(/*device_index=*/0, 64);
-  ASSERT_NE(rbln_data, nullptr);
-  EXPECT_THROW(c10::rbln::borrow_host_ptr(rbln_data, /*nbytes=*/0), c10::Error);
-  EXPECT_THROW(c10::rbln::acquire_host_ptr_for_overwrite(rbln_data, /*nbytes=*/0), c10::Error);
-  c10::rbln::free(rbln_data);
-}
-
-TEST_F(RBLNFunctionsTest, ReturnBorrowedZeroIdIsNoop) {
-  // borrow_id == 0 is a sentinel meaning "no live borrow". Cleanup paths in
-  // RBLNCPUFallback rely on this so they can call return_borrowed
-  // unconditionally over a vector that may contain skipped entries.
-  EXPECT_NO_THROW(c10::rbln::return_borrowed(/*borrow_id=*/0, /*updated=*/false));
-  EXPECT_NO_THROW(c10::rbln::return_borrowed(/*borrow_id=*/0, /*updated=*/true));
-}
-
-TEST_F(RBLNFunctionsTest, ReturnBorrowedDoubleReleaseThrows) {
-  // The borrow ledger is single-shot; returning the same id twice must
-  // surface as an error.
-  const size_t nbytes = 64;
-  auto rbln_data = c10::rbln::malloc(/*device_index=*/0, nbytes);
-  ASSERT_NE(rbln_data, nullptr);
-
-  const auto borrowed = c10::rbln::borrow_host_ptr(rbln_data, nbytes);
-  c10::rbln::return_borrowed(borrowed.borrow_id, /*updated=*/false);
-  EXPECT_THROW(c10::rbln::return_borrowed(borrowed.borrow_id, /*updated=*/false), c10::Error);
-
-  c10::rbln::free(rbln_data);
-}
-
-// The key/field layout of mem_get_info_per_chiplet(), on a fixed reply rather than a live
-// reading another process can move between two queries.
-TEST(RBLNFunctionsPerChipletMemoryMap, LaysOutEveryFieldOfEveryReply) {
-  RBLNDeviceMemoryInfo npu0{};
-  npu0.total = 1000;
-  npu0.used = 300;
-  npu0.free = 700;
-  npu0.huge_granularity = 64;
-  npu0.granularity = 8;
-  npu0.chiplet_cnt = 2;
-  npu0.chiplet[0] = RBLNChipletMemoryInfo{500, 100, 400, 350, 320};
-  npu0.chiplet[1] = RBLNChipletMemoryInfo{500, 200, 300, 250, 0};
-  // Slots past chiplet_cnt carry garbage the map must not pick up.
-  npu0.chiplet[2] = RBLNChipletMemoryInfo{9, 9, 9, 9, 9};
-
-  RBLNDeviceMemoryInfo npu1{};
-  npu1.total = 2000;
-  npu1.used = 0;
-  npu1.free = 2000;
-  npu1.huge_granularity = 0;
-  npu1.granularity = 16;
-  npu1.chiplet_cnt = 1;
-  npu1.chiplet[0] = RBLNChipletMemoryInfo{2000, 0, 2000, 2000, 0};
-
-  const auto out = c10::rbln::per_chiplet_memory_map({npu0, npu1});
+  const auto out = c10::rbln::per_chiplet_memory_map(npus);
 
   const std::map<std::string, uint64_t> expected = {
       {"npu.0.total", 1000},
       {"npu.0.used", 300},
       {"npu.0.free", 700},
-      {"npu.0.granularity", 8},
-      {"npu.0.huge_granularity", 64},
       {"npu.0.chiplet.0.total", 500},
       {"npu.0.chiplet.0.used", 100},
       {"npu.0.chiplet.0.free", 400},
-      {"npu.0.chiplet.0.largest_free", 350},
-      {"npu.0.chiplet.0.largest_free_huge", 320},
       {"npu.0.chiplet.1.total", 500},
       {"npu.0.chiplet.1.used", 200},
       {"npu.0.chiplet.1.free", 300},
-      {"npu.0.chiplet.1.largest_free", 250},
-      {"npu.0.chiplet.1.largest_free_huge", 0},
       {"npu.1.total", 2000},
       {"npu.1.used", 0},
       {"npu.1.free", 2000},
-      {"npu.1.granularity", 16},
-      {"npu.1.huge_granularity", 0},
       {"npu.1.chiplet.0.total", 2000},
       {"npu.1.chiplet.0.used", 0},
       {"npu.1.chiplet.0.free", 2000},
-      {"npu.1.chiplet.0.largest_free", 2000},
-      {"npu.1.chiplet.0.largest_free_huge", 0},
   };
   EXPECT_EQ(out, expected);
 }

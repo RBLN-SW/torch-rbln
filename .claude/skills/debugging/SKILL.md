@@ -21,7 +21,7 @@ Get a reproducer before changing anything, and narrow it to the smallest input t
 
 - `TORCH_RBLN_LOG_LEVEL=INFO` prints ```aten::<op>` op ran on CPU instead of RBLN`` for every fallback. `_C._dispatch_fallback_by_op()` gives the same fact as a count, but only for the fallbacks the C++ shim's precheck takes — the eager Python route logs and is not counted. `_C._warmcache_size()` covers both: it grows only when the device path compiled. Use whichever a script or a test can assert; the returned values say nothing.
 - `torch.rbln.explain()` attributes hidden overhead — dispatch, CPU fallback, host copies — and `with_stack=True` gives the call site. `docs/EXPLAIN.md` is the reference; read it before writing your own instrumentation.
-- `python -m torch_rbln.diagnose` (with `TORCH_RBLN_DIAGNOSE=1`) diagnoses library loading when the failure is `Cannot find libraries` or a missing `librbln.so`, rather than anything about your change.
+- `python -m torch_rbln.diagnose` diagnoses runtime loading when the failure is `import rbln.runtime` or an `RBLN ABI mismatch`, rather than anything about your change: it shows where `rbln` imports from, the `librbln_rt.so` it maps, and both ABI ids.
 
 Each of these makes a run exercise something other than what you think:
 
@@ -61,7 +61,7 @@ Signals for layer 3: the same graph produces different results across compiler v
 
 The switches that produce those artifacts belong to the runtime, not to this repository, and are not documented here — setting one is not always enough on its own. Ask the compiler team which switch yields the artifact you need on the pinned version rather than guessing at names.
 
-**Check what the runtime already does before you build anything.** rebel-compiler ships its headers and `librbln.so` in the wheel; read its source and the pinned version's changes rather than inferring behavior from symptoms. A gate the runtime already implements, re-implemented here, is machinery that fights a problem that no longer exists — and it is the shape that survives ten review rounds before someone reads the runtime and deletes all of it.
+**Check what the runtime already does before you build anything.** The runtime's headers and sources are in the rebel-compiler tree under `REBEL_HOME/rbln`; read them and the tree's history rather than inferring behavior from symptoms. A gate the runtime already implements, re-implemented here, is machinery that fights a problem that no longer exists — and it is the shape that survives ten review rounds before someone reads the runtime and deletes all of it.
 
 **When the cause is layer 3, do not fix it here.** Reduce it to a minimal reproducer, report it against rebel-compiler, and say so. If the failure is architecture-specific, `xfail_rebel` / `xfail_atom` (`test/utils.py`) mark it strictly so it fails again once the bug is fixed; `_REBEL_XFAILS` in `test/conftest.py` is the table that applies `xfail_rebel` by test name. A failure that is not architecture-specific does not get parked. A guard added in the backend to make a compiler bug invisible removes the only pressure to fix it and stays in this code permanently. If you think a local workaround is warranted anyway, stop and ask.
 

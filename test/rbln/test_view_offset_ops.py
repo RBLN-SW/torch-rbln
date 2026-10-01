@@ -4,11 +4,11 @@
 View-offset correctness for the in-place RBLN ops ``zero_``, ``fill_.Scalar``,
 and ``.item()``.
 
-A view's ``data_ptr()`` is an interior vaddr (storage base +
-``storage_offset() * itemsize``). ``zero_`` used the lazy ``mark_zeros`` path,
-which takes no offset/size and zeroes the whole enclosing allocation — so
-``base[2:4].zero_()`` wrongly zeroed the entire tensor. These tests pin the
-invariant: mutating a view touches only the view's elements. Each case mutates
+A view's ``data_ptr()`` is an interior address (storage base +
+``storage_offset() * itemsize``). A zero-fill that took only the base address
+would zero the whole enclosing allocation, so ``base[2:4].zero_()`` would
+wrongly zero the entire tensor. These tests pin the invariant: mutating a view
+touches only the view's elements. Each case mutates
 the same view on an RBLN tensor and a CPU reference, then compares the entire
 backing tensor.
 """
@@ -61,13 +61,13 @@ class TestZeroViewOffset(TestCase):
 
     @parametrize("dtype", [torch.float32, torch.int64, torch.bool])
     def test_full_tensor_control(self, dtype):
-        # Full-allocation zero_ keeps the lazy mark_zeros path (no regression).
+        # Full-allocation zero_ takes the device-side zero fill.
         base_rbln = torch.ones((2, 3), dtype=dtype, device="rbln")
         base_rbln.zero_()
         self.assertEqual(base_rbln.to("cpu"), torch.zeros((2, 3), dtype=dtype))
 
     def test_empty_view(self):
-        # Zero-element view — early return, no borrow, no mark_zeros.
+        # Zero-element view — early return, nothing is written.
         base_rbln = torch.ones(8, device="rbln")
         base_cpu = torch.ones(8)
         base_rbln[4:4].zero_()
@@ -94,7 +94,7 @@ class TestFillViewOffset(TestCase):
         self._check(torch.float32, (3, 4), lambda x: x[1], 9.0)
 
     def test_column_view_2d(self):
-        # Non-contiguous — CPU fallback in fill_scalar_rbln_.
+        # Non-contiguous — a run per row through the strided region fill.
         self._check(torch.float32, (3, 4), lambda x: x[:, 2], 9.0)
 
     def test_strided_view_1d(self):
@@ -103,7 +103,7 @@ class TestFillViewOffset(TestCase):
 
 @pytest.mark.test_set_ci
 class TestItemViewOffset(TestCase):
-    """``.item()`` must read the element at the view's interior vaddr."""
+    """``.item()`` must read the element at the view's interior address."""
 
     @parametrize("index", [0, 3, 7])
     def test_item_at_offset(self, index):

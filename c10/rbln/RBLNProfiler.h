@@ -17,9 +17,8 @@
 //   * command-stream submission count, structural alignment/dtype padding —
 //     measurable but NOT user-actionable, so they are NOISE for the verdict.
 //     If ever exposed they belong in a runtime-owned RAW tier, off the verdict.
-//   * device-residency (hidden d2h), idle-time, memory gauges — these are the
-//     runtime's truth and are added later from rebel-compiler, never polled
-//     from here.
+//   * idle time and memory gauges — the runtime's and the allocator's truth,
+//     read from them, never polled from here.
 // "Measurable" does not mean "worth showing": the verdict carries only what
 // changes the user's behavior; everything uncertain stays raw until real
 // workloads prove it matters.
@@ -38,8 +37,8 @@ enum class BounceSite : uint8_t {
   kCpu2RblnStaging, // copy_: cpu src staged via at::empty + cpu copy   (RBLNCopy.cpp)
   kCpu2RblnNoncontigDst, // copy_: non-contig rbln dst pulled to host + h2v   (RBLNCopy.cpp)
   kStridedV2VFallback, // strided_v2v_copy -> dst.copy_(src.cpu()) bounce   (RBLNStridedV2V.cpp)
-  kV2VBatchToPerEntry, // batched memcpy_v2v_multi rejected -> per-entry     (RBLNV2VBatch.cpp)
   kHostBatchToPerEntry, // batched h2v/v2h_multi rejected -> per-entry       (RBLNHostBatch.cpp)
+  kOpArgThroughHost, // op arg not laid out as torch holds it: host encode/decode (OpFunction.cpp)
   kNumBounceSites,
 };
 

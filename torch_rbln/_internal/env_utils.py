@@ -54,20 +54,6 @@ def is_rbln_deploy() -> bool:
     return os.getenv("TORCH_RBLN_DEPLOY") == "ON"
 
 
-def use_device_group_num_devices() -> bool:
-    """
-    Check if eager mode ops should use the device group's num_devices instead of num_devices=1.
-
-    By default, eager mode ops use num_devices=1. When this returns True, eager mode ops will
-    follow the logical device size (RBLN_NPUS_PER_DEVICE) like torch.compile operations do.
-
-    Returns:
-        bool: True if eager mode ops should use the logical device's num_devices
-              (environment variable TORCH_RBLN_USE_DEVICE_TP is "ON"), False otherwise.
-    """
-    return os.getenv("TORCH_RBLN_USE_DEVICE_TP") == "ON"
-
-
 def use_tp_failover() -> bool:
     """
     Check if tensor parallel failover is enabled.

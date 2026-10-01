@@ -76,11 +76,7 @@ class TestRotateHalfHeadDim128(TestCase):
 
     @parametrize("head_dim", [128, 256, 64])
     def test_half_neg(self, head_dim) -> None:
-        # head_dim=64 control case: halves are 32 (not multiple of 64) →
-        # align-fallback kicks in and routes through cpu_fallback_path. The
-        # 128/256 variants are the textbook trigger for the wrong-hit
-        # scenario because the second half has storage_offset>0 AND last
-        # dim is 64-aligned (so view-on-device fires).
+        # The second half starts at storage_offset > 0, which a warm hit must tell apart.
         B, S = 2, 4
         x = torch.randn(B, S, head_dim, dtype=torch.float16, device="rbln")
         first = x[..., : head_dim // 2]  # storage_offset == 0

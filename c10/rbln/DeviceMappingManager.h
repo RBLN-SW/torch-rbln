@@ -128,23 +128,28 @@ class C10_RBLN_API DeviceMappingManager {
    */
   static DeviceMappingManager& getInstance();
 
+  /**
+   * @brief The NPUs the process sees, by system number: those of this host that
+   * RBLN_DEVICES (or its alias RBLN_VISIBLE_DEVICES) names, in its order, or every NPU
+   * without it. Read from the environment now; plans nothing and claims no NPU.
+   */
+  static std::vector<uint32_t> visibleNpus();
+
   // Initialization is two stages:
   //
   //   plan   Parse RBLN_DEVICES (alias RBLN_VISIBLE_DEVICES) / RBLN_DEVICE_MAP /
   //          RBLN_NPUS_PER_DEVICE, validate, compute the logical->physical table.
   //          Claims no NPU. Run by availability and enumeration queries.
-  //   commit rbln_register_device_id() per planned logical device, which opens a context
-  //          on every mapped NPU. Deferred to the first actual device use.
+  //   commit Opens every mapped NPU, which holds a context on it. Deferred to the first
+  //          actual device use.
   //
   // torch calls is_available()/device_count() from paths that never asked for an NPU, so
   // claiming hardware there takes NPUs from co-tenants;
   // ATen/detail/AcceleratorHooksInterface.h: isAvailable() "should NOT initialize the
   // context on any device".
   //
-  // Commit is also where the runtime freezes its own RBLN_DEVICES mapping:
-  // rbln_register_device_id() reaches Context::Create, which latches it. Both layers
-  // therefore freeze together, so a launcher may still assign RBLN_DEVICES after import --
-  // fork()ed workers included -- until the first device use.
+  // Commit also freezes the NPUs RBLN_DEVICES lets the process see, so a launcher may still
+  // assign RBLN_DEVICES after import -- fork()ed workers included -- until the first device use.
 
   /**
    * @brief Plan the device mapping from the environment (no NPU is claimed).
@@ -166,6 +171,13 @@ class C10_RBLN_API DeviceMappingManager {
    * commits to using a device. Raises if the plan is invalid or a registration fails.
    */
   void commit();
+
+  /**
+   * @brief The system number of the NPU a physical device id of the plan names: its place
+   * among the NPUs RBLN_DEVICES (alias RBLN_VISIBLE_DEVICES) lets the process see, all of
+   * them when it names none.
+   */
+  uint32_t systemNpu(int physical_device_id) const;
 
   /**
    * @brief Whether a commit failed part-way, leaving the process unable to use a device.
@@ -261,7 +273,7 @@ class C10_RBLN_API DeviceMappingManager {
   /**
    * @brief Record one logical device -> physical NPU mapping. Bookkeeping only.
    *
-   * Deliberately does NOT call rbln_register_device_id(); commit() does that later.
+   * Deliberately opens no NPU; commit() does that later.
    */
   void planLogicalDevice(int logical_device_index, const std::vector<int>& physical_ids) const;
 
@@ -293,6 +305,9 @@ class C10_RBLN_API DeviceMappingManager {
    * @brief The RBLN_* environment the plan depends on, as a comparable string.
    */
   static std::string envSignature();
+
+  // The NPUs the plan's physical device ids number, by system number.
+  mutable std::vector<uint32_t> visible_npus_;
 
   /**
    * @brief Collect unused physical NPU indices based on usage tracking.

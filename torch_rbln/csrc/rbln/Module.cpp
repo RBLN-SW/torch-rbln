@@ -1,4 +1,5 @@
 #include <ATen/native/rbln/RBLNCPUFallback.h>
+#include <ATen/ops/from_blob.h>
 #include <ATen/native/rbln/RBLNCPUFastPaths.h>
 #include <ATen/native/rbln/RBLNCopy.h>
 #include <ATen/native/rbln/RBLNTensorUtils.h>
@@ -9,6 +10,7 @@
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNSupportedDtypes.h>
+#include <rbln/runtime/device.h>
 #include <torch/csrc/Dtype.h>
 #include <torch/csrc/utils/pybind.h>
 #include <torch_rbln/csrc/distributed/c10d/rbln/ProcessGroupRBLNModule.hpp>
@@ -84,8 +86,8 @@ void register_public_device_api(py::module_& module) {
       "Deprecated alias of is_available(), kept for existing callers. Never raises.");
   module.def(
       "runtime_loaded",
-      &rbln_runtime_available,
-      "Whether the RBLN device runtime is loaded (librbln's rbln_runtime_available()). Never raises.");
+      [] { return rbln::runtime::Device::available(); },
+      "Whether the RBLN driver can be loaded and sees at least one NPU. Never raises.");
   module.def(
       "_set_runtime_shutting_down",
       &c10::rbln::set_runtime_shutting_down,
@@ -211,22 +213,6 @@ void register_stream_api(py::module_& module) {
       "Internal: set current rbln stream; returns the previous as (stream_id, device_index, device_type)");
 }
 
-// Both callers configure the whole device allocation behind the tensor's base
-// address, so a tensor that does not cover its storage is rejected up front
-// instead of misbehaving downstream. Covering it is the whole contract: a torch
-// view that still spans its storage (base.view(...), base[:]) carries the
-// allocation's own address and size, and is accepted.
-void check_base_rbln_tensor(const at::Tensor& t, const char* api, const char* name) {
-  TORCH_CHECK(t.device().is_privateuseone(), api, ": ", name, " must be an RBLN tensor, got ", t.device());
-  TORCH_CHECK(
-      t.storage_offset() == 0 && t.is_contiguous() &&
-          static_cast<int64_t>(t.storage().nbytes()) == t.numel() * t.element_size(),
-      api,
-      ": ",
-      name,
-      " must cover its whole storage (contiguous, storage_offset 0)");
-}
-
 /**
  * @brief Register internal API functions with Python
  *
@@ -240,53 +226,6 @@ void register_internal_api(py::module_& module) {
   // Tensor creation and manipulation functions
   module.def(
       "_create_tensor_from_ptr", &at::native::rbln::create_tensor_from_ptr, "Internal: create tensor from device ptr");
-
-  // Mark the virtual memory as logically zero-initialized without allocating host memory.
-  // Preferred implementation of aten::zero_ for large RBLN tensors (e.g. KV-cache).
-  module.def(
-      "_mark_zeros",
-      [](uint64_t vaddr) {
-        c10::rbln::mark_zeros(reinterpret_cast<const void*>(vaddr)); // NOLINT(performance-no-int-to-ptr)
-      },
-      "Internal: mark RBLN virtual memory as zero-initialized (no host alloc)");
-
-  // Materialise a tensor's device allocation up front, for a consumer that reads the physical
-  // buffers out of band. Used by torch_rbln.bind_device_memory().
-  module.def(
-      "_bind_device_memory",
-      [](const at::Tensor& tensor) {
-        check_base_rbln_tensor(tensor, "bind_device_memory", "tensor");
-        c10::rbln::bind_device_memory(tensor.data_ptr(), tensor.storage().nbytes());
-      },
-      "Internal: give an RBLN tensor a flat single-node device allocation");
-
-  // Set target's device-allocation layout to match ref's, without copying data.
-  // Used by torch_rbln.set_device_layout_like().
-  module.def(
-      "_set_device_layout_like",
-      [](const at::Tensor& target, const at::Tensor& ref) {
-        // Validate inputs up front so misuse fails with a clear error. dtype
-        // must match: a mismatch would reinterpret target's buffer as a
-        // different dtype.
-        check_base_rbln_tensor(target, "set_device_layout_like", "target");
-        check_base_rbln_tensor(ref, "set_device_layout_like", "ref");
-        TORCH_CHECK(
-            target.device() == ref.device(),
-            "set_device_layout_like: target and ref must be on the same device (got ",
-            target.device(),
-            " and ",
-            ref.device(),
-            ")");
-        TORCH_CHECK(
-            target.scalar_type() == ref.scalar_type(),
-            "set_device_layout_like: target and ref must have the same dtype (got ",
-            target.scalar_type(),
-            " and ",
-            ref.scalar_type(),
-            ")");
-        c10::rbln::set_device_layout_like(target.data_ptr(), ref.data_ptr());
-      },
-      "Internal: configure target's device layout like ref (no data copy)");
 
   // Logging utilities
   module.def("_log_cpu_fallback", &c10::rbln::log_cpu_fallback, "Internal: log CPU fallback");
@@ -338,14 +277,9 @@ void register_internal_api(py::module_& module) {
       &torch_rbln::shim::diag_reset_trace_by_op,
       "DIAG/PROFILER (A) WHERE: reset captured call-sites");
   module.def(
-      "_dispatch_shim_align_fastpath_count",
-      &torch_rbln::shim::diag_dump_align_fastpath_count,
-      "DIAG: count of align-penalty fast-path hits");
-  module.def(
       "_dispatch_shim_warm_segments_dump",
       &torch_rbln::shim::diag_dump_warm_segments,
-      "DIAG: warm-cache hit per-segment timers (n_hits, ns_lookup, ns_io_build, "
-      "ns_prep_in, ns_prep_out, ns_run, ns_finalize)");
+      "DIAG: warm-cache hit per-segment timers (n_hits, ns_lookup, ns_run, ns_finalize)");
   module.def(
       "_dispatch_shim_warm_segments_reset",
       &torch_rbln::shim::diag_reset_warm_segments,
@@ -367,60 +301,6 @@ void register_internal_api(py::module_& module) {
       "PROFILER: per-site (count, bytes) of hidden host bounces, in BounceSite order");
   module.def("_profiler_reset_bounces", &c10::rbln::prof::reset_bounces, "PROFILER: reset hidden-bounce counters");
 
-  // PROFILER: runtime (rebel-compiler) hidden-overhead counters, read from librbln
-  // via its public C-API. Per-reason axes are POSITIONAL — their meaning is an
-  // internal classification interpreted Python-side, so no internal name crosses
-  // this boundary. See rebel/runtime/api/rbln_runtime_api.h (rebel-compiler wheel).
-  module.def(
-      "_rt_prof_hidden",
-      []() {
-        const uint32_t n = c10::rbln::rt_prof_hidden_num();
-        std::vector<uint64_t> c(n, uint64_t{0}), b(n, uint64_t{0});
-        c10::rbln::rt_prof_hidden_get(c.data(), b.data(), n);
-        std::vector<std::pair<uint64_t, uint64_t>> out;
-        out.reserve(n);
-        for (uint32_t i = 0; i < n; ++i) {
-          out.emplace_back(c[i], b[i]);
-        }
-        return out;
-      },
-      "PROFILER: per-cause (count,bytes) of runtime hidden d2h, positional");
-  module.def(
-      "_rt_prof_reject",
-      []() {
-        const uint32_t n = c10::rbln::rt_prof_reject_num();
-        std::vector<uint64_t> c(n, uint64_t{0}), b(n, uint64_t{0});
-        c10::rbln::rt_prof_reject_get(c.data(), b.data(), n);
-        std::vector<std::pair<uint64_t, uint64_t>> out;
-        out.reserve(n);
-        for (uint32_t i = 0; i < n; ++i) {
-          out.emplace_back(c[i], b[i]);
-        }
-        return out;
-      },
-      "PROFILER: per-reason (count,bytes) of v2v plan reject, positional");
-  module.def(
-      "_rt_prof_host_sync",
-      []() {
-        uint64_t dc = 0, db = 0, hc = 0, hb = 0;
-        c10::rbln::rt_prof_host_sync_d2h(&dc, &db);
-        c10::rbln::rt_prof_host_sync_h2d(&hc, &hb);
-        std::vector<std::pair<uint64_t, uint64_t>> out{{dc, db}, {hc, hb}}; // [0]=d2h, [1]=h2d
-        return out;
-      },
-      "PROFILER: [(d2h_count,d2h_bytes),(h2d_count,h2d_bytes)] real device<->host transfers");
-  module.def(
-      "_rt_prof_memory",
-      []() {
-        uint64_t cur = 0, peak = 0;
-        c10::rbln::rt_prof_memory(&cur, &peak);
-        return std::make_pair(cur, peak);
-      },
-      "PROFILER: (current,peak) device-memory gauge (process-global, both alloc paths)");
-  module.def(
-      "_rt_prof_reset",
-      []() { c10::rbln::rt_prof_reset(); },
-      "PROFILER: reset runtime hidden/reject/host-sync counters for an explain region");
   module.def(
       "_register_cpp_shim",
       &torch_rbln::shim::register_cpp_shim,
@@ -429,18 +309,20 @@ void register_internal_api(py::module_& module) {
       pybind11::arg("py_fn"),
       pybind11::arg("skip_dtype_args") = std::vector<size_t>{});
 
+  torch_rbln::init_op_function_bindings(module);
+
   // Warm-cache API. The C++ shim populates a thread-local `pending` entry on
   // every miss-path dispatch; the generated Python wrapper calls
-  // `_warmcache_install_pending` after a successful first compile + run so the
-  // runtime is cached for subsequent invocations with the same input profile.
+  // `_warmcache_install_pending` after a successful compile + run so the
+  // op's function is cached for subsequent invocations with the same input
+  // profile.
   module.def(
       "_warmcache_install_pending",
       &torch_rbln::shim::install_warmcache_from_pending,
       "Internal: install a warm-cache entry from the thread-local pending key "
       "set by the shim on the way into the miss path",
-      pybind11::arg("dyn_runtime"),
-      pybind11::arg("runtime_handle"),
-      pybind11::arg("out_profiles"));
+      pybind11::arg("function"),
+      pybind11::arg("inputs"));
 
   module.def(
       "_warmcache_set_enabled",
@@ -460,19 +342,6 @@ void register_internal_api(py::module_& module) {
       "Internal: drop the warm-cache entries whose inputs live on `device`, or "
       "all of them when device is None",
       pybind11::arg("device") = pybind11::none());
-  module.def(
-      "_warmcache_is_building",
-      []() { return torch_rbln::warmcache::WarmCache::is_building_entry(); },
-      "Internal: true iff the current thread is inside the miss-path compile");
-  module.def(
-      "_warmcache_enter_building",
-      []() { torch_rbln::warmcache::WarmCache::enter_building(); },
-      "Internal: mark the current thread as inside the miss-path compile "
-      "(reentrancy guard; pairs with _warmcache_exit_building)");
-  module.def(
-      "_warmcache_exit_building",
-      []() { torch_rbln::warmcache::WarmCache::exit_building(); },
-      "Internal: clear the miss-path reentrancy flag set by _warmcache_enter_building");
 
   // CPU fast-path registry introspection. Returns True iff a handler is
   // registered for the given fully-qualified op name (e.g. "aten::rsqrt.out").
@@ -485,14 +354,14 @@ void register_internal_api(py::module_& module) {
       },
       "Internal: returns True iff a CPU fast-path handler is registered for the given op name");
 
-  // (B) explain: rebel-runtime (librbln) boundary timing. Gated so it is OFF
+  // (B) explain: runtime copy-call timing. Gated so it is OFF
   // (one relaxed atomic load per boundary call) unless an explain region enables
   // it; lets the profiler split host overhead into runtime vs torch-side dispatch.
   module.def(
       "_rt_timing_enable",
       [](bool on) { c10::rbln::rt_timing_enable(on); },
-      "Internal: enable/disable librbln boundary timing for an explain region");
-  module.def("_rt_timing_reset", []() { c10::rbln::rt_timing_reset(); }, "Internal: zero the librbln boundary timers");
+      "Internal: enable/disable runtime copy-call timing for an explain region");
+  module.def("_rt_timing_reset", []() { c10::rbln::rt_timing_reset(); }, "Internal: zero the runtime copy-call timers");
   module.def(
       "_rt_timing_get",
       []() {
@@ -505,27 +374,24 @@ void register_internal_api(py::module_& module) {
         }
         return out;
       },
-      "Internal: per-primitive (ns, calls) spent inside librbln boundary calls this region");
+      "Internal: per-primitive (ns, calls) spent inside runtime copy calls this region");
+
+  module.def(
+      "_host_empty",
+      [](int64_t nbytes) {
+        TORCH_CHECK(nbytes > 0, "nbytes must be positive, but got ", nbytes);
+        auto buffer = ::rbln::runtime::HostBuffer::allocate(static_cast<uint64_t>(nbytes));
+        return at::from_blob(buffer->data(), {nbytes}, [buffer](void*) {}, at::TensorOptions().dtype(at::kByte));
+      },
+      "Internal: a zero-filled uint8 CPU tensor over page-aligned host memory the device copies "
+      "from and to directly",
+      pybind11::arg("nbytes"));
 
   // Fallback configuration
   module.def(
       "_is_fallback_disabled",
       &c10::rbln::is_fallback_disabled,
       "Internal: check if specified fallback category is disabled");
-
-  // Process-wide RBLN vmemory file offloading toggle. Exposed only as an
-  // internal helper so torch.rbln.offload (in torch_rbln/memory.py) can drive
-  // it; users should go through the offload() context manager rather than
-  // calling this directly.
-  module.def(
-      "_set_file_offloading_enabled",
-      &c10::rbln::set_file_offloading_enabled,
-      "Internal: enable or disable process-wide RBLN vmemory file offloading.");
-
-  module.def(
-      "_release_offload_temp_storage",
-      &c10::rbln::release_offload_temp_storage,
-      "Internal: remove this process's file offloading temp files and directories.");
 
   // torch.profiler (kineto) integration
   module.def(

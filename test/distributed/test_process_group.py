@@ -26,7 +26,7 @@ def setup_environment(rank: int, world_size: int) -> None:
     torch.rbln.set_device(rank)
 
 
-def run_allreduce_test(rank: int, world_size: int, backend: str, op: dist.ReduceOp) -> None:
+def run_allreduce_test(rank: int, world_size: int, backend: str, op: dist.ReduceOp, dtype: torch.dtype) -> None:
     """Test allreduce operation with specific reduce op."""
     setup_environment(rank, world_size)
     dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
@@ -34,7 +34,7 @@ def run_allreduce_test(rank: int, world_size: int, backend: str, op: dist.Reduce
     try:
         # Create test tensor with rank-specific values
         base_value = rank + 1.0
-        tensor = torch.full([64], base_value, dtype=torch.float16, device=torch.device(f"rbln:{rank}"))
+        tensor = torch.full([64], base_value, dtype=dtype, device=torch.device(f"rbln:{rank}"))
 
         # Perform allreduce
         dist.all_reduce(tensor, op=op)
@@ -347,7 +347,9 @@ def run_allgather_into_tensor_coalesced_test(
         dist.destroy_process_group()
 
 
-def run_reduce_scatter_test(rank: int, world_size: int, backend: str, op: dist.ReduceOp, size: int) -> None:
+def run_reduce_scatter_test(
+    rank: int, world_size: int, backend: str, op: dist.ReduceOp, size: int, dtype: torch.dtype = torch.bfloat16
+) -> None:
     """Test reduce_scatter operation with specific reduce op."""
     setup_environment(rank, world_size)
     dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
@@ -362,11 +364,11 @@ def run_reduce_scatter_test(rank: int, world_size: int, backend: str, op: dist.R
         for j in range(world_size):
             # Each tensor has values based on rank and j
             base_value = float((rank + 1) * 10 + j + 1)
-            tensor = torch.full([output_size], base_value, dtype=torch.float16, device=device)
+            tensor = torch.full([output_size], base_value, dtype=dtype, device=device)
             input_list.append(tensor)
 
         # Create output tensor
-        output = torch.zeros(output_size, dtype=torch.float16, device=device)
+        output = torch.zeros(output_size, dtype=dtype, device=device)
 
         # Perform reduce_scatter
         dist.reduce_scatter(output, input_list, op=op)
@@ -516,7 +518,6 @@ class TestProcessGroupRBLNBase(TestCase):
         env = mock.patch.dict(
             os.environ,
             {
-                "RCCL_FORCE_EXPORT_MEM": "1",
                 "RBLN_ROOT_IP": "127.0.0.1",
                 "RBLN_LOCAL_IP": "127.0.0.1",
                 "MASTER_ADDR": "127.0.0.1",
@@ -573,41 +574,24 @@ class TestBroadcastRBLN(TestProcessGroupRBLNBase):
 class TestAllReduceRBLN(TestProcessGroupRBLNBase):
     """Test cases for allreduce operations."""
 
+    # The device sums bfloat16; every other reduction runs on the host through Gloo.
+    @parametrize("dtype", [torch.bfloat16, torch.float16])
+    @parametrize(
+        "op",
+        [
+            subtest(dist.ReduceOp.SUM, name="sum"),
+            subtest(dist.ReduceOp.AVG, name="avg"),
+            subtest(dist.ReduceOp.MIN, name="min"),
+            subtest(dist.ReduceOp.MAX, name="max"),
+            subtest(dist.ReduceOp.PRODUCT, name="product"),
+        ],
+    )
     @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
-    def test_allreduce_sum(self, c10d_async_env):
-        """Test allreduce with SUM operation."""
+    def test_allreduce(self, dtype, op, c10d_async_env):
+        """Test allreduce with each reduce op."""
         self.run_c10d_test(
-            c10d_async_env, self.world_size, run_allreduce_test, (self.world_size, self.backend, dist.ReduceOp.SUM)
+            c10d_async_env, self.world_size, run_allreduce_test, (self.world_size, self.backend, op, dtype)
         )
-
-    # NOTE: RCCL support only SUM operation
-    # @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
-    # def test_allreduce_avg(self, c10d_async_env):
-    #     """Test allreduce with AVG operation."""
-    #     self.run_c10d_test(
-    #         c10d_async_env, self.world_size, run_allreduce_test, (self.world_size, self.backend, dist.ReduceOp.AVG)
-    #     )
-
-    # @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
-    # def test_allreduce_min(self, c10d_async_env):
-    #     """Test allreduce with MIN operation."""
-    #     self.run_c10d_test(
-    #         c10d_async_env, self.world_size, run_allreduce_test, (self.world_size, self.backend, dist.ReduceOp.MIN)
-    #     )
-
-    # @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
-    # def test_allreduce_max(self, c10d_async_env):
-    #     """Test allreduce with MAX operation."""
-    #     self.run_c10d_test(
-    #         c10d_async_env, self.world_size, run_allreduce_test, (self.world_size, self.backend, dist.ReduceOp.MAX)
-    #     )
-
-    # @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
-    # def test_allreduce_product(self, c10d_async_env):
-    #     """Test allreduce with PRODUCT operation."""
-    #     self.run_c10d_test(
-    #         c10d_async_env, self.world_size, run_allreduce_test, (self.world_size, self.backend, dist.ReduceOp.PRODUCT)
-    #     )
 
 
 @pytest.mark.single_worker
@@ -793,37 +777,22 @@ class TestReduceScatterRBLN(TestProcessGroupRBLNBase):
             (self.world_size, self.backend, dist.ReduceOp.SUM, size),
         )
 
-    # NOTE: RCCL support only SUM operation
-    # @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
-    # def test_reduce_scatter_avg(self, c10d_async_env):
-    #     """Test reduce_scatter with AVG operation."""
-    #     self.run_c10d_test(
-    #         c10d_async_env, self.world_size, run_reduce_scatter_test, (self.world_size, self.backend, dist.ReduceOp.AVG)
-    #     )
-
-    # @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
-    # def test_reduce_scatter_min(self, c10d_async_env):
-    #     """Test reduce_scatter with MIN operation."""
-    #     self.run_c10d_test(
-    #         c10d_async_env, self.world_size, run_reduce_scatter_test, (self.world_size, self.backend, dist.ReduceOp.MIN)
-    #     )
-
-    # @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
-    # def test_reduce_scatter_max(self, c10d_async_env):
-    #     """Test reduce_scatter with MAX operation."""
-    #     self.run_c10d_test(
-    #         c10d_async_env, self.world_size, run_reduce_scatter_test, (self.world_size, self.backend, dist.ReduceOp.MAX)
-    #     )
-
-    # @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
-    # def test_reduce_scatter_product(self, c10d_async_env):
-    #     """Test reduce_scatter with PRODUCT operation."""
-    #     self.run_c10d_test(
-    #         c10d_async_env,
-    #         self.world_size,
-    #         run_reduce_scatter_test,
-    #         (self.world_size, self.backend, dist.ReduceOp.PRODUCT),
-    #     )
+    @parametrize("dtype", [torch.bfloat16, torch.float16])
+    @parametrize(
+        "op",
+        [
+            subtest(dist.ReduceOp.AVG, name="avg"),
+            subtest(dist.ReduceOp.MIN, name="min"),
+            subtest(dist.ReduceOp.MAX, name="max"),
+            subtest(dist.ReduceOp.PRODUCT, name="product"),
+        ],
+    )
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_reduce_scatter_on_host(self, dtype, op, c10d_async_env):
+        """Test reduce_scatter with the reductions that run on the host."""
+        self.run_c10d_test(
+            c10d_async_env, self.world_size, run_reduce_scatter_test, (self.world_size, self.backend, op, 64, dtype)
+        )
 
 
 @pytest.mark.single_worker
@@ -888,14 +857,15 @@ class TestAllReduceSizesRBLN(TestProcessGroupRBLNBase):
             13631488,  # previously problematic size
         ],
     )
+    @parametrize("dtype", [torch.bfloat16, torch.float16])
     @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
-    def test_allreduce_float16(self, size, c10d_async_env):
-        """Test allreduce with specified bytes using torch.float16."""
+    def test_allreduce_16bit(self, size, dtype, c10d_async_env):
+        """Test allreduce with specified bytes of a 16-bit dtype."""
         self.run_c10d_test(
             c10d_async_env,
             self.world_size,
             run_allreduce_size_test,
-            (self.world_size, self.backend, size, torch.float16),
+            (self.world_size, self.backend, size, dtype),
         )
 
     @parametrize("size", [MiB, (4 * MiB)])

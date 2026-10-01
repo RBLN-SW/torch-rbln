@@ -40,7 +40,7 @@ from test.utils_v2v import arange as _arange, ENGINE_DTYPES, eq as _eq, to_dev a
 
 def _prim_calls(report: dict) -> dict[str, int]:
     """Per-primitive runtime call counts from an explain() dump."""
-    rt = report.get("rebel_runtime")
+    rt = report.get("runtime")
     if rt is None:
         return {}
     return {name: int(v["calls"]) for name, v in rt.get("by_primitive", {}).items()}
@@ -276,12 +276,10 @@ class TestForeachCopyV2V(TestCase):
             _eq(dst, _arange((rows, cols), torch.float32) + i)
 
     def test_large_fanout_v2v_pair_does_not_bounce_through_host(self):
-        """Above the runtime's per-destination v2v cap the batch falls back to
-        per-entry device copies, while ``copy_``'s strided path round-trips the
-        host. Sending such a pair to ``copy_`` turns a device-side copy into the
-        hidden host bounce the profiler exists to report.
+        """A pair with a large fan-out of runs stays a device-side copy; sending it
+        through the host would be the hidden host bounce the profiler exists to report.
         """
-        rows = 1024 + 8  # ::rbln::kMaxV2VMultiCopies is 1024
+        rows = 1024 + 8
         cols, stride = 4, 6
         big = _to_dev(torch.zeros(rows, stride, dtype=torch.float32))
         dst = big[:, :cols]

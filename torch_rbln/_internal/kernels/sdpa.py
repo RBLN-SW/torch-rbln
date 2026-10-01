@@ -9,7 +9,7 @@ from typing import Optional
 
 import torch
 
-from torch_rbln._internal.compile_cache import compile_rbln_cached
+from torch_rbln._internal.compile_cache import run_op
 from torch_rbln._internal.log_utils import rbln_log_cpu_fallback
 from torch_rbln._internal.ops_utils import is_cpu_fallback_cases, SupportedDtypes, to_cpu
 
@@ -346,7 +346,6 @@ def _compile_sdpa_attn_weights_fn(
 def _compile_sdpa_output_fn(
     attn_weights: torch.Tensor,
     value: torch.Tensor,
-    dropout_p: float = 0.0,
 ) -> torch.Tensor:
     """Compile wrapper for: attn_weights @ V -> output."""
     # Handle GQA (4D only)
@@ -354,9 +353,6 @@ def _compile_sdpa_output_fn(
         a_heads, v_heads = attn_weights.size(1), value.size(1)
         if a_heads != v_heads:
             value = _repeat_kv(value, a_heads // v_heads)
-
-    if dropout_p > 0.0:
-        attn_weights = torch.dropout(attn_weights, dropout_p, train=True)
 
     output = torch.matmul(attn_weights, value)
 
@@ -397,13 +393,7 @@ def _sdpa_compute_attn_weights(
     if merged_mask is not None:
         merged_mask = merged_mask.contiguous()
 
-    compiled = compile_rbln_cached(
-        _compile_sdpa_attn_weights_fn,
-        dynamic=False,
-        options={"disable_logger": True},
-        device_cache_key=query.device.index,
-    )
-    external_result = compiled(query, key, attn_mask=merged_mask, scale=scale)
+    external_result = run_op(_compile_sdpa_attn_weights_fn, query, key, attn_mask=merged_mask, scale=scale)
 
     return external_result
 
@@ -460,16 +450,13 @@ def _sdpa_compute_output(
         rbln_log_cpu_fallback("sdpa (output)")
         return _sdpa_output_fallback(attn_weights, value, dropout_p)
 
+    # Dropout draws random numbers, which no compiled function does; it runs as an op of its own.
+    if dropout_p > 0.0:
+        attn_weights = torch.dropout(attn_weights, dropout_p, train=True)
     attn_weights = attn_weights.contiguous()
     value = value.contiguous()
 
-    compiled = compile_rbln_cached(
-        _compile_sdpa_output_fn,
-        dynamic=False,
-        options={"disable_logger": True},
-        device_cache_key=attn_weights.device.index,
-    )
-    external_result = compiled(attn_weights, value, dropout_p=dropout_p)
+    external_result = run_op(_compile_sdpa_output_fn, attn_weights, value)
 
     return external_result
 
@@ -580,41 +567,17 @@ def _sdpa_backward_compiled(
     attn_weights = attn_weights.contiguous()
 
     # Graph 1: grad_V = attn_weights^T @ grad_output
-    compiled_grad_v = compile_rbln_cached(
-        _compile_sdpa_grad_value_fn,
-        dynamic=False,
-        options={"disable_logger": True},
-        device_cache_key=grad_output.device.index,
-    )
-    grad_value = compiled_grad_v(attn_weights, grad_output)
+    grad_value = run_op(_compile_sdpa_grad_value_fn, attn_weights, grad_output)
 
     # Graph 2: grad_scores = softmax_backward * scale
-    compiled_grad_scores = compile_rbln_cached(
-        _compile_sdpa_grad_scores_fn,
-        dynamic=False,
-        options={"disable_logger": True},
-        device_cache_key=grad_output.device.index,
-    )
-    grad_scores = compiled_grad_scores(grad_output, value_expanded, attn_weights, scale)
+    grad_scores = run_op(_compile_sdpa_grad_scores_fn, grad_output, value_expanded, attn_weights, scale)
 
     # Graph 3: grad_Q = grad_scores @ K
     grad_scores = grad_scores.contiguous()
-    compiled_grad_q = compile_rbln_cached(
-        _compile_sdpa_grad_query_fn,
-        dynamic=False,
-        options={"disable_logger": True},
-        device_cache_key=grad_output.device.index,
-    )
-    grad_query = compiled_grad_q(grad_scores, key_expanded)
+    grad_query = run_op(_compile_sdpa_grad_query_fn, grad_scores, key_expanded)
 
     # Graph 4: grad_K = grad_scores^T @ Q
-    compiled_grad_k = compile_rbln_cached(
-        _compile_sdpa_grad_key_fn,
-        dynamic=False,
-        options={"disable_logger": True},
-        device_cache_key=grad_output.device.index,
-    )
-    grad_key = compiled_grad_k(grad_scores, query)
+    grad_key = run_op(_compile_sdpa_grad_key_fn, grad_scores, query)
 
     # Handle GQA gradient reduction
     if gqa_enabled:

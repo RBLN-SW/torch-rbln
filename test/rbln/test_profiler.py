@@ -11,26 +11,20 @@ Mapping to the profiler signal taxonomy discussed in design (A-E):
   * copy host-bounce  -> ``hidden_host_bounce``   (torch-side) [core]
   * A recompile       -> ``dispatch.recompile_miss`` (torch-side)
   * B cpu_fallback    -> ``dispatch.cpu_fallback``    (torch-side)
-  * runtime hidden-d2h cause -> ``runtime_residency`` (rebel runtime) [core]
   * C device idle / D command-stream / leaf-byte host-traffic -> deliberately
-                         EXCLUDED. They are a different profiler's job
-                         (dispatch/utilization, à la torch.profiler/nsys), out of
-                         this profiler's hidden-overhead scope, and on the
-                         executed path live in the TVM runtime where they read ~0
-                         -- surfacing them would mislead. The one hidden signal
-                         still missing (side-effect host-sync on the TVM
-                         graph-exec path) is a tracked follow-up, not these.
-  * E memory gauge    -> ``device_memory`` (rebel runtime). NOT a hidden-overhead
-                         signal; kept only because it is accurate and complete
-                         (every device alloc routes through BufferAllocator).
+                         EXCLUDED. Timelines and utilization are torch.profiler's
+                         job (a row per NPU with ``RBLN_PROFILER=1``), out of this
+                         profiler's hidden-overhead scope.
+  * E memory gauge    -> ``device_memory`` (caching allocator). NOT a hidden-overhead
+                         signal; kept because every device tensor allocation goes
+                         through the caching allocator, so it is complete.
+  * runtime copy time -> ``runtime`` (per-primitive time + calls inside the runtime's
+                         copy calls). Context, not a verdict signal.
 
 These tests therefore assert the profiler's *honesty and scope* — that it
 carries the hidden-overhead signals plus the memory gauge, and EXCLUDES the
 out-of-scope dispatch/utilization counters.
 """
-
-import os
-from unittest import mock
 
 import pytest
 import torch
@@ -42,28 +36,32 @@ import torch_rbln  # noqa: F401  -- registers the ``rbln`` device + ``torch.rbln
 DEV = "rbln"
 
 
+def _runtime_calls(dump):
+    """Calls per runtime copy primitive in an explain() dump (primitives with no call omitted)."""
+    return {name: v["calls"] for name, v in dump["runtime"]["by_primitive"].items()}
+
+
 @pytest.mark.test_set_ci
 class TestProfilerCopyBounce(TestCase):
     """The core signal: a hidden host round-trip behind a plain ``copy_``."""
 
-    def test_contiguous_copy_no_torch_side_bounce(self):
-        # A contiguous same-shape/dtype copy_ does NOT take torch-rbln's own host
-        # path (no torch-side bounce). NOTE: the runtime residency witness may
-        # still flag a hidden d2h if device residency isn't established for these
-        # freshly-created tensors — that is a real finding, not a test failure —
-        # so we assert only the torch-side invariant here, and let
-        # test_empty_region_is_clean cover the unconditional-clean case.
+    def test_contiguous_copy_stays_on_device(self):
+        # A contiguous same-shape/dtype copy_ is one device->device copy: no host bounce,
+        # and the runtime copy counters show a v2v and nothing read back to the host.
+        x = torch.randn(64, 64, device=DEV, dtype=torch.float16)
+        y = torch.empty(64, 64, device=DEV, dtype=torch.float16)
         with torch.rbln.explain() as p:
-            x = torch.randn(64, 64, device=DEV, dtype=torch.float16)
-            y = torch.empty(64, 64, device=DEV, dtype=torch.float16)
             y.copy_(x)
-        self.assertEqual(p.dump()["hidden_host_bounce"]["total_count"], 0)
+        d = p.dump()
+        self.assertEqual(d["hidden_host_bounce"]["total_count"], 0)
+        calls = _runtime_calls(d)
+        self.assertGreaterEqual(calls.get("v2v", 0), 1)
+        self.assertEqual(calls.get("v2h", 0) + calls.get("v2h_multi", 0), 0)
 
     def test_d2d_int_cast_bounces_with_bytes(self):
-        # An int-dtype device->device cast (int64->int32) cannot use the fp16 on-device
-        # v2v engine, so it round-trips the host -> explain shows copy_d2d_host_bounce
-        # with bytes, so the region is not clean. (A plain non-contiguous fp16 slice copy
-        # no longer bounces here -- the runtime's strided v2v now handles it on-device.)
+        # A device->device cast (int64->int32) is not a byte copy, so neither the direct
+        # v2v nor the strided v2v engine takes it: it round-trips the host -> explain shows
+        # copy_d2d_host_bounce with bytes, so the region is not clean.
         s = torch.tensor([3, 4, 5, 6], dtype=torch.int64).to(DEV)
         with torch.rbln.explain() as p:
             _ = s.to(torch.int32)
@@ -103,17 +101,19 @@ class TestProfilerDispatchSignals(TestCase):
 
 @pytest.mark.test_set_ci
 class TestProfilerFallbackRegimes(TestCase):
-    """explain must render each dispatch regime distinctly. The decode-path study
-    showed a CPU fallback is NOT automatically a host transfer: int arithmetic on a
-    contiguous, host-resident tensor falls back per op but stays host-resident (lazy
-    v-mem, borrow chain) — so its only cost is fallback wall-time, not d2h/bounce.
-    A non-contiguous input can't be borrowed and DOES round-trip host. These lock
-    that distinction so a regression can't silently turn one regime into another.
+    """explain must render each dispatch regime distinctly. A device run neither falls
+    back nor moves data to the host. A CPU fallback copies its inputs to the host and
+    its results back: that traffic is the fallback's own cost, shown as runtime copy
+    calls next to the cpu_fallback row, not as a separate host bounce. These lock that
+    distinction so a regression can't silently turn one regime into another.
     (host-bounce WITHOUT fallback is covered by TestProfilerCopyBounce.)"""
 
-    def test_device_run_no_fallback_no_bounce(self):
-        # Contiguous fp16 elementwise runs on-device: no CPU fallback, no host
-        # bounce. (A one-time recompile may still occur; not asserted here.)
+    @pytest.mark.usefixtures("enable_deploy_mode")
+    def test_device_run_no_fallback_no_transfer(self):
+        # Contiguous fp16 elementwise runs on-device: no CPU fallback, no host bounce,
+        # nothing copied to or from the host. Deploy mode, because outside it the dispatch
+        # shim reads every device input to the host to scan it for NaN/Inf. (A one-time
+        # recompile may still occur; not asserted here.)
         x = torch.randn(64, 64, device=DEV, dtype=torch.float16)
         for _ in range(3):
             _ = x * 2  # warm
@@ -122,11 +122,14 @@ class TestProfilerFallbackRegimes(TestCase):
         d = p.dump()
         self.assertEqual(d["dispatch"]["cpu_fallback"], 0)
         self.assertEqual(d["hidden_host_bounce"]["total_count"], 0)
+        calls = _runtime_calls(d)
+        for prim in ("v2h", "h2v", "v2h_multi", "h2v_multi"):
+            self.assertEqual(calls.get(prim, 0), 0, prim)
 
-    def test_fallback_without_transfer(self):
-        # int ops on a CONTIGUOUS host-resident tensor fall back EVERY op but stay
-        # host-resident -> NO host bounce, NO hidden d2h. explain surfaces the
-        # cpu_fallback count + its wall-time, and zero transfer signals.
+    def test_fallback_moves_inputs_and_results(self):
+        # int ops fall back EVERY op; each one reads its input to the host and writes its
+        # result back. explain surfaces the cpu_fallback count + its wall-time, the
+        # traffic as runtime copy calls, and no host bounce.
         a = torch.arange(256, dtype=torch.int32).to(DEV)
 
         def chain():
@@ -141,22 +144,26 @@ class TestProfilerFallbackRegimes(TestCase):
         d = p.dump()
         self.assertGreaterEqual(d["dispatch"]["cpu_fallback"], 8)
         self.assertIn("cpu_fallback_ns", d["dispatch"])  # COST is surfaced
-        self.assertEqual(d["hidden_host_bounce"]["total_count"], 0)  # contiguous -> borrowed, no copy
-        if d["runtime_residency"]["available"]:
-            self.assertEqual(d["runtime_residency"]["total_count"], 0)
+        self.assertEqual(d["hidden_host_bounce"]["total_count"], 0)
+        calls = _runtime_calls(d)
+        self.assertGreaterEqual(calls.get("v2h", 0) + calls.get("v2h_multi", 0), 8)
+        self.assertGreaterEqual(calls.get("h2v", 0) + calls.get("h2v_multi", 0), 8)
 
-    def test_fallback_with_transfer(self):
-        # An int op on a NON-CONTIGUOUS tensor cannot be borrowed (borrow rejects
-        # non-contig), so the fallback routes through a real host copy -> explain
-        # shows BOTH a cpu_fallback AND a host bounce with bytes.
-        m = torch.arange(256, dtype=torch.int32).reshape(16, 16).to(DEV)
-        _ = m.t() - 1  # warm
+    @pytest.mark.usefixtures("enable_deploy_mode")
+    def test_a_narrow_result_runs_on_device_through_the_host(self):
+        # The compiler lays a [2, 2] mm result out padded, not as torch holds it, so the op
+        # runs on the device and its result is decoded on the host: no CPU fallback, one
+        # op_arg_through_host per call, and the value torch computes.
+        a = torch.randn(2, 1024, dtype=torch.float16)
+        x = a.to(DEV)
+        _ = x @ x.t()  # warm
         with torch.rbln.explain() as p:
-            _ = m.t() - 1
+            out = x @ x.t()
         d = p.dump()
-        self.assertGreaterEqual(d["dispatch"]["cpu_fallback"], 1)
-        self.assertGreaterEqual(d["hidden_host_bounce"]["total_count"], 1)
-        self.assertGreater(d["hidden_host_bounce"]["total_bytes"], 0)
+        self.assertEqual(d["dispatch"]["cpu_fallback"], 0)
+        self.assertGreaterEqual(d["hidden_host_bounce"]["by_site"]["op_arg_through_host"]["count"], 1)
+        self.assertFalse(p.verdict()["clean"])
+        torch.testing.assert_close(out.cpu().float(), a.float() @ a.float().t(), rtol=2e-2, atol=1.0)
 
 
 @pytest.mark.test_set_ci
@@ -164,80 +171,31 @@ class TestProfilerTruthfulnessAndScope(TestCase):
     """The verdict must never claim more truth than it has (C/E), and must not
     carry signals the user cannot act on (D)."""
 
-    def test_runtime_signals_present_or_honestly_pending(self):
-        # When the loaded librbln exposes the runtime counters, the in-scope
-        # sections (hidden-d2h residency + the device-memory gauge) must be
-        # present. The out-of-scope dispatch/utilization counters (leaf-byte
-        # traffic, command streams, device idle) must NOT be surfaced. On an
-        # older runtime, the profiler must HONESTLY mark them pending — never a
-        # false clean.
+    def test_in_scope_sections_only(self):
+        # The in-scope context (device-memory gauge, runtime copy time) is present; the
+        # out-of-scope dispatch/utilization counters (leaf-byte traffic, command streams,
+        # device idle) must NOT be surfaced.
         with torch.rbln.explain() as p:
             _ = torch.randn(8, 8, device=DEV, dtype=torch.float16)
         d = p.dump()
-        rr = d["runtime_residency"]
-        if rr["available"]:
-            self.assertIn("total_count", rr)
-            self.assertIn("by_reason", rr)
-            self.assertIn("device_memory", d)  # E (resource gauge, kept)
-            # out of hidden-overhead scope — must not be surfaced:
-            self.assertNotIn("runtime_host_traffic", d)  # leaf bytes
-            self.assertNotIn("command_streams", d)  # D
-            self.assertNotIn("device_idle", d)  # C
-        else:
-            pending = " ".join(d["pending_runtime_signals"]).lower()
-            self.assertIn("d2h", pending)
+        self.assertIn("device_memory", d)  # E (resource gauge, kept)
+        self.assertIn("runtime", d)
+        # out of hidden-overhead scope — must not be surfaced:
+        self.assertNotIn("runtime_host_traffic", d)  # leaf bytes
+        self.assertNotIn("command_streams", d)  # D
+        self.assertNotIn("device_idle", d)  # C
 
     def test_E_device_memory_gauge(self):
-        # Pure allocation (no compute) — the gauge is the device BufferAllocator's
-        # reserved high-water mark, so it reads a sane non-zero peak >= current.
+        # Pure allocation (no compute) — the gauge is the caching allocator's reserved
+        # high-water mark, so it reads a sane non-zero peak >= current, and it agrees
+        # with torch.rbln.memory_reserved() on a single device.
         with torch.rbln.explain() as p:
-            _ = torch.empty(2048, 2048, device=DEV, dtype=torch.float16)
-        d = p.dump()
-        if not d["runtime_residency"]["available"]:
-            self.skipTest("runtime gauge not exposed by the loaded librbln")
-        m = d["device_memory"]
+            t = torch.empty(2048, 2048, device=DEV, dtype=torch.float16)
+        m = p.dump()["device_memory"]
         self.assertGreaterEqual(m["peak_bytes"], m["current_bytes"])
-        self.assertGreater(m["peak_bytes"], 0)
-
-    def test_runtime_hidden_d2h_is_cause_tagged(self):
-        # Deterministic witness for the runtime hidden-d2h path. Pin lazy allocation
-        # (delenv EAGER_MALLOC) so a freshly-created host-latest src forces the runtime's
-        # src_not_on_device v2v hidden d2h; under eager-malloc the copy completes on-device
-        # with 0 hidden d2h, so this must not depend on ambient env. Assert the profiler both
-        # counts the incident AND attributes every one to a named reason (no unattributed).
-        with mock.patch.dict(os.environ):
-            os.environ.pop("TORCH_RBLN_EAGER_MALLOC", None)
-            with torch.rbln.explain() as p:
-                x = torch.randn(256, 256, device=DEV, dtype=torch.float16)
-                y = torch.empty(256, 256, device=DEV, dtype=torch.float16)
-                y.copy_(x)
-        rr = p.dump()["runtime_residency"]
-        if not rr["available"]:
-            self.skipTest("runtime residency counter not exposed by the loaded librbln")
-        self.assertGreaterEqual(rr["total_count"], 1)
-        attributed = sum(v["count"] for v in rr["by_reason"].values())
-        self.assertEqual(attributed, rr["total_count"])  # every hidden d2h is cause-tagged
-        self.assertTrue(any(v["count"] > 0 for v in rr["by_reason"].values()))
-
-    def test_runtime_h2d_push_counted(self):
-        # A device op (matmul) consuming host-latest inputs must push them to the
-        # device -> the manager-emitted real_host_sync_h2d counter fires. Symmetric
-        # to the d2h counter; without it the push direction (the lazy push at the
-        # device-consume boundary) is invisible. A host-served write never reaches it.
-        a = torch.randn(256, 256, dtype=torch.float16).to(DEV)  # host-latest (USER_VIEW)
-        b = torch.randn(256, 256, dtype=torch.float16).to(DEV)
-        _ = (a @ b).to("cpu")  # warm: compile/recompile out of the measured region
-        a = torch.randn(256, 256, dtype=torch.float16).to(DEV)
-        b = torch.randn(256, 256, dtype=torch.float16).to(DEV)
-        with torch.rbln.explain() as p:
-            _ = (a @ b).to("cpu")
-        rr = p.dump()["runtime_residency"]
-        if not rr.get("available") or "real_host_sync_h2d" not in rr:
-            self.skipTest("runtime h2d counter not exposed by the loaded librbln")
-        # both operands are host-latest -> each is pushed to device for the matmul.
-        self.assertGreaterEqual(rr["real_host_sync_h2d"]["count"], 1)
-        self.assertGreater(rr["real_host_sync_h2d"]["bytes"], 0)
-        self.assertIn("host->device push", p.report())
+        self.assertGreaterEqual(m["current_bytes"], t.numel() * t.element_size())
+        if m["devices"] == 1:
+            self.assertEqual(m["current_bytes"], torch.rbln.memory_reserved(DEV))
 
     def test_D_command_stream_is_not_a_verdict_signal(self):
         # Command-stream count / structural padding are intentionally excluded
@@ -278,8 +236,8 @@ class TestProfilerApi(TestCase):
         d = p.dump()
         self.assertIn("hidden_host_bounce", d)
         self.assertIn("dispatch", d)
-        self.assertIn("runtime_residency", d)
-        self.assertIn("pending_runtime_signals", d)
+        self.assertIn("host_threads", d)
+        self.assertIn("notes", d)
 
     def test_verdict_is_factual_not_graded(self):
         # The tool OBSERVES; it does not grade. verdict() carries a factual ``clean``
@@ -390,7 +348,7 @@ class TestProfilerApi(TestCase):
 @pytest.mark.test_set_ci
 class TestProfilerHostCostContext(TestCase):
     """Host-cost context signals: (A) which fallback ops lack a fast-path handler,
-    (E) host CPU oversubscription, (B) rebel-runtime (librbln) boundary time vs
+    (E) host CPU oversubscription, (B) time inside the runtime's copy calls vs
     torch-side dispatch."""
 
     def test_A_unaccelerated_lists_only_unhandled_fallback_ops(self):
@@ -425,8 +383,9 @@ class TestProfilerHostCostContext(TestCase):
         # oversubscribed iff intended host parallelism exceeds the allowed cores.
         self.assertEqual(ht["oversubscribed"], ht["cores"] > 0 and ht["intended_threads"] > ht["cores"])
 
-    def test_B_rebel_runtime_time_split(self):
+    def test_B_runtime_time_split(self):
         import torch_rbln._C as _C
+        from torch_rbln.profiler import _RT_PRIMS
 
         if not hasattr(_C, "_rt_timing_get"):
             self.skipTest("rt-timing not exposed by this _C build")
@@ -434,31 +393,30 @@ class TestProfilerHostCostContext(TestCase):
         b = torch.tensor([1, 2, 3, 4], dtype=torch.int32).to(DEV)
         with torch.rbln.explain() as p:
             for _ in range(20):
-                _ = (a - b).cpu()  # exercises borrow / return / acquire / v2h boundary calls
-        rt = p.dump().get("rebel_runtime")
+                _ = (a - b).cpu()  # fallback v2h/h2v + the .cpu() v2h copy calls
+        rt = p.dump().get("runtime")
         self.assertIsNotNone(rt)
         self.assertGreaterEqual(rt["total_ns"], 0)
         self.assertGreaterEqual(rt["wall_fraction"], 0.0)
         self.assertLessEqual(rt["wall_fraction"], 1.0)
-        prims = {"v2v", "v2v_multi", "borrow", "acquire", "return", "v2h", "h2v", "v2h_multi", "h2v_multi"}
         for prim, vv in rt["by_primitive"].items():
-            self.assertIn(prim, prims)
+            self.assertIn(prim, _RT_PRIMS)
             self.assertGreater(vv["calls"], 0)
-        self.assertTrue(rt["by_primitive"])  # boundary calls happened -> recorded
-        self.assertIn("rebel runtime", p.report())
+        self.assertGreaterEqual(rt["by_primitive"]["v2h"]["calls"], 20)
+        self.assertIn("runtime:", p.report())
 
     def test_B_gated_off_outside_region(self):
-        # ON==OFF guard: librbln work OUTSIDE any explain region must NOT be counted
+        # ON==OFF guard: runtime copies OUTSIDE any explain region must NOT be counted
         # (the timers are gated off + reset at region entry).
         import torch_rbln._C as _C
 
         if not hasattr(_C, "_rt_timing_get"):
             self.skipTest("rt-timing not exposed by this _C build")
         a = torch.tensor([1, 2], dtype=torch.int32).to(DEV)
-        _ = (a - a).cpu()  # boundary calls OUTSIDE a region -> gate off -> uncounted
+        _ = (a - a).cpu()  # copy calls OUTSIDE a region -> gate off -> uncounted
         with torch.rbln.explain() as p:
             pass  # empty region
-        rt = p.dump().get("rebel_runtime")
+        rt = p.dump().get("runtime")
         self.assertIsNotNone(rt)
         self.assertEqual(rt["total_ns"], 0)
 
@@ -477,13 +435,11 @@ class TestProfilerReportFormat(TestCase):
         self.assertEqual(_fmt_time(66_430_000), "66.430ms")
         self.assertEqual(_fmt_time(5_790_680_000), "5.791s")
 
-    def test_note_prefixes_split_action_from_fact(self):
-        from torch_rbln.profiler import _fix, _fyi
+    def test_note_prefix_marks_a_suggestion(self):
+        from torch_rbln.profiler import _fix
 
         self.assertEqual(_fix("make contiguous"), "try: make contiguous")
-        self.assertEqual(_fyi("served on host"), "fyi: served on host")
         self.assertEqual(_fix(""), "")  # empty note stays empty (no bare prefix)
-        self.assertEqual(_fyi(""), "")
 
     def test_table_uses_double_dash_for_na_and_is_ascii(self):
         from torch_rbln.profiler import _table
@@ -518,12 +474,12 @@ class TestProfilerReportFormat(TestCase):
         self.assertIn("RBLN EXPLAIN", rep)
         self.assertIn("region wall", rep)  # P1-5: the wall label carries the 'region' qualifier
         if "mem " in rep:
-            self.assertIn("peak, reserved", rep)  # P0-3: device BufferAllocator reserved footprint, labeled
+            self.assertIn("peak, reserved", rep)  # P0-3: caching allocator reserved footprint, labeled
 
     def test_report_format_contract(self):
-        # Lock the P1 report shape without needing hardware: feed a canned dump through the
-        # real verdict()/report() and assert the structural contract (grouped blocks, the
-        # >> witness line, fixed row order, region-wall label, thousands separators).
+        # Lock the report shape without needing hardware: feed a canned dump through the
+        # real verdict()/report() and assert the structural contract (grouped blocks, fixed
+        # row order, region-wall label, thousands separators, the runtime context line).
         import types
 
         from torch_rbln import profiler as _p
@@ -531,24 +487,17 @@ class TestProfilerReportFormat(TestCase):
         gb, kb = 1024**3, 1024
         dump = {
             "wall_ns": 5_791_000_000,
-            "device_memory": {"peak_bytes": 5 * gb, "current_bytes": 4 * gb},
+            "device_memory": {"peak_bytes": 5 * gb, "current_bytes": 4 * gb, "devices": 1},
             "host_threads": {"oversubscribed": True, "intended_threads": 8, "cores": 1},
-            "rebel_runtime": {
+            "runtime": {
                 "total_ns": 24_673_000,
                 "wall_fraction": 0.004,
-                "by_primitive": {"h2v": {"ns": 7_289_000, "calls": 3600}, "acquire": {"ns": 5_455_000, "calls": 2400}},
+                "by_primitive": {"h2v": {"ns": 7_289_000, "calls": 3600}, "v2h": {"ns": 5_455_000, "calls": 2400}},
             },
             "hidden_host_bounce": {
                 "by_site": {"copy_d2d_host_bounce": {"count": 1600, "bytes": 12 * kb}},
                 "total_count": 1600,
                 "total_bytes": 12 * kb,
-            },
-            "runtime_residency": {
-                "available": True,
-                "total_count": 796,
-                "by_reason": {"src_not_on_device": {"count": 796, "bytes": 0}},
-                "real_host_sync_d2h": {"count": 0, "bytes": 0},
-                "reject": {"user_actionable": {}, "internal_fallback": {"count": 796, "bytes": 0}},
             },
             "dispatch": {"cpu_fallback": 1600, "recompile_miss": 0, "cpu_fallback_ns": 41_084_000},
             "cpu_fallback_by_op": {"aten::sub.out": 800},
@@ -562,17 +511,28 @@ class TestProfilerReportFormat(TestCase):
         rep = _p.RBLNExplain.report(o)
 
         self.assertTrue(rep.isascii())
-        self.assertIn("[overhead: 3 signals]", rep)  # marker carries a factual signal-kind count
+        self.assertIn("[overhead: 2 signals]", rep)  # marker carries a factual signal-kind count
         self.assertIn("region wall", rep)  # P1-5
-        self.assertIn("device mem 5.00 GB peak, reserved", rep)  # P0-3
+        self.assertIn("device mem 5.00 GB peak, reserved)", rep)  # P0-3
+        self.assertIn("runtime: 24.673ms in copy calls (0.4% of region wall)", rep)
+        self.assertIn("h2v 7.3ms/3600  v2h 5.5ms/2400", rep)  # per-primitive, sorted by time
         self.assertIn("host_bounce/d2d_copy", rep)  # P1-6 trimmed label
         self.assertIn("1,600", rep)  # P1-7 thousands separators
-        self.assertIn("no DMA (low cost)", rep)  # P1-2 cost verdict leads the Note
-        self.assertIn(">> physical d2h (real transfer): 0", rep)  # P1-3 promoted witness line
+        self.assertIn("try: " + _p._FIX_SHORT["copy_d2d_host_bounce"], rep)  # the fix leads the Note
         self.assertIn("dispatch/cpu_fallback:", rep)  # P1-1 grouped detail block
-        # P1-4 fixed category order (NOT sorted by cost): host_bounce -> runtime -> dispatch
-        self.assertLess(rep.index("host_bounce/d2d_copy"), rep.index("runtime/v2v_slow"))
-        self.assertLess(rep.index("runtime/v2v_slow"), rep.index("dispatch/cpu_fallback"))
+        self.assertIn("where? -> rerun with explain(with_stack=True)", rep)
+        # P1-4 fixed category order (NOT sorted by cost): host_bounce -> dispatch
+        self.assertLess(rep.index("host_bounce/d2d_copy"), rep.index("dispatch/cpu_fallback"))
+
+    def test_help_resolves_report_labels(self):
+        # help() takes the label the report shows, including the trimmed host_bounce ones.
+        from torch_rbln import profiler as _p
+
+        p = _p.RBLNExplain()
+        p.dump = lambda: {"notes": []}
+        self.assertEqual(p.help("host_bounce/d2d_copy"), _p._REMEDY["copy_d2d_host_bounce"])
+        self.assertEqual(p.help("host_bounce/strided_v2v_cpu_fallback"), _p._REMEDY["strided_v2v_cpu_fallback"])
+        self.assertEqual(p.help("dispatch/cpu_fallback"), _p._REMEDY["cpu_fallback"])
 
 
 @pytest.mark.test_set_ci
@@ -609,11 +569,10 @@ class TestProfilerRegionSafety(TestCase):
 
 @pytest.mark.test_set_ci
 class TestProfilerRuntimeContract(TestCase):
-    """Guard the positional contracts with the (closed) rebel-compiler runtime. If a probe's
-    cardinality drifts (a reason/primitive/site added or removed), these FAIL in CI --
-    *detection* -- instead of the Python mapping silently truncating (zip) or mislabelling
-    counts. An equal-cardinality reorder is NOT catchable from here; that still relies on the
-    rebel-compiler pin keeping the wheel's headers and runtime in lockstep."""
+    """Guard the positional contracts with _C. If a probe's cardinality drifts (a site,
+    primitive or reason added or removed), these FAIL in CI -- *detection* -- instead of
+    the Python mapping silently truncating (zip) or mislabelling counts. An equal-cardinality
+    reorder is NOT catchable from here; the enums and these tuples must change together."""
 
     def test_positional_axis_lengths_match_runtime(self):
         from torch_rbln.profiler import (
@@ -622,9 +581,7 @@ class TestProfilerRuntimeContract(TestCase):
             _read_bounces,
             _read_fallback_reasons,
             _read_rt_timing,
-            _read_runtime,
             _RT_PRIMS,
-            _RUNTIME_REASONS,
         )
 
         # BounceSite: core binding, always present.
@@ -639,49 +596,23 @@ class TestProfilerRuntimeContract(TestCase):
         fr = _read_fallback_reasons()
         if fr:
             self.assertEqual(len(fr), len(_FALLBACK_REASON_NAMES), "fallback-reason count drifted; sync names")
-        # runtime hidden-d2h reason axis (if the runtime exposes it): our names must cover it
-        # exactly -- dump() fails fast on any mismatch (see the unit test below).
-        rtd = _read_runtime()
-        if rtd is not None:
-            self.assertEqual(
-                len(rtd["hidden_count"]),
-                len(_RUNTIME_REASONS),
-                "runtime hidden-reason count drifted; sync _RUNTIME_REASONS with the runtime axis",
-            )
 
-    def test_dump_fails_fast_on_runtime_reason_axis_drift(self):
-        # The hidden-reason axis is a positional ABI contract: report keys like src_not_on_device
-        # are only truthful if count/order/meaning line up 1:1 with _RUNTIME_REASONS. If the loaded
-        # librbln reports a different reason count, dump() must fail loudly (this build and the
-        # runtime are out of sync) rather than truncate or mislabel. Device-free: inject internal
-        # state and read dump() directly.
-        from torch_rbln.profiler import _BOUNCE_SITES, _RUNTIME_REASONS
+    def test_dump_maps_rt_timing_positionally(self):
+        # Device-free: the (ns, calls) pairs map 1:1 onto _RT_PRIMS in order, a primitive
+        # with no call is left out, and the total and wall fraction cover every primitive.
+        from torch_rbln.profiler import _BOUNCE_SITES, _RT_PRIMS
 
         p = torch.rbln.explain()
         p._bounces = [(0, 0)] * len(_BOUNCE_SITES)
         p._dispatch = (0, 0, 0, 0, 0, 0, 0)
         p._fallback_by_op, p._recompile_by_op, p._fallback_reasons = {}, {}, []
-        p._trace_by_op, p._rt_timing, p._wall_ns = {}, None, 1
-        drifted = len(_RUNTIME_REASONS) + 1  # runtime enum grew past what this build names
-        p._rt = {"hidden_count": [0] * drifted, "hidden_bytes": [0] * drifted}
-        with self.assertRaisesRegex(RuntimeError, "out of sync"):
-            p.dump()
-
-    def test_dump_maps_every_named_runtime_reason(self):
-        # The happy path: an exactly-matching axis maps 1:1 to named reasons, nothing dropped.
-        from torch_rbln.profiler import _BOUNCE_SITES, _RUNTIME_REASONS
-
-        p = torch.rbln.explain()
-        p._bounces = [(0, 0)] * len(_BOUNCE_SITES)
-        p._dispatch = (0, 0, 0, 0, 0, 0, 0)
-        p._fallback_by_op, p._recompile_by_op, p._fallback_reasons = {}, {}, []
-        p._trace_by_op, p._rt_timing, p._wall_ns = {}, None, 1
-        n = len(_RUNTIME_REASONS)
-        counts = list(range(1, n + 1))
-        p._rt = {"hidden_count": counts, "hidden_bytes": [c * 10 for c in counts]}
-        rr = p.dump()["runtime_residency"]
-        self.assertEqual(set(rr["by_reason"]), {name for name, _fix in _RUNTIME_REASONS})
-        self.assertEqual(sum(v["count"] for v in rr["by_reason"].values()), rr["total_count"])
+        p._trace_by_op, p._wall_ns = {}, 1_000_000
+        p._rt_timing = [(1000 * (i + 1), 0 if i == 1 else i + 1) for i in range(len(_RT_PRIMS))]
+        rt = p.dump()["runtime"]
+        expected = {name: {"ns": 1000 * (i + 1), "calls": i + 1} for i, name in enumerate(_RT_PRIMS) if i != 1}
+        self.assertEqual(rt["by_primitive"], expected)
+        self.assertEqual(rt["total_ns"], sum(1000 * (i + 1) for i in range(len(_RT_PRIMS))))
+        self.assertAlmostEqual(rt["wall_fraction"], rt["total_ns"] / 1_000_000)
 
 
 if __name__ == "__main__":

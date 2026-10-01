@@ -29,7 +29,7 @@ class TestEfficientZeroTensor(TestCase):
     """`aten::_efficientzerotensor` should produce a logically-zero RBLN tensor.
 
     The op is dtype-agnostic at the C++ level (it just allocates and
-    zero-marks v-memory) but we keep an explicit fp16 + int64 cross because
+    zero-fills device memory) but we keep an explicit fp16 + int64 cross because
     those are the two dtypes that actually reach the op on real workloads
     (fp16 KV scratch, int64 indexing scratch). ``SUPPORTED_DTYPES`` alone
     would only cover fp16, so we add int64 as an explicit ``@parametrize``.

@@ -197,28 +197,18 @@ void DoOnce() {
     }
   }
 
-  // No IP found. Missing-IP is no longer fatal: we can't tell single- vs
-  // multi-node here, so warn (when RCCL_PORT_GEN is set) and defer the
-  // decision to the runtime. See the header for the full contract.
-  const char* port_gen_env = std::getenv("RCCL_PORT_GEN");
-  const bool use_autoport = (port_gen_env != nullptr && port_gen_env[0] != '\0');
+  // No IP found. Missing-IP is not fatal: we can't tell single- vs multi-node
+  // here, so defer the decision to the runtime. See the header for the contract.
   const char* final_ip = std::getenv(kEnvRdmaIp);
-  const bool have_ip = (final_ip != nullptr && final_ip[0] != '\0');
-  if (have_ip) {
+  if (final_ip != nullptr && final_ip[0] != '\0') {
     return;
   }
-  if (use_autoport) {
-    RBLN_LOG_WARN(
-        "{} RCCL_PORT_GEN set but {} unresolved. Single-node runs continue; "
-        "multi-node will fail at RCCL init. To pin it set {} (HCA device name "
-        "as listed under /sys/class/infiniband) or {} (IPv4 string) explicitly.",
-        kDiagPrefix,
-        kEnvRdmaIp,
-        kEnvRdmaHca,
-        kEnvRdmaIp);
-    return;
-  }
-  RDMA_DIAG("{} unresolved, but RCCL_PORT_GEN is not set -- RDMA IP not required, continuing", kEnvRdmaIp);
+  RDMA_DIAG(
+      "{} unresolved. Single-node runs continue; multi-node will fail at RCCL init. To pin it set {} "
+      "(HCA device name as listed under /sys/class/infiniband) or {} (IPv4 string) explicitly.",
+      kEnvRdmaIp,
+      kEnvRdmaHca,
+      kEnvRdmaIp);
 }
 
 } // namespace

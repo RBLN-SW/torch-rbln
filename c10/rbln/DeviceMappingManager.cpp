@@ -1,7 +1,8 @@
 #include <c10/rbln/DeviceMappingManager.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
-#include <rebel/runtime/api/rbln_runtime_api.h>
+#include <rbln/runtime/device.h>
+#include <rbln/runtime/flags.h>
 
 #include <atomic>
 #include <cctype>
@@ -67,8 +68,8 @@ DeviceMappingManager& DeviceMappingManager::getInstance() {
 // Construction must not touch the environment or the runtime, so planning is lazy
 // (ensurePlanned): a function-local static whose constructor throws is re-attempted on the
 // next call ([stmt.dcl]/4), and c10::call_once leaves its flag unset on a throwing
-// initializer (c10/util/CallOnce.h), which would re-run the whole mapping init --
-// rbln_register_device_id() included -- on every query under a malformed RBLN_* config.
+// initializer (c10/util/CallOnce.h), which would re-run the whole mapping init -- the NPU
+// probe included -- on every query under a malformed RBLN_* config.
 DeviceMappingManager::DeviceMappingManager() = default;
 
 bool DeviceMappingManager::isValidDeviceGroupSize(size_t size) const {
@@ -131,22 +132,7 @@ RblnNpuMappingEnvDisplay getRblnNpuMappingEnvDisplay() {
 }
 
 bool dummyDeviceEnabled() {
-  const char* env = std::getenv("RBLN_DUMMY_DEVICE");
-  if (env == nullptr || env[0] == '\0') {
-    return false;
-  }
-  // Truthy spellings of the RBLN_DUMMY_DEVICE boolean flag (non-boolean values
-  // are already rejected by the runtime at startup).
-  std::string s(env);
-  const auto first = s.find_first_not_of(" \t\n\r\f\v");
-  if (first == std::string::npos) {
-    return false;
-  }
-  s = s.substr(first, s.find_last_not_of(" \t\n\r\f\v") - first + 1);
-  for (char& c : s) {
-    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-  }
-  return s == "1" || s == "true" || s == "t" || s == "yes" || s == "y" || s == "on";
+  return ::rbln::runtime::flags::kDummyDevice.value();
 }
 
 std::vector<std::vector<int>> DeviceMappingManager::parseDeviceMap(const std::string& device_map_str) {
@@ -230,8 +216,8 @@ std::vector<std::vector<int>> DeviceMappingManager::parseDeviceMap(const std::st
 }
 
 void DeviceMappingManager::planLogicalDevice(int logical_device_index, const std::vector<int>& physical_ids) const {
-  // Bookkeeping only. rbln_register_device_id() lives in commit(); see the class
-  // comment for why an availability query must not reach it.
+  // Bookkeeping only. Opening the NPUs lives in commit(); see the class comment for why an
+  // availability query must not reach it.
   assigned_devices_.insert(static_cast<c10::DeviceIndex>(logical_device_index));
 
   DeviceMapping mapping;
@@ -254,9 +240,8 @@ void DeviceMappingManager::commit() {
     if (plan_state_.load(std::memory_order_relaxed) == PlanState::Committed) {
       return;
     }
-    // A part-way failure left devices claimed with no way to release them, and the runtime's
-    // rbln_register_device_id() returns success for an id it already holds -- so a retry
-    // against a rebuilt plan would bind this layer to a mapping the runtime does not have.
+    // A part-way failure left NPUs open with no way to release them, so a retry against a
+    // rebuilt plan would hold NPUs the new plan does not name.
     RBLN_CHECK(plan_state_.load(std::memory_order_relaxed) != PlanState::Failed, "{}", commit_error_);
     ensurePlannedLocked();
     // Loud here (RBLN_CHECK, not the quiet variant): this is the point of use. Its
@@ -268,25 +253,28 @@ void DeviceMappingManager::commit() {
         // Kept as DeviceIndex; widened only at each use. Binding it to an `int` local trips
         // bugprone-signed-char-misuse, since DeviceIndex is a signed char.
         const auto logical_device = mapping.logical_device;
-        // rbln_register_device_id takes int*, so a non-const copy is required.
-        std::vector<int> physical_ids = mapping.physical_device_ids;
-        const int rc = rbln_register_device_id(
-            static_cast<int>(logical_device), physical_ids.data(), static_cast<int>(physical_ids.size()));
-        // No rollback is possible: the runtime exposes no unregister call, so devices claimed
-        // by earlier iterations stay claimed. Name them, so the leak is visible.
-        const std::string already_claimed = (logical_device > 0)
-            ? fmt::format(
-                  " Note: rbln:0..{} were already registered by this process and remain claimed.",
-                  static_cast<int>(logical_device) - 1)
-            : std::string();
-        RBLN_CHECK(
-            rc == 0,
-            "rbln_register_device_id failed for rbln:{} on physical NPU(s) [{}] (rc={}); the device(s) may be in use "
-            "by another process or hold stale allocations. Free the device(s) or adjust RBLN_DEVICES.{}",
-            static_cast<int>(logical_device),
-            fmt::join(physical_ids, ","),
-            rc,
-            already_claimed);
+        // A dummy device has no NPU behind it; its ids are shape markers.
+        for (const int physical_id : dummyDeviceEnabled() ? std::vector<int>{} : mapping.physical_device_ids) {
+          try {
+            ::rbln::runtime::Device::open(systemNpu(physical_id));
+          } catch (const std::exception& e) {
+            // No rollback: NPUs opened by earlier iterations stay open. Name them, so the
+            // hold is visible.
+            const std::string already_open = (logical_device > 0)
+                ? fmt::format(
+                      " Note: rbln:0..{} were already opened by this process and remain held.",
+                      static_cast<int>(logical_device) - 1)
+                : std::string();
+            RBLN_CHECK(
+                false,
+                "cannot open NPU {} for rbln:{} ({}); the device may be in use by another process. Free the "
+                "device or adjust RBLN_DEVICES.{}",
+                systemNpu(physical_id),
+                static_cast<int>(logical_device),
+                e.what(),
+                already_open);
+          }
+        }
       }
     } catch (const std::exception& e) {
       // msg() is the message alone; what() embeds a backtrace, which the RBLN_CHECK that
@@ -307,6 +295,15 @@ void DeviceMappingManager::commit() {
     plan_state_.store(PlanState::Committed, std::memory_order_release);
     RBLN_LOG_DEBUG("Committed {} logical device(s) to the runtime", device_mapping_table_.size());
   }
+}
+
+uint32_t DeviceMappingManager::systemNpu(int physical_device_id) const {
+  RBLN_CHECK(
+      physical_device_id >= 0 && static_cast<size_t>(physical_device_id) < visible_npus_.size(),
+      "physical device {} is not one of the {} NPU(s) this process sees",
+      physical_device_id,
+      visible_npus_.size());
+  return visible_npus_[physical_device_id];
 }
 
 bool DeviceMappingManager::hasFailedCommit() const noexcept {
@@ -475,18 +472,20 @@ void DeviceMappingManager::initializeDummyDevices() const {
 std::string DeviceMappingManager::envSignature() {
   // Any change to one of these changes the plan. Values are length-prefixed so that
   // e.g. RBLN_DEVICES="0|" and RBLN_DEVICES="0", RBLN_DEVICE_MAP="" cannot collide.
-  // RBLN_VISIBLE_DEVICES is the runtime's alias of RBLN_DEVICES and selects the visible
-  // pool just as well, so omitting it cached the plan against a pool already changed.
+  // RBLN_DEVICES counts as the text its flag reads, under its name or its alias.
   //
   // RBLN_DUMMY_DEVICE is deliberately absent: it is startup-only, since the runtime
-  // registers it FlagMutability::Sealed and is_dummy_device() caches for the process.
+  // registers it FlagMutability::kSealed and is_dummy_device() caches for the process.
   std::string signature;
-  for (const char* name : {"RBLN_DEVICES", "RBLN_VISIBLE_DEVICES", "RBLN_DEVICE_MAP", "RBLN_NPUS_PER_DEVICE"}) {
-    const char* value = std::getenv(name);
-    const std::string text = (value != nullptr) ? std::string(value) : std::string();
+  auto add = [&signature](const std::string& text) {
     signature += std::to_string(text.size());
     signature += ':';
     signature += text;
+  };
+  add(::rbln::runtime::flags::kDevices.raw().value_or(""));
+  for (const char* name : {"RBLN_DEVICE_MAP", "RBLN_NPUS_PER_DEVICE"}) {
+    const char* value = std::getenv(name);
+    add(value != nullptr ? value : "");
   }
   return signature;
 }
@@ -543,14 +542,41 @@ void DeviceMappingManager::ensurePlannedLocked() const {
   }
 }
 
+std::vector<uint32_t> DeviceMappingManager::visibleNpus() {
+  std::vector<uint32_t> npus;
+  const auto& visible = ::rbln::runtime::flags::kDevices;
+  if (visible.isSet()) {
+    for (const uint32_t npu : visible.value()) {
+      if (!::rbln::runtime::Device::exists(npu)) {
+        RBLN_LOG_WARN("RBLN_DEVICES names NPU {}, which this host does not have; leaving it out", npu);
+        continue;
+      }
+      npus.push_back(npu);
+    }
+    return npus;
+  }
+  uint32_t count = 0;
+  try {
+    count = ::rbln::runtime::Device::count();
+  } catch (const std::exception& e) {
+    RBLN_CHECK_QUIET(
+        false, "cannot count NPUs; the RBLN kernel driver may not be loaded or the device may be unavailable: {}",
+        e.what());
+  }
+  for (uint32_t npu = 0; npu < count; ++npu) {
+    npus.push_back(npu);
+  }
+  return npus;
+}
+
 void DeviceMappingManager::buildPlan() const {
   RBLN_LOG_DEBUG("Planning RBLN device mapping");
 
   // Without the runtime nothing can execute, so report 0 devices. Planning does not need it;
   // commit() does, and every caller treats "no runtime" as "no device".
-  if (!rbln_runtime_available()) {
+  if (!dummyDeviceEnabled() && !::rbln::runtime::Device::available()) {
     RBLN_LOG_INFO(
-        "RBLN runtime not loaded; planning 0 logical device(s). Device access will fail at the point of use.");
+        "RBLN driver not loaded; planning 0 logical device(s). Device access will fail at the point of use.");
     buildDeviceTopology();
     return;
   }
@@ -561,15 +587,8 @@ void DeviceMappingManager::buildPlan() const {
     return;
   }
 
-  // The runtime is the only authority on how many NPUs RBLN_DEVICES leaves visible;
-  // counting /dev/rbln* ourselves would be a second source of truth for something it owns.
-  // RBLN_DEVICES is named as a cause because the runtime narrows its own detail
-  // ("Invalid RBLN_DEVICES value: ...") to an RBLNRetCode, leaving only its log.
-  int physical_device_count = 0;
-  RBLN_CHECK_QUIET(
-      !rbln_get_device_count(&physical_device_count),
-      "rbln_get_device_count failed; the RBLN kernel driver may not be loaded, the device may be unavailable, or "
-      "RBLN_DEVICES / RBLN_VISIBLE_DEVICES may hold an invalid value (the runtime logs the detail)");
+  visible_npus_ = visibleNpus();
+  const int physical_device_count = static_cast<int>(visible_npus_.size());
   RBLN_LOG_DEBUG("Found {} physical NPU(s)", physical_device_count);
 
   // No physical NPU: plan 0 logical devices instead of failing (like

@@ -1,6 +1,5 @@
 # Owner(s): ["module: PrivateUse1"]
 
-import sys
 from unittest.mock import patch
 
 import pytest
@@ -82,12 +81,11 @@ class TestArchXfailMarkers(TestCase):
 
 @pytest.mark.test_set_ci
 class TestArchResolutionFailure(TestCase):
-    """Only ``None`` from the runtime is ``"unknown"``; any failure propagates.
+    """Only a host with no NPU to ask is ``"unknown"``; any failure propagates.
 
-    A host with no NPU and a broken lookup used to answer the same
-    ``"unknown"``, and every caller of ``get_device_arch`` is an architecture
-    gate, so the second one turned all of them off at once with nothing
-    failing.
+    Every caller of ``get_device_arch`` is an architecture gate, so a failed
+    lookup answering ``"unknown"`` would turn all of them off at once with
+    nothing failing.
     """
 
     def setUp(self) -> None:
@@ -96,18 +94,19 @@ class TestArchResolutionFailure(TestCase):
         self.addCleanup(get_device_arch.cache_clear)
 
     def test_no_device_answers_unknown(self) -> None:
-        # What rebel returns for an index no device claims.
-        with patch("rebel.device_info.get_npu_name", return_value=None):
+        with patch("torch_rbln._C.is_dummy_device", return_value=False), patch("torch_rbln._C.device_count", return_value=0):
             self.assertEqual(get_device_arch(), "unknown")
 
-    def test_moved_entry_point_raises(self) -> None:
-        # None in sys.modules is what CPython turns a moved module into.
-        with patch.dict(sys.modules, {"rebel.device_info": None}):
-            with self.assertRaises(ImportError):
-                get_device_arch()
+    def test_a_dummy_device_answers_unknown(self) -> None:
+        with patch("torch_rbln._C.is_dummy_device", return_value=True):
+            self.assertEqual(get_device_arch(), "unknown")
 
     def test_lookup_error_propagates(self) -> None:
-        with patch("rebel.device_info.get_npu_name", side_effect=RuntimeError("device query failed")):
+        with (
+            patch("torch_rbln._C.is_dummy_device", return_value=False),
+            patch("torch_rbln._C.device_count", return_value=1),
+            patch("torch_rbln._C.get_device_properties", side_effect=RuntimeError("device query failed")),
+        ):
             with self.assertRaises(RuntimeError):
                 get_device_arch()
 

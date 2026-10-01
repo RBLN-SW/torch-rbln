@@ -36,7 +36,7 @@ import sys
 import textwrap
 
 import pytest
-import rebel  # noqa: F401  -- defines the rbln_custom_ops schemas the decoder calls
+import rbln  # noqa: F401  -- defines the rbln_custom_ops schemas the decoder calls
 import torch
 
 from test.utils import requires_physical_devices, SUPPORTED_DTYPES
@@ -205,17 +205,17 @@ with torch.no_grad():
     steps = [step_inputs([tok], len(PROMPT) + i, dev, dtype) for i, tok in enumerate(DECODE_TOKENS)]
     decode = [run(*steps[0], k_cache, v_cache)]
     torch.rbln.synchronize()
-    alloc0 = torch.rbln.memory_stats(dev).get("allocated.total_allocated")
+    alloc0 = torch.rbln.memory_stats(dev).get("allocated_bytes.all.allocated")
     with rprof.explain() as region:
         for step in steps[1:]:
             decode.append(run(*step, k_cache, v_cache))
         torch.rbln.synchronize()
-    alloc1 = torch.rbln.memory_stats(dev).get("allocated.total_allocated")
-    rr = region.dump()["runtime_residency"]
+    alloc1 = torch.rbln.memory_stats(dev).get("allocated_bytes.all.allocated")
+    report = region.dump()
+    calls = {name: v["calls"] for name, v in report["runtime"]["by_primitive"].items()}
     out["steady"] = {
-        "available": rr["available"],
-        "d2h_count": rr.get("real_host_sync_d2h", {}).get("count"),
-        "h2d_bytes": rr.get("real_host_sync_h2d", {}).get("bytes"),
+        "host_bounces": report["hidden_host_bounce"]["total_count"],
+        "d2h_copies": calls.get("v2h", 0) + calls.get("v2h_multi", 0),
         "cache_bytes": cache_bytes,
         "alloc_delta": None if alloc0 is None or alloc1 is None else alloc1 - alloc0,
     }
@@ -382,12 +382,11 @@ def test_sharded_kv_cache_lifecycle_and_parity(dtype):
     cpu = _cpu_reference()
 
     # Lifecycle: steady decode over the warm, sharded cache never re-lays it out. A re-layout
-    # syncs the cache to the host (a real d2h) and allocates a cache-sized replacement; the
-    # legitimate per-step traffic is the step's inputs and its logits, far below the cache.
+    # reads the cache back to the host (a device->host copy) or allocates a cache-sized
+    # replacement; the legitimate per-step allocations are the step's results, far below the cache.
     steady = rsd["steady"]
-    assert steady["available"], "runtime residency counters unavailable; torch-rbln and librbln out of sync?"
-    assert steady["d2h_count"] == 0, f"device->host sync during steady decode (cache bounced through host): {steady}"
-    assert steady["h2d_bytes"] is None or steady["h2d_bytes"] < steady["cache_bytes"] // 4, steady
+    assert steady["host_bounces"] == 0, f"host round trip during steady decode: {steady}"
+    assert steady["d2h_copies"] == 0, f"device->host copy during steady decode (cache read back to the host): {steady}"
     assert steady["alloc_delta"] is None or steady["alloc_delta"] < steady["cache_bytes"] // 4, (
         f"device allocation grew by a cache-sized amount during steady decode (re-allocation): {steady}"
     )

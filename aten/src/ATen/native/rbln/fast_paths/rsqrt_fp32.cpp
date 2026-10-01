@@ -5,8 +5,8 @@
 // the op through TensorIterator + the boxed CPU dispatcher costs
 // ~30-50 µs/call from framework overhead alone, dwarfing the actual
 // rsqrt math on the buffer sizes seen by RMSNorm (~1k elements). This
-// handler skips both and emits the rsqrt loop directly into the borrowed
-// host buffer of the out tensor.
+// handler skips both and emits the rsqrt loop directly into the host
+// buffer of the out tensor.
 #include <ATen/core/Tensor.h>
 #include <ATen/native/rbln/RBLNCPUFastPaths.h>
 #include <c10/util/ArrayRef.h>

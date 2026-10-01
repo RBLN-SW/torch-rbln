@@ -26,7 +26,7 @@ def _run_allreduce_with_unset_control_plane_ips(rank: int, world_size: int, back
         assert os.environ.get("RBLN_ROOT_IP") == "127.0.0.1"
         assert os.environ.get("RBLN_LOCAL_IP") == "127.0.0.1"
 
-        tensor = torch.full([64], rank + 1.0, dtype=torch.float16, device=torch.device(f"rbln:{rank}"))
+        tensor = torch.full([64], rank + 1.0, dtype=torch.bfloat16, device=torch.device(f"rbln:{rank}"))
         dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
         expected = sum(range(1, world_size + 1))
         assert tensor[0] == expected, f"all_reduce failed on rank {rank}: expected={expected}, actual={tensor[0]}"
@@ -49,7 +49,6 @@ def test_rbln_ccl_defaults_control_plane_ips_when_unset(monkeypatch):
     monkeypatch.delenv("RBLN_ROOT_IP", raising=False)
     monkeypatch.delenv("RBLN_LOCAL_IP", raising=False)
     monkeypatch.setenv("MASTER_ADDR", "127.0.0.1")
-    monkeypatch.setenv("RCCL_FORCE_EXPORT_MEM", "1")
     monkeypatch.setenv("TORCH_RBLN_C10D_ASYNC", "0")
     configure_master_port_for_rccl_tests()
 

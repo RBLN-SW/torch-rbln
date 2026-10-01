@@ -43,8 +43,7 @@ namespace torch_rbln::detail {
 // Idempotent (c10::once_flag inside). Set RBLN_DISABLE_AUTO_RDMA_IP=1
 // to skip every step above and leave the environment alone.
 //
-// Never throws: when no IP can be resolved, logs a warning (if
-// RCCL_PORT_GEN is set) or an info diagnostic (otherwise) and lets
+// Never throws: when no IP can be resolved, logs a diagnostic and lets
 // librbln-ccl decide whether to fail at RCCL init -- recent
 // librbln-ccl no longer requires RBLN_RDMA_IP on single-node runs.
 void MaybeAutoDiscoverRbnRdmaIp();

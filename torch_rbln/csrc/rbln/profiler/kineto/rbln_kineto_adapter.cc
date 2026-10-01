@@ -1,6 +1,5 @@
-// libkineto plugin coupling a torch.profiler session with one rbln profiling
-// session, through the rbln_kineto_* C-ABI (rebel/runtime/api/rbln_kineto_api.h).
-// start()/stop() drive the exporter via the C API
+// libkineto plugin coupling a torch.profiler session with the activities the rbln runtime
+// records meanwhile. start()/stop() begin and end the recording.
 
 #include <torch_rbln/csrc/rbln/profiler/kineto/rbln_kineto_adapter.h>
 
@@ -14,15 +13,17 @@
 #include <kineto/libkineto.h>
 #include <kineto/output_base.h>
 
+#include <rbln/runtime/activity.h>
+#include <rbln/runtime/flags.h>
+#include <torch_rbln/csrc/rbln/profiler/kineto/rbln_kineto_emitter.h>
+
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <set>
 #include <string>
 #include <vector>
-
-#include <rebel/runtime/api/rbln_kineto_api.h>
-#include <torch_rbln/csrc/rbln/profiler/kineto/rbln_kineto_emitter.h>
 
 namespace rbln::profiler::kineto {
 
@@ -59,14 +60,7 @@ class RblnActivityProfilerSession : public ::libkineto::IActivityProfilerSession
     anchor_system_ns_ = now_ns(std::chrono::system_clock::now());
     start_ts_ns_ = anchor_system_ns_;
     clock_offset_ns_ = anchor_system_ns_ - anchor_steady_ns_;
-    const RBLNRetCode ret = rbln_kineto_begin_session();
-    if (ret != RBLNRetCode_SUCCESS) {
-      RBLN_LOG_WARN(
-          "rbln_kineto_begin_session failed with error code: {}; skipping rbln profiling for this session",
-          static_cast<int>(ret));
-      status_ = ::libkineto::TraceStatus::ERROR;
-      return;
-    }
+    ::rbln::runtime::beginActivities();
     session_started_ = true;
     status_ = ::libkineto::TraceStatus::RECORDING;
   }
@@ -78,21 +72,9 @@ class RblnActivityProfilerSession : public ::libkineto::IActivityProfilerSession
     }
     session_started_ = false;
     status_ = ::libkineto::TraceStatus::PROCESSING;
-    projected_ = ProjectedKinetoTrace{};
-    int32_t exported = 0;
-    const RBLNRetCode ret = rbln_kineto_end_session_and_export(&sink_thunk, this, &exported);
-    if (ret != RBLNRetCode_SUCCESS) {
-      RBLN_LOG_WARN(
-          "rbln_kineto_end_session_and_export failed with error code: {}; dropping rbln trace for this session",
-          static_cast<int>(ret));
-      status_ = ::libkineto::TraceStatus::ERROR;
-      return;
-    }
+    convert_activities_to_kineto(
+        ::rbln::runtime::endActivities(), clock_offset_ns_, default_trace_span(), &projected_);
     status_ = ::libkineto::TraceStatus::READY;
-  }
-
-  void on_export(const RblnKinetoExport* exp) {
-    convert_export_to_kineto(exp, clock_offset_ns_, default_trace_span(), &projected_);
   }
 
   std::vector<std::string> errors() override {
@@ -127,16 +109,12 @@ class RblnActivityProfilerSession : public ::libkineto::IActivityProfilerSession
   }
 
  private:
-  static void sink_thunk(const RblnKinetoExport* exp, void* user_data) {
-    static_cast<RblnActivityProfilerSession*>(user_data)->on_export(exp);
-  }
-
   ProjectedKinetoTrace projected_;
   int64_t anchor_steady_ns_ = 0;
   int64_t anchor_system_ns_ = 0;
   int64_t clock_offset_ns_ = 0;
   int64_t start_ts_ns_ = 0; // metadata-event timestamp for device/resource rows
-  bool session_started_ = false; // begin_session succeeded; gates stop()'s end call
+  bool session_started_ = false; // gates stop()'s end call
 };
 
 class RblnActivityProfiler : public ::libkineto::IActivityProfiler {
@@ -157,18 +135,10 @@ class RblnActivityProfiler : public ::libkineto::IActivityProfiler {
   std::unique_ptr<::libkineto::IActivityProfilerSession> configure(
       const std::set<::libkineto::ActivityType>& /*activity_types*/,
       const ::libkineto::Config&) override {
-    // Create a session only when rbln profiling is actually running
-    // (rbln_kineto_is_active()), not based on the requested activity types: pytorch
-    // always includes PRIVATEUSE1_RUNTIME/DRIVER in its default set, so the request
-    // can't tell us whether the user actually wants rbln profiling.
-    int32_t active = 0;
-    const RBLNRetCode ret = rbln_kineto_is_active(&active);
-    if (ret != RBLNRetCode_SUCCESS) {
-      RBLN_LOG_WARN(
-          "rbln_kineto_is_active failed with error code: {}; not creating a profiling session", static_cast<int>(ret));
-      return nullptr;
-    }
-    if (!active) {
+    // Create a session only when rbln profiling is asked for (RBLN_PROFILER=1), not based
+    // on the requested activity types: pytorch always includes PRIVATEUSE1_RUNTIME/DRIVER
+    // in its default set, so the request can't tell us whether the user wants it.
+    if (!::rbln::runtime::flags::kProfiler.value()) {
       RBLN_LOG_INFO("rbln profiling is not active; skipping rbln activities for this torch.profiler session");
       return nullptr;
     }

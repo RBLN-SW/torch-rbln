@@ -461,11 +461,11 @@ TEST_F(ProcessGroupRBLNTest, TestWorkSourceRank) {
 }
 
 // ============================================================================
-// World Size 1 RCCL Init Tests
+// World Size 1 Tests
 // ============================================================================
 
 /**
- * Test world size 1 scenarios - verifies RCCL initialization is skipped
+ * Test world size 1 scenarios - a group of one makes no communicator
  */
 TEST_F(ProcessGroupRBLNTest, TestWorldSize1Broadcast) {
   // Create tensor for broadcast test
@@ -526,22 +526,10 @@ TEST_F(ProcessGroupRBLNTest, TestWorldSize1Allreduce) {
 // }
 
 // ============================================================================
-// rccl_unique_id store set/get round-trip (broadcastUniqueRCCLID serialization)
+// Group id store set/get round-trip
 // ============================================================================
 
-#ifndef RCCL_IP_STR_LEN
-#define RCCL_IP_STR_LEN 16
-#endif
-
-struct TestRcclUniqueIdLayout {
-  std::array<char, RCCL_IP_STR_LEN> root_ip;
-  std::array<char, RCCL_IP_STR_LEN> self_ip;
-  std::array<char, RCCL_IP_STR_LEN> self_rdma_ip;
-  int root_port;
-  int rdma_base_port;
-};
-
-TEST_F(ProcessGroupRBLNTest, TestRcclUniqueIdStoreRoundTrip) {
+TEST_F(ProcessGroupRBLNTest, TestGroupIdStoreRoundTrip) {
   const std::string storeKey = "rbln_rccl_uid_0";
   const std::string host = "127.0.0.1";
   constexpr uint16_t kTestPort = 29600;
@@ -557,31 +545,16 @@ TEST_F(ProcessGroupRBLNTest, TestRcclUniqueIdStoreRoundTrip) {
   clientOpts.isServer = false;
   auto clientStore = c10::make_intrusive<TCPStore>(host, clientOpts);
 
-  TestRcclUniqueIdLayout id_original{};
-  std::snprintf(id_original.root_ip.data(), id_original.root_ip.size(), "192.168.1.1");
-  std::snprintf(id_original.self_ip.data(), id_original.self_ip.size(), "192.168.1.%d", 0);
-  std::snprintf(id_original.self_rdma_ip.data(), id_original.self_rdma_ip.size(), "10.0.0.1");
-  id_original.root_port = 12345;
-  id_original.rdma_base_port = 54321;
+  // A group id is raw bytes: addresses padded with NULs, then ports.
+  std::string id(56, '\0');
+  std::snprintf(id.data(), 16, "192.168.1.1");
+  std::snprintf(id.data() + 16, 16, "10.0.0.1");
+  const std::array<int, 2> ports = {12345, 54321};
+  std::memcpy(id.data() + 48, ports.data(), sizeof(ports));
 
-  std::vector<uint8_t> vec(
-      reinterpret_cast<uint8_t*>(&id_original),
-      reinterpret_cast<uint8_t*>(&id_original) + sizeof(TestRcclUniqueIdLayout));
-  serverStore->set(storeKey, vec);
-
-  std::vector<uint8_t> vec_from_store = clientStore->get(storeKey);
-  ASSERT_EQ(vec_from_store.size(), sizeof(TestRcclUniqueIdLayout)) << "TCPStore returned wrong size for rccl_unique_id";
-
-  TestRcclUniqueIdLayout id_restored{};
-  std::memcpy(&id_restored, vec_from_store.data(), vec_from_store.size());
-
-  EXPECT_EQ(std::string(id_original.root_ip.data()), std::string(id_restored.root_ip.data()));
-  EXPECT_EQ(std::string(id_original.self_ip.data()), std::string(id_restored.self_ip.data()));
-  EXPECT_EQ(std::string(id_original.self_rdma_ip.data()), std::string(id_restored.self_rdma_ip.data()));
-  EXPECT_EQ(id_original.root_port, id_restored.root_port);
-  EXPECT_EQ(id_original.rdma_base_port, id_restored.rdma_base_port);
-  EXPECT_EQ(0, std::memcmp(&id_original, &id_restored, sizeof(TestRcclUniqueIdLayout)))
-      << "rccl_unique_id bytes differ after TCPStore set (server) / get (client)";
+  serverStore->set(storeKey, std::vector<uint8_t>(id.begin(), id.end()));
+  auto bytes = clientStore->get(storeKey);
+  EXPECT_EQ(std::string(bytes.begin(), bytes.end()), id) << "a group id differs after TCPStore set (server) / get (client)";
 }
 
 } // namespace c10d

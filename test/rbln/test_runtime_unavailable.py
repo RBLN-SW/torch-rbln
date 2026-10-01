@@ -4,11 +4,11 @@
 the device runtime is absent or torn down, and must NEVER
 segfault.
 
-Background: torch-rbln links ``librbln.so``, which loads the device runtime lazily.
-When the runtime is missing (compile / CPU-only / CI nodes) or has been unmapped at
-interpreter shutdown, a raw ``rbln_*`` call dereferences a null handle and SEGFAULTs
--- unlike CUDA, where a missing driver merely returns an error code. ``c10::rbln::runtime_available()`` is the
-single source of truth that lets best-effort ops no-op, mandatory ops raise a
+Background: torch-rbln links ``librbln_rt.so``, which loads the NPU driver
+(``librbln-thunk.so``) on first use. The driver is missing on compile / CPU-only / CI
+nodes, and at interpreter shutdown the runtime may already be torn down; a call into
+either must fail cleanly or not happen, never crash. ``c10::rbln::runtime_available()`` is
+the single source of truth that lets best-effort ops no-op, mandatory ops raise a
 clean error, and availability probes return False without raising.
 
 These tests exercise the whole gate WITHOUT an actually-absent runtime by flipping the
@@ -68,18 +68,38 @@ def _assert_ok(self, result: subprocess.CompletedProcess, marker: str) -> None:
     )
 
 
-def _build_ld_preload_shim(tmp_dir: str, c_source: str):
-    """Compile a tiny LD_PRELOAD shim that interposes librbln's C-linkage entry points
-    (used to force / observe the runtime calls). Returns the .so path, or None if no C
-    compiler is available (test skips)."""
-    cc = shutil.which("cc") or shutil.which("gcc")
-    if cc is None:
+# rbln::runtime::Device::open(uint32_t), declared as librbln_rt.so exports it. torch-rbln
+# opens an NPU only through it, so an LD_PRELOAD definition sees (or fails) every open.
+_DEVICE_OPEN_DECLARATION = """
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <dlfcn.h>
+#include <memory>
+#include <stdexcept>
+namespace rbln::runtime {
+class Device {
+ public:
+  static std::shared_ptr<Device> open(uint32_t id);
+};
+}
+using rbln::runtime::Device;
+"""
+
+
+def _build_device_open_shim(tmp_dir: str, definition: str):
+    """Compile an LD_PRELOAD shim that defines ``Device::open`` as ``definition`` does, to
+    observe or fail the NPU opens. Returns the .so path, or None without a C++ compiler."""
+    cxx = shutil.which("c++") or shutil.which("g++")
+    if cxx is None:
         return None
-    src = os.path.join(tmp_dir, "shim.c")
+    src = os.path.join(tmp_dir, "shim.cpp")
     so = os.path.join(tmp_dir, "shim.so")
     with open(src, "w") as handle:
-        handle.write(c_source)
-    build = subprocess.run([cc, "-shared", "-fPIC", "-o", so, src], capture_output=True, text=True)
+        handle.write(_DEVICE_OPEN_DECLARATION + definition)
+    build = subprocess.run(
+        [cxx, "-std=c++17", "-shared", "-fPIC", "-o", so, src, "-ldl"], capture_output=True, text=True
+    )
     return so if build.returncode == 0 else None
 
 
@@ -131,32 +151,14 @@ class TestRuntimeUnavailable(TestCase):
         )
         _assert_ok(self, result, "GATE_OK")
 
-    def test_file_offloading_no_ops_when_runtime_unavailable(self):
-        """set_file_offloading_enabled (torch.rbln.offload()) is a global toggle
-        reachable with NO prior allocation -- unlike the copy/borrow leaves, which
-        are downstream of a gated malloc -- so it is gated directly: no-op, never a
-        SEGFAULT, when the runtime is unavailable."""
-        result = _run_subprocess(
-            """
-            C._set_runtime_shutting_down(True)
-            assert C.runtime_available() is False
-            C._set_file_offloading_enabled(True)   # best-effort: no-op, must not raise/crash
-            C._set_file_offloading_enabled(False)
-            print("OFFLOAD_OK")
-            """
-        )
-        _assert_ok(self, result, "OFFLOAD_OK")
-
     def test_release_offload_temp_storage_no_ops_when_runtime_unavailable(self):
         """torch.rbln.release_offload_temp_storage() runs on the shutdown path, after the
-        runtime may already be gone, so it is gated like the offload toggle: it reports 0
-        files removed instead of dereferencing a dead runtime handle."""
+        runtime may already be gone: it reports 0 files removed and never reaches the runtime."""
         result = _run_subprocess(
             """
             C._set_runtime_shutting_down(True)
             assert C.runtime_available() is False
             assert torch.rbln.release_offload_temp_storage() == 0
-            assert C._release_offload_temp_storage() == 0
             print("RELEASE_OK")
             """
         )
@@ -179,9 +181,9 @@ class TestRuntimeUnavailable(TestCase):
     def test_runtime_absent_degrades_to_zero_devices(self):
         """When the RBLN runtime is genuinely absent, device enumeration degrades to
         0 (nothrow) and is_available() is False -- never a SEGFAULT -- mirroring
-        torch.cuda on a host with no driver. The fix is at the source
-        (DeviceMappingManager gates the raw rbln_get_device_count() on rbln_runtime_available()),
-        so a missing runtime collapses into the well-tested no-device path. Skipped where
+        torch.cuda on a host with no driver. DeviceMappingManager asks the runtime for a
+        count only once rbln::runtime::Device::available() says the driver loads, so a missing
+        runtime collapses into the well-tested no-device path. Skipped where
         the runtime is present (e.g. device-bearing CI); the shutdown-flag tests above
         cover the torn-down half of the gate hardware-free."""
         if torch_rbln._C.runtime_loaded() or torch_rbln._C.is_dummy_device():
@@ -281,26 +283,37 @@ class TestRuntimeUnavailable(TestCase):
     @requires_physical_devices(1)
     def test_best_effort_ops_noop_without_live_context(self):
         """The reported regression: a process with the runtime + a device mapping but NO
-        live context (no allocation yet — the vLLM EngineCore parent) must NOT dispatch
-        the runtime call. empty_cache/reset_* are gated by the per-process context flag
-        (initialized()/hasPrimaryContext()), so they no-op without fabricating a context.
-        Proven with a shim that records whether rbln_empty_cache is actually invoked."""
+        live context (no allocation yet — the vLLM EngineCore parent) must not open the NPU,
+        which would hold it against the process meant to use it. empty_cache/reset_*/stats
+        are gated by the per-process context flag (initialized()/hasPrimaryContext()), so
+        they no-op without opening anything. A shim records every Device::open; a real
+        allocation at the end proves the shim sees the opens it is there to catch."""
         with tempfile.TemporaryDirectory() as tmp:
-            marker = os.path.join(tmp, "called")
-            # Shim records an invocation of any of the gated ops; if the gate works, none
-            # are ever called (the marker file is never created).
-            so = _build_ld_preload_shim(
+            so = _build_device_open_shim(
                 tmp,
-                "#include <stdio.h>\n#include <stdlib.h>\n"
-                'static void mark(void){const char*p=getenv("SHIM_MARKER"); if(p){FILE*f=fopen(p,"a"); if(f)fclose(f);}}\n'
-                "int rbln_empty_cache(int d){(void)d; mark(); return 0;}\n"
-                "int rbln_reset_peak_memory_stats(int d){(void)d; mark(); return 0;}\n"
-                "int rbln_reset_accumulated_memory_stats(int d){(void)d; mark(); return 0;}\n",
+                """
+std::shared_ptr<Device> Device::open(uint32_t id) {
+  if (const char* marker = std::getenv("SHIM_MARKER")) {
+    if (FILE* f = std::fopen(marker, "a")) std::fclose(f);
+  }
+  // librbln_rt.so is loaded RTLD_LOCAL under the extension, so RTLD_NEXT cannot reach it.
+  using Open = std::shared_ptr<Device> (*)(uint32_t);
+  static const auto real = reinterpret_cast<Open>(
+      dlsym(dlopen("librbln_rt.so", RTLD_LAZY | RTLD_NOLOAD), "_ZN4rbln7runtime6Device4openEj"));
+  if (real == nullptr) {
+    std::fprintf(stderr, "shim: no Device::open in a loaded librbln_rt.so\n");
+    std::abort();
+  }
+  return real(id);
+}
+""",
             )
             if so is None:
-                self.skipTest("needs a C compiler to build the LD_PRELOAD shim")
+                self.skipTest("needs a C++ compiler to build the LD_PRELOAD shim")
             result = _run_subprocess(
                 """
+                import os
+                marker = os.environ["SHIM_MARKER"]
                 assert torch.rbln.device_count() > 0 and C.runtime_available() is True
                 assert torch._C._accelerator_isAllocatorInitialized() is False, "no allocation yet -> not initialized"
                 d = torch.device("rbln", 0)
@@ -308,91 +321,53 @@ class TestRuntimeUnavailable(TestCase):
                 torch.accelerator.reset_peak_memory_stats()
                 torch.accelerator.reset_accumulated_memory_stats(0)
                 C.empty_cache(d); C.reset_peak_memory_stats(d); C.reset_accumulated_memory_stats(d)  # direct C API too
+                assert C.memory_stats(d) == {} and len(torch.accelerator.memory_stats(0)) == 0
+                assert not os.path.exists(marker), "a best-effort op opened the NPU without a live context"
+                torch.empty(4, dtype=torch.float16, device="rbln:0")
+                assert os.path.exists(marker), "the shim did not see the allocation's NPU open"
                 print("NOCTX_OK")
                 """,
-                env_extra={"LD_PRELOAD": so, "SHIM_MARKER": marker},
+                env_extra={"LD_PRELOAD": so, "SHIM_MARKER": os.path.join(tmp, "opened")},
             )
             _assert_ok(self, result, "NOCTX_OK")
-            self.assertFalse(
-                os.path.exists(marker),
-                "a best-effort runtime op was dispatched despite no live context — the context gate failed",
-            )
 
     @requires_physical_devices(1)
     def test_failed_commit_reports_unavailable(self):
         """A commit that fails part-way leaves the backend unusable, so is_available() must
-        say so. Registration claims one logical device at a time and the runtime has no
-        unregister call, so a failure mid-loop is permanent: every later device use rethrows
-        the stored error. Reporting available while nothing can be used sends a caller --
-        vLLM picking a platform, LMCache picking a backend -- down a path that cannot work.
+        say so. The commit opens one NPU at a time and the runtime has no way to close one,
+        so a failure mid-loop is permanent: every later device use rethrows the stored error.
+        Reporting available while nothing can be used sends a caller -- vLLM picking a
+        platform, LMCache picking a backend -- down a path that cannot work.
 
         The device count may stay: it describes the planned topology, not usability.
-        Injected with a shim forcing rbln_register_device_id to fail."""
+        Injected with a shim forcing Device::open to fail."""
         with tempfile.TemporaryDirectory() as tmp:
-            so = _build_ld_preload_shim(
+            so = _build_device_open_shim(
                 tmp,
-                "int rbln_register_device_id(int t, int* d, int n){(void)t;(void)d;(void)n; return 1;}\n",
+                """
+std::shared_ptr<Device> Device::open(uint32_t) { throw std::runtime_error("injected open failure"); }
+""",
             )
             if so is None:
-                self.skipTest("needs a C compiler to build the LD_PRELOAD shim")
+                self.skipTest("needs a C++ compiler to build the LD_PRELOAD shim")
             result = _run_subprocess(
                 """
                 assert torch.rbln.is_available() is True, "available before any device use"
-                try:
-                    torch.ones(4, dtype=torch.float16, device="rbln:0")
-                except RuntimeError as exc:
-                    assert "rbln_register_device_id failed" in str(exc), str(exc)
-                else:
-                    raise AssertionError("a failing registration must surface at the point of use")
-                assert torch.rbln.is_available() is False, "unusable backend still reports available"
-                assert C.runtime_available() is False, "python and C++ availability disagree"
-                print("FAILED_COMMIT_OK")
-                """,
-                env_extra={"LD_PRELOAD": so, "RBLN_DEVICES": "0"},
-            )
-            _assert_ok(self, result, "FAILED_COMMIT_OK")
-
-    @requires_physical_devices(1)
-    def test_best_effort_ops_propagate_live_context_failure(self):
-        """Once this process has a live context (after an allocation), a genuine runtime
-        failure in a best-effort op IS surfaced (CUDA parity — cudaFree failures in an
-        initialized allocator propagate), not silently swallowed. Injected with an
-        LD_PRELOAD shim forcing the C entry points to return non-zero."""
-        with tempfile.TemporaryDirectory() as tmp:
-            so = _build_ld_preload_shim(
-                tmp,
-                "int rbln_empty_cache(int d){(void)d;return 1;}\n"
-                "int rbln_reset_peak_memory_stats(int d){(void)d;return 1;}\n"
-                "int rbln_reset_accumulated_memory_stats(int d){(void)d;return 1;}\n",
-            )
-            if so is None:
-                self.skipTest("needs a C compiler to build the LD_PRELOAD shim")
-            result = _run_subprocess(
-                """
-                t = torch.ones(64, device="rbln:0"); _ = (t + t).sum().item()   # establish a live context
-                d = torch.device("rbln", 0)
-                ops = {
-                    "empty_cache": lambda: torch.accelerator.empty_cache(),
-                    "reset_peak": lambda: torch.accelerator.reset_peak_memory_stats(),
-                    "reset_accum": lambda: torch.accelerator.reset_accumulated_memory_stats(0),
-                    "C.empty_cache": lambda: C.empty_cache(d),
-                    "C.reset_peak": lambda: C.reset_peak_memory_stats(d),
-                    "C.reset_accum": lambda: C.reset_accumulated_memory_stats(d),
-                }
-                swallowed, bad_msg = [], []
-                for name, fn in ops.items():
+                for attempt in range(2):
                     try:
-                        fn(); swallowed.append(name)
+                        torch.ones(4, dtype=torch.float16, device="rbln:0")
                     except RuntimeError as exc:
-                        if "rc=1" not in str(exc):  # the injected non-zero rc must be reported
-                            bad_msg.append(name + ": " + str(exc)[:60])
-                assert not swallowed, "runtime failure silently swallowed on a live context: " + ",".join(swallowed)
-                assert not bad_msg, "error missing injected rc=1: " + "; ".join(bad_msg)
-                print("PROPAGATE_OK")
+                        assert "cannot open NPU" in str(exc) and "injected open failure" in str(exc), str(exc)
+                    else:
+                        raise AssertionError("a failing open must surface at every point of use")
+                    assert torch.rbln.is_available() is False, "unusable backend still reports available"
+                    assert C.runtime_available() is False, "python and C++ availability disagree"
+                assert torch.rbln.device_count() > 0
+                print("FAILED_COMMIT_OK")
                 """,
                 env_extra={"LD_PRELOAD": so},
             )
-            _assert_ok(self, result, "PROPAGATE_OK")
+            _assert_ok(self, result, "FAILED_COMMIT_OK")
 
     @requires_physical_devices(1)
     def test_memory_ops_nothrow_on_malformed_config(self):
@@ -464,22 +439,22 @@ class TestRuntimeUnavailable(TestCase):
         _assert_ok(self, result, "HEALTHY_OK")
 
     @requires_physical_devices(1)
-    def test_lazy_allocation_initializes_context(self):
-        """Invariant confirmed on real hardware: in default lazy-malloc mode, a single
-        torch.empty() marks the process initialized and the best-effort ops then run
-        (the runtime pool/context is created at registration, before malloc)."""
+    def test_first_allocation_initializes_context(self):
+        """A single torch.empty() takes its device memory at once, which marks the process
+        initialized; the best-effort ops then run and the stats count the block."""
         result = _run_subprocess(
             """
-            t = torch.empty(1, device="rbln:0")   # default lazy VMemory entry (no eager malloc)
-            assert torch._C._accelerator_isAllocatorInitialized() is True, "lazy alloc must initialize the context"
+            assert torch._C._accelerator_isAllocatorInitialized() is False
+            t = torch.empty(1, device="rbln:0")
+            assert torch._C._accelerator_isAllocatorInitialized() is True, "an allocation must initialize the context"
             torch.accelerator.empty_cache()
             torch.accelerator.reset_peak_memory_stats()
-            assert len(torch.accelerator.memory.memory_stats(0)) > 0
-            print("LAZY_OK")
-            """,
-            env_extra={"TORCH_RBLN_EAGER_MALLOC": None},  # ensure lazy mode
+            stats = torch.accelerator.memory.memory_stats(0)
+            assert stats["allocated_bytes.all.current"] >= t.nbytes > 0, stats
+            print("FIRST_ALLOC_OK")
+            """
         )
-        _assert_ok(self, result, "LAZY_OK")
+        _assert_ok(self, result, "FIRST_ALLOC_OK")
 
 
 if __name__ == "__main__":

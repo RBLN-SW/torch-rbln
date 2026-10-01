@@ -59,23 +59,27 @@ project(torch-rbln
 # Set `TORCH_FOUND`, `TORCH_INCLUDE_DIRS`, `TORCH_LIBRARIES`, `TORCH_CXX_FLAGS`
 include(FindTorch)
 
-# Set `REBEL_FOUND`, `REBEL_INCLUDE_DIRS`, `REBEL_LIBRARIES`, and `REBEL_ABI_CURRENT`
+# Set `REBEL_FOUND`, `REBEL_INCLUDE_DIRS`, `REBEL_LIBRARIES`, and `REBEL_ABI_SCRIPT`
 include(FindRebel)
 
-# Freeze the ABI number for the import-time handshake in
-# torch_rbln/_internal/abi_check.py. Empty means a pre-handshake Rebel (FindRebel
-# already warned), which the consumer side reads as "no snapshot recorded".
-if(REBEL_ABI_CURRENT STREQUAL "")
-  set(REBEL_ABI_CURRENT_PY "None")
-else()
-  set(REBEL_ABI_CURRENT_PY "${REBEL_ABI_CURRENT}")
-endif()
-configure_file(
-  ${CMAKE_CURRENT_SOURCE_DIR}/cmake/abi_snapshot.py.in
-  ${CMAKE_CURRENT_BINARY_DIR}/generated/_abi_snapshot.py
-  @ONLY
+# The ABI id of the runtime headers this build compiles against, computed by the runtime's own
+# script, for the import-time check in torch_rbln/_internal/abi_check.py.
+file(GLOB_RECURSE REBEL_HEADERS CONFIGURE_DEPENDS "${REBEL_INCLUDE_DIRS}/rbln/*.h")
+set(abi_snapshot ${CMAKE_CURRENT_BINARY_DIR}/generated/_abi_snapshot.py)
+add_custom_command(
+  OUTPUT ${abi_snapshot}
+  COMMAND ${CMAKE_COMMAND}
+    -DINCLUDE_DIR=${REBEL_INCLUDE_DIRS}
+    -DTEMPLATE=${CMAKE_CURRENT_SOURCE_DIR}/cmake/abi_snapshot.py.in
+    -DOUTPUT=${abi_snapshot}
+    -P ${REBEL_ABI_SCRIPT}
+  DEPENDS ${REBEL_HEADERS}
+    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/abi_snapshot.py.in
+    ${REBEL_ABI_SCRIPT}
+  COMMENT "Recording the rbln runtime ABI id"
 )
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/generated/_abi_snapshot.py
+add_custom_target(torch_rbln_abi_snapshot ALL DEPENDS ${abi_snapshot})
+install(FILES ${abi_snapshot}
   DESTINATION _internal
 )
 

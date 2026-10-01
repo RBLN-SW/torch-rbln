@@ -1,212 +1,87 @@
-# - Try to find Rebel
+# - Try to find the rbln runtime
 # Once done, this will define
-#   REBEL_FOUND            - True if Rebel headers and librbln.so are found
-#   REBEL_INCLUDE_DIRS     - Include directories for Rebel (wheel or external)
-#   REBEL_LIBRARIES        - Libraries to link with Rebel (librbln.so)
-#   REBEL_RUNTIME_RELDIR   - Where the runtime library sits relative to site-packages, used to
-#                            build install RPATHs (see below)
-#   REBEL_ABI_CURRENT      - RBLN_ABI_CURRENT read out of rbln_abi.h, or "" when the
-#                            Rebel being built against predates the ABI handshake
+#   REBEL_FOUND            - True if the runtime headers and libraries are found
+#   REBEL_INCLUDE_DIRS     - The directory holding rbln/runtime/*.h
+#   REBEL_LIBRARIES        - librbln_rt.so and librbln_artifact.so
+#   REBEL_RUNTIME_RELDIR   - Where the runtime library sits relative to the directory the install
+#                            prefix is in, used to build install RPATHs (see below)
+#   REBEL_ABI_SCRIPT       - rbln/cmake/RblnAbi.cmake, which computes the ABI id of the headers
 #
-# Headers and librbln.so are both required at build time. Where they live is not hard-coded:
-# tools/find_rebel_runtime.py runs the same resolver torch-rbln uses at import time, so a
-# rebel-compiler that relocates the library needs no change here. REBEL_HOME switches to an
-# external Rebel tree (rebel/include and build/).
+# REBEL_HOME names a rebel-compiler tree built with rbln: headers in rbln/include and libraries
+# in build/rbln.
 
 cmake_minimum_required(VERSION 3.18 FATAL_ERROR)
 
-set(PACKAGE_NAME REBEL)
 include(FindPackageHandleStandardArgs)
 
-# Capture env vars once to avoid fragile if() parsing with empty values
-set(_REBEL_USE_EXTERNAL "$ENV{RBLN_USE_EXTERNAL_REBEL_COMPILER}")
 set(_REBEL_HOME "$ENV{REBEL_HOME}")
-
-set(rebel_include_dir "")
-set(rebel_library_path "")
-set(rebel_library_reldir "")
-
-# Use the interpreter the build was given: a freshly found one may belong to a different
-# environment and would then report that environment's rebel-compiler.
-if(DEFINED Python_EXECUTABLE)
-  set(_rebel_python "${Python_EXECUTABLE}")
-elseif(DEFINED Python3_EXECUTABLE)
-  set(_rebel_python "${Python3_EXECUTABLE}")
-else()
-  find_package(Python3 COMPONENTS Interpreter REQUIRED)
-  set(_rebel_python "${Python3_EXECUTABLE}")
-endif()
-
-# Ask the resolver where the library is; --library-dir pins it to an external tree.
-set(_rebel_finder "${CMAKE_CURRENT_LIST_DIR}/../tools/find_rebel_runtime.py")
-set(_rebel_finder_args "")
-
-# 1) External: both RBLN_USE_EXTERNAL_REBEL_COMPILER and REBEL_HOME must be set together
-if(_REBEL_USE_EXTERNAL OR _REBEL_HOME)
-  if(NOT _REBEL_USE_EXTERNAL OR NOT _REBEL_HOME)
-    message(FATAL_ERROR
-      "FindRebel: RBLN_USE_EXTERNAL_REBEL_COMPILER and REBEL_HOME must be set together. "
-      "Either set both (for an external rebel tree) or neither (for the installed wheel). "
-      "Current: RBLN_USE_EXTERNAL_REBEL_COMPILER=${_REBEL_USE_EXTERNAL}, REBEL_HOME=${_REBEL_HOME}")
-  endif()
-  set(_rebel_finder_args --library-dir "${_REBEL_HOME}/build")
-endif()
-
-execute_process(
-  COMMAND ${_rebel_python} "${_rebel_finder}" ${_rebel_finder_args}
-  OUTPUT_VARIABLE _rebel_finder_output
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-  RESULT_VARIABLE _rebel_finder_result
-)
-if(NOT _rebel_finder_result EQUAL 0)
+if(NOT _REBEL_HOME)
   message(FATAL_ERROR
-    "FindRebel: could not locate the rebel runtime library. ${_rebel_finder_output}")
+    "FindRebel: set REBEL_HOME to a rebel-compiler tree built with rbln "
+    "(headers in rbln/include, libraries in build/rbln).")
 endif()
-string(REPLACE "\n" ";" _rebel_finder_lines "${_rebel_finder_output}")
-foreach(_line IN LISTS _rebel_finder_lines)
-  if(_line MATCHES "^LIBRARY_DIR=(.+)$")
-    set(rebel_library_path "${CMAKE_MATCH_1}")
-  elseif(_line MATCHES "^LIBRARY_RELDIR=(.*)$")
-    set(rebel_library_reldir "${CMAKE_MATCH_1}")
-  elseif(_line MATCHES "^INCLUDE_DIR=(.+)$")
-    set(rebel_include_dir "${CMAKE_MATCH_1}")
-  endif()
-endforeach()
+set(rebel_library_path "${_REBEL_HOME}/build/rbln")
 
+# find_path/find_library skip the search when their cache entry is already set, so drop paths
+# cached from an earlier configure against another tree.
+unset(REBEL_INCLUDE_DIR CACHE)
+unset(REBEL_RUNTIME_LIBRARY CACHE)
+unset(REBEL_ARTIFACT_LIBRARY CACHE)
+unset(REBEL_ABI_SCRIPT CACHE)
 
-if(_REBEL_HOME)
-  # Headers come from the external tree, matching the library built there.
-  set(rebel_include_dir "${_REBEL_HOME}/rebel/include")
-  message(STATUS "FindRebel: EXTERNAL (REBEL_HOME) -- include: ${rebel_include_dir}, library: ${rebel_library_path}")
-else()
-  # Installed wheel: headers (rebel/include) and the library ship in the same rebel-compiler
-  # wheel, from the same build.
-  # Check the full runtime header set the extension pulls in (directly or
-  # transitively), so a partially-packaged wheel is diagnosed here rather than
-  # as a compile error later.
-  if(NOT EXISTS "${rebel_include_dir}/rebel/runtime/api/rbln_runtime_api.h"
-     OR NOT EXISTS "${rebel_include_dir}/rebel/runtime/api/rbln_exec_api.h"
-     OR NOT EXISTS "${rebel_include_dir}/rebel/runtime/api/rbln_kineto_api.h"
-     OR NOT EXISTS "${rebel_include_dir}/rebel/runtime/api/rbln_retcode.h"
-     OR NOT EXISTS "${rebel_include_dir}/rebel/runtime/memory_stats.h"
-     OR NOT EXISTS "${rebel_include_dir}/rebel/runtime/distributed/rbln_rccl.h")
-    message(FATAL_ERROR
-      "FindRebel: Rebel runtime headers not found under ${rebel_include_dir}. "
-      "Install a rebel-compiler wheel that ships headers under rebel/include "
-      "(>=0.11.1.dev322), or build against an external Rebel tree by setting "
-      "both RBLN_USE_EXTERNAL_REBEL_COMPILER and REBEL_HOME.")
-  endif()
-  message(STATUS "FindRebel: WHEEL (site-packages) -- include: ${rebel_include_dir}, library: ${rebel_library_path}")
-endif()
-
-# find_path/find_library skip the search when their cache entry is already set,
-# so drop paths cached from an earlier vendored, wheel, or external config.
-unset(${PACKAGE_NAME}_INCLUDE_DIR CACHE)
-unset(${PACKAGE_NAME}_LIBRARY CACHE)
-
-find_path(${PACKAGE_NAME}_INCLUDE_DIR
-  NAMES rebel/runtime/api/rbln_runtime_api.h
-  PATHS ${rebel_include_dir}
+find_path(REBEL_INCLUDE_DIR
+  NAMES rbln/runtime/device.h
+  PATHS "${_REBEL_HOME}/rbln/include"
   NO_DEFAULT_PATH
 )
-
-# Library is required at build time for ABI/linking of C code
-find_library(${PACKAGE_NAME}_LIBRARY
-  NAMES rbln
+find_library(REBEL_RUNTIME_LIBRARY
+  NAMES rbln_rt
   PATHS ${rebel_library_path}
+  NO_DEFAULT_PATH
+)
+find_library(REBEL_ARTIFACT_LIBRARY
+  NAMES rbln_artifact
+  PATHS ${rebel_library_path}
+  NO_DEFAULT_PATH
+)
+find_file(REBEL_ABI_SCRIPT
+  NAMES RblnAbi.cmake
+  PATHS "${_REBEL_HOME}/rbln/cmake"
   NO_DEFAULT_PATH
 )
 
 find_package_handle_standard_args(REBEL
-  REQUIRED_VARS ${PACKAGE_NAME}_INCLUDE_DIR ${PACKAGE_NAME}_LIBRARY
-  VERSION_VAR ${PACKAGE_NAME}_VERSION
+  REQUIRED_VARS REBEL_INCLUDE_DIR REBEL_RUNTIME_LIBRARY REBEL_ARTIFACT_LIBRARY REBEL_ABI_SCRIPT
 )
-
 if(NOT REBEL_FOUND)
-  message(FATAL_ERROR "FindRebel: Rebel was not found. RBLN requires Rebel to build.")
+  message(FATAL_ERROR "FindRebel: the rbln runtime was not found under ${_REBEL_HOME}.")
 endif()
 
-if(REBEL_FOUND)
-  set(REBEL_INCLUDE_DIRS ${${PACKAGE_NAME}_INCLUDE_DIR})
-  set(REBEL_LIBRARIES ${${PACKAGE_NAME}_LIBRARY})
-endif()
-
-# ABI snapshot #################################################################
-# Record RBLN_ABI_CURRENT of the Rebel we build against; torch_rbln compares that
-# frozen copy against the librbln.so it actually loads (torch_rbln/_internal/abi_check.py).
-# MIN_SUPPORTED is not read here: it describes what a future runtime still accepts,
-# so it can only be queried from the .so at import time. A missing header means the
-# Rebel predates the handshake (rebel_compiler #12426) -- not a build error, just no
-# snapshot to check against.
-set(REBEL_ABI_CURRENT "")
-set(_rebel_abi_header "${REBEL_INCLUDE_DIRS}/rebel/runtime/api/rbln_abi.h")
-if(EXISTS "${_rebel_abi_header}")
-  # Swapping a wheel in place keeps the same header path, so make its contents a
-  # configure dependency or the snapshot silently goes stale.
-  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_rebel_abi_header}")
-
-  file(STRINGS "${_rebel_abi_header}" _rebel_abi_lines
-    REGEX "^[ \t]*#[ \t]*define[ \t]+RBLN_ABI_CURRENT[ \t]+[0-9]+[ \t]*$")
-  if(NOT _rebel_abi_lines)
-    message(FATAL_ERROR
-      "FindRebel: ${_rebel_abi_header} exists but defines no integer RBLN_ABI_CURRENT. "
-      "Refusing to build a wheel whose recorded ABI would be wrong.")
-  endif()
-  list(GET _rebel_abi_lines 0 _rebel_abi_line)
-  string(REGEX REPLACE "^[ \t]*#[ \t]*define[ \t]+RBLN_ABI_CURRENT[ \t]+([0-9]+)[ \t]*$" "\\1"
-    REBEL_ABI_CURRENT "${_rebel_abi_line}")
-  if(REBEL_ABI_CURRENT STREQUAL "0")
-    message(FATAL_ERROR
-      "FindRebel: ${_rebel_abi_header} declares RBLN_ABI_CURRENT 0. Zero is not a valid "
-      "contract number (torch-rbln reads it as 'no snapshot recorded').")
-  endif()
-  message(STATUS "FindRebel: rebel ABI snapshot -- RBLN_ABI_CURRENT=${REBEL_ABI_CURRENT}")
-else()
-  message(WARNING
-    "FindRebel: no ${_rebel_abi_header} -- this Rebel predates the ABI version handshake. "
-    "The resulting torch-rbln records no ABI snapshot, so it cannot detect at import time "
-    "that it was loaded against an incompatible librbln.so.")
-endif()
-unset(_rebel_abi_header)
-unset(_rebel_abi_lines)
-unset(_rebel_abi_line)
+set(REBEL_INCLUDE_DIRS ${REBEL_INCLUDE_DIR})
+set(REBEL_LIBRARIES ${REBEL_RUNTIME_LIBRARY} ${REBEL_ARTIFACT_LIBRARY})
+message(STATUS "FindRebel: include ${REBEL_INCLUDE_DIRS}, libraries ${REBEL_LIBRARIES}")
 
 mark_as_advanced(
-  ${PACKAGE_NAME}_INCLUDE_DIR
-  ${PACKAGE_NAME}_LIBRARY
+  REBEL_INCLUDE_DIR
+  REBEL_RUNTIME_LIBRARY
+  REBEL_ARTIFACT_LIBRARY
+  REBEL_ABI_SCRIPT
 )
 
-# Install RPATHs are relative to the directory the install prefix sits in, i.e. site-packages
-# for an installed wheel. A library inside site-packages keeps that relationship at runtime, so
-# the RPATH follows it when rebel-compiler moves the library; outside it (external tree, source
-# checkout) a neutrally named symlink next to the install prefix stands in.
-if(rebel_library_reldir)
-  set(REBEL_RUNTIME_RELDIR "${rebel_library_reldir}")
-else()
-  set(REBEL_RUNTIME_RELDIR "_rbln_runtime")
-endif()
+# Install RPATHs are relative to the directory the install prefix sits in. The runtime lives
+# outside it, so a neutrally named symlink next to the install prefix stands in.
+set(REBEL_RUNTIME_RELDIR "_rbln_runtime")
 
 list(APPEND CMAKE_BUILD_RPATH ${rebel_library_path})
 list(APPEND CMAKE_INSTALL_RPATH "$ORIGIN/../../${REBEL_RUNTIME_RELDIR}")
 
-# A source checkout resolves $ORIGIN/../../<reldir> inside the checkout, so link it there.
 install(CODE "
   set(_link \"${CMAKE_INSTALL_PREFIX}/../${REBEL_RUNTIME_RELDIR}\")
   get_filename_component(_link_parent \"\${_link}\" DIRECTORY)
-  if(EXISTS \"\${_link}\" AND NOT IS_SYMLINK \"\${_link}\")
-    # Installing straight into site-packages: rebel-compiler's own directory, which the RPATH
-    # already resolves to.
-    message(STATUS \"FindRebel: \${_link} is a real directory, leaving it in place\")
-  else()
-    # Recreated every install, not only when missing: a link left by an earlier one can still
-    # name a virtualenv this build has nothing to do with.
-    execute_process(COMMAND ${CMAKE_COMMAND} -E make_directory \"\${_link_parent}\")
-    execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink \"${rebel_library_path}\" \"\${_link}\")
-  endif()
+  # Recreated every install: a link left by an earlier one can name another tree.
+  execute_process(COMMAND ${CMAKE_COMMAND} -E make_directory \"\${_link_parent}\")
+  execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink \"${rebel_library_path}\" \"\${_link}\")
 ")
 
-unset(PACKAGE_NAME)
-unset(_REBEL_USE_EXTERNAL)
 unset(_REBEL_HOME)
-unset(rebel_include_dir)
 unset(rebel_library_path)

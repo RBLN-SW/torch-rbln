@@ -1,50 +1,32 @@
-"""Per-module ``torch.compile`` cache used by the eager-dispatch wrappers.
+"""Ops compiled into functions over torch-rbln tensors.
 
-Each shim op (``add_rbln``, ``sub_rbln``, …) calls
-:func:`compile_rbln_cached` with its own ``OpModule`` instance to get a
-torch.compile'd callable. We cache by ``(module-id, dynamic, device-id,
-options)`` so that repeated eager-path dispatches of the same op reuse
-the same compiled graph.
-
-``options`` handling
---------------------
-The rebel backend accepts a side-channel option ``_runtime_holder`` (a
-mutable list) into which it appends the freshly-created ``DynamoRuntime``
-on its first compile pass — used by ``torch_rbln._internal.warm_cache``
-to harvest the runtime for the C++ warm cache.
-
-If we naively fed the holder's identity into the cache key, every call
-would produce a distinct key (fresh list per call) and torch.compile
-would re-trigger on every invocation. Instead we strip the holder from
-the cache key while still passing the *full* options through on miss so
-the backend can still populate it.
-
-Only the **first** miss for a given (module, options-minus-holder) key
-actually runs the rebel backend (and therefore populates the holder);
-subsequent hits return the already-compiled callable without touching
-the holder. That is exactly the semantic the warm-cache bootstrap needs
-— it installs the cache entry only when the holder is populated.
-
-The entry keeps that first holder (:class:`CompiledOp`), so a later hit
-can reach the ``DynamoRuntime`` and drive it directly with the caller's
-``out`` buffers, the way the C++ warm cache does, instead of going back
-through the compiled callable.
+An op is a module called with tensors and other values. It is captured with its
+tensors as the function's inputs, in the order ``tree_flatten`` walks the
+arguments, and every other value as a constant, and compiled with every input
+and result laid out as torch lays out a contiguous tensor (``rbln.LOGICAL``), so
+a call's tensors bind to the function as they are, CPU ones by a copy. One the
+compiler lays out otherwise goes through the host as the op runs. A tensor
+the op holds is state the function encodes as it lays it out. One function serves a
+module for each profile of its arguments: the shape and dtype of each tensor and
+the value of everything else. A function runs on any device of its NPU kind,
+with an executor per device.
 """
 
 from __future__ import annotations
 
+import functools
 import threading
-from collections.abc import Mapping, Sequence
 from typing import Any
 
 import torch
+from torch._subclasses.fake_tensor import FakeTensorMode
+from torch.utils._pytree import tree_flatten, tree_unflatten
+
+import torch_rbln._C as _C
 
 
 _compiled_op_cache_lock = threading.Lock()
 _compiled_op_cache: dict[tuple[Any, ...], CompiledOp] = {}
-
-# Key used to strip the runtime-holder side-channel from cache keys.
-_RUNTIME_HOLDER_KEY = "_runtime_holder"
 
 
 class _IdentityKey:
@@ -63,110 +45,176 @@ class _IdentityKey:
         return isinstance(other, _IdentityKey) and self.value is other.value
 
 
-def _cache_sort_key(value: Any) -> tuple[str, str]:
-    if isinstance(value, _IdentityKey):
-        return ("identity", str(hash(value)))
-    return (type(value).__name__, repr(value))
+def _profile(value: Any) -> Any:
+    """What of an argument its function is compiled for, hashable.
 
-
-def _freeze_cache_value(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return tuple(sorted((key, _freeze_cache_value(item)) for key, item in value.items()))
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return tuple(_freeze_cache_value(item) for item in value)
-    if isinstance(value, (set, frozenset)):
-        return tuple(sorted((_freeze_cache_value(item) for item in value), key=_cache_sort_key))
-    if isinstance(value, (str, int, float, bool, type(None))):
-        return value
-    return _IdentityKey(value)
-
-
-def _options_cache_view(options: Mapping[str, Any] | None) -> Mapping[str, Any]:
-    """Drop per-call side-channel keys from a copy of ``options``.
-
-    Currently strips ``_runtime_holder`` only, since that's the single
-    mutable identity-bearing option we use. Add more entries here if new
-    side-channels appear.
+    ``1``, ``1.0`` and ``True`` are tagged apart because they bake into different
+    constants; anything unrecognized falls back to ``repr``.
     """
-    if not options:
-        return {}
-    return {k: v for k, v in options.items() if k != _RUNTIME_HOLDER_KEY}
+    if isinstance(value, torch.Tensor):
+        return ("tensor", tuple(value.shape), value.dtype)
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return (type(value).__name__, value)
+    if isinstance(value, (list, tuple)):
+        return (type(value).__name__, tuple(_profile(v) for v in value))
+    if isinstance(value, dict):
+        return ("dict", tuple((k, _profile(v)) for k, v in value.items()))
+    if isinstance(value, (torch.dtype, torch.device, torch.memory_format, torch.layout)):
+        return (type(value).__name__, str(value))
+    return ("repr", repr(value))
+
+
+class _TensorsIn(torch.nn.Module):
+    """``inner`` called with a call's arguments, taking only their tensors."""
+
+    def __init__(self, inner: Any, spec: Any, template: list, slots: list[int]):
+        super().__init__()
+        self.inner = inner
+        self._spec = spec
+        self._template = template
+        self._slots = slots
+
+    def forward(self, *tensors: torch.Tensor) -> Any:
+        flat = list(self._template)
+        for slot, tensor in zip(self._slots, tensors):
+            flat[slot] = tensor
+        args, kwargs = tree_unflatten(flat, self._spec)
+        return self.inner(*args, **kwargs)
+
+
+@functools.cache
+def _npu(device_index: int) -> str:
+    from torch_rbln.device.device import get_device_name
+
+    return get_device_name(device_index)
+
+
+def _state(module: torch.nn.Module, graph: Any) -> dict[str, torch.Tensor]:
+    """The values of the graph's inputs a call does not pass, on the CPU."""
+    held = {**dict(module.named_parameters()), **dict(module.named_buffers())}
+    state = {}
+    for inp in graph.inputs:
+        if inp.kind == "input":
+            continue
+        value = inp.value if inp.value is not None else held[inp.fqn]
+        state[inp.name] = value.detach().cpu()
+    return state
 
 
 class CompiledOp:
-    """A compiled callable, the runtimes the rebel backend built for it, and
-    how a call's tensors map onto the graph's inputs once that is known."""
+    """A module compiled for one profile of its arguments, as a
+    ``torch_rbln._C._OpFunction``, and the structure of what it returns."""
 
-    __slots__ = ("compiled", "runtime_holder", "input_order", "copy_fallback_warned")
+    __slots__ = ("function", "out_spec")
 
-    def __init__(self, compiled: Any, runtime_holder: list):
-        self.compiled = compiled
-        self.runtime_holder = runtime_holder
-        self.input_order: tuple[int, ...] | None = None
-        self.copy_fallback_warned = False
+    def __init__(self, function: Any, out_spec: Any):
+        self.function = function
+        self.out_spec = out_spec
 
-    def runtime(self) -> Any:
-        """The one ``DynamoRuntime`` behind ``compiled``, or ``None``.
+    @staticmethod
+    def tensors(args: tuple, kwargs: dict) -> list[torch.Tensor]:
+        """The call's tensors the function takes, in its order."""
+        flat, _ = tree_flatten((args, kwargs))
+        return [v for v in flat if isinstance(v, torch.Tensor)]
 
-        ``None`` before the callable has run once, since the backend builds the
-        runtime during that run, and when the holder has grown past one: Dynamo
-        recompiled inside the callable, so a guard the cache key does not cover
-        differed between calls, and only the callable knows which runtime a
-        given call takes.
-        """
-        if len(self.runtime_holder) != 1:
-            return None
-        return self.runtime_holder[0]
-
-
-def compile_rbln_cached(
-    model: Any,
-    *,
-    dynamic: bool = False,
-    options: dict[str, Any] | None = None,
-    device_cache_key: Any = None,
-) -> Any:
-    return compile_rbln_cached_entry(
-        model,
-        dynamic=dynamic,
-        options=options,
-        device_cache_key=device_cache_key,
-    ).compiled
+    def run(self, tensors: list[torch.Tensor], out: list[torch.Tensor] | None = None) -> Any:
+        """Runs over ``tensors`` and returns what the module returns; a result
+        is written into the tensor of ``out`` given for it when that holds it
+        as the function writes it, and into a new tensor otherwise."""
+        results = None
+        if out:
+            results = self.function.run(tensors, out)
+        if results is None:
+            results = self.function.run(tensors)
+        if results is None:
+            raise RuntimeError("the tensors of the call do not hold what the op was compiled for")
+        return tree_unflatten(results, self.out_spec)
 
 
-def compile_rbln_cached_entry(
-    model: Any,
-    *,
-    dynamic: bool = False,
-    options: dict[str, Any] | None = None,
-    device_cache_key: Any = None,
-) -> CompiledOp:
-    # The cache key excludes ``_runtime_holder`` (see module docstring).
-    # ``device_cache_key`` accepts any hashable; callers that want per-shape
-    # warm-cache harvesting pass a (device_index, shape_sig, dtype_sig) tuple
-    # so distinct input profiles end up in distinct compile_rbln_cached
-    # entries and therefore receive fresh ``_runtime_holder`` slots.
-    cache_options = _options_cache_view(options)
-    cache_key = (
-        _IdentityKey(model),
-        dynamic,
-        _freeze_cache_value(device_cache_key),
-        _freeze_cache_value(cache_options),
-    )
+def compile_logical(graph: Any, npu: str, devices: int = 1, cache_dir: Any = None) -> Any:
+    """The function of ``graph`` with its inputs and results laid out as torch
+    holds contiguous tensors wherever the compiler can; ``_OpFunction`` moves
+    the others through the host as it runs."""
+    import rbln
 
-    entry = _compiled_op_cache.get(cache_key)
-    if entry is not None:
-        return entry
+    try:
+        return rbln.api.compile_graph(graph, npu, devices, cache_dir, inputs=rbln.LOGICAL, outputs=rbln.LOGICAL)
+    except rbln.UnmetRequest as e:
+        return e.function
 
-    with _compiled_op_cache_lock:
-        entry = _compiled_op_cache.get(cache_key)
-        if entry is None:
-            # Use the *full* options on miss so the backend sees the holder.
-            compiled = torch.compile(model, backend="rbln", dynamic=dynamic, options=options)
-            holder = options.get(_RUNTIME_HOLDER_KEY) if options is not None else None
-            entry = CompiledOp(compiled, holder if holder is not None else [])
-            _compiled_op_cache[cache_key] = entry
-        return entry
+
+def _compile(module: Any, args: tuple, kwargs: dict, device_index: int) -> CompiledOp:
+    import rbln
+
+    flat, spec = tree_flatten((args, kwargs))
+    slots = [i for i, v in enumerate(flat) if isinstance(v, torch.Tensor)]
+    template = [None if isinstance(v, torch.Tensor) else v for v in flat]
+    wrapper = _TensorsIn(module, spec, template, slots).eval()
+    names = [f"arg{i}" for i in range(len(slots))]
+    types = {name: rbln.TensorType(flat[slot].shape, flat[slot].dtype) for name, slot in zip(names, slots)}
+    graph = rbln.frontend.capture(wrapper, types)
+    fn = compile_logical(graph, _npu(device_index))
+    with FakeTensorMode(allow_non_fake_inputs=True):
+        _, out_spec = tree_flatten(wrapper(*(torch.empty(flat[slot].shape, dtype=flat[slot].dtype) for slot in slots)))
+    return CompiledOp(_C._OpFunction(fn.to_bytes(), names, _state(wrapper, graph)), out_spec)
+
+
+def device_of(args: tuple, kwargs: dict) -> torch.device:
+    """The RBLN device of the call's first RBLN tensor, or the current one."""
+    flat, _ = tree_flatten((args, kwargs))
+    for v in flat:
+        if isinstance(v, torch.Tensor) and v.device.type == "rbln":
+            return v.device
+    return torch.device("rbln", torch.rbln.current_device())
+
+
+class UncompilableOp(RuntimeError):
+    """The compiler cannot build a function of an op for a profile of its
+    arguments; ``unsupported`` when it has no lowering for an op in it."""
+
+    def __init__(self, message: str, unsupported: bool = False):
+        super().__init__(message)
+        self.unsupported = unsupported
+
+
+class _Refused:
+    """What the cache keeps for a profile the compiler refused."""
+
+    __slots__ = ("error",)
+
+    def __init__(self, error: Exception):
+        self.error = error
+
+
+def compiled_op(module: Any, args: tuple, kwargs: dict, device: torch.device) -> CompiledOp:
+    """The function of ``module`` for the profile of ``args`` and ``kwargs``,
+    compiled on first use for the NPU of ``device``.
+
+    Raises:
+        UncompilableOp: the compiler refused this profile, now or on an earlier call.
+    """
+    key = (_IdentityKey(module), _npu(device.index), _profile(args), _profile(kwargs))
+    entry = _compiled_op_cache.get(key)
+    if entry is None:
+        with _compiled_op_cache_lock:
+            entry = _compiled_op_cache.get(key)
+            if entry is None:
+                try:
+                    entry = _compile(module, args, kwargs, device.index)
+                except (NotImplementedError, ValueError, RuntimeError) as e:
+                    entry = _Refused(e)
+                _compiled_op_cache[key] = entry
+    if isinstance(entry, _Refused):
+        import rbln
+
+        raise UncompilableOp(str(entry.error), isinstance(entry.error, rbln.frontend.NoLowering)) from entry.error
+    return entry
+
+
+def run_op(module: Any, *args: Any, **kwargs: Any) -> Any:
+    """Runs ``module`` on the device of its tensors, as it would run on the CPU."""
+    op = compiled_op(module, args, kwargs, device_of(args, kwargs))
+    return op.run(op.tensors(args, kwargs))
 
 
 def clear_rbln_compile_cache() -> None:

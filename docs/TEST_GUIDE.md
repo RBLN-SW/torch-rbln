@@ -49,10 +49,11 @@ test/
 ├── utils.py      # Shared test utilities (seed helpers, device-count skip markers, SUPPORTED_DTYPES)
 │
 ├── rbln/                                  # RBLN backend-specific tests
-│   ├── test_abi_check.py                  # rebel ABI handshake between this build and the loaded librbln.so
+│   ├── test_abi_check.py                  # rbln ABI id check between this build and the runtime it runs on
 │   ├── test_custom_kernel.py              # RBLN custom kernels
 │   ├── test_custom_op_compile.py          # Paged-attention custom ops inside a larger compiled graph (engine graph mode)
 │   ├── test_device_mapping.py             # Device mapping and topology APIs
+│   ├── test_env_diagnostic.py             # python -m torch_rbln.diagnose and the report it prints
 │   ├── test_graph_eager_mode.py           # Numerical agreement between torch.compile graph mode and eager mode
 │   ├── test_internal_op_utils.py          # Internal op utilities
 │   ├── test_llama_ops.py                  # Core ops used in LLaMA-family models
@@ -61,7 +62,7 @@ test/
 │   ├── test_op_caching.py                 # Operator caching / graph-reuse behavior
 │   ├── test_privateuse1_contract.py       # PrivateUse1 backend contract conformance (one test per upstream clause)
 │   ├── test_rbln_apis.py                  # RBLN Python APIs
-│   ├── test_rbln_runtime_lib.py           # librbln.so resolution order and single-copy/version checks
+│   ├── test_rbln_runtime_lib.py           # Finding the librbln_rt.so the rbln package maps, and the single-copy check
 │   ├── test_registered_ops.py             # All natively registered and fallback ops from RBLNRegisterOps.cpp / register_ops.py
 │   ├── test_rsd_kv_cache.py               # Persistent KV cache under RSD: two programs + eager access on a buffer sharded across NPUs
 │   ├── test_sdpa_decode_overflow.py       # SDPA decode-phase overflow detection and fallback behavior
@@ -277,7 +278,6 @@ These fixtures are defined in `test/conftest.py` and apply automatically to ever
 | `restore_current_device`         | function | **Yes** | Restores the selected RBLN device and lazy-init flag after each test so a `set_device()` can't leak into later tests |
 | `restore_current_stream`         | function | **Yes** | Restores every device's current stream after each test so a `set_stream()` can't leak into later tests               |
 | `enable_deploy_mode`             | function | No      | Sets `TORCH_RBLN_DEPLOY=ON`. Apply with `@pytest.mark.usefixtures("enable_deploy_mode")`                      |
-| `enable_eager_malloc`            | function | No      | Sets `TORCH_RBLN_EAGER_MALLOC=1`. Apply with `@pytest.mark.usefixtures("enable_eager_malloc")`                |
 
 ---
 
@@ -337,7 +337,6 @@ instantiate_device_type_tests(TestRegisteredNativeOps, globals(), only_for="priv
 | `@pytest.mark.single_worker`                      | Force serial execution.                                |
 | `@pytest.mark.no_dynamo_reset`                    | Opt out of the autouse `reset_dynamo` fixture.         |
 | `@pytest.mark.usefixtures("enable_deploy_mode")`  | Enable `TORCH_RBLN_DEPLOY=ON` for the test class.      |
-| `@pytest.mark.usefixtures("enable_eager_malloc")` | Enable `TORCH_RBLN_EAGER_MALLOC=1` for the test class. |
 
 ### Op Filtering for RBLN
 
@@ -477,35 +476,36 @@ class TestMultiDevice(TestCase):
 instantiate_device_type_tests(TestMultiDevice, globals(), only_for="privateuse1")
 ```
 
-### Deploy Mode / Eager Mode Test Template
+### Memory Statistics Test Template
 
-Tests that require `TORCH_RBLN_DEPLOY=ON` or `TORCH_RBLN_EAGER_MALLOC=1`:
+`torch.rbln.memory_stats()` reads a process-wide caching allocator, so tests that measure it
+run serially (`single_worker`) and assert on deltas. A tensor takes its device memory when it
+is created; the allocator rounds a request of up to 1 MiB up to 512 B and a larger one up to a
+multiple of 2 MiB, and a freed block stays reserved until `empty_cache()`
+(see `test/internal/test_memory_stats.py`):
 
 ```python
 @pytest.mark.test_set_ci
 @pytest.mark.single_worker
-@pytest.mark.usefixtures("enable_eager_malloc")
 class TestMemoryStats(TestCase):
-    """Tests for memory statistics APIs. Requires eager malloc and serial execution."""
+    """Tests for memory statistics APIs. Requires serial execution."""
 
     def test_memory_allocated(self):
         device = "rbln:0"
         initial = torch.rbln.memory_allocated(device)
         x = torch.empty([1024], dtype=torch.float16, device=device)
-        allocated = torch.rbln.memory_allocated(device)
-        self.assertGreater(allocated, initial)
+        self.assertEqual(torch.rbln.memory_allocated(device), initial + x.nbytes)
         del x
-        # Memory may not be freed immediately due to caching allocator
+        self.assertEqual(torch.rbln.memory_allocated(device), initial)
 ```
 
 > **Rule — never process-cache an env flag that tests toggle per-test.** xdist workers
 > are long-lived processes that run many tests in sequence. A function-scoped fixture
-> (`enable_deploy_mode`, `enable_eager_malloc`, `monkeypatch.setenv`, `patch.dict`) sets an
+> (`enable_deploy_mode`, `monkeypatch.setenv`, `patch.dict`) sets an
 > env var for one test, but if C++/Python reads it *once* and caches it in a
 > `static`/`@lru_cache` for the process lifetime, the **first** value latches into the whole
 > worker and leaks into every later test on it — an intermittent, order-dependent failure
-> that only shows up when xdist happens to schedule the toggling test first (e.g. the
-> `test_runtime_hidden_d2h` / eager-malloc flake). Read such flags **live** (`std::getenv`
+> that only shows up when xdist happens to schedule the toggling test first. Read such flags **live** (`std::getenv`
 > per call — see `is_deploy_mode()` / `is_nan_inf_check_disabled()` in `DispatchShim.cpp`),
 > and if a Python `@lru_cache` gate must respond to per-test env, `cache_clear()` it in the
 > fixture's teardown.
@@ -761,8 +761,8 @@ Mark a test `torch_rbln_only` when a different rebel-compiler would not change i
   breaks it (`test_privateuse1_contract.py`);
 - the thing under test is a torch-rbln gate that the test drives itself, with the runtime
   stubbed or forced (`test_runtime_unavailable.py`);
-- it tests packaging — where `librbln.so` is found, not what it does once loaded
-  (`test_rbln_runtime_lib.py`). Import behaviour is the counter-example: whether a remap after
+- it tests packaging — which `librbln_rt.so` is found, not what it does once loaded
+  (`test_rbln_runtime_lib.py`, `test_env_diagnostic.py`). Import behaviour is the counter-example: whether a remap after
   import is still accepted is the runtime's doing, so `test_import_rbln_devices_seal.py` stays
   in the lane;
 - it asserts an absence at the torch level (`test_amp_autocast.py`);

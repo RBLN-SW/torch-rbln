@@ -5,7 +5,7 @@
  * This file provides the ProcessGroupRBLN class which implements distributed
  * communication operations using the RBLN (Rebellions Neural Processing Unit)
  * backend. It supports collective operations like allreduce, broadcast, scatter,
- * and point-to-point communication through RCCL (RBLN Collective Communication Library).
+ * and point-to-point communication through a runtime Communicator.
  */
 
 #pragma once
@@ -27,12 +27,11 @@
 
 // ATen includes
 #include <ATen/ThreadLocalState.h>
+#include <c10/core/Stream.h>
 
-// Forward declarations
-namespace rbln {
-class Rccl;
+namespace rbln::runtime {
+class Communicator;
 }
-struct rccl_unique_id;
 
 namespace c10d {
 
@@ -60,8 +59,8 @@ constexpr int DEFAULT_NUM_WORKERS = 1;
  * backend. It supports collective operations (allreduce, broadcast, scatter)
  * and point-to-point communication (send, recv) through RCCL.
  *
- * The class uses an asynchronous work queue pattern where operations are
- * enqueued and processed by worker threads to avoid blocking the main thread.
+ * A collective runs on the current stream of the group's device and is done when its work is.
+ * Under TORCH_RBLN_C10D_ASYNC=1 a worker thread runs the works in the order they were made.
  */
 class TORCH_API ProcessGroupRBLN : public Backend {
  public:
@@ -71,13 +70,13 @@ class TORCH_API ProcessGroupRBLN : public Backend {
 
   /**
    * @brief Construct a new ProcessGroupRBLN object
-   * @param store Shared store for coordination (used for rccl_unique_id broadcast in autoport init)
+   * @param store Shared store the ranks share their group's id through
    * @param rank Process rank in the group
    * @param size Total number of processes in the group
    * @param group_id Group identifier (used for store keys, e.g. rbln_rccl_uid_ + group_id)
    * @param global_ranks_in_group Global ranks of processes in this group
    * @param options Backend options including timeout settings
-   * @param glooBackend Optional Gloo backend for non-float16 allreduce/reduce_scatter fallback
+   * @param glooBackend Optional Gloo backend for CPU tensors and for the reductions the device does not run
    */
   explicit ProcessGroupRBLN(
       const c10::intrusive_ptr<Store>& store,
@@ -263,18 +262,6 @@ class TORCH_API ProcessGroupRBLN : public Backend {
    */
   uint64_t getSequenceNumberForGroup() override;
 
-  /**
-   * @brief Broadcast rccl_unique_id via TCP Store (rank 0 sets, others get).
-   *
-   * Used by the autoport init path (RCCL_PORT_GEN set). Call after PrepareContextAndExportMem on all ranks;
-   * rank 0 generates the id via this group's rccl_->GetUniqueIdForBroadcast and sets it in the store;
-   * other ranks get from the store. Uses this group's group_id_ for the store key. Result is written to
-   * rcclID (no copy on return).
-   *
-   * @param rcclID Output: on rank 0 filled by GetUniqueIdForBroadcast; on others filled from the store
-   */
-  void broadcastUniqueId(struct rccl_unique_id* rcclID);
-
  private:
   // ============================================================================
   // Private Helper Methods
@@ -291,6 +278,15 @@ class TORCH_API ProcessGroupRBLN : public Backend {
    * @return Next sequence number
    */
   uint64_t nextSeq() noexcept;
+
+  /**
+   * @brief Joins this group's communicator: rank 0 makes the group's id on its device and hands
+   * it to the others through the store. A group of one, or one without an NPU, has none.
+   */
+  void connect();
+
+  /// @brief The current stream of the group's device, which collectives run on
+  c10::Stream currentStream() const;
 
   /**
    * @brief Enqueue work for asynchronous execution
@@ -339,16 +335,16 @@ class TORCH_API ProcessGroupRBLN : public Backend {
   // RBLN Backend State
   // ============================================================================
 
-  /// @brief Shared store for coordination (used for rccl_unique_id broadcast).
+  /// @brief Shared store the ranks share their group's id through
   c10::intrusive_ptr<Store> store_;
 
   /// @brief Group ID for this process group (used for store key).
   int group_id_;
 
-  /// @brief RCCL instance for collective communication
-  std::shared_ptr<::rbln::Rccl> rccl_;
+  /// @brief The communicator the collectives run through
+  std::shared_ptr<::rbln::runtime::Communicator> comm_;
 
-  /// @brief Gloo backend for FP32 operations
+  /// @brief Gloo backend for CPU tensors and host reductions
   c10::intrusive_ptr<Backend> glooBackend_;
 
   /// @brief Current tag counter for operation identification

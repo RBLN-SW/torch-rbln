@@ -1,16 +1,19 @@
 #include <ATen/ATen.h>
 #include <c10/rbln/DeviceMappingManager.h>
 #include <c10/rbln/RBLNFunctions.h>
+#include <c10/rbln/RBLNCachingAllocator.h>
 #include <c10/rbln/RBLNLogging.h>
-#include <c10/util/CallOnce.h>
-#include <rebel/runtime/memory_stats.h>
+#include <c10/rbln/RBLNProfiler.h>
+#include <c10/rbln/RBLNRuntime.h>
 
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <functional>
 #include <map>
+#include <set>
 #include <mutex>
 #include <vector>
 
@@ -21,8 +24,8 @@
 
 namespace c10::rbln {
 
-// rt-timing: time spent inside librbln boundary calls, for the explain profiler's
-// "rebel runtime vs torch dispatch" split. Gated: when disabled each boundary call
+// rt-timing: time spent inside runtime copy calls, for the explain profiler's
+// "runtime vs torch dispatch" split. Gated: when disabled each boundary call
 // pays one relaxed atomic load (no clock read), so ON==OFF latency holds; an explain
 // region flips it on for its duration. Index order MUST match kRtTimingN / the
 // Python _RT_PRIMS tuple.
@@ -30,13 +33,8 @@ namespace {
 enum RtIdx : std::uint8_t {
   RT_V2V = 0,
   RT_V2V_MULTI,
-  RT_BORROW,
-  RT_ACQUIRE,
-  RT_RETURN,
   RT_V2H,
   RT_H2V,
-  // Appended, never inserted: rt_timing_get() exposes these by slot index, so
-  // reordering silently remaps every existing reader's columns.
   RT_V2H_MULTI,
   RT_H2V_MULTI,
   RT_N
@@ -87,36 +85,6 @@ void rt_timing_get(uint64_t* out) {
   }
 }
 
-// torch.rbln.explain() runtime-counter reads. Thin pass-throughs to librbln's
-// public C-API (rbln_prof_*, declared in rbln_runtime_api.h via RBLNFunctions.h).
-uint32_t rt_prof_hidden_num() {
-  return rbln_prof_v2v_hidden_num_reasons();
-}
-void rt_prof_hidden_get(uint64_t* counts, uint64_t* bytes, uint32_t n) {
-  rbln_prof_get_v2v_hidden_d2h(counts, bytes, n);
-}
-uint32_t rt_prof_reject_num() {
-  return rbln_prof_v2v_reject_num_reasons();
-}
-void rt_prof_reject_get(uint64_t* counts, uint64_t* bytes, uint32_t n) {
-  rbln_prof_get_v2v_reject(counts, bytes, n);
-}
-void rt_prof_host_sync_d2h(uint64_t* count, uint64_t* bytes) {
-  rbln_prof_get_host_sync_d2h(count, bytes);
-}
-void rt_prof_host_sync_h2d(uint64_t* count, uint64_t* bytes) {
-  rbln_prof_get_host_sync_h2d(count, bytes);
-}
-void rt_prof_memory(uint64_t* current, uint64_t* peak) {
-  rbln_prof_get_memory(current, peak);
-}
-void rt_prof_reset() {
-  rbln_prof_reset_v2v_hidden_d2h();
-  rbln_prof_reset_v2v_reject();
-  rbln_prof_reset_host_sync_d2h();
-  rbln_prof_reset_host_sync_h2d();
-}
-
 namespace {
 
 // Default current logical device is 0
@@ -140,47 +108,6 @@ void check_device_index(c10::DeviceIndex device_index) {
         static_cast<int>(manager.getLogicalDeviceCount()),
         env_display.device_map,
         env_display.npus_per_device);
-  }
-}
-
-std::string to_string(::rbln::DataType rbln_dtype) {
-  switch (rbln_dtype) {
-    case ::rbln::DataType::Undefined:
-      return "Undefined";
-    case ::rbln::DataType::UInt8:
-      return "UInt8";
-    case ::rbln::DataType::Int8:
-      return "Int8";
-    case ::rbln::DataType::Int16:
-      return "Int16";
-    case ::rbln::DataType::Int32:
-      return "Int32";
-    case ::rbln::DataType::Int64:
-      return "Int64";
-    case ::rbln::DataType::Float16:
-      return "Float16";
-    case ::rbln::DataType::Float32:
-      return "Float32";
-    case ::rbln::DataType::Float64:
-      return "Float64";
-    case ::rbln::DataType::Complex32:
-      return "Complex32";
-    case ::rbln::DataType::Complex64:
-      return "Complex64";
-    case ::rbln::DataType::Complex128:
-      return "Complex128";
-    case ::rbln::DataType::Bool:
-      return "Bool";
-    case ::rbln::DataType::BFloat16:
-      return "BFloat16";
-    case ::rbln::DataType::Float8_e5m2:
-      return "Float8_e5m2";
-    case ::rbln::DataType::Float8_e4m3:
-      return "Float8_e4m3";
-    case ::rbln::DataType::CustomFloat16:
-      return "CustomFloat16";
-    default:
-      RBLN_CHECK(false, "Unsupported RBLN dtype: {}", static_cast<int>(rbln_dtype));
   }
 }
 
@@ -210,54 +137,42 @@ int to_device_id(c10::DeviceIndex device_index) {
 
 } // namespace
 
-::rbln::DataType to_rbln_dtype(c10::ScalarType dtype) {
-  switch (dtype) {
-    case c10::kByte:
-      return ::rbln::DataType::UInt8;
-    case c10::kChar:
-      return ::rbln::DataType::Int8;
-    case c10::kShort:
-      return ::rbln::DataType::Int16;
-    case c10::kInt:
-      return ::rbln::DataType::Int32;
-    case c10::kLong:
-      return ::rbln::DataType::Int64;
-    case c10::kHalf:
-      return ::rbln::DataType::Float16;
-    case c10::kFloat:
-      return ::rbln::DataType::Float32;
-    case c10::kDouble:
-      return ::rbln::DataType::Float64;
-    case c10::kComplexHalf:
-      return ::rbln::DataType::Complex32;
-    case c10::kComplexFloat:
-      return ::rbln::DataType::Complex64;
-    case c10::kComplexDouble:
-      return ::rbln::DataType::Complex128;
-    case c10::kBool:
-      return ::rbln::DataType::Bool;
-    case c10::kBFloat16:
-      return ::rbln::DataType::BFloat16;
-    case c10::kFloat8_e5m2:
-      return ::rbln::DataType::Float8_e5m2;
-    case c10::kFloat8_e4m3fn:
-      return ::rbln::DataType::Float8_e4m3;
-    default:
-      RBLN_CHECK(false, "Unsupported dtype: {}", c10::str(dtype));
-  }
+// --- Device-runtime liveness ------------------------------------------------
+// The driver is loaded lazily and is absent on compile/CPU-only/CI hosts, and a call into a
+// torn-down runtime at shutdown must not crash. Runtime-touching leaves gate on
+// runtime_available().
+
+namespace {
+
+std::atomic<bool> runtime_shutting_down_{false}; // set at teardown via a Python atexit hook
+
+bool driver_available() noexcept {
+  return rt::Device::available();
 }
 
-std::string to_string(const ::rbln::MemoryInfo& memory_info) {
-  const auto memory_info_string = fmt::format(
-      "MemoryInfo(torch_device_id={}, key_vaddr={:#x}, user_dtype={}, user_shape={}, physical_dtype={}, physical_shape={})",
-      memory_info.torch_device_id,
-      memory_info.key_vaddr,
-      to_string(memory_info.user_dtype),
-      fmt::join(memory_info.user_shape, ","),
-      to_string(memory_info.physical_dtype),
-      fmt::join(memory_info.physical_shape, ","));
-  return memory_info_string;
+// Torn down (shutting down or driver absent) vs "no device present" (reported by
+// to_device_id()): teardown-safe ops no-op only on the former.
+bool runtime_torn_down() noexcept {
+  return runtime_shutting_down_.load(std::memory_order_relaxed) || !driver_available();
 }
+
+// Mandatory-op guard: clean throw, never a SEGFAULT.
+void require_runtime(const char* op) {
+  RBLN_CHECK(
+      !runtime_shutting_down_.load(std::memory_order_relaxed), "Cannot {}: the RBLN runtime is shutting down.", op);
+  RBLN_CHECK(
+      is_dummy_device() || driver_available(),
+      "Cannot {}: the RBLN driver is not loaded; install the RBLN driver and runtime.",
+      op);
+}
+
+// c10::Error::what() appends "Exception raised from ..." plus a full C++ backtrace.
+// Keep only the human-readable first line for warnings on nothrow paths.
+std::string first_line(std::string_view text) {
+  return std::string(text.substr(0, text.find('\n')));
+}
+
+} // namespace
 
 c10::DeviceIndex get_device_count() {
   auto& manager = DeviceMappingManager::getInstance();
@@ -276,29 +191,23 @@ DeviceProperties get_device_properties(c10::DeviceIndex device_index) {
 
   DeviceProperties properties;
   for (const int physical_device_id : physical_device_ids) {
-    RBLNDeviceProperties npu{};
-    RBLN_CHECK(
-        !rbln_get_device_properties(physical_device_id, &npu),
-        "rbln_get_device_properties failed for NPU {} behind rbln:{}; the device may be absent or held by "
-        "another process — check $rbln-smi",
-        physical_device_id,
-        static_cast<int>(device_index));
-
+    const auto npu = rt::Device::open(DeviceMappingManager::getInstance().systemNpu(physical_device_id))->properties();
+    const uint64_t per_chiplet = npu.chiplets == 0 ? 0 : npu.memory / npu.chiplets;
     if (properties.npu_count == 0) {
-      properties.name = npu.name;
-      properties.memory_per_chiplet = npu.memory_per_chiplet;
-      properties.num_chiplet = npu.num_chiplet;
+      properties.name = npu.npu;
+      properties.memory_per_chiplet = per_chiplet;
+      properties.num_chiplet = npu.chiplets;
     } else {
       RBLN_CHECK(
-          properties.name == npu.name && properties.num_chiplet == npu.num_chiplet,
+          properties.name == npu.npu && properties.num_chiplet == npu.chiplets,
           "rbln:{} aggregates unlike NPUs: {} with {} chiplet(s) and {} with {}",
           static_cast<int>(device_index),
           properties.name,
           properties.num_chiplet,
-          npu.name,
-          npu.num_chiplet);
+          npu.npu,
+          npu.chiplets);
     }
-    properties.total_memory += npu.total_memory;
+    properties.total_memory += npu.memory;
     properties.npu_count++;
   }
   RBLN_LOG_DEBUG(
@@ -312,19 +221,11 @@ DeviceProperties get_device_properties(c10::DeviceIndex device_index) {
 
 c10::DeviceIndex get_physical_device_count() {
   if (is_dummy_device()) {
-    // Dummy mode must not touch the runtime (the host may have no SDK/driver);
-    // there is no physical NPU, so report 0.
+    // Dummy mode must not touch the driver (the host may have none); there is no physical
+    // NPU, so report 0.
     return 0;
   }
-  // Directly query the runtime API for physical device count
-  // This bypasses the RSD mode logic and always returns the actual physical count
-  int device_count = 0;
-  RBLN_CHECK(
-      !rbln_get_device_count(&device_count),
-      "rbln_get_device_count failed; no NPU is visible — check that the device is present, the rbln kernel "
-      "driver is loaded, and the device is not held by another process");
-
-  const auto physical_device_count = static_cast<c10::DeviceIndex>(device_count);
+  const auto physical_device_count = static_cast<c10::DeviceIndex>(DeviceMappingManager::visibleNpus().size());
   RBLN_LOG_DEBUG("physical_NPU_count={}", static_cast<int>(physical_device_count));
   return physical_device_count;
 }
@@ -383,52 +284,8 @@ c10::DeviceIndex exchange_device_index(c10::DeviceIndex device_index) {
 }
 
 c10::DeviceIndex get_torch_device_id(const void* data) {
-  RBLN_LOG_DEBUG("data={}", fmt::ptr(data));
   RBLN_CHECK(data != nullptr, "data cannot be nullptr");
-
-  const auto vaddr = reinterpret_cast<uint64_t>(data);
-  uint32_t torch_device_id = 0;
-  RBLN_CHECK(
-      !::rbln::rbln_get_torch_device_id_from_vaddr(vaddr, torch_device_id),
-      "rbln_get_torch_device_id_from_vaddr failed for vaddr={:#x}; the pointer may not be RBLN device memory or may "
-      "be stale",
-      vaddr);
-  return static_cast<c10::DeviceIndex>(torch_device_id);
-}
-
-::rbln::MemoryInfo get_memory_info(const void* data) {
-  RBLN_LOG_DEBUG("data={}", fmt::ptr(data));
-  RBLN_CHECK(data != nullptr, "data cannot be nullptr");
-  // get_memory_info() does a full VMemory JSON serialize+parse round-trip on
-  // every call. Warn so unexpected hot-path callers are easy to spot in logs;
-  // when only the device id is needed, get_torch_device_id() is the cheap path.
-  RBLN_LOG_WARN(
-      "get_memory_info({}) performs a full VMemory JSON round-trip (slow) — avoid on performance hot paths; "
-      "use get_torch_device_id() when only the device id is needed",
-      fmt::ptr(data));
-
-  const auto vaddr = reinterpret_cast<uint64_t>(data);
-  ::rbln::MemoryInfo memory_info;
-  RBLN_LOG_DEBUG("Calling rbln_get_memory_info: vaddr={:#x}", vaddr);
-  RBLN_CHECK(
-      !::rbln::rbln_get_memory_info(vaddr, memory_info),
-      "rbln_get_memory_info failed for vaddr={:#x}; the pointer may not be RBLN device memory or may be stale",
-      vaddr);
-  RBLN_LOG_DEBUG("memory_info={}", to_string(memory_info));
-  return memory_info;
-}
-
-bool is_eager_malloc() {
-  // Read live per call (not a process-lifetime static) so the value reflects the current
-  // environment. getenv is not thread-safe against a concurrent setenv/putenv, but this is
-  // safe here: only malloc() consults it, free is mode-agnostic (so an env change between an
-  // allocation and its free can't cause an alloc/free mismatch), and the env is not mutated
-  // concurrently with allocation (prod fixes it at startup; tests toggle it only at quiescent
-  // points, single-threaded per worker).
-  const auto* env = std::getenv("TORCH_RBLN_EAGER_MALLOC");
-  const bool eager_malloc = (env != nullptr) && (std::strcmp(env, "1") == 0);
-  RBLN_LOG_DEBUG("eager_malloc={}", eager_malloc);
-  return eager_malloc;
+  return caching::locate(data).device_index;
 }
 
 bool is_dummy_device() {
@@ -437,41 +294,6 @@ bool is_dummy_device() {
   static const bool dummy = dummyDeviceEnabled();
   return dummy;
 }
-
-// --- Device-runtime liveness ------------------------------------------------
-// The device runtime (driver) is loaded lazily and is absent on compile/CPU-only/CI
-// hosts or unmapped at shutdown, when a raw rbln_* call SEGFAULTs. Runtime-touching
-// leaves gate on runtime_available(), built on librbln's own rbln_runtime_available().
-
-namespace {
-
-std::atomic<bool> runtime_shutting_down_{false}; // set at teardown via a Python atexit hook
-
-// Torn down (shutting down or driver absent) vs "no device present" (reported by
-// to_device_id()): teardown-safe ops no-op only on the former.
-bool runtime_torn_down() noexcept {
-  return runtime_shutting_down_.load(std::memory_order_relaxed) || !rbln_runtime_available();
-}
-
-// Mandatory-op guard: clean throw, never a SEGFAULT. Required even in dummy mode.
-void require_runtime(const char* op) {
-  RBLN_CHECK(
-      !runtime_shutting_down_.load(std::memory_order_relaxed), "Cannot {}: the RBLN runtime is shutting down.", op);
-  RBLN_CHECK(
-      rbln_runtime_available(),
-      "Cannot {}: the RBLN device runtime is not loaded; install the RBLN SDK/runtime "
-      "(required even in RBLN_DUMMY_DEVICE mode).",
-      op);
-}
-
-// c10::Error::what() appends "Exception raised from ..." plus a full C++ backtrace.
-// Keep only the human-readable first line for warnings on nothrow paths.
-std::string first_line(std::string_view text) {
-  return std::string(text.substr(0, text.find('\n')));
-}
-
-} // namespace
-
 c10::DeviceIndex get_device_count_nothrow() noexcept {
   // Nothrow view of get_device_count(); failures map to 0. First line only, because
   // e.what() carries the C++ stack trace and every co-tenant walks this path. The full
@@ -519,7 +341,7 @@ bool runtime_available() noexcept {
   // hasFailedCommit() last: getInstance() runs the registered mapping-ready callback -- which
   // may reach back into Python -- without a catch, so the first touch of the singleton has to
   // happen inside get_device_count_nothrow()'s catch-all, not on this noexcept boundary.
-  return !runtime_shutting_down_.load(std::memory_order_relaxed) && rbln_runtime_available() &&
+  return !runtime_shutting_down_.load(std::memory_order_relaxed) && (is_dummy_device() || driver_available()) &&
       get_device_count_nothrow() > 0 && !DeviceMappingManager::getInstance().hasFailedCommit();
 }
 
@@ -579,110 +401,69 @@ void* malloc(c10::DeviceIndex device_index, size_t nbytes) {
   // Allocation is the gateway: clean throw (not SEGFAULT) if the runtime is gone;
   // to_device_id() then throws on a host with no device.
   require_runtime("allocate device memory");
-  const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
-  const auto size = static_cast<uint64_t>(nbytes);
-  uint64_t vaddr = 0;
-  const auto eager_malloc = is_eager_malloc();
-  if (eager_malloc) {
-    RBLN_LOG_DEBUG(
-        "Calling rbln_malloc_eager: rbln:{}, torch_device_id={}, size={}",
-        static_cast<int>(device_index),
-        torch_device_id,
-        size);
-    RBLN_CHECK(
-        !::rbln::rbln_malloc_eager(torch_device_id, size, vaddr),
-        "rbln_malloc_eager failed (rbln:{}, {} bytes); the device may be out of memory or hold stale allocations",
-        static_cast<int>(device_index),
-        size);
-  } else {
-    RBLN_LOG_DEBUG(
-        "Calling rbln_malloc_lazy: rbln:{}, torch_device_id={}, size={}",
-        static_cast<int>(device_index),
-        torch_device_id,
-        size);
-    RBLN_CHECK(
-        !::rbln::rbln_malloc_lazy(torch_device_id, size, vaddr),
-        "rbln_malloc_lazy failed (rbln:{}, {} bytes); the device may be out of memory or hold stale allocations",
-        static_cast<int>(device_index),
-        size);
-  }
-
-  auto* data = reinterpret_cast<void*>(vaddr); // NOLINT(performance-no-int-to-ptr)
+  to_device_id(device_index);
+  static std::once_flag eager_malloc_warned;
+  std::call_once(eager_malloc_warned, [] {
+    if (std::getenv("TORCH_RBLN_EAGER_MALLOC") != nullptr) {
+      RBLN_LOG_WARN("TORCH_RBLN_EAGER_MALLOC has no effect: device memory is allocated with the tensor");
+    }
+  });
+  void* data = caching::allocate(device_index, nbytes);
   RBLN_LOG_DEBUG("data={}", fmt::ptr(data));
-  RBLN_CHECK(data != nullptr, "data cannot be nullptr");
   mark_device_context_initialized(device_index); // this process now owns context on this device
   return data;
 }
 
-void mark_zeros(const void* rbln_data) {
-  RBLN_LOG_DEBUG("rbln_data={}", fmt::ptr(rbln_data));
-  RBLN_CHECK(rbln_data != nullptr, "rbln_data cannot be nullptr");
+namespace {
 
-  const auto vaddr = reinterpret_cast<uint64_t>(rbln_data);
-  RBLN_CHECK(!::rbln::rbln_mark_zeros(vaddr), "rbln_mark_zeros failed for vaddr={:#x}", vaddr);
-  RBLN_LOG_DEBUG("vaddr={:#x} marked as zero-initialized", vaddr);
+// Runs `op` on the current stream of `device_index`, after what is queued on it.
+void on_current_stream(c10::DeviceIndex device_index, const std::function<void()>& op) {
+  runtime_stream(get_current_stream(device_index))->run([&](rt::Work&) { op(); });
+}
+
+Location located(const void* data, size_t nbytes, const char* what) {
+  RBLN_CHECK(data != nullptr, "{} cannot be nullptr", what);
+  auto location = caching::locate(data);
+  RBLN_CHECK(
+      nbytes <= location.available,
+      "{} bytes from {} run past the end of its RBLN allocation ({} bytes left)",
+      nbytes,
+      fmt::ptr(data),
+      location.available);
+  return location;
+}
+
+} // namespace
+
+void fill_zeros(void* rbln_data, size_t nbytes) {
+  if (nbytes == 0) {
+    return;
+  }
+  const auto dst = located(rbln_data, nbytes, "rbln_data");
+  on_current_stream(dst.device_index, [&] { dst.buffer->device()->fill(*dst.buffer, dst.offset, nbytes, 0); });
 }
 
 void free(void* data) {
   RBLN_LOG_DEBUG("data={}", fmt::ptr(data));
   RBLN_CHECK(data != nullptr, "data cannot be nullptr");
-
   require_runtime("free device memory");
-  const auto vaddr = reinterpret_cast<uint64_t>(data);
-  RBLN_LOG_DEBUG("Calling rbln_free: vaddr={:#x}", vaddr);
-  RBLN_CHECK(
-      !::rbln::rbln_free(vaddr),
-      "rbln_free failed for vaddr={:#x} (device may have been reset/lost, or the address was already freed)",
-      vaddr);
+  caching::release(data);
 }
 
 void free_nothrow(void* data) noexcept {
-  // Noexcept deleter: rbln_free and RBLN_WARN_NOTHROW are both nothrow.
   if (data == nullptr) {
     return;
   }
-  // Torn-down runtime: rbln_free would deref a dead runtime -> SEGFAULT; leak instead.
-  // Uses runtime_torn_down() (cheap), not runtime_available(), to avoid
-  // get_device_count()'s GIL/Python side effects in the deleter at teardown.
-  if (runtime_torn_down()) {
-    RBLN_WARN_NOTHROW(
-        "rbln_free skipped for {}: RBLN runtime unavailable; leaking rather than crashing", fmt::ptr(data));
+  // Torn-down runtime: releasing would reach a dead driver; leak instead.
+  if (runtime_shutting_down_.load(std::memory_order_relaxed)) {
+    RBLN_WARN_NOTHROW("free skipped for {}: the RBLN runtime is shutting down; leaking", fmt::ptr(data));
     return;
   }
-  const auto vaddr = reinterpret_cast<uint64_t>(data);
-  if (::rbln::rbln_free(vaddr) != 0) {
-    RBLN_WARN_NOTHROW("rbln_free failed for vaddr={:#x}; leaking rather than aborting", vaddr);
+  try {
+    caching::release(data);
+  } catch (const std::exception& e) {
+    RBLN_WARN_NOTHROW("free failed for {}; leaking rather than aborting: {}", fmt::ptr(data), first_line(e.what()));
   }
-}
-
-void bind_device_memory(void* rbln_data, size_t nbytes) {
-  RBLN_CHECK(rbln_data != nullptr, "bind_device_memory: rbln_data is nullptr");
-  RBLN_CHECK(nbytes > 0, "bind_device_memory: nbytes must be positive, but got {}", nbytes);
-  // Reachable from a public Python entry point at any time, teardown included, where the raw
-  // rbln_* call would SEGFAULT rather than raise. The vmem-configuring leaves that only run
-  // downstream of an allocation do not repeat the check: malloc already made it.
-  require_runtime("bind device memory");
-  const auto vaddr = reinterpret_cast<uint64_t>(rbln_data);
-  RBLN_LOG_DEBUG("bind_device_memory: vaddr={:#x} nbytes={}", vaddr, nbytes);
-  RBLN_CHECK(
-      !::rbln::rbln_set_raw_memory_alloc(vaddr, static_cast<uint64_t>(nbytes)),
-      "rbln_set_raw_memory_alloc failed (vaddr={:#x}, {} bytes); the pointer may not be RBLN device memory or the "
-      "device may be out of memory",
-      vaddr,
-      nbytes);
-}
-
-void set_device_layout_like(void* target_data, const void* ref_data) {
-  RBLN_CHECK(target_data != nullptr, "set_device_layout_like: target is nullptr");
-  RBLN_CHECK(ref_data != nullptr, "set_device_layout_like: ref is nullptr");
-  // Same reason as bind_device_memory: a public Python entry point, so nothing
-  // upstream has established that the runtime is loaded.
-  require_runtime("set the device layout");
-  const auto target_vaddr = reinterpret_cast<uint64_t>(target_data);
-  const auto ref_vaddr = reinterpret_cast<uint64_t>(ref_data);
-  RBLN_LOG_DEBUG("set_device_layout_like: target={:#x} ref={:#x}", target_vaddr, ref_vaddr);
-  RBLN_CHECK(
-      !::rbln::rbln_set_device_alloc_layout_like(target_vaddr, ref_vaddr), "rbln_set_device_alloc_layout_like failed");
 }
 
 void memcpy_h2v(void* rbln_dst_data, const void* cpu_src_data, size_t nbytes) {
@@ -691,18 +472,9 @@ void memcpy_h2v(void* rbln_dst_data, const void* cpu_src_data, size_t nbytes) {
       "dst_rbln_data={}, src_cpu_data={}, nbytes={}", fmt::ptr(rbln_dst_data), fmt::ptr(cpu_src_data), nbytes);
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
   RBLN_CHECK(cpu_src_data != nullptr, "cpu_src_data cannot be nullptr");
-  RBLN_CHECK(rbln_dst_data != nullptr, "rbln_dst_data cannot be nullptr");
-
-  const auto src_host_ptr = reinterpret_cast<uintptr_t>(cpu_src_data);
-  const auto dst_vaddr = reinterpret_cast<uint64_t>(rbln_dst_data);
-  const auto size = static_cast<uint64_t>(nbytes);
-  RBLN_LOG_DEBUG(
-      "Calling rbln_memcpy_h2v: src_host_ptr={:#x}, dst_vaddr={:#x}, size={}", src_host_ptr, dst_vaddr, size);
-  RBLN_CHECK(
-      !::rbln::rbln_memcpy_h2v(src_host_ptr, dst_vaddr, size),
-      "rbln_memcpy_h2v failed ({} bytes, dst vaddr={:#x}); the device may be busy or faulted",
-      size,
-      dst_vaddr);
+  const auto dst = located(rbln_dst_data, nbytes, "rbln_dst_data");
+  on_current_stream(
+      dst.device_index, [&] { dst.buffer->device()->write(*dst.buffer, dst.offset, cpu_src_data, nbytes); });
 }
 
 void memcpy_v2h(void* cpu_dst_data, const void* rbln_src_data, size_t nbytes) {
@@ -710,183 +482,73 @@ void memcpy_v2h(void* cpu_dst_data, const void* rbln_src_data, size_t nbytes) {
   RBLN_LOG_DEBUG(
       "dst_cpu_data={}, src_rbln_data={}, nbytes={}", fmt::ptr(cpu_dst_data), fmt::ptr(rbln_src_data), nbytes);
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
-  RBLN_CHECK(rbln_src_data != nullptr, "rbln_src_data cannot be nullptr");
   RBLN_CHECK(cpu_dst_data != nullptr, "cpu_dst_data cannot be nullptr");
-
-  const auto src_vaddr = reinterpret_cast<uint64_t>(rbln_src_data);
-  const auto dst_host_ptr = reinterpret_cast<uintptr_t>(cpu_dst_data);
-  const auto size = static_cast<uint64_t>(nbytes);
-  RBLN_LOG_DEBUG(
-      "Calling rbln_memcpy_v2h: src_vaddr={:#x}, dst_host_ptr={:#x}, size={}", src_vaddr, dst_host_ptr, size);
-  RBLN_CHECK(
-      !::rbln::rbln_memcpy_v2h(src_vaddr, dst_host_ptr, size),
-      "rbln_memcpy_v2h failed ({} bytes, src vaddr={:#x}); the device may be busy or faulted",
-      size,
-      src_vaddr);
+  const auto src = located(rbln_src_data, nbytes, "rbln_src_data");
+  on_current_stream(
+      src.device_index, [&] { src.buffer->device()->read(*src.buffer, src.offset, cpu_dst_data, nbytes); });
 }
+
+namespace {
+
+void copy_v2v(const Location& dst, const Location& src, size_t nbytes) {
+  const auto& src_device = src.buffer->device();
+  const auto& dst_device = dst.buffer->device();
+  if (dst_device->sharesContext(*src_device)) {
+    if (src.device_index != dst.device_index) {
+      on_current_stream(src.device_index, [] {});
+    }
+    on_current_stream(dst.device_index, [&] {
+      dst_device->copy(*dst.buffer, dst.offset, *src.buffer, src.offset, nbytes);
+    });
+    return;
+  }
+  // Devices of different contexts reach each other through the host.
+  prof::record_bounce(prof::BounceSite::kRbln2RblnIndirect, nbytes);
+  std::vector<uint8_t> host(nbytes);
+  on_current_stream(src.device_index, [&] { src_device->read(*src.buffer, src.offset, host.data(), nbytes); });
+  on_current_stream(dst.device_index, [&] { dst_device->write(*dst.buffer, dst.offset, host.data(), nbytes); });
+}
+
+} // namespace
 
 void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes) {
   RtTimer _rt(RT_V2V);
   RBLN_LOG_DEBUG(
       "dst_rbln_data={}, src_rbln_data={}, nbytes={}", fmt::ptr(rbln_dst_data), fmt::ptr(rbln_src_data), nbytes);
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
-  RBLN_CHECK(rbln_src_data != nullptr, "rbln_src_data cannot be nullptr");
-  RBLN_CHECK(rbln_dst_data != nullptr, "rbln_dst_data cannot be nullptr");
-
-  const auto src_vaddr = reinterpret_cast<uint64_t>(rbln_src_data);
-  const auto dst_vaddr = reinterpret_cast<uint64_t>(rbln_dst_data);
-  const auto size = static_cast<uint64_t>(nbytes);
-
-  const auto src_torch_device_id = get_torch_device_id(rbln_src_data);
-  const auto dst_torch_device_id = get_torch_device_id(rbln_dst_data);
-
-  RBLN_LOG_DEBUG(
-      "src=rbln:{}, dst=rbln:{}", static_cast<int>(src_torch_device_id), static_cast<int>(dst_torch_device_id));
-
-  if (src_torch_device_id == dst_torch_device_id) {
-    RBLN_LOG_DEBUG("Performing same-device copy");
-
-    RBLN_LOG_DEBUG("Calling rbln_memcpy_v2v: src_vaddr={:#x}, dst_vaddr={:#x}, size={}", src_vaddr, dst_vaddr, size);
-    // Tag the failure so `at::native::rbln::submit_or_fallback` can route a
-    // rejected same-device copy to its CPU fallback (the batched path already
-    // emits "rbln_memcpy_v2v_multi failed"; the per-entry path was message-less
-    // and escaped the gate as a hard crash).
-    RBLN_CHECK(!::rbln::rbln_memcpy_v2v(src_vaddr, dst_vaddr, size), "rbln_memcpy_v2v failed");
-  } else {
-    RBLN_LOG_DEBUG("Performing cross-device copy");
-
-    std::vector<uint8_t> host_buffer(nbytes);
-    const auto host_buffer_data = host_buffer.data();
-    RBLN_LOG_DEBUG("Allocated {} bytes of temporary host buffer at {}", nbytes, fmt::ptr(host_buffer_data));
-    const auto host_ptr = reinterpret_cast<uintptr_t>(host_buffer_data);
-
-    RBLN_LOG_DEBUG("Calling rbln_memcpy_v2h: src_vaddr={:#x}, dst_host_ptr={:#x}, size={}", src_vaddr, host_ptr, size);
-    RBLN_CHECK(
-        !::rbln::rbln_memcpy_v2h(src_vaddr, host_ptr, size),
-        "rbln_memcpy_v2h failed during cross-device transfer ({} bytes, src vaddr={:#x})",
-        size,
-        src_vaddr);
-    RBLN_LOG_DEBUG("Calling rbln_memcpy_h2v: src_host_ptr={:#x}, dst_vaddr={:#x}, size={}", host_ptr, dst_vaddr, size);
-    RBLN_CHECK(
-        !::rbln::rbln_memcpy_h2v(host_ptr, dst_vaddr, size),
-        "rbln_memcpy_h2v failed during cross-device transfer ({} bytes, dst vaddr={:#x})",
-        size,
-        dst_vaddr);
-  }
+  copy_v2v(located(rbln_dst_data, nbytes, "rbln_dst_data"), located(rbln_src_data, nbytes, "rbln_src_data"), nbytes);
 }
 
+// Asynchronous copies may run at once: each is ordered on the current stream and done on
+// return, which every caller's contract allows.
 void memcpy_h2v_async(void* rbln_dst_data, const void* cpu_src_data, size_t nbytes) {
-  RBLN_LOG_DEBUG(
-      "dst_rbln_data={}, src_cpu_data={}, nbytes={}", fmt::ptr(rbln_dst_data), fmt::ptr(cpu_src_data), nbytes);
-  RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
-  RBLN_CHECK(cpu_src_data != nullptr, "cpu_src_data cannot be nullptr");
-  RBLN_CHECK(rbln_dst_data != nullptr, "rbln_dst_data cannot be nullptr");
-
-  const auto src_host_ptr = reinterpret_cast<uintptr_t>(cpu_src_data);
-  const auto dst_vaddr = reinterpret_cast<uint64_t>(rbln_dst_data);
-  const auto size = static_cast<uint64_t>(nbytes);
-  uint64_t handle = 0;
-  RBLN_LOG_DEBUG(
-      "Calling rbln_memcpy_h2v_async: src_host_ptr={:#x}, dst_vaddr={:#x}, size={}", src_host_ptr, dst_vaddr, size);
-  RBLN_CHECK(
-      !::rbln::rbln_memcpy_h2v_async(src_host_ptr, dst_vaddr, size, &handle),
-      "rbln_memcpy_h2v_async failed ({} bytes, dst vaddr={:#x}); the device may be busy or faulted",
-      size,
-      dst_vaddr);
-  RBLN_LOG_DEBUG("H2V async dispatched (handle={}, 0=sync fallback)", handle);
+  memcpy_h2v(rbln_dst_data, cpu_src_data, nbytes);
 }
 
 void memcpy_v2h_async(void* cpu_dst_data, const void* rbln_src_data, size_t nbytes) {
-  RBLN_LOG_DEBUG(
-      "dst_cpu_data={}, src_rbln_data={}, nbytes={}", fmt::ptr(cpu_dst_data), fmt::ptr(rbln_src_data), nbytes);
-  RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
-  RBLN_CHECK(rbln_src_data != nullptr, "rbln_src_data cannot be nullptr");
-  RBLN_CHECK(cpu_dst_data != nullptr, "cpu_dst_data cannot be nullptr");
-
-  const auto src_vaddr = reinterpret_cast<uint64_t>(rbln_src_data);
-  const auto dst_host_ptr = reinterpret_cast<uintptr_t>(cpu_dst_data);
-  const auto size = static_cast<uint64_t>(nbytes);
-  uint64_t handle = 0;
-  RBLN_LOG_DEBUG(
-      "Calling rbln_memcpy_v2h_async: src_vaddr={:#x}, dst_host_ptr={:#x}, size={}", src_vaddr, dst_host_ptr, size);
-  RBLN_CHECK(
-      !::rbln::rbln_memcpy_v2h_async(src_vaddr, dst_host_ptr, size, &handle),
-      "rbln_memcpy_v2h_async failed ({} bytes, src vaddr={:#x}); the device may be busy or faulted",
-      size,
-      src_vaddr);
-  RBLN_LOG_DEBUG("V2H async dispatched (handle={}, 0=sync fallback)", handle);
+  memcpy_v2h(cpu_dst_data, rbln_src_data, nbytes);
 }
 
 void memcpy_v2v_async(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes) {
-  RBLN_LOG_DEBUG(
-      "dst_rbln_data={}, src_rbln_data={}, nbytes={}", fmt::ptr(rbln_dst_data), fmt::ptr(rbln_src_data), nbytes);
-  RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
-  RBLN_CHECK(rbln_src_data != nullptr, "rbln_src_data cannot be nullptr");
-  RBLN_CHECK(rbln_dst_data != nullptr, "rbln_dst_data cannot be nullptr");
-
-  const auto src_vaddr = reinterpret_cast<uint64_t>(rbln_src_data);
-  const auto dst_vaddr = reinterpret_cast<uint64_t>(rbln_dst_data);
-  const auto size = static_cast<uint64_t>(nbytes);
-
-  const auto src_torch_device_id = get_torch_device_id(rbln_src_data);
-  const auto dst_torch_device_id = get_torch_device_id(rbln_dst_data);
-
-  if (src_torch_device_id != dst_torch_device_id) {
-    // rbln_memcpy_v2v_async only handles same-device copies; cross-device needs
-    // a host bounce, which we cannot do async without owning a buffer past return.
-    RBLN_LOG_DEBUG("Cross-device v2v, falling back to sync memcpy_v2v");
-    memcpy_v2v(rbln_dst_data, rbln_src_data, nbytes);
-    return;
-  }
-
-  uint64_t handle = 0;
-  RBLN_LOG_DEBUG(
-      "Calling rbln_memcpy_v2v_async: src_vaddr={:#x}, dst_vaddr={:#x}, size={}", src_vaddr, dst_vaddr, size);
-  RBLN_CHECK(
-      !::rbln::rbln_memcpy_v2v_async(src_vaddr, dst_vaddr, size, &handle),
-      "rbln_memcpy_v2v_async failed ({} bytes, src vaddr={:#x}, dst vaddr={:#x}); the device may be busy or faulted",
-      size,
-      src_vaddr,
-      dst_vaddr);
-  RBLN_LOG_DEBUG("V2V async dispatched (handle={}, 0=sync fallback)", handle);
+  memcpy_v2v(rbln_dst_data, rbln_src_data, nbytes);
 }
 
 void synchronize(c10::DeviceIndex device_index) {
   RBLN_LOG_DEBUG("Synchronizing device {}", static_cast<int>(device_index));
-  // No-op only during teardown (runtime may be unmapped); otherwise a missing device
-  // -- no driver or no NPU -- throws via to_device_id() (torch.cuda.synchronize()
-  // parity; see RBLNNoDeviceTest). No raw call is reached before that throw.
+  // No-op only during teardown; otherwise a missing device -- no driver or no NPU -- throws
+  // via to_device_id() (torch.cuda.synchronize() parity; see RBLNNoDeviceTest).
   if (runtime_shutting_down_.load(std::memory_order_relaxed)) {
     return;
   }
   check_device_index(device_index);
-  const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
-  RBLN_CHECK(
-      !::rbln::rbln_device_synchronize(torch_device_id),
-      "rbln_device_synchronize failed for rbln:{} (device may be busy or in a faulted state)",
-      static_cast<int>(device_index));
+  to_device_id(device_index);
+  runtime_stream(get_default_stream(device_index));
+  for (const auto& stream : runtime_streams(device_index)) {
+    stream->synchronize();
+  }
 }
 
 namespace {
-
-// Pack a c10::Stream into its C-ABI handle. StreamId carries the per-device stream id.
-uint64_t stream_to_handle(const c10::Stream& stream) {
-  // The handle holds the stream id in 32 bits, so a wider id would alias another stream.
-  RBLN_CHECK(
-      stream.id() >= 0 && stream.id() <= std::numeric_limits<uint32_t>::max(),
-      "rbln stream id {} is out of range for a stream handle",
-      stream.id());
-  const auto torch_device_id = static_cast<uint32_t>(to_device_id(stream.device_index()));
-  const auto local_id = static_cast<uint32_t>(stream.id());
-  return (static_cast<uint64_t>(torch_device_id) << 32) | local_id;
-}
-
-// Rebuild a c10::Stream on `device_index` from its C-ABI handle. StreamId holds the
-// per-device stream id; the device travels in the Stream itself.
-c10::Stream stream_from_handle(c10::DeviceIndex device_index, uint64_t handle) {
-  const auto local_id = static_cast<c10::StreamId>(static_cast<uint32_t>(handle & 0xFFFFFFFFULL));
-  return c10::Stream(c10::Stream::UNSAFE, c10::Device(c10::kPrivateUse1, device_index), local_id);
-}
 
 // A device index of -1 means "current device" (torch passes it for an index-less
 // device like `torch.Stream(device="rbln")`); resolve it up front.
@@ -894,19 +556,26 @@ c10::DeviceIndex resolve_device_index(c10::DeviceIndex device_index) {
   return device_index < 0 ? get_device_index() : device_index;
 }
 
-// Every stream torch hands out comes from this per-device pool: there is no destroy
-// hook, so an unbounded create would leak and lengthen every runtime drain-all.
+// Every stream torch hands out comes from this per-device pool: there is no destroy hook,
+// so an unbounded create would leak and lengthen every device synchronize.
 constexpr size_t kStreamPoolSize = 32;
 
-c10::StreamId create_stream_local_id(c10::DeviceIndex device_index) {
-  const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
-  uint64_t handle = 0;
-  RBLN_CHECK(
-      !::rbln::rbln_stream_create(torch_device_id, &handle),
-      "rbln_stream_create failed for rbln:{}",
-      static_cast<int>(device_index));
-  mark_device_context_initialized(device_index); // a stream implies a live context here
-  return static_cast<c10::StreamId>(static_cast<uint32_t>(handle & 0xFFFFFFFFULL));
+thread_local std::map<c10::DeviceIndex, c10::StreamId> current_streams_;
+
+struct EventEntry {
+  c10::DeviceIndex device_index = -1;
+  std::optional<rt::Event> event;
+};
+
+std::mutex events_mutex_;
+std::map<uint64_t, EventEntry> events_;
+uint64_t next_event_ = 1;
+
+EventEntry event_entry(uint64_t event) {
+  std::lock_guard<std::mutex> lock(events_mutex_);
+  auto it = events_.find(event);
+  RBLN_CHECK(it != events_.end(), "no RBLN event {:#x}", event);
+  return it->second;
 }
 
 } // namespace
@@ -914,27 +583,24 @@ c10::StreamId create_stream_local_id(c10::DeviceIndex device_index) {
 c10::Stream get_current_stream(c10::DeviceIndex device_index) {
   device_index = resolve_device_index(device_index);
   check_device_index(device_index);
-  const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
-  uint64_t handle = 0;
-  RBLN_CHECK(
-      !::rbln::rbln_get_current_stream(torch_device_id, &handle),
-      "rbln_get_current_stream failed for rbln:{}",
-      static_cast<int>(device_index));
-  return stream_from_handle(device_index, handle);
+  const auto it = current_streams_.find(device_index);
+  const c10::StreamId id = it == current_streams_.end() ? 0 : it->second;
+  return c10::Stream(c10::Stream::UNSAFE, c10::Device(c10::kPrivateUse1, device_index), id);
 }
 
 c10::Stream get_default_stream(c10::DeviceIndex device_index) {
   device_index = resolve_device_index(device_index);
   check_device_index(device_index);
-  // StreamId 0 is the default stream; no C-ABI call needed.
+  // StreamId 0 is the default stream.
   return c10::Stream(c10::Stream::DEFAULT, c10::Device(c10::kPrivateUse1, device_index));
 }
 
 c10::Stream get_stream_from_pool(c10::DeviceIndex device_index) {
   device_index = resolve_device_index(device_index);
   check_device_index(device_index);
+  to_device_id(device_index);
   struct Pool {
-    std::vector<c10::StreamId> local_ids;
+    std::vector<c10::StreamId> ids;
     size_t next = 0;
   };
   static std::mutex pool_mutex;
@@ -942,98 +608,80 @@ c10::Stream get_stream_from_pool(c10::DeviceIndex device_index) {
   std::lock_guard<std::mutex> lock(pool_mutex);
   auto& pool = pools[device_index];
   // next <= size, so next == size means this slot is still empty.
-  if (pool.next == pool.local_ids.size()) {
-    pool.local_ids.push_back(create_stream_local_id(device_index));
+  if (pool.next == pool.ids.size()) {
+    pool.ids.push_back(add_pool_stream(device_index));
+    mark_device_context_initialized(device_index); // a stream implies a live context here
   }
-  const auto local_id = pool.local_ids[pool.next];
+  const auto id = pool.ids[pool.next];
   pool.next = (pool.next + 1) % kStreamPoolSize;
-  return c10::Stream(c10::Stream::UNSAFE, c10::Device(c10::kPrivateUse1, device_index), local_id);
+  return c10::Stream(c10::Stream::UNSAFE, c10::Device(c10::kPrivateUse1, device_index), id);
 }
 
 void set_current_stream(c10::Stream stream) {
   const auto device_index = stream.device_index();
   check_device_index(device_index);
-  const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
-  RBLN_CHECK(
-      !::rbln::rbln_set_current_stream(torch_device_id, stream_to_handle(stream)),
-      "rbln_set_current_stream failed for rbln:{}",
-      static_cast<int>(device_index));
+  current_streams_[device_index] = stream.id();
 }
 
 bool query_stream(c10::Stream stream) {
   if (runtime_shutting_down_.load(std::memory_order_relaxed)) {
     return true; // nothing left to wait for
   }
-  bool done = false;
-  RBLN_CHECK(
-      !::rbln::rbln_stream_query(stream_to_handle(stream), &done),
-      "rbln_stream_query failed for rbln:{}",
-      static_cast<int>(stream.device_index()));
-  return done;
+  return runtime_stream(stream)->query();
 }
 
 void synchronize_stream(c10::Stream stream) {
   if (runtime_shutting_down_.load(std::memory_order_relaxed)) {
     return;
   }
-  RBLN_CHECK(
-      !::rbln::rbln_stream_synchronize(stream_to_handle(stream)),
-      "rbln_stream_synchronize failed for rbln:{}",
-      static_cast<int>(stream.device_index()));
+  runtime_stream(stream)->synchronize();
 }
 
 uint64_t event_create(c10::DeviceIndex device_index) {
   device_index = resolve_device_index(device_index);
   check_device_index(device_index);
-  const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
-  uint64_t handle = 0;
-  RBLN_CHECK(
-      !::rbln::rbln_event_create(torch_device_id, &handle),
-      "rbln_event_create failed for rbln:{}",
-      static_cast<int>(device_index));
-  // A null handle is torch's "not created yet" sentinel, so 0 must never be a handle.
-  RBLN_CHECK(handle != 0, "rbln_event_create returned handle 0, which aliases the not-created sentinel");
-  return handle;
+  std::lock_guard<std::mutex> lock(events_mutex_);
+  // A null handle is torch's "not created yet" sentinel, so 0 is never a handle.
+  const uint64_t event = next_event_++;
+  events_[event] = EventEntry{device_index, std::nullopt};
+  return event;
 }
 
 void event_destroy(uint64_t event) noexcept {
   // Called from ~Event, possibly during interpreter teardown, so it must never throw.
-  if (event == 0 || runtime_shutting_down_.load(std::memory_order_relaxed)) {
+  if (event == 0) {
     return;
   }
-  const int rc = ::rbln::rbln_event_destroy(event);
-  if (rc != 0) {
-    RBLN_WARN_NOTHROW("rbln_event_destroy failed (handle={:#x}, rc={})", event, rc);
-  }
+  std::lock_guard<std::mutex> lock(events_mutex_);
+  events_.erase(event);
 }
 
 void event_record(uint64_t event, c10::Stream stream) {
   if (runtime_shutting_down_.load(std::memory_order_relaxed)) {
     return;
   }
-  RBLN_CHECK(
-      !::rbln::rbln_event_record(event, stream_to_handle(stream)), "rbln_event_record failed (event={:#x})", event);
+  auto recorded = runtime_stream(stream)->record();
+  std::lock_guard<std::mutex> lock(events_mutex_);
+  auto it = events_.find(event);
+  RBLN_CHECK(it != events_.end(), "no RBLN event {:#x}", event);
+  it->second = EventEntry{stream.device_index(), std::move(recorded)};
 }
 
 void event_block(c10::Stream stream, uint64_t event) {
   if (runtime_shutting_down_.load(std::memory_order_relaxed)) {
     return;
   }
-  const auto stream_handle = stream_to_handle(stream);
-  if ((event >> 32) == (stream_handle >> 32)) {
+  const auto entry = event_entry(event);
+  if (!entry.event) {
+    return; // never recorded: nothing to wait for
+  }
+  if (entry.device_index == stream.device_index()) {
     // Same device: does not block the host.
-    RBLN_CHECK(
-        !::rbln::rbln_stream_wait_event(stream_handle, event),
-        "rbln_stream_wait_event failed (stream={:#x}, event={:#x})",
-        stream_handle,
-        event);
+    runtime_stream(stream)->wait(*entry.event);
   } else {
-    // Cross-device waits are not supported; degrade to a host-side wait on the event
-    // -- correct ordering, at the cost of serializing the host.
-    RBLN_CHECK(
-        !::rbln::rbln_event_synchronize(event),
-        "cross-device wait_event fallback (event_synchronize) failed (event={:#x})",
-        event);
+    // A stream waits only on events of its own device; wait on the host instead -- correct
+    // ordering, at the cost of serializing the host.
+    entry.event->synchronize();
   }
 }
 
@@ -1041,348 +689,244 @@ bool event_query(uint64_t event) {
   if (runtime_shutting_down_.load(std::memory_order_relaxed)) {
     return true; // nothing left to wait for
   }
-  bool done = false;
-  RBLN_CHECK(!::rbln::rbln_event_query(event, &done), "rbln_event_query failed (event={:#x})", event);
-  return done;
+  const auto entry = event_entry(event);
+  return !entry.event || entry.event->query();
 }
 
 void event_synchronize(uint64_t event) {
   if (runtime_shutting_down_.load(std::memory_order_relaxed)) {
     return;
   }
-  RBLN_CHECK(!::rbln::rbln_event_synchronize(event), "rbln_event_synchronize failed (event={:#x})", event);
+  const auto entry = event_entry(event);
+  if (entry.event) {
+    entry.event->synchronize();
+  }
 }
 
-void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies) {
-  if (copies.empty()) {
-    return;
+// A failure keeps the "<name> failed" message at::native::rbln::submit_or_fallback matches to
+// route a rejected batch to its CPU fallback.
+#define RBLN_BATCH(name, body)                                     \
+  try {                                                            \
+    body;                                                          \
+  } catch (const std::exception& e) {                              \
+    RBLN_CHECK(false, name " failed: {}", first_line(e.what()));   \
   }
-  RtTimer _rt(RT_V2V_MULTI);
-  std::vector<std::tuple<uint64_t, uint64_t, uint64_t>> rbln_copies;
-  rbln_copies.reserve(copies.size());
+
+namespace {
+
+constexpr size_t kHostPage = 4096;
+
+size_t page_rounded(size_t nbytes) {
+  return (nbytes + kHostPage - 1) / kHostPage * kHostPage;
+}
+
+// Runs one job of the copies `add` puts on it on the current stream of `device_index`, after
+// what is queued there and on the current streams of the devices of `after`; returns once
+// it is done.
+void run_copy_job(
+    c10::DeviceIndex device_index,
+    const std::set<c10::DeviceIndex>& after,
+    const std::function<void(rt::Device::Job&)>& add) {
+  for (const auto other : after) {
+    if (other != device_index) {
+      on_current_stream(other, [] {});
+    }
+  }
+  auto device = runtime_device(device_index);
+  runtime_stream(get_current_stream(device_index))->run([&](rt::Work& work) {
+    auto job = std::make_unique<rt::Device::Job>(*device);
+    job->name("copy");
+    add(*job);
+    work.submit(std::move(job));
+  });
+}
+
+uint64_t address_of(const Location& location) {
+  return location.buffer->address() + location.offset;
+}
+
+void v2v_batch(const std::vector<V2VCopyOp>& copies) {
+  struct Copy {
+    Location dst;
+    Location src;
+    size_t nbytes;
+  };
+  std::map<c10::DeviceIndex, std::vector<Copy>> by_device;
   for (const auto& c : copies) {
-    RBLN_CHECK(c.nbytes > 0, "memcpy_v2v_multi: nbytes must be positive");
-    RBLN_CHECK(c.src != nullptr, "memcpy_v2v_multi: src cannot be nullptr");
-    RBLN_CHECK(c.dst != nullptr, "memcpy_v2v_multi: dst cannot be nullptr");
-    rbln_copies.emplace_back(
-        reinterpret_cast<uint64_t>(c.src), reinterpret_cast<uint64_t>(c.dst), static_cast<uint64_t>(c.nbytes));
+    RBLN_CHECK(c.nbytes > 0, "nbytes must be positive, but got {}", c.nbytes);
+    auto src = located(c.src, c.nbytes, "src");
+    auto dst = located(c.dst, c.nbytes, "dst");
+    if (!dst.buffer->device()->sharesContext(*src.buffer->device())) {
+      copy_v2v(dst, src, c.nbytes);
+      continue;
+    }
+    by_device[dst.device_index].push_back({std::move(dst), std::move(src), c.nbytes});
   }
-  RBLN_LOG_DEBUG("Calling rbln_memcpy_v2v_multi: n_copies={}", copies.size());
-  // Error message matched by `at::native::rbln::submit_or_fallback` to gate CPU fallback — keep stable.
-  RBLN_CHECK(!::rbln::rbln_memcpy_v2v_multi(rbln_copies), "rbln_memcpy_v2v_multi failed");
+  for (const auto& [device_index, group] : by_device) {
+    std::set<c10::DeviceIndex> sources;
+    for (const auto& c : group) {
+      sources.insert(c.src.device_index);
+    }
+    run_copy_job(device_index, sources, [&](rt::Device::Job& job) {
+      for (const auto& c : group) {
+        job.onDevice(address_of(c.dst), *c.src.buffer->device(), address_of(c.src), c.nbytes);
+      }
+    });
+  }
+}
+
+// Host sides go through one staging buffer, a page per entry at least, which the device
+// copies from and to directly.
+void h2v_batch(const std::vector<H2VCopyOp>& copies) {
+  std::map<c10::DeviceIndex, std::vector<std::pair<Location, const H2VCopyOp*>>> by_device;
+  for (const auto& c : copies) {
+    RBLN_CHECK(c.nbytes > 0, "nbytes must be positive, but got {}", c.nbytes);
+    RBLN_CHECK(c.src != nullptr, "src cannot be nullptr");
+    auto dst = located(c.dst, c.nbytes, "dst");
+    by_device[dst.device_index].emplace_back(std::move(dst), &c);
+  }
+  for (const auto& [device_index, group] : by_device) {
+    size_t total = 0;
+    for (const auto& [dst, c] : group) {
+      total += page_rounded(c->nbytes);
+    }
+    auto staging = rt::HostBuffer::allocate(total);
+    run_copy_job(device_index, {}, [&](rt::Device::Job& job) {
+      size_t offset = 0;
+      for (const auto& [dst, c] : group) {
+        std::memcpy(staging->data() + offset, c->src, c->nbytes);
+        job.toDevice(address_of(dst), staging->data() + offset, c->nbytes);
+        offset += page_rounded(c->nbytes);
+      }
+    });
+  }
+}
+
+void v2h_batch(const std::vector<V2HCopyOp>& copies) {
+  std::map<c10::DeviceIndex, std::vector<std::pair<Location, const V2HCopyOp*>>> by_device;
+  for (const auto& c : copies) {
+    RBLN_CHECK(c.nbytes > 0, "nbytes must be positive, but got {}", c.nbytes);
+    RBLN_CHECK(c.dst != nullptr, "dst cannot be nullptr");
+    auto src = located(c.src, c.nbytes, "src");
+    by_device[src.device_index].emplace_back(std::move(src), &c);
+  }
+  for (const auto& [device_index, group] : by_device) {
+    size_t total = 0;
+    for (const auto& [src, c] : group) {
+      total += page_rounded(c->nbytes);
+    }
+    auto staging = rt::HostBuffer::allocate(total);
+    run_copy_job(device_index, {}, [&](rt::Device::Job& job) {
+      size_t offset = 0;
+      for (const auto& [src, c] : group) {
+        job.toHost(staging->data() + offset, address_of(src), c->nbytes);
+        offset += page_rounded(c->nbytes);
+      }
+    });
+    size_t offset = 0;
+    for (const auto& [src, c] : group) {
+      std::memcpy(c->dst, staging->data() + offset, c->nbytes);
+      offset += page_rounded(c->nbytes);
+    }
+  }
+}
+
+} // namespace
+
+void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies) {
+  RtTimer _rt(RT_V2V_MULTI);
+  RBLN_BATCH("rbln_memcpy_v2v_multi", v2v_batch(copies))
 }
 
 void memcpy_h2v_multi(const std::vector<H2VCopyOp>& copies) {
-  if (copies.empty()) {
-    return;
-  }
   RtTimer _rt(RT_H2V_MULTI);
-  // Runtime tuple is (src_host_ptr, dst_vaddr, size). This is the one boundary
-  // where the named descriptor's type distinction is erased — see H2VCopyOp.
-  std::vector<std::tuple<uintptr_t, uint64_t, uint64_t>> rbln_copies;
-  rbln_copies.reserve(copies.size());
-  for (const auto& c : copies) {
-    RBLN_CHECK(c.nbytes > 0, "memcpy_h2v_multi: nbytes must be positive");
-    RBLN_CHECK(c.src != nullptr, "memcpy_h2v_multi: src cannot be nullptr");
-    RBLN_CHECK(c.dst != nullptr, "memcpy_h2v_multi: dst cannot be nullptr");
-    rbln_copies.emplace_back(
-        reinterpret_cast<uintptr_t>(c.src), reinterpret_cast<uint64_t>(c.dst), static_cast<uint64_t>(c.nbytes));
-  }
-  RBLN_LOG_DEBUG("Calling rbln_memcpy_h2v_multi: n_copies={}", copies.size());
-  // Error message matched by `at::native::rbln::submit_or_fallback` to gate the
-  // CPU fallback — keep stable.
-  RBLN_CHECK(!::rbln::rbln_memcpy_h2v_multi(rbln_copies), "rbln_memcpy_h2v_multi failed");
+  RBLN_BATCH("rbln_memcpy_h2v_multi", h2v_batch(copies))
 }
 
 void memcpy_v2h_multi(const std::vector<V2HCopyOp>& copies) {
-  if (copies.empty()) {
-    return;
-  }
   RtTimer _rt(RT_V2H_MULTI);
-  // Runtime tuple is (src_vaddr, dst_host_ptr, size). See memcpy_h2v_multi.
-  std::vector<std::tuple<uint64_t, uintptr_t, uint64_t>> rbln_copies;
-  rbln_copies.reserve(copies.size());
-  for (const auto& c : copies) {
-    RBLN_CHECK(c.nbytes > 0, "memcpy_v2h_multi: nbytes must be positive");
-    RBLN_CHECK(c.src != nullptr, "memcpy_v2h_multi: src cannot be nullptr");
-    RBLN_CHECK(c.dst != nullptr, "memcpy_v2h_multi: dst cannot be nullptr");
-    rbln_copies.emplace_back(
-        reinterpret_cast<uint64_t>(c.src), reinterpret_cast<uintptr_t>(c.dst), static_cast<uint64_t>(c.nbytes));
-  }
-  RBLN_LOG_DEBUG("Calling rbln_memcpy_v2h_multi: n_copies={}", copies.size());
-  // Error message matched by `at::native::rbln::submit_or_fallback` to gate the
-  // CPU fallback — keep stable.
-  RBLN_CHECK(!::rbln::rbln_memcpy_v2h_multi(rbln_copies), "rbln_memcpy_v2h_multi failed");
+  RBLN_BATCH("rbln_memcpy_v2h_multi", v2h_batch(copies))
 }
 
-BorrowedHostPtr borrow_host_ptr(const void* rbln_data, size_t nbytes) {
-  RtTimer _rt(RT_BORROW);
-  RBLN_LOG_DEBUG("rbln_data={}, nbytes={}", fmt::ptr(rbln_data), nbytes);
-  RBLN_CHECK(rbln_data != nullptr, "rbln_data cannot be nullptr");
-  RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
+#undef RBLN_BATCH
 
-  const auto vaddr = reinterpret_cast<uint64_t>(rbln_data);
-  const auto size = static_cast<uint64_t>(nbytes);
-  uintptr_t host_ptr = 0;
-  uint64_t borrow_id = 0;
-  RBLN_LOG_DEBUG("Calling rbln_v_borrow_host_ptr: vaddr={:#x}, size={}", vaddr, size);
-  RBLN_CHECK(
-      !::rbln::rbln_v_borrow_host_ptr(vaddr, size, host_ptr, borrow_id),
-      "rbln_v_borrow_host_ptr failed (vaddr={:#x}, size={}); see rebel runtime logs for details",
-      vaddr,
-      size);
-  return BorrowedHostPtr{.host_ptr = host_ptr, .borrow_id = borrow_id};
+namespace {
+
+// Whether an allocator query of `device` has anything to report (CUDA parity): nothing for a
+// device this process never allocated on, or when the runtime is unavailable. An invalid
+// index still throws.
+bool has_allocator_state(const c10::Device& device) {
+  if (!any_device_context_initialized() || !runtime_available()) {
+    return false;
+  }
+  check_device_index(device.index());
+  return device_context_initialized(device.index());
 }
 
-std::optional<BorrowedHostPtr> try_borrow_host_ptr(const void* rbln_data, size_t nbytes) {
-  if (rbln_data == nullptr || nbytes == 0) {
-    return std::nullopt;
-  }
-  RtTimer _rt(RT_BORROW);
-  const auto vaddr = reinterpret_cast<uint64_t>(rbln_data);
-  const auto size = static_cast<uint64_t>(nbytes);
-  uintptr_t host_ptr = 0;
-  uint64_t borrow_id = 0;
-  // Non-zero return == failure (mirrors borrow_host_ptr's RBLN_CHECK(!...)).
-  // A failure here is an expected, recoverable condition for callers with a
-  // copy-based fallback, so report it as nullopt rather than throwing.
-  if (::rbln::rbln_v_borrow_host_ptr(vaddr, size, host_ptr, borrow_id)) {
-    return std::nullopt;
-  }
-  return BorrowedHostPtr{.host_ptr = host_ptr, .borrow_id = borrow_id};
-}
-
-BorrowedHostPtr acquire_host_ptr_for_overwrite(void* rbln_data, size_t nbytes) {
-  RtTimer _rt(RT_ACQUIRE);
-  RBLN_LOG_DEBUG("rbln_data={}, nbytes={}", fmt::ptr(rbln_data), nbytes);
-  RBLN_CHECK(rbln_data != nullptr, "rbln_data cannot be nullptr");
-  RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
-
-  const auto vaddr = reinterpret_cast<uint64_t>(rbln_data);
-  const auto size = static_cast<uint64_t>(nbytes);
-  uintptr_t host_ptr = 0;
-  uint64_t borrow_id = 0;
-  RBLN_LOG_DEBUG("Calling rbln_v_acquire_host_ptr_for_overwrite: vaddr={:#x}, size={}", vaddr, size);
-  RBLN_CHECK(
-      !::rbln::rbln_v_acquire_host_ptr_for_overwrite(vaddr, size, host_ptr, borrow_id),
-      "rbln_v_acquire_host_ptr_for_overwrite failed (vaddr={:#x}, size={}); see rebel runtime logs for details",
-      vaddr,
-      size);
-  return BorrowedHostPtr{.host_ptr = host_ptr, .borrow_id = borrow_id};
-}
-
-std::optional<BorrowedHostPtr> try_acquire_host_ptr_for_overwrite(void* rbln_data, size_t nbytes) {
-  if (rbln_data == nullptr || nbytes == 0) {
-    return std::nullopt;
-  }
-  RtTimer _rt(RT_ACQUIRE);
-  const auto vaddr = reinterpret_cast<uint64_t>(rbln_data);
-  const auto size = static_cast<uint64_t>(nbytes);
-  uintptr_t host_ptr = 0;
-  uint64_t borrow_id = 0;
-  // Non-zero return == failure (mirrors acquire_host_ptr_for_overwrite's
-  // RBLN_CHECK(!...)). A failure here is an expected, recoverable condition for
-  // callers with a copy-based fallback, so report it as nullopt rather than
-  // throwing.
-  if (::rbln::rbln_v_acquire_host_ptr_for_overwrite(vaddr, size, host_ptr, borrow_id)) {
-    return std::nullopt;
-  }
-  return BorrowedHostPtr{.host_ptr = host_ptr, .borrow_id = borrow_id};
-}
-
-void return_borrowed(uint64_t borrow_id, bool updated) {
-  // borrow_id == 0 is a "no live borrow" sentinel — see header. Cleanup
-  // paths may call this unconditionally over entries that were skipped.
-  if (borrow_id == 0) {
-    return;
-  }
-  RtTimer _rt(RT_RETURN);
-  RBLN_LOG_DEBUG("borrow_id={}, updated={}", borrow_id, updated);
-  RBLN_CHECK(
-      !::rbln::rbln_v_return_borrowed(borrow_id, updated),
-      "rbln_v_return_borrowed failed (borrow_id={}, updated={}); see rebel runtime logs for details",
-      borrow_id,
-      updated);
-}
+} // namespace
 
 c10::CachingDeviceAllocator::DeviceStats get_device_stats(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
-  // Best-effort query: empty stats when the runtime is unavailable.
-  if (!runtime_available()) {
+  if (!has_allocator_state(device)) {
     return c10::CachingDeviceAllocator::DeviceStats{};
   }
-  const auto device_index = device.index();
-  check_device_index(device_index);
-  // CUDA parity (see memory_stats): report zero stats for a valid device this process
-  // has not allocated on, matching PyTorch's generic path (empty only for an
-  // uninitialized allocator). An initialized device still queries the runtime, so
-  // genuine failures surface rather than being masked as zero.
-  if (!device_context_initialized(device_index)) {
-    return c10::CachingDeviceAllocator::DeviceStats{};
-  }
-  const auto device_id = to_device_id(device_index);
-  RBLN_LOG_DEBUG("Calling rbln_get_memory_stats: device_id={}", device_id);
-  const auto memory_stats = rbln_get_memory_stats(device_id);
-
-  c10::CachingDeviceAllocator::DeviceStats stats{};
-  constexpr auto kAggregate = static_cast<size_t>(c10::CachingAllocator::StatType::AGGREGATE);
-
-  // allocated_bytes
-  stats.allocated_bytes[kAggregate].current = static_cast<int64_t>(memory_stats.GetAllocatedCurrent());
-  stats.allocated_bytes[kAggregate].peak = static_cast<int64_t>(memory_stats.GetAllocatedPeak());
-  stats.allocated_bytes[kAggregate].allocated = static_cast<int64_t>(memory_stats.GetAllocatedTotalAllocated());
-  stats.allocated_bytes[kAggregate].freed = static_cast<int64_t>(memory_stats.GetAllocatedTotalFreed());
-
-  // reserved_bytes
-  stats.reserved_bytes[kAggregate].current = static_cast<int64_t>(memory_stats.GetReservedCurrent());
-  stats.reserved_bytes[kAggregate].peak = static_cast<int64_t>(memory_stats.GetReservedPeak());
-  stats.reserved_bytes[kAggregate].allocated = static_cast<int64_t>(memory_stats.GetReservedTotalAllocated());
-  stats.reserved_bytes[kAggregate].freed = static_cast<int64_t>(memory_stats.GetReservedTotalFreed());
-
-  // active_bytes
-  stats.active_bytes[kAggregate].current = static_cast<int64_t>(memory_stats.GetActiveCurrent());
-  stats.active_bytes[kAggregate].peak = static_cast<int64_t>(memory_stats.GetActivePeak());
-
-  // inactive_split_bytes — mapped from memory_stats's "cached" (reusable fragmented blocks).
-  stats.inactive_split_bytes[kAggregate].current = static_cast<int64_t>(memory_stats.GetCachedCurrent());
-  stats.inactive_split_bytes[kAggregate].peak = static_cast<int64_t>(memory_stats.GetCachedPeak());
-
-  // scalar counters
-  stats.num_alloc_retries = static_cast<int64_t>(memory_stats.GetNumAllocRetries());
-  stats.num_ooms = static_cast<int64_t>(memory_stats.GetNumOoms());
-  stats.num_device_alloc = static_cast<int64_t>(memory_stats.GetNumDeviceAlloc());
-  stats.num_device_free = static_cast<int64_t>(memory_stats.GetNumDeviceFree());
-
-  RBLN_LOG_DEBUG(
-      "allocated(current={}, peak={}, allocated={}, freed={}), reserved(current={}, peak={}, allocated={}, freed={}), "
-      "active(current={}, peak={})",
-      stats.allocated_bytes[kAggregate].current,
-      stats.allocated_bytes[kAggregate].peak,
-      stats.allocated_bytes[kAggregate].allocated,
-      stats.allocated_bytes[kAggregate].freed,
-      stats.reserved_bytes[kAggregate].current,
-      stats.reserved_bytes[kAggregate].peak,
-      stats.reserved_bytes[kAggregate].allocated,
-      stats.reserved_bytes[kAggregate].freed,
-      stats.active_bytes[kAggregate].current,
-      stats.active_bytes[kAggregate].peak);
-  return stats;
+  return caching::device_stats(device.index());
 }
 
 void empty_cache(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
-  // Two-level context gate (CUDA parity). Context flag FIRST: no allocator state anywhere
-  // → no-op (a no-context parent or malformed config; nothing to free). Otherwise validate
-  // the index (invalid throws) and skip a device never used here.
-  if (!any_device_context_initialized() || !runtime_available()) {
-    return;
+  if (has_allocator_state(device)) {
+    caching::empty_cache(device.index());
   }
-  const auto device_index = device.index();
-  check_device_index(device_index);
-  if (!device_context_initialized(device_index)) {
-    return;
-  }
-  if (is_dummy_device()) {
-    return;
-  }
-  const auto device_id = to_device_id(device_index);
-  RBLN_LOG_DEBUG("Calling rbln_empty_cache: device_id={}", device_id);
-  // Live context: surface a genuine failure (CUDA parity — an initialized allocator
-  // propagates real errors); rc included for diagnosis.
-  const auto rc = rbln_empty_cache(device_id);
-  RBLN_CHECK(
-      !rc,
-      "rbln_empty_cache failed for rbln:{} (rc={}); the device may be busy or in a faulted state",
-      static_cast<int>(device_index),
-      static_cast<int>(rc));
 }
 
 std::map<std::string, uint64_t> memory_stats(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
-  // Best-effort query: empty when the runtime is unavailable.
-  if (!runtime_available()) {
+  if (!has_allocator_state(device)) {
     return {};
   }
-  const auto device_index = device.index();
-  check_device_index(device_index);
-  // CUDA parity: report empty stats for a valid device this process has not allocated
-  // on (memory_allocated()/memory_reserved() then read 0), matching PyTorch's generic
-  // path, which returns empty only for an uninitialized allocator. An initialized
-  // device still queries the runtime, so genuine failures surface.
-  // (check_device_index above still rejects an invalid index -- a bad index throws.)
-  if (!device_context_initialized(device_index)) {
-    return {};
-  }
-  const auto device_id = to_device_id(device_index);
-  RBLN_LOG_DEBUG("Calling rbln_get_memory_stats: rbln:{}, device_id={}", static_cast<int>(device_index), device_id);
-  const auto stats = rbln_get_memory_stats(device_id);
-  const auto memory_stats = stats.GetMemoryStats();
-  RBLN_LOG_DEBUG("memory_stats={}", memory_stats);
-  return memory_stats;
+  return caching::stats_map(device.index());
 }
 
 std::map<std::string, uint64_t> memory_stats_per_chiplet(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
-  // Same availability/initialization gates as memory_stats().
-  if (!runtime_available()) {
+  if (!has_allocator_state(device)) {
     return {};
   }
-  const auto device_index = device.index();
-  check_device_index(device_index);
-  if (!device_context_initialized(device_index)) {
-    return {};
-  }
-  const auto device_id = to_device_id(device_index);
-  RBLN_LOG_DEBUG(
-      "Calling rbln_get_memory_stats_per_chiplet: rbln:{}, device_id={}", static_cast<int>(device_index), device_id);
-  const auto per_npu = rbln_get_memory_stats_per_chiplet(device_id);
-
-  // Both axes are in the key: a logical device is one or more physical NPUs
-  // (RBLN_NPUS_PER_DEVICE / RBLN_DEVICE_MAP), each with its own chiplets. npu.<n> is
-  // the n-th NPU of THIS logical device, not a physical NPU id.
+  // The allocator places every block on chiplet 0 of the device's one NPU.
   std::map<std::string, uint64_t> out;
-  for (size_t npu = 0; npu < per_npu.size(); ++npu) {
-    for (size_t chiplet = 0; chiplet < per_npu[npu].size(); ++chiplet) {
-      const auto prefix = "npu." + std::to_string(npu) + ".chiplet." + std::to_string(chiplet) + ".";
-      for (const auto& [key, value] : per_npu[npu][chiplet].GetMemoryStats()) {
-        out[prefix + key] = value;
-      }
-    }
+  for (const auto& [key, value] : caching::stats_map(device.index())) {
+    out["npu.0.chiplet.0." + key] = value;
   }
-  RBLN_LOG_DEBUG("memory_stats_per_chiplet={}", out);
   return out;
 }
 
 namespace {
 
-// One reply per physical NPU of the logical device, in mapping order. Commits the mapping
-// (a device use); the physical ids are the runtime's coordinate (after RBLN_VISIBLE_DEVICES).
-std::vector<RBLNDeviceMemoryInfo> device_memory_info_per_npu(const c10::Device& device) {
+// The chiplets of each physical NPU of the logical device, in mapping order. Commits the
+// mapping (a device use).
+std::vector<std::vector<ChipletMemory>> device_memory_per_npu(const c10::Device& device) {
   RBLN_CHECK(
       runtime_available(), "Cannot query device memory for {}: no RBLN runtime or device available", c10::str(device));
+  RBLN_CHECK(
+      !is_dummy_device(),
+      "Device memory info is not available for {}: RBLN_DUMMY_DEVICE has no NPU behind it",
+      c10::str(device));
   const auto device_index = device.index();
   check_device_index(device_index);
   to_device_id(device_index);
 
-  std::vector<RBLNDeviceMemoryInfo> replies;
+  std::vector<std::vector<ChipletMemory>> npus;
   for (const int physical_id : DeviceMappingManager::getInstance().getPhysicalDeviceIds(device_index)) {
-    RBLNDeviceMemoryInfo info{};
-    const auto rc = rbln_get_device_memory_info(physical_id, &info);
-    RBLN_CHECK(
-        rc != RBLNRetCode_UNSUPPORTED,
-        "Device memory info is not available for {} (physical NPU {}): the installed RBLN UMD/KMD does not "
-        "provide the device memory query, or RBLN_DUMMY_DEVICE is set. Update the driver to use mem_get_info().",
-        c10::str(device),
-        physical_id);
-    RBLN_CHECK(
-        rc == RBLNRetCode_SUCCESS,
-        "rbln_get_device_memory_info failed for {} (physical NPU {}, rc={}); see the runtime log",
-        c10::str(device),
-        physical_id,
-        static_cast<int>(rc));
-    replies.push_back(info);
+    const auto npu = rt::Device::open(DeviceMappingManager::getInstance().systemNpu(physical_id));
+    std::vector<ChipletMemory> chiplets;
+    for (uint32_t chiplet = 0; chiplet < npu->chiplets(); ++chiplet) {
+      const auto info = npu->memoryInfo(chiplet);
+      chiplets.push_back(ChipletMemory{info.total, info.free});
+    }
+    npus.push_back(std::move(chiplets));
   }
-  return replies;
+  return npus;
 }
 
 } // namespace
@@ -1391,9 +935,11 @@ std::pair<size_t, size_t> mem_get_info(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
   size_t free = 0;
   size_t total = 0;
-  for (const auto& info : device_memory_info_per_npu(device)) {
-    free += info.free;
-    total += info.total;
+  for (const auto& chiplets : device_memory_per_npu(device)) {
+    for (const auto& chiplet : chiplets) {
+      free += chiplet.free;
+      total += chiplet.total;
+    }
   }
   RBLN_LOG_DEBUG("mem_get_info: free={}, total={}", free, total);
   return {free, total};
@@ -1401,108 +947,43 @@ std::pair<size_t, size_t> mem_get_info(const c10::Device& device) {
 
 std::map<std::string, uint64_t> mem_get_info_per_chiplet(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
-  const auto out = per_chiplet_memory_map(device_memory_info_per_npu(device));
-  RBLN_LOG_DEBUG("mem_get_info_per_chiplet={}", out);
-  return out;
+  return per_chiplet_memory_map(device_memory_per_npu(device));
 }
 
-std::map<std::string, uint64_t> per_chiplet_memory_map(const std::vector<RBLNDeviceMemoryInfo>& replies) {
+std::map<std::string, uint64_t> per_chiplet_memory_map(const std::vector<std::vector<ChipletMemory>>& npus) {
   std::map<std::string, uint64_t> out;
-  for (size_t npu = 0; npu < replies.size(); ++npu) {
-    const auto& info = replies[npu];
+  for (size_t npu = 0; npu < npus.size(); ++npu) {
     const auto npu_prefix = "npu." + std::to_string(npu) + ".";
-    out[npu_prefix + "total"] = info.total;
-    out[npu_prefix + "used"] = info.used;
-    out[npu_prefix + "free"] = info.free;
-    out[npu_prefix + "granularity"] = info.granularity;
-    out[npu_prefix + "huge_granularity"] = info.huge_granularity;
-    for (uint32_t chiplet = 0; chiplet < info.chiplet_cnt; ++chiplet) {
-      const auto& c = info.chiplet[chiplet];
+    uint64_t total = 0;
+    uint64_t free = 0;
+    for (size_t chiplet = 0; chiplet < npus[npu].size(); ++chiplet) {
+      const auto& c = npus[npu][chiplet];
       const auto prefix = npu_prefix + "chiplet." + std::to_string(chiplet) + ".";
       out[prefix + "total"] = c.total;
-      out[prefix + "used"] = c.used;
+      out[prefix + "used"] = c.total - c.free;
       out[prefix + "free"] = c.free;
-      out[prefix + "largest_free"] = c.largest_free;
-      out[prefix + "largest_free_huge"] = c.largest_free_huge;
+      total += c.total;
+      free += c.free;
     }
+    out[npu_prefix + "total"] = total;
+    out[npu_prefix + "used"] = total - free;
+    out[npu_prefix + "free"] = free;
   }
   return out;
 }
 
 void reset_accumulated_memory_stats(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
-  // Two-level context gate (see empty_cache); context flag first.
-  if (!any_device_context_initialized() || !runtime_available()) {
-    return;
+  if (has_allocator_state(device)) {
+    caching::reset_accumulated(device.index());
   }
-  const auto device_index = device.index();
-  check_device_index(device_index);
-  if (!device_context_initialized(device_index)) {
-    return;
-  }
-  if (is_dummy_device()) {
-    return;
-  }
-  const auto device_id = to_device_id(device_index);
-  RBLN_LOG_DEBUG("Calling rbln_reset_accumulated_memory_stats: device_id={}", device_id);
-  // Live context: surface a genuine failure (a silent success would mislead the caller).
-  const auto rc = rbln_reset_accumulated_memory_stats(device_id);
-  RBLN_CHECK(
-      !rc,
-      "rbln_reset_accumulated_memory_stats failed for rbln:{} (rc={})",
-      static_cast<int>(device_index),
-      static_cast<int>(rc));
 }
 
 void reset_peak_memory_stats(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
-  // Two-level context gate (see empty_cache); context flag first. This is also the only
-  // guard for the generic torch.accelerator.reset_peak path (no Python init-guard upstream).
-  if (!any_device_context_initialized() || !runtime_available()) {
-    return;
+  if (has_allocator_state(device)) {
+    caching::reset_peak(device.index());
   }
-  const auto device_index = device.index();
-  check_device_index(device_index);
-  if (!device_context_initialized(device_index)) {
-    return;
-  }
-  if (is_dummy_device()) {
-    return;
-  }
-  const auto device_id = to_device_id(device_index);
-  RBLN_LOG_DEBUG("Calling rbln_reset_peak_memory_stats: device_id={}", device_id);
-  // Live context: surface a genuine failure.
-  const auto rc = rbln_reset_peak_memory_stats(device_id);
-  RBLN_CHECK(
-      !rc,
-      "rbln_reset_peak_memory_stats failed for rbln:{} (rc={})",
-      static_cast<int>(device_index),
-      static_cast<int>(rc));
-}
-
-void set_file_offloading_enabled(bool enabled) {
-  RBLN_LOG_DEBUG("Calling rbln_set_file_offloading_enabled: enabled={}", enabled);
-  // Reachable without an allocation (torch.rbln.offload()), so gated directly:
-  // best-effort no-op when the runtime is unavailable.
-  if (!runtime_available()) {
-    return;
-  }
-  RBLN_CHECK(
-      !::rbln::rbln_set_file_offloading_enabled(enabled),
-      "rbln_set_file_offloading_enabled failed (enabled={})",
-      enabled);
-}
-
-uint64_t release_offload_temp_storage() {
-  RBLN_LOG_DEBUG("Calling rbln_release_offload_temp_storage");
-  // Shutdown-path call, so gated the same way as the offload toggle above.
-  if (!runtime_available()) {
-    return 0;
-  }
-  uint64_t num_files_removed = 0;
-  RBLN_CHECK(
-      !::rbln::rbln_release_offload_temp_storage(&num_files_removed), "rbln_release_offload_temp_storage failed");
-  return num_files_removed;
 }
 
 } // namespace c10::rbln

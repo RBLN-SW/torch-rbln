@@ -2,8 +2,10 @@
 
 #include <pybind11/pybind11.h>
 #include <torch/csrc/utils/pybind.h>
+#include <torch_rbln/csrc/rbln/OpFunction.h>
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -17,8 +19,8 @@ namespace torch_rbln::shim {
 // The shim runs a cheap pre-check in C++ (dtype, scalar-all, contig+offset). On
 // pre-check fail it calls into `at::native::rbln::cpu_fallback_rbln` directly —
 // the Python layer is never entered for that call. On pre-check pass, if a
-// matching warm-cache entry exists the shim drives the rebel runtime from C++
-// through rbln_exec_api.h. Only on warm-cache miss does the shim unbox
+// matching warm-cache entry exists the shim runs its OpFunction from C++. Only
+// on warm-cache miss does the shim unbox
 // the jit stack, call `py_fn` respecting the op schema's kwarg-only markers,
 // and rebox the return onto the stack.
 //
@@ -39,15 +41,14 @@ void register_cpp_shim(
 // Returns (n_total, n_fallback, n_warm_hit, n_miss, ns_warm_hit, ns_miss).
 //   n_total      - every shim invocation
 //   n_fallback   - quick_fallback_check=true → cpu_fallback_rbln
-//   n_warm_hit   - warm-cache hit fast path (rebel runtime driven from C++)
+//   n_warm_hit   - warm-cache hit fast path (op function run from C++)
 //   n_miss       - cold/miss path (Python compile via py_fn)
-//   ns_warm_hit  - cumulative ns inside warm-cache hit path (~all in rebel run)
+//   ns_warm_hit  - cumulative ns inside warm-cache hit path (~all in the run)
 //   ns_miss      - cumulative ns inside miss path (Python compile + first run)
 //   ns_fallback  - cumulative ns inside cpu_fallback_rbln (the COST of fallbacks,
 //                  so the report can separate many-cheap from few-expensive)
 std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t> diag_dump_dispatch_paths();
 void diag_reset_dispatch_paths();
-uint64_t diag_dump_align_fastpath_count();
 
 // DIAG/PROFILER: per-op CPU-fallback attribution (op_name -> fallback count),
 // non-zero entries only. Recorded on the already-slow fallback branch only (one
@@ -79,27 +80,20 @@ std::vector<std::pair<std::string, std::string>> diag_dump_trace_by_op();
 void diag_reset_trace_by_op();
 
 // DIAG: per-segment timers inside the warm-cache hit path. Returns
-// (n_hits, ns_lookup, ns_io_build, ns_prep_in, ns_prep_out, ns_run,
-//  ns_finalize). Counts/accumulates only when the hit path returns true; early
-// failures (find miss, ptr==0, runtime soft-fail) are excluded so per-segment
-// averages reflect successful warm-path calls only.
-std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t> diag_dump_warm_segments();
+// (n_hits, ns_lookup, ns_run, ns_finalize); ns_run covers binding the tensors
+// and queueing the run. Counts/accumulates only when the hit path returns
+// true, so per-segment averages reflect successful warm-path calls only.
+std::tuple<uint64_t, uint64_t, uint64_t, uint64_t> diag_dump_warm_segments();
 void diag_reset_warm_segments();
 
-// Called by the Python wrapper after a successful miss-path compile to install
-// a warm-cache entry keyed by the CacheKey that the shim built on the way in
-// (stored in a thread-local so Python doesn't need to re-build it).
+// Called by the Python wrapper after a successful miss-path compile and run to
+// install a warm-cache entry keyed by the CacheKey that the shim built on the
+// way in (stored in a thread-local so Python doesn't need to re-build it).
 //
-// Returns true if an install actually happened (pending key was valid and
-// accepted). Safe to call when no pending context exists — returns false.
-//
-// `runtime_handle` is rebel's sync runtime; the entry takes its
-// ``native_handle()`` as the RblnSyncRuntime the hit path drives, and keeps a
-// reference to the object so that borrowed handle stays valid.
-// `out_profiles` is a list of (shape, dtype_str, is_rbln) per output tensor.
-bool install_warmcache_from_pending(
-    pybind11::object dyn_runtime,
-    const pybind11::object& runtime_handle,
-    const std::vector<std::tuple<std::vector<int64_t>, std::string, bool>>& out_profiles);
+// `inputs` are the tensors `function` ran over; each must be one of the call's
+// own tensor arguments, whose positions the entry keeps. Returns true if an
+// install actually happened. Safe to call when no pending context exists —
+// returns false.
+bool install_warmcache_from_pending(std::shared_ptr<OpFunction> function, const std::vector<at::Tensor>& inputs);
 
 } // namespace torch_rbln::shim

@@ -2,16 +2,14 @@
 
 """Tests for ``torch.rbln.capture_programs``.
 
-The scope itself (ordering, nesting, thread-locality) is rebel-compiler's and is
-tested there (``tests/python/test_rebel/test_program_capture.py``). These tests cover
-what is observable from torch-rbln:
+These tests cover:
 
 * the surface (``torch.rbln.capture_programs`` / ``CompiledProgram`` are exposed and
-  are the rebel objects, so there is one implementation);
-* the surface staying lazy, so ``import torch`` does not pull ``rebel`` in through the
-  autoload hook;
+  are the ``torch_rbln.programs`` objects);
+* the scope: nesting and thread-locality;
+* ``import torch_rbln`` leaving the ``rebel`` package out;
 * a torch.compile on the rbln backend inside the scope yields one program per graph
-  the backend built, carrying the runtime behind the compiled callable and IO specs
+  the backend built, carrying the function behind the compiled callable and IO specs
   that mirror the graph's inputs and outputs.
 """
 
@@ -19,6 +17,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import threading
 
 import pytest
 import torch
@@ -34,20 +33,11 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 @pytest.mark.test_set_ci
 class TestCaptureProgramsSurface(TestCase):
     def test_exposed_on_torch_rbln(self):
-        from rebel.core import program_capture
-
         for name in torch_rbln_programs.__all__:
-            self.assertIs(getattr(torch.rbln, name), getattr(program_capture, name))
+            self.assertIs(getattr(torch.rbln, name), getattr(torch_rbln_programs, name))
         self.assertEqual(
             set(torch_rbln_programs.__all__),
-            {
-                "capture_programs",
-                "CompiledProgram",
-                "InputSpec",
-                "OutputSpec",
-                "PhysicalPlacement",
-                "ShardPlacement",
-            },
+            {"capture_programs", "CompiledProgram", "InputSpec", "OutputSpec"},
         )
 
     def test_empty_scope_yields_empty_list(self):
@@ -55,27 +45,33 @@ class TestCaptureProgramsSurface(TestCase):
             pass
         self.assertEqual(programs, [])
 
+    def test_nested_scopes_see_what_is_built_inside_them(self):
+        with torch.rbln.capture_programs() as outer:
+            torch_rbln_programs.submit_program("first")
+            with torch.rbln.capture_programs() as inner:
+                torch_rbln_programs.submit_program("second")
+        self.assertEqual(outer, ["first", "second"])
+        self.assertEqual(inner, ["second"])
+
+    def test_scope_is_thread_local(self):
+        with torch.rbln.capture_programs() as programs:
+            thread = threading.Thread(target=torch_rbln_programs.submit_program, args=("elsewhere",))
+            thread.start()
+            thread.join()
+        self.assertEqual(programs, [])
+
 
 @pytest.mark.test_set_ci
-class TestCaptureProgramsLazy(TestCase):
+class TestImportLeavesRebelOut(TestCase):
     def test_import_does_not_load_rebel(self):
-        """Importing torch_rbln must leave ``rebel`` out of ``sys.modules``.
-
-        ``import torch`` runs ``import torch_rbln`` through the autoload hook, so a
-        top-level rebel import here puts the dynamo backend and its custom op
-        registration on every torch user's import path. Both names in
-        ``torch_rbln.programs`` therefore resolve on first access instead.
-        """
+        """Importing torch_rbln must leave the ``rebel`` package out of ``sys.modules``."""
         script = f"""
             import sys
             sys.path.insert(0, {_PROJECT_ROOT!r})
             import torch, torch_rbln  # noqa: F401
             loaded = sorted(m for m in sys.modules if m == "rebel" or m.startswith("rebel."))
             assert not loaded, "import pulled in " + ", ".join(loaded)
-
-            from rebel.core.program_capture import capture_programs
-            assert torch.rbln.capture_programs is capture_programs
-            print("LAZY_OK")
+            print("NO_REBEL")
         """
         result = subprocess.run(
             [sys.executable, "-c", textwrap.dedent(script)],
@@ -85,15 +81,15 @@ class TestCaptureProgramsLazy(TestCase):
             timeout=120,
         )
         self.assertTrue(
-            result.returncode == 0 and "LAZY_OK" in result.stdout,
-            f"torch_rbln imported rebel eagerly\n--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}",
+            result.returncode == 0 and "NO_REBEL" in result.stdout,
+            f"torch_rbln imported rebel\n--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}",
         )
 
 
 @pytest.mark.test_set_ci
 class TestCaptureProgramsCompile(TestCase):
     def test_one_program_per_backend_build(self, device):
-        from rebel.sync_runtime import DynamoRuntime
+        import rbln
 
         class AddModule(torch.nn.Module):
             def forward(self, x, y):
@@ -111,11 +107,12 @@ class TestCaptureProgramsCompile(TestCase):
         self.assertEqual(len(programs), 1)
         program = programs[0]
         self.assertIsInstance(program, torch.rbln.CompiledProgram)
-        self.assertIsInstance(program.runtime, DynamoRuntime)
+        self.assertIsInstance(program.function, rbln.Function)
         self.assertEqual(program.device, x.device)
         self.assertTrue(program.name)  # dynamo compile id, e.g. "0/0"
 
-        # The IO specs mirror the graph: two named float16 inputs, one output, nothing dynamic.
+        # The IO specs mirror the graph: two named float16 inputs and one output, each an arg
+        # of the function.
         self.assertEqual([spec.shape for spec in program.input_specs], [(1, 3, 8, 8), (1, 3, 8, 8)])
         self.assertEqual([spec.dtype for spec in program.input_specs], [torch.float16, torch.float16])
         self.assertTrue(all(spec.name for spec in program.input_specs))
@@ -123,7 +120,8 @@ class TestCaptureProgramsCompile(TestCase):
         self.assertEqual(program.output_specs[0].dtype, torch.float16)
         for spec in (*program.input_specs, *program.output_specs):
             self.assertIsInstance(spec, (torch.rbln.InputSpec, torch.rbln.OutputSpec))
-            self.assertIsNone(spec.physical_placement)
+            self.assertEqual(tuple(spec.arg.logical.shape), spec.shape)
+            self.assertEqual(len(spec.arg.shards), 1)
 
     def test_programs_outside_scope_are_not_recorded(self, device):
         compiled = torch.compile(lambda t: t * 2, backend="rbln", dynamic=False)

@@ -185,14 +185,6 @@ def enable_deploy_mode(monkeypatch):
     monkeypatch.setenv("TORCH_RBLN_DEPLOY", "ON")
 
 
-@pytest.fixture(scope="function")
-def enable_eager_malloc(monkeypatch):
-    """Enable TORCH_RBLN_EAGER_MALLOC for memory tests."""
-    original_env = os.getenv("TORCH_RBLN_EAGER_MALLOC", "")
-    rbln_log_debug(f"Setting TORCH_RBLN_EAGER_MALLOC=1 (was '{original_env}')")
-    monkeypatch.setenv("TORCH_RBLN_EAGER_MALLOC", "1")
-
-
 # REBEL-failing tests keyed by fully expanded name -> (test file, reason). Keying on
 # the name pins one parametrization across separate ``@parametrize`` axes, which a
 # per-parameter mark cannot.

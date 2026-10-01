@@ -1,7 +1,5 @@
 """Monkey patches applied to PyTorch to enable RBLN functionality."""
 
-import warnings
-
 from torch_rbln._internal.compile_cache import clear_rbln_compile_cache
 from torch_rbln._internal.torch_compile_patch_helpers import CompiledFunctionWrapper, is_rbln_backend
 
@@ -14,50 +12,16 @@ _original_torch_compile = None
 _original_dynamo_reset = None
 
 
-def _is_backend_registered(backend_name: str) -> bool:
-    """Whether backend_name is registered with torch._dynamo."""
-    try:
-        import torch
-
-        if hasattr(torch._dynamo, "list_backends"):
-            return backend_name in torch._dynamo.list_backends()
-        if hasattr(torch._dynamo, "backends"):
-            return backend_name in torch._dynamo.backends
-        return False
-    except Exception:
-        return False
-
-
-def _register_rbln_backend() -> bool:
-    """Register the RBLN backend with torch._dynamo; True on success."""
+def _register_rbln_backend() -> None:
+    """Hand the graphs over RBLN tensors that the "rbln" backend (registered when rbln
+    is imported) receives to torch-rbln's backend."""
     global _rbln_backend_registered
 
-    if _rbln_backend_registered or _is_backend_registered("rbln"):
+    if not _rbln_backend_registered:
+        from torch_rbln._internal.graph_backend import register
+
+        register()
         _rbln_backend_registered = True
-        return True
-
-    try:
-        # Importing registers 'rbln' via module-level register_backend() side effects.
-        import rebel.core.torch_compile  # noqa: F401
-
-        if _is_backend_registered("rbln"):
-            _rbln_backend_registered = True
-            return True
-        else:
-            warnings.warn(
-                "RBLN backend import succeeded but backend was not registered. "
-                "torch.compile with backend='rbln' may not work.",
-                UserWarning,
-            )
-            return False
-
-    except ImportError as e:
-        warnings.warn(
-            f"Failed to register rbln backend for torch.compile: {e}. "
-            "torch.compile will work but 'rbln' backend may not be available.",
-            UserWarning,
-        )
-        return False
 
 
 def patch_torch_compile() -> None:

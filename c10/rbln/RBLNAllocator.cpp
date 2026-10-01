@@ -1,4 +1,5 @@
 #include <c10/core/CachingDeviceAllocator.h>
+#include <c10/rbln/RBLNCachingAllocator.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
 
@@ -102,16 +103,17 @@ struct RBLNAllocator final : public c10::DeviceAllocator {
   /**
    * @brief Records a stream association for a given data pointer.
    *
-   * RBLN does not support stream-based asynchronous execution, so this function is a no-op.
+   * The caching allocator reuses a freed block on its allocation stream at once, and on
+   * other streams once every recorded stream has reached the point of the free.
    *
    * @param ptr The data pointer for which to record the stream association.
    * @param stream The stream to associate with the data pointer.
    */
-  void recordStream(const c10::DataPtr& /*ptr*/, c10::Stream /*stream*/) override {
-    // No-op on purpose: the runtime tags a freed block with the (stream, seq) still in
-    // flight at its free and folds foreign seqs into the reusing stream as cross-deps,
-    // so cross-stream lifetime is already safe without the hint torch passes here.
-    RBLN_LOG_DEBUG("recordStream is a no-op; the runtime tags freed blocks with their in-flight stream");
+  void recordStream(const c10::DataPtr& ptr, c10::Stream stream) override {
+    // A block another stream used is reused only once that stream reaches the free.
+    if (ptr.get() != nullptr) {
+      c10::rbln::caching::record_stream(ptr.get(), stream);
+    }
   }
 
   /**

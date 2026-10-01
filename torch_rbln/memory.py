@@ -8,8 +8,7 @@ import contextlib
 import operator
 import os
 import sys
-import threading
-from typing import Dict, Iterator, Optional, Union  # noqa: UP035
+from typing import Dict, Optional, Union  # noqa: UP035
 
 import torch
 
@@ -17,10 +16,8 @@ import torch_rbln._C
 
 
 __all__ = [
-    "bind_device_memory",
     "empty_cache",
     "huge_host_empty",
-    "set_device_layout_like",
     "max_memory_allocated",
     "max_memory_reserved",
     "mem_get_info",
@@ -83,21 +80,6 @@ def _normalize_device(device: Optional[Union[int, str, torch.device]]) -> torch.
     return torch.device("rbln", index)
 
 
-def set_device_layout_like(target: torch.Tensor, ref: torch.Tensor) -> None:
-    """Configure ``target``'s device-allocation layout to match ``ref`` (no copy).
-
-    Both must be RBLN tensors with the same dtype, on the same device, and each
-    covering its whole storage.  ``ref`` must be device-resident.
-    ``target`` adopts ``ref``'s layout and dtype while keeping its own size; no
-    data is transferred.  A subsequent device-to-device copy between ``target``
-    and ``ref`` then stays on the fast path.
-
-    Typical use: make a host→device staging buffer match a KV cache's layout so
-    the bulk upload and the per-slot device-to-device scatter are both fast.
-    """
-    torch_rbln._C._set_device_layout_like(target, ref)
-
-
 def _no_rbln_device() -> bool:
     """No RBLN device available; memory-management ops no-op when True (torch.cuda parity)."""
     return torch_rbln._C.device_count() == 0
@@ -119,11 +101,8 @@ def empty_cache(device: Optional[Union[int, str, torch.device]] = None) -> None:
             If None, uses the current device. Defaults to None.
     """
     device = _normalize_device(device)
-    # WarmCache holds strong refs to DynamoRuntime instances and the rbln
-    # runtime buffers behind them. empty_cache() means "let go of everything
-    # the user isn't holding"; if we kept warm entries the freed bytes would
-    # show up unchanged in memory_stats. Only this device's entries go, matching
-    # the allocator flush below; another device's ops keep hitting.
+    # Warm-cache entries hold executors, whose programs occupy device memory;
+    # only this device's go, as with the allocator flush below.
     torch_rbln._C._warmcache_clear(device.index)
     # The view-recipe cache holds only metadata-derived recipes (no device
     # buffers), so it never shows up in memory_stats — but it has no eviction
@@ -150,11 +129,14 @@ def memory_stats(device: Optional[Union[int, str, torch.device]] = None) -> Dict
     """
     Return a dictionary of accelerator device memory allocator statistics.
 
-    The returned dictionary contains various memory statistics. Keys are the
-    RBLN allocator's dotted names, e.g.:
-    - allocated.current, allocated.peak, allocated.total_allocated, allocated.total_freed
-    - reserved.current, reserved.peak, reserved.total_allocated, reserved.total_freed
-    - active.current, active.peak
+    The returned dictionary contains various memory statistics under the keys
+    :func:`torch.cuda.memory_stats` uses, e.g.:
+    - allocated_bytes.all.{current,peak,allocated,freed}
+    - reserved_bytes.all.{current,peak,allocated,freed}
+    - active_bytes.all.{current,peak,allocated,freed}
+    - the same with ``small_pool`` / ``large_pool`` in place of ``all``, the block and
+      segment counts (``allocation``, ``segment``, ``active``, ``inactive_split``), and
+      ``num_alloc_retries``, ``num_ooms``, ``num_device_alloc``, ``num_device_free``
 
     Scope, same as ``torch.cuda.memory_stats``: the caching allocator of the context
     **this process** holds on ``device``. Other direct device allocations are not
@@ -182,7 +164,7 @@ def memory_stats_per_chiplet(
     Return memory allocator statistics broken down per chiplet.
 
     Same keys as :func:`memory_stats`, each prefixed with ``npu.<n>.chiplet.<c>.`` --
-    e.g. ``npu.0.chiplet.0.allocated.current``. A device runs out on its heaviest
+    e.g. ``npu.0.chiplet.0.allocated_bytes.all.current``. A device runs out on its heaviest
     chiplet, which the aggregate :func:`memory_stats` hides.
 
     ``npu.<n>`` is the n-th physical NPU of this logical device (``RBLN_NPUS_PER_DEVICE``
@@ -236,12 +218,11 @@ def memory_summary(device: Optional[Union[int, str, torch.device]] = None) -> st
 
     rows = sorted({(int(k.split(".")[1]), int(k.split(".")[3])) for k in per_chiplet})
     columns = [
-        ("allocated.current", "allocated"),
-        ("allocated.peak", "alloc peak"),
-        ("reserved.current", "reserved"),
-        ("reserved.peak", "resv peak"),
-        ("active.current", "active"),
-        ("cached.current", "cached"),
+        ("allocated_bytes.all.current", "allocated"),
+        ("allocated_bytes.all.peak", "alloc peak"),
+        ("reserved_bytes.all.current", "reserved"),
+        ("reserved_bytes.all.peak", "resv peak"),
+        ("active_bytes.all.current", "active"),
     ]
 
     def mib(value: int) -> str:
@@ -292,7 +273,7 @@ def memory_allocated(device: Optional[Union[int, str, torch.device]] = None) -> 
     Returns:
         int: The current memory allocated in bytes.
     """
-    return memory_stats(device).get("allocated.current", 0)
+    return memory_stats(device).get("allocated_bytes.all.current", 0)
 
 
 def max_memory_allocated(device: Optional[Union[int, str, torch.device]] = None) -> int:
@@ -306,7 +287,7 @@ def max_memory_allocated(device: Optional[Union[int, str, torch.device]] = None)
     Returns:
         int: The maximum memory allocated in bytes.
     """
-    return memory_stats(device).get("allocated.peak", 0)
+    return memory_stats(device).get("allocated_bytes.all.peak", 0)
 
 
 def memory_reserved(device: Optional[Union[int, str, torch.device]] = None) -> int:
@@ -320,7 +301,7 @@ def memory_reserved(device: Optional[Union[int, str, torch.device]] = None) -> i
     Returns:
         int: The current memory reserved in bytes.
     """
-    return memory_stats(device).get("reserved.current", 0)
+    return memory_stats(device).get("reserved_bytes.all.current", 0)
 
 
 def max_memory_reserved(device: Optional[Union[int, str, torch.device]] = None) -> int:
@@ -334,7 +315,7 @@ def max_memory_reserved(device: Optional[Union[int, str, torch.device]] = None) 
     Returns:
         int: The maximum memory reserved in bytes.
     """
-    return memory_stats(device).get("reserved.peak", 0)
+    return memory_stats(device).get("reserved_bytes.all.peak", 0)
 
 
 def mem_get_info(device: Optional[Union[int, str, torch.device]] = None) -> tuple[int, int]:
@@ -372,15 +353,12 @@ def mem_get_info_per_chiplet(
     Return the driver's device DRAM usage of ``device`` broken down per chiplet, in bytes.
 
     Same figures as :func:`mem_get_info` before summation, keyed like
-    :func:`memory_stats_per_chiplet`: ``npu.<n>.chiplet.<c>.{total,used,free,largest_free,
-    largest_free_huge}`` for each chiplet, and ``npu.<n>.{total,used,free,granularity,
-    huge_granularity}`` for each physical NPU of the logical device. ``npu.<n>`` is the
-    NPU's position within the logical device, not a physical NPU id.
+    :func:`memory_stats_per_chiplet`: ``npu.<n>.chiplet.<c>.{total,used,free}`` for each
+    chiplet, and ``npu.<n>.{total,used,free}`` for each physical NPU of the logical device.
+    ``npu.<n>`` is the NPU's position within the logical device, not a physical NPU id.
 
-    Each chiplet allocates from its own pool, so a physically contiguous buffer is bounded
-    by one chiplet's ``largest_free`` (``largest_free_huge`` for the huge granule; 0 where
-    the part has none), which the device-wide ``free`` hides. ``largest_free`` may exceed
-    ``free`` in the same reply: both are estimates from a lock-free walk.
+    Each chiplet allocates from its own pool, so a buffer is bounded by one chiplet's
+    ``free``, which the device-wide figure hides.
 
     Args:
         device (Optional[Union[int, str, torch.device]]): The device to query.
@@ -428,54 +406,14 @@ def reset_peak_memory_stats(device: Optional[Union[int, str, torch.device]] = No
     torch_rbln._C.reset_peak_memory_stats(device)
 
 
-_offload_lock = threading.Lock()
-_offload_depth = 0
-
-
-def bind_device_memory(tensor: torch.Tensor) -> None:
-    """
-    Materialize ``tensor``'s device allocation instead of leaving it lazy.
-
-    A device allocation reserves a virtual address and materializes the physical
-    memory behind it on first use through a torch op. A consumer that reads those
-    physical buffers *out of band* -- a collective library, direct storage (NVMe)
-    DMA -- never runs such an op, so it would find nothing there. Call this after
-    allocating a buffer you are handing to one.
-
-    The region is laid out flat and 1:1 with no dtype transform, on the device's
-    main node -- what a consumer treating it as bytes expects. Use
-    :func:`set_device_layout_like` instead when the layout has to match another
-    tensor's. Binding an already-bound region is allowed.
-
-    Args:
-        tensor: An RBLN tensor covering its whole storage: contiguous, with zero
-            storage offset. A view that still spans the whole storage is fine; a
-            slice or an interior view is not, since its address is not the
-            allocation's.
-
-    Raises:
-        RuntimeError: if ``tensor`` is not an RBLN tensor, does not cover its
-            whole storage, or the runtime rejects the allocation.
-
-    Example::
-
-        staging = torch.empty(nbytes, dtype=torch.uint8, device="rbln:0")
-        torch.rbln.bind_device_memory(staging)
-    """
-    torch_rbln._C._bind_device_memory(tensor)
-
-
 def huge_host_empty(nbytes: int) -> torch.Tensor:
     """
     Allocate a host buffer the device can DMA into without a staging copy.
 
-    An ordinary CPU tensor is 64 B aligned; the runtime's copy path stages any
-    host address that is not page aligned through a bounce buffer, and even an
-    aligned one pays a page fault per 4 KiB the first time the runtime resolves
-    its host addresses -- which lands in the transfer, not in setup. This returns
-    2 MiB-aligned memory instead, prefaulted, so neither happens. It also asks
-    for transparent huge pages, but that part is best effort: with THP disabled
-    the alignment still holds and nothing is huge-page backed.
+    An ordinary CPU tensor is 64 B aligned; the runtime stages any host address that
+    is not page aligned through a bounce buffer. This returns page-aligned memory the
+    runtime copies from and to directly, zero-filled so its pages are already faulted
+    in when the first transfer resolves them.
 
     The buffer is released when the last reference to the returned tensor (or to
     a view of it) goes away.
@@ -484,8 +422,7 @@ def huge_host_empty(nbytes: int) -> torch.Tensor:
         nbytes: Size of the buffer in bytes. Must be in ``1..sys.maxsize``.
 
     Returns:
-        torch.Tensor: A zero-filled 1-D ``uint8`` CPU tensor of ``nbytes`` bytes,
-        sharing the buffer's memory rather than copying it.
+        torch.Tensor: A zero-filled 1-D ``uint8`` CPU tensor of ``nbytes`` bytes.
 
     Raises:
         TypeError: if ``nbytes`` is not an integer.
@@ -497,67 +434,37 @@ def huge_host_empty(nbytes: int) -> torch.Tensor:
         slab = torch.rbln.huge_host_empty(1 << 30)
         slab.view(...)  # hand to whatever consumes the host side
     """
-    # Third Party
-    from rebel.host_memory import HugeHostBuffer
-
-    # Bound the request to what a size_t can carry. Past that the provider's
-    # round-up to the alignment wraps to zero, which allocates nothing and then
-    # prefaults the original size over it -- a segfault instead of an error.
-    # Reported upstream; this is the range check this API owes its callers either
-    # way. `operator.index` rather than `int()`, so a float is a TypeError rather
-    # than a silent truncation.
+    # `operator.index` rather than `int()`, so a float is a TypeError rather than a
+    # silent truncation.
     nbytes = operator.index(nbytes)
     if not 0 < nbytes <= sys.maxsize:
         raise ValueError(f"nbytes must be in 1..{sys.maxsize}, but got {nbytes}")
-
-    # frombuffer takes a buffer-protocol reference, which is what keeps the
-    # allocation alive for as long as the tensor is: HugeHostBuffer frees itself
-    # on collection and nothing else holds it.
-    return torch.frombuffer(HugeHostBuffer(nbytes), dtype=torch.uint8)
+    return torch_rbln._C._host_empty(nbytes)
 
 
-@contextlib.contextmanager
-def offload() -> Iterator[None]:
+def offload() -> contextlib.AbstractContextManager[None]:
     """
-    Context manager that enables RBLN file offloading for its scope.
+    Context manager for RBLN file offloading, which this runtime does not provide.
 
-    Inside the ``with`` block, the process-wide file offloading switch is on, so
-    host-side regions backing RBLN tensors allocated within the block may be paged
-    out to disk. Use this around code paths that allocate large host-resident
-    tensors (for example, KV-cache initialization) where host RAM pressure
-    matters.
+    RBLN tensors live in device memory with no host-side copy, so there is nothing for
+    file offloading to page out to disk. Calling it raises instead of silently doing nothing.
 
-    Nested ``offload`` blocks are tracked via a thread-safe depth counter; the
-    switch is flipped back off only when the outermost context exits.
-
-    Example::
-
-        with torch.rbln.offload():
-            tensor = torch.zeros(1 << 30, device="rbln:0")  # offloaded
+    Raises:
+        NotImplementedError: always.
     """
-    global _offload_depth
-    with _offload_lock:
-        _offload_depth += 1
-        if _offload_depth == 1:
-            torch_rbln._C._set_file_offloading_enabled(True)
-    try:
-        yield
-    finally:
-        with _offload_lock:
-            _offload_depth -= 1
-            if _offload_depth == 0:
-                torch_rbln._C._set_file_offloading_enabled(False)
+    raise NotImplementedError(
+        "torch.rbln.offload() is not supported by this RBLN runtime: RBLN tensors have no host-side copy to page out"
+    )
 
 
 def release_offload_temp_storage() -> int:
     """
     Remove this process's file offloading temp files and directories.
 
-    :func:`offload` writes into a per-process directory under ``RBLN_OFFLOAD_DIR`` (default
-    ``$HOME/.cache/rbln_cache/offload``) that the runtime removes on teardown. Call this on a
-    shutdown path that may be killed first. Offloaded tensors must not be used afterwards.
+    This runtime does not offload to files (see :func:`offload`), so there is never anything
+    to remove. Safe to call on any shutdown path.
 
     Returns:
-        int: The number of temp files removed.
+        int: The number of temp files removed, always 0.
     """
-    return torch_rbln._C._release_offload_temp_storage()
+    return 0

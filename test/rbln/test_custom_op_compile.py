@@ -20,7 +20,7 @@ holds the compiled run to a tighter bound than fp32 does.
 import math
 
 import pytest
-import rebel  # noqa: F401  -- defines the rbln_custom_ops schemas
+import rbln  # noqa: F401  -- defines the rbln_custom_ops schemas
 import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase

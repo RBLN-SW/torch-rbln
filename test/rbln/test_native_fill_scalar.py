@@ -4,11 +4,10 @@
 Test suite for the RBLN-native `aten::fill_.Scalar` implementation.
 
 `fill_scalar_rbln_` (RBLNTensorFactories.cpp) replaces the default
-`fallback_rbln` registration for `aten::fill_.Scalar`. It borrows a host
-pointer into the RBLN vmemory backing `self`, writes the scalar value with
-a typed std::fill_n / std::memset, and commits via
-return_borrowed(updated=true). Bypasses cpu_fallback_rbln's
-redispatchBoxed(CPU) + TensorIterator path.
+`fallback_rbln` registration for `aten::fill_.Scalar`. It fills zeros on the
+device, and writes any other value from a host pattern built with a typed
+std::fill_n / std::memset. Bypasses cpu_fallback_rbln's redispatchBoxed(CPU)
++ TensorIterator path.
 
 These tests verify:
 * All supported dtypes produce the same values as the CPU reference.
@@ -71,23 +70,20 @@ class TestFillScalarRBLN(TestCase):
         self.assertEqual(x.to("cpu"), torch.full((2, 3, 4), 42, dtype=torch.int64))
 
     def test_empty_tensor_noop(self):
-        # numel() == 0 must short-circuit without touching the vmemory.
+        # numel() == 0 must short-circuit without touching device memory.
         x = torch.empty(0, dtype=torch.int64, device="rbln")
         x.fill_(-1)
         self.assertEqual(x.numel(), 0)
 
-    def test_overflow_conversion_raises_without_leaking_borrow(self):
-        """A checked-cast overflow (128 into int8) throws between the borrow and
-        its return; the RAII guard must still release it, else the next free leaks
-        the vmem. Assert it raises and the tensor stays usable (re-fill + churn)."""
+    def test_overflow_conversion_raises_and_leaves_tensor_usable(self):
+        """A checked-cast overflow (128 into int8) raises before anything is written;
+        the tensor stays usable afterwards, and its memory frees and is reused cleanly."""
         x = torch.empty(8, dtype=torch.int8, device="rbln")
         with pytest.raises(RuntimeError, match="overflow"):
             x.fill_(128)  # 128 > int8 max (127)
-        # Borrow was released on the exception path: the tensor is still usable.
         x.fill_(5)
         self.assertEqual(x.to("cpu"), torch.full((8,), 5, dtype=torch.int8))
-        del x  # must free cleanly (no lingering borrow on the vaddr)
-        # Reuse the freed region a few times to surface a lingering borrow.
+        del x
         for _ in range(3):
             t = torch.empty(8, dtype=torch.int8, device="rbln")
             t.fill_(1)

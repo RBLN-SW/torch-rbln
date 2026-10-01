@@ -326,7 +326,6 @@ class TestCatV2V(TestCase):
         torch.cat([to_dev(a_cpu), to_dev(b_cpu)], dim=0, out=out)
         _check(out, expected)
 
-    @pytest.mark.usefixtures("enable_eager_malloc")
     def test_large_strided_cat(self):
         """``aten::cat`` over a large batched strided copy."""
         # Baseline allocations exercise the bulk strided copy path.
@@ -671,7 +670,7 @@ class TestIndexTensorV2V(TestCase):
         regression back to the fallback."""
         with torch.rbln.explain() as p:
             fn()
-        return "v2v_multi" in p.dump().get("rebel_runtime", {}).get("by_primitive", {})
+        return "v2v_multi" in p.dump().get("runtime", {}).get("by_primitive", {})
 
     # -- white-listed native path: single 1-D integer index --------------------
 

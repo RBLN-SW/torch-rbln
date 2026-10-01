@@ -3,35 +3,37 @@
 """Regression tests for torch.accelerator / torch.rbln contract gaps.
 
 Covers:
-- ``torch.rbln.memory_*`` reading the RBLN allocator's dotted stat keys
-  (``allocated.current`` etc.), not the CUDA-style ``allocated_bytes.all.current``.
+- ``torch.rbln.memory_*`` reading the ``torch.cuda``-style stat keys
+  (``allocated_bytes.all.current`` etc.) that ``torch.rbln.memory_stats()`` reports.
 - Device-argument normalization (accept None/int/str/torch.device, reject
   non-rbln devices and out-of-range indices).
 - ``memory_stats()`` returning zero (not raising) for a valid but uninitialized
   device index (CUDA parity).
-- ``torch.accelerator.get_device_capability()`` advertising the dtypes RBLN can
-  allocate and type-convert on device (allocation + conversion, not native-op
-  dispatch).
+- ``torch.accelerator.get_device_capability()`` advertising the dtypes the device
+  computes on, while a tensor of any dtype takes device memory when it is created.
 - PrivateUse1 storage resize-to-zero.
 - ``torch.accelerator.empty_cache()`` (no device arg) actually releasing cached
-  memory on the current device.
+  memory on every device this process has allocated on.
 - ``torch.accelerator.empty_host_cache()`` returning once the device is in use.
 - ``torch.rbln.mem_get_info()`` / ``torch.accelerator.get_memory_info()`` reporting
-  the driver's device-wide figures, and raising -- not guessing -- where the installed
-  UMD/KMD has no such query.
+  the driver's device-wide figures, and raising -- not guessing -- where there is no NPU
+  to ask.
 """
+
+import os
+from unittest import mock
 
 import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 import torch_rbln  # noqa: F401 -- registers the rbln device + torch.rbln namespace
-from test.utils import run_in_isolated_process
+from test.utils import requires_logical_devices, run_in_isolated_process, SUPPORTED_DTYPES
 
 
 @pytest.mark.single_worker
 class TestRblnMemoryHelpers(TestCase):
-    """``torch.rbln.memory_*`` must read the RBLN allocator's dotted stat keys.
+    """``torch.rbln.memory_*`` must read the stat keys ``torch.rbln.memory_stats()`` reports.
 
     Single-worker: mutates the global allocator (empty_cache / peak reset) and
     compares stats across calls, so it must not race other workers' allocations."""
@@ -48,11 +50,11 @@ class TestRblnMemoryHelpers(TestCase):
         _ = keep + keep
 
         stats = torch.rbln.memory_stats(0)
-        self.assertEqual(torch.rbln.memory_allocated(0), stats.get("allocated.current", 0))
-        self.assertEqual(torch.rbln.max_memory_allocated(0), stats.get("allocated.peak", 0))
-        self.assertEqual(torch.rbln.memory_reserved(0), stats.get("reserved.current", 0))
-        self.assertEqual(torch.rbln.max_memory_reserved(0), stats.get("reserved.peak", 0))
-        # Regression: the CUDA-style key made these return 0 despite a live allocation.
+        self.assertEqual(torch.rbln.memory_allocated(0), stats["allocated_bytes.all.current"])
+        self.assertEqual(torch.rbln.max_memory_allocated(0), stats["allocated_bytes.all.peak"])
+        self.assertEqual(torch.rbln.memory_reserved(0), stats["reserved_bytes.all.current"])
+        self.assertEqual(torch.rbln.max_memory_reserved(0), stats["reserved_bytes.all.peak"])
+        # A helper reading a key the stats lack would return 0 despite the live allocation.
         self.assertGreater(torch.rbln.memory_allocated(0), 0)
         del keep
 
@@ -138,33 +140,25 @@ class TestRblnMemoryHelpers(TestCase):
 
 @pytest.mark.single_worker
 class TestDeviceCapability(TestCase):
-    """``get_device_capability()`` reports dtypes resident in device memory
-    (fp16/bf16); other dtypes are CPU-backed even under device="rbln".
+    """``get_device_capability()`` advertises the dtypes the device computes on: fp16/bf16, the
+    ones eager dispatch sends to the device. A tensor of any dtype takes device memory when it
+    is created; ops on the other dtypes run on the host through the CPU fallback.
+
     Single-worker: measures global device memory."""
 
     @pytest.mark.test_set_ci
-    def test_capability_matches_device_resident_dtypes(self):
-        # Probe a candidate set spanning both advertised (fp16/bf16) and unadvertised
-        # (fp32/int) dtypes, classify each by whether a compute op materializes it in
-        # device memory, and require the advertised set to equal the resident set — so a
-        # dtype that is resident but missing from the advertisement is caught too, not
-        # just the reverse.
+    def test_capability_is_the_dispatch_dtypes(self):
         advertised = set(torch.accelerator.get_device_capability()["supported_dtypes"])
-        candidates = [torch.float16, torch.bfloat16, torch.float32, torch.int32, torch.int64]
-        resident = set()
-        for dtype in candidates:
-            torch.rbln.empty_cache()
-            before = torch.rbln.memory_allocated(0)
-            scratch = torch.empty(1024 * 1024, dtype=dtype, device="rbln:0")
-            scratch.add_(1)
-            if torch.rbln.memory_allocated(0) - before > 0:
-                resident.add(dtype)
-            del scratch
-        self.assertEqual(
-            advertised,
-            resident,
-            msg=f"advertised dtypes {advertised} disagree with device-resident dtypes {resident}",
-        )
+        self.assertEqual(advertised, set(SUPPORTED_DTYPES))
+
+    @pytest.mark.test_set_ci
+    def test_every_dtype_takes_device_memory(self):
+        for dtype in (torch.float16, torch.bfloat16, torch.float32, torch.int32, torch.int64, torch.bool):
+            with self.subTest(dtype=dtype):
+                before = torch.rbln.memory_allocated(0)
+                scratch = torch.empty(1024 * 1024, dtype=dtype, device="rbln:0")
+                self.assertEqual(torch.rbln.memory_allocated(0) - before, scratch.nbytes)
+                del scratch
 
 
 class TestStorageResizeToZero(TestCase):
@@ -181,34 +175,18 @@ class TestStorageResizeToZero(TestCase):
 @pytest.mark.single_worker
 class TestAcceleratorEmptyCache(TestCase):
     """Device-less ``torch.accelerator.empty_cache()`` actually releases cached
-    memory (it is not a no-op or a query-only stub).
+    memory (it is not a no-op or a query-only stub), on every device this process has
+    allocated on, not just the current one (CUDA/XPU parity).
 
     Single-worker: asserts on global reserved-memory changes, so it must not race
-    other workers' allocations.
-
-    Note: the all-devices span — ``empty_cache()`` walking *every* initialized
-    device, not just the current one — is not asserted at the Python level.
-    Confirming a non-current device was released means reading its reserved bytes,
-    but the rbln runtime's per-node memory-stats query supports node 0 only, so on a
-    device index > 0 ``memory_reserved()`` either raises (an initialized device, the
-    runtime rejects the query) or reads 0 (an uninitialized device, the gate) — never
-    the real figure. The all-device selection is instead covered in C++ by
-    ``RBLNAllocatorTest.EmptyCacheSpansNonCurrentInitializedDevice`` (emptyCache()
-    iterates ``initialized_device_indices()``, asserted to include a non-current
-    device)."""
+    other workers' allocations."""
 
     @staticmethod
     def _hold_then_free_reserved(device):
         # Allocate then free a large buffer. The caching allocator keeps the
         # freed block as *reserved* (freeing alone does not return it to the
         # runtime), so reserved stays high until empty_cache() releases it.
-        #
-        # bind_device_memory, not an arithmetic op: an empty tensor's allocation is lazy
-        # until something materializes it, and this test needs the physical memory, not the
-        # arithmetic. Reaching it through ``add_`` compiles a kernel for a 16M-element
-        # tensor, which is most of what this test used to cost.
         buf = torch.empty(16 * 1024 * 1024, device=device, dtype=torch.float16)  # 32 MiB
-        torch.rbln.bind_device_memory(buf)
         del buf
         return torch.rbln.memory_reserved(device)
 
@@ -219,6 +197,15 @@ class TestAcceleratorEmptyCache(TestCase):
         # Must actually release the cached block; a no-op or query-only
         # implementation would leave reserved unchanged.
         self.assertLess(torch.rbln.memory_reserved("rbln:0"), reserved_cached)
+
+    @pytest.mark.test_set_ci
+    @requires_logical_devices(2)
+    def test_empty_cache_releases_every_initialized_device(self):
+        reserved_cached = {device: self._hold_then_free_reserved(device) for device in ("rbln:0", "rbln:1")}
+        with torch.rbln.device(0):
+            torch.accelerator.empty_cache()
+        for device, cached in reserved_cached.items():
+            self.assertLess(torch.rbln.memory_reserved(device), cached, device)
 
 
 def _empty_host_cache_worker():
@@ -240,75 +227,65 @@ class TestAcceleratorEmptyHostCache(TestCase):
         run_in_isolated_process(_empty_host_cache_worker)
 
 
-def _driver_memory_replies(logical_index):
-    """The runtime's own answer per physical NPU of ``rbln:<logical_index>``; None where the
-    installed UMD/KMD has no device memory query. Plan-only: claims no device."""
-    from rebel import get_device_memory_info
-
-    from torch_rbln._internal.rsd_utils import get_physical_device_ids
-
-    return [get_device_memory_info(pid) for pid in get_physical_device_ids(logical_index)]
+def _mem_get_info_dummy_worker():
+    for query in (torch.rbln.mem_get_info, torch.rbln.mem_get_info_per_chiplet, torch.accelerator.get_memory_info):
+        try:
+            query(0)
+        except RuntimeError as err:
+            assert "RBLN_DUMMY_DEVICE" in str(err), err
+        else:
+            raise AssertionError(f"{query.__name__} reported figures for a dummy device")
 
 
 @pytest.mark.test_set_ci
 class TestMemGetInfo(TestCase):
-    """``mem_get_info()`` is the driver's device-wide reading, summed over the logical
-    device's physical NPUs, or a clear error where the driver cannot answer.
-
-    Both environments are asserted so the CUDA-parity contract holds on old and new
-    drivers alike: one test skips where the other runs."""
+    """``mem_get_info()`` is the driver's reading of the logical device's DRAM, summed over its
+    physical NPUs and their chiplets; ``mem_get_info_per_chiplet()`` is the same reading
+    before the sums. ``total`` is static; ``free`` is a reading another process may move
+    between two queries, so it is bounded rather than matched across calls."""
 
     def setUp(self):
+        super().setUp()
         if torch.rbln.device_count() == 0:
             self.skipTest("no rbln device available")
-        self.replies = _driver_memory_replies(0)
+        if torch.rbln.is_dummy_device():
+            self.skipTest("RBLN_DUMMY_DEVICE has no NPU to report on")
 
-    def test_matches_driver_totals(self):
-        if any(reply is None for reply in self.replies):
-            self.skipTest("installed UMD/KMD has no device memory-info query")
+    def test_total_is_the_npus_memory(self):
         free, total = torch.rbln.mem_get_info(0)
         self.assertIsInstance(free, int)
         self.assertIsInstance(total, int)
-        self.assertEqual(total, sum(reply.total for reply in self.replies))
-        self.assertGreater(total, 0)
+        self.assertEqual(total, torch.rbln.get_device_properties(0).total_memory)
         self.assertLessEqual(free, total)
-        # Same figures through the DeviceAllocator path torch.accelerator uses. `total` is
-        # static; `free` is a reading another process may move between the two calls.
-        acc_free, acc_total = torch.accelerator.get_memory_info(0)
-        self.assertEqual(acc_total, total)
-        self.assertLessEqual(acc_free, acc_total)
+        # Same figures through the DeviceAllocator path torch.accelerator uses.
+        accelerator_free, accelerator_total = torch.accelerator.get_memory_info(0)
+        self.assertEqual(accelerator_total, total)
+        self.assertLessEqual(accelerator_free, accelerator_total)
 
-    def test_per_chiplet_matches_driver_reply(self):
-        if any(reply is None for reply in self.replies):
-            self.skipTest("installed UMD/KMD has no device memory-info query")
+    def test_per_chiplet_breaks_the_total_down(self):
+        properties = torch.rbln.get_device_properties(0)
         per_chiplet = torch.rbln.mem_get_info_per_chiplet(0)
-        for npu, reply in enumerate(self.replies):
-            self.assertEqual(per_chiplet[f"npu.{npu}.total"], reply.total)
-            self.assertEqual(per_chiplet[f"npu.{npu}.granularity"], reply.granularity)
-            self.assertEqual(per_chiplet[f"npu.{npu}.huge_granularity"], reply.huge_granularity)
-            chiplets = [k for k in per_chiplet if k.startswith(f"npu.{npu}.chiplet.") and k.endswith(".total")]
-            self.assertEqual(len(chiplets), len(reply.chiplets))
-            # `total` is static; the free figures are readings another process may move between
-            # the setUp() query and this one, so they are bounded, not matched. The exact field
-            # layout is covered by the RBLNFunctionsPerChipletMemoryMap gtest on a fixed reply.
-            for c, chiplet in enumerate(reply.chiplets):
-                self.assertEqual(per_chiplet[f"npu.{npu}.chiplet.{c}.total"], chiplet.total)
-                self.assertLessEqual(per_chiplet[f"npu.{npu}.chiplet.{c}.largest_free_huge"], chiplet.total)
-                self.assertLessEqual(per_chiplet[f"npu.{npu}.chiplet.{c}.largest_free"], chiplet.total)
-            self.assertEqual(
-                sum(per_chiplet[f"npu.{npu}.chiplet.{c}.total"] for c in range(len(reply.chiplets))),
-                reply.total,
-            )
+        npus = [f"npu.{npu}" for npu in range(properties.npu_count)]
+        chiplets = {npu: [f"{npu}.chiplet.{chiplet}" for chiplet in range(properties.num_chiplet)] for npu in npus}
+        scopes = npus + [chiplet for npu in npus for chiplet in chiplets[npu]]
+        self.assertEqual(
+            set(per_chiplet), {f"{scope}.{field}" for scope in scopes for field in ("total", "used", "free")}
+        )
+        for scope in scopes:
+            self.assertEqual(per_chiplet[f"{scope}.used"] + per_chiplet[f"{scope}.free"], per_chiplet[f"{scope}.total"])
+        for npu in npus:
+            for field in ("total", "used", "free"):
+                self.assertEqual(
+                    per_chiplet[f"{npu}.{field}"], sum(per_chiplet[f"{chiplet}.{field}"] for chiplet in chiplets[npu])
+                )
+        self.assertEqual(sum(per_chiplet[f"{npu}.total"] for npu in npus), torch.rbln.mem_get_info(0)[1])
 
-    def test_unsupported_driver_raises(self):
-        if all(reply is not None for reply in self.replies):
-            self.skipTest("installed UMD/KMD provides the device memory-info query")
-        with self.assertRaisesRegex(RuntimeError, "does not provide the device memory query"):
-            torch.rbln.mem_get_info(0)
-        with self.assertRaisesRegex(RuntimeError, "does not provide the device memory query"):
-            torch.accelerator.get_memory_info(0)
-        with self.assertRaisesRegex(RuntimeError, "does not provide the device memory query"):
-            torch.rbln.mem_get_info_per_chiplet(0)
+    def test_used_covers_this_process_reserved_memory(self):
+        live = torch.empty(32 * 1024 * 1024, dtype=torch.float16, device="rbln:0")
+        free, total = torch.rbln.mem_get_info(0)
+        self.assertGreaterEqual(total - free, torch.rbln.memory_reserved(0))
+        self.assertGreaterEqual(torch.rbln.memory_reserved(0), live.nbytes)
+        del live
 
     def test_accepts_device_forms_and_rejects_non_rbln(self):
         for bad in ("cpu", "cuda:0", torch.device("cpu")):
@@ -316,11 +293,14 @@ class TestMemGetInfo(TestCase):
                 torch.rbln.mem_get_info(bad)
         with self.assertRaises(ValueError):
             torch.rbln.mem_get_info(torch.rbln.device_count())
-        if any(reply is None for reply in self.replies):
-            return
         total = torch.rbln.mem_get_info(0)[1]
         for dev in (0, "rbln:0", torch.device("rbln", 0)):
             self.assertEqual(torch.rbln.mem_get_info(dev)[1], total)
+
+    def test_dummy_device_raises(self):
+        """RBLN_DUMMY_DEVICE has no NPU behind it, so there is no figure to report."""
+        with mock.patch.dict(os.environ, {"RBLN_DUMMY_DEVICE": "1"}):
+            run_in_isolated_process(_mem_get_info_dummy_worker)
 
 
 if __name__ == "__main__":

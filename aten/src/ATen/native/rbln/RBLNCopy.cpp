@@ -15,7 +15,6 @@
 #include <c10/rbln/RBLNPinnedAllocator.h>
 
 #include <c10/rbln/RBLNProfiler.h>
-#include <rebel/runtime/api/rbln_runtime_api.h>
 #include <torch/library.h>
 
 #include <cstddef>
@@ -408,31 +407,19 @@ void tensor_copy_from_rbln_to_rbln(const at::Tensor& rbln_src, const at::Tensor&
     return;
   }
 
-  // One compiled program beats both routes below when the source view is classifiable:
-  // the strided engine pays a descriptor per contiguous run, and a KV block read head-major
-  // and written token-major breaks into runs of a single row -- far past the cap, so the
-  // real alternative is the host bounce.
+  // One compiled program beats the strided engine below when the source view is
+  // classifiable: the engine pays a descriptor per contiguous run, and a KV block read
+  // head-major and written token-major breaks into runs of a single row.
   if (try_view_copy(rbln_dst, rbln_src)) {
     return;
   }
 
-  // Strided copy: route to the on-device v2v engine while the outer iteration
-  // count stays within ::rbln::kMaxV2VMultiCopies. A larger fan-out would still
-  // reach the device — V2VBatch::submit splits a batch at that cap — but it
-  // pays one descriptor per contiguous run, and where that stops beating the
-  // host bounce below is unmeasured, so a fan-out past the cap takes the
-  // bounce.
+  // Strided copy on one device: the v2v engine moves every contiguous run in one batch,
+  // with no host round trip.
   if (rbln_src.sizes() == rbln_dst.sizes() && rbln_src.scalar_type() == rbln_dst.scalar_type() &&
       rbln_src.device() == rbln_dst.device()) {
-    const auto inner_start = common_inner_start(rbln_src.sizes(), rbln_src.strides(), rbln_dst.strides());
-    int64_t outer_count = 1;
-    for (int64_t i = 0; i < inner_start; ++i) {
-      outer_count *= rbln_src.size(i);
-    }
-    if (outer_count <= static_cast<int64_t>(::rbln::kMaxV2VMultiCopies)) {
-      strided_v2v_copy(rbln_dst, rbln_src);
-      return;
-    }
+    strided_v2v_copy(rbln_dst, rbln_src);
+    return;
   }
 
   // PROFILER (cold branch): reaching here is a non-direct device->device copy_

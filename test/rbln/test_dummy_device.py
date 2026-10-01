@@ -4,9 +4,9 @@
 
 Dummy mode is an explicit opt-in that lets torch-rbln construct device tensors
 and run memory transfers with no NPU present, so a model can be traced/compiled
-on a host without hardware. Allocations and copies are backed by rebel's
-v-memory host mirror through a dummy runtime context; torch adds no host-memory
-shim of its own. It is forced regardless of physical NPU presence.
+on a host without hardware. Allocations and copies go through the runtime's
+dummy device, which backs device memory with host memory; torch adds no
+host-memory shim of its own. It is forced regardless of physical NPU presence.
 
 Dummy mode registers the device against RBLN_FORCE_NPU_NAME (there is no NPU to
 probe for the SoC), so RBLN_FORCE_NPU_NAME must be set alongside RBLN_DUMMY_DEVICE.
@@ -319,22 +319,6 @@ def test_torch_compile_tracing_smoke():
     assert "OK" in proc.stdout
 
 
-def test_offload_runs_in_dummy_mode():
-    # torch.rbln.offload() flips a runtime flag; on the dummy context it is a safe
-    # no-op and tensor allocation inside the block still works.
-    proc = _run_with_dummy(
-        """
-        import torch, torch_rbln
-        with torch.rbln.offload():
-            t = torch.tensor([1.0, 2.0], device="rbln:0")
-        assert t.cpu().tolist() == [1.0, 2.0]
-        print("OK")
-        """
-    )
-    _assert_ok(proc)
-    assert "OK" in proc.stdout
-
-
 def test_cache_management_is_a_noop_in_dummy_mode():
     proc = _run_with_dummy(
         """
@@ -584,8 +568,7 @@ def test_eager_device_dtype_op_execution_fails_fast():
     # Eager ops that reach the RBLN device-compile path are NPU-bound, so on
     # RBLN_DUMMY_DEVICE they must fail fast like a compiled graph. Cover the axes that
     # each route to that gate: both device dtypes (fp16/bf16), unary (softmax) and binary
-    # (add) ops, and aligned + unaligned last dims (the 64-alignment CPU-fallback must not
-    # make an aligned tensor raise while an unaligned one silently runs). All must raise.
+    # (add) ops, and aligned + unaligned last dims. All must raise.
     proc = _run_with_dummy(
         """
         import torch, torch_rbln
@@ -617,28 +600,6 @@ def test_eager_host_dtype_op_runs_on_cpu():
         a = torch.ones(4, 8, device="rbln:0", dtype=torch.float32)
         assert (a + a).cpu().tolist() == [[2.0] * 8] * 4
         print("OK")
-        """,
-        env_extra={"RBLN_DEVICE_MAP": _NO_NPU_MAP},
-    )
-    _assert_ok(proc)
-    assert "OK" in proc.stdout
-
-
-def test_set_device_layout_like_raises_in_dummy_without_materialized_ref():
-    # Not special-cased for dummy: a plain tensor has no device physical view, so the op
-    # raises a catchable RuntimeError (same precondition a real NPU raises), not a no-op.
-    proc = _run_with_dummy(
-        """
-        import torch, torch_rbln
-        a = torch.empty(64, device="rbln:0", dtype=torch.float16)
-        b = torch.empty(64, device="rbln:0", dtype=torch.float16)
-        try:
-            torch.rbln.set_device_layout_like(a, b)
-        except RuntimeError as e:
-            assert "physical view" in str(e) or "set_device_alloc_layout_like" in str(e), str(e)
-            print("OK")
-        else:
-            raise AssertionError("expected RuntimeError (ref has no materialized physical view)")
         """,
         env_extra={"RBLN_DEVICE_MAP": _NO_NPU_MAP},
     )
@@ -808,7 +769,7 @@ print("OK")
 )
 def test_dummy_compiled_prefill_decode_runs_on_real_npu(tmp_path):
     # End-to-end purpose of dummy mode: prefill/decode graphs compiled with no NPU
-    # (allocations host-backed by rebel v-memory, no device opened) must load and run
+    # (allocations host-backed by the runtime's dummy device, no NPU opened) must load and run
     # correctly on a real NPU. Detect the real NPU first (non-dummy probe), compile
     # both graphs for exactly that SoC in a dummy subprocess, then load + run
     # prefill->decode (KV cache handed from prefill into decode) on the real device

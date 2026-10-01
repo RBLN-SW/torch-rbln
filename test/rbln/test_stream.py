@@ -14,7 +14,7 @@ import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from test.utils import assert_device_resident_dtype
+from test.utils import assert_device_computed_dtype
 
 
 # The device computes fp16 matmuls in a narrower custom float, so results are compared on
@@ -34,9 +34,9 @@ class TestStream(TestCase):
         torch.rbln.set_stream(torch.rbln.default_stream())
         super().tearDown()
 
-    def test_ordering_tests_use_a_device_resident_dtype(self):
-        # The fences below only mean something if the data lives on the device.
-        assert_device_resident_dtype(torch.float16)
+    def test_ordering_tests_use_a_device_computed_dtype(self):
+        # The fences below only mean something if the ops run on the device.
+        assert_device_computed_dtype(torch.float16)
 
     def test_default_stream_id_is_zero(self):
         default = torch.rbln.default_stream()

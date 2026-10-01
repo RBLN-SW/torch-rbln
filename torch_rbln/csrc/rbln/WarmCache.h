@@ -1,38 +1,24 @@
 #pragma once
 
-// Warm-runtime cache for the C++ dispatch shim.
+// Warm-op cache for the C++ dispatch shim.
 //
-// Goal: on warm shim calls (cache hit), bypass the Python wrapper entirely
-// and drive the rebel runtime directly from C++ through rbln_exec_api.h. This
-// eliminates the per-call pybind roundtrip + Python wrapper overhead, which
-// is dominated by is_cpu_fallback_cases and the compile_rbln_cached lookup on
-// the Python side.
-//
-// Architecture:
-//   - On first call of a shim op with a given input profile, the Python
-//     wrapper compiles the op via torch.compile(backend="rbln") and harvests
-//     the DynamoRuntime. It then installs an entry into this cache via the
-//     pybind-exposed install(...) API.
-//   - On subsequent calls with a matching input profile, the shim looks up
-//     the entry and drives one execution through the C ABI.
+// On warm shim calls (cache hit) the op runs from C++ without entering Python:
+//   - The first call of a shim op with a given input profile goes to the Python
+//     wrapper, which compiles the op into an OpFunction, runs it, and installs
+//     it here with the positions of the call's tensors it took.
+//   - Later calls with a matching input profile find the entry and run its
+//     OpFunction over the stack's tensors.
 //   - Entries are keyed by (schema-name, per-Tensor-input profile, per-Scalar
-//     value). Shape/dtype/device changes produce a different key and trigger
-//     a miss (fall back to Python, which in turn repopulates the cache for
-//     the new profile).
+//     value). Shape/dtype/device changes produce a different key and miss.
 //
-// Lifetime / thread-safety:
-//   - Process-global singleton cache.
-//   - Reads take a shared lock (hot path); writes take an exclusive lock.
-//   - Entries hold strong py::object references to the DynamoRuntime and to
-//     the sync-runtime handle it owns, so the borrowed RblnSyncRuntime stays
-//     valid for the cache's lifetime.
-//   - No eviction; entries leave only through ``clear`` (all of them, or one
-//     device's).
+// Process-global; reads take a shared lock (hot path), writes an exclusive
+// one. No eviction; entries leave only through ``clear`` (all of them, or one
+// device's).
 
 #include <ATen/core/ScalarType.h>
 #include <c10/core/Device.h>
 #include <c10/util/SmallVector.h>
-#include <torch/csrc/utils/pybind.h>
+#include <torch_rbln/csrc/rbln/OpFunction.h>
 
 #include <atomic>
 #include <cstddef>
@@ -43,27 +29,11 @@
 #include <string>
 #include <unordered_map>
 
-#include <rebel/runtime/api/rbln_exec_api.h>
-
 namespace torch_rbln::warmcache {
 
-// Per-tensor input profile. Shape/strides/storage_offset/dtype/device
-// together pin down the exact layout the cached runtime was compiled for.
-//
-// Why strides + storage_offset: the warm-cache hit path passes the stack
-// tensor's ``data_ptr()`` straight to the rebel runtime. The runtime was
-// compiled assuming the input layout matches what the Python wrapper fed
-// to ``torch.compile`` — that layout is always contig+offset=0 today
-// (``compile_and_run_view_aware`` skips ``_install_warm_cache_pending``
-// via the ``has_views`` gate whenever any view recipe was applied, so
-// only contig+offset=0 inputs survive into install). If the key carried
-// only shape+dtype, a later call with a non-contig or offset>0 input of
-// the same shape would hit the contig-compiled entry and the runtime
-// would read ``numel*itemsize`` contiguous bytes from a stride-aware
-// pointer — silently wrong values for permute / transpose / expand and
-// wrong-offset reads for narrow(dim, k>0, …). Note: this is the input-
-// side counterpart of ``fix(warm-cache): bypass on non-contiguous out=
-// dispatch`` (commit 6406446), which already handled the out= mirror.
+// Per-tensor input profile. The hit path binds the stack tensor's storage as
+// is, so strides and storage_offset are part of the key: a view of the same
+// shape as the contiguous tensor an entry was installed for must miss.
 struct TensorProfile {
   at::ScalarType dtype{at::ScalarType::Undefined};
   c10::SmallVector<int64_t, 6> shape;
@@ -78,7 +48,7 @@ struct TensorProfile {
 };
 
 // Scalar values appearing as positional/keyword args. These are included
-// because rebel backends commonly specialize the compiled graph on scalars
+// because an op is compiled with its scalars as constants
 // (e.g. clamp's min/max, pow's exponent). Mismatched scalars must miss and
 // rebuild.
 struct ScalarValue {
@@ -135,25 +105,11 @@ struct CacheKeyHash {
   std::size_t operator()(const CacheKey& k) const noexcept;
 };
 
-// Per-output descriptor. Shape/dtype are needed to allocate the output
-// tensor on the hit path when the op does not receive an `out=` argument.
-struct OutputProfile {
-  c10::SmallVector<int64_t, 6> shape;
-  at::ScalarType dtype{at::ScalarType::Undefined};
-  bool is_rbln_device{true};
-};
-
 struct CacheEntry {
-  // The runtime is held as well as the DynamoRuntime that owns it: `runtime`
-  // below is borrowed from the former, and an owner that rebinds its attribute
-  // would otherwise drop it while an installed entry still points at it.
-  pybind11::object py_dyn_runtime;
-  pybind11::object py_runtime_handle;
-
-  // Borrowed from `py_runtime_handle`'s native_handle(); valid only while it is.
-  RblnSyncRuntime runtime{nullptr};
-
-  c10::SmallVector<OutputProfile, 2> out_profiles;
+  std::shared_ptr<OpFunction> function;
+  // For each input of `function`, the position of the tensor it takes among the
+  // call's tensor arguments, as ``build_cache_key`` walks them.
+  c10::SmallVector<uint32_t, 4> inputs;
 };
 
 // Shared pointer to a cache entry. Returned by ``find`` so the caller can
@@ -176,8 +132,8 @@ class WarmCache {
   CacheEntryPtr find(const CacheKey& key);
 
   // Miss path. Inserts entry under `key` if not already present. Called from
-  // Python via pybind after a successful torch.compile. If a concurrent
-  // inserter wins the race, this is a no-op (first writer wins).
+  // Python once the op compiled and ran. If a concurrent inserter wins the
+  // race, this is a no-op (first writer wins).
   void install(CacheKey key, const CacheEntry& entry);
 
   // Enable/disable the warm-cache path globally. When disabled, find() always
@@ -195,15 +151,6 @@ class WarmCache {
   // device is given. An entry with no device input is dropped only by the
   // latter; no shim op has one today (each takes at least one input tensor).
   void clear(std::optional<c10::DeviceIndex> device = std::nullopt);
-
-  // Reentrancy guard used by the miss path: while Python is driving
-  // torch.compile, any ATen dispatch that lands back on a shim op must take
-  // the slow path (the cache entry does not exist yet; attempting to hit
-  // would cause infinite recursion via a partially-built DynamoRuntime).
-  // The guard is thread-local.
-  static bool is_building_entry();
-  static void enter_building();
-  static void exit_building();
 
  private:
   WarmCache() = default;

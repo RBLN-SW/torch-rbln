@@ -23,7 +23,7 @@ from test.utils_v2v import arange as _arange, ENGINE_DTYPES, eq as _eq, to_dev a
 
 def _prim_calls(report: dict) -> dict[str, int]:
     """Per-primitive runtime call counts from an explain() dump."""
-    rt = report.get("rebel_runtime")
+    rt = report.get("runtime")
     if rt is None:
         return {}
     return {name: int(v["calls"]) for name, v in rt.get("by_primitive", {}).items()}

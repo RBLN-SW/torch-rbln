@@ -1,32 +1,35 @@
-"""Environment diagnostics for RBLN library loading.
+"""Environment diagnostics for loading torch-rbln on the rbln runtime.
 
-Helps users debug "Cannot find libraries: librbln.so / librbln_runtime.so" and
-environment-override issues (REBEL_HOME, PYTHONPATH, LD_LIBRARY_PATH).
+Reports where the ``rbln`` package imports from, the ``librbln_rt.so`` it maps, the ABI id this
+build recorded against the one the runtime reports, and torch-rbln's own native libraries -- what
+an ``import torch_rbln`` that fails needs to be explained.
 """
 
-import ctypes
 import os
 import re
 import subprocess
 import sys
 from typing import Any
 
-from torch_rbln._internal.rbln_runtime_lib import (
-    load_runtime_library,
-    loaded_runtime_libraries,
-    RUNTIME_LIB_NAME,
-    runtime_library_candidates,
-)
+from torch_rbln._internal import abi_check
+from torch_rbln._internal.rbln_runtime_lib import load_runtime_library, loaded_runtime_libraries, RUNTIME_LIB_NAME
 
 
-# Environment variables that affect where we look for .so files.
+# Environment variables that decide which rbln package and runtime this process picks up.
 ENV_VARS = (
     "REBEL_HOME",
-    "LD_LIBRARY_PATH",
-    "DYLD_LIBRARY_PATH",
     "PYTHONPATH",
+    "LD_LIBRARY_PATH",
     "PATH",
 )
+
+_VERDICT_TEXT = {
+    abi_check.VERDICT_OK: "OK",
+    abi_check.VERDICT_MISMATCH: "MISMATCH -- import torch_rbln raises; rebuild it against this runtime's headers",
+    abi_check.VERDICT_SKIPPED_NO_SNAPSHOT: "no build-time ABI id to compare against",
+    abi_check.VERDICT_SKIPPED_UNREADABLE_RUNTIME: "no handle could be taken on the mapped runtime",
+    abi_check.VERDICT_SKIPPED_NO_RUNTIME_ID: f"the runtime exports no {abi_check.ABI_SYMBOL}()",
+}
 
 
 def get_gcc_version_from_elf(filepath: str) -> str:
@@ -60,7 +63,7 @@ def get_gcc_version_from_elf(filepath: str) -> str:
 
 
 def _env_snapshot() -> dict[str, Any]:
-    """Snapshot of env vars that affect library discovery (empty = not set)."""
+    """Snapshot of the env vars in ``ENV_VARS`` (empty = not set)."""
     return {k: os.environ.get(k, "") for k in ENV_VARS}
 
 
@@ -152,161 +155,69 @@ def _torch_rbln_info() -> dict[str, Any]:
     return out
 
 
-def _rebel_compiler_info() -> dict[str, Any]:
-    """Installed rebel-compiler package version, location, and install type."""
+def _is_under(path: str, directory: str) -> bool:
+    return os.path.realpath(path).startswith(os.path.realpath(directory) + os.sep)
+
+
+def _rbln_runtime_info() -> dict[str, Any]:
+    """Where ``rbln`` imports from and the ``librbln_rt.so`` importing it maps.
+
+    Maps the runtime the same way ``import torch_rbln`` does, so this is the library the ABI
+    check reads.
+    """
     out: dict[str, Any] = {
-        "found": False,
-        "version": None,
-        "location": None,
-        "installed_location": None,
-        "install_type": None,
+        "package": _package_location("rbln"),
+        "module": None,
+        "path": None,
+        "mapped": [],
+        "under_rebel_home": None,
         "error": None,
     }
     try:
-        import importlib.metadata as _meta
-
-        out["version"] = _meta.version("rebel-compiler")
-        out["found"] = True
+        out["path"] = load_runtime_library()
     except Exception as e:
         out["error"] = str(e)
-        return out
-    try:
-        import importlib.util
-
-        spec = importlib.util.find_spec("rebel")
-        if spec is not None and getattr(spec, "submodule_search_locations", None):
-            out["location"] = os.path.realpath(spec.submodule_search_locations[0])
-        elif spec is not None and getattr(spec, "origin", None):
-            out["location"] = os.path.realpath(os.path.join(os.path.dirname(spec.origin), ".."))
-    except Exception as e:
-        out["location"] = f"(error: {e})"
-    try:
-        import importlib.metadata as _meta
-
-        dist = _meta.distribution("rebel-compiler")
-        try:
-            for entry in ("rebel/__init__.py", "rebel_compiler/__init__.py"):
-                try:
-                    out["installed_location"] = os.path.realpath(os.path.dirname(dist.locate_file(entry)))
-                    break
-                except Exception:
-                    continue
-        except Exception:
-            pass
-        direct = getattr(dist, "direct_url", None)
-        if direct is not None and getattr(direct, "is_editable", None):
-            out["install_type"] = "editable"
-        elif dist is not None:
-            out["install_type"] = "normal"
-    except Exception:
-        out["install_type"] = "unknown"
+    module = sys.modules.get("rbln.runtime")
+    if module is not None:
+        out["module"] = getattr(module, "__file__", None)
+    out["mapped"] = loaded_runtime_libraries()
+    rebel_home = os.environ.get("REBEL_HOME")
+    if out["path"] and rebel_home:
+        out["under_rebel_home"] = _is_under(out["path"], rebel_home)
     return out
 
 
-def _runtime_lib_candidates() -> list[dict[str, Any]]:
-    """Every candidate path considered for librbln.so: path, where it came from, and existence."""
-    return [
-        {"path": path, "source": source, "exists": os.path.isfile(path)}
-        for path, source in runtime_library_candidates()
-    ]
-
-
-_VERSION_SYMBOL = "REBEL_COMPILER_VERSION"
-
-
-def _runtime_library_version(path: str) -> str | None:
-    """Read ``REBEL_COMPILER_VERSION`` from an already-mapped library.
-
-    ``RTLD_NOLOAD``: a reference to the existing mapping, never a second copy.
-    """
-    try:
-        lib = ctypes.CDLL(path, mode=os.RTLD_NOLOAD | ctypes.RTLD_GLOBAL)
-        raw = ctypes.c_char_p.in_dll(lib, _VERSION_SYMBOL).value
-    except (OSError, ValueError):
-        return None
-    return raw.decode(errors="replace") if raw is not None else None
-
-
-def _runtime_lib_state() -> dict[str, Any]:
-    """Which librbln.so this process mapped, and the version it reports.
-
-    Only the one library. rebel-compiler also ships librbln_runtime.so, a runtime-only build its
-    loader can take instead of this one, but the two cannot both be mapped -- loading the second
-    aborts the process in its constructors.
-    """
-    loaded = loaded_runtime_libraries()
-    return {
-        "loaded": loaded,
-        "version": _runtime_library_version(loaded[0]) if loaded else None,
-    }
-
-
-def _rebel_abi_info() -> dict[str, Any]:
-    """Build-time ABI snapshot versus what librbln.so reports here.
-
-    Loads librbln.so the same way the real import does, so these are the numbers the
-    handshake would actually compare.
-    """
+def _abi_info(runtime_path: str | None) -> dict[str, Any]:
+    """This build's ABI id against the one the mapped runtime reports, and the verdict."""
     out: dict[str, Any] = {
         "built_abi": None,
+        "built_include_dir": None,
+        "runtime_abi": None,
         "check_disabled": False,
-        "librbln_path": None,
-        "runtime_min_supported": None,
-        "runtime_current": None,
         "verdict": None,
         "error": None,
     }
+    out["check_disabled"] = abi_check.is_abi_check_disabled()
     try:
-        from torch_rbln._internal import abi_check
-
-        out["built_abi"] = abi_check.get_built_abi()
-        out["check_disabled"] = abi_check.is_abi_check_disabled()
+        state = abi_check.inspect_runtime_abi(runtime_path)
     except Exception as e:
-        out["error"] = f"abi_check unavailable: {e}"
+        out["error"] = f"could not run the ABI check: {e}"
         return out
-
-    try:
-        path = load_runtime_library()
-    except Exception as e:
-        out["error"] = f"could not load librbln.so: {e}"
-        return out
-
-    out["librbln_path"] = path
-    lib = abi_check.open_mapped_runtime(path)
-    if lib is None:
-        out["error"] = f"no handle could be taken on {path}, so its ABI symbols could not be read"
-        return out
-
-    try:
-        values, missing = abi_check.read_abi_symbols(lib)
-    except Exception as e:
-        out["error"] = f"could not read ABI symbols: {e}"
-        return out
-
-    if missing:
-        out["verdict"] = (
-            "runtime predates the ABI handshake (no version symbols)"
-            if not values
-            else f"malformed runtime: exports only {', '.join(n for n in abi_check.ABI_SYMBOLS if n not in missing)}"
-        )
-        return out
-
-    out["runtime_min_supported"], out["runtime_current"] = values
-    if out["built_abi"] is None:
-        out["verdict"] = "no build-time snapshot to compare against"
-        return out
-    reason = abi_check.abi_mismatch_reason(out["built_abi"], values[0], values[1])
-    out["verdict"] = "OK" if reason is None else f"MISMATCH -- {reason}"
+    out["built_abi"] = state.built_abi
+    out["built_include_dir"] = state.built_include_dir
+    out["runtime_abi"] = state.runtime_abi
+    if runtime_path is None:
+        out["verdict"] = "no runtime is mapped to compare against"
+    else:
+        out["verdict"] = _VERDICT_TEXT.get(state.verdict, state.verdict)
     return out
 
 
 def _resolve_so_paths(d: dict[str, Any]) -> list[dict[str, Any]]:
-    """Resolve paths for libtorch, libtorch_rbln, librbln (and related) and get GCC version from ELF .comment."""
+    """Paths of libtorch, torch-rbln's native libraries and the runtime, with the GCC that built each."""
     result: list[dict[str, Any]] = []
     tr = d.get("torch_rbln") or {}
-    candidates = d.get("runtime_lib_candidates") or []
 
-    # libtorch.so — from torch package
     libtorch_path: str | None = None
     try:
         import torch
@@ -334,7 +245,6 @@ def _resolve_so_paths(d: dict[str, Any]) -> list[dict[str, Any]]:
         }
     )
 
-    # libtorch_rbln.so, libc10_rbln.so — from torch_rbln lib_dir
     for so_name in ("libtorch_rbln.so", "libc10_rbln.so"):
         path: str | None = None
         lib_dir = tr.get("lib_dir")
@@ -350,38 +260,25 @@ def _resolve_so_paths(d: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
 
-    # librbln.so — the mapped one if this process loaded it, else the first candidate that exists
-    librbln_path = None
-    loaded = (d.get("runtime_lib") or {}).get("loaded") or []
-    if loaded:
-        librbln_path = os.path.realpath(loaded[0])
-    else:
-        for entry in candidates:
-            if entry["exists"]:
-                librbln_path = os.path.realpath(entry["path"])
-                break
+    runtime_path = (d.get("rbln_runtime") or {}).get("path")
     result.append(
         {
-            "name": "librbln.so",
-            "path": librbln_path,
-            "gcc": get_gcc_version_from_elf(librbln_path) if librbln_path else "path not found",
+            "name": RUNTIME_LIB_NAME,
+            "path": runtime_path,
+            "gcc": get_gcc_version_from_elf(runtime_path) if runtime_path else "not mapped",
         }
     )
-
     return result
 
 
 def collect_diagnostics() -> dict[str, Any]:
-    """Gather env snapshot, compiler package locations, and runtime-library resolution state."""
-    candidates = _runtime_lib_candidates()
+    """Gather the torch-rbln install, the rbln runtime it would run on, the ABI verdict and env."""
+    runtime = _rbln_runtime_info()
     d = {
         "torch_rbln": _torch_rbln_info(),
-        "rebel_compiler": _rebel_compiler_info(),
-        "rebel_abi": _rebel_abi_info(),
+        "rbln_runtime": runtime,
+        "abi": _abi_info(runtime["path"]),
         "env": _env_snapshot(),
-        "rebel": _package_location("rebel"),
-        "runtime_lib": _runtime_lib_state(),
-        "runtime_lib_candidates": candidates,
         "python_executable": sys.executable,
         "sys_path": list(sys.path),
     }
@@ -417,53 +314,40 @@ def format_diagnostics(d: dict[str, Any] | None = None, verbose: bool = True) ->
             lines.append(f"  native .so in lib: {', '.join(tr['native_libs'])}")
         else:
             lines.append("  >>> lib_dir is empty or has no .so files (native libs missing for this install).")
-    lines.extend(
-        [
-            "",
-            "rebel-compiler package:",
-        ]
-    )
-    rc = d.get("rebel_compiler") or {}
-    if rc.get("found"):
-        lines.append(f"  version: {rc.get('version', 'N/A')}")
-        lines.append(f"  install_type: {rc.get('install_type', 'N/A')}")
-        lines.append(f"  loaded from: {rc.get('location', 'N/A')}")
-        if rc.get("installed_location") is not None:
-            lines.append(f"  installed at: {rc['installed_location']}")
+
+    rt = d.get("rbln_runtime") or {}
+    package = rt.get("package") or {}
+    lines.extend(["", "rbln runtime:"])
+    if package.get("found"):
+        lines.append(f"  rbln package: {package.get('origin') or package.get('submodule_search_locations')}")
     else:
-        lines.append("  not installed" + (f" ({rc.get('error', '')})" if rc.get("error") else ""))
-    lines.extend(
-        [
-            "",
-            "rebel ABI handshake:",
-        ]
-    )
-    abi = d.get("rebel_abi") or {}
-    built_abi = abi.get("built_abi")
-    lines.append(
-        f"  built against ABI: {built_abi}"
-        if built_abi is not None
-        else "  built against ABI: (none recorded — built against a pre-handshake rebel-compiler)"
-    )
-    if abi.get("librbln_path"):
-        lines.append(f"  librbln.so: {abi['librbln_path']}")
-    if abi.get("runtime_current") is not None:
-        lines.append(
-            f"  runtime accepts: {abi.get('runtime_min_supported')}..{abi.get('runtime_current')} "
-            f"(min_supported..current)"
-        )
+        lines.append("  rbln package: not importable" + (f" ({package['error']})" if package.get("error") else ""))
+        lines.append("  >>> Put the rbln package of a rebel-compiler tree on the path:")
+        lines.append("      PYTHONPATH=$REBEL_HOME/rbln/python")
+    if rt.get("module"):
+        lines.append(f"  rbln.runtime: {rt['module']}")
+    lines.append(f"  {RUNTIME_LIB_NAME}: {rt.get('path') or 'not mapped'}")
+    if len(rt.get("mapped") or []) > 1:
+        lines.append(f"  >>> {len(rt['mapped'])} copies mapped: {', '.join(rt['mapped'])}")
+    if rt.get("under_rebel_home") is False:
+        lines.append("  >>> The runtime is not from REBEL_HOME, which a build of torch-rbln compiles against.")
+    if rt.get("error"):
+        lines.append(f"  error: {rt['error']}")
+
+    abi = d.get("abi") or {}
+    lines.extend(["", "rbln ABI check:"])
+    lines.append(f"  built ABI:   {abi.get('built_abi') or '(none recorded)'}")
+    if abi.get("built_include_dir"):
+        lines.append(f"    headers:   {abi['built_include_dir']}")
+    lines.append(f"  runtime ABI: {abi.get('runtime_abi') or '(not read)'}")
     if abi.get("verdict"):
         lines.append(f"  verdict: {abi['verdict']}")
     if abi.get("check_disabled"):
         lines.append("  >>> check is DISABLED via TORCH_RBLN_SKIP_ABI_CHECK; import will not enforce it.")
     if abi.get("error"):
         lines.append(f"  error: {abi['error']}")
-    lines.extend(
-        [
-            "",
-            "Environment variables (affecting library search):",
-        ]
-    )
+
+    lines.extend(["", "Environment variables:"])
     for k in ENV_VARS:
         v = d["env"].get(k, "")
         if not v and not verbose:
@@ -481,51 +365,15 @@ def format_diagnostics(d: dict[str, Any] | None = None, verbose: bool = True) ->
                 lines.append(f"  {k}={first}")
         else:
             lines.append(f"  {k}= (not set)")
-    lines.extend(
-        [
-            "",
-            "Compiler packages (import locations):",
-        ]
-    )
-    rebel_pkg = d.get("rebel") or {}
-    if rebel_pkg.get("found"):
-        lines.append(f"  rebel: {rebel_pkg.get('submodule_search_locations') or rebel_pkg.get('origin', 'N/A')}")
-    else:
-        lines.append("  rebel: not found" + (f" ({rebel_pkg.get('error', '')})" if rebel_pkg.get("error") else ""))
-    runtime_lib = d.get("runtime_lib") or {}
-    lines.extend(
-        [
-            "",
-            "RBLN runtime library:",
-            f"  loaded: {', '.join(runtime_lib.get('loaded') or []) or 'none'}",
-            f"  version: {runtime_lib.get('version') or 'N/A'}",
-        ]
-    )
-    lines.extend(
-        [
-            "",
-            f"Candidates considered for {RUNTIME_LIB_NAME} (in order):",
-        ]
-    )
-    for entry in d.get("runtime_lib_candidates") or []:
-        exists = "exists" if entry["exists"] else "MISSING"
-        lines.append(f"  [{exists}] {entry['path']}")
-        lines.append(f"    from: {entry['source']}")
-    lines.extend(
-        [
-            "",
-            "GCC versions (from ELF .comment of .so files):",
-        ]
-    )
+
+    lines.extend(["", "GCC versions (from ELF .comment of .so files):"])
     for entry in d.get("gcc_versions") or []:
         name = entry.get("name", "?")
         path = entry.get("path")
         gcc = entry.get("gcc", "?")
+        lines.append(f"  {name}: {gcc}")
         if path:
-            lines.append(f"  {name}: {gcc}")
             lines.append(f"    path: {path}")
-        else:
-            lines.append(f"  {name}: {gcc}")
     lines.extend(
         [
             "",

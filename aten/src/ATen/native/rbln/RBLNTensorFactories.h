@@ -61,35 +61,37 @@ at::Tensor _efficientzerotensor_rbln(
 /**
  * @brief In-place zero of an RBLN tensor.
  *
- * When `self` spans its whole backing allocation, marks the v-memory as
- * EMPTY_INIT_WITH_ZERO via `mark_zeros`: no host buffer, no transfer — zeros
- * materialise lazily on the first NPU read, or are skipped when the first
- * access is a write (KV-cache pattern). Partial/offset views (e.g. `base[2:4]`)
- * route through `fill_scalar_rbln_(self, 0)`, since `mark_zeros` has no
- * offset/size and would zero the enclosing allocation.
+ * A dense `self` (one byte range from its data pointer, whatever its offset or dim order)
+ * is zero-filled on the device with `fill_zeros`; any other view routes through
+ * `fill_scalar_rbln_(self, 0)`.
  */
 at::Tensor& zero_rbln_(at::Tensor& self);
 
-// Native impl of aten::fill_.Scalar — borrow host pointer + typed std::fill_n
-// + return_borrowed(updated=true). Bypasses cpu_fallback_rbln's redispatchBoxed
-// + TensorIterator path. The fast path is taken for a contiguous self with a
-// supported dtype; broadcast-overlap (stride-0) views collapse to a non-overlapping
-// view, and non-contiguous or unsupported-dtype self routes through the CPU
-// fallback (no hard assert).
+/**
+ * @brief Native impl of aten::fill_.Scalar, without cpu_fallback_rbln's redispatchBoxed +
+ * TensorIterator path.
+ *
+ * A dense self is zero-filled on the device, or written from a host pattern for any other
+ * value; a strided view is written run by run from one host pattern; broadcast-overlap
+ * (stride-0) views collapse to a non-overlapping view first. Unsupported dtypes and views
+ * the device paths decline go through a CPU tensor.
+ */
 at::Tensor& fill_scalar_rbln_(at::Tensor& self, const at::Scalar& value);
 
-// Native impl of aten::arange.start_out — acquire_host_ptr_for_overwrite
-// (D2H skipped, write-only), host-fill out[i] = start + i*step, then
-// return_borrowed(updated=true). `out` is assumed already sized.
+/**
+ * @brief Native impl of aten::arange.start_out: computes out[i] = start + i*step on the
+ * host and writes it with one host-to-device copy. `out` is resized to the arange length.
+ */
 at::Tensor& arange_start_out_rbln(
     const at::Scalar& start,
     const at::Scalar& end,
     const at::Scalar& step,
     at::Tensor& out);
 
-// Native impl of aten::_local_scalar_dense — 1-element tensor → Python scalar
-// (= `.item()`). D2H is unavoidable (we need the value on host) but we skip
-// cpu_fallback_rbln's schema cache + redispatch overhead. Read-only borrow.
+/**
+ * @brief Native impl of aten::_local_scalar_dense (`.item()`): one device-to-host copy of
+ * the element, without cpu_fallback_rbln's schema cache + redispatch overhead.
+ */
 at::Scalar _local_scalar_dense_rbln(const at::Tensor& self);
 
 } // namespace at::native::rbln

@@ -152,7 +152,7 @@ class TestMeanLastDimFastPath(TestCase):
 
     def test_fp32_no_keepdim_falls_through(self):
         # Handler requires keepdim=True (out shape == self minus last dim,
-        # which would change numel and break the borrow size math).
+        # which would change numel).
         cpu_x = torch.randn(4, 8, dtype=torch.float32)
         rbln_x = cpu_x.to("rbln")
         rbln_out = rbln_x.mean(dim=-1, keepdim=False)

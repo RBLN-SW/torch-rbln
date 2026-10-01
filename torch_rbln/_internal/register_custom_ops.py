@@ -2,12 +2,11 @@ import math
 
 import torch
 
-from torch_rbln._internal.compile_cache import compile_rbln_cached
+from torch_rbln._internal.compile_cache import run_op
 from torch_rbln._internal.ops_utils import (
     _detect_view_recipe,
     compile_and_run_view_aware,
     cpu_fallback_path,
-    extract_device_id_from_inputs,
     finalize_output_tensor,
     get_view_op_module,
     handle_empty_binary,
@@ -73,15 +72,9 @@ def pow_tensor_scalar_out_rbln(self, exponent, *, out):
     finalize_output_tensor(out, result_tensor, result_tensor.shape, (self,), {})
 
 
-def _dispatch_custom_kernel(op_module, args, view_recipes):
-    """Compile the kernel module through the rebel backend and run it."""
-    compiled = compile_rbln_cached(
-        op_module,
-        dynamic=False,
-        options={"disable_logger": True, "num_devices": 1},
-        device_cache_key=(extract_device_id_from_inputs(*args), view_recipes),
-    )
-    return compiled(*args)
+def _dispatch_custom_kernel(op_module, args):
+    """Compile the kernel module for the device and run it."""
+    return run_op(op_module, *args)
 
 
 class custom_rbln_paged_attn_prefill(torch.nn.Module):
@@ -137,7 +130,7 @@ def paged_attn_prefill_rbln(*args, **kwargs):
     assert args[0].size(-1) % 64 == 0
 
     op_module = get_view_op_module(_paged_attn_prefill_op_module, view_recipes)
-    return _dispatch_custom_kernel(op_module, view_args, view_recipes)
+    return _dispatch_custom_kernel(op_module, view_args)
 
 
 class custom_rbln_paged_attn_decode(torch.nn.Module):
@@ -177,7 +170,7 @@ def paged_attn_decode_rbln(*args, **kwargs):
     assert args[0].size(-1) % 64 == 0
 
     op_module = get_view_op_module(_paged_attn_decode_op_module, view_recipes)
-    return _dispatch_custom_kernel(op_module, view_args, view_recipes)
+    return _dispatch_custom_kernel(op_module, view_args)
 
 
 class custom_rbln_paged_causal_attn_prefill(torch.nn.Module):
@@ -231,7 +224,7 @@ def paged_causal_attn_prefill_rbln(*args, **kwargs):
     assert args[0].size(-1) % 64 == 0
 
     op_module = get_view_op_module(_paged_causal_attn_prefill_op_module, view_recipes)
-    return _dispatch_custom_kernel(op_module, view_args, view_recipes)
+    return _dispatch_custom_kernel(op_module, view_args)
 
 
 class custom_rbln_paged_causal_attn_decode(torch.nn.Module):
@@ -278,7 +271,7 @@ def paged_causal_attn_decode_rbln(*args, **kwargs):
     assert args[0].size(-1) % 64 == 0
 
     op_module = get_view_op_module(_paged_causal_attn_decode_op_module, view_recipes)
-    return _dispatch_custom_kernel(op_module, view_args, view_recipes)
+    return _dispatch_custom_kernel(op_module, view_args)
 
 
 class custom_rbln_flash_attention_naive_prefill(torch.nn.Module):
@@ -322,7 +315,7 @@ def flash_attention_naive_prefill_rbln(*args, **kwargs):
     assert args[0].size(-1) % 64 == 0
 
     op_module = get_view_op_module(_flash_attention_naive_prefill_op_module, view_recipes)
-    return _dispatch_custom_kernel(op_module, view_args, view_recipes)
+    return _dispatch_custom_kernel(op_module, view_args)
 
 
 class custom_rbln_flash_attention_naive_decode(torch.nn.Module):
@@ -360,7 +353,7 @@ def flash_attention_naive_decode_rbln(*args, **kwargs):
     assert args[0].size(-1) % 64 == 0
 
     op_module = get_view_op_module(_flash_attention_naive_decode_op_module, view_recipes)
-    return _dispatch_custom_kernel(op_module, view_args, view_recipes)
+    return _dispatch_custom_kernel(op_module, view_args)
 
 
 def _materialize(t: torch.Tensor) -> torch.Tensor:
