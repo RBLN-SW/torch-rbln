@@ -96,7 +96,12 @@ class OpFunction {
   std::shared_ptr<rt::HostTensor> encoded(size_t arg) const;
   // A host tensor of arg `arg` encoded from the value of `tensor`, or none if it is not the arg's.
   std::shared_ptr<rt::HostTensor> encoded(const at::Tensor& tensor, size_t arg) const;
-  void bind_state(Slot& slot, size_t arg, const rt::HostTensor& host) const;
+  // `args` with the state args that share pools of pages with them, which a
+  // device holds in one buffer with them.
+  std::vector<size_t> with_page_sharers(std::vector<size_t> args) const;
+  // Binds state `args` of each of `slots` to new tensors on its device that
+  // hold the state now, encoding each arg once.
+  void bind_state(const std::vector<Slot*>& slots, const std::vector<size_t>& args) const;
   Slot& slot(c10::DeviceIndex device_index);
 
   std::shared_ptr<rt::Function> fn_;

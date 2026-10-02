@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstring>
 #include <numeric>
+#include <set>
 #include <stdexcept>
 
 namespace torch_rbln {
@@ -229,10 +230,49 @@ std::shared_ptr<rt::HostTensor> OpFunction::encoded(const at::Tensor& tensor, si
   return host;
 }
 
-void OpFunction::bind_state(Slot& slot, size_t index, const rt::HostTensor& host) const {
-  auto on_device = fn_->emptyLike(index, {slot.device});
-  rt::copy(*on_device, host);
-  slot.executor->bind(fn_->artifact().args[index].name, rt::Binding(std::move(on_device)));
+std::vector<size_t> OpFunction::with_page_sharers(std::vector<size_t> args) const {
+  const auto& f = fn_->artifact();
+  std::set<size_t> pools;
+  for (const auto index : args) {
+    for (uint32_t shard = 0; shard < f.args[index].shards.size(); ++shard) {
+      if (auto pooled = fn_->poolOf(index, shard)) {
+        pools.insert(pooled->first);
+      }
+    }
+  }
+  for (const auto pool : pools) {
+    for (const auto& member : f.pools[pool].members) {
+      bool state = std::find(state_args_.begin(), state_args_.end(), member.arg) != state_args_.end();
+      if (state && std::find(args.begin(), args.end(), member.arg) == args.end()) {
+        args.push_back(member.arg);
+      }
+    }
+  }
+  return args;
+}
+
+void OpFunction::bind_state(const std::vector<Slot*>& slots, const std::vector<size_t>& args) const {
+  if (args.empty()) {
+    return;
+  }
+  std::vector<std::vector<std::shared_ptr<rt::Tensor>>> on_device;
+  for (auto* slot : slots) {
+    on_device.push_back(fn_->emptyLike(args, {slot->device}));
+  }
+  for (size_t k = 0; k < args.size(); ++k) {
+    auto host = encoded(args[k]);
+    for (auto& tensors : on_device) {
+      rt::copy(*tensors[k], *host);
+    }
+  }
+  for (size_t i = 0; i < slots.size(); ++i) {
+    std::vector<std::pair<std::string, rt::Binding>> bound;
+    for (size_t k = 0; k < args.size(); ++k) {
+      bound.emplace_back(fn_->artifact().args[args[k]].name, rt::Binding(on_device[i][k]));
+    }
+    std::lock_guard<std::mutex> slot_lock(slots[i]->mutex);
+    slots[i]->executor->bind(bound);
+  }
 }
 
 void OpFunction::set_state(const std::map<std::string, at::Tensor>& values) {
@@ -243,17 +283,18 @@ void OpFunction::set_state(const std::map<std::string, at::Tensor>& values) {
     it->second = value.cpu().contiguous();
   }
   const auto& args = fn_->artifact().args;
+  std::vector<size_t> changed;
   for (const auto index : state_args_) {
     const auto& sources = args[index].sources;
-    if (std::none_of(sources.begin(), sources.end(), [&](const auto& source) { return values.count(source) != 0; })) {
-      continue;
-    }
-    auto host = encoded(index);
-    for (auto& [device_index, slot] : slots_) {
-      std::lock_guard<std::mutex> slot_lock(slot->mutex);
-      bind_state(*slot, index, *host);
+    if (std::any_of(sources.begin(), sources.end(), [&](const auto& source) { return values.count(source) != 0; })) {
+      changed.push_back(index);
     }
   }
+  std::vector<Slot*> slots;
+  for (auto& [device_index, slot] : slots_) {
+    slots.push_back(slot.get());
+  }
+  bind_state(slots, with_page_sharers(std::move(changed)));
 }
 
 OpFunction::Slot& OpFunction::slot(c10::DeviceIndex device_index) {
@@ -265,9 +306,7 @@ OpFunction::Slot& OpFunction::slot(c10::DeviceIndex device_index) {
   auto slot = std::make_unique<Slot>();
   slot->device = c10::rbln::runtime_device(device_index);
   slot->executor = std::make_shared<rt::Executor>(fn_, std::vector{slot->device}, kBindCache);
-  for (const auto index : state_args_) {
-    bind_state(*slot, index, *encoded(index));
-  }
+  bind_state({slot.get()}, state_args_);
   entry = std::move(slot);
   return *entry;
 }
