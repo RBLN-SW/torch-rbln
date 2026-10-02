@@ -8,7 +8,8 @@
 #   REBEL_ABI_SCRIPT       - rbln/cmake/RblnAbi.cmake, which computes the ABI id of the headers
 #
 # REBEL_HOME names a rebel-compiler tree built with rbln: headers in rbln/include and libraries
-# in build/rbln.
+# in build/rbln. Without it, the rbln package a rebel-compiler wheel installed for Python3 serves,
+# through its CMake package.
 
 cmake_minimum_required(VERSION 3.18 FATAL_ERROR)
 
@@ -16,9 +17,33 @@ include(FindPackageHandleStandardArgs)
 
 set(_REBEL_HOME "$ENV{REBEL_HOME}")
 if(NOT _REBEL_HOME)
-  message(FATAL_ERROR
-    "FindRebel: set REBEL_HOME to a rebel-compiler tree built with rbln "
-    "(headers in rbln/include, libraries in build/rbln).")
+  execute_process(
+    COMMAND ${Python3_EXECUTABLE} -m rbln.cmake
+    OUTPUT_VARIABLE _rbln_config_dir
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_VARIABLE _rbln_config_error
+    RESULT_VARIABLE _rbln_config_missing)
+  if(_rbln_config_missing)
+    message(FATAL_ERROR
+      "FindRebel: set REBEL_HOME to a rebel-compiler tree built with rbln (headers in "
+      "rbln/include, libraries in build/rbln), or install the rebel-compiler wheel: "
+      "${_rbln_config_error}")
+  endif()
+  find_package(rbln CONFIG REQUIRED PATHS "${_rbln_config_dir}" NO_DEFAULT_PATH)
+  set(REBEL_FOUND TRUE)
+  set(REBEL_INCLUDE_DIRS ${rbln_INCLUDE_DIRS})
+  set(REBEL_LIBRARIES rbln::rt rbln::artifact)
+  set(REBEL_ABI_SCRIPT ${rbln_ABI_SCRIPT})
+  message(STATUS "FindRebel: the installed rbln in ${rbln_LIBRARY_DIR}")
+  # torch_rbln/lib and rbln/lib sit side by side in site-packages.
+  set(REBEL_RUNTIME_RELDIR "rbln/lib")
+  list(APPEND CMAKE_BUILD_RPATH ${rbln_LIBRARY_DIR})
+  list(APPEND CMAKE_INSTALL_RPATH "$ORIGIN/../../${REBEL_RUNTIME_RELDIR}")
+  unset(_rbln_config_dir)
+  unset(_rbln_config_error)
+  unset(_rbln_config_missing)
+  unset(_REBEL_HOME)
+  return()
 endif()
 set(rebel_library_path "${_REBEL_HOME}/build/rbln")
 
