@@ -45,6 +45,11 @@ def finalize_output_tensor(
     Ensure `out_tensor` has the correct shape, storage, and metadata to match
     `result` and `result_shape`, handling both resizing and data movement.
     """
+    # An output that holds no memory yet takes the result's instead of a copy of it.
+    if tuple(result.shape) == tuple(result_shape) and _takes_storage_of(out_tensor, result, args, kwargs):
+        out_tensor.set_(result)
+        return
+
     # 1) Resize if shape mismatches
     if out_tensor.shape != result_shape:
         # Warn if tensor had existing elements
@@ -55,6 +60,19 @@ def finalize_output_tensor(
     # 2) Reconcile storage: copy or replace
     if result.data_ptr() != out_tensor.data_ptr():
         out_tensor.copy_(result)
+
+
+def _takes_storage_of(out_tensor: torch.Tensor, result: torch.Tensor, args: tuple, kwargs: dict) -> bool:
+    """Whether `out_tensor`, which holds no memory yet, can take the memory of `result`, a
+    contiguous tensor of its dtype and device that no input shares."""
+    if out_tensor.untyped_storage().nbytes() != 0 or result.untyped_storage().nbytes() == 0:
+        return False
+    if out_tensor.dtype != result.dtype or out_tensor.device != result.device or not result.is_contiguous():
+        return False
+    held = result.untyped_storage().data_ptr()
+    given = [*args, *(v for k, v in kwargs.items() if k != "out")]
+    inputs = [t for v in given for t in (v if isinstance(v, (list, tuple)) else [v]) if isinstance(t, torch.Tensor)]
+    return all(t.untyped_storage().data_ptr() != held for t in inputs)
 
 
 def _make_contig(obj):
