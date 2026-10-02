@@ -6,6 +6,7 @@
 #include <rbln/runtime/executor.h>
 #include <torch/csrc/utils/pybind.h>
 
+#include <atomic>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -48,6 +49,11 @@ class OpFunction {
   }
   const std::vector<Output>& outputs() const {
     return outputs_;
+  }
+  // When the function last ran, on a clock of the process that every run of an
+  // OpFunction moves; zero before its first run.
+  uint64_t last_run() const {
+    return last_run_.load(std::memory_order_relaxed);
   }
 
   /**
@@ -114,6 +120,7 @@ class OpFunction {
   std::mutex slots_mutex_;
   std::map<std::string, at::Tensor> state_values_;
   std::map<c10::DeviceIndex, std::unique_ptr<Slot>> slots_;
+  std::atomic<uint64_t> last_run_{0};
 };
 
 void init_op_function_bindings(pybind11::module& module);

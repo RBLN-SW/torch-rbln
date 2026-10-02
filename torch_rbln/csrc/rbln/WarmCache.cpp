@@ -124,4 +124,19 @@ void WarmCache::clear(std::optional<c10::DeviceIndex> device) {
   }
 }
 
+void WarmCache::forget(const OpFunction* function) {
+  std::vector<std::shared_ptr<CacheEntry>> dropped;
+  {
+    std::unique_lock<std::shared_mutex> wr(mu_);
+    for (auto it = map_.begin(); it != map_.end();) {
+      if (it->second->function.get() == function) {
+        dropped.push_back(std::move(it->second));
+        it = map_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+}
+
 } // namespace torch_rbln::warmcache

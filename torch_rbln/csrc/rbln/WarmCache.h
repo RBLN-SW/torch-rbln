@@ -12,8 +12,8 @@
 //     value). Shape/dtype/device changes produce a different key and miss.
 //
 // Process-global; reads take a shared lock (hot path), writes an exclusive
-// one. No eviction; entries leave only through ``clear`` (all of them, or one
-// device's).
+// one. Entries leave through ``clear`` (all of them, or one device's) and
+// ``forget`` (those of a function the compiled op cache lets go of).
 
 #include <ATen/core/ScalarType.h>
 #include <c10/core/Device.h>
@@ -151,6 +151,8 @@ class WarmCache {
   // device is given. An entry with no device input is dropped only by the
   // latter; no shim op has one today (each takes at least one input tensor).
   void clear(std::optional<c10::DeviceIndex> device = std::nullopt);
+  // Drop the entries that run ``function``.
+  void forget(const OpFunction* function);
 
  private:
   WarmCache() = default;

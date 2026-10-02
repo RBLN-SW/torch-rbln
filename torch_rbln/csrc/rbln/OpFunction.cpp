@@ -7,6 +7,7 @@
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNRuntime.h>
 #include <rbln/artifact/file.h>
+#include <rbln/runtime/flags.h>
 
 #include <algorithm>
 #include <cstring>
@@ -23,6 +24,21 @@ namespace artifact = ::rbln::artifact;
 // Recent bindings an executor keeps its program patched for; an eager op meets the same
 // few blocks of the caching allocator again and again.
 constexpr size_t kBindCache = 8;
+
+std::atomic<uint64_t> run_clock{0};
+
+const rt::Flag<int64_t> kCompiledOps(
+    "TORCH_RBLN_COMPILED_OPS",
+    "The ops compiled for profiles of their arguments a process keeps, letting go of the least "
+    "recently run past them, with their device memory and programs.",
+    2048,
+    [](const std::string& raw) {
+      int64_t count = rt::parseInt(raw);
+      if (count < 1) {
+        throw std::invalid_argument("expected one or more");
+      }
+      return count;
+    });
 
 const char* dtype_name(at::ScalarType type) {
   switch (type) {
@@ -316,6 +332,7 @@ std::optional<std::vector<at::Tensor>> OpFunction::run(
     c10::ArrayRef<std::optional<at::Tensor>> out) {
   TORCH_CHECK(inputs.size() == num_inputs_, "the function takes ", num_inputs_, " tensors, not ", inputs.size());
   TORCH_CHECK(out.size() <= results_.size(), "the function has ", results_.size(), " results, not ", out.size());
+  last_run_.store(run_clock.fetch_add(1, std::memory_order_relaxed) + 1, std::memory_order_relaxed);
   c10::DeviceIndex device_index = -1;
   for (const auto& input : inputs) {
     if (input.defined() && input.device().is_privateuseone()) {
@@ -437,6 +454,7 @@ void init_op_function_bindings(pybind11::module& module) {
           py::arg("host_results") = std::vector<bool>{},
           "Internal: a compiled function run on torch tensors")
       .def_property_readonly("num_inputs", &OpFunction::num_inputs)
+      .def_property_readonly("last_run", &OpFunction::last_run)
       .def(
           "set_state",
           &OpFunction::set_state,

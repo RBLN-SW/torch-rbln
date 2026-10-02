@@ -9,12 +9,14 @@ compiler lays out otherwise goes through the host as the op runs. A tensor
 the op holds is state the function encodes as it lays it out. One function serves a
 module for each profile of its arguments: the shape and dtype of each tensor and
 the value of everything else. A function runs on any device of its NPU kind,
-with an executor per device.
+with an executor per device. The process keeps TORCH_RBLN_COMPILED_OPS of them,
+letting go of the least recently run, which compiles again when called.
 """
 
 from __future__ import annotations
 
 import functools
+import heapq
 import threading
 from typing import Any
 
@@ -26,7 +28,7 @@ import torch_rbln._C as _C
 
 
 _compiled_op_cache_lock = threading.Lock()
-_compiled_op_cache: dict[tuple[Any, ...], CompiledOp] = {}
+_compiled_op_cache: dict[tuple[Any, ...], CompiledOp | _Refused] = {}
 
 
 class _IdentityKey:
@@ -203,12 +205,33 @@ def compiled_op(module: Any, args: tuple, kwargs: dict, device: torch.device) ->
                     entry = _compile(module, args, kwargs, device.index)
                 except (NotImplementedError, ValueError, RuntimeError) as e:
                     entry = _Refused(e)
-                _compiled_op_cache[key] = entry
+                _keep(key, entry)
     if isinstance(entry, _Refused):
         import rbln
 
         raise UncompilableOp(str(entry.error), isinstance(entry.error, rbln.frontend.NoLowering)) from entry.error
     return entry
+
+
+def _last_run(entry: CompiledOp | _Refused) -> int:
+    return entry.function.last_run if isinstance(entry, CompiledOp) else 0
+
+
+def _keep(key: tuple[Any, ...], entry: CompiledOp | _Refused) -> None:
+    """Keeps ``entry`` under ``key``, letting go of the least recently run
+    entries past TORCH_RBLN_COMPILED_OPS, with what the warm cache holds of
+    them. The caller holds ``_compiled_op_cache_lock``."""
+    import rbln
+
+    _compiled_op_cache[key] = entry
+    excess = len(_compiled_op_cache) - rbln.flags.TORCH_RBLN_COMPILED_OPS
+    if excess <= 0:
+        return
+    others = (k for k in _compiled_op_cache if k != key)
+    for old in heapq.nsmallest(excess, others, key=lambda k: _last_run(_compiled_op_cache[k])):
+        dropped = _compiled_op_cache.pop(old)
+        if isinstance(dropped, CompiledOp):
+            _C._warmcache_forget(dropped.function)
 
 
 def run_op(module: Any, *args: Any, **kwargs: Any) -> Any:

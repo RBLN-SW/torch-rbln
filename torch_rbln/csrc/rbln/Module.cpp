@@ -342,6 +342,13 @@ void register_internal_api(py::module_& module) {
       "Internal: drop the warm-cache entries whose inputs live on `device`, or "
       "all of them when device is None",
       pybind11::arg("device") = pybind11::none());
+  module.def(
+      "_warmcache_forget",
+      [](const std::shared_ptr<torch_rbln::OpFunction>& function) {
+        torch_rbln::warmcache::WarmCache::instance().forget(function.get());
+      },
+      "Internal: drop the warm-cache entries that run `function`",
+      pybind11::arg("function"));
 
   // CPU fast-path registry introspection. Returns True iff a handler is
   // registered for the given fully-qualified op name (e.g. "aten::rsqrt.out").
