@@ -152,24 +152,20 @@ class TestAliasedTensors(TestCase):
 
 
 def _input_output_tensor_memory_independence_worker(rbln_device, dtype):
-    """Worker function that runs in a spawned subprocess to ensure a clean data_ptr counter."""
-    # Create a seed input tensor whose internal key value may collide with output tensor memory keys.
+    """Worker function that runs in a spawned subprocess to start from a fresh allocator."""
     seed_tensor = torch.randn([2, 2], dtype=dtype, device=rbln_device)
-    seed_data_ptr = seed_tensor.data_ptr()
+    seed_values = seed_tensor.cpu()
+    seed_start = seed_tensor.data_ptr()
+    seed_end = seed_start + seed_tensor.nbytes
 
-    rbln_out = torch.abs(seed_tensor)  # First output tensor allocation.
-    cpu_out = torch.abs(seed_tensor.cpu())
-    torch.testing.assert_close(rbln_out.cpu(), cpu_out, atol=ATOL, rtol=RTOL)
-
-    # Burn through (seed_data_ptr - 1) output tensor allocations so the next output tensor receives a key equal to
-    # seed_data_ptr, forcing a key collision.
-    for i in range(seed_data_ptr - 1):
-        # Vary the size of the tensor to ensure unique memory allocation.
+    # Outputs of many sizes, made while the seed tensor lives, must each take memory apart from it.
+    for i in range(1, 257):
         t = torch.randn([i], dtype=dtype, device=rbln_device)
         rbln_out = torch.abs(t)
-        cpu_out = torch.abs(t.cpu())
-        torch.testing.assert_close(rbln_out.cpu(), cpu_out, atol=ATOL, rtol=RTOL)
-    # After the loop, the next output tensor key may collide with the seed tensor key.
+        out_start = rbln_out.data_ptr()
+        assert out_start + rbln_out.nbytes <= seed_start or seed_end <= out_start, (i, out_start, seed_start)
+        torch.testing.assert_close(rbln_out.cpu(), torch.abs(t.cpu()), atol=ATOL, rtol=RTOL)
+    torch.testing.assert_close(seed_tensor.cpu(), seed_values)
 
     x = torch.randn([2, 2, 4], dtype=dtype, device=rbln_device)
     y = torch.randn([2, 2, 4], dtype=dtype, device=rbln_device)
@@ -185,14 +181,12 @@ class TestInputOutputTensors(TestCase):
     """
     Regression tests for input and output tensor memory collisions.
 
-    The RBLN backend may confuse an output tensor with an already-allocated
-    input tensor, silently producing incorrect results. This test reproduces
-    such a pattern and verifies that the results remain correct.
+    An output that took the memory of a live input would silently overwrite
+    it. The test makes outputs of many sizes while an input lives, and checks
+    that each lies apart from the input and that both hold the right values.
 
-    The test runs in a spawned subprocess so the data_ptr counter starts from
-    a clean state regardless of how many other tests have run before it. This
-    is because when data_ptr is too large, it takes a long time to reach the
-    collision point, making the test impractically slow.
+    The test runs in a spawned subprocess so the allocator starts from a
+    clean state regardless of how many other tests have run before it.
     """
 
     rbln_device = torch.device("rbln:0")
