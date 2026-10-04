@@ -685,6 +685,47 @@ void set_device_layout_like(void* target_data, const void* ref_data) {
       !::rbln::rbln_set_device_alloc_layout_like(target_vaddr, ref_vaddr), "rbln_set_device_alloc_layout_like failed");
 }
 
+bool host_register(c10::DeviceIndex device_index, const void* host_ptr, size_t nbytes) {
+  RBLN_CHECK(host_ptr != nullptr, "host_register: host_ptr is nullptr");
+  RBLN_CHECK(nbytes > 0, "host_register: nbytes must be positive, but got {}", nbytes);
+  require_runtime("register host memory");
+  check_device_index(device_index);
+  // Commits the device mapping, which creates the context the range is registered with.
+  const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
+  const auto addr = reinterpret_cast<uintptr_t>(host_ptr);
+  if (!::rbln::rbln_host_register_supported(torch_device_id)) {
+    RBLN_LOG_WARN("host_register: rbln:{} does not support host registration", static_cast<int>(device_index));
+    return false;
+  }
+  // A refusal only loses the optimization, so warn rather than raise.
+  if (::rbln::rbln_host_register(torch_device_id, addr, static_cast<uint64_t>(nbytes)) != RBLNRetCode_SUCCESS) {
+    RBLN_LOG_WARN(
+        "host_register: rbln:{} refused [{:#x}, +{}); see the runtime log",
+        static_cast<int>(device_index),
+        addr,
+        nbytes);
+    return false;
+  }
+  RBLN_LOG_DEBUG("host_register: rbln:{} [{:#x}, +{})", static_cast<int>(device_index), addr, nbytes);
+  return true;
+}
+
+void host_unregister(c10::DeviceIndex device_index, const void* host_ptr) {
+  RBLN_CHECK(host_ptr != nullptr, "host_unregister: host_ptr is nullptr");
+  if (runtime_torn_down()) {
+    return;
+  }
+  check_device_index(device_index);
+  const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
+  const auto addr = reinterpret_cast<uintptr_t>(host_ptr);
+  RBLN_LOG_DEBUG("host_unregister: rbln:{} {:#x}", static_cast<int>(device_index), addr);
+  RBLN_CHECK(
+      !::rbln::rbln_host_unregister(torch_device_id, addr),
+      "rbln_host_unregister failed for {:#x} on rbln:{}; see the runtime log",
+      addr,
+      static_cast<int>(device_index));
+}
+
 void memcpy_h2v(void* rbln_dst_data, const void* cpu_src_data, size_t nbytes) {
   RtTimer _rt(RT_H2V);
   RBLN_LOG_DEBUG(
