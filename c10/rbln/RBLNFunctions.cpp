@@ -721,29 +721,22 @@ size_t page_rounded(size_t nbytes) {
   return (nbytes + kHostPage - 1) / kHostPage * kHostPage;
 }
 
-// Runs one job of the copies `add` puts on it on the current stream of `device_index`, after
+// Runs the copies `add` gathers as one job on the current stream of `device_index`, after
 // what is queued there and on the current streams of the devices of `after`; returns once
 // it is done.
-void run_copy_job(
+void run_copies(
     c10::DeviceIndex device_index,
     const std::set<c10::DeviceIndex>& after,
-    const std::function<void(rt::Device::Job&)>& add) {
+    const std::function<void(rt::Device::Copies&)>& add) {
   for (const auto other : after) {
     if (other != device_index) {
       on_current_stream(other, [] {});
     }
   }
   auto device = runtime_device(device_index);
-  runtime_stream(get_current_stream(device_index))->run([&](rt::Work& work) {
-    auto job = std::make_unique<rt::Device::Job>(*device);
-    job->name("copy");
-    add(*job);
-    work.submit(std::move(job));
-  });
-}
-
-uint64_t address_of(const Location& location) {
-  return location.buffer->address() + location.offset;
+  rt::Device::Copies copies;
+  add(copies);
+  on_current_stream(device_index, [&] { device->copy(copies); });
 }
 
 void v2v_batch(const std::vector<V2VCopyOp>& copies) {
@@ -768,9 +761,9 @@ void v2v_batch(const std::vector<V2VCopyOp>& copies) {
     for (const auto& c : group) {
       sources.insert(c.src.device_index);
     }
-    run_copy_job(device_index, sources, [&](rt::Device::Job& job) {
+    run_copies(device_index, sources, [&](rt::Device::Copies& batch) {
       for (const auto& c : group) {
-        job.onDevice(address_of(c.dst), *c.src.buffer->device(), address_of(c.src), c.nbytes);
+        batch.onDevice(*c.dst.buffer, c.dst.offset, *c.src.buffer, c.src.offset, c.nbytes);
       }
     });
   }
@@ -792,11 +785,11 @@ void h2v_batch(const std::vector<H2VCopyOp>& copies) {
       total += page_rounded(c->nbytes);
     }
     auto staging = rt::HostBuffer::allocate(total);
-    run_copy_job(device_index, {}, [&](rt::Device::Job& job) {
+    run_copies(device_index, {}, [&](rt::Device::Copies& batch) {
       size_t offset = 0;
       for (const auto& [dst, c] : group) {
         std::memcpy(staging->data() + offset, c->src, c->nbytes);
-        job.toDevice(address_of(dst), staging->data() + offset, c->nbytes);
+        batch.toDevice(*dst.buffer, dst.offset, staging->data() + offset, c->nbytes);
         offset += page_rounded(c->nbytes);
       }
     });
@@ -817,10 +810,10 @@ void v2h_batch(const std::vector<V2HCopyOp>& copies) {
       total += page_rounded(c->nbytes);
     }
     auto staging = rt::HostBuffer::allocate(total);
-    run_copy_job(device_index, {}, [&](rt::Device::Job& job) {
+    run_copies(device_index, {}, [&](rt::Device::Copies& batch) {
       size_t offset = 0;
       for (const auto& [src, c] : group) {
-        job.toHost(staging->data() + offset, address_of(src), c->nbytes);
+        batch.toHost(staging->data() + offset, *src.buffer, src.offset, c->nbytes);
         offset += page_rounded(c->nbytes);
       }
     });
