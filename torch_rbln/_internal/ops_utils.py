@@ -20,6 +20,13 @@ class SupportedDtypes:
     amp: tuple[torch.dtype, ...] = _C._amp_dtypes()
 
 
+def dispatches(dtype: torch.dtype) -> bool:
+    """Whether eager ops over ``dtype`` run on the device: those of
+    ``SupportedDtypes.dispatch``, and float32 while the process computes float32
+    as the NPU computes floats, in dlfloat16 (``rbln.set_float32_precision``)."""
+    return _C._dispatches(dtype)
+
+
 def _estimate_mm_shape(shape1, shape2):
     if len(shape1) != 2 or len(shape2) != 2:
         raise RuntimeError("mm input shape is invalid")
@@ -1787,7 +1794,7 @@ def is_cpu_fallback_cases(args):
        then runs the original torch.add eagerly; that eager call dispatches again and hits our add_rbln
        -> same path repeats -> infinite recursion. So when TorchDispatchMode is on, we fall back to CPU
        and never enter the compile path.
-    2. **Unsupported or Mismatched Data Types**: If any input tensor's dtype is not in ``SupportedDtypes.dispatch``,
+    2. **Unsupported or Mismatched Data Types**: If any input tensor's dtype is not one ``dispatches`` admits,
        or if the inputs mix different supported dtypes. The RBLN compute path requires all tensors to share the
        same supported dtype.
     3. **Scalar Tensors**: If all input tensors are scalar tensors, rebel-compiler falls back to host ops.
@@ -1833,7 +1840,7 @@ def is_cpu_fallback_cases(args):
     # 2: fall back to the CPU if any input tensor has an unsupported dtype, or if input tensors have mismatched dtypes
     if "dtype" not in disabled_cases:
         first_dtype = tensor_args[0].dtype
-        if first_dtype not in SupportedDtypes.dispatch:
+        if not dispatches(first_dtype):
             return True
         for i in range(1, len(tensor_args)):
             if tensor_args[i].dtype != first_dtype:
@@ -1952,7 +1959,7 @@ def can_use_out_tensor_directly(args: tuple, kwargs: dict) -> bool:
     2. Tensor is neither empty nor scalar
     3. Tensor is contiguous
     4. Tensor has zero storage offset
-    5. dtype is in ``SupportedDtypes.dispatch``
+    5. ``dispatches`` admits its dtype
 
     Args:
         args (tuple): Positional arguments for in-place operation check.
@@ -1970,7 +1977,7 @@ def can_use_out_tensor_directly(args: tuple, kwargs: dict) -> bool:
         and ((out_tensor.numel() > 0) and len(out_tensor.size()) > 0)
         and out_tensor.is_contiguous()
         and (out_tensor.storage_offset() == 0)
-        and out_tensor.dtype in SupportedDtypes.dispatch
+        and dispatches(out_tensor.dtype)
     )
 
 

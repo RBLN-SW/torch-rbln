@@ -16,6 +16,7 @@ inline void hash_combine_size_t(std::size_t& seed, std::size_t v) {
 
 std::size_t CacheKeyHash::operator()(const CacheKey& k) const noexcept {
   std::size_t h = std::hash<const void*>{}(static_cast<const void*>(k.schema_name_intern));
+  hash_combine_size_t(h, std::hash<uint8_t>{}(static_cast<uint8_t>(k.float32_precision)));
   for (const auto& in : k.inputs) {
     hash_combine_size_t(h, std::hash<int>{}(static_cast<int>(in.dtype)));
     hash_combine_size_t(h, std::hash<int>{}(in.device_index));

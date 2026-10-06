@@ -121,6 +121,26 @@ The value is a **comma-separated list** of fallback case names to disable:
 | `nan_inf`        | Falls back when inputs contain NaN or Inf (non-deploy mode only) | Skips the NaN/Inf scan — invalid values reach the device      |
 | `all`            | —                                                                | Disables **all** of the above checks                          |
 
+## Float32 Precision
+
+The NPU computes floats in dlfloat16 (1 sign, 6 exponent and 9 mantissa bits, about three decimal digits). `RBLN_FLOAT32_PRECISION` picks how eager ops over fp32 tensors run, and `rbln.set_float32_precision()` sets it for the rest of the process:
+
+| Value              | Eager fp32 ops                                                               |
+|--------------------|-------------------------------------------------------------------------------|
+| `device` (default) | Run on the NPU, which computes them in dlfloat16; a warning says so once per process |
+| `exact`            | Fall back to CPU, which computes them as fp32                                 |
+
+```bash
+export RBLN_FLOAT32_PRECISION=exact
+```
+
+```python
+import rbln
+rbln.set_float32_precision("exact")
+```
+
+The same precision applies to what `torch.compile` builds for an rbln device: under `exact` the compiler keeps the fp32 ops of a graph on the host. fp16 and bf16 ops run on the NPU under either.
+
 ## Device Mapping
 
 By default, each physical NPU is mapped 1:1 to a logical device (**Direct Mapping**). To group multiple physical NPUs into a single logical device for RSD (Rebellions Scalable Design), use one of the following environment variables.
@@ -222,9 +242,10 @@ export RBLN_DUMMY_DEVICE=1 RBLN_DEVICE_MAP="[0,1],[2,3]"   # 2 logical devices, 
   dummy is not guaranteed to be valid on a specific machine.
 - **Scope**: device tensor construction, host/device copies, and compile-only
   `torch.compile` (building artifacts). Anything that must run on the NPU raises a
-  clear error — a compiled graph, or an eager op on a device dtype (fp16/bf16) — since
-  there is no NPU to run it. Host-side ops (e.g. fp32, which never runs on the NPU even
-  with real hardware) fall back to CPU exactly as they would on a real device.
+  clear error — a compiled graph, or an eager op on a device dtype (fp16/bf16, and fp32
+  under the default float32 precision) — since there is no NPU to run it. Host-side ops
+  (e.g. int64, or fp32 under `RBLN_FLOAT32_PRECISION=exact`) fall back to CPU exactly as
+  they would on a real device.
   Distributed collectives still require real hardware. Memory-stat APIs
   (`memory_stats`, `memory_allocated`, ...) count the host-backed blocks the caching
   allocator hands out, with the same rounding and caching as on a device, while

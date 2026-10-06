@@ -67,11 +67,13 @@ class TestCpuFallbackIsLogged(TestCase):
         return p.stdout + p.stderr
 
     def test_shim_op_dtype_fallback_is_logged(self):
-        """fp32 is outside the dispatch dtype catalog, so ``add`` falls back in the
-        shim's pre-check, before Python is reached. Fails without the fix: the
-        values are right and nothing is logged."""
+        """Exact fp32 runs on the CPU, so ``add`` falls back in the shim's pre-check,
+        before Python is reached. Fails without the fix: the values are right and
+        nothing is logged."""
         p = self._run(
             """
+            import rbln
+            rbln.set_float32_precision("exact")
             a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32, device="rbln")
             b = torch.tensor([4.0, 5.0, 6.0], dtype=torch.float32, device="rbln")
             assert (a + b).cpu().tolist() == [5.0, 7.0, 9.0]
@@ -83,9 +85,11 @@ class TestCpuFallbackIsLogged(TestCase):
 
     def test_fallback_log_stays_off_by_default(self):
         """The line is INFO, so the default (WARNING) keeps it out of a user's console.
-        Pins the level: raising it to WARNING would make every fp32 workload noisy."""
+        Pins the level: raising it to WARNING would make every exact fp32 workload noisy."""
         p = self._run(
             """
+            import rbln
+            rbln.set_float32_precision("exact")
             a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32, device="rbln")
             assert (a + a).cpu().tolist() == [2.0, 4.0, 6.0]
             """,

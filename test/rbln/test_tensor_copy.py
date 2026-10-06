@@ -386,17 +386,25 @@ class TestToOps(TestCase):
 
         It compares the result of two paths:
         1.  CPU Fallback Path: The CF16 tensor is cast to float32 on the RBLN
-            device, and a matrix multiplication is performed on RBLN.
+            device, and a matrix multiplication at the exact float32 precision
+            falls back to the CPU.
         2.  CPU Offloading Path: The CF16 tensor is first moved to the CPU,
             then cast to float32, and the matrix multiplication is performed on CPU.
 
         The final outputs from both paths should be numerically close.
         """
+        import rbln
+
         a = torch.randn([2, 1024], dtype=torch.float16, device="rbln")
         a = a @ a.t()  # To make custom_float16
 
-        out_cpu_fallback = a.to(torch.float32)
-        out_cpu_fallback = out_cpu_fallback @ out_cpu_fallback
+        before = rbln.float32_precision()
+        rbln.set_float32_precision("exact")
+        try:
+            out_cpu_fallback = a.to(torch.float32)
+            out_cpu_fallback = out_cpu_fallback @ out_cpu_fallback
+        finally:
+            rbln.set_float32_precision(before)
 
         out_cpu_offloading = a.to("cpu")
         out_cpu_offloading = out_cpu_offloading.to(torch.float32)

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <c10/core/ScalarType.h>
+#include <c10/rbln/RBLNMacros.h>
 
 #include <array>
 
@@ -32,5 +33,10 @@ constexpr bool is_dispatch_dtype(c10::ScalarType s) noexcept {
   }
   return false;
 }
+
+// Whether eager ops over `s` run on the device: the dispatch catalog, and
+// float32 while the process computes float32 as the NPU computes floats, in
+// dlfloat16 (rbln.set_float32_precision). Ops over any other dtype run on the CPU.
+C10_RBLN_API bool dispatches(c10::ScalarType s);
 
 } // namespace c10::rbln

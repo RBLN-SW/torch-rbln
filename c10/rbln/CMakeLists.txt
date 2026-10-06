@@ -13,6 +13,7 @@ set(sources
   RBLNPinnedAllocator.cpp
   RBLNProfiler.cpp
   RBLNRuntime.cpp
+  RBLNSupportedDtypes.cpp
   RBLNV2VBatch.cpp
 )
 set(headers

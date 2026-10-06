@@ -385,7 +385,7 @@ def copy_strided_view_rbln(src, out) -> bool:
     result = compile_and_run_view_aware(_materialize, "torch_rbln::copy_strided_view", (src,), {}, out)
     if result is not None and result.data_ptr() != out.data_ptr():
         # The compile path only writes the caller's buffer for dtypes in
-        # SupportedDtypes.dispatch; otherwise it hands back its own. Both are contiguous
+        # dtypes ``dispatches`` admits; otherwise it hands back its own. Both are contiguous
         # here, so this lands on copy_'s direct memcpy and cannot recurse.
         out.copy_(result)
     return True

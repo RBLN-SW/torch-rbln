@@ -42,6 +42,8 @@ def _clean_env() -> dict:
       - RBLN_FORCE_NPU_NAME / RBLN_DEVICES: both feed get_npu_name() and thus the
         resolved compile target; a parent-set value would flip the no-NPU cases
         below. Tests set these explicitly via ``env_extra`` when they need them.
+      - RBLN_FLOAT32_PRECISION: decides whether an fp32 op is a device or a host op;
+        tests set it via ``env_extra`` when they need the exact one.
     """
     env = dict(os.environ)
     for key in (
@@ -50,6 +52,7 @@ def _clean_env() -> dict:
         "RBLN_NPUS_PER_DEVICE",
         "RBLN_FORCE_NPU_NAME",
         "RBLN_DEVICES",
+        "RBLN_FLOAT32_PRECISION",
     ):
         env.pop(key, None)
     return env
@@ -308,12 +311,13 @@ def test_torch_compile_tracing_smoke():
         """
         import torch, torch_rbln
         def backend(gm, example_inputs):
-            return gm.forward  # eager replay; ops fall back to CPU in dummy mode
+            return gm.forward  # eager replay; exact fp32 ops fall back to CPU in dummy mode
         f = torch.compile(lambda x: x * 2 + 1, backend=backend, fullgraph=True)
         x = torch.ones(4, device="rbln:0")
         assert f(x).cpu().tolist() == [3.0, 3.0, 3.0, 3.0]
         print("OK")
-        """
+        """,
+        env_extra={"RBLN_FLOAT32_PRECISION": "exact"},
     )
     _assert_ok(proc)
     assert "OK" in proc.stdout
@@ -567,12 +571,13 @@ def test_compile_only_decorator_form_is_allowed():
 def test_eager_device_dtype_op_execution_fails_fast():
     # Eager ops that reach the RBLN device-compile path are NPU-bound, so on
     # RBLN_DUMMY_DEVICE they must fail fast like a compiled graph. Cover the axes that
-    # each route to that gate: both device dtypes (fp16/bf16), unary (softmax) and binary
-    # (add) ops, and aligned + unaligned last dims. All must raise.
+    # each route to that gate: the device dtypes (fp16/bf16, and fp32 at the default
+    # float32 precision), unary (softmax) and binary (add) ops, and aligned + unaligned
+    # last dims. All must raise.
     proc = _run_with_dummy(
         """
         import torch, torch_rbln
-        for dt in (torch.float16, torch.bfloat16):
+        for dt in (torch.float16, torch.bfloat16, torch.float32):
             for shape in [(4, 64), (4, 8)]:  # aligned and unaligned last dim
                 a = torch.ones(*shape, device="rbln:0", dtype=dt)
                 b = torch.ones(*shape, device="rbln:0", dtype=dt)
@@ -592,7 +597,7 @@ def test_eager_device_dtype_op_execution_fails_fast():
 
 
 def test_eager_host_dtype_op_runs_on_cpu():
-    # A host dtype (fp32) never runs on the NPU -- even on real hardware it CPU-falls-back.
+    # Exact fp32 never runs on the NPU -- even on real hardware it CPU-falls-back.
     # Dummy mode must keep that behavior (not reject it), so the result matches CPU.
     proc = _run_with_dummy(
         """
@@ -601,7 +606,7 @@ def test_eager_host_dtype_op_runs_on_cpu():
         assert (a + a).cpu().tolist() == [[2.0] * 8] * 4
         print("OK")
         """,
-        env_extra={"RBLN_DEVICE_MAP": _NO_NPU_MAP},
+        env_extra={"RBLN_DEVICE_MAP": _NO_NPU_MAP, "RBLN_FLOAT32_PRECISION": "exact"},
     )
     _assert_ok(proc)
     assert "OK" in proc.stdout

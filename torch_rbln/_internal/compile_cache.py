@@ -195,7 +195,9 @@ def compiled_op(module: Any, args: tuple, kwargs: dict, device: torch.device) ->
     Raises:
         UncompilableOp: the compiler refused this profile, now or on an earlier call.
     """
-    key = (_IdentityKey(module), _npu(device.index), _profile(args), _profile(kwargs))
+    import rbln
+
+    key = (_IdentityKey(module), _npu(device.index), rbln.float32_precision(), _profile(args), _profile(kwargs))
     entry = _compiled_op_cache.get(key)
     if entry is None:
         with _compiled_op_cache_lock:
@@ -207,8 +209,6 @@ def compiled_op(module: Any, args: tuple, kwargs: dict, device: torch.device) ->
                     entry = _Refused(e)
                 _keep(key, entry)
     if isinstance(entry, _Refused):
-        import rbln
-
         raise UncompilableOp(str(entry.error), isinstance(entry.error, rbln.frontend.NoLowering)) from entry.error
     return entry
 

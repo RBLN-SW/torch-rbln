@@ -344,15 +344,29 @@ class TestInternalOpUtils(TestCase):
         self.assertFalse(is_cpu_fallback_cases((bf16_tensor,)))
 
     def test_is_cpu_fallback_cases_dtype_unsupported(self):
-        """Unsupported dtype (e.g. ``float32``) falls back to CPU."""
-        unsupported_fp32_tensor = torch.tensor([1.0, 2.0], dtype=torch.float32, device="rbln")
-        self.assertTrue(is_cpu_fallback_cases((unsupported_fp32_tensor,)))
+        """Unsupported dtype (e.g. ``float64``) falls back to CPU."""
+        unsupported_fp64_tensor = torch.tensor([1.0, 2.0], dtype=torch.float64, device="rbln")
+        self.assertTrue(is_cpu_fallback_cases((unsupported_fp64_tensor,)))
+
+    def test_is_cpu_fallback_cases_float32_follows_the_precision(self):
+        """``float32`` runs on the device at the device precision and falls back at the exact one."""
+        import rbln
+
+        fp32_tensor = torch.tensor([1.0, 2.0], dtype=torch.float32, device="rbln")
+        before = rbln.float32_precision()
+        try:
+            rbln.set_float32_precision("device")
+            self.assertFalse(is_cpu_fallback_cases((fp32_tensor,)))
+            rbln.set_float32_precision("exact")
+            self.assertTrue(is_cpu_fallback_cases((fp32_tensor,)))
+        finally:
+            rbln.set_float32_precision(before)
 
     def test_is_cpu_fallback_cases_dtype_mixed_unsupported(self):
         """When any arg uses an unsupported dtype, fall back to CPU."""
         supported_fp16_tensor = torch.tensor([1.0, 2.0], dtype=torch.float16, device="rbln")
-        unsupported_fp32_tensor = torch.tensor([3.0, 4.0], dtype=torch.float32, device="rbln")
-        self.assertTrue(is_cpu_fallback_cases((supported_fp16_tensor, unsupported_fp32_tensor)))
+        unsupported_fp64_tensor = torch.tensor([3.0, 4.0], dtype=torch.float64, device="rbln")
+        self.assertTrue(is_cpu_fallback_cases((supported_fp16_tensor, unsupported_fp64_tensor)))
 
     def test_is_cpu_fallback_cases_dtype_mixed_supported(self):
         """``float16`` + ``bfloat16`` falls back even though each is individually supported:
@@ -888,8 +902,21 @@ class TestCpuFallbackOptionalTensor(TestCase):
     atol = 1e-3
     rtol = 1e-3
 
+    def setUp(self):
+        import rbln
+
+        super().setUp()
+        self._precision = rbln.float32_precision()
+        rbln.set_float32_precision("exact")
+
+    def tearDown(self):
+        import rbln
+
+        rbln.set_float32_precision(self._precision)
+        super().tearDown()
+
     def test_linear_fp32_with_bias_through_cpu_fallback(self):
-        # fp32 linear forces cpu_fallback (rbln eager only handles fp16).
+        # Exact float32 forces cpu_fallback.
         device = torch.device("rbln:0")
         weight = torch.randn(20, 10, device=device, dtype=torch.float32)
         bias = torch.randn(20, device=device, dtype=torch.float32)

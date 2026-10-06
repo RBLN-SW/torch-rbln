@@ -9,7 +9,8 @@
 //   - Later calls with a matching input profile find the entry and run its
 //     OpFunction over the stack's tensors.
 //   - Entries are keyed by (schema-name, per-Tensor-input profile, per-Scalar
-//     value). Shape/dtype/device changes produce a different key and miss.
+//     value, float32 precision). Shape/dtype/device changes produce a different
+//     key and miss.
 //
 // Process-global; reads take a shared lock (hot path), writes an exclusive
 // one. Entries leave through ``clear`` (all of them, or one device's) and
@@ -18,6 +19,7 @@
 #include <ATen/core/ScalarType.h>
 #include <c10/core/Device.h>
 #include <c10/util/SmallVector.h>
+#include <rbln/runtime/precision.h>
 #include <torch_rbln/csrc/rbln/OpFunction.h>
 
 #include <atomic>
@@ -95,9 +97,12 @@ struct CacheKey {
   const char* schema_name_intern{nullptr};
   c10::SmallVector<TensorProfile, 4> inputs;
   c10::SmallVector<ScalarValue, 4> scalars;
+  // An op that makes a float32 value compiles to another program at each.
+  ::rbln::runtime::Float32Precision float32_precision{};
 
   bool operator==(const CacheKey& o) const noexcept {
-    return schema_name_intern == o.schema_name_intern && inputs == o.inputs && scalars == o.scalars;
+    return schema_name_intern == o.schema_name_intern && inputs == o.inputs && scalars == o.scalars &&
+        float32_precision == o.float32_precision;
   }
 };
 

@@ -436,6 +436,10 @@ void register_supported_dtypes_api(py::module_& module) {
       "_amp_dtypes",
       [] { return supported_dtypes_to_tuple(c10::rbln::kAmpDtypes); },
       "Internal: AMP autocast supported dtypes");
+  module.def(
+      "_dispatches",
+      [](at::ScalarType dtype) { return c10::rbln::dispatches(dtype); },
+      "Internal: whether eager ops over a dtype run on the device");
 }
 
 /**
