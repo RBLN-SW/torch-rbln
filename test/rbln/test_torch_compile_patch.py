@@ -109,6 +109,12 @@ class TestTorchCompilePatchHelpers(TestCase):
         num_devices = get_num_devices_from_options(compile_kwargs)
         self.assertEqual(num_devices, 4)
 
+    def test_get_num_devices_from_options_with_devices(self):
+        """`devices`, the name rbln's backend takes, wins over the older names."""
+        compile_kwargs = {"options": {"devices": 2, "num_devices": 4}}
+        num_devices = get_num_devices_from_options(compile_kwargs)
+        self.assertEqual(num_devices, 2)
+
     def test_get_num_devices_from_options_legacy_alias(self):
         """The deprecated `tensor_parallel_size` alias is still accepted as a fallback."""
         compile_kwargs = {"options": {"tensor_parallel_size": 4}}
@@ -232,6 +238,21 @@ class TestTorchCompilePatchHelpers(TestCase):
         self.assertEqual(result.device.type, "cpu")
         self.assertEqual(result.item(), 7.0)
 
+    def test_attempt_cpu_fallback_writes_back_in_place_updates(self):
+        """What the original function updates in place reaches the tensors it was given."""
+
+        def bump(x, y):
+            x.add_(y)
+            return x * 2
+
+        x = torch.tensor([1.0, 2.0], device="rbln")
+        y = torch.tensor([3.0, 4.0], device="rbln")
+        result = attempt_cpu_fallback(bump, (x,), {"y": y}, torch.device("rbln"))
+
+        self.assertEqual(x.cpu().tolist(), [4.0, 6.0])
+        self.assertEqual(y.cpu().tolist(), [3.0, 4.0])
+        self.assertEqual(result.cpu().tolist(), [8.0, 12.0])
+
     def test_attempt_cpu_fallback_no_original_fn(self):
         """Test that error is raised when original_fn is None."""
         t = torch.tensor([1.0], device="rbln")
@@ -282,7 +303,7 @@ class TestTensorParallelFunctions(TestCase):
         call_args = mock_compile_fn.call_args
         self.assertEqual(call_args[0][0], mock_model)
         self.assertEqual(call_args[1]["backend"], "rbln")
-        self.assertEqual(call_args[1]["options"]["num_devices"], 4)
+        self.assertEqual(call_args[1]["options"]["devices"], 4)
         self.assertEqual(call_args[1]["options"]["some_option"], "value")
         self.assertEqual(result, "recompiled_fn")
 
@@ -295,7 +316,17 @@ class TestTensorParallelFunctions(TestCase):
         recompile_with_num_devices(mock_model, compile_kwargs, num_devices=2, original_compile_fn=mock_compile_fn)
 
         call_args = mock_compile_fn.call_args
-        self.assertEqual(call_args[1]["options"]["num_devices"], 2)
+        self.assertEqual(call_args[1]["options"]["devices"], 2)
+
+    def test_recompile_with_num_devices_drops_older_names(self):
+        """The count replaces one given under an older name rather than sitting beside it."""
+        mock_compile_fn = Mock(return_value="recompiled_fn")
+        compile_kwargs = {"backend": "rbln", "options": {"num_devices": 8, "tensor_parallel_size": 8}}
+
+        recompile_with_num_devices(Mock(), compile_kwargs, num_devices=2, original_compile_fn=mock_compile_fn)
+
+        self.assertEqual(mock_compile_fn.call_args[1]["options"], {"devices": 2})
+        self.assertEqual(compile_kwargs["options"], {"num_devices": 8, "tensor_parallel_size": 8})
 
     @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices")
     def test_auto_determine_num_devices_if_needed_when_not_set(self, mock_auto_tp):

@@ -119,14 +119,30 @@ def _convert_result_to_device(result, target_device):
     return result
 
 
+def _copies(given, copied):
+    """The pairs of a tensor in `given` and its CPU copy in `copied`, which ``to_cpu`` made."""
+    if isinstance(given, torch.Tensor):
+        return [(given, copied)] if copied is not given else []
+    if isinstance(given, (list, tuple)):
+        return [pair for g, c in zip(given, copied) for pair in _copies(g, c)]
+    if isinstance(given, dict):
+        return [pair for key in given for pair in _copies(given[key], copied[key])]
+    return []
+
+
 def attempt_cpu_fallback(original_fn, args, kwargs, original_device):
-    """Attempt to execute original function on CPU with fallback."""
-    # Execute original function on CPU instead of compiled function
+    """Runs the original function on CPU copies of the tensors, and writes what it updates in
+    place back into the tensors it was given."""
     cpu_args = to_cpu(args)
     cpu_kwargs = to_cpu(kwargs)
     if original_fn is None:
         raise ValueError("original_fn is not provided")
+    copies = _copies(args, cpu_args) + _copies(kwargs, cpu_kwargs)
+    versions = [copy._version for _, copy in copies]
     result = original_fn(*cpu_args, **cpu_kwargs)
+    for (given, copy), version in zip(copies, versions):
+        if copy._version != version:
+            given.copy_(copy)
 
     # Move result back to original device if needed
     if original_device and original_device.type != "cpu":
@@ -142,7 +158,9 @@ def recompile_with_num_devices(model, compile_kwargs, num_devices, original_comp
         recompile_options = recompile_options.copy()
     else:
         recompile_options = {}
-    recompile_options["num_devices"] = num_devices
+    for legacy in ("num_devices", "tensor_parallel_size"):
+        recompile_options.pop(legacy, None)
+    recompile_options["devices"] = num_devices
     recompile_kwargs["options"] = recompile_options
     return original_compile_fn(model, **recompile_kwargs)
 
@@ -151,18 +169,17 @@ def get_num_devices_from_options(compile_kwargs):
     """Read the caller-pinned device count from compile options.
 
     Used only to detect whether the caller explicitly set a device count, so
-    auto-determination and failover do not override an explicit choice. Both
-    ``num_devices`` and the legacy ``tensor_parallel_size`` are recognized
-    (``num_devices`` wins); canonicalizing the option for the backend is the
-    backend's responsibility, not this function's.
+    auto-determination and failover do not override an explicit choice. ``devices``,
+    rbln's name for it, and the older ``num_devices`` and ``tensor_parallel_size`` are
+    recognized, in that order.
     """
     compile_options = compile_kwargs.get("options", {})
     if not isinstance(compile_options, dict):
         return None
-    num_devices = compile_options.get("num_devices")
-    if num_devices is None:
-        num_devices = compile_options.get("tensor_parallel_size")
-    return num_devices
+    for name in ("devices", "num_devices", "tensor_parallel_size"):
+        if compile_options.get(name) is not None:
+            return compile_options[name]
+    return None
 
 
 def _is_compile_only(compile_kwargs) -> bool:
@@ -179,8 +196,8 @@ def _is_compile_only(compile_kwargs) -> bool:
 def _resolve_current_num_devices(device_id, compile_kwargs):
     """Resolve the ``num_devices`` currently in use for this compiled function.
 
-    An explicit ``options.num_devices`` (or the legacy ``tensor_parallel_size``)
-    always wins. Otherwise we fall back to the topology-derived auto-determined
+    An explicit ``options.devices`` (or the older ``num_devices`` or
+    ``tensor_parallel_size``) always wins. Otherwise we fall back to the topology-derived auto-determined
     device count.
     """
     explicit_num_devices = get_num_devices_from_options(compile_kwargs)

@@ -22,7 +22,8 @@ from torch_rbln import programs
 from torch_rbln._internal.compile_cache import compile_logical
 
 
-_OPTIONS = {"npu", "num_devices", "tensor_parallel_size", "mode", "cache_dir", "disable_logger"}
+# `num_devices` and `tensor_parallel_size` are older names of `devices`, which rbln's backend takes.
+_OPTIONS = {"npu", "devices", "num_devices", "tensor_parallel_size", "mode", "cache_dir", "disable_logger"}
 
 
 def _modes(options: dict[str, Any]) -> set[str]:
@@ -156,7 +157,7 @@ def rbln_graph_backend(gm: torch.fx.GraphModule, example_inputs: list[Any], opti
     unknown = set(options) - _OPTIONS
     if unknown:
         raise TypeError(f"unknown rbln options {sorted(unknown)}")
-    devices = int(options.get("num_devices") or options.get("tensor_parallel_size") or 1)
+    devices = int(options.get("devices") or options.get("num_devices") or options.get("tensor_parallel_size") or 1)
     if devices != 1:
         raise NotImplementedError(f"a graph over {devices} devices; torch-rbln runs graphs on one device")
     device = _device_of(example_inputs)
