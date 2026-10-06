@@ -280,8 +280,9 @@ class TORCH_API ProcessGroupRBLN : public Backend {
   uint64_t nextSeq() noexcept;
 
   /**
-   * @brief Joins this group's communicator: rank 0 makes the group's id on its device and hands
-   * it to the others through the store. A group of one, or one without an NPU, has none.
+   * @brief Joins this group's communicator: for the default group, rank 0 makes the group's id on
+   * its device and hands it to the others through the store; a sub group splits the default
+   * group's, as each of its members does. A group of one, or one without an NPU, has none.
    */
   void connect();
 

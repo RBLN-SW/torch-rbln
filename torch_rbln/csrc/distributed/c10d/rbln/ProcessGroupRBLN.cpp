@@ -935,6 +935,17 @@ c10::Stream ProcessGroupRBLN::currentStream() const {
   return c10::rbln::get_current_stream(static_cast<c10::DeviceIndex>(device_id_));
 }
 
+namespace {
+
+// The communicator of the process's default group. RCCL makes one group id a process, so a sub
+// group splits this one.
+std::weak_ptr<::rbln::runtime::Communicator>& default_communicator() {
+  static std::weak_ptr<::rbln::runtime::Communicator> communicator;
+  return communicator;
+}
+
+} // namespace
+
 void ProcessGroupRBLN::connect() {
   if (size_ == 1) {
     return;
@@ -949,6 +960,15 @@ void ProcessGroupRBLN::connect() {
     RBLN_LOG_INFO("A dummy device has no communicator (rank={} size={})", rank_, size_);
     return;
   }
+  if (!global_ranks_in_group_.empty()) {
+    auto root = default_communicator().lock();
+    RBLN_CHECK(
+        root != nullptr,
+        "ProcessGroupRBLN: a sub group splits the default group's communicator, and the default group has none");
+    RBLN_LOG_INFO("Communicator split rank={} size={} group_id={}", rank_, size_, group_id_);
+    comm_ = root->split(global_ranks_in_group_, group_id_);
+    return;
+  }
   RBLN_CHECK(store_ != nullptr, "ProcessGroupRBLN: the ranks share a group id through the store, and there is none");
   const std::string key = "rbln_rccl_uid_" + std::to_string(group_id_);
   std::string id;
@@ -961,6 +981,7 @@ void ProcessGroupRBLN::connect() {
   }
   RBLN_LOG_INFO("Communicator init rank={} size={} device_id={}", rank_, size_, device_id_);
   comm_ = std::make_shared<::rbln::runtime::Communicator>(rank_, size_, device, id);
+  default_communicator() = comm_;
 }
 
 void ProcessGroupRBLN::enqueue(c10::intrusive_ptr<Work> work) {

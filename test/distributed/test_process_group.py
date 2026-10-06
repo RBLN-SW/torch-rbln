@@ -49,6 +49,24 @@ def run_allreduce_test(rank: int, world_size: int, backend: str, op: dist.Reduce
         dist.destroy_process_group()
 
 
+def run_sub_group_allreduce_test(rank: int, world_size: int, backend: str) -> None:
+    """A group over every rank made after the default one, as vLLM makes its tensor parallel group,
+    sums over a communicator of its own, and the default group still sums over its."""
+    setup_environment(rank, world_size)
+    dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+
+    try:
+        group = dist.new_group(list(range(world_size)), backend=backend)
+        tensor = torch.full([64], rank + 1.0, dtype=torch.bfloat16, device=torch.device(f"rbln:{rank}"))
+        dist.all_reduce(tensor, group=group)
+        expected = sum(r + 1.0 for r in range(world_size))
+        assert tensor[0] == expected, f"sub group allreduce on rank {rank}: expected={expected}, actual={tensor[0]}"
+        dist.all_reduce(tensor)
+        assert tensor[0] == expected * world_size, f"default group allreduce on rank {rank}: actual={tensor[0]}"
+    finally:
+        dist.destroy_process_group()
+
+
 def run_broadcast_test(rank: int, world_size: int, backend: str, src: int, dtype: torch.dtype) -> None:
     """Test broadcast operation from specific source rank with specified dtype."""
     setup_environment(rank, world_size)
@@ -595,6 +613,19 @@ class TestAllReduceRBLN(TestProcessGroupRBLNBase):
 
 
 @pytest.mark.single_worker
+class TestSubGroupRBLN(TestProcessGroupRBLNBase):
+    """A group made after the default one splits the default group's communicator."""
+
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_a_sub_group_sums_over_its_ranks(self, c10d_async_env):
+        if self.should_skip_multi_rank_tests():
+            self.skipTest("Requires world_size > 1")
+        self.run_c10d_test(
+            c10d_async_env, self.world_size, run_sub_group_allreduce_test, (self.world_size, self.backend)
+        )
+
+
+@pytest.mark.single_worker
 class TestScatterRBLN(TestProcessGroupRBLNBase):
     """Test cases for scatter operations. Each test runs with dim0 in [32, 256]."""
 
@@ -883,6 +914,7 @@ class TestAllReduceSizesRBLN(TestProcessGroupRBLNBase):
 # Instantiate device type tests for all test classes
 instantiate_device_type_tests(TestBroadcastRBLN, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestAllReduceRBLN, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestSubGroupRBLN, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestScatterRBLN, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestAllGatherRBLN, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestReduceScatterRBLN, globals(), only_for="privateuse1")
