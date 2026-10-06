@@ -419,7 +419,7 @@ namespace {
 
 // Runs `op` on the current stream of `device_index`, after what is queued on it.
 void on_current_stream(c10::DeviceIndex device_index, const std::function<void()>& op) {
-  runtime_stream(get_current_stream(device_index))->run([&](rt::Work&) { op(); });
+  runtime_stream(get_current_stream(device_index))->run(op);
 }
 
 Location located(const void* data, size_t nbytes, const char* what) {
