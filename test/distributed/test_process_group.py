@@ -67,6 +67,18 @@ def run_sub_group_allreduce_test(rank: int, world_size: int, backend: str) -> No
         dist.destroy_process_group()
 
 
+def run_default_group_again_test(rank: int, world_size: int, backend: str) -> None:
+    """A default group destroyed lets the next one be made in the same process, as vLLM makes one per
+    engine and a process may run engines one after another."""
+    setup_environment(rank, world_size)
+    for _ in range(2):
+        dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+        tensor = torch.full([64], 1.0, dtype=torch.bfloat16, device=torch.device(f"rbln:{rank}"))
+        dist.all_reduce(tensor)
+        assert tensor[0] == world_size, f"allreduce on rank {rank}: actual={tensor[0]}"
+        dist.destroy_process_group()
+
+
 def run_broadcast_test(rank: int, world_size: int, backend: str, src: int, dtype: torch.dtype) -> None:
     """Test broadcast operation from specific source rank with specified dtype."""
     setup_environment(rank, world_size)
@@ -615,6 +627,12 @@ class TestAllReduceRBLN(TestProcessGroupRBLNBase):
 @pytest.mark.single_worker
 class TestSubGroupRBLN(TestProcessGroupRBLNBase):
     """A group made after the default one splits the default group's communicator."""
+
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_a_default_group_destroyed_lets_another_be_made(self, c10d_async_env):
+        # A group of one: RCCL makes one group id a process, so a group over several NPUs cannot be
+        # made twice in one process.
+        self.run_c10d_test(c10d_async_env, 1, run_default_group_again_test, (1, self.backend))
 
     @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
     def test_a_sub_group_sums_over_its_ranks(self, c10d_async_env):

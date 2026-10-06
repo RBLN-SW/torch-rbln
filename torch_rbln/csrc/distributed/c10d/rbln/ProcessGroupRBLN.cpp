@@ -844,6 +844,23 @@ class BarrierRBLNWork : public RBLNWork {
 // ProcessGroupRBLN Implementation
 // ============================================================================
 
+namespace {
+
+// The process's default group while one lives: the device each of its global ranks runs on, which a
+// sub group takes.
+struct DefaultGroup {
+  std::mutex mutex;
+  bool live = false;
+  std::unordered_map<int, int> device_of_rank;
+};
+
+DefaultGroup& default_group() {
+  static DefaultGroup group;
+  return group;
+}
+
+} // namespace
+
 ProcessGroupRBLN::ProcessGroupRBLN(
     const c10::intrusive_ptr<Store>& store,
     int rank,
@@ -870,25 +887,19 @@ ProcessGroupRBLN::ProcessGroupRBLN(
   }
   global_rank_ = global_ranks_in_group_.empty() ? rank_ : global_ranks_in_group_[rank_];
 
-  // The device a global rank runs on, as its default group found it; a sub group takes it.
-  static std::unordered_map<int, int> global_rank_to_device_id_in_default_group;
-  static std::mutex map_mutex;
-  static bool default_group_initialized = false;
   device_id_ = -1;
   {
-    std::lock_guard<std::mutex> lock(map_mutex);
+    auto& group = default_group();
+    std::lock_guard<std::mutex> lock(group.mutex);
     if (global_ranks_in_group_.empty()) {
-      RBLN_CHECK(!default_group_initialized, "Default group must be initialized here");
+      RBLN_CHECK(!group.live, "ProcessGroupRBLN: a default group lives already; destroy it before making another");
       device_id_ = static_cast<int>(c10::rbln::get_device_index()); // NOLINT(bugprone-signed-char-misuse)
-      global_rank_to_device_id_in_default_group[global_rank_] = device_id_;
-      default_group_initialized = true;
+      group.device_of_rank[global_rank_] = device_id_;
+      group.live = true;
     } else {
-      RBLN_CHECK(default_group_initialized, "Default group must be initialized before creating sub groups");
-      auto it = global_rank_to_device_id_in_default_group.find(global_rank_);
-      RBLN_CHECK(
-          it != global_rank_to_device_id_in_default_group.end(),
-          "Global rank {} not found in default group mapping",
-          global_rank_);
+      RBLN_CHECK(group.live, "Default group must be initialized before creating sub groups");
+      auto it = group.device_of_rank.find(global_rank_);
+      RBLN_CHECK(it != group.device_of_rank.end(), "Global rank {} not found in default group mapping", global_rank_);
       device_id_ = it->second;
     }
   }
@@ -920,6 +931,12 @@ ProcessGroupRBLN::~ProcessGroupRBLN() {
   workProduceCV_.notify_all();
   for (auto& thread : threads_) {
     thread.join();
+  }
+  if (global_ranks_in_group_.empty()) {
+    auto& group = default_group();
+    std::lock_guard<std::mutex> group_lock(group.mutex);
+    group.live = false;
+    group.device_of_rank.clear();
   }
 }
 
