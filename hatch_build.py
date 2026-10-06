@@ -100,6 +100,7 @@ class CMakeBuildHook(BuildHookInterface):
             f"-DPython3_EXECUTABLE={python_executable}",
             f"-DCMAKE_MAKE_PROGRAM={ninja_path}",
             "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+            f"-DRBLN_BUILD_TESTS={os.environ.get('TORCH_RBLN_BUILD_TESTS', 'ON')}",
         ]
 
         # Enable ccache for faster rebuilds if available

@@ -102,6 +102,7 @@ jobs:
       - name: Build wheel
         env:
           TORCH_RBLN_BUILD_TYPE: ${{ inputs.build_type }}
+          TORCH_RBLN_BUILD_TESTS: 'OFF'
           UV_INDEX_RBLN_USERNAME: ${{ secrets.RBLN_INDEX_USERNAME }}
           UV_INDEX_RBLN_PASSWORD: ${{ secrets.RBLN_INDEX_PASSWORD }}
           UV_INDEX_RBLN_NIGHTLY_USERNAME: ${{ secrets.NEXUS_USERNAME }}

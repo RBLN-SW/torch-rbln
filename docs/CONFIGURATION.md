@@ -1,5 +1,12 @@
 # Configuration
 
+## Building wheels
+
+`TORCH_RBLN_BUILD_TESTS` controls whether the build hook builds C++ test
+executables and GoogleTest (default: `ON`). Set it to `OFF` for wheel-only builds;
+jobs that run CTest or upload C++ test binaries must keep it enabled.
+This option does not disable Python tests.
+
 ## Logging
 
 `torch-rbln` provides structured logging via `spdlog` to help diagnose runtime behavior, including CPU fallback operations and device execution traces.
