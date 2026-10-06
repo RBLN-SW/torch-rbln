@@ -349,9 +349,19 @@ std::optional<std::vector<at::Tensor>> OpFunction::run(
   bound.reserve(bindings_.size() + results_.size());
   // Kept until the run is queued, so that no tensor made for a result takes their memory first.
   std::vector<at::Tensor> staged;
+  // Inputs the run writes through the host, with the host tensors it leaves them in.
+  std::vector<std::pair<const Binding*, std::shared_ptr<rt::HostTensor>>> written_back;
   for (const auto& binding : bindings_) {
-    auto tensor = binding.through_host ? rt::Binding(encoded(inputs[binding.input], binding.arg))
-                                       : over(inputs[binding.input], binding.arg, device_index, &staged);
+    rt::Binding tensor;
+    if (binding.through_host) {
+      auto host = encoded(inputs[binding.input], binding.arg);
+      if (host && args[binding.arg].access != artifact::Access::kRead) {
+        written_back.emplace_back(&binding, host);
+      }
+      tensor = rt::Binding(std::move(host));
+    } else {
+      tensor = over(inputs[binding.input], binding.arg, device_index, &staged);
+    }
     if (missing(tensor)) {
       return std::nullopt;
     }
@@ -414,8 +424,15 @@ std::optional<std::vector<at::Tensor>> OpFunction::run(
     s.executor->bind(bound);
     s.executor->run(stream);
   }
-  if (on_host || !to_decode.empty()) {
+  if (on_host || !to_decode.empty() || !written_back.empty()) {
     stream->synchronize();
+  }
+  for (const auto& [binding, host] : written_back) {
+    const auto& input = inputs[binding->input];
+    auto value = at::empty(input.sizes(), input.options().device(at::kCPU));
+    fn_->decode(binding->arg, *host, {value.data_ptr(), value.sizes().vec()});
+    c10::rbln::prof::record_bounce(c10::rbln::prof::BounceSite::kOpArgThroughHost, value.nbytes());
+    input.copy_(value);
   }
   for (const auto& [k, host] : to_decode) {
     const auto& result = results_[k];
