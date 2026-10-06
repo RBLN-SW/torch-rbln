@@ -841,8 +841,9 @@ class TestWarmCacheNonContigOut(TestCase):
     so a contig and a non-contig out= for the same op + input shapes share
     one entry. The runtime cached for the contig profile would write
     numel*itemsize contiguous bytes into the non-contig view's data_ptr —
-    laying values at the wrong strided positions. try_warmcache_hit must
-    detect non-contig out= and fall through to the pybind miss path.
+    laying values at the wrong strided positions. try_warmcache_hit must not
+    bind a non-contig out=: it runs into a result of its own and copies that
+    into the out, which lands each value at its strided position.
     """
 
     atol = 0.01
@@ -855,7 +856,7 @@ class TestWarmCacheNonContigOut(TestCase):
 
         return torch_rbln._C._dispatch_shim_diag_dump()[2]
 
-    def test_warmcache_bypassed_on_non_contig_out(self):
+    def test_warmcache_copies_into_a_non_contig_out(self):
         import torch_rbln
 
         device = torch.device("rbln:0")
@@ -871,20 +872,15 @@ class TestWarmCacheNonContigOut(TestCase):
         torch.add(x, y, out=out_c)
         contig_hits = self._diag_warm_hits()
 
-        # Non-contig out= must not consume a warm-cache entry.
+        # A non-contig out= takes a copy of the result, value by value.
         base = torch.empty(60, 4, device=device, dtype=torch.float16)
         out_nc = base.t()
         self.assertFalse(out_nc.is_contiguous())
         result = torch.add(x, y, out=out_nc)
         cpu_ref = torch.add(x.cpu(), y.cpu())
-        self.assertEqual(result.cpu(), cpu_ref, atol=self.atol, rtol=self.rtol)
-        nc_hits = self._diag_warm_hits()
-        self.assertEqual(
-            nc_hits,
-            contig_hits,
-            "warm-cache hit counter increased on non-contig out= dispatch; "
-            "the guard in try_warmcache_hit was bypassed.",
-        )
+        self.assertIs(result, out_nc)
+        self.assertEqual(base.cpu().t(), cpu_ref, atol=self.atol, rtol=self.rtol)
+        self.assertEqual(self._diag_warm_hits(), contig_hits + 1)
 
 
 @pytest.mark.test_set_ci

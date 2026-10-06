@@ -634,15 +634,32 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
       break;
     }
   }
+  // An out that holds no memory yet, as a structured kernel hands over the
+  // result of a functional call, takes the memory of a result made for it.
+  const auto& output = entry->function->outputs().front();
+  const bool fresh = out && out->storage().nbytes() == 0 && out->scalar_type() == output.dtype;
+  const bool bind_out = out && !fresh;
   auto results = entry->function->run(
-      inputs, out ? c10::ArrayRef<std::optional<at::Tensor>>(*out) : c10::ArrayRef<std::optional<at::Tensor>>());
+      inputs, bind_out ? c10::ArrayRef<std::optional<at::Tensor>>(*out) : c10::ArrayRef<std::optional<at::Tensor>>());
+  // An out the function cannot write where it is, as one an in-place op shares
+  // with an input, takes a copy of a result made for it.
+  const bool copied = bind_out && !results && out->scalar_type() == output.dtype &&
+      out->sizes() == c10::IntArrayRef(output.shape);
+  if (copied) {
+    results = entry->function->run(inputs);
+  }
   const uint64_t _seg_t_run = now_ns();
   if (!results) {
     return false;
   }
+  if (fresh) {
+    out->set_(results->front());
+  } else if (copied) {
+    out->copy_(results->front());
+  }
 
   torch::jit::drop(stack, cache.num_args);
-  torch::jit::push(stack, std::move(results->front()));
+  torch::jit::push(stack, fresh || copied ? *out : std::move(results->front()));
   const uint64_t _seg_t_finalize = now_ns();
 
   g_diag_warm_n_hits.fetch_add(1, std::memory_order_relaxed);
