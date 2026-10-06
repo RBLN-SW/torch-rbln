@@ -147,17 +147,42 @@ artifact::Layout torch_layout(const artifact::Arg& arg) {
   return artifact::layoutOf(arg.logical);
 }
 
+// Whether a tensor of `sizes` has the shape of `arg`, its dynamic axis within the range of that axis.
+bool fits(const artifact::Arg& arg, c10::IntArrayRef sizes) {
+  const auto& logical = arg.logical;
+  if (sizes.size() != logical.shape.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < sizes.size(); ++i) {
+    if (!logical.dynamic_axes.empty() && logical.dynamic_axes.front().axis == i) {
+      const auto& axis = logical.dynamic_axes.front();
+      if (sizes[i] < axis.min || (axis.max && sizes[i] > axis.max)) {
+        return false;
+      }
+    } else if (sizes[i] != logical.shape[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // Whether `arg` holds its value in one buffer as torch holds the tensor, so that a tensor over
 // torch memory binds to it.
 bool holds_as_torch(const artifact::Arg& arg) {
   return arg.shards.size() == 1 && arg.transform.empty() && artifact::alike(arg.physical, torch_layout(arg));
 }
 
-// A tensor of arg `arg` over `buffer`, which holds a value as torch holds a contiguous tensor.
+// A tensor of arg `arg` and of `shape` over `buffer`, which holds a value as torch holds a contiguous
+// tensor.
 template <class B>
-std::shared_ptr<rt::BasicTensor<B>> over_torch_bytes(const artifact::Arg& arg, std::shared_ptr<B> buffer) {
+std::shared_ptr<rt::BasicTensor<B>> over_torch_bytes(
+    const artifact::Arg& arg,
+    const std::vector<int64_t>& shape,
+    std::shared_ptr<B> buffer) {
+  artifact::Logical logical{arg.logical.dtype, shape, {}};
+  auto layout = artifact::layoutOf(logical);
   return std::make_shared<rt::BasicTensor<B>>(
-      arg.logical, torch_layout(arg), "", std::vector{std::move(buffer)});
+      std::move(logical), std::move(layout), "", std::vector{std::move(buffer)});
 }
 
 bool missing(const rt::Binding& binding) {
@@ -193,7 +218,6 @@ OpFunction::OpFunction(
       continue;
     }
     if (arg.sources.size() == 1 && input_of.count(arg.sources.front())) {
-      require_static(arg);
       const bool through_host = !holds_as_torch(arg);
       if (through_host && arg.access != artifact::Access::kRead && c10::rbln::is_fallback_disabled("host_round_trip")) {
         throw c10::rbln::FallbackDisabled(
@@ -245,11 +269,10 @@ rt::Binding OpFunction::over(
     return {};
   }
   const char* dtype = dtype_name(tensor.scalar_type());
-  if (dtype == nullptr || arg.logical.dtype != dtype || tensor.sizes() != c10::IntArrayRef(arg.logical.shape) ||
-      !tensor.is_contiguous()) {
+  if (dtype == nullptr || arg.logical.dtype != dtype || !fits(arg, tensor.sizes()) || !tensor.is_contiguous()) {
     return {};
   }
-  const auto nbytes = logical_nbytes(arg);
+  const auto nbytes = tensor.nbytes();
   const bool read = arg.access != artifact::Access::kWrite;
   const bool written = arg.access != artifact::Access::kRead;
   if (tensor.device().is_cpu()) {
@@ -262,7 +285,7 @@ rt::Binding OpFunction::over(
     }
     copies->push_back(
         {tensor, at::from_blob(buffer->data(), tensor.sizes(), [buffer](void*) {}, tensor.options()), written});
-    return rt::Binding(over_torch_bytes(arg, std::move(buffer)));
+    return rt::Binding(over_torch_bytes(arg, tensor.sizes().vec(), std::move(buffer)));
   }
   if (!tensor.device().is_privateuseone() || tensor.device().index() != device_index) {
     return {};
@@ -280,7 +303,8 @@ rt::Binding OpFunction::over(
     copies->push_back({tensor, copy, written});
     return over(copy, index, device_index, nullptr);
   }
-  return rt::Binding(over_torch_bytes(arg, rt::DeviceBuffer::view(location->buffer, location->offset, nbytes)));
+  return rt::Binding(
+      over_torch_bytes(arg, tensor.sizes().vec(), rt::DeviceBuffer::view(location->buffer, location->offset, nbytes)));
 }
 
 std::shared_ptr<rt::HostTensor> OpFunction::encoded(size_t index) const {
@@ -299,12 +323,11 @@ std::shared_ptr<rt::HostTensor> OpFunction::encoded(size_t index) const {
 std::shared_ptr<rt::HostTensor> OpFunction::encoded(const at::Tensor& tensor, size_t index) const {
   const auto& arg = fn_->artifact().args[index];
   const char* dtype = dtype_name(tensor.scalar_type());
-  if (!tensor.defined() || dtype == nullptr || arg.logical.dtype != dtype ||
-      tensor.sizes() != c10::IntArrayRef(arg.logical.shape)) {
+  if (!tensor.defined() || dtype == nullptr || arg.logical.dtype != dtype || !fits(arg, tensor.sizes())) {
     return nullptr;
   }
   auto value = tensor.to(at::kCPU).contiguous();
-  auto host = fn_->emptyHostLike(index);
+  auto host = fn_->emptyHostLike(index, value.sizes().vec());
   fn_->encode(index, {{value.data_ptr(), value.sizes().vec()}}, *host);
   c10::rbln::prof::record_bounce(c10::rbln::prof::BounceSite::kOpArgThroughHost, value.nbytes());
   return host;
@@ -500,7 +523,7 @@ std::optional<std::vector<at::Tensor>> OpFunction::run(
     if (result.host) {
       const auto& arg = args[*result.arg];
       auto buffer = rt::HostBuffer::allocate(logical_nbytes(arg));
-      bound.emplace_back(arg.name, over_torch_bytes(arg, buffer));
+      bound.emplace_back(arg.name, over_torch_bytes(arg, arg.logical.shape, buffer));
       results.push_back(
           at::from_blob(
               buffer->data(), outputs_[k].shape, [buffer](void*) {}, at::TensorOptions().dtype(outputs_[k].dtype)));

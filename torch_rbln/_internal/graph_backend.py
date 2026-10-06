@@ -110,6 +110,8 @@ class CompiledGraph:
         self._seen.update(now)
 
     def __call__(self, *args: Any) -> tuple[torch.Tensor, ...]:
+        # Dynamo passes the extents of dynamic axes as well, which the tensors carry.
+        args = tuple(a for a in args if isinstance(a, torch.Tensor))
         self._write_state(self._state(args))
         inputs = [t for (kind, _), t in zip(self._roles, args) if kind == "input"]
         results = self._function.run(inputs)
@@ -133,12 +135,13 @@ def _compile_only(fn: Any, device: torch.device, host_results: list[bool]):
     return forward
 
 
-def _program(fn: Any, graph: Any, device: torch.device) -> programs.CompiledProgram:
+def _program(fn: Any, graph: Any, device: torch.device, example_inputs: list[Any]) -> programs.CompiledProgram:
     arg_of = {tuple(a.sources): a for a in fn.args}
     passed = graph.passed if graph.passed is not None else [inp.name for inp in graph.inputs]
     by_name = {inp.name: inp for inp in graph.inputs}
+    shapes = dict(zip(passed, (tuple(x.shape) for x in example_inputs if isinstance(x, torch.Tensor))))
     inputs = tuple(
-        programs.InputSpec(name, tuple(by_name[name].shape), by_name[name].dtype, arg_of.get((name,)))
+        programs.InputSpec(name, shapes[name], by_name[name].dtype, arg_of.get((name,)))
         for name in passed
         if by_name[name].kind == "input"
     )
@@ -165,7 +168,7 @@ def rbln_graph_backend(gm: torch.fx.GraphModule, example_inputs: list[Any], opti
     fn = compile_logical(graph, _npu(options, device), devices, options.get("cache_dir"))
     host_results = _host_results(gm)
     if programs.is_capturing():
-        programs.submit_program(_program(fn, graph, device))
+        programs.submit_program(_program(fn, graph, device, example_inputs))
     if "compile_only" in _modes(options):
         return _compile_only(fn, device, host_results)
     return CompiledGraph(fn, graph, gm, host_results)

@@ -50,7 +50,8 @@ _ctx = threading.local()
 
 @dataclass(frozen=True)
 class InputSpec:
-    """An input of a compiled program, named as the traced code names it."""
+    """An input of a compiled program, named as the traced code names it, of the shape the traced
+    call gave it; `arg` says which extents of a dynamic axis it takes."""
 
     name: str
     shape: tuple[int, ...]
