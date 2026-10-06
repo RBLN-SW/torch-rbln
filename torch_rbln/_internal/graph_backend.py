@@ -11,6 +11,7 @@ result the graph leaves on the CPU comes back on the CPU.
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 import torch
@@ -38,9 +39,7 @@ def _device_of(example_inputs: list[Any]) -> torch.device:
     return torch.device("rbln", torch.rbln.current_device())
 
 
-def _npu(options: dict[str, Any], device: torch.device) -> str:
-    if options.get("npu"):
-        return options["npu"]
+def _device_npu(device: torch.device) -> str:
     if _C.is_dummy_device():
         import rbln
 
@@ -48,6 +47,15 @@ def _npu(options: dict[str, Any], device: torch.device) -> str:
     from torch_rbln.device.device import get_device_name
 
     return get_device_name(device.index)
+
+
+def _npu(options: dict[str, Any], device: torch.device) -> str:
+    """The NPU to compile for: the ``npu`` option, else the device's."""
+    own = _device_npu(device)
+    asked = options.get("npu")
+    if asked and asked != own:
+        warnings.warn(f"compiling for {asked}, which differs from {own} of {device}; the graph runs only on an {asked}")
+    return asked or own
 
 
 def _host_results(gm: torch.fx.GraphModule) -> list[bool]:

@@ -428,8 +428,10 @@ try:  # compile_only writes the artifact; the call itself errors (no real device
     torch.compile(m, backend="rbln", dynamic=False, options=opts)(x)
 except Exception as e:
     print("COMPILE_EXC:", type(e).__name__, str(e))
-arts = glob.glob(os.path.join(cache, "*.rbln"))
+arts = glob.glob(os.path.join(cache, "**", "*.rbln"), recursive=True)
 assert len(arts) == 1 and os.path.getsize(arts[0]) > 0, arts
+import rbln
+print("Target NPU:", rbln.Function.load(arts[0]).npu)
 print("OK")
 """
 
@@ -451,7 +453,7 @@ def test_compile_only_uses_force_npu_name_when_no_npu_option():
 
 def test_compile_only_npu_option_overrides_force_npu_name():
     # An explicit `npu` option wins over RBLN_FORCE_NPU_NAME: the artifact targets the
-    # requested SoC and rebel warns that it differs from the registered machine SoC.
+    # requested SoC and the backend warns that it differs from the registered machine SoC.
     proc = _run_with_dummy(
         _COMPILE_ONLY_SNIPPET,
         env_extra={
@@ -558,7 +560,7 @@ def test_compile_only_decorator_form_is_allowed():
         except RuntimeError as e:
             # A compile_only build must never be rejected by the dummy execution guard.
             assert "RBLN_DUMMY_DEVICE" not in str(e), str(e)
-        arts = glob.glob(os.path.join(cache, "*.rbln"))
+        arts = glob.glob(os.path.join(cache, "**", "*.rbln"), recursive=True)
         assert len(arts) == 1 and os.path.getsize(arts[0]) > 0, arts
         print("OK")
         """,
