@@ -85,9 +85,16 @@ class CompiledGraph:
         }
         self._constants = {inp.name: inp.value for inp in graph.inputs if inp.kind == "constant"}
         self._module = module
-        self._host_results = host_results
+        # The results the graph returns, then those holding the new values of the inputs it writes
+        # other than in place, by input.
+        self._returned = len(fn.returned)
+        self._written = [(self._inputs.index(name), fn.results.index(result)) for name, result in fn.written.items()]
+        self._host_results = host_results + [False] * (len(fn.results) - self._returned)
         self._function: Any = None
         self._seen: dict[str, tuple[int, int]] = {}
+        # The state the args are made from; the rest the program was built for, which only the
+        # specializations check.
+        self._sources = {source for a in fn.args for source in a.sources}
 
     def _state(self, args: tuple) -> dict[str, torch.Tensor]:
         state = {name: t.detach() for (kind, name), t in zip(self._roles, args) if kind not in ("input", "constant")}
@@ -106,7 +113,9 @@ class CompiledGraph:
             )
         elif changed:
             self._fn.check_specializations(changed)
-            self._function.set_state(changed)
+            made = {name: t for name, t in changed.items() if name in self._sources}
+            if made:
+                self._function.set_state(made)
         self._seen.update(now)
 
     def __call__(self, *args: Any) -> tuple[torch.Tensor, ...]:
@@ -117,13 +126,15 @@ class CompiledGraph:
         results = self._function.run(inputs)
         if results is None:
             raise RuntimeError("the tensors of the call do not hold what the graph was compiled for")
-        return tuple(results)
+        for input_index, result in self._written:
+            inputs[input_index].copy_(results[result])
+        return tuple(results[: self._returned])
 
 
 def _compile_only(fn: Any, device: torch.device, host_results: list[bool]):
     """What stands in for a graph compiled only into the cache: empty tensors of its
     results."""
-    results = [fn.arg(name) for name in fn.results]
+    results = [fn.arg(name) for name in fn.returned]
     host = host_results or [False] * len(results)
 
     def forward(*_: Any) -> tuple[torch.Tensor, ...]:

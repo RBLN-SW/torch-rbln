@@ -1,6 +1,7 @@
 # Owner(s): ["module: PrivateUse1"]
-"""A graph that writes a tensor it is given in place writes the caller's tensor, wherever the
-tensor lies: where its arg takes it, off the alignment the arg takes, or on the host.
+"""A graph that writes a tensor it is given writes the caller's tensor, wherever the tensor lies:
+where its arg takes it, off the alignment the arg takes, or on the host; and whether an op updates
+it in place or the graph computes its new value.
 """
 
 import os
@@ -46,6 +47,17 @@ class TestGraphWrittenInputs(TestCase):
 
     def test_a_tensor_on_the_host_is_written(self):
         self._write(torch.zeros(SHAPE, dtype=torch.float16))
+
+    def test_an_input_written_other_than_in_place_is_written_back(self):
+        # vLLM's sampler applies its temperature to the logits it is given in place.
+        torch._dynamo.reset()
+        logits, temperature = torch.randn(2, 64), torch.tensor([0.5, 2.0])
+        scaled = logits / temperature.unsqueeze(1)
+        given = logits.to("rbln")
+        compiled = torch.compile(lambda x, t: torch.softmax(x.div_(t.unsqueeze(1)), -1), backend="rbln")
+        probs = compiled(given, temperature.to("rbln"))
+        self.assertEqual(probs.cpu(), torch.softmax(scaled, -1), atol=2e-2, rtol=2e-2)
+        self.assertEqual(given.cpu(), scaled, atol=2e-2, rtol=2e-2)
 
     def test_a_round_trip_through_the_host_raises_when_disabled(self):
         cache = torch.zeros(SHAPE, dtype=torch.float16, device="rbln")
