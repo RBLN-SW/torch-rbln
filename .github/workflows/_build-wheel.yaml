@@ -99,6 +99,9 @@ jobs:
             exit 1
           fi
 
+      - name: Configure uv cache
+        run: echo "UV_CACHE_DIR=${RUNNER_TEMP}/torch-rbln-uv-cache" >> "${GITHUB_ENV}"
+
       - name: Build wheel
         env:
           TORCH_RBLN_BUILD_TYPE: ${{ inputs.build_type }}
