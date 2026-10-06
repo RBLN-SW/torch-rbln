@@ -18,6 +18,8 @@ namespace torch_rbln {
 
 namespace rt = ::rbln::runtime;
 
+struct StateKey;
+
 /**
  * @brief A compiled function run on torch tensors: an eager op, or a graph torch.compile hands
  * over. The args a call's tensors bind to hold their values as torch holds a contiguous tensor,
@@ -102,11 +104,13 @@ class OpFunction {
   std::shared_ptr<rt::HostTensor> encoded(size_t arg) const;
   // A host tensor of arg `arg` encoded from the value of `tensor`, or none if it is not the arg's.
   std::shared_ptr<rt::HostTensor> encoded(const at::Tensor& tensor, size_t arg) const;
+  // What tells the tensor of state arg `arg` on `device` apart from others.
+  StateKey state_key(size_t arg, const rt::Device& device) const;
   // `args` with the state args that share pools of pages with them, which a
   // device holds in one buffer with them.
   std::vector<size_t> with_page_sharers(std::vector<size_t> args) const;
-  // Binds state `args` of each of `slots` to new tensors on its device that
-  // hold the state now, encoding each arg once.
+  // Binds state `args` of each of `slots` to tensors on its device that hold the state now:
+  // those another function holding the arg alike has made, or new ones, each encoded once.
   void bind_state(const std::vector<Slot*>& slots, const std::vector<size_t>& args) const;
   Slot& slot(c10::DeviceIndex device_index);
 

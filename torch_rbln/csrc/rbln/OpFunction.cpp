@@ -14,8 +14,22 @@
 #include <numeric>
 #include <set>
 #include <stdexcept>
+#include <tuple>
 
 namespace torch_rbln {
+
+// What tells a tensor of state on a device apart: the device, how the arg holds it (its type
+// and the pools its shards are in), and the torch tensors it is made from, as they are now.
+struct StateKey {
+  uint32_t device = 0;
+  std::string type;
+  std::vector<std::string> pools;
+  std::vector<std::tuple<const void*, int64_t, std::vector<int64_t>, std::vector<int64_t>, int>> sources;
+
+  bool operator<(const StateKey& other) const {
+    return std::tie(device, type, pools, sources) < std::tie(other.device, other.type, other.pools, other.sources);
+  }
+};
 
 namespace {
 
@@ -26,6 +40,35 @@ namespace artifact = ::rbln::artifact;
 constexpr size_t kBindCache = 8;
 
 std::atomic<uint64_t> run_clock{0};
+
+// The tensors of state the process holds on devices, which the functions that hold one alike
+// share. Each function holding one holds the torch tensors it is made from, so no other tensor
+// takes their memory while it lives.
+class StateTensors {
+ public:
+  static StateTensors& get() {
+    static StateTensors tensors;
+    return tensors;
+  }
+
+  std::shared_ptr<rt::Tensor> find(const StateKey& key) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = held_.find(key);
+    return it == held_.end() ? nullptr : it->second.lock();
+  }
+
+  void add(StateKey key, const std::shared_ptr<rt::Tensor>& tensor) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto it = held_.begin(); it != held_.end();) {
+      it = it->second.expired() ? held_.erase(it) : std::next(it);
+    }
+    held_[std::move(key)] = tensor;
+  }
+
+ private:
+  std::mutex mutex_;
+  std::map<StateKey, std::weak_ptr<rt::Tensor>> held_;
+};
 
 const rt::Flag<int64_t> kCompiledOps(
     "TORCH_RBLN_COMPILED_OPS",
@@ -159,7 +202,7 @@ OpFunction::OpFunction(
       if (it == state.end()) {
         throw std::invalid_argument(arg.name + " is made from " + source + ", which is neither an input nor state");
       }
-      state_values_[source] = it->second.cpu().contiguous();
+      state_values_[source] = it->second;
     }
     state_args_.push_back(index);
   }
@@ -223,10 +266,11 @@ rt::Binding OpFunction::over(
 std::shared_ptr<rt::HostTensor> OpFunction::encoded(size_t index) const {
   const auto& arg = fn_->artifact().args[index];
   auto host = fn_->emptyHostLike(index);
+  std::vector<at::Tensor> values;
   std::vector<rt::HostArray> sources;
   for (const auto& source : arg.sources) {
-    const auto& value = state_values_.at(source);
-    sources.push_back({const_cast<void*>(value.const_data_ptr()), value.sizes().vec()});
+    values.push_back(state_values_.at(source).cpu().contiguous());
+    sources.push_back({values.back().data_ptr(), values.back().sizes().vec()});
   }
   fn_->encode(index, sources, *host);
   return host;
@@ -267,27 +311,70 @@ std::vector<size_t> OpFunction::with_page_sharers(std::vector<size_t> args) cons
   return args;
 }
 
+StateKey OpFunction::state_key(size_t index, const rt::Device& device) const {
+  const auto& arg = fn_->artifact().args[index];
+  StateKey key{device.id(), artifact::typeId(arg), {}, {}};
+  for (uint32_t shard = 0; shard < arg.shards.size(); ++shard) {
+    auto pooled = fn_->poolOf(index, shard);
+    key.pools.push_back(pooled ? fn_->artifact().pools[pooled->first].id : "");
+  }
+  for (const auto& source : arg.sources) {
+    const auto& value = state_values_.at(source);
+    key.sources.emplace_back(
+        value.const_data_ptr(),
+        value._version(),
+        value.sizes().vec(),
+        value.strides().vec(),
+        static_cast<int>(value.scalar_type()));
+  }
+  return key;
+}
+
 void OpFunction::bind_state(const std::vector<Slot*>& slots, const std::vector<size_t>& args) const {
   if (args.empty()) {
     return;
   }
-  std::vector<std::vector<std::shared_ptr<rt::Tensor>>> on_device;
+  // Args whose shards share pages are held in one buffer, so they are found or made together.
+  std::map<size_t, std::vector<size_t>> groups;
+  for (const auto index : args) {
+    auto pooled = fn_->poolOf(index, 0);
+    groups[pooled ? pooled->first : fn_->artifact().pools.size() + index].push_back(index);
+  }
+  std::map<size_t, std::shared_ptr<rt::HostTensor>> hosts;
   for (auto* slot : slots) {
-    on_device.push_back(fn_->emptyLike(args, {slot->device}));
-  }
-  for (size_t k = 0; k < args.size(); ++k) {
-    auto host = encoded(args[k]);
-    for (auto& tensors : on_device) {
-      rt::copy(*tensors[k], *host);
+    std::map<size_t, std::shared_ptr<rt::Tensor>> tensors;
+    std::vector<size_t> missing;
+    for (const auto& [group, members] : groups) {
+      std::vector<std::shared_ptr<rt::Tensor>> found;
+      for (const auto index : members) {
+        if (auto tensor = StateTensors::get().find(state_key(index, *slot->device))) {
+          found.push_back(std::move(tensor));
+        }
+      }
+      if (found.size() == members.size()) {
+        for (size_t k = 0; k < members.size(); ++k) {
+          tensors[members[k]] = found[k];
+        }
+      } else {
+        missing.insert(missing.end(), members.begin(), members.end());
+      }
     }
-  }
-  for (size_t i = 0; i < slots.size(); ++i) {
+    auto made = fn_->emptyLike(missing, {slot->device});
+    for (size_t k = 0; k < missing.size(); ++k) {
+      auto& host = hosts[missing[k]];
+      if (!host) {
+        host = encoded(missing[k]);
+      }
+      rt::copy(*made[k], *host);
+      StateTensors::get().add(state_key(missing[k], *slot->device), made[k]);
+      tensors[missing[k]] = made[k];
+    }
     std::vector<std::pair<std::string, rt::Binding>> bound;
-    for (size_t k = 0; k < args.size(); ++k) {
-      bound.emplace_back(fn_->artifact().args[args[k]].name, rt::Binding(on_device[i][k]));
+    for (const auto index : args) {
+      bound.emplace_back(fn_->artifact().args[index].name, rt::Binding(tensors.at(index)));
     }
-    std::lock_guard<std::mutex> slot_lock(slots[i]->mutex);
-    slots[i]->executor->bind(bound);
+    std::lock_guard<std::mutex> slot_lock(slot->mutex);
+    slot->executor->bind(bound);
   }
 }
 
@@ -296,7 +383,7 @@ void OpFunction::set_state(const std::map<std::string, at::Tensor>& values) {
   for (const auto& [name, value] : values) {
     auto it = state_values_.find(name);
     TORCH_CHECK(it != state_values_.end(), "the function is made from no state named ", name);
-    it->second = value.cpu().contiguous();
+    it->second = value;
   }
   const auto& args = fn_->artifact().args;
   std::vector<size_t> changed;
@@ -394,8 +481,9 @@ std::optional<std::vector<at::Tensor>> OpFunction::run(
       const auto& arg = args[*result.arg];
       auto buffer = rt::HostBuffer::allocate(logical_nbytes(arg));
       bound.emplace_back(arg.name, over_torch_bytes(arg, buffer));
-      results.push_back(at::from_blob(
-          buffer->data(), outputs_[k].shape, [buffer](void*) {}, at::TensorOptions().dtype(outputs_[k].dtype)));
+      results.push_back(
+          at::from_blob(
+              buffer->data(), outputs_[k].shape, [buffer](void*) {}, at::TensorOptions().dtype(outputs_[k].dtype)));
       on_host = true;
       continue;
     }
@@ -480,9 +568,9 @@ void init_op_function_bindings(pybind11::module& module) {
           "Internal: replaces the state `values` names and writes the args made from it anew")
       .def(
           "run",
-          [](OpFunction& self, const std::vector<at::Tensor>& inputs, const std::vector<std::optional<at::Tensor>>& out) {
-            return self.run(inputs, out);
-          },
+          [](OpFunction& self,
+             const std::vector<at::Tensor>& inputs,
+             const std::vector<std::optional<at::Tensor>>& out) { return self.run(inputs, out); },
           py::arg("inputs"),
           py::arg("out") = std::vector<std::optional<at::Tensor>>{},
           py::call_guard<py::gil_scoped_release>(),

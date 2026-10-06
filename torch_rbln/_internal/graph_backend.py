@@ -97,7 +97,7 @@ class CompiledGraph:
 
     def _write_state(self, state: dict[str, torch.Tensor]) -> None:
         now = {name: (t.data_ptr(), t._version) for name, t in state.items()}
-        changed = {name: state[name].cpu() for name, seen in now.items() if self._seen.get(name) != seen}
+        changed = {name: state[name] for name, seen in now.items() if self._seen.get(name) != seen}
         if self._function is None:
             self._fn.check_specializations(changed)
             self._function = _C._OpFunction(
