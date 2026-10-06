@@ -60,10 +60,11 @@ class TestGraphWrittenInputs(TestCase):
         self.assertEqual(given.cpu(), scaled, atol=2e-2, rtol=2e-2)
 
     def test_a_round_trip_through_the_host_raises_when_disabled(self):
-        cache = torch.zeros(SHAPE, dtype=torch.float16, device="rbln")
+        # A view off the start of its allocation is not one a program keeps as the device holds it.
+        flat = torch.zeros(1 + torch.Size(SHAPE).numel(), dtype=torch.float16, device="rbln")
         with mock.patch.dict(os.environ, {"TORCH_RBLN_DISABLE_FALLBACK": "host_round_trip"}):
             with self.assertRaisesRegex(RuntimeError, "input cache is written in place"):
-                self._write(cache)
+                self._write(flat[1:].view(SHAPE))
 
 
 if __name__ == "__main__":

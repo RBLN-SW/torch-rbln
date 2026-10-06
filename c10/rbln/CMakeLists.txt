@@ -8,6 +8,7 @@ set(sources
   RBLNFunctions.cpp
   RBLNHostBatch.cpp
   RBLNGenerator.cpp
+  RBLNHeld.cpp
   RBLNHooksInterface.cpp
   RBLNLogging.cpp
   RBLNPinnedAllocator.cpp
@@ -24,6 +25,7 @@ set(headers
   RBLNFunctions.h
   RBLNHostBatch.h
   RBLNGenerator.h
+  RBLNHeld.h
   RBLNHooksInterface.h
   RBLNLogging.h
   RBLNMacros.h

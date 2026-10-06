@@ -1,14 +1,17 @@
 #include <c10/rbln/RBLNCachingAllocator.h>
 #include <c10/rbln/RBLNFunctions.h>
+#include <c10/rbln/RBLNHeld.h>
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNRuntime.h>
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
-#include <map>
 #include <tuple>
 #include <vector>
 
@@ -34,7 +37,20 @@ struct Block {
   std::vector<rt::Event> pending;
   Block* prev = nullptr;
   Block* next = nullptr;
+  // How a program holds the allocation, if one does.
+  std::shared_ptr<const held::Type> held;
 };
+
+// The live allocations programs hold, so that locating bytes looks for one only while there is.
+std::atomic<int64_t> held_allocations{0};
+
+// Taken while an allocation is put in a held type or back, so that no other thread locates the
+// bytes of one halfway; the thread converting locates them as they are.
+std::recursive_mutex& held_mutex() {
+  static std::recursive_mutex mutex;
+  return mutex;
+}
+thread_local bool converting = false;
 
 struct ByStreamSize {
   bool operator()(const Block* a, const Block* b) const {
@@ -85,9 +101,15 @@ class DeviceCache {
     return reinterpret_cast<void*>(block->ptr);
   }
 
-  // The bytes of the live allocation `ptr` lies in from `ptr` on; one past the end is the end
-  // of an empty view there.
-  std::optional<uint64_t> available(uintptr_t ptr) {
+  struct Found {
+    uintptr_t start = 0;
+    uint64_t available = 0;
+    std::shared_ptr<const held::Type> held;
+  };
+
+  // The live allocation `ptr` lies in: its first byte, the bytes from `ptr` to its end, and how a
+  // program holds it. One past the end is the end of an empty view there.
+  std::optional<Found> find(uintptr_t ptr) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = active_.upper_bound(ptr);
     if (it == active_.begin()) {
@@ -98,7 +120,16 @@ class DeviceCache {
     if (ptr - block->ptr > block->requested) {
       return std::nullopt;
     }
-    return block->ptr + block->requested - ptr;
+    return Found{block->ptr, block->ptr + block->requested - ptr, block->held};
+  }
+
+  void set_held(uintptr_t start, std::shared_ptr<const held::Type> type) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = active_.find(start);
+    RBLN_CHECK(it != active_.end(), "{} starts no live RBLN allocation", fmt::ptr(reinterpret_cast<void*>(start)));
+    auto& held = it->second->held;
+    held_allocations += static_cast<int64_t>(type != nullptr) - static_cast<int64_t>(held != nullptr);
+    held = std::move(type);
   }
 
   void release(uintptr_t ptr) {
@@ -108,6 +139,10 @@ class DeviceCache {
     Block* block = it->second;
     active_.erase(it);
     block->allocated = false;
+    if (block->held) {
+      block->held.reset();
+      --held_allocations;
+    }
     decrease(stats_.allocation, block->small, 1);
     decrease(stats_.allocated_bytes, block->small, block->size);
     decrease(stats_.requested_bytes, block->small, block->requested);
@@ -368,21 +403,48 @@ void record_stream(void* ptr, c10::Stream stream) {
   }
 }
 
-std::optional<Location> try_locate(const void* ptr) noexcept {
-  try {
-    auto location = locate_segment(ptr);
-    if (!location) {
-      return std::nullopt;
-    }
-    const auto available = cache(location->device_index).available(reinterpret_cast<uintptr_t>(ptr));
-    if (!available) {
-      return std::nullopt;
-    }
-    location->available = *available;
-    return location;
-  } catch (...) {
+std::optional<Held> try_locate_held(const void* ptr) {
+  auto location = locate_segment(ptr);
+  if (!location) {
     return std::nullopt;
   }
+  auto found = cache(location->device_index).find(reinterpret_cast<uintptr_t>(ptr));
+  if (!found) {
+    return std::nullopt;
+  }
+  location->available = found->available;
+  return Held{std::move(*location), reinterpret_cast<void*>(found->start), std::move(found->held)};
+}
+
+void convert_held(const void* start, const std::function<void()>& convert, std::shared_ptr<const held::Type> type) {
+  std::lock_guard<std::recursive_mutex> lock(held_mutex());
+  auto location = locate_segment(start);
+  RBLN_CHECK(location.has_value(), "{} is not RBLN device memory", fmt::ptr(start));
+  converting = true;
+  try {
+    convert();
+  } catch (...) {
+    converting = false;
+    throw;
+  }
+  converting = false;
+  cache(location->device_index).set_held(reinterpret_cast<uintptr_t>(start), std::move(type));
+}
+
+std::optional<Location> try_locate(const void* ptr) {
+  if (held_allocations.load() == 0 || converting) {
+    auto found = try_locate_held(ptr);
+    return found ? std::optional<Location>(std::move(found->location)) : std::nullopt;
+  }
+  std::lock_guard<std::recursive_mutex> lock(held_mutex());
+  auto found = try_locate_held(ptr);
+  if (!found) {
+    return std::nullopt;
+  }
+  if (found->type) {
+    convert_held(found->start, [&] { held::release(found->start, *found->type); }, nullptr);
+  }
+  return std::move(found->location);
 }
 
 Location locate(const void* ptr) {

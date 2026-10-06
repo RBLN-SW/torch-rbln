@@ -5,6 +5,7 @@
 #include <c10/rbln/RBLNCachingAllocator.h>
 #include <c10/rbln/RBLNFallbackConfig.h>
 #include <c10/rbln/RBLNFunctions.h>
+#include <c10/rbln/RBLNHeld.h>
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNRuntime.h>
 #include <rbln/artifact/file.h>
@@ -195,8 +196,9 @@ OpFunction::OpFunction(
     const std::string& bytes,
     const std::vector<std::string>& inputs,
     const std::map<std::string, at::Tensor>& state,
-    std::vector<bool> host_results)
-    : num_inputs_(inputs.size()) {
+    std::vector<bool> host_results,
+    bool hold_written)
+    : num_inputs_(inputs.size()), hold_written_(hold_written) {
   auto owner = std::make_shared<const std::string>(bytes);
   fn_ = rt::Function::from(
       artifact::deserialize(reinterpret_cast<const uint8_t*>(owner->data()), owner->size(), owner));
@@ -218,14 +220,7 @@ OpFunction::OpFunction(
       continue;
     }
     if (arg.sources.size() == 1 && input_of.count(arg.sources.front())) {
-      const bool through_host = !holds_as_torch(arg);
-      if (through_host && arg.access != artifact::Access::kRead && c10::rbln::is_fallback_disabled("host_round_trip")) {
-        throw c10::rbln::FallbackDisabled(
-            "input " + arg.sources.front() +
-            " is written in place, but the device holds it otherwise than torch holds the tensor, so every run "
-            "would take it through the host (TORCH_RBLN_DISABLE_FALLBACK=host_round_trip)");
-      }
-      bindings_.push_back({index, input_of.at(arg.sources.front()), through_host});
+      bindings_.push_back({index, input_of.at(arg.sources.front()), !holds_as_torch(arg)});
       input_arg.emplace(arg.name, input_of.at(arg.sources.front()));
       continue;
     }
@@ -305,6 +300,50 @@ rt::Binding OpFunction::over(
   }
   return rt::Binding(
       over_torch_bytes(arg, tensor.sizes().vec(), rt::DeviceBuffer::view(location->buffer, location->offset, nbytes)));
+}
+
+rt::Binding OpFunction::held(const at::Tensor& tensor, size_t index, c10::DeviceIndex device_index) const {
+  const auto& arg = fn_->artifact().args[index];
+  if (!tensor.defined() || tensor.numel() == 0 || !tensor.device().is_privateuseone() ||
+      tensor.device().index() != device_index || arg.shards.size() != 1 || fn_->poolOf(index, 0)) {
+    return {};
+  }
+  const char* dtype = dtype_name(tensor.scalar_type());
+  if (dtype == nullptr || arg.logical.dtype != dtype || !fits(arg, tensor.sizes()) || !tensor.is_contiguous()) {
+    return {};
+  }
+  // A program holds a whole allocation, that of a tensor over all of it.
+  const auto& storage = tensor.storage();
+  if (tensor.const_data_ptr() != storage.data() || tensor.nbytes() != storage.nbytes()) {
+    return {};
+  }
+  auto found = c10::rbln::caching::try_locate_held(tensor.const_data_ptr());
+  auto shape = tensor.sizes().vec();
+  const auto nbytes = artifact::minNbytes(arg, arg.shards.front(), shape);
+  if (!found || found->start != tensor.const_data_ptr() || found->location.available < nbytes ||
+      (arg.alignment > 1 && (found->location.buffer->address() + found->location.offset) % arg.alignment != 0)) {
+    return {};
+  }
+  auto id = artifact::typeId(arg);
+  if (found->type) {
+    if (found->type->id != id || found->type->shape != shape) {
+      return {};
+    }
+  } else {
+    if (!hold_written_ || arg.access == artifact::Access::kRead) {
+      return {};
+    }
+    c10::rbln::held::hold(
+        found->start, std::make_shared<const c10::rbln::held::Type>(c10::rbln::held::Type{fn_, index, shape, id}));
+    c10::rbln::prof::record_bounce(c10::rbln::prof::BounceSite::kOpArgThroughHost, tensor.nbytes());
+  }
+  artifact::Logical logical{arg.logical.dtype, std::move(shape), {}};
+  return rt::Binding(
+      std::make_shared<rt::Tensor>(
+          std::move(logical),
+          arg.physical,
+          arg.transform,
+          std::vector{rt::DeviceBuffer::view(found->location.buffer, found->location.offset, nbytes)}));
 }
 
 std::shared_ptr<rt::HostTensor> OpFunction::encoded(size_t index) const {
@@ -484,12 +523,24 @@ std::optional<std::vector<at::Tensor>> OpFunction::run(
   for (const auto& binding : bindings_) {
     rt::Binding tensor;
     if (binding.through_host) {
+      tensor = held(inputs[binding.input], binding.arg, device_index);
+    }
+    if (binding.through_host && missing(tensor)) {
+      const auto& arg = args[binding.arg];
+      const bool written = arg.access != artifact::Access::kRead;
+      if (written && c10::rbln::is_fallback_disabled("host_round_trip")) {
+        throw c10::rbln::FallbackDisabled(
+            "input " + arg.sources.front() +
+            " is written in place, but the device holds it otherwise than torch holds the tensor, and the tensor "
+            "is not one a program keeps as the device holds it, so the run would take it through the host "
+            "(TORCH_RBLN_DISABLE_FALLBACK=host_round_trip)");
+      }
       auto host = encoded(inputs[binding.input], binding.arg);
-      if (host && args[binding.arg].access != artifact::Access::kRead) {
+      if (host && written) {
         written_back.emplace_back(&binding, host);
       }
       tensor = rt::Binding(std::move(host));
-    } else {
+    } else if (!binding.through_host) {
       tensor = over(inputs[binding.input], binding.arg, device_index, &copies);
     }
     if (missing(tensor)) {
@@ -598,15 +649,17 @@ void init_op_function_bindings(pybind11::module& module) {
           py::init([](const py::bytes& function,
                       const std::vector<std::string>& inputs,
                       const std::map<std::string, at::Tensor>& state,
-                      const std::vector<bool>& host_results) {
+                      const std::vector<bool>& host_results,
+                      bool hold_written) {
             std::string bytes = function;
             py::gil_scoped_release release;
-            return std::make_shared<OpFunction>(bytes, inputs, state, host_results);
+            return std::make_shared<OpFunction>(bytes, inputs, state, host_results, hold_written);
           }),
           py::arg("function"),
           py::arg("inputs"),
           py::arg("state") = std::map<std::string, at::Tensor>{},
           py::arg("host_results") = std::vector<bool>{},
+          py::arg("hold_written") = false,
           "Internal: a compiled function run on torch tensors")
       .def_property_readonly("num_inputs", &OpFunction::num_inputs)
       .def_property_readonly("last_run", &OpFunction::last_run)

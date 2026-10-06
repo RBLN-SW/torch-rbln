@@ -26,7 +26,10 @@ struct StateKey;
  * so a torch-rbln tensor binds in place; a CPU tensor, or one off the alignment of its arg, binds
  * through a copy, which goes back into it once the run is done when the run writes the arg. An
  * arg the compiler lays out otherwise goes through the host: a call's tensor is encoded into it,
- * and a result is decoded from it once the run is done.
+ * and a result is decoded from it once the run is done. A tensor a program holds as such an arg
+ * holds it (see c10/rbln/RBLNHeld.h) binds in place instead; with `hold_written`, a tensor over a
+ * whole allocation that a run writes in place is first put so, as a graph writes the same tensor
+ * on every call.
  *
  * `inputs` names the inputs a call passes, in order. The other args are made from state, whose
  * values `state` gives and `set_state` replaces, and are written to each device the function
@@ -45,7 +48,8 @@ class OpFunction {
       const std::string& bytes,
       const std::vector<std::string>& inputs,
       const std::map<std::string, at::Tensor>& state,
-      std::vector<bool> host_results = {});
+      std::vector<bool> host_results = {},
+      bool hold_written = false);
 
   size_t num_inputs() const {
     return num_inputs_;
@@ -108,6 +112,10 @@ class OpFunction {
       size_t arg,
       c10::DeviceIndex device_index,
       std::vector<Copy>* copies) const;
+  // `tensor` in place as arg `arg`, which the compiler lays out otherwise than torch, takes it: a
+  // tensor a program holds as the arg holds it, or, with `hold_written_`, one the arg is written
+  // through, which it holds so first; none for any other.
+  rt::Binding held(const at::Tensor& tensor, size_t arg, c10::DeviceIndex device_index) const;
   // The host tensor of state arg `arg`, encoded from the state now.
   std::shared_ptr<rt::HostTensor> encoded(size_t arg) const;
   // A host tensor of arg `arg` encoded from the value of `tensor`, or none if it is not the arg's.
@@ -124,6 +132,7 @@ class OpFunction {
 
   std::shared_ptr<rt::Function> fn_;
   size_t num_inputs_ = 0;
+  bool hold_written_ = false;
   std::vector<Binding> bindings_;
   std::vector<Result> results_;
   std::vector<Output> outputs_;

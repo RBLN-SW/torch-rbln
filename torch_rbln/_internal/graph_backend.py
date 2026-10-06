@@ -3,7 +3,9 @@
 Dynamo hands over a graph and the tensors of the call it traced. The graph is captured
 with ``rbln.frontend.capture_dynamo`` and compiled for the NPU of those tensors, with every
 input a call passes and every result laid out as torch lays out a contiguous tensor
-(``rbln.LOGICAL``), so torch-rbln tensors bind in place and CPU ones by a copy. The
+(``rbln.LOGICAL``), so torch-rbln tensors bind in place and CPU ones by a copy. An input the
+graph writes in place that the device holds otherwise, such as a float16 KV cache it keeps in
+dlfloat16, is put in the device's type on the first call and bound in place from then on. The
 module's parameters and buffers are the function's state: they are written to the device
 when first seen and again once they change, as another tensor or written in place. A
 result the graph leaves on the CPU comes back on the CPU.
@@ -109,7 +111,11 @@ class CompiledGraph:
         if self._function is None:
             self._fn.check_specializations(changed)
             self._function = _C._OpFunction(
-                self._fn.to_bytes(), self._inputs, {**self._constants, **changed}, self._host_results
+                self._fn.to_bytes(),
+                self._inputs,
+                {**self._constants, **changed},
+                self._host_results,
+                hold_written=True,
             )
         elif changed:
             self._fn.check_specializations(changed)

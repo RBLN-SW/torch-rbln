@@ -8,9 +8,15 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
+
+namespace c10::rbln::held {
+struct Type;
+} // namespace c10::rbln::held
 
 namespace c10::rbln::caching {
 
@@ -32,10 +38,33 @@ C10_RBLN_API void release(void* ptr);
 C10_RBLN_API void record_stream(void* ptr, c10::Stream stream);
 /**
  * @brief Where `ptr` points within the live allocation it lies in, with `available` the bytes
- * from it to the allocation's end; throws, or is none, if it lies in no live allocation.
+ * from it to the allocation's end; throws, or is none, if it lies in no live allocation. What
+ * locates bytes reads or writes them as torch holds a tensor, so an allocation a program holds
+ * otherwise (see RBLNHeld.h) is put back as torch holds it first.
  */
 C10_RBLN_API Location locate(const void* ptr);
-C10_RBLN_API std::optional<Location> try_locate(const void* ptr) noexcept;
+C10_RBLN_API std::optional<Location> try_locate(const void* ptr);
+
+/**
+ * @brief Where `ptr` points, as `try_locate` says, leaving the allocation as it is held: the
+ * allocation's first byte, and how a program holds it, if one does.
+ */
+struct Held {
+  Location location;
+  void* start = nullptr;
+  std::shared_ptr<const held::Type> type;
+};
+C10_RBLN_API std::optional<Held> try_locate_held(const void* ptr);
+
+/**
+ * @brief Runs `convert`, which puts the bytes of the allocation starting at `start` in `type`, or
+ * back as torch holds them when `type` is none, and counts the allocation so until it is freed.
+ * Other threads locating bytes wait while it runs; `convert` locates them as they are.
+ */
+C10_RBLN_API void convert_held(
+    const void* start,
+    const std::function<void()>& convert,
+    std::shared_ptr<const held::Type> type);
 C10_RBLN_API void empty_cache(c10::DeviceIndex device_index);
 C10_RBLN_API c10::CachingDeviceAllocator::DeviceStats device_stats(c10::DeviceIndex device_index);
 // torch.cuda.memory_stats()'s keys, for the aggregate pool.

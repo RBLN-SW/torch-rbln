@@ -286,7 +286,9 @@ c10::DeviceIndex exchange_device_index(c10::DeviceIndex device_index) {
 
 c10::DeviceIndex get_torch_device_id(const void* data) {
   RBLN_CHECK(data != nullptr, "data cannot be nullptr");
-  return caching::locate(data).device_index;
+  auto found = caching::try_locate_held(data);
+  RBLN_CHECK(found.has_value(), "{} is not in live RBLN device memory", fmt::ptr(data));
+  return found->location.device_index;
 }
 
 bool is_dummy_device() {

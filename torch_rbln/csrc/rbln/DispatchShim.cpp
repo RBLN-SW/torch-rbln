@@ -972,13 +972,14 @@ static void bounce_site_capture(uint8_t site) noexcept {
   if (!g_trace_enabled.load(std::memory_order_relaxed)) {
     return;
   }
-  static constexpr std::array<const char*, 6> kNames = {
+  static constexpr std::array<const char*, 7> kNames = {
       "copy_d2d_host_bounce",
       "copy_h2d_staging",
       "copy_h2d_noncontig_dst",
       "strided_v2v_cpu_fallback",
       "host_batch_to_per_entry",
-      "op_arg_through_host"};
+      "op_arg_through_host",
+      "held_tensor_released"};
   static_assert(kNames.size() == c10::rbln::prof::kNumBounceSites, "bounce site names must match the BounceSite enum");
   if (site >= kNames.size()) {
     return;

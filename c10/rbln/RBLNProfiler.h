@@ -39,6 +39,7 @@ enum class BounceSite : uint8_t {
   kStridedV2VFallback, // strided_v2v_copy -> dst.copy_(src.cpu()) bounce   (RBLNStridedV2V.cpp)
   kHostBatchToPerEntry, // batched h2v/v2h_multi rejected -> per-entry       (RBLNHostBatch.cpp)
   kOpArgThroughHost, // op arg not laid out as torch holds it: host encode/decode (OpFunction.cpp)
+  kHeldReleased, // a tensor a graph holds in its own type, put back as torch holds it (RBLNHeld.cpp)
   kNumBounceSites,
 };
 
