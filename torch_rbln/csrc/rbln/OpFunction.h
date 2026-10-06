@@ -70,6 +70,11 @@ class OpFunction {
   void set_state(const std::map<std::string, at::Tensor>& values);
 
   /**
+   * @brief Runs the function's collectives over `communicator`, on every device it runs on.
+   */
+  void set_communicator(std::shared_ptr<rt::Communicator> communicator);
+
+  /**
    * @brief Runs over `inputs`, writing the tensor of `out` given for a result and a new one for
    * each other result, and returns the results; none when a tensor does not hold what the
    * function takes where the function takes it.
@@ -141,6 +146,7 @@ class OpFunction {
   std::mutex slots_mutex_;
   std::map<std::string, at::Tensor> state_values_;
   std::map<c10::DeviceIndex, std::unique_ptr<Slot>> slots_;
+  std::shared_ptr<rt::Communicator> communicator_;
   std::atomic<uint64_t> last_run_{0};
 };
 

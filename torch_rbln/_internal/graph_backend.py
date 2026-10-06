@@ -61,6 +61,27 @@ def _npu(options: dict[str, Any], device: torch.device) -> str:
     return asked or own
 
 
+def _collective_group(gm: torch.fx.GraphModule) -> str | None:
+    """The process group the graph's collectives run over, by name; none for a graph without any.
+
+    A compiled function runs its collectives over one communicator, so a graph over several groups
+    is refused.
+    """
+    names = set()
+    for node in gm.graph.nodes:
+        # Dynamo names an op by its packet, export by an overload of it.
+        packet = getattr(node.target, "_overloadpacket", node.target)
+        if node.op != "call_function" or not getattr(packet, "_qualified_op_name", "").startswith("_c10d_functional::"):
+            continue
+        arguments = [a.name for a in getattr(node.target, "default", node.target)._schema.arguments]
+        if "group_name" in arguments:
+            index = arguments.index("group_name")
+            names.add(node.args[index] if index < len(node.args) else node.kwargs["group_name"])
+    if len(names) > 1:
+        raise NotImplementedError(f"a graph whose collectives run over the process groups {sorted(names)}")
+    return next(iter(names), None)
+
+
 def _host_results(gm: torch.fx.GraphModule) -> list[bool]:
     """Whether each tensor the graph returns is on the CPU, in order."""
     output = next(n for n in gm.graph.nodes if n.op == "output")
@@ -76,8 +97,11 @@ def _host_results(gm: torch.fx.GraphModule) -> list[bool]:
 class CompiledGraph:
     """Runs a graph on the device of its tensors, taking what the graph takes."""
 
-    def __init__(self, fn: Any, graph: Any, module: torch.nn.Module, host_results: list[bool]):
+    def __init__(
+        self, fn: Any, graph: Any, module: torch.nn.Module, host_results: list[bool], group: str | None = None
+    ):
         self._fn = fn
+        self._group = group
         by_name = {inp.name: inp for inp in graph.inputs}
         passed = graph.passed if graph.passed is not None else [inp.name for inp in graph.inputs]
         self._roles = [(by_name[name].kind, name) for name in passed]
@@ -117,6 +141,11 @@ class CompiledGraph:
                 self._host_results,
                 hold_written=True,
             )
+            if self._group is not None:
+                from torch.distributed import distributed_c10d
+
+                process_group = distributed_c10d._resolve_process_group(self._group)
+                self._function.set_communicator(process_group._get_backend(torch.device("rbln")))
         elif changed:
             self._fn.check_specializations(changed)
             made = {name: t for name, t in changed.items() if name in self._sources}
@@ -145,7 +174,9 @@ def _compile_only(fn: Any, device: torch.device, host_results: list[bool]):
 
     def forward(*_: Any) -> tuple[torch.Tensor, ...]:
         return tuple(
-            torch.empty(tuple(a.logical.shape), dtype=getattr(torch, a.logical.dtype), device="cpu" if on_host else device)
+            torch.empty(
+                tuple(a.logical.shape), dtype=getattr(torch, a.logical.dtype), device="cpu" if on_host else device
+            )
             for a, on_host in zip(results, host)
         )
 
@@ -163,7 +194,8 @@ def _program(fn: Any, graph: Any, device: torch.device, example_inputs: list[Any
         if by_name[name].kind == "input"
     )
     outputs = tuple(
-        programs.OutputSpec(tuple(a.logical.shape), getattr(torch, a.logical.dtype), a) for a in (fn.arg(n) for n in fn.results)
+        programs.OutputSpec(tuple(a.logical.shape), getattr(torch, a.logical.dtype), a)
+        for a in (fn.arg(n) for n in fn.results)
     )
     compile_id = torch._guards.CompileContext.current_compile_id()
     return programs.CompiledProgram("" if compile_id is None else str(compile_id), device, fn, inputs, outputs)
@@ -188,7 +220,7 @@ def rbln_graph_backend(gm: torch.fx.GraphModule, example_inputs: list[Any], opti
         programs.submit_program(_program(fn, graph, device, example_inputs))
     if "compile_only" in _modes(options):
         return _compile_only(fn, device, host_results)
-    return CompiledGraph(fn, graph, gm, host_results)
+    return CompiledGraph(fn, graph, gm, host_results, _collective_group(gm))
 
 
 def register() -> None:

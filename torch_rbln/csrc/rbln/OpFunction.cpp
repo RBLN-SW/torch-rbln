@@ -1,5 +1,7 @@
 #include <torch_rbln/csrc/rbln/OpFunction.h>
 
+#include <torch_rbln/csrc/distributed/c10d/rbln/ProcessGroupRBLN.hpp>
+
 #include <ATen/ops/empty.h>
 #include <ATen/ops/from_blob.h>
 #include <c10/rbln/RBLNCachingAllocator.h>
@@ -484,6 +486,15 @@ void OpFunction::set_state(const std::map<std::string, at::Tensor>& values) {
   bind_state(slots, with_page_sharers(std::move(changed)));
 }
 
+void OpFunction::set_communicator(std::shared_ptr<rt::Communicator> communicator) {
+  std::lock_guard<std::mutex> lock(slots_mutex_);
+  communicator_ = std::move(communicator);
+  for (auto& [device_index, slot] : slots_) {
+    std::lock_guard<std::mutex> slot_lock(slot->mutex);
+    slot->executor->setCommunicator(communicator_);
+  }
+}
+
 OpFunction::Slot& OpFunction::slot(c10::DeviceIndex device_index) {
   std::lock_guard<std::mutex> lock(slots_mutex_);
   auto& entry = slots_[device_index];
@@ -493,6 +504,9 @@ OpFunction::Slot& OpFunction::slot(c10::DeviceIndex device_index) {
   auto slot = std::make_unique<Slot>();
   slot->device = c10::rbln::runtime_device(device_index);
   slot->executor = std::make_shared<rt::Executor>(fn_, std::vector{slot->device}, kBindCache);
+  if (communicator_) {
+    slot->executor->setCommunicator(communicator_);
+  }
   bind_state({slot.get()}, state_args_);
   entry = std::move(slot);
   return *entry;
@@ -671,6 +685,14 @@ void init_op_function_bindings(pybind11::module& module) {
           py::arg("values"),
           py::call_guard<py::gil_scoped_release>(),
           "Internal: replaces the state `values` names and writes the args made from it anew")
+      .def(
+          "set_communicator",
+          [](OpFunction& self, const py::object& backend) {
+            self.set_communicator(backend.cast<::c10d::ProcessGroupRBLN&>().communicator());
+          },
+          py::arg("backend"),
+          "Internal: runs the function's collectives over the communicator of `backend`, a "
+          "ProcessGroupRBLN")
       .def(
           "run",
           [](OpFunction& self,

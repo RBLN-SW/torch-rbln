@@ -289,6 +289,14 @@ class TORCH_API ProcessGroupRBLN : public Backend {
   /// @brief The current stream of the group's device, which collectives run on
   c10::Stream currentStream() const;
 
+ public:
+  /// @brief The group's communicator, over which a compiled graph's collectives run as well; none
+  /// for a group of one or one without an NPU.
+  std::shared_ptr<::rbln::runtime::Communicator> communicator() const {
+    return comm_;
+  }
+
+ private:
   /**
    * @brief Enqueue work for asynchronous execution
    * @param work Work object to enqueue
