@@ -101,18 +101,16 @@ def _remap_counts():
     Counted rather than matched against an error message: a frozen mapping is ignored silently
     and only rejected at the next acquisition. The verdict is drawn parent-side
     (:attr:`Probe.remap`), which is where the pool the counts mean anything against is known.
-    Goes through ``rebel._C``, not a torch_rbln API, so a torch_rbln entry point that stopped
-    freezing cannot make these checks pass for the wrong reason.
+    The rbln runtime reads RBLN_DEVICES afresh on every query and keeps no selection of its own,
+    so the freeze is this layer's committed plan, which ``torch.rbln.device_count()`` answers from.
 
     Runs in a forked child: reading the counts rewrites RBLN_DEVICES, the probe body may have
     left threads running (``DataLoader(pin_memory=True)`` keeps a pin-memory thread), and
     setenv/unsetenv beside another thread's getenv is a data race --
     c10/rbln/DeviceMappingManager.h rules out mutating RBLN_* alongside a query at all. The
-    seal is inherited across fork, so the child reads the parent's latch state while its own
+    plan is inherited across fork, so the child reads the parent's committed state while its own
     edits stay private to it.
     """
-    from rebel._C import device_count
-
     def count(value):
         # The alias selects the same pool, so it has to be cleared either way.
         os.environ.pop("RBLN_VISIBLE_DEVICES", None)
@@ -120,7 +118,7 @@ def _remap_counts():
             os.environ.pop("RBLN_DEVICES", None)
         else:
             os.environ["RBLN_DEVICES"] = value
-        return device_count()
+        return torch.rbln.device_count()
 
     read_fd, write_fd = os.pipe()
     child = os.fork()
@@ -179,9 +177,18 @@ print(json.dumps(rec), file=_real_stdout)
 # the mapping layer enforces on a logical index.
 _POOL_SCAN = """\
 import json
-from rebel._C import npu_is_available
+import rbln
 
-print(json.dumps({"ids": [i for i in range(127) if npu_is_available(i)]}))
+
+def exists(npu):
+    try:
+        rbln.npu_name(npu)
+    except Exception:
+        return False
+    return True
+
+
+print(json.dumps({"ids": [i for i in range(127) if exists(i)]}))
 """
 
 
@@ -189,11 +196,10 @@ print(json.dumps({"ids": [i for i in range(127) if npu_is_available(i)]}))
 def _host_pool() -> tuple:
     """Every physical NPU id on this host, scanned in a process of its own.
 
-    The reference a remap verdict is judged against, and it has to be another process. The
-    runtime's RBLN_DEVICES seal is process-local, so once anything here has used a device an
-    in-process query answers with the sealed value -- ``physical_device_count()`` included,
-    since it is the same ``rbln_get_device_count()`` the probe measures -- and the state under
-    test would be deciding its own gate. Stripping the selection variables is what makes the
+    The reference a remap verdict is judged against, and it has to be another process. This
+    layer's committed plan is process-local, so once anything here has used a device an
+    in-process query answers from it -- ``physical_device_count()`` included -- and the state
+    under test would be deciding its own gate. Stripping the selection variables is what makes the
     answer the host rather than a selection of it.
 
     Empty when the runtime, the driver or the NPUs are absent, and when the scan itself fails:
@@ -528,9 +534,8 @@ class TestUpstreamClauses(TestCase):
         initialize the context on any device (result of hasPrimaryContext below
         should not change)."
 
-        ``rbln_register_device_id()`` is documented as "Initializes devices to be used
-        for NPU executions", so calling it from an availability query claims hardware
-        a co-tenant may need.
+        Opening a device creates a driver context on it, so doing so from an availability
+        query claims hardware a co-tenant may need.
         """
         p = run_probe('rec["result"] = torch.rbln.is_available()', HEALTHY)
         if p.ctx is None:
@@ -761,7 +766,7 @@ class TestUpstreamClauses(TestCase):
         ``get_device_properties`` and ``get_device_capability``, and frameworks reach for them
         through the device module (vLLM's XPU platform is
         ``torch.xpu.get_device_name(device_id)``, vllm/platforms/xpu.py). With no RBLN
-        equivalent, vllm-rbln calls ``rebel.get_npu_name()`` directly, bypassing torch, so a
+        equivalent, vllm-rbln calls ``rbln.npu_name()`` directly, bypassing torch, so a
         torch-level policy has nothing to apply to. ``RBLNGuardImpl::getDeviceCapability()``
         already exists on the C++ side.
         """
@@ -826,9 +831,8 @@ class TestUpstreamClauses(TestCase):
         same line: torch/cuda/__init__.py refuses to cache the device count "prior to CUDA
         initialization" and caches it from ``_lazy_init`` onwards.
 
-        Both layers freeze at this same moment -- ``DeviceMappingManager::commit()`` calls
-        ``rbln_register_device_id()``, which reaches ``Context::Create`` and the runtime's
-        latch -- so this also pins that they cannot drift apart.
+        The rbln runtime keeps no selection of its own, so ``DeviceMappingManager::commit()``
+        is the one freeze there is.
         """
         p = run_probe(
             'rec["result"] = float(torch.ones(4, dtype=torch.float16, device="rbln:0").sum().cpu())',
@@ -924,7 +928,7 @@ class TestUpstreamClauses(TestCase):
     def test_a_frozen_mapping_survives_unsetting_the_variable(self):
         """Clearing ``RBLN_DEVICES`` after a device is in use must not un-freeze the mapping.
 
-        The runtime checks the freeze before the environment, so an unset cannot fall back to
+        The committed plan is checked before the environment, so an unset cannot fall back to
         "auto-discover all devices" and quietly widen the pool under live allocations. Pinned
         because it is the escape hatch a remap-rejection check alone would miss: unsetting is
         not a changed value, it is no value.
