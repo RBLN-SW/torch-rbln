@@ -35,6 +35,14 @@ struct Type {
 C10_RBLN_API bool alike(const void* a, const void* b);
 
 /**
+ * @brief The values of `count` elements from `bytes`, held in `type`, into `values`, as the logical
+ * dtype holds them; `encode` is the inverse. `type` is elementwise, so any elements, wherever they
+ * lie, are its elements in a row.
+ */
+C10_RBLN_API void decode(const Type& type, const void* bytes, void* values, size_t count);
+C10_RBLN_API void encode(const Type& type, const void* values, void* bytes, size_t count);
+
+/**
  * @brief While alive, this thread locates held allocations as they are held, as a copy between
  * tensors held `alike` does: it moves their bytes as they are rather than as torch holds them.
  */

@@ -441,6 +441,10 @@ bool locate_as_held(bool value) {
   return std::exchange(as_held, value);
 }
 
+bool locating_as_held() {
+  return as_held;
+}
+
 std::optional<Location> try_locate(const void* ptr) {
   if (held_allocations.load() == 0 || converting || as_held) {
     auto found = try_locate_held(ptr);

@@ -5,6 +5,8 @@
 #include <c10/rbln/RBLNProfiler.h>
 #include <rbln/artifact/function.h>
 
+#include <algorithm>
+#include <cstring>
 #include <functional>
 #include <numeric>
 
@@ -23,7 +25,50 @@ uint64_t logical_nbytes(const Type& type) {
   return static_cast<uint64_t>(numel) * rt::dtypeSize(arg_of(type).logical.dtype);
 }
 
+// Converts `count` elements a chunk at a time, each chunk in a host tensor of a shape the arg takes:
+// whole steps of its dynamic axis, within its range, or its one shape. An elementwise type converts
+// each element by itself, so what pads a chunk does not reach the elements kept.
+void convert(const Type& type, bool encoding, const void* in, void* out, size_t count) {
+  const auto& arg = arg_of(type);
+  RBLN_CHECK(type.elementwise, "arg {} lays its elements out otherwise than torch", arg.name);
+  const auto element = rt::dtypeSize(arg.logical.dtype);
+  auto shape = arg.logical.shape;
+  const auto total = std::accumulate(shape.begin(), shape.end(), int64_t{1}, std::multiplies<>());
+  const auto* axis = arg.logical.dynamic_axes.empty() ? nullptr : &arg.logical.dynamic_axes.front();
+  const auto step = axis ? total / shape[axis->axis] : total;
+  std::vector<uint8_t> values;
+  for (size_t done = 0; done < count;) {
+    if (axis) {
+      auto steps = std::max<int64_t>(axis->min, (static_cast<int64_t>(count - done) + step - 1) / step);
+      shape[axis->axis] = axis->max ? std::min(steps, axis->max) : steps;
+    }
+    const auto capacity = static_cast<size_t>(step * (axis ? shape[axis->axis] : 1));
+    const auto n = std::min(capacity, count - done);
+    auto host = type.fn->emptyHostLike(type.arg, shape);
+    auto* bytes = host->shards().front()->data();
+    values.assign(capacity * element, 0);
+    if (encoding) {
+      std::memcpy(values.data(), static_cast<const uint8_t*>(in) + done * element, n * element);
+      type.fn->encode(type.arg, {{values.data(), shape}}, *host);
+      std::memcpy(static_cast<uint8_t*>(out) + done * element, bytes, n * element);
+    } else {
+      std::memcpy(bytes, static_cast<const uint8_t*>(in) + done * element, n * element);
+      type.fn->decode(type.arg, *host, {values.data(), shape});
+      std::memcpy(static_cast<uint8_t*>(out) + done * element, values.data(), n * element);
+    }
+    done += n;
+  }
+}
+
 } // namespace
+
+void decode(const Type& type, const void* bytes, void* values, size_t count) {
+  convert(type, false, bytes, values, count);
+}
+
+void encode(const Type& type, const void* values, void* bytes, size_t count) {
+  convert(type, true, values, bytes, count);
+}
 
 bool alike(const void* a, const void* b) {
   if (!caching::any_held()) {

@@ -66,6 +66,7 @@ C10_RBLN_API bool any_held();
  * holds them; returns the setting before.
  */
 C10_RBLN_API bool locate_as_held(bool as_held);
+C10_RBLN_API bool locating_as_held();
 
 /**
  * @brief Runs `convert`, which puts the bytes of the allocation starting at `start` in `type`, or

@@ -57,13 +57,35 @@ class TestGraphHeldInputs(TestCase):
         self.assertEqual(_count(region, "held_tensor_released"), 0)
         self._expect({0: 2 * self.x, 1: 6 * self.x})
 
-    def test_reading_the_cache_puts_it_back_until_the_next_call(self):
+    def test_reading_the_cache_leaves_it_held(self):
         self._write(self.compiled, self.x, 0)
         with torch.rbln.explain() as region:
             self._expect({0: 2 * self.x})
+            self._write(self.compiled, self.x, 1)
+        self.assertEqual(_count(region, "held_tensor_released"), 0)
+        self.assertEqual(_count(region, "op_arg_through_host"), 0)
+        self._expect({0: 2 * self.x, 1: 2 * self.x})
+
+    def test_an_eager_op_puts_it_back_until_the_next_call(self):
+        self._write(self.compiled, self.x, 0)
+        with torch.rbln.explain() as region:
+            self.cache.mul_(0.5)
         self.assertEqual(_count(region, "held_tensor_released"), 1)
         self._write(self.compiled, self.x, 1)
-        self._expect({0: 2 * self.x, 1: 2 * self.x})
+        self._expect({0: self.x, 1: 2 * self.x})
+
+    def test_blocks_read_and_written_on_the_host_stay_held(self):
+        # A KV connector stages blocks through host buffers this way.
+        self._write(self.compiled, self.x, 0)
+        read = torch.empty_like(self.x)
+        y = torch.randn_like(self.x)
+        with torch.rbln.explain() as region:
+            torch._foreach_copy_([read], [self.cache[:, 0]])
+            torch._foreach_copy_([self.cache[:, 3]], [y])
+            self._write(self.compiled, self.x, 1)
+        self.assertEqual(_count(region, "held_tensor_released"), 0)
+        self.assertEqual(read, 2 * self.x, atol=5e-2, rtol=5e-2)
+        self._expect({0: 2 * self.x, 1: 2 * self.x, 3: y})
 
     def test_an_eager_write_lands_in_the_held_cache(self):
         self._write(self.compiled, self.x, 0)
