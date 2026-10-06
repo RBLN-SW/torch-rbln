@@ -33,7 +33,7 @@ namespace c10::rbln::prof {
 // One class of hidden host-bounce / fallback incident. Each is a cold branch
 // confirmed (file:line) to already pay a host round-trip or staging alloc.
 enum class BounceSite : uint8_t {
-  kRbln2RblnIndirect = 0, // copy_: non-direct v2v -> v2h + h2v host bounce   (RBLNCopy.cpp)
+  kRbln2RblnIndirect = 0, // copy_: non-direct v2v -> v2h + h2v host bounce   (RBLNCopy.cpp, RBLNStridedV2V.cpp)
   kCpu2RblnStaging, // copy_: cpu src staged via at::empty + cpu copy   (RBLNCopy.cpp)
   kCpu2RblnNoncontigDst, // copy_: non-contig rbln dst pulled to host + h2v   (RBLNCopy.cpp)
   kStridedV2VFallback, // strided_v2v_copy -> dst.copy_(src.cpu()) bounce   (RBLNStridedV2V.cpp)

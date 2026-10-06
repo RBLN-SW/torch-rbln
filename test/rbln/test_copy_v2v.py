@@ -460,6 +460,16 @@ class TestCopyV2V(TestCase):
         dst_dev.copy_(src_view)
         _eq(dst_dev, src_cpu[:, ::2])
 
+    def test_a_transpose_of_many_element_runs_goes_through_the_host(self):
+        """A transpose moves one element per run; the host gathers 128Ki of them faster than the
+        copy engine moves them one by one."""
+        src_cpu = torch.randn(512, 256).to(torch.float16)
+        with torch.rbln.explain() as region:
+            out = _to_dev(src_cpu).t().contiguous()
+        site = region.dump()["hidden_host_bounce"]["by_site"]["copy_d2d_host_bounce"]
+        self.assertEqual(site["count"], 1)
+        _eq(out, src_cpu.t())
+
     # ---- smoke: full coverage parametrize for hot path combinations ----
 
     @dtypes(*ENGINE_DTYPES)

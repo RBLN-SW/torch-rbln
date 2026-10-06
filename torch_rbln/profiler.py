@@ -100,8 +100,9 @@ _FALLBACK_REASON_NAMES = ("dtype-not-fp16", "nan/inf input", "all-scalar inputs"
 # verdict() time, so it adds zero runtime cost.
 _REMEDY: dict[str, str] = {
     "copy_d2d_host_bounce": (
-        "device->device copy_ that casts dtype, broadcasts, or crosses devices non-contiguously went via "
-        "host; cast/broadcast where the data is produced, or make a cross-device copy contiguous"
+        "device->device copy_ that casts dtype, broadcasts, crosses devices non-contiguously, or moves runs too "
+        "small for the copy engine (a transpose) went via host; cast/broadcast where the data is produced, make a "
+        "cross-device copy contiguous, or transpose inside a compiled graph"
     ),
     "copy_h2d_staging": (
         "cpu source converted on the host before h2v (its dtype, shape or contiguity differs from the dst); "

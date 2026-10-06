@@ -6,13 +6,56 @@
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/util/Exception.h>
+#include <rbln/runtime/device.h>
 
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <string_view>
 #include <vector>
 
 namespace at::native::rbln {
+
+namespace {
+
+// Past this many runs the runtime would move off its stream alignment, one command of some 15 us
+// each, the host reads the span, gathers it and writes it back faster, at about a millisecond a
+// megabyte.
+constexpr int64_t kMaxUnstreamedRuns = 256;
+
+// The runs a strided copy of `src` into `dst` moves: dims [inner_start, rank) are contiguous in
+// both and make one run of `bytes`, and the outer dims repeat it `count` times.
+// `streamed` when every run starts and ends on the runtime's stream alignment in both.
+struct Runs {
+  int64_t inner_start = 0;
+  size_t bytes = 0;
+  int64_t count = 1;
+  bool streamed = false;
+};
+
+Runs runs_of(const at::Tensor& dst, const at::Tensor& src) {
+  constexpr uint64_t kAlignment = ::rbln::runtime::Device::kStreamedCopyAlignment;
+  const auto sizes = dst.sizes();
+  const auto elm = static_cast<uint64_t>(dst.element_size());
+  Runs runs;
+  runs.inner_start = common_inner_start(sizes, src.strides(), dst.strides());
+  int64_t inner_elems = 1;
+  for (int64_t i = runs.inner_start; i < dst.dim(); ++i) {
+    inner_elems *= sizes[i];
+  }
+  runs.bytes = static_cast<size_t>(inner_elems) * elm;
+  runs.streamed = runs.bytes % kAlignment == 0 && reinterpret_cast<uintptr_t>(src.const_data_ptr()) % kAlignment == 0 &&
+      reinterpret_cast<uintptr_t>(dst.const_data_ptr()) % kAlignment == 0;
+  for (int64_t i = 0; i < runs.inner_start; ++i) {
+    runs.count *= sizes[i];
+    for (const auto stride : {src.stride(i), dst.stride(i)}) {
+      runs.streamed = runs.streamed && (static_cast<uint64_t>(std::abs(stride)) * elm) % kAlignment == 0;
+    }
+  }
+  return runs;
+}
+
+} // namespace
 
 void strided_v2v_copy(const at::Tensor& dst, const at::Tensor& src, c10::rbln::V2VBatch& batch) {
   RBLN_SCOPE_GUARD();
@@ -66,16 +109,11 @@ void strided_v2v_copy(const at::Tensor& dst, const at::Tensor& src, c10::rbln::V
   const auto src_strides = src.strides();
   const auto dst_strides = dst.strides();
 
-  const int64_t inner_start = common_inner_start(sizes, src_strides, dst_strides);
-
-  // Inner block size = product of dims [inner_start, rank). May be 1 if no
-  // joint contig suffix exists (e.g. both sides non-contig at the innermost
-  // non-size-1 dim) — that is correct, just slow.
-  int64_t inner_block_elems = 1;
-  for (int64_t i = inner_start; i < rank; ++i) {
-    inner_block_elems *= sizes[i];
-  }
-  const size_t inner_block_bytes = static_cast<size_t>(inner_block_elems) * elm;
+  // The inner block may be a single element if no joint contig suffix exists (e.g. both sides
+  // non-contig at the innermost non-size-1 dim) — that is correct, just slow.
+  const auto runs = runs_of(dst, src);
+  const int64_t inner_start = runs.inner_start;
+  const size_t inner_block_bytes = runs.bytes;
 
   // Outer description (dims [0, inner_start)). Byte-strides; stride 0
   // (broadcast) is preserved verbatim so the same source memory replicates
@@ -110,6 +148,15 @@ void strided_v2v_copy(const at::Tensor& dst, const at::Tensor& src, c10::rbln::V
 }
 
 void strided_v2v_copy(const at::Tensor& dst, const at::Tensor& src) {
+  if (dst.dim() > 0 && !(dst.is_contiguous() && src.is_contiguous()) && !is_same_view(dst, src)) {
+    const auto runs = runs_of(dst, src);
+    if (!runs.streamed && runs.count > kMaxUnstreamedRuns) {
+      c10::rbln::prof::record_bounce(
+          c10::rbln::prof::BounceSite::kRbln2RblnIndirect, static_cast<uint64_t>(src.numel()) * src.element_size());
+      dst.copy_(get_cpu_copy_of_rbln_tensor(src));
+      return;
+    }
+  }
   c10::rbln::V2VBatch batch;
   strided_v2v_copy(dst, src, batch);
   submit_or_fallback(batch, "strided_v2v_copy", [&] { dst.copy_(src.cpu()); });

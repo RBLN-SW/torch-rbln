@@ -44,7 +44,9 @@ void strided_v2v_copy(
 
 /**
  * @brief Convenience overload: allocates a temporary batch and submits it
- * inline. Use the batch-aware overload for multi-step kernels.
+ * inline. Use the batch-aware overload for multi-step kernels. A copy of many
+ * runs off the runtime's stream alignment, such as a transpose, goes through the
+ * host instead, which gathers them faster than the runtime moves them one by one.
  */
 void strided_v2v_copy(const at::Tensor& dst, const at::Tensor& src);
 
