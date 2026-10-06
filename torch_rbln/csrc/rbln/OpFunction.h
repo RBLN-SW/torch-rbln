@@ -23,9 +23,10 @@ struct StateKey;
 /**
  * @brief A compiled function run on torch tensors: an eager op, or a graph torch.compile hands
  * over. The args a call's tensors bind to hold their values as torch holds a contiguous tensor,
- * so a torch-rbln tensor binds in place; a CPU tensor is copied to the host memory the runtime
- * moves. An arg the compiler lays out otherwise goes through the host: a call's tensor is
- * encoded into it, and a result is decoded from it once the run is done.
+ * so a torch-rbln tensor binds in place; a CPU tensor, or one off the alignment of its arg, binds
+ * through a copy, which goes back into it once the run is done when the run writes the arg. An
+ * arg the compiler lays out otherwise goes through the host: a call's tensor is encoded into it,
+ * and a result is decoded from it once the run is done.
  *
  * `inputs` names the inputs a call passes, in order. The other args are made from state, whose
  * values `state` gives and `set_state` replaces, and are written to each device the function
@@ -92,14 +93,21 @@ class OpFunction {
     std::shared_ptr<rt::Device> device;
     std::shared_ptr<rt::Executor> executor;
   };
+  // A tensor a run binds through a copy of it, which goes back into the tensor once the run is
+  // done when the run writes the arg.
+  struct Copy {
+    at::Tensor tensor;
+    at::Tensor copy;
+    bool written = false;
+  };
 
-  // `tensor` as arg `arg` takes it, a CPU one copied to the host, or none if it is not the arg's;
-  // with `staged`, one held where the arg cannot take it is copied, and `staged` keeps the copy.
+  // `tensor` as arg `arg` takes it, or none if it is not the arg's; with `copies`, a CPU tensor,
+  // or one held where the arg cannot take it, binds through a copy that `copies` keeps.
   rt::Binding over(
       const at::Tensor& tensor,
       size_t arg,
       c10::DeviceIndex device_index,
-      std::vector<at::Tensor>* staged) const;
+      std::vector<Copy>* copies) const;
   // The host tensor of state arg `arg`, encoded from the state now.
   std::shared_ptr<rt::HostTensor> encoded(size_t arg) const;
   // A host tensor of arg `arg` encoded from the value of `tensor`, or none if it is not the arg's.

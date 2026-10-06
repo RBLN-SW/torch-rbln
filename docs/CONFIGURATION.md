@@ -51,7 +51,7 @@ export TORCH_RBLN_DEPLOY=ON
 
 By default, `torch-rbln` falls back to CPU execution when it encounters unsupported operations or compilation errors.
 The `TORCH_RBLN_DISABLE_FALLBACK` environment variable allows you to selectively disable these fallbacks so that errors are raised instead.
-The variable is read on every fallback check, so changes take effect immediately without restarting the process. This makes it possible to toggle fallback behavior dynamically at runtime — for example, tightening checks for a specific code path and relaxing them afterward.
+The variable is read on every fallback check, so changes take effect immediately without restarting the process. This makes it possible to toggle fallback behavior dynamically at runtime — for example, tightening checks for a specific code path and relaxing them afterward. The error a disabled fallback raises is never caught by another fallback: a compiled graph that raises it does not run on CPU instead.
 
 ```bash
 export TORCH_RBLN_DISABLE_FALLBACK=compile_error,unsupported_op
@@ -62,6 +62,7 @@ The value is a **comma-separated list** of fallback categories to disable:
 | Category             | Fallback behavior (default)                              | When disabled                                         |
 |----------------------|----------------------------------------------------------|-------------------------------------------------------|
 | `compile_error`      | A graph or eager op the compiler cannot build runs on CPU | Raises the compilation error directly                 |
+| `host_round_trip`    | An input a compiled function writes in place, which the device holds otherwise than torch holds the tensor, goes through the host on every run | Raises when the function is first run, naming the input |
 | `non_blocking_copy`  | Non-blocking copy silently falls back to blocking copy   | Raises an error instead of degrading to blocking copy |
 | `strided_copy_error` | Batched strided copy failures fall back to CPU execution | Raises the underlying error directly                  |
 | `unsupported_op`     | Unsupported RBLN ops silently fall back to CPU execution | Raises an error listing the unsupported operator      |

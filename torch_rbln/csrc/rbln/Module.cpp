@@ -399,6 +399,7 @@ void register_internal_api(py::module_& module) {
       "_is_fallback_disabled",
       &c10::rbln::is_fallback_disabled,
       "Internal: check if specified fallback category is disabled");
+  pybind11::register_exception<c10::rbln::FallbackDisabled>(module, "FallbackDisabledError", PyExc_RuntimeError);
 
   // torch.profiler (kineto) integration
   module.def(

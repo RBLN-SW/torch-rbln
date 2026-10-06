@@ -3,6 +3,7 @@
 #include <ATen/ops/empty.h>
 #include <ATen/ops/from_blob.h>
 #include <c10/rbln/RBLNCachingAllocator.h>
+#include <c10/rbln/RBLNFallbackConfig.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNRuntime.h>
@@ -193,7 +194,14 @@ OpFunction::OpFunction(
     }
     if (arg.sources.size() == 1 && input_of.count(arg.sources.front())) {
       require_static(arg);
-      bindings_.push_back({index, input_of.at(arg.sources.front()), !holds_as_torch(arg)});
+      const bool through_host = !holds_as_torch(arg);
+      if (through_host && arg.access != artifact::Access::kRead && c10::rbln::is_fallback_disabled("host_round_trip")) {
+        throw c10::rbln::FallbackDisabled(
+            "input " + arg.sources.front() +
+            " is written in place, but the device holds it otherwise than torch holds the tensor, so every run "
+            "would take it through the host (TORCH_RBLN_DISABLE_FALLBACK=host_round_trip)");
+      }
+      bindings_.push_back({index, input_of.at(arg.sources.front()), through_host});
       input_arg.emplace(arg.name, input_of.at(arg.sources.front()));
       continue;
     }
@@ -231,7 +239,7 @@ rt::Binding OpFunction::over(
     const at::Tensor& tensor,
     size_t index,
     c10::DeviceIndex device_index,
-    std::vector<at::Tensor>* staged) const {
+    std::vector<Copy>* copies) const {
   const auto& arg = fn_->artifact().args[index];
   if (!tensor.defined()) {
     return {};
@@ -242,9 +250,18 @@ rt::Binding OpFunction::over(
     return {};
   }
   const auto nbytes = logical_nbytes(arg);
+  const bool read = arg.access != artifact::Access::kWrite;
+  const bool written = arg.access != artifact::Access::kRead;
   if (tensor.device().is_cpu()) {
+    if (!copies) {
+      return {};
+    }
     auto buffer = rt::HostBuffer::allocate(nbytes);
-    std::memcpy(buffer->data(), tensor.const_data_ptr(), nbytes);
+    if (read) {
+      std::memcpy(buffer->data(), tensor.const_data_ptr(), nbytes);
+    }
+    copies->push_back(
+        {tensor, at::from_blob(buffer->data(), tensor.sizes(), [buffer](void*) {}, tensor.options()), written});
     return rt::Binding(over_torch_bytes(arg, std::move(buffer)));
   }
   if (!tensor.device().is_privateuseone() || tensor.device().index() != device_index) {
@@ -253,12 +270,15 @@ rt::Binding OpFunction::over(
   auto location = c10::rbln::caching::try_locate(tensor.const_data_ptr());
   if (!location || location->available < nbytes ||
       (arg.alignment > 1 && (location->buffer->address() + location->offset) % arg.alignment != 0)) {
-    if (!staged) {
+    if (!copies) {
       return {};
     }
-    // An input the arg cannot take where it is, as a view off its alignment, is read from a copy.
-    staged->push_back(at::empty(tensor.sizes(), tensor.options()).copy_(tensor));
-    return over(staged->back(), index, device_index, nullptr);
+    auto copy = at::empty(tensor.sizes(), tensor.options());
+    if (read) {
+      copy.copy_(tensor);
+    }
+    copies->push_back({tensor, copy, written});
+    return over(copy, index, device_index, nullptr);
   }
   return rt::Binding(over_torch_bytes(arg, rt::DeviceBuffer::view(location->buffer, location->offset, nbytes)));
 }
@@ -434,8 +454,8 @@ std::optional<std::vector<at::Tensor>> OpFunction::run(
   const auto& args = fn_->artifact().args;
   std::vector<std::pair<std::string, rt::Binding>> bound;
   bound.reserve(bindings_.size() + results_.size());
-  // Kept until the run is queued, so that no tensor made for a result takes their memory first.
-  std::vector<at::Tensor> staged;
+  // Kept until the run is done, so that no tensor made for a result takes their memory first.
+  std::vector<Copy> copies;
   // Inputs the run writes through the host, with the host tensors it leaves them in.
   std::vector<std::pair<const Binding*, std::shared_ptr<rt::HostTensor>>> written_back;
   for (const auto& binding : bindings_) {
@@ -447,7 +467,7 @@ std::optional<std::vector<at::Tensor>> OpFunction::run(
       }
       tensor = rt::Binding(std::move(host));
     } else {
-      tensor = over(inputs[binding.input], binding.arg, device_index, &staged);
+      tensor = over(inputs[binding.input], binding.arg, device_index, &copies);
     }
     if (missing(tensor)) {
       return std::nullopt;
@@ -496,7 +516,7 @@ std::optional<std::vector<at::Tensor>> OpFunction::run(
         : at::empty(
               outputs_[k].shape,
               at::TensorOptions().dtype(outputs_[k].dtype).device(c10::DeviceType::PrivateUse1, device_index));
-    auto over_tensor = over(tensor, *result.arg, device_index, nullptr);
+    auto over_tensor = over(tensor, *result.arg, device_index, &copies);
     if (missing(over_tensor)) {
       TORCH_CHECK(given, "a new tensor does not hold result ", k, " as the function writes it");
       return std::nullopt;
@@ -512,8 +532,15 @@ std::optional<std::vector<at::Tensor>> OpFunction::run(
     s.executor->bind(bound);
     s.executor->run(stream);
   }
-  if (on_host || !to_decode.empty() || !written_back.empty()) {
+  const bool written_on_host =
+      std::any_of(copies.begin(), copies.end(), [](const Copy& c) { return c.written && c.copy.device().is_cpu(); });
+  if (on_host || written_on_host || !to_decode.empty() || !written_back.empty()) {
     stream->synchronize();
+  }
+  for (const auto& c : copies) {
+    if (c.written) {
+      c.tensor.copy_(c.copy);
+    }
   }
   for (const auto& [binding, host] : written_back) {
     const auto& input = inputs[binding->input];

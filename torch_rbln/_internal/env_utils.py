@@ -44,6 +44,21 @@ def is_fallback_disabled(category: str) -> bool:
     return torch_rbln._C._is_fallback_disabled(category)
 
 
+def raised_for_disabled_fallback(error: BaseException) -> bool:
+    """Whether `error`, or one it was raised from, is the error of a check where
+    `TORCH_RBLN_DISABLE_FALLBACK` disables the fallback it would take, which no other fallback may
+    take the place of."""
+    import torch_rbln._C
+
+    seen = set()
+    while error is not None and id(error) not in seen:
+        if isinstance(error, torch_rbln._C.FallbackDisabledError):
+            return True
+        seen.add(id(error))
+        error = getattr(error, "inner_exception", None) or error.__cause__
+    return False
+
+
 def is_rbln_deploy() -> bool:
     """
     Check if the RBLN deployment mode is enabled.
