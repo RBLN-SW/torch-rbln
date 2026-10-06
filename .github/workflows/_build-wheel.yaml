@@ -103,6 +103,7 @@ jobs:
         env:
           TORCH_RBLN_BUILD_TYPE: ${{ inputs.build_type }}
           TORCH_RBLN_BUILD_TESTS: 'OFF'
+          PYTHON_VERSION: ${{ inputs.python_version }}
           UV_INDEX_RBLN_USERNAME: ${{ secrets.RBLN_INDEX_USERNAME }}
           UV_INDEX_RBLN_PASSWORD: ${{ secrets.RBLN_INDEX_PASSWORD }}
           UV_INDEX_RBLN_NIGHTLY_USERNAME: ${{ secrets.NEXUS_USERNAME }}
@@ -122,11 +123,26 @@ jobs:
           "${cxx}" --version
           echo "::notice::target: $("${cxx}" -dumpmachine)"
 
+          uv venv --clear --python "${PYTHON_VERSION}" .venv
+          uv run --no-project --no-config --with tomli --python .venv/bin/python python - <<'PY' > "${RUNNER_TEMP}/torch-rbln-build-requirements.txt"
+          from pathlib import Path
+
+          import tomli
+
+          project = tomli.loads(Path("pyproject.toml").read_text())
+          print(*project["build-system"]["requires"], sep="\n")
+          print(*project.get("tool", {}).get("uv", {}).get("build-constraint-dependencies", []), sep="\n")
+          PY
+          uv pip install \
+            --index 'pytorch-cpu=https://download.pytorch.org/whl/cpu' \
+            --python .venv/bin/python \
+            -r "${RUNNER_TEMP}/torch-rbln-build-requirements.txt"
+
           if command -v ccache >/dev/null; then
             export CCACHE_STATSLOG
             CCACHE_STATSLOG="$(mktemp "${RUNNER_TEMP}/torch-rbln-ccache-stats.XXXXXX")"
           fi
-          uv build --wheel
+          uv build --wheel --no-build-isolation --python .venv/bin/python
           if command -v ccache >/dev/null; then
             ccache --show-log-stats
           fi
