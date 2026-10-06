@@ -334,7 +334,9 @@ rt::Binding OpFunction::held(const at::Tensor& tensor, size_t index, c10::Device
       return {};
     }
     c10::rbln::held::hold(
-        found->start, std::make_shared<const c10::rbln::held::Type>(c10::rbln::held::Type{fn_, index, shape, id}));
+        found->start,
+        std::make_shared<const c10::rbln::held::Type>(
+            c10::rbln::held::Type{fn_, index, shape, id, artifact::elementwise(arg)}));
     c10::rbln::prof::record_bounce(c10::rbln::prof::BounceSite::kOpArgThroughHost, tensor.nbytes());
   }
   artifact::Logical logical{arg.logical.dtype, std::move(shape), {}};

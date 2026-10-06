@@ -25,6 +25,21 @@ uint64_t logical_nbytes(const Type& type) {
 
 } // namespace
 
+bool alike(const void* a, const void* b) {
+  if (!caching::any_held()) {
+    return false;
+  }
+  auto x = caching::try_locate_held(a);
+  auto y = caching::try_locate_held(b);
+  return x && y && x->type && y->type && x->type->elementwise && y->type->elementwise && x->type->id == y->type->id;
+}
+
+AsHeld::AsHeld() : before_(caching::locate_as_held(true)) {}
+
+AsHeld::~AsHeld() {
+  caching::locate_as_held(before_);
+}
+
 void hold(void* data, std::shared_ptr<const Type> type) {
   RBLN_CHECK(arg_of(*type).shards.size() == 1, "arg {} holds its value in more than one shard", arg_of(*type).name);
   const Type& to = *type;

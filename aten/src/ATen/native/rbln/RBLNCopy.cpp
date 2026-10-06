@@ -10,6 +10,7 @@
 #include <ATen/ops/empty.h>
 #include <ATen/ops/empty_strided.h>
 #include <c10/rbln/RBLNFunctions.h>
+#include <c10/rbln/RBLNHeld.h>
 #include <c10/rbln/RBLNHostBatch.h>
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNPinnedAllocator.h>
@@ -476,6 +477,14 @@ void copy_impl_rbln(const at::Tensor& src, const at::Tensor& dst) {
   }
 }
 
+// Whether `dst` and `src` are device tensors of one dtype over allocations a program holds in one
+// elementwise type, between which bytes move as they are held (see c10/rbln/RBLNHeld.h): KV blocks
+// vLLM copies within its cache.
+bool held_alike(const at::Tensor& dst, const at::Tensor& src) {
+  return dst.device().is_privateuseone() && src.device().is_privateuseone() && dst.numel() > 0 &&
+      dst.scalar_type() == src.scalar_type() && c10::rbln::held::alike(dst.const_data_ptr(), src.const_data_ptr());
+}
+
 } // namespace
 
 void copy_impl_rbln_async(const at::Tensor& src, const at::Tensor& dst) {
@@ -529,6 +538,10 @@ void copy_impl_rbln_async(const at::Tensor& src, const at::Tensor& dst) {
 at::Tensor _copy_from_rbln(const at::Tensor& src, const at::Tensor& dst, bool non_blocking) {
   RBLN_SCOPE_GUARD();
   RBLN_LOG_DEBUG("src_data={}, dst_data={}", fmt::ptr(src.data_ptr()), fmt::ptr(dst.data_ptr()));
+  std::optional<c10::rbln::held::AsHeld> as_held;
+  if (held_alike(dst, src)) {
+    as_held.emplace();
+  }
 
   if (non_blocking) {
     copy_impl_rbln_async(src, dst);
@@ -755,6 +768,15 @@ void _foreach_copy__rbln(at::TensorList self, at::TensorList src, bool non_block
       "_foreach_copy_: self and src lists must have equal length ({} vs {})",
       self.size(),
       src.size());
+
+  std::optional<c10::rbln::held::AsHeld> as_held;
+  bool alike = !self.empty();
+  for (size_t i = 0; alike && i < self.size(); ++i) {
+    alike = held_alike(self[i], src[i]);
+  }
+  if (alike) {
+    as_held.emplace();
+  }
 
   // Cross-pair aliasing would make the batch's reordering observable; fall back
   // to an ordered copy_ loop. The common disjoint scatter keeps the fast path.

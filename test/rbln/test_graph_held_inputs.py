@@ -72,6 +72,16 @@ class TestGraphHeldInputs(TestCase):
         self._write(self.compiled, self.x, 1)
         self._expect({0: 2 * self.x, 1: 2 * self.x, 2: y})
 
+    def test_blocks_copied_within_the_cache_stay_as_the_device_holds_them(self):
+        # vLLM's prefix caching copies the tokens of one KV block into another.
+        self._write(self.compiled, self.x, 0)
+        with torch.rbln.explain() as region:
+            torch._foreach_copy_([self.cache[:, 2]], [self.cache[:, 0]])
+            self.cache[:, 3].copy_(self.cache[:, 0])
+        self.assertEqual(_count(region, "held_tensor_released"), 0)
+        self._write(self.compiled, self.x, 1)
+        self._expect({0: 2 * self.x, 1: 2 * self.x, 2: 2 * self.x, 3: 2 * self.x})
+
     def test_another_graph_holding_it_alike_binds_it_in_place(self):
         self._write(self.compiled, self.x, 0)
         other = torch.compile(CacheWrite(-1.0), backend="rbln", dynamic=False)

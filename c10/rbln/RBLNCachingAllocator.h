@@ -57,6 +57,17 @@ struct Held {
 C10_RBLN_API std::optional<Held> try_locate_held(const void* ptr);
 
 /**
+ * @brief Whether a program holds any live allocation.
+ */
+C10_RBLN_API bool any_held();
+
+/**
+ * @brief Makes this thread's locates leave held allocations as they are, or put them back as torch
+ * holds them; returns the setting before.
+ */
+C10_RBLN_API bool locate_as_held(bool as_held);
+
+/**
  * @brief Runs `convert`, which puts the bytes of the allocation starting at `start` in `type`, or
  * back as torch holds them when `type` is none, and counts the allocation so until it is freed.
  * Other threads locating bytes wait while it runs; `convert` locates them as they are.

@@ -13,6 +13,7 @@
 #include <mutex>
 #include <set>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 namespace c10::rbln::caching {
@@ -51,6 +52,7 @@ std::recursive_mutex& held_mutex() {
   return mutex;
 }
 thread_local bool converting = false;
+thread_local bool as_held = false;
 
 struct ByStreamSize {
   bool operator()(const Block* a, const Block* b) const {
@@ -431,8 +433,16 @@ void convert_held(const void* start, const std::function<void()>& convert, std::
   cache(location->device_index).set_held(reinterpret_cast<uintptr_t>(start), std::move(type));
 }
 
+bool any_held() {
+  return held_allocations.load() != 0;
+}
+
+bool locate_as_held(bool value) {
+  return std::exchange(as_held, value);
+}
+
 std::optional<Location> try_locate(const void* ptr) {
-  if (held_allocations.load() == 0 || converting) {
+  if (held_allocations.load() == 0 || converting || as_held) {
     auto found = try_locate_held(ptr);
     return found ? std::optional<Location>(std::move(found->location)) : std::nullopt;
   }

@@ -24,6 +24,29 @@ struct Type {
   std::vector<int64_t> shape;
   // artifact::typeId of the arg, which two programs holding the allocation alike share.
   std::string id;
+  // artifact::elementwise of the arg: each element lies where torch holds it, in a dtype of its size.
+  bool elementwise = false;
+};
+
+/**
+ * @brief Whether the device bytes at `a` and at `b` lie in allocations held in one elementwise
+ * type, so that bytes moved between them keep their values wherever they lie.
+ */
+C10_RBLN_API bool alike(const void* a, const void* b);
+
+/**
+ * @brief While alive, this thread locates held allocations as they are held, as a copy between
+ * tensors held `alike` does: it moves their bytes as they are rather than as torch holds them.
+ */
+class C10_RBLN_API AsHeld {
+ public:
+  AsHeld();
+  ~AsHeld();
+  AsHeld(const AsHeld&) = delete;
+  AsHeld& operator=(const AsHeld&) = delete;
+
+ private:
+  bool before_;
 };
 
 /**
