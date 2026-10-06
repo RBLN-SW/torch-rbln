@@ -71,6 +71,8 @@ def torch_backends_entry_point() -> None:
         atexit.register(torch_rbln._C._set_runtime_shutting_down, True)
 
         # Import operators #####################################################
+        # The torch ops models written for the NPU call, such as rbln_custom_ops, before their kernels here.
+        import rbln.ops
         import torch_rbln._internal.register_ops
 
         # Apply monkey patches for RBLN functionality ###########################
