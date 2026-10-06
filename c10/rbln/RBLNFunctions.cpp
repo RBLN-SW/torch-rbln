@@ -225,7 +225,8 @@ c10::DeviceIndex get_physical_device_count() {
     // NPU, so report 0.
     return 0;
   }
-  const auto physical_device_count = static_cast<c10::DeviceIndex>(DeviceMappingManager::visibleNpus().size());
+  const auto physical_device_count =
+      static_cast<c10::DeviceIndex>(DeviceMappingManager::getInstance().seenNpus().size());
   RBLN_LOG_DEBUG("physical_NPU_count={}", static_cast<int>(physical_device_count));
   return physical_device_count;
 }

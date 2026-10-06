@@ -2,9 +2,9 @@
 
 """Importing torch_rbln must not freeze the ``RBLN_DEVICES`` mapping.
 
-The rbln runtime fixes the ``RBLN_DEVICES`` mapping once a device is acquired, and a later
-change is then rejected. A vLLM data-parallel worker inherits a partition-wide
-``RBLN_DEVICES`` and remaps it per rank *after* import, so import must not resolve a device.
+torch-rbln fixes the ``RBLN_DEVICES`` mapping once a device is used, and a later change is
+then ignored. A vLLM data-parallel worker inherits a partition-wide ``RBLN_DEVICES`` and
+remaps it per rank *after* import, so import must not fix the mapping.
 
 Scope: the runtime half -- that a remap after import is still accepted. The torch half, that
 nothing on the import path resolves a device at all, is pinned by
@@ -27,10 +27,9 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 class TestImportDoesNotSeal(TestCase):
     """After import (or a non-RBLN profiler), ``RBLN_DEVICES`` must still be remappable.
 
-    Each subprocess sets ``RBLN_DEVICES``, runs the scenario, remaps it, then makes the
-    first device-resolving call; it must not raise "changed at runtime (Sealed)".
-    ``"0"`` -> ``"0,1"`` is a real change keeping logical device 0 valid; a non-seal
-    device error is unrelated.
+    Each subprocess sets ``RBLN_DEVICES``, runs the scenario, remaps it, then counts the
+    devices; the count must follow the remap. ``"0"`` -> ``"0,1"`` is a real change keeping
+    logical device 0 valid.
     """
 
     def _assert_no_seal(self, result: subprocess.CompletedProcess):
@@ -56,15 +55,9 @@ class TestImportDoesNotSeal(TestCase):
             os.environ["RBLN_DEVICES"] = "0"
             import torch_rbln  # noqa: F401
             os.environ["RBLN_DEVICES"] = "0,1"   # worker remaps per rank AFTER import
-            from rebel._C import get_npu_name
-            try:
-                get_npu_name(0)
-                print("NO_SEAL_OK")
-            except RuntimeError as e:
-                if "changed at runtime" in str(e) or "Sealed" in str(e):
-                    print("SEALED: " + str(e).strip())
-                    sys.exit(1)
-                print("NO_SEAL_OK")  # a device-topology error is unrelated to the seal invariant
+            import rbln, torch
+            want, got = min(2, rbln.device_count()), torch.rbln.device_count()
+            print("NO_SEAL_OK" if got == want else f"SEALED: {{got}} device(s), not {{want}}")
         """
         self._assert_no_seal(self._run(script))
 
@@ -78,15 +71,9 @@ class TestImportDoesNotSeal(TestCase):
             with profile(activities=[ProfilerActivity.CPU]):
                 pass
             os.environ["RBLN_DEVICES"] = "0,1"
-            from rebel._C import get_npu_name
-            try:
-                get_npu_name(0)
-                print("NO_SEAL_OK")
-            except RuntimeError as e:
-                if "changed at runtime" in str(e) or "Sealed" in str(e):
-                    print("SEALED: " + str(e).strip())
-                    sys.exit(1)
-                print("NO_SEAL_OK")
+            import rbln, torch
+            want, got = min(2, rbln.device_count()), torch.rbln.device_count()
+            print("NO_SEAL_OK" if got == want else f"SEALED: {{got}} device(s), not {{want}}")
         """
         self._assert_no_seal(self._run(script))
 

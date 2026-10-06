@@ -135,6 +135,12 @@ class C10_RBLN_API DeviceMappingManager {
    */
   static std::vector<uint32_t> visibleNpus();
 
+  /**
+   * @brief The NPUs the process sees: those the plan froze once it left the open state,
+   * else visibleNpus().
+   */
+  std::vector<uint32_t> seenNpus() const;
+
   // Initialization is two stages:
   //
   //   plan   Parse RBLN_DEVICES (alias RBLN_VISIBLE_DEVICES) / RBLN_DEVICE_MAP /

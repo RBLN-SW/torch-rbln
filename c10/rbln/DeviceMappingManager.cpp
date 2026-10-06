@@ -310,6 +310,13 @@ bool DeviceMappingManager::hasFailedCommit() const noexcept {
   return plan_state_.load(std::memory_order_acquire) == PlanState::Failed;
 }
 
+std::vector<uint32_t> DeviceMappingManager::seenNpus() const {
+  if (plan_state_.load(std::memory_order_acquire) != PlanState::Open) {
+    return visible_npus_;
+  }
+  return visibleNpus();
+}
+
 bool DeviceMappingManager::isCommitted() const {
   return plan_state_.load(std::memory_order_acquire) == PlanState::Committed;
 }
