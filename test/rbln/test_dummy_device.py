@@ -708,10 +708,9 @@ _DTOK = [[7]]
 _DECODER_COMPILE = (
     """
 import glob, os
-import torch, torch_rbln
-from rebel._C import get_npu_name
+import rbln, torch, torch_rbln
 
-npu = get_npu_name(0)  # dummy mode: resolves to RBLN_FORCE_NPU_NAME (the real machine SoC)
+npu = rbln.flags.RBLN_FORCE_NPU_NAME  # dummy mode: the NPU it stands in for (the real machine SoC)
 print("NPU", npu)
 """
     + _DECODER_MODEL
@@ -730,7 +729,7 @@ try:  # distinct past_k/past_v so the graph matches the run (aliasing would spec
         torch.tensor(_DTOK, device="rbln:0"), pk, pv)
 except Exception:
     pass
-assert len(glob.glob(os.path.join({cache!r}, "*.rbln"))) == 2, "expected 2 artifacts (prefill+decode)"
+assert len(glob.glob(os.path.join({cache!r}, "**", "*.rbln"), recursive=True)) == 2, "expected 2 artifacts (prefill+decode)"
 print("OK")
 """
 )
@@ -752,10 +751,10 @@ m = m.to("rbln:0")
 opt = {{"cache_dir": {cache!r}, "npu": {npu!r}}}
 prefill = torch.compile(m.prefill, backend="rbln", dynamic=False, options=opt)
 decode = torch.compile(m.decode, backend="rbln", dynamic=False, options=opt)
-before = set(glob.glob(os.path.join({cache!r}, "*.rbln")))
+before = set(glob.glob(os.path.join({cache!r}, "**", "*.rbln"), recursive=True))
 lp2, k2, v2 = prefill(torch.tensor(_IDS, device="rbln:0"))
 ld2, _, _ = decode(torch.tensor(_DTOK, device="rbln:0"), k2, v2)
-after = set(glob.glob(os.path.join({cache!r}, "*.rbln")))
+after = set(glob.glob(os.path.join({cache!r}, "**", "*.rbln"), recursive=True))
 assert not (after - before), "recompiled instead of loading the dummy-built artifacts"
 got = (int(lp2[0, -1].argmax().cpu()), int(ld2[0, -1].argmax().cpu()))
 assert got == want, (got, want)
@@ -782,7 +781,7 @@ def test_dummy_compiled_prefill_decode_runs_on_real_npu(tmp_path):
     # prefill->decode (KV cache handed from prefill into decode) on the real device
     # and check the argmax equals the CPU reference. Skipped when there is no NPU.
     probe = subprocess.run(
-        [sys.executable, "-c", "from rebel._C import get_npu_name; print(get_npu_name(0) or '')"],
+        [sys.executable, "-c", "import rbln; print(rbln.npu_name(0))"],
         env=_clean_env(),
         capture_output=True,
         text=True,
