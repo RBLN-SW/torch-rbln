@@ -12,12 +12,12 @@ the way ``torch.profiler.profile()`` collects the events inside it::
     for program in programs:  # list[CompiledProgram]
         program.name  # dynamo compile id, e.g. "0/0"
         program.device  # rbln device the graph's tensors are on
-        program.function  # the compiled rbln.Function behind the callable
+        program.function  # the compiled rebel.v2.Function behind the callable
         program.input_specs  # tuple[InputSpec]: name, shape, dtype, arg
         program.output_specs  # tuple[OutputSpec]: shape, dtype, arg
 
 ``input_specs`` / ``output_specs`` list the IO in the order the callable takes and returns
-it. ``arg`` is the function's ``rbln.Arg`` for it, whose ``physical`` layout and ``shards`` say
+it. ``arg`` is the function's ``rebel.v2.Arg`` for it, whose ``physical`` layout and ``shards`` say
 how the device holds it.
 
 Every open scope receives each program, so nested scopes see the same programs; an
@@ -74,7 +74,7 @@ class CompiledProgram:
 
     `name` is dynamo's compile id for the graph ("0/0", "0/1", ...), empty if the backend
     ran outside a dynamo compile. `device` is the rbln device the graph's tensors are on.
-    `function` is the compiled ``rbln.Function`` the callable runs.
+    `function` is the compiled ``rebel.v2.Function`` the callable runs.
     """
 
     name: str
