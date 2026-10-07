@@ -23,13 +23,11 @@ struct StateKey;
 /**
  * @brief A compiled function run on torch tensors: an eager op, or a graph torch.compile hands
  * over. The args a call's tensors bind to hold their values as torch holds a contiguous tensor,
- * so a torch-rbln tensor binds in place; a CPU tensor, or one off the alignment of its arg, binds
- * through a copy, which goes back into it once the run is done when the run writes the arg. An
- * arg the compiler lays out otherwise goes through the host: a call's tensor is encoded into it,
- * and a result is decoded from it once the run is done. A tensor a program holds as such an arg
- * holds it (see c10/rbln/RBLNHeld.h) binds in place instead; with `hold_written`, a tensor over a
- * whole allocation that a run writes in place is first put so, as a graph writes the same tensor
- * on every call.
+ * so a torch-rbln tensor binds in place; a CPU tensor, one off the alignment of its arg, or one of
+ * a type (see c10/rbln/RBLNTyped.h), binds through a copy, which goes back into it once the run is
+ * done when the run writes the arg. An arg the compiler lays out otherwise goes through the host: a
+ * call's tensor is encoded into it, and a result is decoded from it once the run is done. A tensor
+ * made in the arg's type binds to such an arg in place instead.
  *
  * `inputs` names the inputs a call passes, in order. The other args are made from state, whose
  * values `state` gives and `set_state` replaces, and are written to each device the function
@@ -48,8 +46,7 @@ class OpFunction {
       const std::string& bytes,
       const std::vector<std::string>& inputs,
       const std::map<std::string, at::Tensor>& state,
-      std::vector<bool> host_results = {},
-      bool hold_written = false);
+      std::vector<bool> host_results = {});
 
   size_t num_inputs() const {
     return num_inputs_;
@@ -111,16 +108,12 @@ class OpFunction {
   };
 
   // `tensor` as arg `arg` takes it, or none if it is not the arg's; with `copies`, a CPU tensor,
-  // or one held where the arg cannot take it, binds through a copy that `copies` keeps.
-  rt::Binding over(
-      const at::Tensor& tensor,
-      size_t arg,
-      c10::DeviceIndex device_index,
-      std::vector<Copy>* copies) const;
+  // or one the arg cannot take where it lies, binds through a copy that `copies` keeps.
+  rt::Binding over(const at::Tensor& tensor, size_t arg, c10::DeviceIndex device_index, std::vector<Copy>* copies)
+      const;
   // `tensor` in place as arg `arg`, which the compiler lays out otherwise than torch, takes it: a
-  // tensor a program holds as the arg holds it, or, with `hold_written_`, one the arg is written
-  // through, which it holds so first; none for any other.
-  rt::Binding held(const at::Tensor& tensor, size_t arg, c10::DeviceIndex device_index) const;
+  // tensor over a whole allocation of the arg's type; none for any other.
+  rt::Binding typed(const at::Tensor& tensor, size_t arg, c10::DeviceIndex device_index) const;
   // The host tensor of state arg `arg`, encoded from the state now.
   std::shared_ptr<rt::HostTensor> encoded(size_t arg) const;
   // A host tensor of arg `arg` encoded from the value of `tensor`, or none if it is not the arg's.
@@ -137,7 +130,6 @@ class OpFunction {
 
   std::shared_ptr<rt::Function> fn_;
   size_t num_inputs_ = 0;
-  bool hold_written_ = false;
   std::vector<Binding> bindings_;
   std::vector<Result> results_;
   std::vector<Output> outputs_;
@@ -148,6 +140,25 @@ class OpFunction {
   std::map<c10::DeviceIndex, std::unique_ptr<Slot>> slots_;
   std::shared_ptr<rt::Communicator> communicator_;
   std::atomic<uint64_t> last_run_{0};
+};
+
+/**
+ * @brief A compiled function whose args tensors are made in the types of (see
+ * c10/rbln/RBLNTyped.h), such as the KV caches the graphs of a model write in place.
+ */
+class TypedFunction {
+ public:
+  explicit TypedFunction(const std::string& bytes);
+
+  /**
+   * @brief A contiguous tensor of `shape` on device `device_index` in the type of arg `arg`, all
+   * zero when `zero`; a tensor as torch holds it when the arg holds its value so.
+   */
+  at::Tensor empty(const std::string& arg, const std::vector<int64_t>& shape, c10::DeviceIndex device_index, bool zero)
+      const;
+
+ private:
+  std::shared_ptr<rt::Function> fn_;
 };
 
 void init_op_function_bindings(pybind11::module& module);

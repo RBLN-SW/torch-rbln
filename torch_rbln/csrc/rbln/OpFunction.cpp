@@ -4,18 +4,22 @@
 
 #include <ATen/ops/empty.h>
 #include <ATen/ops/from_blob.h>
+#include <ATen/ops/zeros.h>
+#include <c10/core/Allocator.h>
+#include <c10/core/DeviceGuard.h>
 #include <c10/rbln/RBLNCachingAllocator.h>
 #include <c10/rbln/RBLNFallbackConfig.h>
 #include <c10/rbln/RBLNFunctions.h>
-#include <c10/rbln/RBLNHeld.h>
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNRuntime.h>
+#include <c10/rbln/RBLNTyped.h>
 #include <rebel/v2/artifact/file.h>
 #include <rebel/v2/runtime/flags.h>
 
 #include <algorithm>
 #include <cstring>
 #include <numeric>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <tuple>
@@ -86,44 +90,6 @@ const rt::Flag<int64_t> kCompiledOps(
       }
       return count;
     });
-
-const char* dtype_name(at::ScalarType type) {
-  switch (type) {
-    case at::kHalf:
-      return "float16";
-    case at::kBFloat16:
-      return "bfloat16";
-    case at::kFloat:
-      return "float32";
-    case at::kDouble:
-      return "float64";
-    case at::kLong:
-      return "int64";
-    case at::kInt:
-      return "int32";
-    case at::kShort:
-      return "int16";
-    case at::kChar:
-      return "int8";
-    case at::kByte:
-      return "uint8";
-    case at::kBool:
-      return "bool";
-    default:
-      return nullptr;
-  }
-}
-
-at::ScalarType scalar_type_of(const std::string& name) {
-  for (auto type :
-       {at::kHalf, at::kBFloat16, at::kFloat, at::kDouble, at::kLong, at::kInt, at::kShort, at::kChar, at::kByte,
-        at::kBool}) {
-    if (name == dtype_name(type)) {
-      return type;
-    }
-  }
-  throw std::invalid_argument("no torch dtype holds " + name);
-}
 
 // Whether the bytes of `tensor` share memory with those of an input; a run neither reads
 // what it writes nor writes what it reads.
@@ -198,12 +164,11 @@ OpFunction::OpFunction(
     const std::string& bytes,
     const std::vector<std::string>& inputs,
     const std::map<std::string, at::Tensor>& state,
-    std::vector<bool> host_results,
-    bool hold_written)
-    : num_inputs_(inputs.size()), hold_written_(hold_written) {
+    std::vector<bool> host_results)
+    : num_inputs_(inputs.size()) {
   auto owner = std::make_shared<const std::string>(bytes);
-  fn_ = rt::Function::from(
-      artifact::deserialize(reinterpret_cast<const uint8_t*>(owner->data()), owner->size(), owner));
+  fn_ =
+      rt::Function::from(artifact::deserialize(reinterpret_cast<const uint8_t*>(owner->data()), owner->size(), owner));
   const auto& f = fn_->artifact();
   std::map<std::string, size_t> input_of;
   for (size_t i = 0; i < inputs.size(); ++i) {
@@ -252,7 +217,7 @@ OpFunction::OpFunction(
       require_static(arg);
       results_.push_back({index, std::nullopt, !host_results.empty() && host_results[k], !holds_as_torch(arg)});
     }
-    outputs_.push_back({arg.logical.shape, scalar_type_of(arg.logical.dtype)});
+    outputs_.push_back({arg.logical.shape, c10::rbln::scalar_type_of(arg.logical.dtype)});
   }
 }
 
@@ -265,7 +230,7 @@ rt::Binding OpFunction::over(
   if (!tensor.defined()) {
     return {};
   }
-  const char* dtype = dtype_name(tensor.scalar_type());
+  const char* dtype = c10::rbln::dtype_name(tensor.scalar_type());
   if (dtype == nullptr || arg.logical.dtype != dtype || !fits(arg, tensor.sizes()) || !tensor.is_contiguous()) {
     return {};
   }
@@ -287,11 +252,24 @@ rt::Binding OpFunction::over(
   if (!tensor.device().is_privateuseone() || tensor.device().index() != device_index) {
     return {};
   }
-  auto location = c10::rbln::caching::try_locate(tensor.const_data_ptr());
-  if (!location || location->available < nbytes ||
+  // A tensor of a type binds through a copy, as torch holds it, which the copy moves through the
+  // host (see c10/rbln/RBLNTyped.h).
+  auto found = c10::rbln::caching::try_locate_typed(tensor.const_data_ptr());
+  const bool typed = found && found->type;
+  std::optional<c10::rbln::Location> location;
+  if (found) {
+    location = found->location;
+  }
+  if (typed || !location || location->available < nbytes ||
       (arg.alignment > 1 && (location->buffer->address() + location->offset) % arg.alignment != 0)) {
     if (!copies) {
       return {};
+    }
+    if (typed && written && c10::rbln::is_fallback_disabled("host_round_trip")) {
+      throw c10::rbln::FallbackDisabled(
+          "arg " + arg.name + " is written in place, but its tensor is of the type of arg " +
+          c10::rbln::typed::describe(*found->type) +
+          ", so the run would take it through the host (TORCH_RBLN_DISABLE_FALLBACK=host_round_trip)");
     }
     auto copy = at::empty(tensor.sizes(), tensor.options());
     if (read) {
@@ -304,42 +282,32 @@ rt::Binding OpFunction::over(
       over_torch_bytes(arg, tensor.sizes().vec(), rt::DeviceBuffer::view(location->buffer, location->offset, nbytes)));
 }
 
-rt::Binding OpFunction::held(const at::Tensor& tensor, size_t index, c10::DeviceIndex device_index) const {
+rt::Binding OpFunction::typed(const at::Tensor& tensor, size_t index, c10::DeviceIndex device_index) const {
   const auto& arg = fn_->artifact().args[index];
   if (!tensor.defined() || tensor.numel() == 0 || !tensor.device().is_privateuseone() ||
-      tensor.device().index() != device_index || arg.shards.size() != 1 || fn_->poolOf(index, 0)) {
+      tensor.device().index() != device_index || arg.shards.size() != 1 || fn_->poolOf(index, 0) ||
+      !c10::rbln::caching::any_typed()) {
     return {};
   }
-  const char* dtype = dtype_name(tensor.scalar_type());
+  const char* dtype = c10::rbln::dtype_name(tensor.scalar_type());
   if (dtype == nullptr || arg.logical.dtype != dtype || !fits(arg, tensor.sizes()) || !tensor.is_contiguous()) {
     return {};
   }
-  // A program holds a whole allocation, that of a tensor over all of it.
+  // A type is that of a whole allocation, which a tensor over all of it holds.
   const auto& storage = tensor.storage();
   if (tensor.const_data_ptr() != storage.data() || tensor.nbytes() != storage.nbytes()) {
     return {};
   }
-  auto found = c10::rbln::caching::try_locate_held(tensor.const_data_ptr());
+  auto found = c10::rbln::caching::try_locate_typed(tensor.const_data_ptr());
   auto shape = tensor.sizes().vec();
-  const auto nbytes = artifact::minNbytes(arg, arg.shards.front(), shape);
-  if (!found || found->start != tensor.const_data_ptr() || found->location.available < nbytes ||
-      (arg.alignment > 1 && (found->location.buffer->address() + found->location.offset) % arg.alignment != 0)) {
+  if (!found || !found->type || found->start != tensor.const_data_ptr() || found->type->id != artifact::typeId(arg) ||
+      found->type->shape != shape) {
     return {};
   }
-  auto id = artifact::typeId(arg);
-  if (found->type) {
-    if (found->type->id != id || found->type->shape != shape) {
-      return {};
-    }
-  } else {
-    if (!hold_written_ || arg.access == artifact::Access::kRead) {
-      return {};
-    }
-    c10::rbln::held::hold(
-        found->start,
-        std::make_shared<const c10::rbln::held::Type>(
-            c10::rbln::held::Type{fn_, index, shape, id, artifact::elementwise(arg)}));
-    c10::rbln::prof::record_bounce(c10::rbln::prof::BounceSite::kOpArgThroughHost, tensor.nbytes());
+  const auto nbytes = artifact::minNbytes(arg, arg.shards.front(), shape);
+  if (found->location.available < nbytes ||
+      (arg.alignment > 1 && (found->location.buffer->address() + found->location.offset) % arg.alignment != 0)) {
+    return {};
   }
   artifact::Logical logical{arg.logical.dtype, std::move(shape), {}};
   return rt::Binding(
@@ -365,7 +333,7 @@ std::shared_ptr<rt::HostTensor> OpFunction::encoded(size_t index) const {
 
 std::shared_ptr<rt::HostTensor> OpFunction::encoded(const at::Tensor& tensor, size_t index) const {
   const auto& arg = fn_->artifact().args[index];
-  const char* dtype = dtype_name(tensor.scalar_type());
+  const char* dtype = c10::rbln::dtype_name(tensor.scalar_type());
   if (!tensor.defined() || dtype == nullptr || arg.logical.dtype != dtype || !fits(arg, tensor.sizes())) {
     return nullptr;
   }
@@ -539,7 +507,7 @@ std::optional<std::vector<at::Tensor>> OpFunction::run(
   for (const auto& binding : bindings_) {
     rt::Binding tensor;
     if (binding.through_host) {
-      tensor = held(inputs[binding.input], binding.arg, device_index);
+      tensor = typed(inputs[binding.input], binding.arg, device_index);
     }
     if (binding.through_host && missing(tensor)) {
       const auto& arg = args[binding.arg];
@@ -548,7 +516,7 @@ std::optional<std::vector<at::Tensor>> OpFunction::run(
         throw c10::rbln::FallbackDisabled(
             "input " + arg.sources.front() +
             " is written in place, but the device holds it otherwise than torch holds the tensor, and the tensor "
-            "is not one a program keeps as the device holds it, so the run would take it through the host "
+            "is not of the arg's type (torch.rbln.empty_typed), so the run would take it through the host "
             "(TORCH_RBLN_DISABLE_FALLBACK=host_round_trip)");
       }
       auto host = encoded(inputs[binding.input], binding.arg);
@@ -658,6 +626,39 @@ std::optional<std::vector<at::Tensor>> OpFunction::run(
   return results;
 }
 
+TypedFunction::TypedFunction(const std::string& bytes) {
+  auto owner = std::make_shared<const std::string>(bytes);
+  fn_ =
+      rt::Function::from(artifact::deserialize(reinterpret_cast<const uint8_t*>(owner->data()), owner->size(), owner));
+}
+
+at::Tensor TypedFunction::empty(
+    const std::string& name,
+    const std::vector<int64_t>& shape,
+    c10::DeviceIndex device_index,
+    bool zero) const {
+  const auto index = fn_->arg(name);
+  const auto& arg = fn_->artifact().args[index];
+  const auto options = at::TensorOptions()
+                           .dtype(c10::rbln::scalar_type_of(arg.logical.dtype))
+                           .device(c10::DeviceType::PrivateUse1, device_index);
+  if (holds_as_torch(arg)) {
+    return zero ? at::zeros(shape, options) : at::empty(shape, options);
+  }
+  auto type = c10::rbln::typed::of(fn_, index, shape);
+  const c10::DeviceGuard guard(options.device());
+  const auto nbytes = c10::rbln::typed::nbytes(*type);
+  auto* allocator = c10::GetAllocator(c10::DeviceType::PrivateUse1);
+  c10::Storage storage(c10::Storage::use_byte_size_t(), nbytes, allocator->allocate(nbytes), allocator, false);
+  c10::rbln::caching::set_type(storage.mutable_data(), std::move(type));
+  auto tensor = at::empty({0}, options);
+  tensor.set_(storage, 0, shape);
+  if (zero) {
+    tensor.zero_();
+  }
+  return tensor;
+}
+
 void init_op_function_bindings(pybind11::module& module) {
   namespace py = pybind11;
   py::class_<OpFunction, std::shared_ptr<OpFunction>>(module, "_OpFunction")
@@ -665,17 +666,15 @@ void init_op_function_bindings(pybind11::module& module) {
           py::init([](const py::bytes& function,
                       const std::vector<std::string>& inputs,
                       const std::map<std::string, at::Tensor>& state,
-                      const std::vector<bool>& host_results,
-                      bool hold_written) {
+                      const std::vector<bool>& host_results) {
             std::string bytes = function;
             py::gil_scoped_release release;
-            return std::make_shared<OpFunction>(bytes, inputs, state, host_results, hold_written);
+            return std::make_shared<OpFunction>(bytes, inputs, state, host_results);
           }),
           py::arg("function"),
           py::arg("inputs"),
           py::arg("state") = std::map<std::string, at::Tensor>{},
           py::arg("host_results") = std::vector<bool>{},
-          py::arg("hold_written") = false,
           "Internal: a compiled function run on torch tensors")
       .def_property_readonly("num_inputs", &OpFunction::num_inputs)
       .def_property_readonly("last_run", &OpFunction::last_run)
@@ -702,6 +701,24 @@ void init_op_function_bindings(pybind11::module& module) {
           py::arg("out") = std::vector<std::optional<at::Tensor>>{},
           py::call_guard<py::gil_scoped_release>(),
           "Internal: runs over `inputs` and returns the results, or None when a tensor does not fit");
+  py::class_<TypedFunction, std::shared_ptr<TypedFunction>>(module, "_TypedFunction")
+      .def(
+          py::init([](const py::bytes& function) {
+            std::string bytes = function;
+            py::gil_scoped_release release;
+            return std::make_shared<TypedFunction>(bytes);
+          }),
+          py::arg("function"),
+          "Internal: a compiled function whose args tensors are made in the types of")
+      .def(
+          "empty",
+          &TypedFunction::empty,
+          py::arg("arg"),
+          py::arg("shape"),
+          py::arg("device_index"),
+          py::arg("zero"),
+          py::call_guard<py::gil_scoped_release>(),
+          "Internal: a tensor in the type of arg `arg`, as torch.rbln.empty_typed makes it");
 }
 
 } // namespace torch_rbln

@@ -11,12 +11,12 @@
 #include <ATen/ops/empty_strided.h>
 #include <c10/rbln/RBLNCachingAllocator.h>
 #include <c10/rbln/RBLNFunctions.h>
-#include <c10/rbln/RBLNHeld.h>
 #include <c10/rbln/RBLNHostBatch.h>
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNPinnedAllocator.h>
 
 #include <c10/rbln/RBLNProfiler.h>
+#include <c10/rbln/RBLNTyped.h>
 #include <torch/library.h>
 
 #include <cstddef>
@@ -478,56 +478,94 @@ void copy_impl_rbln(const at::Tensor& src, const at::Tensor& dst) {
   }
 }
 
-// Whether `dst` and `src` are device tensors of one dtype over allocations a program holds in one
-// elementwise type, between which bytes move as they are held (see c10/rbln/RBLNHeld.h): KV blocks
-// vLLM copies within its cache.
-bool held_alike(const at::Tensor& dst, const at::Tensor& src) {
-  return dst.device().is_privateuseone() && src.device().is_privateuseone() && dst.numel() > 0 &&
-      dst.scalar_type() == src.scalar_type() && c10::rbln::held::alike(dst.const_data_ptr(), src.const_data_ptr());
-}
+using TypeOf = std::shared_ptr<const c10::rbln::typed::Type>;
 
-using HeldType = std::shared_ptr<const c10::rbln::held::Type>;
-
-// How a program holds the elements of `t`: a device tensor of the arg's logical dtype over an
-// allocation held in an elementwise type. None for any other, and while this thread locates held
+// The type of the allocation the device tensor `t` lies in, when it has one and `t` reads its
+// elements as the arg's logical dtype. None for any other, and while this thread locates typed
 // allocations as they are.
-HeldType held_elements(const at::Tensor& t) {
-  if (!t.device().is_privateuseone() || t.numel() == 0 || !c10::rbln::caching::any_held() ||
-      c10::rbln::caching::locating_as_held()) {
+TypeOf typed_elements(const at::Tensor& t) {
+  if (!t.device().is_privateuseone() || t.numel() == 0 || !c10::rbln::caching::any_typed() ||
+      c10::rbln::caching::locating_as_typed()) {
     return nullptr;
   }
-  auto found = c10::rbln::caching::try_locate_held(t.const_data_ptr());
-  if (!found || !found->type || !found->type->elementwise) {
+  auto found = c10::rbln::caching::try_locate_typed(t.const_data_ptr());
+  if (!found || !found->type) {
     return nullptr;
   }
-  const auto& dtype = found->type->fn->artifact().args.at(found->type->arg).logical.dtype;
-  const bool same =
-      (dtype == "float16" && t.scalar_type() == at::kHalf) || (dtype == "bfloat16" && t.scalar_type() == at::kBFloat16);
-  return same ? found->type : nullptr;
+  const char* dtype = c10::rbln::dtype_name(t.scalar_type());
+  const auto& arg = found->type->fn->artifact().args.at(found->type->arg);
+  return dtype != nullptr && arg.logical.dtype == dtype ? found->type : nullptr;
 }
 
-// `src`, over an allocation held in elementwise `type`, into the CPU tensor `dst`: its bytes as they
-// are held, decoded on the host, so that only its elements cross and the allocation stays held.
-void copy_held_to_cpu(const at::Tensor& dst, const at::Tensor& src, const c10::rbln::held::Type& type) {
+// `src`, over an allocation of `type`, into the CPU tensor `dst`: its bytes as the type holds them,
+// decoded on the host, so that only its elements cross.
+void copy_typed_to_cpu(const at::Tensor& dst, const at::Tensor& src, const c10::rbln::typed::Type& type) {
   auto bytes = at::empty(src.sizes(), src.options().device(at::kCPU));
   {
-    const c10::rbln::held::AsHeld as_held;
+    const c10::rbln::typed::AsTyped as_typed;
     tensor_copy_from_rbln_to_cpu(src, bytes);
   }
   auto values = at::empty_like(bytes);
-  c10::rbln::held::decode(type, bytes.const_data_ptr(), values.mutable_data_ptr(), bytes.numel());
+  c10::rbln::typed::decode(type, bytes.const_data_ptr(), values.mutable_data_ptr(), bytes.numel());
   dst.copy_(values);
 }
 
-// The CPU tensor `src` into `dst`, over an allocation held in elementwise `type`: encoded on the
-// host and written as the allocation holds its bytes.
-void copy_cpu_to_held(const at::Tensor& dst, const at::Tensor& src, const c10::rbln::held::Type& type) {
+// The CPU tensor `src` into `dst`, over an allocation of `type`: encoded on the host and written as
+// the type holds its bytes.
+void copy_cpu_to_typed(const at::Tensor& dst, const at::Tensor& src, const c10::rbln::typed::Type& type) {
   auto values = at::empty(dst.sizes(), dst.options().device(at::kCPU));
   values.copy_(src);
   auto bytes = at::empty_like(values);
-  c10::rbln::held::encode(type, values.const_data_ptr(), bytes.mutable_data_ptr(), values.numel());
-  const c10::rbln::held::AsHeld as_held;
+  c10::rbln::typed::encode(type, values.const_data_ptr(), bytes.mutable_data_ptr(), values.numel());
+  const c10::rbln::typed::AsTyped as_typed;
   tensor_copy_from_cpu_to_rbln(bytes, dst);
+}
+
+// How a copy from `src` into `dst` meets typed allocations (see c10/rbln/RBLNTyped.h).
+enum class Typed {
+  kNone, // neither lies in one
+  kAlike, // both lie in allocations of one type: the bytes move as they are
+  kToCpu, // `src` lies in one and `dst` is on the CPU: the elements are decoded on the host
+  kFromCpu, // `src` is on the CPU and `dst` lies in one: the elements are encoded on the host
+  kAcross, // device tensors of two types: the elements cross the host
+};
+
+Typed typed_copy(const at::Tensor& dst, const at::Tensor& src) {
+  if (!c10::rbln::caching::any_typed() || c10::rbln::caching::locating_as_typed()) {
+    return Typed::kNone;
+  }
+  const auto from = typed_elements(src);
+  const auto to = typed_elements(dst);
+  if (!from && !to) {
+    return Typed::kNone;
+  }
+  if (from && to && from->id == to->id) {
+    return Typed::kAlike;
+  }
+  if (from && dst.device().is_cpu()) {
+    return Typed::kToCpu;
+  }
+  if (to && src.device().is_cpu()) {
+    return Typed::kFromCpu;
+  }
+  return Typed::kAcross;
+}
+
+// `src` into `dst`, device tensors of which one or both lie in typed allocations of no one type: the
+// elements are decoded from the one and encoded into the other on the host.
+void copy_typed_across(const at::Tensor& dst, const at::Tensor& src) {
+  auto values = at::empty(src.sizes(), src.options().device(at::kCPU));
+  if (const auto from = typed_elements(src)) {
+    copy_typed_to_cpu(values, src, *from);
+  } else {
+    values.copy_(src);
+  }
+  if (const auto to = typed_elements(dst)) {
+    copy_cpu_to_typed(dst, values, *to);
+  } else {
+    dst.copy_(values);
+  }
+  c10::rbln::prof::record_bounce(c10::rbln::prof::BounceSite::kTypedThroughHost, values.nbytes());
 }
 
 } // namespace
@@ -583,20 +621,22 @@ void copy_impl_rbln_async(const at::Tensor& src, const at::Tensor& dst) {
 at::Tensor _copy_from_rbln(const at::Tensor& src, const at::Tensor& dst, bool non_blocking) {
   RBLN_SCOPE_GUARD();
   RBLN_LOG_DEBUG("src_data={}, dst_data={}", fmt::ptr(src.data_ptr()), fmt::ptr(dst.data_ptr()));
-  if (dst.device().is_cpu()) {
-    if (const auto type = held_elements(src)) {
-      copy_held_to_cpu(dst, src, *type);
+  std::optional<c10::rbln::typed::AsTyped> as_typed;
+  switch (typed_copy(dst, src)) {
+    case Typed::kNone:
+      break;
+    case Typed::kAlike:
+      as_typed.emplace();
+      break;
+    case Typed::kToCpu:
+      copy_typed_to_cpu(dst, src, *typed_elements(src));
       return dst;
-    }
-  } else if (src.device().is_cpu()) {
-    if (const auto type = held_elements(dst)) {
-      copy_cpu_to_held(dst, src, *type);
+    case Typed::kFromCpu:
+      copy_cpu_to_typed(dst, src, *typed_elements(dst));
       return dst;
-    }
-  }
-  std::optional<c10::rbln::held::AsHeld> as_held;
-  if (held_alike(dst, src)) {
-    as_held.emplace();
+    case Typed::kAcross:
+      copy_typed_across(dst, src);
+      return dst;
   }
 
   if (non_blocking) {
@@ -666,7 +706,8 @@ at::Tensor clone_rbln(const at::Tensor& self, std::optional<c10::MemoryFormat> m
     out = at::empty(self.sizes(), self.options().memory_format(mf_req));
   }
 
-  if (direct_d2d_eligible && nbytes > 0 && out.is_contiguous() && out.strides() == self.strides()) {
+  if (direct_d2d_eligible && nbytes > 0 && out.is_contiguous() && out.strides() == self.strides() &&
+      typed_copy(out, self) == Typed::kNone) {
     // Bypass aten::copy_ dispatch — write directly into the fresh output
     // buffer. Both self and out live on the same RBLN device (Tensor::options
     // preserves device), so this is always a same-device v2v. Require
@@ -825,61 +866,73 @@ void _foreach_copy__rbln(at::TensorList self, at::TensorList src, bool non_block
       self.size(),
       src.size());
 
-  // Pairs between a CPU tensor and one held in an elementwise type cross as their elements: the
-  // reads gather their bytes as held in one batch and decode them, the writes encode first.
-  std::vector<at::Tensor> rest_self, rest_src, read_bytes, read_src, read_dst, write_dst, write_bytes;
-  std::vector<HeldType> read_types;
-  for (size_t i = 0; i < self.size(); ++i) {
-    if (self[i].device().is_cpu()) {
-      if (auto type = held_elements(src[i])) {
-        read_bytes.push_back(at::empty(src[i].sizes(), src[i].options().device(at::kCPU)));
-        read_src.push_back(src[i]);
-        read_dst.push_back(self[i]);
-        read_types.push_back(std::move(type));
-        continue;
-      }
-    } else if (src[i].device().is_cpu()) {
-      if (auto type = held_elements(self[i])) {
-        auto values = at::empty(self[i].sizes(), self[i].options().device(at::kCPU));
-        values.copy_(src[i]);
-        write_bytes.push_back(at::empty_like(values));
-        c10::rbln::held::encode(*type, values.const_data_ptr(), write_bytes.back().mutable_data_ptr(), values.numel());
-        write_dst.push_back(self[i]);
-        continue;
+  // Pairs that meet typed allocations go apart from the rest: those between a CPU tensor and one of
+  // a type cross as their elements, read in one batch of the bytes as typed and decoded, or encoded
+  // first and written in one batch; those within one type move their bytes as they are in one
+  // batch; those across types go one by one.
+  if (c10::rbln::caching::any_typed() && !c10::rbln::caching::locating_as_typed()) {
+    std::vector<at::Tensor> rest_self, rest_src, read_bytes, read_src, read_dst, write_dst, write_bytes, alike_self,
+        alike_src, across_self, across_src;
+    std::vector<TypeOf> read_types;
+    for (size_t i = 0; i < self.size(); ++i) {
+      switch (typed_copy(self[i], src[i])) {
+        case Typed::kNone:
+          rest_self.push_back(self[i]);
+          rest_src.push_back(src[i]);
+          break;
+        case Typed::kAlike:
+          alike_self.push_back(self[i]);
+          alike_src.push_back(src[i]);
+          break;
+        case Typed::kToCpu:
+          read_bytes.push_back(at::empty(src[i].sizes(), src[i].options().device(at::kCPU)));
+          read_src.push_back(src[i]);
+          read_dst.push_back(self[i]);
+          read_types.push_back(typed_elements(src[i]));
+          break;
+        case Typed::kFromCpu: {
+          const auto type = typed_elements(self[i]);
+          auto values = at::empty(self[i].sizes(), self[i].options().device(at::kCPU));
+          values.copy_(src[i]);
+          write_bytes.push_back(at::empty_like(values));
+          c10::rbln::typed::encode(
+              *type, values.const_data_ptr(), write_bytes.back().mutable_data_ptr(), values.numel());
+          write_dst.push_back(self[i]);
+          break;
+        }
+        case Typed::kAcross:
+          across_self.push_back(self[i]);
+          across_src.push_back(src[i]);
+          break;
       }
     }
-    rest_self.push_back(self[i]);
-    rest_src.push_back(src[i]);
-  }
-  if (!read_src.empty() || !write_dst.empty()) {
-    {
-      const c10::rbln::held::AsHeld as_held;
-      if (!read_src.empty()) {
-        _foreach_copy__rbln(read_bytes, read_src, false);
+    if (rest_self.size() < self.size()) {
+      {
+        const c10::rbln::typed::AsTyped as_typed;
+        if (!read_src.empty()) {
+          _foreach_copy__rbln(read_bytes, read_src, false);
+        }
+        if (!write_dst.empty()) {
+          _foreach_copy__rbln(write_dst, write_bytes, false);
+        }
+        if (!alike_self.empty()) {
+          _foreach_copy__rbln(alike_self, alike_src, non_blocking);
+        }
       }
-      if (!write_dst.empty()) {
-        _foreach_copy__rbln(write_dst, write_bytes, false);
+      for (size_t k = 0; k < read_dst.size(); ++k) {
+        auto values = at::empty_like(read_bytes[k]);
+        c10::rbln::typed::decode(
+            *read_types[k], read_bytes[k].const_data_ptr(), values.mutable_data_ptr(), values.numel());
+        read_dst[k].copy_(values);
       }
+      for (size_t k = 0; k < across_self.size(); ++k) {
+        copy_typed_across(across_self[k], across_src[k]);
+      }
+      if (!rest_self.empty()) {
+        _foreach_copy__rbln(rest_self, rest_src, non_blocking);
+      }
+      return;
     }
-    for (size_t k = 0; k < read_dst.size(); ++k) {
-      auto values = at::empty_like(read_bytes[k]);
-      c10::rbln::held::decode(
-          *read_types[k], read_bytes[k].const_data_ptr(), values.mutable_data_ptr(), values.numel());
-      read_dst[k].copy_(values);
-    }
-    if (!rest_self.empty()) {
-      _foreach_copy__rbln(rest_self, rest_src, non_blocking);
-    }
-    return;
-  }
-
-  std::optional<c10::rbln::held::AsHeld> as_held;
-  bool alike = !self.empty();
-  for (size_t i = 0; alike && i < self.size(); ++i) {
-    alike = held_alike(self[i], src[i]);
-  }
-  if (alike) {
-    as_held.emplace();
   }
 
   // Cross-pair aliasing would make the batch's reordering observable; fall back

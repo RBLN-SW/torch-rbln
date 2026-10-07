@@ -5,14 +5,18 @@
 #include <ATen/native/rbln/RBLNStrideUtils.h>
 #include <ATen/native/rbln/RBLNTensorFactories.h>
 #include <ATen/native/rbln/RBLNTensorUtils.h>
+#include <ATen/ops/zeros.h>
+#include <c10/rbln/RBLNCachingAllocator.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNHostBatch.h>
 #include <c10/rbln/RBLNLogging.h>
+#include <c10/rbln/RBLNTyped.h>
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <vector>
 
 namespace at::native::rbln {
@@ -112,6 +116,19 @@ at::Tensor& zero_rbln_(at::Tensor& self) {
   RBLN_SCOPE_GUARD();
   if (self.numel() == 0) {
     return self;
+  }
+  // A tensor of a type zeroes its bytes when a zero element is zero bytes, and is otherwise written
+  // zeros encoded on the host (see c10/rbln/RBLNTyped.h).
+  std::optional<c10::rbln::typed::AsTyped> as_typed;
+  if (c10::rbln::caching::any_typed() && !c10::rbln::caching::locating_as_typed()) {
+    auto found = c10::rbln::caching::try_locate_typed(self.const_data_ptr());
+    if (found && found->type) {
+      if (!found->type->zero_is_zero_bytes) {
+        self.copy_(at::zeros(self.sizes(), self.options().device(at::kCPU)));
+        return self;
+      }
+      as_typed.emplace();
+    }
   }
   // A dense view covers one byte range from data_ptr(), whatever its offset or dim order;
   // anything else is filled run by run.
@@ -274,6 +291,13 @@ at::Tensor& fill_scalar_rbln_(at::Tensor& self, const at::Scalar& value) {
   RBLN_SCOPE_GUARD();
   if (self.numel() == 0) {
     return self;
+  }
+  // A tensor of a type is written the value encoded on the host (see c10/rbln/RBLNTyped.h).
+  if (c10::rbln::caching::any_typed() && !c10::rbln::caching::locating_as_typed()) {
+    auto found = c10::rbln::caching::try_locate_typed(self.const_data_ptr());
+    if (found && found->type) {
+      return fill_scalar_via_cpu(self, value);
+    }
   }
   // Broadcast/expand view: a size>1 dim with stride 0 aliases many logical elements onto a
   // single storage element (internal overlap). A scalar fill is still well-defined — every

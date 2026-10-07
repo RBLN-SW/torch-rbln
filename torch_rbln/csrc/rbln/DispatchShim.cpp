@@ -609,7 +609,11 @@ PendingInstall take_pending() {
 // return value. A call whose tensors the function cannot take as they are (a
 // view, an ``out`` of another shape) falls through to the Python wrapper; the
 // entry stays for later calls.
-bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const CacheKey& key, const CallTensors& tensors) {
+bool try_warmcache_hit(
+    torch::jit::Stack* stack,
+    const SchemaCache& cache,
+    const CacheKey& key,
+    const CallTensors& tensors) {
   auto& wc = WarmCache::instance();
   if (!wc.is_enabled() || cache.return_types.size() != 1)
     return false;
@@ -643,8 +647,8 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
       inputs, bind_out ? c10::ArrayRef<std::optional<at::Tensor>>(*out) : c10::ArrayRef<std::optional<at::Tensor>>());
   // An out the function cannot write where it is, as one an in-place op shares
   // with an input, takes a copy of a result made for it.
-  const bool copied = bind_out && !results && out->scalar_type() == output.dtype &&
-      out->sizes() == c10::IntArrayRef(output.shape);
+  const bool copied =
+      bind_out && !results && out->scalar_type() == output.dtype && out->sizes() == c10::IntArrayRef(output.shape);
   if (copied) {
     results = entry->function->run(inputs);
   }
@@ -979,7 +983,7 @@ static void bounce_site_capture(uint8_t site) noexcept {
       "strided_v2v_cpu_fallback",
       "host_batch_to_per_entry",
       "op_arg_through_host",
-      "held_tensor_released"};
+      "typed_through_host"};
   static_assert(kNames.size() == c10::rbln::prof::kNumBounceSites, "bounce site names must match the BounceSite enum");
   if (site >= kNames.size()) {
     return;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <c10/core/Device.h>
+#include <c10/core/ScalarType.h>
 #include <c10/core/Stream.h>
 #include <c10/rbln/RBLNMacros.h>
 #include <rebel/v2/runtime/device.h>
@@ -9,10 +10,18 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
 
 namespace c10::rbln {
 
 namespace rt = ::rebel::v2::runtime;
+
+/**
+ * @brief The name rebel gives the dtype `type`, or none for one it has no name for;
+ * `scalar_type_of` is the inverse, and throws for a name no torch dtype holds.
+ */
+C10_RBLN_API const char* dtype_name(c10::ScalarType type);
+C10_RBLN_API c10::ScalarType scalar_type_of(const std::string& name);
 
 /**
  * @brief Where a device pointer points: the buffer of the segment it lies in and its offset.

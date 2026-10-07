@@ -8,15 +8,14 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
 #include <string>
 
-namespace c10::rbln::held {
+namespace c10::rbln::typed {
 struct Type;
-} // namespace c10::rbln::held
+} // namespace c10::rbln::typed
 
 namespace c10::rbln::caching {
 
@@ -39,44 +38,39 @@ C10_RBLN_API void record_stream(void* ptr, c10::Stream stream);
 /**
  * @brief Where `ptr` points within the live allocation it lies in, with `available` the bytes
  * from it to the allocation's end; throws, or is none, if it lies in no live allocation. What
- * locates bytes reads or writes them as torch holds a tensor, so an allocation a program holds
- * otherwise (see RBLNHeld.h) is put back as torch holds it first.
+ * locates bytes reads or writes them as torch holds a tensor, so it throws for an allocation of a
+ * type (see RBLNTyped.h), unless this thread locates typed allocations as they are.
  */
 C10_RBLN_API Location locate(const void* ptr);
 C10_RBLN_API std::optional<Location> try_locate(const void* ptr);
 
 /**
- * @brief Where `ptr` points, as `try_locate` says, leaving the allocation as it is held: the
- * allocation's first byte, and how a program holds it, if one does.
+ * @brief Where `ptr` points, as `try_locate` says, whatever type the allocation has: the
+ * allocation's first byte, and its type, if it has one.
  */
-struct Held {
+struct Typed {
   Location location;
   void* start = nullptr;
-  std::shared_ptr<const held::Type> type;
+  std::shared_ptr<const typed::Type> type;
 };
-C10_RBLN_API std::optional<Held> try_locate_held(const void* ptr);
+C10_RBLN_API std::optional<Typed> try_locate_typed(const void* ptr);
 
 /**
- * @brief Whether a program holds any live allocation.
+ * @brief Gives the live allocation starting at `start`, made just now, `type` until it is freed.
  */
-C10_RBLN_API bool any_held();
+C10_RBLN_API void set_type(void* start, std::shared_ptr<const typed::Type> type);
 
 /**
- * @brief Makes this thread's locates leave held allocations as they are, or put them back as torch
- * holds them; returns the setting before.
+ * @brief Whether any live allocation has a type.
  */
-C10_RBLN_API bool locate_as_held(bool as_held);
-C10_RBLN_API bool locating_as_held();
+C10_RBLN_API bool any_typed();
 
 /**
- * @brief Runs `convert`, which puts the bytes of the allocation starting at `start` in `type`, or
- * back as torch holds them when `type` is none, and counts the allocation so until it is freed.
- * Other threads locating bytes wait while it runs; `convert` locates them as they are.
+ * @brief Makes this thread's locates take typed allocations as they are, or refuse them; returns
+ * the setting before.
  */
-C10_RBLN_API void convert_held(
-    const void* start,
-    const std::function<void()>& convert,
-    std::shared_ptr<const held::Type> type);
+C10_RBLN_API bool locate_as_typed(bool as_typed);
+C10_RBLN_API bool locating_as_typed();
 C10_RBLN_API void empty_cache(c10::DeviceIndex device_index);
 C10_RBLN_API c10::CachingDeviceAllocator::DeviceStats device_stats(c10::DeviceIndex device_index);
 // torch.cuda.memory_stats()'s keys, for the aggregate pool.

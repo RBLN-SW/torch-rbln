@@ -8,7 +8,8 @@ import contextlib
 import operator
 import os
 import sys
-from typing import Dict, Optional, Union  # noqa: UP035
+import weakref
+from typing import Any, Dict, Optional, Union  # noqa: UP035
 
 import torch
 
@@ -17,6 +18,7 @@ import torch_rbln._C
 
 __all__ = [
     "empty_cache",
+    "empty_typed",
     "huge_host_empty",
     "max_memory_allocated",
     "max_memory_reserved",
@@ -31,6 +33,7 @@ __all__ = [
     "release_offload_temp_storage",
     "reset_accumulated_memory_stats",
     "reset_peak_memory_stats",
+    "zeros_typed",
 ]
 
 
@@ -440,6 +443,75 @@ def huge_host_empty(nbytes: int) -> torch.Tensor:
     if not 0 < nbytes <= sys.maxsize:
         raise ValueError(f"nbytes must be in 1..{sys.maxsize}, but got {nbytes}")
     return torch_rbln._C._host_empty(nbytes)
+
+
+# The native form of each compiled function tensors were made in the types of, made once.
+_typed_functions: "weakref.WeakKeyDictionary[Any, Any]" = weakref.WeakKeyDictionary()
+
+
+def _typed(
+    arg: Any, device: Optional[Union[int, str, torch.device]], shape: Any, axes: dict, zero: bool
+) -> torch.Tensor:
+    function = arg.function
+    to_bytes = getattr(function, "to_bytes", None)
+    if to_bytes is None:
+        raise TypeError(
+            f"{arg.name} is an arg of a function loaded without its bytes; take it from a function "
+            "rebel.v2.compile, rebel.v2.load or torch.rbln.capture_programs gives"
+        )
+    if shape is not None and axes:
+        raise TypeError("give either shape or dynamic axis values")
+    if shape is None:
+        shape = list(arg.logical.shape)
+        dynamic = {d.name: d.axis for d in arg.logical.dynamic_axes}
+        for name, value in axes.items():
+            if name not in dynamic:
+                raise KeyError(f"{arg.name} has no dynamic axis {name}; it has {list(dynamic)}")
+            shape[dynamic[name]] = value
+    native = _typed_functions.get(function)
+    if native is None:
+        native = torch_rbln._C._TypedFunction(to_bytes())
+        _typed_functions[function] = native
+    return native.empty(arg.name, [int(e) for e in shape], _normalize_device(device).index, zero)
+
+
+def empty_typed(
+    arg: Any, *, device: Optional[Union[int, str, torch.device]] = None, shape: Any = None, **axes: int
+) -> torch.Tensor:
+    """
+    A tensor on an rbln device whose bytes are in the type of ``arg``, an arg of a compiled function
+    (``rebel.v2.Arg``; ``torch.rbln.capture_programs()`` reports those of the graphs
+    ``torch.compile`` ran), for as long as the tensor lives.
+
+    A graph whose arg is of that type binds the tensor in place, with no host round trip: the way
+    to give a graph a tensor it writes in place that the device holds otherwise than torch, such as
+    a float16 KV cache it keeps in dlfloat16. Copies move its elements to and from the CPU and
+    tensors of other types (``copy_``, ``.cpu()``, ``.clone()``), decoding or encoding them on the
+    host, and zeroing it zeroes its elements. Anything else that reads its bytes as torch holds a
+    tensor is refused. When the arg holds its value as torch holds the tensor, this is a plain
+    tensor.
+
+    Args:
+        arg: The arg whose type the tensor takes. It holds its value in one shard, and each element
+            where torch holds it, perhaps cast to a dtype of the same size.
+        device: The rbln device; the current one by default.
+        shape: The tensor's shape, which the arg takes; by default the arg's, with the dynamic
+            axes ``axes`` names set to their values.
+        **axes: Values of the arg's dynamic axes, by the names the function gave them.
+
+    Returns:
+        torch.Tensor: A contiguous tensor of the arg's logical dtype, its elements unset.
+    """
+    return _typed(arg, device, shape, axes, zero=False)
+
+
+def zeros_typed(
+    arg: Any, *, device: Optional[Union[int, str, torch.device]] = None, shape: Any = None, **axes: int
+) -> torch.Tensor:
+    """
+    :func:`empty_typed` with every element zero.
+    """
+    return _typed(arg, device, shape, axes, zero=True)
 
 
 def offload() -> contextlib.AbstractContextManager[None]:

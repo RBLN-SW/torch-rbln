@@ -4,8 +4,8 @@ Dynamo hands over a graph and the tensors of the call it traced. The graph is ca
 with ``rebel.v2.frontend.capture_dynamo`` and compiled for the NPU of those tensors, with every
 input a call passes and every result laid out as torch lays out a contiguous tensor
 (``rebel.v2.LOGICAL``), so torch-rbln tensors bind in place and CPU ones by a copy. An input the
-graph writes in place that the device holds otherwise, such as a float16 KV cache it keeps in
-dlfloat16, is put in the device's type on the first call and bound in place from then on. The
+device holds otherwise, such as a float16 KV cache it keeps in dlfloat16, binds in place when it
+was made in the arg's type (``torch.rbln.empty_typed``), and goes through the host otherwise. The
 module's parameters and buffers are the function's state: they are written to the device
 when first seen and again once they change, as another tensor or written in place. A
 result the graph leaves on the CPU comes back on the CPU.
@@ -139,7 +139,6 @@ class CompiledGraph:
                 self._inputs,
                 {**self._constants, **changed},
                 self._host_results,
-                hold_written=True,
             )
             if self._group is not None:
                 from torch.distributed import distributed_c10d
@@ -156,6 +155,9 @@ class CompiledGraph:
     def __call__(self, *args: Any) -> tuple[torch.Tensor, ...]:
         # Dynamo passes the extents of dynamic axes as well, which the tensors carry.
         args = tuple(a for a in args if isinstance(a, torch.Tensor))
+        if programs.is_compiling_only():
+            device = next((a.device for a in args if a.device.type != "cpu"), torch.device("rbln"))
+            return _zeros(self._fn, device, self._host_results)
         self._write_state(self._state(args))
         inputs = [t for (kind, _), t in zip(self._roles, args) if kind == "input"]
         results = self._function.run(inputs)
@@ -164,6 +166,16 @@ class CompiledGraph:
         for input_index, result in self._written:
             inputs[input_index].copy_(results[result])
         return tuple(results[: self._returned])
+
+
+def _zeros(fn: Any, device: torch.device, host_results: list[bool]) -> tuple[torch.Tensor, ...]:
+    """Zeros of the results `fn` returns, on `device` or on the CPU as `host_results` says."""
+    results = [fn.arg(name) for name in fn.returned]
+    host = host_results or [False] * len(results)
+    return tuple(
+        torch.zeros(tuple(a.logical.shape), dtype=getattr(torch, a.logical.dtype), device="cpu" if on_host else device)
+        for a, on_host in zip(results, host)
+    )
 
 
 def _compile_only(fn: Any, device: torch.device, host_results: list[bool]):
@@ -187,9 +199,15 @@ def _program(fn: Any, graph: Any, device: torch.device, example_inputs: list[Any
     arg_of = {tuple(a.sources): a for a in fn.args}
     passed = graph.passed if graph.passed is not None else [inp.name for inp in graph.inputs]
     by_name = {inp.name: inp for inp in graph.inputs}
-    shapes = dict(zip(passed, (tuple(x.shape) for x in example_inputs if isinstance(x, torch.Tensor))))
+    tensors = dict(zip(passed, (x for x in example_inputs if isinstance(x, torch.Tensor))))
     inputs = tuple(
-        programs.InputSpec(name, shapes[name], by_name[name].dtype, arg_of.get((name,)))
+        programs.InputSpec(
+            name,
+            tuple(tensors[name].shape),
+            by_name[name].dtype,
+            arg_of.get((name,)),
+            tensors[name].untyped_storage().data_ptr(),
+        )
         for name in passed
         if by_name[name].kind == "input"
     )

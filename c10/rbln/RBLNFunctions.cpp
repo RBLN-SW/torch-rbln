@@ -1,7 +1,7 @@
 #include <ATen/ATen.h>
 #include <c10/rbln/DeviceMappingManager.h>
-#include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNCachingAllocator.h>
+#include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNRuntime.h>
@@ -10,11 +10,11 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <limits>
 #include <functional>
+#include <limits>
 #include <map>
-#include <set>
 #include <mutex>
+#include <set>
 #include <vector>
 
 #include <array>
@@ -30,15 +30,7 @@ namespace c10::rbln {
 // region flips it on for its duration. Index order MUST match kRtTimingN / the
 // Python _RT_PRIMS tuple.
 namespace {
-enum RtIdx : std::uint8_t {
-  RT_V2V = 0,
-  RT_V2V_MULTI,
-  RT_V2H,
-  RT_H2V,
-  RT_V2H_MULTI,
-  RT_H2V_MULTI,
-  RT_N
-};
+enum RtIdx : std::uint8_t { RT_V2V = 0, RT_V2V_MULTI, RT_V2H, RT_H2V, RT_V2H_MULTI, RT_H2V_MULTI, RT_N };
 static_assert(static_cast<std::size_t>(RT_N) == kRtTimingN, "RtIdx count must match kRtTimingN in the header");
 std::atomic<bool> g_rt_enabled{false};
 struct RtAcc {
@@ -286,7 +278,7 @@ c10::DeviceIndex exchange_device_index(c10::DeviceIndex device_index) {
 
 c10::DeviceIndex get_torch_device_id(const void* data) {
   RBLN_CHECK(data != nullptr, "data cannot be nullptr");
-  auto found = caching::try_locate_held(data);
+  auto found = caching::try_locate_typed(data);
   RBLN_CHECK(found.has_value(), "{} is not in live RBLN device memory", fmt::ptr(data));
   return found->location.device_index;
 }
@@ -500,9 +492,8 @@ void copy_v2v(const Location& dst, const Location& src, size_t nbytes) {
     if (src.device_index != dst.device_index) {
       on_current_stream(src.device_index, [] {});
     }
-    on_current_stream(dst.device_index, [&] {
-      dst_device->copy(*dst.buffer, dst.offset, *src.buffer, src.offset, nbytes);
-    });
+    on_current_stream(
+        dst.device_index, [&] { dst_device->copy(*dst.buffer, dst.offset, *src.buffer, src.offset, nbytes); });
     return;
   }
   // Devices of different contexts reach each other through the host.
@@ -708,11 +699,11 @@ void event_synchronize(uint64_t event) {
 
 // A failure keeps the "<name> failed" message at::native::rbln::submit_or_fallback matches to
 // route a rejected batch to its CPU fallback.
-#define RBLN_BATCH(name, body)                                     \
-  try {                                                            \
-    body;                                                          \
-  } catch (const std::exception& e) {                              \
-    RBLN_CHECK(false, name " failed: {}", first_line(e.what()));   \
+#define RBLN_BATCH(name, body)                                   \
+  try {                                                          \
+    body;                                                        \
+  } catch (const std::exception& e) {                            \
+    RBLN_CHECK(false, name " failed: {}", first_line(e.what())); \
   }
 
 namespace {

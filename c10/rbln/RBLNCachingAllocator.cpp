@@ -1,17 +1,17 @@
 #include <c10/rbln/RBLNCachingAllocator.h>
 #include <c10/rbln/RBLNFunctions.h>
-#include <c10/rbln/RBLNHeld.h>
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNRuntime.h>
+#include <c10/rbln/RBLNTyped.h>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <set>
+#include <string>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -38,21 +38,14 @@ struct Block {
   std::vector<rt::Event> pending;
   Block* prev = nullptr;
   Block* next = nullptr;
-  // How a program holds the allocation, if one does.
-  std::shared_ptr<const held::Type> held;
+  // The type the allocation holds its bytes in, if it was made with one.
+  std::shared_ptr<const typed::Type> type;
 };
 
-// The live allocations programs hold, so that locating bytes looks for one only while there is.
-std::atomic<int64_t> held_allocations{0};
+// The live allocations with a type, so that locating bytes looks for one only while there is.
+std::atomic<int64_t> typed_allocations{0};
 
-// Taken while an allocation is put in a held type or back, so that no other thread locates the
-// bytes of one halfway; the thread converting locates them as they are.
-std::recursive_mutex& held_mutex() {
-  static std::recursive_mutex mutex;
-  return mutex;
-}
-thread_local bool converting = false;
-thread_local bool as_held = false;
+thread_local bool as_typed = false;
 
 struct ByStreamSize {
   bool operator()(const Block* a, const Block* b) const {
@@ -106,11 +99,11 @@ class DeviceCache {
   struct Found {
     uintptr_t start = 0;
     uint64_t available = 0;
-    std::shared_ptr<const held::Type> held;
+    std::shared_ptr<const typed::Type> type;
   };
 
-  // The live allocation `ptr` lies in: its first byte, the bytes from `ptr` to its end, and how a
-  // program holds it. One past the end is the end of an empty view there.
+  // The live allocation `ptr` lies in: its first byte, the bytes from `ptr` to its end, and its
+  // type. One past the end is the end of an empty view there.
   std::optional<Found> find(uintptr_t ptr) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = active_.upper_bound(ptr);
@@ -122,16 +115,25 @@ class DeviceCache {
     if (ptr - block->ptr > block->requested) {
       return std::nullopt;
     }
-    return Found{block->ptr, block->ptr + block->requested - ptr, block->held};
+    return Found{block->ptr, block->ptr + block->requested - ptr, block->type};
   }
 
-  void set_held(uintptr_t start, std::shared_ptr<const held::Type> type) {
+  void set_type(uintptr_t start, std::shared_ptr<const typed::Type> type) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = active_.find(start);
     RBLN_CHECK(it != active_.end(), "{} starts no live RBLN allocation", fmt::ptr(reinterpret_cast<void*>(start)));
-    auto& held = it->second->held;
-    held_allocations += static_cast<int64_t>(type != nullptr) - static_cast<int64_t>(held != nullptr);
-    held = std::move(type);
+    Block* block = it->second;
+    RBLN_CHECK(
+        block->type == nullptr, "the allocation at {} has a type already", fmt::ptr(reinterpret_cast<void*>(start)));
+    RBLN_CHECK(
+        block->requested >= typed::nbytes(*type),
+        "the allocation at {} has {} bytes, the type {} needs {}",
+        fmt::ptr(reinterpret_cast<void*>(start)),
+        block->requested,
+        typed::describe(*type),
+        typed::nbytes(*type));
+    block->type = std::move(type);
+    ++typed_allocations;
   }
 
   void release(uintptr_t ptr) {
@@ -141,9 +143,9 @@ class DeviceCache {
     Block* block = it->second;
     active_.erase(it);
     block->allocated = false;
-    if (block->held) {
-      block->held.reset();
-      --held_allocations;
+    if (block->type) {
+      block->type.reset();
+      --typed_allocations;
     }
     decrease(stats_.allocation, block->small, 1);
     decrease(stats_.allocated_bytes, block->small, block->size);
@@ -200,9 +202,16 @@ class DeviceCache {
  private:
   template <typename F>
   void for_each_stat(F f) {
-    for (auto* stats : {&stats_.allocation, &stats_.segment, &stats_.active, &stats_.inactive_split,
-                        &stats_.allocated_bytes, &stats_.reserved_bytes, &stats_.active_bytes,
-                        &stats_.inactive_split_bytes, &stats_.requested_bytes}) {
+    for (auto* stats :
+         {&stats_.allocation,
+          &stats_.segment,
+          &stats_.active,
+          &stats_.inactive_split,
+          &stats_.allocated_bytes,
+          &stats_.reserved_bytes,
+          &stats_.active_bytes,
+          &stats_.inactive_split_bytes,
+          &stats_.requested_bytes}) {
       for (auto& stat : *stats) {
         f(stat);
       }
@@ -405,7 +414,7 @@ void record_stream(void* ptr, c10::Stream stream) {
   }
 }
 
-std::optional<Held> try_locate_held(const void* ptr) {
+std::optional<Typed> try_locate_typed(const void* ptr) {
   auto location = locate_segment(ptr);
   if (!location) {
     return std::nullopt;
@@ -415,49 +424,39 @@ std::optional<Held> try_locate_held(const void* ptr) {
     return std::nullopt;
   }
   location->available = found->available;
-  return Held{std::move(*location), reinterpret_cast<void*>(found->start), std::move(found->held)};
+  return Typed{std::move(*location), reinterpret_cast<void*>(found->start), std::move(found->type)};
 }
 
-void convert_held(const void* start, const std::function<void()>& convert, std::shared_ptr<const held::Type> type) {
-  std::lock_guard<std::recursive_mutex> lock(held_mutex());
+void set_type(void* start, std::shared_ptr<const typed::Type> type) {
   auto location = locate_segment(start);
   RBLN_CHECK(location.has_value(), "{} is not RBLN device memory", fmt::ptr(start));
-  converting = true;
-  try {
-    convert();
-  } catch (...) {
-    converting = false;
-    throw;
-  }
-  converting = false;
-  cache(location->device_index).set_held(reinterpret_cast<uintptr_t>(start), std::move(type));
+  cache(location->device_index).set_type(reinterpret_cast<uintptr_t>(start), std::move(type));
 }
 
-bool any_held() {
-  return held_allocations.load() != 0;
+bool any_typed() {
+  return typed_allocations.load() != 0;
 }
 
-bool locate_as_held(bool value) {
-  return std::exchange(as_held, value);
+bool locate_as_typed(bool value) {
+  return std::exchange(as_typed, value);
 }
 
-bool locating_as_held() {
-  return as_held;
+bool locating_as_typed() {
+  return as_typed;
 }
 
 std::optional<Location> try_locate(const void* ptr) {
-  if (held_allocations.load() == 0 || converting || as_held) {
-    auto found = try_locate_held(ptr);
-    return found ? std::optional<Location>(std::move(found->location)) : std::nullopt;
-  }
-  std::lock_guard<std::recursive_mutex> lock(held_mutex());
-  auto found = try_locate_held(ptr);
+  auto found = try_locate_typed(ptr);
   if (!found) {
     return std::nullopt;
   }
-  if (found->type) {
-    convert_held(found->start, [&] { held::release(found->start, *found->type); }, nullptr);
-  }
+  RBLN_CHECK(
+      !found->type || as_typed,
+      "{} lies in a tensor of the type of arg {} of a compiled program, whose bytes are not as torch "
+      "holds them; copy it to a tensor of another type (copy_, .cpu(), .clone()) or run a program of "
+      "that type on it",
+      fmt::ptr(ptr),
+      found->type ? typed::describe(*found->type) : std::string());
   return std::move(found->location);
 }
 

@@ -37,7 +37,7 @@ class TestCaptureProgramsSurface(TestCase):
             self.assertIs(getattr(torch.rbln, name), getattr(torch_rbln_programs, name))
         self.assertEqual(
             set(torch_rbln_programs.__all__),
-            {"capture_programs", "CompiledProgram", "InputSpec", "OutputSpec"},
+            {"capture_programs", "compile_only", "CompiledProgram", "InputSpec", "OutputSpec"},
         )
 
     def test_empty_scope_yields_empty_list(self):

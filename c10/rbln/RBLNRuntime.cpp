@@ -10,6 +10,8 @@
 
 #include <map>
 #include <mutex>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace c10::rbln {
@@ -138,6 +140,52 @@ c10::StreamId add_pool_stream(c10::DeviceIndex device_index) {
   auto& pool = streams[device_index].pool;
   pool.push_back(std::move(stream));
   return static_cast<c10::StreamId>(pool.size());
+}
+
+const char* dtype_name(c10::ScalarType type) {
+  switch (type) {
+    case c10::kHalf:
+      return "float16";
+    case c10::kBFloat16:
+      return "bfloat16";
+    case c10::kFloat:
+      return "float32";
+    case c10::kDouble:
+      return "float64";
+    case c10::kLong:
+      return "int64";
+    case c10::kInt:
+      return "int32";
+    case c10::kShort:
+      return "int16";
+    case c10::kChar:
+      return "int8";
+    case c10::kByte:
+      return "uint8";
+    case c10::kBool:
+      return "bool";
+    default:
+      return nullptr;
+  }
+}
+
+c10::ScalarType scalar_type_of(const std::string& name) {
+  for (auto type :
+       {c10::kHalf,
+        c10::kBFloat16,
+        c10::kFloat,
+        c10::kDouble,
+        c10::kLong,
+        c10::kInt,
+        c10::kShort,
+        c10::kChar,
+        c10::kByte,
+        c10::kBool}) {
+    if (name == dtype_name(type)) {
+      return type;
+    }
+  }
+  throw std::invalid_argument("no torch dtype holds " + name);
 }
 
 } // namespace c10::rbln

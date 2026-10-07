@@ -85,7 +85,7 @@ _BOUNCE_SITES: tuple[tuple[str, str], ...] = (
     ("strided_v2v_cpu_fallback", "cat/index/copy_: strided v2v fell back to CPU"),
     ("host_batch_to_per_entry", "batched h2v/v2h rejected -> per-entry"),
     ("op_arg_through_host", "op arg encoded or decoded on the host"),
-    ("held_tensor_released", "a tensor a graph holds in its own type, put back as torch holds it"),
+    ("typed_through_host", "elements of a typed tensor moved to or from another type on the host"),
 )
 # Which sites are genuine host round-trips. The batch->per-entry site is not: it
 # already moves host<->device, so the incident is a lost batching win, not an
@@ -124,10 +124,10 @@ _REMEDY: dict[str, str] = {
         "64 elements, for one), so it was encoded or decoded on the host around the run; a wider last axis "
         "keeps it on the device"
     ),
-    "held_tensor_released": (
-        "a compiled graph keeps a tensor it writes in place (a KV cache, for one) in the type it computes "
-        "in, and an eager op or copy reached its bytes, which put it back as torch holds it on the host; the "
-        "next run holds it again. Leave such tensors to the graphs"
+    "typed_through_host": (
+        "a tensor made in the type of a compiled program's arg (torch.rbln.empty_typed; a KV cache, for one) "
+        "met a tensor or a program of another type, so its elements were decoded or encoded on the host; copy "
+        "it only to the CPU or to tensors of its type, and run only programs that take its type on it"
     ),
     "cpu_fallback": (
         "op ran on CPU; prefer graph mode (torch.compile backend='rbln'), add a native rbln kernel, or fix "
@@ -149,7 +149,7 @@ _FIX_SHORT: dict[str, str] = {
     "strided_v2v_cpu_fallback": "see the logged runtime error",
     "host_batch_to_per_entry": "see the logged runtime error",
     "op_arg_through_host": "widen the narrow last axis",
-    "held_tensor_released": "leave it to the graphs",
+    "typed_through_host": "keep it to programs of its type",
     "cpu_fallback": "graph mode, or a supported dtype",
     "recompile": "stabilize shapes, or graph mode",
 }
