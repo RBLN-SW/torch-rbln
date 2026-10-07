@@ -1,12 +1,12 @@
-"""The rbln runtime library (``librbln_rt.so``) this process runs on.
+"""The rebel.v2 runtime library (``librebel_v2_rt.so``) this process runs on.
 
-Importing ``rbln.runtime`` maps the runtime: its extension links ``librbln_rt.so`` through its
-own RPATH. torch-rbln's native libraries declare the same library NEEDED by SONAME, so once it is
-mapped the dynamic loader reuses that mapping for them instead of searching their RUNPATH. The
-process then holds one runtime -- one allocator, one device registry -- shared by ``rbln`` and
-torch-rbln.
+Importing ``rebel.v2.runtime`` maps the runtime: its extension links ``librebel_v2_rt.so`` through
+its own RPATH. torch-rbln's native libraries declare the same library NEEDED by SONAME, so once it
+is mapped the dynamic loader reuses that mapping for them instead of searching their RUNPATH. The
+process then holds one runtime -- one allocator, one device registry -- shared by ``rebel.v2``
+and torch-rbln.
 
-Stdlib-only apart from the ``rbln`` import itself, so diagnose can use it when torch-rbln's own
+Stdlib-only apart from the ``rebel.v2`` import itself, so diagnose can use it when torch-rbln's own
 native libraries are missing or broken.
 """
 
@@ -15,8 +15,8 @@ import sys
 from collections.abc import Iterable
 
 
-RUNTIME_LIB_NAME = "librbln_rt.so"
-RUNTIME_PACKAGE = "rbln.runtime"
+RUNTIME_LIB_NAME = "librebel_v2_rt.so"
+RUNTIME_PACKAGE = "rebel.v2.runtime"
 
 _MAPS_PATH = "/proc/self/maps"
 _DELETED_SUFFIX = " (deleted)"
@@ -42,7 +42,7 @@ def parse_mapped_libraries(lines: Iterable[str], name: str = RUNTIME_LIB_NAME) -
 
 
 def loaded_runtime_libraries() -> list[str]:
-    """Paths of every mapped ``librbln_rt.so``; empty when the mapping table cannot be read."""
+    """Paths of every mapped ``librebel_v2_rt.so``; empty when the mapping table cannot be read."""
     if not sys.platform.startswith("linux"):
         return []
     try:
@@ -53,29 +53,30 @@ def loaded_runtime_libraries() -> list[str]:
 
 
 def import_runtime_package():
-    """Import ``rbln.runtime``, which maps ``librbln_rt.so``, and return the module.
+    """Import ``rebel.v2.runtime``, which maps ``librebel_v2_rt.so``, and return the module.
 
     Raises:
-        ImportError: ``rbln`` cannot be imported, with what to install or put on the path.
+        ImportError: ``rebel.v2`` cannot be imported, with what to install or put on the path.
     """
     try:
-        import rbln.runtime
+        from rebel.v2 import runtime
     except ImportError as e:
         raise ImportError(
-            f"torch-rbln runs on the rbln runtime, but `import {RUNTIME_PACKAGE}` failed: {e}. "
-            "Put the rbln package of the rebel-compiler tree torch-rbln was built against on the path "
-            f"(PYTHONPATH=$REBEL_HOME/rbln/python). {_DIAGNOSE_HINT}"
+            f"torch-rbln runs on the rebel.v2 runtime, but `import {RUNTIME_PACKAGE}` failed: {e}. "
+            "Put the rebel package of the rebel-compiler tree torch-rbln was built against on the "
+            f"path (PYTHONPATH=$REBEL_HOME/rebel/python). {_DIAGNOSE_HINT}"
         ) from e
-    return rbln.runtime
+    return runtime
 
 
 def load_runtime_library() -> str:
-    """Map the runtime through ``rbln.runtime`` and return the path of its ``librbln_rt.so``.
+    """Map the runtime through ``rebel.v2.runtime`` and return the path of its
+    ``librebel_v2_rt.so``.
 
     Raises:
-        ImportError: ``rbln.runtime`` cannot be imported, maps no ``librbln_rt.so``, or more than
-            one copy is mapped -- torch-rbln would bind to one of them and ``rbln`` possibly to
-            the other.
+        ImportError: ``rebel.v2.runtime`` cannot be imported, maps no ``librebel_v2_rt.so``, or
+            more than one copy is mapped -- torch-rbln would bind to one of them and ``rebel.v2``
+            possibly to the other.
     """
     module = import_runtime_package()
     mapped = loaded_runtime_libraries()
@@ -88,7 +89,7 @@ def load_runtime_library() -> str:
     if len(mapped) > 1:
         raise ImportError(
             f"{len(mapped)} copies of {RUNTIME_LIB_NAME} are mapped into this process "
-            f"({', '.join(mapped)}); rbln and torch-rbln must share one runtime, so nothing may "
+            f"({', '.join(mapped)}); rebel.v2 and torch-rbln must share one runtime, so nothing may "
             f"open another copy by path. {_DIAGNOSE_HINT}"
         )
     return mapped[0]

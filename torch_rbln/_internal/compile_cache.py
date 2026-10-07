@@ -3,7 +3,7 @@
 An op is a module called with tensors and other values. It is captured with its
 tensors as the function's inputs, in the order ``tree_flatten`` walks the
 arguments, and every other value as a constant, and compiled with every input
-and result laid out as torch lays out a contiguous tensor (``rbln.LOGICAL``), so
+and result laid out as torch lays out a contiguous tensor (``rebel.v2.LOGICAL``), so
 a call's tensors bind to the function as they are, CPU ones by a copy. One the
 compiler lays out otherwise goes through the host as the op runs. A tensor
 the op holds is state the function encodes as it lays it out. One function serves a
@@ -137,24 +137,24 @@ def compile_logical(graph: Any, npu: str, devices: int = 1, cache_dir: Any = Non
     """The function of ``graph`` with its inputs and results laid out as torch
     holds contiguous tensors wherever the compiler can; ``_OpFunction`` moves
     the others through the host as it runs."""
-    import rbln
+    from rebel import v2
 
     try:
-        return rbln.api.compile_graph(graph, npu, devices, cache_dir, inputs=rbln.LOGICAL, outputs=rbln.LOGICAL)
-    except rbln.UnmetRequest as e:
+        return v2.api.compile_graph(graph, npu, devices, cache_dir, inputs=v2.LOGICAL, outputs=v2.LOGICAL)
+    except v2.UnmetRequest as e:
         return e.function
 
 
 def _compile(module: Any, args: tuple, kwargs: dict, device_index: int) -> CompiledOp:
-    import rbln
+    from rebel import v2
 
     flat, spec = tree_flatten((args, kwargs))
     slots = [i for i, v in enumerate(flat) if isinstance(v, torch.Tensor)]
     template = [None if isinstance(v, torch.Tensor) else v for v in flat]
     wrapper = _TensorsIn(module, spec, template, slots).eval()
     names = [f"arg{i}" for i in range(len(slots))]
-    types = {name: rbln.TensorType(flat[slot].shape, flat[slot].dtype) for name, slot in zip(names, slots)}
-    graph = rbln.frontend.capture(wrapper, types)
+    types = {name: v2.TensorType(flat[slot].shape, flat[slot].dtype) for name, slot in zip(names, slots)}
+    graph = v2.frontend.capture(wrapper, types)
     fn = compile_logical(graph, _npu(device_index))
     with FakeTensorMode(allow_non_fake_inputs=True):
         _, out_spec = tree_flatten(wrapper(*(torch.empty(flat[slot].shape, dtype=flat[slot].dtype) for slot in slots)))
@@ -195,9 +195,9 @@ def compiled_op(module: Any, args: tuple, kwargs: dict, device: torch.device) ->
     Raises:
         UncompilableOp: the compiler refused this profile, now or on an earlier call.
     """
-    import rbln
+    from rebel import v2
 
-    key = (_IdentityKey(module), _npu(device.index), rbln.float32_precision(), _profile(args), _profile(kwargs))
+    key = (_IdentityKey(module), _npu(device.index), v2.float32_precision(), _profile(args), _profile(kwargs))
     entry = _compiled_op_cache.get(key)
     if entry is None:
         with _compiled_op_cache_lock:
@@ -209,7 +209,7 @@ def compiled_op(module: Any, args: tuple, kwargs: dict, device: torch.device) ->
                     entry = _Refused(e)
                 _keep(key, entry)
     if isinstance(entry, _Refused):
-        raise UncompilableOp(str(entry.error), isinstance(entry.error, rbln.frontend.NoLowering)) from entry.error
+        raise UncompilableOp(str(entry.error), isinstance(entry.error, v2.frontend.NoLowering)) from entry.error
     return entry
 
 
@@ -221,10 +221,10 @@ def _keep(key: tuple[Any, ...], entry: CompiledOp | _Refused) -> None:
     """Keeps ``entry`` under ``key``, letting go of the least recently run
     entries past TORCH_RBLN_COMPILED_OPS, with what the warm cache holds of
     them. The caller holds ``_compiled_op_cache_lock``."""
-    import rbln
+    from rebel import v2
 
     _compiled_op_cache[key] = entry
-    excess = len(_compiled_op_cache) - rbln.flags.TORCH_RBLN_COMPILED_OPS
+    excess = len(_compiled_op_cache) - v2.flags.TORCH_RBLN_COMPILED_OPS
     if excess <= 0:
         return
     others = (k for k in _compiled_op_cache if k != key)

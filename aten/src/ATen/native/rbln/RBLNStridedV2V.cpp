@@ -6,7 +6,7 @@
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/util/Exception.h>
-#include <rbln/runtime/device.h>
+#include <rebel/v2/runtime/device.h>
 
 #include <cstdint>
 #include <cstdlib>
@@ -34,7 +34,7 @@ struct Runs {
 };
 
 Runs runs_of(const at::Tensor& dst, const at::Tensor& src) {
-  constexpr uint64_t kAlignment = ::rbln::runtime::Device::kStreamedCopyAlignment;
+  constexpr uint64_t kAlignment = ::rebel::v2::runtime::Device::kStreamedCopyAlignment;
   const auto sizes = dst.sizes();
   const auto elm = static_cast<uint64_t>(dst.element_size());
   Runs runs;

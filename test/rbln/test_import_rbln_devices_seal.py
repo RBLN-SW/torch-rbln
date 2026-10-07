@@ -55,8 +55,8 @@ class TestImportDoesNotSeal(TestCase):
             os.environ["RBLN_DEVICES"] = "0"
             import torch_rbln  # noqa: F401
             os.environ["RBLN_DEVICES"] = "0,1"   # worker remaps per rank AFTER import
-            import rbln, torch
-            want, got = min(2, rbln.device_count()), torch.rbln.device_count()
+            import rebel.v2, torch
+            want, got = min(2, rebel.v2.device_count()), torch.rbln.device_count()
             print("NO_SEAL_OK" if got == want else f"SEALED: {{got}} device(s), not {{want}}")
         """
         self._assert_no_seal(self._run(script))
@@ -71,8 +71,8 @@ class TestImportDoesNotSeal(TestCase):
             with profile(activities=[ProfilerActivity.CPU]):
                 pass
             os.environ["RBLN_DEVICES"] = "0,1"
-            import rbln, torch
-            want, got = min(2, rbln.device_count()), torch.rbln.device_count()
+            import rebel.v2, torch
+            want, got = min(2, rebel.v2.device_count()), torch.rbln.device_count()
             print("NO_SEAL_OK" if got == want else f"SEALED: {{got}} device(s), not {{want}}")
         """
         self._assert_no_seal(self._run(script))

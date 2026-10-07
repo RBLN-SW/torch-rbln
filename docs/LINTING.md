@@ -11,7 +11,7 @@ uv sync --locked --no-install-project
 uv run --no-sync lintrunner init
 ```
 
-For C++ changes, `clang-tidy` needs a compile database and the rbln runtime headers, which come from the rebel-compiler tree named by `REBEL_HOME` (`rbln/include`). Configure CMake:
+For C++ changes, `clang-tidy` needs a compile database and the rebel.v2 runtime headers, which come from the rebel-compiler tree named by `REBEL_HOME` (`rebel/v2/include`). Configure CMake:
 
 ```bash
 export REBEL_HOME=/path/to/rebel_compiler

@@ -7,7 +7,7 @@
 #include <kineto/GenericTraceActivity.h>
 #include <kineto/IActivityProfiler.h>
 #include <kineto/TraceSpan.h>
-#include <rbln/runtime/activity.h>
+#include <rebel/v2/runtime/activity.h>
 
 #include <cstdint>
 #include <vector>
@@ -29,7 +29,7 @@ struct ProjectedKinetoTrace {
 // per kind of activity on it, and an arrow from each launch to what it ran. Times move from
 // steady_clock to system time by adding clock_offset_ns.
 void convert_activities_to_kineto(
-    const ::rbln::runtime::Activities& recorded,
+    const ::rebel::v2::runtime::Activities& recorded,
     int64_t clock_offset_ns,
     const ::libkineto::TraceSpan& span,
     ProjectedKinetoTrace* out);

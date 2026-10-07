@@ -62,16 +62,21 @@ class TestCaptureProgramsSurface(TestCase):
 
 
 @pytest.mark.test_set_ci
-class TestImportLeavesRebelOut(TestCase):
-    def test_import_does_not_load_rebel(self):
-        """Importing torch_rbln must leave the ``rebel`` package out of ``sys.modules``."""
+class TestImportLeavesV1Out(TestCase):
+    def test_import_does_not_load_v1(self):
+        """Importing torch_rbln loads rebel.v2 alone: no other ``rebel`` module, and no TVM."""
         script = f"""
             import sys
             sys.path.insert(0, {_PROJECT_ROOT!r})
             import torch, torch_rbln  # noqa: F401
-            loaded = sorted(m for m in sys.modules if m == "rebel" or m.startswith("rebel."))
+            loaded = sorted(
+                m
+                for m in sys.modules
+                if m.split(".")[0] == "tvm"
+                or (m.startswith("rebel.") and m != "rebel.v2" and not m.startswith("rebel.v2."))
+            )
             assert not loaded, "import pulled in " + ", ".join(loaded)
-            print("NO_REBEL")
+            print("NO_V1")
         """
         result = subprocess.run(
             [sys.executable, "-c", textwrap.dedent(script)],
@@ -81,15 +86,15 @@ class TestImportLeavesRebelOut(TestCase):
             timeout=120,
         )
         self.assertTrue(
-            result.returncode == 0 and "NO_REBEL" in result.stdout,
-            f"torch_rbln imported rebel\n--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}",
+            result.returncode == 0 and "NO_V1" in result.stdout,
+            f"torch_rbln imported v1\n--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}",
         )
 
 
 @pytest.mark.test_set_ci
 class TestCaptureProgramsCompile(TestCase):
     def test_one_program_per_backend_build(self, device):
-        import rbln
+        from rebel import v2
 
         class AddModule(torch.nn.Module):
             def forward(self, x, y):
@@ -107,7 +112,7 @@ class TestCaptureProgramsCompile(TestCase):
         self.assertEqual(len(programs), 1)
         program = programs[0]
         self.assertIsInstance(program, torch.rbln.CompiledProgram)
-        self.assertIsInstance(program.function, rbln.Function)
+        self.assertIsInstance(program.function, v2.Function)
         self.assertEqual(program.device, x.device)
         self.assertTrue(program.name)  # dynamo compile id, e.g. "0/0"
 

@@ -19,7 +19,7 @@
 #include <ATen/core/ScalarType.h>
 #include <c10/core/Device.h>
 #include <c10/util/SmallVector.h>
-#include <rbln/runtime/precision.h>
+#include <rebel/v2/runtime/precision.h>
 #include <torch_rbln/csrc/rbln/OpFunction.h>
 
 #include <atomic>
@@ -98,7 +98,7 @@ struct CacheKey {
   c10::SmallVector<TensorProfile, 4> inputs;
   c10::SmallVector<ScalarValue, 4> scalars;
   // An op that makes a float32 value compiles to another program at each.
-  ::rbln::runtime::Float32Precision float32_precision{};
+  ::rebel::v2::runtime::Float32Precision float32_precision{};
 
   bool operator==(const CacheKey& o) const noexcept {
     return schema_name_intern == o.schema_name_intern && inputs == o.inputs && scalars == o.scalars &&

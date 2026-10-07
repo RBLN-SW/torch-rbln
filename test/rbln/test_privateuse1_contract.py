@@ -101,7 +101,7 @@ def _remap_counts():
     Counted rather than matched against an error message: a frozen mapping is ignored silently
     and only rejected at the next acquisition. The verdict is drawn parent-side
     (:attr:`Probe.remap`), which is where the pool the counts mean anything against is known.
-    The rbln runtime reads RBLN_DEVICES afresh on every query and keeps no selection of its own,
+    The rebel.v2 runtime reads RBLN_DEVICES afresh on every query and keeps no selection of its own,
     so the freeze is this layer's committed plan, which ``torch.rbln.device_count()`` answers from.
 
     Runs in a forked child: reading the counts rewrites RBLN_DEVICES, the probe body may have
@@ -177,12 +177,12 @@ print(json.dumps(rec), file=_real_stdout)
 # the mapping layer enforces on a logical index.
 _POOL_SCAN = """\
 import json
-import rbln
+import rebel.v2
 
 
 def exists(npu):
     try:
-        rbln.npu_name(npu)
+        rebel.v2.npu_name(npu)
     except Exception:
         return False
     return True
@@ -766,7 +766,7 @@ class TestUpstreamClauses(TestCase):
         ``get_device_properties`` and ``get_device_capability``, and frameworks reach for them
         through the device module (vLLM's XPU platform is
         ``torch.xpu.get_device_name(device_id)``, vllm/platforms/xpu.py). With no RBLN
-        equivalent, vllm-rbln calls ``rbln.npu_name()`` directly, bypassing torch, so a
+        equivalent, vllm-rbln calls ``rebel.v2.npu_name()`` directly, bypassing torch, so a
         torch-level policy has nothing to apply to. ``RBLNGuardImpl::getDeviceCapability()``
         already exists on the C++ side.
         """
@@ -831,7 +831,7 @@ class TestUpstreamClauses(TestCase):
         same line: torch/cuda/__init__.py refuses to cache the device count "prior to CUDA
         initialization" and caches it from ``_lazy_init`` onwards.
 
-        The rbln runtime keeps no selection of its own, so ``DeviceMappingManager::commit()``
+        The rebel.v2 runtime keeps no selection of its own, so ``DeviceMappingManager::commit()``
         is the one freeze there is.
         """
         p = run_probe(

@@ -72,8 +72,8 @@ class TestCpuFallbackIsLogged(TestCase):
         nothing is logged."""
         p = self._run(
             """
-            import rbln
-            rbln.set_float32_precision("exact")
+            import rebel.v2
+            rebel.v2.set_float32_precision("exact")
             a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32, device="rbln")
             b = torch.tensor([4.0, 5.0, 6.0], dtype=torch.float32, device="rbln")
             assert (a + b).cpu().tolist() == [5.0, 7.0, 9.0]
@@ -88,8 +88,8 @@ class TestCpuFallbackIsLogged(TestCase):
         Pins the level: raising it to WARNING would make every exact fp32 workload noisy."""
         p = self._run(
             """
-            import rbln
-            rbln.set_float32_precision("exact")
+            import rebel.v2
+            rebel.v2.set_float32_precision("exact")
             a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32, device="rbln")
             assert (a + a).cpu().tolist() == [2.0, 4.0, 6.0]
             """,

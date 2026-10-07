@@ -64,7 +64,7 @@ include(FindRebel)
 
 # The ABI id of the runtime headers this build compiles against, computed by the runtime's own
 # script, for the import-time check in torch_rbln/_internal/abi_check.py.
-file(GLOB_RECURSE REBEL_HEADERS CONFIGURE_DEPENDS "${REBEL_INCLUDE_DIRS}/rbln/*.h")
+file(GLOB_RECURSE REBEL_HEADERS CONFIGURE_DEPENDS "${REBEL_INCLUDE_DIRS}/rebel/v2/*.h")
 set(abi_snapshot ${CMAKE_CURRENT_BINARY_DIR}/generated/_abi_snapshot.py)
 add_custom_command(
   OUTPUT ${abi_snapshot}
@@ -76,7 +76,7 @@ add_custom_command(
   DEPENDS ${REBEL_HEADERS}
     ${CMAKE_CURRENT_SOURCE_DIR}/cmake/abi_snapshot.py.in
     ${REBEL_ABI_SCRIPT}
-  COMMENT "Recording the rbln runtime ABI id"
+  COMMENT "Recording the rebel.v2 runtime ABI id"
 )
 add_custom_target(torch_rbln_abi_snapshot ALL DEPENDS ${abi_snapshot})
 install(FILES ${abi_snapshot}

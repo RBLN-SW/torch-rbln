@@ -1,4 +1,4 @@
-// libkineto plugin coupling a torch.profiler session with the activities the rbln runtime
+// libkineto plugin coupling a torch.profiler session with the activities the rebel.v2 runtime
 // records meanwhile. start()/stop() begin and end the recording.
 
 #include <torch_rbln/csrc/rbln/profiler/kineto/rbln_kineto_adapter.h>
@@ -13,8 +13,8 @@
 #include <kineto/libkineto.h>
 #include <kineto/output_base.h>
 
-#include <rbln/runtime/activity.h>
-#include <rbln/runtime/flags.h>
+#include <rebel/v2/runtime/activity.h>
+#include <rebel/v2/runtime/flags.h>
 #include <torch_rbln/csrc/rbln/profiler/kineto/rbln_kineto_emitter.h>
 
 #include <chrono>
@@ -60,7 +60,7 @@ class RblnActivityProfilerSession : public ::libkineto::IActivityProfilerSession
     anchor_system_ns_ = now_ns(std::chrono::system_clock::now());
     start_ts_ns_ = anchor_system_ns_;
     clock_offset_ns_ = anchor_system_ns_ - anchor_steady_ns_;
-    ::rbln::runtime::beginActivities();
+    ::rebel::v2::runtime::beginActivities();
     session_started_ = true;
     status_ = ::libkineto::TraceStatus::RECORDING;
   }
@@ -73,7 +73,7 @@ class RblnActivityProfilerSession : public ::libkineto::IActivityProfilerSession
     session_started_ = false;
     status_ = ::libkineto::TraceStatus::PROCESSING;
     convert_activities_to_kineto(
-        ::rbln::runtime::endActivities(), clock_offset_ns_, default_trace_span(), &projected_);
+        ::rebel::v2::runtime::endActivities(), clock_offset_ns_, default_trace_span(), &projected_);
     status_ = ::libkineto::TraceStatus::READY;
   }
 
@@ -138,7 +138,7 @@ class RblnActivityProfiler : public ::libkineto::IActivityProfiler {
     // Create a session only when rbln profiling is asked for (RBLN_PROFILER=1), not based
     // on the requested activity types: pytorch always includes PRIVATEUSE1_RUNTIME/DRIVER
     // in its default set, so the request can't tell us whether the user wants it.
-    if (!::rbln::runtime::flags::kProfiler.value()) {
+    if (!::rebel::v2::runtime::flags::kProfiler.value()) {
       RBLN_LOG_INFO("rbln profiling is not active; skipping rbln activities for this torch.profiler session");
       return nullptr;
     }

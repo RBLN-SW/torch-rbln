@@ -3,8 +3,8 @@
 #include <c10/core/Device.h>
 #include <c10/core/Stream.h>
 #include <c10/rbln/RBLNMacros.h>
-#include <rbln/runtime/device.h>
-#include <rbln/runtime/stream.h>
+#include <rebel/v2/runtime/device.h>
+#include <rebel/v2/runtime/stream.h>
 
 #include <cstdint>
 #include <memory>
@@ -12,7 +12,7 @@
 
 namespace c10::rbln {
 
-namespace rt = ::rbln::runtime;
+namespace rt = ::rebel::v2::runtime;
 
 /**
  * @brief Where a device pointer points: the buffer of the segment it lies in and its offset.

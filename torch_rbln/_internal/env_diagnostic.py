@@ -1,6 +1,6 @@
-"""Environment diagnostics for loading torch-rbln on the rbln runtime.
+"""Environment diagnostics for loading torch-rbln on the rebel.v2 runtime.
 
-Reports where the ``rbln`` package imports from, the ``librbln_rt.so`` it maps, the ABI id this
+Reports where the ``rebel.v2`` package imports from, the ``librebel_v2_rt.so`` it maps, the ABI id this
 build recorded against the one the runtime reports, and torch-rbln's own native libraries -- what
 an ``import torch_rbln`` that fails needs to be explained.
 """
@@ -15,7 +15,7 @@ from torch_rbln._internal import abi_check
 from torch_rbln._internal.rbln_runtime_lib import load_runtime_library, loaded_runtime_libraries, RUNTIME_LIB_NAME
 
 
-# Environment variables that decide which rbln package and runtime this process picks up.
+# Environment variables that decide which rebel.v2 package and runtime this process picks up.
 ENV_VARS = (
     "REBEL_HOME",
     "PYTHONPATH",
@@ -160,13 +160,13 @@ def _is_under(path: str, directory: str) -> bool:
 
 
 def _rbln_runtime_info() -> dict[str, Any]:
-    """Where ``rbln`` imports from and the ``librbln_rt.so`` importing it maps.
+    """Where ``rebel.v2`` imports from and the ``librebel_v2_rt.so`` importing it maps.
 
     Maps the runtime the same way ``import torch_rbln`` does, so this is the library the ABI
     check reads.
     """
     out: dict[str, Any] = {
-        "package": _package_location("rbln"),
+        "package": _package_location("rebel.v2"),
         "module": None,
         "path": None,
         "mapped": [],
@@ -177,7 +177,7 @@ def _rbln_runtime_info() -> dict[str, Any]:
         out["path"] = load_runtime_library()
     except Exception as e:
         out["error"] = str(e)
-    module = sys.modules.get("rbln.runtime")
+    module = sys.modules.get("rebel.v2.runtime")
     if module is not None:
         out["module"] = getattr(module, "__file__", None)
     out["mapped"] = loaded_runtime_libraries()
@@ -272,7 +272,7 @@ def _resolve_so_paths(d: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def collect_diagnostics() -> dict[str, Any]:
-    """Gather the torch-rbln install, the rbln runtime it would run on, the ABI verdict and env."""
+    """Gather the torch-rbln install, the rebel.v2 runtime it would run on, the ABI verdict and env."""
     runtime = _rbln_runtime_info()
     d = {
         "torch_rbln": _torch_rbln_info(),
@@ -317,15 +317,15 @@ def format_diagnostics(d: dict[str, Any] | None = None, verbose: bool = True) ->
 
     rt = d.get("rbln_runtime") or {}
     package = rt.get("package") or {}
-    lines.extend(["", "rbln runtime:"])
+    lines.extend(["", "rebel.v2 runtime:"])
     if package.get("found"):
-        lines.append(f"  rbln package: {package.get('origin') or package.get('submodule_search_locations')}")
+        lines.append(f"  rebel.v2 package: {package.get('origin') or package.get('submodule_search_locations')}")
     else:
-        lines.append("  rbln package: not importable" + (f" ({package['error']})" if package.get("error") else ""))
-        lines.append("  >>> Put the rbln package of a rebel-compiler tree on the path:")
-        lines.append("      PYTHONPATH=$REBEL_HOME/rbln/python")
+        lines.append("  rebel.v2 package: not importable" + (f" ({package['error']})" if package.get("error") else ""))
+        lines.append("  >>> Put the rebel.v2 package of a rebel-compiler tree on the path:")
+        lines.append("      PYTHONPATH=$REBEL_HOME/rebel/python")
     if rt.get("module"):
-        lines.append(f"  rbln.runtime: {rt['module']}")
+        lines.append(f"  rebel.v2.runtime: {rt['module']}")
     lines.append(f"  {RUNTIME_LIB_NAME}: {rt.get('path') or 'not mapped'}")
     if len(rt.get("mapped") or []) > 1:
         lines.append(f"  >>> {len(rt['mapped'])} copies mapped: {', '.join(rt['mapped'])}")

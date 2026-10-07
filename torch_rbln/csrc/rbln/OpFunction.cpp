@@ -10,8 +10,8 @@
 #include <c10/rbln/RBLNHeld.h>
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNRuntime.h>
-#include <rbln/artifact/file.h>
-#include <rbln/runtime/flags.h>
+#include <rebel/v2/artifact/file.h>
+#include <rebel/v2/runtime/flags.h>
 
 #include <algorithm>
 #include <cstring>
@@ -37,7 +37,7 @@ struct StateKey {
 
 namespace {
 
-namespace artifact = ::rbln::artifact;
+namespace artifact = ::rebel::v2::artifact;
 
 // Recent bindings an executor keeps its program patched for; an eager op meets the same
 // few blocks of the caching allocator again and again.

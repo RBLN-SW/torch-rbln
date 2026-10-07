@@ -36,7 +36,7 @@ import sys
 import textwrap
 
 import pytest
-import rbln.ops  # noqa: F401  -- defines the rbln_custom_ops schemas the decoder calls
+import rebel.v2.ops  # noqa: F401  -- defines the rbln_custom_ops schemas the decoder calls
 import torch
 
 from test.utils import requires_physical_devices, SUPPORTED_DTYPES

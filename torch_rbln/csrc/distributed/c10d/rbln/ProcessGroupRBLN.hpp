@@ -29,7 +29,7 @@
 #include <ATen/ThreadLocalState.h>
 #include <c10/core/Stream.h>
 
-namespace rbln::runtime {
+namespace rebel::v2::runtime {
 class Communicator;
 }
 
@@ -292,7 +292,7 @@ class TORCH_API ProcessGroupRBLN : public Backend {
  public:
   /// @brief The group's communicator, over which a compiled graph's collectives run as well; none
   /// for a group of one or one without an NPU.
-  std::shared_ptr<::rbln::runtime::Communicator> communicator() const {
+  std::shared_ptr<::rebel::v2::runtime::Communicator> communicator() const {
     return comm_;
   }
 
@@ -351,7 +351,7 @@ class TORCH_API ProcessGroupRBLN : public Backend {
   int group_id_;
 
   /// @brief The communicator the collectives run through
-  std::shared_ptr<::rbln::runtime::Communicator> comm_;
+  std::shared_ptr<::rebel::v2::runtime::Communicator> comm_;
 
   /// @brief Gloo backend for CPU tensors and host reductions
   c10::intrusive_ptr<Backend> glooBackend_;

@@ -3,7 +3,7 @@
 #include <c10/rbln/RBLNHeld.h>
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNProfiler.h>
-#include <rbln/artifact/function.h>
+#include <rebel/v2/artifact/function.h>
 
 #include <algorithm>
 #include <cstring>
@@ -14,7 +14,7 @@ namespace c10::rbln::held {
 
 namespace {
 
-namespace artifact = ::rbln::artifact;
+namespace artifact = ::rebel::v2::artifact;
 
 const artifact::Arg& arg_of(const Type& type) {
   return type.fn->artifact().args.at(type.arg);

@@ -124,7 +124,7 @@ The value is a **comma-separated list** of fallback case names to disable:
 
 ## Float32 Precision
 
-The NPU computes floats in dlfloat16 (1 sign, 6 exponent and 9 mantissa bits, about three decimal digits). `RBLN_FLOAT32_PRECISION` picks how eager ops over fp32 tensors run, and `rbln.set_float32_precision()` sets it for the rest of the process:
+The NPU computes floats in dlfloat16 (1 sign, 6 exponent and 9 mantissa bits, about three decimal digits). `RBLN_FLOAT32_PRECISION` picks how eager ops over fp32 tensors run, and `rebel.v2.set_float32_precision()` sets it for the rest of the process:
 
 | Value              | Eager fp32 ops                                                               |
 |--------------------|-------------------------------------------------------------------------------|
@@ -136,8 +136,8 @@ export RBLN_FLOAT32_PRECISION=exact
 ```
 
 ```python
-import rbln
-rbln.set_float32_precision("exact")
+from rebel import v2
+v2.set_float32_precision("exact")
 ```
 
 The same precision applies to what `torch.compile` builds for an rbln device: under `exact` the compiler keeps the fp32 ops of a graph on the host. fp16 and bf16 ops run on the NPU under either.
@@ -282,15 +282,15 @@ With `RBLN_NPUS_PER_DEVICE=4` (4 NPUs per logical device):
 - If the model doesn't support TP, a RuntimeError occurs
 - With failover enabled, the system retries with `num_devices=1` on NPU 0
 
-## rbln ABI Check
+## rebel.v2 ABI Check
 
 `torch-rbln` compiles against the runtime headers of the rebel-compiler tree named by
-`REBEL_HOME` (`rbln/include/rbln/**/*.h`) and runs on the `librbln_rt.so` that the `rbln`
-package maps when it is imported. Both have to come from the same headers. Their ABI id is a
+`REBEL_HOME` (`rebel/v2/include/rebel/v2/**/*.h`) and runs on the `librebel_v2_rt.so` that the
+`rebel.v2` package maps when it is imported. Both have to come from the same headers. Their ABI id is a
 SHA-256 over every header's relative path and SHA-256, computed by the runtime's own
-`rbln/cmake/RblnAbi.cmake`:
+`rebel/v2/cmake/RebelV2Abi.cmake`:
 
-- the runtime exports the id of the headers it was built with as `rbln_abi_id()`;
+- the runtime exports the id of the headers it was built with as `rebel_v2_abi_id()`;
 - the `torch-rbln` build runs the same script over the headers it compiles against and records
   the id in the generated `torch_rbln/_internal/_abi_snapshot.py`. Editing, adding or removing a
   header regenerates it on the next build.
@@ -298,7 +298,7 @@ SHA-256 over every header's relative path and SHA-256, computed by the runtime's
 `import torch_rbln` compares the two ids before it loads its own native libraries. When they
 differ, the import fails with an `RBLN ABI mismatch` message naming the runtime, both ids and the
 include directory the build used. Rebuild `torch-rbln` with `REBEL_HOME` set to the tree the
-runtime was built from, or run it with the `rbln` package of the tree it was built against.
+runtime was built from, or run it with the `rebel.v2` package of the tree it was built against.
 
 Cases that leave no verdict to reach warn and continue instead:
 
@@ -306,7 +306,7 @@ Cases that leave no verdict to reach warn and continue instead:
 |------|----------------------|
 | `torch-rbln` recorded no ABI id | `_abi_snapshot.py` is missing from this install |
 | no handle can be taken on the mapped runtime | its symbols cannot be read |
-| the runtime exports no `rbln_abi_id` | it cannot say which headers it was built with |
+| the runtime exports no `rebel_v2_abi_id` | it cannot say which headers it was built with |
 
 Run `python -m torch_rbln.diagnose` to see where `rbln` imports from, the runtime it maps, both
 ids and the verdict for the current environment.

@@ -3,7 +3,7 @@
 #include <ATen/core/Tensor.h>
 #include <c10/core/Device.h>
 #include <c10/util/ArrayRef.h>
-#include <rbln/runtime/executor.h>
+#include <rebel/v2/runtime/executor.h>
 #include <torch/csrc/utils/pybind.h>
 
 #include <atomic>
@@ -16,7 +16,7 @@
 
 namespace torch_rbln {
 
-namespace rt = ::rbln::runtime;
+namespace rt = ::rebel::v2::runtime;
 
 struct StateKey;
 

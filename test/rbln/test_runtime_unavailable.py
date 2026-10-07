@@ -4,7 +4,7 @@
 the device runtime is absent or torn down, and must NEVER
 segfault.
 
-Background: torch-rbln links ``librbln_rt.so``, which loads the NPU driver
+Background: torch-rbln links ``librebel_v2_rt.so``, which loads the NPU driver
 (``librbln-thunk.so``) on first use. The driver is missing on compile / CPU-only / CI
 nodes, and at interpreter shutdown the runtime may already be torn down; a call into
 either must fail cleanly or not happen, never crash. ``c10::rbln::runtime_available()`` is
@@ -68,7 +68,7 @@ def _assert_ok(self, result: subprocess.CompletedProcess, marker: str) -> None:
     )
 
 
-# rbln::runtime::Device::open(uint32_t), declared as librbln_rt.so exports it. torch-rbln
+# rebel::v2::runtime::Device::open(uint32_t), declared as librebel_v2_rt.so exports it. torch-rbln
 # opens an NPU only through it, so an LD_PRELOAD definition sees (or fails) every open.
 _DEVICE_OPEN_DECLARATION = """
 #include <cstdint>
@@ -77,13 +77,13 @@ _DEVICE_OPEN_DECLARATION = """
 #include <dlfcn.h>
 #include <memory>
 #include <stdexcept>
-namespace rbln::runtime {
+namespace rebel::v2::runtime {
 class Device {
  public:
   static std::shared_ptr<Device> open(uint32_t id);
 };
 }
-using rbln::runtime::Device;
+using rebel::v2::runtime::Device;
 """
 
 
@@ -182,7 +182,7 @@ class TestRuntimeUnavailable(TestCase):
         """When the RBLN runtime is genuinely absent, device enumeration degrades to
         0 (nothrow) and is_available() is False -- never a SEGFAULT -- mirroring
         torch.cuda on a host with no driver. DeviceMappingManager asks the runtime for a
-        count only once rbln::runtime::Device::available() says the driver loads, so a missing
+        count only once rebel::v2::runtime::Device::available() says the driver loads, so a missing
         runtime collapses into the well-tested no-device path. Skipped where
         the runtime is present (e.g. device-bearing CI); the shutdown-flag tests above
         cover the torn-down half of the gate hardware-free."""
@@ -296,12 +296,12 @@ std::shared_ptr<Device> Device::open(uint32_t id) {
   if (const char* marker = std::getenv("SHIM_MARKER")) {
     if (FILE* f = std::fopen(marker, "a")) std::fclose(f);
   }
-  // librbln_rt.so is loaded RTLD_LOCAL under the extension, so RTLD_NEXT cannot reach it.
+  // librebel_v2_rt.so is loaded RTLD_LOCAL under the extension, so RTLD_NEXT cannot reach it.
   using Open = std::shared_ptr<Device> (*)(uint32_t);
   static const auto real = reinterpret_cast<Open>(
-      dlsym(dlopen("librbln_rt.so", RTLD_LAZY | RTLD_NOLOAD), "_ZN4rbln7runtime6Device4openEj"));
+      dlsym(dlopen("librebel_v2_rt.so", RTLD_LAZY | RTLD_NOLOAD), "_ZN5rebel2v27runtime6Device4openEj"));
   if (real == nullptr) {
-    std::fprintf(stderr, "shim: no Device::open in a loaded librbln_rt.so\n");
+    std::fprintf(stderr, "shim: no Device::open in a loaded librebel_v2_rt.so\n");
     std::abort();
   }
   return real(id);

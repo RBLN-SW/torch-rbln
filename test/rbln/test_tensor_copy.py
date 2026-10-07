@@ -393,18 +393,18 @@ class TestToOps(TestCase):
 
         The final outputs from both paths should be numerically close.
         """
-        import rbln
+        from rebel import v2
 
         a = torch.randn([2, 1024], dtype=torch.float16, device="rbln")
         a = a @ a.t()  # To make custom_float16
 
-        before = rbln.float32_precision()
-        rbln.set_float32_precision("exact")
+        before = v2.float32_precision()
+        v2.set_float32_precision("exact")
         try:
             out_cpu_fallback = a.to(torch.float32)
             out_cpu_fallback = out_cpu_fallback @ out_cpu_fallback
         finally:
-            rbln.set_float32_precision(before)
+            v2.set_float32_precision(before)
 
         out_cpu_offloading = a.to("cpu")
         out_cpu_offloading = out_cpu_offloading.to(torch.float32)

@@ -1,15 +1,15 @@
 #!/bin/bash
 #
-# Build torch-rbln against the rbln runtime of a rebel-compiler tree.
+# Build torch-rbln against the rebel.v2 runtime of a rebel-compiler tree.
 #
 # This script is designed to be run from torch-rbln directory.
-# torch-rbln compiles against the runtime headers in $REBEL_HOME/rbln/include, links
-# $REBEL_HOME/build/rbln/librbln_rt.so, and at run time uses the rbln package in
-# $REBEL_HOME/rbln/python, which maps that library.
+# torch-rbln compiles against the runtime headers in $REBEL_HOME/rebel/v2/include, links
+# $REBEL_HOME/build/rebel/v2/librebel_v2_rt.so, and at run time uses the rebel.v2 package in
+# $REBEL_HOME/rebel/python, which maps that library.
 #
 # Prerequisites:
-#   - REBEL_HOME must be set to a rebel-compiler tree built with rbln
-#     (rebel_install.sh completed, build/rbln/librbln_rt.so present)
+#   - REBEL_HOME must be set to a rebel-compiler tree built with rebel.v2
+#     (rebel_install.sh completed, build/rebel/v2/librebel_v2_rt.so present)
 #
 # Usage:
 #   cd /path/to/torch-rbln
@@ -183,24 +183,24 @@ check_prerequisites() {
         log_error "REBEL_HOME directory does not exist: ${REBEL_HOME}"
         exit 1
     fi
-    # Recorded in rbln_home.pth and activate_rebel, which must not depend on the current directory.
+    # Recorded in rebel_home.pth and activate_rebel, which must not depend on the current directory.
     REBEL_HOME="$(realpath "${REBEL_HOME}")"
     export REBEL_HOME
 
-    # Check that the rbln runtime is built
-    if [[ ! -f "${REBEL_HOME}/build/rbln/librbln_rt.so" ]]; then
-        log_error "rbln runtime not found: ${REBEL_HOME}/build/rbln/librbln_rt.so"
+    # Check that the rebel.v2 runtime is built
+    if [[ ! -f "${REBEL_HOME}/build/rebel/v2/librebel_v2_rt.so" ]]; then
+        log_error "rebel.v2 runtime not found: ${REBEL_HOME}/build/rebel/v2/librebel_v2_rt.so"
         log_error "Please build rebel-compiler first using rebel_install.sh"
         exit 1
     fi
 
-    if [[ ! -d "${REBEL_HOME}/rbln/python/rbln" ]]; then
-        log_error "rbln Python package not found: ${REBEL_HOME}/rbln/python/rbln"
+    if [[ ! -d "${REBEL_HOME}/rebel/python/rebel/v2" ]]; then
+        log_error "rebel.v2 Python package not found: ${REBEL_HOME}/rebel/python/rebel/v2"
         exit 1
     fi
 
-    # Check rbln Python version compatibility
-    check_rbln_python_version
+    # Check rebel.v2 Python version compatibility
+    check_rebel_v2_python_version
 
     # Validate TORCH_RBLN_HOME
     if [[ ! -d "${TORCH_RBLN_HOME}" ]]; then
@@ -246,25 +246,25 @@ setup_compiler_env() {
     fi
 }
 
-check_rbln_python_version() {
+check_rebel_v2_python_version() {
     # Get current Python version (e.g., "310" for Python 3.10)
     local current_py_version
     current_py_version=$(python -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')")
 
     log_info "Current Python version: ${current_py_version} (Python 3.${current_py_version:1})"
 
-    # The rbln runtime extension is built for one Python next to the package sources.
-    local runtime_dir="${REBEL_HOME}/rbln/python/rbln/runtime"
+    # The rebel.v2 runtime extension is built for one Python next to the package sources.
+    local runtime_dir="${REBEL_HOME}/rebel/python/rebel/v2/runtime"
     local runtime_so
     runtime_so=$(find "${runtime_dir}" -maxdepth 1 -name "_runtime.cpython-${current_py_version}-*.so" 2>/dev/null | head -1 || true)
 
     if [[ -n "${runtime_so}" ]]; then
-        log_info "Found matching rbln.runtime extension: $(basename "${runtime_so}")"
+        log_info "Found matching rebel.v2.runtime extension: $(basename "${runtime_so}")"
         log_info "Python version check passed!"
         return 0
     fi
 
-    log_error "The rbln runtime extension was not built for Python ${current_py_version}!"
+    log_error "The rebel.v2 runtime extension was not built for Python ${current_py_version}!"
     log_error ""
 
     local available_versions
@@ -273,7 +273,7 @@ check_rbln_python_version() {
         xargs -I{} basename {} | grep -oP 'cpython-\K\d+' | sort -u || true)
 
     if [[ -n "${available_versions}" ]]; then
-        log_error "Available rbln.runtime builds:"
+        log_error "Available rebel.v2.runtime builds:"
         for ver in ${available_versions}; do
             log_error "  - Python 3.${ver:1} (cpython-${ver})"
         done
@@ -344,7 +344,7 @@ create_activate_rebel_script() {
 
     cat > "${activate_script}" << EOF
 # Sourced only when .use_external_rebel exists in the venv. REBEL_HOME is what a rebuild of
-# torch-rbln compiles against; rbln itself is importable through rbln_home.pth in site-packages.
+# torch-rbln compiles against; rebel.v2 itself is importable through rebel_home.pth in site-packages.
 export REBEL_HOME="${REBEL_HOME}"
 EOF
     chmod +x "${activate_script}"
@@ -446,22 +446,22 @@ configure_uv() {
     fi
 }
 
-# Make the rbln package of REBEL_HOME importable in place, after `uv sync` so the sync keeps it.
-# rbln ships no packaging metadata, so its third-party imports are installed here.
-install_rbln_package() {
+# Make the rebel.v2 package of REBEL_HOME importable in place, after `uv sync` so the sync keeps it.
+# rebel.v2 ships no packaging metadata, so its third-party imports are installed here.
+install_rebel_v2_package() {
     local site_packages
     site_packages=$(python -c "import sysconfig; print(sysconfig.get_path('purelib'))") || return $?
 
-    log_info "Adding ${REBEL_HOME}/rbln/python to ${site_packages}/rbln_home.pth"
-    echo "${REBEL_HOME}/rbln/python" > "${site_packages}/rbln_home.pth"
+    log_info "Adding ${REBEL_HOME}/rebel/python to ${site_packages}/rebel_home.pth"
+    echo "${REBEL_HOME}/rebel/python" > "${site_packages}/rebel_home.pth"
 
     uv pip install numpy ml_dtypes || return $?
 
-    python -c "import rbln.runtime" || {
-        log_error "rbln.runtime does not import from ${REBEL_HOME}/rbln/python"
+    python -c "import rebel.v2.runtime" || {
+        log_error "rebel.v2.runtime does not import from ${REBEL_HOME}/rebel/python"
         return 1
     }
-    log_info "rbln installed"
+    log_info "rebel.v2 installed"
 }
 
 build_torch_rbln() {
@@ -488,7 +488,7 @@ build_torch_rbln() {
     torch_before=$(pip show torch 2>/dev/null | grep "^Version:" | awk '{print $2}' || true)
     log_info "Torch version before uv sync: ${torch_before}"
 
-    # Update uv.lock and install dependencies (rbln is made importable after sync)
+    # Update uv.lock and install dependencies (rebel.v2 is made importable after sync)
     log_info "Updating uv.lock..."
     uv lock
 
@@ -511,7 +511,7 @@ build_torch_rbln() {
     log_info "Final torch version: ${torch_final}"
 
     # shellcheck disable=SC2310
-    install_rbln_package || return $?
+    install_rebel_v2_package || return $?
 
     # Build and install torch-rbln
     log_info "Building torch-rbln with gcc-13..."
@@ -546,8 +546,8 @@ verify_installation() {
     python -c "
 import torch
 print(f'  torch: {torch.__version__}')
-import rbln.runtime
-print(f'  rbln: {rbln.runtime.__file__}')
+import rebel.v2.runtime
+print(f'  rebel.v2: {rebel.v2.runtime.__file__}')
 import torch_rbln
 print(f'  torch_rbln: {torch_rbln.__version__}')
 " || import_result=$?
@@ -561,8 +561,8 @@ print(f'  torch_rbln: {torch_rbln.__version__}')
         log_error "Possible causes:"
         log_error "  - Segmentation fault (library version mismatch)"
         log_error "  - RBLN ABI mismatch: REBEL_HOME was rebuilt after torch-rbln; rebuild torch-rbln"
-        log_error "  - rbln not importable (check \$VIRTUAL_ENV/lib/python*/site-packages/rbln_home.pth)"
-        log_error "  - Python version mismatch with the rbln runtime extension"
+        log_error "  - rebel.v2 not importable (check \$VIRTUAL_ENV/lib/python*/site-packages/rebel_home.pth)"
+        log_error "  - Python version mismatch with the rebel.v2 runtime extension"
         log_error "  - GCC version mismatch between torch and torch-rbln"
         log_error ""
         log_error "Try manually:"
@@ -597,7 +597,7 @@ print_summary() {
     echo "     source ${venv_path}/bin/activate"
     echo ""
     echo "  2. The activate_rebel script is auto-sourced, setting REBEL_HOME for rebuilds."
-    echo "     rbln is imported from ${REBEL_HOME}/rbln/python through rbln_home.pth."
+    echo "     rebel.v2 is imported from ${REBEL_HOME}/rebel/python through rebel_home.pth."
     echo ""
     echo "  3. Example usage:"
     echo "     python -c 'import torch; import torch_rbln; print(\"OK\")'"

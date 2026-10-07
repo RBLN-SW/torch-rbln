@@ -2,7 +2,7 @@
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNRuntime.h>
-#include <rbln/runtime/flags.h>
+#include <rebel/v2/runtime/flags.h>
 
 #include <sys/mman.h>
 

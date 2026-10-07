@@ -1,8 +1,8 @@
-"""ABI check between torch-rbln and the rbln runtime it runs on.
+"""ABI check between torch-rbln and the rebel.v2 runtime it runs on.
 
-The runtime's C++ API is its headers, ``rbln/include/rbln/**/*.h``. Their ABI id is a SHA-256
-over every header's relative path and SHA-256, computed by ``rbln/cmake/RblnAbi.cmake``; the
-runtime exports the id of the headers it was built with as ``rbln_abi_id()``. The torch-rbln
+The runtime's C++ API is its headers, ``rebel/v2/include/rebel/v2/**/*.h``. Their ABI id is a SHA-256
+over every header's relative path and SHA-256, computed by ``rebel/v2/cmake/RebelV2Abi.cmake``; the
+runtime exports the id of the headers it was built with as ``rebel_v2_abi_id()``. The torch-rbln
 build runs the same script over the headers it compiles against and records the result in
 ``_abi_snapshot.BUILT_ABI``, regenerated whenever a header changes. Import time compares the two
 for equality, before any of torch-rbln's native libraries is loaded.
@@ -12,7 +12,7 @@ loaded: a runtime whose API differs from theirs would otherwise surface as an ``
 symbol`` abort or as corruption inside the runtime, with no readable message.
 
 Cases that leave no verdict warn and continue: a build that recorded no id, a handle that
-cannot be taken on the mapped runtime, and a runtime that exports no ``rbln_abi_id``.
+cannot be taken on the mapped runtime, and a runtime that exports no ``rebel_v2_abi_id``.
 ``TORCH_RBLN_SKIP_ABI_CHECK=1`` skips the check entirely; see docs/CONFIGURATION.md.
 """
 
@@ -24,7 +24,7 @@ import warnings
 from dataclasses import dataclass
 
 
-ABI_SYMBOL = "rbln_abi_id"
+ABI_SYMBOL = "rebel_v2_abi_id"
 
 _SKIP_ENV = "TORCH_RBLN_SKIP_ABI_CHECK"
 _ABI_ID_PATTERN = re.compile(r"[0-9a-f]{64}")
@@ -147,15 +147,15 @@ def mismatch_report(state: AbiState) -> str:
     """The ImportError message for a runtime whose headers differ from the ones built against."""
     built_from = state.built_include_dir or "an unrecorded include directory"
     return (
-        "RBLN ABI mismatch: torch-rbln was built against rbln runtime headers other than the ones "
+        "RBLN ABI mismatch: torch-rbln was built against rebel.v2 runtime headers other than the ones "
         "the loaded runtime was built with.\n"
         f"  runtime:      {state.runtime_path or 'unknown'}\n"
         f"  runtime ABI:  {state.runtime_abi}\n"
-        f"  rbln package: {_module_location('rbln')}\n"
+        f"  rebel.v2 package: {_module_location('rebel.v2')}\n"
         f"  torch-rbln:   {_version_of('torch-rbln')} ({_module_location('torch_rbln')})\n"
         f"  built ABI:    {state.built_abi} (headers in {built_from})\n"
         "Rebuild torch-rbln with REBEL_HOME set to the rebel-compiler tree this runtime was built "
-        "from, or run it with the rbln package of the tree it was built against.\n"
+        "from, or run it with the rebel.v2 package of the tree it was built against.\n"
         "Run `python -m torch_rbln.diagnose` for the full environment report."
     )
 
@@ -164,7 +164,7 @@ def _fail_open_warning(state: AbiState) -> str | None:
     path = state.runtime_path or "unknown"
     if state.verdict == VERDICT_SKIPPED_UNREADABLE_RUNTIME:
         return (
-            f"The rbln runtime ({path}) is mapped into this process but no handle could be taken "
+            f"The rebel.v2 runtime ({path}) is mapped into this process but no handle could be taken "
             "on it, so its ABI id could not be read. Continuing; run `python -m torch_rbln.diagnose` "
             "if anything downstream misbehaves."
         )
@@ -176,7 +176,7 @@ def _fail_open_warning(state: AbiState) -> str | None:
         )
     if state.verdict == VERDICT_SKIPPED_NO_RUNTIME_ID:
         return (
-            f"The rbln runtime ({path}) exports no {ABI_SYMBOL}(), so it cannot be checked against "
+            f"The rebel.v2 runtime ({path}) exports no {ABI_SYMBOL}(), so it cannot be checked against "
             f"this torch-rbln (built against ABI {state.built_abi}). Continuing; use a runtime "
             "built from a rebel-compiler tree that declares rbln/abi.h."
         )
@@ -191,7 +191,7 @@ def check_runtime_abi(runtime_path: str | None) -> str:
     open: a guard that can itself break an import it was meant to explain is worse than none.
 
     Args:
-        runtime_path: path of the ``librbln_rt.so`` this process has already mapped.
+        runtime_path: path of the ``librebel_v2_rt.so`` this process has already mapped.
 
     Returns:
         str: one of the ``VERDICT_*`` values other than ``VERDICT_MISMATCH``.

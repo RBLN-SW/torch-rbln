@@ -35,7 +35,7 @@ def torch_backends_entry_point() -> None:
         import torch
 
         # Load shared objects ##################################################
-        # rbln maps librbln_rt.so, and the native extensions below reuse it through their NEEDED entry.
+        # rebel.v2 maps librebel_v2_rt.so, and the native extensions below reuse it through their NEEDED entry.
         runtime_path = load_runtime_library()
 
         # Past this point a runtime built from other headers aborts the import as `undefined symbol`.
@@ -72,7 +72,7 @@ def torch_backends_entry_point() -> None:
 
         # Import operators #####################################################
         # The torch ops models written for the NPU call, such as rbln_custom_ops, before their kernels here.
-        import rbln.ops
+        import rebel.v2.ops
         import torch_rbln._internal.register_ops
 
         # Apply monkey patches for RBLN functionality ###########################

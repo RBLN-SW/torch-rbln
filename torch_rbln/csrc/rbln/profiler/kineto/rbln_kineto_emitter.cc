@@ -17,7 +17,7 @@ namespace rbln::profiler::kineto {
 
 namespace {
 
-using ::rbln::runtime::Activity;
+using ::rebel::v2::runtime::Activity;
 
 constexpr std::array<const char*, 4> kLaneNames = {"compute", "copy", "host", "collective"};
 
@@ -42,7 +42,7 @@ constexpr uint32_t kRblnFlowIdSpan = 0x01000000u;
 // An arrow from each launch to the activities it ran, and a zero-length marker at the launch
 // for its tail; a launch that ran nothing gets no marker, so none dangles.
 void add_flow_arrows(
-    const ::rbln::runtime::Activities& recorded,
+    const ::rebel::v2::runtime::Activities& recorded,
     int64_t clock_offset_ns,
     const ::libkineto::TraceSpan& span,
     ProjectedKinetoTrace* out) {
@@ -91,7 +91,7 @@ void add_flow_arrows(
 } // namespace
 
 void convert_activities_to_kineto(
-    const ::rbln::runtime::Activities& recorded,
+    const ::rebel::v2::runtime::Activities& recorded,
     int64_t clock_offset_ns,
     const ::libkineto::TraceSpan& span,
     ProjectedKinetoTrace* out) {

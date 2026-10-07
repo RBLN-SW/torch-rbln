@@ -2,7 +2,7 @@
 
 #include <c10/rbln/RBLNMacros.h>
 #include <c10/rbln/RBLNRuntime.h>
-#include <rbln/runtime/function.h>
+#include <rebel/v2/runtime/function.h>
 
 #include <cstdint>
 #include <memory>

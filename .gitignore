@@ -1,6 +1,6 @@
 # Build artifacts
 /build/
-/_rbln_runtime
+/_rebel_v2_runtime
 /dist/
 /Testing/
 *.whl

@@ -1,6 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""torch.profiler shows the work the rbln runtime ran on a row per NPU, tied to the host op that
+"""torch.profiler shows the work the rebel.v2 runtime ran on a row per NPU, tied to the host op that
 launched it.
 
 Runs models on an NPU under ``torch.profiler`` (CPU + PrivateUse1) with ``RBLN_PROFILER=1``, which

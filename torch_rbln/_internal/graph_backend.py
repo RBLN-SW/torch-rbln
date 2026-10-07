@@ -1,9 +1,9 @@
 """The backend of ``torch.compile(backend="rbln")`` for graphs over torch-rbln tensors.
 
 Dynamo hands over a graph and the tensors of the call it traced. The graph is captured
-with ``rbln.frontend.capture_dynamo`` and compiled for the NPU of those tensors, with every
+with ``rebel.v2.frontend.capture_dynamo`` and compiled for the NPU of those tensors, with every
 input a call passes and every result laid out as torch lays out a contiguous tensor
-(``rbln.LOGICAL``), so torch-rbln tensors bind in place and CPU ones by a copy. An input the
+(``rebel.v2.LOGICAL``), so torch-rbln tensors bind in place and CPU ones by a copy. An input the
 graph writes in place that the device holds otherwise, such as a float16 KV cache it keeps in
 dlfloat16, is put in the device's type on the first call and bound in place from then on. The
 module's parameters and buffers are the function's state: they are written to the device
@@ -44,9 +44,9 @@ def _device_of(example_inputs: list[Any]) -> torch.device:
 
 def _device_npu(device: torch.device) -> str:
     if _C.is_dummy_device():
-        import rbln
+        from rebel import v2
 
-        return rbln.flags.RBLN_FORCE_NPU_NAME or "RBLN-CA25"
+        return v2.flags.RBLN_FORCE_NPU_NAME or "RBLN-CA25"
     from torch_rbln.device.device import get_device_name
 
     return get_device_name(device.index)
@@ -203,7 +203,7 @@ def _program(fn: Any, graph: Any, device: torch.device, example_inputs: list[Any
 
 def rbln_graph_backend(gm: torch.fx.GraphModule, example_inputs: list[Any], options: dict | None = None):
     """Compiles a graph Dynamo hands over whose tensors are on RBLN devices."""
-    import rbln
+    from rebel import v2
 
     options = dict(options or {})
     unknown = set(options) - _OPTIONS
@@ -213,7 +213,7 @@ def rbln_graph_backend(gm: torch.fx.GraphModule, example_inputs: list[Any], opti
     if devices != 1:
         raise NotImplementedError(f"a graph over {devices} devices; torch-rbln runs graphs on one device")
     device = _device_of(example_inputs)
-    graph = rbln.frontend.capture_dynamo(gm, example_inputs)
+    graph = v2.frontend.capture_dynamo(gm, example_inputs)
     fn = compile_logical(graph, _npu(options, device), devices, options.get("cache_dir"))
     host_results = _host_results(gm)
     if programs.is_capturing():
@@ -225,6 +225,6 @@ def rbln_graph_backend(gm: torch.fx.GraphModule, example_inputs: list[Any], opti
 
 def register() -> None:
     """Makes torch.compile(backend="rbln") compile graphs over RBLN tensors here."""
-    import rbln.api.torch_backend
+    from rebel.v2.api import torch_backend
 
-    rbln.api.torch_backend.register_device_backend("rbln", rbln_graph_backend)
+    torch_backend.register_device_backend("rbln", rbln_graph_backend)

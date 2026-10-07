@@ -9,7 +9,7 @@
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNSupportedDtypes.h>
-#include <rbln/runtime/precision.h>
+#include <rebel/v2/runtime/precision.h>
 #include <torch/csrc/jit/python/pybind_utils.h>
 #include <torch/library.h>
 
@@ -320,7 +320,7 @@ bool is_nan_inf_check_disabled() {
 // offset 7, mask ``0x7F80``; fp32: 8 bits at offset 23, mask ``0x7F800000``).
 // NaN distinguishes itself by a non-zero mantissa, Inf has mantissa==0 — we
 // don't care about the distinction for fallback routing, either value means
-// "rbln runtime cannot handle this".
+// "the rebel.v2 runtime cannot handle this".
 template <typename Word, Word kExponent>
 bool has_nan_or_inf(const void* data, size_t n) noexcept {
   const auto* words = static_cast<const Word*>(data);
@@ -540,7 +540,7 @@ bool build_cache_key(
   out_key.schema_name_intern = op_name_intern;
   out_key.inputs.clear();
   out_key.scalars.clear();
-  out_key.float32_precision = ::rbln::runtime::float32Precision();
+  out_key.float32_precision = ::rebel::v2::runtime::float32Precision();
   tensors.clear();
 
   auto arguments = torch::jit::last(stack, cache.num_args);

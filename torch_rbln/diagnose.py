@@ -1,4 +1,4 @@
-"""Run environment diagnostics for loading torch-rbln on the rbln runtime.
+"""Run environment diagnostics for loading torch-rbln on the rebel.v2 runtime.
 
 Usage:
   python -m torch_rbln.diagnose
@@ -7,11 +7,11 @@ Usage:
   ``import torch_rbln`` fails. ``TORCH_RBLN_DIAGNOSE=1`` does the same for any other entry point.
 
 Use when ``import torch_rbln`` fails with:
-  ImportError: torch-rbln runs on the rbln runtime, but `import rbln.runtime` failed
+  ImportError: torch-rbln runs on the rebel.v2 runtime, but `import rebel.v2.runtime` failed
 or
   ImportError: RBLN ABI mismatch
 
-This prints where the ``rbln`` package imports from, the ``librbln_rt.so`` it maps, the ABI id
+This prints where the ``rebel.v2`` package imports from, the ``librebel_v2_rt.so`` it maps, the ABI id
 this build recorded against the one the runtime reports, REBEL_HOME and the other variables that
 decide which runtime is picked up, and the GCC that built each native library.
 """

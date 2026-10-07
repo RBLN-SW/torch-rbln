@@ -62,7 +62,7 @@ test/
 │   ├── test_op_caching.py                 # Operator caching / graph-reuse behavior
 │   ├── test_privateuse1_contract.py       # PrivateUse1 backend contract conformance (one test per upstream clause)
 │   ├── test_rbln_apis.py                  # RBLN Python APIs
-│   ├── test_rbln_runtime_lib.py           # Finding the librbln_rt.so the rbln package maps, and the single-copy check
+│   ├── test_rbln_runtime_lib.py           # Finding the librebel_v2_rt.so the rebel.v2 package maps, and the single-copy check
 │   ├── test_registered_ops.py             # All natively registered and fallback ops from RBLNRegisterOps.cpp / register_ops.py
 │   ├── test_rsd_kv_cache.py               # Persistent KV cache under RSD: two programs + eager access on a buffer sharded across NPUs
 │   ├── test_sdpa_decode_overflow.py       # SDPA decode-phase overflow detection and fallback behavior
@@ -761,7 +761,7 @@ Mark a test `torch_rbln_only` when a different rebel-compiler would not change i
   breaks it (`test_privateuse1_contract.py`);
 - the thing under test is a torch-rbln gate that the test drives itself, with the runtime
   stubbed or forced (`test_runtime_unavailable.py`);
-- it tests packaging — which `librbln_rt.so` is found, not what it does once loaded
+- it tests packaging — which `librebel_v2_rt.so` is found, not what it does once loaded
   (`test_rbln_runtime_lib.py`, `test_env_diagnostic.py`). Import behaviour is the counter-example: whether a remap after
   import is still accepted is the runtime's doing, so `test_import_rbln_devices_seal.py` stays
   in the lane;

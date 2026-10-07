@@ -350,17 +350,17 @@ class TestInternalOpUtils(TestCase):
 
     def test_is_cpu_fallback_cases_float32_follows_the_precision(self):
         """``float32`` runs on the device at the device precision and falls back at the exact one."""
-        import rbln
+        from rebel import v2
 
         fp32_tensor = torch.tensor([1.0, 2.0], dtype=torch.float32, device="rbln")
-        before = rbln.float32_precision()
+        before = v2.float32_precision()
         try:
-            rbln.set_float32_precision("device")
+            v2.set_float32_precision("device")
             self.assertFalse(is_cpu_fallback_cases((fp32_tensor,)))
-            rbln.set_float32_precision("exact")
+            v2.set_float32_precision("exact")
             self.assertTrue(is_cpu_fallback_cases((fp32_tensor,)))
         finally:
-            rbln.set_float32_precision(before)
+            v2.set_float32_precision(before)
 
     def test_is_cpu_fallback_cases_dtype_mixed_unsupported(self):
         """When any arg uses an unsupported dtype, fall back to CPU."""
@@ -899,16 +899,16 @@ class TestCpuFallbackOptionalTensor(TestCase):
     rtol = 1e-3
 
     def setUp(self):
-        import rbln
+        from rebel import v2
 
         super().setUp()
-        self._precision = rbln.float32_precision()
-        rbln.set_float32_precision("exact")
+        self._precision = v2.float32_precision()
+        v2.set_float32_precision("exact")
 
     def tearDown(self):
-        import rbln
+        from rebel import v2
 
-        rbln.set_float32_precision(self._precision)
+        v2.set_float32_precision(self._precision)
         super().tearDown()
 
     def test_linear_fp32_with_bias_through_cpu_fallback(self):

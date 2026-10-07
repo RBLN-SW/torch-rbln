@@ -1,8 +1,8 @@
 #include <c10/rbln/DeviceMappingManager.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
-#include <rbln/runtime/device.h>
-#include <rbln/runtime/flags.h>
+#include <rebel/v2/runtime/device.h>
+#include <rebel/v2/runtime/flags.h>
 
 #include <atomic>
 #include <cctype>
@@ -132,7 +132,7 @@ RblnNpuMappingEnvDisplay getRblnNpuMappingEnvDisplay() {
 }
 
 bool dummyDeviceEnabled() {
-  return ::rbln::runtime::flags::kDummyDevice.value();
+  return ::rebel::v2::runtime::flags::kDummyDevice.value();
 }
 
 std::vector<std::vector<int>> DeviceMappingManager::parseDeviceMap(const std::string& device_map_str) {
@@ -256,7 +256,7 @@ void DeviceMappingManager::commit() {
         // A dummy device has no NPU behind it; its ids are shape markers.
         for (const int physical_id : dummyDeviceEnabled() ? std::vector<int>{} : mapping.physical_device_ids) {
           try {
-            ::rbln::runtime::Device::open(systemNpu(physical_id));
+            ::rebel::v2::runtime::Device::open(systemNpu(physical_id));
           } catch (const std::exception& e) {
             // No rollback: NPUs opened by earlier iterations stay open. Name them, so the
             // hold is visible.
@@ -489,7 +489,7 @@ std::string DeviceMappingManager::envSignature() {
     signature += ':';
     signature += text;
   };
-  add(::rbln::runtime::flags::kDevices.raw().value_or(""));
+  add(::rebel::v2::runtime::flags::kDevices.raw().value_or(""));
   for (const char* name : {"RBLN_DEVICE_MAP", "RBLN_NPUS_PER_DEVICE"}) {
     const char* value = std::getenv(name);
     add(value != nullptr ? value : "");
@@ -551,10 +551,10 @@ void DeviceMappingManager::ensurePlannedLocked() const {
 
 std::vector<uint32_t> DeviceMappingManager::visibleNpus() {
   std::vector<uint32_t> npus;
-  const auto& visible = ::rbln::runtime::flags::kDevices;
+  const auto& visible = ::rebel::v2::runtime::flags::kDevices;
   if (visible.isSet()) {
     for (const uint32_t npu : visible.value()) {
-      if (!::rbln::runtime::Device::exists(npu)) {
+      if (!::rebel::v2::runtime::Device::exists(npu)) {
         RBLN_LOG_WARN("RBLN_DEVICES names NPU {}, which this host does not have; leaving it out", npu);
         continue;
       }
@@ -564,7 +564,7 @@ std::vector<uint32_t> DeviceMappingManager::visibleNpus() {
   }
   uint32_t count = 0;
   try {
-    count = ::rbln::runtime::Device::count();
+    count = ::rebel::v2::runtime::Device::count();
   } catch (const std::exception& e) {
     RBLN_CHECK_QUIET(
         false, "cannot count NPUs; the RBLN kernel driver may not be loaded or the device may be unavailable: {}",
@@ -581,7 +581,7 @@ void DeviceMappingManager::buildPlan() const {
 
   // Without the runtime nothing can execute, so report 0 devices. Planning does not need it;
   // commit() does, and every caller treats "no runtime" as "no device".
-  if (!dummyDeviceEnabled() && !::rbln::runtime::Device::available()) {
+  if (!dummyDeviceEnabled() && !::rebel::v2::runtime::Device::available()) {
     RBLN_LOG_INFO(
         "RBLN driver not loaded; planning 0 logical device(s). Device access will fail at the point of use.");
     buildDeviceTopology();

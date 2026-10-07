@@ -27,8 +27,8 @@
 
 #include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
 
-#include <rbln/runtime/communicator.h>
-#include <rbln/runtime/stream.h>
+#include <rebel/v2/runtime/communicator.h>
+#include <rebel/v2/runtime/stream.h>
 #include <torch/torch.h>
 #include <torch_rbln/csrc/distributed/c10d/rbln/ProcessGroupRBLN.hpp>
 // TEMPORARY: remove together with RdmaIpAutoDiscovery.{hpp,cpp} once
@@ -39,7 +39,7 @@ namespace c10d {
 
 namespace {
 
-namespace rt = ::rbln::runtime;
+namespace rt = ::rebel::v2::runtime;
 using Place = rt::Communicator::Place;
 
 // What the collectives library takes of one call (RCCL_DATA_ALIGNSIZE_FOR_CS and the size of
@@ -956,8 +956,8 @@ namespace {
 
 // The communicator of the process's default group. RCCL makes one group id a process, so a sub
 // group splits this one.
-std::weak_ptr<::rbln::runtime::Communicator>& default_communicator() {
-  static std::weak_ptr<::rbln::runtime::Communicator> communicator;
+std::weak_ptr<::rebel::v2::runtime::Communicator>& default_communicator() {
+  static std::weak_ptr<::rebel::v2::runtime::Communicator> communicator;
   return communicator;
 }
 
@@ -990,14 +990,14 @@ void ProcessGroupRBLN::connect() {
   const std::string key = "rbln_rccl_uid_" + std::to_string(group_id_);
   std::string id;
   if (rank_ == 0) {
-    id = ::rbln::runtime::Communicator::uniqueId(device);
+    id = ::rebel::v2::runtime::Communicator::uniqueId(device);
     store_->set(key, std::vector<uint8_t>(id.begin(), id.end()));
   } else {
     auto bytes = store_->get(key);
     id.assign(bytes.begin(), bytes.end());
   }
   RBLN_LOG_INFO("Communicator init rank={} size={} device_id={}", rank_, size_, device_id_);
-  comm_ = std::make_shared<::rbln::runtime::Communicator>(rank_, size_, device, id);
+  comm_ = std::make_shared<::rebel::v2::runtime::Communicator>(rank_, size_, device, id);
   default_communicator() = comm_;
 }
 

@@ -15,7 +15,7 @@ See ``test_custom_op_compile.py`` for the same family inside a larger compiled p
 import math
 
 import pytest
-import rbln.ops  # noqa: F401  -- defines the rbln_custom_ops schemas these tests call
+import rebel.v2.ops  # noqa: F401  -- defines the rbln_custom_ops schemas these tests call
 import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase

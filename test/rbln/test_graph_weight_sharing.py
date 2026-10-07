@@ -3,7 +3,7 @@
 holds a weight as another graph does binds that graph's tensor of it instead of writing its own.
 """
 
-import rbln
+from rebel import v2
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
@@ -23,7 +23,7 @@ class Mlp(torch.nn.Module):
 
 
 def _free() -> int:
-    return rbln.Device(torch.rbln.current_device()).memory_info().free
+    return v2.Device(torch.rbln.current_device()).memory_info().free
 
 
 class TestGraphWeightSharing(TestCase):

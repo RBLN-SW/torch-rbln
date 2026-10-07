@@ -1,10 +1,10 @@
 # Owner(s): ["module: PrivateUse1"]
 
 """
-Test the rbln ABI check performed when torch_rbln loads the rbln runtime.
+Test the rbln ABI check performed when torch_rbln loads the rebel.v2 runtime.
 
 Covers the equality verdict and its report, the cases that fail open (no handle on the mapped
-runtime, no build-time id, a runtime without ``rbln_abi_id``), the opt-out env var, how the
+runtime, no build-time id, a runtime without ``rebel_v2_abi_id``), the opt-out env var, how the
 snapshot is read, that the build's snapshot template yields a readable id, and that the
 runtime installed here agrees with this build.
 """
@@ -43,7 +43,7 @@ finally:
 _ABI_CHECK_ENABLED = {abi_check._SKIP_ENV: ""}
 
 _SNAPSHOT_MODULE = "torch_rbln._internal._abi_snapshot"
-_FAKE_PATH = "/fake/rbln/build/rbln/librbln_rt.so"
+_FAKE_PATH = "/fake/rbln/build/rebel/v2/librebel_v2_rt.so"
 _ID_A = "a" * 64
 _ID_B = "b" * 64
 
@@ -85,7 +85,7 @@ def _snapshot(**values) -> types.ModuleType:
 
 
 @contextlib.contextmanager
-def _runtime(lib, built_abi, built_include_dir="/fake/rbln/rbln/include"):
+def _runtime(lib, built_abi, built_include_dir="/fake/rbln/rebel/v2/include"):
     """The check against a fake runtime and a fixed snapshot, opt-out pinned off."""
     with (
         patch.dict(os.environ, _ABI_CHECK_ENABLED),
@@ -117,8 +117,8 @@ class TestSnapshot(TestCase):
             self.assertEqual(abi_check.get_built_abi(), _ID_A)
 
     def test_include_dir_is_read_when_recorded(self):
-        with patch.dict("sys.modules", {_SNAPSHOT_MODULE: _snapshot(BUILT_INCLUDE_DIR="/tree/rbln/include")}):
-            self.assertEqual(abi_check.get_built_include_dir(), "/tree/rbln/include")
+        with patch.dict("sys.modules", {_SNAPSHOT_MODULE: _snapshot(BUILT_INCLUDE_DIR="/tree/rebel/v2/include")}):
+            self.assertEqual(abi_check.get_built_include_dir(), "/tree/rebel/v2/include")
         for value in ("", None):
             with patch.dict("sys.modules", {_SNAPSHOT_MODULE: _snapshot(BUILT_INCLUDE_DIR=value)}):
                 self.assertIsNone(abi_check.get_built_include_dir(), f"value={value!r}")
@@ -126,7 +126,7 @@ class TestSnapshot(TestCase):
 
 @pytest.mark.test_set_ci
 class TestReadRuntimeAbi(TestCase):
-    """Reading ``rbln_abi_id`` off a loaded runtime."""
+    """Reading ``rebel_v2_abi_id`` off a loaded runtime."""
 
     def test_reads_the_id(self):
         self.assertEqual(abi_check.read_runtime_abi(_runtime_reporting(_ID_A)), _ID_A)
@@ -148,7 +148,7 @@ class TestOpenMappedRuntime(TestCase):
     def test_a_path_that_cannot_be_opened_is_not_an_exception(self):
         # /proc/self/maps can name a mapping whose file has since been replaced; this is reached
         # from the import path, where an OSError would kill the import.
-        self.assertIsNone(abi_check.open_mapped_runtime("/nonexistent/librbln_rt.so"))
+        self.assertIsNone(abi_check.open_mapped_runtime("/nonexistent/librebel_v2_rt.so"))
 
     def test_only_a_mapped_library_gives_a_handle(self):
         # RTLD_NOLOAD: a copy of a mapped library is another file, so it yields no handle
@@ -176,7 +176,7 @@ class TestCheckRuntimeAbi(TestCase):
             self.assertEqual(abi_check.check_runtime_abi(_FAKE_PATH), abi_check.VERDICT_OK)
 
     def test_different_ids_raise_with_an_actionable_report(self):
-        with _runtime(_runtime_reporting(_ID_B), built_abi=_ID_A, built_include_dir="/old/tree/rbln/include"):
+        with _runtime(_runtime_reporting(_ID_B), built_abi=_ID_A, built_include_dir="/old/tree/rebel/v2/include"):
             with self.assertRaises(ImportError) as ctx:
                 abi_check.check_runtime_abi(_FAKE_PATH)
         message = str(ctx.exception)
@@ -184,7 +184,7 @@ class TestCheckRuntimeAbi(TestCase):
         self.assertIn(_FAKE_PATH, message)
         self.assertIn(f"runtime ABI:  {_ID_B}", message)
         self.assertIn(f"built ABI:    {_ID_A}", message)
-        self.assertIn("/old/tree/rbln/include", message)
+        self.assertIn("/old/tree/rebel/v2/include", message)
         self.assertIn("Rebuild torch-rbln with REBEL_HOME", message)
         self.assertIn("python -m torch_rbln.diagnose", message)
 
@@ -202,7 +202,7 @@ class TestCheckRuntimeAbi(TestCase):
 
     def test_runtime_without_an_id_warns_but_does_not_block(self):
         with _runtime(_FakeLib({}), built_abi=_ID_A):
-            with pytest.warns(UserWarning, match="exports no rbln_abi_id"):
+            with pytest.warns(UserWarning, match="exports no rebel_v2_abi_id"):
                 verdict = abi_check.check_runtime_abi(_FAKE_PATH)
         self.assertEqual(verdict, abi_check.VERDICT_SKIPPED_NO_RUNTIME_ID)
 
@@ -255,11 +255,11 @@ class TestSnapshotTemplate(TestCase):
         rebel_home = os.environ.get("REBEL_HOME")
         if not rebel_home:
             self.skipTest("REBEL_HOME is not set")
-        script = os.path.join(rebel_home, "rbln", "cmake", "RblnAbi.cmake")
-        include_dir = os.path.join(rebel_home, "rbln", "include")
+        script = os.path.join(rebel_home, "rebel", "v2", "cmake", "RebelV2Abi.cmake")
+        include_dir = os.path.join(rebel_home, "rebel", "v2", "include")
         cmake = shutil.which("cmake")
         if cmake is None or not os.path.isfile(script):
-            self.skipTest("needs cmake and a REBEL_HOME tree with rbln/cmake/RblnAbi.cmake")
+            self.skipTest("needs cmake and a REBEL_HOME tree with rebel/v2/cmake/RebelV2Abi.cmake")
 
         with tempfile.TemporaryDirectory() as tmp:
             output = os.path.join(tmp, "_abi_snapshot.py")
@@ -273,10 +273,10 @@ class TestSnapshotTemplate(TestCase):
                 exec(f.read(), namespace)
 
         # The id's definition, restated: SHA-256 over "<relative path> <SHA-256>\n" of every
-        # rbln/**/*.h, sorted by path.
+        # rebel/v2/**/*.h, sorted by path.
         headers = sorted(
             os.path.relpath(os.path.join(root, name), include_dir)
-            for root, _, names in os.walk(os.path.join(include_dir, "rbln"))
+            for root, _, names in os.walk(os.path.join(include_dir, "rebel", "v2"))
             for name in names
             if name.endswith(".h")
         )
@@ -296,7 +296,7 @@ def _mapped_runtime(case) -> str:
     try:
         return rbln_runtime_lib.load_runtime_library()
     except ImportError as e:
-        case.skipTest(f"the rbln runtime is not available: {e}")
+        case.skipTest(f"the rebel.v2 runtime is not available: {e}")
 
 
 @pytest.mark.test_set_ci

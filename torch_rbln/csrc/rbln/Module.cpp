@@ -10,7 +10,7 @@
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNSupportedDtypes.h>
-#include <rbln/runtime/device.h>
+#include <rebel/v2/runtime/device.h>
 #include <torch/csrc/Dtype.h>
 #include <torch/csrc/utils/pybind.h>
 #include <torch_rbln/csrc/distributed/c10d/rbln/ProcessGroupRBLNModule.hpp>
@@ -86,7 +86,7 @@ void register_public_device_api(py::module_& module) {
       "Deprecated alias of is_available(), kept for existing callers. Never raises.");
   module.def(
       "runtime_loaded",
-      [] { return rbln::runtime::Device::available(); },
+      [] { return rebel::v2::runtime::Device::available(); },
       "Whether the RBLN driver can be loaded and sees at least one NPU. Never raises.");
   module.def(
       "_set_runtime_shutting_down",
@@ -387,7 +387,7 @@ void register_internal_api(py::module_& module) {
       "_host_empty",
       [](int64_t nbytes) {
         TORCH_CHECK(nbytes > 0, "nbytes must be positive, but got ", nbytes);
-        auto buffer = ::rbln::runtime::HostBuffer::allocate(static_cast<uint64_t>(nbytes));
+        auto buffer = ::rebel::v2::runtime::HostBuffer::allocate(static_cast<uint64_t>(nbytes));
         return at::from_blob(buffer->data(), {nbytes}, [buffer](void*) {}, at::TensorOptions().dtype(at::kByte));
       },
       "Internal: a zero-filled uint8 CPU tensor over page-aligned host memory the device copies "

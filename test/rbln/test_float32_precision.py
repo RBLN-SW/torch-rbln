@@ -3,7 +3,7 @@
 """
 Float32 ops run as the process's float32 precision says: on the device, which
 computes floats in dlfloat16, by default, or on the CPU, as float32, once
-``rbln.set_float32_precision("exact")`` asks for it.
+``rebel.v2.set_float32_precision("exact")`` asks for it.
 """
 
 import pytest
@@ -15,10 +15,10 @@ from test.utils import run_in_isolated_process
 
 
 def _float32_mul_worker(precision, on_device):
-    import rbln
+    from rebel import v2
     from torch_rbln import _C
 
-    rbln.set_float32_precision(precision)
+    v2.set_float32_precision(precision)
     x, y = torch.randn(8, 64), torch.randn(8, 64)
     _C._dispatch_fallback_reasons_reset()
     got = (x.to("rbln:0") * y.to("rbln:0")).cpu()
@@ -33,14 +33,14 @@ def _float32_mul_worker(precision, on_device):
 
 
 def _keyed_by_precision_worker():
-    import rbln
+    from rebel import v2
     from torch_rbln import _C
     from torch_rbln._internal import compile_cache
 
     h = torch.randn(4, 64, dtype=torch.float16).to("rbln:0")
     torch.add(h, h)
     compiled, warm = len(compile_cache._compiled_op_cache), _C._warmcache_size()
-    rbln.set_float32_precision("exact")
+    v2.set_float32_precision("exact")
     torch.add(h, h)
     assert len(compile_cache._compiled_op_cache) == compiled + 1
     assert _C._warmcache_size() == warm + 1

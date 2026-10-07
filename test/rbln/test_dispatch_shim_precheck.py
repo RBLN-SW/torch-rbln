@@ -165,7 +165,7 @@ class TestDispatchShimNanInfFallback(TestCase):
     """Inputs containing NaN or Inf must route to the CPU fallback path in
     non-deploy mode.
 
-    The rbln runtime does not handle NaN/Inf inputs and will silently produce
+    The rebel.v2 runtime does not handle NaN/Inf inputs and will silently produce
     wrong results. In AS-IS this safety net was carried by the Python
     wrapper's per-call ``has_invalid_tensor(to_cpu(args))`` scan; in TO-BE
     the C++ ``quick_fallback_check`` performs the same scan (only when
@@ -191,7 +191,7 @@ class TestDispatchShimNanInfFallback(TestCase):
         self.assertEqual(z.device.type, "rbln")
         result = z.to("cpu")
         # CPU semantics: NaN + 2.0 = NaN.  If we'd taken the device path the
-        # rbln runtime would have returned wrong (non-NaN) values for slot 1.
+        # rebel.v2 runtime would have returned wrong (non-NaN) values for slot 1.
         self.assertTrue(torch.isnan(result[1]))
         self.assertEqual(result[0].item(), 2.0)
         self.assertEqual(result[2].item(), 6.0)
@@ -239,7 +239,7 @@ class TestDispatchShimNanInfFallback(TestCase):
         Step 1: clean inputs install a warm-cache entry for shape (64,).
         Step 2: same shape, but one input has NaN. Without this fixup the
                 C++ shim would hit the warm cache, bypass the Python check,
-                and hand the NaN tensor to the rbln runtime — wrong result.
+                and hand the NaN tensor to the rebel.v2 runtime — wrong result.
         Step 3: NaN must propagate (proves the late NaN was caught and
                 routed to the CPU fallback path even with the entry hot).
         """

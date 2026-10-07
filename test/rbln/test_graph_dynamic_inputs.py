@@ -4,7 +4,7 @@ there run that one graph, and capture_programs reports what each further index o
 """
 
 import pytest
-import rbln.ops  # noqa: F401  -- defines the rbln_custom_ops schemas
+import rebel.v2.ops  # noqa: F401  -- defines the rbln_custom_ops schemas
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 

@@ -23,7 +23,7 @@ class SupportedDtypes:
 def dispatches(dtype: torch.dtype) -> bool:
     """Whether eager ops over ``dtype`` run on the device: those of
     ``SupportedDtypes.dispatch``, and float32 while the process computes float32
-    as the NPU computes floats, in dlfloat16 (``rbln.set_float32_precision``)."""
+    as the NPU computes floats, in dlfloat16 (``rebel.v2.set_float32_precision``)."""
     return _C._dispatches(dtype)
 
 

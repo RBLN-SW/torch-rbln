@@ -2,7 +2,7 @@
 
 """Tests for how torch_rbln._internal.rbln_runtime_lib finds the runtime it runs on.
 
-The rule under test is that the runtime is the ``librbln_rt.so`` the ``rbln`` package maps:
+The rule under test is that the runtime is the ``librebel_v2_rt.so`` the ``rebel.v2`` package maps:
 nothing is searched for, the mapping is read back from ``/proc/self/maps``, and anything other
 than exactly one mapped copy is an ImportError that says what to fix.
 """
@@ -23,8 +23,8 @@ from torch_rbln._internal import rbln_runtime_lib
 pytestmark = pytest.mark.torch_rbln_only
 
 
-_RUNTIME = "/tree/build/rbln/librbln_rt.so"
-_OTHER_RUNTIME = "/other/build/rbln/librbln_rt.so"
+_RUNTIME = "/tree/build/rebel/v2/librebel_v2_rt.so"
+_OTHER_RUNTIME = "/other/build/rebel/v2/librebel_v2_rt.so"
 
 
 def _maps_line(path: str = "", perms: str = "r-xp") -> str:
@@ -45,9 +45,9 @@ class TestParseMappedLibraries(TestCase):
         lines = [
             _maps_line(),
             _maps_line("[heap]"),
-            _maps_line("/tree/build/rbln/librbln_artifact.so"),
-            _maps_line("/tree/build/rbln/librbln_rt.so.bak"),
-            _maps_line("/tree/rbln/python/rbln/runtime/_runtime.cpython-312-x86_64-linux-gnu.so"),
+            _maps_line("/tree/build/rebel/v2/librebel_v2_artifact.so"),
+            _maps_line("/tree/build/rebel/v2/librebel_v2_rt.so.bak"),
+            _maps_line("/tree/rebel/python/rebel/v2/runtime/_runtime.cpython-312-x86_64-linux-gnu.so"),
             _maps_line(_RUNTIME),
         ]
         self.assertEqual(rbln_runtime_lib.parse_mapped_libraries(lines), [_RUNTIME])
@@ -63,14 +63,14 @@ class TestParseMappedLibraries(TestCase):
         self.assertEqual(rbln_runtime_lib.parse_mapped_libraries(lines), [_RUNTIME])
 
     def test_a_path_with_spaces_is_kept_whole(self):
-        path = "/home/some user/tree/build/rbln/librbln_rt.so"
+        path = "/home/some user/tree/build/rebel/v2/librebel_v2_rt.so"
         self.assertEqual(rbln_runtime_lib.parse_mapped_libraries([_maps_line(path)]), [path])
 
     def test_another_name_can_be_looked_up(self):
-        lines = [_maps_line(_RUNTIME), _maps_line("/tree/build/rbln/librbln_artifact.so")]
+        lines = [_maps_line(_RUNTIME), _maps_line("/tree/build/rebel/v2/librebel_v2_artifact.so")]
         self.assertEqual(
-            rbln_runtime_lib.parse_mapped_libraries(lines, name="librbln_artifact.so"),
-            ["/tree/build/rbln/librbln_artifact.so"],
+            rbln_runtime_lib.parse_mapped_libraries(lines, name="librebel_v2_artifact.so"),
+            ["/tree/build/rebel/v2/librebel_v2_artifact.so"],
         )
 
     def test_an_unreadable_mapping_table_reads_as_nothing_mapped(self):
@@ -80,9 +80,9 @@ class TestParseMappedLibraries(TestCase):
 
 @pytest.mark.test_set_ci
 class TestLoadRuntimeLibrary(TestCase):
-    """Mapping the runtime through ``rbln.runtime`` and reporting what was mapped."""
+    """Mapping the runtime through ``rebel.v2.runtime`` and reporting what was mapped."""
 
-    _MODULE = types.SimpleNamespace(__file__="/tree/rbln/python/rbln/runtime/__init__.py")
+    _MODULE = types.SimpleNamespace(__file__="/tree/rebel/python/rebel/v2/runtime/__init__.py")
 
     def _mapped(self, paths: list[str]):
         return (
@@ -97,12 +97,12 @@ class TestLoadRuntimeLibrary(TestCase):
 
     def test_an_unimportable_rbln_says_where_to_get_it(self):
         # A None entry in sys.modules makes the import raise ImportError.
-        with patch.dict(sys.modules, {"rbln": None, "rbln.runtime": None}):
+        with patch.dict(sys.modules, {"rebel.v2": None, "rebel.v2.runtime": None}):
             with self.assertRaises(ImportError) as ctx:
                 rbln_runtime_lib.load_runtime_library()
         message = str(ctx.exception)
-        self.assertIn("`import rbln.runtime` failed", message)
-        self.assertIn("PYTHONPATH=$REBEL_HOME/rbln/python", message)
+        self.assertIn("`import rebel.v2.runtime` failed", message)
+        self.assertIn("PYTHONPATH=$REBEL_HOME/rebel/python", message)
         self.assertIn("python -m torch_rbln.diagnose", message)
 
     def test_an_import_that_maps_no_runtime_is_an_error(self):
@@ -111,7 +111,7 @@ class TestLoadRuntimeLibrary(TestCase):
             with self.assertRaises(ImportError) as ctx:
                 rbln_runtime_lib.load_runtime_library()
         message = str(ctx.exception)
-        self.assertIn("no librbln_rt.so is mapped", message)
+        self.assertIn("no librebel_v2_rt.so is mapped", message)
         self.assertIn(self._MODULE.__file__, message)
 
     def test_two_mapped_copies_are_an_error(self):
@@ -129,13 +129,13 @@ class TestLoadRuntimeLibrary(TestCase):
 
 @pytest.mark.test_set_ci
 class TestInstalledRuntime(TestCase):
-    """The rbln package importable here, if any."""
+    """The rebel.v2 package importable here, if any."""
 
     def test_rbln_maps_exactly_one_runtime_and_it_is_the_one_returned(self):
         try:
             path = rbln_runtime_lib.load_runtime_library()
         except ImportError as e:
-            self.skipTest(f"the rbln runtime is not available: {e}")
+            self.skipTest(f"the rebel.v2 runtime is not available: {e}")
         self.assertEqual(os.path.basename(path), rbln_runtime_lib.RUNTIME_LIB_NAME)
         self.assertTrue(os.path.isfile(path), path)
         self.assertEqual(rbln_runtime_lib.loaded_runtime_libraries(), [path])

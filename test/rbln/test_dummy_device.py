@@ -430,8 +430,8 @@ except Exception as e:
     print("COMPILE_EXC:", type(e).__name__, str(e))
 arts = glob.glob(os.path.join(cache, "**", "*.rbln"), recursive=True)
 assert len(arts) == 1 and os.path.getsize(arts[0]) > 0, arts
-import rbln
-print("Target NPU:", rbln.Function.load(arts[0]).npu)
+from rebel import v2
+print("Target NPU:", v2.Function.load(arts[0]).npu)
 print("OK")
 """
 
@@ -708,9 +708,9 @@ _DTOK = [[7]]
 _DECODER_COMPILE = (
     """
 import glob, os
-import rbln, torch, torch_rbln
+import rebel.v2, torch, torch_rbln
 
-npu = rbln.flags.RBLN_FORCE_NPU_NAME  # dummy mode: the NPU it stands in for (the real machine SoC)
+npu = rebel.v2.flags.RBLN_FORCE_NPU_NAME  # dummy mode: the NPU it stands in for (the real machine SoC)
 print("NPU", npu)
 """
     + _DECODER_MODEL
@@ -781,7 +781,7 @@ def test_dummy_compiled_prefill_decode_runs_on_real_npu(tmp_path):
     # prefill->decode (KV cache handed from prefill into decode) on the real device
     # and check the argmax equals the CPU reference. Skipped when there is no NPU.
     probe = subprocess.run(
-        [sys.executable, "-c", "import rbln; print(rbln.npu_name(0))"],
+        [sys.executable, "-c", "import rebel.v2; print(rebel.v2.npu_name(0))"],
         env=_clean_env(),
         capture_output=True,
         text=True,
