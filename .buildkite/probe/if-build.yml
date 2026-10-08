@@ -1,0 +1,34 @@
+_udc: &udc
+  image: ${TORCH_RBLN_BUILD_IMAGE?}-py3.12
+  agents:
+    queue: udc
+  timeout_in_minutes: 15
+  checkout:
+    sparse:
+      paths:
+        - .buildkite
+  command: |
+    set -euo pipefail
+
+    echo "Kept by its if"
+
+steps:
+  - label: "probe: if build.branch == main"
+    key: probe-if-branch-main
+    if: build.branch == "main"
+    <<: *udc
+
+  - label: "probe: if build.branch != main"
+    key: probe-if-branch-not-main
+    if: build.branch != "main"
+    <<: *udc
+
+  - label: "probe: if build.tag != null"
+    key: probe-if-tag-set
+    if: build.tag != null
+    <<: *udc
+
+  - label: "probe: if build.tag == null"
+    key: probe-if-tag-null
+    if: build.tag == null
+    <<: *udc

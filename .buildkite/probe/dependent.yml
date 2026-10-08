@@ -1,0 +1,17 @@
+steps:
+  - label: "probe: depends on a step another job uploaded"
+    key: probe-dependent
+    depends_on:
+      - probe-interpolated-first
+    image: ${TORCH_RBLN_BUILD_IMAGE?}-py3.12
+    agents:
+      queue: udc
+    timeout_in_minutes: 15
+    checkout:
+      sparse:
+        paths:
+          - .buildkite
+    command: |
+      set -euo pipefail
+
+      echo "probe-interpolated-first had finished"

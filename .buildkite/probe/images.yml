@@ -1,0 +1,87 @@
+_check: &check |
+  set -euo pipefail
+
+  expected=${TORCH_RBLN_PROBE_PYTHON?}
+  grep '^PRETTY_NAME=' /etc/os-release || true
+  machine="$$(uname --machine)"
+  python="$$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+  echo "$${machine}, Python $${python}"
+  uv --version
+  if [[ "$${machine}" != "$${TORCH_RBLN_PROBE_MACHINE}" ]]; then
+    echo "error: expected $${TORCH_RBLN_PROBE_MACHINE}" >&2
+    exit 1
+  fi
+  if [[ "$${python}" != "$${expected}" ]]; then
+    echo "error: expected Python $${expected}" >&2
+    exit 1
+  fi
+  case "$${TORCH_RBLN_PROBE_IMAGE}" in
+    build)
+      for compiler in cc c++; do
+        path="$$(command -v "$${compiler}")"
+        version="$$("$${compiler}" -dumpfullversion)"
+        echo "$${compiler}: $${path}, GCC $${version}"
+        if [[ "$${version%%.*}" != 13 ]]; then
+          echo "error: $${compiler} is not GCC 13" >&2
+          exit 1
+        fi
+      done
+      ;;
+    test)
+      for tool in gh jq rbln-smi; do
+        if ! command -v "$${tool}"; then
+          echo "error: no $${tool} on PATH" >&2
+          exit 1
+        fi
+      done
+      ;;
+    *)
+      echo "error: unknown image $${TORCH_RBLN_PROBE_IMAGE}" >&2
+      exit 1
+      ;;
+  esac
+
+steps:
+  - label: "probe: build image, Python ${TORCH_RBLN_PROBE_PYTHON?}, amd64"
+    key: probe-image-build-py${TORCH_RBLN_PROBE_PYTHON?}
+    image: ${TORCH_RBLN_BUILD_IMAGE?}-py${TORCH_RBLN_PROBE_PYTHON?}
+    agents:
+      queue: udc
+    timeout_in_minutes: 15
+    checkout:
+      sparse:
+        paths:
+          - .buildkite
+    env:
+      TORCH_RBLN_PROBE_IMAGE: build
+      TORCH_RBLN_PROBE_MACHINE: x86_64
+    command: *check
+
+  - label: "probe: build image, Python ${TORCH_RBLN_PROBE_PYTHON?}, arm64"
+    key: probe-image-build-py${TORCH_RBLN_PROBE_PYTHON?}-aarch64
+    agents:
+      queue: vm
+      arch: arm64
+    plugins:
+      - docker#v5.13.0:
+          image: ${TORCH_RBLN_BUILD_IMAGE?}-py${TORCH_RBLN_PROBE_PYTHON?}
+          environment:
+            - TORCH_RBLN_PROBE_IMAGE=build
+            - TORCH_RBLN_PROBE_MACHINE=aarch64
+    timeout_in_minutes: 30
+    command: *check
+
+  - label: "probe: test image, Python ${TORCH_RBLN_PROBE_PYTHON?}, amd64"
+    key: probe-image-test-py${TORCH_RBLN_PROBE_PYTHON?}
+    image: ${TORCH_RBLN_TEST_IMAGE?}-py${TORCH_RBLN_PROBE_PYTHON?}
+    agents:
+      queue: udc
+    timeout_in_minutes: 15
+    checkout:
+      sparse:
+        paths:
+          - .buildkite
+    env:
+      TORCH_RBLN_PROBE_IMAGE: test
+      TORCH_RBLN_PROBE_MACHINE: x86_64
+    command: *check

@@ -1,0 +1,16 @@
+steps:
+  - label: "probe: keeps the Upload group open for a minute"
+    key: probe-slow
+    image: ${TORCH_RBLN_BUILD_IMAGE?}-py3.12
+    agents:
+      queue: udc
+    timeout_in_minutes: 15
+    checkout:
+      sparse:
+        paths:
+          - .buildkite
+    command: |
+      set -euo pipefail
+
+      sleep 60
+      buildkite-agent meta-data set probe-slow-finished true

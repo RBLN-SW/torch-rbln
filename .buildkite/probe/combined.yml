@@ -1,0 +1,11 @@
+steps:
+  - label: "probe: ${TORCH_RBLN_PROBE_UPLOAD?} of two documents in one upload"
+    key: probe-combined-${TORCH_RBLN_PROBE_UPLOAD?}
+    agents:
+      queue: udc
+    timeout_in_minutes: 15
+    checkout:
+      sparse:
+        paths:
+          - .buildkite
+    command: echo "This step came from the ${TORCH_RBLN_PROBE_UPLOAD?} document"

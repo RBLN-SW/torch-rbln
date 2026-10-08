@@ -1,0 +1,24 @@
+_udc: &udc
+  image: ${TORCH_RBLN_BUILD_IMAGE?}-py3.12
+  agents:
+    queue: udc
+  timeout_in_minutes: 15
+  checkout:
+    sparse:
+      paths:
+        - .buildkite
+  command: |
+    set -euo pipefail
+
+    echo "Kept by its if"
+
+steps:
+  - label: "probe: if an interpolated string matches a regex"
+    key: probe-if-regex-match
+    if: '"${TORCH_RBLN_PROBE_LANES?}" =~ /(^|,)atom(,|$$)/'
+    <<: *udc
+
+  - label: "probe: if an interpolated string does not match a regex"
+    key: probe-if-regex-mismatch
+    if: '"${TORCH_RBLN_PROBE_LANES?}" =~ /(^|,)rebel(,|$$)/'
+    <<: *udc

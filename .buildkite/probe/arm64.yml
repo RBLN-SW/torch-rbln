@@ -1,0 +1,89 @@
+steps:
+  - label: "probe: arm64 VM, host shell"
+    key: probe-arm64-host
+    agents:
+      queue: vm
+      arch: arm64
+    timeout_in_minutes: 15
+    command: |
+      set -euo pipefail
+
+      uname --machine
+      uname --nodename
+      grep '^PRETTY_NAME=' /etc/os-release || true
+      cat /proc/version
+      echo "nproc $$(nproc) of $$(nproc --all)"
+      grep --extended-regexp '^Mem(Total|Available):' /proc/meminfo
+      grep --with-filename . \
+        /sys/fs/cgroup/cpu.max \
+        /sys/fs/cgroup/cpu.weight \
+        /sys/fs/cgroup/memory.max \
+        || echo "no cgroup v2 files"
+      ls -l /dev/rbln* || echo "no /dev/rbln*"
+      if command -v rbln-smi > /dev/null; then
+        rbln-smi
+      else
+        echo "no rbln-smi"
+      fi
+
+  - label: "probe: arm64 VM, docker plugin, secrets, and network"
+    key: probe-arm64-vm
+    agents:
+      queue: vm
+      arch: arm64
+    plugins:
+      - docker#v5.13.0:
+          image: ${TORCH_RBLN_BUILD_IMAGE?}-py3.12
+          propagate-environment: true
+          mount-buildkite-agent: true
+          environment:
+            - BUILDKITE_AGENT_ENDPOINT=https://obedients-api.k8s.rebellions.in/v3
+            - UV_INDEX_RBLN_USERNAME
+            - UV_INDEX_RBLN_PASSWORD
+    timeout_in_minutes: 30
+    secrets:
+      UV_INDEX_RBLN_USERNAME: REBEL_SW_DEV_USERNAME
+      UV_INDEX_RBLN_PASSWORD: REBEL_SW_DEV_PASSWORD
+    command: |
+      set -euo pipefail
+
+      uname --machine
+      uname --nodename
+      grep '^PRETTY_NAME=' /etc/os-release || true
+      cat /proc/version
+      echo "nproc $$(nproc) of $$(nproc --all)"
+      grep --extended-regexp '^Mem(Total|Available):' /proc/meminfo
+      grep --with-filename . \
+        /sys/fs/cgroup/cpu.max \
+        /sys/fs/cgroup/cpu.weight \
+        /sys/fs/cgroup/memory.max \
+        || echo "no cgroup v2 files"
+      ls -l /dev/rbln* || echo "no /dev/rbln*"
+      if command -v rbln-smi > /dev/null; then
+        rbln-smi
+      else
+        echo "no rbln-smi"
+      fi
+      python3 --version
+      buildkite-agent --version
+      buildkite-agent meta-data set probe-arm64-vm-machine "$$(uname --machine)"
+      machine="$$(buildkite-agent meta-data get probe-arm64-vm-machine)"
+      echo "meta-data set and read back from the container: $${machine}"
+      if [[ -z "$${UV_INDEX_RBLN_USERNAME:-}" ]]; then
+        echo "error: the secret did not reach the container" >&2
+        exit 1
+      fi
+      for url in \
+        https://pypi.org/simple/ \
+        https://pypi.rbln.ai/simple/ \
+        https://pypi.rebellions.in/ \
+        https://nexus.mgmt.rbln.in/ \
+        https://harbor.mgmt.rbln.in/; do
+        curl \
+          --silent \
+          --output /dev/null \
+          --write-out "$${url} %{http_code}\n" \
+          --max-time 30 \
+          "$${url}" \
+          || echo "$${url} unreachable"
+      done

@@ -1,0 +1,23 @@
+steps:
+  - label: "probe: the pipeline settings' retry reaches a step two uploads down"
+    key: probe-retry-fragment
+    image: ${TORCH_RBLN_BUILD_IMAGE?}-py3.12
+    agents:
+      queue: udc
+    timeout_in_minutes: 15
+    checkout:
+      sparse:
+        paths:
+          - .buildkite
+    command: |
+      set -euo pipefail
+
+      echo "BUILDKITE_RETRY_COUNT=$${BUILDKITE_RETRY_COUNT:-<unset>}"
+      marker=probe-retry-fragment-first-attempt
+      if ! buildkite-agent meta-data exists "$${marker}"; then
+        buildkite-agent meta-data set "$${marker}" "$${BUILDKITE_JOB_ID}"
+        echo "First attempt: exiting 42"
+        exit 42
+      fi
+      first="$$(buildkite-agent meta-data get "$${marker}")"
+      echo "A retry; the first attempt was job $${first}"
