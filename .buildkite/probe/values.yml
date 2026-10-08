@@ -1,0 +1,25 @@
+env:
+  TORCH_RBLN_PROBE_FRAGMENT_ENV: fragment
+
+steps:
+  - label: "probe: interpolated ${TORCH_RBLN_PROBE_VALUE?}"
+    key: probe-interpolated-${TORCH_RBLN_PROBE_VALUE?}
+    image: ${TORCH_RBLN_BUILD_IMAGE?}-py3.12
+    agents:
+      queue: udc
+    timeout_in_minutes: 15
+    checkout:
+      sparse:
+        paths:
+          - .buildkite
+    command: |
+      set -euo pipefail
+
+      value=${TORCH_RBLN_PROBE_VALUE?}
+      echo "The upload interpolated $${value}"
+      if [[ "$${TORCH_RBLN_PROBE_FRAGMENT_ENV:-}" != fragment ]]; then
+        echo "error: the fragment's env did not reach its step" >&2
+        exit 1
+      fi
+      echo "--- observe: the entry file's env in an uploaded step"
+      echo "TORCH_RBLN_PROBE_ENTRY_ENV=$${TORCH_RBLN_PROBE_ENTRY_ENV:-<unset>}"

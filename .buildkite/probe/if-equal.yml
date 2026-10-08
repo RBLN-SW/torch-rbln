@@ -1,0 +1,24 @@
+_udc: &udc
+  image: ${TORCH_RBLN_BUILD_IMAGE?}-py3.12
+  agents:
+    queue: udc
+  timeout_in_minutes: 15
+  checkout:
+    sparse:
+      paths:
+        - .buildkite
+  command: |
+    set -euo pipefail
+
+    echo "Kept by its if"
+
+steps:
+  - label: "probe: if an interpolated string equals a string"
+    key: probe-if-equal-match
+    if: '"${TORCH_RBLN_PROBE_BUILD_TYPE?}" == "Release"'
+    <<: *udc
+
+  - label: "probe: if an interpolated string differs from a string"
+    key: probe-if-equal-mismatch
+    if: '"${TORCH_RBLN_PROBE_BUILD_TYPE?}" == "Debug"'
+    <<: *udc

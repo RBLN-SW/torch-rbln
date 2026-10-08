@@ -1,0 +1,131 @@
+_retry: &retry
+  automatic:
+    - exit_status: -1
+      signal_reason: none
+      limit: 2
+    - signal_reason: agent_stop
+      limit: 2
+    - signal_reason: stack_error
+      limit: 1
+  manual:
+    allowed: true
+    permit_on_passed: false
+
+_dshm: &dshm
+  - kubernetes:
+      podSpecPatch:
+        containers:
+          - name: container-0
+            volumeMounts:
+              - name: dshm
+                mountPath: /dev/shm
+        volumes:
+          - name: dshm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 4Gi
+
+steps:
+  - label: "probe: ATOM, queue k8s, 2 NPUs"
+    key: probe-npu-atom
+    image: ${TORCH_RBLN_TEST_IMAGE?}-py3.12
+    agents:
+      queue: k8s
+    resources:
+      npu:
+        count: 2
+        product:
+          - RBLN-CA22
+          - RBLN-CA25
+      cpu:
+        requests: "6"
+        limits: "6"
+    plugins: *dshm
+    timeout_in_minutes: 15
+    retry: *retry
+    env:
+      TORCH_RBLN_PROBE_NPU_COUNT: "2"
+    command: &npu-probe |
+      set -euo pipefail
+
+      uname --nodename
+      grep '^PRETTY_NAME=' /etc/os-release || true
+      cat /proc/version
+      echo "nproc $$(nproc) of $$(nproc --all)"
+      grep --extended-regexp '^Mem(Total|Available):' /proc/meminfo
+      grep --with-filename . \
+        /sys/fs/cgroup/cpu.max \
+        /sys/fs/cgroup/cpu.weight \
+        /sys/fs/cgroup/memory.max \
+        || echo "no cgroup v2 files"
+      df --human-readable /dev/shm
+      ls -l /dev/rbln* || echo "no /dev/rbln*"
+      if command -v rbln-smi > /dev/null; then
+        rbln-smi
+      else
+        echo "no rbln-smi"
+      fi
+      shopt -s nullglob
+      devices=(/dev/rbln[0-9]*)
+      echo "$${#devices[@]} device nodes"
+      if [[ "$${#devices[@]}" -ne "$${TORCH_RBLN_PROBE_NPU_COUNT}" ]]; then
+        echo "error: expected $${TORCH_RBLN_PROBE_NPU_COUNT}" >&2
+        exit 1
+      fi
+
+  - label: "probe: ATOM, queue k8s, 2 NPUs, npu only"
+    key: probe-npu-atom-npu-only
+    image: ${TORCH_RBLN_TEST_IMAGE?}-py3.12
+    agents:
+      queue: k8s
+    resources:
+      npu:
+        count: 2
+        product:
+          - RBLN-CA22
+          - RBLN-CA25
+    timeout_in_minutes: 15
+    retry: *retry
+    env:
+      TORCH_RBLN_PROBE_NPU_COUNT: "2"
+    command: *npu-probe
+
+  - label: "probe: REBEL, queue udc, 2 NPUs"
+    key: probe-npu-rebel
+    image: ${TORCH_RBLN_TEST_IMAGE?}-py3.12
+    agents:
+      queue: udc
+    resources:
+      npu:
+        count: 2
+        product:
+          - RBLN-CR13
+      cpu:
+        requests: "6"
+        limits: "6"
+    plugins: *dshm
+    timeout_in_minutes: 15
+    retry: *retry
+    env:
+      TORCH_RBLN_PROBE_NPU_COUNT: "2"
+    command: *npu-probe
+
+  - label: "probe: REBEL, queue udc, 8 NPUs"
+    key: probe-npu-rebel-8
+    image: ${TORCH_RBLN_TEST_IMAGE?}-py3.12
+    agents:
+      queue: udc
+    resources:
+      npu:
+        count: 8
+        product:
+          - RBLN-CR13
+      cpu:
+        requests: "24"
+        limits: "24"
+    plugins: *dshm
+    timeout_in_minutes: 15
+    retry: *retry
+    env:
+      TORCH_RBLN_PROBE_NPU_COUNT: "8"
+    command: *npu-probe

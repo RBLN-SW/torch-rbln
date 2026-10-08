@@ -1,0 +1,604 @@
+env:
+  TORCH_RBLN_PROBE_ENTRY_ENV: entry
+  TORCH_RBLN_IMAGE_REGISTRY: harbor.k8s.rebellions.in
+  TORCH_RBLN_BUILD_IMAGE_REPOSITORY: rebellions-sw/rbln-build
+  TORCH_RBLN_BUILD_IMAGE_TAG: 0.12.0rc0-ubi9.8
+  TORCH_RBLN_BUILD_IMAGE: >-
+    ${TORCH_RBLN_IMAGE_REGISTRY}/${TORCH_RBLN_BUILD_IMAGE_REPOSITORY}:${TORCH_RBLN_BUILD_IMAGE_TAG}
+  TORCH_RBLN_TEST_IMAGE_REPOSITORY: rebellions-sw/rbln-test
+  TORCH_RBLN_TEST_IMAGE_TAG: 0.12.0rc0-ubuntu24.04
+  TORCH_RBLN_TEST_IMAGE: >-
+    ${TORCH_RBLN_IMAGE_REGISTRY}/${TORCH_RBLN_TEST_IMAGE_REPOSITORY}:${TORCH_RBLN_TEST_IMAGE_TAG}
+  UV_PYTHON_DOWNLOADS: never
+notify:
+  - github_commit_status:
+      context: platform-probe
+
+_retry: &retry
+  automatic:
+    - exit_status: -1
+      signal_reason: none
+      limit: 2
+    - signal_reason: agent_stop
+      limit: 2
+    - signal_reason: stack_error
+      limit: 1
+  manual:
+    allowed: true
+    permit_on_passed: false
+
+_udc-bare: &udc-bare
+  agents:
+    queue: udc
+  priority: 9999
+  timeout_in_minutes: 15
+  retry: *retry
+  checkout:
+    sparse:
+      paths:
+        - .buildkite
+
+_udc: &udc
+  <<: *udc-bare
+  image: ${TORCH_RBLN_BUILD_IMAGE}-py3.12
+
+_merged: &merged
+  env:
+    TORCH_RBLN_PROBE_MERGED: merged
+  command: |
+    set -euo pipefail
+
+    if [[ "$${TORCH_RBLN_PROBE_MERGED:-}" != merged ]]; then
+      echo "error: the merged env did not reach the step" >&2
+      exit 1
+    fi
+    echo "The command and env came through the merge key"
+
+_host: &host |
+  set -euo pipefail
+
+  uname --nodename
+  grep '^PRETTY_NAME=' /etc/os-release || true
+  cat /proc/version
+  echo "nproc $$(nproc) of $$(nproc --all)"
+  grep --extended-regexp '^Mem(Total|Available):' /proc/meminfo
+  grep --with-filename . \
+    /sys/fs/cgroup/cpu.max \
+    /sys/fs/cgroup/cpu.weight \
+    /sys/fs/cgroup/memory.max \
+    || echo "no cgroup v2 files"
+  ls -l /dev/rbln* || echo "no /dev/rbln*"
+  if command -v rbln-smi > /dev/null; then
+    rbln-smi
+  else
+    echo "no rbln-smi"
+  fi
+
+steps:
+  - group: Upload
+    key: probe-upload
+    steps:
+      - label: Upload the values fragment, first
+        key: probe-upload-values-first
+        <<: *udc-bare
+        env:
+          TORCH_RBLN_PROBE_VALUE: first
+        command: buildkite-agent pipeline upload .buildkite/probe/values.yml
+
+      - label: Upload the values fragment, second
+        key: probe-upload-values-second
+        <<: *udc-bare
+        env:
+          TORCH_RBLN_PROBE_VALUE: second
+        command: buildkite-agent pipeline upload .buildkite/probe/values.yml
+
+      - label: Upload the dependent probe
+        key: probe-upload-dependent
+        <<: *udc-bare
+        depends_on:
+          - probe-upload-values-first
+        command: buildkite-agent pipeline upload .buildkite/probe/dependent.yml
+
+      - label: Upload the slow probe
+        key: probe-upload-slow
+        <<: *udc-bare
+        command: buildkite-agent pipeline upload .buildkite/probe/slow.yml
+
+      - label: Upload the if probes on build attributes
+        key: probe-upload-if-build
+        <<: *udc-bare
+        command: buildkite-agent pipeline upload .buildkite/probe/if-build.yml
+
+      - label: Upload the if probes on a regex match
+        key: probe-upload-if-regex
+        <<: *udc-bare
+        env:
+          TORCH_RBLN_PROBE_LANES: atom
+        command: buildkite-agent pipeline upload .buildkite/probe/if-regex.yml
+
+      - label: Upload the if probes on an equality
+        key: probe-upload-if-equal
+        <<: *udc-bare
+        env:
+          TORCH_RBLN_PROBE_BUILD_TYPE: Release
+        command: buildkite-agent pipeline upload .buildkite/probe/if-equal.yml
+
+      - label: Upload the retry fragment
+        key: probe-upload-retry
+        <<: *udc-bare
+        command: buildkite-agent pipeline upload .buildkite/probe/retry.yml
+
+      - label: "probe: NAME? fails a dry run that leaves NAME unset"
+        key: probe-required-name
+        <<: *udc
+        command: |
+          set -euo pipefail
+
+          fragment=.buildkite/probe/values.yml
+          echo "--- With the value set, the dry run passes"
+          TORCH_RBLN_PROBE_VALUE=present \
+            buildkite-agent pipeline upload \
+              --dry-run \
+              "$${fragment}" \
+            > /dev/null
+          echo "--- Without it, the dry run fails"
+          if env --unset=TORCH_RBLN_PROBE_VALUE \
+            buildkite-agent pipeline upload \
+              --dry-run \
+              "$${fragment}" \
+            > /dev/null; then
+            echo "error: the dry run accepted an unset name" >&2
+            exit 1
+          fi
+          echo "The dry run failed, as the fragments rely on"
+
+      - label: "probe: a merge key brings a step its command and env"
+        key: probe-merge-key
+        <<:
+          - *udc
+          - *merged
+
+  - group: Uploads per job
+    key: probe-uploads-per-job
+    steps:
+      - label: Upload a fragment twice from one job
+        key: probe-upload-twice
+        <<: *udc-bare
+        command: |
+          set -euo pipefail
+
+          for upload in first second; do
+            TORCH_RBLN_PROBE_UPLOAD="$${upload}" \
+              buildkite-agent pipeline upload .buildkite/probe/twice.yml
+          done
+
+      - label: Upload two documents as one
+        key: probe-upload-combined
+        <<: *udc
+        command: |
+          set -euo pipefail
+
+          work="$$(mktemp --directory)"
+          for upload in first second; do
+            TORCH_RBLN_PROBE_UPLOAD="$${upload}" \
+              buildkite-agent pipeline upload \
+                --dry-run \
+                --format json \
+                .buildkite/probe/combined.yml \
+              > "$${work}/$${upload}.json"
+          done
+          python3 - "$${work}/first.json" "$${work}/second.json" \
+            > "$${work}/combined.json" <<'PY'
+          import json, sys
+          steps = [s for f in sys.argv[1:] for s in json.load(open(f))["steps"]]
+          print(json.dumps({"steps": steps}))
+          PY
+          buildkite-agent pipeline upload \
+            --no-interpolation \
+            "$${work}/combined.json"
+
+  - group: Order
+    key: probe-order
+    depends_on: probe-upload
+    allow_dependency_failure: true
+    steps:
+      - label: "probe: a group waits for the steps uploaded into its dependency"
+        key: probe-group-waits
+        <<: *udc
+        command: |
+          set -euo pipefail
+
+          finished="$$(
+            buildkite-agent meta-data get \
+              --default false \
+              probe-slow-finished
+          )"
+          if [[ "$${finished}" != true ]]; then
+            echo "error: Order started before probe-slow finished" >&2
+            exit 1
+          fi
+          echo "probe-slow had finished"
+
+  - group: Agent API
+    key: probe-agent-api
+    steps:
+      - label: "probe: meta-data set"
+        key: probe-meta-data-set
+        <<: *udc
+        command: |
+          set -euo pipefail
+
+          buildkite-agent meta-data set probe-meta-data value
+
+      - label: "probe: meta-data get in another step"
+        key: probe-meta-data-get
+        <<: *udc
+        depends_on:
+          - probe-meta-data-set
+        command: |
+          set -euo pipefail
+
+          value="$$(buildkite-agent meta-data get probe-meta-data)"
+          if [[ "$${value}" != value ]]; then
+            echo "error: meta-data get returned '$${value}'" >&2
+            exit 1
+          fi
+
+      - label: "probe: artifact upload"
+        key: probe-artifact-upload
+        <<: *udc
+        artifact_paths:
+          - probe-artifact.txt
+        command: |
+          set -euo pipefail
+
+          echo "artifact from $${BUILDKITE_JOB_ID}" > probe-artifact.txt
+
+      - label: "probe: artifact download --step"
+        key: probe-artifact-download
+        <<: *udc
+        depends_on:
+          - probe-artifact-upload
+        command: |
+          set -euo pipefail
+
+          buildkite-agent artifact download \
+            --step probe-artifact-upload \
+            probe-artifact.txt \
+            .
+          grep --quiet '^artifact from ' probe-artifact.txt
+
+      - label: "probe: soft_fail on exit 4"
+        key: probe-soft-fail
+        <<: *udc
+        soft_fail:
+          - exit_status: 4
+        command: |
+          set -euo pipefail
+
+          exit 4
+
+  - group: Job
+    key: probe-job
+    steps:
+      - label: "probe: buildkite-agent is on PATH in the command container"
+        key: probe-agent-on-path
+        <<: *udc
+        command: |
+          set -euo pipefail
+
+          command -v buildkite-agent
+          buildkite-agent --version
+
+      - label: "probe: a sparse checkout keeps the root files (cone mode)"
+        key: probe-sparse-cone
+        <<: *udc
+        command: |
+          set -euo pipefail
+
+          ls -a
+          echo "--- observe: the sparse-checkout state the checkout left"
+          git --version
+          for name in core.sparseCheckout core.sparseCheckoutCone; do
+            echo "$${name}=$$(git config --get "$${name}" || echo '<unset>')"
+          done
+          cat .git/info/sparse-checkout || echo "no .git/info/sparse-checkout"
+          echo "Tracked files by skip-worktree flag (S = skipped):"
+          git ls-files -t | cut --characters=1 | sort | uniq --count
+          test -f pyproject.toml
+          test -f uv.lock
+          if [[ -d test ]]; then
+            echo "error: the checkout is not sparse; test/ is there" >&2
+            exit 1
+          fi
+
+      - label: "probe: PyPI is reachable from a udc pod"
+        key: probe-pypi
+        <<: *udc
+        command: |
+          set -euo pipefail
+
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            --head \
+            --max-time 30 \
+            https://pypi.org/simple/pyyaml/
+
+      - label: "probe: the image's uv reads uv.lock"
+        key: probe-uv-lock
+        <<: *udc
+        command: |
+          set -euo pipefail
+
+          uv --version
+          project="$$(mktemp --directory)"
+          for file in pyproject.toml uv.lock; do
+            git show "HEAD:$${file}" > "$${project}/$${file}"
+          done
+          uv export \
+            --directory "$${project}" \
+            --frozen \
+            --no-hashes \
+            --quiet \
+            > /dev/null
+
+      - label: "probe: the test image installs libnuma1 with apt-get"
+        key: probe-test-image
+        <<: *udc
+        image: ${TORCH_RBLN_TEST_IMAGE}-py3.12
+        command: |
+          set -euo pipefail
+
+          id --user
+          apt-get update --quiet
+          apt-get install --yes --quiet libnuma1
+          for tool in gh jq; do
+            if ! command -v "$${tool}"; then
+              echo "error: no $${tool} on PATH" >&2
+              exit 1
+            fi
+          done
+
+      - label: "probe: the pipeline settings' retry reaches an uploaded step"
+        key: probe-retry-entry
+        image: ${TORCH_RBLN_BUILD_IMAGE}-py3.12
+        agents:
+          queue: udc
+        timeout_in_minutes: 15
+        checkout:
+          sparse:
+            paths:
+              - .buildkite
+        command: |
+          set -euo pipefail
+
+          echo "BUILDKITE_RETRY_COUNT=$${BUILDKITE_RETRY_COUNT:-<unset>}"
+          marker=probe-retry-entry-first-attempt
+          if ! buildkite-agent meta-data exists "$${marker}"; then
+            buildkite-agent meta-data set "$${marker}" "$${BUILDKITE_JOB_ID}"
+            echo "First attempt: exiting 42"
+            exit 42
+          fi
+          first="$$(buildkite-agent meta-data get "$${marker}")"
+          echo "A retry; the first attempt was job $${first}"
+
+      - label: "probe: a step's own retry retries it"
+        key: probe-retry-own
+        <<: *udc
+        retry:
+          automatic:
+            - exit_status: 42
+              limit: 1
+        command: |
+          set -euo pipefail
+
+          echo "BUILDKITE_RETRY_COUNT=$${BUILDKITE_RETRY_COUNT:-<unset>}"
+          marker=probe-retry-own-first-attempt
+          if ! buildkite-agent meta-data exists "$${marker}"; then
+            buildkite-agent meta-data set "$${marker}" "$${BUILDKITE_JOB_ID}"
+            echo "First attempt: exiting 42"
+            exit 42
+          fi
+          first="$$(buildkite-agent meta-data get "$${marker}")"
+          echo "A retry; the first attempt was job $${first}"
+
+      - label: "observe: job environment"
+        key: observe-job-environment
+        <<: *udc
+        command: |
+          set -euo pipefail
+
+          echo "--- Git: shallow history and tags"
+          git rev-parse --is-shallow-repository
+          git tag --list | wc --lines
+          git describe --tags --always
+          echo "--- uv cache"
+          echo "UV_CACHE_DIR=$${UV_CACHE_DIR:-<unset>}"
+          mount | grep --fixed-strings uv_cache || echo "no uv_cache mount"
+          echo "--- Pod"
+          uname --nodename
+          cat /sys/fs/cgroup/cpu.max /sys/fs/cgroup/memory.max \
+            || echo "no cgroup v2 limits"
+
+  - group: Placement
+    key: probe-placement
+    steps:
+      - label: "probe: udc queue, default image, no resources"
+        key: probe-place-udc-bare
+        agents:
+          queue: udc
+        timeout_in_minutes: 15
+        command: *host
+
+      - label: "probe: udc queue, build image, cpu"
+        key: probe-place-udc-cpu
+        image: ${TORCH_RBLN_BUILD_IMAGE}-py3.12
+        agents:
+          queue: udc
+        resources:
+          cpu: "4"
+        timeout_in_minutes: 15
+        command: *host
+
+  - group: Secrets
+    key: probe-secrets
+    steps:
+      - label: Upload the secret probes
+        key: probe-upload-secrets
+        <<: *udc-bare
+        command: buildkite-agent pipeline upload .buildkite/probe/secrets.yml
+
+  - group: NPU
+    key: probe-npu
+    steps:
+      - label: Upload the NPU probes
+        key: probe-upload-npu
+        <<: *udc-bare
+        command: buildkite-agent pipeline upload .buildkite/probe/npu.yml
+
+  - group: arm64
+    key: probe-arm64
+    steps:
+      - label: Upload the arm64 probe
+        key: probe-upload-arm64
+        <<: *udc-bare
+        command: buildkite-agent pipeline upload .buildkite/probe/arm64.yml
+
+  - group: Images
+    key: probe-images
+    steps:
+      - label: Upload the image probes, Python 3.10
+        key: probe-upload-images-py3.10
+        <<: *udc-bare
+        env:
+          TORCH_RBLN_PROBE_PYTHON: "3.10"
+        command: buildkite-agent pipeline upload .buildkite/probe/images.yml
+
+      - label: Upload the image probes, Python 3.11
+        key: probe-upload-images-py3.11
+        <<: *udc-bare
+        env:
+          TORCH_RBLN_PROBE_PYTHON: "3.11"
+        command: buildkite-agent pipeline upload .buildkite/probe/images.yml
+
+      - label: Upload the image probes, Python 3.12
+        key: probe-upload-images-py3.12
+        <<: *udc-bare
+        env:
+          TORCH_RBLN_PROBE_PYTHON: "3.12"
+        command: buildkite-agent pipeline upload .buildkite/probe/images.yml
+
+      - label: Upload the image probes, Python 3.13
+        key: probe-upload-images-py3.13
+        <<: *udc-bare
+        env:
+          TORCH_RBLN_PROBE_PYTHON: "3.13"
+        command: buildkite-agent pipeline upload .buildkite/probe/images.yml
+
+      - label: Upload the image probes, Python 3.14
+        key: probe-upload-images-py3.14
+        <<: *udc-bare
+        env:
+          TORCH_RBLN_PROBE_PYTHON: "3.14"
+        command: buildkite-agent pipeline upload .buildkite/probe/images.yml
+
+  - label: Report
+    key: probe-report
+    depends_on:
+      - probe-upload
+      - probe-uploads-per-job
+      - probe-order
+      - probe-agent-api
+      - probe-job
+      - probe-placement
+      - probe-secrets
+    allow_dependency_failure: true
+    <<: *udc
+    command: |
+      set -euo pipefail
+
+      on_main=false
+      if [[ "$${BUILDKITE_BRANCH}" == main ]]; then
+        on_main=true
+      fi
+      if [[ "$${on_main}" == true ]]; then
+        branch_main=passed
+        branch_not_main=absent
+      else
+        branch_main=absent
+        branch_not_main=passed
+      fi
+      if [[ -n "$${BUILDKITE_TAG:-}" ]]; then
+        tag_set=passed
+        tag_null=absent
+      else
+        tag_set=absent
+        tag_null=passed
+      fi
+      mismatches=0
+      expect() {
+        local key="$$1"
+        local expected="$$2"
+        local actual
+        if ! actual="$$(
+          buildkite-agent step get state --step "$${key}" 2> /dev/null
+        )"; then
+          actual=absent
+        fi
+        local verdict=ok
+        if [[ "$${actual}" != "$${expected}" ]]; then
+          verdict=MISMATCH
+          mismatches=$$((mismatches + 1))
+        fi
+        printf '%-9s %-34s expected %-12s got %s\n' \
+          "$${verdict}" \
+          "$${key}" \
+          "$${expected}" \
+          "$${actual}"
+      }
+      echo "+++ Probes"
+      expect probe-upload-values-first passed
+      expect probe-twice-second passed
+      expect probe-combined-first passed
+      expect probe-combined-second passed
+      expect probe-interpolated-first passed
+      expect probe-interpolated-second passed
+      expect probe-dependent passed
+      expect probe-slow passed
+      expect probe-group-waits passed
+      expect probe-required-name passed
+      expect probe-merge-key passed
+      expect probe-if-regex-match passed
+      expect probe-if-regex-mismatch absent
+      expect probe-if-equal-match passed
+      expect probe-if-equal-mismatch absent
+      expect probe-if-branch-main "$${branch_main}"
+      expect probe-if-branch-not-main "$${branch_not_main}"
+      expect probe-if-tag-set "$${tag_set}"
+      expect probe-if-tag-null "$${tag_null}"
+      expect probe-meta-data-get passed
+      expect probe-artifact-download passed
+      expect probe-soft-fail passed
+      expect probe-agent-on-path passed
+      expect probe-sparse-cone passed
+      expect probe-pypi passed
+      expect probe-uv-lock passed
+      expect probe-test-image passed
+      expect probe-retry-entry passed
+      expect probe-retry-fragment passed
+      expect probe-retry-own passed
+      expect probe-place-udc-bare passed
+      expect probe-place-udc-cpu passed
+      expect probe-index-credentials passed
+      expect probe-github-token passed
+      echo "+++ Observed"
+      state="$$(
+        buildkite-agent step get state --step probe-twice-first 2> /dev/null
+      )" || state=absent
+      echo "probe-twice-first: $${state}"
+      echo "$${mismatches} mismatches"
+      if [[ "$${mismatches}" -ne 0 ]]; then
+        exit 1
+      fi
