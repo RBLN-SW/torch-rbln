@@ -180,25 +180,78 @@ OpFunction::OpFunction(
     }
   };
 
+  using Kind = artifact::Location::Kind;
+  // Whether the transforms make arg `index` of values alone, as they encode an input.
+  auto of_values = [&](size_t index) {
+    bool made = false;
+    for (const auto& t : f.transforms) {
+      if (std::none_of(t.outputs.begin(), t.outputs.end(), [&](const auto& l) {
+            return l.kind == Kind::kArg && l.index == index;
+          })) {
+        continue;
+      }
+      made = true;
+      if (std::any_of(t.inputs.begin(), t.inputs.end(), [](const auto& l) { return l.kind != Kind::kValue; })) {
+        return false;
+      }
+    }
+    return made;
+  };
+  auto of_state = [&](const artifact::Arg& arg) {
+    return std::all_of(
+        arg.sources.begin(), arg.sources.end(), [&](const auto& source) { return state.count(source) != 0; });
+  };
+  // The args the host work of calls reads to make other args; a decode makes a value alone.
+  std::set<size_t> read_by_calls;
+  for (const auto& t : f.transforms) {
+    const bool makes_args =
+        std::any_of(t.outputs.begin(), t.outputs.end(), [](const auto& l) { return l.kind != Kind::kValue; });
+    for (const auto& l : t.inputs) {
+      if (!t.cold && makes_args && l.kind == Kind::kArg) {
+        read_by_calls.insert(l.index);
+      }
+    }
+  }
+  const std::set<std::string> results(f.results.begin(), f.results.end());
+
   std::map<std::string, size_t> input_arg;
   for (size_t index = 0; index < f.args.size(); ++index) {
     const auto& arg = f.args[index];
+    const bool used = artifact::used(f, index);
     if (arg.sources.empty()) {
+      if (used && arg.access == artifact::Access::kWrite && !results.count(arg.name)) {
+        left_args_.push_back(index);
+      }
       continue;
     }
-    if (arg.sources.size() == 1 && input_of.count(arg.sources.front())) {
-      bindings_.push_back({index, input_of.at(arg.sources.front()), !holds_as_torch(arg)});
+    if (arg.sources.size() == 1 && input_of.count(arg.sources.front()) && of_values(index)) {
       input_arg.emplace(arg.name, input_of.at(arg.sources.front()));
+      if (used) {
+        bindings_.push_back({index, input_of.at(arg.sources.front()), !holds_as_torch(arg)});
+      }
+      continue;
+    }
+    if (of_state(arg)) {
+      for (const auto& source : arg.sources) {
+        state_values_[source] = state.at(source);
+      }
+      if (used) {
+        state_args_.push_back(index);
+      }
+      if (read_by_calls.count(index)) {
+        held_state_[index] = nullptr;
+      }
       continue;
     }
     for (const auto& source : arg.sources) {
-      auto it = state.find(source);
-      if (it == state.end()) {
+      if (!input_of.count(source) && !state.count(source)) {
         throw std::invalid_argument(arg.name + " is made from " + source + ", which is neither an input nor state");
       }
-      state_values_[source] = it->second;
     }
-    state_args_.push_back(index);
+    if (used) {
+      require_static(arg);
+      made_args_.push_back(index);
+    }
   }
 
   TORCH_CHECK(
@@ -207,6 +260,7 @@ OpFunction::OpFunction(
       host_results.size(),
       " results of ",
       f.results.size());
+  std::vector<size_t> after;
   for (size_t k = 0; k < f.results.size(); ++k) {
     const auto index = fn_->arg(f.results[k]);
     const auto& arg = f.args[index];
@@ -215,9 +269,51 @@ OpFunction::OpFunction(
       results_.push_back({std::nullopt, it->second});
     } else {
       require_static(arg);
-      results_.push_back({index, std::nullopt, !host_results.empty() && host_results[k], !holds_as_torch(arg)});
+      const bool made_after = !artifact::used(f, index);
+      if (made_after) {
+        after.push_back(index);
+      }
+      results_.push_back(
+          {index,
+           std::nullopt,
+           !host_results.empty() && host_results[k],
+           !holds_as_torch(arg) || read_by_calls.count(index) != 0,
+           made_after});
     }
     outputs_.push_back({arg.logical.shape, c10::rbln::scalar_type_of(arg.logical.dtype)});
+  }
+
+  // The host work of a call reads the values of inputs, and the host tensors of the args made
+  // of state, of those it makes and of those the run leaves on the host.
+  std::set<size_t> held;
+  for (auto& [index, host] : held_state_) {
+    host = encoded(index);
+    held.insert(index);
+  }
+  std::set<size_t> needed;
+  if (!made_args_.empty()) {
+    for (const auto v : fn_->needs(made_args_, held)) {
+      needed.insert(v);
+    }
+  }
+  held.insert(made_args_.begin(), made_args_.end());
+  held.insert(left_args_.begin(), left_args_.end());
+  for (const auto& result : results_) {
+    if (result.arg && result.through_host && !result.after) {
+      held.insert(*result.arg);
+    }
+  }
+  if (!after.empty()) {
+    for (const auto v : fn_->needs(after, held)) {
+      needed.insert(v);
+    }
+  }
+  for (const auto v : needed) {
+    auto it = input_of.find(f.values[v].name);
+    if (it == input_of.end()) {
+      throw std::invalid_argument("the host work of a call reads " + f.values[v].name + ", which is no input");
+    }
+    made_inputs_.emplace_back(v, it->second);
   }
 }
 
@@ -440,6 +536,12 @@ void OpFunction::set_state(const std::map<std::string, at::Tensor>& values) {
     it->second = value;
   }
   const auto& args = fn_->artifact().args;
+  for (auto& [index, host] : held_state_) {
+    const auto& sources = args[index].sources;
+    if (std::any_of(sources.begin(), sources.end(), [&](const auto& source) { return values.count(source) != 0; })) {
+      host = encoded(index);
+    }
+  }
   std::vector<size_t> changed;
   for (const auto index : state_args_) {
     const auto& sources = args[index].sources;
@@ -532,15 +634,70 @@ std::optional<std::vector<at::Tensor>> OpFunction::run(
     }
     bound.emplace_back(args[binding.arg].name, std::move(tensor));
   }
+  // What the host work of the call reads and writes: the values of inputs, and host tensors of
+  // args, which it holds until the call is done.
+  std::vector<at::Tensor> values;
+  rt::Function::Given work;
+  std::vector<std::shared_ptr<rt::HostTensor>> hosts;
+  auto hold = [&](size_t index, std::shared_ptr<rt::HostTensor> host) {
+    work.args[index] = host.get();
+    hosts.push_back(std::move(host));
+  };
+  for (const auto& [v, input] : made_inputs_) {
+    const auto& value = fn_->artifact().values[v];
+    const auto& tensor = inputs[input];
+    const char* dtype = c10::rbln::dtype_name(tensor.scalar_type());
+    if (!tensor.defined() || dtype == nullptr || value.logical.dtype != dtype ||
+        (value.logical.dynamic_axes.empty() && tensor.sizes() != c10::IntArrayRef(value.logical.shape))) {
+      return std::nullopt;
+    }
+    values.push_back(tensor.to(at::kCPU).contiguous());
+    if (!tensor.device().is_cpu()) {
+      c10::rbln::prof::record_bounce(c10::rbln::prof::BounceSite::kOpArgThroughHost, tensor.nbytes());
+    }
+    work.values[v] = {values.back().data_ptr(), values.back().sizes().vec()};
+  }
+  if (!held_state_.empty()) {
+    std::lock_guard<std::mutex> lock(slots_mutex_);
+    for (const auto& [index, host] : held_state_) {
+      hold(index, host);
+    }
+  }
+  if (!made_args_.empty()) {
+    for (const auto index : made_args_) {
+      hold(index, fn_->emptyHostLike(index));
+      bound.emplace_back(args[index].name, hosts.back());
+    }
+    fn_->make(made_args_, {}, work);
+  }
+  for (const auto index : left_args_) {
+    hold(index, fn_->emptyHostLike(index));
+    bound.emplace_back(args[index].name, hosts.back());
+  }
+
   std::vector<at::Tensor> results;
   results.reserve(results_.size());
   bool on_host = false;
   // Results the run leaves in host tensors laid out as the function writes them, by result.
   std::vector<std::pair<size_t, std::shared_ptr<rt::HostTensor>>> to_decode;
+  // Results the host makes once the run is done.
+  std::vector<size_t> after;
   for (size_t k = 0; k < results_.size(); ++k) {
     const auto& result = results_[k];
     if (result.input) {
       results.push_back(inputs[*result.input]);
+      continue;
+    }
+    if (result.after) {
+      const bool given = k < out.size() && out[k].has_value() && out[k]->defined();
+      if (given &&
+          (out[k]->scalar_type() != outputs_[k].dtype || out[k]->sizes() != c10::IntArrayRef(outputs_[k].shape))) {
+        return std::nullopt;
+      }
+      hold(*result.arg, fn_->emptyHostLike(*result.arg));
+      after.push_back(*result.arg);
+      to_decode.emplace_back(k, hosts.back());
+      results.push_back(given ? *out[k] : at::Tensor());
       continue;
     }
     if (result.through_host) {
@@ -551,6 +708,7 @@ std::optional<std::vector<at::Tensor>> OpFunction::run(
       }
       auto host = fn_->emptyHostLike(*result.arg);
       bound.emplace_back(args[*result.arg].name, host);
+      work.args[*result.arg] = host.get();
       to_decode.emplace_back(k, std::move(host));
       results.push_back(given ? *out[k] : at::Tensor());
       continue;
@@ -606,6 +764,9 @@ std::optional<std::vector<at::Tensor>> OpFunction::run(
     fn_->decode(binding->arg, *host, {value.data_ptr(), value.sizes().vec()});
     c10::rbln::prof::record_bounce(c10::rbln::prof::BounceSite::kOpArgThroughHost, value.nbytes());
     input.copy_(value);
+  }
+  if (!after.empty()) {
+    fn_->make(after, {}, work);
   }
   for (const auto& [k, host] : to_decode) {
     const auto& result = results_[k];

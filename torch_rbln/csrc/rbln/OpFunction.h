@@ -29,11 +29,13 @@ struct StateKey;
  * call's tensor is encoded into it, and a result is decoded from it once the run is done. A tensor
  * made in the arg's type binds to such an arg in place instead.
  *
- * `inputs` names the inputs a call passes, in order. The other args are made from state, whose
- * values `state` gives and `set_state` replaces, and are written to each device the function
- * runs on. The results are the function's; those `host_results` flags come back as CPU tensors
- * once the run is done. Each device gets an executor of its own, and runs queue on the current
- * stream of that device.
+ * `inputs` names the inputs a call passes, in order. The args made from state alone, whose values
+ * `state` gives and `set_state` replaces, are written to each device the function runs on, or kept
+ * on the host for the host work that reads them. Every call makes the args the run reads of what
+ * the host works out of its inputs, and once the run is done the results the host works out of
+ * what the run wrote. The results are the function's; those `host_results` flags come back as CPU
+ * tensors once the run is done. Each device gets an executor of its own, and runs queue on the
+ * current stream of that device.
  */
 class OpFunction {
  public:
@@ -87,12 +89,14 @@ class OpFunction {
     size_t input;
     bool through_host = false;
   };
-  // A result is written to arg `arg`, or is input `input` the function updates.
+  // A result is written to arg `arg`, or is input `input` the function updates; `after` when the
+  // host makes the arg once the run is done.
   struct Result {
     std::optional<size_t> arg;
     std::optional<size_t> input;
     bool host = false;
     bool through_host = false;
+    bool after = false;
   };
   struct Slot {
     std::mutex mutex;
@@ -134,6 +138,13 @@ class OpFunction {
   std::vector<Result> results_;
   std::vector<Output> outputs_;
   std::vector<size_t> state_args_;
+  // The args each call makes on the host before its run, of the values of the inputs
+  // `made_inputs_` gives by value, and those the run writes for the host to read after it.
+  std::vector<size_t> made_args_;
+  std::vector<std::pair<size_t, size_t>> made_inputs_;
+  std::vector<size_t> left_args_;
+  // By arg made from state alone that the host work of calls reads, its host tensor.
+  std::map<size_t, std::shared_ptr<rt::HostTensor>> held_state_;
   // Guards the state and the slots.
   std::mutex slots_mutex_;
   std::map<std::string, at::Tensor> state_values_;
