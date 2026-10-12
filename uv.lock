@@ -13,8 +13,8 @@ supported-markers = [
 ]
 
 [manifest]
-constraints = [{ name = "rebel-compiler", specifier = "==0.12.0rc1" }]
-build-constraints = [{ name = "rebel-compiler", specifier = "==0.12.0rc1" }]
+constraints = [{ name = "rebel-compiler", specifier = "==0.12.0rc2" }]
+build-constraints = [{ name = "rebel-compiler", specifier = "==0.12.0rc2" }]
 
 [[package]]
 name = "actionlint-py"
@@ -1353,7 +1353,7 @@ wheels = [
 
 [[package]]
 name = "rebel-compiler"
-version = "0.12.0rc1"
+version = "0.12.0rc2"
 source = { registry = "https://pypi.rebellions.in/simple/" }
 dependencies = [
     { name = "attrs" },
@@ -1375,11 +1375,13 @@ dependencies = [
     { name = "typing-extensions" },
 ]
 wheels = [
-    { url = "https://pypi.rebellions.in/api/package/rebel-compiler/rebel_compiler-0.12.0rc1-cp310-cp310-manylinux_2_34_x86_64.whl", hash = "sha256:b952876f455b3efdc2c6e0ba96d018a43774b633eb5de95d6380a15dba9345af" },
-    { url = "https://pypi.rebellions.in/api/package/rebel-compiler/rebel_compiler-0.12.0rc1-cp311-cp311-manylinux_2_34_x86_64.whl", hash = "sha256:df6bcd770758b97d4d9fb84ff297ff320f61f098227a6fc28b673713d84a3bb1" },
-    { url = "https://pypi.rebellions.in/api/package/rebel-compiler/rebel_compiler-0.12.0rc1-cp312-cp312-manylinux_2_34_x86_64.whl", hash = "sha256:3117b4d87978bcfaf5564ce055a796055c63845bb245ac8e310dd075ff972b8e" },
-    { url = "https://pypi.rebellions.in/api/package/rebel-compiler/rebel_compiler-0.12.0rc1-cp313-cp313-manylinux_2_34_x86_64.whl", hash = "sha256:0011f8aa43c25c614843c24985b2e4dce558efdf304b04593119dcdd2e23d79a" },
-    { url = "https://pypi.rebellions.in/api/package/rebel-compiler/rebel_compiler-0.12.0rc1-cp314-cp314-manylinux_2_34_x86_64.whl", hash = "sha256:44a31196f9f2344c11067e782f6e462e4244b5f3d9d954c3e2d80e043cf8417d" },
+    { url = "https://pypi.rebellions.in/api/package/rebel-compiler/rebel_compiler-0.12.0rc2-cp310-cp310-manylinux_2_28_aarch64.whl", hash = "sha256:6faf8f6d4ef62a65d1fd95951912423b9f74853f78c330339ad995b16914e042" },
+    { url = "https://pypi.rebellions.in/api/package/rebel-compiler/rebel_compiler-0.12.0rc2-cp310-cp310-manylinux_2_34_x86_64.whl", hash = "sha256:61f335032e40c796f7d485c77488c4bf15b98924e55203fbf3df9ebf90feb5e6" },
+    { url = "https://pypi.rebellions.in/api/package/rebel-compiler/rebel_compiler-0.12.0rc2-cp311-cp311-manylinux_2_34_x86_64.whl", hash = "sha256:fa5f35a428160f13fe7fd518efe4767bd7534c88335f007076bc9e7e75658c44" },
+    { url = "https://pypi.rebellions.in/api/package/rebel-compiler/rebel_compiler-0.12.0rc2-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:4e66cd9ac3442c17987b3aef699b6a4ae8bcd2db22110600e3a1ecf720165045" },
+    { url = "https://pypi.rebellions.in/api/package/rebel-compiler/rebel_compiler-0.12.0rc2-cp312-cp312-manylinux_2_34_x86_64.whl", hash = "sha256:67946d3cebb12ae08e0ed4db459e2e17198525d4647df2901ab67e42df09766f" },
+    { url = "https://pypi.rebellions.in/api/package/rebel-compiler/rebel_compiler-0.12.0rc2-cp313-cp313-manylinux_2_34_x86_64.whl", hash = "sha256:792b53eab91c30900b316d72684b3194e9913ed65b5d623d7adf2386b4e85d72" },
+    { url = "https://pypi.rebellions.in/api/package/rebel-compiler/rebel_compiler-0.12.0rc2-cp314-cp314-manylinux_2_34_x86_64.whl", hash = "sha256:9fc2c49353f4104ed2085fa84c7d01b684e807baa6ebe129160f3f9a083399ab" },
 ]
 
 [[package]]
