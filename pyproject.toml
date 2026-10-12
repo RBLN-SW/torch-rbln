@@ -24,7 +24,7 @@ dependencies = [
 
 [project.optional-dependencies]
 runtime = [
-  "rebel-compiler~=0.12.0rc1",
+  "rebel-compiler>=0.12.0rc1,<0.12.1",
 ]
 
 [project.entry-points]

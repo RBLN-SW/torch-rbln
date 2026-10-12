@@ -1900,7 +1900,7 @@ lint = [
 requires-dist = [
     { name = "libcst", specifier = ">=1.2.0" },
     { name = "pyyaml", specifier = ">=6,<7" },
-    { name = "rebel-compiler", marker = "extra == 'runtime'", specifier = "~=0.12.0rc1" },
+    { name = "rebel-compiler", marker = "extra == 'runtime'", specifier = ">=0.12.0rc1,<0.12.1" },
     { name = "scipy", specifier = ">=1.14.0" },
     { name = "torch", specifier = "==2.13.0+cpu", index = "https://download.pytorch.org/whl/cpu" },
 ]
