@@ -138,11 +138,13 @@ class OpFunction {
   std::vector<Result> results_;
   std::vector<Output> outputs_;
   std::vector<size_t> state_args_;
-  // The args each call makes on the host before its run, of the values of the inputs
-  // `made_inputs_` gives by value, and those the run writes for the host to read after it.
+  // The args each call makes on the host before its run, and those the run writes for the host
+  // to read after it; the transforms that make the args before the run and the results the run
+  // does not write after it, with the input each value they read is, in order.
   std::vector<size_t> made_args_;
-  std::vector<std::pair<size_t, size_t>> made_inputs_;
   std::vector<size_t> left_args_;
+  std::shared_ptr<const rt::Maker> before_, after_;
+  std::vector<size_t> before_inputs_, after_inputs_;
   // By arg made from state alone that the host work of calls reads, its host tensor.
   std::map<size_t, std::shared_ptr<rt::HostTensor>> held_state_;
   // Guards the state and the slots.

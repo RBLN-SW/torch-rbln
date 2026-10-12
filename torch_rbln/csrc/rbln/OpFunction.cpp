@@ -285,35 +285,37 @@ OpFunction::OpFunction(
 
   // The host work of a call reads the values of inputs, and the host tensors of the args made
   // of state, of those it makes and of those the run leaves on the host.
-  std::set<size_t> held;
+  auto inputs_read = [&](const rt::Maker& maker) {
+    std::vector<size_t> out;
+    for (const auto v : maker.reads()) {
+      auto it = input_of.find(f.values[v].name);
+      if (it == input_of.end()) {
+        throw std::invalid_argument("the host work of a call reads " + f.values[v].name + ", which is no input");
+      }
+      out.push_back(it->second);
+    }
+    return out;
+  };
+  std::vector<size_t> held;
   for (auto& [index, host] : held_state_) {
     host = encoded(index);
-    held.insert(index);
+    held.push_back(index);
   }
-  std::set<size_t> needed;
   if (!made_args_.empty()) {
-    for (const auto v : fn_->needs(made_args_, held)) {
-      needed.insert(v);
-    }
+    before_ = fn_->maker(made_args_, {}, held);
+    before_inputs_ = inputs_read(*before_);
   }
-  held.insert(made_args_.begin(), made_args_.end());
-  held.insert(left_args_.begin(), left_args_.end());
+  held.insert(held.end(), made_args_.begin(), made_args_.end());
+  held.insert(held.end(), left_args_.begin(), left_args_.end());
   for (const auto& result : results_) {
-    if (result.arg && result.through_host && !result.after) {
-      held.insert(*result.arg);
+    if (result.arg && result.through_host && !result.after &&
+        std::find(held.begin(), held.end(), *result.arg) == held.end()) {
+      held.push_back(*result.arg);
     }
   }
   if (!after.empty()) {
-    for (const auto v : fn_->needs(after, held)) {
-      needed.insert(v);
-    }
-  }
-  for (const auto v : needed) {
-    auto it = input_of.find(f.values[v].name);
-    if (it == input_of.end()) {
-      throw std::invalid_argument("the host work of a call reads " + f.values[v].name + ", which is no input");
-    }
-    made_inputs_.emplace_back(v, it->second);
+    after_ = fn_->maker(after, {}, held);
+    after_inputs_ = inputs_read(*after_);
   }
 }
 
@@ -634,45 +636,59 @@ std::optional<std::vector<at::Tensor>> OpFunction::run(
     }
     bound.emplace_back(args[binding.arg].name, std::move(tensor));
   }
-  // What the host work of the call reads and writes: the values of inputs, and host tensors of
-  // args, which it holds until the call is done.
-  std::vector<at::Tensor> values;
-  rt::Function::Given work;
-  std::vector<std::shared_ptr<rt::HostTensor>> hosts;
-  auto hold = [&](size_t index, std::shared_ptr<rt::HostTensor> host) {
-    work.args[index] = host.get();
-    hosts.push_back(std::move(host));
+  // What the host work of the call reads and writes: the values of inputs on the host, by input,
+  // and host tensors of args, by arg, which it holds until the call is done.
+  std::map<size_t, at::Tensor> values;
+  std::map<size_t, std::shared_ptr<rt::HostTensor>> host_of;
+  auto arrays_of = [&](const rt::Maker& maker, const std::vector<size_t>& from) {
+    std::optional<std::vector<rt::HostArray>> out(std::in_place);
+    for (size_t k = 0; k < from.size(); ++k) {
+      const auto& value = fn_->artifact().values[maker.reads()[k]];
+      auto& host = values[from[k]];
+      if (!host.defined()) {
+        const auto& tensor = inputs[from[k]];
+        const char* dtype = c10::rbln::dtype_name(tensor.scalar_type());
+        if (!tensor.defined() || dtype == nullptr || value.logical.dtype != dtype ||
+            (value.logical.dynamic_axes.empty() && tensor.sizes() != c10::IntArrayRef(value.logical.shape))) {
+          return decltype(out)();
+        }
+        host = tensor.to(at::kCPU).contiguous();
+        if (!tensor.device().is_cpu()) {
+          c10::rbln::prof::record_bounce(c10::rbln::prof::BounceSite::kOpArgThroughHost, tensor.nbytes());
+        }
+      }
+      out->push_back({host.data_ptr(), host.sizes().vec()});
+    }
+    return out;
   };
-  for (const auto& [v, input] : made_inputs_) {
-    const auto& value = fn_->artifact().values[v];
-    const auto& tensor = inputs[input];
-    const char* dtype = c10::rbln::dtype_name(tensor.scalar_type());
-    if (!tensor.defined() || dtype == nullptr || value.logical.dtype != dtype ||
-        (value.logical.dynamic_axes.empty() && tensor.sizes() != c10::IntArrayRef(value.logical.shape))) {
-      return std::nullopt;
+  auto tensors_of = [&](const rt::Maker& maker) {
+    std::vector<const rt::HostTensor*> out;
+    for (const auto index : maker.tensors()) {
+      out.push_back(host_of.at(index).get());
     }
-    values.push_back(tensor.to(at::kCPU).contiguous());
-    if (!tensor.device().is_cpu()) {
-      c10::rbln::prof::record_bounce(c10::rbln::prof::BounceSite::kOpArgThroughHost, tensor.nbytes());
-    }
-    work.values[v] = {values.back().data_ptr(), values.back().sizes().vec()};
+    return out;
+  };
+  std::optional<std::vector<rt::HostArray>> before_arrays, after_arrays;
+  if (before_ && !(before_arrays = arrays_of(*before_, before_inputs_))) {
+    return std::nullopt;
+  }
+  if (after_ && !(after_arrays = arrays_of(*after_, after_inputs_))) {
+    return std::nullopt;
   }
   if (!held_state_.empty()) {
     std::lock_guard<std::mutex> lock(slots_mutex_);
-    for (const auto& [index, host] : held_state_) {
-      hold(index, host);
-    }
+    host_of.insert(held_state_.begin(), held_state_.end());
   }
-  if (!made_args_.empty()) {
+  if (before_) {
     for (const auto index : made_args_) {
-      hold(index, fn_->emptyHostLike(index));
-      bound.emplace_back(args[index].name, hosts.back());
+      host_of[index] = fn_->emptyHostLike(index);
+      bound.emplace_back(args[index].name, host_of[index]);
     }
-    fn_->make(made_args_, {}, work);
+    (*before_)(*before_arrays, tensors_of(*before_));
   }
   for (const auto index : left_args_) {
-    hold(index, fn_->emptyHostLike(index));
-    bound.emplace_back(args[index].name, hosts.back());
+    host_of[index] = fn_->emptyHostLike(index);
+    bound.emplace_back(args[index].name, host_of[index]);
   }
 
   std::vector<at::Tensor> results;
@@ -680,8 +696,6 @@ std::optional<std::vector<at::Tensor>> OpFunction::run(
   bool on_host = false;
   // Results the run leaves in host tensors laid out as the function writes them, by result.
   std::vector<std::pair<size_t, std::shared_ptr<rt::HostTensor>>> to_decode;
-  // Results the host makes once the run is done.
-  std::vector<size_t> after;
   for (size_t k = 0; k < results_.size(); ++k) {
     const auto& result = results_[k];
     if (result.input) {
@@ -694,9 +708,9 @@ std::optional<std::vector<at::Tensor>> OpFunction::run(
           (out[k]->scalar_type() != outputs_[k].dtype || out[k]->sizes() != c10::IntArrayRef(outputs_[k].shape))) {
         return std::nullopt;
       }
-      hold(*result.arg, fn_->emptyHostLike(*result.arg));
-      after.push_back(*result.arg);
-      to_decode.emplace_back(k, hosts.back());
+      auto& host = host_of[*result.arg];
+      host = fn_->emptyHostLike(*result.arg);
+      to_decode.emplace_back(k, host);
       results.push_back(given ? *out[k] : at::Tensor());
       continue;
     }
@@ -708,7 +722,7 @@ std::optional<std::vector<at::Tensor>> OpFunction::run(
       }
       auto host = fn_->emptyHostLike(*result.arg);
       bound.emplace_back(args[*result.arg].name, host);
-      work.args[*result.arg] = host.get();
+      host_of[*result.arg] = host;
       to_decode.emplace_back(k, std::move(host));
       results.push_back(given ? *out[k] : at::Tensor());
       continue;
@@ -765,8 +779,8 @@ std::optional<std::vector<at::Tensor>> OpFunction::run(
     c10::rbln::prof::record_bounce(c10::rbln::prof::BounceSite::kOpArgThroughHost, value.nbytes());
     input.copy_(value);
   }
-  if (!after.empty()) {
-    fn_->make(after, {}, work);
+  if (after_) {
+    (*after_)(*after_arrays, tensors_of(*after_));
   }
   for (const auto& [k, host] : to_decode) {
     const auto& result = results_[k];
