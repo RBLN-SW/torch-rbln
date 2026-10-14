@@ -94,7 +94,10 @@ class TestArchResolutionFailure(TestCase):
         self.addCleanup(get_device_arch.cache_clear)
 
     def test_no_device_answers_unknown(self) -> None:
-        with patch("torch_rbln._C.is_dummy_device", return_value=False), patch("torch_rbln._C.device_count", return_value=0):
+        with (
+            patch("torch_rbln._C.is_dummy_device", return_value=False),
+            patch("torch_rbln._C.device_count", return_value=0),
+        ):
             self.assertEqual(get_device_arch(), "unknown")
 
     def test_a_dummy_device_answers_unknown(self) -> None:
