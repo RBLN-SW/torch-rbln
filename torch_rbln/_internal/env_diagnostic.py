@@ -322,8 +322,8 @@ def format_diagnostics(d: dict[str, Any] | None = None, verbose: bool = True) ->
         lines.append(f"  rebel.v2 package: {package.get('origin') or package.get('submodule_search_locations')}")
     else:
         lines.append("  rebel.v2 package: not importable" + (f" ({package['error']})" if package.get("error") else ""))
-        lines.append("  >>> Put the rebel.v2 package of a rebel-compiler tree on the path:")
-        lines.append("      PYTHONPATH=$REBEL_HOME/rebel/python")
+        lines.append("  >>> Install rebel-compiler[v2], or install a rebel-compiler tree in place:")
+        lines.append("      pip install -e $REBEL_HOME/python -e $REBEL_HOME/rebel/v2/wheel")
     if rt.get("module"):
         lines.append(f"  rebel.v2.runtime: {rt['module']}")
     lines.append(f"  {RUNTIME_LIB_NAME}: {rt.get('path') or 'not mapped'}")

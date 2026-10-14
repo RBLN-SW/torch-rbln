@@ -63,8 +63,9 @@ def import_runtime_package():
     except ImportError as e:
         raise ImportError(
             f"torch-rbln runs on the rebel.v2 runtime, but `import {RUNTIME_PACKAGE}` failed: {e}. "
-            "Put the rebel package of the rebel-compiler tree torch-rbln was built against on the "
-            f"path (PYTHONPATH=$REBEL_HOME/rebel/python). {_DIAGNOSE_HINT}"
+            "Install rebel-compiler[v2] of the build torch-rbln was built against, or install that "
+            "rebel-compiler tree in place (pip install -e $REBEL_HOME/python -e "
+            f"$REBEL_HOME/rebel/v2/wheel). {_DIAGNOSE_HINT}"
         ) from e
     return runtime
 

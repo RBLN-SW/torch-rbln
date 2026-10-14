@@ -8,7 +8,7 @@
 #   REBEL_ABI_SCRIPT       - rebel/v2/cmake/RebelV2Abi.cmake, which computes the ABI id of the headers
 #
 # REBEL_HOME names a rebel-compiler tree built with rebel.v2: headers in rebel/v2/include and
-# libraries in build/rebel/v2. Without it, the rebel.v2 package a rebel-compiler wheel installed for
+# libraries in build/rebel/v2. Without it, the rebel.v2 package that rebel-compiler[v2] installed for
 # Python3 serves, through its CMake package.
 
 cmake_minimum_required(VERSION 3.18 FATAL_ERROR)
@@ -26,7 +26,7 @@ if(NOT _REBEL_HOME)
   if(_rebel_v2_config_missing)
     message(FATAL_ERROR
       "FindRebel: set REBEL_HOME to a rebel-compiler tree built with rebel.v2 (headers in "
-      "rebel/v2/include, libraries in build/rebel/v2), or install the rebel-compiler wheel: "
+      "rebel/v2/include, libraries in build/rebel/v2), or install rebel-compiler[v2]: "
       "${_rebel_v2_config_error}")
   endif()
   find_package(rebel_v2 CONFIG REQUIRED PATHS "${_rebel_v2_config_dir}" NO_DEFAULT_PATH)

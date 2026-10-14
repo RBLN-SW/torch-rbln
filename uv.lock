@@ -1900,7 +1900,7 @@ lint = [
 requires-dist = [
     { name = "libcst", specifier = ">=1.2.0" },
     { name = "pyyaml", specifier = ">=6,<7" },
-    { name = "rebel-compiler", marker = "extra == 'runtime'", specifier = "~=0.11.3.dev530" },
+    { name = "rebel-compiler", extras = ["v2"], marker = "extra == 'runtime'", specifier = "~=0.11.3.dev530" },
     { name = "scipy", specifier = ">=1.14.0" },
     { name = "torch", specifier = "==2.13.0+cpu", index = "https://download.pytorch.org/whl/cpu" },
 ]
@@ -1914,7 +1914,7 @@ build = [
     { name = "mypy", specifier = ">=1.13.0,<1.14.0" },
     { name = "ninja", specifier = ">=1.11" },
     { name = "pip", specifier = ">=24.3.1,<24.4" },
-    { name = "rebel-compiler" },
+    { name = "rebel-compiler", extras = ["v2"] },
     { name = "setuptools-scm", specifier = ">=8.0" },
 ]
 dev = [
@@ -1949,7 +1949,7 @@ dev = [
     { name = "pytest", specifier = ">=8.3.4,<8.4.0" },
     { name = "pytest-forked", specifier = ">=1.6.0" },
     { name = "pytest-xdist", specifier = ">=3.6.1" },
-    { name = "rebel-compiler" },
+    { name = "rebel-compiler", extras = ["v2"] },
     { name = "ruamel-yaml", specifier = ">=0.17.4,<0.18.0" },
     { name = "ruff", specifier = ">=0.9.1,<0.10" },
     { name = "setuptools", specifier = ">=70.0.0,<78.0.0" },

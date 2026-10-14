@@ -4,8 +4,8 @@
 #
 # This script is designed to be run from torch-rbln directory.
 # torch-rbln compiles against the runtime headers in $REBEL_HOME/rebel/v2/include, links
-# $REBEL_HOME/build/rebel/v2/librebel_v2_rt.so, and at run time uses the rebel.v2 package in
-# $REBEL_HOME/rebel/python, which maps that library.
+# $REBEL_HOME/build/rebel/v2/librebel_v2_rt.so, and at run time uses the rebel.v2 package of
+# $REBEL_HOME, which maps that library, from the rebel-compiler packages installed in place.
 #
 # Prerequisites:
 #   - REBEL_HOME must be set to a rebel-compiler tree built with rebel.v2
@@ -183,7 +183,7 @@ check_prerequisites() {
         log_error "REBEL_HOME directory does not exist: ${REBEL_HOME}"
         exit 1
     fi
-    # Recorded in rebel_home.pth and activate_rebel, which must not depend on the current directory.
+    # Recorded in the in-place install and activate_rebel, which must not depend on the current directory.
     REBEL_HOME="$(realpath "${REBEL_HOME}")"
     export REBEL_HOME
 
@@ -344,7 +344,7 @@ create_activate_rebel_script() {
 
     cat > "${activate_script}" << EOF
 # Sourced only when .use_external_rebel exists in the venv. REBEL_HOME is what a rebuild of
-# torch-rbln compiles against; rebel.v2 itself is importable through rebel_home.pth in site-packages.
+# torch-rbln compiles against; rebel.v2 itself is installed in place from REBEL_HOME.
 export REBEL_HOME="${REBEL_HOME}"
 EOF
     chmod +x "${activate_script}"
@@ -446,19 +446,14 @@ configure_uv() {
     fi
 }
 
-# Make the rebel.v2 package of REBEL_HOME importable in place, after `uv sync` so the sync keeps it.
-# rebel.v2 ships no packaging metadata, so its third-party imports are installed here.
+# Install the rebel-compiler packages of REBEL_HOME in place, after `uv sync` so the sync keeps them.
+# rebel.v2 sits inside rebel, whose __init__ loads v1, so rebel-compiler goes in with rebel-compiler-v2.
 install_rebel_v2_package() {
-    local site_packages
-    site_packages=$(python -c "import sysconfig; print(sysconfig.get_path('purelib'))") || return $?
-
-    log_info "Adding ${REBEL_HOME}/rebel/python to ${site_packages}/rebel_home.pth"
-    echo "${REBEL_HOME}/rebel/python" > "${site_packages}/rebel_home.pth"
-
-    uv pip install numpy ml_dtypes || return $?
+    log_info "Installing ${REBEL_HOME}/python and ${REBEL_HOME}/rebel/v2/wheel in place"
+    uv pip install -e "${REBEL_HOME}/python" -e "${REBEL_HOME}/rebel/v2/wheel" || return $?
 
     python -c "import rebel.v2.runtime" || {
-        log_error "rebel.v2.runtime does not import from ${REBEL_HOME}/rebel/python"
+        log_error "rebel.v2.runtime does not import from ${REBEL_HOME}"
         return 1
     }
     log_info "rebel.v2 installed"
@@ -561,7 +556,7 @@ print(f'  torch_rbln: {torch_rbln.__version__}')
         log_error "Possible causes:"
         log_error "  - Segmentation fault (library version mismatch)"
         log_error "  - RBLN ABI mismatch: REBEL_HOME was rebuilt after torch-rbln; rebuild torch-rbln"
-        log_error "  - rebel.v2 not importable (check \$VIRTUAL_ENV/lib/python*/site-packages/rebel_home.pth)"
+        log_error "  - rebel.v2 not importable (check: pip show rebel-compiler rebel-compiler-v2)"
         log_error "  - Python version mismatch with the rebel.v2 runtime extension"
         log_error "  - GCC version mismatch between torch and torch-rbln"
         log_error ""
@@ -597,7 +592,7 @@ print_summary() {
     echo "     source ${venv_path}/bin/activate"
     echo ""
     echo "  2. The activate_rebel script is auto-sourced, setting REBEL_HOME for rebuilds."
-    echo "     rebel.v2 is imported from ${REBEL_HOME}/rebel/python through rebel_home.pth."
+    echo "     rebel and rebel.v2 are imported from ${REBEL_HOME}, installed in place."
     echo ""
     echo "  3. Example usage:"
     echo "     python -c 'import torch; import torch_rbln; print(\"OK\")'"

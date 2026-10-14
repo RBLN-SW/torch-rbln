@@ -7,7 +7,8 @@ These tests cover:
 * the surface (``torch.rbln.capture_programs`` / ``CompiledProgram`` are exposed and
   are the ``torch_rbln.programs`` objects);
 * the scope: nesting and thread-locality;
-* ``import torch_rbln`` leaving the ``rebel`` package out;
+* torch-rbln's torch.compile taking the "rbln" backend for rebel.v2 from v1, which the
+  ``rebel`` package loads first;
 * a torch.compile on the rbln backend inside the scope yields one program per graph
   the backend built, carrying the function behind the compiled callable and IO specs
   that mirror the graph's inputs and outputs.
@@ -62,21 +63,21 @@ class TestCaptureProgramsSurface(TestCase):
 
 
 @pytest.mark.test_set_ci
-class TestImportLeavesV1Out(TestCase):
-    def test_import_does_not_load_v1(self):
-        """Importing torch_rbln loads rebel.v2 alone: no other ``rebel`` module, and no TVM."""
+class TestCompileTakesRblnFromV1(TestCase):
+    def test_torch_compile_gives_rbln_to_rebel_v2(self):
+        """The rebel package loads v1, which names its own torch.compile backend "rbln" and
+        has Dynamo hold parameters as graph attributes; torch_rbln's torch.compile takes both
+        for rebel.v2 before it compiles."""
         script = f"""
             import sys
             sys.path.insert(0, {_PROJECT_ROOT!r})
             import torch, torch_rbln  # noqa: F401
-            loaded = sorted(
-                m
-                for m in sys.modules
-                if m.split(".")[0] == "tvm"
-                or (m.startswith("rebel.") and m != "rebel.v2" and not m.startswith("rebel.v2."))
-            )
-            assert not loaded, "import pulled in " + ", ".join(loaded)
-            print("NO_V1")
+            from torch._dynamo.backends.registry import lookup_backend
+            torch.compile(lambda x: x + 1, backend="rbln")
+            from rebel.v2.api import torch_backend
+            assert lookup_backend("rbln") is torch_backend.rbln_backend
+            assert not torch._dynamo.config.prepare_freezing
+            print("REBEL_V2")
         """
         result = subprocess.run(
             [sys.executable, "-c", textwrap.dedent(script)],
@@ -86,8 +87,8 @@ class TestImportLeavesV1Out(TestCase):
             timeout=120,
         )
         self.assertTrue(
-            result.returncode == 0 and "NO_V1" in result.stdout,
-            f"torch_rbln imported v1\n--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}",
+            result.returncode == 0 and "REBEL_V2" in result.stdout,
+            f"rbln is not rebel.v2's\n--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}",
         )
 
 

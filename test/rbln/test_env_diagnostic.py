@@ -56,6 +56,21 @@ def _diagnostics(**overrides) -> dict:
     return d
 
 
+_NO_REBEL_V2 = """
+import sys
+
+
+class NoRebelV2:
+    def find_spec(self, name, path=None, target=None):
+        if name == "rebel.v2":
+            raise ImportError("rebel.v2 stub for the test")
+        return None
+
+
+sys.meta_path.insert(0, NoRebelV2())
+"""
+
+
 def _run_diagnose(pythonpath: list[str]) -> subprocess.CompletedProcess:
     env = dict(os.environ, PYTHONPATH=os.pathsep.join(pythonpath))
     return subprocess.run(
@@ -91,7 +106,7 @@ class TestFormatDiagnostics(TestCase):
         }
         text = env_diagnostic.format_diagnostics(d)
         self.assertIn("rebel.v2 package: not importable", text)
-        self.assertIn("PYTHONPATH=$REBEL_HOME/rebel/python", text)
+        self.assertIn("pip install -e $REBEL_HOME/python -e $REBEL_HOME/rebel/v2/wheel", text)
         self.assertIn("librebel_v2_rt.so: not mapped", text)
 
     def test_two_copies_and_a_runtime_outside_rebel_home_are_flagged(self):
@@ -119,11 +134,10 @@ class TestDiagnoseModule(TestCase):
     """``python -m torch_rbln.diagnose`` in a fresh interpreter."""
 
     def test_runs_when_rebel_v2_cannot_be_imported(self):
+        # A finder ahead of any other, as an editable install's would shadow a stub package.
         with tempfile.TemporaryDirectory() as stub_root:
-            os.makedirs(os.path.join(stub_root, "rebel", "v2"))
-            open(os.path.join(stub_root, "rebel", "__init__.py"), "w").close()
-            with open(os.path.join(stub_root, "rebel", "v2", "__init__.py"), "w") as f:
-                f.write("raise ImportError('rebel.v2 stub for the test')\n")
+            with open(os.path.join(stub_root, "sitecustomize.py"), "w") as f:
+                f.write(_NO_REBEL_V2)
             result = _run_diagnose([stub_root, _PACKAGE_ROOT])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("rebel.v2 stub for the test", result.stderr)

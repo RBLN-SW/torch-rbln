@@ -30,6 +30,12 @@ def package_entry_index(array: MutableSequence[Any], location: str) -> int:
     return hits[0]
 
 
+def requirement(item: Any, specifier: str) -> str:
+    """`specifier` for PACKAGE, with the extras `item` asks for."""
+    extras = sorted(Requirement(str(item)).extras)
+    return f"{PACKAGE}[{','.join(extras)}]{specifier}" if extras else f"{PACKAGE}{specifier}"
+
+
 def pinned_build(uv_table: Any) -> str:
     build_pin, pin = (
         str(uv_table[key][package_entry_index(uv_table[key], f"[tool.uv].{key}")])
@@ -63,15 +69,16 @@ def main() -> None:
         Specifier(f"~={build.public}")
     except (InvalidVersion, InvalidSpecifier):
         sys.exit(f"'{options.build}' is not a PEP 440 version that ~= accepts")
-    exact = f"{PACKAGE}=={build}"
-    compatible = f"{PACKAGE}~={build.public}"
+    exact = f"=={build}"
+    compatible = f"~={build.public}"
     entries = [
         (uv_table["build-constraint-dependencies"], exact, "[tool.uv].build-constraint-dependencies"),
         (uv_table["constraint-dependencies"], exact, "[tool.uv].constraint-dependencies"),
         (doc["project"]["optional-dependencies"]["runtime"], compatible, "[project.optional-dependencies].runtime"),
     ]
-    for array, replacement, location in entries:
-        array[package_entry_index(array, location)] = replacement
+    for array, specifier, location in entries:
+        index = package_entry_index(array, location)
+        array[index] = requirement(array[index], specifier)
     with open(PYPROJECT, "w", encoding="utf-8") as f:
         f.write(tomlkit.dumps(doc))
     print(f"Pinned {PACKAGE} to {build} (was {current})")

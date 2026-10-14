@@ -102,7 +102,7 @@ class TestLoadRuntimeLibrary(TestCase):
                 rbln_runtime_lib.load_runtime_library()
         message = str(ctx.exception)
         self.assertIn("`import rebel.v2.runtime` failed", message)
-        self.assertIn("PYTHONPATH=$REBEL_HOME/rebel/python", message)
+        self.assertIn("pip install -e $REBEL_HOME/python -e $REBEL_HOME/rebel/v2/wheel", message)
         self.assertIn("python -m torch_rbln.diagnose", message)
 
     def test_an_import_that_maps_no_runtime_is_an_error(self):
