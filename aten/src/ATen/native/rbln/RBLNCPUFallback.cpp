@@ -6,6 +6,9 @@
 #include <ATen/native/rbln/RBLNCPUFallback.h>
 #include <ATen/native/rbln/RBLNCPUFastPaths.h>
 
+#include <c10/rbln/RBLNFunctions.h>
+#include <c10/rbln/RBLNGenerator.h>
+
 #ifndef AT_PER_OPERATOR_HEADERS
 #include <ATen/Functions.h>
 #else
@@ -29,6 +32,7 @@ namespace {
 // Populate under unique_lock; readers take a shared_lock. OptionalTensor (`Tensor?`,
 // e.g. linear's bias) must be classified explicitly — else the arg stays on the
 // stack as an RBLN tensor under CPU dispatch and blows up at the next hop.
+// OptionalGenerator (`Generator?`) likewise: the CPU kernel accepts only a CPU generator.
 enum class CpuFbArgKind : uint8_t {
   Other = 0,
   Tensor,
@@ -36,6 +40,7 @@ enum class CpuFbArgKind : uint8_t {
   TensorList,
   OptionalTensorList,
   Device,
+  OptionalGenerator,
 };
 
 struct CpuFbSchemaInfo {
@@ -89,6 +94,10 @@ const CpuFbSchemaInfo& get_or_populate_schema_info(const c10::FunctionSchema& sc
       info.arg_kind[i] = CpuFbArgKind::OptionalTensor;
     } else if (type->kind() == TypeKind::DeviceObjType) {
       info.arg_kind[i] = CpuFbArgKind::Device;
+    } else if (
+        type->kind() == TypeKind::OptionalType &&
+        type->castRaw<OptionalType>()->getElementType()->kind() == TypeKind::GeneratorType) {
+      info.arg_kind[i] = CpuFbArgKind::OptionalGenerator;
     }
     const auto* alias = a.alias_info();
     const bool is_w = (alias != nullptr && alias->isWrite());
@@ -204,6 +213,7 @@ void cpu_fallback_rbln(
   // save converted cpu tensor for TensorList and optional TensorList
   std::vector<c10::IValue> tensorlist_cpu_args;
   std::vector<c10::IValue> optional_tensorlist_cpu_args;
+  std::optional<size_t> generator_idx;
 
   // Step 1: copy all non-CPU tensor inputs into CPU tensors and stage them on the stack at
   // the correct indices, switching on the cached per-arg schema kind.
@@ -249,8 +259,34 @@ void cpu_fallback_rbln(
         tgt_device = ivalue.toDevice();
         (*stack)[arguments_begin + idx] = c10::IValue(c10::Device(kCPU));
         break;
+      case CpuFbArgKind::OptionalGenerator:
+        generator_idx = idx;
+        break;
       case CpuFbArgKind::Other:
         break; // unreachable — gated above
+    }
+  }
+  // Swap in the CPU generator behind the op's RBLN generator -- or behind its device's
+  // default one for None, which the CPU kernel would otherwise read as the global CPU
+  // generator that torch.rbln.manual_seed() does not seed. Skipped when the op is not on an
+  // RBLN device: a CPU op reaches here only because an RBLN generator's dispatch key routed
+  // it, and the CPU kernel rejects that generator itself; an op with no tensor or Device
+  // argument (randperm.generator) redispatches with its out tensor, and that call swaps.
+  if (generator_idx.has_value()) {
+    const auto op_device = tgt_device.has_value() ? tgt_device : compute_target_device(tensor_args, tensorlist_args);
+    if (op_device.has_value() && op_device->type() == c10::DeviceType::PrivateUse1) {
+      const auto op_index = op_device->has_index() ? op_device->index() : c10::rbln::get_device_index();
+      const auto& ivalue = arguments[*generator_idx];
+      const auto generator = ivalue.isNone() ? c10::rbln::get_default_rbln_generator(op_index) : ivalue.toGenerator();
+      auto* rbln_generator = check_generator<RBLNGeneratorImpl>(generator);
+      TORCH_CHECK(
+          generator.device().index() == op_index,
+          op.schema().operator_name(),
+          ": expected a generator on rbln:",
+          static_cast<int>(op_index),
+          ", but got one on ",
+          generator.device());
+      (*stack)[arguments_begin + *generator_idx] = c10::IValue(rbln_generator->fallback_generator());
     }
   }
 

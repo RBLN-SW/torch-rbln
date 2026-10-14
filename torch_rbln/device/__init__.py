@@ -4,3 +4,4 @@ from torch_rbln.device.streams import *  # noqa: F403
 from torch_rbln.memory import *  # noqa: F403
 from torch_rbln.profiler import *  # noqa: F403
 from torch_rbln.programs import *  # noqa: F403
+from torch_rbln.random import *  # noqa: F403
