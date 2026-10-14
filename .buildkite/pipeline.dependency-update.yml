@@ -1,0 +1,30 @@
+env:
+  # The agent interpolates each value with only the ones above it, so an
+  # image that joins other values must come after them.
+  TORCH_RBLN_IMAGE_REGISTRY: >-
+    ${TORCH_RBLN_IMAGE_REGISTRY:-harbor.k8s.rebellions.in}
+  TORCH_RBLN_TEST_IMAGE_REPOSITORY: >-
+    ${TORCH_RBLN_TEST_IMAGE_REPOSITORY:-rebellions-sw/rbln-test}
+  TORCH_RBLN_TEST_IMAGE_TAG: ${TORCH_RBLN_TEST_IMAGE_TAG:-0.12.0rc0-ubuntu24.04}
+  TORCH_RBLN_TEST_IMAGE: >-
+    ${TORCH_RBLN_IMAGE_REGISTRY}/${TORCH_RBLN_TEST_IMAGE_REPOSITORY}:${TORCH_RBLN_TEST_IMAGE_TAG}
+
+steps:
+  - label: Update rebel-compiler dependency
+    key: update-rebel-compiler-dependency
+    command: |
+      .buildkite/scripts/dependency-update/update-rebel-compiler-dependency.sh
+    agents:
+      queue: udc
+    env:
+      GH_REPO: RBLN-SW/torch-rbln
+    secrets:
+      GH_TOKEN: GIT_PAT
+      UV_INDEX_RBLN_USERNAME: REBEL_SW_DEV_USERNAME
+      UV_INDEX_RBLN_PASSWORD: REBEL_SW_DEV_PASSWORD
+      UV_INDEX_RBLN_NIGHTLY_USERNAME: MGMT_NEXUS_USERNAME
+      UV_INDEX_RBLN_NIGHTLY_PASSWORD: MGMT_NEXUS_PASSWORD
+      UV_INDEX_RBLN_INTERNAL_USERNAME: REBEL_SW_DEV_USERNAME
+      UV_INDEX_RBLN_INTERNAL_PASSWORD: REBEL_SW_DEV_PASSWORD
+    timeout_in_minutes: 30
+    image: ${TORCH_RBLN_TEST_IMAGE}-py3.12

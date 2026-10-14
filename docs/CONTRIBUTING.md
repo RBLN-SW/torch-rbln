@@ -32,7 +32,7 @@ All contributors must use **English** for issues, comments, and code.
 
 - **Linting:** See [Linting](LINTING.md) for `lintrunner` and pre-commit setup.
 - **Tests:** See [Test Guide](TEST_GUIDE.md) for Python and C++ test commands.
-- **CI/CD:** See [Workflows](WORKFLOWS.md) for the automated testing and deployment pipeline.
+- **CI/CD:** See [Pipelines](PIPELINES.md) for the automated testing and deployment pipelines.
 
 ---
 
@@ -92,11 +92,11 @@ Individual commit messages in PR branches do not need to strictly follow Convent
 
 All of the following must be satisfied for a PR to be merged:
 
-- All CI tests must pass (see [CI/CD Workflows](WORKFLOWS.md) for details)
+- All CI tests must pass (see [Pipelines](PIPELINES.md) for details)
 - At least one approval from the relevant team
 - **Squash and merge** only
 
-Tests run on remote infrastructure with physical NPU devices, and their results appear as status checks on the pull request. For what happens after a change is merged, see [Release Process](RELEASE_PROCESS.md).
+CI does not run on PRs from forks; a maintainer runs the checks for you.
 
 ---
 

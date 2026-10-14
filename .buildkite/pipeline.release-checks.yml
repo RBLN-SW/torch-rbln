@@ -1,0 +1,167 @@
+env:
+  # The agent interpolates each value with only the ones above it, so an
+  # image that joins other values must come after them.
+  TORCH_RBLN_IMAGE_REGISTRY: >-
+    ${TORCH_RBLN_IMAGE_REGISTRY:-harbor.k8s.rebellions.in}
+  TORCH_RBLN_BUILD_IMAGE_REPOSITORY: >-
+    ${TORCH_RBLN_BUILD_IMAGE_REPOSITORY:-rebellions-sw/rbln-build}
+  TORCH_RBLN_BUILD_IMAGE_TAG: ${TORCH_RBLN_BUILD_IMAGE_TAG:-0.12.0rc0-ubi9.8}
+  TORCH_RBLN_BUILD_IMAGE: >-
+    ${TORCH_RBLN_IMAGE_REGISTRY}/${TORCH_RBLN_BUILD_IMAGE_REPOSITORY}:${TORCH_RBLN_BUILD_IMAGE_TAG}
+  TORCH_RBLN_TEST_IMAGE_REPOSITORY: >-
+    ${TORCH_RBLN_TEST_IMAGE_REPOSITORY:-rebellions-sw/rbln-test}
+  TORCH_RBLN_TEST_IMAGE_TAG: ${TORCH_RBLN_TEST_IMAGE_TAG:-0.12.0rc0-ubuntu24.04}
+  TORCH_RBLN_TEST_IMAGE: >-
+    ${TORCH_RBLN_IMAGE_REGISTRY}/${TORCH_RBLN_TEST_IMAGE_REPOSITORY}:${TORCH_RBLN_TEST_IMAGE_TAG}
+
+notify:
+  - github_commit_status:
+      context: Release checks
+
+common:
+  index-secrets: &index-secrets
+    UV_INDEX_RBLN_USERNAME: REBEL_SW_DEV_USERNAME
+    UV_INDEX_RBLN_PASSWORD: REBEL_SW_DEV_PASSWORD
+    UV_INDEX_RBLN_NIGHTLY_USERNAME: MGMT_NEXUS_USERNAME
+    UV_INDEX_RBLN_NIGHTLY_PASSWORD: MGMT_NEXUS_PASSWORD
+    UV_INDEX_RBLN_INTERNAL_USERNAME: REBEL_SW_DEV_USERNAME
+    UV_INDEX_RBLN_INTERNAL_PASSWORD: REBEL_SW_DEV_PASSWORD
+  upload: &upload
+    agents:
+      queue: udc
+    timeout_in_minutes: 5
+    image: ${TORCH_RBLN_BUILD_IMAGE}-py3.12
+
+steps:
+  - group: Lint
+    key: lint
+    steps:
+      - label: Upload pipeline linting steps
+        key: upload-pipeline-linting-steps
+        command: |
+          .buildkite/scripts/upload-pipeline.py pipeline-linting
+        <<: *upload
+
+      - label: Upload source linting steps
+        key: upload-source-linting-steps
+        command: |
+          .buildkite/scripts/upload-pipeline.py source-linting \
+            --python-versions 3.10,3.11,3.12,3.13,3.14 \
+            --build-types Release,Debug
+        <<: *upload
+
+  - group: Publish (x86_64)
+    key: publish-x86_64
+    steps:
+      - label: Upload wheel steps (x86_64, Release)
+        key: upload-wheel-steps-x86_64-Release
+        command: |
+          .buildkite/scripts/upload-pipeline.py x86_64-build \
+            --python-versions 3.10,3.11,3.12,3.13,3.14 \
+            --build-types Release \
+            --skip-unbuildable
+        secrets: *index-secrets
+        <<: *upload
+
+      - label: Upload wheel steps (x86_64, Debug)
+        key: upload-wheel-steps-x86_64-Debug
+        command: |
+          .buildkite/scripts/upload-pipeline.py x86_64-build \
+            --python-versions 3.12 \
+            --build-types Debug
+        <<: *upload
+
+  - group: Publish (aarch64)
+    key: publish-aarch64
+    steps:
+      - label: Upload wheel steps (aarch64)
+        key: upload-wheel-steps-aarch64
+        command: |
+          .buildkite/scripts/upload-pipeline.py aarch64-build \
+            --python-versions 3.10,3.11,3.12,3.13,3.14 \
+            --build-types Release \
+            --skip-unbuildable
+        secrets: *index-secrets
+        <<: *upload
+
+  - group: Prepare debug torch
+    key: prepare-debug-torch
+    steps:
+      - label: Upload debug torch steps
+        key: upload-debug-torch-steps
+        command: |
+          .buildkite/scripts/upload-pipeline.py debug-torch-build \
+            --python-versions 3.12
+        <<: *upload
+
+  - group: Run C++ tests
+    key: run-cpp-tests
+    depends_on:
+      - publish-x86_64
+      - prepare-debug-torch
+    steps:
+      - label: Upload C++ test steps (Release)
+        key: upload-cpp-test-steps-Release
+        command: |
+          .buildkite/scripts/upload-pipeline.py cpp-tests \
+            --python-versions 3.12 \
+            --build-types Release \
+            --npu-products ca25,cr13
+        <<: *upload
+
+      - label: Upload C++ test steps (Debug)
+        key: upload-cpp-test-steps-Debug
+        command: |
+          .buildkite/scripts/upload-pipeline.py cpp-tests \
+            --python-versions 3.12 \
+            --build-types Debug \
+            --npu-products ca25
+        <<: *upload
+
+  - group: Run Python tests
+    key: run-python-tests
+    depends_on:
+      - publish-x86_64
+      - prepare-debug-torch
+    steps:
+      - label: Upload Python test steps (Release)
+        key: upload-python-test-steps-Release
+        command: |
+          .buildkite/scripts/upload-pipeline.py python-tests \
+            --python-versions 3.12 \
+            --build-types Release \
+            --npu-products ca25,cr13 \
+            --test-suites core,ops,models,distributed \
+            --test-mode release
+        <<: *upload
+
+      - label: Upload Python test steps (Debug)
+        key: upload-python-test-steps-Debug
+        command: |
+          .buildkite/scripts/upload-pipeline.py python-tests \
+            --python-versions 3.12 \
+            --build-types Debug \
+            --npu-products ca25 \
+            --test-suites core,ops,distributed \
+            --test-mode release
+        <<: *upload
+
+  - group: Promote
+    key: promote
+    depends_on:
+      - publish-x86_64
+      - publish-aarch64
+      - lint
+      - run-cpp-tests
+      - run-python-tests
+    steps:
+      - label: Upload promotion steps
+        key: upload-promotion-steps
+        command: |
+          .buildkite/scripts/upload-pipeline.py promotion \
+            --for-each-built-wheel \
+            --version-kind dev
+        # The agent fills in the branch at upload, because the CI server has not
+        # been shown to evaluate `build.*` expressions.
+        if: '"${BUILDKITE_BRANCH}" == "main"'
+        <<: *upload

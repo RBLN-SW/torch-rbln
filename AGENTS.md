@@ -10,7 +10,7 @@ These documents own their subjects. Read them rather than duplicating them here:
 | Environment variables and runtime options                  | `docs/CONFIGURATION.md`      |
 | Lint setup and commands                                    | `docs/LINTING.md`            |
 | PR process, issue labels, merge policy                     | `docs/CONTRIBUTING.md`       |
-| CI and release lanes                                       | `docs/WORKFLOWS.md`          |
+| CI and release lanes                                       | `docs/PIPELINES.md`          |
 | PyTorch pin, vendored upstream files, rebel-compiler bumps | `docs/THIRD_PARTY_UPDATE.md` |
 
 ## Terms
@@ -39,7 +39,7 @@ Two questions come before any change, and getting either wrong wastes the whole 
 - **Do not work around a layer-3 defect in layer 1 or 2.** A guard that makes a compiler or runtime bug invisible hides it from the team that can fix it and stays here permanently.
 - When it is layer 3: reduce it to a minimal reproducer, report it to the rebel-compiler team, and say so in the PR. If the failure is architecture-specific, `xfail_rebel` / `xfail_atom` (`test/utils.py`) mark it strictly, so it fails again once the bug is fixed. A failure that is not architecture-specific does not get parked — it stays visible.
 - **The boundary runs both ways — before building machinery here, check what the pinned runtime already does.**
-- **Bump the pin when your change needs it; leave it alone when only your experiment did.** Raising the pin in the PR that requires a newer compiler is normal here — say in the body what the change needs from it. Move it with `tools/pin_rebel_compiler.py`, then `uv lock` (`docs/THIRD_PARTY_UPDATE.md`). What does not belong is a pin you moved while trying versions, or a local-wheel path some tool wrote into `pyproject.toml` and `uv.lock`. A scheduled workflow also proposes bumps on its own, so an unexplained one reads as noise.
+- **Bump the pin when your change needs it; leave it alone when only your experiment did.** Raising the pin in the PR that requires a newer compiler is normal here — say in the body what the change needs from it. Move it with `tools/pin_rebel_compiler.py`, then `uv lock` (`docs/THIRD_PARTY_UPDATE.md`). What does not belong is a pin you moved while trying versions, or a local-wheel path some tool wrote into `pyproject.toml` and `uv.lock`. A scheduled pipeline also proposes bumps on its own, so an unexplained one reads as noise.
 - To settle which layer it is, install a different `rebel-compiler` version and rebuild. Building against a compiler source checkout is heavier and mutates this tree — ask first, and use a worktree you can throw away.
 
 **Is this file generated?** These are build outputs; the edit disappears on the next build.

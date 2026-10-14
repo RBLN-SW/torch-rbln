@@ -11,9 +11,8 @@ The current third party packages are:
 torch-rbln uses torch packages. The current version of torch is
 fixed by ```pyproject.toml``` in the root directory.
 
-For Debug CI builds, PyTorch is cloned from the repository specified by the
-```pytorch-repo``` and ```pytorch-ref``` inputs in the GitHub Actions workflow
-(defaults: ```https://github.com/pytorch/pytorch.git```, tag derived from ```pyproject.toml```).
+[Release checks](PIPELINES.md#release-checks) test a Debug build of torch-rbln
+against a debug build of the same torch version.
 
 ### Version update checklist
 
@@ -28,7 +27,7 @@ following together:
 | 4 | `uv.lock` | Regenerate with `uv lock` |
 
 CI Debug builds automatically derive the PyTorch git tag (`vX.Y.Z`) from the
-```pyproject.toml``` torch version, so no additional workflow files need updating.
+```pyproject.toml``` torch version, so no pipeline files need updating.
 
 For local Debug builds, clone PyTorch manually:
 
@@ -95,8 +94,8 @@ uv run tools/pin_rebel_compiler.py <build>
 uv lock
 ```
 
-> **Note:** The pin is updated automatically by the [`rebel-compiler` dependency update workflow](WORKFLOWS.md#rebel-compiler-dependency-update).
+> **Note:** The [`rebel-compiler` dependency update pipeline](PIPELINES.md#rebel-compiler-dependency-update) opens a pull request with this update when a newer production build is published.
 
 ### Release requirement
 
-Before a final release or a post-release is tagged, the pin must be a released version, and `uv.lock` must record `pypi.rbln.ai` as the source of `rebel-compiler`. Release candidates may keep a development build. If `uv.lock` was generated before the release reached that index, `uv lock` alone keeps the old entry; re-resolve it with `uv lock --upgrade-package rebel-compiler`.
+Before a final release or a post-release is tagged, the pin must be a released version, and `uv.lock` must record the `rbln` index (`pypi.rbln.ai`) as the source of `rebel-compiler`. Release candidates may keep a development build. If `uv.lock` was generated before the release reached that index, `uv lock` alone keeps the old entry; re-resolve it with `uv lock --upgrade-package rebel-compiler`.

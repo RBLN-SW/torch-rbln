@@ -60,6 +60,7 @@ class CMakeBuildHook(BuildHookInterface):
 
         # Get build configuration from environment
         build_type = os.environ.get("TORCH_RBLN_BUILD_TYPE", "Release")
+        build_testing = os.environ.get("TORCH_RBLN_BUILD_TESTING", "ON")
         install_dir = project_root / "torch_rbln"
         python_executable = sys.executable
 
@@ -90,6 +91,7 @@ class CMakeBuildHook(BuildHookInterface):
             "-G",
             "Ninja",
             "-DBUILD_SHARED_LIBS=ON",
+            f"-DBUILD_TESTING={build_testing}",
             f"-DCMAKE_BUILD_TYPE={build_type}",
             f"-DCMAKE_INSTALL_PREFIX={install_dir}",
             f"-DPython_EXECUTABLE={python_executable}",
@@ -128,8 +130,6 @@ class CMakeBuildHook(BuildHookInterface):
         self._run_command(build_args, cwd=project_root)
 
         # Install artifacts into torch_rbln/ via cmake --install.
-        # This copies _C.so, lib/*.so, _C.pyi stubs, and (optionally) test
-        # binaries — matching the layout produced by tools/build-libtorch-rbln.sh.
         install_args = [
             "cmake",
             "--install",
@@ -230,9 +230,8 @@ class CMakeBuildHook(BuildHookInterface):
     def _update_build_data(self, build_data: dict[str, Any], project_root: Path) -> None:
         """Update build_data to include cmake-installed artifacts.
 
-        All build artifacts are gitignored (*.so*, torch_rbln/lib/,
-        torch_rbln/test/, torch_rbln/_C/__init__.pyi) so they must be
-        added via force_include to appear in the wheel.
+        Hatchling leaves gitignored files out of the wheel. All of these
+        artifacts are gitignored, so force_include must list each one.
         """
         torch_rbln_dir = project_root / "torch_rbln"
 
@@ -258,18 +257,18 @@ class CMakeBuildHook(BuildHookInterface):
         if pyi_stub.exists():
             _include(pyi_stub)
 
-        # C++ test binaries (installed to torch_rbln/test/ when
-        # RBLN_INSTALL_TESTING=ON)
-        test_dir = torch_rbln_dir / "test"
-        if test_dir.exists():
-            for test_bin in test_dir.iterdir():
-                if test_bin.is_file():
-                    _include(test_bin)
-
         # Generated register_ops.py (gitignored but required)
         register_ops = torch_rbln_dir / "_internal" / "register_ops.py"
         if register_ops.exists():
             _include(register_ops)
+
+        # Public C++ headers (used by the standalone C++ test build)
+        include_dir = torch_rbln_dir / "include"
+        headers = [p for p in include_dir.rglob("*") if p.is_file()]
+        if not headers:
+            raise RuntimeError(f"cmake --install put no headers in {include_dir}")
+        for header in headers:
+            _include(header)
 
         # Generated _abi_snapshot.py (gitignored but required): without it in the
         # wheel the import-time ABI handshake has nothing to compare the runtime with.

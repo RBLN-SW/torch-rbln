@@ -1,0 +1,106 @@
+env:
+  # The agent interpolates each value with only the ones above it, so an
+  # image that joins other values must come after them.
+  TORCH_RBLN_IMAGE_REGISTRY: >-
+    ${TORCH_RBLN_IMAGE_REGISTRY:-harbor.k8s.rebellions.in}
+  TORCH_RBLN_BUILD_IMAGE_REPOSITORY: >-
+    ${TORCH_RBLN_BUILD_IMAGE_REPOSITORY:-rebellions-sw/rbln-build}
+  TORCH_RBLN_BUILD_IMAGE_TAG: ${TORCH_RBLN_BUILD_IMAGE_TAG:-0.12.0rc0-ubi9.8}
+  TORCH_RBLN_BUILD_IMAGE: >-
+    ${TORCH_RBLN_IMAGE_REGISTRY}/${TORCH_RBLN_BUILD_IMAGE_REPOSITORY}:${TORCH_RBLN_BUILD_IMAGE_TAG}
+  TORCH_RBLN_TEST_IMAGE_REPOSITORY: >-
+    ${TORCH_RBLN_TEST_IMAGE_REPOSITORY:-rebellions-sw/rbln-test}
+  TORCH_RBLN_TEST_IMAGE_TAG: ${TORCH_RBLN_TEST_IMAGE_TAG:-0.12.0rc0-ubuntu24.04}
+  TORCH_RBLN_TEST_IMAGE: >-
+    ${TORCH_RBLN_IMAGE_REGISTRY}/${TORCH_RBLN_TEST_IMAGE_REPOSITORY}:${TORCH_RBLN_TEST_IMAGE_TAG}
+
+common:
+  github: &github
+    agents:
+      queue: udc
+    checkout:
+      sparse:
+        paths:
+          - .buildkite
+    env:
+      GH_REPO: RBLN-SW/torch-rbln
+    secrets:
+      GH_TOKEN: GIT_PAT
+    timeout_in_minutes: 5
+    image: ${TORCH_RBLN_TEST_IMAGE}-py3.12
+  index-secrets: &index-secrets
+    UV_INDEX_RBLN_USERNAME: REBEL_SW_DEV_USERNAME
+    UV_INDEX_RBLN_PASSWORD: REBEL_SW_DEV_PASSWORD
+    UV_INDEX_RBLN_NIGHTLY_USERNAME: MGMT_NEXUS_USERNAME
+    UV_INDEX_RBLN_NIGHTLY_PASSWORD: MGMT_NEXUS_PASSWORD
+    UV_INDEX_RBLN_INTERNAL_USERNAME: REBEL_SW_DEV_USERNAME
+    UV_INDEX_RBLN_INTERNAL_PASSWORD: REBEL_SW_DEV_PASSWORD
+  upload: &upload
+    agents:
+      queue: udc
+    timeout_in_minutes: 5
+    image: ${TORCH_RBLN_BUILD_IMAGE}-py3.12
+  release-wheels: &release-wheels >-
+    "${TORCH_RBLN_RELEASE_WHEELS:-true}" != "false"
+
+steps:
+  - label: Tag release
+    key: tag-release
+    command: |
+      .buildkite/scripts/release/create-release-tag.sh
+    <<: *github
+
+  - label: Create GitHub Release
+    key: create-github-release
+    command: |
+      .buildkite/scripts/release/create-github-release.sh
+    depends_on:
+      - tag-release
+    <<: *github
+
+  - group: Publish (x86_64)
+    key: publish-x86_64
+    depends_on:
+      - tag-release
+    steps:
+      - label: Upload wheel steps (x86_64)
+        key: upload-wheel-steps-x86_64
+        command: |
+          .buildkite/scripts/upload-pipeline.py x86_64-build \
+            --python-versions 3.10,3.11,3.12,3.13,3.14 \
+            --build-types Release \
+            --skip-unbuildable
+        secrets: *index-secrets
+        if: *release-wheels
+        <<: *upload
+
+  - group: Publish (aarch64)
+    key: publish-aarch64
+    depends_on:
+      - tag-release
+    steps:
+      - label: Upload wheel steps (aarch64)
+        key: upload-wheel-steps-aarch64
+        command: |
+          .buildkite/scripts/upload-pipeline.py aarch64-build \
+            --python-versions 3.10,3.11,3.12,3.13,3.14 \
+            --build-types Release \
+            --skip-unbuildable
+        secrets: *index-secrets
+        if: *release-wheels
+        <<: *upload
+
+  - group: Promote
+    key: promote
+    depends_on:
+      - publish-x86_64
+      - publish-aarch64
+    steps:
+      - label: Upload promotion steps
+        key: upload-promotion-steps
+        command: |
+          .buildkite/scripts/upload-pipeline.py promotion \
+            --for-each-built-wheel \
+            --version-kind release
+        if: *release-wheels
+        <<: *upload

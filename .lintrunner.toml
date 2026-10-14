@@ -130,6 +130,7 @@ command = [
 [[linter]]
 code = 'MYPYSTRICT'
 include_patterns = [
+    '.buildkite/**/*.py',
     '.github/**/*.py',
     'benchmarks/instruction_counts/**/*.py',
     'tools/**/*.py',
@@ -556,7 +557,10 @@ command = [
 
 [[linter]]
 code = 'PYPIDEP'
-include_patterns = ['.github/**']
+include_patterns = [
+    '.buildkite/**',
+    '.github/**',
+]
 exclude_patterns = [
     '**/*.rst',
     '**/*.py',

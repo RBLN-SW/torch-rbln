@@ -1,0 +1,65 @@
+env:
+  # The agent interpolates each value with only the ones above it, so an
+  # image that joins other values must come after them.
+  TORCH_RBLN_IMAGE_REGISTRY: >-
+    ${TORCH_RBLN_IMAGE_REGISTRY:-harbor.k8s.rebellions.in}
+  TORCH_RBLN_BUILD_IMAGE_REPOSITORY: >-
+    ${TORCH_RBLN_BUILD_IMAGE_REPOSITORY:-rebellions-sw/rbln-build}
+  TORCH_RBLN_BUILD_IMAGE_TAG: ${TORCH_RBLN_BUILD_IMAGE_TAG:-0.12.0rc0-ubi9.8}
+  TORCH_RBLN_BUILD_IMAGE: >-
+    ${TORCH_RBLN_IMAGE_REGISTRY}/${TORCH_RBLN_BUILD_IMAGE_REPOSITORY}:${TORCH_RBLN_BUILD_IMAGE_TAG}
+  TORCH_RBLN_PYTHON_VERSION: ${TORCH_RBLN_PYTHON_VERSION:-3.12}
+
+common:
+  internal-index-secrets: &internal-index-secrets
+    UV_INDEX_RBLN_INTERNAL_USERNAME: REBEL_SW_DEV_USERNAME
+    UV_INDEX_RBLN_INTERNAL_PASSWORD: REBEL_SW_DEV_PASSWORD
+
+steps:
+  - group: Prepare debug torch
+    steps:
+      - label: Resolve debug torch (py${TORCH_RBLN_PYTHON_VERSION?})
+        key: resolve-debug-torch-py${TORCH_RBLN_PYTHON_VERSION?}
+        command: |
+          .buildkite/scripts/release-checks/resolve-debug-torch.sh \
+            --python-version ${TORCH_RBLN_PYTHON_VERSION?}
+        agents:
+          queue: udc
+        secrets: *internal-index-secrets
+        timeout_in_minutes: 5
+        image: ${TORCH_RBLN_BUILD_IMAGE?}-py${TORCH_RBLN_PYTHON_VERSION?}
+
+      - label: Build debug torch (py${TORCH_RBLN_PYTHON_VERSION?})
+        key: build-debug-torch-py${TORCH_RBLN_PYTHON_VERSION?}
+        command: |
+          .buildkite/scripts/release-checks/build-debug-torch.sh \
+            --python-version ${TORCH_RBLN_PYTHON_VERSION?}
+        agents:
+          queue: udc
+        depends_on:
+          - resolve-debug-torch-py${TORCH_RBLN_PYTHON_VERSION?}
+        env:
+          # `MAX_JOBS` matches `resources.cpu`, because the container sees every
+          # CPU of the node.
+          MAX_JOBS: "16"
+        # A PyTorch debug build from source takes hours; when the index already
+        # has the wheel, the step exits at once.
+        timeout_in_minutes: 120
+        image: ${TORCH_RBLN_BUILD_IMAGE?}-py${TORCH_RBLN_PYTHON_VERSION?}
+        resources:
+          cpu:
+            requests: "16"
+            limits: "16"
+
+      - label: Publish debug torch (py${TORCH_RBLN_PYTHON_VERSION?})
+        key: publish-debug-torch-py${TORCH_RBLN_PYTHON_VERSION?}
+        command: |
+          .buildkite/scripts/release-checks/publish-debug-torch.sh \
+            --python-version ${TORCH_RBLN_PYTHON_VERSION?}
+        agents:
+          queue: udc
+        depends_on:
+          - build-debug-torch-py${TORCH_RBLN_PYTHON_VERSION?}
+        secrets: *internal-index-secrets
+        timeout_in_minutes: 5
+        image: ${TORCH_RBLN_BUILD_IMAGE?}-py3.12
