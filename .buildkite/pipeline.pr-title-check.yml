@@ -1,0 +1,33 @@
+env:
+  # The agent interpolates each value with only the ones above it, so an
+  # image that joins other values must come after them.
+  TORCH_RBLN_IMAGE_REGISTRY: >-
+    ${TORCH_RBLN_IMAGE_REGISTRY:-harbor.k8s.rebellions.in}
+  TORCH_RBLN_TEST_IMAGE_REPOSITORY: >-
+    ${TORCH_RBLN_TEST_IMAGE_REPOSITORY:-rebellions-sw/rbln-test}
+  TORCH_RBLN_TEST_IMAGE_TAG: ${TORCH_RBLN_TEST_IMAGE_TAG:-0.12.0rc0-ubuntu24.04}
+  TORCH_RBLN_TEST_IMAGE: >-
+    ${TORCH_RBLN_IMAGE_REGISTRY}/${TORCH_RBLN_TEST_IMAGE_REPOSITORY}:${TORCH_RBLN_TEST_IMAGE_TAG}
+
+notify:
+  - github_commit_status:
+      context: PR title check
+
+steps:
+  - label: Check pull request title
+    key: check-pr-title
+    command: |
+      .buildkite/scripts/pr-title-check/check-pr-title.sh
+    agents:
+      queue: udc
+    checkout:
+      sparse:
+        paths:
+          - .buildkite
+    env:
+      GH_REPO: RBLN-SW/torch-rbln
+    secrets:
+      GH_TOKEN: GIT_PAT
+    if: '"${BUILDKITE_PULL_REQUEST:-false}" != "false"'
+    timeout_in_minutes: 5
+    image: ${TORCH_RBLN_TEST_IMAGE}-py3.12

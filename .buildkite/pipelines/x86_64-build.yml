@@ -1,0 +1,61 @@
+env:
+  # The agent interpolates each value with only the ones above it, so an
+  # image that joins other values must come after them.
+  TORCH_RBLN_IMAGE_REGISTRY: >-
+    ${TORCH_RBLN_IMAGE_REGISTRY:-harbor.k8s.rebellions.in}
+  TORCH_RBLN_BUILD_IMAGE_REPOSITORY: >-
+    ${TORCH_RBLN_BUILD_IMAGE_REPOSITORY:-rebellions-sw/rbln-build}
+  TORCH_RBLN_BUILD_IMAGE_TAG: ${TORCH_RBLN_BUILD_IMAGE_TAG:-0.12.0rc0-ubi9.8}
+  TORCH_RBLN_BUILD_IMAGE: >-
+    ${TORCH_RBLN_IMAGE_REGISTRY}/${TORCH_RBLN_BUILD_IMAGE_REPOSITORY}:${TORCH_RBLN_BUILD_IMAGE_TAG}
+  TORCH_RBLN_PYTHON_VERSION: ${TORCH_RBLN_PYTHON_VERSION:-3.12}
+  TORCH_RBLN_BUILD_TYPE: ${TORCH_RBLN_BUILD_TYPE:-Release}
+
+steps:
+  - group: Publish (x86_64)
+    steps:
+      - label: >-
+          Build wheel (py${TORCH_RBLN_PYTHON_VERSION?}, x86_64,
+          ${TORCH_RBLN_BUILD_TYPE?})
+        key: >-
+          build-wheel-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}
+        command: |
+          .buildkite/scripts/packaging/build-wheel.sh \
+            --python-version ${TORCH_RBLN_PYTHON_VERSION?} \
+            --build-type ${TORCH_RBLN_BUILD_TYPE?}
+        agents:
+          queue: udc
+        secrets:
+          UV_INDEX_RBLN_USERNAME: REBEL_SW_DEV_USERNAME
+          UV_INDEX_RBLN_PASSWORD: REBEL_SW_DEV_PASSWORD
+          UV_INDEX_RBLN_NIGHTLY_USERNAME: MGMT_NEXUS_USERNAME
+          UV_INDEX_RBLN_NIGHTLY_PASSWORD: MGMT_NEXUS_PASSWORD
+          UV_INDEX_RBLN_INTERNAL_USERNAME: REBEL_SW_DEV_USERNAME
+          UV_INDEX_RBLN_INTERNAL_PASSWORD: REBEL_SW_DEV_PASSWORD
+        timeout_in_minutes: 30
+        image: ${TORCH_RBLN_BUILD_IMAGE?}-py${TORCH_RBLN_PYTHON_VERSION?}
+        resources:
+          cpu:
+            requests: "16"
+            limits: "16"
+
+      - label: >-
+          Publish wheel (py${TORCH_RBLN_PYTHON_VERSION?}, x86_64,
+          ${TORCH_RBLN_BUILD_TYPE?})
+        key: >-
+          publish-wheel-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}
+        command: |
+          .buildkite/scripts/publishing/publish-wheel.sh \
+            --python-version ${TORCH_RBLN_PYTHON_VERSION?} \
+            --cpu-architecture x86_64 \
+            --build-type ${TORCH_RBLN_BUILD_TYPE?} \
+            --index rbln-internal
+        agents:
+          queue: udc
+        depends_on:
+          - build-wheel-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}
+        secrets:
+          UV_INDEX_RBLN_INTERNAL_USERNAME: REBEL_SW_DEV_USERNAME
+          UV_INDEX_RBLN_INTERNAL_PASSWORD: REBEL_SW_DEV_PASSWORD
+        timeout_in_minutes: 5
+        image: ${TORCH_RBLN_BUILD_IMAGE?}-py3.12

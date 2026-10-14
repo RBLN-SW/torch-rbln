@@ -4,6 +4,7 @@ cmake_minimum_required(VERSION 3.18
 
 # Options ######################################################################
 option(RBLN_USE_CCACHE "Use ccache if it is installed" ON)
+option(BUILD_TESTING "Build C++ test binaries" ON)
 
 # CMake configurations #########################################################
 # Prohibit in-source builds
@@ -37,9 +38,6 @@ set(CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-
-# Enable CTest
-enable_testing()
 
 # If ccache installed, use it as a compiler launcher.
 if(RBLN_USE_CCACHE)
@@ -78,9 +76,6 @@ configure_file(
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/generated/_abi_snapshot.py
   DESTINATION _internal
 )
-
-# Add GoogleTest features
-include(FindGTest)
 
 # Add spdlog for logging
 include(Findspdlog)
@@ -131,4 +126,10 @@ add_subdirectory(aten/src/ATen)
 add_subdirectory(c10)
 add_subdirectory(torch_rbln/csrc/rbln)
 add_subdirectory(torch_rbln/csrc/distributed/c10d/rbln)
-add_subdirectory(test/cpp)
+if(BUILD_TESTING)
+  enable_testing()
+  include(FindGTest)
+  add_subdirectory(test/cpp)
+else()
+  message(STATUS "Skipping C++ tests (BUILD_TESTING=OFF)")
+endif()

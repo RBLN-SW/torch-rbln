@@ -1,0 +1,120 @@
+env:
+  # The agent interpolates each value with only the ones above it, so an
+  # image that joins other values must come after them.
+  TORCH_RBLN_IMAGE_REGISTRY: >-
+    ${TORCH_RBLN_IMAGE_REGISTRY:-harbor.k8s.rebellions.in}
+  TORCH_RBLN_BUILD_IMAGE_REPOSITORY: >-
+    ${TORCH_RBLN_BUILD_IMAGE_REPOSITORY:-rebellions-sw/rbln-build}
+  TORCH_RBLN_BUILD_IMAGE_TAG: ${TORCH_RBLN_BUILD_IMAGE_TAG:-0.12.0rc0-ubi9.8}
+  TORCH_RBLN_BUILD_IMAGE: >-
+    ${TORCH_RBLN_IMAGE_REGISTRY}/${TORCH_RBLN_BUILD_IMAGE_REPOSITORY}:${TORCH_RBLN_BUILD_IMAGE_TAG}
+  TORCH_RBLN_TEST_IMAGE_REPOSITORY: >-
+    ${TORCH_RBLN_TEST_IMAGE_REPOSITORY:-rebellions-sw/rbln-test}
+  TORCH_RBLN_TEST_IMAGE_TAG: ${TORCH_RBLN_TEST_IMAGE_TAG:-0.12.0rc0-ubuntu24.04}
+  TORCH_RBLN_TEST_IMAGE: >-
+    ${TORCH_RBLN_IMAGE_REGISTRY}/${TORCH_RBLN_TEST_IMAGE_REPOSITORY}:${TORCH_RBLN_TEST_IMAGE_TAG}
+  # The agent resolves the default at upload, so the labels and images below
+  # get it too.
+  TORCH_RBLN_PYTHON_VERSION: ${TORCH_RBLN_PYTHON_VERSION:-3.12}
+
+common:
+  index-secrets: &index-secrets
+    UV_INDEX_RBLN_USERNAME: REBEL_SW_DEV_USERNAME
+    UV_INDEX_RBLN_PASSWORD: REBEL_SW_DEV_PASSWORD
+    UV_INDEX_RBLN_NIGHTLY_USERNAME: MGMT_NEXUS_USERNAME
+    UV_INDEX_RBLN_NIGHTLY_PASSWORD: MGMT_NEXUS_PASSWORD
+    UV_INDEX_RBLN_INTERNAL_USERNAME: REBEL_SW_DEV_USERNAME
+    UV_INDEX_RBLN_INTERNAL_PASSWORD: REBEL_SW_DEV_PASSWORD
+
+steps:
+  - group: Test PyTorch nightly (py${TORCH_RBLN_PYTHON_VERSION})
+    key: test-pytorch-nightly
+    steps:
+      - label: Resolve PyTorch nightly version
+        key: resolve-pytorch-nightly
+        command: |
+          .buildkite/scripts/nightly-torch/resolve-pytorch-nightly-version.sh
+        agents:
+          queue: udc
+        timeout_in_minutes: 5
+        image: ${TORCH_RBLN_BUILD_IMAGE}-py${TORCH_RBLN_PYTHON_VERSION}
+
+      - label: Build wheel against PyTorch nightly
+        key: build-wheel-pytorch-nightly
+        command: |
+          .buildkite/scripts/nightly-torch/build-wheel-pytorch-nightly.sh \
+            --python-version ${TORCH_RBLN_PYTHON_VERSION}
+        agents:
+          queue: udc
+        depends_on:
+          - resolve-pytorch-nightly
+        secrets: *index-secrets
+        timeout_in_minutes: 30
+        image: ${TORCH_RBLN_BUILD_IMAGE}-py${TORCH_RBLN_PYTHON_VERSION}
+        resources:
+          cpu:
+            requests: "16"
+            limits: "16"
+
+      - label: Run core suite (RBLN-CR13, Release)
+        key: test-core-cr13
+        command: |
+          .buildkite/scripts/test/run-python-tests.sh \
+            --suite core \
+            --npu-count 2 \
+            --python-version ${TORCH_RBLN_PYTHON_VERSION} \
+            --build-type Release \
+            --test-mode ci \
+            --torch-index pytorch-nightly-cpu
+        agents:
+          queue: udc
+        depends_on:
+          - build-wheel-pytorch-nightly
+        secrets: *index-secrets
+        plugins:
+          - kubernetes:
+              podSpecPatch:
+                containers:
+                  - name: container-0
+                    volumeMounts:
+                      - name: dshm
+                        mountPath: /dev/shm
+                volumes:
+                  - name: dshm
+                    emptyDir:
+                      medium: Memory
+                      sizeLimit: 4Gi
+        timeout_in_minutes: 60
+        image: ${TORCH_RBLN_TEST_IMAGE}-py${TORCH_RBLN_PYTHON_VERSION}
+        resources:
+          cpu:
+            requests: "16"
+            limits: "16"
+          npu:
+            count: 2
+            product:
+              - RBLN-CR13
+
+      - label: Run no-NPU tests
+        key: test-no-npu
+        # `test_dummy_device` sets `RBLN_DUMMY_DEVICE` per subprocess, and
+        # `test_device_arch` mocks the NPU lookup, so both run on a host with
+        # no NPU.
+        command: |
+          .buildkite/scripts/nightly-torch/run-no-npu-tests.sh \
+            --umd /mnt/cross_data/umd \
+            --python-version ${TORCH_RBLN_PYTHON_VERSION} \
+            --torch-index pytorch-nightly-cpu \
+            test/rbln/test_dummy_device.py \
+            test/internal/test_device_arch.py
+        agents:
+          queue: udc
+        depends_on:
+          - build-wheel-pytorch-nightly
+        env:
+          # With no NPU to probe, `rebel` takes the NPU name from this variable,
+          # which the tests' architecture checks read.
+          RBLN_FORCE_NPU_NAME: RBLN-CA25
+        secrets: *index-secrets
+        timeout_in_minutes: 30
+        image: ${TORCH_RBLN_BUILD_IMAGE}-py${TORCH_RBLN_PYTHON_VERSION}

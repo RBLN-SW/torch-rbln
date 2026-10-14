@@ -1,0 +1,271 @@
+env:
+  # The agent interpolates each value with only the ones above it, so an
+  # image that joins other values must come after them.
+  TORCH_RBLN_IMAGE_REGISTRY: >-
+    ${TORCH_RBLN_IMAGE_REGISTRY:-harbor.k8s.rebellions.in}
+  TORCH_RBLN_TEST_IMAGE_REPOSITORY: >-
+    ${TORCH_RBLN_TEST_IMAGE_REPOSITORY:-rebellions-sw/rbln-test}
+  TORCH_RBLN_TEST_IMAGE_TAG: ${TORCH_RBLN_TEST_IMAGE_TAG:-0.12.0rc0-ubuntu24.04}
+  TORCH_RBLN_TEST_IMAGE: >-
+    ${TORCH_RBLN_IMAGE_REGISTRY}/${TORCH_RBLN_TEST_IMAGE_REPOSITORY}:${TORCH_RBLN_TEST_IMAGE_TAG}
+  TORCH_RBLN_PYTHON_VERSION: ${TORCH_RBLN_PYTHON_VERSION:-3.12}
+  TORCH_RBLN_BUILD_TYPE: ${TORCH_RBLN_BUILD_TYPE:-Release}
+  TORCH_RBLN_TEST_MODE: ${TORCH_RBLN_TEST_MODE:-ci}
+  TORCH_RBLN_NPU_PRODUCTS: ${TORCH_RBLN_NPU_PRODUCTS:-ca25,cr13}
+  TORCH_RBLN_TEST_SUITES: ${TORCH_RBLN_TEST_SUITES:-core,ops,models,distributed}
+
+common:
+  npu-test: &npu-test
+    secrets:
+      UV_INDEX_RBLN_USERNAME: REBEL_SW_DEV_USERNAME
+      UV_INDEX_RBLN_PASSWORD: REBEL_SW_DEV_PASSWORD
+      UV_INDEX_RBLN_NIGHTLY_USERNAME: MGMT_NEXUS_USERNAME
+      UV_INDEX_RBLN_NIGHTLY_PASSWORD: MGMT_NEXUS_PASSWORD
+      UV_INDEX_RBLN_INTERNAL_USERNAME: REBEL_SW_DEV_USERNAME
+      UV_INDEX_RBLN_INTERNAL_PASSWORD: REBEL_SW_DEV_PASSWORD
+    plugins:
+      - kubernetes:
+          podSpecPatch:
+            containers:
+              - name: container-0
+                volumeMounts:
+                  - name: dshm
+                    mountPath: /dev/shm
+            volumes:
+              - name: dshm
+                emptyDir:
+                  medium: Memory
+                  sizeLimit: 4Gi
+    image: ${TORCH_RBLN_TEST_IMAGE?}-py${TORCH_RBLN_PYTHON_VERSION?}
+  models-env: &models-env
+    HF_HOME: /mnt/shared_data/.cache/huggingface
+    HF_HUB_OFFLINE: "1"
+
+steps:
+  - group: Run Python tests
+    steps:
+      - label: >-
+          Run core suite (RBLN-CA25, py${TORCH_RBLN_PYTHON_VERSION?},
+          ${TORCH_RBLN_BUILD_TYPE?})
+        key: >-
+          test-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-core-ca25
+        command: |
+          .buildkite/scripts/test/run-python-tests.sh \
+            --suite core \
+            --npu-count 2 \
+            --python-version ${TORCH_RBLN_PYTHON_VERSION?} \
+            --build-type ${TORCH_RBLN_BUILD_TYPE?} \
+            --test-mode ${TORCH_RBLN_TEST_MODE?}
+        agents:
+          queue: k8s
+        if: >-
+          ",${TORCH_RBLN_TEST_SUITES?}," =~ /,core,/
+          && ",${TORCH_RBLN_NPU_PRODUCTS?}," =~ /,ca25,/
+        timeout_in_minutes: 60
+        resources:
+          cpu:
+            requests: "8"
+            limits: "8"
+          npu:
+            count: 2
+            product:
+              - RBLN-CA25
+        <<: *npu-test
+
+      - label: >-
+          Run ops suite (RBLN-CA25, py${TORCH_RBLN_PYTHON_VERSION?},
+          ${TORCH_RBLN_BUILD_TYPE?})
+        key: >-
+          test-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-ops-ca25
+        command: |
+          .buildkite/scripts/test/run-python-tests.sh \
+            --suite ops \
+            --npu-count 2 \
+            --python-version ${TORCH_RBLN_PYTHON_VERSION?} \
+            --build-type ${TORCH_RBLN_BUILD_TYPE?} \
+            --test-mode ${TORCH_RBLN_TEST_MODE?}
+        agents:
+          queue: k8s
+        if: >-
+          ",${TORCH_RBLN_TEST_SUITES?}," =~ /,ops,/
+          && ",${TORCH_RBLN_NPU_PRODUCTS?}," =~ /,ca25,/
+        timeout_in_minutes: 60
+        resources:
+          cpu:
+            requests: "8"
+            limits: "8"
+          npu:
+            count: 2
+            product:
+              - RBLN-CA25
+        <<: *npu-test
+
+      - label: >-
+          Run models suite (RBLN-CA25, py${TORCH_RBLN_PYTHON_VERSION?},
+          ${TORCH_RBLN_BUILD_TYPE?})
+        key: >-
+          test-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-models-ca25
+        command: |
+          .buildkite/scripts/test/run-python-tests.sh \
+            --suite models \
+            --npu-count 2 \
+            --python-version ${TORCH_RBLN_PYTHON_VERSION?} \
+            --build-type ${TORCH_RBLN_BUILD_TYPE?} \
+            --test-mode ${TORCH_RBLN_TEST_MODE?}
+        agents:
+          queue: k8s
+        env: *models-env
+        if: >-
+          ",${TORCH_RBLN_TEST_SUITES?}," =~ /,models,/
+          && ",${TORCH_RBLN_NPU_PRODUCTS?}," =~ /,ca25,/
+        timeout_in_minutes: 120
+        resources:
+          cpu:
+            requests: "8"
+            limits: "8"
+          npu:
+            count: 2
+            product:
+              - RBLN-CA25
+        <<: *npu-test
+
+      - label: >-
+          Run distributed suite (RBLN-CA25, py${TORCH_RBLN_PYTHON_VERSION?},
+          ${TORCH_RBLN_BUILD_TYPE?})
+        key: >-
+          test-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-distributed-ca25
+        command: |
+          .buildkite/scripts/test/run-python-tests.sh \
+            --suite distributed \
+            --npu-count 8 \
+            --python-version ${TORCH_RBLN_PYTHON_VERSION?} \
+            --build-type ${TORCH_RBLN_BUILD_TYPE?} \
+            --test-mode ${TORCH_RBLN_TEST_MODE?}
+        agents:
+          queue: k8s
+        if: >-
+          ",${TORCH_RBLN_TEST_SUITES?}," =~ /,distributed,/
+          && ",${TORCH_RBLN_NPU_PRODUCTS?}," =~ /,ca25,/
+        timeout_in_minutes: 120
+        resources:
+          cpu:
+            requests: "16"
+            limits: "16"
+          npu:
+            count: 8
+            product:
+              - RBLN-CA25
+        <<: *npu-test
+
+      - label: >-
+          Run core suite (RBLN-CR13, py${TORCH_RBLN_PYTHON_VERSION?},
+          ${TORCH_RBLN_BUILD_TYPE?})
+        key: >-
+          test-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-core-cr13
+        command: |
+          .buildkite/scripts/test/run-python-tests.sh \
+            --suite core \
+            --npu-count 2 \
+            --python-version ${TORCH_RBLN_PYTHON_VERSION?} \
+            --build-type ${TORCH_RBLN_BUILD_TYPE?} \
+            --test-mode ${TORCH_RBLN_TEST_MODE?}
+        agents:
+          queue: udc
+        if: >-
+          ",${TORCH_RBLN_TEST_SUITES?}," =~ /,core,/
+          && ",${TORCH_RBLN_NPU_PRODUCTS?}," =~ /,cr13,/
+        timeout_in_minutes: 60
+        resources:
+          cpu:
+            requests: "16"
+            limits: "16"
+          npu:
+            count: 2
+            product:
+              - RBLN-CR13
+        <<: *npu-test
+
+      - label: >-
+          Run ops suite (RBLN-CR13, py${TORCH_RBLN_PYTHON_VERSION?},
+          ${TORCH_RBLN_BUILD_TYPE?})
+        key: >-
+          test-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-ops-cr13
+        command: |
+          .buildkite/scripts/test/run-python-tests.sh \
+            --suite ops \
+            --npu-count 2 \
+            --python-version ${TORCH_RBLN_PYTHON_VERSION?} \
+            --build-type ${TORCH_RBLN_BUILD_TYPE?} \
+            --test-mode ${TORCH_RBLN_TEST_MODE?}
+        agents:
+          queue: udc
+        if: >-
+          ",${TORCH_RBLN_TEST_SUITES?}," =~ /,ops,/
+          && ",${TORCH_RBLN_NPU_PRODUCTS?}," =~ /,cr13,/
+        timeout_in_minutes: 60
+        resources:
+          cpu:
+            requests: "16"
+            limits: "16"
+          npu:
+            count: 2
+            product:
+              - RBLN-CR13
+        <<: *npu-test
+
+      - label: >-
+          Run models suite (RBLN-CR13, py${TORCH_RBLN_PYTHON_VERSION?},
+          ${TORCH_RBLN_BUILD_TYPE?})
+        key: >-
+          test-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-models-cr13
+        command: |
+          .buildkite/scripts/test/run-python-tests.sh \
+            --suite models \
+            --npu-count 2 \
+            --python-version ${TORCH_RBLN_PYTHON_VERSION?} \
+            --build-type ${TORCH_RBLN_BUILD_TYPE?} \
+            --test-mode ${TORCH_RBLN_TEST_MODE?}
+        agents:
+          queue: udc
+        env: *models-env
+        if: >-
+          ",${TORCH_RBLN_TEST_SUITES?}," =~ /,models,/
+          && ",${TORCH_RBLN_NPU_PRODUCTS?}," =~ /,cr13,/
+        timeout_in_minutes: 120
+        resources:
+          cpu:
+            requests: "16"
+            limits: "16"
+          npu:
+            count: 2
+            product:
+              - RBLN-CR13
+        <<: *npu-test
+
+      - label: >-
+          Run distributed suite (RBLN-CR13, py${TORCH_RBLN_PYTHON_VERSION?},
+          ${TORCH_RBLN_BUILD_TYPE?})
+        key: >-
+          test-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-distributed-cr13
+        command: |
+          .buildkite/scripts/test/run-python-tests.sh \
+            --suite distributed \
+            --npu-count 8 \
+            --python-version ${TORCH_RBLN_PYTHON_VERSION?} \
+            --build-type ${TORCH_RBLN_BUILD_TYPE?} \
+            --test-mode ${TORCH_RBLN_TEST_MODE?}
+        agents:
+          queue: udc
+        if: >-
+          ",${TORCH_RBLN_TEST_SUITES?}," =~ /,distributed,/
+          && ",${TORCH_RBLN_NPU_PRODUCTS?}," =~ /,cr13,/
+        timeout_in_minutes: 120
+        resources:
+          cpu:
+            requests: "32"
+            limits: "32"
+          npu:
+            count: 8
+            product:
+              - RBLN-CR13
+        <<: *npu-test

@@ -1,0 +1,36 @@
+env:
+  # The agent interpolates each value with only the ones above it, so an
+  # image that joins other values must come after them.
+  TORCH_RBLN_IMAGE_REGISTRY: >-
+    ${TORCH_RBLN_IMAGE_REGISTRY:-harbor.k8s.rebellions.in}
+  TORCH_RBLN_BUILD_IMAGE_REPOSITORY: >-
+    ${TORCH_RBLN_BUILD_IMAGE_REPOSITORY:-rebellions-sw/rbln-build}
+  TORCH_RBLN_BUILD_IMAGE_TAG: ${TORCH_RBLN_BUILD_IMAGE_TAG:-0.12.0rc0-ubi9.8}
+  TORCH_RBLN_BUILD_IMAGE: >-
+    ${TORCH_RBLN_IMAGE_REGISTRY}/${TORCH_RBLN_BUILD_IMAGE_REPOSITORY}:${TORCH_RBLN_BUILD_IMAGE_TAG}
+  TORCH_RBLN_PYTHON_VERSION: ${TORCH_RBLN_PYTHON_VERSION:-3.12}
+  TORCH_RBLN_CPU_ARCHITECTURE: ${TORCH_RBLN_CPU_ARCHITECTURE:-x86_64}
+  TORCH_RBLN_VERSION_KIND: ${TORCH_RBLN_VERSION_KIND:-dev}
+
+steps:
+  - group: Promote
+    steps:
+      - label: >-
+          Promote wheel (py${TORCH_RBLN_PYTHON_VERSION?},
+          ${TORCH_RBLN_CPU_ARCHITECTURE?})
+        key: >-
+          promote-wheel-py${TORCH_RBLN_PYTHON_VERSION?}-${TORCH_RBLN_CPU_ARCHITECTURE?}
+        command: |
+          .buildkite/scripts/publishing/publish-wheel.sh \
+            --python-version ${TORCH_RBLN_PYTHON_VERSION?} \
+            --cpu-architecture ${TORCH_RBLN_CPU_ARCHITECTURE?} \
+            --build-type Release \
+            --index rbln-nightly \
+            --version-kind ${TORCH_RBLN_VERSION_KIND?}
+        agents:
+          queue: udc
+        secrets:
+          UV_INDEX_RBLN_NIGHTLY_USERNAME: MGMT_NEXUS_USERNAME
+          UV_INDEX_RBLN_NIGHTLY_PASSWORD: MGMT_NEXUS_PASSWORD
+        timeout_in_minutes: 5
+        image: ${TORCH_RBLN_BUILD_IMAGE?}-py3.12

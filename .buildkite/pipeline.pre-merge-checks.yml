@@ -1,0 +1,85 @@
+env:
+  # The agent interpolates each value with only the ones above it, so an
+  # image that joins other values must come after them.
+  TORCH_RBLN_IMAGE_REGISTRY: >-
+    ${TORCH_RBLN_IMAGE_REGISTRY:-harbor.k8s.rebellions.in}
+  TORCH_RBLN_BUILD_IMAGE_REPOSITORY: >-
+    ${TORCH_RBLN_BUILD_IMAGE_REPOSITORY:-rebellions-sw/rbln-build}
+  TORCH_RBLN_BUILD_IMAGE_TAG: ${TORCH_RBLN_BUILD_IMAGE_TAG:-0.12.0rc0-ubi9.8}
+  TORCH_RBLN_BUILD_IMAGE: >-
+    ${TORCH_RBLN_IMAGE_REGISTRY}/${TORCH_RBLN_BUILD_IMAGE_REPOSITORY}:${TORCH_RBLN_BUILD_IMAGE_TAG}
+  TORCH_RBLN_TEST_IMAGE_REPOSITORY: >-
+    ${TORCH_RBLN_TEST_IMAGE_REPOSITORY:-rebellions-sw/rbln-test}
+  TORCH_RBLN_TEST_IMAGE_TAG: ${TORCH_RBLN_TEST_IMAGE_TAG:-0.12.0rc0-ubuntu24.04}
+  TORCH_RBLN_TEST_IMAGE: >-
+    ${TORCH_RBLN_IMAGE_REGISTRY}/${TORCH_RBLN_TEST_IMAGE_REPOSITORY}:${TORCH_RBLN_TEST_IMAGE_TAG}
+
+notify:
+  - github_commit_status:
+      context: Pre-merge checks
+
+common:
+  upload: &upload
+    agents:
+      queue: udc
+    timeout_in_minutes: 5
+    image: ${TORCH_RBLN_BUILD_IMAGE}-py3.12
+
+steps:
+  - group: Lint
+    key: lint
+    steps:
+      - label: Upload pipeline linting steps
+        key: upload-pipeline-linting-steps
+        command: |
+          .buildkite/scripts/upload-pipeline.py pipeline-linting
+        <<: *upload
+
+      - label: Upload source linting steps
+        key: upload-source-linting-steps
+        command: |
+          .buildkite/scripts/upload-pipeline.py source-linting \
+            --python-versions 3.12 \
+            --build-types Release
+        <<: *upload
+
+  - group: Publish (x86_64)
+    key: publish-x86_64
+    steps:
+      - label: Upload wheel steps (x86_64)
+        key: upload-wheel-steps-x86_64
+        command: |
+          .buildkite/scripts/upload-pipeline.py x86_64-build \
+            --python-versions 3.12 \
+            --build-types Release
+        <<: *upload
+
+  - group: Run C++ tests
+    key: run-cpp-tests
+    depends_on:
+      - publish-x86_64
+    steps:
+      - label: Upload C++ test steps
+        key: upload-cpp-test-steps
+        command: |
+          .buildkite/scripts/upload-pipeline.py cpp-tests \
+            --python-versions 3.12 \
+            --build-types Release \
+            --npu-products ca25,cr13
+        <<: *upload
+
+  - group: Run Python tests
+    key: run-python-tests
+    depends_on:
+      - publish-x86_64
+    steps:
+      - label: Upload Python test steps
+        key: upload-python-test-steps
+        command: |
+          .buildkite/scripts/upload-pipeline.py python-tests \
+            --python-versions 3.12 \
+            --build-types Release \
+            --npu-products ca25,cr13 \
+            --test-suites core,ops,models,distributed \
+            --test-mode ci
+        <<: *upload

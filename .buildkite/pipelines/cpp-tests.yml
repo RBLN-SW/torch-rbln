@@ -1,0 +1,124 @@
+# The tests share one upload with the binaries they depend on, because the CI
+# server refuses a `depends_on` on a step that an earlier upload of the same
+# job added.
+env:
+  # The agent interpolates each value with only the ones above it, so an
+  # image that joins other values must come after them.
+  TORCH_RBLN_IMAGE_REGISTRY: >-
+    ${TORCH_RBLN_IMAGE_REGISTRY:-harbor.k8s.rebellions.in}
+  TORCH_RBLN_BUILD_IMAGE_REPOSITORY: >-
+    ${TORCH_RBLN_BUILD_IMAGE_REPOSITORY:-rebellions-sw/rbln-build}
+  TORCH_RBLN_BUILD_IMAGE_TAG: ${TORCH_RBLN_BUILD_IMAGE_TAG:-0.12.0rc0-ubi9.8}
+  TORCH_RBLN_BUILD_IMAGE: >-
+    ${TORCH_RBLN_IMAGE_REGISTRY}/${TORCH_RBLN_BUILD_IMAGE_REPOSITORY}:${TORCH_RBLN_BUILD_IMAGE_TAG}
+  TORCH_RBLN_TEST_IMAGE_REPOSITORY: >-
+    ${TORCH_RBLN_TEST_IMAGE_REPOSITORY:-rebellions-sw/rbln-test}
+  TORCH_RBLN_TEST_IMAGE_TAG: ${TORCH_RBLN_TEST_IMAGE_TAG:-0.12.0rc0-ubuntu24.04}
+  TORCH_RBLN_TEST_IMAGE: >-
+    ${TORCH_RBLN_IMAGE_REGISTRY}/${TORCH_RBLN_TEST_IMAGE_REPOSITORY}:${TORCH_RBLN_TEST_IMAGE_TAG}
+  TORCH_RBLN_PYTHON_VERSION: ${TORCH_RBLN_PYTHON_VERSION:-3.12}
+  TORCH_RBLN_BUILD_TYPE: ${TORCH_RBLN_BUILD_TYPE:-Release}
+  TORCH_RBLN_NPU_PRODUCTS: ${TORCH_RBLN_NPU_PRODUCTS:-ca25,cr13}
+
+common:
+  index-secrets: &index-secrets
+    UV_INDEX_RBLN_USERNAME: REBEL_SW_DEV_USERNAME
+    UV_INDEX_RBLN_PASSWORD: REBEL_SW_DEV_PASSWORD
+    UV_INDEX_RBLN_NIGHTLY_USERNAME: MGMT_NEXUS_USERNAME
+    UV_INDEX_RBLN_NIGHTLY_PASSWORD: MGMT_NEXUS_PASSWORD
+    UV_INDEX_RBLN_INTERNAL_USERNAME: REBEL_SW_DEV_USERNAME
+    UV_INDEX_RBLN_INTERNAL_PASSWORD: REBEL_SW_DEV_PASSWORD
+  npu-test: &npu-test
+    secrets: *index-secrets
+    plugins:
+      - kubernetes:
+          podSpecPatch:
+            containers:
+              - name: container-0
+                volumeMounts:
+                  - name: dshm
+                    mountPath: /dev/shm
+            volumes:
+              - name: dshm
+                emptyDir:
+                  medium: Memory
+                  sizeLimit: 4Gi
+    image: ${TORCH_RBLN_TEST_IMAGE?}-py${TORCH_RBLN_PYTHON_VERSION?}
+
+steps:
+  - group: Run C++ tests
+    steps:
+      - label: >-
+          Build C++ test binaries (py${TORCH_RBLN_PYTHON_VERSION?},
+          ${TORCH_RBLN_BUILD_TYPE?})
+        key: >-
+          build-test-binaries-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}
+        command: |
+          .buildkite/scripts/test/build-test-binaries.sh \
+            --python-version ${TORCH_RBLN_PYTHON_VERSION?} \
+            --build-type ${TORCH_RBLN_BUILD_TYPE?}
+        agents:
+          queue: udc
+        env:
+          # `CMAKE_BUILD_PARALLEL_LEVEL` matches `resources.cpu`, because the
+          # container sees every CPU of the node.
+          CMAKE_BUILD_PARALLEL_LEVEL: "16"
+        secrets: *index-secrets
+        timeout_in_minutes: 60
+        image: ${TORCH_RBLN_BUILD_IMAGE?}-py${TORCH_RBLN_PYTHON_VERSION?}
+        resources:
+          cpu:
+            requests: "16"
+            limits: "16"
+
+      - label: >-
+          Run C++ tests (RBLN-CA25, py${TORCH_RBLN_PYTHON_VERSION?},
+          ${TORCH_RBLN_BUILD_TYPE?})
+        key: >-
+          test-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-cpp-ca25
+        command: |
+          .buildkite/scripts/test/run-cpp-tests.sh \
+            --python-version ${TORCH_RBLN_PYTHON_VERSION?} \
+            --build-type ${TORCH_RBLN_BUILD_TYPE?} \
+            --npu-count 2
+        agents:
+          queue: k8s
+        depends_on:
+          - build-test-binaries-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}
+        if: '",${TORCH_RBLN_NPU_PRODUCTS?}," =~ /,ca25,/'
+        timeout_in_minutes: 60
+        resources:
+          cpu:
+            requests: "8"
+            limits: "8"
+          npu:
+            count: 2
+            product:
+              - RBLN-CA25
+        <<: *npu-test
+
+      - label: >-
+          Run C++ tests (RBLN-CR13, py${TORCH_RBLN_PYTHON_VERSION?},
+          ${TORCH_RBLN_BUILD_TYPE?})
+        key: >-
+          test-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-cpp-cr13
+        command: |
+          .buildkite/scripts/test/run-cpp-tests.sh \
+            --python-version ${TORCH_RBLN_PYTHON_VERSION?} \
+            --build-type ${TORCH_RBLN_BUILD_TYPE?} \
+            --npu-count 2
+        agents:
+          queue: udc
+        depends_on:
+          - build-test-binaries-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}
+        if: '",${TORCH_RBLN_NPU_PRODUCTS?}," =~ /,cr13,/'
+        timeout_in_minutes: 60
+        resources:
+          cpu:
+            requests: "16"
+            limits: "16"
+          npu:
+            count: 2
+            product:
+              - RBLN-CR13
+        <<: *npu-test

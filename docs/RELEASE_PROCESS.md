@@ -1,10 +1,10 @@
 # Release Process
 
-This document describes how PyTorch RBLN releases are prepared, validated, and published. For CI/CD workflow internals, see [Workflows](WORKFLOWS.md); for pull request and merge policies, see [Contributing Guide](CONTRIBUTING.md).
+This document describes how PyTorch RBLN releases are prepared, validated, and published. For CI/CD pipeline internals, see [Pipelines](PIPELINES.md); for pull request and merge policies, see [Contributing Guide](CONTRIBUTING.md).
 
 ## Overview
 
-PyTorch RBLN maintains a single long-lived branch, `main`. Every change reaches it through a squash-merged pull request. Release checks validate `main` daily against the release test suite, and a version tag on a validated commit triggers artifact build and publication.
+PyTorch RBLN maintains a single long-lived branch, `main`. Every change reaches it through a squash-merged pull request. Release checks validate `main` daily against the release test suite, and the release pipeline tags a validated commit and publishes its wheels.
 
 ```text
                    ┌─ pre-merge checks
@@ -23,7 +23,7 @@ Separate [GitHub repository rulesets](https://docs.github.com/en/repositories/co
 
 `main` accepts changes only through pull requests, which must have the required approvals and passing status checks. Repository admins can bypass the merge requirements, but not even they can push to `main` directly.
 
-Version tags are created by the release workflow. The ruleset prevents them from being moved or deleted, so a published version always points at the same commit.
+Version tags are created by the release pipeline. The ruleset prevents them from being moved or deleted, so a published version always points at the same commit.
 
 ## Versioning
 
@@ -56,19 +56,19 @@ Release checks run the release test suite against the current `main` commit and 
 
 ### 3. Tagging and publication
 
-The release manager runs the release workflow to tag the validated commit. The tag triggers the CD workflow, which builds wheels for all supported Python versions and publishes them to the internal package index first, then to public PyPI.
+The release manager starts the release pipeline on the validated commit (see [Release](PIPELINES.md#release)). The build tags that commit, then builds its Release wheels and publishes them to the `rbln-internal` and `rbln-nightly` indexes.
 
-Before tagging a final release or a post-release, the release manager checks the `rebel-compiler` pin: it must be a released version, and `uv.lock` must record `pypi.rbln.ai` as its source (see [Third-Party Update](THIRD_PARTY_UPDATE.md#release-requirement)).
+Before tagging a final release or a post-release, the release manager checks the `rebel-compiler` pin: it must be a released version, and `uv.lock` must record the `rbln` index as its source (see [Third-Party Update](THIRD_PARTY_UPDATE.md#release-requirement)).
 
 ### 4. Release notes
 
-The release workflow creates a [GitHub Release](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository) for the tag, with auto-generated notes covering the commits since the previous release. It skips release candidates.
+The release pipeline creates a [GitHub Release](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository) for the tag, with auto-generated notes covering the commits since the previous release. Only final and post releases get one.
 
 ## Debug Builds
 
-Debug wheels — built against a debug variant of PyTorch — are produced alongside release wheels during release checks. They surface issues that only manifest under debug-mode assertions.
+Debug wheels — tested on a debug build of PyTorch — are produced alongside Release wheels during release checks. They surface issues that only manifest under debug-mode assertions.
 
-Debug wheels are uploaded to the internal package index with a `.debug` or `+debug` version suffix (for example, `0.10.0+debug`). They are **not** published to public PyPI.
+Debug wheels are uploaded to the `rbln-internal` index with a `.debug` or `+debug` version suffix (for example, `0.10.0+debug`). They are **not** part of a release.
 
 ## Hotfix
 
@@ -76,6 +76,6 @@ When a critical issue in a released version cannot wait for the next release, a 
 
 ## Related Documentation
 
-- [Workflows](WORKFLOWS.md) — CI/CD workflow details, triggers, and concurrency
+- [Pipelines](PIPELINES.md) — CI/CD pipeline details
 - [Contributing Guide](CONTRIBUTING.md) — PR requirements and merge policy
 - [Third-Party Update](THIRD_PARTY_UPDATE.md) — Dependency versioning (PyTorch, rebel-compiler)
