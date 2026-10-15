@@ -390,10 +390,11 @@ TEST_F(RBLNV2VBatchTest, LargeBatchedSubmit) {
   c10::rbln::free(dst);
 }
 
-// More entries than one rbln_memcpy_v2v_multi call dispatches on the device
-// (::rbln::kMaxV2VMultiCopies): submit() must issue runtime-sized calls — one
-// oversized call makes the runtime host-sync the whole entry — and the data
-// must still arrive in full.
+// More entries than one command stream carries (::rbln::kMaxV2VMultiCopies).
+// A runtime that splits past the cap itself (RBLN_V2V_MULTI_SPLITS_PAST_CAP)
+// takes the batch in one call; an older one host-syncs an oversized call's
+// whole entry, so submit() must issue runtime-sized calls. Either way the data
+// must arrive in full.
 TEST_F(RBLNV2VBatchTest, AboveRuntimeCapSubmitsInRuntimeSizedCalls) {
   constexpr size_t blk = 16;
   constexpr size_t nblk = ::rbln::kMaxV2VMultiCopies + 1;
@@ -424,7 +425,11 @@ TEST_F(RBLNV2VBatchTest, AboveRuntimeCapSubmitsInRuntimeSizedCalls) {
     c10::rbln::rt_timing_enable(false);
     std::vector<uint64_t> timing(2 * c10::rbln::kRtTimingN);
     c10::rbln::rt_timing_get(timing.data());
+#ifdef RBLN_V2V_MULTI_SPLITS_PAST_CAP
+    EXPECT_EQ(timing[2 * kV2VMultiSlot + 1], 1u) << "the runtime splits past the cap, so one call suffices";
+#else
     EXPECT_EQ(timing[2 * kV2VMultiSlot + 1], 2u) << "cap + 1 entries must go out as two runtime-sized calls";
+#endif
     EXPECT_EQ(batch.pending_count(), 0u);
   }
 

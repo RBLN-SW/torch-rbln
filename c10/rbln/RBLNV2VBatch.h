@@ -13,9 +13,9 @@ namespace c10::rbln {
  *
  * Isolates callers from the rebel runtime's v2v API. enqueue() / enqueue_strided()
  * record copy requests; submit() flushes them through rbln_memcpy_v2v_multi when
- * every entry shares one device — in calls of at most
- * ::rbln::kMaxV2VMultiCopies entries, the most one call dispatches on the
- * device — or falls back to per-entry memcpy_v2v (which host-bounces
+ * every entry shares one device — in one call when the runtime splits past its
+ * cap itself (RBLN_V2V_MULTI_SPLITS_PAST_CAP), otherwise in calls of at most
+ * ::rbln::kMaxV2VMultiCopies entries — or falls back to per-entry memcpy_v2v (which host-bounces
  * cross-device entries). The path is decided from bookkeeping kept at enqueue
  * time, so submit() is O(N) with no extra lookups.
  *

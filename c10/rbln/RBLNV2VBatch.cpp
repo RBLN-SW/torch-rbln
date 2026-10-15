@@ -107,6 +107,14 @@ void V2VBatch::submit() {
     }
   };
 
+#ifdef RBLN_V2V_MULTI_SPLITS_PAST_CAP
+  // The runtime keeps a batch of any size on the device: it cuts the command
+  // streams at ::rbln::kMaxV2VMultiCopies itself, and a copy it cannot batch
+  // goes through the host alone instead of dragging its destination along.
+  // One call per batch saves the fixed submit cost of every extra call.
+  RBLN_LOG_DEBUG("V2VBatch::submit draining {} entries (batched)", all.size());
+  submit_one_call(0, all.size());
+#else
   // Work one bulk call may carry. The runtime dispatches at most
   // ::rbln::kMaxV2VMultiCopies sub-copies per call through the device command
   // buffer; past that it completes the call by syncing the entries to the host
@@ -126,6 +134,7 @@ void V2VBatch::submit() {
   for (size_t begin = 0; begin < all.size(); begin += kMaxBulkEntries) {
     submit_one_call(begin, std::min(begin + kMaxBulkEntries, all.size()));
   }
+#endif
 }
 
 size_t V2VBatch::pending_count() const {
