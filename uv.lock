@@ -1354,7 +1354,7 @@ wheels = [
 [[package]]
 name = "rebel-compiler"
 version = "0.12.0"
-source = { registry = "https://pypi.rbln.ai/simple/" }
+source = { registry = "https://pypi.rebellions.in/simple/" }
 dependencies = [
     { name = "attrs" },
     { name = "cloudpickle" },
@@ -1375,13 +1375,13 @@ dependencies = [
     { name = "typing-extensions" },
 ]
 wheels = [
-    { url = "https://pypi.rbln.ai/api/package/rebel-compiler/rebel_compiler-0.12.0-cp310-cp310-manylinux_2_28_aarch64.whl", hash = "sha256:71fec5c7aec2b200f295fbb7d972adc80ed95f137c7744c0a7e2492055da333f" },
-    { url = "https://pypi.rbln.ai/api/package/rebel-compiler/rebel_compiler-0.12.0-cp310-cp310-manylinux_2_34_x86_64.whl", hash = "sha256:c3f83dd902dbad1ab86e293413458ba964ddb8825560348b571d69e74cc534f6" },
-    { url = "https://pypi.rbln.ai/api/package/rebel-compiler/rebel_compiler-0.12.0-cp311-cp311-manylinux_2_34_x86_64.whl", hash = "sha256:64952237eb0977c08c89eef363ea1242db47b3da8fd8881060e44087eee1e221" },
-    { url = "https://pypi.rbln.ai/api/package/rebel-compiler/rebel_compiler-0.12.0-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:dd87dcb0fcf7ae276dfe193f014af2958fe862be5d0328b48e3c813f1e2e4677" },
-    { url = "https://pypi.rbln.ai/api/package/rebel-compiler/rebel_compiler-0.12.0-cp312-cp312-manylinux_2_34_x86_64.whl", hash = "sha256:51726e6b63a9b247e6d5f93188844f693232a1e5e08c810940efe96268f83d76" },
-    { url = "https://pypi.rbln.ai/api/package/rebel-compiler/rebel_compiler-0.12.0-cp313-cp313-manylinux_2_34_x86_64.whl", hash = "sha256:661bf95c36ba3776d045911aaea9d7c8dbf839197ef78e096974f87a03d29b6c" },
-    { url = "https://pypi.rbln.ai/api/package/rebel-compiler/rebel_compiler-0.12.0-cp314-cp314-manylinux_2_34_x86_64.whl", hash = "sha256:7553a19fd36a356e82c2eee6ad3f711e461eac0ccefdecab9f52e27e1d0c1268" },
+    { url = "https://pypi.rebellions.in/api/package/rebel-compiler/rebel_compiler-0.12.0-cp310-cp310-manylinux_2_28_aarch64.whl", hash = "sha256:71fec5c7aec2b200f295fbb7d972adc80ed95f137c7744c0a7e2492055da333f" },
+    { url = "https://pypi.rebellions.in/api/package/rebel-compiler/rebel_compiler-0.12.0-cp310-cp310-manylinux_2_34_x86_64.whl", hash = "sha256:c3f83dd902dbad1ab86e293413458ba964ddb8825560348b571d69e74cc534f6" },
+    { url = "https://pypi.rebellions.in/api/package/rebel-compiler/rebel_compiler-0.12.0-cp311-cp311-manylinux_2_34_x86_64.whl", hash = "sha256:64952237eb0977c08c89eef363ea1242db47b3da8fd8881060e44087eee1e221" },
+    { url = "https://pypi.rebellions.in/api/package/rebel-compiler/rebel_compiler-0.12.0-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:dd87dcb0fcf7ae276dfe193f014af2958fe862be5d0328b48e3c813f1e2e4677" },
+    { url = "https://pypi.rebellions.in/api/package/rebel-compiler/rebel_compiler-0.12.0-cp312-cp312-manylinux_2_34_x86_64.whl", hash = "sha256:51726e6b63a9b247e6d5f93188844f693232a1e5e08c810940efe96268f83d76" },
+    { url = "https://pypi.rebellions.in/api/package/rebel-compiler/rebel_compiler-0.12.0-cp313-cp313-manylinux_2_34_x86_64.whl", hash = "sha256:661bf95c36ba3776d045911aaea9d7c8dbf839197ef78e096974f87a03d29b6c" },
+    { url = "https://pypi.rebellions.in/api/package/rebel-compiler/rebel_compiler-0.12.0-cp314-cp314-manylinux_2_34_x86_64.whl", hash = "sha256:7553a19fd36a356e82c2eee6ad3f711e461eac0ccefdecab9f52e27e1d0c1268" },
 ]
 
 [[package]]
