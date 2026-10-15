@@ -6,6 +6,7 @@
 #include <c10/rbln/DeviceMappingManager.h>
 #include <c10/rbln/RBLNFallbackConfig.h>
 #include <c10/rbln/RBLNFunctions.h>
+#include <c10/rbln/RBLNGenerator.h>
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNSupportedDtypes.h>
@@ -156,6 +157,17 @@ void register_public_device_api(py::module_& module) {
       "_get_device_topology",
       []() -> c10::rbln::DeviceTopology { return c10::rbln::DeviceMappingManager::getInstance().getDeviceTopology(); },
       "Get the complete device topology.");
+
+  module.def(
+      "get_default_generator",
+      &c10::rbln::get_default_rbln_generator,
+      py::arg("device_index") = -1,
+      "Get the default generator of an RBLN device, creating it on first use.");
+  module.def(
+      "manual_seed_all",
+      &c10::rbln::manual_seed_all,
+      py::arg("seed"),
+      "Seed the default generator of every RBLN device, including ones created later.");
 }
 
 /**

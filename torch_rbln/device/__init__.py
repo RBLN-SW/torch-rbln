@@ -4,6 +4,7 @@ from torch_rbln.device.device_tensor_utils import *  # noqa: F403
 from torch_rbln.device.streams import *  # noqa: F403
 from torch_rbln.memory import *  # noqa: F403
 from torch_rbln.profiler import *  # noqa: F403
+from torch_rbln.random import *  # noqa: F403
 
 
 def __getattr__(name: str):
