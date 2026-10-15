@@ -180,8 +180,9 @@ C10_RBLN_API void set_device_layout_like(void* target_data, const void* ref_data
 /**
  * @brief Pin a caller-owned host range for DMA on one device (cudaHostRegister's counterpart).
  *
- * Copies whose host operand is 4 KiB aligned and inside the range then skip the kernel's
- * per-command-buffer pin. The caller keeps ownership: unregister before freeing the pages.
+ * Copies whose host operand is 4 KiB aligned and inside the range then DMA it directly
+ * instead of staging through a bounce buffer. The caller keeps ownership: unregister
+ * before freeing the pages.
  *
  * @return False, with a warning, if the range stays unregistered (unsupported UMD, dummy
  *         device, or overlap with a registered range). Copies over it still work.

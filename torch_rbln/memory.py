@@ -522,8 +522,8 @@ def host_register(ptr: int, nbytes: int, device: Optional[Union[int, str, torch.
     """
     Pin a caller-owned host range for DMA on ``device``; the counterpart of ``cudaHostRegister``.
 
-    Copies whose host side is 4 KiB aligned and inside the range skip the kernel's
-    per-command-buffer pin, which cuts the time to issue them (not the transfer bandwidth).
+    Copies whose host side is 4 KiB aligned and inside the range then DMA straight to and
+    from it instead of staging through a runtime bounce buffer.
     Registration itself is costly, so register reused buffers once, not per transfer.
 
     The caller keeps ownership: call :func:`host_unregister` before freeing the memory.
