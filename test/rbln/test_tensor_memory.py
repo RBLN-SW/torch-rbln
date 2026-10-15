@@ -8,6 +8,7 @@ Validates that device operations produce correct results under non-trivial memor
 - Input/output memory independence: ensuring that input and output tensors do not share overlapping memory
 - Bound allocations: device buffers handed to a consumer that DMAs out of band
 - Huge host buffers: the host side of the same transfers
+- Host registration: caller-owned host ranges pinned once for those transfers
 """
 
 import gc
@@ -21,6 +22,7 @@ from torch.testing._internal.common_device_type import dtypes, instantiate_devic
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
 import torch_rbln._C
+import torch_rbln.memory
 from test.utils import run_in_isolated_process, SUPPORTED_DTYPES
 
 
@@ -362,6 +364,96 @@ class TestHugeHostEmpty(TestCase):
             torch.rbln.huge_host_empty(-1)
         with self.assertRaises(TypeError):
             torch.rbln.huge_host_empty(4096.0)
+
+
+@pytest.mark.test_set_ci
+class TestHostRegisterArguments(TestCase):
+    """``torch.rbln.host_register`` argument checks; no device needed."""
+
+    def test_rejects_non_positive_and_non_integer(self):
+        for ptr, nbytes in ((0, 4096), (-4096, 4096), (4096, 0), (4096, -1)):
+            with self.assertRaises(ValueError):
+                torch.rbln.host_register(ptr, nbytes)
+        with self.assertRaises(TypeError):
+            torch.rbln.host_register(4096.0, 4096)
+        with self.assertRaises(TypeError):
+            torch.rbln.host_unregister(4096.0)
+
+    def test_no_device_leaves_the_range_unregistered(self):
+        slab = torch.rbln.huge_host_empty(1 << 20)
+        with mock.patch.object(torch_rbln.memory, "_no_rbln_device", return_value=True):
+            self.assertFalse(torch.rbln.host_register(slab.data_ptr(), slab.numel()))
+
+
+@pytest.mark.test_set_ci
+class TestHostRegister(TestCase):
+    """Copies over a registered host range stay correct, including across re-registration."""
+
+    rbln_device = torch.device("rbln:0")
+    nbytes = 8 << 20
+
+    def setUp(self):
+        super().setUp()
+        if torch_rbln._C.is_dummy_device():
+            self.skipTest("a dummy device has no NPU to pin host memory for")
+
+    def _round_trip(self, slab, offset, n, fill):
+        src = slab[offset : offset + n]
+        src.copy_(torch.arange(n, dtype=torch.int64).remainder(251).to(torch.uint8).add_(fill))
+        expected = src.clone()
+        # Bound so both copies DMA against the slab; a lazy allocation never would.
+        on_device = torch.empty(n, dtype=torch.uint8, device=self.rbln_device)
+        torch.rbln.bind_device_memory(on_device)
+        on_device.copy_(src)
+        dst = slab[offset + n : offset + 2 * n]
+        dst.zero_()
+        dst.copy_(on_device)
+        self.assertEqual(dst, expected)
+
+    def test_copies_through_a_registered_range(self):
+        slab = torch.rbln.huge_host_empty(self.nbytes)
+        self.assertTrue(torch.rbln.host_register(slab.data_ptr(), slab.numel(), self.rbln_device))
+        try:
+            # Page-aligned (registered path) and unaligned (bounced) slices.
+            self._round_trip(slab, 1 << 20, 1 << 20, fill=1)
+            self._round_trip(slab, (4 << 20) + 100, 1 << 20, fill=2)
+        finally:
+            torch.rbln.host_unregister(slab.data_ptr(), self.rbln_device)
+
+    def test_copies_stay_correct_across_unregister_and_register(self):
+        # Same host address throughout: a cached command buffer must not reuse a stale device address.
+        slab = torch.rbln.huge_host_empty(self.nbytes)
+        self.assertTrue(torch.rbln.host_register(slab.data_ptr(), slab.numel(), self.rbln_device))
+        self._round_trip(slab, 0, 1 << 20, fill=3)
+        torch.rbln.host_unregister(slab.data_ptr(), self.rbln_device)
+        self._round_trip(slab, 0, 1 << 20, fill=4)
+        self.assertTrue(torch.rbln.host_register(slab.data_ptr(), slab.numel(), self.rbln_device))
+        try:
+            self._round_trip(slab, 0, 1 << 20, fill=5)
+        finally:
+            torch.rbln.host_unregister(slab.data_ptr(), self.rbln_device)
+
+    def test_overlapping_range_is_refused(self):
+        slab = torch.rbln.huge_host_empty(self.nbytes)
+        self.assertTrue(torch.rbln.host_register(slab.data_ptr(), slab.numel(), self.rbln_device))
+        try:
+            self.assertFalse(torch.rbln.host_register(slab.data_ptr() + 4096, 4096, self.rbln_device))
+        finally:
+            torch.rbln.host_unregister(slab.data_ptr(), self.rbln_device)
+
+    def test_unregister_of_an_unregistered_range_raises(self):
+        slab = torch.rbln.huge_host_empty(1 << 20)
+        with self.assertRaises(RuntimeError):
+            torch.rbln.host_unregister(slab.data_ptr(), self.rbln_device)
+
+    def test_unregister_needs_the_start_of_the_range(self):
+        slab = torch.rbln.huge_host_empty(1 << 20)
+        self.assertTrue(torch.rbln.host_register(slab.data_ptr(), slab.numel(), self.rbln_device))
+        try:
+            with self.assertRaises(RuntimeError):
+                torch.rbln.host_unregister(slab.data_ptr() + 4096, self.rbln_device)
+        finally:
+            torch.rbln.host_unregister(slab.data_ptr(), self.rbln_device)
 
 
 instantiate_device_type_tests(TestAliasedTensors, globals(), only_for="privateuse1")
