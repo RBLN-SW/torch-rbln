@@ -43,6 +43,17 @@ def pinned_build(uv_table: Any) -> str:
     return specs[0].version
 
 
+def runtime_requirement(build: Version) -> str:
+    # A development build accepts any later build of its minor line, so nightly users
+    # can take a newer compiler without a torch-rbln rebuild. A release candidate,
+    # final, or post-release stops below the next patch release: `<X.Y.Z+1` also
+    # excludes that release's own dev and rc builds, which `~=` would let through.
+    if build.is_devrelease:
+        return f"{PACKAGE}~={build.public}"
+    major, minor, micro = (*build.release, 0, 0)[:3]
+    return f"{PACKAGE}>={build.public},<{major}.{minor}.{micro + 1}"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     target = parser.add_mutually_exclusive_group(required=True)
@@ -64,11 +75,11 @@ def main() -> None:
     except (InvalidVersion, InvalidSpecifier):
         sys.exit(f"'{options.build}' is not a PEP 440 version that ~= accepts")
     exact = f"{PACKAGE}=={build}"
-    compatible = f"{PACKAGE}~={build.public}"
+    runtime = runtime_requirement(build)
     entries = [
         (uv_table["build-constraint-dependencies"], exact, "[tool.uv].build-constraint-dependencies"),
         (uv_table["constraint-dependencies"], exact, "[tool.uv].constraint-dependencies"),
-        (doc["project"]["optional-dependencies"]["runtime"], compatible, "[project.optional-dependencies].runtime"),
+        (doc["project"]["optional-dependencies"]["runtime"], runtime, "[project.optional-dependencies].runtime"),
     ]
     for array, replacement, location in entries:
         array[package_entry_index(array, location)] = replacement

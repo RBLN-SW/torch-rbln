@@ -79,14 +79,16 @@ override it by passing a tag: ```./sync-linter.sh v2.11.0```.
 
 When updating the `rebel-compiler` build, change **all** of the following together:
 
-| # | Entry                                     | What to change                     |
-|---|-------------------------------------------|------------------------------------|
-| 1 | `[tool.uv].build-constraint-dependencies` | `rebel-compiler==<build>`          |
-| 2 | `[tool.uv].constraint-dependencies`       | `rebel-compiler==<build>`          |
-| 3 | `[project.optional-dependencies].runtime` | `rebel-compiler~=<public version>` |
-| 4 | `uv.lock`                                 | Regenerate with `uv lock`          |
+| # | Entry                                     | What to change                                                                                                |
+|---|-------------------------------------------|---------------------------------------------------------------------------------------------------------------|
+| 1 | `[tool.uv].build-constraint-dependencies` | `rebel-compiler==<build>`                                                                                     |
+| 2 | `[tool.uv].constraint-dependencies`       | `rebel-compiler==<build>`                                                                                     |
+| 3 | `[project.optional-dependencies].runtime` | `rebel-compiler~=<public version>` for a development build, else `rebel-compiler>=<public version>,<X.Y.Z+1>` |
+| 4 | `uv.lock`                                 | Regenerate with `uv lock`                                                                                     |
 
 `<build>` is the pinned version with its local segment; `<public version>` is the same without it, because PEP 440 allows no local segment after `~=`.
+
+The `runtime` entry is what a published wheel declares, and installers read it instead of `uv.lock`. A development build keeps `~=`, so a nightly install can take a later build of the same minor line. A release candidate, final, or post-release is bounded below the next patch release `X.Y.Z+1`, where `X.Y.Z` is the pinned release: `0.12.0rc1` gives `>=0.12.0rc1,<0.12.1`. PEP 440 makes `<X.Y.Z+1` exclude that release's own development and candidate builds too, which `~=` would accept.
 
 Run [`tools/pin_rebel_compiler.py`](../tools/pin_rebel_compiler.py) to rewrite the `pyproject.toml` entries, then regenerate the lockfile:
 
