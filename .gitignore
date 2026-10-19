@@ -1,5 +1,6 @@
 # Build artifacts
 /build/
+/build-test/
 /dist/
 /Testing/
 *.whl
@@ -15,7 +16,6 @@
 /torch_rbln/include/
 /torch_rbln/lib/
 /torch_rbln/out/
-/torch_rbln/test/
 
 # Python
 *.pyc

@@ -1,0 +1,33 @@
+env:
+  TORCH_RBLN_QUEUE_DEFAULT: ${TORCH_RBLN_QUEUE_DEFAULT?}
+  TORCH_RBLN_PYTHON_VERSION: ${TORCH_RBLN_PYTHON_VERSION?}
+  TORCH_RBLN_CPU_ARCHITECTURE: ${TORCH_RBLN_CPU_ARCHITECTURE?}
+  TORCH_RBLN_BUILD_TYPE: ${TORCH_RBLN_BUILD_TYPE?}
+  TORCH_RBLN_ARTIFACT_BUILD_ID: ${TORCH_RBLN_ARTIFACT_BUILD_ID?}
+  TORCH_RBLN_ARTIFACT_DIR: ${TORCH_RBLN_ARTIFACT_DIR?}
+
+common:
+  test-image: &test-image >-
+    harbor.k8s.rebellions.in/rebellions-sw/rbln-test:0.12.0rc0-ubuntu24.04-py3.12
+  publish-secrets: &publish-secrets
+    UV_INDEX_RBLN_INTERNAL_USERNAME: REBEL_SW_DEV_USERNAME
+    UV_INDEX_RBLN_INTERNAL_PASSWORD: REBEL_SW_DEV_PASSWORD
+    UV_PUBLISH_USERNAME: REBEL_SW_DEV_USERNAME
+    UV_PUBLISH_PASSWORD: REBEL_SW_DEV_PASSWORD
+
+steps:
+  - label: >-
+      Publish wheel (py${TORCH_RBLN_PYTHON_VERSION?},
+      ${TORCH_RBLN_CPU_ARCHITECTURE?}, ${TORCH_RBLN_BUILD_TYPE?})
+    key: >-
+      publish-wheel-py${TORCH_RBLN_PYTHON_VERSION?}-${TORCH_RBLN_CPU_ARCHITECTURE?}-${TORCH_RBLN_BUILD_TYPE?}
+    command: |
+      .buildkite/scripts/publish/publish-wheel.sh \
+        --index rbln-internal \
+        --artifact-build-id ${TORCH_RBLN_ARTIFACT_BUILD_ID?} \
+        --artifact-dir ${TORCH_RBLN_ARTIFACT_DIR?}
+    agents:
+      queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
+    secrets: *publish-secrets
+    timeout_in_minutes: 5
+    image: *test-image
