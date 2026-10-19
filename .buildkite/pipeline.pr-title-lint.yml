@@ -1,0 +1,33 @@
+env:
+  TORCH_RBLN_COMMIT_STATUS: ${TORCH_RBLN_COMMIT_STATUS:-false}
+  TORCH_RBLN_QUEUE_DEFAULT: ${TORCH_RBLN_QUEUE_DEFAULT?}
+
+notify:
+  - github_commit_status:
+      context: PR title lint
+    if: >-
+      "${BUILDKITE_SOURCE}" == "webhook"
+      || "${BUILDKITE_SOURCE}" == "schedule"
+      || "${TORCH_RBLN_COMMIT_STATUS?}" == "true"
+
+common:
+  test-image: &test-image >-
+    harbor.k8s.rebellions.in/rebellions-sw/rbln-test:0.12.0rc0-ubuntu24.04-py3.12
+
+steps:
+  - group: Lint
+    key: lint
+    steps:
+      - label: Lint PR title
+        key: lint-pr-title
+        command: |
+          .buildkite/scripts/lint/lint-pr-title.py
+        agents:
+          queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
+        env:
+          GH_REPO: RBLN-SW/torch-rbln
+        secrets:
+          GH_TOKEN: GIT_PAT
+        if: '"${BUILDKITE_PULL_REQUEST:-false}" != "false"'
+        timeout_in_minutes: 5
+        image: *test-image

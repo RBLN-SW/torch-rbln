@@ -13,7 +13,7 @@ from collections.abc import MutableSequence
 from pathlib import Path
 from typing import Any
 
-import tomlkit  # type: ignore[import-not-found]
+import tomlkit
 from packaging.requirements import Requirement
 from packaging.specifiers import InvalidSpecifier, Specifier
 from packaging.version import InvalidVersion, Version

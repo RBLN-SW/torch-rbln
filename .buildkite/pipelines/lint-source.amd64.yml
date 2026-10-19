@@ -1,0 +1,32 @@
+env:
+  TORCH_RBLN_QUEUE_AMD64: ${TORCH_RBLN_QUEUE_AMD64?}
+  TORCH_RBLN_PYTHON_VERSION: ${TORCH_RBLN_PYTHON_VERSION?}
+  TORCH_RBLN_BUILD_TYPE: ${TORCH_RBLN_BUILD_TYPE?}
+  TORCH_RBLN_LINT_BASE: ${TORCH_RBLN_LINT_BASE?}
+
+common:
+  build-image: &build-image >-
+    harbor.k8s.rebellions.in/rebellions-sw/rbln-build:0.12.0rc0-ubi9.8-py${TORCH_RBLN_PYTHON_VERSION?}
+  index-secrets: &index-secrets
+    UV_INDEX_RBLN_USERNAME: REBEL_SW_DEV_USERNAME
+    UV_INDEX_RBLN_PASSWORD: REBEL_SW_DEV_PASSWORD
+    UV_INDEX_RBLN_NIGHTLY_USERNAME: MGMT_NEXUS_USERNAME
+    UV_INDEX_RBLN_NIGHTLY_PASSWORD: MGMT_NEXUS_PASSWORD
+    UV_INDEX_RBLN_INTERNAL_USERNAME: REBEL_SW_DEV_USERNAME
+    UV_INDEX_RBLN_INTERNAL_PASSWORD: REBEL_SW_DEV_PASSWORD
+
+steps:
+  - label: >-
+      Lint source (py${TORCH_RBLN_PYTHON_VERSION?}, x86_64,
+      ${TORCH_RBLN_BUILD_TYPE?})
+    key: >-
+      lint-source-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}
+    command: |
+      .buildkite/scripts/lint/lint-source.sh \
+        --build-type ${TORCH_RBLN_BUILD_TYPE?} \
+        --base "${TORCH_RBLN_LINT_BASE?}"
+    agents:
+      queue: ${TORCH_RBLN_QUEUE_AMD64?}
+    secrets: *index-secrets
+    timeout_in_minutes: 30
+    image: *build-image

@@ -1,0 +1,38 @@
+env:
+  TORCH_RBLN_QUEUE_AMD64: ${TORCH_RBLN_QUEUE_AMD64?}
+  TORCH_RBLN_PYTHON_VERSION: ${TORCH_RBLN_PYTHON_VERSION?}
+  TORCH_RBLN_TORCH_VERSION: ${TORCH_RBLN_TORCH_VERSION?}
+  TORCH_RBLN_ARTIFACT_DIR: ${TORCH_RBLN_ARTIFACT_DIR?}
+
+common:
+  build-image: &build-image >-
+    harbor.k8s.rebellions.in/rebellions-sw/rbln-build:0.12.0rc0-ubi9.8-py${TORCH_RBLN_PYTHON_VERSION?}
+  build-cpu-count: &build-cpu-count "16"
+  index-secrets: &index-secrets
+    UV_INDEX_RBLN_USERNAME: REBEL_SW_DEV_USERNAME
+    UV_INDEX_RBLN_PASSWORD: REBEL_SW_DEV_PASSWORD
+    UV_INDEX_RBLN_NIGHTLY_USERNAME: MGMT_NEXUS_USERNAME
+    UV_INDEX_RBLN_NIGHTLY_PASSWORD: MGMT_NEXUS_PASSWORD
+    UV_INDEX_RBLN_INTERNAL_USERNAME: REBEL_SW_DEV_USERNAME
+    UV_INDEX_RBLN_INTERNAL_PASSWORD: REBEL_SW_DEV_PASSWORD
+
+steps:
+  - label: >-
+      Build wheel against nightly torch
+      (py${TORCH_RBLN_PYTHON_VERSION?}, x86_64, Release)
+    key: >-
+      build-wheel-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-Release-nightly-torch
+    command: |
+      .buildkite/scripts/package/build-wheel-nightly-torch.sh \
+        --artifact-dir ${TORCH_RBLN_ARTIFACT_DIR?}
+    agents:
+      queue: ${TORCH_RBLN_QUEUE_AMD64?}
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: *build-cpu-count
+    secrets: *index-secrets
+    timeout_in_minutes: 30
+    image: *build-image
+    resources:
+      cpu:
+        requests: *build-cpu-count
+        limits: *build-cpu-count

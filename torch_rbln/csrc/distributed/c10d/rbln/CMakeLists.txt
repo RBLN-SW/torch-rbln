@@ -36,3 +36,7 @@ install(TARGETS ${target}
   EXPORT Caffe2Targets
   DESTINATION lib
 )
+
+install(FILES ${headers}
+  DESTINATION include/torch_rbln/csrc/distributed/c10d/rbln
+)
