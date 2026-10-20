@@ -310,40 +310,43 @@ C10_RBLN_API void mark_zeros(const void* rbln_data);
 C10_RBLN_API void free(void* data);
 
 /**
- * @brief Cross-process handle of the device allocation backing an RBLN pointer.
+ * @brief Cross-process handle of an exportable RBLN allocation.
  *
- * `fd` is a dma-buf covering the whole containing allocation [base_dva, base_dva + size);
- * the pointer's bytes start at `offset` inside it. The caller owns `fd`.
+ * `payload` is opaque to the caller (it carries the physical layout). `fds[i]` is a dma-buf of
+ * one physical area; the caller owns them.
  */
 struct DeviceMemoryExport {
-  uint64_t base_dva;
   uint64_t size;
-  uint64_t offset;
-  int fd;
+  std::vector<uint8_t> payload;
+  std::vector<int> fds;
 };
 
 /**
- * @brief Exports the device allocation backing `rbln_data` as a dma-buf handle.
+ * @brief Exports the allocation backing `rbln_data`, which must come from malloc_exportable().
  *
- * The memory must come from malloc_exportable(). The exporter must keep the tensor alive while
- * any importer uses it.
+ * The layout is pinned from then on. The exporter must keep the tensor alive while any importer
+ * uses it.
  */
 C10_RBLN_API DeviceMemoryExport export_device_memory(const void* rbln_data);
 
 /**
- * @brief Allocates `nbytes` of device memory that export_device_memory() can export.
+ * @brief Allocates `nbytes` that export_device_memory() can export. Release it with free().
  *
- * Release it with free(). Requires the device's DRM accel node to be openable by this process.
+ * Requires the device's DRM accel node to be openable by this process.
  */
 C10_RBLN_API void* malloc_exportable(c10::DeviceIndex device_index, size_t nbytes);
 
 /**
- * @brief Imports a dma-buf exported by another process on the same device.
+ * @brief Rebuilds memory exported by another process on the same device.
  *
- * Returns an RBLN pointer covering `nbytes` from the imported base; release it with free().
- * Requires the device's DRM accel node to be openable by this process.
+ * `fds` are not consumed. Release the result with free(). Requires the device's DRM accel node to
+ * be openable by this process.
  */
-C10_RBLN_API void* import_device_memory(c10::DeviceIndex device_index, int fd, size_t nbytes);
+C10_RBLN_API void* import_device_memory(
+    c10::DeviceIndex device_index,
+    size_t nbytes,
+    const std::vector<uint8_t>& payload,
+    const std::vector<int>& fds);
 
 /**
  * @brief Non-throwing free() for `noexcept` contexts (the c10 DataPtr deleter).
