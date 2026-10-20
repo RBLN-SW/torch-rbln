@@ -536,13 +536,14 @@ def host_register(ptr: int, nbytes: int, device: Optional[Union[int, str, torch.
             If None, uses the current device. Defaults to None.
 
     Returns:
-        bool: True if registered. False if not -- no RBLN device, or (with a warning) an
-        unsupported runtime, a dummy device, or overlap with a registered range. Copies
-        over an unregistered range still work.
+        bool: True if registered. False if the range cannot be registered here -- no RBLN
+        device, or (with a warning) a runtime without host registration or a dummy device.
+        Copies over an unregistered range still work.
 
     Raises:
         TypeError: if ``ptr`` or ``nbytes`` is not an integer.
         ValueError: if ``ptr`` or ``nbytes`` is not positive.
+        RuntimeError: if the runtime refuses the range, e.g. it overlaps a registered range.
 
     Example::
 
@@ -566,7 +567,7 @@ def host_register(ptr: int, nbytes: int, device: Optional[Union[int, str, torch.
 def host_unregister(ptr: int, device: Optional[Union[int, str, torch.device]] = None) -> None:
     """
     Unpin a range registered with :func:`host_register`. A synchronization point: waits for
-    the device's pending transfers first.
+    the device's pending transfers first. A no-op when there is no RBLN device.
 
     Args:
         ptr: The ``ptr`` passed to :func:`host_register`.
@@ -578,6 +579,8 @@ def host_unregister(ptr: int, device: Optional[Union[int, str, torch.device]] = 
         RuntimeError: if ``ptr`` is not the start of a range registered on ``device``.
     """
     ptr = operator.index(ptr)
+    if _no_rbln_device():
+        return
     device = _normalize_device(device)
     torch_rbln._C._host_unregister(device.index, ptr)
 

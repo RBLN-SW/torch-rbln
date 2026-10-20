@@ -184,8 +184,10 @@ C10_RBLN_API void set_device_layout_like(void* target_data, const void* ref_data
  * instead of staging through a bounce buffer. The caller keeps ownership: unregister
  * before freeing the pages.
  *
- * @return False, with a warning, if the range stays unregistered (unsupported UMD, dummy
- *         device, or overlap with a registered range). Copies over it still work.
+ * @return False, with a warning, if the runtime cannot register host memory (unsupported
+ *         UMD or dummy device). Copies over the range still work.
+ * @throws c10::Error on a null host_ptr, zero nbytes or an invalid device, or if the runtime
+ *         refuses the range (e.g. it overlaps a registered one).
  */
 C10_RBLN_API bool host_register(c10::DeviceIndex device_index, const void* host_ptr, size_t nbytes);
 

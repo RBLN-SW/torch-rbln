@@ -697,15 +697,12 @@ bool host_register(c10::DeviceIndex device_index, const void* host_ptr, size_t n
     RBLN_LOG_WARN("host_register: rbln:{} does not support host registration", static_cast<int>(device_index));
     return false;
   }
-  // A refusal only loses the optimization, so warn rather than raise.
-  if (::rbln::rbln_host_register(torch_device_id, addr, static_cast<uint64_t>(nbytes)) != RBLNRetCode_SUCCESS) {
-    RBLN_LOG_WARN(
-        "host_register: rbln:{} refused [{:#x}, +{}); see the runtime log",
-        static_cast<int>(device_index),
-        addr,
-        nbytes);
-    return false;
-  }
+  RBLN_CHECK(
+      ::rbln::rbln_host_register(torch_device_id, addr, static_cast<uint64_t>(nbytes)) == RBLNRetCode_SUCCESS,
+      "rbln_host_register failed for [{:#x}, +{}) on rbln:{}",
+      addr,
+      nbytes,
+      static_cast<int>(device_index));
   RBLN_LOG_DEBUG("host_register: rbln:{} [{:#x}, +{})", static_cast<int>(device_index), addr, nbytes);
   return true;
 }
@@ -721,7 +718,7 @@ void host_unregister(c10::DeviceIndex device_index, const void* host_ptr) {
   RBLN_LOG_DEBUG("host_unregister: rbln:{} {:#x}", static_cast<int>(device_index), addr);
   RBLN_CHECK(
       !::rbln::rbln_host_unregister(torch_device_id, addr),
-      "rbln_host_unregister failed for {:#x} on rbln:{}; see the runtime log",
+      "rbln_host_unregister failed for {:#x} on rbln:{}",
       addr,
       static_cast<int>(device_index));
 }

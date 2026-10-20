@@ -383,6 +383,7 @@ class TestHostRegisterArguments(TestCase):
         slab = torch.rbln.huge_host_empty(1 << 20)
         with mock.patch.object(torch_rbln.memory, "_no_rbln_device", return_value=True):
             self.assertFalse(torch.rbln.host_register(slab.data_ptr(), slab.numel()))
+            torch.rbln.host_unregister(slab.data_ptr())  # no-op, does not raise
 
 
 @pytest.mark.test_set_ci
@@ -437,7 +438,8 @@ class TestHostRegister(TestCase):
         slab = torch.rbln.huge_host_empty(self.nbytes)
         self.assertTrue(torch.rbln.host_register(slab.data_ptr(), slab.numel(), self.rbln_device))
         try:
-            self.assertFalse(torch.rbln.host_register(slab.data_ptr() + 4096, 4096, self.rbln_device))
+            with self.assertRaises(RuntimeError):
+                torch.rbln.host_register(slab.data_ptr() + 4096, 4096, self.rbln_device)
         finally:
             torch.rbln.host_unregister(slab.data_ptr(), self.rbln_device)
 
