@@ -36,7 +36,7 @@ All three publish their `Release` wheels to the `rbln-internal` index and run th
 |                | Pre-merge checks               | Post-merge checks              | Release checks                                                                                          |
 |----------------|--------------------------------|--------------------------------|---------------------------------------------------------------------------------------------------------|
 | Source linting | Python 3.12, x86_64, `Release` | Python 3.12, x86_64, `Release` | Python 3.10–3.14, x86_64, `Release` and `Debug`                                                         |
-| Wheel builds   | Python 3.12, x86_64, `Release` | Python 3.12, x86_64, `Release` | Python 3.10–3.14, x86_64, `Release`; Python 3.12, x86_64, `Debug`                                       |
+| Wheel builds   | Python 3.12, x86_64, `Release` | Python 3.12, x86_64, `Release` | Python 3.10–3.14, x86_64 and aarch64, `Release`; Python 3.12, x86_64, `Debug`                           |
 | NPU tests      | RBLN-CA25, RBLN-CR13           | RBLN-CA25                      | `Release` wheel: RBLN-CA25, RBLN-CR13; `Debug` wheel: RBLN-CA25, without the `models` Python test suite |
 | Test mode      | `ci`                           | `ci`                           | `release`                                                                                               |
 
@@ -49,6 +49,8 @@ Source linting covers every tracked file in post-merge and release checks. In pr
 ### Release checks
 
 The `Debug` wheel builds and runs against a debug wheel of the pinned `torch` from the `rbln-internal` index. When the index lacks that wheel, release checks on `main` build and publish it first; on any other branch, the `Debug` wheel build fails because it cannot lock an unpublished wheel.
+
+The aarch64 wheel builds soft fail, as they do in the release pipeline.
 
 On `main`, once every other step passes, the promotion steps publish the `Release` wheels to the `rbln-nightly` index.
 
@@ -91,4 +93,5 @@ The entry files do not hard-code queue names. The upload step in each pipeline's
 | `TORCH_RBLN_QUEUE_AMD64_CA25` | AMD64 agents with RBLN-CA25 for NPU tests         |
 | `TORCH_RBLN_QUEUE_AMD64_CR13` | AMD64 agents with RBLN-CR13 for NPU tests         |
 | `TORCH_RBLN_QUEUE_AMD64`      | AMD64 agents for x86_64 builds and source linting |
+| `TORCH_RBLN_QUEUE_ARM64`      | Arm64 agents for aarch64 builds                   |
 | `TORCH_RBLN_QUEUE_DEFAULT`    | Agents for every other step                       |

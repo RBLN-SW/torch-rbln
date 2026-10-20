@@ -4,6 +4,7 @@ env:
   TORCH_RBLN_QUEUE_AMD64: ${TORCH_RBLN_QUEUE_AMD64?}
   TORCH_RBLN_QUEUE_AMD64_CA25: ${TORCH_RBLN_QUEUE_AMD64_CA25?}
   TORCH_RBLN_QUEUE_AMD64_CR13: ${TORCH_RBLN_QUEUE_AMD64_CR13?}
+  TORCH_RBLN_QUEUE_ARM64: ${TORCH_RBLN_QUEUE_ARM64?}
 
 notify:
   - github_commit_status:
@@ -99,6 +100,54 @@ steps:
           TORCH_RBLN_BUILD_TYPE: Release
           TORCH_RBLN_ARTIFACT_BUILD_ID: ${BUILDKITE_BUILD_ID}
           TORCH_RBLN_ARTIFACT_DIR: torch-rbln-py{{matrix.python}}-x86_64-Release
+        matrix:
+          setup:
+            python: *python-versions
+        timeout_in_minutes: 5
+        image: *test-image
+
+  - group: Wheel builds (aarch64, Release)
+    key: wheel-builds-aarch64-Release
+    steps:
+      - label: Upload wheel build steps (py{{matrix.python}}, aarch64, Release)
+        key: upload-wheel-build-steps-aarch64-Release
+        command: |
+          buildkite-agent pipeline upload \
+            .buildkite/pipelines/build-wheel.arm64.yml
+        agents:
+          queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
+        env:
+          TORCH_RBLN_PYTHON_VERSION: "{{matrix.python}}"
+          TORCH_RBLN_BUILD_TYPE: Release
+          TORCH_RBLN_ARTIFACT_DIR: >-
+            torch-rbln-py{{matrix.python}}-aarch64-Release
+        matrix:
+          setup:
+            python: *python-versions
+        timeout_in_minutes: 5
+        image: *test-image
+
+  - group: Wheel publishing (aarch64, Release)
+    key: wheel-publishing-aarch64-Release
+    depends_on:
+      - wheel-builds-aarch64-Release
+    steps:
+      - label: >-
+          Upload wheel publishing steps (py{{matrix.python}}, aarch64,
+          Release)
+        key: upload-wheel-publishing-steps-aarch64-Release
+        command: |
+          buildkite-agent pipeline upload \
+            .buildkite/pipelines/publish-wheel.yml
+        agents:
+          queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
+        env:
+          TORCH_RBLN_PYTHON_VERSION: "{{matrix.python}}"
+          TORCH_RBLN_CPU_ARCHITECTURE: aarch64
+          TORCH_RBLN_BUILD_TYPE: Release
+          TORCH_RBLN_ARTIFACT_BUILD_ID: ${BUILDKITE_BUILD_ID}
+          TORCH_RBLN_ARTIFACT_DIR: >-
+            torch-rbln-py{{matrix.python}}-aarch64-Release
         matrix:
           setup:
             python: *python-versions
@@ -313,6 +362,7 @@ steps:
     depends_on:
       - lint
       - wheel-publishing-x86_64-Release
+      - wheel-publishing-aarch64-Release
       - cpp-tests
       - python-tests
     steps:
@@ -338,5 +388,6 @@ steps:
             python: *python-versions
             cpu_architecture:
               - x86_64
+              - aarch64
         timeout_in_minutes: 5
         image: *test-image

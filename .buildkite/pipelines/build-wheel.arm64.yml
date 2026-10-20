@@ -1,0 +1,58 @@
+env:
+  TORCH_RBLN_QUEUE_ARM64: ${TORCH_RBLN_QUEUE_ARM64?}
+  TORCH_RBLN_PYTHON_VERSION: ${TORCH_RBLN_PYTHON_VERSION?}
+  TORCH_RBLN_BUILD_TYPE: ${TORCH_RBLN_BUILD_TYPE?}
+  TORCH_RBLN_ARTIFACT_DIR: ${TORCH_RBLN_ARTIFACT_DIR?}
+
+common:
+  build-image: &build-image >-
+    harbor.k8s.rebellions.in/rebellions-sw/rbln-build:0.12.0rc0-ubi9.8-py${TORCH_RBLN_PYTHON_VERSION?}
+  build-cpu-count: &build-cpu-count "16"
+  index-secrets: &index-secrets
+    UV_INDEX_RBLN_USERNAME: REBEL_SW_DEV_USERNAME
+    UV_INDEX_RBLN_PASSWORD: REBEL_SW_DEV_PASSWORD
+    UV_INDEX_RBLN_NIGHTLY_USERNAME: MGMT_NEXUS_USERNAME
+    UV_INDEX_RBLN_NIGHTLY_PASSWORD: MGMT_NEXUS_PASSWORD
+    UV_INDEX_RBLN_INTERNAL_USERNAME: REBEL_SW_DEV_USERNAME
+    UV_INDEX_RBLN_INTERNAL_PASSWORD: REBEL_SW_DEV_PASSWORD
+
+steps:
+  - label: >-
+      Build wheel (py${TORCH_RBLN_PYTHON_VERSION?}, aarch64,
+      ${TORCH_RBLN_BUILD_TYPE?})
+    key: >-
+      build-wheel-py${TORCH_RBLN_PYTHON_VERSION?}-aarch64-${TORCH_RBLN_BUILD_TYPE?}
+    command: |
+      .buildkite/scripts/package/build-wheel.sh \
+        --build-type ${TORCH_RBLN_BUILD_TYPE?} \
+        --artifact-dir ${TORCH_RBLN_ARTIFACT_DIR?}
+    agents:
+      queue: ${TORCH_RBLN_QUEUE_ARM64?}
+      arch: arm64
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: *build-cpu-count
+    secrets: *index-secrets
+    plugins:
+      - docker#v5.14.0:
+          image: *build-image
+          # The container gets neither the agent endpoint nor the secrets
+          # unless `environment` lists them.
+          environment:
+            - BUILDKITE_AGENT_ENDPOINT
+            - GIT_CONFIG_COUNT=1
+            - GIT_CONFIG_KEY_0=safe.directory
+            - GIT_CONFIG_VALUE_0=/workdir
+            - UV_INDEX_RBLN_USERNAME
+            - UV_INDEX_RBLN_PASSWORD
+            - UV_INDEX_RBLN_NIGHTLY_USERNAME
+            - UV_INDEX_RBLN_NIGHTLY_PASSWORD
+            - UV_INDEX_RBLN_INTERNAL_USERNAME
+            - UV_INDEX_RBLN_INTERNAL_PASSWORD
+          propagate-environment: true
+          chown: true
+          chown-image: *build-image
+          mount-buildkite-agent: true
+    # The aarch64 wheels are optional: when this step fails, its wheel is
+    # neither published nor promoted.
+    soft_fail: true
+    timeout_in_minutes: 30
