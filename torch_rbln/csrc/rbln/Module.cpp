@@ -6,6 +6,7 @@
 #include <c10/rbln/DeviceMappingManager.h>
 #include <c10/rbln/RBLNFallbackConfig.h>
 #include <c10/rbln/RBLNFunctions.h>
+#include <c10/rbln/RBLNGenerator.h>
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNSupportedDtypes.h>
@@ -157,6 +158,17 @@ void register_public_device_api(py::module_& module) {
       "_get_device_topology",
       []() -> c10::rbln::DeviceTopology { return c10::rbln::DeviceMappingManager::getInstance().getDeviceTopology(); },
       "Get the complete device topology.");
+
+  module.def(
+      "get_default_generator",
+      &c10::rbln::get_default_rbln_generator,
+      py::arg("device_index") = -1,
+      "Get the default generator of an RBLN device, creating it on first use.");
+  module.def(
+      "manual_seed_all",
+      &c10::rbln::manual_seed_all,
+      py::arg("seed"),
+      "Seed the default generator of every RBLN device, including ones created later.");
 }
 
 /**
@@ -294,6 +306,22 @@ void register_internal_api(py::module_& module) {
         return at::native::rbln::create_owning_tensor_from_ptr(base_ptr, base_ptr + offset, sizes, dtype);
       },
       "Internal: import a dma-buf fd as an owning RBLN tensor viewing (offset, sizes, dtype)");
+
+  // Used by torch_rbln.host_register() / host_unregister().
+  module.def(
+      "_host_register",
+      [](c10::DeviceIndex device_index, uintptr_t host_ptr, size_t nbytes) {
+        return c10::rbln::host_register(
+            device_index, reinterpret_cast<const void*>(host_ptr), nbytes); // NOLINT(performance-no-int-to-ptr)
+      },
+      "Internal: pin a host range for DMA on a device");
+  module.def(
+      "_host_unregister",
+      [](c10::DeviceIndex device_index, uintptr_t host_ptr) {
+        c10::rbln::host_unregister(
+            device_index, reinterpret_cast<const void*>(host_ptr)); // NOLINT(performance-no-int-to-ptr)
+      },
+      "Internal: unpin a host range registered with _host_register");
 
   // Set target's device-allocation layout to match ref's, without copying data.
   // Used by torch_rbln.set_device_layout_like().

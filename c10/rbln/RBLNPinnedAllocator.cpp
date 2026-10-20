@@ -1,3 +1,4 @@
+#include <ATen/core/CachingHostAllocator.h>
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNPinnedAllocator.h>
 
@@ -5,6 +6,7 @@
 #include <unistd.h>
 
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <mutex>
 
@@ -37,7 +39,10 @@ void raw_pinned_delete(void* data) {
   std::free(data); // NOLINT(cppcoreguidelines-no-malloc)
 }
 
-struct RBLNPinnedAllocator final : public c10::Allocator {
+// Registered as the PrivateUse1 host allocator, the slot the device-generic host APIs
+// (`torch.accelerator.empty_host_cache()`) read. torch 2.13 dereferences that slot without
+// a null check, so leaving it empty is a segfault there (pytorch/pytorch#197593).
+struct RBLNPinnedAllocator final : public at::HostAllocator {
   /**
    * @brief Allocates page-aligned host memory and page-locks it (best effort).
    *
@@ -71,13 +76,36 @@ struct RBLNPinnedAllocator final : public c10::Allocator {
       std::memcpy(dst_data, src_data, nbytes);
     }
   }
+
+  // Nothing is cached: a freed block goes straight back to free(), so no block outlives its
+  // tensor for a stream to still be using and there is nothing to release. No counters are
+  // kept, so the stats read zero.
+  bool record_event(void* ptr, void* /*ctx*/, c10::Stream /*stream*/) override {
+    return is_pinned_ptr(ptr);
+  }
+
+  void empty_cache() override {}
+
+  at::HostStats get_stats() override {
+    return {};
+  }
+
+  void reset_accumulated_stats() override {}
+
+  void reset_peak_stats() override {}
 };
+
+RBLNPinnedAllocator* pinned_allocator() {
+  static RBLNPinnedAllocator allocator;
+  return &allocator;
+}
+
+REGISTER_HOST_ALLOCATOR(at::kPrivateUse1, pinned_allocator())
 
 } // namespace
 
 c10::Allocator* get_pinned_memory_allocator() {
-  static RBLNPinnedAllocator allocator;
-  return &allocator;
+  return pinned_allocator();
 }
 
 bool is_pinned_ptr(const void* data) {

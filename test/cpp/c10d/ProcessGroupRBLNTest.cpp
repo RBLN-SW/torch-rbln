@@ -27,7 +27,7 @@
 #include <torch/torch.h>
 
 // RBLN includes
-#include <aten/src/ATen/native/rbln/RBLNTensorUtils.h>
+#include <ATen/native/rbln/RBLNTensorUtils.h>
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNLogging.h>
 #include <torch_rbln/csrc/distributed/c10d/rbln/ProcessGroupRBLN.hpp>

@@ -1,3 +1,4 @@
+#include <ATen/core/CachingHostAllocator.h>
 #include <c10/rbln/RBLNPinnedAllocator.h>
 #include <gtest/gtest.h>
 
@@ -48,4 +49,19 @@ TEST_F(RBLNPinnedAllocatorTest, ZeroByteAllocationIsNull) {
   auto data_ptr = c10::rbln::get_pinned_memory_allocator()->allocate(0);
   EXPECT_EQ(data_ptr.get(), nullptr);
   EXPECT_FALSE(c10::rbln::is_pinned_ptr(data_ptr.get()));
+}
+
+TEST_F(RBLNPinnedAllocatorTest, RegisteredAsPrivateUse1HostAllocator) {
+  auto* host_allocator = at::getHostAllocator(c10::DeviceType::PrivateUse1);
+  ASSERT_EQ(static_cast<c10::Allocator*>(host_allocator), c10::rbln::get_pinned_memory_allocator());
+
+  auto data_ptr = host_allocator->allocate(256);
+  const c10::Stream stream(c10::Stream::DEFAULT, c10::Device(c10::DeviceType::PrivateUse1, 0));
+  EXPECT_TRUE(host_allocator->record_event(data_ptr.get(), data_ptr.get_context(), stream));
+  int local = 0;
+  EXPECT_FALSE(host_allocator->record_event(&local, nullptr, stream));
+
+  // The allocator caches nothing, so emptying the cache must leave a live block pinned.
+  host_allocator->empty_cache();
+  EXPECT_TRUE(c10::rbln::is_pinned_ptr(data_ptr.get()));
 }

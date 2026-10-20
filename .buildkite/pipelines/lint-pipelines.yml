@@ -1,0 +1,16 @@
+env:
+  TORCH_RBLN_QUEUE_DEFAULT: ${TORCH_RBLN_QUEUE_DEFAULT?}
+
+common:
+  test-image: &test-image >-
+    harbor.k8s.rebellions.in/rebellions-sw/rbln-test:0.12.0rc0-ubuntu24.04-py3.12
+
+steps:
+  - label: Lint pipelines
+    key: lint-pipelines
+    command: |
+      .buildkite/scripts/lint/lint-pipelines.sh
+    agents:
+      queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
+    timeout_in_minutes: 5
+    image: *test-image
