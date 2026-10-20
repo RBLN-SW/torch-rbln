@@ -15,6 +15,8 @@ notify:
 common:
   test-image: &test-image >-
     harbor.k8s.rebellions.in/rebellions-sw/rbln-test:0.12.0rc0-ubuntu24.04-py3.12
+  python-versions: &python-versions
+    - "3.12"
 
 steps:
   - group: Lint
@@ -30,7 +32,9 @@ steps:
         timeout_in_minutes: 5
         image: *test-image
 
-      - label: Upload source lint steps (py3.12, x86_64, Release)
+      - label: >-
+          Upload source lint steps (py{{matrix.python}}, x86_64,
+          {{matrix.build_type}})
         key: upload-source-lint-steps-x86_64
         command: |
           buildkite-agent pipeline upload \
@@ -38,16 +42,21 @@ steps:
         agents:
           queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
         env:
-          TORCH_RBLN_PYTHON_VERSION: "3.12"
-          TORCH_RBLN_BUILD_TYPE: Release
+          TORCH_RBLN_PYTHON_VERSION: "{{matrix.python}}"
+          TORCH_RBLN_BUILD_TYPE: "{{matrix.build_type}}"
           TORCH_RBLN_LINT_BASE: ""
+        matrix:
+          setup:
+            python: *python-versions
+            build_type:
+              - Release
         timeout_in_minutes: 5
         image: *test-image
 
   - group: Wheel builds (x86_64, Release)
     key: wheel-builds-x86_64-Release
     steps:
-      - label: Upload wheel build steps (py3.12, x86_64, Release)
+      - label: Upload wheel build steps (py{{matrix.python}}, x86_64, Release)
         key: upload-wheel-build-steps-x86_64-Release
         command: |
           buildkite-agent pipeline upload \
@@ -55,9 +64,12 @@ steps:
         agents:
           queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
         env:
-          TORCH_RBLN_PYTHON_VERSION: "3.12"
+          TORCH_RBLN_PYTHON_VERSION: "{{matrix.python}}"
           TORCH_RBLN_BUILD_TYPE: Release
-          TORCH_RBLN_ARTIFACT_DIR: torch-rbln-py3.12-x86_64-Release
+          TORCH_RBLN_ARTIFACT_DIR: torch-rbln-py{{matrix.python}}-x86_64-Release
+        matrix:
+          setup:
+            python: *python-versions
         timeout_in_minutes: 5
         image: *test-image
 
@@ -66,7 +78,9 @@ steps:
     depends_on:
       - wheel-builds-x86_64-Release
     steps:
-      - label: Upload wheel publishing steps (py3.12, x86_64, Release)
+      - label: >-
+          Upload wheel publishing steps (py{{matrix.python}}, x86_64,
+          Release)
         key: upload-wheel-publishing-steps-x86_64-Release
         command: |
           buildkite-agent pipeline upload \
@@ -74,11 +88,14 @@ steps:
         agents:
           queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
         env:
-          TORCH_RBLN_PYTHON_VERSION: "3.12"
+          TORCH_RBLN_PYTHON_VERSION: "{{matrix.python}}"
           TORCH_RBLN_CPU_ARCHITECTURE: x86_64
           TORCH_RBLN_BUILD_TYPE: Release
           TORCH_RBLN_ARTIFACT_BUILD_ID: ${BUILDKITE_BUILD_ID}
-          TORCH_RBLN_ARTIFACT_DIR: torch-rbln-py3.12-x86_64-Release
+          TORCH_RBLN_ARTIFACT_DIR: torch-rbln-py{{matrix.python}}-x86_64-Release
+        matrix:
+          setup:
+            python: *python-versions
         timeout_in_minutes: 5
         image: *test-image
 
@@ -87,8 +104,10 @@ steps:
     depends_on:
       - wheel-builds-x86_64-Release
     steps:
-      - label: Upload C++ test build steps (py3.12, x86_64, Release)
-        key: upload-cpp-test-build-steps-x86_64-Release
+      - label: >-
+          Upload C++ test build steps (py3.12, x86_64,
+          {{matrix.build_type}})
+        key: upload-cpp-test-build-steps-x86_64
         command: |
           buildkite-agent pipeline upload \
             .buildkite/pipelines/build-cpp-test-binaries.amd64.yml
@@ -96,32 +115,44 @@ steps:
           queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
         env:
           TORCH_RBLN_PYTHON_VERSION: "3.12"
-          TORCH_RBLN_BUILD_TYPE: Release
+          TORCH_RBLN_BUILD_TYPE: "{{matrix.build_type}}"
           TORCH_RBLN_ARTIFACT_BUILD_ID: ${BUILDKITE_BUILD_ID}
-          TORCH_RBLN_ARTIFACT_DIR: torch-rbln-py3.12-x86_64-Release
+          TORCH_RBLN_ARTIFACT_DIR: >-
+            torch-rbln-py3.12-x86_64-{{matrix.build_type}}
           TORCH_RBLN_CPP_TEST_ARCHIVE: >-
-            cpp-test-binaries-py3.12-x86_64-Release.tar.gz
+            cpp-test-binaries-py3.12-x86_64-{{matrix.build_type}}.tar.gz
+        matrix:
+          setup:
+            build_type:
+              - Release
         timeout_in_minutes: 5
         image: *test-image
 
-      - label: Upload C++ test steps (py3.12, x86_64, Release, RBLN-CA25)
-        key: upload-cpp-test-steps-x86_64-Release-RBLN-CA25
+      - label: >-
+          Upload C++ test steps (py3.12, x86_64, {{matrix.build_type}},
+          RBLN-CA25)
+        key: upload-cpp-test-steps-x86_64-RBLN-CA25
         command: |
           buildkite-agent pipeline upload \
             .buildkite/pipelines/run-cpp-tests.amd64.yml
         agents:
           queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
         depends_on:
-          - upload-cpp-test-build-steps-x86_64-Release
+          - upload-cpp-test-build-steps-x86_64
         env:
           TORCH_RBLN_QUEUE_AMD64_NPU: ${TORCH_RBLN_QUEUE_AMD64_CA25?}
           TORCH_RBLN_PYTHON_VERSION: "3.12"
-          TORCH_RBLN_BUILD_TYPE: Release
+          TORCH_RBLN_BUILD_TYPE: "{{matrix.build_type}}"
           TORCH_RBLN_ARTIFACT_BUILD_ID: ${BUILDKITE_BUILD_ID}
-          TORCH_RBLN_ARTIFACT_DIR: torch-rbln-py3.12-x86_64-Release
+          TORCH_RBLN_ARTIFACT_DIR: >-
+            torch-rbln-py3.12-x86_64-{{matrix.build_type}}
           TORCH_RBLN_CPP_TEST_ARCHIVE: >-
-            cpp-test-binaries-py3.12-x86_64-Release.tar.gz
+            cpp-test-binaries-py3.12-x86_64-{{matrix.build_type}}.tar.gz
           TORCH_RBLN_NPU_PRODUCT: RBLN-CA25
+        matrix:
+          setup:
+            build_type:
+              - Release
         timeout_in_minutes: 5
         image: *test-image
 
@@ -130,8 +161,10 @@ steps:
     depends_on:
       - wheel-builds-x86_64-Release
     steps:
-      - label: Upload Python test steps (py3.12, x86_64, Release, RBLN-CA25)
-        key: upload-python-test-steps-x86_64-Release-RBLN-CA25
+      - label: >-
+          Upload Python test steps (py3.12, x86_64, {{matrix.build_type}},
+          RBLN-CA25)
+        key: upload-python-test-steps-x86_64-RBLN-CA25
         command: |
           buildkite-agent pipeline upload \
             .buildkite/pipelines/run-python-tests.amd64.yml
@@ -140,11 +173,18 @@ steps:
         env:
           TORCH_RBLN_QUEUE_AMD64_NPU: ${TORCH_RBLN_QUEUE_AMD64_CA25?}
           TORCH_RBLN_PYTHON_VERSION: "3.12"
-          TORCH_RBLN_BUILD_TYPE: Release
+          TORCH_RBLN_BUILD_TYPE: "{{matrix.build_type}}"
           TORCH_RBLN_ARTIFACT_BUILD_ID: ${BUILDKITE_BUILD_ID}
-          TORCH_RBLN_ARTIFACT_DIR: torch-rbln-py3.12-x86_64-Release
+          TORCH_RBLN_ARTIFACT_DIR: >-
+            torch-rbln-py3.12-x86_64-{{matrix.build_type}}
           TORCH_RBLN_NPU_PRODUCT: RBLN-CA25
           TORCH_RBLN_TEST_MODE: ci
-          TORCH_RBLN_TEST_SUITES: core,distributed,ops,models
+          TORCH_RBLN_TEST_SUITES: "{{matrix.test_suites}}"
+        matrix:
+          setup:
+            build_type:
+              - Release
+            test_suites:
+              - core,distributed,ops,models
         timeout_in_minutes: 5
         image: *test-image
