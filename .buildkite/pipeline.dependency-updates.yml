@@ -1,0 +1,31 @@
+env:
+  TORCH_RBLN_QUEUE_DEFAULT: ${TORCH_RBLN_QUEUE_DEFAULT?}
+
+common:
+  test-image: &test-image >-
+    harbor.k8s.rebellions.in/rebellions-sw/rbln-test:0.12.0rc0-ubuntu24.04-py3.12
+  index-secrets: &index-secrets
+    UV_INDEX_RBLN_USERNAME: REBEL_SW_DEV_USERNAME
+    UV_INDEX_RBLN_PASSWORD: REBEL_SW_DEV_PASSWORD
+    UV_INDEX_RBLN_NIGHTLY_USERNAME: MGMT_NEXUS_USERNAME
+    UV_INDEX_RBLN_NIGHTLY_PASSWORD: MGMT_NEXUS_PASSWORD
+    UV_INDEX_RBLN_INTERNAL_USERNAME: REBEL_SW_DEV_USERNAME
+    UV_INDEX_RBLN_INTERNAL_PASSWORD: REBEL_SW_DEV_PASSWORD
+
+steps:
+  - group: Dependency updates
+    key: dependency-updates
+    steps:
+      - label: Update rebel-compiler dependency
+        key: update-rebel-compiler-dependency
+        command: |
+          .buildkite/scripts/update-rebel-compiler-dependency.sh
+        agents:
+          queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
+        env:
+          GH_REPO: RBLN-SW/torch-rbln
+        secrets:
+          GH_TOKEN: GIT_PAT
+          <<: *index-secrets
+        timeout_in_minutes: 5
+        image: *test-image

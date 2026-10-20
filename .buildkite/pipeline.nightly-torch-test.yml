@@ -1,0 +1,55 @@
+env:
+  TORCH_RBLN_QUEUE_DEFAULT: ${TORCH_RBLN_QUEUE_DEFAULT?}
+  TORCH_RBLN_QUEUE_AMD64: ${TORCH_RBLN_QUEUE_AMD64?}
+  TORCH_RBLN_QUEUE_AMD64_CR13: ${TORCH_RBLN_QUEUE_AMD64_CR13?}
+  TORCH_RBLN_PYTHON_VERSION: ${TORCH_RBLN_PYTHON_VERSION:-3.12}
+  TORCH_RBLN_TORCH_VERSION: ${TORCH_RBLN_TORCH_VERSION:-}
+
+common:
+  test-image: &test-image >-
+    harbor.k8s.rebellions.in/rebellions-sw/rbln-test:0.12.0rc0-ubuntu24.04-py3.12
+
+steps:
+  - group: Wheel builds (x86_64, Release)
+    key: wheel-builds-x86_64-Release
+    steps:
+      - label: >-
+          Upload wheel build steps (py${TORCH_RBLN_PYTHON_VERSION?}, x86_64,
+          Release)
+        key: upload-wheel-build-steps-x86_64-Release
+        command: |
+          buildkite-agent pipeline upload \
+            .buildkite/pipelines/build-wheel-nightly-torch.amd64.yml
+        agents:
+          queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
+        env:
+          TORCH_RBLN_ARTIFACT_DIR: >-
+            torch-rbln-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-Release
+        timeout_in_minutes: 5
+        image: *test-image
+
+  - group: Python tests
+    key: python-tests
+    depends_on:
+      - wheel-builds-x86_64-Release
+    steps:
+      - label: >-
+          Upload Python test steps (py${TORCH_RBLN_PYTHON_VERSION?}, x86_64,
+          Release, RBLN-CR13)
+        key: upload-python-test-steps-x86_64-Release-RBLN-CR13
+        command: |
+          buildkite-agent pipeline upload \
+            .buildkite/pipelines/run-python-tests.amd64.yml
+        agents:
+          queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
+        env:
+          TORCH_RBLN_QUEUE_AMD64_NPU: ${TORCH_RBLN_QUEUE_AMD64_CR13?}
+          TORCH_RBLN_BUILD_TYPE: Release
+          TORCH_RBLN_ARTIFACT_BUILD_ID: ${BUILDKITE_BUILD_ID}
+          TORCH_RBLN_ARTIFACT_DIR: >-
+            torch-rbln-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-Release
+          TORCH_RBLN_NPU_PRODUCT: RBLN-CR13
+          TORCH_RBLN_TEST_MODE: ci
+          TORCH_RBLN_TEST_SUITES: core
+        timeout_in_minutes: 5
+        image: *test-image

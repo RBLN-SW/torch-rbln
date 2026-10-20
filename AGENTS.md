@@ -10,7 +10,7 @@ These documents own their subjects. Read them rather than duplicating them here:
 | Environment variables and runtime options                  | `docs/CONFIGURATION.md`      |
 | Lint setup and commands                                    | `docs/LINTING.md`            |
 | PR process, issue labels, merge policy                     | `docs/CONTRIBUTING.md`       |
-| CI and release lanes                                       | `docs/WORKFLOWS.md`          |
+| CI and release lanes                                       | `docs/PIPELINES.md`          |
 | PyTorch pin, vendored upstream files, rebel-compiler bumps | `docs/THIRD_PARTY_UPDATE.md` |
 
 ## Terms
@@ -39,7 +39,7 @@ Two questions come before any change, and getting either wrong wastes the whole 
 - **Do not work around a layer-3 defect in layer 1 or 2.** A guard that makes a compiler or runtime bug invisible hides it from the team that can fix it and stays here permanently.
 - When it is layer 3: reduce it to a minimal reproducer, report it to the rebel-compiler team, and say so in the PR. If the failure is architecture-specific, `xfail_rebel` / `xfail_atom` (`test/utils.py`) mark it strictly, so it fails again once the bug is fixed. A failure that is not architecture-specific does not get parked — it stays visible.
 - **The boundary runs both ways — before building machinery here, check what the pinned runtime already does.**
-- **Bump the pin when your change needs it; leave it alone when only your experiment did.** Raising the pin in the PR that requires a newer compiler is normal here — say in the body what the change needs from it. Move it with `tools/pin_rebel_compiler.py`, then `uv lock` (`docs/THIRD_PARTY_UPDATE.md`). What does not belong is a pin you moved while trying versions, or a local-wheel path some tool wrote into `pyproject.toml` and `uv.lock`. A scheduled workflow also proposes bumps on its own, so an unexplained one reads as noise.
+- **Bump the pin when your change needs it; leave it alone when only your experiment did.** Raising the pin in the PR that requires a newer compiler is normal here — say in the body what the change needs from it. Move it with `tools/pin_rebel_compiler.py`, then `uv lock` (`docs/THIRD_PARTY_UPDATE.md`). What does not belong is a pin you moved while trying versions, or a local-wheel path some tool wrote into `pyproject.toml` and `uv.lock`. A scheduled pipeline also proposes bumps on its own, so an unexplained one reads as noise.
 - To settle which layer it is, install a different `rebel-compiler` version and rebuild. Building against a compiler source checkout is heavier and mutates this tree — ask first, and use a worktree you can throw away.
 
 **Is this file generated?** These are build outputs; the edit disappears on the next build.
@@ -67,7 +67,7 @@ uv pip install -e . --no-build-isolation                   # rebuild — see bel
 
 **A change under `aten/`, `c10/`, `torch_rbln/csrc/`, `CMakeLists.txt`, or `native_functions.yaml` does not reach your interpreter until you rebuild.** The build needs `rebel-compiler` present at the pin, installed with `uv sync --locked --no-install-project` (`./tools/dev-setup.sh pypi` if you cannot authenticate to the index `uv.lock` names). A link error naming `rbln::` symbols means the installed one is older than the pin — install the pinned version rather than changing code to match what you have. An `AttributeError` for a missing `torch_rbln._C` attribute means the opposite: the built extension is older than the Python tree, which is what a branch switch leaves behind. An `RBLN ABI mismatch` is a third shape — the snapshot this build recorded and the loaded `librbln.so` disagree.
 
-Skip the rebuild and pytest loads the previously built `torch_rbln/_C` and `torch_rbln/lib/*.so`: the run tests the old code and its result means nothing. A bare `ninja -C build` stages nothing into `torch_rbln/`; the install step does. The build needs GCC 13 or newer (`CC=gcc-13 CXX=g++-13`), enforced by `cmake/FindTorch.cmake`.
+Skip the rebuild and pytest loads the previously built `torch_rbln/_C` and `torch_rbln/lib/*.so`: the run tests the old code and its result means nothing. A bare `ninja -C build` stages nothing into `torch_rbln/`; the install step does. The build needs GCC 13 or newer (`CC=gcc-13 CXX=g++-13`), enforced by `cmake/FindTorch.cmake`. To change the number of parallel build jobs in the install step, set `CMAKE_BUILD_PARALLEL_LEVEL`.
 
 Verify the rebuild actually took before trusting any result. An install can skip the build step and leave the previous binary in place while reporting success; grepping the built artifact for a string only your change introduces is the cheap check.
 

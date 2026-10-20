@@ -1,0 +1,114 @@
+env:
+  TORCH_RBLN_QUEUE_DEFAULT: ${TORCH_RBLN_QUEUE_DEFAULT?}
+  TORCH_RBLN_QUEUE_AMD64: ${TORCH_RBLN_QUEUE_AMD64?}
+  TORCH_RBLN_VERSION_TAG: ${TORCH_RBLN_VERSION_TAG:-}
+  TORCH_RBLN_RELEASE_WHEELS: ${TORCH_RBLN_RELEASE_WHEELS:-true}
+
+common:
+  release-wheels: &release-wheels >-
+    "${TORCH_RBLN_RELEASE_WHEELS?}" == "true"
+  test-image: &test-image >-
+    harbor.k8s.rebellions.in/rebellions-sw/rbln-test:0.12.0rc0-ubuntu24.04-py3.12
+  python-versions: &python-versions
+    - "3.10"
+    - "3.11"
+    - "3.12"
+    - "3.13"
+    - "3.14"
+
+steps:
+  - group: Release
+    key: release
+    steps:
+      - label: Create release
+        key: create-release
+        command: |
+          .buildkite/scripts/release/create-release.py
+        agents:
+          queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
+        env:
+          GH_REPO: RBLN-SW/torch-rbln
+        secrets:
+          GH_TOKEN: GIT_PAT
+        timeout_in_minutes: 5
+        image: *test-image
+
+  - group: Wheel builds (x86_64, Release)
+    key: wheel-builds-x86_64-Release
+    depends_on:
+      - release
+    steps:
+      - label: Upload wheel build steps (py{{matrix.python}}, x86_64, Release)
+        key: upload-wheel-build-steps-x86_64-Release
+        command: |
+          buildkite-agent pipeline upload \
+            .buildkite/pipelines/build-wheel.amd64.yml
+        agents:
+          queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
+        env:
+          TORCH_RBLN_PYTHON_VERSION: "{{matrix.python}}"
+          TORCH_RBLN_BUILD_TYPE: Release
+          TORCH_RBLN_ARTIFACT_DIR: torch-rbln-py{{matrix.python}}-x86_64-Release
+        if: *release-wheels
+        matrix:
+          setup:
+            python: *python-versions
+        timeout_in_minutes: 5
+        image: *test-image
+
+  - group: Wheel publishing (x86_64, Release)
+    key: wheel-publishing-x86_64-Release
+    depends_on:
+      - wheel-builds-x86_64-Release
+    steps:
+      - label: >-
+          Upload wheel publishing steps (py{{matrix.python}}, x86_64,
+          Release)
+        key: upload-wheel-publishing-steps-x86_64-Release
+        command: |
+          buildkite-agent pipeline upload \
+            .buildkite/pipelines/publish-wheel.yml
+        agents:
+          queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
+        env:
+          TORCH_RBLN_PYTHON_VERSION: "{{matrix.python}}"
+          TORCH_RBLN_CPU_ARCHITECTURE: x86_64
+          TORCH_RBLN_BUILD_TYPE: Release
+          TORCH_RBLN_ARTIFACT_BUILD_ID: ${BUILDKITE_BUILD_ID}
+          TORCH_RBLN_ARTIFACT_DIR: torch-rbln-py{{matrix.python}}-x86_64-Release
+        if: *release-wheels
+        matrix:
+          setup:
+            python: *python-versions
+        timeout_in_minutes: 5
+        image: *test-image
+
+  - group: Promotion
+    key: promotion
+    depends_on:
+      - wheel-publishing-x86_64-Release
+    steps:
+      - label: >-
+          Upload promotion steps (py{{matrix.python}},
+          {{matrix.cpu_architecture}}, Release)
+        key: upload-promotion-steps
+        command: |
+          buildkite-agent pipeline upload \
+            .buildkite/pipelines/promote-wheel.yml
+        agents:
+          queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
+        env:
+          TORCH_RBLN_PYTHON_VERSION: "{{matrix.python}}"
+          TORCH_RBLN_CPU_ARCHITECTURE: "{{matrix.cpu_architecture}}"
+          TORCH_RBLN_BUILD_TYPE: Release
+          TORCH_RBLN_ARTIFACT_BUILD_ID: ${BUILDKITE_BUILD_ID}
+          TORCH_RBLN_ARTIFACT_DIR: >-
+            torch-rbln-py{{matrix.python}}-{{matrix.cpu_architecture}}-Release
+        if: *release-wheels
+        matrix:
+          setup:
+            python: *python-versions
+            cpu_architecture:
+              - x86_64
+        timeout_in_minutes: 5
+        image: *test-image

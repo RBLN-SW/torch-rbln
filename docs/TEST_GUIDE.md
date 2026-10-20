@@ -577,6 +577,8 @@ To add a new C++ test:
 2. Add it to `test/cpp/CMakeLists.txt` in the `sources` list.
 3. Rebuild with `uv pip install -e . --no-build-isolation`.
 
+CI runs all the tests of a binary in one process, whereas `ctest` runs each test in its own process, so a test must not depend on starting in a fresh process.
+
 ### Parametrization Best Practices
 
 Use `@parametrize` from `torch.testing._internal.common_utils` — **not** `pytest.mark.parametrize`. The PyTorch decorator integrates with `instantiate_device_type_tests()` and produces correctly suffixed test names.
@@ -708,26 +710,22 @@ torch._dynamo.exc.InternalTorchDynamoError: ...
 
 ## 8. CI/CD Integration
 
-Tests in this project run automatically as part of the CI/CD pipeline via GitHub Actions. Understanding how the automated workflows interact with the test infrastructure helps you write tests that work correctly in both local and CI environments.
-
-For the full workflow architecture, see [Workflows](WORKFLOWS.md).
-
 ### How Tests Run in CI
 
-The [pre-merge checks](WORKFLOWS.md#pre-merge-checks) trigger on every pull request, and the [post-merge checks](WORKFLOWS.md#post-merge-checks) on every push to `main`. Both run `run_tests.py` in CI mode:
+The [pre-merge and post-merge checks](PIPELINES.md#checks) run `run_tests.py` in CI mode:
 
 ```bash
-python test/run_tests.py  # -m "test_set_ci"
+python test/run_tests.py --suite=<suite>  # -m "test_set_ci"
 ```
 
 This means only tests marked with `@pytest.mark.test_set_ci` are selected. **Without it, the pre-merge checks never run the test.**
 
 ### How Tests Run in Release
 
-The [release checks](WORKFLOWS.md#release-checks) run daily against `main`. They run `run_tests.py` in release mode:
+The [release checks](PIPELINES.md#release-checks) run `run_tests.py` in release mode:
 
 ```bash
-python test/run_tests.py --test_mode=release  # -m "not (test_set_experimental or test_set_perf)"
+python test/run_tests.py --suite=<suite> --test_mode=release  # -m "not (test_set_experimental or test_set_perf)"
 ```
 
 This selects a broader set of tests — everything except tests marked `test_set_experimental` or `test_set_perf`.
@@ -789,7 +787,7 @@ fraction of a second.
 Test set markers operate on two orthogonal dimensions:
 
 - **Stability stage**: `test_set_experimental` ($E$) vs. release-eligible ($R$) — intended to be mutually exclusive by convention
-- **Execution scope**: `test_set_ci` ($C$), `test_set_perf` ($P$), or unmarked — determines which workflow selects the test
+- **Execution scope**: `test_set_ci` ($C$), `test_set_perf` ($P$), or unmarked — determines which pipeline selects the test
 
 In the intended design, these dimensions satisfy three invariants:
 * $E \cap R = \emptyset$
@@ -824,13 +822,3 @@ The first expresses the design intent that experimental and release-eligible tes
 | unmarked $\cap\; R$ | *(none)*                                  | ❌ | ❌   | ✅      |
 
 > **Reading the table:** CI mode selects $C$ (`-m "test_set_ci"`), so only rows containing $C$ run. Release mode selects $\neg E \land \neg P$ (`-m "not (test_set_experimental or test_set_perf)"`), so it picks up $C \cap R$ and unmarked $\cap\; R$ — everything stable that isn't a benchmark. The diagonal pattern (✅ in CI ↔ ❌ in Release for $C \cap E$) is the mechanism that lets experimental features get CI validation without blocking releases.
-
-### Remote Execution
-
-All CI and release tests execute on remote infrastructure with access to
-physical RBLN NPU devices. Results are reported back as PR status checks. This
-means:
-
-- Tests that require NPU hardware **will** have device access in CI.
-- Test failures appear directly on the pull request as failed status checks.
-- You can manually trigger a workflow run via `workflow_dispatch` if you need to re-run tests for a specific commit.

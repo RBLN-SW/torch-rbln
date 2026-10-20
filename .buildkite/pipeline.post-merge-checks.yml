@@ -1,0 +1,150 @@
+env:
+  TORCH_RBLN_COMMIT_STATUS: ${TORCH_RBLN_COMMIT_STATUS:-false}
+  TORCH_RBLN_QUEUE_DEFAULT: ${TORCH_RBLN_QUEUE_DEFAULT?}
+  TORCH_RBLN_QUEUE_AMD64: ${TORCH_RBLN_QUEUE_AMD64?}
+  TORCH_RBLN_QUEUE_AMD64_CA25: ${TORCH_RBLN_QUEUE_AMD64_CA25?}
+
+notify:
+  - github_commit_status:
+      context: Post-merge checks
+    if: >-
+      "${BUILDKITE_SOURCE}" == "webhook"
+      || "${BUILDKITE_SOURCE}" == "schedule"
+      || "${TORCH_RBLN_COMMIT_STATUS?}" == "true"
+
+common:
+  test-image: &test-image >-
+    harbor.k8s.rebellions.in/rebellions-sw/rbln-test:0.12.0rc0-ubuntu24.04-py3.12
+
+steps:
+  - group: Lint
+    key: lint
+    steps:
+      - label: Upload pipeline lint steps
+        key: upload-pipeline-lint-steps
+        command: |
+          buildkite-agent pipeline upload \
+            .buildkite/pipelines/lint-pipelines.yml
+        agents:
+          queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
+        timeout_in_minutes: 5
+        image: *test-image
+
+      - label: Upload source lint steps (py3.12, x86_64, Release)
+        key: upload-source-lint-steps-x86_64
+        command: |
+          buildkite-agent pipeline upload \
+            .buildkite/pipelines/lint-source.amd64.yml
+        agents:
+          queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
+        env:
+          TORCH_RBLN_PYTHON_VERSION: "3.12"
+          TORCH_RBLN_BUILD_TYPE: Release
+          TORCH_RBLN_LINT_BASE: ""
+        timeout_in_minutes: 5
+        image: *test-image
+
+  - group: Wheel builds (x86_64, Release)
+    key: wheel-builds-x86_64-Release
+    steps:
+      - label: Upload wheel build steps (py3.12, x86_64, Release)
+        key: upload-wheel-build-steps-x86_64-Release
+        command: |
+          buildkite-agent pipeline upload \
+            .buildkite/pipelines/build-wheel.amd64.yml
+        agents:
+          queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
+        env:
+          TORCH_RBLN_PYTHON_VERSION: "3.12"
+          TORCH_RBLN_BUILD_TYPE: Release
+          TORCH_RBLN_ARTIFACT_DIR: torch-rbln-py3.12-x86_64-Release
+        timeout_in_minutes: 5
+        image: *test-image
+
+  - group: Wheel publishing (x86_64, Release)
+    key: wheel-publishing-x86_64-Release
+    depends_on:
+      - wheel-builds-x86_64-Release
+    steps:
+      - label: Upload wheel publishing steps (py3.12, x86_64, Release)
+        key: upload-wheel-publishing-steps-x86_64-Release
+        command: |
+          buildkite-agent pipeline upload \
+            .buildkite/pipelines/publish-wheel.yml
+        agents:
+          queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
+        env:
+          TORCH_RBLN_PYTHON_VERSION: "3.12"
+          TORCH_RBLN_CPU_ARCHITECTURE: x86_64
+          TORCH_RBLN_BUILD_TYPE: Release
+          TORCH_RBLN_ARTIFACT_BUILD_ID: ${BUILDKITE_BUILD_ID}
+          TORCH_RBLN_ARTIFACT_DIR: torch-rbln-py3.12-x86_64-Release
+        timeout_in_minutes: 5
+        image: *test-image
+
+  - group: C++ tests
+    key: cpp-tests
+    depends_on:
+      - wheel-builds-x86_64-Release
+    steps:
+      - label: Upload C++ test build steps (py3.12, x86_64, Release)
+        key: upload-cpp-test-build-steps-x86_64-Release
+        command: |
+          buildkite-agent pipeline upload \
+            .buildkite/pipelines/build-cpp-test-binaries.amd64.yml
+        agents:
+          queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
+        env:
+          TORCH_RBLN_PYTHON_VERSION: "3.12"
+          TORCH_RBLN_BUILD_TYPE: Release
+          TORCH_RBLN_ARTIFACT_BUILD_ID: ${BUILDKITE_BUILD_ID}
+          TORCH_RBLN_ARTIFACT_DIR: torch-rbln-py3.12-x86_64-Release
+          TORCH_RBLN_CPP_TEST_ARCHIVE: >-
+            cpp-test-binaries-py3.12-x86_64-Release.tar.gz
+        timeout_in_minutes: 5
+        image: *test-image
+
+      - label: Upload C++ test steps (py3.12, x86_64, Release, RBLN-CA25)
+        key: upload-cpp-test-steps-x86_64-Release-RBLN-CA25
+        command: |
+          buildkite-agent pipeline upload \
+            .buildkite/pipelines/run-cpp-tests.amd64.yml
+        agents:
+          queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
+        depends_on:
+          - upload-cpp-test-build-steps-x86_64-Release
+        env:
+          TORCH_RBLN_QUEUE_AMD64_NPU: ${TORCH_RBLN_QUEUE_AMD64_CA25?}
+          TORCH_RBLN_PYTHON_VERSION: "3.12"
+          TORCH_RBLN_BUILD_TYPE: Release
+          TORCH_RBLN_ARTIFACT_BUILD_ID: ${BUILDKITE_BUILD_ID}
+          TORCH_RBLN_ARTIFACT_DIR: torch-rbln-py3.12-x86_64-Release
+          TORCH_RBLN_CPP_TEST_ARCHIVE: >-
+            cpp-test-binaries-py3.12-x86_64-Release.tar.gz
+          TORCH_RBLN_NPU_PRODUCT: RBLN-CA25
+        timeout_in_minutes: 5
+        image: *test-image
+
+  - group: Python tests
+    key: python-tests
+    depends_on:
+      - wheel-builds-x86_64-Release
+    steps:
+      - label: Upload Python test steps (py3.12, x86_64, Release, RBLN-CA25)
+        key: upload-python-test-steps-x86_64-Release-RBLN-CA25
+        command: |
+          buildkite-agent pipeline upload \
+            .buildkite/pipelines/run-python-tests.amd64.yml
+        agents:
+          queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
+        env:
+          TORCH_RBLN_QUEUE_AMD64_NPU: ${TORCH_RBLN_QUEUE_AMD64_CA25?}
+          TORCH_RBLN_PYTHON_VERSION: "3.12"
+          TORCH_RBLN_BUILD_TYPE: Release
+          TORCH_RBLN_ARTIFACT_BUILD_ID: ${BUILDKITE_BUILD_ID}
+          TORCH_RBLN_ARTIFACT_DIR: torch-rbln-py3.12-x86_64-Release
+          TORCH_RBLN_NPU_PRODUCT: RBLN-CA25
+          TORCH_RBLN_TEST_MODE: ci
+          TORCH_RBLN_TEST_SUITES: core,distributed,ops,models
+        timeout_in_minutes: 5
+        image: *test-image
