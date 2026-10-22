@@ -13,8 +13,8 @@ supported-markers = [
 ]
 
 [manifest]
-constraints = [{ name = "rebel-compiler", specifier = "==0.12.1.dev163+g0c6d4a5e.prod" }]
-build-constraints = [{ name = "rebel-compiler", specifier = "==0.12.1.dev163+g0c6d4a5e.prod" }]
+constraints = [{ name = "rebel-compiler", specifier = "==0.12.1.dev228+gecc7b4ed.prod" }]
+build-constraints = [{ name = "rebel-compiler", specifier = "==0.12.1.dev228+gecc7b4ed.prod" }]
 
 [[package]]
 name = "attrs"
@@ -30,13 +30,13 @@ name = "black"
 version = "24.10.0"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "click" },
-    { name = "mypy-extensions" },
-    { name = "packaging" },
-    { name = "pathspec" },
-    { name = "platformdirs" },
-    { name = "tomli", marker = "python_full_version < '3.11'" },
-    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+    { name = "click", marker = "sys_platform == 'linux'" },
+    { name = "mypy-extensions", marker = "sys_platform == 'linux'" },
+    { name = "packaging", marker = "sys_platform == 'linux'" },
+    { name = "pathspec", marker = "sys_platform == 'linux'" },
+    { name = "platformdirs", marker = "sys_platform == 'linux'" },
+    { name = "tomli", marker = "python_full_version < '3.11' and sys_platform == 'linux'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11' and sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d8/0d/cc2fb42b8c50d80143221515dd7e4766995bd07c56c9a3ed30baf080b6dc/black-24.10.0.tar.gz", hash = "sha256:846ea64c97afe3bc677b761787993be4991810ecc7a4a937816dd6bddedc4875", size = 645813, upload-time = "2024-10-07T19:20:50.361Z" }
 wheels = [
@@ -61,7 +61,7 @@ name = "cffi"
 version = "2.1.1"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "pycparser", marker = "implementation_name != 'PyPy'" },
+    { name = "pycparser", marker = "implementation_name != 'PyPy' and sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/9e/ef/008a1939e372c06329a3fce4279c02f328488f3526744906eeec3da7ad5f/cffi-2.1.1.tar.gz", hash = "sha256:dd31f52ea1086513bb9df30f8fcee9b8918323ae067a3d5b78bc826a000712be", size = 530807, upload-time = "2026-08-03T21:21:18.939Z" }
 wheels = [
@@ -266,8 +266,8 @@ name = "cryptography"
 version = "50.0.1"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "cffi", marker = "platform_python_implementation != 'PyPy'" },
-    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+    { name = "cffi", marker = "platform_python_implementation != 'PyPy' and sys_platform == 'linux'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11' and sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/bb/ad/5d6702db60b1e40b41ef513b6967ff5848f307d50f8449baf1634f5908f1/cryptography-50.0.1.tar.gz", hash = "sha256:5dd9bda1c12b4162f6ff568eeb5e0ff956c28d14406e875cfe8a63a2d414ff20", size = 880381, upload-time = "2026-08-25T19:45:45.499Z" }
 wheels = [
@@ -333,7 +333,7 @@ name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "typing-extensions" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11' and sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/50/79/66800aadf48771f6b62f7eb014e352e5d06856655206165d775e675a02c9/exceptiongroup-1.3.1.tar.gz", hash = "sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219", size = 30371, upload-time = "2025-11-21T23:01:54.787Z" }
 wheels = [
@@ -372,9 +372,9 @@ name = "flake8"
 version = "6.1.0"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "mccabe" },
-    { name = "pycodestyle" },
-    { name = "pyflakes" },
+    { name = "mccabe", marker = "sys_platform == 'linux'" },
+    { name = "pycodestyle", marker = "sys_platform == 'linux'" },
+    { name = "pyflakes", marker = "sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/cf/f8/bbe24f43695c0c480181e39ce910c2650c794831886ec46ddd7c40520e6a/flake8-6.1.0.tar.gz", hash = "sha256:d5b3857f07c030bdb5bf41c7f53799571d75c4491748a3adcd47de929e34cd23", size = 48767, upload-time = "2023-07-29T19:05:05.665Z" }
 wheels = [
@@ -386,8 +386,8 @@ name = "flake8-bugbear"
 version = "24.12.12"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "attrs" },
-    { name = "flake8" },
+    { name = "attrs", marker = "sys_platform == 'linux'" },
+    { name = "flake8", marker = "sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c7/25/48ba712ff589b0149f21135234f9bb45c14d6689acc6151b5e2ff8ac2ae9/flake8_bugbear-24.12.12.tar.gz", hash = "sha256:46273cef0a6b6ff48ca2d69e472f41420a42a46e24b2a8972e4f0d6733d12a64", size = 82907, upload-time = "2024-12-12T16:49:26.307Z" }
 wheels = [
@@ -399,7 +399,7 @@ name = "flake8-comprehensions"
 version = "3.15.0"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "flake8" },
+    { name = "flake8", marker = "sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/60/fa/68481f25fc8ecdbe8a763062ba4f5b17fa4ef7fc0646c081267cef4f67e5/flake8_comprehensions-3.15.0.tar.gz", hash = "sha256:923c22603e0310376a6b55b03efebdc09753c69f2d977755cba8bb73458a5d4d", size = 13079, upload-time = "2024-06-29T22:29:49.972Z" }
 wheels = [
@@ -411,7 +411,7 @@ name = "flake8-executable"
 version = "2.1.3"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "flake8" },
+    { name = "flake8", marker = "sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/3b/41/f0687401d76d6031aa5fc447615e1a337308a9c5c586913f70c5a2abe832/flake8-executable-2.1.3.tar.gz", hash = "sha256:619fe023e00c3d8e5113521d7200e1ebb04587c12d157f9a2fb167feb8cae66b", size = 23035, upload-time = "2023-01-23T00:39:57.537Z" }
 wheels = [
@@ -429,8 +429,8 @@ name = "flake8-pyi"
 version = "23.3.1"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "flake8" },
-    { name = "pyflakes" },
+    { name = "flake8", marker = "sys_platform == 'linux'" },
+    { name = "pyflakes", marker = "sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/7f/fc/f0dd7143ea9c151110abd43894b6efd902e0834879c9faba19a012272090/flake8_pyi-23.3.1.tar.gz", hash = "sha256:1dff9766a68306ed04679bafeeed5096bd570b78367c042e13593d0f0e2589cf", size = 47994, upload-time = "2023-03-20T16:51:00.01Z" }
 wheels = [
@@ -442,7 +442,7 @@ name = "flake8-simplify"
 version = "0.30.0"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "flake8" },
+    { name = "flake8", marker = "sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f0/33/c41fa08469da7586d1076d755ea713c7113e9f0215b6b4dbbedfcc147c95/flake8_simplify-0.30.0.tar.gz", hash = "sha256:61bff74fab73884e1ec12e472d67e7e789043028ff858e5f9af389d392d65b82", size = 33680, upload-time = "2026-01-01T13:32:22.806Z" }
 wheels = [
@@ -463,11 +463,11 @@ name = "hatchling"
 version = "1.31.0"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "packaging" },
-    { name = "pathspec" },
-    { name = "pluggy" },
-    { name = "tomli", marker = "python_full_version < '3.11'" },
-    { name = "trove-classifiers" },
+    { name = "packaging", marker = "sys_platform == 'linux'" },
+    { name = "pathspec", marker = "sys_platform == 'linux'" },
+    { name = "pluggy", marker = "sys_platform == 'linux'" },
+    { name = "tomli", marker = "python_full_version < '3.11' and sys_platform == 'linux'" },
+    { name = "trove-classifiers", marker = "sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/25/e2/dfa73fe78f773018dcaebc6d09b819bc10d328ff5a6b4a66efa1e3d71f52/hatchling-1.31.0.tar.gz", hash = "sha256:6b48ad4068a482ed7239b3a8215bc55b47aad3345d58dfc94e553c5d2d46211b", size = 57208, upload-time = "2026-07-08T01:48:32.237Z" }
 wheels = [
@@ -506,7 +506,7 @@ name = "jinja2"
 version = "3.1.6"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "markupsafe" },
+    { name = "markupsafe", marker = "sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/df/bf/f7da0350254c0ed7c72f3e33cef02e048281fec7ecec5f032d4aac52226b/jinja2-3.1.6.tar.gz", hash = "sha256:0137fb05990d35f1275a587e9aee6d56da821fc83491a0fb838183be43f66d6d", size = 245115, upload-time = "2025-03-05T20:05:02.478Z" }
 wheels = [
@@ -518,8 +518,8 @@ name = "libcst"
 version = "1.9.0"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "pyyaml", marker = "python_full_version != '3.13.*'" },
-    { name = "pyyaml-ft", marker = "python_full_version == '3.13.*'" },
+    { name = "pyyaml", marker = "python_full_version != '3.13.*' and sys_platform == 'linux'" },
+    { name = "pyyaml-ft", marker = "python_full_version == '3.13.*' and sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/02/c0/098e5c91ff1537f00c85a6438b6cb1863d17144680cc91f47c87f104a200/libcst-1.9.0.tar.gz", hash = "sha256:087b58a9afe076bb08e2d726478e1f16cb928d67ffa9092817e033c335de522a", size = 914739, upload-time = "2026-07-29T21:28:43.153Z" }
 wheels = [
@@ -623,9 +623,9 @@ name = "ml-dtypes"
 version = "0.6.0"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version < '3.11' and sys_platform == 'linux'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version == '3.11.*' and sys_platform == 'linux'" },
+    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version >= '3.12' and sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/12/72/307d7c4bd0600601c7133fba5cb78af7db968152951c1cd473abb1cda782/ml_dtypes-0.6.0.tar.gz", hash = "sha256:5e60251d32ced5598972e4d5e06a2f044341f9291402551a3f6f0ec44f9299b0", size = 3032327, upload-time = "2026-08-13T14:14:40.215Z" }
 wheels = [
@@ -666,9 +666,9 @@ name = "mypy"
 version = "1.13.0"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "mypy-extensions" },
-    { name = "tomli", marker = "python_full_version < '3.11'" },
-    { name = "typing-extensions" },
+    { name = "mypy-extensions", marker = "sys_platform == 'linux'" },
+    { name = "tomli", marker = "python_full_version < '3.11' and sys_platform == 'linux'" },
+    { name = "typing-extensions", marker = "sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/e8/21/7e9e523537991d145ab8a0a2fd98548d67646dc2aaaf6091c31ad883e7c1/mypy-1.13.0.tar.gz", hash = "sha256:0291a61b6fbf3e6673e3405cfcc0e7650bebc7939659fdca2702958038bd835e", size = 3152532, upload-time = "2024-10-22T21:55:47.458Z" }
 wheels = [
@@ -844,7 +844,7 @@ name = "optree"
 version = "0.17.0"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "typing-extensions" },
+    { name = "typing-extensions", marker = "sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/56/c7/0853e0c59b135dff770615d2713b547b6b3b5cde7c10995b4a5825244612/optree-0.17.0.tar.gz", hash = "sha256:5335a5ec44479920620d72324c66563bd705ab2a698605dd4b6ee67dbcad7ecd", size = 163111, upload-time = "2025-07-25T11:26:11.586Z" }
 wheels = [
@@ -905,12 +905,12 @@ name = "pandas"
 version = "2.3.3"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version >= '3.12'" },
-    { name = "python-dateutil" },
-    { name = "pytz" },
-    { name = "tzdata" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version < '3.11' and sys_platform == 'linux'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version == '3.11.*' and sys_platform == 'linux'" },
+    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version >= '3.12' and sys_platform == 'linux'" },
+    { name = "python-dateutil", marker = "sys_platform == 'linux'" },
+    { name = "pytz", marker = "sys_platform == 'linux'" },
+    { name = "tzdata", marker = "sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/33/01/d40b85317f86cf08d853a4f495195c73815fdf205eef3993821720274518/pandas-2.3.3.tar.gz", hash = "sha256:e05e1af93b977f7eafa636d043f9f94c7ee3ac81af99c13508215942e64c993b", size = 4495223, upload-time = "2025-09-29T23:34:51.853Z" }
 wheels = [
@@ -994,7 +994,7 @@ name = "prettytable"
 version = "3.18.0"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "wcwidth" },
+    { name = "wcwidth", marker = "sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/81/74/ba08d81e668ccfe8658d7520a307e63c19862c08eb4ccb26f356c5239a7a/prettytable-3.18.0.tar.gz", hash = "sha256:439217116152244369caf3d9f1caf2f9fe29b03bd79e88d2928c8e718c95d680", size = 76373, upload-time = "2026-06-22T16:07:50.174Z" }
 wheels = [
@@ -1049,11 +1049,11 @@ name = "pygithub"
 version = "2.10.0"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "pyjwt", extra = ["crypto"] },
-    { name = "pynacl" },
-    { name = "requests" },
-    { name = "typing-extensions" },
-    { name = "urllib3" },
+    { name = "pyjwt", extra = ["crypto"], marker = "sys_platform == 'linux'" },
+    { name = "pynacl", marker = "sys_platform == 'linux'" },
+    { name = "requests", marker = "sys_platform == 'linux'" },
+    { name = "typing-extensions", marker = "sys_platform == 'linux'" },
+    { name = "urllib3", marker = "sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/e1/9b/195603d5371861005a3467c5e4afd02fd0698795a2aa36dc41498b9d879d/pygithub-2.10.0.tar.gz", hash = "sha256:90ff24ef1cd1bd57124c2a3869cafee9d7b066909129ecdaba2c2d1903bc118d", size = 2750952, upload-time = "2026-08-20T10:05:08.327Z" }
 wheels = [
@@ -1065,7 +1065,7 @@ name = "pyjwt"
 version = "2.15.1"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11' and sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/43/ea/5194e52748b0da83d71e082d75496eaec6e58f419f5e184786ded517e6a9/pyjwt-2.15.1.tar.gz", hash = "sha256:4f259e80cdfb6b3fc18a7de51fd1ef9ec79652f25019bae68975ca2468a34df8", size = 121252, upload-time = "2026-09-28T18:40:42.598Z" }
 wheels = [
@@ -1074,7 +1074,7 @@ wheels = [
 
 [package.optional-dependencies]
 crypto = [
-    { name = "cryptography" },
+    { name = "cryptography", marker = "sys_platform == 'linux'" },
 ]
 
 [[package]]
@@ -1082,7 +1082,7 @@ name = "pynacl"
 version = "1.6.2"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "cffi", marker = "platform_python_implementation != 'PyPy'" },
+    { name = "cffi", marker = "platform_python_implementation != 'PyPy' and sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d9/9a/4019b524b03a13438637b11538c82781a5eda427394380381af8f04f467a/pynacl-1.6.2.tar.gz", hash = "sha256:018494d6d696ae03c7e656e5e74cdfd8ea1326962cc401bcf018f1ed8436811c", size = 3511692, upload-time = "2026-01-01T17:48:10.851Z" }
 wheels = [
@@ -1109,11 +1109,11 @@ name = "pytest"
 version = "8.3.5"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "exceptiongroup", marker = "python_full_version < '3.11'" },
-    { name = "iniconfig" },
-    { name = "packaging" },
-    { name = "pluggy" },
-    { name = "tomli", marker = "python_full_version < '3.11'" },
+    { name = "exceptiongroup", marker = "python_full_version < '3.11' and sys_platform == 'linux'" },
+    { name = "iniconfig", marker = "sys_platform == 'linux'" },
+    { name = "packaging", marker = "sys_platform == 'linux'" },
+    { name = "pluggy", marker = "sys_platform == 'linux'" },
+    { name = "tomli", marker = "python_full_version < '3.11' and sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ae/3c/c9d525a414d506893f0cd8a8d0de7706446213181570cdbd766691164e40/pytest-8.3.5.tar.gz", hash = "sha256:f4efe70cc14e511565ac476b57c279e12a855b11f48f212af1080ef2263d3845", size = 1450891, upload-time = "2025-03-02T12:54:54.503Z" }
 wheels = [
@@ -1125,7 +1125,7 @@ name = "pytest-forked"
 version = "1.7.5"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "pytest" },
+    { name = "pytest", marker = "sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/99/92/98bd460b998f9ec053acba2e3efbbca12a9a408ec8648bd55abd2df784f0/pytest_forked-1.7.5.tar.gz", hash = "sha256:00f2bee51612f29b8e6b81eed2c3b2975e824c2693394f5bdaf7a1369078ba5f", size = 12981, upload-time = "2026-08-08T12:05:12.374Z" }
 wheels = [
@@ -1137,8 +1137,8 @@ name = "pytest-xdist"
 version = "3.8.0"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "execnet" },
-    { name = "pytest" },
+    { name = "execnet", marker = "sys_platform == 'linux'" },
+    { name = "pytest", marker = "sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/78/b4/439b179d1ff526791eb921115fca8e44e596a13efeda518b9d845a619450/pytest_xdist-3.8.0.tar.gz", hash = "sha256:7e578125ec9bc6050861aa93f2d59f1d8d085595d6551c2c90b6f4fad8d3a9f1", size = 88069, upload-time = "2025-07-01T13:30:59.346Z" }
 wheels = [
@@ -1150,7 +1150,7 @@ name = "python-dateutil"
 version = "2.9.0.post0"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "six" },
+    { name = "six", marker = "sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/66/c0/0c8b6ad9f17a802ee498c46e004a0eb49bc148f2fd230864601a86dcf6db/python-dateutil-2.9.0.post0.tar.gz", hash = "sha256:37dd54208da7e1cd875388217d5e00ebd4179249f90fb72437e91a35459a0ad3", size = 342432, upload-time = "2024-03-01T18:36:20.211Z" }
 wheels = [
@@ -1224,33 +1224,33 @@ wheels = [
 
 [[package]]
 name = "rebel-compiler"
-version = "0.12.1.dev163+g0c6d4a5e.prod"
+version = "0.12.1.dev228+gecc7b4ed.prod"
 source = { registry = "https://nexus.mgmt.rbln.in/repository/pypi-group-nightly/simple/" }
 dependencies = [
-    { name = "attrs" },
-    { name = "cloudpickle" },
-    { name = "cryptography" },
-    { name = "decorator" },
-    { name = "ml-dtypes" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version >= '3.12'" },
-    { name = "packaging" },
-    { name = "prettytable" },
-    { name = "psutil" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version < '3.11'" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version == '3.11.*'" },
-    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version >= '3.12'" },
-    { name = "tornado" },
-    { name = "tqdm" },
-    { name = "typing-extensions" },
+    { name = "attrs", marker = "sys_platform == 'linux'" },
+    { name = "cloudpickle", marker = "sys_platform == 'linux'" },
+    { name = "cryptography", marker = "sys_platform == 'linux'" },
+    { name = "decorator", marker = "sys_platform == 'linux'" },
+    { name = "ml-dtypes", marker = "sys_platform == 'linux'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version < '3.11' and sys_platform == 'linux'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version == '3.11.*' and sys_platform == 'linux'" },
+    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version >= '3.12' and sys_platform == 'linux'" },
+    { name = "packaging", marker = "sys_platform == 'linux'" },
+    { name = "prettytable", marker = "sys_platform == 'linux'" },
+    { name = "psutil", marker = "sys_platform == 'linux'" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version < '3.11' and sys_platform == 'linux'" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version == '3.11.*' and sys_platform == 'linux'" },
+    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version >= '3.12' and sys_platform == 'linux'" },
+    { name = "tornado", marker = "sys_platform == 'linux'" },
+    { name = "tqdm", marker = "sys_platform == 'linux'" },
+    { name = "typing-extensions", marker = "sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://nexus.mgmt.rbln.in/repository/pypi-group-nightly/packages/rebel-compiler/0.12.1.dev163+g0c6d4a5e.prod/rebel_compiler-0.12.1.dev163+g0c6d4a5e.prod-cp310-cp310-manylinux_2_34_x86_64.whl", hash = "md5:bc2f1f3943dec4945461da64f9c0bebb" },
-    { url = "https://nexus.mgmt.rbln.in/repository/pypi-group-nightly/packages/rebel-compiler/0.12.1.dev163+g0c6d4a5e.prod/rebel_compiler-0.12.1.dev163+g0c6d4a5e.prod-cp311-cp311-manylinux_2_34_x86_64.whl", hash = "md5:1e7db98ee830785d65d9f7d107e64f82" },
-    { url = "https://nexus.mgmt.rbln.in/repository/pypi-group-nightly/packages/rebel-compiler/0.12.1.dev163+g0c6d4a5e.prod/rebel_compiler-0.12.1.dev163+g0c6d4a5e.prod-cp312-cp312-manylinux_2_34_x86_64.whl", hash = "md5:5176f8674899fc0da51927b335be49bf" },
-    { url = "https://nexus.mgmt.rbln.in/repository/pypi-group-nightly/packages/rebel-compiler/0.12.1.dev163+g0c6d4a5e.prod/rebel_compiler-0.12.1.dev163+g0c6d4a5e.prod-cp313-cp313-manylinux_2_34_x86_64.whl", hash = "md5:74a5ed89a9b3b4b3b41c4deeb2443f97" },
-    { url = "https://nexus.mgmt.rbln.in/repository/pypi-group-nightly/packages/rebel-compiler/0.12.1.dev163+g0c6d4a5e.prod/rebel_compiler-0.12.1.dev163+g0c6d4a5e.prod-cp314-cp314-manylinux_2_34_x86_64.whl", hash = "md5:de1f2896eaf30025ae2364c15bce9d51" },
+    { url = "https://nexus.mgmt.rbln.in/repository/pypi-group-nightly/packages/rebel-compiler/0.12.1.dev228+gecc7b4ed.prod/rebel_compiler-0.12.1.dev228+gecc7b4ed.prod-cp310-cp310-manylinux_2_34_x86_64.whl", hash = "md5:27c00328b8c79e8303404cf573d817fc" },
+    { url = "https://nexus.mgmt.rbln.in/repository/pypi-group-nightly/packages/rebel-compiler/0.12.1.dev228+gecc7b4ed.prod/rebel_compiler-0.12.1.dev228+gecc7b4ed.prod-cp311-cp311-manylinux_2_34_x86_64.whl", hash = "md5:1f029d55418c1dbd2dfe06511118442d" },
+    { url = "https://nexus.mgmt.rbln.in/repository/pypi-group-nightly/packages/rebel-compiler/0.12.1.dev228+gecc7b4ed.prod/rebel_compiler-0.12.1.dev228+gecc7b4ed.prod-cp312-cp312-manylinux_2_34_x86_64.whl", hash = "md5:d6b539d7d7b94d80d508503be7685cbe" },
+    { url = "https://nexus.mgmt.rbln.in/repository/pypi-group-nightly/packages/rebel-compiler/0.12.1.dev228+gecc7b4ed.prod/rebel_compiler-0.12.1.dev228+gecc7b4ed.prod-cp313-cp313-manylinux_2_34_x86_64.whl", hash = "md5:af7174dc2ae1e8a9c58e4cb281e0bc8a" },
+    { url = "https://nexus.mgmt.rbln.in/repository/pypi-group-nightly/packages/rebel-compiler/0.12.1.dev228+gecc7b4ed.prod/rebel_compiler-0.12.1.dev228+gecc7b4ed.prod-cp314-cp314-manylinux_2_34_x86_64.whl", hash = "md5:557823a0b325473d4b4315bf33a1fe52" },
 ]
 
 [[package]]
@@ -1258,10 +1258,10 @@ name = "requests"
 version = "2.34.2"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "certifi" },
-    { name = "charset-normalizer" },
-    { name = "idna" },
-    { name = "urllib3" },
+    { name = "certifi", marker = "sys_platform == 'linux'" },
+    { name = "charset-normalizer", marker = "sys_platform == 'linux'" },
+    { name = "idna", marker = "sys_platform == 'linux'" },
+    { name = "urllib3", marker = "sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ac/c3/e2a2b89f2d3e2179abd6d00ebd70bff6273f37fb3e0cc209f48b39d00cbf/requests-2.34.2.tar.gz", hash = "sha256:f288924cae4e29463698d6d60bc6a4da69c89185ad1e0bcc4104f584e960b9ed", size = 142856, upload-time = "2026-05-14T19:25:27.735Z" }
 wheels = [
@@ -1273,7 +1273,7 @@ name = "ruamel-yaml"
 version = "0.17.40"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "ruamel-yaml-clib", marker = "python_full_version < '3.13' and platform_python_implementation == 'CPython'" },
+    { name = "ruamel-yaml-clib", marker = "python_full_version < '3.13' and platform_python_implementation == 'CPython' and sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d1/d6/eb2833ccba5ea36f8f4de4bcfa0d1a91eb618f832d430b70e3086821f251/ruamel.yaml-0.17.40.tar.gz", hash = "sha256:6024b986f06765d482b5b07e086cc4b4cd05dd22ddcbc758fa23d54873cf313d", size = 137672, upload-time = "2023-10-20T12:53:56.073Z" }
 wheels = [
@@ -1346,7 +1346,7 @@ resolution-markers = [
     "python_full_version < '3.11' and sys_platform == 'linux'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple/" } },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version < '3.11' and sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/0f/37/6964b830433e654ec7485e45a00fc9a27cf868d622838f6b6d9c5ec0d532/scipy-1.15.3.tar.gz", hash = "sha256:eae3cf522bc7df64b42cad3925c876e1b0b6c35c1337c93e12c0f366f55b0eaf", size = 59419214, upload-time = "2025-05-08T16:13:05.955Z" }
 wheels = [
@@ -1380,7 +1380,7 @@ resolution-markers = [
     "python_full_version == '3.11.*' and sys_platform == 'linux'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple/" } },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version == '3.11.*' and sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/7a/97/5a3609c4f8d58b039179648e62dd220f89864f56f7357f5d4f45c29eb2cc/scipy-1.17.1.tar.gz", hash = "sha256:95d8e012d8cb8816c226aef832200b1d45109ed4464303e997c5b13122b297c0", size = 30573822, upload-time = "2026-02-23T00:26:24.851Z" }
 wheels = [
@@ -1420,7 +1420,7 @@ resolution-markers = [
     "python_full_version == '3.12.*' and sys_platform == 'linux'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple/" } },
+    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version >= '3.12' and sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/7e/74/66de6258867beb2ef08f35f9f2ac017a52cacd5081714d239ff1a442d458/scipy-1.18.1.tar.gz", hash = "sha256:52c4b7422442aba924d03ad4019852b08a92e64ea187b933135687bfe2747307", size = 30781235, upload-time = "2026-08-21T23:28:50.599Z" }
 wheels = [
@@ -1456,11 +1456,11 @@ name = "setuptools-scm"
 version = "10.2.3"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "packaging" },
-    { name = "setuptools" },
-    { name = "tomli", marker = "python_full_version < '3.11'" },
-    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
-    { name = "vcs-versioning" },
+    { name = "packaging", marker = "sys_platform == 'linux'" },
+    { name = "setuptools", marker = "sys_platform == 'linux'" },
+    { name = "tomli", marker = "python_full_version < '3.11' and sys_platform == 'linux'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11' and sys_platform == 'linux'" },
+    { name = "vcs-versioning", marker = "sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/3c/87/1ff7adcf6e03021ae58ce401565be3c9b8c739a44d14a8253d38b3754117/setuptools_scm-10.2.3.tar.gz", hash = "sha256:f179ed3e2a63cf5823e5ee9aa9ca08386219400443a0553224d72dde3f206b44", size = 67696, upload-time = "2026-09-03T13:03:29.565Z" }
 wheels = [
@@ -1499,7 +1499,7 @@ name = "sympy"
 version = "1.13.3"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "mpmath" },
+    { name = "mpmath", marker = "sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/11/8a/5a7fd6284fa8caac23a26c9ddf9c30485a48169344b4bd3b0f02fef1890f/sympy-1.13.3.tar.gz", hash = "sha256:b27fd2c6530e0ab39e275fc9b683895367e51d5da91baa8d3d64db2565fec4d9", size = 7533196, upload-time = "2024-09-18T21:54:25.591Z" }
 wheels = [
@@ -1567,14 +1567,14 @@ name = "torch"
 version = "2.13.0+cpu"
 source = { registry = "https://download.pytorch.org/whl/cpu" }
 dependencies = [
-    { name = "filelock" },
-    { name = "fsspec" },
-    { name = "jinja2" },
-    { name = "networkx", version = "3.4.2", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version < '3.11'" },
-    { name = "networkx", version = "3.6.1", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version >= '3.11'" },
-    { name = "setuptools" },
-    { name = "sympy" },
-    { name = "typing-extensions" },
+    { name = "filelock", marker = "sys_platform == 'linux'" },
+    { name = "fsspec", marker = "sys_platform == 'linux'" },
+    { name = "jinja2", marker = "sys_platform == 'linux'" },
+    { name = "networkx", version = "3.4.2", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version < '3.11' and sys_platform == 'linux'" },
+    { name = "networkx", version = "3.6.1", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version >= '3.11' and sys_platform == 'linux'" },
+    { name = "setuptools", marker = "sys_platform == 'linux'" },
+    { name = "sympy", marker = "sys_platform == 'linux'" },
+    { name = "typing-extensions", marker = "sys_platform == 'linux'" },
 ]
 wheels = [
     { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp310-cp310-linux_s390x.whl", hash = "sha256:0555fde6108ca90247ae33d4e1237cbae475c86a223bb2f0f91d9addf1f611bd", upload-time = "2026-07-08T19:27:11Z" },
@@ -1601,150 +1601,150 @@ wheels = [
 name = "torch-rbln"
 source = { editable = "." }
 dependencies = [
-    { name = "libcst" },
-    { name = "pyyaml" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version < '3.11'" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version == '3.11.*'" },
-    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version >= '3.12'" },
-    { name = "torch" },
+    { name = "libcst", marker = "sys_platform == 'linux'" },
+    { name = "pyyaml", marker = "sys_platform == 'linux'" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version < '3.11' and sys_platform == 'linux'" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version == '3.11.*' and sys_platform == 'linux'" },
+    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version >= '3.12' and sys_platform == 'linux'" },
+    { name = "torch", marker = "sys_platform == 'linux'" },
 ]
 
 [package.optional-dependencies]
 runtime = [
-    { name = "rebel-compiler" },
+    { name = "rebel-compiler", marker = "sys_platform == 'linux'" },
 ]
 
 [package.dev-dependencies]
 build = [
-    { name = "cmake" },
-    { name = "editables" },
-    { name = "hatchling" },
-    { name = "mypy" },
-    { name = "ninja" },
-    { name = "pip" },
-    { name = "rebel-compiler" },
-    { name = "setuptools-scm" },
+    { name = "cmake", marker = "sys_platform == 'linux'" },
+    { name = "editables", marker = "sys_platform == 'linux'" },
+    { name = "hatchling", marker = "sys_platform == 'linux'" },
+    { name = "mypy", marker = "sys_platform == 'linux'" },
+    { name = "ninja", marker = "sys_platform == 'linux'" },
+    { name = "pip", marker = "sys_platform == 'linux'" },
+    { name = "rebel-compiler", marker = "sys_platform == 'linux'" },
+    { name = "setuptools-scm", marker = "sys_platform == 'linux'" },
 ]
 ci = [
-    { name = "packaging" },
-    { name = "pygithub" },
-    { name = "requests" },
-    { name = "tomli", marker = "python_full_version < '3.11'" },
-    { name = "tomlkit" },
+    { name = "packaging", marker = "sys_platform == 'linux'" },
+    { name = "pygithub", marker = "sys_platform == 'linux'" },
+    { name = "requests", marker = "sys_platform == 'linux'" },
+    { name = "tomli", marker = "python_full_version < '3.11' and sys_platform == 'linux'" },
+    { name = "tomlkit", marker = "sys_platform == 'linux'" },
 ]
 dev = [
-    { name = "black" },
-    { name = "click" },
-    { name = "cmake" },
-    { name = "cmakelint" },
-    { name = "editables" },
-    { name = "expecttest" },
-    { name = "filelock" },
-    { name = "flake8" },
-    { name = "flake8-bugbear" },
-    { name = "flake8-comprehensions" },
-    { name = "flake8-executable" },
-    { name = "flake8-logging-format" },
-    { name = "flake8-pyi" },
-    { name = "flake8-simplify" },
-    { name = "hatchling" },
-    { name = "isort" },
-    { name = "lintrunner" },
-    { name = "mccabe" },
-    { name = "mypy" },
-    { name = "mypy-extensions" },
-    { name = "ninja" },
-    { name = "optree" },
-    { name = "packaging" },
-    { name = "pandas" },
-    { name = "pip" },
-    { name = "pkginfo" },
-    { name = "pycodestyle" },
-    { name = "pyflakes" },
-    { name = "pygithub" },
-    { name = "pytest" },
-    { name = "pytest-forked" },
-    { name = "pytest-xdist" },
-    { name = "rebel-compiler" },
-    { name = "requests" },
-    { name = "ruamel-yaml" },
-    { name = "ruff" },
-    { name = "setuptools" },
-    { name = "setuptools-scm" },
-    { name = "shellcheck-py" },
-    { name = "sympy" },
-    { name = "tabulate" },
-    { name = "toml" },
-    { name = "tomli", marker = "python_full_version < '3.11'" },
-    { name = "tomlkit" },
-    { name = "types-colorama" },
-    { name = "types-jinja2" },
-    { name = "types-markupsafe" },
-    { name = "types-protobuf" },
-    { name = "types-pyyaml" },
-    { name = "types-requests" },
-    { name = "types-setuptools" },
-    { name = "types-tabulate" },
-    { name = "types-urllib3" },
-    { name = "usort" },
-    { name = "yamllint" },
+    { name = "black", marker = "sys_platform == 'linux'" },
+    { name = "click", marker = "sys_platform == 'linux'" },
+    { name = "cmake", marker = "sys_platform == 'linux'" },
+    { name = "cmakelint", marker = "sys_platform == 'linux'" },
+    { name = "editables", marker = "sys_platform == 'linux'" },
+    { name = "expecttest", marker = "sys_platform == 'linux'" },
+    { name = "filelock", marker = "sys_platform == 'linux'" },
+    { name = "flake8", marker = "sys_platform == 'linux'" },
+    { name = "flake8-bugbear", marker = "sys_platform == 'linux'" },
+    { name = "flake8-comprehensions", marker = "sys_platform == 'linux'" },
+    { name = "flake8-executable", marker = "sys_platform == 'linux'" },
+    { name = "flake8-logging-format", marker = "sys_platform == 'linux'" },
+    { name = "flake8-pyi", marker = "sys_platform == 'linux'" },
+    { name = "flake8-simplify", marker = "sys_platform == 'linux'" },
+    { name = "hatchling", marker = "sys_platform == 'linux'" },
+    { name = "isort", marker = "sys_platform == 'linux'" },
+    { name = "lintrunner", marker = "sys_platform == 'linux'" },
+    { name = "mccabe", marker = "sys_platform == 'linux'" },
+    { name = "mypy", marker = "sys_platform == 'linux'" },
+    { name = "mypy-extensions", marker = "sys_platform == 'linux'" },
+    { name = "ninja", marker = "sys_platform == 'linux'" },
+    { name = "optree", marker = "sys_platform == 'linux'" },
+    { name = "packaging", marker = "sys_platform == 'linux'" },
+    { name = "pandas", marker = "sys_platform == 'linux'" },
+    { name = "pip", marker = "sys_platform == 'linux'" },
+    { name = "pkginfo", marker = "sys_platform == 'linux'" },
+    { name = "pycodestyle", marker = "sys_platform == 'linux'" },
+    { name = "pyflakes", marker = "sys_platform == 'linux'" },
+    { name = "pygithub", marker = "sys_platform == 'linux'" },
+    { name = "pytest", marker = "sys_platform == 'linux'" },
+    { name = "pytest-forked", marker = "sys_platform == 'linux'" },
+    { name = "pytest-xdist", marker = "sys_platform == 'linux'" },
+    { name = "rebel-compiler", marker = "sys_platform == 'linux'" },
+    { name = "requests", marker = "sys_platform == 'linux'" },
+    { name = "ruamel-yaml", marker = "sys_platform == 'linux'" },
+    { name = "ruff", marker = "sys_platform == 'linux'" },
+    { name = "setuptools", marker = "sys_platform == 'linux'" },
+    { name = "setuptools-scm", marker = "sys_platform == 'linux'" },
+    { name = "shellcheck-py", marker = "sys_platform == 'linux'" },
+    { name = "sympy", marker = "sys_platform == 'linux'" },
+    { name = "tabulate", marker = "sys_platform == 'linux'" },
+    { name = "toml", marker = "sys_platform == 'linux'" },
+    { name = "tomli", marker = "python_full_version < '3.11' and sys_platform == 'linux'" },
+    { name = "tomlkit", marker = "sys_platform == 'linux'" },
+    { name = "types-colorama", marker = "sys_platform == 'linux'" },
+    { name = "types-jinja2", marker = "sys_platform == 'linux'" },
+    { name = "types-markupsafe", marker = "sys_platform == 'linux'" },
+    { name = "types-protobuf", marker = "sys_platform == 'linux'" },
+    { name = "types-pyyaml", marker = "sys_platform == 'linux'" },
+    { name = "types-requests", marker = "sys_platform == 'linux'" },
+    { name = "types-setuptools", marker = "sys_platform == 'linux'" },
+    { name = "types-tabulate", marker = "sys_platform == 'linux'" },
+    { name = "types-urllib3", marker = "sys_platform == 'linux'" },
+    { name = "usort", marker = "sys_platform == 'linux'" },
+    { name = "yamllint", marker = "sys_platform == 'linux'" },
 ]
 lint = [
-    { name = "black" },
-    { name = "click" },
-    { name = "cmakelint" },
-    { name = "expecttest" },
-    { name = "filelock" },
-    { name = "flake8" },
-    { name = "flake8-bugbear" },
-    { name = "flake8-comprehensions" },
-    { name = "flake8-executable" },
-    { name = "flake8-logging-format" },
-    { name = "flake8-pyi" },
-    { name = "flake8-simplify" },
-    { name = "isort" },
-    { name = "lintrunner" },
-    { name = "mccabe" },
-    { name = "mypy" },
-    { name = "mypy-extensions" },
-    { name = "optree" },
-    { name = "packaging" },
-    { name = "pandas" },
-    { name = "pkginfo" },
-    { name = "pycodestyle" },
-    { name = "pyflakes" },
-    { name = "pygithub" },
-    { name = "pytest" },
-    { name = "pytest-forked" },
-    { name = "pytest-xdist" },
-    { name = "requests" },
-    { name = "ruamel-yaml" },
-    { name = "ruff" },
-    { name = "setuptools" },
-    { name = "shellcheck-py" },
-    { name = "sympy" },
-    { name = "tabulate" },
-    { name = "toml" },
-    { name = "tomli", marker = "python_full_version < '3.11'" },
-    { name = "tomlkit" },
-    { name = "types-colorama" },
-    { name = "types-jinja2" },
-    { name = "types-markupsafe" },
-    { name = "types-protobuf" },
-    { name = "types-pyyaml" },
-    { name = "types-requests" },
-    { name = "types-setuptools" },
-    { name = "types-tabulate" },
-    { name = "types-urllib3" },
-    { name = "usort" },
-    { name = "yamllint" },
+    { name = "black", marker = "sys_platform == 'linux'" },
+    { name = "click", marker = "sys_platform == 'linux'" },
+    { name = "cmakelint", marker = "sys_platform == 'linux'" },
+    { name = "expecttest", marker = "sys_platform == 'linux'" },
+    { name = "filelock", marker = "sys_platform == 'linux'" },
+    { name = "flake8", marker = "sys_platform == 'linux'" },
+    { name = "flake8-bugbear", marker = "sys_platform == 'linux'" },
+    { name = "flake8-comprehensions", marker = "sys_platform == 'linux'" },
+    { name = "flake8-executable", marker = "sys_platform == 'linux'" },
+    { name = "flake8-logging-format", marker = "sys_platform == 'linux'" },
+    { name = "flake8-pyi", marker = "sys_platform == 'linux'" },
+    { name = "flake8-simplify", marker = "sys_platform == 'linux'" },
+    { name = "isort", marker = "sys_platform == 'linux'" },
+    { name = "lintrunner", marker = "sys_platform == 'linux'" },
+    { name = "mccabe", marker = "sys_platform == 'linux'" },
+    { name = "mypy", marker = "sys_platform == 'linux'" },
+    { name = "mypy-extensions", marker = "sys_platform == 'linux'" },
+    { name = "optree", marker = "sys_platform == 'linux'" },
+    { name = "packaging", marker = "sys_platform == 'linux'" },
+    { name = "pandas", marker = "sys_platform == 'linux'" },
+    { name = "pkginfo", marker = "sys_platform == 'linux'" },
+    { name = "pycodestyle", marker = "sys_platform == 'linux'" },
+    { name = "pyflakes", marker = "sys_platform == 'linux'" },
+    { name = "pygithub", marker = "sys_platform == 'linux'" },
+    { name = "pytest", marker = "sys_platform == 'linux'" },
+    { name = "pytest-forked", marker = "sys_platform == 'linux'" },
+    { name = "pytest-xdist", marker = "sys_platform == 'linux'" },
+    { name = "requests", marker = "sys_platform == 'linux'" },
+    { name = "ruamel-yaml", marker = "sys_platform == 'linux'" },
+    { name = "ruff", marker = "sys_platform == 'linux'" },
+    { name = "setuptools", marker = "sys_platform == 'linux'" },
+    { name = "shellcheck-py", marker = "sys_platform == 'linux'" },
+    { name = "sympy", marker = "sys_platform == 'linux'" },
+    { name = "tabulate", marker = "sys_platform == 'linux'" },
+    { name = "toml", marker = "sys_platform == 'linux'" },
+    { name = "tomli", marker = "python_full_version < '3.11' and sys_platform == 'linux'" },
+    { name = "tomlkit", marker = "sys_platform == 'linux'" },
+    { name = "types-colorama", marker = "sys_platform == 'linux'" },
+    { name = "types-jinja2", marker = "sys_platform == 'linux'" },
+    { name = "types-markupsafe", marker = "sys_platform == 'linux'" },
+    { name = "types-protobuf", marker = "sys_platform == 'linux'" },
+    { name = "types-pyyaml", marker = "sys_platform == 'linux'" },
+    { name = "types-requests", marker = "sys_platform == 'linux'" },
+    { name = "types-setuptools", marker = "sys_platform == 'linux'" },
+    { name = "types-tabulate", marker = "sys_platform == 'linux'" },
+    { name = "types-urllib3", marker = "sys_platform == 'linux'" },
+    { name = "usort", marker = "sys_platform == 'linux'" },
+    { name = "yamllint", marker = "sys_platform == 'linux'" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "libcst", specifier = ">=1.2.0" },
     { name = "pyyaml", specifier = ">=6,<7" },
-    { name = "rebel-compiler", marker = "extra == 'runtime'", specifier = "~=0.12.1.dev163" },
+    { name = "rebel-compiler", marker = "extra == 'runtime'", specifier = "~=0.12.1.dev228" },
     { name = "scipy", specifier = ">=1.14.0" },
     { name = "torch", specifier = "==2.13.0+cpu", index = "https://download.pytorch.org/whl/cpu" },
 ]
@@ -1902,7 +1902,7 @@ name = "trailrunner"
 version = "1.4.0"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "pathspec" },
+    { name = "pathspec", marker = "sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/4d/93/630e10bacd897daeb9ff5a408f4e7cb0fc2f243e7e3ef00f9e6cf319b11c/trailrunner-1.4.0.tar.gz", hash = "sha256:3fe61e259e6b2e5192f321c265985b7a0dc18497ced62b2da244f08104978398", size = 15836, upload-time = "2023-03-27T07:54:35.515Z" }
 wheels = [
@@ -1932,7 +1932,7 @@ name = "types-jinja2"
 version = "2.11.9"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "types-markupsafe" },
+    { name = "types-markupsafe", marker = "sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/46/c4/b82309bfed8195de7997672deac301bd6f5bd5cbb6a3e392b7fe780d7852/types-Jinja2-2.11.9.tar.gz", hash = "sha256:dbdc74a40aba7aed520b7e4d89e8f0fe4286518494208b35123bcf084d4b8c81", size = 13302, upload-time = "2021-11-26T06:21:17.496Z" }
 wheels = [
@@ -1971,7 +1971,7 @@ name = "types-requests"
 version = "2.27.31"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "types-urllib3" },
+    { name = "types-urllib3", marker = "sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/14/d3/f009dc52ff7bc7296c4e47a7c886ee8cc7f2f438b9f49fe52a2661f42f3d/types-requests-2.27.31.tar.gz", hash = "sha256:6fab97b99fea52b9c7b466a4dd93e06bb325bc7e7420475e87831026a8dd35cc", size = 11492, upload-time = "2022-06-21T15:20:49.007Z" }
 wheels = [
@@ -2037,13 +2037,13 @@ name = "usort"
 version = "1.0.8.post1"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "attrs" },
-    { name = "click" },
-    { name = "libcst" },
-    { name = "moreorless" },
-    { name = "stdlibs" },
-    { name = "toml" },
-    { name = "trailrunner" },
+    { name = "attrs", marker = "sys_platform == 'linux'" },
+    { name = "click", marker = "sys_platform == 'linux'" },
+    { name = "libcst", marker = "sys_platform == 'linux'" },
+    { name = "moreorless", marker = "sys_platform == 'linux'" },
+    { name = "stdlibs", marker = "sys_platform == 'linux'" },
+    { name = "toml", marker = "sys_platform == 'linux'" },
+    { name = "trailrunner", marker = "sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/9b/f4/3ef48b43f2645f2cb4a37d6007e611bc669af44eecfee953c5dd57433011/usort-1.0.8.post1.tar.gz", hash = "sha256:68def75f2b20b97390c552c503e071ee06c65ad502c5f94f3bd03f095cf4dfe6", size = 83215, upload-time = "2024-02-12T04:29:33.632Z" }
 wheels = [
@@ -2055,9 +2055,9 @@ name = "vcs-versioning"
 version = "2.3.4"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "packaging" },
-    { name = "tomli", marker = "python_full_version < '3.11'" },
-    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+    { name = "packaging", marker = "sys_platform == 'linux'" },
+    { name = "tomli", marker = "python_full_version < '3.11' and sys_platform == 'linux'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11' and sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a0/00/c883501b0c55b7d0ec33e67813e9a38563ea84bfecebce9b3347fa52d845/vcs_versioning-2.3.4.tar.gz", hash = "sha256:f3443da15a34a32755b04324e33c6166add300c7661f45902225190c9337f711", size = 149647, upload-time = "2026-09-03T13:04:31.205Z" }
 wheels = [
@@ -2078,8 +2078,8 @@ name = "yamllint"
 version = "1.38.0"
 source = { registry = "https://pypi.org/simple/" }
 dependencies = [
-    { name = "pathspec" },
-    { name = "pyyaml" },
+    { name = "pathspec", marker = "sys_platform == 'linux'" },
+    { name = "pyyaml", marker = "sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/28/a0/8fc2d68e132cf918f18273fdc8a1b8432b60d75ac12fdae4b0ef5c9d2e8d/yamllint-1.38.0.tar.gz", hash = "sha256:09e5f29531daab93366bb061e76019d5e91691ef0a40328f04c927387d1d364d", size = 142446, upload-time = "2026-01-13T07:47:53.276Z" }
 wheels = [
