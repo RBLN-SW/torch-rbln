@@ -1085,7 +1085,6 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
 
   // No GIL and no py::object below this point. A failure short-circuits to the
   // early return, so the diag accumulators only read a fully-assigned path.
-  uint64_t _seg_t_prep_out = _seg_t_io_build;
   uint64_t _seg_t_run = _seg_t_io_build;
 
   if (rbln_rt_begin_io_patch_batch(entry->runtime) != RBLNRetCode_SUCCESS) {
@@ -1111,7 +1110,7 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
                          /*host_count=*/0) != RBLNRetCode_SUCCESS;
   }
   runtime_failed = (rbln_rt_end_io_patch_batch(entry->runtime) != RBLNRetCode_SUCCESS) || runtime_failed;
-  _seg_t_prep_out = now_ns();
+  const uint64_t _seg_t_prep_out = now_ns();
   if (!runtime_failed) {
     runtime_failed = rbln_rt_run(entry->runtime) != RBLNRetCode_SUCCESS;
     _seg_t_run = now_ns();
