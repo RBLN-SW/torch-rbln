@@ -322,7 +322,7 @@ steps:
           TORCH_RBLN_ARTIFACT_DIR: >-
             torch-rbln-py3.12-x86_64-{{matrix.build_type}}
           TORCH_RBLN_NPU_PRODUCT: RBLN-CA25
-          TORCH_RBLN_TEST_MODE: release
+          TORCH_RBLN_EXCLUDE_PERIODIC: "false"
           TORCH_RBLN_TEST_SUITES: "{{matrix.test_suites}}"
         matrix:
           setup:
@@ -352,7 +352,7 @@ steps:
           TORCH_RBLN_ARTIFACT_BUILD_ID: ${BUILDKITE_BUILD_ID}
           TORCH_RBLN_ARTIFACT_DIR: torch-rbln-py3.12-x86_64-Release
           TORCH_RBLN_NPU_PRODUCT: RBLN-CR13
-          TORCH_RBLN_TEST_MODE: release
+          TORCH_RBLN_EXCLUDE_PERIODIC: "false"
           TORCH_RBLN_TEST_SUITES: core,distributed,ops,models
         timeout_in_minutes: 5
         image: *test-image

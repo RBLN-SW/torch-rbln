@@ -13,7 +13,6 @@ Verifies that:
 - Device memory is allocated lazily (a device op increases `memory_allocated`).
 """
 
-import pytest
 import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
@@ -21,7 +20,6 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 from test.utils import requires_logical_devices, SUPPORTED_DTYPES
 
 
-@pytest.mark.test_set_ci
 class TestAcceleratorInterface(TestCase):
     """Walkthrough example 4: unified accelerator API with RBLN."""
 
@@ -60,7 +58,6 @@ class TestAcceleratorInterface(TestCase):
         self.assertEqual(torch.accelerator.current_device_index(), 0)
 
 
-@pytest.mark.test_set_ci
 class TestAcceleratorMemory(TestCase):
     """Walkthrough example 4: `torch.accelerator.memory` API and lazy allocation."""
 

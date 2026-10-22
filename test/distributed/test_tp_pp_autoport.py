@@ -51,8 +51,7 @@ def _invoke_test_tp_pp(env_overrides: dict) -> subprocess.CompletedProcess:
     )
 
 
-@pytest.mark.test_set_ci
-@pytest.mark.single_worker
+@pytest.mark.serial
 @pytest.mark.skipif(
     is_atom_device(),
     reason="autoport concurrency path is REBEL-only; ATOM does not run the RCCL RDMA autoport init",

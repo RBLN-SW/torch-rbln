@@ -5,7 +5,7 @@ env:
   TORCH_RBLN_ARTIFACT_BUILD_ID: ${TORCH_RBLN_ARTIFACT_BUILD_ID?}
   TORCH_RBLN_ARTIFACT_DIR: ${TORCH_RBLN_ARTIFACT_DIR?}
   TORCH_RBLN_NPU_PRODUCT: ${TORCH_RBLN_NPU_PRODUCT?}
-  TORCH_RBLN_TEST_MODE: ${TORCH_RBLN_TEST_MODE?}
+  TORCH_RBLN_EXCLUDE_PERIODIC: ${TORCH_RBLN_EXCLUDE_PERIODIC?}
   TORCH_RBLN_TEST_SUITES: ${TORCH_RBLN_TEST_SUITES?}
 
 common:
@@ -38,16 +38,15 @@ common:
 steps:
   - label: >-
       Run Python tests (py${TORCH_RBLN_PYTHON_VERSION?}, x86_64,
-      ${TORCH_RBLN_BUILD_TYPE?}, ${TORCH_RBLN_NPU_PRODUCT?},
-      ${TORCH_RBLN_TEST_MODE?}, core)
+      ${TORCH_RBLN_BUILD_TYPE?}, ${TORCH_RBLN_NPU_PRODUCT?}, core)
     key: >-
-      run-python-tests-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-${TORCH_RBLN_NPU_PRODUCT?}-${TORCH_RBLN_TEST_MODE?}-core
+      run-python-tests-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-${TORCH_RBLN_NPU_PRODUCT?}-core
     command: |
       .buildkite/scripts/test/run-python-tests.sh \
         --build-type ${TORCH_RBLN_BUILD_TYPE?} \
         --artifact-build-id ${TORCH_RBLN_ARTIFACT_BUILD_ID?} \
         --artifact-dir ${TORCH_RBLN_ARTIFACT_DIR?} \
-        --test-mode ${TORCH_RBLN_TEST_MODE?} \
+        --exclude-periodic ${TORCH_RBLN_EXCLUDE_PERIODIC?} \
         --suite core
     agents:
       queue: ${TORCH_RBLN_QUEUE_AMD64_NPU?}
@@ -65,16 +64,15 @@ steps:
 
   - label: >-
       Run Python tests (py${TORCH_RBLN_PYTHON_VERSION?}, x86_64,
-      ${TORCH_RBLN_BUILD_TYPE?}, ${TORCH_RBLN_NPU_PRODUCT?},
-      ${TORCH_RBLN_TEST_MODE?}, distributed)
+      ${TORCH_RBLN_BUILD_TYPE?}, ${TORCH_RBLN_NPU_PRODUCT?}, distributed)
     key: >-
-      run-python-tests-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-${TORCH_RBLN_NPU_PRODUCT?}-${TORCH_RBLN_TEST_MODE?}-distributed
+      run-python-tests-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-${TORCH_RBLN_NPU_PRODUCT?}-distributed
     command: |
       .buildkite/scripts/test/run-python-tests.sh \
         --build-type ${TORCH_RBLN_BUILD_TYPE?} \
         --artifact-build-id ${TORCH_RBLN_ARTIFACT_BUILD_ID?} \
         --artifact-dir ${TORCH_RBLN_ARTIFACT_DIR?} \
-        --test-mode ${TORCH_RBLN_TEST_MODE?} \
+        --exclude-periodic ${TORCH_RBLN_EXCLUDE_PERIODIC?} \
         --suite distributed
     agents:
       queue: ${TORCH_RBLN_QUEUE_AMD64_NPU?}
@@ -92,16 +90,15 @@ steps:
 
   - label: >-
       Run Python tests (py${TORCH_RBLN_PYTHON_VERSION?}, x86_64,
-      ${TORCH_RBLN_BUILD_TYPE?}, ${TORCH_RBLN_NPU_PRODUCT?},
-      ${TORCH_RBLN_TEST_MODE?}, ops)
+      ${TORCH_RBLN_BUILD_TYPE?}, ${TORCH_RBLN_NPU_PRODUCT?}, ops)
     key: >-
-      run-python-tests-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-${TORCH_RBLN_NPU_PRODUCT?}-${TORCH_RBLN_TEST_MODE?}-ops
+      run-python-tests-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-${TORCH_RBLN_NPU_PRODUCT?}-ops
     command: |
       .buildkite/scripts/test/run-python-tests.sh \
         --build-type ${TORCH_RBLN_BUILD_TYPE?} \
         --artifact-build-id ${TORCH_RBLN_ARTIFACT_BUILD_ID?} \
         --artifact-dir ${TORCH_RBLN_ARTIFACT_DIR?} \
-        --test-mode ${TORCH_RBLN_TEST_MODE?} \
+        --exclude-periodic ${TORCH_RBLN_EXCLUDE_PERIODIC?} \
         --suite ops
     agents:
       queue: ${TORCH_RBLN_QUEUE_AMD64_NPU?}
@@ -119,16 +116,15 @@ steps:
 
   - label: >-
       Run Python tests (py${TORCH_RBLN_PYTHON_VERSION?}, x86_64,
-      ${TORCH_RBLN_BUILD_TYPE?}, ${TORCH_RBLN_NPU_PRODUCT?},
-      ${TORCH_RBLN_TEST_MODE?}, models)
+      ${TORCH_RBLN_BUILD_TYPE?}, ${TORCH_RBLN_NPU_PRODUCT?}, models)
     key: >-
-      run-python-tests-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-${TORCH_RBLN_NPU_PRODUCT?}-${TORCH_RBLN_TEST_MODE?}-models
+      run-python-tests-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-${TORCH_RBLN_NPU_PRODUCT?}-models
     command: |
       .buildkite/scripts/test/run-python-tests.sh \
         --build-type ${TORCH_RBLN_BUILD_TYPE?} \
         --artifact-build-id ${TORCH_RBLN_ARTIFACT_BUILD_ID?} \
         --artifact-dir ${TORCH_RBLN_ARTIFACT_DIR?} \
-        --test-mode ${TORCH_RBLN_TEST_MODE?} \
+        --exclude-periodic ${TORCH_RBLN_EXCLUDE_PERIODIC?} \
         --suite models
     agents:
       queue: ${TORCH_RBLN_QUEUE_AMD64_NPU?}

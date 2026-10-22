@@ -24,6 +24,12 @@ from torch_rbln import _C  # type: ignore[attr-defined]
 from torch_rbln._internal import warm_cache
 
 
+# Deselected by rebel_compiler's CI (-m "not torch_rbln_only");
+# see the marker in pyproject. These tests cover torch-rbln's own
+# warm cache logic.
+pytestmark = pytest.mark.torch_rbln_only
+
+
 # These suites exercise the C++ warm-cache's process-wide / thread-local
 # state via its pybind surface. No RBLN-device tensor work happens here, so
 # ``instantiate_device_type_tests`` is intentionally NOT used — this matches
@@ -31,7 +37,6 @@ from torch_rbln._internal import warm_cache
 # probe process-level flags rather than device-side ops.
 
 
-@pytest.mark.test_set_ci
 class TestWarmCacheEnableDisable(TestCase):
     """`_warmcache_set_enabled` round-trips and `clear()` empties the cache.
 
@@ -67,7 +72,6 @@ class TestWarmCacheEnableDisable(TestCase):
         self.assertEqual(_C._warmcache_size(), 0)
 
 
-@pytest.mark.test_set_ci
 class TestWarmCacheBuildingGuard(TestCase):
     """Reentrancy guard set by the miss path.
 
@@ -124,7 +128,6 @@ class TestWarmCacheBuildingGuard(TestCase):
         self.assertTrue(_C._warmcache_is_building())
 
 
-@pytest.mark.test_set_ci
 class TestWarmCacheHitPath(TestCase):
     """Repeated dispatch of one input profile must keep taking the hit path.
 
@@ -152,7 +155,6 @@ class TestWarmCacheHitPath(TestCase):
         self.assertGreater(hits_after, hits_before, "warm-cache hit path never ran")
 
 
-@pytest.mark.test_set_ci
 class TestWarmCacheHandleGate(TestCase):
     """Which runtime handles the hit path accepts.
 
@@ -179,8 +181,7 @@ class TestWarmCacheHandleGate(TestCase):
         self.assertFalse(warm_cache._is_drivable_runtime_handle(object()))
 
 
-@pytest.mark.test_set_ci
-@pytest.mark.single_worker
+@pytest.mark.serial
 class TestWarmCacheContractBreak(TestCase):
     """A runtime the hit path cannot take a handle off must stay harmless.
 
@@ -230,8 +231,7 @@ class TestWarmCacheContractBreak(TestCase):
         self.assertEqual(hits_after, hits_before, "an entry was cached off an unusable handle")
 
 
-@pytest.mark.test_set_ci
-@pytest.mark.single_worker
+@pytest.mark.serial
 class TestWarmCacheDeviceScope(TestCase):
     """``empty_cache(device)`` drops that device's entries and no other's.
 

@@ -34,7 +34,6 @@ from torch_rbln._internal.ops_utils import SupportedDtypes
 pytestmark = pytest.mark.torch_rbln_only
 
 
-@pytest.mark.test_set_ci
 class TestAmpCatalog(TestCase):
     """The AMP dtype catalog is empty and coherent end-to-end."""
 
@@ -51,7 +50,6 @@ class TestAmpCatalog(TestCase):
         self.assertTrue(hasattr(torch.rbln, "get_amp_supported_dtype"))
 
 
-@pytest.mark.test_set_ci
 class TestAutocastDisabledGracefully(TestCase):
     """Entering an rbln autocast region must never crash on the first op."""
 
@@ -82,7 +80,6 @@ class TestAutocastDisabledGracefully(TestCase):
         self.assertEqual(y.dtype, torch.float32)
 
 
-@pytest.mark.test_set_ci
 class TestAutocastRealModelEager(TestCase):
     """A real (tiny) transformers LlamaForCausalLM run eagerly under an rbln autocast
     region must not crash and must match the plain fp32 path (autocast is a no-op)."""

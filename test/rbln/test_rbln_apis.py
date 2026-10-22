@@ -8,7 +8,6 @@ This test suite covers the following RBLN Python APIs:
 2. Tensor utilities: _create_tensor_from_ptr
 """
 
-import pytest
 import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
@@ -16,7 +15,6 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 from test.utils import SUPPORTED_DTYPES
 
 
-@pytest.mark.test_set_ci
 class TestDeviceManagementAPIs(TestCase):
     """Test RBLN device management APIs such as device_count, is_available, current_device, and set_device."""
 
@@ -65,7 +63,6 @@ class TestDeviceManagementAPIs(TestCase):
         self.assertEqual(dst.cpu(), src.cpu())
 
 
-@pytest.mark.test_set_ci
 class TestTensorUtils(TestCase):
     """Test RBLN tensor utilities such as _create_tensor_from_ptr."""
 

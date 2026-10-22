@@ -6,7 +6,6 @@ Test suite for tensor copy operations.
 
 import math
 
-import pytest
 import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
@@ -81,7 +80,6 @@ def _make_tensor(
     return t
 
 
-@pytest.mark.test_set_ci
 class TestTensorCopy(TestCase):
     rbln_device = torch.device("rbln:0")
 
@@ -326,7 +324,6 @@ class TestTensorCopy(TestCase):
         self.assertEqual(dst.cpu(), expected, atol=ATOL, rtol=RTOL)
 
 
-@pytest.mark.test_set_ci
 class TestToOps(TestCase):
     @dtypes(*TEST_DTYPES)
     def test_to_cpu(self, dtype):

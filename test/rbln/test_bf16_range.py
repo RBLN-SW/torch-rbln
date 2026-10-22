@@ -16,7 +16,6 @@ the attention output with it, with no error raised.
 reports it, and the model-level skip can go.
 """
 
-import pytest
 import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
@@ -25,7 +24,6 @@ from test.utils import xfail_atom
 
 
 class TestBf16Range(TestCase):
-    @pytest.mark.test_set_ci
     @xfail_atom("the bfloat16 -> custom float promotion returns NaN instead of saturating")
     def test_range_limit_survives_a_value_preserving_op(self, device):
         # `+ 0` cannot change the value, so whatever comes back is the promotion's doing.

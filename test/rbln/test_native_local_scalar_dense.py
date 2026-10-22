@@ -15,13 +15,11 @@ These tests verify the returned scalar matches the CPU reference across
 all supported dtypes.
 """
 
-import pytest
 import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
 
-@pytest.mark.test_set_ci
 class TestLocalScalarDenseRBLN(TestCase):
     """`aten::_local_scalar_dense` via `tensor.item()` on RBLN must match CPU."""
 

@@ -8,14 +8,12 @@ import os
 import subprocess
 import sys
 
-import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from test.utils import requires_physical_devices
 
 
-@pytest.mark.test_set_ci
 class TestDeviceProperties(TestCase):
     def test_properties_report_hardware(self):
         props = torch.rbln.get_device_properties(0)
@@ -58,7 +56,6 @@ def _run_in_subprocess(env_vars, script):
     return subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, env=env)
 
 
-@pytest.mark.test_set_ci
 class TestDevicePropertiesEnvVars(TestCase):
     """Cases that need the device mapping set before import, so they run in a subprocess."""
 

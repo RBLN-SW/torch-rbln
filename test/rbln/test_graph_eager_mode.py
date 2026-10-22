@@ -18,7 +18,6 @@ ATOL = 0.04
 RTOL = 0.07
 
 
-@pytest.mark.test_set_ci
 class TestGraphMode(TestCase):
     """Test cases for graph mode with RBLN backend."""
 
@@ -147,7 +146,6 @@ class TestGraphMode(TestCase):
         self._run_eager_and_graph_mode(model, (x,))
 
 
-@pytest.mark.test_set_ci
 class TestGraphEagerMode(TestCase):
     """Test cases for graph mode and eager mode compatibility with rbln backend."""
 
@@ -490,7 +488,6 @@ class TestGraphEagerMode(TestCase):
         self.assertEqual(eager_out.cpu(), graph_out.cpu(), atol=ATOL, rtol=RTOL)
 
 
-@pytest.mark.test_set_ci
 class TestRecompileWeightHandling(TestCase):
     """Test cases for weight handling when a module is rebuilt and recompiled under a fixed seed."""
 

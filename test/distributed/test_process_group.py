@@ -504,10 +504,9 @@ def _get_expected_reduce_scatter_value(rank: int, world_size: int, op: dist.Redu
 class TestProcessGroupRBLNBase(TestCase):
     """Base test class for RBLN process group tests."""
 
-    # CI tests run only sync mode; release tests cover both sync and async modes.
     c10d_async_envs = [
-        subtest("0", decorators=[pytest.mark.test_set_ci]),  # sync mode (TORCH_RBLN_C10D_ASYNC=0)
-        "1",  # async mode (TORCH_RBLN_C10D_ASYNC=1)
+        "0",  # sync mode (TORCH_RBLN_C10D_ASYNC=0)
+        subtest("1", decorators=[pytest.mark.periodic]),  # async mode (TORCH_RBLN_C10D_ASYNC=1)
     ]
 
     def setUp(self):
@@ -540,7 +539,7 @@ class TestProcessGroupRBLNBase(TestCase):
             mp.spawn(spawn_target_with_clean_exit, args=(test_func, *args), nprocs=nprocs, join=True)
 
 
-@pytest.mark.single_worker
+@pytest.mark.serial
 class TestBroadcastRBLN(TestProcessGroupRBLNBase):
     """Test cases for broadcast operations."""
 
@@ -569,7 +568,7 @@ class TestBroadcastRBLN(TestProcessGroupRBLNBase):
         )
 
 
-@pytest.mark.single_worker
+@pytest.mark.serial
 class TestAllReduceRBLN(TestProcessGroupRBLNBase):
     """Test cases for allreduce operations."""
 
@@ -610,7 +609,7 @@ class TestAllReduceRBLN(TestProcessGroupRBLNBase):
     #     )
 
 
-@pytest.mark.single_worker
+@pytest.mark.serial
 class TestScatterRBLN(TestProcessGroupRBLNBase):
     """Test cases for scatter operations. Each test runs with dim0 in [32, 256]."""
 
@@ -654,7 +653,7 @@ class TestScatterRBLN(TestProcessGroupRBLNBase):
         )
 
 
-@pytest.mark.single_worker
+@pytest.mark.serial
 class TestAllGatherRBLN(TestProcessGroupRBLNBase):
     """Test cases for allgather operations."""
 
@@ -733,7 +732,7 @@ class TestAllGatherRBLN(TestProcessGroupRBLNBase):
         )
 
 
-@pytest.mark.single_worker
+@pytest.mark.serial
 class TestReduceScatterRBLN(TestProcessGroupRBLNBase):
     """Test cases for reduce_scatter operations."""
 
@@ -826,7 +825,7 @@ class TestReduceScatterRBLN(TestProcessGroupRBLNBase):
     #     )
 
 
-@pytest.mark.single_worker
+@pytest.mark.serial
 class TestBarrierRBLN(TestProcessGroupRBLNBase):
     """Test cases for barrier synchronization."""
 
@@ -836,7 +835,7 @@ class TestBarrierRBLN(TestProcessGroupRBLNBase):
         self.run_c10d_test(c10d_async_env, self.world_size, run_barrier_test, (self.world_size, self.backend))
 
 
-@pytest.mark.single_worker
+@pytest.mark.serial
 class TestSendRecvRBLN(TestProcessGroupRBLNBase):
     """Test cases for send/recv operations."""
 
@@ -851,7 +850,7 @@ class TestSendRecvRBLN(TestProcessGroupRBLNBase):
         )
 
 
-@pytest.mark.single_worker
+@pytest.mark.serial
 class TestUnsupportedOpsRBLN(TestProcessGroupRBLNBase):
     """Test cases for unsupported operations."""
 
@@ -861,7 +860,7 @@ class TestUnsupportedOpsRBLN(TestProcessGroupRBLNBase):
         self.run_c10d_test(c10d_async_env, self.world_size, run_unsupported_op_test, (self.world_size, self.backend))
 
 
-@pytest.mark.single_worker
+@pytest.mark.serial
 class TestAllReduceSizesRBLN(TestProcessGroupRBLNBase):
     """Test cases for allreduce operations with various data sizes."""
 

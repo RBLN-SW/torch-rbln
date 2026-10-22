@@ -29,7 +29,6 @@ def _prim_calls(report: dict) -> dict[str, int]:
     return {name: int(v["calls"]) for name, v in rt.get("by_primitive", {}).items()}
 
 
-@pytest.mark.test_set_ci
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestForeachCopyHost(TestCase):
     """cpu<->rbln pairs reached through ``torch._foreach_copy_``."""

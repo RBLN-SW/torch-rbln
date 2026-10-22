@@ -1393,10 +1393,9 @@ def run_two_linear_bias_allgather_subgroup_send_recv_test(
 class TestTPPPRBLNBase(TestCase):
     """Base test class for RBLN TP/PP tests."""
 
-    # CI tests run only sync mode; release tests cover both sync and async modes.
     c10d_async_envs = [
-        subtest("0", decorators=[pytest.mark.test_set_ci]),  # sync mode (TORCH_RBLN_C10D_ASYNC=0)
-        "1",  # async mode (TORCH_RBLN_C10D_ASYNC=1)
+        "0",  # sync mode (TORCH_RBLN_C10D_ASYNC=0)
+        subtest("1", decorators=[pytest.mark.periodic]),  # async mode (TORCH_RBLN_C10D_ASYNC=1)
     ]
 
     def setUp(self):
@@ -1435,7 +1434,7 @@ class TestTPPPRBLNBase(TestCase):
             mp.spawn(spawn_target_with_clean_exit, args=(test_func, *args), nprocs=nprocs, join=True)
 
 
-@pytest.mark.single_worker
+@pytest.mark.serial
 class TestDefaultGroupAllReduceRBLN(TestTPPPRBLNBase):
     """Test cases for default group allreduce operations."""
 
@@ -1452,7 +1451,7 @@ class TestDefaultGroupAllReduceRBLN(TestTPPPRBLNBase):
         )
 
 
-@pytest.mark.single_worker
+@pytest.mark.serial
 class TestSingleLinearAllgatherDefaultGroupRBLN(TestTPPPRBLNBase):
     """Test cases for single linear layer with allgather, default group."""
 
@@ -1471,7 +1470,7 @@ class TestSingleLinearAllgatherDefaultGroupRBLN(TestTPPPRBLNBase):
         )
 
 
-@pytest.mark.single_worker
+@pytest.mark.serial
 class TestPP2RBLN(TestTPPPRBLNBase):
     """Test cases for PP=2 pipeline parallel operations."""
 
@@ -1485,7 +1484,7 @@ class TestPP2RBLN(TestTPPPRBLNBase):
         self.run_c10d_test(c10d_async_env, self.world_size_2, run_pp2_test, (self.world_size_2, self.backend, dtype))
 
 
-@pytest.mark.single_worker
+@pytest.mark.serial
 class TestTwoLinearBiasDefaultGroupRBLN(TestTPPPRBLNBase):
     """Test cases for two linear layers with bias, default group, send/recv."""
 
@@ -1504,7 +1503,7 @@ class TestTwoLinearBiasDefaultGroupRBLN(TestTPPPRBLNBase):
         )
 
 
-@pytest.mark.single_worker
+@pytest.mark.serial
 class TestTwoLinearNoBiasDefaultGroupRBLN(TestTPPPRBLNBase):
     """Test cases for two linear layers without bias, default group, send/recv."""
 
@@ -1522,7 +1521,7 @@ class TestTwoLinearNoBiasDefaultGroupRBLN(TestTPPPRBLNBase):
         )
 
 
-@pytest.mark.single_worker
+@pytest.mark.serial
 class TestTwoLinearBiasSubgroupRBLN(TestTPPPRBLNBase):
     """Test cases for two linear layers with bias, subgroup, send/recv."""
 
@@ -1541,7 +1540,7 @@ class TestTwoLinearBiasSubgroupRBLN(TestTPPPRBLNBase):
         )
 
 
-@pytest.mark.single_worker
+@pytest.mark.serial
 class TestTwoLinearBiasReluSubgroupRBLN(TestTPPPRBLNBase):
     """Test cases for two linear layers with bias and ReLU, subgroup, send/recv."""
 
@@ -1560,7 +1559,7 @@ class TestTwoLinearBiasReluSubgroupRBLN(TestTPPPRBLNBase):
         )
 
 
-@pytest.mark.single_worker
+@pytest.mark.serial
 class TestTwoLinearBiasAllgatherSubgroupRBLN(TestTPPPRBLNBase):
     """Test cases for two linear layers with bias, allgather, subgroup, send/recv."""
 

@@ -23,7 +23,6 @@ import torch_rbln  # noqa: F401  # binds the RBLN device + torch.rbln namespace
 DEVICE = torch.device("rbln:0")
 
 
-@pytest.mark.test_set_ci
 class TestSetDeviceLayoutLike:
     def test_api_visible(self):
         assert hasattr(torch.rbln, "set_device_layout_like")

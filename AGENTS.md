@@ -10,7 +10,7 @@ These documents own their subjects. Read them rather than duplicating them here:
 | Environment variables and runtime options                  | `docs/CONFIGURATION.md`      |
 | Lint setup and commands                                    | `docs/LINTING.md`            |
 | PR process, issue labels, merge policy                     | `docs/CONTRIBUTING.md`       |
-| CI and release lanes                                       | `docs/PIPELINES.md`          |
+| CI pipelines and their lanes                               | `docs/PIPELINES.md`          |
 | PyTorch pin, vendored upstream files, rebel-compiler bumps | `docs/THIRD_PARTY_UPDATE.md` |
 
 ## Terms
@@ -23,7 +23,7 @@ The codebase already has a word for each of these. Use it, and do not reach for 
 - **logical device** — what `rbln:N` and `device_count()` refer to: one or more **physical NPUs** grouped by `RBLN_NPUS_PER_DEVICE` or `RBLN_DEVICE_MAP`. Always say which of the two you mean.
 - **fallback** — two separate controls. `TORCH_RBLN_DISABLE_FALLBACK` covers unsupported ops, compile errors, and non-blocking copies; `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` covers the per-dispatch checks (`dtype`, `scalar`, `storage_offset`, `nan_inf`, …). Name the one you mean.
 - **shim** — the generated Python wrapper in `register_ops.py`. **kernel** — a hand-written implementation, C++ or Python. Not interchangeable.
-- **suite** — a `run_tests.py` tree: `core`, `distributed`, `models`, `ops`. **lane** — what a marker selects: the CI lane, the release lane, the perf lane.
+- **suite** — the test directory a CI step runs: `test/rbln` for `core`, `test/<suite>` for `distributed`, `models`, and `ops`. **lane** — the tests a CI pipeline selects by marker: the pre-merge and post-merge checks leave out `periodic` tests.
 
 ## Which file do I edit
 
@@ -59,11 +59,23 @@ Two questions come before any change, and getting either wrong wastes the whole 
 Run everything through `uv`. Never use the system `python3` or a bare `pip`.
 
 ```bash
-uv run --no-sync pytest test/rbln/test_tensor_copy.py -x   # narrowest target covering the change
-uv run --no-sync python test/run_tests.py --suite=core     # a whole suite, the way CI runs it
-uv run --no-sync lintrunner -m origin/main -a              # lint and auto-fix what you changed
-uv pip install -e . --no-build-isolation                   # rebuild — see below
+# Narrowest target covering the change
+uv run --no-sync pytest \
+  test/rbln/test_tensor_copy.py \
+  --exitfirst
+
+# Lint and auto-fix what you changed
+uv run --no-sync lintrunner \
+  -m origin/main \
+  -a
+
+# Rebuild — see below
+uv pip install \
+  -e . \
+  --no-build-isolation
 ```
+
+For a whole suite, use the two pytest runs in "Run a suite the way CI does" in `docs/TEST_GUIDE.md`.
 
 **A change under `aten/`, `c10/`, `torch_rbln/csrc/`, `CMakeLists.txt`, or `native_functions.yaml` does not reach your interpreter until you rebuild.** The build needs `rebel-compiler` present at the pin, installed with `uv sync --locked --no-install-project` (`./tools/dev-setup.sh pypi` if you cannot authenticate to the index `uv.lock` names). A link error naming `rbln::` symbols means the installed one is older than the pin — install the pinned version rather than changing code to match what you have. An `AttributeError` for a missing `torch_rbln._C` attribute means the opposite: the built extension is older than the Python tree, which is what a branch switch leaves behind. An `RBLN ABI mismatch` is a third shape — the snapshot this build recorded and the loaded `librbln.so` disagree.
 
@@ -100,7 +112,7 @@ Before the first edit, record the commit and dirty state (`git log -1`, `git sta
 | Build host, no NPU          | Build, lint, codegen, and `RBLN_DUMMY_DEVICE=1` for tensor construction, host/device copies, and compile-only `torch.compile` (`docs/CONFIGURATION.md`). `is_available()` is `True` there and says nothing about hardware. |
 | NPU host                    | Numerics, performance, fallback attribution, distributed. Only a result from here settles a claim about the device path.                                                                                                    |
 
-Match the verification to the change: a docs change needs lint; Python logic needs the narrowest pytest target and the suite around it; a codegen or native change needs the rebuild, proof that it took, and those tests; a perf change needs a measurement with its base printed. Read the collected count, not only the exit code — `run_tests.py` counts a run that collected nothing as neither pass nor fail, and a device-type test on a host without an NPU collects nothing.
+Match the verification to the change: a docs change needs lint; Python logic needs the narrowest pytest target and the suite around it; a codegen or native change needs the rebuild, proof that it took, and those tests; a perf change needs a measurement with its base printed. Read the collected count, not only the exit code — CI counts a pytest run that collects nothing as no failure, and a device-type test collects nothing on a host without an NPU.
 
 ## Before saying a change is done
 
@@ -159,7 +171,7 @@ Read `.claude/skills/adding-an-op/SKILL.md` before starting.
 
 ## What not to publish
 
-This repository is public. Absolute measurements stay out of it: throughput, latency, memory footprint, and accuracy from an internal run do not belong in code, comments, tests, docs, commit messages, or PR descriptions. Benchmark scripts and `test_set_perf` tests live here; their results do not.
+This repository is public. Absolute measurements stay out of it: throughput, latency, memory footprint, and accuracy from an internal run do not belong in code, comments, tests, docs, commit messages, or PR descriptions.
 
 A relative change is fine. Say that something got a third faster, not what the two numbers were, and keep the raw figures to an internal channel.
 
@@ -190,8 +202,8 @@ Everything written in words — a comment, a docstring, a doc page, a PR body, a
 Read `docs/TEST_GUIDE.md` before adding a test — it is the contract for this suite, and review checks against it. `.claude/skills/writing-tests/SKILL.md` covers what goes wrong on top of it. The rules broken most often:
 
 - A test must fail without the change it covers. Verify that; do not assume it.
-- **A test with no `@pytest.mark.test_set_ci` never runs in the pre-merge checks.** It runs only in the release lane — the release checks on `main`.
-- **Pick the isolation the state needs.** `single_worker` for a resource shared across processes — a device, a fixed port; a fixture or `monkeypatch` for state that restores — an env var that is read live, the selected device; `run_in_isolated_process` (`test/utils.py`) for state that does not — an import-time effect, a `static` or `@lru_cache` latch, a committed device mapping. `single_worker` only serializes: it is one xdist worker, not a fresh process, and undoes no leak.
+- **An unmarked test runs in every check.** `@pytest.mark.periodic` takes it out of the pre-merge and post-merge checks; use it only on a test that meets one of the `periodic` criteria in `docs/TEST_GUIDE.md`.
+- **Pick the isolation the state needs.** `serial` for a resource shared across processes — a device, a fixed port; a fixture or `monkeypatch` for state that restores — an env var that is read live, the selected device; `run_in_isolated_process` (`test/utils.py`) for state that does not — an import-time effect, a `static` or `@lru_cache` latch, a committed device mapping. `serial` only serializes: its tests share one xdist worker process, so it undoes no leak.
 - Assertion rewriting is off (`--assert=plain`), so a bare `assert a == b` prints no values.
 - Do not re-run a flaky test until it goes green, and do not loosen a tolerance to make one pass.
 - Do not assert an optimization the runtime is free to change, or write an assertion a hardcoded constant would also satisfy.

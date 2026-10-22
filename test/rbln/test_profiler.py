@@ -32,7 +32,6 @@ out-of-scope dispatch/utilization counters.
 import os
 from unittest import mock
 
-import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
@@ -42,7 +41,6 @@ import torch_rbln  # noqa: F401  -- registers the ``rbln`` device + ``torch.rbln
 DEV = "rbln"
 
 
-@pytest.mark.test_set_ci
 class TestProfilerCopyBounce(TestCase):
     """The core signal: a hidden host round-trip behind a plain ``copy_``."""
 
@@ -73,7 +71,6 @@ class TestProfilerCopyBounce(TestCase):
         self.assertFalse(p.verdict()["clean"])  # a host bounce fired -> not clean
 
 
-@pytest.mark.test_set_ci
 class TestProfilerDispatchSignals(TestCase):
     """A (recompile) and B (cpu_fallback) read from the existing dispatch counters."""
 
@@ -101,7 +98,6 @@ class TestProfilerDispatchSignals(TestCase):
         self.assertFalse(p.verdict()["clean"])  # a compile happened -> not clean
 
 
-@pytest.mark.test_set_ci
 class TestProfilerFallbackRegimes(TestCase):
     """explain must render each dispatch regime distinctly. The decode-path study
     showed a CPU fallback is NOT automatically a host transfer: int arithmetic on a
@@ -159,7 +155,6 @@ class TestProfilerFallbackRegimes(TestCase):
         self.assertGreater(d["hidden_host_bounce"]["total_bytes"], 0)
 
 
-@pytest.mark.test_set_ci
 class TestProfilerTruthfulnessAndScope(TestCase):
     """The verdict must never claim more truth than it has (C/E), and must not
     carry signals the user cannot act on (D)."""
@@ -269,7 +264,6 @@ class TestProfilerTruthfulnessAndScope(TestCase):
         self.assertEqual(p2.dump()["hidden_host_bounce"]["total_count"], 0)
 
 
-@pytest.mark.test_set_ci
 class TestProfilerApi(TestCase):
     def test_report_is_str_and_dump_shape(self):
         with torch.rbln.explain() as p:
@@ -387,7 +381,6 @@ class TestProfilerApi(TestCase):
         self.assertIsInstance(r1.diff(r2).report(), str)
 
 
-@pytest.mark.test_set_ci
 class TestProfilerHostCostContext(TestCase):
     """Host-cost context signals: (A) which fallback ops lack a fast-path handler,
     (E) host CPU oversubscription, (B) rebel-runtime (librbln) boundary time vs
@@ -463,7 +456,6 @@ class TestProfilerHostCostContext(TestCase):
         self.assertEqual(rt["total_ns"], 0)
 
 
-@pytest.mark.test_set_ci
 class TestProfilerReportFormat(TestCase):
     """Output-format contract: torch.profiler-style, ASCII, torch-parity time units."""
 
@@ -575,7 +567,6 @@ class TestProfilerReportFormat(TestCase):
         self.assertLess(rep.index("runtime/v2v_slow"), rep.index("dispatch/cpu_fallback"))
 
 
-@pytest.mark.test_set_ci
 class TestProfilerRegionSafety(TestCase):
     """Regions own process-global instrumentation, so they must not overlap. A guard raises
     on overlap, and cleanup is guaranteed on any error (failed start OR mid-region raise)."""
@@ -607,7 +598,6 @@ class TestProfilerRegionSafety(TestCase):
         self.assertFalse(_prof._active)  # outer released on the way out
 
 
-@pytest.mark.test_set_ci
 class TestProfilerRuntimeContract(TestCase):
     """Guard the positional contracts with the (closed) rebel-compiler runtime. If a probe's
     cardinality drifts (a reason/primitive/site added or removed), these FAIL in CI --

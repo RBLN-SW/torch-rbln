@@ -98,8 +98,7 @@ def _run_all_gather(rank: int, world_size: int, backend: str) -> None:
         dist.destroy_process_group()
 
 
-@pytest.mark.test_set_ci
-@pytest.mark.single_worker
+@pytest.mark.serial
 @requires_logical_devices(2)
 class TestC10dRBLNCCL(TestCase):
     """Walkthrough example 8: c10d collectives with the `rbln-ccl` backend."""

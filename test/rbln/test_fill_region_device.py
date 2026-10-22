@@ -58,7 +58,6 @@ def _device_latest(shape, dtype=torch.bfloat16):
     return y
 
 
-@pytest.mark.test_set_ci
 @needs_device
 class TestFillRegionDevice(TestCase):
     def _check(self, make_view, value, shape=(1, 474, 3072), dtype=torch.bfloat16, resident=True):

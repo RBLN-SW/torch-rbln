@@ -31,7 +31,6 @@ ATOL = 0.01
 RTOL = 0.01
 
 
-@pytest.mark.test_set_ci
 class TestAliasedTensors(TestCase):
     binary_ops = [torch.add]
     rbln_device = torch.device("rbln:0")
@@ -186,7 +185,6 @@ def _input_output_tensor_memory_independence_worker(rbln_device, dtype):
     torch.testing.assert_close(rbln_out.cpu(), cpu_out, atol=ATOL, rtol=RTOL)
 
 
-@pytest.mark.test_set_ci
 class TestInputOutputTensors(TestCase):
     """
     Regression tests for input and output tensor memory collisions.
@@ -237,7 +235,6 @@ def _bind_after_shutdown_worker(device):
     raise AssertionError("bind_device_memory did not raise with the runtime shutting down")
 
 
-@pytest.mark.test_set_ci
 class TestBindDeviceMemory(TestCase):
     """
     ``torch.rbln.bind_device_memory`` materializes a tensor's device allocation, for
@@ -304,14 +301,13 @@ class TestBindDeviceMemory(TestCase):
             torch.rbln.bind_device_memory(base[16:])
         torch.rbln.bind_device_memory(base.view(64, 64))
 
-    @pytest.mark.single_worker
+    @pytest.mark.serial
     def test_raises_once_runtime_is_shutting_down(self):
         # The raw runtime call would fault rather than raise past teardown, and this
         # entry point is public, so a caller can reach it there.
         run_in_isolated_process(_bind_after_shutdown_worker, str(self.rbln_device))
 
 
-@pytest.mark.test_set_ci
 class TestHugeHostEmpty(TestCase):
     """
     ``torch.rbln.huge_host_empty`` returns host memory the device can DMA into
@@ -366,7 +362,6 @@ class TestHugeHostEmpty(TestCase):
             torch.rbln.huge_host_empty(4096.0)
 
 
-@pytest.mark.test_set_ci
 class TestHostRegisterArguments(TestCase):
     """``torch.rbln.host_register`` argument checks; no device needed."""
 
@@ -386,7 +381,6 @@ class TestHostRegisterArguments(TestCase):
             torch.rbln.host_unregister(slab.data_ptr())  # no-op, does not raise
 
 
-@pytest.mark.test_set_ci
 class TestHostRegister(TestCase):
     """Copies over a registered host range stay correct, including across re-registration."""
 

@@ -56,7 +56,6 @@ def _noncontig_2d(shape, dtype, device):
     return big[:, : shape[1]]
 
 
-@pytest.mark.test_set_ci
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestCopyV2V(TestCase):
     """Tests for the v2v-based ``aten::copy_`` path and the strided

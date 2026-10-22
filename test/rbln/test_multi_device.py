@@ -13,7 +13,6 @@ from torch.testing._internal.common_utils import parametrize, run_tests, TestCas
 from test.utils import requires_logical_devices, SUPPORTED_DTYPES
 
 
-@pytest.mark.test_set_ci
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestMultiDevice(TestCase):
     @requires_logical_devices(2)
@@ -433,7 +432,6 @@ class TestMultiDevice(TestCase):
         self.assertEqual(y1.device, device1)
 
 
-@pytest.mark.test_set_ci
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestDeviceOutputPlacement(TestCase):
     """Test cases to ensure output tensors are placed on the correct device."""

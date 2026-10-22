@@ -27,7 +27,6 @@ import torch_rbln
 pytestmark = pytest.mark.torch_rbln_only
 
 
-@pytest.mark.test_set_ci
 class TestEnvironmentVerification(TestCase):
     """Environment sanity checks (Walkthrough example 0)."""
 

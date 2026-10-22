@@ -383,7 +383,6 @@ def xfail_until(owner: str, reason: str):
     return pytest.mark.xfail(strict=True, reason=f"[{owner}] {reason}")
 
 
-@pytest.mark.test_set_ci
 @requires_physical_devices(1)
 class TestProbeHarness(TestCase):
     """Positive controls: prove the harness can actually observe a violation.
@@ -470,7 +469,6 @@ class TestProbeHarness(TestCase):
                 self.assertEqual(p.result, expected[name], f"{name}: scenario is not live -- {p}")
 
 
-@pytest.mark.test_set_ci
 @requires_physical_devices(1)
 class TestUpstreamClauses(TestCase):
     """One test per stated upstream requirement, cited in the docstring."""
@@ -940,7 +938,6 @@ class TestUpstreamClauses(TestCase):
         self.assertEqual(p.result, [1, 1], f"unsetting RBLN_DEVICES widened the pool -- {p}")
 
 
-@pytest.mark.test_set_ci
 @requires_physical_devices(1)
 class TestExternalConsumers(TestCase):
     """Scenarios reproducing how vLLM and LMCache drive this backend; each is a reported

@@ -18,7 +18,6 @@ supported dtypes and across forward / reverse / fractional / single-step
 configurations.
 """
 
-import pytest
 import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
@@ -30,7 +29,6 @@ def _arange_via_out(start, end, step, dtype, device):
     return torch.arange(start, end, step, out=out)
 
 
-@pytest.mark.test_set_ci
 class TestArangeStartOutRBLN(TestCase):
     """`aten::arange.start_out` on RBLN must match CPU."""
 

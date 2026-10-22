@@ -11,7 +11,6 @@ host memory. These tests verify correctness across all access patterns:
 - Edge cases: empty tensors, scalars, large tensors, repeated zero_ calls
 """
 
-import pytest
 import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
@@ -21,7 +20,6 @@ ATOL = 0.01
 RTOL = 0.01
 
 
-@pytest.mark.test_set_ci
 class TestZeroOptBasic(TestCase):
     """Basic correctness: zero_ produces all-zero tensors readable from CPU."""
 
@@ -76,7 +74,6 @@ class TestZeroOptBasic(TestCase):
         self.assertTrue(torch.all(t.cpu() == 0).item())
 
 
-@pytest.mark.test_set_ci
 class TestZeroOptArithmetic(TestCase):
     """Arithmetic on zero-initialized tensors (device read path)."""
 
@@ -119,7 +116,6 @@ class TestZeroOptArithmetic(TestCase):
         self.assertTrue(torch.all(cmp.cpu()).item())
 
 
-@pytest.mark.test_set_ci
 class TestZeroOptPartialWrite(TestCase):
     """Partial writes (slice assignment) after zero_ marking."""
 
@@ -167,7 +163,6 @@ class TestZeroOptPartialWrite(TestCase):
                 self.assertAlmostEqual(result[i].item(), 0.0, places=2)
 
 
-@pytest.mark.test_set_ci
 class TestZeroOptViews(TestCase):
     """Views and reshapes on zero-initialized tensors."""
 
@@ -222,7 +217,6 @@ class TestZeroOptViews(TestCase):
         self.assertTrue(torch.all(expanded.cpu() == 0).item())
 
 
-@pytest.mark.test_set_ci
 class TestZeroOptCopy(TestCase):
     """Copy operations involving zero-initialized tensors."""
 
@@ -261,7 +255,6 @@ class TestZeroOptCopy(TestCase):
         self.assertTrue(torch.all(back.cpu() == 0).item())
 
 
-@pytest.mark.test_set_ci
 class TestZeroOptKVCachePattern(TestCase):
     """Simulate KV-cache usage pattern: zero-init then overwrite via NPU."""
 
@@ -303,7 +296,6 @@ class TestZeroOptKVCachePattern(TestCase):
             )
 
 
-@pytest.mark.test_set_ci
 class TestZeroOptLargeTensor(TestCase):
     """Large tensor tests — closer to real KV-cache sizes."""
 
@@ -322,7 +314,6 @@ class TestZeroOptLargeTensor(TestCase):
         self.assertTrue(torch.all(result.cpu() == 1.0).item())
 
 
-@pytest.mark.test_set_ci
 class TestZeroOptReZero(TestCase):
     """Re-zeroing: zero_ after tensor already has data (state transitions)."""
 
@@ -359,7 +350,6 @@ class TestZeroOptReZero(TestCase):
             self.assertEqual(t.cpu(), expected, atol=ATOL, rtol=RTOL)
 
 
-@pytest.mark.test_set_ci
 class TestZeroOptTorchZeros(TestCase):
     """torch.zeros() factory — should also use the optimized path."""
 

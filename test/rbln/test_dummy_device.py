@@ -27,9 +27,6 @@ import pytest
 from test.utils import is_rebel_device
 
 
-pytestmark = pytest.mark.test_set_ci
-
-
 def _clean_env() -> dict:
     """A hermetic env copy for subprocess tests.
 
@@ -796,7 +793,7 @@ print("OK")
 )
 
 
-@pytest.mark.single_worker
+@pytest.mark.serial
 # Not xfail_rebel(): that helper is strict, and the fault sits in the pinned compiler, so a
 # rebel-compiler that compiles this decoder again must not fail the job on XPASS. `-rEfX`
 # still reports the XPASS, which is the signal to drop this marker.

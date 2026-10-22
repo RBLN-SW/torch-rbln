@@ -5,14 +5,14 @@
 #   run-python-tests.sh --build-type <Release|Debug>
 #                       --artifact-build-id <build ID>
 #                       --artifact-dir <name>
-#                       --test-mode <ci|release>
+#                       --exclude-periodic <true|false>
 #                       --suite <core|distributed|ops|models>
 set -euo pipefail
 
 build_type=""
 artifact_build_id=""
 artifact_dir=""
-test_mode=""
+exclude_periodic=""
 suite=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -28,8 +28,14 @@ while [[ $# -gt 0 ]]; do
       artifact_dir="$2"
       shift 2
       ;;
-    --test-mode)
-      test_mode="$2"
+    --exclude-periodic)
+      case "${2-}" in
+        true | false) exclude_periodic="$2" ;;
+        *)
+          echo "--exclude-periodic must be true or false, not '${2-}'" >&2
+          exit 2
+          ;;
+      esac
       shift 2
       ;;
     --suite)
@@ -58,8 +64,8 @@ if [[ -z "${artifact_dir}" ]]; then
   exit 2
 fi
 
-if [[ -z "${test_mode}" ]]; then
-  echo "--test-mode is required" >&2
+if [[ -z "${exclude_periodic}" ]]; then
+  echo "--exclude-periodic is required" >&2
   exit 2
 fi
 
@@ -67,6 +73,21 @@ if [[ -z "${suite}" ]]; then
   echo "--suite is required" >&2
   exit 2
 fi
+
+# `-m` rejects an empty `()`, so `selection` carries its own `and`.
+selection=""
+if [[ "${exclude_periodic}" == "true" ]]; then
+  selection="(not periodic) and "
+fi
+
+case "${suite}" in
+  core) test_dir="test/rbln" ;;
+  distributed | ops | models) test_dir="test/${suite}" ;;
+  *)
+    echo "--suite must be core, distributed, ops, or models, not '${suite}'" >&2
+    exit 2
+    ;;
+esac
 
 echo "--- Downloading ${artifact_dir}"
 buildkite-agent artifact download \
@@ -108,18 +129,53 @@ uv pip install \
   --python .venv/bin/python \
   "${wheel}[runtime]"
 
-# `test/run_tests.py` runs `python -m pytest`, which puts the current
-# directory first on `sys.path`, where `./torch_rbln` would shadow the
-# installed wheel.
+# pytest prepends the repository root to `sys.path`, where `./torch_rbln`
+# would shadow the installed wheel.
 mv \
   ./torch_rbln \
   ./torch_rbln.bak
 
-echo "--- Running ${suite} suite"
+if [[ "${suite}" == "models" ]]; then
+  echo "--- Installing model-test dependencies"
+  uv run \
+    --no-sync \
+    bash \
+      tools/test/install-test-deps.sh
+fi
+
+failed_pytest_runs=()
+
+echo "--- Running ${suite} suite, ${test_dir}, serial tests"
+pytest_exit_code=0
 uv run \
   --no-sync \
-  python \
-    test/run_tests.py \
-    --suite "${suite}" \
-    --test_mode "${test_mode}" \
-    --workers 32
+  pytest \
+    "${test_dir}" \
+    -m "${selection}serial" \
+    --numprocesses=1 \
+  || pytest_exit_code=$?
+# Exit 5 means pytest selected no tests, which is not a failure.
+if [[ "${pytest_exit_code}" -ne 0 && "${pytest_exit_code}" -ne 5 ]]; then
+  failed_pytest_runs+=("serial tests (pytest exit code ${pytest_exit_code})")
+fi
+
+echo "--- Running ${suite} suite, ${test_dir}, parallel tests"
+pytest_exit_code=0
+uv run \
+  --no-sync \
+  pytest \
+    "${test_dir}" \
+    -m "${selection}(not serial)" \
+    --numprocesses=32 \
+  || pytest_exit_code=$?
+if [[ "${pytest_exit_code}" -ne 0 && "${pytest_exit_code}" -ne 5 ]]; then
+  failed_pytest_runs+=("parallel tests (pytest exit code ${pytest_exit_code})")
+fi
+
+if [[ "${#failed_pytest_runs[@]}" -gt 0 ]]; then
+  echo "--- Reporting failed pytest runs"
+  for failed_pytest_run in "${failed_pytest_runs[@]}"; do
+    echo "Failed: ${failed_pytest_run}" >&2
+  done
+  exit 1
+fi

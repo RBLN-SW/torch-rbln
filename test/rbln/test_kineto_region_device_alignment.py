@@ -101,8 +101,7 @@ def async_dispatch(monkeypatch):
     monkeypatch.setenv("RBLN_RUNTIME_FORCE_SYNC", "0")
 
 
-@pytest.mark.test_set_ci
-@pytest.mark.single_worker
+@pytest.mark.serial
 # Not xfail_rebel(): that helper is strict, and the fault is host-dependent, so a REBEL host
 # that does create the runtime must not fail the job on XPASS. `-rEfX` still reports the XPASS,
 # which is the signal to drop this marker.

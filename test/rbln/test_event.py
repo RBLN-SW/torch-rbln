@@ -9,14 +9,12 @@ unsupported elapsed_time path.
 
 import unittest
 
-import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from test.utils import assert_device_resident_dtype
 
 
-@pytest.mark.test_set_ci
 class TestEvent(TestCase):
     def test_event_default_device_is_rbln(self):
         event = torch.Event()

@@ -53,7 +53,6 @@ def _record(name: str, located: str):
     return _Entry(name)
 
 
-@pytest.mark.test_set_ci
 class TestRblnRuntimeLibResolve(TestCase):
     """Resolution order for librbln.so."""
 
@@ -270,7 +269,6 @@ class TestRblnRuntimeLibResolve(TestCase):
             self.assertEqual(rbln_runtime_lib._split_env_paths("LD_LIBRARY_PATH"), ["/a", "/b"])
 
 
-@pytest.mark.test_set_ci
 class TestRblnRuntimeLibRecord(TestCase):
     """What the build takes from the same record."""
 
@@ -309,7 +307,6 @@ class TestRblnRuntimeLibRecord(TestCase):
         self.assertTrue(os.path.isdir(include_dir), f"{include_dir} does not exist")
 
 
-@pytest.mark.test_set_ci
 class TestRblnRuntimeLibAdopt(TestCase):
     """Adopting a librbln.so something else mapped first."""
 

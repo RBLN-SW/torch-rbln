@@ -12,7 +12,6 @@ Verifies that:
 - `.to(device, dtype=...)` moves and casts in one call.
 """
 
-import pytest
 import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
@@ -20,7 +19,6 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 from test.utils import SUPPORTED_DTYPES
 
 
-@pytest.mark.test_set_ci
 class TestRBLNDeviceTensor(TestCase):
     """Walkthrough example 2: tensor creation/movement on RBLN."""
 

@@ -60,7 +60,6 @@ def _run_and_count(fn):
     return d2h_after - d2h_before, timing[slot][1]
 
 
-@pytest.mark.test_set_ci
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestIndexCopyV2V(TestCase):
     """Tests for the native v2v ``aten::index_copy.out`` kernel and the

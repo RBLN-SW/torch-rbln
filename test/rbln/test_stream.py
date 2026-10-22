@@ -10,7 +10,6 @@ query / synchronize / wait_event / wait_stream — plus the intentionally
 unsupported bits (stream priorities are accepted but ignored).
 """
 
-import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
@@ -26,7 +25,6 @@ def rel_err(got: torch.Tensor, ref: torch.Tensor) -> float:
     return ((got.float() - ref.float()).norm() / ref.float().norm()).item()
 
 
-@pytest.mark.test_set_ci
 class TestStream(TestCase):
     def tearDown(self):
         # Streams are thread-local process state; leave the default selected so tests

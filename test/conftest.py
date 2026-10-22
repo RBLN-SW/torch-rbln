@@ -16,10 +16,15 @@ _rbln_device_poisoned = False
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_setup(item):
-    """Skip (before any fixture) once the device faulted on this worker: a fixture setup would
-    torch._dynamo.reset() and free runtime buffers the faulted device may still be using."""
+    """Skip once this worker's device has faulted, before fixture setup frees runtime buffers the
+    device may still be using. Fail a serial test when xdist runs more than one worker."""
     if _rbln_device_poisoned:
         pytest.skip("RBLN device drain failed earlier on this worker; skipping to avoid the faulted device")
+
+    if item.get_closest_marker("serial") and hasattr(item.config, "workerinput"):
+        worker_count = int(os.environ["PYTEST_XDIST_WORKER_COUNT"])
+        if worker_count > 1:
+            pytest.fail(f"serial test needs one worker, not {worker_count}", pytrace=False)
 
 
 # =============================================================================

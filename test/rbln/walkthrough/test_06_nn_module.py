@@ -12,7 +12,6 @@ Verifies that:
 - `model.eval()` + `torch.inference_mode()` works with the same model.
 """
 
-import pytest
 import torch
 import torch.nn as nn
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
@@ -34,7 +33,6 @@ class _SmallNet(nn.Module):
         return self.seq(x)
 
 
-@pytest.mark.test_set_ci
 class TestNNModuleOnRBLN(TestCase):
     """Walkthrough example 6: nn.Module.to('rbln') and forward pass."""
 

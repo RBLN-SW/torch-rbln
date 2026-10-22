@@ -29,14 +29,32 @@ import torch_rbln  # noqa: F401 -- registers the rbln device + torch.rbln namesp
 from test.utils import run_in_isolated_process
 
 
-@pytest.mark.single_worker
+def _memory_stats_uninitialized_device_worker():
+    idx = torch.rbln.device_count() - 1
+    assert isinstance(torch.rbln.memory_stats(idx), dict)
+    torch.testing.assert_close(torch.rbln.memory_allocated(idx), 0)
+    torch.testing.assert_close(torch.rbln.memory_reserved(idx), 0)
+
+
+def _accelerator_memory_stats_uninitialized_device_worker():
+    keep = torch.randn(1024, 1024, device="rbln:0", dtype=torch.float16)
+    _ = keep + keep
+    idx = torch.rbln.device_count() - 1
+    stats = torch.accelerator.memory_stats(idx)
+    assert isinstance(stats, dict)
+    assert len(stats) > 0, "getDeviceStats() was not exercised (accelerator returned an empty dict)"
+    assert all(v == 0 for v in stats.values() if isinstance(v, int)), (
+        f"expected zero stats for uninitialized rbln:{idx}, got nonzero entries"
+    )
+
+
+@pytest.mark.serial
 class TestRblnMemoryHelpers(TestCase):
     """``torch.rbln.memory_*`` must read the RBLN allocator's dotted stat keys.
 
-    Single-worker: mutates the global allocator (empty_cache / peak reset) and
+    Serial: mutates the global allocator (empty_cache / peak reset) and
     compares stats across calls, so it must not race other workers' allocations."""
 
-    @pytest.mark.test_set_ci
     def test_memory_helpers_match_stats_and_are_nonzero(self):
         # Pin to device 0 explicitly. The helpers/reset default to the *current*
         # device, which is not guaranteed to be 0 (another test may have changed it),
@@ -56,24 +74,20 @@ class TestRblnMemoryHelpers(TestCase):
         self.assertGreater(torch.rbln.memory_allocated(0), 0)
         del keep
 
-    @pytest.mark.test_set_ci
     def test_memory_stats_rejects_non_rbln_devices(self):
         for bad in ("cpu", "cuda:0", torch.device("cpu")):
             with self.assertRaises(ValueError):
                 torch.rbln.memory_stats(bad)
 
-    @pytest.mark.test_set_ci
     def test_memory_stats_accepts_all_device_forms(self):
         current = torch.accelerator.current_device_index()
         for dev in (None, 0, "rbln:0", "rbln", torch.device("rbln", 0), torch.device("rbln", current)):
             self.assertIsInstance(torch.rbln.memory_stats(dev), dict)
 
-    @pytest.mark.test_set_ci
     def test_memory_stats_rejects_out_of_range_index(self):
         with self.assertRaises(ValueError):
             torch.rbln.memory_stats(torch.rbln.device_count())  # first out-of-range index
 
-    @pytest.mark.test_set_ci
     def test_memory_stats_rejects_malformed_device_strings(self):
         # torch's canonical device grammar rejects these; a bare partition(":") + int()
         # would accept them (int() tolerates "+0"/"00"/" 0"/"0_0"), so "rbln:" typos must
@@ -82,7 +96,6 @@ class TestRblnMemoryHelpers(TestCase):
             with self.assertRaises(ValueError, msg=f"{bad!r} was accepted as a valid device"):
                 torch.rbln.memory_stats(bad)
 
-    @pytest.mark.test_set_ci
     def test_memory_stats_rejects_int8_wrapped_index(self):
         # torch.device's index is an int8_t: raw 256 wraps to 0, 257 to 1, 255 to -1
         # (current device). Such values must be rejected from the original int/str, not
@@ -93,7 +106,6 @@ class TestRblnMemoryHelpers(TestCase):
             with self.assertRaises(ValueError, msg=f"{bad!r} slipped past the range check"):
                 torch.rbln.memory_stats(bad)
 
-    @pytest.mark.test_set_ci
     def test_memory_stats_uninitialized_device_reports_zero_not_raise(self):
         # CUDA parity: memory_stats() must not throw for a *valid* device index this
         # process has not allocated on. It reports zero (like torch.cuda.memory_stats
@@ -105,13 +117,8 @@ class TestRblnMemoryHelpers(TestCase):
         count = torch.rbln.device_count()
         if count < 2:
             self.skipTest("needs a second, never-allocated device index")
-        # Highest index: not touched by other tests in this (single) worker process.
-        idx = count - 1
-        self.assertIsInstance(torch.rbln.memory_stats(idx), dict)  # must not raise
-        self.assertEqual(torch.rbln.memory_allocated(idx), 0)
-        self.assertEqual(torch.rbln.memory_reserved(idx), 0)
+        run_in_isolated_process(_memory_stats_uninitialized_device_worker)
 
-    @pytest.mark.test_set_ci
     def test_accelerator_memory_stats_uninitialized_device_reports_zero_not_raise(self):
         # The generic torch.accelerator path routes to the C10 getDeviceStats() hook --
         # a separate code path from torch.rbln.memory_stats(). It must report zero (not
@@ -123,26 +130,15 @@ class TestRblnMemoryHelpers(TestCase):
         # torch.accelerator short-circuits to an empty dict *before* reaching
         # getDeviceStats(), making the check below vacuous. With it initialized, querying
         # an uninitialized index actually exercises getDeviceStats() (populated zeros).
-        keep = torch.randn(1024, 1024, device="rbln:0", dtype=torch.float16)
-        _ = keep + keep
-        idx = count - 1  # highest index: not touched by other tests in this worker
-        stats = torch.accelerator.memory_stats(idx)  # must not raise (regression: INIT_INVALID_ARGUMENT)
-        self.assertIsInstance(stats, dict)
-        self.assertGreater(len(stats), 0, "getDeviceStats() was not exercised (accelerator returned an empty dict)")
-        self.assertTrue(
-            all(v == 0 for v in stats.values() if isinstance(v, int)),
-            msg=f"expected zero stats for uninitialized rbln:{idx}, got nonzero entries",
-        )
-        del keep
+        run_in_isolated_process(_accelerator_memory_stats_uninitialized_device_worker)
 
 
-@pytest.mark.single_worker
+@pytest.mark.serial
 class TestDeviceCapability(TestCase):
     """``get_device_capability()`` reports dtypes resident in device memory
     (fp16/bf16); other dtypes are CPU-backed even under device="rbln".
-    Single-worker: measures global device memory."""
+    Serial: measures global device memory."""
 
-    @pytest.mark.test_set_ci
     def test_capability_matches_device_resident_dtypes(self):
         # Probe a candidate set spanning both advertised (fp16/bf16) and unadvertised
         # (fp32/int) dtypes, classify each by whether a compute op materializes it in
@@ -170,7 +166,6 @@ class TestDeviceCapability(TestCase):
 class TestStorageResizeToZero(TestCase):
     """PrivateUse1 storage must accept ``resize_(0)``."""
 
-    @pytest.mark.test_set_ci
     def test_resize_storage_to_zero(self):
         x = torch.empty(16, device="rbln:0", dtype=torch.float16)
         storage = x.untyped_storage()
@@ -178,12 +173,12 @@ class TestStorageResizeToZero(TestCase):
         self.assertEqual(storage.nbytes(), 0)
 
 
-@pytest.mark.single_worker
+@pytest.mark.serial
 class TestAcceleratorEmptyCache(TestCase):
     """Device-less ``torch.accelerator.empty_cache()`` actually releases cached
     memory (it is not a no-op or a query-only stub).
 
-    Single-worker: asserts on global reserved-memory changes, so it must not race
+    Serial: asserts on global reserved-memory changes, so it must not race
     other workers' allocations.
 
     Note: the all-devices span — ``empty_cache()`` walking *every* initialized
@@ -212,7 +207,6 @@ class TestAcceleratorEmptyCache(TestCase):
         del buf
         return torch.rbln.memory_reserved(device)
 
-    @pytest.mark.test_set_ci
     def test_empty_cache_releases_current_device(self):
         reserved_cached = self._hold_then_free_reserved("rbln:0")
         torch.accelerator.empty_cache()
@@ -234,7 +228,6 @@ class TestAcceleratorEmptyHostCache(TestCase):
     """``torch.accelerator.empty_host_cache()`` reads the PrivateUse1 host allocator
     slot; with it empty, torch 2.13 segfaults (pytorch/pytorch#197593)."""
 
-    @pytest.mark.test_set_ci
     def test_empty_host_cache_after_device_use(self):
         # A spawned process, so a segfault fails this test instead of the worker.
         run_in_isolated_process(_empty_host_cache_worker)
@@ -250,7 +243,6 @@ def _driver_memory_replies(logical_index):
     return [get_device_memory_info(pid) for pid in get_physical_device_ids(logical_index)]
 
 
-@pytest.mark.test_set_ci
 class TestMemGetInfo(TestCase):
     """``mem_get_info()`` is the driver's device-wide reading, summed over the logical
     device's physical NPUs, or a clear error where the driver cannot answer.

@@ -11,7 +11,6 @@ import sys
 from io import StringIO
 from unittest.mock import patch
 
-import pytest
 import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
@@ -19,7 +18,6 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 import torch_rbln._C
 
 
-@pytest.mark.test_set_ci
 class TestDeviceMapping(TestCase):
     """Test device mapping functionality without environment variables.
 
@@ -244,7 +242,6 @@ def run_test_with_env(env_vars, impl_test_func):
     return result
 
 
-@pytest.mark.test_set_ci
 class TestDeviceMappingEnvVars(TestCase):
     """Tests for device mapping with environment variables.
 
