@@ -54,7 +54,6 @@ def assert_equal_where_specials_match(a: torch.Tensor, b: torch.Tensor, *, atol=
         raise AssertionError(f"Mismatch at finite/special boundary: {idx}")
 
 
-@pytest.mark.test_set_ci
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestLlamaOps(TestCase):
     batch_sizes = [1, 2]

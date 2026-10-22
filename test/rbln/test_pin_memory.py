@@ -10,7 +10,6 @@ Covers the standard `pin_memory` UX while RBLN is the active accelerator:
 4. `non_blocking=True` copies from/to pinned host tensors
 """
 
-import pytest
 import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
@@ -18,7 +17,6 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 from test.utils import SUPPORTED_DTYPES
 
 
-@pytest.mark.test_set_ci
 class TestPinMemory(TestCase):
     """Pinned host allocation and is_pinned semantics (no device transfer involved)."""
 
@@ -71,7 +69,6 @@ class TestPinMemory(TestCase):
         self.assertEqual(torch.cat(batches), torch.arange(32, dtype=torch.float32).reshape(8, 4))
 
 
-@pytest.mark.test_set_ci
 class TestPinMemoryCopy(TestCase):
     """Pinned host <-> RBLN device transfers, including the non_blocking path."""
 

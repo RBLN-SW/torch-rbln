@@ -17,7 +17,6 @@ import torch
 from torch.testing._internal.common_utils import run_tests, TEST_ACCELERATOR, TEST_MULTIACCELERATOR, TestCase
 
 
-@pytest.mark.test_set_ci
 @pytest.mark.skipif(not TEST_ACCELERATOR, reason="no accelerator (rbln) detected")
 class TestAcceleratorStream(TestCase):
     def test_generic_stream_behavior(self):

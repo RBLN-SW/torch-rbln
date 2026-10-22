@@ -11,7 +11,11 @@ from test.utils import xfail_atom, xfail_rebel
 from torch_rbln._internal.device_arch_utils import _arch_from_npu_name, get_device_arch, is_atom_device, is_rebel_device
 
 
-@pytest.mark.test_set_ci
+# Deselected by rebel_compiler's CI (-m "not torch_rbln_only");
+# see the marker in pyproject. No test here calls the runtime.
+pytestmark = pytest.mark.torch_rbln_only
+
+
 class TestArchFromNpuName(TestCase):
     """Maps an NPU name to a device family."""
 
@@ -31,7 +35,6 @@ class TestArchFromNpuName(TestCase):
         self.assertEqual(_arch_from_npu_name("RBLN-XX99"), "unknown")
 
 
-@pytest.mark.test_set_ci
 class TestArchPredicates(TestCase):
     """``is_rebel_device`` / ``is_atom_device`` reflect ``get_device_arch``."""
 
@@ -52,7 +55,6 @@ class TestArchPredicates(TestCase):
             self.assertFalse(is_atom_device())
 
 
-@pytest.mark.test_set_ci
 class TestArchXfailMarkers(TestCase):
     """xfail markers set ``condition`` per arch and ``strict=True``."""
 
@@ -80,7 +82,6 @@ class TestArchXfailMarkers(TestCase):
         self.assertFalse(mark.mark.kwargs["condition"])
 
 
-@pytest.mark.test_set_ci
 class TestArchResolutionFailure(TestCase):
     """Only ``None`` from the runtime is ``"unknown"``; any failure propagates.
 

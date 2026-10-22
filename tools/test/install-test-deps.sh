@@ -13,7 +13,7 @@
 # Steps:
 #   1. Test runner   : pytest, pytest-xdist
 #   2. Test infra    : expecttest (for torch.testing._internal)
-#   3. Model tests   : pandas, transformers 4 (the line test_transformers.py's
+#   3. Model tests   : transformers 4 (the line test_transformers.py's
 #                      models load under)
 #
 # Usage:
@@ -76,9 +76,7 @@ install_test_infra() {
   pip_install "expecttest>=0.3.0,<0.4.0"
 }
 
-# ----- step 3: model-test deps (pandas + transformers) ----------------------
-#
-# pandas is a plain PyPI package used by test/models/test_transformers.py.
+# ----- step 3: model-test deps (transformers) -------------------------------
 #
 # transformers is pinned to what the RBLN PyTorch tutorial requires: this suite
 # exists to keep that tutorial working, so it has to run what the tutorial runs.
@@ -87,8 +85,7 @@ install_test_infra() {
 # transformers 5 release runs EXAONE-3.5's hub modeling code.
 
 install_model_test_deps() {
-  log_step "Model-test deps (pandas + transformers)"
-  pip_install "pandas==2.2.3"
+  log_step "Model-test deps (transformers)"
   pip_install "transformers==4.49.0"
 }
 

@@ -20,7 +20,6 @@ import subprocess
 import sys
 import textwrap
 
-import pytest
 import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
@@ -31,7 +30,6 @@ import torch_rbln.programs as torch_rbln_programs
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-@pytest.mark.test_set_ci
 class TestCaptureProgramsSurface(TestCase):
     def test_exposed_on_torch_rbln(self):
         from rebel.core import program_capture
@@ -56,7 +54,6 @@ class TestCaptureProgramsSurface(TestCase):
         self.assertEqual(programs, [])
 
 
-@pytest.mark.test_set_ci
 class TestCaptureProgramsLazy(TestCase):
     def test_import_does_not_load_rebel(self):
         """Importing torch_rbln must leave ``rebel`` out of ``sys.modules``.
@@ -90,7 +87,6 @@ class TestCaptureProgramsLazy(TestCase):
         )
 
 
-@pytest.mark.test_set_ci
 class TestCaptureProgramsCompile(TestCase):
     def test_one_program_per_backend_build(self, device):
         from rebel.sync_runtime import DynamoRuntime

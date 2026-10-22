@@ -9,6 +9,12 @@ from torch.testing._internal.common_device_type import instantiate_device_type_t
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 
+# Deselected by rebel_compiler's CI (-m "not torch_rbln_only");
+# see the marker in pyproject. These tests pin the memory API's
+# torch-facing contract.
+pytestmark = pytest.mark.torch_rbln_only
+
+
 def _round_up_to_block(nbytes, granularity):
     """Round an allocation size up to the allocator's page granularity.
 
@@ -21,8 +27,7 @@ def _round_up_to_block(nbytes, granularity):
     return ((nbytes + granularity - 1) // granularity) * granularity
 
 
-@pytest.mark.test_set_ci
-@pytest.mark.single_worker
+@pytest.mark.serial
 @pytest.mark.usefixtures("enable_eager_malloc")
 class TestMemoryStats(TestCase):
     # Memory allocation size constants for testing (matching C++ test)
@@ -631,8 +636,7 @@ class TestMemoryStats(TestCase):
         self.assertIsNone(torch.rbln.reset_peak_memory_stats(self.device))
 
 
-@pytest.mark.test_set_ci
-@pytest.mark.single_worker
+@pytest.mark.serial
 @pytest.mark.usefixtures("enable_eager_malloc")
 class TestAcceleratorMemoryAPI(TestCase):
     """Tests for torch.accelerator.* memory APIs backed by RBLNAllocator.DeviceAllocator.
@@ -978,8 +982,7 @@ class TestAcceleratorMemoryAPI(TestCase):
             del tensor
 
 
-@pytest.mark.test_set_ci
-@pytest.mark.single_worker
+@pytest.mark.serial
 @pytest.mark.usefixtures("enable_eager_malloc")
 class TestPerChipletMemoryStats(TestCase):
     """memory_stats_per_chiplet() / memory_summary()."""

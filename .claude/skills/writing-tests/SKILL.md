@@ -1,13 +1,13 @@
 ---
 name: writing-tests
-description: Use when adding or modifying tests under test/ — where the file goes, the markers that decide whether it runs at all, how to assert an op reached the device rather than the host fallback, the process-state traps in this suite, and how to prove a new test fails before the fix.
+description: Use when adding or modifying tests under test/ — where the file goes, which marker, if any, a test needs, how to assert an op reached the device rather than the host fallback, the process-state traps in this suite, and how to prove a new test fails before the fix.
 ---
 
 # Writing tests in torch-rbln
 
 ## 0. Read the guide first
 
-`docs/TEST_GUIDE.md` is the contract for this suite, not background reading. Before writing, read the sections that apply to what you are adding: §2 for where the file goes, §5 for the PrivateUse1 device-type framework, §6 for the templates and parametrization rules, §8 for which marker the test needs. A test that ignores it gets sent back in review even when it passes.
+`docs/TEST_GUIDE.md` is the contract for this suite, not background reading. Before writing, read the sections that apply to what you are adding: "Directory layout" for where the file goes, "PrivateUse1 test framework" for the device-type framework, "Write tests" for the templates and parametrization rules, and "CI integration" for which marker the test needs. A test that ignores it gets sent back in review even when it passes.
 
 This skill covers what goes wrong on top of that — the traps the guide does not spell out.
 
@@ -25,7 +25,6 @@ Answer these before writing a line. If you cannot, ask instead of guessing.
 | Directory           | Holds                                                                   |
 | ------------------- | ----------------------------------------------------------------------- |
 | `test/rbln/`        | Backend behavior — ops, device mapping, memory, copies, `torch.compile` |
-| `test/internal/`    | Internal subsystems reached through `torch_rbln._internal`              |
 | `test/ops/`         | Upstream op-compatibility tests. Adapted from PyTorch; change minimally |
 | `test/distributed/` | ProcessGroup, TP/PP                                                     |
 | `test/models/`      | Whole-model integration; needs extra dependencies and model artifacts   |
@@ -46,36 +45,29 @@ if __name__ == "__main__":
 
 The `TESTOWNERS` and `TEST_HAS_MAIN` linters reject a Python test file missing either end. C++ tests are GTest under `test/cpp/` and none of this applies to them.
 
-Read the `collected N items` line every time you run a file. `run_tests.py` counts a run that collected nothing as neither a pass nor a failure, so an exit code alone can report a test that never existed as done.
+Check the `collected N items` line every time you run a file. CI treats a run that collects no tests as passing, so a green check does not prove that your test ran.
 
-**Instantiate only what has an axis.** `instantiate_device_type_tests` expands `@dtypes`, `@parametrize`, or a `device` argument, and is required for a test that uses one. Do not wrap a test that never touches a device: the call deletes the template class and rebuilds it per device type, and on a host with no NPU nothing replaces it — the file then collects zero tests, with no failure and no skip. An import guard, a subprocess check, or a contract assertion is a plain `TestCase`; follow a neighbour like `test_dummy_device.py` or `test_import_rbln_devices_seal.py`. `docs/TEST_GUIDE.md` §5 covers the mechanism.
+**Instantiate only what has an axis.** `instantiate_device_type_tests` expands `@dtypes`, `@parametrize`, or a `device` argument, and is required for a test that uses one. Do not wrap a test that never touches a device: the call deletes the template class and rebuilds it per device type, and on a host with no NPU nothing replaces it — the file then collects zero tests, with no failure and no skip. An import guard, a subprocess check, or a contract assertion is a plain `TestCase`; follow a neighbor like `test_dummy_device.py` or `test_import_rbln_devices_seal.py`. The "PrivateUse1 test framework" section of `docs/TEST_GUIDE.md` covers the mechanism.
 
-## 4. Markers decide whether the test runs at all
+## 4. Most tests need no marker
 
-| Marker                  | Effect                                                                     |
-| ----------------------- | -------------------------------------------------------------------------- |
-| `test_set_ci`           | Runs on every PR. **Without it, the pre-merge checks never run the test.** |
-| *(none)*                | Runs only in the release checks on `main`                                  |
-| `test_set_perf`         | Manual only                                                                |
-| `test_set_experimental` | Excluded from release                                                      |
-| `single_worker`         | Runs in the serial pass, which is still xdist at `--numprocesses=1`        |
-| `no_dynamo_reset`       | Opts out of the autouse `torch._dynamo.reset()`                            |
+An unmarked test runs in every check. Add a marker only when its condition holds:
 
-Default to `test_set_ci`. Omit it only for a test too slow for per-commit CI, and say so in the PR.
+- `periodic`: the test meets one of the `periodic` criteria in `docs/TEST_GUIDE.md`. The test then runs only in the release checks.
+- `serial`: the test uses a resource shared across processes. It runs on one worker and fails at setup on more.
+- `no_dynamo_reset`: the test is compile-heavy. The marker keeps the compile cache across tests, which the `reset_dynamo` autouse fixture would otherwise clear.
 
-`single_worker` serializes; it does not isolate. The serial pass is one xdist worker running every marked test in one process, so state still leaks from one to the next. Pick the isolation the state actually needs:
+`serial` serializes but does not isolate: every `serial` test shares one worker process, so state leaks between them. Choose the isolation by the state, not by what a nearby test uses:
 
-- **A resource shared across processes** — a device, a fixed port, a file the runtime writes — `single_worker`.
-- **State that restores** — an env var the code reads live, the selected device — a fixture or `monkeypatch`, and no marker.
-- **State that does not restore** — an import-time effect, a `static` or `@lru_cache` latch, a device mapping that has been committed — `run_in_isolated_process` (`test/utils.py`), or a `subprocess` the way `test_import_rbln_devices_seal.py` does it.
-
-Several dozen tests carry `single_worker`; read one near your target and check which of the three it needed before copying the marker.
+- **A resource shared across processes**, such as a device, a fixed port, or a file the runtime writes: `serial`.
+- **State that restores**, such as an env var the code reads live or the selected device: a fixture or `monkeypatch`.
+- **State that does not restore**, such as an import-time effect, a `static` or `@lru_cache` latch, or a committed device mapping: `run_in_isolated_process` (`test/utils.py`), or a `subprocess` as in `test_import_rbln_devices_seal.py`.
 
 ## 5. Process state leaks between tests
 
 This is where tests in this repository most often lie.
 
-- **A flag read into `static` or `@lru_cache` state latches for the whole process.** A `monkeypatch.setenv` after that first read changes nothing, and the value you did set can outlive the test on an xdist worker and silently change an unrelated later one — that is a real CI flake this suite has already paid for, and `docs/TEST_GUIDE.md` §6 records the rule: such flags are read live. Use `run_in_isolated_process` (`test/utils.py`) whenever the behavior under test depends on an env var, a singleton, or a fresh device count.
+- **A flag read into `static` or `@lru_cache` state latches for the whole process.** A `monkeypatch.setenv` after that first read changes nothing, and the value you did set can outlive the test on an xdist worker and silently change an unrelated later one — that is a real CI flake this suite has already paid for, and the "Write tests" section of `docs/TEST_GUIDE.md` records the rule: such flags are read live. Use `run_in_isolated_process` (`test/utils.py`) whenever the behavior under test depends on an env var, a singleton, or a fresh device count.
 - **The device mapping freezes on first real use.** Queries like `device_count()` only plan it; an allocation, a `synchronize()`, or a collective commits it and later edits to `RBLN_DEVICES` are ignored. So a test that uses a device changes what every later test on that worker sees, and the autouse `restore_current_device` fixture restores the selected index, not that commit.
 - **The suite force-disables the `compile_error` fallback** (`test/conftest.py`), so a compile failure raises here even though it would fall back to CPU in production. Do not re-enable it to make a test pass.
 - **A failed drain poisons the rest of the worker.** Teardown synchronizes every device after each test; if that synchronize raises, your test errors in teardown and every remaining test on that worker skips rather than run against a faulted device. So a `RuntimeError: RBLN device drain failed` plus a wall of skips points at the test that ran before them, not at them. Do not paper over it with a retry.
@@ -105,9 +97,13 @@ Run the new test against the code as it was before your change. The reliable way
 ```bash
 git worktree add ../wt-base $(git merge-base HEAD origin/main)
 git -C ../wt-base checkout $(git rev-parse HEAD) -- <your new test files>
-# its own venv, set up the way `docs/LINTING.md` shows (`uv sync`, then the editable install), then:
-(cd ../wt-base && uv run --no-sync python -c 'import torch_rbln; print(torch_rbln.__file__)')  # must be ../wt-base
-(cd ../wt-base && uv run --no-sync pytest <your new test> -x)   # must fail
+# Set up and build ../wt-base as `AGENTS.md` describes, with no venv activated.
+uv run --directory ../wt-base --no-sync python \
+  -c 'import torch_rbln; print(torch_rbln.__file__)'  # must be ../wt-base
+
+uv run --directory ../wt-base --no-sync pytest \
+  <your new test> \
+  --exitfirst  # must fail
 ```
 
 A stash is a shortcut with conditions: the change is Python-only, nothing else runs from this tree, and you stash only the production paths you touched — `git stash push -- <paths>`, check `git stash list` before and after, and pop. The tree here often carries unrelated edits, and losing one costs more than the check is worth. For a native change the stash is never enough: the built `.so` is the same until you rebuild, so a stash without a rebuild on both sides tests one binary twice.

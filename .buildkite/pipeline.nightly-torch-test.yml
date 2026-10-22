@@ -49,7 +49,7 @@ steps:
           TORCH_RBLN_ARTIFACT_DIR: >-
             torch-rbln-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-Release
           TORCH_RBLN_NPU_PRODUCT: RBLN-CR13
-          TORCH_RBLN_TEST_MODE: ci
+          TORCH_RBLN_EXCLUDE_PERIODIC: "true"
           TORCH_RBLN_TEST_SUITES: core
         timeout_in_minutes: 5
         image: *test-image

@@ -76,8 +76,7 @@ def _no_device_dtensor_worker(rank: int, world_size: int) -> None:
     _dtensor_worker(rank, world_size)
 
 
-@pytest.mark.test_set_ci
-@pytest.mark.single_worker
+@pytest.mark.serial
 class TestNoDeviceDistributed(TestCase):
     """Process group / DeviceMesh / DTensor with ``device_count() == 0``."""
 

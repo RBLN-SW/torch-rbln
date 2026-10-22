@@ -178,7 +178,7 @@ steps:
           TORCH_RBLN_ARTIFACT_DIR: >-
             torch-rbln-py3.12-x86_64-{{matrix.build_type}}
           TORCH_RBLN_NPU_PRODUCT: RBLN-CA25
-          TORCH_RBLN_TEST_MODE: ci
+          TORCH_RBLN_EXCLUDE_PERIODIC: "true"
           TORCH_RBLN_TEST_SUITES: "{{matrix.test_suites}}"
         matrix:
           setup:

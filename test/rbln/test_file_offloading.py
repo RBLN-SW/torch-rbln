@@ -19,7 +19,7 @@ verify only what is observable from the torch-rbln level:
 * exception-safe restoration of the off state.
 
 The flag and the depth counter are both process-local, so each pytest-xdist
-worker is isolated; the class does not need ``single_worker``.
+worker is isolated; the class does not need the serial marker.
 """
 
 from unittest.mock import patch
@@ -44,7 +44,6 @@ import torch_rbln.memory as torch_rbln_memory
 pytestmark = pytest.mark.torch_rbln_only
 
 
-@pytest.mark.test_set_ci
 class TestFileOffloading(TestCase):
     def tearDown(self):
         # Defensive: ensure the depth counter is reset and the underlying flag

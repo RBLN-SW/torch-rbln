@@ -52,7 +52,6 @@ TEST_SHAPES = [
 TEST_SHAPES_SUBSET = TEST_SHAPES[:8]
 
 
-@pytest.mark.test_set_ci
 class TestRegisteredNativeOps(TestCase):
     """Test native implementation ops registered in RBLNRegisterOps.cpp"""
 
@@ -267,7 +266,6 @@ class TestRegisteredNativeOps(TestCase):
         self.assertEqual(x.data_ptr(), y.data_ptr())
 
 
-@pytest.mark.test_set_ci
 class TestRegisteredFallbackOps(TestCase):
     """Test representative fallback ops registered in RBLNRegisterOps.cpp"""
 
@@ -497,7 +495,6 @@ class TestRegisteredFallbackOps(TestCase):
         self.assertEqual(result.dtype, expected.dtype)
 
 
-@pytest.mark.test_set_ci
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestRegisteredPythonOps(TestCase):
     """Test ops registered in register_ops.py (Python implementation)"""
@@ -1266,7 +1263,6 @@ BROADCAST_PATTERNS = [
 ]
 
 
-@pytest.mark.test_set_ci
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestBinaryOpsBroadcast(TestCase):
     """Verify the 12 binary / comparison ops produce correct results across
@@ -1435,7 +1431,6 @@ PERMUTE_PATTERNS = [
 ]
 
 
-@pytest.mark.test_set_ci
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestViewOpsOnDevice(TestCase):
     """Verify the 22 affected ops dispatch correctly when their inputs are
@@ -1883,7 +1878,6 @@ class TestViewOpsOnDevice(TestCase):
         )
 
 
-@pytest.mark.test_set_ci
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestRegisteredPythonOpsMultiDevice(TestCase):
     """Test ops registered in register_ops.py with mixed device indices"""

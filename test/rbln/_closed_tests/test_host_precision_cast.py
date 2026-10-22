@@ -8,7 +8,6 @@ Previously, float16 -> custom_float16 casting for device execution caused precis
 host ops keep float16 and produce correct results. These tests verify that behavior.
 """
 
-import pytest
 import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
@@ -21,7 +20,6 @@ DIV_SENSITIVE_POSITIVE = 8.9922
 DIV_SENSITIVE_NEGATIVE = -6.0039
 
 
-@pytest.mark.test_set_ci
 class TestHostPrecisionCast(TestCase):
     """Verify host ops run in float16 and match CPU float16 results."""
 

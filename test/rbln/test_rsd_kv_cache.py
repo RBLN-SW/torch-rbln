@@ -360,7 +360,6 @@ def _skip_unless_two_atom_npus() -> None:
         pytest.skip("RSD spans NPUs; the REBEL lineup exposes one device")
 
 
-@pytest.mark.test_set_ci
 @pytest.mark.parametrize("dtype", SUPPORTED_DTYPES, ids=lambda d: str(d).removeprefix("torch."))
 def test_rsd_programs_compile_on_dummy_device(dtype, tmp_path):
     """Both KV-cache programs compile for a two-NPU ATOM logical device with no NPU present."""
@@ -371,8 +370,7 @@ def test_rsd_programs_compile_on_dummy_device(dtype, tmp_path):
     assert "OK" in proc.stdout, proc.stdout
 
 
-@pytest.mark.test_set_ci
-@pytest.mark.single_worker
+@pytest.mark.serial
 @requires_physical_devices(2)
 @pytest.mark.parametrize("dtype", SUPPORTED_DTYPES, ids=lambda d: str(d).removeprefix("torch."))
 def test_sharded_kv_cache_lifecycle_and_parity(dtype):

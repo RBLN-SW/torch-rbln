@@ -11,7 +11,6 @@ Verifies that:
 - Indexed devices such as "rbln:0" are accepted.
 """
 
-import pytest
 import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
@@ -19,7 +18,6 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 from test.utils import requires_logical_devices
 
 
-@pytest.mark.test_set_ci
 class TestRBLNDeviceType(TestCase):
     """Walkthrough example 1: RBLN as a first-class PyTorch device type."""
 

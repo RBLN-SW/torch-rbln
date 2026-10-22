@@ -55,7 +55,6 @@ def _device_latest(shape, dtype=torch.bfloat16):
     return y
 
 
-@pytest.mark.test_set_ci
 @needs_device
 class TestFallbackRegionIO(TestCase):
     def test_boxed_fallback_reads_only_the_view(self):

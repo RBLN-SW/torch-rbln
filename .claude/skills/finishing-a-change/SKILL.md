@@ -35,14 +35,17 @@ Never run `ruff`, `black`, or `isort` on their own; `.lintrunner.toml` coordinat
 
 ## 3. Run the tests
 
-Run the narrowest target that covers the change, then the suite around it:
+Run the narrowest target that covers the change:
 
 ```bash
-uv run --no-sync pytest test/rbln/test_<module>.py -x
-uv run --no-sync python test/run_tests.py --suite=core
+uv run --no-sync pytest \
+  test/rbln/test_<module>.py \
+  --exitfirst
 ```
 
-Include the command, its result, and the collected count in your reply. "Should pass" is not a result, and neither is exit code 0 from a run that collected nothing. If you could not run them, say that instead of implying you did. On a host without an NPU, say which of these ran under `RBLN_DUMMY_DEVICE=1` — that covers construction, copies, and compile-only, not numerics (`AGENTS.md`, Know where you are).
+Then run the suite around it with the two pytest runs in "Run a suite the way CI does" in `docs/TEST_GUIDE.md`.
+
+Include the command, its result, and the collected count in your reply. "Should pass" is not a result, and neither is a green run that did not collect the tests covering the change. If you could not run them, say that instead of implying you did. On a host without an NPU, say which of these ran under `RBLN_DUMMY_DEVICE=1` — that covers construction, copies, and compile-only, not numerics (`AGENTS.md`, "Know where you are").
 
 For a change to an op or a kernel, confirm the tests exercised the device path and not the host fallback — matching numbers alone do not show it. `.claude/skills/writing-tests/SKILL.md` has the check.
 
@@ -86,7 +89,7 @@ torch-rbln specific:
 - **An op registered only in C++** is listed in `_ops_with_rbln_native_kernel` in `test/filters.py`.
 - **A skill whose content you changed still matches its `description`** — the frontmatter is the trigger, so anything the description does not mention may never be loaded.
 - **New or changed tests follow `docs/TEST_GUIDE.md`** — placement, template shape, marker, and the existing fixtures and helpers rather than new ones. Re-read the relevant section against your diff; this is checked in review.
-- **New test files** carry `# Owner(s): ["module: PrivateUse1"]` and the `run_tests()` main block, and are marked `test_set_ci` unless you can say why not.
+- **New test files** carry `# Owner(s): ["module: PrivateUse1"]` and the `run_tests()` main block, and their tests carry no `periodic` marker unless they meet one of the `periodic` criteria in `docs/TEST_GUIDE.md`.
 - **No widened tolerance** without a derivation, and no test made green by re-running it.
 - **Nothing on the import path uses a device** — the first allocation, `synchronize()`, or collective commits the mapping and freezes it for the process.
 - **PR body claims match the diff.** A conditional check is not described as unconditional; a derived set is not described as derived if it is hardcoded.

@@ -37,7 +37,6 @@ from __future__ import annotations
 import threading
 import unittest
 
-import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
@@ -55,7 +54,6 @@ def _sample(device="rbln", generator=None, n=16):
     return torch.randint(0, 1024, (n,), device=device, generator=generator)
 
 
-@pytest.mark.test_set_ci
 class TestGeneratorBasic(TestCase):
     """Basic tests for the RBLN ``torch.Generator`` implementation."""
 
@@ -129,7 +127,6 @@ class TestGeneratorBasic(TestCase):
         self.assertEqual(g.initial_seed(), new_seed)
 
 
-@pytest.mark.test_set_ci
 class TestDefaultGenerator(TestCase):
     """Default (generator=None) path: seeding, reproducibility, isolation."""
 
@@ -203,7 +200,6 @@ class TestDefaultGenerator(TestCase):
         self.assertEqual(x.cpu(), y.cpu())
 
 
-@pytest.mark.test_set_ci
 class TestGeneratorValidation(TestCase):
     """Rejection of foreign generators and malformed state blobs."""
 
@@ -299,7 +295,6 @@ class TestGeneratorValidation(TestCase):
         self.assertEqual(state.numel(), torch.Generator(device="rbln").get_state().numel())
 
 
-@pytest.mark.test_set_ci
 @unittest.skipUnless(RBLN_DEVICE_COUNT >= 2, "requires at least 2 RBLN devices")
 class TestMultiDeviceGenerator(TestCase):
     """Per-device default generator independence."""
@@ -365,7 +360,6 @@ class TestMultiDeviceGenerator(TestCase):
             _sample(device="rbln:0", generator=g1)
 
 
-@pytest.mark.test_set_ci
 class TestForkRng(TestCase):
     """torch.random.fork_rng integration through get/set_rng_state."""
 
@@ -413,7 +407,6 @@ class TestForkRng(TestCase):
         self.assertEqual(torch.rbln.get_rng_state(0), before)
 
 
-@pytest.mark.test_set_ci
 class TestGeneratorThreadSafety(TestCase):
     """Smoke test for concurrent seeding vs. fallback sampling.
 
@@ -455,7 +448,6 @@ class TestGeneratorThreadSafety(TestCase):
         self.assertEqual(_sample(generator=g).cpu(), _sample(generator=h).cpu())
 
 
-@pytest.mark.test_set_ci
 class TestFallbackBorrowSafety(TestCase):
     """Regression tests for borrow release when generator validation throws.
 
@@ -512,7 +504,6 @@ class TestFallbackBorrowSafety(TestCase):
         self._assert_tensor_still_healthy(x)
 
 
-@pytest.mark.test_set_ci
 class TestGeneratorCoverageBreadth(TestCase):
     """Broader op coverage and mid-stream state semantics."""
 

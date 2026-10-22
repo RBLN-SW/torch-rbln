@@ -14,7 +14,6 @@ from collections.abc import Sequence
 from functools import partial
 from importlib import import_module
 
-import pytest
 import torch
 import torch._prims as prims
 import torch.utils._pytree as pytree
@@ -322,7 +321,6 @@ def _custom_float16_input_safe_mask(
     return mask
 
 
-@pytest.mark.test_set_ci
 # Tests that apply to all operators and aren't related to any particular
 #   system
 @unMarkDynamoStrictTest
@@ -2085,7 +2083,6 @@ class TestCommon(TestCase):
                 raise RuntimeError(f"{device} failed, but meta didn't.") from device_err
 
 
-@pytest.mark.test_set_ci
 @unMarkDynamoStrictTest
 class TestCompositeCompliance(TestCase):
     # Checks if the operator (if it is composite) is written to support most
@@ -2426,7 +2423,6 @@ class TestCompositeCompliance(TestCase):
                     self.assertTrue(new_inp._base is new_out)
 
 
-@pytest.mark.test_set_ci
 @unMarkDynamoStrictTest
 class TestMathBits(TestCase):
     # Tests that
@@ -2968,7 +2964,6 @@ fake_autocast_backward_xfails = {
 }
 
 
-@pytest.mark.test_set_ci
 @unMarkDynamoStrictTest
 class TestFakeTensor(TestCase):
     def setUp(self):

@@ -22,7 +22,6 @@ from torch.testing._internal.common_device_type import instantiate_device_type_t
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
 
-@pytest.mark.test_set_ci
 class TestFillScalarRBLN(TestCase):
     """`aten::fill_.Scalar` on RBLN must match CPU bit-for-bit."""
 

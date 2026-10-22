@@ -83,7 +83,6 @@ def _build_ld_preload_shim(tmp_dir: str, c_source: str):
     return so if build.returncode == 0 else None
 
 
-@pytest.mark.test_set_ci
 class TestRuntimeUnavailable(TestCase):
     """``runtime_available()`` gates every runtime-touching leaf (torch.cuda parity)."""
 

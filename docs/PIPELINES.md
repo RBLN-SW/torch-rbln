@@ -29,7 +29,7 @@ Pre-merge, post-merge, and release checks all run these jobs:
 
 - **Source linting** runs the linters once per Python version, CPU architecture, and build type.
 - **Wheel builds** build a wheel per Python version, CPU architecture, and build type.
-- **NPU tests** run the C++ tests and the Python test suites on NPUs. The [test mode](TEST_GUIDE.md#8-cicd-integration) selects which Python tests run.
+- **NPU tests** run the C++ tests and the Python test suites on NPUs. Only release checks run the Python tests marked [`periodic`](TEST_GUIDE.md#ci-integration).
 
 All three publish their `Release` wheels to the `rbln-internal` index and run their NPU tests against the x86_64 wheels for Python 3.12, but they differ in coverage:
 
@@ -38,7 +38,7 @@ All three publish their `Release` wheels to the `rbln-internal` index and run th
 | Source linting | Python 3.12, x86_64, `Release` | Python 3.12, x86_64, `Release` | Python 3.10–3.14, x86_64, `Release` and `Debug`                                                         |
 | Wheel builds   | Python 3.12, x86_64, `Release` | Python 3.12, x86_64, `Release` | Python 3.10–3.14, x86_64 and aarch64, `Release`; Python 3.12, x86_64, `Debug`                           |
 | NPU tests      | RBLN-CA25, RBLN-CR13           | RBLN-CA25                      | `Release` wheel: RBLN-CA25, RBLN-CR13; `Debug` wheel: RBLN-CA25, without the `models` Python test suite |
-| Test mode      | `ci`                           | `ci`                           | `release`                                                                                               |
+| Periodic tests | Not run                        | Not run                        | Run                                                                                                     |
 
 ### Linting
 

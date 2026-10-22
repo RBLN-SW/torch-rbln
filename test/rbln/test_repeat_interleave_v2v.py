@@ -30,7 +30,6 @@ from torch.testing._internal.common_utils import parametrize, run_tests, TestCas
 from test.utils_v2v import arange as _arange, ENGINE_DTYPES, eq as _eq, to_dev as _to_dev
 
 
-@pytest.mark.test_set_ci
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestRepeatInterleaveV2V(TestCase):
     """Tests for native ``aten::repeat_interleave.Tensor`` and the

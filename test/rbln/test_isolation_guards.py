@@ -49,7 +49,6 @@ def _run_setup_teardown(fixture, *args):
         pass
 
 
-@pytest.mark.test_set_ci
 def test_restore_current_device_does_not_leak_initialized():
     """restore_current_device must not flip ``_initialized`` on a test that never touched the
     device: it snapshots the flag and restores it, and skips set_device when the index is
@@ -67,7 +66,6 @@ def test_restore_current_device_does_not_leak_initialized():
 # The device functions are patched directly on the module (not via the monkeypatch fixture)
 # and restored in a finally inside the test body, so they are back to real BEFORE the real
 # autouse restore_current_device fixture tears down and would otherwise call the mock.
-@pytest.mark.test_set_ci
 def test_restore_current_device_restores_changed_index():
     """When a test moves the current device index, restore_current_device must set it back in
     teardown -- and only then (device-independent via patched device functions)."""
@@ -97,7 +95,6 @@ def test_restore_current_device_restores_changed_index():
         _dev.device_count, _dev.current_device, _dev.set_device = orig
 
 
-@pytest.mark.test_set_ci
 def test_restore_current_device_propagates_restore_failure():
     """A device-index restore failure must propagate as a teardown error, not be swallowed
     while _initialized is rolled back -- which would hand later tests a mismatched
@@ -127,7 +124,6 @@ def test_restore_current_device_propagates_restore_failure():
         _dev._initialized = saved_flag
 
 
-@pytest.mark.test_set_ci
 def test_caching_allocator_teardown_fails_loud_and_skips_flush_on_sync_error(monkeypatch):
     """A drain (synchronize) failure means the device may still have in-flight DMA, so the
     teardown must fail loud AND NOT flush -- freeing a faulted device's blocks would re-open
@@ -152,7 +148,6 @@ def test_caching_allocator_teardown_fails_loud_and_skips_flush_on_sync_error(mon
         assert flushed == []  # flush must be skipped when the drain failed
 
 
-@pytest.mark.test_set_ci
 def test_caching_allocator_teardown_reports_flush_error(monkeypatch):
     """When the drain succeeds, the flush runs; an empty_cache failure must be surfaced
     (aggregated), not hidden."""
@@ -173,7 +168,6 @@ def test_caching_allocator_teardown_reports_flush_error(monkeypatch):
             next(gen)  # teardown: drain ok -> flush runs -> its failure surfaced
 
 
-@pytest.mark.test_set_ci
 def test_drain_failure_poisons_worker_and_skips_rest(monkeypatch):
     """End-to-end: a drain failure in teardown sets the poison flag, and pytest_runtest_setup
     then skips (before any fixture). Driven on a fresh conftest instance so the real session
@@ -196,7 +190,6 @@ def test_drain_failure_poisons_worker_and_skips_rest(monkeypatch):
         conftest.pytest_runtest_setup(object())  # a subsequent test's setup now skips
 
 
-@pytest.mark.test_set_ci
 def test_clean_teardown_order_sync_then_sdpa_clear_then_flush(monkeypatch):
     """A clean drain must run synchronize -> drop the SDPA cache -> empty_cache, so the cache's
     device tensors are released before the flush that reclaims their blocks."""
@@ -216,7 +209,6 @@ def test_clean_teardown_order_sync_then_sdpa_clear_then_flush(monkeypatch):
     assert calls == ["sync", "sdpa_clear", "flush"]
 
 
-@pytest.mark.test_set_ci
 def test_stream_guard_restores_the_stream_a_test_moved_and_the_device_guard_the_index(monkeypatch):
     """Driven through both guards, from an entry state that is not the default stream, with
     set_stream's device selection modelled: the stream guard restores what the test found (not
@@ -281,7 +273,6 @@ def _with_env(var, value, fn):
             os.environ[var] = old
 
 
-@pytest.mark.test_set_ci
 def test_python_disabled_fallback_gate_reads_env_live():
     """The Python cold-path gate must read the env live too, matching the C++ warm-path gate
     (else warm/cold dispatch disagree and the value latches across an xdist worker). It was

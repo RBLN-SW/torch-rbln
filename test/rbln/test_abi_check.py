@@ -84,7 +84,6 @@ def _runtime(lib, built_abi):
         yield
 
 
-@pytest.mark.test_set_ci
 class TestAbiMismatchReason(TestCase):
     """The accept/reject window, for every combination of consumer and runtime."""
 
@@ -123,7 +122,6 @@ class TestAbiMismatchReason(TestCase):
         self.assertIn("inconsistent", reason)
 
 
-@pytest.mark.test_set_ci
 class TestReadRuntimeAbi(TestCase):
     """Reading the two entry points off a loaded librbln.so."""
 
@@ -153,7 +151,6 @@ class TestReadRuntimeAbi(TestCase):
         self.assertEqual(abi_check.read_abi_symbols(None), ([], list(abi_check.ABI_SYMBOLS)))
 
 
-@pytest.mark.test_set_ci
 class TestOpenMappedRuntime(TestCase):
     """Taking a handle on the library the import path already mapped."""
 
@@ -169,7 +166,6 @@ class TestOpenMappedRuntime(TestCase):
         self.assertIsNone(abi_check.open_mapped_runtime(""))
 
 
-@pytest.mark.test_set_ci
 class TestGetBuiltAbi(TestCase):
     """The build-time snapshot, including the shapes that mean 'no snapshot'."""
 
@@ -190,7 +186,6 @@ class TestGetBuiltAbi(TestCase):
             self.assertEqual(abi_check.get_built_abi(), 3)
 
 
-@pytest.mark.test_set_ci
 class TestCheckLibrblnAbi(TestCase):
     """End-to-end verdicts, including what does and does not block the import."""
 
@@ -282,7 +277,6 @@ def _mapped_librbln(case):
     return abi_check.open_mapped_runtime(path)
 
 
-@pytest.mark.test_set_ci
 class TestInstalledCombination(TestCase):
     """The librbln.so installed on this machine against the wheel under test."""
 

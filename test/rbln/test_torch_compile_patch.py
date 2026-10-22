@@ -7,7 +7,6 @@ Test suite for torch_compile_patch_helpers module.
 import types
 from unittest.mock import Mock, patch
 
-import pytest
 import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
@@ -31,7 +30,6 @@ from torch_rbln._internal.torch_compile_patch_helpers import (
 )
 
 
-@pytest.mark.test_set_ci
 class TestTorchCompilePatchHelpers(TestCase):
     """Tests for torch_compile_patch_helpers module."""
 
@@ -263,7 +261,6 @@ class TestTorchCompilePatchHelpers(TestCase):
         self.assertFalse(is_rbln_backend(other_backend))
 
 
-@pytest.mark.test_set_ci
 class TestTensorParallelFunctions(TestCase):
     """Tests for tensor parallel related functions."""
 
@@ -436,7 +433,6 @@ class TestTensorParallelFunctions(TestCase):
         self.assertIsNone(result)
 
 
-@pytest.mark.test_set_ci
 class TestCompiledFunctionWrapper(TestCase):
     """Tests for CompiledFunctionWrapper class."""
 
@@ -836,7 +832,6 @@ class TestCompiledFunctionWrapper(TestCase):
         self.assertIs(Holder.m, wrapper)
 
 
-@pytest.mark.test_set_ci
 class TestChromiumEventStatePreservation(TestCase):
     """Reproduces the ``build_guards`` crash caused by a nested op-compile.
 
@@ -908,7 +903,6 @@ class TestChromiumEventStatePreservation(TestCase):
             self.skipTest("chromium_event_timed signature differs in this torch version")
 
 
-@pytest.mark.test_set_ci
 class TestTorchCompileMonkeyPatch(TestCase):
     """Tests for torch.compile monkey patching."""
 

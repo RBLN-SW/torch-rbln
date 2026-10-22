@@ -400,14 +400,13 @@ select = [
 # `-p no:warnings`: disable warnings plugin to keep test output clean
 # `--assert=plain`: disable assertion rewriting to avoid import-order conflicts (see upstream PR #117060)
 # `--max-worker-restart=0`: fail immediately on worker crash instead of restarting
-addopts = "--verbose -rEfX --tb=native -p no:warnings --assert=plain --max-worker-restart=0"
+# `--strict-markers`: fail on any marker not registered in `markers`
+addopts = "--verbose -rEfX --tb=native -p no:warnings --assert=plain --max-worker-restart=0 --strict-markers"
 testpaths = ["test"]
 xfail_strict = true
 markers = [
-    "test_set_ci: [test set] marks tests to run in CI pipelines (select with `-m test_set_ci`)",
-    "test_set_experimental: [test set] marks tests for experimental features (deselect with `-m \"not test_set_experimental\"`)",
-    "test_set_perf: [test set] marks performance tests (select with `-m test_set_perf`)",
+    "periodic: marks tests that only the release checks run (deselect with '-m \"not periodic\"')",
+    "serial: marks tests that must run on a single worker (deselect with '-m \"not serial\"')",
     "no_dynamo_reset: skips autouse TorchDynamo reset fixture",
-    "single_worker: marks tests that must run on a single worker (select with `-m single_worker`)",
     "torch_rbln_only: marks tests whose outcome does not depend on rebel-compiler -- torch-rbln's own logic, packaging, or the torch-facing contract. rebel_compiler's CI deselects these (`-m \"not torch_rbln_only\"`); torch-rbln's own lanes still run them",
 ]

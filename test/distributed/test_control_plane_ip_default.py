@@ -34,8 +34,7 @@ def _run_allreduce_with_unset_control_plane_ips(rank: int, world_size: int, back
         dist.destroy_process_group()
 
 
-@pytest.mark.single_worker
-@pytest.mark.test_set_ci
+@pytest.mark.serial
 @requires_logical_devices(2)
 def test_rbln_ccl_defaults_control_plane_ips_when_unset(monkeypatch):
     """rbln-ccl must init + run a collective with RBLN_ROOT_IP/RBLN_LOCAL_IP unset.

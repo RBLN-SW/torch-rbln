@@ -16,14 +16,12 @@ import subprocess
 import sys
 import textwrap
 
-import pytest
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-@pytest.mark.test_set_ci
 class TestImportDoesNotSeal(TestCase):
     """After import (or a non-RBLN profiler), ``RBLN_DEVICES`` must still be remappable.
 

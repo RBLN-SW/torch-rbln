@@ -18,7 +18,6 @@ import sys
 import textwrap
 import unittest
 
-import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
@@ -31,7 +30,6 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 _NEEDS_NO_NPU = "requires a host with no physical NPU (device_count() == 0)"
 
 
-@pytest.mark.test_set_ci
 class TestNoDevice(TestCase):
     """``device_count() == 0`` must be a valid, non-fatal state (torch.cuda parity)."""
 
