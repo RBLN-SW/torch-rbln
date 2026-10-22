@@ -72,4 +72,16 @@ at::Tensor create_tensor_from_ptr(uint64_t data_ptr, c10::IntArrayRef sizes, c10
   return at::from_blob(data, sizes, options);
 }
 
+at::Tensor create_owning_tensor_from_ptr(
+    uint64_t base_ptr,
+    uint64_t data_ptr,
+    c10::IntArrayRef sizes,
+    c10::ScalarType dtype) {
+  auto* base = reinterpret_cast<void*>(base_ptr); // NOLINT(performance-no-int-to-ptr)
+  auto* data = reinterpret_cast<void*>(data_ptr); // NOLINT(performance-no-int-to-ptr)
+  const auto device = c10::rbln::get_rbln_hooks()->getDeviceFromPtr(base);
+  const auto options = c10::TensorOptions().dtype(dtype).device(device);
+  return at::from_blob(data, sizes, [base](void*) { c10::rbln::free_nothrow(base); }, options);
+}
+
 } // namespace at::native::rbln

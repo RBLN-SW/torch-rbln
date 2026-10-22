@@ -310,6 +310,45 @@ C10_RBLN_API void mark_zeros(const void* rbln_data);
 C10_RBLN_API void free(void* data);
 
 /**
+ * @brief Cross-process handle of an exportable RBLN allocation.
+ *
+ * `payload` is opaque to the caller (it carries the physical layout). `fds[i]` is a dma-buf of
+ * one physical area; the caller owns them.
+ */
+struct DeviceMemoryExport {
+  uint64_t size;
+  std::vector<uint8_t> payload;
+  std::vector<int> fds;
+};
+
+/**
+ * @brief Exports the allocation backing `rbln_data`, which must come from malloc_exportable().
+ *
+ * The layout is pinned from then on. The exporter must keep the tensor alive while any importer
+ * uses it.
+ */
+C10_RBLN_API DeviceMemoryExport export_device_memory(const void* rbln_data);
+
+/**
+ * @brief Allocates `nbytes` that export_device_memory() can export. Release it with free().
+ *
+ * Requires the device's DRM accel node to be openable by this process.
+ */
+C10_RBLN_API void* malloc_exportable(c10::DeviceIndex device_index, size_t nbytes);
+
+/**
+ * @brief Rebuilds memory exported by another process on the same device.
+ *
+ * `fds` are not consumed. Release the result with free(). Requires the device's DRM accel node to
+ * be openable by this process.
+ */
+C10_RBLN_API void* import_device_memory(
+    c10::DeviceIndex device_index,
+    size_t nbytes,
+    const std::vector<uint8_t>& payload,
+    const std::vector<int>& fds);
+
+/**
  * @brief Non-throwing free() for `noexcept` contexts (the c10 DataPtr deleter).
  *
  * The deleter runs in a noexcept destructor, so a throwing free() would
