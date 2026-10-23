@@ -152,11 +152,11 @@ An eager op is compiled the first time a process runs it for a profile of its ar
 
 | Variable | Description |
 |----------|-------------|
-| `TORCH_RBLN_COMPILE_CACHE_DIR` | The directory. Set but empty, torch-rbln names none, and the functions stay in memory, or go where `RBLN_COMPILE_CACHE_DIR` says when that is set. |
+| `TORCH_RBLN_COMPILE_CACHE_DIR` | The directory. Set but empty, torch-rbln names no directory: the functions go where `RBLN_COMPILE_CACHE_DIR` says when that is set, and stay in memory otherwise. |
 | `RBLN_COMPILE_CACHE_DIR` | The directory of the `rebel.v2` compiles that name none, used when `TORCH_RBLN_COMPILE_CACHE_DIR` is unset. |
 | `RBLN_COMPILE_CACHE_DISK` | The bytes of compiled functions a directory keeps, 20 GiB by default. Past them, the process storing a function drops those no process used for the longest. |
 
-With neither directory variable set, the directory is `$XDG_CACHE_HOME/torch_rbln/compile_cache`, or `~/.cache/torch_rbln/compile_cache`. The `cache_dir` option of `torch.compile` names the directory of that graph's compile instead. A function is found again only by the same build of the compiler, so the directory needs no clearing after an upgrade; the functions of the earlier build are the least recently used and go first.
+With neither directory variable set, the directory is `$XDG_CACHE_HOME/torch_rbln/compile_cache`, or `~/.cache/torch_rbln/compile_cache`. To keep every compiled function in memory only, leave `RBLN_COMPILE_CACHE_DIR` unset and set `TORCH_RBLN_COMPILE_CACHE_DIR` to empty (`export TORCH_RBLN_COMPILE_CACHE_DIR=`). The `cache_dir` option of `torch.compile` names the directory of that graph's compile instead. A function is found again only by the same build of the compiler, so the directory needs no clearing after an upgrade; the functions of the earlier build are the least recently used and go first.
 
 ## Debugging Device Errors
 
