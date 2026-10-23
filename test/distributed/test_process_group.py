@@ -67,6 +67,22 @@ def run_sub_group_allreduce_test(rank: int, world_size: int, backend: str) -> No
         dist.destroy_process_group()
 
 
+def run_launch_blocking_test(rank: int, world_size: int, backend: str) -> None:
+    """Under RBLN_LAUNCH_BLOCKING an all_reduce made with async_op is done once the call returns,
+    though TORCH_RBLN_C10D_ASYNC=1 would run it on a worker thread."""
+    os.environ["RBLN_LAUNCH_BLOCKING"] = "1"
+    setup_environment(rank, world_size)
+    dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+    try:
+        tensor = torch.full([64], rank + 1.0, dtype=torch.bfloat16, device=torch.device(f"rbln:{rank}"))
+        work = dist.all_reduce(tensor, async_op=True)
+        assert work.is_completed(), f"rank {rank}: the all_reduce was not done when the call returned"
+        expected = sum(r + 1.0 for r in range(world_size))
+        assert tensor[0] == expected, f"allreduce on rank {rank}: expected={expected}, actual={tensor[0]}"
+    finally:
+        dist.destroy_process_group()
+
+
 def run_default_group_again_test(rank: int, world_size: int, backend: str) -> None:
     """A default group destroyed lets the next one be made in the same process, as vLLM makes one per
     engine and a process may run engines one after another."""
@@ -638,6 +654,13 @@ class TestSubGroupRBLN(TestProcessGroupRBLNBase):
 
 
 @pytest.mark.single_worker
+@pytest.mark.test_set_ci
+class TestLaunchBlockingRBLN(TestProcessGroupRBLNBase):
+    def test_an_async_collective_is_done_when_its_call_returns(self):
+        self.run_c10d_test("1", self.world_size, run_launch_blocking_test, (self.world_size, self.backend))
+
+
+@pytest.mark.single_worker
 class TestScatterRBLN(TestProcessGroupRBLNBase):
     """Test cases for scatter operations. Each test runs with dim0 in [32, 256]."""
 
@@ -926,6 +949,7 @@ class TestAllReduceSizesRBLN(TestProcessGroupRBLNBase):
 instantiate_device_type_tests(TestBroadcastRBLN, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestAllReduceRBLN, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestSubGroupRBLN, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestLaunchBlockingRBLN, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestScatterRBLN, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestAllGatherRBLN, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestReduceScatterRBLN, globals(), only_for="privateuse1")

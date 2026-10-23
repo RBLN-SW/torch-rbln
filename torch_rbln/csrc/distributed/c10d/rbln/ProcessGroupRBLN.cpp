@@ -28,6 +28,7 @@
 #include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
 
 #include <rebel/v2/runtime/communicator.h>
+#include <rebel/v2/runtime/flags.h>
 #include <rebel/v2/runtime/stream.h>
 #include <torch/torch.h>
 #include <torch_rbln/csrc/distributed/c10d/rbln/ProcessGroupRBLN.hpp>
@@ -55,6 +56,12 @@ constexpr size_t RCCL_ALLGATHER_MAX_OUTPUT_BYTES = size_t{64} << 20;
 /// Collectives that only move bytes move them as int8.
 constexpr const char* kBytes = "int8";
 constexpr const char* kSum = "sum";
+
+// Whether every operation runs before the call that queues it returns, the rebel.v2 runtime's
+// RBLN_LAUNCH_BLOCKING; a work then runs on the thread that makes it, as in sync mode.
+bool launch_blocking() {
+  return dynamic_cast<const rt::Flag<bool>&>(rt::FlagBase::find("RBLN_LAUNCH_BLOCKING")).value();
+}
 
 size_t roundUp(size_t n, size_t unit) {
   return (n + unit - 1) / unit * unit;
@@ -909,7 +916,7 @@ ProcessGroupRBLN::ProcessGroupRBLN(
 
   // Last, as unwinding past a joinable std::thread member terminates.
   const char* async_env = std::getenv("TORCH_RBLN_C10D_ASYNC");
-  if (async_env != nullptr && std::string(async_env) == "1") {
+  if (async_env != nullptr && std::string(async_env) == "1" && !launch_blocking()) {
     sync_mode_ = false;
   }
 

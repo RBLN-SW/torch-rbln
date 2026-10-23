@@ -60,7 +60,8 @@ constexpr int DEFAULT_NUM_WORKERS = 1;
  * and point-to-point communication (send, recv) through RCCL.
  *
  * A collective runs on the current stream of the group's device and is done when its work is.
- * Under TORCH_RBLN_C10D_ASYNC=1 a worker thread runs the works in the order they were made.
+ * Under TORCH_RBLN_C10D_ASYNC=1 a worker thread runs the works in the order they were made,
+ * unless RBLN_LAUNCH_BLOCKING is set.
  */
 class TORCH_API ProcessGroupRBLN : public Backend {
  public:

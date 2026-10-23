@@ -7,8 +7,14 @@ order, work on different streams may run concurrently. These tests cover the
 torch.cuda-parity surface —
 Stream / current_stream / default_stream / set_stream / stream context manager /
 query / synchronize / wait_event / wait_stream — plus the intentionally
-unsupported bits (stream priorities are accepted but ignored).
+unsupported bits (stream priorities are accepted but ignored), and
+RBLN_LAUNCH_BLOCKING, under which a stream is done with an op once it returns.
 """
+
+import os
+import subprocess
+import sys
+import textwrap
 
 import pytest
 import torch
@@ -24,6 +30,37 @@ REL_TOL = 0.01
 
 def rel_err(got: torch.Tensor, ref: torch.Tensor) -> float:
     return ((got.float() - ref.float()).norm() / ref.float().norm()).item()
+
+
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Eager ops on the default stream and on another, a copy and a graph, each followed by whether
+# its stream is idle; prints whether every one was, and whether every result was right.
+_IDLE_ON_RETURN = f"""
+    import sys
+    sys.path.insert(0, {_PROJECT_ROOT!r})
+    import torch
+    from test.rbln.test_stream import REL_TOL, rel_err
+
+    a_cpu, b_cpu = torch.randn(256, 256, dtype=torch.float16), torch.randn(256, 256, dtype=torch.float16)
+    a, b = a_cpu.to("rbln"), b_cpu.to("rbln")
+    default, other = torch.rbln.current_stream(), torch.rbln.Stream()
+    idle, right = [], []
+    for _ in range(8):
+        c = (a @ b).relu()
+        idle.append(default.query())
+    right.append(rel_err(c.cpu(), (a_cpu @ b_cpu).relu()) < REL_TOL)
+    with torch.rbln.stream(other):
+        d = a @ b + 1
+        idle.append(other.query())
+        e = d.clone()
+        idle.append(other.query())
+    right.append(rel_err(e.cpu(), a_cpu @ b_cpu + 1) < REL_TOL)
+    f = torch.compile(lambda x, y: (x @ y).relu() + x, backend="rbln")(a, b)
+    idle.append(default.query())
+    right.append(rel_err(f.cpu(), (a_cpu @ b_cpu).relu() + a_cpu) < REL_TOL)
+    print("idle and right", all(idle), all(right))
+"""
 
 
 @pytest.mark.test_set_ci
@@ -189,6 +226,23 @@ class TestStream(TestCase):
         torch.rbln.synchronize(1)
         self.assertLess(rel_err(c0.cpu(), a0_cpu @ b0_cpu), REL_TOL)
         self.assertLess(rel_err(c1.cpu(), a1_cpu @ b1_cpu), REL_TOL)
+
+
+@pytest.mark.test_set_ci
+class TestLaunchBlocking(TestCase):
+    def test_a_stream_is_idle_once_its_op_returns(self):
+        result = subprocess.run(
+            [sys.executable, "-c", textwrap.dedent(_IDLE_ON_RETURN)],
+            cwd=_PROJECT_ROOT,
+            env={**os.environ, "RBLN_LAUNCH_BLOCKING": "1"},
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # The runtime logs to stdout as well.
+        (line,) = (line for line in result.stdout.splitlines() if line.startswith("idle and right "))
+        self.assertEqual(line, "idle and right True True")
 
 
 if __name__ == "__main__":

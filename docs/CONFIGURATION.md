@@ -144,6 +144,16 @@ The same precision applies to what `torch.compile` builds for an rbln device: un
 
 Ops that round to an integer follow the device, not the CPU. `ceil` and `floor` round the input after it is rounded to dlfloat16 (to nearest, an fp16 tie to even and an fp32 tie away from zero, which moves a value by up to half a dlfloat16 step), and `div` with a `rounding_mode` rounds the quotient the NPU computes, which is within two dlfloat16 steps of the exact one. So a value or quotient that close to an integer can come out one away from the CPU's result.
 
+## Debugging Device Errors
+
+Eager ops and graph runs are queued on the current stream and run after the call that queues them returns. An error of the device work they do, such as a failed device job, is raised by a later call that waits for the stream (`torch.rbln.synchronize()`, a copy to the CPU, a later op), far from the op that caused it.
+
+`RBLN_LAUNCH_BLOCKING=1` runs each operation queued on a stream before the call that queues it returns, and waits for its device work, so its error is raised by that call, with the Python traceback of the op that caused it. A process group then runs each collective on the thread that calls it, under `TORCH_RBLN_C10D_ASYNC=1` too, so the collective is done when the call returns; its error is raised by the work's `wait()`, which a collective without `async_op` calls itself. The variable is read once, at the first operation a process queues, so set it before the process starts. The host no longer runs ahead of the device, which slows a model down: use it to find the op, not in production. It is a `rebel.v2` runtime variable, so it does the same for every library running on `rebel.v2`, optimum-rbln and vLLM included.
+
+```bash
+RBLN_LAUNCH_BLOCKING=1 python train.py
+```
+
 ## Device Mapping
 
 Each RBLN device is exactly one NPU: `rbln:N` is the N-th NPU that `RBLN_DEVICES` selects.
