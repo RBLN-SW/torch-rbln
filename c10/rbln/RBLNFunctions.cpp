@@ -15,6 +15,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include <array>
@@ -107,11 +108,7 @@ std::optional<c10::ScalarType> parse_dtype_name(std::string name) {
   for (auto& ch : name) {
     ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
   }
-  struct Entry {
-    const char* name;
-    c10::ScalarType type;
-  };
-  static constexpr std::array<Entry, 26> kNames = {{
+  static constexpr std::array<std::pair<const char*, c10::ScalarType>, 26> kNames = {{
       {"float32", c10::kFloat},  {"float", c10::kFloat},   {"fp32", c10::kFloat},        {"f32", c10::kFloat},
       {"float64", c10::kDouble}, {"double", c10::kDouble}, {"fp64", c10::kDouble},       {"float16", c10::kHalf},
       {"half", c10::kHalf},      {"fp16", c10::kHalf},     {"bfloat16", c10::kBFloat16}, {"bf16", c10::kBFloat16},
@@ -120,9 +117,9 @@ std::optional<c10::ScalarType> parse_dtype_name(std::string name) {
       {"i16", c10::kShort},      {"int8", c10::kChar},     {"i8", c10::kChar},           {"uint8", c10::kByte},
       {"u8", c10::kByte},        {"bool", c10::kBool},
   }};
-  for (const auto& e : kNames) {
-    if (name == e.name) {
-      return e.type;
+  for (const auto& [n, type] : kNames) {
+    if (name == n) {
+      return type;
     }
   }
   return std::nullopt;
