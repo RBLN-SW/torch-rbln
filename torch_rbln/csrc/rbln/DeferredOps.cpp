@@ -11,7 +11,6 @@
 #include <atomic>
 #include <map>
 #include <mutex>
-#include <stdexcept>
 #include <unordered_map>
 #include <utility>
 
@@ -34,16 +33,10 @@ const rt::Flag<int64_t> kDeferOps(
 constexpr int kRunsBeforeFusing = 2;
 
 // Whether the runtime runs each operation as it is queued (RBLN_LAUNCH_BLOCKING), which
-// deferring would undo. A runtime without the flag queues them.
+// deferring would undo.
 bool launch_blocking() {
-  static const rt::FlagBase* flag = []() -> const rt::FlagBase* {
-    try {
-      return &rt::FlagBase::find("RBLN_LAUNCH_BLOCKING");
-    } catch (const std::out_of_range&) {
-      return nullptr;
-    }
-  }();
-  return flag != nullptr && flag->text() == rt::flagText(true);
+  static const auto& flag = dynamic_cast<const rt::Flag<bool>&>(rt::FlagBase::find("RBLN_LAUNCH_BLOCKING"));
+  return flag.value();
 }
 
 // What an op of a segment reads: result `index` of op `op`, or input `index` of the segment.
