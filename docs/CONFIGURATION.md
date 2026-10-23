@@ -190,6 +190,32 @@ A bucketed call returns the same values as an unbucketed one. Its run computes e
 - Memory: the result keeps the storage of the bucket's rows, so its `untyped_storage()` is up to 1.5 times its size, and `torch.save` writes those rows as well. The next bucketed op reads the result in place.
 - A copy per call: an input whose allocation has no room for the bucket's rows is copied into a tensor of the bucket's rows at every call, and the copy blocks the caller until the work queued before it is done. An input that the previous bucketed op made always has room; any other tensor has room only when the caching allocator's rounding of its allocation left enough.
 
+## Deferred Eager Ops
+
+Each eager op runs as its own compiled function, a device job of its own. `TORCH_RBLN_DEFER_OPS=N` defers them instead: the ops a stream runs gather into a segment of up to N, which runs as one function, compiled from the ops' modules, at the next point that needs it. Unset or `0`, each op runs as it is called. The variable is read at every op.
+
+```bash
+export TORCH_RBLN_DEFER_OPS=32
+```
+
+A deferred op allocates its results when it is called, so shapes, views and later ops can use them at once; until the segment runs, nothing reads or writes its tensors. It reads and writes the memory its tensors view when it is called, whatever later changes their views (`set_`, `.data =`, `t_()`). The ops deferred on a stream are queued, ahead of the work that needs them, by:
+
+- anything queued on that stream: a copy to, from or within the device (`.cpu()`, `.item()`, `.to()`, `copy_`, and the copy a CPU fallback makes of its inputs), a kernel other than a compiled op (`cat`, `index_select`, a fill), a `torch.compile` graph, or a collective;
+- `torch.rbln.synchronize()`, a stream's `synchronize()` and `query()`, an event recorded on the stream, and `torch.rbln.empty_cache()` for every stream of its device;
+- `torch.rbln.set_stream()` leaving the stream, and the start and end of a `torch.profiler` session that records the NPU (`RBLN_PROFILER=1`);
+- the segment reaching N ops, and an op whose tensor shares memory with a tensor of the segment through another view when either of the two is written.
+
+A segment runs op by op the first time it is seen, and is compiled the second time; later runs of it take the compiled function from a cache, without entering Python. One the compiler refuses or fails on keeps running op by op. The compiled segments count against `TORCH_RBLN_COMPILED_OPS` apart from the ops.
+
+The function of a segment writes the tensors its ops were given as `out=` (an in-place op's tensor among them), the inputs its ops update in place, and the other results a tensor still holds when it runs. It does not round the values between its ops to the tensors' dtype, so a result can differ in its last bits from the result of the same ops run one by one.
+
+An op is deferred only when its function does all its work on the device over tensors it takes in place; any other runs as it is called, after the deferred ones. An error of a deferred op is raised no earlier than the call that runs its segment, and the ops after it in the segment do not run; an error of its device work, such as a failed device job, is raised by a later call that waits for the stream, as for any op (see Debugging Device Errors). Two things leave deferring nothing to fuse:
+
+- Outside deploy mode, the NaN/Inf scan reads every op's inputs on the host before it runs, which runs what is deferred at each op: set `TORCH_RBLN_DEPLOY=ON` (or skip the scan with `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK=nan_inf`).
+- `RBLN_LAUNCH_BLOCKING` runs every op as it is called.
+
+Each stream defers its own ops, as CUDA orders work only within a stream: an op on one stream that reads what another wrote needs that order given, by an event or `wait_stream`, which runs the writer's deferred ops when it records the event.
+
 ## Device Mapping
 
 Each RBLN device is exactly one NPU: `rbln:N` is the N-th NPU that `RBLN_DEVICES` selects.

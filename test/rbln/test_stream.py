@@ -241,7 +241,9 @@ _FAILED_RUNS = f"""
     driver = ctypes.CDLL(os.environ["RBLN_THUNK_LIB"])
     a = torch.randn(64, 64, dtype=torch.float16).to("rbln")
     graph = torch.compile(lambda x: (x @ x).relu(), backend="rbln")
-    calls = {{"eager": lambda: a * 2, "graph": lambda: graph(a), "copy": lambda: torch.cat([a, a])}}
+    # The eager op's result is kept: a deferred op whose result nothing holds never runs.
+    kept = []
+    calls = {{"eager": lambda: kept.append(a * 2), "graph": lambda: graph(a), "copy": lambda: torch.cat([a, a])}}
     for call in calls.values():
         call()
     torch.rbln.synchronize()

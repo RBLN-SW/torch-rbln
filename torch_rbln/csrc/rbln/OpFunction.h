@@ -2,8 +2,10 @@
 
 #include <ATen/core/Tensor.h>
 #include <c10/core/Device.h>
+#include <c10/rbln/RBLNRuntime.h>
 #include <c10/util/ArrayRef.h>
 #include <rebel/v2/runtime/executor.h>
+#include <rebel/v2/runtime/flags.h>
 #include <torch/csrc/utils/pybind.h>
 
 #include <atomic>
@@ -19,6 +21,9 @@ namespace torch_rbln {
 namespace rt = ::rebel::v2::runtime;
 
 struct StateKey;
+
+// TORCH_RBLN_COMPILED_OPS: the compiled ops a process keeps.
+extern const rt::Flag<int64_t> kCompiledOps;
 
 /**
  * @brief A compiled function run on torch tensors: an eager op, or a graph torch.compile hands
@@ -71,11 +76,17 @@ class OpFunction {
   bool row_wise() const {
     return !row_inputs_.empty();
   }
+  // The inputs a run writes in place, which no result names.
+  const std::vector<size_t>& updated_inputs() const {
+    return updated_inputs_;
+  }
   // When the function last ran, on a clock of the process that every run of an
   // OpFunction moves; zero before its first run.
   uint64_t last_run() const {
     return last_run_.load(std::memory_order_relaxed);
   }
+  // Moves `last_run` as a run does, for a run of a function that does this one's work.
+  void note_run();
 
   /**
    * @brief Replaces the state `values` names, and writes the args made from it anew on every
@@ -96,6 +107,23 @@ class OpFunction {
   std::optional<std::vector<at::Tensor>> run(
       c10::ArrayRef<at::Tensor> inputs,
       c10::ArrayRef<std::optional<at::Tensor>> out = {});
+
+  /**
+   * @brief Whether a run does all its work on the device, with no host work before or after it
+   * and every arg held as torch holds a contiguous tensor: what a deferred run must be.
+   */
+  bool runs_on_device() const {
+    return runs_on_device_;
+  }
+
+  /**
+   * @brief Whether a run on device `device_index` over `inputs`, writing the tensors of `out`
+   * given, binds each of them in place, through no copy.
+   */
+  bool binds_in_place(
+      c10::ArrayRef<at::Tensor> inputs,
+      c10::ArrayRef<std::optional<at::Tensor>> out,
+      c10::DeviceIndex device_index) const;
 
  private:
   // `through_host` when the arg holds its value otherwise than torch holds the tensor; `row` when
@@ -128,10 +156,15 @@ class OpFunction {
     bool written = false;
   };
 
-  // `tensor` as arg `arg` takes it, or none if it is not the arg's; with `copies`, a CPU tensor,
-  // or one the arg cannot take where it lies, binds through a copy that `copies` keeps. With
-  // `extent`, the tensor's leading axis binds at that extent, over the bytes past its rows up to the
-  // end of its allocation's block.
+  // Where `tensor` lies when arg `arg` takes it there on device `device_index`, or none; with `extent`,
+  // its leading axis stands at that extent, over the bytes past its rows to the end of its block.
+  std::optional<c10::rbln::Location> in_place(
+      const at::Tensor& tensor,
+      size_t arg,
+      c10::DeviceIndex device_index,
+      std::optional<int64_t> extent = std::nullopt) const;
+  // `tensor` as arg `arg` takes it, or none; with `copies`, a CPU tensor or one the arg cannot take
+  // where it lies binds through a copy that `copies` keeps. `extent` is as for `in_place`.
   rt::Binding over(
       const at::Tensor& tensor,
       size_t arg,
@@ -171,6 +204,7 @@ class OpFunction {
   std::vector<size_t> row_inputs_;
   int64_t row_extent_ = 0;
   std::vector<Binding> bindings_;
+  std::vector<size_t> updated_inputs_;
   std::vector<Result> results_;
   std::vector<Output> outputs_;
   std::vector<size_t> state_args_;
@@ -189,6 +223,7 @@ class OpFunction {
   std::map<c10::DeviceIndex, std::unique_ptr<Slot>> slots_;
   std::shared_ptr<rt::Communicator> communicator_;
   std::atomic<uint64_t> last_run_{0};
+  bool runs_on_device_ = false;
 };
 
 /**

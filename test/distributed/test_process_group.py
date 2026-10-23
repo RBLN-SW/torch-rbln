@@ -483,6 +483,26 @@ def run_allreduce_size_test(
         dist.destroy_process_group()
 
 
+def run_allreduce_of_deferred_ops_test(rank: int, world_size: int, backend: str) -> None:
+    """An all_reduce of what deferred eager ops write, then deferred ops over what it writes
+    (TORCH_RBLN_DEFER_OPS)."""
+    import torch_rbln._C as _C
+
+    setup_environment(rank, world_size)
+    dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+    try:
+        deferred = _C._deferred_stats()["deferred_ops"]
+        x = torch.full([64], rank + 1.0, dtype=torch.bfloat16, device=torch.device(f"rbln:{rank}"))
+        y = x * 2 + 1
+        dist.all_reduce(y)
+        z = y * 0.5 - 1
+        expected = sum((r + 1.0) * 2 + 1 for r in range(world_size)) * 0.5 - 1
+        assert z.cpu().eq(expected).all(), f"rank {rank}: expected {expected}, got {z.cpu()}"
+        assert _C._deferred_stats()["deferred_ops"] > deferred, "no op was deferred"
+    finally:
+        dist.destroy_process_group()
+
+
 def run_unsupported_op_test(rank: int, world_size: int, backend: str) -> None:
     """Test that unsupported operations raise appropriate errors."""
     setup_environment(rank, world_size)
@@ -896,6 +916,20 @@ class TestUnsupportedOpsRBLN(TestProcessGroupRBLNBase):
 
 
 @pytest.mark.single_worker
+class TestDeferredOpsRBLN(TestProcessGroupRBLNBase):
+    """Collectives among eager ops deferred into one function (TORCH_RBLN_DEFER_OPS)."""
+
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_allreduce_of_deferred_ops(self, c10d_async_env):
+        if self.should_skip_multi_rank_tests():
+            self.skipTest("Requires world_size > 1")
+        with mock.patch.dict(os.environ, {"TORCH_RBLN_DEFER_OPS": "32", "TORCH_RBLN_DEPLOY": "ON"}):
+            self.run_c10d_test(
+                c10d_async_env, self.world_size, run_allreduce_of_deferred_ops_test, (self.world_size, self.backend)
+            )
+
+
+@pytest.mark.single_worker
 class TestAllReduceSizesRBLN(TestProcessGroupRBLNBase):
     """Test cases for allreduce operations with various data sizes."""
 
@@ -957,6 +991,7 @@ instantiate_device_type_tests(TestBarrierRBLN, globals(), only_for="privateuse1"
 instantiate_device_type_tests(TestSendRecvRBLN, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestUnsupportedOpsRBLN, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestAllReduceSizesRBLN, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestDeferredOpsRBLN, globals(), only_for="privateuse1")
 
 
 if __name__ == "__main__":

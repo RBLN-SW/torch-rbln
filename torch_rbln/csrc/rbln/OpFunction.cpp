@@ -1,6 +1,7 @@
 #include <torch_rbln/csrc/rbln/OpFunction.h>
 
 #include <torch_rbln/csrc/distributed/c10d/rbln/ProcessGroupRBLN.hpp>
+#include <torch_rbln/csrc/rbln/DeferredOps.h>
 
 #include <ATen/ops/empty.h>
 #include <ATen/ops/from_blob.h>
@@ -79,19 +80,6 @@ class StateTensors {
   std::map<StateKey, std::weak_ptr<rt::Tensor>> held_;
 };
 
-const rt::Flag<int64_t> kCompiledOps(
-    "TORCH_RBLN_COMPILED_OPS",
-    "The ops compiled for profiles of their arguments a process keeps, letting go of the least "
-    "recently run past them, with their device memory and programs.",
-    2048,
-    [](const std::string& raw) {
-      int64_t count = rt::parseInt(raw);
-      if (count < 1) {
-        throw std::invalid_argument("expected one or more");
-      }
-      return count;
-    });
-
 // Whether the bytes of `tensor` share memory with those of an input; a run neither reads
 // what it writes nor writes what it reads.
 bool overlaps_an_input(const at::Tensor& tensor, c10::ArrayRef<at::Tensor> inputs) {
@@ -142,6 +130,21 @@ bool holds_as_torch(const artifact::Arg& arg) {
   return arg.shards.size() == 1 && arg.transform.empty() && artifact::alike(arg.physical, torch_layout(arg));
 }
 
+// The sizes of `tensor`, with a leading extent of `extent` when one is given.
+c10::SmallVector<int64_t, 6> sizes_at(const at::Tensor& tensor, std::optional<int64_t> extent) {
+  c10::SmallVector<int64_t, 6> sizes(tensor.sizes().begin(), tensor.sizes().end());
+  if (extent) {
+    sizes.front() = *extent;
+  }
+  return sizes;
+}
+
+// Whether `tensor`, standing at `sizes`, holds a value of `arg` as torch holds a contiguous tensor.
+bool of_arg(const artifact::Arg& arg, const at::Tensor& tensor, c10::IntArrayRef sizes) {
+  const char* dtype = tensor.defined() ? c10::rbln::dtype_name(tensor.scalar_type()) : nullptr;
+  return dtype != nullptr && arg.logical.dtype == dtype && fits(arg, sizes) && tensor.is_contiguous();
+}
+
 // A tensor of arg `arg` and of `shape` over `buffer`, which holds a value as torch holds a contiguous
 // tensor.
 template <class B>
@@ -169,6 +172,20 @@ at::Tensor first_rows(const at::Tensor& tensor, int64_t rows) {
 }
 
 } // namespace
+
+const rt::Flag<int64_t> kCompiledOps(
+    "TORCH_RBLN_COMPILED_OPS",
+    "The ops compiled for profiles of their arguments a process keeps, letting go of the least "
+    "recently run past them, with their device memory and programs; as many segments of deferred "
+    "eager ops besides.",
+    2048,
+    [](const std::string& raw) {
+      int64_t count = rt::parseInt(raw);
+      if (count < 1) {
+        throw std::invalid_argument("expected one or more");
+      }
+      return count;
+    });
 
 OpFunction::OpFunction(
     const std::string& bytes,
@@ -338,6 +355,14 @@ OpFunction::OpFunction(
       binding.row = std::ranges::find(row_inputs_, binding.input) != row_inputs_.end();
     }
   }
+  for (const auto& binding : bindings_) {
+    if (f.args[binding.arg].access != artifact::Access::kRead) {
+      updated_inputs_.push_back(binding.input);
+    }
+  }
+  runs_on_device_ = made_args_.empty() && left_args_.empty() && held_state_.empty() &&
+      std::ranges::none_of(bindings_, [](const Binding& b) { return b.through_host; }) &&
+      std::ranges::all_of(results_, [](const Result& r) { return r.arg && !r.host && !r.through_host && !r.after; });
 }
 
 std::optional<int64_t> OpFunction::row_extent(const std::vector<size_t>& rows) const {
@@ -371,6 +396,53 @@ std::optional<int64_t> OpFunction::row_extent(const std::vector<size_t>& rows) c
   return extent;
 }
 
+std::optional<c10::rbln::Location> OpFunction::in_place(
+    const at::Tensor& tensor,
+    size_t index,
+    c10::DeviceIndex device_index,
+    std::optional<int64_t> extent) const {
+  const auto& arg = fn_->artifact().args[index];
+  if (!tensor.defined() || !tensor.device().is_privateuseone() || tensor.device().index() != device_index) {
+    return std::nullopt;
+  }
+  const auto sizes = sizes_at(tensor, extent);
+  if (!of_arg(arg, tensor, sizes)) {
+    return std::nullopt;
+  }
+  // A tensor of a type holds its value otherwise than torch holds it (see c10/rbln/RBLNTyped.h).
+  auto found = c10::rbln::caching::try_locate_typed(tensor.const_data_ptr());
+  const uint64_t nbytes = c10::multiply_integers(sizes) * tensor.element_size();
+  if (!found || found->type || (extent ? found->block_available : found->location.available) < nbytes ||
+      (arg.alignment > 1 && (found->location.buffer->address() + found->location.offset) % arg.alignment != 0)) {
+    return std::nullopt;
+  }
+  return found->location;
+}
+
+void OpFunction::note_run() {
+  last_run_.store(run_clock.fetch_add(1, std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+}
+
+bool OpFunction::binds_in_place(
+    c10::ArrayRef<at::Tensor> inputs,
+    c10::ArrayRef<std::optional<at::Tensor>> out,
+    c10::DeviceIndex device_index) const {
+  if (inputs.size() != num_inputs_ || out.size() > results_.size()) {
+    return false;
+  }
+  for (const auto& binding : bindings_) {
+    if (!in_place(inputs[binding.input], binding.arg, device_index)) {
+      return false;
+    }
+  }
+  for (size_t k = 0; k < out.size(); ++k) {
+    if (out[k] && out[k]->defined() && !in_place(*out[k], *results_[k].arg, device_index)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 rt::Binding OpFunction::over(
     const at::Tensor& tensor,
     size_t index,
@@ -381,27 +453,25 @@ rt::Binding OpFunction::over(
   if (!tensor.defined()) {
     return {};
   }
-  auto sizes = tensor.sizes().vec();
-  if (extent) {
-    sizes.front() = *extent;
+  const auto sizes = sizes_at(tensor, extent);
+  const std::vector<int64_t> shape(sizes.begin(), sizes.end());
+  if (auto location = in_place(tensor, index, device_index, extent)) {
+    const auto nbytes = c10::multiply_integers(sizes) * tensor.element_size();
+    return rt::Binding(
+        over_torch_bytes(arg, shape, rt::DeviceBuffer::view(location->buffer, location->offset, nbytes)));
   }
-  const char* dtype = c10::rbln::dtype_name(tensor.scalar_type());
-  if (dtype == nullptr || arg.logical.dtype != dtype || !fits(arg, sizes) || !tensor.is_contiguous()) {
+  if (!copies || !of_arg(arg, tensor, sizes)) {
     return {};
   }
-  const auto nbytes = c10::multiply_integers(sizes) * tensor.element_size();
   const bool read = arg.access != artifact::Access::kWrite;
   const bool written = arg.access != artifact::Access::kRead;
   if (tensor.device().is_cpu()) {
-    if (!copies) {
-      return {};
-    }
-    auto buffer = rt::HostBuffer::allocate(nbytes);
+    auto buffer = rt::HostBuffer::allocate(c10::multiply_integers(sizes) * tensor.element_size());
     if (read) {
       std::memcpy(buffer->data(), tensor.const_data_ptr(), tensor.nbytes());
     }
     copies->push_back({tensor, at::from_blob(buffer->data(), sizes, [buffer](void*) {}, tensor.options()), written});
-    return rt::Binding(over_torch_bytes(arg, sizes, std::move(buffer)));
+    return rt::Binding(over_torch_bytes(arg, shape, std::move(buffer)));
   }
   if (!tensor.device().is_privateuseone() || tensor.device().index() != device_index) {
     return {};
@@ -409,31 +479,18 @@ rt::Binding OpFunction::over(
   // A tensor of a type binds through a copy, as torch holds it, which the copy moves through the
   // host (see c10/rbln/RBLNTyped.h).
   auto found = c10::rbln::caching::try_locate_typed(tensor.const_data_ptr());
-  const bool typed = found && found->type;
-  std::optional<c10::rbln::Location> location;
-  if (found) {
-    location = found->location;
+  if (found && found->type && written && c10::rbln::is_fallback_disabled("host_round_trip")) {
+    throw c10::rbln::FallbackDisabled(
+        "arg " + arg.name + " is written in place, but its tensor is of the type of arg " +
+        c10::rbln::typed::describe(*found->type) +
+        ", so the run would take it through the host (TORCH_RBLN_DISABLE_FALLBACK=host_round_trip)");
   }
-  const uint64_t reach = !location ? 0 : extent ? found->block_available : location->available;
-  if (typed || !location || reach < nbytes ||
-      (arg.alignment > 1 && (location->buffer->address() + location->offset) % arg.alignment != 0)) {
-    if (!copies) {
-      return {};
-    }
-    if (typed && written && c10::rbln::is_fallback_disabled("host_round_trip")) {
-      throw c10::rbln::FallbackDisabled(
-          "arg " + arg.name + " is written in place, but its tensor is of the type of arg " +
-          c10::rbln::typed::describe(*found->type) +
-          ", so the run would take it through the host (TORCH_RBLN_DISABLE_FALLBACK=host_round_trip)");
-    }
-    auto copy = at::empty(sizes, tensor.options());
-    if (read) {
-      (extent ? copy.narrow(0, 0, tensor.size(0)) : copy).copy_(tensor);
-    }
-    copies->push_back({tensor, copy, written});
-    return over(copy, index, device_index, nullptr);
+  auto copy = at::empty(sizes, tensor.options());
+  if (read) {
+    (extent ? copy.narrow(0, 0, tensor.size(0)) : copy).copy_(tensor);
   }
-  return rt::Binding(over_torch_bytes(arg, sizes, rt::DeviceBuffer::view(location->buffer, location->offset, nbytes)));
+  copies->push_back({tensor, copy, written});
+  return over(copy, index, device_index, nullptr);
 }
 
 rt::Binding OpFunction::typed(const at::Tensor& tensor, size_t index, c10::DeviceIndex device_index) const {
@@ -660,7 +717,7 @@ std::optional<std::vector<at::Tensor>> OpFunction::run(
     c10::ArrayRef<std::optional<at::Tensor>> out) {
   TORCH_CHECK(inputs.size() == num_inputs_, "the function takes ", num_inputs_, " tensors, not ", inputs.size());
   TORCH_CHECK(out.size() <= results_.size(), "the function has ", results_.size(), " results, not ", out.size());
-  last_run_.store(run_clock.fetch_add(1, std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+  note_run();
   c10::DeviceIndex device_index = -1;
   for (const auto& input : inputs) {
     if (input.defined() && input.device().is_privateuseone()) {
@@ -985,7 +1042,20 @@ void init_op_function_bindings(pybind11::module& module) {
           py::arg("inputs"),
           py::arg("out") = std::vector<std::optional<at::Tensor>>{},
           py::call_guard<py::gil_scoped_release>(),
-          "Internal: runs over `inputs` and returns the results, or None when a tensor does not fit");
+          "Internal: runs over `inputs` and returns the results, or None when a tensor does not fit")
+      .def(
+          "submit",
+          [](const std::shared_ptr<OpFunction>& self,
+             const std::vector<at::Tensor>& inputs,
+             const std::vector<std::optional<at::Tensor>>& out,
+             bool own_out) { return deferred::submit(self, inputs, out, own_out); },
+          py::arg("inputs"),
+          py::arg("out") = std::vector<std::optional<at::Tensor>>{},
+          py::arg("own_out") = false,
+          py::call_guard<py::gil_scoped_release>(),
+          "Internal: runs over `inputs` as `run` does, or defers the run while TORCH_RBLN_DEFER_OPS defers "
+          "eager ops, and returns the tensors of the results, or None when a tensor does not fit; `own_out` "
+          "says the tensors of `out` are the call's own, made for its results by a structured kernel");
   py::class_<TypedFunction, std::shared_ptr<TypedFunction>>(module, "_TypedFunction")
       .def(
           py::init([](const py::bytes& function) {

@@ -1,3 +1,4 @@
+#include <torch_rbln/csrc/rbln/DeferredOps.h>
 #include <torch_rbln/csrc/rbln/DispatchShim.h>
 #include <torch_rbln/csrc/rbln/WarmCache.h>
 
@@ -724,6 +725,8 @@ struct PendingInstall {
   c10::SmallVector<const c10::TensorImpl*, 4> tensors;
   const std::string* op = nullptr;
   std::optional<Bucket> bucket;
+  // Whether the call's out is its own, the result a structured kernel made for it (see t_own_out).
+  bool own_out = false;
 };
 
 thread_local PendingInstall t_pending;
@@ -854,13 +857,16 @@ bool try_warmcache_hit(
     return false;
   }
   const bool bind_out = out && !fresh && !bucket;
-  auto results = entry->function->run(
-      inputs, bind_out ? c10::ArrayRef<std::optional<at::Tensor>>(*out) : c10::ArrayRef<std::optional<at::Tensor>>());
+  auto results = deferred::submit(
+      entry->function,
+      inputs,
+      bind_out ? c10::ArrayRef<std::optional<at::Tensor>>(out) : c10::ArrayRef<std::optional<at::Tensor>>(),
+      own_out);
   bool copied = out && !fresh && bucket;
   // An unbucketed out the function cannot write where it is, as one an in-place op shares with an
   // input, takes a copy of a result made for it.
   if (bind_out && !results && fits) {
-    results = entry->function->run(inputs);
+    results = deferred::submit(entry->function, inputs);
     copied = true;
   }
   const uint64_t _seg_t_run = now_ns();
@@ -995,6 +1001,7 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
     }
     t_pending.op = &op.schema().name();
     t_pending.bucket = bucket;
+    t_pending.own_out = own_out;
   }
 
   pybind11::gil_scoped_acquire gil;
@@ -1341,6 +1348,11 @@ std::optional<std::pair<int64_t, std::vector<size_t>>> pending_bucket(
     return std::nullopt;
   }
   return std::pair{p.bucket->extent, std::move(rows)};
+}
+
+bool pending_owns_out(const std::string& op, const std::vector<at::Tensor>& tensors) {
+  const auto& p = t_pending;
+  return p.own_out && pending_positions(p, op, tensors).has_value();
 }
 
 bool install_warmcache_from_pending(

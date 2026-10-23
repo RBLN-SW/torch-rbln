@@ -157,7 +157,7 @@ class DeviceCache {
     decrease(stats_.requested_bytes, block->small, block->requested);
     if (!block->uses.empty()) {
       for (const auto& stream : block->uses) {
-        block->pending.push_back(runtime_stream(stream)->record());
+        block->pending.push_back(runtime_stream(stream, false)->record());
       }
       block->uses.clear();
       pending_.push_back(block);
@@ -476,6 +476,8 @@ Location locate(const void* ptr) {
 }
 
 void empty_cache(c10::DeviceIndex device_index) {
+  // A deferred op holds the tensors it reads until it is queued.
+  run_deferred_ops(device_index, std::nullopt);
   cache(device_index).empty_cache();
 }
 

@@ -23,6 +23,10 @@ that row of those tensors alone, so that it serves every call of as many rows or
 fewer (see ``_C._OpFunction``'s ``rows``). A call whose bucket the compiler
 refuses, or whose function cannot compute by rows, gets the function of its own
 extent.
+
+The eager ops a stream defers (TORCH_RBLN_DEFER_OPS) can run as one function:
+``compile_segment`` captures their modules, in order, as one module (``_Segment``)
+and compiles it.
 """
 
 from __future__ import annotations
@@ -43,6 +47,7 @@ from torch.utils._pytree import tree_flatten, tree_unflatten
 
 import torch_rbln._C as _C
 from torch_rbln._internal.env_utils import compile_cache_dir
+from torch_rbln._internal.log_utils import rbln_log_debug
 
 
 if TYPE_CHECKING:
@@ -127,13 +132,15 @@ def _state(module: torch.nn.Module, graph: Any) -> dict[str, torch.Tensor]:
 
 class CompiledOp:
     """A module compiled for one profile of its arguments, as a
-    ``torch_rbln._C._OpFunction``, and the structure of what it returns."""
+    ``torch_rbln._C._OpFunction``, the structure of what it returns, and the module
+    the function is compiled from, called with the tensors the function takes."""
 
-    __slots__ = ("function", "out_spec")
+    __slots__ = ("function", "out_spec", "module")
 
-    def __init__(self, function: Any, out_spec: Any):
+    def __init__(self, function: Any, out_spec: Any, module: torch.nn.Module):
         self.function = function
         self.out_spec = out_spec
+        self.module = module
 
     @staticmethod
     def tensors(args: tuple, kwargs: dict) -> list[torch.Tensor]:
@@ -141,15 +148,17 @@ class CompiledOp:
         flat, _ = tree_flatten((args, kwargs))
         return [v for v in flat if isinstance(v, torch.Tensor)]
 
-    def run(self, tensors: list[torch.Tensor], out: list[torch.Tensor] | None = None) -> Any:
-        """Runs over ``tensors`` and returns what the module returns; a result
-        is written into the tensor of ``out`` given for it when that holds it
-        as the function writes it, and into a new tensor otherwise."""
+    def run(self, tensors: list[torch.Tensor], out: list[torch.Tensor] | None = None, own_out: bool = False) -> Any:
+        """Runs over ``tensors``, or defers the run (TORCH_RBLN_DEFER_OPS), and
+        returns what the module returns; a result is written into the tensor of
+        ``out`` given for it when that holds it as the function writes it, and
+        into a new tensor otherwise. ``own_out`` says the tensors of ``out`` are
+        the call's own, made for its results by a structured kernel."""
         results = None
         if out:
-            results = self.function.run(tensors, out)
+            results = self.function.submit(tensors, out, own_out)
         if results is None:
-            results = self.function.run(tensors)
+            results = self.function.submit(tensors)
         if results is None:
             raise RuntimeError("the tensors of the call do not hold what the op was compiled for")
         return tree_unflatten(results, self.out_spec)
@@ -207,7 +216,7 @@ def _compile(module: Any, args: tuple, kwargs: dict, device_index: int, rows: tu
             entry = io.BytesIO()
             torch.save({"function": function, "names": names, "state": state}, entry)
             v2.api.store_entry(key, entry.getvalue(), directory)
-    return CompiledOp(_C._OpFunction(function, names, state, rows=list(rows)), out_spec)
+    return CompiledOp(_C._OpFunction(function, names, state, rows=list(rows)), out_spec, wrapper)
 
 
 def _stored_key(module: Any, args: tuple, kwargs: dict, npu: str, precision: str) -> str | None:
@@ -398,6 +407,7 @@ def _keep(key: tuple[Any, ...], entry: CompiledOp | _Refused) -> None:
         dropped = _compiled_op_cache.pop(old)
         if isinstance(dropped, CompiledOp):
             _C._warmcache_forget(dropped.function)
+            _C._deferred_forget(dropped.function)
 
 
 def run_op(module: Any, *args: Any, **kwargs: Any) -> Any:
@@ -406,6 +416,62 @@ def run_op(module: Any, *args: Any, **kwargs: Any) -> Any:
     return op.run(op.tensors(args, kwargs))
 
 
+class _Segment(torch.nn.Module):
+    """Ops run in order, each over inputs of the segment and results of the ops
+    before it, returning the values ``left`` names.
+
+    ``reads`` gives what each op takes, and ``left`` what the segment returns, as
+    ``(op, index)``: result ``index`` of op ``op``, or input ``index`` of the
+    segment when ``op`` is -1."""
+
+    def __init__(self, ops: list[torch.nn.Module], reads: list[list[tuple[int, int]]], left: list[tuple[int, int]]):
+        super().__init__()
+        self.ops = torch.nn.ModuleList(ops)
+        self._reads = reads
+        self._left = left
+
+    def forward(self, *inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        results: list[list[torch.Tensor]] = []
+
+        def value(op: int, index: int) -> torch.Tensor:
+            return inputs[index] if op < 0 else results[op][index]
+
+        for op, reads in zip(self.ops, self._reads):
+            flat, _ = tree_flatten(op(*(value(*r) for r in reads)))
+            results.append([v for v in flat if isinstance(v, torch.Tensor)])
+        return tuple(value(*v) for v in self._left)
+
+
+def compile_segment(
+    functions: list[Any],
+    reads: list[list[tuple[int, int]]],
+    left: list[tuple[int, int]],
+    inputs: list[torch.Tensor],
+    device_index: int,
+) -> Any:
+    """The function of a segment of deferred ops, a ``torch_rbln._C._OpFunction``
+    over ``inputs`` that returns the values ``left`` names (see ``_Segment``),
+    compiled from the modules of the ops whose functions ``functions`` are; None
+    when the compiler refuses it, or an op is no longer one the process keeps."""
+    from rebel import v2
+
+    by_function = {id(e.function): e for e in list(_compiled_op_cache.values()) if isinstance(e, CompiledOp)}
+    ops = [by_function.get(id(f)) for f in functions]
+    if any(op is None for op in ops):
+        return None
+    module = _Segment([op.module for op in ops], reads, left).eval()
+    types = {f"arg{i}": v2.TensorType(t.shape, t.dtype) for i, t in enumerate(inputs)}
+    try:
+        graph = v2.frontend.capture(module, types)
+        fn = compile_logical(graph, _npu(device_index))
+        return _C._OpFunction(fn.to_bytes(), list(types), _state(module, graph))
+    except Exception as e:
+        # Whatever keeps the segment from compiling, its ops run one by one without its function.
+        rbln_log_debug(f"a segment of {len(ops)} deferred ops runs op by op: the compiler refuses it ({e})")
+        return None
+
+
 def clear_rbln_compile_cache() -> None:
     with _compiled_op_cache_lock:
         _compiled_op_cache.clear()
+    _C._deferred_clear()

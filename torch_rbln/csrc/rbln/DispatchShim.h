@@ -98,6 +98,10 @@ std::optional<std::pair<int64_t, std::vector<size_t>>> pending_bucket(
     const std::string& op,
     const std::vector<at::Tensor>& tensors);
 
+// Whether the out of the call the shim hands to the Python wrapper is the call's own, the result a
+// structured kernel made for it, when that call is one of `op` over `tensors`.
+bool pending_owns_out(const std::string& op, const std::vector<at::Tensor>& tensors);
+
 // Called by the Python wrapper after a successful miss-path compile and run to
 // install a warm-cache entry keyed by the CacheKey that the shim built on the
 // way in (stored in a thread-local so Python doesn't need to re-build it).

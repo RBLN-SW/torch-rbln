@@ -6,6 +6,7 @@
 
 #include <sys/mman.h>
 
+#include <atomic>
 #include <cstdlib>
 
 #include <map>
@@ -58,7 +59,19 @@ struct DeviceStreams {
 std::mutex streams_mutex;
 std::map<c10::DeviceIndex, DeviceStreams> streams;
 
+std::atomic<DeferredOpsRunner> deferred_ops_runner{nullptr};
+
 } // namespace
+
+void set_deferred_ops_runner(DeferredOpsRunner runner) {
+  deferred_ops_runner.store(runner, std::memory_order_release);
+}
+
+void run_deferred_ops(c10::DeviceIndex device_index, std::optional<c10::StreamId> stream) {
+  if (auto* runner = deferred_ops_runner.load(std::memory_order_acquire)) {
+    runner(device_index, stream);
+  }
+}
 
 std::shared_ptr<rt::Device> runtime_device(c10::DeviceIndex device_index) {
   if (is_dummy_device()) {
@@ -97,9 +110,12 @@ std::optional<Location> locate_segment(const void* ptr) noexcept {
   }
 }
 
-std::shared_ptr<rt::Stream> runtime_stream(c10::Stream stream) {
+std::shared_ptr<rt::Stream> runtime_stream(c10::Stream stream, bool deferred_first) {
   const auto device_index = stream.device_index();
   const auto id = stream.id();
+  if (deferred_first) {
+    run_deferred_ops(device_index, id);
+  }
   std::lock_guard<std::mutex> lock(streams_mutex);
   auto& entry = streams[device_index];
   if (id == 0) {
@@ -117,6 +133,7 @@ std::shared_ptr<rt::Stream> runtime_stream(c10::Stream stream) {
 }
 
 std::vector<std::shared_ptr<rt::Stream>> runtime_streams(c10::DeviceIndex device_index) {
+  run_deferred_ops(device_index, std::nullopt);
   std::lock_guard<std::mutex> lock(streams_mutex);
   auto& entry = streams[device_index];
   std::vector<std::shared_ptr<rt::Stream>> out;

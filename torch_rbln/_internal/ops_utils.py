@@ -1740,7 +1740,11 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
 
     from torch_rbln._internal.compile_cache import compiled_op, CompiledOp, device_of, UncompilableOp
     from torch_rbln._internal.env_utils import is_fallback_disabled
-    from torch_rbln._internal.warm_cache import install_pending as _install_warm_cache_pending, pending_bucket
+    from torch_rbln._internal.warm_cache import (
+        install_pending as _install_warm_cache_pending,
+        pending_bucket,
+        pending_owns_out,
+    )
 
     (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs_filtered)
     has_views = any(r is not None for r in view_recipes)
@@ -1761,7 +1765,8 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
         and can_use_out_tensor_directly(view_args, dict(view_kwargs, out=out_tensor))
     )
     tensors = op.tensors(view_args, view_kwargs)
-    result = op.run(tensors, [out_tensor] if use_out else None)
+    own_out = use_out and bool(op_name) and pending_owns_out(op_name, tensors)
+    result = op.run(tensors, [out_tensor] if use_out else None, own_out=own_out)
     if not has_views and op_name:
         _install_warm_cache_pending(op_name, op.function, tensors)
     if use_out and result is not out_tensor:

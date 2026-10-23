@@ -10,11 +10,13 @@
 #include <c10/rbln/RBLNGenerator.h>
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNProfiler.h>
+#include <c10/rbln/RBLNRuntime.h>
 #include <c10/rbln/RBLNSupportedDtypes.h>
 #include <rebel/v2/runtime/device.h>
 #include <torch/csrc/Dtype.h>
 #include <torch/csrc/utils/pybind.h>
 #include <torch_rbln/csrc/distributed/c10d/rbln/ProcessGroupRBLNModule.hpp>
+#include <torch_rbln/csrc/rbln/DeferredOps.h>
 #include <torch_rbln/csrc/rbln/DispatchShim.h>
 #include <torch_rbln/csrc/rbln/WarmCache.h>
 #include <torch_rbln/csrc/rbln/profiler/kineto/rbln_kineto_adapter.h>
@@ -205,7 +207,13 @@ void register_stream_api(py::module_& module) {
         if (guard.getDevice().index() != stream.device_index()) {
           guard.setDevice(stream.device());
         }
-        return pack(guard.exchangeStream(stream));
+        // The ops deferred on the stream being left are queued, on that stream, before anything the
+        // new stream runs, as they would be had they run as they were called.
+        const auto left = guard.exchangeStream(stream);
+        if (left != stream) {
+          c10::rbln::run_deferred_ops(left.device_index(), left.id());
+        }
+        return pack(left);
       },
       "Internal: set current rbln stream; returns the previous as (stream_id, device_index, device_type)");
 }
@@ -307,6 +315,7 @@ void register_internal_api(py::module_& module) {
       pybind11::arg("skip_dtype_args") = std::vector<size_t>{});
 
   torch_rbln::init_op_function_bindings(module);
+  torch_rbln::deferred::init_deferred_ops_bindings(module);
 
   // Warm-cache API. The C++ shim populates a thread-local `pending` entry on
   // every miss-path dispatch; the generated Python wrapper calls
@@ -328,6 +337,14 @@ void register_internal_api(py::module_& module) {
       "Internal: the bucket extent of the call the shim hands to the Python wrapper, with the positions "
       "among `tensors` of those that stand at it, or None when that call is not bucketed or is not one "
       "of `op` over `tensors`",
+      pybind11::arg("op"),
+      pybind11::arg("tensors"));
+
+  module.def(
+      "_warmcache_pending_owns_out",
+      &torch_rbln::shim::pending_owns_out,
+      "Internal: whether the out of the call the shim hands to the Python wrapper is the call's own, the "
+      "result a structured kernel made for it, when that call is one of `op` over `tensors`",
       pybind11::arg("op"),
       pybind11::arg("tensors"));
 

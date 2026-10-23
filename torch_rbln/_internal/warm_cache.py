@@ -40,6 +40,13 @@ def pending_bucket(op: str, tensors: list[torch.Tensor]) -> tuple[int, list[int]
     return _C._warmcache_pending_bucket(op, tensors)
 
 
+def pending_owns_out(op: str, tensors: list[torch.Tensor]) -> bool:
+    """Whether the out of the call the shim hands to this wrapper is the call's
+    own, the result a structured kernel made for it, when that call is one of
+    ``op`` over ``tensors``."""
+    return bool(_C._warmcache_pending_owns_out(op, tensors))
+
+
 def install_pending(op: str, function: Any, tensors: list[torch.Tensor]) -> bool:
     if not _C._warmcache_is_enabled():
         return False

@@ -15,6 +15,7 @@
 
 #include <rebel/v2/runtime/activity.h>
 #include <rebel/v2/runtime/flags.h>
+#include <torch_rbln/csrc/rbln/DeferredOps.h>
 #include <torch_rbln/csrc/rbln/profiler/kineto/rbln_kineto_emitter.h>
 
 #include <chrono>
@@ -54,6 +55,8 @@ class RblnActivityProfilerSession : public ::libkineto::IActivityProfilerSession
   RblnActivityProfilerSession& operator=(const RblnActivityProfilerSession&) = delete;
 
   void start() override {
+    // The ops deferred so far run before the session, and those deferred during it within it.
+    ::torch_rbln::deferred::run_all();
     // (steady, system) anchor at session open; exported slices carry steady_clock ns,
     // so we add (system - steady) at projection time to convert them to system time.
     anchor_steady_ns_ = now_ns(std::chrono::steady_clock::now());
@@ -72,9 +75,14 @@ class RblnActivityProfilerSession : public ::libkineto::IActivityProfilerSession
     }
     session_started_ = false;
     status_ = ::libkineto::TraceStatus::PROCESSING;
-    convert_activities_to_kineto(
-        ::rebel::v2::runtime::endActivities(), clock_offset_ns_, default_trace_span(), &projected_);
-    status_ = ::libkineto::TraceStatus::READY;
+    // The session ends even when an op deferred during it fails, which is raised once it has.
+    try {
+      ::torch_rbln::deferred::run_all();
+    } catch (...) {
+      end();
+      throw;
+    }
+    end();
   }
 
   std::vector<std::string> errors() override {
@@ -109,6 +117,12 @@ class RblnActivityProfilerSession : public ::libkineto::IActivityProfilerSession
   }
 
  private:
+  void end() {
+    convert_activities_to_kineto(
+        ::rebel::v2::runtime::endActivities(), clock_offset_ns_, default_trace_span(), &projected_);
+    status_ = ::libkineto::TraceStatus::READY;
+  }
+
   ProjectedKinetoTrace projected_;
   int64_t anchor_steady_ns_ = 0;
   int64_t anchor_system_ns_ = 0;

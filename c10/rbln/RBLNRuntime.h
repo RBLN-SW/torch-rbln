@@ -61,10 +61,20 @@ C10_RBLN_API void release_segment(void* handle);
 C10_RBLN_API std::optional<Location> locate_segment(const void* ptr) noexcept;
 
 /**
- * @brief The runtime stream a torch stream of an RBLN device runs on. StreamId 0 is the
- * device's default stream; the others come from its pool.
+ * @brief What queues the eager ops deferred on stream `stream` of device `device_index`, or on
+ * every stream of it when none is given (torch_rbln/csrc/rbln/DeferredOps.h).
  */
-C10_RBLN_API std::shared_ptr<rt::Stream> runtime_stream(c10::Stream stream);
+using DeferredOpsRunner = void (*)(c10::DeviceIndex device_index, std::optional<c10::StreamId> stream);
+C10_RBLN_API void set_deferred_ops_runner(DeferredOpsRunner runner);
+C10_RBLN_API void run_deferred_ops(c10::DeviceIndex device_index, std::optional<c10::StreamId> stream);
+
+/**
+ * @brief The runtime stream a torch stream of an RBLN device runs on, with the eager ops deferred
+ * on it queued first, so that what the caller queues follows them. StreamId 0 is the device's
+ * default stream; the others come from its pool. Without `deferred_first` the deferred ops stay
+ * deferred: for an event that orders only the reuse of memory none of them touches.
+ */
+C10_RBLN_API std::shared_ptr<rt::Stream> runtime_stream(c10::Stream stream, bool deferred_first = true);
 
 /**
  * @brief Adds a stream to the pool of `device_index` and returns its StreamId.
@@ -72,7 +82,8 @@ C10_RBLN_API std::shared_ptr<rt::Stream> runtime_stream(c10::Stream stream);
 C10_RBLN_API c10::StreamId add_pool_stream(c10::DeviceIndex device_index);
 
 /**
- * @brief Pool streams created so far on `device_index`, the default stream first.
+ * @brief Pool streams created so far on `device_index`, the default stream first. The eager ops
+ * deferred on any of them are queued before this returns.
  */
 C10_RBLN_API std::vector<std::shared_ptr<rt::Stream>> runtime_streams(c10::DeviceIndex device_index);
 
