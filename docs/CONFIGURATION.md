@@ -205,7 +205,7 @@ A deferred op allocates its results when it is called, so shapes, views and late
 - `torch.rbln.set_stream()` leaving the stream, and the start and end of a `torch.profiler` session that records the NPU (`RBLN_PROFILER=1`);
 - the segment reaching N ops, and an op whose tensor shares memory with a tensor of the segment through another view when either of the two is written.
 
-A segment runs op by op the first time it is seen, and is compiled the second time; later runs of it take the compiled function from a cache, without entering Python. One the compiler refuses or fails on keeps running op by op. The compiled segments count against `TORCH_RBLN_COMPILED_OPS` apart from the ops.
+A segment runs op by op the first time it is seen, and is compiled the second time; later runs of it take the compiled function from a cache, without entering Python. One the compiler refuses or fails on keeps running op by op. The process keeps as many segments as `TORCH_RBLN_COMPILED_OPS` keeps compiled ops, letting go of the least recently run.
 
 The function of a segment writes the tensors its ops were given as `out=` (an in-place op's tensor among them), the inputs its ops update in place, and the other results a tensor still holds when it runs. It does not round the values between its ops to the tensors' dtype, so a result can differ in its last bits from the result of the same ops run one by one.
 

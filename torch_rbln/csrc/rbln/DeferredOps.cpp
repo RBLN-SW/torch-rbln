@@ -305,8 +305,14 @@ class Fusions {
     return *fusions;
   }
 
-  // The fusion of the segment `key` names, now seen to run once more.
-  std::shared_ptr<Fusion> ran(SegmentKey key, const Segment& segment) {
+  // What the fusion of the segment `key` names holds, now that it runs once more.
+  struct Seen {
+    std::shared_ptr<Fusion> fusion;
+    int runs = 0;
+    std::shared_ptr<OpFunction> function;
+    bool refused = false;
+  };
+  Seen ran(SegmentKey key, const Segment& segment) {
     std::vector<std::shared_ptr<Fusion>> dropped;
     std::lock_guard<std::mutex> lock(mutex_);
     auto& fusion = map_[std::move(key)];
@@ -318,14 +324,14 @@ class Fusions {
     }
     ++fusion->runs;
     fusion->used = ++clock_;
-    auto kept = fusion;
+    Seen seen{.fusion = fusion, .runs = fusion->runs, .function = fusion->function, .refused = fusion->refused};
     const auto limit = static_cast<size_t>(kCompiledOps.value());
     while (map_.size() > limit) {
       auto oldest = std::ranges::min_element(map_, {}, [](const auto& entry) { return entry.second->used; });
       dropped.push_back(std::move(oldest->second));
       map_.erase(oldest);
     }
-    return kept;
+    return seen;
   }
 
   void compiled(Fusion& fusion, std::shared_ptr<OpFunction> function) {
@@ -335,11 +341,6 @@ class Fusions {
     } else {
       fusion.refused = true;
     }
-  }
-
-  std::pair<std::shared_ptr<OpFunction>, bool> function_of(const Fusion& fusion) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return {fusion.function, fusion.refused};
   }
 
   void forget(const OpFunction* function) {
@@ -496,9 +497,9 @@ void execute(const Segment& segment) {
   for (const auto& l : left) {
     key.left.push_back(l.value);
   }
-  auto fusion = Fusions::get().ran(std::move(key), segment);
-  auto [function, refused] = Fusions::get().function_of(*fusion);
-  if (!function && !refused && fusion->runs >= kRunsBeforeFusing && Py_IsInitialized()) {
+  auto seen = Fusions::get().ran(std::move(key), segment);
+  auto function = seen.function;
+  if (!function && !seen.refused && seen.runs >= kRunsBeforeFusing && Py_IsInitialized()) {
     try {
       function = compile(segment, left);
     } catch (...) {
@@ -507,7 +508,7 @@ void execute(const Segment& segment) {
       stat_op_runs.fetch_add(1, std::memory_order_relaxed);
       throw;
     }
-    Fusions::get().compiled(*fusion, function);
+    Fusions::get().compiled(*seen.fusion, function);
     (function ? stat_compiled : stat_refused).fetch_add(1, std::memory_order_relaxed);
   }
   if (function) {
