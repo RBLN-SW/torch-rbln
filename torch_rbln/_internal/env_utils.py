@@ -69,6 +69,30 @@ def is_rbln_deploy() -> bool:
     return os.getenv("TORCH_RBLN_DEPLOY") == "ON"
 
 
+def compile_cache_dir() -> str | None:
+    """
+    The directory eager ops and graphs compiled with no ``cache_dir`` option keep their compiled
+    functions in, which the processes sharing it reuse rather than compile again.
+
+    ``TORCH_RBLN_COMPILE_CACHE_DIR`` when set, else ``RBLN_COMPILE_CACHE_DIR`` when set, else
+    ``torch_rbln/compile_cache`` under ``$XDG_CACHE_HOME``, ``~/.cache`` without it.
+
+    Returns:
+        str | None: The directory, or None for an empty ``TORCH_RBLN_COMPILE_CACHE_DIR``, which
+        leaves the functions to rebel.v2: in ``RBLN_COMPILE_CACHE_DIR`` when that is set, in memory
+        only otherwise.
+    """
+    own = os.environ.get("TORCH_RBLN_COMPILE_CACHE_DIR")
+    if own is not None:
+        return own or None
+    from rebel import v2
+
+    if v2.flags.RBLN_COMPILE_CACHE_DIR:
+        return v2.flags.RBLN_COMPILE_CACHE_DIR
+    user_cache = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+    return os.path.join(user_cache, "torch_rbln", "compile_cache")
+
+
 def is_diagnose_mode() -> bool:
     """
     Check if torch-rbln is running in diagnose-only mode (skip backend init).

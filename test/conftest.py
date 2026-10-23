@@ -1,5 +1,7 @@
 import os
+import shutil
 import sys
+import tempfile
 
 import pytest
 import torch
@@ -12,6 +14,24 @@ from torch_rbln._internal.log_utils import rbln_log_debug
 # Set (per worker process) when an RBLN device drain fails in reset_caching_allocator: the
 # device is faulted, so the rest of this worker's tests are skipped rather than run against it.
 _rbln_device_poisoned = False
+
+# The compile cache directory of this run, made by the process xdist runs its workers from.
+_compile_cache_dir = None
+
+
+def pytest_configure(config):
+    """Keep the run's compiled functions out of the user's compile cache, in a directory of the
+    run's own. The xdist workers and the processes the tests start inherit it, so they share it
+    as the processes of one host share the user's."""
+    global _compile_cache_dir
+    if os.environ.get("PYTEST_XDIST_WORKER") is None:
+        _compile_cache_dir = tempfile.mkdtemp(prefix="torch_rbln_compile_cache_")
+        os.environ["TORCH_RBLN_COMPILE_CACHE_DIR"] = _compile_cache_dir
+
+
+def pytest_unconfigure(config):
+    if _compile_cache_dir is not None:
+        shutil.rmtree(_compile_cache_dir, ignore_errors=True)
 
 
 @pytest.hookimpl(tryfirst=True)

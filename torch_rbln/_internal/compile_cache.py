@@ -10,7 +10,9 @@ the op holds is state the function encodes as it lays it out. One function serve
 module for each profile of its arguments: the shape and dtype of each tensor and
 the value of everything else. A function runs on any device of its NPU kind,
 with an executor per device. The process keeps TORCH_RBLN_COMPILED_OPS of them,
-letting go of the least recently run, which compiles again when called.
+letting go of the least recently run, which compiles again when called. A compile
+reuses a function a process sharing the compile cache directory made
+(``env_utils.compile_cache_dir``), so only the capture runs again.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.utils._pytree import tree_flatten, tree_unflatten
 
 import torch_rbln._C as _C
+from torch_rbln._internal.env_utils import compile_cache_dir
 
 
 _compiled_op_cache_lock = threading.Lock()
@@ -136,9 +139,12 @@ class CompiledOp:
 def compile_logical(graph: Any, npu: str, cache_dir: Any = None) -> Any:
     """The function of ``graph`` with its inputs and results laid out as torch
     holds contiguous tensors wherever the compiler can; ``_OpFunction`` moves
-    the others through the host as it runs."""
+    the others through the host as it runs. It is kept in ``cache_dir``, or in
+    the compile cache directory when that is None."""
     from rebel import v2
 
+    if cache_dir is None:
+        cache_dir = compile_cache_dir()
     try:
         return v2.api.compile_graph(graph, npu, cache_dir=cache_dir, inputs=v2.LOGICAL, outputs=v2.LOGICAL)
     except v2.UnmetRequest as e:

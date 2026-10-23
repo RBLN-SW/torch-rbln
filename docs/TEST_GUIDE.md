@@ -278,6 +278,8 @@ These fixtures are defined in `test/conftest.py` and apply automatically to ever
 | `restore_current_stream`         | function | **Yes** | Restores every device's current stream after each test so a `set_stream()` can't leak into later tests               |
 | `enable_deploy_mode`             | function | No      | Sets `TORCH_RBLN_DEPLOY=ON`. Apply with `@pytest.mark.usefixtures("enable_deploy_mode")`                      |
 
+`pytest_configure` points `TORCH_RBLN_COMPILE_CACHE_DIR` at a temporary directory of the run, which its xdist workers and the processes its tests start share, so a run neither reads nor fills the user's compile cache.
+
 ---
 
 ## 5. PrivateUse1 Test Framework

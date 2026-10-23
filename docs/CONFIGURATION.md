@@ -144,6 +144,18 @@ The same precision applies to what `torch.compile` builds for an rbln device: un
 
 Ops that round to an integer follow the device, not the CPU. `ceil` and `floor` round the input after it is rounded to dlfloat16 (to nearest, an fp16 tie to even and an fp32 tie away from zero, which moves a value by up to half a dlfloat16 step), and `div` with a `rounding_mode` rounds the quotient the NPU computes, which is within two dlfloat16 steps of the exact one. So a value or quotient that close to an integer can come out one away from the CPU's result.
 
+## Compile Cache
+
+An eager op is compiled the first time a process runs it for a profile of its arguments (the shape and dtype of each tensor and every other value), and `torch.compile(backend="rbln")` compiles each graph Dynamo hands over. Both keep the compiled functions on disk, in a directory the processes of a host share: a process takes a function another one made rather than compiling it again, so a restarted process only traces its ops again. While one process compiles a function, the others that need it wait and take it.
+
+| Variable | Description |
+|----------|-------------|
+| `TORCH_RBLN_COMPILE_CACHE_DIR` | The directory. Set but empty, torch-rbln names none, and the functions stay in memory, or go where `RBLN_COMPILE_CACHE_DIR` says when that is set. |
+| `RBLN_COMPILE_CACHE_DIR` | The directory of the `rebel.v2` compiles that name none, used when `TORCH_RBLN_COMPILE_CACHE_DIR` is unset. |
+| `RBLN_COMPILE_CACHE_DISK` | The bytes of compiled functions a directory keeps, 20 GiB by default. Past them, the process storing a function drops those no process used for the longest. |
+
+With neither directory variable set, the directory is `$XDG_CACHE_HOME/torch_rbln/compile_cache`, or `~/.cache/torch_rbln/compile_cache`. The `cache_dir` option of `torch.compile` names the directory of that graph's compile instead. A function is found again only by the same build of the compiler, so the directory needs no clearing after an upgrade; the functions of the earlier build are the least recently used and go first.
+
 ## Debugging Device Errors
 
 Eager ops and graph runs are queued on the current stream and run after the call that queues them returns. An error of the device work they do, such as a failed device job, is raised by a later call that waits for the stream (`torch.rbln.synchronize()`, a copy to the CPU, a later op), far from the op that caused it.
