@@ -1606,6 +1606,39 @@ def prepare_args_view_aware(args, kwargs_filtered):
 _view_op_module_cache: dict = {}
 
 
+class _PlainOp(torch.nn.Module):
+    """``op`` as a module."""
+
+    def __init__(self, op):
+        super().__init__()
+        self.op = op
+
+    def forward(self, *fwd_args, **fwd_kwargs):
+        return self.op(*fwd_args, **fwd_kwargs)
+
+
+class _ViewOp(torch.nn.Module):
+    """``op`` called with each positional tensor argument first viewed by its
+    recipe in ``recipes``."""
+
+    def __init__(self, op, recipes):
+        super().__init__()
+        self.op = op
+        self.recipes = recipes
+
+    def forward(self, *fwd_args, **fwd_kwargs):
+        new_args = []
+        for arg, recipe in zip(fwd_args, self.recipes):
+            if recipe is None or not isinstance(arg, torch.Tensor):
+                new_args.append(arg)
+                continue
+            cur = arg
+            for step in recipe:
+                cur = _apply_view_step(cur, step)
+            new_args.append(cur)
+        return self.op(*new_args, **fwd_kwargs)
+
+
 def get_view_op_module(op_callable_or_module, view_recipes):
     """Return an ``nn.Module`` whose forward applies the per-arg view recipes
     to its positional args, then invokes the underlying op.
@@ -1637,12 +1670,7 @@ def get_view_op_module(op_callable_or_module, view_recipes):
         cached = _view_op_module_cache.get(key)
         if cached is not None:
             return cached
-
-        class _PlainOp(torch.nn.Module):
-            def forward(self, *fwd_args, **fwd_kwargs):
-                return op_callable(*fwd_args, **fwd_kwargs)
-
-        inst = _PlainOp().eval()
+        inst = _PlainOp(op_callable).eval()
         _view_op_module_cache[key] = inst
         return inst
 
@@ -1651,22 +1679,7 @@ def get_view_op_module(op_callable_or_module, view_recipes):
     cached = _view_op_module_cache.get(key)
     if cached is not None:
         return cached
-    captured_recipes = tuple(view_recipes)
-
-    class _ViewOp(torch.nn.Module):
-        def forward(self, *fwd_args, **fwd_kwargs):
-            new_args = []
-            for arg, recipe in zip(fwd_args, captured_recipes):
-                if recipe is None or not isinstance(arg, torch.Tensor):
-                    new_args.append(arg)
-                    continue
-                cur = arg
-                for step in recipe:
-                    cur = _apply_view_step(cur, step)
-                new_args.append(cur)
-            return op_callable(*new_args, **fwd_kwargs)
-
-    inst = _ViewOp().eval()
+    inst = _ViewOp(op_callable, tuple(view_recipes)).eval()
     _view_op_module_cache[key] = inst
     return inst
 

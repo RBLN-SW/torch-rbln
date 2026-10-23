@@ -12,14 +12,21 @@ the value of everything else. A function runs on any device of its NPU kind,
 with an executor per device. The process keeps TORCH_RBLN_COMPILED_OPS of them,
 letting go of the least recently run, which compiles again when called. A compile
 reuses a function a process sharing the compile cache directory made
-(``env_utils.compile_cache_dir``), so only the capture runs again.
+(``env_utils.compile_cache_dir``). It takes it from there without capturing the
+op again when the op and every argument have a name all processes give them
+(``_stored_key``), and finds it by the captured graph otherwise.
 """
 
 from __future__ import annotations
 
 import functools
+import hashlib
 import heapq
+import io
+import sys
 import threading
+from pathlib import Path
+from types import BuiltinFunctionType, FunctionType
 from typing import Any
 
 import torch
@@ -158,13 +165,121 @@ def _compile(module: Any, args: tuple, kwargs: dict, device_index: int) -> Compi
     slots = [i for i, v in enumerate(flat) if isinstance(v, torch.Tensor)]
     template = [None if isinstance(v, torch.Tensor) else v for v in flat]
     wrapper = _TensorsIn(module, spec, template, slots).eval()
-    names = [f"arg{i}" for i in range(len(slots))]
-    types = {name: v2.TensorType(flat[slot].shape, flat[slot].dtype) for name, slot in zip(names, slots)}
-    graph = v2.frontend.capture(wrapper, types)
-    fn = compile_logical(graph, _npu(device_index))
     with FakeTensorMode(allow_non_fake_inputs=True):
         _, out_spec = tree_flatten(wrapper(*(torch.empty(flat[slot].shape, dtype=flat[slot].dtype) for slot in slots)))
-    return CompiledOp(_C._OpFunction(fn.to_bytes(), names, _state(wrapper, graph)), out_spec)
+    npu = _npu(device_index)
+    directory = compile_cache_dir()
+    key = _stored_key(module, args, kwargs, npu, v2.float32_precision())
+    stored = v2.api.find_entry(key, directory) if key is not None else None
+    if stored is not None:
+        entry = torch.load(io.BytesIO(stored), weights_only=True)
+        function, names, state = entry["function"], entry["names"], entry["state"]
+    else:
+        names = [f"arg{i}" for i in range(len(slots))]
+        types = {name: v2.TensorType(flat[slot].shape, flat[slot].dtype) for name, slot in zip(names, slots)}
+        graph = v2.frontend.capture(wrapper, types)
+        function = compile_logical(graph, npu, directory).to_bytes()
+        state = _state(wrapper, graph)
+        if key is not None:
+            entry = io.BytesIO()
+            torch.save({"function": function, "names": names, "state": state}, entry)
+            v2.api.store_entry(key, entry.getvalue(), directory)
+    return CompiledOp(_C._OpFunction(function, names, state), out_spec)
+
+
+def _stored_key(module: Any, args: tuple, kwargs: dict, npu: str, precision: str) -> str | None:
+    """What the function of ``module`` for the profile of ``args`` and ``kwargs`` is kept
+    under on disk, beside the functions of its graph: everything its capture and compile
+    depend on, the defaults a tensor the op makes takes among them, but the build of
+    rebel.v2, which rebel.v2 adds. None when ``module`` or an argument has no name every
+    process gives it."""
+    named = _named(module)
+    if named is None or not _stable((args, kwargs), tensors=True):
+        return None
+    return repr(
+        (
+            named,
+            _profile(args),
+            _profile(kwargs),
+            npu,
+            precision,
+            torch.get_default_dtype(),
+            str(torch.get_default_device()),
+            torch.__version__,
+            torch.version.git_version,
+            sys.version,
+            _source_id(),
+        )
+    )
+
+
+@functools.cache
+def _source_id() -> str:
+    """A hash of torch-rbln's Python sources."""
+    root = Path(__file__).resolve().parents[1]
+    h = hashlib.sha256()
+    for path in sorted(root.rglob("*.py")):
+        h.update(str(path.relative_to(root)).encode() + b"\0" + path.read_bytes())
+    return h.hexdigest()
+
+
+_OWN_PACKAGES = ("torch", "torch_rbln")
+_BARE_MODULE = frozenset(vars(torch.nn.Module()))
+
+
+def _named(value: Any) -> str | None:
+    """A name of ``value`` that every process with the same torch and torch-rbln takes
+    to the same op, or None.
+
+    A function or class is named where torch or torch-rbln defines it, and a plain value
+    by its profile. A module is named by its class, its mode and the names of what it
+    holds, and has none when it holds a parameter, a buffer or a hook.
+    """
+    if isinstance(value, torch.nn.Module):
+        return _named_module(value)
+    if isinstance(value, (FunctionType, BuiltinFunctionType, type)):
+        module = getattr(value, "__module__", None) or ""
+        if module.partition(".")[0] not in _OWN_PACKAGES:
+            return None
+        for path in (value.__qualname__, value.__name__):
+            found = sys.modules.get(module)
+            for part in path.split("."):
+                found = getattr(found, part, None)
+            if found is value:
+                return f"{module}:{path}"
+        return None
+    return repr(_profile(value)) if _stable(value, tensors=False) else None
+
+
+def _named_module(module: torch.nn.Module) -> str | None:
+    kind = _named(type(module))
+    if kind is None:
+        return None
+    held = []
+    for name, value in sorted(vars(module).items()):
+        if name == "_modules":
+            held += [(k, _named(v)) for k, v in value.items()]
+        elif name not in _BARE_MODULE:
+            held.append((name, _named(value)))
+        elif name != "training" and value:
+            return None
+    if any(named is None for _, named in held):
+        return None
+    return repr((kind, module.training, held))
+
+
+def _stable(value: Any, tensors: bool) -> bool:
+    """Whether the profile of ``value`` names it as every process would: by the values it
+    holds, and by the shapes and dtypes of its tensors where ``tensors`` admits them."""
+    if isinstance(value, torch.Tensor):
+        return tensors
+    if value is None or type(value) in (bool, int, float, str):
+        return True
+    if type(value) in (list, tuple, torch.Size):
+        return all(_stable(v, tensors) for v in value)
+    if type(value) is dict:
+        return all(type(k) is str and _stable(v, tensors) for k, v in value.items())
+    return isinstance(value, (torch.dtype, torch.device, torch.memory_format, torch.layout))
 
 
 def device_of(args: tuple, kwargs: dict) -> torch.device:
