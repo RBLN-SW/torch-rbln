@@ -14,7 +14,7 @@ import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
-from test.utils import requires_devices, SUPPORTED_DTYPES
+from test.utils import requires_devices, rounding_division_bounds, SUPPORTED_DTYPES, to_dlfloat16
 
 
 # Tolerance for numerical comparisons
@@ -637,14 +637,16 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     @parametrize("mode", ["trunc", "floor"])
     def test_div_mode(self, dtype, shape, mode):
-        """Test div with mode (trunc/floor)"""
+        """div with a rounding mode rounds the quotient the NPU computes, so a quotient within the
+        division's accuracy of an integer may land on either side of it (``rounding_division_bounds``)."""
         x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
         y = torch.randn(shape, dtype=dtype, device=self.rbln_device) + 0.1
         result = torch.div(x, y, rounding_mode=mode)
-        expected = torch.div(x.cpu(), y.cpu(), rounding_mode=mode)
-        self.assertEqual(result.cpu(), expected.cpu(), atol=ATOL, rtol=RTOL)
+        lo, hi = rounding_division_bounds(x.cpu(), y.cpu(), mode)
+        outside = (result.cpu() < lo) | (result.cpu() > hi)
+        self.assertFalse(outside.any(), msg=f"{outside.sum()} of {outside.numel()} results outside the device's bounds")
         self.assertEqual(result.device, self.rbln_device)
-        self.assertEqual(result.dtype, expected.dtype)
+        self.assertEqual(result.dtype, dtype)
 
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("shape", TEST_SHAPES_SUBSET)
@@ -1450,10 +1452,10 @@ class TestViewOpsOnDevice(TestCase):
         base = torch.randn(*base_shape, dtype=dtype, device=device)
         return base, base.permute(*perm)
 
-    def _check_unary(self, op_callable, base_shape, perm, atol=ATOL, rtol=RTOL, output_is_bool=False):
+    def _check_unary(self, op_callable, base_shape, perm, atol=ATOL, rtol=RTOL, output_is_bool=False, reference=None):
         base, t = self._make_permuted(base_shape, perm, device=self.rbln_device)
         result = op_callable(t)
-        expected = op_callable(t.cpu())
+        expected = (reference or op_callable)(t.cpu())
         self.assertEqual(result.shape, expected.shape, msg=f"{op_callable.__name__} permute({perm})")
         if output_is_bool:
             self.assertEqual(result.cpu(), expected.cpu(), msg=f"{op_callable.__name__} permute({perm})")
@@ -1500,7 +1502,10 @@ class TestViewOpsOnDevice(TestCase):
 
     @parametrize("base_shape,perm", PERMUTE_PATTERNS)
     def test_unary_ceil_permute(self, base_shape, perm):
-        self._check_unary(torch.ceil, base_shape, perm)
+        # The NPU takes the ceiling of the float16 input rounded to dlfloat16.
+        self._check_unary(
+            torch.ceil, base_shape, perm, atol=0, rtol=0, reference=lambda t: torch.ceil(to_dlfloat16(t)).to(t.dtype)
+        )
 
     @parametrize("base_shape,perm", PERMUTE_PATTERNS)
     def test_unary_floor_permute(self, base_shape, perm):

@@ -14,8 +14,12 @@ target's compute precision policy changes.
 
 import pytest
 import torch
-from torch.testing._internal.common_device_type import instantiate_device_type_tests
+from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
+
+from test.utils import DLFLOAT16_DIVISION_ACCURACY, to_dlfloat16
+
+from torch_rbln._internal.ops_utils import dispatches
 
 
 def _operands(numel, seed, lo=-4.0, hi=4.0):
@@ -99,6 +103,66 @@ class TestFp16Numerics(TestCase):
                 "tolerances and re-derive this bound."
             ),
         )
+
+    @pytest.mark.test_set_ci
+    @dtypes(torch.float16, torch.float32)
+    def test_values_reach_dlfloat16_as_to_dlfloat16_rounds(self, device, dtype):
+        """ceil on the device sees every float16 up to 2048 as ``to_dlfloat16`` rounds it.
+
+        A float16 keeps one mantissa bit more than dlfloat16, so every other value is a tie and the
+        ceiling tells the tie rules apart: 1022.5 -> 1022 to even, -> 1023 away from zero."""
+        if not dispatches(dtype):
+            self.skipTest(f"{dtype} runs on the host under this float32 precision")
+        magnitudes = torch.arange(0, 0x6801, dtype=torch.int16).view(torch.float16)
+        x = torch.cat([magnitudes, -magnitudes])
+        x = torch.cat([x, x[: -x.numel() % 64]]).reshape(-1, 64).to(dtype)
+        result = torch.ceil(x.to(device)).cpu()
+        expected = torch.ceil(to_dlfloat16(x)).to(dtype)
+        mismatched = result != expected
+        self.assertFalse(mismatched.any(), msg=f"first mismatches at {x[mismatched][:8].tolist()}")
+
+    @pytest.mark.test_set_ci
+    def test_division_stays_within_its_accuracy(self, device):
+        """The quotient the device computes from the dlfloat16 operands, which float16 holds exactly."""
+        gen = torch.Generator().manual_seed(10)
+        x = (torch.randn(4096, 64, generator=gen) * 8).to(torch.float16)
+        y = (torch.randn(4096, 64, generator=gen) + 0.1).to(torch.float16)
+        result = torch.div(x.to(device), y.to(device)).cpu().double()
+        exact = to_dlfloat16(x).double() / to_dlfloat16(y).double()
+        finite = torch.isfinite(result) & (exact != 0)
+        relative = ((result - exact).abs() / exact.abs())[finite].max().item()
+        self.assertLessEqual(
+            relative,
+            DLFLOAT16_DIVISION_ACCURACY,
+            msg=f"division is off by {relative / 2**-9:.2f} * 2**-9 relative, past DLFLOAT16_DIVISION_ACCURACY",
+        )
+
+
+class TestDlfloat16Emulation(TestCase):
+    ulp = 2.0**-9
+
+    def _assert_rounds(self, dtype, values, expected):
+        values = torch.tensor(values, dtype=dtype)
+        self.assertEqual(to_dlfloat16(values), torch.tensor(expected), atol=0, rtol=0)
+        self.assertEqual(to_dlfloat16(-values), -torch.tensor(expected), atol=0, rtol=0)
+
+    @pytest.mark.test_set_ci
+    def test_float16_ties_go_to_even(self):
+        self._assert_rounds(
+            torch.float16, [1022.5, 1023.5, 1 + self.ulp / 2, 1 + 3 * self.ulp / 2], [1022, 1024, 1, 1 + 2 * self.ulp]
+        )
+
+    @pytest.mark.test_set_ci
+    def test_float32_ties_go_away_from_zero(self):
+        self._assert_rounds(
+            torch.float32,
+            [1022.5, 1023.5, 1 + self.ulp / 2, 1 + self.ulp / 4, 1 + 3 * self.ulp / 4, 2.0**-31],
+            [1023, 1024, 1 + self.ulp, 1, 1 + self.ulp, 2.0**-31],
+        )
+
+    @pytest.mark.test_set_ci
+    def test_bfloat16_is_exact(self):
+        self._assert_rounds(torch.bfloat16, [1.5, 1.9921875], [1.5, 1.9921875])
 
 
 instantiate_device_type_tests(TestFp16Numerics, globals(), only_for="privateuse1")

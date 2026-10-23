@@ -49,6 +49,35 @@ def assert_device_computed_dtype(dtype: torch.dtype) -> None:
     assert dtype in advertised, f"{dtype} is not computed on the device; advertised: {advertised}"
 
 
+#: The relative accuracy of the NPU's division: two dlfloat16 ulps (the measured worst case is about 1.28 * 2**-9).
+DLFLOAT16_DIVISION_ACCURACY = 2.0**-8
+
+
+def to_dlfloat16(x: torch.Tensor) -> torch.Tensor:
+    """``x`` rounded to dlfloat16 (1 sign, 6 exponent and 9 mantissa bits) as the NPU rounds a value
+    of ``x.dtype`` it computes on, as float32.
+
+    Both round to nearest, but a float16 tie goes to even and a float32 tie away from zero; every
+    bfloat16 is exact. Covers dlfloat16's normal range, which holds every finite float16.
+    """
+    bits = x.float().view(torch.int32)
+    tie = (bits >> 14) & 1 if x.dtype == torch.float16 else 1
+    return ((bits + 0x1FFF + tie) & ~0x3FFF).view(torch.float32)
+
+
+def rounding_division_bounds(x: torch.Tensor, y: torch.Tensor, rounding_mode: str) -> tuple[torch.Tensor, torch.Tensor]:
+    """The interval ``(lo, hi)`` the NPU's ``torch.div(x, y, rounding_mode=rounding_mode)`` lies in.
+
+    The NPU divides the dlfloat16 operands to within ``DLFLOAT16_DIVISION_ACCURACY`` and rounds
+    the quotient as ``rounding_mode`` says, either before or after holding it in ``x.dtype``.
+    """
+    rounding = {"floor": torch.floor, "trunc": torch.trunc}[rounding_mode]
+    quotient = to_dlfloat16(x).double() / to_dlfloat16(y).double()
+    ends = (quotient * (1 - DLFLOAT16_DIVISION_ACCURACY), quotient * (1 + DLFLOAT16_DIVISION_ACCURACY))
+    candidates = torch.stack([rounding(held).to(x.dtype) for end in ends for held in (end, end.to(x.dtype).double())])
+    return candidates.amin(0), candidates.amax(0)
+
+
 def set_deterministic_seeds(seed: int):
     """Set deterministic seeds for reproducibility.
 

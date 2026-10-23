@@ -142,6 +142,8 @@ v2.set_float32_precision("exact")
 
 The same precision applies to what `torch.compile` builds for an rbln device: under `exact` the compiler keeps the fp32 ops of a graph on the host. fp16 and bf16 ops run on the NPU under either.
 
+Ops that round to an integer follow the device, not the CPU. `ceil` and `floor` round the input after it is rounded to dlfloat16 (to nearest, an fp16 tie to even and an fp32 tie away from zero, which moves a value by up to half a dlfloat16 step), and `div` with a `rounding_mode` rounds the quotient the NPU computes, which is within two dlfloat16 steps of the exact one. So a value or quotient that close to an integer can come out one away from the CPU's result.
+
 ## Device Mapping
 
 Each RBLN device is exactly one NPU: `rbln:N` is the N-th NPU that `RBLN_DEVICES` selects.
