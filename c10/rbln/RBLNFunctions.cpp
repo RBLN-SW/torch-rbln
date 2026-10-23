@@ -12,6 +12,7 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <set>
 #include <vector>
 
 #include <array>
@@ -1108,6 +1109,45 @@ void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies) {
   RBLN_LOG_DEBUG("Calling rbln_memcpy_v2v_multi: n_copies={}", copies.size());
   // Error message matched by `at::native::rbln::submit_or_fallback` to gate CPU fallback — keep stable.
   RBLN_CHECK(!::rbln::rbln_memcpy_v2v_multi(rbln_copies), "rbln_memcpy_v2v_multi failed");
+}
+
+void memcpy_v2v_strided_multi(const std::vector<V2VStridedCopyOp>& copies) {
+  if (copies.empty()) {
+    return;
+  }
+  RtTimer _rt(RT_V2V_MULTI);
+  std::vector<::rbln::V2VStridedCopy> rbln_copies;
+  rbln_copies.reserve(copies.size());
+  for (const auto& c : copies) {
+    RBLN_CHECK(c.chunk_bytes > 0 && c.count > 0, "memcpy_v2v_strided_multi: empty copy");
+    RBLN_CHECK(c.src != nullptr && c.dst != nullptr, "memcpy_v2v_strided_multi: null pointer");
+    RBLN_CHECK(c.src_stride >= 0 && c.dst_stride >= 0, "memcpy_v2v_strided_multi: negative stride");
+    rbln_copies.push_back(
+        {reinterpret_cast<uint64_t>(c.src),
+         reinterpret_cast<uint64_t>(c.dst),
+         static_cast<uint64_t>(c.chunk_bytes),
+         static_cast<uint64_t>(c.count),
+         static_cast<uint64_t>(c.src_stride),
+         static_cast<uint64_t>(c.dst_stride)});
+  }
+  RBLN_LOG_DEBUG("Calling rbln_memcpy_v2v_strided_multi: n_copies={}", copies.size());
+  // Same message as memcpy_v2v_multi: submit_or_fallback matches it to gate the CPU fallback.
+  RBLN_CHECK(!::rbln::rbln_memcpy_v2v_strided_multi(rbln_copies), "rbln_memcpy_v2v_multi failed");
+}
+
+bool memcpy_v2v_strided_supported(c10::DeviceIndex device) {
+  // Only a positive answer is cached: before the device has a context the runtime says false.
+  static std::mutex mu;
+  static std::set<c10::DeviceIndex> supported;
+  std::lock_guard<std::mutex> lock(mu);
+  if (supported.count(device) != 0) {
+    return true;
+  }
+  if (!::rbln::rbln_memcpy_v2v_strided_supported(static_cast<uint32_t>(device))) {
+    return false;
+  }
+  supported.insert(device);
+  return true;
 }
 
 void memcpy_h2v_multi(const std::vector<H2VCopyOp>& copies) {

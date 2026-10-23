@@ -3,6 +3,7 @@
 #include <c10/rbln/RBLNV2VBatch.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <numeric>
 #include <vector>
@@ -506,6 +507,42 @@ TEST_F(RBLNV2VBatchTest, StridedTwoDimRowMajor) {
   batch.submit();
 
   EXPECT_EQ(CopyToHost(dst, total), src_host);
+  c10::rbln::free(src);
+  c10::rbln::free(dst);
+}
+
+// Head-major [H, T, row] -> token-major [T, H, row] with 256 B rows: the shape
+// the runtime runs as one SCTR descriptor per head.
+TEST_F(RBLNV2VBatchTest, StridedHeadToTokenTranspose) {
+  constexpr int64_t heads = 4;
+  constexpr int64_t tokens = 64;
+  constexpr int64_t row = 256;
+  constexpr size_t total = static_cast<size_t>(heads * tokens * row);
+
+  std::vector<int8_t> src_host(total);
+  for (size_t i = 0; i < total; ++i)
+    src_host[i] = static_cast<int8_t>((i * 37 + (i >> 8) * 11) % 127);
+  std::vector<int8_t> dst_initial(total, 0);
+
+  void* src = AllocAndCopyFromHost(src_host.data(), total);
+  void* dst = AllocAndCopyFromHost(dst_initial.data(), total);
+
+  const std::vector<int64_t> outer_sizes = {heads, tokens};
+  const std::vector<int64_t> src_bs = {tokens * row, row};
+  const std::vector<int64_t> dst_bs = {row, heads * row};
+
+  c10::rbln::V2VBatch batch;
+  batch.enqueue_strided(dst, src, row, outer_sizes, src_bs, dst_bs);
+  EXPECT_EQ(batch.pending_count(), static_cast<size_t>(heads * tokens));
+  batch.submit();
+  EXPECT_EQ(batch.pending_count(), 0u);
+
+  std::vector<int8_t> expected(total);
+  for (int64_t h = 0; h < heads; ++h)
+    for (int64_t t = 0; t < tokens; ++t)
+      std::copy_n(&src_host[(h * tokens + t) * row], row, &expected[(t * heads + h) * row]);
+  EXPECT_EQ(CopyToHost(dst, total), expected);
+
   c10::rbln::free(src);
   c10::rbln::free(dst);
 }
