@@ -30,7 +30,10 @@ namespace torch_rbln::deferred {
  *
  * A run is deferred only when it does all its work on the device over tensors it binds in place;
  * otherwise, and while RBLN_LAUNCH_BLOCKING has each operation run as it is queued, the run is
- * queued after the segment runs.
+ * queued after the segment runs. A run of a function that computes by rows (TORCH_RBLN_EAGER_BUCKETS)
+ * over fewer rows gets results whose storage holds every row. A segment whose runs all compute by
+ * rows at one extent over one count of rows, and read one another's results by rows, compiles to a
+ * function that computes by rows too, or runs op by op when the compiler cannot make one.
  */
 std::optional<std::vector<at::Tensor>> submit(
     const std::shared_ptr<OpFunction>& function,

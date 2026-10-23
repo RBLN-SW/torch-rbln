@@ -214,6 +214,10 @@ An op is deferred only when its function does all its work on the device over te
 - Outside deploy mode, the NaN/Inf scan reads every op's inputs on the host before it runs, which runs what is deferred at each op: set `TORCH_RBLN_DEPLOY=ON` (or skip the scan with `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK=nan_inf`).
 - `RBLN_LAUNCH_BLOCKING` runs every op as it is called.
 
+An op that runs the function of its bucket (`TORCH_RBLN_EAGER_BUCKETS`) is deferred only when, besides the above, each input of the result's rank and leading extent has room for the bucket's rows, so that it needs no copy per call. Its results keep the storage of the bucket's rows, as they do when it runs as it is called. An in-place bucketed op takes a copy of its result, which runs the segment.
+
+A segment whose ops all run functions of one bucket over the same number of rows compiles once for the bucket and serves every extent of it, or keeps running op by op when its function cannot compute by rows. Any other segment compiles for the rows its ops were called with.
+
 Each stream defers its own ops, as CUDA orders work only within a stream: an op on one stream that reads what another wrote needs that order given, by an event or `wait_stream`, which runs the writer's deferred ops when it records the event.
 
 ## Device Mapping

@@ -29,6 +29,10 @@ def _deferring(limit: int = 32):
     return mock.patch.dict(os.environ, {"TORCH_RBLN_DEFER_OPS": str(limit)})
 
 
+def _bucketing():
+    return mock.patch.dict(os.environ, {"TORCH_RBLN_EAGER_BUCKETS": "1"})
+
+
 def _counts() -> dict:
     return dict(_C._deferred_stats())
 
@@ -236,6 +240,63 @@ class TestDeferredOps(TestCase):
         expected = (r + 1, (r + 1) * 3, (r + 1) * 3 - 1)
         for got, want in zip(results, expected):
             torch.testing.assert_close(got, want, **_TOLERANCE)
+
+    def _bucketed(self, rows):
+        # Results of bucketed ops, whose storage holds the rows of the bucket of six.
+        with _bucketing():
+            return self.xd[:rows].contiguous() * 1, self.yd[:rows].contiguous() * 1
+
+    def test_a_segment_of_one_bucket_compiles_once_for_the_bucket(self):
+        inputs = {rows: self._bucketed(rows) for rows in (5, 6)}
+        with _deferring(0):
+            expected = {rows: _chain(*inputs[rows], 6).cpu() for rows in inputs}
+        before = _counts()
+        _C._rt_timing_enable(True)
+        self.addCleanup(_C._rt_timing_enable, False)
+        _C._rt_timing_reset()
+        with _deferring(), _bucketing():
+            # Op by op the first time, compiled the second, and the same function for six rows.
+            for rows in (5, 5, 6):
+                result = _chain(*inputs[rows], 6)
+                self.assertEqual(result.untyped_storage().nbytes(), 6 * result[0].nbytes)
+                torch.testing.assert_close(result.cpu(), expected[rows], **_TOLERANCE)
+        change = _since(before)
+        self.assertEqual(change["deferred_ops"], 18)
+        self.assertEqual(change["compiled"], 1)
+        self.assertEqual(change["fused_runs"], 2)
+        # The runs write the results where they lie, through no device copy.
+        self.assertEqual(_C._rt_timing_get()[0][1], 0)
+
+    def test_a_segment_mixing_shapes_compiles_for_its_rows(self):
+        w = self.yd[0].contiguous()
+
+        def run(x):
+            # `w * 2` does not compute by rows, so the segment compiles for the rows it is handed.
+            return (x * 0.5 + w * 2).cpu()
+
+        inputs = {rows: self._bucketed(rows)[0] for rows in (5, 6)}
+        with _deferring(0):
+            expected = {rows: run(inputs[rows]) for rows in inputs}
+        before = _counts()
+        with _deferring(), _bucketing():
+            for rows in (5, 5, 6, 6):
+                torch.testing.assert_close(run(inputs[rows]), expected[rows], **_TOLERANCE)
+        change = _since(before)
+        self.assertEqual(change["deferred_ops"], 12)
+        self.assertEqual(change["compiled"], 2)
+        self.assertEqual(change["fused_runs"], 2)
+
+    def test_a_bucketed_op_over_an_input_without_room_runs_as_it_is_called(self):
+        # Five rows copied from the host take an allocation with no room for the bucket's six.
+        x = self.x[:5].to("rbln")
+        with _deferring(), _bucketing():
+            before = _counts()
+            s = torch.sigmoid(x)
+            self.assertEqual(_since(before)["deferred_ops"], 0)
+            t = torch.sigmoid(s)
+            self.assertEqual(_since(before)["deferred_ops"], 1)
+            result = t.cpu()
+        torch.testing.assert_close(result, torch.sigmoid(torch.sigmoid(self.x[:5])), **_TOLERANCE)
 
     def test_launch_blocking_runs_each_op_as_it_is_called(self):
         with mock.patch.dict(os.environ, {"TORCH_RBLN_DEFER_OPS": "32", "RBLN_LAUNCH_BLOCKING": "1"}):

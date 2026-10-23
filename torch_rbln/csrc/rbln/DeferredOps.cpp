@@ -5,14 +5,17 @@
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNRuntime.h>
 #include <c10/util/ScopeExit.h>
+#include <c10/util/accumulate.h>
 #include <rebel/v2/runtime/flags.h>
 
 #include <algorithm>
 #include <atomic>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace torch_rbln::deferred {
 
@@ -109,6 +112,8 @@ at::Tensor snapshot(const at::Tensor& tensor) {
 struct Op {
   std::shared_ptr<OpFunction> function;
   std::vector<Value> inputs{};
+  // The rows the call passes of the inputs its function computes by rows; 0 when it does not.
+  int64_t rows = 0;
 };
 
 struct Segment {
@@ -187,19 +192,17 @@ std::optional<std::vector<at::Tensor>> add(
   }
 
   // The results are made before the segment changes, so that a failed allocation leaves it as it was.
+  const int64_t rows = function->row_wise() ? function->rows_of(inputs).value() : 0;
+  const auto fewer = rows != 0 && rows < function->row_extent() ? std::optional<int64_t>(rows) : std::nullopt;
   const auto& outputs = function->outputs();
   std::vector<at::Tensor> results;
   results.reserve(outputs.size());
   for (size_t k = 0; k < outputs.size(); ++k) {
     const bool given = k < out.size() && out[k] && out[k]->defined();
-    results.push_back(
-        given ? *out[k]
-              : at::empty(
-                    outputs[k].shape,
-                    at::TensorOptions().dtype(outputs[k].dtype).device(c10::DeviceType::PrivateUse1, device_index)));
+    results.push_back(given ? *out[k] : function->empty_result(k, device_index, fewer));
   }
 
-  Op op{.function = function, .inputs = {}};
+  Op op{.function = function, .inputs = {}, .rows = rows};
   op.inputs.reserve(inputs.size());
   for (size_t i = 0; i < inputs.size(); ++i) {
     int index = find(segment, inputs[i], updates(i));
@@ -249,11 +252,13 @@ struct Left {
   bool read = false;
 };
 
-// What tells segments apart: their ops, what each reads, and the values they leave.
+// What tells segments apart: their ops, what each reads, the values they leave, and the leading extent
+// at which the segment's function runs each op (0 for an op that does not compute by rows).
 struct SegmentKey {
   std::vector<const OpFunction*> ops;
   std::vector<Value> reads;
   std::vector<Value> left;
+  std::vector<int64_t> extents;
   bool operator==(const SegmentKey&) const = default;
 };
 
@@ -269,6 +274,9 @@ struct SegmentKeyHash {
       for (const auto& v : *values) {
         mix((static_cast<size_t>(static_cast<uint32_t>(v.op)) << 32) | static_cast<uint32_t>(v.index));
       }
+    }
+    for (const auto extent : key.extents) {
+      mix(static_cast<size_t>(extent));
     }
     return h;
   }
@@ -375,8 +383,95 @@ void lock_without_gil(std::unique_lock<std::mutex>& lock) {
   }
 }
 
-// The function of the ops of `segment`, compiled to leave `left`; none when the compiler refuses.
-std::shared_ptr<OpFunction> compile(const Segment& segment, const std::vector<Left>& left) {
+// How a segment computes by rows as one function: at the extent of its ops' functions, over the
+// rows of the inputs `inputs` names.
+struct ByRows {
+  int64_t extent = 0;
+  std::vector<size_t> inputs{};
+};
+
+// How `segment` computes by rows, or none: each op computes by rows at one extent over one count of rows
+// and reads by rows what earlier ops made; every op reading a segment input reads it the same way.
+std::optional<ByRows> by_rows(const Segment& segment) {
+  const auto& first = segment.ops.front();
+  if (!first.function->row_wise()) {
+    return std::nullopt;
+  }
+  const int64_t extent = first.function->row_extent();
+  // By segment input: unread, read whole, or read by rows.
+  enum class Read : uint8_t { kNone, kWhole, kRows };
+  std::vector<Read> reads(segment.inputs.size(), Read::kNone);
+  for (const auto& op : segment.ops) {
+    if (!op.function->row_wise() || op.function->row_extent() != extent || op.rows != first.rows) {
+      return std::nullopt;
+    }
+    const auto& row_inputs = op.function->row_inputs();
+    for (size_t i = 0; i < op.inputs.size(); ++i) {
+      const bool by_rows = std::ranges::find(row_inputs, i) != row_inputs.end();
+      const auto& v = op.inputs[i];
+      if (v.op != Value::kInput) {
+        if (!by_rows) {
+          return std::nullopt;
+        }
+        continue;
+      }
+      auto& read = reads[v.index];
+      const auto now = by_rows ? Read::kRows : Read::kWhole;
+      if (read != Read::kNone && read != now) {
+        return std::nullopt;
+      }
+      read = now;
+    }
+  }
+  ByRows found{.extent = extent, .inputs = {}};
+  for (size_t i = 0; i < reads.size(); ++i) {
+    if (reads[i] == Read::kRows) {
+      found.inputs.push_back(i);
+    }
+  }
+  return found;
+}
+
+// `tensor` with a leading extent of `extent` over its storage, when the storage holds those rows.
+std::optional<at::Tensor> at_extent(const at::Tensor& tensor, int64_t extent) {
+  if (tensor.dim() == 0 || !tensor.is_contiguous()) {
+    return std::nullopt;
+  }
+  auto sizes = tensor.sizes().vec();
+  sizes.front() = extent;
+  const auto nbytes = (tensor.storage_offset() + c10::multiply_integers(sizes)) * tensor.element_size();
+  if (tensor.storage().nbytes() < static_cast<size_t>(nbytes)) {
+    return std::nullopt;
+  }
+  auto full = at::empty({0}, tensor.options());
+  full.set_(tensor.storage(), tensor.storage_offset(), sizes);
+  return full;
+}
+
+// The tensors a run of `function` over `inputs` writes `left` through: `left` itself, or, for a
+// call of fewer rows than the function computes, a tensor of every row over its storage.
+std::vector<std::optional<at::Tensor>> outs_for(
+    const OpFunction& function,
+    c10::ArrayRef<at::Tensor> inputs,
+    const std::vector<std::optional<at::Tensor>>& left) {
+  const auto rows = function.rows_of(inputs);
+  if (!rows || *rows == function.row_extent()) {
+    return left;
+  }
+  std::vector<std::optional<at::Tensor>> out;
+  out.reserve(left.size());
+  for (const auto& l : left) {
+    out.push_back(l ? at_extent(*l, function.row_extent()) : std::nullopt);
+  }
+  return out;
+}
+
+// The function of the ops of `segment`, compiled to leave `left`, by rows as `rows` says; none when
+// the compiler refuses it.
+std::shared_ptr<OpFunction> compile(
+    const Segment& segment,
+    const std::vector<Left>& left,
+    const std::optional<ByRows>& rows) {
   py::gil_scoped_acquire gil;
   py::list functions, reads, values, inputs;
   for (const auto& op : segment.ops) {
@@ -393,22 +488,39 @@ std::shared_ptr<OpFunction> compile(const Segment& segment, const std::vector<Le
   for (const auto& input : segment.inputs) {
     inputs.append(py::cast(input));
   }
+  py::list by_rows_inputs;
+  for (const auto input : rows ? rows->inputs : std::vector<size_t>{}) {
+    by_rows_inputs.append(input);
+  }
   auto function = py::module_::import("torch_rbln._internal.compile_cache")
-                      .attr("compile_segment")(functions, reads, values, inputs, segment.stream->device_index());
+                      .attr("compile_segment")(
+                          functions,
+                          reads,
+                          values,
+                          inputs,
+                          segment.stream->device_index(),
+                          by_rows_inputs,
+                          rows ? rows->extent : 0);
   return function.is_none() ? nullptr : function.cast<std::shared_ptr<OpFunction>>();
 }
 
+// `to` holds `from` when both view the same bytes alike, as a run that wrote `to` in place leaves them.
 void copy_unless_same(const at::Tensor& to, const at::Tensor& from) {
-  if (!to.is_same(from)) {
+  const bool same = to.is_same(from) ||
+      (to.data_ptr() == from.data_ptr() && to.dtype() == from.dtype() && to.sizes() == from.sizes() &&
+       to.strides() == from.strides());
+  if (!same) {
     to.copy_(from);
   }
 }
 
 void run_fused(OpFunction& function, const Segment& segment, const std::vector<Left>& left) {
-  std::vector<std::optional<at::Tensor>> out;
+  std::vector<std::optional<at::Tensor>> written;
+  written.reserve(left.size());
   for (const auto& l : left) {
-    out.push_back(l.read ? std::nullopt : std::optional<at::Tensor>(l.tensor));
+    written.push_back(l.read ? std::nullopt : std::optional<at::Tensor>(l.tensor));
   }
+  auto out = outs_for(function, segment.inputs, written);
   auto results = function.run(segment.inputs, out);
   if (!results) {
     results = function.run(segment.inputs);
@@ -436,14 +548,14 @@ void run_each(const Segment& segment, const std::vector<Left>& left) {
     for (const auto& v : op.inputs) {
       inputs.push_back(v.op == Value::kInput ? segment.inputs[v.index] : results[v.op][v.index]);
     }
-    std::vector<std::optional<at::Tensor>> out(op.function->outputs().size());
-    for (size_t k = 0; k < out.size(); ++k) {
+    std::vector<std::optional<at::Tensor>> written(op.function->outputs().size());
+    for (size_t k = 0; k < written.size(); ++k) {
       auto it = left_by_value.find({static_cast<int32_t>(j), static_cast<int32_t>(k)});
       if (it != left_by_value.end() && !it->second->read) {
-        out[k] = it->second->tensor;
+        written[k] = it->second->tensor;
       }
     }
-    auto r = op.function->run(inputs, out);
+    auto r = op.function->run(inputs, outs_for(*op.function, inputs, written));
     if (!r) {
       r = op.function->run(inputs);
     }
@@ -482,10 +594,12 @@ void execute(const Segment& segment) {
     stat_op_runs.fetch_add(1, std::memory_order_relaxed);
     return;
   }
+  const auto rows = by_rows(segment);
   SegmentKey key;
   for (const auto& op : segment.ops) {
     key.ops.push_back(op.function.get());
     key.reads.insert(key.reads.end(), op.inputs.begin(), op.inputs.end());
+    key.extents.push_back(rows ? rows->extent : op.rows);
   }
   for (const auto& l : left) {
     key.left.push_back(l.value);
@@ -494,7 +608,7 @@ void execute(const Segment& segment) {
   auto function = seen.function;
   if (!function && !seen.refused && seen.runs >= kRunsBeforeFusing && Py_IsInitialized()) {
     try {
-      function = compile(segment, left);
+      function = compile(segment, left, rows);
     } catch (...) {
       // A compile cut short, as by KeyboardInterrupt, still leaves the ops to run.
       run_each(segment, left);

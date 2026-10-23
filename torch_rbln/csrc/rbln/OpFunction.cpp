@@ -419,8 +419,36 @@ std::optional<c10::rbln::Location> OpFunction::in_place(
   return found->location;
 }
 
+std::optional<int64_t> OpFunction::rows_of(c10::ArrayRef<at::Tensor> inputs) const {
+  if (!row_wise() || inputs.size() != num_inputs_) {
+    return std::nullopt;
+  }
+  const auto& first = inputs[row_inputs_.front()];
+  if (!first.defined() || first.dim() == 0) {
+    return std::nullopt;
+  }
+  const int64_t count = first.size(0);
+  for (const auto input : row_inputs_) {
+    const auto& tensor = inputs[input];
+    if (!tensor.defined() || tensor.dim() == 0 || tensor.size(0) != count) {
+      return std::nullopt;
+    }
+  }
+  if (count < 1 || count > row_extent_) {
+    return std::nullopt;
+  }
+  return count;
+}
+
 void OpFunction::note_run() {
   last_run_.store(run_clock.fetch_add(1, std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+}
+
+at::Tensor OpFunction::empty_result(size_t k, c10::DeviceIndex device_index, std::optional<int64_t> rows) const {
+  auto tensor = at::empty(
+      outputs_[k].shape,
+      at::TensorOptions().dtype(outputs_[k].dtype).device(c10::DeviceType::PrivateUse1, device_index));
+  return rows ? first_rows(tensor, *rows) : tensor;
 }
 
 bool OpFunction::binds_in_place(
@@ -430,8 +458,16 @@ bool OpFunction::binds_in_place(
   if (inputs.size() != num_inputs_ || out.size() > results_.size()) {
     return false;
   }
+  std::optional<int64_t> rows;
+  if (row_wise()) {
+    rows = rows_of(inputs);
+    if (!rows) {
+      return false;
+    }
+  }
+  const auto extent = rows && *rows < row_extent_ ? std::optional<int64_t>(row_extent_) : std::nullopt;
   for (const auto& binding : bindings_) {
-    if (!in_place(inputs[binding.input], binding.arg, device_index)) {
+    if (!in_place(inputs[binding.input], binding.arg, device_index, binding.row ? extent : std::nullopt)) {
       return false;
     }
   }
@@ -730,22 +766,12 @@ std::optional<std::vector<at::Tensor>> OpFunction::run(
   }
   // The call's rows along the results' leading axis, when fewer than the function computes.
   std::optional<int64_t> rows;
-  if (!row_inputs_.empty()) {
-    const auto& first = inputs[row_inputs_.front()];
-    if (!first.defined() || first.dim() == 0) {
+  if (row_wise()) {
+    const auto count = rows_of(inputs);
+    if (!count) {
       return std::nullopt;
     }
-    const int64_t count = first.size(0);
-    for (const auto input : row_inputs_) {
-      const auto& tensor = inputs[input];
-      if (!tensor.defined() || tensor.dim() == 0 || tensor.size(0) != count) {
-        return std::nullopt;
-      }
-    }
-    if (count < 1 || count > row_extent_) {
-      return std::nullopt;
-    }
-    if (count < row_extent_) {
+    if (*count < row_extent_) {
       rows = count;
     }
   }
@@ -858,7 +884,8 @@ std::optional<std::vector<at::Tensor>> OpFunction::run(
       continue;
     }
     // A tensor of the call's rows does not hold the rows the run computes past them.
-    if (rows && k < out.size() && out[k].has_value() && out[k]->defined()) {
+    if (rows && k < out.size() && out[k].has_value() && out[k]->defined() &&
+        out[k]->sizes() != c10::IntArrayRef(outputs_[k].shape)) {
       return std::nullopt;
     }
     if (result.after) {

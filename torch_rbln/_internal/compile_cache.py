@@ -26,7 +26,7 @@ extent.
 
 The eager ops a stream defers (TORCH_RBLN_DEFER_OPS) can run as one function:
 ``compile_segment`` captures their modules, in order, as one module (``_Segment``)
-and compiles it.
+and compiles it, by rows when every op of the segment computes by rows.
 """
 
 from __future__ import annotations
@@ -448,11 +448,17 @@ def compile_segment(
     left: list[tuple[int, int]],
     inputs: list[torch.Tensor],
     device_index: int,
+    rows: list[int],
+    extent: int,
 ) -> Any:
     """The function of a segment of deferred ops, a ``torch_rbln._C._OpFunction``
     over ``inputs`` that returns the values ``left`` names (see ``_Segment``),
     compiled from the modules of the ops whose functions ``functions`` are; None
-    when the compiler refuses it, or an op is no longer one the process keeps."""
+    when the compiler refuses it, or an op is no longer one the process keeps.
+
+    With ``rows``, the inputs at those positions stand at ``extent`` rows, and
+    the function computes by rows over them (see ``_C._OpFunction``'s ``rows``);
+    None when it cannot."""
     from rebel import v2
 
     by_function = {id(e.function): e for e in list(_compiled_op_cache.values()) if isinstance(e, CompiledOp)}
@@ -460,15 +466,22 @@ def compile_segment(
     if any(op is None for op in ops):
         return None
     module = _Segment([op.module for op in ops], reads, left).eval()
-    types = {f"arg{i}": v2.TensorType(t.shape, t.dtype) for i, t in enumerate(inputs)}
+    types = {
+        f"arg{i}": v2.TensorType((extent, *t.shape[1:]) if i in rows else t.shape, t.dtype)
+        for i, t in enumerate(inputs)
+    }
     try:
         graph = v2.frontend.capture(module, types)
         fn = compile_logical(graph, _npu(device_index))
-        return _C._OpFunction(fn.to_bytes(), list(types), _state(module, graph))
+        function = _C._OpFunction(fn.to_bytes(), list(types), _state(module, graph), rows=rows)
     except Exception as e:
         # Whatever keeps the segment from compiling, its ops run one by one without its function.
         rbln_log_debug(f"a segment of {len(ops)} deferred ops runs op by op: the compiler refuses it ({e})")
         return None
+    if rows and not function.row_wise:
+        rbln_log_debug(f"a segment of {len(ops)} deferred ops runs op by op: its function does not compute by rows")
+        return None
+    return function
 
 
 def clear_rbln_compile_cache() -> None:

@@ -76,6 +76,20 @@ class OpFunction {
   bool row_wise() const {
     return !row_inputs_.empty();
   }
+  // The inputs a call may pass fewer rows of, and the rows the function computes, when it is
+  // row-wise.
+  const std::vector<size_t>& row_inputs() const {
+    return row_inputs_;
+  }
+  int64_t row_extent() const {
+    return row_extent_;
+  }
+  // The rows a call over `inputs` passes of `row_inputs`, one count for all and no more than the
+  // function computes; none when the function is not row-wise or the inputs pass no such count.
+  std::optional<int64_t> rows_of(c10::ArrayRef<at::Tensor> inputs) const;
+  // A new tensor for result `k` on device `device_index`, as a run makes it: with `rows`, its first
+  // `rows` rows over the storage of every row the function computes.
+  at::Tensor empty_result(size_t k, c10::DeviceIndex device_index, std::optional<int64_t> rows = std::nullopt) const;
   // The inputs a run writes in place, which no result names.
   const std::vector<size_t>& updated_inputs() const {
     return updated_inputs_;
@@ -102,7 +116,9 @@ class OpFunction {
   /**
    * @brief Runs over `inputs`, writing the tensor of `out` given for a result and a new one for
    * each other result, and returns the results; none when a tensor does not hold what the
-   * function takes where the function takes it.
+   * function takes where the function takes it. A call of fewer rows (see `rows`) writes a tensor
+   * of `out` only when that tensor has every row the function computes, and returns the first rows
+   * of each result.
    */
   std::optional<std::vector<at::Tensor>> run(
       c10::ArrayRef<at::Tensor> inputs,
@@ -118,7 +134,8 @@ class OpFunction {
 
   /**
    * @brief Whether a run on device `device_index` over `inputs`, writing the tensors of `out`
-   * given, binds each of them in place, through no copy.
+   * given, binds each of them in place, through no copy. In a call of fewer rows (see `rows`), an
+   * input read by rows binds over the rows past its own as well, as `run` binds it.
    */
   bool binds_in_place(
       c10::ArrayRef<at::Tensor> inputs,
