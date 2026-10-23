@@ -89,9 +89,13 @@ def _collective_group(gm: torch.fx.GraphModule) -> str | None:
 
 
 class CollectivesDiffer(RuntimeError):
-    """The ranks of a process group compiled graphs whose collectives differ. Run on the CPU
-    instead, the graphs would make the same collectives through the group, so no fallback takes
-    their place."""
+    """The ranks of a process group compiled graphs whose collectives differ."""
+
+
+class UnloadableGraph(RuntimeError):
+    """A compiled graph whose function cannot serve a call: it fails to load, or the call's state
+    or tensors are not what it was built for. A run on the CPU may take its place, as it may a
+    compile error's; an error from running the function may not."""
 
 
 _checks_lock = threading.Lock()
@@ -190,21 +194,27 @@ class CompiledGraph:
     def _write_state(self, state: dict[str, torch.Tensor]) -> None:
         now = {name: (t.data_ptr(), t._version) for name, t in state.items()}
         changed = {name: state[name] for name, seen in now.items() if self._seen.get(name) != seen}
+        try:
+            self._fn.check_specializations(changed)
+        except ValueError as error:
+            raise UnloadableGraph(str(error)) from error
         if self._function is None:
-            self._fn.check_specializations(changed)
-            self._function = _C._OpFunction(
-                self._fn.to_bytes(),
-                self._inputs,
-                {**self._constants, **changed},
-                self._host_results,
-            )
-            if self._group is not None:
-                from torch.distributed import distributed_c10d
+            try:
+                self._function = _C._OpFunction(
+                    self._fn.to_bytes(),
+                    self._inputs,
+                    {**self._constants, **changed},
+                    self._host_results,
+                )
+                if self._group is not None:
+                    from torch.distributed import distributed_c10d
 
-                process_group = distributed_c10d._resolve_process_group(self._group)
-                self._function.set_communicator(process_group._get_backend(torch.device("rbln")))
+                    process_group = distributed_c10d._resolve_process_group(self._group)
+                    self._function.set_communicator(process_group._get_backend(torch.device("rbln")))
+            except (RuntimeError, ValueError) as error:
+                self._function = None
+                raise UnloadableGraph(f"the compiled graph cannot be loaded: {error}") from error
         elif changed:
-            self._fn.check_specializations(changed)
             made = {name: t for name, t in changed.items() if name in self._sources}
             if made:
                 self._function.set_state(made)
@@ -223,7 +233,7 @@ class CompiledGraph:
         inputs = [t for (kind, _), t in zip(self._roles, args) if kind == "input"]
         results = self._function.run(inputs)
         if results is None:
-            raise RuntimeError("the tensors of the call do not hold what the graph was compiled for")
+            raise UnloadableGraph("the tensors of the call do not hold what the graph was compiled for")
         for input_index, result in self._written:
             inputs[input_index].copy_(results[result])
         return tuple(results[: self._returned])

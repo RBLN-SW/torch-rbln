@@ -85,6 +85,17 @@ def _isolate_chromium_event_state():
     return _restore
 
 
+def failed_to_build(error):
+    """Whether ``error`` says a graph could not be compiled or loaded, which a run on the CPU may
+    take the place of. An error from running the graph, a failed device job among them, reaches
+    the caller instead: running it again on the CPU would hide it."""
+    from torch._dynamo.exc import TorchDynamoException
+
+    from torch_rbln._internal.graph_backend import UnloadableGraph
+
+    return isinstance(error, (TorchDynamoException, UnloadableGraph))
+
+
 def is_recompile_limit_exception(exception):
     """Check if exception is FailOnRecompileLimitHit."""
     try:
@@ -164,7 +175,8 @@ class CompiledFunctionWrapper:
 
     This wrapper provides the following features:
 
-    1. **CPU Fallback**: Falls back to CPU execution when compilation fails (in non-debug mode).
+    1. **CPU Fallback**: Falls back to CPU execution when a graph fails to compile or load (unless
+       ``TORCH_RBLN_DISABLE_FALLBACK`` disables it). An error from running a graph is raised.
 
     2. **Recompile Limit Handling**: Handles FailOnRecompileLimitHit by resetting dynamo
        and retrying.
@@ -246,9 +258,7 @@ class CompiledFunctionWrapper:
 
     def _attempt_cpu_fallback_or_raise(self, error, args, kwargs):
         """Attempt CPU fallback or re-raise error based on fallback configuration."""
-        from torch_rbln._internal.graph_backend import CollectivesDiffer
-
-        if raised_for_disabled_fallback(error) or isinstance(error, CollectivesDiffer):
+        if raised_for_disabled_fallback(error):
             raise error
         if is_fallback_disabled("compile_error"):
             rbln_log_error(
@@ -265,14 +275,6 @@ class CompiledFunctionWrapper:
         )
         original_device = extract_device_from_inputs(*args, **kwargs)
         return attempt_cpu_fallback(self._original_fn, args, kwargs, original_device)
-
-    def _handle_compile_exception(self, error, args, kwargs, *, is_recompile_limit, attempt):
-        """Non-RuntimeError path: recompile-limit retries, else CPU fallback or re-raise."""
-        if is_recompile_limit:
-            torch._dynamo.reset()
-            if attempt < self._max_retries:
-                return None  # retry same compiled_fn after dynamo reset
-        return self._attempt_cpu_fallback_or_raise(error, args, kwargs)
 
     def __call__(self, *args, **kwargs):
         """Execute the compiled function with reentrancy guard and CPU fallback."""
@@ -295,19 +297,14 @@ class CompiledFunctionWrapper:
         for attempt in range(self._max_retries + 1):
             try:
                 return self._compiled_fn(*args, **kwargs)
-            except RuntimeError as e:
-                return self._attempt_cpu_fallback_or_raise(e, args, kwargs)
             except Exception as e:
-                result = self._handle_compile_exception(
-                    e,
-                    args,
-                    kwargs,
-                    is_recompile_limit=is_recompile_limit_exception(e),
-                    attempt=attempt,
-                )
-                if result is None:
-                    continue
-                return result
+                if is_recompile_limit_exception(e):
+                    torch._dynamo.reset()
+                    if attempt < self._max_retries:
+                        continue
+                elif not failed_to_build(e):
+                    raise
+                return self._attempt_cpu_fallback_or_raise(e, args, kwargs)
 
 
 def is_rbln_backend(backend):

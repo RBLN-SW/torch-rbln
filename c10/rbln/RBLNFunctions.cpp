@@ -15,6 +15,7 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <stdexcept>
 #include <vector>
 
 #include <array>
@@ -667,12 +668,14 @@ void event_synchronize(uint64_t event) {
   }
 }
 
-// A failure keeps the "<name> failed" message at::native::rbln::submit_or_fallback matches to
-// route a rejected batch to its CPU fallback.
+// A refused batch (a check here, or the runtime's std::logic_error) keeps the "<name> failed" message that
+// at::native::rbln::submit_or_fallback routes to the CPU; a failed device job propagates, as a rerun would hide it.
 #define RBLN_BATCH(name, body)                                   \
   try {                                                          \
     body;                                                        \
-  } catch (const std::exception& e) {                            \
+  } catch (const c10::Error& e) {                                \
+    RBLN_CHECK(false, name " failed: {}", first_line(e.what())); \
+  } catch (const std::logic_error& e) {                          \
     RBLN_CHECK(false, name " failed: {}", first_line(e.what())); \
   }
 

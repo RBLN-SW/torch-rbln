@@ -1,6 +1,10 @@
+import ctypes.util
 import multiprocessing
 import os
 import random
+import shutil
+import subprocess
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -167,3 +171,81 @@ def run_in_isolated_process(func, *args):
     p.join()
     if p.exitcode != 0:
         raise RuntimeError(f"{func.__name__} failed with exit code {p.exitcode}")
+
+
+_FAILING_DRIVER_SOURCE = r"""
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <errno.h>
+#include <stdint.h>
+
+struct RblnContext;
+
+static int armed, doomed;
+static struct RblnContext* doomed_ctx;
+static uint64_t doomed_seq;
+
+static void* real(const char* name) {
+  static void* driver;
+  if (!driver) driver = dlopen(DRIVER, RTLD_NOW | RTLD_NOLOAD);
+  return dlsym(driver, name);
+}
+
+void rbln_test_fail_next_job(void) { __atomic_store_n(&armed, 1, __ATOMIC_SEQ_CST); }
+
+int rblnSubmitJob(struct RblnContext* ctx, void* cbs, uint32_t cb_cnt, const void* deps,
+                  uint32_t dep_cnt, uint64_t* seq) {
+  int (*submit)(struct RblnContext*, void*, uint32_t, const void*, uint32_t, uint64_t*) =
+      real("rblnSubmitJob");
+  int rc = submit(ctx, cbs, cb_cnt, deps, dep_cnt, seq);
+  if (rc == 0 && __atomic_exchange_n(&armed, 0, __ATOMIC_SEQ_CST)) {
+    doomed_ctx = ctx;
+    doomed_seq = *seq;
+    __atomic_store_n(&doomed, 1, __ATOMIC_SEQ_CST);
+  }
+  return rc;
+}
+
+int rblnWaitJob(struct RblnContext* ctx, uint64_t seq, uint32_t timeout_us) {
+  int (*wait)(struct RblnContext*, uint64_t, uint32_t) = real("rblnWaitJob");
+  int rc = wait(ctx, seq, timeout_us);
+  if (rc == 0 && timeout_us != 0 && __atomic_load_n(&doomed, __ATOMIC_SEQ_CST) && ctx == doomed_ctx &&
+      seq >= doomed_seq && __atomic_exchange_n(&doomed, 0, __ATOMIC_SEQ_CST))
+    return -EIO;
+  return rc;
+}
+"""
+
+
+def build_failing_driver(directory: Path) -> Path:
+    """Builds into ``directory`` the NPU driver with its job submission and blocking wait wrapped,
+    for ``RBLN_THUNK_LIB`` of a process that has not used a device yet. Once the process calls
+    ``rbln_test_fail_next_job()`` through ``ctypes.CDLL`` of the same path, the next job submitted
+    is reported failed to the first blocking wait for it or a later job of its context; the job
+    itself runs, so the device is left as a good job leaves it. Skips the test where no C compiler
+    or NPU driver is found."""
+    compiler = shutil.which("cc")
+    driver = ctypes.util.find_library("rbln-thunk")
+    if compiler is None or driver is None:
+        pytest.skip("building the failing driver needs a C compiler and the NPU driver library")
+    source = directory / "failing_driver.c"
+    source.write_text(_FAILING_DRIVER_SOURCE)
+    library = directory / "libfailing_driver.so"
+    subprocess.run(
+        [
+            compiler,
+            "-shared",
+            "-fPIC",
+            "-O2",
+            f'-DDRIVER="{driver}"',
+            "-o",
+            str(library),
+            str(source),
+            "-Wl,--no-as-needed",
+            f"-l:{driver}",
+            "-ldl",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return library

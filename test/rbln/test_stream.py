@@ -14,13 +14,15 @@ RBLN_LAUNCH_BLOCKING, under which a stream is done with an op once it returns.
 import os
 import subprocess
 import sys
+import tempfile
 import textwrap
+from pathlib import Path
 
 import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from test.utils import assert_device_computed_dtype
+from test.utils import assert_device_computed_dtype, build_failing_driver
 
 
 # The device computes fp16 matmuls in a narrower custom float, so results are compared on
@@ -228,6 +230,38 @@ class TestStream(TestCase):
         self.assertLess(rel_err(c1.cpu(), a1_cpu @ b1_cpu), REL_TOL)
 
 
+# An eager op, a graph and a batched copy, each run once, then run with a device job that fails;
+# prints where each failure is raised: at the call, at the synchronize after it, or nowhere.
+_FAILED_RUNS = f"""
+    import ctypes, os, sys
+    sys.path.insert(0, {_PROJECT_ROOT!r})
+    import torch
+    import torch_rbln
+
+    driver = ctypes.CDLL(os.environ["RBLN_THUNK_LIB"])
+    a = torch.randn(64, 64, dtype=torch.float16).to("rbln")
+    graph = torch.compile(lambda x: (x @ x).relu(), backend="rbln")
+    calls = {{"eager": lambda: a * 2, "graph": lambda: graph(a), "copy": lambda: torch.cat([a, a])}}
+    for call in calls.values():
+        call()
+    torch.rbln.synchronize()
+    for name, call in calls.items():
+        driver.rbln_test_fail_next_job()
+        try:
+            call()
+        except RuntimeError as error:
+            assert "did not complete" in str(error), error
+            print("raised", name, "call")
+            continue
+        try:
+            torch.rbln.synchronize()
+            print("raised", name, "nowhere")
+        except RuntimeError as error:
+            assert "did not complete" in str(error), error
+            print("raised", name, "synchronize")
+"""
+
+
 @pytest.mark.test_set_ci
 class TestLaunchBlocking(TestCase):
     def test_a_stream_is_idle_once_its_op_returns(self):
@@ -243,6 +277,34 @@ class TestLaunchBlocking(TestCase):
         # The runtime logs to stdout as well.
         (line,) = (line for line in result.stdout.splitlines() if line.startswith("idle and right "))
         self.assertEqual(line, "idle and right True True")
+
+    def _where_failed_runs_raise(self, launch_blocking: str) -> dict[str, str]:
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        env = {k: v for k, v in os.environ.items() if k != "TORCH_RBLN_DISABLE_FALLBACK"}
+        # Deploy mode leaves out the NaN/Inf scan of an op's inputs, which waits for the device.
+        env.update(
+            RBLN_THUNK_LIB=str(build_failing_driver(directory)),
+            RBLN_LAUNCH_BLOCKING=launch_blocking,
+            TORCH_RBLN_DEPLOY="ON",
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", textwrap.dedent(_FAILED_RUNS)],
+            cwd=_PROJECT_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return dict(line.split()[1:] for line in result.stdout.splitlines() if line.startswith("raised "))
+
+    def test_a_failed_device_run_raises_where_the_call_queued_it(self):
+        """A failed device job of an eager op, a graph or a copy is raised, never run again on the
+        CPU, with the CPU fallbacks on as they are by default. A copy waits for its jobs either way."""
+        self.assertEqual(self._where_failed_runs_raise("1"), {"eager": "call", "graph": "call", "copy": "call"})
+        self.assertEqual(
+            self._where_failed_runs_raise("0"), {"eager": "synchronize", "graph": "synchronize", "copy": "call"}
+        )
 
 
 if __name__ == "__main__":

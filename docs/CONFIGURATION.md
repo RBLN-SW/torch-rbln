@@ -57,14 +57,16 @@ The variable is read on every fallback check, so changes take effect immediately
 export TORCH_RBLN_DISABLE_FALLBACK=compile_error,unsupported_op
 ```
 
+A fallback takes the place of a graph or op that could not be built, loaded or accepted, never of one that ran and failed: an error from running a graph, an eager op or a copy, such as a failed device job, is raised whatever this variable holds.
+
 The value is a **comma-separated list** of fallback categories to disable:
 
 | Category             | Fallback behavior (default)                              | When disabled                                         |
 |----------------------|----------------------------------------------------------|-------------------------------------------------------|
-| `compile_error`      | A graph or eager op the compiler cannot build runs on CPU | Raises the compilation error directly                 |
+| `compile_error`      | A graph or eager op the compiler cannot build, or a graph that cannot load, runs on CPU | Raises the compilation error directly                 |
 | `host_round_trip`    | An input a compiled function writes in place, which the device holds otherwise than torch holds the tensor, goes through the host on every run | Raises when the function is first run, naming the input |
 | `non_blocking_copy`  | Non-blocking copy silently falls back to blocking copy   | Raises an error instead of degrading to blocking copy |
-| `strided_copy_error` | Batched strided copy failures fall back to CPU execution | Raises the underlying error directly                  |
+| `strided_copy_error` | A batched strided copy the runtime refuses falls back to CPU execution | Raises the underlying error directly                  |
 | `unsupported_op`     | Unsupported RBLN ops silently fall back to CPU execution | Raises an error listing the unsupported operator      |
 | `all`                | —                                                        | Disables **all** of the above fallbacks               |
 

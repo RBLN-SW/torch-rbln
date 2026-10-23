@@ -9,12 +9,14 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from torch._dynamo.exc import BackendCompilerFailed
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 import torch_rbln._internal.register_custom_ops as register_custom_ops
 from test.utils import requires_devices
 from torch_rbln._internal.compile_cache import clear_rbln_compile_cache, compiled_op
+from torch_rbln._internal.graph_backend import UnloadableGraph
 from torch_rbln._internal.monkey_patches import patch_torch_compile, remove_all_patches
 from torch_rbln._internal.ops_utils import extract_device_id_from_inputs
 from torch_rbln._internal.torch_compile_patch_helpers import (
@@ -24,6 +26,11 @@ from torch_rbln._internal.torch_compile_patch_helpers import (
     extract_device_from_inputs,
     is_rbln_backend,
 )
+
+
+def _compile_failed(message):
+    """What Dynamo raises when the backend fails to compile a graph."""
+    return BackendCompilerFailed(Mock(__name__="rbln"), RuntimeError(message), None)
 
 
 @pytest.mark.test_set_ci
@@ -259,7 +266,7 @@ class TestCompiledFunctionWrapper(TestCase):
         """Test that wrapper falls back to CPU on error."""
 
         def mock_compiled_fn(x):
-            raise RuntimeError("Compilation error")
+            raise _compile_failed("Compilation error")
 
         def original_fn(x):
             return x + 1
@@ -277,7 +284,7 @@ class TestCompiledFunctionWrapper(TestCase):
         """Test fallback chooses the RBLN device and restores nested outputs recursively."""
 
         def mock_compiled_fn(cpu_tensor, rbln_tensor):
-            raise RuntimeError("Compilation error")
+            raise _compile_failed("Compilation error")
 
         def original_fn(cpu_tensor, rbln_tensor):
             return {
@@ -303,7 +310,7 @@ class TestCompiledFunctionWrapper(TestCase):
         """Test that RBLN fallback refuses CPU-only tensor inputs."""
 
         def mock_compiled_fn(cpu_tensor):
-            raise RuntimeError("Compilation error")
+            raise _compile_failed("Compilation error")
 
         def original_fn(cpu_tensor):
             return cpu_tensor + 1
@@ -321,7 +328,7 @@ class TestCompiledFunctionWrapper(TestCase):
         """Test that wrapper raises exception when 'compile_error' fallback is disabled."""
 
         def mock_compiled_fn(x):
-            raise RuntimeError("Compilation error")
+            raise _compile_failed("Compilation error")
 
         def original_fn(x):
             return x + 1
@@ -333,6 +340,30 @@ class TestCompiledFunctionWrapper(TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 wrapper(t)
             self.assertIn("Compilation error", str(ctx.exception))
+
+    def test_wrapper_falls_back_when_a_graph_cannot_load(self):
+        def mock_compiled_fn(x):
+            raise UnloadableGraph("the compiled graph cannot be loaded")
+
+        t = torch.tensor([1.0, 2.0], device="rbln:0")
+        wrapper = CompiledFunctionWrapper(mock_compiled_fn, lambda x: x + 1)
+        with patch("torch_rbln._internal.torch_compile_patch_helpers.is_fallback_disabled", return_value=False):
+            self.assertEqual(wrapper(t).tolist(), [2.0, 3.0])
+
+    def test_wrapper_raises_an_error_from_running_a_graph(self):
+        """A failed run, such as a failed device job, reaches the caller rather than running again
+        on the CPU, with the fallback enabled."""
+
+        def mock_compiled_fn(x):
+            raise RuntimeError("a job on device 0 did not complete")
+
+        original_fn = Mock(side_effect=lambda x: x + 1)
+        t = torch.tensor([1.0], device="rbln:0")
+        wrapper = CompiledFunctionWrapper(mock_compiled_fn, original_fn)
+        with patch("torch_rbln._internal.torch_compile_patch_helpers.is_fallback_disabled", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "did not complete"):
+                wrapper(t)
+        original_fn.assert_not_called()
 
     def test_wrapper_recompile_retry_success(self):
         """Test that wrapper retries on recompile limit and succeeds."""
