@@ -62,9 +62,9 @@ struct RBLNGuardImpl final : public c10::impl::DeviceGuardImplInterface {
    * torch.accelerator.get_device_capability).
    *
    * supported_dtypes is the device's allocation/conversion capability, not
-   * native op dispatch. RBLN advertises fp16/bf16 (kCapabilityDtypes) — the
-   * only dtypes resident in device memory; other dtypes are CPU-backed even
-   * under device="rbln".
+   * native op dispatch. RBLN advertises fp16/bf16/fp32 (kCapabilityDtypes) —
+   * the only dtypes resident in device memory; other dtypes are CPU-backed
+   * even under device="rbln".
    */
   c10::DeviceCapability getDeviceCapability(c10::Device device) const override;
 

@@ -118,6 +118,9 @@ c10::DeviceCapability RBLNGuardImpl::getDeviceCapability(
       case c10::kBFloat16:
         capability.capability_data.supported_scalar_types.has_BFloat16 = 1;
         break;
+      case c10::kFloat:
+        capability.capability_data.supported_scalar_types.has_Float = 1;
+        break;
       default:
         TORCH_CHECK(
             false, "unhandled capability dtype ", c10::toString(scalar_type));
