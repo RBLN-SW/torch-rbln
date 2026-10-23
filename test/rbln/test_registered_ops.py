@@ -29,6 +29,8 @@ RTOL = 0.01
 MATMUL_TOLERANCES: dict[torch.dtype, tuple[float, float]] = {
     torch.float16: (0.1, 0.1),
     torch.bfloat16: (0.4, 0.1),
+    # The device may cast float32 ops to a custom float format with reduced precision.
+    torch.float32: (0.1, 0.1),
 }
 
 

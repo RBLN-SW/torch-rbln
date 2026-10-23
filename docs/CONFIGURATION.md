@@ -223,9 +223,9 @@ export RBLN_DUMMY_DEVICE=1 RBLN_DEVICE_MAP="[0,1],[2,3]"   # 2 logical devices, 
   dummy is not guaranteed to be valid on a specific machine.
 - **Scope**: device tensor construction, host/device copies, and compile-only
   `torch.compile` (building artifacts). Anything that must run on the NPU raises a
-  clear error — a compiled graph, or an eager op on a device dtype (fp16/bf16) — since
-  there is no NPU to run it. Host-side ops (e.g. fp32, which never runs on the NPU even
-  with real hardware) fall back to CPU exactly as they would on a real device.
+  clear error — a compiled graph, or an eager op on a dispatch dtype (fp16/bf16/fp32) —
+  since there is no NPU to run it. Host-side ops (e.g. fp64, which never runs on the NPU
+  even with real hardware) fall back to CPU exactly as they would on a real device.
   Distributed collectives still require real hardware, and memory-stat APIs
   (`memory_stats`, `memory_allocated`, ...) report zeros rather than real usage.
   `mem_get_info()` and `mem_get_info_per_chiplet()` raise: there is no device DRAM to report.

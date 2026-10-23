@@ -136,12 +136,12 @@ class TestRblnMemoryHelpers(TestCase):
 @pytest.mark.serial
 class TestDeviceCapability(TestCase):
     """``get_device_capability()`` reports dtypes resident in device memory
-    (fp16/bf16); other dtypes are CPU-backed even under device="rbln".
+    (fp16/bf16/fp32); other dtypes are CPU-backed even under device="rbln".
     Serial: measures global device memory."""
 
     def test_capability_matches_device_resident_dtypes(self):
-        # Probe a candidate set spanning both advertised (fp16/bf16) and unadvertised
-        # (fp32/int) dtypes, classify each by whether a compute op materializes it in
+        # Probe a candidate set spanning both advertised (fp16/bf16/fp32) and unadvertised
+        # (int) dtypes, classify each by whether a compute op materializes it in
         # device memory, and require the advertised set to equal the resident set — so a
         # dtype that is resident but missing from the advertisement is caught too, not
         # just the reverse.

@@ -16,7 +16,7 @@ from test.utils import configure_master_port_for_rccl_tests, spawn_target_with_c
 KiB = 1024
 MiB = 1024 * 1024
 
-TEST_DTYPES = SUPPORTED_DTYPES + [torch.float32, torch.float64, torch.int8, torch.int16, torch.int32, torch.int64]
+TEST_DTYPES = SUPPORTED_DTYPES + [torch.float64, torch.int8, torch.int16, torch.int32, torch.int64]
 
 
 def setup_environment(rank: int, world_size: int) -> None:

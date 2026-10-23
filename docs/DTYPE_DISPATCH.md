@@ -1,9 +1,10 @@
 # Extending the eager dispatch catalog
 
 torch-rbln's eager path decides per op whether to compile it for the device or run it on the
-host (CPU fallback). The dtype catalog is the first gate: fp16 and bf16. Two variables widen it
-for one process, for measurement. Both are unset by default, and a default build behaves
-exactly as before.
+host (CPU fallback). The dtype catalog is the first gate: fp16, bf16 and fp32. The device
+may cast fp32 ops to a custom float format, so an fp32 op dispatched to it can run in reduced
+precision. Two variables widen the catalog for one process, for measurement. Both are unset by
+default.
 
 ```
 TORCH_RBLN_DISPATCH_DTYPES=<names>       admit these dtypes into the eager dispatch catalog
@@ -50,5 +51,5 @@ decision; it may place a small or unaligned op on the host inside the compiled p
 - A device launch costs far more than the host op on small tensors; admitting a dtype for
   glue-sized tensors makes them slower even when the result is right.
 
-The default catalog stays fp16/bf16 because of these. The variables exist so the trade-off can
-be measured on a workload instead of argued.
+fp32 is in the default catalog despite its reduced precision; the other dtypes stay out because
+of these. The variables exist so the trade-off can be measured on a workload instead of argued.

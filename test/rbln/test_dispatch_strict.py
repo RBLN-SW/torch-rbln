@@ -141,7 +141,9 @@ class TestStrictCatalog(TestCase):
             self.assertEqual(set(_C._dispatch_strict_dtypes()), {torch.int32, torch.float32})
             mp.setenv("TORCH_RBLN_DISPATCH_DTYPES", "int16")
             mp.setenv("TORCH_RBLN_DISPATCH_STRICT", "all")
-            self.assertEqual(set(_C._dispatch_strict_dtypes()), {torch.float16, torch.bfloat16, torch.int16})
+            self.assertEqual(
+                set(_C._dispatch_strict_dtypes()), {torch.float16, torch.bfloat16, torch.float32, torch.int16}
+            )
             mp.setenv("TORCH_RBLN_DISPATCH_STRICT", "int32, float3")
             with self.assertRaisesRegex(RuntimeError, "unknown dtype name 'float3'"):
                 _C._dispatch_strict_dtypes()
