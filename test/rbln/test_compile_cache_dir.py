@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import unittest
 from pathlib import Path
 from unittest import mock
 
@@ -46,6 +47,21 @@ _COMPILES = f"""
     torch.compile(lambda a: torch.sin(a) + a, backend="rbln")(y).cpu()
     info = v2.cache_info(compile_cache_dir())
     print("compile cache", info.hits, info.misses, len(captures))
+"""
+
+# An eager op and a graph, compiled and run on the device, whatever the compile cache directory is.
+_RUNS = f"""
+    import sys
+    sys.path.insert(0, {_PROJECT_ROOT!r})
+    import torch
+    import torch_rbln
+
+    x = torch.randn(4, 64, dtype=torch.float16)
+    eager = x.to("rbln") * 3 + x.to("rbln")
+    graph = torch.compile(lambda a: torch.sin(a) + a, backend="rbln")(x.to("rbln"))
+    torch.testing.assert_close(eager.cpu(), x * 3 + x, atol=0.01, rtol=0.01)
+    torch.testing.assert_close(graph.cpu(), torch.sin(x) + x, atol=0.01, rtol=0.01)
+    print("ran", eager.device, graph.device)
 """
 
 
@@ -98,6 +114,29 @@ class TestCompileCacheDir(TestCase):
         self.assertTrue(any(directory.glob("*.entry")))
         # The graph's function is found by the graph; the eager ops' are found uncaptured.
         self.assertEqual(self._compiles(directory), (1, 0, 0))
+
+    @unittest.skipIf(os.geteuid() == 0, "root writes any directory")
+    def test_ops_compile_and_run_when_the_directory_cannot_be_written(self):
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        directory.chmod(0o500)
+        self.addCleanup(directory.chmod, 0o700)
+        result = subprocess.run(
+            [sys.executable, "-c", textwrap.dedent(_RUNS)],
+            cwd=_PROJECT_ROOT,
+            env={
+                **os.environ,
+                "TORCH_RBLN_COMPILE_CACHE_DIR": str(directory),
+                "TORCH_RBLN_DISABLE_FALLBACK": "compile_error",
+            },
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ran rbln:0 rbln:0", result.stdout)
+        warned = [line for line in result.stderr.splitlines() if f"compile cache cannot use {directory}" in line]
+        self.assertEqual(len(warned), 1, result.stderr)
+        self.assertEqual(list(directory.iterdir()), [])
 
 
 @pytest.mark.test_set_ci

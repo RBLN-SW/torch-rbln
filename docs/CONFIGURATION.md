@@ -148,7 +148,7 @@ Ops that round to an integer follow the device, not the CPU. `ceil` and `floor` 
 
 ## Compile Cache
 
-An eager op is compiled the first time a process runs it for a profile of its arguments (the shape and dtype of each tensor and every other value), and `torch.compile(backend="rbln")` compiles each graph Dynamo hands over. Both keep the compiled functions on disk, in a directory the processes of a host share: a process takes a function another one made rather than compiling it again. A restarted process traces a graph again to find its function, but takes an eager op of torch or torch-rbln without tracing it. While one process compiles a function, the others that need it wait and take it.
+An eager op is compiled the first time a process runs it for a profile of its arguments (the shape and dtype of each tensor and every other value), and `torch.compile(backend="rbln")` compiles each graph Dynamo hands over. Both keep the compiled functions on disk, in a directory the processes of a host share: a process takes a function another one made rather than compiling it again. A restarted process traces a graph again to find its function, but takes an eager op of torch or torch-rbln without tracing it. While one process compiles a function, the others that need it wait and take it. The directory only saves compiles: a process that cannot create, read or write it warns once, naming it, and keeps its compiled functions in memory.
 
 | Variable | Description |
 |----------|-------------|
