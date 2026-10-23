@@ -1,7 +1,8 @@
 # Owner(s): ["module: PrivateUse1"]
 """A graph torch.compile hands the rbln backend runs its collectives over the communicator of the
 process group they name, the default group's or one made after it, as vLLM's tensor parallel
-layers reduce their partial sums inside the model graph.
+layers reduce their partial sums inside the model graph. Graphs whose collectives differ across
+the ranks raise on every rank rather than leave the device collectives waiting for each other.
 """
 
 import os
@@ -54,6 +55,32 @@ def run_row_parallel(rank: int, world_size: int, sub_group: bool) -> None:
         dist.destroy_process_group()
 
 
+def run_differing(rank: int, world_size: int) -> None:
+    """Each rank reduces a result of a size of its own, as a graph whose shapes depend on the rank
+    does, with the CPU fallback of a failed graph on, as it is by default."""
+    os.environ["LOCAL_RANK"] = str(rank)
+    os.environ["WORLD_SIZE"] = str(world_size)
+    os.environ.pop("TORCH_RBLN_DISABLE_FALLBACK", None)
+    torch.rbln.set_device(rank)
+    dist.init_process_group(backend="rbln-ccl", rank=rank, world_size=world_size)
+    try:
+        units = UNITS * (rank + 1)
+        weight = (torch.randn(units, FEATURES // world_size) / 16).to(torch.float16)
+        model = RowParallel(weight, None).to(f"rbln:{rank}")
+        compiled = torch.compile(model, backend="rbln", dynamic=False)
+        x = torch.randn(1, 64, FEATURES // world_size).to(torch.float16).to(f"rbln:{rank}")
+        try:
+            compiled(x)
+        except RuntimeError as error:
+            message = str(error)
+        else:
+            raise AssertionError(f"rank {rank} ran a graph whose collectives differ from the other rank's")
+        for part in ("collective 0 is all_reduce", f"{64 * UNITS} x", f"{64 * 2 * UNITS} x", "ranks [0]", "ranks [1]"):
+            assert part in message, f"rank {rank}: {part!r} not in {message!r}"
+    finally:
+        dist.destroy_process_group()
+
+
 @pytest.mark.single_worker
 @pytest.mark.test_set_ci
 class TestGraphCollectives(TestCase):
@@ -73,6 +100,16 @@ class TestGraphCollectives(TestCase):
         mp.spawn(
             spawn_target_with_clean_exit,
             args=(run_row_parallel, self.world_size, sub_group),
+            nprocs=self.world_size,
+            join=True,
+        )
+
+    def test_graphs_whose_collectives_differ_raise_on_every_rank(self):
+        if self.world_size < 2:
+            self.skipTest("Requires two NPUs")
+        mp.spawn(
+            spawn_target_with_clean_exit,
+            args=(run_differing, self.world_size),
             nprocs=self.world_size,
             join=True,
         )

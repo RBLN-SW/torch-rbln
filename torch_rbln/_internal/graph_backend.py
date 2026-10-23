@@ -9,10 +9,17 @@ was made in the arg's type (``torch.rbln.empty_typed``), and goes through the ho
 module's parameters and buffers are the function's state: they are written to the device
 when first seen and again once they change, as another tensor or written in place. A
 result the graph leaves on the CPU comes back on the CPU.
+
+Each rank compiles its graph apart, and the device collectives of functions whose collectives
+differ, in kind, reduce op, dtype, size or order, wait for each other for good or combine buffers
+that do not match. So before a graph with collectives first runs, its rank checks with the other
+ranks of the group that their functions make the same ones.
 """
 
 from __future__ import annotations
 
+import json
+import threading
 import warnings
 from typing import Any
 
@@ -81,6 +88,57 @@ def _collective_group(gm: torch.fx.GraphModule) -> str | None:
     return next(iter(names), None)
 
 
+class CollectivesDiffer(RuntimeError):
+    """The ranks of a process group compiled graphs whose collectives differ. Run on the CPU
+    instead, the graphs would make the same collectives through the group, so no fallback takes
+    their place."""
+
+
+_checks_lock = threading.Lock()
+# The checks the graphs over each process group made in this process, by group name.
+_checks: dict[str, int] = {}
+
+
+def _describe(collective: dict | None) -> str:
+    if collective is None:
+        return "none"
+    reduce = f"{collective['reduce']}, " if collective["reduce"] else ""
+    return f"{collective['symbol']}({reduce}{collective['count']} x {collective['dtype']}, world {collective['world']})"
+
+
+def _check_collectives(fn: Any, group: str) -> None:
+    """Raises on every rank of process group ``group`` unless the function each compiled makes the
+    same collectives, in the order it runs them, as the others'.
+
+    The ranks swap them through the group's store, under the number of checks the group's graphs
+    made in the process before, so the n-th graph a rank runs is checked against the n-th of each
+    other rank. A rank that runs no such graph leaves the others waiting for the store's timeout.
+    """
+    from torch.distributed import distributed_c10d
+
+    process_group = distributed_c10d._resolve_process_group(group)
+    store = distributed_c10d._get_process_group_store(process_group)
+    with _checks_lock:
+        check = _checks.get(group, 0)
+        _checks[group] = check + 1
+    keys = [f"rbln_collectives/{check}/{rank}" for rank in range(process_group.size())]
+    store.set(keys[process_group.rank()], json.dumps(fn.collectives))
+    store.wait(keys)
+    made = [json.loads(value) for value in store.multi_get(keys)]
+    for index in range(max(len(m) for m in made)):
+        at = [m[index] if index < len(m) else None for m in made]
+        if any(c != at[0] for c in at):
+            ranks = distributed_c10d.get_process_group_ranks(process_group)
+            by_collective: dict[str, list[int]] = {}
+            for rank, c in zip(ranks, at):
+                by_collective.setdefault(_describe(c), []).append(rank)
+            found = "; ".join(f"{c} on ranks {r}" for c, r in by_collective.items())
+            raise CollectivesDiffer(
+                f"the ranks of process group {group} compiled graphs whose collectives differ, which the device "
+                f"would wait on for good or combine wrongly: collective {index} is {found}"
+            )
+
+
 def _host_results(gm: torch.fx.GraphModule) -> list[bool]:
     """Whether each tensor the graph returns is on the CPU, in order."""
     output = next(n for n in gm.graph.nodes if n.op == "output")
@@ -101,6 +159,7 @@ class CompiledGraph:
     ):
         self._fn = fn
         self._group = group
+        self._checked = group is None
         by_name = {inp.name: inp for inp in graph.inputs}
         passed = graph.passed if graph.passed is not None else [inp.name for inp in graph.inputs]
         self._roles = [(by_name[name].kind, name) for name in passed]
@@ -158,6 +217,9 @@ class CompiledGraph:
             device = next((a.device for a in args if a.device.type != "cpu"), torch.device("rbln"))
             return _zeros(self._fn, device, self._host_results)
         self._write_state(self._state(args))
+        if not self._checked:
+            _check_collectives(self._fn, self._group)
+            self._checked = True
         inputs = [t for (kind, _), t in zip(self._roles, args) if kind == "input"]
         results = self._function.run(inputs)
         if results is None:

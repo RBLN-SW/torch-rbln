@@ -246,7 +246,9 @@ class CompiledFunctionWrapper:
 
     def _attempt_cpu_fallback_or_raise(self, error, args, kwargs):
         """Attempt CPU fallback or re-raise error based on fallback configuration."""
-        if raised_for_disabled_fallback(error):
+        from torch_rbln._internal.graph_backend import CollectivesDiffer
+
+        if raised_for_disabled_fallback(error) or isinstance(error, CollectivesDiffer):
             raise error
         if is_fallback_disabled("compile_error"):
             rbln_log_error(
