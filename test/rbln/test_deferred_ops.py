@@ -71,7 +71,8 @@ class TestDeferredOps(TestCase):
 
     @parametrize("n", [5, 20])
     def test_a_chain_gives_what_it_gives_eagerly(self, n):
-        expected = _chain(self.xd, self.yd, n).cpu()
+        with _deferring(0):
+            expected = _chain(self.xd, self.yd, n).cpu()
         before = _counts()
         with _deferring():
             # Op by op the first time, compiled the second, from the cache the third.
@@ -95,17 +96,20 @@ class TestDeferredOps(TestCase):
         self.assertEqual(change["op_runs"], 0)
 
     def test_a_segment_the_compiler_refuses_runs_op_by_op(self):
-        expected = _chain(self.xd, self.yd, 6).cpu()
+        # A shape no other test runs, so that no other test compiled the segment first.
+        x, y = self.xd[:, :192].contiguous(), self.yd[:, :192].contiguous()
+        with _deferring(0):
+            expected = _chain(x, y, 6).cpu()
 
         def refuse(*args, **kwargs):
             raise RuntimeError("refused for the test")
 
         with _deferring():
-            _chain(self.xd, self.yd, 6).cpu()
+            _chain(x, y, 6).cpu()
             before = _counts()
             with mock.patch.object(compile_cache, "compile_logical", refuse):
                 for _ in range(3):
-                    torch.testing.assert_close(_chain(self.xd, self.yd, 6).cpu(), expected, **_TOLERANCE)
+                    torch.testing.assert_close(_chain(x, y, 6).cpu(), expected, **_TOLERANCE)
         change = _since(before)
         self.assertEqual(change["refused"], 1)
         self.assertEqual(change["op_runs"], 3)
@@ -126,7 +130,8 @@ class TestDeferredOps(TestCase):
                 z.mul_(0.5).add_(y)
             return z.cpu()
 
-        expected = run(self.xd, self.yd)
+        with _deferring(0):
+            expected = run(self.xd, self.yd)
         before = _counts()
         with _deferring():
             torch.testing.assert_close(run(self.xd, self.yd), expected, **_TOLERANCE)
@@ -194,7 +199,8 @@ class TestDeferredOps(TestCase):
 
     def test_a_compiled_graph_between_deferred_ops(self):
         graph = torch.compile(lambda t: t * 3 + 1, backend="rbln")
-        expected = graph(self.xd * 2).cpu()
+        with _deferring(0):
+            expected = graph(self.xd * 2).cpu()
         with _deferring():
             r = self.xd * 2
             g = graph(r)
