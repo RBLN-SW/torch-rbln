@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -14,7 +15,10 @@
 namespace torch_rbln::shim {
 
 // Install a C++ boxed dispatch shim for `op_name` on PrivateUse1, and register
-// `py_fn` as the Python impl invoked on the non-fallback path.
+// `py_fn` as the Python impl invoked on the non-fallback path. When op_name is
+// the out= overload of an elementwise op that torch runs through a structured
+// kernel, the functional overload also gets a kernel, which marks the result it
+// allocates as the call's own (see TORCH_RBLN_EAGER_BUCKETS).
 //
 // The shim runs a cheap pre-check in C++ (dtype, scalar-all, contig+offset). On
 // pre-check fail it calls into `at::native::rbln::cpu_fallback_rbln` directly —
@@ -86,14 +90,25 @@ void diag_reset_trace_by_op();
 std::tuple<uint64_t, uint64_t, uint64_t, uint64_t> diag_dump_warm_segments();
 void diag_reset_warm_segments();
 
+// The bucket extent of the call the shim hands to the Python wrapper, with the
+// positions among `tensors` of those that stand at it, or none when that call is
+// not bucketed or is not a call of `op` over `tensors` (see
+// TORCH_RBLN_EAGER_BUCKETS).
+std::optional<std::pair<int64_t, std::vector<size_t>>> pending_bucket(
+    const std::string& op,
+    const std::vector<at::Tensor>& tensors);
+
 // Called by the Python wrapper after a successful miss-path compile and run to
 // install a warm-cache entry keyed by the CacheKey that the shim built on the
 // way in (stored in a thread-local so Python doesn't need to re-build it).
 //
-// `inputs` are the tensors `function` ran over; each must be one of the call's
-// own tensor arguments, whose positions the entry keeps. Returns true if an
-// install actually happened. Safe to call when no pending context exists —
-// returns false.
-bool install_warmcache_from_pending(std::shared_ptr<OpFunction> function, const std::vector<at::Tensor>& inputs);
+// `inputs` are the tensors `function` ran over; the call must be one of `op`,
+// and each input one of its own tensor arguments, whose positions the entry
+// keeps, as pending_bucket matches them. Returns true if an install actually
+// happened. Safe to call when no pending context exists — returns false.
+bool install_warmcache_from_pending(
+    const std::string& op,
+    std::shared_ptr<OpFunction> function,
+    const std::vector<at::Tensor>& inputs);
 
 } // namespace torch_rbln::shim

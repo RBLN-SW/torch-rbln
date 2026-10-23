@@ -1719,7 +1719,9 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     - Builds (or reuses) the wrapper OpModule via ``get_view_op_module``.
     - Compiles it for the profile of the call (``compile_cache.compiled_op``)
       and runs it over the call's tensors, writing ``out`` in place when the
-      function can.
+      function can. A call the shim buckets (``TORCH_RBLN_EAGER_BUCKETS``)
+      compiles for its bucket instead and returns a result of its own; it never
+      writes ``out``, which cannot hold the bucket's rows.
     - Installs the function in the C++ warm cache unless a view recipe was
       applied: the shim's pending key describes the view, while the function
       takes its base. Those calls come back through Python, which finds the
@@ -1736,27 +1738,32 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     if get_rbln_compile_op_depth() == 0:
         raise_if_dummy_execution(f"the eager op {op_name}" if op_name else "an eager op")
 
-    from torch_rbln._internal.compile_cache import compiled_op, device_of, UncompilableOp
+    from torch_rbln._internal.compile_cache import compiled_op, CompiledOp, device_of, UncompilableOp
     from torch_rbln._internal.env_utils import is_fallback_disabled
-    from torch_rbln._internal.warm_cache import install_pending as _install_warm_cache_pending
+    from torch_rbln._internal.warm_cache import install_pending as _install_warm_cache_pending, pending_bucket
 
     (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs_filtered)
     has_views = any(r is not None for r in view_recipes)
+    bucket = None if has_views or not op_name else pending_bucket(op_name, CompiledOp.tensors(view_args, view_kwargs))
 
-    use_out = out_tensor is not None and can_use_out_tensor_directly(view_args, dict(view_kwargs, out=out_tensor))
     op_module = get_view_op_module(op_callable, view_recipes)
     device = device_of(view_args, view_kwargs)
     try:
-        op = compiled_op(op_module, view_args, view_kwargs, device)
+        op = compiled_op(op_module, view_args, view_kwargs, device, bucket)
     except UncompilableOp as e:
         if is_fallback_disabled("unsupported_op" if e.unsupported else "compile_error"):
             raise
         _warn_uncompilable_once(op_name, e)
         return cpu_fallback_path(op_callable, args, result=out_tensor, op_name=op_name, **kwargs_filtered)
+    use_out = (
+        out_tensor is not None
+        and not op.function.row_wise
+        and can_use_out_tensor_directly(view_args, dict(view_kwargs, out=out_tensor))
+    )
     tensors = op.tensors(view_args, view_kwargs)
     result = op.run(tensors, [out_tensor] if use_out else None)
-    if not has_views:
-        _install_warm_cache_pending(op.function, tensors)
+    if not has_views and op_name:
+        _install_warm_cache_pending(op_name, op.function, tensors)
     if use_out and result is not out_tensor:
         out_tensor.copy_(result)
         return out_tensor

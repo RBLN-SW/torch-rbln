@@ -36,6 +36,16 @@ struct StateKey;
  * what the run wrote. The results are the function's; those `host_results` flags come back as CPU
  * tensors once the run is done. Each device gets an executor of its own, and runs queue on the
  * current stream of that device.
+ *
+ * A function given `rows` computes row i of each result from row i of each input `rows` names, and
+ * from no other row of them, as an elementwise op does; its maker vouches for this. A call may pass
+ * those inputs with fewer rows than the function takes, the same count for each, and gets results
+ * of that many rows. The run computes every row the function takes and drops those past the call's,
+ * whatever they were computed from: an input binds over the bytes after its rows up to the end of
+ * its allocation's block, or else through a copy padded to the function's extent, on the host for an
+ * arg that goes through it. A result keeps the storage of every row, so that a later such call reads
+ * it in place. A function whose results or args of those inputs cannot be bound so takes calls of
+ * all of its rows only (see `row_extent`).
  */
 class OpFunction {
  public:
@@ -48,13 +58,18 @@ class OpFunction {
       const std::string& bytes,
       const std::vector<std::string>& inputs,
       const std::map<std::string, at::Tensor>& state,
-      std::vector<bool> host_results = {});
+      std::vector<bool> host_results = {},
+      const std::vector<size_t>& rows = {});
 
   size_t num_inputs() const {
     return num_inputs_;
   }
   const std::vector<Output>& outputs() const {
     return outputs_;
+  }
+  // Whether a call may pass fewer rows of the inputs `rows` names.
+  bool row_wise() const {
+    return !row_inputs_.empty();
   }
   // When the function last ran, on a clock of the process that every run of an
   // OpFunction moves; zero before its first run.
@@ -83,11 +98,13 @@ class OpFunction {
       c10::ArrayRef<std::optional<at::Tensor>> out = {});
 
  private:
-  // `through_host` when the arg holds its value otherwise than torch holds the tensor.
+  // `through_host` when the arg holds its value otherwise than torch holds the tensor; `row` when
+  // the input is one of `rows`.
   struct Binding {
     size_t arg;
     size_t input;
     bool through_host = false;
+    bool row = false;
   };
   // A result is written to arg `arg`, or is input `input` the function updates; `after` when the
   // host makes the arg once the run is done.
@@ -112,16 +129,26 @@ class OpFunction {
   };
 
   // `tensor` as arg `arg` takes it, or none if it is not the arg's; with `copies`, a CPU tensor,
-  // or one the arg cannot take where it lies, binds through a copy that `copies` keeps.
-  rt::Binding over(const at::Tensor& tensor, size_t arg, c10::DeviceIndex device_index, std::vector<Copy>* copies)
-      const;
+  // or one the arg cannot take where it lies, binds through a copy that `copies` keeps. With
+  // `extent`, the tensor's leading axis binds at that extent, over the bytes past its rows up to the
+  // end of its allocation's block.
+  rt::Binding over(
+      const at::Tensor& tensor,
+      size_t arg,
+      c10::DeviceIndex device_index,
+      std::vector<Copy>* copies,
+      std::optional<int64_t> extent = std::nullopt) const;
   // `tensor` in place as arg `arg`, which the compiler lays out otherwise than torch, takes it: a
   // tensor over a whole allocation of the arg's type; none for any other.
   rt::Binding typed(const at::Tensor& tensor, size_t arg, c10::DeviceIndex device_index) const;
   // The host tensor of state arg `arg`, encoded from the state now.
   std::shared_ptr<rt::HostTensor> encoded(size_t arg) const;
-  // A host tensor of arg `arg` encoded from the value of `tensor`, or none if it is not the arg's.
-  std::shared_ptr<rt::HostTensor> encoded(const at::Tensor& tensor, size_t arg) const;
+  // A host tensor of arg `arg` encoded from the value of `tensor`, or none if it is not the arg's;
+  // with `extent`, from the value padded with zeros to that leading extent.
+  std::shared_ptr<rt::HostTensor> encoded(
+      const at::Tensor& tensor,
+      size_t arg,
+      std::optional<int64_t> extent = std::nullopt) const;
   // What tells the tensor of state arg `arg` on `device` apart from others.
   StateKey state_key(size_t arg, const rt::Device& device) const;
   // `args` with the state args that share pools of pages with them, which a
@@ -131,9 +158,18 @@ class OpFunction {
   // those another function holding the arg alike has made, or new ones, each encoded once.
   void bind_state(const std::vector<Slot*>& slots, const std::vector<size_t>& args) const;
   Slot& slot(c10::DeviceIndex device_index);
+  // The leading extent of the results, when a call can pass the inputs `rows` names with fewer
+  // rows: each result is a tensor the function makes on the device, all of one leading extent, and
+  // each arg of those inputs is one the run only reads, along that extent, and no host work of a
+  // call reads those inputs.
+  std::optional<int64_t> row_extent(const std::vector<size_t>& rows) const;
 
   std::shared_ptr<rt::Function> fn_;
   size_t num_inputs_ = 0;
+  // The inputs `rows` names, when the function is row-wise, and the leading extent of every result
+  // and of those inputs' args.
+  std::vector<size_t> row_inputs_;
+  int64_t row_extent_ = 0;
   std::vector<Binding> bindings_;
   std::vector<Result> results_;
   std::vector<Output> outputs_;

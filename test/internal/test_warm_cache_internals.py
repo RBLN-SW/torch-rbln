@@ -111,8 +111,8 @@ class TestWarmCacheInstall(TestCase):
         """A wrapper that ran over copies of the call's tensors installs no entry:
         the hit path binds the call's tensors as they are."""
 
-        def install_over_copies(function, inputs):
-            return self._orig_install(function, [t.clone() for t in inputs])
+        def install_over_copies(op, function, inputs):
+            return self._orig_install(op, function, [t.clone() for t in inputs])
 
         _C._warmcache_install_pending = install_over_copies
         x = torch.arange(self.SHAPE, dtype=torch.float16, device="rbln")

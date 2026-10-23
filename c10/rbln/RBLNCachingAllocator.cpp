@@ -99,11 +99,12 @@ class DeviceCache {
   struct Found {
     uintptr_t start = 0;
     uint64_t available = 0;
+    uint64_t block_available = 0;
     std::shared_ptr<const typed::Type> type;
   };
 
-  // The live allocation `ptr` lies in: its first byte, the bytes from `ptr` to its end, and its
-  // type. One past the end is the end of an empty view there.
+  // The live allocation `ptr` lies in: its first byte, the bytes from `ptr` to its end and to the
+  // end of its block, and its type. One past the end is the end of an empty view there.
   std::optional<Found> find(uintptr_t ptr) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = active_.upper_bound(ptr);
@@ -115,7 +116,11 @@ class DeviceCache {
     if (ptr - block->ptr > block->requested) {
       return std::nullopt;
     }
-    return Found{block->ptr, block->ptr + block->requested - ptr, block->type};
+    return Found{
+        .start = block->ptr,
+        .available = block->ptr + block->requested - ptr,
+        .block_available = block->ptr + block->size - ptr,
+        .type = block->type};
   }
 
   void set_type(uintptr_t start, std::shared_ptr<const typed::Type> type) {
@@ -424,7 +429,11 @@ std::optional<Typed> try_locate_typed(const void* ptr) {
     return std::nullopt;
   }
   location->available = found->available;
-  return Typed{std::move(*location), reinterpret_cast<void*>(found->start), std::move(found->type)};
+  return Typed{
+      .location = std::move(*location),
+      .start = reinterpret_cast<void*>(found->start),
+      .type = std::move(found->type),
+      .block_available = found->block_available};
 }
 
 void set_type(void* start, std::shared_ptr<const typed::Type> type) {

@@ -46,12 +46,14 @@ C10_RBLN_API std::optional<Location> try_locate(const void* ptr);
 
 /**
  * @brief Where `ptr` points, as `try_locate` says, whatever type the allocation has: the
- * allocation's first byte, and its type, if it has one.
+ * allocation's first byte, its type, if it has one, and the bytes from `ptr` to the end of the
+ * block it was carved as, which past `location.available` hold nothing any allocation reaches.
  */
 struct Typed {
   Location location;
   void* start = nullptr;
   std::shared_ptr<const typed::Type> type;
+  uint64_t block_available = 0;
 };
 C10_RBLN_API std::optional<Typed> try_locate_typed(const void* ptr);
 

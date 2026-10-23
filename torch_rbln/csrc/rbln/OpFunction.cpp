@@ -13,6 +13,7 @@
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNRuntime.h>
 #include <c10/rbln/RBLNTyped.h>
+#include <c10/util/accumulate.h>
 #include <rebel/v2/artifact/file.h>
 #include <rebel/v2/runtime/flags.h>
 
@@ -158,13 +159,23 @@ bool missing(const rt::Binding& binding) {
   return !binding.device && !binding.host;
 }
 
+// The first rows of tensor, over all of its storage, as a tensor not marked as a view of it.
+at::Tensor first_rows(const at::Tensor& tensor, int64_t rows) {
+  auto sizes = tensor.sizes().vec();
+  sizes.front() = rows;
+  auto out = at::detail::make_tensor<c10::TensorImpl>(c10::Storage(tensor.storage()), tensor.key_set(), tensor.dtype());
+  out.unsafeGetTensorImpl()->set_sizes_contiguous(sizes);
+  return out;
+}
+
 } // namespace
 
 OpFunction::OpFunction(
     const std::string& bytes,
     const std::vector<std::string>& inputs,
     const std::map<std::string, at::Tensor>& state,
-    std::vector<bool> host_results)
+    std::vector<bool> host_results,
+    const std::vector<size_t>& rows)
     : num_inputs_(inputs.size()) {
   auto owner = std::make_shared<const std::string>(bytes);
   fn_ =
@@ -317,22 +328,68 @@ OpFunction::OpFunction(
     after_ = fn_->maker(after, {}, held);
     after_inputs_ = inputs_read(*after_);
   }
+  for (const auto input : rows) {
+    TORCH_CHECK(input < num_inputs_, "the function takes ", num_inputs_, " tensors, not input ", input);
+  }
+  if (const auto extent = row_extent(rows)) {
+    row_inputs_ = rows;
+    row_extent_ = *extent;
+    for (auto& binding : bindings_) {
+      binding.row = std::ranges::find(row_inputs_, binding.input) != row_inputs_.end();
+    }
+  }
+}
+
+std::optional<int64_t> OpFunction::row_extent(const std::vector<size_t>& rows) const {
+  if (rows.empty() || results_.empty()) {
+    return std::nullopt;
+  }
+  int64_t extent = 0;
+  for (size_t k = 0; k < results_.size(); ++k) {
+    const auto& shape = outputs_[k].shape;
+    if (!results_[k].arg || results_[k].host || shape.empty() || (k > 0 && shape.front() != extent)) {
+      return std::nullopt;
+    }
+    extent = shape.front();
+  }
+  for (const auto input : rows) {
+    if (std::ranges::find(before_inputs_, input) != before_inputs_.end() ||
+        std::ranges::find(after_inputs_, input) != after_inputs_.end()) {
+      return std::nullopt;
+    }
+  }
+  const auto& args = fn_->artifact().args;
+  for (const auto& binding : bindings_) {
+    if (std::ranges::find(rows, binding.input) == rows.end()) {
+      continue;
+    }
+    const auto& arg = args[binding.arg];
+    if (arg.access != artifact::Access::kRead || arg.logical.shape.empty() || arg.logical.shape.front() != extent) {
+      return std::nullopt;
+    }
+  }
+  return extent;
 }
 
 rt::Binding OpFunction::over(
     const at::Tensor& tensor,
     size_t index,
     c10::DeviceIndex device_index,
-    std::vector<Copy>* copies) const {
+    std::vector<Copy>* copies,
+    std::optional<int64_t> extent) const {
   const auto& arg = fn_->artifact().args[index];
   if (!tensor.defined()) {
     return {};
   }
+  auto sizes = tensor.sizes().vec();
+  if (extent) {
+    sizes.front() = *extent;
+  }
   const char* dtype = c10::rbln::dtype_name(tensor.scalar_type());
-  if (dtype == nullptr || arg.logical.dtype != dtype || !fits(arg, tensor.sizes()) || !tensor.is_contiguous()) {
+  if (dtype == nullptr || arg.logical.dtype != dtype || !fits(arg, sizes) || !tensor.is_contiguous()) {
     return {};
   }
-  const auto nbytes = tensor.nbytes();
+  const auto nbytes = c10::multiply_integers(sizes) * tensor.element_size();
   const bool read = arg.access != artifact::Access::kWrite;
   const bool written = arg.access != artifact::Access::kRead;
   if (tensor.device().is_cpu()) {
@@ -341,11 +398,10 @@ rt::Binding OpFunction::over(
     }
     auto buffer = rt::HostBuffer::allocate(nbytes);
     if (read) {
-      std::memcpy(buffer->data(), tensor.const_data_ptr(), nbytes);
+      std::memcpy(buffer->data(), tensor.const_data_ptr(), tensor.nbytes());
     }
-    copies->push_back(
-        {tensor, at::from_blob(buffer->data(), tensor.sizes(), [buffer](void*) {}, tensor.options()), written});
-    return rt::Binding(over_torch_bytes(arg, tensor.sizes().vec(), std::move(buffer)));
+    copies->push_back({tensor, at::from_blob(buffer->data(), sizes, [buffer](void*) {}, tensor.options()), written});
+    return rt::Binding(over_torch_bytes(arg, sizes, std::move(buffer)));
   }
   if (!tensor.device().is_privateuseone() || tensor.device().index() != device_index) {
     return {};
@@ -358,7 +414,8 @@ rt::Binding OpFunction::over(
   if (found) {
     location = found->location;
   }
-  if (typed || !location || location->available < nbytes ||
+  const uint64_t reach = !location ? 0 : extent ? found->block_available : location->available;
+  if (typed || !location || reach < nbytes ||
       (arg.alignment > 1 && (location->buffer->address() + location->offset) % arg.alignment != 0)) {
     if (!copies) {
       return {};
@@ -369,15 +426,14 @@ rt::Binding OpFunction::over(
           c10::rbln::typed::describe(*found->type) +
           ", so the run would take it through the host (TORCH_RBLN_DISABLE_FALLBACK=host_round_trip)");
     }
-    auto copy = at::empty(tensor.sizes(), tensor.options());
+    auto copy = at::empty(sizes, tensor.options());
     if (read) {
-      copy.copy_(tensor);
+      (extent ? copy.narrow(0, 0, tensor.size(0)) : copy).copy_(tensor);
     }
     copies->push_back({tensor, copy, written});
     return over(copy, index, device_index, nullptr);
   }
-  return rt::Binding(
-      over_torch_bytes(arg, tensor.sizes().vec(), rt::DeviceBuffer::view(location->buffer, location->offset, nbytes)));
+  return rt::Binding(over_torch_bytes(arg, sizes, rt::DeviceBuffer::view(location->buffer, location->offset, nbytes)));
 }
 
 rt::Binding OpFunction::typed(const at::Tensor& tensor, size_t index, c10::DeviceIndex device_index) const {
@@ -429,13 +485,28 @@ std::shared_ptr<rt::HostTensor> OpFunction::encoded(size_t index) const {
   return host;
 }
 
-std::shared_ptr<rt::HostTensor> OpFunction::encoded(const at::Tensor& tensor, size_t index) const {
+std::shared_ptr<rt::HostTensor> OpFunction::encoded(
+    const at::Tensor& tensor,
+    size_t index,
+    std::optional<int64_t> extent) const {
   const auto& arg = fn_->artifact().args[index];
+  if (!tensor.defined()) {
+    return nullptr;
+  }
+  auto sizes = tensor.sizes().vec();
+  if (extent) {
+    sizes.front() = *extent;
+  }
   const char* dtype = c10::rbln::dtype_name(tensor.scalar_type());
-  if (!tensor.defined() || dtype == nullptr || arg.logical.dtype != dtype || !fits(arg, tensor.sizes())) {
+  if (dtype == nullptr || arg.logical.dtype != dtype || !fits(arg, sizes)) {
     return nullptr;
   }
   auto value = tensor.to(at::kCPU).contiguous();
+  if (extent) {
+    auto padded = at::zeros(sizes, value.options());
+    padded.narrow(0, 0, value.size(0)).copy_(value);
+    value = std::move(padded);
+  }
   auto host = fn_->emptyHostLike(index, value.sizes().vec());
   fn_->encode(index, {{value.data_ptr(), value.sizes().vec()}}, *host);
   c10::rbln::prof::record_bounce(c10::rbln::prof::BounceSite::kOpArgThroughHost, value.nbytes());
@@ -600,6 +671,27 @@ std::optional<std::vector<at::Tensor>> OpFunction::run(
   if (device_index < 0) {
     device_index = c10::rbln::get_device_index();
   }
+  // The call's rows along the results' leading axis, when fewer than the function computes.
+  std::optional<int64_t> rows;
+  if (!row_inputs_.empty()) {
+    const auto& first = inputs[row_inputs_.front()];
+    if (!first.defined() || first.dim() == 0) {
+      return std::nullopt;
+    }
+    const int64_t count = first.size(0);
+    for (const auto input : row_inputs_) {
+      const auto& tensor = inputs[input];
+      if (!tensor.defined() || tensor.dim() == 0 || tensor.size(0) != count) {
+        return std::nullopt;
+      }
+    }
+    if (count < 1 || count > row_extent_) {
+      return std::nullopt;
+    }
+    if (count < row_extent_) {
+      rows = count;
+    }
+  }
 
   const auto& args = fn_->artifact().args;
   std::vector<std::pair<std::string, rt::Binding>> bound;
@@ -623,13 +715,19 @@ std::optional<std::vector<at::Tensor>> OpFunction::run(
             "is not of the arg's type (torch.rbln.empty_typed), so the run would take it through the host "
             "(TORCH_RBLN_DISABLE_FALLBACK=host_round_trip)");
       }
-      auto host = encoded(inputs[binding.input], binding.arg);
+      auto host = encoded(
+          inputs[binding.input], binding.arg, rows && binding.row ? std::optional<int64_t>(row_extent_) : std::nullopt);
       if (host && written) {
         written_back.emplace_back(&binding, host);
       }
       tensor = rt::Binding(std::move(host));
     } else if (!binding.through_host) {
-      tensor = over(inputs[binding.input], binding.arg, device_index, &copies);
+      tensor = over(
+          inputs[binding.input],
+          binding.arg,
+          device_index,
+          &copies,
+          rows && binding.row ? std::optional<int64_t>(row_extent_) : std::nullopt);
     }
     if (missing(tensor)) {
       return std::nullopt;
@@ -701,6 +799,10 @@ std::optional<std::vector<at::Tensor>> OpFunction::run(
     if (result.input) {
       results.push_back(inputs[*result.input]);
       continue;
+    }
+    // A tensor of the call's rows does not hold the rows the run computes past them.
+    if (rows && k < out.size() && out[k].has_value() && out[k]->defined()) {
+      return std::nullopt;
     }
     if (result.after) {
       const bool given = k < out.size() && out[k].has_value() && out[k]->defined();
@@ -798,6 +900,11 @@ std::optional<std::vector<at::Tensor>> OpFunction::run(
     }
     results[k].copy_(value);
   }
+  if (rows) {
+    for (auto& result : results) {
+      result = first_rows(result, *rows);
+    }
+  }
   return results;
 }
 
@@ -841,17 +948,20 @@ void init_op_function_bindings(pybind11::module& module) {
           py::init([](const py::bytes& function,
                       const std::vector<std::string>& inputs,
                       const std::map<std::string, at::Tensor>& state,
-                      const std::vector<bool>& host_results) {
+                      const std::vector<bool>& host_results,
+                      const std::vector<size_t>& rows) {
             std::string bytes = function;
             py::gil_scoped_release release;
-            return std::make_shared<OpFunction>(bytes, inputs, state, host_results);
+            return std::make_shared<OpFunction>(bytes, inputs, state, host_results, rows);
           }),
           py::arg("function"),
           py::arg("inputs"),
           py::arg("state") = std::map<std::string, at::Tensor>{},
           py::arg("host_results") = std::vector<bool>{},
+          py::arg("rows") = std::vector<size_t>{},
           "Internal: a compiled function run on torch tensors")
       .def_property_readonly("num_inputs", &OpFunction::num_inputs)
+      .def_property_readonly("row_wise", &OpFunction::row_wise)
       .def_property_readonly("last_run", &OpFunction::last_run)
       .def(
           "set_state",

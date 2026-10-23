@@ -168,6 +168,28 @@ Eager ops and graph runs are queued on the current stream and run after the call
 RBLN_LAUNCH_BLOCKING=1 python train.py
 ```
 
+## Eager Op Buckets
+
+An eager op is compiled for the shapes of its tensors, so code whose leading extent changes from call to call, such as a sampler over a changing batch, compiles each op once per extent. `TORCH_RBLN_EAGER_BUCKETS` (default off, read at every dispatch) makes an elementwise op compile once per bucket of extents instead: 1, 2, 3, 4, 6, 8, 12, 16, 24, … (each power of two and the point halfway to the next). A growing extent then compiles about twice per doubling.
+
+```bash
+export TORCH_RBLN_EAGER_BUCKETS=1
+```
+
+A call is bucketed when all of these hold:
+
+- The op is tagged `pointwise`, not `nondeterministic_seeded`, and has one result.
+- Its result has two or more rows along its leading axis.
+- Every tensor it reads is contiguous, and every input of the result's rank and leading extent is on the device, with rows of a multiple of 64 elements. The compiler computes an elementwise op on the host, which rounds as the CPU does, when its last axis is not a multiple of 64 elements (for an op over two tensors of one shape, when its element count is not), and on the device, which rounds as the device does, otherwise. A bucket of other rows could move a call from one to the other and change its result. A one-dimensional tensor therefore never buckets.
+- It has no `out=`, or its `out=` shares memory with an input (as an in-place op's does) or is not contiguous. Such an `out=` takes a copy of the result, as it does unbucketed. A call that writes any other `out=` runs the function of its own extent.
+
+When the compiler refuses a bucket, or the bucket's function cannot compute by rows, the calls of that bucket run the function of their own extent on the device.
+
+A bucketed call returns the same values as an unbucketed one. Its run computes every row of the bucket, fewer than 1.5 times the call's rows, from whatever memory lies after each input's rows, and drops the rows past the call's. This costs:
+
+- Memory: the result keeps the storage of the bucket's rows, so its `untyped_storage()` is up to 1.5 times its size, and `torch.save` writes those rows as well. The next bucketed op reads the result in place.
+- A copy per call: an input whose allocation has no room for the bucket's rows is copied into a tensor of the bucket's rows at every call, and the copy blocks the caller until the work queued before it is done. An input that the previous bucketed op made always has room; any other tensor has room only when the caching allocator's rounding of its allocation left enough.
+
 ## Device Mapping
 
 Each RBLN device is exactly one NPU: `rbln:N` is the N-th NPU that `RBLN_DEVICES` selects.

@@ -318,8 +318,18 @@ void register_internal_api(py::module_& module) {
       &torch_rbln::shim::install_warmcache_from_pending,
       "Internal: install a warm-cache entry from the thread-local pending key "
       "set by the shim on the way into the miss path",
+      pybind11::arg("op"),
       pybind11::arg("function"),
       pybind11::arg("inputs"));
+
+  module.def(
+      "_warmcache_pending_bucket",
+      &torch_rbln::shim::pending_bucket,
+      "Internal: the bucket extent of the call the shim hands to the Python wrapper, with the positions "
+      "among `tensors` of those that stand at it, or None when that call is not bucketed or is not one "
+      "of `op` over `tensors`",
+      pybind11::arg("op"),
+      pybind11::arg("tensors"));
 
   module.def(
       "_warmcache_set_enabled",

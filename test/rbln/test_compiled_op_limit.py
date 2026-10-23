@@ -24,9 +24,9 @@ def _keeps_the_most_recently_run_ops_worker():
     compiled = []
     compile_op = compile_cache._compile
 
-    def counting(module, args, kwargs, device_index):
+    def counting(module, args, kwargs, device_index, rows):
         compiled.append(tuple(args[0].shape))
-        return compile_op(module, args, kwargs, device_index)
+        return compile_op(module, args, kwargs, device_index, rows)
 
     compile_cache._compile = counting
     for rows in (1, 2, 3, 1, 4, 1, 2):

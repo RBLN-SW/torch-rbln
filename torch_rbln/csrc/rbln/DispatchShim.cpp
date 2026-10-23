@@ -1,6 +1,7 @@
 #include <torch_rbln/csrc/rbln/DispatchShim.h>
 #include <torch_rbln/csrc/rbln/WarmCache.h>
 
+#include <ATen/MemoryOverlap.h>
 #include <ATen/core/dispatch/Dispatcher.h>
 #include <ATen/core/stack.h>
 #include <ATen/native/rbln/RBLNCPUFallback.h>
@@ -9,11 +10,14 @@
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNSupportedDtypes.h>
+#include <rebel/v2/runtime/flags.h>
 #include <rebel/v2/runtime/precision.h>
 #include <torch/csrc/jit/python/pybind_utils.h>
 #include <torch/library.h>
 
+#include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -26,6 +30,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace torch_rbln::shim {
@@ -116,8 +121,18 @@ struct SchemaCache {
   size_t num_args = 0;
   size_t num_positional = 0;
   std::vector<c10::TypePtr> return_types; // parallel to schema returns
+  bool elementwise = false;
   bool populated = false;
 };
+
+const rt::Flag<bool> kEagerBuckets(
+    "TORCH_RBLN_EAGER_BUCKETS",
+    "Whether an eager elementwise op whose result has two or more rows along its leading axis runs a "
+    "function compiled for the bucket of that extent (1, 2, 3, 4, 6, 8, 12, 16, ...) over its rows, "
+    "rather than one compiled for the extent itself.",
+    false,
+    rt::parseBool,
+    rt::FlagMutability::kMutable);
 
 struct ShimEntry {
   pybind11::object py_fn;
@@ -238,7 +253,12 @@ ShimEntry* find_shim_entry(const std::string& op_name) {
   return it != r.end() ? &it->second : nullptr;
 }
 
-void populate_schema_cache(SchemaCache& cache, const c10::FunctionSchema& schema) {
+bool elementwise(const c10::OperatorHandle& op) {
+  return op.hasTag(at::Tag::pointwise) && !op.hasTag(at::Tag::nondeterministic_seeded);
+}
+
+void populate_schema_cache(SchemaCache& cache, const c10::OperatorHandle& op) {
+  const auto& schema = op.schema();
   const auto& args = schema.arguments();
   const auto& returns = schema.returns();
   cache.num_args = args.size();
@@ -263,6 +283,7 @@ void populate_schema_cache(SchemaCache& cache, const c10::FunctionSchema& schema
   for (const auto& r : returns) {
     cache.return_types.push_back(r.type());
   }
+  cache.elementwise = elementwise(op);
   cache.populated = true;
 }
 
@@ -584,17 +605,153 @@ bool build_cache_key(
   return true;
 }
 
+// The least bucket extent that holds rows: 1, 2, 3, 4, 6, 8, 12, 16, 24, ... A run computes fewer
+// than 1.5 times the rows it returns, and a growing extent compiles twice per doubling.
+int64_t bucket_extent(int64_t rows) {
+  const auto power = static_cast<int64_t>(std::bit_floor(static_cast<uint64_t>(rows)));
+  if (rows == power) {
+    return rows;
+  }
+  return rows <= power + power / 2 ? power + power / 2 : 2 * power;
+}
+
+// Rows bucket only when they hold a multiple of this many elements: the compiler computes an elementwise op on
+// the host or on the device by whether its sizes are multiples of it, and a bucket must not move a call across.
+constexpr int64_t kRowElements = 64;
+
+// A call's leading extent, the extent of its bucket, and the rank of its result.
+struct Bucket {
+  int64_t rows = 0;
+  int64_t extent = 0;
+  int64_t rank = 0;
+};
+
+// The bucket of a call over tensors, or none when it runs the function of its own extent. A call is
+// bucketed when TORCH_RBLN_EAGER_BUCKETS is on, every tensor is contiguous (a view recipe cannot take
+// a bucket), every tensor along the leading axis is on the device with rows of a multiple of
+// kRowElements elements, and the result has two or more rows.
+std::optional<Bucket> bucket_of(const CallTensors& tensors) {
+  if (tensors.empty() || !kEagerBuckets.value()) {
+    return std::nullopt;
+  }
+  int64_t rank = 0;
+  for (const auto* tensor : tensors) {
+    if (!tensor->is_contiguous()) {
+      return std::nullopt;
+    }
+    rank = std::max(rank, tensor->dim());
+  }
+  int64_t rows = 0;
+  for (const auto* tensor : tensors) {
+    if (tensor->dim() == rank && rank > 0) {
+      rows = std::max(rows, tensor->size(0));
+    }
+  }
+  if (rows < 2) {
+    return std::nullopt;
+  }
+  for (const auto* tensor : tensors) {
+    if (tensor->dim() == rank && tensor->size(0) == rows &&
+        (!tensor->device().is_privateuseone() || tensor->numel() / rows % kRowElements != 0)) {
+      return std::nullopt;
+    }
+  }
+  return Bucket{.rows = rows, .extent = bucket_extent(rows), .rank = rank};
+}
+
+// Whether the input `profile` describes stands at the extent of `bucket` in a key bucket_key made.
+bool at_bucket(const TensorProfile& profile, const Bucket& bucket) {
+  return static_cast<int64_t>(profile.shape.size()) == bucket.rank && profile.shape.front() == bucket.extent;
+}
+
+// `key`, which bucket_key made for `bucket`, as the key of the call's own extent.
+void unbucket(CacheKey& key, const Bucket& bucket) {
+  for (auto& input : key.inputs) {
+    if (at_bucket(input, bucket)) {
+      input.shape.front() = bucket.rows;
+    }
+  }
+  key.bucketed = false;
+}
+
+// The bucket of the call, as bucket_of gives it, with key set to the bucket's function: each tensor
+// of the result's rank and leading extent stands at the bucket's extent. An out that holds no
+// memory, or is the call's own (own_out), takes the result's memory; one that is not contiguous or
+// overlaps an input, as an in-place op's does, takes a copy. Any other out leaves the call unbucketed.
+std::optional<Bucket> bucket_key(
+    torch::jit::Stack* stack,
+    const SchemaCache& cache,
+    const CallTensors& tensors,
+    bool own_out,
+    CacheKey& key) {
+  if (!cache.elementwise || cache.return_types.size() != 1) {
+    return std::nullopt;
+  }
+  const auto bucket = bucket_of(tensors);
+  if (!bucket) {
+    return std::nullopt;
+  }
+  auto arguments = torch::jit::last(stack, cache.num_args);
+  for (size_t i = 0; i < cache.num_args; ++i) {
+    if (!cache.is_write_alias[i] || !arguments[i].isTensor() || !arguments[i].toTensor().defined()) {
+      continue;
+    }
+    const auto& out = arguments[i].toTensor();
+    const bool copied = !out.is_contiguous() || std::ranges::any_of(tensors, [&](const at::Tensor* t) {
+      return at::get_overlap_status(out, *t) != at::MemOverlapStatus::No;
+    });
+    if (!own_out && out.storage().nbytes() != 0 && !copied) {
+      return std::nullopt;
+    }
+  }
+  for (size_t i = 0; i < tensors.size(); ++i) {
+    if (tensors[i]->dim() == bucket->rank && tensors[i]->size(0) == bucket->rows) {
+      key.inputs[i].shape.front() = bucket->extent;
+    }
+  }
+  key.bucketed = true;
+  return bucket;
+}
+
 // Thread-local context that ties a just-computed CacheKey (built before the
 // pybind miss-path call) to the later pybind-exposed install hook called from
 // the Python wrapper after it compiles and runs the op, with the call's
-// tensors, which the wrapper's inputs are matched against.
+// tensors, which the wrapper's inputs are matched against, its op's name and
+// its bucket.
 struct PendingInstall {
   bool valid = false;
   CacheKey key;
   c10::SmallVector<const c10::TensorImpl*, 4> tensors;
+  const std::string* op = nullptr;
+  std::optional<Bucket> bucket;
 };
 
 thread_local PendingInstall t_pending;
+
+// Gives a shim call's Python wrapper a t_pending of its own: the scope keeps the
+// outer call's context, if any, and gives it back when the call returns, so that
+// a shim call the wrapper makes in turn does not take it.
+class PendingScope {
+ public:
+  PendingScope() {
+    if (t_pending.valid) {
+      outer_ = std::move(t_pending);
+      t_pending.valid = false;
+    }
+  }
+  ~PendingScope() {
+    if (outer_) {
+      t_pending = std::move(*outer_);
+    } else {
+      t_pending.valid = false;
+    }
+  }
+  PendingScope(const PendingScope&) = delete;
+  PendingScope& operator=(const PendingScope&) = delete;
+
+ private:
+  std::optional<PendingInstall> outer_;
+};
 
 // Take ownership of the pending context (single reader); installer clears it.
 PendingInstall take_pending() {
@@ -603,23 +760,67 @@ PendingInstall take_pending() {
   return p;
 }
 
+// The position among the pending call's tensors of each of `tensors`, when the
+// pending call is one of `op` and every one of `tensors` is one of its tensors.
+// A tensor passed twice takes its positions in order, as ``add(a, a)`` and
+// ``add(a, b)`` share a key.
+std::optional<c10::SmallVector<uint32_t, 4>> pending_positions(
+    const PendingInstall& p,
+    const std::string& op,
+    c10::ArrayRef<at::Tensor> tensors) {
+  if (!p.valid || p.op == nullptr || *p.op != op) {
+    return std::nullopt;
+  }
+  c10::SmallVector<uint32_t, 4> positions;
+  c10::SmallVector<bool, 4> taken(p.tensors.size(), false);
+  for (const auto& tensor : tensors) {
+    const auto* impl = tensor.unsafeGetTensorImpl();
+    std::optional<size_t> found;
+    for (size_t j = 0; j < p.tensors.size(); ++j) {
+      if (p.tensors[j] == impl && (!found || (taken[*found] && !taken[j]))) {
+        found = j;
+      }
+    }
+    if (!found) {
+      return std::nullopt;
+    }
+    taken[*found] = true;
+    positions.push_back(static_cast<uint32_t>(*found));
+  }
+  return positions;
+}
+
+// The out= overload whose next shim call on this thread has as its out the
+// result torch's structured kernel just allocated, which nothing else holds
+// (StructuredFunctional).
+thread_local const c10::FunctionSchema* t_own_out = nullptr;
+
 // Hot path: look up the warm-cache entry for `key` and, on hit, run its
 // OpFunction over the call's tensors from C++ — no pybind, no Python wrapper.
 // Returns true iff the hit path was taken and the stack has been left with the
 // return value. A call whose tensors the function cannot take as they are (a
 // view, an ``out`` of another shape) falls through to the Python wrapper; the
-// entry stays for later calls.
+// entry stays for later calls. A bucket whose entry has no function runs its
+// calls by the function of their own extent: `key` and `bucket` become the
+// call's own, for the miss path as well.
 bool try_warmcache_hit(
     torch::jit::Stack* stack,
     const SchemaCache& cache,
-    const CacheKey& key,
-    const CallTensors& tensors) {
+    CacheKey& key,
+    const CallTensors& tensors,
+    std::optional<Bucket>& bucket,
+    bool own_out) {
   auto& wc = WarmCache::instance();
   if (!wc.is_enabled() || cache.return_types.size() != 1)
     return false;
 
   const uint64_t _seg_t0 = now_ns();
   CacheEntryPtr entry = wc.find(key);
+  if (entry && !entry->function) {
+    unbucket(key, *bucket);
+    bucket.reset();
+    entry = wc.find(key);
+  }
   const uint64_t _seg_t_lookup = now_ns();
   if (!entry)
     return false;
@@ -638,19 +839,29 @@ bool try_warmcache_hit(
       break;
     }
   }
-  // An out that holds no memory yet, as a structured kernel hands over the
-  // result of a functional call, takes the memory of a result made for it.
+  // An out that holds no memory yet, as a composite kernel hands over, takes the memory
+  // of a result made for it, as does a bucketed call's own out.
   const auto& output = entry->function->outputs().front();
-  const bool fresh = out && out->storage().nbytes() == 0 && out->scalar_type() == output.dtype;
-  const bool bind_out = out && !fresh;
+  auto shape = output.shape;
+  if (bucket) {
+    shape.front() = bucket->rows;
+  }
+  const bool fresh = out && (out->storage().nbytes() == 0 || (own_out && bucket)) && out->scalar_type() == output.dtype;
+  const bool fits = out && out->scalar_type() == output.dtype && out->sizes() == c10::IntArrayRef(shape);
+  // A bucketed run makes a result of the bucket's rows, which the call's out cannot hold: an out of
+  // the call's shape takes a copy, and one of another shape goes to the wrapper.
+  if (out && !fresh && bucket && !fits) {
+    return false;
+  }
+  const bool bind_out = out && !fresh && !bucket;
   auto results = entry->function->run(
       inputs, bind_out ? c10::ArrayRef<std::optional<at::Tensor>>(*out) : c10::ArrayRef<std::optional<at::Tensor>>());
-  // An out the function cannot write where it is, as one an in-place op shares
-  // with an input, takes a copy of a result made for it.
-  const bool copied =
-      bind_out && !results && out->scalar_type() == output.dtype && out->sizes() == c10::IntArrayRef(output.shape);
-  if (copied) {
+  bool copied = out && !fresh && bucket;
+  // An unbucketed out the function cannot write where it is, as one an in-place op shares with an
+  // input, takes a copy of a result made for it.
+  if (bind_out && !results && fits) {
     results = entry->function->run(inputs);
+    copied = true;
   }
   const uint64_t _seg_t_run = now_ns();
   if (!results) {
@@ -676,6 +887,10 @@ bool try_warmcache_hit(
 // The boxed kernel that Library::impl points at for every shimmed op.
 void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack) {
   g_diag_n_total.fetch_add(1, std::memory_order_relaxed);
+  const bool own_out = t_own_out == &op.schema();
+  if (own_out) {
+    t_own_out = nullptr;
+  }
   // Build the fully-qualified key as "<namespace>::<name>[.overload]" so it
   // matches what register_cpp_shim stored (e.g. "aten::add.out").
   std::string op_name = op.schema().name();
@@ -690,7 +905,7 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
     entry = find_shim_entry(op_name);
     TORCH_CHECK(entry != nullptr, "No Python impl registered for shim op: ", op_name);
     if (!entry->schema_cache.populated) {
-      populate_schema_cache(entry->schema_cache, op.schema());
+      populate_schema_cache(entry->schema_cache, op);
     }
   }
 
@@ -739,9 +954,11 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
   CacheKey key;
   CallTensors tensors;
   const bool key_ok = build_cache_key(stack, cache, op_name_intern, key, tensors);
+  std::optional<Bucket> bucket;
   if (key_ok) {
+    bucket = bucket_key(stack, cache, tensors, own_out, key);
     const uint64_t _diag_warm_t0 = now_ns();
-    const bool hit = try_warmcache_hit(stack, cache, key, tensors);
+    const bool hit = try_warmcache_hit(stack, cache, key, tensors, bucket, own_out);
     if (hit) {
       g_diag_n_warm_hit.fetch_add(1, std::memory_order_relaxed);
       g_diag_ns_warm_hit.fetch_add(now_ns() - _diag_warm_t0, std::memory_order_relaxed);
@@ -750,10 +967,10 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
   }
 
   // MISS path: set up thread-local pending install so the Python wrapper can
-  // call `_warmcache_install_pending(function, inputs)` once it finishes
-  // compile + first run. The pending context is discarded unconditionally at
-  // the end of this function (even on failure / exception) to avoid leaking
-  // into subsequent unrelated ops on the same thread.
+  // call `_warmcache_install_pending(op, function, inputs)` once it finishes
+  // compile + first run. The pending context is discarded at the end of this
+  // function (even on failure / exception) to avoid leaking into subsequent
+  // unrelated ops on the same thread.
   g_diag_n_miss.fetch_add(1, std::memory_order_relaxed);
   if (entry->recompile_ctr != nullptr) {
     entry->recompile_ctr->fetch_add(1, std::memory_order_relaxed); // per-op attribution (same slow miss branch)
@@ -768,6 +985,7 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
       g_diag_ns_miss.fetch_add(now_ns() - t0, std::memory_order_relaxed);
     }
   } _diag_miss_guard{_diag_miss_t0};
+  const PendingScope pending;
   if (key_ok) {
     t_pending.valid = true;
     t_pending.key = std::move(key);
@@ -775,8 +993,8 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
     for (const auto* t : tensors) {
       t_pending.tensors.push_back(t->unsafeGetTensorImpl());
     }
-  } else {
-    t_pending.valid = false;
+    t_pending.op = &op.schema().name();
+    t_pending.bucket = bucket;
   }
 
   pybind11::gil_scoped_acquire gil;
@@ -791,9 +1009,20 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
   pybind11::object out_obj = pybind11::none();
   size_t pos_idx = 0;
 
+  // The wrapper gets a stand-in with no memory for a bucketed call's own out. The
+  // stand-in takes the result's memory, and the out then takes the stand-in's.
+  std::optional<at::Tensor> own;
+  at::Tensor stand_in;
   auto arguments = torch::jit::last(stack, cache.num_args);
   for (size_t i = 0; i < cache.num_args; ++i) {
-    pybind11::object val = torch::jit::toPyObject(arguments[i]);
+    pybind11::object val;
+    if (own_out && bucket && cache.is_write_alias[i] && arguments[i].isTensor() && arguments[i].toTensor().defined()) {
+      own = arguments[i].toTensor();
+      stand_in = at::empty({0}, own->options());
+      val = torch::jit::toPyObject(c10::IValue(stand_in));
+    } else {
+      val = torch::jit::toPyObject(arguments[i]);
+    }
     if (cache.is_kwarg_only[i]) {
       kwargs[cache.arg_names[i].c_str()] = val;
       if (static_cast<int>(i) == cache.out_positional_idx) {
@@ -804,17 +1033,11 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
     }
   }
 
-  pybind11::object result;
-  try {
-    result = py_fn_copy(*pos_tup, **kwargs);
-  } catch (...) {
-    t_pending.valid = false; // scrub stale context on exception
-    throw;
+  pybind11::object result = py_fn_copy(*pos_tup, **kwargs);
+  if (own) {
+    own->set_(stand_in);
+    out_obj = torch::jit::toPyObject(c10::IValue(*own));
   }
-
-  // Drop pending regardless of what Python did (install_pending, if called,
-  // already cleared t_pending via take_pending()).
-  t_pending.valid = false;
 
   torch::jit::drop(stack, cache.num_args);
 
@@ -845,6 +1068,65 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
     auto iv = torch::jit::toIValue(v, cache.return_types[i]);
     torch::jit::push(stack, iv);
   }
+}
+
+// Runs torch's structured kernel of a shimmed elementwise op's functional
+// overload, which checks the call, allocates the result and calls the out=
+// overload. The result is marked as the call's own, so that a bucketed out= call
+// gives it the bucket's storage instead of copying into it (see bucket_key).
+class StructuredFunctional final : public c10::OperatorKernel {
+ public:
+  StructuredFunctional(c10::SafeKernelFunction kernel, const c10::FunctionSchema& out)
+      : kernel_(std::move(kernel)), out_(&out) {}
+
+  void operator()(const c10::OperatorHandle& op, c10::DispatchKeySet keys, torch::jit::Stack* stack) const {
+    struct Own {
+      explicit Own(const c10::FunctionSchema* out) : outer(std::exchange(t_own_out, out)) {}
+      ~Own() {
+        t_own_out = outer;
+      }
+      const c10::FunctionSchema* outer;
+    } own(out_);
+    kernel_.callBoxed(op, keys, stack);
+  }
+
+ private:
+  c10::SafeKernelFunction kernel_;
+  const c10::FunctionSchema* out_;
+};
+
+// The functional overload of `out_op`, an out= overload of an elementwise op,
+// that torch runs through its structured kernel: the overload of the same name
+// with a CompositeExplicitAutogradNonFunctional kernel, which torchgen gives a
+// structured op, and the same arguments but the out.
+std::optional<c10::OperatorHandle> structured_functional_of(const c10::OperatorHandle& out_op) {
+  const auto& schema = out_op.schema();
+  const auto& args = schema.arguments();
+  if (!elementwise(out_op) || args.empty() || args.back().alias_info() == nullptr ||
+      !args.back().alias_info()->isWrite() || schema.returns().size() != 1) {
+    return std::nullopt;
+  }
+  auto& dispatcher = c10::Dispatcher::singleton();
+  for (const auto& name :
+       dispatcher.getAllOpNamesForDispatchKey(c10::DispatchKey::CompositeExplicitAutogradNonFunctional)) {
+    if (name.name != schema.name() || name.overload_name == schema.overload_name()) {
+      continue;
+    }
+    auto handle = dispatcher.findOp(name);
+    if (!handle) {
+      continue;
+    }
+    const auto& f = handle->schema().arguments();
+    const bool same = f.size() + 1 == args.size() && handle->schema().returns().size() == 1 &&
+        std::equal(f.begin(), f.end(), args.begin(), [](const c10::Argument& a, const c10::Argument& b) {
+                        return a.name() == b.name() && *a.type() == *b.type() && a.kwarg_only() == b.kwarg_only() &&
+                            a.alias_info() == nullptr;
+                      });
+    if (same) {
+      return handle;
+    }
+  }
+  return std::nullopt;
 }
 
 // Extract the overload-qualified name `foo.bar` from a fully-qualified
@@ -900,6 +1182,20 @@ void register_cpp_shim(const std::string& op_name, pybind11::object py_fn, const
       static_cast<uint32_t>(__LINE__));
   const std::string overload = strip_namespace(op_name);
   lib->impl(overload.c_str(), torch::CppFunction::makeFromBoxedFunction<&generic_shim_boxed>());
+  const auto dot = overload.find('.');
+  const auto out_op = c10::Dispatcher::singleton().findOp(
+      {"aten::" + overload.substr(0, dot), dot == std::string::npos ? "" : overload.substr(dot + 1)});
+  if (const auto functional = out_op ? structured_functional_of(*out_op) : std::nullopt) {
+    const auto name = c10::toString(functional->schema().operator_name());
+    TORCH_INTERNAL_ASSERT(
+        !functional->hasKernelForDispatchKey(c10::DispatchKey::PrivateUse1),
+        name,
+        " has a PrivateUse1 kernel of its own, which StructuredFunctional would replace");
+    lib->impl(
+        strip_namespace(name).c_str(),
+        torch::CppFunction::makeFromBoxedFunctor(std::make_unique<StructuredFunctional>(
+            functional->getComputedKernelForDispatchKey(c10::DispatchKey::PrivateUse1), out_op->schema())));
+  }
   installed_libs().push_back(std::move(lib));
 }
 
@@ -1027,30 +1323,51 @@ void diag_reset_trace_by_op() {
 // compile and run of `function` over `inputs`.
 // ---------------------------------------------------------------------------
 
-bool install_warmcache_from_pending(std::shared_ptr<OpFunction> function, const std::vector<at::Tensor>& inputs) {
+std::optional<std::pair<int64_t, std::vector<size_t>>> pending_bucket(
+    const std::string& op,
+    const std::vector<at::Tensor>& tensors) {
+  const auto& p = t_pending;
+  const auto positions = pending_positions(p, op, tensors);
+  if (!positions || !p.bucket) {
+    return std::nullopt;
+  }
+  std::vector<size_t> rows;
+  for (size_t i = 0; i < positions->size(); ++i) {
+    if (at_bucket(p.key.inputs[(*positions)[i]], *p.bucket)) {
+      rows.push_back(i);
+    }
+  }
+  if (rows.empty()) {
+    return std::nullopt;
+  }
+  return std::pair{p.bucket->extent, std::move(rows)};
+}
+
+bool install_warmcache_from_pending(
+    const std::string& op,
+    std::shared_ptr<OpFunction> function,
+    const std::vector<at::Tensor>& inputs) {
   PendingInstall p = take_pending();
-  if (!p.valid || function->outputs().size() != 1 || inputs.size() != function->num_inputs())
+  if (function->outputs().size() != 1 || inputs.size() != function->num_inputs())
+    return false;
+  auto positions = pending_positions(p, op, inputs);
+  if (!positions)
     return false;
 
-  // Inputs must be the call's own tensors; one passed twice takes its positions
-  // in order, as ``add(a, a)`` and ``add(a, b)`` share a key.
-  CacheEntry entry;
-  entry.function = std::move(function);
-  std::vector<bool> taken(p.tensors.size(), false);
-  for (const auto& input : inputs) {
-    const auto* impl = input.unsafeGetTensorImpl();
-    std::optional<size_t> found;
-    for (size_t j = 0; j < p.tensors.size(); ++j) {
-      if (p.tensors[j] == impl && (!found || (taken[*found] && !taken[j]))) {
-        found = j;
-      }
-    }
-    if (!found)
-      return false;
-    taken[*found] = true;
-    entry.inputs.push_back(static_cast<uint32_t>(*found));
+  CacheEntry entry{.function = std::move(function), .inputs = std::move(*positions)};
+  TORCH_INTERNAL_ASSERT(
+      p.bucket || !entry.function->row_wise(), "a function computed by rows ran over a call that is not bucketed");
+  auto& wc = WarmCache::instance();
+  // A bucketed call the wrapper ran by the function of its own extent leaves its bucket
+  // an entry with no function, so that later calls of the bucket run by theirs.
+  if (p.bucket && !entry.function->row_wise()) {
+    auto own = p.key;
+    unbucket(own, *p.bucket);
+    wc.install(std::move(p.key), CacheEntry{});
+    wc.install(std::move(own), entry);
+    return true;
   }
-  WarmCache::instance().install(std::move(p.key), entry);
+  wc.install(std::move(p.key), entry);
   return true;
 }
 

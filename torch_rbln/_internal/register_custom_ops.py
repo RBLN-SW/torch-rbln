@@ -26,7 +26,7 @@ def custom_softmax_out_rbln(self, dim: int, half_to_float: bool, *, out=None):
         # device alongside softmax.
         result_tensor = compile_and_run_view_aware(
             torch.softmax,
-            "aten::softmax",
+            "aten::_softmax",
             (self,),
             {"dim": dim},
             out,

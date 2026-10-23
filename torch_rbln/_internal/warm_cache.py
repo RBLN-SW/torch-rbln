@@ -9,8 +9,8 @@ warm cache), the C++ shim:
   2. Calls the generated Python wrapper (e.g. ``add_out_rbln``) via pybind.
 
 The wrapper compiles the op into a ``torch_rbln._C._OpFunction``, runs it,
-and calls :func:`install_pending` with the function and the tensors it ran
-over. The C++ side matches those tensors to the call's by identity and inserts
+and calls :func:`install_pending` with the op, the function and the tensors it
+ran over. The C++ side matches those tensors to the call's by identity and inserts
 a ``CacheEntry`` keyed by (op name, input profile, scalars). A wrapper that ran
 the function over tensors of its own making (a copy, a view's base) installs
 nothing: the hit path binds the call's tensors as they are.
@@ -32,10 +32,18 @@ if TYPE_CHECKING:
     import torch
 
 
-def install_pending(function: Any, tensors: list[torch.Tensor]) -> bool:
+def pending_bucket(op: str, tensors: list[torch.Tensor]) -> tuple[int, list[int]] | None:
+    """The bucket extent of the call the shim hands to this wrapper, with the
+    positions among ``tensors`` of those that stand at it, or None when the shim
+    does not bucket the call (``TORCH_RBLN_EAGER_BUCKETS``) or it is not a call
+    of ``op`` over ``tensors``."""
+    return _C._warmcache_pending_bucket(op, tensors)
+
+
+def install_pending(op: str, function: Any, tensors: list[torch.Tensor]) -> bool:
     if not _C._warmcache_is_enabled():
         return False
-    return bool(_C._warmcache_install_pending(function, tensors))
+    return bool(_C._warmcache_install_pending(op, function, tensors))
 
 
 # ---------------------------------------------------------------------------

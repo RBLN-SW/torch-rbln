@@ -15,6 +15,14 @@ reuses a function a process sharing the compile cache directory made
 (``env_utils.compile_cache_dir``). It takes it from there without capturing the
 op again when the op and every argument have a name all processes give them
 (``_stored_key``), and finds it by the captured graph otherwise.
+
+An elementwise op can instead be compiled for a bucket of rows: the tensors the
+dispatch shim names (``warm_cache.pending_bucket``) are replaced by meta tensors
+of the bucket's extent, and the function computes each row of its result from
+that row of those tensors alone, so that it serves every call of as many rows or
+fewer (see ``_C._OpFunction``'s ``rows``). A call whose bucket the compiler
+refuses, or whose function cannot compute by rows, gets the function of its own
+extent.
 """
 
 from __future__ import annotations
@@ -27,7 +35,7 @@ import sys
 import threading
 from pathlib import Path
 from types import BuiltinFunctionType, FunctionType
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import torch
 from torch._subclasses.fake_tensor import FakeTensorMode
@@ -35,6 +43,10 @@ from torch.utils._pytree import tree_flatten, tree_unflatten
 
 import torch_rbln._C as _C
 from torch_rbln._internal.env_utils import compile_cache_dir
+
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 _compiled_op_cache_lock = threading.Lock()
@@ -158,7 +170,18 @@ def compile_logical(graph: Any, npu: str, cache_dir: Any = None) -> Any:
         return e.function
 
 
-def _compile(module: Any, args: tuple, kwargs: dict, device_index: int) -> CompiledOp:
+def _at_bucket(args: tuple, kwargs: dict, extent: int, rows: tuple[int, ...]) -> tuple[tuple, dict]:
+    """``args`` and ``kwargs`` with the tensors at positions ``rows`` among the
+    call's tensors replaced by meta tensors of ``extent`` rows."""
+    flat, spec = tree_flatten((args, kwargs))
+    slots = [i for i, v in enumerate(flat) if isinstance(v, torch.Tensor)]
+    for position in rows:
+        tensor = flat[slots[position]]
+        flat[slots[position]] = torch.empty((extent, *tensor.shape[1:]), dtype=tensor.dtype, device="meta")
+    return tree_unflatten(flat, spec)
+
+
+def _compile(module: Any, args: tuple, kwargs: dict, device_index: int, rows: tuple[int, ...] = ()) -> CompiledOp:
     from rebel import v2
 
     flat, spec = tree_flatten((args, kwargs))
@@ -184,7 +207,7 @@ def _compile(module: Any, args: tuple, kwargs: dict, device_index: int) -> Compi
             entry = io.BytesIO()
             torch.save({"function": function, "names": names, "state": state}, entry)
             v2.api.store_entry(key, entry.getvalue(), directory)
-    return CompiledOp(_C._OpFunction(function, names, state), out_spec)
+    return CompiledOp(_C._OpFunction(function, names, state, rows=list(rows)), out_spec)
 
 
 def _stored_key(module: Any, args: tuple, kwargs: dict, npu: str, precision: str) -> str | None:
@@ -309,28 +332,50 @@ class _Refused:
         self.error = error
 
 
-def compiled_op(module: Any, args: tuple, kwargs: dict, device: torch.device) -> CompiledOp:
+def compiled_op(
+    module: Any, args: tuple, kwargs: dict, device: torch.device, bucket: tuple[int, Sequence[int]] | None = None
+) -> CompiledOp:
     """The function of ``module`` for the profile of ``args`` and ``kwargs``,
-    compiled on first use for the NPU of ``device``.
+    compiled on first use for the NPU of ``device``. With ``bucket``, the extent
+    of a bucket and the positions of the tensors that stand at it, it is the
+    function of an elementwise ``module`` for that bucket, which computes by
+    rows, unless the compiler refuses the bucket or its function cannot compute
+    by rows.
 
     Raises:
         UncompilableOp: the compiler refused this profile, now or on an earlier call.
     """
     from rebel import v2
 
-    key = (_IdentityKey(module), _npu(device.index), v2.float32_precision(), _profile(args), _profile(kwargs))
+    if bucket is not None:
+        extent, rows = bucket
+        entry = _entry(module, *_at_bucket(args, kwargs, extent, tuple(rows)), device, tuple(rows))
+        if isinstance(entry, CompiledOp) and entry.function.row_wise:
+            return entry
+    entry = _entry(module, args, kwargs, device, ())
+    if isinstance(entry, _Refused):
+        raise UncompilableOp(str(entry.error), isinstance(entry.error, v2.frontend.NoLowering)) from entry.error
+    return entry
+
+
+def _entry(
+    module: Any, args: tuple, kwargs: dict, device: torch.device, rows: tuple[int, ...]
+) -> CompiledOp | _Refused:
+    """What the cache keeps for ``module`` over the profile of ``args`` and
+    ``kwargs`` with ``rows``, compiled on first use."""
+    from rebel import v2
+
+    key = (_IdentityKey(module), _npu(device.index), v2.float32_precision(), _profile(args), _profile(kwargs), rows)
     entry = _compiled_op_cache.get(key)
     if entry is None:
         with _compiled_op_cache_lock:
             entry = _compiled_op_cache.get(key)
             if entry is None:
                 try:
-                    entry = _compile(module, args, kwargs, device.index)
+                    entry = _compile(module, args, kwargs, device.index, rows)
                 except (NotImplementedError, ValueError, RuntimeError) as e:
                     entry = _Refused(e)
                 _keep(key, entry)
-    if isinstance(entry, _Refused):
-        raise UncompilableOp(str(entry.error), isinstance(entry.error, v2.frontend.NoLowering)) from entry.error
     return entry
 
 

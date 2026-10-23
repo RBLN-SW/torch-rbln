@@ -99,10 +99,13 @@ struct CacheKey {
   c10::SmallVector<ScalarValue, 4> scalars;
   // An op that makes a float32 value compiles to another program at each.
   ::rebel::v2::runtime::Float32Precision float32_precision{};
+  // Whether the inputs along the result's leading axis stand at the extent of
+  // its bucket, for a function that takes fewer rows there.
+  bool bucketed{false};
 
   bool operator==(const CacheKey& o) const noexcept {
     return schema_name_intern == o.schema_name_intern && inputs == o.inputs && scalars == o.scalars &&
-        float32_precision == o.float32_precision;
+        float32_precision == o.float32_precision && bucketed == o.bucketed;
   }
 };
 
@@ -111,6 +114,7 @@ struct CacheKeyHash {
 };
 
 struct CacheEntry {
+  // None under a bucketed key whose calls run the function of their own extent.
   std::shared_ptr<OpFunction> function;
   // For each input of `function`, the position of the tensor it takes among the
   // call's tensor arguments, as ``build_cache_key`` walks them.
