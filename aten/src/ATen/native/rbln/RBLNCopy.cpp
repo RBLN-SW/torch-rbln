@@ -416,20 +416,26 @@ void tensor_copy_from_rbln_to_rbln(const at::Tensor& rbln_src, const at::Tensor&
     return;
   }
 
-  // Strided copy: route to the on-device v2v engine while the outer iteration
-  // count stays within ::rbln::kMaxV2VMultiCopies. A larger fan-out would still
-  // reach the device — V2VBatch::submit splits a batch at that cap — but it
-  // pays one descriptor per contiguous run, and where that stops beating the
-  // host bounce below is unmeasured, so a fan-out past the cap takes the
-  // bounce.
+  // Strided copy: route to the on-device v2v engine while the strided descriptor
+  // count stays within ::rbln::kMaxV2VMultiCopies. Where the device supports it
+  // (REBEL), V2VBatch hands the largest outer dim to the runtime as one
+  // descriptor, so only the other dims count; elsewhere every run counts. A
+  // larger fan-out would still reach the device — V2VBatch::submit splits a
+  // batch at that cap — but it pays one descriptor per contiguous run, and
+  // where that stops beating the host bounce below is unmeasured, so a fan-out
+  // past the cap takes the bounce.
   if (rbln_src.sizes() == rbln_dst.sizes() && rbln_src.scalar_type() == rbln_dst.scalar_type() &&
       rbln_src.device() == rbln_dst.device()) {
     const auto inner_start = common_inner_start(rbln_src.sizes(), rbln_src.strides(), rbln_dst.strides());
     int64_t outer_count = 1;
+    int64_t largest = 1;
     for (int64_t i = 0; i < inner_start; ++i) {
       outer_count *= rbln_src.size(i);
+      largest = std::max(largest, rbln_src.size(i));
     }
-    if (outer_count <= static_cast<int64_t>(::rbln::kMaxV2VMultiCopies)) {
+    const int64_t descriptor_count =
+        c10::rbln::memcpy_v2v_strided_supported(rbln_src.device().index()) ? outer_count / largest : outer_count;
+    if (descriptor_count <= static_cast<int64_t>(::rbln::kMaxV2VMultiCopies)) {
       strided_v2v_copy(rbln_dst, rbln_src);
       return;
     }

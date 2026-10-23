@@ -494,6 +494,34 @@ struct C10_RBLN_API V2VCopyOp {
 C10_RBLN_API void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies);
 
 /**
+ * @brief One strided device-to-device copy: `count` chunks of `chunk_bytes`,
+ *        chunk i reading src + i * src_stride and writing dst + i * dst_stride.
+ */
+struct C10_RBLN_API V2VStridedCopyOp {
+  void* dst;
+  const void* src;
+  size_t chunk_bytes;
+  size_t count;
+  int64_t src_stride;
+  int64_t dst_stride;
+};
+
+/**
+ * @brief Batched strided device-to-device copy through rbln_memcpy_v2v_strided_multi.
+ *
+ * Same caller contract as memcpy_v2v_multi. Strides must be non-negative. A failure
+ * reports "rbln_memcpy_v2v_multi failed" so submit_or_fallback treats it the same.
+ */
+C10_RBLN_API void memcpy_v2v_strided_multi(const std::vector<V2VStridedCopyOp>& copies);
+
+/**
+ * @brief Whether the device runs memcpy_v2v_strided_multi copies as-is. Where it
+ *        does not, the runtime expands each copy into chunks, so callers keep
+ *        expanding (and gating on chunk count) themselves.
+ */
+C10_RBLN_API bool memcpy_v2v_strided_supported(c10::DeviceIndex device);
+
+/**
  * @brief Descriptor for one host-to-device slab copy used by memcpy_h2v_multi.
  *
  * Layout matches V2VCopyOp / V2HCopyOp; the type is distinct on purpose. On LP64

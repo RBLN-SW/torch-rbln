@@ -8,10 +8,11 @@ Neither fits a copy that is one reshape away from contiguous -- a KV block read
 head-major and written token-major breaks into runs of a single head_size row, far past
 the cap. Replaying the view inside a compiled graph moves it in one program instead.
 
-Which route ran is observable, and it takes two counters, not one. Every shape here is
-past the strided engine's cap, so without the program the copy round-trips the host and
-the profiler records a bounce -- that separates "served" from "declined", which the
-result cannot, since the slow routes are correct too. But a served copy can still reach
+Which route ran is observable, and it takes two counters, not one. Without the program
+the copy either round-trips the host, recorded as a bounce, or -- where the device runs
+strided copies as-is -- goes to the strided engine, recorded as a v2v_multi call. Either
+separates "served" from "declined", which the result cannot, since the slow routes are
+correct too. But a served copy can still reach
 the host: below the compiler's last-dim alignment the program is lowered with its input
 on the host, and the runtime feeds it there without any bounce being recorded. So the
 served cases also assert that the runtime ran no host primitive.
@@ -27,8 +28,8 @@ from test.utils import requires_logical_devices
 from test.utils_v2v import to_dev as _to_dev
 
 
-# Past ::rbln::kMaxV2VMultiCopies once permuted: the strided engine declines and the
-# alternative is a host bounce, which is what makes the route observable.
+# Past ::rbln::kMaxV2VMultiCopies once permuted when every run is its own copy, so without
+# strided support the alternative to the program is a host bounce.
 _ROWS, _HEADS, _BLOCK, _DIM = 2, 4, 256, 128
 
 
@@ -50,6 +51,14 @@ def _copy_and_count(dst: torch.Tensor, src: torch.Tensor) -> tuple[int, dict]:
         dst.copy_(src)
     report = p.dump()
     return _bounces(report), _host_primitives(report)
+
+
+def _declined(dst: torch.Tensor, src: torch.Tensor) -> bool:
+    """The copy took a route other than the program: a host bounce or the strided engine."""
+    with torch.rbln.explain() as p:
+        dst.copy_(src)
+    report = p.dump()
+    return _bounces(report) > 0 or "v2v_multi" in report["rebel_runtime"]["by_primitive"]
 
 
 # View chains the detector classifies. Each maps a contiguous host tensor to the view
@@ -97,6 +106,13 @@ class TestViewCopy(TestCase):
         bounces, host_primitives = _copy_and_count(dst, src)
         return (bounces, host_primitives), dst.cpu(), view_fn(host).contiguous()
 
+    def _run_declined(self, shape, view_fn, dtype=torch.bfloat16):
+        """Returns (declined, device result, host reference)."""
+        host = torch.randint(-1000, 1000, shape).to(dtype)
+        src = view_fn(_to_dev(host))
+        dst = torch.empty(src.shape, dtype=dtype, device=src.device)
+        return _declined(dst, src), dst.cpu(), view_fn(host).contiguous()
+
     # ---- chains the program serves ----
 
     @parametrize("chain", sorted(_CHAINS))
@@ -136,8 +152,8 @@ class TestViewCopy(TestCase):
         """Only bf16 reaches the device as itself; the rest are rewritten to a narrower
         float, and ``copy_`` is not a compute op -- both routes have to agree."""
         shape, view_fn = _CHAINS["permute"]
-        (bounces, _), got, want = self._run(shape, view_fn, dtype=dtype)
-        self.assertGreater(bounces, 0, f"{dtype} must not take the program")
+        declined, got, want = self._run_declined(shape, view_fn, dtype=dtype)
+        self.assertTrue(declined, f"{dtype} must not take the program")
         self.assertTrue(torch.equal(got, want))
 
     @parametrize("last_dim", [96, 127, 1])
@@ -145,8 +161,8 @@ class TestViewCopy(TestCase):
         """Below the compiler's last-dim alignment the tensor stays on the host, where
         the program is orders of magnitude slower than the walk it would replace."""
         shape = (_ROWS, _HEADS, _BLOCK, last_dim)
-        (bounces, _), got, want = self._run(shape, lambda t: t.permute(0, 2, 1, 3))
-        self.assertGreater(bounces, 0, f"last dim {last_dim} must not take the program")
+        declined, got, want = self._run_declined(shape, lambda t: t.permute(0, 2, 1, 3))
+        self.assertTrue(declined, f"last dim {last_dim} must not take the program")
         self.assertTrue(torch.equal(got, want))
 
     def test_a_strided_destination_keeps_the_slow_route(self, device):
@@ -155,8 +171,7 @@ class TestViewCopy(TestCase):
         host = torch.randint(-1000, 1000, (_ROWS, _HEADS, _BLOCK, _DIM)).to(torch.bfloat16)
         src = _to_dev(host)
         dst = torch.empty((_ROWS, _BLOCK, _HEADS, _DIM), dtype=torch.bfloat16, device=src.device).permute(0, 2, 1, 3)
-        bounces, _ = _copy_and_count(dst, src)
-        self.assertGreater(bounces, 0, "a strided destination must not take the program")
+        self.assertTrue(_declined(dst, src), "a strided destination must not take the program")
         self.assertTrue(torch.equal(dst.contiguous().cpu(), host))
 
     def test_an_unclassifiable_view_keeps_the_slow_route(self, device):
@@ -168,8 +183,7 @@ class TestViewCopy(TestCase):
         sizes, strides = (_ROWS, _HEADS, _BLOCK, _DIM), (100000, 20000, _DIM + 1, 1)
         src = _to_dev(host).as_strided(sizes, strides, 0)
         dst = torch.empty(sizes, dtype=torch.bfloat16, device=src.device)
-        bounces, _ = _copy_and_count(dst, src)
-        self.assertGreater(bounces, 0, "an unclassified view must not take the program")
+        self.assertTrue(_declined(dst, src), "an unclassified view must not take the program")
         self.assertTrue(torch.equal(dst.cpu(), host.as_strided(sizes, strides, 0).contiguous()))
 
     def test_a_contiguous_copy_is_untouched(self, device):
