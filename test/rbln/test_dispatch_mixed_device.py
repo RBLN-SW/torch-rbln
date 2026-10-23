@@ -57,7 +57,6 @@ def _run(**env):
     return ast.literal_eval(lines[-1][len("RESULT ") :])
 
 
-@pytest.mark.test_set_ci
 @needs_device
 class TestMixedDeviceOperands(TestCase):
     def test_extended_catalog_keeps_stock_device_semantics(self):

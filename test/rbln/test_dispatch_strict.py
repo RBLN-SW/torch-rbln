@@ -132,7 +132,6 @@ def _run_nan_scenario(**env) -> tuple[int, bool, bool]:
     return int(hits), ast.literal_eval(is_nan), ast.literal_eval(is_inf)
 
 
-@pytest.mark.test_set_ci
 class TestStrictCatalog(TestCase):
     def test_env_parsing(self):
         with pytest.MonkeyPatch.context() as mp:
@@ -150,7 +149,6 @@ class TestStrictCatalog(TestCase):
             self.assertEqual(_C._dispatch_strict_dtypes(), (torch.int32,))  # the bad value left no partial state
 
 
-@pytest.mark.test_set_ci
 @needs_device
 class TestStrictDispatch(TestCase):
     def test_default_policy_keeps_unaligned_bf16_on_host(self):
