@@ -25,7 +25,7 @@ import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
-from test.utils import requires_logical_devices
+from test.utils import requires_devices
 from test.utils_v2v import to_dev as _to_dev
 
 
@@ -200,7 +200,7 @@ class TestViewCopy(TestCase):
         self.assertEqual(host_primitives, {}, "an offset destination must stay on device")
         self.assertTrue(torch.equal(dst.cpu(), host.permute(0, 2, 1, 3).contiguous()))
 
-    @requires_logical_devices(2)
+    @requires_devices(2)
     def test_a_copy_across_devices_is_untouched(self, device):
         """One program reads and writes one device, so a copy that crosses them is not
         this path's -- and taking it anyway writes the wrong buffer, not just a slow one."""

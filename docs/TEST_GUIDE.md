@@ -52,7 +52,7 @@ test/
 │   ├── test_abi_check.py                  # rbln ABI id check between this build and the runtime it runs on
 │   ├── test_custom_kernel.py              # RBLN custom kernels
 │   ├── test_custom_op_compile.py          # Paged-attention custom ops inside a larger compiled graph (engine graph mode)
-│   ├── test_device_mapping.py             # Device mapping and topology APIs
+│   ├── test_device_mapping.py             # Device-to-NPU mapping and the RBLN_* variables that select it
 │   ├── test_env_diagnostic.py             # python -m torch_rbln.diagnose and the report it prints
 │   ├── test_graph_eager_mode.py           # Numerical agreement between torch.compile graph mode and eager mode
 │   ├── test_internal_op_utils.py          # Internal op utilities
@@ -64,7 +64,6 @@ test/
 │   ├── test_rbln_apis.py                  # RBLN Python APIs
 │   ├── test_rbln_runtime_lib.py           # Finding the librebel_v2_rt.so the rebel.v2 package maps, and the single-copy check
 │   ├── test_registered_ops.py             # All natively registered and fallback ops from RBLNRegisterOps.cpp / register_ops.py
-│   ├── test_rsd_kv_cache.py               # Persistent KV cache under RSD: two programs + eager access on a buffer sharded across NPUs
 │   ├── test_sdpa_decode_overflow.py       # SDPA decode-phase overflow detection and fallback behavior
 │   ├── test_tensor_copy.py                # Tensor copy operations across directions (H2D, D2H, D2D) and dtypes
 │   ├── test_tensor_memory.py              # Device memory allocation and lifetime management
@@ -105,7 +104,7 @@ test/
 | `run_tests.py` | Unified test runner — handles suite selection, CI/release marker filtering, and parallel/serial worker splitting                                     |
 | `conftest.py`  | Auto-use fixtures applied to every test: deterministic seeding, TorchDynamo reset, and `TORCH_RBLN_DISABLE_FALLBACK` env-var isolation               |
 | `filters.py`   | Parses `native_functions.yaml` for `PrivateUse1` dispatch keys; defines which upstream op tests to skip                                              |
-| `utils.py`     | Shared helpers — `SUPPORTED_DTYPES`, `set_deterministic_seeds()`, `requires_logical_devices`, `requires_physical_devices`, `run_in_isolated_process` |
+| `utils.py`     | Shared helpers — `SUPPORTED_DTYPES`, `set_deterministic_seeds()`, `requires_devices`, `requires_physical_devices`, `run_in_isolated_process` |
 
 ---
 
@@ -322,7 +321,7 @@ instantiate_device_type_tests(TestRegisteredNativeOps, globals(), only_for="priv
 
 | Decorator / Utility                    | Description                                                                                                                     |
 |----------------------------------------|---------------------------------------------------------------------------------------------------------------------------------|
-| `@requires_logical_devices(N)`         | `pytest.mark.skipif` — skips if `torch.rbln.device_count() < N`.                                                                |
+| `@requires_devices(N)`                 | `pytest.mark.skipif` — skips if `torch.rbln.device_count() < N`.                                                                |
 | `@requires_physical_devices(N)`        | `pytest.mark.skipif` — skips if `torch.rbln.physical_device_count() < N`.                                                       |
 | `SUPPORTED_DTYPES`                     | Baseline dtype list for RBLN backend tests, derived from `torch_rbln._internal.ops_utils.SupportedDtypes.dispatch`.             |
 | `set_deterministic_seeds(seed)`        | Sets torch, numpy, and random seeds. Must be called in each spawned process for reproducibility.                                |
@@ -452,14 +451,14 @@ instantiate_device_type_tests(TestDeployFeature, globals(), only_for="privateuse
 For tests that require multiple RBLN devices:
 
 ```python
-from test.utils import requires_logical_devices, SUPPORTED_DTYPES
+from test.utils import requires_devices, SUPPORTED_DTYPES
 
 
 @pytest.mark.test_set_ci
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestMultiDevice(TestCase):
 
-    @requires_logical_devices(2)
+    @requires_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_tensor_move_between_devices(self, dtype):
         """Test moving tensors between RBLN devices."""
@@ -651,10 +650,10 @@ python -m pytest test/rbln/ --durations=10
 #### Multi-Device Tests Skipped
 
 ```
-SKIPPED: Requires at least 2 logical devices, found 1
+SKIPPED: Requires at least 2 devices, found 1
 ```
 
-**Cause:** The test requires multiple RBLN devices (via `@requires_logical_devices` or `@requires_physical_devices`), but fewer are available.
+**Cause:** The test requires multiple RBLN devices (via `@requires_devices` or `@requires_physical_devices`), but fewer are available.
 
 **Fix:** Run on a machine with enough devices. Check with `torch.rbln.device_count()` or `torch.rbln.physical_device_count()`.
 

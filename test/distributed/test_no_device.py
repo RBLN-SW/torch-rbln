@@ -26,7 +26,7 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 import torch_rbln  # noqa: F401
 from test.utils import (
     configure_master_port_for_rccl_tests,
-    requires_logical_devices,
+    requires_devices,
     requires_physical_devices,
     spawn_target_with_clean_exit,
 )
@@ -143,7 +143,7 @@ class TestNoDeviceDistributed(TestCase):
             ctx.delenv("LOCAL_RANK", raising=False)
             mp.spawn(spawn_target_with_clean_exit, args=(_no_device_dtensor_worker, 2), nprocs=2, join=True)
 
-    @requires_logical_devices(1)
+    @requires_devices(1)
     def test_device_mesh_with_npu_is_unaffected(self):
         """Regression: the device-module additions don't break a real-device mesh."""
         mp.spawn(spawn_target_with_clean_exit, args=(_mesh_worker, 1), nprocs=1, join=True)

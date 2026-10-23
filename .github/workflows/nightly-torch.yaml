@@ -198,7 +198,7 @@ jobs:
           assert torch.__version__ == expected_torch, (
               f"torch version mismatch: expected {expected_torch}, got {torch.__version__}"
           )
-          assert torch.rbln.device_count() == 1, f"expected 1 logical device, got {torch.rbln.device_count()}"
+          assert torch.rbln.device_count() == 1, f"expected 1 device, got {torch.rbln.device_count()}"
           assert torch.rbln.physical_device_count() == 0, (
               f"expected 0 physical devices, got {torch.rbln.physical_device_count()}"
           )

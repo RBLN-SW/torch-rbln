@@ -27,7 +27,7 @@ def _register_rbln_backend() -> None:
 def patch_torch_compile() -> None:
     """
     Monkey patch torch.compile() to automatically register the RBLN backend on first use
-    and add automatic num_devices determination and tensor-parallel failover support.
+    and wrap the compiled function with CPU fallback support.
 
     This patch wraps torch.compile() to ensure the RBLN backend is registered before
     the first compilation. The registration is lazy (happens on first call) to avoid
@@ -58,25 +58,23 @@ def patch_torch_compile() -> None:
 
             # Detect the model from either call form: torch.compile(m, ...) passes it in
             # args[0]; torch.compile(model=m, ...) passes it in kwargs. Normalize it out of
-            # kwargs so the compile options stored on CompiledFunctionWrapper (reused for
-            # failover recompiles) never carry a stray model= that would clash with the
-            # positional model on recompile.
+            # kwargs so it reaches torch.compile once, positionally.
             model = args[0] if args else kwargs.pop("model", None)
 
-            # Model provided (either form): wrap the compiled callable so RBLN failover,
-            # CPU fallback, and the RBLN_DUMMY_DEVICE execution guard apply.
+            # Model provided (either form): wrap the compiled callable so CPU fallback and
+            # the RBLN_DUMMY_DEVICE execution guard apply.
             if model is not None:
                 compiled_fn = original_torch_compile(model, **kwargs)
-                return CompiledFunctionWrapper(compiled_fn, model, original_torch_compile, kwargs.copy())
+                return CompiledFunctionWrapper(compiled_fn, model, kwargs.copy())
 
             # No model: factory/decorator form, e.g.
             #   f = torch.compile(backend="rbln")(fn)   or   @torch.compile(backend="rbln")
             # torch returns a *decorator* here; wrap the eventual compiled fn so the same
-            # guard/failover/fallback apply to this form as to the model path above.
+            # guard and fallback apply to this form as to the model path above.
             torch_decorator = original_torch_compile(**kwargs)
 
             def rbln_compile_decorator(m):
-                return CompiledFunctionWrapper(torch_decorator(m), m, original_torch_compile, kwargs.copy())
+                return CompiledFunctionWrapper(torch_decorator(m), m, kwargs.copy())
 
             return rbln_compile_decorator
 

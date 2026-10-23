@@ -79,28 +79,21 @@ void rt_timing_get(uint64_t* out) {
 
 namespace {
 
-// Default current logical device is 0
+// Default current device is 0
 thread_local c10::DeviceIndex current_device_index_ = 0;
 
 void check_device_index(c10::DeviceIndex device_index) {
-  // Dropped a dead `<= max()` check (always true for an int8 DeviceIndex); an
-  // invalid/negative index is caught by the OOB-safe isDeviceAssigned() lookup.
-  auto& manager = DeviceMappingManager::getInstance();
-  // No logical devices: selecting one is pure bookkeeping (nothing to validate);
-  // actual device use still fails at the point of use.
-  if (manager.getLogicalDeviceCount() == 0) {
+  const auto device_count = DeviceMappingManager::getInstance().getDeviceCount();
+  // No devices: selecting one is pure bookkeeping (nothing to validate); actual device use
+  // still fails at the point of use.
+  if (device_count == 0) {
     return;
   }
-  if (!manager.isDeviceAssigned(device_index)) {
-    const auto env_display = getRblnNpuMappingEnvDisplay();
-    RBLN_CHECK(
-        false,
-        "Logical device rbln: {} is not assigned (this process has {} logical device(s)). Env RBLN_DEVICE_MAP={}, RBLN_NPUS_PER_DEVICE={}.",
-        static_cast<int>(device_index),
-        static_cast<int>(manager.getLogicalDeviceCount()),
-        env_display.device_map,
-        env_display.npus_per_device);
-  }
+  RBLN_CHECK(
+      device_index >= 0 && device_index < device_count,
+      "rbln:{} is not a device of this process, which has {} device(s), one per NPU RBLN_DEVICES selects.",
+      static_cast<int>(device_index),
+      static_cast<int>(device_count));
 }
 
 int to_device_id(c10::DeviceIndex device_index) {
@@ -113,8 +106,8 @@ int to_device_id(c10::DeviceIndex device_index) {
   // check_device_index() stays plan-only -- selecting a device is bookkeeping.
   DeviceMappingManager::getInstance().commit();
   RBLN_CHECK(
-      DeviceMappingManager::getInstance().getLogicalDeviceCount() > 0,
-      "Cannot use rbln:{}: no logical device available (this process sees 0 RBLN device(s)). "
+      DeviceMappingManager::getInstance().getDeviceCount() > 0,
+      "Cannot use rbln:{}: no device available (this process sees 0 RBLN device(s)). "
       "If this host has no NPU, set RBLN_DUMMY_DEVICE=1 for host-backed tensors/compilation "
       "(execution still needs hardware); otherwise check RBLN_DEVICES and that the NPU driver is available.",
       static_cast<int>(device_index));
@@ -122,7 +115,7 @@ int to_device_id(c10::DeviceIndex device_index) {
   // stray negative index to a real id (e.g. -1 -> 255).
   RBLN_CHECK(
       device_index >= 0,
-      "Internal error: negative logical device index ({}) reached to_device_id",
+      "Internal error: negative device index ({}) reached to_device_id",
       static_cast<int>(device_index));
   return static_cast<int>(device_index);
 }
@@ -167,9 +160,8 @@ std::string first_line(std::string_view text) {
 } // namespace
 
 c10::DeviceIndex get_device_count() {
-  auto& manager = DeviceMappingManager::getInstance();
-  const auto device_count = manager.getLogicalDeviceCount();
-  RBLN_LOG_DEBUG("logical_device_count={}", static_cast<int>(device_count));
+  const auto device_count = DeviceMappingManager::getInstance().getDeviceCount();
+  RBLN_LOG_DEBUG("device_count={}", static_cast<int>(device_count));
   return device_count;
 }
 
@@ -178,36 +170,14 @@ DeviceProperties get_device_properties(c10::DeviceIndex device_index) {
       !is_dummy_device(),
       "get_device_properties() reports what the hardware says, and RBLN_DUMMY_DEVICE has no NPU behind it");
 
-  const auto physical_device_ids = DeviceMappingManager::getInstance().getPhysicalDeviceIds(device_index);
-  RBLN_CHECK(!physical_device_ids.empty(), "no NPU is mapped to rbln:{}", static_cast<int>(device_index));
-
+  const auto npu = rt::Device::open(DeviceMappingManager::getInstance().npu(device_index))->properties();
   DeviceProperties properties;
-  for (const int physical_device_id : physical_device_ids) {
-    const auto npu = rt::Device::open(DeviceMappingManager::getInstance().systemNpu(physical_device_id))->properties();
-    const uint64_t per_chiplet = npu.chiplets == 0 ? 0 : npu.memory / npu.chiplets;
-    if (properties.npu_count == 0) {
-      properties.name = npu.npu;
-      properties.memory_per_chiplet = per_chiplet;
-      properties.num_chiplet = npu.chiplets;
-    } else {
-      RBLN_CHECK(
-          properties.name == npu.npu && properties.num_chiplet == npu.chiplets,
-          "rbln:{} aggregates unlike NPUs: {} with {} chiplet(s) and {} with {}",
-          static_cast<int>(device_index),
-          properties.name,
-          properties.num_chiplet,
-          npu.npu,
-          npu.chiplets);
-    }
-    properties.total_memory += npu.memory;
-    properties.npu_count++;
-  }
+  properties.name = npu.npu;
+  properties.total_memory = npu.memory;
+  properties.memory_per_chiplet = npu.chiplets == 0 ? 0 : npu.memory / npu.chiplets;
+  properties.num_chiplet = npu.chiplets;
   RBLN_LOG_DEBUG(
-      "rbln:{} name={} total_memory={} npu_count={}",
-      static_cast<int>(device_index),
-      properties.name,
-      properties.total_memory,
-      properties.npu_count);
+      "rbln:{} name={} total_memory={}", static_cast<int>(device_index), properties.name, properties.total_memory);
   return properties;
 }
 
@@ -219,7 +189,7 @@ c10::DeviceIndex get_physical_device_count() {
   }
   const auto physical_device_count =
       static_cast<c10::DeviceIndex>(DeviceMappingManager::getInstance().seenNpus().size());
-  RBLN_LOG_DEBUG("physical_NPU_count={}", static_cast<int>(physical_device_count));
+  RBLN_LOG_DEBUG("physical_device_count={}", static_cast<int>(physical_device_count));
   return physical_device_count;
 }
 
@@ -229,29 +199,29 @@ c10::DeviceIndex get_device_index() {
   // Report a device that exists; the selection is bookkeeping, so nothing has to unwind.
   // Checked on read because other threads' selections are unreachable from here.
   //
-  // Nothrow enumeration, not getLogicalDeviceCount(): this backs
+  // Nothrow enumeration, not getDeviceCount(): this backs
   // torch._C._accelerator_getDeviceIndex(), which torch calls from total predicates such as
   // reset_peak_memory_stats(), so a malformed RBLN_* config must not raise here. It maps a
   // failed plan to 0, and with no plan there is nothing to validate against.
   const auto device_count = get_device_count_nothrow();
   if (device_count > 0 && current_device_index_ >= device_count) {
     RBLN_LOG_DEBUG(
-        "current logical device rbln:{} is outside the {} planned device(s); reporting rbln:0",
+        "current device rbln:{} is outside the {} planned device(s); reporting rbln:0",
         static_cast<int>(current_device_index_),
         static_cast<int>(device_count));
     current_device_index_ = 0;
   }
-  RBLN_LOG_DEBUG("current logical device=rbln:{}", static_cast<int>(current_device_index_));
+  RBLN_LOG_DEBUG("current device=rbln:{}", static_cast<int>(current_device_index_));
   return current_device_index_;
 }
 
 void set_device_index(c10::DeviceIndex device_index) {
-  RBLN_LOG_DEBUG("logical device=rbln:{}", static_cast<int>(device_index));
+  RBLN_LOG_DEBUG("device=rbln:{}", static_cast<int>(device_index));
   // A negative index is the "keep current device" sentinel (CUDA convention;
   // Python maps device=None to it): intentional no-op. Only >= 0 is validated.
   if (device_index >= 0) {
     RBLN_LOG_DEBUG(
-        "Setting current logical device: rbln:{} -> rbln:{}",
+        "Setting current device: rbln:{} -> rbln:{}",
         static_cast<int>(current_device_index_),
         static_cast<int>(device_index));
     check_device_index(device_index);
@@ -262,7 +232,7 @@ void set_device_index(c10::DeviceIndex device_index) {
 c10::DeviceIndex exchange_device_index(c10::DeviceIndex device_index) {
   const auto original_device_index = get_device_index();
   RBLN_LOG_DEBUG(
-      "Setting current logical device: rbln:{} -> rbln:{}",
+      "Setting current device: rbln:{} -> rbln:{}",
       static_cast<int>(original_device_index),
       static_cast<int>(device_index));
 
@@ -311,8 +281,8 @@ c10::DeviceIndex device_count_ensure_non_zero() {
   const auto device_count = get_device_count();
   RBLN_CHECK(
       device_count > 0,
-      "No RBLN devices are available (0 logical device(s)). Check that an NPU is present, the rbln kernel driver "
-      "is loaded, and RBLN_DEVICES / RBLN_DEVICE_MAP / RBLN_NPUS_PER_DEVICE select at least one device.");
+      "No RBLN devices are available. Check that an NPU is present, the rbln kernel driver is loaded, and "
+      "RBLN_DEVICES selects at least one NPU.");
   return device_count;
 }
 
@@ -325,7 +295,7 @@ void set_runtime_shutting_down(bool value) noexcept {
 }
 
 bool runtime_available() noexcept {
-  // Driver loaded, not shutting down, at least one usable logical device. Bound to Python
+  // Driver loaded, not shutting down, at least one usable device. Bound to Python
   // is_available() and to RBLNHooksInterface::hasRBLN(), so the two cannot disagree.
   //
   // Dummy mode is NOT short-circuited: doing so reported True for a dummy device whose
@@ -341,7 +311,7 @@ bool runtime_available() noexcept {
 }
 
 // --- Per-process device-context tracking ------------------------------------
-// A per-logical-device bit set on the first successful device malloc, mirroring CUDA's
+// A per-device bit set on the first successful device malloc, mirroring CUDA's
 // device_allocator populated on first use. Backs initialized()/hasPrimaryContext() and
 // gates the best-effort memory ops, so a process with the runtime + a mapping but no live
 // context (e.g. a vLLM EngineCore parent) reports uninitialized. Set-once, lock-free.
@@ -349,7 +319,7 @@ bool runtime_available() noexcept {
 // (the mask is inherited stale in a fork child).
 namespace {
 // Two 64-bit words cover the full valid DeviceIndex range. DeviceMappingManager caps
-// logical devices at numeric_limits<DeviceIndex>::max(), so valid indices are
+// devices at numeric_limits<DeviceIndex>::max(), so valid indices are
 // [0, max) = [0, 126] and index 127 is never a device — no valid device is silently
 // untracked (the earlier single-word tracker dropped indices 64+).
 constexpr c10::DeviceIndex kMaxTrackedDevices = std::numeric_limits<c10::DeviceIndex>::max(); // 127
@@ -389,7 +359,7 @@ std::vector<c10::DeviceIndex> initialized_device_indices() {
 }
 
 void* malloc(c10::DeviceIndex device_index, size_t nbytes) {
-  RBLN_LOG_DEBUG("logical device=rbln:{}, nbytes={}", static_cast<int>(device_index), nbytes);
+  RBLN_LOG_DEBUG("device=rbln:{}, nbytes={}", static_cast<int>(device_index), nbytes);
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
   check_device_index(device_index);
 
@@ -853,7 +823,7 @@ bool has_allocator_state(const c10::Device& device) {
 } // namespace
 
 c10::CachingDeviceAllocator::DeviceStats get_device_stats(const c10::Device& device) {
-  RBLN_LOG_DEBUG("logical device={}", c10::str(device));
+  RBLN_LOG_DEBUG("device={}", c10::str(device));
   if (!has_allocator_state(device)) {
     return c10::CachingDeviceAllocator::DeviceStats{};
   }
@@ -861,14 +831,14 @@ c10::CachingDeviceAllocator::DeviceStats get_device_stats(const c10::Device& dev
 }
 
 void empty_cache(const c10::Device& device) {
-  RBLN_LOG_DEBUG("logical device={}", c10::str(device));
+  RBLN_LOG_DEBUG("device={}", c10::str(device));
   if (has_allocator_state(device)) {
     caching::empty_cache(device.index());
   }
 }
 
 std::map<std::string, uint64_t> memory_stats(const c10::Device& device) {
-  RBLN_LOG_DEBUG("logical device={}", c10::str(device));
+  RBLN_LOG_DEBUG("device={}", c10::str(device));
   if (!has_allocator_state(device)) {
     return {};
   }
@@ -876,7 +846,7 @@ std::map<std::string, uint64_t> memory_stats(const c10::Device& device) {
 }
 
 std::map<std::string, uint64_t> memory_stats_per_chiplet(const c10::Device& device) {
-  RBLN_LOG_DEBUG("logical device={}", c10::str(device));
+  RBLN_LOG_DEBUG("device={}", c10::str(device));
   if (!has_allocator_state(device)) {
     return {};
   }
@@ -890,9 +860,8 @@ std::map<std::string, uint64_t> memory_stats_per_chiplet(const c10::Device& devi
 
 namespace {
 
-// The chiplets of each physical NPU of the logical device, in mapping order. Commits the
-// mapping (a device use).
-std::vector<std::vector<ChipletMemory>> device_memory_per_npu(const c10::Device& device) {
+// The chiplets of the device's NPU. Commits the mapping (a device use).
+std::vector<ChipletMemory> device_chiplet_memory(const c10::Device& device) {
   RBLN_CHECK(
       runtime_available(), "Cannot query device memory for {}: no RBLN runtime or device available", c10::str(device));
   RBLN_CHECK(
@@ -903,71 +872,55 @@ std::vector<std::vector<ChipletMemory>> device_memory_per_npu(const c10::Device&
   check_device_index(device_index);
   to_device_id(device_index);
 
-  std::vector<std::vector<ChipletMemory>> npus;
-  for (const int physical_id : DeviceMappingManager::getInstance().getPhysicalDeviceIds(device_index)) {
-    const auto npu = rt::Device::open(DeviceMappingManager::getInstance().systemNpu(physical_id));
-    std::vector<ChipletMemory> chiplets;
-    for (uint32_t chiplet = 0; chiplet < npu->chiplets(); ++chiplet) {
-      const auto info = npu->memoryInfo(chiplet);
-      chiplets.push_back(ChipletMemory{info.total, info.free});
-    }
-    npus.push_back(std::move(chiplets));
+  const auto npu = rt::Device::open(DeviceMappingManager::getInstance().npu(device_index));
+  std::vector<ChipletMemory> chiplets;
+  for (uint32_t chiplet = 0; chiplet < npu->chiplets(); ++chiplet) {
+    const auto info = npu->memoryInfo(chiplet);
+    chiplets.push_back(ChipletMemory{info.total, info.free});
   }
-  return npus;
+  return chiplets;
 }
 
 } // namespace
 
 std::pair<size_t, size_t> mem_get_info(const c10::Device& device) {
-  RBLN_LOG_DEBUG("logical device={}", c10::str(device));
+  RBLN_LOG_DEBUG("device={}", c10::str(device));
   size_t free = 0;
   size_t total = 0;
-  for (const auto& chiplets : device_memory_per_npu(device)) {
-    for (const auto& chiplet : chiplets) {
-      free += chiplet.free;
-      total += chiplet.total;
-    }
+  for (const auto& chiplet : device_chiplet_memory(device)) {
+    free += chiplet.free;
+    total += chiplet.total;
   }
   RBLN_LOG_DEBUG("mem_get_info: free={}, total={}", free, total);
   return {free, total};
 }
 
 std::map<std::string, uint64_t> mem_get_info_per_chiplet(const c10::Device& device) {
-  RBLN_LOG_DEBUG("logical device={}", c10::str(device));
-  return per_chiplet_memory_map(device_memory_per_npu(device));
+  RBLN_LOG_DEBUG("device={}", c10::str(device));
+  return per_chiplet_memory_map(device_chiplet_memory(device));
 }
 
-std::map<std::string, uint64_t> per_chiplet_memory_map(const std::vector<std::vector<ChipletMemory>>& npus) {
+std::map<std::string, uint64_t> per_chiplet_memory_map(const std::vector<ChipletMemory>& chiplets) {
   std::map<std::string, uint64_t> out;
-  for (size_t npu = 0; npu < npus.size(); ++npu) {
-    const auto npu_prefix = "npu." + std::to_string(npu) + ".";
-    uint64_t total = 0;
-    uint64_t free = 0;
-    for (size_t chiplet = 0; chiplet < npus[npu].size(); ++chiplet) {
-      const auto& c = npus[npu][chiplet];
-      const auto prefix = npu_prefix + "chiplet." + std::to_string(chiplet) + ".";
-      out[prefix + "total"] = c.total;
-      out[prefix + "used"] = c.total - c.free;
-      out[prefix + "free"] = c.free;
-      total += c.total;
-      free += c.free;
-    }
-    out[npu_prefix + "total"] = total;
-    out[npu_prefix + "used"] = total - free;
-    out[npu_prefix + "free"] = free;
+  for (size_t chiplet = 0; chiplet < chiplets.size(); ++chiplet) {
+    const auto& c = chiplets[chiplet];
+    const auto prefix = "npu.0.chiplet." + std::to_string(chiplet) + ".";
+    out[prefix + "total"] = c.total;
+    out[prefix + "used"] = c.total - c.free;
+    out[prefix + "free"] = c.free;
   }
   return out;
 }
 
 void reset_accumulated_memory_stats(const c10::Device& device) {
-  RBLN_LOG_DEBUG("logical device={}", c10::str(device));
+  RBLN_LOG_DEBUG("device={}", c10::str(device));
   if (has_allocator_state(device)) {
     caching::reset_accumulated(device.index());
   }
 }
 
 void reset_peak_memory_stats(const c10::Device& device) {
-  RBLN_LOG_DEBUG("logical device={}", c10::str(device));
+  RBLN_LOG_DEBUG("device={}", c10::str(device));
   if (has_allocator_state(device)) {
     caching::reset_peak(device.index());
   }

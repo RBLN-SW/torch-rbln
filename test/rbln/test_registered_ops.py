@@ -14,7 +14,7 @@ import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
-from test.utils import requires_logical_devices, SUPPORTED_DTYPES
+from test.utils import requires_devices, SUPPORTED_DTYPES
 
 
 # Tolerance for numerical comparisons
@@ -1888,7 +1888,7 @@ class TestViewOpsOnDevice(TestCase):
 class TestRegisteredPythonOpsMultiDevice(TestCase):
     """Test ops registered in register_ops.py with mixed device indices"""
 
-    @requires_logical_devices(2)
+    @requires_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("shape", TEST_SHAPES)
     @parametrize("device_index", range(min(torch.rbln.device_count(), 3)))
@@ -1906,7 +1906,7 @@ class TestRegisteredPythonOpsMultiDevice(TestCase):
         self.assertEqual(result.device, device)
         self.assertEqual(result.dtype, expected.dtype)
 
-    @requires_logical_devices(2)
+    @requires_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("shape", TEST_SHAPES)
     @parametrize("device_index", range(min(torch.rbln.device_count(), 3)))
@@ -1921,7 +1921,7 @@ class TestRegisteredPythonOpsMultiDevice(TestCase):
         self.assertEqual(result.device, device)
         self.assertEqual(result.dtype, expected.dtype)
 
-    @requires_logical_devices(2)
+    @requires_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("n,m,p", [(10, 20, 30), (5, 10, 15)])
     @parametrize("device_index", range(min(torch.rbln.device_count(), 3)))
@@ -1941,7 +1941,7 @@ class TestRegisteredPythonOpsMultiDevice(TestCase):
         self.assertEqual(result.dtype, expected.dtype)
         self.assertEqual(result.shape, expected.shape)
 
-    @requires_logical_devices(2)
+    @requires_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("shape", [(5, 10)])
     def test_add_cross_device(self, dtype, shape):
@@ -1963,7 +1963,7 @@ class TestRegisteredPythonOpsMultiDevice(TestCase):
             # If it fails, that's also acceptable behavior
             pass
 
-    @requires_logical_devices(2)
+    @requires_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("batch_size,in_features,out_features", [(3, 64, 32)])
     def test_linear_device_context_mismatch(self, dtype, batch_size, in_features, out_features):

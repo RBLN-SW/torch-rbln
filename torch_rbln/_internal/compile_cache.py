@@ -133,14 +133,14 @@ class CompiledOp:
         return tree_unflatten(results, self.out_spec)
 
 
-def compile_logical(graph: Any, npu: str, devices: int = 1, cache_dir: Any = None) -> Any:
+def compile_logical(graph: Any, npu: str, cache_dir: Any = None) -> Any:
     """The function of ``graph`` with its inputs and results laid out as torch
     holds contiguous tensors wherever the compiler can; ``_OpFunction`` moves
     the others through the host as it runs."""
     from rebel import v2
 
     try:
-        return v2.api.compile_graph(graph, npu, devices, cache_dir, inputs=v2.LOGICAL, outputs=v2.LOGICAL)
+        return v2.api.compile_graph(graph, npu, cache_dir=cache_dir, inputs=v2.LOGICAL, outputs=v2.LOGICAL)
     except v2.UnmetRequest as e:
         return e.function
 

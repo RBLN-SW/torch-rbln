@@ -144,13 +144,17 @@ The same precision applies to what `torch.compile` builds for an rbln device: un
 
 ## Device Mapping
 
-By default, each physical NPU is mapped 1:1 to a logical device (**Direct Mapping**). To group multiple physical NPUs into a single logical device for RSD (Rebellions Scalable Design), use one of the following environment variables.
+Each RBLN device is exactly one NPU: `rbln:N` is the N-th NPU that `RBLN_DEVICES` selects.
 
 ### RBLN_DEVICES
 
-Selects which physical NPUs this process can see, as a comma-separated list of ids — the `CUDA_VISIBLE_DEVICES` analogue. `RBLN_VISIBLE_DEVICES` is an alias of it. Unset means every NPU on the host.
+Selects which NPUs this process can see, as a comma-separated list of ids — the `CUDA_VISIBLE_DEVICES` analogue. `RBLN_VISIBLE_DEVICES` is an alias of it. Unset means every NPU on the host.
 
-It is owned by the runtime (`rebel-compiler`), not by torch-rbln, and everything below is expressed **relative to the devices it leaves visible**: with `RBLN_DEVICES=4,5,6,7`, `rbln:0` is physical NPU `4`, and the ids in `RBLN_DEVICE_MAP` are indices into that visible pool rather than system ids.
+It is owned by the runtime (`rebel-compiler`), not by torch-rbln: with `RBLN_DEVICES=4,5,6,7`, `rbln:0` is NPU `4` as `rbln-smi` numbers it, and `rbln:3` is NPU `7`. An id the host does not have is left out with a warning.
+
+### RBLN_NPUS_PER_DEVICE and RBLN_DEVICE_MAP
+
+These grouped several NPUs into one device on the v1 runtime. torch-rbln on rebel.v2 refuses them rather than ignoring them: with either set, `device_count()` is `0`, `is_available()` is `False`, and the first device use raises an error that names the variable. Unset the variable and select the NPUs with `RBLN_DEVICES`. Spreading one model over several NPUs is the compiler's job (`rebel.v2` with `devices=N`), not a device's; a `torch.compile(backend="rbln")` graph runs on the one NPU of its device, and its `devices` option accepts only `1`.
 
 ### When the mapping takes effect
 
@@ -158,43 +162,14 @@ The mapping is resolved in two stages:
 
 | Stage | What happens | Triggered by |
 |-------|--------------|--------------|
-| **Plan** | The variables below are parsed and validated and the logical→physical table is computed. No NPU is claimed. | `torch.rbln.is_available()`, `torch.rbln.device_count()`, other queries |
-| **Commit** | Each planned logical device is registered with the runtime, opening a context on every mapped NPU. The mapping is then frozen. | First actual device use — an allocation, `synchronize()`, a collective. Selecting a device with `set_device()` does **not** commit: it is bookkeeping and claims nothing. |
+| **Plan** | The variables above are read and the NPU of each device is listed. No NPU is claimed. | `torch.rbln.is_available()`, `torch.rbln.device_count()`, other queries |
+| **Commit** | The NPU of each planned device is opened, which holds a context on it. The mapping is then frozen. | First actual device use — an allocation, `synchronize()`, a collective. Selecting a device with `set_device()` does **not** commit: it is bookkeeping and claims nothing. |
 
 Until commit, editing the variables still changes the mapping. After commit it is fixed for the process lifetime: later changes are ignored rather than rejected, and unsetting a variable does not widen the pool back to every device. This matches `torch.cuda`, which likewise refuses to cache its device count "prior to CUDA initialization, because the number of devices can change due to changes to `CUDA_VISIBLE_DEVICES`".
 
-Both layers freeze at the same moment: commit registers each logical device with the runtime, and that registration is what makes the runtime fix its own `RBLN_DEVICES` mapping. A launcher may therefore assign `RBLN_DEVICES` after import — including inside a `fork()`ed worker — as long as it does so before the process first uses a device.
+A launcher may therefore assign `RBLN_DEVICES` after import — including inside a `fork()`ed worker — as long as it does so before the process first uses a device.
 
-### RBLN_NPUS_PER_DEVICE
-
-Groups physical NPUs uniformly. Must be one of: `1`, `2`, `4`, `8`, `16`, `32`.
-
-```bash
-export RBLN_NPUS_PER_DEVICE=2
-```
-
-**Examples** (4 physical devices):
-- `RBLN_NPUS_PER_DEVICE=2` → `rbln:0` = NPUs [0, 1], `rbln:1` = NPUs [2, 3]
-- `RBLN_NPUS_PER_DEVICE=4` → `rbln:0` = NPUs [0, 1, 2, 3]
-
-With 6 physical devices and `RBLN_NPUS_PER_DEVICE=4`:
-- `rbln:0` = NPUs [0, 1, 2, 3]; NPUs [4, 5] remain unused (warning displayed)
-
-### RBLN_DEVICE_MAP
-
-Explicit mapping for fine-grained control. Each group must contain a supported size (`1`, `2`, `4`, `8`, `16`, `32`).
-
-```bash
-export RBLN_DEVICE_MAP="[0,1],[2,3,4,5]"
-```
-
-This maps `rbln:0` → NPUs [0, 1] and `rbln:1` → NPUs [2, 3, 4, 5].
-
-### Priority
-
-`RBLN_DEVICE_MAP` > `RBLN_NPUS_PER_DEVICE` > default (1:1)
-
-### Viewing Device Topology
+### Viewing Devices
 
 ```python
 import torch
@@ -202,13 +177,13 @@ torch.rbln.device_summary()
 ```
 
 ```
-[RBLN] Device Topology Initialized:
-+-------------------+-------------------+----------------------+
-| Logical Device    | Physical NPU IDs  | Status               |
-+-------------------+-------------------+----------------------+
-| rbln:0            | [ 0, 1 ]          | Active (Aggregated)  |
-| rbln:1            | [ 2, 3 ]          | Active (Aggregated)  |
-+-------------------+-------------------+----------------------+
+[RBLN] Devices:
++--------+-----+
+| Device | NPU |
++--------+-----+
+| rbln:0 | 4   |
+| rbln:1 | 5   |
++--------+-----+
 ```
 
 ### RBLN_DUMMY_DEVICE
@@ -220,27 +195,21 @@ even though no hardware is present.
 
 `RBLN_DUMMY_DEVICE` is a **boolean** flag (shared with the rebel runtime, which
 validates it at startup): `1/true/t/yes/y/on` enable it, `0/false/f/no/n/off`
-and unset disable it, and any other value (e.g. `4`) aborts at startup. The
-host-backed logical-device layout comes from `RBLN_DEVICE_MAP` (its group count
-and sizes). Without `RBLN_DEVICE_MAP`, `RBLN_NPUS_PER_DEVICE=N` yields a single
-logical device of size N (TP=N); with neither set, one device (TP=1).
+and unset disable it, and any other value (e.g. `4`) aborts at startup. There is
+one host-backed device per id `RBLN_DEVICES` names, or one without it; no NPU
+backs them, so the ids are not checked against the host.
 
 ```bash
-# 1 host-backed logical device
+# 1 host-backed device
 export RBLN_DUMMY_DEVICE=1
 
-# Preserve an RSD/TP layout for compilation (group count + sizes honored)
-export RBLN_DUMMY_DEVICE=1 RBLN_DEVICE_MAP="[0,1],[2,3]"   # 2 logical devices, TP=2
+# 2 host-backed devices, rbln:0 and rbln:1
+export RBLN_DUMMY_DEVICE=1 RBLN_DEVICES=0,1
 ```
 
 - Forced regardless of physical NPU presence; checked before any runtime query,
   so a host with no SDK/driver still works.
-- `device_count()` reports the dummy logical device count (the `RBLN_DEVICE_MAP`
-  group count when set, otherwise 1); `physical_device_count()` stays `0`.
-  `RBLN_DEVICE_MAP` is validated as far as is possible without hardware — group
-  sizes against the allowed sizes (1, 2, 4, 8, 16, 32) and duplicate physical ids
-  are rejected — but physical-id ranges are **not** checked, so a map valid under
-  dummy is not guaranteed to be valid on a specific machine.
+- `device_count()` reports the dummy device count; `physical_device_count()` stays `0`.
 - **Scope**: device tensor construction, host/device copies, and compile-only
   `torch.compile` (building artifacts). Anything that must run on the NPU raises a
   clear error — a compiled graph, or an eager op on a device dtype (fp16/bf16, and fp32
@@ -253,34 +222,6 @@ export RBLN_DUMMY_DEVICE=1 RBLN_DEVICE_MAP="[0,1],[2,3]"   # 2 logical devices, 
   `mem_get_info()` and `mem_get_info_per_chiplet()` raise: there is no device DRAM to report.
 - `torch.rbln.is_available()` returns `True` in this mode — treat it as a
   development flag, not real hardware availability.
-
-## Tensor Parallel Configuration
-
-The following environment variables control tensor parallel behavior for `torch.compile` operations and eager mode ops.
-
-### TORCH_RBLN_USE_TP_FAILOVER
-
-Enables automatic tensor parallel failover. When a RuntimeError occurs during execution with `num_devices > 1`, the system automatically retries with `num_devices=1` on the root NPU of the device group.
-
-This is useful for models that don't support tensor parallelism, allowing them to run on a single NPU within an aggregated device group without manual intervention.
-
-```bash
-export TORCH_RBLN_USE_TP_FAILOVER=ON   # enable
-export TORCH_RBLN_USE_TP_FAILOVER=OFF  # disable (default: OFF)
-```
-
-**Behavior:**
-- When set to ON and a RuntimeError occurs with `num_devices > 1`:
-  1. The system logs a warning message indicating the failover attempt
-  2. The model is recompiled with `num_devices=1`
-  3. Execution continues on the root NPU of the device group
-- When set to OFF or unset (default), RuntimeErrors are propagated as-is
-
-**Example scenario:**
-With `RBLN_NPUS_PER_DEVICE=4` (4 NPUs per logical device):
-- Initial compilation attempts `num_devices=4`
-- If the model doesn't support TP, a RuntimeError occurs
-- With failover enabled, the system retries with `num_devices=1` on NPU 0
 
 ## rebel.v2 ABI Check
 

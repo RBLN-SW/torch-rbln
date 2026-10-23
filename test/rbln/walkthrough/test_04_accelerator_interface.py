@@ -18,7 +18,7 @@ import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from test.utils import requires_logical_devices, SUPPORTED_DTYPES
+from test.utils import requires_devices, SUPPORTED_DTYPES
 
 
 @pytest.mark.test_set_ci
@@ -48,7 +48,7 @@ class TestAcceleratorInterface(TestCase):
         self.assertIsInstance(idx, int)
         self.assertGreaterEqual(idx, 0)
 
-    @requires_logical_devices(2)
+    @requires_devices(2)
     def test_device_index_context_manager(self):
         """`device_index(i)` should switch the active device for the duration of the block."""
         torch.accelerator.set_device_index(0)

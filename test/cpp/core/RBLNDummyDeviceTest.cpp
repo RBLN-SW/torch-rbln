@@ -1,6 +1,6 @@
 // Tests for the dummy device contract (RBLN_DUMMY_DEVICE=1).
 //
-// Dummy mode presents host-backed logical device(s) with no NPU, so a model can
+// Dummy mode presents host-backed device(s) with no NPU, so a model can
 // be constructed and compiled without hardware. Allocations and transfers go
 // through the runtime's dummy device, which backs device memory with host
 // memory — torch adds no host-memory shim of its own. The returned device
@@ -22,26 +22,26 @@
 #include <vector>
 
 namespace {
-// Force dummy mode before main(). Two logical devices (RBLN_DEVICE_MAP) so the
+// Force dummy mode before main(). Two devices (one per RBLN_DEVICES id) so the
 // owning-device lookup is testable across devices.
 [[maybe_unused]] const int kSetDummyEnv = []() {
   setenv("RBLN_DUMMY_DEVICE", "1", /*overwrite=*/1);
-  setenv("RBLN_DEVICE_MAP", "[0],[1]", /*overwrite=*/1);
+  setenv("RBLN_DEVICES", "0,1", /*overwrite=*/1);
   setenv("RBLN_FORCE_NPU_NAME", "RBLN-CA25", /*overwrite=*/1);
   return 0;
 }();
 } // namespace
 
-TEST(RBLNDummyDeviceTest, ReportsLogicalButNoPhysicalDevice) {
+TEST(RBLNDummyDeviceTest, ReportsDevicesButNoNpu) {
   EXPECT_TRUE(c10::rbln::is_dummy_device());
-  EXPECT_EQ(c10::rbln::get_device_count(), 2); // RBLN_DEVICE_MAP group count
+  EXPECT_EQ(c10::rbln::get_device_count(), 2); // one per RBLN_DEVICES id
   // physical count must not query the runtime (no NPU); reports 0.
   EXPECT_EQ(c10::rbln::get_physical_device_count(), 0);
 }
 
 TEST(RBLNDummyDeviceTest, AllocateAndTransfer) {
   // Allocation succeeds (host-backed dummy device) instead of throwing as it would
-  // with no logical device. Data moves via h2v/v2h/v2v, never a raw deref.
+  // with no device. Data moves via h2v/v2h/v2v, never a raw deref.
   constexpr size_t kBytes = 4 * sizeof(float);
   void* dev = nullptr;
   ASSERT_NO_THROW(dev = c10::rbln::malloc(/*device_index=*/0, kBytes));

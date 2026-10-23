@@ -28,34 +28,31 @@ namespace c10::rbln {
 C10_RBLN_API c10::DeviceIndex get_device_count();
 
 /**
- * @brief Returns the number of physical NPUs visible to this process.
+ * @brief Returns the number of NPUs visible to this process: those of the host RBLN_DEVICES
+ * selects.
  *
- * Queries the runtime for how many physical NPUs are available, regardless of
- * RSD mode. Unlike get_device_count() (logical device count), this returns
- * the actual physical NPU count; get_device_count() may return 1 when RSD is active.
+ * Equal to get_device_count() unless RBLN_DUMMY_DEVICE is set (no NPU, so 0) or the device
+ * configuration is rejected (0 devices, but the NPUs are still there).
  *
- * @return The number of physical NPUs (non-negative integer).
+ * @return The number of NPUs (non-negative integer).
  */
 C10_RBLN_API c10::DeviceIndex get_physical_device_count();
 
 /**
- * @brief What the NPUs behind one logical device are.
- *
- * total_memory sums the device's physical NPUs; num_chiplet and memory_per_chiplet stay per NPU.
+ * @brief What the NPU behind one device is.
  */
 struct C10_RBLN_API DeviceProperties {
   std::string name;
   uint64_t total_memory = 0;
   uint64_t memory_per_chiplet = 0;
   uint32_t num_chiplet = 0;
-  uint32_t npu_count = 0;
 };
 
 /**
- * @brief Reports what the logical device at device_index is, summed over its NPUs.
+ * @brief Reports what the NPU of the device at device_index is.
  *
- * Needs real hardware: raises in dummy mode, when no NPU is mapped to the index, when the runtime
- * cannot answer for one of them, or when the mapping aggregates unlike NPUs.
+ * Needs real hardware: raises in dummy mode, for an index that is not a device of this process,
+ * or when the runtime cannot answer.
  */
 C10_RBLN_API DeviceProperties get_device_properties(c10::DeviceIndex device_index);
 
@@ -103,7 +100,7 @@ C10_RBLN_API c10::DeviceIndex exchange_device_index(c10::DeviceIndex device_inde
 C10_RBLN_API c10::DeviceIndex get_torch_device_id(const void* data);
 
 /**
- * @brief Whether RBLN_DUMMY_DEVICE mode is active: a host-backed logical device
+ * @brief Whether RBLN_DUMMY_DEVICE mode is active: a host-backed device
  * with no NPU, so tensors can be built and compiled without hardware (execution
  * still needs one). Cached after the first call.
  */
@@ -127,7 +124,7 @@ C10_RBLN_API c10::DeviceIndex get_device_count_nothrow() noexcept;
 C10_RBLN_API c10::DeviceIndex device_count_ensure_non_zero();
 
 /**
- * @brief Claim the planned logical devices with the runtime (rbln_register_device_id).
+ * @brief Claim the planned devices with the runtime, opening the NPU of each.
  *
  * Idempotent, and normally unnecessary: to_device_id() already does it. Call it explicitly
  * only on a path that hands a device index to the runtime while bypassing to_device_id(),
@@ -138,7 +135,7 @@ C10_RBLN_API void commit_device_mapping();
 /**
  * @brief Single source of truth: is RBLN usable as an accelerator right now?
  *
- * Runtime loaded, not shutting down, and at least one usable logical device -- dummy
+ * Runtime loaded, not shutting down, and at least one usable device -- dummy
  * included, since it host-backs through the runtime and still needs a valid mapping.
  * Never throws. Bound to both Python is_available() and RBLNHooksInterface::hasRBLN(),
  * so the two cannot diverge.
@@ -155,7 +152,7 @@ C10_RBLN_API void set_runtime_shutting_down(bool value) noexcept;
  * @brief Per-process device-context tracking (CUDA parity with device_allocator).
  *
  * mark_device_context_initialized() records that THIS process has successfully
- * allocated device memory on a logical device; the query functions report whether
+ * allocated device memory on a device; the query functions report whether
  * such allocator/context state exists. They gate the best-effort memory ops and back
  * initialized()/hasPrimaryContext(), so a process with the runtime + a device mapping
  * but no live context (e.g. a vLLM EngineCore parent) is correctly reported as
@@ -167,7 +164,7 @@ C10_RBLN_API bool device_context_initialized(c10::DeviceIndex device_index) noex
 C10_RBLN_API bool any_device_context_initialized() noexcept;
 
 /**
- * @brief Logical device indices this process has initialized (a live context on).
+ * @brief Device indices this process has initialized (a live context on).
  *
  * The set of devices the device-less torch.accelerator.empty_cache() must flush —
  * every initialized device, not just the current one (CUDA/XPU parity). Extracted
@@ -444,9 +441,8 @@ C10_RBLN_API void empty_cache(const c10::Device& device);
  * @brief Returns a dictionary of accelerator device memory allocator statistics.
  *
  * Scope is the caching allocator of the context THIS process holds on `device`, the
- * same scope torch.cuda.memory_stats() reports. It counts every physical NPU the
- * logical device maps to, but not direct device allocations (weights), and not another
- * process using the same NPU. For a device-wide figure, use rbln-smi.
+ * same scope torch.cuda.memory_stats() reports. It does not count direct device allocations
+ * (weights), nor another process using the same NPU. For a device-wide figure, use rbln-smi.
  *
  * @param device The input device.
  * @return A map containing memory statistics.
@@ -456,10 +452,9 @@ C10_RBLN_API std::map<std::string, uint64_t> memory_stats(const c10::Device& dev
 /**
  * @brief Returns memory allocator statistics broken down per chiplet.
  *
- * Same keys as memory_stats(), each prefixed with "npu.<n>.chiplet.<c>.". A device runs
- * out on its heaviest chiplet, which the aggregate memory_stats() hides. npu.<n> is the
- * n-th physical NPU of this logical device (see RBLN_NPUS_PER_DEVICE), so a 1:1 mapping
- * yields npu.0 only.
+ * Same keys as memory_stats(), each prefixed with "npu.0.chiplet.<c>."; a device is one NPU,
+ * so the npu level is always 0. A device runs out on its heaviest chiplet, which the
+ * aggregate memory_stats() hides.
  *
  * Scope is the caching allocator of this process's context on `device`. Other direct
  * device allocations are not counted, and a second process on the same NPU is
@@ -497,8 +492,7 @@ C10_RBLN_API void reset_peak_memory_stats(const c10::Device& device);
  *
  * The kernel driver's figure for the NPU as a whole -- every process, not this process's
  * caching allocator (see memory_stats()) -- which is what torch.cuda.mem_get_info() reports
- * on CUDA. Summed over the physical NPUs of the logical device; one tensor still lives on
- * one NPU. A reading, not a reservation.
+ * on CUDA. A reading, not a reservation.
  *
  * Raises when the installed UMD/KMD does not provide the query or under RBLN_DUMMY_DEVICE:
  * there is no figure to report, and a guess here would size a KV cache wrong.
@@ -511,10 +505,9 @@ C10_RBLN_API std::pair<size_t, size_t> mem_get_info(const c10::Device& device);
 /**
  * @brief Returns the driver's device-wide DRAM usage of `device` broken down per chiplet.
  *
- * Keys "npu.<n>.chiplet.<c>.{total,used,free}" plus "npu.<n>.{total,used,free}" for each
- * physical NPU of the logical device; npu.<n> is the NPU's position as in
- * memory_stats_per_chiplet(). Same scope and failure modes as mem_get_info(). A buffer lives
- * on one chiplet, which the device total hides.
+ * Keys "npu.0.chiplet.<c>.{total,used,free}", as memory_stats_per_chiplet() names the chiplets.
+ * Same scope and failure modes as mem_get_info(). A buffer lives on one chiplet, which the
+ * device total hides.
  *
  * @param device The input device.
  * @return A map from key to bytes.
@@ -530,15 +523,15 @@ struct C10_RBLN_API ChipletMemory {
 };
 
 /**
- * @brief Lays out per-NPU chiplet memory as the mem_get_info_per_chiplet() map.
+ * @brief Lays out the chiplet memory of a device's NPU as the mem_get_info_per_chiplet() map.
  *
- * `npus[n]` becomes the "npu.<n>." entries: "npu.<n>.chiplet.<c>.{total,used,free}" and
- * "npu.<n>.{total,used,free}". Pure; this is the key mapping mem_get_info_per_chiplet() returns.
+ * `chiplets[c]` becomes "npu.0.chiplet.<c>.{total,used,free}". Pure; this is the key mapping
+ * mem_get_info_per_chiplet() returns.
  *
- * @param npus The chiplets of each physical NPU of a logical device, in mapping order.
+ * @param chiplets The chiplets of the NPU, in chiplet order.
  * @return A map from key to bytes.
  */
-C10_RBLN_API std::map<std::string, uint64_t> per_chiplet_memory_map(const std::vector<std::vector<ChipletMemory>>& npus);
+C10_RBLN_API std::map<std::string, uint64_t> per_chiplet_memory_map(const std::vector<ChipletMemory>& chiplets);
 
 /**
  * @brief Diagnostic: time spent inside runtime copy calls, so a profiler can split host

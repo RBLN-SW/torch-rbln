@@ -703,17 +703,17 @@ class TestPerChipletMemoryStats(TestCase):
         _settle(self.device)
 
     def _by_chiplet(self, per_chiplet):
-        """``per_chiplet`` as ``{(npu, chiplet): stats}``."""
+        """``per_chiplet`` as ``{chiplet: stats}``."""
         chiplets = {}
         for key, value in per_chiplet.items():
             npu_tag, npu, chiplet_tag, chiplet, stat = key.split(".", 4)
-            self.assertEqual((npu_tag, chiplet_tag), ("npu", "chiplet"), key)
-            self.assertTrue(npu.isdigit() and chiplet.isdigit(), key)
-            chiplets.setdefault((int(npu), int(chiplet)), {})[stat] = value
+            self.assertEqual((npu_tag, npu, chiplet_tag), ("npu", "0", "chiplet"), key)
+            self.assertTrue(chiplet.isdigit(), key)
+            chiplets.setdefault(int(chiplet), {})[stat] = value
         return chiplets
 
     def test_key_schema(self):
-        """Each chiplet carries memory_stats()'s keys under an npu.<n>.chiplet.<c>. prefix."""
+        """Each chiplet carries memory_stats()'s keys under an npu.0.chiplet.<c>. prefix."""
         chiplets = self._by_chiplet(torch.rbln.memory_stats_per_chiplet(self.device))
         self.assertGreater(len(chiplets), 0)
         for location, stats in chiplets.items():
@@ -746,9 +746,9 @@ class TestPerChipletMemoryStats(TestCase):
             self.skipTest("RBLN_DUMMY_DEVICE has no driver memory figures")
         live = _alloc(8 * MiB, self.device)
         driver = torch.rbln.mem_get_info_per_chiplet(self.device)
-        for (npu, chiplet), stats in self._by_chiplet(torch.rbln.memory_stats_per_chiplet(self.device)).items():
+        for chiplet, stats in self._by_chiplet(torch.rbln.memory_stats_per_chiplet(self.device)).items():
             self.assertGreaterEqual(
-                driver[f"npu.{npu}.chiplet.{chiplet}.used"], stats["reserved_bytes.all.current"], (npu, chiplet)
+                driver[f"npu.0.chiplet.{chiplet}.used"], stats["reserved_bytes.all.current"], chiplet
             )
         del live
 
@@ -758,8 +758,6 @@ class TestPerChipletMemoryStats(TestCase):
         self.assertIn("device=rbln:0", summary)
         self.assertIn(f"pid {os.getpid()}", summary)
         self.assertIn("caching allocator only, this process only", summary)
-        self.assertIn("npu: physical NPU id as in device_summary()", summary)
-        self.assertIn("npu", summary)
         self.assertIn("chiplet", summary)
         self.assertIn("total", summary)
 
@@ -783,16 +781,10 @@ class TestPerChipletMemoryStats(TestCase):
         self.assertIn(f"alloc retries: {retries}   ooms: {ooms}", summary)
         del small, large
 
-    def test_summary_rows_carry_physical_npu_ids(self):
-        """Row `npu` is the id device_summary() prints, not the NPU's position in the device."""
-        from torch_rbln._internal.rsd_utils import get_physical_device_ids
-
-        physical = get_physical_device_ids(0)
-        self.assertTrue(physical)
-        summary = torch.rbln.memory_summary(self.device)
-        table = summary.split("\n")[4:]
-        row_ids = sorted({int(line.split()[0]) for line in table if line.strip() and line.split()[0].isdigit()})
-        self.assertEqual(row_ids, sorted(set(physical)))
+    def test_summary_has_a_row_per_chiplet(self):
+        chiplets = sorted(self._by_chiplet(torch.rbln.memory_stats_per_chiplet(self.device)))
+        table = torch.rbln.memory_summary(self.device).splitlines()[4:]
+        self.assertEqual([int(line.split()[0]) for line in table if line.split()[0].isdigit()], chiplets)
 
     def test_summary_without_device(self):
         """No RBLN device / uninitialized allocator degrades to a notice, not a raise."""
@@ -800,10 +792,10 @@ class TestPerChipletMemoryStats(TestCase):
             summary = torch.rbln.memory_summary(self.device)
         self.assertIn("no statistics", summary)
 
-    def test_second_logical_device(self):
+    def test_second_device(self):
         """rbln:1 has an allocator of its own, which every entry point reaches."""
         if torch.rbln.device_count() < 2:
-            self.skipTest("needs at least 2 logical rbln devices")
+            self.skipTest("needs at least 2 rbln devices")
         second = torch.device("rbln", 1)
         first_before = torch.rbln.memory_stats(self.device)
         tensor = _alloc(4 * MiB, second)

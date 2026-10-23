@@ -70,7 +70,7 @@ void register_public_device_api(py::module_& module) {
   module.def(
       "physical_device_count",
       &c10::rbln::get_physical_device_count,
-      "Get the number of physical devices (ignores RSD mode).");
+      "Get the number of NPUs RBLN_DEVICES leaves visible; 0 under RBLN_DUMMY_DEVICE.");
   module.def(
       "is_dummy_device",
       &c10::rbln::is_dummy_device,
@@ -79,7 +79,7 @@ void register_public_device_api(py::module_& module) {
       "is_available",
       &c10::rbln::runtime_available,
       "Whether RBLN is usable as an accelerator: runtime loaded, not shutting down, at least one usable "
-      "logical device. The same predicate RBLNHooksInterface::hasRBLN() uses, so Python and C++ cannot "
+      "device. The same predicate RBLNHooksInterface::hasRBLN() uses, so Python and C++ cannot "
       "disagree. Never raises.");
   module.def(
       "runtime_available",
@@ -125,7 +125,6 @@ void register_public_device_api(py::module_& module) {
       .def_readonly("total_memory", &c10::rbln::DeviceProperties::total_memory)
       .def_readonly("memory_per_chiplet", &c10::rbln::DeviceProperties::memory_per_chiplet)
       .def_readonly("num_chiplet", &c10::rbln::DeviceProperties::num_chiplet)
-      .def_readonly("npu_count", &c10::rbln::DeviceProperties::npu_count)
       .def("__repr__", [](const c10::rbln::DeviceProperties& self) {
         return c10::str(
             "DeviceProperties(name='",
@@ -136,29 +135,15 @@ void register_public_device_api(py::module_& module) {
             self.memory_per_chiplet,
             ", num_chiplet=",
             self.num_chiplet,
-            ", npu_count=",
-            self.npu_count,
             ")");
       });
 
   module.def(
-      "get_device_properties", &c10::rbln::get_device_properties, "Get the hardware properties of a logical device.");
-
-  // Register DeviceTopology structures
-  py::class_<c10::rbln::DeviceTopologyEntry>(module, "DeviceTopologyEntry")
-      .def_property_readonly("logical_device_index", &c10::rbln::DeviceTopologyEntry::getLogicalDeviceIndex)
-      .def_property_readonly("physical_device_ids", &c10::rbln::DeviceTopologyEntry::getPhysicalDeviceIds)
-      .def_property_readonly("is_aggregated", &c10::rbln::DeviceTopologyEntry::isAggregated);
-
-  py::class_<c10::rbln::DeviceTopology>(module, "DeviceTopology")
-      .def_property_readonly("entries", &c10::rbln::DeviceTopology::getEntries)
-      .def_property_readonly("unused_physical_device_ids", &c10::rbln::DeviceTopology::getUnusedPhysicalDeviceIds);
-
-  // Direct binding to DeviceMappingManager for device topology
+      "get_device_properties", &c10::rbln::get_device_properties, "Get the hardware properties of a device's NPU.");
   module.def(
-      "_get_device_topology",
-      []() -> c10::rbln::DeviceTopology { return c10::rbln::DeviceMappingManager::getInstance().getDeviceTopology(); },
-      "Get the complete device topology.");
+      "_device_npus",
+      [] { return c10::rbln::DeviceMappingManager::getInstance().npus(); },
+      "The NPU behind each device, in device order, by system number. Plans the mapping; claims no NPU.");
 
   module.def(
       "get_default_generator",

@@ -62,8 +62,8 @@ def set_deterministic_seeds(seed: int):
     random.seed(seed)
 
 
-def requires_logical_devices(num_devices):
-    """Pytest marker to skip test if logical device count is less than required.
+def requires_devices(num_devices):
+    """Pytest marker to skip test if device count is less than required.
 
     Note: This replaces `deviceCountAtLeast` from `torch.testing._internal`,
     which must NOT be used here. During collection, `deviceCountAtLeast`
@@ -72,15 +72,15 @@ def requires_logical_devices(num_devices):
     `instantiate_device_type_tests(only_for="privateuse1")` for all files
     collected after the mutation, silently dropping most tests.
     """
-    logical_device_count = torch.rbln.device_count()
+    device_count = torch.rbln.device_count()
     return pytest.mark.skipif(
-        logical_device_count < num_devices,
-        reason=f"Requires at least {num_devices} logical devices, found {logical_device_count}",
+        device_count < num_devices,
+        reason=f"Requires at least {num_devices} devices, found {device_count}",
     )
 
 
 def requires_physical_devices(num_devices):
-    """Pytest marker to skip test if physical device count is less than required."""
+    """Pytest marker to skip test if this process sees fewer NPUs than required."""
     physical_device_count = torch.rbln.physical_device_count()
     return pytest.mark.skipif(
         physical_device_count < num_devices,

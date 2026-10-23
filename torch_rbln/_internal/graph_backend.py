@@ -24,8 +24,7 @@ from torch_rbln import programs
 from torch_rbln._internal.compile_cache import compile_logical
 
 
-# `num_devices` and `tensor_parallel_size` are older names of `devices`, which rbln's backend takes.
-_OPTIONS = {"npu", "devices", "num_devices", "tensor_parallel_size", "mode", "cache_dir", "disable_logger"}
+_OPTIONS = {"npu", "devices", "mode", "cache_dir", "disable_logger"}
 
 
 def _modes(options: dict[str, Any]) -> set[str]:
@@ -227,12 +226,15 @@ def rbln_graph_backend(gm: torch.fx.GraphModule, example_inputs: list[Any], opti
     unknown = set(options) - _OPTIONS
     if unknown:
         raise TypeError(f"unknown rbln options {sorted(unknown)}")
-    devices = int(options.get("devices") or options.get("num_devices") or options.get("tensor_parallel_size") or 1)
+    devices = int(options.get("devices", 1))
     if devices != 1:
-        raise NotImplementedError(f"a graph over {devices} devices; torch-rbln runs graphs on one device")
+        raise ValueError(
+            f"devices={devices}: a torch device is one NPU, so its graph compiles for devices=1. "
+            "Compile with rebel.v2 directly to spread a model over several NPUs."
+        )
     device = _device_of(example_inputs)
     graph = v2.frontend.capture_dynamo(gm, example_inputs)
-    fn = compile_logical(graph, _npu(options, device), devices, options.get("cache_dir"))
+    fn = compile_logical(graph, _npu(options, device), options.get("cache_dir"))
     host_results = _host_results(gm)
     if programs.is_capturing():
         programs.submit_program(_program(fn, graph, device, example_inputs))

@@ -16,7 +16,7 @@ import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from test.utils import requires_logical_devices
+from test.utils import requires_devices
 
 
 @pytest.mark.test_set_ci
@@ -45,9 +45,9 @@ class TestRBLNDeviceType(TestCase):
         self.assertEqual(device.type, "rbln")
         self.assertEqual(device.index, 0)
 
-    @requires_logical_devices(2)
+    @requires_devices(2)
     def test_switch_between_devices(self):
-        """With at least two logical devices, set_device(1) should be observable."""
+        """With at least two devices, set_device(1) should be observable."""
         try:
             torch.rbln.set_device(1)
             self.assertEqual(torch.rbln.current_device(), 1)

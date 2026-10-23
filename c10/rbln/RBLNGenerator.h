@@ -39,14 +39,14 @@ struct C10_RBLN_API RBLNGeneratorImpl : public GeneratorImpl {
 namespace c10::rbln {
 
 /**
- * @brief Returns the default generator of an RBLN logical device, creating it on first use.
+ * @brief Returns the default generator of an RBLN device, creating it on first use.
  *
  * Plan-only: it claims no device, so torch.manual_seed() before a launcher assigns RBLN_DEVICES
  * leaves the mapping open. A generator is created with the seed of the last manual_seed_all()
  * call, or default_rng_seed_val before any, so a device added by a later remap is seeded the
  * same as the rest.
  *
- * @param device_index The logical device index, or -1 for the current device.
+ * @param device_index The device index, or -1 for the current device.
  */
 C10_RBLN_API const at::Generator& get_default_rbln_generator(c10::DeviceIndex device_index = -1);
 

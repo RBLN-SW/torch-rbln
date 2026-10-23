@@ -174,7 +174,7 @@ print(json.dumps(rec), file=_real_stdout)
 
 # Physical NPU ids, scanned in a process of its own. Sparse ids are possible (a container can
 # be granted 5,6,7), so this scans instead of taking range(device_count()); 127 is the ceiling
-# the mapping layer enforces on a logical index.
+# the mapping layer enforces on a device index.
 _POOL_SCAN = """\
 import json
 import rebel.v2
@@ -267,16 +267,16 @@ def _pool_devices(count: int) -> str:
 HEALTHY = {"RBLN_DEVICES": _pool_devices(1)}
 TWO_DEVICES = {"RBLN_DEVICES": _pool_devices(2)}
 NO_DEVICE = {"RBLN_DEVICES": "99999"}  # visible-device filter matches nothing
-BAD_MAP = {"RBLN_DEVICES": _pool_devices(1), "RBLN_DEVICE_MAP": "[1],[99]"}  # map exceeds visible NPUs
+GROUPED = {"RBLN_DEVICES": _pool_devices(1), "RBLN_NPUS_PER_DEVICE": "2"}  # a device is one NPU: refused
 DUMMY = {"RBLN_DUMMY_DEVICE": "1"}
-DUMMY_BAD_MAP = {"RBLN_DUMMY_DEVICE": "1", "RBLN_DEVICE_MAP": "[0,1,1]"}  # group size 3 invalid
+DUMMY_GROUPED = {"RBLN_DUMMY_DEVICE": "1", "RBLN_DEVICE_MAP": "[0,1]"}  # refused under dummy too
 
 ALL_SCENARIOS = {
     "healthy": HEALTHY,
     "no_device": NO_DEVICE,
-    "bad_map": BAD_MAP,
+    "grouped": GROUPED,
     "dummy": DUMMY,
-    "dummy_bad_map": DUMMY_BAD_MAP,
+    "dummy_grouped": DUMMY_GROUPED,
 }
 
 
@@ -439,7 +439,7 @@ class TestProbeHarness(TestCase):
         ``RBLN_CHECK`` -- a use error, not something a probe walks into -- so it logs
         ``c10::Error::what()`` and the trace it embeds.
 
-        Deliberately not a malformed-config failure: those rethrow the stored plan error via
+        Deliberately not a refused-config failure: those rethrow the stored plan error via
         ``RBLN_CHECK_QUIET`` and so carry the message without a logged trace, which makes
         them useless as a control here.
         """
@@ -459,15 +459,15 @@ class TestProbeHarness(TestCase):
     def test_scenarios_are_live(self):
         """Each scenario must actually change what the backend reports.
 
-        Without this, a regression that ignored ``RBLN_DEVICE_MAP`` would make every
+        Without this, a regression that ignored ``RBLN_NPUS_PER_DEVICE`` would make every
         "never throws" clause pass vacuously -- nothing would be misconfigured any more.
         """
         expected = {
-            "healthy": 1,  # RBLN_DEVICES="0" -> exactly one logical device
+            "healthy": 1,  # RBLN_DEVICES names one NPU -> exactly one device
             "no_device": 0,  # filter matches nothing
-            "bad_map": 0,  # malformed map -> quiet 0, detail at point of use
-            "dummy": 1,  # one host-backed logical device
-            "dummy_bad_map": 0,  # invalid group size -> quiet 0
+            "grouped": 0,  # refused grouping -> quiet 0, detail at point of use
+            "dummy": 1,  # one host-backed device
+            "dummy_grouped": 0,  # refused grouping -> quiet 0
         }
         for name, env in ALL_SCENARIOS.items():
             with self.subTest(scenario=name):
@@ -794,11 +794,11 @@ class TestUpstreamClauses(TestCase):
             except Exception as e:
                 rec["result"] = str(e).splitlines()[0]
             """,
-            BAD_MAP,
+            GROUPED,
         )
         self.assertIsNone(p.raised, f"probe harness error -- {p}")
         self.assertNotEqual(p.result, "NO-RAISE", f"device use must fail -- {p}")
-        self.assertIn("out of range", p.result.lower(), f"error lost its detail -- {p}")
+        self.assertIn("a torch device is one NPU", p.result, f"error lost its detail -- {p}")
 
     def test_availability_emits_no_cpp_traceback(self):
         """A swallowed availability failure must not spam a co-tenant's console.
@@ -815,7 +815,7 @@ class TestUpstreamClauses(TestCase):
             except Exception:
                 rec["result"] = False
             """,
-            BAD_MAP,
+            GROUPED,
         )
         self.assertFalse(p.has_cpp_traceback, f"C++ traceback leaked to the console:\n{p.console}")
 
@@ -1106,14 +1106,14 @@ class TestExternalConsumers(TestCase):
             except Exception as e:
                 rec["result"] = "RAISED: " + str(e).splitlines()[0]
             """,
-            BAD_MAP,
+            GROUPED,
         )
         self.assertIsNone(p.raised, f"probe harness error -- {p}")
         # Both halves: torch's message has to be the one that surfaces, and ours must not.
         # Asserting only the absence would also hold if _validate_device stopped raising.
         self.assertTrue(p.result.startswith("RAISED"), f"_validate_device must reject rbln:0 -- {p}")
         self.assertIn("torch.rbln.is_available() is False", p.result, f"not torch's message -- {p}")
-        self.assertNotIn("out of range", p.result.lower(), f"backend error replaced torch's -- {p}")
+        self.assertNotIn("a torch device is one NPU", p.result, f"backend error replaced torch's -- {p}")
 
 
 if __name__ == "__main__":

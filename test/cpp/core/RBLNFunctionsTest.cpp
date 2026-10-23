@@ -454,30 +454,18 @@ TEST_F(RBLNFunctionsTest, FillZerosRejectsInvalidRanges) {
 
 // The key layout of mem_get_info_per_chiplet(), on fixed readings rather than a live one
 // another process can move between two queries.
-TEST(RBLNFunctionsPerChipletMemoryMap, LaysOutEveryChipletOfEveryNpu) {
-  const std::vector<std::vector<c10::rbln::ChipletMemory>> npus = {
-      {{500, 400}, {500, 300}},
-      {{2000, 2000}},
-  };
+TEST(RBLNFunctionsPerChipletMemoryMap, LaysOutEveryChiplet) {
+  const std::vector<c10::rbln::ChipletMemory> chiplets = {{500, 400}, {500, 300}};
 
-  const auto out = c10::rbln::per_chiplet_memory_map(npus);
+  const auto out = c10::rbln::per_chiplet_memory_map(chiplets);
 
   const std::map<std::string, uint64_t> expected = {
-      {"npu.0.total", 1000},
-      {"npu.0.used", 300},
-      {"npu.0.free", 700},
       {"npu.0.chiplet.0.total", 500},
       {"npu.0.chiplet.0.used", 100},
       {"npu.0.chiplet.0.free", 400},
       {"npu.0.chiplet.1.total", 500},
       {"npu.0.chiplet.1.used", 200},
       {"npu.0.chiplet.1.free", 300},
-      {"npu.1.total", 2000},
-      {"npu.1.used", 0},
-      {"npu.1.free", 2000},
-      {"npu.1.chiplet.0.total", 2000},
-      {"npu.1.chiplet.0.used", 0},
-      {"npu.1.chiplet.0.free", 2000},
   };
   EXPECT_EQ(out, expected);
 }

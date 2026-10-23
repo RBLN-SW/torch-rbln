@@ -14,7 +14,7 @@ Verifies that PyTorch distributed (c10d) works with RBLN using the
   the full list.
 
 Multi-process launch uses `torch.multiprocessing.spawn`; each rank runs on
-`rbln:{rank}`. The test requires at least two logical RBLN devices.
+`rbln:{rank}`. The test requires at least two RBLN devices.
 """
 
 import os
@@ -27,7 +27,7 @@ import torch.multiprocessing as mp
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from test.utils import configure_master_port_for_rccl_tests, requires_logical_devices
+from test.utils import configure_master_port_for_rccl_tests, requires_devices
 
 
 def _setup_environment(rank: int, world_size: int) -> None:
@@ -100,7 +100,7 @@ def _run_all_gather(rank: int, world_size: int, backend: str) -> None:
 
 @pytest.mark.test_set_ci
 @pytest.mark.single_worker
-@requires_logical_devices(2)
+@requires_devices(2)
 class TestC10dRBLNCCL(TestCase):
     """Walkthrough example 8: c10d collectives with the `rbln-ccl` backend."""
 

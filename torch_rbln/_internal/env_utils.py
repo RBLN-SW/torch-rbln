@@ -69,20 +69,6 @@ def is_rbln_deploy() -> bool:
     return os.getenv("TORCH_RBLN_DEPLOY") == "ON"
 
 
-def use_tp_failover() -> bool:
-    """
-    Check if tensor parallel failover is enabled.
-
-    When enabled, if a RuntimeError occurs during execution with num_devices > 1,
-    the system will automatically retry with num_devices=1.
-
-    Returns:
-        bool: True if failover is enabled (environment variable TORCH_RBLN_USE_TP_FAILOVER is "ON"),
-              False otherwise (default).
-    """
-    return os.getenv("TORCH_RBLN_USE_TP_FAILOVER") == "ON"
-
-
 def is_diagnose_mode() -> bool:
     """
     Check if torch-rbln is running in diagnose-only mode (skip backend init).

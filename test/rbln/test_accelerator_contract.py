@@ -28,7 +28,7 @@ import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 import torch_rbln  # noqa: F401 -- registers the rbln device + torch.rbln namespace
-from test.utils import requires_logical_devices, run_in_isolated_process, SUPPORTED_DTYPES
+from test.utils import requires_devices, run_in_isolated_process, SUPPORTED_DTYPES
 
 
 @pytest.mark.single_worker
@@ -199,7 +199,7 @@ class TestAcceleratorEmptyCache(TestCase):
         self.assertLess(torch.rbln.memory_reserved("rbln:0"), reserved_cached)
 
     @pytest.mark.test_set_ci
-    @requires_logical_devices(2)
+    @requires_devices(2)
     def test_empty_cache_releases_every_initialized_device(self):
         reserved_cached = {device: self._hold_then_free_reserved(device) for device in ("rbln:0", "rbln:1")}
         with torch.rbln.device(0):
@@ -239,10 +239,10 @@ def _mem_get_info_dummy_worker():
 
 @pytest.mark.test_set_ci
 class TestMemGetInfo(TestCase):
-    """``mem_get_info()`` is the driver's reading of the logical device's DRAM, summed over its
-    physical NPUs and their chiplets; ``mem_get_info_per_chiplet()`` is the same reading
-    before the sums. ``total`` is static; ``free`` is a reading another process may move
-    between two queries, so it is bounded rather than matched across calls."""
+    """``mem_get_info()`` is the driver's reading of the device's DRAM, summed over its NPU's
+    chiplets; ``mem_get_info_per_chiplet()`` is the same reading before the sum. ``total`` is
+    static; ``free`` is a reading another process may move between two queries, so it is
+    bounded rather than matched across calls."""
 
     def setUp(self):
         super().setUp()
@@ -265,20 +265,15 @@ class TestMemGetInfo(TestCase):
     def test_per_chiplet_breaks_the_total_down(self):
         properties = torch.rbln.get_device_properties(0)
         per_chiplet = torch.rbln.mem_get_info_per_chiplet(0)
-        npus = [f"npu.{npu}" for npu in range(properties.npu_count)]
-        chiplets = {npu: [f"{npu}.chiplet.{chiplet}" for chiplet in range(properties.num_chiplet)] for npu in npus}
-        scopes = npus + [chiplet for npu in npus for chiplet in chiplets[npu]]
+        chiplets = [f"npu.0.chiplet.{chiplet}" for chiplet in range(properties.num_chiplet)]
         self.assertEqual(
-            set(per_chiplet), {f"{scope}.{field}" for scope in scopes for field in ("total", "used", "free")}
+            set(per_chiplet), {f"{chiplet}.{field}" for chiplet in chiplets for field in ("total", "used", "free")}
         )
-        for scope in scopes:
-            self.assertEqual(per_chiplet[f"{scope}.used"] + per_chiplet[f"{scope}.free"], per_chiplet[f"{scope}.total"])
-        for npu in npus:
-            for field in ("total", "used", "free"):
-                self.assertEqual(
-                    per_chiplet[f"{npu}.{field}"], sum(per_chiplet[f"{chiplet}.{field}"] for chiplet in chiplets[npu])
-                )
-        self.assertEqual(sum(per_chiplet[f"{npu}.total"] for npu in npus), torch.rbln.mem_get_info(0)[1])
+        for chiplet in chiplets:
+            self.assertEqual(
+                per_chiplet[f"{chiplet}.used"] + per_chiplet[f"{chiplet}.free"], per_chiplet[f"{chiplet}.total"]
+            )
+        self.assertEqual(sum(per_chiplet[f"{chiplet}.total"] for chiplet in chiplets), torch.rbln.mem_get_info(0)[1])
 
     def test_used_covers_this_process_reserved_memory(self):
         live = torch.empty(32 * 1024 * 1024, dtype=torch.float16, device="rbln:0")

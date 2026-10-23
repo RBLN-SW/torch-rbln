@@ -41,7 +41,7 @@ struct Location {
 };
 
 /**
- * @brief The NPU logical device `device_index` runs on, opened on first use; under
+ * @brief The NPU of device `device_index`, opened on first use; under
  * RBLN_DUMMY_DEVICE, the dummy device of the NPU kind RBLN_FORCE_NPU_NAME names (RBLN-CA25).
  */
 C10_RBLN_API std::shared_ptr<rt::Device> runtime_device(c10::DeviceIndex device_index);

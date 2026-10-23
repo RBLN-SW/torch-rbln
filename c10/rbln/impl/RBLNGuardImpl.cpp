@@ -74,8 +74,6 @@ void RBLNGuardImpl::uncheckedSetDevice(c10::Device device) const noexcept {
 c10::DeviceIndex RBLNGuardImpl::deviceCount() const noexcept {
   // Delegates to the shared nothrow enumeration so the guard impl, the accelerator
   // hooks and Python device_count() all answer from one place (and warn identically).
-  // It also swallows the std::stoi throw from lazily parsing RBLN_DEVICE_MAP /
-  // RBLN_NPUS_PER_DEVICE, which is not a c10::Error and would otherwise terminate.
   // Deliberately no debug log: RBLN_LOG_DEBUG can throw when debug logging is enabled
   // (fmt / sink, e.g. bad_alloc), which would terminate this noexcept override. The shared
   // enumeration already logs on the paths that can afford it.

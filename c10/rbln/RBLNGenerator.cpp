@@ -90,7 +90,7 @@ const at::Generator& get_default_rbln_generator(c10::DeviceIndex device_index) {
   const auto device_count = get_device_count();
   RBLN_CHECK(
       index >= 0 && index < device_count,
-      "No default generator for rbln:{}: this process has {} logical device(s)",
+      "No default generator for rbln:{}: this process has {} device(s)",
       static_cast<int>(index),
       static_cast<int>(device_count));
 

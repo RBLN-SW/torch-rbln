@@ -370,11 +370,11 @@ std::shared_ptr<Device> Device::open(uint32_t) { throw std::runtime_error("injec
             _assert_ok(self, result, "FAILED_COMMIT_OK")
 
     @requires_physical_devices(1)
-    def test_memory_ops_nothrow_on_malformed_config(self):
+    def test_memory_ops_nothrow_on_refused_config(self):
         """The initialized()/hasPrimaryContext() predicates that gate torch.accelerator
-        memory ops must stay total. A malformed RBLN_NPUS_PER_DEVICE makes the internal
+        memory ops must stay total. A refused RBLN_NPUS_PER_DEVICE makes the internal
         device-count lookup throw; the predicate swallows it and reports not-initialized,
-        so empty_cache no-ops instead of aborting the caller. The misconfig still surfaces
+        so empty_cache no-ops instead of aborting the caller. The refusal still surfaces
         at real device use."""
         result = _run_subprocess(
             """
@@ -384,21 +384,20 @@ std::shared_ptr<Device> Device::open(uint32_t) { throw std::runtime_error("injec
             try:
                 torch.ones(4, device="rbln:0")
             except RuntimeError as exc:
-                assert "valid sizes" in str(exc), str(exc)   # misconfig surfaces at real device use
+                assert "a torch device is one NPU" in str(exc), str(exc)   # surfaces at real device use
             else:
-                raise AssertionError("malformed config must raise at the point of real device use")
-            print("MALFORMED_OK")
+                raise AssertionError("a refused config must raise at the point of real device use")
+            print("REFUSED_OK")
             """,
-            env_extra={"RBLN_NPUS_PER_DEVICE": "3", "RBLN_DEVICE_MAP": None},
+            env_extra={"RBLN_NPUS_PER_DEVICE": "2", "RBLN_DEVICE_MAP": None},
         )
-        _assert_ok(self, result, "MALFORMED_OK")
+        _assert_ok(self, result, "REFUSED_OK")
 
     @requires_physical_devices(1)
-    def test_dummy_malformed_config_memory_ops_noop(self):
-        """Dummy mode must not short-circuit the context gate: with a malformed config and
-        no allocation, the memory ops still no-op (not-initialized), and the misconfig
-        surfaces only at real device use. Covered for both malformed-config env vars
-        (RBLN_NPUS_PER_DEVICE and RBLN_DEVICE_MAP — same validateDeviceGroups path)."""
+    def test_dummy_refused_config_memory_ops_noop(self):
+        """Dummy mode must not short-circuit the context gate: with a refused config and
+        no allocation, the memory ops still no-op (not-initialized), and the refusal
+        surfaces only at real device use. Covered for both refused env vars."""
         script = """
             assert C.is_dummy_device() is True
             assert torch._C._accelerator_isAllocatorInitialized() is False
@@ -409,16 +408,15 @@ std::shared_ptr<Device> Device::open(uint32_t) { throw std::runtime_error("injec
             except RuntimeError:
                 pass
             else:
-                raise AssertionError("dummy + malformed config must raise at real device use")
-            print("DUMMY_MALFORMED_OK")
+                raise AssertionError("dummy + refused config must raise at real device use")
+            print("DUMMY_REFUSED_OK")
             """
-        # A bad group size (3) via each of the two mapping env vars.
         for env_extra in (
-            {"RBLN_DUMMY_DEVICE": "1", "RBLN_NPUS_PER_DEVICE": "3", "RBLN_DEVICE_MAP": None},
-            {"RBLN_DUMMY_DEVICE": "1", "RBLN_DEVICE_MAP": "[0,1,2]", "RBLN_NPUS_PER_DEVICE": None},
+            {"RBLN_DUMMY_DEVICE": "1", "RBLN_NPUS_PER_DEVICE": "2", "RBLN_DEVICE_MAP": None},
+            {"RBLN_DUMMY_DEVICE": "1", "RBLN_DEVICE_MAP": "[0,1]", "RBLN_NPUS_PER_DEVICE": None},
         ):
             result = _run_subprocess(script, env_extra=env_extra)
-            _assert_ok(self, result, "DUMMY_MALFORMED_OK")
+            _assert_ok(self, result, "DUMMY_REFUSED_OK")
 
     @requires_physical_devices(1)
     def test_runtime_available_true_on_healthy_host(self):

@@ -380,20 +380,14 @@ TEST_F(RBLNAllocatorTest, GetMemoryInfo) {
   EXPECT_GT(total_bytes, 0u);
   EXPECT_LE(free_bytes, total_bytes);
 
-  // The device-wide figure is the sum of its chiplets, NPU by NPU.
+  // The device-wide figure is the sum of its NPU's chiplets.
   const auto per_chiplet = c10::rbln::mem_get_info_per_chiplet(c10::Device(c10::kPrivateUse1, initial_device_index_));
-  uint64_t npu_total = 0;
   uint64_t chiplet_total = 0;
   for (const auto& [key, value] : per_chiplet) {
-    if (key.find(".chiplet.") != std::string::npos) {
-      if (key.size() > 6 && key.compare(key.size() - 6, 6, ".total") == 0) {
-        chiplet_total += value;
-      }
-    } else if (key.size() > 6 && key.compare(key.size() - 6, 6, ".total") == 0) {
-      npu_total += value;
+    if (key.size() > 6 && key.compare(key.size() - 6, 6, ".total") == 0) {
+      chiplet_total += value;
     }
   }
-  EXPECT_EQ(npu_total, total_bytes);
   EXPECT_EQ(chiplet_total, total_bytes);
 }
 

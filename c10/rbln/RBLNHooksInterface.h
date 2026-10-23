@@ -32,7 +32,7 @@ struct C10_RBLN_API RBLNHooksInterface : public at::PrivateUse1HooksInterface {
   bool hasRBLN() const;
 
   /**
-   * @brief Number of logical RBLN devices. Nothrow (ATen/DeviceAccelerator.h).
+   * @brief Number of RBLN devices. Nothrow (ATen/DeviceAccelerator.h).
    *
    * The inherited default returns 0, so at::accelerator::deviceCount() reported no devices
    * while torch.rbln.device_count() reported the real number.
@@ -40,17 +40,17 @@ struct C10_RBLN_API RBLNHooksInterface : public at::PrivateUse1HooksInterface {
   c10::DeviceIndex deviceCount() const override;
 
   /**
-   * @brief Currently selected logical device.
+   * @brief Currently selected device.
    *
    * The inherited default is TORCH_CHECK(false, ...), so
    * torch._C._accelerator_hooks_get_current_device() raised on an RBLN host.
    */
   c10::DeviceIndex getCurrentDevice() const override;
 
-  /** @brief Select a logical device (bookkeeping only; no context is created). */
+  /** @brief Select a device (bookkeeping only; no context is created). */
   void setCurrentDevice(c10::DeviceIndex device) const override;
 
-  /** @brief Select a logical device and return the previously selected one. */
+  /** @brief Select a device and return the previously selected one. */
   c10::DeviceIndex exchangeDevice(c10::DeviceIndex device) const override;
 
   /**

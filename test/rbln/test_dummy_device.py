@@ -36,12 +36,12 @@ def _clean_env() -> dict:
     Strips external state these tests must not inherit:
       - TORCH_RBLN_DIAGNOSE: a test module that gates backend init sets it at import
         and may leak it into the pytest process and then into ``os.environ`` here.
-      - RBLN_DEVICE_MAP / RBLN_NPUS_PER_DEVICE: a parent shell/CI mapping would
-        change the dummy logical device count; tests assume the default of 1 and
-        set their own map via ``env_extra`` when they need one.
-      - RBLN_FORCE_NPU_NAME / RBLN_DEVICES: both feed get_npu_name() and thus the
-        resolved compile target; a parent-set value would flip the no-NPU cases
-        below. Tests set these explicitly via ``env_extra`` when they need them.
+      - RBLN_DEVICE_MAP / RBLN_NPUS_PER_DEVICE: torch-rbln refuses them, so a parent
+        shell/CI that sets one would fail every case.
+      - RBLN_DEVICES: gives one dummy device per id it names; tests assume the default
+        of one device and set it via ``env_extra`` when they need more.
+      - RBLN_FORCE_NPU_NAME: the dummy device's NPU kind and so the resolved compile
+        target. Tests set it explicitly via ``env_extra`` when they need another.
       - RBLN_FLOAT32_PRECISION: decides whether an fp32 op is a device or a host op;
         tests set it via ``env_extra`` when they need the exact one.
     """
@@ -80,11 +80,11 @@ def _assert_ok(proc: subprocess.CompletedProcess) -> None:
     assert proc.returncode == 0, f"subprocess failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
 
 
-def test_reports_logical_device_but_no_physical():
+def test_reports_a_device_but_no_npu():
     proc = _run_with_dummy(
         """
         import torch, torch_rbln
-        # default count is 1 (no RBLN_DEVICE_MAP set)
+        # default count is 1 (no RBLN_DEVICES set)
         assert torch.rbln.device_count() == 1, torch.rbln.device_count()
         assert torch.rbln.is_available() is True
         # physical count must not query the runtime in dummy mode; reports 0.
@@ -150,37 +150,17 @@ def test_set_device_and_context_do_not_raise():
     assert "OK" in proc.stdout
 
 
-def test_device_count_honors_device_map_group_count():
+def test_device_count_is_one_per_rbln_devices_id():
     proc = _run_with_dummy(
         """
         import torch, torch_rbln
-        # 3 logical-device groups -> 3 dummy logical devices.
         assert torch.rbln.device_count() == 3, torch.rbln.device_count()
+        assert torch_rbln._C._device_npus() == [4, 5, 6], torch_rbln._C._device_npus()
+        assert torch.rbln.physical_device_count() == 0, torch.rbln.physical_device_count()
         torch.tensor(1.0, device="rbln:2")  # highest index must be usable
         print("OK")
         """,
-        env_extra={"RBLN_DEVICE_MAP": "[0],[1],[2]"},
-    )
-    _assert_ok(proc)
-    assert "OK" in proc.stdout
-
-
-def test_device_map_preserves_tp_shape():
-    # RBLN_DEVICE_MAP group sizes must survive so torch.compile's auto TP sizing
-    # still works (topology keeps non-empty physical-id lists in dummy mode).
-    proc = _run_with_dummy(
-        """
-        import torch, torch_rbln
-        from torch_rbln._internal.rsd_utils import (
-            auto_determine_num_devices,
-            get_physical_device_ids,
-        )
-        assert get_physical_device_ids(0) == [0, 1], get_physical_device_ids(0)
-        assert auto_determine_num_devices(0) == 2
-        assert auto_determine_num_devices(1) == 2
-        print("OK")
-        """,
-        env_extra={"RBLN_DEVICE_MAP": "[0,1],[2,3]"},
+        env_extra={"RBLN_DEVICES": "4,5,6"},
     )
     _assert_ok(proc)
     assert "OK" in proc.stdout
@@ -188,7 +168,7 @@ def test_device_map_preserves_tp_shape():
 
 def test_boolean_spellings():
     # RBLN_DUMMY_DEVICE is a boolean flag (shared with the rebel runtime); the
-    # logical count comes from RBLN_DEVICE_MAP (default 1), not this value. Cover
+    # device count comes from RBLN_DEVICES (default 1), not this value. Cover
     # the full truthy/falsy spellings the parser recognizes.
     #
     # The flag is sealed at startup, so every spelling needs its own interpreter -- but they
@@ -263,45 +243,6 @@ def test_is_dummy_device_false_without_env():
     assert "OK" in proc.stdout
 
 
-# A malformed map is surfaced by the point-of-use entry point, not by device_count():
-# enumeration is a quiet probe that reports 0 (see test_privateuse1_contract.py), while
-# device_count_ensure_non_zero() -- the torch.rbln.current_device() / set_device() /
-# allocation path -- raises with the detail. Both cases below are rejectable without
-# hardware, which is why they can assert under dummy.
-
-
-def test_device_map_rejects_duplicate_physical_id():
-    # Duplicate ids are rejectable without hardware; dummy must reject like real.
-    proc = _run_with_dummy(
-        "import torch, torch_rbln; torch_rbln._C.device_count_ensure_non_zero()",
-        env_extra={"RBLN_DEVICE_MAP": "[0],[0]"},
-    )
-    assert proc.returncode != 0
-    assert "more than one logical device" in (proc.stdout + proc.stderr).lower()
-
-
-def test_device_map_rejects_invalid_group_size():
-    # TP=3 is not an allowed group size; dummy must reject it like real hardware
-    # so a config that compiles under dummy also runs on an NPU.
-    proc = _run_with_dummy(
-        "import torch, torch_rbln; torch_rbln._C.device_count_ensure_non_zero()",
-        env_extra={"RBLN_DEVICE_MAP": "[0,1,2]"},
-    )
-    assert proc.returncode != 0
-    assert "valid sizes" in (proc.stdout + proc.stderr).lower()
-
-
-def test_device_count_stays_quiet_on_a_malformed_map():
-    # The counterpart: the same malformed map must NOT make enumeration raise, or every
-    # co-tenant that merely asks whether an NPU exists inherits the failure.
-    proc = _run_with_dummy(
-        "import torch, torch_rbln; print('COUNT', torch.rbln.device_count(), torch.rbln.is_available())",
-        env_extra={"RBLN_DEVICE_MAP": "[0,1,2]"},
-    )
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "COUNT 0 False" in proc.stdout
-
-
 def test_torch_compile_tracing_smoke():
     # Dummy mode's purpose is the no-NPU compile path. A custom backend that does
     # not lower to the device confirms dynamo can fakify and trace over dummy rbln
@@ -340,72 +281,6 @@ def test_cache_management_is_a_noop_in_dummy_mode():
     assert "OK" in proc.stdout
 
 
-@pytest.mark.parametrize("npus_per_device", [1, 2, 4, 8])
-def test_npus_per_device_sets_single_group_tp(npus_per_device):
-    # RBLN_NPUS_PER_DEVICE=N (no RBLN_DEVICE_MAP) -> one logical device of size N (TP=N).
-    # Sizes valid on both dev and deploy builds; the group is host-only indices in
-    # dummy mode, so no NPU is needed to materialize a width-N device.
-    proc = _run_with_dummy(
-        """
-        import os
-        import torch, torch_rbln
-        from torch_rbln._internal.rsd_utils import auto_determine_num_devices, get_physical_device_ids
-        n = int(os.environ["RBLN_NPUS_PER_DEVICE"])
-        assert torch.rbln.device_count() == 1, torch.rbln.device_count()
-        assert get_physical_device_ids(0) == list(range(n)), get_physical_device_ids(0)
-        assert auto_determine_num_devices(0) == n
-        torch.tensor(1.0, device="rbln:0")  # device of size N is usable
-        print("OK")
-        """,
-        env_extra={"RBLN_NPUS_PER_DEVICE": str(npus_per_device)},
-    )
-    _assert_ok(proc)
-    assert "OK" in proc.stdout
-
-
-@pytest.mark.parametrize(
-    ("device_map", "expected_count", "expected_ids0"),
-    [
-        ("[0]", 1, [0]),  # single device, TP=1
-        ("[0],[1]", 2, [0]),  # two devices, TP=1 each
-        ("[0,1]", 1, [0, 1]),  # single device, TP=2
-        ("[0,1,2,3]", 1, [0, 1, 2, 3]),  # single device, TP=4
-        ("[0,1],[2,3]", 2, [0, 1]),  # two devices, TP=2 each
-    ],
-)
-def test_device_map_shapes(device_map, expected_count, expected_ids0):
-    # RBLN_DEVICE_MAP shape must survive into the dummy topology: the logical-device
-    # count and per-device TP shape (physical ids of device 0) match real hardware,
-    # so a config that compiles under dummy also runs on an NPU.
-    proc = _run_with_dummy(
-        """
-        import os
-        import torch, torch_rbln
-        from torch_rbln._internal.rsd_utils import get_physical_device_ids
-        count = int(os.environ["EXP_COUNT"])
-        ids0 = [int(x) for x in os.environ["EXP_IDS0"].split(",")]
-        assert torch.rbln.device_count() == count, torch.rbln.device_count()
-        assert get_physical_device_ids(0) == ids0, get_physical_device_ids(0)
-        torch.tensor(1.0, device=f"rbln:{count - 1}")  # highest index is usable
-        print("OK")
-        """,
-        env_extra={
-            "RBLN_DEVICE_MAP": device_map,
-            "EXP_COUNT": str(expected_count),
-            "EXP_IDS0": ",".join(str(i) for i in expected_ids0),
-        },
-    )
-    _assert_ok(proc)
-    assert "OK" in proc.stdout
-
-
-# A physical device id past any realistic host's range. With RBLN_FORCE_NPU_NAME set,
-# dummy registration takes the SoC from the env instead of probing hardware, so
-# this id is a pure shape marker and no real NPU is ever touched -- the no-device
-# path is exercised even on a machine that physically has NPUs.
-_NO_NPU_MAP = "[99]"
-
-
 _COMPILE_ONLY_SNIPPET = """
 import glob, os, tempfile
 import torch, torch_rbln
@@ -441,7 +316,7 @@ def test_compile_only_uses_force_npu_name_when_no_npu_option():
     # dummy mode registers against), and a .rbln artifact is written for it.
     proc = _run_with_dummy(
         _COMPILE_ONLY_SNIPPET,
-        env_extra={"RBLN_FORCE_NPU_NAME": "RBLN-CA25", "RBLN_DEVICE_MAP": _NO_NPU_MAP},
+        env_extra={"RBLN_FORCE_NPU_NAME": "RBLN-CA25"},
     )
     _assert_ok(proc)
     assert "OK" in proc.stdout
@@ -459,7 +334,6 @@ def test_compile_only_npu_option_overrides_force_npu_name():
         env_extra={
             "RBLN_FORCE_NPU_NAME": "RBLN-CA25",
             "RBLN_DUMMY_TEST_NPU": "RBLN-CR03",
-            "RBLN_DEVICE_MAP": _NO_NPU_MAP,
         },
     )
     _assert_ok(proc)
@@ -485,8 +359,7 @@ def test_compiled_graph_execution_fails_fast():
             print("OK")
         else:
             raise AssertionError("expected RuntimeError executing a compiled graph on dummy")
-        """,
-        env_extra={"RBLN_DEVICE_MAP": _NO_NPU_MAP},
+        """
     )
     _assert_ok(proc)
     assert "OK" in proc.stdout
@@ -511,8 +384,7 @@ def test_compiled_graph_decorator_form_execution_fails_fast():
             print("OK")
         else:
             raise AssertionError("expected RuntimeError executing a compiled graph on dummy")
-        """,
-        env_extra={"RBLN_DEVICE_MAP": _NO_NPU_MAP},
+        """
     )
     _assert_ok(proc)
     assert "OK" in proc.stdout
@@ -536,8 +408,7 @@ def test_compiled_graph_keyword_model_execution_fails_fast():
             print("OK")
         else:
             raise AssertionError("expected RuntimeError executing a compiled graph on dummy")
-        """,
-        env_extra={"RBLN_DEVICE_MAP": _NO_NPU_MAP},
+        """
     )
     _assert_ok(proc)
     assert "OK" in proc.stdout
@@ -563,8 +434,7 @@ def test_compile_only_decorator_form_is_allowed():
         arts = glob.glob(os.path.join(cache, "**", "*.rbln"), recursive=True)
         assert len(arts) == 1 and os.path.getsize(arts[0]) > 0, arts
         print("OK")
-        """,
-        env_extra={"RBLN_DEVICE_MAP": _NO_NPU_MAP},
+        """
     )
     _assert_ok(proc)
     assert "OK" in proc.stdout
@@ -591,8 +461,7 @@ def test_eager_device_dtype_op_execution_fails_fast():
                     else:
                         raise AssertionError(f"expected RuntimeError on dummy for {dt} {shape}")
         print("OK")
-        """,
-        env_extra={"RBLN_DEVICE_MAP": _NO_NPU_MAP},
+        """
     )
     _assert_ok(proc)
     assert "OK" in proc.stdout
@@ -608,20 +477,18 @@ def test_eager_host_dtype_op_runs_on_cpu():
         assert (a + a).cpu().tolist() == [[2.0] * 8] * 4
         print("OK")
         """,
-        env_extra={"RBLN_DEVICE_MAP": _NO_NPU_MAP, "RBLN_FLOAT32_PRECISION": "exact"},
+        env_extra={"RBLN_FLOAT32_PRECISION": "exact"},
     )
     _assert_ok(proc)
     assert "OK" in proc.stdout
 
 
-# An out-of-range system device id: RBLN_DEVICES remaps user device 0 onto it, the
-# probe misses, and 0 logical devices remain (distinct from RBLN_DEVICE_MAP, which
-# declares a logical device that only fails when actually opened).
+# An NPU id no host has: RBLN_DEVICES names nothing this host has, so 0 devices remain.
 _NO_NPU_DEVICES = "999"
 
 
 def test_dummy_is_required_no_silent_cpu():
-    # The out-of-range RBLN_DEVICES leaves 0 logical devices. WITHOUT dummy mode
+    # The out-of-range RBLN_DEVICES leaves 0 devices. WITHOUT dummy mode
     # the first device op must fail loudly (no silent host fallback) -- dummy is
     # an explicit opt-in, not an implicit no-NPU shim.
     env = _clean_env()
@@ -637,10 +504,10 @@ def test_dummy_is_required_no_silent_cpu():
                 try:
                     torch.tensor([1.0], device="rbln:0")
                 except RuntimeError as e:
-                    assert "no logical device" in str(e), str(e)
+                    assert "no device available" in str(e), str(e)
                     print("OK")
                 else:
-                    raise AssertionError("expected RuntimeError: no logical device")
+                    raise AssertionError("expected RuntimeError: no device available")
                 """
             ),
         ],

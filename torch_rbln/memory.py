@@ -166,13 +166,10 @@ def memory_stats_per_chiplet(
     """
     Return memory allocator statistics broken down per chiplet.
 
-    Same keys as :func:`memory_stats`, each prefixed with ``npu.<n>.chiplet.<c>.`` --
-    e.g. ``npu.0.chiplet.0.allocated_bytes.all.current``. A device runs out on its heaviest
-    chiplet, which the aggregate :func:`memory_stats` hides.
-
-    ``npu.<n>`` is the n-th physical NPU of this logical device (``RBLN_NPUS_PER_DEVICE``
-    / ``RBLN_DEVICE_MAP``), not a physical NPU id; a 1:1 mapping yields ``npu.0`` only.
-    Same scope as :func:`memory_stats`.
+    Same keys as :func:`memory_stats`, each prefixed with ``npu.0.chiplet.<c>.`` --
+    e.g. ``npu.0.chiplet.0.allocated_bytes.all.current``; a device is one NPU, so the ``npu``
+    level is always ``0``. A device runs out on its heaviest chiplet, which the aggregate
+    :func:`memory_stats` hides. Same scope as :func:`memory_stats`.
 
     Args:
         device (Optional[Union[int, str, torch.device]]): The device to query.
@@ -191,12 +188,9 @@ def memory_summary(device: Optional[Union[int, str, torch.device]] = None) -> st
     """
     Return a human-readable printout of the current memory allocator statistics.
 
-    Rows are per (NPU, chiplet), so an imbalance is visible at a glance. The scope line
-    under the title names what the numbers cover: they are this process's allocator, not
-    the NPU's occupancy (see :func:`memory_stats`). The ``npu`` column is the physical NPU
-    id as :func:`torch.rbln.device_summary` prints it: relative to ``RBLN_VISIBLE_DEVICES``,
-    so it differs from ``rbln-smi`` when that variable is set. A logical device grouping
-    several NPUs (``RBLN_NPUS_PER_DEVICE`` / ``RBLN_DEVICE_MAP``) gets one row per NPU.
+    Rows are per chiplet, so an imbalance is visible at a glance. The scope line under the
+    title names what the numbers cover: they are this process's allocator, not the NPU's
+    occupancy (see :func:`memory_stats`).
 
     Peaks are tracked per chiplet, so the peak columns of the ``total`` row bound the
     joint peak from above rather than reporting it. :func:`memory_stats` carries the
@@ -219,7 +213,7 @@ def memory_summary(device: Optional[Union[int, str, torch.device]] = None) -> st
     if not per_chiplet:
         return no_stats
 
-    rows = sorted({(int(k.split(".")[1]), int(k.split(".")[3])) for k in per_chiplet})
+    chiplets = sorted({int(key.split(".")[3]) for key in per_chiplet})
     columns = [
         ("allocated_bytes.all.current", "allocated"),
         ("allocated_bytes.all.peak", "alloc peak"),
@@ -231,36 +225,24 @@ def memory_summary(device: Optional[Union[int, str, torch.device]] = None) -> st
     def mib(value: int) -> str:
         return f"{value / 1024**2:.1f}"
 
-    def stat(npu: int, chiplet: int, key: str) -> int:
-        return per_chiplet.get(f"npu.{npu}.chiplet.{chiplet}.{key}", 0)
+    def stat(chiplet: int, key: str) -> int:
+        return per_chiplet.get(f"npu.0.chiplet.{chiplet}.{key}", 0)
 
-    # Local import: rsd_utils pulls in torch_rbln.device, which star-imports this module.
-    from torch_rbln._internal.rsd_utils import get_physical_device_ids
-
-    # Stats keys carry the NPU's position within the logical device; print the physical
-    # id device_summary() shows instead, falling back to the position if unmapped.
-    physical = get_physical_device_ids(device.index) or []
-
-    def npu_id(npu: int) -> int:
-        return physical[npu] if npu < len(physical) else npu
-
-    header = f"{'npu':>5}{'chiplet':>9}" + "".join(f"{label:>13}" for _, label in columns)
+    header = f"{'chiplet':>9}" + "".join(f"{label:>13}" for _, label in columns)
     lines = [
         f"torch_rbln memory summary (device={device}, MiB)",
         f"scope: pid {os.getpid()} -- caching allocator only, this process only",
-        "npu: physical NPU id as in device_summary() (relative to RBLN_VISIBLE_DEVICES, may differ from rbln-smi)",
         header,
         "-" * len(header),
     ]
-    for npu, chiplet in rows:
-        cells = "".join(f"{mib(stat(npu, chiplet, key)):>13}" for key, _ in columns)
-        lines.append(f"{npu_id(npu):>5}{chiplet:>9}" + cells)
-    totals = "".join(f"{mib(sum(stat(npu, chiplet, key) for npu, chiplet in rows)):>13}" for key, _ in columns)
+    for chiplet in chiplets:
+        lines.append(f"{chiplet:>9}" + "".join(f"{mib(stat(chiplet, key)):>13}" for key, _ in columns))
+    totals = "".join(f"{mib(sum(stat(chiplet, key) for chiplet in chiplets)):>13}" for key, _ in columns)
     lines.append("-" * len(header))
-    lines.append(f"{'total':>14}" + totals)
+    lines.append(f"{'total':>9}" + totals)
 
-    retries = sum(stat(npu, chiplet, "num_alloc_retries") for npu, chiplet in rows)
-    ooms = sum(stat(npu, chiplet, "num_ooms") for npu, chiplet in rows)
+    retries = sum(stat(chiplet, "num_alloc_retries") for chiplet in chiplets)
+    ooms = sum(stat(chiplet, "num_ooms") for chiplet in chiplets)
     lines.append(f"alloc retries: {retries}   ooms: {ooms}")
     return "\n".join(lines) + "\n"
 
@@ -329,9 +311,8 @@ def mem_get_info(device: Optional[Union[int, str, torch.device]] = None) -> tupl
     :func:`torch.accelerator.get_memory_info` reports for ``rbln``: the NPU's figures as the
     kernel driver sees them, across every process -- not this process's caching allocator,
     which :func:`memory_stats` covers. ``total`` is the pool the driver can hand out, so it
-    sits below the part's nominal DRAM. A logical device spanning several physical NPUs
-    (``RBLN_NPUS_PER_DEVICE`` / ``RBLN_DEVICE_MAP``) reports their sum; one tensor still
-    lives on one NPU. A reading, not a reservation: another process may allocate right after.
+    sits below the part's nominal DRAM. A reading, not a reservation: another process may
+    allocate right after.
 
     Args:
         device (Optional[Union[int, str, torch.device]]): The device to query.
@@ -356,9 +337,8 @@ def mem_get_info_per_chiplet(
     Return the driver's device DRAM usage of ``device`` broken down per chiplet, in bytes.
 
     Same figures as :func:`mem_get_info` before summation, keyed like
-    :func:`memory_stats_per_chiplet`: ``npu.<n>.chiplet.<c>.{total,used,free}`` for each
-    chiplet, and ``npu.<n>.{total,used,free}`` for each physical NPU of the logical device.
-    ``npu.<n>`` is the NPU's position within the logical device, not a physical NPU id.
+    :func:`memory_stats_per_chiplet`: ``npu.0.chiplet.<c>.{total,used,free}`` for each
+    chiplet.
 
     Each chiplet allocates from its own pool, so a buffer is bounded by one chiplet's
     ``free``, which the device-wide figure hides.

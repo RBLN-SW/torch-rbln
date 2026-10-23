@@ -57,7 +57,7 @@ def current_device() -> int:
 
 
 def device_count() -> int:
-    """Number of RBLN logical devices. Never raises (``torch.cuda`` parity).
+    """Number of RBLN devices: one per NPU ``RBLN_DEVICES`` selects. Never raises (``torch.cuda`` parity).
 
     Returns ``0`` when the runtime is absent, no NPU is visible, or the ``RBLN_*``
     configuration is malformed; the malformed case also warns. torch treats
@@ -75,20 +75,18 @@ def device_count() -> int:
 
 def physical_device_count() -> int:
     """
-    Get the number of physical RBLN devices in the system.
+    Get the number of NPUs this process sees: those of the host ``RBLN_DEVICES`` selects.
 
-    This function returns the actual number of physical devices, regardless of
-    whether RSD mode is enabled. Unlike device_count(),
-    this function always returns the physical device count, even when RSD mode
-    is active (which makes device_count() return 1).
+    Equal to :func:`device_count` except under ``RBLN_DUMMY_DEVICE``, where no NPU backs the
+    devices and this is ``0``, and when the device configuration is rejected, where
+    :func:`device_count` is ``0`` but the NPUs are still there.
 
-    Note: this bypasses the device-mapping plan and asks the runtime directly, so it
-    reports the visible physical pool rather than the logical devices this process has
-    planned. It does not claim an NPU and does not freeze the mapping -- both happen on
-    first device use. See "When the mapping takes effect" in docs/CONFIGURATION.md.
+    Note: this asks the runtime directly rather than the device-mapping plan. It does not
+    claim an NPU and does not freeze the mapping -- both happen on first device use. See
+    "When the mapping takes effect" in docs/CONFIGURATION.md.
 
     Returns:
-        int: The number of physical RBLN devices.
+        int: The number of NPUs.
     """
     return torch_rbln._C.physical_device_count()
 
@@ -148,12 +146,10 @@ def get_amp_supported_dtype() -> List[torch.dtype]:
 def get_device_properties(
     device: Union[int, torch.device, str, None] = None,
 ) -> torch_rbln._C.DeviceProperties:
-    """What the NPUs behind an RBLN logical device are (``torch.cuda`` parity).
+    """What the NPU behind an RBLN device is (``torch.cuda`` parity).
 
-    A logical device may span several physical NPUs (``RBLN_DEVICE_MAP`` /
-    ``RBLN_NPUS_PER_DEVICE``), so ``total_memory`` sums them and ``npu_count`` says how many.
-    ``num_chiplet`` and ``memory_per_chiplet`` stay per NPU: a device runs out on its heaviest
-    chiplet, which ``total_memory`` hides, so size a pool by ``memory_per_chiplet``.
+    A device runs out on its heaviest chiplet, which ``total_memory`` hides, so size a pool
+    by ``memory_per_chiplet``.
 
     Args:
         device (torch.device or int or str, optional): The device to query. Defaults to the
@@ -161,7 +157,7 @@ def get_device_properties(
 
     Raises:
         RuntimeError: in ``RBLN_DUMMY_DEVICE`` mode (host-backed, no NPU to report on), when no
-            NPU is mapped to the index, or when the runtime cannot answer for one of them.
+            device of this process has the index, or when the runtime cannot answer.
 
     Example::
         >>> import torch
@@ -173,7 +169,7 @@ def get_device_properties(
 
 
 def get_device_name(device: Union[int, torch.device, str, None] = None) -> str:
-    """The NPU name behind an RBLN logical device, e.g. ``"RBLN-CA25"`` (``torch.cuda`` parity).
+    """The NPU name behind an RBLN device, e.g. ``"RBLN-CA25"`` (``torch.cuda`` parity).
 
     Args:
         device (torch.device or int or str, optional): The device to query. Defaults to the
@@ -376,85 +372,31 @@ def _on_device_mapping_ready_from_cpp() -> None:
 
 
 def _device_summary_string() -> str:
-    topology = torch_rbln._C._get_device_topology()
-    rows = []
-    max_logical_width = len("Logical Device")
-    max_physical_width = len("Physical NPU IDs")
-    max_status_width = len("Active (Aggregated)")
-    for entry in topology.entries:
-        physical_str = "[ " + ", ".join(str(pid) for pid in entry.physical_device_ids) + " ]"
-        status = "Active (Aggregated)" if entry.is_aggregated else "Active"
-        logical_device = f"rbln:{entry.logical_device_index}"
-        rows.append((logical_device, physical_str, status))
-        max_logical_width = max(max_logical_width, len(logical_device))
-        max_physical_width = max(max_physical_width, len(physical_str))
-        max_status_width = max(max_status_width, len(status))
-    if topology.unused_physical_device_ids:
-        unused_str = "[ " + ", ".join(str(pid) for pid in topology.unused_physical_device_ids) + " ]"
-        rows.append(("-", unused_str, "Unused"))
-        max_physical_width = max(max_physical_width, len(unused_str))
-    max_logical_width = max(max_logical_width, len("Logical Device"))
-    max_physical_width = max(max_physical_width, len("Physical NPU IDs"))
-    max_status_width = max(max_status_width, len("Status"))
-    header_sep = (
-        "+"
-        + "-" * (max_logical_width + 2)
-        + "+"
-        + "-" * (max_physical_width + 2)
-        + "+"
-        + "-" * (max_status_width + 2)
-        + "+"
-    )
-    header_row = (
-        f"| {'Logical Device':<{max_logical_width}} | "
-        f"{'Physical NPU IDs':<{max_physical_width}} | "
-        f"{'Status':<{max_status_width}} |"
-    )
-    lines = [
-        "[RBLN] Device Topology Initialized:",
-        header_sep,
-        header_row,
-        header_sep,
-    ]
-    for logical_device, physical_ids, status in rows:
-        row = (
-            f"| {logical_device:<{max_logical_width}} | "
-            f"{physical_ids:<{max_physical_width}} | "
-            f"{status:<{max_status_width}} |"
-        )
-        lines.append(row)
-    lines.append(header_sep)
-    if topology.unused_physical_device_ids:
-        nu = len(topology.unused_physical_device_ids)
-        lines.append(f"[Warning] {nu} physical NPU(s) are unused due to grouping constraints.")
+    rows = [(f"rbln:{index}", str(npu)) for index, npu in enumerate(torch_rbln._C._device_npus())]
+    device_width = max([len("Device")] + [len(device) for device, _ in rows])
+    npu_width = max([len("NPU")] + [len(npu) for _, npu in rows])
+    separator = f"+{'-' * (device_width + 2)}+{'-' * (npu_width + 2)}+"
+    lines = ["[RBLN] Devices:", separator, f"| {'Device':<{device_width}} | {'NPU':<{npu_width}} |", separator]
+    lines += [f"| {device:<{device_width}} | {npu:<{npu_width}} |" for device, npu in rows]
+    lines.append(separator)
     return "\n".join(lines)
 
 
 def device_summary() -> None:
     """
-    Print a summary of the RBLN device topology showing the mapping between
-    logical devices and physical NPU IDs.
-
-    This function displays a table showing:
-    - Logical device indices (e.g., rbln:0, rbln:1)
-    - Physical NPU IDs mapped to each logical device
-    - Status of each device (Active, Active (Aggregated), or Unused)
-    - Warnings about unused physical devices if any
-
-    The device mapping is determined by the following environment variables
-    (in order of priority):
-    1. RBLN_DEVICE_MAP: Explicit mapping (e.g., "[0,1],[2,3,4,5]")
-    2. RBLN_NPUS_PER_DEVICE: Group devices by count (e.g., "2")
+    Print the NPU behind each RBLN device: ``rbln:N`` is the N-th NPU ``RBLN_DEVICES``
+    selects, numbered as ``rbln-smi`` numbers it. Under ``RBLN_DUMMY_DEVICE`` no NPU backs the
+    devices, and the numbers are the ones ``RBLN_DEVICES`` names.
 
     Example::
         >>> import torch
-        >>> torch.rbln.device_summary()
-        [RBLN] Device Topology Initialized:
-        +-------------------+-------------------+----------------------+
-        | Logical Device    | Physical NPU IDs  | Status               |
-        +-------------------+-------------------+----------------------+
-        | rbln:0            | [ 0, 1 ]          | Active (Aggregated)  |
-        | rbln:1            | [ 2, 3 ]          | Active (Aggregated)  |
-        +-------------------+-------------------+----------------------+
+        >>> torch.rbln.device_summary()  # RBLN_DEVICES=4,5
+        [RBLN] Devices:
+        +--------+-----+
+        | Device | NPU |
+        +--------+-----+
+        | rbln:0 | 4   |
+        | rbln:1 | 5   |
+        +--------+-----+
     """
     print(_device_summary_string())

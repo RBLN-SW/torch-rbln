@@ -29,7 +29,7 @@ class TestImportDoesNotSeal(TestCase):
 
     Each subprocess sets ``RBLN_DEVICES``, runs the scenario, remaps it, then counts the
     devices; the count must follow the remap. ``"0"`` -> ``"0,1"`` is a real change keeping
-    logical device 0 valid.
+    device 0 valid.
     """
 
     def _assert_no_seal(self, result: subprocess.CompletedProcess):

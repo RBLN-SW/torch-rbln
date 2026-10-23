@@ -65,14 +65,7 @@ std::shared_ptr<rt::Device> runtime_device(c10::DeviceIndex device_index) {
     const std::string npu = rt::flags::kForceNpuName.value();
     return rt::Device::openDummy(npu.empty() ? "RBLN-CA25" : npu);
   }
-  const auto ids = DeviceMappingManager::getInstance().getPhysicalDeviceIds(device_index);
-  RBLN_CHECK(!ids.empty(), "no NPU is mapped to rbln:{}", static_cast<int>(device_index));
-  RBLN_CHECK(
-      ids.size() == 1,
-      "rbln:{} maps {} NPUs; tensors on several NPUs come with functions over them",
-      static_cast<int>(device_index),
-      ids.size());
-  return rt::Device::open(DeviceMappingManager::getInstance().systemNpu(ids.front()));
+  return rt::Device::open(DeviceMappingManager::getInstance().npu(device_index));
 }
 
 void* allocate_segment(c10::DeviceIndex device_index, size_t nbytes) {

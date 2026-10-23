@@ -13,21 +13,16 @@ from torch.testing._internal.common_device_type import instantiate_device_type_t
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 import torch_rbln._internal.register_custom_ops as register_custom_ops
-from test.utils import requires_logical_devices
+from test.utils import requires_devices
 from torch_rbln._internal.compile_cache import clear_rbln_compile_cache, compiled_op
 from torch_rbln._internal.monkey_patches import patch_torch_compile, remove_all_patches
 from torch_rbln._internal.ops_utils import extract_device_id_from_inputs
 from torch_rbln._internal.torch_compile_patch_helpers import (
     _convert_result_to_device,
     attempt_cpu_fallback,
-    auto_determine_num_devices_if_needed,
     CompiledFunctionWrapper,
     extract_device_from_inputs,
-    get_num_devices_from_options,
-    handle_tp_failover,
     is_rbln_backend,
-    recompile_with_num_devices,
-    should_attempt_failover,
 )
 
 
@@ -82,7 +77,7 @@ class TestTorchCompilePatchHelpers(TestCase):
         device_id = extract_device_id_from_inputs(t)
         self.assertEqual(device_id, 0)
 
-    @requires_logical_devices(2)
+    @requires_devices(2)
     def test_extract_device_id_from_inputs_with_multiple_tensors(self):
         """Test extracting device ID from multiple tensors."""
         t1 = torch.tensor([1], device="cpu")
@@ -90,7 +85,7 @@ class TestTorchCompilePatchHelpers(TestCase):
         device_id = extract_device_id_from_inputs(t1, t2)
         self.assertEqual(device_id, 1)
 
-    @requires_logical_devices(3)
+    @requires_devices(3)
     def test_extract_device_id_from_inputs_with_kwargs(self):
         """Test extracting device ID from kwargs."""
         t = torch.tensor([1], device="rbln:2")
@@ -102,48 +97,6 @@ class TestTorchCompilePatchHelpers(TestCase):
         t = torch.tensor([1], device="cpu")
         device_id = extract_device_id_from_inputs(t, 42, "hello")
         self.assertIsNone(device_id)
-
-    def test_get_num_devices_from_options_with_num_devices(self):
-        """Test extracting num_devices from compile_kwargs."""
-        compile_kwargs = {"options": {"num_devices": 4}}
-        num_devices = get_num_devices_from_options(compile_kwargs)
-        self.assertEqual(num_devices, 4)
-
-    def test_get_num_devices_from_options_with_devices(self):
-        """`devices`, the name rbln's backend takes, wins over the older names."""
-        compile_kwargs = {"options": {"devices": 2, "num_devices": 4}}
-        num_devices = get_num_devices_from_options(compile_kwargs)
-        self.assertEqual(num_devices, 2)
-
-    def test_get_num_devices_from_options_legacy_alias(self):
-        """The deprecated `tensor_parallel_size` alias is still accepted as a fallback."""
-        compile_kwargs = {"options": {"tensor_parallel_size": 4}}
-        num_devices = get_num_devices_from_options(compile_kwargs)
-        self.assertEqual(num_devices, 4)
-
-    def test_get_num_devices_from_options_num_devices_wins_over_alias(self):
-        """`num_devices` takes precedence when both keys are present."""
-        compile_kwargs = {"options": {"num_devices": 4, "tensor_parallel_size": 8}}
-        num_devices = get_num_devices_from_options(compile_kwargs)
-        self.assertEqual(num_devices, 4)
-
-    def test_get_num_devices_from_options_without_num_devices(self):
-        """Test that None is returned when num_devices is not set."""
-        compile_kwargs = {"options": {}}
-        num_devices = get_num_devices_from_options(compile_kwargs)
-        self.assertIsNone(num_devices)
-
-    def test_get_num_devices_from_options_no_options(self):
-        """Test that None is returned when options key is missing."""
-        compile_kwargs = {}
-        num_devices = get_num_devices_from_options(compile_kwargs)
-        self.assertIsNone(num_devices)
-
-    def test_get_num_devices_from_options_non_dict_options(self):
-        """Test that None is returned when options is not a dict."""
-        compile_kwargs = {"options": "not_a_dict"}
-        num_devices = get_num_devices_from_options(compile_kwargs)
-        self.assertIsNone(num_devices)
 
     def test_convert_result_to_device_single_tensor(self):
         """Test converting single tensor result to target device."""
@@ -285,196 +238,11 @@ class TestTorchCompilePatchHelpers(TestCase):
 
 
 @pytest.mark.test_set_ci
-class TestTensorParallelFunctions(TestCase):
-    """Tests for tensor parallel related functions."""
-
-    def test_recompile_with_num_devices(self):
-        """Test recompile_with_num_devices updates compile_kwargs correctly."""
-        mock_compile_fn = Mock(return_value="recompiled_fn")
-        mock_model = Mock()
-        compile_kwargs = {"backend": "rbln", "options": {"some_option": "value"}}
-
-        result = recompile_with_num_devices(
-            mock_model, compile_kwargs, num_devices=4, original_compile_fn=mock_compile_fn
-        )
-
-        # Verify compile function was called with updated options
-        mock_compile_fn.assert_called_once()
-        call_args = mock_compile_fn.call_args
-        self.assertEqual(call_args[0][0], mock_model)
-        self.assertEqual(call_args[1]["backend"], "rbln")
-        self.assertEqual(call_args[1]["options"]["devices"], 4)
-        self.assertEqual(call_args[1]["options"]["some_option"], "value")
-        self.assertEqual(result, "recompiled_fn")
-
-    def test_recompile_with_num_devices_no_existing_options(self):
-        """Test recompile_with_num_devices with no existing options."""
-        mock_compile_fn = Mock(return_value="recompiled_fn")
-        mock_model = Mock()
-        compile_kwargs = {"backend": "rbln"}
-
-        recompile_with_num_devices(mock_model, compile_kwargs, num_devices=2, original_compile_fn=mock_compile_fn)
-
-        call_args = mock_compile_fn.call_args
-        self.assertEqual(call_args[1]["options"]["devices"], 2)
-
-    def test_recompile_with_num_devices_drops_older_names(self):
-        """The count replaces one given under an older name rather than sitting beside it."""
-        mock_compile_fn = Mock(return_value="recompiled_fn")
-        compile_kwargs = {"backend": "rbln", "options": {"num_devices": 8, "tensor_parallel_size": 8}}
-
-        recompile_with_num_devices(Mock(), compile_kwargs, num_devices=2, original_compile_fn=mock_compile_fn)
-
-        self.assertEqual(mock_compile_fn.call_args[1]["options"], {"devices": 2})
-        self.assertEqual(compile_kwargs["options"], {"num_devices": 8, "tensor_parallel_size": 8})
-
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices")
-    def test_auto_determine_num_devices_if_needed_when_not_set(self, mock_auto_tp):
-        """Test auto_determine_num_devices_if_needed when num_devices is not set."""
-        mock_auto_tp.return_value = 4
-        mock_compile_fn = Mock(return_value="recompiled_fn")
-        mock_model = Mock()
-        compile_kwargs = {"backend": "rbln"}
-
-        result = auto_determine_num_devices_if_needed(
-            mock_model, compile_kwargs, device_id=0, original_compile_fn=mock_compile_fn
-        )
-
-        mock_auto_tp.assert_called_once_with(0)
-        self.assertEqual(result, "recompiled_fn")
-
-    def test_auto_determine_num_devices_if_needed_when_already_set(self):
-        """Test auto_determine_num_devices_if_needed when num_devices is already set."""
-        mock_compile_fn = Mock()
-        mock_model = Mock()
-        compile_kwargs = {"options": {"num_devices": 2}}
-
-        result = auto_determine_num_devices_if_needed(
-            mock_model, compile_kwargs, device_id=0, original_compile_fn=mock_compile_fn
-        )
-
-        # Should return None without calling compile function
-        mock_compile_fn.assert_not_called()
-        self.assertIsNone(result)
-
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices")
-    def test_auto_determine_num_devices_if_needed_when_auto_tp_fails(self, mock_auto_tp):
-        """Test auto_determine_num_devices_if_needed when auto-determination fails."""
-        mock_auto_tp.return_value = None
-        mock_compile_fn = Mock()
-        mock_model = Mock()
-        compile_kwargs = {}
-
-        result = auto_determine_num_devices_if_needed(
-            mock_model, compile_kwargs, device_id=0, original_compile_fn=mock_compile_fn
-        )
-
-        mock_compile_fn.assert_not_called()
-        self.assertIsNone(result)
-
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.use_tp_failover")
-    def test_should_attempt_failover_enabled(self, mock_enable_failover):
-        """Test should_attempt_failover when failover is enabled."""
-        mock_enable_failover.return_value = True
-        compile_kwargs = {}
-
-        result = should_attempt_failover(device_id=0, compile_kwargs=compile_kwargs, current_num_devices=4)
-
-        self.assertTrue(result)
-
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.use_tp_failover")
-    def test_should_attempt_failover_disabled(self, mock_enable_failover):
-        """Test should_attempt_failover when failover is disabled."""
-        mock_enable_failover.return_value = False
-        compile_kwargs = {}
-
-        result = should_attempt_failover(device_id=0, compile_kwargs=compile_kwargs, current_num_devices=4)
-
-        self.assertFalse(result)
-
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.use_tp_failover")
-    def test_should_attempt_failover_tp_is_one(self, mock_enable_failover):
-        """Test should_attempt_failover when current_num_devices is 1."""
-        mock_enable_failover.return_value = True
-        compile_kwargs = {}
-
-        result = should_attempt_failover(device_id=0, compile_kwargs=compile_kwargs, current_num_devices=1)
-
-        self.assertFalse(result)
-
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.use_tp_failover")
-    def test_should_attempt_failover_explicit_tp_one(self, mock_enable_failover):
-        """Test should_attempt_failover when num_devices=1 is explicitly set."""
-        mock_enable_failover.return_value = True
-        compile_kwargs = {"options": {"num_devices": 1}}
-
-        result = should_attempt_failover(device_id=0, compile_kwargs=compile_kwargs, current_num_devices=4)
-
-        self.assertFalse(result)
-
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.use_tp_failover")
-    def test_should_attempt_failover_explicit_tp_gt_one(self, mock_enable_failover):
-        """Test should_attempt_failover when num_devices>1 is explicitly set."""
-        mock_enable_failover.return_value = True
-        compile_kwargs = {"options": {"num_devices": 2}}
-
-        result = should_attempt_failover(device_id=0, compile_kwargs=compile_kwargs, current_num_devices=2)
-
-        self.assertFalse(result)
-
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.get_physical_device_ids")
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices")
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.use_tp_failover")
-    def test_handle_tp_failover_success(self, mock_enable_failover, mock_auto_tp, mock_get_devices):
-        """Test handle_tp_failover successfully recompiles with tp=1."""
-        mock_enable_failover.return_value = True
-        mock_auto_tp.return_value = 4
-        mock_get_devices.return_value = [0, 1, 2, 3]
-        mock_compile_fn = Mock(return_value="recompiled_fn_tp1")
-        mock_model = Mock()
-        mock_model.__name__ = "TestModel"
-        compile_kwargs = {}
-
-        result = handle_tp_failover(mock_model, compile_kwargs, device_id=0, original_compile_fn=mock_compile_fn)
-
-        self.assertEqual(result, "recompiled_fn_tp1")
-        mock_compile_fn.assert_called_once()
-
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.use_tp_failover")
-    def test_handle_tp_failover_not_applicable(self, mock_enable_failover):
-        """Test handle_tp_failover when failover is not applicable."""
-        mock_enable_failover.return_value = False
-        mock_compile_fn = Mock()
-        mock_model = Mock()
-        compile_kwargs = {}
-
-        result = handle_tp_failover(mock_model, compile_kwargs, device_id=0, original_compile_fn=mock_compile_fn)
-
-        mock_compile_fn.assert_not_called()
-        self.assertIsNone(result)
-
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.use_tp_failover")
-    def test_handle_tp_failover_respects_explicit_num_devices(self, mock_enable_failover):
-        """Test handle_tp_failover does not override explicit caller TP settings."""
-        mock_enable_failover.return_value = True
-        mock_compile_fn = Mock()
-        mock_model = Mock()
-        compile_kwargs = {"options": {"num_devices": 4}}
-
-        result = handle_tp_failover(mock_model, compile_kwargs, device_id=0, original_compile_fn=mock_compile_fn)
-
-        mock_compile_fn.assert_not_called()
-        self.assertIsNone(result)
-
-
-@pytest.mark.test_set_ci
 class TestCompiledFunctionWrapper(TestCase):
     """Tests for CompiledFunctionWrapper class."""
 
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
-    def test_wrapper_successful_execution(self, mock_auto_determine):
+    def test_wrapper_successful_execution(self):
         """Test that wrapper correctly executes compiled function on success."""
-        mock_auto_determine.return_value = None  # No recompilation needed
 
         def mock_compiled_fn(x):
             return x * 2
@@ -482,18 +250,13 @@ class TestCompiledFunctionWrapper(TestCase):
         def original_fn(x):
             return x * 2
 
-        mock_original_compile_fn = Mock()
         t = torch.tensor([5], device="rbln:0")
-        wrapper = CompiledFunctionWrapper(mock_compiled_fn, original_fn, mock_original_compile_fn)
+        wrapper = CompiledFunctionWrapper(mock_compiled_fn, original_fn)
         result = wrapper(t)
         self.assertEqual(result.item(), 10)
 
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.use_tp_failover")
-    def test_wrapper_cpu_fallback_on_error(self, mock_enable_failover, mock_auto_determine):
+    def test_wrapper_cpu_fallback_on_error(self):
         """Test that wrapper falls back to CPU on error."""
-        mock_enable_failover.return_value = False
-        mock_auto_determine.return_value = None
 
         def mock_compiled_fn(x):
             raise RuntimeError("Compilation error")
@@ -501,9 +264,8 @@ class TestCompiledFunctionWrapper(TestCase):
         def original_fn(x):
             return x + 1
 
-        mock_original_compile_fn = Mock()
         t = torch.tensor([1.0, 2.0], device="rbln:0")
-        wrapper = CompiledFunctionWrapper(mock_compiled_fn, original_fn, mock_original_compile_fn)
+        wrapper = CompiledFunctionWrapper(mock_compiled_fn, original_fn)
 
         with patch("torch_rbln._internal.torch_compile_patch_helpers.is_fallback_disabled", return_value=False):
             result = wrapper(t)
@@ -511,16 +273,8 @@ class TestCompiledFunctionWrapper(TestCase):
             self.assertEqual(result.device.type, "rbln")
             self.assertEqual(result.tolist(), [2.0, 3.0])
 
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.use_tp_failover")
-    def test_wrapper_cpu_fallback_handles_cpu_first_inputs_and_nested_outputs(
-        self,
-        mock_enable_failover,
-        mock_auto_determine,
-    ):
+    def test_wrapper_cpu_fallback_handles_cpu_first_inputs_and_nested_outputs(self):
         """Test fallback chooses the RBLN device and restores nested outputs recursively."""
-        mock_enable_failover.return_value = False
-        mock_auto_determine.return_value = None
 
         def mock_compiled_fn(cpu_tensor, rbln_tensor):
             raise RuntimeError("Compilation error")
@@ -535,7 +289,7 @@ class TestCompiledFunctionWrapper(TestCase):
 
         cpu_tensor = torch.tensor([1.0, 2.0], device="cpu")
         rbln_tensor = torch.tensor([3.0, 4.0], device="rbln:0")
-        wrapper = CompiledFunctionWrapper(mock_compiled_fn, original_fn, Mock())
+        wrapper = CompiledFunctionWrapper(mock_compiled_fn, original_fn)
 
         with patch("torch_rbln._internal.torch_compile_patch_helpers.is_fallback_disabled", return_value=False):
             result = wrapper(cpu_tensor, rbln_tensor)
@@ -545,16 +299,8 @@ class TestCompiledFunctionWrapper(TestCase):
         self.assertEqual(result["result"][1][0].device.type, "rbln")
         self.assertEqual(result["result"][0].cpu().tolist(), [4.0, 6.0])
 
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.use_tp_failover")
-    def test_wrapper_cpu_fallback_raises_without_rbln_inputs(
-        self,
-        mock_enable_failover,
-        mock_auto_determine,
-    ):
+    def test_wrapper_cpu_fallback_raises_without_rbln_inputs(self):
         """Test that RBLN fallback refuses CPU-only tensor inputs."""
-        mock_enable_failover.return_value = False
-        mock_auto_determine.return_value = None
 
         def mock_compiled_fn(cpu_tensor):
             raise RuntimeError("Compilation error")
@@ -563,7 +309,7 @@ class TestCompiledFunctionWrapper(TestCase):
             return cpu_tensor + 1
 
         cpu_tensor = torch.tensor([1.0, 2.0], device="cpu")
-        wrapper = CompiledFunctionWrapper(mock_compiled_fn, original_fn, Mock())
+        wrapper = CompiledFunctionWrapper(mock_compiled_fn, original_fn)
 
         with patch("torch_rbln._internal.torch_compile_patch_helpers.is_fallback_disabled", return_value=False):
             with self.assertRaises(RuntimeError) as ctx:
@@ -571,12 +317,8 @@ class TestCompiledFunctionWrapper(TestCase):
 
         self.assertIn("requires at least one RBLN tensor input", str(ctx.exception))
 
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.use_tp_failover")
-    def test_wrapper_raises_when_compile_error_fallback_disabled(self, mock_enable_failover, mock_auto_determine):
+    def test_wrapper_raises_when_compile_error_fallback_disabled(self):
         """Test that wrapper raises exception when 'compile_error' fallback is disabled."""
-        mock_enable_failover.return_value = False
-        mock_auto_determine.return_value = None
 
         def mock_compiled_fn(x):
             raise RuntimeError("Compilation error")
@@ -584,24 +326,21 @@ class TestCompiledFunctionWrapper(TestCase):
         def original_fn(x):
             return x + 1
 
-        mock_original_compile_fn = Mock()
         t = torch.tensor([1.0], device="rbln:0")
-        wrapper = CompiledFunctionWrapper(mock_compiled_fn, original_fn, mock_original_compile_fn)
+        wrapper = CompiledFunctionWrapper(mock_compiled_fn, original_fn)
 
         with patch("torch_rbln._internal.torch_compile_patch_helpers.is_fallback_disabled", return_value=True):
             with self.assertRaises(RuntimeError) as ctx:
                 wrapper(t)
             self.assertIn("Compilation error", str(ctx.exception))
 
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
-    def test_wrapper_recompile_retry_success(self, mock_auto_determine):
+    def test_wrapper_recompile_retry_success(self):
         """Test that wrapper retries on recompile limit and succeeds."""
         try:
             from torch._dynamo.exc import FailOnRecompileLimitHit
         except ImportError:
             self.skipTest("torch._dynamo.exc not available")
 
-        mock_auto_determine.return_value = None
         call_count = [0]
 
         def mock_compiled_fn(x):
@@ -613,9 +352,8 @@ class TestCompiledFunctionWrapper(TestCase):
         def original_fn(x):
             return x * 3
 
-        mock_original_compile_fn = Mock()
         t = torch.tensor([4], device="rbln:0")
-        wrapper = CompiledFunctionWrapper(mock_compiled_fn, original_fn, mock_original_compile_fn)
+        wrapper = CompiledFunctionWrapper(mock_compiled_fn, original_fn)
 
         with patch("torch._dynamo.reset") as mock_reset:
             result = wrapper(t)
@@ -623,15 +361,12 @@ class TestCompiledFunctionWrapper(TestCase):
             mock_reset.assert_called_once()
             self.assertEqual(call_count[0], 2)
 
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
-    def test_wrapper_recompile_retry_then_fallback(self, mock_auto_determine):
+    def test_wrapper_recompile_retry_then_fallback(self):
         """Test that wrapper falls back to CPU after max retries."""
         try:
             from torch._dynamo.exc import FailOnRecompileLimitHit
         except ImportError:
             self.skipTest("torch._dynamo.exc not available")
-
-        mock_auto_determine.return_value = None
 
         def mock_compiled_fn(x):
             raise FailOnRecompileLimitHit("Recompile limit hit")
@@ -639,9 +374,8 @@ class TestCompiledFunctionWrapper(TestCase):
         def original_fn(x):
             return x + 10
 
-        mock_original_compile_fn = Mock()
         t = torch.tensor([5.0], device="rbln:0")
-        wrapper = CompiledFunctionWrapper(mock_compiled_fn, original_fn, mock_original_compile_fn)
+        wrapper = CompiledFunctionWrapper(mock_compiled_fn, original_fn)
 
         with patch("torch._dynamo.reset") as mock_reset:
             with patch("torch_rbln._internal.torch_compile_patch_helpers.is_fallback_disabled", return_value=False):
@@ -651,77 +385,11 @@ class TestCompiledFunctionWrapper(TestCase):
                 # Should fall back to CPU
                 self.assertEqual(result.item(), 15.0)
 
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
-    def test_wrapper_auto_determine_tp_on_first_call(self, mock_auto_determine):
-        """Test that TP auto-determination happens only once on first call."""
-
-        def recompiled_fn_with_tp(x):
-            return x * 2
-
-        mock_auto_determine.return_value = recompiled_fn_with_tp
-
-        def mock_compiled_fn(x):
-            return x * 2
-
-        def original_fn(x):
-            return x * 2
-
-        mock_original_compile_fn = Mock()
-        t = torch.tensor([5], device="rbln:0")
-        wrapper = CompiledFunctionWrapper(mock_compiled_fn, original_fn, mock_original_compile_fn, compile_kwargs={})
-
-        # First call should trigger auto-determination
-        wrapper(t)
-        mock_auto_determine.assert_called_once()
-
-        # Second call should not trigger auto-determination again
-        wrapper(t)
-        mock_auto_determine.assert_called_once()  # Still only once
-
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
-    def test_wrapper_tp_failover_on_runtime_error(self, mock_auto_determine):
-        """Test that TP failover is triggered on RuntimeError."""
-        mock_auto_determine.return_value = None
-
-        call_count = [0]
-        recompiled_called = [False]
-
-        def mock_compiled_fn(x):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                raise RuntimeError("TP execution error")
-            return x * 3
-
-        def recompiled_fn_tp1(x):
-            recompiled_called[0] = True
-            return x * 3
-
-        def original_fn(x):
-            return x * 3
-
-        mock_original_compile_fn = Mock()
-        t = torch.tensor([4], device="rbln:0")
-        wrapper = CompiledFunctionWrapper(mock_compiled_fn, original_fn, mock_original_compile_fn)
-
-        # Mock _try_tp_failover with side_effect to update _compiled_fn
-        def mock_failover_side_effect(device_id):
-            wrapper._compiled_fn = recompiled_fn_tp1
-            wrapper._failover_attempted = True
-            return recompiled_fn_tp1
-
-        with patch("torch_rbln._internal.torch_compile_patch_helpers.use_tp_failover", return_value=True):
-            with patch.object(wrapper, "_try_tp_failover", side_effect=mock_failover_side_effect) as mock_failover:
-                # Should trigger failover and retry
-                result = wrapper(t)
-                mock_failover.assert_called_once()
-                self.assertEqual(result.item(), 12)
-                self.assertTrue(recompiled_called[0])
-
     def test_wrapper_delegates_module_attributes(self):
         """torch.compile(nn.Module) must keep state_dict()/eval()/parameters() —
         __getattr__ delegates unknown attributes to the wrapped model."""
         model = torch.nn.Linear(4, 4)
-        wrapper = CompiledFunctionWrapper(lambda *a, **k: None, model, Mock(), compile_kwargs={})
+        wrapper = CompiledFunctionWrapper(lambda *a, **k: None, model, compile_kwargs={})
         self.assertEqual(list(wrapper.state_dict().keys()), list(model.state_dict().keys()))
         self.assertEqual(len(list(wrapper.parameters())), len(list(model.parameters())))
 
@@ -729,7 +397,7 @@ class TestCompiledFunctionWrapper(TestCase):
         """Self-returning methods (eval/train/to) return the wrapper, not the bare model, and
         the mode toggle still lands on the model."""
         model = torch.nn.Linear(4, 4)
-        wrapper = CompiledFunctionWrapper(lambda *a, **k: None, model, Mock(), compile_kwargs={})
+        wrapper = CompiledFunctionWrapper(lambda *a, **k: None, model, compile_kwargs={})
         self.assertIs(wrapper.eval(), wrapper)
         self.assertFalse(model.training)  # toggle reached the model
         self.assertIs(wrapper.train(), wrapper)
@@ -742,7 +410,7 @@ class TestCompiledFunctionWrapper(TestCase):
         """Writes (training flag, parameter swap, arbitrary attrs) land on the wrapped model,
         not the wrapper."""
         model = torch.nn.Linear(4, 4)
-        wrapper = CompiledFunctionWrapper(lambda *a, **k: None, model, Mock(), compile_kwargs={})
+        wrapper = CompiledFunctionWrapper(lambda *a, **k: None, model, compile_kwargs={})
 
         wrapper.training = False
         self.assertFalse(model.training)  # write reached the model...
@@ -761,7 +429,7 @@ class TestCompiledFunctionWrapper(TestCase):
     def test_wrapper_delattr_delegates_to_model(self):
         """`del compiled.attr` must remove it from the wrapped model."""
         model = torch.nn.Linear(4, 4)
-        wrapper = CompiledFunctionWrapper(lambda *a, **k: None, model, Mock(), compile_kwargs={})
+        wrapper = CompiledFunctionWrapper(lambda *a, **k: None, model, compile_kwargs={})
         wrapper.custom_flag = 7
         self.assertEqual(model.custom_flag, 7)
         del wrapper.custom_flag
@@ -770,10 +438,10 @@ class TestCompiledFunctionWrapper(TestCase):
     def test_wrapper_own_attrs_stay_on_wrapper(self):
         """The wrapper's bookkeeping must not leak onto the wrapped model."""
         model = torch.nn.Linear(4, 4)
-        wrapper = CompiledFunctionWrapper(lambda *a, **k: None, model, Mock(), compile_kwargs={})
-        wrapper._failover_attempted = True
-        self.assertTrue(wrapper._failover_attempted)
-        self.assertFalse(hasattr(model, "_failover_attempted"))
+        wrapper = CompiledFunctionWrapper(lambda *a, **k: None, model, compile_kwargs={})
+        wrapper._max_retries = 3
+        self.assertEqual(wrapper._max_retries, 3)
+        self.assertFalse(hasattr(model, "_max_retries"))
 
     def test_wrapper_over_plain_function_keeps_attrs_local(self):
         """With a plain-function target (not nn.Module), writes stay on the wrapper -- not
@@ -782,8 +450,8 @@ class TestCompiledFunctionWrapper(TestCase):
         def fn(*args, **kwargs):
             return None
 
-        w1 = CompiledFunctionWrapper(fn, fn, Mock(), compile_kwargs={})
-        w2 = CompiledFunctionWrapper(fn, fn, Mock(), compile_kwargs={})
+        w1 = CompiledFunctionWrapper(fn, fn, compile_kwargs={})
+        w2 = CompiledFunctionWrapper(fn, fn, compile_kwargs={})
         w1.custom_flag = 1
         self.assertEqual(w1.custom_flag, 1)
         self.assertFalse(hasattr(fn, "custom_flag"))  # not written onto the function
@@ -791,11 +459,9 @@ class TestCompiledFunctionWrapper(TestCase):
         del w1.custom_flag
         self.assertFalse(hasattr(w1, "custom_flag"))
 
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
-    def test_wrapper_forward_routes_through_compiled_path(self, mock_auto):
+    def test_wrapper_forward_routes_through_compiled_path(self):
         """`compiled.forward(...)` must run the wrapper's compiled path, not delegate to the
-        wrapped module's raw forward and bypass compilation/guard/failover."""
-        mock_auto.return_value = None  # keep our recording compiled_fn as _compiled_fn
+        wrapped module's raw forward and bypass compilation/guard/fallback."""
         seen = []
 
         class _M(torch.nn.Module):
@@ -807,16 +473,14 @@ class TestCompiledFunctionWrapper(TestCase):
             seen.append("compiled")
             return args[0] if args else None
 
-        wrapper = CompiledFunctionWrapper(compiled_fn, _M(), Mock(), compile_kwargs={})
+        wrapper = CompiledFunctionWrapper(compiled_fn, _M(), compile_kwargs={})
         wrapper.forward(torch.tensor([1], device="rbln"))
         self.assertIn("compiled", seen)  # went through the compiled path
         self.assertNotIn("raw_forward", seen)  # did not bypass to raw module.forward
 
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
-    def test_wrapper_binds_self_as_method_descriptor(self, mock_auto):
+    def test_wrapper_binds_self_as_method_descriptor(self):
         """@torch.compile(backend="rbln") on an instance method: __get__ must bind
         the instance as the first argument, and class access returns the wrapper."""
-        mock_auto.return_value = None
         seen = {}
 
         def echo(*args, **kwargs):
@@ -824,7 +488,7 @@ class TestCompiledFunctionWrapper(TestCase):
             return args
 
         class C:
-            method = CompiledFunctionWrapper(echo, echo, Mock(), compile_kwargs={})
+            method = CompiledFunctionWrapper(echo, echo, compile_kwargs={})
 
         c = C()
         c.method(torch.tensor([1], device="rbln"))
@@ -837,7 +501,7 @@ class TestCompiledFunctionWrapper(TestCase):
         -- the descriptor used to prepend the owner unconditionally, so `H().model(x)` would
         call the module as `model(H(), x)` instead of `model(x)`."""
         model = torch.nn.Linear(4, 4)
-        wrapper = CompiledFunctionWrapper(lambda *a, **k: None, model, Mock(), compile_kwargs={})
+        wrapper = CompiledFunctionWrapper(lambda *a, **k: None, model, compile_kwargs={})
 
         class Holder:
             m = wrapper
@@ -858,7 +522,7 @@ class TestCompiledFunctionWrapper(TestCase):
 
         target = Target()
         self.assertIsInstance(target.method, types.MethodType)  # precondition: already bound
-        wrapper = CompiledFunctionWrapper(lambda *a, **k: None, target.method, Mock(), compile_kwargs={})
+        wrapper = CompiledFunctionWrapper(lambda *a, **k: None, target.method, compile_kwargs={})
 
         class Holder:
             m = wrapper
@@ -881,7 +545,7 @@ class TestChromiumEventStatePreservation(TestCase):
     the outer compile survives.
     """
 
-    @requires_logical_devices(1)
+    @requires_devices(1)
     def test_rbln_op_in_build_guards_does_not_break_outer_compile(self):
         """End-to-end reproduction of the real crash with an actual RBLN device op.
 
@@ -1149,7 +813,7 @@ class TestTorchCompileMonkeyPatch(TestCase):
         self.assertIs(second, compiled_b)
         self.assertEqual(mock_compile.call_count, 2)
 
-    @requires_logical_devices(1)
+    @requires_devices(1)
     def test_custom_attn_kernel_paths_reuse_singleton_modules(self):
         """Custom attention kernels should hand a stable module singleton to the compile cache."""
         cases = [
@@ -1231,10 +895,15 @@ class TestTorchCompileMonkeyPatch(TestCase):
             torch._dynamo.reset()
             mock_clear.assert_called_once()
 
-    @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
-    def test_patch_torch_compile_wrapper_integration(self, mock_auto_determine):
+    def test_rbln_backend_compiles_a_graph_for_one_device(self):
+        """A torch device is one NPU, so the backend refuses a graph over several."""
+        torch._dynamo.reset()
+        compiled = torch.compile(lambda x: x + 1, backend="rbln", options={"devices": 2})
+        with self.assertRaisesRegex(Exception, "a torch device is one NPU"):
+            compiled(torch.ones(4, 64, dtype=torch.float16, device="rbln:0"))
+
+    def test_patch_torch_compile_wrapper_integration(self):
         """Test CompiledFunctionWrapper integration with torch.compile."""
-        mock_auto_determine.return_value = None
 
         # This tests that the wrapper can be instantiated and called correctly
         def mock_compiled_fn(x):
@@ -1243,9 +912,8 @@ class TestTorchCompileMonkeyPatch(TestCase):
         def original_fn(x):
             return x * 2
 
-        mock_original_compile_fn = Mock()
         # Create wrapper directly (simulating what patch does)
-        wrapper = CompiledFunctionWrapper(mock_compiled_fn, original_fn, mock_original_compile_fn)
+        wrapper = CompiledFunctionWrapper(mock_compiled_fn, original_fn)
 
         # Test with tensor
         t = torch.tensor([1, 2, 3], device="rbln:0")
@@ -1254,7 +922,6 @@ class TestTorchCompileMonkeyPatch(TestCase):
 
 
 instantiate_device_type_tests(TestTorchCompilePatchHelpers, globals(), only_for="privateuse1")
-instantiate_device_type_tests(TestTensorParallelFunctions, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestCompiledFunctionWrapper, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestTorchCompileMonkeyPatch, globals(), only_for="privateuse1")
 
