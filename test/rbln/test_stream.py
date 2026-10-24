@@ -10,6 +10,7 @@ query / synchronize / wait_event / wait_stream — plus the intentionally
 unsupported bits (stream priorities are accepted but ignored).
 """
 
+import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
@@ -32,18 +33,22 @@ class TestStream(TestCase):
         torch.rbln.set_stream(torch.rbln.default_stream())
         super().tearDown()
 
+    @pytest.mark.npu(count=1)
     def test_ordering_tests_use_a_device_resident_dtype(self):
         # The fences below only mean something if the data lives on the device.
         assert_device_resident_dtype(torch.float16)
 
+    @pytest.mark.npu(count=1)
     def test_default_stream_id_is_zero(self):
         default = torch.rbln.default_stream()
         self.assertEqual(default.stream_id, 0)
         self.assertEqual(default.device.type, "rbln")
 
+    @pytest.mark.npu(count=1)
     def test_current_defaults_to_default(self):
         self.assertEqual(torch.rbln.current_stream(), torch.rbln.default_stream())
 
+    @pytest.mark.npu(count=1)
     def test_new_stream_is_nonzero_and_distinct(self):
         s1 = torch.rbln.Stream()
         s2 = torch.rbln.Stream()
@@ -51,18 +56,21 @@ class TestStream(TestCase):
         self.assertNotEqual(s1.stream_id, 0)
         self.assertNotEqual(s1, s2)
 
+    @pytest.mark.npu(count=1)
     def test_stream_creation_is_bounded_by_the_pool(self):
         # Streams come from a fixed per-device pool; past its size, instances reuse one.
         ids = {torch.rbln.Stream().stream_id for _ in range(96)}
         self.assertLessEqual(len(ids), 32)
         self.assertNotIn(0, ids)
 
+    @pytest.mark.npu(count=1)
     def test_generic_torch_stream_on_rbln(self):
         # torch.Stream must work with no torch.rbln pybind — purely via the guard impl.
         s = torch.Stream(device="rbln")
         self.assertEqual(s.device.type, "rbln")
         self.assertTrue(s.query())
 
+    @pytest.mark.npu(count=1)
     def test_set_stream_and_current(self):
         s = torch.rbln.Stream()
         prev = torch.rbln.current_stream()
@@ -73,6 +81,7 @@ class TestStream(TestCase):
             torch.rbln.set_stream(prev)
         self.assertEqual(torch.rbln.current_stream(), prev)
 
+    @pytest.mark.npu(count=1)
     def test_stream_context_manager(self):
         s = torch.rbln.Stream()
         default = torch.rbln.current_stream()
@@ -80,33 +89,39 @@ class TestStream(TestCase):
             self.assertEqual(torch.rbln.current_stream(), s)
         self.assertEqual(torch.rbln.current_stream(), default)
 
+    @pytest.mark.npu(count=1)
     def test_stream_context_none_is_noop(self):
         default = torch.rbln.current_stream()
         with torch.rbln.stream(None):
             self.assertEqual(torch.rbln.current_stream(), default)
 
+    @pytest.mark.npu(count=1)
     def test_set_stream_rejects_a_foreign_stream(self):
         # A foreign stream id would otherwise be read as an RBLN local stream id.
         with self.assertRaisesRegex(RuntimeError, "expect device type"):
             torch.rbln.set_stream(torch.Stream(device="cpu"))
 
+    @pytest.mark.npu(count=1)
     def test_record_event_returns_an_rbln_event(self):
         s = torch.rbln.Stream()
         self.assertIsInstance(s.record_event(), torch.rbln.Event)
         self.assertIsInstance(s.record_event(torch.rbln.Event()), torch.rbln.Event)
 
+    @pytest.mark.npu(count=1)
     def test_query_and_synchronize_idle(self):
         s = torch.rbln.Stream()
         self.assertTrue(s.query())
         s.synchronize()  # idle -> no crash
         self.assertTrue(s.query())
 
+    @pytest.mark.npu(count=1)
     def test_priority_accepted_but_ignored(self):
         s = torch.rbln.Stream(priority=-1)  # accepted; RBLN has no priorities
         self.assertEqual(s.device.type, "rbln")
         self.assertEqual(s.priority, 0)
         self.assertEqual(torch.rbln.Stream.priority_range(), (0, 0))
 
+    @pytest.mark.npu(count=1)
     def test_wait_stream_and_wait_event_do_not_error(self):
         s1, s2 = torch.rbln.Stream(), torch.rbln.Stream()
         s1.wait_stream(s2)  # record an event on s2, make s1 wait it
@@ -116,6 +131,7 @@ class TestStream(TestCase):
         s1.synchronize()
         s2.synchronize()
 
+    @pytest.mark.npu(count=1)
     def test_copy_on_stream_gated_by_event(self):
         # Non-blocking D2H on a non-default stream, gated by an event recorded on it.
         # Pinned host memory, so the event's seq wait makes the copy host-visible.
@@ -131,6 +147,7 @@ class TestStream(TestCase):
         e.synchronize()
         self.assertEqual(pinned.flatten().tolist(), list(range(1024)))
 
+    @pytest.mark.npu(count=1)
     def test_matmul_on_non_default_stream(self):
         # A compute op, not just a copy, honors the current stream through dispatch.
         a_cpu, b_cpu = torch.randn(64, 64, dtype=torch.float16), torch.randn(64, 64, dtype=torch.float16)
@@ -143,6 +160,7 @@ class TestStream(TestCase):
         expected = (a_cpu @ b_cpu).relu()
         self.assertLess(rel_err(c.cpu(), expected), REL_TOL)
 
+    @pytest.mark.npu(count=1)
     def test_compute_gated_by_async_copy_event(self):
         # Copy<->compute ordering across streams: the event fence is what makes the
         # producer's still-in-flight copy safe for the consumer to matmul with.
@@ -160,20 +178,18 @@ class TestStream(TestCase):
         torch.rbln.synchronize()
         self.assertLess(rel_err(y.cpu(), x_cpu @ w_cpu), REL_TOL)
 
+    @pytest.mark.npu(count=2)
     def test_stream_context_selects_the_stream_device(self):
         # Selecting a stream selects its device, so allocations land there.
-        if torch.rbln.device_count() < 2:
-            self.skipTest("needs >= 2 RBLN devices")
         torch.rbln.set_device(0)
         with torch.rbln.stream(torch.rbln.Stream(device=1)):
             self.assertEqual(torch.rbln.current_device(), 1)
             self.assertEqual(torch.zeros(4, device="rbln").device.index, 1)
         self.assertEqual(torch.rbln.current_device(), 0)
 
+    @pytest.mark.npu(count=2)
     def test_multi_device_independent_streams(self):
         # Independent work on per-device streams is correct and isolated.
-        if torch.rbln.device_count() < 2:
-            self.skipTest("needs >= 2 RBLN devices")
         a0_cpu, b0_cpu = torch.randn(32, 32, dtype=torch.float16), torch.randn(32, 32, dtype=torch.float16)
         a1_cpu, b1_cpu = torch.randn(32, 32, dtype=torch.float16), torch.randn(32, 32, dtype=torch.float16)
         a0, b0 = a0_cpu.to("rbln:0"), b0_cpu.to("rbln:0")

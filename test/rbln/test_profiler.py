@@ -32,6 +32,7 @@ out-of-scope dispatch/utilization counters.
 import os
 from unittest import mock
 
+import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
@@ -41,6 +42,7 @@ import torch_rbln  # noqa: F401  -- registers the ``rbln`` device + ``torch.rbln
 DEV = "rbln"
 
 
+@pytest.mark.npu(count=1)
 class TestProfilerCopyBounce(TestCase):
     """The core signal: a hidden host round-trip behind a plain ``copy_``."""
 
@@ -71,6 +73,7 @@ class TestProfilerCopyBounce(TestCase):
         self.assertFalse(p.verdict()["clean"])  # a host bounce fired -> not clean
 
 
+@pytest.mark.npu(count=1)
 class TestProfilerDispatchSignals(TestCase):
     """A (recompile) and B (cpu_fallback) read from the existing dispatch counters."""
 
@@ -98,6 +101,7 @@ class TestProfilerDispatchSignals(TestCase):
         self.assertFalse(p.verdict()["clean"])  # a compile happened -> not clean
 
 
+@pytest.mark.npu(count=1)
 class TestProfilerFallbackRegimes(TestCase):
     """explain must render each dispatch regime distinctly. The decode-path study
     showed a CPU fallback is NOT automatically a host transfer: int arithmetic on a
@@ -159,6 +163,7 @@ class TestProfilerTruthfulnessAndScope(TestCase):
     """The verdict must never claim more truth than it has (C/E), and must not
     carry signals the user cannot act on (D)."""
 
+    @pytest.mark.npu(count=1)
     def test_runtime_signals_present_or_honestly_pending(self):
         # When the loaded librbln exposes the runtime counters, the in-scope
         # sections (hidden-d2h residency + the device-memory gauge) must be
@@ -182,6 +187,7 @@ class TestProfilerTruthfulnessAndScope(TestCase):
             pending = " ".join(d["pending_runtime_signals"]).lower()
             self.assertIn("d2h", pending)
 
+    @pytest.mark.npu(count=1)
     def test_E_device_memory_gauge(self):
         # Pure allocation (no compute) — the gauge is the device BufferAllocator's
         # reserved high-water mark, so it reads a sane non-zero peak >= current.
@@ -194,6 +200,7 @@ class TestProfilerTruthfulnessAndScope(TestCase):
         self.assertGreaterEqual(m["peak_bytes"], m["current_bytes"])
         self.assertGreater(m["peak_bytes"], 0)
 
+    @pytest.mark.npu(count=1)
     def test_runtime_hidden_d2h_is_cause_tagged(self):
         # Deterministic witness for the runtime hidden-d2h path. Pin lazy allocation
         # (delenv EAGER_MALLOC) so a freshly-created host-latest src forces the runtime's
@@ -214,6 +221,7 @@ class TestProfilerTruthfulnessAndScope(TestCase):
         self.assertEqual(attributed, rr["total_count"])  # every hidden d2h is cause-tagged
         self.assertTrue(any(v["count"] > 0 for v in rr["by_reason"].values()))
 
+    @pytest.mark.npu(count=1)
     def test_runtime_h2d_push_counted(self):
         # A device op (matmul) consuming host-latest inputs must push them to the
         # device -> the manager-emitted real_host_sync_h2d counter fires. Symmetric
@@ -234,6 +242,7 @@ class TestProfilerTruthfulnessAndScope(TestCase):
         self.assertGreater(rr["real_host_sync_h2d"]["bytes"], 0)
         self.assertIn("host->device push", p.report())
 
+    @pytest.mark.npu(count=1)
     def test_D_command_stream_is_not_a_verdict_signal(self):
         # Command-stream count / structural padding are intentionally excluded
         # from the verdict (measurable but not user-actionable).
@@ -251,6 +260,7 @@ class TestProfilerTruthfulnessAndScope(TestCase):
         self.assertTrue(p.verdict()["clean"])
         self.assertEqual(p.verdict()["hidden_host_bounces"], 0)
 
+    @pytest.mark.npu(count=1)
     def test_regions_are_independent_deltas(self):
         with torch.rbln.explain() as p1:
             s = torch.tensor([3, 4, 5, 6], dtype=torch.int64).to(DEV)
@@ -265,6 +275,7 @@ class TestProfilerTruthfulnessAndScope(TestCase):
 
 
 class TestProfilerApi(TestCase):
+    @pytest.mark.npu(count=1)
     def test_report_is_str_and_dump_shape(self):
         with torch.rbln.explain() as p:
             _ = torch.randn(8, 8, device=DEV, dtype=torch.float16)
@@ -275,6 +286,7 @@ class TestProfilerApi(TestCase):
         self.assertIn("runtime_residency", d)
         self.assertIn("pending_runtime_signals", d)
 
+    @pytest.mark.npu(count=1)
     def test_verdict_is_factual_not_graded(self):
         # The tool OBSERVES; it does not grade. verdict() carries a factual ``clean``
         # flag (+ ``reasons``) and NO RED/AMBER/GREEN ``status``. report() shows a
@@ -292,6 +304,7 @@ class TestProfilerApi(TestCase):
         for banned in ("[ OK ]", "[WARN]", "[BAD ]", "RBLN EXPLAIN - RED", "GREEN", "AMBER"):
             self.assertNotIn(banned, rep)
 
+    @pytest.mark.npu(count=1)
     def test_explain_steady_isolates_cold_compile(self):
         # explain_steady profiles the WARM (steady-state) call. A stable-shape op
         # compiles once (cold) then hits the warm cache, so steady-state recompile
@@ -301,6 +314,7 @@ class TestProfilerApi(TestCase):
         self.assertLessEqual(warm.dump()["dispatch"]["recompile_miss"], cold.dump()["dispatch"]["recompile_miss"])
         self.assertIsInstance(warm.verdict()["clean"], bool)
 
+    @pytest.mark.npu(count=1)
     def test_A_where_traceback_is_opt_in(self):
         # (A) WHERE: default explain() captures NO call-site (opt-in => adds
         # nothing); explain(with_stack=True) captures the Python call-site of the op.
@@ -329,6 +343,7 @@ class TestProfilerApi(TestCase):
         self.assertTrue(torch.rbln.explain(with_stack=True)._trace)
         self.assertFalse(torch.rbln.explain()._trace)
 
+    @pytest.mark.npu(count=1)
     def test_A_where_traces_bounce_site(self):
         # (A) WHERE also covers host BOUNCES (not just cpu_fallback/recompile): with
         # with_stack=True the bounced copy's Python call-site is captured under the site
@@ -359,6 +374,7 @@ class TestProfilerApi(TestCase):
         self.assertIn("host_bounce/d2d_copy:", rep)  # grouped detail block header (display label)
         self.assertIn("_do_bounce", rep)  # the captured call-site is shown under it
 
+    @pytest.mark.npu(count=1)
     def test_diff_reports_only_what_changed_between_two_regions(self):
         # explain doesn't know lifecycle; diff compares two regions the USER places.
         # int32 add falls back EVERY call -> persists; a stable fp16 shape compiles
@@ -381,6 +397,7 @@ class TestProfilerApi(TestCase):
         self.assertIsInstance(r1.diff(r2).report(), str)
 
 
+@pytest.mark.npu(count=1)
 class TestProfilerHostCostContext(TestCase):
     """Host-cost context signals: (A) which fallback ops lack a fast-path handler,
     (E) host CPU oversubscription, (B) rebel-runtime (librbln) boundary time vs
@@ -501,6 +518,7 @@ class TestProfilerReportFormat(TestCase):
             pass
         self.assertEqual(str(p), p.report())  # print(p) == print(p.report())
 
+    @pytest.mark.npu(count=1)
     def test_report_is_ascii_and_header_labels(self):
         with torch.rbln.explain() as p:
             x = torch.randn(8, 8, device=DEV, dtype=torch.float16)
@@ -571,6 +589,7 @@ class TestProfilerRegionSafety(TestCase):
     """Regions own process-global instrumentation, so they must not overlap. A guard raises
     on overlap, and cleanup is guaranteed on any error (failed start OR mid-region raise)."""
 
+    @pytest.mark.npu(count=1)
     def test_region_released_on_exception(self):
         # start()+stop() release the global guard/gate via try/finally even if the body
         # raises, so instrumentation never leaks ON into the next region.

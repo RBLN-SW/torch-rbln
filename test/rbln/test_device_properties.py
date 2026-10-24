@@ -8,12 +8,12 @@ import os
 import subprocess
 import sys
 
+import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from test.utils import requires_physical_devices
 
-
+@pytest.mark.npu(count=1)
 class TestDeviceProperties(TestCase):
     def test_properties_report_hardware(self):
         props = torch.rbln.get_device_properties(0)
@@ -59,7 +59,7 @@ def _run_in_subprocess(env_vars, script):
 class TestDevicePropertiesEnvVars(TestCase):
     """Cases that need the device mapping set before import, so they run in a subprocess."""
 
-    @requires_physical_devices(2)
+    @pytest.mark.npu(count=2)
     def test_an_aggregated_device_sums_its_npus(self):
         """With two NPUs behind rbln:0, total_memory doubles while the per-chiplet figure does not."""
         script = """
@@ -82,7 +82,7 @@ print(props.npu_count, props.total_memory, props.memory_per_chiplet, props.num_c
         self.assertEqual(two_per_chiplet, one_per_chiplet)
         self.assertEqual(two_chiplets, one_chiplets)
 
-    @requires_physical_devices(2)
+    @pytest.mark.npu(count=2)
     def test_a_narrowed_pool_is_not_remapped_twice(self):
         """RBLN_VISIBLE_DEVICES renumbers the pool from 0, and the query resolves that once.
 

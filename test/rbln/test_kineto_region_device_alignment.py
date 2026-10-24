@@ -102,6 +102,12 @@ def async_dispatch(monkeypatch):
 
 
 @pytest.mark.serial
+@pytest.mark.npu(count=1)
+@pytest.mark.usefixtures("enable_rbln_device_profiler")
+@pytest.mark.skipif(
+    is_atom_device(),
+    reason="rbln kineto export is REBEL-only; rbln_kineto_is_active() reports inactive on ATOM",
+)
 # Not xfail_rebel(): that helper is strict, and the fault is host-dependent, so a REBEL host
 # that does create the runtime must not fail the job on XPASS. `-rEfX` still reports the XPASS,
 # which is the signal to drop this marker.
@@ -111,11 +117,6 @@ def async_dispatch(monkeypatch):
     "(Create query pool / System Passes); re-enable once the runtime carries the fix",
     strict=False,
 )
-@pytest.mark.skipif(
-    is_atom_device(),
-    reason="rbln kineto export is REBEL-only; rbln_kineto_is_active() reports inactive on ATOM",
-)
-@pytest.mark.usefixtures("enable_rbln_device_profiler")
 class TestKinetoRegionDeviceAlignment(TestCase):
     """rbln device slices must line up with the host op that launched them."""
 

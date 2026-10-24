@@ -6,8 +6,9 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+from torch.testing._internal.common_utils import run_tests
 
-from test.utils import configure_master_port_for_rccl_tests, requires_logical_devices, spawn_target_with_clean_exit
+from test.utils import configure_master_port_for_rccl_tests, spawn_target_with_clean_exit
 
 
 def _run_allreduce_with_unset_control_plane_ips(rank: int, world_size: int, backend: str) -> None:
@@ -35,7 +36,7 @@ def _run_allreduce_with_unset_control_plane_ips(rank: int, world_size: int, back
 
 
 @pytest.mark.serial
-@requires_logical_devices(2)
+@pytest.mark.npu(count=2)
 def test_rbln_ccl_defaults_control_plane_ips_when_unset(monkeypatch):
     """rbln-ccl must init + run a collective with RBLN_ROOT_IP/RBLN_LOCAL_IP unset.
 
@@ -62,6 +63,4 @@ def test_rbln_ccl_defaults_control_plane_ips_when_unset(monkeypatch):
 
 
 if __name__ == "__main__":
-    from torch.testing._internal.common_utils import run_tests
-
     run_tests()

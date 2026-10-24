@@ -7,8 +7,7 @@ before reading the host buffer), reuse, cross-stream and cross-device waits, and
 unsupported elapsed_time path.
 """
 
-import unittest
-
+import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
@@ -16,20 +15,25 @@ from test.utils import assert_device_resident_dtype
 
 
 class TestEvent(TestCase):
+    @pytest.mark.npu(count=1)
     def test_event_default_device_is_rbln(self):
         event = torch.Event()
         self.assertEqual(event.device.type, "rbln")
 
+    @pytest.mark.npu(count=1)
     def test_ordering_tests_use_a_device_resident_dtype(self):
         # The fences below only mean something if the data lives on the device.
         assert_device_resident_dtype(torch.float16)
 
+    @pytest.mark.npu(count=1)
     def test_query_before_record_is_true(self):
         self.assertTrue(torch.Event().query())
 
+    @pytest.mark.npu(count=1)
     def test_synchronize_before_record_is_noop(self):
         torch.Event().synchronize()
 
+    @pytest.mark.npu(count=1)
     def test_record_synchronize_d2h_pinned(self):
         # The vllm-rbln transfer_event pattern: non_blocking D2H into a pinned
         # buffer, record, synchronize, then read on the host.
@@ -43,6 +47,7 @@ class TestEvent(TestCase):
         self.assertEqual(pinned, src)
         self.assertTrue(event.query())
 
+    @pytest.mark.npu(count=1)
     def test_record_synchronize_h2d_pinned(self):
         src = torch.randn(128, 128, dtype=torch.float16).pin_memory()
         dev = src.to("rbln", non_blocking=True)
@@ -51,6 +56,7 @@ class TestEvent(TestCase):
         event.synchronize()
         self.assertEqual(dev.cpu(), src)
 
+    @pytest.mark.npu(count=1)
     def test_event_is_reusable(self):
         src = torch.arange(1024, dtype=torch.float16).reshape(-1, 1)
         dev = src.to("rbln")
@@ -62,6 +68,7 @@ class TestEvent(TestCase):
             event.synchronize()
             self.assertEqual(pinned.flatten().tolist(), list(range(1024)))
 
+    @pytest.mark.npu(count=1)
     def test_elapsed_time_unsupported(self):
         start, end = torch.Event(enable_timing=True), torch.Event(enable_timing=True)
         start.record()
@@ -69,12 +76,14 @@ class TestEvent(TestCase):
         with self.assertRaisesRegex(RuntimeError, "elapsedTime"):
             start.elapsed_time(end)
 
+    @pytest.mark.npu(count=1)
     def test_rbln_event_namespace(self):
         # torch.rbln.Event mirrors torch.cuda.Event and binds to the rbln device.
         event = torch.rbln.Event()
         self.assertEqual(event.device.type, "rbln")
         self.assertTrue(event.query())  # never recorded -> complete
 
+    @pytest.mark.npu(count=1)
     def test_rbln_event_elapsed_time_unsupported(self):
         start, end = torch.rbln.Event(enable_timing=True), torch.rbln.Event(enable_timing=True)
         start.record()
@@ -82,6 +91,7 @@ class TestEvent(TestCase):
         with self.assertRaisesRegex(RuntimeError, "elapsed_time"):
             start.elapsed_time(end)
 
+    @pytest.mark.npu(count=1)
     def test_wait_event_across_streams(self):
         # A consumer stream waits on an event recorded on a producer stream (a real
         # device-side fence), then a host sync makes the pinned D2H visible.
@@ -97,7 +107,7 @@ class TestEvent(TestCase):
         consumer.synchronize()
         self.assertEqual(pinned.flatten().tolist(), list(range(512)))
 
-    @unittest.skipIf(torch.rbln.device_count() < 2, "needs >= 2 RBLN devices")
+    @pytest.mark.npu(count=2)
     def test_cross_device_event_wait_degrades_to_host_sync(self):
         # Cross-device waits are not supported and must degrade to a host-side
         # synchronize (correct, serializing) rather than erroring.

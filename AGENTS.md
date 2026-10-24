@@ -75,11 +75,11 @@ uv pip install \
   --no-build-isolation
 ```
 
-For a whole suite, use the two pytest runs in "Run a suite the way CI does" in `docs/TEST_GUIDE.md`.
+For a whole suite, use the two `pytest` runs in "Run a suite the way CI does" in `docs/TEST_GUIDE.md`.
 
 **A change under `aten/`, `c10/`, `torch_rbln/csrc/`, `CMakeLists.txt`, or `native_functions.yaml` does not reach your interpreter until you rebuild.** The build needs `rebel-compiler` present at the pin, installed with `uv sync --locked --no-install-project` (`./tools/dev-setup.sh pypi` if you cannot authenticate to the index `uv.lock` names). A link error naming `rbln::` symbols means the installed one is older than the pin — install the pinned version rather than changing code to match what you have. An `AttributeError` for a missing `torch_rbln._C` attribute means the opposite: the built extension is older than the Python tree, which is what a branch switch leaves behind. An `RBLN ABI mismatch` is a third shape — the snapshot this build recorded and the loaded `librbln.so` disagree.
 
-Skip the rebuild and pytest loads the previously built `torch_rbln/_C` and `torch_rbln/lib/*.so`: the run tests the old code and its result means nothing. A bare `ninja -C build` stages nothing into `torch_rbln/`; the install step does. The build needs GCC 13 or newer (`CC=gcc-13 CXX=g++-13`), enforced by `cmake/FindTorch.cmake`. To change the number of parallel build jobs in the install step, set `CMAKE_BUILD_PARALLEL_LEVEL`.
+Skip the rebuild and `pytest` loads the previously built `torch_rbln/_C` and `torch_rbln/lib/*.so`: the run tests the old code and its result means nothing. A bare `ninja -C build` stages nothing into `torch_rbln/`; the install step does. The build needs GCC 13 or newer (`CC=gcc-13 CXX=g++-13`), enforced by `cmake/FindTorch.cmake`. To change the number of parallel build jobs in the install step, set `CMAKE_BUILD_PARALLEL_LEVEL`.
 
 Verify the rebuild actually took before trusting any result. An install can skip the build step and leave the previous binary in place while reporting success; grepping the built artifact for a string only your change introduces is the cheap check.
 
@@ -112,7 +112,7 @@ Before the first edit, record the commit and dirty state (`git log -1`, `git sta
 | Build host, no NPU          | Build, lint, codegen, and `RBLN_DUMMY_DEVICE=1` for tensor construction, host/device copies, and compile-only `torch.compile` (`docs/CONFIGURATION.md`). `is_available()` is `True` there and says nothing about hardware. |
 | NPU host                    | Numerics, performance, fallback attribution, distributed. Only a result from here settles a claim about the device path.                                                                                                    |
 
-Match the verification to the change: a docs change needs lint; Python logic needs the narrowest pytest target and the suite around it; a codegen or native change needs the rebuild, proof that it took, and those tests; a perf change needs a measurement with its base printed. Read the collected count, not only the exit code — CI counts a pytest run that collects nothing as no failure, and a device-type test collects nothing on a host without an NPU.
+Match the verification to the change: a docs change needs lint; Python logic needs the narrowest `pytest` target and the suite around it; a codegen or native change needs the rebuild, proof that it took, and those tests; a perf change needs a measurement with its base printed. Read the collected count, not only the exit code — CI counts a `pytest` run that collects nothing as no failure, and a device-type test collects nothing on a host without an NPU.
 
 ## Before saying a change is done
 
@@ -202,7 +202,8 @@ Everything written in words — a comment, a docstring, a doc page, a PR body, a
 Read `docs/TEST_GUIDE.md` before adding a test — it is the contract for this suite, and review checks against it. `.claude/skills/writing-tests/SKILL.md` covers what goes wrong on top of it. The rules broken most often:
 
 - A test must fail without the change it covers. Verify that; do not assume it.
-- **An unmarked test runs in every check.** `@pytest.mark.periodic` takes it out of the pre-merge and post-merge checks; use it only on a test that meets one of the `periodic` criteria in `docs/TEST_GUIDE.md`.
+- **`@pytest.mark.periodic` takes a test out of the pre-merge and post-merge checks.** Use it only on a test that meets one of the `periodic` criteria in `docs/TEST_GUIDE.md`.
+- **Mark every test that uses an NPU with `@pytest.mark.npu(count=N)`.** Without it, CI runs the test only in an NPU-less step, where a device-type test is never generated and so silently stops running.
 - **Pick the isolation the state needs.** `serial` for a resource shared across processes — a device, a fixed port; a fixture or `monkeypatch` for state that restores — an env var that is read live, the selected device; `run_in_isolated_process` (`test/utils.py`) for state that does not — an import-time effect, a `static` or `@lru_cache` latch, a committed device mapping. `serial` only serializes: its tests share one xdist worker process, so it undoes no leak.
 - Assertion rewriting is off (`--assert=plain`), so a bare `assert a == b` prints no values.
 - Do not re-run a flaky test until it goes green, and do not loosen a tolerance to make one pass.

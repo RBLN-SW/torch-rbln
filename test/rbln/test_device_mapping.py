@@ -11,6 +11,7 @@ import sys
 from io import StringIO
 from unittest.mock import patch
 
+import pytest
 import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
@@ -25,11 +26,13 @@ class TestDeviceMapping(TestCase):
     (1:1 mapping) or test APIs that don't depend on environment variables.
     """
 
+    @pytest.mark.npu(count=1)
     def test_device_summary_exists(self):
         """Test that device_summary function exists."""
         self.assertTrue(hasattr(torch.rbln, "device_summary"))
         self.assertTrue(callable(torch.rbln.device_summary))
 
+    @pytest.mark.npu(count=1)
     def test_device_summary_basic(self):
         """Test basic device_summary output format."""
         # Capture stdout
@@ -41,6 +44,7 @@ class TestDeviceMapping(TestCase):
             self.assertIn("Physical NPU IDs", output)
             self.assertIn("Status", output)
 
+    @pytest.mark.npu(count=2)
     def test_get_device_topology(self):
         """Test _get_device_topology function."""
         topology = torch_rbln._C._get_device_topology()
@@ -95,6 +99,7 @@ class TestDeviceMapping(TestCase):
         self.assertEqual(len(logical_indices), len(set(logical_indices)))
         self.assertEqual(set(logical_indices), set(range(logical_count)))
 
+    @pytest.mark.npu(count=1)
     def test_device_count(self):
         """Test getting logical device count."""
         logical_count = torch.rbln.device_count()
@@ -104,6 +109,7 @@ class TestDeviceMapping(TestCase):
         physical_count = torch.rbln.physical_device_count()
         self.assertLessEqual(logical_count, physical_count)
 
+    @pytest.mark.npu(count=1)
     def test_device_count_equals_physical_count_default(self):
         """Test that default mode (1:1 mapping) results in equal counts."""
         # Skip if environment variables are set (they affect device mapping)
@@ -115,6 +121,7 @@ class TestDeviceMapping(TestCase):
         # In default mode, logical count should equal physical count
         self.assertEqual(logical_count, physical_count)
 
+    @pytest.mark.npu(count=2)
     def test_physical_device_ids_default_mapping(self):
         """Test that default mapping is 1:1."""
         # Skip if environment variables are set (they affect device mapping)
@@ -257,6 +264,7 @@ class TestDeviceMappingEnvVars(TestCase):
 
     # ========== Wrapper tests (run in main process, launch subprocess) ==========
 
+    @pytest.mark.npu(count=2)
     def test_npus_per_device_1(self):
         """Test RBLN_NPUS_PER_DEVICE=1 (1:1 mapping)."""
         env_vars = {"RBLN_NPUS_PER_DEVICE": "1"}
@@ -265,83 +273,56 @@ class TestDeviceMappingEnvVars(TestCase):
             result.returncode, 0, f"Subprocess test failed. STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
         )
 
+    @pytest.mark.npu(count=2)
     def test_npus_per_device_2(self):
         """Test RBLN_NPUS_PER_DEVICE=2 (grouping by 2)."""
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 2:
-            self.skipTest(
-                f"This test requires at least 2 physical devices for aggregation, but only {physical_count} are available"
-            )
         env_vars = {"RBLN_NPUS_PER_DEVICE": "2"}
         result = run_test_with_env(env_vars, self.run_npus_per_device_2_impl)
         self.assertEqual(
             result.returncode, 0, f"Subprocess test failed. STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
         )
 
+    @pytest.mark.npu(count=4)
     def test_npus_per_device_4(self):
         """Test RBLN_NPUS_PER_DEVICE=4 (grouping by 4)."""
-        # Skip if not enough physical devices
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 4:
-            self.skipTest(f"This test requires at least 4 physical devices, but only {physical_count} are available")
-
         env_vars = {"RBLN_NPUS_PER_DEVICE": "4"}
         result = run_test_with_env(env_vars, self.run_npus_per_device_4_impl)
         self.assertEqual(
             result.returncode, 0, f"Subprocess test failed. STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
         )
 
+    @pytest.mark.npu(count=4)
     def test_device_map_simple(self):
         """Test RBLN_DEVICE_MAP with simple mapping."""
-        # Skip if not enough physical devices
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 4:
-            self.skipTest(f"This test requires at least 4 physical devices, but only {physical_count} are available")
-
         env_vars = {"RBLN_DEVICE_MAP": "[0,1],[2,3]"}
         result = run_test_with_env(env_vars, self.run_device_map_simple_impl)
         self.assertEqual(
             result.returncode, 0, f"Subprocess test failed. STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
         )
 
+    @pytest.mark.npu(count=8)
     def test_device_map_complex(self):
         """Test RBLN_DEVICE_MAP with complex mapping."""
-        # Skip if not enough physical devices
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 6:
-            self.skipTest(f"This test requires at least 6 physical devices, but only {physical_count} are available")
-
         env_vars = {"RBLN_DEVICE_MAP": "[0,1,2,3],[4,5]"}
         result = run_test_with_env(env_vars, self.run_device_map_complex_impl)
         self.assertEqual(
             result.returncode, 0, f"Subprocess test failed. STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
         )
 
+    @pytest.mark.npu(count=8)
     def test_device_map_with_unused(self):
         """Test RBLN_DEVICE_MAP with some devices unused."""
         # Use RBLN_DEVICES to limit available devices to 5 (0,1,2,3,4)
         # With RBLN_DEVICE_MAP="[0,1],[2,3]", we use 4 devices, leaving 1 unused
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 5:
-            self.skipTest(
-                f"This test requires at least 5 physical devices to have unused ones, but only {physical_count} are available"
-            )
-
-        # Verify that device IDs 0-4 are available
-        available_devices = list(range(min(5, physical_count)))
-        env_vars = {"RBLN_DEVICE_MAP": "[0,1],[2,3]", "RBLN_DEVICES": ",".join(str(d) for d in available_devices)}
+        env_vars = {"RBLN_DEVICE_MAP": "[0,1],[2,3]", "RBLN_DEVICES": "0,1,2,3,4"}
         result = run_test_with_env(env_vars, self.run_device_map_with_unused_impl)
         self.assertEqual(
             result.returncode, 0, f"Subprocess test failed. STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
         )
 
+    @pytest.mark.npu(count=4)
     def test_device_map_non_contiguous(self):
         """Test RBLN_DEVICE_MAP with non-contiguous device IDs."""
-        # Skip if not enough physical devices
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 4:
-            self.skipTest(f"This test requires at least 4 physical devices, but only {physical_count} are available")
-
         # Use non-contiguous mapping: [0,2],[1,3] - devices are not consecutive
         env_vars = {"RBLN_DEVICE_MAP": "[0,2],[1,3]"}
         result = run_test_with_env(env_vars, self.run_device_map_non_contiguous_impl)
@@ -349,13 +330,9 @@ class TestDeviceMappingEnvVars(TestCase):
             result.returncode, 0, f"Subprocess test failed. STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
         )
 
+    @pytest.mark.npu(count=8)
     def test_device_map_scattered(self):
         """Test RBLN_DEVICE_MAP with scattered device IDs."""
-        # Skip if not enough physical devices
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 6:
-            self.skipTest(f"This test requires at least 6 physical devices, but only {physical_count} are available")
-
         # Use scattered mapping: [0,4],[1,5] - devices with gaps
         env_vars = {"RBLN_DEVICE_MAP": "[0,4],[1,5]"}
         result = run_test_with_env(env_vars, self.run_device_map_scattered_impl)
@@ -363,13 +340,9 @@ class TestDeviceMappingEnvVars(TestCase):
             result.returncode, 0, f"Subprocess test failed. STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
         )
 
+    @pytest.mark.npu(count=4)
     def test_device_map_reversed_order(self):
         """Test RBLN_DEVICE_MAP with reversed order device IDs."""
-        # Skip if not enough physical devices
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 4:
-            self.skipTest(f"This test requires at least 4 physical devices, but only {physical_count} are available")
-
         # Use reversed order: [2,0],[3,1] - devices in reverse order
         env_vars = {"RBLN_DEVICE_MAP": "[2,0],[3,1]"}
         result = run_test_with_env(env_vars, self.run_device_map_reversed_order_impl)
@@ -377,13 +350,9 @@ class TestDeviceMappingEnvVars(TestCase):
             result.returncode, 0, f"Subprocess test failed. STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
         )
 
+    @pytest.mark.npu(count=8)
     def test_device_map_mixed_patterns(self):
         """Test RBLN_DEVICE_MAP with mixed patterns (non-contiguous and different sizes)."""
-        # Skip if not enough physical devices
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 8:
-            self.skipTest(f"This test requires at least 8 physical devices, but only {physical_count} are available")
-
         # Mixed pattern: [0,2],[1,3,5,7] - different sizes (2 and 4) and non-contiguous
         env_vars = {"RBLN_DEVICE_MAP": "[0,2],[1,3,5,7]"}
         result = run_test_with_env(env_vars, self.run_device_map_mixed_patterns_impl)
@@ -391,13 +360,9 @@ class TestDeviceMappingEnvVars(TestCase):
             result.returncode, 0, f"Subprocess test failed. STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
         )
 
+    @pytest.mark.npu(count=8)
     def test_device_map_complex_non_contiguous(self):
         """Test RBLN_DEVICE_MAP with complex non-contiguous mapping."""
-        # Skip if not enough physical devices
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 8:
-            self.skipTest(f"This test requires at least 8 physical devices, but only {physical_count} are available")
-
         # Complex non-contiguous: [0,2,4,6],[1,3,5,7] - alternating pattern
         env_vars = {"RBLN_DEVICE_MAP": "[0,2,4,6],[1,3,5,7]"}
         result = run_test_with_env(env_vars, self.run_device_map_complex_non_contiguous_impl)
@@ -405,6 +370,7 @@ class TestDeviceMappingEnvVars(TestCase):
             result.returncode, 0, f"Subprocess test failed. STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
         )
 
+    @pytest.mark.npu(count=1)
     def test_npus_per_device_invalid_size_error(self):
         """Test that invalid sizes are rejected for RBLN_NPUS_PER_DEVICE."""
         env_vars = {"RBLN_NPUS_PER_DEVICE": "3"}
@@ -412,6 +378,7 @@ class TestDeviceMappingEnvVars(TestCase):
         self.assertNotEqual(result.returncode, 0, "Should fail with invalid size")
         self.assertIn("valid sizes", result.stderr.lower() or result.stdout.lower())
 
+    @pytest.mark.npu(count=1)
     def test_npus_per_device_invalid_size_error_5(self):
         """Test that invalid size 5 is rejected."""
         env_vars = {"RBLN_NPUS_PER_DEVICE": "5"}
@@ -419,6 +386,7 @@ class TestDeviceMappingEnvVars(TestCase):
         self.assertNotEqual(result.returncode, 0, "Should fail with invalid size")
         self.assertIn("valid sizes", result.stderr.lower() or result.stdout.lower())
 
+    @pytest.mark.npu(count=1)
     def test_npus_per_device_invalid_size_error_6(self):
         """Test that invalid size 6 is rejected."""
         env_vars = {"RBLN_NPUS_PER_DEVICE": "6"}
@@ -426,6 +394,7 @@ class TestDeviceMappingEnvVars(TestCase):
         self.assertNotEqual(result.returncode, 0, "Should fail with invalid size")
         self.assertIn("valid sizes", result.stderr.lower() or result.stdout.lower())
 
+    @pytest.mark.npu(count=1)
     def test_npus_per_device_invalid_size_error_7(self):
         """Test that invalid size 7 is rejected."""
         env_vars = {"RBLN_NPUS_PER_DEVICE": "7"}
@@ -433,39 +402,16 @@ class TestDeviceMappingEnvVars(TestCase):
         self.assertNotEqual(result.returncode, 0, "Should fail with invalid size")
         self.assertIn("valid sizes", result.stderr.lower() or result.stdout.lower())
 
+    @pytest.mark.npu(count=8)
     def test_npus_per_device_valid_size_8(self):
         """Test that valid size 8 is accepted for RBLN_NPUS_PER_DEVICE."""
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 8:
-            self.skipTest(f"This test requires at least 8 physical devices, but only {physical_count} are available")
         env_vars = {"RBLN_NPUS_PER_DEVICE": "8"}
         result = run_test_with_env(env_vars, self.run_npus_per_device_valid_size_8_impl)
         self.assertEqual(
             result.returncode, 0, f"Subprocess test failed. STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
         )
 
-    def test_npus_per_device_valid_size_16(self):
-        """Test that valid size 16 is accepted for RBLN_NPUS_PER_DEVICE."""
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 16:
-            self.skipTest(f"This test requires at least 16 physical devices, but only {physical_count} are available")
-        env_vars = {"RBLN_NPUS_PER_DEVICE": "16"}
-        result = run_test_with_env(env_vars, self.run_npus_per_device_valid_size_16_impl)
-        self.assertEqual(
-            result.returncode, 0, f"Subprocess test failed. STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-        )
-
-    def test_npus_per_device_valid_size_32(self):
-        """Test that valid size 32 is accepted for RBLN_NPUS_PER_DEVICE."""
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 32:
-            self.skipTest(f"This test requires at least 32 physical devices, but only {physical_count} are available")
-        env_vars = {"RBLN_NPUS_PER_DEVICE": "32"}
-        result = run_test_with_env(env_vars, self.run_npus_per_device_valid_size_32_impl)
-        self.assertEqual(
-            result.returncode, 0, f"Subprocess test failed. STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-        )
-
+    @pytest.mark.npu(count=1)
     def test_device_map_invalid_group_size_error(self):
         """Test that invalid-sized groups are rejected for RBLN_DEVICE_MAP."""
         env_vars = {"RBLN_DEVICE_MAP": "[0,1,2]"}
@@ -473,6 +419,7 @@ class TestDeviceMappingEnvVars(TestCase):
         self.assertNotEqual(result.returncode, 0, "Should fail with invalid-sized group")
         self.assertIn("valid sizes", result.stderr.lower() or result.stdout.lower())
 
+    @pytest.mark.npu(count=1)
     def test_device_map_multiple_invalid_groups_error(self):
         """Test that multiple invalid-sized groups are rejected."""
         env_vars = {"RBLN_DEVICE_MAP": "[0,1,2],[3,4,5]"}
@@ -480,16 +427,15 @@ class TestDeviceMappingEnvVars(TestCase):
         self.assertNotEqual(result.returncode, 0, "Should fail with invalid-sized groups")
         self.assertIn("valid sizes", result.stderr.lower() or result.stdout.lower())
 
+    @pytest.mark.npu(count=1)
     def test_device_map_invalid_size_6_error(self):
         """Test that size 6 group is rejected."""
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 6:
-            self.skipTest(f"This test requires at least 6 physical devices, but only {physical_count} are available")
         env_vars = {"RBLN_DEVICE_MAP": "[0,1,2,3,4,5]"}
         result = run_test_with_env(env_vars, self.run_device_map_invalid_group_size_error_impl)
         self.assertNotEqual(result.returncode, 0, "Should fail with invalid-sized group")
         self.assertIn("valid sizes", result.stderr.lower() or result.stdout.lower())
 
+    @pytest.mark.npu(count=1)
     def test_device_map_malformed_rejected(self):
         """Malformed RBLN_DEVICE_MAP must be rejected by the parser, not silently truncated.
 
@@ -498,9 +444,6 @@ class TestDeviceMappingEnvVars(TestCase):
         error fires during init (the subprocess's device_count() query), before any
         physical-id range check, so a single device is enough for every case.
         """
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 1:
-            self.skipTest("Requires at least one physical RBLN device to reach the parser")
         malformed = [
             "[]",  # empty group
             "[0,]",  # trailing comma inside a group
@@ -536,11 +479,9 @@ class TestDeviceMappingEnvVars(TestCase):
                 out = ((result.stderr or "") + (result.stdout or "")).lower()
                 self.assertIn("invalid rbln_device_map", out, f"{device_map!r}: unexpected error output\n{out}")
 
+    @pytest.mark.npu(count=2)
     def test_device_map_out_of_range_error_message(self):
         """Test that RBLN_DEVICE_MAP out-of-range shows improved error with env and device_summary hint."""
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 2:
-            self.skipTest(f"This test requires at least 2 physical devices, but only {physical_count} are available")
         # Process sees only devices 0,1 but map references [2,3] -> out of range
         env_vars = {
             "RBLN_DEVICES": "0,1",
@@ -553,11 +494,9 @@ class TestDeviceMappingEnvVars(TestCase):
         self.assertIn("RBLN_DEVICE_MAP=", out, "Error should show RBLN_DEVICE_MAP env")
         self.assertIn("RBLN_NPUS_PER_DEVICE=", out, "Error should show RBLN_NPUS_PER_DEVICE env")
 
+    @pytest.mark.npu(count=2)
     def test_npus_per_device_no_logical_device_error_message(self):
         """Test that RBLN_NPUS_PER_DEVICE with too few devices shows improved error with env and device_summary."""
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 2:
-            self.skipTest(f"This test requires at least 2 physical devices, but only {physical_count} are available")
         # Process sees only 2 devices but NPUS_PER_DEVICE=4 -> no logical device
         env_vars = {
             "RBLN_DEVICES": "0,1",
@@ -570,13 +509,9 @@ class TestDeviceMappingEnvVars(TestCase):
         self.assertIn("RBLN_NPUS_PER_DEVICE=4", out, "Error should show RBLN_NPUS_PER_DEVICE value")
         self.assertIn("RBLN_DEVICE_MAP=", out, "Error should show RBLN_DEVICE_MAP env")
 
+    @pytest.mark.npu(count=2)
     def test_device_index_not_assigned_error_message(self):
         """Test that using an unassigned device index shows improved error with env and device_summary hint."""
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 2:
-            self.skipTest(
-                f"This test requires at least 2 physical devices (1 logical with NPUS=2), but only {physical_count} are available"
-            )
         # 2 devices + NPUS_PER_DEVICE=2 -> 1 logical device (rbln:0). Using rbln:1 triggers "not assigned"
         env_vars = {"RBLN_DEVICES": "0,1", "RBLN_NPUS_PER_DEVICE": "2"}
         result = run_test_with_env(env_vars, self.run_device_index_not_assigned_error_impl)
@@ -587,6 +522,7 @@ class TestDeviceMappingEnvVars(TestCase):
         self.assertIn("RBLN_DEVICE_MAP=", out, "Error should show RBLN_DEVICE_MAP env")
         self.assertIn("RBLN_NPUS_PER_DEVICE=", out, "Error should show RBLN_NPUS_PER_DEVICE env")
 
+    @pytest.mark.npu(count=1)
     def test_nonexistent_rbln_devices_yields_zero_visible_devices(self):
         """nonexistent RBLN_DEVICES -> device_count() == 0 (not a hard failure at import).
 
@@ -594,81 +530,51 @@ class TestDeviceMappingEnvVars(TestCase):
         logical devices and stays usable for compile-only work; actually using an rbln device
         then raises a clear, catchable error (verified inside the subprocess impl).
         """
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 1:
-            self.skipTest("This test requires at least one physical RBLN device in the system")
         env_vars = {"RBLN_DEVICES": "99999"}
         result = run_test_with_env(env_vars, self.run_nonexistent_rbln_devices_zero_count_impl)
         self.assertEqual(
             result.returncode, 0, f"Subprocess test failed. STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
         )
 
+    @pytest.mark.npu(count=8)
     def test_device_map_valid_size_8(self):
         """Test that valid size 8 group is accepted for RBLN_DEVICE_MAP."""
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 8:
-            self.skipTest(f"This test requires at least 8 physical devices, but only {physical_count} are available")
         env_vars = {"RBLN_DEVICE_MAP": "[0,1,2,3,4,5,6,7]"}
         result = run_test_with_env(env_vars, self.run_device_map_valid_size_8_impl)
         self.assertEqual(
             result.returncode, 0, f"Subprocess test failed. STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
         )
 
-    def test_device_map_valid_size_16(self):
-        """Test that valid size 16 group is accepted for RBLN_DEVICE_MAP."""
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 16:
-            self.skipTest(f"This test requires at least 16 physical devices, but only {physical_count} are available")
-        env_vars = {"RBLN_DEVICE_MAP": "[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]"}
-        result = run_test_with_env(env_vars, self.run_device_map_valid_size_16_impl)
-        self.assertEqual(
-            result.returncode, 0, f"Subprocess test failed. STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-        )
-
+    @pytest.mark.npu(count=4)
     def test_priority_device_map_over_npus_per_device(self):
         """Test that RBLN_DEVICE_MAP takes priority over RBLN_NPUS_PER_DEVICE."""
-        # Skip if not enough physical devices
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 4:
-            self.skipTest(f"This test requires at least 4 physical devices, but only {physical_count} are available")
-
         env_vars = {"RBLN_DEVICE_MAP": "[0,1],[2,3]", "RBLN_NPUS_PER_DEVICE": "4"}
         result = run_test_with_env(env_vars, self.run_priority_device_map_over_npus_per_device_impl)
         self.assertEqual(
             result.returncode, 0, f"Subprocess test failed. STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
         )
 
+    @pytest.mark.npu(count=2)
     def test_device_summary_with_aggregation(self):
         """Test device_summary output with aggregated mapping."""
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 2:
-            self.skipTest(
-                f"This test requires at least 2 physical devices for aggregation, but only {physical_count} are available"
-            )
         env_vars = {"RBLN_NPUS_PER_DEVICE": "2"}
         result = run_test_with_env(env_vars, self.run_device_summary_with_aggregation_impl)
         self.assertEqual(
             result.returncode, 0, f"Subprocess test failed. STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
         )
 
+    @pytest.mark.npu(count=8)
     def test_device_summary_with_unused_devices(self):
         """Test device_summary output with unused devices."""
         # Use RBLN_DEVICES to limit available devices to 5 (0,1,2,3,4)
         # With RBLN_NPUS_PER_DEVICE=4, we group 4 devices, leaving 1 unused
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 5:
-            self.skipTest(
-                f"This test requires at least 5 physical devices to have unused ones, but only {physical_count} are available"
-            )
-
-        # Verify that device IDs 0-4 are available
-        available_devices = list(range(min(5, physical_count)))
-        env_vars = {"RBLN_NPUS_PER_DEVICE": "4", "RBLN_DEVICES": ",".join(str(d) for d in available_devices)}
+        env_vars = {"RBLN_NPUS_PER_DEVICE": "4", "RBLN_DEVICES": "0,1,2,3,4"}
         result = run_test_with_env(env_vars, self.run_device_summary_with_unused_devices_impl)
         self.assertEqual(
             result.returncode, 0, f"Subprocess test failed. STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
         )
 
+    @pytest.mark.npu(count=1)
     def test_device_count_equals_physical_count_default(self):
         """Test that default mode (1:1 mapping) results in equal counts."""
         # Use empty env_vars to ensure default behavior (no env vars set)
@@ -678,6 +584,7 @@ class TestDeviceMappingEnvVars(TestCase):
             result.returncode, 0, f"Subprocess test failed. STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
         )
 
+    @pytest.mark.npu(count=2)
     def test_physical_device_ids_default_mapping(self):
         """Test that default mapping is 1:1."""
         # Use empty env_vars to ensure default behavior (no env vars set)
@@ -768,10 +675,6 @@ class TestDeviceMappingEnvVars(TestCase):
         logical_count = torch.rbln.device_count()
         physical_count = torch.rbln.physical_device_count()
 
-        # Skip if not enough physical devices
-        if physical_count < 4:
-            self.skipTest(f"This test requires at least 4 physical devices, but only {physical_count} are available")
-
         # With NPUS_PER_DEVICE=4, logical count should be approximately quarter
         expected_logical = physical_count // 4
         self.assertEqual(logical_count, expected_logical)
@@ -803,10 +706,7 @@ class TestDeviceMappingEnvVars(TestCase):
         self.assertEqual(device_map, "[0,1],[2,3]", "RBLN_DEVICE_MAP should be set to '[0,1],[2,3]' in subprocess")
 
         topology = torch_rbln._C._get_device_topology()
-        # Check if we have enough physical devices
         physical_count = torch.rbln.physical_device_count()
-        if physical_count < 4:
-            self.skipTest(f"This test requires at least 4 physical devices, but only {physical_count} are available")
 
         logical_count = torch.rbln.device_count()
         # With "[0,1],[2,3]", we should have 2 logical devices
@@ -841,11 +741,6 @@ class TestDeviceMappingEnvVars(TestCase):
         self.assertEqual(device_map, "[0,1,2,3],[4,5]", "RBLN_DEVICE_MAP should be set correctly")
 
         topology = torch_rbln._C._get_device_topology()
-        # Check if we have enough physical devices
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 6:
-            self.skipTest(f"This test requires at least 6 physical devices, but only {physical_count} are available")
-
         logical_count = torch.rbln.device_count()
         # With "[0,1,2,3],[4,5]", we should have 2 logical devices
         self.assertEqual(logical_count, 2)
@@ -874,18 +769,10 @@ class TestDeviceMappingEnvVars(TestCase):
         self.assertEqual(device_map, "[0,1],[2,3]", "RBLN_DEVICE_MAP should be set correctly")
 
         topology = torch_rbln._C._get_device_topology()
-        physical_count = torch.rbln.physical_device_count()
-
-        # Skip if not enough physical devices (need at least 5 to have unused devices)
-        if physical_count < 5:
-            self.skipTest(
-                f"This test requires at least 5 physical devices to have unused ones, but only {physical_count} are available"
-            )
 
         # Check unused devices
         unused = topology.unused_physical_device_ids
-        # If we have more than 4 physical devices, some should be unused
-        self.assertGreater(len(unused), 0, "Should have unused devices when physical_count > 4")
+        self.assertGreater(len(unused), 0, "Should have unused devices")
         # Unused devices should be >= 4 (since we use 0,1,2,3)
         for unused_id in unused:
             self.assertGreaterEqual(unused_id, 4)
@@ -901,11 +788,6 @@ class TestDeviceMappingEnvVars(TestCase):
         self.assertEqual(device_map, "[0,2],[1,3]", "RBLN_DEVICE_MAP should be set to '[0,2],[1,3]' in subprocess")
 
         topology = torch_rbln._C._get_device_topology()
-        # Check if we have enough physical devices
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 4:
-            self.skipTest(f"This test requires at least 4 physical devices, but only {physical_count} are available")
-
         logical_count = torch.rbln.device_count()
         # With "[0,2],[1,3]", we should have 2 logical devices
         self.assertEqual(logical_count, 2)
@@ -933,11 +815,6 @@ class TestDeviceMappingEnvVars(TestCase):
         self.assertEqual(device_map, "[0,4],[1,5]", "RBLN_DEVICE_MAP should be set to '[0,4],[1,5]' in subprocess")
 
         topology = torch_rbln._C._get_device_topology()
-        # Check if we have enough physical devices
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 6:
-            self.skipTest(f"This test requires at least 6 physical devices, but only {physical_count} are available")
-
         logical_count = torch.rbln.device_count()
         # With "[0,4],[1,5]", we should have 2 logical devices
         self.assertEqual(logical_count, 2)
@@ -965,11 +842,6 @@ class TestDeviceMappingEnvVars(TestCase):
         self.assertEqual(device_map, "[2,0],[3,1]", "RBLN_DEVICE_MAP should be set to '[2,0],[3,1]' in subprocess")
 
         topology = torch_rbln._C._get_device_topology()
-        # Check if we have enough physical devices
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 4:
-            self.skipTest(f"This test requires at least 4 physical devices, but only {physical_count} are available")
-
         logical_count = torch.rbln.device_count()
         # With "[2,0],[3,1]", we should have 2 logical devices
         self.assertEqual(logical_count, 2)
@@ -1002,11 +874,6 @@ class TestDeviceMappingEnvVars(TestCase):
         )
 
         topology = torch_rbln._C._get_device_topology()
-        # Check if we have enough physical devices
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 8:
-            self.skipTest(f"This test requires at least 6 physical devices, but only {physical_count} are available")
-
         logical_count = torch.rbln.device_count()
         # With "[0,2],[1,3,5,7]", we should have 2 logical devices
         self.assertEqual(logical_count, 2)
@@ -1038,11 +905,6 @@ class TestDeviceMappingEnvVars(TestCase):
         )
 
         topology = torch_rbln._C._get_device_topology()
-        # Check if we have enough physical devices
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 8:
-            self.skipTest(f"This test requires at least 8 physical devices, but only {physical_count} are available")
-
         logical_count = torch.rbln.device_count()
         # With "[0,2,4,6],[1,3,5,7]", we should have 2 logical devices
         self.assertEqual(logical_count, 2)
@@ -1098,70 +960,6 @@ class TestDeviceMappingEnvVars(TestCase):
         # Check unused devices (if any)
         unused = topology.unused_physical_device_ids
         expected_unused = physical_count % 8
-        self.assertEqual(len(unused), expected_unused)
-
-    def run_npus_per_device_valid_size_16_impl(self):
-        """Implementation: Test RBLN_NPUS_PER_DEVICE=16."""
-        import torch_rbln._C
-
-        npus_per_device = os.getenv("RBLN_NPUS_PER_DEVICE")
-        if npus_per_device is None:
-            self.skipTest("This test must be run via wrapper test with environment variables set")
-        self.assertEqual(npus_per_device, "16", "RBLN_NPUS_PER_DEVICE should be set to 16 in subprocess")
-
-        topology = torch_rbln._C._get_device_topology()
-        logical_count = torch.rbln.device_count()
-        physical_count = torch.rbln.physical_device_count()
-
-        # With NPUS_PER_DEVICE=16, logical count should be approximately one-sixteenth
-        expected_logical = physical_count // 16
-        self.assertEqual(logical_count, expected_logical)
-
-        # Each logical device should map to 16 physical devices
-        for i in range(logical_count):
-            entry = next((e for e in topology.entries if e.logical_device_index == i), None)
-            self.assertIsNotNone(entry, f"Entry for logical device {i} not found")
-            physical_ids = entry.physical_device_ids
-            self.assertEqual(len(physical_ids), 16)
-            # Check that physical IDs are consecutive
-            for j in range(1, len(physical_ids)):
-                self.assertEqual(physical_ids[j] - physical_ids[j - 1], 1)
-
-        # Check unused devices (if any)
-        unused = topology.unused_physical_device_ids
-        expected_unused = physical_count % 16
-        self.assertEqual(len(unused), expected_unused)
-
-    def run_npus_per_device_valid_size_32_impl(self):
-        """Implementation: Test RBLN_NPUS_PER_DEVICE=32."""
-        import torch_rbln._C
-
-        npus_per_device = os.getenv("RBLN_NPUS_PER_DEVICE")
-        if npus_per_device is None:
-            self.skipTest("This test must be run via wrapper test with environment variables set")
-        self.assertEqual(npus_per_device, "32", "RBLN_NPUS_PER_DEVICE should be set to 32 in subprocess")
-
-        topology = torch_rbln._C._get_device_topology()
-        logical_count = torch.rbln.device_count()
-        physical_count = torch.rbln.physical_device_count()
-
-        # With NPUS_PER_DEVICE=32, logical count should be approximately one-thirty-second
-        expected_logical = physical_count // 32
-        self.assertEqual(logical_count, expected_logical)
-
-        # Each logical device should map to 32 physical devices
-        for i in range(logical_count):
-            entry = next((e for e in topology.entries if e.logical_device_index == i), None)
-            self.assertIsNotNone(entry, f"Entry for logical device {i} not found")
-            physical_ids = entry.physical_device_ids
-            self.assertEqual(len(physical_ids), 32)
-            # Check that physical IDs are consecutive
-            for j in range(1, len(physical_ids)):
-                self.assertEqual(physical_ids[j] - physical_ids[j - 1], 1)
-
-        # Check unused devices (if any)
-        unused = topology.unused_physical_device_ids
-        expected_unused = physical_count % 32
         self.assertEqual(len(unused), expected_unused)
 
     # A malformed RBLN_* config is reported at the *point of use*, not by enumeration:
@@ -1227,10 +1025,6 @@ class TestDeviceMappingEnvVars(TestCase):
         self.assertEqual(device_map, "[0,1,2,3,4,5,6,7]", "RBLN_DEVICE_MAP should be set correctly")
 
         topology = torch_rbln._C._get_device_topology()
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 8:
-            self.skipTest(f"This test requires at least 8 physical devices, but only {physical_count} are available")
-
         logical_count = torch.rbln.device_count()
         # With "[0,1,2,3,4,5,6,7]", we should have 1 logical device
         self.assertEqual(logical_count, 1)
@@ -1241,34 +1035,6 @@ class TestDeviceMappingEnvVars(TestCase):
         physical_ids_0 = entry_0.physical_device_ids
         self.assertEqual(physical_ids_0, [0, 1, 2, 3, 4, 5, 6, 7])
         self.assertEqual(len(physical_ids_0), 8)
-
-    def run_device_map_valid_size_16_impl(self):
-        """Implementation: Test RBLN_DEVICE_MAP with size 16 group."""
-        import torch_rbln._C
-
-        device_map = os.getenv("RBLN_DEVICE_MAP")
-        if device_map is None:
-            self.skipTest("This test must be run via wrapper test with environment variables set")
-        self.assertEqual(
-            device_map, "[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]", "RBLN_DEVICE_MAP should be set correctly"
-        )
-
-        topology = torch_rbln._C._get_device_topology()
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 16:
-            self.skipTest(f"This test requires at least 16 physical devices, but only {physical_count} are available")
-
-        logical_count = torch.rbln.device_count()
-        # With "[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]", we should have 1 logical device
-        self.assertEqual(logical_count, 1)
-
-        # Check logical device maps to [0, 1, 2, ..., 15]
-        entry_0 = next((e for e in topology.entries if e.logical_device_index == 0), None)
-        self.assertIsNotNone(entry_0, "Entry for logical device 0 not found")
-        physical_ids_0 = entry_0.physical_device_ids
-        expected_ids = list(range(16))
-        self.assertEqual(physical_ids_0, expected_ids)
-        self.assertEqual(len(physical_ids_0), 16)
 
     def run_priority_device_map_over_npus_per_device_impl(self):
         """Implementation: Test that RBLN_DEVICE_MAP takes priority."""
@@ -1286,11 +1052,6 @@ class TestDeviceMappingEnvVars(TestCase):
         self.assertIsNotNone(npus_per_device, "RBLN_NPUS_PER_DEVICE should be set")
 
         topology = torch_rbln._C._get_device_topology()
-        # Check if we have enough physical devices for this test
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 4:
-            self.skipTest(f"This test requires at least 4 physical devices, but only {physical_count} are available")
-
         # RBLN_DEVICE_MAP should take priority
         logical_count = torch.rbln.device_count()
         # With "[0,1],[2,3]", we should have 2 logical devices (not 1 from NPUS_PER_DEVICE=4)
@@ -1329,11 +1090,7 @@ class TestDeviceMappingEnvVars(TestCase):
         self.assertIn("Physical NPU IDs", output)
         self.assertIn("Status", output)
         self.assertIn("Active (Aggregated)", output)
-
-        # Check that we have aggregated devices
-        logical_count = torch.rbln.device_count()
-        if logical_count > 0:
-            self.assertIn("rbln:0", output)
+        self.assertIn("rbln:0", output)
 
     def run_device_summary_with_unused_devices_impl(self):
         """Implementation: Test device_summary output with unused devices."""
@@ -1346,13 +1103,6 @@ class TestDeviceMappingEnvVars(TestCase):
         if npus_per_device is None:
             self.skipTest("This test must be run via wrapper test with environment variables set")
         self.assertEqual(npus_per_device, "4", "RBLN_NPUS_PER_DEVICE should be set to 4")
-
-        # Check if we have enough physical devices (need at least 5 to have unused devices)
-        physical_count = torch.rbln.physical_device_count()
-        if physical_count < 5:
-            self.skipTest(
-                f"This test requires at least 5 physical devices to have unused ones, but only {physical_count} are available"
-            )
 
         # Verify unused devices exist before checking output
         topology = torch_rbln._C._get_device_topology()

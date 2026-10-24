@@ -7,12 +7,11 @@ Test suite for torch_compile_patch_helpers module.
 import types
 from unittest.mock import Mock, patch
 
+import pytest
 import torch
-from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 import torch_rbln._internal.register_custom_ops as register_custom_ops
-from test.utils import requires_logical_devices
 from torch_rbln._internal.compile_cache import clear_rbln_compile_cache, compile_rbln_cached
 from torch_rbln._internal.monkey_patches import patch_torch_compile, remove_all_patches
 from torch_rbln._internal.ops_utils import extract_device_id_from_inputs
@@ -33,6 +32,7 @@ from torch_rbln._internal.torch_compile_patch_helpers import (
 class TestTorchCompilePatchHelpers(TestCase):
     """Tests for torch_compile_patch_helpers module."""
 
+    @pytest.mark.npu(count=1)
     def test_extract_device_from_inputs_with_tensor_args(self):
         """Test extracting device from tensor arguments."""
         t1 = torch.tensor([1, 2, 3], device="rbln")
@@ -54,6 +54,7 @@ class TestTorchCompilePatchHelpers(TestCase):
             extract_device_from_inputs(42, "hello", [1, 2, 3])
         self.assertIn("requires at least one RBLN tensor input", str(ctx.exception))
 
+    @pytest.mark.npu(count=1)
     def test_extract_device_from_inputs_prefers_rbln_over_cpu(self):
         """Test that the first RBLN tensor wins even if a CPU tensor appears earlier."""
         cpu_tensor = torch.tensor([1, 2], device="cpu")
@@ -64,6 +65,7 @@ class TestTorchCompilePatchHelpers(TestCase):
         self.assertEqual(device.type, "rbln")
         self.assertEqual(device.index, 0)
 
+    @pytest.mark.npu(count=1)
     def test_extract_device_from_inputs_prefers_rbln_in_kwargs(self):
         """Test that RBLN tensors in kwargs are preferred over CPU tensors in args."""
         cpu_tensor = torch.tensor([1], device="cpu")
@@ -74,13 +76,14 @@ class TestTorchCompilePatchHelpers(TestCase):
         self.assertEqual(device.type, "rbln")
         self.assertEqual(device.index, 0)
 
+    @pytest.mark.npu(count=1)
     def test_extract_device_id_from_inputs_with_rbln_tensor(self):
         """Test extracting device ID from RBLN tensor."""
         t = torch.tensor([1, 2, 3], device="rbln:0")
         device_id = extract_device_id_from_inputs(t)
         self.assertEqual(device_id, 0)
 
-    @requires_logical_devices(2)
+    @pytest.mark.npu(count=2)
     def test_extract_device_id_from_inputs_with_multiple_tensors(self):
         """Test extracting device ID from multiple tensors."""
         t1 = torch.tensor([1], device="cpu")
@@ -88,7 +91,7 @@ class TestTorchCompilePatchHelpers(TestCase):
         device_id = extract_device_id_from_inputs(t1, t2)
         self.assertEqual(device_id, 1)
 
-    @requires_logical_devices(3)
+    @pytest.mark.npu(count=4)
     def test_extract_device_id_from_inputs_with_kwargs(self):
         """Test extracting device ID from kwargs."""
         t = torch.tensor([1], device="rbln:2")
@@ -137,6 +140,7 @@ class TestTorchCompilePatchHelpers(TestCase):
         num_devices = get_num_devices_from_options(compile_kwargs)
         self.assertIsNone(num_devices)
 
+    @pytest.mark.npu(count=1)
     def test_convert_result_to_device_single_tensor(self):
         """Test converting single tensor result to target device."""
         result = torch.tensor([1, 2, 3], device="cpu")
@@ -144,6 +148,7 @@ class TestTorchCompilePatchHelpers(TestCase):
         self.assertEqual(converted.device.type, "rbln")
         self.assertEqual(converted.tolist(), [1, 2, 3])
 
+    @pytest.mark.npu(count=1)
     def test_convert_result_to_device_tuple(self):
         """Test converting tuple of tensors to target device."""
         t1 = torch.tensor([1, 2], device="cpu")
@@ -156,6 +161,7 @@ class TestTorchCompilePatchHelpers(TestCase):
         self.assertEqual(converted[1], "hello")
         self.assertEqual(converted[2].device.type, "rbln")
 
+    @pytest.mark.npu(count=1)
     def test_convert_result_to_device_list(self):
         """Test converting list of tensors to target device."""
         t1 = torch.tensor([1], device="cpu")
@@ -168,6 +174,7 @@ class TestTorchCompilePatchHelpers(TestCase):
         self.assertEqual(converted[1], 99)
         self.assertEqual(converted[2].device.type, "rbln")
 
+    @pytest.mark.npu(count=1)
     def test_convert_result_to_device_nested_containers(self):
         """Test recursively converting nested list/tuple/dict containers."""
         result = {
@@ -191,6 +198,7 @@ class TestTorchCompilePatchHelpers(TestCase):
         converted = _convert_result_to_device(result, torch.device("rbln"))
         self.assertEqual(converted, result)
 
+    @pytest.mark.npu(count=1)
     def test_attempt_cpu_fallback_basic(self):
         """Test CPU fallback with basic operation."""
 
@@ -204,6 +212,7 @@ class TestTorchCompilePatchHelpers(TestCase):
         self.assertEqual(result.device.type, "rbln")
         self.assertEqual(result.tolist(), [2.0, 3.0])
 
+    @pytest.mark.npu(count=1)
     def test_attempt_cpu_fallback_with_kwargs(self):
         """Test CPU fallback with keyword arguments."""
 
@@ -230,6 +239,7 @@ class TestTorchCompilePatchHelpers(TestCase):
         self.assertEqual(result.device.type, "cpu")
         self.assertEqual(result.item(), 7.0)
 
+    @pytest.mark.npu(count=1)
     def test_attempt_cpu_fallback_no_original_fn(self):
         """Test that error is raised when original_fn is None."""
         t = torch.tensor([1.0], device="rbln")
@@ -436,6 +446,7 @@ class TestTensorParallelFunctions(TestCase):
 class TestCompiledFunctionWrapper(TestCase):
     """Tests for CompiledFunctionWrapper class."""
 
+    @pytest.mark.npu(count=1)
     @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
     def test_wrapper_successful_execution(self, mock_auto_determine):
         """Test that wrapper correctly executes compiled function on success."""
@@ -453,6 +464,7 @@ class TestCompiledFunctionWrapper(TestCase):
         result = wrapper(t)
         self.assertEqual(result.item(), 10)
 
+    @pytest.mark.npu(count=1)
     @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
     @patch("torch_rbln._internal.torch_compile_patch_helpers.use_tp_failover")
     def test_wrapper_cpu_fallback_on_error(self, mock_enable_failover, mock_auto_determine):
@@ -476,6 +488,7 @@ class TestCompiledFunctionWrapper(TestCase):
             self.assertEqual(result.device.type, "rbln")
             self.assertEqual(result.tolist(), [2.0, 3.0])
 
+    @pytest.mark.npu(count=1)
     @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
     @patch("torch_rbln._internal.torch_compile_patch_helpers.use_tp_failover")
     def test_wrapper_cpu_fallback_handles_cpu_first_inputs_and_nested_outputs(
@@ -510,6 +523,7 @@ class TestCompiledFunctionWrapper(TestCase):
         self.assertEqual(result["result"][1][0].device.type, "rbln")
         self.assertEqual(result["result"][0].cpu().tolist(), [4.0, 6.0])
 
+    @pytest.mark.npu(count=1)
     @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
     @patch("torch_rbln._internal.torch_compile_patch_helpers.use_tp_failover")
     def test_wrapper_cpu_fallback_raises_without_rbln_inputs(
@@ -536,6 +550,7 @@ class TestCompiledFunctionWrapper(TestCase):
 
         self.assertIn("requires at least one RBLN tensor input", str(ctx.exception))
 
+    @pytest.mark.npu(count=1)
     @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
     @patch("torch_rbln._internal.torch_compile_patch_helpers.use_tp_failover")
     def test_wrapper_raises_when_compile_error_fallback_disabled(self, mock_enable_failover, mock_auto_determine):
@@ -558,6 +573,7 @@ class TestCompiledFunctionWrapper(TestCase):
                 wrapper(t)
             self.assertIn("Compilation error", str(ctx.exception))
 
+    @pytest.mark.npu(count=1)
     @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
     def test_wrapper_recompile_retry_success(self, mock_auto_determine):
         """Test that wrapper retries on recompile limit and succeeds."""
@@ -588,6 +604,7 @@ class TestCompiledFunctionWrapper(TestCase):
             mock_reset.assert_called_once()
             self.assertEqual(call_count[0], 2)
 
+    @pytest.mark.npu(count=1)
     @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
     def test_wrapper_recompile_retry_then_fallback(self, mock_auto_determine):
         """Test that wrapper falls back to CPU after max retries."""
@@ -616,6 +633,7 @@ class TestCompiledFunctionWrapper(TestCase):
                 # Should fall back to CPU
                 self.assertEqual(result.item(), 15.0)
 
+    @pytest.mark.npu(count=1)
     @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
     def test_wrapper_auto_determine_tp_on_first_call(self, mock_auto_determine):
         """Test that TP auto-determination happens only once on first call."""
@@ -643,6 +661,7 @@ class TestCompiledFunctionWrapper(TestCase):
         wrapper(t)
         mock_auto_determine.assert_called_once()  # Still only once
 
+    @pytest.mark.npu(count=1)
     @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
     def test_wrapper_tp_failover_on_runtime_error(self, mock_auto_determine):
         """Test that TP failover is triggered on RuntimeError."""
@@ -756,6 +775,7 @@ class TestCompiledFunctionWrapper(TestCase):
         del w1.custom_flag
         self.assertFalse(hasattr(w1, "custom_flag"))
 
+    @pytest.mark.npu(count=1)
     @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
     def test_wrapper_forward_routes_through_compiled_path(self, mock_auto):
         """`compiled.forward(...)` must run the wrapper's compiled path, not delegate to the
@@ -777,6 +797,7 @@ class TestCompiledFunctionWrapper(TestCase):
         self.assertIn("compiled", seen)  # went through the compiled path
         self.assertNotIn("raw_forward", seen)  # did not bypass to raw module.forward
 
+    @pytest.mark.npu(count=1)
     @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
     def test_wrapper_binds_self_as_method_descriptor(self, mock_auto):
         """@torch.compile(backend="rbln") on an instance method: __get__ must bind
@@ -832,6 +853,7 @@ class TestCompiledFunctionWrapper(TestCase):
         self.assertIs(Holder.m, wrapper)
 
 
+@pytest.mark.npu(count=1)
 class TestChromiumEventStatePreservation(TestCase):
     """Reproduces the ``build_guards`` crash caused by a nested op-compile.
 
@@ -845,7 +867,6 @@ class TestChromiumEventStatePreservation(TestCase):
     the outer compile survives.
     """
 
-    @requires_logical_devices(1)
     def test_rbln_op_in_build_guards_does_not_break_outer_compile(self):
         """End-to-end reproduction of the real crash with an actual RBLN device op.
 
@@ -1101,7 +1122,7 @@ class TestTorchCompileMonkeyPatch(TestCase):
         self.assertIs(second, compiled_b)
         self.assertEqual(mock_compile.call_count, 2)
 
-    @requires_logical_devices(1)
+    @pytest.mark.npu(count=1)
     def test_custom_attn_kernel_paths_reuse_singleton_modules(self):
         """Custom attention kernels should hand a stable module singleton to the compile cache."""
         cases = [
@@ -1194,6 +1215,7 @@ class TestTorchCompileMonkeyPatch(TestCase):
             torch._dynamo.reset()
             mock_clear.assert_called_once()
 
+    @pytest.mark.npu(count=1)
     @patch("torch_rbln._internal.torch_compile_patch_helpers.auto_determine_num_devices_if_needed")
     def test_patch_torch_compile_wrapper_integration(self, mock_auto_determine):
         """Test CompiledFunctionWrapper integration with torch.compile."""
@@ -1215,11 +1237,6 @@ class TestTorchCompileMonkeyPatch(TestCase):
         result = wrapper(t)
         self.assertEqual(result.tolist(), [2, 4, 6])
 
-
-instantiate_device_type_tests(TestTorchCompilePatchHelpers, globals(), only_for="privateuse1")
-instantiate_device_type_tests(TestTensorParallelFunctions, globals(), only_for="privateuse1")
-instantiate_device_type_tests(TestCompiledFunctionWrapper, globals(), only_for="privateuse1")
-instantiate_device_type_tests(TestTorchCompileMonkeyPatch, globals(), only_for="privateuse1")
 
 if __name__ == "__main__":
     run_tests()

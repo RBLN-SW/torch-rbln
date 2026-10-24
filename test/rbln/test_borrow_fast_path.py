@@ -24,6 +24,7 @@ from torch.testing._internal.common_device_type import instantiate_device_type_t
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 
+@pytest.mark.npu(count=1)
 class TestBorrowFastPath(TestCase):
     """The borrow path must yield correct results for ops routed to the
     CPU fallback. ``aten::sigmoid`` on int32 is intentionally a non-fp16

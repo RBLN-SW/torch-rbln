@@ -20,11 +20,13 @@ These tests verify:
   affect the source.
 """
 
+import pytest
 import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
 
+@pytest.mark.npu(count=1)
 class TestCloneRBLNDirectD2D(TestCase):
     """The contiguous, full-storage fast path."""
 
@@ -69,6 +71,7 @@ class TestCloneRBLNDirectD2D(TestCase):
         self.assertEqual(out.dtype, torch.int64)
 
 
+@pytest.mark.npu(count=1)
 class TestCloneRBLNNonContigFallback(TestCase):
     """The composite fallback path (non-contig / partial-storage views)."""
 
@@ -101,6 +104,7 @@ class TestCloneRBLNNonContigFallback(TestCase):
         self._check_view(src, lambda x: x.transpose(0, 1))
 
 
+@pytest.mark.npu(count=1)
 class TestCloneRBLNIsolation(TestCase):
     """Clones must not alias the source's storage."""
 

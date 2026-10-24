@@ -27,7 +27,7 @@ the worker.
 import pytest
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from test.utils import requires_logical_devices, run_in_isolated_process
+from test.utils import run_in_isolated_process
 
 
 def _eager_matmul_decode_worker(
@@ -79,11 +79,11 @@ def _eager_matmul_decode_worker(
 
 
 @pytest.mark.serial
+@pytest.mark.npu(count=1)
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestEagerAsyncBufferRegression(TestCase):
     """Eager-mode async buffer-lifetime regression."""
 
-    @requires_logical_devices(1)
     def test_eager_decode_loop_no_async_buffer_crash(self):
         """A decode-like eager loop must not crash the runtime.
 

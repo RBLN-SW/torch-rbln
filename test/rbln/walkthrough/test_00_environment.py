@@ -27,6 +27,7 @@ import torch_rbln
 pytestmark = pytest.mark.torch_rbln_only
 
 
+@pytest.mark.npu(count=1)
 class TestEnvironmentVerification(TestCase):
     """Environment sanity checks (Walkthrough example 0)."""
 

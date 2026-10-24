@@ -13,11 +13,15 @@ from torch_rbln._internal.log_utils import rbln_log_debug
 # device is faulted, so the rest of this worker's tests are skipped rather than run against it.
 _rbln_device_poisoned = False
 
+_CI_NPU_COUNTS = (0, 1, 2, 4, 8)
+
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_setup(item):
     """Skip once this worker's device has faulted, before fixture setup frees runtime buffers the
-    device may still be using. Fail a serial test when xdist runs more than one worker."""
+    device may still be using. Fail a serial test when xdist runs more than one worker. Skip a
+    test that requires more NPUs than are available, and a test that runs only without an NPU
+    when one is."""
     if _rbln_device_poisoned:
         pytest.skip("RBLN device drain failed earlier on this worker; skipping to avoid the faulted device")
 
@@ -25,6 +29,18 @@ def pytest_runtest_setup(item):
         worker_count = int(os.environ["PYTEST_XDIST_WORKER_COUNT"])
         if worker_count > 1:
             pytest.fail(f"serial test needs one worker, not {worker_count}", pytrace=False)
+
+    marker = item.get_closest_marker("npu")
+    if marker is None:
+        return
+    count = marker.kwargs["count"]
+    if count == 0:
+        if torch.rbln.is_available():
+            pytest.skip(f"NPUs required: {count}, available: {torch.rbln.physical_device_count()}")
+        return
+    physical_npu_count = torch.rbln.physical_device_count()
+    if physical_npu_count < count:
+        pytest.skip(f"NPUs required: {count}, available: {physical_npu_count}")
 
 
 # =============================================================================
@@ -224,3 +240,21 @@ def pytest_collection_modifyitems(items):
     stale = [name for name, (path, _) in _REBEL_XFAILS.items() if name not in matched and path in collected_files]
     if stale:
         raise pytest.UsageError(f"Stale _REBEL_XFAILS keys (file collected, name unmatched): {stale}")
+
+    # The check covers every item, including those that -m deselects afterward.
+    for item in items:
+        # instantiate_device_type_tests copies and inherits class markers, so pytest yields each twice.
+        markers = list({id(m): m for m in item.iter_markers("npu")}.values())
+        if not markers:
+            continue
+        if len(markers) > 1:
+            raise pytest.UsageError(
+                f"{item.nodeid}: expected at most 1 npu marker, got {len(markers)}: {[m.kwargs for m in markers]}"
+            )
+        marker = markers[0]
+        count = marker.kwargs.get("count")
+        if marker.args or set(marker.kwargs) != {"count"} or count not in _CI_NPU_COUNTS:
+            raise pytest.UsageError(
+                f"{item.nodeid}: expected npu(count=N) with N in {_CI_NPU_COUNTS}, "
+                f"got args={marker.args} kwargs={marker.kwargs}"
+            )

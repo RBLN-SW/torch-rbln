@@ -28,6 +28,7 @@ def _round_up_to_block(nbytes, granularity):
 
 
 @pytest.mark.serial
+@pytest.mark.npu(count=1)
 @pytest.mark.usefixtures("enable_eager_malloc")
 class TestMemoryStats(TestCase):
     # Memory allocation size constants for testing (matching C++ test)
@@ -42,11 +43,6 @@ class TestMemoryStats(TestCase):
         """Set up test environment."""
         self.device_id = 0
         self.device = f"rbln:{self.device_id}"
-
-        # Skip only when there is no device to test; a warmup/reset failure below is a
-        # real regression and must fail the suite, not be swallowed into a skip.
-        if torch.rbln.device_count() == 0:
-            self.skipTest("no rbln device available")
 
         # torch.rbln.memory_stats() reports {} for a device this process has not
         # allocated on (CUDA parity, via the device_context_initialized gate). This
@@ -637,6 +633,7 @@ class TestMemoryStats(TestCase):
 
 
 @pytest.mark.serial
+@pytest.mark.npu(count=1)
 @pytest.mark.usefixtures("enable_eager_malloc")
 class TestAcceleratorMemoryAPI(TestCase):
     """Tests for torch.accelerator.* memory APIs backed by RBLNAllocator.DeviceAllocator.
@@ -652,11 +649,6 @@ class TestAcceleratorMemoryAPI(TestCase):
             import torch_rbln  # noqa: F401 — registers the rbln backend
         except ImportError:
             self.skipTest("torch_rbln is not installed")
-
-        if not torch.rbln.is_available():
-            self.skipTest("RBLN device not available")
-        if torch.accelerator.current_accelerator().type != "rbln":
-            self.skipTest("Current accelerator is not RBLN")
 
         # Establish allocator state so the torch.accelerator memory APIs report full stats.
         # Before the first allocation the allocator is uninitialized, and upstream's
@@ -988,8 +980,6 @@ class TestPerChipletMemoryStats(TestCase):
     """memory_stats_per_chiplet() / memory_summary()."""
 
     def setUp(self):
-        if torch.rbln.device_count() == 0:
-            self.skipTest("no rbln device available")
         self.device = "rbln:0"
         # Same warmup as TestMemoryStats: the per-chiplet dict is empty until this
         # process has a context on the device.
@@ -997,6 +987,7 @@ class TestPerChipletMemoryStats(TestCase):
         del warmup
         torch.rbln.empty_cache(self.device)
 
+    @pytest.mark.npu(count=1)
     def test_key_schema(self):
         """Keys carry both axes: npu.<n>.chiplet.<c>.<stat>."""
         per_chiplet = torch.rbln.memory_stats_per_chiplet(self.device)
@@ -1008,6 +999,7 @@ class TestPerChipletMemoryStats(TestCase):
             self.assertTrue(parts[1].isdigit() and parts[3].isdigit(), f"Unexpected key format: {key}")
             self.assertIsInstance(per_chiplet[key], int)
 
+    @pytest.mark.npu(count=1)
     def test_breakdown_sums_to_aggregate(self):
         """The breakdown must account for exactly what memory_stats() aggregates.
 
@@ -1029,6 +1021,7 @@ class TestPerChipletMemoryStats(TestCase):
         finally:
             del tensor
 
+    @pytest.mark.npu(count=1)
     def test_summary_names_its_scope(self):
         """The table must say the numbers are one process's allocator, not the NPU's."""
         summary = torch.rbln.memory_summary(self.device)
@@ -1040,6 +1033,7 @@ class TestPerChipletMemoryStats(TestCase):
         self.assertIn("chiplet", summary)
         self.assertIn("total", summary)
 
+    @pytest.mark.npu(count=1)
     def test_summary_rows_carry_physical_npu_ids(self):
         """Row `npu` is the id device_summary() prints, not the NPU's position in the device."""
         from torch_rbln._internal.rsd_utils import get_physical_device_ids
@@ -1051,12 +1045,14 @@ class TestPerChipletMemoryStats(TestCase):
         row_ids = sorted({int(line.split()[0]) for line in table if line.strip() and line.split()[0].isdigit()})
         self.assertEqual(row_ids, sorted(set(physical)))
 
+    @pytest.mark.npu(count=1)
     def test_summary_without_device(self):
         """No RBLN device / uninitialized allocator degrades to a notice, not a raise."""
         with patch("torch_rbln.memory.memory_stats_per_chiplet", return_value={}):
             summary = torch.rbln.memory_summary(self.device)
         self.assertIn("no statistics", summary)
 
+    @pytest.mark.npu(count=2)
     def test_second_logical_device(self):
         """A logical device other than rbln:0 must be queryable.
 
@@ -1064,8 +1060,6 @@ class TestPerChipletMemoryStats(TestCase):
         context's device list. Forwarding one as the other raised "Invalid node_id"
         here for every device but rbln:0.
         """
-        if torch.rbln.device_count() < 2:
-            self.skipTest("needs at least 2 logical rbln devices")
         second = "rbln:1"
         tensor = torch.empty(512 * 1024, dtype=torch.float16, device=second)
         try:

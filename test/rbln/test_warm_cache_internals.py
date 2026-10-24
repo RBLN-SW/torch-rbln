@@ -19,7 +19,6 @@ import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-import torch_rbln
 from torch_rbln import _C  # type: ignore[attr-defined]
 from torch_rbln._internal import warm_cache
 
@@ -128,6 +127,7 @@ class TestWarmCacheBuildingGuard(TestCase):
         self.assertTrue(_C._warmcache_is_building())
 
 
+@pytest.mark.npu(count=1)
 class TestWarmCacheHitPath(TestCase):
     """Repeated dispatch of one input profile must keep taking the hit path.
 
@@ -182,6 +182,7 @@ class TestWarmCacheHandleGate(TestCase):
 
 
 @pytest.mark.serial
+@pytest.mark.npu(count=1)
 class TestWarmCacheContractBreak(TestCase):
     """A runtime the hit path cannot take a handle off must stay harmless.
 
@@ -232,6 +233,7 @@ class TestWarmCacheContractBreak(TestCase):
 
 
 @pytest.mark.serial
+@pytest.mark.npu(count=2)
 class TestWarmCacheDeviceScope(TestCase):
     """``empty_cache(device)`` drops that device's entries and no other's.
 
@@ -242,8 +244,6 @@ class TestWarmCacheDeviceScope(TestCase):
     SHAPE = 384  # 64-aligned and unused elsewhere, so the first call compiles
 
     def setUp(self) -> None:
-        if torch_rbln._C.device_count() < 2:
-            self.skipTest("needs two RBLN devices")
         self.addCleanup(_C._warmcache_clear)
 
     @staticmethod

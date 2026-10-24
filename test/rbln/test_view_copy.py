@@ -19,11 +19,11 @@ served cases also assert that the runtime ran no host primitive.
 
 from __future__ import annotations
 
+import pytest
 import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
-from test.utils import requires_logical_devices
 from test.utils_v2v import to_dev as _to_dev
 
 
@@ -99,6 +99,7 @@ class TestViewCopy(TestCase):
 
     # ---- chains the program serves ----
 
+    @pytest.mark.npu(count=1)
     @parametrize("chain", sorted(_CHAINS))
     def test_a_classifiable_view_is_served_by_the_program(self, device, chain):
         shape, view_fn = _CHAINS[chain]
@@ -107,6 +108,7 @@ class TestViewCopy(TestCase):
         self.assertEqual(host_primitives, {}, f"{chain} ran on the host, not the device")
         self.assertTrue(torch.equal(got, want), f"{chain} returned different values")
 
+    @pytest.mark.npu(count=1)
     @parametrize("chain", sorted(_CHAINS))
     def test_a_repeated_copy_stays_on_the_program(self, device, chain):
         """The program is cached per view pattern; a repeat must not fall off it."""
@@ -120,6 +122,7 @@ class TestViewCopy(TestCase):
             self.assertEqual(host_primitives, {}, f"{chain} reached the host on call {i}")
         self.assertTrue(torch.equal(dst.cpu(), view_fn(host).contiguous()))
 
+    @pytest.mark.npu(count=1)
     def test_the_detector_classifies_every_served_chain(self, device):
         """A route regression surfaces here first: once the detector stops classifying a
         chain, its copy drops back to the slow route and only the timing shows it."""
@@ -131,6 +134,7 @@ class TestViewCopy(TestCase):
 
     # ---- what stays on the existing route ----
 
+    @pytest.mark.npu(count=1)
     @dtypes(torch.float16, torch.float32, torch.int32, torch.bool)
     def test_a_dtype_the_device_rewrites_keeps_the_slow_route(self, device, dtype):
         """Only bf16 reaches the device as itself; the rest are rewritten to a narrower
@@ -140,6 +144,7 @@ class TestViewCopy(TestCase):
         self.assertGreater(bounces, 0, f"{dtype} must not take the program")
         self.assertTrue(torch.equal(got, want))
 
+    @pytest.mark.npu(count=1)
     @parametrize("last_dim", [96, 127, 1])
     def test_an_unaligned_last_dim_keeps_the_slow_route(self, device, last_dim):
         """Below the compiler's last-dim alignment the tensor stays on the host, where
@@ -149,6 +154,7 @@ class TestViewCopy(TestCase):
         self.assertGreater(bounces, 0, f"last dim {last_dim} must not take the program")
         self.assertTrue(torch.equal(got, want))
 
+    @pytest.mark.npu(count=1)
     def test_a_strided_destination_keeps_the_slow_route(self, device):
         """The program writes a contiguous buffer; scattering into a strided destination
         is not something the out-tensor path can express."""
@@ -159,6 +165,7 @@ class TestViewCopy(TestCase):
         self.assertGreater(bounces, 0, "a strided destination must not take the program")
         self.assertTrue(torch.equal(dst.contiguous().cpu(), host))
 
+    @pytest.mark.npu(count=1)
     def test_an_unclassifiable_view_keeps_the_slow_route(self, device):
         """The op has to answer before ``prepare_args_view_aware`` would reach for
         ``.contiguous()``, which re-enters ``copy_``."""
@@ -172,6 +179,7 @@ class TestViewCopy(TestCase):
         self.assertGreater(bounces, 0, "an unclassified view must not take the program")
         self.assertTrue(torch.equal(dst.cpu(), host.as_strided(sizes, strides, 0).contiguous()))
 
+    @pytest.mark.npu(count=1)
     def test_a_contiguous_copy_is_untouched(self, device):
         host = torch.randint(-1000, 1000, (_ROWS, _HEADS, _BLOCK, _DIM)).to(torch.bfloat16)
         src = _to_dev(host)
@@ -179,6 +187,7 @@ class TestViewCopy(TestCase):
         self.assertEqual(_copy_and_count(dst, src), (0, {}), "a direct copy must not bounce")
         self.assertTrue(torch.equal(dst.cpu(), host))
 
+    @pytest.mark.npu(count=1)
     def test_a_destination_at_a_storage_offset_is_served(self, device):
         """The compile path writes the caller's buffer only when it starts at offset 0;
         otherwise it hands back its own and the result is moved across. Still on device --
@@ -193,7 +202,7 @@ class TestViewCopy(TestCase):
         self.assertEqual(host_primitives, {}, "an offset destination must stay on device")
         self.assertTrue(torch.equal(dst.cpu(), host.permute(0, 2, 1, 3).contiguous()))
 
-    @requires_logical_devices(2)
+    @pytest.mark.npu(count=2)
     def test_a_copy_across_devices_is_untouched(self, device):
         """One program reads and writes one device, so a copy that crosses them is not
         this path's -- and taking it anyway writes the wrong buffer, not just a slow one."""
@@ -204,6 +213,7 @@ class TestViewCopy(TestCase):
         torch.rbln.synchronize()
         self.assertTrue(torch.equal(dst.cpu(), host.permute(0, 2, 1, 3).contiguous()))
 
+    @pytest.mark.npu(count=1)
     def test_a_device_to_host_copy_is_untouched(self, device):
         host = torch.randint(-1000, 1000, (_ROWS, _HEADS, _BLOCK, _DIM)).to(torch.bfloat16)
         src = _to_dev(host).permute(0, 2, 1, 3)

@@ -222,6 +222,7 @@ def _small_model_cover_array(full_matrix_at=None, skip_shapes=()):
 
 
 @pytest.mark.serial
+@pytest.mark.npu(count=1)
 class TestCausalLM(TestCausalLMBase):
     """Test correctness of causal language model outputs across various configurations."""
 
@@ -318,6 +319,7 @@ class TestCausalLM(TestCausalLMBase):
 
 
 @pytest.mark.serial
+@pytest.mark.npu(count=1)
 class TestCausalLMGraph(TestCausalLMBase):
     """Run a causal language model through ``torch.compile(backend="rbln")``.
 

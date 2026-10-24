@@ -29,7 +29,7 @@ Pre-merge, post-merge, and release checks all run these jobs:
 
 - **Source linting** runs the linters once per Python version, CPU architecture, and build type.
 - **Wheel builds** build a wheel per Python version, CPU architecture, and build type.
-- **NPU tests** run the C++ tests and the Python test suites on NPUs. Only release checks run the Python tests marked [`periodic`](TEST_GUIDE.md#ci-integration).
+- **NPU tests** run the C++ tests and the Python test suites for each NPU product. Only release checks run the Python tests marked [`periodic`](TEST_GUIDE.md#ci-integration).
 
 All three publish their `Release` wheels to the `rbln-internal` index and run their NPU tests against the x86_64 wheels for Python 3.12, but they differ in coverage:
 
@@ -44,7 +44,13 @@ All three publish their `Release` wheels to the `rbln-internal` index and run th
 
 Source linting covers every tracked file in post-merge and release checks. In pre-merge checks, it covers the files that the pull request changes, or every tracked file if the pull request changes the lint configuration.
 
-[Pipeline linting](LINTING.md#pipeline-linting) runs a dry-run upload of each pipeline file with the `TORCH_RBLN_*` variables unset, except for required variables (`${VAR?}`), which receive placeholder values. Each entry file must therefore pass with its own defaults.
+[Pipeline linting](LINTING.md#pipeline-linting) runs a dry-run upload of each pipeline file with the `TORCH_RBLN_*` environment variables unset, except for the required ones (`${VAR?}`), which receive placeholder values. Each entry file must therefore pass with its own defaults.
+
+### Python tests
+
+Each Python test suite runs as one step per NPU count, and each step runs the tests whose [`npu` marker](TEST_GUIDE.md#markers) declares that count. An NPU-less step runs the tests that do not require an NPU. For the dummy devices those tests create, it sets `RBLN_FORCE_NPU_NAME` to the step's NPU product and `LD_LIBRARY_PATH` to the `UMD_PATH` environment variable, because only NPU pods have the RBLN user-mode driver.
+
+Before running `pytest`, each step checks that the pod has exactly the requested NPUs of the step's product and that it can load the RBLN user-mode driver. A failed check fails the step, so a misallocated pod cannot pass with skipped tests or on the wrong NPUs.
 
 ### Release checks
 
@@ -58,7 +64,7 @@ On `main`, once every other step passes, the promotion steps publish the `Releas
 
 The release pipeline tags the build's commit, which can be on any branch.
 
-| Input                       | Default    | Description                             |
+| Variable                    | Default    | Description                             |
 |-----------------------------|------------|-----------------------------------------|
 | `TORCH_RBLN_VERSION_TAG`    | (required) | The tag to create                       |
 | `TORCH_RBLN_RELEASE_WHEELS` | `true`     | Whether to build and publish the wheels |
@@ -77,16 +83,16 @@ When the latest `rebel-compiler` on the `rbln-nightly` index is newer than the p
 
 ## Nightly torch test
 
-The nightly torch test builds against nightly `torch` instead of the `torch` pin and runs the `core` Python test suite on RBLN-CR13.
+The nightly torch test builds against nightly `torch` instead of the `torch` pin and runs the `core` Python test suite for RBLN-CR13.
 
-| Input                       | Default    | Description                             |
+| Variable                    | Default    | Description                             |
 |-----------------------------|------------|-----------------------------------------|
 | `TORCH_RBLN_PYTHON_VERSION` | `3.12`     | The Python version                      |
 | `TORCH_RBLN_TORCH_VERSION`  | The latest | The nightly `torch` version to build on |
 
 ## Agent queues
 
-The entry files do not hard-code queue names. The upload step in each pipeline's settings sets these variables in its `env`, and an upload without them fails.
+The entry files do not hard-code queue names. The upload step in each pipeline's settings sets these environment variables in its `env`, and an upload without them fails.
 
 | Variable                      | Description                                       |
 |-------------------------------|---------------------------------------------------|
@@ -94,4 +100,4 @@ The entry files do not hard-code queue names. The upload step in each pipeline's
 | `TORCH_RBLN_QUEUE_AMD64_CR13` | AMD64 agents with RBLN-CR13 for NPU tests         |
 | `TORCH_RBLN_QUEUE_AMD64`      | AMD64 agents for x86_64 builds and source linting |
 | `TORCH_RBLN_QUEUE_ARM64`      | Arm64 agents for aarch64 builds                   |
-| `TORCH_RBLN_QUEUE_DEFAULT`    | Agents for every other step                       |
+| `TORCH_RBLN_QUEUE_DEFAULT`    | Agents for NPU-less steps and every other step    |

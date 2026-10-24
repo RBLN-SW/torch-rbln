@@ -1,4 +1,5 @@
 env:
+  TORCH_RBLN_QUEUE_DEFAULT: ${TORCH_RBLN_QUEUE_DEFAULT?}
   TORCH_RBLN_QUEUE_AMD64_NPU: ${TORCH_RBLN_QUEUE_AMD64_NPU?}
   TORCH_RBLN_PYTHON_VERSION: ${TORCH_RBLN_PYTHON_VERSION?}
   TORCH_RBLN_BUILD_TYPE: ${TORCH_RBLN_BUILD_TYPE?}
@@ -38,20 +39,80 @@ common:
 steps:
   - label: >-
       Run Python tests (py${TORCH_RBLN_PYTHON_VERSION?}, x86_64,
-      ${TORCH_RBLN_BUILD_TYPE?}, ${TORCH_RBLN_NPU_PRODUCT?}, core)
+      ${TORCH_RBLN_BUILD_TYPE?}, ${TORCH_RBLN_NPU_PRODUCT?}, core, 0 NPUs)
     key: >-
-      run-python-tests-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-${TORCH_RBLN_NPU_PRODUCT?}-core
+      run-python-tests-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-${TORCH_RBLN_NPU_PRODUCT?}-core-0-npus
     command: |
       .buildkite/scripts/test/run-python-tests.sh \
         --build-type ${TORCH_RBLN_BUILD_TYPE?} \
         --artifact-build-id ${TORCH_RBLN_ARTIFACT_BUILD_ID?} \
         --artifact-dir ${TORCH_RBLN_ARTIFACT_DIR?} \
         --exclude-periodic ${TORCH_RBLN_EXCLUDE_PERIODIC?} \
-        --suite core
+        --test-suite core \
+        --npu-product ${TORCH_RBLN_NPU_PRODUCT?} \
+        --num-npus 0 \
+        --num-workers 32
+    agents:
+      queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
+    env:
+      LD_LIBRARY_PATH: ${UMD_PATH}
+    secrets: *index-secrets
+    if: '",${TORCH_RBLN_TEST_SUITES?}," =~ /,core,/'
+    timeout_in_minutes: 10
+    image: *test-image
+    resources:
+      cpu:
+        requests: "32"
+        limits: "32"
+
+  - label: >-
+      Run Python tests (py${TORCH_RBLN_PYTHON_VERSION?}, x86_64,
+      ${TORCH_RBLN_BUILD_TYPE?}, ${TORCH_RBLN_NPU_PRODUCT?}, core, 1 NPU)
+    key: >-
+      run-python-tests-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-${TORCH_RBLN_NPU_PRODUCT?}-core-1-npu
+    command: |
+      .buildkite/scripts/test/run-python-tests.sh \
+        --build-type ${TORCH_RBLN_BUILD_TYPE?} \
+        --artifact-build-id ${TORCH_RBLN_ARTIFACT_BUILD_ID?} \
+        --artifact-dir ${TORCH_RBLN_ARTIFACT_DIR?} \
+        --exclude-periodic ${TORCH_RBLN_EXCLUDE_PERIODIC?} \
+        --test-suite core \
+        --npu-product ${TORCH_RBLN_NPU_PRODUCT?} \
+        --num-npus 1 \
+        --num-workers 32
     agents:
       queue: ${TORCH_RBLN_QUEUE_AMD64_NPU?}
     if: '",${TORCH_RBLN_TEST_SUITES?}," =~ /,core,/'
-    timeout_in_minutes: 30
+    timeout_in_minutes: 20
+    resources:
+      cpu:
+        requests: "32"
+        limits: "32"
+      npu:
+        count: 1
+        product:
+          - ${TORCH_RBLN_NPU_PRODUCT?}
+    <<: *npu-test
+
+  - label: >-
+      Run Python tests (py${TORCH_RBLN_PYTHON_VERSION?}, x86_64,
+      ${TORCH_RBLN_BUILD_TYPE?}, ${TORCH_RBLN_NPU_PRODUCT?}, core, 2 NPUs)
+    key: >-
+      run-python-tests-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-${TORCH_RBLN_NPU_PRODUCT?}-core-2-npus
+    command: |
+      .buildkite/scripts/test/run-python-tests.sh \
+        --build-type ${TORCH_RBLN_BUILD_TYPE?} \
+        --artifact-build-id ${TORCH_RBLN_ARTIFACT_BUILD_ID?} \
+        --artifact-dir ${TORCH_RBLN_ARTIFACT_DIR?} \
+        --exclude-periodic ${TORCH_RBLN_EXCLUDE_PERIODIC?} \
+        --test-suite core \
+        --npu-product ${TORCH_RBLN_NPU_PRODUCT?} \
+        --num-npus 2 \
+        --num-workers 32
+    agents:
+      queue: ${TORCH_RBLN_QUEUE_AMD64_NPU?}
+    if: '",${TORCH_RBLN_TEST_SUITES?}," =~ /,core,/'
+    timeout_in_minutes: 10
     resources:
       cpu:
         requests: "32"
@@ -64,20 +125,113 @@ steps:
 
   - label: >-
       Run Python tests (py${TORCH_RBLN_PYTHON_VERSION?}, x86_64,
-      ${TORCH_RBLN_BUILD_TYPE?}, ${TORCH_RBLN_NPU_PRODUCT?}, distributed)
+      ${TORCH_RBLN_BUILD_TYPE?}, ${TORCH_RBLN_NPU_PRODUCT?}, distributed, 1 NPU)
     key: >-
-      run-python-tests-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-${TORCH_RBLN_NPU_PRODUCT?}-distributed
+      run-python-tests-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-${TORCH_RBLN_NPU_PRODUCT?}-distributed-1-npu
     command: |
       .buildkite/scripts/test/run-python-tests.sh \
         --build-type ${TORCH_RBLN_BUILD_TYPE?} \
         --artifact-build-id ${TORCH_RBLN_ARTIFACT_BUILD_ID?} \
         --artifact-dir ${TORCH_RBLN_ARTIFACT_DIR?} \
         --exclude-periodic ${TORCH_RBLN_EXCLUDE_PERIODIC?} \
-        --suite distributed
+        --test-suite distributed \
+        --npu-product ${TORCH_RBLN_NPU_PRODUCT?} \
+        --num-npus 1 \
+        --num-workers 32
     agents:
       queue: ${TORCH_RBLN_QUEUE_AMD64_NPU?}
     if: '",${TORCH_RBLN_TEST_SUITES?}," =~ /,distributed,/'
-    timeout_in_minutes: 90
+    timeout_in_minutes: 10
+    resources:
+      cpu:
+        requests: "32"
+        limits: "32"
+      npu:
+        count: 1
+        product:
+          - ${TORCH_RBLN_NPU_PRODUCT?}
+    <<: *npu-test
+
+  - label: >-
+      Run Python tests (py${TORCH_RBLN_PYTHON_VERSION?}, x86_64,
+      ${TORCH_RBLN_BUILD_TYPE?}, ${TORCH_RBLN_NPU_PRODUCT?},
+      distributed, 2 NPUs)
+    key: >-
+      run-python-tests-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-${TORCH_RBLN_NPU_PRODUCT?}-distributed-2-npus
+    command: |
+      .buildkite/scripts/test/run-python-tests.sh \
+        --build-type ${TORCH_RBLN_BUILD_TYPE?} \
+        --artifact-build-id ${TORCH_RBLN_ARTIFACT_BUILD_ID?} \
+        --artifact-dir ${TORCH_RBLN_ARTIFACT_DIR?} \
+        --exclude-periodic ${TORCH_RBLN_EXCLUDE_PERIODIC?} \
+        --test-suite distributed \
+        --npu-product ${TORCH_RBLN_NPU_PRODUCT?} \
+        --num-npus 2 \
+        --num-workers 32
+    agents:
+      queue: ${TORCH_RBLN_QUEUE_AMD64_NPU?}
+    if: '",${TORCH_RBLN_TEST_SUITES?}," =~ /,distributed,/'
+    timeout_in_minutes: 70
+    resources:
+      cpu:
+        requests: "32"
+        limits: "32"
+      npu:
+        count: 2
+        product:
+          - ${TORCH_RBLN_NPU_PRODUCT?}
+    <<: *npu-test
+
+  - label: >-
+      Run Python tests (py${TORCH_RBLN_PYTHON_VERSION?}, x86_64,
+      ${TORCH_RBLN_BUILD_TYPE?}, ${TORCH_RBLN_NPU_PRODUCT?},
+      distributed, 4 NPUs)
+    key: >-
+      run-python-tests-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-${TORCH_RBLN_NPU_PRODUCT?}-distributed-4-npus
+    command: |
+      .buildkite/scripts/test/run-python-tests.sh \
+        --build-type ${TORCH_RBLN_BUILD_TYPE?} \
+        --artifact-build-id ${TORCH_RBLN_ARTIFACT_BUILD_ID?} \
+        --artifact-dir ${TORCH_RBLN_ARTIFACT_DIR?} \
+        --exclude-periodic ${TORCH_RBLN_EXCLUDE_PERIODIC?} \
+        --test-suite distributed \
+        --npu-product ${TORCH_RBLN_NPU_PRODUCT?} \
+        --num-npus 4 \
+        --num-workers 32
+    agents:
+      queue: ${TORCH_RBLN_QUEUE_AMD64_NPU?}
+    if: '",${TORCH_RBLN_TEST_SUITES?}," =~ /,distributed,/'
+    timeout_in_minutes: 20
+    resources:
+      cpu:
+        requests: "32"
+        limits: "32"
+      npu:
+        count: 4
+        product:
+          - ${TORCH_RBLN_NPU_PRODUCT?}
+    <<: *npu-test
+
+  - label: >-
+      Run Python tests (py${TORCH_RBLN_PYTHON_VERSION?}, x86_64,
+      ${TORCH_RBLN_BUILD_TYPE?}, ${TORCH_RBLN_NPU_PRODUCT?},
+      distributed, 8 NPUs)
+    key: >-
+      run-python-tests-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-${TORCH_RBLN_NPU_PRODUCT?}-distributed-8-npus
+    command: |
+      .buildkite/scripts/test/run-python-tests.sh \
+        --build-type ${TORCH_RBLN_BUILD_TYPE?} \
+        --artifact-build-id ${TORCH_RBLN_ARTIFACT_BUILD_ID?} \
+        --artifact-dir ${TORCH_RBLN_ARTIFACT_DIR?} \
+        --exclude-periodic ${TORCH_RBLN_EXCLUDE_PERIODIC?} \
+        --test-suite distributed \
+        --npu-product ${TORCH_RBLN_NPU_PRODUCT?} \
+        --num-npus 8 \
+        --num-workers 32
+    agents:
+      queue: ${TORCH_RBLN_QUEUE_AMD64_NPU?}
+    if: '",${TORCH_RBLN_TEST_SUITES?}," =~ /,distributed,/'
+    timeout_in_minutes: 20
     resources:
       cpu:
         requests: "32"
@@ -90,42 +244,48 @@ steps:
 
   - label: >-
       Run Python tests (py${TORCH_RBLN_PYTHON_VERSION?}, x86_64,
-      ${TORCH_RBLN_BUILD_TYPE?}, ${TORCH_RBLN_NPU_PRODUCT?}, ops)
+      ${TORCH_RBLN_BUILD_TYPE?}, ${TORCH_RBLN_NPU_PRODUCT?}, ops, 1 NPU)
     key: >-
-      run-python-tests-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-${TORCH_RBLN_NPU_PRODUCT?}-ops
+      run-python-tests-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-${TORCH_RBLN_NPU_PRODUCT?}-ops-1-npu
     command: |
       .buildkite/scripts/test/run-python-tests.sh \
         --build-type ${TORCH_RBLN_BUILD_TYPE?} \
         --artifact-build-id ${TORCH_RBLN_ARTIFACT_BUILD_ID?} \
         --artifact-dir ${TORCH_RBLN_ARTIFACT_DIR?} \
         --exclude-periodic ${TORCH_RBLN_EXCLUDE_PERIODIC?} \
-        --suite ops
+        --test-suite ops \
+        --npu-product ${TORCH_RBLN_NPU_PRODUCT?} \
+        --num-npus 1 \
+        --num-workers 32
     agents:
       queue: ${TORCH_RBLN_QUEUE_AMD64_NPU?}
     if: '",${TORCH_RBLN_TEST_SUITES?}," =~ /,ops,/'
-    timeout_in_minutes: 30
+    timeout_in_minutes: 20
     resources:
       cpu:
         requests: "32"
         limits: "32"
       npu:
-        count: 2
+        count: 1
         product:
           - ${TORCH_RBLN_NPU_PRODUCT?}
     <<: *npu-test
 
   - label: >-
       Run Python tests (py${TORCH_RBLN_PYTHON_VERSION?}, x86_64,
-      ${TORCH_RBLN_BUILD_TYPE?}, ${TORCH_RBLN_NPU_PRODUCT?}, models)
+      ${TORCH_RBLN_BUILD_TYPE?}, ${TORCH_RBLN_NPU_PRODUCT?}, models, 1 NPU)
     key: >-
-      run-python-tests-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-${TORCH_RBLN_NPU_PRODUCT?}-models
+      run-python-tests-py${TORCH_RBLN_PYTHON_VERSION?}-x86_64-${TORCH_RBLN_BUILD_TYPE?}-${TORCH_RBLN_NPU_PRODUCT?}-models-1-npu
     command: |
       .buildkite/scripts/test/run-python-tests.sh \
         --build-type ${TORCH_RBLN_BUILD_TYPE?} \
         --artifact-build-id ${TORCH_RBLN_ARTIFACT_BUILD_ID?} \
         --artifact-dir ${TORCH_RBLN_ARTIFACT_DIR?} \
         --exclude-periodic ${TORCH_RBLN_EXCLUDE_PERIODIC?} \
-        --suite models
+        --test-suite models \
+        --npu-product ${TORCH_RBLN_NPU_PRODUCT?} \
+        --num-npus 1 \
+        --num-workers 32
     agents:
       queue: ${TORCH_RBLN_QUEUE_AMD64_NPU?}
     env:
@@ -138,7 +298,7 @@ steps:
         requests: "32"
         limits: "32"
       npu:
-        count: 2
+        count: 1
         product:
           - ${TORCH_RBLN_NPU_PRODUCT?}
     <<: *npu-test

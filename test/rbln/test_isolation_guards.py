@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from torch.testing._internal.common_utils import run_tests
 
 import torch_rbln
 
@@ -49,6 +50,7 @@ def _run_setup_teardown(fixture, *args):
         pass
 
 
+@pytest.mark.npu(count=1)
 def test_restore_current_device_does_not_leak_initialized():
     """restore_current_device must not flip ``_initialized`` on a test that never touched the
     device: it snapshots the flag and restores it, and skips set_device when the index is
@@ -289,6 +291,4 @@ def test_python_disabled_fallback_gate_reads_env_live():
 
 
 if __name__ == "__main__":
-    from torch.testing._internal.common_utils import run_tests
-
     run_tests()

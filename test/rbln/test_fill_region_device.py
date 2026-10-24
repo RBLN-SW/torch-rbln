@@ -8,19 +8,14 @@ runs through the runtime's h2v copy and the storage stays device-latest.
 
 from __future__ import annotations
 
-import os
-
 import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-import torch_rbln  # noqa: F401
 from torch_rbln import _C
 
 
 DEVICE = torch.device("rbln:0")
-_have_device = torch_rbln.device.device_count() > 0 and os.environ.get("RBLN_DUMMY_DEVICE") != "1"
-needs_device = pytest.mark.skipif(not _have_device, reason="needs an RBLN device")
 _identity = torch.compile(lambda t: torch.maximum(t, t), backend="rbln", dynamic=False)
 
 
@@ -58,7 +53,7 @@ def _device_latest(shape, dtype=torch.bfloat16):
     return y
 
 
-@needs_device
+@pytest.mark.npu(count=1)
 class TestFillRegionDevice(TestCase):
     def _check(self, make_view, value, shape=(1, 474, 3072), dtype=torch.bfloat16, resident=True):
         x = _device_latest(shape, dtype)

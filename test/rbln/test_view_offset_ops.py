@@ -13,11 +13,13 @@ the same view on an RBLN tensor and a CPU reference, then compares the entire
 backing tensor.
 """
 
+import pytest
 import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
 
+@pytest.mark.npu(count=1)
 class TestZeroViewOffset(TestCase):
     """``zero_`` must zero only the view, not the enclosing allocation."""
 
@@ -73,6 +75,7 @@ class TestZeroViewOffset(TestCase):
         self.assertEqual(base_rbln.to("cpu"), base_cpu)
 
 
+@pytest.mark.npu(count=1)
 class TestFillViewOffset(TestCase):
     """``fill_.Scalar`` must write only the view's byte range."""
 
@@ -98,6 +101,7 @@ class TestFillViewOffset(TestCase):
         self._check(torch.float32, (8,), lambda x: x[::2], 3.0)
 
 
+@pytest.mark.npu(count=1)
 class TestItemViewOffset(TestCase):
     """``.item()`` must read the element at the view's interior vaddr."""
 
@@ -111,6 +115,7 @@ class TestItemViewOffset(TestCase):
         self.assertEqual(base[2, 1].item(), 9)
 
 
+@pytest.mark.npu(count=1)
 class TestBroadcastOverlapFill(TestCase):
     """``zero_``/``fill_`` on an internally-overlapping (expand/broadcast, stride-0) view must
     match CPU's overlap-tolerant fill — write each distinct storage element once — instead of

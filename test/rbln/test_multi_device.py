@@ -10,18 +10,12 @@ import torch.nn as nn
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
-from test.utils import requires_logical_devices, SUPPORTED_DTYPES
+from test.utils import SUPPORTED_DTYPES
 
 
+@pytest.mark.npu(count=2)
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestMultiDevice(TestCase):
-    @requires_logical_devices(2)
-    def test_device_count(self):
-        """Test that we have multiple devices available"""
-        num_devices = torch.rbln.device_count()
-        self.assertGreaterEqual(num_devices, 2, "Need at least 2 logical devices for multi-device tests")
-
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_tensor_to_different_device(self, dtype):
         """Test moving tensors between devices using to()"""
@@ -40,7 +34,6 @@ class TestMultiDevice(TestCase):
         # Verify data is preserved
         self.assertEqual(x.cpu(), y.cpu())
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_tensor_to_same_device(self, dtype):
         """Test that to() on same device returns same tensor"""
@@ -50,7 +43,6 @@ class TestMultiDevice(TestCase):
         # Should be the same tensor (no copy)
         self.assertEqual(x.data_ptr(), y.data_ptr())
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_copy_between_devices(self, dtype):
         """Test copy_() between different devices"""
@@ -71,7 +63,6 @@ class TestMultiDevice(TestCase):
         self.assertEqual(dst.device, device1)
         self.assertEqual(dst.cpu(), src_data)
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_copy_same_device(self, dtype):
         """Test copy_() on same device"""
@@ -83,7 +74,6 @@ class TestMultiDevice(TestCase):
         dst.copy_(src)
         self.assertEqual(dst.cpu(), src_data)
 
-    @requires_logical_devices(2)
     def test_set_device(self):
         """Test set_device() public API"""
         # Set device 0
@@ -102,7 +92,6 @@ class TestMultiDevice(TestCase):
         torch.rbln.set_device("rbln:1")
         self.assertEqual(torch.rbln.current_device(), 1)
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_device_context_manager(self, dtype):
         """
@@ -141,7 +130,6 @@ class TestMultiDevice(TestCase):
         # Should restore to original device 0
         self.assertEqual(torch.rbln.current_device(), 0)
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_device_of(self, dtype):
         """Test device_of() context manager that uses tensor's device"""
@@ -179,12 +167,10 @@ class TestMultiDevice(TestCase):
             # Should remain unchanged (no-op for non-RBLN devices)
             self.assertEqual(torch.rbln.current_device(), original_device)
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_current_device_tracking(self, dtype):
         """Test that current device is tracked correctly"""
-        num_devices = torch.rbln.device_count()
-        for i in range(min(num_devices, 4)):  # Test up to 4 devices
+        for i in range(2):
             device = torch.device(f"rbln:{i}")
             torch.rbln.set_device(i)
             self.assertEqual(torch.rbln.current_device(), i)
@@ -193,7 +179,6 @@ class TestMultiDevice(TestCase):
             x = torch.randn([2, 2], dtype=dtype, device=device)
             self.assertEqual(x.device.index, i)
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_operations_preserve_device(self, dtype):
         """Test that operations preserve device placement"""
@@ -211,7 +196,6 @@ class TestMultiDevice(TestCase):
         w = y * y  # Both on device1
         self.assertEqual(w.device, device1)
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_cross_device_operations_error(self, dtype):
         """Test that cross-device operations raise appropriate errors"""
@@ -228,7 +212,6 @@ class TestMultiDevice(TestCase):
         with self.assertRaises(RuntimeError):
             _ = x * y  # Different devices
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_clone_preserves_device(self, dtype):
         """Test that clone() preserves device"""
@@ -244,7 +227,6 @@ class TestMultiDevice(TestCase):
         self.assertEqual(z.device, device1)
         self.assertEqual(x.cpu(), z.cpu())
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_empty_like_preserves_device(self, dtype):
         """Test that empty_like preserves device"""
@@ -259,7 +241,6 @@ class TestMultiDevice(TestCase):
         y1 = torch.empty_like(x1)
         self.assertEqual(y1.device, device1)
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_zeros_ones_like_preserves_device(self, dtype):
         """Test that zeros_like and ones_like preserve device"""
@@ -278,7 +259,6 @@ class TestMultiDevice(TestCase):
         self.assertEqual(y1.device, device1)
         self.assertEqual(z1.device, device1)
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_multi_device_memory_isolation(self, dtype):
         """
@@ -315,7 +295,6 @@ class TestMultiDevice(TestCase):
         x_expected = x_initial + 100.0
         self.assertEqual(x.cpu(), x_expected, "Device 0 tensor should be modified", atol=1e-3, rtol=1e-3)
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_to_with_dtype_and_device(self, dtype):
         """Test to() with both dtype and device conversion"""
@@ -329,7 +308,6 @@ class TestMultiDevice(TestCase):
         self.assertEqual(y.dtype, dtype)
         self.assertEqual(x.cpu(), y.cpu())
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_non_blocking_copy(self, dtype):
         """Test non_blocking parameter in to()"""
@@ -342,7 +320,6 @@ class TestMultiDevice(TestCase):
         self.assertEqual(y.device, device1)
         self.assertEqual(x.cpu(), y.cpu())
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_cuda_like_device_string(self, dtype):
         """Test that device strings like 'rbln:0' work like 'cuda:0'"""
@@ -355,21 +332,18 @@ class TestMultiDevice(TestCase):
         y = x.to(device1_str)
         self.assertEqual(y.device.index, 1)
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_device_index_access(self, dtype):
         """Test accessing device index"""
-        num_devices = torch.rbln.device_count()
-        for device_index in range(min(num_devices, 4)):
+        for device_index in range(2):
             device = torch.device("rbln", device_index)
             x = torch.randn([2, 2], dtype=dtype, device=device)
             self.assertEqual(x.device, device)
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_sequential_device_operations(self, dtype):
         """Test sequential operations across multiple devices"""
-        devices = [f"rbln:{i}" for i in range(torch.rbln.device_count())]
+        devices = [f"rbln:{i}" for i in range(2)]
         tensors = []
         for device_str in devices:
             x = torch.randn([3, 3], dtype=dtype, device=device_str)
@@ -381,12 +355,10 @@ class TestMultiDevice(TestCase):
             self.assertEqual(t.device, torch.device(devices[i]))
 
         # Copy between devices
-        if len(devices) >= 2:
-            copied = tensors[0].to(devices[1])
-            self.assertEqual(copied.device, torch.device(devices[1]))
-            self.assertEqual(copied.cpu(), tensors[0].cpu())
+        copied = tensors[0].to(devices[1])
+        self.assertEqual(copied.device, torch.device(devices[1]))
+        self.assertEqual(copied.cpu(), tensors[0].cpu())
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_view_operations_preserve_device(self, dtype):
         """Test that view operations preserve device"""
@@ -401,7 +373,6 @@ class TestMultiDevice(TestCase):
         y1 = x1.reshape(16)
         self.assertEqual(y1.device, device1)
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_inplace_operations_preserve_device(self, dtype):
         """Test that in-place operations preserve device"""
@@ -416,7 +387,6 @@ class TestMultiDevice(TestCase):
         y.mul_(2.0)
         self.assertEqual(y.device, device1)
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_slice_operations_preserve_device(self, dtype):
         """Test that slicing operations preserve device"""
@@ -432,6 +402,7 @@ class TestMultiDevice(TestCase):
         self.assertEqual(y1.device, device1)
 
 
+@pytest.mark.npu(count=2)
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestDeviceOutputPlacement(TestCase):
     """Test cases to ensure output tensors are placed on the correct device."""
@@ -454,7 +425,6 @@ class TestDeviceOutputPlacement(TestCase):
     # Basic Linear Layer Tests
     # =========================================================================
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("device_index", [0, 1])
     def test_linear_single_device(self, dtype, device_index):
@@ -469,12 +439,10 @@ class TestDeviceOutputPlacement(TestCase):
         self.assertEqual(output.shape, (3, 64))
         self.assertEqual(output.dtype, dtype)
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_linear_multiple_devices(self, dtype):
         """Test nn.Linear on multiple devices to catch device placement bugs."""
-        num_devices = torch.rbln.device_count()
-        for device_id in range(min(num_devices, 4)):  # Test up to 4 devices
+        for device_id in range(2):
             device = torch.device(f"rbln:{device_id}")
             linear = nn.Linear(32, 32).to(device=device, dtype=dtype)
             x = torch.randn([2, 32], dtype=dtype, device=device)
@@ -484,7 +452,6 @@ class TestDeviceOutputPlacement(TestCase):
             self._assert_device_match(output, device, f"Linear output on device {device_id}: ")
             self.assertEqual(output.shape, (2, 32))
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_linear_with_bias_device_1(self, dtype):
         """Test Linear layer with bias on device 1."""
@@ -495,7 +462,6 @@ class TestDeviceOutputPlacement(TestCase):
         output = linear(x)
         self._assert_device_match(output, device, "Linear with bias output: ")
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_linear_without_bias_device_1(self, dtype):
         """Test Linear layer without bias on device 1."""
@@ -506,25 +472,10 @@ class TestDeviceOutputPlacement(TestCase):
         output = linear(x)
         self._assert_device_match(output, device, "Linear without bias output: ")
 
-    @dtypes(*SUPPORTED_DTYPES)
-    def test_linear_default_device(self, dtype):
-        """Test Linear on default device (rbln:0 or rbln)."""
-        # Use default device (should be rbln:0 or rbln)
-        linear = nn.Linear(32, 32).to(device="rbln", dtype=dtype)
-        x = torch.randn([4, 32], dtype=dtype, device="rbln")
-
-        output = linear(x)
-
-        # Output should be on rbln device
-        self.assertEqual(output.device.type, "rbln")
-        # Should match input device
-        self.assertEqual(output.device.index, x.device.index)
-
     # =========================================================================
     # Multi-Device and Context Tests
     # =========================================================================
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_linear_sequential_devices(self, dtype):
         """Test sequential Linear operations on different devices."""
@@ -545,7 +496,6 @@ class TestDeviceOutputPlacement(TestCase):
         out1 = linear1(x1)
         self._assert_device_match(out1, device1, "Second Linear output: ")
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_linear_with_current_device_context(self, dtype):
         """Test that Linear respects device context even when current_device is different."""
@@ -564,7 +514,6 @@ class TestDeviceOutputPlacement(TestCase):
         self._assert_device_match(output, device1, "Linear should use input device, not current device: ")
         self.assertNotEqual(output.device.index, torch.rbln.current_device())
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_device_0_vs_device_1_comparison(self, dtype):
         """Test that operations on device 0 and device 1 produce outputs on correct devices."""
@@ -587,7 +536,6 @@ class TestDeviceOutputPlacement(TestCase):
         # Ensure they're on different devices
         self.assertNotEqual(out0.device.index, out1.device.index)
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_device_switching_sequence(self, dtype):
         """Test switching between devices in a sequence of operations."""
@@ -612,7 +560,6 @@ class TestDeviceOutputPlacement(TestCase):
         out2 = linear2(x2)
         self._assert_device_match(out2, device0, "Third operation: ")
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_mixed_device_operations_error(self, dtype):
         """Test that mixing devices in operations raises appropriate errors."""
@@ -630,7 +577,6 @@ class TestDeviceOutputPlacement(TestCase):
     # Model Combination Tests
     # =========================================================================
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_multiple_operations_device_1(self, dtype):
         """Test multiple operations in sequence on device 1."""
@@ -649,7 +595,6 @@ class TestDeviceOutputPlacement(TestCase):
         linear_out = linear(mul_out)
         self._assert_device_match(linear_out, device, "Linear output: ")
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_nested_model_device_1(self, dtype):
         """Test nested model with multiple layers on device 1."""
@@ -676,7 +621,6 @@ class TestDeviceOutputPlacement(TestCase):
         self._assert_device_match(output, device, "Nested model output: ")
         self.assertEqual(output.shape, (4, 8))
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_sequential_model_device_1(self, dtype):
         """Test Sequential model device placement."""
@@ -695,7 +639,6 @@ class TestDeviceOutputPlacement(TestCase):
         self._assert_device_match(output, device, "Sequential model output: ")
         self.assertEqual(output.shape, (4, 16))
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_multiple_outputs_device_1(self, dtype):
         """Test model with multiple outputs on device 1."""
@@ -720,7 +663,6 @@ class TestDeviceOutputPlacement(TestCase):
         self._assert_device_match(out1, device, "First output: ")
         self._assert_device_match(out2, device, "Second output: ")
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_complex_model_device_1(self, dtype):
         """Test a complex model using only ops from native_functions.yaml on device 1."""
@@ -757,7 +699,6 @@ class TestDeviceOutputPlacement(TestCase):
         self._assert_device_match(output, device, "Complex model output: ")
         self.assertEqual(output.shape, (4, 16))
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     def test_complex_model_device_1_128aligned(self, dtype):
         """Test complex model with 128-byte aligned last dimension using native_functions ops."""
@@ -806,7 +747,6 @@ class TestDeviceOutputPlacement(TestCase):
     # Native Functions Tests - Basic Operations (non-aligned, aligned)
     # =========================================================================
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("binary_op", [torch.add, torch.mul, torch.sub])
     @parametrize("shape", [(4, 8), (4, 64)])
@@ -819,7 +759,6 @@ class TestDeviceOutputPlacement(TestCase):
         output = binary_op(x, y)
         self._assert_device_match(output, device, f"{binary_op.__name__} output: ")
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("shape", [(4, 8), (4, 64)])
     def test_div_device_1(self, dtype, shape):
@@ -831,7 +770,6 @@ class TestDeviceOutputPlacement(TestCase):
         output = torch.div(x, y)
         self._assert_device_match(output, device, "Div output: ")
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("unary_op", [torch.abs, torch.ceil, torch.floor, torch.neg, torch.sigmoid, torch.nn.functional.silu])
     @parametrize("shape", [(4, 8), (4, 64)])
@@ -843,7 +781,6 @@ class TestDeviceOutputPlacement(TestCase):
         output = unary_op(x)
         self._assert_device_match(output, device, "Sigmoid output: ")
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("shape", [(4, 8), (4, 64)])
     def test_clamp_device_1(self, dtype, shape):
@@ -854,7 +791,6 @@ class TestDeviceOutputPlacement(TestCase):
         output = torch.clamp(x, min=-1.0, max=1.0)
         self._assert_device_match(output, device, "Clamp output: ")
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("shape", [(4, 8), (4, 64)])
     def test_log_device_1(self, dtype, shape):
@@ -865,7 +801,6 @@ class TestDeviceOutputPlacement(TestCase):
         output = torch.log(x)
         self._assert_device_match(output, device, "Log output: ")
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("shape", [(4, 8), (4, 64)])
     def test_rsqrt_device_1(self, dtype, shape):
@@ -876,7 +811,6 @@ class TestDeviceOutputPlacement(TestCase):
         output = torch.rsqrt(x)
         self._assert_device_match(output, device, "Rsqrt output: ")
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("shape", [(4, 8), (4, 64)])
     def test_pow_tensor_scalar_device_1(self, dtype, shape):
@@ -887,7 +821,6 @@ class TestDeviceOutputPlacement(TestCase):
         output = torch.pow(x, 2.0)
         self._assert_device_match(output, device, "Pow output: ")
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("shape", [(4, 8), (4, 64)])
     def test_mean_device_1(self, dtype, shape):
@@ -898,7 +831,6 @@ class TestDeviceOutputPlacement(TestCase):
         output = torch.mean(x, dim=-1, keepdim=True)
         self._assert_device_match(output, device, "Mean output: ")
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("reduction_op", [torch.maximum, torch.minimum])
     @parametrize("shape", [(4, 8), (4, 64)])
@@ -911,7 +843,6 @@ class TestDeviceOutputPlacement(TestCase):
         output = reduction_op(x, y)
         self._assert_device_match(output, device, f"{reduction_op.__name__} output: ")
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("shape", [(4, 8), (4, 64)])
     def test_where_device_1(self, dtype, shape):
@@ -924,7 +855,6 @@ class TestDeviceOutputPlacement(TestCase):
         output = torch.where(condition, x, y)
         self._assert_device_match(output, device, "Where output: ")
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("shape", [(4, 8), (4, 64)])
     def test_cat_device_1(self, dtype, shape):
@@ -938,7 +868,6 @@ class TestDeviceOutputPlacement(TestCase):
         self._assert_device_match(output, device, "Cat output: ")
         self.assertEqual(output.shape, (shape[0], shape[1] * 3))
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("comparison_op", [torch.eq, torch.ne, torch.gt, torch.ge, torch.lt, torch.le])
     @parametrize("shape", [(4, 8), (4, 64)])
@@ -952,7 +881,6 @@ class TestDeviceOutputPlacement(TestCase):
         out = comparison_op(x, y)
         self._assert_device_match(out, device, f"{comparison_op.__name__} output: ")
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("shape", [(4, 8), (4, 64)])
     def test_logical_not_device_1(self, dtype, shape):
@@ -963,7 +891,6 @@ class TestDeviceOutputPlacement(TestCase):
         output = torch.logical_not(x)
         self._assert_device_match(output, device, "Logical_not output: ")
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("n,m,p", [(4, 8, 16), (4, 64, 128)])
     def test_mm_device_1(self, dtype, n, m, p):
@@ -976,7 +903,6 @@ class TestDeviceOutputPlacement(TestCase):
         self._assert_device_match(output, device, "MM output: ")
         self.assertEqual(output.shape, (n, p))
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("b,n,m,p", [(2, 4, 8, 16), (2, 4, 64, 128)])
     def test_bmm_device_1(self, dtype, b, n, m, p):
@@ -989,7 +915,6 @@ class TestDeviceOutputPlacement(TestCase):
         self._assert_device_match(output, device, "BMM output: ")
         self.assertEqual(output.shape, (b, n, p))
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("n,m,p", [(4, 8, 16), (4, 64, 128)])
     def test_addmm_device_1(self, dtype, n, m, p):
@@ -1003,7 +928,6 @@ class TestDeviceOutputPlacement(TestCase):
         self._assert_device_match(output, device, "Addmm output: ")
         self.assertEqual(output.shape, (n, p))
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("n,m,p", [(4, 8, 16), (4, 64, 128)])
     def test_matmul_device_1(self, dtype, n, m, p):
@@ -1015,7 +939,6 @@ class TestDeviceOutputPlacement(TestCase):
         matmul_out = torch.matmul(x, y)
         self._assert_device_match(matmul_out, device, "Matmul output: ")
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("in_features,out_features", [(64, 64), (128, 128)])
     def test_linear_device_1(self, dtype, in_features, out_features):

@@ -29,6 +29,7 @@ shim) so they catch regressions in either the C++ pre-check or the Python
 wrapper path together.
 """
 
+import pytest
 import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
@@ -42,6 +43,7 @@ def _dispatch_counts() -> tuple[int, int, int, int]:
     return d[0], d[1], d[2], d[3]
 
 
+@pytest.mark.npu(count=1)
 class TestDispatchShimWrappedScalar(TestCase):
     """A python-number operand is a wrapped 0-dim tensor at the dispatcher and a
     graph constant in the compiled program.
@@ -126,6 +128,7 @@ class TestDispatchShimWrappedScalar(TestCase):
         self.assertEqual((a + s).cpu()[0, 0].item(), 4.0, "a real 0-dim tensor is read at run time, not baked in")
 
 
+@pytest.mark.npu(count=1)
 class TestDispatchShimAllScalarFallback(TestCase):
     """All-scalar inputs trip the fallback (the shortcut is correct here).
 
@@ -144,6 +147,7 @@ class TestDispatchShimAllScalarFallback(TestCase):
         self.assertEqual(z.to("cpu"), torch.tensor(3.0, dtype=torch.float16))
 
 
+@pytest.mark.npu(count=1)
 class TestDispatchShimDtypeMismatch(TestCase):
     """Non-fp16 input falls through to the Python wrapper / CPU fallback."""
 
@@ -156,6 +160,7 @@ class TestDispatchShimDtypeMismatch(TestCase):
         self.assertEqual(y.to("cpu"), torch.arange(8, dtype=torch.int32) + 3)
 
 
+@pytest.mark.npu(count=1)
 class TestDispatchShimNanInfFallback(TestCase):
     """Inputs containing NaN or Inf must route to the CPU fallback path in
     non-deploy mode.
@@ -301,6 +306,7 @@ class TestDispatchShimNanInfFallback(TestCase):
         self.assertTrue(torch.isnan(result).all())
 
 
+@pytest.mark.npu(count=1)
 class TestDispatchShimGateLiveRead(TestCase):
     """Both NaN/Inf-scan gates -- ``TORCH_RBLN_DEPLOY`` (``is_deploy_mode``) and
     ``TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK`` (``is_nan_inf_check_disabled``) in

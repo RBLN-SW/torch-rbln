@@ -14,7 +14,7 @@ import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
-from test.utils import requires_logical_devices, SUPPORTED_DTYPES
+from test.utils import SUPPORTED_DTYPES
 
 
 # Tolerance for numerical comparisons
@@ -52,6 +52,7 @@ TEST_SHAPES = [
 TEST_SHAPES_SUBSET = TEST_SHAPES[:8]
 
 
+@pytest.mark.npu(count=1)
 class TestRegisteredNativeOps(TestCase):
     """Test native implementation ops registered in RBLNRegisterOps.cpp"""
 
@@ -266,6 +267,7 @@ class TestRegisteredNativeOps(TestCase):
         self.assertEqual(x.data_ptr(), y.data_ptr())
 
 
+@pytest.mark.npu(count=1)
 class TestRegisteredFallbackOps(TestCase):
     """Test representative fallback ops registered in RBLNRegisterOps.cpp"""
 
@@ -495,6 +497,7 @@ class TestRegisteredFallbackOps(TestCase):
         self.assertEqual(result.dtype, expected.dtype)
 
 
+@pytest.mark.npu(count=1)
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestRegisteredPythonOps(TestCase):
     """Test ops registered in register_ops.py (Python implementation)"""
@@ -1263,6 +1266,7 @@ BROADCAST_PATTERNS = [
 ]
 
 
+@pytest.mark.npu(count=1)
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestBinaryOpsBroadcast(TestCase):
     """Verify the 12 binary / comparison ops produce correct results across
@@ -1431,6 +1435,7 @@ PERMUTE_PATTERNS = [
 ]
 
 
+@pytest.mark.npu(count=1)
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestViewOpsOnDevice(TestCase):
     """Verify the 22 affected ops dispatch correctly when their inputs are
@@ -1878,14 +1883,14 @@ class TestViewOpsOnDevice(TestCase):
         )
 
 
+@pytest.mark.npu(count=2)
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestRegisteredPythonOpsMultiDevice(TestCase):
     """Test ops registered in register_ops.py with mixed device indices"""
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("shape", TEST_SHAPES)
-    @parametrize("device_index", range(min(torch.rbln.device_count(), 3)))
+    @parametrize("device_index", range(2))
     def test_add_mixed_devices(self, dtype, shape, device_index):
         """Test add op with tensors on different devices"""
         device = torch.device("rbln", device_index)
@@ -1900,10 +1905,9 @@ class TestRegisteredPythonOpsMultiDevice(TestCase):
         self.assertEqual(result.device, device)
         self.assertEqual(result.dtype, expected.dtype)
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("shape", TEST_SHAPES)
-    @parametrize("device_index", range(min(torch.rbln.device_count(), 3)))
+    @parametrize("device_index", range(2))
     def test_mul_mixed_devices(self, dtype, shape, device_index):
         """Test mul op with tensors on different devices"""
         device = torch.device("rbln", device_index)
@@ -1915,10 +1919,9 @@ class TestRegisteredPythonOpsMultiDevice(TestCase):
         self.assertEqual(result.device, device)
         self.assertEqual(result.dtype, expected.dtype)
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("n,m,p", [(10, 20, 30), (5, 10, 15)])
-    @parametrize("device_index", range(min(torch.rbln.device_count(), 3)))
+    @parametrize("device_index", range(2))
     def test_mm_mixed_devices(self, dtype, n, m, p, device_index):
         """Test mm op with tensors on different devices
 
@@ -1935,7 +1938,6 @@ class TestRegisteredPythonOpsMultiDevice(TestCase):
         self.assertEqual(result.dtype, expected.dtype)
         self.assertEqual(result.shape, expected.shape)
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("shape", [(5, 10)])
     def test_add_cross_device(self, dtype, shape):
@@ -1957,7 +1959,6 @@ class TestRegisteredPythonOpsMultiDevice(TestCase):
             # If it fails, that's also acceptable behavior
             pass
 
-    @requires_logical_devices(2)
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("batch_size,in_features,out_features", [(3, 64, 32)])
     def test_linear_device_context_mismatch(self, dtype, batch_size, in_features, out_features):

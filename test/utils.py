@@ -75,32 +75,6 @@ def set_deterministic_seeds(seed: int):
     random.seed(seed)
 
 
-def requires_logical_devices(num_devices):
-    """Pytest marker to skip test if logical device count is less than required.
-
-    Note: This replaces `deviceCountAtLeast` from `torch.testing._internal`,
-    which must NOT be used here. During collection, `deviceCountAtLeast`
-    triggers `PrivateUse1TestBase.setUpClass()`, mutating `device_type` from
-    `"privateuse1"` to `"rbln"` at the class level. This breaks
-    `instantiate_device_type_tests(only_for="privateuse1")` for all files
-    collected after the mutation, silently dropping most tests.
-    """
-    logical_device_count = torch.rbln.device_count()
-    return pytest.mark.skipif(
-        logical_device_count < num_devices,
-        reason=f"Requires at least {num_devices} logical devices, found {logical_device_count}",
-    )
-
-
-def requires_physical_devices(num_devices):
-    """Pytest marker to skip test if physical device count is less than required."""
-    physical_device_count = torch.rbln.physical_device_count()
-    return pytest.mark.skipif(
-        physical_device_count < num_devices,
-        reason=f"Requires at least {num_devices} physical devices, found {physical_device_count}",
-    )
-
-
 def xfail_atom(reason: str):
     """Strict xfail on ATOM, inert elsewhere.
 

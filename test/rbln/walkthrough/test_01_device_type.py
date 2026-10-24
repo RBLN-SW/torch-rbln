@@ -11,39 +11,42 @@ Verifies that:
 - Indexed devices such as "rbln:0" are accepted.
 """
 
+import pytest
 import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
-
-from test.utils import requires_logical_devices
 
 
 class TestRBLNDeviceType(TestCase):
     """Walkthrough example 1: RBLN as a first-class PyTorch device type."""
 
+    @pytest.mark.npu(count=1)
     def test_device_is_rbln(self):
         """`torch.device('rbln')` should yield a device whose type is 'rbln'."""
         device = torch.device("rbln")
         self.assertEqual(device.type, "rbln")
 
+    @pytest.mark.npu(count=1)
     def test_device_count_positive(self):
         """device_count() should return a positive int when RBLN is available."""
         count = torch.rbln.device_count()
         self.assertIsInstance(count, int)
         self.assertGreater(count, 0)
 
+    @pytest.mark.npu(count=1)
     def test_set_and_current_device_on_zero(self):
         """set_device(0) should make current_device() return 0."""
         torch.rbln.set_device(0)
         self.assertEqual(torch.rbln.current_device(), 0)
 
+    @pytest.mark.npu(count=1)
     def test_indexed_device(self):
         """Indexed devices like 'rbln:0' should round-trip through torch.device."""
         device = torch.device("rbln:0")
         self.assertEqual(device.type, "rbln")
         self.assertEqual(device.index, 0)
 
-    @requires_logical_devices(2)
+    @pytest.mark.npu(count=2)
     def test_switch_between_devices(self):
         """With at least two logical devices, set_device(1) should be observable."""
         try:

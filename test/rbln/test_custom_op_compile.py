@@ -97,6 +97,7 @@ def _inputs(phase: str, dtype: torch.dtype, device: torch.device | str):
     return [a.to(device) for a in (x, kv_cache, seq_idx, block_tables)]
 
 
+@pytest.mark.npu(count=1)
 # Compile-heavy; keep the RBLN compile cache across tests (skip per-test dynamo reset).
 @pytest.mark.no_dynamo_reset
 class TestAttentionInGraph(TestCase):

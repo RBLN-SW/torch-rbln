@@ -27,7 +27,7 @@ import torch.multiprocessing as mp
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from test.utils import configure_master_port_for_rccl_tests, requires_logical_devices
+from test.utils import configure_master_port_for_rccl_tests
 
 
 def _setup_environment(rank: int, world_size: int) -> None:
@@ -99,7 +99,7 @@ def _run_all_gather(rank: int, world_size: int, backend: str) -> None:
 
 
 @pytest.mark.serial
-@requires_logical_devices(2)
+@pytest.mark.npu(count=2)
 class TestC10dRBLNCCL(TestCase):
     """Walkthrough example 8: c10d collectives with the `rbln-ccl` backend."""
 
@@ -121,7 +121,7 @@ class TestC10dRBLNCCL(TestCase):
         configure_master_port_for_rccl_tests()
 
         self.backend = "rbln-ccl"
-        self.world_size = min(torch.rbln.device_count(), 2)
+        self.world_size = 2
 
     def _spawn(self, fn):
         """Launch `fn(rank, world_size, backend)` across `self.world_size` ranks."""
