@@ -7,7 +7,7 @@ description: Use when adding or modifying tests under test/ — where the file g
 
 ## 0. Read the guide first
 
-`docs/TEST_GUIDE.md` is the contract for this suite, not background reading. Before writing, read the sections that apply to what you are adding: "Directory layout" for where the file goes, "PrivateUse1 test framework" for the device-type framework, "Write tests" for the templates and parametrization rules, and "CI integration" for which marker the test needs. A test that ignores it gets sent back in review even when it passes.
+`docs/TEST_GUIDE.md` is the contract for this suite, not background reading. Before writing, read the sections that apply to what you are adding: "Directory layout" for where the file goes, "PrivateUse1 test framework" for the device-type framework, "Write tests" for the templates and parametrization rules, and "Markers" and "CI integration" for which markers the test needs. A test that ignores it gets sent back in review even when it passes.
 
 This skill covers what goes wrong on top of that — the traps the guide does not spell out.
 
@@ -49,12 +49,13 @@ Check the `collected N items` line every time you run a file. CI treats a run th
 
 **Instantiate only what has an axis.** `instantiate_device_type_tests` expands `@dtypes`, `@parametrize`, or a `device` argument, and is required for a test that uses one. Do not wrap a test that never touches a device: the call deletes the template class and rebuilds it per device type, and on a host with no NPU nothing replaces it — the file then collects zero tests, with no failure and no skip. An import guard, a subprocess check, or a contract assertion is a plain `TestCase`; follow a neighbor like `test_dummy_device.py` or `test_import_rbln_devices_seal.py`. The "PrivateUse1 test framework" section of `docs/TEST_GUIDE.md` covers the mechanism.
 
-## 4. Most tests need no marker
+## 4. Markers
 
-An unmarked test runs in every check. Add a marker only when its condition holds:
+Add a marker only when its condition holds:
 
 - `periodic`: the test meets one of the `periodic` criteria in `docs/TEST_GUIDE.md`. The test then runs only in the release checks.
 - `serial`: the test uses a resource shared across processes. It runs on one worker and fails at setup on more.
+- `npu(count=N)`: the test requires N NPUs, rounded up to 1, 2, 4, or 8. For `count=0`, it requires that no NPU be present.
 - `no_dynamo_reset`: the test is compile-heavy. The marker keeps the compile cache across tests, which the `reset_dynamo` autouse fixture would otherwise clear.
 
 `serial` serializes but does not isolate: every `serial` test shares one worker process, so state leaks between them. Choose the isolation by the state, not by what a nearby test uses:

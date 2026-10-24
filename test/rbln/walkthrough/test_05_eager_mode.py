@@ -11,6 +11,7 @@ Verifies that standard PyTorch eager ops run on RBLN without `torch.compile`:
 - Matrix multiply via `torch.matmul`, the `@` operator, and matmul + bias.
 """
 
+import pytest
 import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
@@ -18,6 +19,7 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 from test.utils import SUPPORTED_DTYPES
 
 
+@pytest.mark.npu(count=1)
 class TestEagerMode(TestCase):
     """Walkthrough example 5: eager pointwise, reduction, and matmul on RBLN."""
 

@@ -222,9 +222,6 @@ def run_send_recv_test(rank: int, world_size: int, backend: str, src: int, dst: 
     device = torch.device("rbln", rank)
 
     try:
-        if world_size < 2:
-            return  # Skip if not enough ranks
-
         # Use appropriate value based on dtype
         if dtype in [torch.int8, torch.int16, torch.int32, torch.int64]:
             send_value = 42
@@ -525,11 +522,7 @@ class TestProcessGroupRBLNBase(TestCase):
         self.addCleanup(env.stop)
         configure_master_port_for_rccl_tests()
         self.backend = "rbln-ccl"
-        self.world_size = min(torch.rbln.device_count(), 2)
-
-    def should_skip_multi_rank_tests(self):
-        """Check if multi-rank tests should be skipped."""
-        return self.world_size <= 1
+        self.world_size = 2
 
     def run_c10d_test(self, c10d_async_env, nprocs, test_func, args):
         """Helper to run a test function with mp.spawn."""
@@ -540,6 +533,7 @@ class TestProcessGroupRBLNBase(TestCase):
 
 
 @pytest.mark.serial
+@pytest.mark.npu(count=2)
 class TestBroadcastRBLN(TestProcessGroupRBLNBase):
     """Test cases for broadcast operations."""
 
@@ -548,9 +542,6 @@ class TestBroadcastRBLN(TestProcessGroupRBLNBase):
     @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
     def test_broadcast(self, dtype, rank, c10d_async_env):
         """Test broadcast on specified rank."""
-        if (rank >= 1) and self.should_skip_multi_rank_tests():
-            self.skipTest("Requires world_size > 1")
-
         self.run_c10d_test(
             c10d_async_env, self.world_size, run_broadcast_test, (self.world_size, self.backend, rank, dtype)
         )
@@ -560,15 +551,13 @@ class TestBroadcastRBLN(TestProcessGroupRBLNBase):
     @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
     def test_broadcast_zero_sized_tensor(self, dtype, rank, c10d_async_env):
         """Test broadcast with zero-sized tensor on specified rank."""
-        if (rank >= 1) and self.should_skip_multi_rank_tests():
-            self.skipTest("Requires world_size > 1")
-
         self.run_c10d_test(
             c10d_async_env, self.world_size, run_broadcast_zero_sized_test, (self.world_size, self.backend, rank, dtype)
         )
 
 
 @pytest.mark.serial
+@pytest.mark.npu(count=2)
 class TestAllReduceRBLN(TestProcessGroupRBLNBase):
     """Test cases for allreduce operations."""
 
@@ -610,6 +599,7 @@ class TestAllReduceRBLN(TestProcessGroupRBLNBase):
 
 
 @pytest.mark.serial
+@pytest.mark.npu(count=2)
 class TestScatterRBLN(TestProcessGroupRBLNBase):
     """Test cases for scatter operations. Each test runs with dim0 in [32, 256]."""
 
@@ -619,9 +609,6 @@ class TestScatterRBLN(TestProcessGroupRBLNBase):
     @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
     def test_scatter(self, dtype, rank, dim0, c10d_async_env):
         """Test scatter on specified rank."""
-        if (rank >= 1) and self.should_skip_multi_rank_tests():
-            self.skipTest("Requires world_size > 1")
-
         self.run_c10d_test(
             c10d_async_env, self.world_size, run_scatter_test, (self.world_size, self.backend, rank, dtype, dim0)
         )
@@ -636,14 +623,6 @@ class TestScatterRBLN(TestProcessGroupRBLNBase):
         a distinct physical NPU, but that is not load-bearing here -- see the worker
         docstring.)
         """
-        if self.should_skip_multi_rank_tests():
-            self.skipTest("Requires world_size > 1")
-        # The host should expose at least world_size physical NPUs so each rank can
-        # (best-effort) pin its own; world_size derives from the logical count, which
-        # a parent grouping env could otherwise make smaller.
-        if torch.rbln.physical_device_count() < self.world_size:
-            self.skipTest(f"Requires >= {self.world_size} physical NPUs (one per rank)")
-
         root = 1  # non-zero root exposes the rank vs device_id conflation
         self.run_c10d_test(
             c10d_async_env,
@@ -654,6 +633,7 @@ class TestScatterRBLN(TestProcessGroupRBLNBase):
 
 
 @pytest.mark.serial
+@pytest.mark.npu(count=2)
 class TestAllGatherRBLN(TestProcessGroupRBLNBase):
     """Test cases for allgather operations."""
 
@@ -733,6 +713,7 @@ class TestAllGatherRBLN(TestProcessGroupRBLNBase):
 
 
 @pytest.mark.serial
+@pytest.mark.npu(count=2)
 class TestReduceScatterRBLN(TestProcessGroupRBLNBase):
     """Test cases for reduce_scatter operations."""
 
@@ -826,6 +807,7 @@ class TestReduceScatterRBLN(TestProcessGroupRBLNBase):
 
 
 @pytest.mark.serial
+@pytest.mark.npu(count=2)
 class TestBarrierRBLN(TestProcessGroupRBLNBase):
     """Test cases for barrier synchronization."""
 
@@ -836,6 +818,7 @@ class TestBarrierRBLN(TestProcessGroupRBLNBase):
 
 
 @pytest.mark.serial
+@pytest.mark.npu(count=2)
 class TestSendRecvRBLN(TestProcessGroupRBLNBase):
     """Test cases for send/recv operations."""
 
@@ -843,14 +826,13 @@ class TestSendRecvRBLN(TestProcessGroupRBLNBase):
     @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
     def test_send_recv(self, dtype, c10d_async_env):
         """Test send/recv with specified dtype from rank 0 to rank 1."""
-        if self.should_skip_multi_rank_tests():
-            self.skipTest("Requires world_size > 1")
         self.run_c10d_test(
             c10d_async_env, self.world_size, run_send_recv_test, (self.world_size, self.backend, 0, 1, dtype)
         )
 
 
 @pytest.mark.serial
+@pytest.mark.npu(count=2)
 class TestUnsupportedOpsRBLN(TestProcessGroupRBLNBase):
     """Test cases for unsupported operations."""
 
@@ -861,6 +843,7 @@ class TestUnsupportedOpsRBLN(TestProcessGroupRBLNBase):
 
 
 @pytest.mark.serial
+@pytest.mark.npu(count=2)
 class TestAllReduceSizesRBLN(TestProcessGroupRBLNBase):
     """Test cases for allreduce operations with various data sizes."""
 

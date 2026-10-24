@@ -43,9 +43,9 @@ uv run --no-sync pytest \
   --exitfirst
 ```
 
-Then run the suite around it with the two pytest runs in "Run a suite the way CI does" in `docs/TEST_GUIDE.md`.
+Then run the suite around it with the two `pytest` runs in "Run a suite the way CI does" in `docs/TEST_GUIDE.md`.
 
-Include the command, its result, and the collected count in your reply. "Should pass" is not a result, and neither is a green run that did not collect the tests covering the change. If you could not run them, say that instead of implying you did. On a host without an NPU, say which of these ran under `RBLN_DUMMY_DEVICE=1` — that covers construction, copies, and compile-only, not numerics (`AGENTS.md`, "Know where you are").
+Include the command, its result, and the collected count in your reply. "Should pass" is not a result, and neither is a green run that did not collect the tests covering the change. If you could not run them, say that instead of implying you did. On a host without an NPU, the tests that require one cannot run, even under `RBLN_DUMMY_DEVICE=1`.
 
 For a change to an op or a kernel, confirm the tests exercised the device path and not the host fallback — matching numbers alone do not show it. `.claude/skills/writing-tests/SKILL.md` has the check.
 

@@ -13,7 +13,6 @@ regression and runs only when a device is present.
 """
 
 import os
-import unittest
 from unittest import mock
 
 import pytest
@@ -24,16 +23,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 import torch_rbln  # noqa: F401
-from test.utils import (
-    configure_master_port_for_rccl_tests,
-    requires_logical_devices,
-    requires_physical_devices,
-    spawn_target_with_clean_exit,
-)
-
-
-_HAS_NPU = torch.rbln.device_count() > 0
-_NEEDS_NO_NPU = "requires a host with no physical NPU (device_count() == 0)"
+from test.utils import configure_master_port_for_rccl_tests, spawn_target_with_clean_exit
 
 
 # ---- spawn workers (module-level so they are picklable by mp.spawn) ---------
@@ -88,7 +78,7 @@ class TestNoDeviceDistributed(TestCase):
         self.addCleanup(env.stop)
         configure_master_port_for_rccl_tests()
 
-    @unittest.skipIf(_HAS_NPU, _NEEDS_NO_NPU)
+    @pytest.mark.npu(count=0)
     def test_process_group_constructs_with_world_size_gt_1(self):
         """A world_size > 1 ProcessGroupRBLN must construct with no NPU (RCCL init skipped)."""
         import torch_rbln._C
@@ -102,7 +92,7 @@ class TestNoDeviceDistributed(TestCase):
         finally:
             del pg
 
-    @unittest.skipIf(_HAS_NPU, _NEEDS_NO_NPU)
+    @pytest.mark.npu(count=0)
     def test_device_mesh_world_size_1_without_npu(self):
         """init_device_mesh("rbln", (1,)) must build with no NPU.
 
@@ -112,18 +102,18 @@ class TestNoDeviceDistributed(TestCase):
         """
         mp.spawn(spawn_target_with_clean_exit, args=(_mesh_worker, 1), nprocs=1, join=True)
 
-    @unittest.skipIf(_HAS_NPU, _NEEDS_NO_NPU)
+    @pytest.mark.npu(count=0)
     def test_device_mesh_world_size_2_without_npu(self):
         """The real tensor-parallel case: a world_size=2 "rbln" DeviceMesh across
         two processes must build with no NPU."""
         mp.spawn(spawn_target_with_clean_exit, args=(_mesh_worker, 2), nprocs=2, join=True)
 
-    @unittest.skipIf(_HAS_NPU, _NEEDS_NO_NPU)
+    @pytest.mark.npu(count=0)
     def test_dtensor_tensor_parallel_without_npu(self):
         """A DTensor sharded over a world_size=2 "rbln" mesh must build with no NPU."""
         mp.spawn(spawn_target_with_clean_exit, args=(_dtensor_worker, 2), nprocs=2, join=True)
 
-    @requires_physical_devices(1)
+    @pytest.mark.npu(count=1)
     def test_device_mesh_world_size_2_forced_no_device(self):
         """The no-device mesh path, exercised on a real-NPU CI host by hiding the
         NPUs with a nonexistent ``RBLN_DEVICES`` filter (spawned children re-read
@@ -133,7 +123,7 @@ class TestNoDeviceDistributed(TestCase):
             ctx.delenv("LOCAL_RANK", raising=False)
             mp.spawn(spawn_target_with_clean_exit, args=(_no_device_mesh_worker, 2), nprocs=2, join=True)
 
-    @requires_physical_devices(1)
+    @pytest.mark.npu(count=1)
     def test_dtensor_tensor_parallel_forced_no_device(self):
         """The no-device DTensor (tensor-parallel) path, exercised on a real-NPU
         CI host by hiding the NPUs."""
@@ -142,7 +132,7 @@ class TestNoDeviceDistributed(TestCase):
             ctx.delenv("LOCAL_RANK", raising=False)
             mp.spawn(spawn_target_with_clean_exit, args=(_no_device_dtensor_worker, 2), nprocs=2, join=True)
 
-    @requires_logical_devices(1)
+    @pytest.mark.npu(count=1)
     def test_device_mesh_with_npu_is_unaffected(self):
         """Regression: the device-module additions don't break a real-device mesh."""
         mp.spawn(spawn_target_with_clean_exit, args=(_mesh_worker, 1), nprocs=1, join=True)

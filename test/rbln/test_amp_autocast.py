@@ -50,6 +50,7 @@ class TestAmpCatalog(TestCase):
         self.assertTrue(hasattr(torch.rbln, "get_amp_supported_dtype"))
 
 
+@pytest.mark.npu(count=1)
 class TestAutocastDisabledGracefully(TestCase):
     """Entering an rbln autocast region must never crash on the first op."""
 
@@ -80,6 +81,7 @@ class TestAutocastDisabledGracefully(TestCase):
         self.assertEqual(y.dtype, torch.float32)
 
 
+@pytest.mark.npu(count=1)
 class TestAutocastRealModelEager(TestCase):
     """A real (tiny) transformers LlamaForCausalLM run eagerly under an rbln autocast
     region must not crash and must match the plain fp32 path (autocast is a no-op)."""

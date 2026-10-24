@@ -31,6 +31,7 @@ def _bounces(report: dict) -> int:
     return int(report["hidden_host_bounce"]["total_count"])
 
 
+@pytest.mark.npu(count=1)
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestStridedHostCopy(TestCase):
     """Non-contiguous cpu<->rbln ``copy_`` pairs."""

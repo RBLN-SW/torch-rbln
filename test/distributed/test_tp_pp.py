@@ -71,9 +71,6 @@ def run_default_group_allreduce_test(rank: int, world_size: int, backend: str, d
             def forward(self, x):
                 return self.linear(x)
 
-        if world_size != 2:
-            return
-
         set_deterministic_seeds(42)
         device = torch.device("rbln", rank)
 
@@ -184,8 +181,6 @@ def run_pp2_test(rank: int, world_size: int, backend: str, dtype: torch.dtype) -
         rank = dist.get_rank()
         world_size = dist.get_world_size()
 
-        assert world_size == 2, f"This example requires exactly 2 ranks, got {world_size}"
-
         input_size = 128
         hidden_size = 256
         output_size = 64
@@ -247,8 +242,6 @@ def run_single_linear_allgather_default_group_test(
         IN_DIM_0 = 1
         IN_DIM_1 = 128
         OUT_DIM_1 = 128
-
-        assert world_size == 2, f"This test requires exactly 2 ranks, got {world_size}"
 
         set_deterministic_seeds(42)
         device = torch.device("rbln", rank)
@@ -425,8 +418,6 @@ def run_two_linear_bias_default_group_send_recv_test(
 
             def forward(self, x):
                 return self.layers(x)
-
-        assert world_size == 4, f"This test requires exactly 4 ranks, got {world_size}"
 
         set_deterministic_seeds(42)
         device = torch.device("rbln", rank)
@@ -612,8 +603,6 @@ def run_two_linear_no_bias_default_group_send_recv_test(
             def forward(self, x):
                 return self.layers(x)
 
-        assert world_size == 4, f"This test requires exactly 4 ranks, got {world_size}"
-
         set_deterministic_seeds(42)
         device = torch.device("rbln", rank)
 
@@ -774,8 +763,6 @@ def run_two_linear_bias_subgroup_send_recv_test(rank: int, world_size: int, back
 
             def forward(self, x):
                 return self.layers(x)
-
-        assert world_size == 4, f"This test requires exactly 4 ranks, got {world_size}"
 
         set_deterministic_seeds(42)
         device = torch.device("rbln", rank)
@@ -996,8 +983,6 @@ def run_two_linear_bias_relu_subgroup_send_recv_test(
 
             def forward(self, x):
                 return self.layers(x)
-
-        assert world_size == 4, f"This test requires exactly 4 ranks, got {world_size}"
 
         set_deterministic_seeds(42)
         device = torch.device("rbln", rank)
@@ -1235,8 +1220,6 @@ def run_two_linear_bias_allgather_subgroup_send_recv_test(
             def forward(self, x):
                 return self.layers(x)
 
-        assert world_size == 4, f"This test requires exactly 4 ranks, got {world_size}"
-
         set_deterministic_seeds(42)
         device = torch.device("rbln", rank)
 
@@ -1414,17 +1397,6 @@ class TestTPPPRBLNBase(TestCase):
         self.addCleanup(env.stop)
         configure_master_port_for_rccl_tests()
         self.backend = "rbln-ccl"
-        self.device_count = torch.rbln.device_count()
-        self.world_size_2 = min(self.device_count, 2)
-        self.world_size_4 = min(self.device_count, 4)
-
-    def should_skip_multi_rank_tests(self):
-        """Check if multi-rank tests should be skipped."""
-        return self.world_size_2 <= 1
-
-    def should_skip_4rank_tests(self):
-        """Check if 4-rank tests should be skipped."""
-        return self.world_size_4 < 4
 
     def run_c10d_test(self, c10d_async_env, nprocs, test_func, args):
         """Helper to run a test function with mp.spawn."""
@@ -1435,6 +1407,7 @@ class TestTPPPRBLNBase(TestCase):
 
 
 @pytest.mark.serial
+@pytest.mark.npu(count=2)
 class TestDefaultGroupAllReduceRBLN(TestTPPPRBLNBase):
     """Test cases for default group allreduce operations."""
 
@@ -1445,13 +1418,14 @@ class TestDefaultGroupAllReduceRBLN(TestTPPPRBLNBase):
 
         self.run_c10d_test(
             c10d_async_env,
-            self.world_size_2,
+            2,
             run_default_group_allreduce_test,
-            (self.world_size_2, self.backend, dtype),
+            (2, self.backend, dtype),
         )
 
 
 @pytest.mark.serial
+@pytest.mark.npu(count=2)
 class TestSingleLinearAllgatherDefaultGroupRBLN(TestTPPPRBLNBase):
     """Test cases for single linear layer with allgather, default group."""
 
@@ -1459,18 +1433,16 @@ class TestSingleLinearAllgatherDefaultGroupRBLN(TestTPPPRBLNBase):
     @parametrize("c10d_async_env", TestTPPPRBLNBase.c10d_async_envs)
     def test_single_linear_allgather_default_group(self, dtype, c10d_async_env):
         """Test single linear layer with allgather, default group."""
-        if self.should_skip_multi_rank_tests():
-            self.skipTest("Requires world_size > 1")
-
         self.run_c10d_test(
             c10d_async_env,
-            self.world_size_2,
+            2,
             run_single_linear_allgather_default_group_test,
-            (self.world_size_2, self.backend, dtype),
+            (2, self.backend, dtype),
         )
 
 
 @pytest.mark.serial
+@pytest.mark.npu(count=2)
 class TestPP2RBLN(TestTPPPRBLNBase):
     """Test cases for PP=2 pipeline parallel operations."""
 
@@ -1478,13 +1450,11 @@ class TestPP2RBLN(TestTPPPRBLNBase):
     @parametrize("c10d_async_env", TestTPPPRBLNBase.c10d_async_envs)
     def test_pp2_pipeline_parallel(self, dtype, c10d_async_env):
         """Test PP=2 pipeline parallel."""
-        if self.should_skip_multi_rank_tests():
-            self.skipTest("Requires world_size > 1")
-
-        self.run_c10d_test(c10d_async_env, self.world_size_2, run_pp2_test, (self.world_size_2, self.backend, dtype))
+        self.run_c10d_test(c10d_async_env, 2, run_pp2_test, (2, self.backend, dtype))
 
 
 @pytest.mark.serial
+@pytest.mark.npu(count=4)
 class TestTwoLinearBiasDefaultGroupRBLN(TestTPPPRBLNBase):
     """Test cases for two linear layers with bias, default group, send/recv."""
 
@@ -1492,18 +1462,16 @@ class TestTwoLinearBiasDefaultGroupRBLN(TestTPPPRBLNBase):
     @parametrize("c10d_async_env", TestTPPPRBLNBase.c10d_async_envs)
     def test_two_linear_bias_default_group_send_recv(self, dtype, c10d_async_env):
         """Test two linear layers with bias, default group, send/recv."""
-        if self.should_skip_4rank_tests():
-            self.skipTest("Requires at least 4 devices")
-
         self.run_c10d_test(
             c10d_async_env,
-            self.world_size_4,
+            4,
             run_two_linear_bias_default_group_send_recv_test,
-            (self.world_size_4, self.backend, dtype),
+            (4, self.backend, dtype),
         )
 
 
 @pytest.mark.serial
+@pytest.mark.npu(count=4)
 class TestTwoLinearNoBiasDefaultGroupRBLN(TestTPPPRBLNBase):
     """Test cases for two linear layers without bias, default group, send/recv."""
 
@@ -1511,17 +1479,16 @@ class TestTwoLinearNoBiasDefaultGroupRBLN(TestTPPPRBLNBase):
     @parametrize("c10d_async_env", TestTPPPRBLNBase.c10d_async_envs)
     def test_two_linear_no_bias_default_group_send_recv(self, dtype, c10d_async_env):
         """Test two linear layers without bias, default group, send/recv."""
-        if self.should_skip_4rank_tests():
-            self.skipTest("Requires at least 4 devices")
         self.run_c10d_test(
             c10d_async_env,
-            self.world_size_4,
+            4,
             run_two_linear_no_bias_default_group_send_recv_test,
-            (self.world_size_4, self.backend, dtype),
+            (4, self.backend, dtype),
         )
 
 
 @pytest.mark.serial
+@pytest.mark.npu(count=4)
 class TestTwoLinearBiasSubgroupRBLN(TestTPPPRBLNBase):
     """Test cases for two linear layers with bias, subgroup, send/recv."""
 
@@ -1529,18 +1496,16 @@ class TestTwoLinearBiasSubgroupRBLN(TestTPPPRBLNBase):
     @parametrize("c10d_async_env", TestTPPPRBLNBase.c10d_async_envs)
     def test_two_linear_bias_subgroup_send_recv(self, dtype, c10d_async_env):
         """Test two linear layers with bias, subgroup, send/recv."""
-        if self.should_skip_4rank_tests():
-            self.skipTest("Requires at least 4 devices")
-
         self.run_c10d_test(
             c10d_async_env,
-            self.world_size_4,
+            4,
             run_two_linear_bias_subgroup_send_recv_test,
-            (self.world_size_4, self.backend, dtype),
+            (4, self.backend, dtype),
         )
 
 
 @pytest.mark.serial
+@pytest.mark.npu(count=4)
 class TestTwoLinearBiasReluSubgroupRBLN(TestTPPPRBLNBase):
     """Test cases for two linear layers with bias and ReLU, subgroup, send/recv."""
 
@@ -1548,18 +1513,16 @@ class TestTwoLinearBiasReluSubgroupRBLN(TestTPPPRBLNBase):
     @parametrize("c10d_async_env", TestTPPPRBLNBase.c10d_async_envs)
     def test_two_linear_bias_relu_subgroup_send_recv(self, dtype, c10d_async_env):
         """Test two linear layers with bias and ReLU, subgroup, send/recv."""
-        if self.should_skip_4rank_tests():
-            self.skipTest("Requires at least 4 devices")
-
         self.run_c10d_test(
             c10d_async_env,
-            self.world_size_4,
+            4,
             run_two_linear_bias_relu_subgroup_send_recv_test,
-            (self.world_size_4, self.backend, dtype),
+            (4, self.backend, dtype),
         )
 
 
 @pytest.mark.serial
+@pytest.mark.npu(count=4)
 class TestTwoLinearBiasAllgatherSubgroupRBLN(TestTPPPRBLNBase):
     """Test cases for two linear layers with bias, allgather, subgroup, send/recv."""
 
@@ -1567,14 +1530,11 @@ class TestTwoLinearBiasAllgatherSubgroupRBLN(TestTPPPRBLNBase):
     @parametrize("c10d_async_env", TestTPPPRBLNBase.c10d_async_envs)
     def test_two_linear_bias_allgather_subgroup_send_recv(self, dtype, c10d_async_env):
         """Test two linear layers with bias, allgather, subgroup, send/recv."""
-        if self.should_skip_4rank_tests():
-            self.skipTest("Requires at least 4 devices")
-
         self.run_c10d_test(
             c10d_async_env,
-            self.world_size_4,
+            4,
             run_two_linear_bias_allgather_subgroup_send_recv_test,
-            (self.world_size_4, self.backend, dtype),
+            (4, self.backend, dtype),
         )
 
 

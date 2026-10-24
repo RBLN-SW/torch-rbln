@@ -39,6 +39,7 @@ storage-alias case mentioned in ``prepare_args_view_aware``, and the
 cache-size invariant for view-recipe calls.
 """
 
+import pytest
 import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
@@ -55,6 +56,7 @@ def _assert_fp16_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
     torch.testing.assert_close(actual, expected, rtol=0.01, atol=0.02)
 
 
+@pytest.mark.npu(count=1)
 class TestRotateHalfHeadDim128(TestCase):
     """``rotate_half(x) = cat([-x[..., D//2:], x[..., :D//2]], dim=-1)``.
 
@@ -92,6 +94,7 @@ class TestRotateHalfHeadDim128(TestCase):
         _assert_fp16_close(out_second.cpu(), ref_second)
 
 
+@pytest.mark.npu(count=1)
 class TestStorageAliasInputs(TestCase):
     """``prepare_args_view_aware`` forces ``.contiguous()`` on every operand
     when two tensor args alias the same storage (rebel-compiler can't
@@ -118,6 +121,7 @@ class TestStorageAliasInputs(TestCase):
         _assert_fp16_close(out.cpu(), ref)
 
 
+@pytest.mark.npu(count=1)
 class TestWarmCacheSizeViewInteraction(TestCase):
     """``has_views=True`` calls must not install. ``has_views=False`` calls
     install once per (op, contig-shape) profile and reuse on subsequent hits.

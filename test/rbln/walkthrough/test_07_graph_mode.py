@@ -11,6 +11,7 @@ Verifies that:
 - Eager and graph outputs are numerically close (`torch.allclose`).
 """
 
+import pytest
 import torch
 import torch.nn as nn
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
@@ -36,6 +37,7 @@ class _SmallNet(nn.Module):
         return self.linear(x)
 
 
+@pytest.mark.npu(count=1)
 class TestGraphMode(TestCase):
     """Walkthrough example 7: eager vs graph mode on RBLN."""
 

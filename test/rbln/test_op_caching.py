@@ -4,6 +4,7 @@
 Test suite for verifying operator caching behavior in various scenarios.
 """
 
+import pytest
 import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
@@ -15,6 +16,7 @@ ATOL = 0.01
 RTOL = 0.01
 
 
+@pytest.mark.npu(count=1)
 class TestOpCaching(TestCase):
     rbln_device = torch.device("rbln:0")
     # Both shapes must be 64-elem-aligned on the last dim: the

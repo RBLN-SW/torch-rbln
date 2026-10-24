@@ -39,8 +39,6 @@ import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from test.utils import requires_physical_devices
-
 
 # Deselected by rebel_compiler's CI (`-m "not torch_rbln_only"`); see the marker in pyproject.
 # Upstream torch clauses, not rebel-compiler behaviour: each probe pins something torch
@@ -72,7 +70,7 @@ sys.stdout = sys.stderr
 
 # The ids this job may use, as the parent measured them. Nothing here assumes id 0 is ours.
 # DEV1 falls back to DEV0 so a body can name a second device without an index error; a
-# scenario that needs two really present is gated on the count it reads back.
+# scenario that requires two real devices asserts the count it reads back.
 POOL = {pool!r}
 DEV0 = str(POOL[0]) if POOL else "0"
 DEV1 = str(POOL[1]) if len(POOL) > 1 else DEV0
@@ -383,7 +381,6 @@ def xfail_until(owner: str, reason: str):
     return pytest.mark.xfail(strict=True, reason=f"[{owner}] {reason}")
 
 
-@requires_physical_devices(1)
 class TestProbeHarness(TestCase):
     """Positive controls: prove the harness can actually observe a violation.
 
@@ -392,12 +389,14 @@ class TestProbeHarness(TestCase):
     therefore needs a case that deliberately triggers it.
     """
 
+    @pytest.mark.npu(count=1)
     def test_detects_a_raise(self):
         """A probe that raises must be reported in ``raised``."""
         p = run_probe('raise RuntimeError("deliberate")', HEALTHY)
         self.assertIsNotNone(p.raised, f"harness missed a raise -- {p}")
         self.assertIn("deliberate", p.raised, f"harness lost the message -- {p}")
 
+    @pytest.mark.npu(count=1)
     def test_detects_a_device_context(self):
         """A probe that allocates must be reported in ``ctx``."""
         p = run_probe(
@@ -409,6 +408,7 @@ class TestProbeHarness(TestCase):
             self.skipTest("rbln-stat unavailable; cannot observe device contexts")
         self.assertTrue(p.ctx, f"harness did not see the NPU context an allocation opens -- {p}")
 
+    @pytest.mark.npu(count=2)
     def test_detects_a_frozen_mapping(self):
         """A probe that acquires a device must be reported as freezing the mapping.
 
@@ -425,6 +425,7 @@ class TestProbeHarness(TestCase):
             self.skipTest(f"remap state undetermined in this environment -- {p}")
         self.assertEqual(p.remap, "frozen", f"harness did not see the mapping freeze -- {p}")
 
+    @pytest.mark.npu(count=1)
     def test_detects_a_cpp_traceback(self):
         """A failure from a still-loud ``RBLN_CHECK`` must be seen by ``has_cpp_traceback``.
 
@@ -449,6 +450,7 @@ class TestProbeHarness(TestCase):
         self.assertEqual(p.result, "raised", f"rbln:99 should not be usable -- {p}")
         self.assertTrue(p.has_cpp_traceback, f"harness cannot see a C++ traceback -- {p.console}")
 
+    @pytest.mark.npu(count=1)
     def test_scenarios_are_live(self):
         """Each scenario must actually change what the backend reports.
 
@@ -469,12 +471,12 @@ class TestProbeHarness(TestCase):
                 self.assertEqual(p.result, expected[name], f"{name}: scenario is not live -- {p}")
 
 
-@requires_physical_devices(1)
 class TestUpstreamClauses(TestCase):
     """One test per stated upstream requirement, cited in the docstring."""
 
     # -- availability must never throw -------------------------------------
 
+    @pytest.mark.npu(count=1)
     def test_is_available_never_throws(self):
         """``torch.rbln.is_available()`` must never raise.
 
@@ -491,6 +493,7 @@ class TestUpstreamClauses(TestCase):
                 p = run_probe('rec["result"] = torch.rbln.is_available()', env)
                 self.assertIsNone(p.raised, f"{name}: is_available() raised -- {p}")
 
+    @pytest.mark.npu(count=1)
     def test_device_count_never_throws(self):
         """``torch.rbln.device_count()`` must never raise.
 
@@ -506,6 +509,7 @@ class TestUpstreamClauses(TestCase):
                 p = run_probe('rec["result"] = torch.rbln.device_count()', env)
                 self.assertIsNone(p.raised, f"{name}: device_count() raised -- {p}")
 
+    @pytest.mark.npu(count=1)
     def test_is_initialized_never_throws(self):
         """``torch.rbln.is_initialized()`` must never raise.
 
@@ -519,6 +523,7 @@ class TestUpstreamClauses(TestCase):
 
     # -- availability must not touch the device ----------------------------
 
+    @pytest.mark.npu(count=1)
     def test_is_available_opens_no_device_context(self):
         """``is_available()`` must not initialize a context on any device.
 
@@ -535,6 +540,7 @@ class TestUpstreamClauses(TestCase):
             self.skipTest("rbln-stat unavailable; cannot observe device contexts")
         self.assertFalse(p.ctx, f"is_available() opened an NPU context -- {p}")
 
+    @pytest.mark.npu(count=1)
     def test_device_count_opens_no_device_context(self):
         """``device_count()`` must not initialize a context on any device.
 
@@ -548,6 +554,7 @@ class TestUpstreamClauses(TestCase):
 
     # -- the accelerator hooks must agree with the module ------------------
 
+    @pytest.mark.npu(count=1)
     def test_hooks_device_count_agrees_with_module(self):
         """The C++ accelerator hooks must report the same device count as the module.
 
@@ -567,6 +574,7 @@ class TestUpstreamClauses(TestCase):
         self.assertEqual(module_count, 1, f"scenario is not live -- {p}")
         self.assertEqual(hooks_count, module_count, f"hooks disagree with module -- {p}")
 
+    @pytest.mark.npu(count=1)
     def test_hooks_get_current_device_is_implemented(self):
         """The C++ accelerator hooks must answer ``getCurrentDevice()``.
 
@@ -577,6 +585,7 @@ class TestUpstreamClauses(TestCase):
         p = run_probe('rec["result"] = torch._C._accelerator_hooks_get_current_device()', HEALTHY)
         self.assertIsNone(p.raised, f"hooks getCurrentDevice() raised -- {p}")
 
+    @pytest.mark.npu(count=1)
     def test_python_and_cpp_availability_agree(self):
         """``torch.rbln.is_available()`` and the C++ predicate must never disagree.
 
@@ -606,6 +615,7 @@ class TestUpstreamClauses(TestCase):
 
     # -- torch's own entry points ------------------------------------------
 
+    @pytest.mark.npu(count=1)
     def test_torch_accelerator_apis_never_throw(self):
         """``torch.accelerator.is_available()`` / ``device_count()`` must never raise.
 
@@ -621,6 +631,7 @@ class TestUpstreamClauses(TestCase):
                 )
                 self.assertIsNone(p.raised, f"{name}: torch.accelerator raised -- {p}")
 
+    @pytest.mark.npu(count=1)
     def test_get_available_device_type_never_throws(self):
         """``torch._utils._get_available_device_type()`` must never raise.
 
@@ -632,6 +643,7 @@ class TestUpstreamClauses(TestCase):
                 p = run_probe('rec["result"] = torch._utils._get_available_device_type()', env)
                 self.assertIsNone(p.raised, f"{name}: raised -- {p}")
 
+    @pytest.mark.npu(count=1)
     def test_common_utils_is_importable(self):
         """``import torch.testing._internal.common_utils`` must not raise.
 
@@ -653,6 +665,7 @@ class TestUpstreamClauses(TestCase):
 
     # -- backend-module surface torch looks for ------------------------------
 
+    @pytest.mark.npu(count=1)
     def test_manual_seed_reaches_the_backend(self):
         """``torch.manual_seed()`` must seed the RBLN generators.
 
@@ -686,6 +699,7 @@ class TestUpstreamClauses(TestCase):
         offenders = [message for message in p.result["warnings"] if "does not take effect" in message]
         self.assertEqual(offenders, [], f"torch.manual_seed() does not reach RBLN -- {offenders}")
 
+    @pytest.mark.npu(count=1)
     def test_rng_state_round_trips_through_the_device_module(self):
         """``torch.rbln.get_rng_state`` / ``set_rng_state`` must exist and carry the generator's seed.
 
@@ -713,6 +727,7 @@ class TestUpstreamClauses(TestCase):
         finally:
             torch.rbln.set_rng_state(saved, index)
 
+    @pytest.mark.npu(count=1)
     def test_freeze_rng_state_restores_the_rbln_generator(self):
         """``torch.testing._utils.freeze_rng_state`` must leave the RBLN generator as it found it.
 
@@ -733,6 +748,7 @@ class TestUpstreamClauses(TestCase):
             self.assertFalse(torch.equal(torch.rbln.get_rng_state(index), before))
         self.assertTrue(torch.equal(torch.rbln.get_rng_state(index), before))
 
+    @pytest.mark.npu(count=1)
     @xfail_until("phase 4", "torch.rbln has no _utils._get_device_index")
     def test_serialization_device_index_helper_exists(self):
         """``torch.rbln._utils._get_device_index`` must exist for ``torch.load``.
@@ -750,6 +766,7 @@ class TestUpstreamClauses(TestCase):
         self.assertIsNone(p.raised, f"probe raised -- {p}")
         self.assertTrue(p.result, "torch.rbln._utils._get_device_index is missing")
 
+    @pytest.mark.npu(count=1)
     @xfail_until("phase 4", "torch.rbln has no get_device_name/properties/capability")
     def test_device_name_apis_exist(self):
         """``torch.rbln.get_device_name()`` and friends must exist.
@@ -772,6 +789,7 @@ class TestUpstreamClauses(TestCase):
 
     # -- the counterpart clause: point of use must stay loud ----------------
 
+    @pytest.mark.npu(count=1)
     def test_point_of_use_still_raises_with_detail(self):
         """Quiet availability must not cost the diagnostic; device *use* must be loud.
 
@@ -793,6 +811,7 @@ class TestUpstreamClauses(TestCase):
         self.assertNotEqual(p.result, "NO-RAISE", f"device use must fail -- {p}")
         self.assertIn("out of range", p.result.lower(), f"error lost its detail -- {p}")
 
+    @pytest.mark.npu(count=1)
     def test_availability_emits_no_cpp_traceback(self):
         """A swallowed availability failure must not spam a co-tenant's console.
 
@@ -814,6 +833,7 @@ class TestUpstreamClauses(TestCase):
 
     # -- the counterpart clause: using a device must freeze the mapping -----
 
+    @pytest.mark.npu(count=2)
     def test_device_use_freezes_the_mapping(self):
         """Using a device must freeze the mapping, even though querying does not.
 
@@ -836,6 +856,7 @@ class TestUpstreamClauses(TestCase):
             self.skipTest(f"remap state undetermined in this environment -- {p}")
         self.assertEqual(p.remap, "frozen", f"device use left the mapping remappable -- {p}")
 
+    @pytest.mark.npu(count=2)
     def test_device_selection_after_import_is_honoured(self):
         """Selecting devices *after* import must change what this layer reports.
 
@@ -862,11 +883,10 @@ class TestUpstreamClauses(TestCase):
                     {},  # neither name set: the primary wins when both are, so both must be absent
                 )
                 self.assertIsNone(p.raised, f"{name}: probe raised -- {p}")
-                before, after = p.result
-                if before[0] < 2:
-                    self.skipTest(f"needs at least two visible NPUs to tell the counts apart -- {p}")
+                _, after = p.result
                 self.assertEqual(after, [1, 1], f"{name} did not reach both answers -- {p}")
 
+    @pytest.mark.npu(count=1)
     def test_a_zero_device_plan_is_recoverable(self):
         """A failed device use with no devices must not freeze the mapping.
 
@@ -894,6 +914,7 @@ class TestUpstreamClauses(TestCase):
         self.assertTrue(use_failed, f"device use must fail with no devices -- {p}")
         self.assertEqual(after, 1, f"the 0-device plan was frozen and could not recover -- {p}")
 
+    @pytest.mark.npu(count=2)
     def test_current_device_stays_inside_the_plan(self):
         """``current_device()`` must never name a device outside the current plan.
 
@@ -913,11 +934,11 @@ class TestUpstreamClauses(TestCase):
         )
         self.assertIsNone(p.raised, f"probe raised -- {p}")
         before, count, current = p.result
-        if before != 2:
-            self.skipTest(f"needs two visible NPUs to select a device the replan drops -- {p}")
+        self.assertEqual(before, 2, f"scenario is not live -- {p}")
         self.assertEqual(count, 1, f"the replan did not take effect -- {p}")
         self.assertLess(current, count, f"current_device() is outside the plan -- {p}")
 
+    @pytest.mark.npu(count=2)
     def test_a_frozen_mapping_survives_unsetting_the_variable(self):
         """Clearing ``RBLN_DEVICES`` after a device is in use must not un-freeze the mapping.
 
@@ -938,12 +959,12 @@ class TestUpstreamClauses(TestCase):
         self.assertEqual(p.result, [1, 1], f"unsetting RBLN_DEVICES widened the pool -- {p}")
 
 
-@requires_physical_devices(1)
 class TestExternalConsumers(TestCase):
     """Scenarios reproducing how vLLM and LMCache drive this backend; each is a reported
     failure.
     """
 
+    @pytest.mark.npu(count=2)
     def test_cotenant_availability_probe_leaves_the_mapping_remappable(self):
         """A co-tenant availability probe must leave ``RBLN_DEVICES`` remappable.
 
@@ -957,6 +978,7 @@ class TestExternalConsumers(TestCase):
             self.skipTest(f"remap state undetermined in this environment -- {p}")
         self.assertEqual(p.remap, "applied", f"availability probe froze the mapping -- {p}")
 
+    @pytest.mark.npu(count=2)
     def test_fork_then_worker_remap_succeeds(self):
         """A forked worker must still be able to remap ``RBLN_DEVICES``.
 
@@ -995,11 +1017,11 @@ class TestExternalConsumers(TestCase):
         )
         self.assertIsNone(p.raised, f"probe raised -- {p}")
         parent, child = p.result
-        if parent != 2:
-            self.skipTest(f"needs two visible NPUs for the child's count to differ -- {p}")
+        self.assertEqual(parent, 2, f"scenario is not live -- {p}")
         self.assertNotIn("FAIL", child, f"forked worker could not remap -- {p}")
         self.assertEqual(child, "OK:1,1", f"the child kept the parent's mapping -- {p}")
 
+    @pytest.mark.npu(count=2)
     def test_cpu_dataloader_does_not_touch_the_npu(self):
         """``DataLoader(pin_memory=True)`` must not freeze the mapping or claim an NPU.
 
@@ -1023,6 +1045,7 @@ class TestExternalConsumers(TestCase):
         self.assertFalse(p.ctx, f"DataLoader opened an NPU context -- {p}")
         self.assertEqual(p.remap, "applied", f"DataLoader froze the mapping -- {p}")
 
+    @pytest.mark.npu(count=2)
     def test_seed_before_llm_leaves_the_mapping_remappable(self):
         """``torch.manual_seed()`` before ``LLM(...)`` must not freeze the mapping or claim an NPU.
 
@@ -1044,6 +1067,7 @@ class TestExternalConsumers(TestCase):
         self.assertFalse(p.ctx, f"seeding opened an NPU context -- {p}")
         self.assertEqual(p.remap, "applied", f"seeding froze the mapping -- {p}")
 
+    @pytest.mark.npu(count=2)
     def test_remap_after_seeding_seeds_the_added_device(self):
         """A device a remap adds after ``torch.manual_seed()`` must carry that seed.
 
@@ -1061,10 +1085,10 @@ class TestExternalConsumers(TestCase):
         )
         self.assertIsNone(p.raised, f"probe raised -- {p}")
         count, seed = p.result
-        if count != 2:
-            self.skipTest(f"needs two visible NPUs for the remap to add a device -- {p}")
+        self.assertEqual(count, 2, f"the remap did not add a device -- {p}")
         self.assertEqual(seed, 1234, f"the added device was not seeded -- {p}")
 
+    @pytest.mark.npu(count=1)
     def test_import_does_not_resolve_a_device(self):
         """Importing ``torch_rbln`` must not resolve a device to read its architecture.
 
@@ -1082,6 +1106,7 @@ class TestExternalConsumers(TestCase):
         self.assertIsNone(p.raised, f"probe raised -- {p}")
         self.assertEqual(p.result, 0, f"import resolved a device to read its arch -- {p}")
 
+    @pytest.mark.npu(count=1)
     def test_torch_load_reports_its_own_error(self):
         """``torch.load(map_location="rbln:0")`` must fail with torch's message.
 

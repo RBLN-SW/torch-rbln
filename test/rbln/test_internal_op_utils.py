@@ -7,6 +7,7 @@ Test suite for internal utilities used in op kernel implementations.
 import os
 from unittest.mock import patch
 
+import pytest
 import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
@@ -57,6 +58,7 @@ def _h2d_bytes() -> int:
     return _C._rt_prof_host_sync()[1][1]
 
 
+@pytest.mark.npu(count=1)
 class TestInternalOpUtils(TestCase):
     # =========================================================================
     # cpu_fallback_path tests
@@ -554,6 +556,7 @@ class TestInternalOpUtils(TestCase):
         self.assertNotEqual(extract_warm_cache_key([a, b], 0), extract_warm_cache_key([a], 0))
 
 
+@pytest.mark.npu(count=1)
 class TestOutTensors(TestCase):
     """Test operations using out tensors with various contiguity and storage offset properties."""
 
@@ -848,6 +851,7 @@ class TestOutTensors(TestCase):
         self.assertEqual(result.cpu(), cpu_reference, atol=self.atol, rtol=self.rtol)
 
 
+@pytest.mark.npu(count=1)
 class TestTorchDispatchModeWithRbln(TestCase):
     """Tests that rbln ops do not recurse infinitely when a TorchDispatchMode is active."""
 
@@ -890,6 +894,7 @@ class TestTorchDispatchModeWithRbln(TestCase):
         self.assertEqual(rbln_result.cpu(), expected, atol=1e-2, rtol=1e-2)
 
 
+@pytest.mark.npu(count=1)
 class TestWarmCacheNonContigOut(TestCase):
     """Regression guard for the warm-cache hit path serving stale layouts.
 
@@ -943,6 +948,7 @@ class TestWarmCacheNonContigOut(TestCase):
         )
 
 
+@pytest.mark.npu(count=1)
 class TestCpuFallbackOptionalTensor(TestCase):
     """Regression guard for cpu_fallback's schema-typed arg_kind dispatch.
 

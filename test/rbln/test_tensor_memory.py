@@ -31,6 +31,7 @@ ATOL = 0.01
 RTOL = 0.01
 
 
+@pytest.mark.npu(count=1)
 class TestAliasedTensors(TestCase):
     binary_ops = [torch.add]
     rbln_device = torch.device("rbln:0")
@@ -185,6 +186,7 @@ def _input_output_tensor_memory_independence_worker(rbln_device, dtype):
     torch.testing.assert_close(rbln_out.cpu(), cpu_out, atol=ATOL, rtol=RTOL)
 
 
+@pytest.mark.npu(count=1)
 class TestInputOutputTensors(TestCase):
     """
     Regression tests for input and output tensor memory collisions.
@@ -235,6 +237,7 @@ def _bind_after_shutdown_worker(device):
     raise AssertionError("bind_device_memory did not raise with the runtime shutting down")
 
 
+@pytest.mark.npu(count=1)
 class TestBindDeviceMemory(TestCase):
     """
     ``torch.rbln.bind_device_memory`` materializes a tensor's device allocation, for
@@ -381,16 +384,12 @@ class TestHostRegisterArguments(TestCase):
             torch.rbln.host_unregister(slab.data_ptr())  # no-op, does not raise
 
 
+@pytest.mark.npu(count=1)
 class TestHostRegister(TestCase):
     """Copies over a registered host range stay correct, including across re-registration."""
 
     rbln_device = torch.device("rbln:0")
     nbytes = 8 << 20
-
-    def setUp(self):
-        super().setUp()
-        if torch_rbln._C.is_dummy_device():
-            self.skipTest("a dummy device has no NPU to pin host memory for")
 
     def _round_trip(self, slab, offset, n, fill):
         src = slab[offset : offset + n]

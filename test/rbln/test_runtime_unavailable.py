@@ -30,7 +30,6 @@ import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 import torch_rbln  # noqa: F401
-from test.utils import requires_physical_devices
 
 
 # Deselected by rebel_compiler's CI (`-m "not torch_rbln_only"`); see the marker in pyproject.
@@ -258,7 +257,7 @@ class TestRuntimeUnavailable(TestCase):
         )
         _assert_ok(self, result, "DUMMY_GATED_OK")
 
-    @requires_physical_devices(1)
+    @pytest.mark.npu(count=1)
     def test_mandatory_op_raises_clean_error_not_segfault(self):
         """Allocation is a mandatory op: when the runtime is unavailable it must raise
         a clean, catchable RuntimeError (not SEGFAULT). Needs a real device so the
@@ -277,7 +276,7 @@ class TestRuntimeUnavailable(TestCase):
         )
         _assert_ok(self, result, "MALLOC_OK")
 
-    @requires_physical_devices(1)
+    @pytest.mark.npu(count=1)
     def test_best_effort_ops_noop_without_live_context(self):
         """The reported regression: a process with the runtime + a device mapping but NO
         live context (no allocation yet — the vLLM EngineCore parent) must NOT dispatch
@@ -317,7 +316,7 @@ class TestRuntimeUnavailable(TestCase):
                 "a best-effort runtime op was dispatched despite no live context — the context gate failed",
             )
 
-    @requires_physical_devices(1)
+    @pytest.mark.npu(count=1)
     def test_failed_commit_reports_unavailable(self):
         """A commit that fails part-way leaves the backend unusable, so is_available() must
         say so. Registration claims one logical device at a time and the runtime has no
@@ -351,7 +350,7 @@ class TestRuntimeUnavailable(TestCase):
             )
             _assert_ok(self, result, "FAILED_COMMIT_OK")
 
-    @requires_physical_devices(1)
+    @pytest.mark.npu(count=1)
     def test_best_effort_ops_propagate_live_context_failure(self):
         """Once this process has a live context (after an allocation), a genuine runtime
         failure in a best-effort op IS surfaced (CUDA parity — cudaFree failures in an
@@ -393,7 +392,7 @@ class TestRuntimeUnavailable(TestCase):
             )
             _assert_ok(self, result, "PROPAGATE_OK")
 
-    @requires_physical_devices(1)
+    @pytest.mark.npu(count=1)
     def test_memory_ops_nothrow_on_malformed_config(self):
         """The initialized()/hasPrimaryContext() predicates that gate torch.accelerator
         memory ops must stay total. A malformed RBLN_NPUS_PER_DEVICE makes the internal
@@ -417,7 +416,7 @@ class TestRuntimeUnavailable(TestCase):
         )
         _assert_ok(self, result, "MALFORMED_OK")
 
-    @requires_physical_devices(1)
+    @pytest.mark.npu(count=1)
     def test_dummy_malformed_config_memory_ops_noop(self):
         """Dummy mode must not short-circuit the context gate: with a malformed config and
         no allocation, the memory ops still no-op (not-initialized), and the misconfig
@@ -444,7 +443,7 @@ class TestRuntimeUnavailable(TestCase):
             result = _run_subprocess(script, env_extra=env_extra)
             _assert_ok(self, result, "DUMMY_MALFORMED_OK")
 
-    @requires_physical_devices(1)
+    @pytest.mark.npu(count=1)
     def test_runtime_available_true_on_healthy_host(self):
         """With a device present, the runtime loaded, and this process having allocated,
         best-effort ops actually run (not gated off)."""
@@ -462,7 +461,7 @@ class TestRuntimeUnavailable(TestCase):
         )
         _assert_ok(self, result, "HEALTHY_OK")
 
-    @requires_physical_devices(1)
+    @pytest.mark.npu(count=1)
     def test_lazy_allocation_initializes_context(self):
         """Invariant confirmed on real hardware: in default lazy-malloc mode, a single
         torch.empty() marks the process initialized and the best-effort ops then run

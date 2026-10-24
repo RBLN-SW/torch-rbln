@@ -30,6 +30,7 @@ GIB = 1 << 30
 
 @pytest.mark.periodic
 @pytest.mark.serial
+@pytest.mark.npu(count=1)
 @pytest.mark.skipif(not is_rebel_device(), reason="cross-chiplet repro needs REBEL (>35 GiB, chiplets)")
 def test_strided_write_past_chiplet_boundary():
     n_kv, partition, head = 8, 1024, 64

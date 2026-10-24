@@ -6,14 +6,20 @@
 #                       --artifact-build-id <build ID>
 #                       --artifact-dir <name>
 #                       --exclude-periodic <true|false>
-#                       --suite <core|distributed|ops|models>
+#                       --test-suite <core|distributed|ops|models>
+#                       --npu-product <name>
+#                       --num-npus <0|1|2|4|8>
+#                       --num-workers <n>
 set -euo pipefail
 
 build_type=""
 artifact_build_id=""
 artifact_dir=""
 exclude_periodic=""
-suite=""
+test_suite=""
+npu_product=""
+num_npus=""
+num_workers=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --build-type)
@@ -38,8 +44,30 @@ while [[ $# -gt 0 ]]; do
       esac
       shift 2
       ;;
-    --suite)
-      suite="$2"
+    --test-suite)
+      test_suite="$2"
+      shift 2
+      ;;
+    --npu-product)
+      npu_product="$2"
+      shift 2
+      ;;
+    --num-npus)
+      case "${2-}" in
+        0 | 1 | 2 | 4 | 8) num_npus="$2" ;;
+        *)
+          echo "--num-npus must be 0, 1, 2, 4, or 8, not '${2-}'" >&2
+          exit 2
+          ;;
+      esac
+      shift 2
+      ;;
+    --num-workers)
+      if [[ ! "${2-}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "--num-workers must be a positive integer, not '${2-}'" >&2
+        exit 2
+      fi
+      num_workers="$2"
       shift 2
       ;;
     *)
@@ -69,25 +97,76 @@ if [[ -z "${exclude_periodic}" ]]; then
   exit 2
 fi
 
-if [[ -z "${suite}" ]]; then
-  echo "--suite is required" >&2
+if [[ -z "${test_suite}" ]]; then
+  echo "--test-suite is required" >&2
   exit 2
 fi
 
-# `-m` rejects an empty `()`, so `selection` carries its own `and`.
-selection=""
-if [[ "${exclude_periodic}" == "true" ]]; then
-  selection="(not periodic) and "
+if [[ -z "${npu_product}" ]]; then
+  echo "--npu-product is required" >&2
+  exit 2
 fi
 
-case "${suite}" in
-  core) test_dir="test/rbln" ;;
-  distributed | ops | models) test_dir="test/${suite}" ;;
+if [[ -z "${num_npus}" ]]; then
+  echo "--num-npus is required" >&2
+  exit 2
+fi
+
+if [[ -z "${num_workers}" ]]; then
+  echo "--num-workers is required" >&2
+  exit 2
+fi
+
+case "${num_npus}" in
+  0)
+    selection="((not npu) or npu(count=0))"
+    pytest_env=("RBLN_FORCE_NPU_NAME=${npu_product}")
+    ;;
   *)
-    echo "--suite must be core, distributed, ops, or models, not '${suite}'" >&2
+    selection="npu(count=${num_npus})"
+    pytest_env=()
+    ;;
+esac
+if [[ "${exclude_periodic}" == "true" ]]; then
+  selection="(not periodic) and ${selection}"
+fi
+
+case "${test_suite}" in
+  core) test_dir="test/rbln" ;;
+  distributed | ops | models) test_dir="test/${test_suite}" ;;
+  *)
+    echo "--test-suite must be core, distributed, ops, or models, not" \
+      "'${test_suite}'" >&2
     exit 2
     ;;
 esac
+
+echo "--- Checking NPU environment"
+shopt \
+  -s \
+  nullglob
+device_nodes=(/dev/rbln[0-9]*)
+shopt \
+  -u \
+  nullglob
+if [[ "${#device_nodes[@]}" -ne "${num_npus}" ]]; then
+  echo "The number of /dev/rbln* device nodes is ${#device_nodes[@]}, not" \
+    "the requested ${num_npus}" >&2
+  exit 1
+fi
+for device_node in "${device_nodes[@]}"; do
+  card_name="$(<"/sys/class/rebellions/${device_node#/dev/}/card_name")"
+  if [[ "${card_name}" != "${npu_product}" ]]; then
+    echo "${device_node} is ${card_name}, not the requested" \
+      "${npu_product}" >&2
+    exit 1
+  fi
+done
+if ! python3 \
+  -c 'import ctypes; ctypes.CDLL("librbln-thunk.so")'; then
+  echo "Could not load librbln-thunk.so, the RBLN user-mode driver" >&2
+  exit 1
+fi
 
 echo "--- Downloading ${artifact_dir}"
 buildkite-agent artifact download \
@@ -135,7 +214,7 @@ mv \
   ./torch_rbln \
   ./torch_rbln.bak
 
-if [[ "${suite}" == "models" ]]; then
+if [[ "${test_suite}" == "models" ]]; then
   echo "--- Installing model-test dependencies"
   uv run \
     --no-sync \
@@ -145,28 +224,32 @@ fi
 
 failed_pytest_runs=()
 
-echo "--- Running ${suite} suite, ${test_dir}, serial tests"
+echo "--- Running ${test_suite} suite, ${test_dir}, serial tests"
 pytest_exit_code=0
-uv run \
-  --no-sync \
-  pytest \
-    "${test_dir}" \
-    -m "${selection}serial" \
-    --numprocesses=1 \
+env \
+  "${pytest_env[@]}" \
+  uv run \
+    --no-sync \
+    pytest \
+      "${test_dir}" \
+      -m "${selection} and serial" \
+      --numprocesses=1 \
   || pytest_exit_code=$?
 # Exit 5 means pytest selected no tests, which is not a failure.
 if [[ "${pytest_exit_code}" -ne 0 && "${pytest_exit_code}" -ne 5 ]]; then
   failed_pytest_runs+=("serial tests (pytest exit code ${pytest_exit_code})")
 fi
 
-echo "--- Running ${suite} suite, ${test_dir}, parallel tests"
+echo "--- Running ${test_suite} suite, ${test_dir}, parallel tests"
 pytest_exit_code=0
-uv run \
-  --no-sync \
-  pytest \
-    "${test_dir}" \
-    -m "${selection}(not serial)" \
-    --numprocesses=32 \
+env \
+  "${pytest_env[@]}" \
+  uv run \
+    --no-sync \
+    pytest \
+      "${test_dir}" \
+      -m "${selection} and (not serial)" \
+      --numprocesses="${num_workers}" \
   || pytest_exit_code=$?
 if [[ "${pytest_exit_code}" -ne 0 && "${pytest_exit_code}" -ne 5 ]]; then
   failed_pytest_runs+=("parallel tests (pytest exit code ${pytest_exit_code})")

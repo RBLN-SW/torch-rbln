@@ -12,6 +12,7 @@ shows up. Re-derive them (the failure message prints the measured value) if the
 target's compute precision policy changes.
 """
 
+import pytest
 import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
@@ -64,6 +65,7 @@ CASES = [
 ]
 
 
+@pytest.mark.npu(count=1)
 class TestFp16Numerics(TestCase):
     @parametrize("name,build,op,bound", CASES)
     def test_fp16_matches_fp32_reference(self, device, name, build, op, bound):

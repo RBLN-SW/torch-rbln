@@ -16,7 +16,6 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
-import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from test.utils import is_atom_device
@@ -24,7 +23,6 @@ from test.utils import is_atom_device
 
 _TARGET_MODULE = "test.distributed.test_tp_pp"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_MIN_DEVICES = 8
 
 _PARTITIONS = (
     {"RCCL_PORT_GEN": "1", "RBLN_DEVICES": "0,1,2,3", "MASTER_PORT": "29604"},
@@ -52,6 +50,7 @@ def _invoke_test_tp_pp(env_overrides: dict) -> subprocess.CompletedProcess:
 
 
 @pytest.mark.serial
+@pytest.mark.npu(count=8)
 @pytest.mark.skipif(
     is_atom_device(),
     reason="autoport concurrency path is REBEL-only; ATOM does not run the RCCL RDMA autoport init",
@@ -60,11 +59,6 @@ class TestTPPPAutoportConcurrent(TestCase):
     """Run test_tp_pp.py concurrently on two disjoint device partitions."""
 
     def test_autoport_concurrent_device_split(self):
-        if not torch.rbln.is_available() or torch.rbln.device_count() < _MIN_DEVICES:
-            self.skipTest(
-                f"requires at least {_MIN_DEVICES} RBLN devices "
-                f"(available: {torch.rbln.device_count() if torch.rbln.is_available() else 0})",
-            )
         # RBLN_LOCAL_IP / RBLN_ROOT_IP need a loopback default for the control
         # plane on single-host runs; RBLN_RDMA_IP is auto-discovered inside the
         # C++ ProcessGroupRBLN ctor (see RdmaIpAutoDiscovery.cpp) so we no

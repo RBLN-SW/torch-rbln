@@ -52,6 +52,7 @@ def _attend(q, kcache, vcache, additive_mask):
     return torch.matmul(torch.softmax(weights, dim=-1), vcache)
 
 
+@pytest.mark.npu(count=1)
 # Compile-heavy; keep the RBLN compile cache across tests (skip per-test dynamo reset).
 @pytest.mark.no_dynamo_reset
 class TestCustomKernelRBLN(TestCase):

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import pytest
 import torch
+from torch.testing._internal.common_utils import run_tests
 
 import torch_rbln  # noqa: F401  # binds the RBLN device + torch.rbln namespace
 
@@ -28,6 +29,7 @@ class TestSetDeviceLayoutLike:
         assert hasattr(torch.rbln, "set_device_layout_like")
         assert callable(torch.rbln.set_device_layout_like)
 
+    @pytest.mark.npu(count=1)
     def test_ref_not_device_resident_raises(self):
         """``ref`` must be device-resident; this is enforced. Valid
         same-dtype/-device RBLN tensors whose ``ref`` is not device-resident (a
@@ -40,24 +42,28 @@ class TestSetDeviceLayoutLike:
         with pytest.raises(RuntimeError, match="layout_like"):
             torch.rbln.set_device_layout_like(target, ref)
 
+    @pytest.mark.npu(count=1)
     def test_cpu_target_raises(self):
         ref = torch.ones((4,), dtype=torch.float16, device=DEVICE) + 1
         cpu_target = torch.empty((4,), dtype=torch.float16)
         with pytest.raises(RuntimeError, match="target must be an RBLN tensor"):
             torch.rbln.set_device_layout_like(cpu_target, ref)
 
+    @pytest.mark.npu(count=1)
     def test_cpu_ref_raises(self):
         target = torch.empty((4,), dtype=torch.float16, device=DEVICE)
         cpu_ref = torch.ones((4,), dtype=torch.float16)
         with pytest.raises(RuntimeError, match="ref must be an RBLN tensor"):
             torch.rbln.set_device_layout_like(target, cpu_ref)
 
+    @pytest.mark.npu(count=1)
     def test_dtype_mismatch_raises(self):
         ref = torch.ones((4,), dtype=torch.float16, device=DEVICE) + 1
         target = torch.empty((4,), dtype=torch.float32, device=DEVICE)
         with pytest.raises(RuntimeError, match="same dtype"):
             torch.rbln.set_device_layout_like(target, ref)
 
+    @pytest.mark.npu(count=1)
     def test_offset_view_target_raises(self):
         """A storage_offset>0 view does not cover its storage and is rejected with
         a clear error."""
@@ -68,6 +74,7 @@ class TestSetDeviceLayoutLike:
         with pytest.raises(RuntimeError, match="whole storage"):
             torch.rbln.set_device_layout_like(view, ref)
 
+    @pytest.mark.npu(count=1)
     def test_narrowing_view_target_raises(self):
         """A storage_offset==0 view that doesn't span its storage (``base[:k]``)
         still does not cover it — reject it."""
@@ -78,6 +85,7 @@ class TestSetDeviceLayoutLike:
         with pytest.raises(RuntimeError, match="whole storage"):
             torch.rbln.set_device_layout_like(view, ref)
 
+    @pytest.mark.npu(count=1)
     def test_view_ref_raises(self):
         target = torch.empty(16, dtype=torch.float16, device=DEVICE)
         ref_view = torch.empty(64, dtype=torch.float16, device=DEVICE)[:16]
@@ -86,6 +94,4 @@ class TestSetDeviceLayoutLike:
 
 
 if __name__ == "__main__":
-    from torch.testing._internal.common_utils import run_tests
-
     run_tests()

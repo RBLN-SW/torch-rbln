@@ -36,6 +36,7 @@ def _check(actual_dev: torch.Tensor, expected_cpu: torch.Tensor, atol: float = 0
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.npu(count=1)
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestCatV2V(TestCase):
     """Tests for the native v2v `aten::cat` kernel and the `aten::stack`
@@ -344,6 +345,7 @@ class TestCatV2V(TestCase):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.npu(count=1)
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestIndexSelectV2V(TestCase):
     """Tests for the native v2v `aten::index_select` kernel."""
@@ -649,6 +651,7 @@ def _index_at_axis(x: torch.Tensor, axis: int, idx: torch.Tensor) -> torch.Tenso
     return x[tuple(key)]
 
 
+@pytest.mark.npu(count=1)
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestIndexTensorV2V(TestCase):
     """Tests for the native `aten::index.Tensor` white-list fast-path (a single

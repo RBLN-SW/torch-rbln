@@ -6,6 +6,7 @@ Test suite for SDPA decode-phase overflow behavior.
 
 import math
 
+import pytest
 import torch
 import torch.nn.functional as F
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
@@ -19,6 +20,7 @@ from torch_rbln._internal.kernels.sdpa import (
 )
 
 
+@pytest.mark.npu(count=1)
 class TestSDPADecodeOverflow(TestCase):
     """Test SDPA decode-phase overflow behavior."""
 

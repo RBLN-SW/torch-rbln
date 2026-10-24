@@ -23,6 +23,7 @@ import sys
 import textwrap
 
 import pytest
+from torch.testing._internal.common_utils import run_tests
 
 from test.utils import is_rebel_device
 
@@ -794,6 +795,7 @@ print("OK")
 
 
 @pytest.mark.serial
+@pytest.mark.npu(count=1)
 # Not xfail_rebel(): that helper is strict, and the fault sits in the pinned compiler, so a
 # rebel-compiler that compiles this decoder again must not fail the job on XPASS. `-rEfX`
 # still reports the XPASS, which is the signal to drop this marker.
@@ -809,7 +811,7 @@ def test_dummy_compiled_prefill_decode_runs_on_real_npu(tmp_path):
     # correctly on a real NPU. Detect the real NPU first (non-dummy probe), compile
     # both graphs for exactly that SoC in a dummy subprocess, then load + run
     # prefill->decode (KV cache handed from prefill into decode) on the real device
-    # and check the argmax equals the CPU reference. Skipped when there is no NPU.
+    # and check the argmax equals the CPU reference.
     probe = subprocess.run(
         [sys.executable, "-c", "from rebel._C import get_npu_name; print(get_npu_name(0) or '')"],
         env=_clean_env(),
@@ -818,8 +820,6 @@ def test_dummy_compiled_prefill_decode_runs_on_real_npu(tmp_path):
         errors="replace",
     )
     npu = probe.stdout.strip()
-    if not npu:
-        pytest.skip("no NPU available to compile/run the decoder against")
 
     cache = str(tmp_path / "cache")
     # Dummy compile targets the real machine SoC via RBLN_FORCE_NPU_NAME; no NPU is opened.
@@ -840,6 +840,4 @@ def test_dummy_compiled_prefill_decode_runs_on_real_npu(tmp_path):
 
 
 if __name__ == "__main__":
-    from torch.testing._internal.common_utils import run_tests
-
     run_tests()

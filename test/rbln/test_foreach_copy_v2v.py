@@ -46,6 +46,7 @@ def _prim_calls(report: dict) -> dict[str, int]:
     return {name: int(v["calls"]) for name, v in rt.get("by_primitive", {}).items()}
 
 
+@pytest.mark.npu(count=1)
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestForeachCopyV2V(TestCase):
     """Tests for the native ``aten::_foreach_copy_`` kernel reached through

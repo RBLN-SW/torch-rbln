@@ -407,6 +407,7 @@ xfail_strict = true
 markers = [
     "periodic: marks tests that only the release checks run (deselect with '-m \"not periodic\"')",
     "serial: marks tests that must run on a single worker (deselect with '-m \"not serial\"')",
+    "npu(count=N): marks tests that require N NPUs; N=0 marks tests that run only without an NPU (select with '-m \"npu(count=N)\"')",
     "no_dynamo_reset: skips autouse TorchDynamo reset fixture",
     "torch_rbln_only: marks tests whose outcome does not depend on rebel-compiler -- torch-rbln's own logic, packaging, or the torch-facing contract. rebel_compiler's CI deselects these (`-m \"not torch_rbln_only\"`); torch-rbln's own lanes still run them",
 ]

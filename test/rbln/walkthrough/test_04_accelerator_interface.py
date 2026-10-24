@@ -13,26 +13,30 @@ Verifies that:
 - Device memory is allocated lazily (a device op increases `memory_allocated`).
 """
 
+import pytest
 import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from test.utils import requires_logical_devices, SUPPORTED_DTYPES
+from test.utils import SUPPORTED_DTYPES
 
 
 class TestAcceleratorInterface(TestCase):
     """Walkthrough example 4: unified accelerator API with RBLN."""
 
+    @pytest.mark.npu(count=1)
     def test_accelerator_is_available(self):
         """`torch.accelerator.is_available()` should return True on an RBLN host."""
         self.assertTrue(torch.accelerator.is_available())
 
+    @pytest.mark.npu(count=1)
     def test_current_accelerator_is_rbln(self):
         """The current accelerator should be the RBLN device."""
         acc = torch.accelerator.current_accelerator()
         self.assertIsNotNone(acc)
         self.assertEqual(acc.type, "rbln")
 
+    @pytest.mark.npu(count=1)
     def test_accelerator_device_count(self):
         """Accelerator and `torch.rbln` device counts should agree and be positive."""
         count = torch.accelerator.device_count()
@@ -40,13 +44,14 @@ class TestAcceleratorInterface(TestCase):
         self.assertGreater(count, 0)
         self.assertEqual(count, torch.rbln.device_count())
 
+    @pytest.mark.npu(count=1)
     def test_accelerator_current_device_index(self):
         """`current_device_index()` should return a non-negative int."""
         idx = torch.accelerator.current_device_index()
         self.assertIsInstance(idx, int)
         self.assertGreaterEqual(idx, 0)
 
-    @requires_logical_devices(2)
+    @pytest.mark.npu(count=2)
     def test_device_index_context_manager(self):
         """`device_index(i)` should switch the active device for the duration of the block."""
         torch.accelerator.set_device_index(0)
@@ -58,6 +63,7 @@ class TestAcceleratorInterface(TestCase):
         self.assertEqual(torch.accelerator.current_device_index(), 0)
 
 
+@pytest.mark.npu(count=1)
 class TestAcceleratorMemory(TestCase):
     """Walkthrough example 4: `torch.accelerator.memory` API and lazy allocation."""
 

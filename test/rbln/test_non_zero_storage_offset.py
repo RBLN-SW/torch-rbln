@@ -10,6 +10,7 @@ This test suite validates the correct behavior of tensors with non-zero storage 
 
 import unittest
 
+import pytest
 import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
@@ -106,6 +107,7 @@ class BaseTestNonZeroStorageOffset(TestCase):
         return tensor
 
 
+@pytest.mark.npu(count=1)
 class TestSplitOps(BaseTestNonZeroStorageOffset):
     """Test split tensors with view operations (transpose, reshape, etc.)."""
 
@@ -597,6 +599,7 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
             self.assertEqual(actual_cpu, expected_cpu, msg=f"chunk {i} operation mismatch")
 
 
+@pytest.mark.npu(count=1)
 class TestSplitAndMerge(BaseTestNonZeroStorageOffset):
     """Test split and merge operations."""
 

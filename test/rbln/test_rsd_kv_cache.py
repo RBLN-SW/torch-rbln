@@ -38,8 +38,9 @@ import textwrap
 import pytest
 import rebel  # noqa: F401  -- defines the rbln_custom_ops schemas the decoder calls
 import torch
+from torch.testing._internal.common_utils import run_tests
 
-from test.utils import requires_physical_devices, SUPPORTED_DTYPES
+from test.utils import SUPPORTED_DTYPES
 
 from torch_rbln._internal.device_arch_utils import is_rebel_device
 
@@ -344,7 +345,6 @@ def _run(driver: str, args: list[str], env: dict) -> subprocess.CompletedProcess
 
 def _run_on_device(dtype: torch.dtype, npus: int) -> dict:
     ids = _visible_physical_ids()
-    assert len(ids) >= npus, ids
     env = _clean_env()
     env["RBLN_VISIBLE_DEVICES"] = ",".join(ids[:npus])
     env["RBLN_NPUS_PER_DEVICE"] = str(npus)
@@ -371,7 +371,7 @@ def test_rsd_programs_compile_on_dummy_device(dtype, tmp_path):
 
 
 @pytest.mark.serial
-@requires_physical_devices(2)
+@pytest.mark.npu(count=2)
 @pytest.mark.parametrize("dtype", SUPPORTED_DTYPES, ids=lambda d: str(d).removeprefix("torch."))
 def test_sharded_kv_cache_lifecycle_and_parity(dtype):
     _skip_unless_two_atom_npus()
@@ -437,6 +437,4 @@ def test_sharded_kv_cache_lifecycle_and_parity(dtype):
 
 
 if __name__ == "__main__":
-    from torch.testing._internal.common_utils import run_tests
-
     run_tests()

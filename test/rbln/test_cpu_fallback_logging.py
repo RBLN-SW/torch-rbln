@@ -21,6 +21,7 @@ import subprocess
 import sys
 import textwrap
 
+import pytest
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 
@@ -28,6 +29,7 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 _FALLBACK_LOG = "op ran on CPU instead of RBLN"
 
 
+@pytest.mark.npu(count=1)
 class TestCpuFallbackIsLogged(TestCase):
     """A fallback the shim decides in C++ logs the same line the Python path logs."""
 

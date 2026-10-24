@@ -14,11 +14,11 @@ Kept as close to the upstream bodies as possible so divergences are easy to spot
 
 import pytest
 import torch
-from torch.testing._internal.common_utils import run_tests, TEST_ACCELERATOR, TEST_MULTIACCELERATOR, TestCase
+from torch.testing._internal.common_utils import run_tests, TestCase
 
 
-@pytest.mark.skipif(not TEST_ACCELERATOR, reason="no accelerator (rbln) detected")
 class TestAcceleratorStream(TestCase):
+    @pytest.mark.npu(count=1)
     def test_generic_stream_behavior(self):
         s1 = torch.Stream()
         s2 = torch.Stream()
@@ -42,6 +42,7 @@ class TestAcceleratorStream(TestCase):
         self.assertTrue(event.query())
         self.assertEqual(c_acc.cpu(), c)
 
+    @pytest.mark.npu(count=1)
     def test_current_stream_query(self):
         s = torch.accelerator.current_stream()
         self.assertEqual(torch.accelerator.current_stream(s.device), s)
@@ -51,12 +52,14 @@ class TestAcceleratorStream(TestCase):
         with self.assertRaisesRegex(ValueError, "doesn't match the current accelerator"):
             torch.accelerator.current_stream(other_device)
 
+    @pytest.mark.npu(count=1)
     def test_stream_context_manager(self):
         prev_stream = torch.accelerator.current_stream()
         with torch.Stream() as s:
             self.assertEqual(torch.accelerator.current_stream(), s)
         self.assertEqual(torch.accelerator.current_stream(), prev_stream)
 
+    @pytest.mark.npu(count=1)
     def test_stream_context_manager_reentrance(self):
         prev_stream = torch.accelerator.current_stream()
         s0 = torch.Stream()
@@ -72,6 +75,7 @@ class TestAcceleratorStream(TestCase):
                     self.assertEqual(torch.accelerator.current_stream(), s0)
         self.assertEqual(torch.accelerator.current_stream(), prev_stream)
 
+    @pytest.mark.npu(count=1)
     def test_generic_event_behavior(self):
         event1 = torch.Event(enable_timing=False)
         event2 = torch.Event(enable_timing=False)
@@ -98,7 +102,7 @@ class TestAcceleratorStream(TestCase):
         ):
             event1.elapsed_time(event2)
 
-    @pytest.mark.skipif(not TEST_MULTIACCELERATOR, reason="only one accelerator detected")
+    @pytest.mark.npu(count=2)
     def test_generic_multi_device_behavior(self):
         orig_device = torch.accelerator.current_device_index()
         target_device = (orig_device + 1) % torch.accelerator.device_count()
@@ -114,7 +118,7 @@ class TestAcceleratorStream(TestCase):
         torch.accelerator.synchronize(orig_device)
         self.assertEqual(target_device, torch.accelerator.current_device_index())
 
-    @pytest.mark.skipif(not TEST_MULTIACCELERATOR, reason="only one accelerator detected")
+    @pytest.mark.npu(count=2)
     def test_multi_device_stream_context_manager(self):
         src_device = 0
         dst_device = 1

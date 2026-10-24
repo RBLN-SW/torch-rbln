@@ -18,11 +18,13 @@ These tests verify the factory's core invariants on the RBLN device:
   completion on RBLN without segfault and matches the CPU result.
 """
 
+import pytest
 import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
 
+@pytest.mark.npu(count=1)
 class TestEfficientZeroTensor(TestCase):
     """`aten::_efficientzerotensor` should produce a logically-zero RBLN tensor.
 
@@ -50,6 +52,7 @@ class TestEfficientZeroTensor(TestCase):
         self.assertEqual(t.to("cpu"), expected)
 
 
+@pytest.mark.npu(count=1)
 class TestSgnDecomposition(TestCase):
     """`aten::sgn` decomposes through `_efficientzerotensor`; verify safety + value.
 

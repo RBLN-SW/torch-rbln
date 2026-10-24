@@ -20,6 +20,7 @@ import subprocess
 import sys
 import textwrap
 
+import pytest
 import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
@@ -87,6 +88,7 @@ class TestCaptureProgramsLazy(TestCase):
         )
 
 
+@pytest.mark.npu(count=1)
 class TestCaptureProgramsCompile(TestCase):
     def test_one_program_per_backend_build(self, device):
         from rebel.sync_runtime import DynamoRuntime

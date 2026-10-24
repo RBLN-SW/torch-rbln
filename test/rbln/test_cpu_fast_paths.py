@@ -19,6 +19,7 @@ Coverage:
 
 from __future__ import annotations
 
+import pytest
 import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
@@ -67,6 +68,7 @@ class TestCPUFastPathRegistration(TestCase):
         self.assertFalse(_C._cpu_fast_path_registered("aten::nonexistent.op"))
 
 
+@pytest.mark.npu(count=1)
 class TestRsqrtFastPath(TestCase):
     """`aten::rsqrt.out` fast path — fp32 contig hot path + fp16 fall-through.
 
@@ -93,6 +95,7 @@ class TestRsqrtFastPath(TestCase):
         self.assertEqual(rbln_out.cpu(), torch.rsqrt(cpu_x), rtol=0.005, atol=0.01)
 
 
+@pytest.mark.npu(count=1)
 class TestPowSquaredFastPath(TestCase):
     """`aten::pow.Tensor_Scalar_out` fast path is fp32 + exp == 2 only; verify
     that both eligibility (fp32 contig, exp == 2) and fall-through (exp != 2)
@@ -120,6 +123,7 @@ class TestPowSquaredFastPath(TestCase):
         self.assertEqual(rbln_out.cpu(), torch.pow(cpu_x, 3))
 
 
+@pytest.mark.npu(count=1)
 class TestMeanLastDimFastPath(TestCase):
     """`aten::mean.out` last-dim + keepdim fast path; verify eligibility
     (last dim, keepdim=True) vs fall-through (non-last dim, keepdim=False)."""
@@ -154,6 +158,7 @@ class TestMeanLastDimFastPath(TestCase):
         self.assertEqual(rbln_out.cpu(), cpu_x.mean(dim=-1, keepdim=False), rtol=1e-5, atol=1e-6)
 
 
+@pytest.mark.npu(count=1)
 class TestIntSubFastPath(TestCase):
     """`aten::sub.out` integer fast path. The fp16-only device falls int ops back
     to CPU; the handler runs a host loop (int64 accumulate, stored in out dtype).
@@ -199,6 +204,7 @@ class TestIntSubFastPath(TestCase):
         self.assertEqual(torch.sub(ra, rb, alpha=2).cpu(), torch.sub(cpu_a, cpu_b, alpha=2))
 
 
+@pytest.mark.npu(count=1)
 class TestIntMulFastPath(TestCase):
     """`aten::mul.out` integer fast path; same-shape and scalar broadcast."""
 
@@ -215,6 +221,7 @@ class TestIntMulFastPath(TestCase):
         self.assertEqual((ra * 1024).cpu(), cpu_a * 1024)
 
 
+@pytest.mark.npu(count=1)
 class TestIntClampFastPath(TestCase):
     """`aten::clamp.out` integer fast path; min+max, min-only, max-only."""
 

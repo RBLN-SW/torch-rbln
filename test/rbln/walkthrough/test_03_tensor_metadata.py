@@ -12,6 +12,7 @@ metadata / stride handling:
 - `is_contiguous()` / `contiguous()` report and enforce layout.
 """
 
+import pytest
 import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
@@ -19,6 +20,7 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 from test.utils import SUPPORTED_DTYPES
 
 
+@pytest.mark.npu(count=1)
 class TestTensorMetadata(TestCase):
     """Walkthrough example 3: view/reshape/transpose/contiguous on RBLN."""
 
