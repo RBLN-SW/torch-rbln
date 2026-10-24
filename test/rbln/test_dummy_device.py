@@ -307,7 +307,7 @@ def test_torch_compile_tracing_smoke():
         def backend(gm, example_inputs):
             return gm.forward  # eager replay; ops fall back to CPU in dummy mode
         f = torch.compile(lambda x: x * 2 + 1, backend=backend, fullgraph=True)
-        x = torch.ones(4, device="rbln:0")
+        x = torch.ones(4, device="rbln:0", dtype=torch.float64)
         assert f(x).cpu().tolist() == [3.0, 3.0, 3.0, 3.0]
         print("OK")
         """
@@ -606,12 +606,12 @@ def test_eager_device_dtype_op_execution_fails_fast():
 
 
 def test_eager_host_dtype_op_runs_on_cpu():
-    # A host dtype (fp32) never runs on the NPU -- even on real hardware it CPU-falls-back.
+    # A host dtype (fp64) never runs on the NPU -- even on real hardware it CPU-falls-back.
     # Dummy mode must keep that behavior (not reject it), so the result matches CPU.
     proc = _run_with_dummy(
         """
         import torch, torch_rbln
-        a = torch.ones(4, 8, device="rbln:0", dtype=torch.float32)
+        a = torch.ones(4, 8, device="rbln:0", dtype=torch.float64)
         assert (a + a).cpu().tolist() == [[2.0] * 8] * 4
         print("OK")
         """,

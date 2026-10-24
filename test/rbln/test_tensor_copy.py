@@ -18,8 +18,6 @@ ATOL = 0.01
 RTOL = 0.01
 
 
-TEST_DTYPES = SUPPORTED_DTYPES + [torch.float32]
-
 COPY_TYPES = {
     "h2d": ("cpu", "rbln"),
     "d2h": ("rbln", "cpu"),
@@ -85,8 +83,8 @@ class TestTensorCopy(TestCase):
 
     @parametrize("shape", TEST_SHAPES)
     @parametrize("src_device_type,dst_device_type", COPY_TYPES.values())
-    @parametrize("src_dtype", TEST_DTYPES)
-    @parametrize("dst_dtype", TEST_DTYPES)
+    @parametrize("src_dtype", SUPPORTED_DTYPES)
+    @parametrize("dst_dtype", SUPPORTED_DTYPES)
     @parametrize("src_is_contiguous", [True, False])
     @parametrize("dst_is_contiguous", [True, False])
     @parametrize("non_blocking", [True, False])
@@ -114,7 +112,7 @@ class TestTensorCopy(TestCase):
         self.assertEqual(dst.cpu(), src.cpu().to(dst_dtype), atol=ATOL, rtol=RTOL)
         self.assertEqual(dst.is_contiguous(), dst_is_contiguous)
 
-    @dtypes(*TEST_DTYPES)
+    @dtypes(*SUPPORTED_DTYPES)
     def test_copy_from_tensor_with_nonzero_storage_offset(self, dtype):
         base_shape = (6, 12)
         view_slice = (slice(2, 4), slice(3, 8))
@@ -140,8 +138,8 @@ class TestTensorCopy(TestCase):
             actual, expected, atol=ATOL, rtol=RTOL, msg="Mismatch when copying from non-zero offset tensor"
         )
 
-    @parametrize("src_dtype", TEST_DTYPES)
-    @parametrize("dst_dtype", TEST_DTYPES)
+    @parametrize("src_dtype", SUPPORTED_DTYPES)
+    @parametrize("dst_dtype", SUPPORTED_DTYPES)
     def test_partial_copy_between_rbln_sliced(self, src_dtype, dst_dtype):
         dst_full_shape = (4, 10)
         src_shape = (2, 5)
@@ -292,8 +290,8 @@ class TestTensorCopy(TestCase):
 
         self.assertEqual(b.cpu(), a.cpu(), atol=ATOL, rtol=RTOL)
 
-    @parametrize("src_dtype", TEST_DTYPES)
-    @parametrize("dst_dtype", TEST_DTYPES)
+    @parametrize("src_dtype", SUPPORTED_DTYPES)
+    @parametrize("dst_dtype", SUPPORTED_DTYPES)
     def test_copy_with_broadcast_and_dtype_conversion(self, src_dtype, dst_dtype):
         # (1,) → (1024,)
         src = torch.tensor([3.14], dtype=src_dtype, device=self.rbln_device)
@@ -325,7 +323,7 @@ class TestTensorCopy(TestCase):
 
 
 class TestToOps(TestCase):
-    @dtypes(*TEST_DTYPES)
+    @dtypes(*SUPPORTED_DTYPES)
     def test_to_cpu(self, dtype):
         x_cpu = torch.randn([2, 4], dtype=dtype, device="cpu")
         self.assertEqual(x_cpu.dtype, dtype)
@@ -341,7 +339,7 @@ class TestToOps(TestCase):
 
         self.assertEqual(z, x_cpu, atol=ATOL, rtol=RTOL)
 
-    @dtypes(*TEST_DTYPES)
+    @dtypes(*SUPPORTED_DTYPES)
     def test_to_copy(self, dtype):
         x_cpu = torch.randn([2, 4], dtype=dtype, device="cpu")
         self.assertEqual(x_cpu.dtype, dtype)

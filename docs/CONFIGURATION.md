@@ -223,9 +223,9 @@ export RBLN_DUMMY_DEVICE=1 RBLN_DEVICE_MAP="[0,1],[2,3]"   # 2 logical devices, 
   dummy is not guaranteed to be valid on a specific machine.
 - **Scope**: device tensor construction, host/device copies, and compile-only
   `torch.compile` (building artifacts). Anything that must run on the NPU raises a
-  clear error — a compiled graph, or an eager op on a device dtype (fp16/bf16) — since
-  there is no NPU to run it. Host-side ops (e.g. fp32, which never runs on the NPU even
-  with real hardware) fall back to CPU exactly as they would on a real device.
+  clear error — a compiled graph, or an eager op on a dispatch dtype (fp16/bf16/fp32) —
+  since there is no NPU to run it. Host-side ops (e.g. fp64, which never runs on the NPU
+  even with real hardware) fall back to CPU exactly as they would on a real device.
   Distributed collectives still require real hardware, and memory-stat APIs
   (`memory_stats`, `memory_allocated`, ...) report zeros rather than real usage.
   `mem_get_info()` and `mem_get_info_per_chiplet()` raise: there is no device DRAM to report.
@@ -327,3 +327,13 @@ This is an escape hatch for unblocking a machine while a matching wheel is built
 suppresses the diagnosis, not the incompatibility: the mismatch it hides is what would
 otherwise surface as an `undefined symbol` import crash or as corruption inside the
 runtime.
+
+## Eager-dispatch dtype catalog (measurement knobs)
+
+Both unset by default; set before `import torch_rbln`. `docs/DTYPE_DISPATCH.md` has the
+contract and the boundaries to know before enabling a dtype.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `TORCH_RBLN_DISPATCH_DTYPES` | Extra dtypes admitted to the eager dispatch catalog (torch dtype names or aliases; an unknown name is an error) | unset |
+| `TORCH_RBLN_DISPATCH_STRICT` | Dtypes (or `all`) whose ops skip the alignment performance fallbacks and always reach the compiler | unset |

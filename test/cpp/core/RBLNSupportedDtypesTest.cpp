@@ -27,7 +27,7 @@ bool contains(const Arr& arr, const T& value) {
 }
 
 TEST_F(RBLNSupportedDtypesTest, DispatchCatalogContents) {
-  constexpr c10::ScalarType kExpected[] = {c10::kHalf, c10::kBFloat16};
+  constexpr c10::ScalarType kExpected[] = {c10::kHalf, c10::kBFloat16, c10::kFloat};
   for (const auto scalar_type : kExpected) {
     EXPECT_TRUE(contains(c10::rbln::kDispatchDtypes, scalar_type));
   }
@@ -54,8 +54,8 @@ TEST_F(RBLNSupportedDtypesTest, SdpaCatalogIsFloatOnly) {
 }
 
 TEST_F(RBLNSupportedDtypesTest, CapabilityCatalogContents) {
-  // Device-resident dtypes only (fp16/bf16); other dtypes are CPU-backed.
-  constexpr c10::ScalarType kExpected[] = {c10::kHalf, c10::kBFloat16};
+  // Device-resident dtypes only (fp16/bf16/fp32); other dtypes are CPU-backed.
+  constexpr c10::ScalarType kExpected[] = {c10::kHalf, c10::kBFloat16, c10::kFloat};
   for (const auto scalar_type : kExpected) {
     EXPECT_TRUE(contains(c10::rbln::kCapabilityDtypes, scalar_type));
   }
@@ -69,7 +69,6 @@ TEST_F(RBLNSupportedDtypesTest, IsDispatchDtypeAcceptsAdmitted) {
 
 TEST_F(RBLNSupportedDtypesTest, IsDispatchDtypeRejectsUnsupported) {
   constexpr c10::ScalarType kUnsupported[] = {
-      c10::kFloat,
       c10::kInt,
       c10::kLong,
       c10::kBool,
@@ -84,4 +83,3 @@ static_assert(!c10::rbln::kSdpaDtypes.empty(), "SDPA dtype catalog must not be e
 static_assert(c10::rbln::kAmpDtypes.empty(), "AMP dtype catalog is intentionally empty until autocast is implemented");
 static_assert(!c10::rbln::kCapabilityDtypes.empty(), "capability dtype catalog must not be empty");
 static_assert(c10::rbln::is_dispatch_dtype(c10::kHalf), "is_dispatch_dtype must be constexpr");
-static_assert(!c10::rbln::is_dispatch_dtype(c10::kFloat), "is_dispatch_dtype must be constexpr");
