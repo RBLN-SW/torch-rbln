@@ -33,6 +33,7 @@ def main() -> None:
     document = tomlkit.parse(path.read_text(encoding="utf-8"))
     pin_torch_requirement(document["project"]["dependencies"], args.torch_version, "[project].dependencies")
     pin_torch_requirement(document["build-system"]["requires"], args.torch_version, "[build-system].requires")
+    pin_torch_requirement(document["dependency-groups"]["build"], args.torch_version, "[dependency-groups].build")
     document["tool"]["uv"]["sources"]["torch"]["index"] = args.torch_index
     print(f"[tool.uv.sources].torch: index {args.torch_index}")
     path.write_text(tomlkit.dumps(document), encoding="utf-8")

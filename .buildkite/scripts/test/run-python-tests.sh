@@ -183,7 +183,10 @@ cp \
   "${artifact_dir}/uv.lock" \
   .
 uv sync \
+  --extra runtime \
+  --group test \
   --locked \
+  --no-default-groups \
   --no-install-project
 if [[ "${build_type}" == "Debug" ]]; then
   libnuma_status="$(
@@ -213,14 +216,6 @@ uv pip install \
 mv \
   ./torch_rbln \
   ./torch_rbln.bak
-
-if [[ "${test_suite}" == "models" ]]; then
-  echo "--- Installing model-test dependencies"
-  uv run \
-    --no-sync \
-    bash \
-      tools/test/install-test-deps.sh
-fi
 
 failed_pytest_runs=()
 

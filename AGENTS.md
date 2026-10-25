@@ -97,8 +97,9 @@ there works until the next build.
 from upstream PyTorch; the two YAML files name the upstream tag they came from
 on their first line. Keep the diff no larger than the change requires, and keep
 that line true when you re-sync one. A `torch` version bump lands as one change:
-`[project].dependencies`, `[build-system].requires`, `uv.lock`, and these files
-re-synced from the new tag (`docs/THIRD_PARTY_UPDATE.md`). `tools/linter`,
+`[project].dependencies`, `[build-system].requires`,
+`[dependency-groups].build`, `uv.lock`, and these files re-synced from the new
+tag (`docs/THIRD_PARTY_UPDATE.md`). `tools/linter`,
 `.clang-format`, and `.clang-tidy` are upstream copies that
 `tools/sync-linter.sh` refreshes; do not edit them by hand.
 

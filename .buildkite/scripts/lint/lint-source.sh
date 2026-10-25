@@ -59,7 +59,10 @@ lint_configuration=(
 
 echo "--- Installing locked environment"
 uv sync \
+  --group build \
+  --group lint \
   --locked \
+  --no-default-groups \
   --no-install-project
 
 echo "--- Initializing linters"

@@ -544,6 +544,18 @@ command = [
 
 # The linters below are not in upstream PyTorch.
 [[linter]]
+code = 'DEPTRY'
+include_patterns = ['pyproject.toml', 'torch_rbln/**/*.py']
+command = [
+  'python3',
+  'tools/linter_rbln/command_linter.py',
+  '--code=DEPTRY',
+  '--lint-command=deptry --no-ansi --known-first-party=torch_rbln torch_rbln',
+  '--lint-pattern=^(?P<path>[^:\n]+):(?:(?P<line>\d+):(?P<char>\d+):)? (?P<name>DEP\d+) (?P<description>.+)$',
+  '--lint-ignore-pattern=^(?:Assuming the corresponding module name of package .+|Scanning \d+ files?\.\.\.|Found \d+ dependency issues?\.|For more information, see the documentation: \S+)$',
+]
+
+[[linter]]
 code = 'RUMDL'
 include_patterns = ['**/*.md']
 exclude_patterns = [
@@ -576,6 +588,18 @@ command = [
   '@{{PATHSFILE}}',
 ]
 is_formatter = true
+
+[[linter]]
+code = 'UV'
+# If `uv` cannot parse `[tool.uv]`, it only warns and ignores the table.
+include_patterns = ['pyproject.toml']
+command = [
+  'python3',
+  'tools/linter_rbln/command_linter.py',
+  '--code=UV',
+  '--lint-command=uv tree --depth 0 --frozen --offline',
+  '--lint-pattern=^(?P<name>warning): (?P<description>.*(?:\n .*)*)',
+]
 
 [[linter]]
 code = 'YAMLLINT'
