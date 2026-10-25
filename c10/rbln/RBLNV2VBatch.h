@@ -15,13 +15,10 @@ namespace c10::rbln {
  * record copy requests; submit() flushes them through rbln_memcpy_v2v_multi when
  * every entry shares one device — in calls of at most
  * ::rbln::kMaxV2VMultiCopies entries, the most one call dispatches on the
- * device — or falls back to per-entry memcpy_v2v (which host-bounces
+ * device, plus one rbln_memcpy_v2v_strided_multi call for queued strided
+ * entries — or falls back to per-entry memcpy_v2v (which host-bounces
  * cross-device entries). The path is decided from bookkeeping kept at enqueue
  * time, so submit() is O(N) with no extra lookups.
- *
- * When the runtime exposes a strided v2v API, enqueue_strided will forward the
- * description directly instead of expanding internally — engine/kernel code that
- * uses V2VBatch will not change.
  *
  * Lifetime: callers must invoke submit() on success. The destructor never issues
  * backend calls (a rejection during unwind would terminate the process); it just
@@ -60,9 +57,10 @@ class C10_RBLN_API V2VBatch {
    * length. When that length is zero this degenerates to a single
    * enqueue(dst, src, inner_block_bytes).
    *
-   * Today this expands into `prod(outer_sizes)` enqueue() calls internally.
-   * When the runtime exposes a strided v2v API, this will forward the
-   * description without expansion.
+   * Where the device runs strided copies as-is (memcpy_v2v_strided_supported),
+   * the largest outer dim (innermost on a tie) is forwarded to the runtime as
+   * one strided descriptor and only the other dims are walked here. Otherwise,
+   * or with negative strides, this expands into `prod(outer_sizes)` flat entries.
    *
    * The IntArrayRefs are read during this call only; the caller does not need
    * to keep them alive past return.
@@ -81,7 +79,8 @@ class C10_RBLN_API V2VBatch {
   void submit();
 
   /**
-   * @brief Number of pending (un-submitted) flat entries. For tests / debug.
+   * @brief Number of pending (un-submitted) copies, counting each strided
+   *        chunk as one entry. For tests / debug.
    */
   size_t pending_count() const;
 
