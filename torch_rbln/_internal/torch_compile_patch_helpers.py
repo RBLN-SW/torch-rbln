@@ -1,10 +1,10 @@
-"""
-Helper functions and classes for torch.compile patching.
+"""Helper functions and classes for torch.compile patching.
 
 This module contains utilities for wrapping compiled functions with num_devices
 auto-determination, tensor-parallel failover support, and CPU fallback functionality.
 """
 
+import contextlib
 import functools
 import threading
 import types
@@ -24,9 +24,10 @@ from torch_rbln._internal.ops_utils import extract_device_id_from_inputs, to_cpu
 from torch_rbln._internal.rsd_utils import auto_determine_num_devices, get_physical_device_ids
 
 
-# Thread-local reentrancy guard: when we're already inside an RBLN op that uses torch.compile,
-# any nested dispatch (e.g. from compiled graph running torch.add -> add_rbln again, or from
-# print/repr of a tensor triggering dispatch) must take CPU fallback to avoid infinite recursion.
+# Thread-local reentrancy guard: when we're already inside an RBLN op that uses
+# torch.compile, any nested dispatch (e.g. from compiled graph running torch.add ->
+# add_rbln again, or from print/repr of a tensor triggering dispatch) must take CPU
+# fallback to avoid infinite recursion.
 _rbln_compile_op_depth = threading.local()
 
 
@@ -49,9 +50,9 @@ def _isolate_chromium_event_state():
 
     RBLN ATen-op fallbacks are ``torch.compile``-d, so dispatching one during an outer
     compile's ``build_guards`` re-enters dynamo; the nested compile's exit resets the
-    *shared* chromium event stack, wiping the outer compile's events and crashing it with
-    "No toplevel event active". Swap in throwaway containers for the op-compile, then
-    restore the originals unconditionally.
+    *shared* chromium event stack, wiping the outer compile's events and crashing it
+    with "No toplevel event active". Swap in throwaway containers for the op-compile,
+    then restore the originals unconditionally.
 
     Returns a zero-arg restorer, or ``None`` if there is nothing to protect.
     """
@@ -71,18 +72,17 @@ def _isolate_chromium_event_state():
     except Exception:
         return None
 
-    # The nested op-compile's reset_event_log_on_exit now clears these throwaways instead.
+    # The nested op-compile's reset_event_log_on_exit now clears these throwaways
+    # instead.
     tls.stack = []
     tls.pt2_compile_substack = []
     tls.event_data = {}
 
     def _restore():
-        try:
+        with contextlib.suppress(Exception):
             tls.stack = saved_stack
             tls.pt2_compile_substack = saved_substack
             tls.event_data = saved_event_data
-        except Exception:
-            pass
 
     return _restore
 
@@ -90,7 +90,7 @@ def _isolate_chromium_event_state():
 def is_recompile_limit_exception(exception):
     """Check if exception is FailOnRecompileLimitHit."""
     try:
-        import torch._dynamo.exc as dynamo_exc
+        import torch._dynamo.exc as dynamo_exc  # noqa: PLC0415
 
         return isinstance(exception, dynamo_exc.FailOnRecompileLimitHit)
     except ImportError:
@@ -102,7 +102,8 @@ def extract_device_from_inputs(*args, **kwargs):
     """Extract the original output device from RBLN tensor inputs."""
     device_id = extract_device_id_from_inputs(*args, **kwargs)
     if device_id is None:
-        raise RuntimeError("RBLN CPU fallback requires at least one RBLN tensor input.")
+        msg = "RBLN CPU fallback requires at least one RBLN tensor input."
+        raise RuntimeError(msg)
     return torch.device("rbln", device_id)
 
 
@@ -110,11 +111,11 @@ def _convert_result_to_device(result, target_device):
     """Recursively convert result containers back to the target device."""
     if isinstance(result, torch.Tensor):
         return result.to(target_device)
-    elif isinstance(result, dict):
+    if isinstance(result, dict):
         return {key: _convert_result_to_device(value, target_device) for key, value in result.items()}
-    elif isinstance(result, tuple):
+    if isinstance(result, tuple):
         return tuple(_convert_result_to_device(item, target_device) for item in result)
-    elif isinstance(result, list):
+    if isinstance(result, list):
         return [_convert_result_to_device(item, target_device) for item in result]
     return result
 
@@ -125,7 +126,8 @@ def attempt_cpu_fallback(original_fn, args, kwargs, original_device):
     cpu_args = to_cpu(args)
     cpu_kwargs = to_cpu(kwargs)
     if original_fn is None:
-        raise ValueError("original_fn is not provided")
+        msg = "original_fn is not provided"
+        raise ValueError(msg)
     result = original_fn(*cpu_args, **cpu_kwargs)
 
     # Move result back to original device if needed
@@ -138,10 +140,7 @@ def recompile_with_num_devices(model, compile_kwargs, num_devices, original_comp
     """Recompile model with the specified ``num_devices``."""
     recompile_kwargs = compile_kwargs.copy()
     recompile_options = recompile_kwargs.get("options", {})
-    if isinstance(recompile_options, dict):
-        recompile_options = recompile_options.copy()
-    else:
-        recompile_options = {}
+    recompile_options = recompile_options.copy() if isinstance(recompile_options, dict) else {}
     recompile_options["num_devices"] = num_devices
     recompile_kwargs["options"] = recompile_options
     return original_compile_fn(model, **recompile_kwargs)
@@ -222,7 +221,7 @@ def auto_determine_num_devices_if_needed(model, compile_kwargs, device_id, origi
         return None
 
 
-def should_attempt_failover(device_id, compile_kwargs, current_num_devices):
+def should_attempt_failover(compile_kwargs, current_num_devices):
     """Check if failover should be attempted.
 
     Failover is attempted when:
@@ -231,7 +230,6 @@ def should_attempt_failover(device_id, compile_kwargs, current_num_devices):
     - current_num_devices > 1
 
     Args:
-        device_id: The RBLN logical device ID.
         compile_kwargs: Keyword arguments passed to torch.compile.
         current_num_devices: Current number of devices the model is distributed across.
 
@@ -246,10 +244,7 @@ def should_attempt_failover(device_id, compile_kwargs, current_num_devices):
     if get_num_devices_from_options(compile_kwargs) is not None:
         return False
 
-    if current_num_devices is None or current_num_devices <= 1:
-        return False  # No need to failover
-
-    return True
+    return current_num_devices is not None and current_num_devices > 1
 
 
 def handle_tp_failover(model, compile_kwargs, device_id, original_compile_fn):
@@ -268,13 +263,14 @@ def handle_tp_failover(model, compile_kwargs, device_id, original_compile_fn):
         original_compile_fn: The original torch.compile function.
 
     Returns:
-        Compiled function with num_devices=1 (failover), or None if failover is not applicable
-        or recompilation fails (caller will then try CPU fallback or re-raise).
+        Compiled function with num_devices=1 (failover), or None if failover is not
+        applicable or recompilation fails (caller will then try CPU fallback or
+        re-raise).
     """
     # Determine the num_devices that the current compiled_fn is actually using.
     current_num_devices = _resolve_current_num_devices(device_id, compile_kwargs)
 
-    if not should_attempt_failover(device_id, compile_kwargs, current_num_devices):
+    if not should_attempt_failover(compile_kwargs, current_num_devices):
         return None
 
     # Log the failover attempt
@@ -300,28 +296,34 @@ class CompiledFunctionWrapper:
     This wrapper provides the following features:
 
     1. **TP Auto-Determination**: Automatically determines num_devices based on
-       RSD device topology (RBLN_NPUS_PER_DEVICE or RBLN_DEVICE_MAP) if not explicitly set.
+       RSD device topology (RBLN_NPUS_PER_DEVICE or RBLN_DEVICE_MAP) if not explicitly
+       set.
 
     2. **TP Failover**: When TORCH_RBLN_USE_TP_FAILOVER=ON and a RuntimeError occurs
        with num_devices > 1, automatically retries with num_devices=1 on the root NPU.
 
-    3. **CPU Fallback**: Falls back to CPU execution when compilation fails (in non-debug mode).
+    3. **CPU Fallback**: Falls back to CPU execution when compilation fails (in
+       non-debug mode).
 
     4. **Recompile Limit Handling**: Handles FailOnRecompileLimitHit by resetting dynamo
        and retrying.
 
     Args:
         compiled_fn: The compiled function from torch.compile.
-        original_fn: The original uncompiled function (for CPU fallback and TP recompilation).
+        original_fn: The original uncompiled function (for CPU fallback and
+            TP recompilation).
         original_compile_fn: The original torch.compile function.
         compile_kwargs: Keyword arguments passed to torch.compile.
 
     """
 
+    _max_retries: int
+
     def __init__(self, compiled_fn, original_fn, original_compile_fn, compile_kwargs=None):
-        # object.__setattr__ so __setattr__'s delegation (which reads _original_fn) isn't
-        # triggered before the fields exist. Each field lands in __dict__ and is thereafter
-        # treated as the wrapper's own -- no hand-maintained field list to keep in sync.
+        # object.__setattr__ so __setattr__'s delegation (which reads _original_fn)
+        # isn't triggered before the fields exist. Each field lands in __dict__ and is
+        # thereafter treated as the wrapper's own -- no hand-maintained field list to
+        # keep in sync.
         object.__setattr__(self, "_compiled_fn", compiled_fn)
         object.__setattr__(self, "_original_fn", original_fn)
         object.__setattr__(self, "_original_compile_fn", original_compile_fn)
@@ -331,15 +333,15 @@ class CompiledFunctionWrapper:
         object.__setattr__(self, "_failover_attempted", False)
 
     def _is_own_attr(self, name):
-        # Own = an existing instance field or anything the wrapper class defines (methods,
-        # `forward`). Keeps e.g. patch.object(wrapper, "_try_tp_failover") shadowing the
-        # method here rather than leaking onto the model.
+        # Own = an existing instance field or anything the wrapper class defines
+        # (methods, `forward`). Keeps e.g. patch.object(wrapper, "_try_tp_failover")
+        # shadowing the method here rather than leaking onto the model.
         return name in self.__dict__ or hasattr(type(self), name)
 
     def __setattr__(self, name, value):
-        # Own state stays on the wrapper; everything else is delegated to the wrapped model,
-        # but only an nn.Module (which has training/param/buffer state to keep in sync). A
-        # plain-function target has none, so keep the attr on the wrapper.
+        # Own state stays on the wrapper; everything else is delegated to the wrapped
+        # model, but only an nn.Module (which has training/param/buffer state to keep in
+        # sync). A plain-function target has none, so keep the attr on the wrapper.
         if self._is_own_attr(name):
             object.__setattr__(self, name, value)
         elif isinstance(self._original_fn, torch.nn.Module):
@@ -356,9 +358,9 @@ class CompiledFunctionWrapper:
             object.__delattr__(self, name)
 
     def __getattr__(self, name):
-        # Fires only for attributes missing on the wrapper: delegate reads to the wrapped
-        # model/callable (state_dict/eval/parameters/...). Dunders are excluded so
-        # copy/pickle protocol lookups aren't redirected.
+        # Fires only for attributes missing on the wrapper: delegate reads to the
+        # wrapped model/callable (state_dict/eval/parameters/...). Dunders are excluded
+        # so copy/pickle protocol lookups aren't redirected.
         if name.startswith("__") and name.endswith("__"):
             raise AttributeError(name)
         model = object.__getattribute__(self, "_original_fn")
@@ -378,15 +380,16 @@ class CompiledFunctionWrapper:
     def __get__(self, obj, objtype=None):
         # Descriptor: bind the owner only for a decorated *function* target (the usual
         # `@torch.compile` on a method). A compiled nn.Module / callable object -- or an
-        # already-bound method -- is returned unchanged, so the owner is not injected as a
-        # spurious first argument (and a bound method is not bound a second time).
+        # already-bound method -- is returned unchanged, so the owner is not injected as
+        # a spurious first argument (and a bound method is not bound a second time).
         if obj is None or not isinstance(self._original_fn, types.FunctionType):
             return self
         return functools.partial(self.__call__, obj)
 
     def forward(self, *args, **kwargs):
-        # Route an explicit .forward(...) through the compiled path, like calling the wrapper
-        # directly -- else __getattr__ would delegate it to the module and bypass compilation.
+        # Route an explicit .forward(...) through the compiled path, like calling the
+        # wrapper directly -- else __getattr__ would delegate it to the module and
+        # bypass compilation.
         return self(*args, **kwargs)
 
     def _try_tp_failover(self, device_id):
@@ -436,7 +439,9 @@ class CompiledFunctionWrapper:
         return self._attempt_cpu_fallback_or_raise(error, args, kwargs)
 
     def _handle_compile_exception(self, error, args, kwargs, *, is_recompile_limit, attempt):
-        """Non-RuntimeError path: recompile-limit retries, else CPU fallback or re-raise."""
+        """Non-RuntimeError path: recompile-limit retries, else CPU fallback or
+        re-raise.
+        """
         if is_recompile_limit:
             torch._dynamo.reset()
             if attempt < self._max_retries:
@@ -444,7 +449,9 @@ class CompiledFunctionWrapper:
         return self._attempt_cpu_fallback_or_raise(error, args, kwargs)
 
     def __call__(self, *args, **kwargs):
-        """Execute the compiled function with reentrancy guard, TP auto-determination and failover."""
+        """Execute the compiled function with reentrancy guard, TP auto-determination
+        and failover.
+        """
         _enter_rbln_compile_op()
         # Isolate an outer compile's chromium event stack from this op-compile's reset.
         restore_chromium = _isolate_chromium_event_state()
@@ -476,7 +483,7 @@ class CompiledFunctionWrapper:
         for attempt in range(self._max_retries + 1):
             try:
                 return self._compiled_fn(*args, **kwargs)
-            except RuntimeError as e:
+            except RuntimeError as e:  # noqa: PERF203
                 result = self._handle_runtime_error(e, device_id, args, kwargs)
                 if result is None:
                     continue
@@ -492,6 +499,7 @@ class CompiledFunctionWrapper:
                 if result is None:
                     continue
                 return result
+        return None
 
 
 def is_rbln_backend(backend):

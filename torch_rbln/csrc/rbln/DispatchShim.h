@@ -43,9 +43,11 @@ void register_cpp_shim(
 //   n_miss       - cold/miss path (Python compile via py_fn)
 //   ns_warm_hit  - cumulative ns inside warm-cache hit path (~all in rebel run)
 //   ns_miss      - cumulative ns inside miss path (Python compile + first run)
-//   ns_fallback  - cumulative ns inside cpu_fallback_rbln (the COST of fallbacks,
-//                  so the report can separate many-cheap from few-expensive)
-std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t> diag_dump_dispatch_paths();
+//   ns_fallback  - cumulative ns inside cpu_fallback_rbln (the COST of
+//                  fallbacks, so the report can separate many-cheap from
+//                  few-expensive)
+std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>
+diag_dump_dispatch_paths();
 void diag_reset_dispatch_paths();
 uint64_t diag_dump_align_fastpath_count();
 
@@ -83,7 +85,8 @@ void diag_reset_trace_by_op();
 //  ns_finalize). Counts/accumulates only when the hit path returns true; early
 // failures (find miss, ptr==0, runtime soft-fail) are excluded so per-segment
 // averages reflect successful warm-path calls only.
-std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t> diag_dump_warm_segments();
+std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>
+diag_dump_warm_segments();
 void diag_reset_warm_segments();
 
 // Called by the Python wrapper after a successful miss-path compile to install
@@ -100,6 +103,7 @@ void diag_reset_warm_segments();
 bool install_warmcache_from_pending(
     pybind11::object dyn_runtime,
     const pybind11::object& runtime_handle,
-    const std::vector<std::tuple<std::vector<int64_t>, std::string, bool>>& out_profiles);
+    const std::vector<std::tuple<std::vector<int64_t>, std::string, bool>>&
+        out_profiles);
 
 } // namespace torch_rbln::shim

@@ -93,12 +93,16 @@ def main() -> None:
         parser.error(f"TORCH_RBLN_RELEASE_WHEELS is '{release_wheels}'; expected true or false")
     for name in ("GH_REPO", "GH_TOKEN"):
         if not os.environ.get(name):
-            raise SystemExit(f"{name} is not set")
+            msg = f"{name} is not set"
+            raise SystemExit(msg)
 
     # The release uses the checked-out commit because BUILDKITE_COMMIT
     # can be a symbolic name such as HEAD.
     head_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"], stdout=subprocess.PIPE, text=True, check=True
+        ["git", "rev-parse", "HEAD"],  # noqa: S607
+        stdout=subprocess.PIPE,
+        text=True,
+        check=True,
     ).stdout.strip()
     try:
         repo = repository()
@@ -106,13 +110,15 @@ def main() -> None:
         if tagged_sha is None:
             repo.create_git_ref(f"refs/tags/{tag}", head_sha)
     except GITHUB_ERRORS as error:
-        raise SystemExit(f"Could not read or create the tag {tag} in {os.environ['GH_REPO']}: {error}") from None
+        msg = f"Could not read or create the tag {tag} in {os.environ['GH_REPO']}: {error}"
+        raise SystemExit(msg) from None
     if tagged_sha is None:
         print(f"Created tag {tag} at {head_sha}")
     elif tagged_sha == head_sha:
         print(f"Tag {tag} already points at {head_sha}; skipping tag creation")
     else:
-        raise SystemExit(f"Tag {tag} already exists at {tagged_sha}, not at {head_sha}; pick a new version")
+        msg = f"Tag {tag} already exists at {tagged_sha}, not at {head_sha}; pick a new version"
+        raise SystemExit(msg)
 
     if shipped_version(tag) is None:
         print(
@@ -123,14 +129,16 @@ def main() -> None:
     try:
         release_exists = has_published_release(repo, tag)
     except GITHUB_ERRORS as error:
-        raise SystemExit(f"Could not look up the GitHub Release for {tag}: {error}") from None
+        msg = f"Could not look up the GitHub Release for {tag}: {error}"
+        raise SystemExit(msg) from None
     if release_exists:
         print(f"GitHub Release {tag} already exists; nothing to do")
         return
     try:
         tags = [ref.ref.removeprefix("refs/tags/") for ref in repo.get_git_matching_refs("tags/v")]
     except GITHUB_ERRORS as error:
-        raise SystemExit(f"Could not list the tags in {os.environ['GH_REPO']}: {error}") from None
+        msg = f"Could not list the tags in {os.environ['GH_REPO']}: {error}"
+        raise SystemExit(msg) from None
     baseline = notes_baseline(tag, tags)
     print(f"Release notes baseline: {baseline or '<none>'}")
 
@@ -140,7 +148,8 @@ def main() -> None:
         notes = repo.generate_release_notes(tag, previous_tag_name=baseline or NotSet)
         repo.create_git_release(tag, name=tag, message=notes.body)
     except GITHUB_ERRORS as error:
-        raise SystemExit(f"Could not create the GitHub Release for {tag}: {error}") from None
+        msg = f"Could not create the GitHub Release for {tag}: {error}"
+        raise SystemExit(msg) from None
     print(f"Created GitHub Release {tag}")
 
 

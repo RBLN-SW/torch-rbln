@@ -1,11 +1,12 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Test suite for tensor memory correctness.
+"""Test suite for tensor memory correctness.
 
-Validates that device operations produce correct results under non-trivial memory scenarios:
+Validates that device operations produce correct results under non-trivial memory
+scenarios:
 - Storage aliasing: multiple tensors sharing the same underlying storage
-- Input/output memory independence: ensuring that input and output tensors do not share overlapping memory
+- Input/output memory independence: ensuring that input and output tensors do not share
+  overlapping memory
 - Bound allocations: device buffers handed to a consumer that DMAs out of band
 - Huge host buffers: the host side of the same transfers
 - Host registration: caller-owned host ranges pinned once for those transfers
@@ -14,6 +15,8 @@ Validates that device operations produce correct results under non-trivial memor
 import gc
 import os
 import sys
+from collections.abc import Callable
+from typing import ClassVar
 from unittest import mock
 
 import pytest
@@ -33,9 +36,9 @@ RTOL = 0.01
 
 @pytest.mark.npu(count=1)
 class TestAliasedTensors(TestCase):
-    binary_ops = [torch.add]
+    binary_ops: ClassVar[list[Callable[..., torch.Tensor]]] = [torch.add]
     rbln_device = torch.device("rbln:0")
-    shapes = [(2, 16), (2, 64)]
+    shapes: ClassVar[list[tuple[int, int]]] = [(2, 16), (2, 64)]
 
     def _run_binary_op(self, binary_op, rbln_input, rbln_other):
         self.assertEqual(rbln_input.device.type, "rbln")
@@ -158,8 +161,11 @@ class TestAliasedTensors(TestCase):
 
 
 def _input_output_tensor_memory_independence_worker(rbln_device, dtype):
-    """Worker function that runs in a spawned subprocess to ensure a clean data_ptr counter."""
-    # Create a seed input tensor whose internal key value may collide with output tensor memory keys.
+    """Worker function that runs in a spawned subprocess to ensure a clean data_ptr
+    counter.
+    """
+    # Create a seed input tensor whose internal key value may collide with output tensor
+    # memory keys.
     seed_tensor = torch.randn([2, 2], dtype=dtype, device=rbln_device)
     seed_data_ptr = seed_tensor.data_ptr()
 
@@ -167,8 +173,8 @@ def _input_output_tensor_memory_independence_worker(rbln_device, dtype):
     cpu_out = torch.abs(seed_tensor.cpu())
     torch.testing.assert_close(rbln_out.cpu(), cpu_out, atol=ATOL, rtol=RTOL)
 
-    # Burn through (seed_data_ptr - 1) output tensor allocations so the next output tensor receives a key equal to
-    # seed_data_ptr, forcing a key collision.
+    # Burn through (seed_data_ptr - 1) output tensor allocations so the next output
+    # tensor receives a key equal to seed_data_ptr, forcing a key collision.
     for i in range(seed_data_ptr - 1):
         # Vary the size of the tensor to ensure unique memory allocation.
         t = torch.randn([i], dtype=dtype, device=rbln_device)
@@ -180,7 +186,8 @@ def _input_output_tensor_memory_independence_worker(rbln_device, dtype):
     x = torch.randn([2, 2, 4], dtype=dtype, device=rbln_device)
     y = torch.randn([2, 2, 4], dtype=dtype, device=rbln_device)
 
-    # Use trunc-mode division to amplify numerical divergence if the backend silently returns wrong data.
+    # Use trunc-mode division to amplify numerical divergence if the backend silently
+    # returns wrong data.
     rbln_out = torch.div(x, y, rounding_mode="trunc")
     cpu_out = torch.div(x.cpu(), y.cpu(), rounding_mode="trunc")
     torch.testing.assert_close(rbln_out.cpu(), cpu_out, atol=ATOL, rtol=RTOL)
@@ -188,8 +195,7 @@ def _input_output_tensor_memory_independence_worker(rbln_device, dtype):
 
 @pytest.mark.npu(count=1)
 class TestInputOutputTensors(TestCase):
-    """
-    Regression tests for input and output tensor memory collisions.
+    """Regression tests for input and output tensor memory collisions.
 
     The RBLN backend may confuse an output tensor with an already-allocated
     input tensor, silently producing incorrect results. This test reproduces
@@ -218,29 +224,25 @@ def _device_bytes() -> int:
 
 
 def _bind_after_shutdown_worker(device):
-    """Assert ``bind_device_memory`` raises rather than faulting once the runtime is down.
+    """Assert ``bind_device_memory`` raises rather than faulting once the runtime is
+    down.
 
     Runs in a spawned process: the shutdown flag is process-global and set-once, so
     flipping it here would poison every later test on this worker.
     """
-    # Third Party
-    import torch
-
-    import torch_rbln._C
-
     t = torch.empty(4096, dtype=torch.uint8, device=device)
-    torch_rbln._C._set_runtime_shutting_down(True)
+    torch_rbln._C._set_runtime_shutting_down(shutting_down=True)
     try:
         torch.rbln.bind_device_memory(t)
     except RuntimeError:
         return
-    raise AssertionError("bind_device_memory did not raise with the runtime shutting down")
+    msg = "bind_device_memory did not raise with the runtime shutting down"
+    raise AssertionError(msg)
 
 
 @pytest.mark.npu(count=1)
 class TestBindDeviceMemory(TestCase):
-    """
-    ``torch.rbln.bind_device_memory`` materializes a tensor's device allocation, for
+    """``torch.rbln.bind_device_memory`` materializes a tensor's device allocation, for
     a consumer that reads the physical buffers out of band and so never runs the op
     that would otherwise trigger the lazy bind.
 
@@ -267,7 +269,8 @@ class TestBindDeviceMemory(TestCase):
             after_bind = _device_bytes()
 
         self.assertEqual(before_bind, before_alloc, "the allocation was expected to still be lazy")
-        # The runtime may bring more along -- a slab it grew to serve this -- but not less.
+        # The runtime may bring more along -- a slab it grew to serve this -- but not
+        # less.
         self.assertGreaterEqual(after_bind - before_bind, nbytes)
 
     def test_binds_a_whole_tensor(self):
@@ -312,8 +315,7 @@ class TestBindDeviceMemory(TestCase):
 
 
 class TestHugeHostEmpty(TestCase):
-    """
-    ``torch.rbln.huge_host_empty`` returns host memory the device can DMA into
+    """``torch.rbln.huge_host_empty`` returns host memory the device can DMA into
     without staging through a bounce buffer and without faulting a page per
     4 KiB mid-transfer.
 
@@ -386,7 +388,9 @@ class TestHostRegisterArguments(TestCase):
 
 @pytest.mark.npu(count=1)
 class TestHostRegister(TestCase):
-    """Copies over a registered host range stay correct, including across re-registration."""
+    """Copies over a registered host range stay correct, including across
+    re-registration.
+    """
 
     rbln_device = torch.device("rbln:0")
     nbytes = 8 << 20
@@ -415,7 +419,8 @@ class TestHostRegister(TestCase):
             torch.rbln.host_unregister(slab.data_ptr(), self.rbln_device)
 
     def test_copies_stay_correct_across_unregister_and_register(self):
-        # Same host address throughout: a cached command buffer must not reuse a stale device address.
+        # Same host address throughout: a cached command buffer must not reuse a stale
+        # device address.
         slab = torch.rbln.huge_host_empty(self.nbytes)
         self.assertTrue(torch.rbln.host_register(slab.data_ptr(), slab.numel(), self.rbln_device))
         self._round_trip(slab, 0, 1 << 20, fill=3)

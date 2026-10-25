@@ -45,7 +45,7 @@ class TestForeachCopyHost(TestCase):
 
         torch._foreach_copy_(dst_dev, src_cpu)
 
-        for got, want in zip(dst_dev, src_cpu):
+        for got, want in zip(dst_dev, src_cpu, strict=True):
             _eq(got, want)
 
     def test_h2v_many_pairs(self):
@@ -53,12 +53,13 @@ class TestForeachCopyHost(TestCase):
         src_cpu = [_arange((2, 8), torch.float32) + i for i in range(n_pairs)]
         dst_dev = [_to_dev(torch.zeros(2, 8, dtype=torch.float32)) for _ in range(n_pairs)]
         torch._foreach_copy_(dst_dev, src_cpu)
-        for got, want in zip(dst_dev, src_cpu):
+        for got, want in zip(dst_dev, src_cpu, strict=True):
             _eq(got, want)
 
     def test_h2v_noncontiguous_device_dst(self):
         """A strided device destination is not batched. Writes still land in the
-        viewed positions and the gaps keep their previous contents."""
+        viewed positions and the gaps keep their previous contents.
+        """
         base = _to_dev(torch.full((5, 6), -1.0, dtype=torch.float32))
         dst_views = [base.select(1, c) for c in (1, 3)]
         src_cpu = [_arange((5,), torch.float32) + c * 10 for c in (1, 3)]
@@ -69,13 +70,14 @@ class TestForeachCopyHost(TestCase):
         self.assertEqual(calls.get("h2v_multi", 0), 0, f"strided dst must not batch: {calls}")
 
         want = torch.full((5, 6), -1.0, dtype=torch.float32)
-        for c, s in zip((1, 3), src_cpu):
+        for c, s in zip((1, 3), src_cpu, strict=True):
             want.select(1, c).copy_(s)
         _eq(base, want)
 
     def test_h2v_noncontiguous_cpu_src(self):
         """A transposed cpu source is not batched — it would emit one descriptor
-        per element. ``copy_`` stages it into one bulk DMA instead."""
+        per element. ``copy_`` stages it into one bulk DMA instead.
+        """
         src_cpu = [_arange((4, 6), torch.float32).t(), _arange((4, 6), torch.float32).t() + 50]
         dst_dev = [_to_dev(torch.zeros(6, 4, dtype=torch.float32)) for _ in src_cpu]
 
@@ -84,7 +86,7 @@ class TestForeachCopyHost(TestCase):
         calls = _prim_calls(p.dump())
         self.assertEqual(calls.get("h2v_multi", 0), 0, f"transposed src must not batch: {calls}")
 
-        for got, want in zip(dst_dev, src_cpu):
+        for got, want in zip(dst_dev, src_cpu, strict=True):
             _eq(got, want)
 
     # ---- rbln -> cpu (V2HBatch) ----
@@ -98,12 +100,13 @@ class TestForeachCopyHost(TestCase):
 
         torch._foreach_copy_(dst_cpu, src_dev)
 
-        for got, want in zip(dst_cpu, src_cpu):
+        for got, want in zip(dst_cpu, src_cpu, strict=True):
             self.assertTrue(torch.equal(got, want), f"{got} != {want}")
 
     def test_v2h_gather_into_disjoint_slices(self):
         """The gather shape: N device views read into disjoint slices of one host
-        tensor. This is the direction that had no batched path at all."""
+        tensor. This is the direction that had no batched path at all.
+        """
         blocks, block_len = 5, 8
         src_full = _arange((blocks, block_len), torch.float32)
         src_dev = [_to_dev(src_full)[b] for b in range(blocks)]
@@ -127,13 +130,14 @@ class TestForeachCopyHost(TestCase):
         self.assertEqual(calls.get("v2h_multi", 0), 0, f"strided host dst must not batch: {calls}")
 
         want = torch.full((5, 6), -1.0, dtype=torch.float32)
-        for c, s in zip((0, 4), src_cpu):
+        for c, s in zip((0, 4), src_cpu, strict=True):
             want.select(1, c).copy_(s)
         self.assertTrue(torch.equal(host, want), f"{host} != {want}")
 
     def test_v2h_repeated_source_is_allowed(self):
         """Several pairs reading the same device range into different host
-        destinations. Sources are pure reads, so this must not be refused."""
+        destinations. Sources are pure reads, so this must not be refused.
+        """
         src_cpu = _arange((16,), torch.float32)
         shared = _to_dev(src_cpu)
         dst_cpu = [torch.zeros(16, dtype=torch.float32) for _ in range(3)]
@@ -147,7 +151,8 @@ class TestForeachCopyHost(TestCase):
 
     def test_mixed_all_three_directions(self):
         """One call carrying rbln->rbln, cpu->rbln and rbln->cpu pairs. Each goes
-        to its own batch; the results must not depend on which."""
+        to its own batch; the results must not depend on which.
+        """
         d2d_src = _to_dev(_arange((3, 4), torch.float32))
         d2d_dst = _to_dev(torch.zeros(3, 4, dtype=torch.float32))
 
@@ -168,7 +173,8 @@ class TestForeachCopyHost(TestCase):
         """dtype-cast and broadcast pairs take per-pair copy_; the eligible ones
         around them are unaffected. The broadcast source is passed at its real
         shape ``(1,)`` — an already-``expand``ed one would match sizes and take
-        the batched path instead."""
+        the batched path instead.
+        """
         ok_src = _arange((4,), torch.float32)
         ok_dst = _to_dev(torch.zeros(4, dtype=torch.float32))
 
@@ -186,7 +192,8 @@ class TestForeachCopyHost(TestCase):
 
     def test_broadcast_source_at_matching_size_is_not_batched(self):
         """A stride-0 source expanded to the destination's shape matches sizes but
-        is noncontiguous, so it takes the per-pair path and must replicate there."""
+        is noncontiguous, so it takes the per-pair path and must replicate there.
+        """
         src = torch.tensor([7.0, 8.0], dtype=torch.float32).expand(5, 2)
         dst = _to_dev(torch.zeros(5, 2, dtype=torch.float32))
         with torch.rbln.explain() as p:
@@ -197,7 +204,8 @@ class TestForeachCopyHost(TestCase):
 
     def test_ineligible_pair_does_not_split_the_v2v_batch(self):
         """A pair on the per-pair path between two batchable v2v pairs must not
-        force an early submit: the two v2v pairs still share one."""
+        force an early submit: the two v2v pairs still share one.
+        """
         cases = {
             "cast": (
                 _to_dev(torch.zeros(4, dtype=torch.float32)),
@@ -235,7 +243,8 @@ class TestForeachCopyHost(TestCase):
         """An ``expand``ed destination maps several elements onto one address, so
         with unordered entries the surviving write is arbitrary. ``copy_`` refuses
         it and so must the batch. All three directions, since the guard is
-        shared."""
+        shared.
+        """
         cases = {
             "h2v": (_to_dev(torch.zeros(1)).expand(4), _arange((4,), torch.float32)),
             "v2h": (torch.zeros(1).expand(4), _to_dev(_arange((4,), torch.float32))),
@@ -245,15 +254,15 @@ class TestForeachCopyHost(TestCase):
             ),
         }
         for name, (dst, src) in cases.items():
-            with self.subTest(direction=name):
-                with pytest.raises(RuntimeError, match="refers to a single memory location"):
-                    torch._foreach_copy_([dst], [src])
+            with self.subTest(direction=name), pytest.raises(RuntimeError, match="refers to a single memory location"):
+                torch._foreach_copy_([dst], [src])
 
     def test_same_view_pairs_are_no_ops_even_when_overlapping(self):
         """``copy_`` returns early on an identical view, before its overlap check,
         so an ``expand``ed identity pair is a no-op rather than an error and the
         batch must agree. Both forms: the same tensor twice, and two tensors
-        describing the same view."""
+        describing the same view.
+        """
         base = _to_dev(_arange((1,), torch.float32))
         expanded = base.expand(4)
         same_view = base.expand(4)
@@ -273,7 +282,8 @@ class TestForeachCopyHost(TestCase):
         entry order is arbitrary. ``has_internal_overlap`` answers ``TooHard`` so
         ``assert_no_internal_overlap`` lets it through; on the host directions the
         contiguity rule refuses it first, and ``TooHard`` is what keeps the same
-        shape off the v2v batch."""
+        shape off the v2v batch.
+        """
         elems_per_row = 16 * 1024
         stride = elems_per_row // 2
         storage = _to_dev(torch.zeros(elems_per_row + stride, dtype=torch.float32))
@@ -294,7 +304,8 @@ class TestForeachCopyHost(TestCase):
     def test_pairs_before_a_throwing_pair_still_land(self):
         """A pair rejected mid-list must not swallow the ones already queued:
         without a flush before the rejection, earlier destinations would stay
-        untouched."""
+        untouched.
+        """
         ok_src = _arange((4,), torch.float32)
         ok_dst = _to_dev(torch.zeros(4, dtype=torch.float32))
         bad_dst = _to_dev(torch.zeros(1)).expand(4)
@@ -309,7 +320,8 @@ class TestForeachCopyHost(TestCase):
     def test_contiguous_pairs_batch_regardless_of_size(self):
         """Contiguous pairs stay batched at any size: one descriptor each, so the
         batch replaces N submits with one (~3x at the weight-load shape). Size
-        never enters the eligibility decision — contiguity does."""
+        never enters the eligibility decision — contiguity does.
+        """
         n_pairs = 16
         srcs = [_arange((64,), torch.float32) + i for i in range(n_pairs)]  # 256 B each
         dsts = [_to_dev(torch.zeros(64, dtype=torch.float32)) for _ in range(n_pairs)]
@@ -320,12 +332,13 @@ class TestForeachCopyHost(TestCase):
 
         self.assertEqual(calls.get("h2v_multi", 0), 1, f"contiguous pairs must batch: {calls}")
         self.assertEqual(calls.get("h2v", 0), 0, f"{calls}")
-        for got, want in zip(dsts, srcs):
+        for got, want in zip(dsts, srcs, strict=True):
             _eq(got, want)
 
     def test_pinned_non_blocking_pairs_stay_per_pair(self):
         """The multi entrypoints are sync-only, so a pinned + non_blocking pair
-        keeps its per-pair async copy. The same pairs batch without the flag."""
+        keeps its per-pair async copy. The same pairs batch without the flag.
+        """
         srcs = [(_arange((64,), torch.float32) + i).pin_memory() for i in range(4)]
         dsts = [_to_dev(torch.zeros(64, dtype=torch.float32)) for _ in range(4)]
 
@@ -333,7 +346,7 @@ class TestForeachCopyHost(TestCase):
             torch._foreach_copy_(dsts, srcs, non_blocking=True)
         calls = _prim_calls(p.dump())
         self.assertEqual(calls.get("h2v_multi", 0), 0, f"pinned async must not batch: {calls}")
-        for got, want in zip(dsts, srcs):
+        for got, want in zip(dsts, srcs, strict=True):
             _eq(got, want)
 
         dsts = [_to_dev(torch.zeros(64, dtype=torch.float32)) for _ in range(4)]
@@ -341,12 +354,13 @@ class TestForeachCopyHost(TestCase):
             torch._foreach_copy_(dsts, srcs)
         calls = _prim_calls(p.dump())
         self.assertEqual(calls.get("h2v_multi", 0), 1, f"pinned sync must batch: {calls}")
-        for got, want in zip(dsts, srcs):
+        for got, want in zip(dsts, srcs, strict=True):
             _eq(got, want)
 
     def test_empty_lists_rejected_upstream(self):
         """Empty tensor lists are rejected by PyTorch before reaching the RBLN
-        kernel, so the op is never invoked with zero pairs."""
+        kernel, so the op is never invoked with zero pairs.
+        """
         with pytest.raises(RuntimeError, match="at least one tensor"):
             torch._foreach_copy_([], [])
 
@@ -361,7 +375,8 @@ class TestForeachCopyHost(TestCase):
     def test_overlapping_host_destinations_stay_ordered(self):
         """Two pairs whose host destinations overlap must drop to the sequential
         path: the runtime requires disjoint destinations and does not check, and
-        batching would make the write order observable."""
+        batching would make the write order observable.
+        """
         src_a_cpu = torch.full((8,), 1.0, dtype=torch.float32)
         src_b_cpu = torch.full((8,), 2.0, dtype=torch.float32)
 
@@ -378,7 +393,8 @@ class TestForeachCopyHost(TestCase):
     def test_host_destination_aliasing_a_source_stays_ordered(self):
         """A host destination that is also a later pair's source (RAW). List order
         means pair 1 reads what pair 0 wrote, so the second destination must hold
-        the new contents; batching would let it read the pre-copy bytes."""
+        the new contents; batching would let it read the pre-copy bytes.
+        """
         nines = torch.full((8,), 9.0, dtype=torch.float32)
         shared = _arange((8,), torch.float32)
         dev_src = _to_dev(nines)
@@ -397,7 +413,8 @@ class TestForeachCopyHost(TestCase):
 
     def test_h2v_uses_one_batched_submit(self):
         """N cpu->rbln pairs must reach the runtime through one h2v_multi call, not
-        N per-entry h2v calls."""
+        N per-entry h2v calls.
+        """
         n_pairs = 8
         src_cpu = [_arange((4, 4), torch.float32) + i for i in range(n_pairs)]
         dst_dev = [_to_dev(torch.zeros(4, 4, dtype=torch.float32)) for _ in range(n_pairs)]
@@ -408,7 +425,7 @@ class TestForeachCopyHost(TestCase):
 
         self.assertEqual(calls.get("h2v_multi", 0), 1, f"expected one batched submit, got {calls}")
         self.assertEqual(calls.get("h2v", 0), 0, f"no per-entry h2v expected, got {calls}")
-        for got, want in zip(dst_dev, src_cpu):
+        for got, want in zip(dst_dev, src_cpu, strict=True):
             _eq(got, want)
 
     def test_v2h_uses_one_batched_submit(self):
@@ -423,7 +440,7 @@ class TestForeachCopyHost(TestCase):
 
         self.assertEqual(calls.get("v2h_multi", 0), 1, f"expected one batched submit, got {calls}")
         self.assertEqual(calls.get("v2h", 0), 0, f"no per-entry v2h expected, got {calls}")
-        for got, want in zip(dst_cpu, src_cpu):
+        for got, want in zip(dst_cpu, src_cpu, strict=True):
             self.assertTrue(torch.equal(got, want))
 
     def test_oversized_batch_is_split_across_capped_submits(self):
@@ -445,7 +462,7 @@ class TestForeachCopyHost(TestCase):
                 calls.get("v2h_multi", 0), want_calls, f"{n_pairs} pairs of 1MiB: expected {want_calls}, got {calls}"
             )
             self.assertEqual(calls.get("v2h", 0), 0, f"splitting must not degrade to per-entry: {calls}")
-            for got, want in zip(dst_cpu, src_cpu):
+            for got, want in zip(dst_cpu, src_cpu, strict=True):
                 self.assertTrue(torch.equal(got, want))
 
             with torch.rbln.explain() as p:
@@ -455,13 +472,14 @@ class TestForeachCopyHost(TestCase):
                 calls.get("h2v_multi", 0), want_calls, f"{n_pairs} pairs of 1MiB: expected {want_calls}, got {calls}"
             )
             self.assertEqual(calls.get("h2v", 0), 0, f"splitting must not degrade to per-entry: {calls}")
-            for got, want in zip(dst_dev, src_cpu):
+            for got, want in zip(dst_dev, src_cpu, strict=True):
                 _eq(got, want)
 
     def test_entry_cap_splits_a_batch_under_the_byte_cap(self):
         """The 16-entry limit is the separate half of the cap: 40 entries of 64 KiB
         total 2.5 MiB, so only the entry count can split them — three calls, not
-        one."""
+        one.
+        """
         elems = (64 << 10) // 4  # float32 elements
         n_pairs = 40
         srcs = [_arange((elems,), torch.float32) + i for i in range(n_pairs)]
@@ -473,12 +491,13 @@ class TestForeachCopyHost(TestCase):
 
         self.assertEqual(calls.get("h2v_multi", 0), 3, f"40 entries must split at 16: {calls}")
         self.assertEqual(calls.get("h2v", 0), 0, f"splitting must not degrade to per-entry: {calls}")
-        for got, want in zip(dsts, srcs):
+        for got, want in zip(dsts, srcs, strict=True):
             _eq(got, want)
 
     def test_entry_over_the_cap_goes_per_entry(self):
         """A single descriptor larger than the 8 MiB cap cannot be split, so it
-        takes the single-copy path — which has no cap — instead of a bulk call."""
+        takes the single-copy path — which has no cap — instead of a bulk call.
+        """
         elems = (12 << 20) // 4  # 12 MiB of float32
         src_cpu = _arange((elems,), torch.float32)
 
@@ -500,7 +519,8 @@ class TestForeachCopyHost(TestCase):
 
     def test_mixed_directions_use_one_submit_each(self):
         """A list spanning all three directions costs one submit per direction —
-        three total, not one per pair."""
+        three total, not one per pair.
+        """
         pairs = 4
         d2d_dst = [_to_dev(torch.zeros(4, dtype=torch.float32)) for _ in range(pairs)]
         d2d_src = [_to_dev(_arange((4,), torch.float32) + i) for i in range(pairs)]
@@ -519,7 +539,8 @@ class TestForeachCopyHost(TestCase):
 
     def test_no_batch_fallback_recorded_on_the_happy_path(self):
         """A well-formed batch must not record a bounce. A fallback here would be
-        invisible in the values — the copy still completes, just slowly."""
+        invisible in the values — the copy still completes, just slowly.
+        """
         src_cpu = [_arange((8, 8), torch.float32) + i for i in range(6)]
         dst_dev = [_to_dev(torch.zeros(8, 8, dtype=torch.float32)) for _ in range(6)]
 

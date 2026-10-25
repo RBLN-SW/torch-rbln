@@ -1,12 +1,16 @@
 # Test Guide
 
-This guide covers how to run, write, and debug tests for `torch-rbln`, the RBLN NPU backend for PyTorch registered through the [`PrivateUse1`](https://docs.pytorch.org/tutorials/advanced/privateuseone.html) extension mechanism.
+This guide covers how to run, write, and debug tests for `torch-rbln`, the RBLN
+NPU backend for PyTorch registered through the
+[`PrivateUse1`](https://docs.pytorch.org/tutorials/advanced/privateuseone.html)
+extension mechanism.
 
 ---
 
 ## Prerequisites
 
-Install `torch-rbln` in the project environment, then install the test dependencies into it:
+Install `torch-rbln` in the project environment, then install the test
+dependencies into it:
 
 ```bash
 uv run --no-sync bash \
@@ -14,9 +18,13 @@ uv run --no-sync bash \
 ```
 
 This installs:
-- **Test runner:** [`pytest`](https://docs.pytest.org/), [`pytest-xdist`](https://pytest-xdist.readthedocs.io/) (parallel execution)
-- **Test infra:** [`expecttest`](https://github.com/ezyang/expecttest) (required by `torch.testing._internal`)
-- **Model-test dependencies:** transformers 4.49.0 (the version the RBLN PyTorch tutorial pins)
+
+- **Test runner**: [`pytest`](https://docs.pytest.org/),
+  [`pytest-xdist`](https://pytest-xdist.readthedocs.io/) (parallel execution)
+- **Test infra**: [`expecttest`](https://github.com/ezyang/expecttest) (required
+  by `torch.testing._internal`)
+- **Model-test dependencies**: `transformers` 4.49.0 (the version the RBLN
+  PyTorch tutorial pins)
 
 Model tests may also need external model artifacts.
 
@@ -24,14 +32,20 @@ Model tests may also need external model artifacts.
 
 ## Test frameworks
 
-- **Python:** [`pytest`](https://docs.pytest.org/) with [`pytest-xdist`](https://pytest-xdist.readthedocs.io/) for parallel workers, plus the PyTorch test framework (`torch.testing._internal`) for device-type instantiation, dtype parametrization, and `OpInfo` op tests.
-- **C++:** [Google Test](https://google.github.io/googletest/), built with CMake and discovered with `gtest_discover_tests()`. Each test executable links against `torch_rbln` and `GTest::gtest_main`.
+- **Python**: [`pytest`](https://docs.pytest.org/) with
+  [`pytest-xdist`](https://pytest-xdist.readthedocs.io/) for parallel workers,
+  plus the PyTorch test framework (`torch.testing._internal`) for device-type
+  instantiation, dtype parametrization, and `OpInfo` op tests.
+- **C++**: [GoogleTest](https://google.github.io/googletest/), built with CMake
+  and discovered with `gtest_discover_tests()`. Each test executable links
+  against `torch_rbln` and `GTest::gtest_main`.
 
 ---
 
 ## Directory layout
 
-```
+<!-- rumdl-disable MD013 -->
+```text
 test/
 ├── conftest.py   # Global pytest fixtures (deterministic seeding, Dynamo reset, env-var isolation)
 ├── filters.py    # Op-test filters (PrivateUse1 dispatch key parsing, skipped tests, unsupported ops)
@@ -71,7 +85,7 @@ test/
 ├── models/                                # Model-level integration tests
 │   └── test_transformers.py               # Causal-LM logits vs an fp32 CPU reference (transformers)
 │
-└── cpp/                                   # C++ unit tests (Google Test)
+└── cpp/                                   # C++ unit tests (GoogleTest)
     ├── CMakeLists.txt
     ├── core/                              # Core C++ tests
     │   ├── RBLNAllocatorTest.cpp          # Device memory allocator
@@ -82,16 +96,20 @@ test/
     └── c10d/
         └── ProcessGroupRBLNTest.cpp       # ProcessGroup C++ tests
 ```
+<!-- rumdl-enable MD013 -->
 
 ---
 
 ## Run Python tests
 
-Run `pytest` through `uv run --no-sync`, which uses the project environment without syncing it, so the editable build stays in place.
+Run `pytest` through `uv run --no-sync`, which uses the project environment
+without syncing it, so the editable build stays in place.
 
 ### Run a suite the way CI does
 
-CI tests each suite with two `pytest` runs on its directory: the tests marked `serial` on one worker, then the rest in parallel. For the `core` suite in the pre-merge checks:
+CI tests each suite with two `pytest` runs on its directory: the tests marked
+`serial` on one worker, then the rest in parallel. For the `core` suite in the
+pre-merge checks:
 
 ```bash
 uv run --no-sync pytest \
@@ -105,7 +123,12 @@ uv run --no-sync pytest \
   --numprocesses=32
 ```
 
-Release checks drop `(not periodic) and`. CI also splits a suite into steps by NPU count, each with both runs (see [Python tests](PIPELINES.md#python-tests)). The `core` suite runs `test/rbln`; `distributed`, `models`, and `ops` run `test/<suite>`, and `models` needs the [model-test dependencies](#prerequisites). CI counts a `pytest` run that collects nothing (exit code 5) as no failure.
+Release checks drop `(not periodic) and`. CI also splits a suite into steps by
+NPU count, each with both runs (see [Python tests](PIPELINES.md#python-tests)).
+The `core` suite runs `test/rbln`; `distributed`, `models`, and `ops` run
+`test/<suite>`, and `models` needs the
+[model-test dependencies](#prerequisites). CI counts a `pytest` run that
+collects nothing (exit code 5) as no failure.
 
 ### Run individual tests
 
@@ -175,19 +198,22 @@ ctest \
 
 ## `pytest` configuration
 
-All `pytest` configuration lives in `pyproject.toml` under `[tool.pytest.ini_options]`.
+All `pytest` configuration lives in `pyproject.toml` under
+`[tool.pytest.ini_options]`.
 
 ### Default options
 
+<!-- rumdl-disable MD013 -->
 ```toml
 [tool.pytest.ini_options]
 addopts = "--verbose -rEfX --tb=native -p no:warnings --assert=plain --max-worker-restart=0 --strict-markers"
 testpaths = ["test"]
 xfail_strict = true
 ```
+<!-- rumdl-enable MD013 -->
 
 | Option                   | Effect                                                            |
-|--------------------------|-------------------------------------------------------------------|
+| ------------------------ | ----------------------------------------------------------------- |
 | `--verbose`              | Show each test name and result                                    |
 | `-rEfX`                  | Extra summary for Error, failed, and Xpassed tests                |
 | `--tb=native`            | Standard Python traceback format                                  |
@@ -202,53 +228,76 @@ xfail_strict = true
 The suite registers these markers in `pyproject.toml`:
 
 | Marker            | Description                                                                                     |
-|-------------------|-------------------------------------------------------------------------------------------------|
+| ----------------- | ----------------------------------------------------------------------------------------------- |
 | `periodic`        | Runs only in release checks.                                                                    |
 | `serial`          | Runs on a single worker and fails at setup when run in parallel.                                |
 | `npu(count=N)`    | Requires N NPUs, where N is 1, 2, 4, or 8. When N is 0, runs only without an NPU.               |
 | `no_dynamo_reset` | Keeps the TorchDynamo cache from earlier tests by skipping the autouse `reset_dynamo` fixture.  |
 | `torch_rbln_only` | Has an outcome that does not depend on `rebel-compiler`, so `rebel-compiler`'s CI deselects it. |
 
-To make a test require NPUs, mark it with `npu(count=N)`, not with `deviceCountAtLeast` from `torch.testing._internal`, which breaks device-type test generation in every file collected after it and silently drops most tests. Follow these rules for `npu(count=N)`:
+To make a test require NPUs, mark it with `npu(count=N)`, not with
+`deviceCountAtLeast` from `torch.testing._internal`, which breaks device-type
+test generation in every file collected after it and silently drops most tests.
+Follow these rules for `npu(count=N)`:
 
 - Pass `count` as a keyword, and round any other count up to 1, 2, 4, or 8.
 - Use `count=0` only for a test that asserts the no-device state.
-- Leave a test that runs with or without an NPU unmarked. CI runs it only in an NPU-less step (see [Python tests](PIPELINES.md#python-tests)).
+- Leave a test that runs with or without an NPU unmarked. CI runs it only in an
+  NPU-less step (see [Python tests](PIPELINES.md#python-tests)).
 
-For more information about when to use `periodic` and `torch_rbln_only`, see [CI integration](#ci-integration).
+For more information about when to use `periodic` and `torch_rbln_only`, see
+[CI integration](#ci-integration).
 
 ### Fixtures
 
-These fixtures are defined in `test/conftest.py` and apply automatically to every test unless noted otherwise.
+These fixtures are defined in `test/conftest.py` and apply automatically to
+every test unless noted otherwise.
 
-| Fixture                          | Scope    | Autouse | Description                                                                                                   |
-|----------------------------------|----------|---------|---------------------------------------------------------------------------------------------------------------|
-| `set_seeds`                      | function | **Yes** | Sets `torch.manual_seed(0)`, `np.random.seed(0)`, `random.seed(0)` for deterministic reproducibility          |
-| `reset_dynamo`                   | function | **Yes** | Calls `torch._dynamo.reset()` before each test. Skipped if test is marked with `@pytest.mark.no_dynamo_reset` |
-| `disable_compile_error_fallback` | function | **Yes** | Appends `compile_error` to `TORCH_RBLN_DISABLE_FALLBACK` env var                                              |
+| Fixture                          | Scope    | Autouse | Description                                                                                                                                  |
+| -------------------------------- | -------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `set_seeds`                      | function | **Yes** | Sets `torch.manual_seed(0)`, `np.random.seed(0)`, `random.seed(0)` for deterministic reproducibility                                         |
+| `reset_dynamo`                   | function | **Yes** | Calls `torch._dynamo.reset()` before each test. Skipped if test is marked with `@pytest.mark.no_dynamo_reset`                                |
+| `disable_compile_error_fallback` | function | **Yes** | Appends `compile_error` to `TORCH_RBLN_DISABLE_FALLBACK` env var                                                                             |
 | `reset_caching_allocator`        | function | **Yes** | Drains in-flight device work then releases the RBLN caching-allocator blocks in teardown; fails loud and skips the flush if the drain faults |
-| `restore_current_device`         | function | **Yes** | Restores the selected RBLN device and lazy-init flag after each test so a `set_device()` can't leak into later tests |
-| `restore_current_stream`         | function | **Yes** | Restores every device's current stream after each test so a `set_stream()` can't leak into later tests               |
-| `enable_deploy_mode`             | function | No      | Sets `TORCH_RBLN_DEPLOY=ON`. Apply with `@pytest.mark.usefixtures("enable_deploy_mode")`                      |
-| `enable_eager_malloc`            | function | No      | Sets `TORCH_RBLN_EAGER_MALLOC=1`. Apply with `@pytest.mark.usefixtures("enable_eager_malloc")`                |
+| `restore_current_device`         | function | **Yes** | Restores the selected RBLN device and lazy-init flag after each test so a `set_device()` can't leak into later tests                         |
+| `restore_current_stream`         | function | **Yes** | Restores every device's current stream after each test so a `set_stream()` can't leak into later tests                                       |
+| `enable_deploy_mode`             | function | No      | Sets `TORCH_RBLN_DEPLOY=ON`. Apply with `@pytest.mark.usefixtures("enable_deploy_mode")`                                                     |
+| `enable_eager_malloc`            | function | No      | Sets `TORCH_RBLN_EAGER_MALLOC=1`. Apply with `@pytest.mark.usefixtures("enable_eager_malloc")`                                               |
 
 ---
 
-## PrivateUse1 test framework
+## `PrivateUse1` test framework
 
 ### Device-type test instantiation
 
-The PyTorch test framework (`torch.testing._internal`) automatically generates device-specific test classes from templates. The key mechanism is `instantiate_device_type_tests()`:
+The PyTorch test framework (`torch.testing._internal`) automatically generates
+device-specific test classes from templates. The key mechanism is
+`instantiate_device_type_tests()`:
 
-1. Write a template class inheriting from `TestCase` with methods that accept a `device` parameter.
-2. Call `instantiate_device_type_tests(TestClass, globals(), only_for="privateuse1")` at module scope.
-3. The framework generates concrete classes like `TestFooPRIVATEUSE1`, with `_rbln` added to each method name before any dtype suffix.
+1. Write a template class inheriting from `TestCase` with methods that accept a
+   `device` parameter.
+2. Call
+   `instantiate_device_type_tests(TestClass, globals(), only_for="privateuse1")`
+   at module scope.
+3. The framework generates concrete classes like `TestFooPRIVATEUSE1`, with
+   `_rbln` added to each method name before any dtype suffix.
 
-**New device-type tests use `only_for="privateuse1"`** to generate tests exclusively for the RBLN backend, avoiding unnecessary CPU/CUDA variants.
+**New device-type tests use `only_for="privateuse1"`** to generate tests
+exclusively for the RBLN backend, avoiding unnecessary CPU/CUDA variants.
 
-Since that leaves exactly one device type, the instantiation earns its keep through the axes it expands — `@dtypes`, `@parametrize`, or a `device` argument — and it is required for any test that uses one.
+Since that leaves exactly one device type, the instantiation earns its keep
+through the axes it expands — `@dtypes`, `@parametrize`, or a `device` argument
+— and it is required for any test that uses one.
 
-**Do not wrap a test that never touches a device.** The call deletes the template class and rebuilds it per device type, and the RBLN base is only in that list when `torch.rbln.is_available()` is true. On a host without an NPU the template is gone and nothing replaces it, so the file collects zero tests — no failure, no skip. This costs nothing for a test that requires an NPU. A wrapped test that never touches a device, however, never runs in CI: only an NPU-less step selects it, and there the template generates no tests. Tests asserting behavior with no device present (`test_dummy_device.py`, `test_no_device.py`) or through a subprocess (`test_import_rbln_devices_seal.py`) are plain `TestCase`.
+**Do not wrap a test that never touches a device**. The call deletes the
+template class and rebuilds it per device type, and the RBLN base is only in
+that list when `torch.rbln.is_available()` is true. On a host without an NPU the
+template is gone and nothing replaces it, so the file collects zero tests — no
+failure, no skip. This costs nothing for a test that requires an NPU. A wrapped
+test that never touches a device, however, never runs in CI: only an NPU-less
+step selects it, and there the template generates no tests. Tests asserting
+behavior with no device present (`test_dummy_device.py`, `test_no_device.py`) or
+through a subprocess (`test_import_rbln_devices_seal.py`) are plain `TestCase`.
 
 ```python
 # This call at the bottom of a device-type test file:
@@ -263,7 +312,7 @@ instantiate_device_type_tests(TestRegisteredNativeOps, globals(), only_for="priv
 From `torch.testing._internal`:
 
 | Decorator                      | Description                                                                          |
-|--------------------------------|--------------------------------------------------------------------------------------|
+| ------------------------------ | ------------------------------------------------------------------------------------ |
 | `@parametrize("name", values)` | Generates independent test cases per value. Composes with device-type instantiation. |
 | `@dtypes(*dtypes)`             | Generates dtype-specialized variants (e.g., `test_foo_rbln_float16`).                |
 | `@ops(op_db)`                  | Instantiates the test for every OpInfo × dtype × device combination.                 |
@@ -274,21 +323,26 @@ From `torch.testing._internal`:
 From `test/utils.py`:
 
 | Utility                                | Description                                                                                                                     |
-|----------------------------------------|---------------------------------------------------------------------------------------------------------------------------------|
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | `SUPPORTED_DTYPES`                     | Baseline dtype list for RBLN backend tests, derived from `torch_rbln._internal.ops_utils.SupportedDtypes.dispatch`.             |
-| `set_deterministic_seeds(seed)`        | Sets torch, numpy, and random seeds. Must be called in each spawned process for reproducibility.                                |
+| `set_deterministic_seeds(seed)`        | Sets `torch`, `numpy`, and `random` seeds. Must be called in each spawned process for reproducibility.                          |
 | `run_in_isolated_process(func, *args)` | Runs `func` in a fresh `spawn`-method process. Useful when tests need clean process state. `func` and `args` must be picklable. |
 
 ### Op filtering
 
-`test/filters.py` provides `custom_instantiate_device_type_tests()` — a wrapper around `instantiate_device_type_tests()` that automatically skips tests for operators not supported on the RBLN backend:
+`test/filters.py` provides `custom_instantiate_device_type_tests()` — a wrapper
+around `instantiate_device_type_tests()` that automatically skips tests for
+operators not supported on the RBLN backend:
 
-- Parses `aten/src/ATen/native/native_functions.yaml` for ops with `PrivateUse1` dispatch keys
+- Parses `aten/src/ATen/native/native_functions.yaml` for ops with `PrivateUse1`
+  dispatch keys
 - Skips tests for ops not in the parsed list
-- Skips unsupported dtypes (only `SUPPORTED_DTYPES` are allowed, with exceptions for CPU-fallback dtype tests like SDPA)
+- Skips unsupported dtypes (only `SUPPORTED_DTYPES` are allowed, with exceptions
+  for CPU-fallback dtype tests like SDPA)
 - Skips specific known-failing tests listed in `_skipped_tests`
 - Skips forward AD tests for ops listed in `_ops_without_forward_ad_support`
-- In debug builds (`torch.version.debug`), runs only a representative subset of ops for faster iteration
+- In debug builds (`torch.version.debug`), runs only a representative subset of
+  ops for faster iteration
 
 ```python
 # Used in test/ops/test_ops.py instead of plain instantiate_device_type_tests:
@@ -299,26 +353,29 @@ custom_instantiate_device_type_tests(TestCommon, globals(), only_for="privateuse
 
 ### Contract conformance tests
 
-`test/rbln/test_privateuse1_contract.py` is organized differently from the rest of the
-suite, on purpose: PyTorch does not merely *offer* the `torch.rbln` module and the RBLN
-accelerator hooks, it calls into them from paths that never asked for an NPU. Each test
-pins exactly one clause upstream states and cites its source, so a torch upgrade or a new
-call site fails on the clause rather than on a downstream symptom.
+`test/rbln/test_privateuse1_contract.py` is organized differently from the rest
+of the suite, on purpose: PyTorch does not merely _offer_ the `torch.rbln`
+module and the RBLN accelerator hooks, it calls into them from paths that never
+asked for an NPU. Each test pins exactly one clause upstream states and cites
+its source, so a `torch` upgrade or a new call site fails on the clause rather
+than on a downstream symptom.
 
 Conventions specific to it:
 
 - **Every probe runs in a fresh subprocess** (`run_probe`). It cannot use
-  `run_in_isolated_process()` from `test/utils.py`, which needs a picklable callable, runs
-  after `torch_rbln` is already imported, and captures no output — the probes must set
-  `RBLN_*` *before* the import and inspect stdout/stderr.
-- **A clause not satisfied yet is a `strict=True` xfail** naming the work that closes it,
-  rather than being omitted. `xfail_strict = true` is the project default, so an unexpected
-  pass fails the suite and signals that the marker should be removed.
-- **The remap verdict needs a reference measurement.** With one usable NPU a live mapping and
-  a frozen one report the same device count, so `Probe.remap` is conclusive only when a pool
-  scanned in a clean process shows two or more; `/dev/rbln*` is not that count, since a
-  container can show more device nodes than the runtime can use. Scenarios name devices from
-  this job's own selection instead of assuming id 0 is theirs.
+  `run_in_isolated_process()` from `test/utils.py`, which needs a picklable
+  callable, runs after `torch_rbln` is already imported, and captures no output
+  — the probes must set `RBLN_*` _before_ the import and inspect stdout/stderr.
+- **A clause not satisfied yet is a `strict=True` xfail** naming the work that
+  closes it, rather than being omitted. `xfail_strict = true` is the project
+  default, so an unexpected pass fails the suite and signals that the marker
+  should be removed.
+- **The remap verdict needs a reference measurement**. With one usable NPU a
+  live mapping and a frozen one report the same device count, so `Probe.remap`
+  is conclusive only when a pool scanned in a clean process shows two or more;
+  `/dev/rbln*` is not that count, since a container can show more device nodes
+  than the runtime can use. Scenarios name devices from this job's own selection
+  instead of assuming id 0 is theirs.
 
 ---
 
@@ -360,17 +417,22 @@ if __name__ == "__main__":
     run_tests()
 ```
 
-> **Key points:**
+> **Key points**:
+>
 > - Inherit from `TestCase` (from `torch.testing._internal.common_utils`).
-> - Add `@pytest.mark.periodic` only when the test meets one of the [criteria](#when-to-use-the-periodic-marker).
-> - Mark the class with `@pytest.mark.npu(count=N)` as described in [Markers](#markers).
+> - Add `@pytest.mark.periodic` only when the test meets one of the
+> [criteria](#when-to-use-the-periodic-marker).
+> - Mark the class with `@pytest.mark.npu(count=N)` as described in
+> [Markers](#markers).
 > - Use `@dtypes(*SUPPORTED_DTYPES)` to parametrize over RBLN-supported dtypes.
-> - Call `instantiate_device_type_tests(..., only_for="privateuse1")` at module scope to generate RBLN-only test classes.
+> - Call `instantiate_device_type_tests(..., only_for="privateuse1")` at module
+>   scope to generate RBLN-only test classes.
 > - End with `if __name__ == "__main__": run_tests()`.
 
 ### Template with fixtures
 
-When tests need specific environment configurations, use `@pytest.mark.usefixtures`:
+When tests need specific environment configurations, use
+`@pytest.mark.usefixtures`:
 
 ```python
 import pytest
@@ -456,22 +518,25 @@ class TestMemoryStats(TestCase):
         # Memory may not be freed immediately due to caching allocator
 ```
 
-> **Rule — never process-cache an env flag that tests toggle per-test.** xdist workers
-> are long-lived processes that run many tests in sequence. A function-scoped fixture
-> (`enable_deploy_mode`, `enable_eager_malloc`, `monkeypatch.setenv`, `patch.dict`) sets an
-> env var for one test, but if C++/Python reads it *once* and caches it in a
-> `static`/`@lru_cache` for the process lifetime, the **first** value latches into the whole
-> worker and leaks into every later test on it — an intermittent, order-dependent failure
-> that only shows up when xdist happens to schedule the toggling test first (e.g. the
-> `test_runtime_hidden_d2h` / eager-malloc flake). Read such flags **live** (`std::getenv`
-> per call — see `is_deploy_mode()` / `is_nan_inf_check_disabled()` in `DispatchShim.cpp`),
-> and if a Python `@lru_cache` gate must respond to per-test env, `cache_clear()` it in the
+> **Rule — never process-cache an env flag that tests toggle per-test**. xdist
+> workers are long-lived processes that run many tests in sequence. A
+> function-scoped fixture (`enable_deploy_mode`, `enable_eager_malloc`,
+> `monkeypatch.setenv`, `patch.dict`) sets an env var for one test, but if
+> C++/Python reads it _once_ and caches it in a `static`/`@lru_cache` for the
+> process lifetime, the **first** value latches into the whole worker and leaks
+> into every later test on it — an intermittent, order-dependent failure that
+> only shows up when xdist happens to schedule the toggling test first (e.g. the
+> `test_runtime_hidden_d2h` / eager-malloc flake). Read such flags **live**
+> (`std::getenv` per call — see `is_deploy_mode()` /
+> `is_nan_inf_check_disabled()` in `DispatchShim.cpp`), and if a Python
+> `@lru_cache` gate must respond to per-test env, `cache_clear()` it in the
 > fixture's teardown.
 >
-> The same applies to any other process-global state a test mutates. Restore it in the
-> test's own teardown (e.g. `TestTorchCompileMonkeyPatch.tearDown` re-installs the original
-> `torch.compile` wrappers it patched), or — for the selected RBLN device and the current
-> stream — rely on the autouse `restore_current_device` / `restore_current_stream` guards in
+> The same applies to any other process-global state a test mutates. Restore it
+> in the test's own teardown (e.g. `TestTorchCompileMonkeyPatch.tearDown`
+> re-installs the original `torch.compile` wrappers it patched), or — for the
+> selected RBLN device and the current stream — rely on the autouse
+> `restore_current_device` / `restore_current_stream` guards in
 > `test/conftest.py` that repair them after each test.
 
 ### Custom kernel template
@@ -506,7 +571,8 @@ instantiate_device_type_tests(TestCustomKernel, globals(), only_for="privateuse1
 
 ### C++ template
 
-C++ tests register the `privateuse1` backend as `"rbln"` and use Google Test fixtures:
+C++ tests register the `privateuse1` backend as `"rbln"` and use GoogleTest
+fixtures:
 
 ```cpp
 #include <c10/core/Allocator.h>
@@ -538,15 +604,19 @@ TEST_F(RBLNMyFeatureTest, BasicOperation) {
 ```
 
 To add a new C++ test:
+
 1. Create the `.cpp` file under `test/cpp/`.
 2. Add it to `test/cpp/CMakeLists.txt` in the `sources` list.
 3. Rebuild with `uv pip install -e . --no-build-isolation`.
 
-CI runs all the tests of a binary in one process, whereas `ctest` runs each test in its own process, so a test must not depend on starting in a fresh process.
+CI runs all the tests of a binary in one process, whereas `ctest` runs each test
+in its own process, so a test must not depend on starting in a fresh process.
 
 ### Parametrization
 
-Use `@parametrize` from `torch.testing._internal.common_utils` — **not** `pytest.mark.parametrize`. The PyTorch decorator integrates with `instantiate_device_type_tests()` and produces correctly suffixed test names.
+Use `@parametrize` from `torch.testing._internal.common_utils` — **not**
+`pytest.mark.parametrize`. The PyTorch decorator integrates with
+`instantiate_device_type_tests()` and produces correctly suffixed test names.
 
 #### Prefer parametrization over loops
 
@@ -584,7 +654,8 @@ uv run --no-sync pytest \
   --quiet
 ```
 
-The output lists each generated test, such as `<TestCaseFunction test_clone_shape0_rbln_float16>`.
+The output lists each generated test, such as
+`<TestCaseFunction test_clone_shape0_rbln_float16>`.
 
 ---
 
@@ -592,43 +663,50 @@ The output lists each generated test, such as `<TestCaseFunction test_clone_shap
 
 ### Multi-device tests skipped
 
-```
+```text
 SKIPPED (NPUs required: 2, available: 1)
 ```
 
-**Cause:** The test is marked `npu(count=N)`, but fewer than N NPUs are available, so `test/conftest.py` skips it.
+**Cause**: The test is marked `npu(count=N)`, but fewer than N NPUs are
+available, so `test/conftest.py` skips it.
 
-**Fix:** Run the test on a machine with at least N NPUs.
+**Fix**: Run the test on a machine with at least N NPUs.
 
 ### Missing model-test dependencies
 
-```
+```text
 ModuleNotFoundError: No module named 'transformers'
 ```
 
-**Cause:** The extra packages required by model tests are not installed.
+**Cause**: The extra packages required by model tests are not installed.
 
-**Fix:** Install them as described in [Prerequisites](#prerequisites).
+**Fix**: Install them as described in [Prerequisites](#prerequisites).
 
 ### Numerical tolerance mismatch
 
-```
+```text
 AssertionError: Tensor-likes are not close!
 ```
 
-**Cause:** The RBLN result exceeds the test's `atol`/`rtol` tolerance compared to the CPU reference.
+**Cause**: The RBLN result exceeds the test's `atol`/`rtol` tolerance compared
+to the CPU reference.
 
-**Fix:** Check whether the op has known precision limitations and adjust tolerances if appropriate.
+**Fix**: Check whether the op has known precision limitations and adjust
+tolerances if appropriate.
 
 ### Worker crash
 
-```
+```text
 worker 'gw0' crashed while running 'test/rbln/test_problem_file.py::<test>'
 ```
 
-**Cause:** A parallel worker process crashed. The project sets `--max-worker-restart=0`, so xdist does not replace the worker and stops the `pytest` run.
+**Cause**: A parallel worker process crashed. The project sets
+`--max-worker-restart=0`, so xdist does not replace the worker and stops the
+`pytest` run.
 
-**Fix:** To see the crash's traceback and output, rerun the test file without xdist:
+**Fix**: To see the crash's traceback and output, rerun the test file without
+xdist:
+
 ```bash
 uv run --no-sync pytest \
   test/rbln/test_problem_file.py \
@@ -639,63 +717,75 @@ uv run --no-sync pytest \
 
 ### TorchDynamo internal error
 
-```
+```text
 torch._dynamo.exc.InternalTorchDynamoError: ...
 ```
 
-**Cause:** An error during `torch.compile` graph capture.
+**Cause**: An error during `torch.compile` graph capture.
 
-**Fix:** The `reset_dynamo` fixture calls `torch._dynamo.reset()` before each test, so running the test in isolation usually resolves stale-state issues. If the error persists, check whether the test is marked with `@pytest.mark.no_dynamo_reset` and inspect the captured graph for unsupported patterns.
+**Fix**: The `reset_dynamo` fixture calls `torch._dynamo.reset()` before each
+test, so running the test in isolation usually resolves stale-state issues. If
+the error persists, check whether the test is marked with
+`@pytest.mark.no_dynamo_reset` and inspect the captured graph for unsupported
+patterns.
 
 ---
 
 ## CI integration
 
-The `periodic` and `torch_rbln_only` markers each take a test out of some CI runs, so use them only as the following sections describe.
+The `periodic` and `torch_rbln_only` markers each take a test out of some CI
+runs, so use them only as the following sections describe.
 
 ### When to use the `periodic` marker
 
 Only when one of these holds:
 
-- It reruns, in a second configuration, a path that every check covers, such as the `TORCH_RBLN_C10D_ASYNC=1` subtests in `test/distributed/`.
-- It is the rest of a parametrize sweep whose representative case every check runs, such as the non-representative shapes in `test_transformers.py`.
-- It needs hardware or time too costly for every pull request, such as `test_v2v_cross_chiplet.py`.
+- It reruns, in a second configuration, a path that every check covers, such as
+  the `TORCH_RBLN_C10D_ASYNC=1` subtests in `test/distributed/`.
+- It is the rest of a parametrize sweep whose representative case every check
+  runs, such as the non-representative shapes in `test_transformers.py`.
+- It needs hardware or time too costly for every pull request, such as
+  `test_v2v_cross_chiplet.py`.
 
-Do not mark the representative case `periodic`; otherwise the pre-merge and post-merge checks stop covering its path.
+Do not mark the representative case `periodic`; otherwise the pre-merge and
+post-merge checks stop covering its path.
 
 ### When to use the `torch_rbln_only` marker
 
-`rebel-compiler` runs this suite on its own pull requests, to see whether a compiler or runtime
-change regresses `torch-rbln`. It has a hard per-job time budget, so it should run the tests that
-answer that question and not the rest.
+`rebel-compiler` runs this suite on its own pull requests, to see whether a
+compiler or runtime change regresses `torch-rbln`. It has a hard per-job time
+budget, so it should run the tests that answer that question and not the rest.
 
-A test belongs in that lane when its outcome depends on `librbln` or the `rbln` compile
-backend: device allocation, copies and layouts, compiled graphs and their artifacts, the custom
-op schemas, device topology and runtime state, numerics on device, the runtime counters the
-profiler reads. That is the default, and it is most of this suite — a new test needs no marker
-to be included.
+A test belongs in that lane when its outcome depends on `librbln` or the `rbln`
+compile backend: device allocation, copies and layouts, compiled graphs and
+their artifacts, the custom op schemas, device topology and runtime state,
+numerics on device, the runtime counters the profiler reads. That is the
+default, and it is most of this suite — a new test needs no marker to be
+included.
 
-Mark a test `torch_rbln_only` when a different `rebel-compiler` would not change its outcome:
+Mark a test `torch_rbln_only` when a different `rebel-compiler` would not change
+its outcome:
 
-- it pins an upstream **torch** clause or a torch-facing contract, so a torch upgrade is what
-  breaks it (`test_privateuse1_contract.py`);
-- the thing under test is a `torch-rbln` gate that the test drives itself, with the runtime
-  stubbed or forced (`test_runtime_unavailable.py`);
+- it pins an upstream **`torch`** clause or a torch-facing contract, so a
+  `torch` upgrade is what breaks it (`test_privateuse1_contract.py`);
+- the thing under test is a `torch-rbln` gate that the test drives itself, with
+  the runtime stubbed or forced (`test_runtime_unavailable.py`);
 - it tests packaging — where `librbln.so` is found, not what it does once loaded
-  (`test_rbln_runtime_lib.py`). Import behavior is the counter-example: whether a remap after
-  import is still accepted is the runtime's doing, so `test_import_rbln_devices_seal.py` stays
-  in the lane;
-- it asserts an absence at the torch level (`test_amp_autocast.py`);
-- it tests only a `torch-rbln` surface whose behavior `rebel-compiler` covers on its own side
-  (`test_file_offloading.py`);
+  (`test_rbln_runtime_lib.py`). Import behavior is the counter-example: whether
+  a remap after import is still accepted is the runtime's doing, so
+  `test_import_rbln_devices_seal.py` stays in the lane;
+- it asserts an absence at the `torch` level (`test_amp_autocast.py`);
+- it tests only a `torch-rbln` surface whose behavior `rebel-compiler` covers on
+  its own side (`test_file_offloading.py`);
 - it tests the harness itself (`test_isolation_guards.py`).
 
-Mark it on the module (`pytestmark = pytest.mark.torch_rbln_only`) with a comment saying which
-of those it is; the reason is the reviewable part, not the marker. `torch-rbln`'s own lanes run
-these tests as before — the marker only removes them from someone else's gate.
+Mark it on the module (`pytestmark = pytest.mark.torch_rbln_only`) with a
+comment saying which of those it is; the reason is the reviewable part, not the
+marker. `torch-rbln`'s own lanes run these tests as before — the marker only
+removes them from someone else's gate.
 
-Cost is part of the judgment, in one direction only: a file that costs nothing stays in the
-lane even when its subject is arguably ours, because the risk of dropping a signal outweighs
-the seconds. `test_torch_compile_patch.py` is mostly helper unit tests and still runs there —
-two of its cases drive a real compile through the rbln backend, and the whole file is a
-fraction of a second.
+Cost is part of the judgment, in one direction only: a file that costs nothing
+stays in the lane even when its subject is arguably ours, because the risk of
+dropping a signal outweighs the seconds. `test_torch_compile_patch.py` is mostly
+helper unit tests and still runs there — two of its cases drive a real compile
+through the rbln backend, and the whole file is a fraction of a second.

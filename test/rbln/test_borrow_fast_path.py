@@ -1,8 +1,7 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-End-to-end test for the V3 v-mem borrow fast path in
-``cpu_fallback_rbln`` (see ``aten/src/ATen/native/rbln/RBLNCPUFallback.cpp``).
+"""End-to-end test for the V3 v-mem borrow fast path in ``cpu_fallback_rbln`` (see
+``aten/src/ATen/native/rbln/RBLNCPUFallback.cpp``).
 
 The fast path replaces the legacy ``at::_to_cpu`` /
 ``at::_copy_from_and_resize`` round-trip with a borrow on the rebel virtual
@@ -30,7 +29,8 @@ class TestBorrowFastPath(TestCase):
     CPU fallback. ``aten::sigmoid`` on int32 is intentionally a non-fp16
     input (forces the dispatch shim's pre-check shortcut into the C++
     fallback), and is a unary op with no write aliasing — clean for
-    borrow correctness."""
+    borrow correctness.
+    """
 
     def test_fallback_unary_int32_input(self) -> None:
         x = torch.arange(48, dtype=torch.int32, device="rbln").reshape(6, 8)
@@ -43,7 +43,8 @@ class TestBorrowFastPath(TestCase):
         """Sanity: a rbln tensor flowing through cpu_fallback_rbln does not
         crash and returns a tensor on the rbln device with the expected
         shape. A regression that disabled the default would most likely
-        surface as a build error or a runtime exception."""
+        surface as a build error or a runtime exception.
+        """
         x = torch.arange(16, dtype=torch.int32, device="rbln")
         # int32 input forces the cpu_fallback_rbln path (fp16-only kernels).
         y = torch.sigmoid(x.float())
@@ -54,7 +55,8 @@ class TestBorrowFastPath(TestCase):
         """Undersized pure ``out=`` (borrowed as a non-resizable from_blob) must GROW
         to the result shape instead of raising "not resizable", and the "output was
         resized" warning fires once across the retry, not once per attempt. ``sin`` is
-        a CPU-fallback op."""
+        a CPU-fallback op.
+        """
         x = torch.arange(8, dtype=torch.float32, device="rbln")
         out = torch.empty(1, dtype=torch.float32, device="rbln")  # undersized -> grow
         with warnings.catch_warnings(record=True) as caught:
@@ -68,10 +70,11 @@ class TestBorrowFastPath(TestCase):
 
     def test_pure_out_oversized_shrinks(self) -> None:
         """The already-working shrink counterpart: an oversized ``out=`` is
-        narrowed via from_blob metadata shrink and its size synced back."""
+        narrowed via from_blob metadata shrink and its size synced back.
+        """
         x = torch.arange(8, dtype=torch.float32, device="rbln")
         out = torch.empty(16, dtype=torch.float32, device="rbln")  # oversized -> shrink
-        with pytest.warns(UserWarning):
+        with pytest.warns(UserWarning, match="was resized"):
             ret = torch.sin(x, out=out)
         self.assertEqual(tuple(ret.shape), (8,))
         self.assertEqual(ret.to("cpu"), torch.sin(torch.arange(8, dtype=torch.float32)))
@@ -84,7 +87,8 @@ class TestBorrowFastPath(TestCase):
         dispatch shim's NaN/Inf pre-check) must fall back to a D2H copy instead
         of raising ``rbln_v_borrow_host_ptr failed`` (the PrepareUserViewBuffer
         assertion). Comparing two rbln tensors routes ``eq`` through the borrow
-        path, so this exercises the fallback and checks correctness at once."""
+        path, so this exercises the fallback and checks correctness at once.
+        """
         a = torch.zeros(5, 0, dtype=torch.float16, device="rbln")
         b = torch.zeros(0, 10, dtype=torch.float16, device="rbln")
         out = torch.full((5, 10), float("nan"), dtype=torch.float16, device="rbln")

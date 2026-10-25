@@ -36,7 +36,7 @@ if [[ -n "${requested}" ]]; then
   requirement="torch==${requested}"
 fi
 index_url="$(
-  .buildkite/scripts/read-index-setting.py \
+  .buildkite/scripts/read_index_setting.py \
     --index pytorch-nightly-cpu \
     --setting url
 )"
@@ -70,7 +70,7 @@ fi
 echo "Resolved ${requirement} to ${torch_version}"
 
 echo "--- Pinning torch to ${torch_version}"
-.buildkite/scripts/package/pin-torch.py \
+.buildkite/scripts/package/pin_torch.py \
   --torch-version "${torch_version}" \
   --torch-index pytorch-nightly-cpu
 uv lock

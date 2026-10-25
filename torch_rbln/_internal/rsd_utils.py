@@ -4,15 +4,12 @@ This module provides utility functions related to RSD environment variables
 and device mapping configuration for tensor parallelism.
 """
 
-from typing import Optional
-
 import torch_rbln._C
 from torch_rbln.device import device_count
 
 
-def get_physical_device_ids(device_id: int) -> Optional[list[int]]:
-    """
-    Get physical device IDs mapped to a logical device.
+def get_physical_device_ids(device_id: int) -> list[int] | None:
+    """Get physical device IDs mapped to a logical device.
 
     This function queries the device topology to find the physical NPU IDs
     that are mapped to the given logical device index.
@@ -42,9 +39,8 @@ def get_physical_device_ids(device_id: int) -> Optional[list[int]]:
     return entry.physical_device_ids
 
 
-def auto_determine_num_devices(device_id: Optional[int]) -> Optional[int]:
-    """
-    Automatically determine num_devices based on RSD environment variables.
+def auto_determine_num_devices(device_id: int | None) -> int | None:
+    """Automatically determine num_devices based on RSD environment variables.
 
     This function reads RBLN_NPUS_PER_DEVICE or RBLN_DEVICE_MAP environment variables
     to determine the number of physical NPUs mapped to the given logical device.

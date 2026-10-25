@@ -50,7 +50,8 @@ def _prim_calls(report: dict) -> dict[str, int]:
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestForeachCopyV2V(TestCase):
     """Tests for the native ``aten::_foreach_copy_`` kernel reached through
-    ``torch._foreach_copy_``."""
+    ``torch._foreach_copy_``.
+    """
 
     # ---- basic correctness (the scatter fast path) ----
 
@@ -64,7 +65,7 @@ class TestForeachCopyV2V(TestCase):
         dst_dev = [_to_dev(d) for d in dst_cpu]
         torch._foreach_copy_(dst_dev, [_to_dev(s) for s in src_cpu])
 
-        for got, want in zip(dst_dev, src_cpu):
+        for got, want in zip(dst_dev, src_cpu, strict=True):
             _eq(got, want)
 
     def test_many_pairs(self):
@@ -73,7 +74,7 @@ class TestForeachCopyV2V(TestCase):
         src_cpu = [_arange((2, 8), torch.float32) + i for i in range(n_pairs)]
         dst_dev = [_to_dev(torch.zeros(2, 8, dtype=torch.float32)) for _ in range(n_pairs)]
         torch._foreach_copy_(dst_dev, [_to_dev(s) for s in src_cpu])
-        for got, want in zip(dst_dev, src_cpu):
+        for got, want in zip(dst_dev, src_cpu, strict=True):
             _eq(got, want)
 
     def test_single_pair(self):
@@ -87,7 +88,8 @@ class TestForeachCopyV2V(TestCase):
     def test_mixed_rbln_and_cpu_source(self):
         """Some pairs are RBLN-to-RBLN (batched), some are CPU-to-RBLN
         (fallback). All disjoint, so order does not matter — result must match
-        regardless of which path each pair takes."""
+        regardless of which path each pair takes.
+        """
         a_src = _arange((4, 3), torch.float32) + 10
         b_src = _arange((4, 3), torch.float32) + 20  # delivered from CPU
         c_src = _arange((4, 3), torch.float32) + 30
@@ -105,7 +107,8 @@ class TestForeachCopyV2V(TestCase):
 
     def test_mixed_dtype_cast_fallback(self):
         """A dtype-mismatched pair takes the per-pair copy_ (cast) fallback while
-        the matching pair is batched."""
+        the matching pair is batched.
+        """
         same = _arange((3, 3), torch.float32) + 1
         cast_src = (_arange((3, 3), torch.float32) + 2).to(torch.float16)
 
@@ -140,7 +143,7 @@ class TestForeachCopyV2V(TestCase):
         dst_views = [big_dst[i : i + 2, :8] for i in (0, 2, 4)]
         src_views = [_to_dev(big_src_cpu)[i : i + 2, :8] for i in (0, 2, 4)]
         torch._foreach_copy_(dst_views, src_views)
-        for v, i in zip(dst_views, (0, 2, 4)):
+        for v, i in zip(dst_views, (0, 2, 4), strict=True):
             _eq(v, big_src_cpu[i : i + 2, :8])
 
     # ---- zero-numel / empty ----
@@ -157,7 +160,8 @@ class TestForeachCopyV2V(TestCase):
 
     def test_empty_lists_rejected_upstream(self):
         """Empty tensor lists are rejected by PyTorch before reaching the RBLN
-        kernel, so the op is never invoked with zero pairs."""
+        kernel, so the op is never invoked with zero pairs.
+        """
         with pytest.raises(RuntimeError, match="at least one tensor"):
             torch._foreach_copy_([], [])
 
@@ -168,7 +172,8 @@ class TestForeachCopyV2V(TestCase):
         slices of one shared buffer (kv[0] / kv[1]), sources are disjoint
         slices of one staging buffer. No real overlap, so the result must be
         correct (and the kernel must not treat shared-storage-but-disjoint as
-        aliasing)."""
+        aliasing).
+        """
         n_layers = 3
         # One destination buffer shaped [2, L, 8]; pair k writes [kv, layer].
         dst_base = _to_dev(torch.zeros(2, n_layers, 8, dtype=torch.float32))
@@ -195,7 +200,8 @@ class TestForeachCopyV2V(TestCase):
         ``_foreach_copy_([a, b], [b, cpu_src])`` — list-order semantics give
         ``a == original b`` and ``b == cpu_src``. A naive batched path defers
         ``a <- b`` past the immediate ``b <- cpu_src``, so ``a`` would wrongly
-        read the mutated ``b``."""
+        read the mutated ``b``.
+        """
         a0 = _arange((2, 4), torch.float32) + 1
         b0 = _arange((2, 4), torch.float32) + 50
         cpu_src = _arange((2, 4), torch.float32) + 900
@@ -215,7 +221,8 @@ class TestForeachCopyV2V(TestCase):
         """Both pairs are batch-eligible and alias each other:
         ``_foreach_copy_([a, b], [b, a])``. List order copies ``a <- b`` then
         ``b <- (new) a`` so both end as the original ``b``. The batched path has
-        no inter-copy ordering, so this must drop to the sequential path."""
+        no inter-copy ordering, so this must drop to the sequential path.
+        """
         a0 = _arange((3, 4), torch.float32) + 1
         b0 = _arange((3, 4), torch.float32) + 100
 
@@ -232,7 +239,8 @@ class TestForeachCopyV2V(TestCase):
     def test_overlapping_destinations_waw(self):
         """Two destinations are overlapping slices of one buffer fed by disjoint
         sources. List order makes the later write win on the overlap; the
-        batched path must not reorder them."""
+        batched path must not reorder them.
+        """
         base0 = _arange((8,), torch.float32)
         x = _arange((4,), torch.float32) + 100
         y = _arange((4,), torch.float32) + 200
@@ -247,7 +255,8 @@ class TestForeachCopyV2V(TestCase):
 
     def test_identity_self_equals_src(self):
         """Within-pair identity (``self[i] is src[i]``) is a no-op and must be
-        left unchanged — within-pair overlap is not a reorder hazard."""
+        left unchanged — within-pair overlap is not a reorder hazard.
+        """
         a0 = _arange((4, 4), torch.float32) + 3
         a = _to_dev(a0)
         torch._foreach_copy_([a], [a])

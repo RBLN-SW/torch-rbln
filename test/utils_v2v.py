@@ -55,7 +55,8 @@ def to_dev(x: torch.Tensor) -> torch.Tensor:
 
 def arange(shape, dtype: torch.dtype) -> torch.Tensor:
     """Deterministic CPU ramp shaped `shape`. 0-D (`shape == ()`) returns the
-    scalar `0`."""
+    scalar `0`.
+    """
     n = 1
     for s in shape:
         n *= s
@@ -71,7 +72,8 @@ def arange(shape, dtype: torch.dtype) -> torch.Tensor:
 
 def eq(actual_dev: torch.Tensor, expected_cpu: torch.Tensor) -> None:
     """Bitwise equality after pulling the device tensor back to CPU. Fails
-    with a tensor dump if shape/dtype differ or any element diverges."""
+    with a tensor dump if shape/dtype differ or any element diverges.
+    """
     actual_cpu = actual_dev.cpu()
     assert actual_cpu.shape == expected_cpu.shape, (
         f"shape mismatch: device={tuple(actual_cpu.shape)} expected={tuple(expected_cpu.shape)}"
@@ -89,7 +91,8 @@ def close(
     rtol: float = 1e-2,
 ) -> None:
     """Tolerance-based comparison via `torch.testing.assert_close`. Use for
-    cross-dtype paths where bit-exactness isn't expected."""
+    cross-dtype paths where bit-exactness isn't expected.
+    """
     actual_cpu = actual_dev.cpu()
     assert actual_cpu.shape == expected_cpu.shape, (
         f"shape mismatch: device={tuple(actual_cpu.shape)} expected={tuple(expected_cpu.shape)}"

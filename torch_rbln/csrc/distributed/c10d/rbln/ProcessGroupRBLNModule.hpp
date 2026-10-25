@@ -2,8 +2,7 @@
 
 #include <Python.h>
 
-namespace torch_rbln {
-namespace distributed {
+namespace torch_rbln::distributed {
 
 /**
  * @brief Initialize ProcessGroupRBLN Python bindings
@@ -14,7 +13,9 @@ namespace distributed {
  *
  * @return PyObject* Py_True on success, Py_False on failure
  */
-PyObject* initialize_process_group_rbln_bindings(PyObject* _unused, PyObject* noargs);
+PyObject* initialize_process_group_rbln_bindings(
+    PyObject* _unused,
+    PyObject* noargs);
 
 /**
  * @brief Get Python method definitions for distributed functions
@@ -26,5 +27,4 @@ PyObject* initialize_process_group_rbln_bindings(PyObject* _unused, PyObject* no
  */
 PyMethodDef* get_distributed_method_definitions();
 
-} // namespace distributed
-} // namespace torch_rbln
+} // namespace torch_rbln::distributed

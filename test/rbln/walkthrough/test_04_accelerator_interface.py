@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Walkthrough example 4: `torch.accelerator` device and memory APIs for RBLN.
+"""Walkthrough example 4: `torch.accelerator` device and memory APIs for RBLN.
 
 Ported from walkthrough_guide/4.accelerator_interface.py.
 
@@ -53,7 +52,9 @@ class TestAcceleratorInterface(TestCase):
 
     @pytest.mark.npu(count=2)
     def test_device_index_context_manager(self):
-        """`device_index(i)` should switch the active device for the duration of the block."""
+        """`device_index(i)` should switch the active device for the duration of the
+        block.
+        """
         torch.accelerator.set_device_index(0)
         self.assertEqual(torch.accelerator.current_device_index(), 0)
 

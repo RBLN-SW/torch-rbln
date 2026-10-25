@@ -30,13 +30,28 @@ out-of-scope dispatch/utilization counters.
 """
 
 import os
+import types
 from unittest import mock
 
 import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-import torch_rbln  # noqa: F401  -- registers the ``rbln`` device + ``torch.rbln``
+from torch_rbln import _C, profiler as _prof
+from torch_rbln.profiler import (
+    _BOUNCE_SITES,
+    _FALLBACK_REASON_NAMES,
+    _fix,
+    _fmt_time,
+    _fyi,
+    _read_bounces,
+    _read_fallback_reasons,
+    _read_rt_timing,
+    _read_runtime,
+    _RT_PRIMS,
+    _RUNTIME_REASONS,
+    _table,
+)
 
 
 DEV = "rbln"
@@ -62,8 +77,9 @@ class TestProfilerCopyBounce(TestCase):
     def test_d2d_int_cast_bounces_with_bytes(self):
         # An int-dtype device->device cast (int64->int32) cannot use the fp16 on-device
         # v2v engine, so it round-trips the host -> explain shows copy_d2d_host_bounce
-        # with bytes, so the region is not clean. (A plain non-contiguous fp16 slice copy
-        # no longer bounces here -- the runtime's strided v2v now handles it on-device.)
+        # with bytes, so the region is not clean. (A plain non-contiguous fp16 slice
+        # copy no longer bounces here -- the runtime's strided v2v now handles it
+        # on-device.)
         s = torch.tensor([3, 4, 5, 6], dtype=torch.int64).to(DEV)
         with torch.rbln.explain() as p:
             _ = s.to(torch.int32)
@@ -77,19 +93,20 @@ class TestProfilerCopyBounce(TestCase):
 class TestProfilerDispatchSignals(TestCase):
     """A (recompile) and B (cpu_fallback) read from the existing dispatch counters."""
 
-    def test_B_cpu_fallback_counted(self):
+    def test_cpu_fallback_counted(self):
         with torch.rbln.explain() as p:
             a = torch.ones(32, 32, device=DEV, dtype=torch.int32)  # non-fp16 -> CPU fallback
             _ = a + a
         disp = p.dump()["dispatch"]
         self.assertGreaterEqual(disp["cpu_fallback"], 1)
         # COST is surfaced too (wall ns spent in cpu_fallback), so a report can tell
-        # many-cheap fallbacks from few-expensive ones. >= 0 (0 only on a _C predating it).
+        # many-cheap fallbacks from few-expensive ones. >= 0 (0 only on a _C predating
+        # it).
         self.assertIn("cpu_fallback_ns", disp)
         self.assertGreaterEqual(disp["cpu_fallback_ns"], 0)
         self.assertFalse(p.verdict()["clean"])  # ran on CPU -> not clean
 
-    def test_A_recompile_counted(self):
+    def test_recompile_counted(self):
         # First use of an unusual shape forces a compile; the profiler must count
         # it as a recompile/miss (the actionable "you are recompiling" signal).
         # NOTE: whether a *repeat* is served from warm cache is a property of the
@@ -109,7 +126,8 @@ class TestProfilerFallbackRegimes(TestCase):
     v-mem, borrow chain) — so its only cost is fallback wall-time, not d2h/bounce.
     A non-contiguous input can't be borrowed and DOES round-trip host. These lock
     that distinction so a regression can't silently turn one regime into another.
-    (host-bounce WITHOUT fallback is covered by TestProfilerCopyBounce.)"""
+    (host-bounce WITHOUT fallback is covered by TestProfilerCopyBounce.)
+    """
 
     def test_device_run_no_fallback_no_bounce(self):
         # Contiguous fp16 elementwise runs on-device: no CPU fallback, no host
@@ -161,7 +179,8 @@ class TestProfilerFallbackRegimes(TestCase):
 
 class TestProfilerTruthfulnessAndScope(TestCase):
     """The verdict must never claim more truth than it has (C/E), and must not
-    carry signals the user cannot act on (D)."""
+    carry signals the user cannot act on (D).
+    """
 
     @pytest.mark.npu(count=1)
     def test_runtime_signals_present_or_honestly_pending(self):
@@ -188,7 +207,7 @@ class TestProfilerTruthfulnessAndScope(TestCase):
             self.assertIn("d2h", pending)
 
     @pytest.mark.npu(count=1)
-    def test_E_device_memory_gauge(self):
+    def test_device_memory_gauge(self):
         # Pure allocation (no compute) — the gauge is the device BufferAllocator's
         # reserved high-water mark, so it reads a sane non-zero peak >= current.
         with torch.rbln.explain() as p:
@@ -203,10 +222,11 @@ class TestProfilerTruthfulnessAndScope(TestCase):
     @pytest.mark.npu(count=1)
     def test_runtime_hidden_d2h_is_cause_tagged(self):
         # Deterministic witness for the runtime hidden-d2h path. Pin lazy allocation
-        # (delenv EAGER_MALLOC) so a freshly-created host-latest src forces the runtime's
-        # src_not_on_device v2v hidden d2h; under eager-malloc the copy completes on-device
-        # with 0 hidden d2h, so this must not depend on ambient env. Assert the profiler both
-        # counts the incident AND attributes every one to a named reason (no unattributed).
+        # (delenv EAGER_MALLOC) so a freshly-created host-latest src forces the
+        # runtime's src_not_on_device v2v hidden d2h; under eager-malloc the copy
+        # completes on-device with 0 hidden d2h, so this must not depend on ambient env.
+        # Assert the profiler both counts the incident AND attributes every one to a
+        # named reason (no unattributed).
         with mock.patch.dict(os.environ):
             os.environ.pop("TORCH_RBLN_EAGER_MALLOC", None)
             with torch.rbln.explain() as p:
@@ -243,7 +263,7 @@ class TestProfilerTruthfulnessAndScope(TestCase):
         self.assertIn("host->device push", p.report())
 
     @pytest.mark.npu(count=1)
-    def test_D_command_stream_is_not_a_verdict_signal(self):
+    def test_command_stream_is_not_a_verdict_signal(self):
         # Command-stream count / structural padding are intentionally excluded
         # from the verdict (measurable but not user-actionable).
         with torch.rbln.explain() as p:
@@ -290,7 +310,7 @@ class TestProfilerApi(TestCase):
     def test_verdict_is_factual_not_graded(self):
         # The tool OBSERVES; it does not grade. verdict() carries a factual ``clean``
         # flag (+ ``reasons``) and NO RED/AMBER/GREEN ``status``. report() shows a
-        # factual [clean]/[overhead] marker, never a severity colour.
+        # factual [clean]/[overhead] marker, never a severity color.
         with torch.rbln.explain() as p:
             a = torch.ones(16, 16, device=DEV, dtype=torch.int32)  # int32 -> cpu_fallback
             _ = a + a
@@ -315,7 +335,7 @@ class TestProfilerApi(TestCase):
         self.assertIsInstance(warm.verdict()["clean"], bool)
 
     @pytest.mark.npu(count=1)
-    def test_A_where_traceback_is_opt_in(self):
+    def test_where_traceback_is_opt_in(self):
         # (A) WHERE: default explain() captures NO call-site (opt-in => adds
         # nothing); explain(with_stack=True) captures the Python call-site of the op.
         def _do_fallback():
@@ -325,8 +345,6 @@ class TestProfilerApi(TestCase):
         with torch.rbln.explain() as off:
             _do_fallback()
         self.assertEqual(off.dump()["trace_by_op"], {})  # nothing unless asked
-
-        import torch_rbln._C as _C
 
         if not hasattr(_C, "_explain_set_trace"):
             self.skipTest("trace capture not exposed by this _C build")
@@ -344,13 +362,11 @@ class TestProfilerApi(TestCase):
         self.assertFalse(torch.rbln.explain()._trace)
 
     @pytest.mark.npu(count=1)
-    def test_A_where_traces_bounce_site(self):
+    def test_where_traces_bounce_site(self):
         # (A) WHERE also covers host BOUNCES (not just cpu_fallback/recompile): with
         # with_stack=True the bounced copy's Python call-site is captured under the site
         # name, so the report can point at the offending copy. Previously a bounce was
         # counted but unlocatable. OFF by default (a plain region captures nothing).
-        import torch_rbln._C as _C
-
         if not hasattr(_C, "_explain_set_trace"):
             self.skipTest("trace capture not exposed by this _C build")
 
@@ -401,11 +417,10 @@ class TestProfilerApi(TestCase):
 class TestProfilerHostCostContext(TestCase):
     """Host-cost context signals: (A) which fallback ops lack a fast-path handler,
     (E) host CPU oversubscription, (B) rebel-runtime (librbln) boundary time vs
-    torch-side dispatch."""
+    torch-side dispatch.
+    """
 
-    def test_A_unaccelerated_lists_only_unhandled_fallback_ops(self):
-        import torch_rbln._C as _C
-
+    def test_unaccelerated_lists_only_unhandled_fallback_ops(self):
         if not hasattr(_C, "_cpu_fast_path_registered"):
             self.skipTest("fast-path registry query not exposed by this _C build")
         a = torch.tensor([5, 3, 9, 1], dtype=torch.int32).to(DEV)
@@ -426,7 +441,7 @@ class TestProfilerHostCostContext(TestCase):
         if unaccel:
             self.assertIn("no fast-path handler", p.report())
 
-    def test_E_host_threads_resource_fact(self):
+    def test_host_threads_resource_fact(self):
         with torch.rbln.explain() as p:
             _ = torch.randn(8, 8, device=DEV, dtype=torch.float16)
         ht = p.dump()["host_threads"]
@@ -435,9 +450,7 @@ class TestProfilerHostCostContext(TestCase):
         # oversubscribed iff intended host parallelism exceeds the allowed cores.
         self.assertEqual(ht["oversubscribed"], ht["cores"] > 0 and ht["intended_threads"] > ht["cores"])
 
-    def test_B_rebel_runtime_time_split(self):
-        import torch_rbln._C as _C
-
+    def test_rebel_runtime_time_split(self):
         if not hasattr(_C, "_rt_timing_get"):
             self.skipTest("rt-timing not exposed by this _C build")
         a = torch.tensor([5, 3, 9, 1], dtype=torch.int32).to(DEV)
@@ -457,11 +470,9 @@ class TestProfilerHostCostContext(TestCase):
         self.assertTrue(rt["by_primitive"])  # boundary calls happened -> recorded
         self.assertIn("rebel runtime", p.report())
 
-    def test_B_gated_off_outside_region(self):
+    def test_gated_off_outside_region(self):
         # ON==OFF guard: librbln work OUTSIDE any explain region must NOT be counted
         # (the timers are gated off + reset at region entry).
-        import torch_rbln._C as _C
-
         if not hasattr(_C, "_rt_timing_get"):
             self.skipTest("rt-timing not exposed by this _C build")
         a = torch.tensor([1, 2], dtype=torch.int32).to(DEV)
@@ -479,24 +490,18 @@ class TestProfilerReportFormat(TestCase):
     def test_fmt_time_matches_torch_format_time(self):
         # Adaptive us/ms/s with 3 decimals, no space, ASCII "us" -- byte-identical to
         # torch.autograd.profiler_util._format_time (explain reads like a torch table).
-        from torch_rbln.profiler import _fmt_time
-
         self.assertEqual(_fmt_time(500), "0.500us")
         self.assertEqual(_fmt_time(190_000), "190.000us")
         self.assertEqual(_fmt_time(66_430_000), "66.430ms")
         self.assertEqual(_fmt_time(5_790_680_000), "5.791s")
 
     def test_note_prefixes_split_action_from_fact(self):
-        from torch_rbln.profiler import _fix, _fyi
-
         self.assertEqual(_fix("make contiguous"), "try: make contiguous")
         self.assertEqual(_fyi("served on host"), "fyi: served on host")
         self.assertEqual(_fix(""), "")  # empty note stays empty (no bare prefix)
         self.assertEqual(_fyi(""), "")
 
     def test_table_uses_double_dash_for_na_and_is_ascii(self):
-        from torch_rbln.profiler import _table
-
         out = "\n".join(
             _table(
                 ["Signal", "Count", "Bytes", "Note"],
@@ -509,7 +514,8 @@ class TestProfilerReportFormat(TestCase):
 
     def test_repr_before_stop_is_placeholder_not_report(self):
         # __repr__ mirrors torch._dynamo.explain's ExplainOutput (object renders as its
-        # report), but a still-open region has no data yet -> a safe placeholder, no crash.
+        # report), but a still-open region has no data yet -> a safe placeholder, no
+        # crash.
         p = torch.rbln.explain()
         self.assertIn("active", repr(p))
 
@@ -531,13 +537,10 @@ class TestProfilerReportFormat(TestCase):
             self.assertIn("peak, reserved", rep)  # P0-3: device BufferAllocator reserved footprint, labeled
 
     def test_report_format_contract(self):
-        # Lock the P1 report shape without needing hardware: feed a canned dump through the
-        # real verdict()/report() and assert the structural contract (grouped blocks, the
-        # >> witness line, fixed row order, region-wall label, thousands separators).
-        import types
-
-        from torch_rbln import profiler as _p
-
+        # Lock the P1 report shape without needing hardware: feed a canned dump through
+        # the real verdict()/report() and assert the structural contract (grouped
+        # blocks, the >> witness line, fixed row order, region-wall label, thousands
+        # separators).
         gb, kb = 1024**3, 1024
         dump = {
             "wall_ns": 5_791_000_000,
@@ -568,8 +571,8 @@ class TestProfilerReportFormat(TestCase):
         }
         o = types.SimpleNamespace()
         o.dump = lambda: dump
-        o.verdict = types.MethodType(_p.RBLNExplain.verdict, o)
-        rep = _p.RBLNExplain.report(o)
+        o.verdict = types.MethodType(_prof.RBLNExplain.verdict, o)
+        rep = _prof.RBLNExplain.report(o)
 
         self.assertTrue(rep.isascii())
         self.assertIn("[overhead: 3 signals]", rep)  # marker carries a factual signal-kind count
@@ -580,62 +583,51 @@ class TestProfilerReportFormat(TestCase):
         self.assertIn("no DMA (low cost)", rep)  # P1-2 cost verdict leads the Note
         self.assertIn(">> physical d2h (real transfer): 0", rep)  # P1-3 promoted witness line
         self.assertIn("dispatch/cpu_fallback:", rep)  # P1-1 grouped detail block
-        # P1-4 fixed category order (NOT sorted by cost): host_bounce -> runtime -> dispatch
+        # P1-4 fixed category order (NOT sorted by cost): host_bounce -> runtime ->
+        # dispatch
         self.assertLess(rep.index("host_bounce/d2d_copy"), rep.index("runtime/v2v_slow"))
         self.assertLess(rep.index("runtime/v2v_slow"), rep.index("dispatch/cpu_fallback"))
 
 
 class TestProfilerRegionSafety(TestCase):
-    """Regions own process-global instrumentation, so they must not overlap. A guard raises
-    on overlap, and cleanup is guaranteed on any error (failed start OR mid-region raise)."""
+    """Regions own process-global instrumentation, so they must not overlap. A guard
+    raises on overlap, and cleanup is guaranteed on any error (failed start OR
+    mid-region raise).
+    """
 
     @pytest.mark.npu(count=1)
     def test_region_released_on_exception(self):
         # start()+stop() release the global guard/gate via try/finally even if the body
         # raises, so instrumentation never leaks ON into the next region.
-        from torch_rbln import profiler as _prof
-
         self.assertFalse(_prof._active)
-        with self.assertRaises(ValueError):
-            with torch.rbln.explain():
-                _ = torch.ones(4, 4, device=DEV, dtype=torch.int32) + 1
-                raise ValueError("boom")
+        with self.assertRaises(ValueError), torch.rbln.explain():
+            _ = torch.ones(4, 4, device=DEV, dtype=torch.int32) + 1
+            msg = "boom"
+            raise ValueError(msg)
         self.assertFalse(_prof._active)  # released despite the exception
 
     def test_overlapping_region_raises(self):
         # Regions must not overlap: a nested (or concurrent) region raises rather than
         # silently corrupting the open region's timer/trace/counters. The outer region
         # still releases the guard on the way out.
-        from torch_rbln import profiler as _prof
-
         self.assertFalse(_prof._active)
-        with self.assertRaises(RuntimeError):
-            with torch.rbln.explain():
-                self.assertTrue(_prof._active)
-                with torch.rbln.explain():  # overlap -> raises on start
-                    pass
+        with self.assertRaises(RuntimeError), torch.rbln.explain():
+            self.assertTrue(_prof._active)
+            with torch.rbln.explain():  # overlap -> raises on start
+                pass
         self.assertFalse(_prof._active)  # outer released on the way out
 
 
 class TestProfilerRuntimeContract(TestCase):
-    """Guard the positional contracts with the (closed) rebel-compiler runtime. If a probe's
-    cardinality drifts (a reason/primitive/site added or removed), these FAIL in CI --
-    *detection* -- instead of the Python mapping silently truncating (zip) or mislabelling
-    counts. An equal-cardinality reorder is NOT catchable from here; that still relies on the
-    rebel-compiler pin keeping the wheel's headers and runtime in lockstep."""
+    """Guard the positional contracts with the (closed) rebel-compiler runtime. If a
+    probe's cardinality drifts (a reason/primitive/site added or removed), these FAIL in
+    CI -- *detection* -- instead of the Python mapping silently truncating (zip) or
+    mislabelling counts. An equal-cardinality reorder is NOT catchable from here; that
+    still relies on the rebel-compiler pin keeping the wheel's headers and runtime in
+    lockstep.
+    """
 
     def test_positional_axis_lengths_match_runtime(self):
-        from torch_rbln.profiler import (
-            _BOUNCE_SITES,
-            _FALLBACK_REASON_NAMES,
-            _read_bounces,
-            _read_fallback_reasons,
-            _read_rt_timing,
-            _read_runtime,
-            _RT_PRIMS,
-            _RUNTIME_REASONS,
-        )
-
         # BounceSite: core binding, always present.
         self.assertEqual(
             len(_read_bounces()), len(_BOUNCE_SITES), "BounceSite count drifted; sync _BOUNCE_SITES with RBLNProfiler.h"
@@ -648,8 +640,9 @@ class TestProfilerRuntimeContract(TestCase):
         fr = _read_fallback_reasons()
         if fr:
             self.assertEqual(len(fr), len(_FALLBACK_REASON_NAMES), "fallback-reason count drifted; sync names")
-        # runtime hidden-d2h reason axis (if the runtime exposes it): our names must cover it
-        # exactly -- dump() fails fast on any mismatch (see the unit test below).
+        # runtime hidden-d2h reason axis (if the runtime exposes it): our names must
+        # cover it exactly -- dump() fails fast on any mismatch (see the unit test
+        # below).
         rtd = _read_runtime()
         if rtd is not None:
             self.assertEqual(
@@ -659,13 +652,12 @@ class TestProfilerRuntimeContract(TestCase):
             )
 
     def test_dump_fails_fast_on_runtime_reason_axis_drift(self):
-        # The hidden-reason axis is a positional ABI contract: report keys like src_not_on_device
-        # are only truthful if count/order/meaning line up 1:1 with _RUNTIME_REASONS. If the loaded
-        # librbln reports a different reason count, dump() must fail loudly (this build and the
-        # runtime are out of sync) rather than truncate or mislabel. Device-free: inject internal
-        # state and read dump() directly.
-        from torch_rbln.profiler import _BOUNCE_SITES, _RUNTIME_REASONS
-
+        # The hidden-reason axis is a positional ABI contract: report keys like
+        # src_not_on_device are only truthful if count/order/meaning line up 1:1 with
+        # _RUNTIME_REASONS. If the loaded librbln reports a different reason count,
+        # dump() must fail loudly (this build and the runtime are out of sync) rather
+        # than truncate or mislabel. Device-free: inject internal state and read dump()
+        # directly.
         p = torch.rbln.explain()
         p._bounces = [(0, 0)] * len(_BOUNCE_SITES)
         p._dispatch = (0, 0, 0, 0, 0, 0, 0)
@@ -677,9 +669,8 @@ class TestProfilerRuntimeContract(TestCase):
             p.dump()
 
     def test_dump_maps_every_named_runtime_reason(self):
-        # The happy path: an exactly-matching axis maps 1:1 to named reasons, nothing dropped.
-        from torch_rbln.profiler import _BOUNCE_SITES, _RUNTIME_REASONS
-
+        # The happy path: an exactly-matching axis maps 1:1 to named reasons, nothing
+        # dropped.
         p = torch.rbln.explain()
         p._bounces = [(0, 0)] * len(_BOUNCE_SITES)
         p._dispatch = (0, 0, 0, 0, 0, 0, 0)

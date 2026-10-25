@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import argparse
-import importlib
+
+import rebel
+import torch
+
+import torch_rbln
 
 
 def main() -> None:
@@ -12,11 +16,6 @@ def main() -> None:
     parser.add_argument("--build-type", required=True, choices=["Release", "Debug"])
     args = parser.parse_args()
 
-    # Plain imports would pull rebel, which is untyped, and torch_rbln,
-    # which fails strict mypy, into this script's strict mypy lint.
-    rebel = importlib.import_module("rebel")
-    torch = importlib.import_module("torch")
-    torch_rbln = importlib.import_module("torch_rbln")
     print(f"torch={torch.__version__} torch_rbln={torch_rbln.__version__} rebel={rebel.__version__}")
 
     failures: list[str] = []

@@ -40,18 +40,20 @@ class C10_RBLN_API H2VBatch {
   /**
    * @brief Enqueue one contiguous slab copy.
    *
-   * @param dst    Destination device pointer (rbln virtual address).
-   * @param src    Source host pointer.
+   * @param dst Destination device pointer (rbln virtual address).
+   * @param src Source host pointer.
    * @param nbytes Slab size in bytes; 0 is a no-op.
    */
   void enqueue(void* dst, const void* src, size_t nbytes);
 
   /**
-   * @brief Enqueue `prod(outer_sizes)` copies of `inner_block_bytes`, row-major.
+   * @brief Enqueue `prod(outer_sizes)` copies of `inner_block_bytes`,
+   * row-major.
    *
-   * Entry k at outer index idx[] is offset sum_d idx[d]*{dst,src}_byte_strides[d].
-   * The three arrays must have equal length; length 0 degenerates to enqueue(). A
-   * src stride of 0 is preserved, so a broadcast host source replicates.
+   * Entry k at outer index idx[] is offset sum_d
+   * idx[d]*{dst,src}_byte_strides[d]. The three arrays must have equal length;
+   * length 0 degenerates to enqueue(). A src stride of 0 is preserved, so a
+   * broadcast host source replicates.
    */
   void enqueue_strided(
       void* dst,
@@ -77,8 +79,8 @@ class C10_RBLN_API H2VBatch {
  *
  * Mirror of H2VBatch: the source is device memory and anchors the per-device
  * grouping, the destination is host memory. Destination (host) ranges must not
- * overlap; source (device) ranges may. The lifetime rule applies to the destination
- * here. See H2VBatch for the rest of the contract.
+ * overlap; source (device) ranges may. The lifetime rule applies to the
+ * destination here. See H2VBatch for the rest of the contract.
  */
 class C10_RBLN_API V2HBatch {
  public:
@@ -93,8 +95,8 @@ class C10_RBLN_API V2HBatch {
   /**
    * @brief Enqueue one contiguous slab copy.
    *
-   * @param dst    Destination host pointer.
-   * @param src    Source device pointer (rbln virtual address).
+   * @param dst Destination host pointer.
+   * @param src Source device pointer (rbln virtual address).
    * @param nbytes Slab size in bytes; 0 is a no-op.
    */
   void enqueue(void* dst, const void* src, size_t nbytes);

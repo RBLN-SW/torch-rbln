@@ -74,7 +74,8 @@ TEST_F(RBLNLoggingTest, ExceptionSafetyDepthReset) {
     c10::rbln::RBLNScopeGuard guard(__FILE__, __LINE__, __func__);
     EXPECT_EQ(c10::rbln::get_scope_depth(), 1);
     throw std::runtime_error("test");
-  } catch (const std::runtime_error&) {
+  } catch (const std::runtime_error& e) {
+    EXPECT_STREQ(e.what(), "test");
   }
   EXPECT_EQ(c10::rbln::get_scope_depth(), 0);
 }
@@ -87,7 +88,8 @@ TEST_F(RBLNLoggingTest, NestedExceptionSafetyDepthReset) {
       EXPECT_EQ(c10::rbln::get_scope_depth(), 2);
       throw std::runtime_error("test");
     }
-  } catch (const std::runtime_error&) {
+  } catch (const std::runtime_error& e) {
+    EXPECT_STREQ(e.what(), "test");
   }
   EXPECT_EQ(c10::rbln::get_scope_depth(), 0);
 }
@@ -169,7 +171,8 @@ TEST_F(RBLNLoggingTest, MultipleThreadsConcurrent) {
       std::vector<std::unique_ptr<c10::rbln::RBLNScopeGuard>> scopes;
       scopes.reserve(nesting_depth);
       for (int d = 0; d < nesting_depth; ++d) {
-        scopes.push_back(std::make_unique<c10::rbln::RBLNScopeGuard>(__FILE__, __LINE__, __func__));
+        scopes.push_back(std::make_unique<c10::rbln::RBLNScopeGuard>(
+            __FILE__, __LINE__, __func__));
         EXPECT_EQ(c10::rbln::get_scope_depth(), d + 1);
       }
       while (!scopes.empty()) {
@@ -188,7 +191,8 @@ TEST_F(RBLNLoggingTest, MultipleThreadsConcurrent) {
 }
 
 TEST_F(RBLNLoggingTest, GetNewGeneratorDoesNotAbort) {
-  auto generator = c10::rbln::get_rbln_hooks()->getNewGenerator(initial_device_index_);
+  auto generator =
+      c10::rbln::get_rbln_hooks()->getNewGenerator(initial_device_index_);
   (void)generator;
   SUCCEED();
 }

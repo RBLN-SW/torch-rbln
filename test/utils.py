@@ -9,6 +9,7 @@ import torch
 
 from torch_rbln._internal.device_arch_utils import is_atom_device, is_rebel_device
 from torch_rbln._internal.ops_utils import SupportedDtypes
+from torch_rbln._internal.rdma_env import apply_default_rbln_network_environment
 
 
 SUPPORTED_DTYPES = list(SupportedDtypes.dispatch)
@@ -24,8 +25,6 @@ def configure_rbln_network_for_autoport_tests() -> None:
     ``RBLN_RDMA_IP`` when ``torch_rbln`` / ``librbln`` load in the subprocess.
     See :mod:`torch_rbln._internal.rdma_env`.
     """
-    from torch_rbln._internal.rdma_env import apply_default_rbln_network_environment
-
     apply_default_rbln_network_environment()
 
 
@@ -39,13 +38,11 @@ def configure_master_port_for_rccl_tests(default_port: str = _DEFAULT_DISTRIBUTE
     """
     if os.environ.get("RCCL_PORT_GEN") == "1":
         if not os.environ.get("MASTER_PORT"):
-            print(
+            sys.exit(
                 "RCCL_PORT_GEN=1 requires MASTER_PORT to be set in the environment "
                 f"(e.g. export MASTER_PORT=29500). Unset RCCL_PORT_GEN or set it to "
-                f"empty to use the test default ({default_port}).",
-                file=sys.stderr,
+                f"empty to use the test default ({default_port})."
             )
-            sys.exit(1)
         return
     os.environ.setdefault("MASTER_PORT", default_port)
 
@@ -71,15 +68,15 @@ def set_deterministic_seeds(seed: int):
     parent process are not inherited by child processes.
     """
     torch.manual_seed(seed)
-    np.random.seed(seed)
+    np.random.seed(seed)  # noqa: NPY002
     random.seed(seed)
 
 
 def xfail_atom(reason: str):
     """Strict xfail on ATOM, inert elsewhere.
 
-    An unexpected pass fails the suite, signalling the marker can be removed
-    once ATOM gains support.
+    An unexpected pass fails the suite, signaling the marker can be removed once ATOM
+    gains support.
     """
     return pytest.mark.xfail(condition=is_atom_device(), reason=reason, strict=True)
 
@@ -87,8 +84,8 @@ def xfail_atom(reason: str):
 def xfail_rebel(reason: str):
     """Strict xfail on REBEL, inert elsewhere.
 
-    An unexpected pass fails the suite, signalling the marker can be removed
-    once REBEL gains support.
+    An unexpected pass fails the suite, signaling the marker can be removed once REBEL
+    gains support.
     """
     return pytest.mark.xfail(condition=is_rebel_device(), reason=reason, strict=True)
 
@@ -124,4 +121,5 @@ def run_in_isolated_process(func, *args):
     p.start()
     p.join()
     if p.exitcode != 0:
-        raise RuntimeError(f"{func.__name__} failed with exit code {p.exitcode}")
+        msg = f"{func.__name__} failed with exit code {p.exitcode}"
+        raise RuntimeError(msg)

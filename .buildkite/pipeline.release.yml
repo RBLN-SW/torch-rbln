@@ -1,3 +1,4 @@
+---
 env:
   TORCH_RBLN_QUEUE_DEFAULT: ${TORCH_RBLN_QUEUE_DEFAULT?}
   TORCH_RBLN_QUEUE_AMD64: ${TORCH_RBLN_QUEUE_AMD64?}
@@ -24,7 +25,7 @@ steps:
       - label: Create release
         key: create-release
         command: |
-          .buildkite/scripts/release/create-release.py
+          .buildkite/scripts/release/create_release.py
         agents:
           queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
         env:

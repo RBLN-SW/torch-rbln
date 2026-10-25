@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Test suite for RBLN Python APIs.
+"""Test suite for RBLN Python APIs.
 
 This test suite covers the following RBLN Python APIs:
 1. Device management APIs: device_count, is_available, current_device, set_device
@@ -18,7 +17,9 @@ from test.utils import SUPPORTED_DTYPES
 
 @pytest.mark.npu(count=1)
 class TestDeviceManagementAPIs(TestCase):
-    """Test RBLN device management APIs such as device_count, is_available, current_device, and set_device."""
+    """Test RBLN device management APIs such as device_count, is_available,
+    current_device, and set_device.
+    """
 
     def test_device_management_api_existence(self):
         self.assertTrue(hasattr(torch.rbln, "device_count"))

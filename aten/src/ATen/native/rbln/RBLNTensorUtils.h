@@ -1,7 +1,7 @@
 #pragma once
 
-#include <c10/rbln/RBLNMacros.h>
 #include <ATen/ATen.h>
+#include <c10/rbln/RBLNMacros.h>
 
 namespace at::native::rbln {
 
@@ -32,7 +32,10 @@ C10_RBLN_API at::Tensor get_cpu_copy_of_rbln_tensor(const at::Tensor& self);
  * @param dtype The data type of the tensor.
  * @return The created tensor.
  */
-C10_RBLN_API at::Tensor create_tensor_from_ptr(uint64_t data_ptr, c10::IntArrayRef sizes, c10::ScalarType dtype);
+C10_RBLN_API at::Tensor create_tensor_from_ptr(
+    uint64_t data_ptr,
+    c10::IntArrayRef sizes,
+    c10::ScalarType dtype);
 
 /**
  * @brief True iff `a` and `b` reference the same logical view: same storage

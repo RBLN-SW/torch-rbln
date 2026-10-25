@@ -1,14 +1,15 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Test suite for storage offset handling.
+"""Test suite for storage offset handling.
 
-This test suite validates the correct behavior of tensors with non-zero storage offsets in various scenarios:
+This test suite validates the correct behavior of tensors with non-zero storage offsets
+in various scenarios:
 1. Split tensors with view operations (transpose, reshape, etc.)
 2. Split and merge operations
 """
 
 import unittest
+from typing_extensions import override
 
 import pytest
 import torch
@@ -23,9 +24,11 @@ class BaseTestNonZeroStorageOffset(TestCase):
 
     rbln_device = torch.device("rbln:0")
 
-    # Flag to enable contiguous() call for non-zero storage offset tensors that are contiguous
+    # Flag to enable contiguous() call for non-zero storage offset tensors that are
+    # contiguous
     ALLOW_CONTIGUOUS_FOR_NONZERO_OFFSET = True
 
+    @override
     def assertEqual(self, x, y, *args, **kwargs):
         # View-on-device adds a cast round-trip on every view-aware op (e.g.,
         # fp16 ↔ custom_float16 for fp16 inputs); the round-trip can lose
@@ -56,12 +59,14 @@ class BaseTestNonZeroStorageOffset(TestCase):
         return actual_offset
 
     def _check_contiguous_with_storage_offset(self, tensor, msg=""):
-        """Check if tensor with non-zero storage offset is contiguous (unexpected case)."""
+        """Check if tensor with non-zero storage offset is contiguous (unexpected
+        case).
+        """
         storage_offset = tensor.storage_offset()
         is_contig = tensor.is_contiguous()
 
         if storage_offset > 0 and is_contig:
-            print(
+            print(  # noqa: T201
                 f"WARNING [{msg}]: Tensor has non-zero storage_offset={storage_offset} but is_contiguous()=True. "
                 f"This may cause test failures."
             )
@@ -69,40 +74,41 @@ class BaseTestNonZeroStorageOffset(TestCase):
         return is_contig
 
     def _ensure_contiguous_if_needed(self, tensor, msg=""):
-        """
-        Ensure tensor is contiguous if it has non-zero storage offset and is contiguous.
+        """Ensure tensor is contiguous if it has non-zero storage offset and is
+        contiguous.
 
-        If ALLOW_CONTIGUOUS_FOR_NONZERO_OFFSET is True and the tensor has non-zero storage
-        offset but is contiguous, create a new tensor with storage_offset=0 and contiguous=True.
-        Otherwise, return the original tensor.
+        If ALLOW_CONTIGUOUS_FOR_NONZERO_OFFSET is True and the tensor has non-zero
+        storage offset but is contiguous, create a new tensor with storage_offset=0 and
+        contiguous=True. Otherwise, return the original tensor.
 
         Args:
             tensor: Input tensor
             msg: Optional message for logging
 
         Returns:
-            Tensor that is guaranteed to be contiguous with storage_offset=0 (if flag is enabled and conditions met)
+            Tensor that is guaranteed to be contiguous with storage_offset=0 (if flag is
+            enabled and conditions met)
         """
         storage_offset = tensor.storage_offset()
         is_contig = tensor.is_contiguous()
-        print(f"INFO [{msg}]: storage_offset={storage_offset}, is_contig={is_contig}")
+        print(f"INFO [{msg}]: storage_offset={storage_offset}, is_contig={is_contig}")  # noqa: T201
         self._check_contiguous_with_storage_offset(tensor, msg)
 
-        if self.ALLOW_CONTIGUOUS_FOR_NONZERO_OFFSET:
-            if storage_offset > 0 and is_contig:
-                print(
-                    f"INFO [{msg}]: Creating new tensor with storage_offset=0 from tensor with "
-                    f"non-zero storage_offset={storage_offset} and is_contiguous()=True "
-                    f"(ALLOW_CONTIGUOUS_FOR_NONZERO_OFFSET=True)"
-                )
-                # Create a new tensor with storage_offset=0 by creating empty tensor and copying
-                # This ensures we get a new tensor with storage_offset=0
-                new_tensor = torch.empty_like(tensor, device=self.rbln_device)
-                new_tensor.copy_(tensor)
-                # Verify the new tensor has storage_offset=0 and is contiguous
-                self.assertEqual(new_tensor.storage_offset(), 0, f"{msg}: New tensor should have storage_offset=0")
-                self.assertTrue(new_tensor.is_contiguous(), f"{msg}: New tensor should be contiguous")
-                return new_tensor
+        if self.ALLOW_CONTIGUOUS_FOR_NONZERO_OFFSET and storage_offset > 0 and is_contig:
+            print(  # noqa: T201
+                f"INFO [{msg}]: Creating new tensor with storage_offset=0 from tensor with "
+                f"non-zero storage_offset={storage_offset} and is_contiguous()=True "
+                f"(ALLOW_CONTIGUOUS_FOR_NONZERO_OFFSET=True)"
+            )
+            # Create a new tensor with storage_offset=0 by creating empty tensor and
+            # copying
+            # This ensures we get a new tensor with storage_offset=0
+            new_tensor = torch.empty_like(tensor, device=self.rbln_device)
+            new_tensor.copy_(tensor)
+            # Verify the new tensor has storage_offset=0 and is contiguous
+            self.assertEqual(new_tensor.storage_offset(), 0, f"{msg}: New tensor should have storage_offset=0")
+            self.assertTrue(new_tensor.is_contiguous(), f"{msg}: New tensor should be contiguous")
+            return new_tensor
 
         return tensor
 
@@ -166,14 +172,16 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
             add_tensor[i * 8 : (i + 1) * 8] = float(i + 1)
 
         # Check contiguous status for each chunk
-        for i, chunk in enumerate(chunks):
-            chunk = self._ensure_contiguous_if_needed(chunk, "[test_chunk_contiguous_then_add] chunk")
+        for i, raw_chunk in enumerate(chunks):
+            chunk = self._ensure_contiguous_if_needed(raw_chunk, "[test_chunk_contiguous_then_add] chunk")
             result = torch.add(chunk, float(i + 1))
             self.assertEqual(result.cpu(), (base_tensor + add_tensor)[i * 8 : (i + 1) * 8].cpu())
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_chunk_non_contiguous_then_add(self, dtype):
-        """Test chunk that produces non-contiguous tensors (after transpose), then torch.add."""
+        """Test chunk that produces non-contiguous tensors (after transpose), then
+        torch.add.
+        """
         # Create base tensor
         base_tensor = torch.randn([32, 64], dtype=dtype, device=self.rbln_device)
 
@@ -189,8 +197,8 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
             add_tensor[i * 8 : (i + 1) * 8] = float(i + 1)
 
         # Check contiguous status for each transposed chunk
-        for i, chunk_t in enumerate(transposed_chunks):
-            chunk_t = self._ensure_contiguous_if_needed(chunk_t, "[test_chunk_non_contiguous_then_add] chunk_t")
+        for i, raw_chunk_t in enumerate(transposed_chunks):
+            chunk_t = self._ensure_contiguous_if_needed(raw_chunk_t, "[test_chunk_non_contiguous_then_add] chunk_t")
             result = torch.add(chunk_t, float(i + 1))
             self.assertEqual(result.cpu(), (base_tensor + add_tensor)[i * 8 : (i + 1) * 8].transpose(0, 1).cpu())
 
@@ -330,14 +338,14 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
 
         # Check contiguous status after transpose
         for i, chunk_t in enumerate(transposed_chunks):
-            print(
+            print(  # noqa: T201
                 f"[test_split_chunk_then_transpose] transposed_chunk[{i}].is_contiguous() = {chunk_t.is_contiguous()}"
             )
 
         # Verify transpose worked correctly
         expected_transposed = [base_tensor[i * 8 : (i + 1) * 8].transpose(0, 1) for i in range(4)]
 
-        for i, (actual, expected) in enumerate(zip(transposed_chunks, expected_transposed)):
+        for i, (actual, expected) in enumerate(zip(transposed_chunks, expected_transposed, strict=True)):
             self.assertEqual(actual.cpu(), expected.cpu(), msg=f"chunk {i} transpose mismatch")
 
         transposed_chunks = [
@@ -346,7 +354,7 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
         results = [torch.add(tc, 1.0) for tc in transposed_chunks]
         expected_results = [et + 1.0 for et in expected_transposed]
 
-        for i, (actual, expected) in enumerate(zip(results, expected_results)):
+        for i, (actual, expected) in enumerate(zip(results, expected_results, strict=True)):
             self.assertEqual(actual.cpu(), expected.cpu(), msg=f"chunk {i} operation mismatch")
 
     @dtypes(*SUPPORTED_DTYPES)
@@ -582,17 +590,17 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
         # Verify transpose worked correctly
         expected_transposed = [base_tensor[i * 4 : (i + 1) * 4].transpose(0, 1) for i in range(16)]
 
-        for i, (actual, expected) in enumerate(zip(transposed_chunks, expected_transposed)):
+        for actual, expected in zip(transposed_chunks, expected_transposed, strict=True):
             self.assertEqual(actual.cpu(), expected.cpu())
 
         # Use transposed chunks in operations
         # Check contiguous status before operations
         for tc in transposed_chunks:
-            tc = self._ensure_contiguous_if_needed(tc, "[test_split_multiple_chunks_then_transpose_each] tc")
+            self._ensure_contiguous_if_needed(tc, "[test_split_multiple_chunks_then_transpose_each] tc")
         results = [torch.add(tc, 1.0) for tc in transposed_chunks]
         expected_results = [et + 1.0 for et in expected_transposed]
 
-        for i, (actual, expected) in enumerate(zip(results, expected_results)):
+        for i, (actual, expected) in enumerate(zip(results, expected_results, strict=True)):
             # Compare values directly since they may have different storage layouts
             actual_cpu = actual.cpu().contiguous()
             expected_cpu = expected.cpu().contiguous()
@@ -691,7 +699,7 @@ class TestSplitAndMerge(BaseTestNonZeroStorageOffset):
 
         # Second level split (split each first level chunk)
         second_level_chunks = []
-        for i, chunk in enumerate(first_level_chunks):
+        for chunk in first_level_chunks:
             sub_chunks = torch.chunk(chunk, chunks=2, dim=1)
             second_level_chunks.extend(sub_chunks)
 
@@ -749,7 +757,7 @@ class TestSplitAndMerge(BaseTestNonZeroStorageOffset):
         chunk_sizes = [25, 30, 20, 25]  # Sums to 100
         chunks = []
         start_idx = 0
-        for i, chunk_size in enumerate(chunk_sizes):
+        for chunk_size in chunk_sizes:
             end_idx = start_idx + chunk_size
             chunk = base_tensor[start_idx:end_idx]
             chunks.append(chunk)
@@ -839,14 +847,14 @@ class TestSplitAndMerge(BaseTestNonZeroStorageOffset):
     @dtypes(*SUPPORTED_DTYPES)
     def test_regard_tensor_list_as_single_tensor_if_list_is_contiguous(self, dtype):
         """Test regard tensor list as single tensor if list is contiguous."""
-
         # Create a single large tensor and split it to ensure contiguous memory
         # This simulates the case where tensors are allocated contiguously (like in C++)
         # We need to create tensors that share the same underlying storage
         large_tensor = torch.zeros([4, 32, 64], dtype=dtype, device=self.rbln_device)
         tensor_list = []
         for i in range(4):
-            # Create views that share the same storage (like slicing a contiguous buffer)
+            # Create views that share the same storage (like slicing a contiguous
+            # buffer)
             tensor = large_tensor[i]  # This creates a view with storage_offset
             tensor_list.append(tensor)
 
@@ -885,7 +893,7 @@ class TestSplitAndMerge(BaseTestNonZeroStorageOffset):
         ]
 
         for tensor_list_to_test, reference_tensor, expected_contiguous, case_name in test_cases:
-            print(f"\nTesting {case_name} tensor list")
+            print(f"\nTesting {case_name} tensor list")  # noqa: T201
             is_contig = _is_tensor_vector_contiguous(tensor_list_to_test, 32 * 64)
             self.assertEqual(
                 is_contig,
@@ -894,12 +902,14 @@ class TestSplitAndMerge(BaseTestNonZeroStorageOffset):
             )
 
             if is_contig:
-                print(f"{case_name} tensor_list is contiguous")
-                # Create a single tensor view from contiguous tensor list using tensor_list[0]
-                # Each tensor is (32, 64), so stride should be (32*64, 64, 1) for shape (4, 32, 64)
-                # Since tensor_list[0] shares the same storage as large_tensor, we can use it directly
+                print(f"{case_name} tensor_list is contiguous")  # noqa: T201
+                # Create a single tensor view from contiguous tensor list using
+                # tensor_list[0] Each tensor is (32, 64), so stride should be (32*64,
+                # 64, 1) for shape (4, 32, 64) Since tensor_list[0] shares the same
+                # storage as large_tensor, we can use it directly
                 first_tensor = tensor_list_to_test[0]
-                # Use tensor_list[0] directly - it shares storage with large_tensor, so storage is large enough
+                # Use tensor_list[0] directly - it shares storage with large_tensor, so
+                # storage is large enough
                 single_tensor_view = torch.as_strided(
                     first_tensor,  # Use tensor_list[0] directly
                     size=(4, 32, 64),
@@ -914,7 +924,7 @@ class TestSplitAndMerge(BaseTestNonZeroStorageOffset):
                 if reference_tensor is not None:
                     self.assertEqual(single_tensor_view.cpu(), reference_tensor.cpu())
             else:
-                print(f"{case_name} tensor_list is not contiguous")
+                print(f"{case_name} tensor_list is not contiguous")  # noqa: T201
                 # If not contiguous, we cannot create a single tensor view
                 # In this case, we would need to concatenate or copy
                 combined_tensor = torch.stack(tensor_list_to_test, dim=0)

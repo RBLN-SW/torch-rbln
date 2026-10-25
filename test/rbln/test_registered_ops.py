@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Test suite for all ops registered in RBLNRegisterOps.cpp and register_ops.py.
+"""Test suite for all ops registered in RBLNRegisterOps.cpp and register_ops.py.
 
 This test suite verifies:
 1. All native implementation ops work correctly with various shapes
@@ -9,12 +8,20 @@ This test suite verifies:
 3. Python-registered ops from register_ops.py work correctly
 """
 
+from typing import ClassVar
+
 import pytest
 import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
 from test.utils import SUPPORTED_DTYPES
+from torch_rbln._internal.ops_utils import (
+    _detect_view_recipe,
+    _simulate_recipe,
+    _view_fallback_count_get,
+    _view_fallback_count_reset,
+)
 
 
 # Tolerance for numerical comparisons
@@ -48,7 +55,8 @@ TEST_SHAPES = [
     (128, 64),  # rectangular matrix
 ]
 
-# Subset of TEST_SHAPES for smaller tests to reduce runtime while still covering different dimensionalities and sizes
+# Subset of TEST_SHAPES for smaller tests to reduce runtime while still covering
+# different dimensionalities and sizes
 TEST_SHAPES_SUBSET = TEST_SHAPES[:8]
 
 
@@ -368,7 +376,7 @@ class TestRegisteredFallbackOps(TestCase):
     @parametrize("shape", [(3, 4), (10, 20), (2, 3, 4), (5, 10)])
     def test_argmax(self, dtype, shape):
         """Test argmax fallback op with various shapes"""
-        valid_dims = [None] + list(range(len(shape)))
+        valid_dims = [None, *range(len(shape))]
         for dim in valid_dims:
             with self.subTest(shape=shape, dim=dim):
                 x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
@@ -597,7 +605,8 @@ class TestRegisteredPythonOps(TestCase):
     def test_mm(self, dtype, n, m, p):
         """Test mm op with various matrix sizes
 
-        Note: float16 precision limits require relaxed tolerance for matrix multiplication.
+        Note: float16 precision limits require relaxed tolerance for matrix
+        multiplication.
         """
         x = torch.randn([n, m], dtype=dtype, device=self.rbln_device)
         y = torch.randn([m, p], dtype=dtype, device=self.rbln_device)
@@ -715,7 +724,8 @@ class TestRegisteredPythonOps(TestCase):
     def test_bmm(self, dtype, b, n, m, p):
         """Test bmm op with various batch matrix sizes
 
-        Note: float16 precision limits require relaxed tolerance for batch matrix multiplication.
+        Note: float16 precision limits require relaxed tolerance for batch matrix
+        multiplication.
         """
         x = torch.randn([b, n, m], dtype=dtype, device=self.rbln_device)
         y = torch.randn([b, m, p], dtype=dtype, device=self.rbln_device)
@@ -941,7 +951,9 @@ class TestRegisteredPythonOps(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("n,m,p", [(10, 20, 30), (5, 10, 15)])
     def test_addmm(self, dtype, n, m, p):
-        """Test addmm op — matmul accumulated error needs the relaxed ``MATMUL_TOLERANCES``."""
+        """Test addmm op — matmul accumulated error needs the relaxed
+        ``MATMUL_TOLERANCES``.
+        """
         mat1 = torch.randn([n, m], dtype=dtype, device=self.rbln_device)
         mat2 = torch.randn([m, p], dtype=dtype, device=self.rbln_device)
         vec = torch.randn([n, p], dtype=dtype, device=self.rbln_device)
@@ -956,12 +968,10 @@ class TestRegisteredPythonOps(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("batch_size,in_features,out_features", [(3, 64, 32), (5, 128, 64), (10, 32, 16)])
     def test_linear(self, dtype, batch_size, in_features, out_features):
-        """Test linear op — matmul accumulated error needs the relaxed ``MATMUL_TOLERANCES``."""
+        """Test linear op — matmul accumulated error needs the relaxed
+        ``MATMUL_TOLERANCES``.
+        """
         # linear(input, weight, bias) computes input @ weight.T + bias
-        # input: (batch_size, in_features)
-        # weight: (out_features, in_features)
-        # bias: (out_features,)
-        # result: (batch_size, out_features)
         x = torch.randn([batch_size, in_features], dtype=dtype, device=self.rbln_device)
         weight = torch.randn([out_features, in_features], dtype=dtype, device=self.rbln_device)
         bias = torch.randn([out_features], dtype=dtype, device=self.rbln_device)
@@ -983,7 +993,8 @@ class TestRegisteredPythonOps(TestCase):
         ],
     )
     def test_linear_backward(self, dtype, batch_size, in_features, out_features, output_mask):
-        """Test linear_backward op — matmul accumulated error needs the relaxed ``MATMUL_TOLERANCES``.
+        """Test linear_backward op — matmul accumulated error needs the relaxed
+        ``MATMUL_TOLERANCES``.
 
         CPU has no direct linear_backward; the reference is computed inline.
         """
@@ -1009,7 +1020,7 @@ class TestRegisteredPythonOps(TestCase):
         result = torch.ops.aten.linear_backward(input_tensor, grad_output, weight, output_mask)
         expected = _linear_backward_cpu(input_tensor.cpu(), grad_output.cpu(), weight.cpu(), output_mask)
         # Compare each element of the tuple
-        for i, (r, e) in enumerate(zip(result, expected)):
+        for i, (r, e) in enumerate(zip(result, expected, strict=True)):
             if r is not None and e is not None:
                 atol, rtol = MATMUL_TOLERANCES.get(dtype, (ATOL, RTOL))
                 self.assertEqual(r.cpu(), e.cpu(), atol=atol, rtol=rtol)
@@ -1252,7 +1263,7 @@ BROADCAST_PATTERNS = [
     # else rebel-compiler raises ``Graph Optimization: [UNEXPECTED_GRAPH]``).
     # Patterns observed in practice:
     #   * ``softmax_backward_rbln``  : ``output * S.sum(dim=-1, keepdim=True)``
-    #     emits ``(N, D) × (N, 1)`` when ``dim`` is the last axis.
+    #     emits ``(N, D) x (N, 1)`` when ``dim`` is the last axis.
     #   * Reduce-then-multiply patterns where ``keepdim=True`` leaves a 1 in
     #     the last position.
     # -----
@@ -1272,7 +1283,8 @@ class TestBinaryOpsBroadcast(TestCase):
     """Verify the 12 binary / comparison ops produce correct results across
     broadcast patterns after the implicit-broadcast change (2026-04-30).
     Single-tensor and same-shape cases are also covered to ensure the fast
-    paths in broadcast_args_general still work."""
+    paths in broadcast_args_general still work.
+    """
 
     rbln_device = torch.device("rbln:0")
 
@@ -1280,9 +1292,7 @@ class TestBinaryOpsBroadcast(TestCase):
         # CPU reference in fp32 to avoid double-rounding in the assertion
         return op_callable(a_cpu, b_cpu)
 
-    def _check(
-        self, op_callable, lhs_shape, rhs_shape, dtype=torch.float16, atol=ATOL, rtol=RTOL, output_is_bool=False
-    ):
+    def _check(self, op_callable, lhs_shape, rhs_shape, dtype=torch.float16, atol=ATOL, rtol=RTOL):
         a_cpu = torch.randn(*lhs_shape, dtype=torch.float32) if lhs_shape else torch.randn(())
         b_cpu = torch.randn(*rhs_shape, dtype=torch.float32) if rhs_shape else torch.randn(())
         a = a_cpu.to(dtype=dtype, device=self.rbln_device)
@@ -1296,17 +1306,14 @@ class TestBinaryOpsBroadcast(TestCase):
         b_ref = b.cpu()
         expected = self._golden(op_callable, a_ref, b_ref)
         expected_shape = torch.broadcast_shapes(lhs_shape, rhs_shape) if (lhs_shape or rhs_shape) else torch.Size([])
-        self.assertEqual(result.shape, expected_shape, msg=f"{op_callable.__name__} {lhs_shape}×{rhs_shape}")
-        if output_is_bool:
-            self.assertEqual(result.cpu(), expected.cpu(), msg=f"{op_callable.__name__} {lhs_shape}×{rhs_shape}")
-        else:
-            self.assertEqual(
-                result.cpu(),
-                expected.cpu(),
-                atol=atol,
-                rtol=rtol,
-                msg=f"{op_callable.__name__} {lhs_shape}×{rhs_shape}",
-            )
+        self.assertEqual(result.shape, expected_shape, msg=f"{op_callable.__name__} {lhs_shape} x {rhs_shape}")
+        self.assertEqual(
+            result.cpu(),
+            expected.cpu(),
+            atol=atol,
+            rtol=rtol,
+            msg=f"{op_callable.__name__} {lhs_shape} x {rhs_shape}",
+        )
         self.assertEqual(result.device, self.rbln_device)
 
     # add/sub need a looser tolerance: on REBEL NPU, the compiler computes
@@ -1342,7 +1349,7 @@ class TestBinaryOpsBroadcast(TestCase):
     # flip individual bits when the operands round to exactly equal in fp16,
     # so we keep the pattern set tight (subset of BROADCAST_PATTERNS) for
     # comparisons.
-    _CMP_PATTERNS = [
+    _CMP_PATTERNS: ClassVar[list[tuple[tuple[int, ...], tuple[int, ...]]]] = [
         ((1, 8, 16), (16,)),
         ((4, 1, 64), (1, 8, 64)),
         ((4, 8, 16), (4, 8, 16)),
@@ -1377,8 +1384,7 @@ class TestBinaryOpsBroadcast(TestCase):
     # the exact softmax_backward shapes here so a future "let's just use raw
     # implicit broadcast everywhere" refactor trips the test instead of an
     # 8-hour debug session.
-    _LAST_DIM_ONE_PATTERNS = [
-        # (lhs_shape, rhs_shape, dim_used_in_originating_reduction)
+    _LAST_DIM_ONE_PATTERNS: ClassVar[list[tuple[tuple[int, ...], tuple[int, ...], str]]] = [
         ((3, 4), (3, 1), "softmax_backward shape0_dim_1"),
         ((2, 3, 4), (2, 3, 1), "softmax_backward shape2_dim_2"),
         ((4, 8, 16), (4, 8, 1), "last-dim aligned-side"),
@@ -1387,7 +1393,7 @@ class TestBinaryOpsBroadcast(TestCase):
 
     @parametrize("op_callable", [torch.add, torch.sub, torch.mul, torch.div])
     @parametrize("lhs_shape,rhs_shape,label", _LAST_DIM_ONE_PATTERNS)
-    def test_last_dim_size_one_broadcast(self, op_callable, lhs_shape, rhs_shape, label):
+    def test_last_dim_size_one_broadcast(self, op_callable, lhs_shape, rhs_shape, label):  # noqa: ARG002
         """Direct regression for the rebel ``UNEXPECTED_GRAPH`` failure mode."""
         atol, rtol = (0.05, 0.05) if op_callable is torch.div else (ATOL, RTOL)
         self._check(op_callable, lhs_shape, rhs_shape, atol=atol, rtol=rtol)
@@ -1447,11 +1453,10 @@ class TestViewOpsOnDevice(TestCase):
     rbln_device = torch.device("rbln:0")
 
     def _make_permuted(self, base_shape, perm, dtype=torch.float16, device=None):
-        base = torch.randn(*base_shape, dtype=dtype, device=device)
-        return base, base.permute(*perm)
+        return torch.randn(*base_shape, dtype=dtype, device=device).permute(*perm)
 
-    def _check_unary(self, op_callable, base_shape, perm, atol=ATOL, rtol=RTOL, output_is_bool=False):
-        base, t = self._make_permuted(base_shape, perm, device=self.rbln_device)
+    def _check_unary(self, op_callable, base_shape, perm, atol=ATOL, rtol=RTOL, *, output_is_bool=False):
+        t = self._make_permuted(base_shape, perm, device=self.rbln_device)
         result = op_callable(t)
         expected = op_callable(t.cpu())
         self.assertEqual(result.shape, expected.shape, msg=f"{op_callable.__name__} permute({perm})")
@@ -1464,14 +1469,22 @@ class TestViewOpsOnDevice(TestCase):
         self.assertEqual(result.device, self.rbln_device)
 
     def _check_binary(
-        self, op_callable, base_shape, perm, perm_lhs=True, perm_rhs=False, atol=ATOL, rtol=RTOL, output_is_bool=False
+        self,
+        op_callable,
+        base_shape,
+        perm,
+        *,
+        perm_lhs=True,
+        perm_rhs=False,
+        atol=ATOL,
+        rtol=RTOL,
     ):
         # The "other" tensor is built to match the permuted shape so we focus
         # on view dispatch correctness (not broadcast, which is covered
         # separately in TestBinaryOpsBroadcast).
-        base_lhs, t_lhs = self._make_permuted(base_shape, perm, device=self.rbln_device)
+        t_lhs = self._make_permuted(base_shape, perm, device=self.rbln_device)
         if perm_rhs:
-            base_rhs, t_rhs = self._make_permuted(base_shape, perm, device=self.rbln_device)
+            t_rhs = self._make_permuted(base_shape, perm, device=self.rbln_device)
         else:
             t_rhs = torch.randn(*t_lhs.shape, dtype=torch.float16, device=self.rbln_device)
         if not perm_lhs:
@@ -1479,10 +1492,7 @@ class TestViewOpsOnDevice(TestCase):
         result = op_callable(t_lhs, t_rhs)
         expected = op_callable(t_lhs.cpu(), t_rhs.cpu())
         self.assertEqual(result.shape, expected.shape)
-        if output_is_bool:
-            self.assertEqual(result.cpu(), expected.cpu())
-        else:
-            self.assertEqual(result.cpu(), expected.cpu(), atol=atol, rtol=rtol)
+        self.assertEqual(result.cpu(), expected.cpu(), atol=atol, rtol=rtol)
         self.assertEqual(result.device, self.rbln_device)
 
     # --- Unary ops (9) ---
@@ -1698,7 +1708,7 @@ class TestViewOpsOnDevice(TestCase):
         # custom_softmax_out_rbln (in register_custom_ops.py) — manually
         # converted to compile_and_run_view_aware. Permute on input must
         # reach the device path with explicit aten::permute in graph.
-        base, t = self._make_permuted(base_shape, perm, device=self.rbln_device)
+        t = self._make_permuted(base_shape, perm, device=self.rbln_device)
         result = torch.softmax(t, dim=-1)
         expected = torch.softmax(t.cpu(), dim=-1)
         self.assertEqual(result.shape, expected.shape)
@@ -1708,7 +1718,7 @@ class TestViewOpsOnDevice(TestCase):
     @parametrize("base_shape,perm", PERMUTE_PATTERNS)
     def test_pow_permute(self, base_shape, perm):
         # pow_tensor_scalar_out_rbln (manual) view-aware path.
-        base, t = self._make_permuted(base_shape, perm, device=self.rbln_device)
+        t = self._make_permuted(base_shape, perm, device=self.rbln_device)
         # Use abs() to avoid negative bases with non-integer exponent edge cases.
         result = torch.pow(torch.abs(t) + 0.1, 2)
         expected = torch.pow(torch.abs(t.cpu()) + 0.1, 2)
@@ -1720,7 +1730,7 @@ class TestViewOpsOnDevice(TestCase):
     def test_clamp_permute(self, base_shape, perm):
         # clamp goes through codegen template's view-aware path. We test
         # the scalar-bound variant (clamp.out — most common in real models).
-        base, t = self._make_permuted(base_shape, perm, device=self.rbln_device)
+        t = self._make_permuted(base_shape, perm, device=self.rbln_device)
         result = torch.clamp(t, min=-0.5, max=0.5)
         expected = torch.clamp(t.cpu(), min=-0.5, max=0.5)
         self.assertEqual(result.shape, expected.shape)
@@ -1732,7 +1742,7 @@ class TestViewOpsOnDevice(TestCase):
     # dispatch-path issue — explicit aten::permute → aten::mean shows the
     # same numerical break in a hand-written OpModule). Track separately
     # under rebel-compiler; our view-aware path is correct in semantics.
-    _MEAN_PERMUTE_PATTERNS = [
+    _MEAN_PERMUTE_PATTERNS: ClassVar[list[tuple[tuple[int, ...], tuple[int, ...]]]] = [
         ((2, 4, 8), (2, 0, 1)),
         ((2, 4, 8), (1, 0, 2)),
         ((2, 4, 8), (0, 2, 1)),
@@ -1742,7 +1752,7 @@ class TestViewOpsOnDevice(TestCase):
 
     @parametrize("base_shape,perm", _MEAN_PERMUTE_PATTERNS)
     def test_mean_permute(self, base_shape, perm):
-        base, t = self._make_permuted(base_shape, perm, device=self.rbln_device)
+        t = self._make_permuted(base_shape, perm, device=self.rbln_device)
         result = torch.mean(t, dim=-1)
         expected = torch.mean(t.cpu(), dim=-1)
         self.assertEqual(result.shape, expected.shape)
@@ -1823,8 +1833,6 @@ class TestViewOpsOnDevice(TestCase):
         # must reproduce the target tensor's (shape, stride, offset)
         # exactly. Bit-exact match is the correctness invariant of the
         # generic detector.
-        from torch_rbln._internal.ops_utils import _detect_view_recipe, _simulate_recipe
-
         bases = [
             torch.randn(2, 4, 8, dtype=torch.float16, device=self.rbln_device),
             torch.randn(8, 16, dtype=torch.float16, device=self.rbln_device),
@@ -1847,7 +1855,7 @@ class TestViewOpsOnDevice(TestCase):
             for label, mk in view_makers:
                 try:
                     t = mk(base)
-                except Exception:
+                except Exception:  # noqa: S112
                     continue  # skip impossible combos
                 if t.is_contiguous() and t.storage_offset() == 0:
                     continue  # detector returns None for canonical tensors
@@ -1873,8 +1881,6 @@ class TestViewOpsOnDevice(TestCase):
         # The fallback warning counter should remain at 0 across the
         # recognized-pattern operations exercised in this class. Reset it,
         # run a known-recognized view op, and check it didn't increment.
-        from torch_rbln._internal.ops_utils import _view_fallback_count_get, _view_fallback_count_reset
-
         _view_fallback_count_reset()
         base = torch.randn(2, 4, 8, dtype=torch.float16, device=self.rbln_device)
         _ = torch.mul(base.permute(2, 0, 1), torch.randn(8, 2, 4, dtype=torch.float16, device=self.rbln_device))
@@ -1925,7 +1931,8 @@ class TestRegisteredPythonOpsMultiDevice(TestCase):
     def test_mm_mixed_devices(self, dtype, n, m, p, device_index):
         """Test mm op with tensors on different devices
 
-        Note: float16 precision limits require relaxed tolerance for matrix multiplication.
+        Note: float16 precision limits require relaxed tolerance for matrix
+        multiplication.
         """
         device = torch.device("rbln", device_index)
         x = torch.randn([n, m], dtype=dtype, device=device)
@@ -1941,7 +1948,9 @@ class TestRegisteredPythonOpsMultiDevice(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("shape", [(5, 10)])
     def test_add_cross_device(self, dtype, shape):
-        """Test add op with tensors on different devices (should fail or handle appropriately)"""
+        """Test add op with tensors on different devices (should fail or handle
+        appropriately)
+        """
         device0 = torch.device("rbln:0")
         device1 = torch.device("rbln:1")
         x = torch.randn(shape, dtype=dtype, device=device0)
@@ -2007,7 +2016,8 @@ class TestRegisteredPythonOpsMultiDevice(TestCase):
 
             # Perform linear operation
             # sync_runtime should detect device_id from input tensors
-            # and create output tensor on tensor_device_index (not context_device_index, despite context being different)
+            # and create output tensor on tensor_device_index (not context_device_index,
+            # despite context being different)
             result = torch.nn.functional.linear(x, weight, bias)
 
             # Verify correctness
@@ -2019,7 +2029,8 @@ class TestRegisteredPythonOpsMultiDevice(TestCase):
             # Verify output shape
             self.assertEqual(result.shape, expected.shape)
 
-            # The output should be on tensor_device_index (matching input device), not context_device_index (current context)
+            # The output should be on tensor_device_index (matching input device), not
+            # context_device_index (current context)
             # This tests that sync_runtime correctly uses device_id from input tensors
             # rather than the current device context
             self.assertEqual(
@@ -2029,7 +2040,8 @@ class TestRegisteredPythonOpsMultiDevice(TestCase):
                 f"not device {context_device_index} (current context)",
             )
 
-            # Verify device context is still context_device_index (should not have changed)
+            # Verify device context is still context_device_index (should not have
+            # changed)
             self.assertEqual(
                 torch.rbln.current_device(),
                 context_device_index,

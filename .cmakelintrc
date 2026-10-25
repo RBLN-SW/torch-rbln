@@ -1,1 +1,2 @@
-filter=-convention/filename,-linelength,-package/consistency,-readability/logic,-readability/mixedcase,-readability/wonkycase,-syntax,-whitespace/eol,+whitespace/extra,-whitespace/indent,-whitespace/mismatch,-whitespace/newline,-whitespace/tabs
+# The CMAKE linter passes this file to `cmakelint`. Without filters, `cmakelint`
+# runs its default checks.

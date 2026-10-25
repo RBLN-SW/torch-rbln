@@ -20,7 +20,8 @@ struct RBLNGuardImpl final : public c10::impl::DeviceGuardImplInterface {
   c10::DeviceType type() const override;
 
   /**
-   * @brief Sets the current device to the input device, and returns the previous device.
+   * @brief Sets the current device to the input device, and returns the
+   * previous device.
    *
    * @param device The input device.
    * @return The previous device.
@@ -42,7 +43,8 @@ struct RBLNGuardImpl final : public c10::impl::DeviceGuardImplInterface {
   void setDevice(c10::Device device) const override;
 
   /**
-   * @brief Sets the current device to the input device without throwing exceptions.
+   * @brief Sets the current device to the input device without throwing
+   * exceptions.
    *
    * @param device The input device.
    */
@@ -56,16 +58,19 @@ struct RBLNGuardImpl final : public c10::impl::DeviceGuardImplInterface {
   c10::DeviceIndex deviceCount() const noexcept override;
 
   /**
-   * @brief Reports supported dtypes (backs torch.accelerator.get_device_capability).
+   * @brief Reports supported dtypes (backs
+   * torch.accelerator.get_device_capability).
    *
-   * supported_dtypes is the device's allocation/conversion capability, not native
-   * op dispatch. RBLN advertises fp16/bf16 (kCapabilityDtypes) — the only dtypes
-   * resident in device memory; other dtypes are CPU-backed even under device="rbln".
+   * supported_dtypes is the device's allocation/conversion capability, not
+   * native op dispatch. RBLN advertises fp16/bf16 (kCapabilityDtypes) — the
+   * only dtypes resident in device memory; other dtypes are CPU-backed even
+   * under device="rbln".
    */
   c10::DeviceCapability getDeviceCapability(c10::Device device) const override;
 
   /**
-   * @brief Returns the current stream for the input device (default if none set).
+   * @brief Returns the current stream for the input device (default if none
+   * set).
    *
    * @param device The input device.
    * @return The current stream.
@@ -96,10 +101,13 @@ struct RBLNGuardImpl final : public c10::impl::DeviceGuardImplInterface {
    * @param isHighPriority Ignored. RBLN has no stream priorities.
    * @return A pooled stream.
    */
-  c10::Stream getStreamFromGlobalPool(c10::Device device, bool isHighPriority = false) const override;
+  c10::Stream getStreamFromGlobalPool(
+      c10::Device device,
+      bool isHighPriority = false) const override;
 
   /**
-   * @brief Sets the current stream to the input stream, and returns the previous stream.
+   * @brief Sets the current stream to the input stream, and returns the
+   * previous stream.
    *
    * @param stream The input stream.
    * @return The previous stream.
@@ -107,7 +115,8 @@ struct RBLNGuardImpl final : public c10::impl::DeviceGuardImplInterface {
   c10::Stream exchangeStream(c10::Stream stream) const override;
 
   /**
-   * @brief Non-blocking: true iff all work submitted to the stream has completed.
+   * @brief Non-blocking: true iff all work submitted to the stream has
+   * completed.
    *
    * @param stream The stream to query.
    */
@@ -120,26 +129,29 @@ struct RBLNGuardImpl final : public c10::impl::DeviceGuardImplInterface {
    */
   void synchronizeStream(const c10::Stream& stream) const override;
 
-  // Events (torch.Event). elapsedTime stays unimplemented -- event timing is not
-  // supported, so the base throws. The opaque void* handle is non-zero for a valid
-  // event, so it never aliases nullptr.
+  // Events (torch.Event). elapsedTime stays unimplemented -- event timing is
+  // not supported, so the base throws. The opaque void* handle is non-zero for
+  // a valid event, so it never aliases nullptr.
 
   /**
-   * @brief Records the event at the stream's current position (allocates on first
-   * record; re-record overwrites the snapshot).
+   * @brief Records the event at the stream's current position (allocates on
+   * first record; re-record overwrites the snapshot).
    *
    * @param event In/out opaque event handle.
    * @param stream The stream to record on.
    * @param device_index The device index, or -1 for the stream's device.
    * @param flag Ignored (event timing is not supported).
    */
-  void record(void** event, const c10::Stream& stream, c10::DeviceIndex device_index, c10::EventFlag flag)
-      const override;
+  void record(
+      void** event,
+      const c10::Stream& stream,
+      c10::DeviceIndex device_index,
+      c10::EventFlag flag) const override;
 
   /**
    * @brief Makes the stream wait for the event. Same-device: does not block the
-   * host. Cross-device waits are not supported and degrade to a host-side wait on
-   * the event.
+   * host. Cross-device waits are not supported and degrade to a host-side wait
+   * on the event.
    *
    * @param event An opaque event handle. May be null (never recorded -> no-op).
    * @param stream The stream that must wait.
@@ -147,8 +159,8 @@ struct RBLNGuardImpl final : public c10::impl::DeviceGuardImplInterface {
   void block(void* event, const c10::Stream& stream) const override;
 
   /**
-   * @brief Non-blocking: true iff the work recorded into the event has completed
-   * (true for a null / never-recorded event).
+   * @brief Non-blocking: true iff the work recorded into the event has
+   * completed (true for a null / never-recorded event).
    *
    * @param event An opaque event handle. May be null (never recorded).
    */
@@ -167,7 +179,8 @@ struct RBLNGuardImpl final : public c10::impl::DeviceGuardImplInterface {
    * @param event An opaque event handle. May be null.
    * @param device_index Unused.
    */
-  void destroyEvent(void* event, c10::DeviceIndex device_index) const noexcept override;
+  void destroyEvent(void* event, c10::DeviceIndex device_index)
+      const noexcept override;
 
   /**
    * @brief Blocks the host until all pending work on the device has completed.

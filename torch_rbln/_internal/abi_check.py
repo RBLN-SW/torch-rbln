@@ -5,7 +5,7 @@ exports both as C entry points: ``RBLN_ABI_CURRENT``, the interface a librbln.so
 implements, and ``RBLN_ABI_MIN_SUPPORTED``, the oldest consumer contract it still
 accepts.
 
-torch-rbln owns no number of its own. FindRebel.cmake records a snapshot of
+torch-rbln owns no number of its own. FindREBEL.cmake records a snapshot of
 ``RBLN_ABI_CURRENT`` from the header the build compiled against
 (``_abi_snapshot.BUILT_ABI``) and import time checks it against the live runtime::
 
@@ -21,13 +21,15 @@ The symbols are read with dlsym rather than linked: CPython opens extensions wit
 A runtime whose two entry points contradict each other (``min > current``) is rejected
 outright, snapshot or no snapshot. Everything else that leaves no verdict to reach warns
 and continues: a runtime predating the handshake, one exporting only half the pair, a
-handle that cannot be taken on the mapped library, and a build that recorded no snapshot.
-``TORCH_RBLN_SKIP_ABI_CHECK=1`` skips the check entirely; see docs/CONFIGURATION.md.
+handle that cannot be taken on the mapped library, and a build that recorded no
+snapshot. ``TORCH_RBLN_SKIP_ABI_CHECK=1`` skips the check entirely; see
+docs/CONFIGURATION.md.
 """
 
 import ctypes
 import os
 import warnings
+from importlib.metadata import version
 
 
 # The pair rebel-compiler exports, in the order they are read: (min_supported, current).
@@ -56,7 +58,7 @@ def get_built_abi() -> int | None:
     that was never built through CMake (module absent).
     """
     try:
-        from torch_rbln._internal._abi_snapshot import BUILT_ABI
+        from torch_rbln._internal._abi_snapshot import BUILT_ABI  # noqa: PLC0415
     except ImportError:
         return None
     # bool is an int subclass; True would otherwise compare as ABI 1.
@@ -66,13 +68,14 @@ def get_built_abi() -> int | None:
 
 
 def open_mapped_runtime(path: str | None) -> ctypes.CDLL | None:
-    """A handle on the librbln.so already mapped at ``path``, or None if one cannot be taken.
+    """A handle on the librbln.so already mapped at ``path``, or None if one cannot be
+    taken.
 
-    ``RTLD_NOLOAD`` references the existing mapping instead of making a second one, so this
-    never brings another copy of the runtime into the process. Failure is not fatal and must
-    not be: the caller mapped the library successfully and only loses the ability to read its
-    ABI symbols -- a path out of /proc/self/maps whose file has since been replaced is enough
-    to get here.
+    ``RTLD_NOLOAD`` references the existing mapping instead of making a second one, so
+    this never brings another copy of the runtime into the process. Failure is not fatal
+    and must not be: the caller mapped the library successfully and only loses the
+    ability to read its ABI symbols -- a path out of /proc/self/maps whose file has
+    since been replaced is enough to get here.
     """
     if not path:
         return None
@@ -85,9 +88,10 @@ def open_mapped_runtime(path: str | None) -> ctypes.CDLL | None:
 def read_abi_symbols(lib: ctypes.CDLL | None) -> tuple[list[int], list[str]]:
     """Resolve both ABI entry points off a loaded librbln.so.
 
-    Returns the values that resolved, in ``ABI_SYMBOLS`` order, and the names that did not:
-    neither present is a runtime older than the handshake, exactly one present is a malformed
-    runtime, since the pair is declared in one header and exported by one build.
+    Returns the values that resolved, in ``ABI_SYMBOLS`` order, and the names that did
+    not: neither present is a runtime older than the handshake, exactly one present is a
+    malformed runtime, since the pair is declared in one header and exported by one
+    build.
     """
     if lib is None:
         return [], list(ABI_SYMBOLS)
@@ -106,7 +110,9 @@ def read_abi_symbols(lib: ctypes.CDLL | None) -> tuple[list[int], list[str]]:
 
 
 def read_runtime_abi(lib: ctypes.CDLL | None) -> tuple[int, int] | None:
-    """Read ``(min_supported, current)`` off a loaded librbln.so, or None if either is absent."""
+    """Read ``(min_supported, current)`` off a loaded librbln.so, or None if either is
+    absent.
+    """
     values, missing = read_abi_symbols(lib)
     if missing:
         return None
@@ -143,8 +149,6 @@ def abi_mismatch_reason(built_abi: int, runtime_min: int, runtime_current: int) 
 def _version_of(distribution: str) -> str:
     """Best-effort installed version, for the mismatch report."""
     try:
-        from importlib.metadata import version
-
         return version(distribution)
     except Exception:
         return "unknown"
@@ -162,12 +166,14 @@ def _mismatch_report(reason: str, librbln_path: str | None, built_abi: int | Non
 
 
 def check_librbln_abi(librbln_path: str | None) -> str:
-    """Validate the librbln.so mapped at ``librbln_path`` against this build's ABI snapshot.
+    """Validate the librbln.so mapped at ``librbln_path`` against this build's ABI
+    snapshot.
 
     Must run before any other rebel entry point is reached, including the ones our own
-    extensions resolve as they load. Taking the handle is part of the check rather than the
-    caller's job, so that everything this does sits behind the opt-out and fails open: a
-    guard that can itself break an import it was meant to explain is worse than no guard.
+    extensions resolve as they load. Taking the handle is part of the check rather than
+    the caller's job, so that everything this does sits behind the opt-out and fails
+    open: a guard that can itself break an import it was meant to explain is worse than
+    no guard.
 
     Args:
         librbln_path: path of the librbln.so this process has already mapped.
@@ -195,8 +201,9 @@ def check_librbln_abi(librbln_path: str | None) -> str:
     values, missing = read_abi_symbols(lib)
     built_abi = get_built_abi()
 
-    # A runtime whose own two entry points disagree describes no acceptable consumer, so it is
-    # rejected before the snapshot is consulted: there is nothing it could be valid against.
+    # A runtime whose own two entry points disagree describes no acceptable consumer, so
+    # it is rejected before the snapshot is consulted: there is nothing it could be
+    # valid against.
     if not missing and values[0] > values[1]:
         reason = _inconsistent_window_reason(values[0], values[1])
         raise ImportError(_mismatch_report(reason, librbln_path, built_abi))

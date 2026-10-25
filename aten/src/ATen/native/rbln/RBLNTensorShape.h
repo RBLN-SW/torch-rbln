@@ -13,9 +13,9 @@ namespace at::native::rbln {
 // ---------------------------------------------------------------------------
 // cat
 //
-// Bypasses rebel-compiler entirely; cat is reduced to a sequence of
+// Bypasses `rebel-compiler` entirely; cat is reduced to a sequence of
 // contiguous v2v copies derived from each input's stride structure.
-// Non-contiguous inputs are not materialised — instead we slice `out` per
+// Non-contiguous inputs are not materialized — instead we slice `out` per
 // input via `narrow()` and hand both views to the strided v2v engine.
 //
 // Restrictions vs PyTorch upstream cat:
@@ -28,6 +28,9 @@ namespace at::native::rbln {
 // it inherits this kernel without a separate registration.
 // ---------------------------------------------------------------------------
 
-at::Tensor& cat_out_rbln(const at::ITensorListRef& tensors, int64_t dim, at::Tensor& out);
+at::Tensor& cat_out_rbln(
+    const at::ITensorListRef& tensors,
+    int64_t dim,
+    at::Tensor& out);
 
 } // namespace at::native::rbln

@@ -5,14 +5,16 @@ include(FetchContent)
 
 set(old_cxx_flags ${CMAKE_CXX_FLAGS})
 
-include(FindTorch)
+include(TorchSetup)
 
-FetchContent_Declare(
+set(googletest_commit 03597a01ee50ed33e9dfd640b249b4be3799d395)
+fetchcontent_declare(
   googletest
-  URL https://github.com/google/googletest/archive/03597a01ee50ed33e9dfd640b249b4be3799d395.zip
+  URL https://github.com/google/googletest/archive/${googletest_commit}.zip
 )
+unset(googletest_commit)
 set(INSTALL_GTEST OFF)
-FetchContent_MakeAvailable(googletest)
+fetchcontent_makeavailable(googletest)
 
 set(CMAKE_CXX_FLAGS ${old_cxx_flags})
 unset(old_cxx_flags)

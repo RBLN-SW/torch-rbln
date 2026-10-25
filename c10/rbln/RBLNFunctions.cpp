@@ -15,17 +15,15 @@
 #include <vector>
 
 #include <array>
-#include <atomic>
 #include <chrono>
-#include <cstdint>
 
 namespace c10::rbln {
 
-// rt-timing: time spent inside librbln boundary calls, for the explain profiler's
-// "rebel runtime vs torch dispatch" split. Gated: when disabled each boundary call
-// pays one relaxed atomic load (no clock read), so ON==OFF latency holds; an explain
-// region flips it on for its duration. Index order MUST match kRtTimingN / the
-// Python _RT_PRIMS tuple.
+// rt-timing: time spent inside `librbln` boundary calls, for the explain
+// profiler's "rebel runtime vs torch dispatch" split. Gated: when disabled each
+// boundary call pays one relaxed atomic load (no clock read), so ON==OFF
+// latency holds; an explain region flips it on for its duration. Index order
+// MUST match kRtTimingN / the Python _RT_PRIMS tuple.
 namespace {
 enum RtIdx : std::uint8_t {
   RT_V2V = 0,
@@ -41,7 +39,9 @@ enum RtIdx : std::uint8_t {
   RT_H2V_MULTI,
   RT_N
 };
-static_assert(static_cast<std::size_t>(RT_N) == kRtTimingN, "RtIdx count must match kRtTimingN in the header");
+static_assert(
+    static_cast<std::size_t>(RT_N) == kRtTimingN,
+    "RtIdx count must match kRtTimingN in the header");
 std::atomic<bool> g_rt_enabled{false};
 struct RtAcc {
   std::atomic<uint64_t> ns{0};
@@ -55,17 +55,25 @@ struct RtTimer {
   int idx;
   bool on;
   std::chrono::steady_clock::time_point t0;
-  explicit RtTimer(int i) : idx(i), on(g_rt_enabled.load(std::memory_order_relaxed)) {
+  explicit RtTimer(int i)
+      : idx(i), on(g_rt_enabled.load(std::memory_order_relaxed)) {
     if (on) {
       t0 = std::chrono::steady_clock::now();
     }
   }
+  RtTimer(const RtTimer&) = delete;
+  RtTimer& operator=(const RtTimer&) = delete;
+  RtTimer(RtTimer&&) = delete;
+  RtTimer& operator=(RtTimer&&) = delete;
   ~RtTimer() {
     if (!on) {
       return;
     }
-    const auto dt = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
-    rt_accs()[idx].ns.fetch_add(static_cast<uint64_t>(dt), std::memory_order_relaxed);
+    const auto dt = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - t0)
+                        .count();
+    rt_accs()[idx].ns.fetch_add(
+        static_cast<uint64_t>(dt), std::memory_order_relaxed);
     rt_accs()[idx].cnt.fetch_add(1, std::memory_order_relaxed);
   }
 };
@@ -87,8 +95,9 @@ void rt_timing_get(uint64_t* out) {
   }
 }
 
-// torch.rbln.explain() runtime-counter reads. Thin pass-throughs to librbln's
-// public C-API (rbln_prof_*, declared in rbln_runtime_api.h via RBLNFunctions.h).
+// torch.rbln.explain() runtime-counter reads. Thin pass-throughs to `librbln`'s
+// public C-API (rbln_prof_*, declared in rbln_runtime_api.h via
+// RBLNFunctions.h).
 uint32_t rt_prof_hidden_num() {
   return rbln_prof_v2v_hidden_num_reasons();
 }
@@ -126,8 +135,8 @@ void check_device_index(c10::DeviceIndex device_index) {
   // Dropped a dead `<= max()` check (always true for an int8 DeviceIndex); an
   // invalid/negative index is caught by the OOB-safe isDeviceAssigned() lookup.
   auto& manager = DeviceMappingManager::getInstance();
-  // No logical devices: selecting one is pure bookkeeping (nothing to validate);
-  // actual device use still fails at the point of use.
+  // No logical devices: selecting one is pure bookkeeping (nothing to
+  // validate); actual device use still fails at the point of use.
   if (manager.getLogicalDeviceCount() == 0) {
     return;
   }
@@ -180,7 +189,8 @@ std::string to_string(::rbln::DataType rbln_dtype) {
     case ::rbln::DataType::CustomFloat16:
       return "CustomFloat16";
     default:
-      RBLN_CHECK(false, "Unsupported RBLN dtype: {}", static_cast<int>(rbln_dtype));
+      RBLN_CHECK(
+          false, "Unsupported RBLN dtype: {}", static_cast<int>(rbln_dtype));
   }
 }
 
@@ -189,9 +199,10 @@ int to_device_id(c10::DeviceIndex device_index) {
   // memory stats, ...). With no NPU, fail here with one clear message before
   // reaching the runtime, which may not handle an unregistered device.
   //
-  // Also the commit point: reaching here means the process has decided to use a device, so
-  // this is where the plan is claimed with the runtime and the mapping freezes. Idempotent.
-  // check_device_index() stays plan-only -- selecting a device is bookkeeping.
+  // Also the commit point: reaching here means the process has decided to use a
+  // device, so this is where the plan is claimed with the runtime and the
+  // mapping freezes. Idempotent. check_device_index() stays plan-only --
+  // selecting a device is bookkeeping.
   DeviceMappingManager::getInstance().commit();
   RBLN_CHECK(
       DeviceMappingManager::getInstance().getLogicalDeviceCount() > 0,
@@ -271,8 +282,12 @@ DeviceProperties get_device_properties(c10::DeviceIndex device_index) {
       !is_dummy_device(),
       "get_device_properties() reports what the hardware says, and RBLN_DUMMY_DEVICE has no NPU behind it");
 
-  const auto physical_device_ids = DeviceMappingManager::getInstance().getPhysicalDeviceIds(device_index);
-  RBLN_CHECK(!physical_device_ids.empty(), "no NPU is mapped to rbln:{}", static_cast<int>(device_index));
+  const auto physical_device_ids =
+      DeviceMappingManager::getInstance().getPhysicalDeviceIds(device_index);
+  RBLN_CHECK(
+      !physical_device_ids.empty(),
+      "no NPU is mapped to rbln:{}",
+      static_cast<int>(device_index));
 
   DeviceProperties properties;
   for (const int physical_device_id : physical_device_ids) {
@@ -290,7 +305,8 @@ DeviceProperties get_device_properties(c10::DeviceIndex device_index) {
       properties.num_chiplet = npu.num_chiplet;
     } else {
       RBLN_CHECK(
-          properties.name == npu.name && properties.num_chiplet == npu.num_chiplet,
+          properties.name == npu.name &&
+              properties.num_chiplet == npu.num_chiplet,
           "rbln:{} aggregates unlike NPUs: {} with {} chiplet(s) and {} with {}",
           static_cast<int>(device_index),
           properties.name,
@@ -317,28 +333,33 @@ c10::DeviceIndex get_physical_device_count() {
     return 0;
   }
   // Directly query the runtime API for physical device count
-  // This bypasses the RSD mode logic and always returns the actual physical count
+  // This bypasses the RSD mode logic and always returns the actual physical
+  // count
   int device_count = 0;
   RBLN_CHECK(
       !rbln_get_device_count(&device_count),
       "rbln_get_device_count failed; no NPU is visible — check that the device is present, the rbln kernel "
       "driver is loaded, and the device is not held by another process");
 
-  const auto physical_device_count = static_cast<c10::DeviceIndex>(device_count);
-  RBLN_LOG_DEBUG("physical_NPU_count={}", static_cast<int>(physical_device_count));
+  const auto physical_device_count =
+      static_cast<c10::DeviceIndex>(device_count);
+  RBLN_LOG_DEBUG(
+      "physical_NPU_count={}", static_cast<int>(physical_device_count));
   return physical_device_count;
 }
 
 c10::DeviceIndex get_device_index() {
-  // The selection is thread_local while the plan is process-wide, so an RBLN_* change before
-  // the mapping commits can leave this thread pointing past the end of a rebuilt plan.
-  // Report a device that exists; the selection is bookkeeping, so nothing has to unwind.
-  // Checked on read because other threads' selections are unreachable from here.
+  // The selection is thread_local while the plan is process-wide, so an RBLN_*
+  // change before the mapping commits can leave this thread pointing past the
+  // end of a rebuilt plan. Report a device that exists; the selection is
+  // bookkeeping, so nothing has to unwind. Checked on read because other
+  // threads' selections are unreachable from here.
   //
   // Nothrow enumeration, not getLogicalDeviceCount(): this backs
-  // torch._C._accelerator_getDeviceIndex(), which torch calls from total predicates such as
-  // reset_peak_memory_stats(), so a malformed RBLN_* config must not raise here. It maps a
-  // failed plan to 0, and with no plan there is nothing to validate against.
+  // torch._C._accelerator_getDeviceIndex(), which PyTorch calls from total
+  // predicates such as reset_peak_memory_stats(), so a malformed RBLN_* config
+  // must not raise here. It maps a failed plan to 0, and with no plan there is
+  // nothing to validate against.
   const auto device_count = get_device_count_nothrow();
   if (device_count > 0 && current_device_index_ >= device_count) {
     RBLN_LOG_DEBUG(
@@ -347,7 +368,9 @@ c10::DeviceIndex get_device_index() {
         static_cast<int>(device_count));
     current_device_index_ = 0;
   }
-  RBLN_LOG_DEBUG("current logical device=rbln:{}", static_cast<int>(current_device_index_));
+  RBLN_LOG_DEBUG(
+      "current logical device=rbln:{}",
+      static_cast<int>(current_device_index_));
   return current_device_index_;
 }
 
@@ -375,7 +398,8 @@ c10::DeviceIndex exchange_device_index(c10::DeviceIndex device_index) {
   if (device_index != original_device_index) {
     set_device_index(device_index);
   } else if (device_index >= 0) {
-    // Same as set_device_index: validate mapping when the index is unchanged (see DeviceGuard).
+    // Same as set_device_index: validate mapping when the index is unchanged
+    // (see DeviceGuard).
     check_device_index(device_index);
   }
 
@@ -419,11 +443,12 @@ c10::DeviceIndex get_torch_device_id(const void* data) {
 }
 
 bool is_eager_malloc() {
-  // Read live per call (not a process-lifetime static) so the value reflects the current
-  // environment. getenv is not thread-safe against a concurrent setenv/putenv, but this is
-  // safe here: only malloc() consults it, free is mode-agnostic (so an env change between an
-  // allocation and its free can't cause an alloc/free mismatch), and the env is not mutated
-  // concurrently with allocation (prod fixes it at startup; tests toggle it only at quiescent
+  // Read live per call (not a process-lifetime static) so the value reflects
+  // the current environment. The read is not thread-safe against a concurrent
+  // setenv/putenv, but this is safe here: only malloc() consults it, free is
+  // mode-agnostic (so an env change between an allocation and its free can't
+  // cause an alloc/free mismatch), and the env is not mutated concurrently with
+  // allocation (prod fixes it at startup; tests toggle it only at quiescent
   // points, single-threaded per worker).
   const auto* env = std::getenv("TORCH_RBLN_EAGER_MALLOC");
   const bool eager_malloc = (env != nullptr) && (std::strcmp(env, "1") == 0);
@@ -439,24 +464,30 @@ bool is_dummy_device() {
 }
 
 // --- Device-runtime liveness ------------------------------------------------
-// The device runtime (driver) is loaded lazily and is absent on compile/CPU-only/CI
-// hosts or unmapped at shutdown, when a raw rbln_* call SEGFAULTs. Runtime-touching
-// leaves gate on runtime_available(), built on librbln's own rbln_runtime_available().
+// The device runtime (driver) is loaded lazily and is absent on
+// compile/CPU-only/CI hosts or unmapped at shutdown, when a raw rbln_* call
+// SEGFAULTs. Runtime-touching leaves gate on runtime_available(), built on
+// `librbln`'s own rbln_runtime_available().
 
 namespace {
 
-std::atomic<bool> runtime_shutting_down_{false}; // set at teardown via a Python atexit hook
+std::atomic<bool> runtime_shutting_down_{
+    false}; // set at teardown via a Python atexit hook
 
-// Torn down (shutting down or driver absent) vs "no device present" (reported by
-// to_device_id()): teardown-safe ops no-op only on the former.
+// Torn down (shutting down or driver absent) vs "no device present" (reported
+// by to_device_id()): teardown-safe ops no-op only on the former.
 bool runtime_torn_down() noexcept {
-  return runtime_shutting_down_.load(std::memory_order_relaxed) || !rbln_runtime_available();
+  return runtime_shutting_down_.load(std::memory_order_relaxed) ||
+      !rbln_runtime_available();
 }
 
-// Mandatory-op guard: clean throw, never a SEGFAULT. Required even in dummy mode.
+// Mandatory-op guard: clean error, never a SEGFAULT. Required even in dummy
+// mode.
 void require_runtime(const char* op) {
   RBLN_CHECK(
-      !runtime_shutting_down_.load(std::memory_order_relaxed), "Cannot {}: the RBLN runtime is shutting down.", op);
+      !runtime_shutting_down_.load(std::memory_order_relaxed),
+      "Cannot {}: the RBLN runtime is shutting down.",
+      op);
   RBLN_CHECK(
       rbln_runtime_available(),
       "Cannot {}: the RBLN device runtime is not loaded; install the RBLN SDK/runtime "
@@ -464,8 +495,9 @@ void require_runtime(const char* op) {
       op);
 }
 
-// c10::Error::what() appends "Exception raised from ..." plus a full C++ backtrace.
-// Keep only the human-readable first line for warnings on nothrow paths.
+// c10::Error::what() appends "Exception raised from ..." plus a full C++
+// backtrace. Keep only the human-readable first line for warnings on nothrow
+// paths.
 std::string first_line(std::string_view text) {
   return std::string(text.substr(0, text.find('\n')));
 }
@@ -473,24 +505,29 @@ std::string first_line(std::string_view text) {
 } // namespace
 
 c10::DeviceIndex get_device_count_nothrow() noexcept {
-  // Nothrow view of get_device_count(); failures map to 0. First line only, because
-  // e.what() carries the C++ stack trace and every co-tenant walks this path. The full
-  // text is still raised by device_count_ensure_non_zero() and by the allocation path.
+  // Nothrow view of get_device_count(); failures map to 0. First line only,
+  // because e.what() carries the C++ stack trace and every co-tenant walks this
+  // path. The full text is still raised by device_count_ensure_non_zero() and
+  // by the allocation path.
   try {
     return get_device_count();
   } catch (const std::exception& e) {
-    RBLN_WARN_NOTHROW("get_device_count failed, treating as 0 device(s): {}", first_line(e.what()));
+    RBLN_WARN_NOTHROW(
+        "get_device_count failed, treating as 0 device(s): {}",
+        first_line(e.what()));
     return 0;
   } catch (...) {
-    RBLN_WARN_NOTHROW("get_device_count failed, treating as 0 device(s): unknown exception");
+    RBLN_WARN_NOTHROW(
+        "get_device_count failed, treating as 0 device(s): unknown exception");
     return 0;
   }
 }
 
 c10::DeviceIndex device_count_ensure_non_zero() {
   // Throwing counterpart of the noexcept query, named after c10::cuda's
-  // device_count_ensure_non_zero(). This is where a malformed RBLN_* config becomes a
-  // loud, detailed error: the availability path stays quiet, the point of use does not.
+  // device_count_ensure_non_zero(). This is where a malformed RBLN_* config
+  // becomes a loud, detailed error: the availability path stays quiet, the
+  // point of use does not.
   const auto device_count = get_device_count();
   RBLN_CHECK(
       device_count > 0,
@@ -508,46 +545,55 @@ void set_runtime_shutting_down(bool value) noexcept {
 }
 
 bool runtime_available() noexcept {
-  // Driver loaded, not shutting down, at least one usable logical device. Bound to Python
-  // is_available() and to RBLNHooksInterface::hasRBLN(), so the two cannot disagree.
+  // Driver loaded, not shutting down, at least one usable logical device. Bound
+  // to Python is_available() and to RBLNHooksInterface::hasRBLN(), so the two
+  // cannot disagree.
   //
-  // Dummy mode is NOT short-circuited: doing so reported True for a dummy device whose
-  // mapping had failed to build -- available yet unusable.
+  // Dummy mode is NOT short-circuited: doing so reported True for a dummy
+  // device whose mapping had failed to build -- available yet unusable.
   //
-  // A part-way commit failure is the same shape: the plan keeps its device count, but the
-  // devices it did not claim can never be claimed, so every later device use rethrows.
-  // hasFailedCommit() last: getInstance() runs the registered mapping-ready callback -- which
-  // may reach back into Python -- without a catch, so the first touch of the singleton has to
-  // happen inside get_device_count_nothrow()'s catch-all, not on this noexcept boundary.
-  return !runtime_shutting_down_.load(std::memory_order_relaxed) && rbln_runtime_available() &&
-      get_device_count_nothrow() > 0 && !DeviceMappingManager::getInstance().hasFailedCommit();
+  // A part-way commit failure is the same shape: the plan keeps its device
+  // count, but the devices it did not claim can never be claimed, so every
+  // later device use rethrows. hasFailedCommit() last: getInstance() runs the
+  // registered mapping-ready callback -- which may reach back into Python --
+  // without a catch, so the first touch of the singleton has to happen inside
+  // get_device_count_nothrow()'s catch-all, not on this noexcept boundary.
+  return !runtime_shutting_down_.load(std::memory_order_relaxed) &&
+      rbln_runtime_available() && get_device_count_nothrow() > 0 &&
+      !DeviceMappingManager::getInstance().hasFailedCommit();
 }
 
 // --- Per-process device-context tracking ------------------------------------
-// A per-logical-device bit set on the first successful device malloc, mirroring CUDA's
-// device_allocator populated on first use. Backs initialized()/hasPrimaryContext() and
-// gates the best-effort memory ops, so a process with the runtime + a mapping but no live
-// context (e.g. a vLLM EngineCore parent) reports uninitialized. Set-once, lock-free.
-// RBLN device use after fork is unsupported; bad-fork detection is not implemented yet
-// (the mask is inherited stale in a fork child).
+// A per-logical-device bit set on the first successful device malloc, mirroring
+// CUDA's device_allocator populated on first use. Backs
+// initialized()/hasPrimaryContext() and gates the best-effort memory ops, so a
+// process with the runtime + a mapping but no live context (e.g. a vLLM
+// EngineCore parent) reports uninitialized. Set-once, lock-free. RBLN device
+// use after fork is unsupported; bad-fork detection is not implemented yet (the
+// mask is inherited stale in a fork child).
 namespace {
-// Two 64-bit words cover the full valid DeviceIndex range. DeviceMappingManager caps
-// logical devices at numeric_limits<DeviceIndex>::max(), so valid indices are
-// [0, max) = [0, 126] and index 127 is never a device — no valid device is silently
-// untracked (the earlier single-word tracker dropped indices 64+).
-constexpr c10::DeviceIndex kMaxTrackedDevices = std::numeric_limits<c10::DeviceIndex>::max(); // 127
+// Two 64-bit words cover the full valid DeviceIndex range. DeviceMappingManager
+// caps logical devices at numeric_limits<DeviceIndex>::max(), so valid indices
+// are [0, max) = [0, 126] and index 127 is never a device — no valid device is
+// silently untracked (the earlier single-word tracker dropped indices 64+).
+constexpr c10::DeviceIndex kMaxTrackedDevices =
+    std::numeric_limits<c10::DeviceIndex>::max(); // 127
 std::array<std::atomic<uint64_t>, 2> g_context_init_mask{}; // 128 bits
 } // namespace
 
 void mark_device_context_initialized(c10::DeviceIndex device_index) noexcept {
   if (device_index >= 0 && device_index < kMaxTrackedDevices) {
-    g_context_init_mask[device_index >> 6].fetch_or(uint64_t{1} << (device_index & 63), std::memory_order_relaxed);
+    g_context_init_mask[device_index >> 6].fetch_or(
+        uint64_t{1} << (device_index & 63), std::memory_order_relaxed);
   }
 }
 
 bool device_context_initialized(c10::DeviceIndex device_index) noexcept {
   return device_index >= 0 && device_index < kMaxTrackedDevices &&
-      ((g_context_init_mask[device_index >> 6].load(std::memory_order_relaxed) >> (device_index & 63)) & 1U) != 0;
+      ((g_context_init_mask[device_index >> 6].load(
+            std::memory_order_relaxed) >>
+        (device_index & 63)) &
+       1U) != 0;
 }
 
 bool any_device_context_initialized() noexcept {
@@ -557,8 +603,8 @@ bool any_device_context_initialized() noexcept {
 
 std::vector<c10::DeviceIndex> initialized_device_indices() {
   std::vector<c10::DeviceIndex> indices;
-  // Context flag first: nothing initialized anywhere -> empty, without asking the runtime
-  // for a count this process has nothing to report against.
+  // Context flag first: nothing initialized anywhere -> empty, without asking
+  // the runtime for a count this process has nothing to report against.
   if (!any_device_context_initialized()) {
     return indices;
   }
@@ -572,14 +618,18 @@ std::vector<c10::DeviceIndex> initialized_device_indices() {
 }
 
 void* malloc(c10::DeviceIndex device_index, size_t nbytes) {
-  RBLN_LOG_DEBUG("logical device=rbln:{}, nbytes={}", static_cast<int>(device_index), nbytes);
+  RBLN_LOG_DEBUG(
+      "logical device=rbln:{}, nbytes={}",
+      static_cast<int>(device_index),
+      nbytes);
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
   check_device_index(device_index);
 
-  // Allocation is the gateway: clean throw (not SEGFAULT) if the runtime is gone;
-  // to_device_id() then throws on a host with no device.
+  // Allocation is the gateway: clean error (not SEGFAULT) if the runtime is
+  // gone; to_device_id() then throws on a host with no device.
   require_runtime("allocate device memory");
-  const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
+  const auto torch_device_id =
+      static_cast<uint32_t>(to_device_id(device_index));
   const auto size = static_cast<uint64_t>(nbytes);
   uint64_t vaddr = 0;
   const auto eager_malloc = is_eager_malloc();
@@ -607,10 +657,12 @@ void* malloc(c10::DeviceIndex device_index, size_t nbytes) {
         size);
   }
 
-  auto* data = reinterpret_cast<void*>(vaddr); // NOLINT(performance-no-int-to-ptr)
+  // NOLINTNEXTLINE(performance-no-int-to-ptr)
+  auto* data = reinterpret_cast<void*>(vaddr);
   RBLN_LOG_DEBUG("data={}", fmt::ptr(data));
   RBLN_CHECK(data != nullptr, "data cannot be nullptr");
-  mark_device_context_initialized(device_index); // this process now owns context on this device
+  mark_device_context_initialized(
+      device_index); // this process now owns context on this device
   return data;
 }
 
@@ -619,7 +671,10 @@ void mark_zeros(const void* rbln_data) {
   RBLN_CHECK(rbln_data != nullptr, "rbln_data cannot be nullptr");
 
   const auto vaddr = reinterpret_cast<uint64_t>(rbln_data);
-  RBLN_CHECK(!::rbln::rbln_mark_zeros(vaddr), "rbln_mark_zeros failed for vaddr={:#x}", vaddr);
+  RBLN_CHECK(
+      !::rbln::rbln_mark_zeros(vaddr),
+      "rbln_mark_zeros failed for vaddr={:#x}",
+      vaddr);
   RBLN_LOG_DEBUG("vaddr={:#x} marked as zero-initialized", vaddr);
 }
 
@@ -641,26 +696,34 @@ void free_nothrow(void* data) noexcept {
   if (data == nullptr) {
     return;
   }
-  // Torn-down runtime: rbln_free would deref a dead runtime -> SEGFAULT; leak instead.
-  // Uses runtime_torn_down() (cheap), not runtime_available(), to avoid
-  // get_device_count()'s GIL/Python side effects in the deleter at teardown.
+  // Torn-down runtime: rbln_free would deref a dead runtime -> SEGFAULT; leak
+  // instead. Uses runtime_torn_down() (cheap), not runtime_available(), to
+  // avoid get_device_count()'s GIL/Python side effects in the deleter at
+  // teardown.
   if (runtime_torn_down()) {
     RBLN_WARN_NOTHROW(
-        "rbln_free skipped for {}: RBLN runtime unavailable; leaking rather than crashing", fmt::ptr(data));
+        "rbln_free skipped for {}: RBLN runtime unavailable; leaking rather than crashing",
+        fmt::ptr(data));
     return;
   }
   const auto vaddr = reinterpret_cast<uint64_t>(data);
   if (::rbln::rbln_free(vaddr) != 0) {
-    RBLN_WARN_NOTHROW("rbln_free failed for vaddr={:#x}; leaking rather than aborting", vaddr);
+    RBLN_WARN_NOTHROW(
+        "rbln_free failed for vaddr={:#x}; leaking rather than aborting",
+        vaddr);
   }
 }
 
 void bind_device_memory(void* rbln_data, size_t nbytes) {
   RBLN_CHECK(rbln_data != nullptr, "bind_device_memory: rbln_data is nullptr");
-  RBLN_CHECK(nbytes > 0, "bind_device_memory: nbytes must be positive, but got {}", nbytes);
-  // Reachable from a public Python entry point at any time, teardown included, where the raw
-  // rbln_* call would SEGFAULT rather than raise. The vmem-configuring leaves that only run
-  // downstream of an allocation do not repeat the check: malloc already made it.
+  RBLN_CHECK(
+      nbytes > 0,
+      "bind_device_memory: nbytes must be positive, but got {}",
+      nbytes);
+  // Reachable from a public Python entry point at any time, teardown included,
+  // where the raw rbln_* call would SEGFAULT rather than raise. The
+  // vmem-configuring leaves that only run downstream of an allocation do not
+  // repeat the check: malloc already made it.
   require_runtime("bind device memory");
   const auto vaddr = reinterpret_cast<uint64_t>(rbln_data);
   RBLN_LOG_DEBUG("bind_device_memory: vaddr={:#x} nbytes={}", vaddr, nbytes);
@@ -673,37 +736,56 @@ void bind_device_memory(void* rbln_data, size_t nbytes) {
 }
 
 void set_device_layout_like(void* target_data, const void* ref_data) {
-  RBLN_CHECK(target_data != nullptr, "set_device_layout_like: target is nullptr");
+  RBLN_CHECK(
+      target_data != nullptr, "set_device_layout_like: target is nullptr");
   RBLN_CHECK(ref_data != nullptr, "set_device_layout_like: ref is nullptr");
   // Same reason as bind_device_memory: a public Python entry point, so nothing
   // upstream has established that the runtime is loaded.
   require_runtime("set the device layout");
   const auto target_vaddr = reinterpret_cast<uint64_t>(target_data);
   const auto ref_vaddr = reinterpret_cast<uint64_t>(ref_data);
-  RBLN_LOG_DEBUG("set_device_layout_like: target={:#x} ref={:#x}", target_vaddr, ref_vaddr);
+  RBLN_LOG_DEBUG(
+      "set_device_layout_like: target={:#x} ref={:#x}",
+      target_vaddr,
+      ref_vaddr);
   RBLN_CHECK(
-      !::rbln::rbln_set_device_alloc_layout_like(target_vaddr, ref_vaddr), "rbln_set_device_alloc_layout_like failed");
+      !::rbln::rbln_set_device_alloc_layout_like(target_vaddr, ref_vaddr),
+      "rbln_set_device_alloc_layout_like failed");
 }
 
-bool host_register(c10::DeviceIndex device_index, const void* host_ptr, size_t nbytes) {
+bool host_register(
+    c10::DeviceIndex device_index,
+    const void* host_ptr,
+    size_t nbytes) {
   RBLN_CHECK(host_ptr != nullptr, "host_register: host_ptr is nullptr");
-  RBLN_CHECK(nbytes > 0, "host_register: nbytes must be positive, but got {}", nbytes);
+  RBLN_CHECK(
+      nbytes > 0, "host_register: nbytes must be positive, but got {}", nbytes);
   require_runtime("register host memory");
   check_device_index(device_index);
-  // Commits the device mapping, which creates the context the range is registered with.
-  const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
+  // Commits the device mapping, which creates the context the range is
+  // registered with.
+  const auto torch_device_id =
+      static_cast<uint32_t>(to_device_id(device_index));
   const auto addr = reinterpret_cast<uintptr_t>(host_ptr);
   if (!::rbln::rbln_host_register_supported(torch_device_id)) {
-    RBLN_LOG_WARN("host_register: rbln:{} does not support host registration", static_cast<int>(device_index));
+    RBLN_LOG_WARN(
+        "host_register: rbln:{} does not support host registration",
+        static_cast<int>(device_index));
     return false;
   }
   RBLN_CHECK(
-      ::rbln::rbln_host_register(torch_device_id, addr, static_cast<uint64_t>(nbytes)) == RBLNRetCode_SUCCESS,
+      ::rbln::rbln_host_register(
+          torch_device_id, addr, static_cast<uint64_t>(nbytes)) ==
+          RBLNRetCode_SUCCESS,
       "rbln_host_register failed for [{:#x}, +{}) on rbln:{}",
       addr,
       nbytes,
       static_cast<int>(device_index));
-  RBLN_LOG_DEBUG("host_register: rbln:{} [{:#x}, +{})", static_cast<int>(device_index), addr, nbytes);
+  RBLN_LOG_DEBUG(
+      "host_register: rbln:{} [{:#x}, +{})",
+      static_cast<int>(device_index),
+      addr,
+      nbytes);
   return true;
 }
 
@@ -713,9 +795,11 @@ void host_unregister(c10::DeviceIndex device_index, const void* host_ptr) {
     return;
   }
   check_device_index(device_index);
-  const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
+  const auto torch_device_id =
+      static_cast<uint32_t>(to_device_id(device_index));
   const auto addr = reinterpret_cast<uintptr_t>(host_ptr);
-  RBLN_LOG_DEBUG("host_unregister: rbln:{} {:#x}", static_cast<int>(device_index), addr);
+  RBLN_LOG_DEBUG(
+      "host_unregister: rbln:{} {:#x}", static_cast<int>(device_index), addr);
   RBLN_CHECK(
       !::rbln::rbln_host_unregister(torch_device_id, addr),
       "rbln_host_unregister failed for {:#x} on rbln:{}",
@@ -726,7 +810,10 @@ void host_unregister(c10::DeviceIndex device_index, const void* host_ptr) {
 void memcpy_h2v(void* rbln_dst_data, const void* cpu_src_data, size_t nbytes) {
   RtTimer _rt(RT_H2V);
   RBLN_LOG_DEBUG(
-      "dst_rbln_data={}, src_cpu_data={}, nbytes={}", fmt::ptr(rbln_dst_data), fmt::ptr(cpu_src_data), nbytes);
+      "dst_rbln_data={}, src_cpu_data={}, nbytes={}",
+      fmt::ptr(rbln_dst_data),
+      fmt::ptr(cpu_src_data),
+      nbytes);
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
   RBLN_CHECK(cpu_src_data != nullptr, "cpu_src_data cannot be nullptr");
   RBLN_CHECK(rbln_dst_data != nullptr, "rbln_dst_data cannot be nullptr");
@@ -735,7 +822,10 @@ void memcpy_h2v(void* rbln_dst_data, const void* cpu_src_data, size_t nbytes) {
   const auto dst_vaddr = reinterpret_cast<uint64_t>(rbln_dst_data);
   const auto size = static_cast<uint64_t>(nbytes);
   RBLN_LOG_DEBUG(
-      "Calling rbln_memcpy_h2v: src_host_ptr={:#x}, dst_vaddr={:#x}, size={}", src_host_ptr, dst_vaddr, size);
+      "Calling rbln_memcpy_h2v: src_host_ptr={:#x}, dst_vaddr={:#x}, size={}",
+      src_host_ptr,
+      dst_vaddr,
+      size);
   RBLN_CHECK(
       !::rbln::rbln_memcpy_h2v(src_host_ptr, dst_vaddr, size),
       "rbln_memcpy_h2v failed ({} bytes, dst vaddr={:#x}); the device may be busy or faulted",
@@ -746,7 +836,10 @@ void memcpy_h2v(void* rbln_dst_data, const void* cpu_src_data, size_t nbytes) {
 void memcpy_v2h(void* cpu_dst_data, const void* rbln_src_data, size_t nbytes) {
   RtTimer _rt(RT_V2H);
   RBLN_LOG_DEBUG(
-      "dst_cpu_data={}, src_rbln_data={}, nbytes={}", fmt::ptr(cpu_dst_data), fmt::ptr(rbln_src_data), nbytes);
+      "dst_cpu_data={}, src_rbln_data={}, nbytes={}",
+      fmt::ptr(cpu_dst_data),
+      fmt::ptr(rbln_src_data),
+      nbytes);
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
   RBLN_CHECK(rbln_src_data != nullptr, "rbln_src_data cannot be nullptr");
   RBLN_CHECK(cpu_dst_data != nullptr, "cpu_dst_data cannot be nullptr");
@@ -755,7 +848,10 @@ void memcpy_v2h(void* cpu_dst_data, const void* rbln_src_data, size_t nbytes) {
   const auto dst_host_ptr = reinterpret_cast<uintptr_t>(cpu_dst_data);
   const auto size = static_cast<uint64_t>(nbytes);
   RBLN_LOG_DEBUG(
-      "Calling rbln_memcpy_v2h: src_vaddr={:#x}, dst_host_ptr={:#x}, size={}", src_vaddr, dst_host_ptr, size);
+      "Calling rbln_memcpy_v2h: src_vaddr={:#x}, dst_host_ptr={:#x}, size={}",
+      src_vaddr,
+      dst_host_ptr,
+      size);
   RBLN_CHECK(
       !::rbln::rbln_memcpy_v2h(src_vaddr, dst_host_ptr, size),
       "rbln_memcpy_v2h failed ({} bytes, src vaddr={:#x}); the device may be busy or faulted",
@@ -766,7 +862,10 @@ void memcpy_v2h(void* cpu_dst_data, const void* rbln_src_data, size_t nbytes) {
 void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes) {
   RtTimer _rt(RT_V2V);
   RBLN_LOG_DEBUG(
-      "dst_rbln_data={}, src_rbln_data={}, nbytes={}", fmt::ptr(rbln_dst_data), fmt::ptr(rbln_src_data), nbytes);
+      "dst_rbln_data={}, src_rbln_data={}, nbytes={}",
+      fmt::ptr(rbln_dst_data),
+      fmt::ptr(rbln_src_data),
+      nbytes);
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
   RBLN_CHECK(rbln_src_data != nullptr, "rbln_src_data cannot be nullptr");
   RBLN_CHECK(rbln_dst_data != nullptr, "rbln_dst_data cannot be nullptr");
@@ -779,32 +878,51 @@ void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes) {
   const auto dst_torch_device_id = get_torch_device_id(rbln_dst_data);
 
   RBLN_LOG_DEBUG(
-      "src=rbln:{}, dst=rbln:{}", static_cast<int>(src_torch_device_id), static_cast<int>(dst_torch_device_id));
+      "src=rbln:{}, dst=rbln:{}",
+      static_cast<int>(src_torch_device_id),
+      static_cast<int>(dst_torch_device_id));
 
   if (src_torch_device_id == dst_torch_device_id) {
     RBLN_LOG_DEBUG("Performing same-device copy");
 
-    RBLN_LOG_DEBUG("Calling rbln_memcpy_v2v: src_vaddr={:#x}, dst_vaddr={:#x}, size={}", src_vaddr, dst_vaddr, size);
+    RBLN_LOG_DEBUG(
+        "Calling rbln_memcpy_v2v: src_vaddr={:#x}, dst_vaddr={:#x}, size={}",
+        src_vaddr,
+        dst_vaddr,
+        size);
     // Tag the failure so `at::native::rbln::submit_or_fallback` can route a
     // rejected same-device copy to its CPU fallback (the batched path already
     // emits "rbln_memcpy_v2v_multi failed"; the per-entry path was message-less
     // and escaped the gate as a hard crash).
-    RBLN_CHECK(!::rbln::rbln_memcpy_v2v(src_vaddr, dst_vaddr, size), "rbln_memcpy_v2v failed");
+    RBLN_CHECK(
+        !::rbln::rbln_memcpy_v2v(src_vaddr, dst_vaddr, size),
+        "rbln_memcpy_v2v failed");
   } else {
     RBLN_LOG_DEBUG("Performing cross-device copy");
 
     std::vector<uint8_t> host_buffer(nbytes);
     const auto host_buffer_data = host_buffer.data();
-    RBLN_LOG_DEBUG("Allocated {} bytes of temporary host buffer at {}", nbytes, fmt::ptr(host_buffer_data));
+    RBLN_LOG_DEBUG(
+        "Allocated {} bytes of temporary host buffer at {}",
+        nbytes,
+        fmt::ptr(host_buffer_data));
     const auto host_ptr = reinterpret_cast<uintptr_t>(host_buffer_data);
 
-    RBLN_LOG_DEBUG("Calling rbln_memcpy_v2h: src_vaddr={:#x}, dst_host_ptr={:#x}, size={}", src_vaddr, host_ptr, size);
+    RBLN_LOG_DEBUG(
+        "Calling rbln_memcpy_v2h: src_vaddr={:#x}, dst_host_ptr={:#x}, size={}",
+        src_vaddr,
+        host_ptr,
+        size);
     RBLN_CHECK(
         !::rbln::rbln_memcpy_v2h(src_vaddr, host_ptr, size),
         "rbln_memcpy_v2h failed during cross-device transfer ({} bytes, src vaddr={:#x})",
         size,
         src_vaddr);
-    RBLN_LOG_DEBUG("Calling rbln_memcpy_h2v: src_host_ptr={:#x}, dst_vaddr={:#x}, size={}", host_ptr, dst_vaddr, size);
+    RBLN_LOG_DEBUG(
+        "Calling rbln_memcpy_h2v: src_host_ptr={:#x}, dst_vaddr={:#x}, size={}",
+        host_ptr,
+        dst_vaddr,
+        size);
     RBLN_CHECK(
         !::rbln::rbln_memcpy_h2v(host_ptr, dst_vaddr, size),
         "rbln_memcpy_h2v failed during cross-device transfer ({} bytes, dst vaddr={:#x})",
@@ -813,9 +931,15 @@ void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes) {
   }
 }
 
-void memcpy_h2v_async(void* rbln_dst_data, const void* cpu_src_data, size_t nbytes) {
+void memcpy_h2v_async(
+    void* rbln_dst_data,
+    const void* cpu_src_data,
+    size_t nbytes) {
   RBLN_LOG_DEBUG(
-      "dst_rbln_data={}, src_cpu_data={}, nbytes={}", fmt::ptr(rbln_dst_data), fmt::ptr(cpu_src_data), nbytes);
+      "dst_rbln_data={}, src_cpu_data={}, nbytes={}",
+      fmt::ptr(rbln_dst_data),
+      fmt::ptr(cpu_src_data),
+      nbytes);
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
   RBLN_CHECK(cpu_src_data != nullptr, "cpu_src_data cannot be nullptr");
   RBLN_CHECK(rbln_dst_data != nullptr, "rbln_dst_data cannot be nullptr");
@@ -825,7 +949,10 @@ void memcpy_h2v_async(void* rbln_dst_data, const void* cpu_src_data, size_t nbyt
   const auto size = static_cast<uint64_t>(nbytes);
   uint64_t handle = 0;
   RBLN_LOG_DEBUG(
-      "Calling rbln_memcpy_h2v_async: src_host_ptr={:#x}, dst_vaddr={:#x}, size={}", src_host_ptr, dst_vaddr, size);
+      "Calling rbln_memcpy_h2v_async: src_host_ptr={:#x}, dst_vaddr={:#x}, size={}",
+      src_host_ptr,
+      dst_vaddr,
+      size);
   RBLN_CHECK(
       !::rbln::rbln_memcpy_h2v_async(src_host_ptr, dst_vaddr, size, &handle),
       "rbln_memcpy_h2v_async failed ({} bytes, dst vaddr={:#x}); the device may be busy or faulted",
@@ -834,9 +961,15 @@ void memcpy_h2v_async(void* rbln_dst_data, const void* cpu_src_data, size_t nbyt
   RBLN_LOG_DEBUG("H2V async dispatched (handle={}, 0=sync fallback)", handle);
 }
 
-void memcpy_v2h_async(void* cpu_dst_data, const void* rbln_src_data, size_t nbytes) {
+void memcpy_v2h_async(
+    void* cpu_dst_data,
+    const void* rbln_src_data,
+    size_t nbytes) {
   RBLN_LOG_DEBUG(
-      "dst_cpu_data={}, src_rbln_data={}, nbytes={}", fmt::ptr(cpu_dst_data), fmt::ptr(rbln_src_data), nbytes);
+      "dst_cpu_data={}, src_rbln_data={}, nbytes={}",
+      fmt::ptr(cpu_dst_data),
+      fmt::ptr(rbln_src_data),
+      nbytes);
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
   RBLN_CHECK(rbln_src_data != nullptr, "rbln_src_data cannot be nullptr");
   RBLN_CHECK(cpu_dst_data != nullptr, "cpu_dst_data cannot be nullptr");
@@ -846,7 +979,10 @@ void memcpy_v2h_async(void* cpu_dst_data, const void* rbln_src_data, size_t nbyt
   const auto size = static_cast<uint64_t>(nbytes);
   uint64_t handle = 0;
   RBLN_LOG_DEBUG(
-      "Calling rbln_memcpy_v2h_async: src_vaddr={:#x}, dst_host_ptr={:#x}, size={}", src_vaddr, dst_host_ptr, size);
+      "Calling rbln_memcpy_v2h_async: src_vaddr={:#x}, dst_host_ptr={:#x}, size={}",
+      src_vaddr,
+      dst_host_ptr,
+      size);
   RBLN_CHECK(
       !::rbln::rbln_memcpy_v2h_async(src_vaddr, dst_host_ptr, size, &handle),
       "rbln_memcpy_v2h_async failed ({} bytes, src vaddr={:#x}); the device may be busy or faulted",
@@ -855,9 +991,15 @@ void memcpy_v2h_async(void* cpu_dst_data, const void* rbln_src_data, size_t nbyt
   RBLN_LOG_DEBUG("V2H async dispatched (handle={}, 0=sync fallback)", handle);
 }
 
-void memcpy_v2v_async(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes) {
+void memcpy_v2v_async(
+    void* rbln_dst_data,
+    const void* rbln_src_data,
+    size_t nbytes) {
   RBLN_LOG_DEBUG(
-      "dst_rbln_data={}, src_rbln_data={}, nbytes={}", fmt::ptr(rbln_dst_data), fmt::ptr(rbln_src_data), nbytes);
+      "dst_rbln_data={}, src_rbln_data={}, nbytes={}",
+      fmt::ptr(rbln_dst_data),
+      fmt::ptr(rbln_src_data),
+      nbytes);
   RBLN_CHECK(nbytes > 0, "nbytes must be positive, but got {}", nbytes);
   RBLN_CHECK(rbln_src_data != nullptr, "rbln_src_data cannot be nullptr");
   RBLN_CHECK(rbln_dst_data != nullptr, "rbln_dst_data cannot be nullptr");
@@ -871,7 +1013,8 @@ void memcpy_v2v_async(void* rbln_dst_data, const void* rbln_src_data, size_t nby
 
   if (src_torch_device_id != dst_torch_device_id) {
     // rbln_memcpy_v2v_async only handles same-device copies; cross-device needs
-    // a host bounce, which we cannot do async without owning a buffer past return.
+    // a host bounce, which we cannot do async without owning a buffer past
+    // return.
     RBLN_LOG_DEBUG("Cross-device v2v, falling back to sync memcpy_v2v");
     memcpy_v2v(rbln_dst_data, rbln_src_data, nbytes);
     return;
@@ -879,7 +1022,10 @@ void memcpy_v2v_async(void* rbln_dst_data, const void* rbln_src_data, size_t nby
 
   uint64_t handle = 0;
   RBLN_LOG_DEBUG(
-      "Calling rbln_memcpy_v2v_async: src_vaddr={:#x}, dst_vaddr={:#x}, size={}", src_vaddr, dst_vaddr, size);
+      "Calling rbln_memcpy_v2v_async: src_vaddr={:#x}, dst_vaddr={:#x}, size={}",
+      src_vaddr,
+      dst_vaddr,
+      size);
   RBLN_CHECK(
       !::rbln::rbln_memcpy_v2v_async(src_vaddr, dst_vaddr, size, &handle),
       "rbln_memcpy_v2v_async failed ({} bytes, src vaddr={:#x}, dst vaddr={:#x}); the device may be busy or faulted",
@@ -891,14 +1037,16 @@ void memcpy_v2v_async(void* rbln_dst_data, const void* rbln_src_data, size_t nby
 
 void synchronize(c10::DeviceIndex device_index) {
   RBLN_LOG_DEBUG("Synchronizing device {}", static_cast<int>(device_index));
-  // No-op only during teardown (runtime may be unmapped); otherwise a missing device
-  // -- no driver or no NPU -- throws via to_device_id() (torch.cuda.synchronize()
-  // parity; see RBLNNoDeviceTest). No raw call is reached before that throw.
+  // No-op only during teardown (runtime may be unmapped); otherwise a missing
+  // device -- no driver or no NPU -- throws via to_device_id()
+  // (torch.cuda.synchronize() parity; see RBLNNoDeviceTest). No raw call is
+  // reached before that error.
   if (runtime_shutting_down_.load(std::memory_order_relaxed)) {
     return;
   }
   check_device_index(device_index);
-  const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
+  const auto torch_device_id =
+      static_cast<uint32_t>(to_device_id(device_index));
   RBLN_CHECK(
       !::rbln::rbln_device_synchronize(torch_device_id),
       "rbln_device_synchronize failed for rbln:{} (device may be busy or in a faulted state)",
@@ -907,44 +1055,55 @@ void synchronize(c10::DeviceIndex device_index) {
 
 namespace {
 
-// Pack a c10::Stream into its C-ABI handle. StreamId carries the per-device stream id.
+// Pack a c10::Stream into its C-ABI handle. StreamId carries the per-device
+// stream id.
 uint64_t stream_to_handle(const c10::Stream& stream) {
-  // The handle holds the stream id in 32 bits, so a wider id would alias another stream.
+  // The handle holds the stream id in 32 bits, so a wider id would alias
+  // another stream.
   RBLN_CHECK(
       stream.id() >= 0 && stream.id() <= std::numeric_limits<uint32_t>::max(),
       "rbln stream id {} is out of range for a stream handle",
       stream.id());
-  const auto torch_device_id = static_cast<uint32_t>(to_device_id(stream.device_index()));
+  const auto torch_device_id =
+      static_cast<uint32_t>(to_device_id(stream.device_index()));
   const auto local_id = static_cast<uint32_t>(stream.id());
   return (static_cast<uint64_t>(torch_device_id) << 32) | local_id;
 }
 
-// Rebuild a c10::Stream on `device_index` from its C-ABI handle. StreamId holds the
-// per-device stream id; the device travels in the Stream itself.
+// Rebuild a c10::Stream on `device_index` from its C-ABI handle. StreamId holds
+// the per-device stream id; the device travels in the Stream itself.
 c10::Stream stream_from_handle(c10::DeviceIndex device_index, uint64_t handle) {
-  const auto local_id = static_cast<c10::StreamId>(static_cast<uint32_t>(handle & 0xFFFFFFFFULL));
-  return c10::Stream(c10::Stream::UNSAFE, c10::Device(c10::kPrivateUse1, device_index), local_id);
+  const auto local_id =
+      static_cast<c10::StreamId>(static_cast<uint32_t>(handle & 0xFFFFFFFFULL));
+  return c10::Stream(
+      c10::Stream::UNSAFE,
+      c10::Device(c10::kPrivateUse1, device_index),
+      local_id);
 }
 
-// A device index of -1 means "current device" (torch passes it for an index-less
-// device like `torch.Stream(device="rbln")`); resolve it up front.
+// A device index of -1 means "current device" (PyTorch passes it for an
+// index-less device like `torch.Stream(device="rbln")`); resolve it up front.
 c10::DeviceIndex resolve_device_index(c10::DeviceIndex device_index) {
   return device_index < 0 ? get_device_index() : device_index;
 }
 
-// Every stream torch hands out comes from this per-device pool: there is no destroy
-// hook, so an unbounded create would leak and lengthen every runtime drain-all.
+// Every stream PyTorch hands out comes from this per-device pool: there is no
+// destroy hook, so an unbounded create would leak and lengthen every runtime
+// drain-all.
 constexpr size_t kStreamPoolSize = 32;
 
 c10::StreamId create_stream_local_id(c10::DeviceIndex device_index) {
-  const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
+  const auto torch_device_id =
+      static_cast<uint32_t>(to_device_id(device_index));
   uint64_t handle = 0;
   RBLN_CHECK(
       !::rbln::rbln_stream_create(torch_device_id, &handle),
       "rbln_stream_create failed for rbln:{}",
       static_cast<int>(device_index));
-  mark_device_context_initialized(device_index); // a stream implies a live context here
-  return static_cast<c10::StreamId>(static_cast<uint32_t>(handle & 0xFFFFFFFFULL));
+  mark_device_context_initialized(
+      device_index); // a stream implies a live context here
+  return static_cast<c10::StreamId>(
+      static_cast<uint32_t>(handle & 0xFFFFFFFFULL));
 }
 
 } // namespace
@@ -952,7 +1111,8 @@ c10::StreamId create_stream_local_id(c10::DeviceIndex device_index) {
 c10::Stream get_current_stream(c10::DeviceIndex device_index) {
   device_index = resolve_device_index(device_index);
   check_device_index(device_index);
-  const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
+  const auto torch_device_id =
+      static_cast<uint32_t>(to_device_id(device_index));
   uint64_t handle = 0;
   RBLN_CHECK(
       !::rbln::rbln_get_current_stream(torch_device_id, &handle),
@@ -965,7 +1125,8 @@ c10::Stream get_default_stream(c10::DeviceIndex device_index) {
   device_index = resolve_device_index(device_index);
   check_device_index(device_index);
   // StreamId 0 is the default stream; no C-ABI call needed.
-  return c10::Stream(c10::Stream::DEFAULT, c10::Device(c10::kPrivateUse1, device_index));
+  return c10::Stream(
+      c10::Stream::DEFAULT, c10::Device(c10::kPrivateUse1, device_index));
 }
 
 c10::Stream get_stream_from_pool(c10::DeviceIndex device_index) {
@@ -985,15 +1146,20 @@ c10::Stream get_stream_from_pool(c10::DeviceIndex device_index) {
   }
   const auto local_id = pool.local_ids[pool.next];
   pool.next = (pool.next + 1) % kStreamPoolSize;
-  return c10::Stream(c10::Stream::UNSAFE, c10::Device(c10::kPrivateUse1, device_index), local_id);
+  return c10::Stream(
+      c10::Stream::UNSAFE,
+      c10::Device(c10::kPrivateUse1, device_index),
+      local_id);
 }
 
 void set_current_stream(c10::Stream stream) {
   const auto device_index = stream.device_index();
   check_device_index(device_index);
-  const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
+  const auto torch_device_id =
+      static_cast<uint32_t>(to_device_id(device_index));
   RBLN_CHECK(
-      !::rbln::rbln_set_current_stream(torch_device_id, stream_to_handle(stream)),
+      !::rbln::rbln_set_current_stream(
+          torch_device_id, stream_to_handle(stream)),
       "rbln_set_current_stream failed for rbln:{}",
       static_cast<int>(device_index));
 }
@@ -1023,25 +1189,31 @@ void synchronize_stream(c10::Stream stream) {
 uint64_t event_create(c10::DeviceIndex device_index) {
   device_index = resolve_device_index(device_index);
   check_device_index(device_index);
-  const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
+  const auto torch_device_id =
+      static_cast<uint32_t>(to_device_id(device_index));
   uint64_t handle = 0;
   RBLN_CHECK(
       !::rbln::rbln_event_create(torch_device_id, &handle),
       "rbln_event_create failed for rbln:{}",
       static_cast<int>(device_index));
-  // A null handle is torch's "not created yet" sentinel, so 0 must never be a handle.
-  RBLN_CHECK(handle != 0, "rbln_event_create returned handle 0, which aliases the not-created sentinel");
+  // A null handle is PyTorch's "not created yet" sentinel, so 0 must never be a
+  // handle.
+  RBLN_CHECK(
+      handle != 0,
+      "rbln_event_create returned handle 0, which aliases the not-created sentinel");
   return handle;
 }
 
 void event_destroy(uint64_t event) noexcept {
-  // Called from ~Event, possibly during interpreter teardown, so it must never throw.
+  // Called from ~Event, possibly during interpreter teardown, so it must never
+  // raise.
   if (event == 0 || runtime_shutting_down_.load(std::memory_order_relaxed)) {
     return;
   }
   const int rc = ::rbln::rbln_event_destroy(event);
   if (rc != 0) {
-    RBLN_WARN_NOTHROW("rbln_event_destroy failed (handle={:#x}, rc={})", event, rc);
+    RBLN_WARN_NOTHROW(
+        "rbln_event_destroy failed (handle={:#x}, rc={})", event, rc);
   }
 }
 
@@ -1050,7 +1222,9 @@ void event_record(uint64_t event, c10::Stream stream) {
     return;
   }
   RBLN_CHECK(
-      !::rbln::rbln_event_record(event, stream_to_handle(stream)), "rbln_event_record failed (event={:#x})", event);
+      !::rbln::rbln_event_record(event, stream_to_handle(stream)),
+      "rbln_event_record failed (event={:#x})",
+      event);
 }
 
 void event_block(c10::Stream stream, uint64_t event) {
@@ -1066,8 +1240,8 @@ void event_block(c10::Stream stream, uint64_t event) {
         stream_handle,
         event);
   } else {
-    // Cross-device waits are not supported; degrade to a host-side wait on the event
-    // -- correct ordering, at the cost of serializing the host.
+    // Cross-device waits are not supported; degrade to a host-side wait on the
+    // event -- correct ordering, at the cost of serializing the host.
     RBLN_CHECK(
         !::rbln::rbln_event_synchronize(event),
         "cross-device wait_event fallback (event_synchronize) failed (event={:#x})",
@@ -1080,7 +1254,10 @@ bool event_query(uint64_t event) {
     return true; // nothing left to wait for
   }
   bool done = false;
-  RBLN_CHECK(!::rbln::rbln_event_query(event, &done), "rbln_event_query failed (event={:#x})", event);
+  RBLN_CHECK(
+      !::rbln::rbln_event_query(event, &done),
+      "rbln_event_query failed (event={:#x})",
+      event);
   return done;
 }
 
@@ -1088,7 +1265,10 @@ void event_synchronize(uint64_t event) {
   if (runtime_shutting_down_.load(std::memory_order_relaxed)) {
     return;
   }
-  RBLN_CHECK(!::rbln::rbln_event_synchronize(event), "rbln_event_synchronize failed (event={:#x})", event);
+  RBLN_CHECK(
+      !::rbln::rbln_event_synchronize(event),
+      "rbln_event_synchronize failed (event={:#x})",
+      event);
 }
 
 void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies) {
@@ -1103,11 +1283,16 @@ void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies) {
     RBLN_CHECK(c.src != nullptr, "memcpy_v2v_multi: src cannot be nullptr");
     RBLN_CHECK(c.dst != nullptr, "memcpy_v2v_multi: dst cannot be nullptr");
     rbln_copies.emplace_back(
-        reinterpret_cast<uint64_t>(c.src), reinterpret_cast<uint64_t>(c.dst), static_cast<uint64_t>(c.nbytes));
+        reinterpret_cast<uint64_t>(c.src),
+        reinterpret_cast<uint64_t>(c.dst),
+        static_cast<uint64_t>(c.nbytes));
   }
   RBLN_LOG_DEBUG("Calling rbln_memcpy_v2v_multi: n_copies={}", copies.size());
-  // Error message matched by `at::native::rbln::submit_or_fallback` to gate CPU fallback — keep stable.
-  RBLN_CHECK(!::rbln::rbln_memcpy_v2v_multi(rbln_copies), "rbln_memcpy_v2v_multi failed");
+  // Error message matched by `at::native::rbln::submit_or_fallback` to gate CPU
+  // fallback — keep stable.
+  RBLN_CHECK(
+      !::rbln::rbln_memcpy_v2v_multi(rbln_copies),
+      "rbln_memcpy_v2v_multi failed");
 }
 
 void memcpy_h2v_multi(const std::vector<H2VCopyOp>& copies) {
@@ -1124,12 +1309,16 @@ void memcpy_h2v_multi(const std::vector<H2VCopyOp>& copies) {
     RBLN_CHECK(c.src != nullptr, "memcpy_h2v_multi: src cannot be nullptr");
     RBLN_CHECK(c.dst != nullptr, "memcpy_h2v_multi: dst cannot be nullptr");
     rbln_copies.emplace_back(
-        reinterpret_cast<uintptr_t>(c.src), reinterpret_cast<uint64_t>(c.dst), static_cast<uint64_t>(c.nbytes));
+        reinterpret_cast<uintptr_t>(c.src),
+        reinterpret_cast<uint64_t>(c.dst),
+        static_cast<uint64_t>(c.nbytes));
   }
   RBLN_LOG_DEBUG("Calling rbln_memcpy_h2v_multi: n_copies={}", copies.size());
   // Error message matched by `at::native::rbln::submit_or_fallback` to gate the
   // CPU fallback — keep stable.
-  RBLN_CHECK(!::rbln::rbln_memcpy_h2v_multi(rbln_copies), "rbln_memcpy_h2v_multi failed");
+  RBLN_CHECK(
+      !::rbln::rbln_memcpy_h2v_multi(rbln_copies),
+      "rbln_memcpy_h2v_multi failed");
 }
 
 void memcpy_v2h_multi(const std::vector<V2HCopyOp>& copies) {
@@ -1145,12 +1334,16 @@ void memcpy_v2h_multi(const std::vector<V2HCopyOp>& copies) {
     RBLN_CHECK(c.src != nullptr, "memcpy_v2h_multi: src cannot be nullptr");
     RBLN_CHECK(c.dst != nullptr, "memcpy_v2h_multi: dst cannot be nullptr");
     rbln_copies.emplace_back(
-        reinterpret_cast<uint64_t>(c.src), reinterpret_cast<uintptr_t>(c.dst), static_cast<uint64_t>(c.nbytes));
+        reinterpret_cast<uint64_t>(c.src),
+        reinterpret_cast<uintptr_t>(c.dst),
+        static_cast<uint64_t>(c.nbytes));
   }
   RBLN_LOG_DEBUG("Calling rbln_memcpy_v2h_multi: n_copies={}", copies.size());
   // Error message matched by `at::native::rbln::submit_or_fallback` to gate the
   // CPU fallback — keep stable.
-  RBLN_CHECK(!::rbln::rbln_memcpy_v2h_multi(rbln_copies), "rbln_memcpy_v2h_multi failed");
+  RBLN_CHECK(
+      !::rbln::rbln_memcpy_v2h_multi(rbln_copies),
+      "rbln_memcpy_v2h_multi failed");
 }
 
 BorrowedHostPtr borrow_host_ptr(const void* rbln_data, size_t nbytes) {
@@ -1163,7 +1356,8 @@ BorrowedHostPtr borrow_host_ptr(const void* rbln_data, size_t nbytes) {
   const auto size = static_cast<uint64_t>(nbytes);
   uintptr_t host_ptr = 0;
   uint64_t borrow_id = 0;
-  RBLN_LOG_DEBUG("Calling rbln_v_borrow_host_ptr: vaddr={:#x}, size={}", vaddr, size);
+  RBLN_LOG_DEBUG(
+      "Calling rbln_v_borrow_host_ptr: vaddr={:#x}, size={}", vaddr, size);
   RBLN_CHECK(
       !::rbln::rbln_v_borrow_host_ptr(vaddr, size, host_ptr, borrow_id),
       "rbln_v_borrow_host_ptr failed (vaddr={:#x}, size={}); see rebel runtime logs for details",
@@ -1172,7 +1366,9 @@ BorrowedHostPtr borrow_host_ptr(const void* rbln_data, size_t nbytes) {
   return BorrowedHostPtr{.host_ptr = host_ptr, .borrow_id = borrow_id};
 }
 
-std::optional<BorrowedHostPtr> try_borrow_host_ptr(const void* rbln_data, size_t nbytes) {
+std::optional<BorrowedHostPtr> try_borrow_host_ptr(
+    const void* rbln_data,
+    size_t nbytes) {
   if (rbln_data == nullptr || nbytes == 0) {
     return std::nullopt;
   }
@@ -1200,16 +1396,22 @@ BorrowedHostPtr acquire_host_ptr_for_overwrite(void* rbln_data, size_t nbytes) {
   const auto size = static_cast<uint64_t>(nbytes);
   uintptr_t host_ptr = 0;
   uint64_t borrow_id = 0;
-  RBLN_LOG_DEBUG("Calling rbln_v_acquire_host_ptr_for_overwrite: vaddr={:#x}, size={}", vaddr, size);
+  RBLN_LOG_DEBUG(
+      "Calling rbln_v_acquire_host_ptr_for_overwrite: vaddr={:#x}, size={}",
+      vaddr,
+      size);
   RBLN_CHECK(
-      !::rbln::rbln_v_acquire_host_ptr_for_overwrite(vaddr, size, host_ptr, borrow_id),
+      !::rbln::rbln_v_acquire_host_ptr_for_overwrite(
+          vaddr, size, host_ptr, borrow_id),
       "rbln_v_acquire_host_ptr_for_overwrite failed (vaddr={:#x}, size={}); see rebel runtime logs for details",
       vaddr,
       size);
   return BorrowedHostPtr{.host_ptr = host_ptr, .borrow_id = borrow_id};
 }
 
-std::optional<BorrowedHostPtr> try_acquire_host_ptr_for_overwrite(void* rbln_data, size_t nbytes) {
+std::optional<BorrowedHostPtr> try_acquire_host_ptr_for_overwrite(
+    void* rbln_data,
+    size_t nbytes) {
   if (rbln_data == nullptr || nbytes == 0) {
     return std::nullopt;
   }
@@ -1222,7 +1424,8 @@ std::optional<BorrowedHostPtr> try_acquire_host_ptr_for_overwrite(void* rbln_dat
   // RBLN_CHECK(!...)). A failure here is an expected, recoverable condition for
   // callers with a copy-based fallback, so report it as nullopt rather than
   // throwing.
-  if (::rbln::rbln_v_acquire_host_ptr_for_overwrite(vaddr, size, host_ptr, borrow_id)) {
+  if (::rbln::rbln_v_acquire_host_ptr_for_overwrite(
+          vaddr, size, host_ptr, borrow_id)) {
     return std::nullopt;
   }
   return BorrowedHostPtr{.host_ptr = host_ptr, .borrow_id = borrow_id};
@@ -1243,7 +1446,8 @@ void return_borrowed(uint64_t borrow_id, bool updated) {
       updated);
 }
 
-c10::CachingDeviceAllocator::DeviceStats get_device_stats(const c10::Device& device) {
+c10::CachingDeviceAllocator::DeviceStats get_device_stats(
+    const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
   // Best-effort query: empty stats when the runtime is unavailable.
   if (!runtime_available()) {
@@ -1251,10 +1455,10 @@ c10::CachingDeviceAllocator::DeviceStats get_device_stats(const c10::Device& dev
   }
   const auto device_index = device.index();
   check_device_index(device_index);
-  // CUDA parity (see memory_stats): report zero stats for a valid device this process
-  // has not allocated on, matching PyTorch's generic path (empty only for an
-  // uninitialized allocator). An initialized device still queries the runtime, so
-  // genuine failures surface rather than being masked as zero.
+  // CUDA parity (see memory_stats): report zero stats for a valid device this
+  // process has not allocated on, matching PyTorch's generic path (empty only
+  // for an uninitialized allocator). An initialized device still queries the
+  // runtime, so genuine failures surface rather than being masked as zero.
   if (!device_context_initialized(device_index)) {
     return c10::CachingDeviceAllocator::DeviceStats{};
   }
@@ -1263,32 +1467,48 @@ c10::CachingDeviceAllocator::DeviceStats get_device_stats(const c10::Device& dev
   const auto memory_stats = rbln_get_memory_stats(device_id);
 
   c10::CachingDeviceAllocator::DeviceStats stats{};
-  constexpr auto kAggregate = static_cast<size_t>(c10::CachingAllocator::StatType::AGGREGATE);
+  constexpr auto kAggregate =
+      static_cast<size_t>(c10::CachingAllocator::StatType::AGGREGATE);
 
   // allocated_bytes
-  stats.allocated_bytes[kAggregate].current = static_cast<int64_t>(memory_stats.GetAllocatedCurrent());
-  stats.allocated_bytes[kAggregate].peak = static_cast<int64_t>(memory_stats.GetAllocatedPeak());
-  stats.allocated_bytes[kAggregate].allocated = static_cast<int64_t>(memory_stats.GetAllocatedTotalAllocated());
-  stats.allocated_bytes[kAggregate].freed = static_cast<int64_t>(memory_stats.GetAllocatedTotalFreed());
+  stats.allocated_bytes[kAggregate].current =
+      static_cast<int64_t>(memory_stats.GetAllocatedCurrent());
+  stats.allocated_bytes[kAggregate].peak =
+      static_cast<int64_t>(memory_stats.GetAllocatedPeak());
+  stats.allocated_bytes[kAggregate].allocated =
+      static_cast<int64_t>(memory_stats.GetAllocatedTotalAllocated());
+  stats.allocated_bytes[kAggregate].freed =
+      static_cast<int64_t>(memory_stats.GetAllocatedTotalFreed());
 
   // reserved_bytes
-  stats.reserved_bytes[kAggregate].current = static_cast<int64_t>(memory_stats.GetReservedCurrent());
-  stats.reserved_bytes[kAggregate].peak = static_cast<int64_t>(memory_stats.GetReservedPeak());
-  stats.reserved_bytes[kAggregate].allocated = static_cast<int64_t>(memory_stats.GetReservedTotalAllocated());
-  stats.reserved_bytes[kAggregate].freed = static_cast<int64_t>(memory_stats.GetReservedTotalFreed());
+  stats.reserved_bytes[kAggregate].current =
+      static_cast<int64_t>(memory_stats.GetReservedCurrent());
+  stats.reserved_bytes[kAggregate].peak =
+      static_cast<int64_t>(memory_stats.GetReservedPeak());
+  stats.reserved_bytes[kAggregate].allocated =
+      static_cast<int64_t>(memory_stats.GetReservedTotalAllocated());
+  stats.reserved_bytes[kAggregate].freed =
+      static_cast<int64_t>(memory_stats.GetReservedTotalFreed());
 
   // active_bytes
-  stats.active_bytes[kAggregate].current = static_cast<int64_t>(memory_stats.GetActiveCurrent());
-  stats.active_bytes[kAggregate].peak = static_cast<int64_t>(memory_stats.GetActivePeak());
+  stats.active_bytes[kAggregate].current =
+      static_cast<int64_t>(memory_stats.GetActiveCurrent());
+  stats.active_bytes[kAggregate].peak =
+      static_cast<int64_t>(memory_stats.GetActivePeak());
 
-  // inactive_split_bytes — mapped from memory_stats's "cached" (reusable fragmented blocks).
-  stats.inactive_split_bytes[kAggregate].current = static_cast<int64_t>(memory_stats.GetCachedCurrent());
-  stats.inactive_split_bytes[kAggregate].peak = static_cast<int64_t>(memory_stats.GetCachedPeak());
+  // inactive_split_bytes — mapped from memory_stats's "cached" (reusable
+  // fragmented blocks).
+  stats.inactive_split_bytes[kAggregate].current =
+      static_cast<int64_t>(memory_stats.GetCachedCurrent());
+  stats.inactive_split_bytes[kAggregate].peak =
+      static_cast<int64_t>(memory_stats.GetCachedPeak());
 
   // scalar counters
-  stats.num_alloc_retries = static_cast<int64_t>(memory_stats.GetNumAllocRetries());
+  stats.num_alloc_retries =
+      static_cast<int64_t>(memory_stats.GetNumAllocRetries());
   stats.num_ooms = static_cast<int64_t>(memory_stats.GetNumOoms());
-  stats.num_device_alloc = static_cast<int64_t>(memory_stats.GetNumDeviceAlloc());
+  stats.num_device_alloc =
+      static_cast<int64_t>(memory_stats.GetNumDeviceAlloc());
   stats.num_device_free = static_cast<int64_t>(memory_stats.GetNumDeviceFree());
 
   RBLN_LOG_DEBUG(
@@ -1309,9 +1529,10 @@ c10::CachingDeviceAllocator::DeviceStats get_device_stats(const c10::Device& dev
 
 void empty_cache(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
-  // Two-level context gate (CUDA parity). Context flag FIRST: no allocator state anywhere
-  // → no-op (a no-context parent or malformed config; nothing to free). Otherwise validate
-  // the index (invalid throws) and skip a device never used here.
+  // Two-level context gate (CUDA parity). Context flag FIRST: no allocator
+  // state anywhere → no-op (a no-context parent or malformed config; nothing to
+  // free). Otherwise validate the index (invalid throws) and skip a device
+  // never used here.
   if (!any_device_context_initialized() || !runtime_available()) {
     return;
   }
@@ -1325,8 +1546,8 @@ void empty_cache(const c10::Device& device) {
   }
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_empty_cache: device_id={}", device_id);
-  // Live context: surface a genuine failure (CUDA parity — an initialized allocator
-  // propagates real errors); rc included for diagnosis.
+  // Live context: surface a genuine failure (CUDA parity — an initialized
+  // allocator propagates real errors); rc included for diagnosis.
   const auto rc = rbln_empty_cache(device_id);
   RBLN_CHECK(
       !rc,
@@ -1343,23 +1564,28 @@ std::map<std::string, uint64_t> memory_stats(const c10::Device& device) {
   }
   const auto device_index = device.index();
   check_device_index(device_index);
-  // CUDA parity: report empty stats for a valid device this process has not allocated
-  // on (memory_allocated()/memory_reserved() then read 0), matching PyTorch's generic
-  // path, which returns empty only for an uninitialized allocator. An initialized
-  // device still queries the runtime, so genuine failures surface.
-  // (check_device_index above still rejects an invalid index -- a bad index throws.)
+  // CUDA parity: report empty stats for a valid device this process has not
+  // allocated on (memory_allocated()/memory_reserved() then read 0), matching
+  // PyTorch's generic path, which returns empty only for an uninitialized
+  // allocator. An initialized device still queries the runtime, so genuine
+  // failures surface. (check_device_index above still rejects an invalid index
+  // -- a bad index throws.)
   if (!device_context_initialized(device_index)) {
     return {};
   }
   const auto device_id = to_device_id(device_index);
-  RBLN_LOG_DEBUG("Calling rbln_get_memory_stats: rbln:{}, device_id={}", static_cast<int>(device_index), device_id);
+  RBLN_LOG_DEBUG(
+      "Calling rbln_get_memory_stats: rbln:{}, device_id={}",
+      static_cast<int>(device_index),
+      device_id);
   const auto stats = rbln_get_memory_stats(device_id);
   const auto memory_stats = stats.GetMemoryStats();
   RBLN_LOG_DEBUG("memory_stats={}", memory_stats);
   return memory_stats;
 }
 
-std::map<std::string, uint64_t> memory_stats_per_chiplet(const c10::Device& device) {
+std::map<std::string, uint64_t> memory_stats_per_chiplet(
+    const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
   // Same availability/initialization gates as memory_stats().
   if (!runtime_available()) {
@@ -1372,16 +1598,19 @@ std::map<std::string, uint64_t> memory_stats_per_chiplet(const c10::Device& devi
   }
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG(
-      "Calling rbln_get_memory_stats_per_chiplet: rbln:{}, device_id={}", static_cast<int>(device_index), device_id);
+      "Calling rbln_get_memory_stats_per_chiplet: rbln:{}, device_id={}",
+      static_cast<int>(device_index),
+      device_id);
   const auto per_npu = rbln_get_memory_stats_per_chiplet(device_id);
 
   // Both axes are in the key: a logical device is one or more physical NPUs
-  // (RBLN_NPUS_PER_DEVICE / RBLN_DEVICE_MAP), each with its own chiplets. npu.<n> is
-  // the n-th NPU of THIS logical device, not a physical NPU id.
+  // (RBLN_NPUS_PER_DEVICE / RBLN_DEVICE_MAP), each with its own chiplets.
+  // npu.<n> is the n-th NPU of THIS logical device, not a physical NPU id.
   std::map<std::string, uint64_t> out;
   for (size_t npu = 0; npu < per_npu.size(); ++npu) {
     for (size_t chiplet = 0; chiplet < per_npu[npu].size(); ++chiplet) {
-      const auto prefix = "npu." + std::to_string(npu) + ".chiplet." + std::to_string(chiplet) + ".";
+      const auto prefix = "npu." + std::to_string(npu) + ".chiplet." +
+          std::to_string(chiplet) + ".";
       for (const auto& [key, value] : per_npu[npu][chiplet].GetMemoryStats()) {
         out[prefix + key] = value;
       }
@@ -1393,17 +1622,22 @@ std::map<std::string, uint64_t> memory_stats_per_chiplet(const c10::Device& devi
 
 namespace {
 
-// One reply per physical NPU of the logical device, in mapping order. Commits the mapping
-// (a device use); the physical ids are the runtime's coordinate (after RBLN_VISIBLE_DEVICES).
-std::vector<RBLNDeviceMemoryInfo> device_memory_info_per_npu(const c10::Device& device) {
+// One reply per physical NPU of the logical device, in mapping order. Commits
+// the mapping (a device use); the physical ids are the runtime's coordinate
+// (after RBLN_VISIBLE_DEVICES).
+std::vector<RBLNDeviceMemoryInfo> device_memory_info_per_npu(
+    const c10::Device& device) {
   RBLN_CHECK(
-      runtime_available(), "Cannot query device memory for {}: no RBLN runtime or device available", c10::str(device));
+      runtime_available(),
+      "Cannot query device memory for {}: no RBLN runtime or device available",
+      c10::str(device));
   const auto device_index = device.index();
   check_device_index(device_index);
   to_device_id(device_index);
 
   std::vector<RBLNDeviceMemoryInfo> replies;
-  for (const int physical_id : DeviceMappingManager::getInstance().getPhysicalDeviceIds(device_index)) {
+  for (const int physical_id :
+       DeviceMappingManager::getInstance().getPhysicalDeviceIds(device_index)) {
     RBLNDeviceMemoryInfo info{};
     const auto rc = rbln_get_device_memory_info(physical_id, &info);
     RBLN_CHECK(
@@ -1437,14 +1671,16 @@ std::pair<size_t, size_t> mem_get_info(const c10::Device& device) {
   return {free, total};
 }
 
-std::map<std::string, uint64_t> mem_get_info_per_chiplet(const c10::Device& device) {
+std::map<std::string, uint64_t> mem_get_info_per_chiplet(
+    const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
   const auto out = per_chiplet_memory_map(device_memory_info_per_npu(device));
   RBLN_LOG_DEBUG("mem_get_info_per_chiplet={}", out);
   return out;
 }
 
-std::map<std::string, uint64_t> per_chiplet_memory_map(const std::vector<RBLNDeviceMemoryInfo>& replies) {
+std::map<std::string, uint64_t> per_chiplet_memory_map(
+    const std::vector<RBLNDeviceMemoryInfo>& replies) {
   std::map<std::string, uint64_t> out;
   for (size_t npu = 0; npu < replies.size(); ++npu) {
     const auto& info = replies[npu];
@@ -1456,7 +1692,8 @@ std::map<std::string, uint64_t> per_chiplet_memory_map(const std::vector<RBLNDev
     out[npu_prefix + "huge_granularity"] = info.huge_granularity;
     for (uint32_t chiplet = 0; chiplet < info.chiplet_cnt; ++chiplet) {
       const auto& c = info.chiplet[chiplet];
-      const auto prefix = npu_prefix + "chiplet." + std::to_string(chiplet) + ".";
+      const auto prefix =
+          npu_prefix + "chiplet." + std::to_string(chiplet) + ".";
       out[prefix + "total"] = c.total;
       out[prefix + "used"] = c.used;
       out[prefix + "free"] = c.free;
@@ -1482,8 +1719,10 @@ void reset_accumulated_memory_stats(const c10::Device& device) {
     return;
   }
   const auto device_id = to_device_id(device_index);
-  RBLN_LOG_DEBUG("Calling rbln_reset_accumulated_memory_stats: device_id={}", device_id);
-  // Live context: surface a genuine failure (a silent success would mislead the caller).
+  RBLN_LOG_DEBUG(
+      "Calling rbln_reset_accumulated_memory_stats: device_id={}", device_id);
+  // Live context: surface a genuine failure (a silent success would mislead the
+  // caller).
   const auto rc = rbln_reset_accumulated_memory_stats(device_id);
   RBLN_CHECK(
       !rc,
@@ -1494,8 +1733,9 @@ void reset_accumulated_memory_stats(const c10::Device& device) {
 
 void reset_peak_memory_stats(const c10::Device& device) {
   RBLN_LOG_DEBUG("logical device={}", c10::str(device));
-  // Two-level context gate (see empty_cache); context flag first. This is also the only
-  // guard for the generic torch.accelerator.reset_peak path (no Python init-guard upstream).
+  // Two-level context gate (see empty_cache); context flag first. This is also
+  // the only guard for the generic torch.accelerator.reset_peak path (no Python
+  // init-guard upstream).
   if (!any_device_context_initialized() || !runtime_available()) {
     return;
   }
@@ -1508,7 +1748,8 @@ void reset_peak_memory_stats(const c10::Device& device) {
     return;
   }
   const auto device_id = to_device_id(device_index);
-  RBLN_LOG_DEBUG("Calling rbln_reset_peak_memory_stats: device_id={}", device_id);
+  RBLN_LOG_DEBUG(
+      "Calling rbln_reset_peak_memory_stats: device_id={}", device_id);
   // Live context: surface a genuine failure.
   const auto rc = rbln_reset_peak_memory_stats(device_id);
   RBLN_CHECK(
@@ -1519,7 +1760,8 @@ void reset_peak_memory_stats(const c10::Device& device) {
 }
 
 void set_file_offloading_enabled(bool enabled) {
-  RBLN_LOG_DEBUG("Calling rbln_set_file_offloading_enabled: enabled={}", enabled);
+  RBLN_LOG_DEBUG(
+      "Calling rbln_set_file_offloading_enabled: enabled={}", enabled);
   // Reachable without an allocation (torch.rbln.offload()), so gated directly:
   // best-effort no-op when the runtime is unavailable.
   if (!runtime_available()) {
@@ -1539,7 +1781,8 @@ uint64_t release_offload_temp_storage() {
   }
   uint64_t num_files_removed = 0;
   RBLN_CHECK(
-      !::rbln::rbln_release_offload_temp_storage(&num_files_removed), "rbln_release_offload_temp_storage failed");
+      !::rbln::rbln_release_offload_temp_storage(&num_files_removed),
+      "rbln_release_offload_temp_storage failed");
   return num_files_removed;
 }
 

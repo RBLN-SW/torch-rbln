@@ -36,7 +36,8 @@ class TestSetDeviceLayoutLike:
         plain eager tensor) raise rather than silently mis-configure the layout.
         The successful end-to-end path — with a device-resident KV cache as
         ``ref`` — is exercised by the LMCache-RBLN device-tensor integration,
-        which a standalone unit test cannot easily set up."""
+        which a standalone unit test cannot easily set up.
+        """
         ref = torch.ones((2, 4, 8), dtype=torch.float16, device=DEVICE) + 1
         target = torch.empty(2 * 4 * 8, dtype=torch.float16, device=DEVICE)
         with pytest.raises(RuntimeError, match="layout_like"):
@@ -66,7 +67,8 @@ class TestSetDeviceLayoutLike:
     @pytest.mark.npu(count=1)
     def test_offset_view_target_raises(self):
         """A storage_offset>0 view does not cover its storage and is rejected with
-        a clear error."""
+        a clear error.
+        """
         base = torch.empty(64, dtype=torch.float16, device=DEVICE)
         view = base[8:24]
         assert view.storage_offset() != 0
@@ -77,10 +79,12 @@ class TestSetDeviceLayoutLike:
     @pytest.mark.npu(count=1)
     def test_narrowing_view_target_raises(self):
         """A storage_offset==0 view that doesn't span its storage (``base[:k]``)
-        still does not cover it — reject it."""
+        still does not cover it — reject it.
+        """
         base = torch.empty(64, dtype=torch.float16, device=DEVICE)
         view = base[:16]
-        assert view.storage_offset() == 0 and view.is_contiguous()
+        assert view.storage_offset() == 0
+        assert view.is_contiguous()
         ref = torch.empty(16, dtype=torch.float16, device=DEVICE)
         with pytest.raises(RuntimeError, match="whole storage"):
             torch.rbln.set_device_layout_like(view, ref)

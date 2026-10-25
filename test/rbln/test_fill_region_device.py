@@ -25,7 +25,7 @@ def _host_sync():
 
 
 def _delta(a, b):
-    return tuple(y - x for x, y in zip(a, b))
+    return tuple(y - x for x, y in zip(a, b, strict=True))
 
 
 def _d2h_bytes_of(fn):
@@ -37,7 +37,9 @@ def _d2h_bytes_of(fn):
 
 
 def _assert_data_on_device(tc, x, msg=""):
-    """Reading x back must move every byte from the device: the data still lives there."""
+    """Reading x back must move every byte from the device: the data still lives
+    there.
+    """
     moved, _ = _d2h_bytes_of(x.cpu)
     tc.assertEqual(moved, x.numel() * x.element_size(), f"{msg}: storage is not device-latest ({moved} B moved)")
 
@@ -55,7 +57,7 @@ def _device_latest(shape, dtype=torch.bfloat16):
 
 @pytest.mark.npu(count=1)
 class TestFillRegionDevice(TestCase):
-    def _check(self, make_view, value, shape=(1, 474, 3072), dtype=torch.bfloat16, resident=True):
+    def _check(self, make_view, value, shape=(1, 474, 3072), dtype=torch.bfloat16, *, resident=True):
         x = _device_latest(shape, dtype)
         ref = x.cpu()
         make_view(ref).fill_(value)
@@ -90,18 +92,18 @@ class TestFillRegionDevice(TestCase):
                 self._check(lambda t: t[:, 8:], value, shape=(16, 1024), dtype=dtype)
 
     def test_dtypes_converted_physical_stay_correct(self):
-        # float16/float32 are held as dlf16 on the device (user dtype != physical dtype). The
-        # runtime routes a converting host write to the user view (exact bytes for host readers),
-        # so these take the same whole-entry host path as before; only correctness is asserted.
-        # A device-side fill for converting views needs the runtime to accept a pattern in the
-        # physical dtype.
+        # float16/float32 are held as dlf16 on the device (user dtype != physical
+        # dtype). The runtime routes a converting host write to the user view (exact
+        # bytes for host readers), so these take the same whole-entry host path as
+        # before; only correctness is asserted. A device-side fill for converting views
+        # needs the runtime to accept a pattern in the physical dtype.
         for dtype, value in ((torch.float32, 3.25), (torch.float16, 0.5)):
             with self.subTest(dtype=dtype):
                 self._check(lambda t: t[:, 8:], value, shape=(16, 1024), dtype=dtype, resident=False)
 
     def test_host_latest_storage_moves_nothing(self):
-        # host-latest: the runtime lands the region in the user view; nothing may move, and the
-        # data stays on the host (reading it back is a host copy, not a D2H)
+        # host-latest: the runtime lands the region in the user view; nothing may move,
+        # and the data stays on the host (reading it back is a host copy, not a D2H)
         x = torch.randn(64, 1024).to(torch.bfloat16).to(DEVICE)
         before = _host_sync()
         x[:, 10:].fill_(4.0)
@@ -125,7 +127,8 @@ class TestFillRegionDevice(TestCase):
         self.assertTrue(torch.all(host[:, :100] == -1.0) and torch.all(host[:, 100:] == 2.5))
 
     def test_region_above_bulk_caps_is_split_and_correct(self):
-        # more entries and more bytes than one bulk call may carry (RBLNHostBatch.cpp caps):
+        # more entries and more bytes than one bulk call may carry (RBLNHostBatch.cpp
+        # caps):
         # H2VBatch must split the submit
         x = _device_latest((32, 524288))
         ref = x.cpu()
@@ -138,8 +141,8 @@ class TestFillRegionDevice(TestCase):
         torch.testing.assert_close(x.cpu(), ref, rtol=0, atol=0)
 
     def test_overlapping_unfold_view_stays_correct(self):
-        # unfold windows overlap with positive strides; bulk destinations must be disjoint,
-        # so this view takes the previous path
+        # unfold windows overlap with positive strides; bulk destinations must be
+        # disjoint, so this view takes the previous path
         x = _device_latest((64,))
         ref = x.cpu()
         ref.unfold(0, 4, 1).fill_(1.0)

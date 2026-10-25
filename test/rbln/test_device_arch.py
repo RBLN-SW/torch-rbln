@@ -7,7 +7,6 @@ import pytest
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from test.utils import xfail_atom, xfail_rebel
-
 from torch_rbln._internal.device_arch_utils import _arch_from_npu_name, get_device_arch, is_atom_device, is_rebel_device
 
 
@@ -103,14 +102,15 @@ class TestArchResolutionFailure(TestCase):
 
     def test_moved_entry_point_raises(self) -> None:
         # None in sys.modules is what CPython turns a moved module into.
-        with patch.dict(sys.modules, {"rebel.device_info": None}):
-            with self.assertRaises(ImportError):
-                get_device_arch()
+        with patch.dict(sys.modules, {"rebel.device_info": None}), self.assertRaises(ImportError):
+            get_device_arch()
 
     def test_lookup_error_propagates(self) -> None:
-        with patch("rebel.device_info.get_npu_name", side_effect=RuntimeError("device query failed")):
-            with self.assertRaises(RuntimeError):
-                get_device_arch()
+        with (
+            patch("rebel.device_info.get_npu_name", side_effect=RuntimeError("device query failed")),
+            self.assertRaises(RuntimeError),
+        ):
+            get_device_arch()
 
 
 if __name__ == "__main__":

@@ -51,20 +51,23 @@ def authenticated_opener(url: str, username: str, password: str) -> urllib.reque
 
 
 def fetch_page(url: str, username: str, password: str) -> str | None:
-    request = urllib.request.Request(url, headers={"Accept": "text/html"})
+    request = urllib.request.Request(url, headers={"Accept": "text/html"})  # noqa: S310
     try:
         with authenticated_opener(url, username, password).open(request, timeout=TIMEOUT_SECONDS) as response:
             body: bytes = response.read()
     except urllib.error.HTTPError as error:
         if error.code == 404:
             return None
-        raise SystemExit(f"Could not fetch {url}: HTTP {error.code}") from None
+        msg = f"Could not fetch {url}: HTTP {error.code}"
+        raise SystemExit(msg) from None
     except (OSError, http.client.HTTPException) as error:
-        raise SystemExit(f"Could not fetch {url}: {error}") from None
+        msg = f"Could not fetch {url}: {error}"
+        raise SystemExit(msg) from None
     try:
         return body.decode()
     except UnicodeDecodeError as error:
-        raise SystemExit(f"Could not decode the page at {url}: {error}") from None
+        msg = f"Could not decode the page at {url}: {error}"
+        raise SystemExit(msg) from None
 
 
 def main() -> None:
@@ -82,13 +85,15 @@ def main() -> None:
     try:
         target_wheel = parse_wheel_filename(args.wheel_filename)
     except InvalidWheelFilename as error:
-        raise SystemExit(f"Could not parse the wheel filename: {error}") from None
+        msg = f"Could not parse the wheel filename: {error}"
+        raise SystemExit(msg) from None
     project_name = target_wheel[0]
     prefix = "UV_INDEX_" + re.sub(r"[^A-Z0-9]", "_", args.index.upper())
     username = os.environ.get(f"{prefix}_USERNAME")
     password = os.environ.get(f"{prefix}_PASSWORD")
     if not (username and password):
-        raise SystemExit(f"{prefix}_USERNAME and {prefix}_PASSWORD must both be set")
+        msg = f"{prefix}_USERNAME and {prefix}_PASSWORD must both be set"
+        raise SystemExit(msg)
     url = f"{index_url.rstrip('/')}/{project_name}/"
 
     page = fetch_page(url, username, password)
@@ -99,7 +104,8 @@ def main() -> None:
     listing = ProjectPageParser()
     listing.feed(page)
     if not any(name.endswith((".whl", ".tar.gz", ".zip")) for name in listing.file_names):
-        raise SystemExit(f"{url} lists no distribution files, so it may not be a project page")
+        msg = f"{url} lists no distribution files, so it may not be a project page"
+        raise SystemExit(msg)
     unparsed = []
     for name in listing.file_names:
         if not name.endswith(".whl"):
@@ -111,7 +117,8 @@ def main() -> None:
         except InvalidWheelFilename:
             unparsed.append(name)
     if unparsed:
-        raise SystemExit(f"Could not parse {', '.join(unparsed)} on {url}, so {args.wheel_filename} may be listed")
+        msg = f"Could not parse {', '.join(unparsed)} on {url}, so {args.wheel_filename} may be listed"
+        raise SystemExit(msg)
     print("false")
 
 

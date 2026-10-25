@@ -6,9 +6,9 @@
 #include <cstdint>
 #include <vector>
 
-// Exercises the event half of RBLNGuardImpl through VirtualGuardImpl (the same path
-// torch.Event takes): record, block, query, synchronize, destroy. Host-observable
-// data assertions use synchronizeDevice.
+// Exercises the event half of RBLNGuardImpl through VirtualGuardImpl (the same
+// path torch.Event takes): record, block, query, synchronize, destroy.
+// Host-observable data assertions use synchronizeDevice.
 class RBLNEventTest : public ::testing::Test {
  protected:
   static void SetUpTestSuite() {
@@ -47,7 +47,8 @@ TEST_F(RBLNEventTest, RecordSynchronizeCompletesAsyncCopy) {
   c10::rbln::memcpy_v2h_async(dst_cpu.data(), rbln_data, nbytes);
 
   void* event = nullptr;
-  const auto stream = impl.getStream(c10::Device(c10::kPrivateUse1, device_index));
+  const auto stream =
+      impl.getStream(c10::Device(c10::kPrivateUse1, device_index));
   impl.record(&event, stream, device_index, c10::EventFlag::PYTORCH_DEFAULT);
   impl.synchronizeEvent(event); // the recorded work has completed
   EXPECT_TRUE(impl.queryEvent(event)); // ... and query agrees
@@ -55,7 +56,7 @@ TEST_F(RBLNEventTest, RecordSynchronizeCompletesAsyncCopy) {
   EXPECT_EQ(dst_cpu, src_cpu);
 
   // Re-record reuses the handle and snapshots the newer copy.
-  std::fill(dst_cpu.begin(), dst_cpu.end(), int8_t{0});
+  std::ranges::fill(dst_cpu, int8_t{0});
   c10::rbln::memcpy_v2h_async(dst_cpu.data(), rbln_data, nbytes);
   impl.record(&event, stream, device_index, c10::EventFlag::PYTORCH_DEFAULT);
   impl.synchronizeEvent(event);
@@ -67,15 +68,16 @@ TEST_F(RBLNEventTest, RecordSynchronizeCompletesAsyncCopy) {
 }
 
 TEST_F(RBLNEventTest, WaitEventAcrossStreamsDoesNotError) {
-  // stream B waits on an event recorded on stream A. Asserts the plumbing works end
-  // to end and completion is observable.
+  // stream B waits on an event recorded on stream A. Asserts the plumbing works
+  // end to end and completion is observable.
   const c10::impl::VirtualGuardImpl impl(c10::kPrivateUse1);
   constexpr c10::DeviceIndex device_index = 0;
   constexpr size_t nbytes = 4096;
   const auto device = c10::Device(c10::kPrivateUse1, device_index);
 
   std::vector<int8_t> src_cpu(nbytes, 7);
-  auto* rbln_data = c10::rbln::malloc(device_index, nbytes); // also materializes the context
+  auto* rbln_data =
+      c10::rbln::malloc(device_index, nbytes); // also materializes the context
   ASSERT_NE(rbln_data, nullptr);
 
   const auto stream_a = impl.getNewStream(device, 0);

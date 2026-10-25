@@ -1,5 +1,4 @@
-"""
-Operation categories configuration.
+"""Operation categories configuration.
 
 Defines categories of operations for code generation logic.
 
@@ -13,7 +12,6 @@ Categories:
 - COMPARE_OPS: eq, ne, gt, etc. (output dtype is bool)
 - SINGLE_MEM_LOC_OUT_VIOLATION_OPS: cat, etc. (memory location validation needed)
 - SKIP_DTYPE_CHECK_OPS: cat, etc. (skip dtype check)
-- CONTIGUOUS_ON_DEVICE_OPS: bmm, mm, etc. (need contiguous preparation on device)
 
 Empty tensor handling:
 - Defined in EMPTY_TENSOR_HANDLING_MAP mapping table
@@ -25,15 +23,15 @@ Usage examples:
 - OpCodeGenerator: Determine dtype validation approach
 """
 
-from typing import Dict, FrozenSet, List, Optional, Set, Tuple  # noqa: UP035
+from typing import ClassVar
 
 
 class OpCategories:
     """Manages categorization of operations for code generation logic."""
 
     # TODO: need to make automatically fill 'Ops' if it figure out
-    REDUCTION_OPS: Set[str] = {"sum", "mean"}
-    BROADCASTABLE_OPS: Set[str] = {
+    REDUCTION_OPS: ClassVar[set[str]] = {"sum", "mean"}
+    BROADCASTABLE_OPS: ClassVar[set[str]] = {
         "add",
         "sub",
         "mul",
@@ -49,21 +47,18 @@ class OpCategories:
         "le",
     }
 
-    COMPARE_OPS: Set[str] = {"logical_not", "ne", "eq", "gt", "ge", "lt", "le"}
-    # TODO: for cat only, violation if in_tensor(array) and out tensor are same data_ptr.
-    #       need to check if other OPs need this check too
-    SINGLE_MEM_LOC_OUT_VIOLATION_OPS: Set[str] = {"cat"}
-    SKIP_DTYPE_CHECK_OPS: Set[str] = {"cat"}
+    COMPARE_OPS: ClassVar[set[str]] = {"logical_not", "ne", "eq", "gt", "ge", "lt", "le"}
+    # TODO: for cat only, violation if in_tensor(array) and out tensor are same
+    #       data_ptr. need to check if other OPs need this check too
+    SINGLE_MEM_LOC_OUT_VIOLATION_OPS: ClassVar[set[str]] = {"cat"}
+    SKIP_DTYPE_CHECK_OPS: ClassVar[set[str]] = {"cat"}
 
     # Operations that need special kwargs filtering (non-standard 'out' parameter)
     # Maps root_name -> set of kwargs to exclude from filtering
-    SPECIAL_KWARGS_FILTER_OPS: Dict[str, Set[str]] = {
+    SPECIAL_KWARGS_FILTER_OPS: ClassVar[dict[str, set[str]]] = {
         "max": {"out", "max", "max_values"},
         "min": {"out", "min", "min_indices"},
     }
-
-    # Operations that need contiguous preparation on device (instead of default)
-    CONTIGUOUS_ON_DEVICE_OPS: Set[str] = {"bmm", "mm"}
 
     # Operations whose Python-level aten_impl.impl registration is replaced by
     # a C++ dispatch shim installed at module-init time. Codegen emits
@@ -78,7 +73,7 @@ class OpCategories:
     # DispatchShim.cpp (e.g. SHIM_WHERE → skip_dtype_args for the bool cond,
     # SHIM_MATMUL → contiguous-on-device prep). Add an op by appending to the
     # right sub-set, not by editing the flat union below.
-    SHIM_BINARY_POINTWISE: Set[str] = {
+    SHIM_BINARY_POINTWISE: ClassVar[set[str]] = {
         "add.out",
         "sub.out",
         "mul.out",
@@ -88,7 +83,7 @@ class OpCategories:
         "maximum.out",
         "minimum.out",
     }
-    SHIM_UNARY_POINTWISE: Set[str] = {
+    SHIM_UNARY_POINTWISE: ClassVar[set[str]] = {
         "silu.out",
         "rsqrt.out",
         "neg.out",
@@ -100,7 +95,7 @@ class OpCategories:
         "sigmoid.out",
     }
     # Bool output — checks are on inputs, so pointwise pre-check still applies.
-    SHIM_COMPARE: Set[str] = {
+    SHIM_COMPARE: ClassVar[set[str]] = {
         "logical_not.out",
         "ne.Tensor_out",
         "eq.Tensor_out",
@@ -117,30 +112,30 @@ class OpCategories:
     }
     # Cond arg is bool — see CPP_SHIM_SKIP_DTYPE_ARGS for the dtype-check
     # override.
-    SHIM_WHERE: Set[str] = {
+    SHIM_WHERE: ClassVar[set[str]] = {
         "where.self",
         "where.self_out",
     }
     # Reduction .out variants: quick_fallback_check is compatible
-    # (fp16 + not-all-scalar + no-contig-offset). Python wrappers keep the
-    # empty-tensor handle_empty_reduction branch — it runs before the shim
-    # decision on cold call; on warm call our pre-check passes and we call
-    # into Python which handles empty correctly.
-    SHIM_REDUCTION: Set[str] = {
+    # (fp16 + not-all-scalar + no-contig-offset). Python wrappers keep the empty-tensor
+    # handle_empty_reduction branch — it runs before the shim decision on cold call; on
+    # warm call our pre-check passes and we call into Python which handles empty
+    # correctly.
+    SHIM_REDUCTION: ClassVar[set[str]] = {
         "mean.out",
         "max.unary_out",
         "min.unary_out",
     }
     # Max/min full-reduction: Normal-variant (no overload) with single
     # Tensor return. Pointwise-compatible pre-check still applies.
-    SHIM_REDUCTION_FULL: Set[str] = {
+    SHIM_REDUCTION_FULL: ClassVar[set[str]] = {
         "max",
         "min",
     }
     # Softmax .out: shape-preserving, with an int dim and a bool flag. The
     # pointwise pre-check applies unchanged (fp16, not-all-scalar, no contig
     # offset); the scalars ride in the warm-cache key like any other shim op.
-    SHIM_SOFTMAX: Set[str] = {
+    SHIM_SOFTMAX: ClassVar[set[str]] = {
         "_softmax.out",
     }
     # Matmul family. Earlier benches showed a small device-path overhead
@@ -148,7 +143,7 @@ class OpCategories:
     # the warm-cache path skips Python entirely on warm hits. Coverage gain
     # — matmul is registered C++-side instead of Python-side — is the main
     # reason; perf is parity within noise on llama_1b/llama_8b 1L bench.
-    SHIM_MATMUL: Set[str] = {
+    SHIM_MATMUL: ClassVar[set[str]] = {
         "mm.out",
         "bmm.out",
         "addmm.out",
@@ -156,7 +151,7 @@ class OpCategories:
     }
 
     # Flat union, derived from the sub-sets above. Codegen consumes this set.
-    CPP_SHIM_OPS: Set[str] = (
+    CPP_SHIM_OPS: ClassVar[set[str]] = (
         SHIM_BINARY_POINTWISE
         | SHIM_UNARY_POINTWISE
         | SHIM_COMPARE
@@ -171,20 +166,20 @@ class OpCategories:
     # whose dtype should NOT be compared to float16. The shim's own check still
     # applies to other args (storage offset, all-scalar, dtype).
     # Keyed by the same overload name used in CPP_SHIM_OPS.
-    CPP_SHIM_SKIP_DTYPE_ARGS: Dict[str, List[int]] = {
+    CPP_SHIM_SKIP_DTYPE_ARGS: ClassVar[dict[str, list[int]]] = {
         "where.self": [0],  # cond (bool)
         "where.self_out": [0],  # cond (bool)
     }
 
-    # EmptyTensor template names that skip `tensor_args = extract_tensors(args)` before the
-    # empty-tensor branch (those templates only read raw positional args, e.g. args[0]).
-    # Keep in sync when adding EmptyTensor methods with the same pattern.
-    EMPTY_TENSOR_TEMPLATES_WITHOUT_PRIOR_TENSOR_ARGS: FrozenSet[str] = frozenset({"where"})
+    # EmptyTensor template names that skip `tensor_args = extract_tensors(args)` before
+    # the empty-tensor branch (those templates only read raw positional args, e.g.
+    # args[0]). Keep in sync when adding EmptyTensor methods with the same pattern.
+    EMPTY_TENSOR_TEMPLATES_WITHOUT_PRIOR_TENSOR_ARGS: frozenset[str] = frozenset({"where"})
 
     # Empty tensor handling mapping: (category_set, template_method_name)
     # Maps category Set -> template method name in EmptyTensor class
     # Order matters: checked in sequence, first match wins
-    EMPTY_TENSOR_HANDLING_MAP: List[Tuple[Set[str], str]] = [  # noqa: UP035
+    EMPTY_TENSOR_HANDLING_MAP: ClassVar[list[tuple[set[str], str]]] = [
         (REDUCTION_OPS, "reduction"),
         (BROADCASTABLE_OPS, "broadcastable"),
         ({"mm"}, "mm"),
@@ -195,15 +190,14 @@ class OpCategories:
 
     # Special out parameter names for operations that don't use standard 'out' kwarg
     # Maps kernel_name pattern -> (out_tensor_kwarg, out_values_kwarg)
-    SPECIAL_OUT_PARAMS: Dict[str, Tuple[str, Optional[str]]] = {  # noqa: UP035
+    SPECIAL_OUT_PARAMS: ClassVar[dict[str, tuple[str, str | None]]] = {
         "max_dim_max_rbln": ("max", "max_values"),
         "min_dim_min_rbln": ("min", "min_indices"),
     }
 
     @classmethod
-    def get_out_param_names(cls, kernel_name: str) -> Tuple[str, Optional[str]]:
-        """
-        Get out parameter names for a kernel.
+    def get_out_param_names(cls, kernel_name: str) -> tuple[str, str | None]:
+        """Get out parameter names for a kernel.
         Returns (out_tensor_kwarg, out_values_kwarg) tuple.
         For standard ops, returns ('out', None).
         """
@@ -222,22 +216,15 @@ class OpCategories:
         return root_name in cls.SKIP_DTYPE_CHECK_OPS
 
     @classmethod
-    def get_kwargs_to_exclude(cls, root_name: str) -> Optional[Set[str]]:
-        """
-        Get kwargs to exclude for an operation.
+    def get_kwargs_to_exclude(cls, root_name: str) -> set[str] | None:
+        """Get kwargs to exclude for an operation.
         Returns set of kwargs to exclude, or None for default (only 'out').
         """
         return cls.SPECIAL_KWARGS_FILTER_OPS.get(root_name)
 
     @classmethod
-    def needs_contiguous_on_device(cls, root_name: str) -> bool:
-        """Check if operation needs contiguous preparation on device."""
-        return root_name in cls.CONTIGUOUS_ON_DEVICE_OPS
-
-    @classmethod
-    def _get_template_method_from_map(cls, root_name: str, mapping: List[Tuple[Set[str], str]], default: str) -> str:
-        """
-        Get template method name from a mapping table.
+    def _get_template_method_from_map(cls, root_name: str, mapping: list[tuple[set[str], str]], default: str) -> str:
+        """Get template method name from a mapping table.
 
         Searches through the mapping table in order and returns the first matching
         template method name. If no match is found, returns the default value.
@@ -257,15 +244,16 @@ class OpCategories:
 
     @classmethod
     def get_empty_tensor_template_method(cls, root_name: str) -> str:
-        """
-        Get empty tensor template method name for an operation.
+        """Get empty tensor template method name for an operation.
         Returns template method name, or 'default' if no match found.
         """
         return cls._get_template_method_from_map(root_name, cls.EMPTY_TENSOR_HANDLING_MAP, "default")
 
     @classmethod
     def needs_tensor_args_extraction_before_empty_handling(cls, root_name: str) -> bool:
-        """Whether to emit `tensor_args = extract_tensors(args)` before EmptyTensor handling."""
+        """Whether to emit `tensor_args = extract_tensors(args)` before
+        EmptyTensor handling.
+        """
         return (
             cls.get_empty_tensor_template_method(root_name) not in cls.EMPTY_TENSOR_TEMPLATES_WITHOUT_PRIOR_TENSOR_ARGS
         )

@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Test suite for the RBLN-native `aten::_local_scalar_dense` implementation.
+"""Test suite for the RBLN-native `aten::_local_scalar_dense` implementation.
 
 `_local_scalar_dense_rbln` (RBLNTensorFactories.cpp) replaces the default
 fallback_rbln registration. It is the op behind `tensor.item()` and is

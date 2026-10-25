@@ -24,11 +24,13 @@ def torch_build_version(pyproject: str, build_type: str) -> str:
         try:
             requirement = Requirement(dependency)
         except InvalidRequirement as error:
-            raise SystemExit(f"Invalid requirement in [project].dependencies: {error}") from None
+            msg = f"Invalid requirement in [project].dependencies: {error}"
+            raise SystemExit(msg) from None
         if canonicalize_name(requirement.name) == "torch":
             requirements.append(requirement)
     if len(requirements) != 1:
-        raise SystemExit(f"Expected one torch requirement in [project].dependencies, found {len(requirements)}")
+        msg = f"Expected one torch requirement in [project].dependencies, found {len(requirements)}"
+        raise SystemExit(msg)
     (requirement,) = requirements
     specifiers = list(requirement.specifier)
     pin = specifiers[0].version if len(specifiers) == 1 and specifiers[0].operator == "==" else ""
@@ -37,9 +39,11 @@ def torch_build_version(pyproject: str, build_type: str) -> str:
     except InvalidVersion:
         version = None
     if version is None or version.local != "cpu":
-        raise SystemExit(f"Expected a torch==<version>+cpu pin, got {requirement}")
+        msg = f"Expected a torch==<version>+cpu pin, got {requirement}"
+        raise SystemExit(msg)
     if version.is_prerelease or version.is_postrelease or version.epoch or len(version.release) != 3:
-        raise SystemExit(f"Expected a final X.Y.Z torch release, which has a PyTorch tag, got {version.public}")
+        msg = f"Expected a final X.Y.Z torch release, which has a PyTorch tag, got {version.public}"
+        raise SystemExit(msg)
     return f"{version.public}+cpu.{build_type.lower()}"
 
 

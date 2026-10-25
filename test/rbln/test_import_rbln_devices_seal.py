@@ -2,25 +2,26 @@
 
 """Importing torch_rbln must not freeze the ``RBLN_DEVICES`` mapping.
 
-The rbln runtime fixes the ``RBLN_DEVICES`` mapping once a device is acquired, and a later
-change is then rejected. A vLLM data-parallel worker inherits a partition-wide
-``RBLN_DEVICES`` and remaps it per rank *after* import, so import must not resolve a device.
+The rbln runtime fixes the ``RBLN_DEVICES`` mapping once a device is acquired, and a
+later change is then rejected. A vLLM data-parallel worker inherits a partition-wide
+``RBLN_DEVICES`` and remaps it per rank *after* import, so import must not resolve a
+device.
 
-Scope: the runtime half -- that a remap after import is still accepted. The torch half, that
-nothing on the import path resolves a device at all, is pinned by
+Scope: the runtime half -- that a remap after import is still accepted. The torch half,
+that nothing on the import path resolves a device at all, is pinned by
 ``test_import_does_not_resolve_a_device`` in test_privateuse1_contract.py.
 """
 
-import os
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
 import pytest
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_PROJECT_ROOT = str(Path(__file__).absolute().parents[2])
 
 
 @pytest.mark.npu(count=1)
@@ -43,6 +44,7 @@ class TestImportDoesNotSeal(TestCase):
     def _run(self, script: str) -> subprocess.CompletedProcess:
         return subprocess.run(
             [sys.executable, "-c", textwrap.dedent(script)],
+            check=False,
             cwd=_PROJECT_ROOT,
             capture_output=True,
             text=True,
@@ -54,7 +56,7 @@ class TestImportDoesNotSeal(TestCase):
             import os, sys
             sys.path.insert(0, {_PROJECT_ROOT!r})
             os.environ["RBLN_DEVICES"] = "0"
-            import torch_rbln  # noqa: F401
+            import torch_rbln
             os.environ["RBLN_DEVICES"] = "0,1"   # worker remaps per rank AFTER import
             from rebel._C import get_npu_name
             try:

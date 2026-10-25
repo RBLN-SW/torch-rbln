@@ -2,18 +2,21 @@ set(target torch_rbln_csrc_rbln)
 
 find_package(Torch REQUIRED)
 
-pybind11_add_module(${target} Module.cpp DispatchShim.cpp WarmCache.cpp ../distributed/c10d/rbln/ProcessGroupRBLNModule.cpp
+pybind11_add_module(${target} Module.cpp DispatchShim.cpp WarmCache.cpp
+  ../distributed/c10d/rbln/ProcessGroupRBLNModule.cpp
   profiler/kineto/rbln_kineto_emitter.cc
   profiler/kineto/rbln_kineto_adapter.cc)
 
 
-find_library(TORCH_PYTHON_LIBRARY torch_python PATH "${TORCH_INSTALL_PREFIX}/lib")
+find_library(TORCH_PYTHON_LIBRARY torch_python
+  PATH "${TORCH_INSTALL_PREFIX}/lib")
 
 target_link_libraries(${target} PUBLIC torch_rbln ${TORCH_PYTHON_LIBRARY})
 set_target_properties(${target} PROPERTIES
   OUTPUT_NAME _C
   PREFIX ""
-  INSTALL_RPATH "$ORIGIN/lib:$ORIGIN/../${REBEL_RUNTIME_RELDIR}:$ORIGIN/../torch/lib"
+  INSTALL_RPATH
+    "$ORIGIN/lib:$ORIGIN/../${REBEL_RUNTIME_RELDIR}:$ORIGIN/../torch/lib"
 )
 install(TARGETS ${target}
   DESTINATION .
@@ -23,10 +26,11 @@ install(TARGETS ${target}
 # ---------------------------------------------------------------------------
 # Type stub generation (_C.pyi)
 #
-# stubgen imports the built _C.so to inspect its API, so it has to run under the interpreter
-# the extension was built for -- a `stubgen` off PATH may belong to another one. Look for the
-# console script beside that interpreter first; `-m mypy.stubgen` is not an option, because a
-# mypyc-compiled mypy has no code object to run that way. It requires:
+# stubgen imports the built _C.so to inspect its API, so it has to run under the
+# interpreter the extension was built for -- a `stubgen` off PATH may belong to
+# another one. Look for the console script beside that interpreter first;
+# `-m mypy.stubgen` is not an option, because a `mypyc`-compiled `mypy` has no
+# code object to run that way. It requires:
 #   PYTHONPATH      → directory containing _C.*.so
 #   LD_LIBRARY_PATH → libtorch_rbln.so, libtorch.so, etc.
 # ---------------------------------------------------------------------------
@@ -41,11 +45,13 @@ endif()
 add_custom_target(${target} ALL
   DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/_C.pyi
 )
+set(_stubgen_library_path
+  "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}:${TORCH_INSTALL_PREFIX}/lib")
 add_custom_command(
   DEPENDS $<TARGET_FILE:torch_rbln_csrc_rbln>
   COMMAND ${CMAKE_COMMAND} -E env
     "PYTHONPATH=${CMAKE_LIBRARY_OUTPUT_DIRECTORY}"
-    "LD_LIBRARY_PATH=${CMAKE_LIBRARY_OUTPUT_DIRECTORY}:${TORCH_INSTALL_PREFIX}/lib:$ENV{LD_LIBRARY_PATH}"
+    "LD_LIBRARY_PATH=${_stubgen_library_path}:$ENV{LD_LIBRARY_PATH}"
     ${STUBGEN} -m _C -o ${CMAKE_CURRENT_BINARY_DIR}
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/_C.pyi
   WORKING_DIRECTORY ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}

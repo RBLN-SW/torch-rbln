@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Concurrency smoke test for the RCCL autoport init path.
+"""Concurrency smoke test for the RCCL autoport init path.
 Spawns two concurrent invocations of ``test_tp_pp.py`` on disjoint
 ``RBLN_DEVICES`` partitions with distinct ``MASTER_PORT`` values, all under
 ``RCCL_PORT_GEN=1``. Both subprocess runs must complete successfully --
@@ -68,7 +67,11 @@ class TestTPPPAutoportConcurrent(TestCase):
         with ThreadPoolExecutor(max_workers=len(_PARTITIONS)) as executor:
             results = list(executor.map(_invoke_test_tp_pp, _PARTITIONS))
 
-        failures = [(env["RBLN_DEVICES"], r.returncode) for env, r in zip(_PARTITIONS, results) if r.returncode != 0]
+        failures = [
+            (env["RBLN_DEVICES"], r.returncode)
+            for env, r in zip(_PARTITIONS, results, strict=True)
+            if r.returncode != 0
+        ]
         self.assertFalse(
             failures,
             msg=f"test_tp_pp.py concurrent autoport runs failed: {failures}",

@@ -38,7 +38,8 @@ constexpr const char* kEnvDisable = "RBLN_DISABLE_AUTO_RDMA_IP";
 // Mirrors the Python helper's stderr-tagged probe lines so existing CI grep
 // patterns ([rbln_rdma_probe] ...) keep working when the source of the
 // diagnostics moves from Python to C++.
-#define RDMA_DIAG(fmt_str, ...) RBLN_LOG_INFO("{} " fmt_str, kDiagPrefix, ##__VA_ARGS__)
+#define RDMA_DIAG(fmt_str, ...) \
+  RBLN_LOG_INFO("{} " fmt_str, kDiagPrefix, ##__VA_ARGS__)
 
 bool EnvTruthy(const char* name) {
   const char* v = std::getenv(name);
@@ -46,11 +47,13 @@ bool EnvTruthy(const char* name) {
     return false;
   }
   std::string s(v);
-  std::ranges::transform(s, s.begin(), [](unsigned char c) { return std::tolower(c); });
+  std::ranges::transform(
+      s, s.begin(), [](unsigned char c) { return std::tolower(c); });
   // Trim surrounding whitespace.
   auto not_space = [](unsigned char c) { return !std::isspace(c); };
   s.erase(s.begin(), std::ranges::find_if(s, not_space));
-  s.erase(std::ranges::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
+  s.erase(
+      std::ranges::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
   return s == "1" || s == "true" || s == "yes" || s == "on";
 }
 
@@ -59,7 +62,8 @@ bool EnvTruthy(const char* name) {
 // EADDRNOTAVAIL / ENODEV is treated as "no IPv4 available".
 std::optional<std::string> Ipv4ForIface(const std::string& iface) {
   if (iface.size() >= IFNAMSIZ) {
-    RDMA_DIAG("iface={} name too long for ifreq (max {} bytes)", iface, IFNAMSIZ - 1);
+    RDMA_DIAG(
+        "iface={} name too long for ifreq (max {} bytes)", iface, IFNAMSIZ - 1);
     return std::nullopt;
   }
   int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
@@ -98,13 +102,22 @@ std::optional<std::string> HcaToNetdev(std::string_view hca) {
     return std::nullopt;
   }
   if (sep != std::string_view::npos) {
-    RDMA_DIAG("{}={} ignoring port suffix '{}' for HCA '{}'", kEnvRdmaHca, hca, std::string(hca.substr(sep)), dev_name);
+    RDMA_DIAG(
+        "{}={} ignoring port suffix '{}' for HCA '{}'",
+        kEnvRdmaHca,
+        hca,
+        std::string(hca.substr(sep)),
+        dev_name);
   }
 
   fs::path net_root = fs::path(kSysfsInfiniband) / dev_name / "device" / "net";
   std::error_code ec;
   if (!fs::is_directory(net_root, ec)) {
-    RDMA_DIAG("{}={} resolve failed: {} does not exist", kEnvRdmaHca, dev_name, net_root.string());
+    RDMA_DIAG(
+        "{}={} resolve failed: {} does not exist",
+        kEnvRdmaHca,
+        dev_name,
+        net_root.string());
     return std::nullopt;
   }
 
@@ -117,7 +130,11 @@ std::optional<std::string> HcaToNetdev(std::string_view hca) {
     netdevs.push_back(std::move(name));
   }
   if (netdevs.empty()) {
-    RDMA_DIAG("{}={} resolve failed: no netdev under {}", kEnvRdmaHca, dev_name, net_root.string());
+    RDMA_DIAG(
+        "{}={} resolve failed: no netdev under {}",
+        kEnvRdmaHca,
+        dev_name,
+        net_root.string());
     return std::nullopt;
   }
   std::ranges::sort(netdevs);
@@ -153,7 +170,8 @@ std::optional<std::string> ResolveRbnRdmaHca(std::string_view hca) {
   }
   auto ipv4 = Ipv4ForIface(*netdev);
   if (!ipv4) {
-    RDMA_DIAG("{}={} netdev={} resolve failed: no IPv4", kEnvRdmaHca, hca, *netdev);
+    RDMA_DIAG(
+        "{}={} netdev={} resolve failed: no IPv4", kEnvRdmaHca, hca, *netdev);
     return std::nullopt;
   }
   RDMA_DIAG("{}={} netdev={} ipv4={}", kEnvRdmaHca, hca, *netdev, *ipv4);
@@ -171,7 +189,8 @@ void DoOnce() {
     //   3. RBLN_RDMA_HCA unset -- do nothing.
     const char* existing = std::getenv(kEnvRdmaIp);
     if (existing != nullptr && existing[0] != '\0') {
-      RDMA_DIAG("{} already set ({}), skipping resolution", kEnvRdmaIp, existing);
+      RDMA_DIAG(
+          "{} already set ({}), skipping resolution", kEnvRdmaIp, existing);
     } else {
       const char* hca = std::getenv(kEnvRdmaHca);
       if (hca != nullptr && hca[0] != '\0') {
@@ -179,12 +198,17 @@ void DoOnce() {
         if (ipv4.has_value()) {
           // overwrite=0 is sufficient: we just confirmed RBLN_RDMA_IP is empty.
           if (::setenv(kEnvRdmaIp, ipv4->c_str(), /*overwrite=*/0) != 0) {
-            RDMA_DIAG("setenv({}, {}) failed errno={}", kEnvRdmaIp, *ipv4, errno);
+            RDMA_DIAG(
+                "setenv({}, {}) failed errno={}", kEnvRdmaIp, *ipv4, errno);
           } else {
             RDMA_DIAG("{}={} (via {}={})", kEnvRdmaIp, *ipv4, kEnvRdmaHca, hca);
           }
         } else {
-          RDMA_DIAG("{}={} resolution failed, leaving {} unset (see diagnostics above)", kEnvRdmaHca, hca, kEnvRdmaIp);
+          RDMA_DIAG(
+              "{}={} resolution failed, leaving {} unset (see diagnostics above)",
+              kEnvRdmaHca,
+              hca,
+              kEnvRdmaIp);
         }
       } else {
         RDMA_DIAG(
@@ -201,7 +225,8 @@ void DoOnce() {
   // multi-node here, so warn (when RCCL_PORT_GEN is set) and defer the
   // decision to the runtime. See the header for the full contract.
   const char* port_gen_env = std::getenv("RCCL_PORT_GEN");
-  const bool use_autoport = (port_gen_env != nullptr && port_gen_env[0] != '\0');
+  const bool use_autoport =
+      (port_gen_env != nullptr && port_gen_env[0] != '\0');
   const char* final_ip = std::getenv(kEnvRdmaIp);
   const bool have_ip = (final_ip != nullptr && final_ip[0] != '\0');
   if (have_ip) {
@@ -218,7 +243,9 @@ void DoOnce() {
         kEnvRdmaIp);
     return;
   }
-  RDMA_DIAG("{} unresolved, but RCCL_PORT_GEN is not set -- RDMA IP not required, continuing", kEnvRdmaIp);
+  RDMA_DIAG(
+      "{} unresolved, but RCCL_PORT_GEN is not set -- RDMA IP not required, continuing",
+      kEnvRdmaIp);
 }
 
 } // namespace

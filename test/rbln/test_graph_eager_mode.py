@@ -1,12 +1,10 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Test suite for graph mode and eager mode compatibility.
-"""
+"""Test suite for graph mode and eager mode compatibility."""
 
 import pytest
 import torch
-import torch.nn as nn
+from torch import nn
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
@@ -36,7 +34,9 @@ class TestGraphMode(TestCase):
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_add(self, dtype):
-        """Test that graph mode and eager mode produce same results for add operation."""
+        """Test that graph mode and eager mode produce same results for add
+        operation.
+        """
         x = torch.randn([4, 4], dtype=dtype, device=self.rbln_device)
         y = torch.randn([4, 4], dtype=dtype, device=self.rbln_device)
 
@@ -44,7 +44,9 @@ class TestGraphMode(TestCase):
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_to_device(self, dtype):
-        """Test that graph mode and eager mode produce same results for to.device operation."""
+        """Test that graph mode and eager mode produce same results for to.device
+        operation.
+        """
 
         class Net(nn.Module):
             def forward(self, x):
@@ -58,7 +60,9 @@ class TestGraphMode(TestCase):
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_to_other(self, dtype):
-        """Test that graph mode and eager mode produce same results for to.other operation."""
+        """Test that graph mode and eager mode produce same results for to.other
+        operation.
+        """
 
         class Net(nn.Module):
             def forward(self, x):
@@ -72,7 +76,9 @@ class TestGraphMode(TestCase):
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_matmul_bias(self, dtype):
-        """Test that graph mode and eager mode produce same results for matmul with bias."""
+        """Test that graph mode and eager mode produce same results for matmul with
+        bias.
+        """
 
         class Net(nn.Module):
             def __init__(self):
@@ -107,7 +113,9 @@ class TestGraphMode(TestCase):
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_linear_to_linear(self, dtype):
-        """Test that graph mode and eager mode produce same results for complex linear layers."""
+        """Test that graph mode and eager mode produce same results for complex linear
+        layers.
+        """
 
         class Net(nn.Module):
             def __init__(self):
@@ -129,7 +137,9 @@ class TestGraphMode(TestCase):
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_layernorm_mixed_precision(self, dtype):
-        """Test that graph mode and eager mode produce same results for layernorm with mixed precision."""
+        """Test that graph mode and eager mode produce same results for layernorm with
+        mixed precision.
+        """
 
         class Net(nn.Module):
             def __init__(self):
@@ -154,8 +164,9 @@ class TestGraphEagerMode(TestCase):
     rbln_device = torch.device("rbln:0")
 
     # Wide enough for the operator to reach the device. Below 64 it is host-scheduled,
-    # binds no device buffer, and cannot exercise the weight's device residency at all --
-    # which is why this file's other cases, at [4, 4] to [8, 32], never reach this path.
+    # binds no device buffer, and cannot exercise the weight's device residency at all
+    # -- which is why this file's other cases, at [4, 4] to [8, 32], never reach this
+    # path.
     device_width = 128
 
     def _weight_module(self, use, dtype):
@@ -213,11 +224,12 @@ class TestGraphEagerMode(TestCase):
     @pytest.mark.usefixtures("enable_deploy_mode")
     @dtypes(*SUPPORTED_DTYPES)
     def test_graph_still_runs_after_eager_touched_its_weights(self, dtype):
-        """The graph has to keep working once an eager operator has taken the weights back.
+        """The graph has to keep working once an eager operator has taken the weights
+        back.
 
-        Restoring a weight for the eager path moves where its data lives. This asserts the
-        move leaves the compiled program able to run again, which the eager-only case above
-        does not cover.
+        Restoring a weight for the eager path moves where its data lives. This asserts
+        the move leaves the compiled program able to run again, which the eager-only
+        case above does not cover.
         """
         model = self._weight_module("matmul", dtype)
         x = torch.randn([1, self.device_width, self.device_width], dtype=dtype, device=self.rbln_device)
@@ -261,8 +273,7 @@ class TestGraphEagerMode(TestCase):
 
             def forward(self, x):
                 # This will be compiled as graph mode
-                out = self.linear(x)
-                return out
+                return self.linear(x)
 
         model = MixedModel().to(device=self.rbln_device, dtype=dtype)
         x = torch.randn([8, 16], dtype=dtype, device=self.rbln_device)
@@ -299,7 +310,6 @@ class TestGraphEagerMode(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     def test_graph_mode_with_eager_input_preparation(self, dtype):
         """Test graph mode with inputs prepared in eager mode."""
-
         # Prepare inputs in eager mode
         x = torch.randn([4, 4], dtype=dtype, device=self.rbln_device)
         y = torch.randn([4, 4], dtype=dtype, device=self.rbln_device)
@@ -342,10 +352,7 @@ class TestGraphEagerMode(TestCase):
         # Alternate between graph and eager
         result = x
         for i in range(5):
-            if i % 2 == 0:
-                result = compiled_add(result, y)  # Graph mode
-            else:
-                result = torch.mul(result, 1.1)  # Eager mode
+            result = compiled_add(result, y) if i % 2 == 0 else torch.mul(result, 1.1)
 
         # Verify final result
         self.assertIsInstance(result, torch.Tensor)
@@ -365,8 +372,7 @@ class TestGraphEagerMode(TestCase):
             def forward(self, x):
                 # These will be compiled as graph mode
                 out = self.linear1(x)
-                out = self.linear2(out)
-                return out
+                return self.linear2(out)
 
         model = HybridModel().to(device=self.rbln_device, dtype=dtype)
         x = torch.randn([8, 16], dtype=dtype, device=self.rbln_device)
@@ -405,7 +411,6 @@ class TestGraphEagerMode(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     def test_reuse_compiled_function(self, dtype):
         """Test reusing a compiled function multiple times with different inputs."""
-
         compiled_add = torch.compile(torch.add, backend="rbln", dynamic=False)
 
         # Use compiled function multiple times
@@ -472,9 +477,7 @@ class TestGraphEagerMode(TestCase):
                 out = self.linear3(out)
 
                 # Clamp
-                out = torch.clamp(out, min=-2.0, max=2.0)  # clamp
-
-                return out
+                return torch.clamp(out, min=-2.0, max=2.0)  # clamp
 
         model = MultiOpModel().to(device=self.rbln_device, dtype=dtype)
         x = torch.randn([8, 32], dtype=dtype, device=self.rbln_device)
@@ -492,7 +495,9 @@ class TestGraphEagerMode(TestCase):
 
 @pytest.mark.npu(count=1)
 class TestRecompileWeightHandling(TestCase):
-    """Test cases for weight handling when a module is rebuilt and recompiled under a fixed seed."""
+    """Test cases for weight handling when a module is rebuilt and recompiled under a
+    fixed seed.
+    """
 
     rbln_device = torch.device("rbln:0")
 
@@ -506,7 +511,9 @@ class TestRecompileWeightHandling(TestCase):
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_reseed_recompile_in_loop(self, dtype):
-        """Test that reseeding and recompiling a rebuilt module each iteration produces consistent results."""
+        """Test that reseeding and recompiling a rebuilt module each iteration produces
+        consistent results.
+        """
         x = torch.ones([128, 128], device=self.rbln_device, dtype=dtype)
 
         graph_outs = []
@@ -526,7 +533,9 @@ class TestRecompileWeightHandling(TestCase):
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_identical_weights_distinct_models(self, dtype):
-        """Test that two separately built modules with identical weights both compile and match."""
+        """Test that two separately built modules with identical weights both compile
+        and match.
+        """
         x = torch.ones([128, 128], device=self.rbln_device, dtype=dtype)
 
         torch.manual_seed(0)

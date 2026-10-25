@@ -72,8 +72,9 @@ struct TensorProfile {
   int8_t device_index{-1};
 
   bool operator==(const TensorProfile& o) const noexcept {
-    return dtype == o.dtype && device_index == o.device_index && storage_offset == o.storage_offset &&
-        shape == o.shape && strides == o.strides;
+    return dtype == o.dtype && device_index == o.device_index &&
+        storage_offset == o.storage_offset && shape == o.shape &&
+        strides == o.strides;
   }
 };
 
@@ -127,7 +128,8 @@ struct CacheKey {
   c10::SmallVector<ScalarValue, 4> scalars;
 
   bool operator==(const CacheKey& o) const noexcept {
-    return schema_name_intern == o.schema_name_intern && inputs == o.inputs && scalars == o.scalars;
+    return schema_name_intern == o.schema_name_intern && inputs == o.inputs &&
+        scalars == o.scalars;
   }
 };
 
@@ -150,7 +152,8 @@ struct CacheEntry {
   pybind11::object py_dyn_runtime;
   pybind11::object py_runtime_handle;
 
-  // Borrowed from `py_runtime_handle`'s native_handle(); valid only while it is.
+  // Borrowed from `py_runtime_handle`'s native_handle(); valid only while it
+  // is.
   RblnSyncRuntime runtime{nullptr};
 
   c10::SmallVector<OutputProfile, 2> out_profiles;

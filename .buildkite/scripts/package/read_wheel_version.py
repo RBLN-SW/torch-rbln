@@ -16,7 +16,8 @@ def main() -> None:
     try:
         _, version, _, _ = parse_wheel_filename(args.wheel.name)
     except InvalidWheelFilename as error:
-        raise SystemExit(f"Could not parse the wheel filename: {error}") from None
+        msg = f"Could not parse the wheel filename: {error}"
+        raise SystemExit(msg) from None
     print(version)
 
 

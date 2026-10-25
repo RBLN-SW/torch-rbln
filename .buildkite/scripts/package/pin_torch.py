@@ -15,7 +15,8 @@ from packaging.utils import canonicalize_name
 def pin_torch_requirement(requirements: list[str], version: str, location: str) -> None:
     positions = [i for i, text in enumerate(requirements) if canonicalize_name(Requirement(text).name) == "torch"]
     if len(positions) != 1:
-        raise SystemExit(f"Expected one torch requirement in {location}, found {len(positions)}")
+        msg = f"Expected one torch requirement in {location}, found {len(positions)}"
+        raise SystemExit(msg)
     (position,) = positions
     requirement = Requirement(requirements[position])
     requirement.specifier = SpecifierSet(f"=={version}")

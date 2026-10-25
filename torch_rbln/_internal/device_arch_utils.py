@@ -33,16 +33,20 @@ def get_device_arch() -> str:
     swallowed failure would turn all of them off at once while the suite
     goes on passing.
     """
-    from rebel.device_info import get_npu_name
+    from rebel.device_info import get_npu_name  # noqa: PLC0415
 
     return _arch_from_npu_name(get_npu_name(0) or "")
 
 
 def is_atom_device() -> bool:
-    """True on the ATOM lineup (``RBLN-CA*``); thin wrapper over :func:`get_device_arch`."""
+    """True on the ATOM lineup (``RBLN-CA*``); thin wrapper over
+    :func:`get_device_arch`.
+    """
     return get_device_arch() == "atom"
 
 
 def is_rebel_device() -> bool:
-    """True on the REBEL lineup (``RBLN-CR*``); thin wrapper over :func:`get_device_arch`."""
+    """True on the REBEL lineup (``RBLN-CR*``); thin wrapper over
+    :func:`get_device_arch`.
+    """
     return get_device_arch() == "rebel"

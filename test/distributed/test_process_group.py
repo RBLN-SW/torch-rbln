@@ -1,12 +1,14 @@
 # Owner(s): ["module: PrivateUse1"]
 
 import os
+from typing import ClassVar
 from unittest import mock
 
 import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+from torch.distributed import distributed_c10d as c10d
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, subtest, TestCase
 
@@ -16,7 +18,7 @@ from test.utils import configure_master_port_for_rccl_tests, spawn_target_with_c
 KiB = 1024
 MiB = 1024 * 1024
 
-TEST_DTYPES = SUPPORTED_DTYPES + [torch.float32, torch.float64, torch.int8, torch.int16, torch.int32, torch.int64]
+TEST_DTYPES = [*SUPPORTED_DTYPES, torch.float32, torch.float64, torch.int8, torch.int16, torch.int32, torch.int64]
 
 
 def setup_environment(rank: int, world_size: int) -> None:
@@ -40,7 +42,7 @@ def run_allreduce_test(rank: int, world_size: int, backend: str, op: dist.Reduce
         dist.all_reduce(tensor, op=op)
 
         # Verify result based on operation
-        expected_value = _get_expected_allreduce_value(base_value, world_size, op)
+        expected_value = _get_expected_allreduce_value(world_size, op)
         assert tensor[0] == expected_value, (
             f"allreduce {op} failed on rank {rank}: expected={expected_value}, actual={tensor[0]}"
         )
@@ -58,10 +60,7 @@ def run_broadcast_test(rank: int, world_size: int, backend: str, src: int, dtype
     try:
         # Create tensor with different values based on rank
         # Use appropriate value based on dtype
-        if dtype in [torch.int8, torch.int16, torch.int32, torch.int64]:
-            broadcast_value = 42
-        else:
-            broadcast_value = 42.0
+        broadcast_value = 42 if dtype in [torch.int8, torch.int16, torch.int32, torch.int64] else 42.0
 
         if rank == src:
             tensor = torch.full([64], broadcast_value, dtype=dtype, device=device)
@@ -113,7 +112,9 @@ def run_broadcast_zero_sized_test(rank: int, world_size: int, backend: str, src:
 
 
 def run_scatter_test(rank: int, world_size: int, backend: str, root: int, dtype: torch.dtype, dim0: int = 32) -> None:
-    """Test scatter operation from specific root rank with specified dtype and tensor size [dim0]."""
+    """Test scatter operation from specific root rank with specified dtype and tensor
+    size [dim0].
+    """
     setup_environment(rank, world_size)
     dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
     device = torch.device("rbln", rank)
@@ -121,10 +122,7 @@ def run_scatter_test(rank: int, world_size: int, backend: str, root: int, dtype:
     try:
         # Create input data for scatter
         # Use appropriate value based on dtype
-        if dtype in [torch.int8, torch.int16, torch.int32, torch.int64]:
-            use_int = True
-        else:
-            use_int = False
+        use_int = dtype in [torch.int8, torch.int16, torch.int32, torch.int64]
 
         if rank == root:
             # Root rank has data for all ranks
@@ -216,17 +214,16 @@ def run_scatter_shared_logical_device_test(rank: int, world_size: int, backend: 
 
 
 def run_send_recv_test(rank: int, world_size: int, backend: str, src: int, dst: int, dtype: torch.dtype) -> None:
-    """Test send/recv operation between source and destination ranks with specified dtype."""
+    """Test send/recv operation between source and destination ranks with specified
+    dtype.
+    """
     setup_environment(rank, world_size)
     dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
     device = torch.device("rbln", rank)
 
     try:
         # Use appropriate value based on dtype
-        if dtype in [torch.int8, torch.int16, torch.int32, torch.int64]:
-            send_value = 42
-        else:
-            send_value = 42.0
+        send_value = 42 if dtype in [torch.int8, torch.int16, torch.int32, torch.int64] else 42.0
 
         if rank == src:
             # Source rank sends data to destination rank
@@ -309,8 +306,6 @@ def run_allgather_into_tensor_coalesced_test(
     device = torch.device("rbln", rank)
 
     try:
-        from torch.distributed import distributed_c10d as c10d
-
         use_int = dtype in [torch.int8, torch.int16, torch.int32, torch.int64]
         input_value = rank + 1 if use_int else float(rank + 1)
 
@@ -452,23 +447,23 @@ def run_unsupported_op_test(rank: int, world_size: int, backend: str) -> None:
         dist.destroy_process_group()
 
 
-def _get_expected_allreduce_value(base_value: float, world_size: int, op: dist.ReduceOp) -> float:
+def _get_expected_allreduce_value(world_size: int, op: dist.ReduceOp) -> float:
     """Calculate expected value after allreduce operation."""
     if op == dist.ReduceOp.SUM:
         return sum(range(1, world_size + 1))  # 1+2+...+world_size
-    elif op == dist.ReduceOp.AVG:
+    if op == dist.ReduceOp.AVG:
         return sum(range(1, world_size + 1)) / world_size
-    elif op == dist.ReduceOp.MIN:
+    if op == dist.ReduceOp.MIN:
         return 1.0  # minimum of 1, 2, ..., world_size
-    elif op == dist.ReduceOp.MAX:
+    if op == dist.ReduceOp.MAX:
         return float(world_size)  # maximum of 1, 2, ..., world_size
-    elif op == dist.ReduceOp.PRODUCT:
+    if op == dist.ReduceOp.PRODUCT:
         result = 1.0
         for i in range(1, world_size + 1):
             result *= i
         return result
-    else:
-        raise ValueError(f"Unsupported reduce operation: {op}")
+    msg = f"Unsupported reduce operation: {op}"
+    raise ValueError(msg)
 
 
 def _get_expected_reduce_scatter_value(rank: int, world_size: int, op: dist.ReduceOp) -> float:
@@ -479,36 +474,37 @@ def _get_expected_reduce_scatter_value(rank: int, world_size: int, op: dist.Redu
     """
     if op == dist.ReduceOp.SUM:
         # Sum of (rank+1)*10 + (i+1) across all ranks for input_list[i]
-        # For rank i, we reduce input_list[i] = [(r+1)*10 + (i+1)] for r in range(world_size)
+        # For rank i, we reduce input_list[i] = [(r+1)*10 + (i+1)] for r
+        # in range(world_size)
         return sum((r + 1) * 10 + (rank + 1) for r in range(world_size))
-    elif op == dist.ReduceOp.AVG:
+    if op == dist.ReduceOp.AVG:
         return sum((r + 1) * 10 + (rank + 1) for r in range(world_size)) / world_size
-    elif op == dist.ReduceOp.MIN:
+    if op == dist.ReduceOp.MIN:
         # Minimum of (r+1)*10 + (i+1) across all ranks
         return min((r + 1) * 10 + (rank + 1) for r in range(world_size))
-    elif op == dist.ReduceOp.MAX:
+    if op == dist.ReduceOp.MAX:
         # Maximum of (r+1)*10 + (i+1) across all ranks
         return max((r + 1) * 10 + (rank + 1) for r in range(world_size))
-    elif op == dist.ReduceOp.PRODUCT:
+    if op == dist.ReduceOp.PRODUCT:
         result = 1.0
         for r in range(world_size):
             result *= (r + 1) * 10 + (rank + 1)
         return result
-    else:
-        raise ValueError(f"Unsupported reduce operation: {op}")
+    msg = f"Unsupported reduce operation: {op}"
+    raise ValueError(msg)
 
 
 class TestProcessGroupRBLNBase(TestCase):
     """Base test class for RBLN process group tests."""
 
-    c10d_async_envs = [
+    c10d_async_envs: ClassVar[list[subtest | str]] = [
         "0",  # sync mode (TORCH_RBLN_C10D_ASYNC=0)
         subtest("1", decorators=[pytest.mark.periodic]),  # async mode (TORCH_RBLN_C10D_ASYNC=1)
     ]
 
     def setUp(self):
-        # Scoped to the test: these are process-global, and patch.dict restores the whole
-        # environment -- including the MASTER_PORT the helper below adds.
+        # Scoped to the test: these are process-global, and patch.dict restores the
+        # whole environment -- including the MASTER_PORT the helper below adds.
         env = mock.patch.dict(
             os.environ,
             {
@@ -561,41 +557,13 @@ class TestBroadcastRBLN(TestProcessGroupRBLNBase):
 class TestAllReduceRBLN(TestProcessGroupRBLNBase):
     """Test cases for allreduce operations."""
 
+    # NOTE: RCCL supports only the SUM operation.
     @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
     def test_allreduce_sum(self, c10d_async_env):
         """Test allreduce with SUM operation."""
         self.run_c10d_test(
             c10d_async_env, self.world_size, run_allreduce_test, (self.world_size, self.backend, dist.ReduceOp.SUM)
         )
-
-    # NOTE: RCCL support only SUM operation
-    # @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
-    # def test_allreduce_avg(self, c10d_async_env):
-    #     """Test allreduce with AVG operation."""
-    #     self.run_c10d_test(
-    #         c10d_async_env, self.world_size, run_allreduce_test, (self.world_size, self.backend, dist.ReduceOp.AVG)
-    #     )
-
-    # @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
-    # def test_allreduce_min(self, c10d_async_env):
-    #     """Test allreduce with MIN operation."""
-    #     self.run_c10d_test(
-    #         c10d_async_env, self.world_size, run_allreduce_test, (self.world_size, self.backend, dist.ReduceOp.MIN)
-    #     )
-
-    # @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
-    # def test_allreduce_max(self, c10d_async_env):
-    #     """Test allreduce with MAX operation."""
-    #     self.run_c10d_test(
-    #         c10d_async_env, self.world_size, run_allreduce_test, (self.world_size, self.backend, dist.ReduceOp.MAX)
-    #     )
-
-    # @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
-    # def test_allreduce_product(self, c10d_async_env):
-    #     """Test allreduce with PRODUCT operation."""
-    #     self.run_c10d_test(
-    #         c10d_async_env, self.world_size, run_allreduce_test, (self.world_size, self.backend, dist.ReduceOp.PRODUCT)
-    #     )
 
 
 @pytest.mark.serial
@@ -717,6 +685,7 @@ class TestAllGatherRBLN(TestProcessGroupRBLNBase):
 class TestReduceScatterRBLN(TestProcessGroupRBLNBase):
     """Test cases for reduce_scatter operations."""
 
+    # NOTE: RCCL supports only the SUM operation.
     @parametrize(
         "size",
         [1, 63, 64, 256, 512, (512 * KiB), MiB, (2 * MiB), (4 * MiB), (8 * MiB), (16 * MiB), (32 * MiB), (64 * MiB)],
@@ -772,38 +741,6 @@ class TestReduceScatterRBLN(TestProcessGroupRBLNBase):
             run_reduce_scatter_test,
             (self.world_size, self.backend, dist.ReduceOp.SUM, size),
         )
-
-    # NOTE: RCCL support only SUM operation
-    # @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
-    # def test_reduce_scatter_avg(self, c10d_async_env):
-    #     """Test reduce_scatter with AVG operation."""
-    #     self.run_c10d_test(
-    #         c10d_async_env, self.world_size, run_reduce_scatter_test, (self.world_size, self.backend, dist.ReduceOp.AVG)
-    #     )
-
-    # @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
-    # def test_reduce_scatter_min(self, c10d_async_env):
-    #     """Test reduce_scatter with MIN operation."""
-    #     self.run_c10d_test(
-    #         c10d_async_env, self.world_size, run_reduce_scatter_test, (self.world_size, self.backend, dist.ReduceOp.MIN)
-    #     )
-
-    # @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
-    # def test_reduce_scatter_max(self, c10d_async_env):
-    #     """Test reduce_scatter with MAX operation."""
-    #     self.run_c10d_test(
-    #         c10d_async_env, self.world_size, run_reduce_scatter_test, (self.world_size, self.backend, dist.ReduceOp.MAX)
-    #     )
-
-    # @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
-    # def test_reduce_scatter_product(self, c10d_async_env):
-    #     """Test reduce_scatter with PRODUCT operation."""
-    #     self.run_c10d_test(
-    #         c10d_async_env,
-    #         self.world_size,
-    #         run_reduce_scatter_test,
-    #         (self.world_size, self.backend, dist.ReduceOp.PRODUCT),
-    #     )
 
 
 @pytest.mark.serial

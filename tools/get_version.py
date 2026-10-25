@@ -23,10 +23,7 @@ def _local_scheme(version: ScmVersion) -> str:
     Omits the date that setuptools-scm's default ``node-and-date`` would add, so
     a dirty tree yields the same segment as a clean one.
     """
-    if version.distance == 0 or version.node is None:
-        local = ""
-    else:
-        local = version.format_with("+{node}")
+    local = "" if version.distance == 0 or version.node is None else version.format_with("+{node}")
     if os.environ.get("TORCH_RBLN_BUILD_TYPE") == "Debug":
         local = f"{local}.debug" if local else "+debug"
     return local

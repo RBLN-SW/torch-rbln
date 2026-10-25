@@ -50,12 +50,12 @@ compatibility_tags="${python_tag}-${python_tag}-linux_$(uname -m)"
 
 echo "--- Checking rbln-internal index"
 torch_version="$(
-  .buildkite/scripts/package/resolve-torch-build-version.py \
+  .buildkite/scripts/package/resolve_torch_build_version.py \
     --build-type "${build_type}"
 )"
 wheel_file="torch-${torch_version}-${compatibility_tags}.whl"
 already_published="$(
-  .buildkite/scripts/check-index-listing.py \
+  .buildkite/scripts/check_index_listing.py \
     --index rbln-internal \
     --wheel-filename "${wheel_file}"
 )"

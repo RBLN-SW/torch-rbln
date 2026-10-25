@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Test suite for the RBLN-native `_efficientzerotensor` factory.
+"""Test suite for the RBLN-native `_efficientzerotensor` factory.
 
 `aten::_efficientzerotensor` is a "logically zero" tensor that PyTorch may
 produce as a backward-pass scratch and as the reference value for ops like

@@ -74,7 +74,8 @@ def main() -> None:
     args = parser.parse_args()
     for name in ("GH_REPO", "GH_TOKEN"):
         if not os.environ.get(name):
-            raise SystemExit(f"{name} is not set")
+            msg = f"{name} is not set"
+            raise SystemExit(msg)
     title = f"chore: update {args.package} to {args.package_version}"
     body = (
         f"Updates the `{args.package}` dependency to `{args.package_version}`.\n\n"
@@ -82,7 +83,10 @@ def main() -> None:
         "so merge a fix pushed here before then."
     )
     build_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"], stdout=subprocess.PIPE, text=True, check=True
+        ["git", "rev-parse", "HEAD"],  # noqa: S607
+        stdout=subprocess.PIPE,
+        text=True,
+        check=True,
     ).stdout.strip()
 
     try:
@@ -91,9 +95,8 @@ def main() -> None:
         tree = proposal_tree(repo, build_commit)
         commit = commit_proposal(repo, args.head_branch, title, build_commit, tree)
     except GITHUB_ERRORS as error:
-        raise SystemExit(
-            f"Could not propose {args.package_version} on {args.head_branch} in {os.environ['GH_REPO']}: {error}"
-        ) from None
+        msg = f"Could not propose {args.package_version} on {args.head_branch} in {os.environ['GH_REPO']}: {error}"
+        raise SystemExit(msg) from None
     if commit is None:
         print(f"{args.head_branch} already proposes {args.package_version} on {build_sha}; nothing to push")
     else:
@@ -111,7 +114,8 @@ def main() -> None:
             pull.edit(title=title, body=body)
             print(f"Updated pull request #{pull.number}")
     except GITHUB_ERRORS as error:
-        raise SystemExit(f"Could not open or update the pull request from {args.head_branch}: {error}") from None
+        msg = f"Could not open or update the pull request from {args.head_branch}: {error}"
+        raise SystemExit(msg) from None
 
 
 if __name__ == "__main__":

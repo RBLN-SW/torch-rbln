@@ -16,16 +16,16 @@ is to grep the log. That only holds if each fallback logs. Two groups did not:
 each scenario runs in its own process with the level already set.
 """
 
-import os
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
 import pytest
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_PROJECT_ROOT = str(Path(__file__).absolute().parents[2])
 _FALLBACK_LOG = "op ran on CPU instead of RBLN"
 
 
@@ -41,13 +41,14 @@ class TestCpuFallbackIsLogged(TestCase):
                 "import os, sys",
                 f"sys.path.insert(0, {_PROJECT_ROOT!r})",
                 f'os.environ["TORCH_RBLN_LOG_LEVEL"] = {log_level!r}',
-                "import torch, torch_rbln  # noqa: F401",
+                "import torch, torch_rbln",
                 textwrap.dedent(body).strip(),
                 'print("BODY_OK")',
             ]
         )
         return subprocess.run(
             [sys.executable, "-c", script],
+            check=False,
             cwd=_PROJECT_ROOT,
             capture_output=True,
             text=True,
@@ -69,7 +70,8 @@ class TestCpuFallbackIsLogged(TestCase):
     def test_shim_op_dtype_fallback_is_logged(self):
         """fp32 is outside the dispatch dtype catalog, so ``add`` falls back in the
         shim's pre-check, before Python is reached. Fails without the fix: the
-        values are right and nothing is logged."""
+        values are right and nothing is logged.
+        """
         p = self._run(
             """
             a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32, device="rbln")
@@ -83,7 +85,8 @@ class TestCpuFallbackIsLogged(TestCase):
 
     def test_fallback_log_stays_off_by_default(self):
         """The line is INFO, so the default (WARNING) keeps it out of a user's console.
-        Pins the level: raising it to WARNING would make every fp32 workload noisy."""
+        Pins the level: raising it to WARNING would make every fp32 workload noisy.
+        """
         p = self._run(
             """
             a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32, device="rbln")
@@ -95,9 +98,11 @@ class TestCpuFallbackIsLogged(TestCase):
         self.assertNotIn(_FALLBACK_LOG, out, f"the fallback line escaped a WARNING-level run\n{out}")
 
     def test_sdpa_inner_fallback_is_logged(self):
-        """The dtype gate in ``sdpa_overrideable`` passes for float16, so the kernel reaches
-        the per-step ``is_cpu_fallback_cases`` checks, which a NaN in the inputs trips. Those
-        two branches return into a CPU helper; without the fix neither says so."""
+        """The dtype gate in ``sdpa_overrideable`` passes for float16, so the kernel
+        reaches the per-step ``is_cpu_fallback_cases`` checks, which a NaN in the inputs
+        trips. Those two branches return into a CPU helper; without the fix neither says
+        so.
+        """
         p = self._run(
             """
             q = torch.randn(1, 2, 64, 64, dtype=torch.float16, device="rbln")

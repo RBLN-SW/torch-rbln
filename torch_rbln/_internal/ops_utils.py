@@ -3,13 +3,18 @@ import os
 import sys
 import warnings
 from collections.abc import Sequence
-from typing import Optional, Union
+from itertools import permutations
+from typing import Any
 
 import torch
 from torch.utils._pytree import tree_flatten, tree_unflatten
 
-import torch_rbln._C as _C
+from torch_rbln import _C
+from torch_rbln._internal.compile_cache import compile_rbln_cached_entry
+from torch_rbln._internal.dummy_device import raise_if_dummy_execution
+from torch_rbln._internal.env_utils import is_rbln_deploy, use_device_group_num_devices
 from torch_rbln._internal.log_utils import rbln_log_cpu_fallback, rbln_log_warn
+from torch_rbln._internal.warm_cache import install_pending as _install_warm_cache_pending
 
 
 class SupportedDtypes:
@@ -22,13 +27,14 @@ class SupportedDtypes:
 
 def _estimate_mm_shape(shape1, shape2):
     if len(shape1) != 2 or len(shape2) != 2:
-        raise RuntimeError("mm input shape is invalid")
+        msg = "mm input shape is invalid"
+        raise RuntimeError(msg)
 
     if shape1[1] != shape2[0]:
-        raise RuntimeError("mm input shapes are unmatched")
+        msg = "mm input shapes are unmatched"
+        raise RuntimeError(msg)
 
-    result_shape = (shape1[0], shape2[1])
-    return result_shape
+    return (shape1[0], shape2[1])
 
 
 def _needs_broadcast(tensor_args):
@@ -38,18 +44,15 @@ def _needs_broadcast(tensor_args):
     return any(t.shape != first_shape for t in tensor_args[1:])
 
 
-def finalize_output_tensor(
-    out_tensor: torch.Tensor, result: torch.Tensor, result_shape: tuple[int, ...], args: tuple, kwargs: dict
-):
-    """
-    Ensure `out_tensor` has the correct shape, storage, and metadata to match
+def finalize_output_tensor(out_tensor: torch.Tensor, result: torch.Tensor, result_shape: tuple[int, ...]):
+    """Ensure `out_tensor` has the correct shape, storage, and metadata to match
     `result` and `result_shape`, handling both resizing and data movement.
     """
     # 1) Resize if shape mismatches
     if out_tensor.shape != result_shape:
         # Warn if tensor had existing elements
         if out_tensor.numel() != 0:
-            warnings.warn("An output with one or more elements")  # pytorch rule
+            warnings.warn("An output with one or more elements", stacklevel=1)  # pytorch rule
         out_tensor.resize_(result_shape)
 
     # 2) Reconcile storage: copy or replace
@@ -79,7 +82,7 @@ def _contains_nan_or_inf(x):
         if x.numel() == 1 and torch.isreal(x):  # possibly scalar tensor and real number
             return math.isnan(x.item()) or math.isinf(x.item())
         return (torch.isnan(x) | torch.isinf(x)).any().item()
-    elif isinstance(x, (float, int)):
+    if isinstance(x, (float, int)):
         return math.isnan(x) or math.isinf(x) if isinstance(x, float) else False
     return False
 
@@ -90,11 +93,14 @@ def has_invalid_tensor(args):
 
 def is_type_promotion_allowed(input_tensors, output_tensor):
     if not input_tensors:
-        raise ValueError("Input tensors list cannot be empty")
+        msg = "Input tensors list cannot be empty"
+        raise ValueError(msg)
     if output_tensor is None:
-        raise ValueError("Output tensor cannot be None")
+        msg = "Output tensor cannot be None"
+        raise ValueError(msg)
     if not isinstance(output_tensor, torch.Tensor):
-        raise TypeError(f"Output must be a torch.Tensor, but got {type(output_tensor)}")
+        msg = f"Output must be a torch.Tensor, but got {type(output_tensor)}"
+        raise TypeError(msg)
 
     # Flatten input structure
     flat_inputs, _ = tree_flatten(input_tensors)
@@ -102,7 +108,8 @@ def is_type_promotion_allowed(input_tensors, output_tensor):
     # Filter only Tensors
     tensor_inputs = [x for x in flat_inputs if isinstance(x, torch.Tensor)]
     if not tensor_inputs:
-        raise TypeError("No tensor inputs found in input_tensors")
+        msg = "No tensor inputs found in input_tensors"
+        raise TypeError(msg)
 
     # Promote types across all input tensors
     promoted_dtype = tensor_inputs[0].dtype
@@ -116,9 +123,11 @@ def is_type_promotion_allowed(input_tensors, output_tensor):
 
 def is_type_promotion_allowed_dtype(input_dtypes, output_dtype):
     if not input_dtypes:
-        raise ValueError("Input dtypes list cannot be empty")
+        msg = "Input dtypes list cannot be empty"
+        raise ValueError(msg)
     if output_dtype is None:
-        raise ValueError("Output dtype cannot be None")
+        msg = "Output dtype cannot be None"
+        raise ValueError(msg)
 
     final_promoted_dtype = torch.promote_types(input_dtypes, output_dtype)
 
@@ -126,28 +135,26 @@ def is_type_promotion_allowed_dtype(input_dtypes, output_dtype):
 
 
 def extract_tensors(obj):
-    """
-    Extract all torch.Tensor objects from an arbitrarily nested structure and return them as a flat list
+    """Extract all torch.Tensor objects from an arbitrarily nested structure and return
+    them as a flat list
     """
     if isinstance(obj, torch.Tensor):
         return [obj]
-    elif isinstance(obj, (list, tuple)):
+    if isinstance(obj, (list, tuple)):
         tensors = []
         for item in obj:
             tensors.extend(extract_tensors(item))
         return tensors
-    elif isinstance(obj, dict):
+    if isinstance(obj, dict):
         tensors = []
         for v in obj.values():
             tensors.extend(extract_tensors(v))
         return tensors
-    else:
-        return []
+    return []
 
 
 def extract_device_id_from_inputs(*args, **kwargs):
-    """
-    Extract RBLN device_id from tensor inputs.
+    """Extract RBLN device_id from tensor inputs.
 
     This function searches through all positional and keyword arguments to find
     the first RBLN tensor and returns its device index.
@@ -157,7 +164,8 @@ def extract_device_id_from_inputs(*args, **kwargs):
         **kwargs: Keyword arguments that may contain tensors.
 
     Returns:
-        Optional[int]: The device index of the first RBLN tensor found, or None if no RBLN tensor is found.
+        Optional[int]: The device index of the first RBLN tensor found, or None if no
+        RBLN tensor is found.
     """
     input_tensors = extract_tensors(args) + extract_tensors(kwargs)
     for tensor in input_tensors:
@@ -230,30 +238,28 @@ def _scalar_key_part(value):
 def remove_empty_tensors(obj):
     if isinstance(obj, torch.Tensor):
         return None if obj.numel() == 0 else obj
-    elif isinstance(obj, (list, tuple)):
+    if isinstance(obj, (list, tuple)):
         filtered = [remove_empty_tensors(item) for item in obj]
         filtered = [x for x in filtered if x is not None]
         return type(obj)(filtered)
-    elif isinstance(obj, dict):
+    if isinstance(obj, dict):
         return {k: v for k, v in ((k, remove_empty_tensors(v)) for k, v in obj.items()) if v is not None}
-    else:
-        return obj
+    return obj
 
 
 def to_cpu(x):
     if isinstance(x, torch.Tensor):  # for convert Tensor to cpu
         return x.cpu() if x.device != torch.device("cpu") else x
-    elif isinstance(x, list):  # for convert list (recursive)
+    if isinstance(x, list):  # for convert list (recursive)
         return [to_cpu(item) for item in x]
-    elif isinstance(x, tuple):  # for convert tuple (recursive)
+    if isinstance(x, tuple):  # for convert tuple (recursive)
         return tuple(to_cpu(item) for item in x)
-    elif isinstance(x, dict):  # for convert dict (recursive)
+    if isinstance(x, dict):  # for convert dict (recursive)
         return {k: to_cpu(v) for k, v in x.items()}
-    else:
-        return x
+    return x
 
 
-def handle_empty_reduction(input: torch.Tensor, dim: Optional[Union[int, Sequence[int]]] = None, keepdim: bool = False):
+def handle_empty_reduction(input: torch.Tensor, dim: int | Sequence[int] | None = None, *, keepdim: bool = False):
     # Handle the case where dim is None or empty list []
     is_full_reduction = dim is None or (isinstance(dim, (list, tuple)) and len(dim) == 0)
 
@@ -296,7 +302,8 @@ def handle_empty_binary(args):
     # broadcast result shape so downstream copy_/resize_ behaves correctly.
     tensor_args = [a for a in args if isinstance(a, torch.Tensor)]
     if not tensor_args:
-        raise RuntimeError("Can't find reference tensor for out")
+        msg = "Can't find reference tensor for out"
+        raise RuntimeError(msg)
     out_shape = torch.broadcast_shapes(*[t.shape for t in tensor_args])
     ref = tensor_args[0]
     ret = torch.empty(out_shape, dtype=ref.dtype, device="rbln")
@@ -315,15 +322,12 @@ def _has_zero_dim_broadcast(tensor_args, out_shape):
     fp16 scalar+vector multiply (verified 2026-05-07: the same call passes
     when one of the inputs is forced to vector shape via pre-broadcast).
 
-    Pre-broadcast on the host turns the call into an N-dim × N-dim mul
-    that rebel-compiler handles cleanly.
+    Pre-broadcast on the host turns the call into an N-dim x N-dim mul that
+    rebel-compiler handles cleanly.
     """
     if not out_shape:
         return False
-    for t in tensor_args:
-        if t.dim() == 0:
-            return True
-    return False
+    return any(t.dim() == 0 for t in tensor_args)
 
 
 def _has_last_dim_size_one_broadcast(tensor_args, out_shape):
@@ -337,16 +341,16 @@ def _has_last_dim_size_one_broadcast(tensor_args, out_shape):
 
     Confirmed-failing patterns (covered by ``TestBinaryOpsBroadcast``)::
 
-        (3, 4)        × (3, 1)        → (3, 4)        # softmax_backward shape0
-        (2, 3, 4)     × (2, 3, 1)     → (2, 3, 4)     # softmax_backward shape2
-        (4, 8, 16)    × (4, 8, 1)     → (4, 8, 16)
-        (1, 32, 4)    × (1, 32, 1)    → (1, 32, 4)
+        (3, 4)        x (3, 1)        → (3, 4)        # softmax_backward shape0
+        (2, 3, 4)     x (2, 3, 1)     → (2, 3, 4)     # softmax_backward shape2
+        (4, 8, 16)    x (4, 8, 1)     → (4, 8, 16)
+        (1, 32, 4)    x (1, 32, 1)    → (1, 32, 4)
 
     Confirmed-WORKING patterns (validate-only is fine)::
 
-        (B, S, H) × (H,)              # RMSNorm — last dims already match
-        (10, 20)  × (1, 20)           # leading-dim broadcast, last dims match
-        (5, 10, 15) × (5, 1, 15)      # middle-dim broadcast
+        (B, S, H) x (H,)              # RMSNorm — last dims already match
+        (10, 20)  x (1, 20)           # leading-dim broadcast, last dims match
+        (5, 10, 15) x (5, 1, 15)      # middle-dim broadcast
 
     Origin of pattern: ``torch.tensor.sum(dim=last_dim, keepdim=True)`` and
     similar reductions yield ``shape[-1] == 1``; multiplying that back into
@@ -360,10 +364,7 @@ def _has_last_dim_size_one_broadcast(tensor_args, out_shape):
     out_last = out_shape[-1] if out_shape else 1
     if out_last == 1:
         return False
-    for t in tensor_args:
-        if t.shape and t.shape[-1] == 1:
-            return True
-    return False
+    return any(t.shape and t.shape[-1] == 1 for t in tensor_args)
 
 
 def broadcast_args_general(tensor_args, args):
@@ -397,7 +398,8 @@ def broadcast_args_general(tensor_args, args):
         out_shape = torch.broadcast_shapes(*[t.shape for t in tensor_args])
     except RuntimeError as e:
         tensor_shapes = [tuple(t.shape) for t in tensor_args]
-        raise RuntimeError(f"Broadcasting failed for tensor shapes={tensor_shapes}") from e
+        msg = f"Broadcasting failed for tensor shapes={tensor_shapes}"
+        raise RuntimeError(msg) from e
 
     if not _has_last_dim_size_one_broadcast(tensor_args, out_shape) and not _has_zero_dim_broadcast(
         tensor_args, out_shape
@@ -408,7 +410,8 @@ def broadcast_args_general(tensor_args, args):
         broadcasted = torch.broadcast_tensors(*tensor_args)
     except RuntimeError as e:
         tensor_shapes = [tuple(t.shape) for t in tensor_args]
-        raise RuntimeError(f"Broadcasting failed for tensor shapes={tensor_shapes}") from e
+        msg = f"Broadcasting failed for tensor shapes={tensor_shapes}"
+        raise RuntimeError(msg) from e
     # Materialize stride-0 expand views into real contig buffers — otherwise
     # ``prepare_args_view_aware`` would re-detect the expand recipe and emit
     # ``aten::expand`` into the FX graph, dropping us right back into the
@@ -434,12 +437,13 @@ def handle_empty_addmm(tensor_args, beta):
     return ret, ret.shape
 
 
-def addmm_broadcast_args(tensor_args, args):
+def addmm_broadcast_args(tensor_args):
     try:
         result_shape = _estimate_mm_shape(tensor_args[1].shape, tensor_args[2].shape)
         return (tensor_args[0].expand(result_shape), tensor_args[1], tensor_args[2])
     except RuntimeError as e:
-        raise RuntimeError(f"Broadcasting failed for {tensor_args[0]}") from e
+        msg = f"Broadcasting failed for {tensor_args[0]}"
+        raise RuntimeError(msg) from e
 
 
 def handle_empty_linear(tensor_args):
@@ -466,9 +470,8 @@ def handle_empty_linear(tensor_args):
 
     # Output shape: input's batch dims + weight's out_features
     # input: [..., in_features], weight: [out_features, in_features]
-    # output: [..., out_features]
     out_features = weight_tensor.shape[0]
-    output_shape = list(input_tensor.shape[:-1]) + [out_features]
+    output_shape = [*input_tensor.shape[:-1], out_features]
 
     ret = torch.empty(output_shape, dtype=input_tensor.dtype, device="rbln")
     return ret, ret.shape
@@ -478,7 +481,8 @@ def handle_empty_tensor(tensor_args):
     for a in tensor_args:
         ret = torch.empty(a.shape, dtype=a.dtype, device="rbln")
         return ret, ret.shape
-    raise RuntimeError("Can't find reference tensor for out")
+    msg = "Can't find reference tensor for out"
+    raise RuntimeError(msg)
 
 
 def prepare_args_for_contiguous(args, kwargs_filtered):
@@ -501,9 +505,8 @@ def prepare_args_for_contiguous(args, kwargs_filtered):
 # / expand / select / squeeze / unsqueeze) from a contig base, and a wrapper
 # OpModule replays it in ``forward``. The live detector is BFS-based
 # (``_detect_view_recipe_safe``); the hand-rolled helpers below are kept for
-# reference / differential testing. Unclassifiable chains fall back to
-# ``.contiguous()`` with a one-time warning and the ``_view_fallback_count``
-# telemetry counter.
+# reference / differential testing. Unclassifiable chains fall back to ``.contiguous()``
+# with a one-time warning and the ``_view_fallback_count`` telemetry counter.
 # ============================================================================
 
 # Telemetry: how often the view-detection fell back to .contiguous() because
@@ -628,11 +631,10 @@ def _classify_single_step_view(parent: torch.Tensor, child: torch.Tensor):
                 if not found:
                     ok = False
                     break
-            if ok and len(perm) == c_ndim:
-                # Reject the identity perm (no actual transformation): caller
-                # already handled "is_contiguous + offset 0" before calling.
-                if tuple(perm) != tuple(range(c_ndim)):
-                    return ("permute", tuple(perm))
+            # Reject the identity perm (no actual transformation): caller
+            # already handled "is_contiguous + offset 0" before calling.
+            if ok and len(perm) == c_ndim and tuple(perm) != tuple(range(c_ndim)):
+                return ("permute", tuple(perm))
 
         # Expand: same offset, same ndim, child has stride 0 in some dims and
         # the non-zero strides match the parent's at those positions. The
@@ -644,14 +646,13 @@ def _classify_single_step_view(parent: torch.Tensor, child: torch.Tensor):
                     if p_shape[i] != 1:
                         ok = False
                         break
-                else:
-                    if p_shape[i] != c_shape[i] or p_stride[i] != c_stride[i]:
-                        ok = False
-                        break
+                elif p_shape[i] != c_shape[i] or p_stride[i] != c_stride[i]:
+                    ok = False
+                    break
             if ok:
                 # Reject an all-size-1 parent (rank-N broadcast of a scalar):
                 # replaying ``scalar.expand`` in-graph aborts build_internal for
-                # fp16 scalar×vector — same bug as the 0-dim reject in
+                # fp16 scalar x vector — same bug as the 0-dim reject in
                 # _detect_view_recipe_safe. Materialize via .contiguous() instead.
                 if all(s == 1 for s in p_shape):
                     pass
@@ -717,16 +718,15 @@ def _classify_single_step_view(parent: torch.Tensor, child: torch.Tensor):
             return ("select", sel, index)
 
     # ---- 3. ndim grew by 1: unsqueeze ----
-    if c_ndim == p_ndim + 1:
-        if c_off == p_off:
-            for un in range(c_ndim):
-                if c_shape[un] != 1:
-                    continue
-                expected = c_shape[:un] + c_shape[un + 1 :]
-                if expected == p_shape:
-                    expected_stride = c_stride[:un] + c_stride[un + 1 :]
-                    if expected_stride == p_stride:
-                        return ("unsqueeze", un)
+    if c_ndim == p_ndim + 1 and c_off == p_off:
+        for un in range(c_ndim):
+            if c_shape[un] != 1:
+                continue
+            expected = c_shape[:un] + c_shape[un + 1 :]
+            if expected == p_shape:
+                expected_stride = c_stride[:un] + c_stride[un + 1 :]
+                if expected_stride == p_stride:
+                    return ("unsqueeze", un)
 
     # ---- 4. Reshape with ndim change ----
     if (
@@ -829,7 +829,7 @@ def _detect_permute_narrow_composite(base: torch.Tensor, t: torch.Tensor):
     # Narrow-first keeps the tensor contig until the permute, so the
     # resulting graph has a single ``narrow`` on the original base layout
     # plus a final ``permute`` — the form rebel reliably handles.
-    recipe = []
+    recipe: list[tuple[Any, ...]] = []
     for d in narrows:
         base_dim = perm[d]
         recipe.append(("narrow", base_dim, starts[d], t.size(d)))
@@ -881,12 +881,11 @@ def _detect_expand_permute_composite(base: torch.Tensor, t: torch.Tensor):
         for j in range(p_ndim):
             if p_used[j]:
                 continue
-            if p_stride[j] == st:
-                # Stride match. The size constraint: t.size[i] must equal
-                # base.size[j] (non-1 dim is preserved).
-                if p_size[j] == t.size(i):
-                    found = j
-                    break
+            # Stride match. The size constraint: t.size[i] must equal
+            # base.size[j] (non-1 dim is preserved).
+            if p_stride[j] == st and p_size[j] == t.size(i):
+                found = j
+                break
         if found == -1:
             return None
         perm_after_expand[i] = found
@@ -990,8 +989,7 @@ def _detect_permute_unsqueeze_composite(base: torch.Tensor, t: torch.Tensor):
     recipe = []
     if perm != list(range(n)):
         recipe.append(("permute", tuple(perm)))
-    for un_dim in sorted(drop):
-        recipe.append(("unsqueeze", un_dim))
+    recipe.extend(("unsqueeze", un_dim) for un_dim in sorted(drop))
     if not recipe:
         return None
     return tuple(recipe)
@@ -1033,7 +1031,7 @@ def _construct_synthetic_base(t: torch.Tensor):
 # squeeze / unsqueeze), simulating each step on (shape, stride, offset) metadata
 # — no tensor allocation. A recipe is accepted only when its full simulation
 # matches the target's metadata exactly, so a wrong recipe can never silently
-# emit. Blacklisted patterns (known rebel-backend bugs, see
+# emit. Blocklisted patterns (known rebel-backend bugs, see
 # ``_is_known_bad_pattern``) are skipped so the search picks an
 # algebraically-equivalent route; ``_construct_synthetic_base`` handles tensors
 # whose ``_base`` isn't contig+offset=0. First match wins by recipe length
@@ -1125,10 +1123,7 @@ def _simulate_recipe(shape, stride, offset, recipe):
             # with stride ``stride[d] * size[d]`` (extends the contig
             # convention from the dim now at position d). At the end,
             # use stride 1.
-            if d < len(st):
-                ref_stride = st[d] * s[d + 1]
-            else:
-                ref_stride = 1
+            ref_stride = st[d] * s[d + 1] if d < len(st) else 1
             st.insert(d, ref_stride)
         else:
             return None
@@ -1163,9 +1158,8 @@ def _is_known_bad_pattern(recipe):
     #    fine; only ``expand → permute/narrow/select`` trips it.
     #    (repro 2026-04-30: ``base.expand(3,4,8).permute(2,0,1)``)
     for i, step in enumerate(recipe):
-        if step[0] == "expand" and i + 1 < len(recipe):
-            if recipe[i + 1][0] != "expand":
-                return True
+        if step[0] == "expand" and i + 1 < len(recipe) and recipe[i + 1][0] != "expand":
+            return True
 
     # 4. ``unsqueeze → non-(unsqueeze|expand)`` → runtime vmemory verify error;
     #    ``permute → unsqueeze`` (unsqueeze last) works. ``unsqueeze → expand``
@@ -1204,9 +1198,9 @@ def _gen_step_candidates(cur, target):
     if len(cur_s) == len(tgt_s):
         used = [False] * len(cur_st)
         perm = []
-        for ts, tsz in zip(tgt_st, tgt_s):
+        for ts, tsz in zip(tgt_st, tgt_s, strict=True):
             found = False
-            for i, (cs, csz) in enumerate(zip(cur_st, cur_s)):
+            for i, (cs, csz) in enumerate(zip(cur_st, cur_s, strict=True)):
                 if used[i]:
                     continue
                 if cs == ts and (tsz != 1 or csz == 1):
@@ -1221,8 +1215,6 @@ def _gen_step_candidates(cur, target):
             yield ("permute", tuple(perm))
     elif len(cur_s) < len(tgt_s) and len(cur_s) >= 2:
         # Enumerate all non-identity permutations.
-        from itertools import permutations
-
         identity = tuple(range(len(cur_s)))
         for perm in permutations(range(len(cur_s))):
             if perm != identity:
@@ -1263,7 +1255,7 @@ def _gen_step_candidates(cur, target):
 
     # Expand: any size-1 cur dim. The expanded dim may later be permuted
     # to a different index, so don't restrict to same-index target size.
-    # Try every (cur size-1 dim) × (target expanded-dim size).
+    # Try every (cur size-1 dim) x (target expanded-dim size).
     if len(cur_s) == len(tgt_s):
         target_expand_sizes = {tgt_s[d] for d in range(len(tgt_s)) if tgt_st[d] == 0 and tgt_s[d] > 1}
         for d in range(len(cur_s)):
@@ -1279,13 +1271,13 @@ def _gen_step_candidates(cur, target):
     if cur_o == 0 and cur_st == _contiguous_strides(cur_s):
         if len(cur_s) > len(tgt_s) and len(cur_s) >= 2:
             for d in range(len(cur_s) - 1):
-                yield ("reshape", cur_s[:d] + (cur_s[d] * cur_s[d + 1],) + cur_s[d + 2 :])
+                yield ("reshape", (*cur_s[:d], cur_s[d] * cur_s[d + 1], *cur_s[d + 2 :]))
         if len(cur_s) < len(tgt_s):
             tgt_sizes = {x for x in tgt_s if x > 1}
             for d, sz in enumerate(cur_s):
                 for a in tgt_sizes:
                     if a < sz and sz % a == 0 and (sz // a) in tgt_sizes:
-                        yield ("reshape", cur_s[:d] + (a, sz // a) + cur_s[d + 1 :])
+                        yield ("reshape", (*cur_s[:d], a, sz // a, *cur_s[d + 1 :]))
 
     # Select: cur has more dims, a non-size-1 dim is being indexed away.
     if len(cur_s) > len(tgt_s):
@@ -1304,7 +1296,7 @@ def _gen_step_candidates(cur, target):
 
 def _bfs_search_recipe(base, t, max_steps=4):
     """BFS for a recipe that transforms ``base`` into ``t``. Returns the
-    first non-blacklisted recipe whose simulation matches ``t``'s
+    first non-blocklisted recipe whose simulation matches ``t``'s
     metadata, or ``None``.
 
     ``base`` must be contig+offset=0; ``t`` is the view target.
@@ -1317,7 +1309,7 @@ def _bfs_search_recipe(base, t, max_steps=4):
     if start == target:
         return ()
 
-    visited = {start: ()}
+    visited: dict[tuple, tuple] = {start: ()}
     frontier = [start]
 
     for _ in range(max_steps):
@@ -1328,9 +1320,9 @@ def _bfs_search_recipe(base, t, max_steps=4):
                 new_state = _simulate_recipe(cur[0], cur[1], cur[2], (step,))
                 if new_state is None:
                     continue
-                new_recipe = cur_recipe + (step,)
+                new_recipe = (*cur_recipe, step)
                 if new_state == target:
-                    # Reached the goal — accept if not blacklisted, else keep
+                    # Reached the goal — accept if not blocklisted, else keep
                     # exploring other paths through OTHER intermediate states
                     # (do NOT add target to visited, so alternative-route
                     # arrivals can also be considered).
@@ -1353,13 +1345,12 @@ def _bfs_search_recipe(base, t, max_steps=4):
 # BFS searches over (base_size, base_stride) -> (target_size, target_stride,
 # target_offset). Both endpoints are pure metadata; the recipe is a function
 # of metadata alone (data_ptr / _version do not affect the search). So a
-# geometric-only cache key is sound: same metadata pair always produces the
-# same recipe.
+# geometric-only cache key is sound: same metadata pair always produces the same recipe.
 #
-# LLaMA-1B prefill exercises ~48 BFS calls across 16 layers × ~3 view
-# patterns. The data_ptr-keyed cache previously prototyped never hit
-# (per-layer storages differ); a geometric key hits 16x for each of the
-# ~3 unique patterns. Saves ~4 s of the ~12 s prefill (measured 2026-05-11).
+# LLaMA-1B prefill exercises ~48 BFS calls across 16 layers x ~3 view patterns. The
+# data_ptr-keyed cache previously prototyped never hit (per-layer storages differ); a
+# geometric key hits 16x for each of the ~3 unique patterns. Saves ~4 s of the ~12 s
+# prefill (measured 2026-05-11).
 #
 # Sentinel ``_RECIPE_CACHE_NONE`` marks "no recipe found" so the negative
 # result is cached too (BFS exhaustion is the expensive case).
@@ -1376,7 +1367,8 @@ def view_recipe_cache_stats():
 
 def view_recipe_cache_reset():
     """Clear cache + reset counters. Called by ``memory.empty_cache()`` to
-    bound the cache, and by bench to isolate phases."""
+    bound the cache, and by bench to isolate phases.
+    """
     global _recipe_cache_hits, _recipe_cache_misses
     _recipe_cache.clear()
     _recipe_cache_hits = 0
@@ -1409,8 +1401,8 @@ def _detect_view_recipe_safe(t: torch.Tensor):
 
     # Reject 0-dim base: autograd bprop emits ``scalar.expand(target)`` for
     # ``y.sum().backward()`` etc.; replaying it (``unsqueeze + expand``) aborts
-    # build_internal for fp16 scalar×vector. Falling back to ``.contiguous()``
-    # gives a real vector buffer so the compile path sees vector × vector.
+    # build_internal for fp16 scalar x vector. Falling back to ``.contiguous()`` gives a
+    # real vector buffer so the compile path sees vector x vector.
     # (verified 2026-05-07 via cos backward fp16)
     if base.dim() == 0:
         return None
@@ -1457,8 +1449,8 @@ def _detect_view_recipe(t: torch.Tensor):
     to ``.contiguous()`` (with a one-time warning log).
 
     Implementation: delegates to ``_detect_view_recipe_safe`` (BFS + simulation
-    + blacklist). The legacy 5-layer hard-coded helpers remain compiled but
-    are no longer reached on the dispatch path.
+    + blocklist). The legacy 5-layer hard-coded helpers remain compiled but are no
+    longer reached on the dispatch path.
     """
     return _detect_view_recipe_safe(t)
 
@@ -1467,7 +1459,8 @@ def _detect_view_recipe_legacy(t: torch.Tensor):
     """Legacy 5-layer hard-coded detector. Kept as a reference and for
     differential testing against the generic detector. NOT on the dispatch
     path — see ``_detect_view_recipe`` (which routes to
-    ``_detect_view_recipe_safe``)."""
+    ``_detect_view_recipe_safe``).
+    """
     if not isinstance(t, torch.Tensor) or t.numel() == 0:
         return None
     if t.is_contiguous() and t.storage_offset() == 0:
@@ -1722,7 +1715,7 @@ def get_view_op_module(op_callable_or_module, view_recipes):
     class _ViewOp(torch.nn.Module):
         def forward(self, *fwd_args, **fwd_kwargs):
             new_args = []
-            for arg, recipe in zip(fwd_args, captured_recipes):
+            for arg, recipe in zip(fwd_args, captured_recipes, strict=False):
                 if recipe is None or not isinstance(arg, torch.Tensor):
                     new_args.append(arg)
                     continue
@@ -1768,25 +1761,20 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
       Future calls re-enter Python and hit the compile_rbln_cached cache —
       ~50 µs/call overhead, still cheap relative to host materialization.
 
-    Imports are deferred into the body to avoid a load-time circular import
-    (``ops_utils`` is imported broadly).
+    ``get_rbln_compile_op_depth`` is imported in the body because
+    ``torch_compile_patch_helpers`` imports this module.
     """
-    # Policy precondition, checked before any device-compile machinery is imported or
-    # run: this is the device-compute entry (only supported dtypes reach here; host-dtype
-    # / unsupported ops already took cpu_fallback_path). On RBLN_DUMMY_DEVICE that means an
-    # NPU-bound eager op with no NPU, so reject it through the shared policy gate — same
-    # rule as a compiled graph, and independent of the 64-alignment fallback below so the
-    # behavior does not depend on tensor shape. depth > 0 means we are nested inside a
-    # compile op (e.g. an artifact build); those must proceed so builds still work.
-    from torch_rbln._internal.dummy_device import raise_if_dummy_execution
-    from torch_rbln._internal.torch_compile_patch_helpers import get_rbln_compile_op_depth
+    # Policy precondition, checked before any device-compile machinery runs: this is the
+    # device-compute entry (only supported dtypes reach here; host-dtype / unsupported
+    # ops already took cpu_fallback_path). On RBLN_DUMMY_DEVICE that means an NPU-bound
+    # eager op with no NPU, so reject it through the shared policy gate — same rule as a
+    # compiled graph, and independent of the 64-alignment fallback below so the behavior
+    # does not depend on tensor shape. depth > 0 means we are nested inside a compile op
+    # (e.g. an artifact build); those must proceed so builds still work.
+    from torch_rbln._internal.torch_compile_patch_helpers import get_rbln_compile_op_depth  # noqa: PLC0415
 
     if get_rbln_compile_op_depth() == 0:
         raise_if_dummy_execution(f"the eager op {op_name}" if op_name else "an eager op")
-
-    from torch_rbln._internal.compile_cache import compile_rbln_cached_entry
-    from torch_rbln._internal.env_utils import use_device_group_num_devices
-    from torch_rbln._internal.warm_cache import install_pending as _install_warm_cache_pending
 
     # Device 64-elem-align fallback: a last-dim not a multiple of 64 makes the
     # rebel pipeline wrap the device fn with host-only contrib_aligned_pad /
@@ -1808,10 +1796,10 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
             **kwargs_filtered,
         )
 
-    # Supported-dtype div with rounding_mode trunc/floor: the device kernel returns wrong
-    # values for entire output rows (not ULP drift), so route it to cpu_fallback.
-    # Plain div (no rounding_mode) and fp32 div are unaffected. (verified
-    # 2026-05-07: trunc on (357,789), row 338 came back all 0.0/-0.0)
+    # Supported-dtype div with rounding_mode trunc/floor: the device kernel returns
+    # wrong values for entire output rows (not ULP drift), so route it to cpu_fallback.
+    # Plain div (no rounding_mode) and fp32 div are unaffected. (verified 2026-05-07:
+    # trunc on (357,789), row 338 came back all 0.0/-0.0)
     if op_name == "aten::div":
         rmode = kwargs_filtered.get("rounding_mode")
         if rmode in ("trunc", "floor"):
@@ -1847,18 +1835,17 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs_filtered)
     has_views = any(r is not None for r in view_recipes)
 
-    compile_options = {"disable_logger": True}
+    compile_options: dict[str, Any] = {"disable_logger": True}
     if not use_device_group_num_devices():
         compile_options["num_devices"] = 1
     compile_options["_runtime_holder"] = []
 
     if out_tensor is None:
         result_tensor = None
+    elif can_use_out_tensor_directly(view_args, dict(view_kwargs, out=out_tensor)):
+        result_tensor = out_tensor
     else:
-        if can_use_out_tensor_directly(view_args, dict(view_kwargs, out=out_tensor)):
-            result_tensor = out_tensor
-        else:
-            result_tensor = None
+        result_tensor = None
 
     op_module = get_view_op_module(op_callable, view_recipes)
 
@@ -1891,7 +1878,7 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
         runtime = entry.runtime()
         if runtime is not None and entry.input_order is None:
             entry.input_order = _graph_input_order(runtime, tensors)
-        if out_list is not None:
+        if result_tensor is not None:
             if runtime is not None and entry.input_order is not None:
                 runtime.run(*(tensors[i] for i in entry.input_order), out=out_list)
             else:
@@ -1945,14 +1932,15 @@ _warned_disable_fallback = False
 
 
 def _parse_disabled_fallback_cases() -> frozenset:
-    """
-    Parse `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` into a frozenset of disabled cases.
+    """Parse `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` into a frozenset of disabled
+    cases.
 
-    Read live (NOT lru_cached): the C++ dispatch gate (DispatchShim.is_nan_inf_check_disabled)
-    reads the same env live, so caching here would let the Python cold path and the C++ warm
-    path disagree, and would latch the first value across a whole xdist worker (tests toggle
-    it per-test via patch.dict). This is the cold/miss path, so re-parsing per call is
-    negligible. Warn once per process (not once per call) via a module flag.
+    Read live (NOT lru_cached): the C++ dispatch gate
+    (DispatchShim.is_nan_inf_check_disabled) reads the same env live, so caching here
+    would let the Python cold path and the C++ warm path disagree, and would latch the
+    first value across a whole xdist worker (tests toggle it per-test via patch.dict).
+    This is the cold/miss path, so re-parsing per call is negligible. Warn once per
+    process (not once per call) via a module flag.
     """
     global _warned_disable_fallback
     env = os.getenv("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK")
@@ -1961,7 +1949,8 @@ def _parse_disabled_fallback_cases() -> frozenset:
     if not _warned_disable_fallback:
         warnings.warn(
             "Enabling `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` may lead to unexpected behavior. "
-            "Do NOT use in production."
+            "Do NOT use in production.",
+            stacklevel=1,
         )
         _warned_disable_fallback = True
     cases = frozenset(c.strip() for c in env.split(",") if c.strip())
@@ -1969,52 +1958,58 @@ def _parse_disabled_fallback_cases() -> frozenset:
 
 
 def is_cpu_fallback_cases(args):
-    """
-    Determines if a CPU fallback is necessary for an operation.
+    """Determines if a CPU fallback is necessary for an operation.
 
-    This function checks for several conditions that would require an operation to fall back to the CPU:
-    0a. **Python trace/debugger**: When a trace function is set (e.g. pdb, coverage, sys.settrace), we fall
-        back to CPU to avoid running torch.compile under a tracer. Disable with
-        TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK=trace for debugging only.
-    1. **TorchDispatchMode Active**: When a non-infra TorchDispatchMode is active (e.g. LoggingMode,
-       CompositeCompliantTensorMode), we must not attempt torch.compile. Reason: with rbln tensors we do
-       add_rbln -> torch.compile(torch.add) -> ...; Dynamo sees the dispatch mode and skips compilation,
-       then runs the original torch.add eagerly; that eager call dispatches again and hits our add_rbln
-       -> same path repeats -> infinite recursion. So when TorchDispatchMode is on, we fall back to CPU
-       and never enter the compile path.
-    2. **Unsupported or Mismatched Data Types**: If any input tensor's dtype is not in ``SupportedDtypes.dispatch``,
-       or if the inputs mix different supported dtypes. The RBLN compute path requires all tensors to share the
-       same supported dtype.
-    3. **Scalar Tensors**: If all input tensors are scalar tensors, rebel-compiler falls back to host ops.
+    This function checks for several conditions that would require an operation to fall
+    back to the CPU:
+    0a. **Python trace/debugger**: When a trace function is set (e.g. pdb, coverage,
+        sys.settrace), we fall back to CPU to avoid running torch.compile under a
+        tracer. Disable with TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK=trace for debugging
+        only.
+    1. **TorchDispatchMode Active**: When a non-infra TorchDispatchMode is active (e.g.
+       LoggingMode, CompositeCompliantTensorMode), we must not attempt torch.compile.
+       Reason: with rbln tensors we do add_rbln -> torch.compile(torch.add) -> ...;
+       Dynamo sees the dispatch mode and skips compilation, then runs the original
+       torch.add eagerly; that eager call dispatches again and hits our add_rbln -> same
+       path repeats -> infinite recursion. So when TorchDispatchMode is on, we fall back
+       to CPU and never enter the compile path.
+    2. **Unsupported or Mismatched Data Types**: If any input tensor's dtype is not in
+       ``SupportedDtypes.dispatch``, or if the inputs mix different supported dtypes.
+       The RBLN compute path requires all tensors to share the same supported dtype.
+    3. **Scalar Tensors**: If all input tensors are scalar tensors, rebel-compiler falls
+       back to host ops.
     4. **Storage Offset**: If any tensor has `storage_offset != 0`, fall back to CPU.
-    5. **NaN/Inf Values**: When not in deploy mode, if any input tensor contains NaN or Inf values,
-       rbln cannot handle them and we need to fall back to CPU. This check converts tensors to CPU
-       before checking to ensure accurate detection.
-    6. **Reentrancy** (checked last): When we're already inside an RBLN op that uses torch.compile
-       (thread-local depth > 0), any nested dispatch (e.g. compiled graph running torch.add -> add_rbln
-       again, or print/repr triggering tensor ops) must use CPU fallback to avoid infinite recursion.
-       This is an unexpected path; a warning is logged when it triggers. Disable with
+    5. **NaN/Inf Values**: When not in deploy mode, if any input tensor contains NaN or
+       Inf values, rbln cannot handle them and we need to fall back to CPU. This check
+       converts tensors to CPU before checking to ensure accurate detection.
+    6. **Reentrancy** (checked last): When we're already inside an RBLN op that uses
+       torch.compile (thread-local depth > 0), any nested dispatch (e.g. compiled graph
+       running torch.add -> add_rbln again, or print/repr triggering tensor ops) must
+       use CPU fallback to avoid infinite recursion. This is an unexpected path; a
+       warning is logged when it triggers. Disable with
        TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK=reentrant for debugging only.
 
     Individual checks can be disabled via `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK`
     (comma-separated names or `"all"`).
 
     Args:
-        args (tuple): A tuple of positional arguments for the operation, which may contain tensors.
+        args (tuple): A tuple of positional arguments for the operation, which may
+            contain tensors.
 
     Returns:
         bool: True if a CPU fallback is necessary, False otherwise.
     """
     disabled_cases = _parse_disabled_fallback_cases()
 
-    # 0a: Python trace/debugger – when a trace function is set (e.g. pdb, coverage, sys.settrace), fall back to CPU
+    # 0a: Python trace/debugger — when a trace function is set (e.g. pdb, coverage,
+    # sys.settrace), fall back to CPU
     if "trace" not in disabled_cases and sys.gettrace() is not None:
         return True
 
-    # 1: TorchDispatchMode active – run on CPU and do not attempt compile (cheap)
+    # 1: TorchDispatchMode active — run on CPU and do not attempt compile (cheap)
     if "dispatch_mode" not in disabled_cases:
         try:
-            from torch.utils._python_dispatch import is_in_torch_dispatch_mode
+            from torch.utils._python_dispatch import is_in_torch_dispatch_mode  # noqa: PLC0415
 
             if is_in_torch_dispatch_mode(include_infra_modes=False):
                 return True
@@ -2026,7 +2021,8 @@ def is_cpu_fallback_cases(args):
     if not tensor_args:
         return False
 
-    # 2: fall back to the CPU if any input tensor has an unsupported dtype, or if input tensors have mismatched dtypes
+    # 2: fall back to the CPU if any input tensor has an unsupported dtype, or if input
+    # tensors have mismatched dtypes
     if "dtype" not in disabled_cases:
         first_dtype = tensor_args[0].dtype
         if first_dtype not in SupportedDtypes.dispatch:
@@ -2036,29 +2032,25 @@ def is_cpu_fallback_cases(args):
                 return True
 
     # 3: fall back to the CPU if all input tensors are scalar tensors
-    if "scalar" not in disabled_cases:
-        if all(a.ndim == 0 for a in tensor_args):
-            return True
+    if "scalar" not in disabled_cases and all(a.ndim == 0 for a in tensor_args):
+        return True
 
     # 4: fall back to the CPU if any contiguous tensor has non-zero storage offset
-    if "storage_offset" not in disabled_cases:
-        if any(a.is_contiguous() and a.storage_offset() != 0 for a in tensor_args):
-            return True
+    if "storage_offset" not in disabled_cases and any(
+        a.is_contiguous() and a.storage_offset() != 0 for a in tensor_args
+    ):
+        return True
 
-    # 5: fall back to the CPU if any tensor contains NaN/Inf values (heavy: to_cpu + scan; non-deploy only)
-    if "nan_inf" not in disabled_cases:
-        try:
-            from torch_rbln._internal.env_utils import is_rbln_deploy
+    # 5: fall back to the CPU if any tensor contains NaN/Inf values (heavy: to_cpu +
+    # scan; non-deploy only)
+    if "nan_inf" not in disabled_cases and not is_rbln_deploy() and has_invalid_tensor(to_cpu(args)):
+        return True
 
-            if not is_rbln_deploy() and has_invalid_tensor(to_cpu(args)):
-                return True
-        except ImportError:
-            pass
-
-    # 6: Reentrancy – already inside an RBLN compile op (e.g. from print/repr or from compiled graph).
+    # 6: Reentrancy — already inside an RBLN compile op (e.g. from print/repr or from
+    # compiled graph).
     #     Unexpected path; log a warning when it triggers.
     if "reentrant" not in disabled_cases:
-        from torch_rbln._internal.torch_compile_patch_helpers import get_rbln_compile_op_depth
+        from torch_rbln._internal.torch_compile_patch_helpers import get_rbln_compile_op_depth  # noqa: PLC0415
 
         if get_rbln_compile_op_depth() > 0:
             rbln_log_warn("Unexpected CPU fallback: reentrant dispatch (already inside RBLN compile op)")
@@ -2067,26 +2059,25 @@ def is_cpu_fallback_cases(args):
     return False
 
 
-def cpu_fallback_path(
-    target_ops, args, *, result: Optional[torch.Tensor] = None, op_name: Optional[str] = None, **op_kwargs
-):
-    """
-    Perform CPU fallback for the given target operation.
+def cpu_fallback_path(target_ops, args, *, result: torch.Tensor | None = None, op_name: str | None = None, **op_kwargs):
+    """Perform CPU fallback for the given target operation.
 
-    This function converts the input arguments and keyword arguments from their original device to CPU,
-    executes the target operation on these converted arguments, and then converts the result back to the 'rbln'
-    device.
+    This function converts the input arguments and keyword arguments from their original
+    device to CPU, executes the target operation on these converted arguments, and then
+    converts the result back to the 'rbln' device.
 
     Args:
         target_ops (callable): The operation to be executed on the CPU.
         args (tuple): A tuple of positional arguments that need to be converted to CPU.
-        result (Optional[torch.Tensor]): Optional pre-allocated output tensor. If provided and size matches,
-            the result will be copied into this tensor.
+        result (Optional[torch.Tensor]): Optional pre-allocated output tensor. If
+            provided and size matches, the result will be copied into this tensor.
         op_name (Optional[str]): Operator name like "aten::add" for logging purposes.
-        **op_kwargs: Keyword arguments for the operation (e.g. dim=2, out=...). Passed as-is to target_ops.
+        **op_kwargs: Keyword arguments for the operation (e.g. dim=2, out=...). Passed
+            as-is to target_ops.
 
     Returns:
-        torch.Tensor: The result of the target operation, converted back to the 'rbln' device.
+        torch.Tensor: The result of the target operation, converted back to the 'rbln'
+        device.
     """
     if op_name is not None:
         rbln_log_cpu_fallback(op_name)
@@ -2108,14 +2099,14 @@ def cpu_fallback_path(
 
     # Convert result back to rbln device with proper device_index
     # device_id should always be available when rbln tensors are present
-    assert device_id is not None, "device_id should be found from rbln tensors"
-    result = result_cpu.to(f"rbln:{device_id}")
-    return result
+    if device_id is None:
+        msg = "device_id should be found from rbln tensors"
+        raise RuntimeError(msg)
+    return result_cpu.to(f"rbln:{device_id}")
 
 
 def is_inplace_op(args, kwargs) -> bool:
-    """
-    Determine whether the current call is an in-place operation.
+    """Determine whether the current call is an in-place operation.
 
     The function scans all positional and keyword arguments to locate the
     tensor. It then checks whether this tensor shares the same storage
@@ -2136,16 +2127,11 @@ def is_inplace_op(args, kwargs) -> bool:
     input_tensors = [t for t in args if torch.is_tensor(t)]
     input_tensors += [v for v in kwargs.values() if torch.is_tensor(v) and v is not out_t]
 
-    for t in input_tensors:
-        if (t is out_t) or (t.data_ptr() == out_t.data_ptr() and t.device == out_t.device):
-            return True
-
-    return False
+    return any(t is out_t or (t.data_ptr() == out_t.data_ptr() and t.device == out_t.device) for t in input_tensors)
 
 
 def can_use_out_tensor_directly(args: tuple, kwargs: dict) -> bool:
-    """
-    Check if the out_tensor can be used directly by the compiler.
+    """Check if the out_tensor can be used directly by the compiler.
 
     This function checks several conditions to determine if the output tensor
     can be used directly without creating a temporary tensor:
@@ -2157,7 +2143,8 @@ def can_use_out_tensor_directly(args: tuple, kwargs: dict) -> bool:
 
     Args:
         args (tuple): Positional arguments for in-place operation check.
-        kwargs (dict): Keyword arguments containing 'out' key with the output tensor to check.
+        kwargs (dict): Keyword arguments containing 'out' key with the output
+            tensor to check.
 
     Returns:
         bool: True if the out_tensor can be used directly, False otherwise.
@@ -2176,8 +2163,7 @@ def can_use_out_tensor_directly(args: tuple, kwargs: dict) -> bool:
 
 
 def _ceil_to_nearest_multiple_of_64(n):
-    """
-    Rounds up the given integer `n` to the nearest multiple of 64.
+    """Rounds up the given integer `n` to the nearest multiple of 64.
 
     Args:
         n (int): The integer to be rounded up.

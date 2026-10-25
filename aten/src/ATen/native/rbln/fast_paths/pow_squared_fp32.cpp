@@ -17,24 +17,33 @@
 namespace at::native::rbln {
 namespace {
 
-void micro_square_fp32_contig(const float* __restrict__ in, float* __restrict__ out, size_t n) {
+void micro_square_fp32_contig(
+    const float* __restrict__ in,
+    float* __restrict__ out,
+    size_t n) {
   for (size_t i = 0; i < n; ++i) {
     out[i] = in[i] * in[i];
   }
 }
 
-bool pow_squared_handler(c10::ArrayRef<at::Tensor> cpu_tensors, torch::jit::Stack* stack, size_t arguments_begin) {
-  // schema: pow.Tensor_Scalar_out(Tensor self, Scalar exponent, *, Tensor(a!) out)
+bool pow_squared_handler(
+    c10::ArrayRef<at::Tensor> cpu_tensors,
+    torch::jit::Stack* stack,
+    size_t arguments_begin) {
+  // schema: pow.Tensor_Scalar_out(Tensor self, Scalar exponent,
+  //                               *, Tensor(a!) out)
   // stack args at arguments_begin: [self, exponent, out]
   if (cpu_tensors.size() < 2) {
     return false;
   }
   const auto& self = cpu_tensors[0];
   const auto& out = cpu_tensors.back();
-  if (!self.defined() || !self.is_contiguous() || self.scalar_type() != at::kFloat) {
+  if (!self.defined() || !self.is_contiguous() ||
+      self.scalar_type() != at::kFloat) {
     return false;
   }
-  if (!out.defined() || !out.is_contiguous() || out.scalar_type() != at::kFloat) {
+  if (!out.defined() || !out.is_contiguous() ||
+      out.scalar_type() != at::kFloat) {
     return false;
   }
   if (out.numel() != self.numel() || out.sizes() != self.sizes()) {
@@ -46,15 +55,16 @@ bool pow_squared_handler(c10::ArrayRef<at::Tensor> cpu_tensors, torch::jit::Stac
     return false;
   }
   const auto exp_s = exp_iv.toScalar();
-  const bool is_two =
-      (exp_s.isFloatingPoint() && exp_s.toDouble() == 2.0) || (exp_s.isIntegral(false) && exp_s.toLong() == 2);
+  const bool is_two = (exp_s.isFloatingPoint() && exp_s.toDouble() == 2.0) ||
+      (exp_s.isIntegral(false) && exp_s.toLong() == 2);
   if (!is_two) {
     return false;
   }
 
-  micro_square_fp32_contig(self.data_ptr<float>(), out.data_ptr<float>(), self.numel());
+  micro_square_fp32_contig(
+      self.data_ptr<float>(), out.data_ptr<float>(), self.numel());
   stack->resize(arguments_begin);
-  stack->emplace_back(c10::IValue(out));
+  stack->emplace_back(out);
   return true;
 }
 

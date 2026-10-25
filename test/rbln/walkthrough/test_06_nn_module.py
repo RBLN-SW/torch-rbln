@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Walkthrough example 6: nn.Module on RBLN.
+"""Walkthrough example 6: nn.Module on RBLN.
 
 Ported from walkthrough_guide/6.nn_module_to_rbln.py.
 
@@ -14,7 +13,7 @@ Verifies that:
 
 import pytest
 import torch
-import torch.nn as nn
+from torch import nn
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 

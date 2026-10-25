@@ -1,12 +1,10 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Test suite for multi-device functionality of RBLN backend.
-"""
+"""Test suite for multi-device functionality of RBLN backend."""
 
 import pytest
 import torch
-import torch.nn as nn
+from torch import nn
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
@@ -94,8 +92,7 @@ class TestMultiDevice(TestCase):
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_device_context_manager(self, dtype):
-        """
-        Test device context manager (torch.rbln.device()) for switching devices.
+        """Test device context manager (torch.rbln.device()) for switching devices.
         This is the PyTorch-style way to switch devices, similar to torch.cuda.device().
         """
         device1 = torch.device("rbln:1")
@@ -261,8 +258,7 @@ class TestMultiDevice(TestCase):
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_multi_device_memory_isolation(self, dtype):
-        """
-        Test that memory is isolated between devices.
+        """Test that memory is isolated between devices.
         This ensures that modifying a tensor on device 0 does not affect
         a tensor on device 1, confirming proper device memory separation.
         """
@@ -498,7 +494,9 @@ class TestDeviceOutputPlacement(TestCase):
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_linear_with_current_device_context(self, dtype):
-        """Test that Linear respects device context even when current_device is different."""
+        """Test that Linear respects device context even when current_device is
+        different.
+        """
         device1 = torch.device("rbln:1")
 
         # Set current device to 0
@@ -516,7 +514,9 @@ class TestDeviceOutputPlacement(TestCase):
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_device_0_vs_device_1_comparison(self, dtype):
-        """Test that operations on device 0 and device 1 produce outputs on correct devices."""
+        """Test that operations on device 0 and device 1 produce outputs on correct
+        devices.
+        """
         device0 = torch.device("rbln:0")
         device1 = torch.device("rbln:1")
 
@@ -610,8 +610,7 @@ class TestDeviceOutputPlacement(TestCase):
             def forward(self, x):
                 x = self.linear1(x)
                 x = self.linear2(x)
-                x = self.linear3(x)
-                return x
+                return self.linear3(x)
 
         model = NestedModel().to(device=device, dtype=dtype)
         x = torch.randn([4, 16], dtype=dtype, device=device)
@@ -665,7 +664,9 @@ class TestDeviceOutputPlacement(TestCase):
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_complex_model_device_1(self, dtype):
-        """Test a complex model using only ops from native_functions.yaml on device 1."""
+        """Test a complex model using only ops from native_functions.yaml on device
+        1.
+        """
         device = torch.device("rbln:1")
 
         class ComplexModel(nn.Module):
@@ -688,8 +689,7 @@ class TestDeviceOutputPlacement(TestCase):
                 x = torch.clamp(x, min=-2.0, max=2.0)
                 x = torch.log(torch.add(torch.abs(x), 1.0))  # log(|x| + 1)
                 # Final linear transformation
-                x = self.linear3(x)
-                return x
+                return self.linear3(x)
 
         model = ComplexModel().to(device=device, dtype=dtype)
         x = torch.randn([4, 32], dtype=dtype, device=device)
@@ -701,7 +701,9 @@ class TestDeviceOutputPlacement(TestCase):
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_complex_model_device_1_128aligned(self, dtype):
-        """Test complex model with 128-byte aligned last dimension using native_functions ops."""
+        """Test complex model with 128-byte aligned last dimension using
+        native_functions ops.
+        """
         device = torch.device("rbln:1")
         # 128 bytes = 64 elements for float16 (2 bytes per element)
 
@@ -732,8 +734,7 @@ class TestDeviceOutputPlacement(TestCase):
                 x_mean = torch.mean(x, dim=-1, keepdim=True)
                 x = torch.maximum(x, x_mean)
                 # Final linear transformation
-                x = self.linear3(x)
-                return x
+                return self.linear3(x)
 
         model = ComplexModel128Aligned().to(device=device, dtype=dtype)
         x = torch.randn([4, 128], dtype=dtype, device=device)
@@ -751,7 +752,9 @@ class TestDeviceOutputPlacement(TestCase):
     @parametrize("binary_op", [torch.add, torch.mul, torch.sub])
     @parametrize("shape", [(4, 8), (4, 64)])
     def test_binary_ops_device_1(self, dtype, binary_op, shape):
-        """Test binary operation device placement (native_functions: add.out, mul.out, sub.out)."""
+        """Test binary operation device placement (native_functions: add.out, mul.out,
+        sub.out).
+        """
         device = torch.device("rbln:1")
         x = torch.randn(shape, dtype=dtype, device=device)
         y = torch.randn(shape, dtype=dtype, device=device)
@@ -774,7 +777,9 @@ class TestDeviceOutputPlacement(TestCase):
     @parametrize("unary_op", [torch.abs, torch.ceil, torch.floor, torch.neg, torch.sigmoid, torch.nn.functional.silu])
     @parametrize("shape", [(4, 8), (4, 64)])
     def test_unary_ops_device_1(self, dtype, unary_op, shape):
-        """Test unary operation device placement (native_functions: abs.out, ceil.out, neg.out, sigmoid.out, silu.out)."""
+        """Test unary operation device placement (native_functions: abs.out, ceil.out,
+        neg.out, sigmoid.out, silu.out).
+        """
         device = torch.device("rbln:1")
         x = torch.randn(shape, dtype=dtype, device=device)
 
@@ -814,7 +819,9 @@ class TestDeviceOutputPlacement(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("shape", [(4, 8), (4, 64)])
     def test_pow_tensor_scalar_device_1(self, dtype, shape):
-        """Test pow operation device placement (native_functions: pow.Tensor_Scalar_out)."""
+        """Test pow operation device placement (native_functions:
+        pow.Tensor_Scalar_out).
+        """
         device = torch.device("rbln:1")
         x = torch.randn(shape, dtype=dtype, device=device).abs() + 0.1  # ensure positive
 
@@ -835,7 +842,9 @@ class TestDeviceOutputPlacement(TestCase):
     @parametrize("reduction_op", [torch.maximum, torch.minimum])
     @parametrize("shape", [(4, 8), (4, 64)])
     def test_reduction_ops_device_1(self, dtype, reduction_op, shape):
-        """Test reduction operation device placement (native_functions: maximum.out, minimum.out)."""
+        """Test reduction operation device placement (native_functions:
+        maximum.out, minimum.out).
+        """
         device = torch.device("rbln:1")
         x = torch.randn(shape, dtype=dtype, device=device)
         y = torch.randn(shape, dtype=dtype, device=device)
@@ -872,7 +881,9 @@ class TestDeviceOutputPlacement(TestCase):
     @parametrize("comparison_op", [torch.eq, torch.ne, torch.gt, torch.ge, torch.lt, torch.le])
     @parametrize("shape", [(4, 8), (4, 64)])
     def test_comparison_ops_device_1(self, dtype, comparison_op, shape):
-        """Test comparison operations device placement (native_functions: eq, ne, gt, ge, lt, le)."""
+        """Test comparison operations device placement (native_functions: eq, ne, gt,
+        ge, lt, le).
+        """
         device = torch.device("rbln:1")
         x = torch.randn(shape, dtype=dtype, device=device)
         y = torch.randn(shape, dtype=dtype, device=device)
@@ -884,7 +895,9 @@ class TestDeviceOutputPlacement(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("shape", [(4, 8), (4, 64)])
     def test_logical_not_device_1(self, dtype, shape):
-        """Test logical_not operation device placement (native_functions: logical_not.out)."""
+        """Test logical_not operation device placement (native_functions:
+        logical_not.out).
+        """
         device = torch.device("rbln:1")
         x = torch.randn(shape, dtype=dtype, device=device) > 0
 

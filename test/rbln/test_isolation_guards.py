@@ -4,24 +4,28 @@
 
 These pin the guards that stop one test's process-scoped mutations from leaking into
 later tests on the same pytest-xdist worker (the class of bug behind the intermittent
-profiler / pinned-copy CI failures)."""
+profiler / pinned-copy CI failures).
+"""
 
+import contextlib
 import importlib.util
 import inspect
 import os
 import sys
-from collections import namedtuple
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests
 
 import torch_rbln
+import torch_rbln._internal.kernels.sdpa as sdpa_mod
+from torch_rbln._internal.ops_utils import _parse_disabled_fallback_cases
 
 
-# Deselected by rebel_compiler's CI (`-m "not torch_rbln_only"`); see the marker in pyproject.
-# Pins the test harness's own guards in test/conftest.py.
+# Deselected by rebel_compiler's CI (`-m "not torch_rbln_only"`); see the marker in
+# pyproject. Pins the test harness's own guards in test/conftest.py.
 pytestmark = pytest.mark.torch_rbln_only
 
 
@@ -31,7 +35,8 @@ _dev = sys.modules[torch_rbln.device.set_device.__module__]
 
 
 def _load_root_conftest():
-    # Path-relative (not cwd-relative): test/rbln/test_isolation_guards.py -> test/conftest.py.
+    # Path-relative (not cwd-relative): test/rbln/test_isolation_guards.py ->
+    # test/conftest.py.
     conftest_path = Path(__file__).resolve().parents[1] / "conftest.py"
     spec = importlib.util.spec_from_file_location("rbln_root_conftest", conftest_path)
     module = importlib.util.module_from_spec(spec)
@@ -41,20 +46,20 @@ def _load_root_conftest():
 
 def _run_setup_teardown(fixture, *args):
     """Drive an autouse generator fixture through setup + teardown so its teardown side
-    effects can be asserted directly."""
+    effects can be asserted directly.
+    """
     gen = fixture.__wrapped__(*args)
     next(gen)  # setup, up to yield
-    try:
+    with contextlib.suppress(StopIteration):
         next(gen)  # teardown, past yield
-    except StopIteration:
-        pass
 
 
 @pytest.mark.npu(count=1)
 def test_restore_current_device_does_not_leak_initialized():
-    """restore_current_device must not flip ``_initialized`` on a test that never touched the
-    device: it snapshots the flag and restores it, and skips set_device when the index is
-    unchanged."""
+    """restore_current_device must not flip ``_initialized`` on a test that never
+    touched the device: it snapshots the flag and restores it, and skips set_device when
+    the index is unchanged.
+    """
     conftest = _load_root_conftest()
     saved = _dev._initialized
     try:
@@ -65,12 +70,14 @@ def test_restore_current_device_does_not_leak_initialized():
         _dev._initialized = saved
 
 
-# The device functions are patched directly on the module (not via the monkeypatch fixture)
-# and restored in a finally inside the test body, so they are back to real BEFORE the real
-# autouse restore_current_device fixture tears down and would otherwise call the mock.
+# The device functions are patched directly on the module (not via the monkeypatch
+# fixture) and restored in a finally inside the test body, so they are back to real
+# BEFORE the real autouse restore_current_device fixture tears down and would otherwise
+# call the mock.
 def test_restore_current_device_restores_changed_index():
-    """When a test moves the current device index, restore_current_device must set it back in
-    teardown -- and only then (device-independent via patched device functions)."""
+    """When a test moves the current device index, restore_current_device must set it
+    back in teardown -- and only then (device-independent via patched device functions).
+    """
     conftest = _load_root_conftest()
     state = {"idx": 0}
     set_calls = []
@@ -87,10 +94,8 @@ def test_restore_current_device_restores_changed_index():
         gen = conftest.restore_current_device.__wrapped__()
         next(gen)  # setup: saved = current_device() = 0
         state["idx"] = 1  # a "test" moved the current device
-        try:
+        with contextlib.suppress(StopIteration):
             next(gen)  # teardown: current_device() 1 != 0 -> set_device(0)
-        except StopIteration:
-            pass
         assert set_calls == [0]
         assert state["idx"] == 0
     finally:
@@ -98,9 +103,10 @@ def test_restore_current_device_restores_changed_index():
 
 
 def test_restore_current_device_propagates_restore_failure():
-    """A device-index restore failure must propagate as a teardown error, not be swallowed
-    while _initialized is rolled back -- which would hand later tests a mismatched
-    (index moved, flag old) state."""
+    """A device-index restore failure must propagate as a teardown error, not be
+    swallowed while _initialized is rolled back -- which would hand later tests a
+    mismatched (index moved, flag old) state.
+    """
     conftest = _load_root_conftest()
     state = {"idx": 0}
     orig = (_dev.device_count, _dev.current_device, _dev.set_device)
@@ -109,8 +115,9 @@ def test_restore_current_device_propagates_restore_failure():
         _dev.device_count = lambda: 2
         _dev.current_device = lambda: state["idx"]
 
-        def _boom(i):
-            raise RuntimeError("synthetic set_device failure")
+        def _boom(i):  # noqa: ARG001
+            msg = "synthetic set_device failure"
+            raise RuntimeError(msg)
 
         _dev.set_device = _boom
         _dev._initialized = False  # pre-test flag
@@ -127,17 +134,21 @@ def test_restore_current_device_propagates_restore_failure():
 
 
 def test_caching_allocator_teardown_fails_loud_and_skips_flush_on_sync_error(monkeypatch):
-    """A drain (synchronize) failure means the device may still have in-flight DMA, so the
-    teardown must fail loud AND NOT flush -- freeing a faulted device's blocks would re-open
-    the async-buffer race (and empty_cache clears the process-global WarmCache)."""
+    """A drain (synchronize) failure means the device may still have in-flight DMA, so
+    the teardown must fail loud AND NOT flush -- freeing a faulted device's blocks would
+    re-open the async-buffer race (and empty_cache clears the process-global
+    WarmCache).
+    """
     conftest = _load_root_conftest()
     flushed = []
 
-    def _sync_boom(idx):
-        raise RuntimeError("sync fault")
+    def _sync_boom(idx):  # noqa: ARG001
+        msg = "sync fault"
+        raise RuntimeError(msg)
 
-    # context() restores the patches on block exit -- success OR assertion failure -- before
-    # the real autouse reset_caching_allocator teardown runs, so it never calls the patched fns.
+    # context() restores the patches on block exit -- success OR assertion failure --
+    # before the real autouse reset_caching_allocator teardown runs, so it never calls
+    # the patched fns.
     with monkeypatch.context() as m:
         m.setattr(torch_rbln.device, "device_count", lambda: 1)
         m.setattr(torch.rbln, "synchronize", _sync_boom)
@@ -152,16 +163,19 @@ def test_caching_allocator_teardown_fails_loud_and_skips_flush_on_sync_error(mon
 
 def test_caching_allocator_teardown_reports_flush_error(monkeypatch):
     """When the drain succeeds, the flush runs; an empty_cache failure must be surfaced
-    (aggregated), not hidden."""
+    (aggregated), not hidden.
+    """
     conftest = _load_root_conftest()
 
-    def _flush_boom(device):
-        raise RuntimeError("flush fault")
+    def _flush_boom(device):  # noqa: ARG001
+        msg = "flush fault"
+        raise RuntimeError(msg)
 
-    # context() restores the patches on block exit before the real autouse teardown runs.
+    # context() restores the patches on block exit before the real autouse teardown
+    # runs.
     with monkeypatch.context() as m:
         m.setattr(torch_rbln.device, "device_count", lambda: 1)
-        m.setattr(torch.rbln, "synchronize", lambda idx: None)
+        m.setattr(torch.rbln, "synchronize", lambda idx: None)  # noqa: ARG005
         m.setattr(torch_rbln.memory, "empty_cache", _flush_boom)
 
         gen = conftest.reset_caching_allocator.__wrapped__()
@@ -171,13 +185,15 @@ def test_caching_allocator_teardown_reports_flush_error(monkeypatch):
 
 
 def test_drain_failure_poisons_worker_and_skips_rest(monkeypatch):
-    """End-to-end: a drain failure in teardown sets the poison flag, and pytest_runtest_setup
-    then skips (before any fixture). Driven on a fresh conftest instance so the real session
-    isn't poisoned."""
+    """End-to-end: a drain failure in teardown sets the poison flag, and
+    pytest_runtest_setup then skips (before any fixture). Driven on a fresh conftest
+    instance so the real session isn't poisoned.
+    """
     conftest = _load_root_conftest()
 
-    def _sync_boom(idx):
-        raise RuntimeError("sync fault")
+    def _sync_boom(idx):  # noqa: ARG001
+        msg = "sync fault"
+        raise RuntimeError(msg)
 
     with monkeypatch.context() as m:
         m.setattr(torch_rbln.device, "device_count", lambda: 1)
@@ -193,17 +209,16 @@ def test_drain_failure_poisons_worker_and_skips_rest(monkeypatch):
 
 
 def test_clean_teardown_order_sync_then_sdpa_clear_then_flush(monkeypatch):
-    """A clean drain must run synchronize -> drop the SDPA cache -> empty_cache, so the cache's
-    device tensors are released before the flush that reclaims their blocks."""
-    import torch_rbln._internal.kernels.sdpa as sdpa_mod
-
+    """A clean drain must run synchronize -> drop the SDPA cache -> empty_cache, so the
+    cache's device tensors are released before the flush that reclaims their blocks.
+    """
     conftest = _load_root_conftest()
     calls = []
     with monkeypatch.context() as m:
         m.setattr(torch_rbln.device, "device_count", lambda: 1)
-        m.setattr(torch.rbln, "synchronize", lambda idx: calls.append("sync"))
+        m.setattr(torch.rbln, "synchronize", lambda idx: calls.append("sync"))  # noqa: ARG005
         m.setattr(sdpa_mod, "_clear_attn_weights_cache", lambda: calls.append("sdpa_clear"))
-        m.setattr(torch_rbln.memory, "empty_cache", lambda device: calls.append("flush"))
+        m.setattr(torch_rbln.memory, "empty_cache", lambda device: calls.append("flush"))  # noqa: ARG005
         gen = conftest.reset_caching_allocator.__wrapped__()
         next(gen)
         with pytest.raises(StopIteration):
@@ -212,17 +227,24 @@ def test_clean_teardown_order_sync_then_sdpa_clear_then_flush(monkeypatch):
 
 
 def test_stream_guard_restores_the_stream_a_test_moved_and_the_device_guard_the_index(monkeypatch):
-    """Driven through both guards, from an entry state that is not the default stream, with
-    set_stream's device selection modelled: the stream guard restores what the test found (not
-    a default) and only for the devices that moved, and restore_current_device -- which the
-    fixture argument orders after it -- puts the index back that set_stream moved."""
+    """Driven through both guards, from an entry state that is not the default stream,
+    with set_stream's device selection modeled: the stream guard restores what the test
+    found (not a default) and only for the devices that moved, and
+    restore_current_device -- which the fixture argument orders after it -- puts the
+    index back that set_stream moved.
+    """
     conftest = _load_root_conftest()
-    stream = namedtuple("stream", "device_index stream_id")  # the fixture reads device_index and ==
-    # The fixture argument is what orders the two teardowns; pin it rather than assume it.
+
+    class Stream(NamedTuple):  # the fixture reads device_index and ==
+        device_index: int
+        stream_id: int
+
+    # The fixture argument is what orders the two teardowns; pin it rather than assume
+    # it.
     assert "restore_current_device" in inspect.signature(conftest.restore_current_stream.__wrapped__).parameters
 
-    # rbln:0 enters on a non-default stream, so restoring the snapshot and resetting to the
-    # default are different outcomes; rbln:2 never moves.
+    # rbln:0 enters on a non-default stream, so restoring the snapshot and resetting to
+    # the default are different outcomes; rbln:2 never moves.
     state = {"device": 0, "streams": {0: 4, 1: 0, 2: 2}}
     set_calls = []
 
@@ -233,7 +255,7 @@ def test_stream_guard_restores_the_stream_a_test_moved_and_the_device_guard_the_
 
     with monkeypatch.context() as m:
         m.setattr(torch.rbln, "device_count", lambda: 3)
-        m.setattr(torch.rbln, "current_stream", lambda index: stream(index, state["streams"][index]))
+        m.setattr(torch.rbln, "current_stream", lambda index: Stream(index, state["streams"][index]))
         m.setattr(torch.rbln, "set_stream", _set_stream)
         m.setattr(_dev, "device_count", lambda: 3)
         m.setattr(_dev, "current_device", lambda: state["device"])
@@ -254,13 +276,15 @@ def test_stream_guard_restores_the_stream_a_test_moved_and_the_device_guard_the_
         with pytest.raises(StopIteration):
             next(device_guard)  # then the index goes back
 
-    assert set_calls == [stream(0, 4), stream(1, 0)]  # rbln:2 did not move, so it is left alone
+    assert set_calls == [Stream(0, 4), Stream(1, 0)]  # rbln:2 did not move, so it is left alone
     assert state["streams"] == {0: 4, 1: 0, 2: 2}  # restored to what the test found, not to default
     assert state["device"] == 0
 
 
 def _with_env(var, value, fn):
-    """Run fn() with env var set to value (None = unset), then restore the prior value."""
+    """Run fn() with env var set to value (None = unset), then restore the prior
+    value.
+    """
     old = os.environ.get(var)
     try:
         if value is None:
@@ -276,10 +300,10 @@ def _with_env(var, value, fn):
 
 
 def test_python_disabled_fallback_gate_reads_env_live():
-    """The Python cold-path gate must read the env live too, matching the C++ warm-path gate
-    (else warm/cold dispatch disagree and the value latches across an xdist worker). It was
-    previously @lru_cache'd."""
-    from torch_rbln._internal.ops_utils import _parse_disabled_fallback_cases
+    """The Python cold-path gate must read the env live too, matching the C++ warm-path
+    gate (else warm/cold dispatch disagree and the value latches across an xdist
+    worker). It was previously @lru_cache'd.
+    """
 
     def has_nan_inf():
         return "nan_inf" in _parse_disabled_fallback_cases()

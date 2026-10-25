@@ -11,8 +11,9 @@
 //      this header in ProcessGroupRBLN.cpp.
 //   3. Delete the RdmaIpAutoDiscovery.cpp entry in the sibling CMakeLists.txt.
 //
-// `grep -rn "MaybeAutoDiscoverRbnRdmaIp\|RdmaIpAutoDiscovery\|RBLN_DISABLE_AUTO_RDMA_IP"`
-// must return zero matches once removal is complete.
+// These commands must return zero matches once removal is complete:
+//   grep -rn -e MaybeAutoDiscoverRbnRdmaIp -e RdmaIpAutoDiscovery
+//   grep -rn RBLN_DISABLE_AUTO_RDMA_IP
 //
 // The rest of the codebase communicates with this code only via the
 // RBLN_RDMA_IP environment variable, so removal does not require touching
@@ -21,8 +22,8 @@
 #pragma once
 
 // NOTE: must NOT be nested under namespace c10d -- a nested `rbln` namespace
-// there would shadow the top-level `::rbln` (rebel-compiler runtime) and break
-// every `rbln::MemoryInfo` / `rbln::DataType` reference inside c10d code.
+// there would shadow the top-level `::rbln` (`rebel-compiler` runtime) and
+// break every `rbln::MemoryInfo` / `rbln::DataType` reference inside c10d code.
 namespace torch_rbln::detail {
 
 // Resolve RBLN_RDMA_IP for the running process. Resolution priority:

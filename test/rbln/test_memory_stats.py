@@ -1,5 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
+import contextlib
 import os
 from unittest.mock import patch
 
@@ -7,6 +8,8 @@ import pytest
 import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
+
+from torch_rbln._internal.rsd_utils import get_physical_device_ids
 
 
 # Deselected by rebel_compiler's CI (-m "not torch_rbln_only");
@@ -82,15 +85,12 @@ class TestMemoryStats(TestCase):
 
     def tearDown(self):
         """Clean up after each test."""
-        try:
+        with contextlib.suppress(Exception):
             # Clean up dummy tensor used for 2MB alignment
             if hasattr(self, "dummy_tensor") and self.dummy_tensor is not None:
                 del self.dummy_tensor
                 self.dummy_tensor = None
             torch.rbln.empty_cache(self.device)
-        except Exception:
-            # Ignore cleanup errors
-            pass
 
     def _measure_alloc_granularity(self):
         """Probe the allocator's per-allocation rounding granularity in bytes.
@@ -129,7 +129,6 @@ class TestMemoryStats(TestCase):
 
     def test_basic_stats_operations(self):
         """Test basic memory stats operations (matching C++ BasicStatsOperations)."""
-
         # Get baseline stats (should be 0 or minimal after setUp)
         stats_baseline = torch.rbln.memory_stats(self.device)
 
@@ -269,7 +268,9 @@ class TestMemoryStats(TestCase):
         self.assertEqual(stats_baseline["cached.current"], stats_after_empty_cache["cached.current"])
 
     def test_malloc_free_with_stats(self):
-        """Test malloc/free with detailed stats tracking (matching C++ RuntimeAPI_malloc_free_with_stats)."""
+        """Test malloc/free with detailed stats tracking (matching C++
+        RuntimeAPI_malloc_free_with_stats).
+        """
         # Get baseline stats
         stats_baseline = torch.rbln.memory_stats(self.device)
 
@@ -352,24 +353,22 @@ class TestMemoryStats(TestCase):
         self.assertEqual(stats_baseline["cached.peak"] + expected_reserved, stats_after["cached.peak"])
 
     def test_invalid_device_id(self):
-        """Test invalid device ID handling (matching C++ RuntimeAPI_invalid_device_id)."""
-
+        """Test invalid device ID handling (matching C++
+        RuntimeAPI_invalid_device_id).
+        """
         # Test with invalid device IDs that don't immediately raise exceptions
         invalid_devices = [-1]  # Only test integer device IDs that might be handled gracefully
 
         for invalid_device in invalid_devices:
             # These should not raise exceptions but may return default values
             # or handle gracefully depending on implementation
-            try:
+            with contextlib.suppress(RuntimeError, ValueError):
                 torch.rbln.empty_cache(invalid_device)
                 torch.rbln.reset_accumulated_memory_stats(invalid_device)
                 torch.rbln.reset_peak_memory_stats(invalid_device)
                 stats = torch.rbln.memory_stats(invalid_device)
                 # If no exception is raised, stats should be reasonable
                 self.assertIsInstance(stats, dict)
-            except (RuntimeError, ValueError):
-                # Expected behavior for invalid device IDs
-                pass
 
         # Test string device IDs separately since they raise exceptions immediately
         try:
@@ -380,7 +379,9 @@ class TestMemoryStats(TestCase):
             pass
 
     def test_reset_peak_memory_stats(self):
-        """Test reset peak memory stats functionality (matching C++ RuntimeAPI_reset_peak_memory_stats)."""
+        """Test reset peak memory stats functionality (matching C++
+        RuntimeAPI_reset_peak_memory_stats).
+        """
         # Get baseline stats
         stats_baseline = torch.rbln.memory_stats(self.device)
 
@@ -411,7 +412,9 @@ class TestMemoryStats(TestCase):
         torch.rbln.empty_cache(self.device)
 
     def test_reset_accumulated_memory_stats(self):
-        """Test reset accumulated memory stats functionality (matching C++ RuntimeAPI_reset_accumulated_memory_stats)."""
+        """Test reset accumulated memory stats functionality (matching C++
+        RuntimeAPI_reset_accumulated_memory_stats).
+        """
         # Get baseline stats
         stats_baseline = torch.rbln.memory_stats(self.device)
 
@@ -450,7 +453,9 @@ class TestMemoryStats(TestCase):
         torch.rbln.empty_cache(self.device)
 
     def test_get_memory_stats(self):
-        """Test get memory stats functionality (matching C++ RuntimeAPI_get_memory_stats)."""
+        """Test get memory stats functionality (matching C++
+        RuntimeAPI_get_memory_stats).
+        """
         # Test with valid device_id - get baseline stats
         stats_baseline = torch.rbln.memory_stats(self.device)
 
@@ -610,7 +615,7 @@ class TestMemoryStats(TestCase):
         stats = torch.rbln.memory_stats(self.device)
 
         # Check key naming convention
-        for key in stats.keys():
+        for key in stats:
             self.assertTrue(
                 key.endswith((".current", ".peak", ".total_allocated", ".total_freed"))
                 or key.startswith(("num_", "active_", "cached_")),
@@ -636,7 +641,8 @@ class TestMemoryStats(TestCase):
 @pytest.mark.npu(count=1)
 @pytest.mark.usefixtures("enable_eager_malloc")
 class TestAcceleratorMemoryAPI(TestCase):
-    """Tests for torch.accelerator.* memory APIs backed by RBLNAllocator.DeviceAllocator.
+    """Tests for torch.accelerator.* memory APIs backed by
+    RBLNAllocator.DeviceAllocator.
 
     These tests exercise the DeviceAllocator interface path (getDeviceStats,
     resetAccumulatedStats, resetPeakStats, emptyCache, initialized) independently
@@ -645,16 +651,11 @@ class TestAcceleratorMemoryAPI(TestCase):
     """
 
     def setUp(self):
-        try:
-            import torch_rbln  # noqa: F401 — registers the rbln backend
-        except ImportError:
-            self.skipTest("torch_rbln is not installed")
-
-        # Establish allocator state so the torch.accelerator memory APIs report full stats.
-        # Before the first allocation the allocator is uninitialized, and upstream's
-        # torch.accelerator.memory_stats() returns an empty dict via its init guard — so
-        # without this warmup these tests would be order-dependent (only passing when an
-        # earlier test in the process happened to allocate first).
+        # Establish allocator state so the torch.accelerator memory APIs report full
+        # stats. Before the first allocation the allocator is uninitialized, and
+        # upstream's torch.accelerator.memory_stats() returns an empty dict via its init
+        # guard — so without this warmup these tests would be order-dependent (only
+        # passing when an earlier test in the process happened to allocate first).
         warmup = torch.empty(1, device="rbln:0")
         del warmup
 
@@ -728,7 +729,9 @@ class TestAcceleratorMemoryAPI(TestCase):
         )
 
     def test_memory_allocated_consistent_with_stats(self):
-        """memory_allocated() must equal allocated_bytes.all.current in memory_stats()."""
+        """memory_allocated() must equal allocated_bytes.all.current in
+        memory_stats().
+        """
         # Sample both in close succession; no allocation between calls.
         stats = torch.accelerator.memory_stats()
         allocated = torch.accelerator.memory_allocated()
@@ -741,7 +744,9 @@ class TestAcceleratorMemoryAPI(TestCase):
         self.assertEqual(reserved, stats["reserved_bytes.all.current"])
 
     def test_accelerator_stats_consistent_with_rbln_stats(self):
-        """DeviceAllocator path must report the same underlying values as torch.rbln path."""
+        """DeviceAllocator path must report the same underlying values as torch.rbln
+        path.
+        """
         device = "rbln:0"
         rbln_stats = torch.rbln.memory_stats(device)
         acc_stats = torch.accelerator.memory_stats()
@@ -820,14 +825,14 @@ class TestAcceleratorMemoryAPI(TestCase):
         value rather than a lazy-mode zero.
         """
         device = "rbln:0"
-        MB_1 = 1024 * 1024
+        mb_1 = 1024 * 1024
         tensor = torch.empty(512 * 1024, dtype=torch.float16, device=device)
         try:
             rbln_stats = torch.rbln.memory_stats(device)
             acc_stats = torch.accelerator.memory_stats()
 
             # Physical allocation must be visible (eager malloc is active).
-            self.assertGreaterEqual(acc_stats["allocated_bytes.all.current"], MB_1)
+            self.assertGreaterEqual(acc_stats["allocated_bytes.all.current"], mb_1)
 
             # All four byte categories must match exactly.
             self.assertEqual(
@@ -857,7 +862,7 @@ class TestAcceleratorMemoryAPI(TestCase):
         each stage, confirming no divergence in the getDeviceStats() mapping.
         """
         device = "rbln:0"
-        MB_1 = 1024 * 1024
+        mb_1 = 1024 * 1024
 
         # --- Baseline (clean state after setUp) ---
         rbln_base = torch.rbln.memory_stats(device)
@@ -880,17 +885,17 @@ class TestAcceleratorMemoryAPI(TestCase):
                 acc_alloc["reserved_bytes.all.current"],
                 rbln_alloc["reserved.current"],
             )
-            # Exact delta must equal MB_1.
+            # Exact delta must equal mb_1.
             self.assertEqual(
                 rbln_alloc["allocated.current"] - rbln_base["allocated.current"],
-                MB_1,
+                mb_1,
             )
             self.assertEqual(
                 acc_alloc["allocated_bytes.all.current"] - acc_base["allocated_bytes.all.current"],
-                MB_1,
+                mb_1,
             )
             # Peak must reflect the live allocation.
-            self.assertGreaterEqual(rbln_alloc["allocated.peak"], MB_1)
+            self.assertGreaterEqual(rbln_alloc["allocated.peak"], mb_1)
             self.assertEqual(acc_alloc["allocated_bytes.all.peak"], rbln_alloc["allocated.peak"])
         finally:
             del tensor
@@ -904,7 +909,7 @@ class TestAcceleratorMemoryAPI(TestCase):
         self.assertEqual(acc_free["allocated_bytes.all.current"], rbln_free["allocated.current"])
         self.assertEqual(rbln_free["allocated.current"], rbln_base["allocated.current"])
         # Peak must be retained after free.
-        self.assertGreaterEqual(rbln_free["allocated.peak"], MB_1)
+        self.assertGreaterEqual(rbln_free["allocated.peak"], mb_1)
         self.assertEqual(acc_free["allocated_bytes.all.peak"], rbln_free["allocated.peak"])
 
     def test_stats_consistency_after_reset_accumulated(self):
@@ -948,7 +953,7 @@ class TestAcceleratorMemoryAPI(TestCase):
         peak and agree on the post-reset value.
         """
         device = "rbln:0"
-        MB_1 = 1024 * 1024
+        mb_1 = 1024 * 1024
 
         # Generate a non-zero peak.
         tensor = torch.empty(512 * 1024, dtype=torch.float16, device=device)
@@ -956,7 +961,7 @@ class TestAcceleratorMemoryAPI(TestCase):
             # Pre-reset: both APIs must agree on non-zero peak.
             rbln_pre = torch.rbln.memory_stats(device)
             acc_pre = torch.accelerator.memory_stats()
-            self.assertGreaterEqual(rbln_pre["allocated.peak"], MB_1)
+            self.assertGreaterEqual(rbln_pre["allocated.peak"], mb_1)
             self.assertEqual(acc_pre["allocated_bytes.all.peak"], rbln_pre["allocated.peak"])
 
             # Reset via accelerator API.
@@ -1035,9 +1040,9 @@ class TestPerChipletMemoryStats(TestCase):
 
     @pytest.mark.npu(count=1)
     def test_summary_rows_carry_physical_npu_ids(self):
-        """Row `npu` is the id device_summary() prints, not the NPU's position in the device."""
-        from torch_rbln._internal.rsd_utils import get_physical_device_ids
-
+        """Row `npu` is the id device_summary() prints, not the NPU's position in the
+        device.
+        """
         physical = get_physical_device_ids(0)
         self.assertTrue(physical)
         summary = torch.rbln.memory_summary(self.device)
@@ -1047,7 +1052,9 @@ class TestPerChipletMemoryStats(TestCase):
 
     @pytest.mark.npu(count=1)
     def test_summary_without_device(self):
-        """No RBLN device / uninitialized allocator degrades to a notice, not a raise."""
+        """No RBLN device / uninitialized allocator degrades to a notice, not a
+        raise.
+        """
         with patch("torch_rbln.memory.memory_stats_per_chiplet", return_value={}):
             summary = torch.rbln.memory_summary(self.device)
         self.assertIn("no statistics", summary)

@@ -50,7 +50,7 @@ _RUNTIME_HOLDER_KEY = "_runtime_holder"
 class _IdentityKey:
     """Hashable identity wrapper that keeps the referenced object alive."""
 
-    __slots__ = ("value", "_hash")
+    __slots__ = ("_hash", "value")
 
     def __init__(self, value: Any):
         self.value = value
@@ -95,9 +95,10 @@ def _options_cache_view(options: Mapping[str, Any] | None) -> Mapping[str, Any]:
 
 class CompiledOp:
     """A compiled callable, the runtimes the rebel backend built for it, and
-    how a call's tensors map onto the graph's inputs once that is known."""
+    how a call's tensors map onto the graph's inputs once that is known.
+    """
 
-    __slots__ = ("compiled", "runtime_holder", "input_order", "copy_fallback_warned")
+    __slots__ = ("compiled", "copy_fallback_warned", "input_order", "runtime_holder")
 
     def __init__(self, compiled: Any, runtime_holder: list):
         self.compiled = compiled

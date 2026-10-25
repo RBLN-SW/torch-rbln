@@ -3,10 +3,10 @@
 // Dummy mode presents host-backed logical device(s) with no NPU, so a model can
 // be constructed and compiled without hardware. Allocations and transfers are
 // backed by rebel's v-memory (a host mirror) through a dummy runtime context —
-// torch adds no host-memory shim of its own. The returned device pointer is an
-// opaque v-memory handle, NOT host-dereferenceable, so these tests move data
-// only through memcpy_h2v / memcpy_v2h / memcpy_v2v. Kernel/graph execution
-// still requires a real NPU (guarded elsewhere).
+// `torch-rbln` adds no host-memory shim of its own. The returned device pointer
+// is an opaque v-memory handle, NOT host-dereferenceable, so these tests move
+// data only through memcpy_h2v / memcpy_v2h / memcpy_v2v. Kernel/graph
+// execution still requires a real NPU (guarded elsewhere).
 //
 // The env MUST be set before the DeviceMappingManager singleton initializes (it
 // reads the flags once at init). A file-scope static initializer sets them
@@ -16,8 +16,8 @@
 #include <c10/rbln/RBLNFunctions.h>
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cstdlib>
-#include <cstring>
 #include <vector>
 
 namespace {
@@ -46,19 +46,19 @@ TEST(RBLNDummyDeviceTest, AllocateAndTransferViaVMemory) {
   ASSERT_NO_THROW(dev = c10::rbln::malloc(/*device_index=*/0, kBytes));
   ASSERT_NE(dev, nullptr);
 
-  const float src[4] = {1.0F, -2.0F, 3.5F, 42.0F};
-  float dst[4] = {0, 0, 0, 0};
-  ASSERT_NO_THROW(c10::rbln::memcpy_h2v(dev, src, kBytes));
-  ASSERT_NO_THROW(c10::rbln::memcpy_v2h(dst, dev, kBytes));
-  EXPECT_EQ(0, std::memcmp(src, dst, kBytes));
+  const std::array<float, 4> src = {1.0F, -2.0F, 3.5F, 42.0F};
+  std::array<float, 4> dst{};
+  ASSERT_NO_THROW(c10::rbln::memcpy_h2v(dev, src.data(), kBytes));
+  ASSERT_NO_THROW(c10::rbln::memcpy_v2h(dst.data(), dev, kBytes));
+  EXPECT_EQ(src, dst);
 
   // v2v between two device buffers round-trips the same bytes.
   void* dev2 = c10::rbln::malloc(/*device_index=*/0, kBytes);
   ASSERT_NE(dev2, nullptr);
   ASSERT_NO_THROW(c10::rbln::memcpy_v2v(dev2, dev, kBytes));
-  float dst2[4] = {0, 0, 0, 0};
-  c10::rbln::memcpy_v2h(dst2, dev2, kBytes);
-  EXPECT_EQ(0, std::memcmp(src, dst2, kBytes));
+  std::array<float, 4> dst2{};
+  c10::rbln::memcpy_v2h(dst2.data(), dev2, kBytes);
+  EXPECT_EQ(src, dst2);
 
   c10::rbln::free(dev);
   c10::rbln::free(dev2);
@@ -73,7 +73,8 @@ TEST(RBLNDummyDeviceTest, GetTorchDeviceIdResolvesOwningDevice) {
   ASSERT_NE(d1, nullptr);
   EXPECT_EQ(c10::rbln::get_torch_device_id(d0), 0);
   EXPECT_EQ(c10::rbln::get_torch_device_id(d1), 1);
-  EXPECT_EQ(c10::rbln::get_torch_device_id(d1 + 16), 1); // interior/view pointer
+  EXPECT_EQ(
+      c10::rbln::get_torch_device_id(d1 + 16), 1); // interior/view pointer
   EXPECT_EQ(c10::rbln::get_torch_device_id(d1 + 63), 1); // last byte
   c10::rbln::free(d0);
   c10::rbln::free(d1);
@@ -83,9 +84,11 @@ TEST(RBLNDummyDeviceTest, FreeRejectsDoubleAndStale) {
   void* p = c10::rbln::malloc(/*device_index=*/0, 32);
   ASSERT_NE(p, nullptr);
   ASSERT_NO_THROW(c10::rbln::free(p)); // first free succeeds
-  EXPECT_THROW(c10::rbln::free(p), c10::Error); // double free rejected (no abort)
+  EXPECT_THROW(
+      c10::rbln::free(p), c10::Error); // double free rejected (no abort)
   int stack_var = 0;
-  EXPECT_THROW(c10::rbln::free(&stack_var), c10::Error); // unknown pointer rejected
+  EXPECT_THROW(
+      c10::rbln::free(&stack_var), c10::Error); // unknown pointer rejected
 }
 
 TEST(RBLNDummyDeviceTest, TransfersAndBorrowsRejectOutOfBounds) {
@@ -93,40 +96,43 @@ TEST(RBLNDummyDeviceTest, TransfersAndBorrowsRejectOutOfBounds) {
   constexpr size_t kBytes = 4 * sizeof(int32_t);
   void* dev = c10::rbln::malloc(/*device_index=*/0, kBytes);
   ASSERT_NE(dev, nullptr);
-  int32_t host[8] = {};
-  EXPECT_THROW(c10::rbln::memcpy_h2v(dev, host, kBytes * 2), c10::Error);
-  EXPECT_THROW(c10::rbln::memcpy_v2h(host, dev, kBytes * 2), c10::Error);
+  std::array<int32_t, 8> host{};
+  EXPECT_THROW(c10::rbln::memcpy_h2v(dev, host.data(), kBytes * 2), c10::Error);
+  EXPECT_THROW(c10::rbln::memcpy_v2h(host.data(), dev, kBytes * 2), c10::Error);
   EXPECT_THROW(c10::rbln::borrow_host_ptr(dev, kBytes * 2), c10::Error);
   // An unknown device pointer is rejected too.
   int32_t stack = 0;
-  EXPECT_THROW(c10::rbln::memcpy_v2h(host, &stack, sizeof(int32_t)), c10::Error);
+  EXPECT_THROW(
+      c10::rbln::memcpy_v2h(host.data(), &stack, sizeof(int32_t)), c10::Error);
   c10::rbln::free(dev);
 }
 
 TEST(RBLNDummyDeviceTest, AsyncTransfersRoundTrip) {
-  // Async transfers complete on the dummy context (no handle/runtime); same data
-  // and bounds contract as the sync variants.
+  // Async transfers complete on the dummy context (no handle/runtime); same
+  // data and bounds contract as the sync variants.
   constexpr size_t kBytes = 4 * sizeof(float);
   void* a = c10::rbln::malloc(/*device_index=*/0, kBytes);
   void* b = c10::rbln::malloc(/*device_index=*/0, kBytes);
   ASSERT_NE(a, nullptr);
   ASSERT_NE(b, nullptr);
-  const float src[4] = {1.0F, -2.0F, 3.5F, 42.0F};
-  float dst[4] = {0, 0, 0, 0};
-  ASSERT_NO_THROW(c10::rbln::memcpy_h2v_async(a, src, kBytes));
+  const std::array<float, 4> src = {1.0F, -2.0F, 3.5F, 42.0F};
+  std::array<float, 4> dst{};
+  ASSERT_NO_THROW(c10::rbln::memcpy_h2v_async(a, src.data(), kBytes));
   ASSERT_NO_THROW(c10::rbln::memcpy_v2v_async(b, a, kBytes));
-  ASSERT_NO_THROW(c10::rbln::memcpy_v2h_async(dst, b, kBytes));
+  ASSERT_NO_THROW(c10::rbln::memcpy_v2h_async(dst.data(), b, kBytes));
   c10::rbln::synchronize(/*device_index=*/0);
-  EXPECT_EQ(0, std::memcmp(src, dst, kBytes));
-  EXPECT_THROW(c10::rbln::memcpy_h2v_async(a, src, kBytes * 2), c10::Error);
+  EXPECT_EQ(src, dst);
+  EXPECT_THROW(
+      c10::rbln::memcpy_h2v_async(a, src.data(), kBytes * 2), c10::Error);
   c10::rbln::free(a);
   c10::rbln::free(b);
 }
 
 TEST(RBLNDummyDeviceTest, BorrowAndAcquireProvideHostAccess) {
   // A borrow yields a valid host pointer (non-zero id) into the v-memory host
-  // mirror; writing through it with return_borrowed(updated=true) is reflected on
-  // a subsequent v2h read. borrow/try_borrow/acquire/try_acquire all succeed.
+  // mirror; writing through it with return_borrowed(updated=true) is reflected
+  // on a subsequent v2h read. borrow/try_borrow/acquire/try_acquire all
+  // succeed.
   constexpr size_t kBytes = 4 * sizeof(int32_t);
   void* dev = c10::rbln::malloc(/*device_index=*/0, kBytes);
   ASSERT_NE(dev, nullptr);
@@ -134,18 +140,22 @@ TEST(RBLNDummyDeviceTest, BorrowAndAcquireProvideHostAccess) {
   const auto borrow = c10::rbln::borrow_host_ptr(dev, kBytes);
   EXPECT_NE(borrow.borrow_id, 0U);
   ASSERT_NE(borrow.host_ptr, 0U);
+  // NOLINTNEXTLINE(performance-no-int-to-ptr)
   auto* hp = reinterpret_cast<int32_t*>(borrow.host_ptr);
   for (int32_t i = 0; i < 4; ++i) {
     hp[i] = i + 10;
   }
-  ASSERT_NO_THROW(c10::rbln::return_borrowed(borrow.borrow_id, /*updated=*/true));
-  int32_t out[4] = {};
-  c10::rbln::memcpy_v2h(out, dev, kBytes);
-  const int32_t expected[4] = {10, 11, 12, 13};
-  EXPECT_EQ(0, std::memcmp(expected, out, kBytes));
+  ASSERT_NO_THROW(
+      c10::rbln::return_borrowed(borrow.borrow_id, /*updated=*/true));
+  std::array<int32_t, 4> out{};
+  c10::rbln::memcpy_v2h(out.data(), dev, kBytes);
+  const std::array<int32_t, 4> expected = {10, 11, 12, 13};
+  EXPECT_EQ(expected, out);
 
   const auto tb = c10::rbln::try_borrow_host_ptr(dev, kBytes);
-  ASSERT_TRUE(tb.has_value());
+  if (!tb.has_value()) {
+    FAIL() << "try_borrow_host_ptr returned nullopt";
+  }
   EXPECT_NE(tb->borrow_id, 0U);
   c10::rbln::return_borrowed(tb->borrow_id, /*updated=*/false);
 
@@ -154,12 +164,15 @@ TEST(RBLNDummyDeviceTest, BorrowAndAcquireProvideHostAccess) {
   c10::rbln::return_borrowed(acq.borrow_id, /*updated=*/true);
 
   const auto ta = c10::rbln::try_acquire_host_ptr_for_overwrite(dev, kBytes);
-  ASSERT_TRUE(ta.has_value());
+  if (!ta.has_value()) {
+    FAIL() << "try_acquire_host_ptr_for_overwrite returned nullopt";
+  }
   c10::rbln::return_borrowed(ta->borrow_id, /*updated=*/false);
 
   // try_* return nullopt (no throw) for an out-of-range request.
   EXPECT_FALSE(c10::rbln::try_borrow_host_ptr(dev, kBytes * 2).has_value());
-  EXPECT_FALSE(c10::rbln::try_acquire_host_ptr_for_overwrite(dev, kBytes * 2).has_value());
+  EXPECT_FALSE(c10::rbln::try_acquire_host_ptr_for_overwrite(dev, kBytes * 2)
+                   .has_value());
 
   c10::rbln::free(dev);
 }
@@ -172,17 +185,20 @@ TEST(RBLNDummyDeviceTest, V2VMultiTransfers) {
   ASSERT_NE(src, nullptr);
   ASSERT_NE(d0, nullptr);
   ASSERT_NE(d1, nullptr);
-  const int32_t values[4] = {1, 2, 3, 4};
-  c10::rbln::memcpy_h2v(src, values, kBytes);
+  const std::array<int32_t, 4> values = {1, 2, 3, 4};
+  c10::rbln::memcpy_h2v(src, values.data(), kBytes);
 
   EXPECT_NO_THROW(c10::rbln::memcpy_v2v_multi({})); // empty is a no-op
-  std::vector<c10::rbln::V2VCopyOp> copies = {{d0, src, kBytes}, {d1, src, kBytes}};
+  std::vector<c10::rbln::V2VCopyOp> copies = {
+      {.dst = d0, .src = src, .nbytes = kBytes},
+      {.dst = d1, .src = src, .nbytes = kBytes}};
   ASSERT_NO_THROW(c10::rbln::memcpy_v2v_multi(copies));
-  int32_t out0[4] = {}, out1[4] = {};
-  c10::rbln::memcpy_v2h(out0, d0, kBytes);
-  c10::rbln::memcpy_v2h(out1, d1, kBytes);
-  EXPECT_EQ(0, std::memcmp(values, out0, kBytes));
-  EXPECT_EQ(0, std::memcmp(values, out1, kBytes));
+  std::array<int32_t, 4> out0{};
+  std::array<int32_t, 4> out1{};
+  c10::rbln::memcpy_v2h(out0.data(), d0, kBytes);
+  c10::rbln::memcpy_v2h(out1.data(), d1, kBytes);
+  EXPECT_EQ(values, out0);
+  EXPECT_EQ(values, out1);
 
   c10::rbln::free(src);
   c10::rbln::free(d0);
@@ -193,9 +209,12 @@ TEST(RBLNDummyDeviceTest, SynchronizeIsNoOp) {
   EXPECT_NO_THROW(c10::rbln::synchronize(/*device_index=*/0));
 }
 
-TEST(RBLNDummyDeviceTest, SetDeviceLayoutLikeRaisesGracefullyWithoutMaterializedRef) {
-  // Not special-cased for dummy: without a materialized ref (physical view) the op raises
-  // a catchable c10::Error -- same precondition as a real NPU, not a no-op or a crash.
+TEST(
+    RBLNDummyDeviceTest,
+    SetDeviceLayoutLikeRaisesGracefullyWithoutMaterializedRef) {
+  // Not special-cased for dummy: without a materialized ref (physical view) the
+  // op raises a catchable c10::Error -- same precondition as a real NPU, not a
+  // no-op or a crash.
   void* a = c10::rbln::malloc(/*device_index=*/0, 64);
   void* b = c10::rbln::malloc(/*device_index=*/0, 64);
   ASSERT_NE(a, nullptr);

@@ -208,7 +208,7 @@ uv pip install \
   --python .venv/bin/python \
   "${wheel}[runtime]"
 
-# pytest prepends the repository root to `sys.path`, where `./torch_rbln`
+# `pytest` prepends the repository root to `sys.path`, where `./torch_rbln`
 # would shadow the installed wheel.
 mv \
   ./torch_rbln \
@@ -235,7 +235,7 @@ env \
       -m "${selection} and serial" \
       --numprocesses=1 \
   || pytest_exit_code=$?
-# Exit 5 means pytest selected no tests, which is not a failure.
+# Exit 5 means `pytest` selected no tests, which is not a failure.
 if [[ "${pytest_exit_code}" -ne 0 && "${pytest_exit_code}" -ne 5 ]]; then
   failed_pytest_runs+=("serial tests (pytest exit code ${pytest_exit_code})")
 fi

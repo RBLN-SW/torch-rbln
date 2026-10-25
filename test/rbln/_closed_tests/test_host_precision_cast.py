@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
-"""
-Tests that host (CPU fallback) ops run with float16 without casting to custom_float16,
-so that precision is preserved and results match CPU float16 reference.
+"""Tests that host (CPU fallback) ops run with float16 without casting to
+custom_float16, so that precision is preserved and results match CPU float16 reference.
 
 Previously, float16 -> custom_float16 casting for device execution caused precision loss
 (e.g. div(..., rounding_mode='floor'/'trunc') giving wrong results). After the patch,
@@ -28,9 +27,9 @@ class TestHostPrecisionCast(TestCase):
     rbln_device = torch.device("rbln:0")
 
     def test_div_trunc_rounding_mode_float16(self):
-        """
-        div(..., rounding_mode='trunc') with float16.
-        When this path uses host fallback, result must match CPU float16 (no custom_float16 cast).
+        """div(..., rounding_mode='trunc') with float16.
+        When this path uses host fallback, result must match CPU float16 (no
+        custom_float16 cast).
         """
         a = torch.tensor(
             [DIV_SENSITIVE_POSITIVE, DIV_SENSITIVE_NEGATIVE, 7.5, -3.2],
@@ -53,9 +52,9 @@ class TestHostPrecisionCast(TestCase):
         )
 
     def test_div_floor_rounding_mode_float16(self):
-        """
-        div(..., rounding_mode='floor') with float16.
-        When this path uses host fallback, result must match CPU float16 (no custom_float16 cast).
+        """div(..., rounding_mode='floor') with float16.
+        When this path uses host fallback, result must match CPU float16 (no
+        custom_float16 cast).
         """
         a = torch.tensor(
             [7.5, DIV_SENSITIVE_POSITIVE, DIV_SENSITIVE_NEGATIVE],
@@ -78,8 +77,7 @@ class TestHostPrecisionCast(TestCase):
         )
 
     def test_div_by_one_float16_host_fallback(self):
-        """
-        div(..., 1) triggers CPU fallback (check_div_by_one_needs_fallback).
+        """div(..., 1) triggers CPU fallback (check_div_by_one_needs_fallback).
         Result must match CPU float16; no precision loss from host cast.
         """
         # Use values that are sensitive to precision (e.g. near boundary)
@@ -100,8 +98,7 @@ class TestHostPrecisionCast(TestCase):
         self.assertEqual(rbln_result.cpu(), cpu_result, msg="div by one (fallback) should match CPU float16")
 
     def test_mean_dim2_keepdim_float16(self):
-        """
-        torch.mean(x, dim=2, keepdim=True) with float16.
+        """torch.mean(x, dim=2, keepdim=True) with float16.
         When run on host (or with correct float16 path), result must match CPU float16.
         """
         # 3D shape so dim=2 is valid; include values that stress precision

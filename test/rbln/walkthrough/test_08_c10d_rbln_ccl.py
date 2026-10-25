@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Walkthrough example 8: c10d distributed on RBLN (`rbln-ccl` backend).
+"""Walkthrough example 8: c10d distributed on RBLN (`rbln-ccl` backend).
 
 Ported from walkthrough_guide/8.c10d_rbln_ccl.py.
 
@@ -50,7 +49,7 @@ def _run_all_reduce_sum(rank: int, world_size: int, backend: str) -> None:
         dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
 
         # Ranks are 0..world_size-1, so values are 1..world_size.
-        # SUM == world_size * (world_size + 1) / 2.
+        # Their sum is world_size * (world_size + 1) / 2.
         expected_sum = world_size * (world_size + 1) / 2.0
         assert tensor[0] == expected_sum, (
             f"all_reduce SUM failed on rank {rank}: expected {expected_sum}, got {tensor[0]}"
@@ -105,8 +104,8 @@ class TestC10dRBLNCCL(TestCase):
 
     def setUp(self):
         # Match the env setup used by test/distributed/test_process_group.py.
-        # Scoped to the test: these are process-global, and patch.dict restores the whole
-        # environment -- including the MASTER_PORT the helper below adds.
+        # Scoped to the test: these are process-global, and patch.dict restores the
+        # whole environment -- including the MASTER_PORT the helper below adds.
         env = mock.patch.dict(
             os.environ,
             {

@@ -3,8 +3,8 @@
 """Tests for the v2v-based copy refactor.
 
 These tests exercise the strided v2v engine and the always-v2v copy path
-through `tensor.copy_(other)` and `tensor.to(device)`. Coverage is organised by
-the property under test rather than by op:
+through `tensor.copy_(other)` and `tensor.to(device)`. Coverage is organized by the
+property under test rather than by op:
 
   - Engine: stride patterns that exercise contig_suffix_start logic on each
     side (contig / sliced / transposed / permuted / expanded / unfolded /
@@ -51,7 +51,8 @@ _STRIDED_PATTERNS = [
 
 def _noncontig_2d(shape, dtype, device):
     """A non-contig view of size `shape` on `device`. Uses [:N, :M] of a bigger
-    base so storage_offset=0 but stride[0] is larger than expected."""
+    base so storage_offset=0 but stride[0] is larger than expected.
+    """
     big = torch.empty((shape[0], shape[1] + 2), dtype=dtype, device=device)
     return big[:, : shape[1]]
 
@@ -60,7 +61,8 @@ def _noncontig_2d(shape, dtype, device):
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestCopyV2V(TestCase):
     """Tests for the v2v-based ``aten::copy_`` path and the strided
-    ``strided_v2v_copy`` engine that drives it."""
+    ``strided_v2v_copy`` engine that drives it.
+    """
 
     # ---- engine fast paths — both sides contig, or 0-D / single element ----
 
@@ -95,7 +97,8 @@ class TestCopyV2V(TestCase):
     @dtypes(torch.float16, torch.int32)
     def test_engine_dst_sliced_inner(self, dtype):
         """dst is a contig outer slice of a larger tensor; src is contig.
-        Inner-most dim stays contig in both → 1 strided range with outer K=axis-0 size."""
+        Inner-most dim stays contig in both → 1 strided range with outer K=axis-0 size.
+        """
         big_cpu = _arange_like((4, 12), dtype) * 0
         big_dev = _to_dev(big_cpu)
         dst_view = big_dev[:, :8]
@@ -173,7 +176,8 @@ class TestCopyV2V(TestCase):
     @dtypes(torch.int32)
     def test_engine_strided_step_inner(self, dtype):
         """Strided inner dim (step>1) breaks inner contig in src; engine must
-        handle one slab per surviving inner position."""
+        handle one slab per surviving inner position.
+        """
         src_cpu = _arange_like((4, 16), dtype)
         src_dev = _to_dev(src_cpu)
         src_view = src_dev[:, ::2]
@@ -197,7 +201,8 @@ class TestCopyV2V(TestCase):
     @dtypes(*ENGINE_DTYPES)
     def test_engine_broadcast_inner(self, dtype):
         """stride==0 on the innermost non-size-1 dim — engine must NOT absorb
-        it into the inner contig block."""
+        it into the inner contig block.
+        """
         src_cpu = torch.tensor([7.0], dtype=dtype)
         src_dev = _to_dev(src_cpu)
         expanded = src_dev.expand(8)
@@ -269,15 +274,16 @@ class TestCopyV2V(TestCase):
         dst_dev.copy_(src_view)
         _eq(dst_dev, src_cpu[:, 1:, :, :2, :])
 
-    # ---- device pair coverage (h2d / d2h / d2d) × contig matrix ----
+    # ---- device pair coverage (h2d / d2h / d2d) x contig matrix ----
 
     @dtypes(torch.float16, torch.int32)
     @parametrize("src_dev_str,dst_dev_str", [("cpu", "rbln"), ("rbln", "cpu"), ("rbln", "rbln")])
     @parametrize("src_contig", [True, False])
     @parametrize("dst_contig", [True, False])
     def test_device_pair_layout_matrix(self, dtype, src_dev_str, dst_dev_str, src_contig, dst_contig):
-        """Full 3 × 2 × 2 × N device/layout/dtype matrix. Each combination must
-        produce a correct copy regardless of which staging path the kernel picks."""
+        """Full 3 x 2 x 2 x N device/layout/dtype matrix. Each combination must produce
+        a correct copy regardless of which staging path the kernel picks.
+        """
         src_dev = torch.device(src_dev_str + (":0" if src_dev_str == "rbln" else ""))
         dst_dev = torch.device(dst_dev_str + (":0" if dst_dev_str == "rbln" else ""))
         shape = (4, 6)
@@ -289,10 +295,7 @@ class TestCopyV2V(TestCase):
             src = _noncontig_2d(shape, dtype, src_dev)
             src.copy_(base.to(src_dev))
 
-        if dst_contig:
-            dst = torch.empty(shape, dtype=dtype, device=dst_dev)
-        else:
-            dst = _noncontig_2d(shape, dtype, dst_dev)
+        dst = torch.empty(shape, dtype=dtype, device=dst_dev) if dst_contig else _noncontig_2d(shape, dtype, dst_dev)
 
         dst.zero_()
         dst.copy_(src)
@@ -344,7 +347,8 @@ class TestCopyV2V(TestCase):
     @dtypes(torch.float32)
     def test_cat_with_noncontig_input(self, dtype):
         """One input is a non-contig view — engine handles it inside the per-input
-        narrow-and-copy loop."""
+        narrow-and-copy loop.
+        """
         a_big_cpu = _arange_like((4, 12), dtype) + 1
         a_big_dev = _to_dev(a_big_cpu)
         a_view = a_big_dev[:, :6]
@@ -357,7 +361,8 @@ class TestCopyV2V(TestCase):
 
     def test_cat_28_inputs_batched(self):
         """Many inputs share a single V2VBatch — verifies batch path doesn't
-        silently lose entries."""
+        silently lose entries.
+        """
         n = 28
         inputs_cpu = [torch.full((1, 4, 8, 16), float(i), dtype=torch.bfloat16) for i in range(n)]
         expected = torch.cat(inputs_cpu, dim=0)
@@ -391,7 +396,8 @@ class TestCopyV2V(TestCase):
     @parametrize("axis", [0, 1, 2])
     def test_index_select_non_contig_self(self, axis):
         """index_select from a non-contig source — narrow() must preserve the
-        stride pattern and the engine must walk axis correctly."""
+        stride pattern and the engine must walk axis correctly.
+        """
         big_cpu = _arange_like((4, 5, 6, 7), torch.float16)
         big_dev = _to_dev(big_cpu)
         self_cpu = big_cpu[:, :, :4, :]
@@ -401,14 +407,14 @@ class TestCopyV2V(TestCase):
         got = torch.index_select(self_dev, axis, idx)
         _eq(got, expected)
 
-    # ---- mass parametrized sanity: random-ish strided patterns across dtype × shape ----
+    # ---- mass parametrized sanity: random-ish strided patterns over dtype x shape ----
 
     @dtypes(torch.float16, torch.int32)
     @parametrize(
         "full_shape,sliced,descr",
         _STRIDED_PATTERNS,
     )
-    def test_strided_pattern_d2d(self, dtype, full_shape, sliced, descr):
+    def test_strided_pattern_d2d(self, dtype, full_shape, sliced, descr):  # noqa: ARG002
         base_cpu = _arange_like(full_shape, dtype) + 1
         base_dev = _to_dev(base_cpu)
         src_view = base_dev[sliced]
@@ -420,7 +426,7 @@ class TestCopyV2V(TestCase):
         "full_shape,sliced,descr",
         _STRIDED_PATTERNS,
     )
-    def test_strided_pattern_d2h(self, full_shape, sliced, descr):
+    def test_strided_pattern_d2h(self, full_shape, sliced, descr):  # noqa: ARG002
         base_cpu = _arange_like(full_shape, torch.float32)
         base_dev = _to_dev(base_cpu)
         src_view = base_dev[sliced]
@@ -431,9 +437,10 @@ class TestCopyV2V(TestCase):
         "full_shape,sliced,descr",
         _STRIDED_PATTERNS,
     )
-    def test_strided_pattern_h2d_nc_dst(self, full_shape, sliced, descr):
+    def test_strided_pattern_h2d_nc_dst(self, full_shape, sliced, descr):  # noqa: ARG002
         """Non-contig dst on device, contig src on host — exercises the
-        CPU→RBLN staging-then-engine path."""
+        CPU→RBLN staging-then-engine path.
+        """
         base_dev = torch.zeros(full_shape, dtype=torch.float32, device=DEVICE)
         base_cpu = torch.zeros(full_shape, dtype=torch.float32)
         src_cpu = (
@@ -451,8 +458,9 @@ class TestCopyV2V(TestCase):
     # ---- stress: large outer count with small inner block ----
 
     def test_many_small_blocks_d2d(self):
-        """1024 × 1 strided slabs in one copy. Confirms we don't lose entries
-        when the V2VBatch grows past trivial sizes."""
+        """1024 x 1 strided slabs in one copy. Confirms we don't lose entries when the
+        V2VBatch grows past trivial sizes.
+        """
         src_cpu = _arange_like((1024, 4), torch.int32)
         src_dev = _to_dev(src_cpu)
         src_view = src_dev[:, ::2]
