@@ -74,7 +74,9 @@ cp \
   "${artifact_dir}/uv.lock" \
   .
 uv sync \
+  --group build \
   --locked \
+  --no-default-groups \
   --no-install-project
 
 echo "--- Installing $(basename "${wheel}")"

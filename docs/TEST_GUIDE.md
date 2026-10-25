@@ -13,8 +13,12 @@ Install `torch-rbln` in the project environment, then install the test
 dependencies into it:
 
 ```bash
-uv run --no-sync bash \
-  tools/test/install-test-deps.sh
+uv sync \
+  --group test \
+  --inexact \
+  --locked \
+  --no-default-groups \
+  --no-install-project
 ```
 
 This installs:
@@ -23,6 +27,7 @@ This installs:
   [`pytest-xdist`](https://pytest-xdist.readthedocs.io/) (parallel execution)
 - **Test infra**: [`expecttest`](https://github.com/ezyang/expecttest) (required
   by `torch.testing._internal`)
+- **Op-test dependencies**: [`pyyaml`](https://pyyaml.org/)
 - **Model-test dependencies**: `transformers` 4.49.0 (the version the RBLN
   PyTorch tutorial pins)
 

@@ -17,12 +17,13 @@ fixed by `pyproject.toml` in the root directory.
 When updating the PyTorch version (e.g. 2.10.0 → 2.11.0), change **all** of the
 following together:
 
-| #   | File                                       | What to change            |
-| --- | ------------------------------------------ | ------------------------- |
-| 1   | `pyproject.toml` `[project].dependencies`  | `torch==X.Y.Z+cpu`        |
-| 2   | `pyproject.toml` `[build-system].requires` | `torch==X.Y.Z+cpu`        |
-| 3   | Upstream files (see below)                 | Sync from the new tag     |
-| 4   | `uv.lock`                                  | Regenerate with `uv lock` |
+| #   | File                                         | What to change            |
+| --- | -------------------------------------------- | ------------------------- |
+| 1   | `pyproject.toml` `[project].dependencies`    | `torch==X.Y.Z+cpu`        |
+| 2   | `pyproject.toml` `[build-system].requires`   | `torch==X.Y.Z+cpu`        |
+| 3   | `pyproject.toml` `[dependency-groups].build` | `torch==X.Y.Z+cpu`        |
+| 4   | Upstream files (see below)                   | Sync from the new tag     |
+| 5   | `uv.lock`                                    | Regenerate with `uv lock` |
 
 [Release checks](PIPELINES.md#release-checks) derive the version of their debug `torch`
 from the `torch` pin in `pyproject.toml`, so no pipeline file needs updating.

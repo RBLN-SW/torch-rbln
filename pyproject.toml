@@ -7,12 +7,7 @@ readme = "README.md"
 license = "Apache-2.0"
 classifiers = ["License :: OSI Approved :: Apache Software License"]
 requires-python = ">=3.10,<3.15"
-dependencies = [
-  "PyYAML>=6,<7",
-  "scipy>=1.14.0",
-  "libcst>=1.2.0",
-  "torch==2.13.0+cpu",
-]
+dependencies = ["torch==2.13.0+cpu"]
 
 [project.optional-dependencies]
 runtime = ["rebel-compiler~=0.12.1.dev261"]
@@ -22,15 +17,15 @@ runtime = ["rebel-compiler~=0.12.1.dev261"]
 
 [build-system]
 requires = [
+  "cmake>=4.4.4,<4.5.0",
   # `hatchling` 1.32 emits Metadata-Version 2.5. Keep this cap until
   # `rbln-internal` and `rbln-nightly` are confirmed to accept 2.5.
-  "hatchling>=1.25.0,<1.32",
-  "setuptools-scm>=8.0",
-  "PyYAML>=6,<7",
-  "cmake>=3.18,<4.0",
+  "hatchling>=1.31.0,<1.32.0",
   "mypy>=1.13.0,<1.14.0",
-  "ninja>=1.11.1.3,<1.11.2",
-  "rebel-compiler",          # [tool.uv].build-constraint-dependencies pins the version.
+  "ninja>=1.13.2,<1.14.0",
+  "pyyaml>=6.0.3,<6.1.0",
+  "rebel-compiler",                 # `[tool.uv].build-constraint-dependencies` pins the version.
+  "setuptools-scm>=10.3.4,<10.4.0",
   "torch==2.13.0+cpu",
 ]
 build-backend = "hatchling.build"
@@ -145,34 +140,47 @@ publish-url = "https://pypi.rebellions.in/"
 torch = { index = "pytorch-cpu" }
 
 [dependency-groups]
+# The `build` group lists the build requirements because
+# `uv pip install --no-build-isolation` does not install them.
 build = [
-  "cmake>=3.18",
-  "editables>=0.5",
-  "rebel-compiler",        # [tool.uv].constraint-dependencies pins the version.
-  "setuptools-scm>=8.0",
-  "hatchling>=1.25,<1.32", # see the build-system pin
+  "cmake>=4.4.4,<4.5.0",
+  "editables>=0.6,<0.7",
+  "hatchling>=1.31.0,<1.32.0",
   "mypy>=1.13.0,<1.14.0",
-  "ninja>=1.11",
-  "pip>=24.3.1,<24.4",
+  "ninja>=1.13.2,<1.14.0",
+  "pyyaml>=6.0.3,<6.1.0",
+  "rebel-compiler",                 # `[tool.uv].constraint-dependencies` pins the version.
+  "setuptools-scm>=10.3.4,<10.4.0",
+  "torch==2.13.0+cpu",
 ]
 ci = [
-  "packaging~=26.3.0",
-  "PyGithub~=2.10.0",
-  "requests~=2.34.2",
-  "tomli~=2.5.0; python_version < '3.11'",
-  "tomlkit~=0.15.2",
+  "packaging>=26.3,<26.4",
+  "PyGithub>=2.10.0,<2.11.0",
+  "requests>=2.34.2,<2.35.0",
+  "tomli>=2.5.0,<2.6.0; python_version < '3.11'",
+  "tomlkit>=0.15.2,<0.16.0",
 ]
 lint = [
   { include-group = "ci" },
-  "expecttest>=0.3.0,<0.4.0",
+  "deptry>=0.25.1,<0.26.0",
   "lintrunner==0.12.11",
-  "pytest>=8.3.4,<8.4.0",
-  "pytest-xdist>=3.6.1",
   "rumdl>=0.3.0,<0.4.0",
   "taplo>=0.9.3,<0.10.0",
   "yamllint>=1.38.0,<1.39.0",
 ]
-dev = [{ include-group = "build" }, { include-group = "lint" }]
+test = [
+  "expecttest>=0.3.0,<0.4.0",
+  "pytest>=9.1.1,<9.2.0",
+  "pytest-xdist>=3.8.0,<3.9.0",
+  "pyyaml>=6.0.3,<6.1.0",
+  "transformers==4.49.0",
+]
+dev = [
+  { include-group = "build" },
+  { include-group = "ci" },
+  { include-group = "lint" },
+  { include-group = "test" },
+]
 
 [tool.black]
 # `usort` reads its line length from this table.

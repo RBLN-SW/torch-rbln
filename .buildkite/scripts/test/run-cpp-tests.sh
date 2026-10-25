@@ -72,7 +72,9 @@ cp \
   "${artifact_dir}/uv.lock" \
   .
 uv sync \
+  --extra runtime \
   --locked \
+  --no-default-groups \
   --no-install-project
 if [[ "${build_type}" == "Debug" ]]; then
   libnuma_status="$(

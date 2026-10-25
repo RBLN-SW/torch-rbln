@@ -70,11 +70,11 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
-from typing_extensions import Self
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from typing_extensions import Self
 
 
 __all__ = ["RBLNDiff", "RBLNExplain", "RBLNProfile", "explain", "explain_steady", "profile"]

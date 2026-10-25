@@ -49,7 +49,9 @@ def report_failure(code: str, path: str | None, proc: subprocess.CompletedProces
     report(code, path, "command-failed", f"{shlex.join(proc.args)} exited {proc.returncode}:\n{output}")
 
 
-def lint(code: str, command: str, pattern: re.Pattern[str], paths: list[str]) -> None:
+def lint(
+    code: str, command: str, pattern: re.Pattern[str], ignore_pattern: re.Pattern[str] | None, paths: list[str]
+) -> None:
     argv: list[str] = []
     for arg in shlex.split(command):
         argv.extend(paths if arg == "{paths}" else [arg])
@@ -59,16 +61,19 @@ def lint(code: str, command: str, pattern: re.Pattern[str], paths: list[str]) ->
     output = (proc.stdout + proc.stderr).decode(errors="replace")
     matches = list(pattern.finditer(output))
     for match in matches:
+        finding = match.groupdict()
         report(
             code,
-            match["path"],
-            match["name"],
-            match["description"],
-            line=int(match["line"]),
-            char=int(match["char"]),
+            finding.get("path"),
+            finding["name"],
+            finding["description"],
+            line=int(finding["line"]) if finding.get("line") else None,
+            char=int(finding["char"]) if finding.get("char") else None,
         )
-    unmatched = pattern.sub("", output).strip()
-    if proc.returncode != 0 and (not matches or unmatched):
+    unmatched = pattern.sub("", output)
+    if ignore_pattern is not None:
+        unmatched = ignore_pattern.sub("", unmatched)
+    if proc.returncode != 0 and (not matches or unmatched.strip()):
         report_failure(code, None, proc)
 
 
@@ -97,21 +102,23 @@ def main() -> None:
     parser.add_argument("--code", required=True)
     parser.add_argument("--lint-command", help="command to run once; {paths} expands to the files")
     parser.add_argument(
-        "--lint-pattern", help="regex for one finding, with groups path, line, char, name, and description"
+        "--lint-pattern",
+        help="regex for a finding, with groups name and description, plus optional path, line, and char",
     )
-    parser.add_argument(
-        "--format-command",
-        help="command that reads one file on stdin and writes it formatted to stdout; {path} expands to its path",
-    )
+    parser.add_argument("--lint-ignore-pattern", help="regex for output to ignore")
+    parser.add_argument("--format-command", help="command that formats stdin to stdout; {path} expands to the file")
     parser.add_argument("paths", nargs="*")
     args = parser.parse_args()
     if bool(args.lint_command) != bool(args.lint_pattern):
         parser.error("--lint-command and --lint-pattern must be used together")
+    if args.lint_ignore_pattern and not args.lint_command:
+        parser.error("--lint-ignore-pattern requires --lint-command")
     if args.lint_command:
         pattern = re.compile(args.lint_pattern, re.MULTILINE)
-        if missing := {"path", "line", "char", "name", "description"}.difference(pattern.groupindex):
+        if missing := {"name", "description"}.difference(pattern.groupindex):
             parser.error(f"--lint-pattern is missing groups: {', '.join(sorted(missing))}")
-        lint(args.code, args.lint_command, pattern, args.paths)
+        ignore_pattern = re.compile(args.lint_ignore_pattern, re.MULTILINE) if args.lint_ignore_pattern else None
+        lint(args.code, args.lint_command, pattern, ignore_pattern, args.paths)
     if args.format_command:
         for path in args.paths:
             format_file(args.code, args.format_command, path)
