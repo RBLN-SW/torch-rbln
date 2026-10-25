@@ -49,7 +49,6 @@ void register_cpp_shim(
 std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>
 diag_dump_dispatch_paths();
 void diag_reset_dispatch_paths();
-uint64_t diag_dump_align_fastpath_count();
 
 // DIAG/PROFILER: per-op CPU-fallback attribution (op_name -> fallback count),
 // non-zero entries only. Recorded on the already-slow fallback branch only (one

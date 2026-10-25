@@ -440,10 +440,6 @@ void register_internal_api(py::module_& module) {
       &torch_rbln::shim::diag_reset_trace_by_op,
       "DIAG/PROFILER (A) WHERE: reset captured call-sites");
   module.def(
-      "_dispatch_shim_align_fastpath_count",
-      &torch_rbln::shim::diag_dump_align_fastpath_count,
-      "DIAG: count of align-penalty fast-path hits");
-  module.def(
       "_dispatch_shim_warm_segments_dump",
       &torch_rbln::shim::diag_dump_warm_segments,
       "DIAG: warm-cache hit per-segment timers (n_hits, ns_lookup, ns_io_build, "

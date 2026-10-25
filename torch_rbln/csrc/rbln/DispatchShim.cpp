@@ -49,8 +49,6 @@ std::atomic<uint64_t> g_diag_ns_fallback{
 // (1=dtype-not-fp16, 2=nan/inf input, 3=all-scalar). Bumped on the fallback
 // branch only (the reason is already computed there) -> ON==OFF preserved.
 std::array<std::atomic<uint64_t>, 4> g_fallback_reason{};
-std::atomic<uint64_t> g_diag_n_align_fastpath{
-    0}; // align fast-path hits → cpu_fallback
 
 // Warm-cache hit path per-segment timers. Accumulated only on successful hits
 // so per-segment averages = ns_X / n_hits give the steady-state breakdown.
@@ -75,10 +73,6 @@ diag_dump_dispatch_paths() {
       g_diag_ns_fallback.load(std::memory_order_relaxed));
 }
 
-uint64_t diag_dump_align_fastpath_count() {
-  return g_diag_n_align_fastpath.load(std::memory_order_relaxed);
-}
-
 void diag_reset_dispatch_paths() {
   g_diag_n_total.store(0, std::memory_order_relaxed);
   g_diag_n_fallback.store(0, std::memory_order_relaxed);
@@ -87,7 +81,6 @@ void diag_reset_dispatch_paths() {
   g_diag_ns_warm_hit.store(0, std::memory_order_relaxed);
   g_diag_ns_miss.store(0, std::memory_order_relaxed);
   g_diag_ns_fallback.store(0, std::memory_order_relaxed);
-  g_diag_n_align_fastpath.store(0, std::memory_order_relaxed);
 }
 
 std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>
@@ -140,7 +133,6 @@ struct SchemaCache {
   size_t num_positional = 0;
   std::vector<c10::TypePtr> return_types; // parallel to schema returns
   bool populated = false;
-  bool is_align_sensitive = false; // op name in align_sensitive_ops() set
   bool is_broadcast_op = false; // op may broadcast tensor args
                                 // (mul/add/sub/...). When true,
                                 // ``try_warmcache_hit`` decides per-call (via
@@ -349,79 +341,6 @@ bool is_contiguous_row_major(
   return true;
 }
 
-// ---------------------------------------------------------------------------
-// Align-penalty fast-path
-//
-// RBLN device requires last-dim aligned to 64. When an op's output has
-// last-dim not divisible by 64, `rebel-compiler` inserts host pad/depad nodes
-// (RblnTensorPadLastDim + RblnTensorWrapHostOps passes) on the op graph,
-// producing the chain: host pad → H2D → device → D2H → host depad. For small
-// tensors (decode workloads), per-call cost is dominated by this
-// orchestration (~700 µs measured) rather than the compute (~5 µs).
-//
-// We route these calls through cpu_fallback_rbln, which uses v-mem
-// host-backed borrow (no D2H copy, no pad). Validated on aten::neg.out for
-// LLaMA-1B rotary: decode -10.3% (NEG_ONLY isolation).
-//
-// Eligibility (`g_align_sensitive_ops`):
-//   - Shape-preserving elementwise ops where output last-dim mirrors broadcast
-//     of inputs. These include unary (neg, abs, sqrt, log, exp, silu, rsqrt,
-//     ceil, floor, sigmoid, logical_not, pow.Tensor_Scalar_out), binary (add,
-//     sub, mul, div, div.out_mode, maximum, minimum), comparisons
-//     (ne/eq/gt/ge/lt/le), and where.self_out.
-//   - clamp.out is shape-preserving with scalar bounds.
-//
-// Excluded:
-//   - mm.out, bmm.out, addmm.out, linear: output last-dim depends on weight,
-//     not input. Compute (O(MNK)) usually dominates align cost.
-//   - mean.out / max.unary_out / min.unary_out: reductions change output dim.
-//   - cat / index ops: not in shim path anyway.
-//
-// Criterion: check OUT tensor's last-dim (post-broadcast result shape),
-// since for binary ops the result shape may be aligned even if one input is not
-// (e.g. `mul([B,S,64], [1,1,32]) → [B,S,64]` — device wins, no align penalty).
-const std::unordered_set<std::string>& align_sensitive_ops() {
-  static const std::unordered_set<std::string>* s =
-      new std::unordered_set<std::string>{
-          // Unary elementwise
-          "aten::neg.out",
-          "aten::abs.out",
-          "aten::log.out",
-          "aten::sigmoid.out",
-          "aten::silu.out",
-          "aten::rsqrt.out",
-          "aten::ceil.out",
-          "aten::floor.out",
-          "aten::logical_not.out",
-          "aten::pow.Tensor_Scalar_out",
-          "aten::clamp.out",
-          // Binary elementwise (broadcast-aware via OUT tensor check)
-          "aten::add.out",
-          "aten::sub.out",
-          "aten::mul.out",
-          "aten::div.out",
-          "aten::div.out_mode",
-          "aten::maximum.out",
-          "aten::minimum.out",
-          // Comparisons (output is bool but shape mirrors broadcast)
-          "aten::ne.Tensor_out",
-          "aten::eq.Tensor_out",
-          "aten::gt.Tensor_out",
-          "aten::ge.Tensor_out",
-          "aten::lt.Tensor_out",
-          "aten::le.Tensor_out",
-          "aten::ne.Scalar_out",
-          "aten::eq.Scalar_out",
-          "aten::gt.Scalar_out",
-          "aten::ge.Scalar_out",
-          "aten::lt.Scalar_out",
-          "aten::le.Scalar_out",
-          // Ternary (cond, self, other) — output shape is broadcast
-          "aten::where.self_out",
-      };
-  return *s;
-}
-
 // Set of ops whose tensor inputs MUST be pre-broadcast in the C++ shim path
 // because the compiled runtime expects post-broadcast-shape buffers.
 //
@@ -485,46 +404,6 @@ bool needs_last_dim_one_broadcast(
       any_size_one = true;
   }
   return any_size_one && out_last > 1;
-}
-
-bool align_penalty_fast_path_check(
-    torch::jit::Stack* stack,
-    const SchemaCache& cache) {
-  if (!cache.is_align_sensitive) {
-    return false;
-  }
-  auto args = torch::jit::last(stack, cache.num_args);
-  // Strict dispatch (TORCH_RBLN_DISPATCH_STRICT): the op must take the device path even
-  // when it pays the pad/depad penalty, so this performance routing is skipped.
-  auto unaligned_unless_strict = [](const at::Tensor& t) {
-    if (c10::rbln::is_strict_dispatch_dtype_rt(t.scalar_type())) {
-      return false;
-    }
-    return (t.size(t.dim() - 1) % 64) != 0;
-  };
-  // Prefer checking the OUT tensor's last-dim — it reflects the broadcast
-  // result shape, which is what the device graph would produce.
-  if (cache.out_positional_idx >= 0) {
-    const auto& iv = args[cache.out_positional_idx];
-    if (iv.isTensor()) {
-      const auto& t = iv.toTensor();
-      if (t.defined() && t.dim() > 0) {
-        return unaligned_unless_strict(t);
-      }
-    }
-  }
-  // No `out` tensor (functional ops): fall back to input shape — pick the
-  // first non-write-alias tensor with non-zero dim.
-  for (size_t i = 0; i < cache.num_args; ++i) {
-    const auto& iv = args[i];
-    if (!iv.isTensor())
-      continue;
-    const auto& t = iv.toTensor();
-    if (!t.defined() || cache.is_write_alias[i] || t.dim() == 0)
-      continue;
-    return unaligned_unless_strict(t);
-  }
-  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -1215,11 +1094,6 @@ void generic_shim_boxed(
         entry != nullptr, "No Python impl registered for shim op: ", op_name);
     if (!entry->schema_cache.populated) {
       populate_schema_cache(entry->schema_cache, op.schema());
-      // Populate align-sensitive flag once per op (avoids per-call string
-      // allocation + unordered_set lookup in the hot path).
-      const auto& align_set = align_sensitive_ops();
-      entry->schema_cache.is_align_sensitive =
-          (align_set.find(op_name) != align_set.end());
       const auto& bcast_set = broadcast_ops();
       entry->schema_cache.is_broadcast_op =
           (bcast_set.find(op_name) != bcast_set.end());
@@ -1274,19 +1148,6 @@ void generic_shim_boxed(
     g_diag_ns_fallback.fetch_add(now_ns() - _fb_t0, std::memory_order_relaxed);
     return;
   }
-
-  // Align-penalty fast-path: previously routed shape-preserving elementwise
-  // ops with non-64-aligned last-dim through cpu_fallback to skip rebel's
-  // host pad → H2D → device → D2H → host depad penalty (~700 µs for tiny
-  // decode tensors).
-  //
-  // **Disabled (2026-04-30):** mixing CPU-fallback (native fp16) and device
-  // (cf16) for the same op produces 1-ULP rounding divergence, breaking
-  // bit-exact tests (``test/rbln/test_non_zero_storage_offset``) where
-  // sibling ops on aligned shapes stay on device. The helper/counter stay
-  // compiled so we can re-enable behind an env gate if a workload regresses.
-  (void)align_penalty_fast_path_check;
-  (void)g_diag_n_align_fastpath;
 
   // Warm-cache hot path: if we've previously compiled this op for an identical
   // input profile and have the rebel runtime cached, drive the runtime from
