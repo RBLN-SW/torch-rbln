@@ -1,5 +1,6 @@
 import argparse
 import re
+from pathlib import Path
 
 
 def main() -> None:
@@ -16,8 +17,7 @@ def main() -> None:
     )
     options = parser.parse_args()
 
-    with open(options.pyproject_path, encoding="utf-8") as f:
-        content = f.read()
+    content = Path(options.pyproject_path).read_text(encoding="utf-8")
 
     # Replace any double-quoted dependency string that starts with the source
     # package name followed by a version specifier or end-of-string.
@@ -67,9 +67,8 @@ def main() -> None:
                         )
 
     if new_content == content and options.set_index is None:
-        print(f"Warning: no dependency matching '{options.source}' found in {options.pyproject_path}")
-    with open(options.pyproject_path, "w", encoding="utf-8") as f:
-        f.write(new_content)
+        print(f"Warning: no dependency matching '{options.source}' found in {options.pyproject_path}")  # noqa: T201
+    Path(options.pyproject_path).write_text(new_content, encoding="utf-8")
 
 
 if __name__ == "__main__":

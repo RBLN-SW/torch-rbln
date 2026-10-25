@@ -4,6 +4,7 @@
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNV2VBatch.h>
 #include <c10/rbln/detail/RBLNCopyBatchImpl.h>
+#include <c10/util/ScopeExit.h>
 
 #include <algorithm>
 #include <cstddef>
@@ -42,7 +43,14 @@ void V2VBatch::enqueue_strided(
     c10::IntArrayRef src_byte_strides,
     c10::IntArrayRef dst_byte_strides) {
   detail::enqueue_strided_impl<V2VCopyOp, kAnchor>(
-      impl_->st, kWho, dst, src, inner_block_bytes, outer_sizes, src_byte_strides, dst_byte_strides);
+      impl_->st,
+      kWho,
+      dst,
+      src,
+      inner_block_bytes,
+      outer_sizes,
+      src_byte_strides,
+      dst_byte_strides);
 }
 
 void V2VBatch::submit() {
@@ -51,19 +59,16 @@ void V2VBatch::submit() {
   }
   // RAII guard: reset batch state on any exit so the destructor's
   // "missing submit()" warning fires only when submit() was genuinely skipped.
-  struct ResetGuard {
-    detail::BatchState<V2VCopyOp>* st;
-    ~ResetGuard() noexcept {
-      st->reset();
-    }
-  } guard{&impl_->st};
+  const auto guard = c10::make_scope_exit([this] { impl_->st.reset(); });
 
   const auto& all = impl_->st.pending;
 
   if (!impl_->st.homogeneous) {
     // Heterogeneous — per-entry memcpy_v2v handles host-bounce internally and
     // tolerates any ordering between entries.
-    RBLN_LOG_DEBUG("V2VBatch::submit draining {} entries (per-entry, cross-device)", all.size());
+    RBLN_LOG_DEBUG(
+        "V2VBatch::submit draining {} entries (per-entry, cross-device)",
+        all.size());
     for (const auto& e : all) {
       memcpy_v2v(e.dst, e.src, e.nbytes);
     }
@@ -87,16 +92,20 @@ void V2VBatch::submit() {
   const auto submit_one_call = [&all](size_t begin, size_t end) {
     try {
       if (begin == 0 && end == all.size()) {
-        memcpy_v2v_multi(all); // whole batch fits one call — submit it as is, no copy
+        memcpy_v2v_multi(
+            all); // whole batch fits one call — submit it as is, no copy
       } else {
         memcpy_v2v_multi(std::vector<V2VCopyOp>(
-            all.begin() + static_cast<std::ptrdiff_t>(begin), all.begin() + static_cast<std::ptrdiff_t>(end)));
+            all.begin() + static_cast<std::ptrdiff_t>(begin),
+            all.begin() + static_cast<std::ptrdiff_t>(end)));
       }
       return;
     } catch (const c10::Error& e) {
-      // PROFILER (cold branch): batched v2v rejected by the runtime's no-overlap
-      // check; the per-entry loop below has no inter-copy constraint.
-      c10::rbln::prof::record_bounce(c10::rbln::prof::BounceSite::kV2VBatchToPerEntry, 0);
+      // PROFILER (cold branch): batched v2v rejected by the runtime's
+      // no-overlap check; the per-entry loop below has no inter-copy
+      // constraint.
+      c10::rbln::prof::record_bounce(
+          c10::rbln::prof::BounceSite::kV2VBatchToPerEntry, 0);
       RBLN_LOG_WARN(
           "V2VBatch::submit batched path rejected ({} entries) — falling back to per-entry: {}",
           end - begin,
@@ -117,12 +126,15 @@ void V2VBatch::submit() {
   // published constant, not a measured one.
   constexpr size_t kMaxBulkEntries = ::rbln::kMaxV2VMultiCopies;
   if (all.size() <= kMaxBulkEntries) {
-    RBLN_LOG_DEBUG("V2VBatch::submit draining {} entries (batched)", all.size());
+    RBLN_LOG_DEBUG(
+        "V2VBatch::submit draining {} entries (batched)", all.size());
     submit_one_call(0, all.size());
     return;
   }
   RBLN_LOG_DEBUG(
-      "V2VBatch::submit splitting {} entries to stay under the cap ({} entries)", all.size(), kMaxBulkEntries);
+      "V2VBatch::submit splitting {} entries to stay under the cap ({} entries)",
+      all.size(),
+      kMaxBulkEntries);
   for (size_t begin = 0; begin < all.size(); begin += kMaxBulkEntries) {
     submit_one_call(begin, std::min(begin + kMaxBulkEntries, all.size()));
   }

@@ -8,7 +8,9 @@ from torch_rbln.random import *  # noqa: F403
 
 
 def __getattr__(name: str):
-    # torch.rbln.capture_programs / CompiledProgram: resolved lazily, see torch_rbln/programs.py.
+    # torch.rbln.capture_programs / CompiledProgram: resolved lazily, see
+    # torch_rbln/programs.py.
     if name in _programs.__all__:
         return getattr(_programs, name)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    msg = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(msg)

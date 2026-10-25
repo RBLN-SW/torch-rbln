@@ -22,6 +22,7 @@ The flag and the depth counter are both process-local, so each pytest-xdist
 worker is isolated; the class does not need the serial marker.
 """
 
+import contextlib
 from unittest.mock import patch
 
 import pytest
@@ -34,13 +35,14 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 # directly to peek at its module-level _offload_depth from the nesting test,
 # and torch_rbln._C for the tearDown safety net that bypasses the depth
 # counter.
-import torch_rbln._C as torch_rbln_C
 import torch_rbln.memory as torch_rbln_memory
+from torch_rbln import _C
 
 
-# Deselected by rebel_compiler's CI (`-m "not torch_rbln_only"`); see the marker in pyproject.
-# Only the torch-rbln surface of ``torch.rbln.offload``; the offloading behaviour itself is
-# covered by rebel-compiler's own C++ tests, as this file's docstring says.
+# Deselected by rebel_compiler's CI (`-m "not torch_rbln_only"`); see the marker in
+# pyproject. Only the torch-rbln surface of ``torch.rbln.offload``; the offloading
+# behavior itself is covered by rebel-compiler's own C++ tests, as this file's docstring
+# says.
 pytestmark = pytest.mark.torch_rbln_only
 
 
@@ -50,20 +52,18 @@ class TestFileOffloading(TestCase):
         # is flipped off so a failing test doesn't leak state into the next
         # test (or the next test file).
         torch_rbln_memory._offload_depth = 0
-        try:
-            torch_rbln_C._set_file_offloading_enabled(False)  # noqa: SLF001
-        except Exception:
-            pass
+        with contextlib.suppress(Exception):
+            _C._set_file_offloading_enabled(enabled=False)
 
     # ------------------------------------------------------------------
     # Surface
     # ------------------------------------------------------------------
     def test_offload_context_exposed(self):
         """``offload`` is reachable on every documented path and is a CM."""
-        from torch_rbln.memory import offload  # noqa: F401
+        from torch_rbln.memory import offload  # noqa: PLC0415
 
         self.assertIn("offload", torch_rbln_memory.__all__)
-        self.assertTrue(hasattr(torch.rbln, "offload"))
+        self.assertIs(torch.rbln.offload, offload)
         cm = torch.rbln.offload()
         self.assertTrue(hasattr(cm, "__enter__"))
         self.assertTrue(hasattr(cm, "__exit__"))
@@ -94,10 +94,10 @@ class TestFileOffloading(TestCase):
     # ------------------------------------------------------------------
     def test_offload_restores_depth_on_exception(self):
         """Exception inside the block must still decrement the depth counter."""
-        with self.assertRaises(RuntimeError):
-            with torch.rbln.offload():
-                self.assertEqual(torch_rbln_memory._offload_depth, 1)
-                raise RuntimeError("boom")
+        with self.assertRaises(RuntimeError), torch.rbln.offload():
+            self.assertEqual(torch_rbln_memory._offload_depth, 1)
+            msg = "boom"
+            raise RuntimeError(msg)
 
         self.assertEqual(torch_rbln_memory._offload_depth, 0)
 
@@ -106,10 +106,10 @@ class TestFileOffloading(TestCase):
     # ------------------------------------------------------------------
     def test_release_offload_temp_storage_surface(self):
         """``release_offload_temp_storage`` is exposed and reports a file count."""
-        from torch_rbln.memory import release_offload_temp_storage  # noqa: F401
+        from torch_rbln.memory import release_offload_temp_storage  # noqa: PLC0415
 
         self.assertIn("release_offload_temp_storage", torch_rbln_memory.__all__)
-        self.assertTrue(hasattr(torch.rbln, "release_offload_temp_storage"))
+        self.assertIs(torch.rbln.release_offload_temp_storage, release_offload_temp_storage)
 
         num_removed = torch.rbln.release_offload_temp_storage()
         self.assertIsInstance(num_removed, int)
@@ -117,7 +117,7 @@ class TestFileOffloading(TestCase):
 
     def test_release_offload_temp_storage_returns_binding_count(self):
         """The wrapper is a pass-through: the binding's count is returned unchanged."""
-        with patch.object(torch_rbln_C, "_release_offload_temp_storage", return_value=7) as mock_release:
+        with patch.object(_C, "_release_offload_temp_storage", return_value=7) as mock_release:
             self.assertEqual(torch.rbln.release_offload_temp_storage(), 7)
 
         mock_release.assert_called_once_with()

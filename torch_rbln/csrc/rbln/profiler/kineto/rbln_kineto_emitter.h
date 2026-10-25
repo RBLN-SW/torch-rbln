@@ -15,8 +15,8 @@
 
 namespace rbln::profiler::kineto {
 
-// Sort-priority base for rbln device rows: keeps them below host CPU rows in the
-// Perfetto UI; each sorts at base + pid so multi-node rows keep node order.
+// Sort-priority base for rbln device rows: keeps them below host CPU rows in
+// the Perfetto UI; each sorts at base + pid so multi-node rows keep node order.
 constexpr int64_t kRblnDeviceSortIndex = 5000000;
 
 // One projection's output, emitted through the logger in processTrace.

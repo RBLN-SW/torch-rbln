@@ -4,11 +4,16 @@ Helps users debug "Cannot find libraries: librbln.so / librbln_runtime.so" and
 environment-override issues (REBEL_HOME, PYTHONPATH, LD_LIBRARY_PATH).
 """
 
+import contextlib
 import ctypes
+import importlib.metadata as _meta
+import importlib.util
 import os
 import re
+import shutil
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any
 
 from torch_rbln._internal.rbln_runtime_lib import (
@@ -30,33 +35,38 @@ ENV_VARS = (
 
 
 def get_gcc_version_from_elf(filepath: str) -> str:
-    """Read GCC version from ELF .comment section (Linux). Returns e.g. 'GCC 12.3.0' or 'unknown'."""
+    """Read GCC version from ELF .comment section (Linux). Returns e.g. 'GCC 12.3.0' or
+    'unknown'.
+    """
     if not sys.platform.startswith("linux"):
         return "N/A (not Linux)"
-    if not os.path.isfile(filepath):
+    if not Path(filepath).is_file():
         return "missing"
+    readelf = shutil.which("readelf")
+    if readelf is None:
+        return "readelf not found"
     try:
-        out = subprocess.run(
-            ["readelf", "-p", ".comment", filepath],
+        out = subprocess.run(  # noqa: S603
+            [readelf, "-p", ".comment", filepath],
+            check=False,
             capture_output=True,
             text=True,
             timeout=30,
         )
-        if out.returncode != 0 or not out.stdout:
-            return "no .comment or readelf failed"
-        # e.g. "  [     0]  GCC: (Ubuntu 12.3.0-1ubuntu1~22.04) 12.3.0" or "  [     0]  GCC: (GNU) 11.2.0"
-        match = re.search(r"GCC:\s*\([^)]*\)\s*(\d+\.\d+(?:\.\d+)?)", out.stdout)
-        if match:
-            return f"GCC {match.group(1)}"
-        if "GCC:" in out.stdout:
-            return "GCC (version unparsed)"
-        return "no GCC in .comment"
-    except FileNotFoundError:
-        return "readelf not found"
     except subprocess.TimeoutExpired:
         return "timeout"
     except Exception as e:
         return f"error: {e}"
+    if out.returncode != 0 or not out.stdout:
+        return "no .comment or readelf failed"
+    # e.g. "  [     0]  GCC: (Ubuntu 12.3.0-1ubuntu1~22.04) 12.3.0"
+    # or "  [     0]  GCC: (GNU) 11.2.0"
+    match = re.search(r"GCC:\s*\([^)]*\)\s*(\d+\.\d+(?:\.\d+)?)", out.stdout)
+    if match:
+        return f"GCC {match.group(1)}"
+    if "GCC:" in out.stdout:
+        return "GCC (version unparsed)"
+    return "no GCC in .comment"
 
 
 def _env_snapshot() -> dict[str, Any]:
@@ -67,8 +77,6 @@ def _env_snapshot() -> dict[str, Any]:
 def _package_location(name: str) -> dict[str, Any]:
     """Where a package would be imported from, without importing it."""
     try:
-        import importlib.util
-
         spec = importlib.util.find_spec(name)
         if spec is None:
             return {"found": False, "origin": None, "submodule_search_locations": None}
@@ -95,35 +103,28 @@ def _torch_rbln_info() -> dict[str, Any]:
         "lib_dir_exists": None,
     }
     try:
-        import importlib.metadata as _meta
-
         out["version"] = _meta.version("torch-rbln")
     except Exception:
         try:
-            import torch_rbln as _tr
+            import torch_rbln as _tr  # noqa: PLC0415
 
             out["version"] = getattr(_tr, "__version__", "?")
         except Exception as e:
             out["version"] = f"(error: {e})"
     try:
-        import importlib.util
-
         spec = importlib.util.find_spec("torch_rbln")
         if spec is not None and getattr(spec, "submodule_search_locations", None):
             out["location"] = os.path.realpath(spec.submodule_search_locations[0])
         elif spec is not None and getattr(spec, "origin", None):
-            out["location"] = os.path.realpath(os.path.join(os.path.dirname(spec.origin), ".."))
+            out["location"] = os.path.realpath(Path(spec.origin).parent / "..")
     except Exception as e:
         out["location"] = f"(error: {e})"
     try:
-        import importlib.metadata as _meta
-
         dist = _meta.distribution("torch-rbln")
-        # Where the package is installed (wheel/site-packages), not necessarily what was loaded.
-        try:
-            out["installed_location"] = os.path.realpath(os.path.dirname(dist.locate_file("torch_rbln/__init__.py")))
-        except Exception:
-            pass
+        # Where the package is installed (wheel/site-packages), not necessarily what was
+        # loaded.
+        with contextlib.suppress(Exception):
+            out["installed_location"] = os.path.realpath(Path(str(dist.locate_file("torch_rbln/__init__.py"))).parent)
         direct = getattr(dist, "direct_url", None)
         if direct is not None and getattr(direct, "is_editable", None):
             out["install_type"] = "editable"
@@ -136,16 +137,15 @@ def _torch_rbln_info() -> dict[str, Any]:
         and out.get("installed_location")
         and isinstance(out["location"], str)
         and isinstance(out["installed_location"], str)
-    ):
-        if os.path.realpath(out["location"]) != os.path.realpath(out["installed_location"]):
-            out["shadowed"] = True
-    if out["location"] and isinstance(out["location"], str) and os.path.isdir(out["location"]):
-        lib_dir = os.path.join(out["location"], "lib")
+    ) and os.path.realpath(out["location"]) != os.path.realpath(out["installed_location"]):
+        out["shadowed"] = True
+    if out["location"] and isinstance(out["location"], str) and Path(out["location"]).is_dir():
+        lib_dir = str(Path(out["location"], "lib"))
         out["lib_dir"] = lib_dir
-        out["lib_dir_exists"] = os.path.isdir(lib_dir)
+        out["lib_dir_exists"] = Path(lib_dir).is_dir()
         if out["lib_dir_exists"]:
             try:
-                libs = [f for f in os.listdir(lib_dir) if f.endswith(".so")]
+                libs = [entry.name for entry in Path(lib_dir).iterdir() if entry.name.endswith(".so")]
                 out["native_libs"] = sorted(libs)[:20]
             except OSError:
                 out["native_libs"] = []
@@ -163,36 +163,26 @@ def _rebel_compiler_info() -> dict[str, Any]:
         "error": None,
     }
     try:
-        import importlib.metadata as _meta
-
         out["version"] = _meta.version("rebel-compiler")
         out["found"] = True
     except Exception as e:
         out["error"] = str(e)
         return out
     try:
-        import importlib.util
-
         spec = importlib.util.find_spec("rebel")
         if spec is not None and getattr(spec, "submodule_search_locations", None):
             out["location"] = os.path.realpath(spec.submodule_search_locations[0])
         elif spec is not None and getattr(spec, "origin", None):
-            out["location"] = os.path.realpath(os.path.join(os.path.dirname(spec.origin), ".."))
+            out["location"] = os.path.realpath(Path(spec.origin).parent / "..")
     except Exception as e:
         out["location"] = f"(error: {e})"
     try:
-        import importlib.metadata as _meta
-
         dist = _meta.distribution("rebel-compiler")
-        try:
+        with contextlib.suppress(Exception):
             for entry in ("rebel/__init__.py", "rebel_compiler/__init__.py"):
-                try:
-                    out["installed_location"] = os.path.realpath(os.path.dirname(dist.locate_file(entry)))
+                with contextlib.suppress(Exception):
+                    out["installed_location"] = os.path.realpath(Path(str(dist.locate_file(entry))).parent)
                     break
-                except Exception:
-                    continue
-        except Exception:
-            pass
         direct = getattr(dist, "direct_url", None)
         if direct is not None and getattr(direct, "is_editable", None):
             out["install_type"] = "editable"
@@ -204,9 +194,11 @@ def _rebel_compiler_info() -> dict[str, Any]:
 
 
 def _runtime_lib_candidates() -> list[dict[str, Any]]:
-    """Every candidate path considered for librbln.so: path, where it came from, and existence."""
+    """Every candidate path considered for librbln.so: path, where it came from, and
+    existence.
+    """
     return [
-        {"path": path, "source": source, "exists": os.path.isfile(path)}
+        {"path": path, "source": source, "exists": Path(path).is_file()}
         for path, source in runtime_library_candidates()
     ]
 
@@ -230,9 +222,9 @@ def _runtime_library_version(path: str) -> str | None:
 def _runtime_lib_state() -> dict[str, Any]:
     """Which librbln.so this process mapped, and the version it reports.
 
-    Only the one library. rebel-compiler also ships librbln_runtime.so, a runtime-only build its
-    loader can take instead of this one, but the two cannot both be mapped -- loading the second
-    aborts the process in its constructors.
+    Only the one library. rebel-compiler also ships librbln_runtime.so, a runtime-only
+    build its loader can take instead of this one, but the two cannot both be mapped --
+    loading the second aborts the process in its constructors.
     """
     loaded = loaded_runtime_libraries()
     return {
@@ -257,7 +249,7 @@ def _rebel_abi_info() -> dict[str, Any]:
         "error": None,
     }
     try:
-        from torch_rbln._internal import abi_check
+        from torch_rbln._internal import abi_check  # noqa: PLC0415
 
         out["built_abi"] = abi_check.get_built_abi()
         out["check_disabled"] = abi_check.is_abi_check_disabled()
@@ -301,31 +293,31 @@ def _rebel_abi_info() -> dict[str, Any]:
 
 
 def _resolve_so_paths(d: dict[str, Any]) -> list[dict[str, Any]]:
-    """Resolve paths for libtorch, libtorch_rbln, librbln (and related) and get GCC version from ELF .comment."""
+    """Resolve paths for libtorch, libtorch_rbln, librbln (and related) and get GCC
+    version from ELF .comment.
+    """
     result: list[dict[str, Any]] = []
     tr = d.get("torch_rbln") or {}
     candidates = d.get("runtime_lib_candidates") or []
 
     # libtorch.so — from torch package
     libtorch_path: str | None = None
-    try:
-        import torch
+    with contextlib.suppress(Exception):
+        import torch  # noqa: PLC0415
 
         torch_root = getattr(torch, "__path__", [None])[0]
         if torch_root:
-            lib_dir = os.path.join(torch_root, "lib")
+            lib_dir = str(Path(torch_root, "lib"))
             for name in ("libtorch.so", "libtorch.so.2", "libtorch.so.1"):
-                p = os.path.join(lib_dir, name)
-                if os.path.isfile(p):
+                p = Path(lib_dir, name)
+                if p.is_file():
                     libtorch_path = os.path.realpath(p)
                     break
-            if libtorch_path is None and os.path.isdir(lib_dir):
-                for f in os.listdir(lib_dir):
-                    if f.startswith("libtorch.so"):
-                        libtorch_path = os.path.realpath(os.path.join(lib_dir, f))
+            if libtorch_path is None and Path(lib_dir).is_dir():
+                for entry in Path(lib_dir).iterdir():
+                    if entry.name.startswith("libtorch.so"):
+                        libtorch_path = os.path.realpath(entry)
                         break
-    except Exception:
-        pass
     result.append(
         {
             "name": "libtorch.so",
@@ -338,9 +330,9 @@ def _resolve_so_paths(d: dict[str, Any]) -> list[dict[str, Any]]:
     for so_name in ("libtorch_rbln.so", "libc10_rbln.so"):
         path: str | None = None
         lib_dir = tr.get("lib_dir")
-        if lib_dir and os.path.isdir(lib_dir):
-            p = os.path.join(lib_dir, so_name)
-            if os.path.isfile(p):
+        if lib_dir and Path(lib_dir).is_dir():
+            p = Path(lib_dir, so_name)
+            if p.is_file():
                 path = os.path.realpath(p)
         result.append(
             {
@@ -350,7 +342,8 @@ def _resolve_so_paths(d: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
 
-    # librbln.so — the mapped one if this process loaded it, else the first candidate that exists
+    # librbln.so — the mapped one if this process loaded it, else the first candidate
+    # that exists
     librbln_path = None
     loaded = (d.get("runtime_lib") or {}).get("loaded") or []
     if loaded:
@@ -372,7 +365,9 @@ def _resolve_so_paths(d: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def collect_diagnostics() -> dict[str, Any]:
-    """Gather env snapshot, compiler package locations, and runtime-library resolution state."""
+    """Gather env snapshot, compiler package locations, and runtime-library resolution
+    state.
+    """
     candidates = _runtime_lib_candidates()
     d = {
         "torch_rbln": _torch_rbln_info(),
@@ -386,14 +381,14 @@ def collect_diagnostics() -> dict[str, Any]:
         "sys_path": list(sys.path),
     }
     try:
-        print("Checking GCC versions in .so files (readelf)...", file=sys.stderr)
+        print("Checking GCC versions in .so files (readelf)...", file=sys.stderr)  # noqa: T201
         d["gcc_versions"] = _resolve_so_paths(d)
     except Exception:
         d["gcc_versions"] = []
     return d
 
 
-def format_diagnostics(d: dict[str, Any] | None = None, verbose: bool = True) -> str:
+def format_diagnostics(d: dict[str, Any] | None = None, *, verbose: bool = True) -> str:
     """Format diagnostics for console output. If d is None, collects first."""
     if d is None:
         d = collect_diagnostics()
@@ -475,8 +470,7 @@ def format_diagnostics(d: dict[str, Any] | None = None, verbose: bool = True) ->
             rest = [p.strip() for p in parts[1:] if p.strip()]
             if rest:
                 lines.append(f"  {k}={first}")
-                for p in rest:
-                    lines.append(f"    {p}")
+                lines.extend(f"    {p}" for p in rest)
             else:
                 lines.append(f"  {k}={first}")
         else:
@@ -536,8 +530,10 @@ def format_diagnostics(d: dict[str, Any] | None = None, verbose: bool = True) ->
     return "\n".join(lines)
 
 
-def print_diagnostics(verbose: bool = True) -> None:
-    """Print formatted diagnostics to stderr so they are visible even when stdout is captured."""
+def print_diagnostics(*, verbose: bool = True) -> None:
+    """Print formatted diagnostics to stderr so they are visible even when stdout is
+    captured.
+    """
     d = collect_diagnostics()
     text = format_diagnostics(d, verbose=verbose)
-    print(text, file=sys.stderr)
+    print(text, file=sys.stderr)  # noqa: T201

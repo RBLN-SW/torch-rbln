@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Walkthrough example 1: PyTorch recognizes RBLN as a device type.
+"""Walkthrough example 1: PyTorch recognizes RBLN as a device type.
 
 Ported from walkthrough_guide/1.rbln_device_type.py.
 

@@ -39,7 +39,7 @@ For **`rebel-compiler`** and the rest of the setup, see **Prerequisites** above 
 
 ### Build from source
 
-1. Install **[uv](https://docs.astral.sh/uv/getting-started/installation/)** (see [Installation — Prerequisites](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html#prerequisites) in the SDK docs).
+1. Install **[`uv`](https://docs.astral.sh/uv/getting-started/installation/)** (see [Installation — Prerequisites](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html#prerequisites) in the SDK docs).
 2. Configure access to the RBLN package index (see [Authenticate to the RBLN package index](#authenticate-to-the-rbln-package-index) below).
 3. Follow **[Build from source](https://docs.rbln.ai/latest/software/rbln_pytorch/installation.html#build-from-source-advanced)** (venv, **`rebel-compiler`**, editable build, manual steps).
 
@@ -56,13 +56,13 @@ uv venv .venv && source .venv/bin/activate
 
 **`rebel-compiler`** is installed from the RBLN package index (`pypi.rbln.ai`), which requires an **[RBLN Portal account](https://docs.rbln.ai/latest/supports/contact_us.html#rbln-portal)**. Without credentials, `./tools/dev-setup.sh pypi` fails with:
 
-```
+```text
 ❌ Cannot reach any rbln pypi index (no permission or network error).
 ```
 
 Add your RBLN Portal credentials to `~/.netrc` so `pip`/`uv` can authenticate:
 
-```
+```text
 machine pypi.rbln.ai
 login <your-rbln-portal-id>
 password <your-rbln-portal-password>
@@ -106,7 +106,7 @@ Re-run `./tools/dev-setup.sh pypi` once the credentials are in place.
 
 ## Contributing
 
-See [docs/CONTRIBUTING.md](https://github.com/RBLN-SW/torch-rbln/blob/main/docs/CONTRIBUTING.md).
+See [`docs/CONTRIBUTING.md`](https://github.com/RBLN-SW/torch-rbln/blob/main/docs/CONTRIBUTING.md).
 
 ## License
 
@@ -114,5 +114,5 @@ Apache License 2.0 — see [LICENSE](https://github.com/RBLN-SW/torch-rbln/blob/
 
 ## Contact
 
-- **Community:** [discuss.rebellions.ai](https://discuss.rebellions.ai/)
-- **Email:** [support@rebellions.ai](mailto:support@rebellions.ai)
+- **Community**: [discuss.rebellions.ai](https://discuss.rebellions.ai/)
+- **Email**: [support@rebellions.ai](mailto:support@rebellions.ai)

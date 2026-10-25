@@ -2,13 +2,13 @@
 
 """Tests for the v2v-based index_copy.out kernel.
 
-Coverage is organised by behaviour:
+Coverage is organized by behavior:
   - Basic correctness across dtypes / rank / axis
   - Index patterns: consecutive runs (coalesce), scattered, duplicates,
     empty, single element, in-bounds boundary values
   - Stride combinations: contig / non-contig self, source, out
   - In-place vs out-of-place (out aliasing self) — the in-place
-    short-circuits the self → out initialisation
+    short-circuits the self → out initialization
   - 0-D self, 0-numel self, source with zero index count
   - Index dtype (int32 vs int64) and index device (CPU vs RBLN)
   - Error paths: wrong shape, out-of-range index, mismatched dtype
@@ -26,12 +26,15 @@ from torch.testing._internal.common_device_type import dtypes, instantiate_devic
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
 from test.utils_v2v import arange as _arange, DEVICE, ENGINE_DTYPES, eq as _eq, to_dev as _to_dev
+from torch_rbln import _C
+from torch_rbln.profiler import _read_rt_timing, _RT_PRIMS, _rt_timing_enable, _rt_timing_reset
 
 
 def _device_latest(shape, dtype=torch.bfloat16):
     """A tensor whose data lives on the device: a compiled graph's output.
     ``torch.empty(...).copy_(cpu)`` would leave it host-latest, which is the
-    state these tests must not be measured in."""
+    state these tests must not be measured in.
+    """
     f = torch.compile(lambda t: torch.maximum(t, t), backend="rbln", dynamic=False)
     y = f(torch.randn(shape).to(dtype).to(DEVICE))
     torch.rbln.synchronize()
@@ -40,20 +43,18 @@ def _device_latest(shape, dtype=torch.bfloat16):
 
 def _run_and_count(fn):
     """Run ``fn`` and report what crossed the host boundary: bytes the runtime
-    moved device->host, and how many ``rbln_memcpy_v2v_multi`` calls it made."""
-    from torch_rbln import _C
-    from torch_rbln.profiler import _read_rt_timing, _RT_PRIMS, _rt_timing_enable, _rt_timing_reset
-
+    moved device->host, and how many ``rbln_memcpy_v2v_multi`` calls it made.
+    """
     slot = _RT_PRIMS.index("v2v_multi")
     torch.rbln.synchronize()
     (_, d2h_before), _ = _C._rt_prof_host_sync()
     _rt_timing_reset()
-    _rt_timing_enable(True)
+    _rt_timing_enable(on=True)
     try:
         fn()
         torch.rbln.synchronize()
     finally:
-        _rt_timing_enable(False)
+        _rt_timing_enable(on=False)
     (_, d2h_after), _ = _C._rt_prof_host_sync()
     timing = _read_rt_timing()
     assert timing is not None, "this build has no _rt_timing_get binding; rebuild before trusting the result"
@@ -64,7 +65,8 @@ def _run_and_count(fn):
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestIndexCopyV2V(TestCase):
     """Tests for the native v2v ``aten::index_copy.out`` kernel and the
-    ``index_copy_`` / ``index_copy`` forms that dispatch through it."""
+    ``index_copy_`` / ``index_copy`` forms that dispatch through it.
+    """
 
     # ---- basic correctness ----
 
@@ -128,9 +130,10 @@ class TestIndexCopyV2V(TestCase):
         _eq(got, expected)
 
     def test_duplicate_indices_last_write_wins(self):
-        """PyTorch leaves duplicate-index behaviour implementation-defined; both
-        upstream CPU and our v2v path apply runs in order so the LAST write wins.
-        Test that our result matches the CPU reference."""
+        """PyTorch leaves duplicate-index behavior implementation-defined; both upstream
+        CPU and our v2v path apply runs in order so the LAST write wins.
+        Test that our result matches the CPU reference.
+        """
         self_cpu = _arange((6, 3), torch.float32)
         src_cpu = _arange((4, 3), torch.float32) + 1000
         idx_cpu = torch.tensor([2, 4, 5, 2], dtype=torch.int64)
@@ -169,7 +172,8 @@ class TestIndexCopyV2V(TestCase):
 
     def test_in_place_index_copy(self):
         """tensor.index_copy_(...) dispatches with out aliasing self — the kernel
-        must skip the self → out copy and write directly."""
+        must skip the self → out copy and write directly.
+        """
         self_cpu = _arange((6, 4), torch.float16)
         src_cpu = _arange((2, 4), torch.float16) + 100
         idx_cpu = torch.tensor([1, 4], dtype=torch.int64)
@@ -186,7 +190,8 @@ class TestIndexCopyV2V(TestCase):
         rows may be written and nothing may reach the host. The kernel used to
         stage a non-contig ``out`` through a contig buffer and copy it back,
         which for a storage this size meant pulling every byte to the host and
-        re-uploading it — for two rows of work."""
+        re-uploading it — for two rows of work.
+        """
         n_slots = 2048
         storage = _device_latest((n_slots, 256))
         expected = storage.cpu()
@@ -200,7 +205,8 @@ class TestIndexCopyV2V(TestCase):
         self.assertEqual(moved, 0, "index_copy_ on the view pulled the storage to the host")
 
         expected[:, :128].index_copy_(0, idx_cpu, src.cpu())
-        # Reading the storage back must move every byte: the data is still on the device.
+        # Reading the storage back must move every byte: the data is still on the
+        # device.
         read_back, _ = _run_and_count(storage.cpu)
         self.assertEqual(read_back, storage.numel() * storage.element_size())
         _eq(storage, expected)
@@ -210,7 +216,8 @@ class TestIndexCopyV2V(TestCase):
         what one ``rbln_memcpy_v2v_multi`` call dispatches on the device
         (``kMaxV2VMultiCopies`` = 1024). The batch has to split the submit —
         one oversized call makes the runtime host-sync the whole storage and
-        leave it host-latest, so the next graph re-uploads all of it."""
+        leave it host-latest, so the next graph re-uploads all of it.
+        """
         n_rows = 2048
         storage = _device_latest((2 * n_rows, 256))
         expected = storage.cpu()
@@ -237,7 +244,8 @@ class TestIndexCopyV2V(TestCase):
 
     def test_out_with_existing_data_is_overwritten(self):
         """`out` already has data — it must be overwritten by self + indexed updates,
-        not OR'd or accumulated."""
+        not OR'd or accumulated.
+        """
         self_cpu = _arange((4, 3), torch.float32)
         src_cpu = _arange((2, 3), torch.float32) + 100
         idx_cpu = torch.tensor([0, 2], dtype=torch.int64)
@@ -297,7 +305,8 @@ class TestIndexCopyV2V(TestCase):
 
     def test_axis_non_inner_stride(self):
         """index_copy along axis 0 of a tensor whose axis-0 elements are NOT contiguous
-        in memory — runs cannot coalesce into a single v2v call."""
+        in memory — runs cannot coalesce into a single v2v call.
+        """
         big = _arange((6, 12), torch.float32)
         self_cpu = big[:, ::2]
         src_cpu = _arange((3, 6), torch.float32) + 1000
@@ -321,7 +330,8 @@ class TestIndexCopyV2V(TestCase):
         """torch._refs.index_select on a 0-D input decomposes to
         ``empty_like(x).index_copy(0, idx, x.expand_as(idx))`` — 0-D self
         with a 1-D source whose every element equals x. Matches CPU's
-        last-write-wins semantic."""
+        last-write-wins semantic.
+        """
         self_cpu = torch.tensor(42, dtype=torch.float32)
         x = torch.tensor(7, dtype=torch.float32)
         idx_cpu = torch.tensor([0, 0, 0], dtype=torch.int64)
@@ -333,7 +343,8 @@ class TestIndexCopyV2V(TestCase):
     def test_zero_d_self_one_d_source_distinct_values(self):
         """Non-broadcast 1-D source with distinct values on 0-D self: last
         write wins, so the result is source[-1]. PyTorch's index_copy meta
-        admits this shape (self.dim()=0 or source.dim()=0 → mismatch OK)."""
+        admits this shape (self.dim()=0 or source.dim()=0 → mismatch OK).
+        """
         self_cpu = torch.tensor(42, dtype=torch.float32)
         src_cpu = torch.tensor([10.0, 20.0, 30.0], dtype=torch.float32)
         idx_cpu = torch.tensor([0, 0, 0], dtype=torch.int64)
@@ -371,7 +382,8 @@ class TestIndexCopyV2V(TestCase):
     def test_index_dtype_int32_rejected_upstream(self):
         """index_copy upstream is strict about index dtype — it accepts only int64
         (unlike index_select). We don't need to special-case this on our side;
-        PyTorch's meta function raises before reaching the RBLN kernel."""
+        PyTorch's meta function raises before reaching the RBLN kernel.
+        """
         self_dev = _to_dev(_arange((5, 3), torch.float32))
         src_dev = _to_dev(_arange((2, 3), torch.float32))
         idx_int32 = torch.tensor([1, 3], dtype=torch.int32, device=DEVICE)
@@ -381,7 +393,8 @@ class TestIndexCopyV2V(TestCase):
     def test_index_cross_device_rejected_upstream(self):
         """index_copy upstream enforces same-device for self/index/source — unlike
         index_select, an index on a different device is rejected before reaching
-        the kernel."""
+        the kernel.
+        """
         self_dev = _to_dev(_arange((5, 3), torch.float16))
         src_dev = _to_dev(_arange((2, 3), torch.float16))
         idx_cpu = torch.tensor([0, 4], dtype=torch.int64)
@@ -394,24 +407,27 @@ class TestIndexCopyV2V(TestCase):
         self_dev = _to_dev(_arange((5, 3), torch.float32))
         src_dev = _to_dev(_arange((1, 3), torch.float32))
         idx_dev = torch.tensor([10], dtype=torch.int64, device=DEVICE)
-        with pytest.raises((IndexError, RuntimeError), match="out of range|out of bounds"):
+        with pytest.raises((IndexError, RuntimeError), match=r"out of range|out of bounds"):
             torch.index_copy(self_dev, 0, idx_dev, src_dev)
 
     def test_empty_self_along_indexed_dim_oob_rejected(self):
         """self empty on the INDEXED axis (extent 0): every index is out of range
         and must raise, not be swallowed by the empty-self early return.
-        (Contrast test_empty_self_along_dim: empty on a non-indexed axis.)"""
+        (Contrast test_empty_self_along_dim: empty on a non-indexed axis.)
+        """
         self_dev = _to_dev(torch.empty((0, 3), dtype=torch.float32))
         src_dev = _to_dev(torch.zeros((1, 3), dtype=torch.float32))
         idx_dev = torch.tensor([0], dtype=torch.int64, device=DEVICE)
-        with pytest.raises((IndexError, RuntimeError), match="out of range|out of bounds"):
+        with pytest.raises((IndexError, RuntimeError), match=r"out of range|out of bounds"):
             torch.index_copy(self_dev, 0, idx_dev, src_dev)
 
     def test_empty_source_oob_index_not_rejected(self):
         """self empty on a NON-indexed axis => source is empty too (numel 0). CPU
         skips the index bounds check and returns the empty result, so an out-of-range
-        index must NOT raise here (contrast test_empty_self_along_indexed_dim_oob_rejected,
-        where source is non-empty). Regression for the index_copy bounds parity."""
+        index must NOT raise here (contrast
+        test_empty_self_along_indexed_dim_oob_rejected, where source is non-empty).
+        Regression for the index_copy bounds parity.
+        """
         self_cpu = torch.zeros((3, 0), dtype=torch.float32)
         src_cpu = torch.zeros((1, 0), dtype=torch.float32)
         idx_cpu = torch.tensor([5], dtype=torch.int64)  # 5 >= self.size(0)=3, but nothing to copy
@@ -423,7 +439,7 @@ class TestIndexCopyV2V(TestCase):
         self_dev = _to_dev(_arange((3, 4), torch.float32))
         src_dev = _to_dev(_arange((1, 4), torch.float32))
         idx_dev = torch.tensor([0], dtype=torch.int64, device=DEVICE)
-        with pytest.raises((IndexError, RuntimeError), match="dim|range|bounds"):
+        with pytest.raises((IndexError, RuntimeError), match=r"dim|range|bounds"):
             torch.index_copy(self_dev, 5, idx_dev, src_dev)
 
     def test_source_size_mismatch_rejected(self):
@@ -435,7 +451,9 @@ class TestIndexCopyV2V(TestCase):
 
     @dtypes(*ENGINE_DTYPES)
     def test_out_source_overlap_rejected(self, dtype):
-        """``out`` and ``source`` sharing storage (``source`` is a slice of ``out``) must raise ``RuntimeError``."""
+        """``out`` and ``source`` sharing storage (``source`` is a slice of ``out``)
+        must raise ``RuntimeError``.
+        """
         self_ref = _to_dev(_arange((5,), dtype))
         idx = torch.tensor([0, 2], dtype=torch.long)
         out = _to_dev(_arange((5,), dtype))
@@ -445,7 +463,9 @@ class TestIndexCopyV2V(TestCase):
 
     @dtypes(*ENGINE_DTYPES)
     def test_out_internal_overlap_rejected(self, dtype):
-        """``out`` with internal overlap (broadcast view) must raise ``RuntimeError``."""
+        """``out`` with internal overlap (broadcast view) must raise
+        ``RuntimeError``.
+        """
         self_ref = _to_dev(_arange((2, 4), dtype))
         source = _to_dev(_arange((1, 4), dtype))
         idx = torch.tensor([0], dtype=torch.long)
@@ -457,7 +477,8 @@ class TestIndexCopyV2V(TestCase):
 
     def test_large_consecutive_run(self):
         """Big tensor with one large consecutive run — the coalesce should issue
-        one v2v of the whole run rather than per-row."""
+        one v2v of the whole run rather than per-row.
+        """
         n, c = 1024, 128
         run_len = 256
         self_cpu = _arange((n, c), torch.float16)

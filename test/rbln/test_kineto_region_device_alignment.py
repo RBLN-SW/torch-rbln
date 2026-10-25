@@ -2,45 +2,47 @@
 
 """rbln device slices must line up with the host op that launched them.
 
-Runs models on a real NPU under ``torch.profiler`` (CPU + PrivateUse1) and, for every run,
-checks the device slices it produced against the host CPU slice that launched them. Two
-runtime modes, selected by ``RBLN_RUNTIME_FORCE_SYNC``:
+Runs models on a real NPU under ``torch.profiler`` (CPU + PrivateUse1) and, for every
+run, checks the device slices it produced against the host CPU slice that launched them.
+Two runtime modes, selected by ``RBLN_RUNTIME_FORCE_SYNC``:
 
-* sync dispatch (``RBLN_RUNTIME_FORCE_SYNC=1``) -- the runtime blocks on device completion
-  after each op, so the device work nests inside the launching op: we assert *containment*
-  (device work starts at/after the launch AND ends inside the op).
+* sync dispatch (``RBLN_RUNTIME_FORCE_SYNC=1``) -- the runtime blocks on device
+  completion after each op, so the device work nests inside the launching op: we assert
+  *containment* (device work starts at/after the launch AND ends inside the op).
 * async dispatch (``RBLN_RUNTIME_FORCE_SYNC=0``, the default) -- the runtime submits and
   returns (RuntimeInstance uses ``RunAsync`` + in-flight tracking), so device work may
-  outlive the launching op. We assert only the *start ordering* (device work never begins
-  before its launch). NOTE: with the profiler on, per-run counter readback currently drains
-  each op so the trace still comes out contained; asserting only the async-safe bound keeps
-  this test valid once async profiling lands and the device work really does outlive the op.
+  outlive the launching op. We assert only the *start ordering* (device work never
+  begins before its launch). NOTE: with the profiler on, per-run counter readback
+  currently drains each op so the trace still comes out contained; asserting only the
+  async-safe bound keeps this test valid once async profiling lands and the device work
+  really does outlive the op.
 
-The launching op is the innermost enclosing CPU slice the run's source marker sits in: the
-"Torch-Compiled Region" for graph mode, the aten op for eager. A broken clock anchor
+The launching op is the innermost enclosing CPU slice the run's source marker sits in:
+the "Torch-Compiled Region" for graph mode, the aten op for eager. A broken clock anchor
 misplaces device slices by orders of magnitude, so either check fails.
 
 Correlation is read from the ``launch_id`` annotation the rbln bridge stamps on both the
-``rbln_run`` source marker and every device slice a run produced: we group trace slices by
-``launch_id``, use the ``rbln_run`` marker to locate the enclosing op, and check the run's
-device slices against it. (These two strings are the producer<->consumer contract; a drift
-surfaces as zero correlated launches and fails loudly here.)
+``rbln_run`` source marker and every device slice a run produced: we group trace slices
+by ``launch_id``, use the ``rbln_run`` marker to locate the enclosing op, and check the
+run's device slices against it. (These two strings are the producer<->consumer contract;
+a drift surfaces as zero correlated launches and fails loudly here.)
 
 The arrows drawn from that correlation are chrome-trace ``ph`` "s"/"f" events, which the
-slice checks never see, so one test walks them directly: every marker owns one flow start and
-every start reaches a device slice of the same ``launch_id``.
+slice checks never see, so one test walks them directly: every marker owns one flow
+start and every start reaches a device slice of the same ``launch_id``.
 
-Requires a live REBEL NPU and ``RBLN_PROFILER=1`` (device profiling must be on at runtime
-creation, else no device slices are recorded).
+Requires a live REBEL NPU and ``RBLN_PROFILER=1`` (device profiling must be on at
+runtime creation, else no device slices are recorded).
 """
 
 import json
 import os
 import tempfile
+from pathlib import Path
 
 import pytest
 import torch
-import torch.nn as nn
+from torch import nn
 from torch.profiler import profile, ProfilerActivity
 from torch.testing._internal.common_utils import run_tests, TestCase
 
@@ -84,20 +86,26 @@ class _MLP2(nn.Module):
 
 @pytest.fixture
 def enable_rbln_device_profiler(monkeypatch, tmp_path):
-    """Device profiling must be on at runtime creation for the kineto session to record slices."""
+    """Device profiling must be on at runtime creation for the kineto session to record
+    slices.
+    """
     monkeypatch.setenv("RBLN_PROFILER", "1")
     monkeypatch.setenv("RBLN_PROFILER_DIR", str(tmp_path))
 
 
 @pytest.fixture
 def force_sync_dispatch(monkeypatch):
-    """Block on device completion after each runtime op (RuntimeInstance drains per op)."""
+    """Block on device completion after each runtime op (RuntimeInstance drains per
+    op).
+    """
     monkeypatch.setenv("RBLN_RUNTIME_FORCE_SYNC", "1")
 
 
 @pytest.fixture
 def async_dispatch(monkeypatch):
-    """Default async dispatch: the runtime submits and returns without blocking per op."""
+    """Default async dispatch: the runtime submits and returns without blocking per
+    op.
+    """
     monkeypatch.setenv("RBLN_RUNTIME_FORCE_SYNC", "0")
 
 
@@ -108,9 +116,9 @@ def async_dispatch(monkeypatch):
     is_atom_device(),
     reason="rbln kineto export is REBEL-only; rbln_kineto_is_active() reports inactive on ATOM",
 )
-# Not xfail_rebel(): that helper is strict, and the fault is host-dependent, so a REBEL host
-# that does create the runtime must not fail the job on XPASS. `-rEfX` still reports the XPASS,
-# which is the signal to drop this marker.
+# Not xfail_rebel(): that helper is strict, and the fault is host-dependent, so a REBEL
+# host that does create the runtime must not fail the job on XPASS. `-rEfX` still
+# reports the XPASS, which is the signal to drop this marker.
 @pytest.mark.xfail(
     condition=is_rebel_device(),
     reason="create_runtime(activate_profiler=True) faults on the REBEL CI hosts "
@@ -122,7 +130,9 @@ class TestKinetoRegionDeviceAlignment(TestCase):
 
     @staticmethod
     def _profiled_events(run_in_window):
-        """Profile ``run_in_window()`` (CPU + PrivateUse1); return the chrome trace events."""
+        """Profile ``run_in_window()`` (CPU + PrivateUse1); return the chrome trace
+        events.
+        """
         with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.PrivateUse1]) as prof:
             run_in_window()
             torch.rbln.synchronize()  # flush device work into the window
@@ -130,10 +140,10 @@ class TestKinetoRegionDeviceAlignment(TestCase):
         os.close(fd)
         try:
             prof.export_chrome_trace(path)
-            with open(path) as fh:
+            with Path(path).open() as fh:
                 data = json.load(fh)
         finally:
-            os.unlink(path)
+            Path(path).unlink()
         return data["traceEvents"] if isinstance(data, dict) else data
 
     def _two_graph_events(self):
@@ -157,9 +167,11 @@ class TestKinetoRegionDeviceAlignment(TestCase):
             return None
 
     def _assert_launches_aligned(self, events, name_contains, min_launches, sync):
-        """Group slices by ``launch_id``; for each run, its device slices start at/after the
-        launch (always) and end inside the launching op when ``sync``. ``name_contains``
-        filters that op (a compiled region); None means any CPU op (eager)."""
+        """Group slices by ``launch_id``; for each run, its device slices start at/after
+        the launch (always) and end inside the launching op when ``sync``.
+        ``name_contains`` filters that op (a compiled region); None means any CPU op
+        (eager).
+        """
         slices = [e for e in events if e.get("ph") == "X" and isinstance(e.get("name"), str)]
 
         by_launch = {}
@@ -219,9 +231,10 @@ class TestKinetoRegionDeviceAlignment(TestCase):
     def _assert_flow_arrows(self, events, min_launches):
         """Ids in our block must account for themselves: one flow start per ``rbln_run``
         marker, each start's finishes covering exactly that launch's runtime slices, and
-        nothing left over -- so a foreign id landing inside the block breaks a count. Ids
-        outside the block are another producer's. Arrows are ``ph`` "s"/"f", which the
-        ``ph == "X"`` checks never see."""
+        nothing left over -- so a foreign id landing inside the block breaks a count.
+        Ids outside the block are another producer's. Arrows are ``ph`` "s"/"f", which
+        the ``ph == "X"`` checks never see.
+        """
         slices = [e for e in events if e.get("ph") == "X" and isinstance(e.get("name"), str)]
         markers = [e for e in slices if e["name"] == RUN_MARKER and self._launch_id(e) is not None]
         flows = [
@@ -297,7 +310,8 @@ class TestKinetoRegionDeviceAlignment(TestCase):
 
     @pytest.mark.usefixtures("force_sync_dispatch")
     def test_sync_dispatch_device_contained(self):
-        # RBLN_RUNTIME_FORCE_SYNC=1: the run blocks on the device, so device work nests in its region.
+        # RBLN_RUNTIME_FORCE_SYNC=1: the run blocks on the device, so device work nests
+        # in its region.
         events = self._two_graph_events()
         self.assertGreater(
             len([e for e in events if e.get("ph") == "X" and REGION_NAME in str(e.get("name"))]),
@@ -308,8 +322,9 @@ class TestKinetoRegionDeviceAlignment(TestCase):
 
     @pytest.mark.usefixtures("async_dispatch")
     def test_async_dispatch_device_after_launch(self):
-        # RBLN_RUNTIME_FORCE_SYNC=0 (async dispatch): assert only that device work starts after
-        # its launch (it may outlive the region once async profiling no longer drains per run).
+        # RBLN_RUNTIME_FORCE_SYNC=0 (async dispatch): assert only that device work
+        # starts after its launch (it may outlive the region once async profiling no
+        # longer drains per run).
         events = self._two_graph_events()
         self._assert_launches_aligned(events, name_contains=REGION_NAME, min_launches=2, sync=False)
 
@@ -320,7 +335,8 @@ class TestKinetoRegionDeviceAlignment(TestCase):
 
     @pytest.mark.usefixtures("force_sync_dispatch")
     def test_eager_ops_device_contained(self):
-        # Eager compiles per op too, but emits no "Torch-Compiled Region"; the launcher is the aten op.
+        # Eager compiles per op too, but emits no "Torch-Compiled Region"; the launcher
+        # is the aten op.
         model = _MLP1().to(DEVICE, dtype=DTYPE)
         x = torch.randn(4, 128, device=DEVICE, dtype=DTYPE)
         model(x)  # compile before profiling

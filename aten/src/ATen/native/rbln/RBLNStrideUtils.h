@@ -25,7 +25,9 @@ namespace at::native::rbln {
  * position emits its own copy) should use `common_inner_start` below, which
  * additionally rejects stride==0 on non-size-1 dims.
  */
-inline int64_t contig_suffix_start(c10::IntArrayRef sizes, c10::IntArrayRef strides) {
+inline int64_t contig_suffix_start(
+    c10::IntArrayRef sizes,
+    c10::IntArrayRef strides) {
   const int64_t rank = static_cast<int64_t>(sizes.size());
   if (rank == 0)
     return 0;
@@ -95,7 +97,9 @@ inline int64_t common_inner_start(
  *
  * Returns false when iteration is exhausted (idx wraps back to all zeros).
  */
-inline bool advance_multi_index(std::vector<int64_t>& idx, c10::IntArrayRef outer_sizes) {
+inline bool advance_multi_index(
+    std::vector<int64_t>& idx,
+    c10::IntArrayRef outer_sizes) {
   for (int64_t d = static_cast<int64_t>(outer_sizes.size()) - 1; d >= 0; --d) {
     if (++idx[d] < outer_sizes[d])
       return true;
@@ -115,12 +119,14 @@ inline bool advance_multi_index(std::vector<int64_t>& idx, c10::IntArrayRef oute
  * already cover. Stride 0 aliases by definition.
  *
  * Conservative one way only — never misses a real overlap, but reports one for
- * interleaved-yet-disjoint layouts (sizes {3,2}, strides {8,12}). Deciding those
- * exactly is subset-sum, which is why `at::has_internal_overlap` answers
+ * interleaved-yet-disjoint layouts (sizes {3,2}, strides {8,12}). Deciding
+ * those exactly is subset-sum, which is why `at::has_internal_overlap` answers
  * `TooHard`. A false report costs a batching win, never correctness. Against
  * brute force over 300k random shapes: 0 misses, ~6% conservative.
  */
-inline bool view_may_self_overlap(c10::IntArrayRef sizes, c10::IntArrayRef strides) {
+inline bool view_may_self_overlap(
+    c10::IntArrayRef sizes,
+    c10::IntArrayRef strides) {
   c10::SmallVector<std::pair<int64_t, int64_t>, 8> dims; // (|stride|, size)
   for (size_t i = 0; i < sizes.size(); ++i) {
     if (sizes[i] <= 1) {
@@ -131,7 +137,7 @@ inline bool view_may_self_overlap(c10::IntArrayRef sizes, c10::IntArrayRef strid
     }
     dims.emplace_back(std::abs(strides[i]), sizes[i]);
   }
-  std::sort(dims.begin(), dims.end());
+  std::ranges::sort(dims);
   int64_t covered = 1; // elements spanned by the dimensions handled so far
   for (const auto& [stride, size] : dims) {
     if (stride < covered) {

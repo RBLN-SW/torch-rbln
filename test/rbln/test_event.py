@@ -114,7 +114,7 @@ class TestEvent(TestCase):
         src = torch.randn(128, 128, dtype=torch.float16)
         dev0 = src.to("rbln:0")
         pinned = torch.empty_like(src, pin_memory=True)
-        _warm = torch.zeros(1, dtype=torch.float16, device="rbln:1")  # device 1's context  # noqa: F841
+        _warm = torch.zeros(1, dtype=torch.float16, device="rbln:1")  # device 1's context
         event = torch.rbln.Event()
         with torch.rbln.stream(torch.rbln.Stream(device=0)):
             pinned.copy_(dev0, non_blocking=True)

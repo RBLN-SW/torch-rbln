@@ -1,20 +1,21 @@
 # ==============================================================================
-# FindPybind.cmake - PyTorch-compatible pybind11 configuration
+# pybind11Setup.cmake - PyTorch-compatible pybind11 configuration
 # ==============================================================================
 #
 # PROBLEM:
-# When torch-rbln uses a different pybind11 version than PyTorch, cross-module
-# type inheritance fails with "Assertion 'parent_tinfo != nullptr' failed" error.
-# This occurs because pybind11 maintains an internal type registry that is
-# version-specific and not shared across modules built with different versions.
+# When `torch-rbln` uses a different pybind11 version than PyTorch, cross-module
+# type inheritance fails with "Assertion 'parent_tinfo != nullptr' failed"
+# error. This occurs because pybind11 maintains an internal type registry that
+# is version-specific and not shared across modules built with different
+# versions.
 #
 # ROOT CAUSE:
 # - PyTorch (pip-installed) bundles pybind11 3.x (e.g., 3.0.1)
-# - System pybind11 (pip install pybind11) is typically 2.x (e.g., 2.13.6)
+# - A pybind11 installed separately from PyTorch can be 2.x (e.g., 2.13.6)
 # - pybind11 2.x and 3.x have incompatible ABIs and type registries
-# - When ProcessGroupRBLN tries to inherit from torch._C._distributed_c10d.Backend,
-#   pybind11 cannot find the parent type info because it was registered with
-#   a different pybind11 version
+# - When ProcessGroupRBLN tries to inherit from
+#   torch._C._distributed_c10d.Backend, pybind11 cannot find the parent type
+#   info because it was registered with a different pybind11 version
 #
 # SOLUTION:
 # Use PyTorch's bundled pybind11 to ensure ABI compatibility and shared type
@@ -31,7 +32,8 @@ find_package(Python3
 # Get Python site-packages path (used for both PyTorch and fallback pybind11)
 if(NOT DEFINED PYTHON_SITE_PACKAGES)
   execute_process(
-    COMMAND ${Python3_EXECUTABLE} -c "import sysconfig; print(sysconfig.get_paths()['purelib'])"
+    COMMAND ${Python3_EXECUTABLE} -c
+      "import sysconfig; print(sysconfig.get_paths()['purelib'])"
     OUTPUT_VARIABLE PYTHON_SITE_PACKAGES
     OUTPUT_STRIP_TRAILING_WHITESPACE
   )
@@ -40,8 +42,9 @@ if(NOT DEFINED PYTHON_SITE_PACKAGES)
   endif()
 endif()
 
-# Use TORCH_INCLUDE_DIRS from FindTorch.cmake if already defined
-# Otherwise, derive from PYTHON_SITE_PACKAGES (same approach as FindTorch.cmake)
+# Use TORCH_INCLUDE_DIRS from TorchSetup.cmake if already defined
+# Otherwise, derive from PYTHON_SITE_PACKAGES (same approach as
+# TorchSetup.cmake)
 if(DEFINED TORCH_INCLUDE_DIRS)
   # TORCH_INCLUDE_DIRS is a list, get the first element
   list(GET TORCH_INCLUDE_DIRS 0 TORCH_INCLUDE_DIR)
@@ -73,7 +76,8 @@ if(EXISTS "${TORCH_PYBIND11_DIR}")
   # Get Python module extension (e.g., .cpython-312-x86_64-linux-gnu.so)
   if(NOT DEFINED PYTHON_MODULE_EXTENSION)
     execute_process(
-      COMMAND ${Python3_EXECUTABLE} -c "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))"
+      COMMAND ${Python3_EXECUTABLE} -c
+        "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))"
       OUTPUT_VARIABLE PYTHON_MODULE_EXTENSION
       OUTPUT_STRIP_TRAILING_WHITESPACE
     )
@@ -92,7 +96,8 @@ if(EXISTS "${TORCH_PYBIND11_DIR}")
   endfunction()
 else()
   # Fallback to system pybind11 if PyTorch's is not found
-  message(WARNING "PyTorch's pybind11 not found, falling back to system pybind11")
+  message(WARNING
+    "PyTorch's pybind11 not found, falling back to system pybind11")
   find_package(pybind11 REQUIRED
     PATHS ${PYTHON_SITE_PACKAGES}/pybind11/share/cmake
     NO_DEFAULT_PATH

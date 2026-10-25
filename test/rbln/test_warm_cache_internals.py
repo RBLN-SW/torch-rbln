@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Test suite for the C++ warm-cache internals (torch_rbln._C._warmcache_*).
+"""Test suite for the C++ warm-cache internals (torch_rbln._C._warmcache_*).
 
 The warm-cache caches the rebel-runtime handle for a (op, input-profile)
 combination so that subsequent dispatches with the same profile bypass the
@@ -19,7 +18,7 @@ import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from torch_rbln import _C  # type: ignore[attr-defined]
+from torch_rbln import _C
 from torch_rbln._internal import warm_cache
 
 
@@ -56,9 +55,9 @@ class TestWarmCacheEnableDisable(TestCase):
         self.assertIsInstance(v, bool)
 
     def test_set_enabled_round_trip(self) -> None:
-        _C._warmcache_set_enabled(False)
+        _C._warmcache_set_enabled(enabled=False)
         self.assertFalse(_C._warmcache_is_enabled())
-        _C._warmcache_set_enabled(True)
+        _C._warmcache_set_enabled(enabled=True)
         self.assertTrue(_C._warmcache_is_enabled())
 
     def test_size_is_non_negative_int(self) -> None:
@@ -208,7 +207,8 @@ class TestWarmCacheContractBreak(TestCase):
                 self._inner = inner
 
             def native_handle(self):
-                raise TypeError("native_handle(): incompatible function arguments")
+                msg = "native_handle(): incompatible function arguments"
+                raise TypeError(msg)
 
             def __getattr__(self, name):
                 return getattr(self._inner, name)

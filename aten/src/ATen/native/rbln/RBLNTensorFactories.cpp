@@ -29,7 +29,8 @@ at::Tensor empty_rbln(
   const auto layout = c10::layout_or_default(layout_opt);
   const auto device = c10::device_or_default(device_opt);
   const auto pin_memory = c10::pinned_memory_or_default(pin_memory_opt);
-  const auto memory_format = memory_format_opt.value_or(c10::MemoryFormat::Contiguous);
+  const auto memory_format =
+      memory_format_opt.value_or(c10::MemoryFormat::Contiguous);
   RBLN_LOG_DEBUG(
       "sizes={}, dtype={}, layout={}, device={}, pin_memory={}, memory_format={}",
       c10::str(sizes),
@@ -38,14 +39,22 @@ at::Tensor empty_rbln(
       c10::str(device),
       pin_memory,
       c10::str(memory_format));
-  RBLN_CHECK(layout == c10::kStrided, "Only Strided layout is supported, but got {}", c10::str(layout));
-  RBLN_CHECK(device.is_privateuseone(), "Only privateuseone device is supported, but got {}", c10::str(device));
+  RBLN_CHECK(
+      layout == c10::kStrided,
+      "Only Strided layout is supported, but got {}",
+      c10::str(layout));
+  RBLN_CHECK(
+      device.is_privateuseone(),
+      "Only privateuseone device is supported, but got {}",
+      c10::str(device));
   RBLN_CHECK(!pin_memory, "Pinned memory is not supported");
 
   const auto device_guard = c10::DeviceGuard(device);
   auto* allocator = c10::GetAllocator(c10::kPrivateUse1);
-  constexpr auto dispatch_key_set = c10::DispatchKeySet(c10::DispatchKey::PrivateUse1);
-  const at::Tensor out = at::detail::empty_generic(sizes, allocator, dispatch_key_set, dtype, memory_format);
+  constexpr auto dispatch_key_set =
+      c10::DispatchKeySet(c10::DispatchKey::PrivateUse1);
+  const at::Tensor out = at::detail::empty_generic(
+      sizes, allocator, dispatch_key_set, dtype, memory_format);
   RBLN_LOG_DEBUG("out_data={}", fmt::ptr(out.data_ptr()));
   return out;
 }
@@ -70,14 +79,22 @@ at::Tensor empty_strided_rbln(
       c10::str(layout),
       c10::str(device),
       pin_memory);
-  RBLN_CHECK(layout == c10::kStrided, "Only Strided layout is supported, but got {}", c10::str(layout));
-  RBLN_CHECK(device.is_privateuseone(), "Only privateuseone device is supported, but got {}", c10::str(device));
+  RBLN_CHECK(
+      layout == c10::kStrided,
+      "Only Strided layout is supported, but got {}",
+      c10::str(layout));
+  RBLN_CHECK(
+      device.is_privateuseone(),
+      "Only privateuseone device is supported, but got {}",
+      c10::str(device));
   RBLN_CHECK(!pin_memory, "Pinned memory is not supported");
 
   const auto device_guard = c10::DeviceGuard(device);
   auto* allocator = c10::GetAllocator(c10::kPrivateUse1);
-  constexpr auto dispatch_key_set = c10::DispatchKeySet(c10::DispatchKey::PrivateUse1);
-  const at::Tensor out = at::detail::empty_strided_generic(sizes, strides, allocator, dispatch_key_set, dtype);
+  constexpr auto dispatch_key_set =
+      c10::DispatchKeySet(c10::DispatchKey::PrivateUse1);
+  const at::Tensor out = at::detail::empty_strided_generic(
+      sizes, strides, allocator, dispatch_key_set, dtype);
   RBLN_LOG_DEBUG("out_data={}", fmt::ptr(out.data_ptr()));
   return out;
 }
@@ -127,8 +144,10 @@ at::Tensor& zero_rbln_(at::Tensor& self) {
   // only when `self` spans that allocation. A partial/offset view (e.g.
   // base[2:4]) would otherwise zero the entire tensor; route those through
   // fill_(0), which writes just the view's byte range.
-  const bool covers_whole_allocation = self.is_contiguous() && self.storage_offset() == 0 &&
-      static_cast<size_t>(self.numel()) * self.element_size() == self.storage().nbytes();
+  const bool covers_whole_allocation = self.is_contiguous() &&
+      self.storage_offset() == 0 &&
+      static_cast<size_t>(self.numel()) * self.element_size() ==
+          self.storage().nbytes();
   if (!covers_whole_allocation) {
     return fill_scalar_rbln_(self, 0);
   }
@@ -138,10 +157,15 @@ at::Tensor& zero_rbln_(at::Tensor& self) {
 
 namespace {
 // Dispatch a scalar value into the appropriate typed std::fill_n over a host
-// buffer of given element count. We support the dtypes vllm-rbln actually hits
-// on Llama-class workloads (slot_mapping=int64, masks=bool, positions=int64,
-// fp16/bf16/fp32 activations). Adding more is a one-line case extension.
-bool fill_host_typed(void* host_ptr, int64_t numel, c10::ScalarType st, const at::Scalar& value) {
+// buffer of given element count. We support the dtypes `vllm-rbln` actually
+// hits on Llama-class workloads (slot_mapping=int64, masks=bool,
+// positions=int64, fp16/bf16/fp32 activations). Adding more is a one-line case
+// extension.
+bool fill_host_typed(
+    void* host_ptr,
+    int64_t numel,
+    c10::ScalarType st,
+    const at::Scalar& value) {
   switch (st) {
     case at::kLong:
       std::fill_n(static_cast<int64_t*>(host_ptr), numel, value.to<int64_t>());
@@ -172,10 +196,14 @@ bool fill_host_typed(void* host_ptr, int64_t numel, c10::ScalarType st, const at
       std::fill_n(static_cast<double*>(host_ptr), numel, value.to<double>());
       return true;
     case at::kHalf:
-      std::fill_n(static_cast<at::Half*>(host_ptr), numel, value.to<at::Half>());
+      std::fill_n(
+          static_cast<at::Half*>(host_ptr), numel, value.to<at::Half>());
       return true;
     case at::kBFloat16:
-      std::fill_n(static_cast<at::BFloat16*>(host_ptr), numel, value.to<at::BFloat16>());
+      std::fill_n(
+          static_cast<at::BFloat16*>(host_ptr),
+          numel,
+          value.to<at::BFloat16>());
       return true;
     default:
       return false; // unsupported dtype — caller falls back to cpu_fallback
@@ -236,27 +264,30 @@ at::Tensor& fill_scalar_via_cpu(at::Tensor& self, const at::Scalar& value) {
 
 // Region fill through the runtime's host->virtual copy.
 //
-// The borrow path below materialises the whole storage on the host: a device-latest
-// tensor is read back in full, the view is filled, and the storage is left host-latest,
-// so the next device consumer uploads all of it again. Writing the view's runs through
-// the h2v copy instead lets the runtime route by the entry's own sync state, as it does
-// for every cpu->rbln copy_: a device-resident entry is written in place and stays
-// device-latest; a host-latest or empty entry is written in its user view with no
-// transfer.
+// The borrow path below materialises the whole storage on the host: a
+// device-latest tensor is read back in full, the view is filled, and the
+// storage is left host-latest, so the next device consumer uploads all of it
+// again. Writing the view's runs through the h2v copy instead lets the runtime
+// route by the entry's own sync state, as it does for every cpu->rbln copy_: a
+// device-resident entry is written in place and stays device-latest; a
+// host-latest or empty entry is written in its user view with no transfer.
 //
-// The contiguous suffix of the view's dims is one run; the dims above it are the outer
-// iteration, enqueued with a source stride of 0 so one pattern buffer feeds every run,
-// and H2VBatch splits the submit to the runtime's bulk caps. Declined, and left to the
-// paths below: a view whose runs could alias (bulk destinations must be disjoint), more
-// runs than kMaxFillRuns, or a run larger than the pattern buffer cap.
+// The contiguous suffix of the view's dims is one run; the dims above it are
+// the outer iteration, enqueued with a source stride of 0 so one pattern buffer
+// feeds every run, and H2VBatch splits the submit to the runtime's bulk caps.
+// Declined, and left to the paths below: a view whose runs could alias (bulk
+// destinations must be disjoint), more runs than kMaxFillRuns, or a run larger
+// than the pattern buffer cap.
 namespace {
 constexpr int64_t kMaxFillRuns = 4096;
-constexpr size_t kMaxPatternBytes = size_t{16} << 20; // one pattern buffer per fill
+constexpr size_t kMaxPatternBytes = size_t{16}
+    << 20; // one pattern buffer per fill
 
 bool fill_region_device(at::Tensor& self, const at::Scalar& value) {
   const auto sizes = self.sizes();
   const auto strides = self.strides();
-  if (at::has_internal_overlap(self) != at::MemOverlap::No && view_may_self_overlap(sizes, strides)) {
+  if (at::has_internal_overlap(self) != at::MemOverlap::No &&
+      view_may_self_overlap(sizes, strides)) {
     return false;
   }
   const int64_t rank = self.dim();
@@ -273,42 +304,62 @@ bool fill_region_device(at::Tensor& self, const at::Scalar& value) {
   if (outer_count > kMaxFillRuns) {
     return false;
   }
-  const size_t run_bytes = static_cast<size_t>(inner_elems) * static_cast<size_t>(elm);
+  const size_t run_bytes =
+      static_cast<size_t>(inner_elems) * static_cast<size_t>(elm);
   if (run_bytes == 0 || run_bytes > kMaxPatternBytes) {
     return false;
   }
   std::vector<uint8_t> pattern(run_bytes);
-  if (!fill_host_typed(pattern.data(), inner_elems, self.scalar_type(), value)) {
+  if (!fill_host_typed(
+          pattern.data(), inner_elems, self.scalar_type(), value)) {
     return false;
   }
-  c10::SmallVector<int64_t, 8> outer_sizes(sizes.begin(), sizes.begin() + inner_start);
-  c10::SmallVector<int64_t, 8> src_byte_strides(static_cast<size_t>(inner_start), 0);
+  c10::SmallVector<int64_t, 8> outer_sizes(
+      sizes.begin(), sizes.begin() + inner_start);
+  c10::SmallVector<int64_t, 8> src_byte_strides(
+      static_cast<size_t>(inner_start), 0);
   c10::SmallVector<int64_t, 8> dst_byte_strides;
   for (int64_t i = 0; i < inner_start; ++i) {
     dst_byte_strides.push_back(strides[i] * elm);
   }
   c10::rbln::H2VBatch batch;
-  batch.enqueue_strided(self.data_ptr(), pattern.data(), run_bytes, outer_sizes, src_byte_strides, dst_byte_strides);
+  batch.enqueue_strided(
+      self.data_ptr(),
+      pattern.data(),
+      run_bytes,
+      outer_sizes,
+      src_byte_strides,
+      dst_byte_strides);
   batch.submit();
-  RBLN_LOG_DEBUG("fill_: region fill through h2v, runs={} run_bytes={}", outer_count, run_bytes);
+  RBLN_LOG_DEBUG(
+      "fill_: region fill through h2v, runs={} run_bytes={}",
+      outer_count,
+      run_bytes);
   return true;
 }
 } // namespace
 
-// RAII for a host borrow: if the scope exits via a throw (e.g. Scalar::to<T>()'s checked
-// cast overflowing), return the borrow (updated=false) so it isn't leaked. The happy path
-// returns explicitly then disarms.
+// RAII for a host borrow: if the scope exits via an exception (e.g.
+// Scalar::to<T>()'s checked cast overflowing), return the borrow
+// (updated=false) so it isn't leaked. The happy path returns explicitly then
+// disarms.
 struct BorrowGuard {
-  uint64_t id;
-  bool armed = true;
+  explicit BorrowGuard(uint64_t borrow_id) : id(borrow_id) {}
+  BorrowGuard(const BorrowGuard&) = delete;
+  BorrowGuard& operator=(const BorrowGuard&) = delete;
+  BorrowGuard(BorrowGuard&&) = delete;
+  BorrowGuard& operator=(BorrowGuard&&) = delete;
   ~BorrowGuard() {
     if (armed) {
       try {
         c10::rbln::return_borrowed(id, /*updated=*/false);
-      } catch (...) {
+      } catch (...) { // NOLINT(bugprone-empty-catch)
       }
     }
   }
+
+  uint64_t id;
+  bool armed = true;
 };
 } // namespace
 
@@ -317,12 +368,13 @@ at::Tensor& fill_scalar_rbln_(at::Tensor& self, const at::Scalar& value) {
   if (self.numel() == 0) {
     return self;
   }
-  // Broadcast/expand view: a size>1 dim with stride 0 aliases many logical elements onto a
-  // single storage element (internal overlap). A scalar fill is still well-defined — every
-  // aliased element takes the same value, matching CPU's overlap-tolerant fill_ — but the
-  // copy_-based fallback below would throw ("more than one element ... refers to a single
-  // memory location"). Collapse each stride-0 dim to size 1 so each distinct storage element
-  // is written exactly once, then fill that non-overlapping view.
+  // Broadcast/expand view: a size>1 dim with stride 0 aliases many logical
+  // elements onto a single storage element (internal overlap). A scalar fill is
+  // still well-defined — every aliased element takes the same value, matching
+  // CPU's overlap-tolerant fill_ — but the copy_-based fallback below would
+  // raise ("more than one element ... refers to a single memory location").
+  // Collapse each stride-0 dim to size 1 so each distinct storage element is
+  // written exactly once, then fill that non-overlapping view.
   bool has_broadcast_overlap = false;
   for (int64_t d = 0; d < self.dim(); ++d) {
     if (self.size(d) > 1 && self.stride(d) == 0) {
@@ -341,7 +393,8 @@ at::Tensor& fill_scalar_rbln_(at::Tensor& self, const at::Scalar& value) {
     return self;
   }
 
-  if (fill_host_typed_supports(self.scalar_type()) && fill_region_device(self, value)) {
+  if (fill_host_typed_supports(self.scalar_type()) &&
+      fill_region_device(self, value)) {
     return self;
   }
 
@@ -356,12 +409,15 @@ at::Tensor& fill_scalar_rbln_(at::Tensor& self, const at::Scalar& value) {
   const auto nbytes = static_cast<size_t>(self.numel()) * self.element_size();
   const auto borrow = c10::rbln::borrow_host_ptr(self.data_ptr(), nbytes);
 
-  // fill_host_typed's checked cast can throw on overflow (e.g. fill_(128) into int8);
-  // guard the borrow so the throw can't skip return_borrowed and leak it.
-  BorrowGuard guard{borrow.borrow_id};
+  // fill_host_typed's checked cast can raise on overflow (e.g. fill_(128) into
+  // int8); guard the borrow so the exception can't skip return_borrowed and
+  // leak it.
+  BorrowGuard guard(borrow.borrow_id);
 
+  // NOLINTNEXTLINE(performance-no-int-to-ptr)
   void* host_ptr = reinterpret_cast<void*>(borrow.host_ptr);
-  const bool handled = fill_host_typed(host_ptr, self.numel(), self.scalar_type(), value);
+  const bool handled =
+      fill_host_typed(host_ptr, self.numel(), self.scalar_type(), value);
   // Return while still armed, then disarm: if this explicit return throws, the
   // guard's dtor retries (updated=false) rather than leaking the borrow.
   c10::rbln::return_borrowed(borrow.borrow_id, /*updated=*/handled);
@@ -377,9 +433,14 @@ at::Tensor& fill_scalar_rbln_(at::Tensor& self, const at::Scalar& value) {
 
 namespace {
 template <typename scalar_t>
-void arange_fill_host(scalar_t* host_ptr, int64_t n, scalar_t start, scalar_t step) {
+void arange_fill_host(
+    scalar_t* host_ptr,
+    int64_t n,
+    scalar_t start,
+    scalar_t step) {
   for (int64_t i = 0; i < n; ++i) {
-    host_ptr[i] = static_cast<scalar_t>(start + static_cast<scalar_t>(i) * step);
+    host_ptr[i] =
+        static_cast<scalar_t>(start + static_cast<scalar_t>(i) * step);
   }
 }
 } // namespace
@@ -399,9 +460,12 @@ at::Tensor& arange_start_out_rbln(
     at::Tensor& out) {
   RBLN_SCOPE_GUARD();
   int64_t n = 0;
-  AT_DISPATCH_ALL_TYPES_AND2(at::kHalf, at::kBFloat16, out.scalar_type(), "arange_start_out_rbln", [&] {
-    n = at::native::compute_arange_size<scalar_t>(start, end, step);
-  });
+  AT_DISPATCH_ALL_TYPES_AND2(
+      at::kHalf,
+      at::kBFloat16,
+      out.scalar_type(),
+      "arange_start_out_rbln",
+      [&] { n = at::native::compute_arange_size<scalar_t>(start, end, step); });
   if (out.numel() != n) {
     out.resize_({n});
   }
@@ -413,7 +477,8 @@ at::Tensor& arange_start_out_rbln(
   // dtypes that OpInfo tests for arange route through the CPU fallback
   // below so we don't hard-assert and crash the suite.
   auto cpu_fallback_for_arange = [&]() -> at::Tensor& {
-    auto out_cpu = at::empty({n}, out.options().device(c10::Device(c10::DeviceType::CPU)));
+    auto out_cpu =
+        at::empty({n}, out.options().device(c10::Device(c10::DeviceType::CPU)));
     at::arange_out(out_cpu, start, end, step);
     out.copy_(out_cpu);
     return out;
@@ -422,40 +487,72 @@ at::Tensor& arange_start_out_rbln(
     return cpu_fallback_for_arange();
   }
   const auto st = out.scalar_type();
-  const bool dtype_supported = st == at::kLong || st == at::kInt || st == at::kShort || st == at::kChar ||
-      st == at::kByte || st == at::kFloat || st == at::kDouble;
+  const bool dtype_supported = st == at::kLong || st == at::kInt ||
+      st == at::kShort || st == at::kChar || st == at::kByte ||
+      st == at::kFloat || st == at::kDouble;
   if (!dtype_supported) {
     return cpu_fallback_for_arange();
   }
 
   const auto nbytes = static_cast<size_t>(out.numel()) * out.element_size();
-  const auto borrow = c10::rbln::acquire_host_ptr_for_overwrite(out.data_ptr(), nbytes);
+  const auto borrow =
+      c10::rbln::acquire_host_ptr_for_overwrite(out.data_ptr(), nbytes);
+  // NOLINTNEXTLINE(performance-no-int-to-ptr)
   void* host_ptr = reinterpret_cast<void*>(borrow.host_ptr);
-  // start.to<T>()/step.to<T>() below are checked casts that can throw on overflow; guard the
-  // borrow so a throw can't skip return_borrowed and leak it.
-  BorrowGuard guard{borrow.borrow_id};
+  // start.to<T>()/step.to<T>() below are checked casts that can raise on
+  // overflow; guard the borrow so an exception can't skip return_borrowed and
+  // leak it.
+  BorrowGuard guard(borrow.borrow_id);
 
   switch (st) {
     case at::kLong:
-      arange_fill_host<int64_t>(static_cast<int64_t*>(host_ptr), n, start.to<int64_t>(), step.to<int64_t>());
+      arange_fill_host<int64_t>(
+          static_cast<int64_t*>(host_ptr),
+          n,
+          start.to<int64_t>(),
+          step.to<int64_t>());
       break;
     case at::kInt:
-      arange_fill_host<int32_t>(static_cast<int32_t*>(host_ptr), n, start.to<int32_t>(), step.to<int32_t>());
+      arange_fill_host<int32_t>(
+          static_cast<int32_t*>(host_ptr),
+          n,
+          start.to<int32_t>(),
+          step.to<int32_t>());
       break;
     case at::kShort:
-      arange_fill_host<int16_t>(static_cast<int16_t*>(host_ptr), n, start.to<int16_t>(), step.to<int16_t>());
+      arange_fill_host<int16_t>(
+          static_cast<int16_t*>(host_ptr),
+          n,
+          start.to<int16_t>(),
+          step.to<int16_t>());
       break;
     case at::kChar:
-      arange_fill_host<int8_t>(static_cast<int8_t*>(host_ptr), n, start.to<int8_t>(), step.to<int8_t>());
+      arange_fill_host<int8_t>(
+          static_cast<int8_t*>(host_ptr),
+          n,
+          start.to<int8_t>(),
+          step.to<int8_t>());
       break;
     case at::kByte:
-      arange_fill_host<uint8_t>(static_cast<uint8_t*>(host_ptr), n, start.to<uint8_t>(), step.to<uint8_t>());
+      arange_fill_host<uint8_t>(
+          static_cast<uint8_t*>(host_ptr),
+          n,
+          start.to<uint8_t>(),
+          step.to<uint8_t>());
       break;
     case at::kFloat:
-      arange_fill_host<float>(static_cast<float*>(host_ptr), n, start.to<float>(), step.to<float>());
+      arange_fill_host<float>(
+          static_cast<float*>(host_ptr),
+          n,
+          start.to<float>(),
+          step.to<float>());
       break;
     case at::kDouble:
-      arange_fill_host<double>(static_cast<double*>(host_ptr), n, start.to<double>(), step.to<double>());
+      arange_fill_host<double>(
+          static_cast<double*>(host_ptr),
+          n,
+          start.to<double>(),
+          step.to<double>());
       break;
     default:
       // dtype_supported gate above rules this branch out.
@@ -470,10 +567,14 @@ at::Tensor& arange_start_out_rbln(
 
 at::Scalar _local_scalar_dense_rbln(const at::Tensor& self) {
   RBLN_SCOPE_GUARD();
-  TORCH_CHECK(self.numel() == 1, "_local_scalar_dense_rbln: expected 1-element tensor, got numel=", self.numel());
+  TORCH_CHECK(
+      self.numel() == 1,
+      "_local_scalar_dense_rbln: expected 1-element tensor, got numel=",
+      self.numel());
 
   const size_t nbytes = static_cast<size_t>(self.element_size());
   const auto borrow = c10::rbln::borrow_host_ptr(self.data_ptr(), nbytes);
+  // NOLINTNEXTLINE(performance-no-int-to-ptr)
   void* p = reinterpret_cast<void*>(borrow.host_ptr);
 
   at::Scalar r;
@@ -513,7 +614,10 @@ at::Scalar _local_scalar_dense_rbln(const at::Tensor& self) {
       handled = false;
   }
   c10::rbln::return_borrowed(borrow.borrow_id, /*updated=*/false);
-  TORCH_INTERNAL_ASSERT(handled, "_local_scalar_dense_rbln: unsupported dtype ", c10::toString(self.scalar_type()));
+  TORCH_INTERNAL_ASSERT(
+      handled,
+      "_local_scalar_dense_rbln: unsupported dtype ",
+      c10::toString(self.scalar_type()));
   return r;
 }
 

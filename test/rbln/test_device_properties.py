@@ -1,8 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Test suite for torch.rbln.get_device_properties / get_device_name.
-"""
+"""Test suite for torch.rbln.get_device_properties / get_device_name."""
 
 import os
 import subprocess
@@ -22,7 +20,8 @@ class TestDeviceProperties(TestCase):
         self.assertGreaterEqual(props.num_chiplet, 1)
         self.assertGreaterEqual(props.npu_count, 1)
         self.assertGreater(props.memory_per_chiplet, 0)
-        # Reporting the per-chiplet figure as the total understates REBEL 4x, unnoticed on ATOM.
+        # Reporting the per-chiplet figure as the total understates REBEL 4x, unnoticed
+        # on ATOM.
         self.assertEqual(props.total_memory, props.memory_per_chiplet * props.num_chiplet * props.npu_count)
 
     def test_get_device_name_matches_properties(self):
@@ -53,15 +52,19 @@ def _run_in_subprocess(env_vars, script):
     for key in ("RBLN_DEVICE_MAP", "RBLN_NPUS_PER_DEVICE", "RBLN_DEVICES"):
         env.pop(key, None)
     env.update(env_vars)
-    return subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, env=env)
+    return subprocess.run([sys.executable, "-c", script], check=False, capture_output=True, text=True, env=env)
 
 
 class TestDevicePropertiesEnvVars(TestCase):
-    """Cases that need the device mapping set before import, so they run in a subprocess."""
+    """Cases that need the device mapping set before import, so they run in a
+    subprocess.
+    """
 
     @pytest.mark.npu(count=2)
     def test_an_aggregated_device_sums_its_npus(self):
-        """With two NPUs behind rbln:0, total_memory doubles while the per-chiplet figure does not."""
+        """With two NPUs behind rbln:0, total_memory doubles while the per-chiplet
+        figure does not.
+        """
         script = """
 import torch
 import torch_rbln
@@ -84,12 +87,14 @@ print(props.npu_count, props.total_memory, props.memory_per_chiplet, props.num_c
 
     @pytest.mark.npu(count=2)
     def test_a_narrowed_pool_is_not_remapped_twice(self):
-        """RBLN_VISIBLE_DEVICES renumbers the pool from 0, and the query resolves that once.
+        """RBLN_VISIBLE_DEVICES renumbers the pool from 0, and the query resolves that
+        once.
 
-        The topology reports pool ids while the runtime query resolves a pool id to a system
-        id, so passing an already-resolved id would either read another card or fall off the
-        end of the mapping. Hiding all but the last NPU makes the difference visible: the pool
-        holds one device at index 0, whose system id is the highest on the host.
+        The topology reports pool ids while the runtime query resolves a pool id to a
+        system id, so passing an already-resolved id would either read another card or
+        fall off the end of the mapping. Hiding all but the last NPU makes the
+        difference visible: the pool holds one device at index 0, whose system id is the
+        highest on the host.
         """
         last = torch.rbln.physical_device_count() - 1
         script = """

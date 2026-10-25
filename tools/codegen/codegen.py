@@ -1,5 +1,4 @@
-"""
-Main code generator.
+"""Main code generator.
 
 Orchestrates the generation of register_ops.py from parsed YAML data.
 
@@ -13,12 +12,13 @@ Code generation flow:
    e. Add registration code
 3. Append all registration code at the end of file
 
-The main flow can be found in this file, while detailed implementations are separated into modules.
+The main flow can be found in this file, while detailed implementations are separated
+into modules.
 """
 
-from typing import Any, Dict, Tuple  # noqa: UP035
+from typing import Any
 
-from torchgen.model import DispatchKey, SchemaKind  # type: ignore[import-untyped]
+from torchgen.model import DispatchKey, SchemaKind
 
 from .analyzer import FunctionAnalyzer
 from .config import OpCategories
@@ -27,8 +27,7 @@ from .generators.variants import OpCodeGenerator
 
 
 class CodeGenerator:
-    """
-    Main code generator that orchestrates the generation of register_ops.py.
+    """Main code generator that orchestrates the generation of register_ops.py.
 
     Manages the entire code generation process with the following steps:
 
@@ -66,8 +65,7 @@ DEBUG_MODE = torch.version.debug
 """
 
     def _registration_line(self, operator_name: Any, kernel_name: str) -> str:
-        """
-        Return the dispatcher-registration snippet for `operator_name`.
+        """Return the dispatcher-registration snippet for `operator_name`.
 
         Ops listed in OpCategories.CPP_SHIM_OPS are routed through a C++
         dispatch shim installed at module-init time; everything else keeps the
@@ -93,20 +91,21 @@ _register_cpp_shim("aten::{operator_name}", {kernel_name})"""
         root_name: str,
         python_module: str,
         op_namespace: str,
-        general_kernel_name_table: Dict[str, str],
-    ) -> Tuple[str, str]:
-        """
-        Get or generate general function code for a root operation.
+        general_kernel_name_table: dict[str, str],
+    ) -> tuple[str, str]:
+        """Get or generate general function code for a root operation.
 
         If the general function has already been generated for this root_name,
         returns the existing kernel name and empty string.
-        Otherwise, generates the general function code and returns the kernel name and code.
+        Otherwise, generates the general function code and returns the kernel name and
+        code.
 
         Args:
             root_name: Root name of the operation
             python_module: Python module name (e.g., "nn")
             op_namespace: Operation namespace
-            general_kernel_name_table: Dictionary mapping root_name to general kernel name
+            general_kernel_name_table: Dictionary mapping root_name to general
+                kernel name
 
         Returns:
             Tuple of (general_kernel_name, function_code)
@@ -122,8 +121,7 @@ _register_cpp_shim("aten::{operator_name}", {kernel_name})"""
         return general_kernel_name, function_code
 
     def generate_python_registration(self, parsed_yaml: Any) -> str:
-        """
-        Generate Python registration code for all operations.
+        """Generate Python registration code for all operations.
 
         Overall flow:
         1. Generate header
@@ -146,7 +144,7 @@ _register_cpp_shim("aten::{operator_name}", {kernel_name})"""
         """
         # Step 1: Generate header (imports, setup)
         code_blocks = self.generate_header()
-        general_kernel_name_table: Dict[str, str] = {}
+        general_kernel_name_table: dict[str, str] = {}
         operator_register_code = ""
 
         # Step 2: Iterate over all native functions
@@ -178,7 +176,7 @@ _register_cpp_shim("aten::{operator_name}", {kernel_name})"""
 
             # If kernel name is not found, skip this function
             if not kernel_name:
-                print(f"Skipping {operator_name}, no kernel name found.")
+                print(f"Skipping {operator_name}, no kernel name found.")  # noqa: T201
                 continue
 
             # Step 3: Generate code based on operation type
@@ -193,9 +191,10 @@ _register_cpp_shim("aten::{operator_name}", {kernel_name})"""
                     root_name, python_module, op_namespace, general_kernel_name_table
                 )
 
-                # Generate Out function wrapper: Input validation + general function call + output processing
+                # Generate Out function wrapper: Input validation + general function
+                # call + output processing
                 function_code += self.op_code_generator.generate_out_function(
-                    kernel_name, root_name, general_kernel_name, self_arg_pos, has_device_kwarg
+                    kernel_name, root_name, general_kernel_name, self_arg_pos, has_device_kwarg=has_device_kwarg
                 )
                 operator_register_code += self._registration_line(operator_name, kernel_name)
 

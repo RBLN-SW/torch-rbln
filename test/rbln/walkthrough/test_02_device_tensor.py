@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Walkthrough example 2: tensor creation and movement on RBLN.
+"""Walkthrough example 2: tensor creation and movement on RBLN.
 
 Ported from walkthrough_guide/2.rbln_device_tensor.py.
 
@@ -28,7 +27,9 @@ class TestRBLNDeviceTensor(TestCase):
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_randn_on_rbln(self, dtype):
-        """`torch.randn` should create a tensor directly on RBLN with the requested shape and dtype."""
+        """`torch.randn` should create a tensor directly on RBLN with the requested
+        shape and dtype.
+        """
         x = torch.randn(2, 64, device=self.rbln_device, dtype=dtype)
         self.assertEqual(x.device.type, "rbln")
         self.assertEqual(x.shape, (2, 64))

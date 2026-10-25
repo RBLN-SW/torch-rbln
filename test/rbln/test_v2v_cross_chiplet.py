@@ -63,4 +63,5 @@ def test_strided_write_past_chiplet_boundary():
 
 
 if __name__ == "__main__":
-    raise SystemExit("Run via pytest: pytest test/rbln/test_v2v_cross_chiplet.py")
+    msg = "Run via pytest: pytest test/rbln/test_v2v_cross_chiplet.py"
+    raise SystemExit(msg)

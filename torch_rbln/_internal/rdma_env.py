@@ -33,7 +33,7 @@ from pathlib import Path
 try:  # POSIX-only; Linux is the only RBLN runtime target.
     import fcntl as _fcntl
 except ImportError:
-    _fcntl = None  # type: ignore[assignment]
+    _fcntl = None
 
 
 _SYSFS_INFINIBAND = Path("/sys/class/infiniband")
@@ -56,7 +56,7 @@ def _diag(msg: str) -> None:
     `ip` or `rdma` binary) caused an empty RBLN_RDMA_IP result without
     shell access to the CI host.
     """
-    print(f"{_DIAG_PREFIX} {msg}", file=sys.stderr, flush=True)
+    print(f"{_DIAG_PREFIX} {msg}", file=sys.stderr, flush=True)  # noqa: T201
 
 
 def _env_truthy(name: str) -> bool:
@@ -105,7 +105,8 @@ def _ipv4_for_iface(iface: str) -> str | None:
         return None
     try:
         # ifreq layout: char ifr_name[IFNAMSIZ]; union { struct sockaddr ifr_addr; ... }
-        # We send a 256-byte buffer with the iface name; kernel writes sockaddr_in into bytes 16:.
+        # We send a 256-byte buffer with the iface name; kernel writes sockaddr_in into
+        # bytes 16:.
         ifreq = struct.pack("256s", iface_bytes)
         try:
             packed = _fcntl.ioctl(sock.fileno(), _SIOCGIFADDR, ifreq)
@@ -133,10 +134,8 @@ def _gid_to_ipv4(gid: str) -> str | None:
     if parts[5].lower() != "ffff":
         return None
     try:
-        b1 = int(parts[6][:2], 16)
-        b2 = int(parts[6][2:], 16)
-        b3 = int(parts[7][:2], 16)
-        b4 = int(parts[7][2:], 16)
+        b1, b2 = divmod(int(parts[6], 16), 256)
+        b3, b4 = divmod(int(parts[7], 16), 256)
     except (ValueError, IndexError):
         return None
     if (b1 | b2 | b3 | b4) == 0:
@@ -210,12 +209,14 @@ def _classify_rdma_state(state: str | None) -> bool | None:
 
 
 def _rdma_port_active(dev_name: str) -> bool | None:
-    """Return True/False from ``rdma link``, or None if ``rdma`` is missing or unparsable."""
+    """Return True/False from ``rdma link``, or None if ``rdma`` is missing or
+    unparsable.
+    """
     rdma_bin = shutil.which("rdma")
     if not rdma_bin:
         return None
     try:
-        proc = subprocess.run(
+        proc = subprocess.run(  # noqa: S603
             [rdma_bin, "link", "show", f"{dev_name}/1"],
             capture_output=True,
             text=True,
@@ -256,7 +257,7 @@ def _diag_dev_infiniband() -> None:
     for name in entries:
         path = _DEV_INFINIBAND / name
         try:
-            st = os.stat(str(path))
+            st = path.stat()
         except OSError as exc:
             _diag(f"{path} stat failed: {exc!r}")
             continue
@@ -318,7 +319,7 @@ def _diag_libibverbs_userspace() -> None:
 def _diag_memlock_limit() -> None:
     """Surface RLIMIT_MEMLOCK — RDMA pinning needs a high (or unlimited) cap."""
     try:
-        import resource
+        import resource  # noqa: PLC0415
 
         soft, hard = resource.getrlimit(resource.RLIMIT_MEMLOCK)
     except Exception as exc:  # pragma: no cover - defensive
@@ -413,7 +414,7 @@ def probe_roce_rdma_ipv4() -> str | None:
                     f"RDMA unique_id setup may reject this address"
                 )
             # Prefer the sysfs port state. Fall back to the rdma binary only when
-            # the sysfs read returned an unrecognised value.
+            # the sysfs read returned an unrecognized value.
             link_ok = sysfs_link_ok if sysfs_link_ok is not None else _rdma_port_active(dev_name)
             if link_ok is False:
                 _diag(
@@ -452,10 +453,10 @@ def apply_default_rbln_network_environment() -> None:
 
     existing = os.environ.get("RBLN_RDMA_IP", "").strip()
     if existing:
-        print(f"RBLN_RDMA_IP={existing}")
+        print(f"RBLN_RDMA_IP={existing}")  # noqa: T201
         return
 
     discovered = probe_roce_rdma_ipv4()
     if discovered:
         os.environ["RBLN_RDMA_IP"] = discovered
-    print(f"RBLN_RDMA_IP={os.environ.get('RBLN_RDMA_IP', '')}")
+    print(f"RBLN_RDMA_IP={os.environ.get('RBLN_RDMA_IP', '')}")  # noqa: T201

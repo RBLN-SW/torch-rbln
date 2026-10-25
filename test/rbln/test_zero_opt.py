@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Comprehensive tests for the optimized zero_ op (EMPTY_INIT_WITH_ZERO marking).
+"""Comprehensive tests for the optimized zero_ op (EMPTY_INIT_WITH_ZERO marking).
 
 The optimized zero_ marks VMemory as logically zero-initialized without allocating
 host memory. These tests verify correctness across all access patterns:
@@ -124,7 +123,9 @@ class TestZeroOptPartialWrite(TestCase):
     """Partial writes (slice assignment) after zero_ marking."""
 
     def test_slice_write_then_read(self):
-        """Write to a slice of zero-init tensor, verify written and unwritten regions."""
+        """Write to a slice of zero-init tensor, verify written and unwritten
+        regions.
+        """
         t = torch.zeros(16, dtype=torch.float16, device="rbln")
         # Write to first 4 elements
         t[:4] = torch.ones(4, dtype=torch.float16, device="rbln")

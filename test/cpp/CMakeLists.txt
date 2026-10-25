@@ -14,13 +14,17 @@ if(NOT TARGET torch_rbln)
 
   enable_testing()
 
-  get_filename_component(TORCH_RBLN_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
+  get_filename_component(TORCH_RBLN_SOURCE_DIR
+    "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
   set(CMAKE_MODULE_PATH ${TORCH_RBLN_SOURCE_DIR}/cmake)
 
   if(NOT DEFINED TORCH_RBLN_ROOT)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    string(CONCAT torch_rbln_probe_code
+      "import importlib.util; print(importlib.util.find_spec('torch_rbln')"
+      ".submodule_search_locations[0])")
     execute_process(
-      COMMAND ${Python3_EXECUTABLE} -I -c "import importlib.util; print(importlib.util.find_spec('torch_rbln').submodule_search_locations[0])"
+      COMMAND ${Python3_EXECUTABLE} -I -c "${torch_rbln_probe_code}"
       OUTPUT_VARIABLE TORCH_RBLN_ROOT
       OUTPUT_STRIP_TRAILING_WHITESPACE
       RESULT_VARIABLE torch_rbln_probe
@@ -50,9 +54,9 @@ if(NOT TARGET torch_rbln)
     REQUIRED
   )
 
-  include(FindTorch)
-  include(FindRebel)
-  include(FindGTest)
+  include(TorchSetup)
+  include(FindREBEL)
+  include(GTestSetup)
 
   add_library(torch_rbln SHARED IMPORTED)
   set_target_properties(torch_rbln PROPERTIES

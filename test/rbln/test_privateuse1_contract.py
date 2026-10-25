@@ -2,13 +2,13 @@
 
 """PrivateUse1 backend contract conformance.
 
-torch does not merely *offer* the ``torch.rbln`` module and the RBLN accelerator hooks --
-it *calls into them*, from paths that have nothing to do with wanting an NPU:
+torch does not merely *offer* the ``torch.rbln`` module and the RBLN accelerator hooks
+-- it *calls into them*, from paths that have nothing to do with wanting an NPU:
 ``DataLoader(pin_memory=True)``, ``torch.load(map_location=...)``, importing
 ``torch.testing._internal.common_utils``, ``torch._utils._get_available_device_type()``.
 
-Every test pins exactly ONE upstream clause and cites its source, so a torch upgrade or a
-new call site fails on the clause rather than on a downstream symptom.
+Every test pins exactly ONE upstream clause and cites its source, so a torch upgrade or
+a new call site fails on the clause rather than on a downstream symptom.
 
 Each probe runs in a fresh subprocess (the state involved is
 process-global and one-shot):
@@ -16,12 +16,12 @@ process-global and one-shot):
 ``raised``  the probe propagated an exception
 ``ctx``     the probe opened an NPU context (``rbln-stat`` reports this pid)
 ``remap``   what a later ``RBLN_DEVICES`` remap does: ``applied`` (mapping still live),
-            ``frozen`` (silently ignored), ``None`` (undetermined -- fewer than two usable
-            NPUs, where a live mapping and a frozen one report the same count)
+            ``frozen`` (silently ignored), ``None`` (undetermined -- fewer than two
+            usable NPUs, where a live mapping and a frozen one report the same count)
 
-``remap`` is load-bearing for vLLM: ``VLLM_WORKER_MULTIPROC_METHOD`` defaults to ``fork``
-and ``RBLNWorker._init_device_env()`` remaps ``RBLN_DEVICES`` *inside* the forked worker, so
-a mapping frozen in the parent breaks every worker.
+``remap`` is load-bearing for vLLM: ``VLLM_WORKER_MULTIPROC_METHOD`` defaults to
+``fork`` and ``RBLNWorker._init_device_env()`` remaps ``RBLN_DEVICES`` *inside* the
+forked worker, so a mapping frozen in the parent breaks every worker.
 
 A clause not satisfied yet is a ``strict=True`` xfail naming the work that closes it; an
 unexpected pass means the marker should go. One group remains: ``phase 4``, the
@@ -34,22 +34,25 @@ import os
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
 import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
+from torch.testing._utils import freeze_rng_state
 
 
-# Deselected by rebel_compiler's CI (`-m "not torch_rbln_only"`); see the marker in pyproject.
-# Upstream torch clauses, not rebel-compiler behaviour: each probe pins something torch
-# itself does to this backend, so a torch upgrade or a new call site is what fails here.
+# Deselected by rebel_compiler's CI (`-m "not torch_rbln_only"`); see the marker in
+# pyproject. Upstream torch clauses, not rebel-compiler behavior: each probe pins
+# something torch itself does to this backend, so a torch upgrade or a new call site is
+# what fails here.
 pytestmark = pytest.mark.torch_rbln_only
 
 
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_PROJECT_ROOT = str(Path(__file__).absolute().parents[2])
 
-# The RBLN_* variables a scenario owns. Stripped from a probe's environment so the runner's
-# own selection cannot decide the outcome.
+# The RBLN_* variables a scenario owns. Stripped from a probe's environment so the
+# runner's own selection cannot decide the outcome.
 _SELECTION_VARS = frozenset(
     {"RBLN_DEVICES", "RBLN_VISIBLE_DEVICES", "RBLN_DEVICE_MAP", "RBLN_NPUS_PER_DEVICE", "RBLN_DUMMY_DEVICE"}
 )
@@ -77,8 +80,8 @@ DEV1 = str(POOL[1]) if len(POOL) > 1 else DEV0
 
 rec = {{"result": None, "raised": None, "ctx": None, "remap_counts": None}}
 
-import torch          # noqa: F401
-import torch_rbln     # noqa: F401
+import torch
+import torch_rbln
 
 
 def _ctx_opened():
@@ -158,7 +161,7 @@ def _remap_counts():
 
 try:
 {probe}
-except BaseException as e:  # noqa: BLE001 - the point is to characterise failures
+except BaseException as e:  # the point is to characterize failures
     rec["raised"] = "{{}}: {{}}".format(type(e).__name__, str(e).splitlines()[0][:160])
 
 rec["ctx"] = _ctx_opened()
@@ -172,9 +175,10 @@ print(json.dumps(rec), file=_real_stdout)
 '''
 
 
-# Physical NPU ids, scanned in a process of its own. Sparse ids are possible (a container can
-# be granted 5,6,7), so this scans instead of taking range(device_count()); 127 is the ceiling
-# the mapping layer enforces on a logical index.
+# Physical NPU ids, scanned in a process of its own. Sparse ids are possible (a
+# container can be granted 5,6,7), so this scans instead of taking
+# range(device_count()); 127 is the ceiling the mapping layer enforces on a logical
+# index.
 _POOL_SCAN = """\
 import json
 from rebel._C import npu_is_available
@@ -187,20 +191,22 @@ print(json.dumps({"ids": [i for i in range(127) if npu_is_available(i)]}))
 def _host_pool() -> tuple:
     """Every physical NPU id on this host, scanned in a process of its own.
 
-    The reference a remap verdict is judged against, and it has to be another process. The
-    runtime's RBLN_DEVICES seal is process-local, so once anything here has used a device an
-    in-process query answers with the sealed value -- ``physical_device_count()`` included,
-    since it is the same ``rbln_get_device_count()`` the probe measures -- and the state under
-    test would be deciding its own gate. Stripping the selection variables is what makes the
-    answer the host rather than a selection of it.
+    The reference a remap verdict is judged against, and it has to be another process.
+    The runtime's RBLN_DEVICES seal is process-local, so once anything here has used a
+    device an in-process query answers with the sealed value --
+    ``physical_device_count()`` included, since it is the same
+    ``rbln_get_device_count()`` the probe measures -- and the state under test would be
+    deciding its own gate. Stripping the selection variables is what makes the answer
+    the host rather than a selection of it.
 
-    Empty when the runtime, the driver or the NPUs are absent, and when the scan itself fails:
-    callers then treat every remap verdict as undetermined.
+    Empty when the runtime, the driver or the NPUs are absent, and when the scan itself
+    fails: callers then treat every remap verdict as undetermined.
     """
     env = {k: v for k, v in os.environ.items() if k not in _SELECTION_VARS}
     try:
         proc = subprocess.run(
             [sys.executable, "-c", _POOL_SCAN],
+            check=False,
             cwd=_PROJECT_ROOT,
             env=env,
             capture_output=True,
@@ -222,13 +228,14 @@ def _host_pool() -> tuple:
 
 @functools.lru_cache(maxsize=1)
 def _visible_pool() -> tuple:
-    """Physical NPU ids this job may touch: the host pool, narrowed to the runner's selection.
+    """Physical NPU ids this job may touch: the host pool, narrowed to the runner's
+    selection.
 
     Which devices are ours, not how many are observable -- :attr:`Probe.remap` is judged
-    against :func:`_host_pool`. The narrowing is what keeps a scenario from naming an NPU that
-    a co-tenant job was allocated: the runner's selection bounds the ids the scenarios pick,
-    while never deciding what a scenario *sets*, which is the point of stripping it from the
-    probe's environment.
+    against :func:`_host_pool`. The narrowing is what keeps a scenario from naming an
+    NPU that a co-tenant job was allocated: the runner's selection bounds the ids the
+    scenarios pick, while never deciding what a scenario *sets*, which is the point of
+    stripping it from the probe's environment.
     """
     host = _host_pool()
     selected = os.environ.get("RBLN_DEVICES") or os.environ.get("RBLN_VISIBLE_DEVICES")
@@ -244,10 +251,10 @@ def _visible_pool() -> tuple:
 def _pool_devices(count: int) -> str:
     """The first ``count`` ids of this job's pool, as an ``RBLN_DEVICES`` value.
 
-    Not hard-coded ``"0"``: where this job was allocated other NPUs, id 0 is a co-tenant's, so
-    a scenario naming it would measure the wrong pool and claim a device that is not ours.
-    Counting from 0 when the pool is unknown (no runtime, no driver) keeps the scenarios
-    constructible on a host where they cannot run anyway.
+    Not hard-coded ``"0"``: where this job was allocated other NPUs, id 0 is a
+    co-tenant's, so a scenario naming it would measure the wrong pool and claim a device
+    that is not ours. Counting from 0 when the pool is unknown (no runtime, no driver)
+    keeps the scenarios constructible on a host where they cannot run anyway.
     """
     pool = _visible_pool() or tuple(range(count))
     return ",".join(str(i) for i in pool[:count])
@@ -294,14 +301,15 @@ class Probe:
     def remap(self):
         """What a later ``RBLN_DEVICES`` remap did: ``applied`` / ``frozen`` / ``None``.
 
-        ``None`` means undetermined, not benign: with fewer than two usable NPUs a live mapping
-        and a frozen one report the same count, so nothing can be concluded either way.
+        ``None`` means undetermined, not benign: with fewer than two usable NPUs a live
+        mapping and a frozen one report the same count, so nothing can be concluded
+        either way.
 
-        Judged against :func:`_host_pool`, which is what the *probe* can enumerate: it runs
-        with the runner's selection stripped, and its second count unsets RBLN_DEVICES. Not
-        against ``/dev/rbln*`` -- a container can show more device nodes than the runtime can
-        use, a Buildkite step asking for ``npu: count: 1`` among them, and counting nodes there
-        reads a legitimate 1-and-1 as a freeze.
+        Judged against :func:`_host_pool`, which is what the *probe* can enumerate: it
+        runs with the runner's selection stripped, and its second count unsets
+        RBLN_DEVICES. Not against ``/dev/rbln*`` -- a container can show more device
+        nodes than the runtime can use, a Buildkite step asking for ``npu: count: 1``
+        among them, and counting nodes there reads a legitimate 1-and-1 as a freeze.
         """
         if self.remap_counts is None or len(_host_pool()) < 2:
             return None
@@ -336,13 +344,14 @@ def run_probe(body: str, env: dict) -> Probe:
         pool=list(_visible_pool()),
         probe=textwrap.indent(textwrap.dedent(body).strip("\n"), "    "),
     )
-    # The scenario is the whole RBLN_* configuration: inheriting the parent's would let a
-    # device selection in the test runner's environment decide what the probe sees, which
-    # shows up as a silent skip rather than a failure.
+    # The scenario is the whole RBLN_* configuration: inheriting the parent's would let
+    # a device selection in the test runner's environment decide what the probe sees,
+    # which shows up as a silent skip rather than a failure.
     child_env = {k: v for k, v in os.environ.items() if k not in _SELECTION_VARS}
     child_env.update({k: v for k, v in env.items() if v is not None})
     proc = subprocess.run(
         [sys.executable, "-c", script],
+        check=False,
         cwd=_PROJECT_ROOT,
         env=child_env,
         capture_output=True,
@@ -357,26 +366,29 @@ def run_probe(body: str, env: dict) -> Probe:
         except ValueError:
             continue
         if isinstance(rec, dict) and "remap_counts" in rec:
-            # The record is not enough: the runner catches every exception, so a probe that
-            # reported and then died in teardown (SIGABRT out of the runtime, say) exits
-            # non-zero with a complete JSON line. Reading only the record passes that.
+            # The record is not enough: the runner catches every exception, so a probe
+            # that reported and then died in teardown (SIGABRT out of the runtime, say)
+            # exits non-zero with a complete JSON line. Reading only the record passes
+            # that.
             if proc.returncode != 0:
-                raise AssertionError(
+                msg = (
                     f"probe reported but exited abnormally (rc={proc.returncode})\n"
                     f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
                 )
+                raise AssertionError(msg)
             return Probe(rec, proc.stdout, proc.stderr)
-    raise AssertionError(
+    msg = (
         "probe harness produced no result (the child died before reporting)\n"
         f"--- rc={proc.returncode} stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
     )
+    raise AssertionError(msg)
 
 
 def xfail_until(owner: str, reason: str):
     """Strict xfail for a clause that is not satisfied yet.
 
-    ``owner`` names the work that closes it. Strict, so an unexpected pass fails the suite
-    and signals the marker should be removed.
+    ``owner`` names the work that closes it. Strict, so an unexpected pass fails the
+    suite and signals the marker should be removed.
     """
     return pytest.mark.xfail(strict=True, reason=f"[{owner}] {reason}")
 
@@ -384,9 +396,9 @@ def xfail_until(owner: str, reason: str):
 class TestProbeHarness(TestCase):
     """Positive controls: prove the harness can actually observe a violation.
 
-    Every clause below is expressed as "the probe did NOT do X", which passes both when the
-    contract holds and when the harness has gone blind. Each of the three measurements
-    therefore needs a case that deliberately triggers it.
+    Every clause below is expressed as "the probe did NOT do X", which passes both when
+    the contract holds and when the harness has gone blind. Each of the three
+    measurements therefore needs a case that deliberately triggers it.
     """
 
     @pytest.mark.npu(count=1)
@@ -412,9 +424,9 @@ class TestProbeHarness(TestCase):
     def test_detects_a_frozen_mapping(self):
         """A probe that acquires a device must be reported as freezing the mapping.
 
-        The freeze is only observable through an *acquisition*: a query leaves the mapping
-        live, so a query-based control would report "not frozen" forever and every "left it
-        remappable" clause below would pass for free.
+        The freeze is only observable through an *acquisition*: a query leaves the
+        mapping live, so a query-based control would report "not frozen" forever and
+        every "left it remappable" clause below would pass for free.
         """
         p = run_probe(
             'rec["result"] = float(torch.ones(4, dtype=torch.float16, device="rbln:0").sum().cpu())',
@@ -427,15 +439,16 @@ class TestProbeHarness(TestCase):
 
     @pytest.mark.npu(count=1)
     def test_detects_a_cpp_traceback(self):
-        """A failure from a still-loud ``RBLN_CHECK`` must be seen by ``has_cpp_traceback``.
+        """A failure from a still-loud ``RBLN_CHECK`` must be seen by
+        ``has_cpp_traceback``.
 
-        An unassigned device index goes through ``check_device_index()``, which kept plain
-        ``RBLN_CHECK`` -- a use error, not something a probe walks into -- so it logs
-        ``c10::Error::what()`` and the trace it embeds.
+        An unassigned device index goes through ``check_device_index()``, which kept
+        plain ``RBLN_CHECK`` -- a use error, not something a probe walks into -- so it
+        logs ``c10::Error::what()`` and the trace it embeds.
 
-        Deliberately not a malformed-config failure: those rethrow the stored plan error via
-        ``RBLN_CHECK_QUIET`` and so carry the message without a logged trace, which makes
-        them useless as a control here.
+        Deliberately not a malformed-config failure: those rethrow the stored plan error
+        via ``RBLN_CHECK_QUIET`` and so carry the message without a logged trace, which
+        makes them useless as a control here.
         """
         p = run_probe(
             """
@@ -568,9 +581,9 @@ class TestUpstreamClauses(TestCase):
         )
         self.assertIsNone(p.raised, f"probe raised -- {p}")
         hooks_count, module_count = p.result
-        # The count is pinned as well as the agreement: this scenario has exactly one device,
-        # and equality alone would also hold if both sides regressed to 0 -- which is the
-        # half of the original bug that the hooks side had.
+        # The count is pinned as well as the agreement: this scenario has exactly one
+        # device, and equality alone would also hold if both sides regressed to 0 --
+        # which is the half of the original bug that the hooks side had.
         self.assertEqual(module_count, 1, f"scenario is not live -- {p}")
         self.assertEqual(hooks_count, module_count, f"hooks disagree with module -- {p}")
 
@@ -589,9 +602,10 @@ class TestUpstreamClauses(TestCase):
     def test_python_and_cpp_availability_agree(self):
         """``torch.rbln.is_available()`` and the C++ predicate must never disagree.
 
-        ``RBLNHooksInterface::hasRBLN()`` answers from ``c10::rbln::runtime_available()``
-        while the python entry point computes its own answer. Two sources of truth for
-        one question means torch's C++ paths and its python paths can diverge.
+        ``RBLNHooksInterface::hasRBLN()`` answers from
+        ``c10::rbln::runtime_available()`` while the python entry point computes its own
+        answer. Two sources of truth for one question means torch's C++ paths and its
+        python paths can diverge.
         """
         for name, env in ALL_SCENARIOS.items():
             with self.subTest(scenario=name):
@@ -669,12 +683,12 @@ class TestUpstreamClauses(TestCase):
     def test_manual_seed_reaches_the_backend(self):
         """``torch.manual_seed()`` must seed the RBLN generators.
 
-        The obvious implementation walks ``device_count()`` to build one generator per device,
-        which is only viable because enumeration claims nothing.
+        The obvious implementation walks ``device_count()`` to build one generator per
+        device, which is only viable because enumeration claims nothing.
 
         torch/random.py::_seed_custom_device requires ``_is_in_bad_fork`` **and**
-        ``manual_seed_all`` on the device module; without both it warns and silently does
-        nothing, so RBLN results are not reproducible from ``torch.manual_seed()``.
+        ``manual_seed_all`` on the device module; without both it warns and silently
+        does nothing, so RBLN results are not reproducible from ``torch.manual_seed()``.
         Listed as a required backend API in torch/utils/backend_registration.py.
         """
         p = run_probe(
@@ -701,12 +715,13 @@ class TestUpstreamClauses(TestCase):
 
     @pytest.mark.npu(count=1)
     def test_rng_state_round_trips_through_the_device_module(self):
-        """``torch.rbln.get_rng_state`` / ``set_rng_state`` must exist and carry the generator's seed.
+        """``torch.rbln.get_rng_state`` / ``set_rng_state`` must exist and carry the
+        generator's seed.
 
         torch/utils/backend_registration.py lists ``get_rng_state(device)`` and
-        ``set_rng_state(new_state, device)`` among the APIs a privateuse1 device module must
-        provide; torch/random.py::fork_rng and torch/utils/checkpoint.py call them on the device
-        module of the tensors they see.
+        ``set_rng_state(new_state, device)`` among the APIs a privateuse1 device module
+        must provide; torch/random.py::fork_rng and torch/utils/checkpoint.py call them
+        on the device module of the tensors they see.
         """
         index = torch.rbln.current_device()
         saved = torch.rbln.get_rng_state(index)
@@ -715,7 +730,8 @@ class TestUpstreamClauses(TestCase):
             seeded.manual_seed(2024)
             torch.rbln.set_rng_state(seeded.get_state(), index)
             self.assertTrue(torch.equal(torch.rbln.get_rng_state(index), seeded.get_state()))
-            # Round-tripping the bytes is not enough: a generator fed the state must report the seed.
+            # Round-tripping the bytes is not enough: a generator fed the state must
+            # report the seed.
             restored = torch.Generator(device=f"rbln:{index}")
             restored.set_state(torch.rbln.get_rng_state(index))
             self.assertEqual(restored.initial_seed(), 2024)
@@ -729,15 +745,14 @@ class TestUpstreamClauses(TestCase):
 
     @pytest.mark.npu(count=1)
     def test_freeze_rng_state_restores_the_rbln_generator(self):
-        """``torch.testing._utils.freeze_rng_state`` must leave the RBLN generator as it found it.
+        """``torch.testing._utils.freeze_rng_state`` must leave the RBLN generator as it
+        found it.
 
         From torch 2.13 the helper is accelerator-generic: it snapshots
-        ``torch.get_device_module(<current accelerator>).get_rng_state()`` on entry and sets it
-        back on exit, and every OpInfo test of a seeded op (``normal``, ``uniform``, SDPA with
-        dropout, ...) runs inside it.
+        ``torch.get_device_module(<current accelerator>).get_rng_state()`` on entry and
+        sets it back on exit, and every OpInfo test of a seeded op (``normal``,
+        ``uniform``, SDPA with dropout, ...) runs inside it.
         """
-        from torch.testing._utils import freeze_rng_state
-
         index = torch.rbln.current_device()
         before = torch.rbln.get_rng_state(index)
         probe = torch.Generator(device=f"rbln:{index}")
@@ -755,9 +770,10 @@ class TestUpstreamClauses(TestCase):
 
         torch/serialization.py documents it as required of a privateuse1 backend
         ("Implement the following methods in device_module like cuda:
-        device_module._utils._get_device_index(location, True), device_module.device_count()")
-        and uses it to resolve ``map_location="rbln:N"``. Without it torch falls back to a
-        looser path that cannot honour a backend-specific index normalisation.
+        device_module._utils._get_device_index(location, True),
+        device_module.device_count()") and uses it to resolve ``map_location="rbln:N"``.
+        Without it torch falls back to a looser path that cannot honor a
+        backend-specific index normalization.
         """
         p = run_probe(
             'rec["result"] = hasattr(getattr(torch.rbln, "_utils", None), "_get_device_index")',
@@ -772,12 +788,12 @@ class TestUpstreamClauses(TestCase):
         """``torch.rbln.get_device_name()`` and friends must exist.
 
         ``torch.cuda`` / ``torch.xpu`` both expose ``get_device_name``,
-        ``get_device_properties`` and ``get_device_capability``, and frameworks reach for them
-        through the device module (vLLM's XPU platform is
+        ``get_device_properties`` and ``get_device_capability``, and frameworks reach
+        for them through the device module (vLLM's XPU platform is
         ``torch.xpu.get_device_name(device_id)``, vllm/platforms/xpu.py). With no RBLN
-        equivalent, vllm-rbln calls ``rebel.get_npu_name()`` directly, bypassing torch, so a
-        torch-level policy has nothing to apply to. ``RBLNGuardImpl::getDeviceCapability()``
-        already exists on the C++ side.
+        equivalent, vllm-rbln calls ``rebel.get_npu_name()`` directly, bypassing torch,
+        so a torch-level policy has nothing to apply to.
+        ``RBLNGuardImpl::getDeviceCapability()`` already exists on the C++ side.
         """
         p = run_probe(
             'rec["result"] = [n for n in ("get_device_name", "get_device_properties",'
@@ -817,8 +833,8 @@ class TestUpstreamClauses(TestCase):
 
         ``RBLN_CHECK`` (c10/rbln/RBLNLogging.h) logs ``c10::Error::what()`` -- the
         C++ stack trace included -- to **stdout** before throwing, at ERROR level, so no
-        ``TORCH_RBLN_LOG_LEVEL`` setting suppresses it and catching the exception does not
-        either.
+        ``TORCH_RBLN_LOG_LEVEL`` setting suppresses it and catching the exception does
+        not either.
         """
         p = run_probe(
             """
@@ -839,13 +855,13 @@ class TestUpstreamClauses(TestCase):
 
         The clauses above all say a probe left the mapping remappable. On their own they
         are also satisfied by a backend that never freezes it at all, which would let a
-        launcher renumber devices out from under live allocations. ``torch.cuda`` draws the
-        same line: torch/cuda/__init__.py refuses to cache the device count "prior to CUDA
-        initialization" and caches it from ``_lazy_init`` onwards.
+        launcher renumber devices out from under live allocations. ``torch.cuda`` draws
+        the same line: torch/cuda/__init__.py refuses to cache the device count "prior
+        to CUDA initialization" and caches it from ``_lazy_init`` onwards.
 
-        Both layers freeze at this same moment -- ``DeviceMappingManager::commit()`` calls
-        ``rbln_register_device_id()``, which reaches ``Context::Create`` and the runtime's
-        latch -- so this also pins that they cannot drift apart.
+        Both layers freeze at this same moment -- ``DeviceMappingManager::commit()``
+        calls ``rbln_register_device_id()``, which reaches ``Context::Create`` and the
+        runtime's latch -- so this also pins that they cannot drift apart.
         """
         p = run_probe(
             'rec["result"] = float(torch.ones(4, dtype=torch.float16, device="rbln:0").sum().cpu())',
@@ -862,15 +878,16 @@ class TestUpstreamClauses(TestCase):
 
         This is the point of planning separately from committing: a launcher assigns the
         visible devices once it knows the rank, necessarily after ``import torch``.
-        torch/cuda/__init__.py states the same rule -- do not cache the device count "prior
-        to CUDA initialization, because the number of devices can change due to changes to
-        ``CUDA_VISIBLE_DEVICES``".
+        torch/cuda/__init__.py states the same rule -- do not cache the device count
+        "prior to CUDA initialization, because the number of devices can change due to
+        changes to ``CUDA_VISIBLE_DEVICES``".
 
-        Both names, because the runtime ships ``RBLN_VISIBLE_DEVICES`` as an alias of the
-        same flag and it renumbers the pool identically. Both answers, because checking one
-        cannot tell "the assignment was honoured" from "the two disagree" -- leaving the
-        alias out of the plan signature made ``device_count()`` answer from a stale plan
-        while ``physical_device_count()``, which bypasses it, answered from the new pool.
+        Both names, because the runtime ships ``RBLN_VISIBLE_DEVICES`` as an alias of
+        the same flag and it renumbers the pool identically. Both answers, because
+        checking one cannot tell "the assignment was honored" from "the two disagree" --
+        leaving the alias out of the plan signature made ``device_count()`` answer from
+        a stale plan while ``physical_device_count()``, which bypasses it, answered from
+        the new pool.
         """
         for name in ("RBLN_DEVICES", "RBLN_VISIBLE_DEVICES"):
             with self.subTest(variable=name):
@@ -890,10 +907,10 @@ class TestUpstreamClauses(TestCase):
     def test_a_zero_device_plan_is_recoverable(self):
         """A failed device use with no devices must not freeze the mapping.
 
-        Commit freezes the plan so a later ``RBLN_*`` change cannot renumber devices out from
-        under live allocations. With nothing planned nothing is registered, so the freeze has
-        nothing to protect and only makes the 0-device state permanent -- a launcher that
-        probed with a bad value could never recover in that process.
+        Commit freezes the plan so a later ``RBLN_*`` change cannot renumber devices out
+        from under live allocations. With nothing planned nothing is registered, so the
+        freeze has nothing to protect and only makes the 0-device state permanent -- a
+        launcher that probed with a bad value could never recover in that process.
         """
         p = run_probe(
             """
@@ -919,8 +936,8 @@ class TestUpstreamClauses(TestCase):
         """``current_device()`` must never name a device outside the current plan.
 
         The selection is ``thread_local`` while the plan is process-wide, so shrinking
-        ``RBLN_DEVICES`` after ``set_device()`` -- both legal before the mapping commits --
-        can leave the selection pointing past the end of it.
+        ``RBLN_DEVICES`` after ``set_device()`` -- both legal before the mapping commits
+        -- can leave the selection pointing past the end of it.
         """
         p = run_probe(
             """
@@ -940,12 +957,13 @@ class TestUpstreamClauses(TestCase):
 
     @pytest.mark.npu(count=2)
     def test_a_frozen_mapping_survives_unsetting_the_variable(self):
-        """Clearing ``RBLN_DEVICES`` after a device is in use must not un-freeze the mapping.
+        """Clearing ``RBLN_DEVICES`` after a device is in use must not un-freeze the
+        mapping.
 
-        The runtime checks the freeze before the environment, so an unset cannot fall back to
-        "auto-discover all devices" and quietly widen the pool under live allocations. Pinned
-        because it is the escape hatch a remap-rejection check alone would miss: unsetting is
-        not a changed value, it is no value.
+        The runtime checks the freeze before the environment, so an unset cannot fall
+        back to "auto-discover all devices" and quietly widen the pool under live
+        allocations. Pinned because it is the escape hatch a remap-rejection check alone
+        would miss: unsetting is not a changed value, it is no value.
         """
         p = run_probe(
             """
@@ -969,8 +987,8 @@ class TestExternalConsumers(TestCase):
         """A co-tenant availability probe must leave ``RBLN_DEVICES`` remappable.
 
         LMCache runs device detection while importing ``lmcache.v1.platform``, on every
-        start, in whatever process imports it -- including a vLLM parent that has not yet
-        forked its workers. A mapping frozen there is inherited by every worker.
+        start, in whatever process imports it -- including a vLLM parent that has not
+        yet forked its workers. A mapping frozen there is inherited by every worker.
         """
         p = run_probe('rec["result"] = torch.rbln.is_available()', HEALTHY)
         self.assertIsNone(p.raised, f"is_available() raised -- {p}")
@@ -983,15 +1001,16 @@ class TestExternalConsumers(TestCase):
         """A forked worker must still be able to remap ``RBLN_DEVICES``.
 
         ``VLLM_WORKER_MULTIPROC_METHOD`` defaults to ``fork`` (vllm/envs.py) and
-        ``RBLNWorker._init_device_env()`` assigns ``os.environ[RBLN_DEVICES]`` inside the
-        forked worker. A frozen mapping is inherited across fork, so a probe in the parent
-        breaks every worker deterministically.
+        ``RBLNWorker._init_device_env()`` assigns ``os.environ[RBLN_DEVICES]`` inside
+        the forked worker. A frozen mapping is inherited across fork, so a probe in the
+        parent breaks every worker deterministically.
 
-        The parent gets *two* devices and the child keeps *one*, so the counts differ: an
-        ignored remap leaves the child reporting the parent's 2. A same-size remap cannot tell
-        those apart, and neither can "the child did not fail" -- an ignored remap raises
-        nothing. Both counts are read because ``physical_device_count()`` asks the runtime
-        directly, so it alone would pass with this layer still serving the parent's plan.
+        The parent gets *two* devices and the child keeps *one*, so the counts differ:
+        an ignored remap leaves the child reporting the parent's 2. A same-size remap
+        cannot tell those apart, and neither can "the child did not fail" -- an ignored
+        remap raises nothing. Both counts are read because ``physical_device_count()``
+        asks the runtime directly, so it alone would pass with this layer still serving
+        the parent's plan.
         """
         p = run_probe(
             """
@@ -1026,8 +1045,8 @@ class TestExternalConsumers(TestCase):
         """``DataLoader(pin_memory=True)`` must not freeze the mapping or claim an NPU.
 
         torch/utils/data/dataloader.py gate pinning on
-        ``torch.accelerator.is_available()``. A pure-CPU DataLoader in a vLLM parent must
-        not freeze the process-wide mapping or hold device contexts.
+        ``torch.accelerator.is_available()``. A pure-CPU DataLoader in a vLLM parent
+        must not freeze the process-wide mapping or hold device contexts.
         """
         p = run_probe(
             """
@@ -1038,8 +1057,8 @@ class TestExternalConsumers(TestCase):
             HEALTHY,
         )
         self.assertIsNone(p.raised, f"DataLoader raised -- {p}")
-        # skipTest, not a silent `if ... is not None`: an unavailable measurement must not
-        # quietly turn this into a test that checks nothing.
+        # skipTest, not a silent `if ... is not None`: an unavailable measurement must
+        # not quietly turn this into a test that checks nothing.
         if p.ctx is None or p.remap is None:
             self.skipTest(f"ctx/remap state undetermined in this environment -- {p}")
         self.assertFalse(p.ctx, f"DataLoader opened an NPU context -- {p}")
@@ -1047,12 +1066,14 @@ class TestExternalConsumers(TestCase):
 
     @pytest.mark.npu(count=2)
     def test_seed_before_llm_leaves_the_mapping_remappable(self):
-        """``torch.manual_seed()`` before ``LLM(...)`` must not freeze the mapping or claim an NPU.
+        """``torch.manual_seed()`` before ``LLM(...)`` must not freeze the mapping or
+        claim an NPU.
 
-        Scripts seed first and construct the engine second; vLLM then forks workers that remap
-        ``RBLN_DEVICES``. ``torch.manual_seed`` reaches ``torch.rbln.manual_seed_all`` through
-        torch/random.py::_seed_custom_device, and ``fork_rng`` / checkpointing read the default
-        generator through ``get_rng_state``, so neither may acquire a device.
+        Scripts seed first and construct the engine second; vLLM then forks workers that
+        remap ``RBLN_DEVICES``. ``torch.manual_seed`` reaches
+        ``torch.rbln.manual_seed_all`` through torch/random.py::_seed_custom_device, and
+        ``fork_rng`` / checkpointing read the default generator through
+        ``get_rng_state``, so neither may acquire a device.
         """
         p = run_probe(
             """
@@ -1071,8 +1092,9 @@ class TestExternalConsumers(TestCase):
     def test_remap_after_seeding_seeds_the_added_device(self):
         """A device a remap adds after ``torch.manual_seed()`` must carry that seed.
 
-        The parent sees one device when it seeds and two after the remap. A generator table
-        sized at seeding time would have no rbln:1, or would give it an unseeded generator.
+        The parent sees one device when it seeds and two after the remap. A generator
+        table sized at seeding time would have no rbln:1, or would give it an unseeded
+        generator.
         """
         p = run_probe(
             """
@@ -1127,8 +1149,9 @@ class TestExternalConsumers(TestCase):
             BAD_MAP,
         )
         self.assertIsNone(p.raised, f"probe harness error -- {p}")
-        # Both halves: torch's message has to be the one that surfaces, and ours must not.
-        # Asserting only the absence would also hold if _validate_device stopped raising.
+        # Both halves: torch's message has to be the one that surfaces, and ours must
+        # not. Asserting only the absence would also hold if _validate_device stopped
+        # raising.
         self.assertTrue(p.result.startswith("RAISED"), f"_validate_device must reject rbln:0 -- {p}")
         self.assertIn("torch.rbln.is_available() is False", p.result, f"not torch's message -- {p}")
         self.assertNotIn("out of range", p.result.lower(), f"backend error replaced torch's -- {p}")

@@ -45,9 +45,10 @@ Usage::
         model(x)
     print(p.report())  # torch.profiler-style table, [clean]/[overhead] marker + facts
     p.dump()  # dict for CI gates
-    p.verdict()  # {'clean': bool, 'reasons': [...], ...}  (a fact, not a severity grade)
+    p.verdict()  # {'clean': bool, 'reasons': [...], ...} (a fact, not a severity grade)
 
-    with torch.rbln.explain(with_stack=True) as p:  # opt-in: WHERE each fallback/recompile originates
+    # with_stack=True (opt-in) records WHERE each fallback/recompile originates.
+    with torch.rbln.explain(with_stack=True) as p:
         model(x)
     print(p.report())  # adds an "at <file:line(func)>" line per offending op
 
@@ -62,13 +63,21 @@ Usage::
 
 from __future__ import annotations
 
+import contextlib
+import os
+import re
 import threading
 import time
-from typing import Any, Callable, Optional  # noqa: UP035
+from pathlib import Path
+from typing import Any, TYPE_CHECKING
 from typing_extensions import Self
 
 
-__all__ = ["explain", "explain_steady", "RBLNExplain", "RBLNDiff", "profile", "RBLNProfile"]
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+
+__all__ = ["RBLNDiff", "RBLNExplain", "RBLNProfile", "explain", "explain_steady", "profile"]
 
 
 # explain() drives PROCESS-GLOBAL instrumentation: the (B) rebel-runtime timer gate
@@ -162,7 +171,8 @@ def _collect_notes(d: dict[str, Any]) -> list[dict[str, str]]:
 
     Returned in priority order (host bounce -> runtime cause -> dispatch) so the
     most impactful change is listed first. Pure lookup over the already-computed
-    dump, so it costs nothing at runtime."""
+    dump, so it costs nothing at runtime.
+    """
     fixes: list[dict[str, str]] = []
     for name, vv in d["hidden_host_bounce"]["by_site"].items():
         if vv["count"] and name in _REMEDY:
@@ -176,11 +186,13 @@ def _collect_notes(d: dict[str, Any]) -> list[dict[str, str]]:
                 # drift), so rfix[n] always resolves.
                 fixes.append({"signal": f"runtime/v2v_slow:{n}", "fix": rfix[n]})
         # Reject axis (so help()/dump()['notes'] resolve the v2v_reject:* signals the
-        # report shows): user-actionable reasons carry their fix; the internal bucket is a
-        # notification, not a to-do.
+        # report shows): user-actionable reasons carry their fix; the internal bucket is
+        # a notification, not a to-do.
         rj = rr.get("reject") or {}
-        for lbl in rj.get("user_actionable", {}):
-            fixes.append({"signal": f"runtime/v2v_reject:{lbl}", "fix": _REJECT_FIX.get(lbl, "")})
+        fixes.extend(
+            {"signal": f"runtime/v2v_reject:{lbl}", "fix": _REJECT_FIX.get(lbl, "")}
+            for lbl in rj.get("user_actionable", {})
+        )
         if rj.get("internal_fallback", {}).get("count"):
             fixes.append(
                 {
@@ -197,21 +209,22 @@ def _collect_notes(d: dict[str, Any]) -> list[dict[str, str]]:
 
 
 def _read_bounces() -> list[tuple[int, int]]:
-    import torch_rbln._C as _C
+    from torch_rbln import _C  # noqa: PLC0415
 
     return list(_C._profiler_dump_bounces())
 
 
 def _read_dispatch() -> tuple[int, int, int, int, int, int]:
-    import torch_rbln._C as _C
+    from torch_rbln import _C  # noqa: PLC0415
 
     return tuple(_C._dispatch_shim_diag_dump())
 
 
 def _read_fallback_by_op() -> dict[str, int]:
     """Per-op CPU-fallback counts from the dispatch shim (op_name -> count), or
-    {} if the loaded torch_rbln._C predates the binding (graceful degrade)."""
-    import torch_rbln._C as _C
+    {} if the loaded torch_rbln._C predates the binding (graceful degrade).
+    """
+    from torch_rbln import _C  # noqa: PLC0415
 
     fn = getattr(_C, "_dispatch_fallback_by_op", None)
     if fn is None:
@@ -221,8 +234,9 @@ def _read_fallback_by_op() -> dict[str, int]:
 
 def _read_recompile_by_op() -> dict[str, int]:
     """Per-op warm-cache miss (recompile) counts (op_name -> count), or {} if the
-    loaded torch_rbln._C predates the binding (graceful degrade)."""
-    import torch_rbln._C as _C
+    loaded torch_rbln._C predates the binding (graceful degrade).
+    """
+    from torch_rbln import _C  # noqa: PLC0415
 
     fn = getattr(_C, "_dispatch_recompile_by_op", None)
     if fn is None:
@@ -232,8 +246,9 @@ def _read_recompile_by_op() -> dict[str, int]:
 
 def _read_fallback_reasons() -> list[int]:
     """cpu_fallback reason counts [dtype-not-fp16, nan/inf input, all-scalar], or
-    [] if the loaded torch_rbln._C predates the binding (graceful degrade)."""
-    import torch_rbln._C as _C
+    [] if the loaded torch_rbln._C predates the binding (graceful degrade).
+    """
+    from torch_rbln import _C  # noqa: PLC0415
 
     fn = getattr(_C, "_dispatch_fallback_reasons", None)
     if fn is None:
@@ -242,10 +257,11 @@ def _read_fallback_reasons() -> list[int]:
 
 
 # --- (A) fast-path handler coverage: which fallback ops are un-accelerated -----
-def _read_fast_path_registered(op_name: str) -> Optional[bool]:
+def _read_fast_path_registered(op_name: str) -> bool | None:
     """True/False if the loaded _C can say whether ``op_name`` has a CPU
-    fast-path handler; None if the binding is absent (graceful degrade)."""
-    import torch_rbln._C as _C
+    fast-path handler; None if the binding is absent (graceful degrade).
+    """
+    from torch_rbln import _C  # noqa: PLC0415
 
     fn = getattr(_C, "_cpu_fast_path_registered", None)
     if fn is None:
@@ -261,16 +277,15 @@ def _host_thread_info() -> dict[str, Any]:
     """Cores this process may run on vs the host-thread parallelism. When threads
     far exceed cores the worker's tiny serial host ops get preempted by the idle
     OMP/numba pool, inflating per-op host latency several-fold -- invisible to any
-    per-op counter. A resource fact (like device memory), never a per-op verdict."""
-    import os
-
+    per-op counter. A resource fact (like device memory), never a per-op verdict.
+    """
     info: dict[str, Any] = {}
     try:
         info["cores"] = len(os.sched_getaffinity(0))  # cores actually allowed (post-pin)
     except (AttributeError, OSError):
         info["cores"] = os.cpu_count() or 0
     try:
-        import torch
+        import torch  # noqa: PLC0415
 
         info["torch_threads"] = int(torch.get_num_threads())
     except Exception:
@@ -279,14 +294,11 @@ def _host_thread_info() -> dict[str, Any]:
         info["omp_threads"] = int(os.environ.get("OMP_NUM_THREADS", "0") or 0)
     except ValueError:
         info["omp_threads"] = 0
-    try:
-        with open("/proc/self/status") as f:
-            for ln in f:
-                if ln.startswith("Threads:"):
-                    info["proc_threads"] = int(ln.split()[1])
-                    break
-    except Exception:
-        pass
+    with contextlib.suppress(Exception), Path("/proc/self/status").open() as f:
+        for ln in f:
+            if ln.startswith("Threads:"):
+                info["proc_threads"] = int(ln.split()[1])
+                break
     intended = max(info.get("omp_threads", 0), info["torch_threads"], info.get("proc_threads", 0))
     info["intended_threads"] = intended
     info["oversubscribed"] = info["cores"] > 0 and intended > info["cores"]
@@ -299,8 +311,8 @@ def _host_thread_info() -> dict[str, Any]:
 _RT_PRIMS = ("v2v", "v2v_multi", "borrow", "acquire", "return", "v2h", "h2v", "v2h_multi", "h2v_multi")
 
 
-def _rt_timing_enable(on: bool) -> None:
-    import torch_rbln._C as _C
+def _rt_timing_enable(*, on: bool) -> None:
+    from torch_rbln import _C  # noqa: PLC0415
 
     fn = getattr(_C, "_rt_timing_enable", None)
     if fn is not None:
@@ -308,17 +320,18 @@ def _rt_timing_enable(on: bool) -> None:
 
 
 def _rt_timing_reset() -> None:
-    import torch_rbln._C as _C
+    from torch_rbln import _C  # noqa: PLC0415
 
     fn = getattr(_C, "_rt_timing_reset", None)
     if fn is not None:
         fn()
 
 
-def _read_rt_timing() -> Optional[list[tuple[int, int]]]:
+def _read_rt_timing() -> list[tuple[int, int]] | None:
     """Per-primitive (ns, calls) spent inside librbln boundary calls, or None if
-    the loaded _C predates the binding (graceful degrade)."""
-    import torch_rbln._C as _C
+    the loaded _C predates the binding (graceful degrade).
+    """
+    from torch_rbln import _C  # noqa: PLC0415
 
     fn = getattr(_C, "_rt_timing_get", None)
     if fn is None:
@@ -332,8 +345,9 @@ def _read_rt_timing() -> Optional[list[tuple[int, int]]]:
 # --- (A) WHERE: opt-in Python call-site capture (off by default) --------------
 def _read_trace_by_op() -> dict[str, str]:
     """Per-op captured call-site (op_name -> 'file:line(func) <- ...'), or {} if
-    trace was never enabled / the binding is absent (graceful degrade)."""
-    import torch_rbln._C as _C
+    trace was never enabled / the binding is absent (graceful degrade).
+    """
+    from torch_rbln import _C  # noqa: PLC0415
 
     fn = getattr(_C, "_explain_trace_by_op", None)
     if fn is None:
@@ -341,10 +355,11 @@ def _read_trace_by_op() -> dict[str, str]:
     return {str(op): str(site) for op, site in fn()}
 
 
-def _set_trace(on: bool) -> None:
+def _set_trace(*, on: bool) -> None:
     """Flip the C++ capture gate. No-op on a _C that predates the binding (so a
-    with_stack=True request on an old build degrades to no call-sites, not an error)."""
-    import torch_rbln._C as _C
+    with_stack=True request on an old build degrades to no call-sites, not an error).
+    """
+    from torch_rbln import _C  # noqa: PLC0415
 
     fn = getattr(_C, "_explain_set_trace", None)
     if fn is not None:
@@ -352,7 +367,7 @@ def _set_trace(on: bool) -> None:
 
 
 def _reset_trace() -> None:
-    import torch_rbln._C as _C
+    from torch_rbln import _C  # noqa: PLC0415
 
     fn = getattr(_C, "_explain_trace_by_op_reset", None)
     if fn is not None:
@@ -383,21 +398,23 @@ _REJECT_FIX = {
 
 def _rt_prof(name: str):
     """Resolve a runtime-counter binding on _C, or None if the loaded _C/librbln
-    predates it (graceful degradation -> signal reports pending, never a false zero)."""
+    predates it (graceful degradation -> signal reports pending, never a false zero).
+    """
     try:
-        import torch_rbln._C as _C
+        from torch_rbln import _C  # noqa: PLC0415
     except Exception:
         return None
     return getattr(_C, name, None)
 
 
-def _read_runtime() -> Optional[dict]:
+def _read_runtime() -> dict | None:
     """Snapshot of runtime (rebel-compiler) counters via _C, or None if unavailable.
 
     ``hidden_count`` (the hidden-d2h cause breakdown) is the core signal. ``reject_*``
     (WHY a fast v2v plan was rejected), the ``host_sync_*`` real-transfer counters, and
     the ``mem_*`` device-memory gauge are each present only on a runtime that exposes
-    them; on an older one they are omitted (reported pending — never a false zero)."""
+    them; on an older one they are omitted (reported pending — never a false zero).
+    """
     hidden = _rt_prof("_rt_prof_hidden")
     if hidden is None:
         return None
@@ -430,7 +447,8 @@ def _fmt_bytes(b: float) -> str:
 
 def _fmt_time(ns: float) -> str:
     # Mirror torch.profiler's _format_time (adaptive us/ms/s) so explain reads like a
-    # torch profiler table. ASCII "us" (not the Unicode micro sign) for log/Slack safety.
+    # torch profiler table. ASCII "us" (not the Unicode micro sign) for log/Slack
+    # safety.
     us = ns / 1e3
     if us >= 1e6:
         return f"{us / 1e6:.3f}s"
@@ -440,8 +458,8 @@ def _fmt_time(ns: float) -> str:
 
 
 # Note-column prefixes: split a SUGGESTED action (try:) from a fact/notification (fyi:).
-# "try:" (not "fix:") is deliberate -- the advice is a starting point, not a guaranteed fix;
-# it may not fit a given workload. torch tables have no advice column, so this is
+# "try:" (not "fix:") is deliberate -- the advice is a starting point, not a guaranteed
+# fix; it may not fit a given workload. torch tables have no advice column, so this is
 # explain-specific -- kept ASCII.
 def _fix(note: str) -> str:
     return f"try: {note}" if note else ""
@@ -466,15 +484,16 @@ def _thousands(n: int) -> str:
 
 
 def _short_op(op: str) -> str:
-    # Drop the 'aten::' namespace for compact candidate lists (the per-op lines keep it).
+    # Drop the 'aten::' namespace for compact candidate lists (the per-op lines keep
+    # it).
     return op.removeprefix("aten::")
 
 
 def _short_path(callsite: str) -> str:
     """Tail-truncate long file paths in an ``at`` call-site string so the informative
     end (``.../parent/file.py:line(fn)``) survives without a full absolute path. Applied
-    only at report time; ``dump()['trace_by_op']`` keeps the raw string."""
-    import re
+    only at report time; ``dump()['trace_by_op']`` keeps the raw string.
+    """
 
     def _trim(m) -> str:
         path = m.group(0)
@@ -495,7 +514,8 @@ def _fmt_dur(ns: float) -> str:
 def _op_block(by_op: dict, tbo: dict, limit: int = 8) -> list[str]:
     """Per-op detail lines for a dispatch signal -- ``op  count  at call-site`` column-
     aligned within the block (alignment is per-block, not across blocks). The call-site
-    is shown only when captured (``with_stack=True``)."""
+    is shown only when captured (``with_stack=True``).
+    """
     items = list(by_op.items())[:limit]
     if not items:
         return []
@@ -521,9 +541,7 @@ def _table(headers: list[str], rows: list[list[str]], aligns: list[str]) -> list
     sep = "  ".join("-" * widths[c] for c in range(cols))
 
     def fmt_row(cells: list[str]) -> str:
-        out = []
-        for c in range(cols):
-            out.append(cells[c].rjust(widths[c]) if aligns[c] == "r" else cells[c].ljust(widths[c]))
+        out = [cells[c].rjust(widths[c]) if aligns[c] == "r" else cells[c].ljust(widths[c]) for c in range(cols)]
         return "  ".join(out).rstrip()  # trim padding on the trailing (left-aligned) column
 
     lines = [sep, fmt_row(headers), sep]
@@ -540,17 +558,28 @@ class RBLNExplain:
     not just the calling thread. Concurrent device work (e.g. a background transfer or
     worker thread) is therefore included in the delta — attribute accordingly when
     profiling a multi-threaded run (vLLM, DataLoader workers, ...). Memory is read as a
-    process-wide level/high-water mark, not a per-region delta."""
+    process-wide level/high-water mark, not a per-region delta.
+    """
 
-    def __init__(self, with_stack: bool = False, *, trace: Optional[bool] = None) -> None:
+    def __init__(self, with_stack: bool = False, *, trace: bool | None = None) -> None:  # noqa: FBT001, FBT002
         if trace is not None:  # deprecated back-compat alias for with_stack
             with_stack = trace
-        self._b0 = self._d0 = self._rt0 = self._wall0 = self._f0 = self._r0 = self._fr0 = None
-        self._bounces = self._dispatch = self._rt = self._fallback_by_op = self._recompile_by_op = None
-        self._fallback_reasons = None
+        self._b0: list[tuple[int, int]]
+        self._d0: tuple[int, ...]
+        self._f0: dict[str, int]
+        self._r0: dict[str, int]
+        self._fr0: list[int]
+        self._rt0: dict | None
+        self._wall0: int
+        self._bounces: list[tuple[int, int]] | None = None
+        self._dispatch: tuple[int, ...] | None = None
+        self._rt: dict[str, Any] | None = None
+        self._fallback_by_op: dict[str, int] | None = None
+        self._recompile_by_op: dict[str, int] | None = None
+        self._fallback_reasons: list[int] | None = None
         self._trace = with_stack
-        self._trace_by_op: Optional[dict] = None
-        self._rt_timing: Optional[list[tuple[int, int]]] = None  # (B) per-primitive librbln (ns, calls)
+        self._trace_by_op: dict | None = None
+        self._rt_timing: list[tuple[int, int]] | None = None  # (B) per-primitive librbln (ns, calls)
         self._holds = False  # this region owns the global instrumentation (release exactly once)
         self._wall_ns = 0
 
@@ -561,21 +590,24 @@ class RBLNExplain:
         # one's timer/trace/counters.
         with _region_lock:
             if _active:
-                raise RuntimeError(
+                msg = (
                     "torch.rbln.explain() regions must not overlap (nested or concurrent): the "
                     "(B) timer, trace and counters are process-global. Close the open region first."
                 )
+                raise RuntimeError(msg)
             _active = True
             self._holds = True
-        # We now own the gate. Enable it and take the start baselines; if ANY of that raises,
-        # release before propagating so a failed start never leaks the gate/guard (#2).
+        # We now own the gate. Enable it and take the start baselines; if ANY of that
+        # raises, release before propagating so a failed start never leaks the
+        # gate/guard (#2).
         try:
             if self._trace:
-                _set_trace(True)
+                _set_trace(on=True)
                 _reset_trace()  # region-local captures (the C++ map dedups per op)
-            # (B) off => one relaxed atomic load per boundary call, no clock read (ON==OFF).
+            # (B) off => one relaxed atomic load per boundary call, no clock read
+            #     (ON==OFF).
             _rt_timing_reset()
-            _rt_timing_enable(True)
+            _rt_timing_enable(on=True)
             self._b0 = _read_bounces()
             self._d0 = _read_dispatch()
             self._f0 = _read_fallback_by_op()
@@ -589,17 +621,19 @@ class RBLNExplain:
         return self
 
     def _release(self) -> None:
-        """Disable the global instrumentation and release the region guard, exactly once.
-        Called from stop()'s finally AND from a failed start() -- so neither a mid-readout
-        error nor a start failure leaks the (B) timer / trace gate into the next region."""
+        """Disable the global instrumentation and release the region guard, exactly
+        once. Called from stop()'s finally AND from a failed start() -- so neither a
+        mid-readout error nor a start failure leaks the (B) timer / trace gate into the
+        next region.
+        """
         global _active
         with _region_lock:
             if not self._holds:
                 return
             self._holds = False
-            _rt_timing_enable(False)
+            _rt_timing_enable(on=False)
             if self._trace:
-                _set_trace(False)
+                _set_trace(on=False)
             _active = False
 
     def stop(self) -> RBLNExplain:
@@ -607,19 +641,21 @@ class RBLNExplain:
             self._wall_ns = time.perf_counter_ns() - self._wall0
             self._rt_timing = _read_rt_timing()  # (B) region totals (reset at start)
             b1, d1, rt1 = _read_bounces(), _read_dispatch(), _read_runtime()
-            self._bounces = [(c1 - c0, by1 - by0) for (c0, by0), (c1, by1) in zip(self._b0, b1)]
-            self._dispatch = tuple(x1 - x0 for x0, x1 in zip(self._d0, d1))
+            self._bounces = [(c1 - c0, by1 - by0) for (c0, by0), (c1, by1) in zip(self._b0, b1, strict=True)]
+            self._dispatch = tuple(x1 - x0 for x0, x1 in zip(self._d0, d1, strict=True))
             f1 = _read_fallback_by_op()
             self._fallback_by_op = {op: f1[op] - self._f0.get(op, 0) for op in f1 if f1[op] - self._f0.get(op, 0) > 0}
             r1 = _read_recompile_by_op()
             self._recompile_by_op = {op: r1[op] - self._r0.get(op, 0) for op in r1 if r1[op] - self._r0.get(op, 0) > 0}
             fr1 = _read_fallback_reasons()
             self._fallback_reasons = (
-                [b - a for a, b in zip(self._fr0, fr1)] if self._fr0 and fr1 and len(fr1) == len(self._fr0) else []
+                [b - a for a, b in zip(self._fr0, fr1, strict=True)]
+                if self._fr0 and fr1 and len(fr1) == len(self._fr0)
+                else []
             )
             if self._rt0 is not None and rt1 is not None:
-                hc = [a - b for a, b in zip(rt1["hidden_count"], self._rt0["hidden_count"])]
-                hb = [a - b for a, b in zip(rt1["hidden_bytes"], self._rt0["hidden_bytes"])]
+                hc = [a - b for a, b in zip(rt1["hidden_count"], self._rt0["hidden_count"], strict=True)]
+                hb = [a - b for a, b in zip(rt1["hidden_bytes"], self._rt0["hidden_bytes"], strict=True)]
                 self._rt = {"hidden_count": hc, "hidden_bytes": hb}
                 if "mem_cur" in rt1:
                     # memory is a process-level high-water gauge (a level, not a delta)
@@ -632,8 +668,12 @@ class RBLNExplain:
                     self._rt["host_sync_h2d_count"] = rt1["host_sync_h2d_count"] - self._rt0["host_sync_h2d_count"]
                     self._rt["host_sync_h2d_bytes"] = rt1["host_sync_h2d_bytes"] - self._rt0["host_sync_h2d_bytes"]
                 if "reject_count" in rt1 and "reject_count" in self._rt0:
-                    self._rt["reject_count"] = [a - b for a, b in zip(rt1["reject_count"], self._rt0["reject_count"])]
-                    self._rt["reject_bytes"] = [a - b for a, b in zip(rt1["reject_bytes"], self._rt0["reject_bytes"])]
+                    self._rt["reject_count"] = [
+                        a - b for a, b in zip(rt1["reject_count"], self._rt0["reject_count"], strict=True)
+                    ]
+                    self._rt["reject_bytes"] = [
+                        a - b for a, b in zip(rt1["reject_bytes"], self._rt0["reject_bytes"], strict=True)
+                    ]
             else:
                 self._rt = None
             self._trace_by_op = _read_trace_by_op() if self._trace else {}
@@ -644,12 +684,13 @@ class RBLNExplain:
     def __enter__(self) -> Self:
         return self.start()
 
-    def __exit__(self, *exc: Any) -> None:
+    def __exit__(self, *exc: object) -> None:
         self.stop()
 
     def __repr__(self) -> str:
-        # Like torch._dynamo.explain()'s ExplainOutput: the object renders as its report,
-        # so `print(p)` works. NOT auto-printed on __exit__ (torch.profiler doesn't either).
+        # Like torch._dynamo.explain()'s ExplainOutput: the object renders as its
+        # report, so `print(p)` works. NOT auto-printed on __exit__ (torch.profiler
+        # doesn't either).
         if self._bounces is None:  # region still open — stop() not called yet
             return f"<RBLNExplain active (trace={self._trace}); read the report after the region closes>"
         return self.report()
@@ -658,13 +699,17 @@ class RBLNExplain:
 
     # -- readout -------------------------------------------------------------
     def dump(self) -> dict[str, Any]:
-        if self._bounces is None:
-            raise RuntimeError("region is still open -- exit the with-block or call stop() before dump()/report()")
-        per_site = {n: {"count": c, "bytes": by} for (n, _d), (c, by) in zip(_BOUNCE_SITES, self._bounces)}
+        if self._bounces is None or self._dispatch is None:
+            msg = "region is still open -- exit the with-block or call stop() before dump()/report()"
+            raise RuntimeError(msg)
+        per_site = {
+            n: {"count": c, "bytes": by} for (n, _d), (c, by) in zip(_BOUNCE_SITES, self._bounces, strict=False)
+        }
         hb_count = sum(self._bounces[i][0] for i in _HOST_BOUNCE_SITES)
         hb_bytes = sum(self._bounces[i][1] for i in _HOST_BOUNCE_SITES)
-        # tuple is (n_total, n_fallback, n_warm_hit, n_miss, ns_warm_hit, ns_miss[, ns_fallback]);
-        # the 7th (cpu_fallback wall ns) is absent on a _C that predates it -> degrade to 0.
+        # tuple is (n_total, n_fallback, n_warm_hit, n_miss, ns_warm_hit, ns_miss[,
+        # ns_fallback]); the 7th (cpu_fallback wall ns) is absent on a _C that predates
+        # it -> degrade to 0.
         d = self._dispatch
         n_total, n_fallback, n_warm_hit, n_miss = d[0], d[1], d[2], d[3]
         ns_fallback = d[6] if len(d) > 6 else 0
@@ -683,42 +728,50 @@ class RBLNExplain:
         out["cpu_fallback_by_op"] = dict(sorted((self._fallback_by_op or {}).items(), key=lambda kv: -kv[1]))
         out["recompile_by_op"] = dict(sorted((self._recompile_by_op or {}).items(), key=lambda kv: -kv[1]))
         out["cpu_fallback_reasons"] = {
-            n: c for n, c in zip(_FALLBACK_REASON_NAMES, self._fallback_reasons or []) if c > 0
+            n: c for n, c in zip(_FALLBACK_REASON_NAMES, self._fallback_reasons or [], strict=False) if c > 0
         }
         out["trace_by_op"] = dict(self._trace_by_op or {})  # (A) WHERE; {} unless with_stack=True
         if self._rt is not None:
             hc, hbytes = self._rt["hidden_count"], self._rt["hidden_bytes"]
-            # (#3) the runtime hidden-reason axis is a positional ABI contract, not partially-
-            # interpretable user data: report keys like src_not_on_device are only truthful if the
-            # order/count/meaning line up 1:1 with _RUNTIME_REASONS. A length mismatch means this
-            # torch-rbln build and the loaded librbln are out of sync -- fail loudly rather than
-            # silently truncate (zip) or invent an "unattributed" bucket that report()/verdict()
-            # would then have to false-interpret. The axis-length canary guards this in CI too.
+            # (#3) the runtime hidden-reason axis is a positional ABI contract, not
+            # partially interpretable user data: report keys like src_not_on_device are
+            # only truthful if the order/count/meaning line up 1:1 with
+            # _RUNTIME_REASONS. A length mismatch means this torch-rbln build and the
+            # loaded librbln are out of sync -- fail loudly rather than silently
+            # truncate (zip) or invent an "unattributed" bucket that report()/verdict()
+            # would then have to false-interpret. The axis-length canary guards this in
+            # CI too.
             if len(hc) != len(_RUNTIME_REASONS):
-                raise RuntimeError(
+                msg = (
                     f"runtime hidden-reason axis drifted (runtime reports {len(hc)} reasons, "
                     f"this build names {len(_RUNTIME_REASONS)}); "
                     "torch-rbln and rebel-compiler/librbln are out of sync"
                 )
-            by_reason = {n: {"count": c, "bytes": b} for (n, _f), c, b in zip(_RUNTIME_REASONS, hc, hbytes)}
-            out["runtime_residency"] = {
+                raise RuntimeError(msg)
+            by_reason = {
+                n: {"count": c, "bytes": b} for (n, _f), c, b in zip(_RUNTIME_REASONS, hc, hbytes, strict=True)
+            }
+            residency: dict[str, Any] = {
                 "available": True,
                 "total_count": sum(hc),
                 "by_reason": by_reason,
             }
+            out["runtime_residency"] = residency
             if "host_sync_count" in self._rt:
-                # REAL device->host this region (manager-emitted): a host bounce with 0 real
-                # d2h was served on host (no device crossing). Covers synchronous + async-
-                # fallback transfers; a deliberate pinned non_blocking copy takes the async
-                # DMA path (uncounted by the runtime), out of scope by design (see docs §6).
+                # REAL device->host this region (manager-emitted): a host bounce with 0
+                # real d2h was served on host (no device crossing). Covers synchronous +
+                # async-fallback transfers; a deliberate pinned non_blocking copy takes
+                # the async DMA path (uncounted by the runtime), out of scope by design
+                # (see docs §6).
                 out["runtime_residency"]["real_host_sync_d2h"] = {
                     "count": self._rt["host_sync_count"],
                     "bytes": self._rt["host_sync_bytes"],
                 }
             if "host_sync_h2d_count" in self._rt:
                 # REAL host->device this region (manager-emitted): the lazy push at the
-                # device-consume boundary -- glue that pushes host-latest data onto the device
-                # for a graph to consume. Same scope caveat as real_host_sync_d2h above.
+                # device-consume boundary -- glue that pushes host-latest data onto the
+                # device for a graph to consume. Same scope caveat as real_host_sync_d2h
+                # above.
                 out["runtime_residency"]["real_host_sync_h2d"] = {
                     "count": self._rt["host_sync_h2d_count"],
                     "bytes": self._rt["host_sync_h2d_bytes"],
@@ -726,7 +779,8 @@ class RBLNExplain:
             if "reject_count" in self._rt:
                 # WHY a fast v2v plan was rejected, grouped by who can act: user-
                 # actionable reasons individually; every other reason collapsed into one
-                # "internal" bucket (the runtime's internal classification is never named).
+                # "internal" bucket (the runtime's internal classification is never
+                # named).
                 user_rej: dict[str, dict[str, int]] = {}
                 int_c = int_b = 0
                 rc, rb = self._rt["reject_count"], self._rt["reject_bytes"]
@@ -744,8 +798,8 @@ class RBLNExplain:
                     "internal_fallback": {"count": int_c, "bytes": int_b},
                 }
                 # Diagnostic only -- NOT a stable surface. Raw per-index reject axis is
-                # enum-order dependent (the runtime's internal classification), so it lives
-                # under "debug" and must not be treated as a CI contract.
+                # enum-order dependent (the runtime's internal classification), so it
+                # lives under "debug" and must not be treated as a CI contract.
                 out["runtime_residency"]["debug"] = {
                     "reject_raw_by_index": {i: {"count": rc[i], "bytes": rb[i]} for i in range(len(rc)) if rc[i] > 0}
                 }
@@ -767,10 +821,7 @@ class RBLNExplain:
         # (A) which fallback ops lack a CPU fast-path handler = the optimization
         # candidates (registered ones already bypass redispatchBoxed). Omitted when
         # the _C predates the registry query (can't tell handled from un-handled).
-        unaccel: list[str] = []
-        for op in out["cpu_fallback_by_op"]:
-            if _read_fast_path_registered(op) is False:
-                unaccel.append(op)
+        unaccel: list[str] = [op for op in out["cpu_fallback_by_op"] if _read_fast_path_registered(op) is False]
         if unaccel:
             out["cpu_fallback_unaccelerated"] = unaccel
 
@@ -780,7 +831,11 @@ class RBLNExplain:
         # (B) rebel-runtime (librbln) boundary time this region, per primitive.
         if self._rt_timing is not None:
             total_ns = sum(ns for ns, _c in self._rt_timing)
-            by_prim = {name: {"ns": ns, "calls": cnt} for name, (ns, cnt) in zip(_RT_PRIMS, self._rt_timing) if cnt}
+            by_prim = {
+                name: {"ns": ns, "calls": cnt}
+                for name, (ns, cnt) in zip(_RT_PRIMS, self._rt_timing, strict=False)
+                if cnt
+            }
             out["rebel_runtime"] = {
                 "total_ns": total_ns,
                 "wall_fraction": (total_ns / self._wall_ns) if self._wall_ns else 0.0,
@@ -799,8 +854,8 @@ class RBLNExplain:
         runtime_hidden = rr["total_count"] if rr["available"] else 0
         if runtime_hidden > 0:
             # Lead with the real d2h the manager performed to serve the fallback, as a
-            # magnitude fact -- whether it is user-avoidable is the reject axis's job, not
-            # a blanket label here.
+            # magnitude fact -- whether it is user-avoidable is the reject axis's job,
+            # not a blanket label here.
             rd = rr.get("real_host_sync_d2h")
             if rd and rd["count"]:
                 reasons.append(f"runtime-side physical d2h: {rd['count']}x, {_fmt_bytes(rd['bytes'])}")
@@ -814,7 +869,8 @@ class RBLNExplain:
             reasons.append(f"cpu_fallback: {disp['cpu_fallback']}x (ran on CPU)")
         # ``clean`` is a FACT (did any hidden event fire), NOT a severity grade. explain
         # does not colour-judge how bad an event is -- a host bounce can be free -- so a
-        # RED/AMBER/GREEN would be a guess. Cost lives in the table (Bytes/Note) + reasons.
+        # RED/AMBER/GREEN would be a guess. Cost lives in the table (Bytes/Note)
+        # + reasons.
         clean = not reasons
         if clean:
             reasons.append("no hidden host bounce, no CPU fallback, no recompile")
@@ -833,7 +889,8 @@ class RBLNExplain:
     def report(self) -> str:
         """Verdict-first report. Each byte-carrying row's Note leads with the cost
         verdict (from the region-global physical-d2h witness); detail blocks are grouped
-        under their parent signal; the full note prose is in dump()['notes'] / help()."""
+        under their parent signal; the full note prose is in dump()['notes'] / help().
+        """
         d, v = self.dump(), self.verdict()
         rr = d["runtime_residency"]
 
@@ -854,14 +911,15 @@ class RBLNExplain:
             mark = f"[overhead: {nsig} signal{'' if nsig == 1 else 's'}]"
         head = f"{mark}  RBLN EXPLAIN   (region wall {_fmt_time(d['wall_ns'])}"
         if "device_memory" in d:
-            # rebel BufferAllocator reserved footprint (device high-water), not host RSS.
+            # rebel BufferAllocator reserved footprint (device high-water), not host
+            # RSS.
             head += f" | device mem {_fmt_bytes(d['device_memory']['peak_bytes'])} peak, reserved"
         head += ")"
         lines = [head]
 
         # -- context facts (oversubscription, rebel-runtime, h2d push): built for BOTH
-        #    paths -- they happened regardless of any signal, so a clean region shows them
-        #    too (an h2d push is expected glue, not overhead).
+        #    paths -- they happened regardless of any signal, so a clean region shows
+        #    them too (an h2d push is expected glue, not overhead).
         ctx: list[str] = []
         ht = d.get("host_threads") or {}
         if ht.get("oversubscribed"):
@@ -925,7 +983,8 @@ class RBLNExplain:
             rows.append([f"host_bounce/{_site_label(name)}", _thousands(vv["count"]), _fmt_bytes(vv["bytes"]), note])
         if v2v_fired:
             # Bytes = host-path volume only (one semantic); physical DMA lives on the >>
-            # line. Remedy is per reject-cause in the block, so the Note is just the verdict.
+            # line. Remedy is per reject-cause in the block, so the Note is just the
+            # verdict.
             host_path_bytes = sum(x.get("bytes", 0) for x in rr["by_reason"].values())
             rows.append(["runtime/v2v_slow", _thousands(rr["total_count"]), _fmt_bytes(host_path_bytes), _verdict()])
         disp = d["dispatch"]
@@ -990,7 +1049,7 @@ class RBLNExplain:
 
         # -- the single most important line, promoted out of the pile + scoped -
         if bounce_sites or v2v_fired:
-            if witness:
+            if phys and witness:
                 scope = " (see runtime/v2v_slow)" if v2v_fired else ""
                 lines.append(
                     f"  >> physical d2h (real transfer): {phys['count']} copies, {_fmt_bytes(phys['bytes'])}"
@@ -1007,10 +1066,11 @@ class RBLNExplain:
         lines.append("  (detail: p.help(signal) | raw: p.dump())")
         return "\n".join(lines)
 
-    def help(self, signal: Optional[str] = None) -> str:
+    def help(self, signal: str | None = None) -> str:
         """Full remedy prose. No arg: the fix for every fired signal. With a
         signal (bare cause or report label like 'dispatch/cpu_fallback'): just
-        that one."""
+        that one.
+        """
         fixes = self.dump().get("notes", [])
         if signal is None:
             return "\n".join(f"{f['signal']}: {f['fix']}" for f in fixes) or "no hidden overhead"
@@ -1030,13 +1090,16 @@ class RBLNExplain:
         """Compare this region with another one YOU placed (self -> other), e.g.
         an early call vs a later steady call. explain cannot tell a one-time cost
         from a recurring one on its own (it does not know your run structure);
-        placing the two regions is how YOU supply that. See :class:`RBLNDiff`."""
-        # Errors are UI: a bare assert vanishes under -O and its message doesn't say what
-        # to do. Raise something actionable instead.
+        placing the two regions is how YOU supply that. See :class:`RBLNDiff`.
+        """
+        # Errors are UI: a bare assert vanishes under -O and its message doesn't say
+        # what to do. Raise something actionable instead.
         if self._bounces is None:
-            raise RuntimeError("region 'a' is still open -- exit its with-block or call stop() before diff()")
+            msg = "region 'a' is still open -- exit its with-block or call stop() before diff()"
+            raise RuntimeError(msg)
         if other._bounces is None:
-            raise RuntimeError("region 'b' is still open -- exit its with-block or call stop() before diff()")
+            msg = "region 'b' is still open -- exit its with-block or call stop() before diff()"
+            raise RuntimeError(msg)
         return RBLNDiff(self, other)
 
 
@@ -1049,7 +1112,8 @@ class RBLNDiff:
     steady one) YOU supply that structure. This reports ONLY what changed between
     your two points: a signal gone (0) in ``b`` did not recur across them; one
     that persists is overhead that recurs between them. It makes no claim about
-    anything outside the two regions you captured."""
+    anything outside the two regions you captured.
+    """
 
     def __init__(self, a: RBLNExplain, b: RBLNExplain) -> None:
         self._a = a.dump()
@@ -1061,8 +1125,9 @@ class RBLNDiff:
         ra, rb = da["runtime_residency"], db["runtime_residency"]
         if ra.get("available") and rb.get("available"):
             rows.append(("runtime/v2v_slow", ra["total_count"], rb["total_count"]))
-            # The authoritative real device->host transfer (the v2v_slow magnitude). Tracked
-            # so a recurring internal-fallback cost shows up in the diff, not just its count.
+            # The authoritative real device->host transfer (the v2v_slow magnitude).
+            # Tracked so a recurring internal-fallback cost shows up in the diff, not
+            # just its count.
             da_d2h = (ra.get("real_host_sync_d2h") or {}).get("count", 0)
             db_d2h = (rb.get("real_host_sync_d2h") or {}).get("count", 0)
             if da_d2h or db_d2h:
@@ -1076,12 +1141,14 @@ class RBLNDiff:
         return rows
 
     @staticmethod
-    def _sig_bytes(dump: dict[str, Any], name: str) -> Optional[int]:
+    def _sig_bytes(dump: dict[str, Any], name: str) -> int | None:
         """Host-traffic byte magnitude for a signal in one region's dump, or None if the
-        signal carries no byte measure (cpu_fallback/recompile are counts, not transfers).
-        Mirrors the single-region row magnitude: a real device->host transfer if one
-        happened, else the host-served copy volume -- so the diff can rank by COST, not
-        just recurrence (a 12 KB host-served loop and a 12 GB one read identically by count)."""
+        signal carries no byte measure (cpu_fallback/recompile are counts, not
+        transfers). Mirrors the single-region row magnitude: a real device->host
+        transfer if one happened, else the host-served copy volume -- so the diff can
+        rank by COST, not just recurrence (a 12 KB host-served loop and a 12 GB one read
+        identically by count).
+        """
         if name == "host_bounce":
             return dump["hidden_host_bounce"]["total_bytes"]
         rr = dump.get("runtime_residency") or {}
@@ -1099,11 +1166,13 @@ class RBLNDiff:
         return None
 
     def dump(self) -> dict[str, Any]:
-        """{'signals': {name: {'a','b'[,'a_bytes','b_bytes']}}, 'persists'|'gone'|'appeared':
-        [names], 'persists_by_op': [{signal, op, count, at}], 'device_memory': {...}}.
+        """{'signals': {name: {'a','b'[,'a_bytes','b_bytes']}},
+        'persists'|'gone'|'appeared': [names],
+        'persists_by_op': [{signal, op, count, at}], 'device_memory': {...}}.
         ``persists`` (present in ``b``) is the actionable, recurring set. Byte-carrying
         signals also carry ``a_bytes``/``b_bytes`` (the host-traffic magnitude) so a
-        recurring cost can be ranked by size, not just by recurrence."""
+        recurring cost can be ranked by size, not just by recurrence.
+        """
         out: dict[str, Any] = {"signals": {}, "persists": [], "gone": [], "appeared": [], "persists_by_op": []}
         for name, av, bv in self._rows():
             sig: dict[str, int] = {"a": av, "b": bv}
@@ -1166,7 +1235,7 @@ class RBLNDiff:
     __str__ = __repr__
 
 
-def explain(with_stack: bool = False, *, trace: Optional[bool] = None) -> RBLNExplain:
+def explain(with_stack: bool = False, *, trace: bool | None = None) -> RBLNExplain:  # noqa: FBT001, FBT002
     """Return a hidden-overhead explain region, usable as a context manager.
 
     With ``with_stack=True`` (opt-in; OFF by default, so a plain region adds nothing to
@@ -1175,7 +1244,8 @@ def explain(with_stack: bool = False, *, trace: Optional[bool] = None) -> RBLNEx
     the report — telling you WHERE in your model the hidden overhead originates.
 
     ``trace=`` is a deprecated back-compat alias for ``with_stack=`` (torch names this
-    feature ``with_stack`` in ``torch.profiler.profile``); it still works."""
+    feature ``with_stack`` in ``torch.profiler.profile``); it still works.
+    """
     if trace is not None:
         with_stack = trace
     return RBLNExplain(with_stack=with_stack)
@@ -1195,7 +1265,7 @@ def explain_steady(
     return_cold: bool = False,
     as_diff: bool = False,
     with_stack: bool = False,
-    trace: Optional[bool] = None,
+    trace: bool | None = None,
 ) -> RBLNExplain | tuple[RBLNExplain, RBLNExplain] | RBLNDiff:
     """Convenience: capture two regions around ``fn`` — the FIRST call it makes
     and a later call after ``warmup`` more — so you can compare them.
@@ -1221,7 +1291,8 @@ def explain_steady(
     Example::
 
         d = torch.rbln.explain_steady(lambda: model(x), warmup=2, as_diff=True)
-        print(d.report())  # what PERSISTS is the overhead that recurs across the two calls
+        # what PERSISTS is the overhead that recurs across the two calls
+        print(d.report())
     """
     if trace is not None:  # deprecated back-compat alias for with_stack
         with_stack = trace

@@ -1,6 +1,7 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""RBLN generators: explicit ``torch.Generator(device="rbln")`` and the per-device defaults.
+"""RBLN generators: explicit ``torch.Generator(device="rbln")`` and the per-device
+defaults.
 
 Coverage:
   1. Seed initialization — ``manual_seed`` correctly sets the generator's
@@ -35,14 +36,18 @@ Coverage:
 from __future__ import annotations
 
 import threading
+from typing import ClassVar, TYPE_CHECKING
 
 import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-import torch_rbln  # noqa: F401  (registers the rbln backend)
+import torch_rbln
 from test.utils import run_in_isolated_process
 
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # torch's default seed for a generator nobody seeded (c10/core/GeneratorImpl.h).
 DEFAULT_RNG_SEED = 67280421310721
@@ -114,7 +119,8 @@ class TestGeneratorBasic(TestCase):
         self.assertEqual(torch.Generator(device="rbln").device, torch.device("rbln", torch.rbln.current_device()))
 
     def test_manual_seed_wraps_a_negative_seed(self):
-        # torch.manual_seed accepts -1 for the CPU generator, then passes it on to manual_seed_all.
+        # torch.manual_seed accepts -1 for the CPU generator, then passes it on to
+        # manual_seed_all.
         torch.manual_seed(-1)
 
         self.assertEqual(torch_rbln._C.get_default_generator().initial_seed(), 2**64 - 1)
@@ -349,7 +355,7 @@ class TestMultiDeviceGenerator(TestCase):
             torch.rbln.set_rng_state(state, i)
         ys = [_sample(device=f"rbln:{i}") for i in range(2)]
 
-        for x, y in zip(xs, ys):
+        for x, y in zip(xs, ys, strict=True):
             self.assertEqual(x.cpu(), y.cpu())
 
     def test_rejects_wrong_device_index_generator(self):
@@ -393,10 +399,10 @@ class TestForkRng(TestCase):
         torch.rbln.manual_seed(4321)
         before = torch.rbln.get_rng_state()
 
-        with self.assertRaises(ValueError):
-            with torch.random.fork_rng(device_type="rbln"):
-                _ = torch.rand(10, device="rbln")
-                raise ValueError("boom")
+        with self.assertRaises(ValueError), torch.random.fork_rng(device_type="rbln"):
+            _ = torch.rand(10, device="rbln")
+            msg = "boom"
+            raise ValueError(msg)
 
         self.assertEqual(torch.rbln.get_rng_state(), before)
 
@@ -428,14 +434,14 @@ class TestGeneratorThreadSafety(TestCase):
                 for i in range(200):
                     g.manual_seed(i)
                     _ = g.get_state()
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 errors.append(e)
 
         def sampler():
             try:
                 for _ in range(200):
                     _ = torch.rand(256, device="rbln", generator=g)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 errors.append(e)
 
         threads = [threading.Thread(target=seeder), threading.Thread(target=sampler)]
@@ -517,7 +523,7 @@ class TestGeneratorCoverageBreadth(TestCase):
     # Generator-consuming fallback ops beyond randint. Each entry must hit
     # the OptionalGenerator path in get_or_populate_schema_info for its own
     # schema. Factory-style and in-place ops are both represented.
-    _OPS = {
+    _OPS: ClassVar[dict[str, Callable[..., torch.Tensor]]] = {
         "rand": lambda device, g: torch.rand(64, device=device, generator=g),
         "randperm": lambda device, g: torch.randperm(64, device=device, generator=g),
         "uniform_": lambda device, g: torch.empty(64, device=device).uniform_(generator=g),

@@ -7,9 +7,10 @@ segfault.
 Background: torch-rbln links ``librbln.so``, which loads the device runtime lazily.
 When the runtime is missing (compile / CPU-only / CI nodes) or has been unmapped at
 interpreter shutdown, a raw ``rbln_*`` call dereferences a null handle and SEGFAULTs
--- unlike CUDA, where a missing driver merely returns an error code. ``c10::rbln::runtime_available()`` is the
-single source of truth that lets best-effort ops no-op, mandatory ops raise a
-clean error, and availability probes return False without raising.
+-- unlike CUDA, where a missing driver merely returns an error code.
+``c10::rbln::runtime_available()`` is the single source of truth that lets best-effort
+ops no-op, mandatory ops raise a clean error, and availability probes return False
+without raising.
 
 These tests exercise the whole gate WITHOUT an actually-absent runtime by flipping the
 process-wide "shutting down" flag (``_set_runtime_shutting_down``), which forces
@@ -24,21 +25,23 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+from pathlib import Path
 
 import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-import torch_rbln  # noqa: F401
+import torch_rbln
 
 
-# Deselected by rebel_compiler's CI (`-m "not torch_rbln_only"`); see the marker in pyproject.
-# The gate under test is torch-rbln's own: these tests never run against an absent runtime, they
-# flip the process-wide shutting-down flag (and interpose librbln) to force it.
+# Deselected by rebel_compiler's CI (`-m "not torch_rbln_only"`); see the marker in
+# pyproject. The gate under test is torch-rbln's own: these tests never run against an
+# absent runtime, they flip the process-wide shutting-down flag (and interpose librbln)
+# to force it.
 pytestmark = pytest.mark.torch_rbln_only
 
 
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_PROJECT_ROOT = str(Path(__file__).absolute().parents[2])
 
 
 def _run_subprocess(body: str, timeout: int = 90, env_extra=None) -> subprocess.CompletedProcess:
@@ -55,7 +58,13 @@ def _run_subprocess(body: str, timeout: int = 90, env_extra=None) -> subprocess.
             else:
                 env[key] = value
     return subprocess.run(
-        [sys.executable, "-c", script], cwd=_PROJECT_ROOT, capture_output=True, text=True, timeout=timeout, env=env
+        [sys.executable, "-c", script],
+        check=False,
+        cwd=_PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=env,
     )
 
 
@@ -70,15 +79,15 @@ def _assert_ok(self, result: subprocess.CompletedProcess, marker: str) -> None:
 def _build_ld_preload_shim(tmp_dir: str, c_source: str):
     """Compile a tiny LD_PRELOAD shim that interposes librbln's C-linkage entry points
     (used to force / observe the runtime calls). Returns the .so path, or None if no C
-    compiler is available (test skips)."""
+    compiler is available (test skips).
+    """
     cc = shutil.which("cc") or shutil.which("gcc")
     if cc is None:
         return None
-    src = os.path.join(tmp_dir, "shim.c")
-    so = os.path.join(tmp_dir, "shim.so")
-    with open(src, "w") as handle:
-        handle.write(c_source)
-    build = subprocess.run([cc, "-shared", "-fPIC", "-o", so, src], capture_output=True, text=True)
+    src = Path(tmp_dir, "shim.c")
+    so = str(Path(tmp_dir, "shim.so"))
+    src.write_text(c_source)
+    build = subprocess.run([cc, "-shared", "-fPIC", "-o", so, src], check=False, capture_output=True, text=True)
     return so if build.returncode == 0 else None
 
 
@@ -100,7 +109,8 @@ class TestRuntimeUnavailable(TestCase):
         """empty_cache / memory_stats / reset_* / synchronize no-op (never segfault)
         when the runtime is unavailable -- both the RBLN-direct leaves and the
         generic torch.accelerator surface (incl. reset_peak, which has no Python
-        init-guard, so the C++ leaf gate is the only thing protecting it)."""
+        init-guard, so the C++ leaf gate is the only thing protecting it).
+        """
         result = _run_subprocess(
             """
             C._set_runtime_shutting_down(True)
@@ -133,7 +143,8 @@ class TestRuntimeUnavailable(TestCase):
         """set_file_offloading_enabled (torch.rbln.offload()) is a global toggle
         reachable with NO prior allocation -- unlike the copy/borrow leaves, which
         are downstream of a gated malloc -- so it is gated directly: no-op, never a
-        SEGFAULT, when the runtime is unavailable."""
+        SEGFAULT, when the runtime is unavailable.
+        """
         result = _run_subprocess(
             """
             C._set_runtime_shutting_down(True)
@@ -146,9 +157,10 @@ class TestRuntimeUnavailable(TestCase):
         _assert_ok(self, result, "OFFLOAD_OK")
 
     def test_release_offload_temp_storage_no_ops_when_runtime_unavailable(self):
-        """torch.rbln.release_offload_temp_storage() runs on the shutdown path, after the
-        runtime may already be gone, so it is gated like the offload toggle: it reports 0
-        files removed instead of dereferencing a dead runtime handle."""
+        """torch.rbln.release_offload_temp_storage() runs on the shutdown path, after
+        the runtime may already be gone, so it is gated like the offload toggle: it
+        reports 0 files removed instead of dereferencing a dead runtime handle.
+        """
         result = _run_subprocess(
             """
             C._set_runtime_shutting_down(True)
@@ -161,7 +173,9 @@ class TestRuntimeUnavailable(TestCase):
         _assert_ok(self, result, "RELEASE_OK")
 
     def test_flag_toggles_runtime_available(self):
-        """Setting / clearing the shutdown flag flips runtime_available() and restores it."""
+        """Setting / clearing the shutdown flag flips runtime_available() and restores
+        it.
+        """
         result = _run_subprocess(
             """
             before = C.runtime_available()
@@ -178,10 +192,12 @@ class TestRuntimeUnavailable(TestCase):
         """When the RBLN runtime is genuinely absent, device enumeration degrades to
         0 (nothrow) and is_available() is False -- never a SEGFAULT -- mirroring
         torch.cuda on a host with no driver. The fix is at the source
-        (DeviceMappingManager gates the raw rbln_get_device_count() on rbln_runtime_available()),
-        so a missing runtime collapses into the well-tested no-device path. Skipped where
-        the runtime is present (e.g. device-bearing CI); the shutdown-flag tests above
-        cover the torn-down half of the gate hardware-free."""
+        (DeviceMappingManager gates the raw rbln_get_device_count() on
+        rbln_runtime_available()), so a missing runtime collapses into the well-tested
+        no-device path. Skipped where the runtime is present (e.g. device-bearing CI);
+        the shutdown-flag tests above cover the torn-down half of the gate
+        hardware-free.
+        """
         if torch_rbln._C.runtime_loaded() or torch_rbln._C.is_dummy_device():
             self.skipTest("requires a host with the RBLN runtime absent")
         result = _run_subprocess(
@@ -219,7 +235,8 @@ class TestRuntimeUnavailable(TestCase):
     def test_dummy_with_runtime_proceeds(self):
         """Dummy mode (``RBLN_DUMMY_DEVICE``) delegates host-backing to the runtime, so
         with the runtime loaded, device ops proceed and materialize -- the
-        gate passes rather than no-ops."""
+        gate passes rather than no-ops.
+        """
         result = _run_subprocess(
             """
             assert C.is_dummy_device() is True
@@ -237,7 +254,8 @@ class TestRuntimeUnavailable(TestCase):
         """Dummy mode is NOT exempt from the gate: it host-backs via the runtime, so
         the runtime is still required. When the runtime is unavailable (simulated
         by the shutdown flag, standing in for a missing runtime), the gate fires --
-        best-effort ops no-op and allocation raises a clean error, never a SEGFAULT."""
+        best-effort ops no-op and allocation raises a clean error, never a SEGFAULT.
+        """
         result = _run_subprocess(
             """
             assert C.is_dummy_device() is True
@@ -261,7 +279,8 @@ class TestRuntimeUnavailable(TestCase):
     def test_mandatory_op_raises_clean_error_not_segfault(self):
         """Allocation is a mandatory op: when the runtime is unavailable it must raise
         a clean, catchable RuntimeError (not SEGFAULT). Needs a real device so the
-        allocation would otherwise reach the runtime."""
+        allocation would otherwise reach the runtime.
+        """
         result = _run_subprocess(
             """
             assert torch.rbln.device_count() > 0 and not C.is_dummy_device()
@@ -281,16 +300,19 @@ class TestRuntimeUnavailable(TestCase):
         """The reported regression: a process with the runtime + a device mapping but NO
         live context (no allocation yet — the vLLM EngineCore parent) must NOT dispatch
         the runtime call. empty_cache/reset_* are gated by the per-process context flag
-        (initialized()/hasPrimaryContext()), so they no-op without fabricating a context.
-        Proven with a shim that records whether rbln_empty_cache is actually invoked."""
+        (initialized()/hasPrimaryContext()), so they no-op without fabricating a
+        context. Proven with a shim that records whether rbln_empty_cache is actually
+        invoked.
+        """
         with tempfile.TemporaryDirectory() as tmp:
-            marker = os.path.join(tmp, "called")
-            # Shim records an invocation of any of the gated ops; if the gate works, none
-            # are ever called (the marker file is never created).
+            marker = str(Path(tmp, "called"))
+            # Shim records an invocation of any of the gated ops; if the gate works,
+            # none are ever called (the marker file is never created).
             so = _build_ld_preload_shim(
                 tmp,
                 "#include <stdio.h>\n#include <stdlib.h>\n"
-                'static void mark(void){const char*p=getenv("SHIM_MARKER"); if(p){FILE*f=fopen(p,"a"); if(f)fclose(f);}}\n'
+                'static void mark(void){const char*p=getenv("SHIM_MARKER"); '
+                'if(p){FILE*f=fopen(p,"a"); if(f)fclose(f);}}\n'
                 "int rbln_empty_cache(int d){(void)d; mark(); return 0;}\n"
                 "int rbln_reset_peak_memory_stats(int d){(void)d; mark(); return 0;}\n"
                 "int rbln_reset_accumulated_memory_stats(int d){(void)d; mark(); return 0;}\n",
@@ -312,20 +334,22 @@ class TestRuntimeUnavailable(TestCase):
             )
             _assert_ok(self, result, "NOCTX_OK")
             self.assertFalse(
-                os.path.exists(marker),
+                Path(marker).exists(),
                 "a best-effort runtime op was dispatched despite no live context — the context gate failed",
             )
 
     @pytest.mark.npu(count=1)
     def test_failed_commit_reports_unavailable(self):
-        """A commit that fails part-way leaves the backend unusable, so is_available() must
-        say so. Registration claims one logical device at a time and the runtime has no
-        unregister call, so a failure mid-loop is permanent: every later device use rethrows
-        the stored error. Reporting available while nothing can be used sends a caller --
-        vLLM picking a platform, LMCache picking a backend -- down a path that cannot work.
+        """A commit that fails part-way leaves the backend unusable, so is_available()
+        must say so. Registration claims one logical device at a time and the runtime
+        has no unregister call, so a failure mid-loop is permanent: every later device
+        use rethrows the stored error. Reporting available while nothing can be used
+        sends a caller -- vLLM picking a platform, LMCache picking a backend -- down a
+        path that cannot work.
 
         The device count may stay: it describes the planned topology, not usability.
-        Injected with a shim forcing rbln_register_device_id to fail."""
+        Injected with a shim forcing rbln_register_device_id to fail.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             so = _build_ld_preload_shim(
                 tmp,
@@ -355,7 +379,8 @@ class TestRuntimeUnavailable(TestCase):
         """Once this process has a live context (after an allocation), a genuine runtime
         failure in a best-effort op IS surfaced (CUDA parity — cudaFree failures in an
         initialized allocator propagate), not silently swallowed. Injected with an
-        LD_PRELOAD shim forcing the C entry points to return non-zero."""
+        LD_PRELOAD shim forcing the C entry points to return non-zero.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             so = _build_ld_preload_shim(
                 tmp,
@@ -396,12 +421,15 @@ class TestRuntimeUnavailable(TestCase):
     def test_memory_ops_nothrow_on_malformed_config(self):
         """The initialized()/hasPrimaryContext() predicates that gate torch.accelerator
         memory ops must stay total. A malformed RBLN_NPUS_PER_DEVICE makes the internal
-        device-count lookup throw; the predicate swallows it and reports not-initialized,
-        so empty_cache no-ops instead of aborting the caller. The misconfig still surfaces
-        at real device use."""
+        device-count lookup throw; the predicate swallows it and reports
+        not-initialized, so empty_cache no-ops instead of aborting the caller. The
+        misconfig still surfaces at real device use.
+        """
         result = _run_subprocess(
             """
-            assert torch._C._accelerator_isAllocatorInitialized() is False, "predicate must be nothrow + not-initialized"
+            assert torch._C._accelerator_isAllocatorInitialized() is False, (
+                "predicate must be nothrow + not-initialized"
+            )
             torch.accelerator.empty_cache()               # gated off -> no-op, must not raise
             torch.accelerator.reset_peak_memory_stats()
             try:
@@ -418,10 +446,12 @@ class TestRuntimeUnavailable(TestCase):
 
     @pytest.mark.npu(count=1)
     def test_dummy_malformed_config_memory_ops_noop(self):
-        """Dummy mode must not short-circuit the context gate: with a malformed config and
-        no allocation, the memory ops still no-op (not-initialized), and the misconfig
-        surfaces only at real device use. Covered for both malformed-config env vars
-        (RBLN_NPUS_PER_DEVICE and RBLN_DEVICE_MAP — same validateDeviceGroups path)."""
+        """Dummy mode must not short-circuit the context gate: with a malformed config
+        and no allocation, the memory ops still no-op (not-initialized), and the
+        misconfig surfaces only at real device use. Covered for both malformed-config
+        env vars (RBLN_NPUS_PER_DEVICE and RBLN_DEVICE_MAP — same validateDeviceGroups
+        path).
+        """
         script = """
             assert C.is_dummy_device() is True
             assert torch._C._accelerator_isAllocatorInitialized() is False
@@ -446,7 +476,8 @@ class TestRuntimeUnavailable(TestCase):
     @pytest.mark.npu(count=1)
     def test_runtime_available_true_on_healthy_host(self):
         """With a device present, the runtime loaded, and this process having allocated,
-        best-effort ops actually run (not gated off)."""
+        best-effort ops actually run (not gated off).
+        """
         result = _run_subprocess(
             """
             assert torch.rbln.device_count() > 0
@@ -465,7 +496,8 @@ class TestRuntimeUnavailable(TestCase):
     def test_lazy_allocation_initializes_context(self):
         """Invariant confirmed on real hardware: in default lazy-malloc mode, a single
         torch.empty() marks the process initialized and the best-effort ops then run
-        (the runtime pool/context is created at registration, before malloc)."""
+        (the runtime pool/context is created at registration, before malloc).
+        """
         result = _run_subprocess(
             """
             t = torch.empty(1, device="rbln:0")   # default lazy VMemory entry (no eager malloc)

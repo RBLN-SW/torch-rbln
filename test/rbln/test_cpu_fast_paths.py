@@ -24,8 +24,7 @@ import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-import torch_rbln  # noqa: F401  (registers the rbln backend)
-import torch_rbln._C as _C
+from torch_rbln import _C
 
 
 class TestCPUFastPathRegistration(TestCase):
@@ -38,7 +37,7 @@ class TestCPUFastPathRegistration(TestCase):
     suites silently fall through to the generic dispatcher.
 
     These assertions probe a process-wide pybind registry, not device-side
-    tensor behaviour, so this class intentionally does NOT go through
+    tensor behavior, so this class intentionally does NOT go through
     ``instantiate_device_type_tests`` — see ``test_warm_cache_internals.py``
     and ``test_file_offloading.py`` for the same precedent.
     """
@@ -99,7 +98,8 @@ class TestRsqrtFastPath(TestCase):
 class TestPowSquaredFastPath(TestCase):
     """`aten::pow.Tensor_Scalar_out` fast path is fp32 + exp == 2 only; verify
     that both eligibility (fp32 contig, exp == 2) and fall-through (exp != 2)
-    produce correct results."""
+    produce correct results.
+    """
 
     def test_fp32_contig_exp_2_int_matches_cpu(self):
         # Fast path: fp32 contig + exp == 2 (int form).
@@ -126,7 +126,8 @@ class TestPowSquaredFastPath(TestCase):
 @pytest.mark.npu(count=1)
 class TestMeanLastDimFastPath(TestCase):
     """`aten::mean.out` last-dim + keepdim fast path; verify eligibility
-    (last dim, keepdim=True) vs fall-through (non-last dim, keepdim=False)."""
+    (last dim, keepdim=True) vs fall-through (non-last dim, keepdim=False).
+    """
 
     def test_fp32_contig_lastdim_keepdim_matches_cpu(self):
         # Fast path: fp32 contig + dim=[-1] + keepdim=True + dtype=None.
@@ -163,7 +164,8 @@ class TestIntSubFastPath(TestCase):
     """`aten::sub.out` integer fast path. The fp16-only device falls int ops back
     to CPU; the handler runs a host loop (int64 accumulate, stored in out dtype).
     Covers same-shape, scalar/last-dim broadcast, all int widths, and the
-    alpha != 1 guard fall-through."""
+    alpha != 1 guard fall-through.
+    """
 
     def test_int32_same_shape_matches_cpu(self):
         cpu_a = torch.tensor([5, 3, 9, 1], dtype=torch.int32)
@@ -190,7 +192,8 @@ class TestIntSubFastPath(TestCase):
         self.assertEqual((ra - 1).cpu(), cpu_a - 1)
 
     def test_int32_lastdim_broadcast_matches_cpu(self):
-        # `cs - pidx * partition_len` shape: [num_reqs, num_partition] - [num_partition].
+        # `cs - pidx * partition_len` shape: [num_reqs, num_partition]
+        # - [num_partition].
         cpu_a = torch.tensor([[10, 20, 30]], dtype=torch.int32)
         cpu_b = torch.tensor([1, 2, 3], dtype=torch.int32)
         ra, rb = cpu_a.to("rbln"), cpu_b.to("rbln")

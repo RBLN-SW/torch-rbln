@@ -18,8 +18,10 @@ class RBLNTensorUtilsTest : public ::testing::Test {
   }
 
   const c10::DeviceIndex initial_device_index_ = 0;
-  const c10::TensorOptions options_rbln_fp16_ = c10::TensorOptions().device(c10::kPrivateUse1).dtype(c10::kHalf);
-  const c10::TensorOptions options_rbln_fp32_ = c10::TensorOptions().device(c10::kPrivateUse1).dtype(c10::kFloat);
+  const c10::TensorOptions options_rbln_fp16_ =
+      c10::TensorOptions().device(c10::kPrivateUse1).dtype(c10::kHalf);
+  const c10::TensorOptions options_rbln_fp32_ =
+      c10::TensorOptions().device(c10::kPrivateUse1).dtype(c10::kFloat);
 };
 
 TEST_F(RBLNTensorUtilsTest, GetCPUCopyOfContiguousRBLNTensor) {
@@ -32,15 +34,18 @@ TEST_F(RBLNTensorUtilsTest, GetCPUCopyOfContiguousRBLNTensor) {
       contiguous_rbln_tensor.strides(),
       contiguous_rbln_tensor.element_size(),
       contiguous_rbln_tensor.storage_offset());
-  EXPECT_EQ(contiguous_rbln_tensor.storage().nbytes(), contiguous_storage_nbytes);
+  EXPECT_EQ(
+      contiguous_rbln_tensor.storage().nbytes(), contiguous_storage_nbytes);
 
-  // CPU copy uses compact storage (optimization: copies only data, not unused offset region)
+  // CPU copy uses compact storage (optimization: copies only data, not unused
+  // offset region)
   const auto data_only_nbytes = at::detail::computeStorageNbytes(
       contiguous_rbln_tensor.sizes(),
       contiguous_rbln_tensor.strides(),
       contiguous_rbln_tensor.element_size()); // No storage_offset
 
-  const auto cpu_copy = at::native::rbln::get_cpu_copy_of_rbln_tensor(contiguous_rbln_tensor);
+  const auto cpu_copy =
+      at::native::rbln::get_cpu_copy_of_rbln_tensor(contiguous_rbln_tensor);
   EXPECT_TRUE(cpu_copy.device().is_cpu());
   EXPECT_EQ(cpu_copy.dtype(), contiguous_rbln_tensor.dtype());
   EXPECT_EQ(cpu_copy.sizes(), contiguous_rbln_tensor.sizes());
@@ -65,13 +70,15 @@ TEST_F(RBLNTensorUtilsTest, GetCPUCopyOfTransposedRBLNTensor) {
       contiguous_rbln_tensor.strides(),
       contiguous_rbln_tensor.element_size(),
       contiguous_rbln_tensor.storage_offset());
-  EXPECT_EQ(contiguous_rbln_tensor.storage().nbytes(), contiguous_storage_nbytes);
+  EXPECT_EQ(
+      contiguous_rbln_tensor.storage().nbytes(), contiguous_storage_nbytes);
 
   const auto transposed_rbln_tensor = contiguous_rbln_tensor.transpose(0, 1);
   EXPECT_EQ(transposed_rbln_tensor.sizes(), std::vector<int64_t>({64, 16}));
   EXPECT_EQ(transposed_rbln_tensor.storage_offset(), 0);
   EXPECT_FALSE(transposed_rbln_tensor.is_contiguous());
-  EXPECT_EQ(transposed_rbln_tensor.storage().nbytes(), contiguous_storage_nbytes);
+  EXPECT_EQ(
+      transposed_rbln_tensor.storage().nbytes(), contiguous_storage_nbytes);
   const auto transposed_storage_nbytes = at::detail::computeStorageNbytes(
       transposed_rbln_tensor.sizes(),
       transposed_rbln_tensor.strides(),
@@ -79,13 +86,15 @@ TEST_F(RBLNTensorUtilsTest, GetCPUCopyOfTransposedRBLNTensor) {
       transposed_rbln_tensor.storage_offset());
   EXPECT_EQ(transposed_storage_nbytes, contiguous_storage_nbytes);
 
-  // CPU copy uses compact storage (optimization: copies only data, not unused offset region)
+  // CPU copy uses compact storage (optimization: copies only data, not unused
+  // offset region)
   const auto data_only_nbytes = at::detail::computeStorageNbytes(
       transposed_rbln_tensor.sizes(),
       transposed_rbln_tensor.strides(),
       transposed_rbln_tensor.element_size()); // No storage_offset
 
-  const auto cpu_copy = at::native::rbln::get_cpu_copy_of_rbln_tensor(transposed_rbln_tensor);
+  const auto cpu_copy =
+      at::native::rbln::get_cpu_copy_of_rbln_tensor(transposed_rbln_tensor);
   EXPECT_TRUE(cpu_copy.device().is_cpu());
   EXPECT_EQ(cpu_copy.dtype(), transposed_rbln_tensor.dtype());
   EXPECT_EQ(cpu_copy.sizes(), transposed_rbln_tensor.sizes());
@@ -110,7 +119,8 @@ TEST_F(RBLNTensorUtilsTest, GetCPUCopyOfSlicedRBLNTensor) {
       contiguous_rbln_tensor.strides(),
       contiguous_rbln_tensor.element_size(),
       contiguous_rbln_tensor.storage_offset());
-  EXPECT_EQ(contiguous_rbln_tensor.storage().nbytes(), contiguous_storage_nbytes);
+  EXPECT_EQ(
+      contiguous_rbln_tensor.storage().nbytes(), contiguous_storage_nbytes);
 
   const auto sliced_rbln_tensor = contiguous_rbln_tensor.slice(0, 4, 8);
   EXPECT_EQ(sliced_rbln_tensor.sizes(), std::vector<int64_t>({4, 64}));
@@ -124,13 +134,15 @@ TEST_F(RBLNTensorUtilsTest, GetCPUCopyOfSlicedRBLNTensor) {
       sliced_rbln_tensor.storage_offset());
   EXPECT_LT(sliced_storage_nbytes, contiguous_storage_nbytes);
 
-  // CPU copy uses compact storage (optimization: copies only data, not unused offset region)
+  // CPU copy uses compact storage (optimization: copies only data, not unused
+  // offset region)
   const auto data_only_nbytes = at::detail::computeStorageNbytes(
       sliced_rbln_tensor.sizes(),
       sliced_rbln_tensor.strides(),
       sliced_rbln_tensor.element_size()); // No storage_offset
 
-  const auto cpu_copy = at::native::rbln::get_cpu_copy_of_rbln_tensor(sliced_rbln_tensor);
+  const auto cpu_copy =
+      at::native::rbln::get_cpu_copy_of_rbln_tensor(sliced_rbln_tensor);
   EXPECT_TRUE(cpu_copy.device().is_cpu());
   EXPECT_EQ(cpu_copy.dtype(), sliced_rbln_tensor.dtype());
   EXPECT_EQ(cpu_copy.sizes(), sliced_rbln_tensor.sizes());
@@ -153,7 +165,9 @@ TEST_F(RBLNTensorUtilsTest, GetCPUCopyOfEmptyRBLNTensor) {
   EXPECT_EQ(empty_rbln_tensor.numel(), 0);
   EXPECT_EQ(empty_rbln_tensor.storage().nbytes(), 0);
 
-  EXPECT_THROW(at::native::rbln::get_cpu_copy_of_rbln_tensor(empty_rbln_tensor), c10::Error);
+  EXPECT_THROW(
+      at::native::rbln::get_cpu_copy_of_rbln_tensor(empty_rbln_tensor),
+      c10::Error);
 }
 
 TEST_F(RBLNTensorUtilsTest, CreateTensorFromPtrFrom2DTensor) {
@@ -164,7 +178,8 @@ TEST_F(RBLNTensorUtilsTest, CreateTensorFromPtrFrom2DTensor) {
 
   auto data_ptr = reinterpret_cast<uint64_t>(source_tensor.data_ptr());
 
-  auto result_tensor = at::native::rbln::create_tensor_from_ptr(data_ptr, sizes, c10::kHalf);
+  auto result_tensor =
+      at::native::rbln::create_tensor_from_ptr(data_ptr, sizes, c10::kHalf);
   EXPECT_EQ(result_tensor.device(), device);
   EXPECT_EQ(result_tensor.dtype(), c10::kHalf);
   EXPECT_EQ(result_tensor.sizes(), sizes);
@@ -175,7 +190,8 @@ TEST_F(RBLNTensorUtilsTest, CreateTensorFromPtrFrom2DTensor) {
   const auto result_cpu = result_tensor.to(c10::kCPU);
   const auto source_cpu = source_tensor.to(c10::kCPU);
   EXPECT_FLOAT_EQ(result_cpu[0][0].item<float>(), 5.0f);
-  EXPECT_FLOAT_EQ(result_cpu[0][0].item<float>(), source_cpu[0][0].item<float>());
+  EXPECT_FLOAT_EQ(
+      result_cpu[0][0].item<float>(), source_cpu[0][0].item<float>());
 }
 
 TEST_F(RBLNTensorUtilsTest, CreateTensorFromPtrFrom3DTensor) {
@@ -186,7 +202,8 @@ TEST_F(RBLNTensorUtilsTest, CreateTensorFromPtrFrom3DTensor) {
 
   auto data_ptr = reinterpret_cast<uint64_t>(source_tensor.data_ptr());
 
-  const auto result_tensor = at::native::rbln::create_tensor_from_ptr(data_ptr, sizes, c10::kFloat);
+  const auto result_tensor =
+      at::native::rbln::create_tensor_from_ptr(data_ptr, sizes, c10::kFloat);
   EXPECT_EQ(result_tensor.device(), device);
   EXPECT_EQ(result_tensor.dtype(), c10::kFloat);
   EXPECT_EQ(result_tensor.sizes(), sizes);
@@ -197,5 +214,6 @@ TEST_F(RBLNTensorUtilsTest, CreateTensorFromPtrFrom3DTensor) {
   const auto result_cpu = result_tensor.to(c10::kCPU);
   const auto source_cpu = source_tensor.to(c10::kCPU);
   EXPECT_FLOAT_EQ(result_cpu[0][0][0].item<float>(), 99.0f);
-  EXPECT_FLOAT_EQ(result_cpu[0][0][0].item<float>(), source_cpu[0][0][0].item<float>());
+  EXPECT_FLOAT_EQ(
+      result_cpu[0][0][0].item<float>(), source_cpu[0][0][0].item<float>());
 }

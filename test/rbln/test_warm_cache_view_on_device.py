@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Regression coverage for the warm-cache × view-on-device interaction.
+"""Regression coverage for the warm-cache x view-on-device interaction.
 
 PR #47 (``feat(view-on-device)``) routes view recipes — narrow / permute /
 expand / select / composite — through the device path by replacing the
@@ -44,7 +43,6 @@ import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
-import torch_rbln  # noqa: F401 (registers the rbln backend)
 from torch_rbln import _C
 
 
@@ -52,7 +50,8 @@ def _assert_fp16_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
     """rebel fp16 + view-on-device's ``contrib_dummy_cast`` round-trip
     introduces ~1 ULP drift per stage. Tolerance here is wide enough to
     absorb that drift while still catching the orders-of-magnitude error
-    that a wrong-storage hit would produce."""
+    that a wrong-storage hit would produce.
+    """
     torch.testing.assert_close(actual, expected, rtol=0.01, atol=0.02)
 
 
@@ -81,8 +80,8 @@ class TestRotateHalfHeadDim128(TestCase):
         # 128/256 variants are the textbook trigger for the wrong-hit
         # scenario because the second half has storage_offset>0 AND last
         # dim is 64-aligned (so view-on-device fires).
-        B, S = 2, 4
-        x = torch.randn(B, S, head_dim, dtype=torch.float16, device="rbln")
+        batch_size, seq_len = 2, 4
+        x = torch.randn(batch_size, seq_len, head_dim, dtype=torch.float16, device="rbln")
         first = x[..., : head_dim // 2]  # storage_offset == 0
         second = x[..., head_dim // 2 :]  # storage_offset > 0
         # neg of each half — the rotate_half decomposition does this.

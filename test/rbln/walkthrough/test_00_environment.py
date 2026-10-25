@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Walkthrough example 0: environment verification.
+"""Walkthrough example 0: environment verification.
 
 Ported from walkthrough_guide/0.environment_verification.py.
 
@@ -22,8 +21,8 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 import torch_rbln
 
 
-# Deselected by rebel_compiler's CI (`-m "not torch_rbln_only"`); see the marker in pyproject.
-# A walkthrough preflight: the packages are installed and import.
+# Deselected by rebel_compiler's CI (`-m "not torch_rbln_only"`); see the marker in
+# pyproject. A walkthrough preflight: the packages are installed and import.
 pytestmark = pytest.mark.torch_rbln_only
 
 

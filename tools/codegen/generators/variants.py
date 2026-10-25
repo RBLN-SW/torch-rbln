@@ -1,5 +1,4 @@
-"""
-Operation variant code generator.
+"""Operation variant code generator.
 
 Generates code for specific operation variants (out, inplace, normal).
 
@@ -29,8 +28,6 @@ Generation flow:
 Templates: See variants_template.py
 """
 
-from typing import Optional
-
 from ..analyzer import FunctionAnalyzer
 from ..config import OpCategories
 from .variants_template import VariantTemplates
@@ -49,7 +46,8 @@ class OpCodeGenerator:
         kernel_name: str,
         root_name: str,
         general_kernel_name: str,
-        self_arg_pos: Optional[int],
+        self_arg_pos: int | None,
+        *,
         has_device_kwarg: bool,
     ) -> str:
         """Generate code for out variant of an operation."""
@@ -59,7 +57,8 @@ class OpCodeGenerator:
         out_tensor_kwarg, out_values_kwarg = self.op_categories.get_out_param_names(kernel_name)
         code += self.templates.InputExtraction.out_tensor(out_tensor_kwarg, out_values_kwarg)
 
-        # Initialize input tracking variables (compare + self: dtype comes from out tensor checks)
+        # Initialize input tracking variables (compare + self: dtype comes from out
+        # tensor checks)
         if self_arg_pos is not None and root_name in self.op_categories.COMPARE_OPS:
             code += self.templates.InputExtraction.initialization_device_only()
             code += self.templates.InputExtraction.with_self_device_only(self_arg_pos)

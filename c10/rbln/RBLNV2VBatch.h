@@ -11,21 +11,21 @@ namespace c10::rbln {
 /**
  * @brief Buffered batch of pending device-to-device (v2v) copies.
  *
- * Isolates callers from the rebel runtime's v2v API. enqueue() / enqueue_strided()
- * record copy requests; submit() flushes them through rbln_memcpy_v2v_multi when
- * every entry shares one device — in calls of at most
- * ::rbln::kMaxV2VMultiCopies entries, the most one call dispatches on the
+ * Isolates callers from the rebel runtime's v2v API. enqueue() /
+ * enqueue_strided() record copy requests; submit() flushes them through
+ * rbln_memcpy_v2v_multi when every entry shares one device — in calls of at
+ * most ::rbln::kMaxV2VMultiCopies entries, the most one call dispatches on the
  * device — or falls back to per-entry memcpy_v2v (which host-bounces
  * cross-device entries). The path is decided from bookkeeping kept at enqueue
  * time, so submit() is O(N) with no extra lookups.
  *
  * When the runtime exposes a strided v2v API, enqueue_strided will forward the
- * description directly instead of expanding internally — engine/kernel code that
- * uses V2VBatch will not change.
+ * description directly instead of expanding internally — engine/kernel code
+ * that uses V2VBatch will not change.
  *
- * Lifetime: callers must invoke submit() on success. The destructor never issues
- * backend calls (a rejection during unwind would terminate the process); it just
- * warns when pending entries remain on a normal path.
+ * Lifetime: callers must invoke submit() on success. The destructor never
+ * issues backend calls (a rejection during unwind would terminate the process);
+ * it just warns when pending entries remain on a normal path.
  *
  * Threading: not thread-safe — one batch per thread.
  */
@@ -42,15 +42,16 @@ class C10_RBLN_API V2VBatch {
   /**
    * @brief Enqueue one contiguous slab copy.
    *
-   * @param dst    Destination device pointer (rbln virtual address).
-   * @param src    Source device pointer (rbln virtual address).
-   * @param nbytes Slab size in bytes. Must be > 0; an nbytes==0 call is a no-op.
+   * @param dst Destination device pointer (rbln virtual address).
+   * @param src Source device pointer (rbln virtual address).
+   * @param nbytes Slab size in bytes. Must be > 0; an nbytes==0 call is a
+   *     no-op.
    */
   void enqueue(void* dst, const void* src, size_t nbytes);
 
   /**
    * @brief Enqueue a strided range — `prod(outer_sizes)` copies of
-   *        `inner_block_bytes` each, walking outer_sizes in row-major order.
+   * `inner_block_bytes` each, walking outer_sizes in row-major order.
    *
    * For outer iteration index `idx[]` the k-th call has:
    *   dst_off = sum_d idx[d] * dst_byte_strides[d]

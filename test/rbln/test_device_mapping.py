@@ -1,14 +1,14 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Test suite for RBLN device mapping functionality.
-"""
+"""Test suite for RBLN device mapping functionality."""
 
 import concurrent.futures
 import os
 import subprocess
 import sys
+import textwrap
 from io import StringIO
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -156,15 +156,12 @@ def run_test_with_env(env_vars, impl_test_func):
     Returns:
         subprocess.CompletedProcess result
     """
-    test_file = os.path.abspath(__file__)
-    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(test_file))))
+    test_file = str(Path(__file__).absolute())
+    project_root = str(Path(test_file).parents[3])
 
     # Get the function name and class name
     func_name = impl_test_func.__name__
     class_name = impl_test_func.__self__.__class__.__name__
-
-    # Create a standalone test script that doesn't import path-based test modules
-    import textwrap
 
     # Build environment variable setup code - directly set env vars in the script
     env_setup_lines = []
@@ -180,10 +177,8 @@ def run_test_with_env(env_vars, impl_test_func):
     env_setup_code = "\n        ".join(env_setup_lines)
 
     # Build environment variable cleanup code - unset env vars after test
-    env_cleanup_lines = []
-    env_cleanup_lines.append("# Clean up environment variables")
-    for k in env_vars.keys():
-        env_cleanup_lines.append(f'os.environ.pop("{k}", None)')
+    env_cleanup_lines = ["# Clean up environment variables"]
+    env_cleanup_lines.extend(f'os.environ.pop("{k}", None)' for k in env_vars)
     env_cleanup_code = "\n            ".join(env_cleanup_lines)
 
     test_script = textwrap.dedent(
@@ -192,7 +187,7 @@ def run_test_with_env(env_vars, impl_test_func):
         import sys
 
         # Add project root to path
-        sys.path.insert(0, {repr(project_root)})
+        sys.path.insert(0, {project_root!r})
 
         # Set environment variables BEFORE any imports that might trigger device initialization
         {env_setup_code}
@@ -204,7 +199,7 @@ def run_test_with_env(env_vars, impl_test_func):
 
         # Import the test module directly
         import importlib.util
-        spec = importlib.util.spec_from_file_location("test_device_mapping", {repr(test_file)})
+        spec = importlib.util.spec_from_file_location("test_device_mapping", {test_file!r})
         test_module = importlib.util.module_from_spec(spec)
         # Temporarily patch test.rbln import to avoid it
         import builtins
@@ -221,7 +216,7 @@ def run_test_with_env(env_vars, impl_test_func):
         builtins.__import__ = original_import
 
         # Get the test class and run the test
-        {class_name} = getattr(test_module, {repr(class_name)})
+        {class_name} = getattr(test_module, {class_name!r})
         import unittest
 
         test_instance = {class_name}()
@@ -245,8 +240,9 @@ def run_test_with_env(env_vars, impl_test_func):
     )
 
     # Run the test script
-    result = subprocess.run([sys.executable, "-c", test_script], cwd=project_root, capture_output=True, text=True)
-    return result
+    return subprocess.run(
+        [sys.executable, "-c", test_script], check=False, cwd=project_root, capture_output=True, text=True
+    )
 
 
 class TestDeviceMappingEnvVars(TestCase):
@@ -352,7 +348,9 @@ class TestDeviceMappingEnvVars(TestCase):
 
     @pytest.mark.npu(count=8)
     def test_device_map_mixed_patterns(self):
-        """Test RBLN_DEVICE_MAP with mixed patterns (non-contiguous and different sizes)."""
+        """Test RBLN_DEVICE_MAP with mixed patterns (non-contiguous and different
+        sizes).
+        """
         # Mixed pattern: [0,2],[1,3,5,7] - different sizes (2 and 4) and non-contiguous
         env_vars = {"RBLN_DEVICE_MAP": "[0,2],[1,3,5,7]"}
         result = run_test_with_env(env_vars, self.run_device_map_mixed_patterns_impl)
@@ -437,7 +435,8 @@ class TestDeviceMappingEnvVars(TestCase):
 
     @pytest.mark.npu(count=1)
     def test_device_map_malformed_rejected(self):
-        """Malformed RBLN_DEVICE_MAP must be rejected by the parser, not silently truncated.
+        """Malformed RBLN_DEVICE_MAP must be rejected by the parser, not silently
+        truncated.
 
         Each value reaches the parser only when a physical NPU is present (the no-device
         path returns 0 before parsing), so this needs >= 1 physical device. The parse
@@ -455,11 +454,11 @@ class TestDeviceMappingEnvVars(TestCase):
             "[0]extra",  # trailing garbage after a group
             "[0",  # unterminated group
         ]
-        # Each value needs its own interpreter (the mapping is planned once per process),
-        # but the values do not depend on each other, so run them at once rather than
-        # paying for a torch import nine times in a row.
-        # Threads, because each call blocks in subprocess.run; bounded, because each child
-        # costs what a torch import costs in memory.
+        # Each value needs its own interpreter (the mapping is planned once per
+        # process), but the values do not depend on each other, so run them at once
+        # rather than paying for a torch import nine times in a row.
+        # Threads, because each call blocks in subprocess.run; bounded, because each
+        # child costs what a torch import costs in memory.
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             results = list(
                 pool.map(
@@ -469,7 +468,7 @@ class TestDeviceMappingEnvVars(TestCase):
                     malformed,
                 )
             )
-        for device_map, result in zip(malformed, results):
+        for device_map, result in zip(malformed, results, strict=True):
             with self.subTest(device_map=device_map):
                 self.assertNotEqual(
                     result.returncode,
@@ -481,7 +480,9 @@ class TestDeviceMappingEnvVars(TestCase):
 
     @pytest.mark.npu(count=2)
     def test_device_map_out_of_range_error_message(self):
-        """Test that RBLN_DEVICE_MAP out-of-range shows improved error with env and device_summary hint."""
+        """Test that RBLN_DEVICE_MAP out-of-range shows improved error with env and
+        device_summary hint.
+        """
         # Process sees only devices 0,1 but map references [2,3] -> out of range
         env_vars = {
             "RBLN_DEVICES": "0,1",
@@ -496,7 +497,9 @@ class TestDeviceMappingEnvVars(TestCase):
 
     @pytest.mark.npu(count=2)
     def test_npus_per_device_no_logical_device_error_message(self):
-        """Test that RBLN_NPUS_PER_DEVICE with too few devices shows improved error with env and device_summary."""
+        """Test that RBLN_NPUS_PER_DEVICE with too few devices shows improved error with
+        env and device_summary.
+        """
         # Process sees only 2 devices but NPUS_PER_DEVICE=4 -> no logical device
         env_vars = {
             "RBLN_DEVICES": "0,1",
@@ -511,8 +514,11 @@ class TestDeviceMappingEnvVars(TestCase):
 
     @pytest.mark.npu(count=2)
     def test_device_index_not_assigned_error_message(self):
-        """Test that using an unassigned device index shows improved error with env and device_summary hint."""
-        # 2 devices + NPUS_PER_DEVICE=2 -> 1 logical device (rbln:0). Using rbln:1 triggers "not assigned"
+        """Test that using an unassigned device index shows improved error with env and
+        device_summary hint.
+        """
+        # 2 devices + NPUS_PER_DEVICE=2 -> 1 logical device (rbln:0). Using rbln:1
+        # triggers "not assigned"
         env_vars = {"RBLN_DEVICES": "0,1", "RBLN_NPUS_PER_DEVICE": "2"}
         result = run_test_with_env(env_vars, self.run_device_index_not_assigned_error_impl)
         self.assertNotEqual(result.returncode, 0, "Should fail with device index not assigned")
@@ -524,11 +530,13 @@ class TestDeviceMappingEnvVars(TestCase):
 
     @pytest.mark.npu(count=1)
     def test_nonexistent_rbln_devices_yields_zero_visible_devices(self):
-        """nonexistent RBLN_DEVICES -> device_count() == 0 (not a hard failure at import).
+        """nonexistent RBLN_DEVICES -> device_count() == 0 (not a hard failure at
+        import).
 
-        A device id that does not exist is filtered out by the runtime, so the process sees 0
-        logical devices and stays usable for compile-only work; actually using an rbln device
-        then raises a clear, catchable error (verified inside the subprocess impl).
+        A device id that does not exist is filtered out by the runtime, so the process
+        sees 0 logical devices and stays usable for compile-only work; actually using an
+        rbln device then raises a clear, catchable error (verified inside the subprocess
+        impl).
         """
         env_vars = {"RBLN_DEVICES": "99999"}
         result = run_test_with_env(env_vars, self.run_nonexistent_rbln_devices_zero_count_impl)
@@ -596,13 +604,11 @@ class TestDeviceMappingEnvVars(TestCase):
 
     # ========== Implementation tests (run in subprocess with env vars) ==========
     # Note: These methods start with "run_" so unittest can discover them when run
-    # via subprocess. They are NOT run directly by unittest discovery in the maidn process
-    # because they require specific environment variables set by wrapper tests.
+    # via subprocess. They are NOT run directly by unittest discovery in the maidn
+    # process because they require specific environment variables set by wrapper tests.
 
     def run_npus_per_device_1_impl(self):
         """Implementation: Test RBLN_NPUS_PER_DEVICE=1."""
-        import torch_rbln._C
-
         # Verify environment variable is set
         npus_per_device = os.getenv("RBLN_NPUS_PER_DEVICE")
         if npus_per_device is None:
@@ -629,8 +635,6 @@ class TestDeviceMappingEnvVars(TestCase):
 
     def run_npus_per_device_2_impl(self):
         """Implementation: Test RBLN_NPUS_PER_DEVICE=2."""
-        import torch_rbln._C
-
         # Verify environment variable is set
         # If running directly (not via subprocess), skip this test
         npus_per_device = os.getenv("RBLN_NPUS_PER_DEVICE")
@@ -662,8 +666,6 @@ class TestDeviceMappingEnvVars(TestCase):
 
     def run_npus_per_device_4_impl(self):
         """Implementation: Test RBLN_NPUS_PER_DEVICE=4."""
-        import torch_rbln._C
-
         # Verify environment variable is set
         # If running directly (not via subprocess), skip this test
         npus_per_device = os.getenv("RBLN_NPUS_PER_DEVICE")
@@ -696,8 +698,6 @@ class TestDeviceMappingEnvVars(TestCase):
 
     def run_device_map_simple_impl(self):
         """Implementation: Test RBLN_DEVICE_MAP with simple mapping."""
-        import torch_rbln._C
-
         # Verify environment variable is set
         # If running directly (not via subprocess), skip this test
         device_map = os.getenv("RBLN_DEVICE_MAP")
@@ -731,8 +731,6 @@ class TestDeviceMappingEnvVars(TestCase):
 
     def run_device_map_complex_impl(self):
         """Implementation: Test RBLN_DEVICE_MAP with complex mapping."""
-        import torch_rbln._C
-
         # Verify environment variable is set
         # If running directly (not via subprocess), skip this test
         device_map = os.getenv("RBLN_DEVICE_MAP")
@@ -759,8 +757,6 @@ class TestDeviceMappingEnvVars(TestCase):
 
     def run_device_map_with_unused_impl(self):
         """Implementation: Test RBLN_DEVICE_MAP with unused devices."""
-        import torch_rbln._C
-
         # Verify environment variable is set
         # If running directly (not via subprocess), skip this test
         device_map = os.getenv("RBLN_DEVICE_MAP")
@@ -779,8 +775,6 @@ class TestDeviceMappingEnvVars(TestCase):
 
     def run_device_map_non_contiguous_impl(self):
         """Implementation: Test RBLN_DEVICE_MAP with non-contiguous device IDs."""
-        import torch_rbln._C
-
         # Verify environment variable is set
         device_map = os.getenv("RBLN_DEVICE_MAP")
         if device_map is None:
@@ -806,8 +800,6 @@ class TestDeviceMappingEnvVars(TestCase):
 
     def run_device_map_scattered_impl(self):
         """Implementation: Test RBLN_DEVICE_MAP with scattered device IDs."""
-        import torch_rbln._C
-
         # Verify environment variable is set
         device_map = os.getenv("RBLN_DEVICE_MAP")
         if device_map is None:
@@ -833,8 +825,6 @@ class TestDeviceMappingEnvVars(TestCase):
 
     def run_device_map_reversed_order_impl(self):
         """Implementation: Test RBLN_DEVICE_MAP with reversed order device IDs."""
-        import torch_rbln._C
-
         # Verify environment variable is set
         device_map = os.getenv("RBLN_DEVICE_MAP")
         if device_map is None:
@@ -863,8 +853,6 @@ class TestDeviceMappingEnvVars(TestCase):
 
     def run_device_map_mixed_patterns_impl(self):
         """Implementation: Test RBLN_DEVICE_MAP with mixed patterns."""
-        import torch_rbln._C
-
         # Verify environment variable is set
         device_map = os.getenv("RBLN_DEVICE_MAP")
         if device_map is None:
@@ -894,8 +882,6 @@ class TestDeviceMappingEnvVars(TestCase):
 
     def run_device_map_complex_non_contiguous_impl(self):
         """Implementation: Test RBLN_DEVICE_MAP with complex non-contiguous mapping."""
-        import torch_rbln._C
-
         # Verify environment variable is set
         device_map = os.getenv("RBLN_DEVICE_MAP")
         if device_map is None:
@@ -909,14 +895,16 @@ class TestDeviceMappingEnvVars(TestCase):
         # With "[0,2,4,6],[1,3,5,7]", we should have 2 logical devices
         self.assertEqual(logical_count, 2)
 
-        # Check first logical device maps to [0, 2, 4, 6] (alternating pattern, even numbers)
+        # Check first logical device maps to [0, 2, 4, 6] (alternating pattern, even
+        # numbers)
         entry_0 = next((e for e in topology.entries if e.logical_device_index == 0), None)
         self.assertIsNotNone(entry_0, "Entry for logical device 0 not found")
         physical_ids_0 = entry_0.physical_device_ids
         self.assertEqual(physical_ids_0, [0, 2, 4, 6])
         self.assertEqual(len(physical_ids_0), 4)
 
-        # Check second logical device maps to [1, 3, 5, 7] (alternating pattern, odd numbers)
+        # Check second logical device maps to [1, 3, 5, 7] (alternating pattern, odd
+        # numbers)
         entry_1 = next((e for e in topology.entries if e.logical_device_index == 1), None)
         self.assertIsNotNone(entry_1, "Entry for logical device 1 not found")
         physical_ids_1 = entry_1.physical_device_ids
@@ -924,7 +912,9 @@ class TestDeviceMappingEnvVars(TestCase):
         self.assertEqual(len(physical_ids_1), 4)
 
     def run_npus_per_device_invalid_size_error_impl(self):
-        """Implementation: Test that invalid sizes are rejected (at the point of use)."""
+        """Implementation: Test that invalid sizes are rejected (at the point of
+        use).
+        """
         npus_per_device = os.getenv("RBLN_NPUS_PER_DEVICE")
         if npus_per_device is None:
             self.skipTest("This test must be run via wrapper test with environment variables set")
@@ -932,8 +922,6 @@ class TestDeviceMappingEnvVars(TestCase):
 
     def run_npus_per_device_valid_size_8_impl(self):
         """Implementation: Test RBLN_NPUS_PER_DEVICE=8."""
-        import torch_rbln._C
-
         npus_per_device = os.getenv("RBLN_NPUS_PER_DEVICE")
         if npus_per_device is None:
             self.skipTest("This test must be run via wrapper test with environment variables set")
@@ -963,9 +951,9 @@ class TestDeviceMappingEnvVars(TestCase):
         self.assertEqual(len(unused), expected_unused)
 
     # A malformed RBLN_* config is reported at the *point of use*, not by enumeration:
-    # torch requires device_count()/is_available() never to raise. So each impl below calls
-    # device_count_ensure_non_zero(), which backs current_device()/set_device() and the
-    # allocation path. See test_privateuse1_contract.py for the clause.
+    # torch requires device_count()/is_available() never to raise. So each impl below
+    # calls device_count_ensure_non_zero(), which backs current_device()/set_device()
+    # and the allocation path. See test_privateuse1_contract.py for the clause.
 
     def run_device_map_invalid_group_size_error_impl(self):
         """Implementation: Test that invalid-sized groups are rejected."""
@@ -996,29 +984,34 @@ class TestDeviceMappingEnvVars(TestCase):
         torch_rbln._C.device_count_ensure_non_zero()
 
     def run_device_index_not_assigned_error_impl(self):
-        """Implementation: Trigger device index not assigned by using rbln:1 when only rbln:0 exists."""
+        """Implementation: Trigger device index not assigned by using rbln:1 when only
+        rbln:0 exists.
+        """
         npus = os.getenv("RBLN_NPUS_PER_DEVICE")
         if npus is None:
             self.skipTest("This test must be run via wrapper test with environment variables set")
-        # With NPUS_PER_DEVICE=2 and 2 devices we have 1 logical device (rbln:0). Use rbln:1.
+        # With NPUS_PER_DEVICE=2 and 2 devices we have 1 logical device (rbln:0).
+        # Use rbln:1.
         torch.tensor([1], device="rbln:1", dtype=torch.float32)
 
     def run_nonexistent_rbln_devices_zero_count_impl(self):
-        """Implementation: nonexistent RBLN_DEVICES -> 0 visible devices; using rbln then raises."""
+        """Implementation: nonexistent RBLN_DEVICES -> 0 visible devices; using rbln
+        then raises.
+        """
         if os.getenv("RBLN_DEVICES") != "99999":
             self.skipTest("This test must be run via wrapper with RBLN_DEVICES=99999")
-        # New contract: a device id that does not exist is filtered out by the runtime, so the
-        # process sees 0 logical devices (compile-only stays possible) instead of failing hard.
+        # New contract: a device id that does not exist is filtered out by the runtime,
+        # so the process sees 0 logical devices (compile-only stays possible) instead of
+        # failing hard.
         self.assertEqual(torch.rbln.device_count(), 0)
         self.assertFalse(torch.rbln.is_available())
-        # Actually using an rbln device then raises a clear, catchable error (not an abort).
+        # Actually using an rbln device then raises a clear, catchable error (not an
+        # abort).
         with self.assertRaises(RuntimeError):
             torch.ones([1], device="rbln")
 
     def run_device_map_valid_size_8_impl(self):
         """Implementation: Test RBLN_DEVICE_MAP with size 8 group."""
-        import torch_rbln._C
-
         device_map = os.getenv("RBLN_DEVICE_MAP")
         if device_map is None:
             self.skipTest("This test must be run via wrapper test with environment variables set")
@@ -1038,8 +1031,6 @@ class TestDeviceMappingEnvVars(TestCase):
 
     def run_priority_device_map_over_npus_per_device_impl(self):
         """Implementation: Test that RBLN_DEVICE_MAP takes priority."""
-        import torch_rbln._C
-
         # Both environment variables are set
         device_map = os.getenv("RBLN_DEVICE_MAP")
         npus_per_device = os.getenv("RBLN_NPUS_PER_DEVICE")
@@ -1054,7 +1045,8 @@ class TestDeviceMappingEnvVars(TestCase):
         topology = torch_rbln._C._get_device_topology()
         # RBLN_DEVICE_MAP should take priority
         logical_count = torch.rbln.device_count()
-        # With "[0,1],[2,3]", we should have 2 logical devices (not 1 from NPUS_PER_DEVICE=4)
+        # With "[0,1],[2,3]", we should have 2 logical devices (not 1 from
+        # NPUS_PER_DEVICE=4)
         self.assertEqual(logical_count, 2)
 
         # Verify the mapping matches RBLN_DEVICE_MAP, not RBLN_NPUS_PER_DEVICE
@@ -1069,9 +1061,6 @@ class TestDeviceMappingEnvVars(TestCase):
 
     def run_device_summary_with_aggregation_impl(self):
         """Implementation: Test device_summary output with aggregated mapping."""
-        from io import StringIO
-        from unittest.mock import patch
-
         # Verify environment variable is set
         # If running directly (not via subprocess), skip this test
         npus_per_device = os.getenv("RBLN_NPUS_PER_DEVICE")
@@ -1094,9 +1083,6 @@ class TestDeviceMappingEnvVars(TestCase):
 
     def run_device_summary_with_unused_devices_impl(self):
         """Implementation: Test device_summary output with unused devices."""
-        from io import StringIO
-        from unittest.mock import patch
-
         # Verify environment variable is set
         # If running directly (not via subprocess), skip this test
         npus_per_device = os.getenv("RBLN_NPUS_PER_DEVICE")
@@ -1116,13 +1102,16 @@ class TestDeviceMappingEnvVars(TestCase):
 
         # Check output contains expected elements
         self.assertIn("[RBLN] Device Topology Initialized:", output)
-        # With RBLN_DEVICES limiting to 5 devices and NPUS_PER_DEVICE=4, there should be unused devices
+        # With RBLN_DEVICES limiting to 5 devices and NPUS_PER_DEVICE=4, there should be
+        # unused devices
         self.assertIn("Unused", output)
         self.assertIn("[Warning]", output)
         self.assertIn("unused", output.lower())
 
     def run_device_count_equals_physical_count_default_impl(self):
-        """Implementation: Test that default mode (1:1 mapping) results in equal counts."""
+        """Implementation: Test that default mode (1:1 mapping) results in equal
+        counts.
+        """
         logical_count = torch.rbln.device_count()
         physical_count = torch.rbln.physical_device_count()
         # In default mode, logical count should equal physical count

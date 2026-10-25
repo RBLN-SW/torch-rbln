@@ -39,7 +39,7 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-# If ccache installed, use it as a compiler launcher.
+# If `ccache` is installed, use it as a compiler launcher.
 if(RBLN_USE_CCACHE)
   find_program(CCACHE ccache)
   if(CCACHE)
@@ -55,14 +55,16 @@ project(torch-rbln
 
 # dependencies #################################################################
 # Set `TORCH_FOUND`, `TORCH_INCLUDE_DIRS`, `TORCH_LIBRARIES`, `TORCH_CXX_FLAGS`
-include(FindTorch)
+include(TorchSetup)
 
-# Set `REBEL_FOUND`, `REBEL_INCLUDE_DIRS`, `REBEL_LIBRARIES`, and `REBEL_ABI_CURRENT`
-include(FindRebel)
+# Set `REBEL_FOUND`, `REBEL_INCLUDE_DIRS`, `REBEL_LIBRARIES`, and
+# `REBEL_ABI_CURRENT`
+include(FindREBEL)
 
 # Freeze the ABI number for the import-time handshake in
-# torch_rbln/_internal/abi_check.py. Empty means a pre-handshake Rebel (FindRebel
-# already warned), which the consumer side reads as "no snapshot recorded".
+# torch_rbln/_internal/abi_check.py. Empty means a pre-handshake Rebel
+# (FindREBEL already warned), which the consumer side reads as
+# "no snapshot recorded".
 if(REBEL_ABI_CURRENT STREQUAL "")
   set(REBEL_ABI_CURRENT_PY "None")
 else()
@@ -78,14 +80,14 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/generated/_abi_snapshot.py
 )
 
 # Add spdlog for logging
-include(Findspdlog)
+include(spdlogSetup)
 
 # Set `pybind11::module`, `pybind11::embed`, `pybind11::headers`, and
 # `pybind11::pybind11`
-include(FindPybind)
+include(pybind11Setup)
 
-# torch-rbln target ############################################################
-# Define target interface for all libaraies and executables
+# `torch-rbln` target ##########################################################
+# Define target interface for all libraries and executables
 set(target torch_rbln_interface)
 add_library(${target} INTERFACE)
 target_compile_definitions(${target} INTERFACE
@@ -101,7 +103,8 @@ target_compile_options(${target} INTERFACE
 # Hardening flags
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(${target} INTERFACE
-    # _FORTIFY_SOURCE is a no-op without -O; gate on non-Debug to silence the warning.
+    # _FORTIFY_SOURCE is a no-op without -O; gate on non-Debug to silence the
+    # warning.
     $<$<NOT:$<CONFIG:Debug>>:-D_FORTIFY_SOURCE=2>
     -fstack-protector-strong
     -fstack-clash-protection
@@ -110,11 +113,12 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     -Wl,-z,relro
     -Wl,-z,now
     -Wl,-z,noexecstack
-    # Scope to non-executables: tests need libtorch_rbln in NEEDED for static-init op registration.
+    # Scope to non-executables: tests need libtorch_rbln in NEEDED for
+    # static-init op registration.
     $<$<NOT:$<STREQUAL:$<TARGET_PROPERTY:TYPE>,EXECUTABLE>>:-Wl,--as-needed>
   )
 endif()
-target_include_directories(${target} SYSTEM INTERFACE
+target_include_directories(${target} INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
   $<INSTALL_INTERFACE:include>
@@ -128,7 +132,7 @@ add_subdirectory(torch_rbln/csrc/rbln)
 add_subdirectory(torch_rbln/csrc/distributed/c10d/rbln)
 if(BUILD_TESTING)
   enable_testing()
-  include(FindGTest)
+  include(GTestSetup)
   add_subdirectory(test/cpp)
 else()
   message(STATUS "Skipping C++ tests (BUILD_TESTING=OFF)")

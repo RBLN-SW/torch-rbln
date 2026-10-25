@@ -1,8 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Test suite for internal utilities used in op kernel implementations.
-"""
+"""Test suite for internal utilities used in op kernel implementations."""
 
 import os
 from unittest.mock import patch
@@ -13,7 +11,8 @@ from torch.testing._internal.common_device_type import instantiate_device_type_t
 from torch.testing._internal.common_utils import run_tests, TestCase
 from torch.utils._python_dispatch import TorchDispatchMode
 
-import torch_rbln._C as _C
+from torch_rbln import _C
+from torch_rbln._internal.compile_cache import _compiled_op_cache
 from torch_rbln._internal.ops_utils import (
     broadcast_args_general,
     can_use_out_tensor_directly,
@@ -47,7 +46,9 @@ def _is_host_latest(t: torch.Tensor) -> bool:
 
 
 def _host_latest_out(shape) -> torch.Tensor:
-    """A device tensor whose host view is authoritative, as a CPU->device copy leaves it."""
+    """A device tensor whose host view is authoritative, as a CPU->device copy leaves
+    it.
+    """
     out = torch.empty(shape, device="rbln:0", dtype=torch.float16)
     out.copy_(torch.zeros(shape, dtype=torch.float16))
     return out
@@ -103,11 +104,9 @@ class TestInternalOpUtils(TestCase):
         out = torch.empty((2, 2), device="rbln")
         result = out
         result_shape = out.shape
-        args = ()
-        kwargs = {}
 
         # no exception, in-place operation
-        finalize_output_tensor(out, result, result_shape, args, kwargs)
+        finalize_output_tensor(out, result, result_shape)
 
         # shape unchanged
         self.assertEqual(out.shape, result_shape)
@@ -120,11 +119,9 @@ class TestInternalOpUtils(TestCase):
         out.fill_(5.0)
         result = torch.ones((3, 3), device="rbln")
         result_shape = result.shape
-        args = ()
-        kwargs = {}
 
         with self.assertWarns(UserWarning):
-            finalize_output_tensor(out, result, result_shape, args, kwargs)
+            finalize_output_tensor(out, result, result_shape)
 
         # shape updated
         self.assertEqual(out.shape, result_shape)
@@ -138,10 +135,8 @@ class TestInternalOpUtils(TestCase):
         result = torch.ones((2, 2), dtype=torch.float16, device="rbln")
 
         result_shape = result.shape
-        args = ()
-        kwargs = {}
 
-        finalize_output_tensor(out, result, result_shape, args, kwargs)
+        finalize_output_tensor(out, result, result_shape)
 
         self.assertEqual(out.to("cpu"), result.to("cpu"))
 
@@ -161,7 +156,6 @@ class TestInternalOpUtils(TestCase):
     def test_handle_empty_reduction_keepdim(self):
         t = torch.randn((2, 3, 4), device="rbln")
         out, _ = handle_empty_reduction(t, dim=1, keepdim=True)
-        # shape: [2,1,4]
         self.assertEqual(out.shape, torch.Size([2, 1, 4]))
 
     def test_handle_empty_mm(self):
@@ -324,7 +318,8 @@ class TestInternalOpUtils(TestCase):
 
     def test_supported_dtypes_amp(self):
         """Empty: AMP autocast is not implemented (no AutocastPrivateUse1 policy),
-        so the catalog advertises no dtypes and torch disables autocast."""
+        so the catalog advertises no dtypes and torch disables autocast.
+        """
         self.assertIsInstance(SupportedDtypes.amp, tuple)
         self.assertEqual(SupportedDtypes.amp, ())
 
@@ -344,13 +339,6 @@ class TestInternalOpUtils(TestCase):
         b = torch.tensor([3, 4], dtype=torch.float16, device="rbln")
         # Dtype fallback due to a
         self.assertTrue(is_cpu_fallback_cases((a, b)))
-        # No dtype fallback if all float16
-        c = torch.tensor([5], dtype=torch.float16, device="rbln")
-        # alignment unknown; skip alignment test
-        _ = is_cpu_fallback_cases((c,))  # noqa: F841
-        # Should not fallback for float16 scalar (unless other conditions apply)
-        # Note: scalar tensors still trigger fallback, so this may still be True
-        # This test now only checks dtype fallback behavior
 
     def test_is_cpu_fallback_cases_dtype_float16(self):
         """``float16`` non-scalar tensor passes the dtype gate."""
@@ -374,82 +362,98 @@ class TestInternalOpUtils(TestCase):
         self.assertTrue(is_cpu_fallback_cases((supported_fp16_tensor, unsupported_fp32_tensor)))
 
     def test_is_cpu_fallback_cases_dtype_mixed_supported(self):
-        """``float16`` + ``bfloat16`` falls back even though each is individually supported:
-        the compute path requires all tensor args to share the same dtype."""
+        """``float16`` + ``bfloat16`` falls back even though each is individually
+        supported: the compute path requires all tensor args to share the same dtype.
+        """
         fp16_tensor = torch.tensor([1.0, 2.0], dtype=torch.float16, device="rbln")
         bf16_tensor = torch.tensor([3.0, 4.0], dtype=torch.bfloat16, device="rbln")
         self.assertTrue(is_cpu_fallback_cases((fp16_tensor, bf16_tensor)))
 
     def test_is_cpu_fallback_cases_trace(self):
-        """When sys.gettrace() is set (e.g. pdb, coverage), is_cpu_fallback_cases returns True (0a)."""
+        """When sys.gettrace() is set (e.g. pdb, coverage), is_cpu_fallback_cases
+        returns True (0a).
+        """
         t = torch.tensor([1.0, 2.0], dtype=torch.float16, device="rbln")
         args = (t,)
-        with patch("sys.gettrace", return_value=lambda *a, **k: None):
+        with patch("sys.gettrace", return_value=lambda *_a, **_k: None):
             self.assertTrue(
                 is_cpu_fallback_cases(args),
                 "CPU fallback should be triggered when a trace function is set",
             )
         with patch("sys.gettrace", return_value=None):
-            # Same args without trace: no fallback from 0a (other conditions may still apply)
+            # Same args without trace: no fallback from 0a (other conditions may still
+            # apply)
             fallback = is_cpu_fallback_cases(args)
-            # With float16 1D tensor, scalar check triggers (all scalars? no). So we expect False
-            # unless another case triggers (e.g. scalar is checked per-tensor: all(a.ndim==0) -> False)
+            # With float16 1D tensor, scalar check triggers (all scalars? no). So we
+            # expect False unless another case triggers (e.g. scalar is checked
+            # per-tensor: all(a.ndim==0) -> False)
             self.assertFalse(fallback, "Without trace, float16 1D rbln should not fallback from trace")
 
     def test_is_cpu_fallback_cases_trace_disabled(self):
         """When TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK=trace, trace check is skipped."""
         t = torch.tensor([1.0, 2.0], dtype=torch.float16, device="rbln")
         args = (t,)
-        # The gate reads the env live, so patch.dict alone is enough (no cache to clear).
-        with patch.dict(os.environ, {"TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK": "trace"}, clear=False):
-            with patch("sys.gettrace", return_value=lambda *a, **k: None):
-                self.assertFalse(
-                    is_cpu_fallback_cases(args),
-                    "With trace disabled via env, gettrace() set should not trigger fallback",
-                )
+        # The gate reads the env live, so patch.dict alone is enough (no cache to
+        # clear).
+        with (
+            patch.dict(os.environ, {"TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK": "trace"}, clear=False),
+            patch("sys.gettrace", return_value=lambda *_a, **_k: None),
+        ):
+            self.assertFalse(
+                is_cpu_fallback_cases(args),
+                "With trace disabled via env, gettrace() set should not trigger fallback",
+            )
 
     def test_is_cpu_fallback_cases_reentrant(self):
-        """When already inside RBLN compile op (depth > 0), is_cpu_fallback_cases returns True and logs warning (6)."""
+        """When already inside RBLN compile op (depth > 0), is_cpu_fallback_cases
+        returns True and logs warning (6).
+        """
         t = torch.tensor([1.0, 2.0], dtype=torch.float16, device="rbln")
         args = (t,)
-        with patch(
-            "torch_rbln._internal.torch_compile_patch_helpers.get_rbln_compile_op_depth",
-            return_value=1,
-        ):
-            with patch("torch_rbln._internal.ops_utils.rbln_log_warn") as mock_warn:
-                result = is_cpu_fallback_cases(args)
-                self.assertTrue(
-                    result,
-                    "CPU fallback should be triggered when reentrant (depth > 0)",
-                )
-                mock_warn.assert_called_once()
-                self.assertIn("reentrant", mock_warn.call_args[0][0].lower())
-
-    def test_is_cpu_fallback_cases_reentrant_disabled(self):
-        """When TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK=reentrant, reentrancy check is skipped."""
-        t = torch.tensor([1.0, 2.0], dtype=torch.float16, device="rbln")
-        args = (t,)
-        # The gate reads the env live, so patch.dict alone is enough (no cache to clear).
-        with patch.dict(os.environ, {"TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK": "reentrant"}, clear=False):
-            with patch(
+        with (
+            patch(
                 "torch_rbln._internal.torch_compile_patch_helpers.get_rbln_compile_op_depth",
                 return_value=1,
-            ):
-                self.assertFalse(
-                    is_cpu_fallback_cases(args),
-                    "With reentrant disabled via env, depth > 0 should not trigger fallback",
-                )
+            ),
+            patch("torch_rbln._internal.ops_utils.rbln_log_warn") as mock_warn,
+        ):
+            result = is_cpu_fallback_cases(args)
+            self.assertTrue(
+                result,
+                "CPU fallback should be triggered when reentrant (depth > 0)",
+            )
+            mock_warn.assert_called_once()
+            self.assertIn("reentrant", mock_warn.call_args[0][0].lower())
+
+    def test_is_cpu_fallback_cases_reentrant_disabled(self):
+        """When TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK=reentrant, reentrancy check is
+        skipped.
+        """
+        t = torch.tensor([1.0, 2.0], dtype=torch.float16, device="rbln")
+        args = (t,)
+        # The gate reads the env live, so patch.dict alone is enough (no cache to
+        # clear).
+        with (
+            patch.dict(os.environ, {"TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK": "reentrant"}, clear=False),
+            patch(
+                "torch_rbln._internal.torch_compile_patch_helpers.get_rbln_compile_op_depth",
+                return_value=1,
+            ),
+        ):
+            self.assertFalse(
+                is_cpu_fallback_cases(args),
+                "With reentrant disabled via env, depth > 0 should not trigger fallback",
+            )
 
     # =========================================================================
     # is_inplace_op tests
     # =========================================================================
 
     def test_self_inplace(self):
-        """
-        Tests the case where the input tensor itself is passed as the out argument.
+        """Tests the case where the input tensor itself is passed as the out argument.
 
-        This test checks if the `is_inplace_op` function returns True when the same tensor is used both
-        as an input and the output (in-place operation).
+        This test checks if the `is_inplace_op` function returns True when the same
+        tensor is used both as an input and the output (in-place operation).
 
         Args:
             self (TestCase): The test case instance.
@@ -464,12 +468,12 @@ class TestInternalOpUtils(TestCase):
         self.assertTrue(is_inplace_op((x,), {"out": x}))
 
     def test_view_alias(self):
-        """
-        Tests the case where a tensor created via view is passed as the out argument.
+        """Tests the case where a tensor created via view is passed as the out argument.
 
-        This test checks if the `is_inplace_op` function returns True when a view of the base tensor
-        (which shares storage with the base) is used as the output. The data pointers of the base and view
-        should be the same, indicating an in-place operation.
+        This test checks if the `is_inplace_op` function returns True when a view of the
+        base tensor (which shares storage with the base) is used as the output. The data
+        pointers of the base and view should be the same, indicating an in-place
+        operation.
 
         Args:
             self (TestCase): The test case instance.
@@ -485,12 +489,13 @@ class TestInternalOpUtils(TestCase):
         self.assertTrue(is_inplace_op((base,), {"out": view}))
 
     def test_out_variant_alias(self):
-        """
-        Tests the case where src and dst are different instances but share the same storage.
+        """Tests the case where src and dst are different instances but share the same
+        storage.
 
-        This test checks if the `is_inplace_op` function returns True when two tensors, created from the
-        same base tensor (thus sharing storage), are used as input and output respectively. Despite being
-        different instances, they should point to the same data, indicating an in-place operation.
+        This test checks if the `is_inplace_op` function returns True when two tensors,
+        created from the same base tensor (thus sharing storage), are used as input and
+        output respectively. Despite being different instances, they should point to the
+        same data, indicating an in-place operation.
 
         Args:
             self (TestCase): The test case instance.
@@ -506,11 +511,11 @@ class TestInternalOpUtils(TestCase):
         self.assertTrue(is_inplace_op((src,), {"out": dst}))
 
     def test_not_inplace(self):
-        """
-        Tests the case where the out tensor has a separate storage.
+        """Tests the case where the out tensor has a separate storage.
 
-        This test checks if the `is_inplace_op` function returns False when the output tensor is created
-        with its own storage, independent of the input tensor. This indicates that the operation is not in-place.
+        This test checks if the `is_inplace_op` function returns False when the output
+        tensor is created with its own storage, independent of the input tensor. This
+        indicates that the operation is not in-place.
 
         Args:
             self (TestCase): The test case instance.
@@ -526,11 +531,11 @@ class TestInternalOpUtils(TestCase):
         self.assertFalse(is_inplace_op((src,), {"out": dst}))
 
     def test_no_out_argument(self):
-        """
-        Tests the case where there is no out argument.
+        """Tests the case where there is no out argument.
 
-        This test checks if the `is_inplace_op` function returns False when no output tensor is specified.
-        In this scenario, there can be no in-place operation since there is no designated output tensor.
+        This test checks if the `is_inplace_op` function returns False when no output
+        tensor is specified. In this scenario, there can be no in-place operation since
+        there is no designated output tensor.
 
         Args:
             self (TestCase): The test case instance.
@@ -558,7 +563,9 @@ class TestInternalOpUtils(TestCase):
 
 @pytest.mark.npu(count=1)
 class TestOutTensors(TestCase):
-    """Test operations using out tensors with various contiguity and storage offset properties."""
+    """Test operations using out tensors with various contiguity and storage offset
+    properties.
+    """
 
     atol = 0.01
     rtol = 0.01
@@ -608,7 +615,7 @@ class TestOutTensors(TestCase):
         # graph: reusing the first one would compute ``x + x`` for ``x + y``.
         # With the warm cache off every hit is the Python path.
         warm_cache_was_enabled = _C._warmcache_is_enabled()
-        _C._warmcache_set_enabled(False)
+        _C._warmcache_set_enabled(enabled=False)
         try:
             reference = torch.add(x.cpu(), x.cpu())
             for call in range(2):
@@ -623,7 +630,9 @@ class TestOutTensors(TestCase):
             _C._warmcache_set_enabled(warm_cache_was_enabled)
 
     def test_warm_hit_binds_alternating_out_buffers(self):
-        """The C++ hit path writes whichever ``out`` each call passes and keeps its entry."""
+        """The C++ hit path writes whichever ``out`` each call passes and keeps its
+        entry.
+        """
         device = torch.device("rbln:0")
         shape = (5, 192)
         x = torch.randn(shape, device=device, dtype=torch.float16)
@@ -680,7 +689,8 @@ class TestOutTensors(TestCase):
 
     def test_compile_miss_with_out_keeps_no_extra_output_alive(self):
         """The first run of a fresh compile fills the runtime's own buffer before a
-        second run binds ``out``; that first buffer must not stay allocated."""
+        second run binds ``out``; that first buffer must not stay allocated.
+        """
         device = torch.device("rbln:0")
         shape = (3, 256)
         xv = torch.randn(shape[::-1], device=device, dtype=torch.float16).t()  # Python path
@@ -713,8 +723,6 @@ class TestOutTensors(TestCase):
         One runtime per entry shows no guard was missed, since a Dynamo
         recompile inside a callable appends a second one.
         """
-        from torch_rbln._internal.compile_cache import _compiled_op_cache
-
         device = torch.device("rbln:0")
         shape = (3, 320)
         xv = torch.randn(shape[::-1], device=device, dtype=torch.float16).t()  # Python path
@@ -789,7 +797,9 @@ class TestOutTensors(TestCase):
         self.assertEqual(result.cpu(), cpu_reference, atol=self.atol, rtol=self.rtol)
 
     def test_add_using_contiguous_out_with_non_zero_storage_offset(self):
-        """Test add operation using contiguous out tensor with non-zero storage offset."""
+        """Test add operation using contiguous out tensor with non-zero storage
+        offset.
+        """
         device = torch.device("rbln:0")
         x = torch.randn(4, 60, device=device, dtype=torch.float16)
         y = torch.randn(4, 60, device=device, dtype=torch.float16)
@@ -820,7 +830,9 @@ class TestOutTensors(TestCase):
         self.assertEqual(result.cpu(), cpu_reference, atol=self.atol, rtol=self.rtol)
 
     def test_add_using_non_contiguous_out_with_non_zero_storage_offset(self):
-        """Test add operation using non-contiguous out tensor with non-zero storage offset."""
+        """Test add operation using non-contiguous out tensor with non-zero storage
+        offset.
+        """
         device = torch.device("rbln:0")
         x = torch.randn(4, 60, device=device, dtype=torch.float16)
         y = torch.randn(4, 60, device=device, dtype=torch.float16)
@@ -853,10 +865,14 @@ class TestOutTensors(TestCase):
 
 @pytest.mark.npu(count=1)
 class TestTorchDispatchModeWithRbln(TestCase):
-    """Tests that rbln ops do not recurse infinitely when a TorchDispatchMode is active."""
+    """Tests that rbln ops do not recurse infinitely when a TorchDispatchMode is
+    active.
+    """
 
     class _LoggingMode(TorchDispatchMode):
-        """TorchDispatchMode that logs each op and forwards to the real implementation."""
+        """TorchDispatchMode that logs each op and forwards to the real
+        implementation.
+        """
 
         def __init__(self, log=None):
             super().__init__()
@@ -867,7 +883,9 @@ class TestTorchDispatchModeWithRbln(TestCase):
             return func(*args, **(kwargs or {}))
 
     def test_add_under_torch_dispatch_mode_no_recursion(self):
-        """With a non-infra TorchDispatchMode active, add on rbln tensors should complete without RecursionError."""
+        """With a non-infra TorchDispatchMode active, add on rbln tensors should
+        complete without RecursionError.
+        """
         log = []
         with self._LoggingMode(log=log):
             x = torch.randn(3, dtype=torch.float16, device="rbln") + torch.randn(3, dtype=torch.float16, device="rbln")
@@ -875,14 +893,17 @@ class TestTorchDispatchModeWithRbln(TestCase):
         self.assertEqual(x.device.type, "rbln")
         self.assertEqual(x.shape, (3,))
         self.assertEqual(x.dtype, torch.float16)
-        # Mode should have seen at least one add (name may be "add" or "add.Tensor" etc.)
+        # Mode should have seen at least one add (name may be "add" or "add.Tensor"
+        # etc.)
         self.assertTrue(
             any("add" in name for name in log),
             f"LoggingMode should have intercepted add; got log: {log}",
         )
 
     def test_add_under_torch_dispatch_mode_result_consistent(self):
-        """Result of add under TorchDispatchMode should match CPU reference (CPU fallback path)."""
+        """Result of add under TorchDispatchMode should match CPU reference (CPU
+        fallback path).
+        """
         log = []
         with self._LoggingMode(log=log):
             a = torch.randn(4, dtype=torch.float16, device="rbln")
@@ -912,16 +933,12 @@ class TestWarmCacheNonContigOut(TestCase):
     def _diag_warm_hits(self):
         # _dispatch_shim_diag_dump → (n_total, n_fallback, n_warm_hit, n_miss,
         #                             ns_warm_hit, ns_miss)
-        import torch_rbln
-
-        return torch_rbln._C._dispatch_shim_diag_dump()[2]
+        return _C._dispatch_shim_diag_dump()[2]
 
     def test_warmcache_bypassed_on_non_contig_out(self):
-        import torch_rbln
-
         device = torch.device("rbln:0")
-        torch_rbln._C._warmcache_clear()
-        torch_rbln._C._dispatch_shim_diag_reset()
+        _C._warmcache_clear()
+        _C._dispatch_shim_diag_reset()
 
         x = torch.randn(4, 60, device=device, dtype=torch.float16)
         y = torch.randn(4, 60, device=device, dtype=torch.float16)

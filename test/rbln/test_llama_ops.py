@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Test suite for operations used in LLaMA model implementations.
+"""Test suite for operations used in LLaMA model implementations.
 
 This test suite covers the following operations and functions:
 1. Indexing, slicing, joining, mutating ops: torch.cat
@@ -12,7 +11,7 @@ This test suite covers the following operations and functions:
 6. Linear functions: torch.nn.functional.linear
 """
 
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 import torch
@@ -25,19 +24,19 @@ from test.utils import SUPPORTED_DTYPES
 def convert_tensor(arg: Any) -> Any:
     if isinstance(arg, list):
         return [convert_tensor(item) for item in arg]
-    elif isinstance(arg, tuple):
+    if isinstance(arg, tuple):
         return tuple(convert_tensor(item) for item in arg)
-    elif isinstance(arg, torch.Tensor):
+    if isinstance(arg, torch.Tensor):
         return arg.to("rbln")
-    else:
-        return arg
+    return arg
 
 
 def assert_equal_where_specials_match(a: torch.Tensor, b: torch.Tensor, *, atol=1e-5, rtol=1e-3):
     a = a.cpu()
     b = b.cpu()
     if a.shape != b.shape:
-        raise AssertionError(f"Shape mismatch: {a.shape} != {b.shape}")
+        msg = f"Shape mismatch: {a.shape} != {b.shape}"
+        raise AssertionError(msg)
 
     a_finite = torch.isfinite(a)
     b_finite = torch.isfinite(b)
@@ -51,13 +50,14 @@ def assert_equal_where_specials_match(a: torch.Tensor, b: torch.Tensor, *, atol=
     mismatch = a_finite ^ b_finite
     if mismatch.any():
         idx = torch.nonzero(mismatch, as_tuple=False)
-        raise AssertionError(f"Mismatch at finite/special boundary: {idx}")
+        msg = f"Mismatch at finite/special boundary: {idx}"
+        raise AssertionError(msg)
 
 
 @pytest.mark.npu(count=1)
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestLlamaOps(TestCase):
-    batch_sizes = [1, 2]
+    batch_sizes: ClassVar[list[int]] = [1, 2]
 
     def _run_op(self, op, *args, **kwargs):
         cpu_out = op(*args, **kwargs)
@@ -70,7 +70,7 @@ class TestLlamaOps(TestCase):
         op_name = op.__name__
         ignore_inf_nan = False
 
-        if op_name == "rsqrt" or op_name == "pow":
+        if op_name in {"rsqrt", "pow"}:
             ignore_inf_nan = True
         elif op_name in ("linear", "matmul", "bmm"):
             atol = 2
@@ -111,7 +111,8 @@ class TestLlamaOps(TestCase):
         # Get original stride and reshape to (batch, 12, 128, 128)
         input = input.transpose(-2, -3)
         mat2 = torch.randn([batch_size, 12, 128, 128], dtype=dtype)
-        # Get original stride and reshape to (batch, 12, 128, 128) with transposed stride
+        # Get original stride and reshape to (batch, 12, 128, 128) with transposed
+        # stride
         mat2 = mat2.transpose(-1, -2)
         self._run_op(torch.matmul, input, mat2)
 
@@ -177,19 +178,18 @@ class TestLlamaOps(TestCase):
         weight = torch.randn([out_features, in_features], dtype=dtype)
         self._run_op(torch.nn.functional.linear, input, weight)
 
-    # 3D input × bias-less linear where the compiler generates a post-GEMM host
-    # op sequence whose reshape and transpose ranks disagree. rebel-compiler
-    # PR #10429 (GEMM primitive interface change, released in dev281) made
+    # 3D input x bias-less linear where the compiler generates a post-GEMM host op
+    # sequence whose reshape and transpose ranks disagree. rebel-compiler PR #10429
+    # (GEMM primitive interface change, released in dev281) made
     # WrapHostOps emit a 3D reshape followed by a 4D transpose for the output,
     # tripping `transpose_op.axis_order().size() == curr_shape.size()` at
     # runtime/vmemory/transform/calculate.cc:250. Fixed by rebel-compiler
     # PR #10476 (dev top).
     #
     # Shapes come from real compiled graphs captured during perf testing: the
-    # (1, 16, 1024) × (640, 1024) case is the one reported on Slack; the (192)
-    # and (768) siblings were in the same trace and were empirically verified
-    # to reproduce the identical runtime assert on rebel-compiler==dev281, but
-    # not on dev307+.
+    # (1, 16, 1024) x (640, 1024) case is the one reported on Slack; the (192) and (768)
+    # siblings were in the same trace and were empirically verified to reproduce the
+    # identical runtime assert on rebel-compiler==dev281, but not on dev307+.
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize(
         "batch_size,seq_len,in_features,out_features",

@@ -1,4 +1,5 @@
 import math
+from typing import cast
 
 import torch
 
@@ -17,7 +18,7 @@ from torch_rbln._internal.ops_utils import (
 )
 
 
-def custom_softmax_out_rbln(self, dim: int, half_to_float: bool, *, out=None):
+def custom_softmax_out_rbln(self, dim: int, half_to_float: bool, *, out):  # noqa: ARG001, FBT001
     if is_cpu_fallback_cases(self):
         result_tensor = cpu_fallback_path(torch.softmax, (self,), result=out, op_name="aten::softmax", dim=dim)
     else:
@@ -33,7 +34,8 @@ def custom_softmax_out_rbln(self, dim: int, half_to_float: bool, *, out=None):
             out,
         )
 
-    finalize_output_tensor(out, result_tensor, result_tensor.shape, tuple(self), {})
+    result_tensor = cast("torch.Tensor", result_tensor)
+    finalize_output_tensor(out, result_tensor, result_tensor.shape)
 
 
 def _is_integer_exponent(exponent) -> bool:
@@ -46,13 +48,16 @@ def _is_integer_exponent(exponent) -> bool:
 def pow_tensor_scalar_out_rbln(self, exponent, *, out):
     # pow.Tensor_Scalar: exponent must be scalar (int/float), not tensor
     if isinstance(exponent, torch.Tensor):
-        raise RuntimeError("pow.Tensor_Scalar expects scalar exponent (int/float), not tensor.")
+        msg = "pow.Tensor_Scalar expects scalar exponent (int/float), not tensor."
+        raise TypeError(msg)
 
     # Validate device/dtype match (preserved from original implementation)
     if self.device != out.device:
-        raise RuntimeError(f"Input device {self.device} does not match output device {out.device}.")
+        msg = f"Input device {self.device} does not match output device {out.device}."
+        raise RuntimeError(msg)
     if self.dtype != out.dtype and not is_type_promotion_allowed((self,), out):
-        raise RuntimeError(f"Unsafe cast: input has dtype {self.dtype} but output tensor has dtype {out.dtype}.")
+        msg = f"Unsafe cast: input has dtype {self.dtype} but output tensor has dtype {out.dtype}."
+        raise RuntimeError(msg)
 
     if self.numel() == 0:
         result_tensor, _ = handle_empty_binary((self,))
@@ -70,7 +75,8 @@ def pow_tensor_scalar_out_rbln(self, exponent, *, out):
             out,
         )
 
-    finalize_output_tensor(out, result_tensor, result_tensor.shape, (self,), {})
+    result_tensor = cast("torch.Tensor", result_tensor)
+    finalize_output_tensor(out, result_tensor, result_tensor.shape)
 
 
 def _dispatch_custom_kernel(op_module, args, view_recipes):
@@ -85,8 +91,9 @@ def _dispatch_custom_kernel(op_module, args, view_recipes):
 
 
 class custom_rbln_paged_attn_prefill(torch.nn.Module):
-    def forward(self, *args, **kwargs):
-        # TODO: rtosa.multiply cannot accept tensor scalar value. scale must be constant tensor.
+    def forward(self, *args, **_kwargs):
+        # TODO: rtosa.multiply cannot accept tensor scalar value. scale must be constant
+        # tensor.
         scale = torch.tensor(1 / math.sqrt(args[0].size(-1)))
         return torch.ops.rbln_custom_ops.paged_attn_prefill(
             args[0],  # q [1,2,6,33,128]
@@ -107,42 +114,46 @@ _paged_attn_prefill_op_module = custom_rbln_paged_attn_prefill().eval()
 
 def paged_attn_prefill_rbln(*args, **kwargs):
     if len(args) != 10:
-        raise RuntimeError("paged_attn_prefill takes 10 inputs.")
+        msg = "paged_attn_prefill takes 10 inputs."
+        raise RuntimeError(msg)
 
     # Check if batch size (dim=0) is 1 for Q, K, and V tensors.
     # This kernel is constrained to operate on a batch size of 1.
     for i, name in enumerate(["Query (q)", "Key (k)", "Value (v)"]):
         tensor = args[i]
-        assert tensor.size(0) == 1, (
-            f"Custom kernel with prefill must batch size of {name} must be 1, but got shape {tensor.shape}"
-        )
+        if tensor.size(0) != 1:
+            msg = f"paged_attn_prefill batch size of {name} must be 1, but got shape {tensor.shape}"
+            raise RuntimeError(msg)
 
     # K/V cache alignment must be checked on the user-visible shape (caches are
     # always contig in production; if they are non-contig views the recipe
     # would have changed the underlying base shape — caller bug — but we keep
-    # the assert against ``args[K]`` so the error message is still meaningful).
-    assert args[4].size(-1) % 64 == 0, (
-        f"The last dimension of K-cache must be a multiple of 64, but got shape {args[4].shape}"
-    )
-    assert args[5].size(-1) % 64 == 0, (
-        f"The last dimension of V-cache must be a multiple of 64, but got shape {args[5].shape}"
-    )
+    # the check against ``args[K]`` so the error message is still meaningful).
+    if args[4].size(-1) % 64 != 0:
+        msg = f"The last dimension of K-cache must be a multiple of 64, but got shape {args[4].shape}"
+        raise RuntimeError(msg)
+    if args[5].size(-1) % 64 != 0:
+        msg = f"The last dimension of V-cache must be a multiple of 64, but got shape {args[5].shape}"
+        raise RuntimeError(msg)
 
     # View-aware arg prep: pure-permute / single-step views become an explicit
     # aten op inside the wrapper OpModule's forward; the rebel-backend lowers
     # them on device. Other views fall back to ``.contiguous()`` (one-time
     # warning emitted via ``_maybe_warn_view_fallback``).
-    (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
+    (view_args, _view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
 
-    assert args[0].size(-1) % 64 == 0
+    if args[0].size(-1) % 64 != 0:
+        msg = f"The last dimension of Query (q) must be a multiple of 64, but got shape {args[0].shape}"
+        raise RuntimeError(msg)
 
     op_module = get_view_op_module(_paged_attn_prefill_op_module, view_recipes)
     return _dispatch_custom_kernel(op_module, view_args, view_recipes)
 
 
 class custom_rbln_paged_attn_decode(torch.nn.Module):
-    def forward(self, *args, **kwargs):
-        # TODO: rtosa.multiply cannot accept tensor scalar value. scale must be constant tensor.
+    def forward(self, *args, **_kwargs):
+        # TODO: rtosa.multiply cannot accept tensor scalar value. scale must be constant
+        # tensor.
         scale = torch.tensor(1 / math.sqrt(args[0].size(-1)))
         return torch.ops.rbln_custom_ops.paged_attn_decode(
             args[0],  # q [1,2,6,33,128]
@@ -163,30 +174,33 @@ _paged_attn_decode_op_module = custom_rbln_paged_attn_decode().eval()
 
 def paged_attn_decode_rbln(*args, **kwargs):
     if len(args) != 10:
-        raise RuntimeError("paged_attn_prefill takes 10 inputs.")
+        msg = "paged_attn_decode takes 10 inputs."
+        raise RuntimeError(msg)
 
-    assert args[4].size(-1) % 64 == 0, (
-        f"The last dimension of K-cache must be a multiple of 64, but got shape {args[4].shape}"
-    )
-    assert args[5].size(-1) % 64 == 0, (
-        f"The last dimension of V-cache must be a multiple of 64, but got shape {args[5].shape}"
-    )
+    if args[4].size(-1) % 64 != 0:
+        msg = f"The last dimension of K-cache must be a multiple of 64, but got shape {args[4].shape}"
+        raise RuntimeError(msg)
+    if args[5].size(-1) % 64 != 0:
+        msg = f"The last dimension of V-cache must be a multiple of 64, but got shape {args[5].shape}"
+        raise RuntimeError(msg)
 
-    (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
+    (view_args, _view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
 
-    assert args[0].size(-1) % 64 == 0
+    if args[0].size(-1) % 64 != 0:
+        msg = f"The last dimension of Query (q) must be a multiple of 64, but got shape {args[0].shape}"
+        raise RuntimeError(msg)
 
     op_module = get_view_op_module(_paged_attn_decode_op_module, view_recipes)
     return _dispatch_custom_kernel(op_module, view_args, view_recipes)
 
 
 class custom_rbln_paged_causal_attn_prefill(torch.nn.Module):
-    def forward(self, *args, **kwargs):
-        # TODO: rtosa.multiply cannot accept tensor scalar value. scale must be constant tensor.
+    def forward(self, *args, **_kwargs):
+        # TODO: rtosa.multiply cannot accept tensor scalar value. scale must be constant
+        # tensor.
         scale = torch.tensor(1 / math.sqrt(args[0].size(-1)))
-        # paged_causal_attn_prefill: q, k, v, kcache, vcache, seq, scale, block_table, block_size, is_bidirectional, mask (optional)
-        # args[0]: q, args[1]: k, args[2]: v, args[3]: kcache, args[4]: vcache, args[5]: seq,
-        # args[6]: scale (computed), args[7]: block_table, args[8]: block_size, args[9]: is_bidirectional, args[10]: mask (optional)
+        # paged_causal_attn_prefill: q, k, v, kcache, vcache, seq, scale, block_table,
+        #                            block_size, is_bidirectional, and an optional mask
         call_args = [
             args[0],  # q [1,2,6,33,128]
             args[1],  # k [1,2,1,33,128]
@@ -209,38 +223,42 @@ _paged_causal_attn_prefill_op_module = custom_rbln_paged_causal_attn_prefill().e
 
 
 def paged_causal_attn_prefill_rbln(*args, **kwargs):
-    # paged_causal_attn_prefill: q, k, v, kcache, vcache, seq, scale, block_table, block_size, is_bidirectional, mask (optional)
+    # paged_causal_attn_prefill: q, k, v, kcache, vcache, seq, scale, block_table,
+    #                            block_size, is_bidirectional, and an optional mask
     if len(args) < 10 or len(args) > 11:
-        raise RuntimeError(f"paged_causal_attn_prefill takes 10 or 11 inputs, but got {len(args)}.")
+        msg = f"paged_causal_attn_prefill takes 10 or 11 inputs, but got {len(args)}."
+        raise RuntimeError(msg)
 
     for i, name in enumerate(["Query (q)", "Key (k)", "Value (v)"]):
         tensor = args[i]
-        assert tensor.size(0) == 1, (
-            f"Custom kernel with prefill must batch size of {name} must be 1, but got shape {tensor.shape}"
-        )
+        if tensor.size(0) != 1:
+            msg = f"paged_causal_attn_prefill batch size of {name} must be 1, but got shape {tensor.shape}"
+            raise RuntimeError(msg)
 
-    assert args[3].size(-1) % 64 == 0, (
-        f"The last dimension of K-cache must be a multiple of 64, but got shape {args[3].shape}"
-    )
-    assert args[4].size(-1) % 64 == 0, (
-        f"The last dimension of V-cache must be a multiple of 64, but got shape {args[4].shape}"
-    )
+    if args[3].size(-1) % 64 != 0:
+        msg = f"The last dimension of K-cache must be a multiple of 64, but got shape {args[3].shape}"
+        raise RuntimeError(msg)
+    if args[4].size(-1) % 64 != 0:
+        msg = f"The last dimension of V-cache must be a multiple of 64, but got shape {args[4].shape}"
+        raise RuntimeError(msg)
 
-    (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
+    (view_args, _view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
 
-    assert args[0].size(-1) % 64 == 0
+    if args[0].size(-1) % 64 != 0:
+        msg = f"The last dimension of Query (q) must be a multiple of 64, but got shape {args[0].shape}"
+        raise RuntimeError(msg)
 
     op_module = get_view_op_module(_paged_causal_attn_prefill_op_module, view_recipes)
     return _dispatch_custom_kernel(op_module, view_args, view_recipes)
 
 
 class custom_rbln_paged_causal_attn_decode(torch.nn.Module):
-    def forward(self, *args, **kwargs):
-        # TODO: rtosa.multiply cannot accept tensor scalar value. scale must be constant tensor.
+    def forward(self, *args, **_kwargs):
+        # TODO: rtosa.multiply cannot accept tensor scalar value. scale must be constant
+        # tensor.
         scale = torch.tensor(1 / math.sqrt(args[0].size(-1)))
-        # paged_causal_attn_decode: q, k, v, kcache, vcache, seq, scale, block_table, block_size, mask (optional)
-        # args[0]: q, args[1]: k, args[2]: v, args[3]: kcache, args[4]: vcache, args[5]: seq,
-        # args[6]: scale (computed), args[7]: block_table, args[8]: block_size, args[9]: mask (optional)
+        # paged_causal_attn_decode: q, k, v, kcache, vcache, seq, scale, block_table,
+        #                           block_size, and an optional mask
         call_args = [
             args[0],  # q [1,2,6,33,128]
             args[1],  # k [1,2,1,33,128]
@@ -262,27 +280,31 @@ _paged_causal_attn_decode_op_module = custom_rbln_paged_causal_attn_decode().eva
 
 
 def paged_causal_attn_decode_rbln(*args, **kwargs):
-    # paged_causal_attn_decode: q, k, v, kcache, vcache, seq, scale, block_table, block_size, mask (optional)
+    # paged_causal_attn_decode: q, k, v, kcache, vcache, seq, scale, block_table,
+    #                           block_size, and an optional mask
     if len(args) < 9 or len(args) > 10:
-        raise RuntimeError(f"paged_causal_attn_decode takes 9 or 10 inputs, but got {len(args)}.")
+        msg = f"paged_causal_attn_decode takes 9 or 10 inputs, but got {len(args)}."
+        raise RuntimeError(msg)
 
-    assert args[3].size(-1) % 64 == 0, (
-        f"The last dimension of K-cache must be a multiple of 64, but got shape {args[3].shape}"
-    )
-    assert args[4].size(-1) % 64 == 0, (
-        f"The last dimension of V-cache must be a multiple of 64, but got shape {args[4].shape}"
-    )
+    if args[3].size(-1) % 64 != 0:
+        msg = f"The last dimension of K-cache must be a multiple of 64, but got shape {args[3].shape}"
+        raise RuntimeError(msg)
+    if args[4].size(-1) % 64 != 0:
+        msg = f"The last dimension of V-cache must be a multiple of 64, but got shape {args[4].shape}"
+        raise RuntimeError(msg)
 
-    (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
+    (view_args, _view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
 
-    assert args[0].size(-1) % 64 == 0
+    if args[0].size(-1) % 64 != 0:
+        msg = f"The last dimension of Query (q) must be a multiple of 64, but got shape {args[0].shape}"
+        raise RuntimeError(msg)
 
     op_module = get_view_op_module(_paged_causal_attn_decode_op_module, view_recipes)
     return _dispatch_custom_kernel(op_module, view_args, view_recipes)
 
 
 class custom_rbln_flash_attention_naive_prefill(torch.nn.Module):
-    def forward(self, *args, **kwargs):
+    def forward(self, *args, **_kwargs):
         scale = torch.tensor(1 / math.sqrt(args[0].size(-1)))
         call_args = [
             args[0],
@@ -305,28 +327,31 @@ _flash_attention_naive_prefill_op_module = custom_rbln_flash_attention_naive_pre
 
 def flash_attention_naive_prefill_rbln(*args, **kwargs):
     if len(args) < 9 or len(args) > 10:
-        raise RuntimeError(f"flash_attention_naive_prefill takes 9 or 10 inputs (optional sinks), but got {len(args)}.")
+        msg = f"flash_attention_naive_prefill takes 9 or 10 inputs (optional sinks), but got {len(args)}."
+        raise RuntimeError(msg)
 
     for i, name in enumerate(["Query (q)", "Key (k)", "Value (v)"]):
         tensor = args[i]
-        assert tensor.size(0) == 1, (
-            f"flash_attention_naive_prefill batch size of {name} must be 1, but got shape {tensor.shape}"
-        )
+        if tensor.size(0) != 1:
+            msg = f"flash_attention_naive_prefill batch size of {name} must be 1, but got shape {tensor.shape}"
+            raise RuntimeError(msg)
 
-    assert args[3].size(-1) % 64 == 0, (
-        f"The last dimension of kv_cache must be a multiple of 64, but got shape {args[3].shape}"
-    )
+    if args[3].size(-1) % 64 != 0:
+        msg = f"The last dimension of kv_cache must be a multiple of 64, but got shape {args[3].shape}"
+        raise RuntimeError(msg)
 
-    (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
+    (view_args, _view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
 
-    assert args[0].size(-1) % 64 == 0
+    if args[0].size(-1) % 64 != 0:
+        msg = f"The last dimension of Query (q) must be a multiple of 64, but got shape {args[0].shape}"
+        raise RuntimeError(msg)
 
     op_module = get_view_op_module(_flash_attention_naive_prefill_op_module, view_recipes)
     return _dispatch_custom_kernel(op_module, view_args, view_recipes)
 
 
 class custom_rbln_flash_attention_naive_decode(torch.nn.Module):
-    def forward(self, *args, **kwargs):
+    def forward(self, *args, **_kwargs):
         scale = torch.tensor(1 / math.sqrt(args[0].size(-1)))
         call_args = [
             args[0],
@@ -349,15 +374,18 @@ _flash_attention_naive_decode_op_module = custom_rbln_flash_attention_naive_deco
 
 def flash_attention_naive_decode_rbln(*args, **kwargs):
     if len(args) < 9 or len(args) > 10:
-        raise RuntimeError(f"flash_attention_naive_decode takes 9 or 10 inputs (optional sinks), but got {len(args)}.")
+        msg = f"flash_attention_naive_decode takes 9 or 10 inputs (optional sinks), but got {len(args)}."
+        raise RuntimeError(msg)
 
-    assert args[3].size(-1) % 64 == 0, (
-        f"The last dimension of kv_cache must be a multiple of 64, but got shape {args[3].shape}"
-    )
+    if args[3].size(-1) % 64 != 0:
+        msg = f"The last dimension of kv_cache must be a multiple of 64, but got shape {args[3].shape}"
+        raise RuntimeError(msg)
 
-    (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
+    (view_args, _view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs)
 
-    assert args[0].size(-1) % 64 == 0
+    if args[0].size(-1) % 64 != 0:
+        msg = f"The last dimension of Query (q) must be a multiple of 64, but got shape {args[0].shape}"
+        raise RuntimeError(msg)
 
     op_module = get_view_op_module(_flash_attention_naive_decode_op_module, view_recipes)
     return _dispatch_custom_kernel(op_module, view_args, view_recipes)
@@ -376,12 +404,13 @@ def _materialize(t: torch.Tensor) -> torch.Tensor:
 def copy_strided_view_rbln(src, out) -> bool:
     """``out.copy_(src)`` for a strided device ``src``, as one compiled device program.
 
-    ``copy_``'s device->device path calls this instead of walking the copy one contiguous
-    run at a time. The view chain is replayed *inside* the compiled graph by the same
-    machinery every other view-aware op uses (``prepare_args_view_aware`` classifies it,
-    ``get_view_op_module`` replays it), so the device reads the base buffer and writes
-    ``out`` in one program -- no descriptor per run, no host round-trip. Nothing here is
-    specific to a permutation: whatever the detector can classify, this covers.
+    ``copy_``'s device->device path calls this instead of walking the copy one
+    contiguous run at a time. The view chain is replayed *inside* the compiled graph by
+    the same machinery every other view-aware op uses (``prepare_args_view_aware``
+    classifies it, ``get_view_op_module`` replays it), so the device reads the base
+    buffer and writes ``out`` in one program -- no descriptor per run, no host
+    round-trip. Nothing here is specific to a permutation: whatever the detector can
+    classify, this covers.
 
     Returns False when the detector cannot classify ``src``, leaving ``copy_`` on its
     existing route. That check has to happen before ``compile_and_run_view_aware``:
@@ -390,7 +419,7 @@ def copy_strided_view_rbln(src, out) -> bool:
     if _detect_view_recipe(src) is None:
         return False
     result = compile_and_run_view_aware(_materialize, "torch_rbln::copy_strided_view", (src,), {}, out)
-    if result is not None and result.data_ptr() != out.data_ptr():
+    if isinstance(result, torch.Tensor) and result.data_ptr() != out.data_ptr():
         # The compile path only writes the caller's buffer for dtypes in
         # SupportedDtypes.dispatch; otherwise it hands back its own. Both are contiguous
         # here, so this lands on copy_'s direct memcpy and cannot recurse.
@@ -398,7 +427,7 @@ def copy_strided_view_rbln(src, out) -> bool:
     return True
 
 
-rbln_custom_impl = torch.library.Library("rbln_custom_ops", "IMPL")  # noqa: TOR901
+rbln_custom_impl = torch.library.Library("rbln_custom_ops", "IMPL")
 rbln_custom_impl.impl("paged_attn_prefill", paged_attn_prefill_rbln, "PrivateUse1")
 rbln_custom_impl.impl("paged_attn_decode", paged_attn_decode_rbln, "PrivateUse1")
 rbln_custom_impl.impl("paged_causal_attn_prefill", paged_causal_attn_prefill_rbln, "PrivateUse1")
@@ -406,7 +435,7 @@ rbln_custom_impl.impl("paged_causal_attn_decode", paged_causal_attn_decode_rbln,
 rbln_custom_impl.impl("flash_attention_naive_prefill", flash_attention_naive_prefill_rbln, "PrivateUse1")
 rbln_custom_impl.impl("flash_attention_naive_decode", flash_attention_naive_decode_rbln, "PrivateUse1")
 
-# The schema is declared in RBLNRegisterOps.cpp, in the namespace this backend owns; only
-# the implementation lives here, because it drives the compile path.
-torch_rbln_impl = torch.library.Library("torch_rbln", "IMPL")  # noqa: TOR901
+# The schema is declared in RBLNRegisterOps.cpp, in the namespace this backend owns;
+# only the implementation lives here, because it drives the compile path.
+torch_rbln_impl = torch.library.Library("torch_rbln", "IMPL")
 torch_rbln_impl.impl("copy_strided_view", copy_strided_view_rbln, "PrivateUse1")

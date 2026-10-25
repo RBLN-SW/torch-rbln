@@ -47,7 +47,10 @@ class RBLNHostBatchTest : public ::testing::Test {
   }
 
   // Allocate device memory on `dev` and seed it from a host buffer.
-  void* AllocAndCopyFromHost(const void* host_data, size_t nbytes, c10::DeviceIndex dev = 0) {
+  void* AllocAndCopyFromHost(
+      const void* host_data,
+      size_t nbytes,
+      c10::DeviceIndex dev = 0) {
     auto* p = c10::rbln::malloc(dev, nbytes);
     EXPECT_NE(p, nullptr);
     c10::rbln::memcpy_h2v(p, host_data, nbytes);
@@ -126,10 +129,11 @@ TEST_F(RBLNHostBatchTest, H2VMultipleEntriesOneSubmit) {
   std::vector<std::vector<int8_t>> srcs;
   srcs.reserve(n_chunks);
   for (size_t i = 0; i < n_chunks; ++i) {
-    srcs.push_back(std::vector<int8_t>(chunk, static_cast<int8_t>(i + 1)));
+    srcs.emplace_back(chunk, static_cast<int8_t>(i + 1));
   }
   const auto dst_initial = std::vector<int8_t>(total, 0);
-  auto* dst = static_cast<int8_t*>(AllocAndCopyFromHost(dst_initial.data(), total));
+  auto* dst =
+      static_cast<int8_t*>(AllocAndCopyFromHost(dst_initial.data(), total));
 
   c10::rbln::H2VBatch batch;
   for (size_t i = 0; i < n_chunks; ++i) {
@@ -160,7 +164,8 @@ TEST_F(RBLNHostBatchTest, H2VLargeBatchExceedsV2VCap) {
     src_host[i] = static_cast<int8_t>((i * 31) % 127);
   }
   const auto dst_initial = std::vector<int8_t>(total, -1);
-  auto* dst = static_cast<int8_t*>(AllocAndCopyFromHost(dst_initial.data(), total));
+  auto* dst =
+      static_cast<int8_t*>(AllocAndCopyFromHost(dst_initial.data(), total));
 
   c10::rbln::H2VBatch batch;
   for (size_t i = 0; i < entries; ++i) {
@@ -306,7 +311,7 @@ TEST_F(RBLNHostBatchTest, V2HSingleFlatEnqueue) {
 }
 
 // Gather shape: N device slabs read into disjoint regions of one host buffer.
-// This is the direction lmcache's KV offload needs, and the one that currently
+// This is the direction LMCache's KV offload needs, and the one that currently
 // has no batched path at all.
 TEST_F(RBLNHostBatchTest, V2HGatherIntoOneHostBuffer) {
   constexpr size_t chunk = 96;
@@ -317,7 +322,8 @@ TEST_F(RBLNHostBatchTest, V2HGatherIntoOneHostBuffer) {
   for (size_t i = 0; i < total; ++i) {
     src_host[i] = static_cast<int8_t>((i * 17) % 127);
   }
-  auto* src = static_cast<int8_t*>(AllocAndCopyFromHost(src_host.data(), total));
+  auto* src =
+      static_cast<int8_t*>(AllocAndCopyFromHost(src_host.data(), total));
   std::vector<int8_t> dst(total, -1);
 
   c10::rbln::V2HBatch batch;
@@ -361,7 +367,8 @@ TEST_F(RBLNHostBatchTest, V2HLargeBatchExceedsV2VCap) {
   for (size_t i = 0; i < total; ++i) {
     src_host[i] = static_cast<int8_t>((i * 29) % 127);
   }
-  auto* src = static_cast<int8_t*>(AllocAndCopyFromHost(src_host.data(), total));
+  auto* src =
+      static_cast<int8_t*>(AllocAndCopyFromHost(src_host.data(), total));
   std::vector<int8_t> dst(total, -1);
 
   c10::rbln::V2HBatch batch;
@@ -395,9 +402,9 @@ TEST_F(RBLNHostBatchTest, V2HDestructorDoesNotFlush) {
 // Heterogeneous batches — split submit, not a host bounce (no v2v equivalent)
 // ---------------------------------------------------------------------------
 
-// One h2v batch spanning two devices. Host memory is reachable from both, so the
-// batch splits per destination device and every slab must still land. A dropped
-// group would leave one destination at its seed value.
+// One h2v batch spanning two devices. Host memory is reachable from both, so
+// the batch splits per destination device and every slab must still land. A
+// dropped group would leave one destination at its seed value.
 TEST_F(RBLNHostBatchTest, H2VCrossDeviceSplitSubmit) {
   if (c10::rbln::get_device_count() < 2) {
     GTEST_SKIP() << "cross-device batch requires at least 2 devices";
@@ -473,14 +480,16 @@ TEST_F(RBLNHostBatchTest, ScatterThenGatherRoundTrip) {
   constexpr int64_t block_bytes = 64;
   constexpr int64_t dev_pitch = 96; // device blocks padded
   constexpr size_t dev_total = static_cast<size_t>(blocks * layers * dev_pitch);
-  constexpr size_t host_total = static_cast<size_t>(blocks * layers * block_bytes);
+  constexpr size_t host_total =
+      static_cast<size_t>(blocks * layers * block_bytes);
 
   std::vector<int8_t> host_src(host_total);
   for (size_t i = 0; i < host_total; ++i) {
     host_src[i] = static_cast<int8_t>((i * 23 + 5) % 127);
   }
   const auto seed = std::vector<int8_t>(dev_total, -1);
-  auto* dev = static_cast<int8_t*>(AllocAndCopyFromHost(seed.data(), dev_total));
+  auto* dev =
+      static_cast<int8_t*>(AllocAndCopyFromHost(seed.data(), dev_total));
 
   // Scatter: one entry per (block, layer), host contiguous -> device padded.
   {
@@ -488,7 +497,10 @@ TEST_F(RBLNHostBatchTest, ScatterThenGatherRoundTrip) {
     for (int64_t b = 0; b < blocks; ++b) {
       for (int64_t l = 0; l < layers; ++l) {
         const auto idx = b * layers + l;
-        batch.enqueue(dev + idx * dev_pitch, host_src.data() + idx * block_bytes, static_cast<size_t>(block_bytes));
+        batch.enqueue(
+            dev + idx * dev_pitch,
+            host_src.data() + idx * block_bytes,
+            static_cast<size_t>(block_bytes));
       }
     }
     EXPECT_EQ(batch.pending_count(), static_cast<size_t>(blocks * layers));
@@ -502,7 +514,10 @@ TEST_F(RBLNHostBatchTest, ScatterThenGatherRoundTrip) {
     for (int64_t b = 0; b < blocks; ++b) {
       for (int64_t l = 0; l < layers; ++l) {
         const auto idx = b * layers + l;
-        batch.enqueue(host_dst.data() + idx * block_bytes, dev + idx * dev_pitch, static_cast<size_t>(block_bytes));
+        batch.enqueue(
+            host_dst.data() + idx * block_bytes,
+            dev + idx * dev_pitch,
+            static_cast<size_t>(block_bytes));
       }
     }
     batch.submit();
@@ -515,7 +530,8 @@ TEST_F(RBLNHostBatchTest, ScatterThenGatherRoundTrip) {
   for (int64_t idx = 0; idx < blocks * layers; ++idx) {
     for (int64_t off = block_bytes; off < dev_pitch; ++off) {
       EXPECT_EQ(dev_after[static_cast<size_t>(idx * dev_pitch + off)], -1)
-          << "scatter wrote past the payload at block-slot " << idx << " offset " << off;
+          << "scatter wrote past the payload at block-slot " << idx
+          << " offset " << off;
     }
   }
 

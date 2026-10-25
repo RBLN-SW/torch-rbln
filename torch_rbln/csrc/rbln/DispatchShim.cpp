@@ -9,6 +9,7 @@
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNSupportedDtypes.h>
+#include <c10/util/ScopeExit.h>
 #include <torch/csrc/jit/python/pybind_utils.h>
 #include <torch/library.h>
 
@@ -35,17 +36,21 @@ namespace torch_rbln::shim {
 // ---------------------------------------------------------------------------
 namespace {
 std::atomic<uint64_t> g_diag_n_total{0}; // total generic_shim_boxed invocations
-std::atomic<uint64_t> g_diag_n_fallback{0}; // would_fallback=true → cpu_fallback_rbln
+std::atomic<uint64_t> g_diag_n_fallback{
+    0}; // would_fallback=true → cpu_fallback_rbln
 std::atomic<uint64_t> g_diag_n_warm_hit{0}; // warm-cache fast path hit
 std::atomic<uint64_t> g_diag_n_miss{0}; // Python compile (miss) path
-std::atomic<uint64_t> g_diag_ns_warm_hit{0}; // total ns inside warm-cache hit path
+std::atomic<uint64_t> g_diag_ns_warm_hit{
+    0}; // total ns inside warm-cache hit path
 std::atomic<uint64_t> g_diag_ns_miss{0}; // total ns inside miss path
-std::atomic<uint64_t> g_diag_ns_fallback{0}; // total ns inside cpu_fallback_rbln (the COST, not just count)
+std::atomic<uint64_t> g_diag_ns_fallback{
+    0}; // total ns inside cpu_fallback_rbln (the COST, not just count)
 // cpu_fallback reason histogram. index = reason code from quick_fallback_check
 // (1=dtype-not-fp16, 2=nan/inf input, 3=all-scalar). Bumped on the fallback
 // branch only (the reason is already computed there) -> ON==OFF preserved.
 std::array<std::atomic<uint64_t>, 4> g_fallback_reason{};
-std::atomic<uint64_t> g_diag_n_align_fastpath{0}; // align fast-path hits → cpu_fallback
+std::atomic<uint64_t> g_diag_n_align_fastpath{
+    0}; // align fast-path hits → cpu_fallback
 
 // Warm-cache hit path per-segment timers. Accumulated only on successful hits
 // so per-segment averages = ns_X / n_hits give the steady-state breakdown.
@@ -58,7 +63,8 @@ std::atomic<uint64_t> g_diag_warm_ns_run{0};
 std::atomic<uint64_t> g_diag_warm_ns_finalize{0};
 } // namespace
 
-std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t> diag_dump_dispatch_paths() {
+std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>
+diag_dump_dispatch_paths() {
   return std::make_tuple(
       g_diag_n_total.load(std::memory_order_relaxed),
       g_diag_n_fallback.load(std::memory_order_relaxed),
@@ -84,7 +90,8 @@ void diag_reset_dispatch_paths() {
   g_diag_n_align_fastpath.store(0, std::memory_order_relaxed);
 }
 
-std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t> diag_dump_warm_segments() {
+std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>
+diag_dump_warm_segments() {
   return std::make_tuple(
       g_diag_warm_n_hits.load(std::memory_order_relaxed),
       g_diag_warm_ns_lookup.load(std::memory_order_relaxed),
@@ -108,7 +115,8 @@ void diag_reset_warm_segments() {
 namespace {
 
 inline uint64_t now_ns() {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
       .count();
 }
 
@@ -133,16 +141,17 @@ struct SchemaCache {
   std::vector<c10::TypePtr> return_types; // parallel to schema returns
   bool populated = false;
   bool is_align_sensitive = false; // op name in align_sensitive_ops() set
-  bool is_broadcast_op = false; // op may broadcast tensor args (mul/add/sub/...).
-                                // When true, ``try_warmcache_hit`` decides
-                                // per-call (via ``needs_last_dim_one_broadcast``)
-                                // whether to materialize the post-broadcast
-                                // contig buffers before passing data_ptrs to
-                                // input binding. ``build_cache_key`` always
-                                // uses RAW input shapes regardless — keying on
-                                // post-broadcast shapes earlier caused
-                                // (4,8,16)+() and (4,8,16)+(4,8,1) to collide
-                                // on a single key (2026-04-30).
+  bool is_broadcast_op = false; // op may broadcast tensor args
+                                // (mul/add/sub/...). When true,
+                                // ``try_warmcache_hit`` decides per-call (via
+                                // ``needs_last_dim_one_broadcast``) whether to
+                                // materialize the post-broadcast contig buffers
+                                // before passing data_ptrs to input binding.
+                                // ``build_cache_key`` always uses RAW input
+                                // shapes regardless — keying on post-broadcast
+                                // shapes earlier caused (4,8,16)+() and
+                                // (4,8,16)+(4,8,1) to collide on a single key
+                                // (2026-04-30).
 };
 
 struct ShimEntry {
@@ -151,8 +160,8 @@ struct ShimEntry {
   SchemaCache schema_cache; // lazily filled
   const char* op_name_intern = nullptr; // stable pointer for WarmCache keys
   // Cached pointer into fallback_by_op() for this op; bumped lock-free on the
-  // already-slow fallback branch. Raw ptr keeps ShimEntry an aggregate / movable
-  // (the registry stores it by value via move-assign).
+  // already-slow fallback branch. Raw ptr keeps ShimEntry an aggregate /
+  // movable (the registry stores it by value via move-assign).
   std::atomic<uint64_t>* fallback_ctr = nullptr;
   // Same idea for the warm-cache miss (recompile) path -> recompile_by_op().
   std::atomic<uint64_t>* recompile_ctr = nullptr;
@@ -188,22 +197,27 @@ std::mutex& registry_mutex() {
 // branch. Populated/looked-up under registry_mutex at register time (import,
 // before any dispatch); survives op re-registration. Leaky singleton to match
 // registry() teardown semantics.
-std::unordered_map<const char*, std::unique_ptr<std::atomic<uint64_t>>>& fallback_by_op() {
-  static auto* m = new std::unordered_map<const char*, std::unique_ptr<std::atomic<uint64_t>>>();
+std::unordered_map<const char*, std::unique_ptr<std::atomic<uint64_t>>>&
+fallback_by_op() {
+  static auto* m = new std::
+      unordered_map<const char*, std::unique_ptr<std::atomic<uint64_t>>>();
   return *m;
 }
 
 // Per-op warm-cache MISS (recompile) counts. Same scheme as fallback_by_op():
 // the bump lives on the already-slow miss branch (Python compile), so it does
 // not touch the warm-cache hit fast path.
-std::unordered_map<const char*, std::unique_ptr<std::atomic<uint64_t>>>& recompile_by_op() {
-  static auto* m = new std::unordered_map<const char*, std::unique_ptr<std::atomic<uint64_t>>>();
+std::unordered_map<const char*, std::unique_ptr<std::atomic<uint64_t>>>&
+recompile_by_op() {
+  static auto* m = new std::
+      unordered_map<const char*, std::unique_ptr<std::atomic<uint64_t>>>();
   return *m;
 }
 
-// (A) WHERE: opt-in Python call-site capture. OFF by default -> default explain()
-// is byte-identical overhead. When on, capture the user's call-site for an op
-// ONCE (deduped per op), and ONLY on the already-slow fallback / miss branch.
+// (A) WHERE: opt-in Python call-site capture. OFF by default -> default
+// explain() is byte-identical overhead. When on, capture the user's call-site
+// for an op ONCE (deduped per op), and ONLY on the already-slow fallback / miss
+// branch.
 std::atomic<bool> g_trace_enabled{false};
 std::mutex& trace_mutex() {
   static std::mutex m;
@@ -229,7 +243,8 @@ void capture_site(const std::string& op_name) {
   pybind11::gil_scoped_acquire gil;
   std::string site;
   try {
-    pybind11::list stack = pybind11::module_::import("traceback").attr("extract_stack")();
+    pybind11::list stack =
+        pybind11::module_::import("traceback").attr("extract_stack")();
     const auto n = static_cast<pybind11::ssize_t>(pybind11::len(stack));
     int shown = 0;
     for (pybind11::ssize_t i = n - 1; i >= 0 && shown < 2; --i) {
@@ -238,7 +253,8 @@ void capture_site(const std::string& op_name) {
       const long lineno = fr.attr("lineno").cast<long>();
       const std::string func = pybind11::str(fr.attr("name"));
       const auto slash = fname.rfind('/');
-      const std::string base = (slash == std::string::npos) ? fname : fname.substr(slash + 1);
+      const std::string base =
+          (slash == std::string::npos) ? fname : fname.substr(slash + 1);
       if (!site.empty()) {
         site += " <- ";
       }
@@ -264,7 +280,9 @@ ShimEntry* find_shim_entry(const std::string& op_name) {
   return it != r.end() ? &it->second : nullptr;
 }
 
-void populate_schema_cache(SchemaCache& cache, const c10::FunctionSchema& schema) {
+void populate_schema_cache(
+    SchemaCache& cache,
+    const c10::FunctionSchema& schema) {
   const auto& args = schema.arguments();
   const auto& returns = schema.returns();
   cache.num_args = args.size();
@@ -307,7 +325,9 @@ bool is_skipped_arg(const std::vector<size_t>& skip_list, size_t i) {
 // cache when compiled for a contig + offset=0 input layout. Matches
 // PyTorch's ``Tensor::is_contiguous()`` conventions: zero-numel tensors are
 // always contiguous, size-1 dims have a free stride.
-bool is_contiguous_row_major(c10::ArrayRef<int64_t> shape, c10::ArrayRef<int64_t> strides) noexcept {
+bool is_contiguous_row_major(
+    c10::ArrayRef<int64_t> shape,
+    c10::ArrayRef<int64_t> strides) noexcept {
   if (shape.size() != strides.size()) {
     return false;
   }
@@ -333,7 +353,7 @@ bool is_contiguous_row_major(c10::ArrayRef<int64_t> shape, c10::ArrayRef<int64_t
 // Align-penalty fast-path
 //
 // RBLN device requires last-dim aligned to 64. When an op's output has
-// last-dim not divisible by 64, rebel-compiler inserts host pad/depad nodes
+// last-dim not divisible by 64, `rebel-compiler` inserts host pad/depad nodes
 // (RblnTensorPadLastDim + RblnTensorWrapHostOps passes) on the op graph,
 // producing the chain: host pad → H2D → device → D2H → host depad. For small
 // tensors (decode workloads), per-call cost is dominated by this
@@ -358,47 +378,47 @@ bool is_contiguous_row_major(c10::ArrayRef<int64_t> shape, c10::ArrayRef<int64_t
 //   - cat / index ops: not in shim path anyway.
 //
 // Criterion: check OUT tensor's last-dim (post-broadcast result shape),
-// since for binary ops the result shape may be aligned even if one input is
-// not (e.g. `mul([B,S,64], [1,1,32]) → [B,S,64]` — device wins, no align
-// penalty).
+// since for binary ops the result shape may be aligned even if one input is not
+// (e.g. `mul([B,S,64], [1,1,32]) → [B,S,64]` — device wins, no align penalty).
 const std::unordered_set<std::string>& align_sensitive_ops() {
-  static const std::unordered_set<std::string>* s = new std::unordered_set<std::string>{
-      // Unary elementwise
-      "aten::neg.out",
-      "aten::abs.out",
-      "aten::log.out",
-      "aten::sigmoid.out",
-      "aten::silu.out",
-      "aten::rsqrt.out",
-      "aten::ceil.out",
-      "aten::floor.out",
-      "aten::logical_not.out",
-      "aten::pow.Tensor_Scalar_out",
-      "aten::clamp.out",
-      // Binary elementwise (broadcast-aware via OUT tensor check)
-      "aten::add.out",
-      "aten::sub.out",
-      "aten::mul.out",
-      "aten::div.out",
-      "aten::div.out_mode",
-      "aten::maximum.out",
-      "aten::minimum.out",
-      // Comparisons (output is bool but shape mirrors broadcast)
-      "aten::ne.Tensor_out",
-      "aten::eq.Tensor_out",
-      "aten::gt.Tensor_out",
-      "aten::ge.Tensor_out",
-      "aten::lt.Tensor_out",
-      "aten::le.Tensor_out",
-      "aten::ne.Scalar_out",
-      "aten::eq.Scalar_out",
-      "aten::gt.Scalar_out",
-      "aten::ge.Scalar_out",
-      "aten::lt.Scalar_out",
-      "aten::le.Scalar_out",
-      // Ternary (cond, self, other) — output shape is broadcast
-      "aten::where.self_out",
-  };
+  static const std::unordered_set<std::string>* s =
+      new std::unordered_set<std::string>{
+          // Unary elementwise
+          "aten::neg.out",
+          "aten::abs.out",
+          "aten::log.out",
+          "aten::sigmoid.out",
+          "aten::silu.out",
+          "aten::rsqrt.out",
+          "aten::ceil.out",
+          "aten::floor.out",
+          "aten::logical_not.out",
+          "aten::pow.Tensor_Scalar_out",
+          "aten::clamp.out",
+          // Binary elementwise (broadcast-aware via OUT tensor check)
+          "aten::add.out",
+          "aten::sub.out",
+          "aten::mul.out",
+          "aten::div.out",
+          "aten::div.out_mode",
+          "aten::maximum.out",
+          "aten::minimum.out",
+          // Comparisons (output is bool but shape mirrors broadcast)
+          "aten::ne.Tensor_out",
+          "aten::eq.Tensor_out",
+          "aten::gt.Tensor_out",
+          "aten::ge.Tensor_out",
+          "aten::lt.Tensor_out",
+          "aten::le.Tensor_out",
+          "aten::ne.Scalar_out",
+          "aten::eq.Scalar_out",
+          "aten::gt.Scalar_out",
+          "aten::ge.Scalar_out",
+          "aten::lt.Scalar_out",
+          "aten::le.Scalar_out",
+          // Ternary (cond, self, other) — output shape is broadcast
+          "aten::where.self_out",
+      };
   return *s;
 }
 
@@ -418,33 +438,36 @@ const std::unordered_set<std::string>& align_sensitive_ops() {
 // Python wrapper passed RAW to ``compile_rbln_cached`` so the runtime was
 // compiled for the pre-broadcast layout (e.g. RMSNorm ``(B,S,H) * (H,)``).
 const std::unordered_set<std::string>& broadcast_ops() {
-  static const std::unordered_set<std::string>* s = new std::unordered_set<std::string>{
-      "aten::add.out",
-      "aten::sub.out",
-      "aten::mul.out",
-      "aten::div.out",
-      "aten::div.out_mode",
-      "aten::maximum.out",
-      "aten::minimum.out",
-      "aten::ne.Tensor_out",
-      "aten::eq.Tensor_out",
-      "aten::gt.Tensor_out",
-      "aten::ge.Tensor_out",
-      "aten::lt.Tensor_out",
-      "aten::le.Tensor_out",
-      "aten::where.self_out",
-  };
+  static const std::unordered_set<std::string>* s =
+      new std::unordered_set<std::string>{
+          "aten::add.out",
+          "aten::sub.out",
+          "aten::mul.out",
+          "aten::div.out",
+          "aten::div.out_mode",
+          "aten::maximum.out",
+          "aten::minimum.out",
+          "aten::ne.Tensor_out",
+          "aten::eq.Tensor_out",
+          "aten::gt.Tensor_out",
+          "aten::ge.Tensor_out",
+          "aten::lt.Tensor_out",
+          "aten::le.Tensor_out",
+          "aten::where.self_out",
+      };
   return *s;
 }
 
 // Mirror of ``ops_utils._has_last_dim_size_one_broadcast`` for the warm-hit
 // path. Returns true when ANY non-write-alias tensor input has
 // ``shape[-1] == 1`` while the broadcast result has ``shape[-1] > 1`` — the
-// pattern rebel-compiler raises ``UNEXPECTED_GRAPH`` on (e.g.
+// pattern `rebel-compiler` raises `UNEXPECTED_GRAPH` on (e.g.
 // ``output(N,D) * K(N,1)`` from softmax/layernorm backward).
 //
 // Cheap: walks each tensor's last-dim once, no allocation.
-bool needs_last_dim_one_broadcast(torch::jit::Stack* stack, const SchemaCache& cache) {
+bool needs_last_dim_one_broadcast(
+    torch::jit::Stack* stack,
+    const SchemaCache& cache) {
   auto args = torch::jit::last(stack, cache.num_args);
   int64_t out_last = 0;
   bool any_size_one = false;
@@ -464,7 +487,9 @@ bool needs_last_dim_one_broadcast(torch::jit::Stack* stack, const SchemaCache& c
   return any_size_one && out_last > 1;
 }
 
-bool align_penalty_fast_path_check(torch::jit::Stack* stack, const SchemaCache& cache) {
+bool align_penalty_fast_path_check(
+    torch::jit::Stack* stack,
+    const SchemaCache& cache) {
   if (!cache.is_align_sensitive) {
     return false;
   }
@@ -498,10 +523,10 @@ bool align_penalty_fast_path_check(torch::jit::Stack* stack, const SchemaCache& 
 // Deploy / nan_inf-disable gates
 // ---------------------------------------------------------------------------
 //
-// Contract: read live from the environment on every call (NOT process-cached), so both flags
-// are runtime-dynamic. The per-call getenv is negligible against op-dispatch cost. Reading
-// live also keeps per-test env toggles from latching a value into a long-lived worker process
-// (see docs/CONFIGURATION.md).
+// Contract: read live from the environment on every call (NOT process-cached),
+// so both flags are runtime-dynamic. The per-call read is negligible against
+// op-dispatch cost. Reading live also keeps per-test env toggles from latching
+// a value into a long-lived worker process (see docs/CONFIGURATION.md).
 bool is_deploy_mode() {
   const char* env = std::getenv("TORCH_RBLN_DEPLOY");
   return env != nullptr && std::strcmp(env, "ON") == 0;
@@ -610,31 +635,35 @@ bool tensor_has_nan_or_inf(const at::Tensor& t) {
   if (ptr == nullptr)
     return false;
 
-  const size_t nbytes = static_cast<size_t>(t.nbytes());
+  const size_t nbytes = t.nbytes();
   if (nbytes == 0)
     return false;
 
-  // Borrow can be rejected for some runtime sub-states (see try_borrow_host_ptr);
-  // fall back to a D2H copy and scan that — same answer, at the cost of a copy.
+  // Borrow can be rejected for some runtime sub-states (see
+  // try_borrow_host_ptr); fall back to a D2H copy and scan that — same answer,
+  // at the cost of a copy.
   auto borrowed = c10::rbln::try_borrow_host_ptr(ptr, nbytes);
   if (!borrowed) {
     const at::Tensor cpu_copy = t.cpu();
-    const uint16_t* host_data = static_cast<const uint16_t*>(cpu_copy.data_ptr());
+    const uint16_t* host_data =
+        static_cast<const uint16_t*>(cpu_copy.data_ptr());
     if (host_data == nullptr)
       return false;
     return scanner(host_data, n);
   }
-  void* host_raw = reinterpret_cast<void*>(borrowed->host_ptr); // NOLINT(performance-no-int-to-ptr)
+  // NOLINTNEXTLINE(performance-no-int-to-ptr)
+  void* host_raw = reinterpret_cast<void*>(borrowed->host_ptr);
   const bool found = scanner(static_cast<const uint16_t*>(host_raw), n);
   c10::rbln::return_borrowed(borrowed->borrow_id, /*updated=*/false);
   return found;
 }
 
-// A Python number that PyTorch wrapped into a 0-dim CPU tensor (``tensor + 1``).
-// The pybind boundary unwraps it back into a Python scalar and the Python
-// wrapper compiles it as a graph constant, so the runtime never sees it as an
-// input. The warm cache keys it by value -- ``a + 1`` and ``a + 2`` are
-// different programs -- and leaves it out of the device inputs on the hit path.
+// A Python number that PyTorch wrapped into a 0-dim CPU tensor
+// (``tensor + 1``). The pybind boundary unwraps it back into a Python scalar
+// and the Python wrapper compiles it as a graph constant, so the runtime never
+// sees it as an input. The warm cache keys it by value -- ``a + 1`` and
+// ``a + 2`` are different programs -- and leaves it out of the device inputs on
+// the hit path.
 inline bool is_wrapped_scalar(const at::Tensor& t) {
   return t.dim() == 0 && t.unsafeGetTensorImpl()->is_wrapped_number();
 }
@@ -676,14 +705,15 @@ inline std::optional<ScalarValue> wrapped_scalar_value(const at::Tensor& t) {
 // would force the shortcut for the most common binary-op-with-python-scalar
 // case and bypass the compile-path that the test suite expects.
 // Returns 0 = no fallback, else the reason code (1=dtype-not-fp16, 2=nan/inf
-// input, 3=all-scalar). The reason is already decided here; returning it instead
-// of a bool lets the caller attribute WHY at zero extra cost.
+// input, 3=all-scalar). The reason is already decided here; returning it
+// instead of a bool lets the caller attribute WHY at zero extra cost.
 int quick_fallback_check(
     torch::jit::Stack* stack,
     const SchemaCache& cache,
     const std::vector<size_t>& skip_dtype_args) {
   auto args = torch::jit::last(stack, cache.num_args);
-  const bool nan_inf_scan_enabled = !is_deploy_mode() && !is_nan_inf_check_disabled();
+  const bool nan_inf_scan_enabled =
+      !is_deploy_mode() && !is_nan_inf_check_disabled();
   bool has_input_tensor = false;
   bool all_input_scalar = true;
   bool nan_inf_found = false;
@@ -705,8 +735,8 @@ int quick_fallback_check(
     // NaN/Inf in any defined non-write-alias input — including wrapped
     // 0-dim values such as ``tensor + math.nan``. tensor_has_nan_or_inf
     // internally filters out dtypes outside the dispatch catalog (catalog
-    // dtypes — fp16/bf16 — are the ones that can encode NaN/Inf on the
-    // shim path).
+    // dtypes — fp16/bf16 — are the ones that can encode NaN/Inf on the shim
+    // path).
     if (nan_inf_scan_enabled && !nan_inf_found && tensor_has_nan_or_inf(t)) {
       nan_inf_found = true;
     }
@@ -738,7 +768,8 @@ int quick_fallback_check(
   if (nan_inf_found) {
     return 2; // nan/inf in input (non-deploy debug scan)
   }
-  return (has_input_tensor && all_input_scalar) ? 3 : 0; // 3 = all-scalar inputs
+  return (has_input_tensor && all_input_scalar) ? 3
+                                                : 0; // 3 = all-scalar inputs
 }
 
 // ---------------------------------------------------------------------------
@@ -772,7 +803,9 @@ ScalarValue ival_to_scalar(const c10::IValue& iv) {
 // Cheap pre-check: do tensor inputs already share the same shape? If yes,
 // broadcast is a no-op — skip at::broadcast_tensors entirely (which has
 // non-trivial overhead even in the no-op case from input validation).
-inline bool all_input_shapes_equal(torch::jit::Stack* stack, const SchemaCache& cache) {
+inline bool all_input_shapes_equal(
+    torch::jit::Stack* stack,
+    const SchemaCache& cache) {
   auto arguments = torch::jit::last(stack, cache.num_args);
   c10::IntArrayRef ref_shape;
   bool ref_set = false;
@@ -893,7 +926,10 @@ PendingInstall take_pending() {
 //                        (b) a freshly allocated tensor per the cached profile
 // Extended support (TensorLists, multi-output) can be added with parallel
 // codepaths — they're not on any shim op today.
-bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const CacheKey& key) {
+bool try_warmcache_hit(
+    torch::jit::Stack* stack,
+    const SchemaCache& cache,
+    const CacheKey& key) {
   auto& wc = WarmCache::instance();
   if (!wc.is_enabled() || WarmCache::is_building_entry())
     return false;
@@ -920,7 +956,8 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
   uint32_t in_idx = 0;
   auto bind_input = [&](const void* ptr) {
     in_idx_buf.push_back(in_idx++);
-    in_vaddr_buf.push_back(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ptr)));
+    in_vaddr_buf.push_back(
+        static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ptr)));
   };
 
   // For broadcast ops: collect raw tensor inputs first, broadcast all at once,
@@ -942,8 +979,9 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
   //   like RMSNorm ``(B,S,H) * (H,)`` the runtime was compiled for raw shapes
   //   in the Python wrapper, so we skip the materialization (~600 ms / step
   //   on LLaMA-1B prefill).
-  const bool needs_broadcast =
-      cache.is_broadcast_op && !all_input_shapes_equal(stack, cache) && needs_last_dim_one_broadcast(stack, cache);
+  const bool needs_broadcast = cache.is_broadcast_op &&
+      !all_input_shapes_equal(stack, cache) &&
+      needs_last_dim_one_broadcast(stack, cache);
   if (needs_broadcast) {
     std::vector<at::Tensor> raw_args;
     raw_args.reserve(cache.num_args);
@@ -1053,7 +1091,8 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
   // resize-with-warning.
   if (out_tensor.defined() && !entry->out_profiles.empty()) {
     const auto& cached_shape = entry->out_profiles[0].shape;
-    if (out_tensor.sizes() != at::IntArrayRef(cached_shape.data(), cached_shape.size())) {
+    if (out_tensor.sizes() !=
+        at::IntArrayRef(cached_shape.data(), cached_shape.size())) {
       return false;
     }
   }
@@ -1070,7 +1109,8 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
     if (!key.inputs.empty())
       dev_idx = key.inputs.front().device_index;
     auto device = c10::Device(c10::DeviceType::PrivateUse1, dev_idx);
-    out_tensor = at::empty(op0.shape, at::TensorOptions().dtype(op0.dtype).device(device));
+    out_tensor = at::empty(
+        op0.shape, at::TensorOptions().dtype(op0.dtype).device(device));
   }
 
   void* out_ptr = out_tensor.data_ptr();
@@ -1079,7 +1119,8 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
     return false;
   }
   const uint32_t out_idx = 0;
-  const uint64_t out_vaddr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(out_ptr));
+  const uint64_t out_vaddr =
+      static_cast<uint64_t>(reinterpret_cast<uintptr_t>(out_ptr));
 
   const uint64_t _seg_t_io_build = now_ns();
 
@@ -1109,7 +1150,9 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
                          /*host_ptr=*/nullptr,
                          /*host_count=*/0) != RBLNRetCode_SUCCESS;
   }
-  runtime_failed = (rbln_rt_end_io_patch_batch(entry->runtime) != RBLNRetCode_SUCCESS) || runtime_failed;
+  runtime_failed =
+      (rbln_rt_end_io_patch_batch(entry->runtime) != RBLNRetCode_SUCCESS) ||
+      runtime_failed;
   const uint64_t _seg_t_prep_out = now_ns();
   if (!runtime_failed) {
     runtime_failed = rbln_rt_run(entry->runtime) != RBLNRetCode_SUCCESS;
@@ -1132,17 +1175,25 @@ bool try_warmcache_hit(torch::jit::Stack* stack, const SchemaCache& cache, const
   const uint64_t _seg_t_finalize = now_ns();
 
   g_diag_warm_n_hits.fetch_add(1, std::memory_order_relaxed);
-  g_diag_warm_ns_lookup.fetch_add(_seg_t_lookup - _seg_t0, std::memory_order_relaxed);
-  g_diag_warm_ns_io_build.fetch_add(_seg_t_io_build - _seg_t_lookup, std::memory_order_relaxed);
-  g_diag_warm_ns_prep_in.fetch_add(_seg_t_prep_in - _seg_t_io_build, std::memory_order_relaxed);
-  g_diag_warm_ns_prep_out.fetch_add(_seg_t_prep_out - _seg_t_prep_in, std::memory_order_relaxed);
-  g_diag_warm_ns_run.fetch_add(_seg_t_run - _seg_t_prep_out, std::memory_order_relaxed);
-  g_diag_warm_ns_finalize.fetch_add(_seg_t_finalize - _seg_t_run, std::memory_order_relaxed);
+  g_diag_warm_ns_lookup.fetch_add(
+      _seg_t_lookup - _seg_t0, std::memory_order_relaxed);
+  g_diag_warm_ns_io_build.fetch_add(
+      _seg_t_io_build - _seg_t_lookup, std::memory_order_relaxed);
+  g_diag_warm_ns_prep_in.fetch_add(
+      _seg_t_prep_in - _seg_t_io_build, std::memory_order_relaxed);
+  g_diag_warm_ns_prep_out.fetch_add(
+      _seg_t_prep_out - _seg_t_prep_in, std::memory_order_relaxed);
+  g_diag_warm_ns_run.fetch_add(
+      _seg_t_run - _seg_t_prep_out, std::memory_order_relaxed);
+  g_diag_warm_ns_finalize.fetch_add(
+      _seg_t_finalize - _seg_t_run, std::memory_order_relaxed);
   return true;
 }
 
 // The boxed kernel that Library::impl points at for every shimmed op.
-void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack) {
+void generic_shim_boxed(
+    const c10::OperatorHandle& op,
+    torch::jit::Stack* stack) {
   g_diag_n_total.fetch_add(1, std::memory_order_relaxed);
   // Build the fully-qualified key as "<namespace>::<name>[.overload]" so it
   // matches what register_cpp_shim stored (e.g. "aten::add.out").
@@ -1156,15 +1207,18 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
   {
     std::lock_guard<std::mutex> lk(registry_mutex());
     entry = find_shim_entry(op_name);
-    TORCH_CHECK(entry != nullptr, "No Python impl registered for shim op: ", op_name);
+    TORCH_CHECK(
+        entry != nullptr, "No Python impl registered for shim op: ", op_name);
     if (!entry->schema_cache.populated) {
       populate_schema_cache(entry->schema_cache, op.schema());
       // Populate align-sensitive flag once per op (avoids per-call string
       // allocation + unordered_set lookup in the hot path).
       const auto& align_set = align_sensitive_ops();
-      entry->schema_cache.is_align_sensitive = (align_set.find(op_name) != align_set.end());
+      entry->schema_cache.is_align_sensitive =
+          (align_set.find(op_name) != align_set.end());
       const auto& bcast_set = broadcast_ops();
-      entry->schema_cache.is_broadcast_op = (bcast_set.find(op_name) != bcast_set.end());
+      entry->schema_cache.is_broadcast_op =
+          (bcast_set.find(op_name) != bcast_set.end());
     }
   }
 
@@ -1185,29 +1239,34 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
   // path and get bit-different fp16 rounding than the surrounding
   // RBLN-compiled ops produce.
   //
-  // Earlier bugs that motivated disabling this shortcut have been fixed at
-  // the borrow site: write-alias args are skipped from the borrow loop and
-  // the borrow_resize_case is gated on contiguity (see RBLNCPUFallback.cpp).
+  // Earlier bugs that motivated disabling this shortcut have been fixed at the
+  // borrow site: write-alias args are skipped from the borrow loop and the
+  // borrow_resize_case is gated on contiguity (see RBLNCPUFallback.cpp).
   const int fb_reason = quick_fallback_check(stack, cache, skip_dtype_args);
   if (fb_reason != 0) {
     g_diag_n_fallback.fetch_add(1, std::memory_order_relaxed);
-    g_fallback_reason[fb_reason].fetch_add(1, std::memory_order_relaxed); // WHY (same slow branch)
+    g_fallback_reason[fb_reason].fetch_add(
+        1, std::memory_order_relaxed); // WHY (same slow branch)
     if (entry->fallback_ctr != nullptr) {
-      entry->fallback_ctr->fetch_add(1, std::memory_order_relaxed); // per-op attribution (same slow branch)
+      entry->fallback_ctr->fetch_add(
+          1,
+          std::memory_order_relaxed); // per-op attribution (same slow branch)
     }
     if (g_trace_enabled.load(std::memory_order_relaxed)) {
-      capture_site(op_name); // (A) WHERE: opt-in, deduped, GIL-safe; off by default
+      capture_site(
+          op_name); // (A) WHERE: opt-in, deduped, GIL-safe; off by default
     }
     // Same log the ``fallback_rbln`` handler emits for an unsupported op. The
     // shortcut below decides a fallback the Python wrapper would otherwise have
-    // decided and logged, so without this the ops it covers -- add, mul, matmul,
-    // the reductions -- are the only ones whose CPU fallback leaves no trace at
-    // any log level.
+    // decided and logged, so without this the ops it covers -- add, mul,
+    // matmul, the reductions -- are the only ones whose CPU fallback leaves no
+    // trace at any log level.
     c10::rbln::log_cpu_fallback(op.schema().name());
     const uint64_t _fb_t0 = now_ns();
     ::at::native::rbln::cpu_fallback_rbln(op, stack);
-    // COST of the fallback (wall ns), so the report can tell "many cheap fallbacks
-    // (path overhead)" from "few expensive ones (hidden transfer)". Same slow branch.
+    // COST of the fallback (wall ns), so the report can tell "many cheap
+    // fallbacks (path overhead)" from "few expensive ones (hidden transfer)".
+    // Same slow branch.
     g_diag_ns_fallback.fetch_add(now_ns() - _fb_t0, std::memory_order_relaxed);
     return;
   }
@@ -1235,7 +1294,8 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
     const bool hit = try_warmcache_hit(stack, cache, key);
     if (hit) {
       g_diag_n_warm_hit.fetch_add(1, std::memory_order_relaxed);
-      g_diag_ns_warm_hit.fetch_add(now_ns() - _diag_warm_t0, std::memory_order_relaxed);
+      g_diag_ns_warm_hit.fetch_add(
+          now_ns() - _diag_warm_t0, std::memory_order_relaxed);
       return;
     }
   }
@@ -1247,18 +1307,19 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
   // into subsequent unrelated ops on the same thread.
   g_diag_n_miss.fetch_add(1, std::memory_order_relaxed);
   if (entry->recompile_ctr != nullptr) {
-    entry->recompile_ctr->fetch_add(1, std::memory_order_relaxed); // per-op attribution (same slow miss branch)
+    entry->recompile_ctr->fetch_add(
+        1, std::memory_order_relaxed); // per-op attribution (same slow miss
+                                       // branch)
   }
   if (g_trace_enabled.load(std::memory_order_relaxed)) {
-    capture_site(op_name); // (A) WHERE: opt-in, deduped, GIL-safe; off by default
+    capture_site(
+        op_name); // (A) WHERE: opt-in, deduped, GIL-safe; off by default
   }
   const uint64_t _diag_miss_t0 = now_ns();
-  struct MissScopeTimer {
-    uint64_t t0;
-    ~MissScopeTimer() {
-      g_diag_ns_miss.fetch_add(now_ns() - t0, std::memory_order_relaxed);
-    }
-  } _diag_miss_guard{_diag_miss_t0};
+  const auto _diag_miss_guard = c10::make_scope_exit([_diag_miss_t0] {
+    g_diag_ns_miss.fetch_add(
+        now_ns() - _diag_miss_t0, std::memory_order_relaxed);
+  });
   if (key_ok) {
     t_pending.valid = true;
     t_pending.op_name_intern = op_name_intern;
@@ -1293,16 +1354,13 @@ void generic_shim_boxed(const c10::OperatorHandle& op, torch::jit::Stack* stack)
   }
 
   pybind11::object result;
-  try {
+  {
+    // Drop pending regardless of what Python did (install_pending, if called,
+    // already cleared t_pending via take_pending()).
+    const auto drop_pending =
+        c10::make_scope_exit([] { t_pending.valid = false; });
     result = py_fn_copy(*pos_tup, **kwargs);
-  } catch (...) {
-    t_pending.valid = false; // scrub stale context on exception
-    throw;
   }
-
-  // Drop pending regardless of what Python did (install_pending, if called,
-  // already cleared t_pending via take_pending()).
-  t_pending.valid = false;
 
   torch::jit::drop(stack, cache.num_args);
 
@@ -1351,14 +1409,20 @@ std::string strip_namespace(const std::string& op_name) {
 // Public API
 // ---------------------------------------------------------------------------
 
-void register_cpp_shim(const std::string& op_name, pybind11::object py_fn, const std::vector<size_t>& skip_dtype_args) {
+void register_cpp_shim(
+    const std::string& op_name,
+    pybind11::object py_fn,
+    const std::vector<size_t>& skip_dtype_args) {
   std::lock_guard<std::mutex> lk(registry_mutex());
 
   const char* interned = warmcache::intern_op_name(op_name);
 
   const bool first_time = registry().find(op_name) == registry().end();
   registry()[op_name] = ShimEntry{
-      .py_fn = std::move(py_fn), .skip_dtype_args = skip_dtype_args, .schema_cache = {}, .op_name_intern = interned};
+      .py_fn = std::move(py_fn),
+      .skip_dtype_args = skip_dtype_args,
+      .schema_cache = {},
+      .op_name_intern = interned};
   // Wire up the per-op fallback counter (heap atomic, keyed by interned name so
   // it survives re-registration). The move-assign above reset fallback_ctr to
   // null, so re-point it here.
@@ -1387,7 +1451,9 @@ void register_cpp_shim(const std::string& op_name, pybind11::object py_fn, const
       __FILE__,
       static_cast<uint32_t>(__LINE__));
   const std::string overload = strip_namespace(op_name);
-  lib->impl(overload.c_str(), torch::CppFunction::makeFromBoxedFunction<&generic_shim_boxed>());
+  lib->impl(
+      overload.c_str(),
+      torch::CppFunction::makeFromBoxedFunction<&generic_shim_boxed>());
   installed_libs().push_back(std::move(lib));
 }
 
@@ -1454,12 +1520,12 @@ void diag_reset_fallback_reasons() {
   }
 }
 
-// (A) WHERE for bounces: c10::record_bounce calls this (when installed) with the
-// BounceSite ordinal. Map it to the report label and reuse capture_site, so a
-// bounced copy_ gets its Python call-site keyed by the site name in trace_by_op
-// (the report shows "at ..." under the bounce row). noexcept: it is invoked from
-// c10's noexcept record_bounce, so it must never let an exception escape. The
-// names + order mirror BounceSite and profiler.py's _BOUNCE_SITES.
+// (A) WHERE for bounces: c10::record_bounce calls this (when installed) with
+// the BounceSite ordinal. Map it to the report label and reuse capture_site, so
+// a bounced copy_ gets its Python call-site keyed by the site name in
+// trace_by_op (the report shows "at ..." under the bounce row). noexcept: it is
+// invoked from c10's noexcept record_bounce, so it must never let an exception
+// escape. The names + order mirror BounceSite and profiler.py's _BOUNCE_SITES.
 static void bounce_site_capture(uint8_t site) noexcept {
   if (!g_trace_enabled.load(std::memory_order_relaxed)) {
     return;
@@ -1471,13 +1537,15 @@ static void bounce_site_capture(uint8_t site) noexcept {
       "strided_v2v_cpu_fallback",
       "v2v_batch_to_per_entry",
       "host_batch_to_per_entry"};
-  static_assert(kNames.size() == c10::rbln::prof::kNumBounceSites, "bounce site names must match the BounceSite enum");
+  static_assert(
+      kNames.size() == c10::rbln::prof::kNumBounceSites,
+      "bounce site names must match the BounceSite enum");
   if (site >= kNames.size()) {
     return;
   }
-  // This hook runs inside c10's noexcept record_bounce, so it must never throw.
-  // capture_site can (mutex / map alloc); swallow — a diagnostic hook failing is
-  // not worth aborting the run.
+  // This hook runs inside c10's noexcept record_bounce, so it must never raise.
+  // capture_site can (mutex / map alloc); swallow — a diagnostic hook failing
+  // is not worth aborting the run.
   try {
     capture_site(kNames[site]);
   } catch (...) {
@@ -1485,10 +1553,11 @@ static void bounce_site_capture(uint8_t site) noexcept {
   }
 }
 
-// (A) WHERE: opt-in call-site capture. enable() flips the gate the slow branches
-// read; dump returns (op_name -> "file:line(func) <- ...") for the ops that fired
-// while enabled; reset clears between regions. Also (un)installs the bounce hook
-// in c10 so bounced copies capture their call-site too (ON==OFF: null when off).
+// (A) WHERE: opt-in call-site capture. enable() flips the gate the slow
+// branches read; dump returns (op_name -> "file:line(func) <- ...") for the ops
+// that fired while enabled; reset clears between regions. Also (un)installs the
+// bounce hook in c10 so bounced copies capture their call-site too (ON==OFF:
+// null when off).
 void diag_set_trace_enabled(bool on) {
   g_trace_enabled.store(on, std::memory_order_relaxed);
   c10::rbln::prof::set_bounce_capture_fn(on ? &bounce_site_capture : nullptr);
@@ -1518,7 +1587,8 @@ void diag_reset_trace_by_op() {
 bool install_warmcache_from_pending(
     pybind11::object dyn_runtime,
     const pybind11::object& runtime_handle,
-    const std::vector<std::tuple<std::vector<int64_t>, std::string, bool>>& out_profiles) {
+    const std::vector<std::tuple<std::vector<int64_t>, std::string, bool>>&
+        out_profiles) {
   PendingInstall p = take_pending();
   if (!p.valid)
     return false;
@@ -1538,7 +1608,8 @@ bool install_warmcache_from_pending(
   // Defense-in-depth against any future install call site that might
   // bypass the Python ``has_views`` gate.
   for (const auto& tp : p.key.inputs) {
-    if (tp.storage_offset != 0 || !is_contiguous_row_major(tp.shape, tp.strides)) {
+    if (tp.storage_offset != 0 ||
+        !is_contiguous_row_major(tp.shape, tp.strides)) {
       return false;
     }
   }

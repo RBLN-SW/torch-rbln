@@ -1,5 +1,4 @@
-"""
-Custom build hook for hatchling that builds the C++ extension using CMake.
+"""Custom build hook for hatchling that builds the C++ extension using CMake.
 
 This replaces Poetry's custom build script (tools/build-libtorch-rbln.py).
 The hook is invoked during wheel building to compile the native extension.
@@ -25,9 +24,8 @@ class CMakeBuildHook(BuildHookInterface):
 
     PLUGIN_NAME = "cmake-build"
 
-    def initialize(self, version: str, build_data: dict[str, Any]) -> None:
-        """
-        Called before the build starts.
+    def initialize(self, version: str, build_data: dict[str, Any]) -> None:  # noqa: ARG002
+        """Called before the build starts.
 
         Args:
             version: The version being built
@@ -37,11 +35,10 @@ class CMakeBuildHook(BuildHookInterface):
             # Only build the extension for wheel, not sdist
             return
 
-        self._build_cmake_extension(version, build_data)
+        self._build_cmake_extension(build_data)
 
-    def _build_cmake_extension(self, version: str, build_data: dict[str, Any]) -> None:
-        """
-        Build the CMake-based C++ extension.
+    def _build_cmake_extension(self, build_data: dict[str, Any]) -> None:
+        """Build the CMake-based C++ extension.
 
         This is equivalent to running tools/build-libtorch-rbln.py which:
         1. Runs codegen to generate register_ops.py
@@ -74,12 +71,13 @@ class CMakeBuildHook(BuildHookInterface):
             try:
                 cache_content = cmake_cache.read_text()
                 if "CMAKE_MAKE_PROGRAM" in cache_content and ninja_path not in cache_content:
-                    print("Ninja path changed, removing stale CMake cache", file=sys.stderr)
+                    self.app.display_info("Ninja path changed, removing stale CMake cache")
                     cmake_cache.unlink()
             except OSError:
                 pass  # Ignore read errors, CMake will handle it
         if not ninja_path:
-            raise RuntimeError("Ninja build tool not found. Install it via: pip install ninja")
+            msg = "Ninja build tool not found. Install the ninja package."
+            raise RuntimeError(msg)
 
         # CMake configuration — mirrors tools/build-libtorch-rbln.sh
         cmake_args = [
@@ -95,10 +93,11 @@ class CMakeBuildHook(BuildHookInterface):
             f"-DCMAKE_BUILD_TYPE={build_type}",
             f"-DCMAKE_INSTALL_PREFIX={install_dir}",
             f"-DPython_EXECUTABLE={python_executable}",
-            # The CMake modules look the interpreter up with `find_package(Python3)`, which reads
-            # `Python3_EXECUTABLE` and ignores `Python_EXECUTABLE`. Without this, a host with more
-            # than one interpreter builds the extension against whichever `python3` is first on
-            # PATH -- a wheel tagged for the build interpreter carrying an `.so` for another one.
+            # The CMake modules look the interpreter up with `find_package(Python3)`,
+            # which reads `Python3_EXECUTABLE` and ignores `Python_EXECUTABLE`. Without
+            # this, a host with more than one interpreter builds the extension against
+            # whichever `python3` is first on PATH -- a wheel tagged for the build
+            # interpreter carrying an `.so` for another one.
             f"-DPython3_EXECUTABLE={python_executable}",
             f"-DCMAKE_MAKE_PROGRAM={ninja_path}",
             "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
@@ -143,8 +142,7 @@ class CMakeBuildHook(BuildHookInterface):
         self._update_build_data(build_data, project_root)
 
     def _find_ninja(self) -> str | None:
-        """
-        Find ninja executable.
+        """Find ninja executable.
 
         Tries to locate ninja in the following order:
         1. In PATH (via shutil.which)
@@ -160,7 +158,7 @@ class CMakeBuildHook(BuildHookInterface):
 
         # Try to import ninja package and use its bundled executable
         try:
-            import ninja
+            import ninja  # noqa: PLC0415
 
             ninja_executable = Path(ninja.BIN_DIR) / "ninja"
             if ninja_executable.exists():
@@ -172,8 +170,8 @@ class CMakeBuildHook(BuildHookInterface):
 
     def _run_command(self, cmd: list[str], cwd: Path) -> None:
         """Run a command and check for errors."""
-        print(f"Running: {' '.join(cmd)}", file=sys.stderr)
-        subprocess.run(
+        self.app.display_waiting(f"Running: {' '.join(cmd)}")
+        subprocess.run(  # noqa: S603
             cmd,
             cwd=cwd,
             capture_output=False,
@@ -181,8 +179,7 @@ class CMakeBuildHook(BuildHookInterface):
         )
 
     def _run_codegen(self, project_root: Path) -> None:
-        """
-        Run code generation to create register_ops.py.
+        """Run code generation to create register_ops.py.
 
         This generates the operator registration module from YAML definitions.
         """
@@ -203,7 +200,7 @@ class CMakeBuildHook(BuildHookInterface):
             str(generated_file),
         ]
 
-        print("Generating register_ops.py...", file=sys.stderr)
+        self.app.display_waiting("Generating register_ops.py...")
         self._run_command(cmd, cwd=project_root)
 
     @staticmethod
@@ -217,7 +214,7 @@ class CMakeBuildHook(BuildHookInterface):
 
         try:
             libc_info = os.confstr("CS_GNU_LIBC_VERSION")
-            _, version_str = libc_info.split()
+            _, version_str = (libc_info or "").split()
         except (ValueError, OSError, AttributeError):
             _, version_str = platform.libc_ver()
             if not version_str:
@@ -275,7 +272,8 @@ class CMakeBuildHook(BuildHookInterface):
         include_dir = torch_rbln_dir / "include"
         headers = [p for p in include_dir.rglob("*") if p.is_file()]
         if not headers:
-            raise RuntimeError(f"cmake --install put no headers in {include_dir}")
+            msg = f"cmake --install put no headers in {include_dir}"
+            raise RuntimeError(msg)
         for header in headers:
             _include(header)
 

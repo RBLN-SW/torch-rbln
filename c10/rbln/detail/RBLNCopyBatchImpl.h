@@ -1,14 +1,14 @@
 #pragma once
 
 // Internal to V2VBatch / H2VBatch / V2HBatch. Not installed and not for use
-// outside c10/rbln/*.cpp: it exposes the pending storage the public headers hide
-// behind a pimpl.
+// outside c10/rbln/*.cpp: it exposes the pending storage the public headers
+// hide behind a pimpl.
 //
-// Only the mechanical part of a batch is shared — pending storage, the row-major
-// expansion of a strided description, device homogeneity, reset and destructor
-// behaviour. submit() is not: v2v drops to
-// per-entry (host-bouncing) copies once entries span devices and carries a
-// runtime-rejection retry, while h2v/v2h split into one bulk submit per device.
+// Only the mechanical part of a batch is shared — pending storage, the
+// row-major expansion of a strided description, device homogeneity, reset and
+// destructor behavior. submit() is not: v2v drops to per-entry (host-bouncing)
+// copies once entries span devices and carries a runtime-rejection retry, while
+// h2v/v2h split into one bulk submit per device.
 
 #include <c10/core/Device.h>
 #include <c10/rbln/RBLNFunctions.h> // get_torch_device_id
@@ -40,7 +40,7 @@ enum class DeviceAnchor : uint8_t {
  * @brief Shared state behind one batch of pending copies.
  *
  * @tparam Desc Per-entry descriptor — V2VCopyOp / H2VCopyOp / V2HCopyOp. Same
- *         shape, deliberately distinct types; see H2VCopyOp for why.
+ *     shape, deliberately distinct types; see H2VCopyOp for why.
  */
 template <typename Desc>
 struct BatchState {
@@ -66,7 +66,11 @@ struct BatchState {
  * while still homogeneous.
  */
 template <DeviceAnchor kAnchor>
-inline void update_homogeneity(bool& homogeneous, c10::DeviceIndex& anchor, const void* src, const void* dst) {
+inline void update_homogeneity(
+    bool& homogeneous,
+    c10::DeviceIndex& anchor,
+    const void* src,
+    const void* dst) {
   if (!homogeneous) {
     return;
   }
@@ -101,7 +105,12 @@ inline bool advance_index(std::vector<int64_t>& idx, c10::IntArrayRef sizes) {
 
 /** @brief Record one contiguous slab copy. nbytes == 0 is a no-op. */
 template <typename Desc, DeviceAnchor kAnchor>
-inline void enqueue_one(BatchState<Desc>& st, const char* who, void* dst, const void* src, size_t nbytes) {
+inline void enqueue_one(
+    BatchState<Desc>& st,
+    const char* who,
+    void* dst,
+    const void* src,
+    size_t nbytes) {
   RBLN_CHECK(dst != nullptr, "{}::enqueue: dst is nullptr", who);
   RBLN_CHECK(src != nullptr, "{}::enqueue: src is nullptr", who);
   if (nbytes == 0) {
@@ -114,10 +123,10 @@ inline void enqueue_one(BatchState<Desc>& st, const char* who, void* dst, const 
 /**
  * @brief Expand a strided description into `prod(outer_sizes)` flat entries.
  *
- * Entry k at outer index idx[] has dst_off = sum_d idx[d]*dst_byte_strides[d] and
- * likewise for src. A stride of 0 is preserved, which is what makes a broadcast
- * source replicate instead of collapsing to its first slab. The IntArrayRefs are
- * read during this call only.
+ * Entry k at outer index idx[] has dst_off = sum_d idx[d]*dst_byte_strides[d]
+ * and likewise for src. A stride of 0 is preserved, which is what makes a
+ * broadcast source replicate instead of collapsing to its first slab. The
+ * IntArrayRefs are read during this call only.
  */
 template <typename Desc, DeviceAnchor kAnchor>
 inline void enqueue_strided_impl(
@@ -132,7 +141,8 @@ inline void enqueue_strided_impl(
   RBLN_CHECK(dst != nullptr, "{}::enqueue_strided: dst is nullptr", who);
   RBLN_CHECK(src != nullptr, "{}::enqueue_strided: src is nullptr", who);
   RBLN_CHECK(
-      outer_sizes.size() == src_byte_strides.size() && outer_sizes.size() == dst_byte_strides.size(),
+      outer_sizes.size() == src_byte_strides.size() &&
+          outer_sizes.size() == dst_byte_strides.size(),
       "{}::enqueue_strided: size/stride length mismatch (outer={}, src={}, dst={})",
       who,
       outer_sizes.size(),
@@ -150,10 +160,15 @@ inline void enqueue_strided_impl(
   }
 
   // Reject zero-extent outer dims (would yield zero work but a 0 in sizes
-  // means the caller produced a 0-numel tensor — they should have early-returned).
+  // means the caller produced a 0-numel tensor — they should have
+  // early-returned).
   int64_t outer_count = 1;
   for (int64_t s : outer_sizes) {
-    RBLN_CHECK(s > 0, "{}::enqueue_strided: outer_sizes must be all positive, got {}", who, c10::str(outer_sizes));
+    RBLN_CHECK(
+        s > 0,
+        "{}::enqueue_strided: outer_sizes must be all positive, got {}",
+        who,
+        c10::str(outer_sizes));
     outer_count *= s;
   }
 
@@ -173,19 +188,25 @@ inline void enqueue_strided_impl(
       src_off += idx[d] * src_byte_strides[d];
       dst_off += idx[d] * dst_byte_strides[d];
     }
-    st.pending.push_back({dst_base + dst_off, src_base + src_off, inner_block_bytes});
+    st.pending.push_back(
+        {dst_base + dst_off, src_base + src_off, inner_block_bytes});
     advance_index(idx, outer_sizes);
   }
 }
 
 /**
  * @brief Destructor safety net. Never calls the backend — a rejection during
- *        unwind would terminate the process — and stays silent during unwind.
+ * unwind would terminate the process — and stays silent during unwind.
  */
 template <typename Desc>
-inline void warn_if_unsubmitted(const BatchState<Desc>& st, const char* who) noexcept {
+inline void warn_if_unsubmitted(
+    const BatchState<Desc>& st,
+    const char* who) noexcept {
   if (!st.pending.empty() && std::uncaught_exceptions() == 0) {
-    RBLN_LOG_WARN("{} destroyed with {} pending entries — missing submit()", who, st.pending.size());
+    RBLN_LOG_WARN(
+        "{} destroyed with {} pending entries — missing submit()",
+        who,
+        st.pending.size());
   }
 }
 

@@ -9,8 +9,9 @@ from test.utils import set_deterministic_seeds, xfail_rebel
 from torch_rbln._internal.log_utils import rbln_log_debug
 
 
-# Set (per worker process) when an RBLN device drain fails in reset_caching_allocator: the
-# device is faulted, so the rest of this worker's tests are skipped rather than run against it.
+# Set (per worker process) when an RBLN device drain fails in reset_caching_allocator:
+# the device is faulted, so the rest of this worker's tests are skipped rather than run
+# against it.
 _rbln_device_poisoned = False
 
 _CI_NPU_COUNTS = (0, 1, 2, 4, 8)
@@ -18,10 +19,11 @@ _CI_NPU_COUNTS = (0, 1, 2, 4, 8)
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_setup(item):
-    """Skip once this worker's device has faulted, before fixture setup frees runtime buffers the
-    device may still be using. Fail a serial test when xdist runs more than one worker. Skip a
-    test that requires more NPUs than are available, and a test that runs only without an NPU
-    when one is."""
+    """Skip once this worker's device has faulted, before fixture setup frees runtime
+    buffers the device may still be using. Fail a serial test when xdist runs more than
+    one worker. Skip a test that requires more NPUs than are available, and a test that
+    runs only without an NPU when one is.
+    """
     if _rbln_device_poisoned:
         pytest.skip("RBLN device drain failed earlier on this worker; skipping to avoid the faulted device")
 
@@ -46,7 +48,7 @@ def pytest_runtest_setup(item):
 # =============================================================================
 # Deterministic seed fixture (autouse)
 # =============================================================================
-@pytest.fixture(scope="function", autouse=True)
+@pytest.fixture(autouse=True)
 def set_seeds():
     """Set deterministic seeds for reproducibility."""
     rbln_log_debug("Setting deterministic seeds")
@@ -56,7 +58,7 @@ def set_seeds():
 # =============================================================================
 # TorchDynamo reset fixture (autouse)
 # =============================================================================
-@pytest.fixture(scope="function", autouse=True)
+@pytest.fixture(autouse=True)
 def reset_dynamo(request):
     """Reset TorchDynamo before each test unless explicitly opted out."""
     if request.node.get_closest_marker("no_dynamo_reset"):
@@ -70,16 +72,18 @@ def reset_dynamo(request):
 # =============================================================================
 # RBLN caching-allocator reset fixture (autouse)
 # =============================================================================
-@pytest.fixture(scope="function", autouse=True)
+@pytest.fixture(autouse=True)
 def reset_caching_allocator():
-    """Drain this test's in-flight device work, then release the RBLN caching allocator's
-    cached blocks -- both in teardown.
+    """Drain this test's in-flight device work, then release the RBLN caching
+    allocator's cached blocks -- both in teardown.
 
     Draining (synchronize) in this test's teardown attributes an async error to the test
-    that caused it, instead of misreporting it against an unrelated later test. Releasing
-    cached blocks then keeps the pool unfragmented for the next test. This always runs (no
-    opt-out marker): skipping it would leave a test's blocks/in-flight work for the next,
-    unrelated test to inherit -- the cross-test leak this fixture exists to prevent."""
+    that caused it, instead of misreporting it against an unrelated later test.
+    Releasing cached blocks then keeps the pool unfragmented for the next test. This
+    always runs (no opt-out marker): skipping it would leave a test's blocks/in-flight
+    work for the next, unrelated test to inherit -- the cross-test leak this fixture
+    exists to prevent.
+    """
     yield
 
     try:
@@ -94,33 +98,35 @@ def reset_caching_allocator():
     for idx in range(num_devices):
         try:
             torch.rbln.synchronize(idx)
-        except Exception as exc:  # noqa: BLE001 - aggregated and re-raised below
+        except Exception as exc:  # noqa: PERF203
             sync_errors.append(f"synchronize(rbln:{idx}): {exc!r}")
 
-    # Drain failed: the device is faulted and may still have in-flight DMA, so don't free its
-    # blocks/WarmCache (re-opens the async-buffer race). Poison the worker so its remaining
-    # tests skip before any fixture runs -- else the next reset_dynamo would flush the WarmCache
-    # and free those buffers anyway (see pytest_runtest_setup) -- then surface the error.
+    # Drain failed: the device is faulted and may still have in-flight DMA, so don't
+    # free its blocks/WarmCache (re-opens the async-buffer race). Poison the worker so
+    # its remaining tests skip before any fixture runs -- else the next reset_dynamo
+    # would flush the WarmCache and free those buffers anyway (see pytest_runtest_setup)
+    # -- then surface the error.
     if sync_errors:
         global _rbln_device_poisoned
         _rbln_device_poisoned = True
         raise RuntimeError("RBLN device drain failed:\n  " + "\n  ".join(sync_errors))
 
-    # Clean drain. Drop the SDPA attn-weights cache before flushing -- production empty_cache()
-    # keeps it (pending backward), but there is none across a test boundary; see memory.py. Lazy
-    # import avoids a load-time cycle.
-    from torch_rbln._internal.kernels.sdpa import _clear_attn_weights_cache
+    # Clean drain. Drop the SDPA attn-weights cache before flushing -- production
+    # empty_cache() keeps it (pending backward), but there is none across a test
+    # boundary; see memory.py. Lazy import avoids a load-time cycle.
+    from torch_rbln._internal.kernels.sdpa import _clear_attn_weights_cache  # noqa: PLC0415
 
     _clear_attn_weights_cache()
 
-    # Release cached blocks so the next test starts unfragmented. Aggregate flush failures too.
+    # Release cached blocks so the next test starts unfragmented. Aggregate flush
+    # failures too.
     flush_errors = []
     for idx in range(num_devices):
         device = torch.device("rbln", idx)
         rbln_log_debug(f"Releasing RBLN caching allocator blocks on {device}")
         try:
             torch_rbln.memory.empty_cache(device)
-        except Exception as exc:  # noqa: BLE001 - aggregated and re-raised below
+        except Exception as exc:
             flush_errors.append(f"empty_cache(rbln:{idx}): {exc!r}")
     if flush_errors:
         raise RuntimeError("RBLN caching-allocator flush failed:\n  " + "\n  ".join(flush_errors))
@@ -130,23 +136,26 @@ def reset_caching_allocator():
 # Global-state leak guards (autouse): keep one test's process-scoped mutations
 # from leaking into later tests on the same xdist worker.
 # =============================================================================
-@pytest.fixture(scope="function", autouse=True)
+@pytest.fixture(autouse=True)
 def restore_current_device():
-    """Restore the RBLN device selection and the lazy-init flag after each test, so a test
-    that called set_device() cannot leak either into later tests on the same worker.
+    """Restore the RBLN device selection and the lazy-init flag after each test, so a
+    test that called set_device() cannot leak either into later tests on the same
+    worker.
 
-    Only re-issue set_device when the index actually changed -- calling it unconditionally
-    would itself flip ``_initialized`` False->True and leak that. Restore index and flag in
-    lockstep; if the index restore fails, let it propagate (a half-restored device would
-    silently mislead later tests) rather than rolling back only the flag."""
+    Only re-issue set_device when the index actually changed -- calling it
+    unconditionally would itself flip ``_initialized`` False->True and leak that.
+    Restore index and flag in lockstep; if the index restore fails, let it propagate (a
+    half-restored device would silently mislead later tests) rather than rolling back
+    only the flag.
+    """
     # The `torch_rbln.device` package re-exports a `device` class that shadows the
     # `device` submodule, so reach the module (which owns the `_initialized` global that
     # set_device mutates) via sys.modules rather than a `from ... import device`.
     _dev = sys.modules[torch_rbln.device.set_device.__module__]
 
-    # Fail loud on a snapshot failure too: device_count() returns 0 (never raises) when there
-    # is no device, so an exception here is a real fault (e.g. malformed RBLN_* config) that
-    # should surface, not be swallowed into a silent no-op teardown.
+    # Fail loud on a snapshot failure too: device_count() returns 0 (never raises) when
+    # there is no device, so an exception here is a real fault (e.g. malformed RBLN_*
+    # config) that should surface, not be swallowed into a silent no-op teardown.
     saved = _dev.current_device() if _dev.device_count() > 0 else None
     saved_initialized = _dev._initialized
     yield
@@ -162,18 +171,19 @@ def restore_current_device():
 # =============================================================================
 # Current stream
 # =============================================================================
-@pytest.fixture(scope="function", autouse=True)
-def restore_current_stream(restore_current_device):
+@pytest.fixture(autouse=True)
+def restore_current_stream(restore_current_device):  # noqa: ARG001
     """Restore every device's current stream after each test, so a test that selected a
     non-default stream cannot leak it into later tests on the same xdist worker.
 
-    Reading a stream claims no device: ``RBLNGuardImpl::getStream`` answers with the default
-    stream for a device whose context is not initialized, so the snapshot reaches the runtime
-    (and with it ``to_device_id``, which commits the device mapping) only for devices already
-    in use -- and initializing a context commits the mapping anyway. Restore only the devices
-    whose stream moved: ``set_stream`` also selects the stream's device. Depends on
-    ``restore_current_device`` so this teardown runs first and the device index (and the
-    lazy-init flag) are put back after it."""
+    Reading a stream claims no device: ``RBLNGuardImpl::getStream`` answers with the
+    default stream for a device whose context is not initialized, so the snapshot
+    reaches the runtime (and with it ``to_device_id``, which commits the device mapping)
+    only for devices already in use -- and initializing a context commits the mapping
+    anyway. Restore only the devices whose stream moved: ``set_stream`` also selects the
+    stream's device. Depends on ``restore_current_device`` so this teardown runs first
+    and the device index (and the lazy-init flag) are put back after it.
+    """
     count = torch.rbln.device_count()
     if count == 0:
         yield
@@ -188,9 +198,11 @@ def restore_current_stream(restore_current_device):
 # =============================================================================
 # Environment variable isolation fixtures
 # =============================================================================
-@pytest.fixture(scope="function", autouse=True)
+@pytest.fixture(autouse=True)
 def disable_compile_error_fallback(monkeypatch):
-    """Disable 'compile_error' fallback by appending it to the existing TORCH_RBLN_DISABLE_FALLBACK list."""
+    """Disable 'compile_error' fallback by appending it to the existing
+    TORCH_RBLN_DISABLE_FALLBACK list.
+    """
     original_env = os.getenv("TORCH_RBLN_DISABLE_FALLBACK", "")
     fallback_categories = {c.strip() for c in original_env.split(",") if c.strip()} | {"compile_error"}
     new_env = ",".join(sorted(fallback_categories))
@@ -198,7 +210,7 @@ def disable_compile_error_fallback(monkeypatch):
     monkeypatch.setenv("TORCH_RBLN_DISABLE_FALLBACK", new_env)
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def enable_deploy_mode(monkeypatch):
     """Enable TORCH_RBLN_DEPLOY mode for eager execution tests."""
     original_env = os.getenv("TORCH_RBLN_DEPLOY", "")
@@ -206,7 +218,7 @@ def enable_deploy_mode(monkeypatch):
     monkeypatch.setenv("TORCH_RBLN_DEPLOY", "ON")
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def enable_eager_malloc(monkeypatch):
     """Enable TORCH_RBLN_EAGER_MALLOC for memory tests."""
     original_env = os.getenv("TORCH_RBLN_EAGER_MALLOC", "")
@@ -239,22 +251,24 @@ def pytest_collection_modifyitems(items):
     collected_files = {item.nodeid.split("::", 1)[0] for item in items}
     stale = [name for name, (path, _) in _REBEL_XFAILS.items() if name not in matched and path in collected_files]
     if stale:
-        raise pytest.UsageError(f"Stale _REBEL_XFAILS keys (file collected, name unmatched): {stale}")
+        msg = f"Stale _REBEL_XFAILS keys (file collected, name unmatched): {stale}"
+        raise pytest.UsageError(msg)
 
     # The check covers every item, including those that -m deselects afterward.
     for item in items:
-        # instantiate_device_type_tests copies and inherits class markers, so pytest yields each twice.
+        # instantiate_device_type_tests copies and inherits class markers, so pytest
+        # yields each twice.
         markers = list({id(m): m for m in item.iter_markers("npu")}.values())
         if not markers:
             continue
         if len(markers) > 1:
-            raise pytest.UsageError(
-                f"{item.nodeid}: expected at most 1 npu marker, got {len(markers)}: {[m.kwargs for m in markers]}"
-            )
+            msg = f"{item.nodeid}: expected at most 1 npu marker, got {len(markers)}: {[m.kwargs for m in markers]}"
+            raise pytest.UsageError(msg)
         marker = markers[0]
         count = marker.kwargs.get("count")
         if marker.args or set(marker.kwargs) != {"count"} or count not in _CI_NPU_COUNTS:
-            raise pytest.UsageError(
+            msg = (
                 f"{item.nodeid}: expected npu(count=N) with N in {_CI_NPU_COUNTS}, "
                 f"got args={marker.args} kwargs={marker.kwargs}"
             )
+            raise pytest.UsageError(msg)

@@ -49,7 +49,8 @@ C10_RBLN_API c10::DeviceIndex get_device_count();
  *
  * Queries the runtime for how many physical NPUs are available, regardless of
  * RSD mode. Unlike get_device_count() (logical device count), this returns
- * the actual physical NPU count; get_device_count() may return 1 when RSD is active.
+ * the actual physical NPU count; get_device_count() may return 1 when RSD is
+ * active.
  *
  * @return The number of physical NPUs (non-negative integer).
  */
@@ -58,7 +59,8 @@ C10_RBLN_API c10::DeviceIndex get_physical_device_count();
 /**
  * @brief What the NPUs behind one logical device are.
  *
- * total_memory sums the device's physical NPUs; num_chiplet and memory_per_chiplet stay per NPU.
+ * total_memory sums the device's physical NPUs; num_chiplet and
+ * memory_per_chiplet stay per NPU.
  */
 struct C10_RBLN_API DeviceProperties {
   std::string name;
@@ -69,12 +71,15 @@ struct C10_RBLN_API DeviceProperties {
 };
 
 /**
- * @brief Reports what the logical device at device_index is, summed over its NPUs.
+ * @brief Reports what the logical device at device_index is, summed over its
+ * NPUs.
  *
- * Needs real hardware: raises in dummy mode, when no NPU is mapped to the index, when the runtime
- * cannot answer for one of them, or when the mapping aggregates unlike NPUs.
+ * Needs real hardware: raises in dummy mode, when no NPU is mapped to the
+ * index, when the runtime cannot answer for one of them, or when the mapping
+ * aggregates unlike NPUs.
  */
-C10_RBLN_API DeviceProperties get_device_properties(c10::DeviceIndex device_index);
+C10_RBLN_API DeviceProperties
+get_device_properties(c10::DeviceIndex device_index);
 
 /**
  * @brief Returns the currently active RBLN device.
@@ -109,10 +114,11 @@ C10_RBLN_API void set_device_index(c10::DeviceIndex device_index);
  * @param device_index The RBLN device to set as the current active device.
  * @return The device that was active before this call.
  */
-C10_RBLN_API c10::DeviceIndex exchange_device_index(c10::DeviceIndex device_index);
+C10_RBLN_API c10::DeviceIndex exchange_device_index(
+    c10::DeviceIndex device_index);
 
 /**
- * @brief Returns the torch device id backing a device pointer.
+ * @brief Returns the PyTorch device id backing a device pointer.
  *
  * Lightweight counterpart to get_memory_info() for the common case where only
  * the owning device is needed: it calls rbln_get_torch_device_id_from_vaddr()
@@ -120,7 +126,7 @@ C10_RBLN_API c10::DeviceIndex exchange_device_index(c10::DeviceIndex device_inde
  * performs. Prefer this on performance hot paths.
  *
  * @param data A pointer to device memory.
- * @return The torch device id (as a c10::DeviceIndex) backing the pointer.
+ * @return The PyTorch device id (as a c10::DeviceIndex) backing the pointer.
  */
 C10_RBLN_API c10::DeviceIndex get_torch_device_id(const void* data);
 
@@ -128,8 +134,8 @@ C10_RBLN_API c10::DeviceIndex get_torch_device_id(const void* data);
  * @brief Retrieves memory information for a given data pointer.
  *
  * @note This performs a full VMemory JSON round-trip and is expensive — keep it
- * off performance hot paths. When only the owning device is needed, use
- * get_torch_device_id() instead.
+ *     off performance hot paths. When only the owning device is needed, use
+ *     get_torch_device_id() instead.
  *
  * @param data A pointer to device memory.
  * @return Memory information associated with the given data pointer.
@@ -144,28 +150,32 @@ C10_RBLN_API ::rbln::MemoryInfo get_memory_info(const void* data);
 C10_RBLN_API bool is_eager_malloc();
 
 /**
- * @brief Give the vmem region at ``rbln_data`` a flat single-node device allocation.
+ * @brief Give the vmem region at ``rbln_data`` a flat single-node device
+ * allocation.
  *
- * A device allocation reserves a virtual address and materialises the physical memory
- * behind it lazily, on first use through a torch op. A consumer that reads those physical
- * buffers out of band -- a collective library, direct storage (NVMe) DMA -- never runs
- * such an op, so it would find nothing there. This materialises the allocation up front.
+ * A device allocation reserves a virtual address and materializes the physical
+ * memory behind it lazily, on first use through a PyTorch op. A consumer that
+ * reads those physical buffers out of band -- a collective library, direct
+ * storage (NVMe) DMA -- never runs such an op, so it would find nothing there.
+ * This materializes the allocation up front.
  *
- * The layout is flat and 1:1, with no dtype transform, on the device's main node: the
- * shape a consumer that treats the region as bytes expects. Use set_device_layout_like()
- * instead when the region has to match another tensor's layout.
+ * The layout is flat and 1:1, with no dtype transform, on the device's main
+ * node: the shape a consumer that treats the region as bytes expects. Use
+ * set_device_layout_like() instead when the region has to match another
+ * tensor's layout.
  *
- * Re-binding an already-bound region is allowed and is what the collective path does
- * before every operation.
+ * Re-binding an already-bound region is allowed and is what the collective path
+ * does before every operation.
  *
- * @param rbln_data Base pointer of an RBLN allocation (not an interior address).
+ * @param rbln_data Base pointer of an RBLN allocation (not an interior
+ *     address).
  * @param nbytes Size of the allocation in bytes. Must be positive.
  */
 C10_RBLN_API void bind_device_memory(void* rbln_data, size_t nbytes);
 
 /**
  * @brief Configure ``target``'s device allocation to match ``ref``'s layout and
- *        dtype, without copying data.
+ * dtype, without copying data.
  *
  * A subsequent device-to-device copy between ``target`` and ``ref`` then stays
  * on the fast path. ``ref`` must already be device-resident. Used to make a
@@ -173,29 +183,38 @@ C10_RBLN_API void bind_device_memory(void* rbln_data, size_t nbytes);
  * device-to-device scatter are both fast.
  *
  * @param target_data Destination tensor's device pointer to configure.
- * @param ref_data    Reference tensor's device pointer whose layout is mirrored.
+ * @param ref_data Reference tensor's device pointer whose layout is mirrored.
  */
-C10_RBLN_API void set_device_layout_like(void* target_data, const void* ref_data);
+C10_RBLN_API void set_device_layout_like(
+    void* target_data,
+    const void* ref_data);
 
 /**
- * @brief Pin a caller-owned host range for DMA on one device (cudaHostRegister's counterpart).
+ * @brief Pin a caller-owned host range for DMA on one device
+ * (cudaHostRegister's counterpart).
  *
- * Copies whose host operand is 4 KiB aligned and inside the range then DMA it directly
- * instead of staging through a bounce buffer. The caller keeps ownership: unregister
- * before freeing the pages.
+ * Copies whose host operand is 4 KiB aligned and inside the range then DMA it
+ * directly instead of staging through a bounce buffer. The caller keeps
+ * ownership: unregister before freeing the pages.
  *
- * @return False, with a warning, if the runtime cannot register host memory (unsupported
- *         UMD or dummy device). Copies over the range still work.
- * @throws c10::Error on a null host_ptr, zero nbytes or an invalid device, or if the runtime
- *         refuses the range (e.g. it overlaps a registered one).
+ * @return False, with a warning, if the runtime cannot register host memory
+ *     (unsupported UMD or dummy device). Copies over the range still work.
+ * @throws c10::Error on a null host_ptr, zero nbytes or an invalid device, or
+ *     if the runtime refuses the range (e.g. it overlaps a registered one).
  */
-C10_RBLN_API bool host_register(c10::DeviceIndex device_index, const void* host_ptr, size_t nbytes);
+C10_RBLN_API bool host_register(
+    c10::DeviceIndex device_index,
+    const void* host_ptr,
+    size_t nbytes);
 
 /**
- * @brief Unpin a range registered with host_register(). A synchronization point: drains the
- * device first. No-op during shutdown, where context teardown releases every range.
+ * @brief Unpin a range registered with host_register(). A synchronization
+ * point: drains the device first. No-op during shutdown, where context teardown
+ * releases every range.
  */
-C10_RBLN_API void host_unregister(c10::DeviceIndex device_index, const void* host_ptr);
+C10_RBLN_API void host_unregister(
+    c10::DeviceIndex device_index,
+    const void* host_ptr);
 
 /**
  * @brief Whether RBLN_DUMMY_DEVICE mode is active: a host-backed logical device
@@ -205,38 +224,42 @@ C10_RBLN_API void host_unregister(c10::DeviceIndex device_index, const void* hos
 C10_RBLN_API bool is_dummy_device();
 
 /**
- * @brief Nothrow view of get_device_count() (returns 0 on any failure). Warns with the
- * first line of the error only, on every failure.
+ * @brief Nothrow view of get_device_count() (returns 0 on any failure). Warns
+ * with the first line of the error only, on every failure.
  *
- * Backs torch.rbln.device_count(). ATen/DeviceAccelerator.h: deviceCount() "is *REQUIRED*
- * to not raise any exception".
+ * Backs torch.rbln.device_count(). ATen/DeviceAccelerator.h: deviceCount() "is
+ * *REQUIRED* to not raise any exception".
  */
 C10_RBLN_API c10::DeviceIndex get_device_count_nothrow() noexcept;
 
 /**
- * @brief Throwing counterpart, named after c10::cuda::device_count_ensure_non_zero().
+ * @brief Throwing counterpart, named after
+ * c10::cuda::device_count_ensure_non_zero().
  *
- * Raises the detailed RBLN_* configuration error, or a clear "no devices" message.
- * Use at the point where a device is actually required; never on a probe path.
+ * Raises the detailed RBLN_* configuration error, or a clear "no devices"
+ * message. Use at the point where a device is actually required; never on a
+ * probe path.
  */
 C10_RBLN_API c10::DeviceIndex device_count_ensure_non_zero();
 
 /**
- * @brief Claim the planned logical devices with the runtime (rbln_register_device_id).
+ * @brief Claim the planned logical devices with the runtime
+ * (rbln_register_device_id).
  *
- * Idempotent, and normally unnecessary: to_device_id() already does it. Call it explicitly
- * only on a path that hands a device index to the runtime while bypassing to_device_id(),
- * such as RCCL init in ProcessGroupRBLN. Raises on an invalid mapping.
+ * Idempotent, and normally unnecessary: to_device_id() already does it. Call it
+ * explicitly only on a path that hands a device index to the runtime while
+ * bypassing to_device_id(), such as RCCL init in ProcessGroupRBLN. Raises on an
+ * invalid mapping.
  */
 C10_RBLN_API void commit_device_mapping();
 
 /**
  * @brief Single source of truth: is RBLN usable as an accelerator right now?
  *
- * Runtime loaded, not shutting down, and at least one usable logical device -- dummy
- * included, since it host-backs through the runtime and still needs a valid mapping.
- * Never throws. Bound to both Python is_available() and RBLNHooksInterface::hasRBLN(),
- * so the two cannot diverge.
+ * Runtime loaded, not shutting down, and at least one usable logical device --
+ * dummy included, since it host-backs through the runtime and still needs a
+ * valid mapping. Never throws. Bound to both Python is_available() and
+ * RBLNHooksInterface::hasRBLN(), so the two cannot diverge.
  */
 C10_RBLN_API bool runtime_available() noexcept;
 
@@ -247,28 +270,34 @@ C10_RBLN_API bool runtime_available() noexcept;
 C10_RBLN_API void set_runtime_shutting_down(bool value) noexcept;
 
 /**
- * @brief Per-process device-context tracking (CUDA parity with device_allocator).
+ * @brief Per-process device-context tracking (CUDA parity with
+ * device_allocator).
  *
  * mark_device_context_initialized() records that THIS process has successfully
- * allocated device memory on a logical device; the query functions report whether
- * such allocator/context state exists. They gate the best-effort memory ops and back
- * initialized()/hasPrimaryContext(), so a process with the runtime + a device mapping
- * but no live context (e.g. a vLLM EngineCore parent) is correctly reported as
- * uninitialized. Set-once, monotonic, nothrow. RBLN device use after fork is
- * unsupported; bad-fork detection is not implemented yet.
+ * allocated device memory on a logical device; the query functions report
+ * whether such allocator/context state exists. They gate the best-effort memory
+ * ops and back initialized()/hasPrimaryContext(), so a process with the
+ * runtime + a device mapping but no live context (e.g. a vLLM EngineCore
+ * parent) is correctly reported as uninitialized. Set-once, monotonic, nothrow.
+ * RBLN device use after fork is unsupported; bad-fork detection is not
+ * implemented yet.
  */
-C10_RBLN_API void mark_device_context_initialized(c10::DeviceIndex device_index) noexcept;
-C10_RBLN_API bool device_context_initialized(c10::DeviceIndex device_index) noexcept;
+C10_RBLN_API void mark_device_context_initialized(
+    c10::DeviceIndex device_index) noexcept;
+C10_RBLN_API bool device_context_initialized(
+    c10::DeviceIndex device_index) noexcept;
 C10_RBLN_API bool any_device_context_initialized() noexcept;
 
 /**
- * @brief Logical device indices this process has initialized (a live context on).
+ * @brief Logical device indices this process has initialized (a live context
+ * on).
  *
- * The set of devices the device-less torch.accelerator.empty_cache() must flush —
- * every initialized device, not just the current one (CUDA/XPU parity). Extracted
- * as a seam so the "span all initialized devices" selection is unit-testable without
- * observing per-device runtime state (the runtime exposes memory stats for node 0
- * only). Empty when no context is initialized. Order is ascending by index.
+ * The set of devices the device-less torch.accelerator.empty_cache() must flush
+ * — every initialized device, not just the current one (CUDA/XPU parity).
+ * Extracted as a seam so the "span all initialized devices" selection is
+ * unit-testable without observing per-device runtime state (the runtime exposes
+ * memory stats for node 0 only). Empty when no context is initialized. Order is
+ * ascending by index.
  */
 C10_RBLN_API std::vector<c10::DeviceIndex> initialized_device_indices();
 
@@ -288,12 +317,14 @@ C10_RBLN_API void* malloc(c10::DeviceIndex device_index, size_t nbytes);
 /**
  * @brief Marks the virtual memory as logically zero-initialized.
  *
- * Sets the VMemory sync state to EMPTY_INIT_WITH_ZERO without allocating host memory or
- * performing any device transfer. On the next device read, zeros are transferred via a
- * temporary buffer; on the next device write, the transfer is skipped entirely.
+ * Sets the VMemory sync state to EMPTY_INIT_WITH_ZERO without allocating host
+ * memory or performing any device transfer. On the next device read, zeros are
+ * transferred via a temporary buffer; on the next device write, the transfer is
+ * skipped entirely.
  *
- * This is the preferred implementation of aten::zero_ for RBLN tensors. It avoids host
- * memory allocation, which is critical for large tensors such as KV-cache.
+ * This is the preferred implementation of aten::zero_ for RBLN tensors. It
+ * avoids host memory allocation, which is critical for large tensors such as
+ * KV-cache.
  *
  * @param rbln_data Pointer to the RBLN virtual memory (tensor data_ptr).
  */
@@ -327,7 +358,10 @@ C10_RBLN_API void free_nothrow(void* data) noexcept;
  * @param cpu_src_data A pointer to the source host memory.
  * @param nbytes The number of bytes to copy (must be positive).
  */
-C10_RBLN_API void memcpy_h2v(void* rbln_dst_data, const void* cpu_src_data, size_t nbytes);
+C10_RBLN_API void memcpy_h2v(
+    void* rbln_dst_data,
+    const void* cpu_src_data,
+    size_t nbytes);
 
 /**
  * @brief Copies data from device memory to host memory.
@@ -339,7 +373,10 @@ C10_RBLN_API void memcpy_h2v(void* rbln_dst_data, const void* cpu_src_data, size
  * @param rbln_src_data A pointer to the source device memory.
  * @param nbytes The number of bytes to copy (must be positive).
  */
-C10_RBLN_API void memcpy_v2h(void* cpu_dst_data, const void* rbln_src_data, size_t nbytes);
+C10_RBLN_API void memcpy_v2h(
+    void* cpu_dst_data,
+    const void* rbln_src_data,
+    size_t nbytes);
 
 /**
  * @brief Copies data from device memory to device memory.
@@ -352,31 +389,40 @@ C10_RBLN_API void memcpy_v2h(void* cpu_dst_data, const void* rbln_src_data, size
  * @param rbln_src_data A pointer to the source device memory.
  * @param nbytes The number of bytes to copy (must be positive).
  */
-C10_RBLN_API void memcpy_v2v(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes);
+C10_RBLN_API void memcpy_v2v(
+    void* rbln_dst_data,
+    const void* rbln_src_data,
+    size_t nbytes);
 
 /**
  * @brief Asynchronously copies data from host memory to device memory.
  *
- * Falls back to synchronous copy when async is not possible (e.g., when
- * the vmem entry does not have a simple device layout).
+ * Falls back to synchronous copy when async is not possible (e.g., when the
+ * vmem entry does not have a simple device layout).
  *
  * @param rbln_dst_data A pointer to the destination device memory.
  * @param cpu_src_data A pointer to the source host memory.
  * @param nbytes The number of bytes to copy (must be positive).
  */
-C10_RBLN_API void memcpy_h2v_async(void* rbln_dst_data, const void* cpu_src_data, size_t nbytes);
+C10_RBLN_API void memcpy_h2v_async(
+    void* rbln_dst_data,
+    const void* cpu_src_data,
+    size_t nbytes);
 
 /**
  * @brief Asynchronously copies data from device memory to host memory.
  *
- * Falls back to synchronous copy when async is not possible (e.g., when
- * the vmem entry does not have a simple device layout).
+ * Falls back to synchronous copy when async is not possible (e.g., when the
+ * vmem entry does not have a simple device layout).
  *
  * @param cpu_dst_data A pointer to the destination host memory.
  * @param rbln_src_data A pointer to the source device memory.
  * @param nbytes The number of bytes to copy (must be positive).
  */
-C10_RBLN_API void memcpy_v2h_async(void* cpu_dst_data, const void* rbln_src_data, size_t nbytes);
+C10_RBLN_API void memcpy_v2h_async(
+    void* cpu_dst_data,
+    const void* rbln_src_data,
+    size_t nbytes);
 
 /**
  * @brief Asynchronously copies data between two device memory regions.
@@ -389,23 +435,29 @@ C10_RBLN_API void memcpy_v2h_async(void* cpu_dst_data, const void* rbln_src_data
  * @param rbln_src_data A pointer to the source device memory.
  * @param nbytes The number of bytes to copy (must be positive).
  */
-C10_RBLN_API void memcpy_v2v_async(void* rbln_dst_data, const void* rbln_src_data, size_t nbytes);
+C10_RBLN_API void memcpy_v2v_async(
+    void* rbln_dst_data,
+    const void* rbln_src_data,
+    size_t nbytes);
 
 /**
- * @brief Blocks the host until the device is idle: waits the device's pending async
- * transfers, then drains every stream on it. Wider than synchronize_stream(), which
- * drains one stream and leaves work issued on another stream in flight.
+ * @brief Blocks the host until the device is idle: waits the device's pending
+ * async transfers, then drains every stream on it. Wider than
+ * synchronize_stream(), which drains one stream and leaves work issued on
+ * another stream in flight.
  *
  * @param device_index The RBLN device to synchronize.
  */
 C10_RBLN_API void synchronize(c10::DeviceIndex device_index);
 
-// Streams / events (torch.Stream / torch.Event). A c10::Stream carries the per-device
-// stream id as its StreamId (StreamId 0 is the default stream). An event surfaces as
-// its opaque handle, which is non-zero for a valid event (so it never aliases nullptr).
+// Streams / events (torch.Stream / torch.Event). A c10::Stream carries the
+// per-device stream id as its StreamId (StreamId 0 is the default stream). An
+// event surfaces as its opaque handle, which is non-zero for a valid event (so
+// it never aliases nullptr).
 
 /**
- * @brief Returns the current stream for the device (default stream if none set).
+ * @brief Returns the current stream for the device (default stream if none
+ * set).
  */
 C10_RBLN_API c10::Stream get_current_stream(c10::DeviceIndex device_index);
 
@@ -415,9 +467,9 @@ C10_RBLN_API c10::Stream get_current_stream(c10::DeviceIndex device_index);
 C10_RBLN_API c10::Stream get_default_stream(c10::DeviceIndex device_index);
 
 /**
- * @brief Returns a stream from a fixed per-device round-robin pool, filled one slot at
- * a time. Past the pool size, requests reuse earlier streams. Priorities do not exist
- * on RBLN and are not part of this API.
+ * @brief Returns a stream from a fixed per-device round-robin pool, filled one
+ * slot at a time. Past the pool size, requests reuse earlier streams.
+ * Priorities do not exist on RBLN and are not part of this API.
  */
 C10_RBLN_API c10::Stream get_stream_from_pool(c10::DeviceIndex device_index);
 
@@ -447,14 +499,15 @@ C10_RBLN_API uint64_t event_create(c10::DeviceIndex device_index);
 C10_RBLN_API void event_destroy(uint64_t event) noexcept;
 
 /**
- * @brief Snapshots `stream`'s current position into the event (re-record overwrites).
+ * @brief Snapshots `stream`'s current position into the event (re-record
+ * overwrites).
  */
 C10_RBLN_API void event_record(uint64_t event, c10::Stream stream);
 
 /**
  * @brief Makes `stream` wait for `event`. Same-device: does not block the host.
- * Cross-device waits are not supported and degrade to a host-side wait on the event
- * (correct, but serializes the host).
+ * Cross-device waits are not supported and degrade to a host-side wait on the
+ * event (correct, but serializes the host).
  */
 C10_RBLN_API void event_block(c10::Stream stream, uint64_t event);
 
@@ -469,7 +522,8 @@ C10_RBLN_API bool event_query(uint64_t event);
 C10_RBLN_API void event_synchronize(uint64_t event);
 
 /**
- * @brief Descriptor for one device-to-device slab copy used by memcpy_v2v_multi.
+ * @brief Descriptor for one device-to-device slab copy used by
+ * memcpy_v2v_multi.
  */
 struct C10_RBLN_API V2VCopyOp {
   void* dst;
@@ -484,22 +538,22 @@ struct C10_RBLN_API V2VCopyOp {
  *
  * Caller contract (NOT validated): every entry's src AND dst must reside on the
  * same RBLN device. The bulk runtime entrypoint targets one device per call and
- * does NOT host-bounce cross-device entries — mixing devices yields silent wrong
- * results. Callers with heterogeneous inputs should partition up front or use
- * memcpy_v2v per entry; V2VBatch handles this internally via fallback.
+ * does NOT host-bounce cross-device entries — mixing devices yields silent
+ * wrong results. Callers with heterogeneous inputs should partition up front or
+ * use memcpy_v2v per entry; V2VBatch handles this internally via fallback.
  *
- * The runtime may parallelise or reorder entries, so overlapping ranges across
- * entries yield undefined behaviour.
+ * The runtime may parallelize or reorder entries, so overlapping ranges across
+ * entries yield undefined behavior.
  */
 C10_RBLN_API void memcpy_v2v_multi(const std::vector<V2VCopyOp>& copies);
 
 /**
  * @brief Descriptor for one host-to-device slab copy used by memcpy_h2v_multi.
  *
- * Layout matches V2VCopyOp / V2HCopyOp; the type is distinct on purpose. On LP64
- * the three runtime tuple signatures are indistinguishable, so a mixed-up list
- * would compile and DMA a host address as a device vaddr. Separate named types
- * make that a compile error.
+ * Layout matches V2VCopyOp / V2HCopyOp; the type is distinct on purpose. On
+ * LP64 the three runtime tuple signatures are indistinguishable, so a mixed-up
+ * list would compile and DMA a host address as a device vaddr. Separate named
+ * types make that a compile error.
  */
 struct C10_RBLN_API H2VCopyOp {
   void* dst; // device (rbln virtual address)
@@ -563,23 +617,24 @@ struct BorrowedHostPtr {
  * authoritative; allocates host backing if none exists. After this call the
  * host buffer is read-ready.
  *
- * `rbln_data` may be an interior vaddr — a view into the middle of an allocation
- * (e.g. a tensor with a non-zero storage offset). The borrow is offset-correct:
- * the runtime resolves it against the enclosing allocation and returns
- * `host_ptr = allocation_base + (rbln_data - allocation_base)`. The range
- * `[rbln_data, rbln_data + nbytes)` must fit within that allocation, else the
- * borrow fails.
+ * `rbln_data` may be an interior vaddr — a view into the middle of an
+ * allocation (e.g. a tensor with a non-zero storage offset). The borrow is
+ * offset-correct: the runtime resolves it against the enclosing allocation and
+ * returns `host_ptr = allocation_base + (rbln_data - allocation_base)`. The
+ * range `[rbln_data, rbln_data + nbytes)` must fit within that allocation, else
+ * the borrow fails.
  *
  * The borrow MUST be released via `return_borrowed(result.borrow_id, ...)`.
  *
  * @param rbln_data A pointer to rbln-device memory (typically tensor data_ptr;
- *        an interior/offset vaddr is fine). Must not be nullptr.
+ *     an interior/offset vaddr is fine). Must not be nullptr.
  * @param nbytes Number of bytes to borrow. Must be positive — callers with a
- *        legitimate zero-byte case must short-circuit before invoking.
+ *     legitimate zero-byte case must short-circuit before invoking.
  * @return Host pointer + non-zero borrow id; throws c10::Error via RBLN_CHECK
- *         on failure (invalid args, rebel-side error).
+ *     on failure (invalid args, rebel-side error).
  */
-C10_RBLN_API BorrowedHostPtr borrow_host_ptr(const void* rbln_data, size_t nbytes);
+C10_RBLN_API BorrowedHostPtr
+borrow_host_ptr(const void* rbln_data, size_t nbytes);
 
 /**
  * @brief Non-throwing variant of `borrow_host_ptr`. Returns `std::nullopt` when
@@ -590,10 +645,12 @@ C10_RBLN_API BorrowedHostPtr borrow_host_ptr(const void* rbln_data, size_t nbyte
  * surface normally) rather than swallowing a broad c10::Error catch.
  *
  * @return Host pointer + non-zero borrow id on success; `std::nullopt` if the
- *         runtime could not provide an in-place host view. Invalid args
- *         (nullptr / zero nbytes) also return `std::nullopt`.
+ *     runtime could not provide an in-place host view. Invalid args (nullptr /
+ *     zero nbytes) also return `std::nullopt`.
  */
-C10_RBLN_API std::optional<BorrowedHostPtr> try_borrow_host_ptr(const void* rbln_data, size_t nbytes);
+C10_RBLN_API std::optional<BorrowedHostPtr> try_borrow_host_ptr(
+    const void* rbln_data,
+    size_t nbytes);
 
 /**
  * @brief Acquire a host pointer for **overwrite-only** access into the rbln
@@ -609,9 +666,10 @@ C10_RBLN_API std::optional<BorrowedHostPtr> try_borrow_host_ptr(const void* rbln
  * @param rbln_data A pointer to rbln-device memory. Must not be nullptr.
  * @param nbytes Number of bytes to acquire (must be positive).
  * @return Host pointer + non-zero borrow id; throws c10::Error via RBLN_CHECK
- *         on failure.
+ *     on failure.
  */
-C10_RBLN_API BorrowedHostPtr acquire_host_ptr_for_overwrite(void* rbln_data, size_t nbytes);
+C10_RBLN_API BorrowedHostPtr
+acquire_host_ptr_for_overwrite(void* rbln_data, size_t nbytes);
 
 /**
  * @brief Non-throwing variant of `acquire_host_ptr_for_overwrite`. Returns
@@ -620,22 +678,24 @@ C10_RBLN_API BorrowedHostPtr acquire_host_ptr_for_overwrite(void* rbln_data, siz
  * caller has a copy-based fallback (e.g. a fresh `at::empty` + writeback).
  *
  * @return Host pointer + non-zero borrow id on success; `std::nullopt` if the
- *         runtime could not provide an in-place host view. Invalid args
- *         (nullptr / zero nbytes) also return `std::nullopt`.
+ *     runtime could not provide an in-place host view. Invalid args (nullptr /
+ *     zero nbytes) also return `std::nullopt`.
  */
-C10_RBLN_API std::optional<BorrowedHostPtr> try_acquire_host_ptr_for_overwrite(void* rbln_data, size_t nbytes);
+C10_RBLN_API std::optional<BorrowedHostPtr> try_acquire_host_ptr_for_overwrite(
+    void* rbln_data,
+    size_t nbytes);
 
 /**
  * @brief Release a previously borrowed host pointer.
  *
  * @param borrow_id The id returned from `borrow_host_ptr` /
- *        `acquire_host_ptr_for_overwrite`. The value `0` is the
- *        "no live borrow" sentinel and is treated as a no-op so cleanup
- *        paths can release vectors of optional borrows uniformly.
+ *     `acquire_host_ptr_for_overwrite`. The value `0` is the "no live borrow"
+ *     sentinel and is treated as a no-op so cleanup paths can release vectors
+ *     of optional borrows uniformly.
  * @param updated If true, marks the host view as the latest source of truth;
- *        the next device consumer performs a lazy host→device copy. Must be
- *        true after a successful `acquire_host_ptr_for_overwrite` write
- *        sequence; otherwise the overwritten bytes are discarded.
+ *     the next device consumer performs a lazy host→device copy. Must be true
+ *     after a successful `acquire_host_ptr_for_overwrite` write sequence;
+ *     otherwise the overwritten bytes are discarded.
  */
 C10_RBLN_API void return_borrowed(uint64_t borrow_id, bool updated);
 
@@ -648,77 +708,88 @@ C10_RBLN_API void return_borrowed(uint64_t borrow_id, bool updated);
  * @param device The input device.
  * @return A populated DeviceStats snapshot for the device.
  */
-C10_RBLN_API c10::CachingDeviceAllocator::DeviceStats get_device_stats(const c10::Device& device);
+C10_RBLN_API c10::CachingDeviceAllocator::DeviceStats get_device_stats(
+    const c10::Device& device);
 
 /**
- * @brief Releases all unoccupied cached memory currently held by the caching allocator.
+ * @brief Releases all unoccupied cached memory currently held by the caching
+ * allocator.
  *
  * @param device The input device.
  */
 C10_RBLN_API void empty_cache(const c10::Device& device);
 
 /**
- * @brief Returns a dictionary of accelerator device memory allocator statistics.
+ * @brief Returns a dictionary of accelerator device memory allocator
+ * statistics.
  *
- * Scope is the caching allocator of the context THIS process holds on `device`, the
- * same scope torch.cuda.memory_stats() reports. It counts every physical NPU the
- * logical device maps to, but not direct device allocations (weights), and not another
- * process using the same NPU. For a device-wide figure, use rbln-smi.
+ * Scope is the caching allocator of the context THIS process holds on `device`,
+ * the same scope torch.cuda.memory_stats() reports. It counts every physical
+ * NPU the logical device maps to, but not direct device allocations (weights),
+ * and not another process using the same NPU. For a device-wide figure, use
+ * rbln-smi.
  *
  * @param device The input device.
  * @return A map containing memory statistics.
  */
-C10_RBLN_API std::map<std::string, uint64_t> memory_stats(const c10::Device& device);
+C10_RBLN_API std::map<std::string, uint64_t> memory_stats(
+    const c10::Device& device);
 
 /**
  * @brief Returns memory allocator statistics broken down per chiplet.
  *
- * Same keys as memory_stats(), each prefixed with "npu.<n>.chiplet.<c>.". A device runs
- * out on its heaviest chiplet, which the aggregate memory_stats() hides. npu.<n> is the
- * n-th physical NPU of this logical device (see RBLN_NPUS_PER_DEVICE), so a 1:1 mapping
- * yields npu.0 only.
+ * Same keys as memory_stats(), each prefixed with "npu.<n>.chiplet.<c>.". A
+ * device runs out on its heaviest chiplet, which the aggregate memory_stats()
+ * hides. npu.<n> is the n-th physical NPU of this logical device (see
+ * RBLN_NPUS_PER_DEVICE), so a 1:1 mapping yields npu.0 only.
  *
- * Scope is the caching allocator of this process's context on `device`. Other direct
- * device allocations are not counted, and a second process on the same NPU is
- * invisible here -- see memory_stats().
+ * Scope is the caching allocator of this process's context on `device`. Other
+ * direct device allocations are not counted, and a second process on the same
+ * NPU is invisible here -- see memory_stats().
  *
  * @param device The input device.
  * @return A map containing per-chiplet memory statistics.
  */
-C10_RBLN_API std::map<std::string, uint64_t> memory_stats_per_chiplet(const c10::Device& device);
+C10_RBLN_API std::map<std::string, uint64_t> memory_stats_per_chiplet(
+    const c10::Device& device);
 
 /**
- * @brief Resets the "accumulated" (historical) stats tracked by the current accelerator memory allocator.
+ * @brief Resets the "accumulated" (historical) stats tracked by the current
+ * accelerator memory allocator.
  *
  * @param device The input device.
  */
 C10_RBLN_API void reset_accumulated_memory_stats(const c10::Device& device);
 
 /**
- * @brief Resets the "peak" stats tracked by the current accelerator memory allocator.
+ * @brief Resets the "peak" stats tracked by the current accelerator memory
+ * allocator.
  *
- * Peak memory statistics represent the maximum (highest) memory usage values that have
- * been reached since the last reset.
+ * Peak memory statistics represent the maximum (highest) memory usage values
+ * that have been reached since the last reset.
  *
- * This function resets all peak statistics (such as peak allocated memory and peak
- * reserved memory) to their current values, effectively starting a new tracking period
- * from the current memory state. This is useful for measuring memory usage during
- * specific phases of execution or after certain operations.
+ * This function resets all peak statistics (such as peak allocated memory and
+ * peak reserved memory) to their current values, effectively starting a new
+ * tracking period from the current memory state. This is useful for measuring
+ * memory usage during specific phases of execution or after certain operations.
  *
  * @param device The input device.
  */
 C10_RBLN_API void reset_peak_memory_stats(const c10::Device& device);
 
 /**
- * @brief Returns the free and total device DRAM of `device` in bytes, as (free, total).
+ * @brief Returns the free and total device DRAM of `device` in bytes, as (free,
+ * total).
  *
- * The kernel driver's figure for the NPU as a whole -- every process, not this process's
- * caching allocator (see memory_stats()) -- which is what torch.cuda.mem_get_info() reports
- * on CUDA. Summed over the physical NPUs of the logical device; one tensor still lives on
- * one NPU. A reading, not a reservation.
+ * The kernel driver's figure for the NPU as a whole -- every process, not this
+ * process's caching allocator (see memory_stats()) -- which is what
+ * torch.cuda.mem_get_info() reports on CUDA. Summed over the physical NPUs of
+ * the logical device; one tensor still lives on one NPU. A reading, not a
+ * reservation.
  *
- * Raises when the installed UMD/KMD does not provide the query or under RBLN_DUMMY_DEVICE:
- * there is no figure to report, and a guess here would size a KV cache wrong.
+ * Raises when the installed UMD/KMD does not provide the query or under
+ * RBLN_DUMMY_DEVICE: there is no figure to report, and a guess here would size
+ * a KV cache wrong.
  *
  * @param device The input device.
  * @return (free bytes, total bytes).
@@ -726,37 +797,45 @@ C10_RBLN_API void reset_peak_memory_stats(const c10::Device& device);
 C10_RBLN_API std::pair<size_t, size_t> mem_get_info(const c10::Device& device);
 
 /**
- * @brief Returns the driver's device-wide DRAM usage of `device` broken down per chiplet.
+ * @brief Returns the driver's device-wide DRAM usage of `device` broken down
+ * per chiplet.
  *
- * Keys "npu.<n>.chiplet.<c>.{total,used,free,largest_free,largest_free_huge}" plus
- * "npu.<n>.{total,used,free,granularity,huge_granularity}" for each physical NPU of the
- * logical device; npu.<n> is the NPU's position as in memory_stats_per_chiplet(). Same
- * scope and failure modes as mem_get_info(). A physically contiguous buffer is bounded by
- * one chiplet's largest_free, which the device total hides.
+ * Keys "npu.<n>.chiplet.<c>.{total,used,free,largest_free,largest_free_huge}"
+ * plus "npu.<n>.{total,used,free,granularity,huge_granularity}" for each
+ * physical NPU of the logical device; npu.<n> is the NPU's position as in
+ * memory_stats_per_chiplet(). Same scope and failure modes as mem_get_info(). A
+ * physically contiguous buffer is bounded by one chiplet's largest_free, which
+ * the device total hides.
  *
  * @param device The input device.
  * @return A map from key to bytes.
  */
-C10_RBLN_API std::map<std::string, uint64_t> mem_get_info_per_chiplet(const c10::Device& device);
+C10_RBLN_API std::map<std::string, uint64_t> mem_get_info_per_chiplet(
+    const c10::Device& device);
 
 /**
- * @brief Lays out the runtime's per-NPU memory replies as the mem_get_info_per_chiplet() map.
+ * @brief Lays out the runtime's per-NPU memory replies as the
+ * mem_get_info_per_chiplet() map.
  *
- * `replies[n]` becomes the "npu.<n>." entries; only the first `chiplet_cnt` chiplets of each
- * reply are emitted. Pure; this is the key/field mapping mem_get_info_per_chiplet() returns.
+ * `replies[n]` becomes the "npu.<n>." entries; only the first `chiplet_cnt`
+ * chiplets of each reply are emitted. Pure; this is the key/field mapping
+ * mem_get_info_per_chiplet() returns.
  *
- * @param replies One RBLNDeviceMemoryInfo per physical NPU of a logical device, in mapping order.
+ * @param replies One RBLNDeviceMemoryInfo per physical NPU of a logical device,
+ *     in mapping order.
  * @return A map from key to bytes.
  */
-C10_RBLN_API std::map<std::string, uint64_t> per_chiplet_memory_map(const std::vector<RBLNDeviceMemoryInfo>& replies);
+C10_RBLN_API std::map<std::string, uint64_t> per_chiplet_memory_map(
+    const std::vector<RBLNDeviceMemoryInfo>& replies);
 
 /**
- * @brief Enables or disables process-wide file offloading for RBLN virtual memory.
+ * @brief Enables or disables process-wide file offloading for RBLN virtual
+ * memory.
  *
- * When enabled, host-side regions backing RBLN tensors may be paged out to disk to reduce
- * host memory pressure. The setting applies to all RBLN devices initialized in the current
- * process and takes effect for subsequent vmemory operations; existing user views are not
- * migrated by the toggle itself.
+ * When enabled, host-side regions backing RBLN tensors may be paged out to disk
+ * to reduce host memory pressure. The setting applies to all RBLN devices
+ * initialized in the current process and takes effect for subsequent vmemory
+ * operations; existing user views are not migrated by the toggle itself.
  *
  * @param enabled If true, enable file offloading; if false, disable it.
  */
@@ -765,39 +844,47 @@ C10_RBLN_API void set_file_offloading_enabled(bool enabled);
 /**
  * @brief Removes this process's file-offloading temp files and directories.
  *
- * Runtime teardown does this too, so call it only when shutdown may be killed first. Offloaded
- * RBLN tensors must not be used afterwards.
+ * Runtime teardown does this too, so call it only when shutdown may be killed
+ * first. Offloaded RBLN tensors must not be used afterwards.
  *
  * @return The number of temp files removed; 0 when the runtime is unavailable.
  */
 C10_RBLN_API uint64_t release_offload_temp_storage();
 
 /**
- * @brief Diagnostic: time spent inside librbln boundary calls (borrow / v2v /
+ * @brief Diagnostic: time spent inside `librbln` boundary calls (borrow / v2v /
  * h2v / ...), so a profiler can split host overhead into "rebel runtime" vs
  * "torch-side dispatch". Gated: when disabled each boundary call pays only one
  * relaxed atomic load (no clock read), preserving ON==OFF latency; an explain
- * region flips it on for its duration. ``rt_timing_get`` fills ``2 * kRtTimingN``
- * uint64 slots as ``[ns, calls]`` per primitive (order matches the internal
- * RtIdx enum: v2v, v2v_multi, borrow, acquire, return, v2h, h2v, v2h_multi,
- * h2v_multi). New primitives are appended so existing slot indices stay put.
+ * region flips it on for its duration. ``rt_timing_get`` fills
+ * ``2 * kRtTimingN`` uint64 slots as ``[ns, calls]`` per primitive (order
+ * matches the internal RtIdx enum: v2v, v2v_multi, borrow, acquire, return,
+ * v2h, h2v, v2h_multi, h2v_multi). New primitives are appended so existing slot
+ * indices stay put.
  */
 constexpr std::size_t kRtTimingN = 9;
 C10_RBLN_API void rt_timing_enable(bool on);
 C10_RBLN_API void rt_timing_reset();
 C10_RBLN_API void rt_timing_get(uint64_t* out);
 
-// torch.rbln.explain() runtime-counter reads — thin pass-throughs to librbln's
-// public C-API (see rebel/runtime/api/rbln_runtime_api.h). Process-global, lazy.
-// These are LINKED (not dlsym'd): a librbln lacking them fails extension load.
-// Build-time headers and library are resolved from the same source -- the
-// rebel-compiler wheel or a REBEL_HOME tree -- so the linked ABI matches.
-// The per-reason axes are positional; their meaning is interpreted Python-side, so
-// no internal classification name crosses this boundary.
+// torch.rbln.explain() runtime-counter reads — thin pass-throughs to
+// `librbln`'s public C-API (see rebel/runtime/api/rbln_runtime_api.h).
+// Process-global, lazy. These are LINKED (not dlsym'd): a `librbln` lacking
+// them fails extension load. Build-time headers and library are resolved from
+// the same source -- the `rebel-compiler` wheel or a REBEL_HOME tree -- so the
+// linked ABI matches. The per-reason axes are positional; their meaning is
+// interpreted Python-side, so no internal classification name crosses this
+// boundary.
 C10_RBLN_API uint32_t rt_prof_hidden_num();
-C10_RBLN_API void rt_prof_hidden_get(uint64_t* counts, uint64_t* bytes, uint32_t n);
+C10_RBLN_API void rt_prof_hidden_get(
+    uint64_t* counts,
+    uint64_t* bytes,
+    uint32_t n);
 C10_RBLN_API uint32_t rt_prof_reject_num();
-C10_RBLN_API void rt_prof_reject_get(uint64_t* counts, uint64_t* bytes, uint32_t n);
+C10_RBLN_API void rt_prof_reject_get(
+    uint64_t* counts,
+    uint64_t* bytes,
+    uint32_t n);
 C10_RBLN_API void rt_prof_host_sync_d2h(uint64_t* count, uint64_t* bytes);
 C10_RBLN_API void rt_prof_host_sync_h2d(uint64_t* count, uint64_t* bytes);
 C10_RBLN_API void rt_prof_memory(uint64_t* current, uint64_t* peak);

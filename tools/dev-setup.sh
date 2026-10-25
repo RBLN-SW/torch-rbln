@@ -144,7 +144,7 @@ mode_pypi() {
         echo "Running: uv sync --locked --no-install-project --no-install-package rebel-compiler"
         uv sync --locked --no-install-project --no-install-package rebel-compiler
 
-        # Without --no-config, uv pip install applies the constraint and requests the build that just failed.
+        # Without `--no-config`, `uv pip install` applies the constraint and requests the build that just failed.
         echo "Running: uv pip install --no-config --index rbln=https://pypi.rbln.ai/simple/ rebel-compiler"
         uv pip install --no-config --index rbln=https://pypi.rbln.ai/simple/ rebel-compiler
     else

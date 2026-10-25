@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Test suite for the RBLN-native `aten::arange.start_out` implementation.
+"""Test suite for the RBLN-native `aten::arange.start_out` implementation.
 
 `arange_start_out_rbln` (RBLNTensorFactories.cpp) implements
 arange(start, end, step, *, out=tensor) directly on the RBLN device:
@@ -81,8 +80,8 @@ class TestArangeStartOutRBLN(TestCase):
     # non-resizable, so ``out.resize_(n)`` raises "Trying to resize storage
     # that is not resizable" before control reaches our ``arange_start_out_rbln``.
     # Add coverage once the allocator supports resize. The realistic path
-    # (``out=torch.empty(0)``) is exercised indirectly by ``test_compare_cpu_arange_rbln_float16``
-    # in ``test/ops/test_ops.py``.
+    # (``out=torch.empty(0)``) is exercised indirectly by
+    # ``test_compare_cpu_arange_rbln_float16`` in ``test/ops/test_ops.py``.
 
 
 instantiate_device_type_tests(TestArangeStartOutRBLN, globals(), only_for="privateuse1")

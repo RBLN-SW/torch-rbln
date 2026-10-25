@@ -1,5 +1,4 @@
-"""
-YAML parser for native functions.
+"""YAML parser for native functions.
 
 Handles YAML parsing and preprocessing for torchgen compatibility.
 
@@ -18,24 +17,24 @@ Usage examples:
 """
 
 import re
-from typing import Any, List, Optional  # noqa: UP035
+from pathlib import Path
+from typing import Any
 
 import yaml
-from torchgen.gen import parse_native_yaml  # type: ignore[import-untyped]
-from torchgen.model import dispatch_keys, DispatchKey  # type: ignore[import-untyped]
-from torchgen.native_function_generation import OUT_OPS_THAT_DONT_GET_GROUPED_PROPERLY  # type: ignore[import-untyped]
+from torchgen.gen import parse_native_yaml
+from torchgen.model import dispatch_keys, DispatchKey
+from torchgen.native_function_generation import OUT_OPS_THAT_DONT_GET_GROUPED_PROPERLY
 
 
 class YamlParser:
     """Handles YAML parsing and preprocessing for torchgen compatibility."""
 
     @staticmethod
-    def find_out_ops_that_dont_group(file_path: str) -> Optional[List[str]]:
+    def find_out_ops_that_dont_group(file_path: str) -> list[str] | None:
+        """Find operations with 'out' parameter that don't get grouped properly by
+        torchgen. This is a workaround for torchgen compatibility.
         """
-        Find operations with 'out' parameter that don't get grouped properly by torchgen.
-        This is a workaround for torchgen compatibility.
-        """
-        with open(file_path, "r", encoding="utf-8") as f:  # noqa: UP015
+        with Path(file_path).open("r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
 
         out_ops = []
@@ -61,5 +60,4 @@ class YamlParser:
         if YamlParser.find_out_ops_that_dont_group(yaml_file) is not None:
             dispatch_keys.append(DispatchKey.PrivateUse1)
             return parse_native_yaml(yaml_file, tags_file)
-        else:
-            return None
+        return None

@@ -553,7 +553,7 @@ build_torch_rbln() {
     export RBLN_USE_EXTERNAL_REBEL_COMPILER=1
     # No PYTHONPATH shim: install_rebel_python_deps (called later in this function)
     # does a scikit-build-core editable install of rebel-compiler, and
-    # FindRebel.cmake reads REBEL_HOME directly for headers/libs.
+    # FindREBEL.cmake reads REBEL_HOME directly for headers/libs.
 
     local current_torch_version
     current_torch_version=$(pip show torch 2>/dev/null | grep "^Version:" | awk '{print $2}' || true)

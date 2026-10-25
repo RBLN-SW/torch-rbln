@@ -1,8 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Test suite for tensor copy operations.
-"""
+"""Test suite for tensor copy operations."""
 
 import math
 
@@ -19,7 +17,7 @@ ATOL = 0.01
 RTOL = 0.01
 
 
-TEST_DTYPES = SUPPORTED_DTYPES + [torch.float32]
+TEST_DTYPES = [*SUPPORTED_DTYPES, torch.float32]
 
 COPY_TYPES = {
     "h2d": ("cpu", "rbln"),
@@ -49,7 +47,7 @@ def _make_safe_noncontig_tensor(
     stride = tuple(contig_stride)
 
     # 3) storage size actually needed = max(offset) + 1
-    storage_size = 1 + sum((sz - 1) * st for sz, st in zip(shape, stride))
+    storage_size = 1 + sum((sz - 1) * st for sz, st in zip(shape, stride, strict=True))
     buf = torch.empty(storage_size, dtype=dtype, device=device)
 
     # 4) make non-contiguous view
@@ -66,6 +64,7 @@ def _make_tensor(
     shape: tuple[int, ...],
     dtype: torch.dtype,
     device: torch.device,
+    *,
     is_contiguous: bool,
 ) -> torch.Tensor:
     numel = math.prod(shape)
@@ -104,10 +103,10 @@ class TestTensorCopy(TestCase):
         non_blocking,
     ):
         src_device = torch.device(src_device_type)
-        src = _make_tensor(shape, src_dtype, src_device, src_is_contiguous)
+        src = _make_tensor(shape, src_dtype, src_device, is_contiguous=src_is_contiguous)
 
         dst_device = torch.device(dst_device_type)
-        dst = _make_tensor(shape, dst_dtype, dst_device, dst_is_contiguous).zero_()
+        dst = _make_tensor(shape, dst_dtype, dst_device, is_contiguous=dst_is_contiguous).zero_()
 
         dst.copy_(src, non_blocking=non_blocking)
         if non_blocking:
@@ -122,7 +121,7 @@ class TestTensorCopy(TestCase):
         view_slice = (slice(2, 4), slice(3, 8))
 
         # 1. Create a base tensor and fill with known pattern
-        base_tensor = _make_tensor(base_shape, dtype, self.rbln_device, True)
+        base_tensor = _make_tensor(base_shape, dtype, self.rbln_device, is_contiguous=True)
         base_tensor.copy_(torch.arange(base_tensor.numel(), dtype=dtype).view(base_shape))
 
         # 2. Take a view (storage_offset > 0 expected)
@@ -152,10 +151,10 @@ class TestTensorCopy(TestCase):
         initial_fill_val = torch.tensor(7.0, dtype=dst_dtype)
 
         # ==== CASE 1: Contiguous → Non-contiguous ====
-        src_rbln = _make_tensor(src_shape, src_dtype, self.rbln_device, True)
+        src_rbln = _make_tensor(src_shape, src_dtype, self.rbln_device, is_contiguous=True)
         expected_src = torch.arange(math.prod(src_shape), dtype=src_dtype).view(src_shape)
 
-        dst_rbln = _make_tensor(dst_full_shape, dst_dtype, self.rbln_device, True)
+        dst_rbln = _make_tensor(dst_full_shape, dst_dtype, self.rbln_device, is_contiguous=True)
         if dst_rbln.numel() > 0:
             dst_rbln.fill_(initial_fill_val)
 
@@ -182,9 +181,9 @@ class TestTensorCopy(TestCase):
             self.assertFalse(dst_view_rbln.is_contiguous(), "RBLN destination tensor should remain non-contiguous")
 
         # ==== CASE 2-1: Non-contiguous → Contiguous ====
-        dst_rbln = _make_tensor(dst_full_shape, dst_dtype, self.rbln_device, True)
+        dst_rbln = _make_tensor(dst_full_shape, dst_dtype, self.rbln_device, is_contiguous=True)
         src_noncontig = dst_rbln[dst_slice_indices]  # non-contiguous source slice
-        dst_contig = _make_tensor(src_shape, dst_dtype, self.rbln_device, True)
+        dst_contig = _make_tensor(src_shape, dst_dtype, self.rbln_device, is_contiguous=True)
         dst_contig.zero_()
 
         # Sanity check shapes of the view and source
@@ -206,9 +205,9 @@ class TestTensorCopy(TestCase):
             self.assertFalse(src_noncontig.is_contiguous(), "src_noncontig should remain non-contiguous")
 
         # ==== CASE 2-2: Non-contiguous → Contiguous ====
-        dst_rbln = _make_tensor(dst_full_shape, dst_dtype, self.rbln_device, True)
+        dst_rbln = _make_tensor(dst_full_shape, dst_dtype, self.rbln_device, is_contiguous=True)
         src_noncontig = dst_rbln[dst_slice_indices]  # non-contiguous source slice
-        dst_contig = _make_tensor(src_shape, dst_dtype, self.rbln_device, True)
+        dst_contig = _make_tensor(src_shape, dst_dtype, self.rbln_device, is_contiguous=True)
         dst_contig.zero_()
 
         # Sanity check shapes of the view and source
@@ -233,8 +232,8 @@ class TestTensorCopy(TestCase):
         src_nc_slice = (slice(1, 3), slice(1, 6))  # Same position as original
         dst_nc_slice = (slice(0, 2), slice(0, 5))  # Top-left corner
 
-        src_rbln = _make_tensor(dst_full_shape, src_dtype, self.rbln_device, True)
-        dst_rbln = _make_tensor(dst_full_shape, dst_dtype, self.rbln_device, True)
+        src_rbln = _make_tensor(dst_full_shape, src_dtype, self.rbln_device, is_contiguous=True)
+        dst_rbln = _make_tensor(dst_full_shape, dst_dtype, self.rbln_device, is_contiguous=True)
         if dst_rbln.numel() > 0:
             dst_rbln.fill_(initial_fill_val)
 
@@ -262,7 +261,7 @@ class TestTensorCopy(TestCase):
             self.assertFalse(dst_nc.is_contiguous(), "dst_nc should remain non-contiguous")
 
     def test_partial_copy_with_diff_dtype(self):
-        # case 1: partial update float16 to custom_float16
+        # Case 1: partial update float16 to custom_float16
         a = torch.tensor([1, 2, 3], dtype=torch.float16, device=self.rbln_device)
         b = torch.tensor([2, 3, 4], dtype=torch.float16, device=self.rbln_device)
 
@@ -272,7 +271,7 @@ class TestTensorCopy(TestCase):
         result = torch.tensor([10, 5, 7], dtype=torch.float16, device=self.rbln_device)
         self.assertEqual(c, result, atol=ATOL, rtol=RTOL)
 
-        # case 2: partial update float16 to custom_float16
+        # Case 2: partial update float16 to custom_float16
         aa = torch.tensor([1], dtype=torch.float16, device=self.rbln_device)
         bb = torch.tensor([2], dtype=torch.float16, device=self.rbln_device)
         cc = torch.tensor([1, 2, 3], dtype=torch.float16, device=self.rbln_device)
@@ -284,7 +283,9 @@ class TestTensorCopy(TestCase):
         self.assertEqual(cc, result2, atol=ATOL, rtol=RTOL)
 
     def test_remain_cf16_to_cf16_in_d2d(self):
-        """Test that the dtype of a tensor remains cf16 after copy to other device tensor."""
+        """Test that the dtype of a tensor remains cf16 after copy to other device
+        tensor.
+        """
         a = torch.ones([2, 1, 64], dtype=torch.float16, device=self.rbln_device)
         a = a.reshape([1, 1, 128])
 
@@ -364,9 +365,8 @@ class TestToOps(TestCase):
         self.assertEqual(z, x_cpu, atol=ATOL, rtol=RTOL)
 
     def test_cf16_cast_fp16_order(self):
-        """
-        Tests that the order of operations for device transfer and dtype casting
-        from a conceptual CF16 tensor produces numerically equivalent results.
+        """Tests that the order of operations for device transfer and dtype casting from
+        a conceptual CF16 tensor produces numerically equivalent results.
 
         It verifies that casting from CF16 to float16 on the RBLN device and then
         moving to the CPU yields the same result as moving the CF16 tensor to
@@ -380,8 +380,7 @@ class TestToOps(TestCase):
         self.assertEqual(a_casted, a_offloaded)
 
     def test_cf16_cast_fp32_order(self):
-        """
-        Tests for numerical consistency when an operation sequence is performed on
+        """Tests for numerical consistency when an operation sequence is performed on
         RBLN versus being fully offloaded to the CPU.
 
         It compares the result of two paths:
@@ -404,8 +403,8 @@ class TestToOps(TestCase):
         self.assertEqual(out_cpu_offloading, out_cpu_fallback.to("cpu"))
 
     def test_cf16_to_cpu_remain_cf16(self):
-        """
-        Tests that the dtype of a tensor remains custom_float16 after casting to float16 and then back to rbln.
+        """Tests that the dtype of a tensor remains custom_float16 after casting to
+        float16 and then back to rbln.
         """
         a = torch.randn([2, 2], dtype=torch.float16, device="rbln:0")
         self.assertEqual(a.dtype, torch.float16)
@@ -431,8 +430,7 @@ class TestToOps(TestCase):
         self.assertEqual(out_rbln, out_ref, atol=ATOL, rtol=RTOL)
 
     def test_cf16_to_cpu_remain_cf16_with_to(self):
-        """
-        Tests that the dtype of a tensor remains custom_float16 after casting to
+        """Tests that the dtype of a tensor remains custom_float16 after casting to
         float16 and then back to rbln with .to("cpu").to("cpu").
         """
         a = torch.randn([2, 2], dtype=torch.float16, device="rbln")

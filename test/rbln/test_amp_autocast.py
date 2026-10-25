@@ -24,13 +24,13 @@ import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-import torch_rbln  # noqa: F401  (registers the rbln device module + autocast plumbing)
 from torch_rbln._internal.ops_utils import SupportedDtypes
 
 
-# Deselected by rebel_compiler's CI (`-m "not torch_rbln_only"`); see the marker in pyproject.
-# Asserts an absence at the torch level: RBLN registers no autocast backend, so torch's AMP
-# surfaces have to behave a particular way. Nothing here reaches rebel-compiler.
+# Deselected by rebel_compiler's CI (`-m "not torch_rbln_only"`); see the marker in
+# pyproject. Asserts an absence at the torch level: RBLN registers no autocast backend,
+# so torch's AMP surfaces have to behave a particular way. Nothing here reaches
+# rebel-compiler.
 pytestmark = pytest.mark.torch_rbln_only
 
 
@@ -61,16 +61,14 @@ class TestAutocastDisabledGracefully(TestCase):
         return a @ b
 
     def test_fp16_autocast_disables_with_warning(self):
-        with self.assertWarns(UserWarning):
-            with torch.autocast(device_type="rbln", dtype=torch.float16):
-                y = self._matmul_rbln()
+        with self.assertWarns(UserWarning), torch.autocast(device_type="rbln", dtype=torch.float16):
+            y = self._matmul_rbln()
         # Disabled -> the op ran in its native dtype (fp32), not fp16.
         self.assertEqual(y.dtype, torch.float32)
 
     def test_bf16_autocast_disables_with_warning(self):
-        with self.assertWarns(UserWarning):
-            with torch.autocast(device_type="rbln", dtype=torch.bfloat16):
-                y = self._matmul_rbln()
+        with self.assertWarns(UserWarning), torch.autocast(device_type="rbln", dtype=torch.bfloat16):
+            y = self._matmul_rbln()
         self.assertEqual(y.dtype, torch.float32)
 
     def test_enabled_false_force_fp32_block(self):
@@ -84,7 +82,8 @@ class TestAutocastDisabledGracefully(TestCase):
 @pytest.mark.npu(count=1)
 class TestAutocastRealModelEager(TestCase):
     """A real (tiny) transformers LlamaForCausalLM run eagerly under an rbln autocast
-    region must not crash and must match the plain fp32 path (autocast is a no-op)."""
+    region must not crash and must match the plain fp32 path (autocast is a no-op).
+    """
 
     @staticmethod
     def _tiny_llama():

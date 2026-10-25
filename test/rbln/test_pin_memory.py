@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Test suite for pinned host memory with the RBLN backend.
+"""Test suite for pinned host memory with the RBLN backend.
 
 Covers the standard `pin_memory` UX while RBLN is the active accelerator:
 1. `torch.tensor(..., pin_memory=True)` and `torch.empty(..., pin_memory=True)`

@@ -18,30 +18,39 @@
 namespace at::native::rbln {
 namespace {
 
-void micro_rsqrt_fp32_contig(const float* __restrict__ in, float* __restrict__ out, size_t n) {
+void micro_rsqrt_fp32_contig(
+    const float* __restrict__ in,
+    float* __restrict__ out,
+    size_t n) {
   for (size_t i = 0; i < n; ++i) {
     out[i] = 1.0f / std::sqrt(in[i]);
   }
 }
 
-bool rsqrt_handler(c10::ArrayRef<at::Tensor> cpu_tensors, torch::jit::Stack* stack, size_t arguments_begin) {
+bool rsqrt_handler(
+    c10::ArrayRef<at::Tensor> cpu_tensors,
+    torch::jit::Stack* stack,
+    size_t arguments_begin) {
   if (cpu_tensors.size() < 2) {
     return false;
   }
   const auto& self = cpu_tensors[0];
   const auto& out = cpu_tensors.back();
-  if (!self.defined() || !self.is_contiguous() || self.scalar_type() != at::kFloat) {
+  if (!self.defined() || !self.is_contiguous() ||
+      self.scalar_type() != at::kFloat) {
     return false;
   }
-  if (!out.defined() || !out.is_contiguous() || out.scalar_type() != at::kFloat) {
+  if (!out.defined() || !out.is_contiguous() ||
+      out.scalar_type() != at::kFloat) {
     return false;
   }
   if (out.numel() != self.numel() || out.sizes() != self.sizes()) {
     return false;
   }
-  micro_rsqrt_fp32_contig(self.data_ptr<float>(), out.data_ptr<float>(), self.numel());
+  micro_rsqrt_fp32_contig(
+      self.data_ptr<float>(), out.data_ptr<float>(), self.numel());
   stack->resize(arguments_begin);
-  stack->emplace_back(c10::IValue(out));
+  stack->emplace_back(out);
   return true;
 }
 

@@ -39,15 +39,21 @@ c10::DeviceType RBLNGuardImpl::type() const {
 
 c10::Device RBLNGuardImpl::exchangeDevice(c10::Device device) const {
   const auto device_index = device.index();
-  const auto original_device_index = c10::rbln::exchange_device_index(device_index);
-  const auto original_device = c10::Device(c10::kPrivateUse1, original_device_index);
-  RBLN_LOG_DEBUG("Setting current device: {} -> {}", c10::str(original_device), c10::str(device));
+  const auto original_device_index =
+      c10::rbln::exchange_device_index(device_index);
+  const auto original_device =
+      c10::Device(c10::kPrivateUse1, original_device_index);
+  RBLN_LOG_DEBUG(
+      "Setting current device: {} -> {}",
+      c10::str(original_device),
+      c10::str(device));
   return original_device;
 }
 
 c10::Device RBLNGuardImpl::getDevice() const {
   const auto current_device_index = c10::rbln::get_device_index();
-  const auto current_device = c10::Device(c10::kPrivateUse1, current_device_index);
+  const auto current_device =
+      c10::Device(c10::kPrivateUse1, current_device_index);
   RBLN_LOG_DEBUG("current_device={}", c10::str(current_device));
   return current_device;
 }
@@ -72,22 +78,25 @@ void RBLNGuardImpl::uncheckedSetDevice(c10::Device device) const noexcept {
 }
 
 c10::DeviceIndex RBLNGuardImpl::deviceCount() const noexcept {
-  // Delegates to the shared nothrow enumeration so the guard impl, the accelerator
-  // hooks and Python device_count() all answer from one place (and warn identically).
-  // It also swallows the std::stoi throw from lazily parsing RBLN_DEVICE_MAP /
-  // RBLN_NPUS_PER_DEVICE, which is not a c10::Error and would otherwise terminate.
-  // Deliberately no debug log: RBLN_LOG_DEBUG can throw when debug logging is enabled
-  // (fmt / sink, e.g. bad_alloc), which would terminate this noexcept override. The shared
-  // enumeration already logs on the paths that can afford it.
+  // Delegates to the shared nothrow enumeration so the guard impl, the
+  // accelerator hooks and Python device_count() all answer from one place (and
+  // warn identically). It also swallows the std::stoi exception from lazily
+  // parsing RBLN_DEVICE_MAP / RBLN_NPUS_PER_DEVICE, which is not a c10::Error
+  // and would otherwise terminate. Deliberately no debug log: RBLN_LOG_DEBUG
+  // can raise when debug logging is enabled ({fmt} / sink, e.g. bad_alloc),
+  // which would terminate this noexcept override. The shared enumeration
+  // already logs on the paths that can afford it.
   return c10::rbln::get_device_count_nothrow();
 }
 
-c10::DeviceCapability RBLNGuardImpl::getDeviceCapability(c10::Device device) const {
+c10::DeviceCapability RBLNGuardImpl::getDeviceCapability(
+    c10::Device device) const {
   // Validate the requested index so a stale/out-of-range device can't silently
   // report a capability. A no-device host (count == 0) skips the range check.
   const auto count = deviceCount();
   if (count > 0) {
-    const auto index = device.has_index() ? device.index() : c10::rbln::get_device_index();
+    const auto index =
+        device.has_index() ? device.index() : c10::rbln::get_device_index();
     TORCH_CHECK(
         index >= 0 && index < count,
         "rbln device index ",
@@ -110,16 +119,19 @@ c10::DeviceCapability RBLNGuardImpl::getDeviceCapability(c10::Device device) con
         capability.capability_data.supported_scalar_types.has_BFloat16 = 1;
         break;
       default:
-        TORCH_CHECK(false, "unhandled capability dtype ", c10::toString(scalar_type));
+        TORCH_CHECK(
+            false, "unhandled capability dtype ", c10::toString(scalar_type));
     }
   }
   return capability;
 }
 
 c10::Stream RBLNGuardImpl::getStream(c10::Device device) const {
-  // With no context there is nothing to read and nothing can have been selected, so
-  // the default stream is the answer. Past that point a failure is real.
-  const auto index = device.has_index() ? device.index() : c10::rbln::get_device_index();
+  // With no context there is nothing to read and nothing can have been
+  // selected, so the default stream is the answer. Past that point a failure is
+  // real.
+  const auto index =
+      device.has_index() ? device.index() : c10::rbln::get_device_index();
   if (!c10::rbln::device_context_initialized(index)) {
     return c10::rbln::get_default_stream(index);
   }
@@ -130,12 +142,15 @@ c10::Stream RBLNGuardImpl::getDefaultStream(c10::Device device) const {
   return c10::rbln::get_default_stream(device.index());
 }
 
-c10::Stream RBLNGuardImpl::getNewStream(c10::Device device, int priority) const {
+c10::Stream RBLNGuardImpl::getNewStream(c10::Device device, int priority)
+    const {
   (void)priority; // RBLN has no stream priorities.
   return c10::rbln::get_stream_from_pool(device.index());
 }
 
-c10::Stream RBLNGuardImpl::getStreamFromGlobalPool(c10::Device device, bool isHighPriority) const {
+c10::Stream RBLNGuardImpl::getStreamFromGlobalPool(
+    c10::Device device,
+    bool isHighPriority) const {
   (void)isHighPriority; // RBLN has no stream priorities.
   return c10::rbln::get_stream_from_pool(device.index());
 }
@@ -158,7 +173,8 @@ namespace {
 
 // The void* handle IS the opaque event handle; the casts live here only.
 void* to_event_ptr(uint64_t handle) {
-  return reinterpret_cast<void*>(static_cast<uintptr_t>(handle)); // NOLINT(performance-no-int-to-ptr)
+  // NOLINTNEXTLINE(performance-no-int-to-ptr)
+  return reinterpret_cast<void*>(static_cast<uintptr_t>(handle));
 }
 
 uint64_t to_event_handle(void* event) {
@@ -167,8 +183,11 @@ uint64_t to_event_handle(void* event) {
 
 } // namespace
 
-void RBLNGuardImpl::record(void** event, const c10::Stream& stream, c10::DeviceIndex device_index, c10::EventFlag flag)
-    const {
+void RBLNGuardImpl::record(
+    void** event,
+    const c10::Stream& stream,
+    c10::DeviceIndex device_index,
+    c10::EventFlag flag) const {
   (void)flag; // Event timing is not supported (elapsedTime is unimplemented).
   TORCH_CHECK(
       device_index == -1 || device_index == stream.device_index(),
@@ -177,7 +196,8 @@ void RBLNGuardImpl::record(void** event, const c10::Stream& stream, c10::DeviceI
       " does not match recording stream's device index ",
       stream.device_index(),
       ".");
-  const auto event_device = device_index >= 0 ? device_index : stream.device_index();
+  const auto event_device =
+      device_index >= 0 ? device_index : stream.device_index();
   if (*event == nullptr) {
     *event = to_event_ptr(c10::rbln::event_create(event_device));
   }
@@ -205,9 +225,11 @@ void RBLNGuardImpl::synchronizeEvent(void* event) const {
   c10::rbln::event_synchronize(to_event_handle(event));
 }
 
-void RBLNGuardImpl::destroyEvent(void* event, c10::DeviceIndex device_index) const noexcept {
+void RBLNGuardImpl::destroyEvent(void* event, c10::DeviceIndex device_index)
+    const noexcept {
   (void)device_index;
-  c10::rbln::event_destroy(to_event_handle(event)); // noexcept; no-op on null (handle 0)
+  c10::rbln::event_destroy(
+      to_event_handle(event)); // noexcept; no-op on null (handle 0)
 }
 
 void RBLNGuardImpl::synchronizeDevice(c10::DeviceIndex device_index) const {

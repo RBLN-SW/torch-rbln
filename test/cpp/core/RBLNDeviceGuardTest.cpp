@@ -21,9 +21,11 @@ class RBLNDeviceGuardTest : public ::testing::Test {
 TEST_F(RBLNDeviceGuardTest, DeviceGuard) {
   const auto device_count = c10::rbln::get_device_count();
   EXPECT_GE(device_count, 1);
-  for (c10::DeviceIndex device_index = 0; device_index < device_count; device_index++) {
+  for (c10::DeviceIndex device_index = 0; device_index < device_count;
+       device_index++) {
     const auto original_device_index = c10::rbln::get_device_index();
-    const auto original_device = c10::Device(c10::kPrivateUse1, original_device_index);
+    const auto original_device =
+        c10::Device(c10::kPrivateUse1, original_device_index);
     {
       const auto device = c10::Device(c10::kPrivateUse1, device_index);
       const auto guard = c10::DeviceGuard(device);
@@ -35,13 +37,16 @@ TEST_F(RBLNDeviceGuardTest, DeviceGuard) {
   }
 }
 
-static void TestNestedGuard(c10::DeviceIndex device_index, c10::DeviceIndex device_count) {
+static void TestNestedGuard(
+    c10::DeviceIndex device_index,
+    c10::DeviceIndex device_count) {
   if (device_count == 0) {
     return;
   }
 
   const auto original_device_index = c10::rbln::get_device_index();
-  const auto original_device = c10::Device(c10::kPrivateUse1, original_device_index);
+  const auto original_device =
+      c10::Device(c10::kPrivateUse1, original_device_index);
   {
     const auto device = c10::Device(c10::kPrivateUse1, device_index);
     const auto guard = c10::DeviceGuard(device);
@@ -64,8 +69,10 @@ TEST_F(RBLNDeviceGuardTest, MixedDeviceGuard) {
   EXPECT_GE(device_count, 1);
 
   const auto original_rbln_device_index = c10::rbln::get_device_index();
-  const auto original_rbln_device = c10::Device(c10::kPrivateUse1, original_rbln_device_index);
-  for (c10::DeviceIndex rbln_device_index = 0; rbln_device_index < device_count; rbln_device_index++) {
+  const auto original_rbln_device =
+      c10::Device(c10::kPrivateUse1, original_rbln_device_index);
+  for (c10::DeviceIndex rbln_device_index = 0; rbln_device_index < device_count;
+       rbln_device_index++) {
     const auto rbln_device = c10::Device(c10::kPrivateUse1, rbln_device_index);
     const auto cpu_device = c10::Device(c10::kCPU);
     {

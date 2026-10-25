@@ -1,8 +1,8 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Test suite for verifying operator caching behavior in various scenarios.
-"""
+"""Test suite for verifying operator caching behavior in various scenarios."""
+
+from typing import ClassVar
 
 import pytest
 import torch
@@ -24,7 +24,7 @@ class TestOpCaching(TestCase):
     # ``last_dim % 64 != 0`` calls through ``cpu_fallback_path``, which
     # never enters torch.compile and therefore never bumps the
     # ``unique_graphs`` counter these caching tests assert on.
-    shapes = [(2, 64), (2, 128)]
+    shapes: ClassVar[list[tuple[int, int]]] = [(2, 64), (2, 128)]
 
     def _reset_dynamo_counters(self):
         torch._dynamo.reset()
@@ -38,8 +38,7 @@ class TestOpCaching(TestCase):
         fp16_rbln_tensor = fp16_cpu_tensor.to(device)
         # Run device op to get custom float16 tensor.
         # Use neg twice to avoid changing the value.
-        cf16_rbln_tensor = torch.neg(torch.neg(fp16_rbln_tensor))
-        return cf16_rbln_tensor
+        return torch.neg(torch.neg(fp16_rbln_tensor))
 
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("shape", shapes)
@@ -120,7 +119,8 @@ class TestOpCaching(TestCase):
         with a freshly moved fp16 tensor (no recompilation). Sibling
         ``test_no_recompilation_across_instances`` only covers two identical
         ``.to(device)`` copies — it never exercises the fp16 ↔
-        ``custom_float16`` guard equivalence this test locks in."""
+        ``custom_float16`` guard equivalence this test locks in.
+        """
         fp16_cpu_tensor = torch.randn(shape, dtype=torch.float16, device="cpu")
         cpu_out = torch.abs(fp16_cpu_tensor)
 

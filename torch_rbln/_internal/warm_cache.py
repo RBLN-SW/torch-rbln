@@ -38,7 +38,7 @@ from typing import Any
 
 import torch
 
-import torch_rbln._C as _C
+from torch_rbln import _C
 
 
 def _is_drivable_runtime_handle(handle: Any) -> bool:
@@ -105,7 +105,7 @@ def install_pending(runtime_holder: list, outputs: Any) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def set_enabled(enabled: bool) -> None:
+def set_enabled(*, enabled: bool) -> None:
     """Globally enable/disable the warm-cache hot path."""
     _C._warmcache_set_enabled(bool(enabled))
 
@@ -119,5 +119,7 @@ def size() -> int:
 
 
 def clear(device: int | None = None) -> None:
-    """Drop the entries whose inputs live on ``device``, or all of them when ``None``."""
+    """Drop the entries whose inputs live on ``device``, or all of them when
+    ``None``.
+    """
     _C._warmcache_clear(device)

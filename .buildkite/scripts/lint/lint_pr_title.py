@@ -38,23 +38,23 @@ def main() -> None:
     argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter).parse_args()
     for name in ("GH_REPO", "GH_TOKEN"):
         if not os.environ.get(name):
-            raise SystemExit(f"{name} is not set")
+            msg = f"{name} is not set"
+            raise SystemExit(msg)
     pull_request = os.environ.get("BUILDKITE_PULL_REQUEST", "")
     try:
         pull_request_number = int(pull_request)
     except ValueError:
-        raise SystemExit(f"BUILDKITE_PULL_REQUEST is '{pull_request}', not a pull request number") from None
+        msg = f"BUILDKITE_PULL_REQUEST is '{pull_request}', not a pull request number"
+        raise SystemExit(msg) from None
     try:
         title = repository().get_pull(pull_request_number).title
     except GITHUB_ERRORS as error:
-        raise SystemExit(
-            f"Could not read pull request #{pull_request_number} in {os.environ['GH_REPO']}: {error}"
-        ) from None
+        msg = f"Could not read pull request #{pull_request_number} in {os.environ['GH_REPO']}: {error}"
+        raise SystemExit(msg) from None
     print(f"Pull request #{pull_request_number}: {title}")
     if not TITLE_PATTERN.fullmatch(title):
-        raise SystemExit(
-            f'"{title}" is not a Conventional Commits title\n{TITLE_RULES}\nEdit the title, then retry this job'
-        )
+        msg = f'"{title}" is not a Conventional Commits title\n{TITLE_RULES}\nEdit the title, then retry this job'
+        raise SystemExit(msg)
 
 
 if __name__ == "__main__":

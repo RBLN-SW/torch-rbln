@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Test suite for the RBLN-native `aten::clone` implementation.
+"""Test suite for the RBLN-native `aten::clone` implementation.
 
 `clone_rbln` (RBLNCopy.cpp) handles two paths:
 * **Direct d2d (fast path):** `self` is contiguous, storage_offset() == 0,
@@ -32,7 +31,7 @@ class TestCloneRBLNDirectD2D(TestCase):
 
     def _check(self, src_cpu: torch.Tensor) -> None:
         src_rbln = src_cpu.to("rbln")
-        # Sanity-check the fast-path precondition.
+        # Verify the fast-path precondition.
         self.assertTrue(src_rbln.is_contiguous())
         self.assertEqual(src_rbln.storage_offset(), 0)
 

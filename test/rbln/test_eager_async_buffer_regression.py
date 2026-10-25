@@ -7,26 +7,29 @@ class of failure where a device buffer is freed or reallocated while asynchronou
 work that still references it is in flight — which corrupts buffer state and aborts the
 runtime on a later op.
 
-The workload is a decode-like eager loop (per-layer q/k/v/o projections + matmul attention
-over a persistent KV-style cache, with ``empty_cache()`` churn between steps), run in a
-freshly spawned process. On a correct runtime it completes; if a buffer is recycled out
-from under in-flight async work, the worker process aborts and the test fails. The race is
-timing-dependent, so the worker retries the workload a few times to fail reliably when the
-bug is present.
+The workload is a decode-like eager loop (per-layer q/k/v/o projections + matmul
+attention over a persistent KV-style cache, with ``empty_cache()`` churn between steps),
+run in a freshly spawned process. On a correct runtime it completes; if a buffer is
+recycled out from under in-flight async work, the worker process aborts and the test
+fails. The race is timing-dependent, so the worker retries the workload a few times to
+fail reliably when the bug is present.
 
 Requirements (provided by fixtures in ``test/conftest.py``):
   * ``TORCH_RBLN_DEPLOY=ON`` (``enable_deploy_mode``) — required to exercise this path.
-  * ``TORCH_RBLN_DISABLE_FALLBACK`` includes ``compile_error`` (``disable_compile_error_fallback``,
-    autouse) — so the runtime error surfaces instead of falling back to CPU.
+  * ``TORCH_RBLN_DISABLE_FALLBACK`` includes ``compile_error``
+    (``disable_compile_error_fallback``, autouse) — so the runtime error surfaces
+    instead of falling back to CPU.
 
-This is a fast, model-free check of the path (the model-level eager suite that used to cover it
-was removed with test_optimum_llm.py). It runs in a spawned process because the failure aborts
-the worker.
+This is a fast, model-free check of the path (the model-level eager suite that used to
+cover it was removed with test_optimum_llm.py). It runs in a spawned process because the
+failure aborts the worker.
 """
 
 import pytest
+import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
+import torch_rbln
 from test.utils import run_in_isolated_process
 
 
@@ -41,14 +44,11 @@ def _eager_matmul_decode_worker(
     """Decode-like eager loop (q/k/v/o linears + matmul attention over a persistent KV
     cache + ``empty_cache`` churn) that stresses eager buffer alloc/free/reallocate.
 
-    Module-level (picklable) so it can be the target of ``mp.spawn``. The spawned process
-    inherits ``TORCH_RBLN_DEPLOY=ON`` from the parent (``enable_deploy_mode``). On a correct
-    runtime it returns; if a buffer is recycled under in-flight async work it aborts.
+    Module-level (picklable) so it can be the target of ``mp.spawn``. The spawned
+    process inherits ``TORCH_RBLN_DEPLOY=ON`` from the parent (``enable_deploy_mode``).
+    On a correct runtime it returns; if a buffer is recycled under in-flight async work
+    it aborts.
     """
-    import torch
-
-    import torch_rbln
-
     dt = torch.float16 if dtype_str == "float16" else torch.bfloat16
     dev = torch.device("rbln", 0)
     torch.manual_seed(0)

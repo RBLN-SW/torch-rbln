@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Test suite for the C++ dispatch shim's pre-check behaviour.
+"""Test suite for the C++ dispatch shim's pre-check behavior.
 
 The shim short-circuits to the CPU fallback path on these conditions
 (see `DispatchShim.cpp::quick_fallback_check`):
@@ -29,12 +28,16 @@ shim) so they catch regressions in either the C++ pre-check or the Python
 wrapper path together.
 """
 
+import math
+import os
+from unittest import mock
+
 import pytest
 import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-import torch_rbln._C as _C
+from torch_rbln import _C
 
 
 def _dispatch_counts() -> tuple[int, int, int, int]:
@@ -80,7 +83,7 @@ class TestDispatchShimWrappedScalar(TestCase):
                 self.assertEqual(_C._warmcache_size(), 1)
                 before = _dispatch_counts()
                 out = a + 1
-                delta = tuple(b - c for c, b in zip(before, _dispatch_counts()))
+                delta = tuple(b - c for c, b in zip(before, _dispatch_counts(), strict=True))
                 self.assertEqual(delta, (1, 0, 1, 0), "second `a + 1` must be a warm hit (total, fallback, hit, miss)")
                 self.assertEqual(_C._warmcache_size(), 1, "the hit must not erase the entry")
                 self.assertEqual(out.cpu(), torch.full((1, 64), 2.0, dtype=dtype))
@@ -93,7 +96,7 @@ class TestDispatchShimWrappedScalar(TestCase):
         before = _dispatch_counts()
         again1 = (a + 1).cpu()
         again2 = (a + 2).cpu()
-        _, _, warm, miss = tuple(b - c for c, b in zip(before, _dispatch_counts()))
+        _, _, warm, miss = tuple(b - c for c, b in zip(before, _dispatch_counts(), strict=True))
         self.assertEqual((warm, miss), (2, 0))
         self.assertEqual(again1, r1)
         self.assertEqual(again2, r2)
@@ -110,7 +113,7 @@ class TestDispatchShimWrappedScalar(TestCase):
         before = _dispatch_counts()
         self.assertEqual((a + 1.5).cpu()[0, 0].item(), 2.5)
         self.assertEqual((a * 3).cpu()[0, 0].item(), 3.0)
-        _, _, warm, miss = tuple(b - c for c, b in zip(before, _dispatch_counts()))
+        _, _, warm, miss = tuple(b - c for c, b in zip(before, _dispatch_counts(), strict=True))
         self.assertEqual((warm, miss), (2, 0))
 
     def test_inplace_python_scalar_add(self) -> None:
@@ -174,9 +177,9 @@ class TestDispatchShimNanInfFallback(TestCase):
     the first clean call installs an entry for the shape.
 
     These tests assume the default non-deploy environment (the deploy / nan_inf-disable
-    gates are read live from the environment on each dispatch, not process-cached; running
-    the suite with ``TORCH_RBLN_DEPLOY=ON`` skips the scan and these checks no longer hold
-    — that's the intended deploy-mode behaviour and matches AS-IS).
+    gates are read live from the environment on each dispatch, not process-cached;
+    running the suite with ``TORCH_RBLN_DEPLOY=ON`` skips the scan and these checks no
+    longer hold — that's the intended deploy-mode behavior and matches AS-IS).
     """
 
     def setUp(self) -> None:
@@ -297,8 +300,6 @@ class TestDispatchShimNanInfFallback(TestCase):
         # Wrapped 0-dim Python scalars (``tensor + 1.0``) are skipped from
         # the dtype shortcut but MUST still pass through the NaN/Inf scan —
         # ``tensor + math.nan`` would otherwise feed NaN to the device.
-        import math
-
         x = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float16, device="rbln")
         z = x + math.nan
         result = z.to("cpu")
@@ -311,24 +312,25 @@ class TestDispatchShimGateLiveRead(TestCase):
     """Both NaN/Inf-scan gates -- ``TORCH_RBLN_DEPLOY`` (``is_deploy_mode``) and
     ``TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK`` (``is_nan_inf_check_disabled``) in
     ``DispatchShim.cpp`` -- are read live per dispatch, not cached in a process-lifetime
-    ``static``. A re-introduced static cache in either would latch the first value and fail
-    its toggle. They are separate functions, so each is toggled separately."""
+    ``static``. A re-introduced static cache in either would latch the first value and
+    fail its toggle. They are separate functions, so each is toggled separately.
+    """
 
     _GATE_ENVS = ("TORCH_RBLN_DEPLOY", "TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK")
 
     def _nan_add(self, n):
-        # All-NaN fp16 input with a 64-aligned last dim so the device path is eligible once the
-        # scan is off (the NaN value doesn't affect compilation).
+        # All-NaN fp16 input with a 64-aligned last dim so the device path is eligible
+        # once the scan is off (the NaN value doesn't affect compilation).
         x = torch.full((n,), float("nan"), dtype=torch.float16, device="rbln")
         y = torch.ones(n, dtype=torch.float16, device="rbln")
         (x + y).to("cpu")
 
     def _assert_gate_read_live(self, env_name, scan_off_value) -> None:
-        """Toggle one gate off -> on -> off in a single process and assert the warm cache is
-        primed only while the scan is off. Both gate envs are cleared at each baseline so
-        ambient state can't skip the scan; ``env_name=scan_off_value`` disables it."""
-        import os
-
+        """Toggle one gate off -> on -> off in a single process and assert the warm
+        cache is primed only while the scan is off. Both gate envs are cleared at each
+        baseline so ambient state can't skip the scan; ``env_name=scan_off_value``
+        disables it.
+        """
         if not _C._warmcache_is_enabled():
             self.skipTest("warm cache disabled; the device-path install is unobservable")
 
@@ -352,16 +354,10 @@ class TestDispatchShimGateLiveRead(TestCase):
         self.assertEqual(_C._warmcache_size(), after_off, f"{env_name} live: scan re-enabled must fall back again")
 
     def test_deploy_gate_read_live_per_dispatch(self) -> None:
-        import os
-        from unittest import mock
-
         with mock.patch.dict(os.environ):  # restores the full environment on exit
             self._assert_gate_read_live("TORCH_RBLN_DEPLOY", "ON")
 
     def test_nan_inf_disable_gate_read_live_per_dispatch(self) -> None:
-        import os
-        from unittest import mock
-
         with mock.patch.dict(os.environ):  # restores the full environment on exit
             self._assert_gate_read_live("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK", "nan_inf")
 

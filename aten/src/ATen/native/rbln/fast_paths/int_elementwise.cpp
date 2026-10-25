@@ -53,7 +53,7 @@ inline void store_i64(void* base, at::ScalarType st, int64_t i, int64_t v) {
       static_cast<int32_t*>(base)[i] = static_cast<int32_t>(v);
       break;
     case at::kLong:
-      static_cast<int64_t*>(base)[i] = static_cast<int64_t>(v);
+      static_cast<int64_t*>(base)[i] = v;
       break;
     default:
       break; // unreachable
@@ -71,7 +71,8 @@ inline int broadcast_mode(const at::Tensor& self, const at::Tensor& other) {
   if (other.sizes() == self.sizes()) {
     return 0;
   }
-  if (self.dim() >= 1 && other.dim() == 1 && other.numel() == self.size(self.dim() - 1)) {
+  if (self.dim() >= 1 && other.dim() == 1 &&
+      other.numel() == self.size(self.dim() - 1)) {
     return 2;
   }
   return -1;
@@ -124,12 +125,15 @@ bool run_binary(
   }
 
   stack->resize(arguments_begin);
-  stack->emplace_back(c10::IValue(out));
+  stack->emplace_back(out);
   return true;
 }
 
 // schema: sub.out(Tensor self, Tensor other, *, Scalar alpha=1, Tensor(a!) out)
-bool sub_int_handler(c10::ArrayRef<at::Tensor> cpu_tensors, torch::jit::Stack* stack, size_t arguments_begin) {
+bool sub_int_handler(
+    c10::ArrayRef<at::Tensor> cpu_tensors,
+    torch::jit::Stack* stack,
+    size_t arguments_begin) {
   if (cpu_tensors.size() < 3) {
     return false;
   }
@@ -143,24 +147,37 @@ bool sub_int_handler(c10::ArrayRef<at::Tensor> cpu_tensors, torch::jit::Stack* s
     return false;
   }
   return run_binary(
-      cpu_tensors[0], cpu_tensors[1], cpu_tensors.back(), stack, arguments_begin, [](int64_t a, int64_t b) {
-        return a - b;
-      });
+      cpu_tensors[0],
+      cpu_tensors[1],
+      cpu_tensors.back(),
+      stack,
+      arguments_begin,
+      [](int64_t a, int64_t b) { return a - b; });
 }
 
 // schema: mul.out(Tensor self, Tensor other, *, Tensor(a!) out)
-bool mul_int_handler(c10::ArrayRef<at::Tensor> cpu_tensors, torch::jit::Stack* stack, size_t arguments_begin) {
+bool mul_int_handler(
+    c10::ArrayRef<at::Tensor> cpu_tensors,
+    torch::jit::Stack* stack,
+    size_t arguments_begin) {
   if (cpu_tensors.size() < 3) {
     return false;
   }
   return run_binary(
-      cpu_tensors[0], cpu_tensors[1], cpu_tensors.back(), stack, arguments_begin, [](int64_t a, int64_t b) {
-        return a * b;
-      });
+      cpu_tensors[0],
+      cpu_tensors[1],
+      cpu_tensors.back(),
+      stack,
+      arguments_begin,
+      [](int64_t a, int64_t b) { return a * b; });
 }
 
-// schema: clamp.out(Tensor self, Scalar? min=None, Scalar? max=None, *, Tensor(a!) out)
-bool clamp_int_handler(c10::ArrayRef<at::Tensor> cpu_tensors, torch::jit::Stack* stack, size_t arguments_begin) {
+// schema: clamp.out(Tensor self, Scalar? min=None, Scalar? max=None,
+//                   *, Tensor(a!) out)
+bool clamp_int_handler(
+    c10::ArrayRef<at::Tensor> cpu_tensors,
+    torch::jit::Stack* stack,
+    size_t arguments_begin) {
   if (cpu_tensors.size() < 2) {
     return false;
   }
@@ -180,14 +197,16 @@ bool clamp_int_handler(c10::ArrayRef<at::Tensor> cpu_tensors, torch::jit::Stack*
   int64_t lo = 0;
   int64_t hi = 0;
   if (!min_iv.isNone()) {
-    if (!min_iv.isScalar() || !min_iv.toScalar().isIntegral(/*includeBool=*/false)) {
+    if (!min_iv.isScalar() ||
+        !min_iv.toScalar().isIntegral(/*includeBool=*/false)) {
       return false;
     }
     has_min = true;
     lo = min_iv.toScalar().toLong();
   }
   if (!max_iv.isNone()) {
-    if (!max_iv.isScalar() || !max_iv.toScalar().isIntegral(/*includeBool=*/false)) {
+    if (!max_iv.isScalar() ||
+        !max_iv.toScalar().isIntegral(/*includeBool=*/false)) {
       return false;
     }
     has_max = true;
@@ -214,7 +233,7 @@ bool clamp_int_handler(c10::ArrayRef<at::Tensor> cpu_tensors, torch::jit::Stack*
   }
 
   stack->resize(arguments_begin);
-  stack->emplace_back(c10::IValue(out));
+  stack->emplace_back(out);
   return true;
 }
 

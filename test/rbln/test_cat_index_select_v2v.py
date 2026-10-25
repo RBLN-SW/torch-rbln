@@ -24,7 +24,8 @@ from test.utils_v2v import close, DEVICE, ENGINE_DTYPES, eq, to_dev
 
 def _check(actual_dev: torch.Tensor, expected_cpu: torch.Tensor, atol: float = 0.0, rtol: float = 0.0):
     """Thin wrapper that picks `eq` (bitwise) or `close` (tolerance) based on
-    whether the caller passed non-zero tolerance."""
+    whether the caller passed non-zero tolerance.
+    """
     if atol == 0.0 and rtol == 0.0:
         eq(actual_dev, expected_cpu)
     else:
@@ -40,7 +41,8 @@ def _check(actual_dev: torch.Tensor, expected_cpu: torch.Tensor, atol: float = 0
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestCatV2V(TestCase):
     """Tests for the native v2v `aten::cat` kernel and the `aten::stack`
-    composite that decomposes through it."""
+    composite that decomposes through it.
+    """
 
     @dtypes(*ENGINE_DTYPES)
     def test_cat_2input_axis0_contig(self, dtype):
@@ -83,8 +85,9 @@ class TestCatV2V(TestCase):
         _check(got, expected)
 
     def test_cat_all_empty_inputs(self):
-        """When every input is empty, output is empty (default behaviour for the
-        pre-allocated `out` tensor: our kernel returns it unchanged)."""
+        """When every input is empty, output is empty (default behavior for the
+        pre-allocated `out` tensor: our kernel returns it unchanged).
+        """
         empties_cpu = [torch.zeros(0, 4, dtype=torch.float16) for _ in range(3)]
         expected = torch.cat(empties_cpu, dim=0)
         got = torch.cat([to_dev(x) for x in empties_cpu], dim=0)
@@ -92,7 +95,8 @@ class TestCatV2V(TestCase):
 
     def test_cat_non_contig_input_unsqueezed_slice(self):
         """The exact pattern from test.py: kv[0, blk, :, 0, :, :] slices that are
-        actually contiguous on inspection, then unsqueeze(0) for stack-decomposition."""
+        actually contiguous on inspection, then unsqueeze(0) for stack-decomposition.
+        """
         kv_cpu = torch.arange(2 * 4 * 8 * 1 * 16 * 8, dtype=torch.bfloat16).reshape(2, 4, 8, 1, 16, 8)
         kv = to_dev(kv_cpu)
         layers_cpu = [kv_cpu[0, blk, :, 0, :, :].unsqueeze(0) for blk in range(4)]
@@ -103,7 +107,8 @@ class TestCatV2V(TestCase):
 
     def test_cat_genuinely_non_contig_input(self):
         """A non-contig view that cannot be coalesced fully: kv[0, :, :, 0, ::2, :]
-        has stride hole at the second-to-last dim."""
+        has stride hole at the second-to-last dim.
+        """
         kv_cpu = torch.arange(2 * 4 * 8 * 1 * 16 * 8, dtype=torch.float32).reshape(2, 4, 8, 1, 16, 8)
         kv = to_dev(kv_cpu)
         view_cpu = kv_cpu[0, :, :, 0, ::2, :]
@@ -163,7 +168,8 @@ class TestCatV2V(TestCase):
 
     def test_cat_expanded_input(self):
         """Expand creates stride-0 dims (broadcasting). Cat must materialise the
-        repeated values correctly."""
+        repeated values correctly.
+        """
         base_cpu = torch.arange(6, dtype=torch.float32).reshape(1, 6)
         exp_cpu = base_cpu.expand(4, 6)
         expected = torch.cat([exp_cpu, exp_cpu], dim=0)
@@ -180,7 +186,8 @@ class TestCatV2V(TestCase):
 
     def test_cat_narrow_input(self):
         """`narrow` slices a contig region (no stride hole). Should hit the fast
-        path: contig_suffix_start matches the narrowed shape."""
+        path: contig_suffix_start matches the narrowed shape.
+        """
         big_cpu = torch.arange(40, dtype=torch.float32).reshape(5, 8)
         a_cpu = big_cpu.narrow(0, 1, 3)
         b_cpu = big_cpu.narrow(0, 2, 2)
@@ -231,7 +238,8 @@ class TestCatV2V(TestCase):
 
     def test_cat_mixed_contig_and_non_contig_inputs(self):
         """One contig + one non-contig in the same cat — algorithm must handle
-        each input independently."""
+        each input independently.
+        """
         base_cpu = torch.arange(40, dtype=torch.float32).reshape(5, 8)
         contig_cpu = base_cpu[:3, :4]
         non_contig_cpu = base_cpu[:3, ::2]
@@ -260,7 +268,9 @@ class TestCatV2V(TestCase):
 
     @dtypes(*ENGINE_DTYPES)
     def test_cat_out_internal_overlap_rejected(self, dtype):
-        """``out`` with internal overlap (broadcast view) must raise ``RuntimeError``."""
+        """``out`` with internal overlap (broadcast view) must raise
+        ``RuntimeError``.
+        """
         a = torch.arange(12, dtype=dtype, device=DEVICE).reshape(3, 4)
         b = torch.arange(100, 112, dtype=dtype, device=DEVICE).reshape(3, 4)
         out = torch.empty(1, 8, dtype=dtype, device=DEVICE).expand(3, 8)
@@ -272,7 +282,8 @@ class TestCatV2V(TestCase):
     def test_cat_all_zero_axis_resizes_out_to_zero(self):
         """cat of all-empty inputs along an axis where each size is 0 must resize
         `out` to the empty shape (regression for the all-empty fast-path that
-        used to return `out` unchanged)."""
+        used to return `out` unchanged).
+        """
         out_dev = torch.empty(1, dtype=torch.float32, device=DEVICE)
         with pytest.warns(UserWarning, match="An output with one or more elements"):
             torch.cat([torch.empty(0, device=DEVICE), torch.empty(0, device=DEVICE)], dim=0, out=out_dev)
@@ -281,7 +292,8 @@ class TestCatV2V(TestCase):
     def test_stack_empty_inputs_dim_negative_one(self):
         """stack of two (0,1,0) tensors at dim=-1 must produce (0,1,0,2). The
         pre-fix code dropped these as empties and returned the wrong-shape `out`
-        unchanged."""
+        unchanged.
+        """
         empties_cpu = [torch.empty(0, 1, 0, dtype=torch.float32) for _ in range(2)]
         expected = torch.stack(empties_cpu, dim=-1)
         got = torch.stack([to_dev(x) for x in empties_cpu], dim=-1)
@@ -289,7 +301,8 @@ class TestCatV2V(TestCase):
 
     def test_cat_legacy_empty_1d_placeholder_is_skipped(self):
         """A (0,) 1-D placeholder among rank-2 inputs is silently ignored, matching
-        PyTorch's `at::native::cat` legacy behaviour."""
+        PyTorch's `at::native::cat` legacy behavior.
+        """
         a_cpu = torch.randn(5, 5, dtype=torch.float32)
         placeholder_cpu = torch.empty(0, dtype=torch.float32)
         expected = torch.cat([placeholder_cpu, a_cpu], dim=1)
@@ -298,7 +311,8 @@ class TestCatV2V(TestCase):
 
     def test_cat_out_on_wrong_device_raises_type_error(self):
         """cat / stack family must raise TypeError (not RuntimeError) for `out` on
-        the wrong device. Required by test/ops/test_ops.py test_out Case 3."""
+        the wrong device. Required by test/ops/test_ops.py test_out Case 3.
+        """
         a_dev = torch.randn(2, 3, dtype=torch.float32, device=DEVICE)
         out_cpu = torch.empty(2, 6, dtype=torch.float32, device="cpu")
         with pytest.raises(TypeError):
@@ -306,7 +320,8 @@ class TestCatV2V(TestCase):
 
     def test_cat_mixed_dtype_promotes_to_common(self):
         """Mixed-dtype inputs are promoted to the common dtype (PyTorch semantics).
-        Previously we hard-errored with `promotion is not supported`."""
+        Previously we hard-errored with `promotion is not supported`.
+        """
         a_cpu = torch.randn(3, 4, dtype=torch.float16)
         b_cpu = torch.randn(3, 2, dtype=torch.float64)
         expected = torch.cat([a_cpu, b_cpu], dim=1)
@@ -368,7 +383,8 @@ class TestIndexSelectV2V(TestCase):
 
     def test_index_select_consecutive_arange_index(self):
         """When the index is a contiguous arange, the coalesce_runs path should
-        collapse into a single v2v per outer index."""
+        collapse into a single v2v per outer index.
+        """
         src_cpu = torch.arange(28 * 8 * 1024 * 4, dtype=torch.bfloat16).reshape(28, 8, 1024, 4)
         idx_cpu = torch.arange(64, dtype=torch.long)
         expected = torch.index_select(src_cpu, 2, idx_cpu)
@@ -428,7 +444,8 @@ class TestIndexSelectV2V(TestCase):
     @parametrize("idx_value", [torch.tensor([0], dtype=torch.long), torch.tensor(0, dtype=torch.long)])
     def test_index_select_zero_dim_self(self, dim, idx_value):
         """0-D self with index_select: PyTorch returns a 0-D tensor mirroring self's
-        rank. dim must be 0 or -1; index must contain exactly one value (= 0)."""
+        rank. dim must be 0 or -1; index must contain exactly one value (= 0).
+        """
         s_cpu = torch.tensor(3.5, dtype=torch.float16)
         expected = torch.index_select(s_cpu, dim, idx_value)
         got = torch.index_select(to_dev(s_cpu), dim, idx_value)
@@ -461,14 +478,16 @@ class TestIndexSelectV2V(TestCase):
         consecutive index values map to memory separated by padding/NaN bytes.
 
         Reproduces the bug found via PyTorch opinfo's `noncontiguous_samples`
-        test, which interleaves NaN padding between data elements."""
-        S = 5
-        data = torch.arange(S * S, dtype=torch.float16).reshape(S, S)
-        padded = torch.empty(S, S, 2, dtype=torch.float16)
+        test, which interleaves NaN padding between data elements.
+        """
+        size = 5
+        data = torch.arange(size * size, dtype=torch.float16).reshape(size, size)
+        padded = torch.empty(size, size, 2, dtype=torch.float16)
         padded[..., 0] = math.nan
         padded[..., 1] = data
         self_cpu = padded[..., 1]
-        assert not self_cpu.is_contiguous() and self_cpu.stride() == (2 * S, 2)
+        assert not self_cpu.is_contiguous()
+        assert self_cpu.stride() == (2 * size, 2)
 
         self_dev = padded.to(DEVICE)[..., 1]
         idx = torch.tensor([0, 3, 4, 1], dtype=torch.long)
@@ -480,13 +499,14 @@ class TestIndexSelectV2V(TestCase):
 
     def test_test_py_pattern_small(self):
         """Smaller version of test.py's gather pattern to verify cat + stack +
-        index_select compose correctly."""
-        N_LAYERS, N_BLOCKS, N_KV_H, BLK_SZ, HEAD_D = 4, 8, 2, 32, 8
+        index_select compose correctly.
+        """
+        n_layers, n_blocks, n_kv_h, blk_sz, head_d = 4, 8, 2, 32, 8
         kv_cpu_list = [
-            torch.randn(2, N_BLOCKS, N_KV_H, 1, BLK_SZ, HEAD_D, dtype=torch.bfloat16) for _ in range(N_LAYERS)
+            torch.randn(2, n_blocks, n_kv_h, 1, blk_sz, head_d, dtype=torch.bfloat16) for _ in range(n_layers)
         ]
         kv_dev_list = [to_dev(kv) for kv in kv_cpu_list]
-        slot_idx = torch.arange(BLK_SZ // 2, dtype=torch.long)
+        slot_idx = torch.arange(blk_sz // 2, dtype=torch.long)
         blk = 3
 
         def gather(kv_caches):
@@ -588,7 +608,9 @@ class TestIndexSelectV2V(TestCase):
 
     @dtypes(*ENGINE_DTYPES)
     def test_index_select_out_internal_overlap_rejected(self, dtype):
-        """``out`` with internal overlap (broadcast view) must raise ``RuntimeError``."""
+        """``out`` with internal overlap (broadcast view) must raise
+        ``RuntimeError``.
+        """
         src = torch.arange(20, dtype=dtype, device=DEVICE).reshape(4, 5)
         idx = torch.tensor([0, 2], dtype=torch.long)
         out = torch.empty(1, 5, dtype=dtype, device=DEVICE).expand(2, 5)
@@ -604,7 +626,8 @@ class TestIndexSelectV2V(TestCase):
 
     def test_index_select_empty_self_oob_index_rejected(self):
         """self empty on the indexed axis (extent 0): any index is out of range and must
-        raise like CPU, not resize out to (1,3) and return it uninitialized."""
+        raise like CPU, not resize out to (1,3) and return it uninitialized.
+        """
         empty_self = torch.empty((0, 3), dtype=torch.float32)
         idx = torch.tensor([0], dtype=torch.long)
         with pytest.raises(RuntimeError):
@@ -614,7 +637,8 @@ class TestIndexSelectV2V(TestCase):
 
     def test_index_select_empty_output_valid_index(self):
         """self (3,0): extent-3 axis makes index [0] valid with empty output
-        (1,0) — must NOT raise (bounds fix must not reject valid indices)."""
+        (1,0) — must NOT raise (bounds fix must not reject valid indices).
+        """
         empty_self = torch.empty((3, 0), dtype=torch.float32)
         idx = torch.tensor([0], dtype=torch.long)
         expected = torch.index_select(empty_self, 0, idx)
@@ -623,7 +647,8 @@ class TestIndexSelectV2V(TestCase):
 
     def test_index_select_empty_output_oob_index_rejected(self):
         """self (3,0): index 5 exceeds extent 3 and must raise like CPU even though the
-        output would be empty (numel()==0 must not swallow it)."""
+        output would be empty (numel()==0 must not swallow it).
+        """
         empty_self = torch.empty((3, 0), dtype=torch.float32)
         idx = torch.tensor([5], dtype=torch.long)
         with pytest.raises(RuntimeError):
@@ -656,7 +681,8 @@ def _index_at_axis(x: torch.Tensor, axis: int, idx: torch.Tensor) -> torch.Tenso
 class TestIndexTensorV2V(TestCase):
     """Tests for the native `aten::index.Tensor` white-list fast-path (a single
     index on one axis -> v2v `index_select`) and its CPU fallback for the
-    non-white-listed advanced-indexing forms."""
+    non-white-listed advanced-indexing forms.
+    """
 
     def _check_bracket(self, src_cpu: torch.Tensor, idx: torch.Tensor) -> None:
         """`src[idx]` on device (idx on CPU) vs the CPU reference."""
@@ -668,7 +694,8 @@ class TestIndexTensorV2V(TestCase):
         counter never fires for it and gives no routing signal; we instead probe
         the runtime primitive the native gather emits (`v2v_multi`). This is an
         implementation-detail signal, used only to guard against a silent
-        regression back to the fallback."""
+        regression back to the fallback.
+        """
         with torch.rbln.explain() as p:
             fn()
         return "v2v_multi" in p.dump().get("rebel_runtime", {}).get("by_primitive", {})
@@ -699,8 +726,9 @@ class TestIndexTensorV2V(TestCase):
         self._check_bracket(src, torch.tensor([], dtype=torch.long))
 
     def test_index_negative_wrap(self):
-        """Advanced indexing wraps negatives; the kernel must match (it normalises
-        before delegating to index_select, which rejects negatives)."""
+        """Advanced indexing wraps negatives; the kernel must match (it normalizes
+        before delegating to index_select, which rejects negatives).
+        """
         src = torch.arange(30, dtype=torch.float32).reshape(5, 6)
         self._check_bracket(src, torch.tensor([-1, -5, 2, -2], dtype=torch.long))
 
@@ -721,7 +749,8 @@ class TestIndexTensorV2V(TestCase):
 
     def test_index_nd_integer(self):
         """N-D integer index: out = idx.shape + self.shape[1:] (flatten -> gather
-        -> reshape). Includes a repeat to exercise the flattened gather."""
+        -> reshape). Includes a repeat to exercise the flattened gather.
+        """
         src = torch.arange(30, dtype=torch.float32).reshape(5, 6)
         idx2d = torch.tensor([[1, 2], [3, 0], [2, 2]], dtype=torch.long)
         self._check_bracket(src, idx2d)
@@ -780,7 +809,8 @@ class TestIndexTensorV2V(TestCase):
 
     def test_index_full_mask_fallback(self):
         """A full-shape mask selects individual elements (data-dependent, scalar
-        picks) -> CPU fallback."""
+        picks) -> CPU fallback.
+        """
         src = torch.arange(30, dtype=torch.float32).reshape(5, 6)
         mask = src > 12
         _check(to_dev(src)[mask.to(DEVICE)], src[mask])
@@ -792,7 +822,8 @@ class TestIndexTensorV2V(TestCase):
 
     def test_index_empty_self_fallback(self):
         """An empty non-indexed dim makes indexing a no-op with no bounds check
-        (empty(3, 0)[[3]] -> (1, 0)); must match CPU, not raise."""
+        (empty(3, 0)[[3]] -> (1, 0)); must match CPU, not raise.
+        """
         src = torch.empty(3, 0, dtype=torch.float32)
         self._check_bracket(src, torch.tensor([3], dtype=torch.long))
 
@@ -816,7 +847,8 @@ class TestIndexTensorV2V(TestCase):
 
     def test_index_routes_native(self):
         """The white-listed forms must actually run the native gather (not just
-        return the right values via the fallback)."""
+        return the right values via the fallback).
+        """
         src = torch.arange(30, dtype=torch.float16).reshape(5, 6)
         self.assertTrue(self._ran_native_gather(lambda: to_dev(src)[torch.tensor([1, 2, 3]).to(DEVICE)]))
         self.assertTrue(self._ran_native_gather(lambda: to_dev(src)[torch.tensor([[1, 2], [3, 0]]).to(DEVICE)]))
@@ -841,7 +873,8 @@ class TestIndexTensorV2V(TestCase):
         decision, masking a fallback (the gather signal and the reshape signal
         would be indistinguishable). With a CPU index that reshape is host-side, so
         the only device `v2v_multi` is the gather itself — the decisive
-        native-vs-fallback signal."""
+        native-vs-fallback signal.
+        """
         src = torch.arange(30, dtype=torch.float16).reshape(5, 6)
         idx_t = torch.tensor([[1, 2], [3, 0], [2, 4]], dtype=torch.long).t()  # CPU, non-contig
         src_dev = to_dev(src)

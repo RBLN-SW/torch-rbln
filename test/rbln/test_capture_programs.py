@@ -15,10 +15,10 @@ what is observable from torch-rbln:
   that mirror the graph's inputs and outputs.
 """
 
-import os
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
 import pytest
 import torch
@@ -28,12 +28,12 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 import torch_rbln.programs as torch_rbln_programs
 
 
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_PROJECT_ROOT = str(Path(__file__).absolute().parents[2])
 
 
 class TestCaptureProgramsSurface(TestCase):
     def test_exposed_on_torch_rbln(self):
-        from rebel.core import program_capture
+        from rebel.core import program_capture  # noqa: PLC0415
 
         for name in torch_rbln_programs.__all__:
             self.assertIs(getattr(torch.rbln, name), getattr(program_capture, name))
@@ -67,7 +67,7 @@ class TestCaptureProgramsLazy(TestCase):
         script = f"""
             import sys
             sys.path.insert(0, {_PROJECT_ROOT!r})
-            import torch, torch_rbln  # noqa: F401
+            import torch, torch_rbln
             loaded = sorted(m for m in sys.modules if m == "rebel" or m.startswith("rebel."))
             assert not loaded, "import pulled in " + ", ".join(loaded)
 
@@ -77,6 +77,7 @@ class TestCaptureProgramsLazy(TestCase):
         """
         result = subprocess.run(
             [sys.executable, "-c", textwrap.dedent(script)],
+            check=False,
             cwd=_PROJECT_ROOT,
             capture_output=True,
             text=True,
@@ -91,7 +92,7 @@ class TestCaptureProgramsLazy(TestCase):
 @pytest.mark.npu(count=1)
 class TestCaptureProgramsCompile(TestCase):
     def test_one_program_per_backend_build(self, device):
-        from rebel.sync_runtime import DynamoRuntime
+        from rebel.sync_runtime import DynamoRuntime  # noqa: PLC0415
 
         class AddModule(torch.nn.Module):
             def forward(self, x, y):
@@ -113,7 +114,8 @@ class TestCaptureProgramsCompile(TestCase):
         self.assertEqual(program.device, x.device)
         self.assertTrue(program.name)  # dynamo compile id, e.g. "0/0"
 
-        # The IO specs mirror the graph: two named float16 inputs, one output, nothing dynamic.
+        # The IO specs mirror the graph: two named float16 inputs, one output, nothing
+        # dynamic.
         self.assertEqual([spec.shape for spec in program.input_specs], [(1, 3, 8, 8), (1, 3, 8, 8)])
         self.assertEqual([spec.dtype for spec in program.input_specs], [torch.float16, torch.float16])
         self.assertTrue(all(spec.name for spec in program.input_specs))

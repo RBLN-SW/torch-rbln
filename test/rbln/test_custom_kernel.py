@@ -1,13 +1,16 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""The rbln_custom_ops attention kernels through eager dispatch, against a CPU fp32 reference.
+"""The rbln_custom_ops attention kernels through eager dispatch, against a CPU fp32
+reference.
 
-Each op has a closed form -- append k/v at the position ``seq`` names, attend over the valid part
-of that block, matmul with the values -- so the same computation on the CPU in fp32 is an
-independent oracle. It is written here rather than borrowed: rebel_compiler registers these four
-with a stub body (``torch.empty_like(q)``), so there is nothing to call.
+Each op has a closed form -- append k/v at the position ``seq`` names, attend over the
+valid part of that block, matmul with the values -- so the same computation on the CPU
+in fp32 is an independent oracle. It is written here rather than borrowed:
+rebel_compiler registers these four with a stub body (``torch.empty_like(q)``), so there
+is nothing to call.
 
-The KV cache the op mutates is compared the same way, which pins *where* the write landed.
+The KV cache the op mutates is compared the same way, which pins *where* the write
+landed.
 
 See ``test_custom_op_compile.py`` for the same family inside a larger compiled program.
 """
@@ -28,15 +31,17 @@ SEQ_LEN = 256  # prompt length, and the decode phase's existing context
 NUM_Q_GROUPS, NUM_KV_HEADS, HEAD_DIM = 4, 8, 64
 SCALE = torch.tensor(1.0 / math.sqrt(HEAD_DIM))
 
-# Fractions of the reference's own scale, as in test_custom_op_compile.py. The device's 16-bit
-# compute formats move the result by well under a percent; reading the wrong part of the cache,
-# or writing the new token to the wrong slot, moves it by its own scale.
+# Fractions of the reference's own scale, as in test_custom_op_compile.py. The device's
+# 16-bit compute formats move the result by well under a percent; reading the wrong part
+# of the cache, or writing the new token to the wrong slot, moves it by its own scale.
 OUTPUT_TOL_FRACTION = 0.1
 CACHE_TOL_FRACTION = 0.05
 
 
 def _close(actual, reference, tol, what):
-    """assert_close, naming the comparison above its diff summary (a plain ``msg=`` replaces it)."""
+    """assert_close, naming the comparison above its diff summary (a plain ``msg=``
+    replaces it).
+    """
     torch.testing.assert_close(
         actual.float().cpu(),
         reference,
@@ -72,8 +77,9 @@ class TestCustomKernelRBLN(TestCase):
         tol = CACHE_TOL_FRACTION * float(reference_cache.abs().max())
         _close(cache, reference_cache, tol, f"{name} after the call")
 
-    # Prefill fills an empty cache from slot 0; decode appends one token to a cache that already
-    # holds SEQ_LEN of context, one block per batch item so batch 1 lands outside block 0.
+    # Prefill fills an empty cache from slot 0; decode appends one token to a cache that
+    # already holds SEQ_LEN of context, one block per batch item so batch 1 lands
+    # outside block 0.
     def _prefill_inputs(self, dtype):
         batch = 1  # the prefill kernel is specialized for batch size 1
         shape = [batch, NUM_KV_HEADS, 1, SEQ_LEN, HEAD_DIM]
@@ -215,7 +221,7 @@ class TestCustomKernelRBLN(TestCase):
                 SCALE,
                 device["block_table"],
                 MAX_SEQ_LENGTH,
-                False,  # is_bidirectional; always causal here, optional mask omitted
+                is_bidirectional=False,  # always causal here, optional mask omitted
             )
         self._check("paged_causal_attn_prefill", out, device, reference)
 
@@ -239,13 +245,14 @@ class TestCustomKernelRBLN(TestCase):
             )
         self._check("paged_causal_attn_decode", out, device, reference)
 
-    # flash_attention_naive: the reference arrives with the op's single-sourcing in rebel_compiler.
+    # flash_attention_naive: the reference arrives with the op's single-sourcing in
+    # rebel_compiler.
     @dtypes(*SUPPORTED_DTYPES)
-    def test_flash_attention_naive_prefill(self, dtype):
+    def test_flash_attention_naive_prefill(self, dtype):  # noqa: ARG002
         self.skipTest("pending flash_attention_naive single-sourcing in rebel_compiler")
 
     @dtypes(*SUPPORTED_DTYPES)
-    def test_flash_attention_naive_decode(self, dtype):
+    def test_flash_attention_naive_decode(self, dtype):  # noqa: ARG002
         self.skipTest("pending flash_attention_naive single-sourcing in rebel_compiler")
 
 

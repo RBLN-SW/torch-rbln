@@ -41,22 +41,29 @@ class CPUFastPathRegistry {
 
   // Register at module-init. ``op_name`` is the schema-qualified operator
   // name (e.g. ``"aten::rsqrt.out"``).
-  C10_RBLN_API void register_handler(const std::string& op_name, CPUFastPathHandler::Fn fn);
+  C10_RBLN_API void register_handler(
+      const std::string& op_name,
+      CPUFastPathHandler::Fn fn);
 
   // Per-call lookup. First call for a given FunctionSchema* warms the
   // schema cache; subsequent calls are shared_lock + hashmap O(1).
   // Returns ``nullptr`` when no handler is registered for the op.
-  C10_RBLN_API CPUFastPathHandler::Fn try_get(const c10::FunctionSchema& schema) const;
+  C10_RBLN_API CPUFastPathHandler::Fn try_get(
+      const c10::FunctionSchema& schema) const;
 
   // Introspection: does a handler exist for ``op_name``? Used by tests to
   // verify the static-init registration fired without going through the
   // FunctionSchema lookup path.
   C10_RBLN_API bool has_handler_for_op(const std::string& op_name) const;
 
- private:
-  CPUFastPathRegistry() = default;
   CPUFastPathRegistry(const CPUFastPathRegistry&) = delete;
   CPUFastPathRegistry& operator=(const CPUFastPathRegistry&) = delete;
+  CPUFastPathRegistry(CPUFastPathRegistry&&) = delete;
+  CPUFastPathRegistry& operator=(CPUFastPathRegistry&&) = delete;
+
+ private:
+  CPUFastPathRegistry() = default;
+  ~CPUFastPathRegistry() = default;
 
   mutable std::shared_mutex mu_;
   // Source of truth, keyed by op-name string. Populated at static init.
@@ -64,18 +71,19 @@ class CPUFastPathRegistry {
   // Per-call cache, keyed by FunctionSchema pointer (stable for process
   // lifetime). Populated lazily on first lookup; serves shared_lock reads
   // thereafter.
-  mutable std::unordered_map<const c10::FunctionSchema*, CPUFastPathHandler::Fn> by_schema_;
+  mutable std::unordered_map<const c10::FunctionSchema*, CPUFastPathHandler::Fn>
+      by_schema_;
 };
 
 // Helper macro for handler-file self-registration. The static initializer
 // runs at .so load time. Counter suffix keeps the variable name unique per
 // translation unit; cross-TU collisions are impossible because each handler
 // lives in its own .cpp.
-#define REGISTER_RBLN_CPU_FAST_PATH_IMPL(op_name, fn, line)                  \
-  static int _rbln_cpu_fast_path_reg_##line = []() {                         \
-    ::at::native::rbln::CPUFastPathRegistry::instance().register_handler(    \
-        op_name, fn);                                                        \
-    return 0;                                                                \
+#define REGISTER_RBLN_CPU_FAST_PATH_IMPL(op_name, fn, line)               \
+  static int _rbln_cpu_fast_path_reg_##line = []() {                      \
+    ::at::native::rbln::CPUFastPathRegistry::instance().register_handler( \
+        op_name, fn);                                                     \
+    return 0;                                                             \
   }()
 
 #define REGISTER_RBLN_CPU_FAST_PATH_PROXY(op_name, fn, line) \

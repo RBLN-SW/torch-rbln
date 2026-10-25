@@ -1,5 +1,6 @@
-// TODO: The previous copy optimizations based on physical shape and physical dtype were removed during
-// v-memory integration. Revisit these optimizations in a future pass.
+// TODO: The previous copy optimizations based on physical shape and physical
+// dtype were removed during v-memory integration. Revisit these optimizations
+// in a future pass.
 #include <algorithm>
 
 #include <ATen/MemoryOverlap.h>
@@ -15,6 +16,7 @@
 #include <c10/rbln/RBLNPinnedAllocator.h>
 
 #include <c10/rbln/RBLNProfiler.h>
+#include <c10/util/ScopeExit.h>
 #include <rebel/runtime/api/rbln_runtime_api.h>
 #include <torch/library.h>
 
@@ -27,79 +29,93 @@ namespace at::native::rbln {
 
 namespace {
 
-// A strided device->device copy whose source is a classifiable view runs as one compiled
-// device program (``torch_rbln::copy_strided_view``) instead of one descriptor per contiguous
-// run. Two conditions decide whether that program is worth reaching for, and both are
-// facts about the compiler rather than tuning knobs:
+// A strided device->device copy whose source is a classifiable view runs as one
+// compiled device program (``torch_rbln::copy_strided_view``) instead of one
+// descriptor per contiguous run. Two conditions decide whether that program is
+// worth reaching for, and both are facts about the compiler rather than tuning
+// knobs:
 //
-//   dtype -- everything the device does not keep as-is is rewritten to a narrower float
-//     (rebel_compiler ``isDeviceSupportedDtype``), which changes the values. ``copy_`` is
-//     not a compute op, so the compiled path has to return what the strided walk returns.
-//     Of the two dtypes the compile path dispatches, only bf16 survives that; f16 loses
-//     a mantissa bit.
-//   alignment -- the compiler lowers a tensor to the device only when its last dim is a
-//     multiple of 64 elements (``checkLastDim128BAligned``: "regardless of dtype, if
-//     greater than 8 bits, we align last dim to 64"). Unaligned, the op path falls back to
-//     a host round-trip, which is what we are trying to avoid.
+//   dtype -- everything the device does not keep as-is is rewritten to a
+//     narrower float (rebel_compiler ``isDeviceSupportedDtype``), which changes
+//     the values. ``copy_`` is not a compute op, so the compiled path has to
+//     return what the strided walk returns. Of the two dtypes the compile path
+//     dispatches, only bf16 survives that; f16 loses a mantissa bit.
+//   alignment -- the compiler lowers a tensor to the device only when its last
+//     dim is a multiple of 64 elements (``checkLastDim128BAligned``:
+//     "regardless of dtype, if greater than 8 bits, we align last dim to 64").
+//     Unaligned, the op path falls back to a host round-trip, which is what we
+//     are trying to avoid.
 //
-// Whether the view itself can be replayed is not decided here -- the shared detector
-// answers that, and returns false through the op when it cannot.
+// Whether the view itself can be replayed is not decided here -- the shared
+// detector answers that, and returns false through the op when it cannot.
 bool try_view_copy(const at::Tensor& dst, const at::Tensor& src) {
   if (src.is_contiguous() || !dst.is_contiguous())
     return false;
-  // One program reads and writes one device; a copy that crosses them is not ours.
+  // One program reads and writes one device; a copy that crosses them is not
+  // ours.
   if (src.device() != dst.device())
     return false;
-  if (src.scalar_type() != at::kBFloat16 || dst.scalar_type() != src.scalar_type())
+  if (src.scalar_type() != at::kBFloat16 ||
+      dst.scalar_type() != src.scalar_type())
     return false;
   if (src.dim() == 0 || src.size(-1) % 64 != 0 || dst.size(-1) % 64 != 0)
     return false;
 
-  // `import torch_rbln` registers the op, and an RBLN tensor cannot exist without that
-  // import, so a missing schema is a broken build rather than a case to route around --
-  // which is why this throws instead of returning false. Looked up per call, the way
-  // upstream reaches an op from C++ (ATen/native/CPUFallback.h): an OperatorHandle points
-  // into the dispatcher's table, and caching one in a static outlives nothing useful here
-  // -- the lookup is a hash probe in front of a copy of at least a full device tile.
+  // `import torch_rbln` registers the op, and an RBLN tensor cannot exist
+  // without that import, so a missing schema is a broken build rather than a
+  // case to route around -- which is why this throws instead of returning
+  // false. Looked up per call, the way upstream reaches an op from C++
+  // (ATen/native/CPUFallback.h): an OperatorHandle points into the dispatcher's
+  // table, and caching one in a static outlives nothing useful here -- the
+  // lookup is a hash probe in front of a copy of at least a full device tile.
   const auto op = c10::Dispatcher::singleton()
                       .findSchemaOrThrow("torch_rbln::copy_strided_view", "")
                       .typed<bool(const at::Tensor&, at::Tensor&)>();
-  at::Tensor out = dst; // a Tensor is a handle; the schema's Tensor(a!) wants a mutable one
+  at::Tensor out =
+      dst; // a Tensor is a handle; the schema's Tensor(a!) wants a mutable one
   return op.call(src, out);
 }
 
 // Recursion guard: a non-direct rbln->rbln copy_ services itself by a v2h
 // (get_cpu_copy_of_rbln_tensor) followed by a cpu->rbln copy. We count that
-// round-trip ONCE (kRbln2RblnIndirect); this flag suppresses the inner cpu->rbln
-// staging / noncontig counters so a single copy_ is not double-counted.
+// round-trip ONCE (kRbln2RblnIndirect); this flag suppresses the inner
+// cpu->rbln staging / noncontig counters so a single copy_ is not
+// double-counted.
 thread_local int g_indirect_d2d_depth = 0;
 struct IndirectD2DGuard {
   IndirectD2DGuard() {
     ++g_indirect_d2d_depth;
   }
+  IndirectD2DGuard(const IndirectD2DGuard&) = delete;
+  IndirectD2DGuard& operator=(const IndirectD2DGuard&) = delete;
+  IndirectD2DGuard(IndirectD2DGuard&&) = delete;
+  IndirectD2DGuard& operator=(IndirectD2DGuard&&) = delete;
   ~IndirectD2DGuard() {
     --g_indirect_d2d_depth;
   }
 };
 
-// Measured crossover where descriptors beat the host gather pass: 8-16 KiB (h2v),
-// 1-8 KiB (v2h), moving with the host thread count. 16 KiB sits above both because
-// the errors are asymmetric: staging a slab descriptors would have won costs ~1.3x,
-// descriptors on element-sized slabs 130x.
-constexpr size_t kMinStridedHostCopyBytes = 16 * 1024;
-// Below the crossover the plan declines and copy_ stages through the host. For a
-// device-latest dst that staging is a read-back and rewrite of the whole span, so a lower
-// crossover would pay off there; choosing it needs the residency, which this path does not
-// query, so the constant stays at the host-latest crossover.
+// Measured crossover where descriptors beat the host gather pass: 8-16 KiB
+// (h2v), 1-8 KiB (v2h), moving with the host thread count. 16 KiB sits above
+// both because the errors are asymmetric: staging a slab descriptors would have
+// won costs ~1.3x, descriptors on element-sized slabs 130x.
+constexpr size_t kMinStridedHostCopyBytes = size_t{16} * 1024;
+// Below the crossover the plan declines and copy_ stages through the host. For
+// a device-latest dst that staging is a read-back and rewrite of the whole
+// span, so a lower crossover would pay off there; choosing it needs the
+// residency, which this path does not query, so the constant stays at the
+// host-latest crossover.
 
-// Whether make_strided_host_plan would accept `dst` paired with a contiguous source of the
-// same shape and dtype: the inner block is then dst's own contiguous suffix and the overlap
-// rule is dst's, so the answer does not need the source to exist yet.
+// Whether make_strided_host_plan would accept `dst` paired with a contiguous
+// source of the same shape and dtype: the inner block is then dst's own
+// contiguous suffix and the overlap rule is dst's, so the answer does not need
+// the source to exist yet.
 bool strided_plan_possible_for_contiguous_src(const at::Tensor& dst) {
   if (dst.numel() == 0 || dst.is_contiguous()) {
     return false;
   }
-  if (at::has_internal_overlap(dst) != at::MemOverlap::No && view_may_self_overlap(dst.sizes(), dst.strides())) {
+  if (at::has_internal_overlap(dst) != at::MemOverlap::No &&
+      view_may_self_overlap(dst.sizes(), dst.strides())) {
     return false;
   }
   const auto sizes = dst.sizes();
@@ -108,12 +124,14 @@ bool strided_plan_possible_for_contiguous_src(const at::Tensor& dst) {
   for (int64_t i = inner_start; i < dst.dim(); ++i) {
     inner_block_elems *= sizes[i];
   }
-  return static_cast<size_t>(inner_block_elems) * static_cast<size_t>(dst.element_size()) >= kMinStridedHostCopyBytes;
+  return static_cast<size_t>(inner_block_elems) *
+      static_cast<size_t>(dst.element_size()) >=
+      kMinStridedHostCopyBytes;
 }
 
-// Byte-level description of one strided pair. `inner_block_bytes` is the largest
-// run contiguous in both tensors; the outer vectors describe the iteration above
-// it. Empty `outer_sizes` means a single slab.
+// Byte-level description of one strided pair. `inner_block_bytes` is the
+// largest run contiguous in both tensors; the outer vectors describe the
+// iteration above it. Empty `outer_sizes` means a single slab.
 struct StridedPlan {
   size_t inner_block_bytes = 0;
   std::vector<int64_t> outer_sizes;
@@ -121,20 +139,25 @@ struct StridedPlan {
   std::vector<int64_t> dst_byte_strides;
 };
 
-// How to describe the pair for the batch engines, or nothing if staging keeps it.
-// The stride arithmetic is strided_v2v_copy's — which side is host memory does not
-// enter it. The suffix scan decides eligibility and feeds the plan, so it runs once.
-std::optional<StridedPlan> make_strided_host_plan(const at::Tensor& dst, const at::Tensor& src) {
-  if (dst.sizes() != src.sizes() || dst.scalar_type() != src.scalar_type() || dst.numel() == 0) {
+// How to describe the pair for the batch engines, or nothing if staging keeps
+// it. The stride arithmetic is strided_v2v_copy's — which side is host memory
+// does not enter it. The suffix scan decides eligibility and feeds the plan, so
+// it runs once.
+std::optional<StridedPlan> make_strided_host_plan(
+    const at::Tensor& dst,
+    const at::Tensor& src) {
+  if (dst.sizes() != src.sizes() || dst.scalar_type() != src.scalar_type() ||
+      dst.numel() == 0) {
     return std::nullopt;
   }
   if (dst.is_contiguous() && src.is_contiguous()) {
     return std::nullopt; // a single bulk transfer already, nothing to describe
   }
-  // Descriptors within one submit are unordered, so a destination that writes an
-  // address twice has no defined result. Staging writes it serially, as copy_
-  // does everywhere else.
-  if (at::has_internal_overlap(dst) != at::MemOverlap::No && view_may_self_overlap(dst.sizes(), dst.strides())) {
+  // Descriptors within one submit are unordered, so a destination that writes
+  // an address twice has no defined result. Staging writes it serially, as
+  // copy_ does everywhere else.
+  if (at::has_internal_overlap(dst) != at::MemOverlap::No &&
+      view_may_self_overlap(dst.sizes(), dst.strides())) {
     return std::nullopt;
   }
 
@@ -143,10 +166,12 @@ std::optional<StridedPlan> make_strided_host_plan(const at::Tensor& dst, const a
   const auto dst_strides = dst.strides();
   const int64_t rank = dst.dim();
   const auto elm = static_cast<size_t>(dst.element_size());
-  const int64_t inner_start = common_inner_start(sizes, src_strides, dst_strides);
+  const int64_t inner_start =
+      common_inner_start(sizes, src_strides, dst_strides);
 
-  // Inner block = product of dims [inner_start, rank). One element when no joint
-  // contiguous suffix exists, which the threshold then sends back to staging.
+  // Inner block = product of dims [inner_start, rank). One element when no
+  // joint contiguous suffix exists, which the threshold then sends back to
+  // staging.
   int64_t inner_block_elems = 1;
   for (int64_t i = inner_start; i < rank; ++i) {
     inner_block_elems *= sizes[i];
@@ -178,11 +203,14 @@ size_t payload_bytes(const at::Tensor& t) {
 // Which end of a host copy is device memory.
 enum class HostDir { kH2V, kV2H };
 
-// Roles are the caller's contract, checked here because a swapped pair would DMA
-// a host address as a device vaddr. Shape and dtype must match — the entrypoints
-// move bytes, they do not convert.
+// Roles are the caller's contract, checked here because a swapped pair would
+// DMA a host address as a device vaddr. Shape and dtype must match — the
+// entrypoints move bytes, they do not convert.
 template <HostDir kDir>
-void check_host_pair(const at::Tensor& dst, const at::Tensor& src, const char* who) {
+void check_host_pair(
+    const at::Tensor& dst,
+    const at::Tensor& src,
+    const char* who) {
   const at::Tensor& dev = (kDir == HostDir::kH2V) ? dst : src;
   const at::Tensor& host = (kDir == HostDir::kH2V) ? src : dst;
   RBLN_CHECK(
@@ -190,7 +218,11 @@ void check_host_pair(const at::Tensor& dst, const at::Tensor& src, const char* w
       "{}: device side must be on an RBLN device, got {}",
       who,
       c10::str(dev.device()));
-  RBLN_CHECK(host.device().is_cpu(), "{}: host side must be on CPU, got {}", who, c10::str(host.device()));
+  RBLN_CHECK(
+      host.device().is_cpu(),
+      "{}: host side must be on CPU, got {}",
+      who,
+      c10::str(host.device()));
   RBLN_CHECK(
       dst.scalar_type() == src.scalar_type(),
       "{}: dtype mismatch (dst={} src={})",
@@ -209,18 +241,31 @@ void check_host_pair(const at::Tensor& dst, const at::Tensor& src, const char* w
 // One descriptor per pair. The runtime reads the host side during submit, which
 // happens later, so both tensors must outlive the batch.
 template <HostDir kDir, typename Batch>
-void host_copy(const at::Tensor& dst, const at::Tensor& src, Batch& batch, const char* who) {
+void host_copy(
+    const at::Tensor& dst,
+    const at::Tensor& src,
+    Batch& batch,
+    const char* who) {
   RBLN_SCOPE_GUARD();
   check_host_pair<kDir>(dst, src, who);
-  RBLN_CHECK(dst.is_contiguous() && src.is_contiguous(), "{}: both tensors must be contiguous", who);
+  RBLN_CHECK(
+      dst.is_contiguous() && src.is_contiguous(),
+      "{}: both tensors must be contiguous",
+      who);
   batch.enqueue(dst.data_ptr(), src.data_ptr(), payload_bytes(dst));
 }
 
-void h2v_copy(const at::Tensor& dst, const at::Tensor& src, c10::rbln::H2VBatch& batch) {
+void h2v_copy(
+    const at::Tensor& dst,
+    const at::Tensor& src,
+    c10::rbln::H2VBatch& batch) {
   host_copy<HostDir::kH2V>(dst, src, batch, "h2v_copy");
 }
 
-void v2h_copy(const at::Tensor& dst, const at::Tensor& src, c10::rbln::V2HBatch& batch) {
+void v2h_copy(
+    const at::Tensor& dst,
+    const at::Tensor& src,
+    c10::rbln::V2HBatch& batch) {
   host_copy<HostDir::kV2H>(dst, src, batch, "v2h_copy");
 }
 
@@ -251,9 +296,14 @@ bool is_direct_copy(const at::Tensor& src, const at::Tensor& dst) {
   return direct_copy;
 }
 
-void tensor_copy_from_cpu_to_rbln(const at::Tensor& cpu_src, const at::Tensor& rbln_dst) {
+void tensor_copy_from_cpu_to_rbln(
+    const at::Tensor& cpu_src,
+    const at::Tensor& rbln_dst) {
   RBLN_SCOPE_GUARD();
-  RBLN_LOG_DEBUG("src_data={}, dst_data={}", fmt::ptr(cpu_src.data_ptr()), fmt::ptr(rbln_dst.data_ptr()));
+  RBLN_LOG_DEBUG(
+      "src_data={}, dst_data={}",
+      fmt::ptr(cpu_src.data_ptr()),
+      fmt::ptr(rbln_dst.data_ptr()));
   RBLN_CHECK(cpu_src.device().is_cpu() && rbln_dst.device().is_privateuseone());
 
   const auto direct_copy = is_direct_copy(cpu_src, rbln_dst);
@@ -261,7 +311,8 @@ void tensor_copy_from_cpu_to_rbln(const at::Tensor& cpu_src, const at::Tensor& r
     RBLN_LOG_DEBUG("Directly copying CPU src to RBLN dst");
     auto* dst_data = rbln_dst.data_ptr();
     const auto* src_data = cpu_src.data_ptr();
-    const auto nbytes = at::detail::computeStorageNbytes(cpu_src.sizes(), cpu_src.strides(), cpu_src.element_size());
+    const auto nbytes = at::detail::computeStorageNbytes(
+        cpu_src.sizes(), cpu_src.strides(), cpu_src.element_size());
     c10::rbln::memcpy_h2v(dst_data, src_data, nbytes);
   } else {
     // Describing the copy replaces a host gather pass, and for a non-contiguous
@@ -269,7 +320,8 @@ void tensor_copy_from_cpu_to_rbln(const at::Tensor& cpu_src, const at::Tensor& r
     if (const auto plan = make_strided_host_plan(rbln_dst, cpu_src)) {
       RBLN_LOG_DEBUG("Strided h2v copy (no staging)");
       c10::rbln::H2VBatch batch;
-      strided_host_copy<HostDir::kH2V>(rbln_dst, cpu_src, *plan, batch, "copy_");
+      strided_host_copy<HostDir::kH2V>(
+          rbln_dst, cpu_src, *plan, batch, "copy_");
       batch.submit();
       return;
     }
@@ -284,16 +336,24 @@ void tensor_copy_from_cpu_to_rbln(const at::Tensor& cpu_src, const at::Tensor& r
       if (!same_sizes || !same_dtype || !cpu_src.is_contiguous()) {
         // PROFILER (cold branch): hidden staging alloc + CPU copy before h2v,
         // forced by a broadcast / dtype / contiguity mismatch on the cpu src.
-        // Suppressed when nested inside an rbln->rbln indirect copy (counted once there).
+        // Suppressed when nested inside an rbln->rbln indirect copy (counted
+        // once there).
         if (g_indirect_d2d_depth == 0) {
           c10::rbln::prof::record_bounce(
               c10::rbln::prof::BounceSite::kCpu2RblnStaging,
-              static_cast<uint64_t>(rbln_dst.numel()) * rbln_dst.element_size());
+              static_cast<uint64_t>(rbln_dst.numel()) *
+                  rbln_dst.element_size());
         }
-        prepared_cpu_src =
-            at::empty(dst_sizes, dst_dtype, std::nullopt, c10::Device(c10::kCPU), false, c10::MemoryFormat::Contiguous);
+        prepared_cpu_src = at::empty(
+            dst_sizes,
+            dst_dtype,
+            std::nullopt,
+            c10::Device(c10::kCPU),
+            false,
+            c10::MemoryFormat::Contiguous);
 
-        // Upstream at::native::copy_() handles broadcasting, dtype conversion, and non-contiguous tensors.
+        // Upstream at::native::copy_() handles broadcasting, dtype conversion,
+        // and non-contiguous tensors.
         prepared_cpu_src.copy_(cpu_src);
       }
       RBLN_CHECK(prepared_cpu_src.sizes() == dst_sizes);
@@ -304,24 +364,30 @@ void tensor_copy_from_cpu_to_rbln(const at::Tensor& cpu_src, const at::Tensor& r
       auto* dst_data = rbln_dst.data_ptr();
       const auto* src_data = prepared_cpu_src.data_ptr();
       const auto nbytes = at::detail::computeStorageNbytes(
-          prepared_cpu_src.sizes(), prepared_cpu_src.strides(), prepared_cpu_src.element_size());
+          prepared_cpu_src.sizes(),
+          prepared_cpu_src.strides(),
+          prepared_cpu_src.element_size());
       c10::rbln::memcpy_h2v(dst_data, src_data, nbytes);
     } else {
-      // A shape / dtype / layout mismatch on the cpu src is what kept the strided plan
-      // above from applying. A contiguous src in the dst's shape and dtype lets the plan
-      // write the runs in place instead of staging the whole dst. The dst alone decides
-      // whether the plan can take such a src, so that is checked before converting; the
-      // converted src is reused by the staged path if the plan still declines.
+      // A shape / dtype / layout mismatch on the cpu src is what kept the
+      // strided plan above from applying. A contiguous src in the dst's shape
+      // and dtype lets the plan write the runs in place instead of staging the
+      // whole dst. The dst alone decides whether the plan can take such a src,
+      // so that is checked before converting; the converted src is reused by
+      // the staged path if the plan still declines.
       std::optional<at::Tensor> prepared_cpu_src;
-      if ((cpu_src.sizes() != rbln_dst.sizes() || cpu_src.scalar_type() != rbln_dst.scalar_type() ||
+      if ((cpu_src.sizes() != rbln_dst.sizes() ||
+           cpu_src.scalar_type() != rbln_dst.scalar_type() ||
            !cpu_src.is_contiguous()) &&
           strided_plan_possible_for_contiguous_src(rbln_dst)) {
-        // PROFILER (cold branch): hidden staging alloc + CPU copy of the src before h2v.
-        // Suppressed when nested inside an rbln->rbln indirect copy (counted once there).
+        // PROFILER (cold branch): hidden staging alloc + CPU copy of the src
+        // before h2v. Suppressed when nested inside an rbln->rbln indirect copy
+        // (counted once there).
         if (g_indirect_d2d_depth == 0) {
           c10::rbln::prof::record_bounce(
               c10::rbln::prof::BounceSite::kCpu2RblnStaging,
-              static_cast<uint64_t>(rbln_dst.numel()) * rbln_dst.element_size());
+              static_cast<uint64_t>(rbln_dst.numel()) *
+                  rbln_dst.element_size());
         }
         prepared_cpu_src = at::empty(
             rbln_dst.sizes(),
@@ -331,17 +397,20 @@ void tensor_copy_from_cpu_to_rbln(const at::Tensor& cpu_src, const at::Tensor& r
             false,
             c10::MemoryFormat::Contiguous);
         prepared_cpu_src->copy_(cpu_src);
-        if (const auto plan = make_strided_host_plan(rbln_dst, *prepared_cpu_src)) {
-          RBLN_LOG_DEBUG("Strided h2v copy of a prepared src (no staging of the dst)");
+        if (const auto plan =
+                make_strided_host_plan(rbln_dst, *prepared_cpu_src)) {
+          RBLN_LOG_DEBUG(
+              "Strided h2v copy of a prepared src (no staging of the dst)");
           c10::rbln::H2VBatch batch;
-          strided_host_copy<HostDir::kH2V>(rbln_dst, *prepared_cpu_src, *plan, batch, "copy_");
+          strided_host_copy<HostDir::kH2V>(
+              rbln_dst, *prepared_cpu_src, *plan, batch, "copy_");
           batch.submit();
           return;
         }
       }
-      // PROFILER (cold branch): the non-contiguous rbln dst is pulled to the host
-      // (hidden v2h), written on CPU, then copied back (h2v). Suppressed when
-      // nested inside an rbln->rbln indirect copy (counted once there).
+      // PROFILER (cold branch): the non-contiguous rbln dst is pulled to the
+      // host (hidden v2h), written on CPU, then copied back (h2v). Suppressed
+      // when nested inside an rbln->rbln indirect copy (counted once there).
       if (g_indirect_d2d_depth == 0) {
         c10::rbln::prof::record_bounce(
             c10::rbln::prof::BounceSite::kCpu2RblnNoncontigDst,
@@ -351,21 +420,28 @@ void tensor_copy_from_cpu_to_rbln(const at::Tensor& cpu_src, const at::Tensor& r
       auto cpu_dst = at::native::rbln::get_cpu_copy_of_rbln_tensor(rbln_dst);
 
       RBLN_LOG_DEBUG("Copying CPU src to CPU copy");
-      // Upstream at::native::copy_() handles broadcasting, dtype conversion, and non-contiguous tensors.
+      // Upstream at::native::copy_() handles broadcasting, dtype conversion,
+      // and non-contiguous tensors.
       cpu_dst.copy_(prepared_cpu_src ? *prepared_cpu_src : cpu_src);
 
       RBLN_LOG_DEBUG("Copying CPU copy back to RBLN dst");
       auto* dst_data = rbln_dst.data_ptr();
       const auto* src_data = cpu_dst.data_ptr();
-      const auto nbytes = at::detail::computeStorageNbytes(cpu_dst.sizes(), cpu_dst.strides(), cpu_dst.element_size());
+      const auto nbytes = at::detail::computeStorageNbytes(
+          cpu_dst.sizes(), cpu_dst.strides(), cpu_dst.element_size());
       c10::rbln::memcpy_h2v(dst_data, src_data, nbytes);
     }
   }
 }
 
-void tensor_copy_from_rbln_to_cpu(const at::Tensor& rbln_src, const at::Tensor& cpu_dst) {
+void tensor_copy_from_rbln_to_cpu(
+    const at::Tensor& rbln_src,
+    const at::Tensor& cpu_dst) {
   RBLN_SCOPE_GUARD();
-  RBLN_LOG_DEBUG("src_data={}, dst_data={}", fmt::ptr(rbln_src.data_ptr()), fmt::ptr(cpu_dst.data_ptr()));
+  RBLN_LOG_DEBUG(
+      "src_data={}, dst_data={}",
+      fmt::ptr(rbln_src.data_ptr()),
+      fmt::ptr(cpu_dst.data_ptr()));
   RBLN_CHECK(rbln_src.device().is_privateuseone() && cpu_dst.device().is_cpu());
 
   const auto direct_copy = is_direct_copy(rbln_src, cpu_dst);
@@ -374,44 +450,56 @@ void tensor_copy_from_rbln_to_cpu(const at::Tensor& rbln_src, const at::Tensor& 
 
     auto* dst_data = cpu_dst.data_ptr();
     const auto* src_data = rbln_src.data_ptr();
-    const auto nbytes = at::detail::computeStorageNbytes(rbln_src.sizes(), rbln_src.strides(), rbln_src.element_size());
+    const auto nbytes = at::detail::computeStorageNbytes(
+        rbln_src.sizes(), rbln_src.strides(), rbln_src.element_size());
     c10::rbln::memcpy_v2h(dst_data, src_data, nbytes);
   } else {
     if (const auto plan = make_strided_host_plan(cpu_dst, rbln_src)) {
       RBLN_LOG_DEBUG("Strided v2h copy (no staging)");
       c10::rbln::V2HBatch batch;
-      strided_host_copy<HostDir::kV2H>(cpu_dst, rbln_src, *plan, batch, "copy_");
+      strided_host_copy<HostDir::kV2H>(
+          cpu_dst, rbln_src, *plan, batch, "copy_");
       batch.submit();
       return;
     }
     RBLN_LOG_DEBUG("Creating CPU copy of RBLN src");
-    const auto cpu_src = at::native::rbln::get_cpu_copy_of_rbln_tensor(rbln_src);
+    const auto cpu_src =
+        at::native::rbln::get_cpu_copy_of_rbln_tensor(rbln_src);
 
     RBLN_LOG_DEBUG("Copying CPU copy to CPU dst");
-    // Upstream at::native::copy_() handles broadcasting, dtype conversion, and non-contiguous tensors.
+    // Upstream at::native::copy_() handles broadcasting, dtype conversion, and
+    // non-contiguous tensors.
     cpu_dst.copy_(cpu_src);
   }
 }
 
-void tensor_copy_from_rbln_to_rbln(const at::Tensor& rbln_src, const at::Tensor& rbln_dst) {
+void tensor_copy_from_rbln_to_rbln(
+    const at::Tensor& rbln_src,
+    const at::Tensor& rbln_dst) {
   RBLN_SCOPE_GUARD();
-  RBLN_LOG_DEBUG("src_data={}, dst_data={}", fmt::ptr(rbln_src.data_ptr()), fmt::ptr(rbln_dst.data_ptr()));
-  RBLN_CHECK(rbln_src.device().is_privateuseone() && rbln_dst.device().is_privateuseone());
+  RBLN_LOG_DEBUG(
+      "src_data={}, dst_data={}",
+      fmt::ptr(rbln_src.data_ptr()),
+      fmt::ptr(rbln_dst.data_ptr()));
+  RBLN_CHECK(
+      rbln_src.device().is_privateuseone() &&
+      rbln_dst.device().is_privateuseone());
 
   if (is_direct_copy(rbln_src, rbln_dst)) {
     RBLN_LOG_DEBUG("Directly copying RBLN src to RBLN dst");
 
     auto* dst_data = rbln_dst.data_ptr();
     const auto* src_data = rbln_src.data_ptr();
-    const auto nbytes = at::detail::computeStorageNbytes(rbln_src.sizes(), rbln_src.strides(), rbln_src.element_size());
+    const auto nbytes = at::detail::computeStorageNbytes(
+        rbln_src.sizes(), rbln_src.strides(), rbln_src.element_size());
     c10::rbln::memcpy_v2v(dst_data, src_data, nbytes);
     return;
   }
 
-  // One compiled program beats both routes below when the source view is classifiable:
-  // the strided engine pays a descriptor per contiguous run, and a KV block read head-major
-  // and written token-major breaks into runs of a single row -- far past the cap, so the
-  // real alternative is the host bounce.
+  // One compiled program beats both routes below when the source view is
+  // classifiable: the strided engine pays a descriptor per contiguous run, and
+  // a KV block read head-major and written token-major breaks into runs of a
+  // single row -- far past the cap, so the real alternative is the host bounce.
   if (try_view_copy(rbln_dst, rbln_src)) {
     return;
   }
@@ -422,9 +510,11 @@ void tensor_copy_from_rbln_to_rbln(const at::Tensor& rbln_src, const at::Tensor&
   // pays one descriptor per contiguous run, and where that stops beating the
   // host bounce below is unmeasured, so a fan-out past the cap takes the
   // bounce.
-  if (rbln_src.sizes() == rbln_dst.sizes() && rbln_src.scalar_type() == rbln_dst.scalar_type() &&
+  if (rbln_src.sizes() == rbln_dst.sizes() &&
+      rbln_src.scalar_type() == rbln_dst.scalar_type() &&
       rbln_src.device() == rbln_dst.device()) {
-    const auto inner_start = common_inner_start(rbln_src.sizes(), rbln_src.strides(), rbln_dst.strides());
+    const auto inner_start = common_inner_start(
+        rbln_src.sizes(), rbln_src.strides(), rbln_dst.strides());
     int64_t outer_count = 1;
     for (int64_t i = 0; i < inner_start; ++i) {
       outer_count *= rbln_src.size(i);
@@ -438,9 +528,10 @@ void tensor_copy_from_rbln_to_rbln(const at::Tensor& rbln_src, const at::Tensor&
   // PROFILER (cold branch): reaching here is a non-direct device->device copy_
   // that round-trips host — v2h (get_cpu_copy_of_rbln_tensor) then h2v (the
   // headline "hidden host bounce", e.g. #94 KV partial-block copy). The direct
-  // and on-device strided-v2v paths above both return first, so this fall-through
-  // always means a real host bounce. Count incident + bytes; IndirectD2DGuard
-  // suppresses the inner cpu->rbln staging counters so it is not double-counted.
+  // and on-device strided-v2v paths above both return first, so this
+  // fall-through always means a real host bounce. Count incident + bytes;
+  // IndirectD2DGuard suppresses the inner cpu->rbln staging counters so it is
+  // not double-counted.
   c10::rbln::prof::record_bounce(
       c10::rbln::prof::BounceSite::kRbln2RblnIndirect,
       static_cast<uint64_t>(rbln_src.numel()) * rbln_src.element_size());
@@ -454,8 +545,10 @@ void tensor_copy_from_rbln_to_rbln(const at::Tensor& rbln_src, const at::Tensor&
 
 void copy_impl_rbln(const at::Tensor& src, const at::Tensor& dst) {
   RBLN_SCOPE_GUARD();
-  RBLN_LOG_DEBUG("src_metadata={}", at::native::rbln::get_tensor_metadata_string(src));
-  RBLN_LOG_DEBUG("dst_metadata={}", at::native::rbln::get_tensor_metadata_string(dst));
+  RBLN_LOG_DEBUG(
+      "src_metadata={}", at::native::rbln::get_tensor_metadata_string(src));
+  RBLN_LOG_DEBUG(
+      "dst_metadata={}", at::native::rbln::get_tensor_metadata_string(dst));
 
   RBLN_LOG_DEBUG("Validating tensors with TensorIterator");
   const auto iter = at::TensorIteratorConfig()
@@ -472,8 +565,14 @@ void copy_impl_rbln(const at::Tensor& src, const at::Tensor& dst) {
   }
   const auto src_numel = src.numel();
   const auto dst_numel = dst.numel();
-  RBLN_CHECK(src_numel > 0, "Source tensor must have positive numel, got {}", src_numel);
-  RBLN_CHECK(dst_numel > 0, "Destination tensor must have positive numel, got {}", dst_numel);
+  RBLN_CHECK(
+      src_numel > 0,
+      "Source tensor must have positive numel, got {}",
+      src_numel);
+  RBLN_CHECK(
+      dst_numel > 0,
+      "Destination tensor must have positive numel, got {}",
+      dst_numel);
 
   const auto src_device = src.device();
   const auto dst_device = dst.device();
@@ -485,11 +584,12 @@ void copy_impl_rbln(const at::Tensor& src, const at::Tensor& dst) {
     tensor_copy_from_rbln_to_rbln(src, dst);
   } else {
     RBLN_CHECK(
-        false, "Tensor copy from {} device to {} device is not supported", c10::str(src_device), c10::str(dst_device));
+        false,
+        "Tensor copy from {} device to {} device is not supported",
+        c10::str(src_device),
+        c10::str(dst_device));
   }
 }
-
-} // namespace
 
 void copy_impl_rbln_async(const at::Tensor& src, const at::Tensor& dst) {
   RBLN_SCOPE_GUARD();
@@ -500,15 +600,18 @@ void copy_impl_rbln_async(const at::Tensor& src, const at::Tensor& dst) {
   const auto direct_copy = is_direct_copy(src, dst);
 
   // Async only supported for direct copies (same size, dtype, both contiguous).
-  // Non-direct copies require CPU-side staging which needs synchronous data access.
+  // Non-direct copies require CPU-side staging which needs synchronous data
+  // access.
   if (!direct_copy) {
-    // The sync fallback drains in-flight async transfers in the runtime (rbln_vmem_api).
+    // The sync fallback drains in-flight async transfers in the runtime
+    // (rbln_vmem_api).
     RBLN_LOG_DEBUG("Non-direct copy, falling back to sync");
     copy_impl_rbln(src, dst);
     return;
   }
 
-  const auto nbytes = at::detail::computeStorageNbytes(src.sizes(), src.strides(), src.element_size());
+  const auto nbytes = at::detail::computeStorageNbytes(
+      src.sizes(), src.strides(), src.element_size());
   if (nbytes == 0) {
     RBLN_LOG_DEBUG("No bytes to copy");
     return;
@@ -519,7 +622,8 @@ void copy_impl_rbln_async(const at::Tensor& src, const at::Tensor& dst) {
   // for pageable makes that safe; pinned opts in (caller synchronizes).
   const at::Tensor& host = src_device.is_cpu() ? src : dst;
   if (host.device().is_cpu() && !c10::rbln::is_pinned_ptr(host.data_ptr())) {
-    RBLN_LOG_DEBUG("Pageable host tensor, downgrading non_blocking copy to sync");
+    RBLN_LOG_DEBUG(
+        "Pageable host tensor, downgrading non_blocking copy to sync");
     copy_impl_rbln(src, dst);
     return;
   }
@@ -535,31 +639,49 @@ void copy_impl_rbln_async(const at::Tensor& src, const at::Tensor& dst) {
     c10::rbln::memcpy_v2v_async(dst.data_ptr(), src.data_ptr(), nbytes);
   } else {
     RBLN_CHECK(
-        false, "Tensor copy from {} device to {} device is not supported", c10::str(src_device), c10::str(dst_device));
+        false,
+        "Tensor copy from {} device to {} device is not supported",
+        c10::str(src_device),
+        c10::str(dst_device));
   }
 }
 
-at::Tensor _copy_from_rbln(const at::Tensor& src, const at::Tensor& dst, bool non_blocking) {
+} // namespace
+
+at::Tensor _copy_from_rbln(
+    const at::Tensor& src,
+    const at::Tensor& dst,
+    bool non_blocking) {
   RBLN_SCOPE_GUARD();
-  RBLN_LOG_DEBUG("src_data={}, dst_data={}", fmt::ptr(src.data_ptr()), fmt::ptr(dst.data_ptr()));
+  RBLN_LOG_DEBUG(
+      "src_data={}, dst_data={}",
+      fmt::ptr(src.data_ptr()),
+      fmt::ptr(dst.data_ptr()));
 
   if (non_blocking) {
     copy_impl_rbln_async(src, dst);
   } else {
-    // Sync copy; the runtime (rbln_vmem_api) drains in-flight async transfers first.
+    // Sync copy; the runtime (rbln_vmem_api) drains in-flight async transfers
+    // first.
     copy_impl_rbln(src, dst);
   }
 
   return dst;
 }
 
-at::Tensor _copy_from_and_resize_rbln(const at::Tensor& src, const at::Tensor& dst) {
+at::Tensor _copy_from_and_resize_rbln(
+    const at::Tensor& src,
+    const at::Tensor& dst) {
   RBLN_SCOPE_GUARD();
-  RBLN_LOG_DEBUG("src_data={}, dst_data={}", fmt::ptr(src.data_ptr()), fmt::ptr(dst.data_ptr()));
+  RBLN_LOG_DEBUG(
+      "src_data={}, dst_data={}",
+      fmt::ptr(src.data_ptr()),
+      fmt::ptr(dst.data_ptr()));
 
   const auto src_sizes = src.sizes();
   const auto dst_sizes = dst.sizes();
-  RBLN_LOG_DEBUG("src_sizes={}, dst_sizes={}", c10::str(src_sizes), c10::str(dst_sizes));
+  RBLN_LOG_DEBUG(
+      "src_sizes={}, dst_sizes={}", c10::str(src_sizes), c10::str(dst_sizes));
   if (dst_sizes != src_sizes) {
     RBLN_LOG_DEBUG("Resizing dst to match src");
     dst.resize_(src_sizes);
@@ -570,7 +692,9 @@ at::Tensor _copy_from_and_resize_rbln(const at::Tensor& src, const at::Tensor& d
   return dst;
 }
 
-at::Tensor clone_rbln(const at::Tensor& self, std::optional<c10::MemoryFormat> memory_format) {
+at::Tensor clone_rbln(
+    const at::Tensor& self,
+    std::optional<c10::MemoryFormat> memory_format) {
   RBLN_SCOPE_GUARD();
   // aten::clone's default is MemoryFormat::Preserve, which is a *directive*
   // (allocate the output with whatever layout best preserves the source's
@@ -590,8 +714,10 @@ at::Tensor clone_rbln(const at::Tensor& self, std::optional<c10::MemoryFormat> m
   // source elements are contiguous in storage, so a single
   // c10::rbln::memcpy_v2v moves them to a freshly allocated output without
   // going through aten::copy_'s dispatch + TensorIterator path.
-  const bool direct_d2d_eligible = self.is_contiguous() && self.storage_offset() == 0 &&
-      static_cast<int64_t>(self.storage().nbytes()) == self.numel() * self.element_size();
+  const bool direct_d2d_eligible = self.is_contiguous() &&
+      self.storage_offset() == 0 &&
+      static_cast<int64_t>(self.storage().nbytes()) ==
+          self.numel() * self.element_size();
 
   at::Tensor out;
   if (mf_req == c10::MemoryFormat::Preserve) {
@@ -600,24 +726,31 @@ at::Tensor clone_rbln(const at::Tensor& self, std::optional<c10::MemoryFormat> m
       // clone observes identical layout.
       out = at::empty_strided(self.sizes(), self.strides(), self.options());
     } else if (self.is_contiguous(at::MemoryFormat::ChannelsLast)) {
-      out = at::empty(self.sizes(), self.options().memory_format(at::MemoryFormat::ChannelsLast));
+      out = at::empty(
+          self.sizes(),
+          self.options().memory_format(at::MemoryFormat::ChannelsLast));
     } else if (self.is_contiguous(at::MemoryFormat::ChannelsLast3d)) {
-      out = at::empty(self.sizes(), self.options().memory_format(at::MemoryFormat::ChannelsLast3d));
+      out = at::empty(
+          self.sizes(),
+          self.options().memory_format(at::MemoryFormat::ChannelsLast3d));
     } else {
-      out = at::empty(self.sizes(), self.options().memory_format(at::MemoryFormat::Contiguous));
+      out = at::empty(
+          self.sizes(),
+          self.options().memory_format(at::MemoryFormat::Contiguous));
     }
   } else {
     out = at::empty(self.sizes(), self.options().memory_format(mf_req));
   }
 
-  if (direct_d2d_eligible && nbytes > 0 && out.is_contiguous() && out.strides() == self.strides()) {
+  if (direct_d2d_eligible && nbytes > 0 && out.is_contiguous() &&
+      out.strides() == self.strides()) {
     // Bypass aten::copy_ dispatch — write directly into the fresh output
     // buffer. Both self and out live on the same RBLN device (Tensor::options
     // preserves device), so this is always a same-device v2v. Require
     // matching strides so the byte order is identical; if the requested
     // memory format reshuffles strides (e.g. Preserve on a strided view
     // gives empty_strided with non-contig strides), fall through to the
-    // copy_ path which honours strides.
+    // copy_ path which honors strides.
     c10::rbln::memcpy_v2v(out.data_ptr(), self.data_ptr(), nbytes);
   } else {
     // Non-contig / partial-storage view: keep the default composite path
@@ -655,7 +788,7 @@ ByteRange tensor_byte_range(const at::Tensor& t) {
       lo_elems += step;
     }
   }
-  return {base + lo_elems * elsize, base + (hi_elems + 1) * elsize};
+  return {.lo = base + lo_elems * elsize, .hi = base + (hi_elems + 1) * elsize};
 }
 
 bool ranges_overlap(const ByteRange& a, const ByteRange& b) {
@@ -685,13 +818,16 @@ bool foreach_copy_reorder_unsafe(at::TensorList self, at::TensorList src) {
     size_t idx;
   };
   const auto device_key = [](const c10::Device& d) {
-    return (static_cast<int64_t>(d.type()) << 16) | static_cast<int64_t>(d.index());
+    return (static_cast<int64_t>(d.type()) << 16) |
+        static_cast<int64_t>(d.index());
   };
   const auto by_position = [](const Entry& a, const Entry& b) {
-    return a.device_key != b.device_key ? a.device_key < b.device_key : a.lo < b.lo;
+    return a.device_key != b.device_key ? a.device_key < b.device_key
+                                        : a.lo < b.lo;
   };
   const auto trackable = [](const at::Tensor& t) {
-    return (t.device().is_privateuseone() || t.device().is_cpu()) && t.numel() > 0;
+    return (t.device().is_privateuseone() || t.device().is_cpu()) &&
+        t.numel() > 0;
   };
 
   const size_t n = self.size();
@@ -712,8 +848,8 @@ bool foreach_copy_reorder_unsafe(at::TensorList self, at::TensorList src) {
       srcs.push_back({device_key(src[i].device()), r.lo, r.hi, i});
     }
   }
-  std::sort(dsts.begin(), dsts.end(), by_position);
-  std::sort(srcs.begin(), srcs.end(), by_position);
+  std::ranges::sort(dsts, by_position);
+  std::ranges::sort(srcs, by_position);
 
   // WAW: two destinations sharing bytes. Carry the furthest end seen so a long
   // range still catches the ones nested inside it.
@@ -734,8 +870,9 @@ bool foreach_copy_reorder_unsafe(at::TensorList self, at::TensorList src) {
   // at least one belongs to another pair; touching one is safe only if it is
   // this pair's own.
   for (const auto& s : srcs) {
-    const Entry probe{s.device_key, s.hi, s.hi, 0};
-    auto it = std::lower_bound(dsts.begin(), dsts.end(), probe, by_position);
+    const Entry probe{
+        .device_key = s.device_key, .lo = s.hi, .hi = s.hi, .idx = 0};
+    auto it = std::ranges::lower_bound(dsts, probe, by_position);
     // Walk back over destinations that start before this source ends.
     size_t touching = 0;
     size_t only_idx = 0;
@@ -760,7 +897,10 @@ bool foreach_copy_reorder_unsafe(at::TensorList self, at::TensorList src) {
 
 } // namespace
 
-void _foreach_copy__rbln(at::TensorList self, at::TensorList src, bool non_blocking) {
+void _foreach_copy__rbln(
+    at::TensorList self,
+    at::TensorList src,
+    bool non_blocking) {
   RBLN_SCOPE_GUARD();
 
   RBLN_CHECK(
@@ -802,80 +942,82 @@ void _foreach_copy__rbln(at::TensorList self, at::TensorList src, bool non_block
     v2v_batched.clear();
   };
 
-  // Every batched pair is disjoint from every other, so a per-pair copy_ may run
-  // before the batches submit; only a throw has to leave the pairs enqueued so
-  // far applied. Those land in direction order, not list order — disjointness is
-  // what makes that unobservable.
-  try {
-    for (size_t i = 0; i < self.size(); ++i) {
-      const at::Tensor& dst = self[i];
-      const at::Tensor& s = src[i];
-      const bool convertible = dst.scalar_type() == s.scalar_type() && dst.sizes() == s.sizes() && dst.numel() > 0;
-      if (!convertible) {
-        dst.copy_(s, non_blocking);
-        continue;
-      }
-      // copy_ returns early on an identical view, before its overlap check, so an
-      // expand()ed identity pair is a no-op there rather than an error. Match it.
-      if (is_same_view(dst, s)) {
-        continue;
-      }
-      // A destination mapping several elements onto one address cannot go in a
-      // batch: entries are unordered, so the surviving write is arbitrary.
-      //   Yes      an expand()ed view — copy_ refuses it, so raise its error.
-      //   TooHard  gappy strides. A destination that may alias itself takes the
-      //            per-pair path; one that merely has gaps stays batchable.
-      const auto overlap = at::has_internal_overlap(dst);
-      if (overlap == at::MemOverlap::Yes) {
-        at::assert_no_internal_overlap(dst);
-      }
-      if (overlap == at::MemOverlap::TooHard && view_may_self_overlap(dst.sizes(), dst.strides())) {
-        dst.copy_(s, non_blocking);
-        continue;
-      }
-      const bool dst_dev = dst.device().is_privateuseone();
-      const bool src_dev = s.device().is_privateuseone();
-      const bool dst_cpu = dst.device().is_cpu();
-      const bool src_cpu = s.device().is_cpu();
-
-      // Pinned + non_blocking is the one genuinely asynchronous per-pair case
-      // (pageable host memory downgrades to sync). The multi entrypoints are
-      // sync-only, so batching it would trade a real overlap for a submit count.
-      // Only preserves the overlap when every pair in the list takes this path.
-      const bool host_side_pinned_async = non_blocking &&
-          ((dst_dev && src_cpu && c10::rbln::is_pinned_ptr(s.data_ptr())) ||
-           (src_dev && dst_cpu && c10::rbln::is_pinned_ptr(dst.data_ptr())));
-
-      // Host batching is contiguous-only: one descriptor per pair, so batching N
-      // is a submit-count win at any size (~3x at 1 KiB, the weight-load shape). A
-      // fan-out pair competes against copy_'s single staged bulk DMA instead, where
-      // per-descriptor cost decides — that belongs with the change that routes
-      // plain copy_ through these primitives.
-      //
-      // v2v keeps its strided path: there the per-pair path issues the same
-      // on-device strided copy and host-bounces above the runtime's per-destination
-      // cap, so refusing a strided pair would trade one submit for N.
-      const bool contig_pair = dst.is_contiguous() && s.is_contiguous();
-
-      if (dst_dev && src_dev && dst.device() == s.device()) {
-        strided_v2v_copy(dst, s, v2v_batch);
-        v2v_batched.emplace_back(dst, s);
-      } else if (dst_dev && src_cpu && contig_pair && !host_side_pinned_async) {
-        h2v_copy(dst, s, h2v_batch);
-      } else if (src_dev && dst_cpu && contig_pair && !host_side_pinned_async) {
-        v2h_copy(dst, s, v2h_batch);
-      } else {
-        dst.copy_(s, non_blocking);
-      }
-    }
-  } catch (...) {
+  // Every batched pair is disjoint from every other, so a per-pair copy_ may
+  // run before the batches submit; only an exception has to leave the pairs
+  // enqueued so far applied. Those land in direction order, not list order —
+  // the pairs being disjoint is what makes that unobservable.
+  auto flush_on_exception = c10::make_scope_exit([&] {
     try {
       flush_pending();
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
-    throw;
+  });
+  for (size_t i = 0; i < self.size(); ++i) {
+    const at::Tensor& dst = self[i];
+    const at::Tensor& s = src[i];
+    const bool convertible = dst.scalar_type() == s.scalar_type() &&
+        dst.sizes() == s.sizes() && dst.numel() > 0;
+    if (!convertible) {
+      dst.copy_(s, non_blocking);
+      continue;
+    }
+    // copy_ returns early on an identical view, before its overlap check, so an
+    // expand()ed identity pair is a no-op there rather than an error. Match it.
+    if (is_same_view(dst, s)) {
+      continue;
+    }
+    // A destination mapping several elements onto one address cannot go in a
+    // batch: entries are unordered, so the surviving write is arbitrary.
+    //   Yes      an expand()ed view — copy_ refuses it, so raise its error.
+    //   TooHard  gappy strides. A destination that may alias itself takes the
+    //            per-pair path; one that merely has gaps stays batchable.
+    const auto overlap = at::has_internal_overlap(dst);
+    if (overlap == at::MemOverlap::Yes) {
+      at::assert_no_internal_overlap(dst);
+    }
+    if (overlap == at::MemOverlap::TooHard &&
+        view_may_self_overlap(dst.sizes(), dst.strides())) {
+      dst.copy_(s, non_blocking);
+      continue;
+    }
+    const bool dst_dev = dst.device().is_privateuseone();
+    const bool src_dev = s.device().is_privateuseone();
+    const bool dst_cpu = dst.device().is_cpu();
+    const bool src_cpu = s.device().is_cpu();
+
+    // Pinned + non_blocking is the one genuinely asynchronous per-pair case
+    // (pageable host memory downgrades to sync). The multi entrypoints are
+    // sync-only, so batching it would trade a real overlap for a submit count.
+    // Only preserves the overlap when every pair in the list takes this path.
+    const bool host_side_pinned_async = non_blocking &&
+        ((dst_dev && src_cpu && c10::rbln::is_pinned_ptr(s.data_ptr())) ||
+         (src_dev && dst_cpu && c10::rbln::is_pinned_ptr(dst.data_ptr())));
+
+    // Host batching is contiguous-only: one descriptor per pair, so batching N
+    // is a submit-count win at any size (~3x at 1 KiB, the weight-load shape).
+    // A fan-out pair competes against copy_'s single staged bulk DMA instead,
+    // where per-descriptor cost decides — that belongs with the change that
+    // routes plain copy_ through these primitives.
+    //
+    // v2v keeps its strided path: there the per-pair path issues the same
+    // on-device strided copy and host-bounces above the runtime's
+    // per-destination cap, so refusing a strided pair would trade one submit
+    // for N.
+    const bool contig_pair = dst.is_contiguous() && s.is_contiguous();
+
+    if (dst_dev && src_dev && dst.device() == s.device()) {
+      strided_v2v_copy(dst, s, v2v_batch);
+      v2v_batched.emplace_back(dst, s);
+    } else if (dst_dev && src_cpu && contig_pair && !host_side_pinned_async) {
+      h2v_copy(dst, s, h2v_batch);
+    } else if (src_dev && dst_cpu && contig_pair && !host_side_pinned_async) {
+      v2h_copy(dst, s, v2h_batch);
+    } else {
+      dst.copy_(s, non_blocking);
+    }
   }
 
+  flush_on_exception.release();
   flush_pending();
 }
 

@@ -1,13 +1,14 @@
 # Owner(s): ["module: PrivateUse1"]
 
 import os
+from typing import ClassVar
 from unittest import mock
 
 import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-import torch.nn as nn
+from torch import nn
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, subtest, TestCase
 
@@ -120,8 +121,7 @@ def run_pp2_test(rank: int, world_size: int, backend: str, dtype: torch.dtype) -
             def forward(self, x):
                 x = self.layer1(x)
                 x = torch.relu(x)
-                x = self.layer2(x)
-                return x
+                return self.layer2(x)
 
         class PipelineStage(nn.Module):
             def __init__(self, stage_id, input_size, hidden_size, output_size):
@@ -135,7 +135,8 @@ def run_pp2_test(rank: int, world_size: int, backend: str, dtype: torch.dtype) -
                     self.layer = nn.Linear(hidden_size, output_size, bias=False, dtype=dtype)
                     self.has_activation = False
                 else:
-                    raise ValueError(f"Invalid stage_id: {stage_id}")
+                    msg = f"Invalid stage_id: {stage_id}"
+                    raise ValueError(msg)
 
             def forward(self, x):
                 x = self.layer(x)
@@ -158,7 +159,8 @@ def run_pp2_test(rank: int, world_size: int, backend: str, dtype: torch.dtype) -
                     self.next_rank = None
                     self.prev_rank = 0
                 else:
-                    raise ValueError(f"Invalid rank for PP=2: {rank}")
+                    msg = f"Invalid rank for PP=2: {rank}"
+                    raise ValueError(msg)
 
             def forward(self, x):
                 if self.rank == 0:
@@ -166,17 +168,16 @@ def run_pp2_test(rank: int, world_size: int, backend: str, dtype: torch.dtype) -
                     if self.next_rank is not None:
                         dist.send(output, dst=self.next_rank)
                     return output
-                elif self.rank == 1:
-                    if self.prev_rank is not None:
-                        batch_size = x.shape[0]
-                        hidden_size = self.stage.layer.in_features
-                        input_shape = (batch_size, hidden_size)
-                        received_tensor = torch.zeros(input_shape, dtype=dtype, device=x.device)
-                        dist.recv(received_tensor, src=self.prev_rank)
-                        output = self.stage(received_tensor)
-                    else:
-                        output = self.stage(x)
-                    return output
+                if self.prev_rank is not None:
+                    batch_size = x.shape[0]
+                    hidden_size = self.stage.layer.in_features
+                    input_shape = (batch_size, hidden_size)
+                    received_tensor = torch.zeros(input_shape, dtype=dtype, device=x.device)
+                    dist.recv(received_tensor, src=self.prev_rank)
+                    output = self.stage(received_tensor)
+                else:
+                    output = self.stage(x)
+                return output
 
         rank = dist.get_rank()
         world_size = dist.get_world_size()
@@ -202,7 +203,7 @@ def run_pp2_test(rank: int, world_size: int, backend: str, dtype: torch.dtype) -
 
         pp_model = PipelineParallelModel(input_size, hidden_size, output_size, rank, world_size).to(device)
 
-        for name, param in sequential_model.named_parameters():
+        for param in sequential_model.parameters():
             dist.broadcast(param.data, src=0)
 
         if rank == 0:
@@ -239,9 +240,9 @@ def run_single_linear_allgather_default_group_test(
                 tensor = tensor.contiguous()
             return [tensor[i] for i in range(tensor.shape[0])]
 
-        IN_DIM_0 = 1
-        IN_DIM_1 = 128
-        OUT_DIM_1 = 128
+        in_dim_0 = 1
+        in_dim_1 = 128
+        out_dim_1 = 128
 
         set_deterministic_seeds(42)
         device = torch.device("rbln", rank)
@@ -263,13 +264,12 @@ def run_single_linear_allgather_default_group_test(
                 if not partial_output.is_contiguous():
                     partial_output = partial_output.contiguous()
 
-                gathered_output_shape = (self.world_size,) + partial_output.shape
+                gathered_output_shape = (self.world_size, *partial_output.shape)
                 t = torch.empty(gathered_output_shape, device=device, dtype=dtype)
                 gathered_outputs = tensor_to_view_list(t)
 
                 dist.all_gather(gathered_outputs, partial_output, group=self.group)
-                all_outputs = torch.cat(gathered_outputs, dim=1)
-                return all_outputs
+                return torch.cat(gathered_outputs, dim=1)
 
         class PipelineStage(nn.Module):
             def __init__(self, layers, rank):
@@ -303,13 +303,13 @@ def run_single_linear_allgather_default_group_test(
         sequential_model = None
         data = None
         if rank == 0:
-            sequential_model = SequentialModel(IN_DIM_1, OUT_DIM_1).to(device=device)
-            data = torch.randn((IN_DIM_0, IN_DIM_1), dtype=dtype, device=device)
+            sequential_model = SequentialModel(in_dim_1, out_dim_1).to(device=device)
+            data = torch.randn((in_dim_0, in_dim_1), dtype=dtype, device=device)
             output_seq = sequential_model(data)
 
         if rank < tensor_world_size:
             layers = [
-                TensorParallelLinear(IN_DIM_1, OUT_DIM_1, tensor_world_size, rank, tensor_group),
+                TensorParallelLinear(in_dim_1, out_dim_1, tensor_world_size, rank, tensor_group),
             ]
             model = PipelineStage(layers, rank).to(device=device)
 
@@ -332,8 +332,8 @@ def run_single_linear_allgather_default_group_test(
             dist.send(l1_bias_split_1, dst=1, group=tensor_groups[0])
 
         elif rank == 1:
-            l1_weight = torch.empty((OUT_DIM_1 // 2, IN_DIM_1), device=device, dtype=dtype)
-            l1_bias = torch.empty(OUT_DIM_1 // 2, device=device, dtype=dtype)
+            l1_weight = torch.empty((out_dim_1 // 2, in_dim_1), device=device, dtype=dtype)
+            l1_bias = torch.empty(out_dim_1 // 2, device=device, dtype=dtype)
 
             dist.recv(l1_weight, src=0, group=tensor_groups[0])
             dist.recv(l1_bias, src=0, group=tensor_groups[0])
@@ -347,7 +347,7 @@ def run_single_linear_allgather_default_group_test(
         if rank == 0:
             output_tp_pp = model(data)
         elif rank == 1:
-            data_dummy = torch.empty((IN_DIM_0, IN_DIM_1), device=device, dtype=dtype)
+            data_dummy = torch.empty((in_dim_0, in_dim_1), device=device, dtype=dtype)
             output_tp_pp = model(data_dummy)
 
         if rank == 0:
@@ -371,7 +371,7 @@ def run_two_linear_bias_default_group_send_recv_test(
     try:
 
         class TensorParallelLinear(nn.Module):
-            def __init__(self, in_features, out_features, world_size, rank, group, is_output_layer=False):
+            def __init__(self, in_features, out_features, world_size, rank, group, *, is_output_layer=False):
                 super().__init__()
                 self.world_size = world_size
                 self.rank = rank
@@ -389,13 +389,10 @@ def run_two_linear_bias_default_group_send_recv_test(
                 if not self.is_output_layer:
                     src_rank_in_group = dist.get_global_rank(self.group, 0)
                     dist.broadcast(x, src=src_rank_in_group, group=self.group)
-                    output = self.linear(x)
-                    return output
-                else:
-                    weight_output = torch.nn.functional.linear(x, self.linear.weight, bias=None)
-                    dist.all_reduce(weight_output, op=dist.ReduceOp.SUM, group=self.group)
-                    output = weight_output + self.linear.bias
-                    return output
+                    return self.linear(x)
+                weight_output = torch.nn.functional.linear(x, self.linear.weight, bias=None)
+                dist.all_reduce(weight_output, op=dist.ReduceOp.SUM, group=self.group)
+                return weight_output + self.linear.bias
 
         class PipelineStage(nn.Module):
             def __init__(self, layers, rank):
@@ -441,7 +438,7 @@ def run_two_linear_bias_default_group_send_recv_test(
             layers = [TensorParallelLinear(512, 2048, tensor_world_size, rank, tensor_group)]
             model = PipelineStage(layers, rank).to(device=device)
         else:
-            layers = [TensorParallelLinear(2048, 256, tensor_world_size, rank, tensor_group, True)]
+            layers = [TensorParallelLinear(2048, 256, tensor_world_size, rank, tensor_group, is_output_layer=True)]
             model = PipelineStage(layers, rank).to(device=device)
 
         dist.barrier()
@@ -494,15 +491,7 @@ def run_two_linear_bias_default_group_send_recv_test(
             model.layers[0].linear.weight.data.copy_(l1_weight)
             model.layers[0].linear.bias.data.copy_(l1_bias)
 
-        elif rank == 2:
-            l2_weight = torch.empty((256, 1024), device=device, dtype=dtype)
-            l2_bias = torch.empty(256, device=device, dtype=dtype)
-            dist.recv(l2_weight, src=0)
-            dist.recv(l2_bias, src=0)
-            model.layers[0].linear.weight.data.copy_(l2_weight)
-            model.layers[0].linear.bias.data.copy_(l2_bias)
-
-        elif rank == 3:
+        elif rank in {2, 3}:
             l2_weight = torch.empty((256, 1024), device=device, dtype=dtype)
             l2_bias = torch.empty(256, device=device, dtype=dtype)
             dist.recv(l2_weight, src=0)
@@ -556,7 +545,7 @@ def run_two_linear_no_bias_default_group_send_recv_test(
     try:
 
         class TensorParallelLinear(nn.Module):
-            def __init__(self, in_features, out_features, world_size, rank, group, is_output_layer=False):
+            def __init__(self, in_features, out_features, world_size, rank, group, *, is_output_layer=False):
                 super().__init__()
                 self.world_size = world_size
                 self.rank = rank
@@ -574,12 +563,10 @@ def run_two_linear_no_bias_default_group_send_recv_test(
                 if not self.is_output_layer:
                     src_rank_in_group = dist.get_global_rank(self.group, 0)
                     dist.broadcast(x, src=src_rank_in_group, group=self.group)
-                    output = self.linear(x)
-                    return output
-                else:
-                    weight_output = torch.nn.functional.linear(x, self.linear.weight, bias=None)
-                    dist.all_reduce(weight_output, op=dist.ReduceOp.SUM, group=self.group)
-                    return weight_output
+                    return self.linear(x)
+                weight_output = torch.nn.functional.linear(x, self.linear.weight, bias=None)
+                dist.all_reduce(weight_output, op=dist.ReduceOp.SUM, group=self.group)
+                return weight_output
 
         class PipelineStage(nn.Module):
             def __init__(self, layers, rank):
@@ -625,7 +612,7 @@ def run_two_linear_no_bias_default_group_send_recv_test(
             layers = [TensorParallelLinear(512, 2048, tensor_world_size, rank, tensor_group)]
             model = PipelineStage(layers, rank).to(device=device)
         else:
-            layers = [TensorParallelLinear(2048, 256, tensor_world_size, rank, tensor_group, True)]
+            layers = [TensorParallelLinear(2048, 256, tensor_world_size, rank, tensor_group, is_output_layer=True)]
             model = PipelineStage(layers, rank).to(device=device)
 
         dist.barrier()
@@ -662,12 +649,7 @@ def run_two_linear_no_bias_default_group_send_recv_test(
             dist.recv(l1_weight, src=0)
             model.layers[0].linear.weight.data.copy_(l1_weight)
 
-        elif rank == 2:
-            l2_weight = torch.empty((256, 1024), device=device, dtype=dtype)
-            dist.recv(l2_weight, src=0)
-            model.layers[0].linear.weight.data.copy_(l2_weight)
-
-        elif rank == 3:
+        elif rank in {2, 3}:
             l2_weight = torch.empty((256, 1024), device=device, dtype=dtype)
             dist.recv(l2_weight, src=0)
             model.layers[0].linear.weight.data.copy_(l2_weight)
@@ -716,7 +698,7 @@ def run_two_linear_bias_subgroup_send_recv_test(rank: int, world_size: int, back
     try:
 
         class TensorParallelLinear(nn.Module):
-            def __init__(self, in_features, out_features, world_size, rank, group, is_output_layer=False):
+            def __init__(self, in_features, out_features, world_size, rank, group, *, is_output_layer=False):
                 super().__init__()
                 self.world_size = world_size
                 self.rank = rank
@@ -734,13 +716,10 @@ def run_two_linear_bias_subgroup_send_recv_test(rank: int, world_size: int, back
                 if not self.is_output_layer:
                     src_rank_in_group = dist.get_global_rank(self.group, 0)
                     dist.broadcast(x, src=src_rank_in_group, group=self.group)
-                    output = self.linear(x)
-                    return output
-                else:
-                    weight_output = torch.nn.functional.linear(x, self.linear.weight, bias=None)
-                    dist.all_reduce(weight_output, op=dist.ReduceOp.SUM, group=self.group)
-                    output = weight_output + self.linear.bias
-                    return output
+                    return self.linear(x)
+                weight_output = torch.nn.functional.linear(x, self.linear.weight, bias=None)
+                dist.all_reduce(weight_output, op=dist.ReduceOp.SUM, group=self.group)
+                return weight_output + self.linear.bias
 
         class PipelineStage(nn.Module):
             def __init__(self, layers, rank):
@@ -789,7 +768,7 @@ def run_two_linear_bias_subgroup_send_recv_test(rank: int, world_size: int, back
             layers = [TensorParallelLinear(512, 2048, tensor_world_size, rank, tensor_group)]
             model = PipelineStage(layers, rank).to(device=device)
         else:
-            layers = [TensorParallelLinear(2048, 256, tensor_world_size, rank, tensor_group, True)]
+            layers = [TensorParallelLinear(2048, 256, tensor_world_size, rank, tensor_group, is_output_layer=True)]
             model = PipelineStage(layers, rank).to(device=device)
 
         dist.barrier()
@@ -825,7 +804,8 @@ def run_two_linear_bias_subgroup_send_recv_test(rank: int, world_size: int, back
             l2_weight = sequential_model.layers[1].weight.data.clone()
             l2_bias = sequential_model.layers[1].bias.data.clone()
 
-            # Use tensor slicing for manual weight splitting (dim=1 for column-wise split)
+            # Use tensor slicing for manual weight splitting (dim=1 for column-wise
+            # split)
             split_size = l2_weight.size(1) // tensor_world_size
 
             # Slice for rank 2 (first half of columns)
@@ -890,18 +870,10 @@ def run_two_linear_bias_subgroup_send_recv_test(rank: int, world_size: int, back
 
             # Use pipe group for rank 1 -> rank 3 communication
             dist.send(output_tp_pp, group_dst=1, group=pipe_group)
-        elif rank == 2:
+        elif rank in (2, 3):
             output_tp_pp_recv = torch.empty((64, 1024), device=device, dtype=dtype)
 
-            # Use pipe group for rank 2 <- rank 0 communication
-            dist.recv(output_tp_pp_recv, group_src=0, group=pipe_group)
-
-            input_from_stage1 = output_tp_pp_recv
-            output_tp_pp = model(input_from_stage1)
-        elif rank == 3:
-            output_tp_pp_recv = torch.empty((64, 1024), device=device, dtype=dtype)
-
-            # Use pipe group for rank 3 <- rank 1 communication
+            # Use pipe group for rank 2 <- rank 0 and rank 3 <- rank 1 communication
             dist.recv(output_tp_pp_recv, group_src=0, group=pipe_group)
 
             input_from_stage1 = output_tp_pp_recv
@@ -935,7 +907,7 @@ def run_two_linear_bias_relu_subgroup_send_recv_test(
     try:
 
         class TensorParallelLinear(nn.Module):
-            def __init__(self, in_features, out_features, world_size, rank, group, is_output_layer=False):
+            def __init__(self, in_features, out_features, world_size, rank, group, *, is_output_layer=False):
                 super().__init__()
                 self.world_size = world_size
                 self.rank = rank
@@ -953,13 +925,10 @@ def run_two_linear_bias_relu_subgroup_send_recv_test(
                 if not self.is_output_layer:
                     src_rank_in_group = dist.get_global_rank(self.group, 0)
                     dist.broadcast(x, src=src_rank_in_group, group=self.group)
-                    output = self.linear(x)
-                    return output
-                else:
-                    weight_output = torch.nn.functional.linear(x, self.linear.weight, bias=None)
-                    dist.all_reduce(weight_output, op=dist.ReduceOp.SUM, group=self.group)
-                    output = weight_output + self.linear.bias
-                    return output
+                    return self.linear(x)
+                weight_output = torch.nn.functional.linear(x, self.linear.weight, bias=None)
+                dist.all_reduce(weight_output, op=dist.ReduceOp.SUM, group=self.group)
+                return weight_output + self.linear.bias
 
         class PipelineStage(nn.Module):
             def __init__(self, layers, rank):
@@ -1009,7 +978,10 @@ def run_two_linear_bias_relu_subgroup_send_recv_test(
             layers = [TensorParallelLinear(512, 2048, tensor_world_size, rank, tensor_group)]
             model = PipelineStage(layers, rank).to(device=device)
         else:
-            layers = [nn.ReLU(), TensorParallelLinear(2048, 256, tensor_world_size, rank, tensor_group, True)]
+            layers = [
+                nn.ReLU(),
+                TensorParallelLinear(2048, 256, tensor_world_size, rank, tensor_group, is_output_layer=True),
+            ]
             model = PipelineStage(layers, rank).to(device=device)
 
         dist.barrier()
@@ -1044,7 +1016,8 @@ def run_two_linear_bias_relu_subgroup_send_recv_test(
             l2_weight = sequential_model.layers[2].weight.data.clone()
             l2_bias = sequential_model.layers[2].bias.data.clone()
 
-            # Use tensor slicing for manual weight splitting (dim=1 for column-wise split)
+            # Use tensor slicing for manual weight splitting (dim=1 for column-wise
+            # split)
             split_size = l2_weight.size(1) // tensor_world_size
 
             # Slice for rank 2 (first half of columns)
@@ -1109,18 +1082,10 @@ def run_two_linear_bias_relu_subgroup_send_recv_test(
 
             # Use pipe group for rank 1 -> rank 3 communication
             dist.send(output_tp_pp, group_dst=1, group=pipe_group)
-        elif rank == 2:
+        elif rank in (2, 3):
             output_tp_pp_recv = torch.empty((64, 1024), device=device, dtype=dtype)
 
-            # Use pipe group for rank 2 <- rank 0 communication
-            dist.recv(output_tp_pp_recv, group_src=0, group=pipe_group)
-
-            input_from_stage1 = output_tp_pp_recv
-            output_tp_pp = model(input_from_stage1)
-        elif rank == 3:
-            output_tp_pp_recv = torch.empty((64, 1024), device=device, dtype=dtype)
-
-            # Use pipe group for rank 3 <- rank 1 communication
+            # Use pipe group for rank 2 <- rank 0 and rank 3 <- rank 1 communication
             dist.recv(output_tp_pp_recv, group_src=0, group=pipe_group)
 
             input_from_stage1 = output_tp_pp_recv
@@ -1153,18 +1118,12 @@ def run_two_linear_bias_allgather_subgroup_send_recv_test(
 
     try:
 
-        def tensor_to_view_list(tensor):
-            if not tensor.is_contiguous():
-                tensor = tensor.contiguous()
-            return [tensor[i] for i in range(tensor.shape[0])]
-
         class TensorParallelLinear(nn.Module):
-            def __init__(self, in_features, out_features, world_size, rank, group, contiguous_output=False):
+            def __init__(self, in_features, out_features, world_size, rank, group):
                 super().__init__()
                 self.world_size = world_size
                 self.rank = rank
                 self.group = group
-                self.contiguous_output = contiguous_output
 
                 # Column-wise splitting: split output features
                 self.out_features_per_partition = out_features // world_size
@@ -1183,20 +1142,14 @@ def run_two_linear_bias_allgather_subgroup_send_recv_test(
                     partial_output = partial_output.contiguous()
 
                 # All-gather the partial outputs from all ranks
-                if self.contiguous_output:
-                    gathered_output_shape = (self.world_size,) + partial_output.shape
-                    t = torch.empty(gathered_output_shape, device=device, dtype=dtype)
-                    gathered_outputs = tensor_to_view_list(t)
-                else:
-                    gathered_outputs = [
-                        torch.empty(partial_output.shape, device=device, dtype=dtype) for _ in range(self.world_size)
-                    ]
+                gathered_outputs = [
+                    torch.empty(partial_output.shape, device=device, dtype=dtype) for _ in range(self.world_size)
+                ]
 
                 dist.all_gather(gathered_outputs, partial_output, group=self.group)
 
                 # Concatenate the gathered outputs
-                all_outputs = torch.cat(gathered_outputs, dim=1)
-                return all_outputs
+                return torch.cat(gathered_outputs, dim=1)
 
         class PipelineStage(nn.Module):
             def __init__(self, layers, rank):
@@ -1280,7 +1233,8 @@ def run_two_linear_bias_allgather_subgroup_send_recv_test(
             l2_weight = sequential_model.layers[1].weight.data.clone()
             l2_bias = sequential_model.layers[1].bias.data.clone()
 
-            # Use tensor slicing for manual weight splitting (dim=1 for column-wise split)
+            # Use tensor slicing for manual weight splitting (dim=1 for column-wise
+            # split)
             split_size = l2_weight.size(0) // tensor_world_size
 
             # Slice for rank 2 (first half of columns)
@@ -1293,7 +1247,8 @@ def run_two_linear_bias_allgather_subgroup_send_recv_test(
             dist.send(l2_weight, group_dst=1, group=pipe_group)
             dist.send(l2_bias, group_dst=1, group=pipe_group)
 
-            # Use default group for rank 0 -> rank 3 communication (cross-pipeline communication)
+            # Use default group for rank 0 -> rank 3 communication (cross-pipeline
+            # communication)
             dist.send(l2_weight, dst=3)
             dist.send(l2_bias, dst=3)
 
@@ -1350,7 +1305,8 @@ def run_two_linear_bias_allgather_subgroup_send_recv_test(
             output_tp_pp = model(output_tp_pp_recv)
         elif rank == 3:
             # Rank 3 receives input through broadcast in TensorParallelLinear forward
-            # The input will be broadcasted from rank 2 in the TensorParallelLinear forward
+            # The input will be broadcasted from rank 2 in the TensorParallelLinear
+            # forward
             output_tp_pp_recv = torch.empty((64, 2048), device=device, dtype=dtype)
 
             output_tp_pp = model(output_tp_pp_recv)
@@ -1376,14 +1332,14 @@ def run_two_linear_bias_allgather_subgroup_send_recv_test(
 class TestTPPPRBLNBase(TestCase):
     """Base test class for RBLN TP/PP tests."""
 
-    c10d_async_envs = [
+    c10d_async_envs: ClassVar[list[subtest | str]] = [
         "0",  # sync mode (TORCH_RBLN_C10D_ASYNC=0)
         subtest("1", decorators=[pytest.mark.periodic]),  # async mode (TORCH_RBLN_C10D_ASYNC=1)
     ]
 
     def setUp(self):
-        # Scoped to the test: these are process-global, and patch.dict restores the whole
-        # environment -- including the MASTER_PORT the helper below adds.
+        # Scoped to the test: these are process-global, and patch.dict restores the
+        # whole environment -- including the MASTER_PORT the helper below adds.
         env = mock.patch.dict(
             os.environ,
             {
@@ -1415,7 +1371,6 @@ class TestDefaultGroupAllReduceRBLN(TestTPPPRBLNBase):
     @parametrize("c10d_async_env", TestTPPPRBLNBase.c10d_async_envs)
     def test_default_group_allreduce_2ranks(self, dtype, c10d_async_env):
         """Test default group allreduce with 2 ranks."""
-
         self.run_c10d_test(
             c10d_async_env,
             2,

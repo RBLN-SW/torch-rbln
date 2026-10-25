@@ -51,16 +51,22 @@ bool is_dst_slice(const RblnKinetoSlice& s) {
   return s.kind == RBLN_KINETO_KIND_RUNTIME;
 }
 
-void add_flow_arrows(const RblnKinetoExport* exp, int64_t clock_offset_ns,
-                     const ::libkineto::TraceSpan& span, ProjectedKinetoTrace* out) {
+void add_flow_arrows(
+    const RblnKinetoExport* exp,
+    int64_t clock_offset_ns,
+    const ::libkineto::TraceSpan& span,
+    ProjectedKinetoTrace* out) {
   if (exp->host_launches_count == 0) {
     RBLN_LOG_INFO("rbln flow arrows: no host launches captured; 0 arrows");
     return;
   }
-  const uint32_t assignable = std::min(exp->host_launches_count, kRblnFlowIdSpan);
+  const uint32_t assignable =
+      std::min(exp->host_launches_count, kRblnFlowIdSpan);
   if (assignable < exp->host_launches_count)
-    RBLN_LOG_WARN("rbln flow arrows: {} of {} host launches exceed the flow-id field; no arrow drawn",
-                  exp->host_launches_count - assignable, exp->host_launches_count);
+    RBLN_LOG_WARN(
+        "rbln flow arrows: {} of {} host launches exceed the flow-id field; no arrow drawn",
+        exp->host_launches_count - assignable,
+        exp->host_launches_count);
 
   // 1. assign one flow id per host launch.
   std::unordered_map<int64_t, uint32_t> flow_id_by_launch;
@@ -94,7 +100,8 @@ void add_flow_arrows(const RblnKinetoExport* exp, int64_t clock_offset_ns,
     ++arrows;
   }
 
-  // 3. put it on the source marker, only for launches whose slices got it, so none dangles.
+  // 3. put it on the source marker, only for launches whose slices got it, so
+  //    none dangles.
   uint64_t sources = 0, unwired = 0;
   for (uint32_t i = 0; i < assignable; ++i) {
     if (!wired[i]) {
@@ -103,7 +110,8 @@ void add_flow_arrows(const RblnKinetoExport* exp, int64_t clock_offset_ns,
     }
     const RblnKinetoHostLaunch& host_launch = exp->host_launches[i];
     ::libkineto::GenericTraceActivity src(
-        span, ::libkineto::ActivityType::PRIVATEUSE1_RUNTIME,
+        span,
+        ::libkineto::ActivityType::PRIVATEUSE1_RUNTIME,
         std::string(host_launch.name ? host_launch.name : ""));
     const int64_t ts = host_launch.steady_ns + clock_offset_ns;
     src.startTime = ts;
@@ -113,17 +121,23 @@ void add_flow_arrows(const RblnKinetoExport* exp, int64_t clock_offset_ns,
     src.flow.id = flow_id_by_launch.at(host_launch.launch_id);
     src.flow.type = ::libkineto::kLinkAsyncCpuGpu;
     src.flow.start = 1;
-    src.addMetadata(RBLN_KINETO_ANN_LAUNCH_ID, std::to_string(host_launch.launch_id));
+    src.addMetadata(
+        RBLN_KINETO_ANN_LAUNCH_ID, std::to_string(host_launch.launch_id));
     out->activities.push_back(std::move(src));
     ++sources;
   }
   if (unwired)
-    RBLN_LOG_WARN("rbln flow arrows: {} of {} host launches had no RUNTIME slice; no arrow drawn",
-                  unwired, assignable);
+    RBLN_LOG_WARN(
+        "rbln flow arrows: {} of {} host launches had no RUNTIME slice; no arrow drawn",
+        unwired,
+        assignable);
 
   RBLN_LOG_INFO(
       "rbln flow arrows: {} sources, {} arrows; skipped {} slices w/o launch_id, {} w/o host-launch match",
-      sources, arrows, skipped_no_launch_id, skipped_no_launch);
+      sources,
+      arrows,
+      skipped_no_launch_id,
+      skipped_no_launch);
 }
 
 } // namespace
@@ -145,27 +159,28 @@ void convert_export_to_kineto(
   for (uint32_t i = 0; i < exp->devices_count; ++i) {
     const RblnKinetoDevice& dev = exp->devices[i];
     out->device_infos.push_back(::libkineto::DeviceInfo{
-        /*id=*/dev.pid,
-        /*sortIndex=*/kRblnDeviceSortIndex + dev.pid,
-        /*name=*/std::string(dev.name ? dev.name : ""),
-        /*label=*/std::string()});
+        .id = dev.pid,
+        .sortIndex = kRblnDeviceSortIndex + dev.pid,
+        .name = std::string(dev.name ? dev.name : ""),
+        .label = std::string()});
   }
 
   out->resource_infos.reserve(exp->lanes_count);
   for (uint32_t i = 0; i < exp->lanes_count; ++i) {
     const RblnKinetoLane& lane = exp->lanes[i];
     out->resource_infos.push_back(::libkineto::ResourceInfo{
-        /*id=*/lane.resource_tid,
-        /*sortIndex=*/lane.resource_tid,
-        /*deviceId=*/lane.device_pid,
-        /*name=*/std::string(lane.name ? lane.name : "")});
+        .id = lane.resource_tid,
+        .sortIndex = lane.resource_tid,
+        .deviceId = lane.device_pid,
+        .name = std::string(lane.name ? lane.name : "")});
   }
 
   out->activities.reserve(exp->slices_count + exp->host_launches_count);
   for (uint32_t i = 0; i < exp->slices_count; ++i) {
     const RblnKinetoSlice& s = exp->slices[i];
     const ::libkineto::ActivityType act_type = kind_to_activity_type(s.kind);
-    ::libkineto::GenericTraceActivity act(span, act_type, std::string(s.name ? s.name : ""));
+    ::libkineto::GenericTraceActivity act(
+        span, act_type, std::string(s.name ? s.name : ""));
     act.startTime = s.start_steady_ns + clock_offset_ns;
     act.endTime = s.end_steady_ns + clock_offset_ns;
     act.device = s.device_pid;

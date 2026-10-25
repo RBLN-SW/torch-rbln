@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Walkthrough example 5: torch eager execution on RBLN.
+"""Walkthrough example 5: torch eager execution on RBLN.
 
 Ported from walkthrough_guide/5.eager_mode.py.
 

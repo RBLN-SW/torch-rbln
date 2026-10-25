@@ -26,7 +26,11 @@ namespace at::native::rbln {
 // index_select
 // ===========================================================================
 
-at::Tensor& index_select_out_rbln(const at::Tensor& self, int64_t dim, const at::Tensor& index, at::Tensor& out) {
+at::Tensor& index_select_out_rbln(
+    const at::Tensor& self,
+    int64_t dim,
+    const at::Tensor& index,
+    at::Tensor& out) {
   RBLN_SCOPE_GUARD();
 
   RBLN_CHECK(
@@ -58,12 +62,25 @@ at::Tensor& index_select_out_rbln(const at::Tensor& self, int64_t dim, const at:
   if (rank == 0) {
     // 0-D self: index_select returns a 0-D output. dim must be 0 or -1; index
     // must contain exactly one value, equal to 0.
-    RBLN_CHECK(dim == 0 || dim == -1, "index_select: dim {} out of range for 0-D self", dim);
-    RBLN_CHECK(n_out == 1, "index_select: index to scalar can have only 1 value, got {}", n_out);
-    RBLN_CHECK(idx_host[0] == 0, "index_select: index value {} out of range [0, 1) for 0-D self", idx_host[0]);
+    RBLN_CHECK(
+        dim == 0 || dim == -1,
+        "index_select: dim {} out of range for 0-D self",
+        dim);
+    RBLN_CHECK(
+        n_out == 1,
+        "index_select: index to scalar can have only 1 value, got {}",
+        n_out);
+    RBLN_CHECK(
+        idx_host[0] == 0,
+        "index_select: index value {} out of range [0, 1) for 0-D self",
+        idx_host[0]);
   } else {
     const int64_t a = dim < 0 ? dim + rank : dim;
-    RBLN_CHECK(a >= 0 && a < rank, "index_select: dim {} out of range for rank-{} self", dim, rank);
+    RBLN_CHECK(
+        a >= 0 && a < rank,
+        "index_select: dim {} out of range for rank-{} self",
+        dim,
+        rank);
     out_shape.assign(self.sizes().begin(), self.sizes().end());
     out_shape[a] = n_out;
   }
@@ -72,7 +89,8 @@ at::Tensor& index_select_out_rbln(const at::Tensor& self, int64_t dim, const at:
 
   // Non-contig out: stage through a contig buffer and copy_ back at the end.
   if (!out.is_contiguous()) {
-    auto staging = at::empty(out_shape, out.options().memory_format(c10::MemoryFormat::Contiguous));
+    auto staging = at::empty(
+        out_shape, out.options().memory_format(c10::MemoryFormat::Contiguous));
     index_select_out_rbln(self, dim, index, staging);
     out.copy_(staging);
     return out;
@@ -91,7 +109,11 @@ at::Tensor& index_select_out_rbln(const at::Tensor& self, int64_t dim, const at:
   // uninitialized data (e.g. empty self (0,3) resized to (1,3)).
   const int64_t axis_extent = self.size(axis);
   for (int64_t v : idx_host) {
-    RBLN_CHECK(v >= 0 && v < axis_extent, "index_select: index value {} out of range [0, {})", v, axis_extent);
+    RBLN_CHECK(
+        v >= 0 && v < axis_extent,
+        "index_select: index value {} out of range [0, {})",
+        v,
+        axis_extent);
   }
 
   if (n_out == 0 || self.numel() == 0) {
@@ -128,7 +150,10 @@ at::Tensor& index_select_out_rbln(const at::Tensor& self, int64_t dim, const at:
   return out;
 }
 
-at::Tensor index_select_rbln(const at::Tensor& self, int64_t dim, const at::Tensor& index) {
+at::Tensor index_select_rbln(
+    const at::Tensor& self,
+    int64_t dim,
+    const at::Tensor& index) {
   const int64_t rank = self.dim();
 
   std::vector<int64_t> out_shape;
@@ -137,12 +162,17 @@ at::Tensor index_select_rbln(const at::Tensor& self, int64_t dim, const at::Tens
     // validates dim ∈ {0, -1} and index has exactly one value (= 0).
   } else {
     const int64_t axis = dim < 0 ? dim + rank : dim;
-    RBLN_CHECK(axis >= 0 && axis < rank, "index_select: dim {} out of range for rank-{} self", dim, rank);
+    RBLN_CHECK(
+        axis >= 0 && axis < rank,
+        "index_select: dim {} out of range for rank-{} self",
+        dim,
+        rank);
     out_shape.assign(self.sizes().begin(), self.sizes().end());
     out_shape[axis] = index.numel();
   }
 
-  at::Tensor out = at::empty(out_shape, self.options().memory_format(c10::MemoryFormat::Contiguous));
+  at::Tensor out = at::empty(
+      out_shape, self.options().memory_format(c10::MemoryFormat::Contiguous));
   return index_select_out_rbln(self, dim, index, out);
 }
 
@@ -163,19 +193,21 @@ at::Tensor index_select_rbln(const at::Tensor& self, int64_t dim, const at::Tens
 // The fast path is taken only when `out` already has the exact expected shape
 // (else the resize the .out contract may require is left to the fallback).
 //
-// Everything else (multiple index tensors, N-D / non-leading masks, broadcasting,
-// non-contiguous `self`) stays on the CPU fallback. Boxed so that path can reuse
-// `cpu_fallback_rbln`. The functional `index.Tensor` (`x[idx]`) reaches this via
-// the CompositeExplicitAutogradNonFunctional out wrapper.
+// Everything else (multiple index tensors, N-D / non-leading masks,
+// broadcasting, non-contiguous `self`) stays on the CPU fallback. Boxed so that
+// path can reuse `cpu_fallback_rbln`. The functional `index.Tensor` (`x[idx]`)
+// reaches this via the CompositeExplicitAutogradNonFunctional out wrapper.
 void index_out_rbln(const c10::OperatorHandle& op, torch::jit::Stack* stack) {
   // aten::index.Tensor_out(Tensor self, Tensor?[] indices, *, Tensor(a!) out)
   const int64_t num_args = static_cast<int64_t>(op.schema().arguments().size());
   const int64_t base = static_cast<int64_t>(stack->size()) - num_args;
   const at::Tensor self = (*stack)[base].toTensor();
-  const c10::List<c10::optional<at::Tensor>> indices = (*stack)[base + 1].toOptionalTensorList();
+  const c10::List<c10::optional<at::Tensor>> indices =
+      (*stack)[base + 1].toOptionalTensorList();
 
   // Find the single non-None index and its axis (its position in `indices` is
   // the indexed dim; leading `None`s shift it, e.g. `x[:, idx]` -> axis 1).
+  at::Tensor idx;
   int64_t axis = -1;
   int64_t num_present = 0;
   for (size_t i = 0; i < indices.size(); ++i) {
@@ -183,38 +215,47 @@ void index_out_rbln(const c10::OperatorHandle& op, torch::jit::Stack* stack) {
     if (e.has_value() && e->defined()) {
       ++num_present;
       axis = static_cast<int64_t>(i);
+      idx = *e;
     }
   }
 
-  // `self.numel() > 0`: an empty `self` (some dim is 0) makes advanced indexing a
-  //   no-op that skips bounds checks (e.g. empty(3,0)[[3]] -> (1,0), no IndexError);
-  //   leave that to the fallback rather than replicate the special case.
+  // `self.numel() > 0`: an empty `self` (some dim is 0) makes advanced indexing
+  //   a no-op that skips bounds checks (e.g. empty(3,0)[[3]] -> (1,0), no
+  //   IndexError); leave that to the fallback rather than replicate the special
+  //   case.
   // `indices.size() <= self.dim()`: more index slots than dims is "too many
   //   indices" (IndexError); the fallback raises it correctly.
-  const bool eligible = num_present == 1 && self.defined() && self.numel() > 0 && self.device().is_privateuseone() &&
-      self.is_contiguous() && static_cast<int64_t>(indices.size()) <= self.dim() && axis >= 0 && axis < self.dim();
+  const bool eligible = num_present == 1 && self.defined() &&
+      self.numel() > 0 && self.device().is_privateuseone() &&
+      self.is_contiguous() &&
+      static_cast<int64_t>(indices.size()) <= self.dim() && axis >= 0 &&
+      axis < self.dim();
 
   if (eligible) {
-    const at::Tensor idx = indices.get(axis).value();
     at::Tensor out = (*stack)[base + 2].toTensor();
     const auto st = idx.scalar_type();
 
-    // Build the 1-D integer index along `axis` (host-side: the index is tiny and
-    // index_select copies it to host anyway, so no net v2h added) together with
-    // the exact output shape aten::index.Tensor must produce for this form.
+    // Build the 1-D integer index along `axis` (host-side: the index is tiny
+    // and index_select copies it to host anyway, so no net v2h added) together
+    // with the exact output shape aten::index.Tensor must produce for this
+    // form.
     at::Tensor flat_idx;
     std::vector<int64_t> expected;
     bool fast = false;
     if ((st == at::kLong || st == at::kInt) && idx.dim() >= 1) {
-      // integer index of rank >= 1: out = self[:axis] + idx.shape + self[axis+1:]
-      // (a 0-D index does not reach here — it decomposes to select upstream).
+      // integer index of rank >= 1: out = self[:axis] + idx.shape +
+      // self[axis+1:] (a 0-D index does not reach here — it decomposes to
+      // select upstream).
       flat_idx = idx.reshape({-1});
       // Host-side and widened to int64: the negative-wrap add and the bounds
       // compare below must not overflow int32 when an axis exceeds INT32_MAX.
-      flat_idx = (flat_idx.is_cpu() ? flat_idx.contiguous() : flat_idx.cpu().contiguous()).to(at::kLong);
+      flat_idx = (flat_idx.is_cpu() ? flat_idx.contiguous()
+                                    : flat_idx.cpu().contiguous())
+                     .to(at::kLong);
       // advanced indexing wraps negatives; index_select does not.
       if (flat_idx.numel() > 0 && flat_idx.lt(0).any().item<bool>())
-        flat_idx = at::where(flat_idx.lt(0), flat_idx + self.size(axis), flat_idx);
+        flat_idx =
+            at::where(flat_idx.lt(0), flat_idx + self.size(axis), flat_idx);
       for (int64_t d = 0; d < axis; ++d)
         expected.push_back(self.size(d));
       for (int64_t d = 0; d < idx.dim(); ++d)
@@ -222,9 +263,11 @@ void index_out_rbln(const c10::OperatorHandle& op, torch::jit::Stack* stack) {
       for (int64_t d = axis + 1; d < self.dim(); ++d)
         expected.push_back(self.size(d));
       fast = true;
-    } else if (st == at::kBool && idx.dim() == 1 && idx.size(0) == self.size(axis)) {
+    } else if (
+        st == at::kBool && idx.dim() == 1 && idx.size(0) == self.size(axis)) {
       // 1-D boolean mask over `axis`: out = self[:axis] + (K,) + self[axis+1:]
-      const at::Tensor mask_cpu = idx.is_cpu() ? idx.contiguous() : idx.cpu().contiguous();
+      const at::Tensor mask_cpu =
+          idx.is_cpu() ? idx.contiguous() : idx.cpu().contiguous();
       flat_idx = mask_cpu.nonzero().squeeze(-1); // True positions -> (K,)
       for (int64_t d = 0; d < axis; ++d)
         expected.push_back(self.size(d));
@@ -234,18 +277,20 @@ void index_out_rbln(const c10::OperatorHandle& op, torch::jit::Stack* stack) {
       fast = true;
     }
 
-    // Fast path only when `out` already has the shape aten::index would produce —
-    // a mismatch means the .out contract wants a resize only the fallback does.
-    // `out` may be non-contiguous: a transposed / permuted N-D index makes the
-    // functional wrapper allocate it with the index's strides. Contiguous `out` is
-    // written in place (a flattened-axis view aliases its storage); otherwise the
-    // gather goes to a contiguous staging buffer copied into `out`'s layout.
+    // Fast path only when `out` already has the shape aten::index would produce
+    // — a mismatch means the .out contract wants a resize only the fallback
+    // does. `out` may be non-contiguous: a transposed / permuted N-D index
+    // makes the functional wrapper allocate it with the index's strides.
+    // Contiguous `out` is written in place (a flattened-axis view aliases its
+    // storage); otherwise the gather goes to a contiguous staging buffer copied
+    // into `out`'s layout.
     if (fast && out.defined() && out.sizes().equals(expected)) {
       // Advanced indexing raises IndexError (not a plain RuntimeError) when an
       // index is out of range; match that before delegating to index_select.
       TORCH_CHECK_INDEX(
           flat_idx.numel() == 0 ||
-              (flat_idx.ge(0).all().item<bool>() && flat_idx.lt(self.size(axis)).all().item<bool>()),
+              (flat_idx.ge(0).all().item<bool>() &&
+               flat_idx.lt(self.size(axis)).all().item<bool>()),
           "index out of bounds for dimension ",
           axis,
           " with size ",
@@ -256,9 +301,10 @@ void index_out_rbln(const c10::OperatorHandle& op, torch::jit::Stack* stack) {
         at::Tensor out_view = out.view(vshape);
         index_select_out_rbln(self, axis, flat_idx, out_view);
       } else {
-        // Gather into a contiguous buffer, then copy into `out`'s strided layout
-        // (mirrors index_select_out_rbln's own non-contig handling).
-        at::Tensor staging = at::empty(vshape, out.options().memory_format(c10::MemoryFormat::Contiguous));
+        // Gather into a contiguous buffer, then copy into `out`'s strided
+        // layout (mirrors index_select_out_rbln's own non-contig handling).
+        at::Tensor staging = at::empty(
+            vshape, out.options().memory_format(c10::MemoryFormat::Contiguous));
         index_select_out_rbln(self, axis, flat_idx, staging);
         out.copy_(staging.view(expected));
       }
@@ -268,7 +314,7 @@ void index_out_rbln(const c10::OperatorHandle& op, torch::jit::Stack* stack) {
     }
   }
 
-  // Not white-listed -> identical to the previous (pre-kernel) behaviour.
+  // Not white-listed -> identical to the previous (pre-kernel) behavior.
   c10::rbln::log_cpu_fallback(op.schema().name());
   at::native::rbln::cpu_fallback_rbln(op, stack);
 }
@@ -325,10 +371,19 @@ at::Tensor& index_copy_out_rbln(
   // (scalar copy) or 1 (every write targets self[0]; last-write-wins picks
   // source[n_idx - 1]).
   if (rank == 0) {
-    RBLN_CHECK(dim == 0 || dim == -1, "index_copy: dim {} out of range for 0-D self", dim);
-    RBLN_CHECK(n_idx >= 1, "index_copy: index for 0-D self must have at least 1 value, got {}", n_idx);
+    RBLN_CHECK(
+        dim == 0 || dim == -1,
+        "index_copy: dim {} out of range for 0-D self",
+        dim);
+    RBLN_CHECK(
+        n_idx >= 1,
+        "index_copy: index for 0-D self must have at least 1 value, got {}",
+        n_idx);
     for (int64_t i = 0; i < n_idx; ++i) {
-      RBLN_CHECK(idx_host[i] == 0, "index_copy: index value {} out of range [0, 1) for 0-D self", idx_host[i]);
+      RBLN_CHECK(
+          idx_host[i] == 0,
+          "index_copy: index value {} out of range [0, 1) for 0-D self",
+          idx_host[i]);
     }
     at::native::resize_output(out, {});
     if (source.dim() == 0) {
@@ -342,17 +397,28 @@ at::Tensor& index_copy_out_rbln(
       // Last write wins: copy source[n_idx - 1] (a 0-D view) into out.
       strided_v2v_copy(out, source.select(0, n_idx - 1));
     } else {
-      RBLN_CHECK(false, "index_copy: source rank {} not supported when self is 0-D (must be 0 or 1)", source.dim());
+      RBLN_CHECK(
+          false,
+          "index_copy: source rank {} not supported when self is 0-D (must be 0 or 1)",
+          source.dim());
     }
     return out;
   }
 
   const int64_t axis = dim < 0 ? dim + rank : dim;
-  RBLN_CHECK(axis >= 0 && axis < rank, "index_copy: dim {} out of range for rank-{} self", dim, rank);
+  RBLN_CHECK(
+      axis >= 0 && axis < rank,
+      "index_copy: dim {} out of range for rank-{} self",
+      dim,
+      rank);
 
   // Shape validations: source matches self on every non-axis dim, and source
   // has size n_idx along axis.
-  RBLN_CHECK(source.dim() == rank, "index_copy: source rank {} doesn't match self rank {}", source.dim(), rank);
+  RBLN_CHECK(
+      source.dim() == rank,
+      "index_copy: source rank {} doesn't match self rank {}",
+      source.dim(),
+      rank);
   for (int64_t i = 0; i < rank; ++i) {
     if (i == axis) {
       RBLN_CHECK(
@@ -379,11 +445,14 @@ at::Tensor& index_copy_out_rbln(
   // Non-contig `out` that is not `self` itself: stage through a contig buffer
   // and copy_ back at the end, so the positions the index does not name get
   // self's values through one copy_ rather than a strided v2v of the whole
-  // view. The in-place form on a view (`out` is `self`) needs no initialisation:
-  // Phase 2 writes the indexed runs into the view and the rest stays as it is,
-  // so it takes the direct path below however the view is laid out.
+  // view. The in-place form on a view (`out` is `self`) needs no
+  // initialization: Phase 2 writes the indexed runs into the view and the rest
+  // stays as it is, so it takes the direct path below however the view is laid
+  // out.
   if (!out.is_contiguous() && !is_same_view(out, self)) {
-    auto staging = at::empty(self.sizes(), out.options().memory_format(c10::MemoryFormat::Contiguous));
+    auto staging = at::empty(
+        self.sizes(),
+        out.options().memory_format(c10::MemoryFormat::Contiguous));
     index_copy_out_rbln(self, dim, index, source, staging);
     out.copy_(staging);
     return out;
@@ -400,7 +469,11 @@ at::Tensor& index_copy_out_rbln(
   const int64_t axis_extent = self.size(axis);
   if (source.numel() > 0) {
     for (int64_t v : idx_host) {
-      RBLN_CHECK(v >= 0 && v < axis_extent, "index_copy: index value {} out of range [0, {})", v, axis_extent);
+      RBLN_CHECK(
+          v >= 0 && v < axis_extent,
+          "index_copy: index value {} out of range [0, {})",
+          v,
+          axis_extent);
     }
   }
 
@@ -414,10 +487,10 @@ at::Tensor& index_copy_out_rbln(
 
   // Detect duplicate indices in one pass (bounds already checked above).
   // Duplicates make Phase 2's per-run dst slices overlap on the axis, which the
-  // batched v2v API rejects (it may reorder/parallelise entries, so overlapping
-  // ranges are undefined behaviour by contract). When duplicates exist we fall
-  // off the batched path and submit each run as its own v2v — sequential per-run
-  // calls preserve PyTorch's last-write-wins semantics.
+  // batched v2v API rejects (it may reorder/parallelize entries, so overlapping
+  // ranges are undefined behavior by contract). When duplicates exist we fall
+  // off the batched path and submit each run as its own v2v — sequential
+  // per-run calls preserve PyTorch's last-write-wins semantics.
   std::vector<bool> seen(static_cast<size_t>(axis_extent), false);
   bool has_duplicate_index = false;
   for (int64_t v : idx_host) {
@@ -428,7 +501,7 @@ at::Tensor& index_copy_out_rbln(
     }
   }
 
-  // Phase 1: initialise `out` with `self`. Skipped when `out` aliases `self`
+  // Phase 1: initialize `out` with `self`. Skipped when `out` aliases `self`
   // (in-place dispatch) — saves a redundant full-tensor v2v.
   if (!is_same_view(out, self)) {
     strided_v2v_copy(out, self);
