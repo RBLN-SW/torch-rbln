@@ -109,6 +109,9 @@ observed.
 # Disable only the NaN/Inf check (e.g. to benchmark without the scan overhead)
 export TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK=nan_inf
 
+# Disable only the alignment fallback (e.g. to hand unaligned shapes to the compiler)
+export TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK=align
+
 # Disable only the trace/debugger check (e.g. to run under pdb without CPU fallback)
 export TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK=trace
 
@@ -136,6 +139,7 @@ The value is a **comma-separated list** of fallback case names to disable:
 | `scalar`         | Falls back when all input tensors are 0-dim scalars                                                | Sends scalar ops to RBLN — may fail in `rebel-compiler`  |
 | `storage_offset` | Falls back when a contiguous tensor has `storage_offset != 0`                                      | Sends offset tensors to RBLN — may read wrong data       |
 | `nan_inf`        | Falls back when inputs contain NaN or Inf (non-deploy mode only)                                   | Skips the NaN/Inf scan — invalid values reach the device |
+| `align`          | Falls back to CPU when a tensor argument's last dim is not a multiple of 64                        | Sends unaligned ops to RBLN — slower on small tensors, and each new shape compiles |
 | `all`            | —                                                                                                  | Disables **all** of the above checks                     |
 
 ## Device mapping
@@ -383,12 +387,11 @@ built. It suppresses the diagnosis, not the incompatibility: the mismatch it
 hides is what would otherwise surface as an `undefined symbol` import crash or
 as corruption inside the runtime.
 
-## Eager-dispatch dtype catalog (measurement knobs)
+## Eager-dispatch dtype catalog (measurement knob)
 
-Both unset by default; set before `import torch_rbln`. `docs/DTYPE_DISPATCH.md`
-has the contract and the boundaries to know before enabling a dtype.
+Unset by default; set before `import torch_rbln`. `docs/EAGER_DISPATCH.md` has
+the contract and the boundaries to know before enabling a dtype.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `TORCH_RBLN_DISPATCH_DTYPES` | Extra dtypes admitted to the eager dispatch catalog (torch dtype names or aliases; an unknown name is an error) | unset |
-| `TORCH_RBLN_DISPATCH_STRICT` | Dtypes (or `all`) whose ops skip the alignment performance fallbacks and always reach the compiler | unset |

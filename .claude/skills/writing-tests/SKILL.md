@@ -130,12 +130,12 @@ Assertion rewriting is off (`--assert=plain` in `pyproject.toml`), so a bare
 `torch.testing.assert_close`, or pass a message.
 
 To assert an op ran on the device, **assert it** — do not infer it from the
-values. An input that is not fp16 or bf16 takes the host path on every route; in
-eager, a single-tensor op whose last dimension is not a multiple of 64 does too
-(`compile_and_run_view_aware` in `ops_utils.py`). The result then matches the
-CPU reference exactly; the test passes without ever reaching the kernel.
-`test/rbln/test_dispatch_shim_precheck.py` is the worked example from both
-directions: `_C._warmcache_size()` before and after, because a CPU fallback
+values. An input that is not fp16, bf16 or fp32 takes the host path on every
+route; in eager, a single-tensor op whose last dimension is not a multiple of 64
+does too (`compile_and_run_view_aware` in `ops_utils.py`). The result then
+matches the CPU reference exactly; the test passes without ever reaching the
+kernel. `test/rbln/test_dispatch_shim_precheck.py` is the worked example from
+both directions: `_C._warmcache_size()` before and after, because a CPU fallback
 never primes the warm cache. `_C._dispatch_fallback_by_op()` gives per-op
 fallback counts for the same purpose, for the ops the C++ shim prechecks — not
 for the alignment route.

@@ -685,13 +685,6 @@ void register_supported_dtypes_api(py::module_& module) {
       [] { return supported_dtypes_to_tuple(c10::rbln::kDispatchDtypes); },
       "Internal: the built-in eager-dispatch catalog, without the TORCH_RBLN_DISPATCH_DTYPES extension");
   module.def(
-      "_dispatch_strict_dtypes",
-      [] {
-        const auto v = c10::rbln::strict_dispatch_dtypes_rt();
-        return supported_dtypes_to_tuple(c10::ArrayRef<c10::ScalarType>(v));
-      },
-      "Internal: dtypes under strict dispatch (TORCH_RBLN_DISPATCH_STRICT), evaluated now");
-  module.def(
       "_sdpa_dtypes",
       [] { return supported_dtypes_to_tuple(c10::rbln::kSdpaDtypes); },
       "Internal: SDPA kernel supported dtypes");

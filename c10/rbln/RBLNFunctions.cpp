@@ -126,18 +126,16 @@ std::optional<c10::ScalarType> parse_dtype_name(std::string name) {
 }
 
 // Parse a comma-separated dtype list from `env_name` into a bitmask over c10::ScalarType.
-// "all" sets `all_out`. The env string is compared on every call (a short strcmp) and
-// re-parsed only when it changed, so a per-test env toggle takes effect without latching a
-// value into the process.
+// The env string is compared on every call (a short strcmp) and re-parsed only when it
+// changed, so a per-test env toggle takes effect without latching a value into the process.
 struct DtypeMaskCache {
   std::mutex mu;
   std::string last_env;
   bool have_last = false;
   uint64_t mask = 0;
-  bool all = false;
 };
 
-uint64_t dtype_mask_from_env(const char* env_name, DtypeMaskCache& c, bool* all_out) {
+uint64_t dtype_mask_from_env(const char* env_name, DtypeMaskCache& c) {
   const char* env = std::getenv(env_name);
   std::lock_guard<std::mutex> lock(c.mu);
   const std::string current = env == nullptr ? "" : env;
@@ -145,7 +143,6 @@ uint64_t dtype_mask_from_env(const char* env_name, DtypeMaskCache& c, bool* all_
     // Parse into locals and commit only a complete result: a rejected value must
     // not leave a partial mask behind for the next call to return silently.
     uint64_t mask = 0;
-    bool all = false;
     size_t start = 0;
     while (start <= current.size()) {
       size_t end = current.find(',', start);
@@ -157,9 +154,7 @@ uint64_t dtype_mask_from_env(const char* env_name, DtypeMaskCache& c, bool* all_
       const auto e = tok.find_last_not_of(" \t");
       if (b != std::string::npos) {
         tok = tok.substr(b, e - b + 1);
-        if (tok == "all") {
-          all = true;
-        } else if (auto st = parse_dtype_name(tok)) {
+        if (auto st = parse_dtype_name(tok)) {
           mask |= uint64_t{1} << static_cast<unsigned>(*st);
         } else {
           TORCH_CHECK(false, env_name, ": unknown dtype name '", tok, "'");
@@ -170,10 +165,6 @@ uint64_t dtype_mask_from_env(const char* env_name, DtypeMaskCache& c, bool* all_
     c.have_last = true;
     c.last_env = current;
     c.mask = mask;
-    c.all = all;
-  }
-  if (all_out != nullptr) {
-    *all_out = c.all;
   }
   return c.mask;
 }
@@ -181,21 +172,7 @@ uint64_t dtype_mask_from_env(const char* env_name, DtypeMaskCache& c, bool* all_
 // Bitmask of the extra dtypes named by TORCH_RBLN_DISPATCH_DTYPES.
 uint64_t dispatch_dtype_ext_mask() {
   static DtypeMaskCache cache;
-  return dtype_mask_from_env("TORCH_RBLN_DISPATCH_DTYPES", cache, nullptr);
-}
-
-// Bitmask of the dtypes named by TORCH_RBLN_DISPATCH_STRICT ("all" = catalog + extension).
-uint64_t dispatch_dtype_strict_mask() {
-  static DtypeMaskCache cache;
-  bool all = false;
-  uint64_t mask = dtype_mask_from_env("TORCH_RBLN_DISPATCH_STRICT", cache, &all);
-  if (all) {
-    for (const auto d : kDispatchDtypes) {
-      mask |= uint64_t{1} << static_cast<unsigned>(d);
-    }
-    mask |= dispatch_dtype_ext_mask();
-  }
-  return mask;
+  return dtype_mask_from_env("TORCH_RBLN_DISPATCH_DTYPES", cache);
 }
 
 } // namespace
@@ -209,25 +186,6 @@ bool is_dispatch_dtype_rt(c10::ScalarType s) {
     return false;
   }
   return (dispatch_dtype_ext_mask() >> idx) & uint64_t{1};
-}
-
-bool is_strict_dispatch_dtype_rt(c10::ScalarType s) {
-  const auto idx = static_cast<unsigned>(s);
-  if (idx >= 64) {
-    return false;
-  }
-  return (dispatch_dtype_strict_mask() >> idx) & uint64_t{1};
-}
-
-std::vector<c10::ScalarType> strict_dispatch_dtypes_rt() {
-  std::vector<c10::ScalarType> out;
-  const uint64_t mask = dispatch_dtype_strict_mask();
-  for (unsigned i = 0; i < 64; ++i) {
-    if ((mask >> i) & uint64_t{1}) {
-      out.push_back(static_cast<c10::ScalarType>(i));
-    }
-  }
-  return out;
 }
 
 std::vector<c10::ScalarType> dispatch_dtypes_rt() {

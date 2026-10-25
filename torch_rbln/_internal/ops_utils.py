@@ -25,9 +25,6 @@ class SupportedDtypes:
     dispatch_extension: tuple[torch.dtype, ...] = tuple(
         d for d in _C._dispatch_dtypes() if d not in _C._dispatch_catalog_dtypes()
     )
-    # Strict dispatch (TORCH_RBLN_DISPATCH_STRICT): tensors of these dtypes skip the
-    # performance fallbacks (64-alignment) and always take the compile path.
-    strict: tuple[torch.dtype, ...] = _C._dispatch_strict_dtypes()
     sdpa: tuple[torch.dtype, ...] = _C._sdpa_dtypes()
     amp: tuple[torch.dtype, ...] = _C._amp_dtypes()
 
@@ -1783,7 +1780,8 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     if get_rbln_compile_op_depth() == 0:
         raise_if_dummy_execution(f"the eager op {op_name}" if op_name else "an eager op")
 
-    # Device 64-elem-align fallback: a last-dim not a multiple of 64 makes the
+    # Device 64-elem-align fallback (disable with TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK=align):
+    # a last-dim not a multiple of 64 makes the
     # rebel pipeline wrap the device fn with host-only contrib_aligned_pad /
     # contrib_dummy_cast ops (no RTOSA lowering), costing a base-buffer D2H+H2D
     # round-trip (~1MB/op for LLaMA-1B rotary). cpu_fallback_path is strictly
@@ -1794,13 +1792,9 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     def _last_dim_unaligned(t):
         return isinstance(t, torch.Tensor) and t.dim() > 0 and t.shape[-1] % 64 != 0
 
-    def _strict(t):
-        # TORCH_RBLN_DISPATCH_STRICT: this dtype takes the device path even when unaligned
-        return isinstance(t, torch.Tensor) and t.dtype in SupportedDtypes.strict
-
     if (
         any(_last_dim_unaligned(a) for a in args) or any(_last_dim_unaligned(v) for v in kwargs_filtered.values())
-    ) and not (any(_strict(a) for a in args) or any(_strict(v) for v in kwargs_filtered.values())):
+    ) and "align" not in _parse_disabled_fallback_cases():
         return cpu_fallback_path(
             op_callable,
             args,
@@ -1938,7 +1932,9 @@ def _graph_input_order(runtime, tensors):
     return tuple(order)
 
 
-_ALL_FALLBACK_CASES = frozenset({"dispatch_mode", "reentrant", "trace", "dtype", "scalar", "storage_offset", "nan_inf"})
+_ALL_FALLBACK_CASES = frozenset(
+    {"dispatch_mode", "reentrant", "trace", "dtype", "scalar", "storage_offset", "nan_inf", "align"}
+)
 
 
 _warned_disable_fallback = False

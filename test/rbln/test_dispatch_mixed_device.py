@@ -49,7 +49,6 @@ def _run(**env):
     """Run the scenario in a fresh interpreter: the Python dtype policy is an import-time snapshot."""
     full_env = dict(os.environ)
     full_env.pop("TORCH_RBLN_DISPATCH_DTYPES", None)
-    full_env.pop("TORCH_RBLN_DISPATCH_STRICT", None)
     full_env.update(env)
     proc = subprocess.run([sys.executable, "-c", _SCENARIO], env=full_env, capture_output=True, text=True, timeout=600)
     lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT ")]

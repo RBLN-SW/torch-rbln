@@ -122,18 +122,17 @@ Nothing below means anything until this holds. The failure is silent — an op
 routed to the host returns the CPU result, so the comparison you were about to
 trust agrees exactly.
 
-1. **Give it an input the device path accepts**: fp16 or bf16, with a last
-   dimension that is a multiple of 64. `SUPPORTED_DTYPES` is those two only, and
-   `compile_and_run_view_aware` applies its own alignment fallback after
+1. **Give it an input the device path accepts**: fp16, bf16 or fp32, with a last
+   dimension that is a multiple of 64. `SUPPORTED_DTYPES` is those three only,
+   and `compile_and_run_view_aware` applies its own alignment fallback after
    `is_cpu_fallback_cases` (see the 64-element alignment comment in
    `ops_utils.py`). Miss the dtype and the op runs on the host however it is
    registered; miss the alignment and the eager Python route does the same for a
    single-tensor op — list ops, C++ kernels, and graph mode are outside that
    condition, and what they do with an unaligned last dimension is the
    implementation's to check. Measured on `rsqrt`: `(4, 64)` fp16 and bf16
-   differed from CPU at the rounding level, while fp32 — and fp16 at `(4, 8)` —
-   matched exactly, because neither reached the kernel. `torch.rand` defaults to
-   fp32, which is how this is usually missed.
+   differed from CPU at the rounding level, while fp16 at `(4, 8)` matched
+   exactly, because it never reached the kernel.
 2. **Check the log or the counter, not the numbers**. With
    `TORCH_RBLN_LOG_LEVEL=INFO` every fallback prints
    `` `aten::<op>` op ran on CPU instead of RBLN ``;

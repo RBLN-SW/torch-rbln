@@ -240,6 +240,12 @@ class TestDispatchShimNanInfFallback(TestCase):
         self.assertGreater(_C._warmcache_size(), size_before)
 
     def test_warm_hit_does_not_bypass_late_nan(self) -> None:
+        self._check_warm_hit_does_not_bypass_late_nan(torch.float16)
+
+    def test_warm_hit_does_not_bypass_late_nan_float32(self) -> None:
+        self._check_warm_hit_does_not_bypass_late_nan(torch.float32)
+
+    def _check_warm_hit_does_not_bypass_late_nan(self, dtype: torch.dtype) -> None:
         """The critical regression case for the fixup.
 
         Step 1: clean inputs install a warm-cache entry for shape (64,).
@@ -254,13 +260,13 @@ class TestDispatchShimNanInfFallback(TestCase):
         # ``cpu_fallback_path`` and never install an entry.
         n = 64
         # Step 1: prime the warm cache with clean inputs.
-        x_clean = torch.arange(n, dtype=torch.float16, device="rbln")
-        y = torch.ones(n, dtype=torch.float16, device="rbln")
+        x_clean = torch.arange(n, dtype=dtype, device="rbln")
+        y = torch.ones(n, dtype=dtype, device="rbln")
         _ = x_clean + y
         self.assertGreater(_C._warmcache_size(), 0)
 
         # Step 2: same shape, NaN injected on one slot.
-        x_dirty_cpu = torch.arange(n, dtype=torch.float16)
+        x_dirty_cpu = torch.arange(n, dtype=dtype)
         x_dirty_cpu[3] = float("nan")
         x_dirty = x_dirty_cpu.to("rbln")
         z = x_dirty + y
