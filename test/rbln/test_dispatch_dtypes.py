@@ -1,6 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
-"""TORCH_RBLN_DISPATCH_DTYPES: parsing of the extra-dtype list, and an admitted dtype
-(int32) taking the device path with correct results.
+"""TORCH_RBLN_DISPATCH_DTYPES: parsing of the extra-dtype list at import, and an
+admitted dtype (int32) taking the device path with correct results.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 import torch_rbln
-from torch_rbln import _C
+from torch_rbln._internal.ops_utils import _dispatch_extension_from_env
 
 
 _have_device = torch_rbln.device.device_count() > 0 and os.environ.get("RBLN_DUMMY_DEVICE") != "1"
@@ -55,20 +55,6 @@ evidence = {
 print("RESULT", cpu_fallback_counts().get("aten::add", 0), got.device.type, (extra, evidence))
 """
 
-_BAD_ENV_SCENARIO = r"""
-import os, torch, torch_rbln
-a = torch.arange(64, dtype=torch.int32).reshape(1, 64).to("rbln")
-b = a + 1  # int32 admitted: compiles
-torch.rbln.synchronize()
-os.environ["TORCH_RBLN_DISPATCH_DTYPES"] = "int32,bad_dtype"  # the shim re-reads it on the next op
-try:
-    c = a + 1
-    torch.rbln.synchronize()
-    print("RESULT no_error")
-except RuntimeError as e:
-    print("RESULT", "bad_dtype" in str(e))
-"""
-
 
 def _run_int32_scenario(**env) -> tuple[int, str, dict, dict]:
     """Run the int32 scenario in a fresh interpreter with the env set before import.
@@ -94,20 +80,34 @@ def _run_int32_scenario(**env) -> tuple[int, str, dict, dict]:
 
 class TestDispatchDtypesEnv(TestCase):
     def test_env_parsing(self):
-        stock = (torch.float16, torch.bfloat16, torch.float32)
         with pytest.MonkeyPatch.context() as mp:
             mp.delenv("TORCH_RBLN_DISPATCH_DTYPES", raising=False)
-            self.assertEqual(_C._dispatch_dtypes(), stock)
-            mp.setenv("TORCH_RBLN_DISPATCH_DTYPES", "int32, Float64, fp32")
-            self.assertEqual(_C._dispatch_dtypes(), (*stock, torch.int32, torch.float64))
+            self.assertEqual(_dispatch_extension_from_env(), ())
+            # torch names and torch aliases; catalog dtypes and repeats are skipped
+            mp.setenv("TORCH_RBLN_DISPATCH_DTYPES", " int32, float64,float32, int, long ,")
+            self.assertEqual(_dispatch_extension_from_env(), (torch.int32, torch.float64, torch.int64))
             mp.setenv("TORCH_RBLN_DISPATCH_DTYPES", "int32, float3")
-            with self.assertRaisesRegex(RuntimeError, "unknown dtype name 'float3'"):
-                _C._dispatch_dtypes()
-            mp.setenv("TORCH_RBLN_DISPATCH_DTYPES", "all")
-            with self.assertRaisesRegex(RuntimeError, "unknown dtype name 'all'"):
-                _C._dispatch_dtypes()
-            mp.setenv("TORCH_RBLN_DISPATCH_DTYPES", "int32")
-            self.assertEqual(_C._dispatch_dtypes(), (*stock, torch.int32))  # the bad value left no partial state
+            with self.assertRaisesRegex(ValueError, "'float3' is not a torch dtype name"):
+                _dispatch_extension_from_env()
+            mp.setenv("TORCH_RBLN_DISPATCH_DTYPES", "add")  # a torch attribute that is not a dtype
+            with self.assertRaisesRegex(ValueError, "'add' is not a torch dtype name"):
+                _dispatch_extension_from_env()
+            mp.setenv("TORCH_RBLN_DISPATCH_DTYPES", "complex64")
+            with self.assertRaisesRegex(ValueError, "torch.complex64 cannot be admitted"):
+                _dispatch_extension_from_env()
+
+    def test_bad_dtype_name_fails_at_import(self):
+        env = dict(os.environ, TORCH_RBLN_DISPATCH_DTYPES="int32,bad_dtype")
+        proc = subprocess.run(
+            [sys.executable, "-c", "import torch_rbln"],
+            check=False,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("TORCH_RBLN_DISPATCH_DTYPES: 'bad_dtype' is not a torch dtype name", proc.stderr)
 
 
 @needs_device
@@ -124,17 +124,6 @@ class TestExtendedCatalog(TestCase):
         self.assertEqual(evidence["cxx_fallbacks"], [], "the C++ boxed fallback ran an int32 op")
         self.assertGreater(evidence["compiled"], 0, "no int32 op was compiled for the device")
         self.assertEqual(extra, {"mul": True, "eq": True, "where": True})
-
-    def test_bad_dtype_name_after_import_raises_instead_of_terminating(self):
-        # the live parser throws on an unknown name; the getters it runs under must not
-        # be noexcept, or the throw terminates the process instead of reaching Python
-        env = dict(os.environ, TORCH_RBLN_DISPATCH_DTYPES="int32")
-        proc = subprocess.run(
-            [sys.executable, "-c", _BAD_ENV_SCENARIO], check=False, env=env, capture_output=True, text=True, timeout=600
-        )
-        self.assertEqual(proc.returncode, 0, f"process died instead of raising: {proc.stderr[-1500:]}")
-        lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT ")]
-        self.assertEqual(lines[-1], "RESULT True", proc.stdout[-500:])
 
 
 if __name__ == "__main__":

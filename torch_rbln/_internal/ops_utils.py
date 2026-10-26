@@ -17,17 +17,49 @@ from torch_rbln._internal.log_utils import rbln_log_cpu_fallback, rbln_log_warn
 from torch_rbln._internal.warm_cache import install_pending as _install_warm_cache_pending
 
 
+def _dispatch_extension_from_env() -> tuple[torch.dtype, ...]:
+    """Dtypes ``TORCH_RBLN_DISPATCH_DTYPES`` admits beyond the dispatch catalog.
+
+    The value is a comma-separated list of torch dtype names (``int32``, ``long``, ...).
+    A catalog dtype is accepted and skipped; an unknown name, or a dtype the extension
+    cannot admit, raises ``ValueError``. Returned in the order named, deduplicated.
+    """
+    value = os.environ.get("TORCH_RBLN_DISPATCH_DTYPES", "")
+    torch_dtypes = {n: v for n, v in vars(torch).items() if isinstance(v, torch.dtype)}
+    catalog = _C._dispatch_dtypes()
+    admissible = _C._dispatch_extension_dtypes()
+    extension: list[torch.dtype] = []
+    for name in (token.strip() for token in value.split(",")):
+        if not name:
+            continue
+        dtype = torch_dtypes.get(name)
+        if dtype is None:
+            msg = f"TORCH_RBLN_DISPATCH_DTYPES: {name!r} is not a torch dtype name"
+            raise ValueError(msg)
+        if dtype in catalog or dtype in extension:
+            continue
+        if dtype not in admissible:
+            accepted = ", ".join(str(d).removeprefix("torch.") for d in admissible)
+            msg = f"TORCH_RBLN_DISPATCH_DTYPES: {dtype} cannot be admitted (accepted: {accepted})"
+            raise ValueError(msg)
+        extension.append(dtype)
+    return tuple(extension)
+
+
 class SupportedDtypes:
     """Per-path supported dtype tuples for RBLN device dispatch."""
 
-    dispatch: tuple[torch.dtype, ...] = _C._dispatch_dtypes()
     # Dtypes admitted only by TORCH_RBLN_DISPATCH_DTYPES. Empty unless the catalog is
     # extended.
-    dispatch_extension: tuple[torch.dtype, ...] = tuple(
-        d for d in _C._dispatch_dtypes() if d not in _C._dispatch_catalog_dtypes()
-    )
+    dispatch_extension: tuple[torch.dtype, ...] = _dispatch_extension_from_env()
+    dispatch: tuple[torch.dtype, ...] = (*_C._dispatch_dtypes(), *dispatch_extension)
     sdpa: tuple[torch.dtype, ...] = _C._sdpa_dtypes()
     amp: tuple[torch.dtype, ...] = _C._amp_dtypes()
+
+
+# The C++ shim's dtype check reads the same extension, so both layers agree on what
+# dispatches. Set once, here, before any op can run.
+_C._set_dispatch_extension(SupportedDtypes.dispatch_extension)
 
 
 def _estimate_mm_shape(shape1, shape2):

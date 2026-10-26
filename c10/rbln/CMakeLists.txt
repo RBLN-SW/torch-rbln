@@ -11,6 +11,7 @@ set(sources
   RBLNLogging.cpp
   RBLNPinnedAllocator.cpp
   RBLNProfiler.cpp
+  RBLNSupportedDtypes.cpp
   RBLNV2VBatch.cpp
 )
 set(headers

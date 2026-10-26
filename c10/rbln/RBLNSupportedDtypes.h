@@ -2,9 +2,9 @@
 
 #include <c10/core/ScalarType.h>
 #include <c10/rbln/RBLNMacros.h>
+#include <c10/util/ArrayRef.h>
 
 #include <array>
-#include <vector>
 
 namespace c10::rbln {
 
@@ -48,21 +48,31 @@ constexpr bool is_dispatch_dtype(c10::ScalarType s) noexcept {
 
 // Runtime extension of the eager-dispatch catalog.
 //
-// `TORCH_RBLN_DISPATCH_DTYPES` is a comma-separated list of extra dtypes (torch
-// names or the usual aliases: float64, int32, int64, int16, int8, uint8, bool)
-// whose tensors the eager shim dispatches to the RBLN compile path instead of
-// the CPU fallback. Unset (default) leaves the catalog as is.
+// `TORCH_RBLN_DISPATCH_DTYPES` names extra dtypes whose tensors the eager shim
+// dispatches to the RBLN compile path instead of the CPU fallback. Python
+// parses it once at `import torch_rbln` and passes the result here through
+// `set_dispatch_extension`, so the Python gate and the C++ shim always see the
+// same set. Empty (default) leaves the catalog as is.
 //
 // This is opt-in on purpose: the device may compute these dtypes in a reduced
 // or saturating form (see docs/EAGER_DISPATCH.md), so it is worth it only when
-// the caller does not rely on the host semantics of that dtype. The value is
-// read live from the environment (re-parsed only when the string changes), like
-// the other TORCH_RBLN_* runtime gates in DispatchShim.cpp. An unknown dtype
-// name throws, so these are not noexcept: the error has to reach the caller as
-// a Python exception.
-C10_RBLN_API bool is_dispatch_dtype_rt(c10::ScalarType s);
-// Catalog + environment extension, in catalog order then env order
-// (deduplicated).
-C10_RBLN_API std::vector<c10::ScalarType> dispatch_dtypes_rt();
+// the caller does not rely on the host semantics of that dtype.
+//
+// The dtypes the extension may admit. Every floating one needs a NaN/Inf
+// scanner in DispatchShim.cpp (scanner_for).
+inline constexpr std::array<c10::ScalarType, 7> kDispatchExtensionDtypes = {
+    c10::kDouble,
+    c10::kInt,
+    c10::kLong,
+    c10::kShort,
+    c10::kChar,
+    c10::kByte,
+    c10::kBool};
+
+// Replace the extension. Each dtype must be in kDispatchExtensionDtypes;
+// otherwise this throws and the previous extension stays in place.
+C10_RBLN_API void set_dispatch_extension(c10::ArrayRef<c10::ScalarType> dtypes);
+// Catalog or extension.
+C10_RBLN_API bool is_dispatch_dtype_rt(c10::ScalarType s) noexcept;
 
 } // namespace c10::rbln

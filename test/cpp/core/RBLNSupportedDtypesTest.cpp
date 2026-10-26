@@ -83,6 +83,27 @@ TEST_F(RBLNSupportedDtypesTest, IsDispatchDtypeRejectsUnsupported) {
   }
 }
 
+TEST_F(RBLNSupportedDtypesTest, DispatchExtensionAdmitsOnlyWhatIsSet) {
+  EXPECT_TRUE(c10::rbln::is_dispatch_dtype_rt(c10::kFloat));
+  EXPECT_FALSE(c10::rbln::is_dispatch_dtype_rt(c10::kInt));
+
+  c10::rbln::set_dispatch_extension({c10::kInt, c10::kBool});
+  EXPECT_TRUE(c10::rbln::is_dispatch_dtype_rt(c10::kInt));
+  EXPECT_TRUE(c10::rbln::is_dispatch_dtype_rt(c10::kBool));
+  EXPECT_FALSE(c10::rbln::is_dispatch_dtype_rt(c10::kLong));
+
+  // A dtype outside kDispatchExtensionDtypes is rejected and the previous
+  // extension stays in place.
+  EXPECT_THROW(
+      c10::rbln::set_dispatch_extension({c10::kLong, c10::kComplexFloat}),
+      c10::Error);
+  EXPECT_TRUE(c10::rbln::is_dispatch_dtype_rt(c10::kInt));
+  EXPECT_FALSE(c10::rbln::is_dispatch_dtype_rt(c10::kLong));
+
+  c10::rbln::set_dispatch_extension({});
+  EXPECT_FALSE(c10::rbln::is_dispatch_dtype_rt(c10::kInt));
+}
+
 static_assert(
     !c10::rbln::kDispatchDtypes.empty(),
     "dispatch dtype catalog must not be empty");

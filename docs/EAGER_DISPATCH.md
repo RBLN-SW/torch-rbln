@@ -55,11 +55,13 @@ To hand unaligned ops to the compiler anyway, set
 TORCH_RBLN_DISPATCH_DTYPES=<names>    admit more dtypes into the dispatch catalog
 ```
 
-Names are torch dtype names or the usual aliases, comma-separated: `float64`,
-`int32`, `int64`, `int16`, `int8`, `uint8`, `bool` (the dispatch dtypes are
-accepted and already admitted). An unknown name is an error that names the
-variable and the token. Set it before `import torch_rbln`: the C++ shim reads it
-live, the Python gate snapshots it at import.
+Names are torch dtype names, comma-separated, as in `torch.<name>`: `float64`,
+`int32`, `int64`, `int16`, `int8`, `uint8`, `bool`, or a torch alias such as
+`double`, `int` or `long` (the dispatch dtypes are accepted and already
+admitted). It is read once, at `import torch_rbln`, and the same set then
+governs both the Python gate and the C++ shim; changing it later has no effect.
+A name that is not a torch dtype, or a dtype outside that list, fails the
+import with an error that names the variable and the token.
 
 **Mixed devices.** Before the extension, a call with an operand outside the
 catalog went to the C++ boxed fallback, which tolerates a CPU operand next to an

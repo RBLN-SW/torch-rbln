@@ -392,6 +392,6 @@ as corruption inside the runtime.
 Unset by default; set before `import torch_rbln`. `docs/EAGER_DISPATCH.md` has
 the contract and the boundaries to know before enabling a dtype.
 
-| Variable                     | Description                                                                                                     | Default |
-| ---------------------------- | --------------------------------------------------------------------------------------------------------------- | ------- |
-| `TORCH_RBLN_DISPATCH_DTYPES` | Extra dtypes admitted to the eager dispatch catalog (torch dtype names or aliases; an unknown name is an error) | unset   |
+| Variable                     | Description                                                                                               | Default |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------- | ------- |
+| `TORCH_RBLN_DISPATCH_DTYPES` | Extra dtypes admitted to the eager dispatch catalog (torch dtype names; an unknown name fails the import) | unset   |

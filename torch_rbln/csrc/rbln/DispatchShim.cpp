@@ -461,9 +461,8 @@ bool words_have_nan_or_inf(const void* data, size_t n) noexcept {
 }
 
 using ScannerFn = bool (*)(const void*, size_t);
-// One scanner per floating dtype the catalog or TORCH_RBLN_DISPATCH_DTYPES can
-// admit (parse_dtype_name in RBLNFunctions.cpp accepts no other floating
-// names).
+// One scanner per floating dtype in kDispatchDtypes or
+// kDispatchExtensionDtypes (RBLNSupportedDtypes.h).
 inline ScannerFn scanner_for(c10::ScalarType scalar_type) {
   switch (scalar_type) {
     case c10::kHalf:
