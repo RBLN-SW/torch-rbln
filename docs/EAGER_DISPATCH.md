@@ -24,7 +24,6 @@ programs are not cached on disk.
   operands, all-scalar inputs, a storage offset, NaN/Inf in a floating input,
   re-entrancy. The NaN/Inf scan covers every floating dtype that can be
   dispatched.
-- Mixed devices for extension dtypes (below).
 - Unaligned last dims, for now (below).
 
 `torch.rbln.explain()` and `ops_utils.cpu_fallback_counts()` list what left the
@@ -63,14 +62,6 @@ governs both the Python gate and the C++ shim; changing it later has no effect.
 A name that is not a torch dtype, or a dtype outside that list, fails the
 import with an error that names the variable and the token.
 
-**Mixed devices.** Before the extension, a call with an operand outside the
-catalog went to the C++ boxed fallback, which tolerates a CPU operand next to an
-rbln one and places the result on the first tensor argument's device. Extended,
-such a call would reach the compile path and fail. So when any non-bool operand
-is of an extension dtype (a bool tensor is a condition or mask) and the operands
-span more than one device, the Python gate sends the op to the host and keeps
-the first-argument rule. Dispatch dtypes keep their existing behavior.
-
 ## Boundaries to know before admitting a dtype
 
 - Integer arithmetic saturates on the device; the CPU wraps. `INT32_MAX + 1`,
@@ -80,6 +71,10 @@ the first-argument rule. Dispatch dtypes keep their existing behavior.
 - float64 computes in the device's reduced precision, like fp32; int64 is
   narrowed to 32 bits on the device, so values outside the int32 range are
   wrong.
+- An admitted dtype takes the compile path, which places the result of a
+  mixed-device call such as `where(cpu_mask, a, b)` on the device. Before, the
+  C++ boxed fallback put it on the first argument's device; code that relied on
+  that must move its operands explicitly.
 - A device launch costs far more than the host op on small tensors; admitting a
   dtype for glue-sized tensors makes them slower even when the result is right.
 

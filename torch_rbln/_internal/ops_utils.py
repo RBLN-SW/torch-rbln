@@ -46,20 +46,22 @@ def _dispatch_extension_from_env() -> tuple[torch.dtype, ...]:
     return tuple(extension)
 
 
+# Dtypes admitted only by TORCH_RBLN_DISPATCH_DTYPES. Empty unless the catalog is
+# extended.
+_dispatch_extension = _dispatch_extension_from_env()
+
+
 class SupportedDtypes:
     """Per-path supported dtype tuples for RBLN device dispatch."""
 
-    # Dtypes admitted only by TORCH_RBLN_DISPATCH_DTYPES. Empty unless the catalog is
-    # extended.
-    dispatch_extension: tuple[torch.dtype, ...] = _dispatch_extension_from_env()
-    dispatch: tuple[torch.dtype, ...] = (*_C._dispatch_dtypes(), *dispatch_extension)
+    dispatch: tuple[torch.dtype, ...] = (*_C._dispatch_dtypes(), *_dispatch_extension)
     sdpa: tuple[torch.dtype, ...] = _C._sdpa_dtypes()
     amp: tuple[torch.dtype, ...] = _C._amp_dtypes()
 
 
 # The C++ shim's dtype check reads the same extension, so both layers agree on what
 # dispatches. Set once, here, before any op can run.
-_C._set_dispatch_extension(SupportedDtypes.dispatch_extension)
+_C._set_dispatch_extension(_dispatch_extension)
 
 
 def _estimate_mm_shape(shape1, shape2):
@@ -2109,13 +2111,6 @@ def is_cpu_fallback_cases(args):
             if tensor_args[i].dtype != first_dtype:
                 return True
 
-    # 2b: an operand of an extension dtype (TORCH_RBLN_DISPATCH_DTYPES) on a different
-    #     device than the others. Before the extension such a call went to the C++
-    #     boxed fallback, which tolerates mixed devices; the compile path does not.
-    #     Stock dtypes are not affected: an empty extension keeps this branch closed.
-    if "device" not in disabled_cases and _has_mixed_device_extension_operand(tensor_args):
-        return True
-
     # 3: fall back to the CPU if all input tensors are scalar tensors
     if "scalar" not in disabled_cases and all(a.ndim == 0 for a in tensor_args):
         return True
@@ -2142,25 +2137,6 @@ def is_cpu_fallback_cases(args):
             return True
 
     return False
-
-
-def _has_mixed_device_extension_operand(tensor_args) -> bool:
-    """An op on an extension dtype whose operands span more than one device.
-
-    Any non-bool operand of an extension dtype counts: a bool tensor is a condition or
-    mask (where's cond), which the shim's dtype check skips as well, so admitting bool
-    must not re-route an op whose data operands are stock dtypes. Devices are taken over
-    every operand, condition included, because that is what the boxed fallback's
-    first-argument rule sees.
-    """
-    extension = SupportedDtypes.dispatch_extension
-    if not extension:
-        return False
-    non_scalar = [a for a in tensor_args if a.ndim > 0]
-    data = [a for a in non_scalar if a.dtype != torch.bool] or non_scalar
-    if not any(a.dtype in extension for a in data):
-        return False
-    return len({a.device for a in non_scalar}) > 1
 
 
 # Per-op count of Python-path CPU fallbacks (the C++ shim keeps its own counters for the
@@ -2207,15 +2183,6 @@ def cpu_fallback_path(target_ops, args, *, result: torch.Tensor | None = None, o
     if result is not None and result_cpu.size() == result.size():
         result.copy_(result_cpu)
         return result
-
-    # Mixed-device extension-dtype operands (see is_cpu_fallback_cases 2b): mirror the
-    # C++ boxed fallback's convention, which handled these calls before the extension,
-    # and put the result on the first tensor argument's device. Stock dtypes keep the
-    # rule below.
-    tensor_args = extract_tensors(args)
-    if result is None and _has_mixed_device_extension_operand(tensor_args):
-        first_device = tensor_args[0].device
-        return result_cpu if first_device.type == "cpu" else result_cpu.to(first_device)
 
     # Get device_index from result tensor or from input args/op_kwargs
     # In this context, rbln tensors always have a device_index
