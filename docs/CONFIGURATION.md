@@ -192,10 +192,10 @@ A bucketed call returns the same values as an unbucketed one. Its run computes e
 
 ## Deferred Eager Ops
 
-Each eager op runs as its own compiled function, a device job of its own. `TORCH_RBLN_DEFER_OPS=N` defers them instead: the ops a stream runs gather into a segment of up to N, which runs as one function, compiled from the ops' modules, at the next point that needs it. Unset or `0`, each op runs as it is called. The variable is read at every op.
+Each eager op runs as its own compiled function, a device job of its own. `TORCH_RBLN_DEFER_OPS=1` defers them instead: the ops a stream runs gather into a segment, which runs as one function, compiled from the ops' modules, at the next point that needs it. Unset or `0`, each op runs as it is called. The variable is read at every op.
 
 ```bash
-export TORCH_RBLN_DEFER_OPS=32
+export TORCH_RBLN_DEFER_OPS=1
 ```
 
 A deferred op allocates its results when it is called, so shapes, views and later ops can use them at once; until the segment runs, nothing reads or writes its tensors. It reads and writes the memory its tensors view when it is called, whatever later changes their views (`set_`, `.data =`, `t_()`). The ops deferred on a stream are queued, ahead of the work that needs them, by:
@@ -203,7 +203,11 @@ A deferred op allocates its results when it is called, so shapes, views and late
 - anything queued on that stream: a copy to, from or within the device (`.cpu()`, `.item()`, `.to()`, `copy_`, and the copy a CPU fallback makes of its inputs), a kernel other than a compiled op (`cat`, `index_select`, a fill), a `torch.compile` graph, or a collective;
 - `torch.rbln.synchronize()`, a stream's `synchronize()` and `query()`, an event recorded on the stream, and `torch.rbln.empty_cache()` for every stream of its device;
 - `torch.rbln.set_stream()` leaving the stream, and the start and end of a `torch.profiler` session that records the NPU (`RBLN_PROFILER=1`);
-- the segment reaching N ops, and an op whose tensor shares memory with a tensor of the segment through another view when either of the two is written.
+- an op whose tensor shares memory with a tensor of the segment through another view when either of the two is written, and the segment reaching `TORCH_RBLN_DEFER_OPS_MAX` ops when that is above 0.
+
+Each stream also follows the loops its ops repeat. When the ops of its segment end with the same 2 to 128 ops twice over, the same compiled functions in the same order, these are two laps of a loop: the segment is cut before each of them, and the ops before them and each lap run as segments of their own. From then on, each lap the stream repeats is a segment, queued once the op after it is called; an op that departs from the loop makes the stream look for another one among the ops its segment holds. The laps of a loop that read alike and leave alike are one segment, which is compiled once, at the second of them, and runs every later one. A stream keeps the loop it found across the points above, and after one of them expects the loop's first op. Each lap runs as one device job, which costs about as much as one eager op plus about 2.7 µs per op of the lap, so a loop of few ops a lap saves less: on 16×1024 float16 tensors, laps of 2 ops ran about 1.9 times as fast as eager, and laps of 50 ops about 13 times.
+
+Ops with no loop and no point above among them, as in straight-line code, run at the next point that needs them, however many they are. Until then the segment holds the tensors they read, which stay in memory however soon the caller lets go of them, and a long segment is compiled as one function the second time it is seen. `TORCH_RBLN_DEFER_OPS_MAX=N` bounds a segment to N ops; unset or `0`, it has no bound. A bound under two laps of a loop keeps the loop from being found.
 
 A segment runs op by op the first time it is seen, and is compiled the second time; later runs of it take the compiled function from a cache, without entering Python. One the compiler refuses or fails on keeps running op by op. The process keeps as many segments as `TORCH_RBLN_COMPILED_OPS` keeps compiled ops, letting go of the least recently run.
 

@@ -25,8 +25,12 @@ from torch_rbln._internal import compile_cache
 _TOLERANCE = {"atol": 2e-2, "rtol": 2e-2}
 
 
-def _deferring(limit: int = 32):
-    return mock.patch.dict(os.environ, {"TORCH_RBLN_DEFER_OPS": str(limit)})
+def _deferring(on: bool = True):
+    return mock.patch.dict(os.environ, {"TORCH_RBLN_DEFER_OPS": "1" if on else "0"})
+
+
+def _capped(limit: int):
+    return mock.patch.dict(os.environ, {"TORCH_RBLN_DEFER_OPS_MAX": str(limit)})
 
 
 def _bucketing():
@@ -64,6 +68,48 @@ def _chain(x: torch.Tensor, y: torch.Tensor, n: int) -> torch.Tensor:
     return x
 
 
+# Ops by letter, for the bodies of loops below.
+_OPS = {
+    "0": lambda x, y: x * 0.5,
+    "1": lambda x, y: x + y,
+    "2": lambda x, y: torch.neg(x),
+    "3": lambda x, y: x - y,
+    "4": lambda x, y: x * 0.25,
+    "5": lambda x, y: x * y,
+    "6": lambda x, y: torch.sigmoid(x),
+    "7": lambda x, y: x + 0.5,
+}
+
+# Bodies of loops that no shorter run of ops repeats twice over, however many times the body
+# repeats: a loop over one of them up to 128 ops long is found at the body's length.
+_BODY10 = "0102010313"
+_OTHER_BODY10 = "4546454757"
+_BODY50 = "01020103010201202101201020120210130102010301020313"
+_BODY130 = (
+    "0102010301020120210120102012021013010201030102012021012010201202102010210120102012021012010201"
+    "301020103010201202101201020120210323"
+)
+# Ops in which no run of ops repeats twice over.
+_STRAIGHT40 = "0102012021012010201202102010210120102012"
+
+
+def _body(x: torch.Tensor, y: torch.Tensor, word: str) -> torch.Tensor:
+    for letter in word:
+        x = _OPS[letter](x, y)
+    return x
+
+
+def _loop(x: torch.Tensor, y: torch.Tensor, word: str, laps: int) -> torch.Tensor:
+    for _ in range(laps):
+        x = _body(x, y, word)
+    return x
+
+
+def _prefixed_loop(x: torch.Tensor, y: torch.Tensor, laps: int) -> torch.Tensor:
+    # Two ops no lap of the loop holds, before the loop.
+    return _loop(torch.sigmoid(x) + 0.5, y, _BODY10, laps)
+
+
 @pytest.mark.test_set_ci
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestDeferredOps(TestCase):
@@ -73,9 +119,11 @@ class TestDeferredOps(TestCase):
         self.xd = self.x.to("rbln")
         self.yd = self.y.to("rbln")
 
-    @parametrize("n", [5, 20])
-    def test_a_chain_gives_what_it_gives_eagerly(self, n):
-        with _deferring(0):
+    # Twenty ops repeat four: the first run finds the loop at its eighth op, and the later runs follow
+    # it from their first; each run is five laps.
+    @parametrize("n, segments", [(5, 3), (20, 15)])
+    def test_a_chain_gives_what_it_gives_eagerly(self, n, segments):
+        with _deferring(False):
             expected = _chain(self.xd, self.yd, n).cpu()
         before = _counts()
         with _deferring():
@@ -84,7 +132,7 @@ class TestDeferredOps(TestCase):
                 torch.testing.assert_close(_chain(self.xd, self.yd, n).cpu(), expected, **_TOLERANCE)
         change = _since(before)
         self.assertEqual(change["deferred_ops"], 3 * n)
-        self.assertEqual(_segments(change), 3)
+        self.assertEqual(_segments(change), segments)
         self.assertGreaterEqual(change["fused_runs"], 2)
 
     def test_a_repeated_segment_runs_its_function(self):
@@ -102,7 +150,7 @@ class TestDeferredOps(TestCase):
     def test_a_segment_the_compiler_refuses_runs_op_by_op(self):
         # A shape no other test runs, so that no other test compiled the segment first.
         x, y = self.xd[:, :192].contiguous(), self.yd[:, :192].contiguous()
-        with _deferring(0):
+        with _deferring(False):
             expected = _chain(x, y, 6).cpu()
 
         def refuse(*args, **kwargs):
@@ -119,13 +167,202 @@ class TestDeferredOps(TestCase):
         self.assertEqual(change["op_runs"], 3)
         self.assertEqual(change["fused_runs"], 0)
 
-    def test_a_segment_holds_at_most_the_limit(self):
+    def test_defer_ops_max_bounds_a_segment(self):
         before = _counts()
-        with _deferring(3):
+        with _deferring(), _capped(3):
             _chain(self.xd, self.yd, 7).cpu()
         change = _since(before)
         self.assertEqual(change["deferred_ops"], 7)
         self.assertEqual(_segments(change), 3)
+
+    def test_straight_line_ops_run_where_their_results_are_needed(self):
+        x, y = _pair(576)
+        with _deferring():
+            before = _counts()
+            r = _body(x, y, _STRAIGHT40)
+            self.assertEqual(_segments(_since(before)), 0)
+            result = r.cpu()
+        change = _since(before)
+        self.assertEqual(change["deferred_ops"], 40)
+        self.assertEqual(_segments(change), 1)
+        self.assertEqual(change["loops_found"], 0)
+        torch.testing.assert_close(result, _body(x.cpu(), y.cpu(), _STRAIGHT40), **_TOLERANCE)
+
+    def test_a_loop_compiles_its_lap_once_and_runs_later_laps_fused(self):
+        x, y = _pair(640)
+        with _deferring(False):
+            expected = _loop(x, y, _BODY10, 12).cpu()
+        with _deferring():
+            before = _counts()
+            r = _loop(x, y, _BODY10, 12)
+            # The first two laps are found together, and each later lap runs once the next op comes.
+            self.assertEqual(_segments(_since(before)), 11)
+            result = r.cpu()
+        change = _since(before)
+        self.assertEqual(change["loops_found"], 1)
+        self.assertEqual(change["compiled"], 1)
+        self.assertEqual(change["op_runs"], 1)
+        self.assertEqual(change["fused_runs"], 11)
+        torch.testing.assert_close(result, expected, **_TOLERANCE)
+
+    def test_a_long_loop_body_runs_as_one_segment_a_lap(self):
+        x, y = _pair(704)
+        _C._deferred_clear()
+        with _deferring():
+            before = _counts()
+            _loop(x, y, _BODY50, 6).cpu()
+            change = _since(before)
+            kinds = _C._deferred_segment_count()
+            # A bound of two laps leaves room to find the loop; a bound under two laps does not.
+            found = {}
+            for limit in (100, 99):
+                _C._deferred_clear()
+                before = _counts()
+                with _capped(limit):
+                    _loop(x, y, _BODY50, 6).cpu()
+                found[limit] = _since(before)["loops_found"]
+        self.assertEqual(change["loops_found"], 1)
+        self.assertEqual(_segments(change), 6)
+        self.assertEqual(kinds, 1)
+        self.assertEqual(found, {100: 1, 99: 0})
+
+    def test_ops_before_a_loop_run_as_a_part_of_their_own(self):
+        x, y = _pair(960)
+        with _deferring(False):
+            expected = _prefixed_loop(x, y, 6).cpu()
+        with _deferring():
+            before = _counts()
+            result = _prefixed_loop(x, y, 6).cpu()
+            change = _since(before)
+            for _ in range(2):
+                torch.testing.assert_close(_prefixed_loop(x, y, 6).cpu(), expected, **_TOLERANCE)
+        # The two ops before the loop, the two laps found after them, and four more laps.
+        self.assertEqual(change["loops_found"], 1)
+        self.assertEqual(_segments(change), 7)
+        self.assertEqual(change["op_runs"], 2)
+        torch.testing.assert_close(result, expected, **_TOLERANCE)
+
+    def test_a_compile_cut_short_in_a_part_runs_the_parts_after_it(self):
+        x, y = _pair(1024)
+        other_x, other_y = _pair(1024)
+        # On the host, so that no block the device hands the result holds it already.
+        expected = _prefixed_loop(other_x.cpu(), other_y.cpu(), 2)
+
+        class Cut(BaseException):
+            pass
+
+        def cut(*args, **kwargs):
+            raise Cut
+
+        with _deferring():
+            # The first run sees the part before the laps once; the second compiles it.
+            _prefixed_loop(x, y, 2).cpu()
+            r = _prefixed_loop(other_x, other_y, 2)
+            with mock.patch.object(compile_cache, "compile_logical", cut), self.assertRaises(Cut):
+                torch.rbln.synchronize()
+            result = r.cpu()
+        torch.testing.assert_close(result, expected, **_TOLERANCE)
+
+    def test_an_op_that_cannot_read_the_bound_is_not_deferred(self):
+        x = torch.zeros(8, 256, dtype=torch.float16).to("rbln")
+        with _deferring(False):
+            # The op then writes `x` in place, through the warm cache.
+            x.add_(1)
+            x.sub_(1)
+        with _deferring(), _capped(-1), self.assertRaisesRegex(Exception, "TORCH_RBLN_DEFER_OPS_MAX"):
+            x.add_(1)
+        self.assertTrue(bool((x.cpu() == 0).all()))
+
+    def test_an_out_tensor_one_lap_writes_is_read_by_the_next(self):
+        x, y = _pair(1088)
+
+        def run():
+            buf = x.clone()
+            for _ in range(6):
+                t = buf * 0.5
+                torch.add(t, y, out=buf)
+            return buf.cpu()
+
+        with _deferring(False):
+            expected = run()
+        with _deferring():
+            before = _counts()
+            # Op by op, compiled, and from the cache.
+            for _ in range(3):
+                torch.testing.assert_close(run(), expected, **_TOLERANCE)
+        self.assertEqual(_since(before)["loops_found"], 1)
+
+    def test_both_results_of_an_op_one_lap_makes_are_read_by_the_next(self):
+        x, y = _pair(1152)
+        op = compile_cache.compiled_op(_TwoResults(), (x, y), {}, x.device)
+
+        def run():
+            # Two ops before the loop, so that each lap ends with the op of two results. Every lap's
+            # results are kept, so that a later lap reads them where they lie.
+            p, q = x * 2, y * 3
+            kept = []
+            for _ in range(7):
+                r = q * 0.25
+                s = p + y
+                p, q = op.run(op.tensors((r, s), {}))
+                kept += [p, q]
+            return [t.cpu() for t in kept]
+
+        with _deferring(False):
+            expected = run()
+        with _deferring():
+            before = _counts()
+            for _ in range(3):
+                for got, want in zip(run(), expected):
+                    torch.testing.assert_close(got, want, **_TOLERANCE)
+        # The ops before the loop depart from it, so each run finds it anew.
+        self.assertEqual(_since(before)["loops_found"], 3)
+
+    def test_an_input_each_lap_updates_runs_though_nothing_holds_the_laps_results(self):
+        cache = torch.zeros(1, 8, 512, 64, dtype=torch.int16).to("rbln")
+        update = self._cache_update(cache)
+
+        def run():
+            cache.zero_()
+            for _ in range(6):
+                update(cache) * 0.5
+            return cache.cpu()
+
+        with _deferring(False):
+            expected = run()
+        with _deferring():
+            before = _counts()
+            for _ in range(3):
+                self.assertEqual(run(), expected)
+        change = _since(before)
+        self.assertEqual(change["loops_found"], 1)
+        self.assertEqual(_segments(change), 18)
+
+    def test_a_loop_that_changes_is_found_anew(self):
+        x, y = _pair(832)
+        with _deferring(False):
+            expected = _loop(_loop(x, y, _BODY10, 4), y, _OTHER_BODY10, 4).cpu()
+        with _deferring():
+            before = _counts()
+            r = _loop(_loop(x, y, _BODY10, 4), y, _OTHER_BODY10, 4)
+            result = r.cpu()
+        change = _since(before)
+        self.assertEqual(change["loops_found"], 2)
+        self.assertEqual(change["laps_queued"], 8)
+        self.assertEqual(_segments(change), 8)
+        torch.testing.assert_close(result, expected, **_TOLERANCE)
+
+    def test_a_lap_longer_than_128_ops_is_not_found(self):
+        x, y = _pair(896)
+        with _deferring():
+            before = _counts()
+            r = _loop(x, y, _BODY130, 3)
+            self.assertEqual(_segments(_since(before)), 0)
+            result = r.cpu()
+        change = _since(before)
+        self.assertEqual(change["loops_found"], 0)
+        self.assertEqual(_segments(change), 1)
+        torch.testing.assert_close(result, _loop(x.cpu(), y.cpu(), _BODY130, 3), **_TOLERANCE)
 
     def test_in_place_ops(self):
         def run(x, y):
@@ -134,7 +371,7 @@ class TestDeferredOps(TestCase):
                 z.mul_(0.5).add_(y)
             return z.cpu()
 
-        with _deferring(0):
+        with _deferring(False):
             expected = run(self.xd, self.yd)
         before = _counts()
         with _deferring():
@@ -203,7 +440,7 @@ class TestDeferredOps(TestCase):
 
     def test_a_compiled_graph_between_deferred_ops(self):
         graph = torch.compile(lambda t: t * 3 + 1, backend="rbln")
-        with _deferring(0):
+        with _deferring(False):
             expected = graph(self.xd * 2).cpu()
         with _deferring():
             r = self.xd * 2
@@ -248,7 +485,7 @@ class TestDeferredOps(TestCase):
 
     def test_a_segment_of_one_bucket_compiles_once_for_the_bucket(self):
         inputs = {rows: self._bucketed(rows) for rows in (5, 6)}
-        with _deferring(0):
+        with _deferring(False):
             expected = {rows: _chain(*inputs[rows], 6).cpu() for rows in inputs}
         before = _counts()
         _C._rt_timing_enable(True)
@@ -267,6 +504,20 @@ class TestDeferredOps(TestCase):
         # The runs write the results where they lie, through no device copy.
         self.assertEqual(_C._rt_timing_get()[0][1], 0)
 
+    def test_a_bucketed_loop_compiles_its_lap_once_for_the_bucket(self):
+        inputs = {rows: self._bucketed(rows) for rows in (5, 6)}
+        with _deferring(False):
+            expected = {rows: _loop(*inputs[rows], _BODY10, 6).cpu() for rows in inputs}
+        before = _counts()
+        with _deferring(), _bucketing():
+            for rows in (5, 6):
+                torch.testing.assert_close(_loop(*inputs[rows], _BODY10, 6).cpu(), expected[rows], **_TOLERANCE)
+        change = _since(before)
+        # The loop of six rows follows the laps found in the loop of five, through the same function.
+        self.assertEqual(change["loops_found"], 1)
+        self.assertEqual(change["compiled"], 1)
+        self.assertEqual(change["fused_runs"], 11)
+
     def test_a_segment_mixing_shapes_compiles_for_its_rows(self):
         w = self.yd[0].contiguous()
 
@@ -275,7 +526,7 @@ class TestDeferredOps(TestCase):
             return (x * 0.5 + w * 2).cpu()
 
         inputs = {rows: self._bucketed(rows)[0] for rows in (5, 6)}
-        with _deferring(0):
+        with _deferring(False):
             expected = {rows: run(inputs[rows]) for rows in inputs}
         before = _counts()
         with _deferring(), _bucketing():
@@ -299,14 +550,14 @@ class TestDeferredOps(TestCase):
         torch.testing.assert_close(result, torch.sigmoid(torch.sigmoid(self.x[:5])), **_TOLERANCE)
 
     def test_launch_blocking_runs_each_op_as_it_is_called(self):
-        with mock.patch.dict(os.environ, {"TORCH_RBLN_DEFER_OPS": "32", "RBLN_LAUNCH_BLOCKING": "1"}):
+        with mock.patch.dict(os.environ, {"TORCH_RBLN_DEFER_OPS": "1", "RBLN_LAUNCH_BLOCKING": "1"}):
             run_in_isolated_process(_defers_nothing_worker)
 
     @parametrize("change", ["set_", "data", "t_"])
     def test_a_deferred_op_reads_its_input_as_it_was_when_called(self, change):
         x = torch.randn(64, 64, dtype=torch.float16)
         a, other = x.to("rbln"), torch.randn(64, 64, dtype=torch.float16).to("rbln")
-        with _deferring(0):
+        with _deferring(False):
             expected = (a * 2).cpu()
         with _deferring():
             before = _counts()
@@ -323,7 +574,7 @@ class TestDeferredOps(TestCase):
         torch.testing.assert_close(result, expected)
 
     def test_a_deferred_op_writes_its_input_where_it_lay_when_called(self):
-        with _deferring(0):
+        with _deferring(False):
             self.xd.clone().mul_(3).cpu()
         a = self.xd.clone()
         old, replacement = a.detach(), self.yd.clone()
@@ -338,7 +589,7 @@ class TestDeferredOps(TestCase):
 
     def test_another_thread_waits_for_a_segment_being_queued(self):
         x, y = _pair(64)
-        with _deferring(0):
+        with _deferring(False):
             expected = _chain(x, y, 6).cpu()
         _C._deferred_clear()
         compile_segment = compile_cache.compile_segment
@@ -371,7 +622,7 @@ class TestDeferredOps(TestCase):
 
     def test_a_segment_the_compiler_fails_on_runs_op_by_op(self):
         x, y = _pair(320)
-        with _deferring(0):
+        with _deferring(False):
             expected = _chain(x, y, 6).cpu()
 
         def fail(*args, **kwargs):
@@ -393,7 +644,7 @@ class TestDeferredOps(TestCase):
 
     def test_a_compile_cut_short_still_runs_the_ops(self):
         x, y = _pair(384)
-        with _deferring(0):
+        with _deferring(False):
             expected = _chain(x, y, 6).cpu()
 
         class Cut(BaseException):
@@ -411,7 +662,7 @@ class TestDeferredOps(TestCase):
 
     def _failing_run(self, x, y):
         # A segment's second run compiles it; this function takes one tensor where it gets two.
-        with _deferring(0):
+        with _deferring(False):
             _chain(x, y, 6).cpu()
         _chain(x, y, 6).cpu()
         mismatched = compile_cache.compiled_op(torch.nn.Identity(), (x,), {}, x.device).function
@@ -443,7 +694,7 @@ class TestDeferredOps(TestCase):
         self.assertTrue(any(e.device_type == torch.autograd.DeviceType.PrivateUse1 for e in session.events()))
 
     def test_a_segment_whose_results_nothing_holds_does_not_run(self):
-        with _deferring(0):
+        with _deferring(False):
             torch.mul(self.xd, 3).cpu()
         with _deferring():
             before = _counts()
@@ -455,7 +706,7 @@ class TestDeferredOps(TestCase):
 
     def test_an_out_tensor_is_written_whatever_holds_its_bytes(self):
         buf = torch.zeros(8, 256, dtype=torch.float16).to("rbln")
-        with _deferring(0):
+        with _deferring(False):
             torch.mul(self.xd, 2, out=torch.empty_like(buf))
         with _deferring():
             # A tensor of a storage of its own over the bytes of `buf`, which nothing holds once
@@ -521,12 +772,12 @@ class TestDeferredOps(TestCase):
     # It fills the device's memory, which no test running beside it may need.
     @pytest.mark.single_worker
     def test_a_run_that_fails_to_allocate_leaves_the_segment_as_it_was(self):
-        with mock.patch.dict(os.environ, {"TORCH_RBLN_DEFER_OPS": "32", "TORCH_RBLN_DEPLOY": "ON"}):
+        with mock.patch.dict(os.environ, {"TORCH_RBLN_DEFER_OPS": "1", "TORCH_RBLN_DEPLOY": "ON"}):
             run_in_isolated_process(_failed_allocation_worker)
 
     def test_empty_cache_runs_the_deferred_ops_first(self):
         big = torch.ones(64, 1024, 1024, dtype=torch.float16, device="rbln")
-        with _deferring(0):
+        with _deferring(False):
             (big[0] * 2).cpu()
         torch.rbln.empty_cache()
         reserved = torch.rbln.memory_reserved()
@@ -561,7 +812,7 @@ def _fused_ops_stay_compiled_worker():
     others = [torch.randn(8, 64 * (j + 1), dtype=torch.float16).to("rbln") for j in range(36)]
     fused = []
     for round_ in range(6):
-        with mock.patch.dict(os.environ, {"TORCH_RBLN_DEFER_OPS": "32"}):
+        with mock.patch.dict(os.environ, {"TORCH_RBLN_DEFER_OPS": "1"}):
             _chain(x, y, 6).cpu()
         for other in others[round_ * 6 : round_ * 6 + 6]:
             (other * 2).cpu()

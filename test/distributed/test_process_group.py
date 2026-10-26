@@ -923,7 +923,7 @@ class TestDeferredOpsRBLN(TestProcessGroupRBLNBase):
     def test_allreduce_of_deferred_ops(self, c10d_async_env):
         if self.should_skip_multi_rank_tests():
             self.skipTest("Requires world_size > 1")
-        with mock.patch.dict(os.environ, {"TORCH_RBLN_DEFER_OPS": "32", "TORCH_RBLN_DEPLOY": "ON"}):
+        with mock.patch.dict(os.environ, {"TORCH_RBLN_DEFER_OPS": "1", "TORCH_RBLN_DEPLOY": "ON"}):
             self.run_c10d_test(
                 c10d_async_env, self.world_size, run_allreduce_of_deferred_ops_test, (self.world_size, self.backend)
             )

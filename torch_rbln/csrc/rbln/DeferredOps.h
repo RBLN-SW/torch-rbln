@@ -22,11 +22,18 @@ namespace torch_rbln::deferred {
  * The runs deferred on a stream form a segment, which runs as one function, compiled from the
  * modules of its ops, once anything else is queued on the stream (runtime_stream in
  * c10/rbln/RBLNRuntime.h), on a synchronize, when the cache of the device is emptied, when
- * torch.rbln.set_stream leaves the stream, or once the segment holds TORCH_RBLN_DEFER_OPS runs;
- * until then nothing reads or writes the tensors of its runs, which stand for the bytes they view
- * when the run is submitted. The function writes the tensors of `out` a caller gave, the inputs a
- * run updates in place, and the other results a tensor still holds then. A segment runs op by op
- * the first time it is seen, and when the compiler refuses it or fails on it.
+ * torch.rbln.set_stream leaves the stream, or once the segment holds TORCH_RBLN_DEFER_OPS_MAX runs
+ * when that is above 0; until then nothing reads or writes the tensors of its runs, which stand for
+ * the bytes they view when the run is submitted. The function writes the tensors of `out` a caller
+ * gave, the inputs a run updates in place, and the other results a tensor still holds then. A
+ * segment runs op by op the first time it is seen, and when the compiler refuses it or fails on it.
+ *
+ * Runs of the same functions in the same order, 2 to 128 of them, that end the segment twice over are
+ * the laps of a loop: the segment is cut before each of the two, and each later lap the stream runs,
+ * until a run departs from the loop, is a segment of its own, so that laps that read alike and leave
+ * alike run one function, compiled once. A lap runs once the next run is submitted, or at any of the
+ * points above. A compile cut short, as by KeyboardInterrupt, is raised once every part of the segment
+ * has run.
  *
  * A run is deferred only when it does all its work on the device over tensors it binds in place;
  * otherwise, and while RBLN_LAUNCH_BLOCKING has each operation run as it is queued, the run is

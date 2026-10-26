@@ -10,9 +10,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <exception>
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -23,10 +25,17 @@ namespace {
 
 namespace py = pybind11;
 
-const rt::Flag<int64_t> kDeferOps(
+const rt::Flag<bool> kDeferOps(
     "TORCH_RBLN_DEFER_OPS",
-    "The most eager ops a stream defers into one function, which runs them once anything else is "
-    "queued on the stream or needs their results; 0 runs each op as it is called.",
+    "Whether a stream defers its eager ops and runs them as one function compiled from their modules: "
+    "at the next point that needs their results, and at the end of each lap of a loop its ops repeat.",
+    false,
+    rt::parseBool,
+    rt::FlagMutability::kMutable);
+
+const rt::Flag<int64_t> kDeferOpsMax(
+    "TORCH_RBLN_DEFER_OPS_MAX",
+    "The most eager ops a stream defers into one function (TORCH_RBLN_DEFER_OPS); 0 sets no bound.",
     0,
     rt::parseCount,
     rt::FlagMutability::kMutable);
@@ -34,6 +43,10 @@ const rt::Flag<int64_t> kDeferOps(
 // A segment is compiled the second time it runs: one that runs once, as code outside a loop does,
 // would pay a compile that costs many times what fusing it saves.
 constexpr int kRunsBeforeFusing = 2;
+
+// The ops of a stream repeat a loop once they end with a lap of kShortestLap to kLongestLap ops twice over.
+constexpr size_t kShortestLap = 2;
+constexpr size_t kLongestLap = 128;
 
 // Whether the runtime runs each operation as it is queued (RBLN_LAUNCH_BLOCKING), which
 // deferring would undo.
@@ -48,6 +61,7 @@ struct Value {
   int32_t op = kInput;
   int32_t index = 0;
   bool operator==(const Value&) const = default;
+  auto operator<=>(const Value&) const = default;
 };
 
 // A tensor the ops of a segment read or write, as they see it: where its bytes lie, and how.
@@ -107,6 +121,21 @@ bool from_allocator(const c10::Storage& storage) {
   return storage.data_ptr().get_deleter() == deleter;
 }
 
+// A tensor over `place` as it is held, or an undefined one when nothing holds it any longer.
+at::Tensor held(const Place& place) {
+  if (!place.written_only) {
+    return place.tensor;
+  }
+  auto storage = place.written_only->lock();
+  if (!storage) {
+    return {};
+  }
+  auto tensor =
+      at::empty({0}, at::TensorOptions().dtype(place.dtype).device(c10::DeviceType::PrivateUse1, place.device));
+  tensor.set_(c10::Storage(std::move(storage)), place.offset, place.sizes, place.strides);
+  return tensor;
+}
+
 // A tensor of its own over the bytes `tensor` views now, which a later change of `tensor`'s view,
 // such as set_ or .data, leaves as it is.
 at::Tensor snapshot(const at::Tensor& tensor) {
@@ -120,6 +149,7 @@ struct Op {
   std::vector<Value> inputs{};
   // The rows the call passes of the inputs its function computes by rows; 0 when it does not.
   int64_t rows = 0;
+  std::vector<int32_t> result_places{};
 };
 
 struct Segment {
@@ -127,13 +157,25 @@ struct Segment {
   std::vector<Op> ops;
   std::vector<Place> places;
   std::vector<at::Tensor> inputs;
-  // Whether an op updates an input in place, which the segment does whatever it leaves.
-  bool updates_inputs = false;
   // The places over each storage, and those over storages the caching allocator did not make, which
   // may share bytes with any other.
   std::unordered_map<const c10::StorageImpl*, std::vector<int32_t>> by_storage;
   std::vector<int32_t> foreign;
+  // The hash of each op's function, by which the ops of a loop are found, and the ops at which a run of
+  // the segment starts a segment of its own.
+  std::vector<size_t> hashes;
+  std::vector<size_t> cuts;
 };
+
+// `rows` when a call over that many rows passes fewer than `function` computes by rows; none otherwise.
+std::optional<int64_t> fewer_rows(const OpFunction& function, int64_t rows) {
+  return rows != 0 && rows < function.row_extent() ? std::optional<int64_t>(rows) : std::nullopt;
+}
+
+// Whether an op of `segment` updates an input in place, which the segment does whatever it leaves.
+bool updates_inputs(const Segment& segment) {
+  return std::ranges::any_of(segment.ops, [](const Op& op) { return !op.function->updated_inputs().empty(); });
+}
 
 int32_t add_place(Segment& segment, const at::Tensor& tensor) {
   const auto index = static_cast<int32_t>(segment.places.size());
@@ -224,13 +266,12 @@ std::optional<std::vector<at::Tensor>> add(
 
   // The results are made before the segment changes, so that a failed allocation leaves it as it was.
   const int64_t rows = function->row_wise() ? function->rows_of(inputs).value() : 0;
-  const auto fewer = rows != 0 && rows < function->row_extent() ? std::optional<int64_t>(rows) : std::nullopt;
   const auto& outputs = function->outputs();
   std::vector<at::Tensor> results;
   results.reserve(outputs.size());
   for (size_t k = 0; k < outputs.size(); ++k) {
     const bool given = k < out.size() && out[k] && out[k]->defined();
-    results.push_back(given ? *out[k] : function->empty_result(k, device_index, fewer));
+    results.push_back(given ? *out[k] : function->empty_result(k, device_index, fewer_rows(*function, rows)));
   }
 
   Op op{.function = function, .inputs = {}, .rows = rows};
@@ -253,7 +294,6 @@ std::optional<std::vector<at::Tensor>> add(
     op.inputs.push_back({Value::kInput, p.input});
     if (updates(i)) {
       p.updated = true;
-      segment.updates_inputs = true;
     }
   }
   for (size_t k = 0; k < results.size(); ++k) {
@@ -269,6 +309,7 @@ std::optional<std::vector<at::Tensor>> add(
     }
     segment.places[index].value =
         Value{.op = static_cast<int32_t>(segment.ops.size()), .index = static_cast<int32_t>(k)};
+    op.result_places.push_back(index);
   }
   segment.ops.push_back(std::move(op));
   return results;
@@ -326,6 +367,8 @@ std::atomic<uint64_t> stat_fused_runs{0};
 std::atomic<uint64_t> stat_op_runs{0};
 std::atomic<uint64_t> stat_compiled{0};
 std::atomic<uint64_t> stat_refused{0};
+std::atomic<uint64_t> stat_loops_found{0};
+std::atomic<uint64_t> stat_laps_queued{0};
 
 class Fusions {
  public:
@@ -390,6 +433,11 @@ class Fusions {
     std::unordered_map<SegmentKey, std::shared_ptr<Fusion>, SegmentKeyHash> dropped;
     std::lock_guard<std::mutex> lock(mutex_);
     dropped.swap(map_);
+  }
+
+  size_t size() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return map_.size();
   }
 
  private:
@@ -596,29 +644,29 @@ void run_each(const Segment& segment, const std::vector<Left>& left) {
   }
 }
 
-void execute(const Segment& segment) {
+// The values `segment` leaves where a tensor holds them, in the order of the ops that make them.
+std::vector<Left> leaves(const Segment& segment) {
   std::vector<Left> left;
   for (const auto& p : segment.places) {
-    if (!p.value) {
-      continue;
-    }
-    at::Tensor tensor = p.tensor;
-    if (p.written_only) {
-      auto storage = p.written_only->lock();
-      if (!storage) {
-        continue;
+    if (p.value) {
+      if (auto tensor = held(p); tensor.defined()) {
+        left.push_back({.value = *p.value, .tensor = std::move(tensor), .read = p.input >= 0});
       }
-      tensor = at::empty({0}, at::TensorOptions().dtype(p.dtype).device(c10::DeviceType::PrivateUse1, p.device));
-      tensor.set_(c10::Storage(std::move(storage)), p.offset, p.sizes, p.strides);
     }
-    left.push_back({*p.value, std::move(tensor), p.input >= 0});
   }
+  std::ranges::sort(left, {}, &Left::value);
+  return left;
+}
+
+// Runs `segment`, leaving `left`. Once `cut` holds what cut a compile short, the segment runs op by op, so
+// that the segments queued with the one whose compile it cut run before it is raised.
+void execute(const Segment& segment, const std::vector<Left>& left, std::exception_ptr& cut) {
   // Its ops write nothing but their results and the inputs they update, so a segment that leaves no
   // value anywhere a tensor holds and updates no input changes nothing.
-  if (left.empty() && !segment.updates_inputs) {
+  if (left.empty() && !updates_inputs(segment)) {
     return;
   }
-  if (segment.ops.size() == 1 || left.empty()) {
+  if (cut || segment.ops.size() == 1 || left.empty()) {
     run_each(segment, left);
     stat_op_runs.fetch_add(1, std::memory_order_relaxed);
     return;
@@ -640,9 +688,10 @@ void execute(const Segment& segment) {
       function = compile(segment, left, rows);
     } catch (...) {
       // A compile cut short, as by KeyboardInterrupt, still leaves the ops to run.
+      cut = std::current_exception();
       run_each(segment, left);
       stat_op_runs.fetch_add(1, std::memory_order_relaxed);
-      throw;
+      return;
     }
     Fusions::get().compiled(*seen.fusion, function);
     (function ? stat_compiled : stat_refused).fetch_add(1, std::memory_order_relaxed);
@@ -656,13 +705,179 @@ void execute(const Segment& segment) {
   }
 }
 
+// A value of a segment that a later part of it reads, and the place of the tensor it is left in; a
+// tensor of its own, at no place, when nothing holds the place any longer.
+struct Passed {
+  at::Tensor tensor;
+  int32_t place = -1;
+};
+
+// The parts `segment` is cut into at its cuts, each a segment of its own with the values it leaves:
+// those a tensor holds, and those a later part reads.
+std::vector<std::pair<Segment, std::vector<Left>>> split(const Segment& segment) {
+  const auto& ops = segment.ops;
+  std::vector<size_t> starts{0};
+  starts.insert(starts.end(), segment.cuts.begin(), segment.cuts.end());
+  auto part_of = [&starts](size_t op) {
+    return static_cast<size_t>(std::ranges::upper_bound(starts, op) - starts.begin()) - 1;
+  };
+
+  std::map<Value, Passed> passed;
+  for (size_t j = 0; j < ops.size(); ++j) {
+    for (const auto& v : ops[j].inputs) {
+      if (v.op == Value::kInput || part_of(v.op) == part_of(j) || passed.contains(v)) {
+        continue;
+      }
+      const auto& op = ops[v.op];
+      const int32_t place = op.result_places[v.index];
+      if (auto tensor = held(segment.places[place]); tensor.defined()) {
+        passed[v] = Passed{.tensor = std::move(tensor), .place = place};
+      } else {
+        passed[v] = Passed{
+            .tensor =
+                op.function->empty_result(v.index, segment.places[place].device, fewer_rows(*op.function, op.rows))};
+      }
+    }
+  }
+  std::vector<int32_t> place_of_input(segment.inputs.size(), -1);
+  for (size_t i = 0; i < segment.places.size(); ++i) {
+    if (segment.places[i].input >= 0) {
+      place_of_input[segment.places[i].input] = static_cast<int32_t>(i);
+    }
+  }
+
+  std::vector<std::pair<Segment, std::vector<Left>>> parts;
+  for (size_t part = 0; part < starts.size(); ++part) {
+    const auto begin = static_cast<int32_t>(starts[part]);
+    const auto end = static_cast<int32_t>(part + 1 < starts.size() ? starts[part + 1] : ops.size());
+    Segment s;
+    s.stream = segment.stream;
+    // The part's input for each segment input or earlier part's value it reads, and the places of those inputs.
+    std::map<Value, int32_t> input_of;
+    std::set<int32_t> read;
+    auto take = [&](const Value& v, const at::Tensor& tensor, int32_t place) {
+      const auto [it, added] = input_of.try_emplace(v, static_cast<int32_t>(s.inputs.size()));
+      if (added) {
+        s.inputs.push_back(tensor);
+        read.insert(place);
+      }
+      return Value{.op = Value::kInput, .index = it->second};
+    };
+    for (int32_t j = begin; j < end; ++j) {
+      Op op{.function = ops[j].function, .inputs = {}, .rows = ops[j].rows};
+      for (const auto& v : ops[j].inputs) {
+        if (v.op == Value::kInput) {
+          op.inputs.push_back(take(v, segment.inputs[v.index], place_of_input[v.index]));
+        } else if (v.op >= begin) {
+          op.inputs.push_back({.op = v.op - begin, .index = v.index});
+        } else {
+          const auto& p = passed.at(v);
+          op.inputs.push_back(take(v, p.tensor, p.place));
+        }
+      }
+      s.ops.push_back(std::move(op));
+    }
+    std::vector<Left> left;
+    std::set<Value> leaving;
+    for (size_t i = 0; i < segment.places.size(); ++i) {
+      const auto& p = segment.places[i];
+      if (!p.value || p.value->op < begin || p.value->op >= end) {
+        continue;
+      }
+      if (auto tensor = held(p); tensor.defined()) {
+        left.push_back(
+            {.value = {.op = p.value->op - begin, .index = p.value->index},
+             .tensor = std::move(tensor),
+             .read = read.contains(static_cast<int32_t>(i))});
+        leaving.insert(*p.value);
+      }
+    }
+    for (const auto& [v, p] : passed) {
+      if (v.op >= begin && v.op < end && !leaving.contains(v)) {
+        left.push_back(
+            {.value = {.op = v.op - begin, .index = v.index},
+             .tensor = p.tensor,
+             .read = p.place >= 0 && read.contains(p.place)});
+      }
+    }
+    std::ranges::sort(left, {}, &Left::value);
+    parts.emplace_back(std::move(s), std::move(left));
+  }
+  return parts;
+}
+
+void execute(const Segment& segment) {
+  std::exception_ptr cut;
+  if (segment.cuts.empty()) {
+    execute(segment, leaves(segment), cut);
+  } else {
+    for (const auto& [part, left] : split(segment)) {
+      execute(part, left, cut);
+    }
+  }
+  if (cut) {
+    std::rethrow_exception(cut);
+  }
+}
+
 struct Queue {
-  // Guards `segment`.
+  // Guards `segment` and what follows it.
   std::mutex mutex;
   // Held while a segment of the queue runs, so that its segments are queued in order.
   std::mutex running;
   Segment segment;
+  // The hashes of a lap of the loop the queue's ops repeat, and how many ops of it the stream has followed
+  // since its segment last ran.
+  std::vector<size_t> lap;
+  size_t into_lap = 0;
+  // Whether the segment ends with a lap, which is queued before the next op is deferred, once the
+  // caller has let go of what the lap's last op read.
+  bool lap_ended = false;
 };
+
+// The length of the shortest lap of kShortestLap to kLongestLap ops that ends `hashes` twice over, or 0.
+size_t repeated_lap(const std::vector<size_t>& hashes) {
+  const size_t n = hashes.size();
+  for (size_t length = kShortestLap; length <= kLongestLap && 2 * length <= n; ++length) {
+    const auto lap = hashes.end() - static_cast<std::ptrdiff_t>(length);
+    if (hashes[n - 1 - length] == hashes.back() &&
+        std::equal(lap, hashes.end(), lap - static_cast<std::ptrdiff_t>(length))) {
+      return length;
+    }
+  }
+  return 0;
+}
+
+// Advances the loop of `q` by the op just deferred and marks the lap the op ends; when the op departs from
+// the loop, looks for another. The ops that first repeat a lap twice are cut before each of the two laps.
+void follow_loop(Queue& q) {
+  auto& segment = q.segment;
+  if (!q.lap.empty()) {
+    TORCH_INTERNAL_ASSERT(q.into_lap < q.lap.size(), "an op was deferred past the end of a lap");
+    if (segment.hashes.back() == q.lap[q.into_lap]) {
+      if (++q.into_lap == q.lap.size()) {
+        q.lap_ended = true;
+        stat_laps_queued.fetch_add(1, std::memory_order_relaxed);
+      }
+      return;
+    }
+    q.lap.clear();
+    q.into_lap = 0;
+  }
+  const size_t length = repeated_lap(segment.hashes);
+  if (length == 0) {
+    return;
+  }
+  const size_t n = segment.hashes.size();
+  q.lap.assign(segment.hashes.end() - static_cast<std::ptrdiff_t>(length), segment.hashes.end());
+  if (n > 2 * length) {
+    segment.cuts.push_back(n - 2 * length);
+  }
+  segment.cuts.push_back(n - length);
+  q.lap_ended = true;
+  stat_loops_found.fetch_add(1, std::memory_order_relaxed);
+  stat_laps_queued.fetch_add(2, std::memory_order_relaxed);
+}
 
 // The ops deferred on every queue, which have not run yet.
 std::atomic<size_t> deferred_ops{0};
@@ -701,6 +916,8 @@ void run_queue(Queue& q) {
   {
     std::lock_guard<std::mutex> lock(q.mutex);
     segment = std::exchange(q.segment, Segment{});
+    q.into_lap = 0;
+    q.lap_ended = false;
   }
   if (segment.ops.empty()) {
     return;
@@ -723,6 +940,16 @@ c10::DeviceIndex device_of(c10::ArrayRef<at::Tensor> inputs) {
   return c10::rbln::get_device_index();
 }
 
+void clear() {
+  Fusions::get().clear();
+  std::lock_guard<std::mutex> lock(queues_mutex);
+  for (const auto& [key, q] : queues()) {
+    std::lock_guard<std::mutex> queue_lock(q->mutex);
+    q->lap.clear();
+    q->into_lap = 0;
+  }
+}
+
 } // namespace
 
 std::optional<std::vector<at::Tensor>> submit(
@@ -730,28 +957,34 @@ std::optional<std::vector<at::Tensor>> submit(
     c10::ArrayRef<at::Tensor> inputs,
     c10::ArrayRef<std::optional<at::Tensor>> out,
     bool own_out) {
-  const int64_t limit = running_here || launch_blocking() ? 0 : kDeferOps.value();
-  if (limit == 0 || !function->runs_on_device()) {
+  if (running_here || launch_blocking() || !kDeferOps.value() || !function->runs_on_device()) {
     return function->run(inputs, out);
   }
+  const int64_t limit = kDeferOpsMax.value();
   const auto device_index = device_of(inputs);
   if (!function->binds_in_place(inputs, out, device_index)) {
     return function->run(inputs, out);
   }
   const auto stream = c10::rbln::get_current_stream(device_index);
   auto& q = queue(stream);
-  // A run that conflicts with the segment starts the next one; one that conflicts with itself runs as
-  // it is called.
-  for (int attempt = 0; attempt < 2; ++attempt) {
+  // A segment that ends a lap is queued before the run joins it. A run that conflicts with the segment
+  // starts the next one; one that conflicts with itself runs as it is called.
+  for (int conflicts = 0; conflicts < 2;) {
     std::optional<std::vector<at::Tensor>> results;
+    bool lap_ended = false;
     bool full = false;
     {
       std::lock_guard<std::mutex> lock(q.mutex);
-      results = add(q.segment, function, inputs, out, own_out, device_index);
+      lap_ended = q.lap_ended;
+      if (!lap_ended) {
+        results = add(q.segment, function, inputs, out, own_out, device_index);
+      }
       if (results) {
         q.segment.stream = stream;
+        q.segment.hashes.push_back(std::hash<const void*>{}(function.get()));
         deferred_ops.fetch_add(1, std::memory_order_acq_rel);
-        full = static_cast<int64_t>(q.segment.ops.size()) >= limit;
+        follow_loop(q);
+        full = limit > 0 && static_cast<int64_t>(q.segment.ops.size()) >= limit;
       }
     }
     if (results) {
@@ -760,6 +993,9 @@ std::optional<std::vector<at::Tensor>> submit(
         run_queue(q);
       }
       return results;
+    }
+    if (!lap_ended) {
+      ++conflicts;
     }
     run_queue(q);
   }
@@ -812,7 +1048,9 @@ void init_deferred_ops_bindings(pybind11::module& module) {
       "Internal: lets go of the functions of the deferred segments `function` runs in",
       py::arg("function"));
   module.def(
-      "_deferred_clear", []() { Fusions::get().clear(); }, "Internal: lets go of the functions of deferred segments");
+      "_deferred_clear",
+      &clear,
+      "Internal: lets go of the functions of deferred segments, and of the loops the streams' ops repeat");
   module.def(
       "_deferred_stats",
       []() {
@@ -821,10 +1059,17 @@ void init_deferred_ops_bindings(pybind11::module& module) {
             {"fused_runs", stat_fused_runs.load(std::memory_order_relaxed)},
             {"op_runs", stat_op_runs.load(std::memory_order_relaxed)},
             {"compiled", stat_compiled.load(std::memory_order_relaxed)},
-            {"refused", stat_refused.load(std::memory_order_relaxed)}};
+            {"refused", stat_refused.load(std::memory_order_relaxed)},
+            {"loops_found", stat_loops_found.load(std::memory_order_relaxed)},
+            {"laps_queued", stat_laps_queued.load(std::memory_order_relaxed)}};
       },
-      "DIAG: the eager ops deferred, the segments run as one function and op by op, and those "
-      "compiled and refused, since the process started");
+      "DIAG: the eager ops deferred, the segments run as one function and op by op, those compiled "
+      "and refused, the loops found in the ops of a stream, and their laps queued each as a segment, "
+      "since the process started");
+  module.def(
+      "_deferred_segment_count",
+      []() { return Fusions::get().size(); },
+      "DIAG: the segments of deferred ops the process tells apart now, compiled or not");
 }
 
 } // namespace torch_rbln::deferred
