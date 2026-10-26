@@ -130,17 +130,17 @@ unset TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK
 
 The value is a **comma-separated list** of fallback case names to disable:
 
-| Case             | Default behavior (enabled)                                                                         | When disabled                                            |
-| ---------------- | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| `dispatch_mode`  | Falls back to CPU when a non-infra `TorchDispatchMode` is active                                   | Skips the check — risks infinite recursion               |
-| `trace`          | Falls back to CPU when a Python trace is active (e.g. pdb, coverage)                               | Skips the check — compile may run under tracer           |
-| `reentrant`      | Falls back to CPU when already inside RBLN compile op (e.g. print/repr, nested op); logs a warning | Skips the check — risks infinite recursion               |
-| `dtype`          | Falls back on unsupported or mismatched tensor dtypes                                              | Sends such tensors to RBLN — may produce wrong results   |
-| `scalar`         | Falls back when all input tensors are 0-dim scalars                                                | Sends scalar ops to RBLN — may fail in `rebel-compiler`  |
-| `storage_offset` | Falls back when a contiguous tensor has `storage_offset != 0`                                      | Sends offset tensors to RBLN — may read wrong data       |
-| `nan_inf`        | Falls back when inputs contain NaN or Inf (non-deploy mode only)                                   | Skips the NaN/Inf scan — invalid values reach the device |
+| Case             | Default behavior (enabled)                                                                         | When disabled                                                                      |
+| ---------------- | -------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `dispatch_mode`  | Falls back to CPU when a non-infra `TorchDispatchMode` is active                                   | Skips the check — risks infinite recursion                                         |
+| `trace`          | Falls back to CPU when a Python trace is active (e.g. pdb, coverage)                               | Skips the check — compile may run under tracer                                     |
+| `reentrant`      | Falls back to CPU when already inside RBLN compile op (e.g. print/repr, nested op); logs a warning | Skips the check — risks infinite recursion                                         |
+| `dtype`          | Falls back on unsupported or mismatched tensor dtypes                                              | Sends such tensors to RBLN — may produce wrong results                             |
+| `scalar`         | Falls back when all input tensors are 0-dim scalars                                                | Sends scalar ops to RBLN — may fail in `rebel-compiler`                            |
+| `storage_offset` | Falls back when a contiguous tensor has `storage_offset != 0`                                      | Sends offset tensors to RBLN — may read wrong data                                 |
+| `nan_inf`        | Falls back when inputs contain NaN or Inf (non-deploy mode only)                                   | Skips the NaN/Inf scan — invalid values reach the device                           |
 | `align`          | Falls back to CPU when a tensor argument's last dim is not a multiple of 64                        | Sends unaligned ops to RBLN — slower on small tensors, and each new shape compiles |
-| `all`            | —                                                                                                  | Disables **all** of the above checks                     |
+| `all`            | —                                                                                                  | Disables **all** of the above checks                                               |
 
 ## Device mapping
 
@@ -392,6 +392,6 @@ as corruption inside the runtime.
 Unset by default; set before `import torch_rbln`. `docs/EAGER_DISPATCH.md` has
 the contract and the boundaries to know before enabling a dtype.
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `TORCH_RBLN_DISPATCH_DTYPES` | Extra dtypes admitted to the eager dispatch catalog (torch dtype names or aliases; an unknown name is an error) | unset |
+| Variable                     | Description                                                                                                     | Default |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------- | ------- |
+| `TORCH_RBLN_DISPATCH_DTYPES` | Extra dtypes admitted to the eager dispatch catalog (torch dtype names or aliases; an unknown name is an error) | unset   |

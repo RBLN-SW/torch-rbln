@@ -1,11 +1,12 @@
 # Owner(s): ["module: PrivateUse1"]
-"""Mixed CPU/rbln operands with an extended dispatch catalog (TORCH_RBLN_DISPATCH_DTYPES).
+"""Mixed CPU/rbln operands with an extended dispatch catalog
+(TORCH_RBLN_DISPATCH_DTYPES).
 
-Before the catalog could be extended, int operands never reached the compile path: the C++
-boxed CPU fallback took them and placed the result on the first tensor argument's device.
-vllm-rbln's speculative-decoding glue relies on that (a CPU cumsum minus an rbln count).
-With int32 in the catalog the same expression must neither raise nor change device, and
-stock dtypes must keep the result device they had.
+Before the catalog could be extended, int operands never reached the compile path: the
+C++ boxed CPU fallback took them and placed the result on the first tensor argument's
+device. vllm-rbln's speculative-decoding glue relies on that (a CPU cumsum minus an rbln
+count). With int32 in the catalog the same expression must neither raise nor change
+device, and stock dtypes must keep the result device they had.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ import sys
 import pytest
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-import torch_rbln  # noqa: F401
+import torch_rbln
 
 
 _have_device = torch_rbln.device.device_count() > 0 and os.environ.get("RBLN_DUMMY_DEVICE") != "1"
@@ -46,13 +47,18 @@ print("RESULT", [(o.device.type, o.cpu().flatten().tolist()) for o in outs])
 
 
 def _run(**env):
-    """Run the scenario in a fresh interpreter: the Python dtype policy is an import-time snapshot."""
+    """Run the scenario in a fresh interpreter: the Python dtype policy is an
+    import-time snapshot.
+    """
     full_env = dict(os.environ)
     full_env.pop("TORCH_RBLN_DISPATCH_DTYPES", None)
     full_env.update(env)
-    proc = subprocess.run([sys.executable, "-c", _SCENARIO], env=full_env, capture_output=True, text=True, timeout=600)
+    proc = subprocess.run(
+        [sys.executable, "-c", _SCENARIO], check=False, env=full_env, capture_output=True, text=True, timeout=600
+    )
     lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT ")]
-    assert proc.returncode == 0 and lines, proc.stderr[-2000:]
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert lines, proc.stderr[-2000:]
     return ast.literal_eval(lines[-1][len("RESULT ") :])
 
 

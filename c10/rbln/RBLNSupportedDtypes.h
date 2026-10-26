@@ -49,18 +49,20 @@ constexpr bool is_dispatch_dtype(c10::ScalarType s) noexcept {
 // Runtime extension of the eager-dispatch catalog.
 //
 // `TORCH_RBLN_DISPATCH_DTYPES` is a comma-separated list of extra dtypes (torch
-// names or the usual aliases: float64, int32, int64, int16, int8, uint8, bool) whose
-// tensors the eager shim dispatches to the RBLN compile path instead of the CPU
-// fallback. Unset (default) leaves the catalog as is.
+// names or the usual aliases: float64, int32, int64, int16, int8, uint8, bool)
+// whose tensors the eager shim dispatches to the RBLN compile path instead of
+// the CPU fallback. Unset (default) leaves the catalog as is.
 //
-// This is opt-in on purpose: the device may compute these dtypes in a reduced or
-// saturating form (see docs/EAGER_DISPATCH.md), so it is worth it only when the caller
-// does not rely on the host semantics of that dtype. The value is read live
-// from the environment (re-parsed only when the string changes), like the other
-// TORCH_RBLN_* runtime gates in DispatchShim.cpp. An unknown dtype name throws, so
-// these are not noexcept: the error has to reach the caller as a Python exception.
+// This is opt-in on purpose: the device may compute these dtypes in a reduced
+// or saturating form (see docs/EAGER_DISPATCH.md), so it is worth it only when
+// the caller does not rely on the host semantics of that dtype. The value is
+// read live from the environment (re-parsed only when the string changes), like
+// the other TORCH_RBLN_* runtime gates in DispatchShim.cpp. An unknown dtype
+// name throws, so these are not noexcept: the error has to reach the caller as
+// a Python exception.
 C10_RBLN_API bool is_dispatch_dtype_rt(c10::ScalarType s);
-// Catalog + environment extension, in catalog order then env order (deduplicated).
+// Catalog + environment extension, in catalog order then env order
+// (deduplicated).
 C10_RBLN_API std::vector<c10::ScalarType> dispatch_dtypes_rt();
 
 } // namespace c10::rbln

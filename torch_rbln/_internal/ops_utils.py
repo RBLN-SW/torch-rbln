@@ -21,7 +21,8 @@ class SupportedDtypes:
     """Per-path supported dtype tuples for RBLN device dispatch."""
 
     dispatch: tuple[torch.dtype, ...] = _C._dispatch_dtypes()
-    # Dtypes admitted only by TORCH_RBLN_DISPATCH_DTYPES. Empty unless the catalog is extended.
+    # Dtypes admitted only by TORCH_RBLN_DISPATCH_DTYPES. Empty unless the catalog is
+    # extended.
     dispatch_extension: tuple[torch.dtype, ...] = tuple(
         d for d in _C._dispatch_dtypes() if d not in _C._dispatch_catalog_dtypes()
     )
@@ -1780,15 +1781,14 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     if get_rbln_compile_op_depth() == 0:
         raise_if_dummy_execution(f"the eager op {op_name}" if op_name else "an eager op")
 
-    # Device 64-elem-align fallback (disable with TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK=align):
-    # a last-dim not a multiple of 64 makes the
-    # rebel pipeline wrap the device fn with host-only contrib_aligned_pad /
-    # contrib_dummy_cast ops (no RTOSA lowering), costing a base-buffer D2H+H2D
-    # round-trip (~1MB/op for LLaMA-1B rotary). cpu_fallback_path is strictly
-    # cheaper here (one D2H + host op + one H2D). Single-tensor args only: for
-    # list ops (cat/stack) the device path fuses unaligned tensors into one IR
-    # that's cheaper than per-tensor host fallback — TensorList recursion added
-    # +12% prefill. (verified 2026-05-08 via IR dump + trace counts)
+    # Device 64-elem-align fallback; TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK=align turns
+    # it off. A last-dim not a multiple of 64 makes the rebel pipeline wrap the device
+    # fn with host-only contrib_aligned_pad / contrib_dummy_cast ops (no RTOSA
+    # lowering), costing a base-buffer D2H+H2D round-trip (~1MB/op for LLaMA-1B rotary).
+    # cpu_fallback_path is strictly cheaper here (one D2H + host op + one H2D).
+    # Single-tensor args only: for list ops (cat/stack) the device path fuses unaligned
+    # tensors into one IR that's cheaper than per-tensor host fallback — TensorList
+    # recursion added +12% prefill. (verified 2026-05-08 via IR dump + trace counts)
     def _last_dim_unaligned(t):
         return isinstance(t, torch.Tensor) and t.dim() > 0 and t.shape[-1] % 64 != 0
 
@@ -2040,10 +2040,10 @@ def is_cpu_fallback_cases(args):
             if tensor_args[i].dtype != first_dtype:
                 return True
 
-    # 2b: an operand of an extension dtype (TORCH_RBLN_DISPATCH_DTYPES) on a different device
-    #     than the others. Before the extension such a call went to the C++ boxed fallback,
-    #     which tolerates mixed devices; the compile path does not. Stock dtypes are not
-    #     affected: an empty extension keeps this branch closed.
+    # 2b: an operand of an extension dtype (TORCH_RBLN_DISPATCH_DTYPES) on a different
+    #     device than the others. Before the extension such a call went to the C++
+    #     boxed fallback, which tolerates mixed devices; the compile path does not.
+    #     Stock dtypes are not affected: an empty extension keeps this branch closed.
     if "device" not in disabled_cases and _has_mixed_device_extension_operand(tensor_args):
         return True
 
@@ -2076,12 +2076,13 @@ def is_cpu_fallback_cases(args):
 
 
 def _has_mixed_device_extension_operand(tensor_args) -> bool:
-    """The op's working dtype is an extension dtype and its operands span more than one device.
+    """An op on an extension dtype whose operands span more than one device.
 
-    Any non-bool operand of an extension dtype counts: a bool tensor is a condition or mask
-    (where's cond), which the shim's dtype check skips as well, so admitting bool must not
-    re-route an op whose data operands are stock dtypes. Devices are taken over every operand,
-    condition included, because that is what the boxed fallback's first-argument rule sees.
+    Any non-bool operand of an extension dtype counts: a bool tensor is a condition or
+    mask (where's cond), which the shim's dtype check skips as well, so admitting bool
+    must not re-route an op whose data operands are stock dtypes. Devices are taken over
+    every operand, condition included, because that is what the boxed fallback's
+    first-argument rule sees.
     """
     extension = SupportedDtypes.dispatch_extension
     if not extension:
@@ -2094,13 +2095,13 @@ def _has_mixed_device_extension_operand(tensor_args) -> bool:
 
 
 # Per-op count of Python-path CPU fallbacks (the C++ shim keeps its own counters for the
-# boxed/precheck fallbacks, see torch.rbln.explain). Together they list every op that still
-# leaves the device for a given dtype policy — the input the SW team needs to decide what the
-# compiler/runtime should make cheap next.
+# boxed/precheck fallbacks, see torch.rbln.explain). Together they list every op that
+# still leaves the device for a given dtype policy — the input the SW team needs to
+# decide what the compiler/runtime should make cheap next.
 _cpu_fallback_counts: dict[str, int] = {}
 
 
-def cpu_fallback_counts(reset: bool = False) -> dict[str, int]:
+def cpu_fallback_counts(*, reset: bool = False) -> dict[str, int]:
     """Snapshot of Python-path CPU fallbacks per op name (optionally clearing it)."""
     snap = dict(_cpu_fallback_counts)
     if reset:
@@ -2138,9 +2139,10 @@ def cpu_fallback_path(target_ops, args, *, result: torch.Tensor | None = None, o
         result.copy_(result_cpu)
         return result
 
-    # Mixed-device extension-dtype operands (see is_cpu_fallback_cases 2b): mirror the C++
-    # boxed fallback's convention, which handled these calls before the extension, and put
-    # the result on the first tensor argument's device. Stock dtypes keep the rule below.
+    # Mixed-device extension-dtype operands (see is_cpu_fallback_cases 2b): mirror the
+    # C++ boxed fallback's convention, which handled these calls before the extension,
+    # and put the result on the first tensor argument's device. Stock dtypes keep the
+    # rule below.
     tensor_args = extract_tensors(args)
     if result is None and _has_mixed_device_extension_operand(tensor_args):
         first_device = tensor_args[0].device

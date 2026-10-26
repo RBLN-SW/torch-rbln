@@ -34,10 +34,12 @@ _NAN_INF_REASON = 1  # index of the NaN/Inf count in _C._dispatch_fallback_reaso
 
 
 def _via_cpu_fallback(test, fn, *cpu_args):
-    """Run ``fn`` on rbln copies of ``cpu_args`` and assert the shim sent it to ``cpu_fallback_rbln``.
+    """Run ``fn`` on rbln copies of ``cpu_args`` and assert the shim sent it to
+    ``cpu_fallback_rbln``.
 
-    Each float input carries a NaN: with fp32 in the dispatch catalog, the NaN/Inf scan is what
-    routes the op to ``cpu_fallback_rbln``, the only place the fast-path handlers run.
+    Each float input carries a NaN: with fp32 in the dispatch catalog, the NaN/Inf scan
+    is what routes the op to ``cpu_fallback_rbln``, the only place the fast-path
+    handlers run.
     """
     before = _C._dispatch_fallback_reasons()[_NAN_INF_REASON]
     out = fn(*(a.to("rbln") for a in cpu_args))
@@ -170,8 +172,8 @@ class TestMeanLastDimFastPath(TestCase):
 @pytest.mark.npu(count=1)
 class TestIntSubFastPath(TestCase):
     """`aten::sub.out` integer fast path. Int dtypes are outside the dispatch catalog,
-    so int ops fall back to CPU; the handler runs a host loop (int64 accumulate, stored in out dtype).
-    Covers same-shape, scalar/last-dim broadcast, all int widths, and the
+    so int ops fall back to CPU; the handler runs a host loop (int64 accumulate, stored
+    in out dtype). Covers same-shape, scalar/last-dim broadcast, all int widths, and the
     alpha != 1 guard fall-through.
     """
 

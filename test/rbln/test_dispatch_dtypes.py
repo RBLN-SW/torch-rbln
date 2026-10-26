@@ -1,16 +1,20 @@
 # Owner(s): ["module: PrivateUse1"]
-"""TORCH_RBLN_DISPATCH_DTYPES: parsing of the extra-dtype list, and an admitted dtype (int32)
-taking the device path with correct results."""
+"""TORCH_RBLN_DISPATCH_DTYPES: parsing of the extra-dtype list, and an admitted dtype
+(int32) taking the device path with correct results.
+"""
 
 from __future__ import annotations
 
+import ast
 import os
+import subprocess
+import sys
 
 import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-import torch_rbln  # noqa: F401
+import torch_rbln
 from torch_rbln import _C
 
 
@@ -69,22 +73,20 @@ except RuntimeError as e:
 def _run_int32_scenario(**env) -> tuple[int, str, dict, dict]:
     """Run the int32 scenario in a fresh interpreter with the env set before import.
 
-    The Python compile path snapshots the dtype policy at import (SupportedDtypes), which
-    is also how the knob is meant to be used; a subprocess keeps this test independent of
-    what earlier tests imported or patched in this process."""
-    import ast
-    import subprocess
-    import sys
-
+    The Python compile path snapshots the dtype policy at import (SupportedDtypes),
+    which is also how the knob is meant to be used; a subprocess keeps this test
+    independent of what earlier tests imported or patched in this process.
+    """
     full_env = dict(os.environ)
     full_env.pop("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK", None)
     full_env.pop("TORCH_RBLN_DISPATCH_DTYPES", None)
     full_env.update(env)
     proc = subprocess.run(
-        [sys.executable, "-c", _INT32_SCENARIO], env=full_env, capture_output=True, text=True, timeout=600
+        [sys.executable, "-c", _INT32_SCENARIO], check=False, env=full_env, capture_output=True, text=True, timeout=600
     )
     lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT ")]
-    assert proc.returncode == 0 and lines, proc.stderr[-2000:]
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert lines, proc.stderr[-2000:]
     _, count, device, extra = lines[-1].split(" ", 3)
     extra, evidence = ast.literal_eval(extra)
     return int(count), device, extra, evidence
@@ -97,7 +99,7 @@ class TestDispatchDtypesEnv(TestCase):
             mp.delenv("TORCH_RBLN_DISPATCH_DTYPES", raising=False)
             self.assertEqual(_C._dispatch_dtypes(), stock)
             mp.setenv("TORCH_RBLN_DISPATCH_DTYPES", "int32, Float64, fp32")
-            self.assertEqual(_C._dispatch_dtypes(), stock + (torch.int32, torch.float64))
+            self.assertEqual(_C._dispatch_dtypes(), (*stock, torch.int32, torch.float64))
             mp.setenv("TORCH_RBLN_DISPATCH_DTYPES", "int32, float3")
             with self.assertRaisesRegex(RuntimeError, "unknown dtype name 'float3'"):
                 _C._dispatch_dtypes()
@@ -105,14 +107,15 @@ class TestDispatchDtypesEnv(TestCase):
             with self.assertRaisesRegex(RuntimeError, "unknown dtype name 'all'"):
                 _C._dispatch_dtypes()
             mp.setenv("TORCH_RBLN_DISPATCH_DTYPES", "int32")
-            self.assertEqual(_C._dispatch_dtypes(), stock + (torch.int32,))  # the bad value left no partial state
+            self.assertEqual(_C._dispatch_dtypes(), (*stock, torch.int32))  # the bad value left no partial state
 
 
 @needs_device
 class TestExtendedCatalog(TestCase):
     def test_int32_takes_device_path(self):
-        # int32 is outside the default catalog: DISPATCH_DTYPES admits it. The alignment fallback
-        # is disabled so these glue-shaped [4, 3] ops stay on the device; they must stay correct.
+        # int32 is outside the default catalog: DISPATCH_DTYPES admits it. The alignment
+        # fallback is disabled so these glue-shaped [4, 3] ops stay on the device; they
+        # must stay correct.
         count, device, extra, evidence = _run_int32_scenario(
             TORCH_RBLN_DISPATCH_DTYPES="int32", TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK="align"
         )
@@ -123,14 +126,11 @@ class TestExtendedCatalog(TestCase):
         self.assertEqual(extra, {"mul": True, "eq": True, "where": True})
 
     def test_bad_dtype_name_after_import_raises_instead_of_terminating(self):
-        # the live parser throws on an unknown name; the getters it runs under must not be
-        # noexcept, or the throw terminates the process instead of reaching Python
-        import subprocess
-        import sys
-
+        # the live parser throws on an unknown name; the getters it runs under must not
+        # be noexcept, or the throw terminates the process instead of reaching Python
         env = dict(os.environ, TORCH_RBLN_DISPATCH_DTYPES="int32")
         proc = subprocess.run(
-            [sys.executable, "-c", _BAD_ENV_SCENARIO], env=env, capture_output=True, text=True, timeout=600
+            [sys.executable, "-c", _BAD_ENV_SCENARIO], check=False, env=env, capture_output=True, text=True, timeout=600
         )
         self.assertEqual(proc.returncode, 0, f"process died instead of raising: {proc.stderr[-1500:]}")
         lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT ")]

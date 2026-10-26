@@ -444,10 +444,11 @@ bool is_nan_inf_check_disabled() {
   return false;
 }
 
-// NaN/Inf bit-pattern check. Every IEEE format encodes NaN/Inf as "exponent field
-// all-ones"; only the mask differs (fp16 ``0x7C00``, bf16 ``0x7F80``, fp32
-// ``0x7F800000``, fp64 ``0x7FF0000000000000``). NaN and Inf are not distinguished:
-// either value means "rbln runtime cannot handle this".
+// NaN/Inf bit-pattern check. Every IEEE format encodes NaN/Inf as "exponent
+// field all-ones"; only the mask differs (fp16 ``0x7C00``, bf16 ``0x7F80``,
+// fp32
+// ``0x7F800000``, fp64 ``0x7FF0000000000000``). NaN and Inf are not
+// distinguished: either value means "rbln runtime cannot handle this".
 template <typename Word, Word kExpMask>
 bool words_have_nan_or_inf(const void* data, size_t n) noexcept {
   const auto* words = static_cast<const Word*>(data);
@@ -460,8 +461,9 @@ bool words_have_nan_or_inf(const void* data, size_t n) noexcept {
 }
 
 using ScannerFn = bool (*)(const void*, size_t);
-// One scanner per floating dtype the catalog or TORCH_RBLN_DISPATCH_DTYPES can admit
-// (parse_dtype_name in RBLNFunctions.cpp accepts no other floating names).
+// One scanner per floating dtype the catalog or TORCH_RBLN_DISPATCH_DTYPES can
+// admit (parse_dtype_name in RBLNFunctions.cpp accepts no other floating
+// names).
 inline ScannerFn scanner_for(c10::ScalarType scalar_type) {
   switch (scalar_type) {
     case c10::kHalf:
@@ -483,14 +485,14 @@ inline ScannerFn scanner_for(c10::ScalarType scalar_type) {
 // just-computed device data — matches AS-IS Python ``to_cpu(args)`` cost).
 //
 // Returns false for: undefined / empty / dtype outside the dispatch policy or
-// not floating / non-contiguous tensors. Non-admitted dtypes are short-circuited
-// earlier in ``quick_fallback_check``; ``skip_dtype_args`` slots are typically
-// bool/int (eq/ne ``cond`` etc.) which cannot carry NaN/Inf. An admitted floating
-// dtype without a scanner is a bug, not a skip: a warm-cache hit would then run
-// the device kernel on NaN/Inf without the Python scan ever seeing the input.
-// Non-contiguous tensors are skipped here because the warm-cache key
-// requires contig + offset=0 anyway — the non-contig case will miss and
-// fall through to the Python wrapper which performs the full
+// not floating / non-contiguous tensors. Non-admitted dtypes are
+// short-circuited earlier in ``quick_fallback_check``; ``skip_dtype_args``
+// slots are typically bool/int (eq/ne ``cond`` etc.) which cannot carry
+// NaN/Inf. An admitted floating dtype without a scanner is a bug, not a skip: a
+// warm-cache hit would then run the device kernel on NaN/Inf without the Python
+// scan ever seeing the input. Non-contiguous tensors are skipped here because
+// the warm-cache key requires contig + offset=0 anyway — the non-contig case
+// will miss and fall through to the Python wrapper which performs the full
 // ``has_invalid_tensor(to_cpu(args))`` scan.
 bool tensor_has_nan_or_inf(const at::Tensor& t) {
   if (!t.defined())
@@ -498,7 +500,8 @@ bool tensor_has_nan_or_inf(const at::Tensor& t) {
   const auto numel = t.numel();
   if (numel == 0)
     return false;
-  if (!c10::rbln::is_dispatch_dtype_rt(t.scalar_type()) || !c10::isFloatingType(t.scalar_type())) {
+  if (!c10::rbln::is_dispatch_dtype_rt(t.scalar_type()) ||
+      !c10::isFloatingType(t.scalar_type())) {
     return false;
   }
   const auto scanner = scanner_for(t.scalar_type());
@@ -640,7 +643,8 @@ int quick_fallback_check(
       continue;
     }
     has_input_tensor = true;
-    // Catalog plus the TORCH_RBLN_DISPATCH_DTYPES extension (RBLNSupportedDtypes.h).
+    // Catalog plus the TORCH_RBLN_DISPATCH_DTYPES extension
+    // (RBLNSupportedDtypes.h).
     if (!c10::rbln::is_dispatch_dtype_rt(t.scalar_type())) {
       return 1; // dtype-not-fp16 (dtype outside the dispatch policy)
     }

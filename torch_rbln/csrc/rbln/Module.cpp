@@ -673,9 +673,9 @@ void register_supported_dtypes_api(py::module_& module) {
   module.def(
       "_dispatch_dtypes",
       [] {
-        // Catalog plus the TORCH_RBLN_DISPATCH_DTYPES extension, evaluated now: the
-        // Python SupportedDtypes snapshot is taken at import, so the env var must be
-        // set before `import torch_rbln`.
+        // Catalog plus the TORCH_RBLN_DISPATCH_DTYPES extension, evaluated now:
+        // the Python SupportedDtypes snapshot is taken at import, so the env
+        // var must be set before `import torch_rbln`.
         const auto v = c10::rbln::dispatch_dtypes_rt();
         return supported_dtypes_to_tuple(c10::ArrayRef<c10::ScalarType>(v));
       },
