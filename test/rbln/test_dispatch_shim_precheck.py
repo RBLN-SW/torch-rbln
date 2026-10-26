@@ -38,6 +38,7 @@ from torch.testing._internal.common_device_type import instantiate_device_type_t
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torch_rbln import _C
+from torch_rbln._internal.ops_utils import has_invalid_tensor, to_cpu
 
 
 def _dispatch_counts() -> tuple[int, int, int, int]:
@@ -216,6 +217,29 @@ class TestDispatchShimNanInfFallback(TestCase):
         result = z.to("cpu")
         self.assertTrue(torch.isinf(result[1]))
         self.assertEqual(result[1].item(), float("-inf"))
+
+    def test_bf16_neg_inf_takes_device_path_and_propagates(self) -> None:
+        """bf16 is not scanned: the device keeps the bf16 encoding, so -inf
+        survives the device path. The warm-cache entry proves that path ran
+        (the fallback never installs one).
+        """
+        size_before = _C._warmcache_size()
+        x_cpu = torch.arange(64, dtype=torch.bfloat16)
+        x_cpu[3] = float("-inf")
+        x = x_cpu.to("rbln")
+        y = torch.ones(64, dtype=torch.bfloat16, device="rbln")
+        z = x + y
+        result = z.to("cpu")
+        self.assertEqual(result[3].item(), float("-inf"))
+        self.assertEqual(result[0].item(), 1.0)
+        self.assertEqual(result[63].item(), 64.0)
+        self.assertGreater(_C._warmcache_size(), size_before)
+
+    def test_python_gate_scans_fp16_but_not_bf16(self) -> None:
+        inf_bf16 = torch.tensor([1.0, float("-inf")], dtype=torch.bfloat16, device="rbln")
+        inf_fp16 = torch.tensor([1.0, float("-inf")], dtype=torch.float16, device="rbln")
+        self.assertFalse(has_invalid_tensor(to_cpu([inf_bf16])))
+        self.assertTrue(has_invalid_tensor(to_cpu([inf_fp16])))
 
     def test_nan_in_second_operand_also_caught(self) -> None:
         x = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float16, device="rbln")

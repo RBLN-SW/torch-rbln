@@ -557,25 +557,12 @@ bool is_nan_inf_check_disabled() {
   return false;
 }
 
-// fp16/bf16 NaN/Inf bit-pattern check.
-//
-// Both formats encode NaN/Inf as "exponent field all-ones"; only the field
-// width differs (fp16: 5 bits at offset 10, mask ``0x7C00``; bf16: 8 bits
-// at offset 7, mask ``0x7F80``). NaN distinguishes itself by a non-zero
-// mantissa, Inf has mantissa==0 — we don't care about the distinction for
-// fallback routing, either value means "rbln runtime cannot handle this".
+// fp16 NaN/Inf bit-pattern check: exponent field all-ones (5 bits at
+// offset 10, mask ``0x7C00``). NaN has a non-zero mantissa, Inf a zero one;
+// fallback routing does not care which, either value is lost on the device.
 inline bool fp16_has_nan_or_inf(const uint16_t* data, size_t n) noexcept {
   for (size_t i = 0; i < n; ++i) {
     if ((data[i] & 0x7C00) == 0x7C00) {
-      return true;
-    }
-  }
-  return false;
-}
-
-inline bool bf16_has_nan_or_inf(const uint16_t* data, size_t n) noexcept {
-  for (size_t i = 0; i < n; ++i) {
-    if ((data[i] & 0x7F80) == 0x7F80) {
       return true;
     }
   }
@@ -587,8 +574,6 @@ inline ScannerFn scanner_for(c10::ScalarType scalar_type) {
   switch (scalar_type) {
     case c10::kHalf:
       return fp16_has_nan_or_inf;
-    case c10::kBFloat16:
-      return bf16_has_nan_or_inf;
     default:
       TORCH_INTERNAL_ASSERT(false, "missing scanner for ScalarType");
   }
@@ -600,10 +585,10 @@ inline ScannerFn scanner_for(c10::ScalarType scalar_type) {
 // just-computed device data — matches AS-IS Python ``to_cpu(args)`` cost).
 //
 // Returns false for: undefined / empty / dtype outside the dispatch
-// catalog / non-contiguous tensors. Non-catalog dtypes are short-circuited
-// earlier in ``quick_fallback_check``; ``skip_dtype_args`` slots are
-// typically bool/int (eq/ne ``cond`` etc.) which cannot carry NaN/Inf.
-// Non-contiguous tensors are skipped here because the warm-cache key
+// catalog / bf16 / non-contiguous tensors. Non-catalog dtypes are
+// short-circuited earlier in ``quick_fallback_check``; ``skip_dtype_args``
+// slots are typically bool/int (eq/ne ``cond`` etc.) which cannot carry
+// NaN/Inf. Non-contiguous tensors are skipped here because the warm-cache key
 // requires contig + offset=0 anyway — the non-contig case will miss and
 // fall through to the Python wrapper which performs the full
 // ``has_invalid_tensor(to_cpu(args))`` scan.
@@ -614,6 +599,11 @@ bool tensor_has_nan_or_inf(const at::Tensor& t) {
   if (numel == 0)
     return false;
   if (!c10::rbln::is_dispatch_dtype(t.scalar_type())) {
+    return false;
+  }
+  // bf16 keeps Inf/NaN on the device and computes with them the same way the
+  // CPU does, so it is not scanned; the scan is for the dtypes that cannot.
+  if (t.scalar_type() == c10::kBFloat16) {
     return false;
   }
   const auto scanner = scanner_for(t.scalar_type());
@@ -734,9 +724,8 @@ int quick_fallback_check(
     // gates that skip args from the shortcut counter. We want to catch
     // NaN/Inf in any defined non-write-alias input — including wrapped
     // 0-dim values such as ``tensor + math.nan``. tensor_has_nan_or_inf
-    // internally filters out dtypes outside the dispatch catalog (catalog
-    // dtypes — fp16/bf16 — are the ones that can encode NaN/Inf on the shim
-    // path).
+    // internally filters out dtypes outside the dispatch catalog and bf16
+    // (fp16 is the catalog dtype whose NaN/Inf the device cannot keep).
     if (nan_inf_scan_enabled && !nan_inf_found && tensor_has_nan_or_inf(t)) {
       nan_inf_found = true;
     }

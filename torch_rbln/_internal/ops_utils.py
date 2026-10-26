@@ -77,7 +77,9 @@ def _make_contig(obj):
 
 def _contains_nan_or_inf(x):
     if isinstance(x, torch.Tensor):
-        if x.dtype == torch.bool:
+        # bf16 keeps Inf/NaN on the device and is not scanned (mirrors DispatchShim.cpp
+        # tensor_has_nan_or_inf); the scan is for the dtypes that cannot.
+        if x.dtype in (torch.bool, torch.bfloat16):
             return False
         if x.numel() == 1 and torch.isreal(x):  # possibly scalar tensor and real number
             return math.isnan(x.item()) or math.isinf(x.item())
@@ -1979,9 +1981,10 @@ def is_cpu_fallback_cases(args):
     3. **Scalar Tensors**: If all input tensors are scalar tensors, rebel-compiler falls
        back to host ops.
     4. **Storage Offset**: If any tensor has `storage_offset != 0`, fall back to CPU.
-    5. **NaN/Inf Values**: When not in deploy mode, if any input tensor contains NaN or
-       Inf values, rbln cannot handle them and we need to fall back to CPU. This check
-       converts tensors to CPU before checking to ensure accurate detection.
+    5. **NaN/Inf Values**: When not in deploy mode, if any fp16 input tensor contains NaN
+       or Inf values, the device cannot keep them and we need to fall back to CPU. bf16
+       keeps Inf/NaN on the device and is not scanned. This check converts tensors to CPU
+       before checking to ensure accurate detection.
     6. **Reentrancy** (checked last): When we're already inside an RBLN op that uses
        torch.compile (thread-local depth > 0), any nested dispatch (e.g. compiled graph
        running torch.add -> add_rbln again, or print/repr triggering tensor ops) must

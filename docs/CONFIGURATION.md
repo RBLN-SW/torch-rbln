@@ -40,7 +40,8 @@ A log file is always created in debug builds. Its path can be configured via
 
 ## Deploy mode
 
-Skip NaN/Inf validation checks to reduce runtime overhead in production:
+Skip NaN/Inf validation checks to reduce runtime overhead in production. The
+check covers fp16 inputs; bf16 keeps Inf/NaN on the device and is never scanned.
 
 ```bash
 export TORCH_RBLN_DEPLOY=ON
