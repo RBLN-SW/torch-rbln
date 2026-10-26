@@ -368,12 +368,12 @@ void ensureContiguousRcclRawMemory(const std::vector<at::Tensor>& tensors) {
 }
 
 /**
- * @brief Register contiguous RCCL reduce buffer with shape expanded by
- * world_size.
+ * @brief Register contiguous RCCL reduce buffer covering the whole storage.
  *
  * Used when inputs_[i] are contiguous in memory (one per rank). Registers the
- * buffer at key_vaddr with shape [world_size, ...tensor_shape] so the runtime
- * treats it as a single tensor holding all ranks' data.
+ * buffer at key_vaddr with the full storage size so the runtime treats it as a
+ * single tensor holding all ranks' data, including when the inputs are views of
+ * one storage (e.g. from reduce_scatter_tensor).
  *
  * @param tensors Vector of contiguous tensors (e.g. inputs_[i])
  */
@@ -389,8 +389,8 @@ void ensureContiguousRcclReduceMemory(const std::vector<at::Tensor>& tensors) {
         mem_info,
         "ensureContiguousRcclReduceMemory: tensor must be tracked by VMemoryManager");
     const auto rbln_dtype = c10::rbln::to_rbln_dtype(tensor.scalar_type());
-    std::vector<int64_t> shape =
-        std::vector<int64_t>(tensor.sizes().begin(), tensor.sizes().end());
+    std::vector<int64_t> shape = {static_cast<int64_t>(
+        tensor.storage().nbytes() / tensor.element_size())};
     TORCH_CHECK(
         rbln::rbln_set_memory_info(
             mem_info->key_vaddr,

@@ -383,6 +383,30 @@ def run_reduce_scatter_test(rank: int, world_size: int, backend: str, op: dist.R
         dist.destroy_process_group()
 
 
+def run_reduce_scatter_tensor_test(rank: int, world_size: int, backend: str, size: int) -> None:
+    """Test reduce_scatter_tensor, whose input chunks are views of one storage."""
+    setup_environment(rank, world_size)
+    dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+    device = torch.device("rbln", rank)
+
+    try:
+        chunks = [torch.full([size], float((rank + 1) * 10 + j + 1), dtype=torch.float16) for j in range(world_size)]
+        input_tensor = torch.cat(chunks).to(device)
+        output = torch.zeros(size, dtype=torch.float16, device=device)
+
+        dist.reduce_scatter_tensor(output, input_tensor)
+
+        expected_value = _get_expected_reduce_scatter_value(rank, world_size, dist.ReduceOp.SUM)
+        torch.testing.assert_close(
+            output.cpu(),
+            torch.full([size], expected_value, dtype=torch.float16),
+            msg=f"reduce_scatter_tensor failed on rank {rank}: got {output[:5]}, expected {expected_value}",
+        )
+
+    finally:
+        dist.destroy_process_group()
+
+
 def run_barrier_test(rank: int, world_size: int, backend: str) -> None:
     """Test barrier synchronization."""
     setup_environment(rank, world_size)
@@ -698,6 +722,17 @@ class TestReduceScatterRBLN(TestProcessGroupRBLNBase):
             self.world_size,
             run_reduce_scatter_test,
             (self.world_size, self.backend, dist.ReduceOp.SUM, size),
+        )
+
+    @parametrize("size", [1, 256, 3072, (512 * KiB)])
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_reduce_scatter_tensor_sum(self, size, c10d_async_env):
+        """Test reduce_scatter_tensor with SUM operation."""
+        self.run_c10d_test(
+            c10d_async_env,
+            self.world_size,
+            run_reduce_scatter_tensor_test,
+            (self.world_size, self.backend, size),
         )
 
     @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
