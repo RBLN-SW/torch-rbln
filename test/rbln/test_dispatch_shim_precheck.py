@@ -132,6 +132,37 @@ class TestDispatchShimWrappedScalar(TestCase):
 
 
 @pytest.mark.npu(count=1)
+class TestDispatchShimLastDimOneBroadcast(TestCase):
+    """An operand whose last dim is 1 against a 64-aligned last dim is compiled
+    with its raw shape: the backend broadcasts it on the device, the warm cache
+    keys on the raw shapes and a hit binds the raw buffer.
+    """
+
+    def setUp(self) -> None:
+        _C._warmcache_clear()
+
+    def test_aligned_output_takes_device_path_and_warm_hits(self) -> None:
+        x = torch.arange(4 * 64, dtype=torch.float16, device="rbln").reshape(4, 64)
+        s = torch.tensor([[1.0], [2.0], [3.0], [4.0]], dtype=torch.float16, device="rbln")
+        expected = x.cpu() * s.cpu()
+        self.assertEqual((x * s).cpu(), expected)
+        self.assertGreater(_C._warmcache_size(), 0, "the raw [4,1] operand was compiled, not materialized")
+        _, _, hits_before, _ = _dispatch_counts()
+        self.assertEqual((x * s).cpu(), expected)
+        _, _, hits_after, _ = _dispatch_counts()
+        self.assertGreater(hits_after, hits_before)
+        # The hit reads the raw [4,1] buffer at run time, not a copy taken at install.
+        s.fill_(0.5)
+        self.assertEqual((x * s).cpu(), x.cpu() * 0.5)
+
+    def test_unaligned_output_keeps_the_cpu_fallback(self) -> None:
+        x = torch.arange(4 * 8, dtype=torch.float16, device="rbln").reshape(4, 8)
+        s = torch.tensor([[1.0], [2.0], [3.0], [4.0]], dtype=torch.float16, device="rbln")
+        self.assertEqual((x * s).cpu(), x.cpu() * s.cpu())
+        self.assertEqual(_C._warmcache_size(), 0)
+
+
+@pytest.mark.npu(count=1)
 class TestDispatchShimAllScalarFallback(TestCase):
     """All-scalar inputs trip the fallback (the shortcut is correct here).
 
@@ -363,6 +394,7 @@ class TestDispatchShimGateLiveRead(TestCase):
 
 
 instantiate_device_type_tests(TestDispatchShimWrappedScalar, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestDispatchShimLastDimOneBroadcast, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestDispatchShimAllScalarFallback, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestDispatchShimDtypeMismatch, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestDispatchShimNanInfFallback, globals(), only_for="privateuse1")

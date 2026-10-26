@@ -330,67 +330,19 @@ def _has_zero_dim_broadcast(tensor_args, out_shape):
     return any(t.dim() == 0 for t in tensor_args)
 
 
-def _has_last_dim_size_one_broadcast(tensor_args, out_shape):
-    """Detect tensors that need a stride-0 expand on the LAST dim.
-
-    Known UNSUPPORTED rebel-backend implicit-broadcast pattern (2026-04-30):
-    when one operand has ``shape[-1] == 1`` and the broadcast result has
-    ``shape[-1] > 1``, rebel-compiler's graph optimizer raises
-    ``Graph Optimization: [UNEXPECTED_GRAPH]`` instead of compiling the
-    stride-0 expand on the last axis.
-
-    Confirmed-failing patterns (covered by ``TestBinaryOpsBroadcast``)::
-
-        (3, 4)        x (3, 1)        → (3, 4)        # softmax_backward shape0
-        (2, 3, 4)     x (2, 3, 1)     → (2, 3, 4)     # softmax_backward shape2
-        (4, 8, 16)    x (4, 8, 1)     → (4, 8, 16)
-        (1, 32, 4)    x (1, 32, 1)    → (1, 32, 4)
-
-    Confirmed-WORKING patterns (validate-only is fine)::
-
-        (B, S, H) x (H,)              # RMSNorm — last dims already match
-        (10, 20)  x (1, 20)           # leading-dim broadcast, last dims match
-        (5, 10, 15) x (5, 1, 15)      # middle-dim broadcast
-
-    Origin of pattern: ``torch.tensor.sum(dim=last_dim, keepdim=True)`` and
-    similar reductions yield ``shape[-1] == 1``; multiplying that back into
-    the unreduced tensor (the standard ``softmax_backward`` and
-    ``layernorm_backward`` formulas) hits this case.
-
-    If a future workload trips a different rebel-broadcast bug, broaden this
-    helper rather than re-enabling explicit broadcast wholesale — the RMSNorm
-    fast path is too valuable.
-    """
-    out_last = out_shape[-1] if out_shape else 1
-    if out_last == 1:
-        return False
-    return any(t.shape and t.shape[-1] == 1 for t in tensor_args)
-
-
 def broadcast_args_general(tensor_args, args):
-    """Validate broadcast compatibility; pre-broadcast only when rebel needs it.
+    """Validate broadcast compatibility; pre-broadcast only a 0-dim operand.
 
-    Default: validate-only (no allocation). Rebel-backend lowers most
-    implicit broadcasts inside the compiled graph (e.g. ``(B,S,H) * (H,)``
-    for RMSNorm). Pre-broadcasting them via ``torch.broadcast_tensors``
-    materializes stride-0 expand views through D2H + host broadcast + H2D
-    (~600 ms / prefill step on LLaMA-1B), which we want to avoid.
+    The backend lowers implicit broadcasts inside the compiled program,
+    including an operand whose last dim is 1 against a 64-aligned last dim.
+    Pre-broadcasting on the host materializes stride-0 expand views through
+    D2H + host broadcast + H2D (~600 ms / prefill step on LLaMA-1B for
+    RMSNorm's ``(B,S,H) * (H,)``), so the default is validate-only.
 
-    Exception (force pre-broadcast): the **last-dim-size-one** pattern
-    documented in ``_has_last_dim_size_one_broadcast``. Rebel-compiler
-    raises ``UNEXPECTED_GRAPH`` for those, so we materialize on the host
-    side and feed compile same-shape inputs. The pre-broadcasted result is
-    ``.contiguous()``-ed (else ``prepare_args_view_aware`` would re-detect
-    the expand recipe and emit ``aten::expand`` into the FX graph, dropping
-    back into the implicit-broadcast path that fails).
-
-    Cache coherence: after pre-broadcast the runtime is compiled for
-    POST-broadcast shapes while the C++ shim's pending warm-cache key was
-    built from PRE-broadcast shapes. The shim's ``try_warmcache_hit``
-    re-applies the same broadcast on warm-hit (see
-    ``DispatchShim.cpp::needs_last_dim_one_broadcast``) so the cached
-    runtime continues to receive same-shape buffers — install proceeds
-    normally and warm-hits stay correct.
+    The one pattern still materialized is the 0-dim operand documented in
+    ``_has_zero_dim_broadcast``. The warm cache keys on the raw shapes and
+    binds raw pointers on a hit, which is what a program compiled for the raw
+    shapes expects.
     """
     if not _needs_broadcast(tensor_args):
         return args
@@ -401,9 +353,7 @@ def broadcast_args_general(tensor_args, args):
         msg = f"Broadcasting failed for tensor shapes={tensor_shapes}"
         raise RuntimeError(msg) from e
 
-    if not _has_last_dim_size_one_broadcast(tensor_args, out_shape) and not _has_zero_dim_broadcast(
-        tensor_args, out_shape
-    ):
+    if not _has_zero_dim_broadcast(tensor_args, out_shape):
         return args
 
     try:
@@ -414,8 +364,8 @@ def broadcast_args_general(tensor_args, args):
         raise RuntimeError(msg) from e
     # Materialize stride-0 expand views into real contig buffers — otherwise
     # ``prepare_args_view_aware`` would re-detect the expand recipe and emit
-    # ``aten::expand`` into the FX graph, dropping us right back into the
-    # implicit-broadcast path that rebel can't compile for last-dim-1.
+    # ``aten::expand`` into the FX graph, back into the implicit-broadcast
+    # path that aborts for a 0-dim operand.
     new_args = []
     tensor_idx = 0
     for arg in args:
@@ -1738,6 +1688,27 @@ def view_recipes_for_positional(view_recipes_flat, positional_count):
     return view_recipes_flat[:positional_count]
 
 
+# Elementwise binary shim ops whose size-1 last-dim operand the backend broadcasts
+# on the device. ``where`` is left out: three operands, and its bool condition
+# takes the CPU path anyway.
+_LAST_DIM_ONE_DEVICE_BROADCAST_OPS = frozenset(
+    {
+        "aten::add",
+        "aten::sub",
+        "aten::mul",
+        "aten::div",
+        "aten::maximum",
+        "aten::minimum",
+        "aten::ne",
+        "aten::eq",
+        "aten::gt",
+        "aten::ge",
+        "aten::lt",
+        "aten::le",
+    }
+)
+
+
 def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_tensor):
     """Centralized view-aware rbln-compile dispatch.
 
@@ -1784,8 +1755,19 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     # list ops (cat/stack) the device path fuses unaligned tensors into one IR
     # that's cheaper than per-tensor host fallback — TensorList recursion added
     # +12% prefill. (verified 2026-05-08 via IR dump + trace counts)
+    #
+    # A size-1 last dim broadcast against a 64-aligned one runs on the device
+    # for these elementwise ops, so the size-1 side is not unaligned here.
+    tensors = [t for t in (*args, *kwargs_filtered.values()) if isinstance(t, torch.Tensor) and t.dim() > 0]
+    out_last = max((t.shape[-1] for t in tensors), default=0)
+    size_one_broadcasts_on_device = (
+        op_name in _LAST_DIM_ONE_DEVICE_BROADCAST_OPS and len(tensors) >= 2 and out_last % 64 == 0
+    )
+
     def _last_dim_unaligned(t):
-        return isinstance(t, torch.Tensor) and t.dim() > 0 and t.shape[-1] % 64 != 0
+        if not (isinstance(t, torch.Tensor) and t.dim() > 0) or t.shape[-1] % 64 == 0:
+            return False
+        return not (size_one_broadcasts_on_device and t.shape[-1] == 1)
 
     if any(_last_dim_unaligned(a) for a in args) or any(_last_dim_unaligned(v) for v in kwargs_filtered.values()):
         return cpu_fallback_path(

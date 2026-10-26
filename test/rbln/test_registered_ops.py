@@ -1258,20 +1258,21 @@ BROADCAST_PATTERNS = [
     # Mixed-rank
     ((2, 3, 4, 8, 16), (8, 16)),
     ((4, 8, 16), ()),  # scalar rhs
-    # ----- Last-dim-size-one broadcast (rebel-backend CANNOT implicit-compile;
-    # ``broadcast_args_general`` must pre-broadcast via host materialization,
-    # else rebel-compiler raises ``Graph Optimization: [UNEXPECTED_GRAPH]``).
-    # Patterns observed in practice:
-    #   * ``softmax_backward_rbln``  : ``output * S.sum(dim=-1, keepdim=True)``
-    #     emits ``(N, D) x (N, 1)`` when ``dim`` is the last axis.
-    #   * Reduce-then-multiply patterns where ``keepdim=True`` leaves a 1 in
-    #     the last position.
+    # ----- Last-dim-size-one broadcast: ``(N, D) × (N, 1)`` from
+    # ``output * S.sum(dim=-1, keepdim=True)`` (softmax backward) and from
+    # ``x * rsqrt(var)`` (RMSNorm). With an unaligned D the op takes the CPU
+    # fallback; with a 64-aligned D the backend broadcasts the size-1 side on
+    # the device, so both groups are here.
     # -----
     ((3, 4), (3, 1)),  # softmax_backward shape0 (last-dim small)
     ((2, 3, 4), (2, 3, 1)),  # softmax_backward shape2 (3D last-dim)
-    ((4, 8, 16), (4, 8, 1)),  # last-dim aligned-side (16) — also fails
+    ((4, 8, 16), (4, 8, 1)),  # last-dim 16: unaligned, CPU fallback
     ((1, 32, 4), (1, 32, 1)),  # head-shaped, last-dim small
     ((4, 8, 1), (1, 1, 16)),  # both sides have last-dim==1 in one operand
+    ((32, 128), (32, 1)),  # aligned: broadcast on the device
+    ((2, 4, 64), (2, 4, 1)),  # aligned, 3D
+    ((1, 128, 2048), (1, 128, 1)),  # LLaMA RMSNorm ``x * rsqrt(var)`` prefill
+    ((4, 1), (4, 64)),  # size-1 side on the left
     # Same-shape (sanity / fast-path that skips even broadcast_shapes check)
     ((4, 8, 16), (4, 8, 16)),
 ]
