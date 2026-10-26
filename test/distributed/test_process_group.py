@@ -829,6 +829,27 @@ class TestAllReduceSizesRBLN(TestProcessGroupRBLNBase):
         )
 
 
+@pytest.mark.serial
+@pytest.mark.npu(count=4)
+class TestAllReduceOddWorldSizeRBLN(TestProcessGroupRBLNBase):
+    """Test allreduce on world size 3 with sizes not aligned to 128 B * world_size."""
+
+    def setUp(self):
+        super().setUp()
+        self.world_size = 3
+
+    @parametrize("size", [1536, 4096, 6138, 6150])
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_allreduce_float16(self, size, c10d_async_env):
+        """Test allreduce with specified bytes using torch.float16."""
+        self.run_c10d_test(
+            c10d_async_env,
+            self.world_size,
+            run_allreduce_size_test,
+            (self.world_size, self.backend, size, torch.float16),
+        )
+
+
 # Instantiate device type tests for all test classes
 instantiate_device_type_tests(TestBroadcastRBLN, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestAllReduceRBLN, globals(), only_for="privateuse1")
@@ -839,6 +860,7 @@ instantiate_device_type_tests(TestBarrierRBLN, globals(), only_for="privateuse1"
 instantiate_device_type_tests(TestSendRecvRBLN, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestUnsupportedOpsRBLN, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestAllReduceSizesRBLN, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestAllReduceOddWorldSizeRBLN, globals(), only_for="privateuse1")
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@
 // Standard library includes
 #include <cstdlib>
 #include <mutex>
+#include <numeric>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -60,6 +61,15 @@ namespace {
 constexpr size_t RCCL_ALLGATHER_ALIGNMENT = 128ULL;
 constexpr size_t RCCL_ALLREDUCE_ALIGNMENT = 512ULL;
 constexpr size_t RCCL_REDUCE_SCATTER_ALIGNMENT = RCCL_ALLREDUCE_ALIGNMENT;
+// The driver splits AllReduce data into world_size chunks and requires each
+// chunk to be RCCL_DATA_ALIGNSIZE_FOR_CS (128 B) aligned.
+constexpr size_t RCCL_ALLREDUCE_CHUNK_ALIGNMENT = 128ULL;
+
+size_t getAllReduceAlignment(int world_size) {
+  return std::lcm(
+      RCCL_ALLREDUCE_ALIGNMENT,
+      RCCL_ALLREDUCE_CHUNK_ALIGNMENT * static_cast<size_t>(world_size));
+}
 
 // AllReduce size limit: data_size / world_size <= 1MB (temporary driver
 // limitation)
@@ -1241,7 +1251,8 @@ class AllreduceRBLNWork : public RBLNWork {
           "RCCL AllReduce only supports float16 dtype");
 
       const size_t elem_size = getRcclElementSize(rbln_dtype);
-      const size_t align_numel = RCCL_ALLREDUCE_ALIGNMENT / elem_size;
+      const size_t align_bytes = getAllReduceAlignment(worldSize_);
+      const size_t align_numel = align_bytes / elem_size;
       const size_t numel = input.numel();
       const size_t total_bytes = numel * elem_size;
       const size_t max_bytes = RCCL_ALLREDUCE_MAX_BYTES_PER_RANK * worldSize_;
@@ -1249,8 +1260,7 @@ class AllreduceRBLNWork : public RBLNWork {
           (max_bytes / elem_size / align_numel) * align_numel;
 
       // Fast path: small aligned tensor
-      if (total_bytes <= max_bytes &&
-          isAlignedTo(total_bytes, RCCL_ALLREDUCE_ALIGNMENT)) {
+      if (total_bytes <= max_bytes && isAlignedTo(total_bytes, align_bytes)) {
         ensureRcclReduceMemory(input);
         RBLNRetCode ret = rccl_->AllReduce(
             input.data_ptr(),
