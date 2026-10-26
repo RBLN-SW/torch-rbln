@@ -15,6 +15,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 // C10 includes
 #include <c10/rbln/RBLNFunctions.h>
@@ -143,6 +144,43 @@ size_t getRcclElementSize(::rbln::DataType dtype) {
   }
   // This should never be reached due to the checks above
   return ::rbln::Rccl::RcclReduceOp::RCCL_REDUCE_OP_SUM;
+}
+
+const char* reduceOpName(const ReduceOp& reduceOp) {
+  switch (reduceOp) {
+    case ReduceOp::SUM:
+      return "SUM";
+    case ReduceOp::PRODUCT:
+      return "PRODUCT";
+    case ReduceOp::MIN:
+      return "MIN";
+    case ReduceOp::MAX:
+      return "MAX";
+    case ReduceOp::AVG:
+      return "AVG";
+    default:
+      return "UNKNOWN";
+  }
+}
+
+void warnGlooFallbackOnce(
+    const char* collective,
+    at::ScalarType dtype,
+    const ReduceOp& reduceOp) {
+  static std::mutex mutex;
+  static std::unordered_set<std::string> warned;
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (!warned.insert(c10::str(collective, dtype, reduceOpName(reduceOp)))
+             .second) {
+      return;
+    }
+  }
+  RBLN_WARN(
+      "{} of {} with ReduceOp.{} is not handled by rbln-ccl. Falling back to Gloo on the host.",
+      collective,
+      c10::toString(dtype),
+      reduceOpName(reduceOp));
 }
 
 /**
@@ -1199,11 +1237,11 @@ class AllreduceRBLNWork : public RBLNWork {
       return;
     }
 
-    // Check if input is not CUSTOM_FLOAT16
+    // RCCL reduces only CUSTOM_FLOAT16 with SUM
     const auto rbln_dtype = c10::rbln::to_rbln_dtype(inputs_[0].scalar_type());
-    if (rbln_dtype != ::rbln::DataType::Float16) {
+    if (rbln_dtype != ::rbln::DataType::Float16 || reduceOp_ != ReduceOp::SUM) {
       if (glooBackend_) {
-        // Use Gloo backend for non-CUSTOM_FLOAT16 allreduce
+        warnGlooFallbackOnce("all_reduce", inputs_[0].scalar_type(), reduceOp_);
         // Copy RBLN tensor to CPU
         std::vector<at::Tensor> cpu_tensors;
         for (size_t i = 0; i < inputs_.size(); ++i) {
@@ -1217,8 +1255,7 @@ class AllreduceRBLNWork : public RBLNWork {
         opts.reduceOp = reduceOp_;
         auto work = glooBackend_->allreduce(cpu_tensors, opts);
         work->wait();
-        RBLN_LOG_DEBUG(
-            "non-CUSTOM_FLOAT16 allreduce by Gloo Backend is completed");
+        RBLN_LOG_DEBUG("allreduce by Gloo Backend is completed");
 
         size_t i = 0;
         for (auto& input : inputs_) {
@@ -1228,8 +1265,8 @@ class AllreduceRBLNWork : public RBLNWork {
       }
       RBLN_CHECK(
           false,
-          "non-CUSTOM_FLOAT16 allreduce requires a Gloo backend. "
-          "Pass gloo_backend when creating ProcessGroupRBLN, or convert tensors to custom float16 before allreduce.");
+          "allreduce of non-CUSTOM_FLOAT16 tensors or with a non-SUM op requires a Gloo backend. "
+          "Pass gloo_backend when creating ProcessGroupRBLN.");
     }
 
     rcclDataType_ = ::rbln::Rccl::RcclDataType::RBLN_CUSTOM_FP16_TYPE;
@@ -1429,10 +1466,12 @@ class ReduceScatterRBLNWork : public RBLNWork {
       const auto rbln_dtype =
           c10::rbln::to_rbln_dtype(inputs_[i][0].scalar_type());
 
-      // Check if input is not FLOAT16
-      if (rbln_dtype != ::rbln::DataType::Float16) {
+      // RCCL reduces only FLOAT16 with SUM
+      if (rbln_dtype != ::rbln::DataType::Float16 ||
+          reduceOp_ != ReduceOp::SUM) {
         if (glooBackend_) {
-          // Use Gloo backend for non-FLOAT16 reduce_scatter
+          warnGlooFallbackOnce(
+              "reduce_scatter", inputs_[i][0].scalar_type(), reduceOp_);
           std::vector<at::Tensor> cpu_inputs;
           cpu_inputs.reserve(inputs_[i].size());
           for (auto& tensor : inputs_[i]) {
@@ -1453,8 +1492,8 @@ class ReduceScatterRBLNWork : public RBLNWork {
         }
         RBLN_CHECK(
             false,
-            "non-CUSTOM_FLOAT16 reduce_scatter requires a Gloo backend. "
-            "Pass gloo_backend when creating ProcessGroupRBLN, or convert tensors to CUSTOM_FLOAT16 before reduce_scatter.");
+            "reduce_scatter of non-CUSTOM_FLOAT16 tensors or with a non-SUM op requires a Gloo backend. "
+            "Pass gloo_backend when creating ProcessGroupRBLN.");
       }
 
       rcclDataType_ = ::rbln::Rccl::RcclDataType::RBLN_CUSTOM_FP16_TYPE;

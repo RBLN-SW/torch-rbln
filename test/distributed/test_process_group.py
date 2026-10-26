@@ -565,6 +565,12 @@ class TestAllReduceRBLN(TestProcessGroupRBLNBase):
             c10d_async_env, self.world_size, run_allreduce_test, (self.world_size, self.backend, dist.ReduceOp.SUM)
         )
 
+    @parametrize("op", [dist.ReduceOp.PRODUCT, dist.ReduceOp.MIN, dist.ReduceOp.MAX, dist.ReduceOp.AVG])
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_allreduce_non_sum(self, op, c10d_async_env):
+        """Test allreduce with non-SUM ops, which fall back to Gloo."""
+        self.run_c10d_test(c10d_async_env, self.world_size, run_allreduce_test, (self.world_size, self.backend, op))
+
 
 @pytest.mark.serial
 @pytest.mark.npu(count=2)
@@ -698,6 +704,17 @@ class TestReduceScatterRBLN(TestProcessGroupRBLNBase):
             self.world_size,
             run_reduce_scatter_test,
             (self.world_size, self.backend, dist.ReduceOp.SUM, size),
+        )
+
+    @parametrize("op", [dist.ReduceOp.PRODUCT, dist.ReduceOp.MIN, dist.ReduceOp.MAX, dist.ReduceOp.AVG])
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_reduce_scatter_non_sum(self, op, c10d_async_env):
+        """Test reduce_scatter with non-SUM ops, which fall back to Gloo."""
+        self.run_c10d_test(
+            c10d_async_env,
+            self.world_size,
+            run_reduce_scatter_test,
+            (self.world_size, self.backend, op, 256),
         )
 
     @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
