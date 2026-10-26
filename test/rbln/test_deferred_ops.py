@@ -468,6 +468,18 @@ class TestDeferredOps(TestCase):
             result = buf.cpu()
         torch.testing.assert_close(result, self.x * 2, **_TOLERANCE)
 
+    def test_an_op_reads_what_another_storage_over_its_bytes_wrote(self):
+        buf = torch.zeros(8, 256, dtype=torch.float16).to("rbln")
+        # A tensor of a storage of its own over the bytes of `buf`.
+        alias = torch.rbln._create_tensor_from_ptr(buf.data_ptr(), buf.shape, buf.dtype)
+        with _deferring():
+            # Three runs, so that a segment of both ops would run op by op, then compiled, then from the cache.
+            for _ in range(3):
+                buf.zero_()
+                torch.mul(self.xd, 3, out=alias)
+                result = (buf + 1).cpu()
+                torch.testing.assert_close(result, self.x * 3 + 1, **_TOLERANCE)
+
     def _cache_update(self, cache):
         # An op that writes `cache` in place, which binds as torch holds it for an integer cache.
         others = (

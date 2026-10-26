@@ -101,6 +101,12 @@ bool overlap(const Place& a, const Place& b) {
   return a.begin < b.end && b.begin < a.end;
 }
 
+// Whether the caching allocator made `storage`: no two live storages it made share a byte.
+bool from_allocator(const c10::Storage& storage) {
+  static const auto deleter = c10::GetAllocator(c10::DeviceType::PrivateUse1)->raw_deleter();
+  return storage.data_ptr().get_deleter() == deleter;
+}
+
 // A tensor of its own over the bytes `tensor` views now, which a later change of `tensor`'s view,
 // such as set_ or .data, leaves as it is.
 at::Tensor snapshot(const at::Tensor& tensor) {
@@ -123,7 +129,21 @@ struct Segment {
   std::vector<at::Tensor> inputs;
   // Whether an op updates an input in place, which the segment does whatever it leaves.
   bool updates_inputs = false;
+  // The places over each storage, and those over storages the caching allocator did not make, which
+  // may share bytes with any other.
+  std::unordered_map<const c10::StorageImpl*, std::vector<int32_t>> by_storage;
+  std::vector<int32_t> foreign;
 };
+
+int32_t add_place(Segment& segment, const at::Tensor& tensor) {
+  const auto index = static_cast<int32_t>(segment.places.size());
+  segment.places.push_back(place_of(tensor));
+  segment.by_storage[tensor.storage().unsafeGetStorageImpl()].push_back(index);
+  if (!from_allocator(tensor.storage())) {
+    segment.foreign.push_back(index);
+  }
+  return index;
+}
 
 constexpr int kNone = -1;
 constexpr int kConflict = -2;
@@ -133,18 +153,29 @@ constexpr int kConflict = -2;
 int find(const Segment& segment, const at::Tensor& tensor, bool written) {
   const auto place = place_of(tensor);
   int found = kNone;
-  for (size_t i = 0; i < segment.places.size(); ++i) {
+  bool conflict = false;
+  auto check = [&](int32_t i) {
     const auto& p = segment.places[i];
     if (!p.live()) {
-      continue;
+      return;
     }
     if (p.holds(tensor)) {
-      found = static_cast<int>(i);
+      found = i;
     } else if (overlap(p, place) && (written || p.written())) {
-      return kConflict;
+      conflict = true;
+    }
+  };
+  if (from_allocator(tensor.storage())) {
+    if (const auto it = segment.by_storage.find(place.storage); it != segment.by_storage.end()) {
+      std::ranges::for_each(it->second, check);
+    }
+    std::ranges::for_each(segment.foreign, check);
+  } else {
+    for (size_t i = 0; i < segment.places.size(); ++i) {
+      check(static_cast<int32_t>(i));
     }
   }
-  return found;
+  return conflict ? kConflict : found;
 }
 
 // Adds a run of `function` over `inputs` writing `out` to `segment`, and returns its results; none
@@ -207,9 +238,8 @@ std::optional<std::vector<at::Tensor>> add(
   for (size_t i = 0; i < inputs.size(); ++i) {
     int index = find(segment, inputs[i], updates(i));
     if (index == kNone) {
-      index = static_cast<int>(segment.places.size());
-      segment.places.push_back(place_of(inputs[i]));
-      segment.places.back().tensor = snapshot(inputs[i]);
+      index = add_place(segment, inputs[i]);
+      segment.places[index].tensor = snapshot(inputs[i]);
     }
     auto& p = segment.places[index];
     if (p.value) {
@@ -230,12 +260,11 @@ std::optional<std::vector<at::Tensor>> add(
     const bool given = k < out.size() && out[k] && out[k]->defined();
     int index = given ? find(segment, results[k], true) : kNone;
     if (index == kNone) {
-      index = static_cast<int>(segment.places.size());
-      segment.places.push_back(place_of(results[k]));
+      index = add_place(segment, results[k]);
       if (given && !own_out) {
-        segment.places.back().tensor = snapshot(results[k]);
+        segment.places[index].tensor = snapshot(results[k]);
       } else {
-        segment.places.back().written_only = results[k].storage().getWeakStorageImpl();
+        segment.places[index].written_only = results[k].storage().getWeakStorageImpl();
       }
     }
     segment.places[index].value =
