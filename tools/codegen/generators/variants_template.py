@@ -51,7 +51,8 @@ def {kernel_name}(*args, **kwargs):
         raise RuntimeError("No input tensor found.")
     if isinstance(in_tensor, torch.Tensor):
         input_dtype = in_tensor.dtype
-        input_device = in_tensor.device
+        if not (in_tensor.dim() == 0 and in_tensor.device.type == "cpu"):
+            input_device = in_tensor.device
 """
 
         @staticmethod
@@ -63,7 +64,8 @@ def {kernel_name}(*args, **kwargs):
     if in_tensor is None:
         raise RuntimeError("No input tensor found.")
     if isinstance(in_tensor, torch.Tensor):
-        input_device = in_tensor.device
+        if not (in_tensor.dim() == 0 and in_tensor.device.type == "cpu"):
+            input_device = in_tensor.device
 """
 
         @staticmethod

@@ -34,9 +34,10 @@ from unittest import mock
 
 import pytest
 import torch
-from torch.testing._internal.common_device_type import instantiate_device_type_tests
+from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
+from test.utils import SUPPORTED_DTYPES
 from torch_rbln import _C
 
 
@@ -129,6 +130,20 @@ class TestDispatchShimWrappedScalar(TestCase):
         self.assertEqual((a + s).cpu()[0, 0].item(), 2.0)
         s.fill_(3.0)
         self.assertEqual((a + s).cpu()[0, 0].item(), 4.0, "a real 0-dim tensor is read at run time, not baked in")
+
+    @dtypes(*SUPPORTED_DTYPES)
+    def test_cpu_zero_dim_tensor_as_first_operand(self, dtype) -> None:
+        # A CPU 0-dim tensor is a scalar operand (the CUDA rule): `tensor(2.0) * x`
+        # runs on the device like `x * tensor(2.0)`, and its value is read per call.
+        for shape in ((1,), (64,)):
+            x_cpu = torch.full(shape, 3.0, dtype=dtype)
+            x = x_cpu.to("rbln")
+            for op in (torch.mul, torch.sub):
+                for value in (2.0, 5.0):
+                    s = torch.tensor(value, dtype=dtype)
+                    got = op(s, x)
+                    self.assertEqual(got.device.type, "rbln")
+                    self.assertEqual(got.cpu(), op(s, x_cpu), msg=f"{op.__name__} {shape} {value}")
 
 
 @pytest.mark.npu(count=1)

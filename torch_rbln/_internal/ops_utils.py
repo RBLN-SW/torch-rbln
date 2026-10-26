@@ -397,7 +397,9 @@ def broadcast_args_general(tensor_args, args):
     runtime continues to receive same-shape buffers — install proceeds
     normally and warm-hits stay correct.
     """
-    if not _needs_broadcast(tensor_args):
+    if not _needs_broadcast(tensor_args) or _has_cpu_scalar_operand(tensor_args):
+        # A CPU 0-dim operand is moved to the device by ``compile_and_run_view_aware``,
+        # which broadcasts after the move; broadcasting it here would do so on the host.
         return args
     try:
         out_shape = torch.broadcast_shapes(*[t.shape for t in tensor_args])
@@ -1839,6 +1841,15 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
             for k, v in kwargs_filtered.items()
         }
 
+    # A CPU 0-dim tensor is a scalar operand (the CUDA rule): `torch.tensor(2.0) * x` is
+    # valid with `x` on the device. The compiled program needs every input on one
+    # device, so the scalar goes there as a runtime input, read on every call. The
+    # shim's warm-cache key is built from the original CPU tensor, so such a call is not
+    # installed (as with views).
+    args, kwargs_filtered, moved_cpu_scalars = _cpu_scalars_to_device(args, kwargs_filtered)
+    if moved_cpu_scalars:
+        args = broadcast_args_general(extract_tensors(args), args)
+
     (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs_filtered)
     has_views = any(r is not None for r in view_recipes)
 
@@ -1904,10 +1915,36 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
             external_result = result_tensor
     if result_tensor is None:
         result_tensor = external_result
-    if not has_views:
+    if not has_views and not moved_cpu_scalars:
         # install_pending empties the list it is given; the entry keeps its own.
         _install_warm_cache_pending(list(entry.runtime_holder), external_result)
     return result_tensor
+
+
+def _has_cpu_scalar_operand(tensors) -> bool:
+    """A CPU 0-dim tensor next to an rbln tensor: a scalar operand (the CUDA rule)."""
+    return any(t.device.type == "rbln" for t in tensors) and any(
+        t.dim() == 0 and t.device.type == "cpu" for t in tensors
+    )
+
+
+def _cpu_scalars_to_device(args, kwargs):
+    """Move CPU 0-dim tensor operands to the device of the op's rbln tensors.
+
+    Returns ``(args, kwargs, moved)``; when there is nothing to move, ``moved`` is False
+    and the arguments are returned as they are.
+    """
+    tensors = [t for t in (*args, *kwargs.values()) if isinstance(t, torch.Tensor)]
+    if not _has_cpu_scalar_operand(tensors):
+        return args, kwargs, False
+    device = next(t.device for t in tensors if t.device.type == "rbln")
+
+    def move(t):
+        if isinstance(t, torch.Tensor) and t.dim() == 0 and t.device.type == "cpu":
+            return t.to(device)
+        return t
+
+    return tuple(move(a) for a in args), {k: move(v) for k, v in kwargs.items()}, True
 
 
 def _graph_input_order(runtime, tensors):
