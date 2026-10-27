@@ -419,14 +419,12 @@ def run_allreduce_size_test(
         # Verify result - sum of all rank values
         expected_value = sum(range(1, world_size + 1))  # 1+2+...+world_size
 
-        # Check first and last elements to verify correctness
-        assert tensor[0] == expected_value, (
+        result = tensor.cpu()
+        mismatch = (result != expected_value).nonzero()
+        assert mismatch.numel() == 0, (
             f"allreduce size test failed on rank {rank} for size {size_bytes} bytes: "
-            f"expected={expected_value}, actual={tensor[0]}"
-        )
-        assert tensor[-1] == expected_value, (
-            f"allreduce size test failed on rank {rank} for size {size_bytes} bytes (last element): "
-            f"expected={expected_value}, actual={tensor[-1]}"
+            f"{mismatch.numel()} mismatched elements, first at index {mismatch[0].item()} "
+            f"(expected={expected_value}, actual={result[mismatch[0]].item()})"
         )
 
     finally:
@@ -838,7 +836,18 @@ class TestAllReduceOddWorldSizeRBLN(TestProcessGroupRBLNBase):
         super().setUp()
         self.world_size = 3
 
-    @parametrize("size", [1536, 4096, 6138, 6150])
+    @parametrize(
+        "size",
+        [
+            2,
+            1536,
+            4096,
+            6138,
+            6150,
+            (3 * MiB + 2),
+            (3 * MiB + 1536),
+        ],
+    )
     @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
     def test_allreduce_float16(self, size, c10d_async_env):
         """Test allreduce with specified bytes using torch.float16."""
