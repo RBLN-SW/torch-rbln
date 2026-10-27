@@ -239,18 +239,22 @@ class TestDispatchShimNanInfFallback(TestCase):
         result = z.to("cpu")
         self.assertTrue(torch.isnan(result[0]))
 
-    def test_clean_input_takes_device_path(self) -> None:
-        # Regression: clean inputs must NOT be misclassified as needing
-        # fallback. Verified indirectly: a warm-cache entry must be installed
-        # (the fallback path never installs).
+    @dtypes(*SUPPORTED_DTYPES)
+    def test_clean_input_takes_device_path(self, dtype) -> None:
+        # Regression: clean inputs of every dispatch dtype must NOT be
+        # misclassified as needing fallback. Two pieces of evidence: no CPU
+        # fallback was recorded on any path, and a warm-cache entry was
+        # installed (the fallback path never installs).
         # Use a 64-elem-aligned shape so ``compile_and_run_view_aware`` keeps
         # the call on the device path; unaligned last-dim now routes through
         # ``cpu_fallback_path`` and never primes the warm cache.
+        x = torch.arange(64, dtype=dtype, device="rbln")
+        y = torch.ones(64, dtype=dtype, device="rbln")
         size_before = _C._warmcache_size()
-        x = torch.arange(64, dtype=torch.float16, device="rbln")
-        y = torch.ones(64, dtype=torch.float16, device="rbln")
+        _C._dispatch_fallback_by_op_reset()
         z = x + y
-        self.assertEqual(z.to("cpu"), torch.arange(1, 65, dtype=torch.float16))
+        self.assertEqual(_C._dispatch_fallback_by_op(), [])
+        self.assertEqual(z.to("cpu"), torch.arange(1, 65, dtype=dtype))
         # At least one new warm-cache entry was installed.
         self.assertGreater(_C._warmcache_size(), size_before)
 
