@@ -432,7 +432,7 @@ def run_allreduce_size_test(
 
 
 def run_allreduce_noncontiguous_test(rank: int, world_size: int, backend: str, rows: int, cols: int) -> None:
-    """Test that allreduce rejects a non-contiguous float16 tensor instead of returning stale data."""
+    """Test that allreduce rejects a non-contiguous float16 tensor."""
     setup_environment(rank, world_size)
     dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
     device = torch.device("rbln", rank)
