@@ -450,7 +450,7 @@ void register_internal_api(py::module_& module) {
   module.def(
       "_dispatch_fallback_reasons",
       &torch_rbln::shim::diag_dump_fallback_reasons,
-      "DIAG/PROFILER: cpu_fallback reason counts [dtype-not-dispatch, nan/inf input, all-scalar]");
+      "DIAG/PROFILER: cpu_fallback reason counts [dtype-not-dispatch, nan/inf input, all-scalar, out-dtype]");
   module.def(
       "_dispatch_fallback_reasons_reset",
       &torch_rbln::shim::diag_reset_fallback_reasons,

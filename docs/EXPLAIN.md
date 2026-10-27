@@ -143,7 +143,8 @@ dispatch/cpu_fallback  2,000       --  try: graph mode, or a supported dtype
    oversubscription, not a per-op absolute; see §10).
 7. **`why`**: the reason each of the C++ shim's own fallbacks fired —
    `dtype-not-dispatch` (the op's dtype is outside the device dispatch policy),
-   `nan/inf input`, or `all-scalar inputs`.
+   `nan/inf input`, `all-scalar inputs`, or `out-dtype` (a float `out=` of
+   another dtype than the inputs, which the op's CPU kernel accepts or rejects).
 8. **(A) `candidates (no fast-path handler)`**: of the ops that fell back through
    the boxed C++ CPU fallback, which ones have **no CPU fast-path handler** —
    i.e. your **optimization candidates** (registered ops already bypass the slow
@@ -344,8 +345,8 @@ And the auxiliary readouts (in `dump()`):
 
 - `cpu_fallback_by_op`, `recompile_by_op` — per-op counts of what fell back to
   the CPU (every op-level fallback path) and of what recompiled.
-- `cpu_fallback_reasons` — the `dtype-not-dispatch / nan-inf / all-scalar`
-  breakdown of the C++ shim's own fallbacks.
+- `cpu_fallback_reasons` — the `dtype-not-dispatch / nan-inf / all-scalar /
+  out-dtype` breakdown of the C++ shim's own fallbacks.
 - `cpu_fallback_unaccelerated` (A) — fallback ops with no fast-path handler,
   among those that went through the boxed C++ CPU fallback (the only path that
   consults one).

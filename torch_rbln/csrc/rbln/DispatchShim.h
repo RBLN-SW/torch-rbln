@@ -63,10 +63,10 @@ std::string python_fallback_op_name(const std::string& op_name);
 std::vector<std::pair<std::string, uint64_t>> diag_dump_recompile_by_op();
 void diag_reset_recompile_by_op();
 
-// DIAG/PROFILER: cpu_fallback reason histogram, counts for reason codes 1..3:
-// [dtype-not-dispatch, nan/inf input, all-scalar]. Recorded on the fallback
-// branch only (reason already computed by quick_fallback_check) -> ON==OFF
-// preserved.
+// DIAG/PROFILER: cpu_fallback reason histogram, counts for reason codes 1..4:
+// [dtype-not-dispatch, nan/inf input, all-scalar, out-dtype]. Recorded on the
+// fallback branch only (reason already computed by quick_fallback_check) ->
+// ON==OFF preserved.
 std::vector<uint64_t> diag_dump_fallback_reasons();
 void diag_reset_fallback_reasons();
 

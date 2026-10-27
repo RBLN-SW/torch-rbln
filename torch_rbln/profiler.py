@@ -106,7 +106,7 @@ _HOST_BOUNCE_SITES = (0, 1, 2, 3)
 
 # cpu_fallback reason names; index matches the runtime histogram order (the WHY
 # behind dispatch.cpu_fallback). See quick_fallback_check in DispatchShim.cpp.
-_FALLBACK_REASON_NAMES = ("dtype-not-dispatch", "nan/inf input", "all-scalar inputs")
+_FALLBACK_REASON_NAMES = ("dtype-not-dispatch", "nan/inf input", "all-scalar inputs", "out-dtype")
 
 # Must match the reason order in rebel-compiler vmemory_manager.cc.
 _RUNTIME_REASONS: tuple[tuple[str, str], ...] = (
@@ -255,9 +255,9 @@ def _read_recompile_by_op() -> dict[str, int]:
 
 
 def _read_fallback_reasons() -> list[int]:
-    """cpu_fallback reason counts [dtype-not-dispatch, nan/inf input, all-scalar] for
-    the C++ shim's own fallbacks, or [] if the loaded torch_rbln._C predates the binding
-    (graceful degrade).
+    """cpu_fallback reason counts [dtype-not-dispatch, nan/inf input, all-scalar,
+    out-dtype] for the C++ shim's own fallbacks, or [] if the loaded torch_rbln._C
+    predates the binding (graceful degrade).
     """
     from torch_rbln import _C  # noqa: PLC0415
 

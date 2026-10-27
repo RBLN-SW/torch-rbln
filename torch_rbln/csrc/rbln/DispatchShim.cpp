@@ -43,9 +43,10 @@ std::atomic<uint64_t> g_diag_ns_warm_hit{
     0}; // total ns inside warm-cache hit path
 std::atomic<uint64_t> g_diag_ns_miss{0}; // total ns inside miss path
 // cpu_fallback reason histogram. index = reason code from quick_fallback_check
-// (1=dtype-not-dispatch, 2=nan/inf input, 3=all-scalar). Bumped on the fallback
-// branch only (the reason is already computed there) -> ON==OFF preserved.
-std::array<std::atomic<uint64_t>, 4> g_fallback_reason{};
+// (1=dtype-not-dispatch, 2=nan/inf input, 3=all-scalar, 4=out-dtype). Bumped on
+// the fallback branch only (the reason is already computed there) -> ON==OFF
+// preserved.
+std::array<std::atomic<uint64_t>, 5> g_fallback_reason{};
 
 // Warm-cache hit path per-segment timers. Accumulated only on successful hits
 // so per-segment averages = ns_X / n_hits give the steady-state breakdown.
@@ -572,8 +573,14 @@ inline std::optional<ScalarValue> wrapped_scalar_value(const at::Tensor& t) {
 // would force the shortcut for the most common binary-op-with-python-scalar
 // case and bypass the compile-path that the test suite expects.
 // Returns 0 = no fallback, else the reason code (1=dtype-not-dispatch,
-// 2=nan/inf input, 3=all-scalar). The reason is already decided here; returning
-// it instead of a bool lets the caller attribute WHY at zero extra cost.
+// 2=nan/inf input, 3=all-scalar, 4=out-dtype). The reason is already decided
+// here; returning it instead of a bool lets the caller attribute WHY at zero
+// extra cost.
+//
+// out-dtype: a float `out` whose dtype differs from the float inputs'. Whether
+// such an `out` is accepted is each op's own rule (add casts into it, neg and
+// mm reject it), so the op runs on CPU, where its kernel applies that rule and
+// computes the exact result.
 int quick_fallback_check(
     torch::jit::Stack* stack,
     const SchemaCache& cache,
@@ -584,6 +591,7 @@ int quick_fallback_check(
   bool has_input_tensor = false;
   bool all_input_scalar = true;
   bool nan_inf_found = false;
+  std::optional<c10::ScalarType> input_dtype;
   for (size_t i = 0; i < cache.num_args; ++i) {
     const auto& iv = args[i];
     if (!iv.isTensor()) {
@@ -628,12 +636,25 @@ int quick_fallback_check(
     if (!c10::rbln::is_dispatch_dtype_rt(t.scalar_type())) {
       return 1; // dtype-not-dispatch (dtype outside the dispatch policy)
     }
+    if (!input_dtype) {
+      input_dtype = t.scalar_type();
+    }
     if (t.dim() != 0) {
       all_input_scalar = false;
     }
   }
   if (nan_inf_found) {
     return 2; // nan/inf in input (non-deploy debug scan)
+  }
+  if (cache.out_positional_idx >= 0 && input_dtype &&
+      c10::isFloatingType(*input_dtype)) {
+    const auto& out_iv = args[cache.out_positional_idx];
+    if (out_iv.isTensor() && out_iv.toTensor().defined()) {
+      const auto out_dtype = out_iv.toTensor().scalar_type();
+      if (c10::isFloatingType(out_dtype) && out_dtype != *input_dtype) {
+        return 4; // out-dtype (float out of another dtype; see above)
+      }
+    }
   }
   return (has_input_tensor && all_input_scalar) ? 3
                                                 : 0; // 3 = all-scalar inputs
@@ -1331,12 +1352,13 @@ void diag_reset_recompile_by_op() {
 }
 
 std::vector<uint64_t> diag_dump_fallback_reasons() {
-  // counts for reason codes 1..3: [dtype-not-dispatch, nan/inf input,
-  // all-scalar].
+  // counts for reason codes 1..4: [dtype-not-dispatch, nan/inf input,
+  // all-scalar, out-dtype].
   return {
       g_fallback_reason[1].load(std::memory_order_relaxed),
       g_fallback_reason[2].load(std::memory_order_relaxed),
       g_fallback_reason[3].load(std::memory_order_relaxed),
+      g_fallback_reason[4].load(std::memory_order_relaxed),
   };
 }
 

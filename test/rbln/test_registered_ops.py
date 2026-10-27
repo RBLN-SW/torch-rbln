@@ -16,6 +16,7 @@ from torch.testing._internal.common_device_type import dtypes, instantiate_devic
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
 from test.utils import SUPPORTED_DTYPES
+from torch_rbln import _C
 from torch_rbln._internal.ops_utils import (
     _detect_view_recipe,
     _simulate_recipe,
@@ -525,6 +526,20 @@ class TestRegisteredPythonOps(TestCase):
         self.assertEqual(result.cpu(), expected.cpu(), atol=ATOL, rtol=RTOL)
         self.assertEqual(result.device, self.rbln_device)
         self.assertEqual(result.dtype, expected.dtype)
+
+    @parametrize("out_dtype", [torch.float16, torch.bfloat16])
+    def test_add_fp32_into_lower_precision_out(self, out_dtype):
+        """fp32 inputs, fp16/bf16 out=: PyTorch casts the result into out, so the device
+        path must too. Cold warm cache, so this is the call that compiles.
+        """
+        x = torch.full((64,), 2.0)
+        y = torch.full((64,), 3.0)
+        expected = torch.empty(64, dtype=out_dtype)
+        torch.add(x, y, out=expected)
+        out = torch.empty(64, dtype=out_dtype, device=self.rbln_device)
+        _C._warmcache_clear()
+        torch.add(x.to(self.rbln_device), y.to(self.rbln_device), out=out)
+        self.assertEqual(out.cpu(), expected)
 
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("shape", TEST_SHAPES_SUBSET)
