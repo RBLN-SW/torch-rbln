@@ -17,9 +17,19 @@
 #include <torch_rbln/csrc/rbln/WarmCache.h>
 #include <torch_rbln/csrc/rbln/profiler/kineto/rbln_kineto_adapter.h>
 #include <exception>
+#include <optional>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace {
+
+// Holds a c10::rbln::CpuFallbackScope for the length of a Python `with` block.
+struct PyCpuFallbackScope {
+  explicit PyCpuFallbackScope(std::string name) : op_name(std::move(name)) {}
+  std::string op_name;
+  std::optional<c10::rbln::CpuFallbackScope> scope;
+};
 
 /**
  * @brief Add PyMethodDef array to a vector, removing null terminators
@@ -386,15 +396,24 @@ void register_internal_api(py::module_& module) {
       "Internal: configure target's device layout like ref (no data copy)");
 
   // Logging utilities
+  // Python-path CPU fallback, as a context manager around c10's
+  // CpuFallbackScope: `with _CpuFallbackScope(op_name): <run it on CPU>`.
+  py::class_<PyCpuFallbackScope>(module, "_CpuFallbackScope")
+      .def(py::init<std::string>(), py::arg("op_name"))
+      .def(
+          "__enter__",
+          [](PyCpuFallbackScope& self) {
+            self.scope.emplace(
+                torch_rbln::shim::python_fallback_op_name(self.op_name),
+                c10::rbln::CpuFallbackPath::kPython);
+          })
+      .def("__exit__", [](PyCpuFallbackScope& self, const py::args& /*exc*/) {
+        self.scope.reset();
+      });
   module.def(
-      "_record_cpu_fallback",
-      [](const std::string& op_name) {
-        c10::rbln::record_cpu_fallback(
-            torch_rbln::shim::python_fallback_op_name(op_name),
-            c10::rbln::CpuFallbackPath::kPython);
-      },
-      py::arg("op_name"),
-      "Internal: count and log a CPU fallback taken by the Python path");
+      "_cpu_fallback_ns",
+      &c10::rbln::cpu_fallback_ns,
+      "DIAG/PROFILER: wall ns spent in CPU fallbacks, every fallback path");
 
   // C++ dispatch shim: install a boxed C++ handler on PrivateUse1 for the given
   // op, with pre-check + cpu_fallback_rbln on fail and Python callback on pass.

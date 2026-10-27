@@ -110,34 +110,52 @@ class C10_RBLN_API RBLNScopeGuard {
 enum class CpuFallbackPath : uint8_t { kBoxed, kPython };
 
 /**
- * @brief Records that an operation ran on CPU instead of RBLN.
+ * @brief Marks one CPU fallback: an operation running on CPU instead of RBLN.
  *
- * Every torch-rbln op-level CPU fallback goes through here: cpu_fallback_rbln
- * (which the C++ dispatch shim, the boxed fallback and advanced indexing all
- * call) and the eager Python path. It counts the fallback per op (read by
- * torch.rbln.explain() via cpu_fallback_counts) and, when
+ * Every torch-rbln op-level CPU fallback runs inside one of these:
+ * cpu_fallback_rbln (which the C++ dispatch shim, the boxed fallback and
+ * advanced indexing all call), and the eager Python path through the
+ * `_CpuFallbackScope` context manager. Construction counts the fallback per
+ * op (cpu_fallback_counts, read by torch.rbln.explain()) and, when
  * `TORCH_RBLN_LOG_LEVEL` is `INFO` or lower, logs it with a UserWarning that
- * carries the caller's location.
- *
- * @param full_op_name The operation's name, with its overload when known.
- * @param path Where the fallback ran.
+ * carries the caller's location. Destruction adds the scope's wall time to
+ * cpu_fallback_ns() when it is the outermost scope on the thread: a fallback
+ * that runs inside another (an SDPA fallback converting its mask on the
+ * device, say) is counted, but its time is already part of the outer one.
  *
  * @code
- * c10::rbln::record_cpu_fallback("aten::mul.out", CpuFallbackPath::kBoxed);
+ * {
+ *   const CpuFallbackScope fallback("aten::mul.out", CpuFallbackPath::kBoxed);
+ *   // ... run the op on CPU ...
+ * }
  * // Output (at INFO):
  * // [2026-01-01 00:00:00.000][I] `aten::mul.out` op ran on CPU instead of RBLN
  * // /llama/modeling_llama.py:73: UserWarning: TRACE
  * //   result, result_shape = mul_rbln(*args, **kwargs)
  * @endcode
  */
-C10_RBLN_API void record_cpu_fallback(
-    std::string_view full_op_name,
-    CpuFallbackPath path);
+class C10_RBLN_API CpuFallbackScope {
+ public:
+  CpuFallbackScope(std::string_view full_op_name, CpuFallbackPath path);
+  ~CpuFallbackScope();
+  CpuFallbackScope(const CpuFallbackScope&) = delete;
+  CpuFallbackScope& operator=(const CpuFallbackScope&) = delete;
+  CpuFallbackScope(CpuFallbackScope&&) = delete;
+  CpuFallbackScope& operator=(CpuFallbackScope&&) = delete;
 
-// Per-op counts of record_cpu_fallback calls, non-zero only, and their reset.
+ private:
+  bool outermost_;
+  uint64_t start_ns_;
+};
+
+// Per-op counts of CPU fallbacks, non-zero only.
 C10_RBLN_API std::vector<std::pair<std::string, uint64_t>> cpu_fallback_counts();
+// Wall time of the CPU fallbacks those counts cover; nested fallbacks are
+// timed once, as part of the outermost.
+C10_RBLN_API uint64_t cpu_fallback_ns();
+// Clears the counts and the wall time.
 C10_RBLN_API void reset_cpu_fallback_counts();
-// Names among cpu_fallback_counts recorded at least once through
+// Names among cpu_fallback_counts counted at least once through
 // CpuFallbackPath::kBoxed: the fallbacks a CPU fast-path handler could serve.
 C10_RBLN_API std::vector<std::string> boxed_cpu_fallback_ops();
 

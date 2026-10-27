@@ -137,10 +137,10 @@ dispatch/cpu_fallback  2,000       --  try: graph mode, or a supported dtype
    (`dispatch/*`) carry just the fix.
 6. **Detail blocks, grouped under their parent signal** (in table order,
    blank-line separated — no flat pile where ownership must be inferred).
-   `dispatch/cpu_fallback:` shows its per-op counts — with the call-site under
-   `with_stack=True` for the C++ shim's own fallbacks — and the `(sum … wall)`
-   wall time of those shim fallbacks (a _weak, noisy_ A/B signal — inflated
-   under oversubscription, not a per-op absolute; see §10).
+   `dispatch/cpu_fallback:` shows its per-op counts — with the call-site, where
+   one was captured under `with_stack=True` — and the `(sum … wall)` wall time of
+   those same fallbacks (a _weak, noisy_ A/B signal — inflated under
+   oversubscription, not a per-op absolute; see §10).
 7. **`why`**: the reason each of the C++ shim's own fallbacks fired —
    `dtype-not-dispatch` (the op's dtype is outside the device dispatch policy),
    `nan/inf input`, or `all-scalar inputs`.
@@ -345,8 +345,7 @@ And the auxiliary readouts (in `dump()`):
 - `cpu_fallback_by_op`, `recompile_by_op` — per-op counts of what fell back to
   the CPU (every op-level fallback path) and of what recompiled.
 - `cpu_fallback_reasons` — the `dtype-not-dispatch / nan-inf / all-scalar`
-  breakdown of the C++ shim's own fallbacks (`dispatch.cpu_fallback_ns` covers
-  the same set).
+  breakdown of the C++ shim's own fallbacks.
 - `cpu_fallback_unaccelerated` (A) — fallback ops with no fast-path handler,
   among those that went through the boxed C++ CPU fallback (the only path that
   consults one).

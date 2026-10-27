@@ -43,10 +43,9 @@ void register_cpp_shim(
 //   n_miss       - cold/miss path (Python compile via py_fn)
 //   ns_warm_hit  - cumulative ns inside warm-cache hit path (~all in rebel run)
 //   ns_miss      - cumulative ns inside miss path (Python compile + first run)
-//   ns_fallback  - cumulative ns inside cpu_fallback_rbln (the COST of
-//                  fallbacks, so the report can separate many-cheap from
-//                  few-expensive)
-std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>
+// The wall time of CPU fallbacks is not here: every fallback path adds it to
+// c10::rbln::cpu_fallback_ns().
+std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>
 diag_dump_dispatch_paths();
 void diag_reset_dispatch_paths();
 

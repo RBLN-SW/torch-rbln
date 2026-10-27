@@ -2163,8 +2163,14 @@ def cpu_fallback_path(target_ops, args, *, result: torch.Tensor | None = None, o
         torch.Tensor: The result of the target operation, converted back to the 'rbln'
         device.
     """
-    if op_name is not None:
-        rbln_record_cpu_fallback(op_name)
+    if op_name is None:
+        return _run_on_cpu(target_ops, args, result, op_kwargs)
+    with rbln_record_cpu_fallback(op_name):
+        return _run_on_cpu(target_ops, args, result, op_kwargs)
+
+
+def _run_on_cpu(target_ops, args, result, op_kwargs):
+    """Body of ``cpu_fallback_path``: run ``target_ops`` on CPU copies of the inputs."""
     cpu_args = to_cpu(args)
     cpu_op_kwargs = to_cpu(op_kwargs)
     result_cpu = target_ops(*cpu_args, **cpu_op_kwargs)

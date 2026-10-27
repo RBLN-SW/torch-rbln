@@ -103,11 +103,13 @@ def rbln_log_error(msg: str):
 
 
 def rbln_record_cpu_fallback(op_name: str):
-    """Records that an operation ran on CPU instead of RBLN.
+    """Context manager around one CPU fallback: ``with rbln_record_cpu_fallback(name):``
+    then run the op on CPU inside the block.
 
-    Counts the fallback per op, which ``torch.rbln.explain()`` reports, and when
-    `TORCH_RBLN_LOG_LEVEL` is `INFO` or lower logs it with a UserWarning that shows
-    the caller's location. Same record the C++ fallback paths make.
+    Entering counts the fallback per op, which ``torch.rbln.explain()`` reports, and
+    when `TORCH_RBLN_LOG_LEVEL` is `INFO` or lower logs it with a UserWarning that shows
+    the caller's location. Leaving adds the block's wall time to the same total as the
+    C++ fallback paths (c10::rbln::CpuFallbackScope), once for nested fallbacks.
 
     Example output (at INFO):
         [2026-01-01 00:00:00.000][I] `aten::mul` op ran on CPU instead of RBLN
@@ -119,4 +121,4 @@ def rbln_record_cpu_fallback(op_name: str):
     """
     import torch_rbln._C  # noqa: PLC0415
 
-    torch_rbln._C._record_cpu_fallback(op_name)
+    return torch_rbln._C._CpuFallbackScope(op_name)
