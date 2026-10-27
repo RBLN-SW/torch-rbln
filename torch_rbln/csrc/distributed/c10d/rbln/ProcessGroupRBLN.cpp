@@ -57,12 +57,12 @@ namespace {
 // v3.0.0 enforced 512 B for CS-based AllReduce/ReduceScatter and 128 B for
 // AllGather; v3.1+ relaxed CS alignment to 128 B. Keep these at the tighter
 // historical values so a single `torch-rbln` build runs against either driver
-// generation — 512-aligned trivially satisfies the newer 128 B requirement.
+// generation.
 constexpr size_t RCCL_ALLGATHER_ALIGNMENT = 128ULL;
 constexpr size_t RCCL_ALLREDUCE_ALIGNMENT = 512ULL;
 constexpr size_t RCCL_REDUCE_SCATTER_ALIGNMENT = RCCL_ALLREDUCE_ALIGNMENT;
-// The driver splits AllReduce data into world_size chunks and requires each
-// chunk to be RCCL_DATA_ALIGNSIZE_FOR_CS (128 B) aligned.
+// AllReduce also splits data into world_size chunks, each 128 B aligned, so its
+// alignment is lcm(512 B, 128 B * world_size) and grows for world 3 and 5-8.
 constexpr size_t RCCL_ALLREDUCE_CHUNK_ALIGNMENT = 128ULL;
 
 size_t getAllReduceAlignment(int world_size) {
@@ -1249,6 +1249,8 @@ class AllreduceRBLNWork : public RBLNWork {
       RBLN_CHECK(
           rbln_dtype == ::rbln::DataType::Float16,
           "RCCL AllReduce only supports float16 dtype");
+      RBLN_CHECK(
+          input.is_contiguous(), "RCCL AllReduce requires contiguous tensors");
 
       const size_t elem_size = getRcclElementSize(rbln_dtype);
       const size_t align_bytes = getAllReduceAlignment(worldSize_);

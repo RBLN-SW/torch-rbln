@@ -431,6 +431,22 @@ def run_allreduce_size_test(
         dist.destroy_process_group()
 
 
+def run_allreduce_noncontiguous_test(rank: int, world_size: int, backend: str, rows: int, cols: int) -> None:
+    """Test that allreduce rejects a non-contiguous float16 tensor instead of returning stale data."""
+    setup_environment(rank, world_size)
+    dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+    device = torch.device("rbln", rank)
+
+    try:
+        tensor = torch.full([rows, cols], float(rank + 1), dtype=torch.float16).to(device).t()
+        assert not tensor.is_contiguous()
+        with pytest.raises(RuntimeError, match="requires contiguous"):
+            dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+
+    finally:
+        dist.destroy_process_group()
+
+
 def run_unsupported_op_test(rank: int, world_size: int, backend: str) -> None:
     """Test that unsupported operations raise appropriate errors."""
     setup_environment(rank, world_size)
@@ -829,8 +845,8 @@ class TestAllReduceSizesRBLN(TestProcessGroupRBLNBase):
 
 @pytest.mark.serial
 @pytest.mark.npu(count=4)
-class TestAllReduceOddWorldSizeRBLN(TestProcessGroupRBLNBase):
-    """Test allreduce on world size 3 with sizes not aligned to 128 B * world_size."""
+class TestAllReduceWorldSize3RBLN(TestProcessGroupRBLNBase):
+    """Test allreduce on world size 3 with aligned and unaligned sizes."""
 
     def setUp(self):
         super().setUp()
@@ -858,6 +874,17 @@ class TestAllReduceOddWorldSizeRBLN(TestProcessGroupRBLNBase):
             (self.world_size, self.backend, size, torch.float16),
         )
 
+    @parametrize("shape", [(16, 16), (32, 64)])
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_allreduce_noncontiguous(self, shape, c10d_async_env):
+        """Test allreduce rejects a transposed float16 tensor."""
+        self.run_c10d_test(
+            c10d_async_env,
+            self.world_size,
+            run_allreduce_noncontiguous_test,
+            (self.world_size, self.backend, *shape),
+        )
+
 
 # Instantiate device type tests for all test classes
 instantiate_device_type_tests(TestBroadcastRBLN, globals(), only_for="privateuse1")
@@ -869,7 +896,7 @@ instantiate_device_type_tests(TestBarrierRBLN, globals(), only_for="privateuse1"
 instantiate_device_type_tests(TestSendRecvRBLN, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestUnsupportedOpsRBLN, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestAllReduceSizesRBLN, globals(), only_for="privateuse1")
-instantiate_device_type_tests(TestAllReduceOddWorldSizeRBLN, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestAllReduceWorldSize3RBLN, globals(), only_for="privateuse1")
 
 
 if __name__ == "__main__":
