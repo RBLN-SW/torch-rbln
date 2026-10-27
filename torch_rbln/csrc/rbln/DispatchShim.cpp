@@ -23,6 +23,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -401,7 +402,9 @@ bool is_deploy_mode() {
   return env != nullptr && std::strcmp(env, "ON") == 0;
 }
 
-bool is_nan_inf_check_disabled() {
+// True when TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK (a comma-separated list)
+// names `case_name` or "all".
+bool is_fallback_case_disabled(std::string_view case_name) {
   const char* env = std::getenv("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK");
   if (env == nullptr)
     return false;
@@ -419,7 +422,7 @@ bool is_nan_inf_check_disabled() {
     } else {
       token.clear();
     }
-    if (token == "all" || token == "nan_inf")
+    if (token == "all" || token == case_name)
       return true;
     start = end + 1;
   }
@@ -587,7 +590,7 @@ int quick_fallback_check(
     const std::vector<size_t>& skip_dtype_args) {
   auto args = torch::jit::last(stack, cache.num_args);
   const bool nan_inf_scan_enabled =
-      !is_deploy_mode() && !is_nan_inf_check_disabled();
+      !is_deploy_mode() && !is_fallback_case_disabled("nan_inf");
   bool has_input_tensor = false;
   bool all_input_scalar = true;
   bool nan_inf_found = false;
@@ -837,6 +840,9 @@ bool try_warmcache_hit(
   CacheEntryPtr entry = wc.find(key);
   const uint64_t _seg_t_lookup = now_ns();
   if (!entry)
+    return false;
+  // The alignment fallback is back on: let the Python path apply it.
+  if (entry->align_bypassed && !is_fallback_case_disabled("align"))
     return false;
 
   // Input binding, in the order tensor inputs appear on the stack. Device-only:
@@ -1436,7 +1442,8 @@ bool install_warmcache_from_pending(
     pybind11::object dyn_runtime,
     const pybind11::object& runtime_handle,
     const std::vector<std::tuple<std::vector<int64_t>, std::string, bool>>&
-        out_profiles) {
+        out_profiles,
+    bool align_bypassed) {
   PendingInstall p = take_pending();
   if (!p.valid)
     return false;
@@ -1463,6 +1470,7 @@ bool install_warmcache_from_pending(
   }
 
   CacheEntry entry;
+  entry.align_bypassed = align_bypassed;
   entry.py_dyn_runtime = std::move(dyn_runtime);
   // ``native_handle()`` is rebel's declared way to reach the runtime from C,
   // and the handle it returns is borrowed — so the entry holds a reference to

@@ -1828,9 +1828,10 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     def _last_dim_unaligned(t):
         return isinstance(t, torch.Tensor) and t.dim() > 0 and t.shape[-1] % 64 != 0
 
-    if (
-        any(_last_dim_unaligned(a) for a in args) or any(_last_dim_unaligned(v) for v in kwargs_filtered.values())
-    ) and "align" not in _parse_disabled_fallback_cases():
+    unaligned = any(_last_dim_unaligned(a) for a in args) or any(
+        _last_dim_unaligned(v) for v in kwargs_filtered.values()
+    )
+    if unaligned and "align" not in _parse_disabled_fallback_cases():
         return cpu_fallback_path(
             op_callable,
             args,
@@ -1950,8 +1951,10 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     if result_tensor is None:
         result_tensor = external_result
     if not has_views and not moved_cpu_scalars:
-        # install_pending empties the list it is given; the entry keeps its own.
-        _install_warm_cache_pending(list(entry.runtime_holder), external_result)
+        # install_pending empties the list it is given; the entry keeps its own. An
+        # unaligned call got here only because `align` is disabled: mark its entry,
+        # so the C++ hit path skips it once the alignment fallback is on again.
+        _install_warm_cache_pending(list(entry.runtime_holder), external_result, align_bypassed=unaligned)
     return result_tensor
 
 
@@ -2016,7 +2019,7 @@ def _parse_disabled_fallback_cases() -> frozenset:
     cases.
 
     Read live (NOT lru_cached): the C++ dispatch gate
-    (DispatchShim.is_nan_inf_check_disabled) reads the same env live, so caching here
+    (DispatchShim.is_fallback_case_disabled) reads the same env live, so caching here
     would let the Python cold path and the C++ warm path disagree, and would latch the
     first value across a whole xdist worker (tests toggle it per-test via patch.dict).
     This is the cold/miss path, so re-parsing per call is negligible. Warn once per

@@ -335,7 +335,7 @@ class TestDispatchShimNanInfFallback(TestCase):
 @pytest.mark.npu(count=1)
 class TestDispatchShimGateLiveRead(TestCase):
     """Both NaN/Inf-scan gates -- ``TORCH_RBLN_DEPLOY`` (``is_deploy_mode``) and
-    ``TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK`` (``is_nan_inf_check_disabled``) in
+    ``TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK`` (``is_fallback_case_disabled``) in
     ``DispatchShim.cpp`` -- are read live per dispatch, not cached in a process-lifetime
     ``static``. A re-introduced static cache in either would latch the first value and
     fail its toggle. They are separate functions, so each is toggled separately.

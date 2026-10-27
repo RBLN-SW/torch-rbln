@@ -98,10 +98,14 @@ void diag_reset_warm_segments();
 // ``native_handle()`` as the RblnSyncRuntime the hit path drives, and keeps a
 // reference to the object so that borrowed handle stays valid.
 // `out_profiles` is a list of (shape, dtype_str, is_rbln) per output tensor.
+// `align_bypassed` marks an entry for an unaligned call that ran on the device
+// only because the alignment fallback was disabled
+// (CacheEntry::align_bypassed).
 bool install_warmcache_from_pending(
     pybind11::object dyn_runtime,
     const pybind11::object& runtime_handle,
     const std::vector<std::tuple<std::vector<int64_t>, std::string, bool>>&
-        out_profiles);
+        out_profiles,
+    bool align_bypassed);
 
 } // namespace torch_rbln::shim

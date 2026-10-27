@@ -533,7 +533,7 @@ class TestMemoryStats(TestCase):
 > only shows up when xdist happens to schedule the toggling test first (e.g. the
 > `test_runtime_hidden_d2h` / eager-malloc flake). Read such flags **live**
 > (`std::getenv` per call — see `is_deploy_mode()` /
-> `is_nan_inf_check_disabled()` in `DispatchShim.cpp`), and if a Python
+> `is_fallback_case_disabled()` in `DispatchShim.cpp`), and if a Python
 > `@lru_cache` gate must respond to per-test env, `cache_clear()` it in the
 > fixture's teardown.
 >

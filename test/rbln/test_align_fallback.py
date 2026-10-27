@@ -33,6 +33,29 @@ print("RESULT", (got.device.type, evidence))
 """
 
 
+# Disable the alignment fallback, let a warm-cache entry serve the unaligned add, then
+# remove the setting: the cached entry must not keep the call on the device.
+_RESTORE_SCENARIO = r"""
+import os, torch, torch_rbln
+from torch_rbln import _C
+a = torch.full((4, 3), 2.0, dtype=torch.bfloat16).to("rbln")
+b = torch.full((4, 3), 3.0, dtype=torch.bfloat16).to("rbln")
+out = torch.empty_like(a)
+_C._warmcache_clear()
+os.environ["TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK"] = "align"
+torch.add(a, b, out=out)
+hits = _C._dispatch_shim_diag_dump()[2]
+torch.add(a, b, out=out)
+torch.rbln.synchronize()
+warm_hit = _C._dispatch_shim_diag_dump()[2] > hits
+os.environ.pop("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK")
+_C._dispatch_fallback_by_op_reset()
+torch.add(a, b, out=out)
+torch.rbln.synchronize()
+print("RESULT", (warm_hit, dict(_C._dispatch_fallback_by_op()), out.cpu().tolist()))
+"""
+
+
 def _run_scenario(**env) -> tuple[str, dict]:
     """Run the unaligned bf16 add in a fresh interpreter with the env set, so the result
     does not depend on what earlier tests imported or patched in this process.
@@ -51,6 +74,12 @@ class TestAlignFallback(TestCase):
         self.assertEqual(device, "rbln")
         self.assertEqual(evidence["fallbacks"], {})
         self.assertGreater(evidence["compiled"], 0)
+
+    def test_restoring_the_default_reaches_a_cached_entry(self):
+        warm_hit, fallbacks, values = run_snippet(_RESTORE_SCENARIO, unset=("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK",))
+        self.assertTrue(warm_hit, "no warm hit while align was disabled; the case is not exercised")
+        self.assertGreater(fallbacks.get("aten::add.out", 0), 0, "the cached entry bypassed the alignment fallback")
+        self.assertEqual(values, [[5.0] * 3] * 4)
 
 
 if __name__ == "__main__":

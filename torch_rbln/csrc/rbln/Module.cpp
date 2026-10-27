@@ -572,7 +572,8 @@ void register_internal_api(py::module_& module) {
       "set by the shim on the way into the miss path",
       pybind11::arg("dyn_runtime"),
       pybind11::arg("runtime_handle"),
-      pybind11::arg("out_profiles"));
+      pybind11::arg("out_profiles"),
+      pybind11::arg("align_bypassed") = false);
 
   module.def(
       "_warmcache_set_enabled",

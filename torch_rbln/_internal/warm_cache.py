@@ -59,7 +59,7 @@ _DTYPE_KEY = {
 }
 
 
-def install_pending(runtime_holder: list, outputs: Any) -> bool:
+def install_pending(runtime_holder: list, outputs: Any, *, align_bypassed: bool = False) -> bool:
     # Hot codegen-injected path: skip work whenever WarmCache is disabled.
     # `_warmcache_is_enabled` is one C call; cheaper than the rest of this
     # function and makes WC OFF nearly free on the cold path.
@@ -93,6 +93,7 @@ def install_pending(runtime_holder: list, outputs: Any) -> bool:
         dyn_runtime=dyn_runtime,
         runtime_handle=runtime_handle,
         out_profiles=profiles,
+        align_bypassed=align_bypassed,
     )
     # Drop the harvested DynamoRuntime so subsequent compile invocations on the
     # same compiled callable don't grow the list unboundedly.
