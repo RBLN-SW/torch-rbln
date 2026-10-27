@@ -387,9 +387,13 @@ void register_internal_api(py::module_& module) {
 
   // Logging utilities
   module.def(
-      "_log_cpu_fallback",
-      &c10::rbln::log_cpu_fallback,
-      "Internal: log CPU fallback");
+      "_record_cpu_fallback",
+      [](const std::string& op_name) {
+        c10::rbln::record_cpu_fallback(
+            op_name, c10::rbln::CpuFallbackPath::kPython);
+      },
+      py::arg("op_name"),
+      "Internal: count and log a CPU fallback taken by the Python path");
 
   // C++ dispatch shim: install a boxed C++ handler on PrivateUse1 for the given
   // op, with pre-check + cpu_fallback_rbln on fail and Python callback on pass.
@@ -405,12 +409,16 @@ void register_internal_api(py::module_& module) {
       "DIAG: reset dispatch path counters");
   module.def(
       "_dispatch_fallback_by_op",
-      &torch_rbln::shim::diag_dump_fallback_by_op,
-      "DIAG/PROFILER: per-op CPU-fallback counts (list of (op_name, count), non-zero only)");
+      &c10::rbln::cpu_fallback_counts,
+      "DIAG/PROFILER: per-op CPU-fallback counts, every torch-rbln fallback path (list of (op_name, count), non-zero only)");
   module.def(
       "_dispatch_fallback_by_op_reset",
-      &torch_rbln::shim::diag_reset_fallback_by_op,
+      &c10::rbln::reset_cpu_fallback_counts,
       "DIAG/PROFILER: reset per-op CPU-fallback counts");
+  module.def(
+      "_dispatch_fallback_boxed_ops",
+      &c10::rbln::boxed_cpu_fallback_ops,
+      "DIAG/PROFILER: ops among the per-op counts that went through the boxed CPU fallback, where fast-path handlers apply");
   module.def(
       "_dispatch_recompile_by_op",
       &torch_rbln::shim::diag_dump_recompile_by_op,

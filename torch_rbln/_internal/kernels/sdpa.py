@@ -9,7 +9,7 @@ import math
 import torch
 
 from torch_rbln._internal.compile_cache import compile_rbln_cached
-from torch_rbln._internal.log_utils import rbln_log_cpu_fallback
+from torch_rbln._internal.log_utils import rbln_record_cpu_fallback
 from torch_rbln._internal.ops_utils import is_cpu_fallback_cases, SupportedDtypes, to_cpu
 
 
@@ -380,7 +380,7 @@ def _sdpa_compute_attn_weights(
     Causal mask is created outside the compiled graph to avoid RBLN memory issues.
     """
     if is_cpu_fallback_cases((query, key)):
-        rbln_log_cpu_fallback("sdpa (attn_weights)")
+        rbln_record_cpu_fallback("sdpa (attn_weights)")
         return _sdpa_attn_weights_fallback(query, key, attn_mask, is_causal=is_causal, scale=scale)
 
     query = query.contiguous()
@@ -458,7 +458,7 @@ def _sdpa_compute_output(
 ) -> torch.Tensor:
     """Compute output using RBLN compiled graph."""
     if is_cpu_fallback_cases((attn_weights, value)):
-        rbln_log_cpu_fallback("sdpa (output)")
+        rbln_record_cpu_fallback("sdpa (output)")
         return _sdpa_output_fallback(attn_weights, value, dropout_p)
 
     attn_weights = attn_weights.contiguous()
@@ -568,7 +568,7 @@ def _sdpa_backward_compiled(
 
     args = (grad_output, query, key, value, attn_weights)
     if is_cpu_fallback_cases(args):
-        rbln_log_cpu_fallback("sdpa_backward")
+        rbln_record_cpu_fallback("sdpa_backward")
         return _sdpa_backward_fallback(grad_output, query, key, value, attn_weights, scale)
 
     grad_output = grad_output.contiguous()
@@ -729,7 +729,7 @@ def scaled_dot_product_fused_attention_overrideable_rbln(
     # Check RBLN capability
     can_use, reason = can_use_rbln_sdpa(query, key, value, attn_bias)
     if not can_use:
-        rbln_log_cpu_fallback(f"sdpa_overrideable ({reason})")
+        rbln_record_cpu_fallback(f"sdpa_overrideable ({reason})")
         output = _sdpa_cpu_fallback(
             query, key, value, attn_bias, dropout_p, is_causal=is_causal, scale=scale, enable_gqa=False
         )
@@ -831,9 +831,9 @@ def scaled_dot_product_fused_attention_overrideable_backward_rbln(
 
     if use_cpu_fallback:
         if attn_weights is None:
-            rbln_log_cpu_fallback("sdpa_backward (cache miss)")
+            rbln_record_cpu_fallback("sdpa_backward (cache miss)")
         else:
-            rbln_log_cpu_fallback("sdpa_backward (tensor subclass)")
+            rbln_record_cpu_fallback("sdpa_backward (tensor subclass)")
         attn_weights = _sdpa_attn_weights_fallback(query, key, attn_bias, is_causal=is_causal, scale=computed_scale)
         grad_query, grad_key, grad_value = _sdpa_backward_fallback(
             grad_out, query, key, value, attn_weights, computed_scale

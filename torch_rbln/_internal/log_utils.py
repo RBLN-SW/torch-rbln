@@ -6,11 +6,11 @@ import warnings
 
 __all__ = [
     "rbln_is_debug_enabled",
-    "rbln_log_cpu_fallback",
     "rbln_log_debug",
     "rbln_log_error",
     "rbln_log_info",
     "rbln_log_warn",
+    "rbln_record_cpu_fallback",
 ]
 
 
@@ -102,16 +102,14 @@ def rbln_log_error(msg: str):
     _logger.error(msg)
 
 
-def rbln_log_cpu_fallback(op_name: str):
-    """Logs a message indicating that a specified operation ran on CPU instead of RBLN.
+def rbln_record_cpu_fallback(op_name: str):
+    """Records that an operation ran on CPU instead of RBLN.
 
-    This function logs an info-level message that includes the name of the operation
-    that ran on CPU. It also generates a UserWarning that includes the file location
-    where the warning is issued. The warning is formatted to indicate that a fallback to
-    CPU execution is being used for the specified operation. The message is logged when
-    `TORCH_RBLN_LOG_LEVEL` is set to `INFO` or lower.
+    Counts the fallback per op, which ``torch.rbln.explain()`` reports, and when
+    `TORCH_RBLN_LOG_LEVEL` is `INFO` or lower logs it with a UserWarning that shows
+    the caller's location. Same record the C++ fallback paths make.
 
-    Example output:
+    Example output (at INFO):
         [2026-01-01 00:00:00.000][I] `aten::mul` op ran on CPU instead of RBLN
         /llama/modeling_llama.py:73: UserWarning: TRACE
           result, result_shape = mul_rbln(*args, **kwargs)
@@ -121,4 +119,4 @@ def rbln_log_cpu_fallback(op_name: str):
     """
     import torch_rbln._C  # noqa: PLC0415
 
-    torch_rbln._C._log_cpu_fallback(op_name)
+    torch_rbln._C._record_cpu_fallback(op_name)

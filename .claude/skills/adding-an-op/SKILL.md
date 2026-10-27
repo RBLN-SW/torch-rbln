@@ -136,11 +136,11 @@ trust agrees exactly.
 2. **Check the log or the counter, not the numbers**. With
    `TORCH_RBLN_LOG_LEVEL=INFO` every fallback prints
    `` `aten::<op>` op ran on CPU instead of RBLN ``;
-   `_C._dispatch_fallback_by_op()` counts the fallbacks the C++ shim prechecks,
-   and `_C._warmcache_size()` stays flat when nothing compiled — the alignment
-   fallback shows up in the log, not in a counter. No fallback on an aligned
-   input is the proof. `TORCH_RBLN_DISABLE_FALLBACK=compile_error` does not
-   cover the alignment route and will not raise for you.
+   `_C._dispatch_fallback_by_op()` counts every one of them per op, alignment
+   included, and `_C._warmcache_size()` stays flat when nothing compiled. No
+   fallback on an aligned input is the proof.
+   `TORCH_RBLN_DISABLE_FALLBACK=compile_error` does not cover the alignment
+   route and will not raise for you.
 3. **Run an established peer on the same input** — a unary against `rsqrt`, a
    binary against `add`. The same order of difference from CPU says your op took
    the same path.

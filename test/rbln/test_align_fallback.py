@@ -25,28 +25,24 @@ _SCENARIO = r"""
 import torch, torch_rbln
 from torch_rbln import _C
 from torch_rbln._internal import compile_cache
-from torch_rbln._internal.ops_utils import cpu_fallback_counts
 a = (torch.arange(12).reshape(4, 3) * 3).to(torch.bfloat16).to("rbln")
 b = torch.ones(4, 3).to(torch.bfloat16).to("rbln")
 want = a.cpu() + b.cpu()
-cpu_fallback_counts(reset=True)
 _C._dispatch_fallback_by_op_reset()
 compiled_before = len(compile_cache._compiled_op_cache)
 got = a + b
 torch.rbln.synchronize()
 assert torch.equal(got.cpu(), want), (got.cpu(), want)
-# Device-path evidence beyond the Python counter: the C++ boxed fallback (which also
-# returns rbln results without touching the Python counter) recorded nothing, and the
-# compile cache gained the op.
+# Which ops fell back (every fallback path), and whether the compile cache gained an op.
 evidence = {
-    "cxx_fallbacks": _C._dispatch_fallback_by_op(),
+    "fallbacks": dict(_C._dispatch_fallback_by_op()),
     "compiled": len(compile_cache._compiled_op_cache) - compiled_before,
 }
-print("RESULT", cpu_fallback_counts().get("aten::add", 0), got.device.type, evidence)
+print("RESULT", got.device.type, evidence)
 """
 
 
-def _run_scenario(**env) -> tuple[int, str, dict]:
+def _run_scenario(**env) -> tuple[str, dict]:
     """Run the unaligned bf16 add in a fresh interpreter with the env set, so the result
     does not depend on what earlier tests imported or patched in this process.
     """
@@ -59,21 +55,20 @@ def _run_scenario(**env) -> tuple[int, str, dict]:
     lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT ")]
     assert proc.returncode == 0, proc.stderr[-2000:]
     assert lines, proc.stderr[-2000:]
-    _, count, device, evidence = lines[-1].split(" ", 3)
-    return int(count), device, ast.literal_eval(evidence)
+    _, device, evidence = lines[-1].split(" ", 2)
+    return device, ast.literal_eval(evidence)
 
 
 @needs_device
 class TestAlignFallback(TestCase):
     def test_unaligned_bf16_falls_back_by_default(self):
-        count, _, _ = _run_scenario()
-        self.assertGreater(count, 0)
+        _, evidence = _run_scenario()
+        self.assertGreater(evidence["fallbacks"].get("aten::add", 0), 0)
 
     def test_disabled_align_fallback_takes_device_path(self):
-        count, device, evidence = _run_scenario(TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK="align")
-        self.assertEqual(count, 0)
+        device, evidence = _run_scenario(TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK="align")
         self.assertEqual(device, "rbln")
-        self.assertEqual(evidence["cxx_fallbacks"], [])
+        self.assertEqual(evidence["fallbacks"], {})
         self.assertGreater(evidence["compiled"], 0)
 
 

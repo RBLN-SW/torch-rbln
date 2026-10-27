@@ -50,17 +50,9 @@ std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>
 diag_dump_dispatch_paths();
 void diag_reset_dispatch_paths();
 
-// DIAG/PROFILER: per-op CPU-fallback attribution (op_name -> fallback count),
-// non-zero entries only. Recorded on the already-slow fallback branch only (one
-// relaxed atomic via a pointer cached on the op's ShimEntry; warm/fast path
-// untouched), read lazily under registry_mutex. Lets torch.rbln.profile() turn
-// the aggregate cpu_fallback count into "which ops fell back".
-std::vector<std::pair<std::string, uint64_t>> diag_dump_fallback_by_op();
-void diag_reset_fallback_by_op();
-
 // DIAG/PROFILER: per-op warm-cache MISS (recompile) attribution (op_name ->
-// count), non-zero only. Same low-overhead scheme as the fallback counter
-// (one relaxed atomic on the already-slow miss branch). Lets the profiler turn
+// count), non-zero only. One relaxed atomic on the already-slow miss branch,
+// through a pointer cached on the op's ShimEntry. Lets the profiler turn
 // the aggregate recompile_miss count into "which op-shapes keep recompiling".
 std::vector<std::pair<std::string, uint64_t>> diag_dump_recompile_by_op();
 void diag_reset_recompile_by_op();

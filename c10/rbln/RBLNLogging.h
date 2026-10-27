@@ -4,9 +4,11 @@
 #include <c10/util/Exception.h>
 #include <fmt/format.h>
 #include <fmt/ranges.h>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace c10::rbln {
 
@@ -102,28 +104,42 @@ class C10_RBLN_API RBLNScopeGuard {
   const char* func_;
 };
 
+// Where a CPU fallback ran. kBoxed is cpu_fallback_rbln, the boxed CPU
+// fallback and the only path that consults CPU fast-path handlers. kPython is
+// the eager Python path, which runs the op through PyTorch's own CPU kernels.
+enum class CpuFallbackPath : uint8_t { kBoxed, kPython };
+
 /**
- * @brief Logs a message indicating that a specified operation ran on CPU
- * instead of RBLN.
+ * @brief Records that an operation ran on CPU instead of RBLN.
  *
- * This function logs an info-level message that includes the name of the
- * operation that ran on CPU. It also generates a UserWarning that includes the
- * file location where the warning is issued. The warning is formatted to
- * indicate that a fallback to CPU execution is being used for the specified
- * operation. The message is logged when `TORCH_RBLN_LOG_LEVEL` is set to `INFO`
- * or lower.
+ * Every torch-rbln op-level CPU fallback goes through here: cpu_fallback_rbln
+ * (which the C++ dispatch shim, the boxed fallback and advanced indexing all
+ * call) and the eager Python path. It counts the fallback per op (read by
+ * torch.rbln.explain() via cpu_fallback_counts) and, when
+ * `TORCH_RBLN_LOG_LEVEL` is `INFO` or lower, logs it with a UserWarning that
+ * carries the caller's location.
  *
- * @param full_op_name The full name of the operation that ran on CPU.
+ * @param full_op_name The operation's name, with its overload when known.
+ * @param path Where the fallback ran.
  *
  * @code
- * c10::rbln::log_cpu_fallback("aten::mul");
- * // Output:
- * // [2026-01-01 00:00:00.000][I] `aten::mul` op ran on CPU instead of RBLN
+ * c10::rbln::record_cpu_fallback("aten::mul.out", CpuFallbackPath::kBoxed);
+ * // Output (at INFO):
+ * // [2026-01-01 00:00:00.000][I] `aten::mul.out` op ran on CPU instead of RBLN
  * // /llama/modeling_llama.py:73: UserWarning: TRACE
  * //   result, result_shape = mul_rbln(*args, **kwargs)
  * @endcode
  */
-C10_RBLN_API void log_cpu_fallback(std::string_view full_op_name);
+C10_RBLN_API void record_cpu_fallback(
+    std::string_view full_op_name,
+    CpuFallbackPath path);
+
+// Per-op counts of record_cpu_fallback calls, non-zero only, and their reset.
+C10_RBLN_API std::vector<std::pair<std::string, uint64_t>> cpu_fallback_counts();
+C10_RBLN_API void reset_cpu_fallback_counts();
+// Names among cpu_fallback_counts recorded at least once through
+// CpuFallbackPath::kBoxed: the fallbacks a CPU fast-path handler could serve.
+C10_RBLN_API std::vector<std::string> boxed_cpu_fallback_ops();
 
 /**
  * @brief Returns the current scope depth for hierarchical logging.

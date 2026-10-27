@@ -47,10 +47,9 @@ returned values:
 
 - `TORCH_RBLN_LOG_LEVEL=INFO` prints
   `` `aten::<op>` op ran on CPU instead of RBLN `` for every fallback.
-  `_C._dispatch_fallback_by_op()` gives the same fact as a count, but only for
-  the fallbacks the C++ shim's precheck takes — the eager Python route logs and
-  is not counted. `_C._warmcache_size()` covers both: it grows only when the
-  device path compiled. Use whichever a script or a test can assert; the
+  `_C._dispatch_fallback_by_op()` gives the same fact as a per-op count, for
+  every fallback path. `_C._warmcache_size()` grows only when the device path
+  compiled. Use whichever a script or a test can assert; the
   returned values say nothing.
 - `torch.rbln.explain()` attributes hidden overhead — dispatch, CPU fallback,
   host copies — and `with_stack=True` gives the call site. `docs/EXPLAIN.md` is

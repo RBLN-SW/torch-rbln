@@ -137,8 +137,7 @@ matches the CPU reference exactly; the test passes without ever reaching the
 kernel. `test/rbln/test_dispatch_shim_precheck.py` is the worked example from
 both directions: `_C._warmcache_size()` before and after, because a CPU fallback
 never primes the warm cache. `_C._dispatch_fallback_by_op()` gives per-op
-fallback counts for the same purpose, for the ops the C++ shim prechecks — not
-for the alignment route.
+fallback counts for the same purpose, for every fallback path.
 
 `xfail_strict = true`: an `xfail` that starts passing fails the suite.
 `xfail_rebel` / `xfail_atom` (`test/utils.py`) are the strict,

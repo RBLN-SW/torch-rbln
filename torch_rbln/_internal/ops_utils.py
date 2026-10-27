@@ -13,7 +13,7 @@ from torch_rbln import _C
 from torch_rbln._internal.compile_cache import compile_rbln_cached_entry
 from torch_rbln._internal.dummy_device import raise_if_dummy_execution
 from torch_rbln._internal.env_utils import is_rbln_deploy, use_device_group_num_devices
-from torch_rbln._internal.log_utils import rbln_log_cpu_fallback, rbln_log_warn
+from torch_rbln._internal.log_utils import rbln_log_warn, rbln_record_cpu_fallback
 from torch_rbln._internal.warm_cache import install_pending as _install_warm_cache_pending
 
 
@@ -2139,21 +2139,6 @@ def is_cpu_fallback_cases(args):
     return False
 
 
-# Per-op count of Python-path CPU fallbacks (the C++ shim keeps its own counters for the
-# boxed/precheck fallbacks, see torch.rbln.explain). Together they list every op that
-# still leaves the device for a given dtype policy — the input the SW team needs to
-# decide what the compiler/runtime should make cheap next.
-_cpu_fallback_counts: dict[str, int] = {}
-
-
-def cpu_fallback_counts(*, reset: bool = False) -> dict[str, int]:
-    """Snapshot of Python-path CPU fallbacks per op name (optionally clearing it)."""
-    snap = dict(_cpu_fallback_counts)
-    if reset:
-        _cpu_fallback_counts.clear()
-    return snap
-
-
 def cpu_fallback_path(target_ops, args, *, result: torch.Tensor | None = None, op_name: str | None = None, **op_kwargs):
     """Perform CPU fallback for the given target operation.
 
@@ -2175,8 +2160,7 @@ def cpu_fallback_path(target_ops, args, *, result: torch.Tensor | None = None, o
         device.
     """
     if op_name is not None:
-        rbln_log_cpu_fallback(op_name)
-        _cpu_fallback_counts[op_name] = _cpu_fallback_counts.get(op_name, 0) + 1
+        rbln_record_cpu_fallback(op_name)
     cpu_args = to_cpu(args)
     cpu_op_kwargs = to_cpu(op_kwargs)
     result_cpu = target_ops(*cpu_args, **cpu_op_kwargs)

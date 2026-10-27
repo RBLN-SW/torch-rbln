@@ -6,7 +6,6 @@
 #include <ATen/native/rbln/RBLNCPUFallback.h>
 #include <ATen/ops/empty.h>
 #include <c10/rbln/RBLNFunctions.h>
-#include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNSupportedDtypes.h>
 #include <c10/util/ScopeExit.h>
@@ -151,11 +150,9 @@ struct ShimEntry {
   std::vector<size_t> skip_dtype_args;
   SchemaCache schema_cache; // lazily filled
   const char* op_name_intern = nullptr; // stable pointer for WarmCache keys
-  // Cached pointer into fallback_by_op() for this op; bumped lock-free on the
-  // already-slow fallback branch. Raw ptr keeps ShimEntry an aggregate /
+  // Cached pointer into recompile_by_op() for this op; bumped lock-free on the
+  // already-slow warm-cache miss branch. Raw ptr keeps ShimEntry an aggregate /
   // movable (the registry stores it by value via move-assign).
-  std::atomic<uint64_t>* fallback_ctr = nullptr;
-  // Same idea for the warm-cache miss (recompile) path -> recompile_by_op().
   std::atomic<uint64_t>* recompile_ctr = nullptr;
 };
 
@@ -183,20 +180,8 @@ std::mutex& registry_mutex() {
   return m;
 }
 
-// Per-op CPU-fallback counts, keyed by the interned op-name pointer (stable +
-// deduplicated by intern_op_name). Heap-allocated atomics so each ShimEntry can
-// cache a raw pointer (fallback_ctr) and bump it lock-free on the fallback
-// branch. Populated/looked-up under registry_mutex at register time (import,
-// before any dispatch); survives op re-registration. Leaky singleton to match
-// registry() teardown semantics.
-std::unordered_map<const char*, std::unique_ptr<std::atomic<uint64_t>>>&
-fallback_by_op() {
-  static auto* m = new std::
-      unordered_map<const char*, std::unique_ptr<std::atomic<uint64_t>>>();
-  return *m;
-}
-
-// Per-op warm-cache MISS (recompile) counts. Same scheme as fallback_by_op():
+// Per-op warm-cache MISS (recompile) counts, keyed by the interned op-name
+// pointer; each ShimEntry caches a pointer to its counter (recompile_ctr):
 // the bump lives on the already-slow miss branch (Python compile), so it does
 // not touch the warm-cache hit fast path.
 std::unordered_map<const char*, std::unique_ptr<std::atomic<uint64_t>>>&
@@ -1128,21 +1113,10 @@ void generic_shim_boxed(
     g_diag_n_fallback.fetch_add(1, std::memory_order_relaxed);
     g_fallback_reason[fb_reason].fetch_add(
         1, std::memory_order_relaxed); // WHY (same slow branch)
-    if (entry->fallback_ctr != nullptr) {
-      entry->fallback_ctr->fetch_add(
-          1,
-          std::memory_order_relaxed); // per-op attribution (same slow branch)
-    }
     if (g_trace_enabled.load(std::memory_order_relaxed)) {
       capture_site(
           op_name); // (A) WHERE: opt-in, deduped, GIL-safe; off by default
     }
-    // Same log the ``fallback_rbln`` handler emits for an unsupported op. The
-    // shortcut below decides a fallback the Python wrapper would otherwise have
-    // decided and logged, so without this the ops it covers -- add, mul,
-    // matmul, the reductions -- are the only ones whose CPU fallback leaves no
-    // trace at any log level.
-    c10::rbln::log_cpu_fallback(op.schema().name());
     const uint64_t _fb_t0 = now_ns();
     ::at::native::rbln::cpu_fallback_rbln(op, stack);
     // COST of the fallback (wall ns), so the report can tell "many cheap
@@ -1291,15 +1265,10 @@ void register_cpp_shim(
       .skip_dtype_args = skip_dtype_args,
       .schema_cache = {},
       .op_name_intern = interned};
-  // Wire up the per-op fallback counter (heap atomic, keyed by interned name so
-  // it survives re-registration). The move-assign above reset fallback_ctr to
-  // null, so re-point it here.
+  // Wire up the per-op recompile counter (heap atomic, keyed by interned name
+  // so it survives re-registration). The move-assign above reset recompile_ctr
+  // to null, so re-point it here.
   {
-    auto& slot = fallback_by_op()[interned];
-    if (!slot) {
-      slot = std::make_unique<std::atomic<uint64_t>>(0);
-    }
-    registry()[op_name].fallback_ctr = slot.get();
     auto& rslot = recompile_by_op()[interned];
     if (!rslot) {
       rslot = std::make_unique<std::atomic<uint64_t>>(0);
@@ -1323,30 +1292,6 @@ void register_cpp_shim(
       overload.c_str(),
       torch::CppFunction::makeFromBoxedFunction<&generic_shim_boxed>());
   installed_libs().push_back(std::move(lib));
-}
-
-std::vector<std::pair<std::string, uint64_t>> diag_dump_fallback_by_op() {
-  std::vector<std::pair<std::string, uint64_t>> out;
-  std::lock_guard<std::mutex> lk(registry_mutex());
-  for (const auto& kv : registry()) {
-    const ShimEntry& e = kv.second;
-    if (e.fallback_ctr != nullptr) {
-      const uint64_t c = e.fallback_ctr->load(std::memory_order_relaxed);
-      if (c != 0) {
-        out.emplace_back(kv.first, c);
-      }
-    }
-  }
-  return out;
-}
-
-void diag_reset_fallback_by_op() {
-  std::lock_guard<std::mutex> lk(registry_mutex());
-  for (auto& kv : fallback_by_op()) {
-    if (kv.second) {
-      kv.second->store(0, std::memory_order_relaxed);
-    }
-  }
 }
 
 std::vector<std::pair<std::string, uint64_t>> diag_dump_recompile_by_op() {

@@ -137,17 +137,17 @@ dispatch/cpu_fallback  2,000       --  try: graph mode, or a supported dtype
    (`dispatch/*`) carry just the fix.
 6. **Detail blocks, grouped under their parent signal** (in table order,
    blank-line separated — no flat pile where ownership must be inferred).
-   `dispatch/cpu_fallback:` shows its per-op counts, each with its call-site
-   under `with_stack=True`, and the `(sum … wall)` total fallback wall time (a
-   _weak, noisy_ A/B signal — inflated under oversubscription, not a per-op
-   absolute; see §10).
-7. **`why`**: the reason each fallback fired — `dtype-not-fp16` (the op's dtype
-   is outside the device dispatch policy), `nan/inf input`, or
-   `all-scalar inputs`.
-8. **(A) `candidates (no fast-path handler)`**: of the ops that fell back, which
-   ones have **no CPU fast-path handler** — i.e. your
-   **optimization candidates** (registered ops already bypass the slow boxed
-   path).
+   `dispatch/cpu_fallback:` shows its per-op counts — with the call-site under
+   `with_stack=True` for the C++ shim's own fallbacks — and the `(sum … wall)`
+   wall time of those shim fallbacks (a _weak, noisy_ A/B signal — inflated
+   under oversubscription, not a per-op absolute; see §10).
+7. **`why`**: the reason each of the C++ shim's own fallbacks fired —
+   `dtype-not-fp16` (the op's dtype is outside the device dispatch policy),
+   `nan/inf input`, or `all-scalar inputs`.
+8. **(A) `candidates (no fast-path handler)`**: of the ops that fell back through
+   the boxed C++ CPU fallback, which ones have **no CPU fast-path handler** —
+   i.e. your **optimization candidates** (registered ops already bypass the slow
+   boxed path).
 9. **`>>` physical d2h — the single most important line**, promoted out of the
    detail pile. The torch-side `host_bounce`/`v2v_slow` counts are _copy-path_
    counts, blind to whether data actually crossed the device boundary; this
@@ -337,14 +337,19 @@ meaning, the intent (why you should care), and the lever.
 | ↳ `state: src_synced_host_served`                        | `rebel` | src on host+device; host memcpy, no transfer                                                                                                                                                  | (state axis) usually benign                                                        | —                                                                   |
 | ↳ `reject: <user reason>` (e.g. `dtype_mismatch`)        | `rebel` | WHY the fast plan was rejected, when you can act                                                                                                                                              | user-actionable                                                                    | align dtype / alignment / ≤30 chunks                                |
 | ↳ `reject: internal_fallback`                            | `rebel` | WHY the fast plan was rejected, runtime-internal (non-deterministic detail)                                                                                                                   | a notification, NOT a to-do                                                        | not user-fixable; see `dump['…']['debug']` if recurring             |
-| `dispatch/cpu_fallback`                                  | `torch` | an op ran on CPU (fp16-only NPU can't run it)                                                                                                                                                 | the per-op tax for non-device dtypes (e.g. int metadata)                           | graph mode / native rbln kernel / fix dtype — see (A) candidates    |
+| `dispatch/cpu_fallback`                                  | `torch` | an op ran on CPU (dtype outside the dispatch catalog, or no device kernel)                                                                                                                    | the per-op tax for non-device dtypes (e.g. int metadata)                           | graph mode / native rbln kernel / fix dtype — see (A) candidates    |
 | `dispatch/recompile`                                     | `torch` | a graph (re)compiled (warm-cache miss)                                                                                                                                                        | a cold first compile is expected; **repeated** recompiles in a steady loop are not | stabilize shapes (pad/bucket) for warm-cache reuse, or graph mode   |
 
 And the auxiliary readouts (in `dump()`):
 
-- `cpu_fallback_by_op`, `recompile_by_op` — per-op counts (what fell back / recompiled).
-- `cpu_fallback_reasons` — the `dtype-not-fp16 / nan-inf / all-scalar` breakdown.
-- `cpu_fallback_unaccelerated` (A) — fallback ops with no fast-path handler.
+- `cpu_fallback_by_op`, `recompile_by_op` — per-op counts of what fell back to
+  the CPU (every op-level fallback path) and of what recompiled.
+- `cpu_fallback_reasons` — the `dtype-not-fp16 / nan-inf / all-scalar`
+  breakdown of the C++ shim's own fallbacks (`dispatch.cpu_fallback_ns` covers
+  the same set).
+- `cpu_fallback_unaccelerated` (A) — fallback ops with no fast-path handler,
+  among those that went through the boxed C++ CPU fallback (the only path that
+  consults one).
 - `real_host_sync_d2h` / `real_host_sync_h2d` — count+bytes of **real**
   synchronous/host-served physical transfers (vs the copy-path bounce count).
   Deliberate pinned `non_blocking` async transfers are out of scope (§6).

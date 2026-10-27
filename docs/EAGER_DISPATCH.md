@@ -26,8 +26,12 @@ programs are not cached on disk.
   dispatched.
 - Unaligned last dims, for now (below).
 
-`torch.rbln.explain()` and `ops_utils.cpu_fallback_counts()` list what left the
-device through torch-rbln's own fallbacks.
+`torch.rbln.explain()` lists, per op, every op-level CPU fallback torch-rbln
+takes: the C++ shim, the boxed fallback for ops without a device kernel, and the
+Python path all record through one function (`c10::rbln::record_cpu_fallback`).
+A strided copy that bounces through the host and a fallback inside the runtime
+are not ops falling back; `explain()` reports them separately, as a host bounce
+and as a runtime signal.
 
 ## Alignment fallback
 

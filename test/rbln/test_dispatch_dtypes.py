@@ -26,17 +26,15 @@ _INT32_SCENARIO = r"""
 import torch, torch_rbln
 from torch_rbln import _C
 from torch_rbln._internal import compile_cache
-from torch_rbln._internal.ops_utils import cpu_fallback_counts
 a = (torch.arange(12).reshape(4, 3) * 3).to(torch.int32).to("rbln")
 b = torch.ones(4, 3).to(torch.int32).to("rbln")
 want = a.cpu() + b.cpu()
-cpu_fallback_counts(reset=True)
 _C._dispatch_fallback_by_op_reset()
 compiled_before = len(compile_cache._compiled_op_cache)
 got = a + b
 torch.rbln.synchronize()
 assert torch.equal(got.cpu(), want), (got.cpu(), want)
-x = torch.randint(0, 9, (4, 3), dtype=torch.int32, device="rbln")
+x = torch.randint(0, 9, (4, 3), dtype=torch.int32).to("rbln")  # RNG itself runs on the host
 xc = x.cpu()
 checks = {
     "mul": (x * x, xc * xc),
@@ -45,18 +43,16 @@ checks = {
 }
 torch.rbln.synchronize()
 extra = {k: bool(torch.equal(r.cpu(), ref)) for k, (r, ref) in checks.items()}
-# Device-path evidence beyond the Python counter: the C++ boxed fallback (which also
-# returns rbln results without touching the Python counter) recorded nothing, and the
-# compile cache gained the op.
+# Which ops fell back (every fallback path), and whether the compile cache gained an op.
 evidence = {
-    "cxx_fallbacks": _C._dispatch_fallback_by_op(),
+    "fallbacks": dict(_C._dispatch_fallback_by_op()),
     "compiled": len(compile_cache._compiled_op_cache) - compiled_before,
 }
-print("RESULT", cpu_fallback_counts().get("aten::add", 0), got.device.type, (extra, evidence))
+print("RESULT", got.device.type, (extra, evidence))
 """
 
 
-def _run_int32_scenario(**env) -> tuple[int, str, dict, dict]:
+def _run_int32_scenario(**env) -> tuple[str, dict, dict]:
     """Run the int32 scenario in a fresh interpreter with the env set before import.
 
     The Python compile path snapshots the dtype policy at import (SupportedDtypes),
@@ -73,9 +69,9 @@ def _run_int32_scenario(**env) -> tuple[int, str, dict, dict]:
     lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT ")]
     assert proc.returncode == 0, proc.stderr[-2000:]
     assert lines, proc.stderr[-2000:]
-    _, count, device, extra = lines[-1].split(" ", 3)
-    extra, evidence = ast.literal_eval(extra)
-    return int(count), device, extra, evidence
+    _, device, payload = lines[-1].split(" ", 2)
+    extra, evidence = ast.literal_eval(payload)
+    return device, extra, evidence
 
 
 class TestDispatchDtypesEnv(TestCase):
@@ -116,12 +112,14 @@ class TestExtendedCatalog(TestCase):
         # int32 is outside the default catalog: DISPATCH_DTYPES admits it. The alignment
         # fallback is disabled so these glue-shaped [4, 3] ops stay on the device; they
         # must stay correct.
-        count, device, extra, evidence = _run_int32_scenario(
+        device, extra, evidence = _run_int32_scenario(
             TORCH_RBLN_DISPATCH_DTYPES="int32", TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK="align"
         )
-        self.assertEqual(count, 0)
         self.assertEqual(device, "rbln")
-        self.assertEqual(evidence["cxx_fallbacks"], [], "the C++ boxed fallback ran an int32 op")
+        # where's bool condition next to its data is a mixed-dtype call, which the
+        # Python gate sends to the CPU for every dtype; only its result is checked.
+        fallbacks = {op: n for op, n in evidence["fallbacks"].items() if op != "aten::where"}
+        self.assertEqual(fallbacks, {}, "an int32 op fell back to the CPU")
         self.assertGreater(evidence["compiled"], 0, "no int32 op was compiled for the device")
         self.assertEqual(extra, {"mul": True, "eq": True, "where": True})
 

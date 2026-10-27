@@ -6,7 +6,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -276,10 +278,40 @@ RBLNScopeGuard::~RBLNScopeGuard() noexcept {
   scope_log_type_ = ScopeLogType::NONE;
 }
 
-void log_cpu_fallback(std::string_view full_op_name) {
-  // Level first: the dispatch shim calls this on every fallback of the ops it
-  // covers -- add, mul, matmul -- so at the default level nothing here is built
-  // at all.
+namespace {
+
+// Leaky: a fallback during interpreter teardown can still reach
+// record_cpu_fallback after static destructors would have run.
+std::mutex& cpu_fallback_mutex() {
+  static auto* m = new std::mutex();
+  return *m;
+}
+
+struct CpuFallbackRecord {
+  uint64_t count = 0;
+  bool boxed = false; // recorded at least once through CpuFallbackPath::kBoxed
+};
+
+std::map<std::string, CpuFallbackRecord, std::less<>>& cpu_fallback_records() {
+  static auto* m = new std::map<std::string, CpuFallbackRecord, std::less<>>();
+  return *m;
+}
+
+} // namespace
+
+void record_cpu_fallback(std::string_view full_op_name, CpuFallbackPath path) {
+  {
+    std::lock_guard<std::mutex> lk(cpu_fallback_mutex());
+    auto& records = cpu_fallback_records();
+    auto it = records.find(full_op_name);
+    if (it == records.end()) {
+      it = records.emplace(full_op_name, CpuFallbackRecord{}).first;
+    }
+    ++it->second.count;
+    it->second.boxed |= path == CpuFallbackPath::kBoxed;
+  }
+
+  // At the default level the count above is all the work: nothing is logged.
   if (get_log_level() > spdlog::level::info) {
     return;
   }
@@ -304,6 +336,31 @@ void log_cpu_fallback(std::string_view full_op_name) {
           .file = __FILE__, .line = __LINE__, .function = __func__},
       warning_.msg());
   c10::warn(warning_);
+}
+
+std::vector<std::pair<std::string, uint64_t>> cpu_fallback_counts() {
+  std::lock_guard<std::mutex> lk(cpu_fallback_mutex());
+  std::vector<std::pair<std::string, uint64_t>> out;
+  for (const auto& [name, record] : cpu_fallback_records()) {
+    out.emplace_back(name, record.count);
+  }
+  return out;
+}
+
+void reset_cpu_fallback_counts() {
+  std::lock_guard<std::mutex> lk(cpu_fallback_mutex());
+  cpu_fallback_records().clear();
+}
+
+std::vector<std::string> boxed_cpu_fallback_ops() {
+  std::lock_guard<std::mutex> lk(cpu_fallback_mutex());
+  std::vector<std::string> out;
+  for (const auto& [name, record] : cpu_fallback_records()) {
+    if (record.boxed) {
+      out.push_back(name);
+    }
+  }
+  return out;
 }
 
 int get_scope_depth() {
