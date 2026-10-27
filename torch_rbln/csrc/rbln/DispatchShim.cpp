@@ -1333,6 +1333,13 @@ std::string python_fallback_op_name(const std::string& op_name) {
   return op_name;
 }
 
+std::optional<std::string> running_python_op() {
+  if (t_python_op == nullptr) {
+    return std::nullopt;
+  }
+  return *t_python_op;
+}
+
 std::vector<std::pair<std::string, uint64_t>> diag_dump_recompile_by_op() {
   std::vector<std::pair<std::string, uint64_t>> out;
   std::lock_guard<std::mutex> lk(registry_mutex());

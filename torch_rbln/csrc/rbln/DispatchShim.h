@@ -4,6 +4,7 @@
 #include <torch/csrc/utils/pybind.h>
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -55,6 +56,9 @@ void diag_reset_dispatch_paths();
 // and captured call sites (with_stack) use, so explain() joins them. Any other
 // name, or a call outside a shim op, is returned unchanged.
 std::string python_fallback_op_name(const std::string& op_name);
+
+// Schema name of the shim op running Python on this thread, if any.
+std::optional<std::string> running_python_op();
 
 // DIAG/PROFILER: per-op warm-cache MISS (recompile) attribution (op_name ->
 // count), non-zero only. One relaxed atomic on the already-slow miss branch,

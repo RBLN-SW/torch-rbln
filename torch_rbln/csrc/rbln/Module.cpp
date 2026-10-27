@@ -396,6 +396,10 @@ void register_internal_api(py::module_& module) {
       "Internal: configure target's device layout like ref (no data copy)");
 
   // Logging utilities
+  module.def(
+      "_running_shim_op",
+      &torch_rbln::shim::running_python_op,
+      "Internal: schema name of the shim op whose Python wrapper is running on this thread, or None");
   // Python-path CPU fallback, as a context manager around c10's
   // CpuFallbackScope: `with _CpuFallbackScope(op_name): <run it on CPU>`.
   py::class_<PyCpuFallbackScope>(module, "_CpuFallbackScope")

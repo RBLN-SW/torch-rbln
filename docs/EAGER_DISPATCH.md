@@ -28,8 +28,9 @@ programs are not cached on disk.
 
 `torch.rbln.explain()` lists, per op, every op-level CPU fallback torch-rbln
 takes, with their wall time: the C++ shim, the boxed fallback for ops without a
-device kernel, and the Python path all run their fallback inside one scope
-(`c10::rbln::CpuFallbackScope`), which counts, logs and times it.
+device kernel, the Python path, and a compile that fails all run their fallback
+inside one scope (`c10::rbln::CpuFallbackScope`), which counts, logs and times
+it. An eager op whose compile fails is listed under that op.
 A strided copy that bounces through the host and a fallback inside the runtime
 are not ops falling back; `explain()` reports them separately, as a host bounce
 and as a runtime signal.
