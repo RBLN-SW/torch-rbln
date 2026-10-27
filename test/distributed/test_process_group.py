@@ -383,6 +383,45 @@ def run_reduce_scatter_test(rank: int, world_size: int, backend: str, op: dist.R
         dist.destroy_process_group()
 
 
+def run_reduce_scatter_tensor_test(rank: int, world_size: int, backend: str, size: int, margin: int = 0) -> None:
+    """Test reduce_scatter_tensor, whose input chunks are views of one storage.
+
+    With margin > 0 the input is a view in the middle of a larger allocation.
+    """
+    setup_environment(rank, world_size)
+    dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+    device = torch.device("rbln", rank)
+    sentinel = -7.0
+
+    try:
+        chunks = [torch.full([size], float((rank + 1) * 10 + j + 1), dtype=torch.float16) for j in range(world_size)]
+        guard = torch.full([margin], sentinel, dtype=torch.float16)
+        backing = torch.cat([guard, *chunks, guard]).to(device)
+        input_tensor = backing[margin : margin + size * world_size]
+        output = torch.zeros(size, dtype=torch.float16, device=device)
+
+        dist.reduce_scatter_tensor(output, input_tensor)
+
+        expected_value = _get_expected_reduce_scatter_value(rank, world_size, dist.ReduceOp.SUM)
+        torch.testing.assert_close(
+            output.cpu(),
+            torch.full([size], expected_value, dtype=torch.float16),
+            msg=f"reduce_scatter_tensor failed on rank {rank}: got {output[:5]}, expected {expected_value}",
+        )
+        if margin > 0:
+            backing_cpu = backing.cpu()
+            expected_guard = torch.full([margin], sentinel, dtype=torch.float16)
+            torch.testing.assert_close(
+                backing_cpu[:margin], expected_guard, msg=f"reduce_scatter_tensor clobbered the prefix on rank {rank}"
+            )
+            torch.testing.assert_close(
+                backing_cpu[-margin:], expected_guard, msg=f"reduce_scatter_tensor clobbered the suffix on rank {rank}"
+            )
+
+    finally:
+        dist.destroy_process_group()
+
+
 def run_barrier_test(rank: int, world_size: int, backend: str) -> None:
     """Test barrier synchronization."""
     setup_environment(rank, world_size)
@@ -722,6 +761,28 @@ class TestReduceScatterRBLN(TestProcessGroupRBLNBase):
             self.world_size,
             run_reduce_scatter_test,
             (self.world_size, self.backend, op, 256),
+        )
+
+    @parametrize("size", [1, 256, 3072, (512 * KiB)])
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_reduce_scatter_tensor_sum(self, size, c10d_async_env):
+        """Test reduce_scatter_tensor with SUM operation."""
+        self.run_c10d_test(
+            c10d_async_env,
+            self.world_size,
+            run_reduce_scatter_tensor_test,
+            (self.world_size, self.backend, size),
+        )
+
+    @parametrize("size", [1, 256])
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_reduce_scatter_tensor_sum_offset_view(self, size, c10d_async_env):
+        """Test reduce_scatter_tensor on an input view with a nonzero storage offset."""
+        self.run_c10d_test(
+            c10d_async_env,
+            self.world_size,
+            run_reduce_scatter_tensor_test,
+            (self.world_size, self.backend, size, 256),
         )
 
     @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
