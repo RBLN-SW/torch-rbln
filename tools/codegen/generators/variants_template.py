@@ -153,12 +153,19 @@ def {kernel_name}(*args, **kwargs):
 """
 
         @staticmethod
-        def dtype_compare() -> str:
-            """Generate dtype validation for comparison operations."""
-            return """    if out_tensor.dtype != torch.bool:
-        raise RuntimeError(
-            f"Output tensor for comparison operator must have dtype torch.bool, but got {out_tensor.dtype}."
+        def dtype_compare(root_name: str) -> str:
+            """Generate dtype handling for comparison operations.
+
+            The device writes bool; for any other `out` the op runs on CPU and its
+            result is cast into `out`, as PyTorch does.
+            """
+            return f"""    if out_tensor.dtype != torch.bool:
+        kwargs_filtered = {{k: v for k, v in kwargs.items() if k != "out"}}
+        result = cpu_fallback_path(
+            torch.{root_name}, args, result=out_tensor, op_name="aten::{root_name}", **kwargs_filtered
         )
+        finalize_output_tensor(out_tensor, result, result.shape)
+        return
 """
 
         @staticmethod

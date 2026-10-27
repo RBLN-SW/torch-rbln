@@ -580,10 +580,11 @@ inline std::optional<ScalarValue> wrapped_scalar_value(const at::Tensor& t) {
 // here; returning it instead of a bool lets the caller attribute WHY at zero
 // extra cost.
 //
-// out-dtype: a float `out` whose dtype differs from the float inputs'. Whether
-// such an `out` is accepted is each op's own rule (add casts into it, neg and
-// mm reject it), so the op runs on CPU, where its kernel applies that rule and
-// computes the exact result.
+// out-dtype: an `out` whose dtype differs from the inputs'. Whether such an
+// `out` is accepted is each op's own rule (add casts into it, neg and mm reject
+// it), so the op runs on CPU, where its kernel applies that rule and computes
+// the exact result. A bool `out` is left to the device: it is what a comparison
+// writes.
 int quick_fallback_check(
     torch::jit::Stack* stack,
     const SchemaCache& cache,
@@ -649,13 +650,12 @@ int quick_fallback_check(
   if (nan_inf_found) {
     return 2; // nan/inf in input (non-deploy debug scan)
   }
-  if (cache.out_positional_idx >= 0 && input_dtype &&
-      c10::isFloatingType(*input_dtype)) {
+  if (cache.out_positional_idx >= 0 && input_dtype) {
     const auto& out_iv = args[cache.out_positional_idx];
     if (out_iv.isTensor() && out_iv.toTensor().defined()) {
       const auto out_dtype = out_iv.toTensor().scalar_type();
-      if (c10::isFloatingType(out_dtype) && out_dtype != *input_dtype) {
-        return 4; // out-dtype (float out of another dtype; see above)
+      if (out_dtype != c10::kBool && out_dtype != *input_dtype) {
+        return 4; // out-dtype (out of another dtype; see above)
       }
     }
   }
@@ -987,11 +987,13 @@ bool try_warmcache_hit(
   // the hit path can't, since the runtime was compiled for the cached shape
   // and writes ``numel(cached) * itemsize`` contig bytes into out.data_ptr().
   // Fall through to the pybind miss-path so the Python wrapper handles
-  // resize-with-warning.
+  // resize-with-warning. The key leaves `out` out, so an `out` of another dtype
+  // (a float `out` for a comparison cached with a bool one) misses as well.
   if (out_tensor.defined() && !entry->out_profiles.empty()) {
-    const auto& cached_shape = entry->out_profiles[0].shape;
+    const auto& cached = entry->out_profiles[0];
     if (out_tensor.sizes() !=
-        at::IntArrayRef(cached_shape.data(), cached_shape.size())) {
+            at::IntArrayRef(cached.shape.data(), cached.shape.size()) ||
+        out_tensor.scalar_type() != cached.dtype) {
       return false;
     }
   }

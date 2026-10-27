@@ -108,6 +108,22 @@ class TestExtendedCatalog(TestCase):
         self.assertGreater(evidence["compiled"], 0, "no int32 op was compiled for the device")
         self.assertEqual(extra, {"mul": True, "eq": True, "where": True})
 
+    def test_int32_into_out_of_another_dtype(self):
+        # PyTorch casts the int32 result into each out; the device writes int32.
+        code = r"""
+import torch, torch_rbln
+a = torch.arange(64, dtype=torch.int32) * 1000
+b = torch.full((64,), 7, dtype=torch.int32)
+ok = {}
+for dtype in (torch.int64, torch.int16, torch.float32):
+    out = torch.empty(64, dtype=dtype, device="rbln")
+    torch.add(a.to("rbln"), b.to("rbln"), out=out)
+    ok[str(dtype)] = bool(torch.equal(out.cpu(), (a + b).to(dtype)))
+print("RESULT", ok)
+"""
+        ok = run_snippet(code, env={"TORCH_RBLN_DISPATCH_DTYPES": "int32"})
+        self.assertEqual(ok, {"torch.int64": True, "torch.int16": True, "torch.float32": True})
+
 
 if __name__ == "__main__":
     run_tests()

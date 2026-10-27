@@ -541,6 +541,27 @@ class TestRegisteredPythonOps(TestCase):
         torch.add(x.to(self.rbln_device), y.to(self.rbln_device), out=out)
         self.assertEqual(out.cpu(), expected)
 
+    @parametrize("op", [torch.eq, torch.ne, torch.lt, torch.le, torch.gt, torch.ge])
+    def test_compare_into_float_out(self, op):
+        """A comparison casts its bool result into a float out=. Cold warm cache first,
+        then again after a bool out= has installed a warm entry for the same inputs.
+        """
+        x_cpu = torch.arange(64, dtype=torch.float32)
+        y_cpu = torch.full_like(x_cpu, 32)
+        expected = torch.empty(64, dtype=torch.float32)
+        op(x_cpu, y_cpu, out=expected)
+        x, y = x_cpu.to(self.rbln_device), y_cpu.to(self.rbln_device)
+        out = torch.empty(64, dtype=torch.float32, device=self.rbln_device)
+        _C._warmcache_clear()
+        op(x, y, out=out)
+        self.assertEqual(out.cpu(), expected)
+        bool_out = torch.empty(64, dtype=torch.bool, device=self.rbln_device)
+        op(x, y, out=bool_out)
+        self.assertGreater(_C._warmcache_size(), 0)
+        out.zero_()
+        op(x, y, out=out)
+        self.assertEqual(out.cpu(), expected)
+
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_mul(self, dtype, shape):

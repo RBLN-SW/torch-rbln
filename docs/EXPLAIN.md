@@ -143,7 +143,7 @@ dispatch/cpu_fallback  2,000       --  try: graph mode, or a supported dtype
    oversubscription, not a per-op absolute; see §10).
 7. **`why`**: the reason each of the C++ shim's own fallbacks fired —
    `dtype-not-dispatch` (the op's dtype is outside the device dispatch policy),
-   `nan/inf input`, `all-scalar inputs`, or `out-dtype` (a float `out=` of
+   `nan/inf input`, `all-scalar inputs`, or `out-dtype` (a non-bool `out=` of
    another dtype than the inputs, which the op's CPU kernel accepts or rejects).
 8. **(A) `candidates (no fast-path handler)`**: of the ops that fell back through
    the boxed C++ CPU fallback, which ones have **no CPU fast-path handler** —
