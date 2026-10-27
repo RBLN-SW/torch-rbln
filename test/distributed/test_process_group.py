@@ -383,9 +383,7 @@ def run_reduce_scatter_test(rank: int, world_size: int, backend: str, op: dist.R
         dist.destroy_process_group()
 
 
-def run_reduce_scatter_tensor_test(
-    rank: int, world_size: int, backend: str, size: int, margin: int = 0
-) -> None:
+def run_reduce_scatter_tensor_test(rank: int, world_size: int, backend: str, size: int, margin: int = 0) -> None:
     """Test reduce_scatter_tensor, whose input chunks are views of one storage.
 
     With margin > 0 the input is a view in the middle of a larger allocation.
