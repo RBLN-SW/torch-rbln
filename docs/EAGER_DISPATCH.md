@@ -36,8 +36,10 @@ and as a runtime signal.
 
 ## Alignment fallback
 
-An op whose tensor arguments have a last dim that is not a multiple of 64 runs
-on the host. On the device such a shape is costly today:
+The common eager Python path falls back to CPU for tensor arguments whose last
+dim is not a multiple of 64. This check does not cover TensorList inputs such as
+`cat`/`stack`, separate C++ kernels, or graph mode. On the device such a shape is
+costly today:
 
 - the compiler wraps the op in host pad/depad steps, which cost more than the
   compute on small tensors;
