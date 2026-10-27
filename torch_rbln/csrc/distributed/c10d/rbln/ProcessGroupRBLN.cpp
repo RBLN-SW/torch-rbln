@@ -1244,10 +1244,8 @@ class AllreduceRBLNWork : public RBLNWork {
         warnGlooFallbackOnce("all_reduce", inputs_[0].scalar_type(), reduceOp_);
         // Copy RBLN tensor to CPU
         std::vector<at::Tensor> cpu_tensors;
-        for (size_t i = 0; i < inputs_.size(); ++i) {
-          for (auto& input : inputs_) {
-            cpu_tensors.emplace_back(input.to("cpu"));
-          }
+        for (auto& input : inputs_) {
+          cpu_tensors.emplace_back(input.to("cpu"));
         }
 
         // Call Gloo allreduce on CPU tensor
@@ -2451,6 +2449,10 @@ c10::intrusive_ptr<Work> ProcessGroupRBLN::allreduce(
   if (device.type() != at::kPrivateUse1) {
     invalidArgument(c10::str("unsupported device type ", device.type()));
   }
+  RBLN_CHECK(
+      inputs.size() == 1,
+      "ProcessGroupRBLN::allreduce: Expecting one tensor only but got {}",
+      inputs.size());
 
   auto tag = nextTag();
   auto seq = nextSeq();
