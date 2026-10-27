@@ -103,7 +103,7 @@ class TestExtendedCatalog(TestCase):
         self.assertEqual(device, "rbln")
         # where's bool condition next to its data is a mixed-dtype call, which the
         # Python gate sends to the CPU for every dtype; only its result is checked.
-        fallbacks = {op: n for op, n in evidence["fallbacks"].items() if op != "aten::where"}
+        fallbacks = {op: n for op, n in evidence["fallbacks"].items() if op != "aten::where.self"}
         self.assertEqual(fallbacks, {}, "an int32 op fell back to the CPU")
         self.assertGreater(evidence["compiled"], 0, "no int32 op was compiled for the device")
         self.assertEqual(extra, {"mul": True, "eq": True, "where": True})

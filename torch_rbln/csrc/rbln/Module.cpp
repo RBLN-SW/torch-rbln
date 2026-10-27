@@ -390,7 +390,8 @@ void register_internal_api(py::module_& module) {
       "_record_cpu_fallback",
       [](const std::string& op_name) {
         c10::rbln::record_cpu_fallback(
-            op_name, c10::rbln::CpuFallbackPath::kPython);
+            torch_rbln::shim::python_fallback_op_name(op_name),
+            c10::rbln::CpuFallbackPath::kPython);
       },
       py::arg("op_name"),
       "Internal: count and log a CPU fallback taken by the Python path");

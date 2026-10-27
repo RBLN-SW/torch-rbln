@@ -778,6 +778,11 @@ struct PendingInstall {
 
 thread_local PendingInstall t_pending;
 
+// Schema name (e.g. "aten::add.out") of the op whose Python wrapper is running
+// on this thread, or null outside one. Saved and restored around each call, so
+// a nested shim op names itself.
+thread_local const std::string* t_python_op = nullptr;
+
 // Take ownership of the pending context (single reader); installer clears it.
 PendingInstall take_pending() {
   PendingInstall p = std::move(t_pending);
@@ -1201,6 +1206,10 @@ void generic_shim_boxed(
     // already cleared t_pending via take_pending()).
     const auto drop_pending =
         c10::make_scope_exit([] { t_pending.valid = false; });
+    const std::string* const outer_python_op = t_python_op;
+    t_python_op = &op_name;
+    const auto restore_python_op = c10::make_scope_exit(
+        [outer_python_op] { t_python_op = outer_python_op; });
     result = py_fn_copy(*pos_tup, **kwargs);
   }
 
@@ -1292,6 +1301,16 @@ void register_cpp_shim(
       overload.c_str(),
       torch::CppFunction::makeFromBoxedFunction<&generic_shim_boxed>());
   installed_libs().push_back(std::move(lib));
+}
+
+std::string python_fallback_op_name(const std::string& op_name) {
+  const std::string* const shim_op = t_python_op;
+  if (shim_op != nullptr && shim_op->starts_with(op_name) &&
+      (shim_op->size() == op_name.size() ||
+       (*shim_op)[op_name.size()] == '.')) {
+    return *shim_op;
+  }
+  return op_name;
 }
 
 std::vector<std::pair<std::string, uint64_t>> diag_dump_recompile_by_op() {

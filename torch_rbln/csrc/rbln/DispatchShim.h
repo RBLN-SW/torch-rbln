@@ -50,6 +50,13 @@ std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>
 diag_dump_dispatch_paths();
 void diag_reset_dispatch_paths();
 
+// Name to record a Python-path CPU fallback under. Inside a shim op whose
+// Python wrapper reports `op_name` (the codegen root name, e.g. "aten::add"),
+// returns that op's schema name ("aten::add.out"): the key its C++ fallbacks
+// and captured call sites (with_stack) use, so explain() joins them. Any other
+// name, or a call outside a shim op, is returned unchanged.
+std::string python_fallback_op_name(const std::string& op_name);
+
 // DIAG/PROFILER: per-op warm-cache MISS (recompile) attribution (op_name ->
 // count), non-zero only. One relaxed atomic on the already-slow miss branch,
 // through a pointer cached on the op's ShimEntry. Lets the profiler turn

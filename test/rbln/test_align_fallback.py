@@ -44,7 +44,7 @@ def _run_scenario(**env) -> tuple[str, dict]:
 class TestAlignFallback(TestCase):
     def test_unaligned_bf16_falls_back_by_default(self):
         _, evidence = _run_scenario()
-        self.assertGreater(evidence["fallbacks"].get("aten::add", 0), 0)
+        self.assertGreater(evidence["fallbacks"].get("aten::add.out", 0), 0)
 
     def test_disabled_align_fallback_takes_device_path(self):
         device, evidence = _run_scenario(TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK="align")
