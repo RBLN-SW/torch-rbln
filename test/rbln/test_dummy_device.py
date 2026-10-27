@@ -40,6 +40,9 @@ def _clean_env() -> dict:
       - RBLN_FORCE_NPU_NAME / RBLN_DEVICES: both feed get_npu_name() and thus the
         resolved compile target; a parent-set value would flip the no-NPU cases
         below. Tests set these explicitly via ``env_extra`` when they need them.
+      - TORCH_RBLN_DISPATCH_DTYPES: an extended catalog would add dtypes to
+        ``SupportedDtypes.dispatch``, which tests below iterate as the dispatch
+        dtypes.
     """
     env = dict(os.environ)
     for key in (
@@ -48,6 +51,7 @@ def _clean_env() -> dict:
         "RBLN_NPUS_PER_DEVICE",
         "RBLN_FORCE_NPU_NAME",
         "RBLN_DEVICES",
+        "TORCH_RBLN_DISPATCH_DTYPES",
     ):
         env.pop(key, None)
     return env
@@ -587,14 +591,15 @@ def test_compile_only_decorator_form_is_allowed():
 def test_eager_device_dtype_op_execution_fails_fast():
     # Eager ops that reach the RBLN device-compile path are NPU-bound, so on
     # RBLN_DUMMY_DEVICE they must fail fast like a compiled graph. Cover the axes that
-    # each route to that gate: both device dtypes (fp16/bf16), unary (softmax) and
-    # binary (add) ops, and aligned + unaligned last dims (the 64-alignment CPU-fallback
-    # must not make an aligned tensor raise while an unaligned one silently runs). All
-    # must raise.
+    # each route to that gate: every dispatch dtype (SupportedDtypes.dispatch), unary
+    # (softmax) and binary (add) ops, and aligned + unaligned last dims (the
+    # 64-alignment CPU-fallback must not make an aligned tensor raise while an
+    # unaligned one silently runs). All must raise.
     proc = _run_with_dummy(
         """
         import torch, torch_rbln
-        for dt in (torch.float16, torch.bfloat16):
+        from torch_rbln._internal.ops_utils import SupportedDtypes
+        for dt in SupportedDtypes.dispatch:
             for shape in [(4, 64), (4, 8)]:  # aligned and unaligned last dim
                 a = torch.ones(*shape, device="rbln:0", dtype=dt)
                 b = torch.ones(*shape, device="rbln:0", dtype=dt)

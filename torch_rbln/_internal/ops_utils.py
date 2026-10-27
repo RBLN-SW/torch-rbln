@@ -2072,6 +2072,10 @@ def is_cpu_fallback_cases(args):
     Individual checks can be disabled via `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK`
     (comma-separated names or `"all"`).
 
+    Not checked here: the 64-element alignment fallback (`align`), which
+    ``compile_and_run_view_aware`` applies after this function passes. The same
+    variable disables it.
+
     Args:
         args (tuple): A tuple of positional arguments for the operation, which may
             contain tensors.

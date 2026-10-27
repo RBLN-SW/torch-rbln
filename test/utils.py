@@ -1,6 +1,8 @@
+import ast
 import multiprocessing
 import os
 import random
+import subprocess
 import sys
 
 import numpy as np
@@ -104,6 +106,24 @@ def spawn_target_with_clean_exit(rank: int, test_func, *args) -> None:
     """
     test_func(rank, *args)
     os._exit(0)
+
+
+def run_snippet(code: str, *, env: dict[str, str] | None = None, unset: tuple[str, ...] = (), timeout: int = 600):
+    """Run ``code`` in a fresh interpreter; return its printed ``RESULT <literal>``.
+
+    ``env`` is applied (and ``unset`` names removed) before the child imports anything,
+    which is how import-time settings like ``TORCH_RBLN_DISPATCH_DTYPES`` must be set.
+    The child must exit 0; the literal on its last ``RESULT`` line comes back parsed.
+    """
+    child_env = {k: v for k, v in os.environ.items() if k not in unset}
+    child_env.update(env or {})
+    proc = subprocess.run(
+        [sys.executable, "-c", code], check=False, env=child_env, capture_output=True, text=True, timeout=timeout
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT ")]
+    assert lines, proc.stderr[-2000:]
+    return ast.literal_eval(lines[-1][len("RESULT ") :])
 
 
 def run_in_isolated_process(func, *args):

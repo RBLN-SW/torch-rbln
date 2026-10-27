@@ -90,7 +90,7 @@ dispatch/cpu_fallback  2,000       --  try: graph mode, or a supported dtype
     aten::sub.out    1,000
     aten::mul.out      500
     aten::clamp.out    500
-    why: dtype-not-fp16 2,000                                                        (7)
+    why: dtype-not-dispatch 2,000                                                    (7)
     candidates (no fast-path handler): sub.out, mul.out, clamp.out                   (8)
 
   >> physical d2h (real transfer): 0 -- everything above served on host, no crossing  (9)
@@ -142,7 +142,7 @@ dispatch/cpu_fallback  2,000       --  try: graph mode, or a supported dtype
    wall time of those shim fallbacks (a _weak, noisy_ A/B signal — inflated
    under oversubscription, not a per-op absolute; see §10).
 7. **`why`**: the reason each of the C++ shim's own fallbacks fired —
-   `dtype-not-fp16` (the op's dtype is outside the device dispatch policy),
+   `dtype-not-dispatch` (the op's dtype is outside the device dispatch policy),
    `nan/inf input`, or `all-scalar inputs`.
 8. **(A) `candidates (no fast-path handler)`**: of the ops that fell back through
    the boxed C++ CPU fallback, which ones have **no CPU fast-path handler** —
@@ -249,7 +249,7 @@ runtime/v2v_slow      1    0 B  real d2h DMA (costly)
 
 **(G4) A decode step in device-tensor mode — the capstone**. Captured with
 `with_stack=True`, it shows nearly every signal at once: the attention-metadata
-integer math falling back (`sub`/`mul`/`clamp`, `dtype-not-fp16`), the
+integer math falling back (`sub`/`mul`/`clamp`, `dtype-not-dispatch`), the
 `positions[idx]` gather going host-slow (`v2v_slow` + the `d2d_copy` bounce),
 all **host-served** (`physical d2h: 0`), under a worker pinned to one core
 (oversubscription), with the rebel-runtime share and the exact source lines:
@@ -282,7 +282,7 @@ dispatch/cpu_fallback  1,600        --  try: graph mode, or a supported dtype
     aten::sub.out    800  at rbln_model_runner.py:1276(_prepare_inputs)
     aten::mul.out    400  at .../attention/flash_attention.py:1148(build)
     aten::clamp.out  400  at .../attention/flash_attention.py:1147(build)
-    why: dtype-not-fp16 1,600
+    why: dtype-not-dispatch 1,600
     candidates (no fast-path handler): sub.out, mul.out, clamp.out
 
   >> physical d2h (real transfer): 0 -- everything above served on host, no crossing
@@ -299,8 +299,8 @@ How to read G4 in 30 seconds:
   movement. (No color claims this is severe; the `physical d2h: 0` line is what
   tells you the crossing cost is nil.)
 - **What**: `cpu_fallback` is the integer metadata math (`sub`/`mul`/`clamp`,
-  all `dtype-not-fp16`); `v2v_slow`/`bounce` is the `positions[idx]` gather. Per
-  400 steps: 4 fallbacks + ~2 gathers + 4 bounces per step.
+  all `dtype-not-dispatch`); `v2v_slow`/`bounce` is the `positions[idx]` gather.
+  Per 400 steps: 4 fallbacks + ~2 gathers + 4 bounces per step.
 - **Where**: the `at …` lines pin it to `flash_attention.py:1126/1147/1148` (the
   metadata builder) and `rbln_model_runner.py:1276` (logits). All of it is one
   cluster.
@@ -344,7 +344,7 @@ And the auxiliary readouts (in `dump()`):
 
 - `cpu_fallback_by_op`, `recompile_by_op` — per-op counts of what fell back to
   the CPU (every op-level fallback path) and of what recompiled.
-- `cpu_fallback_reasons` — the `dtype-not-fp16 / nan-inf / all-scalar`
+- `cpu_fallback_reasons` — the `dtype-not-dispatch / nan-inf / all-scalar`
   breakdown of the C++ shim's own fallbacks (`dispatch.cpu_fallback_ns` covers
   the same set).
 - `cpu_fallback_unaccelerated` (A) — fallback ops with no fast-path handler,

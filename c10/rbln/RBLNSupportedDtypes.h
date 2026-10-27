@@ -30,12 +30,10 @@ inline constexpr std::array<c10::ScalarType, 0> kAmpDtypes = {};
 // torch.accelerator device-capability dtypes (backs get_device_capability):
 // dtypes actually resident in RBLN device memory. Other dtypes accept
 // device="rbln" but are CPU-backed (0 device bytes), so they are not a device
-// capability. Empirically fp16/bf16, and fp32 since it is in kDispatchDtypes
-// (verified in test_accelerator_contract.py).
-inline constexpr std::array<c10::ScalarType, 3> kCapabilityDtypes = {
-    c10::kHalf,
-    c10::kBFloat16,
-    c10::kFloat};
+// capability. A dtype becomes resident when a device op produces it, and eager
+// dispatch sends exactly the kDispatchDtypes to the device, so this is that set
+// (measured in test_accelerator_contract.py).
+inline constexpr auto kCapabilityDtypes = kDispatchDtypes;
 
 constexpr bool is_dispatch_dtype(c10::ScalarType s) noexcept {
   for (const auto d : kDispatchDtypes) {

@@ -565,7 +565,7 @@ class TestProfilerReportFormat(TestCase):
             },
             "dispatch": {"cpu_fallback": 1600, "recompile_miss": 0, "cpu_fallback_ns": 41_084_000},
             "cpu_fallback_by_op": {"aten::sub.out": 800},
-            "cpu_fallback_reasons": {"dtype-not-fp16": 1600},
+            "cpu_fallback_reasons": {"dtype-not-dispatch": 1600},
             "trace_by_op": {},
             "notes": [],
         }

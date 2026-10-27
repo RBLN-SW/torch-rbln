@@ -6,15 +6,13 @@ must match the CPU either way.
 
 from __future__ import annotations
 
-import ast
 import os
-import subprocess
-import sys
 
 import pytest
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 import torch_rbln
+from test.utils import run_snippet
 
 
 _have_device = torch_rbln.device.device_count() > 0 and os.environ.get("RBLN_DUMMY_DEVICE") != "1"
@@ -38,7 +36,7 @@ evidence = {
     "fallbacks": dict(_C._dispatch_fallback_by_op()),
     "compiled": len(compile_cache._compiled_op_cache) - compiled_before,
 }
-print("RESULT", got.device.type, evidence)
+print("RESULT", (got.device.type, evidence))
 """
 
 
@@ -46,17 +44,7 @@ def _run_scenario(**env) -> tuple[str, dict]:
     """Run the unaligned bf16 add in a fresh interpreter with the env set, so the result
     does not depend on what earlier tests imported or patched in this process.
     """
-    full_env = dict(os.environ)
-    full_env.pop("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK", None)
-    full_env.update(env)
-    proc = subprocess.run(
-        [sys.executable, "-c", _SCENARIO], check=False, env=full_env, capture_output=True, text=True, timeout=600
-    )
-    lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT ")]
-    assert proc.returncode == 0, proc.stderr[-2000:]
-    assert lines, proc.stderr[-2000:]
-    _, device, evidence = lines[-1].split(" ", 2)
-    return device, ast.literal_eval(evidence)
+    return run_snippet(_SCENARIO, env=env, unset=("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK",))
 
 
 @needs_device

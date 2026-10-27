@@ -5,7 +5,6 @@ admitted dtype (int32) taking the device path with correct results.
 
 from __future__ import annotations
 
-import ast
 import os
 import subprocess
 import sys
@@ -15,6 +14,7 @@ import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 import torch_rbln
+from test.utils import run_snippet
 from torch_rbln._internal.ops_utils import _dispatch_extension_from_env
 
 
@@ -48,7 +48,7 @@ evidence = {
     "fallbacks": dict(_C._dispatch_fallback_by_op()),
     "compiled": len(compile_cache._compiled_op_cache) - compiled_before,
 }
-print("RESULT", got.device.type, (extra, evidence))
+print("RESULT", (got.device.type, extra, evidence))
 """
 
 
@@ -59,19 +59,9 @@ def _run_int32_scenario(**env) -> tuple[str, dict, dict]:
     which is also how the knob is meant to be used; a subprocess keeps this test
     independent of what earlier tests imported or patched in this process.
     """
-    full_env = dict(os.environ)
-    full_env.pop("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK", None)
-    full_env.pop("TORCH_RBLN_DISPATCH_DTYPES", None)
-    full_env.update(env)
-    proc = subprocess.run(
-        [sys.executable, "-c", _INT32_SCENARIO], check=False, env=full_env, capture_output=True, text=True, timeout=600
+    return run_snippet(
+        _INT32_SCENARIO, env=env, unset=("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK", "TORCH_RBLN_DISPATCH_DTYPES")
     )
-    lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT ")]
-    assert proc.returncode == 0, proc.stderr[-2000:]
-    assert lines, proc.stderr[-2000:]
-    _, device, payload = lines[-1].split(" ", 2)
-    extra, evidence = ast.literal_eval(payload)
-    return device, extra, evidence
 
 
 class TestDispatchDtypesEnv(TestCase):

@@ -23,8 +23,8 @@ namespace torch_rbln::shim {
 // and rebox the return onto the stack.
 //
 // `skip_dtype_args` lists positional argument indices whose dtype should not be
-// checked against float16. Used for ops with typed non-fp16 inputs (e.g.
-// `aten::where.self_out`'s cond at index 0 is bool). These args are still
+// checked against the dispatch policy. Used for ops with typed non-float inputs
+// (e.g. `aten::where.self_out`'s cond at index 0 is bool). These args are still
 // skipped from the all-scalar check too.
 //
 // Called from generated `register_ops.py` at module-init time in place of the
@@ -58,8 +58,9 @@ std::vector<std::pair<std::string, uint64_t>> diag_dump_recompile_by_op();
 void diag_reset_recompile_by_op();
 
 // DIAG/PROFILER: cpu_fallback reason histogram, counts for reason codes 1..3:
-// [dtype-not-fp16, nan/inf input, all-scalar]. Recorded on the fallback branch
-// only (reason already computed by quick_fallback_check) -> ON==OFF preserved.
+// [dtype-not-dispatch, nan/inf input, all-scalar]. Recorded on the fallback
+// branch only (reason already computed by quick_fallback_check) -> ON==OFF
+// preserved.
 std::vector<uint64_t> diag_dump_fallback_reasons();
 void diag_reset_fallback_reasons();
 

@@ -45,7 +45,7 @@ std::atomic<uint64_t> g_diag_ns_miss{0}; // total ns inside miss path
 std::atomic<uint64_t> g_diag_ns_fallback{
     0}; // total ns inside cpu_fallback_rbln (the COST, not just count)
 // cpu_fallback reason histogram. index = reason code from quick_fallback_check
-// (1=dtype-not-fp16, 2=nan/inf input, 3=all-scalar). Bumped on the fallback
+// (1=dtype-not-dispatch, 2=nan/inf input, 3=all-scalar). Bumped on the fallback
 // branch only (the reason is already computed there) -> ON==OFF preserved.
 std::array<std::atomic<uint64_t>, 4> g_fallback_reason{};
 
@@ -575,9 +575,9 @@ inline std::optional<ScalarValue> wrapped_scalar_value(const at::Tensor& t) {
 // path, not CPU. If we counted wrapped 0-dim against the shortcut here, we
 // would force the shortcut for the most common binary-op-with-python-scalar
 // case and bypass the compile-path that the test suite expects.
-// Returns 0 = no fallback, else the reason code (1=dtype-not-fp16, 2=nan/inf
-// input, 3=all-scalar). The reason is already decided here; returning it
-// instead of a bool lets the caller attribute WHY at zero extra cost.
+// Returns 0 = no fallback, else the reason code (1=dtype-not-dispatch,
+// 2=nan/inf input, 3=all-scalar). The reason is already decided here; returning
+// it instead of a bool lets the caller attribute WHY at zero extra cost.
 int quick_fallback_check(
     torch::jit::Stack* stack,
     const SchemaCache& cache,
@@ -630,7 +630,7 @@ int quick_fallback_check(
     // Catalog plus the TORCH_RBLN_DISPATCH_DTYPES extension
     // (RBLNSupportedDtypes.h).
     if (!c10::rbln::is_dispatch_dtype_rt(t.scalar_type())) {
-      return 1; // dtype-not-fp16 (dtype outside the dispatch policy)
+      return 1; // dtype-not-dispatch (dtype outside the dispatch policy)
     }
     if (t.dim() != 0) {
       all_input_scalar = false;
@@ -1319,7 +1319,8 @@ void diag_reset_recompile_by_op() {
 }
 
 std::vector<uint64_t> diag_dump_fallback_reasons() {
-  // counts for reason codes 1..3: [dtype-not-fp16, nan/inf input, all-scalar].
+  // counts for reason codes 1..3: [dtype-not-dispatch, nan/inf input,
+  // all-scalar].
   return {
       g_fallback_reason[1].load(std::memory_order_relaxed),
       g_fallback_reason[2].load(std::memory_order_relaxed),
