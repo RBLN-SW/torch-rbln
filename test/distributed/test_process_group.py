@@ -477,10 +477,17 @@ def run_unsupported_op_test(rank: int, world_size: int, backend: str) -> None:
     setup_environment(rank, world_size)
     dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
 
+    device = torch.device("rbln", rank)
+
     try:
-        # This test can be used for other unsupported operations
-        # reduce_scatter is now supported, so it's removed from here
-        pass
+        pg = dist.distributed_c10d._get_default_group()
+        for dtype in (torch.float16, torch.float32):
+            for op in (dist.ReduceOp.SUM, dist.ReduceOp.PRODUCT):
+                tensors = [torch.full([256], float(rank + 1), dtype=dtype, device=device) for _ in range(2)]
+                opts = dist.AllreduceOptions()
+                opts.reduceOp = op
+                with pytest.raises(RuntimeError, match="Expecting one tensor only"):
+                    pg.allreduce(tensors, opts)
 
     finally:
         dist.destroy_process_group()
@@ -603,6 +610,12 @@ class TestAllReduceRBLN(TestProcessGroupRBLNBase):
         self.run_c10d_test(
             c10d_async_env, self.world_size, run_allreduce_test, (self.world_size, self.backend, dist.ReduceOp.SUM)
         )
+
+    @parametrize("op", [dist.ReduceOp.PRODUCT, dist.ReduceOp.MIN, dist.ReduceOp.MAX, dist.ReduceOp.AVG])
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_allreduce_non_sum(self, op, c10d_async_env):
+        """Test allreduce with non-SUM ops, which fall back to Gloo."""
+        self.run_c10d_test(c10d_async_env, self.world_size, run_allreduce_test, (self.world_size, self.backend, op))
 
 
 @pytest.mark.serial
@@ -737,6 +750,17 @@ class TestReduceScatterRBLN(TestProcessGroupRBLNBase):
             self.world_size,
             run_reduce_scatter_test,
             (self.world_size, self.backend, dist.ReduceOp.SUM, size),
+        )
+
+    @parametrize("op", [dist.ReduceOp.PRODUCT, dist.ReduceOp.MIN, dist.ReduceOp.MAX, dist.ReduceOp.AVG])
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_reduce_scatter_non_sum(self, op, c10d_async_env):
+        """Test reduce_scatter with non-SUM ops, which fall back to Gloo."""
+        self.run_c10d_test(
+            c10d_async_env,
+            self.world_size,
+            run_reduce_scatter_test,
+            (self.world_size, self.backend, op, 256),
         )
 
     @parametrize("size", [1, 256, 3072, (512 * KiB)])
