@@ -694,6 +694,19 @@ class TestRegisteredPythonOps(TestCase):
         self.assertEqual(result.dtype, expected.dtype)
 
     @dtypes(*SUPPORTED_DTYPES)
+    @parametrize("exponent", [float("inf"), float("-inf"), float("nan")])
+    def test_pow_tensor_scalar_non_finite_exponent(self, dtype, exponent):
+        """A non-finite exponent is not an integer: it takes the CPU fallback instead of
+        raising while checking for one. Cold warm cache, so this is the first call.
+        """
+        x = torch.full((64,), 2.0, dtype=dtype)
+        expected = torch.pow(x, exponent)
+        out = torch.empty(64, dtype=dtype, device=self.rbln_device)
+        _C._warmcache_clear()
+        torch.pow(x.to(self.rbln_device), exponent, out=out)
+        self.assertEqual(out.cpu(), expected, equal_nan=True)
+
+    @dtypes(*SUPPORTED_DTYPES)
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_pow_tensor_tensor(self, dtype, shape):
         """Test pow with tensor and tensor"""
