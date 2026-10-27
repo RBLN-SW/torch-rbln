@@ -13,13 +13,8 @@ import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-import torch_rbln
 from test.utils import run_snippet
 from torch_rbln._internal.ops_utils import _dispatch_extension_from_env
-
-
-_have_device = torch_rbln.device.device_count() > 0 and os.environ.get("RBLN_DUMMY_DEVICE") != "1"
-needs_device = pytest.mark.skipif(not _have_device, reason="needs an RBLN device")
 
 
 _INT32_SCENARIO = r"""
@@ -96,7 +91,7 @@ class TestDispatchDtypesEnv(TestCase):
         self.assertIn("TORCH_RBLN_DISPATCH_DTYPES: 'bad_dtype' is not a torch dtype name", proc.stderr)
 
 
-@needs_device
+@pytest.mark.npu(count=1)
 class TestExtendedCatalog(TestCase):
     def test_int32_takes_device_path(self):
         # int32 is outside the default catalog: DISPATCH_DTYPES admits it. The alignment

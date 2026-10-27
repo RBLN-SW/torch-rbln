@@ -6,17 +6,10 @@ must match the CPU either way.
 
 from __future__ import annotations
 
-import os
-
 import pytest
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-import torch_rbln
 from test.utils import run_snippet
-
-
-_have_device = torch_rbln.device.device_count() > 0 and os.environ.get("RBLN_DUMMY_DEVICE") != "1"
-needs_device = pytest.mark.skipif(not _have_device, reason="needs an RBLN device")
 
 
 _SCENARIO = r"""
@@ -47,7 +40,7 @@ def _run_scenario(**env) -> tuple[str, dict]:
     return run_snippet(_SCENARIO, env=env, unset=("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK",))
 
 
-@needs_device
+@pytest.mark.npu(count=1)
 class TestAlignFallback(TestCase):
     def test_unaligned_bf16_falls_back_by_default(self):
         _, evidence = _run_scenario()
