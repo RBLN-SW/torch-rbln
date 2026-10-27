@@ -594,7 +594,7 @@ void register_internal_api(py::module_& module) {
       "Internal: clear the miss-path reentrancy flag set by _warmcache_enter_building");
 
   // CPU fast-path registry introspection. Returns True iff a handler is
-  // registered for the given fully-qualified op name (e.g. "aten::rsqrt.out").
+  // registered for the given fully-qualified op name (e.g. "aten::sub.out").
   // Used by tests to verify the static-init registration fired without
   // needing a live OperatorHandle.
   module.def(
