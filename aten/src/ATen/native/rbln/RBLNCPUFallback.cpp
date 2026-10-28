@@ -303,6 +303,7 @@ std::vector<at::Tensor> borrow_rbln_list_as_cpu(
 void cpu_fallback_rbln(
     const c10::OperatorHandle& op,
     torch::jit::Stack* stack,
+    std::string_view reason,
     bool error_on_views,
     c10::DispatchKey cpu_dispatch_key) {
   TORCH_CHECK(
@@ -313,7 +314,9 @@ void cpu_fallback_rbln(
   // Every caller of this boxed CPU fallback is a fallback, so it is counted,
   // logged and timed here, once, for all of them.
   const c10::rbln::CpuFallbackScope fallback(
-      c10::toString(op.operator_name()), c10::rbln::CpuFallbackPath::kBoxed);
+      c10::toString(op.operator_name()),
+      c10::rbln::CpuFallbackPath::kBoxed,
+      reason);
   auto& schema_args = op.schema().arguments();
   const auto num_arguments = schema_args.size();
   auto arguments = torch::jit::last(stack, num_arguments);

@@ -114,9 +114,9 @@ def rbln_log_error(msg: str):
     _logger.error(msg)
 
 
-def rbln_record_cpu_fallback(op_name: str):
-    """Context manager around one CPU fallback: ``with rbln_record_cpu_fallback(name):``
-    then run the op on CPU inside the block.
+def rbln_record_cpu_fallback(op_name: str, reason: str):
+    """Context manager around one CPU fallback: ``with rbln_record_cpu_fallback(name,
+    reason):`` then run the op on CPU inside the block.
 
     Entering counts the fallback per op, which ``torch.rbln.explain()`` reports, and
     when `TORCH_RBLN_LOG_LEVEL` is `INFO` or lower logs it with a UserWarning that shows
@@ -130,7 +130,9 @@ def rbln_record_cpu_fallback(op_name: str):
 
     Parameters:
         op_name (str): The name of the operation that ran on CPU.
+        reason (str): Why it ran on CPU, such as the case ``is_cpu_fallback_cases``
+            returned.
     """
     import torch_rbln._C  # noqa: PLC0415
 
-    return torch_rbln._C._CpuFallbackScope(op_name)
+    return torch_rbln._C._CpuFallbackScope(op_name, reason)

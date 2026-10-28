@@ -1838,6 +1838,7 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
             args,
             result=out_tensor,
             op_name=op_name,
+            reason="align",
             **kwargs_filtered,
         )
 
@@ -1855,6 +1856,7 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
                         args,
                         result=out_tensor,
                         op_name=op_name,
+                        reason="div_rounding",
                         **kwargs_filtered,
                     )
 
@@ -2056,7 +2058,7 @@ def _parse_disabled_fallback_cases() -> frozenset:
     return _ALL_FALLBACK_CASES if ("all" in cases) else (cases & _ALL_FALLBACK_CASES)
 
 
-def is_cpu_fallback_cases(args):
+def is_cpu_fallback_cases(args) -> str | None:
     """Determines if a CPU fallback is necessary for an operation.
 
     This function checks for several conditions that would require an operation to fall
@@ -2100,14 +2102,15 @@ def is_cpu_fallback_cases(args):
             contain tensors.
 
     Returns:
-        bool: True if a CPU fallback is necessary, False otherwise.
+        str | None: The name of the first case above that requires a CPU fallback, the
+        name `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` takes, or None if none does.
     """
     disabled_cases = _parse_disabled_fallback_cases()
 
     # 0a: Python trace/debugger — when a trace function is set (e.g. pdb, coverage,
     # sys.settrace), fall back to CPU
     if "trace" not in disabled_cases and sys.gettrace() is not None:
-        return True
+        return "trace"
 
     # 1: TorchDispatchMode active — run on CPU and do not attempt compile (cheap)
     if "dispatch_mode" not in disabled_cases:
@@ -2115,39 +2118,39 @@ def is_cpu_fallback_cases(args):
             from torch.utils._python_dispatch import is_in_torch_dispatch_mode  # noqa: PLC0415
 
             if is_in_torch_dispatch_mode(include_infra_modes=False):
-                return True
+                return "dispatch_mode"
         except ImportError:
             pass
 
     # Checks 2-5 require tensors; bail early if none
     tensor_args = extract_tensors(args)
     if not tensor_args:
-        return False
+        return None
 
     # 2: fall back to the CPU if any input tensor has an unsupported dtype, or if input
     # tensors have mismatched dtypes
     if "dtype" not in disabled_cases:
         first_dtype = tensor_args[0].dtype
         if first_dtype not in SupportedDtypes.dispatch:
-            return True
+            return "dtype"
         for i in range(1, len(tensor_args)):
             if tensor_args[i].dtype != first_dtype:
-                return True
+                return "dtype"
 
     # 3: fall back to the CPU if all input tensors are scalar tensors
     if "scalar" not in disabled_cases and all(a.ndim == 0 for a in tensor_args):
-        return True
+        return "scalar"
 
     # 4: fall back to the CPU if any contiguous tensor has non-zero storage offset
     if "storage_offset" not in disabled_cases and any(
         a.is_contiguous() and a.storage_offset() != 0 for a in tensor_args
     ):
-        return True
+        return "storage_offset"
 
     # 5: fall back to the CPU if any tensor contains NaN/Inf values (heavy: to_cpu +
     # scan; non-deploy only)
     if "nan_inf" not in disabled_cases and not is_rbln_deploy() and has_invalid_tensor(to_cpu(args)):
-        return True
+        return "nan_inf"
 
     # 6: Reentrancy — already inside an RBLN compile op (e.g. from print/repr or from
     # compiled graph).
@@ -2157,12 +2160,20 @@ def is_cpu_fallback_cases(args):
 
         if get_rbln_compile_op_depth() > 0:
             rbln_log_warn("Unexpected CPU fallback: reentrant dispatch (already inside RBLN compile op)")
-            return True
+            return "reentrant"
 
-    return False
+    return None
 
 
-def cpu_fallback_path(target_ops, args, *, result: torch.Tensor | None = None, op_name: str | None = None, **op_kwargs):
+def cpu_fallback_path(
+    target_ops,
+    args,
+    *,
+    result: torch.Tensor | None = None,
+    op_name: str | None = None,
+    reason: str | None = None,
+    **op_kwargs,
+):
     """Perform CPU fallback for the given target operation.
 
     This function converts the input arguments and keyword arguments from their original
@@ -2175,6 +2186,9 @@ def cpu_fallback_path(target_ops, args, *, result: torch.Tensor | None = None, o
         result (Optional[torch.Tensor]): Optional pre-allocated output tensor. If
             provided and size matches, the result will be copied into this tensor.
         op_name (Optional[str]): Operator name like "aten::add" for logging purposes.
+        reason (Optional[str]): Why the op runs on CPU, such as the case
+            ``is_cpu_fallback_cases`` returned. Required with ``op_name``; the fallback
+            is counted under both.
         **op_kwargs: Keyword arguments for the operation (e.g. dim=2, out=...). Passed
             as-is to target_ops.
 
@@ -2184,7 +2198,10 @@ def cpu_fallback_path(target_ops, args, *, result: torch.Tensor | None = None, o
     """
     if op_name is None:
         return _run_on_cpu(target_ops, args, result, op_kwargs)
-    with rbln_record_cpu_fallback(op_name):
+    if reason is None:
+        msg = f"cpu_fallback_path: {op_name} is counted as a fallback, so it needs a reason"
+        raise ValueError(msg)
+    with rbln_record_cpu_fallback(op_name, reason):
         return _run_on_cpu(target_ops, args, result, op_kwargs)
 
 

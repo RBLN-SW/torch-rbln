@@ -30,7 +30,21 @@ namespace {
  * @param stack The stack containing the input and output tensors.
  */
 void fallback_rbln(const c10::OperatorHandle& op, torch::jit::Stack* stack) {
-  at::native::rbln::cpu_fallback_rbln(op, stack);
+  at::native::rbln::cpu_fallback_rbln(op, stack, "registered");
+}
+
+/**
+ * @brief fallback_rbln for an op with no RBLN registration at all, counted as
+ * `unsupported_op`, the `TORCH_RBLN_DISABLE_FALLBACK` category that turns it
+ * into an error.
+ *
+ * @param op The operator handle for the operation being executed.
+ * @param stack The stack containing the input and output tensors.
+ */
+void unsupported_op_fallback_rbln(
+    const c10::OperatorHandle& op,
+    torch::jit::Stack* stack) {
+  at::native::rbln::cpu_fallback_rbln(op, stack, "unsupported_op");
 }
 
 /**
@@ -132,7 +146,8 @@ TORCH_LIBRARY_IMPL(_, PrivateUse1, m) {
     m.fallback(
         torch::CppFunction::makeFromBoxedFunction<&error_fallback_rbln>());
   } else {
-    m.fallback(torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
+    m.fallback(torch::CppFunction::makeFromBoxedFunction<
+               &unsupported_op_fallback_rbln>());
   }
 }
 

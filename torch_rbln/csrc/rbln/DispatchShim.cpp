@@ -1149,7 +1149,9 @@ void generic_shim_boxed(
     }
     // Counted, logged and timed inside (c10::rbln::CpuFallbackScope), like
     // every other fallback path.
-    ::at::native::rbln::cpu_fallback_rbln(op, stack);
+    static constexpr std::array<std::string_view, 5> kReasons = {
+        "", "dtype", "nan_inf", "scalar", "out_dtype"};
+    ::at::native::rbln::cpu_fallback_rbln(op, stack, kReasons[fb_reason]);
     return;
   }
 

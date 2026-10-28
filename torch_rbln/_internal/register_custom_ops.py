@@ -19,8 +19,11 @@ from torch_rbln._internal.ops_utils import (
 
 
 def custom_softmax_out_rbln(self, dim: int, half_to_float: bool, *, out):  # noqa: ARG001, FBT001
-    if is_cpu_fallback_cases(self):
-        result_tensor = cpu_fallback_path(torch.softmax, (self,), result=out, op_name="aten::softmax", dim=dim)
+    fallback_reason = is_cpu_fallback_cases(self)
+    if fallback_reason:
+        result_tensor = cpu_fallback_path(
+            torch.softmax, (self,), result=out, op_name="aten::softmax", reason=fallback_reason, dim=dim
+        )
     else:
         # ``dim`` is a positional kwarg (int) — passed through to torch.softmax
         # inside the wrapper OpModule. View-aware path detects any non-contig
@@ -63,8 +66,14 @@ def pow_tensor_scalar_out_rbln(self, exponent, *, out):
 
     if self.numel() == 0:
         result_tensor, _ = handle_empty_binary((self,))
-    elif not _is_integer_exponent(exponent) or is_cpu_fallback_cases((self, exponent)):
-        result_tensor = cpu_fallback_path(torch.pow, (self, exponent), result=out, op_name="aten::pow")
+    elif not _is_integer_exponent(exponent):
+        result_tensor = cpu_fallback_path(
+            torch.pow, (self, exponent), result=out, op_name="aten::pow", reason="non_integer_exponent"
+        )
+    elif fallback_reason := is_cpu_fallback_cases((self, exponent)):
+        result_tensor = cpu_fallback_path(
+            torch.pow, (self, exponent), result=out, op_name="aten::pow", reason=fallback_reason
+        )
     else:
         # ``exponent`` is a Python scalar so it flows through unchanged; the
         # view-aware helper detects any non-contig ``self`` and dispatches the

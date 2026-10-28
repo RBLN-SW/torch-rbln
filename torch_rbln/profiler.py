@@ -104,9 +104,10 @@ _BOUNCE_SITES: tuple[tuple[str, str], ...] = (
 # a lost batching win, not an added bounce.
 _HOST_BOUNCE_SITES = (0, 1, 2, 3)
 
-# cpu_fallback reason names; index matches the runtime histogram order (the WHY
-# behind dispatch.cpu_fallback). See quick_fallback_check in DispatchShim.cpp.
-_FALLBACK_REASON_NAMES = ("dtype-not-dispatch", "nan/inf input", "all-scalar inputs", "out-dtype")
+# Reason names of the C++ shim's own fallbacks; index matches its reason histogram
+# order. See quick_fallback_check in DispatchShim.cpp. The other fallback paths are
+# not in it; cpu_fallback_reasons_by_op covers them along with the shim.
+_SHIM_FALLBACK_REASON_NAMES = ("dtype-not-dispatch", "nan/inf input", "all-scalar inputs", "out-dtype")
 
 # Must match the reason order in rebel-compiler vmemory_manager.cc.
 _RUNTIME_REASONS: tuple[tuple[str, str], ...] = (
@@ -232,6 +233,19 @@ def _read_fallback_by_op() -> dict[str, int]:
     return {str(op): int(c) for op, c in fn()}
 
 
+def _read_fallback_by_op_reason() -> dict[tuple[str, str], int]:
+    """Per-op, per-reason CPU-fallback counts ((op_name, reason) -> count), every
+    op-level fallback path, or {} if the loaded torch_rbln._C predates the binding
+    (graceful degrade).
+    """
+    from torch_rbln import _C  # noqa: PLC0415
+
+    fn = getattr(_C, "_dispatch_fallback_by_op_reason", None)
+    if fn is None:
+        return {}
+    return {(str(op), str(reason)): int(c) for op, reason, c in fn()}
+
+
 def _read_fallback_ns() -> int:
     """Wall ns spent in CPU fallbacks, every fallback path, or 0 if the loaded
     torch_rbln._C predates the binding (graceful degrade).
@@ -254,7 +268,7 @@ def _read_recompile_by_op() -> dict[str, int]:
     return {str(op): int(c) for op, c in fn()}
 
 
-def _read_fallback_reasons() -> list[int]:
+def _read_shim_fallback_reasons() -> list[int]:
     """cpu_fallback reason counts [dtype-not-dispatch, nan/inf input, all-scalar,
     out-dtype] for the C++ shim's own fallbacks, or [] if the loaded torch_rbln._C
     predates the binding (graceful degrade).
@@ -590,6 +604,7 @@ class RBLNExplain:
         self._b0: list[tuple[int, int]]
         self._d0: tuple[int, ...]
         self._f0: dict[str, int]
+        self._fbr0: dict[tuple[str, str], int]
         self._fns0: int
         self._r0: dict[str, int]
         self._fr0: list[int]
@@ -599,9 +614,10 @@ class RBLNExplain:
         self._dispatch: tuple[int, ...] | None = None
         self._rt: dict[str, Any] | None = None
         self._fallback_by_op: dict[str, int] | None = None
+        self._fallback_reasons_by_op: dict[str, dict[str, int]] | None = None
         self._fallback_ns = 0
         self._recompile_by_op: dict[str, int] | None = None
-        self._fallback_reasons: list[int] | None = None
+        self._shim_fallback_reasons: list[int] | None = None
         self._trace = with_stack
         self._trace_by_op: dict | None = None
         self._rt_timing: list[tuple[int, int]] | None = None  # (B) per-primitive librbln (ns, calls)
@@ -636,9 +652,10 @@ class RBLNExplain:
             self._b0 = _read_bounces()
             self._d0 = _read_dispatch()
             self._f0 = _read_fallback_by_op()
+            self._fbr0 = _read_fallback_by_op_reason()
             self._fns0 = _read_fallback_ns()
             self._r0 = _read_recompile_by_op()
-            self._fr0 = _read_fallback_reasons()
+            self._fr0 = _read_shim_fallback_reasons()
             self._rt0 = _read_runtime()
             self._wall0 = time.perf_counter_ns()
         except BaseException:
@@ -671,11 +688,17 @@ class RBLNExplain:
             self._dispatch = tuple(x1 - x0 for x0, x1 in zip(self._d0, d1, strict=True))
             f1 = _read_fallback_by_op()
             self._fallback_by_op = {op: f1[op] - self._f0.get(op, 0) for op in f1 if f1[op] - self._f0.get(op, 0) > 0}
+            fbr1 = _read_fallback_by_op_reason()
+            self._fallback_reasons_by_op = {}
+            for (op, reason), count in fbr1.items():
+                delta = count - self._fbr0.get((op, reason), 0)
+                if delta > 0:
+                    self._fallback_reasons_by_op.setdefault(op, {})[reason] = delta
             self._fallback_ns = max(0, _read_fallback_ns() - self._fns0)  # 0 if reset in the region
             r1 = _read_recompile_by_op()
             self._recompile_by_op = {op: r1[op] - self._r0.get(op, 0) for op in r1 if r1[op] - self._r0.get(op, 0) > 0}
-            fr1 = _read_fallback_reasons()
-            self._fallback_reasons = (
+            fr1 = _read_shim_fallback_reasons()
+            self._shim_fallback_reasons = (
                 [b - a for a, b in zip(self._fr0, fr1, strict=True)]
                 if self._fr0 and fr1 and len(fr1) == len(self._fr0)
                 else []
@@ -757,9 +780,14 @@ class RBLNExplain:
             "wall_ns": self._wall_ns,
         }
         out["cpu_fallback_by_op"] = dict(sorted((self._fallback_by_op or {}).items(), key=lambda kv: -kv[1]))
+        reasons_by_op = self._fallback_reasons_by_op or {}
+        out["cpu_fallback_reasons_by_op"] = {
+            op: dict(sorted(reasons_by_op.get(op, {}).items(), key=lambda kv: -kv[1]))
+            for op in out["cpu_fallback_by_op"]
+        }
         out["recompile_by_op"] = dict(sorted((self._recompile_by_op or {}).items(), key=lambda kv: -kv[1]))
         out["cpu_fallback_reasons"] = {
-            n: c for n, c in zip(_FALLBACK_REASON_NAMES, self._fallback_reasons or [], strict=False) if c > 0
+            n: c for n, c in zip(_SHIM_FALLBACK_REASON_NAMES, self._shim_fallback_reasons or [], strict=False) if c > 0
         }
         out["trace_by_op"] = dict(self._trace_by_op or {})  # (A) WHERE; {} unless with_stack=True
         if self._rt is not None:

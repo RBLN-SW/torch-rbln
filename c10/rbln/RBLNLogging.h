@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -125,7 +126,8 @@ enum class CpuFallbackPath : uint8_t { kBoxed, kPython };
  *
  * @code
  * {
- *   const CpuFallbackScope fallback("aten::mul.out", CpuFallbackPath::kBoxed);
+ *   const CpuFallbackScope fallback(
+ *       "aten::mul.out", CpuFallbackPath::kBoxed, "nan_inf");
  *   // ... run the op on CPU ...
  * }
  * // Output (at INFO):
@@ -136,7 +138,13 @@ enum class CpuFallbackPath : uint8_t { kBoxed, kPython };
  */
 class C10_RBLN_API CpuFallbackScope {
  public:
-  CpuFallbackScope(std::string_view full_op_name, CpuFallbackPath path);
+  // `reason` names the check that sent the op to CPU, such as the
+  // `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` case or
+  // `TORCH_RBLN_DISABLE_FALLBACK` category that decided it.
+  CpuFallbackScope(
+      std::string_view full_op_name,
+      CpuFallbackPath path,
+      std::string_view reason);
   ~CpuFallbackScope();
   CpuFallbackScope(const CpuFallbackScope&) = delete;
   CpuFallbackScope& operator=(const CpuFallbackScope&) = delete;
@@ -150,6 +158,10 @@ class C10_RBLN_API CpuFallbackScope {
 
 // Per-op counts of CPU fallbacks, non-zero only.
 C10_RBLN_API std::vector<std::pair<std::string, uint64_t>> cpu_fallback_counts();
+// The same counts split by reason, as (op, reason, count); an op's entries sum
+// to its cpu_fallback_counts entry.
+C10_RBLN_API std::vector<std::tuple<std::string, std::string, uint64_t>>
+cpu_fallback_reason_counts();
 // Wall time of the CPU fallbacks those counts cover; nested fallbacks are
 // timed once, as part of the outermost.
 C10_RBLN_API uint64_t cpu_fallback_ns();

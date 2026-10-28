@@ -3,6 +3,8 @@
 #include <ATen/native/CPUFallback.h>
 #include <c10/rbln/RBLNMacros.h>
 
+#include <string_view>
+
 namespace at::native::rbln {
 
 /**
@@ -10,12 +12,14 @@ namespace at::native::rbln {
  *
  * @param op The operator handle.
  * @param stack The JIT stack.
+ * @param reason Why the op runs on CPU, counted with it (see CpuFallbackScope).
  * @param error_on_views If true, an error is raised on view operators.
  * @param cpu_dispatch_key The dispatch key for CPU.
  */
 C10_RBLN_API void cpu_fallback_rbln(
     const c10::OperatorHandle& op,
     torch::jit::Stack* stack,
+    std::string_view reason,
     bool error_on_views = false,
     c10::DispatchKey cpu_dispatch_key = c10::DispatchKey::CPU);
 
