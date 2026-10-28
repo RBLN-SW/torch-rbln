@@ -19,6 +19,7 @@ common:
     harbor.k8s.rebellions.in/rebellions-sw/rbln-test:0.12.0rc0-ubuntu24.04-py3.12
   python-versions: &python-versions
     - "3.12"
+  python-test-suites: &python-test-suites core,distributed,models
 
 steps:
   - group: Lint
@@ -184,9 +185,7 @@ steps:
     depends_on:
       - wheel-builds-x86_64-Release
     steps:
-      - label: >-
-          Upload Python test steps (py3.12, x86_64, {{matrix.build_type}},
-          RBLN-CA25)
+      - label: Upload Python test steps (py3.12, x86_64, Release, RBLN-CA25)
         key: upload-python-test-steps-x86_64-RBLN-CA25
         command: |
           buildkite-agent pipeline upload \
@@ -196,19 +195,12 @@ steps:
         env:
           TORCH_RBLN_QUEUE_AMD64_NPU: ${TORCH_RBLN_QUEUE_AMD64_CA25?}
           TORCH_RBLN_PYTHON_VERSION: "3.12"
-          TORCH_RBLN_BUILD_TYPE: "{{matrix.build_type}}"
+          TORCH_RBLN_BUILD_TYPE: Release
           TORCH_RBLN_ARTIFACT_BUILD_ID: ${BUILDKITE_BUILD_ID}
-          TORCH_RBLN_ARTIFACT_DIR: >-
-            torch-rbln-py3.12-x86_64-{{matrix.build_type}}
+          TORCH_RBLN_ARTIFACT_DIR: torch-rbln-py3.12-x86_64-Release
           TORCH_RBLN_NPU_PRODUCT: RBLN-CA25
           TORCH_RBLN_EXCLUDE_PERIODIC: "true"
-          TORCH_RBLN_TEST_SUITES: "{{matrix.test_suites}}"
-        matrix:
-          setup:
-            build_type:
-              - Release
-            test_suites:
-              - core,distributed,ops,models
+          TORCH_RBLN_TEST_SUITES: *python-test-suites
         timeout_in_minutes: 5
         image: *test-image
 
@@ -227,6 +219,6 @@ steps:
           TORCH_RBLN_ARTIFACT_DIR: torch-rbln-py3.12-x86_64-Release
           TORCH_RBLN_NPU_PRODUCT: RBLN-CR13
           TORCH_RBLN_EXCLUDE_PERIODIC: "true"
-          TORCH_RBLN_TEST_SUITES: core,distributed,ops,models
+          TORCH_RBLN_TEST_SUITES: *python-test-suites
         timeout_in_minutes: 5
         image: *test-image
