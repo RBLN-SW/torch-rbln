@@ -5,9 +5,9 @@ exports both as C entry points: ``RBLN_ABI_CURRENT``, the interface a librbln.so
 implements, and ``RBLN_ABI_MIN_SUPPORTED``, the oldest consumer contract it still
 accepts.
 
-torch-rbln owns no number of its own. FindREBEL.cmake records a snapshot of
-``RBLN_ABI_CURRENT`` from the header the build compiled against
-(``_abi_snapshot.BUILT_ABI``) and import time checks it against the live runtime::
+torch-rbln owns no number of its own. The build reads ``RBLN_ABI_CURRENT`` from the
+header it compiles against and records it as ``_abi_snapshot.BUILT_ABI``, which the
+import-time check compares with the live runtime::
 
     rbln_abi_min_supported() <= BUILT_ABI <= rbln_abi_current()
 

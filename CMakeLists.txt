@@ -1,45 +1,38 @@
-cmake_minimum_required(VERSION 3.18
-  FATAL_ERROR
-)
+cmake_minimum_required(VERSION 3.31...4.4)
 
 # Options ######################################################################
 option(RBLN_USE_CCACHE "Use ccache if it is installed" ON)
 option(BUILD_TESTING "Build C++ test binaries" ON)
 
 # CMake configurations #########################################################
-# Prohibit in-source builds
 if(${CMAKE_SOURCE_DIR} STREQUAL ${CMAKE_BINARY_DIR})
-  message(FATAL_ERROR "In-source build are not supported")
+  message(FATAL_ERROR "In-source builds are not supported")
 endif()
 
-# Set C++ and C standard
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-# Generate compile_commands.json
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Set not to use link path for RPATH
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH OFF)
 
-# Set RPATH for the build and install
 set(CMAKE_BUILD_RPATH "$ORIGIN")
 set(CMAKE_INSTALL_RPATH "$ORIGIN")
 
-# Set position independent code for binaries
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# Set CMake module path
-set(CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+set(CMAKE_MODULE_PATH
+  ${CMAKE_CURRENT_SOURCE_DIR}/cmake
+  ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules
+)
 
-# Set output directory for artifacts of the build result
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-# If `ccache` is installed, use it as a compiler launcher.
 if(RBLN_USE_CCACHE)
   find_program(CCACHE ccache)
   if(CCACHE)
@@ -53,22 +46,20 @@ project(torch-rbln
   LANGUAGES CXX C
 )
 
+include(TorchRBLNCheckCompiler)
+
 # dependencies #################################################################
-# Set `TORCH_FOUND`, `TORCH_INCLUDE_DIRS`, `TORCH_LIBRARIES`, `TORCH_CXX_FLAGS`
-include(TorchSetup)
+include(External/torch)
 
-# Set `REBEL_FOUND`, `REBEL_INCLUDE_DIRS`, `REBEL_LIBRARIES`, and
-# `REBEL_ABI_CURRENT`
-include(FindREBEL)
+find_package(RBLN MODULE REQUIRED)
 
-# Freeze the ABI number for the import-time handshake in
-# torch_rbln/_internal/abi_check.py. Empty means a pre-handshake Rebel
-# (FindREBEL already warned), which the consumer side reads as
-# "no snapshot recorded".
-if(REBEL_ABI_CURRENT STREQUAL "")
-  set(REBEL_ABI_CURRENT_PY "None")
+include(TorchRBLNBuildFlags)
+include(TorchRBLNAlwaysLink)
+
+if(RBLN_ABI_CURRENT STREQUAL "")
+  set(RBLN_ABI_CURRENT_PY "None")
 else()
-  set(REBEL_ABI_CURRENT_PY "${REBEL_ABI_CURRENT}")
+  set(RBLN_ABI_CURRENT_PY "${RBLN_ABI_CURRENT}")
 endif()
 configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/cmake/abi_snapshot.py.in
@@ -79,51 +70,63 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/generated/_abi_snapshot.py
   DESTINATION _internal
 )
 
-# Add spdlog for logging
-include(spdlogSetup)
+set(aten_native_dir ${CMAKE_CURRENT_SOURCE_DIR}/aten/src/ATen/native)
+set(register_ops_file ${CMAKE_CURRENT_BINARY_DIR}/generated/register_ops.py)
+file(GLOB_RECURSE codegen_sources CONFIGURE_DEPENDS
+  ${CMAKE_CURRENT_SOURCE_DIR}/tools/codegen/*.py
+)
+# Codegen depends on a copy of torch's `version.py` because an installed file
+# can keep an older mtime.
+configure_file(
+  ${TORCH_INSTALL_PREFIX}/version.py
+  ${CMAKE_CURRENT_BINARY_DIR}/torch_version.py
+  COPYONLY
+)
+add_custom_command(
+  OUTPUT ${register_ops_file}
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/run_codegen.py
+    ${aten_native_dir}/native_functions.yaml
+    ${aten_native_dir}/tags.yaml
+    ${register_ops_file}
+  DEPENDS
+    ${aten_native_dir}/native_functions.yaml
+    ${aten_native_dir}/tags.yaml
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/run_codegen.py
+    ${codegen_sources}
+    ${CMAKE_CURRENT_BINARY_DIR}/torch_version.py
+  COMMENT "Generating register_ops.py"
+  VERBATIM
+)
+add_custom_target(torch_rbln_register_ops ALL
+  DEPENDS ${register_ops_file}
+)
+install(FILES ${register_ops_file}
+  DESTINATION _internal
+)
 
-# Set `pybind11::module`, `pybind11::embed`, `pybind11::headers`, and
-# `pybind11::pybind11`
-include(pybind11Setup)
+include(External/spdlog)
+
+include(External/pybind11)
 
 # `torch-rbln` target ##########################################################
-# Define target interface for all libraries and executables
 set(target torch_rbln_interface)
 add_library(${target} INTERFACE)
+target_compile_features(${target} INTERFACE cxx_std_20)
 target_compile_definitions(${target} INTERFACE
   FMT_HEADER_ONLY
 )
-target_compile_options(${target} INTERFACE
-  ${TORCH_CXX_FLAGS}
-  -ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}/=
-  -ffile-prefix-map=${CMAKE_CURRENT_BINARY_DIR}/=
-  -ffile-prefix-map=${CMAKE_INSTALL_PREFIX}/=
-  -ffile-prefix-map=${TORCH_INSTALL_PREFIX}/=torch/
-)
-# Hardening flags
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-  target_compile_options(${target} INTERFACE
-    # _FORTIFY_SOURCE is a no-op without -O; gate on non-Debug to silence the
-    # warning.
-    $<$<NOT:$<CONFIG:Debug>>:-D_FORTIFY_SOURCE=2>
-    -fstack-protector-strong
-    -fstack-clash-protection
-  )
-  target_link_options(${target} INTERFACE
-    -Wl,-z,relro
-    -Wl,-z,now
-    -Wl,-z,noexecstack
-    # Scope to non-executables: tests need libtorch_rbln in NEEDED for
-    # static-init op registration.
-    $<$<NOT:$<STREQUAL:$<TARGET_PROPERTY:TYPE>,EXECUTABLE>>:-Wl,--as-needed>
-  )
-endif()
 target_include_directories(${target} INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
   $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(${target} INTERFACE)
+target_link_libraries(${target} INTERFACE
+  torch_library
+  TorchRBLN::rbln
+)
+install(TARGETS ${target}
+  EXPORT TorchRBLNTargets
+)
 
 # subdirectories ###############################################################
 add_subdirectory(aten/src/ATen)
@@ -132,8 +135,47 @@ add_subdirectory(torch_rbln/csrc/rbln)
 add_subdirectory(torch_rbln/csrc/distributed/c10d/rbln)
 if(BUILD_TESTING)
   enable_testing()
-  include(GTestSetup)
+  include(External/googletest)
   add_subdirectory(test/cpp)
 else()
   message(STATUS "Skipping C++ tests (BUILD_TESTING=OFF)")
 endif()
+
+# Package for C++ consumers ####################################################
+include(CMakePackageConfigHelpers)
+set(config_install_dir share/cmake/TorchRBLN)
+install(EXPORT TorchRBLNTargets
+  NAMESPACE TorchRBLN::
+  DESTINATION ${config_install_dir}
+)
+# Both directories come from resolved file paths because some installers
+# symlink each file without symlinking its directory.
+get_filename_component(rbln_library_dir "${RBLN_LIBRARY}" REALPATH)
+get_filename_component(rbln_library_dir "${rbln_library_dir}" DIRECTORY)
+get_filename_component(rbln_include_dir
+  "${RBLN_INCLUDE_DIR}/rebel/runtime/api/rbln_runtime_api.h" REALPATH)
+get_filename_component(rbln_include_dir
+  "${rbln_include_dir}/../../../.." ABSOLUTE)
+file(RELATIVE_PATH rbln_include_offset
+  "${rbln_library_dir}" "${rbln_include_dir}")
+configure_package_config_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/cmake/TorchRBLNConfig.cmake.in
+  ${CMAKE_CURRENT_BINARY_DIR}/TorchRBLNConfig.cmake
+  INSTALL_DESTINATION ${config_install_dir}
+)
+set(config_files
+  ${CMAKE_CURRENT_BINARY_DIR}/TorchRBLNConfig.cmake
+  ${CMAKE_CURRENT_SOURCE_DIR}/cmake/TorchRBLNAddRuntimeTarget.cmake
+)
+if(DEFINED TORCH_RBLN_VERSION)
+  write_basic_package_version_file(
+    ${CMAKE_CURRENT_BINARY_DIR}/TorchRBLNConfigVersion.cmake
+    VERSION ${TORCH_RBLN_VERSION}
+    COMPATIBILITY AnyNewerVersion
+  )
+  list(APPEND config_files
+    ${CMAKE_CURRENT_BINARY_DIR}/TorchRBLNConfigVersion.cmake)
+endif()
+install(FILES ${config_files}
+  DESTINATION ${config_install_dir}
+)

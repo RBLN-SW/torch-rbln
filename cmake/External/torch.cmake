@@ -1,5 +1,7 @@
+include_guard(GLOBAL)
+
 find_package(Python3
-  COMPONENTS Interpreter Development
+  COMPONENTS Interpreter Development.Module
   REQUIRED
 )
 if(NOT DEFINED PYTHON_SITE_PACKAGES)
@@ -20,22 +22,6 @@ find_package(Torch REQUIRED
     ${PYTHON_SITE_PACKAGES}/torch/share/cmake
   NO_DEFAULT_PATH
 )
-
-# `torch-rbln` and `rebel-compiler` both require GCC/G++ 13+.
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS "13.0")
-    message(FATAL_ERROR
-      "torch-rbln requires GCC/G++ version 13.0 or higher. Current version: "
-      "${CMAKE_CXX_COMPILER_VERSION}. Please use CC=gcc-13 CXX=g++-13 "
-      "(Debian/Ubuntu) or gcc-toolset-13 (RHEL).")
-  endif()
-  message(STATUS
-    "GCC/G++ version ${CMAKE_CXX_COMPILER_VERSION} meets requirement (>= 13.0)")
-else()
-  message(FATAL_ERROR
-    "torch-rbln requires the GCC/G++ compiler (version 13.0 or higher). "
-    "Current compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}.")
-endif()
 
 # Set runtime paths for `torch`
 list(APPEND CMAKE_BUILD_RPATH ${PYTHON_SITE_PACKAGES}/torch/lib)

@@ -1,5 +1,5 @@
 # ==============================================================================
-# pybind11Setup.cmake - PyTorch-compatible pybind11 configuration
+# PyTorch-compatible pybind11 configuration
 # ==============================================================================
 #
 # PROBLEM:
@@ -24,8 +24,10 @@
 #
 # ==============================================================================
 
+include_guard(GLOBAL)
+
 find_package(Python3
-  COMPONENTS Interpreter Development
+  COMPONENTS Interpreter Development.Module
   REQUIRED
 )
 
@@ -42,9 +44,6 @@ if(NOT DEFINED PYTHON_SITE_PACKAGES)
   endif()
 endif()
 
-# Use TORCH_INCLUDE_DIRS from TorchSetup.cmake if already defined
-# Otherwise, derive from PYTHON_SITE_PACKAGES (same approach as
-# TorchSetup.cmake)
 if(DEFINED TORCH_INCLUDE_DIRS)
   # TORCH_INCLUDE_DIRS is a list, get the first element
   list(GET TORCH_INCLUDE_DIRS 0 TORCH_INCLUDE_DIR)
@@ -95,9 +94,8 @@ if(EXISTS "${TORCH_PYBIND11_DIR}")
     )
   endfunction()
 else()
-  # Fallback to system pybind11 if PyTorch's is not found
   message(WARNING
-    "PyTorch's pybind11 not found, falling back to system pybind11")
+    "PyTorch's pybind11 not found, falling back to the pybind11 package")
   find_package(pybind11 REQUIRED
     PATHS ${PYTHON_SITE_PACKAGES}/pybind11/share/cmake
     NO_DEFAULT_PATH

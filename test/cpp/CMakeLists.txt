@@ -1,10 +1,9 @@
-cmake_minimum_required(VERSION 3.18 FATAL_ERROR)
+cmake_minimum_required(VERSION 3.31...4.4)
 
-if(NOT TARGET torch_rbln)
+if(NOT TARGET TorchRBLN::torch_rbln)
   project(torch_rbln_cpp_tests LANGUAGES CXX)
 
-  set(CMAKE_CXX_STANDARD 20)
-  set(CMAKE_CXX_STANDARD_REQUIRED ON)
+  set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
   set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
   set(BUILD_SHARED_LIBS ON)
@@ -14,71 +13,25 @@ if(NOT TARGET torch_rbln)
 
   enable_testing()
 
-  get_filename_component(TORCH_RBLN_SOURCE_DIR
-    "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
-  set(CMAKE_MODULE_PATH ${TORCH_RBLN_SOURCE_DIR}/cmake)
+  set(CMAKE_MODULE_PATH ${CMAKE_CURRENT_LIST_DIR}/../../cmake)
+  include(TorchRBLNCheckCompiler)
 
-  if(NOT DEFINED TORCH_RBLN_ROOT)
-    find_package(Python3 COMPONENTS Interpreter REQUIRED)
-    string(CONCAT torch_rbln_probe_code
-      "import importlib.util; print(importlib.util.find_spec('torch_rbln')"
-      ".submodule_search_locations[0])")
-    execute_process(
-      COMMAND ${Python3_EXECUTABLE} -I -c "${torch_rbln_probe_code}"
-      OUTPUT_VARIABLE TORCH_RBLN_ROOT
-      OUTPUT_STRIP_TRAILING_WHITESPACE
-      RESULT_VARIABLE torch_rbln_probe
-    )
-    if(NOT torch_rbln_probe EQUAL 0)
-      message(FATAL_ERROR
-        "Could not find an installed torch_rbln; "
-        "set -DTORCH_RBLN_ROOT=<site-packages>/torch_rbln explicitly.")
-    endif()
-  endif()
-  find_library(TORCH_RBLN_LIBRARY
-    NAMES torch_rbln
-    PATHS "${TORCH_RBLN_ROOT}/lib"
-    NO_DEFAULT_PATH
-    REQUIRED
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  string(CONCAT torch_rbln_probe_code
+    "import importlib.util; print(importlib.util.find_spec('torch_rbln')"
+    ".submodule_search_locations[0])")
+  execute_process(
+    # Without `-I`, a `torch_rbln` in the working directory shadows the
+    # installed one.
+    COMMAND ${Python3_EXECUTABLE} -I -c "${torch_rbln_probe_code}"
+    OUTPUT_VARIABLE torch_rbln_package_dir
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
   )
-  find_library(C10_RBLN_LIBRARY
-    NAMES c10_rbln
-    PATHS "${TORCH_RBLN_ROOT}/lib"
-    NO_DEFAULT_PATH
-    REQUIRED
-  )
-  find_library(C10D_RBLN_LIBRARY
-    NAMES c10d_rbln
-    PATHS "${TORCH_RBLN_ROOT}/lib"
-    NO_DEFAULT_PATH
-    REQUIRED
-  )
-
-  include(TorchSetup)
-  include(FindREBEL)
-  include(GTestSetup)
-
-  add_library(torch_rbln SHARED IMPORTED)
-  set_target_properties(torch_rbln PROPERTIES
-    IMPORTED_LOCATION "${TORCH_RBLN_LIBRARY}"
-  )
-  target_include_directories(torch_rbln INTERFACE
-    ${TORCH_RBLN_ROOT}/include
-    ${TORCH_INCLUDE_DIRS}
-    ${REBEL_INCLUDE_DIRS}
-  )
-  target_link_libraries(torch_rbln INTERFACE
-    ${C10_RBLN_LIBRARY}
-    ${C10D_RBLN_LIBRARY}
-    ${TORCH_LIBRARIES}
-    ${REBEL_LIBRARIES}
-  )
-  target_compile_definitions(torch_rbln INTERFACE
-    FMT_HEADER_ONLY
-  )
-  target_compile_options(torch_rbln INTERFACE
-    ${TORCH_CXX_FLAGS}
-  )
+  find_package(TorchRBLN CONFIG REQUIRED
+    HINTS "${torch_rbln_package_dir}/share/cmake")
+  include(TorchRBLNBuildFlags)
+  include(External/googletest)
 endif()
 
 set(sources
@@ -103,7 +56,10 @@ foreach(source ${sources})
   get_filename_component(test_file_name ${source} NAME_WE)
   set(target test_cpp_${test_file_name})
   add_executable(${target} ${source})
-  target_link_libraries(${target} PUBLIC torch_rbln GTest::gtest_main)
+  target_link_libraries(${target} PRIVATE
+    TorchRBLN::torch_rbln
+    GTest::gtest_main
+  )
   gtest_discover_tests(${target}
     DISCOVERY_MODE PRE_TEST
     DISCOVERY_TIMEOUT 600
