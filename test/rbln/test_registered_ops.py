@@ -1258,7 +1258,7 @@ BROADCAST_PATTERNS = [
     # Mixed-rank
     ((2, 3, 4, 8, 16), (8, 16)),
     ((4, 8, 16), ()),  # scalar rhs
-    # ----- Last-dim-size-one broadcast: ``(N, D) × (N, 1)`` from
+    # ----- Last-dim-size-one broadcast: ``(N, D) x (N, 1)`` from
     # ``output * S.sum(dim=-1, keepdim=True)`` (softmax backward) and from
     # ``x * rsqrt(var)`` (RMSNorm). With an unaligned D the op takes the CPU
     # fallback; with a 64-aligned D the backend broadcasts the size-1 side on
