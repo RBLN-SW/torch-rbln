@@ -1,7 +1,7 @@
 # Note: spdlog is licensed under the MIT License.
 # https://github.com/gabime/spdlog/blob/v1.x/LICENSE
 
-set(DOWNLOAD_EXTRACT_TIMESTAMP ON)
+include_guard(GLOBAL)
 include(FetchContent)
 
 # Use internal {fmt} library to avoid version conflicts between spdlog and
@@ -14,15 +14,11 @@ set(SPDLOG_BUILD_EXAMPLES OFF)
 set(SPDLOG_BUILD_TESTS OFF)
 set(SPDLOG_BUILD_BENCH OFF)
 
-# Fetch and make spdlog available.
 fetchcontent_declare(
   spdlog
-  GIT_REPOSITORY https://github.com/gabime/spdlog.git
-  GIT_TAG v1.17.0
-  GIT_SHALLOW TRUE
+  URL https://github.com/gabime/spdlog/archive/refs/tags/v1.17.0.tar.gz
+  URL_HASH
+    SHA256=d8862955c6d74e5846b3f580b1605d2428b11d97a410d86e2fb13e857cd3a744
+  EXCLUDE_FROM_ALL
 )
-fetchcontent_getproperties(spdlog)
-if(NOT spdlog_POPULATED)
-  fetchcontent_populate(spdlog)
-  add_subdirectory(${spdlog_SOURCE_DIR} ${spdlog_BINARY_DIR} EXCLUDE_FROM_ALL)
-endif()
+fetchcontent_makeavailable(spdlog)

@@ -83,11 +83,11 @@ repository.
 **Is this file generated?** These are build outputs; the edit disappears on the
 next build.
 
-| File                                                                             | Real source                                                    |
-| -------------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| `torch_rbln/_internal/register_ops.py`                                           | `aten/src/ATen/native/native_functions.yaml`, `tools/codegen/` |
-| `torch_rbln/_internal/_abi_snapshot.py`                                          | `cmake/abi_snapshot.py.in`, configured at build time           |
-| `torch_rbln/lib/`, `torch_rbln/include/`, `torch_rbln/_C/__init__.pyi`, `build/` | `cmake --install`                                              |
+| File                                                                    | Real source                                                    |
+| ----------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `torch_rbln/_internal/register_ops.py`                                  | `aten/src/ATen/native/native_functions.yaml`, `tools/codegen/` |
+| `torch_rbln/_internal/_abi_snapshot.py`                                 | `cmake/abi_snapshot.py.in`, configured at build time           |
+| `torch_rbln/lib/`, `torch_rbln/include/`, `torch_rbln/share/`, `build/` | `cmake --install`                                              |
 
 `register_ops.py` is the one that catches people: every eager shim (`add_rbln`,
 `mul_rbln`, …), 1400 lines of ordinary-looking Python, gitignored. Fixing an op
@@ -143,8 +143,8 @@ Skip the rebuild and `pytest` loads the previously built `torch_rbln/_C` and
 `torch_rbln/lib/*.so`: the run tests the old code and its result means nothing.
 A bare `ninja -C build` stages nothing into `torch_rbln/`; the install step
 does. The build needs GCC 13 or newer (`CC=gcc-13 CXX=g++-13`), enforced by
-`cmake/TorchSetup.cmake`. To change the number of parallel build jobs in the
-install step, set `CMAKE_BUILD_PARALLEL_LEVEL`.
+`cmake/TorchRBLNCheckCompiler.cmake`. To change the number of parallel build
+jobs in the install step, set `CMAKE_BUILD_PARALLEL_LEVEL`.
 
 Verify the rebuild actually took before trusting any result. An install can skip
 the build step and leave the previous binary in place while reporting success;

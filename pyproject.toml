@@ -18,11 +18,9 @@ runtime = ["rebel-compiler~=0.12.1.dev261"]
 [build-system]
 requires = [
   "cmake>=4.4.4,<4.5.0",
-  # `hatchling` 1.32 emits Metadata-Version 2.5. Keep this cap until
-  # `rbln-internal` and `rbln-nightly` are confirmed to accept 2.5.
-  "hatchling>=1.31.0,<1.32.0",
-  "mypy>=1.13.0,<1.14.0",
+  "hatchling>=1.32.4,<1.33.0",
   "ninja>=1.13.2,<1.14.0",
+  "packaging>=26.3,<26.4",
   "pyyaml>=6.0.3,<6.1.0",
   "rebel-compiler",                 # `[tool.uv].build-constraint-dependencies` pins the version.
   "setuptools-scm>=10.3.4,<10.4.0",
@@ -41,9 +39,6 @@ expression = "compute_version()"
 # Allow `file://` direct references for build-time dependency pinning
 # (e.g., `replace_depends.py` pins a local `rebel-compiler` wheel in `pyproject.toml`).
 allow-direct-references = true
-
-[tool.hatch.build.hooks.custom]
-path = "hatch_build.py"
 
 [tool.hatch.build.targets.sdist]
 include = [
@@ -93,6 +88,9 @@ packages = ["torch_rbln"]
 exclude = ["torch_rbln/csrc/**"]
 only-include-required = false
 skip-excluded-dirs = true
+
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
 
 [tool.uv]
 # `uv build` does not read the lockfile, so `build-constraint-dependencies` pins the build environment.
@@ -145,9 +143,9 @@ torch = { index = "pytorch-cpu" }
 build = [
   "cmake>=4.4.4,<4.5.0",
   "editables>=0.6,<0.7",
-  "hatchling>=1.31.0,<1.32.0",
-  "mypy>=1.13.0,<1.14.0",
+  "hatchling>=1.32.4,<1.33.0",
   "ninja>=1.13.2,<1.14.0",
+  "packaging>=26.3,<26.4",
   "pyyaml>=6.0.3,<6.1.0",
   "rebel-compiler",                 # `[tool.uv].constraint-dependencies` pins the version.
   "setuptools-scm>=10.3.4,<10.4.0",

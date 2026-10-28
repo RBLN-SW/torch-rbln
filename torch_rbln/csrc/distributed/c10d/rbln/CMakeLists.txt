@@ -9,15 +9,14 @@ set(sources
 set(headers
   ProcessGroupRBLN.hpp
 )
-add_library(${target}
+add_library(${target} SHARED
   ${sources}
   ${headers}
 )
+add_library(TorchRBLN::${target} ALIAS ${target})
 
 target_link_libraries(${target} PUBLIC
   torch_rbln_interface
-  ${TORCH_LIBRARIES}
-  ${REBEL_LIBRARIES}
 )
 target_link_libraries(${target} PRIVATE
   c10_rbln
@@ -27,13 +26,8 @@ set_target_properties(${target} PROPERTIES
   VISIBILITY_INLINES_HIDDEN ON
 )
 
-target_include_directories(${target} SYSTEM PUBLIC
-  ${TORCH_INCLUDE_DIRS}
-  ${REBEL_INCLUDE_DIRS}
-)
-
 install(TARGETS ${target}
-  EXPORT Caffe2Targets
+  EXPORT TorchRBLNTargets
   DESTINATION lib
 )
 

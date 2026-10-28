@@ -30,15 +30,17 @@ set(headers
   native/rbln/RBLNTensorShape.h
   native/rbln/RBLNTensorUtils.h
 )
-add_library(${target}
+add_library(${target} SHARED
   ${sources}
   ${headers}
 )
+add_library(TorchRBLN::${target} ALIAS ${target})
 
 target_link_libraries(${target} PUBLIC
   c10_rbln
   c10d_rbln
 )
+torch_rbln_always_link(${target})
 set_target_properties(${target} PROPERTIES
   DEFINE_SYMBOL TORCH_RBLN_BUILD_MAIN_LIB
   CXX_VISIBILITY_PRESET hidden
@@ -49,12 +51,8 @@ target_include_directories(${target} PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 
-target_include_directories(${target} SYSTEM PRIVATE
-  ${REBEL_INCLUDE_DIRS}
-)
-
 install(TARGETS ${target}
-  EXPORT Caffe2Targets
+  EXPORT TorchRBLNTargets
   DESTINATION lib
 )
 

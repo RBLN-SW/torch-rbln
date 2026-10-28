@@ -6,4 +6,4 @@ BUILT_ABI is None when the build used a rebel-compiler that predates the ABI
 handshake and ships no rbln_abi.h. See torch_rbln/_internal/abi_check.py.
 """
 
-BUILT_ABI: int | None = @REBEL_ABI_CURRENT_PY@
+BUILT_ABI: int | None = @RBLN_ABI_CURRENT_PY@

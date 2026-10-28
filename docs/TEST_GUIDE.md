@@ -43,7 +43,7 @@ Model tests may also need external model artifacts.
   instantiation, dtype parametrization, and `OpInfo` op tests.
 - **C++**: [GoogleTest](https://google.github.io/googletest/), built with CMake
   and discovered with `gtest_discover_tests()`. Each test executable links
-  against `torch_rbln` and `GTest::gtest_main`.
+  against `TorchRBLN::torch_rbln` and `GTest::gtest_main`.
 
 ---
 
@@ -197,6 +197,47 @@ ctest \
 ctest \
   --test-dir ./build \
   --verbose
+```
+
+### Build the tests the way CI does
+
+CI builds `test/cpp` as a standalone project against the installed CMake
+package. With `torch-rbln` installed in `.venv`:
+
+```bash
+uv run --no-sync cmake \
+  -S test/cpp \
+  -B build-test \
+  -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DPython3_EXECUTABLE="${PWD}/.venv/bin/python"
+uv run --no-sync cmake \
+  --build build-test
+```
+
+After switching virtual environments, reconfigure with `--fresh`; otherwise,
+CMake keeps the `TorchRBLN` and `Torch` packages it found in the previous one.
+
+### Use the package in other CMake projects
+
+Add the `share/cmake` directory of the installed `torch_rbln` package to
+`CMAKE_PREFIX_PATH`. To print it, run this with the interpreter that has
+`torch-rbln` installed:
+
+```bash
+python -I - <<'EOF'
+import importlib.util
+spec = importlib.util.find_spec("torch_rbln")
+print(spec.submodule_search_locations[0] + "/share/cmake")
+EOF
+```
+
+Then, in `CMakeLists.txt`, find the package, which also finds `torch` and the
+RBLN Runtime installed alongside it:
+
+```cmake
+find_package(TorchRBLN CONFIG REQUIRED)
+target_link_libraries(my_app PRIVATE TorchRBLN::torch_rbln)
 ```
 
 ---
