@@ -13,7 +13,7 @@ from torch_rbln import _C
 from torch_rbln._internal.compile_cache import compile_rbln_cached_entry
 from torch_rbln._internal.dummy_device import raise_if_dummy_execution
 from torch_rbln._internal.env_utils import is_rbln_deploy, use_device_group_num_devices
-from torch_rbln._internal.log_utils import rbln_log_warn, rbln_record_cpu_fallback
+from torch_rbln._internal.log_utils import rbln_log_warn, rbln_log_warn_once, rbln_record_cpu_fallback
 from torch_rbln._internal.warm_cache import install_pending as _install_warm_cache_pending
 
 
@@ -1814,7 +1814,8 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     # (e.g. an artifact build); those must proceed so builds still work.
     from torch_rbln._internal.torch_compile_patch_helpers import get_rbln_compile_op_depth  # noqa: PLC0415
 
-    if get_rbln_compile_op_depth() == 0:
+    eager = get_rbln_compile_op_depth() == 0
+    if eager:
         raise_if_dummy_execution(f"the eager op {op_name}" if op_name else "an eager op")
 
     # Device 64-elem-align fallback; TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK=align turns
@@ -1875,6 +1876,9 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
             k: (v.contiguous() if isinstance(v, torch.Tensor) and not v.is_contiguous() else v)
             for k, v in kwargs_filtered.items()
         }
+
+    if eager:
+        _warn_float32_on_device_once(op_name, args, kwargs_filtered)
 
     # A CPU 0-dim tensor is a scalar operand (the CUDA rule): `torch.tensor(2.0) * x` is
     # valid with `x` on the device. The compiled program needs every input on one
@@ -1956,6 +1960,18 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
         # so the C++ hit path skips it once the alignment fallback is on again.
         _install_warm_cache_pending(list(entry.runtime_holder), external_result, align_bypassed=unaligned)
     return result_tensor
+
+
+def _warn_float32_on_device_once(op_name, args, kwargs) -> None:
+    """Warn once when the first float32 aten op runs on the device."""
+    if not (op_name or "").startswith("aten::"):
+        return
+    if not any(t.dtype == torch.float32 for t in extract_tensors(args) + extract_tensors(kwargs)):
+        return
+    rbln_log_warn_once(
+        "float32 ops on RBLN device can run at reduced precision; where full precision matters, "
+        'compute on CPU explicitly via to("cpu") and move the result back with to("rbln").'
+    )
 
 
 def _has_cpu_scalar_operand(tensors) -> bool:

@@ -1,3 +1,4 @@
+import functools
 import logging
 import os
 import sys
@@ -10,6 +11,7 @@ __all__ = [
     "rbln_log_error",
     "rbln_log_info",
     "rbln_log_warn",
+    "rbln_log_warn_once",
     "rbln_record_cpu_fallback",
 ]
 
@@ -86,6 +88,16 @@ def rbln_log_info(msg: str):
 
 def rbln_log_warn(msg: str):
     """Logs a message at the WARNING level.
+
+    Args:
+        msg (str): The warning message to log.
+    """
+    _logger.warning(msg)
+
+
+@functools.cache
+def rbln_log_warn_once(msg: str):
+    """Logs a message at the WARNING level, once per distinct message.
 
     Args:
         msg (str): The warning message to log.
