@@ -219,6 +219,15 @@ mv \
 
 failed_pytest_runs=()
 
+# An op test also passes when the op fell back to CPU, comparing CPU against CPU, so
+# the op suite records which ops fell back in each test.
+serial_report=()
+parallel_report=()
+if [[ "${test_suite}" == "ops" ]]; then
+  serial_report=(--fallback-report="test-reports/${test_suite}-serial.json")
+  parallel_report=(--fallback-report="test-reports/${test_suite}-parallel.json")
+fi
+
 echo "--- Running ${test_suite} suite, ${test_dir}, serial tests"
 pytest_exit_code=0
 env \
@@ -228,6 +237,7 @@ env \
     pytest \
       "${test_dir}" \
       -m "${selection} and serial" \
+      "${serial_report[@]}" \
       --numprocesses=1 \
   || pytest_exit_code=$?
 # Exit 5 means `pytest` selected no tests, which is not a failure.
@@ -244,10 +254,20 @@ env \
     pytest \
       "${test_dir}" \
       -m "${selection} and (not serial)" \
+      "${parallel_report[@]}" \
       --numprocesses="${num_workers}" \
   || pytest_exit_code=$?
 if [[ "${pytest_exit_code}" -ne 0 && "${pytest_exit_code}" -ne 5 ]]; then
   failed_pytest_runs+=("parallel tests (pytest exit code ${pytest_exit_code})")
+fi
+
+if [[ "${test_suite}" == "ops" ]]; then
+  echo "--- Uploading CPU fallback reports"
+  # The reports do not decide the step's result, so a failed upload does not fail it.
+  if ! buildkite-agent artifact upload \
+    "test-reports/${test_suite}-*.json"; then
+    echo "Could not upload the CPU fallback reports" >&2
+  fi
 fi
 
 if [[ "${#failed_pytest_runs[@]}" -gt 0 ]]; then

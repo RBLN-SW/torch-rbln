@@ -172,6 +172,25 @@ uv run --no-sync pytest \
   --exitfirst
 ```
 
+### Report CPU fallback per test
+
+A test that compares an op against a CPU reference also passes when the op fell
+back to CPU. `--fallback-report=PATH` writes each test's outcome with the CPU
+fallbacks over its call: their total and their count per op, from the counts every
+fallback path records (`cpu_fallback_by_op` in [EXPLAIN.md](EXPLAIN.md) reads the
+same). Fixtures and child processes are not counted. A test that resets the CPU
+fallback counts inside its call is marked `cpu_fallback_reset_detected`, as its
+counts can miss fallbacks. The CPU retry after a `torch.compile` graph fails to
+compile is not counted, unlike an eager op's, and neither is host work the
+compiler places inside a compiled graph, so no fallback does not mean the device
+ran everything.
+
+```bash
+uv run --no-sync pytest \
+  test/ops \
+  --fallback-report=/tmp/ops-fallback.json
+```
+
 ---
 
 ## Run C++ tests
