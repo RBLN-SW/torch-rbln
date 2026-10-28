@@ -553,15 +553,29 @@ def run_allreduce_size_test(
         # Verify result - sum of all rank values
         expected_value = sum(range(1, world_size + 1))  # 1+2+...+world_size
 
-        # Check first and last elements to verify correctness
-        assert tensor[0] == expected_value, (
+        result = tensor.cpu()
+        mismatch = (result != expected_value).nonzero()
+        assert mismatch.numel() == 0, (
             f"allreduce size test failed on rank {rank} for size {size_bytes} bytes: "
-            f"expected={expected_value}, actual={tensor[0]}"
+            f"{mismatch.numel()} mismatched elements, first at index {mismatch[0].item()} "
+            f"(expected={expected_value}, actual={result[mismatch[0]].item()})"
         )
-        assert tensor[-1] == expected_value, (
-            f"allreduce size test failed on rank {rank} for size {size_bytes} bytes (last element): "
-            f"expected={expected_value}, actual={tensor[-1]}"
-        )
+
+    finally:
+        dist.destroy_process_group()
+
+
+def run_allreduce_noncontiguous_test(rank: int, world_size: int, backend: str, rows: int, cols: int) -> None:
+    """Test that allreduce rejects a non-contiguous float16 tensor."""
+    setup_environment(rank, world_size)
+    dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+    device = torch.device("rbln", rank)
+
+    try:
+        tensor = torch.full([rows, cols], float(rank + 1), dtype=torch.float16).to(device).t()
+        assert not tensor.is_contiguous()
+        with pytest.raises(RuntimeError, match="requires contiguous"):
+            dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
 
     finally:
         dist.destroy_process_group()
@@ -572,10 +586,17 @@ def run_unsupported_op_test(rank: int, world_size: int, backend: str) -> None:
     setup_environment(rank, world_size)
     dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
 
+    device = torch.device("rbln", rank)
+
     try:
-        # This test can be used for other unsupported operations
-        # reduce_scatter is now supported, so it's removed from here
-        pass
+        pg = dist.distributed_c10d._get_default_group()
+        for dtype in (torch.float16, torch.float32):
+            for op in (dist.ReduceOp.SUM, dist.ReduceOp.PRODUCT):
+                tensors = [torch.full([256], float(rank + 1), dtype=dtype, device=device) for _ in range(2)]
+                opts = dist.AllreduceOptions()
+                opts.reduceOp = op
+                with pytest.raises(RuntimeError, match="Expecting one tensor only"):
+                    pg.allreduce(tensors, opts)
 
     finally:
         dist.destroy_process_group()
@@ -708,6 +729,12 @@ class TestAllReduceRBLN(TestProcessGroupRBLNBase):
         self.run_c10d_test(
             c10d_async_env, self.world_size, run_unaligned_reduce_test, (self.world_size, self.backend, "all_reduce")
         )
+
+    @parametrize("op", [dist.ReduceOp.PRODUCT, dist.ReduceOp.MIN, dist.ReduceOp.MAX, dist.ReduceOp.AVG])
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_allreduce_non_sum(self, op, c10d_async_env):
+        """Test allreduce with non-SUM ops, which fall back to Gloo."""
+        self.run_c10d_test(c10d_async_env, self.world_size, run_allreduce_test, (self.world_size, self.backend, op))
 
 
 @pytest.mark.serial
@@ -855,6 +882,17 @@ class TestReduceScatterRBLN(TestProcessGroupRBLNBase):
             self.world_size,
             run_reduce_scatter_test,
             (self.world_size, self.backend, dist.ReduceOp.SUM, size),
+        )
+
+    @parametrize("op", [dist.ReduceOp.PRODUCT, dist.ReduceOp.MIN, dist.ReduceOp.MAX, dist.ReduceOp.AVG])
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_reduce_scatter_non_sum(self, op, c10d_async_env):
+        """Test reduce_scatter with non-SUM ops, which fall back to Gloo."""
+        self.run_c10d_test(
+            c10d_async_env,
+            self.world_size,
+            run_reduce_scatter_test,
+            (self.world_size, self.backend, op, 256),
         )
 
     @parametrize("size", [1, 256, 3072, (512 * KiB)])
@@ -1008,6 +1046,49 @@ class TestAllReduceSizesRBLN(TestProcessGroupRBLNBase):
         )
 
 
+@pytest.mark.serial
+@pytest.mark.npu(count=4)
+class TestAllReduceWorldSize3RBLN(TestProcessGroupRBLNBase):
+    """Test allreduce on world size 3 with aligned and unaligned sizes."""
+
+    def setUp(self):
+        super().setUp()
+        self.world_size = 3
+
+    @parametrize(
+        "size",
+        [
+            2,
+            1536,
+            4096,
+            6138,
+            6150,
+            (3 * MiB + 2),
+            (3 * MiB + 1536),
+        ],
+    )
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_allreduce_float16(self, size, c10d_async_env):
+        """Test allreduce with specified bytes using torch.float16."""
+        self.run_c10d_test(
+            c10d_async_env,
+            self.world_size,
+            run_allreduce_size_test,
+            (self.world_size, self.backend, size, torch.float16),
+        )
+
+    @parametrize("shape", [(16, 16), (32, 64)])
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_allreduce_noncontiguous(self, shape, c10d_async_env):
+        """Test allreduce rejects a transposed float16 tensor."""
+        self.run_c10d_test(
+            c10d_async_env,
+            self.world_size,
+            run_allreduce_noncontiguous_test,
+            (self.world_size, self.backend, *shape),
+        )
+
+
 # Instantiate device type tests for all test classes
 instantiate_device_type_tests(TestBroadcastRBLN, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestAllReduceRBLN, globals(), only_for="privateuse1")
@@ -1018,6 +1099,7 @@ instantiate_device_type_tests(TestBarrierRBLN, globals(), only_for="privateuse1"
 instantiate_device_type_tests(TestSendRecvRBLN, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestUnsupportedOpsRBLN, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestAllReduceSizesRBLN, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestAllReduceWorldSize3RBLN, globals(), only_for="privateuse1")
 
 
 if __name__ == "__main__":

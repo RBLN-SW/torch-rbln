@@ -11,11 +11,13 @@
 #include <algorithm>
 #include <cstdlib>
 #include <mutex>
+#include <numeric>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 // C10 includes
 #include <c10/rbln/RBLNFunctions.h>
@@ -57,12 +59,21 @@ namespace {
 // v3.0.0 enforced 512 B for CS-based AllReduce/ReduceScatter and 128 B for
 // AllGather; v3.1+ relaxed CS alignment to 128 B. Keep these at the tighter
 // historical values so a single `torch-rbln` build runs against either driver
-// generation — 512-aligned trivially satisfies the newer 128 B requirement.
+// generation.
 constexpr size_t RCCL_ALLGATHER_ALIGNMENT = 128ULL;
 constexpr size_t RCCL_ALLREDUCE_ALIGNMENT = 512ULL;
 constexpr size_t RCCL_REDUCE_SCATTER_ALIGNMENT = RCCL_ALLREDUCE_ALIGNMENT;
 // RCCL DMA commands encode device addresses in 128-byte units.
 constexpr size_t RCCL_DEVICE_ADDRESS_ALIGNMENT = 128ULL;
+// AllReduce also splits data into world_size chunks, each 128 B aligned, so its
+// alignment is lcm(512 B, 128 B * world_size) and grows for world 3 and 5-8.
+constexpr size_t RCCL_ALLREDUCE_CHUNK_ALIGNMENT = 128ULL;
+
+size_t getAllReduceAlignment(int world_size) {
+  return std::lcm(
+      RCCL_ALLREDUCE_ALIGNMENT,
+      RCCL_ALLREDUCE_CHUNK_ALIGNMENT * static_cast<size_t>(world_size));
+}
 
 // AllReduce size limit: data_size / world_size <= 1MB (temporary driver
 // limitation)
@@ -146,6 +157,43 @@ size_t getRcclElementSize(::rbln::DataType dtype) {
   }
   // This should never be reached due to the checks above
   return ::rbln::Rccl::RcclReduceOp::RCCL_REDUCE_OP_SUM;
+}
+
+const char* reduceOpName(const ReduceOp& reduceOp) {
+  switch (reduceOp) {
+    case ReduceOp::SUM:
+      return "SUM";
+    case ReduceOp::PRODUCT:
+      return "PRODUCT";
+    case ReduceOp::MIN:
+      return "MIN";
+    case ReduceOp::MAX:
+      return "MAX";
+    case ReduceOp::AVG:
+      return "AVG";
+    default:
+      return "UNKNOWN";
+  }
+}
+
+void warnGlooFallbackOnce(
+    const char* collective,
+    at::ScalarType dtype,
+    const ReduceOp& reduceOp) {
+  static std::mutex mutex;
+  static std::unordered_set<std::string> warned;
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (!warned.insert(c10::str(collective, dtype, reduceOpName(reduceOp)))
+             .second) {
+      return;
+    }
+  }
+  RBLN_WARN(
+      "{} of {} with ReduceOp.{} is not handled by rbln-ccl. Falling back to Gloo on the host.",
+      collective,
+      c10::toString(dtype),
+      reduceOpName(reduceOp));
 }
 
 /**
@@ -1202,17 +1250,16 @@ class AllreduceRBLNWork : public RBLNWork {
       return;
     }
 
-    // Check if input is not CUSTOM_FLOAT16
+    // RCCL reduces only CUSTOM_FLOAT16 with SUM
     const auto rbln_dtype = c10::rbln::to_rbln_dtype(inputs_[0].scalar_type());
-    if (rbln_dtype != ::rbln::DataType::Float16) {
+    if (rbln_dtype != ::rbln::DataType::Float16 || reduceOp_ != ReduceOp::SUM) {
       if (glooBackend_) {
-        // Use Gloo backend for non-CUSTOM_FLOAT16 allreduce
+        warnGlooFallbackOnce("all_reduce", inputs_[0].scalar_type(), reduceOp_);
         // Copy RBLN tensor to CPU
         std::vector<at::Tensor> cpu_tensors;
-        for (size_t i = 0; i < inputs_.size(); ++i) {
-          for (auto& input : inputs_) {
-            cpu_tensors.emplace_back(input.to("cpu"));
-          }
+        cpu_tensors.reserve(inputs_.size());
+        for (auto& input : inputs_) {
+          cpu_tensors.emplace_back(input.to("cpu"));
         }
 
         // Call Gloo allreduce on CPU tensor
@@ -1220,8 +1267,7 @@ class AllreduceRBLNWork : public RBLNWork {
         opts.reduceOp = reduceOp_;
         auto work = glooBackend_->allreduce(cpu_tensors, opts);
         work->wait();
-        RBLN_LOG_DEBUG(
-            "non-CUSTOM_FLOAT16 allreduce by Gloo Backend is completed");
+        RBLN_LOG_DEBUG("allreduce by Gloo Backend is completed");
 
         size_t i = 0;
         for (auto& input : inputs_) {
@@ -1231,8 +1277,8 @@ class AllreduceRBLNWork : public RBLNWork {
       }
       RBLN_CHECK(
           false,
-          "non-CUSTOM_FLOAT16 allreduce requires a Gloo backend. "
-          "Pass gloo_backend when creating ProcessGroupRBLN, or convert tensors to custom float16 before allreduce.");
+          "allreduce of non-CUSTOM_FLOAT16 tensors or with a non-SUM op requires a Gloo backend. "
+          "Pass gloo_backend when creating ProcessGroupRBLN.");
     }
 
     rcclDataType_ = ::rbln::Rccl::RcclDataType::RBLN_CUSTOM_FP16_TYPE;
@@ -1243,9 +1289,13 @@ class AllreduceRBLNWork : public RBLNWork {
       RBLN_CHECK(
           rbln_dtype == ::rbln::DataType::Float16,
           "RCCL AllReduce only supports float16 dtype");
+      RBLN_CHECK(
+          original_input.is_contiguous(),
+          "RCCL AllReduce requires contiguous tensors");
 
       const size_t elem_size = getRcclElementSize(rbln_dtype);
-      const size_t align_numel = RCCL_ALLREDUCE_ALIGNMENT / elem_size;
+      const size_t align_bytes = getAllReduceAlignment(worldSize_);
+      const size_t align_numel = align_bytes / elem_size;
       const size_t numel = original_input.numel();
       const size_t total_bytes = numel * elem_size;
       const size_t max_bytes = RCCL_ALLREDUCE_MAX_BYTES_PER_RANK * worldSize_;
@@ -1259,8 +1309,7 @@ class AllreduceRBLNWork : public RBLNWork {
           : original_input;
 
       // Fast path: small aligned tensor
-      if (total_bytes <= max_bytes &&
-          isAlignedTo(total_bytes, RCCL_ALLREDUCE_ALIGNMENT)) {
+      if (total_bytes <= max_bytes && isAlignedTo(total_bytes, align_bytes)) {
         ensureRcclReduceMemory(input);
         RBLNRetCode ret = rccl_->AllReduce(
             input.data_ptr(),
@@ -1449,10 +1498,12 @@ class ReduceScatterRBLNWork : public RBLNWork {
       const auto rbln_dtype =
           c10::rbln::to_rbln_dtype(inputs_[i][0].scalar_type());
 
-      // Check if input is not FLOAT16
-      if (rbln_dtype != ::rbln::DataType::Float16) {
+      // RCCL reduces only FLOAT16 with SUM
+      if (rbln_dtype != ::rbln::DataType::Float16 ||
+          reduceOp_ != ReduceOp::SUM) {
         if (glooBackend_) {
-          // Use Gloo backend for non-FLOAT16 reduce_scatter
+          warnGlooFallbackOnce(
+              "reduce_scatter", inputs_[i][0].scalar_type(), reduceOp_);
           std::vector<at::Tensor> cpu_inputs;
           cpu_inputs.reserve(inputs_[i].size());
           for (auto& tensor : inputs_[i]) {
@@ -1473,8 +1524,8 @@ class ReduceScatterRBLNWork : public RBLNWork {
         }
         RBLN_CHECK(
             false,
-            "non-CUSTOM_FLOAT16 reduce_scatter requires a Gloo backend. "
-            "Pass gloo_backend when creating ProcessGroupRBLN, or convert tensors to CUSTOM_FLOAT16 before reduce_scatter.");
+            "reduce_scatter of non-CUSTOM_FLOAT16 tensors or with a non-SUM op requires a Gloo backend. "
+            "Pass gloo_backend when creating ProcessGroupRBLN.");
       }
 
       rcclDataType_ = ::rbln::Rccl::RcclDataType::RBLN_CUSTOM_FP16_TYPE;
@@ -2451,6 +2502,10 @@ c10::intrusive_ptr<Work> ProcessGroupRBLN::allreduce(
   if (device.type() != at::kPrivateUse1) {
     invalidArgument(c10::str("unsupported device type ", device.type()));
   }
+  RBLN_CHECK(
+      inputs.size() == 1,
+      "ProcessGroupRBLN::allreduce: Expecting one tensor only but got {}",
+      inputs.size());
 
   auto tag = nextTag();
   auto seq = nextSeq();
