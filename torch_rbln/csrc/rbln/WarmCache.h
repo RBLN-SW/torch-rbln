@@ -157,6 +157,11 @@ struct CacheEntry {
   RblnSyncRuntime runtime{nullptr};
 
   c10::SmallVector<OutputProfile, 2> out_profiles;
+
+  // Installed for an unaligned call that ran on the device only because
+  // TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK=align disabled the alignment
+  // fallback. The hit path skips it while that fallback is on again.
+  bool align_bypassed = false;
 };
 
 // Shared pointer to a cache entry. Returned by ``find`` so the caller can

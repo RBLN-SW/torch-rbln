@@ -17,9 +17,10 @@ try:
 except Exception:  # pragma: no cover - torch internals may move
     _get_chromium_event_logger = None
 
+from torch_rbln import _C
 from torch_rbln._internal.dummy_device import raise_if_dummy_execution
 from torch_rbln._internal.env_utils import is_fallback_disabled, use_tp_failover
-from torch_rbln._internal.log_utils import rbln_log_error, rbln_log_warn
+from torch_rbln._internal.log_utils import rbln_log_error, rbln_log_warn, rbln_record_cpu_fallback
 from torch_rbln._internal.ops_utils import extract_device_id_from_inputs, to_cpu
 from torch_rbln._internal.rsd_utils import auto_determine_num_devices, get_physical_device_ids
 
@@ -424,7 +425,12 @@ class CompiledFunctionWrapper:
             "Performance may be impacted."
         )
         original_device = extract_device_from_inputs(*args, **kwargs)
-        return attempt_cpu_fallback(self._original_fn, args, kwargs, original_device)
+        # Record only eager-op fallbacks, under the op name; graph mode is untouched.
+        op_name = _C._running_shim_op()
+        if op_name is None:
+            return attempt_cpu_fallback(self._original_fn, args, kwargs, original_device)
+        with rbln_record_cpu_fallback(op_name):
+            return attempt_cpu_fallback(self._original_fn, args, kwargs, original_device)
 
     def _handle_runtime_error(self, error, device_id, args, kwargs):
         """Handle RuntimeError with potential TP failover."""

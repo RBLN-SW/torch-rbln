@@ -32,7 +32,7 @@ bool contains(const Arr& arr, const T& value) {
 } // namespace
 
 TEST_F(RBLNSupportedDtypesTest, DispatchCatalogContents) {
-  constexpr std::array kExpected = {c10::kHalf, c10::kBFloat16};
+  constexpr std::array kExpected = {c10::kHalf, c10::kBFloat16, c10::kFloat};
   for (const auto scalar_type : kExpected) {
     EXPECT_TRUE(contains(c10::rbln::kDispatchDtypes, scalar_type));
   }
@@ -59,8 +59,8 @@ TEST_F(RBLNSupportedDtypesTest, SdpaCatalogIsFloatOnly) {
 }
 
 TEST_F(RBLNSupportedDtypesTest, CapabilityCatalogContents) {
-  // Device-resident dtypes only (fp16/bf16); other dtypes are CPU-backed.
-  constexpr std::array kExpected = {c10::kHalf, c10::kBFloat16};
+  // Device-resident dtypes only (fp16/bf16/fp32); other dtypes are CPU-backed.
+  constexpr std::array kExpected = {c10::kHalf, c10::kBFloat16, c10::kFloat};
   for (const auto scalar_type : kExpected) {
     EXPECT_TRUE(contains(c10::rbln::kCapabilityDtypes, scalar_type));
   }
@@ -74,7 +74,6 @@ TEST_F(RBLNSupportedDtypesTest, IsDispatchDtypeAcceptsAdmitted) {
 
 TEST_F(RBLNSupportedDtypesTest, IsDispatchDtypeRejectsUnsupported) {
   constexpr std::array kUnsupported = {
-      c10::kFloat,
       c10::kInt,
       c10::kLong,
       c10::kBool,
@@ -82,6 +81,27 @@ TEST_F(RBLNSupportedDtypesTest, IsDispatchDtypeRejectsUnsupported) {
   for (const auto scalar_type : kUnsupported) {
     EXPECT_FALSE(c10::rbln::is_dispatch_dtype(scalar_type));
   }
+}
+
+TEST_F(RBLNSupportedDtypesTest, DispatchExtensionAdmitsOnlyWhatIsSet) {
+  EXPECT_TRUE(c10::rbln::is_dispatch_dtype_rt(c10::kFloat));
+  EXPECT_FALSE(c10::rbln::is_dispatch_dtype_rt(c10::kInt));
+
+  c10::rbln::set_dispatch_extension({c10::kInt, c10::kBool});
+  EXPECT_TRUE(c10::rbln::is_dispatch_dtype_rt(c10::kInt));
+  EXPECT_TRUE(c10::rbln::is_dispatch_dtype_rt(c10::kBool));
+  EXPECT_FALSE(c10::rbln::is_dispatch_dtype_rt(c10::kLong));
+
+  // A dtype outside kDispatchExtensionDtypes is rejected and the previous
+  // extension stays in place.
+  EXPECT_THROW(
+      c10::rbln::set_dispatch_extension({c10::kLong, c10::kComplexFloat}),
+      c10::Error);
+  EXPECT_TRUE(c10::rbln::is_dispatch_dtype_rt(c10::kInt));
+  EXPECT_FALSE(c10::rbln::is_dispatch_dtype_rt(c10::kLong));
+
+  c10::rbln::set_dispatch_extension({});
+  EXPECT_FALSE(c10::rbln::is_dispatch_dtype_rt(c10::kInt));
 }
 
 static_assert(
@@ -98,7 +118,4 @@ static_assert(
     "capability dtype catalog must not be empty");
 static_assert(
     c10::rbln::is_dispatch_dtype(c10::kHalf),
-    "is_dispatch_dtype must be constexpr");
-static_assert(
-    !c10::rbln::is_dispatch_dtype(c10::kFloat),
     "is_dispatch_dtype must be constexpr");

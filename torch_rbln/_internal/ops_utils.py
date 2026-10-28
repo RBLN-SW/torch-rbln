@@ -13,16 +13,55 @@ from torch_rbln import _C
 from torch_rbln._internal.compile_cache import compile_rbln_cached_entry
 from torch_rbln._internal.dummy_device import raise_if_dummy_execution
 from torch_rbln._internal.env_utils import is_rbln_deploy, use_device_group_num_devices
-from torch_rbln._internal.log_utils import rbln_log_cpu_fallback, rbln_log_warn
+from torch_rbln._internal.log_utils import rbln_log_warn, rbln_log_warn_once, rbln_record_cpu_fallback
 from torch_rbln._internal.warm_cache import install_pending as _install_warm_cache_pending
+
+
+def _dispatch_extension_from_env() -> tuple[torch.dtype, ...]:
+    """Dtypes ``TORCH_RBLN_DISPATCH_DTYPES`` admits beyond the dispatch catalog.
+
+    The value is a comma-separated list of torch dtype names (``int32``, ``long``, ...).
+    A catalog dtype is accepted and skipped; an unknown name, or a dtype the extension
+    cannot admit, raises ``ValueError``. Returned in the order named, deduplicated.
+    """
+    value = os.environ.get("TORCH_RBLN_DISPATCH_DTYPES", "")
+    torch_dtypes = {n: v for n, v in vars(torch).items() if isinstance(v, torch.dtype)}
+    catalog = _C._dispatch_dtypes()
+    admissible = _C._dispatch_extension_dtypes()
+    extension: list[torch.dtype] = []
+    for name in (token.strip() for token in value.split(",")):
+        if not name:
+            continue
+        dtype = torch_dtypes.get(name)
+        if dtype is None:
+            msg = f"TORCH_RBLN_DISPATCH_DTYPES: {name!r} is not a torch dtype name"
+            raise ValueError(msg)
+        if dtype in catalog or dtype in extension:
+            continue
+        if dtype not in admissible:
+            accepted = ", ".join(str(d).removeprefix("torch.") for d in admissible)
+            msg = f"TORCH_RBLN_DISPATCH_DTYPES: {dtype} cannot be admitted (accepted: {accepted})"
+            raise ValueError(msg)
+        extension.append(dtype)
+    return tuple(extension)
+
+
+# Dtypes admitted only by TORCH_RBLN_DISPATCH_DTYPES. Empty unless the catalog is
+# extended.
+_dispatch_extension = _dispatch_extension_from_env()
 
 
 class SupportedDtypes:
     """Per-path supported dtype tuples for RBLN device dispatch."""
 
-    dispatch: tuple[torch.dtype, ...] = _C._dispatch_dtypes()
+    dispatch: tuple[torch.dtype, ...] = (*_C._dispatch_dtypes(), *_dispatch_extension)
     sdpa: tuple[torch.dtype, ...] = _C._sdpa_dtypes()
     amp: tuple[torch.dtype, ...] = _C._amp_dtypes()
+
+
+# The C++ shim's dtype check reads the same extension, so both layers agree on what
+# dispatches. Set once, here, before any op can run.
+_C._set_dispatch_extension(_dispatch_extension)
 
 
 def _estimate_mm_shape(shape1, shape2):
@@ -392,7 +431,9 @@ def broadcast_args_general(tensor_args, args):
     runtime continues to receive same-shape buffers — install proceeds
     normally and warm-hits stay correct.
     """
-    if not _needs_broadcast(tensor_args):
+    if not _needs_broadcast(tensor_args) or _has_cpu_scalar_operand(tensor_args):
+        # A CPU 0-dim operand is moved to the device by ``compile_and_run_view_aware``,
+        # which broadcasts after the move; broadcasting it here would do so on the host.
         return args
     try:
         out_shape = torch.broadcast_shapes(*[t.shape for t in tensor_args])
@@ -1773,21 +1814,25 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     # (e.g. an artifact build); those must proceed so builds still work.
     from torch_rbln._internal.torch_compile_patch_helpers import get_rbln_compile_op_depth  # noqa: PLC0415
 
-    if get_rbln_compile_op_depth() == 0:
+    eager = get_rbln_compile_op_depth() == 0
+    if eager:
         raise_if_dummy_execution(f"the eager op {op_name}" if op_name else "an eager op")
 
-    # Device 64-elem-align fallback: a last-dim not a multiple of 64 makes the
-    # rebel pipeline wrap the device fn with host-only contrib_aligned_pad /
-    # contrib_dummy_cast ops (no RTOSA lowering), costing a base-buffer D2H+H2D
-    # round-trip (~1MB/op for LLaMA-1B rotary). cpu_fallback_path is strictly
-    # cheaper here (one D2H + host op + one H2D). Single-tensor args only: for
-    # list ops (cat/stack) the device path fuses unaligned tensors into one IR
-    # that's cheaper than per-tensor host fallback — TensorList recursion added
-    # +12% prefill. (verified 2026-05-08 via IR dump + trace counts)
+    # Device 64-elem-align fallback; TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK=align turns
+    # it off. A last-dim not a multiple of 64 makes the rebel pipeline wrap the device
+    # fn with host-only contrib_aligned_pad / contrib_dummy_cast ops (no RTOSA
+    # lowering), costing a base-buffer D2H+H2D round-trip (~1MB/op for LLaMA-1B rotary).
+    # cpu_fallback_path is strictly cheaper here (one D2H + host op + one H2D).
+    # Single-tensor args only: for list ops (cat/stack) the device path fuses unaligned
+    # tensors into one IR that's cheaper than per-tensor host fallback — TensorList
+    # recursion added +12% prefill. (verified 2026-05-08 via IR dump + trace counts)
     def _last_dim_unaligned(t):
         return isinstance(t, torch.Tensor) and t.dim() > 0 and t.shape[-1] % 64 != 0
 
-    if any(_last_dim_unaligned(a) for a in args) or any(_last_dim_unaligned(v) for v in kwargs_filtered.values()):
+    unaligned = any(_last_dim_unaligned(a) for a in args) or any(
+        _last_dim_unaligned(v) for v in kwargs_filtered.values()
+    )
+    if unaligned and "align" not in _parse_disabled_fallback_cases():
         return cpu_fallback_path(
             op_callable,
             args,
@@ -1831,6 +1876,18 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
             k: (v.contiguous() if isinstance(v, torch.Tensor) and not v.is_contiguous() else v)
             for k, v in kwargs_filtered.items()
         }
+
+    if eager:
+        _warn_float32_on_device_once(op_name, args, kwargs_filtered)
+
+    # A CPU 0-dim tensor is a scalar operand (the CUDA rule): `torch.tensor(2.0) * x` is
+    # valid with `x` on the device. The compiled program needs every input on one
+    # device, so the scalar goes there as a runtime input, read on every call. The
+    # shim's warm-cache key is built from the original CPU tensor, so such a call is not
+    # installed (as with views).
+    args, kwargs_filtered, moved_cpu_scalars = _cpu_scalars_to_device(args, kwargs_filtered)
+    if moved_cpu_scalars:
+        args = broadcast_args_general(extract_tensors(args), args)
 
     (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs_filtered)
     has_views = any(r is not None for r in view_recipes)
@@ -1897,10 +1954,50 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
             external_result = result_tensor
     if result_tensor is None:
         result_tensor = external_result
-    if not has_views:
-        # install_pending empties the list it is given; the entry keeps its own.
-        _install_warm_cache_pending(list(entry.runtime_holder), external_result)
+    if not has_views and not moved_cpu_scalars:
+        # install_pending empties the list it is given; the entry keeps its own. An
+        # unaligned call got here only because `align` is disabled: mark its entry,
+        # so the C++ hit path skips it once the alignment fallback is on again.
+        _install_warm_cache_pending(list(entry.runtime_holder), external_result, align_bypassed=unaligned)
     return result_tensor
+
+
+def _warn_float32_on_device_once(op_name, args, kwargs) -> None:
+    """Warn once when the first float32 aten op runs on the device."""
+    if not (op_name or "").startswith("aten::"):
+        return
+    if not any(t.dtype == torch.float32 for t in extract_tensors(args) + extract_tensors(kwargs)):
+        return
+    rbln_log_warn_once(
+        "float32 ops on RBLN device can run at reduced precision; where full precision matters, "
+        'compute on CPU explicitly via to("cpu") and move the result back with to("rbln").'
+    )
+
+
+def _has_cpu_scalar_operand(tensors) -> bool:
+    """A CPU 0-dim tensor next to an rbln tensor: a scalar operand (the CUDA rule)."""
+    return any(t.device.type == "rbln" for t in tensors) and any(
+        t.dim() == 0 and t.device.type == "cpu" for t in tensors
+    )
+
+
+def _cpu_scalars_to_device(args, kwargs):
+    """Move CPU 0-dim tensor operands to the device of the op's rbln tensors.
+
+    Returns ``(args, kwargs, moved)``; when there is nothing to move, ``moved`` is False
+    and the arguments are returned as they are.
+    """
+    tensors = [t for t in (*args, *kwargs.values()) if isinstance(t, torch.Tensor)]
+    if not _has_cpu_scalar_operand(tensors):
+        return args, kwargs, False
+    device = next(t.device for t in tensors if t.device.type == "rbln")
+
+    def move(t):
+        if isinstance(t, torch.Tensor) and t.dim() == 0 and t.device.type == "cpu":
+            return t.to(device)
+        return t
+
+    return tuple(move(a) for a in args), {k: move(v) for k, v in kwargs.items()}, True
 
 
 def _graph_input_order(runtime, tensors):
@@ -1925,7 +2022,9 @@ def _graph_input_order(runtime, tensors):
     return tuple(order)
 
 
-_ALL_FALLBACK_CASES = frozenset({"dispatch_mode", "reentrant", "trace", "dtype", "scalar", "storage_offset", "nan_inf"})
+_ALL_FALLBACK_CASES = frozenset(
+    {"dispatch_mode", "reentrant", "trace", "dtype", "scalar", "storage_offset", "nan_inf", "align"}
+)
 
 
 _warned_disable_fallback = False
@@ -1936,7 +2035,7 @@ def _parse_disabled_fallback_cases() -> frozenset:
     cases.
 
     Read live (NOT lru_cached): the C++ dispatch gate
-    (DispatchShim.is_nan_inf_check_disabled) reads the same env live, so caching here
+    (DispatchShim.is_fallback_case_disabled) reads the same env live, so caching here
     would let the Python cold path and the C++ warm path disagree, and would latch the
     first value across a whole xdist worker (tests toggle it per-test via patch.dict).
     This is the cold/miss path, so re-parsing per call is negligible. Warn once per
@@ -1991,6 +2090,10 @@ def is_cpu_fallback_cases(args):
 
     Individual checks can be disabled via `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK`
     (comma-separated names or `"all"`).
+
+    Not checked here: the 64-element alignment fallback (`align`), which
+    ``compile_and_run_view_aware`` applies after this function passes. The same
+    variable disables it.
 
     Args:
         args (tuple): A tuple of positional arguments for the operation, which may
@@ -2079,8 +2182,14 @@ def cpu_fallback_path(target_ops, args, *, result: torch.Tensor | None = None, o
         torch.Tensor: The result of the target operation, converted back to the 'rbln'
         device.
     """
-    if op_name is not None:
-        rbln_log_cpu_fallback(op_name)
+    if op_name is None:
+        return _run_on_cpu(target_ops, args, result, op_kwargs)
+    with rbln_record_cpu_fallback(op_name):
+        return _run_on_cpu(target_ops, args, result, op_kwargs)
+
+
+def _run_on_cpu(target_ops, args, result, op_kwargs):
+    """Body of ``cpu_fallback_path``: run ``target_ops`` on CPU copies of the inputs."""
     cpu_args = to_cpu(args)
     cpu_op_kwargs = to_cpu(op_kwargs)
     result_cpu = target_ops(*cpu_args, **cpu_op_kwargs)

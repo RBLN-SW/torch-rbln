@@ -354,6 +354,25 @@ class TestProfilerApi(TestCase):
         self.assertIn("aten::add.out", tbo)
         self.assertIn("_do_fallback", tbo["aten::add.out"])  # the user's call-site frame
 
+    @pytest.mark.npu(count=1)
+    def test_python_path_fallback_shows_its_call_site(self):
+        # An unaligned last dim falls back on the Python path. It must be counted under
+        # the shim op's schema name, the key with_stack captures the call-site under, so
+        # the report's fallback row says where it happened.
+        def _unaligned_add():
+            a = torch.ones(4, 3, device=DEV, dtype=torch.bfloat16)
+            return a + a
+
+        if not hasattr(_C, "_explain_set_trace"):
+            self.skipTest("trace capture not exposed by this _C build")
+        with torch.rbln.explain(with_stack=True) as e:
+            _unaligned_add()
+        d = e.dump()
+        self.assertIn("aten::add.out", d["cpu_fallback_by_op"])
+        self.assertIn("_unaligned_add", d["trace_by_op"]["aten::add.out"])
+        rows = [ln for ln in e.report().splitlines() if ln.strip().startswith("aten::add.out")]
+        self.assertTrue(any(" at " in ln for ln in rows), rows)
+
     def test_with_stack_trace_is_deprecated_alias(self):
         # with_stack= is the torch-parity name; trace= is kept as a back-compat alias
         # and must set the same capture gate.
@@ -565,7 +584,7 @@ class TestProfilerReportFormat(TestCase):
             },
             "dispatch": {"cpu_fallback": 1600, "recompile_miss": 0, "cpu_fallback_ns": 41_084_000},
             "cpu_fallback_by_op": {"aten::sub.out": 800},
-            "cpu_fallback_reasons": {"dtype-not-fp16": 1600},
+            "cpu_fallback_reasons": {"dtype-not-dispatch": 1600},
             "trace_by_op": {},
             "notes": [],
         }

@@ -7,8 +7,8 @@ is to grep the log. That only holds if each fallback logs. Two groups did not:
 
   * the ops the C++ dispatch shim covers (``add``, ``mul``, the reductions, …).
     The shim's own pre-check decides dtype / NaN-Inf / all-scalar fallbacks and
-    called ``cpu_fallback_rbln`` directly, skipping the ``log_cpu_fallback`` the
-    ``fallback_rbln`` handler makes for an unsupported op. No log at any level.
+    called ``cpu_fallback_rbln`` directly, skipping the log the
+    ``fallback_rbln`` handler made for an unsupported op. No log at any level.
   * the three ``is_cpu_fallback_cases`` branches in the SDPA kernel, whose
     siblings on the same path do log.
 

@@ -109,6 +109,9 @@ observed.
 # Disable only the NaN/Inf check (e.g. to benchmark without the scan overhead)
 export TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK=nan_inf
 
+# Disable only the alignment fallback (e.g. to hand unaligned shapes to the compiler)
+export TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK=align
+
 # Disable only the trace/debugger check (e.g. to run under pdb without CPU fallback)
 export TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK=trace
 
@@ -127,16 +130,17 @@ unset TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK
 
 The value is a **comma-separated list** of fallback case names to disable:
 
-| Case             | Default behavior (enabled)                                                                         | When disabled                                            |
-| ---------------- | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| `dispatch_mode`  | Falls back to CPU when a non-infra `TorchDispatchMode` is active                                   | Skips the check — risks infinite recursion               |
-| `trace`          | Falls back to CPU when a Python trace is active (e.g. pdb, coverage)                               | Skips the check — compile may run under tracer           |
-| `reentrant`      | Falls back to CPU when already inside RBLN compile op (e.g. print/repr, nested op); logs a warning | Skips the check — risks infinite recursion               |
-| `dtype`          | Falls back on unsupported or mismatched tensor dtypes                                              | Sends such tensors to RBLN — may produce wrong results   |
-| `scalar`         | Falls back when all input tensors are 0-dim scalars                                                | Sends scalar ops to RBLN — may fail in `rebel-compiler`  |
-| `storage_offset` | Falls back when a contiguous tensor has `storage_offset != 0`                                      | Sends offset tensors to RBLN — may read wrong data       |
-| `nan_inf`        | Falls back when inputs contain NaN or Inf (non-deploy mode only)                                   | Skips the NaN/Inf scan — invalid values reach the device |
-| `all`            | —                                                                                                  | Disables **all** of the above checks                     |
+| Case             | Default behavior (enabled)                                                                         | When disabled                                                                      |
+| ---------------- | -------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `dispatch_mode`  | Falls back to CPU when a non-infra `TorchDispatchMode` is active                                   | Skips the check — risks infinite recursion                                         |
+| `trace`          | Falls back to CPU when a Python trace is active (e.g. pdb, coverage)                               | Skips the check — compile may run under tracer                                     |
+| `reentrant`      | Falls back to CPU when already inside RBLN compile op (e.g. print/repr, nested op); logs a warning | Skips the check — risks infinite recursion                                         |
+| `dtype`          | Falls back on unsupported or mismatched tensor dtypes                                              | Sends such tensors to RBLN — may produce wrong results                             |
+| `scalar`         | Falls back when all input tensors are 0-dim scalars                                                | Sends scalar ops to RBLN — may fail in `rebel-compiler`                            |
+| `storage_offset` | Falls back when a contiguous tensor has `storage_offset != 0`                                      | Sends offset tensors to RBLN — may read wrong data                                 |
+| `nan_inf`        | Falls back when inputs contain NaN or Inf (non-deploy mode only)                                   | Skips the NaN/Inf scan — invalid values reach the device                           |
+| `align`          | Falls back to CPU when a tensor argument's last dim is not a multiple of 64                        | Sends unaligned ops to RBLN — slower on small tensors, and each new shape compiles |
+| `all`            | —                                                                                                  | Disables **all** of the above checks                                               |
 
 ## Device mapping
 
@@ -260,13 +264,13 @@ export RBLN_DUMMY_DEVICE=1 RBLN_DEVICE_MAP="[0,1],[2,3]"
   dummy is not guaranteed to be valid on a specific machine.
 - **Scope**: device tensor construction, host/device copies, and compile-only
   `torch.compile` (building artifacts). Anything that must run on the NPU raises
-  a clear error — a compiled graph, or an eager op on a device dtype (fp16/bf16)
-  — since there is no NPU to run it. Host-side ops (e.g. fp32, which never runs
-  on the NPU even with real hardware) fall back to CPU exactly as they would on
-  a real device. Distributed collectives still require real hardware, and
-  memory-stat APIs (`memory_stats`, `memory_allocated`, ...) report zeros rather
-  than real usage. `mem_get_info()` and `mem_get_info_per_chiplet()` raise:
-  there is no device DRAM to report.
+  a clear error — a compiled graph, or an eager op on a dispatch dtype
+  (fp16/bf16/fp32) — since there is no NPU to run it. Host-side ops (e.g. fp64,
+  which never runs on the NPU even with real hardware) fall back to CPU exactly
+  as they would on a real device. Distributed collectives still require real
+  hardware, and memory-stat APIs (`memory_stats`, `memory_allocated`, ...)
+  report zeros rather than real usage. `mem_get_info()` and
+  `mem_get_info_per_chiplet()` raise: there is no device DRAM to report.
 - `torch.rbln.is_available()` returns `True` in this mode — treat it as a
   development flag, not real hardware availability.
 
@@ -382,3 +386,12 @@ This is an escape hatch for unblocking a machine while a matching wheel is
 built. It suppresses the diagnosis, not the incompatibility: the mismatch it
 hides is what would otherwise surface as an `undefined symbol` import crash or
 as corruption inside the runtime.
+
+## Eager-dispatch dtype catalog (measurement knob)
+
+Unset by default; set before `import torch_rbln`. `docs/EAGER_DISPATCH.md` has
+the contract and the boundaries to know before enabling a dtype.
+
+| Variable                     | Description                                                                                               | Default |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------- | ------- |
+| `TORCH_RBLN_DISPATCH_DTYPES` | Extra dtypes admitted to the eager dispatch catalog (torch dtype names; an unknown name fails the import) | unset   |

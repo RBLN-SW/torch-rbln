@@ -3,10 +3,14 @@
 #include <spdlog/pattern_formatter.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -276,10 +280,52 @@ RBLNScopeGuard::~RBLNScopeGuard() noexcept {
   scope_log_type_ = ScopeLogType::NONE;
 }
 
-void log_cpu_fallback(std::string_view full_op_name) {
-  // Level first: the dispatch shim calls this on every fallback of the ops it
-  // covers -- add, mul, matmul -- so at the default level nothing here is built
-  // at all.
+namespace {
+
+// Leaky: a fallback during interpreter teardown can still reach a
+// CpuFallbackScope after static destructors would have run.
+std::mutex& cpu_fallback_mutex() {
+  static auto* m = new std::mutex();
+  return *m;
+}
+
+struct CpuFallbackRecord {
+  uint64_t count = 0;
+  bool boxed = false; // recorded at least once through CpuFallbackPath::kBoxed
+};
+
+std::map<std::string, CpuFallbackRecord, std::less<>>& cpu_fallback_records() {
+  static auto* m = new std::map<std::string, CpuFallbackRecord, std::less<>>();
+  return *m;
+}
+
+std::atomic<uint64_t> g_cpu_fallback_ns{0};
+
+// CpuFallbackScopes open on this thread; only the outermost adds its time.
+thread_local int t_cpu_fallback_depth = 0;
+
+uint64_t steady_now_ns() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
+
+void count_and_log_cpu_fallback(
+    std::string_view full_op_name,
+    CpuFallbackPath path) {
+  {
+    std::lock_guard<std::mutex> lk(cpu_fallback_mutex());
+    auto& records = cpu_fallback_records();
+    auto it = records.find(full_op_name);
+    if (it == records.end()) {
+      it = records.emplace(full_op_name, CpuFallbackRecord{}).first;
+    }
+    ++it->second.count;
+    it->second.boxed |= path == CpuFallbackPath::kBoxed;
+  }
+
+  // At the default level the count above is all the work: nothing is logged.
   if (get_log_level() > spdlog::level::info) {
     return;
   }
@@ -304,6 +350,60 @@ void log_cpu_fallback(std::string_view full_op_name) {
           .file = __FILE__, .line = __LINE__, .function = __func__},
       warning_.msg());
   c10::warn(warning_);
+}
+
+// Counts and logs a fallback, then opens its scope; true if it is the
+// outermost on this thread. Counting comes first: if logging throws (warnings
+// as errors), no scope was opened and the destructor does not run.
+bool open_cpu_fallback(std::string_view full_op_name, CpuFallbackPath path) {
+  count_and_log_cpu_fallback(full_op_name, path);
+  return t_cpu_fallback_depth++ == 0;
+}
+
+} // namespace
+
+CpuFallbackScope::CpuFallbackScope(
+    std::string_view full_op_name,
+    CpuFallbackPath path)
+    : outermost_(open_cpu_fallback(full_op_name, path)),
+      start_ns_(steady_now_ns()) {}
+
+CpuFallbackScope::~CpuFallbackScope() {
+  --t_cpu_fallback_depth;
+  if (outermost_) {
+    g_cpu_fallback_ns.fetch_add(
+        steady_now_ns() - start_ns_, std::memory_order_relaxed);
+  }
+}
+
+std::vector<std::pair<std::string, uint64_t>> cpu_fallback_counts() {
+  std::lock_guard<std::mutex> lk(cpu_fallback_mutex());
+  std::vector<std::pair<std::string, uint64_t>> out;
+  for (const auto& [name, record] : cpu_fallback_records()) {
+    out.emplace_back(name, record.count);
+  }
+  return out;
+}
+
+uint64_t cpu_fallback_ns() {
+  return g_cpu_fallback_ns.load(std::memory_order_relaxed);
+}
+
+void reset_cpu_fallback_counts() {
+  std::lock_guard<std::mutex> lk(cpu_fallback_mutex());
+  cpu_fallback_records().clear();
+  g_cpu_fallback_ns.store(0, std::memory_order_relaxed);
+}
+
+std::vector<std::string> boxed_cpu_fallback_ops() {
+  std::lock_guard<std::mutex> lk(cpu_fallback_mutex());
+  std::vector<std::string> out;
+  for (const auto& [name, record] : cpu_fallback_records()) {
+    if (record.boxed) {
+      out.push_back(name);
+    }
+  }
+  return out;
 }
 
 int get_scope_depth() {

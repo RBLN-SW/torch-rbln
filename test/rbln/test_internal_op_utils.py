@@ -301,11 +301,11 @@ class TestInternalOpUtils(TestCase):
     # =========================================================================
 
     def test_supported_dtypes_dispatch(self):
-        """Tuple of ``float16`` and ``bfloat16``; excludes other dtypes."""
+        """Tuple of ``float16``, ``bfloat16`` and ``float32``; excludes other dtypes."""
         self.assertIsInstance(SupportedDtypes.dispatch, tuple)
         self.assertIn(torch.bfloat16, SupportedDtypes.dispatch)
         self.assertIn(torch.float16, SupportedDtypes.dispatch)
-        self.assertNotIn(torch.float32, SupportedDtypes.dispatch)
+        self.assertIn(torch.float32, SupportedDtypes.dispatch)
         self.assertNotIn(torch.bool, SupportedDtypes.dispatch)
 
     def test_supported_dtypes_sdpa(self):
@@ -351,15 +351,15 @@ class TestInternalOpUtils(TestCase):
         self.assertFalse(is_cpu_fallback_cases((bf16_tensor,)))
 
     def test_is_cpu_fallback_cases_dtype_unsupported(self):
-        """Unsupported dtype (e.g. ``float32``) falls back to CPU."""
-        unsupported_fp32_tensor = torch.tensor([1.0, 2.0], dtype=torch.float32, device="rbln")
-        self.assertTrue(is_cpu_fallback_cases((unsupported_fp32_tensor,)))
+        """Unsupported dtype (e.g. ``float64``) falls back to CPU."""
+        unsupported_fp64_tensor = torch.tensor([1.0, 2.0], dtype=torch.float64, device="rbln")
+        self.assertTrue(is_cpu_fallback_cases((unsupported_fp64_tensor,)))
 
     def test_is_cpu_fallback_cases_dtype_mixed_unsupported(self):
         """When any arg uses an unsupported dtype, fall back to CPU."""
         supported_fp16_tensor = torch.tensor([1.0, 2.0], dtype=torch.float16, device="rbln")
-        unsupported_fp32_tensor = torch.tensor([3.0, 4.0], dtype=torch.float32, device="rbln")
-        self.assertTrue(is_cpu_fallback_cases((supported_fp16_tensor, unsupported_fp32_tensor)))
+        unsupported_fp64_tensor = torch.tensor([3.0, 4.0], dtype=torch.float64, device="rbln")
+        self.assertTrue(is_cpu_fallback_cases((supported_fp16_tensor, unsupported_fp64_tensor)))
 
     def test_is_cpu_fallback_cases_dtype_mixed_supported(self):
         """``float16`` + ``bfloat16`` falls back even though each is individually

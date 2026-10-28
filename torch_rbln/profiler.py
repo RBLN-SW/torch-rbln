@@ -106,7 +106,7 @@ _HOST_BOUNCE_SITES = (0, 1, 2, 3)
 
 # cpu_fallback reason names; index matches the runtime histogram order (the WHY
 # behind dispatch.cpu_fallback). See quick_fallback_check in DispatchShim.cpp.
-_FALLBACK_REASON_NAMES = ("dtype-not-fp16", "nan/inf input", "all-scalar inputs")
+_FALLBACK_REASON_NAMES = ("dtype-not-dispatch", "nan/inf input", "all-scalar inputs", "out-dtype")
 
 # Must match the reason order in rebel-compiler vmemory_manager.cc.
 _RUNTIME_REASONS: tuple[tuple[str, str], ...] = (
@@ -221,8 +221,8 @@ def _read_dispatch() -> tuple[int, int, int, int, int, int]:
 
 
 def _read_fallback_by_op() -> dict[str, int]:
-    """Per-op CPU-fallback counts from the dispatch shim (op_name -> count), or
-    {} if the loaded torch_rbln._C predates the binding (graceful degrade).
+    """Per-op CPU-fallback counts from every op-level fallback path (op_name -> count),
+    or {} if the loaded torch_rbln._C predates the binding (graceful degrade).
     """
     from torch_rbln import _C  # noqa: PLC0415
 
@@ -230,6 +230,16 @@ def _read_fallback_by_op() -> dict[str, int]:
     if fn is None:
         return {}
     return {str(op): int(c) for op, c in fn()}
+
+
+def _read_fallback_ns() -> int:
+    """Wall ns spent in CPU fallbacks, every fallback path, or 0 if the loaded
+    torch_rbln._C predates the binding (graceful degrade).
+    """
+    from torch_rbln import _C  # noqa: PLC0415
+
+    fn = getattr(_C, "_cpu_fallback_ns", None)
+    return int(fn()) if fn is not None else 0
 
 
 def _read_recompile_by_op() -> dict[str, int]:
@@ -245,8 +255,9 @@ def _read_recompile_by_op() -> dict[str, int]:
 
 
 def _read_fallback_reasons() -> list[int]:
-    """cpu_fallback reason counts [dtype-not-fp16, nan/inf input, all-scalar], or
-    [] if the loaded torch_rbln._C predates the binding (graceful degrade).
+    """cpu_fallback reason counts [dtype-not-dispatch, nan/inf input, all-scalar,
+    out-dtype] for the C++ shim's own fallbacks, or [] if the loaded torch_rbln._C
+    predates the binding (graceful degrade).
     """
     from torch_rbln import _C  # noqa: PLC0415
 
@@ -270,6 +281,18 @@ def _read_fast_path_registered(op_name: str) -> bool | None:
         return bool(fn(op_name))
     except Exception:
         return None
+
+
+def _read_boxed_fallback_ops() -> set[str] | None:
+    """Ops whose CPU fallback went through the boxed C++ fallback, the only path that
+    consults fast-path handlers; None if the loaded _C predates the binding.
+    """
+    from torch_rbln import _C  # noqa: PLC0415
+
+    fn = getattr(_C, "_dispatch_fallback_boxed_ops", None)
+    if fn is None:
+        return None
+    return {str(op) for op in fn()}
 
 
 # --- (E) host CPU oversubscription: an environment amplifier of host overhead --
@@ -567,6 +590,7 @@ class RBLNExplain:
         self._b0: list[tuple[int, int]]
         self._d0: tuple[int, ...]
         self._f0: dict[str, int]
+        self._fns0: int
         self._r0: dict[str, int]
         self._fr0: list[int]
         self._rt0: dict | None
@@ -575,6 +599,7 @@ class RBLNExplain:
         self._dispatch: tuple[int, ...] | None = None
         self._rt: dict[str, Any] | None = None
         self._fallback_by_op: dict[str, int] | None = None
+        self._fallback_ns = 0
         self._recompile_by_op: dict[str, int] | None = None
         self._fallback_reasons: list[int] | None = None
         self._trace = with_stack
@@ -611,6 +636,7 @@ class RBLNExplain:
             self._b0 = _read_bounces()
             self._d0 = _read_dispatch()
             self._f0 = _read_fallback_by_op()
+            self._fns0 = _read_fallback_ns()
             self._r0 = _read_recompile_by_op()
             self._fr0 = _read_fallback_reasons()
             self._rt0 = _read_runtime()
@@ -645,6 +671,7 @@ class RBLNExplain:
             self._dispatch = tuple(x1 - x0 for x0, x1 in zip(self._d0, d1, strict=True))
             f1 = _read_fallback_by_op()
             self._fallback_by_op = {op: f1[op] - self._f0.get(op, 0) for op in f1 if f1[op] - self._f0.get(op, 0) > 0}
+            self._fallback_ns = max(0, _read_fallback_ns() - self._fns0)  # 0 if reset in the region
             r1 = _read_recompile_by_op()
             self._recompile_by_op = {op: r1[op] - self._r0.get(op, 0) for op in r1 if r1[op] - self._r0.get(op, 0) > 0}
             fr1 = _read_fallback_reasons()
@@ -707,12 +734,16 @@ class RBLNExplain:
         }
         hb_count = sum(self._bounces[i][0] for i in _HOST_BOUNCE_SITES)
         hb_bytes = sum(self._bounces[i][1] for i in _HOST_BOUNCE_SITES)
-        # tuple is (n_total, n_fallback, n_warm_hit, n_miss, ns_warm_hit, ns_miss[,
-        # ns_fallback]); the 7th (cpu_fallback wall ns) is absent on a _C that predates
-        # it -> degrade to 0.
+        # tuple is (n_total, n_fallback, n_warm_hit, n_miss, ns_warm_hit, ns_miss).
         d = self._dispatch
         n_total, n_fallback, n_warm_hit, n_miss = d[0], d[1], d[2], d[3]
-        ns_fallback = d[6] if len(d) > 6 else 0
+        # Fallback wall time and the per-op counts below cover the same fallbacks: every
+        # path counts and times itself.
+        ns_fallback = self._fallback_ns
+        # n_fallback counts the C++ shim's own fallbacks only; the per-op counts cover
+        # every fallback path (shim, boxed, Python) and include the shim's. max() keeps
+        # n_fallback when the per-op binding is absent (older _C reads as {}).
+        n_fallback = max(n_fallback, sum((self._fallback_by_op or {}).values()))
 
         out: dict[str, Any] = {
             "hidden_host_bounce": {"by_site": per_site, "total_count": hb_count, "total_bytes": hb_bytes},
@@ -819,9 +850,16 @@ class RBLNExplain:
                 "device memory gauge",
             ]
         # (A) which fallback ops lack a CPU fast-path handler = the optimization
-        # candidates (registered ones already bypass redispatchBoxed). Omitted when
-        # the _C predates the registry query (can't tell handled from un-handled).
-        unaccel: list[str] = [op for op in out["cpu_fallback_by_op"] if _read_fast_path_registered(op) is False]
+        # candidates (registered ones already bypass redispatchBoxed). Only ops that
+        # went through the boxed C++ fallback count: the Python path runs PyTorch's
+        # CPU kernels and never consults a handler. Omitted when the _C predates the
+        # registry query (can't tell handled from un-handled).
+        boxed = _read_boxed_fallback_ops()
+        unaccel: list[str] = [
+            op
+            for op in out["cpu_fallback_by_op"]
+            if (boxed is None or op in boxed) and _read_fast_path_registered(op) is False
+        ]
         if unaccel:
             out["cpu_fallback_unaccelerated"] = unaccel
 

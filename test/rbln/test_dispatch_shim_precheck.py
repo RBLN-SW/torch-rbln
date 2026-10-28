@@ -34,9 +34,10 @@ from unittest import mock
 
 import pytest
 import torch
-from torch.testing._internal.common_device_type import instantiate_device_type_tests
+from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
+from test.utils import SUPPORTED_DTYPES
 from torch_rbln import _C
 
 
@@ -129,6 +130,20 @@ class TestDispatchShimWrappedScalar(TestCase):
         self.assertEqual((a + s).cpu()[0, 0].item(), 2.0)
         s.fill_(3.0)
         self.assertEqual((a + s).cpu()[0, 0].item(), 4.0, "a real 0-dim tensor is read at run time, not baked in")
+
+    @dtypes(*SUPPORTED_DTYPES)
+    def test_cpu_zero_dim_tensor_as_first_operand(self, dtype) -> None:
+        # A CPU 0-dim tensor is a scalar operand (the CUDA rule): `tensor(2.0) * x`
+        # runs on the device like `x * tensor(2.0)`, and its value is read per call.
+        for shape in ((1,), (64,)):
+            x_cpu = torch.full(shape, 3.0, dtype=dtype)
+            x = x_cpu.to("rbln")
+            for op in (torch.mul, torch.sub):
+                for value in (2.0, 5.0):
+                    s = torch.tensor(value, dtype=dtype)
+                    got = op(s, x)
+                    self.assertEqual(got.device.type, "rbln")
+                    self.assertEqual(got.cpu(), op(s, x_cpu), msg=f"{op.__name__} {shape} {value}")
 
 
 @pytest.mark.npu(count=1)
@@ -224,22 +239,32 @@ class TestDispatchShimNanInfFallback(TestCase):
         result = z.to("cpu")
         self.assertTrue(torch.isnan(result[0]))
 
-    def test_clean_input_takes_device_path(self) -> None:
-        # Regression: clean inputs must NOT be misclassified as needing
-        # fallback. Verified indirectly: a warm-cache entry must be installed
-        # (the fallback path never installs).
+    @dtypes(*SUPPORTED_DTYPES)
+    def test_clean_input_takes_device_path(self, dtype) -> None:
+        # Regression: clean inputs of every dispatch dtype must NOT be
+        # misclassified as needing fallback. Two pieces of evidence: no CPU
+        # fallback was recorded on any path, and a warm-cache entry was
+        # installed (the fallback path never installs).
         # Use a 64-elem-aligned shape so ``compile_and_run_view_aware`` keeps
         # the call on the device path; unaligned last-dim now routes through
         # ``cpu_fallback_path`` and never primes the warm cache.
+        x = torch.arange(64, dtype=dtype, device="rbln")
+        y = torch.ones(64, dtype=dtype, device="rbln")
         size_before = _C._warmcache_size()
-        x = torch.arange(64, dtype=torch.float16, device="rbln")
-        y = torch.ones(64, dtype=torch.float16, device="rbln")
+        _C._dispatch_fallback_by_op_reset()
         z = x + y
-        self.assertEqual(z.to("cpu"), torch.arange(1, 65, dtype=torch.float16))
+        self.assertEqual(_C._dispatch_fallback_by_op(), [])
+        self.assertEqual(z.to("cpu"), torch.arange(1, 65, dtype=dtype))
         # At least one new warm-cache entry was installed.
         self.assertGreater(_C._warmcache_size(), size_before)
 
     def test_warm_hit_does_not_bypass_late_nan(self) -> None:
+        self._check_warm_hit_does_not_bypass_late_nan(torch.float16)
+
+    def test_warm_hit_does_not_bypass_late_nan_float32(self) -> None:
+        self._check_warm_hit_does_not_bypass_late_nan(torch.float32)
+
+    def _check_warm_hit_does_not_bypass_late_nan(self, dtype: torch.dtype) -> None:
         """The critical regression case for the fixup.
 
         Step 1: clean inputs install a warm-cache entry for shape (64,).
@@ -254,13 +279,13 @@ class TestDispatchShimNanInfFallback(TestCase):
         # ``cpu_fallback_path`` and never install an entry.
         n = 64
         # Step 1: prime the warm cache with clean inputs.
-        x_clean = torch.arange(n, dtype=torch.float16, device="rbln")
-        y = torch.ones(n, dtype=torch.float16, device="rbln")
+        x_clean = torch.arange(n, dtype=dtype, device="rbln")
+        y = torch.ones(n, dtype=dtype, device="rbln")
         _ = x_clean + y
         self.assertGreater(_C._warmcache_size(), 0)
 
         # Step 2: same shape, NaN injected on one slot.
-        x_dirty_cpu = torch.arange(n, dtype=torch.float16)
+        x_dirty_cpu = torch.arange(n, dtype=dtype)
         x_dirty_cpu[3] = float("nan")
         x_dirty = x_dirty_cpu.to("rbln")
         z = x_dirty + y
@@ -310,7 +335,7 @@ class TestDispatchShimNanInfFallback(TestCase):
 @pytest.mark.npu(count=1)
 class TestDispatchShimGateLiveRead(TestCase):
     """Both NaN/Inf-scan gates -- ``TORCH_RBLN_DEPLOY`` (``is_deploy_mode``) and
-    ``TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK`` (``is_nan_inf_check_disabled``) in
+    ``TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK`` (``is_fallback_case_disabled``) in
     ``DispatchShim.cpp`` -- are read live per dispatch, not cached in a process-lifetime
     ``static``. A re-introduced static cache in either would latch the first value and
     fail its toggle. They are separate functions, so each is toggled separately.
