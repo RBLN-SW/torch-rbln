@@ -7,10 +7,14 @@ Previously, float16 -> custom_float16 casting for device execution caused precis
 host ops keep float16 and produce correct results. These tests verify that behavior.
 """
 
+from unittest import mock
+
 import pytest
 import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
+
+from torch_rbln._internal import ops_utils
 
 
 # Values that most expose the precision loss when float16 is cast to custom_float16:
@@ -112,7 +116,9 @@ class TestHostPrecisionCast(TestCase):
         )
         x_cpu = x.cpu()
 
-        rbln_result = torch.mean(x, dim=2, keepdim=True)
+        # mean is exempt from the alignment fallback; this test is about the host path.
+        with mock.patch.object(ops_utils, "_ALIGN_EXEMPT_OPS", frozenset()):
+            rbln_result = torch.mean(x, dim=2, keepdim=True)
         cpu_result = torch.mean(x_cpu, dim=2, keepdim=True)
 
         self.assertEqual(rbln_result.device, self.rbln_device)

@@ -11,7 +11,8 @@ of them is transitional. Fallbacks that protect correctness stay.
 An op whose operands are all of a dispatch dtype reaches the compile path, where
 it is compiled per (op, shape, dtype) and run with `out=` bound to the caller's
 tensor. The dispatch dtypes are fp16, bf16 and fp32. The device may cast fp32
-ops to a custom float format, so an fp32 op can run in reduced precision.
+ops to a custom float format, so an fp32 op can run in reduced precision and
+range: very large magnitudes saturate and very small ones flush to zero.
 
 Every new (op, shape, dtype) costs a compile in every process, and eager
 programs are not cached on disk.
@@ -39,8 +40,11 @@ and as a runtime signal.
 
 The common eager Python path falls back to CPU for tensor arguments whose last
 dim is not a multiple of 64. This check does not cover TensorList inputs such as
-`cat`/`stack`, separate C++ kernels, or graph mode. On the device such a shape is
-costly today:
+`cat`/`stack`, separate C++ kernels, or graph mode. It also skips ops whose
+device inputs the compiler pads itself: elementwise arithmetic and unary math,
+comparisons, `maximum`/`minimum`, `max`/`min`/`mean`, `softmax` and the matmul
+family (the list is `_ALIGN_EXEMPT_OPS` in `ops_utils.py`). For other ops such a
+shape is costly on the device today:
 
 - the compiler wraps the op in host pad/depad steps, which cost more than the
   compute on small tensors;

@@ -980,22 +980,22 @@ class TestCpuFallbackOptionalTensor(TestCase):
     atol = 1e-3
     rtol = 1e-3
 
-    def test_linear_fp32_with_bias_through_cpu_fallback(self):
-        # fp32 linear forces cpu_fallback (rbln eager only handles fp16).
+    def test_linear_fp64_with_bias_through_cpu_fallback(self):
+        # fp64 is outside the dispatch dtypes, so linear takes cpu_fallback.
         device = torch.device("rbln:0")
-        weight = torch.randn(20, 10, device=device, dtype=torch.float32)
-        bias = torch.randn(20, device=device, dtype=torch.float32)
-        x = torch.randn(5, 10, device=device, dtype=torch.float32)
+        weight = torch.randn(20, 10, device=device, dtype=torch.float64)
+        bias = torch.randn(20, device=device, dtype=torch.float64)
+        x = torch.randn(5, 10, device=device, dtype=torch.float64)
         out_rbln = torch.nn.functional.linear(x, weight, bias)
         out_cpu = torch.nn.functional.linear(x.cpu(), weight.cpu(), bias.cpu())
         self.assertEqual(out_rbln.cpu(), out_cpu, atol=self.atol, rtol=self.rtol)
 
-    def test_linear_fp32_with_bias_none_through_cpu_fallback(self):
+    def test_linear_fp64_with_bias_none_through_cpu_fallback(self):
         # Optional[Tensor] arg may also be None; the dispatch must still skip
         # the slot without tripping on toTensor() of a None IValue.
         device = torch.device("rbln:0")
-        weight = torch.randn(20, 10, device=device, dtype=torch.float32)
-        x = torch.randn(5, 10, device=device, dtype=torch.float32)
+        weight = torch.randn(20, 10, device=device, dtype=torch.float64)
+        x = torch.randn(5, 10, device=device, dtype=torch.float64)
         out_rbln = torch.nn.functional.linear(x, weight, None)
         out_cpu = torch.nn.functional.linear(x.cpu(), weight.cpu(), None)
         self.assertEqual(out_rbln.cpu(), out_cpu, atol=self.atol, rtol=self.rtol)

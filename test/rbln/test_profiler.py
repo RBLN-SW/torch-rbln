@@ -359,18 +359,18 @@ class TestProfilerApi(TestCase):
         # An unaligned last dim falls back on the Python path. It must be counted under
         # the shim op's schema name, the key with_stack captures the call-site under, so
         # the report's fallback row says where it happened.
-        def _unaligned_add():
+        def _unaligned_logical_not():
             a = torch.ones(4, 3, device=DEV, dtype=torch.bfloat16)
-            return a + a
+            return torch.logical_not(a)
 
         if not hasattr(_C, "_explain_set_trace"):
             self.skipTest("trace capture not exposed by this _C build")
         with torch.rbln.explain(with_stack=True) as e:
-            _unaligned_add()
+            _unaligned_logical_not()
         d = e.dump()
-        self.assertIn("aten::add.out", d["cpu_fallback_by_op"])
-        self.assertIn("_unaligned_add", d["trace_by_op"]["aten::add.out"])
-        rows = [ln for ln in e.report().splitlines() if ln.strip().startswith("aten::add.out")]
+        self.assertIn("aten::logical_not.out", d["cpu_fallback_by_op"])
+        self.assertIn("_unaligned_logical_not", d["trace_by_op"]["aten::logical_not.out"])
+        rows = [ln for ln in e.report().splitlines() if ln.strip().startswith("aten::logical_not.out")]
         self.assertTrue(any(" at " in ln for ln in rows), rows)
 
     def test_with_stack_trace_is_deprecated_alias(self):

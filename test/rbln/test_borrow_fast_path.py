@@ -26,7 +26,7 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 @pytest.mark.npu(count=1)
 class TestBorrowFastPath(TestCase):
     """The borrow path must yield correct results for ops routed to the
-    CPU fallback. ``aten::sigmoid`` on int32 is intentionally a non-fp16
+    CPU fallback. ``aten::sigmoid`` on fp64 is intentionally a non-dispatch
     input (forces the dispatch shim's pre-check shortcut into the C++
     fallback), and is a unary op with no write aliasing — clean for
     borrow correctness.
@@ -34,9 +34,9 @@ class TestBorrowFastPath(TestCase):
 
     def test_fallback_unary_int32_input(self) -> None:
         x = torch.arange(48, dtype=torch.int32, device="rbln").reshape(6, 8)
-        out = torch.sigmoid(x.float()).to("cpu")
+        out = torch.sigmoid(x.double()).to("cpu")
         # Reference computation on CPU.
-        ref = torch.sigmoid(torch.arange(48, dtype=torch.int32).reshape(6, 8).float())
+        ref = torch.sigmoid(torch.arange(48, dtype=torch.int32).reshape(6, 8).double())
         self.assertEqual(out, ref)
 
     def test_borrow_path_default_on(self) -> None:
@@ -46,8 +46,8 @@ class TestBorrowFastPath(TestCase):
         surface as a build error or a runtime exception.
         """
         x = torch.arange(16, dtype=torch.int32, device="rbln")
-        # int32 input forces the cpu_fallback_rbln path (fp16-only kernels).
-        y = torch.sigmoid(x.float())
+        # fp64 is outside the dispatch dtypes, so sigmoid takes cpu_fallback_rbln.
+        y = torch.sigmoid(x.double())
         self.assertEqual(y.device.type, "rbln")
         self.assertEqual(tuple(y.shape), (16,))
 

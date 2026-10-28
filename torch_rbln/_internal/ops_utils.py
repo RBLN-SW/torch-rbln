@@ -1779,6 +1779,42 @@ def view_recipes_for_positional(view_recipes_flat, positional_count):
     return view_recipes_flat[:positional_count]
 
 
+_ALIGN_EXEMPT_OPS = frozenset(
+    {
+        "aten::add",
+        "aten::sub",
+        "aten::mul",
+        "aten::div",
+        "aten::pow",
+        "aten::neg",
+        "aten::abs",
+        "aten::ceil",
+        "aten::floor",
+        "aten::clamp",
+        "aten::log",
+        "aten::rsqrt",
+        "aten::sigmoid",
+        "aten::silu",
+        "aten::eq",
+        "aten::ne",
+        "aten::lt",
+        "aten::le",
+        "aten::gt",
+        "aten::ge",
+        "aten::maximum",
+        "aten::minimum",
+        "aten::max",
+        "aten::min",
+        "aten::mean",
+        "aten::mm",
+        "aten::bmm",
+        "aten::addmm",
+        "aten::linear",
+        "aten::softmax",
+    }
+)
+
+
 def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_tensor):
     """Centralized view-aware rbln-compile dispatch.
 
@@ -1826,11 +1862,12 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     # Single-tensor args only: for list ops (cat/stack) the device path fuses unaligned
     # tensors into one IR that's cheaper than per-tensor host fallback — TensorList
     # recursion added +12% prefill. (verified 2026-05-08 via IR dump + trace counts)
+    # _ALIGN_EXEMPT_OPS are exempt: the compiler pads their device inputs itself.
     def _last_dim_unaligned(t):
         return isinstance(t, torch.Tensor) and t.dim() > 0 and t.shape[-1] % 64 != 0
 
-    unaligned = any(_last_dim_unaligned(a) for a in args) or any(
-        _last_dim_unaligned(v) for v in kwargs_filtered.values()
+    unaligned = op_name not in _ALIGN_EXEMPT_OPS and (
+        any(_last_dim_unaligned(a) for a in args) or any(_last_dim_unaligned(v) for v in kwargs_filtered.values())
     )
     if unaligned and "align" not in _parse_disabled_fallback_cases():
         return cpu_fallback_path(

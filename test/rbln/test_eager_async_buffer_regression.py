@@ -60,9 +60,12 @@ def _eager_matmul_decode_worker(
     k_cache = [torch.zeros(cache_len, hidden, dtype=dt, device=dev) for _ in range(layers)]
     v_cache = [torch.zeros(cache_len, hidden, dtype=dt, device=dev) for _ in range(layers)]
 
+    # Attention length stays a multiple of 64: an unaligned length would compile a
+    # new matmul/softmax per step, which is not what this test measures.
     for _ in range(attempts):
         for step in range(steps):
             pos = step % cache_len
+            length = min(cache_len, (pos // 64 + 1) * 64)
             h = torch.randn(1, hidden, dtype=dt, device=dev)
             for layer in range(layers):
                 q = q_proj[layer](h)
@@ -70,9 +73,9 @@ def _eager_matmul_decode_worker(
                 v = v_proj[layer](h)
                 k_cache[layer][pos] = k[0]  # scatter into KV cache
                 v_cache[layer][pos] = v[0]
-                scores = torch.matmul(q, k_cache[layer][: pos + 1].transpose(0, 1))  # qk^T
+                scores = torch.matmul(q, k_cache[layer][:length].transpose(0, 1))  # qk^T
                 probs = torch.softmax(scores.float(), dim=-1).to(dt)
-                ctx = torch.matmul(probs, v_cache[layer][: pos + 1])  # attn @ v
+                ctx = torch.matmul(probs, v_cache[layer][:length])  # attn @ v
                 h = o_proj[layer](ctx) + h
             del h
             torch_rbln.memory.empty_cache(dev)

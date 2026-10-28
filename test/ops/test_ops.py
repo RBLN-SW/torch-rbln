@@ -278,6 +278,9 @@ def assert_equal_where_specials_match(
             raise AssertionError(f"Mismatch at finite/special boundary: {idx}")
 
 
+_FP32_DEVICE_RANGE = (2.0**-29, 8.0e9)
+
+
 def _custom_float16_input_safe_mask(
     sample_input,
     sample_args,
@@ -286,6 +289,7 @@ def _custom_float16_input_safe_mask(
     *,
     low: float = 1e-3,
     high: float = 32000.0,
+    dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor | None:
     """Build a per-output-element boolean mask flagging positions where
     every fp16 tensor operand has |value| in [low, high). For elementwise
@@ -316,7 +320,7 @@ def _custom_float16_input_safe_mask(
         return None
     mask = torch.ones(output_shape, dtype=torch.bool, device=broadcast[0].device)
     for t in broadcast:
-        if t.dtype == torch.float16:
+        if t.dtype == dtype:
             t_abs = t.abs()
             mask = mask & torch.isfinite(t) & (t_abs >= low) & (t_abs < high)
     return mask
@@ -615,9 +619,12 @@ class TestCommon(TestCase):
         elif op.name == "_refs.floor" or op.name == "_refs.ceil":
             atol = 1
         elif op.name == "_refs.rsqrt" or op.name == "rsqrt":
+            # The device has no inf: rsqrt(0) / log(0) come back finite.
             ignore_inf_nan = True
+            tolerate_boundary_mismatch = True
         elif op.name == "_refs.log" or op.name == "log":
             ignore_inf_nan = True
+            tolerate_boundary_mismatch = True
         elif op.name == "_refs.pow" or op.name == "pow":
             ignore_inf_nan = True
             clamp_inf_fp16_safe = True
@@ -662,9 +669,32 @@ class TestCommon(TestCase):
             ignore_inf_nan = True
             fp16_div_safe_range = (1e-3, 32000.0)  # |x| in [1e-3, ~half-fp16-max]
         fp16_div_input_mask: torch.Tensor | None = None
+        # fp32 computes in the device's narrower compDtype: very large values
+        # saturate and tiny ones flush to zero. Mask both edges.
+        fp32_arith = dtype is torch.float32 and (op.name, op.variant_test_name) in {
+            ("add", ""),
+            ("sub", ""),
+            ("mul", ""),
+            ("div", "no_rounding_mode"),
+            ("abs", ""),
+            ("neg", ""),
+            ("ceil", ""),
+            ("floor", ""),
+            ("maximum", ""),
+            ("minimum", ""),
+            ("max", "binary"),
+            ("min", "binary"),
+        }
+        if fp32_arith:
+            ignore_inf_nan = True
+            fp16_div_safe_range = _FP32_DEVICE_RANGE
 
         if dtype is torch.bfloat16:
-            if (op.name, op.variant_test_name) == ("div", "no_rounding_mode"):
+            if (op.name, op.variant_test_name) in {("add", ""), ("sub", ""), ("mul", "")}:
+                # The device has no inf/nan: an overflow lands on a value torch
+                # reads as nan.
+                ignore_inf_nan = True
+            elif (op.name, op.variant_test_name) == ("div", "no_rounding_mode"):
                 # Near-zero denominator → outlier huge-finite (~1e37) on NPU vs
                 # the CPU finite value. Both sides stay finite (no boundary signal
                 # to mask), and the magnitude exceeds element-wise tolerance.
@@ -739,6 +769,17 @@ class TestCommon(TestCase):
                         cpu_sample.args,
                         cpu_sample.kwargs,
                         cuda_results.shape,
+                    )
+                if fp32_arith:
+                    low, high = _FP32_DEVICE_RANGE
+                    fp16_div_input_mask = _custom_float16_input_safe_mask(
+                        cpu_sample.input,
+                        cpu_sample.args,
+                        cpu_sample.kwargs,
+                        cuda_results.shape,
+                        low=low,
+                        high=high,
+                        dtype=torch.float32,
                     )
                 assert_equal_where_specials_match(
                     cuda_results,
