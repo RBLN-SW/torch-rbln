@@ -80,11 +80,18 @@ after `spawn` instead.
 Older KMD versions can exhaust their finite page-table pool before safely
 returning an error. Both public Python registration APIs therefore share a
 per-device, per-process ledger. The limits are **8,192 ordinary-page leaf
-tables** and **256 GiB of admitted host address space**, including registration
+tables** and **252 GiB of admitted host address space**, including registration
 alignment padding. One ordinary-page table covers 2 MiB, so 8,192 tables allow
 16 GiB of densely packed 4 KiB mappings. Small or fragmented registrations can
 consume that allowance with fewer bytes. Confirmed huge mappings still consume
 address space and upper-level tables; they are not unlimited.
+
+The qualified UMD external VA arena is `[0x4100000000, 0x8000000000)`,
+which is 252 GiB. A 256 GiB allocation therefore retains at least 4 GiB
+unregistered even if every page is huge. This qualification uses KMQ with no
+other users of that external arena. UMQ command buffers and on-demand host
+mappings share the arena; UMQ requires separate capacity qualification and
+accounting before using this large-pool profile.
 
 These limits assume one worker, one context/task per physical device, dual-path
 disabled, 2 MiB-aligned external device VA allocation in UMD, and room for the
@@ -128,8 +135,9 @@ be permitted by the operator's existing mount policy.
 
 When the ordinary-page allowance is exhausted, the owned-buffer API continues
 registering confirmed huge windows and leaves the remaining ordinary windows
-unregistered. For example, an aligned 256 GiB pool with 238 GiB huge and 18 GiB
-ordinary mappings can admit 254 GiB. Registration failure with uncertain driver
+unregistered. For example, an aligned 240 GiB pool with 222 GiB huge and 18 GiB
+ordinary mappings can admit 238 GiB. The separate external-VA limit still applies
+to larger pools. Registration failure with uncertain driver
 cleanup propagates and retains the attempted charge; it is not treated as a
 safe capacity refusal. Replace this temporary guard only after the deployed
 driver/runtime reliably reports exhaustion and rolls back failed registrations.

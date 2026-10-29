@@ -21,7 +21,8 @@ _PAGE = 4096
 _HUGE = 2 << 20
 _WINDOW = 1 << 30
 _TABLE_LIMIT = (16 << 30) // _HUGE
-_VA_LIMIT = 256 << 30
+# The qualified UMD external arena is [0x4100000000, 0x8000000000).
+_VA_LIMIT = 252 << 30
 _lock = threading.RLock()
 _logger = logging.getLogger(__name__)
 _region_start = attrgetter("ptr")
@@ -254,7 +255,9 @@ def _register(
                     if not partial:
                         state.close()
                     break
-                stop = min(end, (cursor // _WINDOW + 1) * _WINDOW)
+                stop = min(end, cursor + _WINDOW)
+                if stop < end and _WINDOW >= _HUGE:
+                    stop -= stop % _HUGE
                 snapshot = torch_rbln._C._HostPageSnapshot(cursor, stop - cursor, promote=partial) if use_huge else None
                 with contextlib.closing(snapshot) if snapshot is not None else contextlib.nullcontext():
                     if snapshot is not None and snapshot.error and not warned:
@@ -269,8 +272,15 @@ def _register(
                         state.close()
                         return state
                     for region in plan:
-                        budget.reserve(region.tables, region.va_bytes)
-                        state.regions.append(region)
+                        previous_tables, previous_va = budget.tables, budget.va_bytes
+                        try:
+                            budget.reserve(region.tables, region.va_bytes)
+                            state.regions.append(region)
+                        except BaseException:
+                            budget.tables, budget.va_bytes = previous_tables, previous_va
+                            if state.regions and state.regions[-1] is region:
+                                state.regions.pop()
+                            raise
                         # Record the attempt before entering the driver: an exception
                         # does not prove that a partially failed mapping was removed.
                         if not torch_rbln._C._host_register(device, region.ptr, region.size):

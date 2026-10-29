@@ -25,6 +25,7 @@ from typing import ClassVar
 from unittest import mock
 
 import pytest
+import rebel._C
 import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
@@ -408,10 +409,17 @@ class TestHostRegister(TestCase):
         # Bound so both copies DMA against the slab; a lazy allocation never would.
         on_device = torch.empty(n, dtype=torch.uint8, device=self.rbln_device)
         torch.rbln.bind_device_memory(on_device)
-        on_device.copy_(src)
+        with torch.rbln.explain() as upload:
+            on_device.copy_(src)
+            torch.rbln.synchronize(self.rbln_device)
+        self.assertEqual(upload.dump()["runtime_residency"]["real_host_sync_h2d"]["bytes"], n)
+        rebel._C.vmem.mark_device_memory_is_updated(on_device.data_ptr())
         dst = slab[offset + n : offset + 2 * n]
         dst.zero_()
-        dst.copy_(on_device)
+        with torch.rbln.explain() as download:
+            dst.copy_(on_device)
+            torch.rbln.synchronize(self.rbln_device)
+        self.assertEqual(download.dump()["runtime_residency"]["real_host_sync_d2h"]["bytes"], n)
         self.assertEqual(dst, expected)
 
     def test_copies_through_a_registered_range(self):
@@ -476,6 +484,7 @@ class TestHostRegister(TestCase):
             self._round_trip(slab, 0, 512 << 10, fill=1)
             self._round_trip(slab, 3 << 20, 1 << 20, fill=2)
             self._round_trip(slab, 1 << 20, 768 << 10, fill=3)
+            self._round_trip(slab, 1792 << 10, 512 << 10, fill=4)
         finally:
             handle.close()
         self.assertFalse(torch.rbln.is_host_memory_registered(slab.data_ptr(), 4096, self.rbln_device))
@@ -492,8 +501,18 @@ class TestHostRegister(TestCase):
             self.assertEqual(len(handle.registered_ranges), 4)
             self.assertFalse(handle.covers(slab.data_ptr(), self.nbytes))
             self._round_trip(slab, 1 << 20, 768 << 10, fill=4)
+            self._round_trip(slab, 1792 << 10, 512 << 10, fill=5)
         finally:
             handle.close()
+
+    def test_managed_unaligned_range_keeps_head_and_body_copies_correct(self):
+        backing = torch.rbln.huge_host_empty(self.nbytes + 4096)
+        slab = backing[31 : 31 + self.nbytes]
+        with torch.rbln.host_register_memory(slab, self.rbln_device) as handle:
+            self.assertTrue(handle.fully_registered)
+            self.assertEqual(len(handle.registered_ranges), 2)
+            self._round_trip(slab, 0, 512 << 10, fill=1)
+            self._round_trip(slab, 1792 << 10, 512 << 10, fill=2)
 
 
 class TestHostRegistrationPolicy(TestCase):
@@ -558,6 +577,29 @@ class TestHostRegistrationPolicy(TestCase):
         handle.close()
         self.assertEqual(self.registration._budgets[0].tables, 0)
 
+    def test_failed_region_recording_refunds_budget_before_native_call(self):
+        initialize = self.registration._RegistrationState.__init__
+
+        class FailingRegions(list):
+            def append(self, _region):
+                message = "region allocation failed"
+                raise MemoryError(message)
+
+        def initialize_with_failure(state, *args, **kwargs):
+            initialize(state, *args, **kwargs)
+            state.regions = FailingRegions()
+
+        with (
+            mock.patch.object(self.registration._RegistrationState, "__init__", initialize_with_failure),
+            self.assertRaisesRegex(MemoryError, "region allocation failed"),
+        ):
+            self.managed(self.huge)
+        self._host_register.assert_not_called()
+        self._host_unregister.assert_not_called()
+        self.assertFalse(self.registration._groups)
+        self.assertEqual(self.registration._budgets[0].tables, 0)
+        self.assertEqual(self.registration._budgets[0].va_bytes, 0)
+
     def test_strict_registration_rolls_back_prior_windows(self):
         h, p = self.huge, self.ptr
         self.huge_ranges = [(p, 2 * h)]
@@ -610,6 +652,18 @@ class TestHostRegistrationPolicy(TestCase):
         self.assertEqual(self.registration._budgets[0].tables, 0)
         handle.close()
 
+    def test_large_huge_pool_leaves_external_address_space_tail_unregistered(self):
+        gib = 1 << 30
+        self.huge_ranges = [(self.ptr, 256 * gib)]
+        with mock.patch.object(self.registration, "_WINDOW", gib):
+            handle = self.managed(256 * gib)
+        self.assertEqual(handle.registered_bytes, 252 * gib)
+        self.assertFalse(handle.fully_registered)
+        self.assertFalse(handle.covers(self.ptr + 252 * gib, 4096))
+        self.assertEqual(self.registration._budgets[0].tables, 0)
+        self.assertEqual(self.registration._budgets[0].va_bytes, 252 * gib)
+        handle.close()
+
     def test_adjacent_registrations_do_not_imply_one_direct_transfer(self):
         self.huge_ranges = [(self.ptr, 2 * self.huge)]
         with mock.patch.object(self.registration, "_WINDOW", self.huge):
@@ -619,6 +673,15 @@ class TestHostRegistrationPolicy(TestCase):
         self.assertTrue(handle.covers(self.ptr + self.huge, self.huge))
         with self.assertRaises(TypeError):
             bool(handle)
+        handle.close()
+
+    def test_small_pool_crossing_absolute_window_keeps_one_registration(self):
+        ptr, size = 800 << 20, 512 << 20
+        self.huge_ranges = [(ptr, size)]
+        with mock.patch.object(self.registration, "_WINDOW", 1 << 30):
+            handle = self.managed(size, ptr=ptr)
+        self.assertTrue(handle.covers(ptr, size))
+        self._host_register.assert_called_once_with(0, ptr, size)
         handle.close()
 
     def test_strict_and_partial_apis_share_the_same_budget(self):
