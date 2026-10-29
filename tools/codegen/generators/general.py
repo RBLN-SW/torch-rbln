@@ -72,7 +72,9 @@ class GeneralFunctionGenerator:
         if self.op_categories.needs_tensor_args_extraction_before_empty_handling(root_name):
             code += self.templates.ArgsProcessing.tensor_args_extraction()
         code += self.generate_empty_tensor_handling(root_name)
-        code += self.templates.FunctionBody.main(target, root_name, op_namespace)
+        code += self.templates.FunctionBody.main(
+            target, root_name, op_namespace, align_exempt=self.op_categories.is_align_exempt(root_name)
+        )
 
         return code
 

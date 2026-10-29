@@ -43,7 +43,7 @@ dim is not a multiple of 64. This check does not cover TensorList inputs such as
 `cat`/`stack`, separate C++ kernels, or graph mode. It also skips ops whose
 device inputs the compiler pads itself: elementwise arithmetic and unary math,
 comparisons, `maximum`/`minimum`, `max`/`min`/`mean`, `softmax` and the matmul
-family (the list is `_ALIGN_EXEMPT_OPS` in `ops_utils.py`). For other ops such a
+family (`OpCategories.ALIGN_EXEMPT_OPS` in `tools/codegen/config.py`). For other ops such a
 shape is costly on the device today:
 
 - the compiler wraps the op in host pad/depad steps, which cost more than the

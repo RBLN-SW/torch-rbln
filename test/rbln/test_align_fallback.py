@@ -35,12 +35,15 @@ print("RESULT", (got.device.type, evidence))
 
 # Disable the alignment fallback, let a warm-cache entry serve an unaligned add, then
 # remove the setting: the cached entry must not keep the call on the device. The
-# exemption list is emptied so add still meets the alignment gate.
+# generated add handler is rebound to a non-exempt dispatch so add still meets the
+# alignment gate.
 _RESTORE_SCENARIO = r"""
 import os, torch, torch_rbln
 from torch_rbln import _C
-from torch_rbln._internal import ops_utils
-ops_utils._ALIGN_EXEMPT_OPS = frozenset()
+from torch_rbln._internal import ops_utils, register_ops
+register_ops.compile_and_run_view_aware = lambda *a, **k: ops_utils.compile_and_run_view_aware(
+    *a, **{**k, "align_exempt": False}
+)
 a = torch.full((4, 3), 2.0, dtype=torch.bfloat16).to("rbln")
 b = torch.full((4, 3), 3.0, dtype=torch.bfloat16).to("rbln")
 out = torch.empty_like(a)
