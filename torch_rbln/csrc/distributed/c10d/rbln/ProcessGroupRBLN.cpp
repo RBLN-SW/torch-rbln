@@ -8,6 +8,7 @@
  */
 
 // Standard library includes
+#include <algorithm>
 #include <cstdlib>
 #include <mutex>
 #include <numeric>
@@ -62,6 +63,8 @@ namespace {
 constexpr size_t RCCL_ALLGATHER_ALIGNMENT = 128ULL;
 constexpr size_t RCCL_ALLREDUCE_ALIGNMENT = 512ULL;
 constexpr size_t RCCL_REDUCE_SCATTER_ALIGNMENT = RCCL_ALLREDUCE_ALIGNMENT;
+// RCCL DMA commands encode device addresses in 128-byte units.
+constexpr size_t RCCL_DEVICE_ADDRESS_ALIGNMENT = 128ULL;
 // AllReduce also splits data into world_size chunks, each 128 B aligned, so its
 // alignment is lcm(512 B, 128 B * world_size) and grows for world 3 and 5-8.
 constexpr size_t RCCL_ALLREDUCE_CHUNK_ALIGNMENT = 128ULL;
@@ -1241,7 +1244,7 @@ class AllreduceRBLNWork : public RBLNWork {
         worldSize_,
         inputs_.size());
     // For single device, no actual allreduce is needed
-    if (worldSize_ == 1) {
+    if (worldSize_ == 1 || inputs_[0].numel() == 0) {
       // In single device case, data is already reduced (no communication
       // needed)
       return;
@@ -1280,22 +1283,30 @@ class AllreduceRBLNWork : public RBLNWork {
 
     rcclDataType_ = ::rbln::Rccl::RcclDataType::RBLN_CUSTOM_FP16_TYPE;
 
-    for (const auto& input : inputs_) {
-      const auto rbln_dtype = c10::rbln::to_rbln_dtype(input.scalar_type());
+    for (const auto& original_input : inputs_) {
+      const auto rbln_dtype =
+          c10::rbln::to_rbln_dtype(original_input.scalar_type());
       RBLN_CHECK(
           rbln_dtype == ::rbln::DataType::Float16,
           "RCCL AllReduce only supports float16 dtype");
       RBLN_CHECK(
-          input.is_contiguous(), "RCCL AllReduce requires contiguous tensors");
+          original_input.is_contiguous(),
+          "RCCL AllReduce requires contiguous tensors");
 
       const size_t elem_size = getRcclElementSize(rbln_dtype);
       const size_t align_bytes = getAllReduceAlignment(worldSize_);
       const size_t align_numel = align_bytes / elem_size;
-      const size_t numel = input.numel();
+      const size_t numel = original_input.numel();
       const size_t total_bytes = numel * elem_size;
       const size_t max_bytes = RCCL_ALLREDUCE_MAX_BYTES_PER_RANK * worldSize_;
       const size_t max_chunk_numel =
           (max_bytes / elem_size / align_numel) * align_numel;
+      const bool stage_input = numel >= align_numel &&
+          !isAlignedTo(original_input.storage_offset() * elem_size,
+                       RCCL_DEVICE_ADDRESS_ALIGNMENT);
+      auto input = stage_input
+          ? original_input.clone(at::MemoryFormat::Contiguous)
+          : original_input;
 
       // Fast path: small aligned tensor
       if (total_bytes <= max_bytes && isAlignedTo(total_bytes, align_bytes)) {
@@ -1312,6 +1323,9 @@ class AllreduceRBLNWork : public RBLNWork {
             ret == RBLNRetCode_SUCCESS,
             "RCCL AllReduce failed: {}",
             static_cast<int>(ret));
+        if (stage_input) {
+          original_input.copy_(input);
+        }
         continue;
       }
 
@@ -1384,6 +1398,9 @@ class AllreduceRBLNWork : public RBLNWork {
         // Copy back only the remainder
         remainder_slice.copy_(padded_slice);
       }
+      if (stage_input) {
+        original_input.copy_(input);
+      }
     }
   }
 
@@ -1442,6 +1459,10 @@ class ReduceScatterRBLNWork : public RBLNWork {
         rank_,
         inputs_.size());
 
+    if (outputs_[0].numel() == 0) {
+      return;
+    }
+
     // For single device, no actual reduce_scatter is needed
     if (worldSize_ == 1) {
       // In single device case, just copy input to output
@@ -1456,7 +1477,8 @@ class ReduceScatterRBLNWork : public RBLNWork {
 
     // Execute reduce_scatter operation
     for (const auto i : c10::irange(outputs_.size())) {
-      auto& output = outputs_[i];
+      auto& original_output = outputs_[i];
+      auto output = original_output;
       // For reduce_scatter, each rank needs to concatenate all inputs_[i]
       // tensors inputs_[i] contains worldSize_ tensors, each of size recv_numel
       RBLN_CHECK(
@@ -1473,7 +1495,6 @@ class ReduceScatterRBLNWork : public RBLNWork {
         input_ptrs.push_back(t.data_ptr());
       }
 
-      ensureRcclReduceMemory(output);
       const auto rbln_dtype =
           c10::rbln::to_rbln_dtype(inputs_[i][0].scalar_type());
 
@@ -1512,6 +1533,20 @@ class ReduceScatterRBLNWork : public RBLNWork {
       auto elem_size = getRcclElementSize(rbln_dtype);
       auto recv_numel = output.numel();
       auto send_numel = recv_numel * worldSize_;
+      const size_t align_unit_numel = RCCL_REDUCE_SCATTER_ALIGNMENT / elem_size;
+      const bool stage_output = send_numel >= align_unit_numel &&
+          !isAlignedTo(output.storage_offset() * elem_size,
+                       RCCL_DEVICE_ADDRESS_ALIGNMENT);
+      if (stage_output) {
+        output = at::empty_like(output, at::MemoryFormat::Contiguous);
+      }
+      ensureRcclReduceMemory(output);
+      const bool inputs_aligned = std::all_of(
+          inputs_[i].begin(), inputs_[i].end(), [elem_size](const auto& input) {
+            return isAlignedTo(
+                input.storage_offset() * elem_size,
+                RCCL_DEVICE_ADDRESS_ALIGNMENT);
+          });
 
       // Check if all inputs are contiguous and can be used directly
       bool inputs_contiguous = true;
@@ -1525,7 +1560,6 @@ class ReduceScatterRBLNWork : public RBLNWork {
         }
       }
 
-      const size_t align_unit_numel = RCCL_REDUCE_SCATTER_ALIGNMENT / elem_size;
       const size_t aligned_up_numel = (send_numel + align_unit_numel - 1) /
           align_unit_numel * align_unit_numel;
       const size_t total_send_bytes = send_numel * elem_size;
@@ -1555,7 +1589,7 @@ class ReduceScatterRBLNWork : public RBLNWork {
       // Conditions: inputs are contiguous, no chunking needed, aligned, and
       // send device addrs contiguous
       bool send_device_addrs_contig = false;
-      if (inputs_contiguous && !needs_chunking &&
+      if (inputs_contiguous && inputs_aligned && !needs_chunking &&
           isAlignedTo(total_send_bytes, RCCL_REDUCE_SCATTER_ALIGNMENT)) {
         ensureContiguousRcclReduceMemory(inputs_[i]);
         send_device_addrs_contig =
@@ -1569,7 +1603,7 @@ class ReduceScatterRBLNWork : public RBLNWork {
               "RCCL ReduceScatter: send device addrs not contiguous, using chunked path");
         }
       }
-      if (inputs_contiguous && !needs_chunking &&
+      if (inputs_contiguous && inputs_aligned && !needs_chunking &&
           isAlignedTo(total_send_bytes, RCCL_REDUCE_SCATTER_ALIGNMENT) &&
           send_device_addrs_contig) {
         // Step 1-1: Execute ReduceScatter in a single operation
@@ -1586,6 +1620,9 @@ class ReduceScatterRBLNWork : public RBLNWork {
             "RCCL ReduceScatter failed with fast path: {}",
             static_cast<int>(ret));
         RBLN_LOG_DEBUG("RCCL ReduceScatter (fast path) completed successfully");
+        if (stage_output) {
+          original_output.copy_(output);
+        }
         continue;
       }
 
@@ -1736,6 +1773,9 @@ class ReduceScatterRBLNWork : public RBLNWork {
 
         RBLN_LOG_DEBUG(
             "RCCL ReduceScatter (padded remainder) completed successfully");
+      }
+      if (stage_output) {
+        original_output.copy_(output);
       }
     }
 
@@ -2551,8 +2591,13 @@ c10::intrusive_ptr<Work> ProcessGroupRBLN::_reduce_scatter_base(
   RBLN_CHECK(outputTensor.dtype() == inputTensor.dtype());
   RBLN_CHECK(inputTensor.numel() == (outputTensor.numel() * worldSize));
 
-  // Split input tensor into chunks for each rank
-  auto input_chunks = at::chunk(inputTensor, worldSize, 0);
+  // Both stacked and concatenated inputs carry the same per-rank flat spans.
+  auto input_rows = inputTensor.reshape({worldSize, outputTensor.numel()});
+  std::vector<at::Tensor> input_chunks;
+  input_chunks.reserve(worldSize);
+  for (const auto rank : c10::irange(worldSize)) {
+    input_chunks.push_back(input_rows[rank].view(outputTensor.sizes()));
+  }
   std::vector<std::vector<at::Tensor>> inputs = {input_chunks};
   std::vector<at::Tensor> outputs = {outputTensor};
 
