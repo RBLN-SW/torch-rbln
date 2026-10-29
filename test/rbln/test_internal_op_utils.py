@@ -225,11 +225,7 @@ class TestInternalOpUtils(TestCase):
         self.assertEqual(new_args[2].data_ptr(), b.data_ptr())
 
     def test_broadcast_args_general_last_dim_one_passes_through(self):
-        # A size-1 last dim used to be materialized on the host for a backend
-        # that rejected the broadcast; the backend now lowers it on the device,
-        # so the operand reaches compile with its raw shape and storage. Whether
-        # the op then runs on the device or takes the CPU fallback is decided by
-        # the alignment check in ``compile_and_run_view_aware``, not here.
+        # Shape and storage are preserved even when alignment later forces fallback.
         a = torch.randn((3, 4), device="rbln")
         b = torch.randn((3, 1), device="rbln")
         args = (a, b)

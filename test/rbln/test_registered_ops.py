@@ -1281,11 +1281,7 @@ BROADCAST_PATTERNS = [
 @pytest.mark.npu(count=1)
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestBinaryOpsBroadcast(TestCase):
-    """Verify the 12 binary / comparison ops produce correct results across
-    broadcast patterns after the implicit-broadcast change (2026-04-30).
-    Single-tensor and same-shape cases are also covered to ensure the fast
-    paths in broadcast_args_general still work.
-    """
+    """Binary and comparison broadcasting across aligned and unaligned shapes."""
 
     rbln_device = torch.device("rbln:0")
 
@@ -1346,21 +1342,19 @@ class TestBinaryOpsBroadcast(TestCase):
     def test_minimum_broadcast(self, lhs_shape, rhs_shape):
         self._check(torch.minimum, lhs_shape, rhs_shape)
 
-    # Comparison ops produce bool outputs; precision-of-floats edge cases can
-    # flip individual bits when the operands round to exactly equal in fp16,
-    # so we keep the pattern set tight (subset of BROADCAST_PATTERNS) for
-    # comparisons.
     _CMP_PATTERNS: ClassVar[list[tuple[tuple[int, ...], tuple[int, ...]]]] = [
         ((1, 8, 16), (16,)),
         ((4, 1, 64), (1, 8, 64)),
         ((4, 8, 16), (4, 8, 16)),
+        ((4, 64), (4, 1)),
+        ((4, 1), (4, 64)),
     ]
 
     @parametrize("op_callable", [torch.eq, torch.ne, torch.gt, torch.ge, torch.lt, torch.le])
     @parametrize("lhs_shape,rhs_shape", _CMP_PATTERNS)
-    def test_comparison_broadcast(self, op_callable, lhs_shape, rhs_shape):
-        # We rebuild integer-valued tensors so fp16 rounding doesn't flip the
-        # ordering of borderline pairs.
+    @dtypes(*SUPPORTED_DTYPES)
+    def test_comparison_broadcast(self, op_callable, lhs_shape, rhs_shape, dtype):
+        # Integer-valued inputs keep comparisons exact in both dtypes.
         a_int = torch.randint(-3, 4, lhs_shape if lhs_shape else (1,), dtype=torch.int64).reshape(
             lhs_shape if lhs_shape else ()
         )
@@ -1369,8 +1363,8 @@ class TestBinaryOpsBroadcast(TestCase):
         )
         a_cpu = a_int.to(torch.float32)
         b_cpu = b_int.to(torch.float32)
-        a = a_cpu.to(dtype=torch.float16, device=self.rbln_device)
-        b = b_cpu.to(dtype=torch.float16, device=self.rbln_device)
+        a = a_cpu.to(dtype=dtype, device=self.rbln_device)
+        b = b_cpu.to(dtype=dtype, device=self.rbln_device)
         result = op_callable(a, b)
         expected = op_callable(a.cpu(), b.cpu())
         expected_shape = torch.broadcast_shapes(lhs_shape, rhs_shape)
@@ -1378,24 +1372,18 @@ class TestBinaryOpsBroadcast(TestCase):
         self.assertEqual(result.cpu(), expected.cpu())
         self.assertEqual(result.device, self.rbln_device)
 
-    # ----- Regression: rebel-backend cannot implicit-compile last-dim
-    # ``size==1 → size>1`` broadcast (raises ``UNEXPECTED_GRAPH``). Without
-    # ``broadcast_args_general``'s explicit-broadcast escape hatch these would
-    # all fail under ``TORCH_RBLN_DISABLE_FALLBACK=compile_error``. Pinning
-    # the exact softmax_backward shapes here so a future "let's just use raw
-    # implicit broadcast everywhere" refactor trips the test instead of an
-    # 8-hour debug session.
+    # Unaligned outputs retain CPU fallback without host pre-broadcasting.
     _LAST_DIM_ONE_PATTERNS: ClassVar[list[tuple[tuple[int, ...], tuple[int, ...], str]]] = [
         ((3, 4), (3, 1), "softmax_backward shape0_dim_1"),
         ((2, 3, 4), (2, 3, 1), "softmax_backward shape2_dim_2"),
-        ((4, 8, 16), (4, 8, 1), "last-dim aligned-side"),
+        ((4, 8, 16), (4, 8, 1), "last-dim 16, unaligned"),
         ((1, 32, 4), (1, 32, 1), "head-shaped, last-dim small"),
     ]
 
     @parametrize("op_callable", [torch.add, torch.sub, torch.mul, torch.div])
     @parametrize("lhs_shape,rhs_shape,label", _LAST_DIM_ONE_PATTERNS)
     def test_last_dim_size_one_broadcast(self, op_callable, lhs_shape, rhs_shape, label):  # noqa: ARG002
-        """Direct regression for the rebel ``UNEXPECTED_GRAPH`` failure mode."""
+        """Preserve results for unaligned last-dim-size-one broadcasts."""
         atol, rtol = (0.05, 0.05) if op_callable is torch.div else (ATOL, RTOL)
         self._check(op_callable, lhs_shape, rhs_shape, atol=atol, rtol=rtol)
 

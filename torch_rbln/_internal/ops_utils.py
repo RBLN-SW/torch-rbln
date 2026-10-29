@@ -331,18 +331,10 @@ def _has_zero_dim_broadcast(tensor_args, out_shape):
 
 
 def broadcast_args_general(tensor_args, args):
-    """Validate broadcast compatibility; pre-broadcast only a 0-dim operand.
+    """Validate broadcasting and preserve input shapes and storage.
 
-    The backend lowers implicit broadcasts inside the compiled program,
-    including an operand whose last dim is 1 against a 64-aligned last dim.
-    Pre-broadcasting on the host materializes stride-0 expand views through
-    D2H + host broadcast + H2D (~600 ms / prefill step on LLaMA-1B for
-    RMSNorm's ``(B,S,H) * (H,)``), so the default is validate-only.
-
-    The one pattern still materialized is the 0-dim operand documented in
-    ``_has_zero_dim_broadcast``. The warm cache keys on the raw shapes and
-    binds raw pointers on a hit, which is what a program compiled for the raw
-    shapes expects.
+    Calls with a 0-dim tensor still materialize the broadcast inputs to avoid
+    the compiler failure documented in ``_has_zero_dim_broadcast``.
     """
     if not _needs_broadcast(tensor_args):
         return args

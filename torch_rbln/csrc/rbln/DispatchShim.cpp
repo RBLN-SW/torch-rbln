@@ -733,11 +733,7 @@ ScalarValue ival_to_scalar(const c10::IValue& iv) {
 // TensorProfile shapes are always the RAW input shapes. Two distinct calls
 // that broadcast to the same result shape (e.g. ``(4,8,16) + ()`` and
 // ``(4,8,16) + (4,8,1)``) MUST produce different cache keys, otherwise a
-// runtime compiled for one would be invoked on the other's inputs (a real
-// bug observed 2026-04-30: shape12 runtime was being hit by shape15).
-// The runtime is compiled for the raw shapes as well, so a hit binds the
-// raw buffers; install/lookup consistency is guaranteed by raw-shape keys
-// alone.
+// runtime compiled for one would be invoked on the other's inputs.
 bool build_cache_key(
     torch::jit::Stack* stack,
     const SchemaCache& cache,
@@ -880,15 +876,8 @@ bool try_warmcache_hit(
       out_tensor = t;
       continue;
     }
-    // The cache key only includes (dtype, shape) per TensorProfile, so a
-    // non-contiguous view shares its key with a contiguous tensor of the
-    // same shape — but the cached runtime was compiled assuming contig
-    // layout. Driving it with the view's data_ptr() makes the runtime
-    // read along the view's strides as if they were contiguous, producing
-    // wrong values (observed 2026-05-06: test_compare_cpu_add fp16, 97%
-    // mismatch where one input is a select-stride view of a larger base).
-    // Fall through to pybind so the Python wrapper materializes via
-    // .contiguous() (or the view-aware path) before re-entering compile.
+    // Direct binding requires contiguous inputs. Layout is part of the key,
+    // but a non-contiguous input still needs Python's view handling.
     if (!t.is_contiguous()) {
       return false;
     }
