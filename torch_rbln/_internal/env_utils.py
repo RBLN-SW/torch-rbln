@@ -53,6 +53,11 @@ def is_rbln_deploy() -> bool:
     return os.getenv("TORCH_RBLN_DEPLOY") == "ON"
 
 
+def is_nan_inf_check_enabled() -> bool:
+    """Whether host-side NaN/Inf scanning is explicitly requested."""
+    return os.getenv("TORCH_RBLN_CHECK_NAN_INF") == "ON"
+
+
 def use_device_group_num_devices() -> bool:
     """Check if eager mode ops should use the device group's num_devices instead of
     num_devices=1.

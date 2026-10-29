@@ -307,7 +307,8 @@ every test unless noted otherwise.
 | `reset_caching_allocator`        | function | **Yes** | Drains in-flight device work then releases the RBLN caching-allocator blocks in teardown; fails loud and skips the flush if the drain faults |
 | `restore_current_device`         | function | **Yes** | Restores the selected RBLN device and lazy-init flag after each test so a `set_device()` can't leak into later tests                         |
 | `restore_current_stream`         | function | **Yes** | Restores every device's current stream after each test so a `set_stream()` can't leak into later tests                                       |
-| `enable_deploy_mode`             | function | No      | Sets `TORCH_RBLN_DEPLOY=ON`. Apply with `@pytest.mark.usefixtures("enable_deploy_mode")`                                                     |
+| `enable_nan_inf_checks`          | function | Yes     | Sets `TORCH_RBLN_CHECK_NAN_INF=ON` to retain compatibility tests' NaN/Inf CPU fallback; restores the environment after each test             |
+| `enable_deploy_mode`             | function | No      | Sets `TORCH_RBLN_DEPLOY=ON`, overriding the NaN/Inf opt-in. Apply with `@pytest.mark.usefixtures("enable_deploy_mode")`                      |
 | `enable_eager_malloc`            | function | No      | Sets `TORCH_RBLN_EAGER_MALLOC=1`. Apply with `@pytest.mark.usefixtures("enable_eager_malloc")`                                               |
 
 ---

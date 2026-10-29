@@ -390,15 +390,20 @@ bool needs_last_dim_one_broadcast(
 }
 
 // ---------------------------------------------------------------------------
-// Deploy / nan_inf-disable gates
+// NaN/Inf scan gates
 // ---------------------------------------------------------------------------
 //
 // Contract: read live from the environment on every call (NOT process-cached),
-// so both flags are runtime-dynamic. The per-call read is negligible against
+// so the flags are runtime-dynamic. The per-call read is negligible against
 // op-dispatch cost. Reading live also keeps per-test env toggles from latching
 // a value into a long-lived worker process (see docs/CONFIGURATION.md).
 bool is_deploy_mode() {
   const char* env = std::getenv("TORCH_RBLN_DEPLOY");
+  return env != nullptr && std::strcmp(env, "ON") == 0;
+}
+
+bool is_nan_inf_check_enabled() {
+  const char* env = std::getenv("TORCH_RBLN_CHECK_NAN_INF");
   return env != nullptr && std::strcmp(env, "ON") == 0;
 }
 
@@ -557,7 +562,7 @@ inline std::optional<ScalarValue> wrapped_scalar_value(const at::Tensor& t) {
 //   2. dtype outside the dispatch catalog on any input tensor
 //   3. all input tensors are scalar (ndim == 0)
 //   4. any input tensor is_contiguous() with storage_offset != 0
-//   5. NaN/Inf in any input tensor  (non-deploy mode only; mirrors the
+//   5. NaN/Inf in any input tensor  (opt-in, non-deploy mode only; mirrors the
 //      ``not is_rbln_deploy() and has_invalid_tensor(to_cpu(args))`` branch
 //      that AS-IS ran on every Python wrapper entry — the warm-cache hot
 //      path otherwise bypasses Python entirely, losing the safety net).
@@ -590,7 +595,7 @@ int quick_fallback_check(
     const SchemaCache& cache,
     const std::vector<size_t>& skip_dtype_args) {
   auto args = torch::jit::last(stack, cache.num_args);
-  const bool nan_inf_scan_enabled =
+  const bool nan_inf_scan_enabled = is_nan_inf_check_enabled() &&
       !is_deploy_mode() && !is_fallback_case_disabled("nan_inf");
   bool has_input_tensor = false;
   bool all_input_scalar = true;
