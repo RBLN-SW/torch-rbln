@@ -10,7 +10,7 @@ requires-python = ">=3.10,<3.15"
 dependencies = ["torch==2.13.0+cpu"]
 
 [project.optional-dependencies]
-runtime = ["rebel-compiler~=0.12.1.dev261"]
+runtime = ["rebel-compiler~=0.12.1.dev364"]
 
 [project.entry-points]
 "torch.backends" = { autoload = "torch_rbln:torch_backends_entry_point" }
@@ -95,8 +95,8 @@ path = "hatch_build.py"
 [tool.uv]
 # `uv build` does not read the lockfile, so `build-constraint-dependencies` pins the build environment.
 # It must match `constraint-dependencies`, or the extension compiles against one build and loads another.
-build-constraint-dependencies = ["rebel-compiler==0.12.1.dev261+g56df7b7a.prod"]
-constraint-dependencies = ["rebel-compiler==0.12.1.dev261+g56df7b7a.prod"]
+build-constraint-dependencies = ["rebel-compiler==0.12.1.dev364+gcb7d8e1c.prod"]
+constraint-dependencies = ["rebel-compiler==0.12.1.dev364+gcb7d8e1c.prod"]
 # `rebel-compiler` publishes wheels for Linux only.
 environments = ["sys_platform == 'linux'"]
 # Without `unsafe-first-match`, `uv` takes `rebel-compiler` only from the first
