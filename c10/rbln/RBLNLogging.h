@@ -108,16 +108,19 @@ class C10_RBLN_API RBLNScopeGuard {
 // Where a CPU fallback ran. kBoxed is cpu_fallback_rbln, the boxed CPU
 // fallback and the only path that consults CPU fast-path handlers. kPython is
 // the eager Python path, which runs the op through PyTorch's own CPU kernels.
-enum class CpuFallbackPath : uint8_t { kBoxed, kPython };
+// kStridedCopy is submit_or_fallback, which redoes a batched strided copy the
+// device rejected with the kernel's own CPU version of the op.
+enum class CpuFallbackPath : uint8_t { kBoxed, kPython, kStridedCopy };
 
 /**
  * @brief Marks one CPU fallback: an operation running on CPU instead of RBLN.
  *
  * Every torch-rbln op-level CPU fallback runs inside one of these:
  * cpu_fallback_rbln (which the C++ dispatch shim, the boxed fallback and
- * advanced indexing all call), and the eager Python path through the
- * `_CpuFallbackScope` context manager. Construction counts the fallback per
- * op (cpu_fallback_counts, read by torch.rbln.explain()) and, when
+ * advanced indexing all call), the eager Python path through the
+ * `_CpuFallbackScope` context manager, and the CPU retry of a batched strided
+ * copy the device rejected (submit_or_fallback). Construction counts the
+ * fallback per op (cpu_fallback_counts, read by torch.rbln.explain()) and, when
  * `TORCH_RBLN_LOG_LEVEL` is `INFO` or lower, logs it with a UserWarning that
  * carries the caller's location. Destruction adds the scope's wall time to
  * cpu_fallback_ns() when it is the outermost scope on the thread: a fallback
