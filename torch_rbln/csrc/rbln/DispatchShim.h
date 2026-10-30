@@ -4,6 +4,7 @@
 #include <torch/csrc/utils/pybind.h>
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -23,8 +24,8 @@ namespace torch_rbln::shim {
 // and rebox the return onto the stack.
 //
 // `skip_dtype_args` lists positional argument indices whose dtype should not be
-// checked against float16. Used for ops with typed non-fp16 inputs (e.g.
-// `aten::where.self_out`'s cond at index 0 is bool). These args are still
+// checked against the dispatch policy. Used for ops with typed non-float inputs
+// (e.g. `aten::where.self_out`'s cond at index 0 is bool). These args are still
 // skipped from the all-scalar check too.
 //
 // Called from generated `register_ops.py` at module-init time in place of the
@@ -43,32 +44,33 @@ void register_cpp_shim(
 //   n_miss       - cold/miss path (Python compile via py_fn)
 //   ns_warm_hit  - cumulative ns inside warm-cache hit path (~all in rebel run)
 //   ns_miss      - cumulative ns inside miss path (Python compile + first run)
-//   ns_fallback  - cumulative ns inside cpu_fallback_rbln (the COST of
-//                  fallbacks, so the report can separate many-cheap from
-//                  few-expensive)
-std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>
+// The wall time of CPU fallbacks is not here: every fallback path adds it to
+// c10::rbln::cpu_fallback_ns().
+std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>
 diag_dump_dispatch_paths();
 void diag_reset_dispatch_paths();
-uint64_t diag_dump_align_fastpath_count();
 
-// DIAG/PROFILER: per-op CPU-fallback attribution (op_name -> fallback count),
-// non-zero entries only. Recorded on the already-slow fallback branch only (one
-// relaxed atomic via a pointer cached on the op's ShimEntry; warm/fast path
-// untouched), read lazily under registry_mutex. Lets torch.rbln.profile() turn
-// the aggregate cpu_fallback count into "which ops fell back".
-std::vector<std::pair<std::string, uint64_t>> diag_dump_fallback_by_op();
-void diag_reset_fallback_by_op();
+// Name to record a Python-path CPU fallback under. Inside a shim op whose
+// Python wrapper reports `op_name` (the codegen root name, e.g. "aten::add"),
+// returns that op's schema name ("aten::add.out"): the key its C++ fallbacks
+// and captured call sites (with_stack) use, so explain() joins them. Any other
+// name, or a call outside a shim op, is returned unchanged.
+std::string python_fallback_op_name(const std::string& op_name);
+
+// Schema name of the shim op running Python on this thread, if any.
+std::optional<std::string> running_python_op();
 
 // DIAG/PROFILER: per-op warm-cache MISS (recompile) attribution (op_name ->
-// count), non-zero only. Same low-overhead scheme as the fallback counter
-// (one relaxed atomic on the already-slow miss branch). Lets the profiler turn
+// count), non-zero only. One relaxed atomic on the already-slow miss branch,
+// through a pointer cached on the op's ShimEntry. Lets the profiler turn
 // the aggregate recompile_miss count into "which op-shapes keep recompiling".
 std::vector<std::pair<std::string, uint64_t>> diag_dump_recompile_by_op();
 void diag_reset_recompile_by_op();
 
-// DIAG/PROFILER: cpu_fallback reason histogram, counts for reason codes 1..3:
-// [dtype-not-fp16, nan/inf input, all-scalar]. Recorded on the fallback branch
-// only (reason already computed by quick_fallback_check) -> ON==OFF preserved.
+// DIAG/PROFILER: cpu_fallback reason histogram, counts for reason codes 1..4:
+// [dtype-not-dispatch, nan/inf input, all-scalar, out-dtype]. Recorded on the
+// fallback branch only (reason already computed by quick_fallback_check) ->
+// ON==OFF preserved.
 std::vector<uint64_t> diag_dump_fallback_reasons();
 void diag_reset_fallback_reasons();
 
@@ -100,10 +102,14 @@ void diag_reset_warm_segments();
 // ``native_handle()`` as the RblnSyncRuntime the hit path drives, and keeps a
 // reference to the object so that borrowed handle stays valid.
 // `out_profiles` is a list of (shape, dtype_str, is_rbln) per output tensor.
+// `align_bypassed` marks an entry for an unaligned call that ran on the device
+// only because the alignment fallback was disabled
+// (CacheEntry::align_bypassed).
 bool install_warmcache_from_pending(
     pybind11::object dyn_runtime,
     const pybind11::object& runtime_handle,
     const std::vector<std::tuple<std::vector<int64_t>, std::string, bool>>&
-        out_profiles);
+        out_profiles,
+    bool align_bypassed);
 
 } // namespace torch_rbln::shim

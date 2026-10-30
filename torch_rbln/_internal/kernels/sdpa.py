@@ -9,7 +9,7 @@ import math
 import torch
 
 from torch_rbln._internal.compile_cache import compile_rbln_cached
-from torch_rbln._internal.log_utils import rbln_log_cpu_fallback
+from torch_rbln._internal.log_utils import rbln_log_info, rbln_record_cpu_fallback
 from torch_rbln._internal.ops_utils import is_cpu_fallback_cases, SupportedDtypes, to_cpu
 
 
@@ -380,8 +380,8 @@ def _sdpa_compute_attn_weights(
     Causal mask is created outside the compiled graph to avoid RBLN memory issues.
     """
     if is_cpu_fallback_cases((query, key)):
-        rbln_log_cpu_fallback("sdpa (attn_weights)")
-        return _sdpa_attn_weights_fallback(query, key, attn_mask, is_causal=is_causal, scale=scale)
+        with rbln_record_cpu_fallback("sdpa (attn_weights)"):
+            return _sdpa_attn_weights_fallback(query, key, attn_mask, is_causal=is_causal, scale=scale)
 
     query = query.contiguous()
     key = key.contiguous()
@@ -458,8 +458,8 @@ def _sdpa_compute_output(
 ) -> torch.Tensor:
     """Compute output using RBLN compiled graph."""
     if is_cpu_fallback_cases((attn_weights, value)):
-        rbln_log_cpu_fallback("sdpa (output)")
-        return _sdpa_output_fallback(attn_weights, value, dropout_p)
+        with rbln_record_cpu_fallback("sdpa (output)"):
+            return _sdpa_output_fallback(attn_weights, value, dropout_p)
 
     attn_weights = attn_weights.contiguous()
     value = value.contiguous()
@@ -568,8 +568,8 @@ def _sdpa_backward_compiled(
 
     args = (grad_output, query, key, value, attn_weights)
     if is_cpu_fallback_cases(args):
-        rbln_log_cpu_fallback("sdpa_backward")
-        return _sdpa_backward_fallback(grad_output, query, key, value, attn_weights, scale)
+        with rbln_record_cpu_fallback("sdpa_backward"):
+            return _sdpa_backward_fallback(grad_output, query, key, value, attn_weights, scale)
 
     grad_output = grad_output.contiguous()
     query = query.contiguous()
@@ -729,10 +729,13 @@ def scaled_dot_product_fused_attention_overrideable_rbln(
     # Check RBLN capability
     can_use, reason = can_use_rbln_sdpa(query, key, value, attn_bias)
     if not can_use:
-        rbln_log_cpu_fallback(f"sdpa_overrideable ({reason})")
-        output = _sdpa_cpu_fallback(
-            query, key, value, attn_bias, dropout_p, is_causal=is_causal, scale=scale, enable_gqa=False
-        )
+        # The reason goes to the log, not the counted name: it can carry shapes, which
+        # would make one explain() row per shape.
+        rbln_log_info(f"sdpa_overrideable runs on CPU: {reason}")
+        with rbln_record_cpu_fallback("sdpa_overrideable"):
+            output = _sdpa_cpu_fallback(
+                query, key, value, attn_bias, dropout_p, is_causal=is_causal, scale=scale, enable_gqa=False
+            )
         attn_weights = None
     else:
         if not query.is_contiguous():
@@ -830,14 +833,13 @@ def scaled_dot_product_fused_attention_overrideable_backward_rbln(
     use_cpu_fallback = attn_weights is None or _any_tensor_subclass(grad_out, query, key, value, out)
 
     if use_cpu_fallback:
-        if attn_weights is None:
-            rbln_log_cpu_fallback("sdpa_backward (cache miss)")
-        else:
-            rbln_log_cpu_fallback("sdpa_backward (tensor subclass)")
-        attn_weights = _sdpa_attn_weights_fallback(query, key, attn_bias, is_causal=is_causal, scale=computed_scale)
-        grad_query, grad_key, grad_value = _sdpa_backward_fallback(
-            grad_out, query, key, value, attn_weights, computed_scale
-        )
+        reason = "cache miss" if attn_weights is None else "tensor subclass"
+        rbln_log_info(f"sdpa_backward runs on CPU: {reason}")
+        with rbln_record_cpu_fallback("sdpa_backward"):
+            attn_weights = _sdpa_attn_weights_fallback(query, key, attn_bias, is_causal=is_causal, scale=computed_scale)
+            grad_query, grad_key, grad_value = _sdpa_backward_fallback(
+                grad_out, query, key, value, attn_weights, computed_scale
+            )
     else:
         grad_query, grad_key, grad_value = _sdpa_backward_compiled(
             grad_out, query, key, value, attn_weights, computed_scale

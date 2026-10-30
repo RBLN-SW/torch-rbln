@@ -77,7 +77,6 @@ uv run \
     -GNinja \
     -B build \
     -S . \
-    -DBUILD_SHARED_LIBS=ON \
     -DCMAKE_BUILD_TYPE="${build_type}" \
     -DCMAKE_INSTALL_PREFIX=torch_rbln \
     -DBUILD_TESTING=ON

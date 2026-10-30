@@ -1,3 +1,4 @@
+import functools
 import logging
 import os
 import sys
@@ -6,11 +7,12 @@ import warnings
 
 __all__ = [
     "rbln_is_debug_enabled",
-    "rbln_log_cpu_fallback",
     "rbln_log_debug",
     "rbln_log_error",
     "rbln_log_info",
     "rbln_log_warn",
+    "rbln_log_warn_once",
+    "rbln_record_cpu_fallback",
 ]
 
 
@@ -93,6 +95,16 @@ def rbln_log_warn(msg: str):
     _logger.warning(msg)
 
 
+@functools.cache
+def rbln_log_warn_once(msg: str):
+    """Logs a message at the WARNING level, once per distinct message.
+
+    Args:
+        msg (str): The warning message to log.
+    """
+    _logger.warning(msg)
+
+
 def rbln_log_error(msg: str):
     """Logs a message at the ERROR level.
 
@@ -102,16 +114,16 @@ def rbln_log_error(msg: str):
     _logger.error(msg)
 
 
-def rbln_log_cpu_fallback(op_name: str):
-    """Logs a message indicating that a specified operation ran on CPU instead of RBLN.
+def rbln_record_cpu_fallback(op_name: str):
+    """Context manager around one CPU fallback: ``with rbln_record_cpu_fallback(name):``
+    then run the op on CPU inside the block.
 
-    This function logs an info-level message that includes the name of the operation
-    that ran on CPU. It also generates a UserWarning that includes the file location
-    where the warning is issued. The warning is formatted to indicate that a fallback to
-    CPU execution is being used for the specified operation. The message is logged when
-    `TORCH_RBLN_LOG_LEVEL` is set to `INFO` or lower.
+    Entering counts the fallback per op, which ``torch.rbln.explain()`` reports, and
+    when `TORCH_RBLN_LOG_LEVEL` is `INFO` or lower logs it with a UserWarning that shows
+    the caller's location. Leaving adds the block's wall time to the same total as the
+    C++ fallback paths (c10::rbln::CpuFallbackScope), once for nested fallbacks.
 
-    Example output:
+    Example output (at INFO):
         [2026-01-01 00:00:00.000][I] `aten::mul` op ran on CPU instead of RBLN
         /llama/modeling_llama.py:73: UserWarning: TRACE
           result, result_shape = mul_rbln(*args, **kwargs)
@@ -121,4 +133,4 @@ def rbln_log_cpu_fallback(op_name: str):
     """
     import torch_rbln._C  # noqa: PLC0415
 
-    torch_rbln._C._log_cpu_fallback(op_name)
+    return torch_rbln._C._CpuFallbackScope(op_name)

@@ -16,8 +16,8 @@ uv pip install -e . --no-build-isolation
 
 Required after a change under `aten/`, `c10/`, `torch_rbln/csrc/`, `cmake/`,
 `CMakeLists.txt`, `hatch_build.py`, `native_functions.yaml`, or `tools/codegen/`
-— the build runs codegen before compiling, so a generator change takes effect
-only here. Without it every test result below is about the previous build.
+— the build runs codegen, so a generator change takes effect only here. Without
+it every test result below is about the previous build.
 
 Confirm it took rather than assuming: grep the built artifact for a string only
 your change introduces. Two error shapes say which side is stale — a link error
@@ -123,8 +123,7 @@ General:
   `uv.lock` is not touched by a change that is about something else.
 - **No edits to generated files** — `torch_rbln/_internal/register_ops.py`,
   `_abi_snapshot.py`, `torch_rbln/lib/`, `torch_rbln/include/`,
-  `torch_rbln/_C/__init__.pyi`. `git status` will not warn you; they are
-  gitignored.
+  `torch_rbln/share/`. `git status` will not warn you; they are gitignored.
 - **No new CPU fallback case** added to make something pass, and no
   `TORCH_RBLN_DISABLE_FALLBACK` category changed to move a test outcome.
 - **No workaround for a `rebel-compiler` or `librbln` defect**. If there is one,

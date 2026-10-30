@@ -315,7 +315,6 @@ void index_out_rbln(const c10::OperatorHandle& op, torch::jit::Stack* stack) {
   }
 
   // Not white-listed -> identical to the previous (pre-kernel) behavior.
-  c10::rbln::log_cpu_fallback(op.schema().name());
   at::native::rbln::cpu_fallback_rbln(op, stack);
 }
 

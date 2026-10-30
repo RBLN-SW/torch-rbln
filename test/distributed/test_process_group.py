@@ -18,7 +18,7 @@ from test.utils import configure_master_port_for_rccl_tests, spawn_target_with_c
 KiB = 1024
 MiB = 1024 * 1024
 
-TEST_DTYPES = [*SUPPORTED_DTYPES, torch.float32, torch.float64, torch.int8, torch.int16, torch.int32, torch.int64]
+TEST_DTYPES = [*SUPPORTED_DTYPES, torch.float64, torch.int8, torch.int16, torch.int32, torch.int64]
 
 
 def setup_environment(rank: int, world_size: int) -> None:
@@ -435,6 +435,101 @@ def run_barrier_test(rank: int, world_size: int, backend: str) -> None:
         dist.destroy_process_group()
 
 
+def run_empty_collectives_test(rank: int, world_size: int, backend: str) -> None:
+    setup_environment(rank, world_size)
+    dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+    device = torch.device("rbln", rank)
+    try:
+        for dtype in (torch.float16, torch.bfloat16, torch.float32):
+            for shape in ((0,), (2, 0)):
+                output = torch.empty(shape, dtype=dtype, device=device)
+                inputs = [torch.empty_like(output) for _ in range(world_size)]
+                work = dist.all_reduce(output, async_op=True)
+                work.wait()
+                torch.testing.assert_close(work.get_future().wait()[0].cpu(), torch.empty(shape, dtype=dtype))
+                work = dist.reduce_scatter(output, inputs, async_op=True)
+                work.wait()
+                torch.testing.assert_close(work.get_future().wait()[0].cpu(), torch.empty(shape, dtype=dtype))
+                for stacked in (False, True):
+                    input_tensor = torch.stack(inputs) if stacked else torch.cat(inputs)
+                    work = dist.reduce_scatter_tensor(output, input_tensor, async_op=True)
+                    work.wait()
+                    torch.testing.assert_close(output.cpu(), torch.empty(shape, dtype=dtype))
+    finally:
+        dist.destroy_process_group()
+
+
+def run_reduce_scatter_tensor_layout_test(rank: int, world_size: int, backend: str) -> None:
+    setup_environment(rank, world_size)
+    dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+    device = torch.device("rbln", rank)
+    try:
+        for dtype in (torch.float16, torch.bfloat16, torch.float32):
+            for shape in ((1,), (3, 5), (4, 64), (4, 65)):
+                chunks = [
+                    (torch.arange(torch.Size(shape).numel()).reshape(shape) % 11 + (rank + 1) * 10 + j + 1).to(dtype)
+                    for j in range(world_size)
+                ]
+                expected = (
+                    (torch.arange(torch.Size(shape).numel()).reshape(shape) % 11) * world_size
+                    + _get_expected_reduce_scatter_value(rank, world_size, dist.ReduceOp.SUM)
+                ).to(dtype)
+                for stacked in (False, True):
+                    input_cpu = torch.stack(chunks) if stacked else torch.cat(chunks)
+                    input_tensor = input_cpu.to(device)
+                    output = torch.empty(shape, dtype=dtype, device=device)
+                    work = dist.reduce_scatter_tensor(output, input_tensor, async_op=True)
+                    work.wait()
+                    torch.testing.assert_close(output.cpu(), expected)
+                    torch.testing.assert_close(input_tensor.cpu(), input_cpu)
+    finally:
+        dist.destroy_process_group()
+
+
+def run_unaligned_reduce_test(rank: int, world_size: int, backend: str, collective: str) -> None:
+    setup_environment(rank, world_size)
+    dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+    device = torch.device("rbln", rank)
+    try:
+        sizes = (256, 257, 1048577) if collective == "all_reduce" else (128, 129, 524289)
+        for size in sizes:
+            margins = ((1, 0), (7, 0), (64, 0)) if collective == "all_reduce" else ((1, 0), (0, 1), (7, 63), (64, 64))
+            for input_margin, output_margin in margins:
+                chunks = 1 if collective == "all_reduce" else world_size
+                values = (torch.arange(size, dtype=torch.int32) % 11).to(torch.float16)
+                data = torch.cat([values + (rank + 1) * 10 + j + 1 for j in range(chunks)])
+                guard = torch.full((input_margin,), -7.0, dtype=torch.float16)
+                input_cpu = torch.cat((guard, data, guard))
+                backing = input_cpu.to(device)
+                input_tensor = backing[input_margin : input_margin + size * chunks]
+                if collective == "all_reduce":
+                    expected_value = sum((r + 1) * 10 + 1 for r in range(world_size))
+                    work = dist.all_reduce(input_tensor, async_op=True)
+                    output = input_tensor
+                else:
+                    expected_value = _get_expected_reduce_scatter_value(rank, world_size, dist.ReduceOp.SUM)
+                    output_cpu = torch.full((size + 2 * output_margin,), -9.0, dtype=torch.float16)
+                    output_backing = output_cpu.to(device)
+                    output = output_backing[output_margin : output_margin + size]
+                    if collective == "reduce_scatter":
+                        work = dist.reduce_scatter(output, list(input_tensor.chunk(world_size)), async_op=True)
+                    else:
+                        work = dist.reduce_scatter_tensor(output, input_tensor, async_op=True)
+                work.wait()
+                torch.testing.assert_close(output.cpu(), values * world_size + expected_value)
+                actual_backing = backing.cpu()
+                if input_margin:
+                    torch.testing.assert_close(actual_backing[:input_margin], guard)
+                    torch.testing.assert_close(actual_backing[-input_margin:], guard)
+                if collective != "all_reduce":
+                    torch.testing.assert_close(actual_backing, input_cpu)
+                    torch.testing.assert_close(output_backing.cpu()[:output_margin], output_cpu[:output_margin])
+                    if output_margin:
+                        torch.testing.assert_close(output_backing.cpu()[-output_margin:], output_cpu[-output_margin:])
+    finally:
+        dist.destroy_process_group()
+
+
 def run_allreduce_size_test(
     rank: int, world_size: int, backend: str, size_bytes: int, dtype: torch.dtype = torch.float16
 ) -> None:
@@ -625,6 +720,16 @@ class TestAllReduceRBLN(TestProcessGroupRBLNBase):
             c10d_async_env, self.world_size, run_allreduce_test, (self.world_size, self.backend, dist.ReduceOp.SUM)
         )
 
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_empty_collectives(self, c10d_async_env):
+        self.run_c10d_test(c10d_async_env, self.world_size, run_empty_collectives_test, (self.world_size, self.backend))
+
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_allreduce_unaligned_storage_offset(self, c10d_async_env):
+        self.run_c10d_test(
+            c10d_async_env, self.world_size, run_unaligned_reduce_test, (self.world_size, self.backend, "all_reduce")
+        )
+
     @parametrize("op", [dist.ReduceOp.PRODUCT, dist.ReduceOp.MIN, dist.ReduceOp.MAX, dist.ReduceOp.AVG])
     @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
     def test_allreduce_non_sum(self, op, c10d_async_env):
@@ -752,6 +857,19 @@ class TestReduceScatterRBLN(TestProcessGroupRBLNBase):
     """Test cases for reduce_scatter operations."""
 
     # NOTE: RCCL supports only the SUM operation.
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_reduce_scatter_tensor_stacked_input(self, c10d_async_env):
+        self.run_c10d_test(
+            c10d_async_env, self.world_size, run_reduce_scatter_tensor_layout_test, (self.world_size, self.backend)
+        )
+
+    @parametrize("collective", ["reduce_scatter", "reduce_scatter_tensor"])
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_reduce_scatter_unaligned_storage_offset(self, collective, c10d_async_env):
+        self.run_c10d_test(
+            c10d_async_env, self.world_size, run_unaligned_reduce_test, (self.world_size, self.backend, collective)
+        )
+
     @parametrize(
         "size",
         [1, 63, 64, 256, 512, (512 * KiB), MiB, (2 * MiB), (4 * MiB), (8 * MiB), (16 * MiB), (32 * MiB), (64 * MiB)],

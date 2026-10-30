@@ -10,6 +10,7 @@
 
 #include <c10/rbln/RBLNFunctions.h>
 #include <c10/rbln/RBLNGenerator.h>
+#include <c10/rbln/RBLNLogging.h>
 #include <c10/util/ScopeExit.h>
 #include <c10/util/SmallVector.h>
 
@@ -309,6 +310,10 @@ void cpu_fallback_rbln(
           c10::toBackendComponent(cpu_dispatch_key),
       "Expected CPU backend DispatchKey but got ",
       c10::toString(cpu_dispatch_key));
+  // Every caller of this boxed CPU fallback is a fallback, so it is counted,
+  // logged and timed here, once, for all of them.
+  const c10::rbln::CpuFallbackScope fallback(
+      c10::toString(op.operator_name()), c10::rbln::CpuFallbackPath::kBoxed);
   auto& schema_args = op.schema().arguments();
   const auto num_arguments = schema_args.size();
   auto arguments = torch::jit::last(stack, num_arguments);

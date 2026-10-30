@@ -17,16 +17,17 @@ that still fails.
 **Narrowing has a floor**. Shrink past it and the op stops reaching the device,
 the result matches CPU exactly, and that reads as "the bug went away". Two gates
 do this, and they do not apply everywhere. Dtype gates every route:
-`SUPPORTED_DTYPES` is fp16 and bf16 only. Alignment gates the eager Python
+`SUPPORTED_DTYPES` is fp16, bf16 and fp32 only. Alignment gates the eager Python
 route: `compile_and_run_view_aware` (`ops_utils.py`) sends a single-tensor op to
-CPU fallback when any tensor argument's last dimension is not a multiple of 64.
-That condition does not apply to list ops such as `cat` and `stack`, to C++
-kernels, or to graph mode; where those pad and where they run is decided by each
-implementation and by the pinned compiler — check it there, do not assume it. So
-the shape that reproduces an alignment bug is the unaligned one, and "making the
-input safe" deletes the bug. Establish which route the reported op takes for its
-dtype and shapes, then check after each narrowing step that it still ran where
-the report says it ran.
+CPU fallback when any tensor argument's last dimension is not a multiple of 64,
+unless `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK=align` is set. That condition
+does not apply to list ops such as `cat` and `stack`, to C++ kernels, or to
+graph mode; where those pad and where they run is decided by each implementation
+and by the pinned compiler — check it there, do not assume it. So the shape that
+reproduces an alignment bug is the unaligned one, and "making the input safe"
+deletes the bug. Establish which route the reported op takes for its dtype and
+shapes, then check after each narrowing step that it still ran where the report
+says it ran.
 
 **If you cannot reproduce it, say so first — then keep going**. No device on
 this host, a log from another machine, a model you cannot pull: narrow the cause
@@ -46,10 +47,9 @@ returned values:
 
 - `TORCH_RBLN_LOG_LEVEL=INFO` prints
   `` `aten::<op>` op ran on CPU instead of RBLN `` for every fallback.
-  `_C._dispatch_fallback_by_op()` gives the same fact as a count, but only for
-  the fallbacks the C++ shim's precheck takes — the eager Python route logs and
-  is not counted. `_C._warmcache_size()` covers both: it grows only when the
-  device path compiled. Use whichever a script or a test can assert; the
+  `_C._dispatch_fallback_by_op()` gives the same fact as a per-op count, for
+  every fallback path. `_C._warmcache_size()` grows only when the device path
+  compiled. Use whichever a script or a test can assert; the
   returned values say nothing.
 - `torch.rbln.explain()` attributes hidden overhead — dispatch, CPU fallback,
   host copies — and `with_stack=True` gives the call site. `docs/EXPLAIN.md` is

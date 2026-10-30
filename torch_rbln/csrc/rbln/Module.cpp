@@ -17,9 +17,19 @@
 #include <torch_rbln/csrc/rbln/WarmCache.h>
 #include <torch_rbln/csrc/rbln/profiler/kineto/rbln_kineto_adapter.h>
 #include <exception>
+#include <optional>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace {
+
+// Holds a c10::rbln::CpuFallbackScope for the length of a Python `with` block.
+struct PyCpuFallbackScope {
+  explicit PyCpuFallbackScope(std::string name) : op_name(std::move(name)) {}
+  std::string op_name;
+  std::optional<c10::rbln::CpuFallbackScope> scope;
+};
 
 /**
  * @brief Add PyMethodDef array to a vector, removing null terminators
@@ -387,9 +397,27 @@ void register_internal_api(py::module_& module) {
 
   // Logging utilities
   module.def(
-      "_log_cpu_fallback",
-      &c10::rbln::log_cpu_fallback,
-      "Internal: log CPU fallback");
+      "_running_shim_op",
+      &torch_rbln::shim::running_python_op,
+      "Internal: schema name of the shim op whose Python wrapper is running on this thread, or None");
+  // Python-path CPU fallback, as a context manager around c10's
+  // CpuFallbackScope: `with _CpuFallbackScope(op_name): <run it on CPU>`.
+  py::class_<PyCpuFallbackScope>(module, "_CpuFallbackScope")
+      .def(py::init<std::string>(), py::arg("op_name"))
+      .def(
+          "__enter__",
+          [](PyCpuFallbackScope& self) {
+            self.scope.emplace(
+                torch_rbln::shim::python_fallback_op_name(self.op_name),
+                c10::rbln::CpuFallbackPath::kPython);
+          })
+      .def("__exit__", [](PyCpuFallbackScope& self, const py::args& /*exc*/) {
+        self.scope.reset();
+      });
+  module.def(
+      "_cpu_fallback_ns",
+      &c10::rbln::cpu_fallback_ns,
+      "DIAG/PROFILER: wall ns spent in CPU fallbacks, every fallback path");
 
   // C++ dispatch shim: install a boxed C++ handler on PrivateUse1 for the given
   // op, with pre-check + cpu_fallback_rbln on fail and Python callback on pass.
@@ -405,12 +433,16 @@ void register_internal_api(py::module_& module) {
       "DIAG: reset dispatch path counters");
   module.def(
       "_dispatch_fallback_by_op",
-      &torch_rbln::shim::diag_dump_fallback_by_op,
-      "DIAG/PROFILER: per-op CPU-fallback counts (list of (op_name, count), non-zero only)");
+      &c10::rbln::cpu_fallback_counts,
+      "DIAG/PROFILER: per-op CPU-fallback counts, every torch-rbln fallback path (list of (op_name, count), non-zero only)");
   module.def(
       "_dispatch_fallback_by_op_reset",
-      &torch_rbln::shim::diag_reset_fallback_by_op,
+      &c10::rbln::reset_cpu_fallback_counts,
       "DIAG/PROFILER: reset per-op CPU-fallback counts");
+  module.def(
+      "_dispatch_fallback_boxed_ops",
+      &c10::rbln::boxed_cpu_fallback_ops,
+      "DIAG/PROFILER: ops among the per-op counts that went through the boxed CPU fallback, where fast-path handlers apply");
   module.def(
       "_dispatch_recompile_by_op",
       &torch_rbln::shim::diag_dump_recompile_by_op,
@@ -422,7 +454,7 @@ void register_internal_api(py::module_& module) {
   module.def(
       "_dispatch_fallback_reasons",
       &torch_rbln::shim::diag_dump_fallback_reasons,
-      "DIAG/PROFILER: cpu_fallback reason counts [dtype-not-fp16, nan/inf input, all-scalar]");
+      "DIAG/PROFILER: cpu_fallback reason counts [dtype-not-dispatch, nan/inf input, all-scalar, out-dtype]");
   module.def(
       "_dispatch_fallback_reasons_reset",
       &torch_rbln::shim::diag_reset_fallback_reasons,
@@ -439,10 +471,6 @@ void register_internal_api(py::module_& module) {
       "_explain_trace_by_op_reset",
       &torch_rbln::shim::diag_reset_trace_by_op,
       "DIAG/PROFILER (A) WHERE: reset captured call-sites");
-  module.def(
-      "_dispatch_shim_align_fastpath_count",
-      &torch_rbln::shim::diag_dump_align_fastpath_count,
-      "DIAG: count of align-penalty fast-path hits");
   module.def(
       "_dispatch_shim_warm_segments_dump",
       &torch_rbln::shim::diag_dump_warm_segments,
@@ -548,7 +576,8 @@ void register_internal_api(py::module_& module) {
       "set by the shim on the way into the miss path",
       pybind11::arg("dyn_runtime"),
       pybind11::arg("runtime_handle"),
-      pybind11::arg("out_profiles"));
+      pybind11::arg("out_profiles"),
+      pybind11::arg("align_bypassed") = false);
 
   module.def(
       "_warmcache_set_enabled",
@@ -590,7 +619,7 @@ void register_internal_api(py::module_& module) {
       "Internal: clear the miss-path reentrancy flag set by _warmcache_enter_building");
 
   // CPU fast-path registry introspection. Returns True iff a handler is
-  // registered for the given fully-qualified op name (e.g. "aten::rsqrt.out").
+  // registered for the given fully-qualified op name (e.g. "aten::sub.out").
   // Used by tests to verify the static-init registration fired without
   // needing a live OperatorHandle.
   module.def(
@@ -677,7 +706,20 @@ void register_supported_dtypes_api(py::module_& module) {
   module.def(
       "_dispatch_dtypes",
       [] { return supported_dtypes_to_tuple(c10::rbln::kDispatchDtypes); },
-      "Internal: eager-dispatch supported dtypes");
+      "Internal: eager-dispatch supported dtypes (the built-in catalog)");
+  module.def(
+      "_dispatch_extension_dtypes",
+      [] {
+        return supported_dtypes_to_tuple(c10::rbln::kDispatchExtensionDtypes);
+      },
+      "Internal: dtypes TORCH_RBLN_DISPATCH_DTYPES may admit");
+  module.def(
+      "_set_dispatch_extension",
+      [](const std::vector<c10::ScalarType>& dtypes) {
+        c10::rbln::set_dispatch_extension(dtypes);
+      },
+      py::arg("dtypes"),
+      "Internal: set the dtypes admitted beyond the eager-dispatch catalog (see TORCH_RBLN_DISPATCH_DTYPES)");
   module.def(
       "_sdpa_dtypes",
       [] { return supported_dtypes_to_tuple(c10::rbln::kSdpaDtypes); },

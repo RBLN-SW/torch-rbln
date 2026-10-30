@@ -1,34 +1,77 @@
-[project]
-name = "torch-rbln"
-dynamic = ["version"]
-description = "Rebellions Extension for PyTorch"
-authors = [{ name = "Rebellions Inc.", email = "client_support@rebellions.ai" }]
-readme = "README.md"
-license = "Apache-2.0"
-classifiers = ["License :: OSI Approved :: Apache Software License"]
-requires-python = ">=3.10,<3.15"
-dependencies = ["torch==2.13.0+cpu"]
-
-[project.optional-dependencies]
-runtime = ["rebel-compiler~=0.12.1.dev261"]
-
-[project.entry-points]
-"torch.backends" = { autoload = "torch_rbln:torch_backends_entry_point" }
-
 [build-system]
 requires = [
   "cmake>=4.4.4,<4.5.0",
-  # `hatchling` 1.32 emits Metadata-Version 2.5. Keep this cap until
-  # `rbln-internal` and `rbln-nightly` are confirmed to accept 2.5.
-  "hatchling>=1.31.0,<1.32.0",
-  "mypy>=1.13.0,<1.14.0",
+  "hatchling>=1.32.4,<1.33.0",
   "ninja>=1.13.2,<1.14.0",
+  "packaging>=26.3,<26.4",
   "pyyaml>=6.0.3,<6.1.0",
   "rebel-compiler",                 # `[tool.uv].build-constraint-dependencies` pins the version.
   "setuptools-scm>=10.3.4,<10.4.0",
   "torch==2.13.0+cpu",
 ]
 build-backend = "hatchling.build"
+
+[project]
+name = "torch-rbln"
+dynamic = ["version"]
+dependencies = ["torch==2.13.0+cpu"]
+requires-python = ">=3.10,<3.15"
+authors = [{ name = "Rebellions Inc.", email = "client_support@rebellions.ai" }]
+description = "Rebellions Extension for PyTorch"
+readme = "README.md"
+license = "Apache-2.0"
+classifiers = ["License :: OSI Approved :: Apache Software License"]
+
+[project.optional-dependencies]
+runtime = ["rebel-compiler~=0.12.1.dev364"]
+
+[project.entry-points."torch.backends"]
+torch_rbln = "torch_rbln:torch_backends_entry_point"
+
+[dependency-groups]
+# The `build` group lists the build requirements because
+# `uv pip install --no-build-isolation` does not install them.
+build = [
+  "cmake>=4.4.4,<4.5.0",
+  "editables>=0.6,<0.7",
+  "hatchling>=1.32.4,<1.33.0",
+  "ninja>=1.13.2,<1.14.0",
+  "packaging>=26.3,<26.4",
+  "pyyaml>=6.0.3,<6.1.0",
+  "rebel-compiler",                 # `[tool.uv].constraint-dependencies` pins the version.
+  "setuptools-scm>=10.3.4,<10.4.0",
+  "torch==2.13.0+cpu",
+]
+ci = [
+  "auditwheel>=6.8.2,<6.9.0",
+  "packaging>=26.3,<26.4",
+  "PyGithub>=2.10.0,<2.11.0",
+  "requests>=2.34.2,<2.35.0",
+  "tomli>=2.5.0,<2.6.0; python_version < '3.11'",
+  "tomlkit>=0.15.2,<0.16.0",
+  "twine>=7.0.0,<7.1.0",
+]
+lint = [
+  { include-group = "ci" },
+  "deptry>=0.25.1,<0.26.0",
+  "lintrunner==0.12.11",
+  "rumdl>=0.3.0,<0.4.0",
+  "taplo>=0.9.3,<0.10.0",
+  "yamllint>=1.38.0,<1.39.0",
+]
+test = [
+  "expecttest>=0.3.0,<0.4.0",
+  "pytest>=9.1.1,<9.2.0",
+  "pytest-xdist>=3.8.0,<3.9.0",
+  "pyyaml>=6.0.3,<6.1.0",
+  "transformers==4.49.0",
+]
+dev = [
+  { include-group = "build" },
+  { include-group = "ci" },
+  { include-group = "lint" },
+  { include-group = "test" },
+]
 
 [tool.hatch.version]
 # Version is derived from Git tags by `setuptools-scm`.
@@ -41,9 +84,6 @@ expression = "compute_version()"
 # Allow `file://` direct references for build-time dependency pinning
 # (e.g., `replace_depends.py` pins a local `rebel-compiler` wheel in `pyproject.toml`).
 allow-direct-references = true
-
-[tool.hatch.build.hooks.custom]
-path = "hatch_build.py"
 
 [tool.hatch.build.targets.sdist]
 include = [
@@ -94,11 +134,14 @@ exclude = ["torch_rbln/csrc/**"]
 only-include-required = false
 skip-excluded-dirs = true
 
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
+
 [tool.uv]
 # `uv build` does not read the lockfile, so `build-constraint-dependencies` pins the build environment.
 # It must match `constraint-dependencies`, or the extension compiles against one build and loads another.
-build-constraint-dependencies = ["rebel-compiler==0.12.1.dev261+g56df7b7a.prod"]
-constraint-dependencies = ["rebel-compiler==0.12.1.dev261+g56df7b7a.prod"]
+build-constraint-dependencies = ["rebel-compiler==0.12.1.dev364+gcb7d8e1c.prod"]
+constraint-dependencies = ["rebel-compiler==0.12.1.dev364+gcb7d8e1c.prod"]
 # `rebel-compiler` publishes wheels for Linux only.
 environments = ["sys_platform == 'linux'"]
 # Without `unsafe-first-match`, `uv` takes `rebel-compiler` only from the first
@@ -138,49 +181,6 @@ publish-url = "https://pypi.rebellions.in/"
 
 [tool.uv.sources]
 torch = { index = "pytorch-cpu" }
-
-[dependency-groups]
-# The `build` group lists the build requirements because
-# `uv pip install --no-build-isolation` does not install them.
-build = [
-  "cmake>=4.4.4,<4.5.0",
-  "editables>=0.6,<0.7",
-  "hatchling>=1.31.0,<1.32.0",
-  "mypy>=1.13.0,<1.14.0",
-  "ninja>=1.13.2,<1.14.0",
-  "pyyaml>=6.0.3,<6.1.0",
-  "rebel-compiler",                 # `[tool.uv].constraint-dependencies` pins the version.
-  "setuptools-scm>=10.3.4,<10.4.0",
-  "torch==2.13.0+cpu",
-]
-ci = [
-  "packaging>=26.3,<26.4",
-  "PyGithub>=2.10.0,<2.11.0",
-  "requests>=2.34.2,<2.35.0",
-  "tomli>=2.5.0,<2.6.0; python_version < '3.11'",
-  "tomlkit>=0.15.2,<0.16.0",
-]
-lint = [
-  { include-group = "ci" },
-  "deptry>=0.25.1,<0.26.0",
-  "lintrunner==0.12.11",
-  "rumdl>=0.3.0,<0.4.0",
-  "taplo>=0.9.3,<0.10.0",
-  "yamllint>=1.38.0,<1.39.0",
-]
-test = [
-  "expecttest>=0.3.0,<0.4.0",
-  "pytest>=9.1.1,<9.2.0",
-  "pytest-xdist>=3.8.0,<3.9.0",
-  "pyyaml>=6.0.3,<6.1.0",
-  "transformers==4.49.0",
-]
-dev = [
-  { include-group = "build" },
-  { include-group = "ci" },
-  { include-group = "lint" },
-  { include-group = "test" },
-]
 
 [tool.black]
 # `usort` reads its line length from this table.

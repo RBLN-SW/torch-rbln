@@ -39,9 +39,11 @@ def custom_softmax_out_rbln(self, dim: int, half_to_float: bool, *, out):  # noq
 
 
 def _is_integer_exponent(exponent) -> bool:
-    """Device can only handle integer exponent values (2, 2.0 OK; 2.5 fallback)."""
-    if isinstance(exponent, (int, float)):
-        return round(exponent) == exponent
+    """Device can only handle integer exponents (2, 2.0 OK; 2.5, inf, nan fall back)."""
+    if isinstance(exponent, int):
+        return True
+    if isinstance(exponent, float):
+        return exponent.is_integer()  # False for inf and nan, where round() would raise
     return False
 
 

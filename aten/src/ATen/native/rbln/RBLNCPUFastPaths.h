@@ -40,7 +40,7 @@ class CPUFastPathRegistry {
   static C10_RBLN_API CPUFastPathRegistry& instance();
 
   // Register at module-init. ``op_name`` is the schema-qualified operator
-  // name (e.g. ``"aten::rsqrt.out"``).
+  // name (e.g. ``"aten::sub.out"``).
   C10_RBLN_API void register_handler(
       const std::string& op_name,
       CPUFastPathHandler::Fn fn);

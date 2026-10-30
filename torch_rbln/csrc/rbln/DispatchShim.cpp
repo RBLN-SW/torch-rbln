@@ -6,7 +6,6 @@
 #include <ATen/native/rbln/RBLNCPUFallback.h>
 #include <ATen/ops/empty.h>
 #include <c10/rbln/RBLNFunctions.h>
-#include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNSupportedDtypes.h>
 #include <c10/util/ScopeExit.h>
@@ -24,8 +23,8 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace torch_rbln::shim {
@@ -43,14 +42,11 @@ std::atomic<uint64_t> g_diag_n_miss{0}; // Python compile (miss) path
 std::atomic<uint64_t> g_diag_ns_warm_hit{
     0}; // total ns inside warm-cache hit path
 std::atomic<uint64_t> g_diag_ns_miss{0}; // total ns inside miss path
-std::atomic<uint64_t> g_diag_ns_fallback{
-    0}; // total ns inside cpu_fallback_rbln (the COST, not just count)
 // cpu_fallback reason histogram. index = reason code from quick_fallback_check
-// (1=dtype-not-fp16, 2=nan/inf input, 3=all-scalar). Bumped on the fallback
-// branch only (the reason is already computed there) -> ON==OFF preserved.
-std::array<std::atomic<uint64_t>, 4> g_fallback_reason{};
-std::atomic<uint64_t> g_diag_n_align_fastpath{
-    0}; // align fast-path hits → cpu_fallback
+// (1=dtype-not-dispatch, 2=nan/inf input, 3=all-scalar, 4=out-dtype). Bumped on
+// the fallback branch only (the reason is already computed there) -> ON==OFF
+// preserved.
+std::array<std::atomic<uint64_t>, 5> g_fallback_reason{};
 
 // Warm-cache hit path per-segment timers. Accumulated only on successful hits
 // so per-segment averages = ns_X / n_hits give the steady-state breakdown.
@@ -63,7 +59,7 @@ std::atomic<uint64_t> g_diag_warm_ns_run{0};
 std::atomic<uint64_t> g_diag_warm_ns_finalize{0};
 } // namespace
 
-std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>
+std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>
 diag_dump_dispatch_paths() {
   return std::make_tuple(
       g_diag_n_total.load(std::memory_order_relaxed),
@@ -71,12 +67,7 @@ diag_dump_dispatch_paths() {
       g_diag_n_warm_hit.load(std::memory_order_relaxed),
       g_diag_n_miss.load(std::memory_order_relaxed),
       g_diag_ns_warm_hit.load(std::memory_order_relaxed),
-      g_diag_ns_miss.load(std::memory_order_relaxed),
-      g_diag_ns_fallback.load(std::memory_order_relaxed));
-}
-
-uint64_t diag_dump_align_fastpath_count() {
-  return g_diag_n_align_fastpath.load(std::memory_order_relaxed);
+      g_diag_ns_miss.load(std::memory_order_relaxed));
 }
 
 void diag_reset_dispatch_paths() {
@@ -86,8 +77,6 @@ void diag_reset_dispatch_paths() {
   g_diag_n_miss.store(0, std::memory_order_relaxed);
   g_diag_ns_warm_hit.store(0, std::memory_order_relaxed);
   g_diag_ns_miss.store(0, std::memory_order_relaxed);
-  g_diag_ns_fallback.store(0, std::memory_order_relaxed);
-  g_diag_n_align_fastpath.store(0, std::memory_order_relaxed);
 }
 
 std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>
@@ -140,7 +129,6 @@ struct SchemaCache {
   size_t num_positional = 0;
   std::vector<c10::TypePtr> return_types; // parallel to schema returns
   bool populated = false;
-  bool is_align_sensitive = false; // op name in align_sensitive_ops() set
 };
 
 struct ShimEntry {
@@ -148,11 +136,9 @@ struct ShimEntry {
   std::vector<size_t> skip_dtype_args;
   SchemaCache schema_cache; // lazily filled
   const char* op_name_intern = nullptr; // stable pointer for WarmCache keys
-  // Cached pointer into fallback_by_op() for this op; bumped lock-free on the
-  // already-slow fallback branch. Raw ptr keeps ShimEntry an aggregate /
+  // Cached pointer into recompile_by_op() for this op; bumped lock-free on the
+  // already-slow warm-cache miss branch. Raw ptr keeps ShimEntry an aggregate /
   // movable (the registry stores it by value via move-assign).
-  std::atomic<uint64_t>* fallback_ctr = nullptr;
-  // Same idea for the warm-cache miss (recompile) path -> recompile_by_op().
   std::atomic<uint64_t>* recompile_ctr = nullptr;
 };
 
@@ -180,20 +166,8 @@ std::mutex& registry_mutex() {
   return m;
 }
 
-// Per-op CPU-fallback counts, keyed by the interned op-name pointer (stable +
-// deduplicated by intern_op_name). Heap-allocated atomics so each ShimEntry can
-// cache a raw pointer (fallback_ctr) and bump it lock-free on the fallback
-// branch. Populated/looked-up under registry_mutex at register time (import,
-// before any dispatch); survives op re-registration. Leaky singleton to match
-// registry() teardown semantics.
-std::unordered_map<const char*, std::unique_ptr<std::atomic<uint64_t>>>&
-fallback_by_op() {
-  static auto* m = new std::
-      unordered_map<const char*, std::unique_ptr<std::atomic<uint64_t>>>();
-  return *m;
-}
-
-// Per-op warm-cache MISS (recompile) counts. Same scheme as fallback_by_op():
+// Per-op warm-cache MISS (recompile) counts, keyed by the interned op-name
+// pointer; each ShimEntry caches a pointer to its counter (recompile_ctr):
 // the bump lives on the already-slow miss branch (Python compile), so it does
 // not touch the warm-cache hit fast path.
 std::unordered_map<const char*, std::unique_ptr<std::atomic<uint64_t>>>&
@@ -339,111 +313,6 @@ bool is_contiguous_row_major(
 }
 
 // ---------------------------------------------------------------------------
-// Align-penalty fast-path
-//
-// RBLN device requires last-dim aligned to 64. When an op's output has
-// last-dim not divisible by 64, `rebel-compiler` inserts host pad/depad nodes
-// (RblnTensorPadLastDim + RblnTensorWrapHostOps passes) on the op graph,
-// producing the chain: host pad → H2D → device → D2H → host depad. For small
-// tensors (decode workloads), per-call cost is dominated by this
-// orchestration (~700 µs measured) rather than the compute (~5 µs).
-//
-// We route these calls through cpu_fallback_rbln, which uses v-mem
-// host-backed borrow (no D2H copy, no pad). Validated on aten::neg.out for
-// LLaMA-1B rotary: decode -10.3% (NEG_ONLY isolation).
-//
-// Eligibility (`g_align_sensitive_ops`):
-//   - Shape-preserving elementwise ops where output last-dim mirrors broadcast
-//     of inputs. These include unary (neg, abs, sqrt, log, exp, silu, rsqrt,
-//     ceil, floor, sigmoid, logical_not, pow.Tensor_Scalar_out), binary (add,
-//     sub, mul, div, div.out_mode, maximum, minimum), comparisons
-//     (ne/eq/gt/ge/lt/le), and where.self_out.
-//   - clamp.out is shape-preserving with scalar bounds.
-//
-// Excluded:
-//   - mm.out, bmm.out, addmm.out, linear: output last-dim depends on weight,
-//     not input. Compute (O(MNK)) usually dominates align cost.
-//   - mean.out / max.unary_out / min.unary_out: reductions change output dim.
-//   - cat / index ops: not in shim path anyway.
-//
-// Criterion: check OUT tensor's last-dim (post-broadcast result shape),
-// since for binary ops the result shape may be aligned even if one input is not
-// (e.g. `mul([B,S,64], [1,1,32]) → [B,S,64]` — device wins, no align penalty).
-const std::unordered_set<std::string>& align_sensitive_ops() {
-  static const std::unordered_set<std::string>* s =
-      new std::unordered_set<std::string>{
-          // Unary elementwise
-          "aten::neg.out",
-          "aten::abs.out",
-          "aten::log.out",
-          "aten::sigmoid.out",
-          "aten::silu.out",
-          "aten::rsqrt.out",
-          "aten::ceil.out",
-          "aten::floor.out",
-          "aten::logical_not.out",
-          "aten::pow.Tensor_Scalar_out",
-          "aten::clamp.out",
-          // Binary elementwise (broadcast-aware via OUT tensor check)
-          "aten::add.out",
-          "aten::sub.out",
-          "aten::mul.out",
-          "aten::div.out",
-          "aten::div.out_mode",
-          "aten::maximum.out",
-          "aten::minimum.out",
-          // Comparisons (output is bool but shape mirrors broadcast)
-          "aten::ne.Tensor_out",
-          "aten::eq.Tensor_out",
-          "aten::gt.Tensor_out",
-          "aten::ge.Tensor_out",
-          "aten::lt.Tensor_out",
-          "aten::le.Tensor_out",
-          "aten::ne.Scalar_out",
-          "aten::eq.Scalar_out",
-          "aten::gt.Scalar_out",
-          "aten::ge.Scalar_out",
-          "aten::lt.Scalar_out",
-          "aten::le.Scalar_out",
-          // Ternary (cond, self, other) — output shape is broadcast
-          "aten::where.self_out",
-      };
-  return *s;
-}
-
-bool align_penalty_fast_path_check(
-    torch::jit::Stack* stack,
-    const SchemaCache& cache) {
-  if (!cache.is_align_sensitive) {
-    return false;
-  }
-  auto args = torch::jit::last(stack, cache.num_args);
-  // Prefer checking the OUT tensor's last-dim — it reflects the broadcast
-  // result shape, which is what the device graph would produce.
-  if (cache.out_positional_idx >= 0) {
-    const auto& iv = args[cache.out_positional_idx];
-    if (iv.isTensor()) {
-      const auto& t = iv.toTensor();
-      if (t.defined() && t.dim() > 0) {
-        return (t.size(t.dim() - 1) % 64) != 0;
-      }
-    }
-  }
-  // No `out` tensor (functional ops): fall back to input shape — pick the
-  // first non-write-alias tensor with non-zero dim.
-  for (size_t i = 0; i < cache.num_args; ++i) {
-    const auto& iv = args[i];
-    if (!iv.isTensor())
-      continue;
-    const auto& t = iv.toTensor();
-    if (!t.defined() || cache.is_write_alias[i] || t.dim() == 0)
-      continue;
-    return (t.size(t.dim() - 1) % 64) != 0;
-  }
-  return false;
-}
-
-// ---------------------------------------------------------------------------
 // Deploy / nan_inf-disable gates
 // ---------------------------------------------------------------------------
 //
@@ -456,7 +325,9 @@ bool is_deploy_mode() {
   return env != nullptr && std::strcmp(env, "ON") == 0;
 }
 
-bool is_nan_inf_check_disabled() {
+// True when TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK (a comma-separated list)
+// names `case_name` or "all".
+bool is_fallback_case_disabled(std::string_view case_name) {
   const char* env = std::getenv("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK");
   if (env == nullptr)
     return false;
@@ -474,47 +345,44 @@ bool is_nan_inf_check_disabled() {
     } else {
       token.clear();
     }
-    if (token == "all" || token == "nan_inf")
+    if (token == "all" || token == case_name)
       return true;
     start = end + 1;
   }
   return false;
 }
 
-// fp16/bf16 NaN/Inf bit-pattern check.
-//
-// Both formats encode NaN/Inf as "exponent field all-ones"; only the field
-// width differs (fp16: 5 bits at offset 10, mask ``0x7C00``; bf16: 8 bits
-// at offset 7, mask ``0x7F80``). NaN distinguishes itself by a non-zero
-// mantissa, Inf has mantissa==0 — we don't care about the distinction for
-// fallback routing, either value means "rbln runtime cannot handle this".
-inline bool fp16_has_nan_or_inf(const uint16_t* data, size_t n) noexcept {
+// NaN/Inf bit-pattern check. Every IEEE format encodes NaN/Inf as "exponent
+// field all-ones"; only the mask differs (fp16 ``0x7C00``, bf16 ``0x7F80``,
+// fp32
+// ``0x7F800000``, fp64 ``0x7FF0000000000000``). NaN and Inf are not
+// distinguished: either value means "rbln runtime cannot handle this".
+template <typename Word, Word kExpMask>
+bool words_have_nan_or_inf(const void* data, size_t n) noexcept {
+  const auto* words = static_cast<const Word*>(data);
   for (size_t i = 0; i < n; ++i) {
-    if ((data[i] & 0x7C00) == 0x7C00) {
+    if ((words[i] & kExpMask) == kExpMask) {
       return true;
     }
   }
   return false;
 }
 
-inline bool bf16_has_nan_or_inf(const uint16_t* data, size_t n) noexcept {
-  for (size_t i = 0; i < n; ++i) {
-    if ((data[i] & 0x7F80) == 0x7F80) {
-      return true;
-    }
-  }
-  return false;
-}
-
-using ScannerFn = bool (*)(const uint16_t*, size_t);
+using ScannerFn = bool (*)(const void*, size_t);
+// One scanner per floating dtype in kDispatchDtypes or
+// kDispatchExtensionDtypes (RBLNSupportedDtypes.h).
 inline ScannerFn scanner_for(c10::ScalarType scalar_type) {
   switch (scalar_type) {
     case c10::kHalf:
-      return fp16_has_nan_or_inf;
+      return words_have_nan_or_inf<uint16_t, uint16_t{0x7C00}>;
     case c10::kBFloat16:
-      return bf16_has_nan_or_inf;
+      return words_have_nan_or_inf<uint16_t, uint16_t{0x7F80}>;
+    case c10::kFloat:
+      return words_have_nan_or_inf<uint32_t, uint32_t{0x7F800000}>;
+    case c10::kDouble:
+      return words_have_nan_or_inf<uint64_t, uint64_t{0x7FF0000000000000}>;
     default:
-      TORCH_INTERNAL_ASSERT(false, "missing scanner for ScalarType");
+      TORCH_INTERNAL_ASSERT(false, "missing NaN/Inf scanner for ScalarType");
   }
 }
 
@@ -523,13 +391,15 @@ inline ScannerFn scanner_for(c10::ScalarType scalar_type) {
 // will trigger a D2H sync (this is the price of catching NaN/Inf in
 // just-computed device data — matches AS-IS Python ``to_cpu(args)`` cost).
 //
-// Returns false for: undefined / empty / dtype outside the dispatch
-// catalog / non-contiguous tensors. Non-catalog dtypes are short-circuited
-// earlier in ``quick_fallback_check``; ``skip_dtype_args`` slots are
-// typically bool/int (eq/ne ``cond`` etc.) which cannot carry NaN/Inf.
-// Non-contiguous tensors are skipped here because the warm-cache key
-// requires contig + offset=0 anyway — the non-contig case will miss and
-// fall through to the Python wrapper which performs the full
+// Returns false for: undefined / empty / dtype outside the dispatch policy or
+// not floating / non-contiguous tensors. Non-admitted dtypes are
+// short-circuited earlier in ``quick_fallback_check``; ``skip_dtype_args``
+// slots are typically bool/int (eq/ne ``cond`` etc.) which cannot carry
+// NaN/Inf. An admitted floating dtype without a scanner is a bug, not a skip: a
+// warm-cache hit would then run the device kernel on NaN/Inf without the Python
+// scan ever seeing the input. Non-contiguous tensors are skipped here because
+// the warm-cache key requires contig + offset=0 anyway — the non-contig case
+// will miss and fall through to the Python wrapper which performs the full
 // ``has_invalid_tensor(to_cpu(args))`` scan.
 bool tensor_has_nan_or_inf(const at::Tensor& t) {
   if (!t.defined())
@@ -537,7 +407,8 @@ bool tensor_has_nan_or_inf(const at::Tensor& t) {
   const auto numel = t.numel();
   if (numel == 0)
     return false;
-  if (!c10::rbln::is_dispatch_dtype(t.scalar_type())) {
+  if (!c10::rbln::is_dispatch_dtype_rt(t.scalar_type()) ||
+      !c10::isFloatingType(t.scalar_type())) {
     return false;
   }
   const auto scanner = scanner_for(t.scalar_type());
@@ -549,7 +420,7 @@ bool tensor_has_nan_or_inf(const at::Tensor& t) {
   if (dev_type != c10::DeviceType::PrivateUse1) {
     // CPU tensor (e.g. wrapped 0-dim scalar that didn't get unwrapped):
     // scan in place.
-    const uint16_t* data = static_cast<const uint16_t*>(t.data_ptr());
+    const void* data = t.data_ptr();
     if (data == nullptr)
       return false;
     return scanner(data, n);
@@ -569,15 +440,14 @@ bool tensor_has_nan_or_inf(const at::Tensor& t) {
   auto borrowed = c10::rbln::try_borrow_host_ptr(ptr, nbytes);
   if (!borrowed) {
     const at::Tensor cpu_copy = t.cpu();
-    const uint16_t* host_data =
-        static_cast<const uint16_t*>(cpu_copy.data_ptr());
+    const void* host_data = cpu_copy.data_ptr();
     if (host_data == nullptr)
       return false;
     return scanner(host_data, n);
   }
   // NOLINTNEXTLINE(performance-no-int-to-ptr)
   void* host_raw = reinterpret_cast<void*>(borrowed->host_ptr);
-  const bool found = scanner(static_cast<const uint16_t*>(host_raw), n);
+  const bool found = scanner(host_raw, n);
   c10::rbln::return_borrowed(borrowed->borrow_id, /*updated=*/false);
   return found;
 }
@@ -628,19 +498,27 @@ inline std::optional<ScalarValue> wrapped_scalar_value(const at::Tensor& t) {
 // path, not CPU. If we counted wrapped 0-dim against the shortcut here, we
 // would force the shortcut for the most common binary-op-with-python-scalar
 // case and bypass the compile-path that the test suite expects.
-// Returns 0 = no fallback, else the reason code (1=dtype-not-fp16, 2=nan/inf
-// input, 3=all-scalar). The reason is already decided here; returning it
-// instead of a bool lets the caller attribute WHY at zero extra cost.
+// Returns 0 = no fallback, else the reason code (1=dtype-not-dispatch,
+// 2=nan/inf input, 3=all-scalar, 4=out-dtype). The reason is already decided
+// here; returning it instead of a bool lets the caller attribute WHY at zero
+// extra cost.
+//
+// out-dtype: an `out` whose dtype differs from the inputs'. Whether such an
+// `out` is accepted is each op's own rule (add casts into it, neg and mm reject
+// it), so the op runs on CPU, where its kernel applies that rule and computes
+// the exact result. A bool `out` is left to the device: it is what a comparison
+// writes.
 int quick_fallback_check(
     torch::jit::Stack* stack,
     const SchemaCache& cache,
     const std::vector<size_t>& skip_dtype_args) {
   auto args = torch::jit::last(stack, cache.num_args);
   const bool nan_inf_scan_enabled =
-      !is_deploy_mode() && !is_nan_inf_check_disabled();
+      !is_deploy_mode() && !is_fallback_case_disabled("nan_inf");
   bool has_input_tensor = false;
   bool all_input_scalar = true;
   bool nan_inf_found = false;
+  std::optional<c10::ScalarType> input_dtype;
   for (size_t i = 0; i < cache.num_args; ++i) {
     const auto& iv = args[i];
     if (!iv.isTensor()) {
@@ -658,9 +536,7 @@ int quick_fallback_check(
     // gates that skip args from the shortcut counter. We want to catch
     // NaN/Inf in any defined non-write-alias input — including wrapped
     // 0-dim values such as ``tensor + math.nan``. tensor_has_nan_or_inf
-    // internally filters out dtypes outside the dispatch catalog (catalog
-    // dtypes — fp16/bf16 — are the ones that can encode NaN/Inf on the shim
-    // path).
+    // scans every floating dtype the dispatch policy admits and skips the rest.
     if (nan_inf_scan_enabled && !nan_inf_found && tensor_has_nan_or_inf(t)) {
       nan_inf_found = true;
     }
@@ -682,8 +558,13 @@ int quick_fallback_check(
       continue;
     }
     has_input_tensor = true;
-    if (!c10::rbln::is_dispatch_dtype(t.scalar_type())) {
-      return 1; // dtype-not-fp16 (dtype outside the dispatch policy)
+    // Catalog plus the TORCH_RBLN_DISPATCH_DTYPES extension
+    // (RBLNSupportedDtypes.h).
+    if (!c10::rbln::is_dispatch_dtype_rt(t.scalar_type())) {
+      return 1; // dtype-not-dispatch (dtype outside the dispatch policy)
+    }
+    if (!input_dtype) {
+      input_dtype = t.scalar_type();
     }
     if (t.dim() != 0) {
       all_input_scalar = false;
@@ -691,6 +572,15 @@ int quick_fallback_check(
   }
   if (nan_inf_found) {
     return 2; // nan/inf in input (non-deploy debug scan)
+  }
+  if (cache.out_positional_idx >= 0 && input_dtype) {
+    const auto& out_iv = args[cache.out_positional_idx];
+    if (out_iv.isTensor() && out_iv.toTensor().defined()) {
+      const auto out_dtype = out_iv.toTensor().scalar_type();
+      if (out_dtype != c10::kBool && out_dtype != *input_dtype) {
+        return 4; // out-dtype (out of another dtype; see above)
+      }
+    }
   }
   return (has_input_tensor && all_input_scalar) ? 3
                                                 : 0; // 3 = all-scalar inputs
@@ -801,6 +691,11 @@ struct PendingInstall {
 
 thread_local PendingInstall t_pending;
 
+// Schema name (e.g. "aten::add.out") of the op whose Python wrapper is running
+// on this thread, or null outside one. Saved and restored around each call, so
+// a nested shim op names itself.
+thread_local const std::string* t_python_op = nullptr;
+
 // Take ownership of the pending context (single reader); installer clears it.
 PendingInstall take_pending() {
   PendingInstall p = std::move(t_pending);
@@ -838,6 +733,9 @@ bool try_warmcache_hit(
   CacheEntryPtr entry = wc.find(key);
   const uint64_t _seg_t_lookup = now_ns();
   if (!entry)
+    return false;
+  // The alignment fallback is back on: let the Python path apply it.
+  if (entry->align_bypassed && !is_fallback_case_disabled("align"))
     return false;
 
   // Input binding, in the order tensor inputs appear on the stack. Device-only:
@@ -899,11 +797,13 @@ bool try_warmcache_hit(
   // the hit path can't, since the runtime was compiled for the cached shape
   // and writes ``numel(cached) * itemsize`` contig bytes into out.data_ptr().
   // Fall through to the pybind miss-path so the Python wrapper handles
-  // resize-with-warning.
+  // resize-with-warning. The key leaves `out` out, so an `out` of another dtype
+  // (a float `out` for a comparison cached with a bool one) misses as well.
   if (out_tensor.defined() && !entry->out_profiles.empty()) {
-    const auto& cached_shape = entry->out_profiles[0].shape;
+    const auto& cached = entry->out_profiles[0];
     if (out_tensor.sizes() !=
-        at::IntArrayRef(cached_shape.data(), cached_shape.size())) {
+            at::IntArrayRef(cached.shape.data(), cached.shape.size()) ||
+        out_tensor.scalar_type() != cached.dtype) {
       return false;
     }
   }
@@ -1022,11 +922,6 @@ void generic_shim_boxed(
         entry != nullptr, "No Python impl registered for shim op: ", op_name);
     if (!entry->schema_cache.populated) {
       populate_schema_cache(entry->schema_cache, op.schema());
-      // Populate align-sensitive flag once per op (avoids per-call string
-      // allocation + unordered_set lookup in the hot path).
-      const auto& align_set = align_sensitive_ops();
-      entry->schema_cache.is_align_sensitive =
-          (align_set.find(op_name) != align_set.end());
     }
   }
 
@@ -1055,42 +950,15 @@ void generic_shim_boxed(
     g_diag_n_fallback.fetch_add(1, std::memory_order_relaxed);
     g_fallback_reason[fb_reason].fetch_add(
         1, std::memory_order_relaxed); // WHY (same slow branch)
-    if (entry->fallback_ctr != nullptr) {
-      entry->fallback_ctr->fetch_add(
-          1,
-          std::memory_order_relaxed); // per-op attribution (same slow branch)
-    }
     if (g_trace_enabled.load(std::memory_order_relaxed)) {
       capture_site(
           op_name); // (A) WHERE: opt-in, deduped, GIL-safe; off by default
     }
-    // Same log the ``fallback_rbln`` handler emits for an unsupported op. The
-    // shortcut below decides a fallback the Python wrapper would otherwise have
-    // decided and logged, so without this the ops it covers -- add, mul,
-    // matmul, the reductions -- are the only ones whose CPU fallback leaves no
-    // trace at any log level.
-    c10::rbln::log_cpu_fallback(op.schema().name());
-    const uint64_t _fb_t0 = now_ns();
+    // Counted, logged and timed inside (c10::rbln::CpuFallbackScope), like
+    // every other fallback path.
     ::at::native::rbln::cpu_fallback_rbln(op, stack);
-    // COST of the fallback (wall ns), so the report can tell "many cheap
-    // fallbacks (path overhead)" from "few expensive ones (hidden transfer)".
-    // Same slow branch.
-    g_diag_ns_fallback.fetch_add(now_ns() - _fb_t0, std::memory_order_relaxed);
     return;
   }
-
-  // Align-penalty fast-path: previously routed shape-preserving elementwise
-  // ops with non-64-aligned last-dim through cpu_fallback to skip rebel's
-  // host pad → H2D → device → D2H → host depad penalty (~700 µs for tiny
-  // decode tensors).
-  //
-  // **Disabled (2026-04-30):** mixing CPU-fallback (native fp16) and device
-  // (cf16) for the same op produces 1-ULP rounding divergence, breaking
-  // bit-exact tests (``test/rbln/test_non_zero_storage_offset``) where
-  // sibling ops on aligned shapes stay on device. The helper/counter stay
-  // compiled so we can re-enable behind an env gate if a workload regresses.
-  (void)align_penalty_fast_path_check;
-  (void)g_diag_n_align_fastpath;
 
   // Warm-cache hot path: if we've previously compiled this op for an identical
   // input profile and have the rebel runtime cached, drive the runtime from
@@ -1167,6 +1035,10 @@ void generic_shim_boxed(
     // already cleared t_pending via take_pending()).
     const auto drop_pending =
         c10::make_scope_exit([] { t_pending.valid = false; });
+    const std::string* const outer_python_op = t_python_op;
+    t_python_op = &op_name;
+    const auto restore_python_op = c10::make_scope_exit(
+        [outer_python_op] { t_python_op = outer_python_op; });
     result = py_fn_copy(*pos_tup, **kwargs);
   }
 
@@ -1231,15 +1103,10 @@ void register_cpp_shim(
       .skip_dtype_args = skip_dtype_args,
       .schema_cache = {},
       .op_name_intern = interned};
-  // Wire up the per-op fallback counter (heap atomic, keyed by interned name so
-  // it survives re-registration). The move-assign above reset fallback_ctr to
-  // null, so re-point it here.
+  // Wire up the per-op recompile counter (heap atomic, keyed by interned name
+  // so it survives re-registration). The move-assign above reset recompile_ctr
+  // to null, so re-point it here.
   {
-    auto& slot = fallback_by_op()[interned];
-    if (!slot) {
-      slot = std::make_unique<std::atomic<uint64_t>>(0);
-    }
-    registry()[op_name].fallback_ctr = slot.get();
     auto& rslot = recompile_by_op()[interned];
     if (!rslot) {
       rslot = std::make_unique<std::atomic<uint64_t>>(0);
@@ -1265,28 +1132,21 @@ void register_cpp_shim(
   installed_libs().push_back(std::move(lib));
 }
 
-std::vector<std::pair<std::string, uint64_t>> diag_dump_fallback_by_op() {
-  std::vector<std::pair<std::string, uint64_t>> out;
-  std::lock_guard<std::mutex> lk(registry_mutex());
-  for (const auto& kv : registry()) {
-    const ShimEntry& e = kv.second;
-    if (e.fallback_ctr != nullptr) {
-      const uint64_t c = e.fallback_ctr->load(std::memory_order_relaxed);
-      if (c != 0) {
-        out.emplace_back(kv.first, c);
-      }
-    }
+std::string python_fallback_op_name(const std::string& op_name) {
+  const std::string* const shim_op = t_python_op;
+  if (shim_op != nullptr && shim_op->starts_with(op_name) &&
+      (shim_op->size() == op_name.size() ||
+       (*shim_op)[op_name.size()] == '.')) {
+    return *shim_op;
   }
-  return out;
+  return op_name;
 }
 
-void diag_reset_fallback_by_op() {
-  std::lock_guard<std::mutex> lk(registry_mutex());
-  for (auto& kv : fallback_by_op()) {
-    if (kv.second) {
-      kv.second->store(0, std::memory_order_relaxed);
-    }
+std::optional<std::string> running_python_op() {
+  if (t_python_op == nullptr) {
+    return std::nullopt;
   }
+  return *t_python_op;
 }
 
 std::vector<std::pair<std::string, uint64_t>> diag_dump_recompile_by_op() {
@@ -1314,11 +1174,13 @@ void diag_reset_recompile_by_op() {
 }
 
 std::vector<uint64_t> diag_dump_fallback_reasons() {
-  // counts for reason codes 1..3: [dtype-not-fp16, nan/inf input, all-scalar].
+  // counts for reason codes 1..4: [dtype-not-dispatch, nan/inf input,
+  // all-scalar, out-dtype].
   return {
       g_fallback_reason[1].load(std::memory_order_relaxed),
       g_fallback_reason[2].load(std::memory_order_relaxed),
       g_fallback_reason[3].load(std::memory_order_relaxed),
+      g_fallback_reason[4].load(std::memory_order_relaxed),
   };
 }
 
@@ -1396,7 +1258,8 @@ bool install_warmcache_from_pending(
     pybind11::object dyn_runtime,
     const pybind11::object& runtime_handle,
     const std::vector<std::tuple<std::vector<int64_t>, std::string, bool>>&
-        out_profiles) {
+        out_profiles,
+    bool align_bypassed) {
   PendingInstall p = take_pending();
   if (!p.valid)
     return false;
@@ -1423,6 +1286,7 @@ bool install_warmcache_from_pending(
   }
 
   CacheEntry entry;
+  entry.align_bypassed = align_bypassed;
   entry.py_dyn_runtime = std::move(dyn_runtime);
   // ``native_handle()`` is rebel's declared way to reach the runtime from C,
   // and the handle it returns is borrowed — so the entry holds a reference to

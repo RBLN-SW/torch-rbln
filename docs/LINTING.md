@@ -16,7 +16,6 @@ writes when it configures. Configuring needs the runtime headers from the
 
 ```bash
 uv run --no-sync cmake -GNinja -B build -S . \
-  -DBUILD_SHARED_LIBS=ON \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX=torch_rbln \
   -DBUILD_TESTING=ON

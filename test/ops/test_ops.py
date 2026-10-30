@@ -684,7 +684,7 @@ class TestCommon(TestCase):
                 rtol = max(rtol, 0.05)
                 atol = max(atol, 0.05)
 
-        is_comparison_op = op.name in ("ne", "eq", "gt", "ge", "lt", "le")
+        is_comparison_op = op.name.removeprefix("_refs.") in ("ne", "eq", "gt", "ge", "lt", "le")
 
         samples = op.reference_inputs(device, dtype)
 

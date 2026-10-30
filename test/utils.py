@@ -1,6 +1,8 @@
+import ast
 import multiprocessing
 import os
 import random
+import subprocess
 import sys
 
 import numpy as np
@@ -50,10 +52,10 @@ def configure_master_port_for_rccl_tests(default_port: str = _DEFAULT_DISTRIBUTE
 def assert_device_resident_dtype(dtype: torch.dtype) -> None:
     """Fail unless the device advertises `dtype` as device-resident.
 
-    Only fp16/bf16 are (`kCapabilityDtypes`); another dtype accepts ``device="rbln"``
-    but stays host-backed, so an ordering test written on it would run entirely on the
-    host and pass with a broken fence. Per-tensor byte counting cannot stand in for
-    this: allocation is lazy and small elementwise ops take CPU fast paths.
+    Only fp16/bf16/fp32 are (`kCapabilityDtypes`); another dtype accepts
+    ``device="rbln"`` but stays host-backed, so an ordering test written on it would run
+    entirely on the host and pass with a broken fence. Per-tensor byte counting cannot
+    stand in for this: allocation is lazy and small elementwise ops take CPU fast paths.
     """
     advertised = torch.accelerator.get_device_capability()["supported_dtypes"]
     assert dtype in advertised, f"{dtype} is not device-resident; advertised: {advertised}"
@@ -104,6 +106,24 @@ def spawn_target_with_clean_exit(rank: int, test_func, *args) -> None:
     """
     test_func(rank, *args)
     os._exit(0)
+
+
+def run_snippet(code: str, *, env: dict[str, str] | None = None, unset: tuple[str, ...] = (), timeout: int = 600):
+    """Run ``code`` in a fresh interpreter; return its printed ``RESULT <literal>``.
+
+    ``env`` is applied (and ``unset`` names removed) before the child imports anything,
+    which is how import-time settings like ``TORCH_RBLN_DISPATCH_DTYPES`` must be set.
+    The child must exit 0; the literal on its last ``RESULT`` line comes back parsed.
+    """
+    child_env = {k: v for k, v in os.environ.items() if k not in unset}
+    child_env.update(env or {})
+    proc = subprocess.run(
+        [sys.executable, "-c", code], check=False, env=child_env, capture_output=True, text=True, timeout=timeout
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT ")]
+    assert lines, proc.stderr[-2000:]
+    return ast.literal_eval(lines[-1][len("RESULT ") :])
 
 
 def run_in_isolated_process(func, *args):
