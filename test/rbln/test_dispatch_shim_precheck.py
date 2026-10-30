@@ -35,7 +35,7 @@ from unittest import mock
 import pytest
 import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
-from torch.testing._internal.common_utils import run_tests, TestCase
+from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
 from test.utils import SUPPORTED_DTYPES
 from torch_rbln import _C
@@ -144,6 +144,55 @@ class TestDispatchShimWrappedScalar(TestCase):
                     got = op(s, x)
                     self.assertEqual(got.device.type, "rbln")
                     self.assertEqual(got.cpu(), op(s, x_cpu), msg=f"{op.__name__} {shape} {value}")
+
+
+@pytest.mark.npu(count=1)
+class TestDispatchShimLastDimOneBroadcast(TestCase):
+    """Aligned last-dim-size-one broadcasts use the device and warm cache."""
+
+    def setUp(self) -> None:
+        _C._warmcache_clear()
+
+    def test_aligned_output_takes_device_path_and_warm_hits(self) -> None:
+        x = torch.arange(4 * 64, dtype=torch.float16, device="rbln").reshape(4, 64)
+        s = torch.tensor([[1.0], [2.0], [3.0], [4.0]], dtype=torch.float16, device="rbln")
+        expected = x.cpu() * s.cpu()
+        self.assertEqual((x * s).cpu(), expected)
+        self.assertGreater(_C._warmcache_size(), 0, "the broadcast did not install a device entry")
+        _, _, hits_before, _ = _dispatch_counts()
+        self.assertEqual((x * s).cpu(), expected)
+        _, _, hits_after, _ = _dispatch_counts()
+        self.assertGreater(hits_after, hits_before)
+        s.fill_(0.5)
+        _, _, hits_before, _ = _dispatch_counts()
+        self.assertEqual((x * s).cpu(), x.cpu() * 0.5)
+        self.assertGreater(_dispatch_counts()[2], hits_before, "updated input must be read on a warm hit")
+
+    @dtypes(*SUPPORTED_DTYPES)
+    @parametrize("op", [torch.eq, torch.ne, torch.gt, torch.ge, torch.lt, torch.le])
+    def test_comparison_broadcast_warm_hit_reads_updated_input(self, dtype, op) -> None:
+        x_cpu = torch.arange(4 * 64, dtype=dtype).reshape(4, 64)
+        threshold_cpu = torch.tensor([[16.0], [80.0], [144.0], [208.0]], dtype=dtype)
+        x, threshold = x_cpu.to("rbln"), threshold_cpu.to("rbln")
+        expected = op(x_cpu, threshold_cpu)
+        self.assertEqual(op(x, threshold).cpu(), expected)
+        self.assertGreater(_C._warmcache_size(), 0, "the comparison did not install a device entry")
+        hits_before = _dispatch_counts()[2]
+        self.assertEqual(op(x, threshold).cpu(), expected)
+        self.assertGreater(_dispatch_counts()[2], hits_before)
+
+        threshold.fill_(128.0)
+        updated = op(x_cpu, torch.full_like(threshold_cpu, 128.0))
+        self.assertFalse(torch.equal(expected, updated), "updated threshold must change the result")
+        hits_before = _dispatch_counts()[2]
+        self.assertEqual(op(x, threshold).cpu(), updated)
+        self.assertGreater(_dispatch_counts()[2], hits_before, "updated threshold must be read on a warm hit")
+
+    def test_unaligned_output_keeps_the_cpu_fallback(self) -> None:
+        x = torch.arange(4 * 8, dtype=torch.float16, device="rbln").reshape(4, 8)
+        s = torch.tensor([[1.0], [2.0], [3.0], [4.0]], dtype=torch.float16, device="rbln")
+        self.assertEqual((x * s).cpu(), x.cpu() * s.cpu())
+        self.assertEqual(_C._warmcache_size(), 0)
 
 
 @pytest.mark.npu(count=1)
@@ -388,6 +437,7 @@ class TestDispatchShimGateLiveRead(TestCase):
 
 
 instantiate_device_type_tests(TestDispatchShimWrappedScalar, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestDispatchShimLastDimOneBroadcast, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestDispatchShimAllScalarFallback, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestDispatchShimDtypeMismatch, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestDispatchShimNanInfFallback, globals(), only_for="privateuse1")

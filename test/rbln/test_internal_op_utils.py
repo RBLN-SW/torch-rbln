@@ -224,25 +224,17 @@ class TestInternalOpUtils(TestCase):
         self.assertEqual(new_args[0].data_ptr(), a.data_ptr())
         self.assertEqual(new_args[2].data_ptr(), b.data_ptr())
 
-    def test_broadcast_args_general_last_dim_one_forces_broadcast(self):
-        # Exception to the validate-only default: rebel-backend cannot
-        # implicit-compile broadcast where one operand has shape[-1] == 1
-        # while the result has shape[-1] > 1 (raises ``UNEXPECTED_GRAPH``,
-        # see ``softmax_backward_rbln`` test cases). For that pattern
-        # ``broadcast_args_general`` does ``torch.broadcast_tensors +
-        # .contiguous()`` so compile sees same-shape inputs.
+    def test_broadcast_args_general_last_dim_one_passes_through(self):
+        # Shape and storage are preserved even when alignment later forces fallback.
         a = torch.randn((3, 4), device="rbln")
         b = torch.randn((3, 1), device="rbln")
         args = (a, b)
         tensor_args = [a, b]
         new_args = broadcast_args_general(tensor_args, args)
-        # Both tensors now have the broadcast result shape (3, 4)
         self.assertEqual(new_args[0].shape, torch.Size([3, 4]))
-        self.assertEqual(new_args[1].shape, torch.Size([3, 4]))
-        # The size-1 operand was materialized — different storage from input
-        self.assertNotEqual(new_args[1].data_ptr(), b.data_ptr())
-        # And contiguous (so prepare_args_view_aware doesn't re-detect expand)
-        self.assertTrue(new_args[1].is_contiguous())
+        self.assertEqual(new_args[1].shape, torch.Size([3, 1]))
+        self.assertEqual(new_args[0].data_ptr(), a.data_ptr())
+        self.assertEqual(new_args[1].data_ptr(), b.data_ptr())
 
     def test_broadcast_args_general_compatibility_check(self):
         # Even though we don't broadcast, we still validate compatibility so
