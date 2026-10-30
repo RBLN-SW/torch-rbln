@@ -82,10 +82,6 @@ from torch.utils._pytree import tree_map
 from test.filters import custom_instantiate_device_type_tests
 
 
-# Set torch._dynamo cache size limit for testing
-if hasattr(torch, "_dynamo") and hasattr(torch._dynamo, "config"):
-    torch._dynamo.config.cache_size_limit = 8
-
 if torch.get_default_dtype() != torch.float32:
     raise AssertionError(f"default dtype should be float32, got {torch.get_default_dtype()}")
 
