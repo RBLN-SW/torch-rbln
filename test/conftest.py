@@ -284,7 +284,8 @@ def pytest_addoption(parser):
         "--fallback-report",
         type=Path,
         metavar="PATH",
-        help="Write each test's outcome and CPU fallbacks over its call, per op and reason, to PATH as JSON",
+        help="Write each test's outcome and CPU fallbacks over its call, per op and reason, to PATH as JSON, "
+        "leaving out skipped tests",
     )
 
 
@@ -344,7 +345,8 @@ class CpuFallbackReport:
 
     def pytest_runtest_logreport(self, report):
         # Subtest reports carry a `context`; the parent's call report covers its call.
-        if self.worker or report.when != "call" or hasattr(report, "context"):
+        # Skipped tests, xfails among them, are left out.
+        if self.worker or report.when != "call" or report.skipped or hasattr(report, "context"):
             return
         # Missing when reading the counts raised, which failed the call with that error.
         fallback = dict(report.user_properties).get("rbln_cpu_fallback")
