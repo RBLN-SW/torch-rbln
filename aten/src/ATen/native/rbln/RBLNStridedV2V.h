@@ -44,9 +44,13 @@ void strided_v2v_copy(
 
 /**
  * @brief Convenience overload: allocates a temporary batch and submits it
- * inline. Use the batch-aware overload for multi-step kernels.
+ * inline through submit_or_fallback, which takes `op_name`. Use the
+ * batch-aware overload for multi-step kernels.
  */
-void strided_v2v_copy(const at::Tensor& dst, const at::Tensor& src);
+void strided_v2v_copy(
+    const at::Tensor& dst,
+    const at::Tensor& src,
+    const char* op_name);
 
 /**
  * @brief Submits `batch`, invoking `cpu_fallback` on a backend call failure.
@@ -58,7 +62,9 @@ void strided_v2v_copy(const at::Tensor& dst, const at::Tensor& src);
  * `TORCH_RBLN_DISABLE_FALLBACK=strided_copy_error` (default enabled).
  *
  * @param batch V2V batch to submit.
- * @param op_name Op identifier used in the fallback warning log.
+ * @param op_name The aten op the fallback is counted under as a CPU fallback
+ *     with reason `strided_copy_error`, such as `aten::cat.out`; also used in
+ *     the fallback warning log.
  * @param cpu_fallback Callable performing the CPU-equivalent computation;
  *     invoked only on a backend call failure.
  */

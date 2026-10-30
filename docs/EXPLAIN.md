@@ -345,6 +345,14 @@ And the auxiliary readouts (in `dump()`):
 
 - `cpu_fallback_by_op`, `recompile_by_op` — per-op counts of what fell back to
   the CPU (every op-level fallback path) and of what recompiled.
+- `cpu_fallback_reasons_by_op` — the fallback counts of each op split by reason:
+  the `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` case (`dtype`, `scalar`,
+  `nan_inf`, `align`, ...) or `TORCH_RBLN_DISABLE_FALLBACK` category
+  (`compile_error`, `unsupported_op`, `strided_copy_error`) that decided it, or
+  else the check itself (`registered` for an op registered to the CPU fallback,
+  `out_dtype`, `div_rounding`, `index_pattern`, ...). The C++ shim's own `dtype`
+  and `scalar` checks use those names too, but
+  `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` does not turn them off.
 - `cpu_fallback_reasons` — the `dtype-not-dispatch / nan-inf / all-scalar /
   out-dtype` breakdown of the C++ shim's own fallbacks.
 - `cpu_fallback_unaccelerated` (A) — fallback ops with no fast-path handler,

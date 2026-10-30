@@ -162,7 +162,12 @@ def {kernel_name}(*args, **kwargs):
             return f"""    if out_tensor.dtype != torch.bool:
         kwargs_filtered = {{k: v for k, v in kwargs.items() if k != "out"}}
         result = cpu_fallback_path(
-            torch.{root_name}, args, result=out_tensor, op_name="aten::{root_name}", **kwargs_filtered
+            torch.{root_name},
+            args,
+            result=out_tensor,
+            op_name="aten::{root_name}",
+            reason="out_dtype",
+            **kwargs_filtered,
         )
         finalize_output_tensor(out_tensor, result, result.shape)
         return

@@ -429,7 +429,7 @@ class CompiledFunctionWrapper:
         op_name = _C._running_shim_op()
         if op_name is None:
             return attempt_cpu_fallback(self._original_fn, args, kwargs, original_device)
-        with rbln_record_cpu_fallback(op_name):
+        with rbln_record_cpu_fallback(op_name, "compile_error"):
             return attempt_cpu_fallback(self._original_fn, args, kwargs, original_device)
 
     def _handle_runtime_error(self, error, device_id, args, kwargs):

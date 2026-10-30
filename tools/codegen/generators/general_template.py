@@ -129,12 +129,14 @@ def {kernel_name}(*args, **kwargs):
             """
             return f"""
     out_tensor = kwargs.get('out', None)
-    if is_cpu_fallback_cases(args):
+    fallback_reason = is_cpu_fallback_cases(args)
+    if fallback_reason:
         result_tensor = cpu_fallback_path(
             {target},
             args,
             result=out_tensor,
             op_name="{op_namespace}::{root_name}",
+            reason=fallback_reason,
             **kwargs_filtered,
         )
     else:

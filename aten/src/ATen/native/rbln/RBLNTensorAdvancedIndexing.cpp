@@ -98,7 +98,7 @@ at::Tensor& index_select_out_rbln(
 
   // 0-D fast path: single element v2v via the engine.
   if (rank == 0) {
-    strided_v2v_copy(out, self);
+    strided_v2v_copy(out, self, "aten::index_select.out");
     return out;
   }
 
@@ -140,7 +140,7 @@ at::Tensor& index_select_out_rbln(
     auto dst_view = out.narrow(axis, run.pos, run.length);
     strided_v2v_copy(dst_view, src_view, batch);
   }
-  submit_or_fallback(batch, "index_select_out_rbln", [&] {
+  submit_or_fallback(batch, "aten::index_select.out", [&] {
     const auto cpu_self = self.cpu();
     const auto cpu_index = index.cpu();
     const auto cpu_out = at::index_select(cpu_self, dim, cpu_index);
@@ -315,7 +315,7 @@ void index_out_rbln(const c10::OperatorHandle& op, torch::jit::Stack* stack) {
   }
 
   // Not white-listed -> identical to the previous (pre-kernel) behavior.
-  at::native::rbln::cpu_fallback_rbln(op, stack);
+  at::native::rbln::cpu_fallback_rbln(op, stack, "index_pattern");
 }
 
 // ===========================================================================
@@ -386,7 +386,7 @@ at::Tensor& index_copy_out_rbln(
     }
     at::native::resize_output(out, {});
     if (source.dim() == 0) {
-      strided_v2v_copy(out, source);
+      strided_v2v_copy(out, source, "aten::index_copy.out");
     } else if (source.dim() == 1) {
       RBLN_CHECK(
           source.size(0) == n_idx,
@@ -394,7 +394,8 @@ at::Tensor& index_copy_out_rbln(
           source.size(0),
           n_idx);
       // Last write wins: copy source[n_idx - 1] (a 0-D view) into out.
-      strided_v2v_copy(out, source.select(0, n_idx - 1));
+      strided_v2v_copy(
+          out, source.select(0, n_idx - 1), "aten::index_copy.out");
     } else {
       RBLN_CHECK(
           false,
@@ -479,7 +480,7 @@ at::Tensor& index_copy_out_rbln(
   // Empty index: out := self (or no-op if they already alias).
   if (n_idx == 0 || self.numel() == 0) {
     if (self.numel() > 0 && !is_same_view(out, self)) {
-      strided_v2v_copy(out, self);
+      strided_v2v_copy(out, self, "aten::index_copy.out");
     }
     return out;
   }
@@ -503,7 +504,7 @@ at::Tensor& index_copy_out_rbln(
   // Phase 1: initialize `out` with `self`. Skipped when `out` aliases `self`
   // (in-place dispatch) — saves a redundant full-tensor v2v.
   if (!is_same_view(out, self)) {
-    strided_v2v_copy(out, self);
+    strided_v2v_copy(out, self, "aten::index_copy.out");
   }
 
   // Phase 2: overwrite indexed positions. `run.value` is the axis position the
@@ -525,7 +526,7 @@ at::Tensor& index_copy_out_rbln(
     for (const auto& run : runs) {
       auto src_view = source.narrow(axis, run.pos, run.length);
       auto dst_view = out.narrow(axis, run.value, run.length);
-      strided_v2v_copy(dst_view, src_view);
+      strided_v2v_copy(dst_view, src_view, "aten::index_copy.out");
     }
   } else {
     c10::rbln::V2VBatch batch;
@@ -534,7 +535,7 @@ at::Tensor& index_copy_out_rbln(
       auto dst_view = out.narrow(axis, run.value, run.length);
       strided_v2v_copy(dst_view, src_view, batch);
     }
-    submit_or_fallback(batch, "index_copy_out_rbln", [&] {
+    submit_or_fallback(batch, "aten::index_copy.out", [&] {
       const auto cpu_self = self.cpu();
       const auto cpu_index = index.cpu();
       const auto cpu_source = source.cpu();

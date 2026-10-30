@@ -76,6 +76,11 @@ NPUs of the step's product and that it can load the RBLN user-mode driver. A
 failed check fails the step, so a misallocated pod cannot pass with skipped
 tests or on the wrong NPUs.
 
+The `ops` step also writes a
+[CPU fallback report](TEST_GUIDE.md#report-cpu-fallback-per-test) for each
+`pytest` run and uploads both as artifacts. A failed upload does not fail the
+step.
+
 ### Release checks
 
 The `Debug` wheel builds and runs against a debug wheel of the pinned `torch`

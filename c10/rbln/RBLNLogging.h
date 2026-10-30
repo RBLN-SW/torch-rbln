@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -107,16 +108,19 @@ class C10_RBLN_API RBLNScopeGuard {
 // Where a CPU fallback ran. kBoxed is cpu_fallback_rbln, the boxed CPU
 // fallback and the only path that consults CPU fast-path handlers. kPython is
 // the eager Python path, which runs the op through PyTorch's own CPU kernels.
-enum class CpuFallbackPath : uint8_t { kBoxed, kPython };
+// kStridedCopy is submit_or_fallback, which redoes a batched strided copy the
+// device rejected with the kernel's own CPU version of the op.
+enum class CpuFallbackPath : uint8_t { kBoxed, kPython, kStridedCopy };
 
 /**
  * @brief Marks one CPU fallback: an operation running on CPU instead of RBLN.
  *
  * Every torch-rbln op-level CPU fallback runs inside one of these:
  * cpu_fallback_rbln (which the C++ dispatch shim, the boxed fallback and
- * advanced indexing all call), and the eager Python path through the
- * `_CpuFallbackScope` context manager. Construction counts the fallback per
- * op (cpu_fallback_counts, read by torch.rbln.explain()) and, when
+ * advanced indexing all call), the eager Python path through the
+ * `_CpuFallbackScope` context manager, and the CPU retry of a batched strided
+ * copy the device rejected (submit_or_fallback). Construction counts the
+ * fallback per op (cpu_fallback_counts, read by torch.rbln.explain()) and, when
  * `TORCH_RBLN_LOG_LEVEL` is `INFO` or lower, logs it with a UserWarning that
  * carries the caller's location. Destruction adds the scope's wall time to
  * cpu_fallback_ns() when it is the outermost scope on the thread: a fallback
@@ -125,7 +129,8 @@ enum class CpuFallbackPath : uint8_t { kBoxed, kPython };
  *
  * @code
  * {
- *   const CpuFallbackScope fallback("aten::mul.out", CpuFallbackPath::kBoxed);
+ *   const CpuFallbackScope fallback(
+ *       "aten::mul.out", CpuFallbackPath::kBoxed, "nan_inf");
  *   // ... run the op on CPU ...
  * }
  * // Output (at INFO):
@@ -136,7 +141,13 @@ enum class CpuFallbackPath : uint8_t { kBoxed, kPython };
  */
 class C10_RBLN_API CpuFallbackScope {
  public:
-  CpuFallbackScope(std::string_view full_op_name, CpuFallbackPath path);
+  // `reason` names the check that sent the op to CPU, such as the
+  // `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` case or
+  // `TORCH_RBLN_DISABLE_FALLBACK` category that decided it.
+  CpuFallbackScope(
+      std::string_view full_op_name,
+      CpuFallbackPath path,
+      std::string_view reason);
   ~CpuFallbackScope();
   CpuFallbackScope(const CpuFallbackScope&) = delete;
   CpuFallbackScope& operator=(const CpuFallbackScope&) = delete;
@@ -150,6 +161,10 @@ class C10_RBLN_API CpuFallbackScope {
 
 // Per-op counts of CPU fallbacks, non-zero only.
 C10_RBLN_API std::vector<std::pair<std::string, uint64_t>> cpu_fallback_counts();
+// The same counts split by reason, as (op, reason, count); an op's entries sum
+// to its cpu_fallback_counts entry.
+C10_RBLN_API std::vector<std::tuple<std::string, std::string, uint64_t>>
+cpu_fallback_reason_counts();
 // Wall time of the CPU fallbacks those counts cover; nested fallbacks are
 // timed once, as part of the outermost.
 C10_RBLN_API uint64_t cpu_fallback_ns();

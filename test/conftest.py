@@ -1,5 +1,7 @@
+import json
 import os
 import sys
+from pathlib import Path
 
 import pytest
 import torch
@@ -272,3 +274,86 @@ def pytest_collection_modifyitems(items):
                 f"got args={marker.args} kwargs={marker.kwargs}"
             )
             raise pytest.UsageError(msg)
+
+
+# =============================================================================
+# CPU fallback report (--fallback-report)
+# =============================================================================
+def pytest_addoption(parser):
+    parser.addoption(
+        "--fallback-report",
+        type=Path,
+        metavar="PATH",
+        help="Write each test's outcome and CPU fallbacks over its call, per op and reason, to PATH as JSON, "
+        "leaving out skipped tests",
+    )
+
+
+def pytest_configure(config):
+    path = config.getoption("--fallback-report")
+    if path is not None:
+        config.pluginmanager.register(CpuFallbackReport(config, path), "fallback-report")
+
+
+_CPU_FALLBACK = pytest.StashKey[dict]()
+
+
+def _cpu_fallback_counts():
+    return {(op, reason): n for op, reason, n in torch_rbln._C._dispatch_fallback_by_op_reason()}
+
+
+class CpuFallbackReport:
+    """CPU fallbacks over each test call, so a test that passed on a CPU fallback --
+    comparing CPU against CPU -- shows up. Fixtures and child processes are not counted.
+
+    The counts are the per-op CPU fallback counts that every fallback path records, the
+    ones ``torch.rbln.explain()`` reads. A test that resets them is marked, unless the
+    reset came before an op's first fallback in its process, which leaves no trace.
+    """
+
+    def __init__(self, config, path):
+        self.path = path
+        self.worker = hasattr(config, "workerinput")
+        self.tests = {}
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_runtest_call(self, item):
+        before = _cpu_fallback_counts()
+        try:
+            return (yield)
+        finally:
+            after = _cpu_fallback_counts()
+            reasons_by_op = {}
+            for (op, reason), n in after.items():
+                if n > before.get((op, reason), 0):
+                    reasons_by_op.setdefault(op, {})[reason] = n - before.get((op, reason), 0)
+            item.stash[_CPU_FALLBACK] = {
+                "cpu_fallback": sum(n for reasons in reasons_by_op.values() for n in reasons.values()),
+                "cpu_fallback_reasons_by_op": reasons_by_op,
+                # A reset inside the call drops a count below where it started.
+                "cpu_fallback_reset_detected": any(after.get(key, 0) < n for key, n in before.items()),
+            }
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_runtest_makereport(self, item, call):
+        report = yield
+        # Subtest reports are made during the call, before its counts exist. User
+        # properties carry the counts from an xdist worker to the controller.
+        if call.when == "call" and _CPU_FALLBACK in item.stash:
+            report.user_properties.append(("rbln_cpu_fallback", item.stash[_CPU_FALLBACK]))
+        return report
+
+    def pytest_runtest_logreport(self, report):
+        # Subtest reports carry a `context`; the parent's call report covers its call.
+        # Skipped tests, xfails among them, are left out.
+        if self.worker or report.when != "call" or report.skipped or hasattr(report, "context"):
+            return
+        # Missing when reading the counts raised, which failed the call with that error.
+        fallback = dict(report.user_properties).get("rbln_cpu_fallback")
+        if fallback is not None:
+            self.tests[report.nodeid] = {"outcome": report.outcome, **fallback}
+
+    def pytest_sessionfinish(self):
+        if not self.worker:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(self.tests, indent=2))

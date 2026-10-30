@@ -292,6 +292,7 @@ std::mutex& cpu_fallback_mutex() {
 struct CpuFallbackRecord {
   uint64_t count = 0;
   bool boxed = false; // recorded at least once through CpuFallbackPath::kBoxed
+  std::map<std::string, uint64_t, std::less<>> by_reason;
 };
 
 std::map<std::string, CpuFallbackRecord, std::less<>>& cpu_fallback_records() {
@@ -313,7 +314,8 @@ uint64_t steady_now_ns() {
 
 void count_and_log_cpu_fallback(
     std::string_view full_op_name,
-    CpuFallbackPath path) {
+    CpuFallbackPath path,
+    std::string_view reason) {
   {
     std::lock_guard<std::mutex> lk(cpu_fallback_mutex());
     auto& records = cpu_fallback_records();
@@ -323,6 +325,12 @@ void count_and_log_cpu_fallback(
     }
     ++it->second.count;
     it->second.boxed |= path == CpuFallbackPath::kBoxed;
+    auto& by_reason = it->second.by_reason;
+    auto reason_it = by_reason.find(reason);
+    if (reason_it == by_reason.end()) {
+      reason_it = by_reason.emplace(reason, 0).first;
+    }
+    ++reason_it->second;
   }
 
   // At the default level the count above is all the work: nothing is logged.
@@ -355,8 +363,11 @@ void count_and_log_cpu_fallback(
 // Counts and logs a fallback, then opens its scope; true if it is the
 // outermost on this thread. Counting comes first: if logging throws (warnings
 // as errors), no scope was opened and the destructor does not run.
-bool open_cpu_fallback(std::string_view full_op_name, CpuFallbackPath path) {
-  count_and_log_cpu_fallback(full_op_name, path);
+bool open_cpu_fallback(
+    std::string_view full_op_name,
+    CpuFallbackPath path,
+    std::string_view reason) {
+  count_and_log_cpu_fallback(full_op_name, path, reason);
   return t_cpu_fallback_depth++ == 0;
 }
 
@@ -364,8 +375,9 @@ bool open_cpu_fallback(std::string_view full_op_name, CpuFallbackPath path) {
 
 CpuFallbackScope::CpuFallbackScope(
     std::string_view full_op_name,
-    CpuFallbackPath path)
-    : outermost_(open_cpu_fallback(full_op_name, path)),
+    CpuFallbackPath path,
+    std::string_view reason)
+    : outermost_(open_cpu_fallback(full_op_name, path, reason)),
       start_ns_(steady_now_ns()) {}
 
 CpuFallbackScope::~CpuFallbackScope() {
@@ -381,6 +393,18 @@ std::vector<std::pair<std::string, uint64_t>> cpu_fallback_counts() {
   std::vector<std::pair<std::string, uint64_t>> out;
   for (const auto& [name, record] : cpu_fallback_records()) {
     out.emplace_back(name, record.count);
+  }
+  return out;
+}
+
+std::vector<std::tuple<std::string, std::string, uint64_t>>
+cpu_fallback_reason_counts() {
+  std::lock_guard<std::mutex> lk(cpu_fallback_mutex());
+  std::vector<std::tuple<std::string, std::string, uint64_t>> out;
+  for (const auto& [name, record] : cpu_fallback_records()) {
+    for (const auto& [reason, count] : record.by_reason) {
+      out.emplace_back(name, reason, count);
+    }
   }
   return out;
 }

@@ -26,8 +26,10 @@ namespace {
 
 // Holds a c10::rbln::CpuFallbackScope for the length of a Python `with` block.
 struct PyCpuFallbackScope {
-  explicit PyCpuFallbackScope(std::string name) : op_name(std::move(name)) {}
+  PyCpuFallbackScope(std::string name, std::string why)
+      : op_name(std::move(name)), reason(std::move(why)) {}
   std::string op_name;
+  std::string reason;
   std::optional<c10::rbln::CpuFallbackScope> scope;
 };
 
@@ -401,15 +403,20 @@ void register_internal_api(py::module_& module) {
       &torch_rbln::shim::running_python_op,
       "Internal: schema name of the shim op whose Python wrapper is running on this thread, or None");
   // Python-path CPU fallback, as a context manager around c10's
-  // CpuFallbackScope: `with _CpuFallbackScope(op_name): <run it on CPU>`.
+  // CpuFallbackScope: run the op on CPU inside
+  // `with _CpuFallbackScope(op_name, reason):`.
   py::class_<PyCpuFallbackScope>(module, "_CpuFallbackScope")
-      .def(py::init<std::string>(), py::arg("op_name"))
+      .def(
+          py::init<std::string, std::string>(),
+          py::arg("op_name"),
+          py::arg("reason"))
       .def(
           "__enter__",
           [](PyCpuFallbackScope& self) {
             self.scope.emplace(
                 torch_rbln::shim::python_fallback_op_name(self.op_name),
-                c10::rbln::CpuFallbackPath::kPython);
+                c10::rbln::CpuFallbackPath::kPython,
+                self.reason);
           })
       .def("__exit__", [](PyCpuFallbackScope& self, const py::args& /*exc*/) {
         self.scope.reset();
@@ -435,6 +442,10 @@ void register_internal_api(py::module_& module) {
       "_dispatch_fallback_by_op",
       &c10::rbln::cpu_fallback_counts,
       "DIAG/PROFILER: per-op CPU-fallback counts, every torch-rbln fallback path (list of (op_name, count), non-zero only)");
+  module.def(
+      "_dispatch_fallback_by_op_reason",
+      &c10::rbln::cpu_fallback_reason_counts,
+      "DIAG/PROFILER: _dispatch_fallback_by_op split by reason (list of (op_name, reason, count), non-zero only)");
   module.def(
       "_dispatch_fallback_by_op_reset",
       &c10::rbln::reset_cpu_fallback_counts,
