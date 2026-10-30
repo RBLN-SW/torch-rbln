@@ -398,16 +398,17 @@ From `test/utils.py`:
 ### Op filtering
 
 `test/filters.py` provides `custom_instantiate_device_type_tests()` — a wrapper
-around `instantiate_device_type_tests()` that automatically skips tests for
-operators not supported on the RBLN backend:
+around `instantiate_device_type_tests()` that leaves out the tests for operators
+not supported on the RBLN backend. It does so before instantiation, so pytest
+never collects them and they are not reported as skipped:
 
 - Parses `aten/src/ATen/native/native_functions.yaml` for ops with `PrivateUse1`
   dispatch keys
-- Skips tests for ops not in the parsed list
-- Skips unsupported dtypes (only `SUPPORTED_DTYPES` are allowed, with exceptions
-  for CPU-fallback dtype tests like SDPA)
-- Skips specific known-failing tests listed in `_skipped_tests`
-- Skips forward AD tests for ops listed in `_ops_without_forward_ad_support`
+- Leaves out tests for ops not in the parsed list
+- Leaves out unsupported dtypes (only `SUPPORTED_DTYPES` are allowed, with
+  exceptions for CPU-fallback dtype tests like SDPA)
+- Leaves out specific known-failing tests listed in `_skipped_tests`
+- Leaves out forward AD tests for ops listed in `_ops_without_forward_ad_support`
 - In debug builds (`torch.version.debug`), runs only a representative subset of
   ops for faster iteration
 

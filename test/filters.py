@@ -1,7 +1,5 @@
 from functools import wraps
-from inspect import signature
 from pathlib import Path
-from unittest import SkipTest
 
 import torch
 from tools.codegen.parser import YamlParser
@@ -222,49 +220,42 @@ for root_name in _root_names:
 _ops_with_cpu_fallback_dtype_tests = {"nn.functional.scaled_dot_product_attention"}
 
 
-def _skip_if_not_implemented(fn):
-    sig = signature(fn)
+def _is_left_out(test_name, param_kwargs):
+    """Whether the instantiation of `test_name` with `param_kwargs` is left out."""
+    op_name = getattr(param_kwargs.get("op"), "name", None)
+    if op_name is not None and op_name not in _target_ops:
+        return True
+    if test_name == "test_forward_ad" and op_name in _ops_without_forward_ad_support:
+        return True
+    # SDPA is an exception, to test CPU fallback with various dtypes.
+    return (
+        "dtype" in param_kwargs
+        and param_kwargs["dtype"] not in SUPPORTED_DTYPES
+        and op_name not in _ops_with_cpu_fallback_dtype_tests
+    )
 
-    @wraps(fn)
-    def wrapper(*args, **kwargs):
-        # Specific test restriction
-        if fn.__name__ in _skipped_tests:
-            msg = f"Skipping {fn.__name__}"
-            raise SkipTest(msg)
-        bound_args = sig.bind(*args, **kwargs)
-        bound_args.apply_defaults()
 
-        # Get the op name if available for CPU fallback dtype test exception
-        op_name = None
-        for name, value in bound_args.arguments.items():
-            if name == "op" and hasattr(value, "name"):
-                op_name = value.name
-                break
+def _without_left_out(test_name, parametrize_fn):
+    def parametrize(test, generic_cls, device_cls):
+        for parametrized in parametrize_fn(test, generic_cls, device_cls):
+            _, _, param_kwargs, _ = parametrized
+            if not _is_left_out(test_name, param_kwargs):
+                yield parametrized
 
-        # Skip forward AD tests for operators without support
-        if fn.__name__ == "test_forward_ad" and op_name in _ops_without_forward_ad_support:
-            msg = f"Skipping {fn.__name__} for {op_name}: forward AD not supported on RBLN"
-            raise SkipTest(msg)
-
-        for name, value in bound_args.arguments.items():
-            # `op` restriction
-            if name == "op" and hasattr(value, "name") and value.name not in _target_ops:
-                msg = f"Skipping {value.name} because it is not in `native_functions.yaml`"
-                raise SkipTest(msg)
-            # `dtype` restriction - SDPA is an exception to test CPU fallback with
-            # various dtypes
-            if name == "dtype" and value not in SUPPORTED_DTYPES and op_name not in _ops_with_cpu_fallback_dtype_tests:
-                msg = f"Skipping {fn.__name__} because it is not supported dtype"
-                raise SkipTest(msg)
-
-        return fn(*args, **kwargs)
-
-    return wrapper
+    return parametrize
 
 
 def custom_instantiate_device_type_tests(generic_test_class, scope, *args, **kwargs):
-    """Wrap instantiate_device_type_tests() to skip tests not implemented on RBLN."""
-    for test_case in dir(generic_test_class):
-        if test_case.startswith("test_"):
-            setattr(generic_test_class, test_case, _skip_if_not_implemented(getattr(generic_test_class, test_case)))
+    """Wrap instantiate_device_type_tests() to leave out tests not implemented on RBLN.
+
+    They are left out before instantiation rather than skipped when they run: a
+    generated test costs collection and the autouse fixtures around it, and keeps
+    objects alive that every garbage collection during a compile walks.
+    """
+    for name in [name for name in vars(generic_test_class) if name.startswith("test_")]:
+        test = getattr(generic_test_class, name)
+        if name in _skipped_tests:
+            delattr(generic_test_class, name)
+        elif hasattr(test, "parametrize_fn"):
+            test.parametrize_fn = _without_left_out(name, test.parametrize_fn)
     return instantiate_device_type_tests(generic_test_class, scope, *args, **kwargs)
