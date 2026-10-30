@@ -205,7 +205,9 @@ _register_cpp_shim("aten::{operator_name}", {kernel_name})"""
                 )
 
                 # Generate Inplace function wrapper: General function call + copy_
-                function_code += self.op_code_generator.generate_inplace_function(kernel_name, general_kernel_name)
+                function_code += self.op_code_generator.generate_inplace_function(
+                    kernel_name, general_kernel_name, root_name
+                )
                 operator_register_code += self._registration_line(operator_name, kernel_name)
 
             else:

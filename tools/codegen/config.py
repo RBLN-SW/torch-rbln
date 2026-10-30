@@ -171,6 +171,23 @@ class OpCategories:
         "where.self_out": [0],  # cond (bool)
     }
 
+    # Typed predicates are independent of the data operands' dispatch dtype.
+    PY_GATE_SKIP_DTYPE_ARGS: ClassVar[dict[str, list[int]]] = {
+        "where": [0],
+        "masked_fill": [1],
+    }
+
+    # Elementwise updates may bind self directly; other inplace ops still copy back.
+    INPLACE_OUT_ALIAS_OPS: frozenset[str] = frozenset({"masked_fill"})
+
+    @classmethod
+    def get_py_gate_skip_dtype_args(cls, root_name: str) -> list[int]:
+        return cls.PY_GATE_SKIP_DTYPE_ARGS.get(root_name, [])
+
+    @classmethod
+    def inplace_binds_self_as_out(cls, root_name: str) -> bool:
+        return root_name in cls.INPLACE_OUT_ALIAS_OPS
+
     # EmptyTensor template names that skip `tensor_args = extract_tensors(args)` before
     # the empty-tensor branch (those templates only read raw positional args, e.g.
     # args[0]). Keep in sync when adding EmptyTensor methods with the same pattern.
