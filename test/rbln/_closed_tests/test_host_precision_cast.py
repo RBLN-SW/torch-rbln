@@ -12,6 +12,8 @@ import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
+from torch_rbln._internal.ops_utils import cpu_fallback_path
+
 
 # Values that most expose the precision loss when float16 is cast to custom_float16:
 # - div(..., rounding_mode='floor'): 8.9922 -> 8, -6.0039 -> -7 (wrong if cast: 9, -6)
@@ -112,7 +114,8 @@ class TestHostPrecisionCast(TestCase):
         )
         x_cpu = x.cpu()
 
-        rbln_result = torch.mean(x, dim=2, keepdim=True)
+        # mean is exempt from the alignment fallback; this test is about the host path.
+        rbln_result = cpu_fallback_path(torch.mean, (x,), op_name="aten::mean", dim=2, keepdim=True)
         cpu_result = torch.mean(x_cpu, dim=2, keepdim=True)
 
         self.assertEqual(rbln_result.device, self.rbln_device)

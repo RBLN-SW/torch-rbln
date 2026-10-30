@@ -162,6 +162,12 @@ class OpCategories:
         | SHIM_SOFTMAX
     )
 
+    # Shim ops whose unaligned device inputs the compiler pads itself, so the Python
+    # path skips the 64-element alignment fallback for them. `where` and `logical_not`
+    # are left out: their bool operand falls back before that gate. Handwritten shim
+    # handlers (softmax, pow in register_custom_ops.py) pass the flag themselves.
+    ALIGN_EXEMPT_OPS: ClassVar[set[str]] = {name.split(".")[0] for name in CPP_SHIM_OPS} - {"where", "logical_not"}
+
     # Per-op overrides of the dispatch-shim dtype check: positional arg indices
     # whose dtype should NOT be compared to float16. The shim's own check still
     # applies to other args (storage offset, all-scalar, dtype).
@@ -209,6 +215,10 @@ class OpCategories:
     def needs_single_mem_loc_check(cls, root_name: str) -> bool:
         """Check if operation needs single memory location violation check."""
         return root_name in cls.SINGLE_MEM_LOC_OUT_VIOLATION_OPS
+
+    @classmethod
+    def is_align_exempt(cls, root_name: str) -> bool:
+        return root_name in cls.ALIGN_EXEMPT_OPS
 
     @classmethod
     def should_skip_dtype_check(cls, root_name: str) -> bool:

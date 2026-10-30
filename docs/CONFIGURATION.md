@@ -139,8 +139,11 @@ The value is a **comma-separated list** of fallback case names to disable:
 | `scalar`         | Falls back when all input tensors are 0-dim scalars                                                | Sends scalar ops to RBLN — may fail in `rebel-compiler`                            |
 | `storage_offset` | Falls back when a contiguous tensor has `storage_offset != 0`                                      | Sends offset tensors to RBLN — may read wrong data                                 |
 | `nan_inf`        | Falls back when inputs contain NaN or Inf (non-deploy mode only)                                   | Skips the NaN/Inf scan — invalid values reach the device                           |
-| `align`          | Falls back to CPU when a tensor argument's last dim is not a multiple of 64                        | Sends unaligned ops to RBLN — slower on small tensors, and each new shape compiles |
+| `align`          | Falls back when a tensor's last dim is not a multiple of 64, except ops the compiler pads (below)  | Sends unaligned ops to RBLN — slower on small tensors, and each new shape compiles |
 | `all`            | —                                                                                                  | Disables **all** of the above checks                                               |
+
+The `align` fallback skips ops whose device inputs the compiler pads itself:
+`add`, `sub`, `mul`, `div`, `pow`, `neg`, `abs`, `ceil`, `floor`, `clamp`, `log`, `rsqrt`, `sigmoid`, `silu`, the comparisons, `maximum`, `minimum`, `max`, `min`, `mean`, `mm`, `bmm`, `addmm`, `linear` and `softmax`.
 
 ## Device mapping
 

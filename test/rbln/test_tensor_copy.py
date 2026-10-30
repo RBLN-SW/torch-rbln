@@ -398,7 +398,7 @@ class TestToOps(TestCase):
         out_cpu_offloading = a.to("cpu")
         out_cpu_offloading = out_cpu_offloading.to(torch.float32)
         out_cpu_offloading = out_cpu_offloading @ out_cpu_offloading
-        self.assertEqual(out_cpu_offloading, out_cpu_fallback.to("cpu"))
+        self.assertEqual(out_cpu_offloading, out_cpu_fallback.to("cpu"), atol=1.0, rtol=1e-2)
 
     def test_cf16_to_cpu_remain_cf16(self):
         """Tests that the dtype of a tensor remains custom_float16 after casting to

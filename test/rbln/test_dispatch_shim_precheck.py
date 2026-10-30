@@ -315,9 +315,8 @@ class TestDispatchShimNanInfFallback(TestCase):
         size_before = _C._warmcache_size()
         # 8 % 64 != 0 → ``_last_dim_unaligned`` returns True → cpu_fallback.
         x = torch.arange(8, dtype=torch.float16, device="rbln")
-        y = torch.ones(8, dtype=torch.float16, device="rbln")
-        z = x + y
-        self.assertEqual(z.to("cpu"), torch.arange(1, 9, dtype=torch.float16))
+        z = torch.logical_not(x)
+        self.assertEqual(z.to("cpu"), torch.logical_not(x.cpu()))
         # No new warm-cache entry was installed (cpu_fallback never primes).
         self.assertEqual(_C._warmcache_size(), size_before)
 
