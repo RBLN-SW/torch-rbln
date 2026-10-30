@@ -38,6 +38,110 @@ A log file is always created in debug builds. Its path can be configured via
 | Source location   | ✅ Included                         | ❌ Omitted       |
 | Thread ID         | ✅ Included                         | ❌ Omitted       |
 
+## Host memory registration
+
+`torch.rbln.host_register(ptr, size, device)` keeps a whole-request bool
+contract: `True` means every byte was registered; `False` leaves no successful
+partial registration. The caller must keep the allocation alive and call
+`host_unregister(ptr, device)` after a successful registration. Large requests
+can contain multiple native registrations.
+
+For best-effort partial registration of an existing contiguous CPU tensor, use
+the owned result API:
+
+```python
+buffer = torch.rbln.huge_host_empty(64 << 20)
+with torch.rbln.host_register_memory(buffer, device=0) as registration:
+    print(registration.registered_bytes, registration.fully_registered)
+    # Transfer only after registration completes. Ordinary copies also work
+    # for bytes outside registration.registered_ranges.
+```
+
+`registered_ranges` contains `(address, size)` pairs. `covers(ptr, size)` is true
+only when a single native registration contains the entire transfer. Adjacent
+entries can have different device addresses, so a copy crossing their boundary
+still takes the ordinary path. `is_host_memory_registered(ptr, size, device)`
+performs that query for tensor views whose owner is elsewhere, such as a shared
+memory transfer context. The result is not a bool and raises on implicit truth
+testing, preventing partial success from masquerading as whole-buffer pinning.
+
+The result retains the CPU tensor. `close()` waits for pending device transfers,
+unregisters all entries, and then releases that reference. It is idempotent after
+success; object destruction provides the same cleanup as a fallback. A failed
+release retains the backing memory and budget, stops reporting that entry as
+usable, and raises from explicit close. If the runtime erased its record before
+unpin failed, retry cannot recover it; the memory remains retained until process
+exit. Do not resize, unmap, or replace the backing storage while registered, and
+do not share registration handles across `fork`; initialize worker registrations
+after `spawn` instead.
+
+### Temporary page-table admission
+
+Older KMD versions can exhaust their finite page-table pool before safely
+returning an error. Both public Python registration APIs therefore share a
+per-device, per-process ledger. The limits are **8,192 ordinary-page leaf
+tables** and **252 GiB of admitted host address space**, including registration
+alignment padding. One ordinary-page table covers 2 MiB, so 8,192 tables allow
+16 GiB of densely packed 4 KiB mappings. Small or fragmented registrations can
+consume that allowance with fewer bytes. Confirmed huge mappings still consume
+address space and upper-level tables; they are not unlimited.
+
+The qualified UMD external VA arena is `[0x4100000000, 0x8000000000)`,
+which is 252 GiB. A 256 GiB allocation therefore retains at least 4 GiB
+unregistered even if every page is huge. This qualification uses KMQ with no
+other users of that external arena. UMQ command buffers and on-demand host
+mappings share the arena; UMQ requires separate capacity qualification and
+accounting before using this large-pool profile.
+
+These limits assume one worker, one context/task per physical device, dual-path
+disabled, 2 MiB-aligned external device VA allocation in UMD, and room for the
+deployment's model mapping in the remaining page-table pool. They are a temporary
+admission policy for that configuration, not a driver capacity guarantee for
+arbitrary context counts or mappings. Calls through private `_C` entry points,
+direct runtime/C++ APIs, or another process are outside this ledger.
+
+| Variable                               | Values                | Default        |
+| -------------------------------------- | --------------------- | -------------- |
+| `TORCH_RBLN_HOST_REGISTRATION_PROFILE` | `conservative`, `thp` | `conservative` |
+
+`conservative` counts every admitted window as ordinary pages. `thp` is an
+explicit deployment qualification: use it only when direct/identity DMA
+(`iommu=pt` or a verified equivalent), 2 MiB device VA alignment, and KMD huge
+mapping support are confirmed. Host THP size alone does not prove the size of
+the device mapping. The library does not infer qualification from a global
+huge-page counter or from the absence of an IOMMU group.
+
+For `thp`, registration processes at most 1 GiB at a time:
+
+1. The owned-buffer API requests pool-local `MADV_HUGEPAGE` and best-effort
+   `MADV_COLLAPSE`; the raw pointer API does not alter the caller's THP advice.
+2. Register the window temporarily as io_uring buffers. No I/O is submitted;
+   this holds Linux long-term pins while the mapping is inspected.
+3. Use read-only `PAGEMAP_SCAN` to find present, non-zero, complete 2 MiB huge
+   mappings in that exact range. Unknown and partial windows cost a leaf table.
+4. Reserve budget, coalesce adjacent selected windows, and register them with
+   the device while the temporary pins remain held. An unaligned leading
+   fragment stays separate so it cannot break the body's device alignment.
+5. Release the temporary pins and continue. The device's own pins retain the
+   admitted pages. Unadmitted pages remain ordinary usable host memory.
+
+This requires Linux io_uring buffer registration, sufficient `RLIMIT_MEMLOCK`
+for a bounded inspection window, and the `PAGEMAP_SCAN` UAPI. On unsupported
+kernels, restricted containers, or insufficient memlock, inspection logs its
+failure once per request and charges unverified windows in full. It never
+credits a `smaps` snapshot that can change before registration. Neither API
+changes host-wide THP/compaction settings or tmpfs mount options; tmpfs THP must
+be permitted by the operator's existing mount policy.
+
+When the ordinary-page allowance is exhausted, the owned-buffer API continues
+registering confirmed huge windows and leaves the remaining ordinary windows
+unregistered. For example, an aligned 240 GiB pool with 222 GiB huge and 18 GiB
+ordinary mappings can admit 238 GiB. The separate external-VA limit still applies
+to larger pools. Registration failure with uncertain driver
+cleanup propagates and retains the attempted charge; it is not treated as a
+safe capacity refusal. Replace this temporary guard only after the deployed
+driver/runtime reliably reports exhaustion and rolls back failed registrations.
+
 ## Deploy mode
 
 Skip NaN/Inf validation checks to reduce runtime overhead in production:

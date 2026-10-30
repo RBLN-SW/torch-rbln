@@ -11,6 +11,15 @@ import os
 import sys
 
 
+def host_registration_profile() -> str:
+    """Return the explicitly qualified device mapping profile for host pinning."""
+    profile = os.environ.get("TORCH_RBLN_HOST_REGISTRATION_PROFILE", "conservative")
+    if profile not in {"conservative", "thp"}:
+        msg = "TORCH_RBLN_HOST_REGISTRATION_PROFILE must be conservative or thp"
+        raise ValueError(msg)
+    return profile
+
+
 def _running_as_diagnose_module() -> bool:
     """True if the interpreter was invoked as python -m torch_rbln.diagnose."""
     if len(sys.argv) >= 3 and sys.argv[1] == "-m" and sys.argv[2] == "torch_rbln.diagnose":
