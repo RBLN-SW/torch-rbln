@@ -38,15 +38,33 @@ A log file is always created in debug builds. Its path can be configured via
 | Source location   | ✅ Included                         | ❌ Omitted       |
 | Thread ID         | ✅ Included                         | ❌ Omitted       |
 
+## NaN/Inf compatibility checks
+
+By default, eager dispatch does not scan inputs for NaN or Inf and does not
+fall back to CPU because of those values. Device arithmetic may interpret or
+propagate them differently from CPU PyTorch, including for bf16. The input
+scan also does not detect non-finite values produced from finite inputs.
+
+To enable host-side input scanning and CPU fallback for NaN/Inf inputs:
+
+```bash
+export TORCH_RBLN_CHECK_NAN_INF=ON
+```
+
+The scan may synchronize device data to the host before each eager operation,
+including warm-cache hits. The pytest suite enables it through a shared fixture
+so upstream ops tests and existing fallback tests retain their behavior.
+Outside pytest, enable it explicitly when running compatibility tests.
+
 ## Deploy mode
 
-Skip NaN/Inf validation checks to reduce runtime overhead in production:
+Deploy mode skips NaN/Inf scanning even when compatibility checks are enabled:
 
 ```bash
 export TORCH_RBLN_DEPLOY=ON
 ```
 
-**Runtime behavior**. `TORCH_RBLN_DEPLOY` and
+**Runtime behavior**. `TORCH_RBLN_CHECK_NAN_INF`, `TORCH_RBLN_DEPLOY` and
 `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` are read on each operator dispatch, so
 changes affect subsequent dispatches without restarting the process. Modify
 these variables only when no RBLN operator dispatch is in progress; concurrent
@@ -138,7 +156,7 @@ The value is a **comma-separated list** of fallback case names to disable:
 | `dtype`          | Falls back on unsupported or mismatched tensor dtypes                                              | Sends such tensors to RBLN — may produce wrong results                             |
 | `scalar`         | Falls back when all input tensors are 0-dim scalars                                                | Sends scalar ops to RBLN — may fail in `rebel-compiler`                            |
 | `storage_offset` | Falls back when a contiguous tensor has `storage_offset != 0`                                      | Sends offset tensors to RBLN — may read wrong data                                 |
-| `nan_inf`        | Falls back when inputs contain NaN or Inf (non-deploy mode only)                                   | Skips the NaN/Inf scan — invalid values reach the device                           |
+| `nan_inf`        | With `TORCH_RBLN_CHECK_NAN_INF=ON`, falls back on NaN/Inf inputs outside deploy mode               | Skips the opt-in scan, even when compatibility checks are enabled                  |
 | `align`          | Falls back to CPU when a tensor argument's last dim is not a multiple of 64                        | Sends unaligned ops to RBLN — slower on small tensors, and each new shape compiles |
 | `all`            | —                                                                                                  | Disables **all** of the above checks                                               |
 

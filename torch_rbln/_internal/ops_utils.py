@@ -12,7 +12,7 @@ from torch.utils._pytree import tree_flatten, tree_unflatten
 from torch_rbln import _C
 from torch_rbln._internal.compile_cache import compile_rbln_cached_entry
 from torch_rbln._internal.dummy_device import raise_if_dummy_execution
-from torch_rbln._internal.env_utils import is_rbln_deploy, use_device_group_num_devices
+from torch_rbln._internal.env_utils import is_nan_inf_check_enabled, is_rbln_deploy, use_device_group_num_devices
 from torch_rbln._internal.log_utils import rbln_log_warn, rbln_log_warn_once, rbln_record_cpu_fallback
 from torch_rbln._internal.warm_cache import install_pending as _install_warm_cache_pending
 
@@ -2078,9 +2078,9 @@ def is_cpu_fallback_cases(args):
     3. **Scalar Tensors**: If all input tensors are scalar tensors, rebel-compiler falls
        back to host ops.
     4. **Storage Offset**: If any tensor has `storage_offset != 0`, fall back to CPU.
-    5. **NaN/Inf Values**: When not in deploy mode, if any input tensor contains NaN or
-       Inf values, rbln cannot handle them and we need to fall back to CPU. This check
-       converts tensors to CPU before checking to ensure accurate detection.
+    5. **NaN/Inf Values**: With TORCH_RBLN_CHECK_NAN_INF=ON outside deploy mode,
+       inputs containing NaN or Inf fall back to CPU. The opt-in scan converts inputs
+       to CPU and preserves the fallback behavior used by compatibility tests.
     6. **Reentrancy** (checked last): When we're already inside an RBLN op that uses
        torch.compile (thread-local depth > 0), any nested dispatch (e.g. compiled graph
        running torch.add -> add_rbln again, or print/repr triggering tensor ops) must
@@ -2144,9 +2144,13 @@ def is_cpu_fallback_cases(args):
     ):
         return True
 
-    # 5: fall back to the CPU if any tensor contains NaN/Inf values (heavy: to_cpu +
-    # scan; non-deploy only)
-    if "nan_inf" not in disabled_cases and not is_rbln_deploy() and has_invalid_tensor(to_cpu(args)):
+    # 5: opt-in host scan; keep the gate before to_cpu to avoid materializing inputs.
+    if (
+        is_nan_inf_check_enabled()
+        and "nan_inf" not in disabled_cases
+        and not is_rbln_deploy()
+        and has_invalid_tensor(to_cpu(args))
+    ):
         return True
 
     # 6: Reentrancy — already inside an RBLN compile op (e.g. from print/repr or from
