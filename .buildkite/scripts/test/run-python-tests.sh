@@ -228,6 +228,14 @@ if [[ "${test_suite}" == "ops" ]]; then
   parallel_report=(--fallback-report="test-reports/${test_suite}-parallel.json")
 fi
 
+# Op test durations differ by orders of magnitude. `load` scheduling keeps the tests
+# already queued on a worker there, so two long ones can run back to back while the
+# other workers sit idle; `worksteal` moves queued tests to idle workers.
+parallel_scheduling=()
+if [[ "${test_suite}" == "ops" ]]; then
+  parallel_scheduling=(--dist=worksteal)
+fi
+
 echo "--- Running ${test_suite} suite, ${test_dir}, serial tests"
 pytest_exit_code=0
 env \
@@ -255,6 +263,7 @@ env \
       "${test_dir}" \
       -m "${selection} and (not serial)" \
       "${parallel_report[@]}" \
+      "${parallel_scheduling[@]}" \
       --numprocesses="${num_workers}" \
   || pytest_exit_code=$?
 if [[ "${pytest_exit_code}" -ne 0 && "${pytest_exit_code}" -ne 5 ]]; then

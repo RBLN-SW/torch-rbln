@@ -81,6 +81,10 @@ The `ops` step also writes a
 `pytest` run and uploads both as artifacts. A failed upload does not fail the
 step.
 
+The `ops` step runs its parallel tests with `--dist=worksteal`. Op test
+durations differ by orders of magnitude, and the default `load` scheduling can
+leave long tests queued on one worker while the others sit idle.
+
 ### Release checks
 
 The `Debug` wheel builds and runs against a debug wheel of the pinned `torch`
