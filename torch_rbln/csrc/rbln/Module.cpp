@@ -10,6 +10,7 @@
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNSupportedDtypes.h>
+#include <c10/util/accumulate.h>
 #include <torch/csrc/Dtype.h>
 #include <torch/csrc/utils/pybind.h>
 #include <torch_rbln/csrc/distributed/c10d/rbln/ProcessGroupRBLNModule.hpp>
@@ -345,6 +346,48 @@ void register_internal_api(py::module_& module) {
             tensor.data_ptr(), tensor.storage().nbytes());
       },
       "Internal: give an RBLN tensor a flat single-node device allocation");
+
+  // Cross-process device memory. Used by torch_rbln.ipc.
+  module.def(
+      "_export_device_memory",
+      [](const at::Tensor& tensor) {
+        check_base_rbln_tensor(tensor, "export_tensor", "tensor");
+        const auto h = c10::rbln::export_device_memory(tensor.data_ptr());
+        return py::make_tuple(
+            h.size, py::bytes(reinterpret_cast<const char*>(h.payload.data()), h.payload.size()), h.fds);
+      },
+      "Internal: export an RBLN tensor's allocation as (size, payload, dma_buf_fds)");
+  module.def(
+      "_empty_exportable",
+      [](c10::DeviceIndex device_index, std::vector<int64_t> sizes, c10::ScalarType dtype) {
+        const auto nbytes = c10::multiply_integers(sizes) * c10::elementSize(dtype);
+        void* base = c10::rbln::malloc_exportable(device_index, nbytes);
+        const auto base_ptr = reinterpret_cast<uint64_t>(base);
+        return at::native::rbln::create_owning_tensor_from_ptr(base_ptr, base_ptr, sizes, dtype);
+      },
+      "Internal: allocate an owning RBLN tensor that _export_device_memory accepts");
+  module.def(
+      "_import_device_memory",
+      [](c10::DeviceIndex device_index,
+         uint64_t size,
+         const py::bytes& payload,
+         const std::vector<int>& fds,
+         std::vector<int64_t> sizes,
+         c10::ScalarType dtype) {
+        const auto nbytes = c10::multiply_integers(sizes) * c10::elementSize(dtype);
+        TORCH_CHECK(
+            static_cast<uint64_t>(nbytes) == size,
+            "open_tensor: shape and dtype describe ",
+            nbytes,
+            " bytes but the handle covers ",
+            size);
+        const std::string raw = payload;
+        const std::vector<uint8_t> bytes(raw.begin(), raw.end());
+        void* base = c10::rbln::import_device_memory(device_index, static_cast<size_t>(size), bytes, fds);
+        const auto base_ptr = reinterpret_cast<uint64_t>(base);
+        return at::native::rbln::create_owning_tensor_from_ptr(base_ptr, base_ptr, sizes, dtype);
+      },
+      "Internal: rebuild an owning RBLN tensor from (size, payload, dma_buf_fds)");
 
   // Used by torch_rbln.host_register() / host_unregister().
   module.def(
