@@ -189,8 +189,15 @@ def {kernel_name}(*args, **kwargs):
 """
 
         @staticmethod
-        def inplace(kernel_name: str, general_kernel_name: str) -> str:
+        def inplace(kernel_name: str, general_kernel_name: str, *, bind_self_as_out: bool = False) -> str:
             """Generate inplace function code."""
+            if bind_self_as_out:
+                return f"""
+def {kernel_name}(*args, **kwargs):
+    result, _ = {general_kernel_name}(*args, **kwargs, out=args[0])
+    if result.data_ptr() != args[0].data_ptr():
+        args[0].copy_(result)
+"""
             return f"""
 def {kernel_name}(*args, **kwargs):
     # TODO: try zero-copy by passing args[0] as out tensor (need to check for violations)

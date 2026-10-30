@@ -119,7 +119,7 @@ def {kernel_name}(*args, **kwargs):
 """
 
         @staticmethod
-        def main(target: str, root_name: str, op_namespace: str) -> str:
+        def main(target: str, root_name: str, op_namespace: str, gate_kwargs: str = "", run_kwargs: str = "") -> str:
             """Generate main function body logic.
 
             Delegates the device-path dispatch to
@@ -129,7 +129,7 @@ def {kernel_name}(*args, **kwargs):
             """
             return f"""
     out_tensor = kwargs.get('out', None)
-    if is_cpu_fallback_cases(args):
+    if is_cpu_fallback_cases(args{gate_kwargs}):
         result_tensor = cpu_fallback_path(
             {target},
             args,
@@ -139,7 +139,7 @@ def {kernel_name}(*args, **kwargs):
         )
     else:
         result_tensor = compile_and_run_view_aware(
-            {target}, "{op_namespace}::{root_name}", args, kwargs_filtered, out_tensor,
+            {target}, "{op_namespace}::{root_name}", args, kwargs_filtered, out_tensor,{run_kwargs}
         )
 
     return result_tensor, result_tensor.shape
