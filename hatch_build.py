@@ -1,5 +1,4 @@
 import os
-import platform
 import shutil
 import subprocess
 import sys
@@ -14,8 +13,8 @@ class CMakeBuildHook(BuildHookInterface):
     def initialize(self, version: str, build_data: dict[str, Any]) -> None:  # noqa: ARG002
         install_manifest = self._build_cmake_extension()
         build_data["pure_python"] = False
+        build_data["infer_tag"] = True
         self._include_installed_files(build_data, install_manifest)
-        self._set_platform_tag(build_data)
 
     def _build_cmake_extension(self) -> Path:
         project_root = Path(self.root)
@@ -95,23 +94,6 @@ class CMakeBuildHook(BuildHookInterface):
             check=True,
         )
 
-    @staticmethod
-    def _get_manylinux_platform_tag() -> str | None:
-        if sys.platform != "linux":
-            return None
-
-        try:
-            libc_info = os.confstr("CS_GNU_LIBC_VERSION")
-            _, version_str = (libc_info or "").split()
-        except (ValueError, OSError, AttributeError):
-            _, version_str = platform.libc_ver()
-            if not version_str:
-                return None
-
-        major, minor = version_str.split(".")[:2]
-        machine = platform.machine()
-        return f"manylinux_{major}_{minor}_{machine}"
-
     def _include_installed_files(self, build_data: dict[str, Any], install_manifest: Path) -> None:
         project_root = Path(self.root)
         # The manifest keeps gitignored build leftovers out of the wheel.
@@ -123,11 +105,3 @@ class CMakeBuildHook(BuildHookInterface):
         build_data["artifacts"].extend(
             f"/{Path(installed_file).relative_to(project_root).as_posix()}" for installed_file in installed_files
         )
-
-    def _set_platform_tag(self, build_data: dict[str, Any]) -> None:
-        manylinux_platform = self._get_manylinux_platform_tag()
-        if manylinux_platform:
-            python_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
-            build_data["tag"] = f"{python_tag}-{python_tag}-{manylinux_platform}"
-        else:
-            build_data["infer_tag"] = True
