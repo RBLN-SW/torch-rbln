@@ -83,7 +83,9 @@ step.
 
 The `ops` step runs its parallel tests with `--dist=worksteal`. Op test
 durations differ by orders of magnitude, and the default `load` scheduling can
-leave long tests queued on one worker while the others sit idle.
+leave long tests queued on one worker while the others sit idle. The step also
+sets `OMP_NUM_THREADS=1` for both runs: it runs one worker per CPU, and each
+worker's OpenMP pool would otherwise size itself to every CPU it can see.
 
 ### Release checks
 

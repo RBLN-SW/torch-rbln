@@ -141,6 +141,14 @@ case "${test_suite}" in
     ;;
 esac
 
+# The ops step runs one xdist worker per CPU, and each worker would otherwise size its
+# OpenMP pool to every CPU it can see; the oversubscribed threads take CPU time the
+# compiles need. torch and librbln both read OMP_NUM_THREADS; RBLN_NUM_THREADS alone
+# makes librbln change torch's thread count inside a Dynamo trace, failing the compile.
+if [[ "${test_suite}" == "ops" ]]; then
+  pytest_env+=("OMP_NUM_THREADS=1")
+fi
+
 echo "--- Checking NPU environment"
 shopt \
   -s \

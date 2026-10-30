@@ -132,9 +132,10 @@ Release checks drop `(not periodic) and`. CI also splits a suite into steps by
 NPU count, each with both runs (see [Python tests](PIPELINES.md#python-tests)).
 The `core` suite runs `test/rbln`; `distributed`, `models`, and `ops` run
 `test/<suite>`, and `models` needs the
-[model-test dependencies](#prerequisites). The `ops` suite's parallel run also
-passes `--dist=worksteal`. CI counts a `pytest` run that collects nothing (exit
-code 5) as no failure.
+[model-test dependencies](#prerequisites). The `ops` suite sets
+`OMP_NUM_THREADS=1` for both runs, and its parallel run also passes
+`--dist=worksteal`. CI counts a `pytest` run that collects nothing (exit code 5)
+as no failure.
 
 ### Run individual tests
 
