@@ -326,10 +326,8 @@ class CpuFallbackReport:
             for (op, reason), n in after.items():
                 if n > before.get((op, reason), 0):
                     reasons_by_op.setdefault(op, {})[reason] = n - before.get((op, reason), 0)
-            by_op = {op: sum(reasons.values()) for op, reasons in reasons_by_op.items()}
             item.stash[_CPU_FALLBACK] = {
-                "cpu_fallback": sum(by_op.values()),
-                "cpu_fallback_by_op": by_op,
+                "cpu_fallback": sum(n for reasons in reasons_by_op.values() for n in reasons.values()),
                 "cpu_fallback_reasons_by_op": reasons_by_op,
                 # A reset inside the call drops a count below where it started.
                 "cpu_fallback_reset_detected": any(after.get(key, 0) < n for key, n in before.items()),
