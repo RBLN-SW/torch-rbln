@@ -1779,7 +1779,7 @@ def view_recipes_for_positional(view_recipes_flat, positional_count):
     return view_recipes_flat[:positional_count]
 
 
-def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_tensor):
+def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_tensor, *, allow_inplace_out=False):
     """Centralized view-aware rbln-compile dispatch.
 
     The single entry point used by all generated ``*_rbln`` handlers (via the
@@ -1899,7 +1899,7 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
 
     if out_tensor is None:
         result_tensor = None
-    elif can_use_out_tensor_directly(view_args, dict(view_kwargs, out=out_tensor)):
+    elif can_use_out_tensor_directly(view_args, dict(view_kwargs, out=out_tensor), allow_inplace=allow_inplace_out):
         result_tensor = out_tensor
     else:
         result_tensor = None
@@ -2056,7 +2056,7 @@ def _parse_disabled_fallback_cases() -> frozenset:
     return _ALL_FALLBACK_CASES if ("all" in cases) else (cases & _ALL_FALLBACK_CASES)
 
 
-def is_cpu_fallback_cases(args):
+def is_cpu_fallback_cases(args, *, skip_dtype_args=()):
     """Determines if a CPU fallback is necessary for an operation.
 
     This function checks for several conditions that would require an operation to fall
@@ -2074,7 +2074,8 @@ def is_cpu_fallback_cases(args):
        to CPU and never enter the compile path.
     2. **Unsupported or Mismatched Data Types**: If any input tensor's dtype is not in
        ``SupportedDtypes.dispatch``, or if the inputs mix different supported dtypes.
-       The RBLN compute path requires all tensors to share the same supported dtype.
+       The data tensors must share a supported dtype; ``skip_dtype_args`` excludes
+       typed predicates from this check only.
     3. **Scalar Tensors**: If all input tensors are scalar tensors, rebel-compiler falls
        back to host ops.
     4. **Storage Offset**: If any tensor has `storage_offset != 0`, fall back to CPU.
@@ -2098,6 +2099,7 @@ def is_cpu_fallback_cases(args):
     Args:
         args (tuple): A tuple of positional arguments for the operation, which may
             contain tensors.
+        skip_dtype_args: Positional predicate indices exempt from dtype matching.
 
     Returns:
         bool: True if a CPU fallback is necessary, False otherwise.
@@ -2127,11 +2129,14 @@ def is_cpu_fallback_cases(args):
     # 2: fall back to the CPU if any input tensor has an unsupported dtype, or if input
     # tensors have mismatched dtypes
     if "dtype" not in disabled_cases:
-        first_dtype = tensor_args[0].dtype
-        if first_dtype not in SupportedDtypes.dispatch:
-            return True
-        for i in range(1, len(tensor_args)):
-            if tensor_args[i].dtype != first_dtype:
+        dtype_args = tensor_args
+        if skip_dtype_args:
+            dtype_args = extract_tensors(tuple(a for i, a in enumerate(args) if i not in skip_dtype_args))
+        if dtype_args:
+            first_dtype = dtype_args[0].dtype
+            if first_dtype not in SupportedDtypes.dispatch:
+                return True
+            if any(t.dtype != first_dtype for t in dtype_args[1:]):
                 return True
 
     # 3: fall back to the CPU if all input tensors are scalar tensors
@@ -2243,12 +2248,12 @@ def is_inplace_op(args, kwargs) -> bool:
     return any(t is out_t or (t.data_ptr() == out_t.data_ptr() and t.device == out_t.device) for t in input_tensors)
 
 
-def can_use_out_tensor_directly(args: tuple, kwargs: dict) -> bool:
+def can_use_out_tensor_directly(args: tuple, kwargs: dict, *, allow_inplace: bool = False) -> bool:
     """Check if the out_tensor can be used directly by the compiler.
 
     This function checks several conditions to determine if the output tensor
     can be used directly without creating a temporary tensor:
-    1. Not an in-place operation
+    1. Not an in-place operation unless ``allow_inplace`` permits an elementwise update
     2. Tensor is neither empty nor scalar
     3. Tensor is contiguous
     4. Tensor has zero storage offset
@@ -2267,7 +2272,7 @@ def can_use_out_tensor_directly(args: tuple, kwargs: dict) -> bool:
         return False
 
     return (
-        not is_inplace_op(args, kwargs)
+        (allow_inplace or not is_inplace_op(args, kwargs))
         and ((out_tensor.numel() > 0) and len(out_tensor.size()) > 0)
         and out_tensor.is_contiguous()
         and (out_tensor.storage_offset() == 0)

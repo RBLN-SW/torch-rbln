@@ -72,7 +72,10 @@ class GeneralFunctionGenerator:
         if self.op_categories.needs_tensor_args_extraction_before_empty_handling(root_name):
             code += self.templates.ArgsProcessing.tensor_args_extraction()
         code += self.generate_empty_tensor_handling(root_name)
-        code += self.templates.FunctionBody.main(target, root_name, op_namespace)
+        skip = self.op_categories.get_py_gate_skip_dtype_args(root_name)
+        gate_kwargs = f", skip_dtype_args={skip}" if skip else ""
+        run_kwargs = " allow_inplace_out=True," if self.op_categories.inplace_binds_self_as_out(root_name) else ""
+        code += self.templates.FunctionBody.main(target, root_name, op_namespace, gate_kwargs, run_kwargs)
 
         return code
 
