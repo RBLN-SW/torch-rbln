@@ -37,8 +37,8 @@ Pre-merge, post-merge, and release checks all run these jobs:
   type. They check each wheel for `manylinux` compatibility and valid metadata,
   and verify that it installs and imports in a clean environment.
 - **NPU tests** run the C++ tests and the Python test suites for each NPU
-  product. Only release checks run the `ops` Python test suite and the Python
-  tests marked [`periodic`](TEST_GUIDE.md#ci-integration).
+  product. Only release checks run the Python tests marked
+  [`periodic`](TEST_GUIDE.md#ci-integration).
 
 All three publish their `Release` wheels to the `rbln-internal` index and run
 their NPU tests against the x86_64 wheels for Python 3.12, but they differ in
@@ -49,7 +49,6 @@ coverage:
 | Source linting | Python 3.12, x86_64, `Release` | Python 3.12, x86_64, `Release` | Python 3.10–3.14, x86_64, `Release` and `Debug`                                                         |
 | Wheel builds   | Python 3.12, x86_64, `Release` | Python 3.12, x86_64, `Release` | Python 3.10–3.14, x86_64 and aarch64, `Release`; Python 3.12, x86_64, `Debug`                           |
 | NPU tests      | RBLN-CA25, RBLN-CR13           | RBLN-CA25                      | `Release` wheel: RBLN-CA25, RBLN-CR13; `Debug` wheel: RBLN-CA25, without the `models` Python test suite |
-| `ops` suite    | Not run                        | Not run                        | Run                                                                                                     |
 | Periodic tests | Not run                        | Not run                        | Run                                                                                                     |
 
 ### Linting
