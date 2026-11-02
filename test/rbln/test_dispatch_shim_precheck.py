@@ -8,10 +8,9 @@ The shim short-circuits to the CPU fallback path on these conditions
   1. any input tensor whose dtype is not float16 (with a per-op
      `skip_dtype_args` allowlist for typed inputs e.g. bool predicates),
   2. all input tensors are scalar (ndim == 0),
-  3. (non-deploy mode only) any input tensor contains NaN or Inf —
-     mirrors the AS-IS Python ``has_invalid_tensor(to_cpu(args))`` safety
-     net that the warm-cache hot path would otherwise bypass after the
-     first call had installed an entry on clean inputs.
+  3. any input tensor contains NaN or Inf, when ``TORCH_RBLN_CHECK_NAN_INF=ON``,
+     deploy mode is off, and ``nan_inf`` / ``all`` fallback checks are not disabled.
+     The C++ scan runs before warm-cache lookup; the Python path uses the same gates.
 
 Two important non-trivial properties:
 
@@ -240,21 +239,12 @@ class TestDispatchShimDtypeMismatch(TestCase):
 
 @pytest.mark.npu(count=1)
 class TestDispatchShimNanInfFallback(TestCase):
-    """Inputs containing NaN or Inf must route to the CPU fallback path in
-    non-deploy mode.
+    """Opted-in NaN/Inf inputs must fall back even after a clean call primes the cache.
 
-    The rbln runtime does not handle NaN/Inf inputs and will silently produce
-    wrong results. In AS-IS this safety net was carried by the Python
-    wrapper's per-call ``has_invalid_tensor(to_cpu(args))`` scan; in TO-BE
-    the C++ ``quick_fallback_check`` performs the same scan (only when
-    non-deploy + ``TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK`` does not contain
-    ``nan_inf`` / ``all``) so the warm-cache hot path cannot bypass it after
-    the first clean call installs an entry for the shape.
-
-    These tests assume the default non-deploy environment (the deploy / nan_inf-disable
-    gates are read live from the environment on each dispatch, not process-cached;
-    running the suite with ``TORCH_RBLN_DEPLOY=ON`` skips the scan and these checks no
-    longer hold — that's the intended deploy-mode behavior and matches AS-IS).
+    The shared ``enable_nan_inf_checks`` fixture sets ``TORCH_RBLN_CHECK_NAN_INF=ON``;
+    production dispatch leaves the scan off by default. These tests also require
+    deploy mode to be off and ``TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK`` to contain
+    neither ``nan_inf`` nor ``all``. Either override skips the scan despite the opt-in.
     """
 
     def setUp(self) -> None:
@@ -394,11 +384,12 @@ class TestDispatchShimNanInfFallback(TestCase):
 
 @pytest.mark.npu(count=1)
 class TestDispatchShimGateLiveRead(TestCase):
-    """Both NaN/Inf-scan gates -- ``TORCH_RBLN_DEPLOY`` (``is_deploy_mode``) and
-    ``TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK`` (``is_fallback_case_disabled``) in
-    ``DispatchShim.cpp`` -- are read live per dispatch, not cached in a process-lifetime
-    ``static``. A re-introduced static cache in either would latch the first value and
-    fail its toggle. They are separate functions, so each is toggled separately.
+    """The deploy and fallback-disable overrides are read live per dispatch.
+
+    The shared fixture keeps ``TORCH_RBLN_CHECK_NAN_INF=ON`` while these tests toggle
+    ``TORCH_RBLN_DEPLOY`` and ``TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK`` separately.
+    A process-lifetime cache in either override would fail its toggle. Live reads of
+    the opt-in flag itself are covered in ``test_nan_inf_opt_in.py``.
     """
 
     _GATE_ENVS = ("TORCH_RBLN_DEPLOY", "TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK")
@@ -412,9 +403,9 @@ class TestDispatchShimGateLiveRead(TestCase):
 
     def _assert_gate_read_live(self, env_name, scan_off_value) -> None:
         """Toggle one gate off -> on -> off in a single process and assert the warm
-        cache is primed only while the scan is off. Both gate envs are cleared at each
-        baseline so ambient state can't skip the scan; ``env_name=scan_off_value``
-        disables it.
+        cache is primed only while the scan is off. With the shared fixture's opt-in
+        active, clearing both override envs restores the scan at each baseline;
+        ``env_name=scan_off_value`` disables it.
         """
         if not _C._warmcache_is_enabled():
             self.skipTest("warm cache disabled; the device-path install is unobservable")
