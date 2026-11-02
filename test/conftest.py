@@ -284,8 +284,8 @@ def pytest_addoption(parser):
         "--fallback-report",
         type=Path,
         metavar="PATH",
-        help="Write each test's call outcome and CPU fallbacks over its call, per op and reason, to PATH as JSON, "
-        "leaving out skipped tests",
+        help="Write each test_compare_cpu test's call outcome and CPU fallbacks over its call, per op and reason, "
+        "to PATH as JSON, leaving out skipped tests",
     )
 
 
@@ -296,6 +296,11 @@ def pytest_configure(config):
 
 
 _CPU_FALLBACK = pytest.StashKey[dict]()
+# The report is for the test that compares the op's device result against its CPU
+# result: a fallback there makes the comparison CPU against CPU. The other op tests
+# check other contracts (out=, refs, dtypes, ...) and are left out. Revisit once the
+# test harness (input generation, the comparison) runs on the CPU.
+_FALLBACK_REPORT_TESTS = ("test_compare_cpu",)
 
 
 def _cpu_fallback_counts():
@@ -303,8 +308,9 @@ def _cpu_fallback_counts():
 
 
 class CpuFallbackReport:
-    """CPU fallbacks over each test call, so a test that passed on a CPU fallback --
-    comparing CPU against CPU -- shows up. Fixtures and child processes are not counted.
+    """CPU fallbacks over each test_compare_cpu call, so a test that passed on a CPU
+    fallback -- comparing CPU against CPU -- shows up. Fixtures and child processes are
+    not counted.
 
     The counts are the per-op CPU fallback counts that every fallback path records, the
     ones ``torch.rbln.explain()`` reads. A test that resets them is marked, unless the
@@ -318,6 +324,8 @@ class CpuFallbackReport:
 
     @pytest.hookimpl(wrapper=True)
     def pytest_runtest_call(self, item):
+        if not item.name.startswith(_FALLBACK_REPORT_TESTS):
+            return (yield)
         before = _cpu_fallback_counts()
         try:
             return (yield)
