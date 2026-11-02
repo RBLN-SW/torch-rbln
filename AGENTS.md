@@ -25,8 +25,9 @@ a synonym because the sentence reads better.
   uninvolved.
 - **graph mode** — the user's `torch.compile(backend="rbln")` over a whole FX
   graph.
-- **deploy mode** — `TORCH_RBLN_DEPLOY=ON`, which skips the host-side NaN/Inf
-  scan. It is not a third execution path.
+- **deploy mode** — `TORCH_RBLN_DEPLOY=ON`, which overrides
+  `TORCH_RBLN_CHECK_NAN_INF=ON` and skips the host-side NaN/Inf scan. The scan
+  is off by default even outside deploy mode. It is not a third execution path.
 - **logical device** — what `rbln:N` and `device_count()` refer to: one or more
   **physical NPUs** grouped by `RBLN_NPUS_PER_DEVICE` or `RBLN_DEVICE_MAP`.
   Always say which of the two you mean.
