@@ -30,6 +30,7 @@ wrapper path together.
 
 import math
 import os
+from contextlib import contextmanager
 from unittest import mock
 
 import pytest
@@ -153,20 +154,23 @@ class TestDispatchShimLastDimOneBroadcast(TestCase):
     def setUp(self) -> None:
         _C._warmcache_clear()
 
+    @contextmanager
+    def _expect_warm_hit(self):
+        before = _dispatch_counts()[2]
+        yield
+        self.assertGreater(_dispatch_counts()[2], before, "call must use the warm cache")
+
     def test_aligned_output_takes_device_path_and_warm_hits(self) -> None:
         x = torch.arange(4 * 64, dtype=torch.float16, device="rbln").reshape(4, 64)
         s = torch.tensor([[1.0], [2.0], [3.0], [4.0]], dtype=torch.float16, device="rbln")
         expected = x.cpu() * s.cpu()
         self.assertEqual((x * s).cpu(), expected)
         self.assertGreater(_C._warmcache_size(), 0, "the broadcast did not install a device entry")
-        _, _, hits_before, _ = _dispatch_counts()
-        self.assertEqual((x * s).cpu(), expected)
-        _, _, hits_after, _ = _dispatch_counts()
-        self.assertGreater(hits_after, hits_before)
+        with self._expect_warm_hit():
+            self.assertEqual((x * s).cpu(), expected)
         s.fill_(0.5)
-        _, _, hits_before, _ = _dispatch_counts()
-        self.assertEqual((x * s).cpu(), x.cpu() * 0.5)
-        self.assertGreater(_dispatch_counts()[2], hits_before, "updated input must be read on a warm hit")
+        with self._expect_warm_hit():
+            self.assertEqual((x * s).cpu(), x.cpu() * 0.5)
 
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("op", [torch.eq, torch.ne, torch.gt, torch.ge, torch.lt, torch.le])
@@ -177,21 +181,28 @@ class TestDispatchShimLastDimOneBroadcast(TestCase):
         expected = op(x_cpu, threshold_cpu)
         self.assertEqual(op(x, threshold).cpu(), expected)
         self.assertGreater(_C._warmcache_size(), 0, "the comparison did not install a device entry")
-        hits_before = _dispatch_counts()[2]
-        self.assertEqual(op(x, threshold).cpu(), expected)
-        self.assertGreater(_dispatch_counts()[2], hits_before)
+        with self._expect_warm_hit():
+            self.assertEqual(op(x, threshold).cpu(), expected)
 
         threshold.fill_(128.0)
         updated = op(x_cpu, torch.full_like(threshold_cpu, 128.0))
         self.assertFalse(torch.equal(expected, updated), "updated threshold must change the result")
-        hits_before = _dispatch_counts()[2]
-        self.assertEqual(op(x, threshold).cpu(), updated)
-        self.assertGreater(_dispatch_counts()[2], hits_before, "updated threshold must be read on a warm hit")
+        with self._expect_warm_hit():
+            self.assertEqual(op(x, threshold).cpu(), updated)
 
     def test_unaligned_output_keeps_the_cpu_fallback(self) -> None:
         x = torch.arange(4 * 8, dtype=torch.float16, device="rbln").reshape(4, 8)
         s = torch.tensor([[1.0], [2.0], [3.0], [4.0]], dtype=torch.float16, device="rbln")
         self.assertEqual((x * s).cpu(), x.cpu() * s.cpu())
+        self.assertEqual(_C._warmcache_size(), 0)
+
+    def test_empty_output_keeps_the_cpu_fallback(self) -> None:
+        x_cpu = torch.empty((4, 0), dtype=torch.float16)
+        s_cpu = torch.ones((4, 1), dtype=torch.float16)
+        x, s = x_cpu.to("rbln"), s_cpu.to("rbln")
+        _C._dispatch_fallback_by_op_reset()
+        self.assertEqual((x * s).cpu(), x_cpu * s_cpu)
+        self.assertTrue(any(name.startswith("aten::mul") and count for name, count in _C._dispatch_fallback_by_op()))
         self.assertEqual(_C._warmcache_size(), 0)
 
 

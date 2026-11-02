@@ -1786,20 +1786,21 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     # The align fallback avoids host padding for unaligned inputs.
     # A size-1 last dim broadcasting to a 64-aligned one is exempt for these
     # elementwise ops. TensorList inputs keep the fused device path.
-    tensors = [t for t in (*args, *kwargs_filtered.values()) if isinstance(t, torch.Tensor) and t.dim() > 0]
-    out_last = max((t.shape[-1] for t in tensors), default=0)
-    size_one_broadcasts_on_device = (
-        op_name in _LAST_DIM_ONE_DEVICE_BROADCAST_OPS and len(tensors) >= 2 and out_last % 64 == 0
-    )
-
     def _last_dim_unaligned(t):
-        if not (isinstance(t, torch.Tensor) and t.dim() > 0) or t.shape[-1] % 64 == 0:
-            return False
-        return not (size_one_broadcasts_on_device and t.shape[-1] == 1)
+        return isinstance(t, torch.Tensor) and t.dim() > 0 and t.shape[-1] % 64 != 0
 
-    unaligned = any(_last_dim_unaligned(a) for a in args) or any(
-        _last_dim_unaligned(v) for v in kwargs_filtered.values()
+    out_shape = (
+        torch.broadcast_shapes(*(t.shape for t in (*args, *kwargs_filtered.values()) if isinstance(t, torch.Tensor)))
+        if op_name in _LAST_DIM_ONE_DEVICE_BROADCAST_OPS
+        else ()
     )
+    if out_shape and out_shape[-1] != 0:
+        unaligned = out_shape[-1] % 64 != 0
+    else:
+        # Preserve the input-based check for empty last dimensions and other ops.
+        unaligned = any(_last_dim_unaligned(a) for a in args) or any(
+            _last_dim_unaligned(v) for v in kwargs_filtered.values()
+        )
     if unaligned and "align" not in _parse_disabled_fallback_cases():
         return cpu_fallback_path(
             op_callable,

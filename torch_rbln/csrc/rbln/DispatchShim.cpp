@@ -774,8 +774,7 @@ bool try_warmcache_hit(
       out_tensor = t;
       continue;
     }
-    // Direct binding requires contiguous inputs. Layout is part of the key,
-    // but a non-contiguous input still needs Python's view handling.
+    // Install already rejects non-contiguous keys; keep this defensive guard.
     if (!t.is_contiguous()) {
       return false;
     }
