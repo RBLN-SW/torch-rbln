@@ -29,6 +29,9 @@ import pytest
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from test.utils import run_snippet
+from torch_rbln import _C
+from torch_rbln._internal.log_utils import rbln_record_cpu_fallback
+from torch_rbln._internal.ops_utils import _ALL_FALLBACK_CASES
 
 
 _PROJECT_ROOT = str(Path(__file__).absolute().parents[2])
@@ -198,6 +201,30 @@ class TestCpuFallbackRecordsItsReason(TestCase):
                 "compile_error_retry": {"aten::neg.out": {"compile_error": 1}},
             },
         )
+
+
+class TestCpuFallbackReasonVocabulary(TestCase):
+    """The reason names are one list, ``c10::rbln::CpuFallbackReason``. The Python
+    fallback paths pass a name and the binding parses it, so the list is also what the
+    `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` cases and their documentation must match.
+    """
+
+    def test_unknown_reason_is_rejected_at_the_call(self):
+        # A typo must not count a fallback under a name nothing else recognizes.
+        with self.assertRaisesRegex(ValueError, "unknown CPU fallback reason 'typo'"):
+            rbln_record_cpu_fallback("aten::add", "typo")
+
+    def test_every_disable_case_is_a_reason(self):
+        names = set(_C._cpu_fallback_reason_names())
+        self.assertEqual(_ALL_FALLBACK_CASES - names, set(), "a disable case the record cannot count under")
+
+    def test_configuration_doc_lists_the_disable_cases(self):
+        # docs/CONFIGURATION.md is the user's copy of the case list; the rows of its
+        # table are the cases, plus `all`.
+        doc = (Path(_PROJECT_ROOT) / "docs" / "CONFIGURATION.md").read_text()
+        section = doc.split("comma-separated list** of fallback case names", 1)[1].split("\n## ", 1)[0]
+        documented = {line.split("`")[1] for line in section.splitlines() if line.startswith("| `")}
+        self.assertEqual(documented - {"all"}, set(_ALL_FALLBACK_CASES))
 
 
 if __name__ == "__main__":

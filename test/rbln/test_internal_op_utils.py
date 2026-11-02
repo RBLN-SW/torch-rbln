@@ -73,7 +73,7 @@ class TestInternalOpUtils(TestCase):
         def add1(x):
             return x + 1.0
 
-        out = cpu_fallback_path(add1, args, op_name="test::add1", reason="test", **kwargs)
+        out = cpu_fallback_path(add1, args, op_name="test::add1", reason="dtype", **kwargs)
 
         self.assertIsInstance(out, torch.Tensor)
         self.assertEqual(out.device.type, "rbln")
@@ -89,7 +89,7 @@ class TestInternalOpUtils(TestCase):
         def mul(x, y):
             return x * y
 
-        out = cpu_fallback_path(mul, args, op_name="test::mul", reason="test", **kwargs)
+        out = cpu_fallback_path(mul, args, op_name="test::mul", reason="dtype", **kwargs)
 
         self.assertIsInstance(out, torch.Tensor)
         self.assertEqual(out.device.type, "rbln")

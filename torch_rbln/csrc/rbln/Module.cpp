@@ -26,11 +26,27 @@ namespace {
 
 // Holds a c10::rbln::CpuFallbackScope for the length of a Python `with` block.
 struct PyCpuFallbackScope {
-  PyCpuFallbackScope(std::string name, std::string why)
-      : op_name(std::move(name)), reason(std::move(why)) {}
+  PyCpuFallbackScope(std::string name, const std::string& why)
+      : op_name(std::move(name)), reason(parse_reason(why)) {}
   std::string op_name;
-  std::string reason;
+  c10::rbln::CpuFallbackReason reason;
   std::optional<c10::rbln::CpuFallbackScope> scope;
+
+ private:
+  // A reason the record does not know is a typo or a new check that has not
+  // been added to CpuFallbackReason yet; either way, fail at the call rather
+  // than count under a name nothing else recognizes.
+  static c10::rbln::CpuFallbackReason parse_reason(const std::string& why) {
+    const auto reason = c10::rbln::parse_cpu_fallback_reason(why);
+    TORCH_CHECK_VALUE(
+        reason.has_value(),
+        "unknown CPU fallback reason '",
+        why,
+        "'; known reasons: ",
+        fmt::format(
+            "{}", fmt::join(c10::rbln::cpu_fallback_reason_names(), ", ")));
+    return *reason;
+  }
 };
 
 /**
@@ -425,6 +441,13 @@ void register_internal_api(py::module_& module) {
       "_cpu_fallback_ns",
       &c10::rbln::cpu_fallback_ns,
       "DIAG/PROFILER: wall ns spent in CPU fallbacks, every fallback path");
+  module.def(
+      "_cpu_fallback_reason_names",
+      [] {
+        const auto names = c10::rbln::cpu_fallback_reason_names();
+        return std::vector<std::string>(names.begin(), names.end());
+      },
+      "Internal: every name a CPU fallback can be counted under (c10::rbln::CpuFallbackReason)");
 
   // C++ dispatch shim: install a boxed C++ handler on PrivateUse1 for the given
   // op, with pre-check + cpu_fallback_rbln on fail and Python callback on pass.

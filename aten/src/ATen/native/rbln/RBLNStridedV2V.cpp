@@ -158,7 +158,7 @@ void submit_or_fallback(
     const c10::rbln::CpuFallbackScope fallback(
         op_name,
         c10::rbln::CpuFallbackPath::kStridedCopy,
-        "strided_copy_error");
+        c10::rbln::CpuFallbackReason::kStridedCopyError);
     cpu_fallback();
   }
 }

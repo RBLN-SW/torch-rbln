@@ -3,6 +3,7 @@
 #include <spdlog/pattern_formatter.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -373,11 +374,68 @@ bool open_cpu_fallback(
 
 } // namespace
 
+namespace {
+
+// Enum order; cpu_fallback_reason_name() indexes it by the enum value.
+constexpr std::array<std::pair<CpuFallbackReason, std::string_view>, 19>
+    kCpuFallbackReasonNames = {{
+        {CpuFallbackReason::kDispatchMode, "dispatch_mode"},
+        {CpuFallbackReason::kTrace, "trace"},
+        {CpuFallbackReason::kReentrant, "reentrant"},
+        {CpuFallbackReason::kDtype, "dtype"},
+        {CpuFallbackReason::kScalar, "scalar"},
+        {CpuFallbackReason::kStorageOffset, "storage_offset"},
+        {CpuFallbackReason::kNanInf, "nan_inf"},
+        {CpuFallbackReason::kAlign, "align"},
+        {CpuFallbackReason::kCompileError, "compile_error"},
+        {CpuFallbackReason::kUnsupportedOp, "unsupported_op"},
+        {CpuFallbackReason::kStridedCopyError, "strided_copy_error"},
+        {CpuFallbackReason::kRegistered, "registered"},
+        {CpuFallbackReason::kOutDtype, "out_dtype"},
+        {CpuFallbackReason::kIndexPattern, "index_pattern"},
+        {CpuFallbackReason::kDivRounding, "div_rounding"},
+        {CpuFallbackReason::kNonIntegerExponent, "non_integer_exponent"},
+        {CpuFallbackReason::kUnsupportedInput, "unsupported_input"},
+        {CpuFallbackReason::kAttnWeightsCacheMiss, "attn_weights_cache_miss"},
+        {CpuFallbackReason::kTensorSubclass, "tensor_subclass"},
+    }};
+
+} // namespace
+
+std::string_view cpu_fallback_reason_name(CpuFallbackReason reason) {
+  const auto& entry = kCpuFallbackReasonNames.at(static_cast<size_t>(reason));
+  RBLN_CHECK(
+      entry.first == reason, "cpu_fallback_reason_name: table out of order");
+  return entry.second;
+}
+
+std::optional<CpuFallbackReason> parse_cpu_fallback_reason(
+    std::string_view name) {
+  for (const auto& [reason, reason_name] : kCpuFallbackReasonNames) {
+    if (reason_name == name) {
+      return reason;
+    }
+  }
+  return std::nullopt;
+}
+
+std::vector<std::string_view> cpu_fallback_reason_names() {
+  std::vector<std::string_view> out;
+  out.reserve(kCpuFallbackReasonNames.size());
+  for (const auto& [reason, reason_name] : kCpuFallbackReasonNames) {
+    out.push_back(reason_name);
+  }
+  return out;
+}
+
 CpuFallbackScope::CpuFallbackScope(
     std::string_view full_op_name,
     CpuFallbackPath path,
-    std::string_view reason)
-    : outermost_(open_cpu_fallback(full_op_name, path, reason)),
+    CpuFallbackReason reason)
+    : outermost_(open_cpu_fallback(
+          full_op_name,
+          path,
+          cpu_fallback_reason_name(reason))),
       start_ns_(steady_now_ns()) {}
 
 CpuFallbackScope::~CpuFallbackScope() {

@@ -5,6 +5,7 @@
 #include <fmt/format.h>
 #include <fmt/ranges.h>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -112,6 +113,46 @@ class C10_RBLN_API RBLNScopeGuard {
 // device rejected with the kernel's own CPU version of the op.
 enum class CpuFallbackPath : uint8_t { kBoxed, kPython, kStridedCopy };
 
+// Why a CPU fallback ran. A reason is the switch that turns the fallback off
+// -- a `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` case or a
+// `TORCH_RBLN_DISABLE_FALLBACK` category -- or, where no switch exists, the
+// check that decided it. cpu_fallback_reason_name() is the name those switches,
+// torch.rbln.explain() and the fallback report use; the Python fallback paths
+// pass that name and the binding parses it back, so an unknown reason fails
+// at the call instead of becoming a new one.
+enum class CpuFallbackReason : uint8_t {
+  // TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK cases (docs/CONFIGURATION.md)
+  kDispatchMode,
+  kTrace,
+  kReentrant,
+  kDtype,
+  kScalar,
+  kStorageOffset,
+  kNanInf,
+  kAlign,
+  // TORCH_RBLN_DISABLE_FALLBACK categories (c10/rbln/RBLNFallbackConfig.cpp)
+  kCompileError,
+  kUnsupportedOp,
+  kStridedCopyError,
+  // the deciding check, where no switch exists
+  kRegistered,
+  kOutDtype,
+  kIndexPattern,
+  kDivRounding,
+  kNonIntegerExponent,
+  kUnsupportedInput,
+  kAttnWeightsCacheMiss,
+  kTensorSubclass,
+};
+
+C10_RBLN_API std::string_view cpu_fallback_reason_name(
+    CpuFallbackReason reason);
+// The reason named `name`, or nullopt if no reason has that name.
+C10_RBLN_API std::optional<CpuFallbackReason> parse_cpu_fallback_reason(
+    std::string_view name);
+// Every reason's name, in enum order.
+C10_RBLN_API std::vector<std::string_view> cpu_fallback_reason_names();
+
 /**
  * @brief Marks one CPU fallback: an operation running on CPU instead of RBLN.
  *
@@ -130,7 +171,7 @@ enum class CpuFallbackPath : uint8_t { kBoxed, kPython, kStridedCopy };
  * @code
  * {
  *   const CpuFallbackScope fallback(
- *       "aten::mul.out", CpuFallbackPath::kBoxed, "nan_inf");
+ *       "aten::mul.out", CpuFallbackPath::kBoxed, CpuFallbackReason::kNanInf);
  *   // ... run the op on CPU ...
  * }
  * // Output (at INFO):
@@ -141,13 +182,10 @@ enum class CpuFallbackPath : uint8_t { kBoxed, kPython, kStridedCopy };
  */
 class C10_RBLN_API CpuFallbackScope {
  public:
-  // `reason` names the check that sent the op to CPU, such as the
-  // `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` case or
-  // `TORCH_RBLN_DISABLE_FALLBACK` category that decided it.
   CpuFallbackScope(
       std::string_view full_op_name,
       CpuFallbackPath path,
-      std::string_view reason);
+      CpuFallbackReason reason);
   ~CpuFallbackScope();
   CpuFallbackScope(const CpuFallbackScope&) = delete;
   CpuFallbackScope& operator=(const CpuFallbackScope&) = delete;

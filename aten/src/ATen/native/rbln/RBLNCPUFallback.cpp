@@ -303,7 +303,7 @@ std::vector<at::Tensor> borrow_rbln_list_as_cpu(
 void cpu_fallback_rbln(
     const c10::OperatorHandle& op,
     torch::jit::Stack* stack,
-    std::string_view reason,
+    c10::rbln::CpuFallbackReason reason,
     bool error_on_views,
     c10::DispatchKey cpu_dispatch_key) {
   TORCH_CHECK(

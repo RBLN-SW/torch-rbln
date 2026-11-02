@@ -1,9 +1,8 @@
 #pragma once
 
 #include <ATen/native/CPUFallback.h>
+#include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNMacros.h>
-
-#include <string_view>
 
 namespace at::native::rbln {
 
@@ -19,7 +18,7 @@ namespace at::native::rbln {
 C10_RBLN_API void cpu_fallback_rbln(
     const c10::OperatorHandle& op,
     torch::jit::Stack* stack,
-    std::string_view reason,
+    c10::rbln::CpuFallbackReason reason,
     bool error_on_views = false,
     c10::DispatchKey cpu_dispatch_key = c10::DispatchKey::CPU);
 
