@@ -1370,11 +1370,10 @@ static void bounce_site_capture(uint8_t site) noexcept {
   if (!g_trace_enabled.load(std::memory_order_relaxed)) {
     return;
   }
-  static constexpr std::array<const char*, 6> kNames = {
+  static constexpr std::array<const char*, 5> kNames = {
       "copy_d2d_host_bounce",
       "copy_h2d_staging",
       "copy_h2d_noncontig_dst",
-      "strided_v2v_cpu_fallback",
       "v2v_batch_to_per_entry",
       "host_batch_to_per_entry"};
   static_assert(

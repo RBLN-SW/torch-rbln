@@ -642,8 +642,11 @@ class TestProfilerReportFormat(TestCase):
                 "reject": {"user_actionable": {}, "internal_fallback": {"count": 796, "bytes": 0}},
             },
             "dispatch": {"cpu_fallback": 1600, "recompile_miss": 0, "cpu_fallback_ns": 41_084_000},
-            "cpu_fallback_by_op": {"aten::sub.out": 800},
-            "cpu_fallback_reasons_by_op": {"aten::sub.out": {"dtype": 800}},
+            "cpu_fallback_by_op": {"aten::sub.out": 800, "aten::index_copy.out": 1},
+            "cpu_fallback_reasons_by_op": {
+                "aten::sub.out": {"dtype": 800},
+                "aten::index_copy.out": {"strided_copy_error": 1},
+            },
             "trace_by_op": {},
             "notes": [],
         }
@@ -661,7 +664,9 @@ class TestProfilerReportFormat(TestCase):
         self.assertIn("no DMA (low cost)", rep)  # P1-2 cost verdict leads the Note
         self.assertIn(">> physical d2h (real transfer): 0", rep)  # P1-3 promoted witness line
         self.assertIn("dispatch/cpu_fallback:", rep)  # P1-1 grouped detail block
-        self.assertIn("why: dtype 800", rep)  # reasons summed over ops, in the record's own names
+        # reasons summed over ops, in the record's own names; a reason whose fix is not
+        # the row's carries its own
+        self.assertIn("why: dtype 800, strided_copy_error 1 (try: lower outer_count / fatter inner)", rep)
         # P1-4 fixed category order (NOT sorted by cost): host_bounce -> runtime ->
         # dispatch
         self.assertLess(rep.index("host_bounce/d2d_copy"), rep.index("runtime/v2v_slow"))

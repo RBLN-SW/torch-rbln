@@ -95,14 +95,13 @@ _BOUNCE_SITES: tuple[tuple[str, str], ...] = (
     ("copy_d2d_host_bounce", "copy_: non-direct device->device round-tripped host"),
     ("copy_h2d_staging", "copy_: cpu src staged before h2v"),
     ("copy_h2d_noncontig_dst", "copy_: non-contiguous rbln dst pulled to host"),
-    ("strided_v2v_cpu_fallback", "cat/index/copy_: strided v2v fell back to CPU"),
     ("v2v_batch_to_per_entry", "batched v2v rejected -> per-entry"),
     ("host_batch_to_per_entry", "batched h2v/v2h rejected -> per-entry"),
 )
 # Which sites are genuine host round-trips. The two batch->per-entry sites are
 # not: they already move host<->device (or stay device-side), so the incident is
 # a lost batching win, not an added bounce.
-_HOST_BOUNCE_SITES = (0, 1, 2, 3)
+_HOST_BOUNCE_SITES = (0, 1, 2)
 
 # Must match the reason order in rebel-compiler vmemory_manager.cc.
 _RUNTIME_REASONS: tuple[tuple[str, str], ...] = (
@@ -123,9 +122,9 @@ _REMEDY: dict[str, str] = {
     "copy_h2d_noncontig_dst": (
         "host->device write into a non-contiguous device dst; write into a contiguous buffer first, then h2d"
     ),
-    "strided_v2v_cpu_fallback": (
-        "strided v2v fell back to CPU; lower outer_count / use a fatter contiguous inner block "
-        "so the device engine qualifies"
+    "strided_copy_error": (
+        "the device rejected a strided copy and the op was redone on the CPU; lower outer_count / use a fatter "
+        "contiguous inner block so the device engine qualifies"
     ),
     "v2v_batch_to_per_entry": (
         "batched v2v rejected to per-entry; check the per-dst limit (kMaxV2VMultiCopies) and batch geometry"
@@ -151,7 +150,7 @@ _FIX_SHORT: dict[str, str] = {
     "copy_d2d_host_bounce": "make contiguous, or v2v engine",
     "copy_h2d_staging": "keep src on-device / stage once",
     "copy_h2d_noncontig_dst": "contiguous staging, then h2d",
-    "strided_v2v_cpu_fallback": "lower outer_count / fatter inner",
+    "strided_copy_error": "lower outer_count / fatter inner",
     "v2v_batch_to_per_entry": "check kMaxV2VMultiCopies / batch geom",
     "host_batch_to_per_entry": "check for overlapping dst ranges",
     "cpu_fallback": "graph mode, or a supported dtype",
@@ -1073,7 +1072,12 @@ class RBLNExplain:
                     by_reason[reason] = by_reason.get(reason, 0) + c
             if by_reason:
                 why = sorted(by_reason.items(), key=lambda kv: -kv[1])
-                lines.append("    why: " + ", ".join(f"{n} {_thousands(c)}" for n, c in why))
+                lines.append(
+                    "    why: "
+                    + ", ".join(
+                        f"{n} {_thousands(c)}" + (f" (try: {_FIX_SHORT[n]})" if n in _FIX_SHORT else "") for n, c in why
+                    )
+                )
             unaccel = d.get("cpu_fallback_unaccelerated") or []
             if unaccel:
                 shown = ", ".join(_short_op(o) for o in unaccel[:8]) + (

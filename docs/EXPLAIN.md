@@ -147,8 +147,11 @@ dispatch/cpu_fallback  2,000       --  try: graph mode, or a supported dtype
    of the check when no switch exists — `dtype` (the op's dtype is outside the
    device dispatch policy), `nan_inf`, `scalar`, `align`, `registered`,
    `out_dtype` (a non-bool `out=` of another dtype than the inputs, which the
-   op's CPU kernel accepts or rejects), ... `cpu_fallback_reasons_by_op` in
-   `dump()` has the same counts per op.
+   op's CPU kernel accepts or rejects), ... A reason whose fix is not the row's
+   carries its own after the count: `strided_copy_error` (the device rejected a
+   strided copy and the op was redone on the CPU) says `try: lower outer_count /
+   fatter inner`. `cpu_fallback_reasons_by_op` in `dump()` has the same counts
+   per op.
 8. **(A) `candidates (no fast-path handler)`**: of the ops that fell back through
    the boxed C++ CPU fallback, which ones have **no CPU fast-path handler** —
    i.e. your **optimization candidates** (registered ops already bypass the slow
@@ -334,7 +337,6 @@ meaning, the intent (why you should care), and the lever.
 | `host_bounce/d2d_copy` (dump key `copy_d2d_host_bounce`) | `torch` | a non-contiguous device→device `copy_` round-tripped the host                                                                                                                                 | a host round-trip you didn't ask for; the data left the device                     | make the copy contiguous, or route through the on-device v2v engine |
 | `host_bounce/copy_h2d_staging`                           | `torch` | a CPU source was staged to host before the h2v push                                                                                                                                           | keep the source on-device, or stage once and reuse                                 | keep src on-device / stage once                                     |
 | `host_bounce/copy_h2d_noncontig_dst`                     | `torch` | host→device write into a non-contiguous device dst                                                                                                                                            | write into a contiguous buffer first, then h2d                                     | contiguous staging, then h2d                                        |
-| `host_bounce/strided_v2v_cpu_fallback`                   | `torch` | a strided v2v (`cat`/`index`/`copy_`) fell back to a host CPU op                                                                                                                              | the device v2v engine rejected the geometry                                        | lower `outer_count` / fatter contiguous inner block                 |
 | `host_bounce/v2v_batch_to_per_entry`                     | `torch` | a batched v2v was rejected to per-entry copies                                                                                                                                                | batch geometry exceeded the per-dst limit                                          | check `kMaxV2VMultiCopies` / batch geometry                         |
 | `runtime/v2v_slow`                                       | `rebel` | a device v2v fell to the host slow path; ONE event row, with a `state:` / `reject:` block below (two views of the same event — don't add their counts) and the real transfer on the `>>` line | a device copy did not stay on device                                               | see the block + `>>` line below                                     |
 | ↳ `state: src_not_on_device`                             | `rebel` | the source was host-latest                                                                                                                                                                    | (state axis)                                                                       | keep the source on device                                           |
