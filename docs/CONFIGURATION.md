@@ -58,7 +58,8 @@ Outside pytest, enable it explicitly when running compatibility tests.
 
 ## Deploy mode
 
-Deploy mode skips NaN/Inf scanning even when compatibility checks are enabled:
+Deploy mode skips NaN/Inf scanning even when `TORCH_RBLN_CHECK_NAN_INF=ON`.
+Without that opt-in, the scan is already off regardless of deploy mode:
 
 ```bash
 export TORCH_RBLN_DEPLOY=ON
@@ -124,7 +125,7 @@ runtime warning is emitted once per process the first time this variable is
 observed.
 
 ```bash
-# Disable only the NaN/Inf check (e.g. to benchmark without the scan overhead)
+# Override TORCH_RBLN_CHECK_NAN_INF=ON (the scan is already off by default)
 export TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK=nan_inf
 
 # Disable only the alignment fallback (e.g. to hand unaligned shapes to the compiler)

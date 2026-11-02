@@ -470,8 +470,8 @@ inline ScannerFn scanner_for(c10::ScalarType scalar_type) {
 
 // Scan a single tensor for NaN/Inf. Uses ``c10::rbln::borrow_host_ptr`` for
 // rbln tensors so a host-latest entry pays no D2H cost; device-latest entries
-// will trigger a D2H sync (this is the price of catching NaN/Inf in
-// just-computed device data — matches AS-IS Python ``to_cpu(args)`` cost).
+// will trigger a D2H sync when the opt-in scan is enabled, as does the Python
+// path's ``to_cpu(args)`` scan.
 //
 // Returns false for: undefined / empty / dtype outside the dispatch policy or
 // not floating / non-contiguous tensors. Non-admitted dtypes are
@@ -481,8 +481,9 @@ inline ScannerFn scanner_for(c10::ScalarType scalar_type) {
 // warm-cache hit would then run the device kernel on NaN/Inf without the Python
 // scan ever seeing the input. Non-contiguous tensors are skipped here because
 // the warm-cache key requires contig + offset=0 anyway — the non-contig case
-// will miss and fall through to the Python wrapper which performs the full
-// ``has_invalid_tensor(to_cpu(args))`` scan.
+// will miss and fall through to the Python wrapper, whose full
+// ``has_invalid_tensor(to_cpu(args))`` scan uses the same opt-in, deploy, and
+// fallback-disable gates.
 bool tensor_has_nan_or_inf(const at::Tensor& t) {
   if (!t.defined())
     return false;
@@ -562,10 +563,10 @@ inline std::optional<ScalarValue> wrapped_scalar_value(const at::Tensor& t) {
 //   2. dtype outside the dispatch catalog on any input tensor
 //   3. all input tensors are scalar (ndim == 0)
 //   4. any input tensor is_contiguous() with storage_offset != 0
-//   5. NaN/Inf in any input tensor  (opt-in, non-deploy mode only; mirrors the
-//      ``not is_rbln_deploy() and has_invalid_tensor(to_cpu(args))`` branch
-//      that AS-IS ran on every Python wrapper entry — the warm-cache hot
-//      path otherwise bypasses Python entirely, losing the safety net).
+//   5. NaN/Inf in any input tensor, only with TORCH_RBLN_CHECK_NAN_INF=ON,
+//      deploy mode off, and neither nan_inf nor all fallback checks disabled.
+//      The Python path uses the same gates; checking before warm-cache lookup
+//      keeps a cache hit from bypassing the opt-in scan.
 //
 // Inputs means args NOT schema-marked as write aliases (out-tensor skipped).
 // `skip_dtype_args` indexes positional args whose dtype check is ignored (e.g.
