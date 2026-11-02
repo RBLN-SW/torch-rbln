@@ -19,6 +19,7 @@
 #include <exception>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -299,7 +300,7 @@ void register_stream_api(py::module_& module) {
       "Internal: set current rbln stream; returns the previous as (stream_id, device_index, device_type)");
 }
 
-// Both callers configure the whole device allocation behind the tensor's base
+// These APIs configure the whole device allocation behind the tensor's base
 // address, so a tensor that does not cover its storage is rejected up front
 // instead of misbehaving downstream. Covering it is the whole contract: a
 // PyTorch view that still spans its storage (base.view(...), base[:]) carries
@@ -384,6 +385,37 @@ void register_internal_api(py::module_& module) {
             reinterpret_cast<const void*>(host_ptr));
       },
       "Internal: unpin a host range registered with _host_register");
+
+  module.def(
+      "_set_device_alloc",
+      [](const at::Tensor& tensor,
+         const std::vector<std::tuple<
+             uint32_t,
+             uint32_t,
+             std::vector<std::tuple<int64_t, int64_t, int64_t>>>>& placements,
+         c10::ScalarType physical_dtype) {
+        check_base_rbln_tensor(tensor, "set_device_alloc", "tensor");
+        TORCH_CHECK(
+            tensor.numel() > 0, "set_device_alloc: tensor must not be empty");
+        std::vector<::rbln::DevicePlacement> device_placements;
+        device_placements.reserve(placements.size());
+        for (const auto& [node_id, chiplet_id, axes] : placements) {
+          auto& placement = device_placements.emplace_back();
+          placement.node_id = node_id;
+          placement.chiplet_id = chiplet_id;
+          placement.slice_axes.reserve(axes.size());
+          for (const auto& [axis, begin, end] : axes) {
+            placement.slice_axes.push_back({axis, begin, end});
+          }
+        }
+        c10::rbln::set_device_alloc(
+            tensor.data_ptr(),
+            tensor.scalar_type(),
+            physical_dtype,
+            tensor.sizes().vec(),
+            device_placements);
+      },
+      "Internal: configure a tensor's device placements");
 
   // Set target's device-allocation layout to match ref's, without copying data.
   // Used by torch_rbln.set_device_layout_like().
