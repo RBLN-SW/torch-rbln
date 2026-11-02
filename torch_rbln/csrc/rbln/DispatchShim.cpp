@@ -553,7 +553,7 @@ inline std::optional<ScalarValue> wrapped_scalar_value(const at::Tensor& t) {
 }
 
 // Cheap C++-side pre-check mirroring the cheap branches of
-// torch_rbln._internal.ops_utils.is_cpu_fallback_cases():
+// torch_rbln._internal.ops_utils.get_fallback_reason():
 //   2. dtype outside the dispatch catalog on any input tensor
 //   3. all input tensors are scalar (ndim == 0)
 //   4. any input tensor is_contiguous() with storage_offset != 0

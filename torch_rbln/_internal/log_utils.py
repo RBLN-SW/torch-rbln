@@ -130,7 +130,7 @@ def rbln_record_cpu_fallback(op_name: str, reason: str):
 
     Parameters:
         op_name (str): The name of the operation that ran on CPU.
-        reason (str): Why it ran on CPU, such as the case ``is_cpu_fallback_cases``
+        reason (str): Why it ran on CPU, such as the case ``get_fallback_reason``
             returned.
     """
     import torch_rbln._C  # noqa: PLC0415

@@ -10,7 +10,7 @@ import torch
 
 from torch_rbln._internal.compile_cache import compile_rbln_cached
 from torch_rbln._internal.log_utils import rbln_log_info, rbln_record_cpu_fallback
-from torch_rbln._internal.ops_utils import is_cpu_fallback_cases, SupportedDtypes, to_cpu
+from torch_rbln._internal.ops_utils import get_fallback_reason, SupportedDtypes, to_cpu
 
 
 # --- Attention Weights Cache for Overrideable SDPA ---
@@ -379,7 +379,7 @@ def _sdpa_compute_attn_weights(
 
     Causal mask is created outside the compiled graph to avoid RBLN memory issues.
     """
-    fallback_reason = is_cpu_fallback_cases((query, key))
+    fallback_reason = get_fallback_reason((query, key))
     if fallback_reason:
         with rbln_record_cpu_fallback("sdpa (attn_weights)", fallback_reason):
             return _sdpa_attn_weights_fallback(query, key, attn_mask, is_causal=is_causal, scale=scale)
@@ -458,7 +458,7 @@ def _sdpa_compute_output(
     dropout_p: float,
 ) -> torch.Tensor:
     """Compute output using RBLN compiled graph."""
-    fallback_reason = is_cpu_fallback_cases((attn_weights, value))
+    fallback_reason = get_fallback_reason((attn_weights, value))
     if fallback_reason:
         with rbln_record_cpu_fallback("sdpa (output)", fallback_reason):
             return _sdpa_output_fallback(attn_weights, value, dropout_p)
@@ -569,7 +569,7 @@ def _sdpa_backward_compiled(
         value_expanded = value
 
     args = (grad_output, query, key, value, attn_weights)
-    fallback_reason = is_cpu_fallback_cases(args)
+    fallback_reason = get_fallback_reason(args)
     if fallback_reason:
         with rbln_record_cpu_fallback("sdpa_backward", fallback_reason):
             return _sdpa_backward_fallback(grad_output, query, key, value, attn_weights, scale)

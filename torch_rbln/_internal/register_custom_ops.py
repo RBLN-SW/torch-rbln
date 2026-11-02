@@ -10,16 +10,16 @@ from torch_rbln._internal.ops_utils import (
     cpu_fallback_path,
     extract_device_id_from_inputs,
     finalize_output_tensor,
+    get_fallback_reason,
     get_view_op_module,
     handle_empty_binary,
-    is_cpu_fallback_cases,
     is_type_promotion_allowed,
     prepare_args_view_aware,
 )
 
 
 def custom_softmax_out_rbln(self, dim: int, half_to_float: bool, *, out):  # noqa: ARG001, FBT001
-    fallback_reason = is_cpu_fallback_cases(self)
+    fallback_reason = get_fallback_reason(self)
     if fallback_reason:
         result_tensor = cpu_fallback_path(
             torch.softmax, (self,), result=out, op_name="aten::softmax", reason=fallback_reason, dim=dim
@@ -70,7 +70,7 @@ def pow_tensor_scalar_out_rbln(self, exponent, *, out):
         result_tensor = cpu_fallback_path(
             torch.pow, (self, exponent), result=out, op_name="aten::pow", reason="non_integer_exponent"
         )
-    elif fallback_reason := is_cpu_fallback_cases((self, exponent)):
+    elif fallback_reason := get_fallback_reason((self, exponent)):
         result_tensor = cpu_fallback_path(
             torch.pow, (self, exponent), result=out, op_name="aten::pow", reason=fallback_reason
         )

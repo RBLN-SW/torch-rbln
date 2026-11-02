@@ -129,7 +129,7 @@ def {kernel_name}(*args, **kwargs):
             """
             return f"""
     out_tensor = kwargs.get('out', None)
-    fallback_reason = is_cpu_fallback_cases(args)
+    fallback_reason = get_fallback_reason(args)
     if fallback_reason:
         result_tensor = cpu_fallback_path(
             {target},

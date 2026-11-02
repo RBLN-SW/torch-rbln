@@ -9,7 +9,7 @@ is to grep the log. That only holds if each fallback logs. Two groups did not:
     The shim's own pre-check decides dtype / NaN-Inf / all-scalar fallbacks and
     called ``cpu_fallback_rbln`` directly, skipping the log the
     ``fallback_rbln`` handler made for an unsupported op. No log at any level.
-  * the three ``is_cpu_fallback_cases`` branches in the SDPA kernel, whose
+  * the three ``get_fallback_reason`` branches in the SDPA kernel, whose
     siblings on the same path do log.
 
 ``TORCH_RBLN_LOG_LEVEL`` is latched in a function-local static on first use, so
@@ -99,7 +99,7 @@ class TestCpuFallbackIsLogged(TestCase):
 
     def test_sdpa_inner_fallback_is_logged(self):
         """The dtype gate in ``sdpa_overrideable`` passes for float16, so the kernel
-        reaches the per-step ``is_cpu_fallback_cases`` checks, which a NaN in the inputs
+        reaches the per-step ``get_fallback_reason`` checks, which a NaN in the inputs
         trips. Those two branches return into a CPU helper; without the fix neither says
         so.
         """
