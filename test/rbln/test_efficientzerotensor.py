@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Test suite for the RBLN-native `_efficientzerotensor` factory.
+"""Test suite for the RBLN-native `_efficientzerotensor` factory.
 
 `aten::_efficientzerotensor` is a "logically zero" tensor that PyTorch may
 produce as a backward-pass scratch and as the reference value for ops like
@@ -24,7 +23,7 @@ from torch.testing._internal.common_device_type import instantiate_device_type_t
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestEfficientZeroTensor(TestCase):
     """`aten::_efficientzerotensor` should produce a logically-zero RBLN tensor.
 
@@ -52,7 +51,7 @@ class TestEfficientZeroTensor(TestCase):
         self.assertEqual(t.to("cpu"), expected)
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestSgnDecomposition(TestCase):
     """`aten::sgn` decomposes through `_efficientzerotensor`; verify safety + value.
 

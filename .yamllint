@@ -1,3 +1,4 @@
+---
 extends: default
 
 rules:
@@ -5,7 +6,6 @@ rules:
     forbid: non-empty
   brackets:
     forbid: non-empty
-  document-start: disable
   empty-values:
     forbid-in-block-mappings: true
     forbid-in-flow-mappings: true
@@ -20,5 +20,3 @@ rules:
     forbid-explicit-octal: true
   quoted-strings:
     required: only-when-needed
-  truthy:
-    check-keys: false

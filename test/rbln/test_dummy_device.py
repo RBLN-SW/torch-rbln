@@ -23,11 +23,9 @@ import sys
 import textwrap
 
 import pytest
+from torch.testing._internal.common_utils import run_tests
 
 from test.utils import is_rebel_device
-
-
-pytestmark = pytest.mark.test_set_ci
 
 
 def _clean_env() -> dict:
@@ -42,6 +40,9 @@ def _clean_env() -> dict:
       - RBLN_FORCE_NPU_NAME / RBLN_DEVICES: both feed get_npu_name() and thus the
         resolved compile target; a parent-set value would flip the no-NPU cases
         below. Tests set these explicitly via ``env_extra`` when they need them.
+      - TORCH_RBLN_DISPATCH_DTYPES: an extended catalog would add dtypes to
+        ``SupportedDtypes.dispatch``, which tests below iterate as the dispatch
+        dtypes.
     """
     env = dict(os.environ)
     for key in (
@@ -50,6 +51,7 @@ def _clean_env() -> dict:
         "RBLN_NPUS_PER_DEVICE",
         "RBLN_FORCE_NPU_NAME",
         "RBLN_DEVICES",
+        "TORCH_RBLN_DISPATCH_DTYPES",
     ):
         env.pop(key, None)
     return env
@@ -66,6 +68,7 @@ def _run_with_dummy(snippet: str, env_extra: dict | None = None) -> subprocess.C
         env.update(env_extra)
     return subprocess.run(
         [sys.executable, "-c", textwrap.dedent(snippet)],
+        check=False,
         env=env,
         capture_output=True,
         text=True,
@@ -188,8 +191,9 @@ def test_boolean_spellings():
     # logical count comes from RBLN_DEVICE_MAP (default 1), not this value. Cover
     # the full truthy/falsy spellings the parser recognizes.
     #
-    # The flag is sealed at startup, so every spelling needs its own interpreter -- but they
-    # are independent, so they run at once instead of importing torch twelve times in a row.
+    # The flag is sealed at startup, so every spelling needs its own interpreter -- but
+    # they are independent, so they run at once instead of importing torch twelve times
+    # in a row.
     truthy = ("1", "true", "t", "on", "yes", "y")
     falsy = ("0", "false", "f", "off", "no", "n")
 
@@ -210,6 +214,7 @@ def test_boolean_spellings():
                 "-c",
                 "import torch, torch_rbln; assert torch.rbln.is_dummy_device() is False; print('OK')",
             ],
+            check=False,
             env=env,
             capture_output=True,
             text=True,
@@ -219,7 +224,7 @@ def test_boolean_spellings():
     # costs what a torch import costs in memory.
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         for spellings, run in ((truthy, run_truthy), (falsy, run_falsy)):
-            for value, proc in zip(spellings, pool.map(run, spellings)):
+            for value, proc in zip(spellings, pool.map(run, spellings), strict=True):
                 _assert_ok(proc)
                 assert "OK" in proc.stdout, value
 
@@ -233,6 +238,7 @@ def test_invalid_value_fails_fast(invalid):
     env["RBLN_DUMMY_DEVICE"] = invalid
     proc = subprocess.run(
         [sys.executable, "-c", "import torch, torch_rbln"],
+        check=False,
         env=env,
         capture_output=True,
         text=True,
@@ -252,6 +258,7 @@ def test_is_dummy_device_false_without_env():
     env.pop("RBLN_DUMMY_DEVICE", None)
     proc = subprocess.run(
         [sys.executable, "-c", "import torch, torch_rbln; assert torch.rbln.is_dummy_device() is False; print('OK')"],
+        check=False,
         env=env,
         capture_output=True,
         text=True,
@@ -310,7 +317,7 @@ def test_torch_compile_tracing_smoke():
         def backend(gm, example_inputs):
             return gm.forward  # eager replay; ops fall back to CPU in dummy mode
         f = torch.compile(lambda x: x * 2 + 1, backend=backend, fullgraph=True)
-        x = torch.ones(4, device="rbln:0")
+        x = torch.ones(4, device="rbln:0", dtype=torch.float64)
         assert f(x).cpu().tolist() == [3.0, 3.0, 3.0, 3.0]
         print("OK")
         """
@@ -354,9 +361,9 @@ def test_cache_management_is_a_noop_in_dummy_mode():
 
 @pytest.mark.parametrize("npus_per_device", [1, 2, 4, 8])
 def test_npus_per_device_sets_single_group_tp(npus_per_device):
-    # RBLN_NPUS_PER_DEVICE=N (no RBLN_DEVICE_MAP) -> one logical device of size N (TP=N).
-    # Sizes valid on both dev and deploy builds; the group is host-only indices in
-    # dummy mode, so no NPU is needed to materialize a width-N device.
+    # RBLN_NPUS_PER_DEVICE=N (no RBLN_DEVICE_MAP) -> one logical device of size N
+    # (TP=N). Sizes valid on both dev and deploy builds; the group is host-only indices
+    # in dummy mode, so no NPU is needed to materialize a width-N device.
     proc = _run_with_dummy(
         """
         import os
@@ -506,9 +513,9 @@ def test_compiled_graph_decorator_form_execution_fails_fast():
     # Same guard as test_compiled_graph_execution_fails_fast, but reached through the
     # factory/decorator form: torch.compile(backend="rbln")(m) (identical code path to
     # @torch.compile(backend="rbln")). This form passes no model positionally, so unless
-    # the patch wraps the eventual compiled function it would bypass CompiledFunctionWrapper
-    # -- and thus this guard -- and silently return zeros on the dummy runtime. It must fail
-    # loudly too.
+    # the patch wraps the eventual compiled function it would bypass
+    # CompiledFunctionWrapper -- and thus this guard -- and silently return zeros on the
+    # dummy runtime. It must fail loudly too.
     proc = _run_with_dummy(
         """
         import torch, torch_rbln
@@ -531,9 +538,9 @@ def test_compiled_graph_decorator_form_execution_fails_fast():
 def test_compiled_graph_keyword_model_execution_fails_fast():
     # torch.compile(model=m, backend="rbln") passes the model as a keyword, so it never
     # lands in *args. It must still be treated as model-provided (wrapped in
-    # CompiledFunctionWrapper), not mistaken for the no-model decorator form; otherwise the
-    # caller gets a decorator back instead of a compiled callable. Executing it in dummy
-    # mode must fail fast just like the positional form.
+    # CompiledFunctionWrapper), not mistaken for the no-model decorator form; otherwise
+    # the caller gets a decorator back instead of a compiled callable. Executing it in
+    # dummy mode must fail fast just like the positional form.
     proc = _run_with_dummy(
         """
         import torch, torch_rbln
@@ -554,8 +561,9 @@ def test_compiled_graph_keyword_model_execution_fails_fast():
 
 
 def test_compile_only_decorator_form_is_allowed():
-    # The guard must exempt an explicit compile_only build even through the decorator form,
-    # mirroring the positional compile_only path: it writes the artifact and does not raise.
+    # The guard must exempt an explicit compile_only build even through the decorator
+    # form, mirroring the positional compile_only path: it writes the artifact and does
+    # not raise.
     proc = _run_with_dummy(
         """
         import glob, os, tempfile
@@ -583,13 +591,15 @@ def test_compile_only_decorator_form_is_allowed():
 def test_eager_device_dtype_op_execution_fails_fast():
     # Eager ops that reach the RBLN device-compile path are NPU-bound, so on
     # RBLN_DUMMY_DEVICE they must fail fast like a compiled graph. Cover the axes that
-    # each route to that gate: both device dtypes (fp16/bf16), unary (softmax) and binary
-    # (add) ops, and aligned + unaligned last dims (the 64-alignment CPU-fallback must not
-    # make an aligned tensor raise while an unaligned one silently runs). All must raise.
+    # each route to that gate: every dispatch dtype (SupportedDtypes.dispatch), unary
+    # (softmax) and binary (add) ops, and aligned + unaligned last dims (the
+    # 64-alignment CPU-fallback must not make an aligned tensor raise while an
+    # unaligned one silently runs). All must raise.
     proc = _run_with_dummy(
         """
         import torch, torch_rbln
-        for dt in (torch.float16, torch.bfloat16):
+        from torch_rbln._internal.ops_utils import SupportedDtypes
+        for dt in SupportedDtypes.dispatch:
             for shape in [(4, 64), (4, 8)]:  # aligned and unaligned last dim
                 a = torch.ones(*shape, device="rbln:0", dtype=dt)
                 b = torch.ones(*shape, device="rbln:0", dtype=dt)
@@ -609,12 +619,13 @@ def test_eager_device_dtype_op_execution_fails_fast():
 
 
 def test_eager_host_dtype_op_runs_on_cpu():
-    # A host dtype (fp32) never runs on the NPU -- even on real hardware it CPU-falls-back.
-    # Dummy mode must keep that behavior (not reject it), so the result matches CPU.
+    # A host dtype (fp64) never runs on the NPU -- even on real hardware it
+    # CPU-falls-back. Dummy mode must keep that behavior (not reject it), so the result
+    # matches CPU.
     proc = _run_with_dummy(
         """
         import torch, torch_rbln
-        a = torch.ones(4, 8, device="rbln:0", dtype=torch.float32)
+        a = torch.ones(4, 8, device="rbln:0", dtype=torch.float64)
         assert (a + a).cpu().tolist() == [[2.0] * 8] * 4
         print("OK")
         """,
@@ -626,7 +637,8 @@ def test_eager_host_dtype_op_runs_on_cpu():
 
 def test_set_device_layout_like_raises_in_dummy_without_materialized_ref():
     # Not special-cased for dummy: a plain tensor has no device physical view, so the op
-    # raises a catchable RuntimeError (same precondition a real NPU raises), not a no-op.
+    # raises a catchable RuntimeError (same precondition a real NPU raises), not a
+    # no-op.
     proc = _run_with_dummy(
         """
         import torch, torch_rbln
@@ -676,6 +688,7 @@ def test_dummy_is_required_no_silent_cpu():
                 """
             ),
         ],
+        check=False,
         env=env,
         capture_output=True,
         text=True,
@@ -796,10 +809,11 @@ print("OK")
 )
 
 
-@pytest.mark.single_worker
-# Not xfail_rebel(): that helper is strict, and the fault sits in the pinned compiler, so a
-# rebel-compiler that compiles this decoder again must not fail the job on XPASS. `-rEfX`
-# still reports the XPASS, which is the signal to drop this marker.
+@pytest.mark.serial
+@pytest.mark.npu(count=1)
+# Not xfail_rebel(): that helper is strict, and the fault sits in the pinned compiler,
+# so a rebel-compiler that compiles this decoder again must not fail the job on XPASS.
+# `-rEfX` still reports the XPASS, which is the signal to drop this marker.
 @pytest.mark.xfail(
     condition=is_rebel_device(),
     reason="known issue: the pinned rebel-compiler does not compile this decoder for the REBEL "
@@ -812,20 +826,20 @@ def test_dummy_compiled_prefill_decode_runs_on_real_npu(tmp_path):
     # correctly on a real NPU. Detect the real NPU first (non-dummy probe), compile
     # both graphs for exactly that SoC in a dummy subprocess, then load + run
     # prefill->decode (KV cache handed from prefill into decode) on the real device
-    # and check the argmax equals the CPU reference. Skipped when there is no NPU.
+    # and check the argmax equals the CPU reference.
     probe = subprocess.run(
         [sys.executable, "-c", "from rebel._C import get_npu_name; print(get_npu_name(0) or '')"],
+        check=False,
         env=_clean_env(),
         capture_output=True,
         text=True,
         errors="replace",
     )
     npu = probe.stdout.strip()
-    if not npu:
-        pytest.skip("no NPU available to compile/run the decoder against")
 
     cache = str(tmp_path / "cache")
-    # Dummy compile targets the real machine SoC via RBLN_FORCE_NPU_NAME; no NPU is opened.
+    # Dummy compile targets the real machine SoC via RBLN_FORCE_NPU_NAME; no NPU is
+    # opened.
     proc = _run_with_dummy(_DECODER_COMPILE.format(cache=cache), env_extra={"RBLN_FORCE_NPU_NAME": npu})
     _assert_ok(proc)
     assert "OK" in proc.stdout
@@ -833,6 +847,7 @@ def test_dummy_compiled_prefill_decode_runs_on_real_npu(tmp_path):
     env = _clean_env()  # non-dummy: the real NPU loads and runs the dummy-built graphs
     proc = subprocess.run(
         [sys.executable, "-c", textwrap.dedent(_DECODER_RUN.format(cache=cache, npu=npu))],
+        check=False,
         env=env,
         capture_output=True,
         text=True,
@@ -843,6 +858,4 @@ def test_dummy_compiled_prefill_decode_runs_on_real_npu(tmp_path):
 
 
 if __name__ == "__main__":
-    from torch.testing._internal.common_utils import run_tests
-
     run_tests()

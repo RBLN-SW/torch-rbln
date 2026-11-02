@@ -26,7 +26,8 @@ class RBLNFunctionsTest : public ::testing::Test {
   const c10::DeviceIndex initial_device_index_ = 0;
   const size_t size_0b_ = 0;
   const size_t size_1gib_ = 1ULL << 30;
-  const size_t size_16gib_ = 1ULL << 34; // The memory capacity of ATOM is 15.7 GiB.
+  const size_t size_16gib_ = 1ULL
+      << 34; // The memory capacity of ATOM is 15.7 GiB.
 };
 
 TEST_F(RBLNFunctionsTest, GetDeviceCount) {
@@ -40,7 +41,8 @@ TEST_F(RBLNFunctionsTest, GetAndSetDeviceIndex) {
 
   const auto device_count = c10::rbln::get_device_count();
   EXPECT_GE(device_count, 1);
-  for (c10::DeviceIndex device_index = 0; device_index < device_count; ++device_index) {
+  for (c10::DeviceIndex device_index = 0; device_index < device_count;
+       ++device_index) {
     c10::rbln::set_device_index(device_index);
     const auto current_device_index = c10::rbln::get_device_index();
     EXPECT_EQ(current_device_index, device_index);
@@ -70,9 +72,11 @@ TEST_F(RBLNFunctionsTest, SetInvalidDeviceIndex) {
 TEST_F(RBLNFunctionsTest, ExchangeDeviceIndex) {
   const auto device_count = c10::rbln::get_device_count();
   EXPECT_GE(device_count, 1);
-  for (c10::DeviceIndex device_index = 0; device_index < device_count; ++device_index) {
+  for (c10::DeviceIndex device_index = 0; device_index < device_count;
+       ++device_index) {
     const auto original_device_index = c10::rbln::get_device_index();
-    const auto previous_device_index = c10::rbln::exchange_device_index(device_index);
+    const auto previous_device_index =
+        c10::rbln::exchange_device_index(device_index);
     EXPECT_EQ(previous_device_index, original_device_index);
     EXPECT_EQ(c10::rbln::get_device_index(), device_index);
   }
@@ -82,7 +86,8 @@ TEST_F(RBLNFunctionsTest, ExchangeNegativeDeviceIndex) {
   const auto original_device_index = c10::rbln::get_device_index();
 
   const c10::DeviceIndex negative_index = -1;
-  const auto previous_device_index = c10::rbln::exchange_device_index(negative_index);
+  const auto previous_device_index =
+      c10::rbln::exchange_device_index(negative_index);
   EXPECT_EQ(previous_device_index, original_device_index);
   EXPECT_EQ(c10::rbln::get_device_index(), original_device_index);
 }
@@ -98,9 +103,10 @@ TEST_F(RBLNFunctionsTest, ExchangeInvalidDeviceIndex) {
 }
 
 TEST_F(RBLNFunctionsTest, IsEagerMalloc) {
-  // is_eager_malloc() reads the env on every call, so toggling it is observed each time.
-  // A process-lifetime cache would latch the first value (the xdist cross-test leak this
-  // guards against), so assert set -> unset -> set flips the result live.
+  // is_eager_malloc() reads the env on every call, so toggling it is observed
+  // each time. A process-lifetime cache would latch the first value (the xdist
+  // cross-test leak this guards against), so assert set -> unset -> set flips
+  // the result live.
   const char* saved = std::getenv("TORCH_RBLN_EAGER_MALLOC");
   const bool had = saved != nullptr;
   const std::string saved_str = had ? saved : "";
@@ -111,7 +117,10 @@ TEST_F(RBLNFunctionsTest, IsEagerMalloc) {
   EXPECT_FALSE(c10::rbln::is_eager_malloc());
   setenv("TORCH_RBLN_EAGER_MALLOC", "1", /*overwrite=*/1);
   EXPECT_TRUE(c10::rbln::is_eager_malloc());
-  setenv("TORCH_RBLN_EAGER_MALLOC", "0", /*overwrite=*/1); // only exactly "1" is eager
+  setenv(
+      "TORCH_RBLN_EAGER_MALLOC",
+      "0",
+      /*overwrite=*/1); // only exactly "1" is eager
   EXPECT_FALSE(c10::rbln::is_eager_malloc());
 
   if (had) {
@@ -124,12 +133,13 @@ TEST_F(RBLNFunctionsTest, IsEagerMalloc) {
 TEST_F(RBLNFunctionsTest, MallocAndFree) {
   const auto device_count = c10::rbln::get_device_count();
   EXPECT_GE(device_count, 1);
-  for (c10::DeviceIndex device_index = 0; device_index < device_count; ++device_index) {
+  for (c10::DeviceIndex device_index = 0; device_index < device_count;
+       ++device_index) {
     const auto data_15gib = c10::rbln::malloc(device_index, 15 * size_1gib_);
     EXPECT_TRUE(data_15gib != nullptr);
 
-    // If memory is allocated lazily, the following assertion may fail because CPU memory is allocated instead of NPU
-    // memory.
+    // If memory is allocated lazily, the following assertion may fail because
+    // CPU memory is allocated instead of NPU memory.
     if (c10::rbln::is_eager_malloc()) {
       EXPECT_THROW(c10::rbln::malloc(device_index, size_1gib_), c10::Error);
     }
@@ -137,7 +147,6 @@ TEST_F(RBLNFunctionsTest, MallocAndFree) {
     c10::rbln::free(data_15gib);
 
     // Double free
-    // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
     EXPECT_THROW(c10::rbln::free(data_15gib), c10::Error);
 
     const auto data_1gib = c10::rbln::malloc(device_index, size_1gib_);
@@ -149,11 +158,12 @@ TEST_F(RBLNFunctionsTest, MallocAndFree) {
 TEST_F(RBLNFunctionsTest, MallocInvalidSize) {
   const auto device_count = c10::rbln::get_device_count();
   EXPECT_GE(device_count, 1);
-  for (c10::DeviceIndex device_index = 0; device_index < device_count; ++device_index) {
+  for (c10::DeviceIndex device_index = 0; device_index < device_count;
+       ++device_index) {
     EXPECT_THROW(c10::rbln::malloc(device_index, size_0b_), c10::Error);
 
-    // If memory is allocated lazily, the following assertion may fail because CPU memory is allocated instead of NPU
-    // memory.
+    // If memory is allocated lazily, the following assertion may fail because
+    // CPU memory is allocated instead of NPU memory.
     if (c10::rbln::is_eager_malloc()) {
       EXPECT_THROW(c10::rbln::malloc(device_index, size_16gib_), c10::Error);
     }
@@ -169,7 +179,8 @@ TEST_F(RBLNFunctionsTest, FreeNullPtr) {
 TEST_F(RBLNFunctionsTest, SameDeviceMemcpy) {
   const auto device_count = c10::rbln::get_device_count();
   EXPECT_GE(device_count, 1);
-  for (c10::DeviceIndex device_index = 0; device_index < device_count; ++device_index) {
+  for (c10::DeviceIndex device_index = 0; device_index < device_count;
+       ++device_index) {
     std::vector<int8_t> src_cpu(size_1gib_, 1);
     const void* src_cpu_data = src_cpu.data();
     std::vector<int8_t> dst_cpu(size_1gib_, 0);
@@ -195,17 +206,21 @@ TEST_F(RBLNFunctionsTest, CrossDeviceMemcpy) {
   const auto device_count = c10::rbln::get_device_count();
   EXPECT_GE(device_count, 1);
   if (device_count < 2) {
-    GTEST_SKIP() << "Skipping: cross-device memcpy requires at least 2 devices.";
+    GTEST_SKIP()
+        << "Skipping: cross-device memcpy requires at least 2 devices.";
   }
-  for (c10::DeviceIndex src_device_index = 0; src_device_index < device_count; ++src_device_index) {
-    for (c10::DeviceIndex dst_device_index = 0; dst_device_index < device_count; ++dst_device_index) {
+  for (c10::DeviceIndex src_device_index = 0; src_device_index < device_count;
+       ++src_device_index) {
+    for (c10::DeviceIndex dst_device_index = 0; dst_device_index < device_count;
+         ++dst_device_index) {
       if (src_device_index != dst_device_index) {
         std::vector<int8_t> src_cpu(size_1gib_, 1);
         const void* src_cpu_data = src_cpu.data();
         std::vector<int8_t> dst_cpu(size_1gib_, 0);
         void* dst_cpu_data = dst_cpu.data();
 
-        const auto src_rbln_data = c10::rbln::malloc(src_device_index, size_1gib_);
+        const auto src_rbln_data =
+            c10::rbln::malloc(src_device_index, size_1gib_);
         EXPECT_TRUE(src_rbln_data != nullptr);
         auto dst_rbln_data = c10::rbln::malloc(dst_device_index, size_1gib_);
         EXPECT_TRUE(dst_rbln_data != nullptr);
@@ -242,11 +257,15 @@ TEST_F(RBLNFunctionsTest, MemcpyV2VMultiBasic) {
   }
   std::vector<int8_t> dst_initial(total, 0);
 
-  for (c10::DeviceIndex device_index = 0; device_index < c10::rbln::get_device_count(); ++device_index) {
+  for (c10::DeviceIndex device_index = 0;
+       device_index < c10::rbln::get_device_count();
+       ++device_index) {
     c10::rbln::set_device_index(device_index);
 
-    auto* src_rbln = static_cast<int8_t*>(c10::rbln::malloc(device_index, total));
-    auto* dst_rbln = static_cast<int8_t*>(c10::rbln::malloc(device_index, total));
+    auto* src_rbln =
+        static_cast<int8_t*>(c10::rbln::malloc(device_index, total));
+    auto* dst_rbln =
+        static_cast<int8_t*>(c10::rbln::malloc(device_index, total));
     ASSERT_NE(src_rbln, nullptr);
     ASSERT_NE(dst_rbln, nullptr);
     c10::rbln::memcpy_h2v(src_rbln, src_host.data(), total);
@@ -277,9 +296,12 @@ TEST_F(RBLNFunctionsTest, MemcpyV2VMultiRejectsInvalidEntries) {
   auto* dst_rbln = c10::rbln::malloc(0, n);
   c10::rbln::memcpy_h2v(src_rbln, src_host.data(), n);
 
-  EXPECT_THROW(c10::rbln::memcpy_v2v_multi({{dst_rbln, src_rbln, 0}}), c10::Error);
-  EXPECT_THROW(c10::rbln::memcpy_v2v_multi({{dst_rbln, nullptr, n}}), c10::Error);
-  EXPECT_THROW(c10::rbln::memcpy_v2v_multi({{nullptr, src_rbln, n}}), c10::Error);
+  EXPECT_THROW(
+      c10::rbln::memcpy_v2v_multi({{dst_rbln, src_rbln, 0}}), c10::Error);
+  EXPECT_THROW(
+      c10::rbln::memcpy_v2v_multi({{dst_rbln, nullptr, n}}), c10::Error);
+  EXPECT_THROW(
+      c10::rbln::memcpy_v2v_multi({{nullptr, src_rbln, n}}), c10::Error);
 
   c10::rbln::free(src_rbln);
   c10::rbln::free(dst_rbln);
@@ -288,7 +310,8 @@ TEST_F(RBLNFunctionsTest, MemcpyV2VMultiRejectsInvalidEntries) {
 TEST_F(RBLNFunctionsTest, GetUninitializedMemoryInfo) {
   const auto device_count = c10::rbln::get_device_count();
   EXPECT_GE(device_count, 1);
-  for (c10::DeviceIndex device_index = 0; device_index < device_count; ++device_index) {
+  for (c10::DeviceIndex device_index = 0; device_index < device_count;
+       ++device_index) {
     const auto data = c10::rbln::malloc(device_index, size_1gib_);
     EXPECT_TRUE(data != nullptr);
 
@@ -305,7 +328,8 @@ TEST_F(RBLNFunctionsTest, GetUninitializedMemoryInfo) {
 TEST_F(RBLNFunctionsTest, GetTorchDeviceId) {
   const auto device_count = c10::rbln::get_device_count();
   EXPECT_GE(device_count, 1);
-  for (c10::DeviceIndex device_index = 0; device_index < device_count; ++device_index) {
+  for (c10::DeviceIndex device_index = 0; device_index < device_count;
+       ++device_index) {
     const auto data = c10::rbln::malloc(device_index, size_1gib_);
     EXPECT_TRUE(data != nullptr);
 
@@ -314,7 +338,8 @@ TEST_F(RBLNFunctionsTest, GetTorchDeviceId) {
     // ...and agree with the full get_memory_info() round-trip it replaces.
     EXPECT_EQ(
         c10::rbln::get_torch_device_id(data),
-        static_cast<c10::DeviceIndex>(c10::rbln::get_memory_info(data).torch_device_id));
+        static_cast<c10::DeviceIndex>(
+            c10::rbln::get_memory_info(data).torch_device_id));
 
     c10::rbln::free(data);
   }
@@ -328,7 +353,8 @@ TEST_F(RBLNFunctionsTest, GetTorchDeviceIdNullPtr) {
 TEST_F(RBLNFunctionsTest, Synchronize) {
   const auto device_count = c10::rbln::get_device_count();
   EXPECT_GE(device_count, 1);
-  for (c10::DeviceIndex device_index = 0; device_index < device_count; ++device_index) {
+  for (c10::DeviceIndex device_index = 0; device_index < device_count;
+       ++device_index) {
     // synchronize with no pending transfers should be a no-op
     EXPECT_NO_THROW(c10::rbln::synchronize(device_index));
   }
@@ -337,7 +363,8 @@ TEST_F(RBLNFunctionsTest, Synchronize) {
 TEST_F(RBLNFunctionsTest, AsyncMemcpyH2VAndV2H) {
   const auto device_count = c10::rbln::get_device_count();
   EXPECT_GE(device_count, 1);
-  for (c10::DeviceIndex device_index = 0; device_index < device_count; ++device_index) {
+  for (c10::DeviceIndex device_index = 0; device_index < device_count;
+       ++device_index) {
     constexpr size_t nbytes = 4096;
     std::vector<int8_t> src_cpu(nbytes);
     for (size_t i = 0; i < nbytes; ++i) {
@@ -365,7 +392,8 @@ TEST_F(RBLNFunctionsTest, AsyncMemcpyH2VAndV2H) {
 TEST_F(RBLNFunctionsTest, AsyncMemcpyV2V) {
   const auto device_count = c10::rbln::get_device_count();
   EXPECT_GE(device_count, 1);
-  for (c10::DeviceIndex device_index = 0; device_index < device_count; ++device_index) {
+  for (c10::DeviceIndex device_index = 0; device_index < device_count;
+       ++device_index) {
     constexpr size_t nbytes = 4096;
     std::vector<int8_t> src_cpu(nbytes);
     for (size_t i = 0; i < nbytes; ++i) {
@@ -391,12 +419,14 @@ TEST_F(RBLNFunctionsTest, AsyncMemcpyV2V) {
   }
 }
 
-// Unaligned-size variants: 4097 is not 64-aligned, so the V2H path takes the host-bounce
-// finalize rather than a direct DMA. Exercises the ordering contract the aligned tests skip.
+// Unaligned-size variants: 4097 is not 64-aligned, so the V2H path takes the
+// host-bounce finalize rather than a direct DMA. Exercises the ordering
+// contract the aligned tests skip.
 TEST_F(RBLNFunctionsTest, AsyncMemcpyH2VAndV2HUnaligned) {
   const auto device_count = c10::rbln::get_device_count();
   EXPECT_GE(device_count, 1);
-  for (c10::DeviceIndex device_index = 0; device_index < device_count; ++device_index) {
+  for (c10::DeviceIndex device_index = 0; device_index < device_count;
+       ++device_index) {
     constexpr size_t nbytes = 4097;
     std::vector<int8_t> src_cpu(nbytes);
     for (size_t i = 0; i < nbytes; ++i) {
@@ -422,7 +452,8 @@ TEST_F(RBLNFunctionsTest, AsyncMemcpyH2VAndV2HUnaligned) {
 TEST_F(RBLNFunctionsTest, AsyncMemcpyV2VUnaligned) {
   const auto device_count = c10::rbln::get_device_count();
   EXPECT_GE(device_count, 1);
-  for (c10::DeviceIndex device_index = 0; device_index < device_count; ++device_index) {
+  for (c10::DeviceIndex device_index = 0; device_index < device_count;
+       ++device_index) {
     constexpr size_t nbytes = 4097;
     std::vector<int8_t> src_cpu(nbytes);
     for (size_t i = 0; i < nbytes; ++i) {
@@ -469,9 +500,11 @@ TEST_F(RBLNFunctionsTest, BorrowHostPtrRoundTrip) {
   EXPECT_NE(borrowed.borrow_id, uint64_t{0});
 
   // Bytes match what we staged.
+  // NOLINTNEXTLINE(performance-no-int-to-ptr)
   const auto* host_view = reinterpret_cast<const int8_t*>(borrowed.host_ptr);
   for (size_t i = 0; i < nbytes; ++i) {
-    EXPECT_EQ(host_view[i], static_cast<int8_t>(0x5a)) << "mismatch at byte " << i;
+    EXPECT_EQ(host_view[i], static_cast<int8_t>(0x5a))
+        << "mismatch at byte " << i;
   }
 
   c10::rbln::return_borrowed(borrowed.borrow_id, /*updated=*/false);
@@ -492,6 +525,7 @@ TEST_F(RBLNFunctionsTest, BorrowHostPtrWriteBackVisibleAfterReturn) {
 
   {
     const auto borrowed = c10::rbln::borrow_host_ptr(rbln_data, nbytes);
+    // NOLINTNEXTLINE(performance-no-int-to-ptr)
     auto* host_writer = reinterpret_cast<int8_t*>(borrowed.host_ptr);
     for (size_t i = 0; i < nbytes; ++i) {
       host_writer[i] = static_cast<int8_t>(i);
@@ -517,10 +551,12 @@ TEST_F(RBLNFunctionsTest, AcquireHostPtrForOverwriteRoundTrip) {
   auto rbln_data = c10::rbln::malloc(/*device_index=*/0, nbytes);
   ASSERT_NE(rbln_data, nullptr);
 
-  const auto borrowed = c10::rbln::acquire_host_ptr_for_overwrite(rbln_data, nbytes);
+  const auto borrowed =
+      c10::rbln::acquire_host_ptr_for_overwrite(rbln_data, nbytes);
   EXPECT_NE(borrowed.host_ptr, uintptr_t{0});
   EXPECT_NE(borrowed.borrow_id, uint64_t{0});
 
+  // NOLINTNEXTLINE(performance-no-int-to-ptr)
   auto* host_writer = reinterpret_cast<uint8_t*>(borrowed.host_ptr);
   std::memset(host_writer, 0xa5, nbytes);
   c10::rbln::return_borrowed(borrowed.borrow_id, /*updated=*/true);
@@ -535,16 +571,21 @@ TEST_F(RBLNFunctionsTest, AcquireHostPtrForOverwriteRoundTrip) {
 }
 
 TEST_F(RBLNFunctionsTest, TryAcquireHostPtrForOverwriteRoundTrip) {
-  // Non-throwing variant: on success it behaves like acquire_host_ptr_for_overwrite.
+  // Non-throwing variant: on success it behaves like
+  // acquire_host_ptr_for_overwrite.
   const size_t nbytes = 256;
   auto rbln_data = c10::rbln::malloc(/*device_index=*/0, nbytes);
   ASSERT_NE(rbln_data, nullptr);
 
-  auto borrowed = c10::rbln::try_acquire_host_ptr_for_overwrite(rbln_data, nbytes);
-  ASSERT_TRUE(borrowed.has_value());
+  auto borrowed =
+      c10::rbln::try_acquire_host_ptr_for_overwrite(rbln_data, nbytes);
+  if (!borrowed.has_value()) {
+    FAIL() << "try_acquire_host_ptr_for_overwrite returned nullopt";
+  }
   EXPECT_NE(borrowed->host_ptr, uintptr_t{0});
   EXPECT_NE(borrowed->borrow_id, uint64_t{0});
 
+  // NOLINTNEXTLINE(performance-no-int-to-ptr)
   std::memset(reinterpret_cast<uint8_t*>(borrowed->host_ptr), 0xa5, nbytes);
   c10::rbln::return_borrowed(borrowed->borrow_id, /*updated=*/true);
 
@@ -556,19 +597,28 @@ TEST_F(RBLNFunctionsTest, TryAcquireHostPtrForOverwriteRoundTrip) {
   c10::rbln::free(rbln_data);
 }
 
-TEST_F(RBLNFunctionsTest, TryAcquireHostPtrForOverwriteInvalidArgsReturnNullopt) {
+TEST_F(
+    RBLNFunctionsTest,
+    TryAcquireHostPtrForOverwriteInvalidArgsReturnNullopt) {
   // The copy-fallback path in cpu_fallback_rbln relies on invalid/rejected
   // acquires returning nullopt rather than throwing.
-  EXPECT_FALSE(c10::rbln::try_acquire_host_ptr_for_overwrite(/*rbln_data=*/nullptr, 64).has_value());
+  EXPECT_FALSE(
+      c10::rbln::try_acquire_host_ptr_for_overwrite(/*rbln_data=*/nullptr, 64)
+          .has_value());
   auto rbln_data = c10::rbln::malloc(/*device_index=*/0, 64);
   ASSERT_NE(rbln_data, nullptr);
-  EXPECT_FALSE(c10::rbln::try_acquire_host_ptr_for_overwrite(rbln_data, /*nbytes=*/0).has_value());
+  EXPECT_FALSE(
+      c10::rbln::try_acquire_host_ptr_for_overwrite(rbln_data, /*nbytes=*/0)
+          .has_value());
   c10::rbln::free(rbln_data);
 }
 
 TEST_F(RBLNFunctionsTest, BorrowRejectsNullData) {
-  EXPECT_THROW(c10::rbln::borrow_host_ptr(/*rbln_data=*/nullptr, 64), c10::Error);
-  EXPECT_THROW(c10::rbln::acquire_host_ptr_for_overwrite(/*rbln_data=*/nullptr, 64), c10::Error);
+  EXPECT_THROW(
+      c10::rbln::borrow_host_ptr(/*rbln_data=*/nullptr, 64), c10::Error);
+  EXPECT_THROW(
+      c10::rbln::acquire_host_ptr_for_overwrite(/*rbln_data=*/nullptr, 64),
+      c10::Error);
 }
 
 TEST_F(RBLNFunctionsTest, BorrowRejectsZeroSize) {
@@ -577,7 +627,9 @@ TEST_F(RBLNFunctionsTest, BorrowRejectsZeroSize) {
   auto rbln_data = c10::rbln::malloc(/*device_index=*/0, 64);
   ASSERT_NE(rbln_data, nullptr);
   EXPECT_THROW(c10::rbln::borrow_host_ptr(rbln_data, /*nbytes=*/0), c10::Error);
-  EXPECT_THROW(c10::rbln::acquire_host_ptr_for_overwrite(rbln_data, /*nbytes=*/0), c10::Error);
+  EXPECT_THROW(
+      c10::rbln::acquire_host_ptr_for_overwrite(rbln_data, /*nbytes=*/0),
+      c10::Error);
   c10::rbln::free(rbln_data);
 }
 
@@ -585,8 +637,10 @@ TEST_F(RBLNFunctionsTest, ReturnBorrowedZeroIdIsNoop) {
   // borrow_id == 0 is a sentinel meaning "no live borrow". Cleanup paths in
   // RBLNCPUFallback rely on this so they can call return_borrowed
   // unconditionally over a vector that may contain skipped entries.
-  EXPECT_NO_THROW(c10::rbln::return_borrowed(/*borrow_id=*/0, /*updated=*/false));
-  EXPECT_NO_THROW(c10::rbln::return_borrowed(/*borrow_id=*/0, /*updated=*/true));
+  EXPECT_NO_THROW(
+      c10::rbln::return_borrowed(/*borrow_id=*/0, /*updated=*/false));
+  EXPECT_NO_THROW(
+      c10::rbln::return_borrowed(/*borrow_id=*/0, /*updated=*/true));
 }
 
 TEST_F(RBLNFunctionsTest, ReturnBorrowedDoubleReleaseThrows) {
@@ -598,13 +652,15 @@ TEST_F(RBLNFunctionsTest, ReturnBorrowedDoubleReleaseThrows) {
 
   const auto borrowed = c10::rbln::borrow_host_ptr(rbln_data, nbytes);
   c10::rbln::return_borrowed(borrowed.borrow_id, /*updated=*/false);
-  EXPECT_THROW(c10::rbln::return_borrowed(borrowed.borrow_id, /*updated=*/false), c10::Error);
+  EXPECT_THROW(
+      c10::rbln::return_borrowed(borrowed.borrow_id, /*updated=*/false),
+      c10::Error);
 
   c10::rbln::free(rbln_data);
 }
 
-// The key/field layout of mem_get_info_per_chiplet(), on a fixed reply rather than a live
-// reading another process can move between two queries.
+// The key/field layout of mem_get_info_per_chiplet(), on a fixed reply rather
+// than a live reading another process can move between two queries.
 TEST(RBLNFunctionsPerChipletMemoryMap, LaysOutEveryFieldOfEveryReply) {
   RBLNDeviceMemoryInfo npu0{};
   npu0.total = 1000;

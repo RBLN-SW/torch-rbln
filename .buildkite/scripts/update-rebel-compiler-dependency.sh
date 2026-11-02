@@ -26,7 +26,7 @@ fi
 
 echo "--- Resolving ${package} version"
 index_url="$(
-  .buildkite/scripts/read-index-setting.py \
+  .buildkite/scripts/read_index_setting.py \
     --index rbln-nightly \
     --setting url
 )"
@@ -72,7 +72,7 @@ if [[ "${target}" == "${current}" ]]; then
   exit 0
 fi
 is_later="$(
-  .buildkite/scripts/compare-versions.py \
+  .buildkite/scripts/compare_versions.py \
     --candidate "${target}" \
     --baseline "${current}"
 )"
@@ -87,9 +87,15 @@ uv run \
   tools/pin_rebel_compiler.py \
     "${target}"
 uv lock
+uv run \
+  --isolated \
+  --locked \
+  --only-group lint \
+  taplo fmt \
+    pyproject.toml
 
 echo "--- Proposing ${target}"
-.buildkite/scripts/propose-dependency-update.py \
+.buildkite/scripts/propose_dependency_update.py \
   --package "${package}" \
   --package-version "${target}" \
   --head-branch "${head_branch}" \

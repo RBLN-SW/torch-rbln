@@ -22,7 +22,8 @@ inline void hash_combine_size_t(std::size_t& seed, std::size_t v) {
 } // namespace
 
 std::size_t CacheKeyHash::operator()(const CacheKey& k) const noexcept {
-  std::size_t h = std::hash<const void*>{}(static_cast<const void*>(k.schema_name_intern));
+  std::size_t h =
+      std::hash<const void*>{}(static_cast<const void*>(k.schema_name_intern));
   for (const auto& in : k.inputs) {
     hash_combine_size_t(h, std::hash<int>{}(static_cast<int>(in.dtype)));
     hash_combine_size_t(h, std::hash<int>{}(in.device_index));
@@ -129,7 +130,8 @@ void WarmCache::install(CacheKey key, const CacheEntry& entry) {
   if (!enabled_.load(std::memory_order_relaxed))
     return;
   std::unique_lock<std::shared_mutex> wr(mu_);
-  std::shared_ptr<CacheEntry> entry_ptr(new CacheEntry(entry), &cache_entry_deleter);
+  std::shared_ptr<CacheEntry> entry_ptr(
+      new CacheEntry(entry), &cache_entry_deleter);
   // First-writer-wins: if another thread beat us to it, keep the earlier one.
   map_.try_emplace(std::move(key), std::move(entry_ptr));
 }
@@ -149,7 +151,9 @@ void WarmCache::clear(std::optional<c10::DeviceIndex> device) {
     for (auto it = map_.begin(); it != map_.end();) {
       const auto& inputs = it->first.inputs;
       const bool drop = !device.has_value() ||
-          std::ranges::any_of(inputs, [&](const TensorProfile& tp) { return tp.device_index == *device; });
+          std::ranges::any_of(inputs, [&](const TensorProfile& tp) {
+            return tp.device_index == *device;
+          });
       if (drop) {
         dropped.push_back(std::move(it->second));
         it = map_.erase(it);

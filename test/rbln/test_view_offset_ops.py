@@ -1,8 +1,7 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-View-offset correctness for the in-place RBLN ops ``zero_``, ``fill_.Scalar``,
-and ``.item()``.
+"""View-offset correctness for the in-place RBLN ops ``zero_``, ``fill_.Scalar``, and
+``.item()``.
 
 A view's ``data_ptr()`` is an interior vaddr (storage base +
 ``storage_offset() * itemsize``). ``zero_`` used the lazy ``mark_zeros`` path,
@@ -19,7 +18,7 @@ from torch.testing._internal.common_device_type import instantiate_device_type_t
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestZeroViewOffset(TestCase):
     """``zero_`` must zero only the view, not the enclosing allocation."""
 
@@ -75,7 +74,7 @@ class TestZeroViewOffset(TestCase):
         self.assertEqual(base_rbln.to("cpu"), base_cpu)
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestFillViewOffset(TestCase):
     """``fill_.Scalar`` must write only the view's byte range."""
 
@@ -101,7 +100,7 @@ class TestFillViewOffset(TestCase):
         self._check(torch.float32, (8,), lambda x: x[::2], 3.0)
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestItemViewOffset(TestCase):
     """``.item()`` must read the element at the view's interior vaddr."""
 
@@ -115,18 +114,21 @@ class TestItemViewOffset(TestCase):
         self.assertEqual(base[2, 1].item(), 9)
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestBroadcastOverlapFill(TestCase):
-    """``zero_``/``fill_`` on an internally-overlapping (expand/broadcast, stride-0) view must
-    match CPU's overlap-tolerant fill — write each distinct storage element once — instead of
-    raising a copy_ "internal overlap" error. Regression for ``expand(...).zero_()``."""
+    """``zero_``/``fill_`` on an internally-overlapping (expand/broadcast, stride-0)
+    view must match CPU's overlap-tolerant fill — write each distinct storage element
+    once — instead of raising a copy_ "internal overlap" error. Regression for
+    ``expand(...).zero_()``.
+    """
 
     def _check(self, dtype, base_shape, expand_fn, op):
         base_rbln = torch.ones(base_shape, dtype=dtype, device="rbln")
         base_cpu = torch.ones(base_shape, dtype=dtype)
         op(expand_fn(base_rbln))
         op(expand_fn(base_cpu))
-        # Both the backing storage (base) and the broadcast view must match the CPU result.
+        # Both the backing storage (base) and the broadcast view must match the CPU
+        # result.
         self.assertEqual(base_rbln.to("cpu"), base_cpu)
         self.assertEqual(expand_fn(base_rbln).to("cpu"), expand_fn(base_cpu))
 
@@ -149,7 +151,8 @@ class TestBroadcastOverlapFill(TestCase):
         self._check(dtype, (1,), lambda x: x.expand(4), lambda v: v.fill_(value))
 
     def test_fill_mixed_real_and_broadcast_dims(self):
-        # dim 0 is real (stride != 0), dim 1 is broadcast (stride 0): only dim 1 collapses.
+        # dim 0 is real (stride != 0), dim 1 is broadcast (stride 0): only dim 1
+        # collapses.
         self._check(torch.float32, (2, 1), lambda x: x.expand(2, 5), lambda v: v.fill_(3.0))
 
 

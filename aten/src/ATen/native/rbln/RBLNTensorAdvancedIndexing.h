@@ -21,10 +21,16 @@ namespace at::native::rbln {
 
 /// Pre-allocated `out` overload.
 at::Tensor& index_select_out_rbln(
-    const at::Tensor& self, int64_t dim, const at::Tensor& index, at::Tensor& out);
+    const at::Tensor& self,
+    int64_t dim,
+    const at::Tensor& index,
+    at::Tensor& out);
 
 /// Non-out overload: allocates a fresh contiguous output and delegates.
-at::Tensor index_select_rbln(const at::Tensor& self, int64_t dim, const at::Tensor& index);
+at::Tensor index_select_rbln(
+    const at::Tensor& self,
+    int64_t dim,
+    const at::Tensor& index);
 
 // ---------------------------------------------------------------------------
 // index.Tensor_out (advanced indexing) — native white-list fast-path
@@ -43,9 +49,10 @@ void index_out_rbln(const c10::OperatorHandle& op, torch::jit::Stack* stack);
 // Schema: index_copy.out(Tensor self, int dim, Tensor index, Tensor source,
 //                        *, Tensor(a!) out) -> Tensor(a!)
 //
-// `out` is shape-equal to `self`; `out[..., index[i], ...] = source[..., i, ...]`
-// along `dim`; all other positions equal `self`. Two phases:
-//   1. Initialise `out` with `self`'s contents — skipped when `out` aliases
+// `out` is shape-equal to `self`;
+// `out[..., index[i], ...] = source[..., i, ...]` along `dim`; all other
+// positions equal `self`. Two phases:
+//   1. Initialize `out` with `self`'s contents — skipped when `out` aliases
 //      `self` (the in-place `index_copy_` case dispatches with `out == self`).
 //   2. For each run of consecutive index values, slice `source` and `out`
 //      along `dim` and hand the views to the strided v2v engine.

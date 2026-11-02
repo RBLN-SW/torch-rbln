@@ -1,10 +1,7 @@
-"""
-Code templates for variant function code generation.
+"""Code templates for variant function code generation.
 
 Contains all code templates used in variant function generation (out, inplace, normal).
 """
-
-from typing import Optional
 
 
 class VariantTemplates:
@@ -24,14 +21,13 @@ def {kernel_name}(*args, **kwargs):
         """Templates for input extraction and processing."""
 
         @staticmethod
-        def out_tensor(out_tensor_kwarg: str, out_values_kwarg: Optional[str] = None) -> str:
+        def out_tensor(out_tensor_kwarg: str, out_values_kwarg: str | None = None) -> str:
             """Generate out tensor extraction code."""
             if out_values_kwarg:
                 return f"""    out_tensor = kwargs.get('{out_tensor_kwarg}')
     out_values_tensor = kwargs.get('{out_values_kwarg}')
 """
-            else:
-                return """    out_tensor = kwargs.get('out')
+            return """    out_tensor = kwargs.get('out')
 """
 
         @staticmethod
@@ -55,17 +51,21 @@ def {kernel_name}(*args, **kwargs):
         raise RuntimeError("No input tensor found.")
     if isinstance(in_tensor, torch.Tensor):
         input_dtype = in_tensor.dtype
-        input_device = in_tensor.device
+        if not (in_tensor.dim() == 0 and in_tensor.device.type == "cpu"):
+            input_device = in_tensor.device
 """
 
         @staticmethod
         def with_self_device_only(self_arg_pos: int) -> str:
-            """Like with_self but only device (compare out ops: dtype checked on output tensor)."""
+            """Like with_self but only device (compare out ops: dtype checked on output
+            tensor).
+            """
             return f"""    in_tensor = args[{self_arg_pos}] if {self_arg_pos} < len(args) else None
     if in_tensor is None:
         raise RuntimeError("No input tensor found.")
     if isinstance(in_tensor, torch.Tensor):
-        input_device = in_tensor.device
+        if not (in_tensor.dim() == 0 and in_tensor.device.type == "cpu"):
+            input_device = in_tensor.device
 """
 
         @staticmethod
@@ -106,7 +106,9 @@ def {kernel_name}(*args, **kwargs):
                 input_dtype = arg.dtype
             else:
                 if input_dtype != arg.dtype:
-                    raise RuntimeError(f"Unsafe cast: input has dtype {input_dtype} but other input tensor has dtype {arg.dtype}.")
+                    raise RuntimeError(
+                        f"Unsafe cast: input has dtype {input_dtype} but other input tensor has dtype {arg.dtype}."
+                    )
 """
 
         @staticmethod
@@ -145,16 +147,25 @@ def {kernel_name}(*args, **kwargs):
             return """    if 'dtype' in kwargs and kwargs['dtype'] is not None:
         input_dtype = kwargs['dtype']
         if input_dtype != out_tensor.dtype and not is_type_promotion_allowed_dtype(input_dtype, out_tensor.dtype):
-            raise RuntimeError(f"Unsafe cast: input has dtype {input_dtype} but output tensor has dtype {out_tensor.dtype}.")
+            raise RuntimeError(
+                f"Unsafe cast: input has dtype {input_dtype} but output tensor has dtype {out_tensor.dtype}."
+            )
 """
 
         @staticmethod
-        def dtype_compare() -> str:
-            """Generate dtype validation for comparison operations."""
-            return """    if out_tensor.dtype != torch.bool:
-        raise RuntimeError(
-            f"Output tensor for comparison operator must have dtype torch.bool, but got {out_tensor.dtype}."
+        def dtype_compare(root_name: str) -> str:
+            """Generate dtype handling for comparison operations.
+
+            The device writes bool; for any other `out` the op runs on CPU and its
+            result is cast into `out`, as PyTorch does.
+            """
+            return f"""    if out_tensor.dtype != torch.bool:
+        kwargs_filtered = {{k: v for k, v in kwargs.items() if k != "out"}}
+        result = cpu_fallback_path(
+            torch.{root_name}, args, result=out_tensor, op_name="aten::{root_name}", **kwargs_filtered
         )
+        finalize_output_tensor(out_tensor, result, result.shape)
+        return
 """
 
         @staticmethod
@@ -162,7 +173,9 @@ def {kernel_name}(*args, **kwargs):
             """Generate default dtype validation."""
             return """    if input_dtype is not None and input_dtype != out_tensor.dtype:
         if not is_type_promotion_allowed(args, out_tensor):
-            raise RuntimeError(f"Unsafe cast: input has dtype {input_dtype} but output tensor has dtype {out_tensor.dtype}.")
+            raise RuntimeError(
+                f"Unsafe cast: input has dtype {input_dtype} but output tensor has dtype {out_tensor.dtype}."
+            )
 """
 
     class FunctionVariants:
@@ -172,7 +185,7 @@ def {kernel_name}(*args, **kwargs):
         def out_footer(general_kernel_name: str) -> str:
             """Generate footer for out functions."""
             return f"""    result, _ = {general_kernel_name}(*args, **kwargs)
-    finalize_output_tensor(out_tensor, result, result.shape, args, kwargs)
+    finalize_output_tensor(out_tensor, result, result.shape)
 """
 
         @staticmethod

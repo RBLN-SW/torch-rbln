@@ -1,0 +1,18 @@
+# The default excludes would skip dot directories such as `.buildkite`.
+disable-project-excludes-heuristics = true
+# The PYREFLY linter runs `pyrefly` without the project's dependencies.
+python-interpreter-path = ".venv/bin/python"
+search-path = [".", "tools"]
+project-excludes = [
+  ".venv",
+  "build",
+  "test",         # `torch.rbln` exists only at runtime
+  "third_party",
+  "tools/linter", # vendored from upstream PyTorch
+]
+# The build generates these modules.
+ignore-missing-imports = [
+  "torch_rbln._C",
+  "torch_rbln._internal._abi_snapshot",
+  "torch_rbln._internal.register_ops",
+]

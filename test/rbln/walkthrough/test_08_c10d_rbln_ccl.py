@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Walkthrough example 8: c10d distributed on RBLN (`rbln-ccl` backend).
+"""Walkthrough example 8: c10d distributed on RBLN (`rbln-ccl` backend).
 
 Ported from walkthrough_guide/8.c10d_rbln_ccl.py.
 
@@ -27,7 +26,7 @@ import torch.multiprocessing as mp
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from test.utils import configure_master_port_for_rccl_tests, requires_logical_devices
+from test.utils import configure_master_port_for_rccl_tests
 
 
 def _setup_environment(rank: int, world_size: int) -> None:
@@ -50,7 +49,7 @@ def _run_all_reduce_sum(rank: int, world_size: int, backend: str) -> None:
         dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
 
         # Ranks are 0..world_size-1, so values are 1..world_size.
-        # SUM == world_size * (world_size + 1) / 2.
+        # Their sum is world_size * (world_size + 1) / 2.
         expected_sum = world_size * (world_size + 1) / 2.0
         assert tensor[0] == expected_sum, (
             f"all_reduce SUM failed on rank {rank}: expected {expected_sum}, got {tensor[0]}"
@@ -98,16 +97,15 @@ def _run_all_gather(rank: int, world_size: int, backend: str) -> None:
         dist.destroy_process_group()
 
 
-@pytest.mark.test_set_ci
-@pytest.mark.single_worker
-@requires_logical_devices(2)
+@pytest.mark.serial
+@pytest.mark.npu(count=2)
 class TestC10dRBLNCCL(TestCase):
     """Walkthrough example 8: c10d collectives with the `rbln-ccl` backend."""
 
     def setUp(self):
         # Match the env setup used by test/distributed/test_process_group.py.
-        # Scoped to the test: these are process-global, and patch.dict restores the whole
-        # environment -- including the MASTER_PORT the helper below adds.
+        # Scoped to the test: these are process-global, and patch.dict restores the
+        # whole environment -- including the MASTER_PORT the helper below adds.
         env = mock.patch.dict(
             os.environ,
             {
@@ -122,7 +120,7 @@ class TestC10dRBLNCCL(TestCase):
         configure_master_port_for_rccl_tests()
 
         self.backend = "rbln-ccl"
-        self.world_size = min(torch.rbln.device_count(), 2)
+        self.world_size = 2
 
     def _spawn(self, fn):
         """Launch `fn(rank, world_size, backend)` across `self.world_size` ranks."""

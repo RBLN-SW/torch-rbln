@@ -46,18 +46,18 @@ _ops_without_forward_ad_support = {
 }
 
 
-# RBLN SDPA rejects dropout + autograd only (the backward can't reproduce the forward dropout
-# mask, so it raises rather than return a silently wrong gradient — see sdpa.py). Drop exactly
-# that OpInfo sample -- dropout_p>0 requested WITH requires_grad on an RBLN device -- so the
-# grad/consistency tests skip only the unsupported case and keep every other sample intact:
-# forward-only (requires_grad=False) dropout, all non-dropout samples, and any CPU
-# instantiation of the shared OpInfo. ``test_dtypes`` stays globally skipped via
-# ``_skipped_tests`` above.
+# RBLN SDPA rejects dropout + autograd only (the backward can't reproduce the forward
+# dropout mask, so it raises rather than return a silently wrong gradient — see
+# sdpa.py). Drop exactly that OpInfo sample -- dropout_p>0 requested WITH requires_grad
+# on an RBLN device -- so the grad/consistency tests skip only the unsupported case and
+# keep every other sample intact: forward-only (requires_grad=False) dropout, all
+# non-dropout samples, and any CPU instantiation of the shared OpInfo. ``test_dtypes``
+# stays globally skipped via ``_skipped_tests`` above.
 def _drop_dropout_grad_samples(op):
     _orig_sample_inputs = op.sample_inputs_func
 
     @wraps(_orig_sample_inputs)
-    def _filtered(op_info, device, dtype, requires_grad=False, **kwargs):
+    def _filtered(op_info, device, dtype, requires_grad=False, **kwargs):  # noqa: FBT002
         is_rbln = "rbln" in str(device) or "privateuse1" in str(device)
         for sample in _orig_sample_inputs(op_info, device, dtype, requires_grad=requires_grad, **kwargs):
             if is_rbln and requires_grad and sample.kwargs.get("dropout_p", 0.0):
@@ -135,8 +135,10 @@ _ops_with_cpu_fallback_tests = [
     "sign",
 ]
 
-# Ops whose public API names differ from yaml function names (e.g., nn.functional.scaled_dot_product_attention
-# vs _scaled_dot_product_fused_attention_overrideable). Added explicitly for test discovery.
+# Ops whose public API names differ from yaml function names (e.g.,
+# nn.functional.scaled_dot_product_attention vs
+# _scaled_dot_product_fused_attention_overrideable). Added explicitly for test
+# discovery.
 _ops_with_public_api_name_mismatch = [
     "nn.functional.scaled_dot_product_attention",
 ]
@@ -168,10 +170,11 @@ dispatch_keys.clear()
 dispatch_keys.extend(_original_dispatch_keys)
 
 if _parsed_yaml is None:
-    raise RuntimeError(
+    msg = (
         f"Failed to parse ATen YAML metadata from {_native_functions_path} and {_tags_path}. "
         "Please verify both files are present and valid."
     )
+    raise RuntimeError(msg)
 
 # Get all the base function names and also nn.functional variants
 _native_functions_ops = []
@@ -214,7 +217,8 @@ for root_name in _root_names:
     _target_ops.add(root_name)
     _target_ops.add(f"_refs.{root_name}")
 
-# Ops that test CPU fallback with non-float16 dtypes (e.g., SDPA falls back when dtype != float16).
+# Ops that test CPU fallback with non-float16 dtypes (e.g., SDPA falls back when dtype
+# != float16).
 _ops_with_cpu_fallback_dtype_tests = {"nn.functional.scaled_dot_product_attention"}
 
 
@@ -225,7 +229,8 @@ def _skip_if_not_implemented(fn):
     def wrapper(*args, **kwargs):
         # Specific test restriction
         if fn.__name__ in _skipped_tests:
-            raise SkipTest(f"Skipping {fn.__name__}")
+            msg = f"Skipping {fn.__name__}"
+            raise SkipTest(msg)
         bound_args = sig.bind(*args, **kwargs)
         bound_args.apply_defaults()
 
@@ -238,16 +243,19 @@ def _skip_if_not_implemented(fn):
 
         # Skip forward AD tests for operators without support
         if fn.__name__ == "test_forward_ad" and op_name in _ops_without_forward_ad_support:
-            raise SkipTest(f"Skipping {fn.__name__} for {op_name}: forward AD not supported on RBLN")
+            msg = f"Skipping {fn.__name__} for {op_name}: forward AD not supported on RBLN"
+            raise SkipTest(msg)
 
         for name, value in bound_args.arguments.items():
             # `op` restriction
             if name == "op" and hasattr(value, "name") and value.name not in _target_ops:
-                raise SkipTest(f"Skipping {value.name} because it is not in `native_functions.yaml`")
-            # `dtype` restriction - SDPA is an exception to test CPU fallback with various dtypes
-            if name == "dtype" and value not in SUPPORTED_DTYPES:
-                if op_name not in _ops_with_cpu_fallback_dtype_tests:
-                    raise SkipTest(f"Skipping {fn.__name__} because it is not supported dtype")
+                msg = f"Skipping {value.name} because it is not in `native_functions.yaml`"
+                raise SkipTest(msg)
+            # `dtype` restriction - SDPA is an exception to test CPU fallback with
+            # various dtypes
+            if name == "dtype" and value not in SUPPORTED_DTYPES and op_name not in _ops_with_cpu_fallback_dtype_tests:
+                msg = f"Skipping {fn.__name__} because it is not supported dtype"
+                raise SkipTest(msg)
 
         return fn(*args, **kwargs)
 

@@ -1,12 +1,14 @@
 # Owner(s): ["module: PrivateUse1"]
 
 import os
+from typing import ClassVar
 from unittest import mock
 
 import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+from torch.distributed import distributed_c10d as c10d
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, subtest, TestCase
 
@@ -16,7 +18,7 @@ from test.utils import configure_master_port_for_rccl_tests, spawn_target_with_c
 KiB = 1024
 MiB = 1024 * 1024
 
-TEST_DTYPES = SUPPORTED_DTYPES + [torch.float32, torch.float64, torch.int8, torch.int16, torch.int32, torch.int64]
+TEST_DTYPES = [*SUPPORTED_DTYPES, torch.float64, torch.int8, torch.int16, torch.int32, torch.int64]
 
 
 def setup_environment(rank: int, world_size: int) -> None:
@@ -40,7 +42,7 @@ def run_allreduce_test(rank: int, world_size: int, backend: str, op: dist.Reduce
         dist.all_reduce(tensor, op=op)
 
         # Verify result based on operation
-        expected_value = _get_expected_allreduce_value(base_value, world_size, op)
+        expected_value = _get_expected_allreduce_value(world_size, op)
         assert tensor[0] == expected_value, (
             f"allreduce {op} failed on rank {rank}: expected={expected_value}, actual={tensor[0]}"
         )
@@ -58,10 +60,7 @@ def run_broadcast_test(rank: int, world_size: int, backend: str, src: int, dtype
     try:
         # Create tensor with different values based on rank
         # Use appropriate value based on dtype
-        if dtype in [torch.int8, torch.int16, torch.int32, torch.int64]:
-            broadcast_value = 42
-        else:
-            broadcast_value = 42.0
+        broadcast_value = 42 if dtype in [torch.int8, torch.int16, torch.int32, torch.int64] else 42.0
 
         if rank == src:
             tensor = torch.full([64], broadcast_value, dtype=dtype, device=device)
@@ -113,7 +112,9 @@ def run_broadcast_zero_sized_test(rank: int, world_size: int, backend: str, src:
 
 
 def run_scatter_test(rank: int, world_size: int, backend: str, root: int, dtype: torch.dtype, dim0: int = 32) -> None:
-    """Test scatter operation from specific root rank with specified dtype and tensor size [dim0]."""
+    """Test scatter operation from specific root rank with specified dtype and tensor
+    size [dim0].
+    """
     setup_environment(rank, world_size)
     dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
     device = torch.device("rbln", rank)
@@ -121,10 +122,7 @@ def run_scatter_test(rank: int, world_size: int, backend: str, root: int, dtype:
     try:
         # Create input data for scatter
         # Use appropriate value based on dtype
-        if dtype in [torch.int8, torch.int16, torch.int32, torch.int64]:
-            use_int = True
-        else:
-            use_int = False
+        use_int = dtype in [torch.int8, torch.int16, torch.int32, torch.int64]
 
         if rank == root:
             # Root rank has data for all ranks
@@ -216,20 +214,16 @@ def run_scatter_shared_logical_device_test(rank: int, world_size: int, backend: 
 
 
 def run_send_recv_test(rank: int, world_size: int, backend: str, src: int, dst: int, dtype: torch.dtype) -> None:
-    """Test send/recv operation between source and destination ranks with specified dtype."""
+    """Test send/recv operation between source and destination ranks with specified
+    dtype.
+    """
     setup_environment(rank, world_size)
     dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
     device = torch.device("rbln", rank)
 
     try:
-        if world_size < 2:
-            return  # Skip if not enough ranks
-
         # Use appropriate value based on dtype
-        if dtype in [torch.int8, torch.int16, torch.int32, torch.int64]:
-            send_value = 42
-        else:
-            send_value = 42.0
+        send_value = 42 if dtype in [torch.int8, torch.int16, torch.int32, torch.int64] else 42.0
 
         if rank == src:
             # Source rank sends data to destination rank
@@ -312,8 +306,6 @@ def run_allgather_into_tensor_coalesced_test(
     device = torch.device("rbln", rank)
 
     try:
-        from torch.distributed import distributed_c10d as c10d
-
         use_int = dtype in [torch.int8, torch.int16, torch.int32, torch.int64]
         input_value = rank + 1 if use_int else float(rank + 1)
 
@@ -391,6 +383,45 @@ def run_reduce_scatter_test(rank: int, world_size: int, backend: str, op: dist.R
         dist.destroy_process_group()
 
 
+def run_reduce_scatter_tensor_test(rank: int, world_size: int, backend: str, size: int, margin: int = 0) -> None:
+    """Test reduce_scatter_tensor, whose input chunks are views of one storage.
+
+    With margin > 0 the input is a view in the middle of a larger allocation.
+    """
+    setup_environment(rank, world_size)
+    dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+    device = torch.device("rbln", rank)
+    sentinel = -7.0
+
+    try:
+        chunks = [torch.full([size], float((rank + 1) * 10 + j + 1), dtype=torch.float16) for j in range(world_size)]
+        guard = torch.full([margin], sentinel, dtype=torch.float16)
+        backing = torch.cat([guard, *chunks, guard]).to(device)
+        input_tensor = backing[margin : margin + size * world_size]
+        output = torch.zeros(size, dtype=torch.float16, device=device)
+
+        dist.reduce_scatter_tensor(output, input_tensor)
+
+        expected_value = _get_expected_reduce_scatter_value(rank, world_size, dist.ReduceOp.SUM)
+        torch.testing.assert_close(
+            output.cpu(),
+            torch.full([size], expected_value, dtype=torch.float16),
+            msg=f"reduce_scatter_tensor failed on rank {rank}: got {output[:5]}, expected {expected_value}",
+        )
+        if margin > 0:
+            backing_cpu = backing.cpu()
+            expected_guard = torch.full([margin], sentinel, dtype=torch.float16)
+            torch.testing.assert_close(
+                backing_cpu[:margin], expected_guard, msg=f"reduce_scatter_tensor clobbered the prefix on rank {rank}"
+            )
+            torch.testing.assert_close(
+                backing_cpu[-margin:], expected_guard, msg=f"reduce_scatter_tensor clobbered the suffix on rank {rank}"
+            )
+
+    finally:
+        dist.destroy_process_group()
+
+
 def run_barrier_test(rank: int, world_size: int, backend: str) -> None:
     """Test barrier synchronization."""
     setup_environment(rank, world_size)
@@ -400,6 +431,101 @@ def run_barrier_test(rank: int, world_size: int, backend: str) -> None:
         # Test barrier
         dist.barrier()
 
+    finally:
+        dist.destroy_process_group()
+
+
+def run_empty_collectives_test(rank: int, world_size: int, backend: str) -> None:
+    setup_environment(rank, world_size)
+    dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+    device = torch.device("rbln", rank)
+    try:
+        for dtype in (torch.float16, torch.bfloat16, torch.float32):
+            for shape in ((0,), (2, 0)):
+                output = torch.empty(shape, dtype=dtype, device=device)
+                inputs = [torch.empty_like(output) for _ in range(world_size)]
+                work = dist.all_reduce(output, async_op=True)
+                work.wait()
+                torch.testing.assert_close(work.get_future().wait()[0].cpu(), torch.empty(shape, dtype=dtype))
+                work = dist.reduce_scatter(output, inputs, async_op=True)
+                work.wait()
+                torch.testing.assert_close(work.get_future().wait()[0].cpu(), torch.empty(shape, dtype=dtype))
+                for stacked in (False, True):
+                    input_tensor = torch.stack(inputs) if stacked else torch.cat(inputs)
+                    work = dist.reduce_scatter_tensor(output, input_tensor, async_op=True)
+                    work.wait()
+                    torch.testing.assert_close(output.cpu(), torch.empty(shape, dtype=dtype))
+    finally:
+        dist.destroy_process_group()
+
+
+def run_reduce_scatter_tensor_layout_test(rank: int, world_size: int, backend: str) -> None:
+    setup_environment(rank, world_size)
+    dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+    device = torch.device("rbln", rank)
+    try:
+        for dtype in (torch.float16, torch.bfloat16, torch.float32):
+            for shape in ((1,), (3, 5), (4, 64), (4, 65)):
+                chunks = [
+                    (torch.arange(torch.Size(shape).numel()).reshape(shape) % 11 + (rank + 1) * 10 + j + 1).to(dtype)
+                    for j in range(world_size)
+                ]
+                expected = (
+                    (torch.arange(torch.Size(shape).numel()).reshape(shape) % 11) * world_size
+                    + _get_expected_reduce_scatter_value(rank, world_size, dist.ReduceOp.SUM)
+                ).to(dtype)
+                for stacked in (False, True):
+                    input_cpu = torch.stack(chunks) if stacked else torch.cat(chunks)
+                    input_tensor = input_cpu.to(device)
+                    output = torch.empty(shape, dtype=dtype, device=device)
+                    work = dist.reduce_scatter_tensor(output, input_tensor, async_op=True)
+                    work.wait()
+                    torch.testing.assert_close(output.cpu(), expected)
+                    torch.testing.assert_close(input_tensor.cpu(), input_cpu)
+    finally:
+        dist.destroy_process_group()
+
+
+def run_unaligned_reduce_test(rank: int, world_size: int, backend: str, collective: str) -> None:
+    setup_environment(rank, world_size)
+    dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+    device = torch.device("rbln", rank)
+    try:
+        sizes = (256, 257, 1048577) if collective == "all_reduce" else (128, 129, 524289)
+        for size in sizes:
+            margins = ((1, 0), (7, 0), (64, 0)) if collective == "all_reduce" else ((1, 0), (0, 1), (7, 63), (64, 64))
+            for input_margin, output_margin in margins:
+                chunks = 1 if collective == "all_reduce" else world_size
+                values = (torch.arange(size, dtype=torch.int32) % 11).to(torch.float16)
+                data = torch.cat([values + (rank + 1) * 10 + j + 1 for j in range(chunks)])
+                guard = torch.full((input_margin,), -7.0, dtype=torch.float16)
+                input_cpu = torch.cat((guard, data, guard))
+                backing = input_cpu.to(device)
+                input_tensor = backing[input_margin : input_margin + size * chunks]
+                if collective == "all_reduce":
+                    expected_value = sum((r + 1) * 10 + 1 for r in range(world_size))
+                    work = dist.all_reduce(input_tensor, async_op=True)
+                    output = input_tensor
+                else:
+                    expected_value = _get_expected_reduce_scatter_value(rank, world_size, dist.ReduceOp.SUM)
+                    output_cpu = torch.full((size + 2 * output_margin,), -9.0, dtype=torch.float16)
+                    output_backing = output_cpu.to(device)
+                    output = output_backing[output_margin : output_margin + size]
+                    if collective == "reduce_scatter":
+                        work = dist.reduce_scatter(output, list(input_tensor.chunk(world_size)), async_op=True)
+                    else:
+                        work = dist.reduce_scatter_tensor(output, input_tensor, async_op=True)
+                work.wait()
+                torch.testing.assert_close(output.cpu(), values * world_size + expected_value)
+                actual_backing = backing.cpu()
+                if input_margin:
+                    torch.testing.assert_close(actual_backing[:input_margin], guard)
+                    torch.testing.assert_close(actual_backing[-input_margin:], guard)
+                if collective != "all_reduce":
+                    torch.testing.assert_close(actual_backing, input_cpu)
+                    torch.testing.assert_close(output_backing.cpu()[:output_margin], output_cpu[:output_margin])
+                    if output_margin:
+                        torch.testing.assert_close(output_backing.cpu()[-output_margin:], output_cpu[-output_margin:])
     finally:
         dist.destroy_process_group()
 
@@ -427,15 +553,29 @@ def run_allreduce_size_test(
         # Verify result - sum of all rank values
         expected_value = sum(range(1, world_size + 1))  # 1+2+...+world_size
 
-        # Check first and last elements to verify correctness
-        assert tensor[0] == expected_value, (
+        result = tensor.cpu()
+        mismatch = (result != expected_value).nonzero()
+        assert mismatch.numel() == 0, (
             f"allreduce size test failed on rank {rank} for size {size_bytes} bytes: "
-            f"expected={expected_value}, actual={tensor[0]}"
+            f"{mismatch.numel()} mismatched elements, first at index {mismatch[0].item()} "
+            f"(expected={expected_value}, actual={result[mismatch[0]].item()})"
         )
-        assert tensor[-1] == expected_value, (
-            f"allreduce size test failed on rank {rank} for size {size_bytes} bytes (last element): "
-            f"expected={expected_value}, actual={tensor[-1]}"
-        )
+
+    finally:
+        dist.destroy_process_group()
+
+
+def run_allreduce_noncontiguous_test(rank: int, world_size: int, backend: str, rows: int, cols: int) -> None:
+    """Test that allreduce rejects a non-contiguous float16 tensor."""
+    setup_environment(rank, world_size)
+    dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+    device = torch.device("rbln", rank)
+
+    try:
+        tensor = torch.full([rows, cols], float(rank + 1), dtype=torch.float16).to(device).t()
+        assert not tensor.is_contiguous()
+        with pytest.raises(RuntimeError, match="requires contiguous"):
+            dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
 
     finally:
         dist.destroy_process_group()
@@ -446,32 +586,39 @@ def run_unsupported_op_test(rank: int, world_size: int, backend: str) -> None:
     setup_environment(rank, world_size)
     dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
 
+    device = torch.device("rbln", rank)
+
     try:
-        # This test can be used for other unsupported operations
-        # reduce_scatter is now supported, so it's removed from here
-        pass
+        pg = dist.distributed_c10d._get_default_group()
+        for dtype in (torch.float16, torch.float32):
+            for op in (dist.ReduceOp.SUM, dist.ReduceOp.PRODUCT):
+                tensors = [torch.full([256], float(rank + 1), dtype=dtype, device=device) for _ in range(2)]
+                opts = dist.AllreduceOptions()
+                opts.reduceOp = op
+                with pytest.raises(RuntimeError, match="Expecting one tensor only"):
+                    pg.allreduce(tensors, opts)
 
     finally:
         dist.destroy_process_group()
 
 
-def _get_expected_allreduce_value(base_value: float, world_size: int, op: dist.ReduceOp) -> float:
+def _get_expected_allreduce_value(world_size: int, op: dist.ReduceOp) -> float:
     """Calculate expected value after allreduce operation."""
     if op == dist.ReduceOp.SUM:
         return sum(range(1, world_size + 1))  # 1+2+...+world_size
-    elif op == dist.ReduceOp.AVG:
+    if op == dist.ReduceOp.AVG:
         return sum(range(1, world_size + 1)) / world_size
-    elif op == dist.ReduceOp.MIN:
+    if op == dist.ReduceOp.MIN:
         return 1.0  # minimum of 1, 2, ..., world_size
-    elif op == dist.ReduceOp.MAX:
+    if op == dist.ReduceOp.MAX:
         return float(world_size)  # maximum of 1, 2, ..., world_size
-    elif op == dist.ReduceOp.PRODUCT:
+    if op == dist.ReduceOp.PRODUCT:
         result = 1.0
         for i in range(1, world_size + 1):
             result *= i
         return result
-    else:
-        raise ValueError(f"Unsupported reduce operation: {op}")
+    msg = f"Unsupported reduce operation: {op}"
+    raise ValueError(msg)
 
 
 def _get_expected_reduce_scatter_value(rank: int, world_size: int, op: dist.ReduceOp) -> float:
@@ -482,37 +629,37 @@ def _get_expected_reduce_scatter_value(rank: int, world_size: int, op: dist.Redu
     """
     if op == dist.ReduceOp.SUM:
         # Sum of (rank+1)*10 + (i+1) across all ranks for input_list[i]
-        # For rank i, we reduce input_list[i] = [(r+1)*10 + (i+1)] for r in range(world_size)
+        # For rank i, we reduce input_list[i] = [(r+1)*10 + (i+1)] for r
+        # in range(world_size)
         return sum((r + 1) * 10 + (rank + 1) for r in range(world_size))
-    elif op == dist.ReduceOp.AVG:
+    if op == dist.ReduceOp.AVG:
         return sum((r + 1) * 10 + (rank + 1) for r in range(world_size)) / world_size
-    elif op == dist.ReduceOp.MIN:
+    if op == dist.ReduceOp.MIN:
         # Minimum of (r+1)*10 + (i+1) across all ranks
         return min((r + 1) * 10 + (rank + 1) for r in range(world_size))
-    elif op == dist.ReduceOp.MAX:
+    if op == dist.ReduceOp.MAX:
         # Maximum of (r+1)*10 + (i+1) across all ranks
         return max((r + 1) * 10 + (rank + 1) for r in range(world_size))
-    elif op == dist.ReduceOp.PRODUCT:
+    if op == dist.ReduceOp.PRODUCT:
         result = 1.0
         for r in range(world_size):
             result *= (r + 1) * 10 + (rank + 1)
         return result
-    else:
-        raise ValueError(f"Unsupported reduce operation: {op}")
+    msg = f"Unsupported reduce operation: {op}"
+    raise ValueError(msg)
 
 
 class TestProcessGroupRBLNBase(TestCase):
     """Base test class for RBLN process group tests."""
 
-    # CI tests run only sync mode; release tests cover both sync and async modes.
-    c10d_async_envs = [
-        subtest("0", decorators=[pytest.mark.test_set_ci]),  # sync mode (TORCH_RBLN_C10D_ASYNC=0)
-        "1",  # async mode (TORCH_RBLN_C10D_ASYNC=1)
+    c10d_async_envs: ClassVar[list[subtest | str]] = [
+        "0",  # sync mode (TORCH_RBLN_C10D_ASYNC=0)
+        subtest("1", decorators=[pytest.mark.periodic]),  # async mode (TORCH_RBLN_C10D_ASYNC=1)
     ]
 
     def setUp(self):
-        # Scoped to the test: these are process-global, and patch.dict restores the whole
-        # environment -- including the MASTER_PORT the helper below adds.
+        # Scoped to the test: these are process-global, and patch.dict restores the
+        # whole environment -- including the MASTER_PORT the helper below adds.
         env = mock.patch.dict(
             os.environ,
             {
@@ -526,11 +673,7 @@ class TestProcessGroupRBLNBase(TestCase):
         self.addCleanup(env.stop)
         configure_master_port_for_rccl_tests()
         self.backend = "rbln-ccl"
-        self.world_size = min(torch.rbln.device_count(), 2)
-
-    def should_skip_multi_rank_tests(self):
-        """Check if multi-rank tests should be skipped."""
-        return self.world_size <= 1
+        self.world_size = 2
 
     def run_c10d_test(self, c10d_async_env, nprocs, test_func, args):
         """Helper to run a test function with mp.spawn."""
@@ -540,7 +683,8 @@ class TestProcessGroupRBLNBase(TestCase):
             mp.spawn(spawn_target_with_clean_exit, args=(test_func, *args), nprocs=nprocs, join=True)
 
 
-@pytest.mark.single_worker
+@pytest.mark.serial
+@pytest.mark.npu(count=2)
 class TestBroadcastRBLN(TestProcessGroupRBLNBase):
     """Test cases for broadcast operations."""
 
@@ -549,9 +693,6 @@ class TestBroadcastRBLN(TestProcessGroupRBLNBase):
     @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
     def test_broadcast(self, dtype, rank, c10d_async_env):
         """Test broadcast on specified rank."""
-        if (rank >= 1) and self.should_skip_multi_rank_tests():
-            self.skipTest("Requires world_size > 1")
-
         self.run_c10d_test(
             c10d_async_env, self.world_size, run_broadcast_test, (self.world_size, self.backend, rank, dtype)
         )
@@ -561,18 +702,17 @@ class TestBroadcastRBLN(TestProcessGroupRBLNBase):
     @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
     def test_broadcast_zero_sized_tensor(self, dtype, rank, c10d_async_env):
         """Test broadcast with zero-sized tensor on specified rank."""
-        if (rank >= 1) and self.should_skip_multi_rank_tests():
-            self.skipTest("Requires world_size > 1")
-
         self.run_c10d_test(
             c10d_async_env, self.world_size, run_broadcast_zero_sized_test, (self.world_size, self.backend, rank, dtype)
         )
 
 
-@pytest.mark.single_worker
+@pytest.mark.serial
+@pytest.mark.npu(count=2)
 class TestAllReduceRBLN(TestProcessGroupRBLNBase):
     """Test cases for allreduce operations."""
 
+    # NOTE: RCCL supports only the SUM operation.
     @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
     def test_allreduce_sum(self, c10d_async_env):
         """Test allreduce with SUM operation."""
@@ -580,37 +720,25 @@ class TestAllReduceRBLN(TestProcessGroupRBLNBase):
             c10d_async_env, self.world_size, run_allreduce_test, (self.world_size, self.backend, dist.ReduceOp.SUM)
         )
 
-    # NOTE: RCCL support only SUM operation
-    # @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
-    # def test_allreduce_avg(self, c10d_async_env):
-    #     """Test allreduce with AVG operation."""
-    #     self.run_c10d_test(
-    #         c10d_async_env, self.world_size, run_allreduce_test, (self.world_size, self.backend, dist.ReduceOp.AVG)
-    #     )
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_empty_collectives(self, c10d_async_env):
+        self.run_c10d_test(c10d_async_env, self.world_size, run_empty_collectives_test, (self.world_size, self.backend))
 
-    # @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
-    # def test_allreduce_min(self, c10d_async_env):
-    #     """Test allreduce with MIN operation."""
-    #     self.run_c10d_test(
-    #         c10d_async_env, self.world_size, run_allreduce_test, (self.world_size, self.backend, dist.ReduceOp.MIN)
-    #     )
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_allreduce_unaligned_storage_offset(self, c10d_async_env):
+        self.run_c10d_test(
+            c10d_async_env, self.world_size, run_unaligned_reduce_test, (self.world_size, self.backend, "all_reduce")
+        )
 
-    # @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
-    # def test_allreduce_max(self, c10d_async_env):
-    #     """Test allreduce with MAX operation."""
-    #     self.run_c10d_test(
-    #         c10d_async_env, self.world_size, run_allreduce_test, (self.world_size, self.backend, dist.ReduceOp.MAX)
-    #     )
-
-    # @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
-    # def test_allreduce_product(self, c10d_async_env):
-    #     """Test allreduce with PRODUCT operation."""
-    #     self.run_c10d_test(
-    #         c10d_async_env, self.world_size, run_allreduce_test, (self.world_size, self.backend, dist.ReduceOp.PRODUCT)
-    #     )
+    @parametrize("op", [dist.ReduceOp.PRODUCT, dist.ReduceOp.MIN, dist.ReduceOp.MAX, dist.ReduceOp.AVG])
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_allreduce_non_sum(self, op, c10d_async_env):
+        """Test allreduce with non-SUM ops, which fall back to Gloo."""
+        self.run_c10d_test(c10d_async_env, self.world_size, run_allreduce_test, (self.world_size, self.backend, op))
 
 
-@pytest.mark.single_worker
+@pytest.mark.serial
+@pytest.mark.npu(count=2)
 class TestScatterRBLN(TestProcessGroupRBLNBase):
     """Test cases for scatter operations. Each test runs with dim0 in [32, 256]."""
 
@@ -620,9 +748,6 @@ class TestScatterRBLN(TestProcessGroupRBLNBase):
     @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
     def test_scatter(self, dtype, rank, dim0, c10d_async_env):
         """Test scatter on specified rank."""
-        if (rank >= 1) and self.should_skip_multi_rank_tests():
-            self.skipTest("Requires world_size > 1")
-
         self.run_c10d_test(
             c10d_async_env, self.world_size, run_scatter_test, (self.world_size, self.backend, rank, dtype, dim0)
         )
@@ -637,14 +762,6 @@ class TestScatterRBLN(TestProcessGroupRBLNBase):
         a distinct physical NPU, but that is not load-bearing here -- see the worker
         docstring.)
         """
-        if self.should_skip_multi_rank_tests():
-            self.skipTest("Requires world_size > 1")
-        # The host should expose at least world_size physical NPUs so each rank can
-        # (best-effort) pin its own; world_size derives from the logical count, which
-        # a parent grouping env could otherwise make smaller.
-        if torch.rbln.physical_device_count() < self.world_size:
-            self.skipTest(f"Requires >= {self.world_size} physical NPUs (one per rank)")
-
         root = 1  # non-zero root exposes the rank vs device_id conflation
         self.run_c10d_test(
             c10d_async_env,
@@ -654,7 +771,8 @@ class TestScatterRBLN(TestProcessGroupRBLNBase):
         )
 
 
-@pytest.mark.single_worker
+@pytest.mark.serial
+@pytest.mark.npu(count=2)
 class TestAllGatherRBLN(TestProcessGroupRBLNBase):
     """Test cases for allgather operations."""
 
@@ -733,9 +851,24 @@ class TestAllGatherRBLN(TestProcessGroupRBLNBase):
         )
 
 
-@pytest.mark.single_worker
+@pytest.mark.serial
+@pytest.mark.npu(count=2)
 class TestReduceScatterRBLN(TestProcessGroupRBLNBase):
     """Test cases for reduce_scatter operations."""
+
+    # NOTE: RCCL supports only the SUM operation.
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_reduce_scatter_tensor_stacked_input(self, c10d_async_env):
+        self.run_c10d_test(
+            c10d_async_env, self.world_size, run_reduce_scatter_tensor_layout_test, (self.world_size, self.backend)
+        )
+
+    @parametrize("collective", ["reduce_scatter", "reduce_scatter_tensor"])
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_reduce_scatter_unaligned_storage_offset(self, collective, c10d_async_env):
+        self.run_c10d_test(
+            c10d_async_env, self.world_size, run_unaligned_reduce_test, (self.world_size, self.backend, collective)
+        )
 
     @parametrize(
         "size",
@@ -749,6 +882,39 @@ class TestReduceScatterRBLN(TestProcessGroupRBLNBase):
             self.world_size,
             run_reduce_scatter_test,
             (self.world_size, self.backend, dist.ReduceOp.SUM, size),
+        )
+
+    @parametrize("op", [dist.ReduceOp.PRODUCT, dist.ReduceOp.MIN, dist.ReduceOp.MAX, dist.ReduceOp.AVG])
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_reduce_scatter_non_sum(self, op, c10d_async_env):
+        """Test reduce_scatter with non-SUM ops, which fall back to Gloo."""
+        self.run_c10d_test(
+            c10d_async_env,
+            self.world_size,
+            run_reduce_scatter_test,
+            (self.world_size, self.backend, op, 256),
+        )
+
+    @parametrize("size", [1, 256, 3072, (512 * KiB)])
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_reduce_scatter_tensor_sum(self, size, c10d_async_env):
+        """Test reduce_scatter_tensor with SUM operation."""
+        self.run_c10d_test(
+            c10d_async_env,
+            self.world_size,
+            run_reduce_scatter_tensor_test,
+            (self.world_size, self.backend, size),
+        )
+
+    @parametrize("size", [1, 256])
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_reduce_scatter_tensor_sum_offset_view(self, size, c10d_async_env):
+        """Test reduce_scatter_tensor on an input view with a nonzero storage offset."""
+        self.run_c10d_test(
+            c10d_async_env,
+            self.world_size,
+            run_reduce_scatter_tensor_test,
+            (self.world_size, self.backend, size, 256),
         )
 
     @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
@@ -793,40 +959,9 @@ class TestReduceScatterRBLN(TestProcessGroupRBLNBase):
             (self.world_size, self.backend, dist.ReduceOp.SUM, size),
         )
 
-    # NOTE: RCCL support only SUM operation
-    # @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
-    # def test_reduce_scatter_avg(self, c10d_async_env):
-    #     """Test reduce_scatter with AVG operation."""
-    #     self.run_c10d_test(
-    #         c10d_async_env, self.world_size, run_reduce_scatter_test, (self.world_size, self.backend, dist.ReduceOp.AVG)
-    #     )
 
-    # @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
-    # def test_reduce_scatter_min(self, c10d_async_env):
-    #     """Test reduce_scatter with MIN operation."""
-    #     self.run_c10d_test(
-    #         c10d_async_env, self.world_size, run_reduce_scatter_test, (self.world_size, self.backend, dist.ReduceOp.MIN)
-    #     )
-
-    # @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
-    # def test_reduce_scatter_max(self, c10d_async_env):
-    #     """Test reduce_scatter with MAX operation."""
-    #     self.run_c10d_test(
-    #         c10d_async_env, self.world_size, run_reduce_scatter_test, (self.world_size, self.backend, dist.ReduceOp.MAX)
-    #     )
-
-    # @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
-    # def test_reduce_scatter_product(self, c10d_async_env):
-    #     """Test reduce_scatter with PRODUCT operation."""
-    #     self.run_c10d_test(
-    #         c10d_async_env,
-    #         self.world_size,
-    #         run_reduce_scatter_test,
-    #         (self.world_size, self.backend, dist.ReduceOp.PRODUCT),
-    #     )
-
-
-@pytest.mark.single_worker
+@pytest.mark.serial
+@pytest.mark.npu(count=2)
 class TestBarrierRBLN(TestProcessGroupRBLNBase):
     """Test cases for barrier synchronization."""
 
@@ -836,7 +971,8 @@ class TestBarrierRBLN(TestProcessGroupRBLNBase):
         self.run_c10d_test(c10d_async_env, self.world_size, run_barrier_test, (self.world_size, self.backend))
 
 
-@pytest.mark.single_worker
+@pytest.mark.serial
+@pytest.mark.npu(count=2)
 class TestSendRecvRBLN(TestProcessGroupRBLNBase):
     """Test cases for send/recv operations."""
 
@@ -844,14 +980,13 @@ class TestSendRecvRBLN(TestProcessGroupRBLNBase):
     @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
     def test_send_recv(self, dtype, c10d_async_env):
         """Test send/recv with specified dtype from rank 0 to rank 1."""
-        if self.should_skip_multi_rank_tests():
-            self.skipTest("Requires world_size > 1")
         self.run_c10d_test(
             c10d_async_env, self.world_size, run_send_recv_test, (self.world_size, self.backend, 0, 1, dtype)
         )
 
 
-@pytest.mark.single_worker
+@pytest.mark.serial
+@pytest.mark.npu(count=2)
 class TestUnsupportedOpsRBLN(TestProcessGroupRBLNBase):
     """Test cases for unsupported operations."""
 
@@ -861,7 +996,8 @@ class TestUnsupportedOpsRBLN(TestProcessGroupRBLNBase):
         self.run_c10d_test(c10d_async_env, self.world_size, run_unsupported_op_test, (self.world_size, self.backend))
 
 
-@pytest.mark.single_worker
+@pytest.mark.serial
+@pytest.mark.npu(count=2)
 class TestAllReduceSizesRBLN(TestProcessGroupRBLNBase):
     """Test cases for allreduce operations with various data sizes."""
 
@@ -910,6 +1046,49 @@ class TestAllReduceSizesRBLN(TestProcessGroupRBLNBase):
         )
 
 
+@pytest.mark.serial
+@pytest.mark.npu(count=4)
+class TestAllReduceWorldSize3RBLN(TestProcessGroupRBLNBase):
+    """Test allreduce on world size 3 with aligned and unaligned sizes."""
+
+    def setUp(self):
+        super().setUp()
+        self.world_size = 3
+
+    @parametrize(
+        "size",
+        [
+            2,
+            1536,
+            4096,
+            6138,
+            6150,
+            (3 * MiB + 2),
+            (3 * MiB + 1536),
+        ],
+    )
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_allreduce_float16(self, size, c10d_async_env):
+        """Test allreduce with specified bytes using torch.float16."""
+        self.run_c10d_test(
+            c10d_async_env,
+            self.world_size,
+            run_allreduce_size_test,
+            (self.world_size, self.backend, size, torch.float16),
+        )
+
+    @parametrize("shape", [(16, 16), (32, 64)])
+    @parametrize("c10d_async_env", TestProcessGroupRBLNBase.c10d_async_envs)
+    def test_allreduce_noncontiguous(self, shape, c10d_async_env):
+        """Test allreduce rejects a transposed float16 tensor."""
+        self.run_c10d_test(
+            c10d_async_env,
+            self.world_size,
+            run_allreduce_noncontiguous_test,
+            (self.world_size, self.backend, *shape),
+        )
+
+
 # Instantiate device type tests for all test classes
 instantiate_device_type_tests(TestBroadcastRBLN, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestAllReduceRBLN, globals(), only_for="privateuse1")
@@ -920,6 +1099,7 @@ instantiate_device_type_tests(TestBarrierRBLN, globals(), only_for="privateuse1"
 instantiate_device_type_tests(TestSendRecvRBLN, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestUnsupportedOpsRBLN, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestAllReduceSizesRBLN, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestAllReduceWorldSize3RBLN, globals(), only_for="privateuse1")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,4 @@
-"""
-Main entry point for code generation.
+"""Main entry point for code generation.
 
 CLI interface and main function for generating register_ops.py.
 
@@ -12,15 +11,15 @@ For detailed flow, refer to CodeGenerator class in codegen.py.
 """
 
 import argparse
-from sys import exit
+import sys
+from pathlib import Path
 
 from .codegen import CodeGenerator
 from .parser import YamlParser
 
 
 def main(yaml_file: str, tags_file: str, generated_file: str) -> int:
-    """
-    Main entry point for code generation.
+    """Main entry point for code generation.
 
     Overall flow:
     1. Parse YAML: Parse native_functions.yaml and tags.yaml
@@ -46,16 +45,16 @@ def main(yaml_file: str, tags_file: str, generated_file: str) -> int:
         python_code = generator.generate_python_registration(parsed_yaml)
 
         # Step 3: Write to file (POSIX text files end with newline)
-        with open(generated_file, "w") as file:
+        with Path(generated_file).open("w") as file:
             file.write(python_code)
             if python_code and not python_code.endswith("\n"):
                 file.write("\n")
         return 0
-    else:
-        # fill file to empty
-        with open(generated_file, "w") as file:
-            file.write("")
-        return 0
+
+    # fill file to empty
+    with Path(generated_file).open("w") as file:
+        file.write("")
+    return 0
 
 
 if __name__ == "__main__":
@@ -65,4 +64,4 @@ if __name__ == "__main__":
     parser.add_argument("generated_file", type=str, help="Path to the generated Python file")
 
     args = parser.parse_args()
-    exit(main(args.yaml_file, args.tags_file, args.generated_file))
+    sys.exit(main(args.yaml_file, args.tags_file, args.generated_file))

@@ -12,10 +12,14 @@ namespace at::native::rbln {
  * @param memory_format_opt Optional memory format for the resized tensor.
  * @return The resized tensor.
  */
-const at::Tensor& resize_rbln_(const at::Tensor& self, c10::IntArrayRef sizes, std::optional<c10::MemoryFormat> memory_format_opt);
+const at::Tensor& resize_rbln_(
+    const at::Tensor& self,
+    c10::IntArrayRef sizes,
+    std::optional<c10::MemoryFormat> memory_format_opt);
 
 /**
- * @brief Set the storage of a tensor in-place, preserving its data when possible.
+ * @brief Set the storage of a tensor in-place, preserving its data when
+ * possible.
  *
  * @param result The tensor whose storage is to be set.
  * @param storage The new storage to be assigned to the tensor.

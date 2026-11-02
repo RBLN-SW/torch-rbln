@@ -1,10 +1,10 @@
-"""
-General function code generator.
+"""General function code generator.
 
 Generates code for general (non-custom) function implementations.
 
 Responsibilities:
-- Generate general function body (kwargs filtering, empty tensor handling, compilation, etc.)
+- Generate general function body (kwargs filtering, empty tensor handling, compilation,
+  etc.)
 
 Generated code structure:
 1. Function body:
@@ -19,10 +19,14 @@ Generated code structure:
 Templates: See general_template.py
 """
 
-from typing import Callable, cast
+from typing import cast, TYPE_CHECKING
 
 from ..config import OpCategories
 from .general_template import GeneralTemplates
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class GeneralFunctionGenerator:
@@ -44,16 +48,8 @@ class GeneralFunctionGenerator:
         template_method_name = self.op_categories.get_empty_tensor_template_method(root_name)
         template_method = getattr(self.templates.EmptyTensor, template_method_name)
         # Cast to Callable[[], str] since all EmptyTensor methods return str
-        method: Callable[[], str] = cast(Callable[[], str], template_method)
+        method: Callable[[], str] = cast("Callable[[], str]", template_method)
         return method()
-
-    def generate_contiguous_preparation(self, root_name: str) -> str:
-        """Generate contiguous tensor preparation code."""
-        # TEMPORARY DISABLED DUE TO TRANSPOSE ISSUE IN RBLN
-        # if self.op_categories.needs_contiguous_on_device(root_name):
-        #     return self.templates.ArgsProcessing.contiguous_preparation_on_device()
-        # else:
-        return self.templates.ArgsProcessing.contiguous_preparation_default()
 
     def generate_function_body(self, kernel_name: str, root_name: str, python_module: str, op_namespace: str) -> str:
         """Generate the complete function body for a general operation.
@@ -65,27 +61,21 @@ class GeneralFunctionGenerator:
         from ~50 lines to ~12 and unifies the view-on-device dispatch
         path across binary / unary / matmul / ternary ops.
         """
-        if python_module == "nn":
-            target = f"torch.nn.functional.{root_name}"
-        else:
-            target = f"torch.{root_name}"
+        target = f"torch.nn.functional.{root_name}" if python_module == "nn" else f"torch.{root_name}"
 
         # Header (was: per-op OpModule class + instance) is now empty —
         # the view-aware helper builds the wrapper OpModule dynamically
         # and caches it per (op_callable, view_recipes_tuple).
-        code = self.templates.FunctionBody.op_module_definition(root_name, target)
+        code = self.templates.FunctionBody.op_module_definition()
         code += self.templates.FunctionBody.start(kernel_name)
         code += self.generate_kwargs_filter(root_name)
         if self.op_categories.needs_tensor_args_extraction_before_empty_handling(root_name):
             code += self.templates.ArgsProcessing.tensor_args_extraction()
         code += self.generate_empty_tensor_handling(root_name)
         code += self.templates.FunctionBody.main(target, root_name, op_namespace)
-        # contiguous_preparation + compile_section are intentionally not
-        # emitted — both subsumed by the helper inside ``main``.
 
         return code
 
     def generate(self, kernel_name: str, root_name: str, python_module: str, op_namespace: str) -> str:
         """Generate complete code for a general function type."""
-        code = self.generate_function_body(kernel_name, root_name, python_module, op_namespace)
-        return code
+        return self.generate_function_body(kernel_name, root_name, python_module, op_namespace)

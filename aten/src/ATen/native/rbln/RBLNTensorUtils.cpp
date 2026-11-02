@@ -45,17 +45,24 @@ at::Tensor get_cpu_copy_of_rbln_tensor(const at::Tensor& self) {
   const auto self_strides = self.strides();
 
   const auto self_element_size = self.element_size();
-  const auto data_nbytes = at::detail::computeStorageNbytes(self_sizes, self_strides, self_element_size);
+  const auto data_nbytes = at::detail::computeStorageNbytes(
+      self_sizes, self_strides, self_element_size);
   const auto data_numel = static_cast<int64_t>(data_nbytes / self_element_size);
 
-  auto cpu_tensor =
-      at::empty({data_numel}, self_dtype, std::nullopt, c10::Device(c10::kCPU), false, c10::MemoryFormat::Contiguous);
+  auto cpu_tensor = at::empty(
+      {data_numel},
+      self_dtype,
+      std::nullopt,
+      c10::Device(c10::kCPU),
+      false,
+      c10::MemoryFormat::Contiguous);
   RBLN_CHECK(cpu_tensor.storage().nbytes() == data_nbytes);
   auto* dst_data = cpu_tensor.storage().mutable_data();
   const auto* src_data = self.data_ptr();
   c10::rbln::memcpy_v2h(dst_data, src_data, data_nbytes);
 
-  const auto cpu_copy_of_rbln_tensor = cpu_tensor.as_strided(self_sizes, self_strides, 0);
+  const auto cpu_copy_of_rbln_tensor =
+      cpu_tensor.as_strided(self_sizes, self_strides, 0);
   RBLN_CHECK(cpu_copy_of_rbln_tensor.device().is_cpu());
   RBLN_CHECK(cpu_copy_of_rbln_tensor.scalar_type() == self_dtype);
   RBLN_CHECK(cpu_copy_of_rbln_tensor.sizes() == self_sizes);
@@ -65,8 +72,12 @@ at::Tensor get_cpu_copy_of_rbln_tensor(const at::Tensor& self) {
   return cpu_copy_of_rbln_tensor;
 }
 
-at::Tensor create_tensor_from_ptr(uint64_t data_ptr, c10::IntArrayRef sizes, c10::ScalarType dtype) {
-  auto* data = reinterpret_cast<void*>(data_ptr); // NOLINT(performance-no-int-to-ptr)
+at::Tensor create_tensor_from_ptr(
+    uint64_t data_ptr,
+    c10::IntArrayRef sizes,
+    c10::ScalarType dtype) {
+  // NOLINTNEXTLINE(performance-no-int-to-ptr)
+  auto* data = reinterpret_cast<void*>(data_ptr);
   const auto device = c10::rbln::get_rbln_hooks()->getDeviceFromPtr(data);
   const auto options = c10::TensorOptions().dtype(dtype).device(device);
   return at::from_blob(data, sizes, options);

@@ -10,19 +10,14 @@ Two paths used to move whole storages:
 
 from __future__ import annotations
 
-import os
-
 import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-import torch_rbln  # noqa: F401
 from torch_rbln import _C
 
 
 DEVICE = torch.device("rbln:0")
-_have_device = torch_rbln.device.device_count() > 0 and os.environ.get("RBLN_DUMMY_DEVICE") != "1"
-needs_device = pytest.mark.skipif(not _have_device, reason="needs an RBLN device")
 _identity = torch.compile(lambda t: torch.maximum(t, t), backend="rbln", dynamic=False)
 
 
@@ -32,7 +27,7 @@ def _host_sync():
 
 
 def _delta(a, b):
-    return tuple(y - x for x, y in zip(a, b))
+    return tuple(y - x for x, y in zip(a, b, strict=True))
 
 
 def _d2h_bytes_of(fn):
@@ -44,7 +39,9 @@ def _d2h_bytes_of(fn):
 
 
 def _assert_data_on_device(tc, x, msg=""):
-    """Reading x back must move every byte from the device: the data still lives there."""
+    """Reading x back must move every byte from the device: the data still lives
+    there.
+    """
     moved, _ = _d2h_bytes_of(x.cpu)
     tc.assertEqual(moved, x.numel() * x.element_size(), f"{msg}: storage is not device-latest ({moved} B moved)")
 
@@ -55,11 +52,11 @@ def _device_latest(shape, dtype=torch.bfloat16):
     return y
 
 
-@pytest.mark.test_set_ci
-@needs_device
+@pytest.mark.npu(count=1)
 class TestFallbackRegionIO(TestCase):
     def test_boxed_fallback_reads_only_the_view(self):
-        # argmax is an explicit CPU fallback; its input is a 4-row prefix of a 512-row storage
+        # argmax is an explicit CPU fallback; its input is a 4-row prefix of a 512-row
+        # storage
         x = _device_latest((512, 3072))
         ref = x.cpu()[:4].argmax(-1)
         before = _host_sync()
@@ -71,8 +68,8 @@ class TestFallbackRegionIO(TestCase):
         torch.testing.assert_close(got.cpu(), ref)
 
     def test_small_view_of_host_latest_storage_costs_only_the_view(self):
-        # the size heuristic's worst case: the data is on the host, so the copy path is a host
-        # memcpy of the view (no transfer) instead of a free borrow
+        # the size heuristic's worst case: the data is on the host, so the copy path is
+        # a host memcpy of the view (no transfer) instead of a free borrow
         x = torch.randn(512, 3072).to(torch.bfloat16).to(DEVICE)
         ref = x.cpu()[:4].argmax(-1)
         before = _host_sync()
@@ -83,7 +80,8 @@ class TestFallbackRegionIO(TestCase):
         torch.testing.assert_close(got.cpu(), ref)
 
     def test_full_view_keeps_borrow(self):
-        # a view covering at least half the storage keeps the borrow fast path (one D2H, then synced)
+        # a view covering at least half the storage keeps the borrow fast path (one D2H,
+        # then synced)
         x = _device_latest((64, 1024))
         ref = x.cpu().argmax(-1)
         before = _host_sync()
@@ -94,9 +92,9 @@ class TestFallbackRegionIO(TestCase):
         torch.testing.assert_close(got.cpu(), ref)
 
     def test_strided_copy_from_mismatched_cpu_src_writes_only_runs(self):
-        # every 4th row of a device-latest [256, 8192] bf16 tensor <- fp32 rows: the src is
-        # converted on the CPU and the rows (above the strided run threshold) are written in place; the dst span is
-        # neither read back nor rewritten as a whole
+        # every 4th row of a device-latest [256, 8192] bf16 tensor <- fp32 rows: the src
+        # is converted on the CPU and the rows (above the strided run threshold) are
+        # written in place; the dst span is neither read back nor rewritten as a whole
         x = _device_latest((256, 8192))
         ref = x.cpu()
         rows = torch.randn(64, 8192)  # fp32 -> bf16 conversion + strided dst
@@ -111,8 +109,9 @@ class TestFallbackRegionIO(TestCase):
         torch.testing.assert_close(x.cpu(), ref, rtol=0, atol=0)
 
     def test_strided_copy_profiler_attribution(self):
-        # the src conversion counts as staging; the dst is not pulled to the host, so the
-        # "non-contiguous rbln dst pulled to host" site must not move (BounceSite order:
+        # the src conversion counts as staging; the dst is not pulled to the host, so
+        # the "non-contiguous rbln dst pulled to host" site must not move (BounceSite
+        # order:
         # 1 = cpu src staged, 2 = non-contiguous dst pulled)
         x = _device_latest((256, 8192))
         rows = torch.randn(64, 8192)

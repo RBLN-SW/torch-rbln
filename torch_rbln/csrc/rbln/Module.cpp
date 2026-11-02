@@ -18,9 +18,19 @@
 #include <torch_rbln/csrc/rbln/WarmCache.h>
 #include <torch_rbln/csrc/rbln/profiler/kineto/rbln_kineto_adapter.h>
 #include <exception>
+#include <optional>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace {
+
+// Holds a c10::rbln::CpuFallbackScope for the length of a Python `with` block.
+struct PyCpuFallbackScope {
+  explicit PyCpuFallbackScope(std::string name) : op_name(std::move(name)) {}
+  std::string op_name;
+  std::optional<c10::rbln::CpuFallbackScope> scope;
+};
 
 /**
  * @brief Add PyMethodDef array to a vector, removing null terminators
@@ -32,7 +42,9 @@ namespace {
  * @param method_vector The vector to append methods to
  * @param method_definitions The PyMethodDef array to append
  */
-void add_py_method_definitions(std::vector<PyMethodDef>& method_vector, PyMethodDef* method_definitions) {
+void add_py_method_definitions(
+    std::vector<PyMethodDef>& method_vector,
+    PyMethodDef* method_definitions) {
   if (!method_vector.empty()) {
     // Remove nullptr terminator from existing vector
     method_vector.pop_back();
@@ -55,17 +67,24 @@ void add_py_method_definitions(std::vector<PyMethodDef>& method_vector, PyMethod
  * @param module The Python module to register the functions with
  */
 void register_public_device_api(py::module_& module) {
-  module.def("current_device", &c10::rbln::get_device_index, "Get the current device.");
-  // Enumeration never raises (torch treats it as infallible); a malformed RBLN_*
-  // config reports 0 with a one-line warning here and raises in full detail from
-  // device_count_ensure_non_zero() / the allocation path.
-  module.def("device_count", &c10::rbln::get_device_count_nothrow, "Get the number of devices. Never raises.");
+  module.def(
+      "current_device",
+      &c10::rbln::get_device_index,
+      "Get the current device.");
+  // Enumeration never raises (PyTorch treats it as infallible); a malformed
+  // RBLN_* config reports 0 with a one-line warning here and raises in full
+  // detail from device_count_ensure_non_zero() / the allocation path.
+  module.def(
+      "device_count",
+      &c10::rbln::get_device_count_nothrow,
+      "Get the number of devices. Never raises.");
   module.def(
       "device_count_ensure_non_zero",
       &c10::rbln::device_count_ensure_non_zero,
       "Number of devices, raising the detailed RBLN_* configuration error if there is not at least one. "
       "For use where a device is actually required.");
-  module.def("set_device", &c10::rbln::set_device_index, "Set the current device.");
+  module.def(
+      "set_device", &c10::rbln::set_device_index, "Set the current device.");
   module.def(
       "physical_device_count",
       &c10::rbln::get_physical_device_count,
@@ -91,6 +110,7 @@ void register_public_device_api(py::module_& module) {
   module.def(
       "_set_runtime_shutting_down",
       &c10::rbln::set_runtime_shutting_down,
+      py::arg("shutting_down"),
       "Mark the RBLN runtime as shutting down so late ops stop dispatching into it.");
   module.def(
       "_exchange_device",
@@ -104,16 +124,30 @@ void register_public_device_api(py::module_& module) {
       "Wait for a device's pending async transfers, then drain all of its streams.");
 
   // Memory management functions
-  module.def("empty_cache", &c10::rbln::empty_cache, "Release all unoccupied cached memory.");
-  module.def("memory_stats", &c10::rbln::memory_stats, "Get memory allocator statistics.");
+  module.def(
+      "empty_cache",
+      &c10::rbln::empty_cache,
+      "Release all unoccupied cached memory.");
+  module.def(
+      "memory_stats",
+      &c10::rbln::memory_stats,
+      "Get memory allocator statistics.");
   module.def(
       "memory_stats_per_chiplet",
       &c10::rbln::memory_stats_per_chiplet,
       "Get memory allocator statistics broken down per chiplet.");
   module.def(
-      "reset_accumulated_memory_stats", &c10::rbln::reset_accumulated_memory_stats, "Reset accumulated memory stats.");
-  module.def("reset_peak_memory_stats", &c10::rbln::reset_peak_memory_stats, "Reset peak memory stats.");
-  module.def("mem_get_info", &c10::rbln::mem_get_info, "Get (free, total) device DRAM in bytes.");
+      "reset_accumulated_memory_stats",
+      &c10::rbln::reset_accumulated_memory_stats,
+      "Reset accumulated memory stats.");
+  module.def(
+      "reset_peak_memory_stats",
+      &c10::rbln::reset_peak_memory_stats,
+      "Reset peak memory stats.");
+  module.def(
+      "mem_get_info",
+      &c10::rbln::mem_get_info,
+      "Get (free, total) device DRAM in bytes.");
   module.def(
       "mem_get_info_per_chiplet",
       &c10::rbln::mem_get_info_per_chiplet,
@@ -122,7 +156,9 @@ void register_public_device_api(py::module_& module) {
   py::class_<c10::rbln::DeviceProperties>(module, "DeviceProperties")
       .def_readonly("name", &c10::rbln::DeviceProperties::name)
       .def_readonly("total_memory", &c10::rbln::DeviceProperties::total_memory)
-      .def_readonly("memory_per_chiplet", &c10::rbln::DeviceProperties::memory_per_chiplet)
+      .def_readonly(
+          "memory_per_chiplet",
+          &c10::rbln::DeviceProperties::memory_per_chiplet)
       .def_readonly("num_chiplet", &c10::rbln::DeviceProperties::num_chiplet)
       .def_readonly("npu_count", &c10::rbln::DeviceProperties::npu_count)
       .def("__repr__", [](const c10::rbln::DeviceProperties& self) {
@@ -141,22 +177,34 @@ void register_public_device_api(py::module_& module) {
       });
 
   module.def(
-      "get_device_properties", &c10::rbln::get_device_properties, "Get the hardware properties of a logical device.");
+      "get_device_properties",
+      &c10::rbln::get_device_properties,
+      "Get the hardware properties of a logical device.");
 
   // Register DeviceTopology structures
   py::class_<c10::rbln::DeviceTopologyEntry>(module, "DeviceTopologyEntry")
-      .def_property_readonly("logical_device_index", &c10::rbln::DeviceTopologyEntry::getLogicalDeviceIndex)
-      .def_property_readonly("physical_device_ids", &c10::rbln::DeviceTopologyEntry::getPhysicalDeviceIds)
-      .def_property_readonly("is_aggregated", &c10::rbln::DeviceTopologyEntry::isAggregated);
+      .def_property_readonly(
+          "logical_device_index",
+          &c10::rbln::DeviceTopologyEntry::getLogicalDeviceIndex)
+      .def_property_readonly(
+          "physical_device_ids",
+          &c10::rbln::DeviceTopologyEntry::getPhysicalDeviceIds)
+      .def_property_readonly(
+          "is_aggregated", &c10::rbln::DeviceTopologyEntry::isAggregated);
 
   py::class_<c10::rbln::DeviceTopology>(module, "DeviceTopology")
       .def_property_readonly("entries", &c10::rbln::DeviceTopology::getEntries)
-      .def_property_readonly("unused_physical_device_ids", &c10::rbln::DeviceTopology::getUnusedPhysicalDeviceIds);
+      .def_property_readonly(
+          "unused_physical_device_ids",
+          &c10::rbln::DeviceTopology::getUnusedPhysicalDeviceIds);
 
   // Direct binding to DeviceMappingManager for device topology
   module.def(
       "_get_device_topology",
-      []() -> c10::rbln::DeviceTopology { return c10::rbln::DeviceMappingManager::getInstance().getDeviceTopology(); },
+      []() -> c10::rbln::DeviceTopology {
+        return c10::rbln::DeviceMappingManager::getInstance()
+            .getDeviceTopology();
+      },
       "Get the complete device topology.");
 
   module.def(
@@ -174,9 +222,10 @@ void register_public_device_api(py::module_& module) {
 /**
  * @brief Register the low-level stream primitives backing torch.rbln streams.
  *
- * These mirror torch.cuda's _cuda_getCurrentStream / _cuda_setStream: they exchange
- * (stream_id, device_index, device_type) tuples with Python and delegate to the
- * PrivateUse1 guard impl. torch.Stream / torch.Event need no binding of their own.
+ * These mirror torch.cuda's _cuda_getCurrentStream / _cuda_setStream: they
+ * exchange (stream_id, device_index, device_type) tuples with Python and
+ * delegate to the PrivateUse1 guard impl. torch.Stream / torch.Event need no
+ * binding of their own.
  *
  * @param module The Python module to register the functions with
  */
@@ -191,20 +240,27 @@ void register_stream_api(py::module_& module) {
   module.def(
       "_get_current_stream",
       [pack](c10::DeviceIndex device_index) {
-        return pack(VirtualGuardImpl(c10::kPrivateUse1).getStream(c10::Device(c10::kPrivateUse1, device_index)));
+        return pack(
+            VirtualGuardImpl(c10::kPrivateUse1)
+                .getStream(c10::Device(c10::kPrivateUse1, device_index)));
       },
       "Internal: current rbln stream as (stream_id, device_index, device_type)");
   module.def(
       "_get_default_stream",
       [pack](c10::DeviceIndex device_index) {
-        return pack(VirtualGuardImpl(c10::kPrivateUse1).getDefaultStream(c10::Device(c10::kPrivateUse1, device_index)));
+        return pack(VirtualGuardImpl(c10::kPrivateUse1)
+                        .getDefaultStream(
+                            c10::Device(c10::kPrivateUse1, device_index)));
       },
       "Internal: default rbln stream as (stream_id, device_index, device_type)");
   module.def(
       "_exchange_stream",
-      [pack](int64_t stream_id, c10::DeviceIndex device_index, int32_t device_type) {
-        // c10::Stream::unpack3 accepts any valid device type, so a foreign stream id
-        // would otherwise be read as an RBLN local stream id.
+      [pack](
+          int64_t stream_id,
+          c10::DeviceIndex device_index,
+          int32_t device_type) {
+        // c10::Stream::unpack3 accepts any valid device type, so a foreign
+        // stream id would otherwise be read as an RBLN local stream id.
         TORCH_CHECK(
             static_cast<c10::DeviceType>(device_type) == c10::kPrivateUse1,
             "torch.rbln streams expect device type ",
@@ -212,7 +268,9 @@ void register_stream_api(py::module_& module) {
             ", got ",
             c10::DeviceTypeName(static_cast<c10::DeviceType>(device_type)));
         const auto stream = c10::Stream::unpack3(
-            static_cast<c10::StreamId>(stream_id), device_index, static_cast<c10::DeviceType>(device_type));
+            static_cast<c10::StreamId>(stream_id),
+            device_index,
+            static_cast<c10::DeviceType>(device_type));
         const auto guard = VirtualGuardImpl(c10::kPrivateUse1);
         // Selecting a stream also selects its device, as torch.cuda and
         // torch.accelerator both do.
@@ -226,14 +284,24 @@ void register_stream_api(py::module_& module) {
 
 // Both callers configure the whole device allocation behind the tensor's base
 // address, so a tensor that does not cover its storage is rejected up front
-// instead of misbehaving downstream. Covering it is the whole contract: a torch
-// view that still spans its storage (base.view(...), base[:]) carries the
-// allocation's own address and size, and is accepted.
-void check_base_rbln_tensor(const at::Tensor& t, const char* api, const char* name) {
-  TORCH_CHECK(t.device().is_privateuseone(), api, ": ", name, " must be an RBLN tensor, got ", t.device());
+// instead of misbehaving downstream. Covering it is the whole contract: a
+// PyTorch view that still spans its storage (base.view(...), base[:]) carries
+// the allocation's own address and size, and is accepted.
+void check_base_rbln_tensor(
+    const at::Tensor& t,
+    const char* api,
+    const char* name) {
+  TORCH_CHECK(
+      t.device().is_privateuseone(),
+      api,
+      ": ",
+      name,
+      " must be an RBLN tensor, got ",
+      t.device());
   TORCH_CHECK(
       t.storage_offset() == 0 && t.is_contiguous() &&
-          static_cast<int64_t>(t.storage().nbytes()) == t.numel() * t.element_size(),
+          static_cast<int64_t>(t.storage().nbytes()) ==
+              t.numel() * t.element_size(),
       api,
       ": ",
       name,
@@ -252,24 +320,30 @@ void check_base_rbln_tensor(const at::Tensor& t, const char* api, const char* na
 void register_internal_api(py::module_& module) {
   // Tensor creation and manipulation functions
   module.def(
-      "_create_tensor_from_ptr", &at::native::rbln::create_tensor_from_ptr, "Internal: create tensor from device ptr");
+      "_create_tensor_from_ptr",
+      &at::native::rbln::create_tensor_from_ptr,
+      "Internal: create tensor from device ptr");
 
-  // Mark the virtual memory as logically zero-initialized without allocating host memory.
-  // Preferred implementation of aten::zero_ for large RBLN tensors (e.g. KV-cache).
+  // Mark the virtual memory as logically zero-initialized without allocating
+  // host memory. Preferred implementation of aten::zero_ for large RBLN tensors
+  // (e.g. KV-cache).
   module.def(
       "_mark_zeros",
       [](uint64_t vaddr) {
-        c10::rbln::mark_zeros(reinterpret_cast<const void*>(vaddr)); // NOLINT(performance-no-int-to-ptr)
+        // NOLINTNEXTLINE(performance-no-int-to-ptr)
+        c10::rbln::mark_zeros(reinterpret_cast<const void*>(vaddr));
       },
       "Internal: mark RBLN virtual memory as zero-initialized (no host alloc)");
 
-  // Materialise a tensor's device allocation up front, for a consumer that reads the physical
-  // buffers out of band. Used by torch_rbln.bind_device_memory().
+  // Materialise a tensor's device allocation up front, for a consumer that
+  // reads the physical buffers out of band. Used by
+  // torch_rbln.bind_device_memory().
   module.def(
       "_bind_device_memory",
       [](const at::Tensor& tensor) {
         check_base_rbln_tensor(tensor, "bind_device_memory", "tensor");
-        c10::rbln::bind_device_memory(tensor.data_ptr(), tensor.storage().nbytes());
+        c10::rbln::bind_device_memory(
+            tensor.data_ptr(), tensor.storage().nbytes());
       },
       "Internal: give an RBLN tensor a flat single-node device allocation");
 
@@ -320,14 +394,19 @@ void register_internal_api(py::module_& module) {
       "_host_register",
       [](c10::DeviceIndex device_index, uintptr_t host_ptr, size_t nbytes) {
         return c10::rbln::host_register(
-            device_index, reinterpret_cast<const void*>(host_ptr), nbytes); // NOLINT(performance-no-int-to-ptr)
+            device_index,
+            // NOLINTNEXTLINE(performance-no-int-to-ptr)
+            reinterpret_cast<const void*>(host_ptr),
+            nbytes);
       },
       "Internal: pin a host range for DMA on a device");
   module.def(
       "_host_unregister",
       [](c10::DeviceIndex device_index, uintptr_t host_ptr) {
         c10::rbln::host_unregister(
-            device_index, reinterpret_cast<const void*>(host_ptr)); // NOLINT(performance-no-int-to-ptr)
+            device_index,
+            // NOLINTNEXTLINE(performance-no-int-to-ptr)
+            reinterpret_cast<const void*>(host_ptr));
       },
       "Internal: unpin a host range registered with _host_register");
 
@@ -360,7 +439,28 @@ void register_internal_api(py::module_& module) {
       "Internal: configure target's device layout like ref (no data copy)");
 
   // Logging utilities
-  module.def("_log_cpu_fallback", &c10::rbln::log_cpu_fallback, "Internal: log CPU fallback");
+  module.def(
+      "_running_shim_op",
+      &torch_rbln::shim::running_python_op,
+      "Internal: schema name of the shim op whose Python wrapper is running on this thread, or None");
+  // Python-path CPU fallback, as a context manager around c10's
+  // CpuFallbackScope: `with _CpuFallbackScope(op_name): <run it on CPU>`.
+  py::class_<PyCpuFallbackScope>(module, "_CpuFallbackScope")
+      .def(py::init<std::string>(), py::arg("op_name"))
+      .def(
+          "__enter__",
+          [](PyCpuFallbackScope& self) {
+            self.scope.emplace(
+                torch_rbln::shim::python_fallback_op_name(self.op_name),
+                c10::rbln::CpuFallbackPath::kPython);
+          })
+      .def("__exit__", [](PyCpuFallbackScope& self, const py::args& /*exc*/) {
+        self.scope.reset();
+      });
+  module.def(
+      "_cpu_fallback_ns",
+      &c10::rbln::cpu_fallback_ns,
+      "DIAG/PROFILER: wall ns spent in CPU fallbacks, every fallback path");
 
   // C++ dispatch shim: install a boxed C++ handler on PrivateUse1 for the given
   // op, with pre-check + cpu_fallback_rbln on fail and Python callback on pass.
@@ -371,15 +471,21 @@ void register_internal_api(py::module_& module) {
       &torch_rbln::shim::diag_dump_dispatch_paths,
       "DIAG: dispatch path counts/timings (n_total, n_fallback, n_warm_hit, n_miss, ns_warm_hit, ns_miss)");
   module.def(
-      "_dispatch_shim_diag_reset", &torch_rbln::shim::diag_reset_dispatch_paths, "DIAG: reset dispatch path counters");
+      "_dispatch_shim_diag_reset",
+      &torch_rbln::shim::diag_reset_dispatch_paths,
+      "DIAG: reset dispatch path counters");
   module.def(
       "_dispatch_fallback_by_op",
-      &torch_rbln::shim::diag_dump_fallback_by_op,
-      "DIAG/PROFILER: per-op CPU-fallback counts (list of (op_name, count), non-zero only)");
+      &c10::rbln::cpu_fallback_counts,
+      "DIAG/PROFILER: per-op CPU-fallback counts, every torch-rbln fallback path (list of (op_name, count), non-zero only)");
   module.def(
       "_dispatch_fallback_by_op_reset",
-      &torch_rbln::shim::diag_reset_fallback_by_op,
+      &c10::rbln::reset_cpu_fallback_counts,
       "DIAG/PROFILER: reset per-op CPU-fallback counts");
+  module.def(
+      "_dispatch_fallback_boxed_ops",
+      &c10::rbln::boxed_cpu_fallback_ops,
+      "DIAG/PROFILER: ops among the per-op counts that went through the boxed CPU fallback, where fast-path handlers apply");
   module.def(
       "_dispatch_recompile_by_op",
       &torch_rbln::shim::diag_dump_recompile_by_op,
@@ -391,7 +497,7 @@ void register_internal_api(py::module_& module) {
   module.def(
       "_dispatch_fallback_reasons",
       &torch_rbln::shim::diag_dump_fallback_reasons,
-      "DIAG/PROFILER: cpu_fallback reason counts [dtype-not-fp16, nan/inf input, all-scalar]");
+      "DIAG/PROFILER: cpu_fallback reason counts [dtype-not-dispatch, nan/inf input, all-scalar, out-dtype]");
   module.def(
       "_dispatch_fallback_reasons_reset",
       &torch_rbln::shim::diag_reset_fallback_reasons,
@@ -409,10 +515,6 @@ void register_internal_api(py::module_& module) {
       &torch_rbln::shim::diag_reset_trace_by_op,
       "DIAG/PROFILER (A) WHERE: reset captured call-sites");
   module.def(
-      "_dispatch_shim_align_fastpath_count",
-      &torch_rbln::shim::diag_dump_align_fastpath_count,
-      "DIAG: count of align-penalty fast-path hits");
-  module.def(
       "_dispatch_shim_warm_segments_dump",
       &torch_rbln::shim::diag_dump_warm_segments,
       "DIAG: warm-cache hit per-segment timers (n_hits, ns_lookup, ns_io_build, "
@@ -422,8 +524,9 @@ void register_internal_api(py::module_& module) {
       &torch_rbln::shim::diag_reset_warm_segments,
       "DIAG: reset warm-cache hit per-segment timers");
 
-  // PROFILER: hidden host-bounce / fallback counters (always-on, cold-path only).
-  // Returns per-site (count, bytes) in BounceSite enum order. See RBLNProfiler.h.
+  // PROFILER: hidden host-bounce / fallback counters (always-on, cold-path
+  // only). Returns per-site (count, bytes) in BounceSite enum order. See
+  // RBLNProfiler.h.
   module.def(
       "_profiler_dump_bounces",
       []() {
@@ -436,12 +539,16 @@ void register_internal_api(py::module_& module) {
         return out;
       },
       "PROFILER: per-site (count, bytes) of hidden host bounces, in BounceSite order");
-  module.def("_profiler_reset_bounces", &c10::rbln::prof::reset_bounces, "PROFILER: reset hidden-bounce counters");
+  module.def(
+      "_profiler_reset_bounces",
+      &c10::rbln::prof::reset_bounces,
+      "PROFILER: reset hidden-bounce counters");
 
-  // PROFILER: runtime (rebel-compiler) hidden-overhead counters, read from librbln
-  // via its public C-API. Per-reason axes are POSITIONAL — their meaning is an
-  // internal classification interpreted Python-side, so no internal name crosses
-  // this boundary. See rebel/runtime/api/rbln_runtime_api.h (rebel-compiler wheel).
+  // PROFILER: runtime (`rebel-compiler`) hidden-overhead counters, read from
+  // `librbln` via its public C-API. Per-reason axes are POSITIONAL — their
+  // meaning is an internal classification interpreted Python-side, so no
+  // internal name crosses this boundary. See
+  // `rebel/runtime/api/rbln_runtime_api.h` (`rebel-compiler` wheel).
   module.def(
       "_rt_prof_hidden",
       []() {
@@ -476,7 +583,8 @@ void register_internal_api(py::module_& module) {
         uint64_t dc = 0, db = 0, hc = 0, hb = 0;
         c10::rbln::rt_prof_host_sync_d2h(&dc, &db);
         c10::rbln::rt_prof_host_sync_h2d(&hc, &hb);
-        std::vector<std::pair<uint64_t, uint64_t>> out{{dc, db}, {hc, hb}}; // [0]=d2h, [1]=h2d
+        std::vector<std::pair<uint64_t, uint64_t>> out{
+            {dc, db}, {hc, hb}}; // [0]=d2h, [1]=h2d
         return out;
       },
       "PROFILER: [(d2h_count,d2h_bytes),(h2d_count,h2d_bytes)] real device<->host transfers");
@@ -511,15 +619,21 @@ void register_internal_api(py::module_& module) {
       "set by the shim on the way into the miss path",
       pybind11::arg("dyn_runtime"),
       pybind11::arg("runtime_handle"),
-      pybind11::arg("out_profiles"));
+      pybind11::arg("out_profiles"),
+      pybind11::arg("align_bypassed") = false);
 
   module.def(
       "_warmcache_set_enabled",
-      [](bool v) { torch_rbln::warmcache::WarmCache::instance().set_enabled(v); },
+      [](bool enabled) {
+        torch_rbln::warmcache::WarmCache::instance().set_enabled(enabled);
+      },
+      py::arg("enabled"),
       "Internal: enable/disable the warm-runtime cache path globally");
   module.def(
       "_warmcache_is_enabled",
-      []() { return torch_rbln::warmcache::WarmCache::instance().is_enabled(); },
+      []() {
+        return torch_rbln::warmcache::WarmCache::instance().is_enabled();
+      },
       "Internal: query whether warm-cache is currently enabled");
   module.def(
       "_warmcache_size",
@@ -527,7 +641,9 @@ void register_internal_api(py::module_& module) {
       "Internal: number of entries in the warm-cache (debug/bench only)");
   module.def(
       "_warmcache_clear",
-      [](std::optional<c10::DeviceIndex> device) { torch_rbln::warmcache::WarmCache::instance().clear(device); },
+      [](std::optional<c10::DeviceIndex> device) {
+        torch_rbln::warmcache::WarmCache::instance().clear(device);
+      },
       "Internal: drop the warm-cache entries whose inputs live on `device`, or "
       "all of them when device is None",
       pybind11::arg("device") = pybind11::none());
@@ -546,24 +662,29 @@ void register_internal_api(py::module_& module) {
       "Internal: clear the miss-path reentrancy flag set by _warmcache_enter_building");
 
   // CPU fast-path registry introspection. Returns True iff a handler is
-  // registered for the given fully-qualified op name (e.g. "aten::rsqrt.out").
+  // registered for the given fully-qualified op name (e.g. "aten::sub.out").
   // Used by tests to verify the static-init registration fired without
   // needing a live OperatorHandle.
   module.def(
       "_cpu_fast_path_registered",
       [](const std::string& op_name) {
-        return at::native::rbln::CPUFastPathRegistry::instance().has_handler_for_op(op_name);
+        return at::native::rbln::CPUFastPathRegistry::instance()
+            .has_handler_for_op(op_name);
       },
       "Internal: returns True iff a CPU fast-path handler is registered for the given op name");
 
-  // (B) explain: rebel-runtime (librbln) boundary timing. Gated so it is OFF
-  // (one relaxed atomic load per boundary call) unless an explain region enables
-  // it; lets the profiler split host overhead into runtime vs torch-side dispatch.
+  // (B) explain: rebel-runtime (`librbln`) boundary timing. Gated so it is OFF
+  // (one relaxed atomic load per boundary call) unless an explain region
+  // enables it; lets the profiler split host overhead into runtime vs
+  // torch-side dispatch.
   module.def(
       "_rt_timing_enable",
       [](bool on) { c10::rbln::rt_timing_enable(on); },
       "Internal: enable/disable librbln boundary timing for an explain region");
-  module.def("_rt_timing_reset", []() { c10::rbln::rt_timing_reset(); }, "Internal: zero the librbln boundary timers");
+  module.def(
+      "_rt_timing_reset",
+      []() { c10::rbln::rt_timing_reset(); },
+      "Internal: zero the librbln boundary timers");
   module.def(
       "_rt_timing_get",
       []() {
@@ -591,6 +712,7 @@ void register_internal_api(py::module_& module) {
   module.def(
       "_set_file_offloading_enabled",
       &c10::rbln::set_file_offloading_enabled,
+      py::arg("enabled"),
       "Internal: enable or disable process-wide RBLN vmemory file offloading.");
 
   module.def(
@@ -598,19 +720,21 @@ void register_internal_api(py::module_& module) {
       &c10::rbln::release_offload_temp_storage,
       "Internal: remove this process's file offloading temp files and directories.");
 
-  // torch.profiler (kineto) integration
+  // `torch.profiler` (Kineto) integration
   module.def(
       "_register_kineto_profiler",
       &rbln::profiler::kineto::register_rbln_kineto_profiler,
       "Internal: register the rbln torch.profiler (kineto) bridge");
 }
 
-py::tuple supported_dtypes_to_tuple(c10::ArrayRef<c10::ScalarType> scalar_types) {
+py::tuple supported_dtypes_to_tuple(
+    c10::ArrayRef<c10::ScalarType> scalar_types) {
   const auto n = scalar_types.size();
   py::tuple out(n);
   for (size_t i = 0; i < n; ++i) {
     // `getTHPDtype` returns a borrowed reference to a process-wide singleton.
-    auto* const dtype_obj = reinterpret_cast<PyObject*>(torch::getTHPDtype(scalar_types[i]));
+    auto* const dtype_obj =
+        reinterpret_cast<PyObject*>(torch::getTHPDtype(scalar_types[i]));
     out[i] = py::reinterpret_borrow<py::object>(dtype_obj);
   }
   return out;
@@ -625,7 +749,20 @@ void register_supported_dtypes_api(py::module_& module) {
   module.def(
       "_dispatch_dtypes",
       [] { return supported_dtypes_to_tuple(c10::rbln::kDispatchDtypes); },
-      "Internal: eager-dispatch supported dtypes");
+      "Internal: eager-dispatch supported dtypes (the built-in catalog)");
+  module.def(
+      "_dispatch_extension_dtypes",
+      [] {
+        return supported_dtypes_to_tuple(c10::rbln::kDispatchExtensionDtypes);
+      },
+      "Internal: dtypes TORCH_RBLN_DISPATCH_DTYPES may admit");
+  module.def(
+      "_set_dispatch_extension",
+      [](const std::vector<c10::ScalarType>& dtypes) {
+        c10::rbln::set_dispatch_extension(dtypes);
+      },
+      py::arg("dtypes"),
+      "Internal: set the dtypes admitted beyond the eager-dispatch catalog (see TORCH_RBLN_DISPATCH_DTYPES)");
   module.def(
       "_sdpa_dtypes",
       [] { return supported_dtypes_to_tuple(c10::rbln::kSdpaDtypes); },
@@ -639,14 +776,16 @@ void register_supported_dtypes_api(py::module_& module) {
 /**
  * @brief Register distributed method definitions with the module
  *
- * This function adds distributed method definitions to the global method vector.
- * These methods are used for distributed training functionality such as
+ * This function adds distributed method definitions to the global method
+ * vector. These methods are used for distributed training functionality such as
  * ProcessGroupRBLN initialization.
  *
  * @param method_vector The global method vector to add distributed methods to
  */
 void register_distributed_method(std::vector<PyMethodDef>& method_vector) {
-  add_py_method_definitions(method_vector, torch_rbln::distributed::get_distributed_method_definitions());
+  add_py_method_definitions(
+      method_vector,
+      torch_rbln::distributed::get_distributed_method_definitions());
 }
 
 } // anonymous namespace
@@ -680,7 +819,8 @@ static std::vector<PyMethodDef> global_method_definitions;
  * This approach follows the ascend-torch pattern and ensures clean separation
  * of concerns while avoiding circular import issues.
  *
- * The initialization is organized into logical sections for better maintainability:
+ * The initialization is organized into logical sections for better
+ * maintainability:
  * - Method definitions setup
  * - Module creation
  * - RBLN-specific bindings registration
@@ -702,7 +842,8 @@ extern "C" PyObject* initModule() {
 
   // Step 3: Initialize RBLN-specific bindings
   py::gil_scoped_acquire gil_acquire;
-  py::module_ python_module = py::reinterpret_borrow<py::module_>(created_module);
+  py::module_ python_module =
+      py::reinterpret_borrow<py::module_>(created_module);
 
   // Set module documentation
   python_module.doc() = "Torch RBLN low‑level bindings.";

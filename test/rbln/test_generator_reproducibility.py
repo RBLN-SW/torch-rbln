@@ -1,6 +1,7 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""RBLN generators: explicit ``torch.Generator(device="rbln")`` and the per-device defaults.
+"""RBLN generators: explicit ``torch.Generator(device="rbln")`` and the per-device
+defaults.
 
 Coverage:
   1. Seed initialization — ``manual_seed`` correctly sets the generator's
@@ -35,17 +36,19 @@ Coverage:
 from __future__ import annotations
 
 import threading
-import unittest
+from typing import ClassVar, TYPE_CHECKING
 
 import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-import torch_rbln  # noqa: F401  (registers the rbln backend)
+import torch_rbln
 from test.utils import run_in_isolated_process
 
 
-RBLN_DEVICE_COUNT = torch_rbln._C.device_count()
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 # torch's default seed for a generator nobody seeded (c10/core/GeneratorImpl.h).
 DEFAULT_RNG_SEED = 67280421310721
 
@@ -55,7 +58,7 @@ def _sample(device="rbln", generator=None, n=16):
     return torch.randint(0, 1024, (n,), device=device, generator=generator)
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestGeneratorBasic(TestCase):
     """Basic tests for the RBLN ``torch.Generator`` implementation."""
 
@@ -116,7 +119,8 @@ class TestGeneratorBasic(TestCase):
         self.assertEqual(torch.Generator(device="rbln").device, torch.device("rbln", torch.rbln.current_device()))
 
     def test_manual_seed_wraps_a_negative_seed(self):
-        # torch.manual_seed accepts -1 for the CPU generator, then passes it on to manual_seed_all.
+        # torch.manual_seed accepts -1 for the CPU generator, then passes it on to
+        # manual_seed_all.
         torch.manual_seed(-1)
 
         self.assertEqual(torch_rbln._C.get_default_generator().initial_seed(), 2**64 - 1)
@@ -129,7 +133,7 @@ class TestGeneratorBasic(TestCase):
         self.assertEqual(g.initial_seed(), new_seed)
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestDefaultGenerator(TestCase):
     """Default (generator=None) path: seeding, reproducibility, isolation."""
 
@@ -203,7 +207,7 @@ class TestDefaultGenerator(TestCase):
         self.assertEqual(x.cpu(), y.cpu())
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestGeneratorValidation(TestCase):
     """Rejection of foreign generators and malformed state blobs."""
 
@@ -299,8 +303,7 @@ class TestGeneratorValidation(TestCase):
         self.assertEqual(state.numel(), torch.Generator(device="rbln").get_state().numel())
 
 
-@pytest.mark.test_set_ci
-@unittest.skipUnless(RBLN_DEVICE_COUNT >= 2, "requires at least 2 RBLN devices")
+@pytest.mark.npu(count=2)
 class TestMultiDeviceGenerator(TestCase):
     """Per-device default generator independence."""
 
@@ -344,15 +347,15 @@ class TestMultiDeviceGenerator(TestCase):
 
     def test_per_device_rng_state_round_trip(self):
         torch.rbln.manual_seed_all(2718)
-        states = [torch.rbln.get_rng_state(i) for i in range(RBLN_DEVICE_COUNT)]
+        states = [torch.rbln.get_rng_state(i) for i in range(2)]
 
-        xs = [_sample(device=f"rbln:{i}") for i in range(RBLN_DEVICE_COUNT)]
+        xs = [_sample(device=f"rbln:{i}") for i in range(2)]
 
         for i, state in enumerate(states):
             torch.rbln.set_rng_state(state, i)
-        ys = [_sample(device=f"rbln:{i}") for i in range(RBLN_DEVICE_COUNT)]
+        ys = [_sample(device=f"rbln:{i}") for i in range(2)]
 
-        for x, y in zip(xs, ys):
+        for x, y in zip(xs, ys, strict=True):
             self.assertEqual(x.cpu(), y.cpu())
 
     def test_rejects_wrong_device_index_generator(self):
@@ -365,7 +368,7 @@ class TestMultiDeviceGenerator(TestCase):
             _sample(device="rbln:0", generator=g1)
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestForkRng(TestCase):
     """torch.random.fork_rng integration through get/set_rng_state."""
 
@@ -396,10 +399,10 @@ class TestForkRng(TestCase):
         torch.rbln.manual_seed(4321)
         before = torch.rbln.get_rng_state()
 
-        with self.assertRaises(ValueError):
-            with torch.random.fork_rng(device_type="rbln"):
-                _ = torch.rand(10, device="rbln")
-                raise ValueError("boom")
+        with self.assertRaises(ValueError), torch.random.fork_rng(device_type="rbln"):
+            _ = torch.rand(10, device="rbln")
+            msg = "boom"
+            raise ValueError(msg)
 
         self.assertEqual(torch.rbln.get_rng_state(), before)
 
@@ -413,7 +416,7 @@ class TestForkRng(TestCase):
         self.assertEqual(torch.rbln.get_rng_state(0), before)
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestGeneratorThreadSafety(TestCase):
     """Smoke test for concurrent seeding vs. fallback sampling.
 
@@ -431,14 +434,14 @@ class TestGeneratorThreadSafety(TestCase):
                 for i in range(200):
                     g.manual_seed(i)
                     _ = g.get_state()
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 errors.append(e)
 
         def sampler():
             try:
                 for _ in range(200):
                     _ = torch.rand(256, device="rbln", generator=g)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 errors.append(e)
 
         threads = [threading.Thread(target=seeder), threading.Thread(target=sampler)]
@@ -455,7 +458,6 @@ class TestGeneratorThreadSafety(TestCase):
         self.assertEqual(_sample(generator=g).cpu(), _sample(generator=h).cpu())
 
 
-@pytest.mark.test_set_ci
 class TestFallbackBorrowSafety(TestCase):
     """Regression tests for borrow release when generator validation throws.
 
@@ -479,6 +481,7 @@ class TestFallbackBorrowSafety(TestCase):
             t = torch.empty(1024, device="rbln")
             del t
 
+    @pytest.mark.npu(count=1)
     def test_failed_generator_check_releases_borrows(self):
         x = torch.empty(64, device="rbln")
         cpu_g = torch.Generator(device="cpu").manual_seed(1234)
@@ -488,6 +491,7 @@ class TestFallbackBorrowSafety(TestCase):
 
         self._assert_tensor_still_healthy(x)
 
+    @pytest.mark.npu(count=1)
     def test_failed_generator_check_releases_input_borrows(self):
         # Same throw point, with a read-only borrowed input (multinomial's weights)
         # rather than the mutated self.
@@ -499,7 +503,7 @@ class TestFallbackBorrowSafety(TestCase):
 
         self._assert_tensor_still_healthy(weights)
 
-    @unittest.skipUnless(RBLN_DEVICE_COUNT >= 2, "requires at least 2 RBLN devices")
+    @pytest.mark.npu(count=2)
     def test_failed_device_index_check_releases_borrows(self):
         # The second throw site in the generator block: an RBLN generator
         # whose device index does not match the op's target device.
@@ -512,14 +516,14 @@ class TestFallbackBorrowSafety(TestCase):
         self._assert_tensor_still_healthy(x)
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestGeneratorCoverageBreadth(TestCase):
     """Broader op coverage and mid-stream state semantics."""
 
     # Generator-consuming fallback ops beyond randint. Each entry must hit
     # the OptionalGenerator path in get_or_populate_schema_info for its own
     # schema. Factory-style and in-place ops are both represented.
-    _OPS = {
+    _OPS: ClassVar[dict[str, Callable[..., torch.Tensor]]] = {
         "rand": lambda device, g: torch.rand(64, device=device, generator=g),
         "randperm": lambda device, g: torch.randperm(64, device=device, generator=g),
         "uniform_": lambda device, g: torch.empty(64, device=device).uniform_(generator=g),

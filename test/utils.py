@@ -1,6 +1,8 @@
+import ast
 import multiprocessing
 import os
 import random
+import subprocess
 import sys
 
 import numpy as np
@@ -9,6 +11,7 @@ import torch
 
 from torch_rbln._internal.device_arch_utils import is_atom_device, is_rebel_device
 from torch_rbln._internal.ops_utils import SupportedDtypes
+from torch_rbln._internal.rdma_env import apply_default_rbln_network_environment
 
 
 SUPPORTED_DTYPES = list(SupportedDtypes.dispatch)
@@ -24,8 +27,6 @@ def configure_rbln_network_for_autoport_tests() -> None:
     ``RBLN_RDMA_IP`` when ``torch_rbln`` / ``librbln`` load in the subprocess.
     See :mod:`torch_rbln._internal.rdma_env`.
     """
-    from torch_rbln._internal.rdma_env import apply_default_rbln_network_environment
-
     apply_default_rbln_network_environment()
 
 
@@ -39,13 +40,11 @@ def configure_master_port_for_rccl_tests(default_port: str = _DEFAULT_DISTRIBUTE
     """
     if os.environ.get("RCCL_PORT_GEN") == "1":
         if not os.environ.get("MASTER_PORT"):
-            print(
+            sys.exit(
                 "RCCL_PORT_GEN=1 requires MASTER_PORT to be set in the environment "
                 f"(e.g. export MASTER_PORT=29500). Unset RCCL_PORT_GEN or set it to "
-                f"empty to use the test default ({default_port}).",
-                file=sys.stderr,
+                f"empty to use the test default ({default_port})."
             )
-            sys.exit(1)
         return
     os.environ.setdefault("MASTER_PORT", default_port)
 
@@ -53,10 +52,10 @@ def configure_master_port_for_rccl_tests(default_port: str = _DEFAULT_DISTRIBUTE
 def assert_device_resident_dtype(dtype: torch.dtype) -> None:
     """Fail unless the device advertises `dtype` as device-resident.
 
-    Only fp16/bf16 are (`kCapabilityDtypes`); another dtype accepts ``device="rbln"``
-    but stays host-backed, so an ordering test written on it would run entirely on the
-    host and pass with a broken fence. Per-tensor byte counting cannot stand in for
-    this: allocation is lazy and small elementwise ops take CPU fast paths.
+    Only fp16/bf16/fp32 are (`kCapabilityDtypes`); another dtype accepts
+    ``device="rbln"`` but stays host-backed, so an ordering test written on it would run
+    entirely on the host and pass with a broken fence. Per-tensor byte counting cannot
+    stand in for this: allocation is lazy and small elementwise ops take CPU fast paths.
     """
     advertised = torch.accelerator.get_device_capability()["supported_dtypes"]
     assert dtype in advertised, f"{dtype} is not device-resident; advertised: {advertised}"
@@ -71,41 +70,15 @@ def set_deterministic_seeds(seed: int):
     parent process are not inherited by child processes.
     """
     torch.manual_seed(seed)
-    np.random.seed(seed)
+    np.random.seed(seed)  # noqa: NPY002
     random.seed(seed)
-
-
-def requires_logical_devices(num_devices):
-    """Pytest marker to skip test if logical device count is less than required.
-
-    Note: This replaces `deviceCountAtLeast` from `torch.testing._internal`,
-    which must NOT be used here. During collection, `deviceCountAtLeast`
-    triggers `PrivateUse1TestBase.setUpClass()`, mutating `device_type` from
-    `"privateuse1"` to `"rbln"` at the class level. This breaks
-    `instantiate_device_type_tests(only_for="privateuse1")` for all files
-    collected after the mutation, silently dropping most tests.
-    """
-    logical_device_count = torch.rbln.device_count()
-    return pytest.mark.skipif(
-        logical_device_count < num_devices,
-        reason=f"Requires at least {num_devices} logical devices, found {logical_device_count}",
-    )
-
-
-def requires_physical_devices(num_devices):
-    """Pytest marker to skip test if physical device count is less than required."""
-    physical_device_count = torch.rbln.physical_device_count()
-    return pytest.mark.skipif(
-        physical_device_count < num_devices,
-        reason=f"Requires at least {num_devices} physical devices, found {physical_device_count}",
-    )
 
 
 def xfail_atom(reason: str):
     """Strict xfail on ATOM, inert elsewhere.
 
-    An unexpected pass fails the suite, signalling the marker can be removed
-    once ATOM gains support.
+    An unexpected pass fails the suite, signaling the marker can be removed once ATOM
+    gains support.
     """
     return pytest.mark.xfail(condition=is_atom_device(), reason=reason, strict=True)
 
@@ -113,8 +86,8 @@ def xfail_atom(reason: str):
 def xfail_rebel(reason: str):
     """Strict xfail on REBEL, inert elsewhere.
 
-    An unexpected pass fails the suite, signalling the marker can be removed
-    once REBEL gains support.
+    An unexpected pass fails the suite, signaling the marker can be removed once REBEL
+    gains support.
     """
     return pytest.mark.xfail(condition=is_rebel_device(), reason=reason, strict=True)
 
@@ -135,6 +108,24 @@ def spawn_target_with_clean_exit(rank: int, test_func, *args) -> None:
     os._exit(0)
 
 
+def run_snippet(code: str, *, env: dict[str, str] | None = None, unset: tuple[str, ...] = (), timeout: int = 600):
+    """Run ``code`` in a fresh interpreter; return its printed ``RESULT <literal>``.
+
+    ``env`` is applied (and ``unset`` names removed) before the child imports anything,
+    which is how import-time settings like ``TORCH_RBLN_DISPATCH_DTYPES`` must be set.
+    The child must exit 0; the literal on its last ``RESULT`` line comes back parsed.
+    """
+    child_env = {k: v for k, v in os.environ.items() if k not in unset}
+    child_env.update(env or {})
+    proc = subprocess.run(
+        [sys.executable, "-c", code], check=False, env=child_env, capture_output=True, text=True, timeout=timeout
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT ")]
+    assert lines, proc.stderr[-2000:]
+    return ast.literal_eval(lines[-1][len("RESULT ") :])
+
+
 def run_in_isolated_process(func, *args):
     """Run `func` in a freshly spawned process and propagate failures.
 
@@ -150,4 +141,5 @@ def run_in_isolated_process(func, *args):
     p.start()
     p.join()
     if p.exitcode != 0:
-        raise RuntimeError(f"{func.__name__} failed with exit code {p.exitcode}")
+        msg = f"{func.__name__} failed with exit code {p.exitcode}"
+        raise RuntimeError(msg)

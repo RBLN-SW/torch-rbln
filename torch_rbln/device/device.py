@@ -7,29 +7,32 @@ extension, so you can query and manage RBLN hardware just as naturally as
 you would in native PyTorch.
 """
 
-from typing import Any, List, Union  # noqa: UP035
+import contextlib
+from types import TracebackType
+from typing import Any
 
 import torch
 
 import torch_rbln._C
+from torch_rbln._internal.log_utils import rbln_is_debug_enabled, rbln_log_debug
 from torch_rbln._internal.ops_utils import SupportedDtypes
 
 
 __all__ = [
     "current_device",
+    "device",
     "device_count",
-    "physical_device_count",
+    "device_of",
+    "device_summary",
+    "get_amp_supported_dtype",
+    "get_device_name",
+    "get_device_properties",
     "is_available",
     "is_dummy_device",
     "is_initialized",
-    "get_amp_supported_dtype",
-    "get_device_properties",
-    "get_device_name",
+    "physical_device_count",
     "set_device",
     "synchronize",
-    "device",
-    "device_of",
-    "device_summary",
 ]
 
 
@@ -39,8 +42,7 @@ _initialized: bool = False
 
 
 def current_device() -> int:
-    """
-    Get the index of the currently selected RBLN device.
+    """Get the index of the currently selected RBLN device.
 
     Raises:
         RuntimeError: if no RBLN device is available (mirrors
@@ -64,8 +66,8 @@ def device_count() -> int:
     enumeration as infallible -- ``ATen/DeviceAccelerator.h`` says ``deviceCount()`` "is
     *REQUIRED* to not raise any exception".
 
-    The configuration error is not lost: :func:`current_device`, :func:`set_device` and any
-    device allocation raise it in full.
+    The configuration error is not lost: :func:`current_device`, :func:`set_device` and
+    any device allocation raise it in full.
 
     Returns:
         int: The number of available RBLN devices.
@@ -74,8 +76,7 @@ def device_count() -> int:
 
 
 def physical_device_count() -> int:
-    """
-    Get the number of physical RBLN devices in the system.
+    """Get the number of physical RBLN devices in the system.
 
     This function returns the actual number of physical devices, regardless of
     whether RSD mode is enabled. Unlike device_count(),
@@ -102,11 +103,11 @@ def is_available() -> bool:
 
     torch evaluates this from paths that never asked for an NPU -- importing
     ``torch.testing._internal.common_utils`` (``TEST_PRIVATEUSE1``),
-    ``torch._utils._get_available_device_type()``, ``DataLoader(pin_memory=True)`` -- so a
-    raise here breaks unrelated callers.
+    ``torch._utils._get_available_device_type()``, ``DataLoader(pin_memory=True)`` -- so
+    a raise here breaks unrelated callers.
 
-    Bound to the same C++ predicate as ``RBLNHooksInterface::hasRBLN()``, so the Python and
-    C++ answers cannot diverge.
+    Bound to the same C++ predicate as ``RBLNHooksInterface::hasRBLN()``, so the Python
+    and C++ answers cannot diverge.
     """
     return torch_rbln._C.is_available()
 
@@ -127,17 +128,17 @@ def is_initialized() -> bool:
     ``init_device_mesh`` skip its ``get_rank() % device_count()`` auto-select,
     which would otherwise fail on a host with no NPU.
 
-    Note: this calls :func:`device_count`, which *plans* the RBLN device mapping from the
-    current ``RBLN_*`` environment. It does not claim an NPU or freeze the mapping -- both
-    happen on first device use -- so a launcher may still assign ``RBLN_DEVICES``
-    afterwards.
+    Note: this calls :func:`device_count`, which *plans* the RBLN device mapping from
+    the current ``RBLN_*`` environment. It does not claim an NPU or freeze the mapping
+    -- both happen on first device use -- so a launcher may still assign
+    ``RBLN_DEVICES`` afterwards.
     """
     return _initialized or device_count() == 0
 
 
-def get_amp_supported_dtype() -> List[torch.dtype]:
-    """
-    Get a list of data types supported by automatic mixed precision (AMP) on RBLN devices.
+def get_amp_supported_dtype() -> list[torch.dtype]:
+    """Get a list of data types supported by automatic mixed precision (AMP) on RBLN
+    devices.
 
     Returns:
         List[torch.dtype]: A list of data types supported by AMP.
@@ -146,22 +147,24 @@ def get_amp_supported_dtype() -> List[torch.dtype]:
 
 
 def get_device_properties(
-    device: Union[int, torch.device, str, None] = None,
+    device: int | torch.device | str | None = None,
 ) -> torch_rbln._C.DeviceProperties:
     """What the NPUs behind an RBLN logical device are (``torch.cuda`` parity).
 
     A logical device may span several physical NPUs (``RBLN_DEVICE_MAP`` /
-    ``RBLN_NPUS_PER_DEVICE``), so ``total_memory`` sums them and ``npu_count`` says how many.
-    ``num_chiplet`` and ``memory_per_chiplet`` stay per NPU: a device runs out on its heaviest
-    chiplet, which ``total_memory`` hides, so size a pool by ``memory_per_chiplet``.
+    ``RBLN_NPUS_PER_DEVICE``), so ``total_memory`` sums them and ``npu_count`` says how
+    many. ``num_chiplet`` and ``memory_per_chiplet`` stay per NPU: a device runs out on
+    its heaviest chiplet, which ``total_memory`` hides, so size a pool by
+    ``memory_per_chiplet``.
 
     Args:
-        device (torch.device or int or str, optional): The device to query. Defaults to the
-            current device.
+        device (torch.device or int or str, optional): The device to query. Defaults to
+            the current device.
 
     Raises:
-        RuntimeError: in ``RBLN_DUMMY_DEVICE`` mode (host-backed, no NPU to report on), when no
-            NPU is mapped to the index, or when the runtime cannot answer for one of them.
+        RuntimeError: in ``RBLN_DUMMY_DEVICE`` mode (host-backed, no NPU to report on),
+            when no NPU is mapped to the index, or when the runtime cannot answer for
+            one of them.
 
     Example::
         >>> import torch
@@ -172,17 +175,18 @@ def get_device_properties(
     return torch_rbln._C.get_device_properties(device_idx)
 
 
-def get_device_name(device: Union[int, torch.device, str, None] = None) -> str:
-    """The NPU name behind an RBLN logical device, e.g. ``"RBLN-CA25"`` (``torch.cuda`` parity).
+def get_device_name(device: int | torch.device | str | None = None) -> str:
+    """The NPU name behind an RBLN logical device, e.g. ``"RBLN-CA25"`` (``torch.cuda``
+    parity).
 
     Args:
-        device (torch.device or int or str, optional): The device to query. Defaults to the
-            current device.
+        device (torch.device or int or str, optional): The device to query. Defaults to
+            the current device.
     """
     return get_device_properties(device).name
 
 
-def synchronize(device: Union[int, torch.device, str, None] = None) -> None:
+def synchronize(device: int | torch.device | str | None = None) -> None:
     """Wait for all work on the given RBLN device: its pending async transfers, then
     every stream on it (``torch.cuda.synchronize`` parity).
 
@@ -197,14 +201,11 @@ def synchronize(device: Union[int, torch.device, str, None] = None) -> None:
         >>> cpu_tensor = rbln_tensor.to("cpu", non_blocking=True)
         >>> torch.rbln.synchronize()  # wait for the transfer to complete
     """
-    if device is None:
-        device_idx = current_device()
-    else:
-        device_idx = _get_device_index(device)
+    device_idx = current_device() if device is None else _get_device_index(device)
     torch_rbln._C.synchronize(device_idx)
 
 
-def set_device(device: Union[int, torch.device, str]) -> None:
+def set_device(device: int | torch.device | str) -> None:
     r"""Set the current device.
 
     Usage of this function is discouraged in favor of :any:`device`. In most
@@ -229,9 +230,8 @@ def set_device(device: Union[int, torch.device, str]) -> None:
         _initialized = True
 
 
-def _get_device_index(device: Any, optional: bool = False) -> int:
-    """
-    Helper function to extract device index from various device representations.
+def _get_device_index(device: Any, optional: bool = False) -> int:  # noqa: FBT001, FBT002
+    """Helper function to extract device index from various device representations.
 
     Args:
         device: Can be an int, torch.device, or None (if optional=True)
@@ -243,28 +243,31 @@ def _get_device_index(device: Any, optional: bool = False) -> int:
     if device is None:
         if optional:
             return -1
-        raise ValueError("device argument must be specified")
+        msg = "device argument must be specified"
+        raise ValueError(msg)
     if isinstance(device, int):
         return device
     if isinstance(device, torch.device):
         if device.type != "rbln":
-            raise ValueError(f"Expected rbln device, but got {device.type}")
+            msg = f"Expected rbln device, but got {device.type}"
+            raise ValueError(msg)
         if device.index is None:
             return current_device()
         return device.index
     if isinstance(device, str):
         dev = torch.device(device)
         if dev.type != "rbln":
-            raise ValueError(f"Expected rbln device, but got {dev.type}")
+            msg = f"Expected rbln device, but got {dev.type}"
+            raise ValueError(msg)
         if dev.index is None:
             return current_device()
         return dev.index
-    raise TypeError(f"Invalid device type: {type(device)}")
+    msg = f"Invalid device type: {type(device)}"
+    raise TypeError(msg)
 
 
-def _exchange_device(device: Union[int, torch.device]) -> int:
-    """
-    Exchange the current device and return the previous device index.
+def _exchange_device(device: int | torch.device) -> int:
+    """Exchange the current device and return the previous device index.
 
     Args:
         device: Device index or torch.device to set as current
@@ -277,13 +280,11 @@ def _exchange_device(device: Union[int, torch.device]) -> int:
         return -1
     # torch.cuda parity: selecting a device needs hardware (see :func:`set_device`).
     torch_rbln._C.device_count_ensure_non_zero()
-    prev_device_idx = torch_rbln._C._exchange_device(device_idx)
-    return prev_device_idx
+    return torch_rbln._C._exchange_device(device_idx)
 
 
 def _maybe_exchange_device(device: int) -> int:
-    """
-    Exchange the current device if device >= 0, otherwise return -1.
+    """Exchange the current device if device >= 0, otherwise return -1.
 
     Args:
         device: Device index to set as current, or -1 for no-op
@@ -317,7 +318,9 @@ class device:
         self.prev_idx = _exchange_device(self.idx)
         return self
 
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any):
+    def __exit__(
+        self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: TracebackType | None
+    ):
         _maybe_exchange_device(self.prev_idx)
         return False
 
@@ -352,7 +355,8 @@ class device_of(device):
             else:
                 idx = -1
         else:
-            raise TypeError(f"Expected Tensor or Storage, but got {type(obj)}")
+            msg = f"Expected Tensor or Storage, but got {type(obj)}"
+            raise TypeError(msg)
         super().__init__(idx)
 
 
@@ -360,19 +364,19 @@ _device_summary_debug_done = False
 
 
 def _on_device_mapping_ready_from_cpp() -> None:
-    """Hook from C++ on first ``DeviceMappingManager::getInstance()`` (e.g. first rbln alloc / device_count)."""
+    """Hook from C++ on first ``DeviceMappingManager::getInstance()`` (e.g. first rbln
+    alloc / device_count).
+    """
     global _device_summary_debug_done
-    from torch_rbln._internal.log_utils import rbln_is_debug_enabled, rbln_log_debug
 
-    # _device_summary_debug_done: belt-and-suspenders if this were ever invoked twice from Python.
-    # not rbln_is_debug_enabled(): avoid building the table when DEBUG is off (see rbln_is_debug_enabled).
+    # _device_summary_debug_done: belt-and-suspenders if this were ever invoked twice
+    # from Python. not rbln_is_debug_enabled(): avoid building the table when DEBUG is
+    # off (see rbln_is_debug_enabled).
     if _device_summary_debug_done or not rbln_is_debug_enabled():
         return
     _device_summary_debug_done = True
-    try:
+    with contextlib.suppress(Exception):
         rbln_log_debug("Device configuration complete:\n" + _device_summary_string())
-    except Exception:
-        pass
 
 
 def _device_summary_string() -> str:
@@ -431,9 +435,8 @@ def _device_summary_string() -> str:
 
 
 def device_summary() -> None:
-    """
-    Print a summary of the RBLN device topology showing the mapping between
-    logical devices and physical NPU IDs.
+    """Print a summary of the RBLN device topology showing the mapping between logical
+    devices and physical NPU IDs.
 
     This function displays a table showing:
     - Logical device indices (e.g., rbln:0, rbln:1)
@@ -457,4 +460,4 @@ def device_summary() -> None:
         | rbln:1            | [ 2, 3 ]          | Active (Aggregated)  |
         +-------------------+-------------------+----------------------+
     """
-    print(_device_summary_string())
+    print(_device_summary_string())  # noqa: T201

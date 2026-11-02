@@ -16,61 +16,57 @@ import os
 import subprocess
 import sys
 import textwrap
-import unittest
+from pathlib import Path
 
 import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-import torch_rbln  # noqa: F401
-from test.utils import requires_physical_devices
+import torch_rbln.memory as rbln_memory
 
 
-_HAS_NPU = torch.rbln.device_count() > 0
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-_NEEDS_NO_NPU = "requires a host with no physical NPU (device_count() == 0)"
+_PROJECT_ROOT = str(Path(__file__).absolute().parents[2])
 
 
-@pytest.mark.test_set_ci
 class TestNoDevice(TestCase):
     """``device_count() == 0`` must be a valid, non-fatal state (torch.cuda parity)."""
 
     def test_device_count_and_is_available_do_not_raise(self):
-        """Enumeration / availability never raise; on a no-NPU host they report 0 / False."""
+        """Enumeration / availability never raise; on a no-NPU host they report 0 /
+        False.
+        """
         n = torch.rbln.device_count()
         self.assertIsInstance(n, int)
         self.assertGreaterEqual(n, 0)
         self.assertEqual(torch.rbln.is_available(), n > 0)
-        if not _HAS_NPU:
-            self.assertEqual(n, 0)
-            self.assertFalse(torch.rbln.is_available())
 
-    @unittest.skipIf(_HAS_NPU, _NEEDS_NO_NPU)
+    @pytest.mark.npu(count=0)
     def test_set_and_current_device_raise_without_device(self):
-        """Selecting / querying the current device raises with no NPU (torch.cuda parity)."""
+        """Selecting / querying the current device raises with no NPU (torch.cuda
+        parity).
+        """
         with self.assertRaises(RuntimeError):
             torch.rbln.set_device(0)
         with self.assertRaises(RuntimeError):
             torch.rbln.current_device()
         # The device context manager selects a device too -> also raises.
-        with self.assertRaises(RuntimeError):
-            with torch.rbln.device(0):
-                pass
+        with self.assertRaises(RuntimeError), torch.rbln.device(0):
+            pass
 
-    @unittest.skipIf(_HAS_NPU, _NEEDS_NO_NPU)
+    @pytest.mark.npu(count=0)
     def test_use_ops_fail_at_point_of_use(self):
         """Operations that truly use a device must fail with 0 devices."""
-        with self.assertRaises(Exception):
+        with self.assertRaises(RuntimeError):
             t = torch.ones(8, dtype=torch.float16, device="rbln:0")
             _ = t + t  # force materialization / device access
-        with self.assertRaises(Exception):
+        with self.assertRaises(RuntimeError):
             torch.rbln.synchronize()
 
-    @unittest.skipIf(_HAS_NPU, _NEEDS_NO_NPU)
+    @pytest.mark.npu(count=0)
     def test_memory_management_is_graceful(self):
-        """empty_cache / memory_stats / reset_* are no-ops / empty with 0 devices (torch.cuda parity)."""
-        import torch_rbln.memory as rbln_memory
-
+        """empty_cache / memory_stats / reset_* are no-ops / empty with 0 devices
+        (torch.cuda parity).
+        """
         rbln_memory.empty_cache()  # no-op, must not raise
         rbln_memory.reset_peak_memory_stats()  # no-op, must not raise
         rbln_memory.reset_accumulated_memory_stats()  # no-op, must not raise
@@ -78,7 +74,8 @@ class TestNoDevice(TestCase):
         self.assertEqual(rbln_memory.memory_allocated(), 0)
         self.assertEqual(rbln_memory.memory_reserved(), 0)
         # mem_get_info() has nothing honest to report without a device: it raises, as
-        # torch.cuda.mem_get_info() does without CUDA, for the implicit and explicit index.
+        # torch.cuda.mem_get_info() does without CUDA, for the implicit and explicit
+        # index.
         with self.assertRaises(RuntimeError):
             rbln_memory.mem_get_info()
         with self.assertRaises(RuntimeError):
@@ -86,32 +83,24 @@ class TestNoDevice(TestCase):
         with self.assertRaises(RuntimeError):
             rbln_memory.mem_get_info_per_chiplet(0)
 
+    @pytest.mark.npu(count=1)
     def test_is_initialized_tracks_set_device(self):
-        """``is_initialized()`` exists (DeviceMesh requires it).
-
-        With a device it starts False and flips True on ``set_device``; with no device
-        it reports True so DeviceMesh skips its auto-select path. Run in a fresh
-        subprocess so the process-wide flag starts from its default.
+        """With a device, ``is_initialized()`` returns False as the first RBLN call and
+        True after ``set_device()``.
         """
         script = textwrap.dedent(
             f"""
             import sys
             sys.path.insert(0, {_PROJECT_ROOT!r})
             import torch, torch_rbln
-            assert isinstance(torch.rbln.is_initialized(), bool)
-            if torch.rbln.device_count() > 0:
-                assert torch.rbln.is_initialized() is False, "should start uninitialized with a device"
-                torch.rbln.set_device(0)
-                assert torch.rbln.is_initialized() is True, "set_device should initialize"
-            else:
-                # No device: is_initialized() reports True so DeviceMesh skips auto-select
-                # (get_rank() % device_count()==0 / set_device both fail with no NPU).
-                assert torch.rbln.is_initialized() is True, "no-device should report initialized"
+            assert torch.rbln.is_initialized() is False, "should start uninitialized with a device"
+            torch.rbln.set_device(0)
+            assert torch.rbln.is_initialized() is True, "set_device should initialize"
             print("INIT_OK")
             """
         )
         result = subprocess.run(
-            [sys.executable, "-c", script], cwd=_PROJECT_ROOT, capture_output=True, text=True, timeout=90
+            [sys.executable, "-c", script], check=False, cwd=_PROJECT_ROOT, capture_output=True, text=True, timeout=90
         )
         self.assertTrue(
             result.returncode == 0 and "INIT_OK" in result.stdout,
@@ -119,42 +108,34 @@ class TestNoDevice(TestCase):
             f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}",
         )
 
-    def test_is_initialized_first_call_triggers_lazy_init(self):
-        """``is_initialized()`` must be correct as the *first* RBLN call of a process.
-
-        It triggers device-mapping lazy-init via ``device_count()``; the existing
-        ``test_is_initialized_tracks_set_device`` calls ``device_count()`` first, so
-        it would not catch a regression where ``is_initialized()`` alone fails to
-        initialize. Here it is the very first RBLN access: no device -> True (so
-        DeviceMesh skips auto-select), with a device -> False (set_device not run).
+    @pytest.mark.npu(count=0)
+    def test_is_initialized_returns_true_without_device(self):
+        """With no device, ``is_initialized()`` returns True as the first RBLN call, so
+        DeviceMesh skips device auto-selection, which fails without an NPU.
         """
         script = textwrap.dedent(
             f"""
             import sys
             sys.path.insert(0, {_PROJECT_ROOT!r})
             import torch, torch_rbln
-            first = torch.rbln.is_initialized()  # first RBLN call: must lazy-init, not crash
-            assert isinstance(first, bool)
-            if torch.rbln.device_count() > 0:
-                assert first is False, "with a device, first is_initialized() must be False"
-            else:
-                assert first is True, "with no device, first is_initialized() must be True"
-            print("FIRST_OK")
+            assert torch.rbln.is_initialized() is True, "the first call with no device should report initialized"
+            print("INIT_OK")
             """
         )
         result = subprocess.run(
-            [sys.executable, "-c", script], cwd=_PROJECT_ROOT, capture_output=True, text=True, timeout=90
+            [sys.executable, "-c", script], check=False, cwd=_PROJECT_ROOT, capture_output=True, text=True, timeout=90
         )
         self.assertTrue(
-            result.returncode == 0 and "FIRST_OK" in result.stdout,
-            f"is_initialized()-first semantics wrong (rc={result.returncode})\n"
+            result.returncode == 0 and "INIT_OK" in result.stdout,
+            f"is_initialized() semantics wrong (rc={result.returncode})\n"
             f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}",
         )
 
-    @requires_physical_devices(1)
+    @pytest.mark.npu(count=1)
     def test_no_device_contract_forced(self):
         """Run the no-device contract on a host that *has* NPUs by hiding them with a
-        nonexistent ``RBLN_DEVICES`` filter, so CI on real hardware covers this path."""
+        nonexistent ``RBLN_DEVICES`` filter, so CI on real hardware covers this path.
+        """
         script = textwrap.dedent(
             f"""
             import sys
@@ -185,7 +166,13 @@ class TestNoDevice(TestCase):
         env = dict(os.environ, RBLN_DEVICES="99999")
         env.pop("LOCAL_RANK", None)
         result = subprocess.run(
-            [sys.executable, "-c", script], cwd=_PROJECT_ROOT, env=env, capture_output=True, text=True, timeout=90
+            [sys.executable, "-c", script],
+            check=False,
+            cwd=_PROJECT_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=90,
         )
         self.assertTrue(
             result.returncode == 0 and "FORCED_OK" in result.stdout,

@@ -35,13 +35,15 @@ void raw_pinned_delete(void* data) {
   if (nbytes > 0) {
     munlock(data, nbytes); // best-effort, mirrors the mlock in allocate
   }
-  // Allocator deleters work on raw pointers from posix_memalign; RAII does not apply.
+  // Allocator deleters work on raw pointers from posix_memalign; RAII does not
+  // apply.
   std::free(data); // NOLINT(cppcoreguidelines-no-malloc)
 }
 
-// Registered as the PrivateUse1 host allocator, the slot the device-generic host APIs
-// (`torch.accelerator.empty_host_cache()`) read. torch 2.13 dereferences that slot without
-// a null check, so leaving it empty is a segfault there (pytorch/pytorch#197593).
+// Registered as the PrivateUse1 host allocator, the slot the device-generic
+// host APIs (`torch.accelerator.empty_host_cache()`) read. PyTorch 2.13
+// dereferences that slot without a null check, so leaving it empty is a
+// segfault there (pytorch/pytorch#197593).
 struct RBLNPinnedAllocator final : public at::HostAllocator {
   /**
    * @brief Allocates page-aligned host memory and page-locks it (best effort).
@@ -52,15 +54,26 @@ struct RBLNPinnedAllocator final : public at::HostAllocator {
   c10::DataPtr allocate(size_t nbytes) override {
     void* data = nullptr;
     if (nbytes > 0) {
-      static const size_t page_size = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+      static const size_t page_size =
+          static_cast<size_t>(sysconf(_SC_PAGESIZE));
       if (posix_memalign(&data, page_size, nbytes) != 0) {
-        TORCH_CHECK(false, "Failed to allocate ", nbytes, " bytes of pinned host memory");
+        TORCH_CHECK(
+            false,
+            "Failed to allocate ",
+            nbytes,
+            " bytes of pinned host memory");
       }
       // RLIMIT_MEMLOCK failure is non-fatal: stays semantically pinned.
       if (mlock(data, nbytes) != 0) {
-        RBLN_LOG_DEBUG("mlock of {} bytes failed (errno={}); continuing unlocked", nbytes, errno);
+        RBLN_LOG_DEBUG(
+            "mlock of {} bytes failed (errno={}); continuing unlocked",
+            nbytes,
+            errno);
       }
-      RBLN_LOG_DEBUG("Allocated {} bytes of pinned host memory at {}", nbytes, fmt::ptr(data));
+      RBLN_LOG_DEBUG(
+          "Allocated {} bytes of pinned host memory at {}",
+          nbytes,
+          fmt::ptr(data));
       const std::lock_guard<std::mutex> guard(pinned_registry_mutex);
       pinned_registry.emplace(reinterpret_cast<uintptr_t>(data), nbytes);
     }
@@ -71,15 +84,16 @@ struct RBLNPinnedAllocator final : public at::HostAllocator {
     return &raw_pinned_delete;
   }
 
-  void copy_data(void* dst_data, const void* src_data, size_t nbytes) const override {
+  void copy_data(void* dst_data, const void* src_data, size_t nbytes)
+      const override {
     if (nbytes > 0) {
       std::memcpy(dst_data, src_data, nbytes);
     }
   }
 
-  // Nothing is cached: a freed block goes straight back to free(), so no block outlives its
-  // tensor for a stream to still be using and there is nothing to release. No counters are
-  // kept, so the stats read zero.
+  // Nothing is cached: a freed block goes straight back to free(), so no block
+  // outlives its tensor for a stream to still be using and there is nothing to
+  // release. No counters are kept, so the stats read zero.
   bool record_event(void* ptr, void* /*ctx*/, c10::Stream /*stream*/) override {
     return is_pinned_ptr(ptr);
   }

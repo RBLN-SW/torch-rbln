@@ -4,8 +4,9 @@
  *
  * This file provides the ProcessGroupRBLN class which implements distributed
  * communication operations using the RBLN (Rebellions Neural Processing Unit)
- * backend. It supports collective operations like allreduce, broadcast, scatter,
- * and point-to-point communication through RCCL (RBLN Collective Communication Library).
+ * backend. It supports collective operations like allreduce, broadcast,
+ * scatter, and point-to-point communication through RCCL (RBLN Collective
+ * Communication Library).
  */
 
 #pragma once
@@ -54,7 +55,8 @@ constexpr int DEFAULT_NUM_WORKERS = 1;
 // ============================================================================
 
 /**
- * @brief ProcessGroupRBLN implements RBLN bindings for c10d distributed computing
+ * @brief ProcessGroupRBLN implements RBLN bindings for c10d distributed
+ * computing
  *
  * This class provides distributed communication operations using the RBLN NPU
  * backend. It supports collective operations (allreduce, broadcast, scatter)
@@ -71,13 +73,17 @@ class TORCH_API ProcessGroupRBLN : public Backend {
 
   /**
    * @brief Construct a new ProcessGroupRBLN object
-   * @param store Shared store for coordination (used for rccl_unique_id broadcast in autoport init)
+   *
+   * @param store Shared store for coordination (used for rccl_unique_id
+   *     broadcast in autoport init)
    * @param rank Process rank in the group
    * @param size Total number of processes in the group
-   * @param group_id Group identifier (used for store keys, e.g. rbln_rccl_uid_ + group_id)
+   * @param group_id Group identifier (used for store keys, e.g.
+   *     rbln_rccl_uid_ + group_id)
    * @param global_ranks_in_group Global ranks of processes in this group
    * @param options Backend options including timeout settings
-   * @param glooBackend Optional Gloo backend for non-float16 allreduce/reduce_scatter fallback
+   * @param glooBackend Optional Gloo backend for non-float16
+   *     allreduce/reduce_scatter fallback
    */
   explicit ProcessGroupRBLN(
       const c10::intrusive_ptr<Store>& store,
@@ -92,9 +98,10 @@ class TORCH_API ProcessGroupRBLN : public Backend {
   /**
    * @brief Destroy the ProcessGroupRBLN object
    *
-   * Ensures all pending work is completed and worker threads are properly terminated.
+   * Ensures all pending work is completed and worker threads are properly
+   * terminated.
    */
-  virtual ~ProcessGroupRBLN() override;
+  ~ProcessGroupRBLN() override;
 
   // ============================================================================
   // Collective Communication Operations
@@ -102,6 +109,7 @@ class TORCH_API ProcessGroupRBLN : public Backend {
 
   /**
    * @brief Broadcast tensors from root rank to all other ranks
+   *
    * @param tensors Tensors to broadcast (in-place operation)
    * @param opts Broadcast options including root rank and tensor selection
    * @return Work object for tracking operation completion
@@ -112,6 +120,7 @@ class TORCH_API ProcessGroupRBLN : public Backend {
 
   /**
    * @brief Scatter tensors from root rank to all ranks
+   *
    * @param outputs Output tensors for each rank
    * @param inputs Input tensors (only used on root rank)
    * @param opts Scatter options including root rank
@@ -124,14 +133,16 @@ class TORCH_API ProcessGroupRBLN : public Backend {
 
   /**
    * @brief Gather tensors from all ranks into lists
-   * @param outputs Output tensor lists for each input tensor (outputs.size() = inputs.size())
+   *
+   * @param outputs Output tensor lists for each input tensor (outputs.size() =
+   *     inputs.size())
    * @param inputs Input tensors to be gathered from current rank
    * @param opts Allgather options
    * @return Work object for tracking operation completion
    *
-   * @note Each element in outputs[i] contains the gathered tensors from all ranks
-   *       for the corresponding input tensor inputs[i]. Each output list size must be
-   *       world_size (outputs[i].size() = world_size).
+   * @note Each element in outputs[i] contains the gathered tensors from all
+   *     ranks for the corresponding input tensor inputs[i]. Each output list
+   *     size must be world_size (outputs[i].size() = world_size).
    */
   c10::intrusive_ptr<Work> allgather(
       std::vector<std::vector<at::Tensor>>& outputs,
@@ -140,6 +151,7 @@ class TORCH_API ProcessGroupRBLN : public Backend {
 
   /**
    * @brief Single tensor all-gather operation (base implementation)
+   *
    * @param output_tensor Output tensor to hold gathered data from all ranks
    * @param input_tensor Input tensor to be gathered
    * @param opts Allgather options
@@ -151,8 +163,11 @@ class TORCH_API ProcessGroupRBLN : public Backend {
       const AllgatherOptions& opts = AllgatherOptions()) override;
 
   /**
-   * @brief Coalesced all-gather: gather multiple input tensors into flat output tensors
-   * @param outputTensors Output tensors (outputTensors[i].numel() == inputTensors[i].numel() * world_size)
+   * @brief Coalesced all-gather: gather multiple input tensors into flat output
+   * tensors
+   *
+   * @param outputTensors Output tensors (outputTensors[i].numel() ==
+   *     inputTensors[i].numel() * world_size)
    * @param inputTensors Input tensors to gather from all ranks
    * @param opts Allgather options
    * @return Work object for tracking operation completion
@@ -164,6 +179,7 @@ class TORCH_API ProcessGroupRBLN : public Backend {
 
   /**
    * @brief All-reduce operation across all ranks
+   *
    * @param tensors Tensors to reduce (in-place operation)
    * @param opts Allreduce options including reduction operation type
    * @return Work object for tracking operation completion
@@ -174,6 +190,7 @@ class TORCH_API ProcessGroupRBLN : public Backend {
 
   /**
    * @brief Reduce-scatter operation across all ranks
+   *
    * @param outputs Output tensors (one per rank)
    * @param inputs Input tensor lists (inputs[0] must have world_size tensors)
    * @param opts ReduceScatter options including reduction operation type
@@ -186,8 +203,11 @@ class TORCH_API ProcessGroupRBLN : public Backend {
 
   /**
    * @brief Single tensor reduce-scatter operation (base implementation)
-   * @param outputTensor Output tensor to hold reduced and scattered data for current rank
-   * @param inputTensor Input tensor containing data from all ranks (size: output_size * world_size)
+   *
+   * @param outputTensor Output tensor to hold reduced and scattered data for
+   *     current rank
+   * @param inputTensor Input tensor containing data from all ranks (size:
+   *     output_size * world_size)
    * @param opts ReduceScatter options including reduction operation type
    * @return Work object for tracking operation completion
    */
@@ -202,21 +222,29 @@ class TORCH_API ProcessGroupRBLN : public Backend {
 
   /**
    * @brief Send tensors to a specific destination rank
+   *
    * @param tensors Tensors to send
    * @param dstRank Destination rank
    * @param tag Message tag
    * @return Work object for tracking operation completion
    */
-  c10::intrusive_ptr<Work> send(std::vector<at::Tensor>& tensors, int dstRank, int tag) override;
+  c10::intrusive_ptr<Work> send(
+      std::vector<at::Tensor>& tensors,
+      int dstRank,
+      int tag) override;
 
   /**
    * @brief Receive tensors from a specific source rank
+   *
    * @param tensors Tensors to receive into
    * @param srcRank Source rank
    * @param tag Message tag
    * @return Work object for tracking operation completion
    */
-  c10::intrusive_ptr<Work> recv(std::vector<at::Tensor>& tensors, int srcRank, int tag) override;
+  c10::intrusive_ptr<Work> recv(
+      std::vector<at::Tensor>& tensors,
+      int srcRank,
+      int tag) override;
 
   // ============================================================================
   // Synchronization Operations
@@ -224,10 +252,12 @@ class TORCH_API ProcessGroupRBLN : public Backend {
 
   /**
    * @brief Barrier synchronization across all ranks
+   *
    * @param opts Barrier options
    * @return Work object for tracking operation completion
    */
-  c10::intrusive_ptr<Work> barrier(const BarrierOptions& opts = BarrierOptions()) override;
+  c10::intrusive_ptr<Work> barrier(
+      const BarrierOptions& opts = BarrierOptions()) override;
 
   // ============================================================================
   // Public Accessors
@@ -235,9 +265,10 @@ class TORCH_API ProcessGroupRBLN : public Backend {
 
   /**
    * @brief Get the backend name
+   *
    * @return Backend name string
    */
-  const std::string getBackendName() const noexcept {
+  const std::string getBackendName() const noexcept override {
     return backendName_;
   }
 
@@ -255,6 +286,7 @@ class TORCH_API ProcessGroupRBLN : public Backend {
 
   /**
    * @brief Get the current sequence number for the group
+   *
    * @return Current sequence number
    *
    * Retrieves the current sequence number for the whole group, which should be
@@ -266,12 +298,14 @@ class TORCH_API ProcessGroupRBLN : public Backend {
   /**
    * @brief Broadcast rccl_unique_id via TCP Store (rank 0 sets, others get).
    *
-   * Used by the autoport init path (RCCL_PORT_GEN set). Call after PrepareContextAndExportMem on all ranks;
-   * rank 0 generates the id via this group's rccl_->GetUniqueIdForBroadcast and sets it in the store;
-   * other ranks get from the store. Uses this group's group_id_ for the store key. Result is written to
-   * rcclID (no copy on return).
+   * Used by the autoport init path (RCCL_PORT_GEN set). Call after
+   * PrepareContextAndExportMem on all ranks; rank 0 generates the id via this
+   * group's rccl_->GetUniqueIdForBroadcast and sets it in the store; other
+   * ranks get from the store. Uses this group's group_id_ for the store key.
+   * Result is written to rcclID (no copy on return).
    *
-   * @param rcclID Output: on rank 0 filled by GetUniqueIdForBroadcast; on others filled from the store
+   * @param rcclID Output: on rank 0 filled by GetUniqueIdForBroadcast; on
+   *     others filled from the store
    */
   void broadcastUniqueId(struct rccl_unique_id* rcclID);
 
@@ -282,30 +316,36 @@ class TORCH_API ProcessGroupRBLN : public Backend {
 
   /**
    * @brief Generate next unique tag for operations
+   *
    * @return Next tag value
    */
   uint32_t nextTag() noexcept;
 
   /**
    * @brief Generate next unique sequence number for operations
+   *
    * @return Next sequence number
    */
   uint64_t nextSeq() noexcept;
 
   /**
    * @brief Enqueue work for asynchronous execution
+   *
    * @param work Work object to enqueue
    */
   void enqueue(c10::intrusive_ptr<Work> work);
 
   /**
-   * @brief Execute work synchronously or enqueue for async execution based on sync_mode_
+   * @brief Execute work synchronously or enqueue for async execution based on
+   * sync_mode_
+   *
    * @param work Work object to execute or enqueue (must be RBLNWork type)
    */
   void enqueueOrExecute(c10::intrusive_ptr<Work> work);
 
   /**
    * @brief Worker thread main loop
+   *
    * @param workerIndex Index of the worker thread
    */
   void runLoop(int workerIndex);

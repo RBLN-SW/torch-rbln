@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Walkthrough example 3: tensor metadata and view ops on RBLN.
+"""Walkthrough example 3: tensor metadata and view ops on RBLN.
 
 Ported from walkthrough_guide/3.rbln_tensor_metadata_handling.py.
 
@@ -20,7 +19,7 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 from test.utils import SUPPORTED_DTYPES
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestTensorMetadata(TestCase):
     """Walkthrough example 3: view/reshape/transpose/contiguous on RBLN."""
 
@@ -70,7 +69,9 @@ class TestTensorMetadata(TestCase):
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_contiguous_produces_contiguous_copy(self, dtype):
-        """`.contiguous()` on a non-contiguous view should return a contiguous tensor."""
+        """`.contiguous()` on a non-contiguous view should return a contiguous
+        tensor.
+        """
         x = torch.randn(4, 64, device=self.rbln_device, dtype=dtype)
         t = x.transpose(0, 1)
         c = t.contiguous()

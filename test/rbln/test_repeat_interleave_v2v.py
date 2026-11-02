@@ -30,11 +30,12 @@ from torch.testing._internal.common_utils import parametrize, run_tests, TestCas
 from test.utils_v2v import arange as _arange, ENGINE_DTYPES, eq as _eq, to_dev as _to_dev
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestRepeatInterleaveV2V(TestCase):
     """Tests for native ``aten::repeat_interleave.Tensor`` and the
-    composite ``.self_int`` / ``.self_Tensor`` forms."""
+    composite ``.self_int`` / ``.self_Tensor`` forms.
+    """
 
     # ---- .Tensor (index-builder) primitive ----
 
@@ -88,12 +89,12 @@ class TestRepeatInterleaveV2V(TestCase):
 
     def test_tensor_output_size_mismatch_rejected(self):
         r_dev = _to_dev(torch.tensor([3, 1, 2], dtype=torch.int64))
-        with pytest.raises(RuntimeError, match="output_size|allocated size"):
+        with pytest.raises(RuntimeError, match=r"output_size|allocated size"):
             torch.repeat_interleave(r_dev, output_size=99)
 
     def test_tensor_negative_repeat_rejected(self):
         r_dev = _to_dev(torch.tensor([2, -1, 3], dtype=torch.int64))
-        with pytest.raises(RuntimeError, match="non-negative|can not be negative"):
+        with pytest.raises(RuntimeError, match=r"non-negative|can not be negative"):
             torch.repeat_interleave(r_dev)
 
     # ---- .self_int — scalar repeats (composite decomposes through .Tensor) ----
@@ -191,7 +192,7 @@ class TestRepeatInterleaveV2V(TestCase):
         got = _to_dev(self_cpu).repeat_interleave(_to_dev(counts), dim=0)
         _eq(got, expected)
 
-    def test_self_int_large_repeats_GQA_pattern(self):
+    def test_self_int_large_repeats_gqa_pattern(self):
         """GQA-style head expansion: (n_kv_heads, head_dim) repeated r=q/kv times."""
         n_kv, head_dim, r = 8, 128, 4
         self_cpu = _arange((n_kv, head_dim), torch.float16) + 1

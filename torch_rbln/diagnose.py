@@ -18,11 +18,11 @@ environment-override or path conflicts (e.g. site-packages vs REBEL_HOME).
 
 import sys
 
+from torch_rbln._internal.env_diagnostic import print_diagnostics
+
 
 def main() -> int:
-    from torch_rbln._internal.env_diagnostic import print_diagnostics
-
-    print("Running torch-rbln environment diagnostics...", file=sys.stderr)
+    print("Running torch-rbln environment diagnostics...", file=sys.stderr)  # noqa: T201
     print_diagnostics(verbose=True)
     return 0
 

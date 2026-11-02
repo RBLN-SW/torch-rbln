@@ -13,12 +13,18 @@ namespace at::native::rbln {
  * @brief Pull a 0- or 1-D index tensor onto the host as a contiguous int64
  * vector. Accepts int32 or int64 input; widens int32 to int64.
  *
- * @param index   The index tensor (any device / layout).
- * @param op_name Error-message prefix (e.g. "index_select", "index_copy"),
- *                used so RBLN_CHECK messages name the op the caller is in.
+ * @param index The index tensor (any device / layout).
+ * @param op_name Error-message prefix (e.g. "index_select", "index_copy"), used
+ *     so RBLN_CHECK messages name the op the caller is in.
  */
-inline std::vector<int64_t> read_index_to_host(const at::Tensor& index, const char* op_name) {
-  RBLN_CHECK(index.dim() <= 1, "{}: index must be 0- or 1-D, got {}-D", op_name, index.dim());
+inline std::vector<int64_t> read_index_to_host(
+    const at::Tensor& index,
+    const char* op_name) {
+  RBLN_CHECK(
+      index.dim() <= 1,
+      "{}: index must be 0- or 1-D, got {}-D",
+      op_name,
+      index.dim());
   RBLN_CHECK(
       index.scalar_type() == at::kLong || index.scalar_type() == at::kInt,
       "{}: index dtype must be int32 or int64, got {}",
@@ -73,13 +79,13 @@ inline std::vector<IndexRun> coalesce_runs(const std::vector<int64_t>& idx) {
   std::vector<IndexRun> runs;
   if (idx.empty())
     return runs;
-  IndexRun cur{idx[0], 0, 1};
+  IndexRun cur{.value = idx[0], .pos = 0, .length = 1};
   for (int64_t i = 1; i < static_cast<int64_t>(idx.size()); ++i) {
     if (idx[i] == cur.value + cur.length) {
       cur.length += 1;
     } else {
       runs.push_back(cur);
-      cur = IndexRun{idx[i], i, 1};
+      cur = IndexRun{.value = idx[i], .pos = i, .length = 1};
     }
   }
   runs.push_back(cur);

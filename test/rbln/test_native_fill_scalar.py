@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Test suite for the RBLN-native `aten::fill_.Scalar` implementation.
+"""Test suite for the RBLN-native `aten::fill_.Scalar` implementation.
 
 `fill_scalar_rbln_` (RBLNTensorFactories.cpp) replaces the default
 `fallback_rbln` registration for `aten::fill_.Scalar`. It borrows a host
@@ -22,7 +21,7 @@ from torch.testing._internal.common_device_type import instantiate_device_type_t
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestFillScalarRBLN(TestCase):
     """`aten::fill_.Scalar` on RBLN must match CPU bit-for-bit."""
 
@@ -79,7 +78,8 @@ class TestFillScalarRBLN(TestCase):
     def test_overflow_conversion_raises_without_leaking_borrow(self):
         """A checked-cast overflow (128 into int8) throws between the borrow and
         its return; the RAII guard must still release it, else the next free leaks
-        the vmem. Assert it raises and the tensor stays usable (re-fill + churn)."""
+        the vmem. Assert it raises and the tensor stays usable (re-fill + churn).
+        """
         x = torch.empty(8, dtype=torch.int8, device="rbln")
         with pytest.raises(RuntimeError, match="overflow"):
             x.fill_(128)  # 128 > int8 max (127)

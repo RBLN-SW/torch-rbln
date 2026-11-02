@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Test suite for pinned host memory with the RBLN backend.
+"""Test suite for pinned host memory with the RBLN backend.
 
 Covers the standard `pin_memory` UX while RBLN is the active accelerator:
 1. `torch.tensor(..., pin_memory=True)` and `torch.empty(..., pin_memory=True)`
@@ -18,7 +17,7 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 from test.utils import SUPPORTED_DTYPES
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestPinMemory(TestCase):
     """Pinned host allocation and is_pinned semantics (no device transfer involved)."""
 
@@ -71,7 +70,7 @@ class TestPinMemory(TestCase):
         self.assertEqual(torch.cat(batches), torch.arange(32, dtype=torch.float32).reshape(8, 4))
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestPinMemoryCopy(TestCase):
     """Pinned host <-> RBLN device transfers, including the non_blocking path."""
 

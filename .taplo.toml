@@ -1,0 +1,2 @@
+# This file stops `taplo` from reading a `.taplo.toml` or `taplo.toml` in a parent
+# directory.

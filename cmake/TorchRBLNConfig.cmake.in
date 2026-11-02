@@ -1,0 +1,59 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+function(_torch_rbln_find_runtime package_dir reason_var)
+  get_filename_component(runtime_dir
+    "${package_dir}/../@RBLN_RUNTIME_RELDIR@" REALPATH)
+  get_filename_component(include_dir
+    "${runtime_dir}/@rbln_include_offset@" ABSOLUTE)
+  set(library "${runtime_dir}/librbln.so")
+  if(NOT EXISTS "${library}")
+    string(CONCAT reason
+      "Could not find the RBLN Runtime library '${library}'. "
+      "Install the rebel-compiler version that torch-rbln pins "
+      "(torch-rbln[runtime]).")
+    set(${reason_var} "${reason}" PARENT_SCOPE)
+    return()
+  endif()
+  if(NOT EXISTS "${include_dir}/rebel/runtime/api/rbln_runtime_api.h")
+    string(CONCAT reason
+      "Could not find the RBLN Runtime headers in '${include_dir}'. "
+      "Reinstall the rebel-compiler version that torch-rbln pins "
+      "(torch-rbln[runtime]).")
+    set(${reason_var} "${reason}" PARENT_SCOPE)
+    return()
+  endif()
+  torch_rbln_add_runtime_target(
+    LIBRARY "${library}"
+    INCLUDE_DIR "${include_dir}"
+  )
+endfunction()
+
+# The `EXACT` find below loads the matching Torch config but keeps the targets
+# an earlier find created, whatever their version.
+if(TARGET torch_library AND NOT Torch_VERSION VERSION_EQUAL "@Torch_VERSION@")
+  string(CONCAT TorchRBLN_NOT_FOUND_MESSAGE
+    "torch-rbln requires Torch @Torch_VERSION@, but this project already found "
+    "Torch ${Torch_VERSION} in '${Torch_DIR}'. Point Torch_DIR or "
+    "CMAKE_PREFIX_PATH at Torch @Torch_VERSION@.")
+  set(TorchRBLN_FOUND FALSE)
+  return()
+endif()
+find_dependency(Torch @Torch_VERSION@ EXACT CONFIG
+  HINTS "${PACKAGE_PREFIX_DIR}/../torch/share/cmake"
+)
+
+include("${CMAKE_CURRENT_LIST_DIR}/TorchRBLNAddRuntimeTarget.cmake")
+# For consumers on CMake 3.29 or older, `find_dependency()` can overwrite
+# `PACKAGE_PREFIX_DIR`, so the path below starts from this file, in
+# `<package>/share/cmake/TorchRBLN`.
+_torch_rbln_find_runtime("${CMAKE_CURRENT_LIST_DIR}/../../.."
+  TorchRBLN_NOT_FOUND_MESSAGE)
+if(NOT TARGET TorchRBLN::rbln)
+  set(TorchRBLN_FOUND FALSE)
+  return()
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/TorchRBLNTargets.cmake")
+check_required_components(TorchRBLN)

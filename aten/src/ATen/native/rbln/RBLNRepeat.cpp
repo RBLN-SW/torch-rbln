@@ -11,10 +11,15 @@
 
 namespace at::native::rbln {
 
-at::Tensor repeat_interleave_Tensor_rbln(const at::Tensor& repeats, std::optional<c10::SymInt> output_size) {
+at::Tensor repeat_interleave_Tensor_rbln(
+    const at::Tensor& repeats,
+    std::optional<c10::SymInt> output_size) {
   RBLN_SCOPE_GUARD();
 
-  RBLN_CHECK(repeats.dim() == 1, "repeat_interleave: repeats must be 1-D, got {}-D", repeats.dim());
+  RBLN_CHECK(
+      repeats.dim() == 1,
+      "repeat_interleave: repeats must be 1-D, got {}-D",
+      repeats.dim());
   RBLN_CHECK(
       repeats.scalar_type() == at::kLong || repeats.scalar_type() == at::kInt,
       "repeat_interleave: repeats dtype must be int32 or int64, got {}",
@@ -42,21 +47,28 @@ at::Tensor repeat_interleave_Tensor_rbln(const at::Tensor& repeats, std::optiona
   // Compute total length. Reject negatives.
   int64_t total = 0;
   for (int64_t r : rep) {
-    RBLN_CHECK(r >= 0, "repeat_interleave: repeats must be non-negative, got {}", r);
+    RBLN_CHECK(
+        r >= 0, "repeat_interleave: repeats must be non-negative, got {}", r);
     total += r;
   }
 
   // Validate `output_size` hint when provided.
   if (output_size.has_value()) {
     const int64_t expected = output_size->expect_int();
-    RBLN_CHECK(expected == total, "repeat_interleave: output_size={} doesn't match sum(repeats)={}", expected, total);
+    RBLN_CHECK(
+        expected == total,
+        "repeat_interleave: output_size={} doesn't match sum(repeats)={}",
+        expected,
+        total);
   }
 
   // Build the output index list on host. Upstream preserves the input
   // dtype, so a int32 `repeats` produces a int32 output.
   const auto out_dtype = repeats.scalar_type();
   auto cpu_out = at::empty(
-      {total}, at::TensorOptions().dtype(out_dtype).device(c10::kCPU).memory_format(c10::MemoryFormat::Contiguous));
+      {total},
+      at::TensorOptions().dtype(out_dtype).device(c10::kCPU).memory_format(
+          c10::MemoryFormat::Contiguous));
   if (total > 0) {
     if (out_dtype == at::kLong) {
       auto* out_ptr = cpu_out.data_ptr<int64_t>();

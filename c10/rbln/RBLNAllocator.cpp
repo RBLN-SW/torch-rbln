@@ -6,11 +6,11 @@ namespace c10::rbln {
 
 namespace {
 
-// Runs from the noexcept DataPtr deleter, so it must not throw. free_nothrow()
+// Runs from the noexcept DataPtr deleter, so it must not raise. free_nothrow()
 // is itself noexcept (it degrades a teardown-time deallocation failure to a
-// warning instead of std::terminate), so the deleter is throw-free. Deliberately
-// no debug log here: RBLN_LOG_DEBUG can throw when debug logging is enabled
-// (fmt / sink, e.g. bad_alloc), which would terminate the noexcept deleter.
+// warning instead of std::terminate), so the deleter cannot raise. Deliberately
+// no debug log here: RBLN_LOG_DEBUG can raise when debug logging is enabled
+// ({fmt} / sink, e.g. bad_alloc), which would terminate the noexcept deleter.
 void raw_delete(void* data) noexcept {
   if (data != nullptr) {
     c10::rbln::free_nothrow(data);
@@ -30,11 +30,13 @@ struct RBLNAllocator final : public c10::DeviceAllocator {
    */
   c10::DataPtr allocate(size_t nbytes) override {
     const auto current_device_index = c10::rbln::get_device_index();
-    const auto current_device = c10::Device(c10::kPrivateUse1, current_device_index);
+    const auto current_device =
+        c10::Device(c10::kPrivateUse1, current_device_index);
 
     void* data = nullptr;
     if (nbytes > 0) {
-      RBLN_LOG_DEBUG("Allocating {} bytes on {} device", nbytes, c10::str(current_device));
+      RBLN_LOG_DEBUG(
+          "Allocating {} bytes on {} device", nbytes, c10::str(current_device));
       data = c10::rbln::malloc(current_device_index, nbytes);
       RBLN_LOG_DEBUG("Allocated memory at {}", fmt::ptr(data));
     }
@@ -43,7 +45,8 @@ struct RBLNAllocator final : public c10::DeviceAllocator {
   }
 
   /**
-   * @brief Returns a function pointer to the raw deleter responsible for memory deallocation.
+   * @brief Returns a function pointer to the raw deleter responsible for memory
+   * deallocation.
    *
    * @return A function pointer to the raw deleter.
    */
@@ -60,23 +63,30 @@ struct RBLNAllocator final : public c10::DeviceAllocator {
    * @param src_data The source pointer from which data should be copied.
    * @param nbytes The number of bytes to copy.
    */
-  void copy_data(void* dst_data, const void* src_data, size_t nbytes) const override {
+  void copy_data(void* dst_data, const void* src_data, size_t nbytes)
+      const override {
     if (nbytes > 0) {
-      RBLN_LOG_DEBUG("Copying {} bytes: {} -> {}", nbytes, fmt::ptr(src_data), fmt::ptr(dst_data));
+      RBLN_LOG_DEBUG(
+          "Copying {} bytes: {} -> {}",
+          nbytes,
+          fmt::ptr(src_data),
+          fmt::ptr(dst_data));
       c10::rbln::memcpy_v2v(dst_data, src_data, nbytes);
     }
   }
 
   bool initialized() override {
-    // Gates torch.accelerator.empty_cache()/memory_stats(). CUDA parity: true only once
-    // THIS process has actually created allocator state (a successful device malloc),
-    // not merely because a device/mapping exists — so a process with the runtime but no
-    // live context (e.g. a vLLM EngineCore parent) reports false and those ops no-op
-    // instead of dispatching into a contextless runtime. Nothrow (torch calls this as a
-    // predicate, incl. cleanup paths, where a throw would abort the caller).
-    // Context flag first: with no context there is nothing to report, and torch calls this
+    // Gates torch.accelerator.empty_cache()/memory_stats(). CUDA parity: true
+    // only once THIS process has actually created allocator state (a successful
+    // device malloc), not merely because a device/mapping exists — so a process
+    // with the runtime but no live context (e.g. a vLLM EngineCore parent)
+    // reports false and those ops no-op instead of dispatching into a
+    // contextless runtime. Nothrow (PyTorch calls this as a predicate, incl.
+    // cleanup paths, where an exception would abort the caller). Context flag
+    // first: with no context there is nothing to report, and PyTorch calls this
     // from cleanup paths where the enumeration would be pointless work.
-    const bool is_initialized = c10::rbln::any_device_context_initialized() && c10::rbln::runtime_available();
+    const bool is_initialized = c10::rbln::any_device_context_initialized() &&
+        c10::rbln::runtime_available();
     RBLN_LOG_DEBUG("is_initialized={}", is_initialized);
     return is_initialized;
   }
@@ -85,13 +95,14 @@ struct RBLNAllocator final : public c10::DeviceAllocator {
    * @brief Flushes the cache for every initialized device.
    *
    * Backs the device-less torch.accelerator.empty_cache() (all-device, CUDA/XPU
-   * parity); torch.rbln.empty_cache(device) stays per-device via a separate path.
-   * mempool_id is ignored (no per-mempool scoping).
+   * parity); torch.rbln.empty_cache(device) stays per-device via a separate
+   * path. mempool_id is ignored (no per-mempool scoping).
    */
   void emptyCache(c10::MempoolId_t /*mempool_id*/) override {
-    // Flush *every* initialized device, not just the current one (CUDA/XPU parity).
-    // initialized_device_indices() context-gates internally (an unused device isn't
-    // enumerated/registered) and is unit-tested for the "span all devices" selection.
+    // Flush *every* initialized device, not just the current one (CUDA/XPU
+    // parity). initialized_device_indices() context-gates internally (an unused
+    // device isn't enumerated/registered) and is unit-tested for the "span all
+    // devices" selection.
     for (const auto idx : c10::rbln::initialized_device_indices()) {
       const auto device = c10::Device(c10::kPrivateUse1, idx);
       RBLN_LOG_DEBUG("Emptying cache for {}", c10::str(device));
@@ -102,25 +113,32 @@ struct RBLNAllocator final : public c10::DeviceAllocator {
   /**
    * @brief Records a stream association for a given data pointer.
    *
-   * RBLN does not support stream-based asynchronous execution, so this function is a no-op.
+   * RBLN does not support stream-based asynchronous execution, so this function
+   * is a no-op.
    *
    * @param ptr The data pointer for which to record the stream association.
    * @param stream The stream to associate with the data pointer.
    */
-  void recordStream(const c10::DataPtr& /*ptr*/, c10::Stream /*stream*/) override {
-    // No-op on purpose: the runtime tags a freed block with the (stream, seq) still in
-    // flight at its free and folds foreign seqs into the reusing stream as cross-deps,
-    // so cross-stream lifetime is already safe without the hint torch passes here.
-    RBLN_LOG_DEBUG("recordStream is a no-op; the runtime tags freed blocks with their in-flight stream");
+  void recordStream(const c10::DataPtr& /*ptr*/, c10::Stream /*stream*/)
+      override {
+    // No-op on purpose: the runtime tags a freed block with the (stream, seq)
+    // still in flight at its free and folds foreign seqs into the reusing
+    // stream as cross-deps, so cross-stream lifetime is already safe without
+    // the hint PyTorch passes here.
+    RBLN_LOG_DEBUG(
+        "recordStream is a no-op; the runtime tags freed blocks with their in-flight stream");
   }
 
   /**
    * @brief Returns device memory statistics for the specified device index.
    *
-   * @param device_index The index of the device for which to retrieve statistics.
-   * @return A DeviceStats object containing memory statistics for the specified device.
+   * @param device_index The index of the device for which to retrieve
+   *     statistics.
+   * @return A DeviceStats object containing memory statistics for the specified
+   *     device.
    */
-  c10::CachingDeviceAllocator::DeviceStats getDeviceStats(c10::DeviceIndex device_index) override {
+  c10::CachingDeviceAllocator::DeviceStats getDeviceStats(
+      c10::DeviceIndex device_index) override {
     const auto device = c10::Device(c10::kPrivateUse1, device_index);
     RBLN_LOG_DEBUG("Getting device stats for {}", c10::str(device));
     const auto device_stats = c10::rbln::get_device_stats(device);
@@ -128,12 +146,14 @@ struct RBLNAllocator final : public c10::DeviceAllocator {
   }
 
   /**
-   * @brief Returns (free, total) device DRAM in bytes for the specified device index.
+   * @brief Returns (free, total) device DRAM in bytes for the specified device
+   * index.
    *
-   * Backs torch.accelerator.get_memory_info(). Device-wide as the driver reports it, not
-   * this process's allocator; see c10::rbln::mem_get_info().
+   * Backs torch.accelerator.get_memory_info(). Device-wide as the driver
+   * reports it, not this process's allocator; see c10::rbln::mem_get_info().
    */
-  std::pair<size_t, size_t> getMemoryInfo(c10::DeviceIndex device_index) override {
+  std::pair<size_t, size_t> getMemoryInfo(
+      c10::DeviceIndex device_index) override {
     const auto device = c10::Device(c10::kPrivateUse1, device_index);
     RBLN_LOG_DEBUG("Getting memory info for {}", c10::str(device));
     return c10::rbln::mem_get_info(device);
@@ -142,7 +162,8 @@ struct RBLNAllocator final : public c10::DeviceAllocator {
   /**
    * @brief Resets accumulated memory statistics for the specified device index.
    *
-   * @param device_index The index of the device for which to reset accumulated statistics.
+   * @param device_index The index of the device for which to reset accumulated
+   *     statistics.
    */
   void resetAccumulatedStats(c10::DeviceIndex device_index) override {
     const auto device = c10::Device(c10::kPrivateUse1, device_index);
@@ -153,7 +174,8 @@ struct RBLNAllocator final : public c10::DeviceAllocator {
   /**
    * @brief Resets peak memory statistics for the specified device index.
    *
-   * @param device_index The index of the device for which to reset peak statistics.
+   * @param device_index The index of the device for which to reset peak
+   *     statistics.
    */
   void resetPeakStats(c10::DeviceIndex device_index) override {
     const auto device = c10::Device(c10::kPrivateUse1, device_index);

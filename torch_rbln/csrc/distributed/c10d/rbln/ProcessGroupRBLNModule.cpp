@@ -1,7 +1,6 @@
 #include <torch/csrc/Exceptions.h>
 #include <torch/csrc/distributed/c10d/Backend.hpp>
 #include <torch/csrc/distributed/c10d/Store.hpp>
-#include <torch/csrc/utils/object_ptr.h>
 #include <torch/extension.h>
 #include <torch_rbln/csrc/distributed/c10d/rbln/ProcessGroupRBLN.hpp>
 #include <torch_rbln/csrc/distributed/c10d/rbln/ProcessGroupRBLNModule.hpp>
@@ -24,14 +23,18 @@ class IntrusivePtrNoGilDestructor {
   IntrusivePtrNoGilDestructor() = default;
   IntrusivePtrNoGilDestructor(const IntrusivePtrNoGilDestructor&) = default;
   IntrusivePtrNoGilDestructor(IntrusivePtrNoGilDestructor&&) noexcept = default;
-  IntrusivePtrNoGilDestructor& operator=(const IntrusivePtrNoGilDestructor&) = default;
-  IntrusivePtrNoGilDestructor& operator=(IntrusivePtrNoGilDestructor&&) noexcept = default;
+  IntrusivePtrNoGilDestructor& operator=(const IntrusivePtrNoGilDestructor&) =
+      default;
+  IntrusivePtrNoGilDestructor& operator=(
+      IntrusivePtrNoGilDestructor&&) noexcept = default;
 
-  /* implicit */ IntrusivePtrNoGilDestructor(c10::intrusive_ptr<T> impl) : impl_(std::move(impl)) {}
+  /* implicit */ IntrusivePtrNoGilDestructor(c10::intrusive_ptr<T> impl)
+      : impl_(std::move(impl)) {}
 
-  explicit IntrusivePtrNoGilDestructor(T* impl) : impl_(c10::intrusive_ptr<T>::unsafe_steal_from_new(impl)) {}
+  explicit IntrusivePtrNoGilDestructor(T* impl)
+      : impl_(c10::intrusive_ptr<T>::unsafe_steal_from_new(impl)) {}
 
-  ~IntrusivePtrNoGilDestructor() { // NOLINT
+  ~IntrusivePtrNoGilDestructor() { // NOLINT(bugprone-exception-escape)
     if (impl_) {
       if (PyGILState_Check() != 0) {
         pybind11::gil_scoped_release release;
@@ -61,24 +64,23 @@ class IntrusivePtrNoGilDestructor {
 
 } // anonymous namespace
 
-PYBIND11_DECLARE_HOLDER_TYPE(T, IntrusivePtrNoGilDestructor<T>, true) // NOLINT
+PYBIND11_DECLARE_HOLDER_TYPE(T, IntrusivePtrNoGilDestructor<T>, true)
 
 template <typename T>
-using intrusive_ptr_no_gil_destructor_class_ = py::class_<T, IntrusivePtrNoGilDestructor<T>>;
+using intrusive_ptr_no_gil_destructor_class_ =
+    py::class_<T, IntrusivePtrNoGilDestructor<T>>;
 
 namespace torch_rbln::distributed {
 
-PyObject* initialize_process_group_rbln_bindings(PyObject* _unused, PyObject* noargs) { // NOLINT
-  // Raw PyMethodDef (METH_NOARGS) is outside pybind11's exception trampoline, so a
-  // C++ throw here (e.g. version-skewed torch) would cross the C ABI and
-  // std::terminate. HANDLE_TH_ERRORS converts it to a Python error.
+PyObject* initialize_process_group_rbln_bindings(
+    PyObject* _unused,
+    PyObject* noargs) {
+  // Raw PyMethodDef (METH_NOARGS) is outside pybind11's exception trampoline,
+  // so a C++ exception here (e.g. version-skewed `torch`) would cross the C ABI
+  // and std::terminate. HANDLE_TH_ERRORS converts it to a Python error.
   HANDLE_TH_ERRORS
   // Import the main torch_rbln._C module
-  auto torch_rbln_module = THPObjectPtr(PyImport_ImportModule("torch_rbln._C"));
-  if (!torch_rbln_module) {
-    throw python_error();
-  }
-  auto torch_rbln_module_handle = py::handle(torch_rbln_module).cast<py::module>();
+  auto torch_rbln_module_handle = py::module_::import("torch_rbln._C");
 
   // Check if already initialized to prevent double initialization
   if (py::hasattr(torch_rbln_module_handle, "_distributed_c10d")) {
@@ -86,38 +88,51 @@ PyObject* initialize_process_group_rbln_bindings(PyObject* _unused, PyObject* no
   }
 
   // Create the _distributed_c10d submodule
-  auto distributed_submodule = torch_rbln_module_handle.def_submodule("_distributed_c10d", "distributed c10d bindings");
-  auto distributed_module_handle = py::handle(distributed_submodule).cast<py::module>();
+  auto distributed_submodule = torch_rbln_module_handle.def_submodule(
+      "_distributed_c10d", "distributed c10d bindings");
+  auto distributed_module_handle =
+      py::handle(distributed_submodule).cast<py::module>();
 
   // Default timeout for process groups (30 minutes)
-  constexpr auto kDefaultProcessGroupTimeout = std::chrono::milliseconds(30 * 60 * 1000);
+  constexpr auto kDefaultProcessGroupTimeout =
+      std::chrono::milliseconds(30 * 60 * 1000);
 
   // Import torch._C._distributed_c10d to get the Backend class for inheritance
-  py::module_ torch_distributed_module = py::module_::import("torch._C._distributed_c10d");
+  py::module_ torch_distributed_module =
+      py::module_::import("torch._C._distributed_c10d");
   auto backend_base_class = torch_distributed_module.attr("Backend");
 
   // Bind ProcessGroupRBLN class with proper inheritance from Backend
-  auto process_group_rbln_class = intrusive_ptr_no_gil_destructor_class_<::c10d::ProcessGroupRBLN>(
-      distributed_module_handle, "ProcessGroupRBLN", backend_base_class);
+  auto process_group_rbln_class =
+      intrusive_ptr_no_gil_destructor_class_<::c10d::ProcessGroupRBLN>(
+          distributed_module_handle, "ProcessGroupRBLN", backend_base_class);
 
   // Constructor 1: With explicit options
   process_group_rbln_class
       .def(
-          py::init([](const c10::intrusive_ptr<::c10d::Store>& store,
-                      int rank,
-                      int size,
-                      int group_id,
-                      const std::vector<int>& global_ranks_in_group,
-                      const c10::intrusive_ptr<::c10d::Backend::Options>& options,
-                      const py::object& gloo_backend) {
-            c10::intrusive_ptr<::c10d::Backend> gloo_ptr;
-            if (!gloo_backend.is_none()) {
-              gloo_ptr = gloo_backend.cast<c10::intrusive_ptr<::c10d::Backend>>();
-            }
-            py::gil_scoped_release gil_release{};
-            return c10::make_intrusive<::c10d::ProcessGroupRBLN>(
-                store, rank, size, group_id, global_ranks_in_group, options, std::move(gloo_ptr));
-          }),
+          py::init(
+              [](const c10::intrusive_ptr<::c10d::Store>& store,
+                 int rank,
+                 int size,
+                 int group_id,
+                 const std::vector<int>& global_ranks_in_group,
+                 const c10::intrusive_ptr<::c10d::Backend::Options>& options,
+                 const py::object& gloo_backend) {
+                c10::intrusive_ptr<::c10d::Backend> gloo_ptr;
+                if (!gloo_backend.is_none()) {
+                  gloo_ptr =
+                      gloo_backend.cast<c10::intrusive_ptr<::c10d::Backend>>();
+                }
+                py::gil_scoped_release gil_release{};
+                return c10::make_intrusive<::c10d::ProcessGroupRBLN>(
+                    store,
+                    rank,
+                    size,
+                    group_id,
+                    global_ranks_in_group,
+                    options,
+                    std::move(gloo_ptr));
+              }),
           py::arg("store"),
           py::arg("rank"),
           py::arg("size"),
@@ -127,7 +142,8 @@ PyObject* initialize_process_group_rbln_bindings(PyObject* _unused, PyObject* no
           py::arg("gloo_backend") = py::none(),
           R"(Create a new ProcessGroupRBLN instance with explicit options. Pass gloo_backend for non-float16 allreduce/reduce_scatter fallback.)")
 
-      // Constructor 2: With timeout parameter (supports int, timedelta, or None)
+      // Constructor 2: With timeout parameter (supports int, timedelta, or
+      // None)
       .def(
           py::init([kDefaultProcessGroupTimeout](
                        const c10::intrusive_ptr<::c10d::Store>& store,
@@ -137,26 +153,39 @@ PyObject* initialize_process_group_rbln_bindings(PyObject* _unused, PyObject* no
                        const std::vector<int>& global_ranks_in_group,
                        const py::object& timeout_object,
                        const py::object& gloo_backend) {
-            // Parse timeout parameter - supports None, int (milliseconds), or timedelta
+            // Parse timeout parameter - supports None, int (milliseconds), or
+            // timedelta
             std::chrono::milliseconds timeout_duration;
             if (timeout_object.is_none()) {
               timeout_duration = kDefaultProcessGroupTimeout;
             } else if (py::isinstance<py::int_>(timeout_object)) {
-              timeout_duration = std::chrono::milliseconds(timeout_object.cast<int>());
+              timeout_duration =
+                  std::chrono::milliseconds(timeout_object.cast<int>());
             } else {
               // Handle datetime.timedelta objects
-              auto total_seconds = timeout_object.attr("total_seconds")().cast<double>();
-              timeout_duration = std::chrono::milliseconds(static_cast<int>(total_seconds * 1000));
+              auto total_seconds =
+                  timeout_object.attr("total_seconds")().cast<double>();
+              timeout_duration = std::chrono::milliseconds(
+                  static_cast<int>(total_seconds * 1000));
             }
 
             c10::intrusive_ptr<::c10d::Backend> gloo_ptr;
             if (!gloo_backend.is_none()) {
-              gloo_ptr = gloo_backend.cast<c10::intrusive_ptr<::c10d::Backend>>();
+              gloo_ptr =
+                  gloo_backend.cast<c10::intrusive_ptr<::c10d::Backend>>();
             }
-            auto backend_options = c10::make_intrusive<::c10d::Backend::Options>("rbln", timeout_duration);
+            auto backend_options =
+                c10::make_intrusive<::c10d::Backend::Options>(
+                    "rbln", timeout_duration);
             py::gil_scoped_release gil_release{};
             return c10::make_intrusive<::c10d::ProcessGroupRBLN>(
-                store, rank, size, group_id, global_ranks_in_group, backend_options, std::move(gloo_ptr));
+                store,
+                rank,
+                size,
+                group_id,
+                global_ranks_in_group,
+                backend_options,
+                std::move(gloo_ptr));
           }),
           py::arg("store"),
           py::arg("rank"),
@@ -168,9 +197,18 @@ PyObject* initialize_process_group_rbln_bindings(PyObject* _unused, PyObject* no
           R"(Create a new ProcessGroupRBLN instance with timeout. Pass gloo_backend for non-float16 allreduce/reduce_scatter fallback.)")
 
       // Expose key methods
-      .def("get_rank", &::c10d::ProcessGroupRBLN::getRank, "Get the rank of this process group")
-      .def("get_size", &::c10d::ProcessGroupRBLN::getSize, "Get the size of this process group")
-      .def("get_backend_name", &::c10d::ProcessGroupRBLN::getBackendName, "Get the backend name")
+      .def(
+          "get_rank",
+          &::c10d::ProcessGroupRBLN::getRank,
+          "Get the rank of this process group")
+      .def(
+          "get_size",
+          &::c10d::ProcessGroupRBLN::getSize,
+          "Get the size of this process group")
+      .def(
+          "get_backend_name",
+          &::c10d::ProcessGroupRBLN::getBackendName,
+          "Get the backend name")
 
       // Sequence number management methods
       .def(
@@ -194,9 +232,12 @@ static std::array<PyMethodDef, 2> distributed_method_definitions = {
       .ml_meth = initialize_process_group_rbln_bindings,
       .ml_flags = METH_NOARGS,
       .ml_doc = nullptr},
-     {.ml_name = nullptr, .ml_meth = nullptr, .ml_flags = 0, .ml_doc = nullptr}}};
+     {.ml_name = nullptr,
+      .ml_meth = nullptr,
+      .ml_flags = 0,
+      .ml_doc = nullptr}}};
 
-PyMethodDef* get_distributed_method_definitions() { // NOLINT
+PyMethodDef* get_distributed_method_definitions() {
   return distributed_method_definitions.data();
 }
 

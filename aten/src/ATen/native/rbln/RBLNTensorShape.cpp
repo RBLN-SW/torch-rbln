@@ -28,12 +28,15 @@ bool is_legacy_empty_1d(const at::Tensor& t) {
 
 } // namespace
 
-at::Tensor& cat_out_rbln(const at::ITensorListRef& tensors, int64_t dim, at::Tensor& out) {
+at::Tensor& cat_out_rbln(
+    const at::ITensorListRef& tensors,
+    int64_t dim,
+    at::Tensor& out) {
   RBLN_SCOPE_GUARD();
 
   // Materialise the input list once so we can iterate it multiple times.
   auto materialised = tensors.materialize();
-  RBLN_CHECK(materialised.size() > 0, "cat: tensors list must be non-empty");
+  RBLN_CHECK(!materialised.empty(), "cat: tensors list must be non-empty");
 
   std::vector<at::Tensor> raw_inputs;
   raw_inputs.reserve(materialised.size());
@@ -42,8 +45,8 @@ at::Tensor& cat_out_rbln(const at::ITensorListRef& tensors, int64_t dim, at::Ten
   }
 
   // Pick the first non-legacy-empty input as the canonical reference for rank
-  // / non-axis sizes / device. Result dtype still considers ALL inputs (including
-  // legacy-empty ones) per PyTorch's promotion rules.
+  // / non-axis sizes / device. Result dtype still considers ALL inputs
+  // (including legacy-empty ones) per PyTorch's promotion rules.
   const at::Tensor* first_ptr = nullptr;
   for (const at::Tensor& t : raw_inputs) {
     if (!is_legacy_empty_1d(t)) {
@@ -57,27 +60,48 @@ at::Tensor& cat_out_rbln(const at::ITensorListRef& tensors, int64_t dim, at::Ten
     common_dtype = c10::promoteTypes(common_dtype, raw_inputs[i].scalar_type());
   }
 
-  // All-legacy-empty case: result is the canonical 1-D empty, regardless of dim.
+  // All-legacy-empty case: result is the canonical 1-D empty, regardless of
+  // dim.
   if (first_ptr == nullptr) {
     const auto device = raw_inputs.front().device();
-    RBLN_CHECK(device.is_privateuseone(), "cat_out_rbln: inputs must be on RBLN device, got {}", c10::str(device));
+    RBLN_CHECK(
+        device.is_privateuseone(),
+        "cat_out_rbln: inputs must be on RBLN device, got {}",
+        c10::str(device));
     TORCH_CHECK_TYPE(
-        out.device() == device, "cat: out must be on the same device as inputs, got ", out.device(), " vs ", device);
+        out.device() == device,
+        "cat: out must be on the same device as inputs, got ",
+        out.device(),
+        " vs ",
+        device);
     TORCH_CHECK_TYPE(
-        out.scalar_type() == common_dtype, "cat: out dtype mismatch (", out.scalar_type(), " vs ", common_dtype, ")");
+        out.scalar_type() == common_dtype,
+        "cat: out dtype mismatch (",
+        out.scalar_type(),
+        " vs ",
+        common_dtype,
+        ")");
     at::native::resize_output(out, {0});
     return out;
   }
 
   const at::Tensor& first = *first_ptr;
   const int64_t rank = first.dim();
-  RBLN_CHECK(rank > 0, "cat requires non-zero-rank inputs, got {}-dim tensor", rank);
+  RBLN_CHECK(
+      rank > 0, "cat requires non-zero-rank inputs, got {}-dim tensor", rank);
 
   const int64_t axis = dim < 0 ? dim + rank : dim;
-  RBLN_CHECK(axis >= 0 && axis < rank, "cat: dim {} out of range for rank-{} inputs", dim, rank);
+  RBLN_CHECK(
+      axis >= 0 && axis < rank,
+      "cat: dim {} out of range for rank-{} inputs",
+      dim,
+      rank);
 
   const auto device = first.device();
-  RBLN_CHECK(device.is_privateuseone(), "cat_out_rbln: inputs must be on RBLN device, got {}", c10::str(device));
+  RBLN_CHECK(
+      device.is_privateuseone(),
+      "cat_out_rbln: inputs must be on RBLN device, got {}",
+      c10::str(device));
 
   // Validate every non-legacy-empty input + accumulate the output axis extent.
   int64_t total_axis = 0;
@@ -120,9 +144,18 @@ at::Tensor& cat_out_rbln(const at::ITensorListRef& tensors, int64_t dim, at::Ten
   // cat's TORCH_CHECK_TYPE. Strict dtype (not canCast): the v2v copy below
   // does not cast.
   TORCH_CHECK_TYPE(
-      out.device() == device, "cat: out must be on the same device as inputs, got ", out.device(), " vs ", device);
+      out.device() == device,
+      "cat: out must be on the same device as inputs, got ",
+      out.device(),
+      " vs ",
+      device);
   TORCH_CHECK_TYPE(
-      out.scalar_type() == common_dtype, "cat: out dtype mismatch (", out.scalar_type(), " vs ", common_dtype, ")");
+      out.scalar_type() == common_dtype,
+      "cat: out dtype mismatch (",
+      out.scalar_type(),
+      " vs ",
+      common_dtype,
+      ")");
 
   // Mirror upstream PyTorch's `aten::cat.out` overlap checks.
   at::assert_no_internal_overlap(out);
@@ -148,7 +181,8 @@ at::Tensor& cat_out_rbln(const at::ITensorListRef& tensors, int64_t dim, at::Ten
   // assumes canonical row-major `out`) trivially correct, and the final v2v
   // back is one strided call.
   if (!out.is_contiguous()) {
-    auto staging = at::empty(out_shape, out.options().memory_format(c10::MemoryFormat::Contiguous));
+    auto staging = at::empty(
+        out_shape, out.options().memory_format(c10::MemoryFormat::Contiguous));
     cat_out_rbln(tensors, dim, staging);
     out.copy_(staging);
     return out;

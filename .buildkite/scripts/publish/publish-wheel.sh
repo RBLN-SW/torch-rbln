@@ -74,7 +74,7 @@ buildkite-agent artifact download \
 
 echo "--- Publishing ${wheel_file} to ${index} index"
 already_published="$(
-  .buildkite/scripts/check-index-listing.py \
+  .buildkite/scripts/check_index_listing.py \
     --index "${index}" \
     --wheel-filename "${wheel_file}"
 )"

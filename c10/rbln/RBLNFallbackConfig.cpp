@@ -10,12 +10,17 @@ namespace c10::rbln {
 
 namespace {
 
-const std::set<std::string> kValidOptions =
-    {"all", "compile_error", "non_blocking_copy", "strided_copy_error", "unsupported_op"};
+const std::set<std::string> kValidOptions = {
+    "all",
+    "compile_error",
+    "non_blocking_copy",
+    "strided_copy_error",
+    "unsupported_op"};
 
 } // namespace
 
-// TODO: Introduce fallback manager to optimize lookup instead of parsing env var on every check.
+// TODO: Introduce fallback manager to optimize lookup instead of parsing env
+// var on every check.
 bool is_fallback_disabled(const std::string& category) {
   const auto env_opt = c10::utils::get_env("TORCH_RBLN_DISABLE_FALLBACK");
   if (!env_opt.has_value()) {
@@ -33,7 +38,7 @@ bool is_fallback_disabled(const std::string& category) {
     auto token = std::string(token_view.substr(start, end - start + 1));
 
     RBLN_CHECK(
-        kValidOptions.count(token) > 0,
+        kValidOptions.contains(token),
         "Invalid TORCH_RBLN_DISABLE_FALLBACK option `{}`, expected one of: {}",
         token,
         fmt::join(kValidOptions, ","));
@@ -41,7 +46,9 @@ bool is_fallback_disabled(const std::string& category) {
     disabled_fallbacks.insert(std::move(token));
   }
 
-  const bool fallback_disabled = ((disabled_fallbacks.count("all") > 0) || (disabled_fallbacks.count(category) > 0));
+  const bool fallback_disabled =
+      (disabled_fallbacks.contains("all") ||
+       disabled_fallbacks.contains(category));
   RBLN_LOG_DEBUG(
       "'{}' fallback: {} (TORCH_RBLN_DISABLE_FALLBACK='{}')",
       category,

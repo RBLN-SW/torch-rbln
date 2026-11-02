@@ -1,10 +1,7 @@
-"""
-Code templates for general function code generation.
+"""Code templates for general function code generation.
 
 Contains all code templates used in general function generation.
 """
-
-from typing import Set  # noqa: UP035
 
 
 class GeneralTemplates:
@@ -14,17 +11,17 @@ class GeneralTemplates:
         """Templates for argument processing."""
 
         @staticmethod
-        def kwargs_filter(exclude_kwargs: Set[str]) -> str:
+        def kwargs_filter(exclude_kwargs: set[str]) -> str:
             """Generate kwargs filter code."""
             if len(exclude_kwargs) == 1:
                 # Single kwarg to exclude (default case: only 'out')
                 kwarg = next(iter(exclude_kwargs))
-                return f"""    kwargs_filtered = {{k: v for k, v in kwargs.items() if k != "{kwarg}"}}  # remove {kwarg} kwarg
+                return f"""    # remove {kwarg} kwarg
+    kwargs_filtered = {{k: v for k, v in kwargs.items() if k != "{kwarg}"}}
 """
-            else:
-                # Multiple kwargs to exclude
-                kwargs_str = "{" + ", ".join(f'"{k}"' for k in sorted(exclude_kwargs)) + "}"
-                return f"""    kwargs_filtered = {{k: v for k, v in kwargs.items() if k not in {kwargs_str}}}
+            # Multiple kwargs to exclude
+            kwargs_str = "{" + ", ".join(f'"{k}"' for k in sorted(exclude_kwargs)) + "}"
+            return f"""    kwargs_filtered = {{k: v for k, v in kwargs.items() if k not in {kwargs_str}}}
 """
 
         @staticmethod
@@ -32,22 +29,6 @@ class GeneralTemplates:
             """Generate tensor arguments extraction code."""
             return """    tensor_args = extract_tensors(args)
 """
-
-        @staticmethod
-        def contiguous_preparation_on_device() -> str:
-            """Generate contiguous preparation for on-device operations."""
-            return (
-                "        (contig_args, contig_kwargs), changed_any = "
-                "prepare_args_for_contiguous_on_device(args, kwargs_filtered)\n"
-            )
-
-        @staticmethod
-        def contiguous_preparation_default() -> str:
-            """Generate default contiguous preparation."""
-            return (
-                "        (contig_args, contig_kwargs), changed_any = "
-                "prepare_args_for_contiguous(args, kwargs_filtered)\n"
-            )
 
     class EmptyTensor:
         """Templates for empty tensor handling."""
@@ -60,7 +41,7 @@ class GeneralTemplates:
         dim = kwargs.get("dim", args[1] if len(args) > 1 else None)
         # Extract keepdim from args[2] if not in kwargs
         keepdim = kwargs.get("keepdim", args[2] if len(args) > 2 else False)
-        return handle_empty_reduction(tensor_args[0], dim, keepdim)
+        return handle_empty_reduction(tensor_args[0], dim, keepdim=keepdim)
 """
 
         @staticmethod
@@ -93,7 +74,7 @@ class GeneralTemplates:
             """Generate empty tensor handling for addmm operations."""
             return """    if len(tensor_args) != 3:
         raise RuntimeError("addmm requires three inputs")
-    args = addmm_broadcast_args(tensor_args, args)
+    args = addmm_broadcast_args(tensor_args)
     if tensor_args and (tensor_args[1].numel() == 0 or tensor_args[2].numel() == 0):   # for handling empty tensors
         beta = kwargs.get("beta", 1)
         return handle_empty_addmm(tensor_args, beta)
@@ -165,19 +146,10 @@ def {kernel_name}(*args, **kwargs):
 """
 
         @staticmethod
-        def op_module_definition(root_name: str, target: str) -> str:
+        def op_module_definition() -> str:
             """Per-op ``OpModule_<name>`` class is no longer emitted: the
             view-aware helper builds a wrapper OpModule dynamically and
             caches it per ``(op_callable, view_recipes)``. Returning the
             empty string keeps the rest of the generator untouched.
-            """
-            return ""
-
-        @staticmethod
-        def compile_section(root_name: str, target: str) -> str:
-            """The legacy compile/dispatch block has been folded into the
-            ``main`` template's call to ``compile_and_run_view_aware``.
-            Keep the static method as a stub to preserve the call site
-            in ``general.py``.
             """
             return ""

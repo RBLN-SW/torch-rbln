@@ -42,22 +42,27 @@ fi
 lint_configuration=(
   cmake/
   tools/linter/
+  tools/linter_rbln/
   "*CMakeLists.txt"
   .clang-format
   .clang-tidy
   .cmakelintrc
-  .flake8
   .lintrunner.toml
+  .rumdl.toml
   .shellcheckrc
-  mypy-strict.ini
-  mypy.ini
+  .taplo.toml
+  .yamllint
   pyproject.toml
+  pyrefly.toml
   uv.lock
 )
 
 echo "--- Installing locked environment"
 uv sync \
+  --group build \
+  --group lint \
   --locked \
+  --no-default-groups \
   --no-install-project
 
 echo "--- Initializing linters"
@@ -72,10 +77,9 @@ uv run \
     -GNinja \
     -B build \
     -S . \
-    -DBUILD_SHARED_LIBS=ON \
     -DCMAKE_BUILD_TYPE="${build_type}" \
     -DCMAKE_INSTALL_PREFIX=torch_rbln \
-    -DBUILD_TESTING=OFF
+    -DBUILD_TESTING=ON
 
 if [[ -n "${base_branch}" ]]; then
   echo "--- Fetching base branch ${base_branch}"
@@ -110,9 +114,6 @@ if [[ -z "${base_branch}" ]]; then
 else
   lint_scope=(--merge-base-with "origin/${base_branch}")
 fi
-# Without `GITHUB_ACTIONS`, the `mypy` adapter runs `dmypy`, whose daemons for
-# `MYPY` and `MYPYSTRICT` race on one status file.
-GITHUB_ACTIONS="true" \
 uv run \
   --no-sync \
   lintrunner \

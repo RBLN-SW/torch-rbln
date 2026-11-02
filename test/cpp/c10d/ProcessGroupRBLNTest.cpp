@@ -15,7 +15,7 @@
 #include <cstring>
 #include <vector>
 
-// Google Test includes
+// GoogleTest includes
 #include <gtest/gtest.h>
 
 // PyTorch includes
@@ -63,12 +63,15 @@ constexpr const char* kBackendName = "rbln-ccl";
 
 /**
  * @brief Create a default-sized RBLN tensor for testing
+ *
  * @param value Scalar value to fill the tensor (default: 1.0f)
  * @return RBLN tensor with default dimensions
  */
 at::Tensor createDefaultRBLNTensor(float value = kDefaultTensorValue) {
-  const auto sizes = std::vector<int64_t>{kDefaultTensorSize, kDefaultTensorSize};
-  const auto device = c10::Device(c10::kPrivateUse1, c10::rbln::get_device_index());
+  const auto sizes =
+      std::vector<int64_t>{kDefaultTensorSize, kDefaultTensorSize};
+  const auto device =
+      c10::Device(c10::kPrivateUse1, c10::rbln::get_device_index());
 
   auto data_tensor = at::ones(sizes, c10::kHalf);
   if (value != kDefaultTensorValue) {
@@ -82,9 +85,10 @@ at::Tensor createDefaultRBLNTensor(float value = kDefaultTensorValue) {
 /**
  * @brief Wait for work completion with timeout
  *
- * This is necessary because ProcessGroupRBLN uses a thread pool for async execution,
- * so work->isCompleted() will return false immediately after calling operations like
- * allreduce() or broadcast(). We need to wait for the work to be processed.
+ * This is necessary because ProcessGroupRBLN uses a thread pool for async
+ * execution, so work->isCompleted() will return false immediately after calling
+ * operations like allreduce() or broadcast(). We need to wait for the work to
+ * be processed.
  *
  * @param work Work object to wait for
  * @param timeout Maximum time to wait
@@ -117,9 +121,11 @@ class ProcessGroupRBLNSingleton {
   ProcessGroupRBLNSingleton() = default;
   ~ProcessGroupRBLNSingleton() = default;
 
-  // Disable copy constructor and assignment operator
   ProcessGroupRBLNSingleton(const ProcessGroupRBLNSingleton&) = delete;
-  ProcessGroupRBLNSingleton& operator=(const ProcessGroupRBLNSingleton&) = delete;
+  ProcessGroupRBLNSingleton& operator=(const ProcessGroupRBLNSingleton&) =
+      delete;
+  ProcessGroupRBLNSingleton(ProcessGroupRBLNSingleton&&) = delete;
+  ProcessGroupRBLNSingleton& operator=(ProcessGroupRBLNSingleton&&) = delete;
 
   // Get the singleton instance
   static ProcessGroupRBLNSingleton& getInstance() {
@@ -148,16 +154,23 @@ class ProcessGroupRBLNSingleton {
     if (initialized_)
       return;
 
-    auto options = c10::make_intrusive<::c10d::Backend::Options>(kBackendName, kDefaultTimeout);
+    auto options = c10::make_intrusive<::c10d::Backend::Options>(
+        kBackendName, kDefaultTimeout);
     auto store = c10::make_intrusive<::c10d::HashStore>();
     pg_ = c10::make_intrusive<ProcessGroupRBLN>(
-        store, kTestRank, kTestSize, -1, std::vector<int>{}, options, c10::intrusive_ptr<::c10d::Backend>());
+        store,
+        kTestRank,
+        kTestSize,
+        -1,
+        std::vector<int>{},
+        options,
+        c10::intrusive_ptr<::c10d::Backend>());
     initialized_ = true;
   }
 
   c10::intrusive_ptr<ProcessGroupRBLN> pg_{nullptr};
   bool initialized_{false};
-  mutable std::mutex mutex_{};
+  mutable std::mutex mutex_;
 };
 
 // ============================================================================
@@ -245,7 +258,8 @@ TEST_F(ProcessGroupRBLNTest, TestSingletonBehavior) {
 
 TEST_F(ProcessGroupRBLNTest, TestUnsupportedDeviceType) {
   // Test that unsupported device types throw errors
-  auto tensor = torch::ones({kDefaultTensorSize, kDefaultTensorSize}, torch::kFloat); // CPU tensor
+  auto tensor = torch::ones(
+      {kDefaultTensorSize, kDefaultTensorSize}, torch::kFloat); // CPU tensor
   std::vector<at::Tensor> inputs = {tensor};
 
   EXPECT_THROW(pg_->broadcast(inputs, BroadcastOptions{}), c10::Error);
@@ -262,7 +276,8 @@ TEST_F(ProcessGroupRBLNTest, TestRBLNTensorCreation) {
 
   // Test tensor values
   auto cpu_tensor = tensor.to("cpu").to(torch::kFloat16);
-  EXPECT_TRUE(cpu_tensor.allclose(torch::ones(shapes, torch::kFloat16) * kTestTensorValue, 1e-6));
+  EXPECT_TRUE(cpu_tensor.allclose(
+      torch::ones(shapes, torch::kFloat16) * kTestTensorValue, 1e-6));
 }
 
 // ============================================================================
@@ -279,7 +294,8 @@ TEST_F(ProcessGroupRBLNTest, TestBarrier) {
 
 TEST_F(ProcessGroupRBLNTest, TestSendNotImplemented) {
   // Test that send is not implemented
-  auto tensor = torch::ones({kDefaultTensorSize, kDefaultTensorSize}, torch::kFloat);
+  auto tensor =
+      torch::ones({kDefaultTensorSize, kDefaultTensorSize}, torch::kFloat);
   std::vector<at::Tensor> inputs = {tensor};
 
   EXPECT_THROW(pg_->send(inputs, 0, 0), c10::Error);
@@ -287,15 +303,18 @@ TEST_F(ProcessGroupRBLNTest, TestSendNotImplemented) {
 
 TEST_F(ProcessGroupRBLNTest, TestRecvNotImplemented) {
   // Test that recv is not implemented
-  auto tensor = torch::ones({kDefaultTensorSize, kDefaultTensorSize}, torch::kFloat);
+  auto tensor =
+      torch::ones({kDefaultTensorSize, kDefaultTensorSize}, torch::kFloat);
   std::vector<at::Tensor> inputs = {tensor};
 
   EXPECT_THROW(pg_->recv(inputs, 0, 0), c10::Error);
 }
 
-// FIXME: Re-enable the following test after resolving C++ implementation issues.
+// FIXME: Re-enable the following test after resolving C++ implementation
+// issues.
 // TEST_F(ProcessGroupRBLNTest, TestScatterWithCPUTensor) {
-//   // Test scatter with CPU tensor (should work now that scatter is implemented)
+//   // Test scatter with CPU tensor (should work now that scatter is
+//   // implemented)
 //   auto tensor = createDefaultRBLNTensor();
 //   std::vector<at::Tensor> outputs = {tensor};
 //   std::vector<std::vector<at::Tensor>> inputs = {{tensor}};
@@ -309,7 +328,8 @@ TEST_F(ProcessGroupRBLNTest, TestRecvNotImplemented) {
 
 TEST_F(ProcessGroupRBLNTest, TestWorkQueueOperations) {
   // Test that work can be enqueued and processed
-  auto tensor = torch::ones({kDefaultTensorSize, kDefaultTensorSize}, torch::kFloat);
+  auto tensor =
+      torch::ones({kDefaultTensorSize, kDefaultTensorSize}, torch::kFloat);
   std::vector<at::Tensor> inputs = {tensor};
 
   // This should throw due to invalid device, but the work queue
@@ -319,7 +339,12 @@ TEST_F(ProcessGroupRBLNTest, TestWorkQueueOperations) {
 
 TEST_F(ProcessGroupRBLNTest, TestReduceOpTypes) {
   // Test different reduce operation types
-  // std::vector<ReduceOp> ops = {ReduceOp::SUM, ReduceOp::AVG, ReduceOp::PRODUCT, ReduceOp::MIN, ReduceOp::MAX};
+  // std::vector<ReduceOp> ops = {
+  //     ReduceOp::SUM,
+  //     ReduceOp::AVG,
+  //     ReduceOp::PRODUCT,
+  //     ReduceOp::MIN,
+  //     ReduceOp::MAX};
   std::vector<ReduceOp> ops = {ReduceOp::SUM};
 
   for (const auto& op : ops) {
@@ -377,7 +402,8 @@ TEST_F(ProcessGroupRBLNTest, TestBarrierOptions) {
   EXPECT_TRUE(waitForWorkCompletion(work));
 }
 
-// FIXME: Re-enable the following test after resolving C++ implementation issues.
+// FIXME: Re-enable the following test after resolving C++ implementation
+// issues.
 // TEST_F(ProcessGroupRBLNTest, TestScatter) {
 //   // Test scatter functionality
 //   auto tensor = createDefaultRBLNTensor(); // Use RBLN tensor
@@ -456,7 +482,8 @@ TEST_F(ProcessGroupRBLNTest, TestWorkSourceRank) {
     EXPECT_EQ(work->sourceRank(), -1);
   } catch (const std::exception& ex) {
     // sourceRank() not applicable for barrier work, which is expected
-    RBLN_LOG_DEBUG("Work sourceRank() not applicable for barrier: {}", ex.what());
+    RBLN_LOG_DEBUG(
+        "Work sourceRank() not applicable for barrier: {}", ex.what());
   }
 }
 
@@ -504,7 +531,8 @@ TEST_F(ProcessGroupRBLNTest, TestWorldSize1Allreduce) {
 /**
  * Test world size 1 scatter
  */
-// FIXME: Re-enable the following test after resolving C++ implementation issues.
+// FIXME: Re-enable the following test after resolving C++ implementation
+// issues.
 // TEST_F(ProcessGroupRBLNTest, TestWorldSize1Scatter) {
 //   auto input_tensor = createDefaultRBLNTensor(4.0f);
 //   auto output_tensor = createDefaultRBLNTensor(0.0f);
@@ -558,29 +586,47 @@ TEST_F(ProcessGroupRBLNTest, TestRcclUniqueIdStoreRoundTrip) {
   auto clientStore = c10::make_intrusive<TCPStore>(host, clientOpts);
 
   TestRcclUniqueIdLayout id_original{};
-  std::snprintf(id_original.root_ip.data(), id_original.root_ip.size(), "192.168.1.1");
-  std::snprintf(id_original.self_ip.data(), id_original.self_ip.size(), "192.168.1.%d", 0);
-  std::snprintf(id_original.self_rdma_ip.data(), id_original.self_rdma_ip.size(), "10.0.0.1");
+  std::snprintf(
+      id_original.root_ip.data(), id_original.root_ip.size(), "192.168.1.1");
+  std::snprintf(
+      id_original.self_ip.data(),
+      id_original.self_ip.size(),
+      "192.168.1.%d",
+      0);
+  std::snprintf(
+      id_original.self_rdma_ip.data(),
+      id_original.self_rdma_ip.size(),
+      "10.0.0.1");
   id_original.root_port = 12345;
   id_original.rdma_base_port = 54321;
 
   std::vector<uint8_t> vec(
       reinterpret_cast<uint8_t*>(&id_original),
-      reinterpret_cast<uint8_t*>(&id_original) + sizeof(TestRcclUniqueIdLayout));
+      reinterpret_cast<uint8_t*>(&id_original) +
+          sizeof(TestRcclUniqueIdLayout));
   serverStore->set(storeKey, vec);
 
   std::vector<uint8_t> vec_from_store = clientStore->get(storeKey);
-  ASSERT_EQ(vec_from_store.size(), sizeof(TestRcclUniqueIdLayout)) << "TCPStore returned wrong size for rccl_unique_id";
+  ASSERT_EQ(vec_from_store.size(), sizeof(TestRcclUniqueIdLayout))
+      << "TCPStore returned wrong size for rccl_unique_id";
 
   TestRcclUniqueIdLayout id_restored{};
   std::memcpy(&id_restored, vec_from_store.data(), vec_from_store.size());
 
-  EXPECT_EQ(std::string(id_original.root_ip.data()), std::string(id_restored.root_ip.data()));
-  EXPECT_EQ(std::string(id_original.self_ip.data()), std::string(id_restored.self_ip.data()));
-  EXPECT_EQ(std::string(id_original.self_rdma_ip.data()), std::string(id_restored.self_rdma_ip.data()));
+  EXPECT_EQ(
+      std::string(id_original.root_ip.data()),
+      std::string(id_restored.root_ip.data()));
+  EXPECT_EQ(
+      std::string(id_original.self_ip.data()),
+      std::string(id_restored.self_ip.data()));
+  EXPECT_EQ(
+      std::string(id_original.self_rdma_ip.data()),
+      std::string(id_restored.self_rdma_ip.data()));
   EXPECT_EQ(id_original.root_port, id_restored.root_port);
   EXPECT_EQ(id_original.rdma_base_port, id_restored.rdma_base_port);
-  EXPECT_EQ(0, std::memcmp(&id_original, &id_restored, sizeof(TestRcclUniqueIdLayout)))
+  EXPECT_EQ(
+      0,
+      std::memcmp(&id_original, &id_restored, sizeof(TestRcclUniqueIdLayout)))
       << "rccl_unique_id bytes differ after TCPStore set (server) / get (client)";
 }
 

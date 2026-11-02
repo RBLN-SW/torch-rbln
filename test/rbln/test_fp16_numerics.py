@@ -65,8 +65,8 @@ CASES = [
 ]
 
 
+@pytest.mark.npu(count=1)
 class TestFp16Numerics(TestCase):
-    @pytest.mark.test_set_ci
     @parametrize("name,build,op,bound", CASES)
     def test_fp16_matches_fp32_reference(self, device, name, build, op, bound):
         operands = build()

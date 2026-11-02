@@ -8,7 +8,7 @@ namespace c10::rbln {
 struct C10_RBLN_API RBLNHooksInterface : public at::PrivateUse1HooksInterface {
   /**
    * @brief Check if RBLN backend was enabled at compilation time.
-   * This function should NEVER throw.
+   * This function should NEVER raise an exception.
    *
    * @return True if RBLN backend is built, False otherwise.
    */
@@ -16,8 +16,9 @@ struct C10_RBLN_API RBLNHooksInterface : public at::PrivateUse1HooksInterface {
 
   /**
    * @brief Check if RBLN backend can be used at runtime.
-   * This means it was built, runtime dependencies are available, and at least one device can be used.
-   * This function should NEVER throw and should NOT initialize the context on any device.
+   * This means it was built, runtime dependencies are available, and at least
+   * one device can be used. This function should NEVER raise an exception and
+   * should NOT initialize the context on any device.
    *
    * @return True if RBLN backend is available, False otherwise.
    */
@@ -25,7 +26,8 @@ struct C10_RBLN_API RBLNHooksInterface : public at::PrivateUse1HooksInterface {
 
   /**
    * @brief Check if RBLN devices are available at runtime.
-   * This function checks if RBLN runtime dependencies are available and at least one device can be used.
+   * This function checks if RBLN runtime dependencies are available and at
+   * least one device can be used.
    *
    * @return True if RBLN devices are available, False otherwise.
    */
@@ -34,8 +36,8 @@ struct C10_RBLN_API RBLNHooksInterface : public at::PrivateUse1HooksInterface {
   /**
    * @brief Number of logical RBLN devices. Nothrow (ATen/DeviceAccelerator.h).
    *
-   * The inherited default returns 0, so at::accelerator::deviceCount() reported no devices
-   * while torch.rbln.device_count() reported the real number.
+   * The inherited default returns 0, so at::accelerator::deviceCount() reported
+   * no devices while torch.rbln.device_count() reported the real number.
    */
   c10::DeviceIndex deviceCount() const override;
 
@@ -47,15 +49,17 @@ struct C10_RBLN_API RBLNHooksInterface : public at::PrivateUse1HooksInterface {
    */
   c10::DeviceIndex getCurrentDevice() const override;
 
-  /** @brief Select a logical device (bookkeeping only; no context is created). */
+  /** @brief Select a logical device (bookkeeping only; no context is created).
+   */
   void setCurrentDevice(c10::DeviceIndex device) const override;
 
   /** @brief Select a logical device and return the previously selected one. */
   c10::DeviceIndex exchangeDevice(c10::DeviceIndex device) const override;
 
   /**
-   * @brief exchangeDevice() that must not create a context. Selecting a device here is
-   * pure bookkeeping -- the context comes with the first allocation -- so they are equal.
+   * @brief exchangeDevice() that must not create a context. Selecting a device
+   * here is pure bookkeeping -- the context comes with the first allocation --
+   * so they are equal.
    */
   c10::DeviceIndex maybeExchangeDevice(c10::DeviceIndex device) const override;
 
@@ -85,7 +89,7 @@ struct C10_RBLN_API RBLNHooksInterface : public at::PrivateUse1HooksInterface {
 
   /**
    * @brief Checks whether the given host pointer was allocated by the pinned
-   * host allocator. This function should NEVER throw.
+   * host allocator. This function should NEVER raise an exception.
    *
    * @param data A host pointer.
    * @return True if the pointer belongs to a pinned allocation.
@@ -98,7 +102,8 @@ struct C10_RBLN_API RBLNHooksInterface : public at::PrivateUse1HooksInterface {
    * @param storage The storage to resize.
    * @param new_nbytes The number of bytes to resize the storage to.
    */
-  void resizePrivateUse1Bytes(const c10::Storage& storage, size_t new_nbytes) const override;
+  void resizePrivateUse1Bytes(const c10::Storage& storage, size_t new_nbytes)
+      const override;
 
   /**
    * @brief Creates a new generator for the specified device index.
@@ -106,7 +111,8 @@ struct C10_RBLN_API RBLNHooksInterface : public at::PrivateUse1HooksInterface {
    * This function is responsible for creating and returning a new generator
    * instance associated with the given device index.
    *
-   * @param device_index The device index for which the generator is to be created.
+   * @param device_index The device index for which the generator is to be
+   *     created.
    * @return A new generator instance for the specified device index.
    */
   at::Generator getNewGenerator(c10::DeviceIndex device_index) const override;
@@ -117,7 +123,8 @@ struct C10_RBLN_API RBLNHooksInterface : public at::PrivateUse1HooksInterface {
    * @param device_index The RBLN device index.
    * @return The default generator associated with the device.
    */
-  const at::Generator& getDefaultGenerator(c10::DeviceIndex device_index) const override;
+  const at::Generator& getDefaultGenerator(
+      c10::DeviceIndex device_index) const override;
 };
 
 struct C10_RBLN_API RBLNHooksArgs : public at::PrivateUse1HooksArgs {};

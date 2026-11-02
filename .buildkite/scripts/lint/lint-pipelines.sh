@@ -12,19 +12,6 @@ fi
 
 failed_checks=()
 
-echo "--- Installing lint tools"
-uv sync \
-  --locked \
-  --only-group lint
-
-echo "--- Running yamllint"
-uv run \
-  --no-sync \
-  yamllint \
-    --strict \
-    .buildkite/ \
-  || failed_checks+=(yamllint)
-
 echo "--- Dry-running pipeline uploads"
 # The dry runs use each file's defaults, not this job's `TORCH_RBLN_*` values.
 unset_values=()

@@ -16,18 +16,25 @@ namespace at::native::rbln {
  * @param non_blocking If true, the copy is performed asynchronously.
  * @return The destination tensor with copied data.
  *
- * @note The source tensor data is converted to match the dtype of the destination tensor during the copy.
+ * @note The source tensor data is converted to match the dtype of the
+ *     destination tensor during the copy.
  */
-at::Tensor _copy_from_rbln(const at::Tensor& src, const at::Tensor& dst, bool non_blocking);
+at::Tensor _copy_from_rbln(
+    const at::Tensor& src,
+    const at::Tensor& dst,
+    bool non_blocking);
 
 /**
- * @brief Resizes the destination tensor to match the source tensor and copies data from the source tensor to the destination tensor.
+ * @brief Resizes the destination tensor to match the source tensor and copies
+ * data from the source tensor to the destination tensor.
  *
  * @param src The source tensor.
  * @param dst The destination tensor.
  * @return The destination tensor with copied data.
  */
-at::Tensor _copy_from_and_resize_rbln(const at::Tensor& src, const at::Tensor& dst);
+at::Tensor _copy_from_and_resize_rbln(
+    const at::Tensor& src,
+    const at::Tensor& dst);
 
 /**
  * @brief Native impl of aten::clone for RBLN.
@@ -53,14 +60,14 @@ at::Tensor clone_rbln(
  * non_blocking=False) -> ()`` — copies ``src[i]`` into ``self[i]`` for every i.
  * Conversion-free, same-shape pairs are enqueued per direction and flushed in
  * ONE submit each: ``V2VBatch`` for rbln->rbln, ``H2VBatch`` for cpu->rbln,
- * ``V2HBatch`` for rbln->cpu, so a scatter into N per-layer tensors collapses to
- * one submit. Mismatched devices disqualify only rbln->rbln; the host directions
- * split per device.
+ * ``V2HBatch`` for rbln->cpu, so a scatter into N per-layer tensors collapses
+ * to one submit. Mismatched devices disqualify only rbln->rbln; the host
+ * directions split per device.
  *
  * Pairs left on a plain per-pair ``copy_``:
  *   - broadcast or dtype cast (the multi entrypoints move bytes, never convert)
- *   - a non-contiguous pair on a host direction, where one staged bulk DMA beats
- *     many small descriptors
+ *   - a non-contiguous pair on a host direction, where one staged bulk DMA
+ *     beats many small descriptors
  *   - a destination that may alias itself, since batch entries are unordered
  *     (an ``expand``ed view raises, as ``copy_`` raises)
  *   - a pinned host buffer with ``non_blocking=True``, the only genuinely
@@ -71,6 +78,9 @@ at::Tensor clone_rbln(
  * ``copy_`` loop. Queued work is flushed before any inline ``copy_`` so a
  * rejection mid-list cannot discard the pairs that preceded it.
  */
-void _foreach_copy__rbln(at::TensorList self, at::TensorList src, bool non_blocking);
+void _foreach_copy__rbln(
+    at::TensorList self,
+    at::TensorList src,
+    bool non_blocking);
 
 } // namespace at::native::rbln

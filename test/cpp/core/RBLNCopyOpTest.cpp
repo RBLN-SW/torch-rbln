@@ -12,8 +12,10 @@ class RBLNCopyOpTest : public ::testing::Test {
   }
   void SetUp() override {}
 
-  at::TensorOptions cpu_options{at::TensorOptions().dtype(at::kFloat).device(at::kCPU)};
-  at::TensorOptions rbln_options{at::TensorOptions().dtype(at::kFloat).device(at::kPrivateUse1)};
+  at::TensorOptions cpu_options{
+      at::TensorOptions().dtype(at::kFloat).device(at::kCPU)};
+  at::TensorOptions rbln_options{
+      at::TensorOptions().dtype(at::kFloat).device(at::kPrivateUse1)};
 };
 
 TEST_F(RBLNCopyOpTest, CPUtoRBLN) {

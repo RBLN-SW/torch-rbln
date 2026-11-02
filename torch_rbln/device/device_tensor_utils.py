@@ -1,7 +1,8 @@
 """torch_rbln Python bindings with device tensor for internal purpose.
 
-This module provides functions for creating, manipulating, and printing tensors on the RBLN device.
-It includes utilities to convert data types, manage tensor metadata, and handle memory contiguity.
+This module provides functions for creating, manipulating, and printing tensors on the
+RBLN device. It includes utilities to convert data types, manage tensor metadata, and
+handle memory contiguity.
 """
 
 from collections.abc import Sequence
@@ -17,8 +18,7 @@ __all__ = [
 
 
 def _create_tensor_from_ptr(data_ptr: int, shape: Sequence[int], dtype: torch.dtype) -> torch.Tensor:
-    """
-    Create a tensor from a device raw data pointer.
+    """Create a tensor from a device raw data pointer.
 
     Args:
         data_ptr: The raw data pointer.

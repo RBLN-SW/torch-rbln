@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Test suite for the RBLN-native `aten::_local_scalar_dense` implementation.
+"""Test suite for the RBLN-native `aten::_local_scalar_dense` implementation.
 
 `_local_scalar_dense_rbln` (RBLNTensorFactories.cpp) replaces the default
 fallback_rbln registration. It is the op behind `tensor.item()` and is
@@ -21,7 +20,7 @@ from torch.testing._internal.common_device_type import instantiate_device_type_t
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestLocalScalarDenseRBLN(TestCase):
     """`aten::_local_scalar_dense` via `tensor.item()` on RBLN must match CPU."""
 

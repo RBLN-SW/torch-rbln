@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Walkthrough example 5: torch eager execution on RBLN.
+"""Walkthrough example 5: torch eager execution on RBLN.
 
 Ported from walkthrough_guide/5.eager_mode.py.
 
@@ -19,7 +18,7 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 from test.utils import SUPPORTED_DTYPES
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestEagerMode(TestCase):
     """Walkthrough example 5: eager pointwise, reduction, and matmul on RBLN."""
 

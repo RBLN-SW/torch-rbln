@@ -2,6 +2,8 @@
 
 import warnings
 
+import torch
+
 from torch_rbln._internal.compile_cache import clear_rbln_compile_cache
 from torch_rbln._internal.torch_compile_patch_helpers import CompiledFunctionWrapper, is_rbln_backend
 
@@ -17,15 +19,10 @@ _original_dynamo_reset = None
 def _is_backend_registered(backend_name: str) -> bool:
     """Whether backend_name is registered with torch._dynamo."""
     try:
-        import torch
-
-        if hasattr(torch._dynamo, "list_backends"):
-            return backend_name in torch._dynamo.list_backends()
-        if hasattr(torch._dynamo, "backends"):
-            return backend_name in torch._dynamo.backends
-        return False
+        backends = torch._dynamo.list_backends() if hasattr(torch._dynamo, "list_backends") else []
     except Exception:
         return False
+    return backend_name in backends
 
 
 def _register_rbln_backend() -> bool:
@@ -38,40 +35,37 @@ def _register_rbln_backend() -> bool:
 
     try:
         # Importing registers 'rbln' via module-level register_backend() side effects.
-        import rebel.core.torch_compile  # noqa: F401
-
-        if _is_backend_registered("rbln"):
-            _rbln_backend_registered = True
-            return True
-        else:
-            warnings.warn(
-                "RBLN backend import succeeded but backend was not registered. "
-                "torch.compile with backend='rbln' may not work.",
-                UserWarning,
-            )
-            return False
-
+        import rebel.core.torch_compile  # noqa: F401,PLC0415
     except ImportError as e:
         warnings.warn(
             f"Failed to register rbln backend for torch.compile: {e}. "
             "torch.compile will work but 'rbln' backend may not be available.",
             UserWarning,
+            stacklevel=1,
         )
         return False
 
+    if _is_backend_registered("rbln"):
+        _rbln_backend_registered = True
+        return True
+    warnings.warn(
+        "RBLN backend import succeeded but backend was not registered. torch.compile with backend='rbln' may not work.",
+        UserWarning,
+        stacklevel=1,
+    )
+    return False
+
 
 def patch_torch_compile() -> None:
-    """
-    Monkey patch torch.compile() to automatically register the RBLN backend on first use
-    and add automatic num_devices determination and tensor-parallel failover support.
+    """Monkey patch torch.compile() to automatically register the RBLN backend on first
+    use and add automatic num_devices determination and tensor-parallel failover
+    support.
 
     This patch wraps torch.compile() to ensure the RBLN backend is registered before
     the first compilation. The registration is lazy (happens on first call) to avoid
     import-time dependencies.
     """
     global _original_dynamo_reset, _original_torch_compile, _torch_compile_patched, _torch_dynamo_reset_patched
-
-    import torch
 
     if _original_torch_compile is None:
         _original_torch_compile = torch.compile
@@ -82,7 +76,9 @@ def patch_torch_compile() -> None:
         original_torch_compile = _original_torch_compile
 
         def wrapper(*args, **kwargs):
-            """Wrapper that registers RBLN backend on first use, then calls original torch.compile."""
+            """Wrapper that registers RBLN backend on first use, then calls original
+            torch.compile.
+            """
             # Lazy registration: register backend on first use
             if not _rbln_backend_registered:
                 _register_rbln_backend()
@@ -93,10 +89,10 @@ def patch_torch_compile() -> None:
                 return original_torch_compile(*args, **kwargs)
 
             # Detect the model from either call form: torch.compile(m, ...) passes it in
-            # args[0]; torch.compile(model=m, ...) passes it in kwargs. Normalize it out of
-            # kwargs so the compile options stored on CompiledFunctionWrapper (reused for
-            # failover recompiles) never carry a stray model= that would clash with the
-            # positional model on recompile.
+            # args[0]; torch.compile(model=m, ...) passes it in kwargs. Normalize it out
+            # of kwargs so the compile options stored on CompiledFunctionWrapper (reused
+            # for failover recompiles) never carry a stray model= that would clash with
+            # the positional model on recompile.
             model = args[0] if args else kwargs.pop("model", None)
 
             # Model provided (either form): wrap the compiled callable so RBLN failover,
@@ -105,10 +101,10 @@ def patch_torch_compile() -> None:
                 compiled_fn = original_torch_compile(model, **kwargs)
                 return CompiledFunctionWrapper(compiled_fn, model, original_torch_compile, kwargs.copy())
 
-            # No model: factory/decorator form, e.g.
-            #   f = torch.compile(backend="rbln")(fn)   or   @torch.compile(backend="rbln")
-            # torch returns a *decorator* here; wrap the eventual compiled fn so the same
-            # guard/failover/fallback apply to this form as to the model path above.
+            # No model: factory/decorator form, e.g. torch.compile(backend="rbln")(fn)
+            # or @torch.compile(backend="rbln"). torch returns a *decorator* here; wrap
+            # the eventual compiled fn so the same guard/failover/fallback apply to this
+            # form as to the model path above.
             torch_decorator = original_torch_compile(**kwargs)
 
             def rbln_compile_decorator(m):
@@ -132,7 +128,7 @@ def patch_torch_compile() -> None:
             # Caveat: the flush can drop the last reference to a warm runtime and
             # free its device buffers. Drain in-flight work (torch.rbln.synchronize)
             # before reset(); resetting a device with pending DMA is undefined.
-            from torch_rbln._internal import warm_cache
+            from torch_rbln._internal import warm_cache  # noqa: PLC0415
 
             warm_cache.clear()
             return original_dynamo_reset(*args, **kwargs)
@@ -147,14 +143,11 @@ def apply_all_patches() -> None:
 
 
 def remove_all_patches() -> None:
-    """
-    Remove all monkey patches (restore original behavior).
+    """Remove all monkey patches (restore original behavior).
 
     WARNING: This function is primarily for testing purposes.
     """
     global _rbln_backend_registered, _torch_compile_patched, _torch_dynamo_reset_patched
-
-    import torch
 
     if _original_torch_compile is not None:
         torch.compile = _original_torch_compile
@@ -164,7 +157,7 @@ def remove_all_patches() -> None:
     clear_rbln_compile_cache()
     # Mirror reset_wrapper's teardown: drop the C++ warm cache's runtime
     # references too, so removal fully undoes apply. Lazy import avoids a cycle.
-    from torch_rbln._internal import warm_cache
+    from torch_rbln._internal import warm_cache  # noqa: PLC0415
 
     warm_cache.clear()
     _torch_compile_patched = False

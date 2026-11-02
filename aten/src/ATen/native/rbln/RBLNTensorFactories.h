@@ -11,17 +11,18 @@ namespace at::native::rbln {
  * @param dtype_opt The desired data type of the returned tensor.
  * @param layout_opt The desired layout of the returned Tensor.
  * @param device_opt The desired device of the returned tensor.
- * @param pin_memory_opt If set, the returned tensor would be allocated in the pinned memory.
+ * @param pin_memory_opt If set, the returned tensor would be allocated in the
+ *     pinned memory.
  * @param memory_format_opt The desired memory format of the returned tensor.
  * @return An uninitialized tensor with the specified properties.
  */
 at::Tensor empty_rbln(
-  c10::IntArrayRef sizes,
-  std::optional<c10::ScalarType> dtype_opt,
-  std::optional<c10::Layout> layout_opt,
-  std::optional<c10::Device> device_opt,
-  std::optional<bool> pin_memory_opt,
-  std::optional<c10::MemoryFormat> memory_format_opt);
+    c10::IntArrayRef sizes,
+    std::optional<c10::ScalarType> dtype_opt,
+    std::optional<c10::Layout> layout_opt,
+    std::optional<c10::Device> device_opt,
+    std::optional<bool> pin_memory_opt,
+    std::optional<c10::MemoryFormat> memory_format_opt);
 
 /**
  * @brief Returns a tensor filled with uninitialized data.
@@ -31,16 +32,17 @@ at::Tensor empty_rbln(
  * @param dtype_opt The desired data type of the returned tensor.
  * @param layout_opt The desired layout of the returned Tensor.
  * @param device_opt The desired device of the returned tensor.
- * @param pin_memory_opt If set, the returned tensor would be allocated in the pinned memory.
+ * @param pin_memory_opt If set, the returned tensor would be allocated in the
+ *     pinned memory.
  * @return An uninitialized tensor with the specified properties.
  */
 at::Tensor empty_strided_rbln(
-  c10::IntArrayRef sizes,
-  c10::IntArrayRef strides,
-  std::optional<c10::ScalarType> dtype_opt,
-  std::optional<c10::Layout> layout_opt,
-  std::optional<c10::Device> device_opt,
-  std::optional<bool> pin_memory_opt);
+    c10::IntArrayRef sizes,
+    c10::IntArrayRef strides,
+    std::optional<c10::ScalarType> dtype_opt,
+    std::optional<c10::Layout> layout_opt,
+    std::optional<c10::Device> device_opt,
+    std::optional<bool> pin_memory_opt);
 
 /**
  * @brief RBLN-native impl of `aten::_efficientzerotensor`.
@@ -52,11 +54,11 @@ at::Tensor empty_strided_rbln(
  * gradients without going through cpu_fallback_rbln.
  */
 at::Tensor _efficientzerotensor_rbln(
-  c10::SymIntArrayRef sizes,
-  std::optional<c10::ScalarType> dtype_opt,
-  std::optional<c10::Layout> layout_opt,
-  std::optional<c10::Device> device_opt,
-  std::optional<bool> pin_memory_opt);
+    c10::SymIntArrayRef sizes,
+    std::optional<c10::ScalarType> dtype_opt,
+    std::optional<c10::Layout> layout_opt,
+    std::optional<c10::Device> device_opt,
+    std::optional<bool> pin_memory_opt);
 
 /**
  * @brief In-place zero of an RBLN tensor.
@@ -73,9 +75,9 @@ at::Tensor& zero_rbln_(at::Tensor& self);
 // Native impl of aten::fill_.Scalar — borrow host pointer + typed std::fill_n
 // + return_borrowed(updated=true). Bypasses cpu_fallback_rbln's redispatchBoxed
 // + TensorIterator path. The fast path is taken for a contiguous self with a
-// supported dtype; broadcast-overlap (stride-0) views collapse to a non-overlapping
-// view, and non-contiguous or unsupported-dtype self routes through the CPU
-// fallback (no hard assert).
+// supported dtype; broadcast-overlap (stride-0) views collapse to a
+// non-overlapping view, and non-contiguous or unsupported-dtype self routes
+// through the CPU fallback (no hard assert).
 at::Tensor& fill_scalar_rbln_(at::Tensor& self, const at::Scalar& value);
 
 // Native impl of aten::arange.start_out — acquire_host_ptr_for_overwrite

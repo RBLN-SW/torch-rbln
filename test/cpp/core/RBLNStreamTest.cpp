@@ -6,8 +6,8 @@
 #include <set>
 
 // Exercises the stream half of RBLNGuardImpl through VirtualGuardImpl (the same
-// path torch.Stream takes). Stream creation needs the device initialized, so each
-// test forces it with a scratch allocation.
+// path torch.Stream takes). Stream creation needs the device initialized, so
+// each test forces it with a scratch allocation.
 class RBLNStreamTest : public ::testing::Test {
  protected:
   static void SetUpTestSuite() {
@@ -75,7 +75,8 @@ TEST_F(RBLNStreamTest, ExchangeStreamSetsAndRestores) {
 
 TEST_F(RBLNStreamTest, PriorityIsAcceptedButIgnored) {
   const c10::impl::VirtualGuardImpl impl(c10::kPrivateUse1);
-  // RBLN has no stream priorities; any value is accepted and yields a usable stream.
+  // RBLN has no stream priorities; any value is accepted and yields a usable
+  // stream.
   const auto high = impl.getNewStream(device_, -1);
   const auto low = impl.getNewStream(device_, 1);
   EXPECT_NE(high.id(), 0);
@@ -112,7 +113,8 @@ TEST_F(RBLNStreamTest, StreamIdRoundTrips) {
   const c10::impl::VirtualGuardImpl impl(c10::kPrivateUse1);
   const auto s = impl.getNewStream(device_, 0);
   const auto data = s.pack3();
-  const auto rebuilt = c10::Stream::unpack3(data.stream_id, data.device_index, data.device_type);
+  const auto rebuilt =
+      c10::Stream::unpack3(data.stream_id, data.device_index, data.device_type);
   EXPECT_EQ(rebuilt, s);
   EXPECT_EQ(rebuilt.id(), s.id());
   EXPECT_EQ(rebuilt.device(), device_);

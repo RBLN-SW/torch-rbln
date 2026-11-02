@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Comprehensive tests for the optimized zero_ op (EMPTY_INIT_WITH_ZERO marking).
+"""Comprehensive tests for the optimized zero_ op (EMPTY_INIT_WITH_ZERO marking).
 
 The optimized zero_ marks VMemory as logically zero-initialized without allocating
 host memory. These tests verify correctness across all access patterns:
@@ -21,7 +20,7 @@ ATOL = 0.01
 RTOL = 0.01
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestZeroOptBasic(TestCase):
     """Basic correctness: zero_ produces all-zero tensors readable from CPU."""
 
@@ -76,7 +75,7 @@ class TestZeroOptBasic(TestCase):
         self.assertTrue(torch.all(t.cpu() == 0).item())
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestZeroOptArithmetic(TestCase):
     """Arithmetic on zero-initialized tensors (device read path)."""
 
@@ -119,12 +118,14 @@ class TestZeroOptArithmetic(TestCase):
         self.assertTrue(torch.all(cmp.cpu()).item())
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestZeroOptPartialWrite(TestCase):
     """Partial writes (slice assignment) after zero_ marking."""
 
     def test_slice_write_then_read(self):
-        """Write to a slice of zero-init tensor, verify written and unwritten regions."""
+        """Write to a slice of zero-init tensor, verify written and unwritten
+        regions.
+        """
         t = torch.zeros(16, dtype=torch.float16, device="rbln")
         # Write to first 4 elements
         t[:4] = torch.ones(4, dtype=torch.float16, device="rbln")
@@ -167,7 +168,7 @@ class TestZeroOptPartialWrite(TestCase):
                 self.assertAlmostEqual(result[i].item(), 0.0, places=2)
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestZeroOptViews(TestCase):
     """Views and reshapes on zero-initialized tensors."""
 
@@ -222,7 +223,7 @@ class TestZeroOptViews(TestCase):
         self.assertTrue(torch.all(expanded.cpu() == 0).item())
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestZeroOptCopy(TestCase):
     """Copy operations involving zero-initialized tensors."""
 
@@ -261,7 +262,7 @@ class TestZeroOptCopy(TestCase):
         self.assertTrue(torch.all(back.cpu() == 0).item())
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestZeroOptKVCachePattern(TestCase):
     """Simulate KV-cache usage pattern: zero-init then overwrite via NPU."""
 
@@ -303,7 +304,7 @@ class TestZeroOptKVCachePattern(TestCase):
             )
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestZeroOptLargeTensor(TestCase):
     """Large tensor tests — closer to real KV-cache sizes."""
 
@@ -322,7 +323,7 @@ class TestZeroOptLargeTensor(TestCase):
         self.assertTrue(torch.all(result.cpu() == 1.0).item())
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestZeroOptReZero(TestCase):
     """Re-zeroing: zero_ after tensor already has data (state transitions)."""
 
@@ -359,7 +360,7 @@ class TestZeroOptReZero(TestCase):
             self.assertEqual(t.cpu(), expected, atol=ATOL, rtol=RTOL)
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestZeroOptTorchZeros(TestCase):
     """torch.zeros() factory — should also use the optimized path."""
 

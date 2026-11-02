@@ -30,12 +30,12 @@ namespace at::native::rbln {
  * overlapping storage are undefined upstream, so it is the higher-level
  * kernel's choice to assert or permit (cat asserts; copy_ does not).
  *
- * @param dst   Destination tensor.
- * @param src   Source tensor.
+ * @param dst Destination tensor.
+ * @param src Source tensor.
  * @param batch Pending-ops batch the work is appended to. The caller controls
- *              when it submits — for cat / index_select / multi-step copy we
- *              want one batch to span all sub-copies so future batched APIs
- *              can fuse them into one backend call.
+ *     when it submits — for cat / index_select / multi-step copy we want one
+ *     batch to span all sub-copies so future batched APIs can fuse them into
+ *     one backend call.
  */
 void strided_v2v_copy(
     const at::Tensor& dst,
@@ -57,14 +57,14 @@ void strided_v2v_copy(const at::Tensor& dst, const at::Tensor& src);
  * calls) propagates so caller-side bugs surface. Gated by
  * `TORCH_RBLN_DISABLE_FALLBACK=strided_copy_error` (default enabled).
  *
- * @param batch         V2V batch to submit.
- * @param op_name       Op identifier used in the fallback warning log.
- * @param cpu_fallback  Callable performing the CPU-equivalent computation;
- *                      invoked only on a backend call failure.
+ * @param batch V2V batch to submit.
+ * @param op_name Op identifier used in the fallback warning log.
+ * @param cpu_fallback Callable performing the CPU-equivalent computation;
+ *     invoked only on a backend call failure.
  */
 void submit_or_fallback(
     c10::rbln::V2VBatch& batch,
     const char* op_name,
-    std::function<void()> cpu_fallback);
+    const std::function<void()>& cpu_fallback);
 
 } // namespace at::native::rbln

@@ -1,6 +1,7 @@
 // libkineto plugin coupling a torch.profiler session with one rbln profiling
-// session, through the rbln_kineto_* C-ABI (rebel/runtime/api/rbln_kineto_api.h).
-// start()/stop() drive the exporter via the C API
+// session, through the rbln_kineto_* C-ABI
+// (rebel/runtime/api/rbln_kineto_api.h). start()/stop() drive the exporter via
+// the C API
 
 #include <torch_rbln/csrc/rbln/profiler/kineto/rbln_kineto_adapter.h>
 
@@ -28,33 +29,44 @@ namespace rbln::profiler::kineto {
 
 namespace {
 
-// GenericTraceActivity keeps the span by pointer, and the activities live longer
-// than this session (they travel into torch's trace result), so the span must
-// live at least as long: static, not a session member/local (which would dangle).
+// GenericTraceActivity keeps the span by pointer, and the activities live
+// longer than this session (they travel into PyTorch's trace result), so the
+// span must live at least as long: static, not a session member/local (which
+// would dangle).
 const ::libkineto::TraceSpan& default_trace_span() {
   static ::libkineto::TraceSpan span(0, 0, "rbln_trace");
   return span;
 }
 
 int64_t now_ns(std::chrono::steady_clock::time_point tp) {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(tp.time_since_epoch()).count();
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             tp.time_since_epoch())
+      .count();
 }
 int64_t now_ns(std::chrono::system_clock::time_point tp) {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(tp.time_since_epoch()).count();
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             tp.time_since_epoch())
+      .count();
 }
 
 } // namespace
 
-class RblnActivityProfilerSession : public ::libkineto::IActivityProfilerSession {
+class RblnActivityProfilerSession
+    : public ::libkineto::IActivityProfilerSession {
  public:
   RblnActivityProfilerSession() = default;
   ~RblnActivityProfilerSession() override = default;
   RblnActivityProfilerSession(const RblnActivityProfilerSession&) = delete;
-  RblnActivityProfilerSession& operator=(const RblnActivityProfilerSession&) = delete;
+  RblnActivityProfilerSession& operator=(const RblnActivityProfilerSession&) =
+      delete;
+  RblnActivityProfilerSession(RblnActivityProfilerSession&&) = delete;
+  RblnActivityProfilerSession& operator=(RblnActivityProfilerSession&&) =
+      delete;
 
   void start() override {
-    // (steady, system) anchor at session open; exported slices carry steady_clock ns,
-    // so we add (system - steady) at projection time to convert them to system time.
+    // (steady, system) anchor at session open; exported slices carry
+    // steady_clock ns, so we add (system - steady) at projection time to
+    // convert them to system time.
     anchor_steady_ns_ = now_ns(std::chrono::steady_clock::now());
     anchor_system_ns_ = now_ns(std::chrono::system_clock::now());
     start_ts_ns_ = anchor_system_ns_;
@@ -80,7 +92,8 @@ class RblnActivityProfilerSession : public ::libkineto::IActivityProfilerSession
     status_ = ::libkineto::TraceStatus::PROCESSING;
     projected_ = ProjectedKinetoTrace{};
     int32_t exported = 0;
-    const RBLNRetCode ret = rbln_kineto_end_session_and_export(&sink_thunk, this, &exported);
+    const RBLNRetCode ret =
+        rbln_kineto_end_session_and_export(&sink_thunk, this, &exported);
     if (ret != RBLNRetCode_SUCCESS) {
       RBLN_LOG_WARN(
           "rbln_kineto_end_session_and_export failed with error code: {}; dropping rbln trace for this session",
@@ -92,7 +105,8 @@ class RblnActivityProfilerSession : public ::libkineto::IActivityProfilerSession
   }
 
   void on_export(const RblnKinetoExport* exp) {
-    convert_export_to_kineto(exp, clock_offset_ns_, default_trace_span(), &projected_);
+    convert_export_to_kineto(
+        exp, clock_offset_ns_, default_trace_span(), &projected_);
   }
 
   std::vector<std::string> errors() override {
@@ -136,13 +150,16 @@ class RblnActivityProfilerSession : public ::libkineto::IActivityProfilerSession
   int64_t anchor_system_ns_ = 0;
   int64_t clock_offset_ns_ = 0;
   int64_t start_ts_ns_ = 0; // metadata-event timestamp for device/resource rows
-  bool session_started_ = false; // begin_session succeeded; gates stop()'s end call
+  bool session_started_ =
+      false; // begin_session succeeded; gates stop()'s end call
 };
 
 class RblnActivityProfiler : public ::libkineto::IActivityProfiler {
  public:
   RblnActivityProfiler()
-      : supported_{::libkineto::ActivityType::PRIVATEUSE1_RUNTIME, ::libkineto::ActivityType::PRIVATEUSE1_DRIVER} {}
+      : supported_{
+            ::libkineto::ActivityType::PRIVATEUSE1_RUNTIME,
+            ::libkineto::ActivityType::PRIVATEUSE1_DRIVER} {}
   ~RblnActivityProfiler() override = default;
 
   const std::string& name() const override {
@@ -150,26 +167,29 @@ class RblnActivityProfiler : public ::libkineto::IActivityProfiler {
     return kName;
   }
 
-  const std::set<::libkineto::ActivityType>& availableActivities() const override {
+  const std::set<::libkineto::ActivityType>& availableActivities()
+      const override {
     return supported_;
   }
 
   std::unique_ptr<::libkineto::IActivityProfilerSession> configure(
       const std::set<::libkineto::ActivityType>& /*activity_types*/,
-      const ::libkineto::Config&) override {
+      const ::libkineto::Config& /*config*/) override {
     // Create a session only when rbln profiling is actually running
-    // (rbln_kineto_is_active()), not based on the requested activity types: pytorch
-    // always includes PRIVATEUSE1_RUNTIME/DRIVER in its default set, so the request
-    // can't tell us whether the user actually wants rbln profiling.
+    // (rbln_kineto_is_active()), not based on the requested activity types:
+    // pytorch always includes PRIVATEUSE1_RUNTIME/DRIVER in its default set, so
+    // the request can't tell us whether the user actually wants rbln profiling.
     int32_t active = 0;
     const RBLNRetCode ret = rbln_kineto_is_active(&active);
     if (ret != RBLNRetCode_SUCCESS) {
       RBLN_LOG_WARN(
-          "rbln_kineto_is_active failed with error code: {}; not creating a profiling session", static_cast<int>(ret));
+          "rbln_kineto_is_active failed with error code: {}; not creating a profiling session",
+          static_cast<int>(ret));
       return nullptr;
     }
     if (!active) {
-      RBLN_LOG_INFO("rbln profiling is not active; skipping rbln activities for this torch.profiler session");
+      RBLN_LOG_INFO(
+          "rbln profiling is not active; skipping rbln activities for this torch.profiler session");
       return nullptr;
     }
     RBLN_LOG_DEBUG("rbln profiling is active; creating a profiling session");

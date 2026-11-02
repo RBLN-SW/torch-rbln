@@ -158,7 +158,8 @@ TEST_F(RBLNV2VBatchTest, CrossDeviceFallback) {
 TEST_F(RBLNV2VBatchTest, MultiDeviceAnchorMismatch) {
   const auto device_count = c10::rbln::get_device_count();
   if (device_count < 2) {
-    GTEST_SKIP() << "Skipping: multi-device anchor requires at least 2 devices.";
+    GTEST_SKIP()
+        << "Skipping: multi-device anchor requires at least 2 devices.";
   }
 
   constexpr size_t n = 256;
@@ -206,7 +207,8 @@ TEST_F(RBLNV2VBatchTest, MultiDeviceAnchorMismatch) {
 TEST_F(RBLNV2VBatchTest, ReuseAfterSubmitResetsState) {
   const auto device_count = c10::rbln::get_device_count();
   if (device_count < 2) {
-    GTEST_SKIP() << "Skipping: reuse-after-submit test requires at least 2 devices.";
+    GTEST_SKIP()
+        << "Skipping: reuse-after-submit test requires at least 2 devices.";
   }
 
   constexpr size_t n = 128;
@@ -298,15 +300,18 @@ TEST_F(RBLNV2VBatchTest, StridedSameDeviceUsesFastPath) {
   }
   std::vector<int8_t> dst_initial(total, -1);
 
-  auto* src = static_cast<int8_t*>(AllocAndCopyFromHost(src_host.data(), total));
-  auto* dst = static_cast<int8_t*>(AllocAndCopyFromHost(dst_initial.data(), total));
+  auto* src =
+      static_cast<int8_t*>(AllocAndCopyFromHost(src_host.data(), total));
+  auto* dst =
+      static_cast<int8_t*>(AllocAndCopyFromHost(dst_initial.data(), total));
 
   const std::vector<int64_t> outer_sizes = {outer};
   const std::vector<int64_t> stride_bytes = {static_cast<int64_t>(inner)};
 
   {
     c10::rbln::V2VBatch batch;
-    batch.enqueue_strided(dst, src, inner, outer_sizes, stride_bytes, stride_bytes);
+    batch.enqueue_strided(
+        dst, src, inner, outer_sizes, stride_bytes, stride_bytes);
     EXPECT_EQ(batch.pending_count(), static_cast<size_t>(outer));
     batch.submit();
   }
@@ -322,7 +327,8 @@ TEST_F(RBLNV2VBatchTest, StridedSameDeviceUsesFastPath) {
 TEST_F(RBLNV2VBatchTest, StridedCrossDeviceFallsBack) {
   const auto device_count = c10::rbln::get_device_count();
   if (device_count < 2) {
-    GTEST_SKIP() << "Skipping: cross-device strided requires at least 2 devices.";
+    GTEST_SKIP()
+        << "Skipping: cross-device strided requires at least 2 devices.";
   }
 
   constexpr size_t inner = 16;
@@ -345,7 +351,8 @@ TEST_F(RBLNV2VBatchTest, StridedCrossDeviceFallsBack) {
 
   {
     c10::rbln::V2VBatch batch;
-    batch.enqueue_strided(dst, src, inner, outer_sizes, stride_bytes, stride_bytes);
+    batch.enqueue_strided(
+        dst, src, inner, outer_sizes, stride_bytes, stride_bytes);
     EXPECT_EQ(batch.pending_count(), static_cast<size_t>(outer));
     batch.submit();
   }
@@ -372,8 +379,10 @@ TEST_F(RBLNV2VBatchTest, LargeBatchedSubmit) {
   }
   std::vector<int8_t> dst_initial(total, -1);
 
-  auto* src = static_cast<int8_t*>(AllocAndCopyFromHost(src_host.data(), total));
-  auto* dst = static_cast<int8_t*>(AllocAndCopyFromHost(dst_initial.data(), total));
+  auto* src =
+      static_cast<int8_t*>(AllocAndCopyFromHost(src_host.data(), total));
+  auto* dst =
+      static_cast<int8_t*>(AllocAndCopyFromHost(dst_initial.data(), total));
 
   {
     c10::rbln::V2VBatch batch;
@@ -405,8 +414,10 @@ TEST_F(RBLNV2VBatchTest, AboveRuntimeCapSubmitsInRuntimeSizedCalls) {
   }
   std::vector<int8_t> dst_initial(total, -1);
 
-  auto* src = static_cast<int8_t*>(AllocAndCopyFromHost(src_host.data(), total));
-  auto* dst = static_cast<int8_t*>(AllocAndCopyFromHost(dst_initial.data(), total));
+  auto* src =
+      static_cast<int8_t*>(AllocAndCopyFromHost(src_host.data(), total));
+  auto* dst =
+      static_cast<int8_t*>(AllocAndCopyFromHost(dst_initial.data(), total));
 
   {
     c10::rbln::V2VBatch batch;
@@ -424,7 +435,8 @@ TEST_F(RBLNV2VBatchTest, AboveRuntimeCapSubmitsInRuntimeSizedCalls) {
     c10::rbln::rt_timing_enable(false);
     std::vector<uint64_t> timing(2 * c10::rbln::kRtTimingN);
     c10::rbln::rt_timing_get(timing.data());
-    EXPECT_EQ(timing[2 * kV2VMultiSlot + 1], 2u) << "cap + 1 entries must go out as two runtime-sized calls";
+    EXPECT_EQ(timing[2 * kV2VMultiSlot + 1], 2u)
+        << "cap + 1 entries must go out as two runtime-sized calls";
     EXPECT_EQ(batch.pending_count(), 0u);
   }
 
@@ -445,8 +457,10 @@ TEST_F(RBLNV2VBatchTest, MultipleFlatEnqueues) {
     src_host[i] = static_cast<int8_t>(i % 127);
   std::vector<int8_t> dst_initial(total, 0);
 
-  auto* src = static_cast<int8_t*>(AllocAndCopyFromHost(src_host.data(), total));
-  auto* dst = static_cast<int8_t*>(AllocAndCopyFromHost(dst_initial.data(), total));
+  auto* src =
+      static_cast<int8_t*>(AllocAndCopyFromHost(src_host.data(), total));
+  auto* dst =
+      static_cast<int8_t*>(AllocAndCopyFromHost(dst_initial.data(), total));
 
   {
     c10::rbln::V2VBatch batch;

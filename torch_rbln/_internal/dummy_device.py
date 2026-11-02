@@ -20,9 +20,9 @@ def is_dummy_device() -> bool:
     extension is unavailable.
     """
     try:
-        import torch_rbln
+        from torch_rbln import _C  # noqa: PLC0415
 
-        return bool(torch_rbln._C.is_dummy_device())
+        return bool(_C.is_dummy_device())
     except Exception:
         return False
 

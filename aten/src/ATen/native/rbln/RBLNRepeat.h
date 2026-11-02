@@ -14,7 +14,8 @@ namespace at::native::rbln {
 /**
  * @brief Native RBLN registration for `repeat_interleave.Tensor`.
  *
- * Schema: repeat_interleave.Tensor(Tensor repeats, *, SymInt? output_size=None) -> Tensor
+ * Schema: repeat_interleave.Tensor(Tensor repeats,
+ *                                  *, SymInt? output_size=None) -> Tensor
  *
  * Returns a 1-D int64 index tensor where each value `i` appears `repeats[i]`
  * times consecutively. With `repeats == [3, 1, 2]` the result is

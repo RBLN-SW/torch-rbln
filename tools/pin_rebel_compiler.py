@@ -61,12 +61,11 @@ def main() -> None:
     target.add_argument("--current", action="store_true", help="print the pinned build")
     options = parser.parse_args()
 
-    with open(PYPROJECT, encoding="utf-8") as f:
-        doc: Any = tomlkit.parse(f.read())
+    doc: Any = tomlkit.parse(PYPROJECT.read_text(encoding="utf-8"))
     uv_table = doc["tool"]["uv"]
     current = pinned_build(uv_table)
     if options.current:
-        print(current)
+        print(current)  # noqa: T201
         return
 
     try:
@@ -83,9 +82,8 @@ def main() -> None:
     ]
     for array, replacement, location in entries:
         array[package_entry_index(array, location)] = replacement
-    with open(PYPROJECT, "w", encoding="utf-8") as f:
-        f.write(tomlkit.dumps(doc))
-    print(f"Pinned {PACKAGE} to {build} (was {current})")
+    PYPROJECT.write_text(tomlkit.dumps(doc), encoding="utf-8")
+    print(f"Pinned {PACKAGE} to {build} (was {current})")  # noqa: T201
 
 
 if __name__ == "__main__":

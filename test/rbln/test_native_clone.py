@@ -1,7 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""
-Test suite for the RBLN-native `aten::clone` implementation.
+"""Test suite for the RBLN-native `aten::clone` implementation.
 
 `clone_rbln` (RBLNCopy.cpp) handles two paths:
 * **Direct d2d (fast path):** `self` is contiguous, storage_offset() == 0,
@@ -26,13 +25,13 @@ from torch.testing._internal.common_device_type import instantiate_device_type_t
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestCloneRBLNDirectD2D(TestCase):
     """The contiguous, full-storage fast path."""
 
     def _check(self, src_cpu: torch.Tensor) -> None:
         src_rbln = src_cpu.to("rbln")
-        # Sanity-check the fast-path precondition.
+        # Verify the fast-path precondition.
         self.assertTrue(src_rbln.is_contiguous())
         self.assertEqual(src_rbln.storage_offset(), 0)
 
@@ -71,7 +70,7 @@ class TestCloneRBLNDirectD2D(TestCase):
         self.assertEqual(out.dtype, torch.int64)
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestCloneRBLNNonContigFallback(TestCase):
     """The composite fallback path (non-contig / partial-storage views)."""
 
@@ -104,7 +103,7 @@ class TestCloneRBLNNonContigFallback(TestCase):
         self._check_view(src, lambda x: x.transpose(0, 1))
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.npu(count=1)
 class TestCloneRBLNIsolation(TestCase):
     """Clones must not alias the source's storage."""
 

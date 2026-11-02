@@ -10,7 +10,8 @@ waits (they degrade to a host-side synchronize), and cross-process event sharing
 (:meth:`Event.ipc_handle` / :meth:`Event.from_ipc_handle` raise).
 """
 
-from typing import Any, Optional  # noqa: UP035
+from types import TracebackType
+from typing import Any
 
 import torch
 
@@ -19,13 +20,13 @@ from torch_rbln.device.device import _get_device_index, current_device, device
 
 
 __all__ = [
-    "Stream",
     "Event",
+    "Stream",
+    "StreamContext",
     "current_stream",
     "default_stream",
     "set_stream",
     "stream",
-    "StreamContext",
 ]
 
 
@@ -45,7 +46,7 @@ class Stream(torch.Stream):
     reuse earlier streams (as in :mod:`torch.cuda`).
     """
 
-    def __new__(cls, device: Any = None, priority: int = 0, **kwargs: Any) -> "Stream":  # noqa: PYI034
+    def __new__(cls, device: Any = None, priority: int = 0, **kwargs: Any) -> "Stream":
         # With ids given (current_stream/default_stream), the base wraps them instead
         # of creating a stream.
         if "stream_id" in kwargs and "device_index" in kwargs and "device_type" in kwargs:
@@ -63,14 +64,14 @@ class Stream(torch.Stream):
         """
         super().wait_event(event)
 
-    def wait_stream(self, stream: torch.Stream) -> None:
+    def wait_stream(self, stream: torch.Stream) -> None:  # pyrefly: ignore[bad-param-name-override]
         """Make all future work submitted to this stream wait for the work already
         submitted to ``stream``. Records an event on ``stream`` and waits it, so the
         cross-device rule in :meth:`wait_event` applies here too.
         """
         super().wait_stream(stream)
 
-    def record_event(self, event: Optional["Event"] = None) -> "Event":
+    def record_event(self, event: torch.Event | None = None) -> torch.Event:
         """Record ``event`` on this stream, creating an :class:`Event` if ``None``.
 
         Overridden like :meth:`torch.cuda.Stream.record_event` so the event is an
@@ -108,11 +109,11 @@ class Event(torch.Event):
     call.
     """
 
-    def __new__(  # noqa: PYI034
+    def __new__(
         cls,
-        enable_timing: bool = False,
-        blocking: bool = False,
-        interprocess: bool = False,
+        enable_timing: bool = False,  # noqa: FBT001, FBT002
+        blocking: bool = False,  # noqa: FBT001, FBT002
+        interprocess: bool = False,  # noqa: FBT001, FBT002
     ) -> "Event":
         return super().__new__(
             cls,
@@ -122,8 +123,9 @@ class Event(torch.Event):
             interprocess=interprocess,
         )
 
-    def elapsed_time(self, other: "Event") -> float:
-        raise RuntimeError("RBLN does not support Event.elapsed_time (event timing is not supported).")
+    def elapsed_time(self, other: torch.Event) -> float:  # noqa: ARG002
+        msg = "RBLN does not support Event.elapsed_time (event timing is not supported)."
+        raise RuntimeError(msg)
 
     def __repr__(self) -> str:
         return f"torch.rbln.Event(device={self.device})"
@@ -143,7 +145,7 @@ def default_stream(device: Any = None) -> Stream:
     return Stream(stream_id=stream_id, device_index=device_index, device_type=device_type)
 
 
-def set_stream(stream: Optional[Stream]) -> None:
+def set_stream(stream: Stream | None) -> None:
     """Set the current stream (no-op if ``None``). Prefer the :func:`stream` manager.
 
     Also selects the stream's device, matching :func:`torch.cuda.set_stream`.
@@ -160,10 +162,10 @@ class StreamContext:
     duration. No-op if the stream is ``None``.
     """
 
-    def __init__(self, stream: Optional[Stream]):
+    def __init__(self, stream: Stream | None):
         self.stream = stream
-        self.src_prev_stream: Optional[Stream] = None
-        self.dst_prev_stream: Optional[Stream] = None
+        self.src_prev_stream: Stream | None = None
+        self.dst_prev_stream: Stream | None = None
 
     def __enter__(self):
         cur_stream = self.stream
@@ -175,7 +177,9 @@ class StreamContext:
                 self.dst_prev_stream = current_stream(cur_stream.device)
         set_stream(cur_stream)
 
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any):
+    def __exit__(
+        self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: TracebackType | None
+    ):
         cur_stream = self.stream
         if cur_stream is None:
             return False
@@ -185,6 +189,6 @@ class StreamContext:
         return False
 
 
-def stream(stream: Optional[Stream]) -> StreamContext:
+def stream(stream: Stream | None) -> StreamContext:
     """Wrap :class:`StreamContext` to select a given stream (no-op if ``None``)."""
     return StreamContext(stream)

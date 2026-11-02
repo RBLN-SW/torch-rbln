@@ -37,12 +37,12 @@ fi
 
 if [[ "${build_type}" == "Debug" ]]; then
   torch_version="$(
-    .buildkite/scripts/package/resolve-torch-build-version.py \
+    .buildkite/scripts/package/resolve_torch_build_version.py \
       --build-type Debug
   )"
 
   echo "--- Pinning torch to ${torch_version}"
-  .buildkite/scripts/package/pin-torch.py \
+  .buildkite/scripts/package/pin_torch.py \
     --torch-version "${torch_version}" \
     --torch-index rbln-internal
   uv lock
@@ -52,12 +52,28 @@ echo "--- Building ${artifact_dir}"
 TORCH_RBLN_BUILD_TYPE="${build_type}" \
 TORCH_RBLN_BUILD_TESTING="OFF" \
 uv build \
-  --wheel \
-  --out-dir "${artifact_dir}"
+  --wheel
+
+echo "--- Repairing wheel"
+# The excluded libraries come from `torch` and `rebel-compiler`. With
+# `--patcher none`, the repair fails instead of bundling any other library.
+uv run \
+  --isolated \
+  --locked \
+  --only-group ci \
+  auditwheel repair \
+    --patcher none \
+    --exclude libc10.so \
+    --exclude librbln.so \
+    --exclude libtorch.so \
+    --exclude libtorch_cpu.so \
+    --exclude libtorch_python.so \
+    --wheel-dir "${artifact_dir}" \
+    dist/*.whl
 wheels=("${artifact_dir}"/*.whl)
 wheel="${wheels[0]}"
 version="$(
-  .buildkite/scripts/package/read-wheel-version.py \
+  .buildkite/scripts/package/read_wheel_version.py \
     --wheel "${wheel}"
 )"
 echo "Built torch-rbln==${version}"
@@ -68,18 +84,27 @@ if [[ -n "${TORCH_RBLN_VERSION_TAG:-}" \
   exit 1
 fi
 
+echo "--- Checking wheel metadata"
+uv run \
+  --isolated \
+  --locked \
+  --only-group ci \
+  twine check \
+    --strict \
+    "${wheel}"
+
 echo "--- Installing wheel in clean environment"
 uv venv \
   verify-install/.venv
 # Installing a built wheel skips the indexes `pyproject.toml` marks
 # `explicit`, so `--index` names the one `torch` comes from.
 torch_index="$(
-  .buildkite/scripts/read-index-setting.py \
+  .buildkite/scripts/read_index_setting.py \
     --index-of torch \
     --setting name
 )"
 torch_index_url="$(
-  .buildkite/scripts/read-index-setting.py \
+  .buildkite/scripts/read_index_setting.py \
     --index-of torch \
     --setting url
 )"
@@ -90,7 +115,7 @@ uv pip install \
 
 echo "--- Verifying versions and debug marker"
 verify-install/.venv/bin/python \
-  .buildkite/scripts/package/verify-installed-versions.py \
+  .buildkite/scripts/package/verify_installed_versions.py \
   --torch-rbln-version "${version}" \
   --build-type "${build_type}"
 
@@ -98,7 +123,7 @@ echo "--- Verifying install RPATH"
 env \
   --unset=LD_LIBRARY_PATH \
   verify-install/.venv/bin/python \
-    .buildkite/scripts/package/verify-install-rpath.py
+    .buildkite/scripts/package/verify_install_rpath.py
 
 echo "--- Uploading wheel, pyproject.toml, and uv.lock"
 cp \

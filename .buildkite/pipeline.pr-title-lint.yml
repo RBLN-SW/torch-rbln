@@ -1,3 +1,4 @@
+---
 env:
   TORCH_RBLN_COMMIT_STATUS: ${TORCH_RBLN_COMMIT_STATUS:-false}
   TORCH_RBLN_QUEUE_DEFAULT: ${TORCH_RBLN_QUEUE_DEFAULT?}
@@ -21,7 +22,7 @@ steps:
       - label: Lint PR title
         key: lint-pr-title
         command: |
-          .buildkite/scripts/lint/lint-pr-title.py
+          .buildkite/scripts/lint/lint_pr_title.py
         agents:
           queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
         env:

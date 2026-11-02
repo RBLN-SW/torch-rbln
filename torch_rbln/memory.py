@@ -9,7 +9,7 @@ import operator
 import os
 import sys
 import threading
-from typing import Dict, Iterator, Optional, Union  # noqa: UP035
+from collections.abc import Iterator
 
 import torch
 
@@ -22,7 +22,6 @@ __all__ = [
     "host_register",
     "host_unregister",
     "huge_host_empty",
-    "set_device_layout_like",
     "max_memory_allocated",
     "max_memory_reserved",
     "mem_get_info",
@@ -36,12 +35,12 @@ __all__ = [
     "release_offload_temp_storage",
     "reset_accumulated_memory_stats",
     "reset_peak_memory_stats",
+    "set_device_layout_like",
 ]
 
 
-def _normalize_device(device: Optional[Union[int, str, torch.device]]) -> torch.device:
-    """
-    Normalize a device argument to a concrete ``rbln`` ``torch.device``.
+def _normalize_device(device: int | str | torch.device | None) -> torch.device:
+    """Normalize a device argument to a concrete ``rbln`` ``torch.device``.
 
     ``None``, ``"rbln"``, and ``torch.device("rbln")`` resolve to the current
     device. A bare int is treated as an ``rbln`` index. Non-``rbln`` devices
@@ -50,12 +49,14 @@ def _normalize_device(device: Optional[Union[int, str, torch.device]]) -> torch.
     if device is None:
         return torch.device("rbln", torch_rbln._C.current_device())
     if isinstance(device, bool):  # bool is an int subclass; reject to avoid rbln:0/1 surprises
-        raise TypeError(f"device must be None, int, str, or torch.device, not bool ({device!r})")
+        msg = f"device must be None, int, str, or torch.device, not bool ({device!r})"
+        raise TypeError(msg)
 
-    # torch.device's index field is an int8_t, so torch.device("rbln", 256) silently wraps
-    # to rbln:0 and would slip past the range check below. Read the index from the raw int
-    # or the original string suffix rather than a constructed device's .index. (A torch.device
-    # passed in has already wrapped and cannot be recovered, so it is validated as-is.)
+    # torch.device's index field is an int8_t, so torch.device("rbln", 256) silently
+    # wraps to rbln:0 and would slip past the range check below. Read the index from the
+    # raw int or the original string suffix rather than a constructed device's .index.
+    # (A torch.device passed in has already wrapped and cannot be recovered, so it is
+    # validated as-is.)
     if isinstance(device, int):
         dtype, index = "rbln", device
     elif isinstance(device, str):
@@ -65,23 +66,27 @@ def _normalize_device(device: Optional[Union[int, str, torch.device]]) -> torch.
         try:
             dtype = torch.device(device).type
         except RuntimeError:
-            raise ValueError(f"Invalid device string {device!r}") from None
+            msg = f"Invalid device string {device!r}"
+            raise ValueError(msg) from None
         _, sep, suffix = device.partition(":")
         index = int(suffix) if sep else None
     elif isinstance(device, torch.device):
         dtype, index = device.type, device.index
     else:
-        raise TypeError(f"device must be None, int, str, or torch.device, got {type(device).__name__}")
+        msg = f"device must be None, int, str, or torch.device, got {type(device).__name__}"
+        raise TypeError(msg)
 
     if dtype != "rbln":
-        raise ValueError(f"Expected an 'rbln' device, got '{dtype}' (from {device!r})")
+        msg = f"Expected an 'rbln' device, got '{dtype}' (from {device!r})"
+        raise ValueError(msg)
     if index is None:
         index = torch_rbln._C.current_device()
 
     # Only range-check when devices exist; on a no-device host callers no-op.
     count = torch_rbln._C.device_count()
     if count > 0 and not (0 <= index < count):
-        raise ValueError(f"rbln device index {index} is out of range [0, {count})")
+        msg = f"rbln device index {index} is out of range [0, {count})"
+        raise ValueError(msg)
     return torch.device("rbln", index)
 
 
@@ -101,13 +106,14 @@ def set_device_layout_like(target: torch.Tensor, ref: torch.Tensor) -> None:
 
 
 def _no_rbln_device() -> bool:
-    """No RBLN device available; memory-management ops no-op when True (torch.cuda parity)."""
+    """No RBLN device available; memory-management ops no-op when True (torch.cuda
+    parity).
+    """
     return torch_rbln._C.device_count() == 0
 
 
-def empty_cache(device: Optional[Union[int, str, torch.device]] = None) -> None:
-    """
-    Release all unoccupied cached memory currently held by the caching allocator.
+def empty_cache(device: int | str | torch.device | None = None) -> None:
+    """Release all unoccupied cached memory currently held by the caching allocator.
 
     This function releases cached memory blocks that are not currently in use,
     allowing them to be used by other applications or returned to the system.
@@ -133,28 +139,29 @@ def empty_cache(device: Optional[Union[int, str, torch.device]] = None) -> None:
     # "let go of everything the user isn't holding" complete and to bound it
     # under variable-shape workloads. Lazy import avoids a load-time cycle
     # (ops_utils imports broadly).
-    from torch_rbln._internal.ops_utils import view_recipe_cache_reset
+    from torch_rbln._internal.ops_utils import view_recipe_cache_reset  # noqa: PLC0415
 
     view_recipe_cache_reset()
-    # NB: the SDPA attn-weights cache is deliberately NOT flushed here. A pending backward's
-    # entry is still live and needed, so a global flush would silently downgrade a
-    # forward -> empty_cache() -> backward sequence to a CPU recompute. Inference never caches
-    # (the forward caches only when a backward may run), so there is no inference leak to
-    # reclaim; a grad-forward-with-no-backward entry lingers only until the next forward that
-    # reuses its output address overwrites or discards it -- see kernels/sdpa.py.
+    # NB: the SDPA attn-weights cache is deliberately NOT flushed here. A pending
+    # backward's entry is still live and needed, so a global flush would silently
+    # downgrade a forward -> empty_cache() -> backward sequence to a CPU recompute.
+    # Inference never caches (the forward caches only when a backward may run), so there
+    # is no inference leak to reclaim; a grad-forward-with-no-backward entry lingers
+    # only until the next forward that reuses its output address overwrites or discards
+    # it -- see kernels/sdpa.py.
     # No NPU: host caches above still dropped, but skip the device-side flush.
     if _no_rbln_device():
         return
     torch_rbln._C.empty_cache(device)
 
 
-def memory_stats(device: Optional[Union[int, str, torch.device]] = None) -> Dict[str, int]:
-    """
-    Return a dictionary of accelerator device memory allocator statistics.
+def memory_stats(device: int | str | torch.device | None = None) -> dict[str, int]:
+    """Return a dictionary of accelerator device memory allocator statistics.
 
     The returned dictionary contains various memory statistics. Keys are the
     RBLN allocator's dotted names, e.g.:
-    - allocated.current, allocated.peak, allocated.total_allocated, allocated.total_freed
+    - allocated.current, allocated.peak, allocated.total_allocated,
+      allocated.total_freed
     - reserved.current, reserved.peak, reserved.total_allocated, reserved.total_freed
     - active.current, active.peak
 
@@ -178,18 +185,17 @@ def memory_stats(device: Optional[Union[int, str, torch.device]] = None) -> Dict
 
 
 def memory_stats_per_chiplet(
-    device: Optional[Union[int, str, torch.device]] = None,
-) -> Dict[str, int]:
-    """
-    Return memory allocator statistics broken down per chiplet.
+    device: int | str | torch.device | None = None,
+) -> dict[str, int]:
+    """Return memory allocator statistics broken down per chiplet.
 
     Same keys as :func:`memory_stats`, each prefixed with ``npu.<n>.chiplet.<c>.`` --
     e.g. ``npu.0.chiplet.0.allocated.current``. A device runs out on its heaviest
     chiplet, which the aggregate :func:`memory_stats` hides.
 
-    ``npu.<n>`` is the n-th physical NPU of this logical device (``RBLN_NPUS_PER_DEVICE``
-    / ``RBLN_DEVICE_MAP``), not a physical NPU id; a 1:1 mapping yields ``npu.0`` only.
-    Same scope as :func:`memory_stats`.
+    ``npu.<n>`` is the n-th physical NPU of this logical device
+    (``RBLN_NPUS_PER_DEVICE`` / ``RBLN_DEVICE_MAP``), not a physical NPU id; a 1:1
+    mapping yields ``npu.0`` only. Same scope as :func:`memory_stats`.
 
     Args:
         device (Optional[Union[int, str, torch.device]]): The device to query.
@@ -204,16 +210,16 @@ def memory_stats_per_chiplet(
     return torch_rbln._C.memory_stats_per_chiplet(device)
 
 
-def memory_summary(device: Optional[Union[int, str, torch.device]] = None) -> str:
-    """
-    Return a human-readable printout of the current memory allocator statistics.
+def memory_summary(device: int | str | torch.device | None = None) -> str:
+    """Return a human-readable printout of the current memory allocator statistics.
 
     Rows are per (NPU, chiplet), so an imbalance is visible at a glance. The scope line
     under the title names what the numbers cover: they are this process's allocator, not
-    the NPU's occupancy (see :func:`memory_stats`). The ``npu`` column is the physical NPU
-    id as :func:`torch.rbln.device_summary` prints it: relative to ``RBLN_VISIBLE_DEVICES``,
-    so it differs from ``rbln-smi`` when that variable is set. A logical device grouping
-    several NPUs (``RBLN_NPUS_PER_DEVICE`` / ``RBLN_DEVICE_MAP``) gets one row per NPU.
+    the NPU's occupancy (see :func:`memory_stats`). The ``npu`` column is the physical
+    NPU id as :func:`torch.rbln.device_summary` prints it: relative to
+    ``RBLN_VISIBLE_DEVICES``, so it differs from ``rbln-smi`` when that variable is set.
+    A logical device grouping several NPUs (``RBLN_NPUS_PER_DEVICE`` /
+    ``RBLN_DEVICE_MAP``) gets one row per NPU.
 
     Peaks are tracked per chiplet, so the peak columns of the ``total`` row bound the
     joint peak from above rather than reporting it. :func:`memory_stats` carries the
@@ -252,8 +258,9 @@ def memory_summary(device: Optional[Union[int, str, torch.device]] = None) -> st
     def stat(npu: int, chiplet: int, key: str) -> int:
         return per_chiplet.get(f"npu.{npu}.chiplet.{chiplet}.{key}", 0)
 
-    # Local import: rsd_utils pulls in torch_rbln.device, which star-imports this module.
-    from torch_rbln._internal.rsd_utils import get_physical_device_ids
+    # Local import: rsd_utils pulls in torch_rbln.device, which star-imports this
+    # module.
+    from torch_rbln._internal.rsd_utils import get_physical_device_ids  # noqa: PLC0415
 
     # Stats keys carry the NPU's position within the logical device; print the physical
     # id device_summary() shows instead, falling back to the position if unmapped.
@@ -283,9 +290,8 @@ def memory_summary(device: Optional[Union[int, str, torch.device]] = None) -> st
     return "\n".join(lines) + "\n"
 
 
-def memory_allocated(device: Optional[Union[int, str, torch.device]] = None) -> int:
-    """
-    Return the current accelerator device memory occupied by tensors in bytes.
+def memory_allocated(device: int | str | torch.device | None = None) -> int:
+    """Return the current accelerator device memory occupied by tensors in bytes.
 
     Args:
         device (Optional[Union[int, str, torch.device]]): The device to query.
@@ -297,9 +303,9 @@ def memory_allocated(device: Optional[Union[int, str, torch.device]] = None) -> 
     return memory_stats(device).get("allocated.current", 0)
 
 
-def max_memory_allocated(device: Optional[Union[int, str, torch.device]] = None) -> int:
-    """
-    Return the current accelerator maximum device memory occupied by tensors in bytes.
+def max_memory_allocated(device: int | str | torch.device | None = None) -> int:
+    """Return the current accelerator maximum device memory occupied by tensors in
+    bytes.
 
     Args:
         device (Optional[Union[int, str, torch.device]]): The device to query.
@@ -311,9 +317,9 @@ def max_memory_allocated(device: Optional[Union[int, str, torch.device]] = None)
     return memory_stats(device).get("allocated.peak", 0)
 
 
-def memory_reserved(device: Optional[Union[int, str, torch.device]] = None) -> int:
-    """
-    Return the current accelerator device memory managed by the caching allocator in bytes.
+def memory_reserved(device: int | str | torch.device | None = None) -> int:
+    """Return the current accelerator device memory managed by the caching allocator in
+    bytes.
 
     Args:
         device (Optional[Union[int, str, torch.device]]): The device to query.
@@ -325,9 +331,9 @@ def memory_reserved(device: Optional[Union[int, str, torch.device]] = None) -> i
     return memory_stats(device).get("reserved.current", 0)
 
 
-def max_memory_reserved(device: Optional[Union[int, str, torch.device]] = None) -> int:
-    """
-    Return the current accelerator maximum device memory managed by the caching allocator in bytes.
+def max_memory_reserved(device: int | str | torch.device | None = None) -> int:
+    """Return the current accelerator maximum device memory managed by the caching
+    allocator in bytes.
 
     Args:
         device (Optional[Union[int, str, torch.device]]): The device to query.
@@ -339,17 +345,18 @@ def max_memory_reserved(device: Optional[Union[int, str, torch.device]] = None) 
     return memory_stats(device).get("reserved.peak", 0)
 
 
-def mem_get_info(device: Optional[Union[int, str, torch.device]] = None) -> tuple[int, int]:
-    """
-    Return the free and total device DRAM of ``device`` in bytes, as ``(free, total)``.
+def mem_get_info(device: int | str | torch.device | None = None) -> tuple[int, int]:
+    """Return the free and total device DRAM of ``device`` in bytes, as
+    ``(free, total)``.
 
     Same contract as :func:`torch.cuda.mem_get_info`, and what
-    :func:`torch.accelerator.get_memory_info` reports for ``rbln``: the NPU's figures as the
-    kernel driver sees them, across every process -- not this process's caching allocator,
-    which :func:`memory_stats` covers. ``total`` is the pool the driver can hand out, so it
-    sits below the part's nominal DRAM. A logical device spanning several physical NPUs
-    (``RBLN_NPUS_PER_DEVICE`` / ``RBLN_DEVICE_MAP``) reports their sum; one tensor still
-    lives on one NPU. A reading, not a reservation: another process may allocate right after.
+    :func:`torch.accelerator.get_memory_info` reports for ``rbln``: the NPU's figures as
+    the kernel driver sees them, across every process -- not this process's caching
+    allocator, which :func:`memory_stats` covers. ``total`` is the pool the driver can
+    hand out, so it sits below the part's nominal DRAM. A logical device spanning
+    several physical NPUs (``RBLN_NPUS_PER_DEVICE`` / ``RBLN_DEVICE_MAP``) reports their
+    sum; one tensor still lives on one NPU. A reading, not a reservation: another
+    process may allocate right after.
 
     Args:
         device (Optional[Union[int, str, torch.device]]): The device to query.
@@ -359,8 +366,8 @@ def mem_get_info(device: Optional[Union[int, str, torch.device]] = None) -> tupl
         tuple[int, int]: ``(free, total)`` in bytes.
 
     Raises:
-        RuntimeError: no RBLN device, ``RBLN_DUMMY_DEVICE`` set, or the installed UMD/KMD
-            does not provide the device memory query (older drivers).
+        RuntimeError: no RBLN device, ``RBLN_DUMMY_DEVICE`` set, or the installed
+            UMD/KMD does not provide the device memory query (older drivers).
     """
     device = _normalize_device(device)
     free, total = torch_rbln._C.mem_get_info(device)
@@ -368,21 +375,23 @@ def mem_get_info(device: Optional[Union[int, str, torch.device]] = None) -> tupl
 
 
 def mem_get_info_per_chiplet(
-    device: Optional[Union[int, str, torch.device]] = None,
-) -> Dict[str, int]:
-    """
-    Return the driver's device DRAM usage of ``device`` broken down per chiplet, in bytes.
+    device: int | str | torch.device | None = None,
+) -> dict[str, int]:
+    """Return the driver's device DRAM usage of ``device`` broken down per chiplet, in
+    bytes.
 
     Same figures as :func:`mem_get_info` before summation, keyed like
-    :func:`memory_stats_per_chiplet`: ``npu.<n>.chiplet.<c>.{total,used,free,largest_free,
-    largest_free_huge}`` for each chiplet, and ``npu.<n>.{total,used,free,granularity,
-    huge_granularity}`` for each physical NPU of the logical device. ``npu.<n>`` is the
-    NPU's position within the logical device, not a physical NPU id.
+    :func:`memory_stats_per_chiplet`:
+    ``npu.<n>.chiplet.<c>.{total,used,free,largest_free, largest_free_huge}`` for each
+    chiplet, and ``npu.<n>.{total,used,free,granularity, huge_granularity}`` for each
+    physical NPU of the logical device. ``npu.<n>`` is the NPU's position within the
+    logical device, not a physical NPU id.
 
-    Each chiplet allocates from its own pool, so a physically contiguous buffer is bounded
-    by one chiplet's ``largest_free`` (``largest_free_huge`` for the huge granule; 0 where
-    the part has none), which the device-wide ``free`` hides. ``largest_free`` may exceed
-    ``free`` in the same reply: both are estimates from a lock-free walk.
+    Each chiplet allocates from its own pool, so a physically contiguous buffer is
+    bounded by one chiplet's ``largest_free`` (``largest_free_huge`` for the huge
+    granule; 0 where the part has none), which the device-wide ``free`` hides.
+    ``largest_free`` may exceed ``free`` in the same reply: both are estimates from a
+    lock-free walk.
 
     Args:
         device (Optional[Union[int, str, torch.device]]): The device to query.
@@ -398,11 +407,12 @@ def mem_get_info_per_chiplet(
     return torch_rbln._C.mem_get_info_per_chiplet(device)
 
 
-def reset_accumulated_memory_stats(device: Optional[Union[int, str, torch.device]] = None) -> None:
-    """
-    Reset the "accumulated" (historical) stats tracked by the current accelerator memory allocator.
+def reset_accumulated_memory_stats(device: int | str | torch.device | None = None) -> None:
+    """Reset the "accumulated" (historical) stats tracked by the current accelerator
+    memory allocator.
 
-    This resets the accumulated counters for allocated, freed, and other historical statistics.
+    This resets the accumulated counters for allocated, freed, and other historical
+    statistics.
 
     Args:
         device (Optional[Union[int, str, torch.device]]): The device to reset stats for.
@@ -414,9 +424,8 @@ def reset_accumulated_memory_stats(device: Optional[Union[int, str, torch.device
     torch_rbln._C.reset_accumulated_memory_stats(device)
 
 
-def reset_peak_memory_stats(device: Optional[Union[int, str, torch.device]] = None) -> None:
-    """
-    Reset the "peak" stats tracked by the current accelerator memory allocator.
+def reset_peak_memory_stats(device: int | str | torch.device | None = None) -> None:
+    """Reset the "peak" stats tracked by the current accelerator memory allocator.
 
     This resets the peak memory usage counters to their current values.
 
@@ -435,8 +444,7 @@ _offload_depth = 0
 
 
 def bind_device_memory(tensor: torch.Tensor) -> None:
-    """
-    Materialize ``tensor``'s device allocation instead of leaving it lazy.
+    """Materialize ``tensor``'s device allocation instead of leaving it lazy.
 
     A device allocation reserves a virtual address and materializes the physical
     memory behind it on first use through a torch op. A consumer that reads those
@@ -468,8 +476,7 @@ def bind_device_memory(tensor: torch.Tensor) -> None:
 
 
 def huge_host_empty(nbytes: int) -> torch.Tensor:
-    """
-    Allocate a host buffer the device can DMA into without a staging copy.
+    """Allocate a host buffer the device can DMA into without a staging copy.
 
     An ordinary CPU tensor is 64 B aligned; the runtime's copy path stages any
     host address that is not page aligned through a bounce buffer, and even an
@@ -500,7 +507,7 @@ def huge_host_empty(nbytes: int) -> torch.Tensor:
         slab.view(...)  # hand to whatever consumes the host side
     """
     # Third Party
-    from rebel.host_memory import HugeHostBuffer
+    from rebel.host_memory import HugeHostBuffer  # noqa: PLC0415
 
     # Bound the request to what a size_t can carry. Past that the provider's
     # round-up to the alignment wraps to zero, which allocates nothing and then
@@ -510,7 +517,8 @@ def huge_host_empty(nbytes: int) -> torch.Tensor:
     # than a silent truncation.
     nbytes = operator.index(nbytes)
     if not 0 < nbytes <= sys.maxsize:
-        raise ValueError(f"nbytes must be in 1..{sys.maxsize}, but got {nbytes}")
+        msg = f"nbytes must be in 1..{sys.maxsize}, but got {nbytes}"
+        raise ValueError(msg)
 
     # frombuffer takes a buffer-protocol reference, which is what keeps the
     # allocation alive for as long as the tensor is: HugeHostBuffer frees itself
@@ -518,12 +526,12 @@ def huge_host_empty(nbytes: int) -> torch.Tensor:
     return torch.frombuffer(HugeHostBuffer(nbytes), dtype=torch.uint8)
 
 
-def host_register(ptr: int, nbytes: int, device: Optional[Union[int, str, torch.device]] = None) -> bool:
-    """
-    Pin a caller-owned host range for DMA on ``device``; the counterpart of ``cudaHostRegister``.
+def host_register(ptr: int, nbytes: int, device: int | str | torch.device | None = None) -> bool:
+    """Pin a caller-owned host range for DMA on ``device``; the counterpart of
+    ``cudaHostRegister``.
 
-    Copies whose host side is 4 KiB aligned and inside the range then DMA straight to and
-    from it instead of staging through a runtime bounce buffer.
+    Copies whose host side is 4 KiB aligned and inside the range then DMA straight to
+    and from it instead of staging through a runtime bounce buffer.
     Registration itself is costly, so register reused buffers once, not per transfer.
 
     The caller keeps ownership: call :func:`host_unregister` before freeing the memory.
@@ -536,14 +544,15 @@ def host_register(ptr: int, nbytes: int, device: Optional[Union[int, str, torch.
             If None, uses the current device. Defaults to None.
 
     Returns:
-        bool: True if registered. False if the range cannot be registered here -- no RBLN
-        device, or (with a warning) a runtime without host registration or a dummy device.
-        Copies over an unregistered range still work.
+        bool: True if registered. False if the range cannot be registered here -- no
+        RBLN device, or (with a warning) a runtime without host registration or a dummy
+        device. Copies over an unregistered range still work.
 
     Raises:
         TypeError: if ``ptr`` or ``nbytes`` is not an integer.
         ValueError: if ``ptr`` or ``nbytes`` is not positive.
-        RuntimeError: if the runtime refuses the range, e.g. it overlaps a registered range.
+        RuntimeError: if the runtime refuses the range, e.g. it overlaps a
+            registered range.
 
     Example::
 
@@ -555,24 +564,26 @@ def host_register(ptr: int, nbytes: int, device: Optional[Union[int, str, torch.
     ptr = operator.index(ptr)
     nbytes = operator.index(nbytes)
     if ptr <= 0:
-        raise ValueError(f"ptr must be positive, but got {ptr}")
+        msg = f"ptr must be positive, but got {ptr}"
+        raise ValueError(msg)
     if nbytes <= 0:
-        raise ValueError(f"nbytes must be positive, but got {nbytes}")
+        msg = f"nbytes must be positive, but got {nbytes}"
+        raise ValueError(msg)
     if _no_rbln_device():
         return False
     device = _normalize_device(device)
     return torch_rbln._C._host_register(device.index, ptr, nbytes)
 
 
-def host_unregister(ptr: int, device: Optional[Union[int, str, torch.device]] = None) -> None:
-    """
-    Unpin a range registered with :func:`host_register`. A synchronization point: waits for
-    the device's pending transfers first. A no-op when there is no RBLN device.
+def host_unregister(ptr: int, device: int | str | torch.device | None = None) -> None:
+    """Unpin a range registered with :func:`host_register`. A synchronization point:
+    waits for the device's pending transfers first. A no-op when there is no RBLN
+    device.
 
     Args:
         ptr: The ``ptr`` passed to :func:`host_register`.
-        device (Optional[Union[int, str, torch.device]]): The device it was registered on.
-            If None, uses the current device. Defaults to None.
+        device (Optional[Union[int, str, torch.device]]): The device it was registered
+            on. If None, uses the current device. Defaults to None.
 
     Raises:
         TypeError: if ``ptr`` is not an integer.
@@ -587,8 +598,7 @@ def host_unregister(ptr: int, device: Optional[Union[int, str, torch.device]] = 
 
 @contextlib.contextmanager
 def offload() -> Iterator[None]:
-    """
-    Context manager that enables RBLN file offloading for its scope.
+    """Context manager that enables RBLN file offloading for its scope.
 
     Inside the ``with`` block, the process-wide file offloading switch is on, so
     host-side regions backing RBLN tensors allocated within the block may be paged
@@ -608,23 +618,23 @@ def offload() -> Iterator[None]:
     with _offload_lock:
         _offload_depth += 1
         if _offload_depth == 1:
-            torch_rbln._C._set_file_offloading_enabled(True)
+            torch_rbln._C._set_file_offloading_enabled(enabled=True)
     try:
         yield
     finally:
         with _offload_lock:
             _offload_depth -= 1
             if _offload_depth == 0:
-                torch_rbln._C._set_file_offloading_enabled(False)
+                torch_rbln._C._set_file_offloading_enabled(enabled=False)
 
 
 def release_offload_temp_storage() -> int:
-    """
-    Remove this process's file offloading temp files and directories.
+    """Remove this process's file offloading temp files and directories.
 
-    :func:`offload` writes into a per-process directory under ``RBLN_OFFLOAD_DIR`` (default
-    ``$HOME/.cache/rbln_cache/offload``) that the runtime removes on teardown. Call this on a
-    shutdown path that may be killed first. Offloaded tensors must not be used afterwards.
+    :func:`offload` writes into a per-process directory under ``RBLN_OFFLOAD_DIR``
+    (default ``$HOME/.cache/rbln_cache/offload``) that the runtime removes on teardown.
+    Call this on a shutdown path that may be killed first. Offloaded tensors must not be
+    used afterwards.
 
     Returns:
         int: The number of temp files removed.
