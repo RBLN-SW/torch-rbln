@@ -369,9 +369,8 @@ void register_internal_api(py::module_& module) {
         const auto nbytes =
             c10::multiply_integers(sizes) * c10::elementSize(dtype);
         void* base = c10::rbln::malloc_exportable(device_index, nbytes);
-        const auto base_ptr = reinterpret_cast<uint64_t>(base);
         return at::native::rbln::create_owning_tensor_from_ptr(
-            base_ptr, base_ptr, sizes, dtype);
+            reinterpret_cast<uint64_t>(base), sizes, dtype);
       },
       "Internal: allocate an owning RBLN tensor that _export_device_memory accepts");
   module.def(
@@ -394,9 +393,8 @@ void register_internal_api(py::module_& module) {
         const std::vector<uint8_t> bytes(raw.begin(), raw.end());
         void* base = c10::rbln::import_device_memory(
             device_index, static_cast<size_t>(size), bytes, fds);
-        const auto base_ptr = reinterpret_cast<uint64_t>(base);
         return at::native::rbln::create_owning_tensor_from_ptr(
-            base_ptr, base_ptr, sizes, dtype);
+            reinterpret_cast<uint64_t>(base), sizes, dtype);
       },
       "Internal: rebuild an owning RBLN tensor from (size, payload, dma_buf_fds)");
 
