@@ -654,7 +654,7 @@ int quick_fallback_check(
     }
   }
   if (nan_inf_found) {
-    return 2; // nan/inf in input (non-deploy debug scan)
+    return 2; // nan/inf in input (opt-in scan)
   }
   if (cache.out_positional_idx >= 0 && input_dtype) {
     const auto& out_iv = args[cache.out_positional_idx];
