@@ -38,9 +38,9 @@ def _opener_main(conn):
         try:
             if cmd == "open":
                 key, handle = args
-                fds = [reduction.recv_handle(conn) for _ in handle.fds]
+                fds = [reduction.recv_handle(conn) for _ in range(handle.num_fds)]
                 try:
-                    tensors[key] = torch.rbln.ipc.open_tensor(handle, fds, device=handle.device_index)
+                    tensors[key] = torch.rbln.ipc.open_tensor(handle, fds, device=DEVICE)
                 finally:
                     for fd in fds:
                         os.close(fd)
@@ -169,15 +169,15 @@ class TestIpcScenarios(TestCase):
         return result
 
     def _share(self, key: str, x: torch.Tensor):
-        handle = torch.rbln.ipc.export_tensor(x)
+        handle, fds = torch.rbln.ipc.export_tensor(x)
         try:
-            self._conn.send(("open", key, handle._replace(fds=[-1] * len(handle.fds))))
-            for fd in handle.fds:
+            self._conn.send(("open", key, handle))
+            for fd in fds:
                 reduction.send_handle(self._conn, fd, self._proc.pid)
             status, result = self._conn.recv()
             self.assertEqual(status, "ok", result)
         finally:
-            for fd in handle.fds:
+            for fd in fds:
                 os.close(fd)
         return handle
 
@@ -269,7 +269,7 @@ class TestIpcScenarios(TestCase):
         n = 4096
         x = _exportable(torch.arange(n, dtype=torch.float32), _sharded_layout(n, chiplets))
         handle = self._share(f"sharded-{chiplets}", x)
-        self.assertEqual(len(handle.fds), chiplets)
+        self.assertEqual(handle.num_fds, chiplets)
         self.assertEqual(self._call("read", f"sharded-{chiplets}"), torch.arange(n, dtype=torch.float32))
         self._call("add_", f"sharded-{chiplets}", 1.0)
         self.assertEqual(x.cpu(), torch.arange(n, dtype=torch.float32) + 1)
@@ -312,27 +312,27 @@ class TestIpcScenarios(TestCase):
         x.add_(5.0)
         self.assertEqual(x.cpu(), torch.full((512,), 5.0))
 
-    def test_handle_pickles_without_fds(self):
+    def test_handle_pickles(self):
         x = _exportable(torch.zeros(3, 5, dtype=torch.bfloat16))
-        h = torch.rbln.ipc.export_tensor(x)
+        h, fds = torch.rbln.ipc.export_tensor(x)
         try:
-            back = pickle.loads(pickle.dumps(h._replace(fds=[])))  # noqa: S301
+            back = pickle.loads(pickle.dumps(h))  # noqa: S301
             self.assertEqual(back.payload, h.payload)
             self.assertEqual(back.shape, h.shape)
             self.assertEqual(back.dtype, h.dtype)
             self.assertEqual(back.nbytes, 3 * 5 * 2)
         finally:
-            for fd in h.fds:
+            for fd in fds:
                 os.close(fd)
 
     def test_exporting_process_cannot_open_its_own_handle(self):
         x = _exportable(torch.zeros(256))
-        h = torch.rbln.ipc.export_tensor(x)
+        h, fds = torch.rbln.ipc.export_tensor(x)
         try:
             with self.assertRaisesRegex(RuntimeError, "rbln_import_device_memory failed"):
-                torch.rbln.ipc.open_tensor(h)
+                torch.rbln.ipc.open_tensor(h, fds, device=DEVICE)
         finally:
-            for fd in h.fds:
+            for fd in fds:
                 os.close(fd)
         x.fill_(4.0)
         self.assertEqual(x.cpu(), torch.full((256,), 4.0))
@@ -348,8 +348,8 @@ class TestIpcScenarios(TestCase):
 
     def test_exported_tensor_keeps_normal_ops(self):
         x = _exportable(torch.arange(1024, dtype=torch.float32))
-        h = torch.rbln.ipc.export_tensor(x)
-        for fd in h.fds:
+        _, fds = torch.rbln.ipc.export_tensor(x)
+        for fd in fds:
             os.close(fd)
         x.mul_(2.0)
         x[:10].fill_(-1.0)

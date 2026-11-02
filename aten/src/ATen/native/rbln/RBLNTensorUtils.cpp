@@ -83,16 +83,4 @@ at::Tensor create_tensor_from_ptr(
   return at::from_blob(data, sizes, options);
 }
 
-at::Tensor create_owning_tensor_from_ptr(
-    uint64_t data_ptr,
-    c10::IntArrayRef sizes,
-    c10::ScalarType dtype) {
-  // NOLINTNEXTLINE(performance-no-int-to-ptr)
-  auto* data = reinterpret_cast<void*>(data_ptr);
-  const auto device = c10::rbln::get_rbln_hooks()->getDeviceFromPtr(data);
-  const auto options = c10::TensorOptions().dtype(dtype).device(device);
-  return at::from_blob(
-      data, sizes, [](void* p) { c10::rbln::free_nothrow(p); }, options);
-}
-
 } // namespace at::native::rbln

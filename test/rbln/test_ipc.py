@@ -21,9 +21,9 @@ def _opener_main(conn):
     import torch  # noqa: PLC0415
 
     handle = conn.recv()
-    fds = [reduction.recv_handle(conn) for _ in handle.fds]
+    fds = [reduction.recv_handle(conn) for _ in range(handle.num_fds)]
     try:
-        t = torch.rbln.ipc.open_tensor(handle, fds, device=handle.device_index)
+        t = torch.rbln.ipc.open_tensor(handle, fds, device=0)
         conn.send(("ok", t.cpu().tolist()))
         del t
     except Exception as e:
@@ -35,18 +35,18 @@ def _opener_main(conn):
     os._exit(0)
 
 
-def _open_in_child(handle) -> list:
+def _open_in_child(handle, fds) -> list:
     ctx = multiprocessing.get_context("spawn")
     parent, child = ctx.Pipe()
     p = ctx.Process(target=_opener_main, args=(child,))
     p.start()
     try:
-        parent.send(handle._replace(fds=[-1] * len(handle.fds)))
-        for fd in handle.fds:
+        parent.send(handle)
+        for fd in fds:
             reduction.send_handle(parent, fd, p.pid)
         status, payload = parent.recv()
     finally:
-        for fd in handle.fds:
+        for fd in fds:
             os.close(fd)
         p.join(timeout=120)
     assert status == "ok", payload
@@ -120,16 +120,16 @@ class TestIpc(TestCase):
 
     def test_export_describes_the_logical_tensor(self):
         x = _exportable_arange(1024)
-        h = torch.rbln.ipc.export_tensor(x)
+        h, fds = torch.rbln.ipc.export_tensor(x)
         try:
             self.assertEqual(h.nbytes, 1024 * 4)
             self.assertEqual(h.shape, x.shape)
             self.assertEqual(h.dtype, torch.float32)
-            self.assertEqual(h.device_index, 0)
             self.assertIsInstance(h.payload, bytes)
-            self.assertEqual(len(h.fds), 1)
+            self.assertEqual(h.num_fds, 1)
+            self.assertEqual(len(fds), 1)
         finally:
-            for fd in h.fds:
+            for fd in fds:
                 os.close(fd)
 
     def test_export_rejects_non_exportable_tensor(self):
@@ -143,37 +143,37 @@ class TestIpc(TestCase):
             torch.rbln.ipc.export_tensor(x[16:])
 
     def test_export_rejects_cpu_tensor(self):
-        with self.assertRaisesRegex(RuntimeError, "expected an rbln tensor"):
+        with self.assertRaisesRegex(RuntimeError, "must be an RBLN tensor"):
             torch.rbln.ipc.export_tensor(torch.ones(4))
 
     def test_open_rejects_wrong_fd_count(self):
         x = _exportable_arange(1024)
-        h = torch.rbln.ipc.export_tensor(x)
+        h, fds = torch.rbln.ipc.export_tensor(x)
         try:
             with self.assertRaisesRegex(RuntimeError, "fd"):
                 torch.rbln.ipc.open_tensor(h, fds=[])
         finally:
-            for fd in h.fds:
+            for fd in fds:
                 os.close(fd)
 
     def test_cross_process_open_reads_exporter_data(self):
         x = _exportable_arange(1024)
-        got = _open_in_child(torch.rbln.ipc.export_tensor(x))
+        got = _open_in_child(*torch.rbln.ipc.export_tensor(x))
         self.assertEqual(got, list(range(1024)))
 
     def test_cross_process_open_of_chiplet_sharded_tensor(self):
         x = _exportable_arange(1024, _two_chiplet_layout(1024))
-        h = torch.rbln.ipc.export_tensor(x)
-        self.assertEqual(len(h.fds), 2)
-        got = _open_in_child(h)
+        h, fds = torch.rbln.ipc.export_tensor(x)
+        self.assertEqual(h.num_fds, 2)
+        got = _open_in_child(h, fds)
         self.assertEqual(got, list(range(1024)))
 
     def test_layout_is_fixed_after_export(self):
         from rebel import _C  # noqa: PLC0415
 
         x = _exportable_arange(1024, _two_chiplet_layout(1024))
-        h = torch.rbln.ipc.export_tensor(x)
-        for fd in h.fds:
+        _, fds = torch.rbln.ipc.export_tensor(x)
+        for fd in fds:
             os.close(fd)
         with self.assertRaisesRegex(RuntimeError, "dma-buf"):
             _C.vmem.debug.set_device_alloc_by_json(x.data_ptr(), _flat_layout(1024))

@@ -1,4 +1,5 @@
-from torch_rbln import ipc, programs as _programs  # noqa: F401
+from torch_rbln import ipc  # noqa: F401
+from torch_rbln import programs as _programs
 from torch_rbln.device.device import *  # noqa: F403
 from torch_rbln.device.device_tensor_utils import *  # noqa: F403
 from torch_rbln.device.streams import *  # noqa: F403

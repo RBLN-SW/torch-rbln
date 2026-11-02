@@ -27,20 +27,17 @@ __all__ = [
 
 
 class IpcHandle(NamedTuple):
-    """Handle of an exported tensor (see :func:`export_tensor`).
+    """Picklable description of an exported tensor (see :func:`export_tensor`).
 
-    Everything but ``fds`` pickles as-is. ``fds`` are dma-buf file descriptors owned by
-    the holder. Pass them to the other process with fd-passing
-    (``multiprocessing.reduction.send_handle`` / ``SCM_RIGHTS``) and close them once
-    sent. Their number is an implementation detail; pass them all, in order.
+    The dma-buf fds that back it are returned next to it, not inside it: they only
+    mean something in the process that holds them.
     """
 
-    fds: list[int]
     payload: bytes
     nbytes: int
     shape: torch.Size
     dtype: torch.dtype
-    device_index: int
+    num_fds: int
 
 
 def empty_exportable(
@@ -63,7 +60,7 @@ def empty_exportable(
     return torch_rbln._C._empty_exportable(dev.index, list(shape), dtype)
 
 
-def export_tensor(tensor: torch.Tensor) -> IpcHandle:
+def export_tensor(tensor: torch.Tensor) -> tuple[IpcHandle, list[int]]:
     """Export ``tensor`` so another process on the same device can open it.
 
     The tensor must come from :func:`empty_exportable` and cover its whole storage
@@ -72,26 +69,28 @@ def export_tensor(tensor: torch.Tensor) -> IpcHandle:
     operations that would move or resize it raise instead. The exporter must keep
     ``tensor`` alive while any other process uses the handle.
 
+    Returns ``(handle, fds)``. ``handle`` pickles. ``fds`` are dma-buf file
+    descriptors owned by the caller: pass them to the other process with fd-passing
+    (``multiprocessing.reduction.send_handle`` / ``SCM_RIGHTS``), in order, and close
+    them once sent. Their number is an implementation detail.
+
     Args:
         tensor: An RBLN tensor from :func:`empty_exportable`.
     """
-    if tensor.device.type != "rbln":
-        msg = f"export_tensor: expected an rbln tensor, got {tensor.device}"
-        raise RuntimeError(msg)
     nbytes, payload, fds = torch_rbln._C._export_device_memory(tensor)
-    return IpcHandle(
-        fds=list(fds),
+    handle = IpcHandle(
         payload=payload,
         nbytes=nbytes,
         shape=tensor.shape,
         dtype=tensor.dtype,
-        device_index=tensor.device.index,
+        num_fds=len(fds),
     )
+    return handle, list(fds)
 
 
 def open_tensor(
     handle: IpcHandle,
-    fds: list[int] | None = None,
+    fds: list[int],
     device: int | str | torch.device | None = None,
 ) -> torch.Tensor:
     """Open a tensor exported by :func:`export_tensor` in another process.
@@ -102,16 +101,15 @@ def open_tensor(
 
     Args:
         handle: The exporter's handle, typically unpickled.
-        fds: The dma-buf fds as received in this process, in the order of
-            ``handle.fds``. Defaults to ``handle.fds``, for a handle that never
-            crossed a process boundary.
-        device: The rbln device the memory lives on. Must be the same physical
-            device as the exporter's. Defaults to the current device.
+        fds: The dma-buf fds as received in this process, in the exporter's order.
+        device: The rbln device the memory lives on, as a logical device of this
+            process. It must map to the exporter's physical NPUs. Defaults to the
+            current device.
     """
     dev = _normalize_device(device)
-    fds = handle.fds if fds is None else list(fds)
-    if len(fds) != len(handle.fds):
-        msg = f"open_tensor: the handle has {len(handle.fds)} fd(s) but {len(fds)} were given"
+    fds = list(fds)
+    if len(fds) != handle.num_fds:
+        msg = f"open_tensor: the handle has {handle.num_fds} fd(s) but {len(fds)} were given"
         raise RuntimeError(msg)
     return torch_rbln._C._import_device_memory(
         dev.index, handle.nbytes, handle.payload, fds, list(handle.shape), handle.dtype

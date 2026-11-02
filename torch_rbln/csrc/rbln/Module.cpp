@@ -308,6 +308,19 @@ void check_base_rbln_tensor(
       " must cover its whole storage (contiguous, storage_offset 0)");
 }
 
+at::Tensor owning_rbln_tensor(
+    void* base,
+    c10::DeviceIndex device_index,
+    c10::IntArrayRef sizes,
+    c10::ScalarType dtype) {
+  return at::from_blob(
+      base,
+      sizes,
+      c10::GetAllocator(c10::kPrivateUse1)->raw_deleter(),
+      c10::TensorOptions().dtype(dtype).device(
+          c10::kPrivateUse1, device_index));
+}
+
 /**
  * @brief Register internal API functions with Python
  *
@@ -369,8 +382,7 @@ void register_internal_api(py::module_& module) {
         const auto nbytes =
             c10::multiply_integers(sizes) * c10::elementSize(dtype);
         void* base = c10::rbln::malloc_exportable(device_index, nbytes);
-        return at::native::rbln::create_owning_tensor_from_ptr(
-            reinterpret_cast<uint64_t>(base), sizes, dtype);
+        return owning_rbln_tensor(base, device_index, sizes, dtype);
       },
       "Internal: allocate an owning RBLN tensor that _export_device_memory accepts");
   module.def(
@@ -389,12 +401,15 @@ void register_internal_api(py::module_& module) {
             nbytes,
             " bytes but the handle covers ",
             size);
-        const std::string raw = payload;
-        const std::vector<uint8_t> bytes(raw.begin(), raw.end());
+        char* raw = nullptr;
+        Py_ssize_t raw_size = 0;
+        if (PyBytes_AsStringAndSize(payload.ptr(), &raw, &raw_size) != 0) {
+          throw py::error_already_set();
+        }
+        const std::vector<uint8_t> bytes(raw, raw + raw_size);
         void* base = c10::rbln::import_device_memory(
             device_index, static_cast<size_t>(size), bytes, fds);
-        return at::native::rbln::create_owning_tensor_from_ptr(
-            reinterpret_cast<uint64_t>(base), sizes, dtype);
+        return owning_rbln_tensor(base, device_index, sizes, dtype);
       },
       "Internal: rebuild an owning RBLN tensor from (size, payload, dma_buf_fds)");
 
