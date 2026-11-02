@@ -692,7 +692,8 @@ void free(void* data) {
 }
 
 DeviceMemoryExport export_device_memory(const void* rbln_data) {
-  RBLN_CHECK(rbln_data != nullptr, "export_device_memory: rbln_data is nullptr");
+  RBLN_CHECK(
+      rbln_data != nullptr, "export_device_memory: rbln_data is nullptr");
   require_runtime("export device memory");
   const auto vaddr = reinterpret_cast<uint64_t>(rbln_data);
   DeviceMemoryExport out{};
@@ -701,25 +702,39 @@ DeviceMemoryExport export_device_memory(const void* rbln_data) {
       "rbln_export_device_memory failed for vaddr={:#x}; only tensors from torch.rbln.ipc.empty_exportable can be "
       "exported",
       vaddr);
-  RBLN_LOG_DEBUG("export_device_memory: vaddr={:#x} size={} fds={}", vaddr, out.size, out.fds.size());
+  RBLN_LOG_DEBUG(
+      "export_device_memory: vaddr={:#x} size={} fds={}",
+      vaddr,
+      out.size,
+      out.fds.size());
   return out;
 }
 
 void* malloc_exportable(c10::DeviceIndex device_index, size_t nbytes) {
-  RBLN_CHECK(nbytes > 0, "malloc_exportable: nbytes must be positive, but got {}", nbytes);
+  RBLN_CHECK(
+      nbytes > 0,
+      "malloc_exportable: nbytes must be positive, but got {}",
+      nbytes);
   check_device_index(device_index);
   require_runtime("allocate exportable device memory");
-  const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
+  const auto torch_device_id =
+      static_cast<uint32_t>(to_device_id(device_index));
   uint64_t vaddr = 0;
   RBLN_CHECK(
-      !::rbln::rbln_malloc_exportable(torch_device_id, static_cast<uint64_t>(nbytes), vaddr),
+      !::rbln::rbln_malloc_exportable(
+          torch_device_id, static_cast<uint64_t>(nbytes), vaddr),
       "rbln_malloc_exportable failed (rbln:{}, {} bytes); check that /dev/accel is accessible",
       static_cast<int>(device_index),
       nbytes);
-  auto* data = reinterpret_cast<void*>(vaddr); // NOLINT(performance-no-int-to-ptr)
+  auto* data =
+      reinterpret_cast<void*>(vaddr); // NOLINT(performance-no-int-to-ptr)
   RBLN_CHECK(data != nullptr, "malloc_exportable returned a null pointer");
   mark_device_context_initialized(device_index);
-  RBLN_LOG_DEBUG("malloc_exportable: rbln:{} nbytes={} -> vaddr={:#x}", static_cast<int>(device_index), nbytes, vaddr);
+  RBLN_LOG_DEBUG(
+      "malloc_exportable: rbln:{} nbytes={} -> vaddr={:#x}",
+      static_cast<int>(device_index),
+      nbytes,
+      vaddr);
   return data;
 }
 
@@ -729,19 +744,25 @@ void* import_device_memory(
     const std::vector<uint8_t>& payload,
     const std::vector<int>& fds) {
   RBLN_CHECK(!fds.empty(), "import_device_memory: no dma-buf fd given");
-  RBLN_CHECK(nbytes > 0, "import_device_memory: nbytes must be positive, but got {}", nbytes);
+  RBLN_CHECK(
+      nbytes > 0,
+      "import_device_memory: nbytes must be positive, but got {}",
+      nbytes);
   check_device_index(device_index);
   require_runtime("import device memory");
-  const auto torch_device_id = static_cast<uint32_t>(to_device_id(device_index));
+  const auto torch_device_id =
+      static_cast<uint32_t>(to_device_id(device_index));
   uint64_t vaddr = 0;
   RBLN_CHECK(
-      !::rbln::rbln_import_device_memory(torch_device_id, static_cast<uint64_t>(nbytes), payload, fds, vaddr),
+      !::rbln::rbln_import_device_memory(
+          torch_device_id, static_cast<uint64_t>(nbytes), payload, fds, vaddr),
       "rbln_import_device_memory failed (rbln:{}, {} fds, {} bytes); check that /dev/accel is accessible and the "
       "handle was exported from the same device",
       static_cast<int>(device_index),
       fds.size(),
       nbytes);
-  auto* data = reinterpret_cast<void*>(vaddr); // NOLINT(performance-no-int-to-ptr)
+  auto* data =
+      reinterpret_cast<void*>(vaddr); // NOLINT(performance-no-int-to-ptr)
   RBLN_CHECK(data != nullptr, "import_device_memory returned a null pointer");
   mark_device_context_initialized(device_index);
   RBLN_LOG_DEBUG(

@@ -2,7 +2,8 @@
 
 One opener process serves the whole class over a pipe, standing in for an LMCache cache
 server next to a vLLM worker. The exporter (this process) plays the worker: it owns the
-tensors, the opener reads them (store), writes them (retrieve) and runs device ops on them.
+tensors, the opener reads them (store), writes them (retrieve) and runs device ops on
+them.
 """
 
 import json
@@ -13,7 +14,7 @@ from multiprocessing import reduction
 
 import pytest
 import torch
-from torch.testing._internal.common_utils import parametrize, run_tests, TestCase, instantiate_parametrized_tests
+from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize, run_tests, TestCase
 
 import torch_rbln  # noqa: F401
 
@@ -28,7 +29,6 @@ def _accel_node_accessible() -> bool:
 def _opener_main(conn):
     """Child: open handles it is sent and run commands on the opened tensors."""
     import torch  # noqa: PLC0415
-    import torch_rbln  # noqa: F401, PLC0415
 
     tensors = {}
     while True:
@@ -77,10 +77,10 @@ def _opener_main(conn):
                 del tensors[args[0]]
                 result = None
             else:
-                raise ValueError(cmd)
+                raise ValueError(cmd)  # noqa: TRY301
             torch.rbln.synchronize()
             conn.send(("ok", result))
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             conn.send(("err", repr(e)))
     conn.close()
     os._exit(0)
@@ -117,7 +117,7 @@ def _sharded_layout(n: int, chiplets: int, dtype_code: int = 7, elem_size: int =
     )
 
 
-def _exportable(src: torch.Tensor, layout: str = None) -> torch.Tensor:
+def _exportable(src: torch.Tensor, layout: str | None = None) -> torch.Tensor:
     x = torch.rbln.ipc.empty_exportable(src.shape, dtype=src.dtype, device=DEVICE)
     if layout is not None:
         from rebel import _C  # noqa: PLC0415
@@ -136,7 +136,9 @@ def _values(shape, dtype, seed=0) -> torch.Tensor:
 
 
 @pytest.mark.test_set_ci
-@pytest.mark.skipif(not _accel_node_accessible(), reason="/dev/accel/accel0 not accessible (export/import need the DRM accel node)")
+@pytest.mark.skipif(
+    not _accel_node_accessible(), reason="/dev/accel/accel0 not accessible (export/import need the DRM accel node)"
+)
 class TestIpcScenarios(TestCase):
     @classmethod
     def setUpClass(cls):
@@ -179,7 +181,7 @@ class TestIpcScenarios(TestCase):
                 os.close(fd)
         return handle
 
-    # --- store direction: the opener reads what the exporter wrote ---------------------
+    # --- store direction: the opener reads what the exporter wrote --------------------
 
     @parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16, torch.int32, torch.int8])
     def test_opener_reads_every_dtype(self, dtype):
@@ -190,7 +192,8 @@ class TestIpcScenarios(TestCase):
         self._call("drop", f"dtype-{dtype}")
 
     def test_opener_gathers_kv_blocks(self):
-        # blocks-first KV cache of one layer: [num_blocks, kv, heads, 1, block_size, head_dim]
+        # one layer's blocks-first KV cache:
+        # num_blocks x kv x heads x 1 x block_size x head_dim
         src = _values((8, 2, 2, 1, 16, 64), torch.bfloat16)
         kv = _exportable(src)
         self._share("kv-gather", kv)
@@ -221,7 +224,7 @@ class TestIpcScenarios(TestCase):
             self.assertEqual(self._call("read", f"layer-{i}"), torch.full((2, 512), float(i)))
             self._call("drop", f"layer-{i}")
 
-    # --- retrieve direction: the exporter sees what the opener wrote ---------------------
+    # --- retrieve direction: the exporter sees what the opener wrote ------------------
 
     def test_exporter_sees_opener_scatter_into_kv_blocks(self):
         kv = _exportable(torch.zeros(8, 2, 2, 1, 16, 64, dtype=torch.bfloat16))
@@ -259,7 +262,7 @@ class TestIpcScenarios(TestCase):
             self.assertEqual(x.cpu(), torch.full((256,), 2.0 * step + 2))
         self._call("drop", "ping-pong")
 
-    # --- chiplet-sharded layouts ----------------------------------------------------------
+    # --- chiplet-sharded layouts ------------------------------------------------------
 
     @parametrize("chiplets", [2, 4])
     def test_sharded_tensor_both_ways(self, chiplets):
@@ -274,7 +277,7 @@ class TestIpcScenarios(TestCase):
         self.assertEqual(self._call("gather", f"sharded-{chiplets}", 0, index), index.to(torch.float32) + 1)
         self._call("drop", f"sharded-{chiplets}")
 
-    # --- graph mode -----------------------------------------------------------------------
+    # --- graph mode -------------------------------------------------------------------
 
     def test_compiled_graph_on_exported_and_opened_tensor(self):
         f = torch.compile(lambda t: t + 1, backend="rbln", dynamic=False)
@@ -285,7 +288,7 @@ class TestIpcScenarios(TestCase):
         self.assertEqual(f(x).cpu(), torch.arange(1024, dtype=torch.float32) + 1)
         self._call("drop", "graph")
 
-    # --- handles and lifetime -------------------------------------------------------------
+    # --- handles and lifetime ---------------------------------------------------------
 
     def test_two_exports_of_one_tensor_alias(self):
         x = _exportable(torch.zeros(512))
@@ -313,7 +316,7 @@ class TestIpcScenarios(TestCase):
         x = _exportable(torch.zeros(3, 5, dtype=torch.bfloat16))
         h = torch.rbln.ipc.export_tensor(x)
         try:
-            back = pickle.loads(pickle.dumps(h._replace(fds=[])))
+            back = pickle.loads(pickle.dumps(h._replace(fds=[])))  # noqa: S301
             self.assertEqual(back.payload, h.payload)
             self.assertEqual(back.shape, h.shape)
             self.assertEqual(back.dtype, h.dtype)

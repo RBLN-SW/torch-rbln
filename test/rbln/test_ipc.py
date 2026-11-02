@@ -19,7 +19,6 @@ def _accel_node_accessible() -> bool:
 def _opener_main(conn):
     """Child: receive the handle and its fds, open the tensor, report its values."""
     import torch  # noqa: PLC0415
-    import torch_rbln  # noqa: F401, PLC0415
 
     handle = conn.recv()
     fds = [reduction.recv_handle(conn) for _ in handle.fds]
@@ -27,7 +26,7 @@ def _opener_main(conn):
         t = torch.rbln.ipc.open_tensor(handle, fds, device=handle.device_index)
         conn.send(("ok", t.cpu().tolist()))
         del t
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         conn.send(("err", repr(e)))
     finally:
         for fd in fds:
@@ -97,7 +96,7 @@ def _flat_layout(n: int) -> str:
     return json.dumps({"on_device": {"allocs": [{"node_id": 0, "chiplet_id": 0, "size": n * 4}]}})
 
 
-def _exportable_arange(n: int, layout: str = None) -> torch.Tensor:
+def _exportable_arange(n: int, layout: str | None = None) -> torch.Tensor:
     x = torch.rbln.ipc.empty_exportable((n,), dtype=torch.float32, device="rbln:0")
     if layout is not None:
         from rebel import _C  # noqa: PLC0415
@@ -109,7 +108,9 @@ def _exportable_arange(n: int, layout: str = None) -> torch.Tensor:
 
 
 @pytest.mark.test_set_ci
-@pytest.mark.skipif(not _accel_node_accessible(), reason="/dev/accel/accel0 not accessible (export/import need the DRM accel node)")
+@pytest.mark.skipif(
+    not _accel_node_accessible(), reason="/dev/accel/accel0 not accessible (export/import need the DRM accel node)"
+)
 class TestIpc(TestCase):
     def test_empty_exportable_is_an_rbln_tensor(self):
         x = torch.rbln.ipc.empty_exportable((4, 8), dtype=torch.bfloat16, device="rbln:0")

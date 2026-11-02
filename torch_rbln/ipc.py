@@ -1,15 +1,16 @@
 """Cross-process RBLN device memory, exposed as ``torch.rbln.ipc``.
 
 A tensor from :func:`empty_exportable` can be shared with another process on the same
-device: :func:`export_tensor` turns it into an :class:`IpcHandle`, and :func:`open_tensor`
-in the other process maps the same memory back as a tensor. Callers only deal with the
-logical tensor. How the runtime lays the memory out on device (sharding across chiplets,
-dtype transforms) travels inside ``IpcHandle.payload`` and is rebuilt on open.
+device: :func:`export_tensor` turns it into an :class:`IpcHandle`, and
+:func:`open_tensor` in the other process maps the same memory back as a tensor. Callers
+only deal with the logical tensor. How the runtime lays the memory out on device
+(sharding across chiplets, dtype transforms) travels inside ``IpcHandle.payload`` and is
+rebuilt on open.
 
 Both processes must be able to open the device's DRM accel node (``/dev/accel/accelN``).
 """
 
-from typing import NamedTuple, Optional, Union
+from typing import NamedTuple
 
 import torch
 
@@ -30,8 +31,8 @@ class IpcHandle(NamedTuple):
 
     Everything but ``fds`` pickles as-is. ``fds`` are dma-buf file descriptors owned by
     the holder. Pass them to the other process with fd-passing
-    (``multiprocessing.reduction.send_handle`` / ``SCM_RIGHTS``) and close them once sent.
-    Their number is an implementation detail; pass them all, in order.
+    (``multiprocessing.reduction.send_handle`` / ``SCM_RIGHTS``) and close them once
+    sent. Their number is an implementation detail; pass them all, in order.
     """
 
     fds: list[int]
@@ -45,10 +46,9 @@ class IpcHandle(NamedTuple):
 def empty_exportable(
     shape,
     dtype: torch.dtype = torch.float32,
-    device: Optional[Union[int, str, torch.device]] = None,
+    device: int | str | torch.device | None = None,
 ) -> torch.Tensor:
-    """
-    Allocate an uninitialized RBLN tensor that :func:`export_tensor` can export.
+    """Allocate an uninitialized RBLN tensor that :func:`export_tensor` can export.
 
     Only tensors from this function can be exported. The runtime places the memory
     on device like any other tensor, for example in the layout a compiled model asks
@@ -64,8 +64,7 @@ def empty_exportable(
 
 
 def export_tensor(tensor: torch.Tensor) -> IpcHandle:
-    """
-    Export ``tensor`` so another process on the same device can open it.
+    """Export ``tensor`` so another process on the same device can open it.
 
     The tensor must come from :func:`empty_exportable` and cover its whole storage
     (contiguous, zero storage offset). If nothing has placed it on device yet, it is
@@ -77,7 +76,8 @@ def export_tensor(tensor: torch.Tensor) -> IpcHandle:
         tensor: An RBLN tensor from :func:`empty_exportable`.
     """
     if tensor.device.type != "rbln":
-        raise RuntimeError(f"export_tensor: expected an rbln tensor, got {tensor.device}")
+        msg = f"export_tensor: expected an rbln tensor, got {tensor.device}"
+        raise RuntimeError(msg)
     nbytes, payload, fds = torch_rbln._C._export_device_memory(tensor)
     return IpcHandle(
         fds=list(fds),
@@ -91,11 +91,10 @@ def export_tensor(tensor: torch.Tensor) -> IpcHandle:
 
 def open_tensor(
     handle: IpcHandle,
-    fds: Optional[list[int]] = None,
-    device: Optional[Union[int, str, torch.device]] = None,
+    fds: list[int] | None = None,
+    device: int | str | torch.device | None = None,
 ) -> torch.Tensor:
-    """
-    Open a tensor exported by :func:`export_tensor` in another process.
+    """Open a tensor exported by :func:`export_tensor` in another process.
 
     The returned tensor has the exporter's shape and dtype and owns the mapping:
     dropping its last reference releases it. ``fds`` are not consumed; close them
@@ -112,7 +111,8 @@ def open_tensor(
     dev = _normalize_device(device)
     fds = handle.fds if fds is None else list(fds)
     if len(fds) != len(handle.fds):
-        raise RuntimeError(f"open_tensor: the handle has {len(handle.fds)} fd(s) but {len(fds)} were given")
+        msg = f"open_tensor: the handle has {len(handle.fds)} fd(s) but {len(fds)} were given"
+        raise RuntimeError(msg)
     return torch_rbln._C._import_device_memory(
         dev.index, handle.nbytes, handle.payload, fds, list(handle.shape), handle.dtype
     )
