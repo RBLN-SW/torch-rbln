@@ -104,11 +104,6 @@ _BOUNCE_SITES: tuple[tuple[str, str], ...] = (
 # a lost batching win, not an added bounce.
 _HOST_BOUNCE_SITES = (0, 1, 2, 3)
 
-# Reason names of the C++ shim's own fallbacks; index matches its reason histogram
-# order. See quick_fallback_check in DispatchShim.cpp. The other fallback paths are
-# not in it; cpu_fallback_reasons_by_op covers them along with the shim.
-_SHIM_FALLBACK_REASON_NAMES = ("dtype-not-dispatch", "nan/inf input", "all-scalar inputs", "out-dtype")
-
 # Must match the reason order in rebel-compiler vmemory_manager.cc.
 _RUNTIME_REASONS: tuple[tuple[str, str], ...] = (
     ("src_not_on_device", "src not on device yet -> establish device residency before the copy"),
@@ -266,19 +261,6 @@ def _read_recompile_by_op() -> dict[str, int]:
     if fn is None:
         return {}
     return {str(op): int(c) for op, c in fn()}
-
-
-def _read_shim_fallback_reasons() -> list[int]:
-    """cpu_fallback reason counts [dtype-not-dispatch, nan/inf input, all-scalar,
-    out-dtype] for the C++ shim's own fallbacks, or [] if the loaded torch_rbln._C
-    predates the binding (graceful degrade).
-    """
-    from torch_rbln import _C  # noqa: PLC0415
-
-    fn = getattr(_C, "_dispatch_fallback_reasons", None)
-    if fn is None:
-        return []
-    return [int(c) for c in fn()]
 
 
 # --- (A) fast-path handler coverage: which fallback ops are un-accelerated -----
@@ -607,7 +589,6 @@ class RBLNExplain:
         self._fbr0: dict[tuple[str, str], int]
         self._fns0: int
         self._r0: dict[str, int]
-        self._fr0: list[int]
         self._rt0: dict | None
         self._wall0: int
         self._bounces: list[tuple[int, int]] | None = None
@@ -617,7 +598,6 @@ class RBLNExplain:
         self._fallback_reasons_by_op: dict[str, dict[str, int]] | None = None
         self._fallback_ns = 0
         self._recompile_by_op: dict[str, int] | None = None
-        self._shim_fallback_reasons: list[int] | None = None
         self._trace = with_stack
         self._trace_by_op: dict | None = None
         self._rt_timing: list[tuple[int, int]] | None = None  # (B) per-primitive librbln (ns, calls)
@@ -655,7 +635,6 @@ class RBLNExplain:
             self._fbr0 = _read_fallback_by_op_reason()
             self._fns0 = _read_fallback_ns()
             self._r0 = _read_recompile_by_op()
-            self._fr0 = _read_shim_fallback_reasons()
             self._rt0 = _read_runtime()
             self._wall0 = time.perf_counter_ns()
         except BaseException:
@@ -697,12 +676,6 @@ class RBLNExplain:
             self._fallback_ns = max(0, _read_fallback_ns() - self._fns0)  # 0 if reset in the region
             r1 = _read_recompile_by_op()
             self._recompile_by_op = {op: r1[op] - self._r0.get(op, 0) for op in r1 if r1[op] - self._r0.get(op, 0) > 0}
-            fr1 = _read_shim_fallback_reasons()
-            self._shim_fallback_reasons = (
-                [b - a for a, b in zip(self._fr0, fr1, strict=True)]
-                if self._fr0 and fr1 and len(fr1) == len(self._fr0)
-                else []
-            )
             if self._rt0 is not None and rt1 is not None:
                 hc = [a - b for a, b in zip(rt1["hidden_count"], self._rt0["hidden_count"], strict=True)]
                 hb = [a - b for a, b in zip(rt1["hidden_bytes"], self._rt0["hidden_bytes"], strict=True)]
@@ -786,9 +759,6 @@ class RBLNExplain:
             for op in out["cpu_fallback_by_op"]
         }
         out["recompile_by_op"] = dict(sorted((self._recompile_by_op or {}).items(), key=lambda kv: -kv[1]))
-        out["cpu_fallback_reasons"] = {
-            n: c for n, c in zip(_SHIM_FALLBACK_REASON_NAMES, self._shim_fallback_reasons or [], strict=False) if c > 0
-        }
         out["trace_by_op"] = dict(self._trace_by_op or {})  # (A) WHERE; {} unless with_stack=True
         if self._rt is not None:
             hc, hbytes = self._rt["hidden_count"], self._rt["hidden_bytes"]
@@ -1097,9 +1067,13 @@ class RBLNExplain:
             cost = f"  (sum {_fmt_time(fb_ns)} wall)" if fb_ns else ""
             lines.append(f"  dispatch/cpu_fallback:{cost}")
             lines += _op_block(fbo, tbo)
-            fr = d.get("cpu_fallback_reasons") or {}
-            if fr:
-                lines.append("    why: " + ", ".join(f"{n} {_thousands(c)}" for n, c in fr.items()))
+            by_reason: dict[str, int] = {}
+            for reasons in (d.get("cpu_fallback_reasons_by_op") or {}).values():
+                for reason, c in reasons.items():
+                    by_reason[reason] = by_reason.get(reason, 0) + c
+            if by_reason:
+                why = sorted(by_reason.items(), key=lambda kv: -kv[1])
+                lines.append("    why: " + ", ".join(f"{n} {_thousands(c)}" for n, c in why))
             unaccel = d.get("cpu_fallback_unaccelerated") or []
             if unaccel:
                 shown = ", ".join(_short_op(o) for o in unaccel[:8]) + (

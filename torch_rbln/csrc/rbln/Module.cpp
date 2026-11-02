@@ -463,14 +463,6 @@ void register_internal_api(py::module_& module) {
       &torch_rbln::shim::diag_reset_recompile_by_op,
       "DIAG/PROFILER: reset per-op recompile counts");
   module.def(
-      "_dispatch_fallback_reasons",
-      &torch_rbln::shim::diag_dump_fallback_reasons,
-      "DIAG/PROFILER: cpu_fallback reason counts [dtype-not-dispatch, nan/inf input, all-scalar, out-dtype]");
-  module.def(
-      "_dispatch_fallback_reasons_reset",
-      &torch_rbln::shim::diag_reset_fallback_reasons,
-      "DIAG/PROFILER: reset cpu_fallback reason counts");
-  module.def(
       "_explain_set_trace",
       &torch_rbln::shim::diag_set_trace_enabled,
       "DIAG/PROFILER (A) WHERE: enable/disable opt-in call-site capture (off by default)");

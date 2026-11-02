@@ -90,7 +90,7 @@ dispatch/cpu_fallback  2,000       --  try: graph mode, or a supported dtype
     aten::sub.out    1,000
     aten::mul.out      500
     aten::clamp.out    500
-    why: dtype-not-dispatch 2,000                                                    (7)
+    why: dtype 2,000                                                                 (7)
     candidates (no fast-path handler): sub.out, mul.out, clamp.out                   (8)
 
   >> physical d2h (real transfer): 0 -- everything above served on host, no crossing  (9)
@@ -141,10 +141,14 @@ dispatch/cpu_fallback  2,000       --  try: graph mode, or a supported dtype
    one was captured under `with_stack=True` — and the `(sum … wall)` wall time of
    those same fallbacks (a _weak, noisy_ A/B signal — inflated under
    oversubscription, not a per-op absolute; see §10).
-7. **`why`**: the reason each of the C++ shim's own fallbacks fired —
-   `dtype-not-dispatch` (the op's dtype is outside the device dispatch policy),
-   `nan/inf input`, `all-scalar inputs`, or `out-dtype` (a non-bool `out=` of
-   another dtype than the inputs, which the op's CPU kernel accepts or rejects).
+7. **`why`**: the fallback count per reason, summed over the ops above. A reason
+   is the `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` case or
+   `TORCH_RBLN_DISABLE_FALLBACK` category that decided the fallback, or the name
+   of the check when no switch exists — `dtype` (the op's dtype is outside the
+   device dispatch policy), `nan_inf`, `scalar`, `align`, `registered`,
+   `out_dtype` (a non-bool `out=` of another dtype than the inputs, which the
+   op's CPU kernel accepts or rejects), ... `cpu_fallback_reasons_by_op` in
+   `dump()` has the same counts per op.
 8. **(A) `candidates (no fast-path handler)`**: of the ops that fell back through
    the boxed C++ CPU fallback, which ones have **no CPU fast-path handler** —
    i.e. your **optimization candidates** (registered ops already bypass the slow
@@ -250,7 +254,7 @@ runtime/v2v_slow      1    0 B  real d2h DMA (costly)
 
 **(G4) A decode step in device-tensor mode — the capstone**. Captured with
 `with_stack=True`, it shows nearly every signal at once: the attention-metadata
-integer math falling back (`sub`/`mul`/`clamp`, `dtype-not-dispatch`), the
+integer math falling back (`sub`/`mul`/`clamp`, `dtype`), the
 `positions[idx]` gather going host-slow (`v2v_slow` + the `d2d_copy` bounce),
 all **host-served** (`physical d2h: 0`), under a worker pinned to one core
 (oversubscription), with the rebel-runtime share and the exact source lines:
@@ -283,7 +287,7 @@ dispatch/cpu_fallback  1,600        --  try: graph mode, or a supported dtype
     aten::sub.out    800  at rbln_model_runner.py:1276(_prepare_inputs)
     aten::mul.out    400  at .../attention/flash_attention.py:1148(build)
     aten::clamp.out  400  at .../attention/flash_attention.py:1147(build)
-    why: dtype-not-dispatch 1,600
+    why: dtype 1,600
     candidates (no fast-path handler): sub.out, mul.out, clamp.out
 
   >> physical d2h (real transfer): 0 -- everything above served on host, no crossing
@@ -300,7 +304,7 @@ How to read G4 in 30 seconds:
   movement. (No color claims this is severe; the `physical d2h: 0` line is what
   tells you the crossing cost is nil.)
 - **What**: `cpu_fallback` is the integer metadata math (`sub`/`mul`/`clamp`,
-  all `dtype-not-dispatch`); `v2v_slow`/`bounce` is the `positions[idx]` gather.
+  all `dtype`); `v2v_slow`/`bounce` is the `positions[idx]` gather.
   Per 400 steps: 4 fallbacks + ~2 gathers + 4 bounces per step.
 - **Where**: the `at …` lines pin it to `flash_attention.py:1126/1147/1148` (the
   metadata builder) and `rbln_model_runner.py:1276` (logits). All of it is one
@@ -353,8 +357,6 @@ And the auxiliary readouts (in `dump()`):
   `out_dtype`, `div_rounding`, `index_pattern`, ...). The C++ shim's own `dtype`
   and `scalar` checks use those names too, but
   `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` does not turn them off.
-- `cpu_fallback_reasons` — the `dtype-not-dispatch / nan-inf / all-scalar /
-  out-dtype` breakdown of the C++ shim's own fallbacks.
 - `cpu_fallback_unaccelerated` (A) — fallback ops with no fast-path handler,
   among those that went through the boxed C++ CPU fallback (the only path that
   consults one).

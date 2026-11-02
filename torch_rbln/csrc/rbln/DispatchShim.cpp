@@ -43,12 +43,6 @@ std::atomic<uint64_t> g_diag_n_miss{0}; // Python compile (miss) path
 std::atomic<uint64_t> g_diag_ns_warm_hit{
     0}; // total ns inside warm-cache hit path
 std::atomic<uint64_t> g_diag_ns_miss{0}; // total ns inside miss path
-// cpu_fallback reason histogram. index = reason code from quick_fallback_check
-// (1=dtype-not-dispatch, 2=nan/inf input, 3=all-scalar, 4=out-dtype). Bumped on
-// the fallback branch only (the reason is already computed there) -> ON==OFF
-// preserved.
-std::array<std::atomic<uint64_t>, 5> g_fallback_reason{};
-
 // Warm-cache hit path per-segment timers. Accumulated only on successful hits
 // so per-segment averages = ns_X / n_hits give the steady-state breakdown.
 std::atomic<uint64_t> g_diag_warm_n_hits{0};
@@ -1141,14 +1135,12 @@ void generic_shim_boxed(
   const int fb_reason = quick_fallback_check(stack, cache, skip_dtype_args);
   if (fb_reason != 0) {
     g_diag_n_fallback.fetch_add(1, std::memory_order_relaxed);
-    g_fallback_reason[fb_reason].fetch_add(
-        1, std::memory_order_relaxed); // WHY (same slow branch)
     if (g_trace_enabled.load(std::memory_order_relaxed)) {
       capture_site(
           op_name); // (A) WHERE: opt-in, deduped, GIL-safe; off by default
     }
-    // Counted, logged and timed inside (c10::rbln::CpuFallbackScope), like
-    // every other fallback path.
+    // Counted under the reason, logged and timed inside
+    // (c10::rbln::CpuFallbackScope), like every other fallback path.
     static constexpr std::array<std::string_view, 5> kReasons = {
         "", "dtype", "nan_inf", "scalar", "out_dtype"};
     ::at::native::rbln::cpu_fallback_rbln(op, stack, kReasons[fb_reason]);
@@ -1365,23 +1357,6 @@ void diag_reset_recompile_by_op() {
     if (kv.second) {
       kv.second->store(0, std::memory_order_relaxed);
     }
-  }
-}
-
-std::vector<uint64_t> diag_dump_fallback_reasons() {
-  // counts for reason codes 1..4: [dtype-not-dispatch, nan/inf input,
-  // all-scalar, out-dtype].
-  return {
-      g_fallback_reason[1].load(std::memory_order_relaxed),
-      g_fallback_reason[2].load(std::memory_order_relaxed),
-      g_fallback_reason[3].load(std::memory_order_relaxed),
-      g_fallback_reason[4].load(std::memory_order_relaxed),
-  };
-}
-
-void diag_reset_fallback_reasons() {
-  for (auto& r : g_fallback_reason) {
-    r.store(0, std::memory_order_relaxed);
   }
 }
 

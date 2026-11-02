@@ -47,10 +47,8 @@ from torch_rbln.profiler import (
     _read_bounces,
     _read_rt_timing,
     _read_runtime,
-    _read_shim_fallback_reasons,
     _RT_PRIMS,
     _RUNTIME_REASONS,
-    _SHIM_FALLBACK_REASON_NAMES,
     _table,
 )
 
@@ -645,7 +643,7 @@ class TestProfilerReportFormat(TestCase):
             },
             "dispatch": {"cpu_fallback": 1600, "recompile_miss": 0, "cpu_fallback_ns": 41_084_000},
             "cpu_fallback_by_op": {"aten::sub.out": 800},
-            "cpu_fallback_reasons": {"dtype-not-dispatch": 1600},
+            "cpu_fallback_reasons_by_op": {"aten::sub.out": {"dtype": 800}},
             "trace_by_op": {},
             "notes": [],
         }
@@ -663,6 +661,7 @@ class TestProfilerReportFormat(TestCase):
         self.assertIn("no DMA (low cost)", rep)  # P1-2 cost verdict leads the Note
         self.assertIn(">> physical d2h (real transfer): 0", rep)  # P1-3 promoted witness line
         self.assertIn("dispatch/cpu_fallback:", rep)  # P1-1 grouped detail block
+        self.assertIn("why: dtype 800", rep)  # reasons summed over ops, in the record's own names
         # P1-4 fixed category order (NOT sorted by cost): host_bounce -> runtime ->
         # dispatch
         self.assertLess(rep.index("host_bounce/d2d_copy"), rep.index("runtime/v2v_slow"))
@@ -716,10 +715,6 @@ class TestProfilerRuntimeContract(TestCase):
         rt = _read_rt_timing()
         if rt is not None:
             self.assertEqual(len(rt), len(_RT_PRIMS), "RtIdx count drifted; sync _RT_PRIMS with RBLNFunctions.cpp")
-        # cpu_fallback reason histogram (if the binding is present).
-        fr = _read_shim_fallback_reasons()
-        if fr:
-            self.assertEqual(len(fr), len(_SHIM_FALLBACK_REASON_NAMES), "fallback-reason count drifted; sync names")
         # runtime hidden-d2h reason axis (if the runtime exposes it): our names must
         # cover it exactly -- dump() fails fast on any mismatch (see the unit test
         # below).
@@ -741,7 +736,7 @@ class TestProfilerRuntimeContract(TestCase):
         p = torch.rbln.explain()
         p._bounces = [(0, 0)] * len(_BOUNCE_SITES)
         p._dispatch = (0, 0, 0, 0, 0, 0, 0)
-        p._fallback_by_op, p._recompile_by_op, p._fallback_reasons = {}, {}, []
+        p._fallback_by_op, p._recompile_by_op, p._fallback_reasons_by_op = {}, {}, {}
         p._trace_by_op, p._rt_timing, p._wall_ns = {}, None, 1
         drifted = len(_RUNTIME_REASONS) + 1  # runtime enum grew past what this build names
         p._rt = {"hidden_count": [0] * drifted, "hidden_bytes": [0] * drifted}
@@ -754,7 +749,7 @@ class TestProfilerRuntimeContract(TestCase):
         p = torch.rbln.explain()
         p._bounces = [(0, 0)] * len(_BOUNCE_SITES)
         p._dispatch = (0, 0, 0, 0, 0, 0, 0)
-        p._fallback_by_op, p._recompile_by_op, p._fallback_reasons = {}, {}, []
+        p._fallback_by_op, p._recompile_by_op, p._fallback_reasons_by_op = {}, {}, {}
         p._trace_by_op, p._rt_timing, p._wall_ns = {}, None, 1
         n = len(_RUNTIME_REASONS)
         counts = list(range(1, n + 1))
