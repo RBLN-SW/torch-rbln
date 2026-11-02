@@ -1,6 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""Every CPU fallback must leave a log line.
+"""Every CPU fallback must leave a log line and record its reason.
 
 ``AGENTS.md``: a run where a fallback fired is a failed run, and the way to tell
 is to grep the log. That only holds if each fallback logs. Two groups did not:
@@ -14,6 +14,10 @@ is to grep the log. That only holds if each fallback logs. Two groups did not:
 
 ``TORCH_RBLN_LOG_LEVEL`` is latched in a function-local static on first use, so
 each scenario runs in its own process with the level already set.
+
+The second half: a fallback is counted under the reason that decided it, which
+is what the per-test fallback report and ``torch.rbln.explain()`` read. One
+scenario drives each fallback path once and checks the reason it records.
 """
 
 import subprocess
@@ -23,6 +27,8 @@ from pathlib import Path
 
 import pytest
 from torch.testing._internal.common_utils import run_tests, TestCase
+
+from test.utils import run_snippet
 
 
 _PROJECT_ROOT = str(Path(__file__).absolute().parents[2])
@@ -130,6 +136,68 @@ class TestCpuFallbackIsLogged(TestCase):
         )
         out = self._assert_ran(p)
         self.assertIn("sdpa_backward", out, f"the backward fallback said nothing\n{out}")
+
+
+_FALLBACK_REASON_SCENARIO = r"""
+import torch, torch_rbln
+from torch._dynamo.backends import registry
+from torch_rbln._internal.monkey_patches import _register_rbln_backend
+offset = torch.ones(65, dtype=torch.bfloat16).to("rbln")[1:]
+unaligned = torch.ones(4, 3, dtype=torch.bfloat16).to("rbln")
+scalar = torch.tensor(2.0, dtype=torch.bfloat16).to("rbln")
+aligned = torch.ones(64, dtype=torch.bfloat16).to("rbln")
+
+def compile_error_retry():
+    _register_rbln_backend()
+    def fail(gm, example_inputs, **kwargs):
+        raise RuntimeError("forced compile failure")
+    registry._COMPILER_FNS["rbln"] = fail
+    torch.neg(aligned)
+
+cases = {
+    "wrapper_check": lambda: offset + offset,
+    "device_entry_check": lambda: unaligned + unaligned,
+    "shim_precheck": lambda: scalar * scalar,
+    "registered_op": lambda: aligned.flip(0),
+    "unregistered_op": lambda: torch.lgamma(aligned),
+    # Last: it replaces the rbln compiler for the rest of the process.
+    "compile_error_retry": compile_error_retry,
+}
+reasons = {}
+for name, case in cases.items():
+    with torch.rbln.explain() as p:
+        case()
+    reasons[name] = p.dump()["cpu_fallback_reasons_by_op"]
+print("RESULT", reasons)
+"""
+
+
+@pytest.mark.npu(count=1)
+class TestCpuFallbackRecordsItsReason(TestCase):
+    """Every fallback path records the reason that decided it, under the op."""
+
+    def test_each_fallback_path_records_its_reason(self):
+        # A fresh interpreter gets the default fallback settings: some are read at
+        # import, and this suite's conftest disables the compile_error fallback.
+        reasons = run_snippet(
+            _FALLBACK_REASON_SCENARIO,
+            unset=(
+                "TORCH_RBLN_DISABLE_FALLBACK",
+                "TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK",
+                "TORCH_RBLN_DISPATCH_DTYPES",
+            ),
+        )
+        self.assertEqual(
+            reasons,
+            {
+                "wrapper_check": {"aten::add.out": {"storage_offset": 1}},
+                "device_entry_check": {"aten::add.out": {"align": 1}},
+                "shim_precheck": {"aten::mul.out": {"scalar": 1}},
+                "registered_op": {"aten::flip": {"registered": 1}},
+                "unregistered_op": {"aten::lgamma.out": {"unsupported_op": 1}},
+                "compile_error_retry": {"aten::neg.out": {"compile_error": 1}},
+            },
+        )
 
 
 if __name__ == "__main__":
