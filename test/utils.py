@@ -4,11 +4,13 @@ import os
 import random
 import subprocess
 import sys
+from contextlib import contextmanager
 
 import numpy as np
 import pytest
 import torch
 
+from torch_rbln import _C
 from torch_rbln._internal.device_arch_utils import is_atom_device, is_rebel_device
 from torch_rbln._internal.ops_utils import SupportedDtypes
 from torch_rbln._internal.rdma_env import apply_default_rbln_network_environment
@@ -143,3 +145,71 @@ def run_in_isolated_process(func, *args):
     if p.exitcode != 0:
         msg = f"{func.__name__} failed with exit code {p.exitcode}"
         raise RuntimeError(msg)
+
+
+# =============================================================================
+# CPU fallback report: the window a test opens around the op under test
+# =============================================================================
+
+CpuFallbackCounts = dict[tuple[str, str], int]
+
+# Set by the --fallback-report plugin (test/conftest.py) around each test call.
+_cpu_fallback_recorder = None
+
+
+def set_cpu_fallback_recorder(recorder) -> None:
+    global _cpu_fallback_recorder
+    _cpu_fallback_recorder = recorder
+
+
+def _cpu_fallback_counts() -> CpuFallbackCounts:
+    """The per-op counts every CPU fallback path records."""
+    return {(op, reason): n for op, reason, n in _C._dispatch_fallback_by_op_reason()}
+
+
+class CpuFallbackRecorder:
+    """The CPU fallbacks of one test, summed over the windows it opened."""
+
+    def __init__(self):
+        self.windows = 0
+        self.reasons_by_op: dict[str, dict[str, int]] = {}
+        self.reset_detected = False
+
+    def add(self, before: CpuFallbackCounts, after: CpuFallbackCounts) -> None:
+        self.windows += 1
+        for (op, reason), n in after.items():
+            delta = n - before.get((op, reason), 0)
+            if delta > 0:
+                by_reason = self.reasons_by_op.setdefault(op, {})
+                by_reason[reason] = by_reason.get(reason, 0) + delta
+        # A count below where the window started: the test reset the counters inside it.
+        self.reset_detected |= any(after.get(key, 0) < n for key, n in before.items())
+
+    def record(self) -> dict:
+        return {
+            "cpu_fallback": sum(n for reasons in self.reasons_by_op.values() for n in reasons.values()),
+            "cpu_fallback_reasons_by_op": self.reasons_by_op,
+            "cpu_fallback_reset_detected": self.reset_detected,
+        }
+
+
+@contextmanager
+def measure_cpu_fallbacks():
+    """Attribute the CPU fallbacks inside the block to the running test's entry in the
+    ``--fallback-report`` (test/conftest.py); a no-op when no report is written.
+
+    Put it around the op under test only, not around input generation or the
+    comparison, so the record names the op's fallbacks and not the harness's. A
+    fallback is counted when the op dispatches, on the calling thread, so the block
+    needs no synchronization and device work still pending from before it is not
+    counted.
+    """
+    recorder = _cpu_fallback_recorder
+    if recorder is None:
+        yield
+        return
+    before = _cpu_fallback_counts()
+    try:
+        yield
+    finally:
+        recorder.add(before, _cpu_fallback_counts())

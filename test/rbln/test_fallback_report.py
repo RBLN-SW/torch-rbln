@@ -1,12 +1,12 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""The ``--fallback-report`` plugin in ``test/conftest.py``: each test's call gets the
-CPU fallbacks of its own call, and the records reach the JSON from a serial run and
-from an xdist worker alike. The counter reader is replaced, so no NPU is involved.
+"""The ``--fallback-report`` plugin in ``test/conftest.py`` and the window a test opens
+with ``measure_cpu_fallbacks()``: a test's record is the CPU fallbacks inside its
+windows and nothing else, and the records reach the JSON from a serial run and from
+an xdist worker alike. The counter reader is replaced, so no NPU is involved.
 """
 
 import json
-import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,18 +16,20 @@ import pytest
 from _pytest.reports import TestReport
 from torch.testing._internal.common_utils import run_tests, TestCase
 
+from test import utils
 from test.conftest import CpuFallbackReport
+from test.utils import measure_cpu_fallbacks
 
 
 # Deselected by rebel_compiler's CI (`-m "not torch_rbln_only"`); see the marker in
 # pyproject.toml.
 pytestmark = pytest.mark.torch_rbln_only
 
-_PLUGIN_MODULE = sys.modules[CpuFallbackReport.__module__]
 _CONTROLLER = SimpleNamespace()  # no `workerinput`: a serial run, or xdist's controller
 _WORKER = SimpleNamespace(workerinput={})  # an xdist worker
 
 _SUITE = "test/ops/test_ops.py::TestCommonPRIVATEUSE1::"
+_ADD, _MUL, _UNIFORM = ("aten::add.out", "dtype"), ("aten::mul.out", "align"), ("aten::uniform_", "registered")
 
 
 def _finish(wrapper, value=None):
@@ -40,15 +42,21 @@ def _finish(wrapper, value=None):
     raise AssertionError(msg)
 
 
-def _run_call(plugin, nodeid, before, after, outcome="passed"):
-    """Drive the plugin through one test call whose counter reads give `before` and
-    `after`; returns the call report as pytest would log it.
+def _run_call(plugin, nodeid, windows, outcome="passed"):
+    """Drive the plugin through one test call whose body opens one window per
+    (before, after) pair in `windows`, the counter reads at the window's ends; returns
+    the call report as pytest would log it.
     """
     item = SimpleNamespace(nodeid=nodeid, name=nodeid.rsplit("::", 1)[1], stash=pytest.Stash())
-    with mock.patch.object(_PLUGIN_MODULE, "_cpu_fallback_counts", side_effect=[before, after]):
-        call = plugin.pytest_runtest_call(item)
-        next(call)  # reads `before`, then runs the test
-        _finish(call)  # reads `after`
+    call = plugin.pytest_runtest_call(item)
+    next(call)  # the plugin opens the test's recorder, then the test body runs
+    for before, after in windows:
+        with (
+            mock.patch.object(utils, "_cpu_fallback_counts", side_effect=[before, after]),
+            measure_cpu_fallbacks(),
+        ):
+            pass
+    _finish(call)
     report = TestReport(nodeid, ("test_ops.py", 0, item.name), {}, outcome, None, "call")
     makereport = plugin.pytest_runtest_makereport(item, SimpleNamespace(when="call"))
     next(makereport)
@@ -66,14 +74,19 @@ class TestCpuFallbackReport(TestCase):
         self.addCleanup(self._dir.cleanup)
         self.path = Path(self._dir.name) / "fallback.json"
 
-    def test_each_test_gets_the_fallbacks_of_its_own_call(self):
+    def test_each_test_gets_the_fallbacks_inside_its_own_windows(self):
         plugin = CpuFallbackReport(_CONTROLLER, self.path)
-        add, mul = ("aten::add.out", "dtype"), ("aten::mul.out", "align")
-        # The counters only grow; each test's record is the growth over its own call,
-        # so an op that already had a count gets the increase, not the total.
-        first = _run_call(plugin, _SUITE + "test_compare_cpu_add_rbln_float16", {}, {add: 2})
-        second = _run_call(plugin, _SUITE + "test_compare_cpu_mul_rbln_float16", {add: 2}, {add: 5, mul: 1})
-        third = _run_call(plugin, _SUITE + "test_compare_cpu_sub_rbln_float16", {add: 5, mul: 1}, {add: 5, mul: 1})
+        # The counters only grow; a window's share is the growth over it, so an op that
+        # already had a count gets the increase, not the total, and windows add up.
+        first = _run_call(plugin, _SUITE + "test_compare_cpu_add_rbln_float16", [({}, {_ADD: 2})])
+        second = _run_call(
+            plugin,
+            _SUITE + "test_compare_cpu_mul_rbln_float16",
+            [({_ADD: 2}, {_ADD: 5}), ({_ADD: 5}, {_ADD: 5, _MUL: 1})],
+        )
+        third = _run_call(
+            plugin, _SUITE + "test_compare_cpu_sub_rbln_float16", [({_ADD: 5, _MUL: 1}, {_ADD: 5, _MUL: 1})]
+        )
         for report in (first, second, third):
             plugin.pytest_runtest_logreport(report)
 
@@ -101,12 +114,47 @@ class TestCpuFallbackReport(TestCase):
             },
         )
 
+    def test_fallbacks_outside_the_windows_are_not_the_tests(self):
+        plugin = CpuFallbackReport(_CONTROLLER, self.path)
+        # Between two windows the harness fell back (input generation: uniform_); the
+        # record carries the op under test only. A test that opens no window has no
+        # record at all, whatever fell back during its call.
+        windowed = _run_call(
+            plugin,
+            _SUITE + "test_compare_cpu_add_rbln_float16",
+            [({}, {_ADD: 1}), ({_ADD: 1, _UNIFORM: 31}, {_ADD: 2, _UNIFORM: 31})],
+        )
+        unwindowed = _run_call(plugin, _SUITE + "test_out_add_rbln_float16", [])
+        self.assertEqual(unwindowed.user_properties, [])
+        for report in (windowed, unwindowed):
+            plugin.pytest_runtest_logreport(report)
+
+        self.assertEqual(
+            _written(plugin),
+            {
+                windowed.nodeid: {
+                    "call_outcome": "passed",
+                    "cpu_fallback": 2,
+                    "cpu_fallback_reasons_by_op": {"aten::add.out": {"dtype": 2}},
+                    "cpu_fallback_reset_detected": False,
+                }
+            },
+        )
+
+    def test_the_window_is_a_no_op_without_a_report(self):
+        # Outside a --fallback-report run no recorder is set, and the window does not
+        # even read the counters.
+        with mock.patch.object(utils, "_cpu_fallback_counts") as reads, measure_cpu_fallbacks():
+            pass
+        self.assertEqual(reads.call_count, 0)
+
     def test_a_failed_call_keeps_its_outcome_and_a_reset_is_marked(self):
         plugin = CpuFallbackReport(_CONTROLLER, self.path)
-        add = ("aten::add.out", "dtype")
-        # A count below where it started means the test reset the counters inside its
-        # call, so its fallbacks can be missed.
-        report = _run_call(plugin, _SUITE + "test_compare_cpu_add_rbln_float16", {add: 5}, {add: 1}, outcome="failed")
+        # A count below where the window started means the test reset the counters
+        # inside it, so its fallbacks can be missed.
+        report = _run_call(
+            plugin, _SUITE + "test_compare_cpu_add_rbln_float16", [({_ADD: 5}, {_ADD: 1})], outcome="failed"
+        )
         plugin.pytest_runtest_logreport(report)
 
         self.assertEqual(
@@ -123,9 +171,8 @@ class TestCpuFallbackReport(TestCase):
 
     def test_skipped_subtest_and_other_phase_reports_are_left_out(self):
         plugin = CpuFallbackReport(_CONTROLLER, self.path)
-        add = ("aten::add.out", "dtype")
-        skipped = _run_call(plugin, _SUITE + "test_compare_cpu_add_rbln_float16", {}, {add: 1}, outcome="skipped")
-        subtest = _run_call(plugin, _SUITE + "test_compare_cpu_mul_rbln_float16", {}, {add: 1})
+        skipped = _run_call(plugin, _SUITE + "test_compare_cpu_add_rbln_float16", [({}, {_ADD: 1})], outcome="skipped")
+        subtest = _run_call(plugin, _SUITE + "test_compare_cpu_mul_rbln_float16", [({}, {_ADD: 1})])
         subtest.context = "a subtest"  # pytest-subtests marks a subtest's report so
         # A setup or teardown report never carries the counts; nor does a call report
         # whose counter read raised (the raise failed the call instead).
@@ -140,8 +187,7 @@ class TestCpuFallbackReport(TestCase):
     def test_an_xdist_worker_hands_its_records_to_the_controller(self):
         worker = CpuFallbackReport(_WORKER, Path(self._dir.name) / "worker.json")
         controller = CpuFallbackReport(_CONTROLLER, self.path)
-        add = ("aten::add.out", "dtype")
-        report = _run_call(worker, _SUITE + "test_compare_cpu_add_rbln_float16", {}, {add: 2})
+        report = _run_call(worker, _SUITE + "test_compare_cpu_add_rbln_float16", [({}, {_ADD: 2})])
         # The worker logs the report too, but only the controller writes.
         worker.pytest_runtest_logreport(report)
         worker.pytest_sessionfinish()

@@ -7,7 +7,7 @@ import pytest
 import torch
 
 import torch_rbln
-from test.utils import set_deterministic_seeds, xfail_rebel
+from test.utils import CpuFallbackRecorder, set_cpu_fallback_recorder, set_deterministic_seeds, xfail_rebel
 from torch_rbln._internal.log_utils import rbln_log_debug
 
 
@@ -294,8 +294,9 @@ def pytest_addoption(parser):
         "--fallback-report",
         type=Path,
         metavar="PATH",
-        help="Write each test_compare_cpu test's call outcome and CPU fallbacks over its call, per op and reason, "
-        "to PATH as JSON, leaving out skipped tests",
+        help="Write each test's call outcome and the CPU fallbacks of the op calls it marks with "
+        "measure_cpu_fallbacks(), per op and reason, to PATH as JSON, leaving out skipped tests and tests "
+        "that mark nothing",
     )
 
 
@@ -306,25 +307,19 @@ def pytest_configure(config):
 
 
 _CPU_FALLBACK = pytest.StashKey[dict]()
-# The report is for the test that compares the op's device result against its CPU
-# result: a fallback there makes the comparison CPU against CPU. The other op tests
-# check other contracts (out=, refs, dtypes, ...) and are left out. Revisit once the
-# test harness (input generation, the comparison) runs on the CPU.
-_FALLBACK_REPORT_TESTS = ("test_compare_cpu",)
-
-
-def _cpu_fallback_counts():
-    return {(op, reason): n for op, reason, n in torch_rbln._C._dispatch_fallback_by_op_reason()}
 
 
 class CpuFallbackReport:
-    """CPU fallbacks over each test_compare_cpu call, so a test that passed on a CPU
-    fallback -- comparing CPU against CPU -- shows up. Fixtures and child processes are
-    not counted.
+    """CPU fallbacks over the op calls a test marks with ``measure_cpu_fallbacks()``
+    (test/utils.py), so a test that passed on a CPU fallback -- comparing CPU against
+    CPU -- shows up. ``test_compare_cpu`` marks its device call; a test that marks
+    nothing has no record. Fixtures, the test's own input generation and comparison,
+    and child processes are not counted.
 
     The counts are the per-op CPU fallback counts that every fallback path records, the
-    ones ``torch.rbln.explain()`` reads. A test that resets them is marked, unless the
-    reset came before an op's first fallback in its process, which leaves no trace.
+    ones ``torch.rbln.explain()`` reads. A test that resets them inside a window is
+    marked, unless the reset came before an op's first fallback in its process, which
+    leaves no trace.
     """
 
     def __init__(self, config, path):
@@ -334,23 +329,14 @@ class CpuFallbackReport:
 
     @pytest.hookimpl(wrapper=True)
     def pytest_runtest_call(self, item):
-        if not item.name.startswith(_FALLBACK_REPORT_TESTS):
-            return (yield)
-        before = _cpu_fallback_counts()
+        recorder = CpuFallbackRecorder()
+        set_cpu_fallback_recorder(recorder)
         try:
             return (yield)
         finally:
-            after = _cpu_fallback_counts()
-            reasons_by_op = {}
-            for (op, reason), n in after.items():
-                if n > before.get((op, reason), 0):
-                    reasons_by_op.setdefault(op, {})[reason] = n - before.get((op, reason), 0)
-            item.stash[_CPU_FALLBACK] = {
-                "cpu_fallback": sum(n for reasons in reasons_by_op.values() for n in reasons.values()),
-                "cpu_fallback_reasons_by_op": reasons_by_op,
-                # A reset inside the call drops a count below where it started.
-                "cpu_fallback_reset_detected": any(after.get(key, 0) < n for key, n in before.items()),
-            }
+            set_cpu_fallback_recorder(None)
+            if recorder.windows:
+                item.stash[_CPU_FALLBACK] = recorder.record()
 
     @pytest.hookimpl(wrapper=True)
     def pytest_runtest_makereport(self, item, call):

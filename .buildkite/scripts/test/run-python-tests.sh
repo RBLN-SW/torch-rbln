@@ -220,7 +220,7 @@ mv \
 failed_pytest_runs=()
 
 # An op test also passes when the op fell back to CPU, comparing CPU against CPU, so
-# the op suite records which ops fell back in each test_compare_cpu test.
+# the op suite records which ops fell back under test in each test.
 serial_report=()
 parallel_report=()
 if [[ "${test_suite}" == "ops" ]]; then
