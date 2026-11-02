@@ -1324,6 +1324,9 @@ BROADCAST_PATTERNS = [
     ((2, 4, 64), (2, 4, 1)),  # aligned, 3D
     ((1, 128, 2048), (1, 128, 1)),  # LLaMA RMSNorm ``x * rsqrt(var)`` prefill
     ((4, 1), (4, 64)),  # size-1 side on the left
+    ((64, 1), (1, 64)),  # two-sided broadcast
+    ((64, 64), (1,)),  # 1D size-1 operand
+    ((64,), (64, 1)),  # mixed-rank broadcast
     # Same-shape (sanity / fast-path that skips even broadcast_shapes check)
     ((4, 8, 16), (4, 8, 16)),
 ]

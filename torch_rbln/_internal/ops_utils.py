@@ -1724,6 +1724,8 @@ def view_recipes_for_positional(view_recipes_flat, positional_count):
 # Elementwise binary shim ops whose size-1 last-dim operand the backend broadcasts
 # on the device. ``where`` is left out: three operands, and its bool condition
 # takes the CPU path anyway.
+# Mirrors OpCategories.BROADCASTABLE_OPS in tools/codegen/config.py, except
+# pow: its tensor-tensor overload takes CPU fallback.
 _LAST_DIM_ONE_DEVICE_BROADCAST_OPS = frozenset(
     {
         "aten::add",
