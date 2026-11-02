@@ -284,7 +284,7 @@ def pytest_addoption(parser):
         "--fallback-report",
         type=Path,
         metavar="PATH",
-        help="Write each test's outcome and CPU fallbacks over its call, per op and reason, to PATH as JSON, "
+        help="Write each test's call outcome and CPU fallbacks over its call, per op and reason, to PATH as JSON, "
         "leaving out skipped tests",
     )
 
@@ -351,7 +351,9 @@ class CpuFallbackReport:
         # Missing when reading the counts raised, which failed the call with that error.
         fallback = dict(report.user_properties).get("rbln_cpu_fallback")
         if fallback is not None:
-            self.tests[report.nodeid] = {"outcome": report.outcome, **fallback}
+            # The call phase's outcome: a test recorded as passed can still fail in
+            # fixture teardown, such as the device synchronization after it.
+            self.tests[report.nodeid] = {"call_outcome": report.outcome, **fallback}
 
     def pytest_sessionfinish(self):
         if not self.worker:
