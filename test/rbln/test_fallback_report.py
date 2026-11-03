@@ -94,18 +94,24 @@ class TestCpuFallbackReport(TestCase):
             _written(plugin),
             {
                 first.nodeid: {
+                    "windows_total": 1,
+                    "windows_with_fallbacks": 1,
                     "call_outcome": "passed",
                     "cpu_fallback": 2,
                     "cpu_fallback_reasons_by_op": {"aten::add.out": {"dtype": 2}},
                     "cpu_fallback_reset_detected": False,
                 },
                 second.nodeid: {
+                    "windows_total": 2,
+                    "windows_with_fallbacks": 2,
                     "call_outcome": "passed",
                     "cpu_fallback": 4,
                     "cpu_fallback_reasons_by_op": {"aten::add.out": {"dtype": 3}, "aten::mul.out": {"align": 1}},
                     "cpu_fallback_reset_detected": False,
                 },
                 third.nodeid: {  # no fallback is a record too: the op ran on the device
+                    "windows_total": 1,
+                    "windows_with_fallbacks": 0,
                     "call_outcome": "passed",
                     "cpu_fallback": 0,
                     "cpu_fallback_reasons_by_op": {},
@@ -133,6 +139,8 @@ class TestCpuFallbackReport(TestCase):
             _written(plugin),
             {
                 windowed.nodeid: {
+                    "windows_total": 2,
+                    "windows_with_fallbacks": 2,
                     "call_outcome": "passed",
                     "cpu_fallback": 2,
                     "cpu_fallback_reasons_by_op": {"aten::add.out": {"dtype": 2}},
@@ -161,6 +169,8 @@ class TestCpuFallbackReport(TestCase):
             _written(plugin),
             {
                 report.nodeid: {
+                    "windows_total": 1,
+                    "windows_with_fallbacks": 0,
                     "call_outcome": "failed",
                     "cpu_fallback": 0,
                     "cpu_fallback_reasons_by_op": {},
@@ -200,6 +210,8 @@ class TestCpuFallbackReport(TestCase):
             _written(controller),
             {
                 report.nodeid: {
+                    "windows_total": 1,
+                    "windows_with_fallbacks": 1,
                     "call_outcome": "passed",
                     "cpu_fallback": 2,
                     "cpu_fallback_reasons_by_op": {"aten::add.out": {"dtype": 2}},

@@ -172,21 +172,27 @@ class CpuFallbackRecorder:
 
     def __init__(self):
         self.windows = 0
+        self.windows_with_fallback = 0
         self.reasons_by_op: dict[str, dict[str, int]] = {}
         self.reset_detected = False
 
     def add(self, before: CpuFallbackCounts, after: CpuFallbackCounts) -> None:
         self.windows += 1
+        fell_back = False
         for (op, reason), n in after.items():
             delta = n - before.get((op, reason), 0)
             if delta > 0:
+                fell_back = True
                 by_reason = self.reasons_by_op.setdefault(op, {})
                 by_reason[reason] = by_reason.get(reason, 0) + delta
+        self.windows_with_fallback += fell_back
         # A count below where the window started: the test reset the counters inside it.
         self.reset_detected |= any(after.get(key, 0) < n for key, n in before.items())
 
     def record(self) -> dict:
         return {
+            "windows_total": self.windows,
+            "windows_with_fallbacks": self.windows_with_fallback,
             "cpu_fallback": sum(n for reasons in self.reasons_by_op.values() for n in reasons.values()),
             "cpu_fallback_reasons_by_op": self.reasons_by_op,
             "cpu_fallback_reset_detected": self.reset_detected,
