@@ -198,9 +198,10 @@ class TestGraphEagerMode(TestCase):
 
         Three conditions have to hold together, and every other case in this file misses
         at least one: the graph has to run first, the operator has to be wide enough to
-        reach the device, and deploy mode has to be on. The NaN/Inf pre-dispatch scan
-        that deploy mode skips reads the eager input on the host, which happens to
-        restore the weight on its way and hides this entirely.
+        reach the device, and the NaN/Inf pre-dispatch scan has to be off. The scan
+        reads the eager input on the host, restoring the weight and hiding the bug.
+        Production leaves it off by default; deploy mode here overrides the shared
+        fixture's ``TORCH_RBLN_CHECK_NAN_INF=ON`` to exercise that path.
 
         The second eager call is not redundant: a weight restored into a state that is
         right once and wrong afterwards would pass with a single call.
