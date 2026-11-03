@@ -254,7 +254,9 @@ def _register(
             warned = False
             while cursor < end:
                 if not driver_admission and (
-                    budget.va_bytes >= _VA_LIMIT or (not use_huge and budget.tables >= _TABLE_LIMIT)
+                    budget.va_bytes >= _VA_LIMIT
+                    or budget.tables > _TABLE_LIMIT
+                    or (not use_huge and budget.tables == _TABLE_LIMIT)
                 ):
                     if not partial:
                         state.close()
@@ -309,7 +311,15 @@ def _register(
             try:
                 state.close()
             except RuntimeError:
-                _logger.exception("Host registration cleanup failed; backing memory and budget remain reserved")
+                _logger.exception(
+                    "Host registration cleanup failed (device=%d, ptr=%#x, bytes=%d); "
+                    "the requested range remains reserved and overlapping retries are blocked. "
+                    "Any owned buffer and unreleased charges are retained. "
+                    "Use a fresh process for the next registration attempt",
+                    device,
+                    ptr,
+                    size,
+                )
             raise
         else:
             return state

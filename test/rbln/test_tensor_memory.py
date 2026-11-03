@@ -28,7 +28,7 @@ import pytest
 import rebel._C
 import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
-from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
+from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize, run_tests, TestCase
 
 import torch_rbln._C
 import torch_rbln.memory
@@ -836,6 +836,89 @@ class TestHostRegistrationPolicy(TestCase):
         self.assertIsNone(ref())
         self.assertEqual(self.registration._budgets[0].tables, 0)
 
+    @parametrize("table_limit", [1, 2, 3])
+    @parametrize("managed", [False, True])
+    def test_driver_to_thp_admission_at_table_limit(self, table_limit, managed):
+        h, p = self.huge, self.ptr
+        with mock.patch.object(self.registration, "host_registration_profile", return_value="driver"):
+            driver = self.managed(2 * h)
+        self.huge_ranges = [(p + 2 * h, h)]
+        with mock.patch.object(self.registration, "_TABLE_LIMIT", table_limit):
+            if managed:
+                candidate = self.managed(h, ptr=p + 2 * h)
+                admitted = candidate.fully_registered
+                candidate.close()
+            else:
+                admitted = self.registration.register_strict(p + 2 * h, h, 0)
+                if admitted:
+                    self.registration.unregister_strict(p + 2 * h, 0)
+            self.assertEqual(admitted, table_limit >= 2)
+            if table_limit < 2:
+                # Reject before pinning/scanning a pool that cannot be admitted.
+                self._HostPageSnapshot.assert_not_called()
+            else:
+                self._HostPageSnapshot.assert_called_once()
+            driver.close()
+            with self.managed(h, ptr=p + 2 * h) as retried:
+                self.assertTrue(retried.fully_registered)
+        self.assertEqual(self.registration._budgets[0].tables, 0)
+        self.assertEqual(self.registration._budgets[0].va_bytes, 0)
+
+    @parametrize("managed", [False, True])
+    def test_driver_failed_registration_and_cleanup_retain_full_request(self, managed):
+        h, p = self.huge, self.ptr
+        owner = torch.empty(4)
+        ref = weakref.ref(owner)
+        failure = RuntimeError("driver capacity exhausted")
+        self._host_register.side_effect = failure
+        self._host_unregister.side_effect = RuntimeError("release not confirmed")
+        with (
+            mock.patch.object(self.registration, "host_registration_profile", return_value="driver"),
+            self.assertLogs(self.registration._logger, level="ERROR") as messages,
+            self.assertRaisesRegex(RuntimeError, "driver capacity exhausted") as raised,
+        ):
+            if managed:
+                self.managed(2 * h, owner=owner)
+            else:
+                self.registration.register_strict(p, 2 * h, 0)
+        self.assertIs(raised.exception, failure)
+        self.assertIn("fresh process", " ".join(messages.output))
+        del owner
+        gc.collect()
+        self.assertEqual(ref() is not None, managed)
+        self.assertEqual(self.registration._budgets[0].tables, 2)
+        self.assertEqual(self.registration._budgets[0].va_bytes, 2 * h)
+        self.assertFalse(self.registration.is_registered(p, h, 0))
+        self._host_register.side_effect = None
+        with (
+            mock.patch.object(self.registration, "host_registration_profile", return_value="driver"),
+            self.assertRaisesRegex(RuntimeError, "overlaps"),
+        ):
+            self.registration.register_strict(p, h, 0)
+        self.huge_ranges = [(p + 2 * h, h)]
+        with self.managed(h, ptr=p + 2 * h) as rejected:
+            self.assertEqual(rejected.registered_bytes, 0)
+        self._host_register.assert_called_once_with(0, p, 2 * h)
+        self._HostPageSnapshot.assert_not_called()
+        # Teardown simulates confirmed release to avoid retaining test fixtures.
+
+    @parametrize("offset,size,tables", [(0, 8192, 1), ((2 << 20) - 4096, 8192, 1), (1, 2 << 20, 2)])
+    def test_driver_unaligned_single_mapping_accounting(self, offset, size, tables):
+        ptr = self.ptr + offset
+        with mock.patch.object(self.registration, "host_registration_profile", return_value="driver"):
+            handle = self.managed(size, ptr=ptr)
+        self.assertEqual(handle.registered_ranges, ((ptr, size),))
+        self.assertTrue(handle.covers(ptr, size))
+        self.assertFalse(handle.covers(ptr - 1, size))
+        self.assertEqual(self.registration._budgets[0].tables, tables)
+        self.assertEqual(self.registration._budgets[0].va_bytes, tables * self.huge)
+        self._host_register.assert_called_once_with(0, ptr, size)
+        self._HostPageSnapshot.assert_not_called()
+        handle.close()
+        self._host_unregister.assert_called_once_with(0, ptr)
+        self.assertEqual(self.registration._budgets[0].tables, 0)
+        self.assertEqual(self.registration._budgets[0].va_bytes, 0)
+
     def test_driver_registration_propagates_errors_for_both_apis(self):
         self._host_register.side_effect = RuntimeError("driver capacity exhausted")
         with mock.patch.object(self.registration, "host_registration_profile", return_value="driver"):
@@ -847,6 +930,12 @@ class TestHostRegistrationPolicy(TestCase):
         self.assertEqual(self._host_unregister.call_count, 2)
         self.assertFalse(self.registration._groups)
         self.assertEqual(self.registration._budgets[0].va_bytes, 0)
+        self._host_register.side_effect = None
+        with (
+            mock.patch.object(self.registration, "host_registration_profile", return_value="driver"),
+            self.managed(2 * self.huge) as retried,
+        ):
+            self.assertTrue(retried.fully_registered)
 
     def test_driver_registration_preserves_unsupported_runtime_result(self):
         self._host_register.return_value = False
@@ -1017,6 +1106,7 @@ class TestHostPageSnapshot(TestCase):
             shared.unlink()
 
 
+instantiate_parametrized_tests(TestHostRegistrationPolicy)
 instantiate_device_type_tests(TestAliasedTensors, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestInputOutputTensors, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestBindDeviceMemory, globals(), only_for="privateuse1")

@@ -118,11 +118,37 @@ they are not converted to an unregistered result or retried with smaller ranges.
 The runtime's unsupported-registration result still yields `False` for the raw
 API or an empty result for the owned API.
 
+If native registration raises and the subsequent unregister also fails, Python
+cannot confirm that the range is safe to release. It preserves the original
+registration error and logs the cleanup failure with the device, address, and
+requested size. The whole requested range remains reserved against overlapping
+retries, and unreleased mapping charges stay in the ledger. For `driver`, that
+is the entire request, since it uses one native registration. The owned API
+retains the tensor but returns no handle on this error; the raw API's caller
+must keep its allocation alive. Use a separate process for each capacity-error
+validation attempt rather than catching the error and retrying in the same one.
+If cleanup succeeds, the range and charges are released and a retry is allowed.
+
+A driver that rolls back a failed mapping may leave nothing for unregister to
+find. The current native API exposes a generic error, so Python cannot treat
+that error as proof of successful rollback. Dropping the allocation or refunding
+its charge requires a verified runtime contract, not an assumption based on the
+selected profile. This option alone does not qualify recovery after exhaustion.
+
 Ownership, overlap checks, coverage queries, and unregister-before-free remain
-active. Live registrations keep conservative ordinary-page and address-space
-charges even in `driver` mode, so switching back to a guarded profile does not
-forget them. Close refunds these charges regardless of the current profile.
-Set the profile before starting the process for reproducible driver validation.
+active. `driver` records ordinary-page charges for its single native mapping,
+including the initial page offset and device-address alignment padding. This
+can differ from a guarded profile that splits an unaligned range into separate
+registrations. It does not inspect or credit huge pages. Close refunds the
+recorded charges regardless of the current profile.
+
+Switching back to a guarded profile preserves all live charges. If `driver`
+has taken them above either limit, both `conservative` and `thp` refuse new
+registrations before page inspection, including confirmed huge-page ranges.
+Close the existing registrations to restore the allowance. At exactly the
+ordinary-page table limit, `thp` can still admit confirmed huge pages if address
+space remains; ordinary pages cannot be admitted. Set the profile before
+starting the process for reproducible driver validation.
 
 `conservative` counts every admitted window as ordinary pages. `thp` is an
 explicit deployment qualification: use it only when direct/identity DMA
