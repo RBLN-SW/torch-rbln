@@ -7,7 +7,7 @@ Covers the standard `pin_memory` UX while RBLN is the active accelerator:
 2. `Tensor.pin_memory()` / `Tensor.is_pinned()`
 3. DataLoader with `pin_memory=True`
 4. `non_blocking=True` copies from/to pinned host tensors
-5. D2H into a pageable buffer whose pages were replaced at the same address
+5. Copies both ways with a pageable buffer whose pages were replaced at the same address
 """
 
 import mmap
@@ -146,6 +146,26 @@ class TestPinMemoryCopy(TestCase):
             (_, d2h_after), _ = _C._rt_prof_host_sync()
             self.assertEqual(d2h_after - d2h_before, nbytes, "D2H did not come from the device")
             self.assertEqual(host, torch.full_like(host, 2))
+
+    def test_h2d_from_pageable_after_its_pages_are_replaced(self, device):
+        # H2D mirror of the test above. The cached copy command must read the pages
+        # the buffer holds now, not the ones it named when it was first built.
+        # A compiled output already has its device memory, so the first H2D takes
+        # the cached path too; an empty tensor could take a slower one.
+        dev = _plus_one(torch.zeros((1, 4096), dtype=torch.bfloat16).to(device))
+        nbytes = dev.numel() * dev.element_size()
+        buf = mmap.mmap(-1, nbytes, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+        host = torch.frombuffer(buf, dtype=dev.dtype).reshape(dev.shape)
+        for replace_pages, value in ((False, 3), (True, 7)):
+            if replace_pages:
+                buf.madvise(mmap.MADV_DONTNEED)
+            host.fill_(value)
+            _, (_, h2d_before) = _C._rt_prof_host_sync()
+            dev.copy_(host)
+            torch.rbln.synchronize()
+            _, (_, h2d_after) = _C._rt_prof_host_sync()
+            self.assertEqual(h2d_after - h2d_before, nbytes, "H2D did not reach the device")
+            self.assertEqual(dev.cpu(), torch.full_like(host, value))
 
 
 instantiate_device_type_tests(TestPinMemoryCopy, globals(), only_for="privateuse1")
