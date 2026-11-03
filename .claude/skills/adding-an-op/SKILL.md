@@ -125,7 +125,7 @@ trust agrees exactly.
 1. **Give it an input the device path accepts**: fp16, bf16 or fp32, with a last
    dimension that is a multiple of 64. `SUPPORTED_DTYPES` is those three only,
    and `compile_and_run_view_aware` applies its own alignment fallback after
-   `is_cpu_fallback_cases` (see the 64-element alignment comment in
+   `get_fallback_reason` (see the 64-element alignment comment in
    `ops_utils.py`). Miss the dtype and the op runs on the host however it is
    registered; miss the alignment and the eager Python route does the same for a
    single-tensor op — list ops, C++ kernels, and graph mode are outside that
@@ -162,7 +162,7 @@ Follow `.claude/skills/writing-tests/SKILL.md` for the tests themselves.
 
 - Do not route the op to CPU fallback to make it pass. An op that falls back is
   an op that is not implemented; say so instead.
-- Do not add a special case to `is_cpu_fallback_cases()` for a shape or dtype
+- Do not add a special case to `get_fallback_reason()` for a shape or dtype
   the kernel gets wrong. That hides a correctness bug behind a performance
   cliff.
 - Do not widen a tolerance to make a new op's test agree with the CPU reference.

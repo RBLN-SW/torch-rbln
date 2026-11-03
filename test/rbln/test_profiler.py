@@ -40,12 +40,10 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 from torch_rbln import _C, profiler as _prof
 from torch_rbln.profiler import (
     _BOUNCE_SITES,
-    _FALLBACK_REASON_NAMES,
     _fix,
     _fmt_time,
     _fyi,
     _read_bounces,
-    _read_fallback_reasons,
     _read_rt_timing,
     _read_runtime,
     _RT_PRIMS,
@@ -410,6 +408,30 @@ class TestProfilerApi(TestCase):
         self.assertIn("_do_bounce", rep)  # the captured call-site is shown under it
 
     @pytest.mark.npu(count=1)
+    def test_where_traces_a_fallback_the_shim_never_saw(self):
+        # A fallback the shim's checks did not decide (flip is registered straight to
+        # the boxed fallback; the strided copy retry is another) is still a fallback,
+        # so with_stack=True captures its call-site under its op, like the shim's own.
+        if not hasattr(_C, "_explain_set_trace"):
+            self.skipTest("trace capture not exposed by this _C build")
+
+        def _do_flip():
+            a = torch.randn(8, 8, device=DEV, dtype=torch.float16)
+            return torch.flip(a, [0])  # registered -> boxed cpu_fallback_rbln
+
+        with torch.rbln.explain() as off:
+            _do_flip()
+        self.assertEqual(off.dump()["trace_by_op"], {})  # opt-in: nothing unless asked
+
+        with torch.rbln.explain(with_stack=True) as on:
+            _do_flip()
+        d = on.dump()
+        self.assertEqual(d["cpu_fallback_reasons_by_op"].get("aten::flip"), {"registered": 1})
+        self.assertIn("_do_flip", d["trace_by_op"]["aten::flip"])  # the user's call-site frame
+        rows = [ln for ln in on.report().splitlines() if ln.strip().startswith("aten::flip")]
+        self.assertTrue(any(" at " in ln and "_do_flip" in ln for ln in rows), rows)
+
+    @pytest.mark.npu(count=1)
     def test_diff_reports_only_what_changed_between_two_regions(self):
         # explain doesn't know lifecycle; diff compares two regions the USER places.
         # int32 add falls back EVERY call -> persists; a stable fp16 shape compiles
@@ -583,8 +605,11 @@ class TestProfilerReportFormat(TestCase):
                 "reject": {"user_actionable": {}, "internal_fallback": {"count": 796, "bytes": 0}},
             },
             "dispatch": {"cpu_fallback": 1600, "recompile_miss": 0, "cpu_fallback_ns": 41_084_000},
-            "cpu_fallback_by_op": {"aten::sub.out": 800},
-            "cpu_fallback_reasons": {"dtype-not-dispatch": 1600},
+            "cpu_fallback_by_op": {"aten::sub.out": 800, "aten::index_copy.out": 1},
+            "cpu_fallback_reasons_by_op": {
+                "aten::sub.out": {"dtype": 800},
+                "aten::index_copy.out": {"strided_copy_error": 1},
+            },
             "trace_by_op": {},
             "notes": [],
         }
@@ -602,6 +627,9 @@ class TestProfilerReportFormat(TestCase):
         self.assertIn("no DMA (low cost)", rep)  # P1-2 cost verdict leads the Note
         self.assertIn(">> physical d2h (real transfer): 0", rep)  # P1-3 promoted witness line
         self.assertIn("dispatch/cpu_fallback:", rep)  # P1-1 grouped detail block
+        # reasons summed over ops, in the record's own names; a reason whose fix is not
+        # the row's carries its own
+        self.assertIn("why: dtype 800, strided_copy_error 1 (try: lower outer_count / fatter inner)", rep)
         # P1-4 fixed category order (NOT sorted by cost): host_bounce -> runtime ->
         # dispatch
         self.assertLess(rep.index("host_bounce/d2d_copy"), rep.index("runtime/v2v_slow"))
@@ -655,10 +683,6 @@ class TestProfilerRuntimeContract(TestCase):
         rt = _read_rt_timing()
         if rt is not None:
             self.assertEqual(len(rt), len(_RT_PRIMS), "RtIdx count drifted; sync _RT_PRIMS with RBLNFunctions.cpp")
-        # cpu_fallback reason histogram (if the binding is present).
-        fr = _read_fallback_reasons()
-        if fr:
-            self.assertEqual(len(fr), len(_FALLBACK_REASON_NAMES), "fallback-reason count drifted; sync names")
         # runtime hidden-d2h reason axis (if the runtime exposes it): our names must
         # cover it exactly -- dump() fails fast on any mismatch (see the unit test
         # below).
@@ -680,7 +704,7 @@ class TestProfilerRuntimeContract(TestCase):
         p = torch.rbln.explain()
         p._bounces = [(0, 0)] * len(_BOUNCE_SITES)
         p._dispatch = (0, 0, 0, 0, 0, 0, 0)
-        p._fallback_by_op, p._recompile_by_op, p._fallback_reasons = {}, {}, []
+        p._fallback_by_op, p._recompile_by_op, p._fallback_reasons_by_op = {}, {}, {}
         p._trace_by_op, p._rt_timing, p._wall_ns = {}, None, 1
         drifted = len(_RUNTIME_REASONS) + 1  # runtime enum grew past what this build names
         p._rt = {"hidden_count": [0] * drifted, "hidden_bytes": [0] * drifted}
@@ -693,7 +717,7 @@ class TestProfilerRuntimeContract(TestCase):
         p = torch.rbln.explain()
         p._bounces = [(0, 0)] * len(_BOUNCE_SITES)
         p._dispatch = (0, 0, 0, 0, 0, 0, 0)
-        p._fallback_by_op, p._recompile_by_op, p._fallback_reasons = {}, {}, []
+        p._fallback_by_op, p._recompile_by_op, p._fallback_reasons_by_op = {}, {}, {}
         p._trace_by_op, p._rt_timing, p._wall_ns = {}, None, 1
         n = len(_RUNTIME_REASONS)
         counts = list(range(1, n + 1))

@@ -10,6 +10,11 @@ from torch_rbln import _C
 from torch_rbln._internal import ops_utils
 
 
+def _nan_inf_fallbacks():
+    """CPU fallbacks the shim took for a NaN/Inf input, over every op."""
+    return sum(n for _op, reason, n in _C._dispatch_fallback_by_op_reason() if reason == "nan_inf")
+
+
 @pytest.mark.parametrize("setting", [None, "OFF", "ON"])
 def test_python_scan_requires_opt_in(monkeypatch, setting):
     monkeypatch.delenv("TORCH_RBLN_DEPLOY", raising=False)
@@ -23,8 +28,8 @@ def test_python_scan_requires_opt_in(monkeypatch, setting):
         mock.patch.object(ops_utils, "has_invalid_tensor", return_value=True) as scan,
         mock.patch.object(ops_utils, "to_cpu", wraps=ops_utils.to_cpu) as host_copy,
     ):
-        fallback = ops_utils.is_cpu_fallback_cases((x,))
-    assert fallback == (setting == "ON"), (setting, fallback)
+        fallback = ops_utils.get_fallback_reason((x,))
+    assert fallback == ("nan_inf" if setting == "ON" else None), (setting, fallback)
     assert scan.call_count == int(setting == "ON"), (setting, scan.call_count)
     assert host_copy.called == (setting == "ON"), (setting, host_copy.call_count)
 
@@ -41,26 +46,26 @@ def test_opt_in_is_live_before_cold_and_warm_dispatch(monkeypatch, dtype):
     x, y = x_cpu.to("rbln"), y_cpu.to("rbln")
     _C._warmcache_clear()
     _C._dispatch_shim_diag_reset()
-    _C._dispatch_fallback_reasons_reset()
+    _C._dispatch_fallback_by_op_reset()
 
     # A NaN input makes an accidentally enabled scanner observable as a fallback.
     torch.add(x, y)
     torch.rbln.synchronize()
     assert _C._warmcache_size() > 0, "default-off cold dispatch did not install a device entry"
-    assert _C._dispatch_fallback_reasons()[1] == 0, "default-off dispatch scanned NaN inputs"
+    assert _nan_inf_fallbacks() == 0, "default-off dispatch scanned NaN inputs"
 
     monkeypatch.setenv("TORCH_RBLN_CHECK_NAN_INF", "ON")
     hits_before = _C._dispatch_shim_diag_dump()[2]
     result = torch.add(x, y)
     torch.testing.assert_close(result.cpu(), torch.add(x_cpu, y_cpu), equal_nan=True)
-    assert _C._dispatch_fallback_reasons()[1] == 1, "opt-in did not take the NaN/Inf fallback"
+    assert _nan_inf_fallbacks() == 1, "opt-in did not take the NaN/Inf fallback"
     assert _C._dispatch_shim_diag_dump()[2] == hits_before, "warm hit bypassed the opt-in scan"
 
     monkeypatch.delenv("TORCH_RBLN_CHECK_NAN_INF")
     torch.add(x, y)
     torch.rbln.synchronize()
     assert _C._dispatch_shim_diag_dump()[2] > hits_before, "disabling the scan did not restore the warm hit"
-    assert _C._dispatch_fallback_reasons()[1] == 1, "disabled scan still caused a fallback"
+    assert _nan_inf_fallbacks() == 1, "disabled scan still caused a fallback"
 
 
 if __name__ == "__main__":
