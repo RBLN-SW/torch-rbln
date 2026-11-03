@@ -8,7 +8,9 @@ This test suite verifies:
 3. Python-registered ops from register_ops.py work correctly
 """
 
+import itertools
 from typing import ClassVar
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -17,8 +19,10 @@ from torch.testing._internal.common_utils import parametrize, run_tests, TestCas
 
 from test.utils import SUPPORTED_DTYPES
 from torch_rbln import _C
+from torch_rbln._internal import ops_utils
 from torch_rbln._internal.ops_utils import (
     _detect_view_recipe,
+    _is_known_bad_pattern,
     _simulate_recipe,
     _view_fallback_count_get,
     _view_fallback_count_reset,
@@ -1930,6 +1934,47 @@ class TestViewOpsOnDevice(TestCase):
         self.assertEqual(
             _view_fallback_count_get(), 0, "Recognized permute view should NOT trigger .contiguous() fallback."
         )
+
+
+class TestViewRecipeSearch(TestCase):
+    """The search behind ``_detect_view_recipe``: metadata only, so no device."""
+
+    def test_a_blocklisted_route_is_not_extended(self):
+        """``x[:, -1:, :]`` is one ``narrow`` that rule 2 blocklists, as is every
+        route that moves the offset. Extending them made the search expand every
+        offset it could reach, a count that grows with the sliced dim.
+        """
+        expanded = {}
+        for seq in (32, 64):
+            base = torch.empty(2, seq, 64)
+            with patch.object(ops_utils, "_gen_step_candidates", wraps=ops_utils._gen_step_candidates) as gen:
+                recipe = ops_utils._bfs_search_recipe(base, base[:, -1:, :])
+            self.assertIsNone(recipe, f"seq={seq}")
+            expanded[seq] = gen.call_count
+        self.assertEqual(expanded[64], expanded[32], f"the search grew with the sliced dim: {expanded}")
+
+    def test_a_blocklisted_recipe_stays_blocklisted_when_extended(self):
+        """The search stops extending a route once it is blocklisted, which is sound
+        only while every rule in ``_is_known_bad_pattern`` survives extension.
+        """
+        steps = [
+            ("permute", (1, 0)),
+            ("narrow", 0, 0, 1),
+            ("narrow", 0, 1, 1),
+            ("narrow", 1, 0, 1),
+            ("narrow", 1, 1, 1),
+            ("expand", 0, 2),
+            ("select", 0, 1),
+            ("squeeze", 0),
+            ("unsqueeze", 0),
+            ("reshape", (2,)),
+        ]
+        for length in range(1, 4):
+            for recipe in itertools.product(steps, repeat=length):
+                if not _is_known_bad_pattern(recipe):
+                    continue
+                for step in steps:
+                    self.assertTrue(_is_known_bad_pattern((*recipe, step)), f"{recipe} + {step}")
 
 
 @pytest.mark.npu(count=2)

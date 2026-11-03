@@ -1118,7 +1118,9 @@ def _is_known_bad_pattern(recipe):
     correctly. The BFS will then prefer an algebraically-equivalent
     alternative (e.g. ``narrow → permute`` instead of ``permute → narrow``).
 
-    Add new entries here as new rebel bugs surface.
+    Add new entries here as new rebel bugs surface. Each rule matches one step or
+    two adjacent steps, so a recipe that matches still matches however it is
+    extended; ``_search_unblocked_routes`` relies on that to stop extending it.
     """
     # 1. ``permute → narrow(non-leading dim)`` → ``inf`` outputs; ``narrow →
     #    permute`` works. (repro 2026-04-30: ``base.narrow(0,2,4).permute(2,0,1)``)
@@ -1292,6 +1294,72 @@ def _bfs_search_recipe(base, t, max_steps=4):
     if start == target:
         return ()
 
+    recipe = _search_unblocked_routes(start, target, max_steps)
+    if recipe is _UNPROVEN:
+        recipe = _search_all_routes(start, target, max_steps)
+    return recipe
+
+
+# Returned by ``_search_unblocked_routes`` when it cannot show that its answer is the
+# one ``_search_all_routes`` gives.
+_UNPROVEN = object()
+
+
+def _search_unblocked_routes(start, target, max_steps):
+    """``_search_all_routes`` without extending blocklisted routes, or ``_UNPROVEN``.
+
+    The full search records each state with the first route that reaches it, and a
+    blocklisted recipe stays blocklisted however it is extended, so nothing past a
+    state first reached by a blocklisted route can be returned. Such states can be
+    nearly all of the search -- for ``x[:, -1:, :]`` every route that moves the offset
+    is blocklisted, the one-step ``narrow`` included -- so this search records them as
+    visited and does not expand them.
+
+    That changes the answer only if, in the full search, a state they lead to was
+    recorded first and so turned away an unblocked route to it. Storage offsets never
+    decrease along a route (``narrow`` and ``select`` add ``start * stride >= 0``; the
+    other steps keep it), so such a state's offset is at least that of a blocklisted
+    state recorded at an earlier depth. This search returns ``_UNPROVEN`` rather than
+    expand a state whose offset is not below all of those; a state reached at
+    ``max_steps`` is never expanded, so it is not checked.
+    """
+    visited: dict[tuple, tuple] = {start: ()}
+    frontier = [start]
+    # The lowest offset among the blocklisted states recorded at earlier depths.
+    lowest_blocked_offset = math.inf
+    for depth in range(1, max_steps + 1):
+        next_frontier = []
+        lowest_blocked_offset_here = math.inf
+        for cur in frontier:
+            cur_recipe = visited[cur]
+            for step in _gen_step_candidates(cur, target):
+                new_state = _simulate_recipe(cur[0], cur[1], cur[2], (step,))
+                if new_state is None:
+                    continue
+                new_recipe = (*cur_recipe, step)
+                blocked = _is_known_bad_pattern(new_recipe)
+                if new_state == target:
+                    if not blocked:
+                        return new_recipe
+                    continue
+                if new_state in visited:
+                    continue
+                visited[new_state] = new_recipe
+                if blocked:
+                    lowest_blocked_offset_here = min(lowest_blocked_offset_here, new_state[2])
+                    continue
+                if depth < max_steps and new_state[2] >= lowest_blocked_offset:
+                    return _UNPROVEN
+                next_frontier.append(new_state)
+        frontier = next_frontier
+        if not frontier:
+            break
+        lowest_blocked_offset = min(lowest_blocked_offset, lowest_blocked_offset_here)
+    return None
+
+
+def _search_all_routes(start, target, max_steps):
+    """The first non-blocklisted recipe from ``start`` to ``target``, in BFS order."""
     visited: dict[tuple, tuple] = {start: ()}
     frontier = [start]
 
