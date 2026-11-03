@@ -334,6 +334,15 @@ def handle_empty_where(args):
     return ret, ret.shape
 
 
+def handle_empty_masked_fill(args, out=None):
+    # ``masked_fill`` keeps ``self``'s shape, so an empty ``self`` gives an empty
+    # result even when the mask is a non-empty (0-dim, broadcast) tensor. Such a
+    # call must not reach the compiler: a program with an empty input fails in
+    # runtime creation (``std::bad_alloc``).
+    ret = out if out is not None else torch.empty_like(args[0], device="rbln")
+    return ret, ret.shape
+
+
 def handle_empty_binary(args):
     # Compute the broadcast result shape from all tensor args. With the
     # implicit-broadcast path (broadcast_args_general now validates only),
@@ -466,6 +475,25 @@ def handle_empty_tensor(tensor_args):
         return ret, ret.shape
     msg = "Can't find reference tensor for out"
     raise RuntimeError(msg)
+
+
+def contiguous_for_scalar_and_strided(args, kwargs_filtered):
+    """Make every tensor arg contiguous when a 0-dim operand meets a strided one.
+
+    The pinned compiler crashes on a graph that combines a 0-dim input with a
+    permuted input (``where(cond, scalar, a.T)``), and a compiler crash cannot be
+    caught by the CPU fallback. Materializing the view here keeps such a call on
+    the device path.
+
+    TODO: remove this helper and ``OpCategories.SCALAR_STRIDED_CONTIG_OPS`` once the
+    pinned compiler passes ``test_where_permuted_operand_with_scalar_matches_cpu``
+    without it.
+    """
+    flat_args, _ = tree_flatten((args, kwargs_filtered))
+    tensors = [a for a in flat_args if isinstance(a, torch.Tensor)]
+    if any(t.dim() == 0 for t in tensors) and any(not t.is_contiguous() for t in tensors):
+        (args, kwargs_filtered), _ = prepare_args_for_contiguous(args, kwargs_filtered)
+    return args, kwargs_filtered
 
 
 def prepare_args_for_contiguous(args, kwargs_filtered):

@@ -191,7 +191,16 @@ class OpCategories:
     # EmptyTensor template names that skip `tensor_args = extract_tensors(args)` before
     # the empty-tensor branch (those templates only read raw positional args, e.g.
     # args[0]). Keep in sync when adding EmptyTensor methods with the same pattern.
-    EMPTY_TENSOR_TEMPLATES_WITHOUT_PRIOR_TENSOR_ARGS: frozenset[str] = frozenset({"where"})
+    EMPTY_TENSOR_TEMPLATES_WITHOUT_PRIOR_TENSOR_ARGS: frozenset[str] = frozenset({"where", "masked_fill"})
+
+    # TODO: remove with ``contiguous_for_scalar_and_strided`` (see its docstring).
+    # Ops whose compile crashes on the pinned compiler when a 0-dim operand meets a
+    # permuted one. The generated handler calls that helper before the dispatch gate.
+    SCALAR_STRIDED_CONTIG_OPS: frozenset[str] = frozenset({"where"})
+
+    @classmethod
+    def needs_scalar_strided_contig(cls, root_name: str) -> bool:
+        return root_name in cls.SCALAR_STRIDED_CONTIG_OPS
 
     # Empty tensor handling mapping: (category_set, template_method_name)
     # Maps category Set -> template method name in EmptyTensor class
@@ -201,6 +210,7 @@ class OpCategories:
         (BROADCASTABLE_OPS, "broadcastable"),
         ({"mm"}, "mm"),
         ({"where"}, "where"),
+        ({"masked_fill"}, "masked_fill"),
         ({"addmm"}, "addmm"),
         ({"linear"}, "linear"),
     ]

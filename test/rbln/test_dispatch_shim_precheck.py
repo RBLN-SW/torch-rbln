@@ -133,6 +133,32 @@ class TestBoolOperandCompilation(TestCase):
         self.assertEqual(fell_back, scan_enabled)
 
     @dtypes(*SUPPORTED_DTYPES)
+    def test_where_permuted_operand_with_scalar_matches_cpu(self, device, dtype):
+        # The pinned compiler crashes on a permuted operand next to a 0-dim operand; the
+        # handler makes the inputs contiguous first (TODO: that guard will be removed;
+        # this test must keep passing without it).
+        a_cpu = torch.arange(64 * 128, dtype=dtype).reshape(64, 128)
+        a = a_cpu.to(device)
+        cond_cpu, cond = a_cpu.T > 100, a.T > 100
+        self.assertEqual(torch.where(cond, -1.0, a.T).cpu(), torch.where(cond_cpu, -1.0, a_cpu.T))
+        self.assertEqual(torch.where(cond, a.T, 0.0).cpu(), torch.where(cond_cpu, a_cpu.T, 0.0))
+        self.assertEqual(torch.where(cond.contiguous(), 1.0, a.T).cpu(), torch.where(cond_cpu, 1.0, a_cpu.T))
+
+    @dtypes(*SUPPORTED_DTYPES)
+    def test_masked_fill_empty_self_with_scalar_mask_skips_compile(self, device, dtype):
+        # The OpInfo harness applies a 0-dim mask to an empty sample; the program
+        # must not be compiled (runtime creation fails on an empty input).
+        compiled = len(_compiled_op_cache)
+        x = torch.empty(0, dtype=dtype, device=device)
+        mask = torch.ones((), dtype=torch.bool, device=device)
+        self.assertIs(x.masked_fill_(mask, 0), x)
+        self.assertEqual(x.shape, (0,))
+        out = torch.masked_fill(torch.empty(0, 3, dtype=dtype, device=device), mask, 1.0)
+        self.assertEqual(out.shape, (0, 3))
+        self.assertEqual(out.dtype, dtype)
+        self.assertEqual(len(_compiled_op_cache), compiled)
+
+    @dtypes(*SUPPORTED_DTYPES)
     @parametrize("op", ["where", "masked_fill"])
     def test_rank0_tensor_value_is_read_on_each_call(self, device, dtype, op):
         x_cpu = torch.arange(256, dtype=dtype).reshape(4, 64)
