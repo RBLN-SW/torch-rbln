@@ -244,6 +244,16 @@ if [[ "${test_suite}" == "ops" ]]; then
   parallel_report=(--fallback-report="test-reports/${test_suite}-parallel.json")
 fi
 
+# TEMPORARY, do not merge: records the network path of the 2-NPU distributed tests.
+probe_network_path=false
+if [[ "${test_suite}" == "distributed" && "${num_npus}" == "2" ]]; then
+  probe_network_path=true
+  .buildkite/scripts/test/network-path-probe.sh \
+    start \
+    test-reports/network-path \
+    || true
+fi
+
 echo "--- Running ${test_suite} suite, ${test_dir}, serial tests"
 pytest_exit_code=0
 env \
@@ -259,6 +269,14 @@ env \
 # Exit 5 means `pytest` selected no tests, which is not a failure.
 if [[ "${pytest_exit_code}" -ne 0 && "${pytest_exit_code}" -ne 5 ]]; then
   failed_pytest_runs+=("serial tests (pytest exit code ${pytest_exit_code})")
+fi
+
+if [[ "${probe_network_path}" == "true" ]]; then
+  echo "--- Network path of the serial tests"
+  .buildkite/scripts/test/network-path-probe.sh \
+    stop \
+    test-reports/network-path \
+    || true
 fi
 
 echo "--- Running ${test_suite} suite, ${test_dir}, parallel tests"
