@@ -107,7 +107,8 @@ def _exportable_arange(n: int, layout: str | None = None) -> torch.Tensor:
     return x
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.serial
+@pytest.mark.npu(count=1)
 @pytest.mark.skipif(
     not _accel_node_accessible(), reason="/dev/accel/accel0 not accessible (export/import need the DRM accel node)"
 )

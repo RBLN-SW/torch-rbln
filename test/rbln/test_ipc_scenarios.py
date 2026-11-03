@@ -135,7 +135,8 @@ def _values(shape, dtype, seed=0) -> torch.Tensor:
     return torch.randint(-100, 100, shape, generator=g).to(dtype)
 
 
-@pytest.mark.test_set_ci
+@pytest.mark.serial
+@pytest.mark.npu(count=1)
 @pytest.mark.skipif(
     not _accel_node_accessible(), reason="/dev/accel/accel0 not accessible (export/import need the DRM accel node)"
 )
