@@ -199,11 +199,13 @@ def {kernel_name}(*args, **kwargs):
 
             With ``reuse_self`` the wrapper offers ``self`` as the output; the
             dispatch helper binds it only under its reuse contract and the
-            wrapper copies back otherwise.
+            wrapper copies back otherwise. The broadcast check first raises
+            PyTorch's own errors for operands that do not broadcast to ``self``.
             """
             if reuse_self:
                 return f"""
 def {kernel_name}(*args, **kwargs):
+    validate_inplace_broadcast(args)
     result, _ = {general_kernel_name}(*args, **kwargs, out=args[0])
     if result.data_ptr() != args[0].data_ptr():
         args[0].copy_(result)

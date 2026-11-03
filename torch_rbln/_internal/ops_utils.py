@@ -2265,6 +2265,35 @@ def is_inplace_op(args, kwargs) -> bool:
     return any(t is out_t or (t.data_ptr() == out_t.data_ptr() and t.device == out_t.device) for t in input_tensors)
 
 
+def validate_inplace_broadcast(args: tuple) -> None:
+    """Raise PyTorch's errors when an elementwise in-place op cannot write to ``self``.
+
+    ``args[0]`` is ``self``; every other tensor arg must broadcast *to* it. The
+    messages match the CPU kernels (``infer_size`` and the in-place output
+    check), so an in-place call that reuses ``self`` as the compiled output
+    fails the same way it does on the CPU instead of with a runtime shape error.
+    """
+    self_tensor = args[0]
+    out_shape = list(self_tensor.shape)
+    for other in (t for t in args[1:] if torch.is_tensor(t)):
+        other_shape = list(other.shape)
+        ndim = max(len(out_shape), len(other_shape))
+        padded_out = [1] * (ndim - len(out_shape)) + out_shape
+        padded_other = [1] * (ndim - len(other_shape)) + other_shape
+        merged = []
+        for dim, (a, b) in enumerate(zip(padded_out, padded_other, strict=True)):
+            if a != b and 1 not in (a, b):
+                msg = (
+                    f"The size of tensor a ({a}) must match the size of tensor b ({b}) at non-singleton dimension {dim}"
+                )
+                raise RuntimeError(msg)
+            merged.append(b if a == 1 else a)
+        out_shape = merged
+    if out_shape != list(self_tensor.shape):
+        msg = f"output with shape {list(self_tensor.shape)} doesn't match the broadcast shape {out_shape}"
+        raise RuntimeError(msg)
+
+
 def _out_alias_allowed(args: tuple, kwargs: dict, out_tensor: torch.Tensor, reusable) -> bool:
     """``out`` may share storage with an input only when it *is* ``reusable``.
 

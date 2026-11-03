@@ -207,6 +207,7 @@ class TestBoolOperandCompilation(TestCase):
         mask_cpu = torch.arange(256).reshape(4, 64) % 2 == 0
         x, mask = x_cpu.to(device), mask_cpu.to(device)
         value = torch.tensor(2.5, dtype=dtype, device=device)
+        compiled = len(_compiled_op_cache)
         for scalar in (2.5, 4.0):
             value.fill_(scalar)
             if op == "where":
@@ -216,6 +217,23 @@ class TestBoolOperandCompilation(TestCase):
                 result = x.masked_fill_(mask, value)
                 expected = x_cpu.masked_fill(mask_cpu, scalar)
             self.assertEqual(result.cpu(), expected)
+        # The value must be read by the compiled program, not by a CPU fallback.
+        self.assertGreater(len(_compiled_op_cache), compiled, f"{op} with a rank-0 value did not compile")
+        self.assertFalse(
+            any(name.startswith(f"aten::{op}") for name, count in _C._dispatch_fallback_by_op() if count),
+            f"{op} with a rank-0 value used dispatch CPU fallback",
+        )
+
+    @parametrize("self_shape,mask_shape", [((1, 64), (4, 64)), ((0, 64), (4, 64)), ((4, 64), (3,))])
+    def test_masked_fill_inplace_shape_errors_match_cpu(self, device, self_shape, mask_shape):
+        # Binding self as the compiled output must not change the error for a
+        # mask that does not broadcast to self.
+        mask_cpu = torch.zeros(mask_shape, dtype=torch.bool)
+        with self.assertRaises(RuntimeError) as cpu_err:
+            torch.zeros(self_shape, dtype=torch.float16).masked_fill_(mask_cpu, 5.0)
+        with self.assertRaises(RuntimeError) as dev_err:
+            torch.zeros(self_shape, dtype=torch.float16, device=device).masked_fill_(mask_cpu.to(device), 5.0)
+        self.assertEqual(str(dev_err.exception), str(cpu_err.exception))
 
 
 @pytest.mark.npu(count=1)
