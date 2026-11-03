@@ -129,6 +129,8 @@ class TestPinMemoryCopy(TestCase):
     def test_d2h_to_pageable_after_its_pages_are_replaced(self, device):
         # The same address gets new pages, as when malloc hands a freed one back.
         # The D2H must land in them, not in the old pages a cached copy names.
+        # A compiled output is device-latest, so the D2H goes through the cached
+        # copy command. A plain .to(device) could be served from the host copy.
         src = _plus_one(torch.ones((1, 4096), dtype=torch.bfloat16).to(device))
         nbytes = src.numel() * src.element_size()
         # MAP_PRIVATE: on a shared mapping MADV_DONTNEED keeps the same pages.
