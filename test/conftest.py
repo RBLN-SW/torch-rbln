@@ -199,6 +199,16 @@ def restore_current_stream(restore_current_device):  # noqa: ARG001
 # Environment variable isolation fixtures
 # =============================================================================
 @pytest.fixture(autouse=True)
+def enable_nan_inf_checks(monkeypatch):
+    """Keep compatibility tests' NaN/Inf CPU fallback without changing runtime defaults.
+
+    Function scope restores the caller's environment and lets an individual test
+    explicitly exercise the default-off path. Subprocesses inherit the test setting.
+    """
+    monkeypatch.setenv("TORCH_RBLN_CHECK_NAN_INF", "ON")
+
+
+@pytest.fixture(autouse=True)
 def disable_compile_error_fallback(monkeypatch):
     """Disable 'compile_error' fallback by appending it to the existing
     TORCH_RBLN_DISABLE_FALLBACK list.

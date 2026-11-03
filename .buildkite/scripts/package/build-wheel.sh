@@ -52,8 +52,24 @@ echo "--- Building ${artifact_dir}"
 TORCH_RBLN_BUILD_TYPE="${build_type}" \
 TORCH_RBLN_BUILD_TESTING="OFF" \
 uv build \
-  --wheel \
-  --out-dir "${artifact_dir}"
+  --wheel
+
+echo "--- Repairing wheel"
+# The excluded libraries come from `torch` and `rebel-compiler`. With
+# `--patcher none`, the repair fails instead of bundling any other library.
+uv run \
+  --isolated \
+  --locked \
+  --only-group ci \
+  auditwheel repair \
+    --patcher none \
+    --exclude libc10.so \
+    --exclude librbln.so \
+    --exclude libtorch.so \
+    --exclude libtorch_cpu.so \
+    --exclude libtorch_python.so \
+    --wheel-dir "${artifact_dir}" \
+    dist/*.whl
 wheels=("${artifact_dir}"/*.whl)
 wheel="${wheels[0]}"
 version="$(
@@ -67,6 +83,15 @@ if [[ -n "${TORCH_RBLN_VERSION_TAG:-}" \
     "the checkout lacks the tag" >&2
   exit 1
 fi
+
+echo "--- Checking wheel metadata"
+uv run \
+  --isolated \
+  --locked \
+  --only-group ci \
+  twine check \
+    --strict \
+    "${wheel}"
 
 echo "--- Installing wheel in clean environment"
 uv venv \

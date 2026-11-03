@@ -34,7 +34,8 @@ Pre-merge, post-merge, and release checks all run these jobs:
 - **Source linting** runs the linters once per Python version, CPU architecture,
   and build type.
 - **Wheel builds** build a wheel per Python version, CPU architecture, and build
-  type.
+  type. They check each wheel for `manylinux` compatibility and valid metadata,
+  and verify that it installs and imports in a clean environment.
 - **NPU tests** run the C++ tests and the Python test suites for each NPU
   product. Only release checks run the Python tests marked
   [`periodic`](TEST_GUIDE.md#ci-integration).
