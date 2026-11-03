@@ -5,8 +5,10 @@
 #include <fmt/format.h>
 #include <fmt/ranges.h>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -107,25 +109,74 @@ class C10_RBLN_API RBLNScopeGuard {
 // Where a CPU fallback ran. kBoxed is cpu_fallback_rbln, the boxed CPU
 // fallback and the only path that consults CPU fast-path handlers. kPython is
 // the eager Python path, which runs the op through PyTorch's own CPU kernels.
-enum class CpuFallbackPath : uint8_t { kBoxed, kPython };
+// kStridedCopy is submit_or_fallback, which redoes a batched strided copy the
+// device rejected with the kernel's own CPU version of the op.
+enum class CpuFallbackPath : uint8_t { kBoxed, kPython, kStridedCopy };
+
+// Why a CPU fallback ran. A reason is the switch that turns the fallback off
+// -- a `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` case or a
+// `TORCH_RBLN_DISABLE_FALLBACK` category -- or, where no switch exists, the
+// check that decided it. cpu_fallback_reason_name() is the name those switches,
+// torch.rbln.explain() and the fallback report use; the Python fallback paths
+// pass that name and the binding parses it back, so an unknown reason fails
+// at the call instead of becoming a new one.
+enum class CpuFallbackReason : uint8_t {
+  // TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK cases (docs/CONFIGURATION.md)
+  kDispatchMode,
+  kTrace,
+  kReentrant,
+  kDtype,
+  kScalar,
+  kStorageOffset,
+  kNanInf,
+  kAlign,
+  // TORCH_RBLN_DISABLE_FALLBACK categories (c10/rbln/RBLNFallbackConfig.cpp)
+  kCompileError,
+  kUnsupportedOp,
+  kStridedCopyError,
+  // the deciding check, where no switch exists
+  kRegistered,
+  kOutDtype,
+  kIndexPattern,
+  kDivRounding,
+  kNonIntegerExponent,
+  kUnsupportedInput,
+  kAttnWeightsCacheMiss,
+  kTensorSubclass,
+  kNumCpuFallbackReasons, // sentinel, not a reason
+};
+inline constexpr size_t kNumCpuFallbackReasons =
+    static_cast<size_t>(CpuFallbackReason::kNumCpuFallbackReasons);
+
+C10_RBLN_API std::string_view cpu_fallback_reason_name(
+    CpuFallbackReason reason);
+// The reason named `name`, or nullopt if no reason has that name.
+C10_RBLN_API std::optional<CpuFallbackReason> parse_cpu_fallback_reason(
+    std::string_view name);
+// Every reason's name, in enum order.
+C10_RBLN_API std::vector<std::string_view> cpu_fallback_reason_names();
 
 /**
  * @brief Marks one CPU fallback: an operation running on CPU instead of RBLN.
  *
  * Every torch-rbln op-level CPU fallback runs inside one of these:
  * cpu_fallback_rbln (which the C++ dispatch shim, the boxed fallback and
- * advanced indexing all call), and the eager Python path through the
- * `_CpuFallbackScope` context manager. Construction counts the fallback per
- * op (cpu_fallback_counts, read by torch.rbln.explain()) and, when
- * `TORCH_RBLN_LOG_LEVEL` is `INFO` or lower, logs it with a UserWarning that
- * carries the caller's location. Destruction adds the scope's wall time to
- * cpu_fallback_ns() when it is the outermost scope on the thread: a fallback
- * that runs inside another (an SDPA fallback converting its mask on the
- * device, say) is counted, but its time is already part of the outer one.
+ * advanced indexing all call), the eager Python path through the
+ * `_CpuFallbackScope` context manager, and the CPU retry of a batched strided
+ * copy the device rejected (submit_or_fallback). Construction counts the
+ * fallback per op (cpu_fallback_counts, read by torch.rbln.explain()), captures
+ * its Python call-site under explain(with_stack=True) (through
+ * set_cpu_fallback_capture_fn) and, when `TORCH_RBLN_LOG_LEVEL` is `INFO` or
+ * lower, logs it with a UserWarning that carries the caller's location.
+ * Destruction adds the scope's wall time to cpu_fallback_ns() when it is the
+ * outermost scope on the thread: a fallback that runs inside another (an SDPA
+ * fallback converting its mask on the device, say) is counted, but its time is
+ * already part of the outer one.
  *
  * @code
  * {
- *   const CpuFallbackScope fallback("aten::mul.out", CpuFallbackPath::kBoxed);
+ *   const CpuFallbackScope fallback(
+ *       "aten::mul.out", CpuFallbackPath::kBoxed, CpuFallbackReason::kNanInf);
  *   // ... run the op on CPU ...
  * }
  * // Output (at INFO):
@@ -136,7 +187,10 @@ enum class CpuFallbackPath : uint8_t { kBoxed, kPython };
  */
 class C10_RBLN_API CpuFallbackScope {
  public:
-  CpuFallbackScope(std::string_view full_op_name, CpuFallbackPath path);
+  CpuFallbackScope(
+      std::string_view full_op_name,
+      CpuFallbackPath path,
+      CpuFallbackReason reason);
   ~CpuFallbackScope();
   CpuFallbackScope(const CpuFallbackScope&) = delete;
   CpuFallbackScope& operator=(const CpuFallbackScope&) = delete;
@@ -148,8 +202,20 @@ class C10_RBLN_API CpuFallbackScope {
   uint64_t start_ns_;
 };
 
+// WHERE for CPU fallbacks: opt-in Python call-site capture, as
+// prof::set_bounce_capture_fn is for host bounces. c10 has no Python, so the
+// dispatch shim installs the hook while explain(with_stack=True) is on, and
+// CpuFallbackScope calls it only then: one relaxed null-load otherwise.
+using CpuFallbackCaptureFn =
+    void (*)(std::string_view full_op_name, CpuFallbackPath path) noexcept;
+C10_RBLN_API void set_cpu_fallback_capture_fn(CpuFallbackCaptureFn fn) noexcept;
+
 // Per-op counts of CPU fallbacks, non-zero only.
 C10_RBLN_API std::vector<std::pair<std::string, uint64_t>> cpu_fallback_counts();
+// The same counts split by reason, as (op, reason, count); an op's entries sum
+// to its cpu_fallback_counts entry.
+C10_RBLN_API std::vector<std::tuple<std::string, std::string, uint64_t>>
+cpu_fallback_reason_counts();
 // Wall time of the CPU fallbacks those counts cover; nested fallbacks are
 // timed once, as part of the outermost.
 C10_RBLN_API uint64_t cpu_fallback_ns();

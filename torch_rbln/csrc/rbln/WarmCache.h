@@ -5,7 +5,7 @@
 // Goal: on warm shim calls (cache hit), bypass the Python wrapper entirely
 // and drive the rebel runtime directly from C++ through rbln_exec_api.h. This
 // eliminates the per-call pybind roundtrip + Python wrapper overhead, which
-// is dominated by is_cpu_fallback_cases and the compile_rbln_cached lookup on
+// is dominated by get_fallback_reason and the compile_rbln_cached lookup on
 // the Python side.
 //
 // Architecture:

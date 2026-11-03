@@ -4,7 +4,6 @@
 #include <ATen/native/rbln/RBLNTensorUtils.h>
 #include <c10/rbln/RBLNFallbackConfig.h>
 #include <c10/rbln/RBLNLogging.h>
-#include <c10/rbln/RBLNProfiler.h>
 #include <c10/util/Exception.h>
 
 #include <cstdint>
@@ -118,10 +117,13 @@ void strided_v2v_copy(
       c10::IntArrayRef(dst_byte_strides));
 }
 
-void strided_v2v_copy(const at::Tensor& dst, const at::Tensor& src) {
+void strided_v2v_copy(
+    const at::Tensor& dst,
+    const at::Tensor& src,
+    const char* op_name) {
   c10::rbln::V2VBatch batch;
   strided_v2v_copy(dst, src, batch);
-  submit_or_fallback(batch, "strided_v2v_copy", [&] { dst.copy_(src.cpu()); });
+  submit_or_fallback(batch, op_name, [&] { dst.copy_(src.cpu()); });
 }
 
 void submit_or_fallback(
@@ -153,10 +155,10 @@ void submit_or_fallback(
         "Underlying error: {}",
         op_name,
         error_message);
-    // PROFILER (cold branch): a strided v2v (cat / index_select / index_copy /
-    // copy_) was rejected on device and fell back to a host CPU op.
-    c10::rbln::prof::record_bounce(
-        c10::rbln::prof::BounceSite::kStridedV2VFallback, 0);
+    const c10::rbln::CpuFallbackScope fallback(
+        op_name,
+        c10::rbln::CpuFallbackPath::kStridedCopy,
+        c10::rbln::CpuFallbackReason::kStridedCopyError);
     cpu_fallback();
   }
 }

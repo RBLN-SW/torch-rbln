@@ -42,12 +42,6 @@ std::atomic<uint64_t> g_diag_n_miss{0}; // Python compile (miss) path
 std::atomic<uint64_t> g_diag_ns_warm_hit{
     0}; // total ns inside warm-cache hit path
 std::atomic<uint64_t> g_diag_ns_miss{0}; // total ns inside miss path
-// cpu_fallback reason histogram. index = reason code from quick_fallback_check
-// (1=dtype-not-dispatch, 2=nan/inf input, 3=all-scalar, 4=out-dtype). Bumped on
-// the fallback branch only (the reason is already computed there) -> ON==OFF
-// preserved.
-std::array<std::atomic<uint64_t>, 5> g_fallback_reason{};
-
 // Warm-cache hit path per-segment timers. Accumulated only on successful hits
 // so per-segment averages = ns_X / n_hits give the steady-state breakdown.
 std::atomic<uint64_t> g_diag_warm_n_hits{0};
@@ -482,7 +476,7 @@ inline std::optional<ScalarValue> wrapped_scalar_value(const at::Tensor& t) {
 }
 
 // Cheap C++-side pre-check mirroring the cheap branches of
-// torch_rbln._internal.ops_utils.is_cpu_fallback_cases():
+// torch_rbln._internal.ops_utils.get_fallback_reason():
 //   2. dtype outside the dispatch catalog on any input tensor
 //   3. all input tensors are scalar (ndim == 0)
 //   4. any input tensor is_contiguous() with storage_offset != 0
@@ -504,17 +498,16 @@ inline std::optional<ScalarValue> wrapped_scalar_value(const at::Tensor& t) {
 // path, not CPU. If we counted wrapped 0-dim against the shortcut here, we
 // would force the shortcut for the most common binary-op-with-python-scalar
 // case and bypass the compile-path that the test suite expects.
-// Returns 0 = no fallback, else the reason code (1=dtype-not-dispatch,
-// 2=nan/inf input, 3=all-scalar, 4=out-dtype). The reason is already decided
-// here; returning it instead of a bool lets the caller attribute WHY at zero
-// extra cost.
+// Returns the reason that sends the op to the CPU, or nullopt when none does.
+// The reason is already decided here; returning it instead of a bool lets the
+// caller attribute WHY at zero extra cost.
 //
 // out-dtype: an `out` whose dtype differs from the inputs'. Whether such an
 // `out` is accepted is each op's own rule (add casts into it, neg and mm reject
 // it), so the op runs on CPU, where its kernel applies that rule and computes
 // the exact result. A bool `out` is left to the device: it is what a comparison
 // writes.
-int quick_fallback_check(
+std::optional<c10::rbln::CpuFallbackReason> quick_fallback_check(
     torch::jit::Stack* stack,
     const SchemaCache& cache,
     const std::vector<size_t>& skip_dtype_args) {
@@ -567,7 +560,7 @@ int quick_fallback_check(
     // Catalog plus the TORCH_RBLN_DISPATCH_DTYPES extension
     // (RBLNSupportedDtypes.h).
     if (!c10::rbln::is_dispatch_dtype_rt(t.scalar_type())) {
-      return 1; // dtype-not-dispatch (dtype outside the dispatch policy)
+      return c10::rbln::CpuFallbackReason::kDtype; // not a dispatch dtype
     }
     if (!input_dtype) {
       input_dtype = t.scalar_type();
@@ -577,19 +570,21 @@ int quick_fallback_check(
     }
   }
   if (nan_inf_found) {
-    return 2; // nan/inf in input (opt-in scan)
+    return c10::rbln::CpuFallbackReason::kNanInf; // opt-in scan
   }
   if (cache.out_positional_idx >= 0 && input_dtype) {
     const auto& out_iv = args[cache.out_positional_idx];
     if (out_iv.isTensor() && out_iv.toTensor().defined()) {
       const auto out_dtype = out_iv.toTensor().scalar_type();
       if (out_dtype != c10::kBool && out_dtype != *input_dtype) {
-        return 4; // out-dtype (out of another dtype; see above)
+        return c10::rbln::CpuFallbackReason::kOutDtype; // see above
       }
     }
   }
-  return (has_input_tensor && all_input_scalar) ? 3
-                                                : 0; // 3 = all-scalar inputs
+  if (has_input_tensor && all_input_scalar) {
+    return c10::rbln::CpuFallbackReason::kScalar;
+  }
+  return std::nullopt;
 }
 
 // ---------------------------------------------------------------------------
@@ -950,18 +945,12 @@ void generic_shim_boxed(
   // Earlier bugs that motivated disabling this shortcut have been fixed at the
   // borrow site: write-alias args are skipped from the borrow loop and the
   // borrow_resize_case is gated on contiguity (see RBLNCPUFallback.cpp).
-  const int fb_reason = quick_fallback_check(stack, cache, skip_dtype_args);
-  if (fb_reason != 0) {
+  const auto fb_reason = quick_fallback_check(stack, cache, skip_dtype_args);
+  if (fb_reason) {
     g_diag_n_fallback.fetch_add(1, std::memory_order_relaxed);
-    g_fallback_reason[fb_reason].fetch_add(
-        1, std::memory_order_relaxed); // WHY (same slow branch)
-    if (g_trace_enabled.load(std::memory_order_relaxed)) {
-      capture_site(
-          op_name); // (A) WHERE: opt-in, deduped, GIL-safe; off by default
-    }
-    // Counted, logged and timed inside (c10::rbln::CpuFallbackScope), like
-    // every other fallback path.
-    ::at::native::rbln::cpu_fallback_rbln(op, stack);
+    // Counted under the reason, logged, timed and (with_stack) located inside
+    // (c10::rbln::CpuFallbackScope), like every other fallback path.
+    ::at::native::rbln::cpu_fallback_rbln(op, stack, *fb_reason);
     return;
   }
 
@@ -1178,23 +1167,6 @@ void diag_reset_recompile_by_op() {
   }
 }
 
-std::vector<uint64_t> diag_dump_fallback_reasons() {
-  // counts for reason codes 1..4: [dtype-not-dispatch, nan/inf input,
-  // all-scalar, out-dtype].
-  return {
-      g_fallback_reason[1].load(std::memory_order_relaxed),
-      g_fallback_reason[2].load(std::memory_order_relaxed),
-      g_fallback_reason[3].load(std::memory_order_relaxed),
-      g_fallback_reason[4].load(std::memory_order_relaxed),
-  };
-}
-
-void diag_reset_fallback_reasons() {
-  for (auto& r : g_fallback_reason) {
-    r.store(0, std::memory_order_relaxed);
-  }
-}
-
 // (A) WHERE for bounces: c10::record_bounce calls this (when installed) with
 // the BounceSite ordinal. Map it to the report label and reuse capture_site, so
 // a bounced copy_ gets its Python call-site keyed by the site name in
@@ -1205,11 +1177,10 @@ static void bounce_site_capture(uint8_t site) noexcept {
   if (!g_trace_enabled.load(std::memory_order_relaxed)) {
     return;
   }
-  static constexpr std::array<const char*, 6> kNames = {
+  static constexpr std::array<const char*, 5> kNames = {
       "copy_d2d_host_bounce",
       "copy_h2d_staging",
       "copy_h2d_noncontig_dst",
-      "strided_v2v_cpu_fallback",
       "v2v_batch_to_per_entry",
       "host_batch_to_per_entry"};
   static_assert(
@@ -1228,14 +1199,37 @@ static void bounce_site_capture(uint8_t site) noexcept {
   }
 }
 
+// (A) WHERE for CPU fallbacks: c10::rbln::CpuFallbackScope calls this (when
+// installed) with the op it counts under, so every C++ fallback path (the
+// shim's checks, the boxed fallback, advanced indexing, the strided copy retry)
+// gets its Python call-site under that op in trace_by_op. The Python path is
+// left out: its scope opens from torch_rbln's own Python, so the innermost
+// frames would be ours; the miss that led into Python captured the user's site
+// already. noexcept, as the bounce hook: it must never let an exception escape.
+static void cpu_fallback_site_capture(
+    std::string_view op_name,
+    c10::rbln::CpuFallbackPath path) noexcept {
+  if (path == c10::rbln::CpuFallbackPath::kPython ||
+      !g_trace_enabled.load(std::memory_order_relaxed)) {
+    return;
+  }
+  try {
+    capture_site(std::string(op_name));
+  } catch (...) {
+    return;
+  }
+}
+
 // (A) WHERE: opt-in call-site capture. enable() flips the gate the slow
 // branches read; dump returns (op_name -> "file:line(func) <- ...") for the ops
 // that fired while enabled; reset clears between regions. Also (un)installs the
-// bounce hook in c10 so bounced copies capture their call-site too (ON==OFF:
-// null when off).
+// bounce and CPU fallback hooks in c10 so bounced copies and every C++ fallback
+// capture their call-site too (ON==OFF: null when off).
 void diag_set_trace_enabled(bool on) {
   g_trace_enabled.store(on, std::memory_order_relaxed);
   c10::rbln::prof::set_bounce_capture_fn(on ? &bounce_site_capture : nullptr);
+  c10::rbln::set_cpu_fallback_capture_fn(
+      on ? &cpu_fallback_site_capture : nullptr);
 }
 
 std::vector<std::pair<std::string, std::string>> diag_dump_trace_by_op() {
