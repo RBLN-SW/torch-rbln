@@ -401,12 +401,8 @@ void register_internal_api(py::module_& module) {
             nbytes,
             " bytes but the handle covers ",
             size);
-        char* raw = nullptr;
-        Py_ssize_t raw_size = 0;
-        if (PyBytes_AsStringAndSize(payload.ptr(), &raw, &raw_size) != 0) {
-          throw py::error_already_set();
-        }
-        const std::vector<uint8_t> bytes(raw, raw + raw_size);
+        const std::string raw = payload;
+        const std::vector<uint8_t> bytes(raw.begin(), raw.end());
         void* base = c10::rbln::import_device_memory(
             device_index, static_cast<size_t>(size), bytes, fds);
         return owning_rbln_tensor(base, device_index, sizes, dtype);
