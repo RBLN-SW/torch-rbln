@@ -948,11 +948,7 @@ void generic_shim_boxed(
   const auto fb_reason = quick_fallback_check(stack, cache, skip_dtype_args);
   if (fb_reason) {
     g_diag_n_fallback.fetch_add(1, std::memory_order_relaxed);
-    if (g_trace_enabled.load(std::memory_order_relaxed)) {
-      capture_site(
-          op_name); // (A) WHERE: opt-in, deduped, GIL-safe; off by default
-    }
-    // Counted under the reason, logged and timed inside
+    // Counted under the reason, logged, timed and (with_stack) located inside
     // (c10::rbln::CpuFallbackScope), like every other fallback path.
     ::at::native::rbln::cpu_fallback_rbln(op, stack, *fb_reason);
     return;
@@ -1203,14 +1199,37 @@ static void bounce_site_capture(uint8_t site) noexcept {
   }
 }
 
+// (A) WHERE for CPU fallbacks: c10::rbln::CpuFallbackScope calls this (when
+// installed) with the op it counts under, so every C++ fallback path (the
+// shim's checks, the boxed fallback, advanced indexing, the strided copy retry)
+// gets its Python call-site under that op in trace_by_op. The Python path is
+// left out: its scope opens from torch_rbln's own Python, so the innermost
+// frames would be ours; the miss that led into Python captured the user's site
+// already. noexcept, as the bounce hook: it must never let an exception escape.
+static void cpu_fallback_site_capture(
+    std::string_view op_name,
+    c10::rbln::CpuFallbackPath path) noexcept {
+  if (path == c10::rbln::CpuFallbackPath::kPython ||
+      !g_trace_enabled.load(std::memory_order_relaxed)) {
+    return;
+  }
+  try {
+    capture_site(std::string(op_name));
+  } catch (...) {
+    return;
+  }
+}
+
 // (A) WHERE: opt-in call-site capture. enable() flips the gate the slow
 // branches read; dump returns (op_name -> "file:line(func) <- ...") for the ops
 // that fired while enabled; reset clears between regions. Also (un)installs the
-// bounce hook in c10 so bounced copies capture their call-site too (ON==OFF:
-// null when off).
+// bounce and CPU fallback hooks in c10 so bounced copies and every C++ fallback
+// capture their call-site too (ON==OFF: null when off).
 void diag_set_trace_enabled(bool on) {
   g_trace_enabled.store(on, std::memory_order_relaxed);
   c10::rbln::prof::set_bounce_capture_fn(on ? &bounce_site_capture : nullptr);
+  c10::rbln::set_cpu_fallback_capture_fn(
+      on ? &cpu_fallback_site_capture : nullptr);
 }
 
 std::vector<std::pair<std::string, std::string>> diag_dump_trace_by_op() {

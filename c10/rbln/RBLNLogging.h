@@ -164,12 +164,14 @@ C10_RBLN_API std::vector<std::string_view> cpu_fallback_reason_names();
  * advanced indexing all call), the eager Python path through the
  * `_CpuFallbackScope` context manager, and the CPU retry of a batched strided
  * copy the device rejected (submit_or_fallback). Construction counts the
- * fallback per op (cpu_fallback_counts, read by torch.rbln.explain()) and, when
- * `TORCH_RBLN_LOG_LEVEL` is `INFO` or lower, logs it with a UserWarning that
- * carries the caller's location. Destruction adds the scope's wall time to
- * cpu_fallback_ns() when it is the outermost scope on the thread: a fallback
- * that runs inside another (an SDPA fallback converting its mask on the
- * device, say) is counted, but its time is already part of the outer one.
+ * fallback per op (cpu_fallback_counts, read by torch.rbln.explain()), captures
+ * its Python call-site under explain(with_stack=True) (through
+ * set_cpu_fallback_capture_fn) and, when `TORCH_RBLN_LOG_LEVEL` is `INFO` or
+ * lower, logs it with a UserWarning that carries the caller's location.
+ * Destruction adds the scope's wall time to cpu_fallback_ns() when it is the
+ * outermost scope on the thread: a fallback that runs inside another (an SDPA
+ * fallback converting its mask on the device, say) is counted, but its time is
+ * already part of the outer one.
  *
  * @code
  * {
@@ -199,6 +201,14 @@ class C10_RBLN_API CpuFallbackScope {
   bool outermost_;
   uint64_t start_ns_;
 };
+
+// WHERE for CPU fallbacks: opt-in Python call-site capture, as
+// prof::set_bounce_capture_fn is for host bounces. c10 has no Python, so the
+// dispatch shim installs the hook while explain(with_stack=True) is on, and
+// CpuFallbackScope calls it only then: one relaxed null-load otherwise.
+using CpuFallbackCaptureFn =
+    void (*)(std::string_view full_op_name, CpuFallbackPath path) noexcept;
+C10_RBLN_API void set_cpu_fallback_capture_fn(CpuFallbackCaptureFn fn) noexcept;
 
 // Per-op counts of CPU fallbacks, non-zero only.
 C10_RBLN_API std::vector<std::pair<std::string, uint64_t>> cpu_fallback_counts();

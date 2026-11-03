@@ -304,6 +304,9 @@ std::map<std::string, CpuFallbackRecord, std::less<>>& cpu_fallback_records() {
 
 std::atomic<uint64_t> g_cpu_fallback_ns{0};
 
+// WHERE hook; null unless the shim installed it (= with_stack on).
+std::atomic<CpuFallbackCaptureFn> g_cpu_fallback_capture_fn{nullptr};
+
 // CpuFallbackScopes open on this thread; only the outermost adds its time.
 thread_local int t_cpu_fallback_depth = 0;
 
@@ -365,6 +368,9 @@ bool open_cpu_fallback(
     CpuFallbackPath path,
     CpuFallbackReason reason) {
   count_and_log_cpu_fallback(full_op_name, path, reason);
+  if (auto fn = g_cpu_fallback_capture_fn.load(std::memory_order_relaxed)) {
+    fn(full_op_name, path);
+  }
   return t_cpu_fallback_depth++ == 0;
 }
 
@@ -413,6 +419,10 @@ std::optional<CpuFallbackReason> parse_cpu_fallback_reason(
 
 std::vector<std::string_view> cpu_fallback_reason_names() {
   return {kCpuFallbackReasonNames.begin(), kCpuFallbackReasonNames.end()};
+}
+
+void set_cpu_fallback_capture_fn(CpuFallbackCaptureFn fn) noexcept {
+  g_cpu_fallback_capture_fn.store(fn, std::memory_order_relaxed);
 }
 
 CpuFallbackScope::CpuFallbackScope(

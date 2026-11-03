@@ -408,6 +408,30 @@ class TestProfilerApi(TestCase):
         self.assertIn("_do_bounce", rep)  # the captured call-site is shown under it
 
     @pytest.mark.npu(count=1)
+    def test_where_traces_a_fallback_the_shim_never_saw(self):
+        # A fallback the shim's checks did not decide (flip is registered straight to
+        # the boxed fallback; the strided copy retry is another) is still a fallback,
+        # so with_stack=True captures its call-site under its op, like the shim's own.
+        if not hasattr(_C, "_explain_set_trace"):
+            self.skipTest("trace capture not exposed by this _C build")
+
+        def _do_flip():
+            a = torch.randn(8, 8, device=DEV, dtype=torch.float16)
+            return torch.flip(a, [0])  # registered -> boxed cpu_fallback_rbln
+
+        with torch.rbln.explain() as off:
+            _do_flip()
+        self.assertEqual(off.dump()["trace_by_op"], {})  # opt-in: nothing unless asked
+
+        with torch.rbln.explain(with_stack=True) as on:
+            _do_flip()
+        d = on.dump()
+        self.assertEqual(d["cpu_fallback_reasons_by_op"].get("aten::flip"), {"registered": 1})
+        self.assertIn("_do_flip", d["trace_by_op"]["aten::flip"])  # the user's call-site frame
+        rows = [ln for ln in on.report().splitlines() if ln.strip().startswith("aten::flip")]
+        self.assertTrue(any(" at " in ln and "_do_flip" in ln for ln in rows), rows)
+
+    @pytest.mark.npu(count=1)
     def test_diff_reports_only_what_changed_between_two_regions(self):
         # explain doesn't know lifecycle; diff compares two regions the USER places.
         # int32 add falls back EVERY call -> persists; a stable fp16 shape compiles
