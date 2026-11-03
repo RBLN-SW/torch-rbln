@@ -168,6 +168,22 @@ if ! python3 \
   exit 1
 fi
 
+# TEMPORARY, do not merge: shows whether the shards of a step share a node and a
+# network namespace. Two shards with the same boot_id ran on one node; there, a
+# different network namespace keeps the fixed RCCL ports (127.0.0.1:20480/20481) from
+# colliding, and the same one, with the host's interfaces listed, means host network.
+echo "--- Shard placement"
+{
+  echo "shard: ${BUILDKITE_PARALLEL_JOB:-}/${BUILDKITE_PARALLEL_JOB_COUNT:-}"
+  echo "node boot_id: $(</proc/sys/kernel/random/boot_id)"
+  echo "net namespace: $(readlink /proc/self/ns/net)"
+  echo "hostname: $(</proc/sys/kernel/hostname)"
+  echo "interfaces: $(awk -F: 'NR > 2 { gsub(/ /, "", $1); printf "%s ", $1 }' /proc/net/dev)"
+  for device_node in "${device_nodes[@]}"; do
+    echo "${device_node}: $(readlink -f "/sys/class/rebellions/${device_node#/dev/}/device")"
+  done
+} || true
+
 echo "--- Downloading ${artifact_dir}"
 buildkite-agent artifact download \
   --build "${artifact_build_id}" \
