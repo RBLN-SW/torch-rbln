@@ -65,9 +65,11 @@ def export_tensor(tensor: torch.Tensor) -> tuple[IpcHandle, list[int]]:
 
     The tensor must come from :func:`empty_exportable` and cover its whole storage
     (contiguous, zero storage offset). If nothing has placed it on device yet, it is
-    placed flat first. From the first export on, its device layout stays fixed:
-    operations that would move or resize it raise instead. The exporter must keep
-    ``tensor`` alive while any other process uses the handle.
+    placed flat first. That default placement keeps the whole tensor in one contiguous
+    area, so a tensor too large for it must be placed before its first export, for
+    example by the compiled model that uses it. From the first export on, its device
+    layout stays fixed: operations that would move or resize it raise instead. The
+    exporter must keep ``tensor`` alive while any other process uses the handle.
 
     Returns ``(handle, fds)``. ``handle`` pickles. ``fds`` are dma-buf file
     descriptors owned by the caller: pass them to the other process with fd-passing
@@ -91,7 +93,7 @@ def export_tensor(tensor: torch.Tensor) -> tuple[IpcHandle, list[int]]:
 def open_tensor(
     handle: IpcHandle,
     fds: list[int],
-    device: int | str | torch.device | None = None,
+    device: int | str | torch.device,
 ) -> torch.Tensor:
     """Open a tensor exported by :func:`export_tensor` in another process.
 
@@ -103,9 +105,11 @@ def open_tensor(
         handle: The exporter's handle, typically unpickled.
         fds: The dma-buf fds as received in this process, in the exporter's order.
         device: The rbln device the memory lives on, as a logical device of this
-            process. It must map to the exporter's physical NPUs. Defaults to the
-            current device.
+            process. It must map to the exporter's physical NPUs.
     """
+    if device is None:
+        msg = "open_tensor: device is required"
+        raise RuntimeError(msg)
     dev = _normalize_device(device)
     fds = list(fds)
     if len(fds) != handle.num_fds:

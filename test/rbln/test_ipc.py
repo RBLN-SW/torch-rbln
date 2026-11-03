@@ -152,7 +152,17 @@ class TestIpc(TestCase):
         h, fds = torch.rbln.ipc.export_tensor(x)
         try:
             with self.assertRaisesRegex(RuntimeError, "fd"):
-                torch.rbln.ipc.open_tensor(h, fds=[])
+                torch.rbln.ipc.open_tensor(h, fds=[], device=0)
+        finally:
+            for fd in fds:
+                os.close(fd)
+
+    def test_open_requires_device(self):
+        x = _exportable_arange(1024)
+        h, fds = torch.rbln.ipc.export_tensor(x)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "device is required"):
+                torch.rbln.ipc.open_tensor(h, fds, device=None)
         finally:
             for fd in fds:
                 os.close(fd)

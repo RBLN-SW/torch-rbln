@@ -699,8 +699,8 @@ DeviceMemoryExport export_device_memory(const void* rbln_data) {
   DeviceMemoryExport out{};
   RBLN_CHECK(
       !::rbln::rbln_export_device_memory(vaddr, out.size, out.payload, out.fds),
-      "rbln_export_device_memory failed for vaddr={:#x}; only tensors from torch.rbln.ipc.empty_exportable can be "
-      "exported",
+      "rbln_export_device_memory failed for vaddr={:#x}; see the runtime log for the cause. The tensor must come "
+      "from torch.rbln.ipc.empty_exportable, and an unplaced tensor must fit the default placement",
       vaddr);
   RBLN_LOG_DEBUG(
       "export_device_memory: vaddr={:#x} size={} fds={}",
