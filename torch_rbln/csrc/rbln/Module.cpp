@@ -10,6 +10,7 @@
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNSupportedDtypes.h>
+#include <c10/util/StringUtil.h>
 #include <c10/util/accumulate.h>
 #include <torch/csrc/Dtype.h>
 #include <torch/csrc/utils/pybind.h>
@@ -161,6 +162,7 @@ void register_public_device_api(py::module_& module) {
           &c10::rbln::DeviceProperties::memory_per_chiplet)
       .def_readonly("num_chiplet", &c10::rbln::DeviceProperties::num_chiplet)
       .def_readonly("npu_count", &c10::rbln::DeviceProperties::npu_count)
+      .def_readonly("pci_bus_ids", &c10::rbln::DeviceProperties::pci_bus_ids)
       .def("__repr__", [](const c10::rbln::DeviceProperties& self) {
         return c10::str(
             "DeviceProperties(name='",
@@ -173,7 +175,9 @@ void register_public_device_api(py::module_& module) {
             self.num_chiplet,
             ", npu_count=",
             self.npu_count,
-            ")");
+            ", pci_bus_ids=[",
+            c10::Join(", ", self.pci_bus_ids),
+            "])");
       });
 
   module.def(
@@ -408,6 +412,14 @@ void register_internal_api(py::module_& module) {
         return owning_rbln_tensor(base, device_index, sizes, dtype);
       },
       "Internal: rebuild an owning RBLN tensor from (size, payload, dma_buf_fds)");
+  module.def(
+      "_resolve_import_device",
+      [](const py::bytes& payload) {
+        const std::string raw = payload;
+        return c10::rbln::resolve_import_device(
+            std::vector<uint8_t>(raw.begin(), raw.end()));
+      },
+      "Internal: the logical device that holds the NPUs an export came from");
 
   // Used by torch_rbln.host_register() / host_unregister().
   module.def(
