@@ -75,7 +75,8 @@ needs different handling.
   or custom ops (`_softmax`, SDPA). Add a plain pointwise or reduction op to the
   matching set; leave an in-place, a backward, or an op with typed non-tensor
   arguments on the Python path. For a single typed argument — `where`'s bool
-  condition — `CPP_SHIM_SKIP_DTYPE_ARGS` exempts that index instead.
+  condition — `PREDICATE_ARGS` exempts that index on both the shim and the
+  Python gate.
 - **A public API name that differs from the schema name** goes in
   `_ops_with_public_api_name_mismatch` in the same file.
 - **`native_functions.yaml` is adapted from upstream PyTorch**. Copy the

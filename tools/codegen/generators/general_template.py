@@ -126,17 +126,34 @@ def {kernel_name}(*args, **kwargs):
 """
 
         @staticmethod
-        def main(target: str, root_name: str, op_namespace: str, gate_kwargs: str = "", run_kwargs: str = "") -> str:
+        def main(
+            target: str,
+            root_name: str,
+            op_namespace: str,
+            *,
+            predicate_args: list[int] | None = None,
+            out_alias_arg_pos: int | None = None,
+        ) -> str:
             """Generate main function body logic.
 
             Delegates the device-path dispatch to
             ``compile_and_run_view_aware`` (single helper call) and keeps
             the cpu-fallback gate inline since it short-circuits without
             going to the device.
+
+            ``predicate_args`` are the positional indices the dtype gate skips
+            (``OpCategories.PREDICATE_ARGS``); ``out_alias_arg_pos`` is the
+            position of the input ``out`` may alias (an in-place ``self``).
             """
+            gate = (
+                f"get_fallback_reason(args, skip_dtype_args={list(predicate_args)})"
+                if predicate_args
+                else "get_fallback_reason(args)"
+            )
+            reuse = f" out_alias_arg_pos={out_alias_arg_pos}," if out_alias_arg_pos is not None else ""
             return f"""
     out_tensor = kwargs.get('out', None)
-    fallback_reason = get_fallback_reason(args{gate_kwargs})
+    fallback_reason = {gate}
     if fallback_reason:
         result_tensor = cpu_fallback_path(
             {target},
@@ -148,7 +165,7 @@ def {kernel_name}(*args, **kwargs):
         )
     else:
         result_tensor = compile_and_run_view_aware(
-            {target}, "{op_namespace}::{root_name}", args, kwargs_filtered, out_tensor,{run_kwargs}
+            {target}, "{op_namespace}::{root_name}", args, kwargs_filtered, out_tensor,{reuse}
         )
 
     return result_tensor, result_tensor.shape

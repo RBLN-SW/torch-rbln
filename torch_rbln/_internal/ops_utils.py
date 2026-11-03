@@ -1772,7 +1772,7 @@ _LAST_DIM_ONE_DEVICE_BROADCAST_OPS = frozenset(
 )
 
 
-def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_tensor, *, allow_inplace_out=False):
+def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_tensor, *, out_alias_arg_pos=None):
     """Centralized view-aware rbln-compile dispatch.
 
     The single entry point used by all generated ``*_rbln`` handlers (via the
@@ -1898,10 +1898,17 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
 
     if out_tensor is None:
         result_tensor = None
-    elif can_use_out_tensor_directly(view_args, dict(view_kwargs, out=out_tensor), allow_inplace=allow_inplace_out):
-        result_tensor = out_tensor
     else:
-        result_tensor = None
+        # An in-place wrapper names the positional input ``out`` may alias
+        # (``out_alias_arg_pos``). It is reusable only when it reaches the compiler
+        # as-is: not rewritten to a view base and not replaced by a moved scalar.
+        reusable = None
+        if out_alias_arg_pos is not None and view_args[out_alias_arg_pos] is args[out_alias_arg_pos]:
+            reusable = args[out_alias_arg_pos]
+        if can_use_out_tensor_directly(view_args, dict(view_kwargs, out=out_tensor), reusable=reusable):
+            result_tensor = out_tensor
+        else:
+            result_tensor = None
 
     op_module = get_view_op_module(op_callable, view_recipes)
 
@@ -2258,21 +2265,45 @@ def is_inplace_op(args, kwargs) -> bool:
     return any(t is out_t or (t.data_ptr() == out_t.data_ptr() and t.device == out_t.device) for t in input_tensors)
 
 
-def can_use_out_tensor_directly(args: tuple, kwargs: dict, *, allow_inplace: bool = False) -> bool:
+def _out_alias_allowed(args: tuple, kwargs: dict, out_tensor: torch.Tensor, reusable) -> bool:
+    """``out`` may share storage with an input only when it *is* ``reusable``.
+
+    Every other input must not overlap ``out``: the compiled program reads its
+    inputs while writing the output, so only the one input the caller declared
+    reusable (an in-place ``self`` updated elementwise) may alias it. Overlap is
+    judged like ``is_inplace_op``: same ``data_ptr`` on the same device.
+    """
+    inputs = [t for t in args if torch.is_tensor(t)]
+    inputs += [v for k, v in kwargs.items() if k != "out" and torch.is_tensor(v)]
+    overlapping = [
+        t
+        for t in inputs
+        if t is out_tensor or (t.data_ptr() == out_tensor.data_ptr() and t.device == out_tensor.device)
+    ]
+    if not overlapping:
+        return True
+    if reusable is None or out_tensor is not reusable:
+        return False
+    return all(t is reusable for t in overlapping)
+
+
+def can_use_out_tensor_directly(args: tuple, kwargs: dict, *, reusable=None) -> bool:
     """Check if the out_tensor can be used directly by the compiler.
 
     This function checks several conditions to determine if the output tensor
     can be used directly without creating a temporary tensor:
-    1. Not an in-place operation unless ``allow_inplace`` permits an elementwise update
+    1. ``out`` does not alias an input, except the input passed as ``reusable``
+       (see ``_out_alias_allowed``)
     2. Tensor is neither empty nor scalar
     3. Tensor is contiguous
     4. Tensor has zero storage offset
     5. dtype is in ``SupportedDtypes.dispatch``
 
     Args:
-        args (tuple): Positional arguments for in-place operation check.
+        args (tuple): Positional arguments for the alias check.
         kwargs (dict): Keyword arguments containing 'out' key with the output
             tensor to check.
+        reusable: The one input ``out`` may be (an in-place ``self``), or None.
 
     Returns:
         bool: True if the out_tensor can be used directly, False otherwise.
@@ -2282,7 +2313,7 @@ def can_use_out_tensor_directly(args: tuple, kwargs: dict, *, allow_inplace: boo
         return False
 
     return (
-        (allow_inplace or not is_inplace_op(args, kwargs))
+        _out_alias_allowed(args, kwargs, out_tensor, reusable)
         and ((out_tensor.numel() > 0) and len(out_tensor.size()) > 0)
         and out_tensor.is_contiguous()
         and (out_tensor.storage_offset() == 0)

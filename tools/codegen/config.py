@@ -110,8 +110,7 @@ class OpCategories:
         "lt.Scalar_out",
         "le.Scalar_out",
     }
-    # Cond arg is bool — see CPP_SHIM_SKIP_DTYPE_ARGS for the dtype-check
-    # override.
+    # Cond arg is bool — see PREDICATE_ARGS for the dtype-check override.
     SHIM_WHERE: ClassVar[set[str]] = {
         "where.self",
         "where.self_out",
@@ -162,31 +161,30 @@ class OpCategories:
         | SHIM_SOFTMAX
     )
 
-    # Per-op overrides of the dispatch-shim dtype check: positional arg indices
-    # whose dtype should NOT be compared to float16. The shim's own check still
-    # applies to other args (storage offset, all-scalar, dtype).
-    # Keyed by the same overload name used in CPP_SHIM_OPS.
-    CPP_SHIM_SKIP_DTYPE_ARGS: ClassVar[dict[str, list[int]]] = {
-        "where.self": [0],  # cond (bool)
-        "where.self_out": [0],  # cond (bool)
+    # Positional predicate args (a bool cond or mask) per root op. A predicate is
+    # typed independently of the data operands, so both dtype gates exempt it:
+    # the C++ shim pre-check (``_register_cpp_shim(..., skip_dtype_args=)``) and
+    # the Python gate (``get_fallback_reason(..., skip_dtype_args=)``). One
+    # definition keeps the two gates from drifting apart. The other checks
+    # (storage offset, all-scalar) still apply to the predicate.
+    PREDICATE_ARGS: ClassVar[dict[str, list[int]]] = {
+        "where": [0],  # cond (bool)
+        "masked_fill": [1],  # mask (bool)
     }
 
-    # Typed predicates are independent of the data operands' dispatch dtype.
-    PY_GATE_SKIP_DTYPE_ARGS: ClassVar[dict[str, list[int]]] = {
-        "where": [0],
-        "masked_fill": [1],
-    }
-
-    # Elementwise updates may bind self directly; other inplace ops still copy back.
-    INPLACE_OUT_ALIAS_OPS: frozenset[str] = frozenset({"masked_fill"})
+    # In-place variants that offer ``self`` as the output to bind. The dispatch
+    # helper binds it only when ``self`` reaches the compiler unchanged and no
+    # other input overlaps it (``can_use_out_tensor_directly``); otherwise the
+    # wrapper copies the result back.
+    SELF_REUSE_INPLACE_OPS: frozenset[str] = frozenset({"masked_fill"})
 
     @classmethod
-    def get_py_gate_skip_dtype_args(cls, root_name: str) -> list[int]:
-        return cls.PY_GATE_SKIP_DTYPE_ARGS.get(root_name, [])
+    def get_predicate_args(cls, root_name: str) -> list[int]:
+        return cls.PREDICATE_ARGS.get(root_name, [])
 
     @classmethod
-    def inplace_binds_self_as_out(cls, root_name: str) -> bool:
-        return root_name in cls.INPLACE_OUT_ALIAS_OPS
+    def reuses_self_inplace(cls, root_name: str) -> bool:
+        return root_name in cls.SELF_REUSE_INPLACE_OPS
 
     # EmptyTensor template names that skip `tensor_args = extract_tensors(args)` before
     # the empty-tensor branch (those templates only read raw positional args, e.g.

@@ -194,9 +194,14 @@ def {kernel_name}(*args, **kwargs):
 """
 
         @staticmethod
-        def inplace(kernel_name: str, general_kernel_name: str, *, bind_self_as_out: bool = False) -> str:
-            """Generate inplace function code."""
-            if bind_self_as_out:
+        def inplace(kernel_name: str, general_kernel_name: str, *, reuse_self: bool = False) -> str:
+            """Generate inplace function code.
+
+            With ``reuse_self`` the wrapper offers ``self`` as the output; the
+            dispatch helper binds it only under its reuse contract and the
+            wrapper copies back otherwise.
+            """
+            if reuse_self:
                 return f"""
 def {kernel_name}(*args, **kwargs):
     result, _ = {general_kernel_name}(*args, **kwargs, out=args[0])

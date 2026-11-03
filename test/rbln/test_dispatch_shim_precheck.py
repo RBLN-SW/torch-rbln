@@ -40,7 +40,7 @@ from torch.testing._internal.common_utils import parametrize, run_tests, TestCas
 from test.utils import SUPPORTED_DTYPES
 from torch_rbln import _C
 from torch_rbln._internal.compile_cache import _compiled_op_cache
-from torch_rbln._internal.ops_utils import get_fallback_reason
+from torch_rbln._internal.ops_utils import can_use_out_tensor_directly, get_fallback_reason
 
 
 def _dispatch_counts() -> tuple[int, int, int, int]:
@@ -58,6 +58,17 @@ class TestBoolOperandGate(TestCase):
         self.assertEqual(get_fallback_reason((cond, x, x.half()), skip_dtype_args=(0,)), "dtype")
         self.assertEqual(get_fallback_reason((cond, x.double(), x.double()), skip_dtype_args=(0,)), "dtype")
         self.assertEqual(get_fallback_reason((cond, x, x)), "dtype")
+
+    def test_out_may_alias_only_the_reusable_input(self):
+        x = torch.ones(64)
+        y = torch.ones(64)
+        mask = torch.ones(64, dtype=torch.bool)
+        self.assertTrue(can_use_out_tensor_directly((x, mask, 5.0), {"out": y}, reusable=x))
+        self.assertTrue(can_use_out_tensor_directly((x, mask, 5.0), {"out": x}, reusable=x))
+        self.assertFalse(can_use_out_tensor_directly((x, mask, 5.0), {"out": x}))
+        self.assertFalse(can_use_out_tensor_directly((x, mask, 5.0), {"out": x}, reusable=mask))
+        self.assertFalse(can_use_out_tensor_directly((x, mask, x.view(64)), {"out": x}, reusable=x))
+        self.assertFalse(can_use_out_tensor_directly((x, mask, 5.0), {"out": x.view(64)}, reusable=x))
 
 
 @pytest.mark.npu(count=1)
@@ -114,6 +125,37 @@ class TestBoolOperandCompilation(TestCase):
         self.assertEqual(y.cpu(), y_cpu.masked_fill(mask_cpu, 5.0))
         self.assertEqual(len(_compiled_op_cache), compiled)
         self.assertNotIn("aten::copy_", [event.key for event in prof.key_averages()])
+
+    @dtypes(*SUPPORTED_DTYPES)
+    @parametrize("layout", ["full", "row_prefix", "row_offset", "transposed", "column_slice"])
+    def test_masked_fill_inplace_self_reuse_contract(self, device, dtype, layout):
+        # ``self`` is bound as the output only when it reaches the compiler as-is;
+        # a rewritten view takes the copy-back path. Both keep in-place semantics.
+        views = {
+            "full": lambda t: t,
+            "row_prefix": lambda t: t[:2],
+            "row_offset": lambda t: t[1:3],
+            "transposed": lambda t: t.T,
+            "column_slice": lambda t: t[:, :32],
+        }
+        bound = layout in ("full", "row_prefix")
+        base_cpu = torch.arange(4 * 64, dtype=dtype).reshape(4, 64)
+        # First call compiles; the copy-back check below profiles the warm call.
+        views[layout](base_cpu.to(device)).masked_fill_(views[layout](base_cpu).to(device) > 100, -7.0)
+        base = base_cpu.to(device)
+        x, x_cpu = views[layout](base), views[layout](base_cpu)
+        mask, mask_cpu = x > 100, x_cpu > 100
+        ptr, shape = x.data_ptr(), x.shape
+        torch.rbln.synchronize()
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as prof:
+            self.assertIs(x.masked_fill_(mask, -7.0), x)
+            torch.rbln.synchronize()
+        x_cpu.masked_fill_(mask_cpu, -7.0)
+        self.assertEqual(x.data_ptr(), ptr)
+        self.assertEqual(x.shape, shape)
+        self.assertEqual(base.cpu(), base_cpu)
+        copied = "aten::copy_" in [event.key for event in prof.key_averages()]
+        self.assertEqual(copied, not bound, f"{layout}: copy-back {'missing' if bound else 'expected'}")
 
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("scan_enabled", [False, True])

@@ -74,10 +74,13 @@ class GeneralFunctionGenerator:
         code += self.generate_empty_tensor_handling(root_name)
         if self.op_categories.needs_scalar_strided_contig(root_name):
             code += "    args, kwargs_filtered = contiguous_for_scalar_and_strided(args, kwargs_filtered)\n"
-        skip = self.op_categories.get_py_gate_skip_dtype_args(root_name)
-        gate_kwargs = f", skip_dtype_args={skip}" if skip else ""
-        run_kwargs = " allow_inplace_out=True," if self.op_categories.inplace_binds_self_as_out(root_name) else ""
-        code += self.templates.FunctionBody.main(target, root_name, op_namespace, gate_kwargs, run_kwargs)
+        code += self.templates.FunctionBody.main(
+            target,
+            root_name,
+            op_namespace,
+            predicate_args=self.op_categories.get_predicate_args(root_name),
+            out_alias_arg_pos=0 if self.op_categories.reuses_self_inplace(root_name) else None,
+        )
 
         return code
 
