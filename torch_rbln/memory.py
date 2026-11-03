@@ -562,6 +562,9 @@ def host_register(ptr: int, nbytes: int, device: int | str | torch.device | None
         A large range may use multiple native registrations. A transfer crossing
         their boundary uses the ordinary copy path. Use :func:`host_register_memory`
         for explicit partial coverage and automatic ownership of a CPU tensor.
+        The opt-in ``TORCH_RBLN_HOST_REGISTRATION_PROFILE=driver`` bypasses the
+        temporary admission limits and submits the whole range to the runtime.
+        See docs/CONFIGURATION.md before using it to validate a fixed driver.
 
     Raises:
         TypeError: if ``ptr`` or ``nbytes`` is not an integer.
@@ -628,6 +631,9 @@ def host_register_memory(
     This is opt-in partial registration. host_register retains its whole-range
     success/failure contract. See docs/CONFIGURATION.md for the qualified THP
     mapping profile and the temporary old-driver registration limits.
+    With the explicit ``driver`` profile, the whole buffer is submitted in one
+    native registration, without page inspection or partial admission. Ownership
+    and close semantics are unchanged; runtime errors still propagate.
     """
     if not isinstance(buffer, torch.Tensor) or buffer.device.type != "cpu" or not buffer.is_contiguous():
         msg = "Host registration requires a contiguous CPU tensor"

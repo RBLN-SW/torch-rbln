@@ -33,8 +33,8 @@ class _Budget:
     tables: int = 0
     va_bytes: int = 0
 
-    def reserve(self, tables: int, va_bytes: int) -> None:
-        if self.tables + tables > _TABLE_LIMIT or self.va_bytes + va_bytes > _VA_LIMIT:
+    def reserve(self, tables: int, va_bytes: int, *, enforce_limits: bool = True) -> None:
+        if enforce_limits and (self.tables + tables > _TABLE_LIMIT or self.va_bytes + va_bytes > _VA_LIMIT):
             msg = "Host registration admission changed during preparation"
             raise RuntimeError(msg)
         self.tables += tables
@@ -236,7 +236,9 @@ def _register(
     state = _RegistrationState(ptr, size, device, owner, managed=partial)
     if not available:
         return state
-    use_huge = host_registration_profile() == "thp"
+    profile = host_registration_profile()
+    use_huge = profile == "thp"
+    driver_admission = profile == "driver"
     with _lock:
         if _forked_with_registrations:
             msg = "Host registration was inherited across fork; start the worker with spawn"
@@ -251,11 +253,13 @@ def _register(
             cursor, end = ptr, ptr + size
             warned = False
             while cursor < end:
-                if budget.va_bytes >= _VA_LIMIT or (not use_huge and budget.tables >= _TABLE_LIMIT):
+                if not driver_admission and (
+                    budget.va_bytes >= _VA_LIMIT or (not use_huge and budget.tables >= _TABLE_LIMIT)
+                ):
                     if not partial:
                         state.close()
                     break
-                stop = min(end, cursor + _WINDOW)
+                stop = end if driver_admission else min(end, cursor + _WINDOW)
                 if stop < end and _WINDOW >= _HUGE:
                     stop -= stop % _HUGE
                 snapshot = torch_rbln._C._HostPageSnapshot(cursor, stop - cursor, promote=partial) if use_huge else None
@@ -267,14 +271,22 @@ def _register(
                         )
                         warned = True
                     huge = snapshot.huge_ranges if snapshot is not None else []
-                    plan = _plan(cursor, stop - cursor, huge, _TABLE_LIMIT - budget.tables, _VA_LIMIT - budget.va_bytes)
+                    if driver_admission:
+                        region = _Region(cursor, stop - cursor, 0)
+                        # Charge ordinary pages if admission is re-enabled later.
+                        region.tables = region.va_bytes // _HUGE
+                        plan = [region]
+                    else:
+                        plan = _plan(
+                            cursor, stop - cursor, huge, _TABLE_LIMIT - budget.tables, _VA_LIMIT - budget.va_bytes
+                        )
                     if not partial and sum(r.size for r in plan) != stop - cursor:
                         state.close()
                         return state
                     for region in plan:
                         previous_tables, previous_va = budget.tables, budget.va_bytes
                         try:
-                            budget.reserve(region.tables, region.va_bytes)
+                            budget.reserve(region.tables, region.va_bytes, enforce_limits=not driver_admission)
                             state.regions.append(region)
                         except BaseException:
                             budget.tables, budget.va_bytes = previous_tables, previous_va

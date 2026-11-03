@@ -34,6 +34,7 @@ import torch_rbln._C
 import torch_rbln.memory
 from test.utils import run_in_isolated_process, SUPPORTED_DTYPES
 from torch_rbln import _host_registration as admission
+from torch_rbln._internal.env_utils import host_registration_profile
 
 
 # Tolerance for numerical comparisons
@@ -514,6 +515,24 @@ class TestHostRegister(TestCase):
             self._round_trip(slab, 0, 512 << 10, fill=1)
             self._round_trip(slab, 1792 << 10, 512 << 10, fill=2)
 
+    def test_driver_profile_registers_and_copies_with_both_apis(self):
+        slab = torch.rbln.huge_host_empty(self.nbytes)
+        # Lower only the Python limits; the real registration stays small.
+        with (
+            mock.patch.dict(os.environ, TORCH_RBLN_HOST_REGISTRATION_PROFILE="driver"),
+            mock.patch.object(admission, "_TABLE_LIMIT", 0),
+            mock.patch.object(admission, "_VA_LIMIT", 0),
+        ):
+            self.assertTrue(torch.rbln.host_register(slab.data_ptr(), slab.numel(), self.rbln_device))
+            try:
+                self._round_trip(slab, 0, 1 << 20, fill=1)
+            finally:
+                torch.rbln.host_unregister(slab.data_ptr(), self.rbln_device)
+            with torch.rbln.host_register_memory(slab, self.rbln_device) as handle:
+                self.assertEqual(handle.registered_ranges, ((slab.data_ptr(), slab.numel()),))
+                self._round_trip(slab, 0, 1 << 20, fill=2)
+        self.assertFalse(torch.rbln.is_host_memory_registered(slab.data_ptr(), slab.numel(), self.rbln_device))
+
 
 class TestHostRegistrationPolicy(TestCase):
     """Admission and ownership without spending real device page tables."""
@@ -756,6 +775,97 @@ class TestHostRegistrationPolicy(TestCase):
         self.assertEqual(handle.registered_bytes, self.huge)
         self._HostPageSnapshot.assert_not_called()
         handle.close()
+
+    def test_driver_profile_bypasses_limits_and_inspection_for_both_apis(self):
+        buffer = torch.empty(64, dtype=torch.uint8)
+        with (
+            mock.patch.dict(os.environ, TORCH_RBLN_HOST_REGISTRATION_PROFILE="driver"),
+            mock.patch.object(self.registration, "host_registration_profile", side_effect=host_registration_profile),
+            mock.patch.object(self.registration, "_TABLE_LIMIT", 0),
+            mock.patch.object(self.registration, "_VA_LIMIT", 0),
+            mock.patch.object(self.registration, "_WINDOW", 16),
+            mock.patch.object(torch_rbln.memory, "_no_rbln_device", return_value=False),
+            mock.patch.object(torch_rbln.memory, "_normalize_device", return_value=torch.device("rbln:0")),
+        ):
+            self.assertTrue(torch_rbln.memory.host_register(buffer.data_ptr(), buffer.numel(), 0))
+            self.assertTrue(torch_rbln.memory.is_host_memory_registered(buffer.data_ptr(), buffer.numel(), 0))
+            torch_rbln.memory.host_unregister(buffer.data_ptr(), 0)
+            with torch_rbln.memory.host_register_memory(buffer, 0) as handle:
+                self.assertTrue(handle.fully_registered)
+                self.assertEqual(handle.registered_ranges, ((buffer.data_ptr(), buffer.numel()),))
+                self.assertTrue(handle.covers(buffer.data_ptr(), buffer.numel()))
+        self.assertEqual(self._host_register.call_count, 2)
+        self._host_register.assert_has_calls([mock.call(0, buffer.data_ptr(), buffer.numel())] * 2)
+        self._HostPageSnapshot.assert_not_called()
+        self.assertFalse(self.registration._groups)
+        self.assertEqual(self.registration._budgets[0].va_bytes, 0)
+
+    def test_driver_registration_remains_charged_after_profile_change(self):
+        with mock.patch.object(self.registration, "host_registration_profile", return_value="driver"):
+            handle = self.managed(2 * self.huge)
+        self.assertEqual(self.registration._budgets[0].tables, 2)
+        with mock.patch.object(self.registration, "host_registration_profile", return_value="conservative"):
+            rejected = self.managed(self.huge, ptr=self.ptr + 2 * self.huge)
+            self.assertEqual(rejected.registered_bytes, 0)
+            rejected.close()
+            handle.close()
+            admitted = self.managed(self.huge)
+            self.assertTrue(admitted.fully_registered)
+            admitted.close()
+        self.assertEqual(self.registration._budgets[0].tables, 0)
+
+    def test_driver_registration_retains_owner_on_failed_close(self):
+        owner = torch.empty(4)
+        ref = weakref.ref(owner)
+        with mock.patch.object(self.registration, "host_registration_profile", return_value="driver"):
+            handle = self.managed(2 * self.huge, owner=owner)
+            with self.assertRaisesRegex(RuntimeError, "overlaps"):
+                self.managed(self.huge)
+        del owner
+        self._host_unregister.side_effect = RuntimeError("release not confirmed")
+        with self.assertRaisesRegex(RuntimeError, "release not confirmed"):
+            handle.close()
+        gc.collect()
+        self.assertIsNotNone(ref())
+        self.assertFalse(handle.covers(self.ptr, self.huge))
+        self.assertEqual(self.registration._budgets[0].tables, 2)
+        self._host_unregister.side_effect = None
+        handle.close()
+        handle.close()
+        gc.collect()
+        self.assertIsNone(ref())
+        self.assertEqual(self.registration._budgets[0].tables, 0)
+
+    def test_driver_registration_propagates_errors_for_both_apis(self):
+        self._host_register.side_effect = RuntimeError("driver capacity exhausted")
+        with mock.patch.object(self.registration, "host_registration_profile", return_value="driver"):
+            with self.assertRaisesRegex(RuntimeError, "driver capacity exhausted"):
+                self.registration.register_strict(self.ptr, 2 * self.huge, 0)
+            with self.assertRaisesRegex(RuntimeError, "driver capacity exhausted"):
+                self.managed(2 * self.huge)
+        self.assertEqual(self._host_register.call_count, 2)
+        self.assertEqual(self._host_unregister.call_count, 2)
+        self.assertFalse(self.registration._groups)
+        self.assertEqual(self.registration._budgets[0].va_bytes, 0)
+
+    def test_driver_registration_preserves_unsupported_runtime_result(self):
+        self._host_register.return_value = False
+        with mock.patch.object(self.registration, "host_registration_profile", return_value="driver"):
+            self.assertFalse(self.registration.register_strict(self.ptr, 2 * self.huge, 0))
+            handle = self.managed(2 * self.huge)
+        self.assertEqual(handle.registered_bytes, 0)
+        handle.close()
+        self._host_unregister.assert_not_called()
+        self.assertEqual(self.registration._budgets[0].tables, 0)
+
+    def test_invalid_profile_fails_before_native_registration(self):
+        with (
+            mock.patch.dict(os.environ, TORCH_RBLN_HOST_REGISTRATION_PROFILE="invalid"),
+            mock.patch.object(self.registration, "host_registration_profile", side_effect=host_registration_profile),
+            self.assertRaisesRegex(ValueError, "conservative, thp or driver"),
+        ):
+            self.managed(self.huge)
+        self._host_register.assert_not_called()
 
     def test_forked_child_cannot_spend_or_release_parent_registrations(self):
         handle = self.managed(self.huge)

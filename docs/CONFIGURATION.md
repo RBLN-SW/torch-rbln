@@ -78,7 +78,7 @@ after `spawn` instead.
 ### Temporary page-table admission
 
 Older KMD versions can exhaust their finite page-table pool before safely
-returning an error. Both public Python registration APIs therefore share a
+returning an error. By default, both public Python registration APIs share a
 per-device, per-process ledger. The limits are **8,192 ordinary-page leaf
 tables** and **252 GiB of admitted host address space**, including registration
 alignment padding. One ordinary-page table covers 2 MiB, so 8,192 tables allow
@@ -100,9 +100,29 @@ admission policy for that configuration, not a driver capacity guarantee for
 arbitrary context counts or mappings. Calls through private `_C` entry points,
 direct runtime/C++ APIs, or another process are outside this ledger.
 
-| Variable                               | Values                | Default        |
-| -------------------------------------- | --------------------- | -------------- |
-| `TORCH_RBLN_HOST_REGISTRATION_PROFILE` | `conservative`, `thp` | `conservative` |
+| Variable                               | Values                          | Default        |
+| -------------------------------------- | ------------------------------- | -------------- |
+| `TORCH_RBLN_HOST_REGISTRATION_PROFILE` | `conservative`, `thp`, `driver` | `conservative` |
+
+`driver` explicitly bypasses the temporary table and address-space admission
+limits so a fixed KMD can be validated. Both `host_register()` and
+`host_register_memory()` submit the entire requested range in one native
+registration, without page inspection, temporary io_uring pins, or pool-local
+THP promotion by the registration API. It enables registration; it does not
+disable pinning. Existing allocation-time THP advice is unaffected.
+
+Use this mode only when the driver safely rejects insufficient capacity and
+cleans up failed mappings. It does not detect whether a KMD is fixed, increase
+device capacity, or make old drivers safe. Native registration errors propagate;
+they are not converted to an unregistered result or retried with smaller ranges.
+The runtime's unsupported-registration result still yields `False` for the raw
+API or an empty result for the owned API.
+
+Ownership, overlap checks, coverage queries, and unregister-before-free remain
+active. Live registrations keep conservative ordinary-page and address-space
+charges even in `driver` mode, so switching back to a guarded profile does not
+forget them. Close refunds these charges regardless of the current profile.
+Set the profile before starting the process for reproducible driver validation.
 
 `conservative` counts every admitted window as ordinary pages. `thp` is an
 explicit deployment qualification: use it only when direct/identity DMA

@@ -14,8 +14,8 @@ import sys
 def host_registration_profile() -> str:
     """Return the explicitly qualified device mapping profile for host pinning."""
     profile = os.environ.get("TORCH_RBLN_HOST_REGISTRATION_PROFILE", "conservative")
-    if profile not in {"conservative", "thp"}:
-        msg = "TORCH_RBLN_HOST_REGISTRATION_PROFILE must be conservative or thp"
+    if profile not in {"conservative", "thp", "driver"}:
+        msg = "TORCH_RBLN_HOST_REGISTRATION_PROFILE must be conservative, thp or driver"
         raise ValueError(msg)
     return profile
 
