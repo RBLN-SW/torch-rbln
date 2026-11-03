@@ -143,7 +143,10 @@ enum class CpuFallbackReason : uint8_t {
   kUnsupportedInput,
   kAttnWeightsCacheMiss,
   kTensorSubclass,
+  kNumCpuFallbackReasons, // sentinel, not a reason
 };
+inline constexpr size_t kNumCpuFallbackReasons =
+    static_cast<size_t>(CpuFallbackReason::kNumCpuFallbackReasons);
 
 C10_RBLN_API std::string_view cpu_fallback_reason_name(
     CpuFallbackReason reason);

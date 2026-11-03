@@ -498,17 +498,16 @@ inline std::optional<ScalarValue> wrapped_scalar_value(const at::Tensor& t) {
 // path, not CPU. If we counted wrapped 0-dim against the shortcut here, we
 // would force the shortcut for the most common binary-op-with-python-scalar
 // case and bypass the compile-path that the test suite expects.
-// Returns 0 = no fallback, else the reason code (1=dtype-not-dispatch,
-// 2=nan/inf input, 3=all-scalar, 4=out-dtype). The reason is already decided
-// here; returning it instead of a bool lets the caller attribute WHY at zero
-// extra cost.
+// Returns the reason that sends the op to the CPU, or nullopt when none does.
+// The reason is already decided here; returning it instead of a bool lets the
+// caller attribute WHY at zero extra cost.
 //
 // out-dtype: an `out` whose dtype differs from the inputs'. Whether such an
 // `out` is accepted is each op's own rule (add casts into it, neg and mm reject
 // it), so the op runs on CPU, where its kernel applies that rule and computes
 // the exact result. A bool `out` is left to the device: it is what a comparison
 // writes.
-int quick_fallback_check(
+std::optional<c10::rbln::CpuFallbackReason> quick_fallback_check(
     torch::jit::Stack* stack,
     const SchemaCache& cache,
     const std::vector<size_t>& skip_dtype_args) {
@@ -561,7 +560,7 @@ int quick_fallback_check(
     // Catalog plus the TORCH_RBLN_DISPATCH_DTYPES extension
     // (RBLNSupportedDtypes.h).
     if (!c10::rbln::is_dispatch_dtype_rt(t.scalar_type())) {
-      return 1; // dtype-not-dispatch (dtype outside the dispatch policy)
+      return c10::rbln::CpuFallbackReason::kDtype; // not a dispatch dtype
     }
     if (!input_dtype) {
       input_dtype = t.scalar_type();
@@ -571,19 +570,21 @@ int quick_fallback_check(
     }
   }
   if (nan_inf_found) {
-    return 2; // nan/inf in input (opt-in scan)
+    return c10::rbln::CpuFallbackReason::kNanInf; // opt-in scan
   }
   if (cache.out_positional_idx >= 0 && input_dtype) {
     const auto& out_iv = args[cache.out_positional_idx];
     if (out_iv.isTensor() && out_iv.toTensor().defined()) {
       const auto out_dtype = out_iv.toTensor().scalar_type();
       if (out_dtype != c10::kBool && out_dtype != *input_dtype) {
-        return 4; // out-dtype (out of another dtype; see above)
+        return c10::rbln::CpuFallbackReason::kOutDtype; // see above
       }
     }
   }
-  return (has_input_tensor && all_input_scalar) ? 3
-                                                : 0; // 3 = all-scalar inputs
+  if (has_input_tensor && all_input_scalar) {
+    return c10::rbln::CpuFallbackReason::kScalar;
+  }
+  return std::nullopt;
 }
 
 // ---------------------------------------------------------------------------
@@ -944,8 +945,8 @@ void generic_shim_boxed(
   // Earlier bugs that motivated disabling this shortcut have been fixed at the
   // borrow site: write-alias args are skipped from the borrow loop and the
   // borrow_resize_case is gated on contiguity (see RBLNCPUFallback.cpp).
-  const int fb_reason = quick_fallback_check(stack, cache, skip_dtype_args);
-  if (fb_reason != 0) {
+  const auto fb_reason = quick_fallback_check(stack, cache, skip_dtype_args);
+  if (fb_reason) {
     g_diag_n_fallback.fetch_add(1, std::memory_order_relaxed);
     if (g_trace_enabled.load(std::memory_order_relaxed)) {
       capture_site(
@@ -953,12 +954,7 @@ void generic_shim_boxed(
     }
     // Counted under the reason, logged and timed inside
     // (c10::rbln::CpuFallbackScope), like every other fallback path.
-    static constexpr std::array<c10::rbln::CpuFallbackReason, 4> kReasons = {
-        c10::rbln::CpuFallbackReason::kDtype,
-        c10::rbln::CpuFallbackReason::kNanInf,
-        c10::rbln::CpuFallbackReason::kScalar,
-        c10::rbln::CpuFallbackReason::kOutDtype};
-    ::at::native::rbln::cpu_fallback_rbln(op, stack, kReasons[fb_reason - 1]);
+    ::at::native::rbln::cpu_fallback_rbln(op, stack, *fb_reason);
     return;
   }
 

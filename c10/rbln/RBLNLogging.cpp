@@ -293,7 +293,8 @@ std::mutex& cpu_fallback_mutex() {
 struct CpuFallbackRecord {
   uint64_t count = 0;
   bool boxed = false; // recorded at least once through CpuFallbackPath::kBoxed
-  std::map<std::string, uint64_t, std::less<>> by_reason;
+  // Indexed by the reason's enum value.
+  std::array<uint64_t, kNumCpuFallbackReasons> by_reason{};
 };
 
 std::map<std::string, CpuFallbackRecord, std::less<>>& cpu_fallback_records() {
@@ -316,7 +317,7 @@ uint64_t steady_now_ns() {
 void count_and_log_cpu_fallback(
     std::string_view full_op_name,
     CpuFallbackPath path,
-    std::string_view reason) {
+    CpuFallbackReason reason) {
   {
     std::lock_guard<std::mutex> lk(cpu_fallback_mutex());
     auto& records = cpu_fallback_records();
@@ -326,12 +327,7 @@ void count_and_log_cpu_fallback(
     }
     ++it->second.count;
     it->second.boxed |= path == CpuFallbackPath::kBoxed;
-    auto& by_reason = it->second.by_reason;
-    auto reason_it = by_reason.find(reason);
-    if (reason_it == by_reason.end()) {
-      reason_it = by_reason.emplace(reason, 0).first;
-    }
-    ++reason_it->second;
+    ++it->second.by_reason.at(static_cast<size_t>(reason));
   }
 
   // At the default level the count above is all the work: nothing is logged.
@@ -367,75 +363,63 @@ void count_and_log_cpu_fallback(
 bool open_cpu_fallback(
     std::string_view full_op_name,
     CpuFallbackPath path,
-    std::string_view reason) {
+    CpuFallbackReason reason) {
   count_and_log_cpu_fallback(full_op_name, path, reason);
   return t_cpu_fallback_depth++ == 0;
 }
 
-} // namespace
-
-namespace {
-
-// Enum order; cpu_fallback_reason_name() indexes it by the enum value.
-constexpr std::array<std::pair<CpuFallbackReason, std::string_view>, 19>
-    kCpuFallbackReasonNames = {{
-        {CpuFallbackReason::kDispatchMode, "dispatch_mode"},
-        {CpuFallbackReason::kTrace, "trace"},
-        {CpuFallbackReason::kReentrant, "reentrant"},
-        {CpuFallbackReason::kDtype, "dtype"},
-        {CpuFallbackReason::kScalar, "scalar"},
-        {CpuFallbackReason::kStorageOffset, "storage_offset"},
-        {CpuFallbackReason::kNanInf, "nan_inf"},
-        {CpuFallbackReason::kAlign, "align"},
-        {CpuFallbackReason::kCompileError, "compile_error"},
-        {CpuFallbackReason::kUnsupportedOp, "unsupported_op"},
-        {CpuFallbackReason::kStridedCopyError, "strided_copy_error"},
-        {CpuFallbackReason::kRegistered, "registered"},
-        {CpuFallbackReason::kOutDtype, "out_dtype"},
-        {CpuFallbackReason::kIndexPattern, "index_pattern"},
-        {CpuFallbackReason::kDivRounding, "div_rounding"},
-        {CpuFallbackReason::kNonIntegerExponent, "non_integer_exponent"},
-        {CpuFallbackReason::kUnsupportedInput, "unsupported_input"},
-        {CpuFallbackReason::kAttnWeightsCacheMiss, "attn_weights_cache_miss"},
-        {CpuFallbackReason::kTensorSubclass, "tensor_subclass"},
-    }};
+// Indexed by the reason's enum value. to_array sizes it from the entries, so a
+// reason without a name, or a name without a reason, fails the static_assert.
+constexpr auto kCpuFallbackReasonNames = std::to_array<std::string_view>({
+    "dispatch_mode",
+    "trace",
+    "reentrant",
+    "dtype",
+    "scalar",
+    "storage_offset",
+    "nan_inf",
+    "align",
+    "compile_error",
+    "unsupported_op",
+    "strided_copy_error",
+    "registered",
+    "out_dtype",
+    "index_pattern",
+    "div_rounding",
+    "non_integer_exponent",
+    "unsupported_input",
+    "attn_weights_cache_miss",
+    "tensor_subclass",
+});
+static_assert(
+    kCpuFallbackReasonNames.size() == kNumCpuFallbackReasons,
+    "every CpuFallbackReason needs a name in kCpuFallbackReasonNames");
 
 } // namespace
 
 std::string_view cpu_fallback_reason_name(CpuFallbackReason reason) {
-  const auto& entry = kCpuFallbackReasonNames.at(static_cast<size_t>(reason));
-  RBLN_CHECK(
-      entry.first == reason, "cpu_fallback_reason_name: table out of order");
-  return entry.second;
+  return kCpuFallbackReasonNames.at(static_cast<size_t>(reason));
 }
 
 std::optional<CpuFallbackReason> parse_cpu_fallback_reason(
     std::string_view name) {
-  for (const auto& [reason, reason_name] : kCpuFallbackReasonNames) {
-    if (reason_name == name) {
-      return reason;
+  for (size_t i = 0; i < kCpuFallbackReasonNames.size(); ++i) {
+    if (kCpuFallbackReasonNames[i] == name) {
+      return static_cast<CpuFallbackReason>(i);
     }
   }
   return std::nullopt;
 }
 
 std::vector<std::string_view> cpu_fallback_reason_names() {
-  std::vector<std::string_view> out;
-  out.reserve(kCpuFallbackReasonNames.size());
-  for (const auto& [reason, reason_name] : kCpuFallbackReasonNames) {
-    out.push_back(reason_name);
-  }
-  return out;
+  return {kCpuFallbackReasonNames.begin(), kCpuFallbackReasonNames.end()};
 }
 
 CpuFallbackScope::CpuFallbackScope(
     std::string_view full_op_name,
     CpuFallbackPath path,
     CpuFallbackReason reason)
-    : outermost_(open_cpu_fallback(
-          full_op_name,
-          path,
-          cpu_fallback_reason_name(reason))),
+    : outermost_(open_cpu_fallback(full_op_name, path, reason)),
       start_ns_(steady_now_ns()) {}
 
 CpuFallbackScope::~CpuFallbackScope() {
@@ -460,8 +444,11 @@ cpu_fallback_reason_counts() {
   std::lock_guard<std::mutex> lk(cpu_fallback_mutex());
   std::vector<std::tuple<std::string, std::string, uint64_t>> out;
   for (const auto& [name, record] : cpu_fallback_records()) {
-    for (const auto& [reason, count] : record.by_reason) {
-      out.emplace_back(name, reason, count);
+    for (size_t i = 0; i < kNumCpuFallbackReasons; ++i) {
+      if (record.by_reason[i] != 0) {
+        out.emplace_back(
+            name, std::string(kCpuFallbackReasonNames[i]), record.by_reason[i]);
+      }
     }
   }
   return out;
