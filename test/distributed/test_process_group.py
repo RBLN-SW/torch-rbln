@@ -7,12 +7,11 @@ from unittest import mock
 import pytest
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 from torch.distributed import distributed_c10d as c10d
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, subtest, TestCase
 
-from test.utils import configure_master_port_for_rccl_tests, spawn_target_with_clean_exit, SUPPORTED_DTYPES
+from test.utils import configure_master_port_for_rccl_tests, run_ranks, SUPPORTED_DTYPES
 
 
 KiB = 1024
@@ -676,11 +675,10 @@ class TestProcessGroupRBLNBase(TestCase):
         self.world_size = 2
 
     def run_c10d_test(self, c10d_async_env, nprocs, test_func, args):
-        """Helper to run a test function with mp.spawn."""
         with pytest.MonkeyPatch.context() as ctx:
             ctx.setenv("TORCH_RBLN_C10D_ASYNC", c10d_async_env)
 
-            mp.spawn(spawn_target_with_clean_exit, args=(test_func, *args), nprocs=nprocs, join=True)
+            run_ranks(test_func, args, nprocs)
 
 
 @pytest.mark.serial

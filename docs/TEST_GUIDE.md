@@ -400,6 +400,7 @@ From `test/utils.py`:
 | `SUPPORTED_DTYPES`                     | Baseline dtype list for RBLN backend tests, derived from `torch_rbln._internal.ops_utils.SupportedDtypes.dispatch`.             |
 | `set_deterministic_seeds(seed)`        | Sets `torch`, `numpy`, and `random` seeds. Must be called in each spawned process for reproducibility.                          |
 | `run_in_isolated_process(func, *args)` | Runs `func` in a fresh `spawn`-method process. Useful when tests need clean process state. `func` and `args` must be picklable. |
+| `run_ranks(test_func, args, nprocs)`   | Runs `test_func(rank, *args)` on `nprocs` ranks, as `mp.spawn` does, forked from a forkserver that has imported `torch`.        |
 
 ### Op filtering
 
