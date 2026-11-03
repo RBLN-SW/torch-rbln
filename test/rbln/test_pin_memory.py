@@ -7,12 +7,10 @@ Covers the standard `pin_memory` UX while RBLN is the active accelerator:
 2. `Tensor.pin_memory()` / `Tensor.is_pinned()`
 3. DataLoader with `pin_memory=True`
 4. `non_blocking=True` copies from/to pinned host tensors
-5. D2H into a pageable buffer whose address was freed and handed back with new pages
+5. D2H into a pageable buffer whose pages were replaced at the same address
 """
 
-import ctypes
-import platform
-import sys
+import mmap
 
 import pytest
 import torch
@@ -20,6 +18,10 @@ from torch.testing._internal.common_device_type import dtypes, instantiate_devic
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from test.utils import SUPPORTED_DTYPES
+from torch_rbln import _C
+
+
+_plus_one = torch.compile(lambda t: t + 1, backend="rbln", dynamic=False)
 
 
 @pytest.mark.npu(count=1)
@@ -124,85 +126,24 @@ class TestPinMemoryCopy(TestCase):
         dev = src.to(device, non_blocking=True)
         self.assertEqual(dev.cpu(), src)
 
-    def test_d2h_to_pageable_after_host_address_reuse(self, device):
-        # malloc hands a freed address back with new pages. The D2H into it must
-        # land there, not in the old pages a cached copy command still names.
-        libc = _glibc()
-        if libc is None:
-            self.skipTest("requires 64-bit glibc")
+    def test_d2h_to_pageable_after_its_pages_are_replaced(self, device):
+        # The same address gets new pages, as when malloc hands a freed one back.
+        # The D2H must land in them, not in the old pages a cached copy names.
         src = _plus_one(torch.ones((1, 4096), dtype=torch.bfloat16).to(device))
-        torch.rbln.synchronize()  # a compiled output is device-latest
         nbytes = src.numel() * src.element_size()
-
-        def d2h(address):
-            buffer = (ctypes.c_ubyte * nbytes).from_address(address)
-            host = torch.frombuffer(buffer, dtype=src.dtype).reshape(src.shape)
+        # MAP_PRIVATE: on a shared mapping MADV_DONTNEED keeps the same pages.
+        buf = mmap.mmap(-1, nbytes, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+        host = torch.frombuffer(buf, dtype=src.dtype).reshape(src.shape)
+        for replace_pages in (False, True):
+            if replace_pages:
+                buf.madvise(mmap.MADV_DONTNEED)
             host.fill_(-123)
+            (_, d2h_before), _ = _C._rt_prof_host_sync()
             host.copy_(src)
             torch.rbln.synchronize()
-            return (host != 2).sum().item()
-
-        held = []
-        address = None
-        try:
-            # Guards keep free() from merging the chunk, so malloc_trim(0) drops
-            # its pages while the address stays free.
-            held.append(libc.malloc(32768))
-            address = libc.aligned_alloc(4096, nbytes)
-            held.append(libc.malloc(32768))
-            self.assertTrue(all(held) and address, "host allocation failed")
-            chunk_size = ctypes.c_size_t.from_address(address - 8).value
-            if chunk_size & 2:
-                self.skipTest("glibc served the buffer from mmap, not the heap")
-            if not chunk_size & 1:
-                # Keep the alignment fragment in front allocated as well.
-                prefix_size = ctypes.c_size_t.from_address(address - 16).value
-                for _ in range(256):
-                    prefix = libc.malloc(prefix_size - 16)
-                    held.append(prefix)
-                    if prefix == address - prefix_size:
-                        break
-                else:
-                    self.skipTest("glibc did not reuse the alignment fragment")
-
-            self.assertEqual(d2h(address), 0, "first D2H returned wrong values")
-            libc.free(address)
-            freed, address = address, None
-            libc.malloc_trim(0)
-
-            for _ in range(256):
-                candidate = libc.malloc(nbytes)
-                if candidate == freed:
-                    address = candidate
-                    break
-                held.append(candidate)
-            else:
-                self.skipTest("glibc did not hand the freed address back")
-            self.assertEqual(d2h(address), 0, "D2H into the reused address returned stale values")
-        finally:
-            for ptr in [*held, address]:
-                libc.free(ptr)
-
-
-_plus_one = torch.compile(lambda t: t + 1, backend="rbln", dynamic=False)
-
-
-def _glibc():
-    """libc for the address-reuse test, or None unless the libc is 64-bit glibc."""
-    if sys.platform != "linux" or ctypes.sizeof(ctypes.c_size_t) != 8:
-        return None
-    if platform.libc_ver()[0] != "glibc":
-        return None
-    libc = ctypes.CDLL(None)
-    libc.malloc.argtypes = (ctypes.c_size_t,)
-    libc.malloc.restype = ctypes.c_void_p
-    libc.aligned_alloc.argtypes = (ctypes.c_size_t, ctypes.c_size_t)
-    libc.aligned_alloc.restype = ctypes.c_void_p
-    libc.free.argtypes = (ctypes.c_void_p,)
-    libc.free.restype = None
-    libc.malloc_trim.argtypes = (ctypes.c_size_t,)
-    libc.malloc_trim.restype = ctypes.c_int
-    return libc
+            (_, d2h_after), _ = _C._rt_prof_host_sync()
+            self.assertEqual(d2h_after - d2h_before, nbytes, "D2H did not come from the device")
+            self.assertEqual(host, torch.full_like(host, 2))
 
 
 instantiate_device_type_tests(TestPinMemoryCopy, globals(), only_for="privateuse1")
