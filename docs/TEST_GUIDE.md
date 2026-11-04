@@ -85,6 +85,7 @@ test/
 │   └── test_tp_pp.py                      # Tensor-parallel (TP) and pipeline-parallel (PP) end-to-end tests
 │
 ├── ops/                                   # PyTorch operator compatibility tests
+│   ├── conftest.py                        # Runs all but the op under test on the host
 │   └── test_ops.py                        # Adapted from upstream PyTorch test_ops.py — validates op correctness on RBLN
 │
 ├── models/                                # Model-level integration tests
@@ -413,6 +414,8 @@ operators not supported on the RBLN backend:
 - Skips unsupported dtypes (only `SUPPORTED_DTYPES` are allowed, with exceptions
   for CPU-fallback dtype tests like SDPA)
 - Skips specific known-failing tests listed in `_skipped_tests`
+- Skips the `_refs.*` OpInfos, which test upstream's Python decompositions rather
+  than RBLN kernels
 - Skips forward AD tests for ops listed in `_ops_without_forward_ad_support`
 - In debug builds (`torch.version.debug`), runs only a representative subset of
   ops for faster iteration
@@ -423,6 +426,10 @@ from test.filters import custom_instantiate_device_type_tests
 
 custom_instantiate_device_type_tests(TestCommon, globals(), only_for="privateuse1")
 ```
+
+`test/ops/conftest.py` runs everything but the op under test on the host: it
+builds OpInfo samples there and compares results there, without editing
+`test_ops.py`.
 
 ### Contract conformance tests
 
