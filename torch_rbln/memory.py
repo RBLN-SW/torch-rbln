@@ -61,7 +61,7 @@ def set_device_alloc(
     *,
     physical_dtype: torch.dtype | None = None,
 ) -> None:
-    """Configure a tensor's device placement without a compiler graph or JSON.
+    """Configure a tensor's device placement.
 
     ``tensor`` must be contiguous and cover its whole storage. Placements must
     split the same axes and cover the tensor exactly, without overlap or gaps.
@@ -74,9 +74,6 @@ def set_device_alloc(
             torch.rbln.DevicePlacement(0, 0, ((0, 0, 2),)),
             torch.rbln.DevicePlacement(0, 1, ((0, 2, 4),)),
         ])
-
-    This replaces ``vmem.debug.set_device_alloc_by_json`` for slice-based
-    layouts. It does not accept padding or transpose operations.
     """
     torch_rbln._C._set_device_alloc(tensor, placements, tensor.dtype if physical_dtype is None else physical_dtype)
 
