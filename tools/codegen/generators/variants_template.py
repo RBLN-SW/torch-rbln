@@ -194,8 +194,22 @@ def {kernel_name}(*args, **kwargs):
 """
 
         @staticmethod
-        def inplace(kernel_name: str, general_kernel_name: str) -> str:
-            """Generate inplace function code."""
+        def inplace(kernel_name: str, general_kernel_name: str, *, reuse_self: bool = False) -> str:
+            """Generate inplace function code.
+
+            With ``reuse_self`` the wrapper offers ``self`` as the output; the
+            dispatch helper binds it only under its reuse contract and the
+            wrapper copies back otherwise. The broadcast check first raises
+            PyTorch's own errors for operands that do not broadcast to ``self``.
+            """
+            if reuse_self:
+                return f"""
+def {kernel_name}(*args, **kwargs):
+    validate_inplace_broadcast(args)
+    result, _ = {general_kernel_name}(*args, **kwargs, out=args[0])
+    if result.data_ptr() != args[0].data_ptr():
+        args[0].copy_(result)
+"""
             return f"""
 def {kernel_name}(*args, **kwargs):
     # TODO: try zero-copy by passing args[0] as out tensor (need to check for violations)
