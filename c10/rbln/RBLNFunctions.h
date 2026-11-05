@@ -68,7 +68,6 @@ struct C10_RBLN_API DeviceProperties {
   uint64_t memory_per_chiplet = 0;
   uint32_t num_chiplet = 0;
   uint32_t npu_count = 0;
-  std::vector<std::string> pci_bus_ids;
 };
 
 /**

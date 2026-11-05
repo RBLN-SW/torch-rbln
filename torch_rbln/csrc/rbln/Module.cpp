@@ -10,7 +10,6 @@
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNSupportedDtypes.h>
-#include <c10/util/StringUtil.h>
 #include <c10/util/accumulate.h>
 #include <torch/csrc/Dtype.h>
 #include <torch/csrc/utils/pybind.h>
@@ -162,7 +161,6 @@ void register_public_device_api(py::module_& module) {
           &c10::rbln::DeviceProperties::memory_per_chiplet)
       .def_readonly("num_chiplet", &c10::rbln::DeviceProperties::num_chiplet)
       .def_readonly("npu_count", &c10::rbln::DeviceProperties::npu_count)
-      .def_readonly("pci_bus_ids", &c10::rbln::DeviceProperties::pci_bus_ids)
       .def("__repr__", [](const c10::rbln::DeviceProperties& self) {
         return c10::str(
             "DeviceProperties(name='",
@@ -175,9 +173,7 @@ void register_public_device_api(py::module_& module) {
             self.num_chiplet,
             ", npu_count=",
             self.npu_count,
-            ", pci_bus_ids=[",
-            c10::Join(", ", self.pci_bus_ids),
-            "])");
+            ")");
       });
 
   module.def(
