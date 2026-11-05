@@ -3,6 +3,7 @@
 #include <spdlog/pattern_formatter.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -292,6 +293,8 @@ std::mutex& cpu_fallback_mutex() {
 struct CpuFallbackRecord {
   uint64_t count = 0;
   bool boxed = false; // recorded at least once through CpuFallbackPath::kBoxed
+  // Indexed by the reason's enum value.
+  std::array<uint64_t, kNumCpuFallbackReasons> by_reason{};
 };
 
 std::map<std::string, CpuFallbackRecord, std::less<>>& cpu_fallback_records() {
@@ -300,6 +303,9 @@ std::map<std::string, CpuFallbackRecord, std::less<>>& cpu_fallback_records() {
 }
 
 std::atomic<uint64_t> g_cpu_fallback_ns{0};
+
+// WHERE hook; null unless the shim installed it (= with_stack on).
+std::atomic<CpuFallbackCaptureFn> g_cpu_fallback_capture_fn{nullptr};
 
 // CpuFallbackScopes open on this thread; only the outermost adds its time.
 thread_local int t_cpu_fallback_depth = 0;
@@ -313,7 +319,8 @@ uint64_t steady_now_ns() {
 
 void count_and_log_cpu_fallback(
     std::string_view full_op_name,
-    CpuFallbackPath path) {
+    CpuFallbackPath path,
+    CpuFallbackReason reason) {
   {
     std::lock_guard<std::mutex> lk(cpu_fallback_mutex());
     auto& records = cpu_fallback_records();
@@ -323,6 +330,7 @@ void count_and_log_cpu_fallback(
     }
     ++it->second.count;
     it->second.boxed |= path == CpuFallbackPath::kBoxed;
+    ++it->second.by_reason.at(static_cast<size_t>(reason));
   }
 
   // At the default level the count above is all the work: nothing is logged.
@@ -355,17 +363,73 @@ void count_and_log_cpu_fallback(
 // Counts and logs a fallback, then opens its scope; true if it is the
 // outermost on this thread. Counting comes first: if logging throws (warnings
 // as errors), no scope was opened and the destructor does not run.
-bool open_cpu_fallback(std::string_view full_op_name, CpuFallbackPath path) {
-  count_and_log_cpu_fallback(full_op_name, path);
+bool open_cpu_fallback(
+    std::string_view full_op_name,
+    CpuFallbackPath path,
+    CpuFallbackReason reason) {
+  count_and_log_cpu_fallback(full_op_name, path, reason);
+  if (auto fn = g_cpu_fallback_capture_fn.load(std::memory_order_relaxed)) {
+    fn(full_op_name, path);
+  }
   return t_cpu_fallback_depth++ == 0;
 }
 
+// Indexed by the reason's enum value. to_array sizes it from the entries, so a
+// reason without a name, or a name without a reason, fails the static_assert.
+constexpr auto kCpuFallbackReasonNames = std::to_array<std::string_view>({
+    "dispatch_mode",
+    "trace",
+    "reentrant",
+    "dtype",
+    "scalar",
+    "storage_offset",
+    "nan_inf",
+    "align",
+    "compile_error",
+    "unsupported_op",
+    "strided_copy_error",
+    "registered",
+    "out_dtype",
+    "index_pattern",
+    "div_rounding",
+    "non_integer_exponent",
+    "unsupported_input",
+    "attn_weights_cache_miss",
+    "tensor_subclass",
+});
+static_assert(
+    kCpuFallbackReasonNames.size() == kNumCpuFallbackReasons,
+    "every CpuFallbackReason needs a name in kCpuFallbackReasonNames");
+
 } // namespace
+
+std::string_view cpu_fallback_reason_name(CpuFallbackReason reason) {
+  return kCpuFallbackReasonNames.at(static_cast<size_t>(reason));
+}
+
+std::optional<CpuFallbackReason> parse_cpu_fallback_reason(
+    std::string_view name) {
+  for (size_t i = 0; i < kCpuFallbackReasonNames.size(); ++i) {
+    if (kCpuFallbackReasonNames[i] == name) {
+      return static_cast<CpuFallbackReason>(i);
+    }
+  }
+  return std::nullopt;
+}
+
+std::vector<std::string_view> cpu_fallback_reason_names() {
+  return {kCpuFallbackReasonNames.begin(), kCpuFallbackReasonNames.end()};
+}
+
+void set_cpu_fallback_capture_fn(CpuFallbackCaptureFn fn) noexcept {
+  g_cpu_fallback_capture_fn.store(fn, std::memory_order_relaxed);
+}
 
 CpuFallbackScope::CpuFallbackScope(
     std::string_view full_op_name,
-    CpuFallbackPath path)
-    : outermost_(open_cpu_fallback(full_op_name, path)),
+    CpuFallbackPath path,
+    CpuFallbackReason reason)
+    : outermost_(open_cpu_fallback(full_op_name, path, reason)),
       start_ns_(steady_now_ns()) {}
 
 CpuFallbackScope::~CpuFallbackScope() {
@@ -381,6 +445,21 @@ std::vector<std::pair<std::string, uint64_t>> cpu_fallback_counts() {
   std::vector<std::pair<std::string, uint64_t>> out;
   for (const auto& [name, record] : cpu_fallback_records()) {
     out.emplace_back(name, record.count);
+  }
+  return out;
+}
+
+std::vector<std::tuple<std::string, std::string, uint64_t>>
+cpu_fallback_reason_counts() {
+  std::lock_guard<std::mutex> lk(cpu_fallback_mutex());
+  std::vector<std::tuple<std::string, std::string, uint64_t>> out;
+  for (const auto& [name, record] : cpu_fallback_records()) {
+    for (size_t i = 0; i < kNumCpuFallbackReasons; ++i) {
+      if (record.by_reason[i] != 0) {
+        out.emplace_back(
+            name, std::string(kCpuFallbackReasonNames[i]), record.by_reason[i]);
+      }
+    }
   }
   return out;
 }

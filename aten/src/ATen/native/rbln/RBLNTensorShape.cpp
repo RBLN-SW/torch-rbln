@@ -206,7 +206,7 @@ at::Tensor& cat_out_rbln(
     strided_v2v_copy(dst_view, t, batch);
     axis_offset += extent;
   }
-  submit_or_fallback(batch, "cat_out_rbln", [&] {
+  submit_or_fallback(batch, "aten::cat.out", [&] {
     std::vector<at::Tensor> cpu_tensors;
     cpu_tensors.reserve(inputs.size());
     for (const auto& t : inputs) {

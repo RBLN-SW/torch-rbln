@@ -520,7 +520,7 @@ void tensor_copy_from_rbln_to_rbln(
       outer_count *= rbln_src.size(i);
     }
     if (outer_count <= static_cast<int64_t>(::rbln::kMaxV2VMultiCopies)) {
-      strided_v2v_copy(rbln_dst, rbln_src);
+      strided_v2v_copy(rbln_dst, rbln_src, "aten::copy_");
       return;
     }
   }
@@ -930,7 +930,7 @@ void _foreach_copy__rbln(
   v2v_batched.reserve(self.size());
 
   const auto flush_pending = [&] {
-    submit_or_fallback(v2v_batch, "_foreach_copy_", [&] {
+    submit_or_fallback(v2v_batch, "aten::_foreach_copy_", [&] {
       for (const auto& pair : v2v_batched) {
         pair.first.copy_(pair.second.cpu());
       }

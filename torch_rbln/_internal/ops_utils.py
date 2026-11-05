@@ -334,6 +334,15 @@ def handle_empty_where(args):
     return ret, ret.shape
 
 
+def handle_empty_masked_fill(args, out=None):
+    # ``masked_fill`` keeps ``self``'s shape, so an empty ``self`` gives an empty
+    # result even when the mask is a non-empty (0-dim, broadcast) tensor. Such a
+    # call must not reach the compiler: a program with an empty input fails in
+    # runtime creation (``std::bad_alloc``).
+    ret = out if out is not None else torch.empty_like(args[0], device="rbln")
+    return ret, ret.shape
+
+
 def handle_empty_binary(args):
     # Compute the broadcast result shape from all tensor args. With the
     # implicit-broadcast path (broadcast_args_general now validates only),
@@ -466,6 +475,25 @@ def handle_empty_tensor(tensor_args):
         return ret, ret.shape
     msg = "Can't find reference tensor for out"
     raise RuntimeError(msg)
+
+
+def contiguous_for_scalar_and_strided(args, kwargs_filtered):
+    """Make every tensor arg contiguous when a 0-dim operand meets a strided one.
+
+    The pinned compiler crashes on a graph that combines a 0-dim input with a
+    permuted input (``where(cond, scalar, a.T)``), and a compiler crash cannot be
+    caught by the CPU fallback. Materializing the view here keeps such a call on
+    the device path.
+
+    TODO: remove this helper and ``OpCategories.SCALAR_STRIDED_CONTIG_OPS`` once the
+    pinned compiler passes ``test_where_permuted_operand_with_scalar_matches_cpu``
+    without it.
+    """
+    flat_args, _ = tree_flatten((args, kwargs_filtered))
+    tensors = [a for a in flat_args if isinstance(a, torch.Tensor)]
+    if any(t.dim() == 0 for t in tensors) and any(not t.is_contiguous() for t in tensors):
+        (args, kwargs_filtered), _ = prepare_args_for_contiguous(args, kwargs_filtered)
+    return args, kwargs_filtered
 
 
 def prepare_args_for_contiguous(args, kwargs_filtered):
@@ -1621,7 +1649,7 @@ def prepare_args_view_aware(args, kwargs_filtered):
             changed = True
             continue
         # Some contiguous-but-offset>0 tensors hit the cpu_fallback path
-        # earlier (see is_cpu_fallback_cases storage_offset gate); if a
+        # earlier (see get_fallback_reason storage_offset gate); if a
         # caller still reaches us with offset>0 + contig, we let .contiguous()
         # handle it. The view detector returns None in that case.
         detected = _detect_view_recipe(a)
@@ -1722,8 +1750,8 @@ def view_recipes_for_positional(view_recipes_flat, positional_count):
 
 
 # Elementwise binary shim ops whose size-1 last-dim operand the backend broadcasts
-# on the device. ``where`` is left out: three operands, and its bool condition
-# takes the CPU path anyway.
+# on the device. ``where`` and ``masked_fill`` are left out: three operands, and a
+# size-1 predicate broadcast is unverified, so they keep the input-based align check.
 # Mirrors OpCategories.BROADCASTABLE_OPS in tools/codegen/config.py, except
 # pow: its tensor-tensor overload takes CPU fallback.
 _LAST_DIM_ONE_DEVICE_BROADCAST_OPS = frozenset(
@@ -1744,7 +1772,7 @@ _LAST_DIM_ONE_DEVICE_BROADCAST_OPS = frozenset(
 )
 
 
-def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_tensor):
+def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_tensor, *, out_alias_arg_pos=None):
     """Centralized view-aware rbln-compile dispatch.
 
     The single entry point used by all generated ``*_rbln`` handlers (via the
@@ -1807,6 +1835,7 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
             args,
             result=out_tensor,
             op_name=op_name,
+            reason="align",
             **kwargs_filtered,
         )
 
@@ -1824,6 +1853,7 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
                         args,
                         result=out_tensor,
                         op_name=op_name,
+                        reason="div_rounding",
                         **kwargs_filtered,
                     )
 
@@ -1868,10 +1898,17 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
 
     if out_tensor is None:
         result_tensor = None
-    elif can_use_out_tensor_directly(view_args, dict(view_kwargs, out=out_tensor)):
-        result_tensor = out_tensor
     else:
-        result_tensor = None
+        # An in-place wrapper names the positional input ``out`` may alias
+        # (``out_alias_arg_pos``). It is reusable only when it reaches the compiler
+        # as-is: not rewritten to a view base and not replaced by a moved scalar.
+        reusable = None
+        if out_alias_arg_pos is not None and view_args[out_alias_arg_pos] is args[out_alias_arg_pos]:
+            reusable = args[out_alias_arg_pos]
+        if can_use_out_tensor_directly(view_args, dict(view_kwargs, out=out_tensor), reusable=reusable):
+            result_tensor = out_tensor
+        else:
+            result_tensor = None
 
     op_module = get_view_op_module(op_callable, view_recipes)
 
@@ -2025,8 +2062,8 @@ def _parse_disabled_fallback_cases() -> frozenset:
     return _ALL_FALLBACK_CASES if ("all" in cases) else (cases & _ALL_FALLBACK_CASES)
 
 
-def is_cpu_fallback_cases(args):
-    """Determines if a CPU fallback is necessary for an operation.
+def get_fallback_reason(args, *, skip_dtype_args=()) -> str | None:
+    """Names the case that sends an operation to the CPU, or returns None.
 
     This function checks for several conditions that would require an operation to fall
     back to the CPU:
@@ -2043,7 +2080,8 @@ def is_cpu_fallback_cases(args):
        to CPU and never enter the compile path.
     2. **Unsupported or Mismatched Data Types**: If any input tensor's dtype is not in
        ``SupportedDtypes.dispatch``, or if the inputs mix different supported dtypes.
-       The RBLN compute path requires all tensors to share the same supported dtype.
+       The data tensors must share a supported dtype; ``skip_dtype_args`` excludes
+       typed predicates from this check only.
     3. **Scalar Tensors**: If all input tensors are scalar tensors, rebel-compiler falls
        back to host ops.
     4. **Storage Offset**: If any tensor has `storage_offset != 0`, fall back to CPU.
@@ -2067,16 +2105,18 @@ def is_cpu_fallback_cases(args):
     Args:
         args (tuple): A tuple of positional arguments for the operation, which may
             contain tensors.
+        skip_dtype_args: Positional predicate indices exempt from dtype matching.
 
     Returns:
-        bool: True if a CPU fallback is necessary, False otherwise.
+        str | None: The name of the first case above that requires a CPU fallback, the
+        name `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` takes, or None if none does.
     """
     disabled_cases = _parse_disabled_fallback_cases()
 
     # 0a: Python trace/debugger — when a trace function is set (e.g. pdb, coverage,
     # sys.settrace), fall back to CPU
     if "trace" not in disabled_cases and sys.gettrace() is not None:
-        return True
+        return "trace"
 
     # 1: TorchDispatchMode active — run on CPU and do not attempt compile (cheap)
     if "dispatch_mode" not in disabled_cases:
@@ -2084,34 +2124,37 @@ def is_cpu_fallback_cases(args):
             from torch.utils._python_dispatch import is_in_torch_dispatch_mode  # noqa: PLC0415
 
             if is_in_torch_dispatch_mode(include_infra_modes=False):
-                return True
+                return "dispatch_mode"
         except ImportError:
             pass
 
     # Checks 2-5 require tensors; bail early if none
     tensor_args = extract_tensors(args)
     if not tensor_args:
-        return False
+        return None
 
     # 2: fall back to the CPU if any input tensor has an unsupported dtype, or if input
     # tensors have mismatched dtypes
     if "dtype" not in disabled_cases:
-        first_dtype = tensor_args[0].dtype
-        if first_dtype not in SupportedDtypes.dispatch:
-            return True
-        for i in range(1, len(tensor_args)):
-            if tensor_args[i].dtype != first_dtype:
-                return True
+        dtype_args = tensor_args
+        if skip_dtype_args:
+            dtype_args = extract_tensors(tuple(a for i, a in enumerate(args) if i not in skip_dtype_args))
+        if dtype_args:
+            first_dtype = dtype_args[0].dtype
+            if first_dtype not in SupportedDtypes.dispatch:
+                return "dtype"
+            if any(t.dtype != first_dtype for t in dtype_args[1:]):
+                return "dtype"
 
     # 3: fall back to the CPU if all input tensors are scalar tensors
     if "scalar" not in disabled_cases and all(a.ndim == 0 for a in tensor_args):
-        return True
+        return "scalar"
 
     # 4: fall back to the CPU if any contiguous tensor has non-zero storage offset
     if "storage_offset" not in disabled_cases and any(
         a.is_contiguous() and a.storage_offset() != 0 for a in tensor_args
     ):
-        return True
+        return "storage_offset"
 
     # 5: opt-in host scan; keep the gate before to_cpu to avoid materializing inputs.
     if (
@@ -2120,7 +2163,7 @@ def is_cpu_fallback_cases(args):
         and not is_rbln_deploy()
         and has_invalid_tensor(to_cpu(args))
     ):
-        return True
+        return "nan_inf"
 
     # 6: Reentrancy — already inside an RBLN compile op (e.g. from print/repr or from
     # compiled graph).
@@ -2130,12 +2173,20 @@ def is_cpu_fallback_cases(args):
 
         if get_rbln_compile_op_depth() > 0:
             rbln_log_warn("Unexpected CPU fallback: reentrant dispatch (already inside RBLN compile op)")
-            return True
+            return "reentrant"
 
-    return False
+    return None
 
 
-def cpu_fallback_path(target_ops, args, *, result: torch.Tensor | None = None, op_name: str | None = None, **op_kwargs):
+def cpu_fallback_path(
+    target_ops,
+    args,
+    *,
+    op_name: str,
+    reason: str,
+    result: torch.Tensor | None = None,
+    **op_kwargs,
+):
     """Perform CPU fallback for the given target operation.
 
     This function converts the input arguments and keyword arguments from their original
@@ -2145,9 +2196,13 @@ def cpu_fallback_path(target_ops, args, *, result: torch.Tensor | None = None, o
     Args:
         target_ops (callable): The operation to be executed on the CPU.
         args (tuple): A tuple of positional arguments that need to be converted to CPU.
+        op_name (str): Operator name like "aten::add"; the fallback is counted and
+            logged under it.
+        reason (str): Why the op runs on CPU, such as the case ``get_fallback_reason``
+            returned. Every fallback is counted under its reason, so there is no way to
+            run one without naming it.
         result (Optional[torch.Tensor]): Optional pre-allocated output tensor. If
             provided and size matches, the result will be copied into this tensor.
-        op_name (Optional[str]): Operator name like "aten::add" for logging purposes.
         **op_kwargs: Keyword arguments for the operation (e.g. dim=2, out=...). Passed
             as-is to target_ops.
 
@@ -2155,9 +2210,7 @@ def cpu_fallback_path(target_ops, args, *, result: torch.Tensor | None = None, o
         torch.Tensor: The result of the target operation, converted back to the 'rbln'
         device.
     """
-    if op_name is None:
-        return _run_on_cpu(target_ops, args, result, op_kwargs)
-    with rbln_record_cpu_fallback(op_name):
+    with rbln_record_cpu_fallback(op_name, reason):
         return _run_on_cpu(target_ops, args, result, op_kwargs)
 
 
@@ -2212,21 +2265,74 @@ def is_inplace_op(args, kwargs) -> bool:
     return any(t is out_t or (t.data_ptr() == out_t.data_ptr() and t.device == out_t.device) for t in input_tensors)
 
 
-def can_use_out_tensor_directly(args: tuple, kwargs: dict) -> bool:
+def validate_inplace_broadcast(args: tuple) -> None:
+    """Raise PyTorch's errors when an elementwise in-place op cannot write to ``self``.
+
+    ``args[0]`` is ``self``; every other tensor arg must broadcast *to* it. The
+    messages match the CPU kernels (``infer_size`` and the in-place output
+    check), so an in-place call that reuses ``self`` as the compiled output
+    fails the same way it does on the CPU instead of with a runtime shape error.
+    """
+    self_tensor = args[0]
+    out_shape = list(self_tensor.shape)
+    for other in (t for t in args[1:] if torch.is_tensor(t)):
+        other_shape = list(other.shape)
+        ndim = max(len(out_shape), len(other_shape))
+        padded_out = [1] * (ndim - len(out_shape)) + out_shape
+        padded_other = [1] * (ndim - len(other_shape)) + other_shape
+        merged = []
+        for dim, (a, b) in enumerate(zip(padded_out, padded_other, strict=True)):
+            if a != b and 1 not in (a, b):
+                msg = (
+                    f"The size of tensor a ({a}) must match the size of tensor b ({b}) at non-singleton dimension {dim}"
+                )
+                raise RuntimeError(msg)
+            merged.append(b if a == 1 else a)
+        out_shape = merged
+    if out_shape != list(self_tensor.shape):
+        msg = f"output with shape {list(self_tensor.shape)} doesn't match the broadcast shape {out_shape}"
+        raise RuntimeError(msg)
+
+
+def _out_alias_allowed(args: tuple, kwargs: dict, out_tensor: torch.Tensor, reusable) -> bool:
+    """``out`` may share storage with an input only when it *is* ``reusable``.
+
+    Every other input must not overlap ``out``: the compiled program reads its
+    inputs while writing the output, so only the one input the caller declared
+    reusable (an in-place ``self`` updated elementwise) may alias it. Overlap is
+    judged like ``is_inplace_op``: same ``data_ptr`` on the same device.
+    """
+    inputs = [t for t in args if torch.is_tensor(t)]
+    inputs += [v for k, v in kwargs.items() if k != "out" and torch.is_tensor(v)]
+    overlapping = [
+        t
+        for t in inputs
+        if t is out_tensor or (t.data_ptr() == out_tensor.data_ptr() and t.device == out_tensor.device)
+    ]
+    if not overlapping:
+        return True
+    if reusable is None or out_tensor is not reusable:
+        return False
+    return all(t is reusable for t in overlapping)
+
+
+def can_use_out_tensor_directly(args: tuple, kwargs: dict, *, reusable=None) -> bool:
     """Check if the out_tensor can be used directly by the compiler.
 
     This function checks several conditions to determine if the output tensor
     can be used directly without creating a temporary tensor:
-    1. Not an in-place operation
+    1. ``out`` does not alias an input, except the input passed as ``reusable``
+       (see ``_out_alias_allowed``)
     2. Tensor is neither empty nor scalar
     3. Tensor is contiguous
     4. Tensor has zero storage offset
     5. dtype is in ``SupportedDtypes.dispatch``
 
     Args:
-        args (tuple): Positional arguments for in-place operation check.
+        args (tuple): Positional arguments for the alias check.
         kwargs (dict): Keyword arguments containing 'out' key with the output
             tensor to check.
+        reusable: The one input ``out`` may be (an in-place ``self``), or None.
 
     Returns:
         bool: True if the out_tensor can be used directly, False otherwise.
@@ -2236,7 +2342,7 @@ def can_use_out_tensor_directly(args: tuple, kwargs: dict) -> bool:
         return False
 
     return (
-        not is_inplace_op(args, kwargs)
+        _out_alias_allowed(args, kwargs, out_tensor, reusable)
         and ((out_tensor.numel() > 0) and len(out_tensor.size()) > 0)
         and out_tensor.is_contiguous()
         and (out_tensor.storage_offset() == 0)

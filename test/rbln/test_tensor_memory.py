@@ -10,6 +10,7 @@ scenarios:
 - Bound allocations: device buffers handed to a consumer that DMAs out of band
 - Huge host buffers: the host side of the same transfers
 - Host registration: caller-owned host ranges pinned once for those transfers
+- Pageable host buffers: copies use the pages a buffer has now, at a reused address
 """
 
 import ctypes
@@ -33,9 +34,11 @@ from torch.testing._internal.common_utils import instantiate_parametrized_tests,
 import torch_rbln._C
 import torch_rbln.memory
 from test.utils import run_in_isolated_process, SUPPORTED_DTYPES
-from torch_rbln import _host_registration as admission
+from torch_rbln import _C, _host_registration as admission
 from torch_rbln._internal.env_utils import host_registration_profile
 
+
+_plus_one = torch.compile(lambda t: t + 1, backend="rbln", dynamic=False)
 
 # Tolerance for numerical comparisons
 ATOL = 0.01
@@ -1107,9 +1110,61 @@ class TestHostPageSnapshot(TestCase):
 
 
 instantiate_parametrized_tests(TestHostRegistrationPolicy)
+
+
+@pytest.mark.npu(count=1)
+class TestPageableHostCopy(TestCase):
+    """Copies against an unregistered pageable host buffer whose pages were
+    replaced at the same address. The registered-range counterpart is
+    ``TestHostRegister.test_copies_stay_correct_across_unregister_and_register``.
+    """
+
+    def test_d2h_to_pageable_after_its_pages_are_replaced(self, device):
+        # The same address gets new pages, as when malloc hands a freed one back.
+        # The D2H must land in them, not in the old pages a cached copy names.
+        # A compiled output is device-latest, so the D2H goes through the cached
+        # copy command. A plain .to(device) could be served from the host copy.
+        src = _plus_one(torch.ones((1, 4096), dtype=torch.bfloat16).to(device))
+        nbytes = src.numel() * src.element_size()
+        # MAP_PRIVATE: on a shared mapping MADV_DONTNEED keeps the same pages.
+        buf = mmap.mmap(-1, nbytes, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+        host = torch.frombuffer(buf, dtype=src.dtype).reshape(src.shape)
+        for replace_pages in (False, True):
+            if replace_pages:
+                buf.madvise(mmap.MADV_DONTNEED)
+            host.fill_(-123)
+            (_, d2h_before), _ = _C._rt_prof_host_sync()
+            host.copy_(src)
+            torch.rbln.synchronize()
+            (_, d2h_after), _ = _C._rt_prof_host_sync()
+            self.assertEqual(d2h_after - d2h_before, nbytes, "D2H did not come from the device")
+            self.assertEqual(host, torch.full_like(host, 2))
+
+    def test_h2d_from_pageable_after_its_pages_are_replaced(self, device):
+        # H2D mirror of the test above. The cached copy command must read the pages
+        # the buffer holds now, not the ones it named when it was first built.
+        # A compiled output already has its device memory, so the first H2D takes
+        # the cached path too; an empty tensor could take a slower one.
+        dev = _plus_one(torch.zeros((1, 4096), dtype=torch.bfloat16).to(device))
+        nbytes = dev.numel() * dev.element_size()
+        buf = mmap.mmap(-1, nbytes, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+        host = torch.frombuffer(buf, dtype=dev.dtype).reshape(dev.shape)
+        for replace_pages, value in ((False, 3), (True, 7)):
+            if replace_pages:
+                buf.madvise(mmap.MADV_DONTNEED)
+            host.fill_(value)
+            _, (_, h2d_before) = _C._rt_prof_host_sync()
+            dev.copy_(host)
+            torch.rbln.synchronize()
+            _, (_, h2d_after) = _C._rt_prof_host_sync()
+            self.assertEqual(h2d_after - h2d_before, nbytes, "H2D did not reach the device")
+            self.assertEqual(dev.cpu(), torch.full_like(host, value))
+
+
 instantiate_device_type_tests(TestAliasedTensors, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestInputOutputTensors, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestBindDeviceMemory, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestPageableHostCopy, globals(), only_for="privateuse1")
 
 
 if __name__ == "__main__":
