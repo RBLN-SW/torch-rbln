@@ -1,11 +1,15 @@
 #include <ATen/native/rbln/RBLNTensorAdvancedIndexing.h>
 
+#include <ATen/ExpandUtils.h>
 #include <ATen/MemoryOverlap.h>
 #include <ATen/core/Tensor.h>
 #include <ATen/core/stack.h> // torch::jit::drop / push
+#include <ATen/native/IndexingUtils.h>
 #include <ATen/native/Resize.h>
+#include <ATen/native/TensorAdvancedIndexingUtils.h>
 #include <ATen/native/rbln/RBLNCPUFallback.h>
 #include <ATen/native/rbln/RBLNIndexUtils.h>
+#include <ATen/native/rbln/RBLNStrideUtils.h>
 #include <ATen/native/rbln/RBLNStridedV2V.h>
 #include <ATen/native/rbln/RBLNTensorUtils.h>
 #include <ATen/ops/empty.h>
@@ -18,6 +22,9 @@
 #include <c10/rbln/RBLNV2VBatch.h>
 
 #include <cstdint>
+#include <optional>
+#include <tuple>
+#include <unordered_set>
 #include <vector>
 
 namespace at::native::rbln {
@@ -546,6 +553,267 @@ at::Tensor& index_copy_out_rbln(
   }
 
   return out;
+}
+
+// ===========================================================================
+// index_put
+// ===========================================================================
+
+namespace {
+
+// Follows upstream's `_index_put_impl_` / `make_info` with upstream's own
+// helpers and replaces only the final `index_put_stub`: each of the
+// `prod(bshape)` points names one slab of `self`, copied from the matching slab
+// of the broadcast `values` by the strided v2v engine. Returns false, having
+// changed nothing, for a form it does not take; the fallback then computes it
+// or raises upstream's error.
+bool index_put_native(
+    const at::Tensor& self,
+    const c10::List<std::optional<at::Tensor>>& indices,
+    const at::Tensor& values_in,
+    bool accumulate) {
+  if (accumulate || !self.defined() || !self.device().is_privateuseone() ||
+      self.numel() == 0 || !values_in.defined() ||
+      static_cast<int64_t>(indices.size()) > self.dim()) {
+    return false;
+  }
+  // A self that may write one address twice has no defined result in an
+  // unordered batch; upstream only warns.
+  if (at::has_internal_overlap(self) != at::MemOverlap::No &&
+      view_may_self_overlap(self.sizes(), self.strides())) {
+    return false;
+  }
+  bool any_index = false;
+  for (const auto& e : indices) {
+    const std::optional<at::Tensor> t = e;
+    if (!t.has_value() || !t->defined()) {
+      continue;
+    }
+    const auto st = t->scalar_type();
+    if (st != at::kLong && st != at::kInt && st != at::kBool &&
+        st != at::kByte) {
+      return false;
+    }
+    if (!t->is_cpu() && t->device() != self.device()) {
+      return false;
+    }
+    any_index = true;
+  }
+  if (!any_index) {
+    return false;
+  }
+
+  const auto [use_masked_fill, mask] =
+      at::native::canDispatchToMaskedFill(self, indices, values_in);
+  if (use_masked_fill) {
+    self.masked_fill_(mask, values_in.item());
+    return true;
+  }
+
+  if (values_in.scalar_type() != self.scalar_type() ||
+      (values_in.device() != self.device() &&
+       !(values_in.is_cpu() && values_in.dim() == 0))) {
+    return false;
+  }
+
+  if (values_in.device() == self.device()) {
+    at::assert_no_overlap(self, values_in);
+  }
+  for (const auto& e : indices) {
+    const std::optional<at::Tensor> t = e;
+    if (t.has_value() && t->defined() && t->device() == self.device()) {
+      at::assert_no_overlap(self, *t);
+    }
+  }
+
+  c10::List<std::optional<at::Tensor>> host_indices;
+  host_indices.reserve(indices.size());
+  for (const auto& e : indices) {
+    const std::optional<at::Tensor> t = e;
+    host_indices.push_back(
+        t.has_value() && t->defined() ? std::optional<at::Tensor>(t->cpu())
+                                      : std::nullopt);
+  }
+  std::vector<at::Tensor> expanded =
+      at::native::expandTensors(self, host_indices);
+  try {
+    expanded = at::expand_outplace(expanded);
+  } catch (const std::exception&) {
+    TORCH_CHECK_INDEX( // as upstream's make_info
+        false,
+        "shape mismatch: indexing tensors could not be broadcast together"
+        " with shapes ",
+        at::native::shapes_as_str(expanded));
+  }
+  while (static_cast<int64_t>(expanded.size()) < self.dim()) {
+    expanded.emplace_back();
+  }
+
+  // The indexing result's shape: `bshape` in place of adjacent indexed dims,
+  // else first.
+  const bool adjacent = at::native::hasContiguousSubspace(expanded);
+  int64_t dims_before = 0;
+  int64_t n = 0;
+  at::DimVector bshape;
+  at::DimVector rest_sizes;
+  for (int64_t d = 0; d < self.dim(); ++d) {
+    if (expanded[d].defined()) {
+      if (n == 0) {
+        bshape.assign(expanded[d].sizes().begin(), expanded[d].sizes().end());
+      }
+      ++n;
+    } else {
+      if (n == 0) {
+        ++dims_before;
+      }
+      rest_sizes.push_back(self.size(d));
+    }
+  }
+  const int64_t bdim = static_cast<int64_t>(bshape.size());
+  at::DimVector target;
+  if (adjacent) {
+    target.append(rest_sizes.begin(), rest_sizes.begin() + dims_before);
+    target.append(bshape.begin(), bshape.end());
+    target.append(rest_sizes.begin() + dims_before, rest_sizes.end());
+  } else {
+    target.append(bshape.begin(), bshape.end());
+    target.append(rest_sizes.begin(), rest_sizes.end());
+  }
+  if (!at::is_expandable_to(values_in.sizes(), target)) {
+    return false;
+  }
+
+  std::vector<int64_t> indexed_dims;
+  for (int64_t d = 0; d < self.dim(); ++d) {
+    if (expanded[d].defined()) {
+      indexed_dims.push_back(d);
+    }
+  }
+  at::Tensor self_t;
+  std::vector<at::Tensor> idx_t;
+  std::tie(self_t, idx_t) = at::native::transposeToFront(self, expanded);
+
+  int64_t num_points = 1;
+  for (int64_t sz : bshape) {
+    num_points *= sz;
+  }
+  std::vector<std::vector<int64_t>> host_idx(n);
+  for (int64_t i = 0; i < n; ++i) {
+    host_idx[i] = read_index_to_host(idx_t[i].reshape({-1}), "index_put_");
+    const int64_t extent = self_t.size(i);
+    for (int64_t& v : host_idx[i]) {
+      TORCH_CHECK_INDEX(
+          v >= -extent && v < extent,
+          "index ",
+          v,
+          " is out of bounds for dimension ",
+          indexed_dims[i],
+          " with size ",
+          extent);
+      if (v < 0) {
+        v += extent;
+      }
+    }
+  }
+  if (num_points == 0) {
+    return true;
+  }
+
+  at::Tensor values = values_in.device() == self.device()
+      ? values_in
+      : values_in.to(self.device());
+  // Reorder `values` like `self_t`: `bshape` first.
+  at::Tensor values_t = values.expand(target);
+  if (adjacent && dims_before > 0) {
+    std::vector<int64_t> perm;
+    perm.reserve(values_t.dim());
+    for (int64_t j = 0; j < bdim; ++j) {
+      perm.push_back(dims_before + j);
+    }
+    for (int64_t j = 0; j < dims_before; ++j) {
+      perm.push_back(j);
+    }
+    for (int64_t j = dims_before + bdim; j < values_t.dim(); ++j) {
+      perm.push_back(j);
+    }
+    values_t = values_t.permute(perm);
+  }
+
+  // Point k writes self_t[i0[k], ..., in-1[k]] from values_t at k's position in
+  // `bshape`.
+  auto dst_view = [&](int64_t k) {
+    at::Tensor v = self_t;
+    for (int64_t i = 0; i < n; ++i) {
+      v = v.select(0, host_idx[i][k]);
+    }
+    return v;
+  };
+  auto src_view = [&](int64_t k) {
+    std::vector<int64_t> pos(bdim);
+    for (int64_t j = bdim - 1; j >= 0; --j) {
+      pos[j] = k % bshape[j];
+      k /= bshape[j];
+    }
+    at::Tensor v = values_t;
+    for (int64_t p : pos) {
+      v = v.select(0, p);
+    }
+    return v;
+  };
+
+  // The batch may reorder entries. Keeping only each point's last write
+  // (walking backwards) matches the CPU and leaves the destinations disjoint.
+  std::unordered_set<int64_t> seen;
+  c10::rbln::V2VBatch batch;
+  for (int64_t k = num_points - 1; k >= 0; --k) {
+    int64_t key = 0;
+    for (int64_t i = 0; i < n; ++i) {
+      key = key * self_t.size(i) + host_idx[i][k];
+    }
+    if (seen.insert(key).second) {
+      strided_v2v_copy(dst_view(k), src_view(k), batch);
+    }
+  }
+
+  RBLN_LOG_DEBUG(
+      "index_put_native: self_sizes={} indexed_dims={} points={} written={} values_sizes={}",
+      c10::str(self.sizes()),
+      c10::str(indexed_dims),
+      num_points,
+      seen.size(),
+      c10::str(values.sizes()));
+
+  submit_or_fallback(batch, "aten::_index_put_impl_", [&] {
+    at::Tensor cpu_self = self.cpu();
+    cpu_self.index_put_(host_indices, values.cpu(), /*accumulate=*/false);
+    self.copy_(cpu_self);
+  });
+  return true;
+}
+
+} // namespace
+
+void index_put_impl_rbln_(
+    const c10::OperatorHandle& op,
+    torch::jit::Stack* stack) {
+  RBLN_SCOPE_GUARD();
+  // aten::_index_put_impl_(Tensor(a!) self, Tensor?[] indices, Tensor values,
+  //                        bool accumulate=False, bool unsafe=False)
+  const int64_t num_args = static_cast<int64_t>(op.schema().arguments().size());
+  const int64_t base = static_cast<int64_t>(stack->size()) - num_args;
+  at::Tensor self = (*stack)[base].toTensor();
+  const c10::List<std::optional<at::Tensor>> indices =
+      (*stack)[base + 1].toOptionalTensorList();
+  const at::Tensor values = (*stack)[base + 2].toTensor();
+  const bool accumulate = (*stack)[base + 3].toBool();
+
+  if (index_put_native(self, indices, values, accumulate)) {
+    torch::jit::drop(*stack, static_cast<size_t>(num_args));
+    torch::jit::push(*stack, std::move(self));
+    return;
+  }
+  at::native::rbln::cpu_fallback_rbln(
+      op, stack, c10::rbln::CpuFallbackReason::kIndexPattern);
 }
 
 } // namespace at::native::rbln

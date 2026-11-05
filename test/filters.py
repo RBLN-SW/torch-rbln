@@ -150,6 +150,7 @@ _ops_with_rbln_native_kernel = [
     "cat",
     "__getitem__",
     "index_copy",
+    "index_put",
     "index_select",
     "repeat_interleave",
     "stack",

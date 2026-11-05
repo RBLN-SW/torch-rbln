@@ -69,4 +69,19 @@ at::Tensor& index_copy_out_rbln(
     const at::Tensor& source,
     at::Tensor& out);
 
+// ---------------------------------------------------------------------------
+// index_put
+//
+// Boxed `_index_put_impl_` kernel behind `index_put_` / `x[...] = v`. A single
+// mask with a host scalar goes to `masked_fill_`, as upstream does; every other
+// form expands its indices on host and writes each indexed slab through the
+// strided v2v engine. Falls back to CPU for `accumulate=True`, an empty or
+// self-aliasing `self`, an index or `values` on another device (a 0-D host
+// `values` is moved), and a `values` of another dtype. See the .cpp.
+// ---------------------------------------------------------------------------
+
+void index_put_impl_rbln_(
+    const c10::OperatorHandle& op,
+    torch::jit::Stack* stack);
+
 } // namespace at::native::rbln
