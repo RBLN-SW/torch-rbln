@@ -1857,21 +1857,6 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
                         **kwargs_filtered,
                     )
 
-    # TODO: remove once the device keeps float32 `-inf` in these ops.
-    # float32 where/masked_fill on the device does not keep `-inf` (as used by
-    # attention masks) yet, so they stay on the host, recorded as ``dtype``.
-    if op_name in _RANK0_LEGALIZED_OPS and any(
-        t.dtype == torch.float32 for t in extract_tensors(args) + extract_tensors(kwargs_filtered)
-    ):
-        return cpu_fallback_path(
-            op_callable,
-            args,
-            result=out_tensor,
-            op_name=op_name,
-            reason="dtype",
-            **kwargs_filtered,
-        )
-
     # Comparison ops (bool output): replaying a view recipe in-graph aborts
     # ``build_internal`` on the negative-pad-on-bool IR sequence. Materialize
     # view inputs to ``.contiguous()`` so the recipe path is skipped. (verified

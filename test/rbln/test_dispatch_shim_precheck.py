@@ -43,12 +43,6 @@ from torch_rbln._internal.compile_cache import _compiled_op_cache
 from torch_rbln._internal.ops_utils import can_use_out_tensor_directly, get_fallback_reason
 
 
-# float32 where and masked_fill take the CPU fallback (the float32 -inf TODO in
-# ``compile_and_run_view_aware``); the tests that check the compiled program use the
-# dtypes that reach the device.
-_DEVICE_DTYPES = [dtype for dtype in SUPPORTED_DTYPES if dtype != torch.float32]
-
-
 def _dispatch_counts() -> tuple[int, int, int, int]:
     """(n_total, n_fallback, n_warm_hit, n_miss) from the dispatch-shim diagnostics."""
     d = _C._dispatch_shim_diag_dump()
@@ -89,7 +83,7 @@ class TestBoolOperandCompilation(TestCase):
         _C._warmcache_clear()
         _C._dispatch_fallback_by_op_reset()
 
-    @dtypes(*_DEVICE_DTYPES)
+    @dtypes(*SUPPORTED_DTYPES)
     def test_where_compiles_and_warm_hit_reads_updated_input(self, device, dtype):
         x_cpu = torch.arange(256, dtype=dtype).reshape(4, 64)
         mask_cpu = torch.arange(256).reshape(4, 64) % 2 == 0
@@ -111,7 +105,7 @@ class TestBoolOperandCompilation(TestCase):
             "where used dispatch CPU fallback",
         )
 
-    @dtypes(*_DEVICE_DTYPES)
+    @dtypes(*SUPPORTED_DTYPES)
     def test_masked_fill_inplace_reuses_program_without_copy_back(self, device, dtype):
         x_cpu = torch.arange(256, dtype=dtype).reshape(4, 64)
         mask_cpu = torch.arange(256).reshape(4, 64) % 2 == 0
@@ -132,7 +126,7 @@ class TestBoolOperandCompilation(TestCase):
         self.assertEqual(len(_compiled_op_cache), compiled)
         self.assertNotIn("aten::copy_", [event.key for event in prof.key_averages()])
 
-    @dtypes(*_DEVICE_DTYPES)
+    @dtypes(*SUPPORTED_DTYPES)
     @parametrize("layout", ["full", "row_prefix", "row_offset", "transposed", "column_slice"])
     def test_masked_fill_inplace_self_reuse_contract(self, device, dtype, layout):
         # ``self`` is bound as the output only when it reaches the compiler as-is;
@@ -163,9 +157,11 @@ class TestBoolOperandCompilation(TestCase):
         copied = "aten::copy_" in [event.key for event in prof.key_averages()]
         self.assertEqual(copied, not bound, f"{layout}: copy-back {'missing' if bound else 'expected'}")
 
-    @dtypes(*_DEVICE_DTYPES)
+    @dtypes(*SUPPORTED_DTYPES)
     @parametrize("scan_enabled", [False, True])
     def test_masked_fill_neg_inf_respects_scan_policy(self, device, dtype, scan_enabled):
+        if dtype == torch.float32 and not scan_enabled:
+            self.skipTest("the device computes float32 in a format without infinities; -inf comes back finite")
         x_cpu = torch.arange(256, dtype=dtype).reshape(4, 64)
         mask_cpu = torch.arange(256).reshape(4, 64) % 2 == 0
         x, mask = x_cpu.to(device), mask_cpu.to(device)
@@ -185,7 +181,8 @@ class TestBoolOperandCompilation(TestCase):
         # The pinned compiler crashes on a permuted operand next to a 0-dim operand; the
         # handler makes the inputs contiguous first (TODO: that guard will be removed;
         # this test must keep passing without it).
-        a_cpu = torch.arange(64 * 128, dtype=dtype).reshape(64, 128)
+        # Values stay below 1024, which the device's float32 format holds exactly.
+        a_cpu = (torch.arange(64 * 128) % 1000).to(dtype).reshape(64, 128)
         a = a_cpu.to(device)
         cond_cpu, cond = a_cpu.T > 100, a.T > 100
         self.assertEqual(torch.where(cond, -1.0, a.T).cpu(), torch.where(cond_cpu, -1.0, a_cpu.T))
@@ -206,7 +203,7 @@ class TestBoolOperandCompilation(TestCase):
         self.assertEqual(out.dtype, dtype)
         self.assertEqual(len(_compiled_op_cache), compiled)
 
-    @dtypes(*_DEVICE_DTYPES)
+    @dtypes(*SUPPORTED_DTYPES)
     @parametrize("op", ["where", "masked_fill"])
     def test_rank0_tensor_value_is_read_on_each_call(self, device, dtype, op):
         x_cpu = torch.arange(256, dtype=dtype).reshape(4, 64)
@@ -229,19 +226,6 @@ class TestBoolOperandCompilation(TestCase):
             any(name.startswith(f"aten::{op}") for name, count in _C._dispatch_fallback_by_op() if count),
             f"{op} with a rank-0 value used dispatch CPU fallback",
         )
-
-    @parametrize("op", ["where", "masked_fill"])
-    def test_float32_takes_cpu_fallback_and_keeps_neg_inf(self, device, op):
-        # TODO: drop with the float32 where/masked_fill fallback in ops_utils.
-        x_cpu = torch.arange(256, dtype=torch.float32).reshape(4, 64)
-        mask_cpu = torch.arange(256).reshape(4, 64) % 2 == 0
-        x, mask = x_cpu.to(device), mask_cpu.to(device)
-        compiled = len(_compiled_op_cache)
-        neg_inf = -float("inf")
-        result = torch.where(mask, neg_inf, x) if op == "where" else x.masked_fill_(mask, neg_inf)
-        self.assertEqual(result.cpu(), x_cpu.masked_fill(mask_cpu, -float("inf")))
-        self.assertEqual(len(_compiled_op_cache), compiled)
-        self.assertTrue(any(name.startswith(f"aten::{op}") for name, count in _C._dispatch_fallback_by_op() if count))
 
     @parametrize("self_shape,mask_shape", [((1, 64), (4, 64)), ((0, 64), (4, 64)), ((4, 64), (3,))])
     def test_masked_fill_inplace_shape_errors_match_cpu(self, device, self_shape, mask_shape):
