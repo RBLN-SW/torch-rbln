@@ -1857,6 +1857,21 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
                         **kwargs_filtered,
                     )
 
+    # TODO: remove once the device keeps float32 `-inf` in these ops.
+    # float32 where/masked_fill on the device does not keep `-inf` (as used by
+    # attention masks) yet, so they stay on the host, recorded as ``dtype``.
+    if op_name in _RANK0_LEGALIZED_OPS and any(
+        t.dtype == torch.float32 for t in extract_tensors(args) + extract_tensors(kwargs_filtered)
+    ):
+        return cpu_fallback_path(
+            op_callable,
+            args,
+            result=out_tensor,
+            op_name=op_name,
+            reason="dtype",
+            **kwargs_filtered,
+        )
+
     # Comparison ops (bool output): replaying a view recipe in-graph aborts
     # ``build_internal`` on the negative-pad-on-bool IR sequence. Materialize
     # view inputs to ``.contiguous()`` so the recipe path is skipped. (verified
@@ -1887,6 +1902,9 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     args, kwargs_filtered, moved_cpu_scalars = _cpu_scalars_to_device(args, kwargs_filtered)
     if moved_cpu_scalars:
         args = broadcast_args_general(extract_tensors(args), args)
+
+    if op_name in _RANK0_LEGALIZED_OPS and any(t.dim() == 0 for t in extract_tensors(args)):
+        op_callable = _RANK0_LEGALIZED_OPS[op_name]
 
     (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs_filtered)
     has_views = any(r is not None for r in view_recipes)
@@ -1966,6 +1984,33 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
         # so the C++ hit path skips it once the alignment fallback is on again.
         _install_warm_cache_pending(list(entry.runtime_holder), external_result, align_bypassed=unaligned)
     return result_tensor
+
+
+def _rank0_as_ones(tensors):
+    """Give each 0-dim tensor the shape ``[1] * ndim`` of the widest tensor operand."""
+    ndim = max((t.dim() for t in tensors if isinstance(t, torch.Tensor)), default=0)
+    return [t.reshape((1,) * ndim) if isinstance(t, torch.Tensor) and t.dim() == 0 else t for t in tensors]
+
+
+def _where_rank0_legalized(condition, input, other):
+    return torch.where(*_rank0_as_ones([condition, input, other]))
+
+
+def _masked_fill_rank0_legalized(input, mask, value):
+    input_, mask, value = _rank0_as_ones([input, mask, value])
+    return torch.where(mask, value, input_)
+
+
+# TODO: remove once the compiler reads a 0-dim input of where correctly.
+# A 0-dim input of where (a rank-0 tensor, or a Python scalar Dynamo lifts to one)
+# is not read correctly on the device yet. Reshaping it to ``[1, ..., 1]`` inside
+# the graph avoids that while the graph inputs keep their shapes, so the C++ warm
+# path binds the same tensors. masked_fill takes only a 0-dim value, so it is
+# written as the equivalent where. Calls without a 0-dim operand keep their program.
+_RANK0_LEGALIZED_OPS = {
+    "aten::where": _where_rank0_legalized,
+    "aten::masked_fill": _masked_fill_rank0_legalized,
+}
 
 
 def _warn_float32_on_device_once(op_name, args, kwargs) -> None:

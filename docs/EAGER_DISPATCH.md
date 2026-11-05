@@ -29,6 +29,10 @@ programs are not cached on disk.
   setting overrides it. This host-side scan is off by default; device NaN/Inf
   behavior can differ from CPU PyTorch. See [Configuration](CONFIGURATION.md).
 - Unaligned last dims, for now (below).
+- fp32 `where` and `masked_fill`, for now: the device does not keep fp32
+  `-inf` in these ops yet. On the device, a 0-dim operand of these ops (a
+  rank-0 tensor, or a Python scalar) is reshaped to `[1, ..., 1]` inside the
+  compiled program.
 
 `torch.rbln.explain()` lists, per op, every op-level CPU fallback torch-rbln
 takes, with their wall time: the C++ shim, the boxed fallback for ops without a
