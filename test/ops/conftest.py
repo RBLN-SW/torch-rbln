@@ -36,8 +36,15 @@ def assert_equal_on_cpu(monkeypatch):
 def _to_device(x, device):
     if isinstance(x, torch.Tensor):
         # Moving the whole storage keeps the strides and the storage offset.
-        whole = x.detach().as_strided((x.untyped_storage().nbytes() // x.element_size(),), (1,), 0)
-        return whole.to(device).as_strided(x.size(), x.stride(), x.storage_offset()).requires_grad_(x.requires_grad)
+        whole = x.detach().as_strided((x.untyped_storage().nbytes() // x.element_size(),), (1,), 0).to(device)
+        if x._is_view():
+            moved = whole.as_strided(x.size(), x.stride(), x.storage_offset())
+        else:
+            # Not a view of `whole`, as the sample was not one: tests such as
+            # test_view_replay tell an op's views of its input by their _base.
+            moved = torch.empty(0, dtype=x.dtype, device=device)
+            moved.set_(whole.untyped_storage(), x.storage_offset(), x.size(), x.stride())
+        return moved.requires_grad_(x.requires_grad)
     # A device the sample passes to the op, as for `to` or a factory function.
     if isinstance(x, (str, torch.device)) and str(x) == "cpu":
         return type(x)(device)
