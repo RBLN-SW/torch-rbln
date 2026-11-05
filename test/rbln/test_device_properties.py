@@ -23,6 +23,9 @@ class TestDeviceProperties(TestCase):
         # Reporting the per-chiplet figure as the total understates REBEL 4x, unnoticed
         # on ATOM.
         self.assertEqual(props.total_memory, props.memory_per_chiplet * props.num_chiplet * props.npu_count)
+        self.assertEqual(len(props.pci_bus_ids), props.npu_count)
+        for bus_id in props.pci_bus_ids:
+            self.assertRegex(bus_id, r"^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$")
 
     def test_get_device_name_matches_properties(self):
         self.assertEqual(torch.rbln.get_device_name(0), torch.rbln.get_device_properties(0).name)
@@ -111,6 +114,22 @@ print(torch.rbln.device_count(), list(entry.physical_device_ids), torch.rbln.get
         self.assertEqual(count, "1")
         self.assertEqual(physical_ids, "[0]")
         self.assertRegex(name, r"^RBLN-C[AIR]\d\d$")
+
+    @pytest.mark.npu(count=2)
+    def test_pci_bus_id_names_the_same_npu_under_any_visible_set(self):
+        """The same NPU reports the same PCI bus id whatever RBLN_VISIBLE_DEVICES says."""
+        last = torch.rbln.physical_device_count() - 1
+        script = """
+import torch
+import torch_rbln
+
+print(torch.rbln.get_device_properties(0).pci_bus_ids[0])
+"""
+        full = _run_in_subprocess({}, script.replace("(0)", f"({last})"))
+        narrowed = _run_in_subprocess({"RBLN_VISIBLE_DEVICES": str(last)}, script)
+        self.assertEqual(full.returncode, 0, full.stderr)
+        self.assertEqual(narrowed.returncode, 0, narrowed.stderr)
+        self.assertEqual(narrowed.stdout.split()[-1], full.stdout.split()[-1])
 
     def test_dummy_device_is_rejected(self):
         """Dummy mode is host-backed with no NPU, so there is nothing to report."""
