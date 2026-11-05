@@ -486,84 +486,40 @@ def test_compile_only_npu_option_overrides_force_npu_name():
     assert "differs from" in out, proc.stderr
 
 
-def test_compiled_graph_execution_fails_fast():
-    # Dummy mode is compile-only: EXECUTING a compiled graph (no compile_only)
-    # must raise a clear error rather than silently returning zeros (the dummy
-    # runtime cannot run kernels). The guard fires before compilation.
+# The three ways torch.compile reaches CompiledFunctionWrapper: model positionally, the
+# factory/decorator form (no model in *args), and model= as a keyword. Each must come
+# back wrapped, or RBLN failover and CPU fallback do not apply to it.
+_COMPILE_FORMS = {
+    "positional": 'torch.compile(m, backend="rbln", dynamic=False, options={"npu": "RBLN-CA25"})',
+    "decorator": 'torch.compile(backend="rbln", dynamic=False, options={"npu": "RBLN-CA25"})(m)',
+    "keyword": 'torch.compile(model=m, backend="rbln", dynamic=False, options={"npu": "RBLN-CA25"})',
+}
+
+
+@pytest.mark.parametrize("form", list(_COMPILE_FORMS))
+def test_compiled_graph_executes_on_dummy_context(form):
+    # Dummy mode runs a compiled graph without error but computes nothing, so only the
+    # output's device and shape are checked. No _NO_NPU_MAP: running an op needs the
+    # default device map, and dummy mode already keeps it off any real NPU.
     proc = _run_with_dummy(
-        """
+        f"""
         import torch, torch_rbln
+        from torch_rbln._internal.torch_compile_patch_helpers import CompiledFunctionWrapper
         m = torch.nn.Linear(4, 4).eval().to("rbln:0")
-        f = torch.compile(m, backend="rbln", dynamic=False, options={"npu": "RBLN-CA25"})
-        try:
-            f(torch.ones(1, 4, device="rbln:0"))
-        except RuntimeError as e:
-            assert "RBLN_DUMMY_DEVICE" in str(e), str(e)
-            print("OK")
-        else:
-            raise AssertionError("expected RuntimeError executing a compiled graph on dummy")
+        f = {_COMPILE_FORMS[form]}
+        assert isinstance(f, CompiledFunctionWrapper), type(f)
+        out = f(torch.ones(1, 4, device="rbln:0"))
+        assert out.device.type == "rbln" and tuple(out.shape) == (1, 4), (out.device, out.shape)
+        print("OK")
         """,
-        env_extra={"RBLN_DEVICE_MAP": _NO_NPU_MAP},
-    )
-    _assert_ok(proc)
-    assert "OK" in proc.stdout
-
-
-def test_compiled_graph_decorator_form_execution_fails_fast():
-    # Same guard as test_compiled_graph_execution_fails_fast, but reached through the
-    # factory/decorator form: torch.compile(backend="rbln")(m) (identical code path to
-    # @torch.compile(backend="rbln")). This form passes no model positionally, so unless
-    # the patch wraps the eventual compiled function it would bypass
-    # CompiledFunctionWrapper -- and thus this guard -- and silently return zeros on the
-    # dummy runtime. It must fail loudly too.
-    proc = _run_with_dummy(
-        """
-        import torch, torch_rbln
-        m = torch.nn.Linear(4, 4).eval().to("rbln:0")
-        f = torch.compile(backend="rbln", dynamic=False, options={"npu": "RBLN-CA25"})(m)
-        try:
-            f(torch.ones(1, 4, device="rbln:0"))
-        except RuntimeError as e:
-            assert "RBLN_DUMMY_DEVICE" in str(e), str(e)
-            print("OK")
-        else:
-            raise AssertionError("expected RuntimeError executing a compiled graph on dummy")
-        """,
-        env_extra={"RBLN_DEVICE_MAP": _NO_NPU_MAP},
-    )
-    _assert_ok(proc)
-    assert "OK" in proc.stdout
-
-
-def test_compiled_graph_keyword_model_execution_fails_fast():
-    # torch.compile(model=m, backend="rbln") passes the model as a keyword, so it never
-    # lands in *args. It must still be treated as model-provided (wrapped in
-    # CompiledFunctionWrapper), not mistaken for the no-model decorator form; otherwise
-    # the caller gets a decorator back instead of a compiled callable. Executing it in
-    # dummy mode must fail fast just like the positional form.
-    proc = _run_with_dummy(
-        """
-        import torch, torch_rbln
-        m = torch.nn.Linear(4, 4).eval().to("rbln:0")
-        f = torch.compile(model=m, backend="rbln", dynamic=False, options={"npu": "RBLN-CA25"})
-        try:
-            f(torch.ones(1, 4, device="rbln:0"))
-        except RuntimeError as e:
-            assert "RBLN_DUMMY_DEVICE" in str(e), str(e)
-            print("OK")
-        else:
-            raise AssertionError("expected RuntimeError executing a compiled graph on dummy")
-        """,
-        env_extra={"RBLN_DEVICE_MAP": _NO_NPU_MAP},
     )
     _assert_ok(proc)
     assert "OK" in proc.stdout
 
 
 def test_compile_only_decorator_form_is_allowed():
-    # The guard must exempt an explicit compile_only build even through the decorator
-    # form, mirroring the positional compile_only path: it writes the artifact and does
-    # not raise.
+    # A compile_only build through the decorator form writes the artifact, mirroring
+    # the positional compile_only path.
     proc = _run_with_dummy(
         """
         import glob, os, tempfile
@@ -576,7 +532,7 @@ def test_compile_only_decorator_form_is_allowed():
         try:  # compile_only writes the artifact; the call itself may error (no real device)
             f(torch.ones(1, 4, device="rbln:0"))
         except RuntimeError as e:
-            # A compile_only build must never be rejected by the dummy execution guard.
+            # A compile_only build must never be rejected because of dummy mode.
             assert "RBLN_DUMMY_DEVICE" not in str(e), str(e)
         arts = glob.glob(os.path.join(cache, "*.rbln"))
         assert len(arts) == 1 and os.path.getsize(arts[0]) > 0, arts
@@ -588,13 +544,11 @@ def test_compile_only_decorator_form_is_allowed():
     assert "OK" in proc.stdout
 
 
-def test_eager_device_dtype_op_execution_fails_fast():
-    # Eager ops that reach the RBLN device-compile path are NPU-bound, so on
-    # RBLN_DUMMY_DEVICE they must fail fast like a compiled graph. Cover the axes that
-    # each route to that gate: every dispatch dtype (SupportedDtypes.dispatch), unary
-    # (softmax) and binary (add) ops, and aligned + unaligned last dims (the
-    # 64-alignment CPU-fallback must not make an aligned tensor raise while an
-    # unaligned one silently runs). All must raise.
+def test_eager_device_dtype_op_executes_on_dummy_context():
+    # Same contract for an eager op, across every dispatch dtype, a unary (softmax) and
+    # a binary (add) op, and aligned + unaligned last dims (the unaligned one takes the
+    # 64-alignment CPU fallback). No _NO_NPU_MAP, as in
+    # test_compiled_graph_executes_on_dummy_context.
     proc = _run_with_dummy(
         """
         import torch, torch_rbln
@@ -603,16 +557,11 @@ def test_eager_device_dtype_op_execution_fails_fast():
             for shape in [(4, 64), (4, 8)]:  # aligned and unaligned last dim
                 a = torch.ones(*shape, device="rbln:0", dtype=dt)
                 b = torch.ones(*shape, device="rbln:0", dtype=dt)
-                for op in (lambda: torch.softmax(a, dim=-1), lambda: a + b):
-                    try:
-                        op()
-                    except RuntimeError as e:
-                        assert "RBLN_DUMMY_DEVICE" in str(e), str(e)
-                    else:
-                        raise AssertionError(f"expected RuntimeError on dummy for {dt} {shape}")
+                for out in (torch.softmax(a, dim=-1), a + b):
+                    assert out.device.type == "rbln", (dt, shape, out.device)
+                    assert out.dtype == dt and tuple(out.shape) == shape, (dt, shape, out.dtype, out.shape)
         print("OK")
         """,
-        env_extra={"RBLN_DEVICE_MAP": _NO_NPU_MAP},
     )
     _assert_ok(proc)
     assert "OK" in proc.stdout

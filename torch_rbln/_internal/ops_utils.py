@@ -11,7 +11,6 @@ from torch.utils._pytree import tree_flatten, tree_unflatten
 
 from torch_rbln import _C
 from torch_rbln._internal.compile_cache import compile_rbln_cached_entry
-from torch_rbln._internal.dummy_device import raise_if_dummy_execution
 from torch_rbln._internal.env_utils import is_nan_inf_check_enabled, is_rbln_deploy, use_device_group_num_devices
 from torch_rbln._internal.log_utils import rbln_log_warn, rbln_log_warn_once, rbln_record_cpu_fallback
 from torch_rbln._internal.warm_cache import install_pending as _install_warm_cache_pending
@@ -1798,18 +1797,9 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     ``get_rbln_compile_op_depth`` is imported in the body because
     ``torch_compile_patch_helpers`` imports this module.
     """
-    # Policy precondition, checked before any device-compile machinery runs: this is the
-    # device-compute entry (only supported dtypes reach here; host-dtype / unsupported
-    # ops already took cpu_fallback_path). On RBLN_DUMMY_DEVICE that means an NPU-bound
-    # eager op with no NPU, so reject it through the shared policy gate — same rule as a
-    # compiled graph, and independent of the 64-alignment fallback below so the behavior
-    # does not depend on tensor shape. depth > 0 means we are nested inside a compile op
-    # (e.g. an artifact build); those must proceed so builds still work.
     from torch_rbln._internal.torch_compile_patch_helpers import get_rbln_compile_op_depth  # noqa: PLC0415
 
     eager = get_rbln_compile_op_depth() == 0
-    if eager:
-        raise_if_dummy_execution(f"the eager op {op_name}" if op_name else "an eager op")
 
     # The align fallback avoids host padding for unaligned inputs.
     # A size-1 last dim broadcasting to a 64-aligned one is exempt for these
