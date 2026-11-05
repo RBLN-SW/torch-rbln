@@ -155,7 +155,8 @@ def get_device_properties(
     ``RBLN_NPUS_PER_DEVICE``), so ``total_memory`` sums them and ``npu_count`` says how
     many. ``num_chiplet`` and ``memory_per_chiplet`` stay per NPU: a device runs out on
     its heaviest chiplet, which ``total_memory`` hides, so size a pool by
-    ``memory_per_chiplet``.
+    ``memory_per_chiplet``. ``pci_bus_ids`` names each NPU the same way in every
+    process, whatever ``RBLN_VISIBLE_DEVICES`` says.
 
     Args:
         device (torch.device or int or str, optional): The device to query. Defaults to
