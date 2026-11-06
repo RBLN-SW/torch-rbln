@@ -161,17 +161,17 @@ class TestBoolOperandCompilation(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("scan_enabled", [False, True])
     def test_masked_fill_neg_inf_respects_scan_policy(self, device, dtype, scan_enabled):
-        if dtype == torch.float32 and not scan_enabled:
-            self.skipTest("the device computes float32 in a format without infinities; -inf comes back finite")
-        if dtype == torch.bfloat16 and not scan_enabled and is_atom_device():
-            self.skipTest("this device computes bfloat16 without infinities; -inf comes back as the saturated value")
+        # With the scan off the fill runs on the device, which has no infinities
+        # for float32, nor for bfloat16 on CA devices; -inf comes back saturated.
+        inf_kept = scan_enabled or not (dtype == torch.float32 or (dtype == torch.bfloat16 and is_atom_device()))
         x_cpu = torch.arange(256, dtype=dtype).reshape(4, 64)
         mask_cpu = torch.arange(256).reshape(4, 64) % 2 == 0
         x, mask = x_cpu.to(device), mask_cpu.to(device)
         compiled = len(_compiled_op_cache)
         with mock.patch.dict(os.environ, {"TORCH_RBLN_CHECK_NAN_INF": "ON"} if scan_enabled else {}):
             x.masked_fill_(mask, -float("inf"))
-        self.assertEqual(x.cpu(), x_cpu.masked_fill(mask_cpu, -float("inf")))
+        if inf_kept:
+            self.assertEqual(x.cpu(), x_cpu.masked_fill(mask_cpu, -float("inf")))
         if scan_enabled:
             self.assertEqual(len(_compiled_op_cache), compiled)
         else:
@@ -208,11 +208,13 @@ class TestBoolOperandCompilation(TestCase):
 
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("op", ["where", "masked_fill"])
-    def test_rank0_tensor_value_is_read_on_each_call(self, device, dtype, op):
+    @parametrize("value_on_cpu", [False, True])
+    def test_rank0_tensor_value_is_read_on_each_call(self, device, dtype, op, value_on_cpu):
         x_cpu = torch.arange(256, dtype=dtype).reshape(4, 64)
         mask_cpu = torch.arange(256).reshape(4, 64) % 2 == 0
         x, mask = x_cpu.to(device), mask_cpu.to(device)
-        value = torch.tensor(2.5, dtype=dtype, device=device)
+        # A CPU 0-dim value is a scalar operand, as on CUDA.
+        value = torch.tensor(2.5, dtype=dtype, device="cpu" if value_on_cpu else device)
         compiled = len(_compiled_op_cache)
         for scalar in (2.5, 4.0):
             value.fill_(scalar)

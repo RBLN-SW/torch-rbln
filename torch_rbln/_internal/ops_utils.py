@@ -1884,11 +1884,14 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     # device, so the scalar goes there as a runtime input, read on every call. The
     # shim's warm-cache key is built from the original CPU tensor, so such a call is not
     # installed (as with views).
+    # Decide before the move: broadcasting a moved CPU scalar materializes it, and
+    # masked_fill then rejects the value that is no longer 0-dim.
+    legalize_rank0 = op_name in _RANK0_LEGALIZED_OPS and any(t.dim() == 0 for t in extract_tensors(args))
     args, kwargs_filtered, moved_cpu_scalars = _cpu_scalars_to_device(args, kwargs_filtered)
     if moved_cpu_scalars:
         args = broadcast_args_general(extract_tensors(args), args)
 
-    if op_name in _RANK0_LEGALIZED_OPS and any(t.dim() == 0 for t in extract_tensors(args)):
+    if legalize_rank0:
         op_callable = _RANK0_LEGALIZED_OPS[op_name]
 
     (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs_filtered)
