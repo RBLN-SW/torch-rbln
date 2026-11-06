@@ -649,49 +649,30 @@ bool index_put_native(
     expanded.emplace_back();
   }
 
-  // The indexing result's shape: `bshape` in place of adjacent indexed dims,
-  // else first.
-  const bool adjacent = at::native::hasContiguousSubspace(expanded);
-  int64_t dims_before = 0;
-  int64_t n = 0;
+  std::vector<int64_t> indexed_dims;
   at::DimVector bshape;
   at::DimVector rest_sizes;
   for (int64_t d = 0; d < self.dim(); ++d) {
     if (expanded[d].defined()) {
-      if (n == 0) {
+      if (indexed_dims.empty()) {
         bshape.assign(expanded[d].sizes().begin(), expanded[d].sizes().end());
       }
-      ++n;
+      indexed_dims.push_back(d);
     } else {
-      if (n == 0) {
-        ++dims_before;
-      }
       rest_sizes.push_back(self.size(d));
     }
   }
+  const int64_t n = static_cast<int64_t>(indexed_dims.size());
   const int64_t bdim = static_cast<int64_t>(bshape.size());
-  at::DimVector target;
-  if (adjacent) {
-    target.append(rest_sizes.begin(), rest_sizes.begin() + dims_before);
-    target.append(bshape.begin(), bshape.end());
-    target.append(rest_sizes.begin() + dims_before, rest_sizes.end());
-  } else {
-    target.append(bshape.begin(), bshape.end());
-    target.append(rest_sizes.begin(), rest_sizes.end());
-  }
+  // `target` is the shape of the indexing result: the non-indexed sizes, with
+  // `bshape` at `start` (where the indexed dims sit if adjacent, else first).
+  const int64_t start =
+      at::native::hasContiguousSubspace(expanded) ? indexed_dims.front() : 0;
+  at::DimVector target = rest_sizes;
+  target.insert(target.begin() + start, bshape.begin(), bshape.end());
   if (!at::is_expandable_to(values_in.sizes(), target)) {
     return false;
   }
-
-  std::vector<int64_t> indexed_dims;
-  for (int64_t d = 0; d < self.dim(); ++d) {
-    if (expanded[d].defined()) {
-      indexed_dims.push_back(d);
-    }
-  }
-  at::Tensor self_t;
-  std::vector<at::Tensor> idx_t;
-  std::tie(self_t, idx_t) = at::native::transposeToFront(self, expanded);
 
   int64_t num_points = 1;
   for (int64_t sz : bshape) {
@@ -699,8 +680,9 @@ bool index_put_native(
   }
   std::vector<std::vector<int64_t>> host_idx(n);
   for (int64_t i = 0; i < n; ++i) {
-    host_idx[i] = read_index_to_host(idx_t[i].reshape({-1}), "index_put_");
-    const int64_t extent = self_t.size(i);
+    host_idx[i] = read_index_to_host(
+        expanded[indexed_dims[i]].reshape({-1}), "index_put_");
+    const int64_t extent = self.size(indexed_dims[i]);
     for (int64_t& v : host_idx[i]) {
       TORCH_CHECK_INDEX(
           v >= -extent && v < extent,
@@ -722,29 +704,15 @@ bool index_put_native(
   at::Tensor values = values_in.device() == self.device()
       ? values_in
       : values_in.to(self.device());
-  // Reorder `values` like `self_t`: `bshape` first.
-  at::Tensor values_t = values.expand(target);
-  if (adjacent && dims_before > 0) {
-    std::vector<int64_t> perm;
-    perm.reserve(values_t.dim());
-    for (int64_t j = 0; j < bdim; ++j) {
-      perm.push_back(dims_before + j);
-    }
-    for (int64_t j = 0; j < dims_before; ++j) {
-      perm.push_back(j);
-    }
-    for (int64_t j = dims_before + bdim; j < values_t.dim(); ++j) {
-      perm.push_back(j);
-    }
-    values_t = values_t.permute(perm);
-  }
+  const at::Tensor values_t = values.expand(target);
 
-  // Point k writes self_t[i0[k], ..., in-1[k]] from values_t at k's position in
-  // `bshape`.
+  // Point k copies `values_t` at its position in `bshape` into `self` at its
+  // indices. Selecting `self`'s indexed dims from last to first and `bshape`
+  // at `start` leaves both views shaped `rest_sizes`.
   auto dst_view = [&](int64_t k) {
-    at::Tensor v = self_t;
-    for (int64_t i = 0; i < n; ++i) {
-      v = v.select(0, host_idx[i][k]);
+    at::Tensor v = self;
+    for (int64_t i = n - 1; i >= 0; --i) {
+      v = v.select(indexed_dims[i], host_idx[i][k]);
     }
     return v;
   };
@@ -756,19 +724,20 @@ bool index_put_native(
     }
     at::Tensor v = values_t;
     for (int64_t p : pos) {
-      v = v.select(0, p);
+      v = v.select(start, p);
     }
     return v;
   };
 
-  // The batch may reorder entries. Keeping only each point's last write
-  // (walking backwards) matches the CPU and leaves the destinations disjoint.
+  // The batch may run entries in any order, so keep only the last write to
+  // each point. With the self-overlap check above, the destination slabs are
+  // then disjoint.
   std::unordered_set<int64_t> seen;
   c10::rbln::V2VBatch batch;
   for (int64_t k = num_points - 1; k >= 0; --k) {
     int64_t key = 0;
     for (int64_t i = 0; i < n; ++i) {
-      key = key * self_t.size(i) + host_idx[i][k];
+      key = key * self.size(indexed_dims[i]) + host_idx[i][k];
     }
     if (seen.insert(key).second) {
       strided_v2v_copy(dst_view(k), src_view(k), batch);

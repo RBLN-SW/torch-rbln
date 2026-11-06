@@ -37,13 +37,13 @@ _VIEWS = {
 }
 
 
-def _fallbacks(fn, op=_OP) -> int:
-    """Run ``fn``; return how often ``op`` fell back to the CPU."""
+def _fallbacks(fn, ops=(_OP,)) -> int:
+    """Run ``fn``; return how often any of ``ops`` fell back to the CPU."""
     torch.rbln.synchronize()
     _C._dispatch_fallback_by_op_reset()
     fn()
     torch.rbln.synchronize()
-    return sum(count for name, count in dict(_C._dispatch_fallback_by_op()).items() if op in name)
+    return sum(count for name, count in dict(_C._dispatch_fallback_by_op()).items() if any(op in name for op in ops))
 
 
 @pytest.mark.npu(count=1)
@@ -180,13 +180,7 @@ class TestIndexPutV2V(TestCase):
         got = _to_dev(self_cpu)
         mask = mask_cpu.to(DEVICE)
         value = torch.tensor(-1.0, dtype=torch.float16)
-
-        torch.rbln.synchronize()
-        _C._dispatch_fallback_by_op_reset()
-        got.index_put_((mask,), value)
-        torch.rbln.synchronize()
-        fallbacks = dict(_C._dispatch_fallback_by_op())
-        self.assertFalse([name for name in fallbacks if _OP in name or "masked_fill" in name], msg=str(fallbacks))
+        self.assertEqual(_fallbacks(lambda: got.index_put_((mask,), value), ops=(_OP, "masked_fill")), 0)
         _eq(got, expected)
 
     def test_mask_with_device_values(self):
