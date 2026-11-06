@@ -15,15 +15,25 @@ from typing import NamedTuple
 import torch
 
 import torch_rbln._C
+from torch_rbln._host_registration import (
+    HostMemoryRegistration,
+    is_registered,
+    register_managed,
+    register_strict,
+    unregister_strict,
+)
 
 
 __all__ = [
     "DevicePlacement",
+    "HostMemoryRegistration",
     "bind_device_memory",
     "empty_cache",
     "host_register",
+    "host_register_memory",
     "host_unregister",
     "huge_host_empty",
+    "is_host_memory_registered",
     "max_memory_allocated",
     "max_memory_reserved",
     "mem_get_info",
@@ -569,8 +579,8 @@ def host_register(ptr: int, nbytes: int, device: int | str | torch.device | None
     """Pin a caller-owned host range for DMA on ``device``; the counterpart of
     ``cudaHostRegister``.
 
-    Copies whose host side is 4 KiB aligned and inside the range then DMA straight to
-    and from it instead of staging through a runtime bounce buffer.
+    Copies whose host side is 4 KiB aligned and contained in one admitted
+    registration can DMA directly instead of using a runtime bounce buffer.
     Registration itself is costly, so register reused buffers once, not per transfer.
 
     The caller keeps ownership: call :func:`host_unregister` before freeing the memory.
@@ -583,9 +593,17 @@ def host_register(ptr: int, nbytes: int, device: int | str | torch.device | None
             If None, uses the current device. Defaults to None.
 
     Returns:
-        bool: True if registered. False if the range cannot be registered here -- no
-        RBLN device, or (with a warning) a runtime without host registration or a dummy
-        device. Copies over an unregistered range still work.
+        bool: True only if the whole range is registered. False if admission
+        exceeds the temporary page-table budget, no RBLN device is present,
+        or the runtime does not support registration. False leaves no successful
+        partial registration behind. Copies over an unregistered range still work.
+
+        A large range may use multiple native registrations. A transfer crossing
+        their boundary uses the ordinary copy path. Use :func:`host_register_memory`
+        for explicit partial coverage and automatic ownership of a CPU tensor.
+        The opt-in ``TORCH_RBLN_HOST_REGISTRATION_PROFILE=driver`` bypasses the
+        temporary admission limits and submits the whole range to the runtime.
+        See docs/CONFIGURATION.md before using it to validate a fixed driver.
 
     Raises:
         TypeError: if ``ptr`` or ``nbytes`` is not an integer.
@@ -596,9 +614,10 @@ def host_register(ptr: int, nbytes: int, device: int | str | torch.device | None
     Example::
 
         slab = torch.rbln.huge_host_empty(1 << 30)
-        torch.rbln.host_register(slab.data_ptr(), slab.numel())
+        registered = torch.rbln.host_register(slab.data_ptr(), slab.numel())
         ...
-        torch.rbln.host_unregister(slab.data_ptr())
+        if registered:
+            torch.rbln.host_unregister(slab.data_ptr())
     """
     ptr = operator.index(ptr)
     nbytes = operator.index(nbytes)
@@ -611,7 +630,10 @@ def host_register(ptr: int, nbytes: int, device: int | str | torch.device | None
     if _no_rbln_device():
         return False
     device = _normalize_device(device)
-    return torch_rbln._C._host_register(device.index, ptr, nbytes)
+    if ptr > sys.maxsize or nbytes > sys.maxsize - ptr:
+        msg = "Host range exceeds the process address space"
+        raise ValueError(msg)
+    return register_strict(ptr, nbytes, device.index)
 
 
 def host_unregister(ptr: int, device: int | str | torch.device | None = None) -> None:
@@ -632,7 +654,43 @@ def host_unregister(ptr: int, device: int | str | torch.device | None = None) ->
     if _no_rbln_device():
         return
     device = _normalize_device(device)
-    torch_rbln._C._host_unregister(device.index, ptr)
+    unregister_strict(ptr, device.index)
+
+
+def host_register_memory(
+    buffer: torch.Tensor, device: int | str | torch.device | None = None
+) -> HostMemoryRegistration:
+    """Register as much of a CPU buffer as the device's page-table budget permits.
+
+    Returns a HostMemoryRegistration with explicit registered_ranges,
+    registered_bytes, fully_registered, covers(ptr, size), and close(). The
+    result retains the tensor until all registered ranges are unregistered.
+    Unregistered portions remain usable through ordinary transfers.
+
+    This is opt-in partial registration. host_register retains its whole-range
+    success/failure contract. See docs/CONFIGURATION.md for the qualified THP
+    mapping profile and the temporary old-driver registration limits.
+    With the explicit ``driver`` profile, the whole buffer is submitted in one
+    native registration, without page inspection or partial admission. Ownership
+    and close semantics are unchanged; runtime errors still propagate.
+    """
+    if not isinstance(buffer, torch.Tensor) or buffer.device.type != "cpu" or not buffer.is_contiguous():
+        msg = "Host registration requires a contiguous CPU tensor"
+        raise ValueError(msg)
+    size = buffer.numel() * buffer.element_size()
+    if size <= 0:
+        msg = "Host registration requires a non-empty buffer"
+        raise ValueError(msg)
+    normalized = _normalize_device(device)
+    return register_managed(buffer.data_ptr(), size, normalized.index, buffer, available=not _no_rbln_device())
+
+
+def is_host_memory_registered(ptr: int, nbytes: int, device: int | str | torch.device | None = None) -> bool:
+    """Whether one live registration covers a host transfer on the device."""
+    ptr, nbytes = operator.index(ptr), operator.index(nbytes)
+    if ptr <= 0 or nbytes <= 0 or _no_rbln_device():
+        return False
+    return is_registered(ptr, nbytes, _normalize_device(device).index)
 
 
 @contextlib.contextmanager

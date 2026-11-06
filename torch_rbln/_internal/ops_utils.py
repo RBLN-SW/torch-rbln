@@ -1884,9 +1884,15 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     # device, so the scalar goes there as a runtime input, read on every call. The
     # shim's warm-cache key is built from the original CPU tensor, so such a call is not
     # installed (as with views).
+    # Decide before the move: broadcasting a moved CPU scalar materializes it, and
+    # masked_fill then rejects the value that is no longer 0-dim.
+    legalize_rank0 = op_name in _RANK0_LEGALIZED_OPS and any(t.dim() == 0 for t in extract_tensors(args))
     args, kwargs_filtered, moved_cpu_scalars = _cpu_scalars_to_device(args, kwargs_filtered)
     if moved_cpu_scalars:
         args = broadcast_args_general(extract_tensors(args), args)
+
+    if legalize_rank0:
+        op_callable = _RANK0_LEGALIZED_OPS[op_name]
 
     (view_args, view_kwargs), view_recipes, _ = prepare_args_view_aware(args, kwargs_filtered)
     has_views = any(r is not None for r in view_recipes)
@@ -1966,6 +1972,33 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
         # so the C++ hit path skips it once the alignment fallback is on again.
         _install_warm_cache_pending(list(entry.runtime_holder), external_result, align_bypassed=unaligned)
     return result_tensor
+
+
+def _rank0_as_ones(tensors):
+    """Give each 0-dim tensor the shape ``[1] * ndim`` of the widest tensor operand."""
+    ndim = max((t.dim() for t in tensors if isinstance(t, torch.Tensor)), default=0)
+    return [t.reshape((1,) * ndim) if isinstance(t, torch.Tensor) and t.dim() == 0 else t for t in tensors]
+
+
+def _where_rank0_legalized(condition, input, other):
+    return torch.where(*_rank0_as_ones([condition, input, other]))
+
+
+def _masked_fill_rank0_legalized(input, mask, value):
+    input_, mask, value = _rank0_as_ones([input, mask, value])
+    return torch.where(mask, value, input_)
+
+
+# TODO: remove once the compiler reads a 0-dim input of where correctly.
+# A 0-dim input of where (a rank-0 tensor, or a Python scalar Dynamo lifts to one)
+# is not read correctly on the device yet. Reshaping it to ``[1, ..., 1]`` inside
+# the graph avoids that while the graph inputs keep their shapes, so the C++ warm
+# path binds the same tensors. masked_fill takes only a 0-dim value, so it is
+# written as the equivalent where. Calls without a 0-dim operand keep their program.
+_RANK0_LEGALIZED_OPS = {
+    "aten::where": _where_rank0_legalized,
+    "aten::masked_fill": _masked_fill_rank0_legalized,
+}
 
 
 def _warn_float32_on_device_once(op_name, args, kwargs) -> None:
