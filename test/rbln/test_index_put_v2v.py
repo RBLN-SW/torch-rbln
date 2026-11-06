@@ -1,6 +1,6 @@
 # Owner(s): ["module: PrivateUse1"]
 
-"""Tests for the v2v-based ``aten::_index_put_impl_`` kernel behind ``index_put_`` and ``x[...] = v``.
+"""Tests for the v2v ``aten::_index_put_impl_`` kernel (``index_put_``, ``x[...] = v``).
 
 Coverage is organized by behavior:
   - Point writes: the vLLM min_tokens pattern, per-point values, slabs under a
@@ -143,7 +143,7 @@ class TestIndexPutV2V(TestCase):
 
     @parametrize("view", list(_VIEWS))
     def test_view_writes_through(self, view):
-        """Writes land in the base storage; a column slice has gaps but no self-aliasing."""
+        """Writes land in the base; a column slice has gaps but no self-aliasing."""
         base_cpu = _arange((16, 128), torch.float16)
         base = _to_dev(base_cpu)
         rows = torch.tensor([0, 5, 7])
