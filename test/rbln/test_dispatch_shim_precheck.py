@@ -40,6 +40,7 @@ from torch.testing._internal.common_utils import parametrize, run_tests, TestCas
 from test.utils import SUPPORTED_DTYPES
 from torch_rbln import _C
 from torch_rbln._internal.compile_cache import _compiled_op_cache
+from torch_rbln._internal.device_arch_utils import is_atom_device
 from torch_rbln._internal.ops_utils import can_use_out_tensor_directly, get_fallback_reason
 
 
@@ -162,6 +163,8 @@ class TestBoolOperandCompilation(TestCase):
     def test_masked_fill_neg_inf_respects_scan_policy(self, device, dtype, scan_enabled):
         if dtype == torch.float32 and not scan_enabled:
             self.skipTest("the device computes float32 in a format without infinities; -inf comes back finite")
+        if dtype == torch.bfloat16 and not scan_enabled and is_atom_device():
+            self.skipTest("this device computes bfloat16 without infinities; -inf comes back as the saturated value")
         x_cpu = torch.arange(256, dtype=dtype).reshape(4, 64)
         mask_cpu = torch.arange(256).reshape(4, 64) % 2 == 0
         x, mask = x_cpu.to(device), mask_cpu.to(device)
