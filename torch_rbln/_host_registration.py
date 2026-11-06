@@ -1,7 +1,10 @@
-"""Temporary admission control for the old driver's finite page-table pool.
+"""Host registration ownership and temporary old-driver admission.
 
-Public Python registrations share one ledger. Native _C entry points are the
-unchecked implementation, not an alternative public registration API.
+Once deployed drivers safely report exhaustion and roll back failures, replace
+_register_with_admission(state) with state.register_region(_Region(ptr, size))
+and remove _release_admission from close(). The admission helpers, budgets,
+page inspection and _Region's accounting fields can then be removed together;
+registration tracking, overlap checks and owner retention remain.
 """
 
 import contextlib
@@ -45,7 +48,7 @@ class _Budget:
 class _Region:
     ptr: int
     size: int
-    tables: int
+    tables: int = 0
     registered: bool = False
 
     @property
@@ -114,6 +117,21 @@ class _RegistrationState:
         self.regions: list[_Region] = []
         self.closed = False
 
+    def register_region(self, region: _Region) -> bool:
+        try:
+            self.regions.append(region)
+        except BaseException:
+            if self.regions and self.regions[-1] is region:
+                self.regions.pop()
+            raise
+        # Record the attempt before entering the driver: an exception does not
+        # prove that a partially failed mapping was removed.
+        if not torch_rbln._C._host_register(self.device, region.ptr, region.size):
+            self.regions.pop()
+            return False
+        region.registered = True
+        return True
+
     def covers(self, ptr: int, size: int) -> bool:
         if self.pid != os.getpid() or size <= 0:
             return False
@@ -141,14 +159,12 @@ class _RegistrationState:
                         torch_rbln._C._host_unregister(self.device, region.ptr)
                     except RuntimeError as exc:
                         # The runtime can erase its entry before a failed unpin.
-                        # Retain the owner and charge until release is confirmed.
+                        # Retain the owner until release is confirmed.
                         remaining.append(region)
                         if error is None:
                             error = exc
                     else:
-                        budget = _budgets[self.device]
-                        budget.tables -= region.tables
-                        budget.va_bytes -= region.va_bytes
+                        _release_admission(self.device, region)
                     processed += 1
             finally:
                 # Also retain unattempted entries on interruption. Avoid repeated
@@ -166,7 +182,7 @@ def _finalize(state: _RegistrationState) -> None:
     try:
         state.close()
     except RuntimeError:
-        _logger.exception("Host unregister failed; retaining the backing memory and registration budget")
+        _logger.exception("Host unregister failed; retaining the backing memory")
 
 
 class HostMemoryRegistration:
@@ -224,6 +240,66 @@ class HostMemoryRegistration:
         self.close()
 
 
+def _release_admission(device: int, region: _Region) -> None:
+    budget = _budgets[device]
+    budget.tables -= region.tables
+    budget.va_bytes -= region.va_bytes
+
+
+def _register_with_admission(state: _RegistrationState) -> bool:
+    """Apply the temporary policy while holding _lock; False requires rollback."""
+    profile = host_registration_profile()
+    use_huge = profile == "thp"
+    driver_admission = profile == "driver"
+    budget = _budgets.setdefault(state.device, _Budget())
+    cursor, end = state.ptr, state.ptr + state.size
+    warned = False
+    while cursor < end:
+        if not driver_admission and (
+            budget.va_bytes >= _VA_LIMIT
+            or budget.tables > _TABLE_LIMIT
+            or (not use_huge and budget.tables == _TABLE_LIMIT)
+        ):
+            return state.managed
+        stop = end if driver_admission else min(end, cursor + _WINDOW)
+        if stop < end and _WINDOW >= _HUGE:
+            stop -= stop % _HUGE
+        snapshot = torch_rbln._C._HostPageSnapshot(cursor, stop - cursor, promote=state.managed) if use_huge else None
+        with contextlib.closing(snapshot) if snapshot is not None else contextlib.nullcontext():
+            if snapshot is not None and snapshot.error and not warned:
+                _logger.warning(
+                    "Cannot verify pinned huge pages (errno=%d); charging unverified memory as 4 KiB pages",
+                    snapshot.error,
+                )
+                warned = True
+            huge = snapshot.huge_ranges if snapshot is not None else []
+            if driver_admission:
+                region = _Region(cursor, stop - cursor)
+                # Charge ordinary pages if admission is re-enabled later.
+                region.tables = region.va_bytes // _HUGE
+                plan = [region]
+            else:
+                plan = _plan(cursor, stop - cursor, huge, _TABLE_LIMIT - budget.tables, _VA_LIMIT - budget.va_bytes)
+            if not state.managed and sum(r.size for r in plan) != stop - cursor:
+                return False
+            for region in plan:
+                previous_tables, previous_va = budget.tables, budget.va_bytes
+                try:
+                    budget.reserve(region.tables, region.va_bytes, enforce_limits=not driver_admission)
+                    registered = state.register_region(region)
+                except BaseException:
+                    # Only an attempt recorded by the lifecycle owns the charge.
+                    # A native failure may still own a partially created mapping.
+                    if not state.regions or state.regions[-1] is not region:
+                        budget.tables, budget.va_bytes = previous_tables, previous_va
+                    raise
+                if not registered:
+                    _release_admission(state.device, region)
+                    return False
+        cursor = stop
+    return True
+
+
 def _register(
     ptr: int,
     size: int,
@@ -236,9 +312,6 @@ def _register(
     state = _RegistrationState(ptr, size, device, owner, managed=partial)
     if not available:
         return state
-    profile = host_registration_profile()
-    use_huge = profile == "thp"
-    driver_admission = profile == "driver"
     with _lock:
         if _forked_with_registrations:
             msg = "Host registration was inherited across fork; start the worker with spawn"
@@ -247,65 +320,9 @@ def _register(
             if registered_device == device and ptr < start + other.size and start < ptr + size:
                 msg = "Host range overlaps an existing or pending registration"
                 raise RuntimeError(msg)
-        budget = _budgets.setdefault(device, _Budget())
         _groups[device, ptr] = state
         try:
-            cursor, end = ptr, ptr + size
-            warned = False
-            while cursor < end:
-                if not driver_admission and (
-                    budget.va_bytes >= _VA_LIMIT
-                    or budget.tables > _TABLE_LIMIT
-                    or (not use_huge and budget.tables == _TABLE_LIMIT)
-                ):
-                    if not partial:
-                        state.close()
-                    break
-                stop = end if driver_admission else min(end, cursor + _WINDOW)
-                if stop < end and _WINDOW >= _HUGE:
-                    stop -= stop % _HUGE
-                snapshot = torch_rbln._C._HostPageSnapshot(cursor, stop - cursor, promote=partial) if use_huge else None
-                with contextlib.closing(snapshot) if snapshot is not None else contextlib.nullcontext():
-                    if snapshot is not None and snapshot.error and not warned:
-                        _logger.warning(
-                            "Cannot verify pinned huge pages (errno=%d); charging unverified memory as 4 KiB pages",
-                            snapshot.error,
-                        )
-                        warned = True
-                    huge = snapshot.huge_ranges if snapshot is not None else []
-                    if driver_admission:
-                        region = _Region(cursor, stop - cursor, 0)
-                        # Charge ordinary pages if admission is re-enabled later.
-                        region.tables = region.va_bytes // _HUGE
-                        plan = [region]
-                    else:
-                        plan = _plan(
-                            cursor, stop - cursor, huge, _TABLE_LIMIT - budget.tables, _VA_LIMIT - budget.va_bytes
-                        )
-                    if not partial and sum(r.size for r in plan) != stop - cursor:
-                        state.close()
-                        return state
-                    for region in plan:
-                        previous_tables, previous_va = budget.tables, budget.va_bytes
-                        try:
-                            budget.reserve(region.tables, region.va_bytes, enforce_limits=not driver_admission)
-                            state.regions.append(region)
-                        except BaseException:
-                            budget.tables, budget.va_bytes = previous_tables, previous_va
-                            if state.regions and state.regions[-1] is region:
-                                state.regions.pop()
-                            raise
-                        # Record the attempt before entering the driver: an exception
-                        # does not prove that a partially failed mapping was removed.
-                        if not torch_rbln._C._host_register(device, region.ptr, region.size):
-                            state.regions.remove(region)
-                            budget.tables -= region.tables
-                            budget.va_bytes -= region.va_bytes
-                            state.close()
-                            return state
-                        region.registered = True
-                cursor = stop
-            if not state.regions:
+            if not _register_with_admission(state) or not state.regions:
                 state.close()
         except BaseException:
             try:
@@ -314,7 +331,7 @@ def _register(
                 _logger.exception(
                     "Host registration cleanup failed (device=%d, ptr=%#x, bytes=%d); "
                     "the requested range remains reserved and overlapping retries are blocked. "
-                    "Any owned buffer and unreleased charges are retained. "
+                    "Any owned buffer is retained. "
                     "Use a fresh process for the next registration attempt",
                     device,
                     ptr,

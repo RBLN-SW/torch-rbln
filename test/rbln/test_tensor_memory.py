@@ -599,11 +599,14 @@ class TestHostRegistrationPolicy(TestCase):
         handle.close()
         self.assertEqual(self.registration._budgets[0].tables, 0)
 
-    def test_failed_region_recording_refunds_budget_before_native_call(self):
+    @parametrize("append_before_failure", [False, True])
+    def test_failed_region_recording_refunds_budget_before_native_call(self, append_before_failure):
         initialize = self.registration._RegistrationState.__init__
 
         class FailingRegions(list):
-            def append(self, _region):
+            def append(self, region):
+                if append_before_failure:
+                    super().append(region)
                 message = "region allocation failed"
                 raise MemoryError(message)
 
