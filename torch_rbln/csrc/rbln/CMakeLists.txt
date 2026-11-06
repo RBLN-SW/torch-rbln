@@ -1,6 +1,7 @@
 set(target torch_rbln_csrc_rbln)
 
-pybind11_add_module(${target} Module.cpp DispatchShim.cpp WarmCache.cpp
+pybind11_add_module(${target}
+  Module.cpp DispatchShim.cpp WarmCache.cpp HostPages.cpp
   ../distributed/c10d/rbln/ProcessGroupRBLNModule.cpp
   profiler/kineto/rbln_kineto_emitter.cc
   profiler/kineto/rbln_kineto_adapter.cc)
