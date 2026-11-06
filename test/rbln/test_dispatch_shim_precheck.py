@@ -40,6 +40,7 @@ from torch.testing._internal.common_utils import parametrize, run_tests, TestCas
 from test.utils import SUPPORTED_DTYPES
 from torch_rbln import _C
 from torch_rbln._internal.compile_cache import _compiled_op_cache
+from torch_rbln._internal.device_arch_utils import is_atom_device
 from torch_rbln._internal.ops_utils import can_use_out_tensor_directly, get_fallback_reason
 
 
@@ -160,13 +161,17 @@ class TestBoolOperandCompilation(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("scan_enabled", [False, True])
     def test_masked_fill_neg_inf_respects_scan_policy(self, device, dtype, scan_enabled):
+        # With the scan off the fill runs on the device, which has no infinities
+        # for float32, nor for bfloat16 on CA devices; -inf comes back saturated.
+        inf_kept = scan_enabled or not (dtype == torch.float32 or (dtype == torch.bfloat16 and is_atom_device()))
         x_cpu = torch.arange(256, dtype=dtype).reshape(4, 64)
         mask_cpu = torch.arange(256).reshape(4, 64) % 2 == 0
         x, mask = x_cpu.to(device), mask_cpu.to(device)
         compiled = len(_compiled_op_cache)
         with mock.patch.dict(os.environ, {"TORCH_RBLN_CHECK_NAN_INF": "ON"} if scan_enabled else {}):
             x.masked_fill_(mask, -float("inf"))
-        self.assertEqual(x.cpu(), x_cpu.masked_fill(mask_cpu, -float("inf")))
+        if inf_kept:
+            self.assertEqual(x.cpu(), x_cpu.masked_fill(mask_cpu, -float("inf")))
         if scan_enabled:
             self.assertEqual(len(_compiled_op_cache), compiled)
         else:
@@ -179,7 +184,8 @@ class TestBoolOperandCompilation(TestCase):
         # The pinned compiler crashes on a permuted operand next to a 0-dim operand; the
         # handler makes the inputs contiguous first (TODO: that guard will be removed;
         # this test must keep passing without it).
-        a_cpu = torch.arange(64 * 128, dtype=dtype).reshape(64, 128)
+        # Values stay below 1024, which the device's float32 format holds exactly.
+        a_cpu = (torch.arange(64 * 128) % 1000).to(dtype).reshape(64, 128)
         a = a_cpu.to(device)
         cond_cpu, cond = a_cpu.T > 100, a.T > 100
         self.assertEqual(torch.where(cond, -1.0, a.T).cpu(), torch.where(cond_cpu, -1.0, a_cpu.T))
@@ -202,11 +208,13 @@ class TestBoolOperandCompilation(TestCase):
 
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("op", ["where", "masked_fill"])
-    def test_rank0_tensor_value_is_read_on_each_call(self, device, dtype, op):
+    @parametrize("value_on_cpu", [False, True])
+    def test_rank0_tensor_value_is_read_on_each_call(self, device, dtype, op, value_on_cpu):
         x_cpu = torch.arange(256, dtype=dtype).reshape(4, 64)
         mask_cpu = torch.arange(256).reshape(4, 64) % 2 == 0
         x, mask = x_cpu.to(device), mask_cpu.to(device)
-        value = torch.tensor(2.5, dtype=dtype, device=device)
+        # A CPU 0-dim value is a scalar operand, as on CUDA.
+        value = torch.tensor(2.5, dtype=dtype, device="cpu" if value_on_cpu else device)
         compiled = len(_compiled_op_cache)
         for scalar in (2.5, 4.0):
             value.fill_(scalar)
