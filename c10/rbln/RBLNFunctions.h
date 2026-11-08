@@ -189,6 +189,13 @@ C10_RBLN_API void set_device_layout_like(
     void* target_data,
     const void* ref_data);
 
+C10_RBLN_API void set_device_alloc(
+    void* data,
+    c10::ScalarType user_dtype,
+    c10::ScalarType physical_dtype,
+    const std::vector<int64_t>& shape,
+    const std::vector<::rbln::DevicePlacement>& placements);
+
 /**
  * @brief Pin a caller-owned host range for DMA on one device
  * (cudaHostRegister's counterpart).

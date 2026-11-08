@@ -317,7 +317,7 @@ asserts it.
   and satisfy what it asserts. **When the contract is ambiguous, follow CUDA** —
   that is what vLLM, LMCache, and Transformers are written against.
 - **CPU fallback is a product feature, not a way to make code work**. Do not add
-  a case to `is_cpu_fallback_cases()`, route an op to `fallback_rbln`, or change
+  a case to `get_fallback_reason()`, route an op to `fallback_rbln`, or change
   a `TORCH_RBLN_DISABLE_FALLBACK` category to move a test outcome — that turns a
   correctness bug into a silent performance cliff. The suite force-disables
   `compile_error` (`test/conftest.py`) so compile failures surface.

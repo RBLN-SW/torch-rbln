@@ -90,7 +90,7 @@ dispatch/cpu_fallback  2,000       --  try: graph mode, or a supported dtype
     aten::sub.out    1,000
     aten::mul.out      500
     aten::clamp.out    500
-    why: dtype-not-dispatch 2,000                                                    (7)
+    why: dtype 2,000                                                                 (7)
     candidates (no fast-path handler): sub.out, mul.out, clamp.out                   (8)
 
   >> physical d2h (real transfer): 0 -- everything above served on host, no crossing  (9)
@@ -141,10 +141,17 @@ dispatch/cpu_fallback  2,000       --  try: graph mode, or a supported dtype
    one was captured under `with_stack=True` — and the `(sum … wall)` wall time of
    those same fallbacks (a _weak, noisy_ A/B signal — inflated under
    oversubscription, not a per-op absolute; see §10).
-7. **`why`**: the reason each of the C++ shim's own fallbacks fired —
-   `dtype-not-dispatch` (the op's dtype is outside the device dispatch policy),
-   `nan/inf input`, `all-scalar inputs`, or `out-dtype` (a non-bool `out=` of
-   another dtype than the inputs, which the op's CPU kernel accepts or rejects).
+7. **`why`**: the fallback count per reason, summed over the ops above. A reason
+   is the `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` case or
+   `TORCH_RBLN_DISABLE_FALLBACK` category that decided the fallback, or the name
+   of the check when no switch exists — `dtype` (the op's dtype is outside the
+   device dispatch policy), `nan_inf`, `scalar`, `align`, `registered`,
+   `out_dtype` (a non-bool `out=` of another dtype than the inputs, which the
+   op's CPU kernel accepts or rejects), ... A reason whose fix is not the row's
+   carries its own after the count: `strided_copy_error` (the device rejected a
+   strided copy and the op was redone on the CPU) says `try: lower outer_count /
+   fatter inner`. `cpu_fallback_reasons_by_op` in `dump()` has the same counts
+   per op.
 8. **(A) `candidates (no fast-path handler)`**: of the ops that fell back through
    the boxed C++ CPU fallback, which ones have **no CPU fast-path handler** —
    i.e. your **optimization candidates** (registered ops already bypass the slow
@@ -250,7 +257,7 @@ runtime/v2v_slow      1    0 B  real d2h DMA (costly)
 
 **(G4) A decode step in device-tensor mode — the capstone**. Captured with
 `with_stack=True`, it shows nearly every signal at once: the attention-metadata
-integer math falling back (`sub`/`mul`/`clamp`, `dtype-not-dispatch`), the
+integer math falling back (`sub`/`mul`/`clamp`, `dtype`), the
 `positions[idx]` gather going host-slow (`v2v_slow` + the `d2d_copy` bounce),
 all **host-served** (`physical d2h: 0`), under a worker pinned to one core
 (oversubscription), with the rebel-runtime share and the exact source lines:
@@ -283,7 +290,7 @@ dispatch/cpu_fallback  1,600        --  try: graph mode, or a supported dtype
     aten::sub.out    800  at rbln_model_runner.py:1276(_prepare_inputs)
     aten::mul.out    400  at .../attention/flash_attention.py:1148(build)
     aten::clamp.out  400  at .../attention/flash_attention.py:1147(build)
-    why: dtype-not-dispatch 1,600
+    why: dtype 1,600
     candidates (no fast-path handler): sub.out, mul.out, clamp.out
 
   >> physical d2h (real transfer): 0 -- everything above served on host, no crossing
@@ -300,7 +307,7 @@ How to read G4 in 30 seconds:
   movement. (No color claims this is severe; the `physical d2h: 0` line is what
   tells you the crossing cost is nil.)
 - **What**: `cpu_fallback` is the integer metadata math (`sub`/`mul`/`clamp`,
-  all `dtype-not-dispatch`); `v2v_slow`/`bounce` is the `positions[idx]` gather.
+  all `dtype`); `v2v_slow`/`bounce` is the `positions[idx]` gather.
   Per 400 steps: 4 fallbacks + ~2 gathers + 4 bounces per step.
 - **Where**: the `at …` lines pin it to `flash_attention.py:1126/1147/1148` (the
   metadata builder) and `rbln_model_runner.py:1276` (logits). All of it is one
@@ -330,7 +337,6 @@ meaning, the intent (why you should care), and the lever.
 | `host_bounce/d2d_copy` (dump key `copy_d2d_host_bounce`) | `torch` | a non-contiguous device→device `copy_` round-tripped the host                                                                                                                                 | a host round-trip you didn't ask for; the data left the device                     | make the copy contiguous, or route through the on-device v2v engine |
 | `host_bounce/copy_h2d_staging`                           | `torch` | a CPU source was staged to host before the h2v push                                                                                                                                           | keep the source on-device, or stage once and reuse                                 | keep src on-device / stage once                                     |
 | `host_bounce/copy_h2d_noncontig_dst`                     | `torch` | host→device write into a non-contiguous device dst                                                                                                                                            | write into a contiguous buffer first, then h2d                                     | contiguous staging, then h2d                                        |
-| `host_bounce/strided_v2v_cpu_fallback`                   | `torch` | a strided v2v (`cat`/`index`/`copy_`) fell back to a host CPU op                                                                                                                              | the device v2v engine rejected the geometry                                        | lower `outer_count` / fatter contiguous inner block                 |
 | `host_bounce/v2v_batch_to_per_entry`                     | `torch` | a batched v2v was rejected to per-entry copies                                                                                                                                                | batch geometry exceeded the per-dst limit                                          | check `kMaxV2VMultiCopies` / batch geometry                         |
 | `runtime/v2v_slow`                                       | `rebel` | a device v2v fell to the host slow path; ONE event row, with a `state:` / `reject:` block below (two views of the same event — don't add their counts) and the real transfer on the `>>` line | a device copy did not stay on device                                               | see the block + `>>` line below                                     |
 | ↳ `state: src_not_on_device`                             | `rebel` | the source was host-latest                                                                                                                                                                    | (state axis)                                                                       | keep the source on device                                           |
@@ -345,8 +351,14 @@ And the auxiliary readouts (in `dump()`):
 
 - `cpu_fallback_by_op`, `recompile_by_op` — per-op counts of what fell back to
   the CPU (every op-level fallback path) and of what recompiled.
-- `cpu_fallback_reasons` — the `dtype-not-dispatch / nan-inf / all-scalar /
-  out-dtype` breakdown of the C++ shim's own fallbacks.
+- `cpu_fallback_reasons_by_op` — the fallback counts of each op split by reason:
+  the `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` case (`dtype`, `scalar`,
+  `nan_inf`, `align`, ...) or `TORCH_RBLN_DISABLE_FALLBACK` category
+  (`compile_error`, `unsupported_op`, `strided_copy_error`) that decided it, or
+  else the check itself (`registered` for an op registered to the CPU fallback,
+  `out_dtype`, `div_rounding`, `index_pattern`, ...). The C++ shim's own `dtype`
+  and `scalar` checks use those names too, but
+  `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` does not turn them off.
 - `cpu_fallback_unaccelerated` (A) — fallback ops with no fast-path handler,
   among those that went through the boxed C++ CPU fallback (the only path that
   consults one).

@@ -49,18 +49,17 @@ _ops_without_forward_ad_support = {
 # RBLN SDPA rejects dropout + autograd only (the backward can't reproduce the forward
 # dropout mask, so it raises rather than return a silently wrong gradient — see
 # sdpa.py). Drop exactly that OpInfo sample -- dropout_p>0 requested WITH requires_grad
-# on an RBLN device -- so the grad/consistency tests skip only the unsupported case and
-# keep every other sample intact: forward-only (requires_grad=False) dropout, all
-# non-dropout samples, and any CPU instantiation of the shared OpInfo. ``test_dtypes``
-# stays globally skipped via ``_skipped_tests`` above.
+# -- so the grad/consistency tests skip only the unsupported case and keep every other
+# sample intact: forward-only (requires_grad=False) dropout and all non-dropout samples.
+# It ignores the device, as test/ops/conftest.py builds samples on the host.
+# ``test_dtypes`` stays globally skipped via ``_skipped_tests`` above.
 def _drop_dropout_grad_samples(op):
     _orig_sample_inputs = op.sample_inputs_func
 
     @wraps(_orig_sample_inputs)
     def _filtered(op_info, device, dtype, requires_grad=False, **kwargs):  # noqa: FBT002
-        is_rbln = "rbln" in str(device) or "privateuse1" in str(device)
         for sample in _orig_sample_inputs(op_info, device, dtype, requires_grad=requires_grad, **kwargs):
-            if is_rbln and requires_grad and sample.kwargs.get("dropout_p", 0.0):
+            if requires_grad and sample.kwargs.get("dropout_p", 0.0):
                 continue  # dropout + autograd is rejected on RBLN; skip just this sample
             yield sample
 
@@ -151,6 +150,7 @@ _ops_with_rbln_native_kernel = [
     "cat",
     "__getitem__",
     "index_copy",
+    "index_put",
     "index_select",
     "repeat_interleave",
     "stack",
@@ -212,10 +212,8 @@ else:
     _root_names.update(_ops_with_public_api_name_mismatch)
     _root_names.update(_ops_with_rbln_native_kernel)
 
-_target_ops = set()
-for root_name in _root_names:
-    _target_ops.add(root_name)
-    _target_ops.add(f"_refs.{root_name}")
+# No `_refs.*`: they test upstream's Python decompositions, not our kernels.
+_target_ops = set(_root_names)
 
 # Ops that test CPU fallback with non-float16 dtypes (e.g., SDPA falls back when dtype
 # != float16).
