@@ -515,6 +515,18 @@ class TestRegisteredPythonOps(TestCase):
 
     rbln_device = torch.device("rbln:0")
 
+    @parametrize("op_name", ["div", "rsqrt", "sigmoid", "log"])
+    @parametrize("size", [0, 20, 64])
+    def test_int64_float_result_rejects_integer_out(self, op_name, size):
+        op = getattr(torch, op_name)
+        x = torch.ones(size, dtype=torch.int64)
+        args = (x, x) if op_name == "div" else (x,)
+        with self.assertRaisesRegex(RuntimeError, "cast"):
+            op(*args, out=torch.empty_like(x))
+        device_args = tuple(t.to(self.rbln_device) for t in args)
+        with self.assertRaisesRegex(RuntimeError, "cast"):
+            op(*device_args, out=torch.empty_like(device_args[0]))
+
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_add(self, dtype, shape):

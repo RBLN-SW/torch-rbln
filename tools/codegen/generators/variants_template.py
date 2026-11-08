@@ -174,14 +174,23 @@ def {kernel_name}(*args, **kwargs):
 """
 
         @staticmethod
-        def dtype_default() -> str:
+        def dtype_default(root_name: str) -> str:
             """Generate default dtype validation."""
-            return """    if input_dtype is not None and input_dtype != out_tensor.dtype:
+            code = ""
+            if root_name in {"div", "rsqrt", "sigmoid", "log"}:
+                rounding = 'kwargs.get("rounding_mode") is None and ' if root_name == "div" else ""
+                code += f"""    if {rounding}not (out_tensor.is_floating_point() or out_tensor.is_complex()):
+        raise RuntimeError(f"Floating point result cannot be cast to output dtype {{out_tensor.dtype}}.")
+"""
+            return (
+                code
+                + """    if input_dtype is not None and input_dtype != out_tensor.dtype:
         if not is_type_promotion_allowed(args, out_tensor):
             raise RuntimeError(
                 f"Unsafe cast: input has dtype {input_dtype} but output tensor has dtype {out_tensor.dtype}."
             )
 """
+            )
 
     class FunctionVariants:
         """Templates for different function variants."""
