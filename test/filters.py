@@ -9,7 +9,7 @@ from torch.testing._internal.common_device_type import instantiate_device_type_t
 from torch.testing._internal.common_methods_invocations import op_db
 from torchgen.model import dispatch_keys
 
-from test.utils import SUPPORTED_DTYPES
+from torch_rbln._internal.ops_utils import SupportedDtypes
 
 
 __all__ = [
@@ -251,7 +251,11 @@ def _skip_if_not_implemented(fn):
                 raise SkipTest(msg)
             # `dtype` restriction - SDPA is an exception to test CPU fallback with
             # various dtypes
-            if name == "dtype" and value not in SUPPORTED_DTYPES and op_name not in _ops_with_cpu_fallback_dtype_tests:
+            if (
+                name == "dtype"
+                and value not in SupportedDtypes.dispatch
+                and op_name not in _ops_with_cpu_fallback_dtype_tests
+            ):
                 msg = f"Skipping {fn.__name__} because it is not supported dtype"
                 raise SkipTest(msg)
 

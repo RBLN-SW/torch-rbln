@@ -293,11 +293,12 @@ class TestInternalOpUtils(TestCase):
     # =========================================================================
 
     def test_supported_dtypes_dispatch(self):
-        """Tuple of ``float16``, ``bfloat16`` and ``float32``; excludes other dtypes."""
+        """Default dispatch includes floating-point dtypes and int64."""
         self.assertIsInstance(SupportedDtypes.dispatch, tuple)
         self.assertIn(torch.bfloat16, SupportedDtypes.dispatch)
         self.assertIn(torch.float16, SupportedDtypes.dispatch)
         self.assertIn(torch.float32, SupportedDtypes.dispatch)
+        self.assertIn(torch.int64, SupportedDtypes.dispatch)
         self.assertNotIn(torch.bool, SupportedDtypes.dispatch)
 
     def test_supported_dtypes_sdpa(self):

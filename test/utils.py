@@ -16,7 +16,8 @@ from torch_rbln._internal.ops_utils import SupportedDtypes
 from torch_rbln._internal.rdma_env import apply_default_rbln_network_environment
 
 
-SUPPORTED_DTYPES = list(SupportedDtypes.dispatch)
+# Shared matrix for floating-point tests; OpInfo and dispatch tests cover integers.
+SUPPORTED_DTYPES = [dtype for dtype in SupportedDtypes.dispatch if dtype.is_floating_point]
 
 _DEFAULT_DISTRIBUTED_MASTER_PORT = "29604"
 

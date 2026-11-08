@@ -13,10 +13,12 @@ namespace c10::rbln {
 // don't leak into `sdpa` or `amp`, which must stay float-only.
 // float32: the device may cast fp32 ops to a custom float format, so an fp32
 // op dispatched here can run in reduced precision.
-inline constexpr std::array<c10::ScalarType, 3> kDispatchDtypes = {
+// int64: device computation narrows values to int32 (docs/EAGER_DISPATCH.md).
+inline constexpr std::array<c10::ScalarType, 4> kDispatchDtypes = {
     c10::kHalf,
     c10::kBFloat16,
-    c10::kFloat};
+    c10::kFloat,
+    c10::kLong};
 inline constexpr std::array<c10::ScalarType, 2> kSdpaDtypes = {
     c10::kHalf,
     c10::kBFloat16};
@@ -30,10 +32,12 @@ inline constexpr std::array<c10::ScalarType, 0> kAmpDtypes = {};
 // torch.accelerator device-capability dtypes (backs get_device_capability):
 // dtypes actually resident in RBLN device memory. Other dtypes accept
 // device="rbln" but are CPU-backed (0 device bytes), so they are not a device
-// capability. A dtype becomes resident when a device op produces it, and eager
-// dispatch sends exactly the kDispatchDtypes to the device, so this is that set
-// (measured in test_accelerator_contract.py).
-inline constexpr auto kCapabilityDtypes = kDispatchDtypes;
+// capability. Dispatch admission does not imply device residency: int64
+// results remain host-backed (measured in test_accelerator_contract.py).
+inline constexpr std::array kCapabilityDtypes = {
+    c10::kHalf,
+    c10::kBFloat16,
+    c10::kFloat};
 
 constexpr bool is_dispatch_dtype(c10::ScalarType s) noexcept {
   for (const auto d : kDispatchDtypes) {
@@ -58,14 +62,8 @@ constexpr bool is_dispatch_dtype(c10::ScalarType s) noexcept {
 //
 // The dtypes the extension may admit. Every floating one needs a NaN/Inf
 // scanner in DispatchShim.cpp (scanner_for).
-inline constexpr std::array<c10::ScalarType, 7> kDispatchExtensionDtypes = {
-    c10::kDouble,
-    c10::kInt,
-    c10::kLong,
-    c10::kShort,
-    c10::kChar,
-    c10::kByte,
-    c10::kBool};
+inline constexpr std::array<c10::ScalarType, 6> kDispatchExtensionDtypes =
+    {c10::kDouble, c10::kInt, c10::kShort, c10::kChar, c10::kByte, c10::kBool};
 
 // Replace the extension. Each dtype must be in kDispatchExtensionDtypes;
 // otherwise this throws and the previous extension stays in place.

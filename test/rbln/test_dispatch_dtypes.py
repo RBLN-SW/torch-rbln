@@ -59,6 +59,42 @@ def _run_int32_scenario(**env) -> tuple[str, dict, dict]:
     )
 
 
+@pytest.mark.npu(count=1)
+class TestInt64Dispatch(TestCase):
+    def test_default_int64_dispatch(self):
+        code = r"""
+import torch, torch_rbln
+from torch_rbln import _C
+a = torch.arange(128, dtype=torch.int64).reshape(2, 64) - 32
+b = torch.full_like(a, 3)
+x, y = a.to("rbln"), b.to("rbln")
+ops = (
+    lambda x, y: x + y,
+    lambda x, y: x * y,
+    lambda x, y: x == 0,
+    lambda x, y: x > 0,
+    lambda x, y: x.masked_fill(x == 0, 7),
+    lambda x, y: torch.where(x > 0, x, y),
+)
+_C._warmcache_clear()
+_C._dispatch_fallback_by_op_reset()
+hits = _C._dispatch_shim_diag_dump()[2]
+for op in ops:
+    for _ in range(2):
+        torch.testing.assert_close(op(x, y).cpu(), op(a, b), rtol=0, atol=0)
+fallbacks = dict(_C._dispatch_fallback_by_op())
+warm_hits = _C._dispatch_shim_diag_dump()[2] - hits
+graph = torch.compile(ops[-1], backend="rbln", dynamic=False)
+torch.testing.assert_close(graph(x, y).cpu(), ops[-1](a, b), rtol=0, atol=0)
+print("RESULT", (fallbacks, warm_hits))
+"""
+        fallbacks, warm_hits = run_snippet(
+            code, unset=("TORCH_RBLN_DISPATCH_DTYPES", "TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK")
+        )
+        self.assertEqual(fallbacks, {}, "an int64 op fell back to CPU")
+        self.assertGreater(warm_hits, 0, "no int64 op used the warm cache")
+
+
 class TestDispatchDtypesEnv(TestCase):
     def test_env_parsing(self):
         with pytest.MonkeyPatch.context() as mp:
@@ -66,7 +102,7 @@ class TestDispatchDtypesEnv(TestCase):
             self.assertEqual(_dispatch_extension_from_env(), ())
             # torch names and torch aliases; catalog dtypes and repeats are skipped
             mp.setenv("TORCH_RBLN_DISPATCH_DTYPES", " int32, float64,float32, int, long ,")
-            self.assertEqual(_dispatch_extension_from_env(), (torch.int32, torch.float64, torch.int64))
+            self.assertEqual(_dispatch_extension_from_env(), (torch.int32, torch.float64))
             mp.setenv("TORCH_RBLN_DISPATCH_DTYPES", "int32, float3")
             with self.assertRaisesRegex(ValueError, "'float3' is not a torch dtype name"):
                 _dispatch_extension_from_env()
