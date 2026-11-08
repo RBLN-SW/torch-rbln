@@ -34,7 +34,8 @@ Pre-merge, post-merge, and release checks all run these jobs:
 - **Source linting** runs the linters once per Python version, CPU architecture,
   and build type.
 - **Wheel builds** build a wheel per Python version, CPU architecture, and build
-  type.
+  type. They check each wheel for `manylinux` compatibility and valid metadata,
+  and verify that it installs and imports in a clean environment.
 - **NPU tests** run the C++ tests and the Python test suites for each NPU
   product. Only release checks run the Python tests marked
   [`periodic`](TEST_GUIDE.md#ci-integration).
@@ -74,6 +75,11 @@ Before running `pytest`, each step checks that the pod has exactly the requested
 NPUs of the step's product and that it can load the RBLN user-mode driver. A
 failed check fails the step, so a misallocated pod cannot pass with skipped
 tests or on the wrong NPUs.
+
+The `ops` step also writes a
+[CPU fallback report](TEST_GUIDE.md#report-cpu-fallback-per-test) for each
+`pytest` run and uploads both as artifacts. A failed upload does not fail the
+step.
 
 ### Release checks
 

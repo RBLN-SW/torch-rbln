@@ -14,11 +14,13 @@
 #include <torch/csrc/utils/pybind.h>
 #include <torch_rbln/csrc/distributed/c10d/rbln/ProcessGroupRBLNModule.hpp>
 #include <torch_rbln/csrc/rbln/DispatchShim.h>
+#include <torch_rbln/csrc/rbln/HostPages.h>
 #include <torch_rbln/csrc/rbln/WarmCache.h>
 #include <torch_rbln/csrc/rbln/profiler/kineto/rbln_kineto_adapter.h>
 #include <exception>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -26,9 +28,27 @@ namespace {
 
 // Holds a c10::rbln::CpuFallbackScope for the length of a Python `with` block.
 struct PyCpuFallbackScope {
-  explicit PyCpuFallbackScope(std::string name) : op_name(std::move(name)) {}
+  PyCpuFallbackScope(std::string name, const std::string& why)
+      : op_name(std::move(name)), reason(parse_reason(why)) {}
   std::string op_name;
+  c10::rbln::CpuFallbackReason reason;
   std::optional<c10::rbln::CpuFallbackScope> scope;
+
+ private:
+  // A reason the record does not know is a typo or a new check that has not
+  // been added to CpuFallbackReason yet; either way, fail at the call rather
+  // than count under a name nothing else recognizes.
+  static c10::rbln::CpuFallbackReason parse_reason(const std::string& why) {
+    const auto reason = c10::rbln::parse_cpu_fallback_reason(why);
+    TORCH_CHECK_VALUE(
+        reason.has_value(),
+        "unknown CPU fallback reason '",
+        why,
+        "'; known reasons: ",
+        fmt::format(
+            "{}", fmt::join(c10::rbln::cpu_fallback_reason_names(), ", ")));
+    return *reason;
+  }
 };
 
 /**
@@ -281,7 +301,7 @@ void register_stream_api(py::module_& module) {
       "Internal: set current rbln stream; returns the previous as (stream_id, device_index, device_type)");
 }
 
-// Both callers configure the whole device allocation behind the tensor's base
+// These APIs configure the whole device allocation behind the tensor's base
 // address, so a tensor that does not cover its storage is rejected up front
 // instead of misbehaving downstream. Covering it is the whole contract: a
 // PyTorch view that still spans its storage (base.view(...), base[:]) carries
@@ -367,6 +387,37 @@ void register_internal_api(py::module_& module) {
       },
       "Internal: unpin a host range registered with _host_register");
 
+  module.def(
+      "_set_device_alloc",
+      [](const at::Tensor& tensor,
+         const std::vector<std::tuple<
+             uint32_t,
+             uint32_t,
+             std::vector<std::tuple<int64_t, int64_t, int64_t>>>>& placements,
+         c10::ScalarType physical_dtype) {
+        check_base_rbln_tensor(tensor, "set_device_alloc", "tensor");
+        TORCH_CHECK(
+            tensor.numel() > 0, "set_device_alloc: tensor must not be empty");
+        std::vector<::rbln::DevicePlacement> device_placements;
+        device_placements.reserve(placements.size());
+        for (const auto& [node_id, chiplet_id, axes] : placements) {
+          auto& placement = device_placements.emplace_back();
+          placement.node_id = node_id;
+          placement.chiplet_id = chiplet_id;
+          placement.slice_axes.reserve(axes.size());
+          for (const auto& [axis, begin, end] : axes) {
+            placement.slice_axes.push_back({axis, begin, end});
+          }
+        }
+        c10::rbln::set_device_alloc(
+            tensor.data_ptr(),
+            tensor.scalar_type(),
+            physical_dtype,
+            tensor.sizes().vec(),
+            device_placements);
+      },
+      "Internal: configure a tensor's device placements");
+
   // Set target's device-allocation layout to match ref's, without copying data.
   // Used by torch_rbln.set_device_layout_like().
   module.def(
@@ -401,15 +452,20 @@ void register_internal_api(py::module_& module) {
       &torch_rbln::shim::running_python_op,
       "Internal: schema name of the shim op whose Python wrapper is running on this thread, or None");
   // Python-path CPU fallback, as a context manager around c10's
-  // CpuFallbackScope: `with _CpuFallbackScope(op_name): <run it on CPU>`.
+  // CpuFallbackScope: run the op on CPU inside
+  // `with _CpuFallbackScope(op_name, reason):`.
   py::class_<PyCpuFallbackScope>(module, "_CpuFallbackScope")
-      .def(py::init<std::string>(), py::arg("op_name"))
+      .def(
+          py::init<std::string, std::string>(),
+          py::arg("op_name"),
+          py::arg("reason"))
       .def(
           "__enter__",
           [](PyCpuFallbackScope& self) {
             self.scope.emplace(
                 torch_rbln::shim::python_fallback_op_name(self.op_name),
-                c10::rbln::CpuFallbackPath::kPython);
+                c10::rbln::CpuFallbackPath::kPython,
+                self.reason);
           })
       .def("__exit__", [](PyCpuFallbackScope& self, const py::args& /*exc*/) {
         self.scope.reset();
@@ -418,6 +474,13 @@ void register_internal_api(py::module_& module) {
       "_cpu_fallback_ns",
       &c10::rbln::cpu_fallback_ns,
       "DIAG/PROFILER: wall ns spent in CPU fallbacks, every fallback path");
+  module.def(
+      "_cpu_fallback_reason_names",
+      [] {
+        const auto names = c10::rbln::cpu_fallback_reason_names();
+        return std::vector<std::string>(names.begin(), names.end());
+      },
+      "Internal: every name a CPU fallback can be counted under (c10::rbln::CpuFallbackReason)");
 
   // C++ dispatch shim: install a boxed C++ handler on PrivateUse1 for the given
   // op, with pre-check + cpu_fallback_rbln on fail and Python callback on pass.
@@ -436,6 +499,10 @@ void register_internal_api(py::module_& module) {
       &c10::rbln::cpu_fallback_counts,
       "DIAG/PROFILER: per-op CPU-fallback counts, every torch-rbln fallback path (list of (op_name, count), non-zero only)");
   module.def(
+      "_dispatch_fallback_by_op_reason",
+      &c10::rbln::cpu_fallback_reason_counts,
+      "DIAG/PROFILER: _dispatch_fallback_by_op split by reason (list of (op_name, reason, count), non-zero only)");
+  module.def(
       "_dispatch_fallback_by_op_reset",
       &c10::rbln::reset_cpu_fallback_counts,
       "DIAG/PROFILER: reset per-op CPU-fallback counts");
@@ -451,14 +518,6 @@ void register_internal_api(py::module_& module) {
       "_dispatch_recompile_by_op_reset",
       &torch_rbln::shim::diag_reset_recompile_by_op,
       "DIAG/PROFILER: reset per-op recompile counts");
-  module.def(
-      "_dispatch_fallback_reasons",
-      &torch_rbln::shim::diag_dump_fallback_reasons,
-      "DIAG/PROFILER: cpu_fallback reason counts [dtype-not-dispatch, nan/inf input, all-scalar, out-dtype]");
-  module.def(
-      "_dispatch_fallback_reasons_reset",
-      &torch_rbln::shim::diag_reset_fallback_reasons,
-      "DIAG/PROFILER: reset cpu_fallback reason counts");
   module.def(
       "_explain_set_trace",
       &torch_rbln::shim::diag_set_trace_enabled,
@@ -809,6 +868,7 @@ extern "C" PyObject* initModule() {
   register_public_device_api(python_module);
   register_stream_api(python_module);
   register_internal_api(python_module);
+  register_host_page_api(python_module);
   register_supported_dtypes_api(python_module);
 
   c10::rbln::register_rbln_device_mapping_initialized_callback([]() {

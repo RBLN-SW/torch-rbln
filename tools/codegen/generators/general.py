@@ -72,8 +72,15 @@ class GeneralFunctionGenerator:
         if self.op_categories.needs_tensor_args_extraction_before_empty_handling(root_name):
             code += self.templates.ArgsProcessing.tensor_args_extraction()
         code += self.generate_empty_tensor_handling(root_name)
+        if self.op_categories.needs_scalar_strided_contig(root_name):
+            code += "    args, kwargs_filtered = contiguous_for_scalar_and_strided(args, kwargs_filtered)\n"
         code += self.templates.FunctionBody.main(
-            target, root_name, op_namespace, align_exempt=self.op_categories.is_align_exempt(root_name)
+            target,
+            root_name,
+            op_namespace,
+            predicate_args=self.op_categories.get_predicate_args(root_name),
+            out_alias_arg_pos=0 if self.op_categories.reuses_self_inplace(root_name) else None,
+            align_exempt=self.op_categories.is_align_exempt(root_name),
         )
 
         return code

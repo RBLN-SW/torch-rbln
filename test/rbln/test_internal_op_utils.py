@@ -19,13 +19,13 @@ from torch_rbln._internal.ops_utils import (
     cpu_fallback_path,
     extract_warm_cache_key,
     finalize_output_tensor,
+    get_fallback_reason,
     handle_empty_binary,
     handle_empty_linear,
     handle_empty_mm,
     handle_empty_reduction,
     handle_empty_tensor,
     handle_empty_where,
-    is_cpu_fallback_cases,
     is_inplace_op,
     prepare_args_for_contiguous,
     SupportedDtypes,
@@ -73,7 +73,7 @@ class TestInternalOpUtils(TestCase):
         def add1(x):
             return x + 1.0
 
-        out = cpu_fallback_path(add1, args, **kwargs)
+        out = cpu_fallback_path(add1, args, op_name="test::add1", reason="dtype", **kwargs)
 
         self.assertIsInstance(out, torch.Tensor)
         self.assertEqual(out.device.type, "rbln")
@@ -89,7 +89,7 @@ class TestInternalOpUtils(TestCase):
         def mul(x, y):
             return x * y
 
-        out = cpu_fallback_path(mul, args, **kwargs)
+        out = cpu_fallback_path(mul, args, op_name="test::mul", reason="dtype", **kwargs)
 
         self.assertIsInstance(out, torch.Tensor)
         self.assertEqual(out.device.type, "rbln")
@@ -224,25 +224,17 @@ class TestInternalOpUtils(TestCase):
         self.assertEqual(new_args[0].data_ptr(), a.data_ptr())
         self.assertEqual(new_args[2].data_ptr(), b.data_ptr())
 
-    def test_broadcast_args_general_last_dim_one_forces_broadcast(self):
-        # Exception to the validate-only default: rebel-backend cannot
-        # implicit-compile broadcast where one operand has shape[-1] == 1
-        # while the result has shape[-1] > 1 (raises ``UNEXPECTED_GRAPH``,
-        # see ``softmax_backward_rbln`` test cases). For that pattern
-        # ``broadcast_args_general`` does ``torch.broadcast_tensors +
-        # .contiguous()`` so compile sees same-shape inputs.
+    def test_broadcast_args_general_last_dim_one_passes_through(self):
+        # Shape and storage are preserved even when alignment later forces fallback.
         a = torch.randn((3, 4), device="rbln")
         b = torch.randn((3, 1), device="rbln")
         args = (a, b)
         tensor_args = [a, b]
         new_args = broadcast_args_general(tensor_args, args)
-        # Both tensors now have the broadcast result shape (3, 4)
         self.assertEqual(new_args[0].shape, torch.Size([3, 4]))
-        self.assertEqual(new_args[1].shape, torch.Size([3, 4]))
-        # The size-1 operand was materialized — different storage from input
-        self.assertNotEqual(new_args[1].data_ptr(), b.data_ptr())
-        # And contiguous (so prepare_args_view_aware doesn't re-detect expand)
-        self.assertTrue(new_args[1].is_contiguous())
+        self.assertEqual(new_args[1].shape, torch.Size([3, 1]))
+        self.assertEqual(new_args[0].data_ptr(), a.data_ptr())
+        self.assertEqual(new_args[1].data_ptr(), b.data_ptr())
 
     def test_broadcast_args_general_compatibility_check(self):
         # Even though we don't broadcast, we still validate compatibility so
@@ -331,65 +323,64 @@ class TestInternalOpUtils(TestCase):
         )
 
     # =========================================================================
-    # is_cpu_fallback_cases tests
+    # get_fallback_reason tests
     # =========================================================================
 
-    def test_is_cpu_fallback_cases_dtype(self):
+    def test_get_fallback_reason_dtype(self):
         a = torch.tensor([1, 2], dtype=torch.float32, device="rbln")
         b = torch.tensor([3, 4], dtype=torch.float16, device="rbln")
-        # Dtype fallback due to a
-        self.assertTrue(is_cpu_fallback_cases((a, b)))
+        # float32 and float16 do not share a dtype
+        self.assertEqual(get_fallback_reason((a, b)), "dtype")
 
-    def test_is_cpu_fallback_cases_dtype_float16(self):
+    def test_get_fallback_reason_dtype_float16(self):
         """``float16`` non-scalar tensor passes the dtype gate."""
         fp16_tensor = torch.tensor([1.0, 2.0], dtype=torch.float16, device="rbln")
-        self.assertFalse(is_cpu_fallback_cases((fp16_tensor,)))
+        self.assertIsNone(get_fallback_reason((fp16_tensor,)))
 
-    def test_is_cpu_fallback_cases_dtype_bfloat16(self):
+    def test_get_fallback_reason_dtype_bfloat16(self):
         """``bfloat16`` non-scalar tensor passes the dtype gate."""
         bf16_tensor = torch.tensor([1.0, 2.0], dtype=torch.bfloat16, device="rbln")
-        self.assertFalse(is_cpu_fallback_cases((bf16_tensor,)))
+        self.assertIsNone(get_fallback_reason((bf16_tensor,)))
 
-    def test_is_cpu_fallback_cases_dtype_unsupported(self):
+    def test_get_fallback_reason_dtype_unsupported(self):
         """Unsupported dtype (e.g. ``float64``) falls back to CPU."""
         unsupported_fp64_tensor = torch.tensor([1.0, 2.0], dtype=torch.float64, device="rbln")
-        self.assertTrue(is_cpu_fallback_cases((unsupported_fp64_tensor,)))
+        self.assertEqual(get_fallback_reason((unsupported_fp64_tensor,)), "dtype")
 
-    def test_is_cpu_fallback_cases_dtype_mixed_unsupported(self):
+    def test_get_fallback_reason_dtype_mixed_unsupported(self):
         """When any arg uses an unsupported dtype, fall back to CPU."""
         supported_fp16_tensor = torch.tensor([1.0, 2.0], dtype=torch.float16, device="rbln")
         unsupported_fp64_tensor = torch.tensor([3.0, 4.0], dtype=torch.float64, device="rbln")
-        self.assertTrue(is_cpu_fallback_cases((supported_fp16_tensor, unsupported_fp64_tensor)))
+        self.assertEqual(get_fallback_reason((supported_fp16_tensor, unsupported_fp64_tensor)), "dtype")
 
-    def test_is_cpu_fallback_cases_dtype_mixed_supported(self):
+    def test_get_fallback_reason_dtype_mixed_supported(self):
         """``float16`` + ``bfloat16`` falls back even though each is individually
         supported: the compute path requires all tensor args to share the same dtype.
         """
         fp16_tensor = torch.tensor([1.0, 2.0], dtype=torch.float16, device="rbln")
         bf16_tensor = torch.tensor([3.0, 4.0], dtype=torch.bfloat16, device="rbln")
-        self.assertTrue(is_cpu_fallback_cases((fp16_tensor, bf16_tensor)))
+        self.assertEqual(get_fallback_reason((fp16_tensor, bf16_tensor)), "dtype")
 
-    def test_is_cpu_fallback_cases_trace(self):
-        """When sys.gettrace() is set (e.g. pdb, coverage), is_cpu_fallback_cases
-        returns True (0a).
+    def test_get_fallback_reason_trace(self):
+        """When sys.gettrace() is set (e.g. pdb, coverage), get_fallback_reason
+        returns ``"trace"`` (0a).
         """
         t = torch.tensor([1.0, 2.0], dtype=torch.float16, device="rbln")
         args = (t,)
         with patch("sys.gettrace", return_value=lambda *_a, **_k: None):
-            self.assertTrue(
-                is_cpu_fallback_cases(args),
+            self.assertEqual(
+                get_fallback_reason(args),
+                "trace",
                 "CPU fallback should be triggered when a trace function is set",
             )
         with patch("sys.gettrace", return_value=None):
             # Same args without trace: no fallback from 0a (other conditions may still
             # apply)
-            fallback = is_cpu_fallback_cases(args)
-            # With float16 1D tensor, scalar check triggers (all scalars? no). So we
-            # expect False unless another case triggers (e.g. scalar is checked
-            # per-tensor: all(a.ndim==0) -> False)
-            self.assertFalse(fallback, "Without trace, float16 1D rbln should not fallback from trace")
+            # A float16 1D tensor trips no other case either (scalar needs every
+            # tensor to be 0-d).
+            self.assertIsNone(get_fallback_reason(args), "Without trace, float16 1D rbln should not fall back")
 
-    def test_is_cpu_fallback_cases_trace_disabled(self):
+    def test_get_fallback_reason_trace_disabled(self):
         """When TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK=trace, trace check is skipped."""
         t = torch.tensor([1.0, 2.0], dtype=torch.float16, device="rbln")
         args = (t,)
@@ -399,14 +390,14 @@ class TestInternalOpUtils(TestCase):
             patch.dict(os.environ, {"TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK": "trace"}, clear=False),
             patch("sys.gettrace", return_value=lambda *_a, **_k: None),
         ):
-            self.assertFalse(
-                is_cpu_fallback_cases(args),
+            self.assertIsNone(
+                get_fallback_reason(args),
                 "With trace disabled via env, gettrace() set should not trigger fallback",
             )
 
-    def test_is_cpu_fallback_cases_reentrant(self):
-        """When already inside RBLN compile op (depth > 0), is_cpu_fallback_cases
-        returns True and logs warning (6).
+    def test_get_fallback_reason_reentrant(self):
+        """When already inside RBLN compile op (depth > 0), get_fallback_reason
+        returns ``"reentrant"`` and logs warning (6).
         """
         t = torch.tensor([1.0, 2.0], dtype=torch.float16, device="rbln")
         args = (t,)
@@ -417,15 +408,15 @@ class TestInternalOpUtils(TestCase):
             ),
             patch("torch_rbln._internal.ops_utils.rbln_log_warn") as mock_warn,
         ):
-            result = is_cpu_fallback_cases(args)
-            self.assertTrue(
-                result,
+            self.assertEqual(
+                get_fallback_reason(args),
+                "reentrant",
                 "CPU fallback should be triggered when reentrant (depth > 0)",
             )
             mock_warn.assert_called_once()
             self.assertIn("reentrant", mock_warn.call_args[0][0].lower())
 
-    def test_is_cpu_fallback_cases_reentrant_disabled(self):
+    def test_get_fallback_reason_reentrant_disabled(self):
         """When TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK=reentrant, reentrancy check is
         skipped.
         """
@@ -440,8 +431,8 @@ class TestInternalOpUtils(TestCase):
                 return_value=1,
             ),
         ):
-            self.assertFalse(
-                is_cpu_fallback_cases(args),
+            self.assertIsNone(
+                get_fallback_reason(args),
                 "With reentrant disabled via env, depth > 0 should not trigger fallback",
             )
 

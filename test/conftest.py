@@ -1,11 +1,13 @@
+import json
 import os
 import sys
+from pathlib import Path
 
 import pytest
 import torch
 
 import torch_rbln
-from test.utils import set_deterministic_seeds, xfail_rebel
+from test.utils import CpuFallbackRecorder, set_cpu_fallback_recorder, set_deterministic_seeds, xfail_rebel
 from torch_rbln._internal.log_utils import rbln_log_debug
 
 
@@ -199,6 +201,16 @@ def restore_current_stream(restore_current_device):  # noqa: ARG001
 # Environment variable isolation fixtures
 # =============================================================================
 @pytest.fixture(autouse=True)
+def enable_nan_inf_checks(monkeypatch):
+    """Keep compatibility tests' NaN/Inf CPU fallback without changing runtime defaults.
+
+    Function scope restores the caller's environment and lets an individual test
+    explicitly exercise the default-off path. Subprocesses inherit the test setting.
+    """
+    monkeypatch.setenv("TORCH_RBLN_CHECK_NAN_INF", "ON")
+
+
+@pytest.fixture(autouse=True)
 def disable_compile_error_fallback(monkeypatch):
     """Disable 'compile_error' fallback by appending it to the existing
     TORCH_RBLN_DISABLE_FALLBACK list.
@@ -272,3 +284,82 @@ def pytest_collection_modifyitems(items):
                 f"got args={marker.args} kwargs={marker.kwargs}"
             )
             raise pytest.UsageError(msg)
+
+
+# =============================================================================
+# CPU fallback report (--fallback-report)
+# =============================================================================
+def pytest_addoption(parser):
+    parser.addoption(
+        "--fallback-report",
+        type=Path,
+        metavar="PATH",
+        help="Write each test's call outcome and the CPU fallbacks of the op calls it marks with "
+        "measure_cpu_fallbacks(), per op and reason, to PATH as JSON, leaving out skipped tests and tests "
+        "that mark nothing",
+    )
+
+
+def pytest_configure(config):
+    path = config.getoption("--fallback-report")
+    if path is not None:
+        config.pluginmanager.register(CpuFallbackReport(config, path), "fallback-report")
+
+
+_CPU_FALLBACK = pytest.StashKey[dict]()
+
+
+class CpuFallbackReport:
+    """CPU fallbacks over the op calls a test marks with ``measure_cpu_fallbacks()``
+    (test/utils.py), so a test that passed on a CPU fallback -- comparing CPU against
+    CPU -- shows up. ``test_compare_cpu`` marks its device call; a test that marks
+    nothing has no record. Fixtures, the test's own input generation and comparison,
+    and child processes are not counted.
+
+    The counts are the per-op CPU fallback counts that every fallback path records, the
+    ones ``torch.rbln.explain()`` reads. A test that resets them inside a window is
+    marked, unless the reset came before an op's first fallback in its process, which
+    leaves no trace.
+    """
+
+    def __init__(self, config, path):
+        self.path = path
+        self.worker = hasattr(config, "workerinput")
+        self.tests = {}
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_runtest_call(self, item):
+        recorder = CpuFallbackRecorder()
+        set_cpu_fallback_recorder(recorder)
+        try:
+            return (yield)
+        finally:
+            set_cpu_fallback_recorder(None)
+            if recorder.windows:
+                item.stash[_CPU_FALLBACK] = recorder.record()
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_runtest_makereport(self, item, call):
+        report = yield
+        # Subtest reports are made during the call, before its counts exist. User
+        # properties carry the counts from an xdist worker to the controller.
+        if call.when == "call" and _CPU_FALLBACK in item.stash:
+            report.user_properties.append(("rbln_cpu_fallback", item.stash[_CPU_FALLBACK]))
+        return report
+
+    def pytest_runtest_logreport(self, report):
+        # Subtest reports carry a `context`; the parent's call report covers its call.
+        # Skipped tests, xfails among them, are left out.
+        if self.worker or report.when != "call" or report.skipped or hasattr(report, "context"):
+            return
+        # Missing when reading the counts raised, which failed the call with that error.
+        fallback = dict(report.user_properties).get("rbln_cpu_fallback")
+        if fallback is not None:
+            # The call phase's outcome: a test recorded as passed can still fail in
+            # fixture teardown, such as the device synchronization after it.
+            self.tests[report.nodeid] = {"call_outcome": report.outcome, **fallback}
+
+    def pytest_sessionfinish(self):
+        if not self.worker:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(self.tests, indent=2))

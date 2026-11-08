@@ -83,9 +83,11 @@ class OpCodeGenerator:
 
         return code
 
-    def generate_inplace_function(self, kernel_name: str, general_kernel_name: str) -> str:
+    def generate_inplace_function(self, kernel_name: str, general_kernel_name: str, root_name: str = "") -> str:
         """Generate code for inplace variant of an operation."""
-        return self.templates.FunctionVariants.inplace(kernel_name, general_kernel_name)
+        return self.templates.FunctionVariants.inplace(
+            kernel_name, general_kernel_name, reuse_self=self.op_categories.reuses_self_inplace(root_name)
+        )
 
     def generate_normal_function(self, kernel_name: str, general_kernel_name: str) -> str:
         """Generate code for normal (non-out, non-inplace) variant of an operation."""

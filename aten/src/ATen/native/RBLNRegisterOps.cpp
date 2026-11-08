@@ -30,7 +30,23 @@ namespace {
  * @param stack The stack containing the input and output tensors.
  */
 void fallback_rbln(const c10::OperatorHandle& op, torch::jit::Stack* stack) {
-  at::native::rbln::cpu_fallback_rbln(op, stack);
+  at::native::rbln::cpu_fallback_rbln(
+      op, stack, c10::rbln::CpuFallbackReason::kRegistered);
+}
+
+/**
+ * @brief fallback_rbln for an op with no RBLN registration at all, counted as
+ * `unsupported_op`, the `TORCH_RBLN_DISABLE_FALLBACK` category that turns it
+ * into an error.
+ *
+ * @param op The operator handle for the operation being executed.
+ * @param stack The stack containing the input and output tensors.
+ */
+void unsupported_op_fallback_rbln(
+    const c10::OperatorHandle& op,
+    torch::jit::Stack* stack) {
+  at::native::rbln::cpu_fallback_rbln(
+      op, stack, c10::rbln::CpuFallbackReason::kUnsupportedOp);
 }
 
 /**
@@ -132,7 +148,8 @@ TORCH_LIBRARY_IMPL(_, PrivateUse1, m) {
     m.fallback(
         torch::CppFunction::makeFromBoxedFunction<&error_fallback_rbln>());
   } else {
-    m.fallback(torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
+    m.fallback(torch::CppFunction::makeFromBoxedFunction<
+               &unsupported_op_fallback_rbln>());
   }
 }
 
@@ -180,6 +197,12 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
       "index.Tensor_out",
       torch::CppFunction::makeFromBoxedFunction<
           &at::native::rbln::index_out_rbln>());
+  // Native for accumulate=False; other forms fall back to CPU inside the
+  // kernel.
+  m.impl(
+      "_index_put_impl_",
+      torch::CppFunction::makeFromBoxedFunction<
+          &at::native::rbln::index_put_impl_rbln_>());
   m.impl(
       "repeat_interleave.Tensor",
       TORCH_FN(at::native::rbln::repeat_interleave_Tensor_rbln));
@@ -274,9 +297,6 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
       torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl(
       "masked_scatter_",
-      torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
-  m.impl(
-      "_index_put_impl_",
       torch::CppFunction::makeFromBoxedFunction<&fallback_rbln>());
   m.impl(
       "index_add.out",

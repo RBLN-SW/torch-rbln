@@ -8,10 +8,9 @@ The shim short-circuits to the CPU fallback path on these conditions
   1. any input tensor whose dtype is not float16 (with a per-op
      `skip_dtype_args` allowlist for typed inputs e.g. bool predicates),
   2. all input tensors are scalar (ndim == 0),
-  3. (non-deploy mode only) any input tensor contains NaN or Inf —
-     mirrors the AS-IS Python ``has_invalid_tensor(to_cpu(args))`` safety
-     net that the warm-cache hot path would otherwise bypass after the
-     first call had installed an entry on clean inputs.
+  3. any input tensor contains NaN or Inf, when ``TORCH_RBLN_CHECK_NAN_INF=ON``,
+     deploy mode is off, and ``nan_inf`` / ``all`` fallback checks are not disabled.
+     The C++ scan runs before warm-cache lookup; the Python path uses the same gates.
 
 Two important non-trivial properties:
 
@@ -30,21 +29,219 @@ wrapper path together.
 
 import math
 import os
+from contextlib import contextmanager
 from unittest import mock
 
 import pytest
 import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
-from torch.testing._internal.common_utils import run_tests, TestCase
+from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
 from test.utils import SUPPORTED_DTYPES
 from torch_rbln import _C
+from torch_rbln._internal.compile_cache import _compiled_op_cache
+from torch_rbln._internal.device_arch_utils import is_atom_device
+from torch_rbln._internal.ops_utils import can_use_out_tensor_directly, get_fallback_reason
 
 
 def _dispatch_counts() -> tuple[int, int, int, int]:
     """(n_total, n_fallback, n_warm_hit, n_miss) from the dispatch-shim diagnostics."""
     d = _C._dispatch_shim_diag_dump()
     return d[0], d[1], d[2], d[3]
+
+
+class TestBoolOperandGate(TestCase):
+    def test_only_predicates_are_exempt_from_dtype_matching(self):
+        cond = torch.ones(64, dtype=torch.bool)
+        x = torch.ones(64, dtype=torch.bfloat16)
+        self.assertIsNone(get_fallback_reason((cond, x, x), skip_dtype_args=(0,)))
+        self.assertIsNone(get_fallback_reason((x, cond, 5.0), skip_dtype_args=(1,)))
+        self.assertEqual(get_fallback_reason((cond, x, x.half()), skip_dtype_args=(0,)), "dtype")
+        self.assertEqual(get_fallback_reason((cond, x.double(), x.double()), skip_dtype_args=(0,)), "dtype")
+        self.assertEqual(get_fallback_reason((cond, x, x)), "dtype")
+
+    def test_out_may_alias_only_the_reusable_input(self):
+        x = torch.ones(64)
+        y = torch.ones(64)
+        mask = torch.ones(64, dtype=torch.bool)
+        self.assertTrue(can_use_out_tensor_directly((x, mask, 5.0), {"out": y}, reusable=x))
+        self.assertTrue(can_use_out_tensor_directly((x, mask, 5.0), {"out": x}, reusable=x))
+        self.assertFalse(can_use_out_tensor_directly((x, mask, 5.0), {"out": x}))
+        self.assertFalse(can_use_out_tensor_directly((x, mask, 5.0), {"out": x}, reusable=mask))
+        self.assertFalse(can_use_out_tensor_directly((x, mask, x.view(64)), {"out": x}, reusable=x))
+        self.assertFalse(can_use_out_tensor_directly((x, mask, 5.0), {"out": x.view(64)}, reusable=x))
+
+
+@pytest.mark.npu(count=1)
+class TestBoolOperandCompilation(TestCase):
+    @pytest.fixture(autouse=True)
+    def use_default_scan_policy(self, monkeypatch):
+        monkeypatch.delenv("TORCH_RBLN_CHECK_NAN_INF", raising=False)
+        monkeypatch.delenv("TORCH_RBLN_DEPLOY", raising=False)
+        monkeypatch.delenv("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK", raising=False)
+
+    def setUp(self):
+        _C._warmcache_clear()
+        _C._dispatch_fallback_by_op_reset()
+
+    @dtypes(*SUPPORTED_DTYPES)
+    def test_where_compiles_and_warm_hit_reads_updated_input(self, device, dtype):
+        x_cpu = torch.arange(256, dtype=dtype).reshape(4, 64)
+        mask_cpu = torch.arange(256).reshape(4, 64) % 2 == 0
+        x, mask = x_cpu.to(device), mask_cpu.to(device)
+        y = torch.full((4, 64), -3.0, dtype=dtype, device=device)
+        expected = torch.where(mask_cpu, x_cpu, torch.full_like(x_cpu, -3.0))
+        size = _C._warmcache_size()
+        self.assertEqual(torch.where(mask, x, y).cpu(), expected)
+        self.assertGreater(_C._warmcache_size(), size, "where did not install a compiled runtime")
+        hits = _dispatch_counts()[2]
+        self.assertEqual(torch.where(mask, x, y).cpu(), expected)
+        self.assertGreater(_dispatch_counts()[2], hits, "where did not use the warm cache")
+        y.fill_(7.0)
+        hits = _dispatch_counts()[2]
+        self.assertEqual(torch.where(mask, x, y).cpu(), torch.where(mask_cpu, x_cpu, torch.full_like(x_cpu, 7.0)))
+        self.assertGreater(_dispatch_counts()[2], hits)
+        self.assertFalse(
+            any(name.startswith("aten::where") for name, count in _C._dispatch_fallback_by_op() if count),
+            "where used dispatch CPU fallback",
+        )
+
+    @dtypes(*SUPPORTED_DTYPES)
+    def test_masked_fill_inplace_reuses_program_without_copy_back(self, device, dtype):
+        x_cpu = torch.arange(256, dtype=dtype).reshape(4, 64)
+        mask_cpu = torch.arange(256).reshape(4, 64) % 2 == 0
+        x, mask = x_cpu.to(device), mask_cpu.to(device)
+        compiled = len(_compiled_op_cache)
+        ptr = x.data_ptr()
+        self.assertIs(x.masked_fill_(mask, 5.0), x)
+        self.assertEqual(x.data_ptr(), ptr)
+        self.assertEqual(x.cpu(), x_cpu.masked_fill(mask_cpu, 5.0))
+        self.assertGreater(len(_compiled_op_cache), compiled, "masked_fill_ did not compile")
+        compiled = len(_compiled_op_cache)
+        y_cpu = x_cpu + 1
+        y = y_cpu.to(device)
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as prof:
+            self.assertIs(y.masked_fill_(mask, 5.0), y)
+            torch.rbln.synchronize()
+        self.assertEqual(y.cpu(), y_cpu.masked_fill(mask_cpu, 5.0))
+        self.assertEqual(len(_compiled_op_cache), compiled)
+        self.assertNotIn("aten::copy_", [event.key for event in prof.key_averages()])
+
+    @dtypes(*SUPPORTED_DTYPES)
+    @parametrize("layout", ["full", "row_prefix", "row_offset", "transposed", "column_slice"])
+    def test_masked_fill_inplace_self_reuse_contract(self, device, dtype, layout):
+        # ``self`` is bound as the output only when it reaches the compiler as-is;
+        # a rewritten view takes the copy-back path. Both keep in-place semantics.
+        views = {
+            "full": lambda t: t,
+            "row_prefix": lambda t: t[:2],
+            "row_offset": lambda t: t[1:3],
+            "transposed": lambda t: t.T,
+            "column_slice": lambda t: t[:, :32],
+        }
+        bound = layout in ("full", "row_prefix")
+        base_cpu = torch.arange(4 * 64, dtype=dtype).reshape(4, 64)
+        # First call compiles; the copy-back check below profiles the warm call.
+        views[layout](base_cpu.to(device)).masked_fill_(views[layout](base_cpu).to(device) > 100, -7.0)
+        base = base_cpu.to(device)
+        x, x_cpu = views[layout](base), views[layout](base_cpu)
+        mask, mask_cpu = x > 100, x_cpu > 100
+        ptr, shape = x.data_ptr(), x.shape
+        torch.rbln.synchronize()
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as prof:
+            self.assertIs(x.masked_fill_(mask, -7.0), x)
+            torch.rbln.synchronize()
+        x_cpu.masked_fill_(mask_cpu, -7.0)
+        self.assertEqual(x.data_ptr(), ptr)
+        self.assertEqual(x.shape, shape)
+        self.assertEqual(base.cpu(), base_cpu)
+        copied = "aten::copy_" in [event.key for event in prof.key_averages()]
+        self.assertEqual(copied, not bound, f"{layout}: copy-back {'missing' if bound else 'expected'}")
+
+    @dtypes(*SUPPORTED_DTYPES)
+    @parametrize("scan_enabled", [False, True])
+    def test_masked_fill_neg_inf_respects_scan_policy(self, device, dtype, scan_enabled):
+        # With the scan off the fill runs on the device, which has no infinities
+        # for float32, nor for bfloat16 on CA devices; -inf comes back saturated.
+        inf_kept = scan_enabled or not (dtype == torch.float32 or (dtype == torch.bfloat16 and is_atom_device()))
+        x_cpu = torch.arange(256, dtype=dtype).reshape(4, 64)
+        mask_cpu = torch.arange(256).reshape(4, 64) % 2 == 0
+        x, mask = x_cpu.to(device), mask_cpu.to(device)
+        compiled = len(_compiled_op_cache)
+        with mock.patch.dict(os.environ, {"TORCH_RBLN_CHECK_NAN_INF": "ON"} if scan_enabled else {}):
+            x.masked_fill_(mask, -float("inf"))
+        if inf_kept:
+            self.assertEqual(x.cpu(), x_cpu.masked_fill(mask_cpu, -float("inf")))
+        if scan_enabled:
+            self.assertEqual(len(_compiled_op_cache), compiled)
+        else:
+            self.assertGreater(len(_compiled_op_cache), compiled, "default-off -inf fill did not compile")
+        fell_back = any(name.startswith("aten::masked_fill") for name, count in _C._dispatch_fallback_by_op() if count)
+        self.assertEqual(fell_back, scan_enabled)
+
+    @dtypes(*SUPPORTED_DTYPES)
+    def test_where_permuted_operand_with_scalar_matches_cpu(self, device, dtype):
+        # The pinned compiler crashes on a permuted operand next to a 0-dim operand; the
+        # handler makes the inputs contiguous first (TODO: that guard will be removed;
+        # this test must keep passing without it).
+        # Values stay below 1024, which the device's float32 format holds exactly.
+        a_cpu = (torch.arange(64 * 128) % 1000).to(dtype).reshape(64, 128)
+        a = a_cpu.to(device)
+        cond_cpu, cond = a_cpu.T > 100, a.T > 100
+        self.assertEqual(torch.where(cond, -1.0, a.T).cpu(), torch.where(cond_cpu, -1.0, a_cpu.T))
+        self.assertEqual(torch.where(cond, a.T, 0.0).cpu(), torch.where(cond_cpu, a_cpu.T, 0.0))
+        self.assertEqual(torch.where(cond.contiguous(), 1.0, a.T).cpu(), torch.where(cond_cpu, 1.0, a_cpu.T))
+
+    @dtypes(*SUPPORTED_DTYPES)
+    def test_masked_fill_empty_self_with_scalar_mask_skips_compile(self, device, dtype):
+        # The OpInfo harness applies a 0-dim mask to an empty sample; the program
+        # must not be compiled (runtime creation fails on an empty input).
+        compiled = len(_compiled_op_cache)
+        x = torch.empty(0, dtype=dtype, device=device)
+        mask = torch.ones((), dtype=torch.bool, device=device)
+        self.assertIs(x.masked_fill_(mask, 0), x)
+        self.assertEqual(x.shape, (0,))
+        out = torch.masked_fill(torch.empty(0, 3, dtype=dtype, device=device), mask, 1.0)
+        self.assertEqual(out.shape, (0, 3))
+        self.assertEqual(out.dtype, dtype)
+        self.assertEqual(len(_compiled_op_cache), compiled)
+
+    @dtypes(*SUPPORTED_DTYPES)
+    @parametrize("op", ["where", "masked_fill"])
+    @parametrize("value_on_cpu", [False, True])
+    def test_rank0_tensor_value_is_read_on_each_call(self, device, dtype, op, value_on_cpu):
+        x_cpu = torch.arange(256, dtype=dtype).reshape(4, 64)
+        mask_cpu = torch.arange(256).reshape(4, 64) % 2 == 0
+        x, mask = x_cpu.to(device), mask_cpu.to(device)
+        # A CPU 0-dim value is a scalar operand, as on CUDA.
+        value = torch.tensor(2.5, dtype=dtype, device="cpu" if value_on_cpu else device)
+        compiled = len(_compiled_op_cache)
+        for scalar in (2.5, 4.0):
+            value.fill_(scalar)
+            if op == "where":
+                result = torch.where(mask, value, x)
+                expected = torch.where(mask_cpu, torch.tensor(scalar, dtype=dtype), x_cpu)
+            else:
+                result = x.masked_fill_(mask, value)
+                expected = x_cpu.masked_fill(mask_cpu, scalar)
+            self.assertEqual(result.cpu(), expected)
+        # The value must be read by the compiled program, not by a CPU fallback.
+        self.assertGreater(len(_compiled_op_cache), compiled, f"{op} with a rank-0 value did not compile")
+        self.assertFalse(
+            any(name.startswith(f"aten::{op}") for name, count in _C._dispatch_fallback_by_op() if count),
+            f"{op} with a rank-0 value used dispatch CPU fallback",
+        )
+
+    @parametrize("self_shape,mask_shape", [((1, 64), (4, 64)), ((0, 64), (4, 64)), ((4, 64), (3,))])
+    def test_masked_fill_inplace_shape_errors_match_cpu(self, device, self_shape, mask_shape):
+        # Binding self as the compiled output must not change the error for a
+        # mask that does not broadcast to self.
+        mask_cpu = torch.zeros(mask_shape, dtype=torch.bool)
+        with self.assertRaises(RuntimeError) as cpu_err:
+            torch.zeros(self_shape, dtype=torch.float16).masked_fill_(mask_cpu, 5.0)
+        with self.assertRaises(RuntimeError) as dev_err:
+            torch.zeros(self_shape, dtype=torch.float16, device=device).masked_fill_(mask_cpu.to(device), 5.0)
+        self.assertEqual(str(dev_err.exception), str(cpu_err.exception))
 
 
 @pytest.mark.npu(count=1)
@@ -147,6 +344,65 @@ class TestDispatchShimWrappedScalar(TestCase):
 
 
 @pytest.mark.npu(count=1)
+class TestDispatchShimLastDimOneBroadcast(TestCase):
+    """Aligned last-dim-size-one broadcasts use the device and warm cache."""
+
+    def setUp(self) -> None:
+        _C._warmcache_clear()
+
+    @contextmanager
+    def _expect_warm_hit(self):
+        before = _dispatch_counts()[2]
+        yield
+        self.assertGreater(_dispatch_counts()[2], before, "call must use the warm cache")
+
+    def test_aligned_output_takes_device_path_and_warm_hits(self) -> None:
+        x = torch.arange(4 * 64, dtype=torch.float16, device="rbln").reshape(4, 64)
+        s = torch.tensor([[1.0], [2.0], [3.0], [4.0]], dtype=torch.float16, device="rbln")
+        expected = x.cpu() * s.cpu()
+        self.assertEqual((x * s).cpu(), expected)
+        self.assertGreater(_C._warmcache_size(), 0, "the broadcast did not install a device entry")
+        with self._expect_warm_hit():
+            self.assertEqual((x * s).cpu(), expected)
+        s.fill_(0.5)
+        with self._expect_warm_hit():
+            self.assertEqual((x * s).cpu(), x.cpu() * 0.5)
+
+    @dtypes(*SUPPORTED_DTYPES)
+    @parametrize("op", [torch.eq, torch.ne, torch.gt, torch.ge, torch.lt, torch.le])
+    def test_comparison_broadcast_warm_hit_reads_updated_input(self, dtype, op) -> None:
+        x_cpu = torch.arange(4 * 64, dtype=dtype).reshape(4, 64)
+        threshold_cpu = torch.tensor([[16.0], [80.0], [144.0], [208.0]], dtype=dtype)
+        x, threshold = x_cpu.to("rbln"), threshold_cpu.to("rbln")
+        expected = op(x_cpu, threshold_cpu)
+        self.assertEqual(op(x, threshold).cpu(), expected)
+        self.assertGreater(_C._warmcache_size(), 0, "the comparison did not install a device entry")
+        with self._expect_warm_hit():
+            self.assertEqual(op(x, threshold).cpu(), expected)
+
+        threshold.fill_(128.0)
+        updated = op(x_cpu, torch.full_like(threshold_cpu, 128.0))
+        self.assertFalse(torch.equal(expected, updated), "updated threshold must change the result")
+        with self._expect_warm_hit():
+            self.assertEqual(op(x, threshold).cpu(), updated)
+
+    def test_unaligned_output_takes_device_path(self) -> None:
+        x = torch.arange(4 * 8, dtype=torch.float16, device="rbln").reshape(4, 8)
+        s = torch.tensor([[1.0], [2.0], [3.0], [4.0]], dtype=torch.float16, device="rbln")
+        self.assertEqual((x * s).cpu(), x.cpu() * s.cpu())
+        self.assertGreater(_C._warmcache_size(), 0, "mul is align-exempt and must install a device entry")
+
+    def test_empty_output_keeps_the_cpu_fallback(self) -> None:
+        x_cpu = torch.empty((4, 0), dtype=torch.float16)
+        s_cpu = torch.ones((4, 1), dtype=torch.float16)
+        x, s = x_cpu.to("rbln"), s_cpu.to("rbln")
+        _C._dispatch_fallback_by_op_reset()
+        self.assertEqual((x * s).cpu(), x_cpu * s_cpu)
+        self.assertTrue(any(name.startswith("aten::mul") and count for name, count in _C._dispatch_fallback_by_op()))
+        self.assertEqual(_C._warmcache_size(), 0)
+
+
+@pytest.mark.npu(count=1)
 class TestDispatchShimAllScalarFallback(TestCase):
     """All-scalar inputs trip the fallback (the shortcut is correct here).
 
@@ -180,21 +436,12 @@ class TestDispatchShimDtypeMismatch(TestCase):
 
 @pytest.mark.npu(count=1)
 class TestDispatchShimNanInfFallback(TestCase):
-    """Inputs containing NaN or Inf must route to the CPU fallback path in
-    non-deploy mode.
+    """Opted-in NaN/Inf inputs must fall back even after a clean call primes the cache.
 
-    The rbln runtime does not handle NaN/Inf inputs and will silently produce
-    wrong results. In AS-IS this safety net was carried by the Python
-    wrapper's per-call ``has_invalid_tensor(to_cpu(args))`` scan; in TO-BE
-    the C++ ``quick_fallback_check`` performs the same scan (only when
-    non-deploy + ``TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK`` does not contain
-    ``nan_inf`` / ``all``) so the warm-cache hot path cannot bypass it after
-    the first clean call installs an entry for the shape.
-
-    These tests assume the default non-deploy environment (the deploy / nan_inf-disable
-    gates are read live from the environment on each dispatch, not process-cached;
-    running the suite with ``TORCH_RBLN_DEPLOY=ON`` skips the scan and these checks no
-    longer hold — that's the intended deploy-mode behavior and matches AS-IS).
+    The shared ``enable_nan_inf_checks`` fixture sets ``TORCH_RBLN_CHECK_NAN_INF=ON``;
+    production dispatch leaves the scan off by default. These tests also require
+    deploy mode to be off and ``TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK`` to contain
+    neither ``nan_inf`` nor ``all``. Either override skips the scan despite the opt-in.
     """
 
     def setUp(self) -> None:
@@ -333,11 +580,12 @@ class TestDispatchShimNanInfFallback(TestCase):
 
 @pytest.mark.npu(count=1)
 class TestDispatchShimGateLiveRead(TestCase):
-    """Both NaN/Inf-scan gates -- ``TORCH_RBLN_DEPLOY`` (``is_deploy_mode``) and
-    ``TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK`` (``is_fallback_case_disabled``) in
-    ``DispatchShim.cpp`` -- are read live per dispatch, not cached in a process-lifetime
-    ``static``. A re-introduced static cache in either would latch the first value and
-    fail its toggle. They are separate functions, so each is toggled separately.
+    """The deploy and fallback-disable overrides are read live per dispatch.
+
+    The shared fixture keeps ``TORCH_RBLN_CHECK_NAN_INF=ON`` while these tests toggle
+    ``TORCH_RBLN_DEPLOY`` and ``TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK`` separately.
+    A process-lifetime cache in either override would fail its toggle. Live reads of
+    the opt-in flag itself are covered in ``test_nan_inf_opt_in.py``.
     """
 
     _GATE_ENVS = ("TORCH_RBLN_DEPLOY", "TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK")
@@ -351,9 +599,9 @@ class TestDispatchShimGateLiveRead(TestCase):
 
     def _assert_gate_read_live(self, env_name, scan_off_value) -> None:
         """Toggle one gate off -> on -> off in a single process and assert the warm
-        cache is primed only while the scan is off. Both gate envs are cleared at each
-        baseline so ambient state can't skip the scan; ``env_name=scan_off_value``
-        disables it.
+        cache is primed only while the scan is off. With the shared fixture's opt-in
+        active, clearing both override envs restores the scan at each baseline;
+        ``env_name=scan_off_value`` disables it.
         """
         if not _C._warmcache_is_enabled():
             self.skipTest("warm cache disabled; the device-path install is unobservable")
@@ -387,6 +635,8 @@ class TestDispatchShimGateLiveRead(TestCase):
 
 
 instantiate_device_type_tests(TestDispatchShimWrappedScalar, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestDispatchShimLastDimOneBroadcast, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestBoolOperandCompilation, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestDispatchShimAllScalarFallback, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestDispatchShimDtypeMismatch, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestDispatchShimNanInfFallback, globals(), only_for="privateuse1")

@@ -62,6 +62,13 @@ class GeneralTemplates:
 """
 
         @staticmethod
+        def masked_fill() -> str:
+            """Empty ``self`` gives an empty result even with a non-empty 0-dim mask."""
+            return """    if args[0].numel() == 0:
+        return handle_empty_masked_fill(args, kwargs.get('out', None))
+"""
+
+        @staticmethod
         def broadcastable() -> str:
             """Generate empty tensor handling for broadcastable operations."""
             return """    args = broadcast_args_general(tensor_args, args)
@@ -119,28 +126,48 @@ def {kernel_name}(*args, **kwargs):
 """
 
         @staticmethod
-        def main(target: str, root_name: str, op_namespace: str, *, align_exempt: bool = False) -> str:
+        def main(
+            target: str,
+            root_name: str,
+            op_namespace: str,
+            *,
+            predicate_args: list[int] | None = None,
+            out_alias_arg_pos: int | None = None,
+            align_exempt: bool = False,
+        ) -> str:
             """Generate main function body logic.
 
             Delegates the device-path dispatch to
             ``compile_and_run_view_aware`` (single helper call) and keeps
             the cpu-fallback gate inline since it short-circuits without
             going to the device.
+
+            ``predicate_args`` are the positional indices the dtype gate skips
+            (``OpCategories.PREDICATE_ARGS``); ``out_alias_arg_pos`` is the
+            position of the input ``out`` may alias (an in-place ``self``).
             """
+            gate = (
+                f"get_fallback_reason(args, skip_dtype_args={list(predicate_args)})"
+                if predicate_args
+                else "get_fallback_reason(args)"
+            )
+            reuse = f" out_alias_arg_pos={out_alias_arg_pos}," if out_alias_arg_pos is not None else ""
             exempt = "\n            align_exempt=True," if align_exempt else ""
             return f"""
     out_tensor = kwargs.get('out', None)
-    if is_cpu_fallback_cases(args):
+    fallback_reason = {gate}
+    if fallback_reason:
         result_tensor = cpu_fallback_path(
             {target},
             args,
             result=out_tensor,
             op_name="{op_namespace}::{root_name}",
+            reason=fallback_reason,
             **kwargs_filtered,
         )
     else:
         result_tensor = compile_and_run_view_aware(
-            {target}, "{op_namespace}::{root_name}", args, kwargs_filtered, out_tensor,{exempt}
+            {target}, "{op_namespace}::{root_name}", args, kwargs_filtered, out_tensor,{reuse}{exempt}
         )
 
     return result_tensor, result_tensor.shape

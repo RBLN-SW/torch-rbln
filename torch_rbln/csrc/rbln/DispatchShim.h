@@ -67,13 +67,6 @@ std::optional<std::string> running_python_op();
 std::vector<std::pair<std::string, uint64_t>> diag_dump_recompile_by_op();
 void diag_reset_recompile_by_op();
 
-// DIAG/PROFILER: cpu_fallback reason histogram, counts for reason codes 1..4:
-// [dtype-not-dispatch, nan/inf input, all-scalar, out-dtype]. Recorded on the
-// fallback branch only (reason already computed by quick_fallback_check) ->
-// ON==OFF preserved.
-std::vector<uint64_t> diag_dump_fallback_reasons();
-void diag_reset_fallback_reasons();
-
 // DIAG/PROFILER (A) WHERE: opt-in Python call-site capture. OFF by default
 // (default explain() pays nothing). When enabled, the slow fallback/miss branch
 // captures the user's call-site ONCE per op (deduped, GIL-safe). dump returns

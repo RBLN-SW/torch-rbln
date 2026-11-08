@@ -85,6 +85,7 @@ test/
 │   └── test_tp_pp.py                      # Tensor-parallel (TP) and pipeline-parallel (PP) end-to-end tests
 │
 ├── ops/                                   # PyTorch operator compatibility tests
+│   ├── conftest.py                        # Runs all but the op under test on the host
 │   └── test_ops.py                        # Adapted from upstream PyTorch test_ops.py — validates op correctness on RBLN
 │
 ├── models/                                # Model-level integration tests
@@ -170,6 +171,32 @@ uv run --no-sync pytest \
   --capture=no \
   --verbose \
   --exitfirst
+```
+
+### Report CPU fallback per test
+
+A test that compares an op against a CPU reference also passes when the op fell
+back to CPU. `--fallback-report=PATH` writes, for each test that wraps its op
+calls in `measure_cpu_fallbacks()` (`test/utils.py`; `test_compare_cpu` wraps
+its device call), the outcome of its call phase (`call_outcome`; a failure in
+fixture teardown, such as the device synchronization after the test, is not in
+it) and the CPU fallbacks inside those windows: how many windows the test opened
+and how many of them fell back (`windows_total`, `windows_with_fallbacks`), the
+fallbacks' total, and their count per op and reason, from the counts every
+fallback path records (`cpu_fallback_reasons_by_op` in [EXPLAIN.md](EXPLAIN.md)
+reads the same). Input
+generation, the comparison, fixtures and child processes are outside the windows
+and not counted, and a test that wraps nothing has no record. A test that resets
+the CPU fallback counts inside a window is marked `cpu_fallback_reset_detected`,
+as its counts can miss fallbacks. The CPU
+retry after a `torch.compile` graph fails to compile is not counted, unlike an
+eager op's, and neither is host work the compiler places inside a compiled
+graph, so no fallback does not mean the device ran everything.
+
+```bash
+uv run --no-sync pytest \
+  test/ops \
+  --fallback-report=/tmp/ops-fallback.json
 ```
 
 ---
@@ -307,7 +334,8 @@ every test unless noted otherwise.
 | `reset_caching_allocator`        | function | **Yes** | Drains in-flight device work then releases the RBLN caching-allocator blocks in teardown; fails loud and skips the flush if the drain faults |
 | `restore_current_device`         | function | **Yes** | Restores the selected RBLN device and lazy-init flag after each test so a `set_device()` can't leak into later tests                         |
 | `restore_current_stream`         | function | **Yes** | Restores every device's current stream after each test so a `set_stream()` can't leak into later tests                                       |
-| `enable_deploy_mode`             | function | No      | Sets `TORCH_RBLN_DEPLOY=ON`. Apply with `@pytest.mark.usefixtures("enable_deploy_mode")`                                                     |
+| `enable_nan_inf_checks`          | function | Yes     | Sets `TORCH_RBLN_CHECK_NAN_INF=ON` to retain compatibility tests' NaN/Inf CPU fallback; restores the environment after each test             |
+| `enable_deploy_mode`             | function | No      | Sets `TORCH_RBLN_DEPLOY=ON`, overriding the NaN/Inf opt-in. Apply with `@pytest.mark.usefixtures("enable_deploy_mode")`                      |
 | `enable_eager_malloc`            | function | No      | Sets `TORCH_RBLN_EAGER_MALLOC=1`. Apply with `@pytest.mark.usefixtures("enable_eager_malloc")`                                               |
 
 ---
@@ -386,6 +414,8 @@ operators not supported on the RBLN backend:
 - Skips unsupported dtypes (only `SUPPORTED_DTYPES` are allowed, with exceptions
   for CPU-fallback dtype tests like SDPA)
 - Skips specific known-failing tests listed in `_skipped_tests`
+- Skips the `_refs.*` OpInfos, which test upstream's Python decompositions rather
+  than RBLN kernels
 - Skips forward AD tests for ops listed in `_ops_without_forward_ad_support`
 - In debug builds (`torch.version.debug`), runs only a representative subset of
   ops for faster iteration
@@ -396,6 +426,10 @@ from test.filters import custom_instantiate_device_type_tests
 
 custom_instantiate_device_type_tests(TestCommon, globals(), only_for="privateuse1")
 ```
+
+`test/ops/conftest.py` runs everything but the op under test on the host: it
+builds OpInfo samples there and compares results there, without editing
+`test_ops.py`.
 
 ### Contract conformance tests
 

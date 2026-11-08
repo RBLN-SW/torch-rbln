@@ -38,15 +38,184 @@ A log file is always created in debug builds. Its path can be configured via
 | Source location   | ✅ Included                         | ❌ Omitted       |
 | Thread ID         | ✅ Included                         | ❌ Omitted       |
 
+## Host memory registration
+
+`torch.rbln.host_register(ptr, size, device)` keeps a whole-request bool
+contract: `True` means every byte was registered; `False` leaves no successful
+partial registration. The caller must keep the allocation alive and call
+`host_unregister(ptr, device)` after a successful registration. Large requests
+can contain multiple native registrations.
+
+For best-effort partial registration of an existing contiguous CPU tensor, use
+the owned result API:
+
+```python
+buffer = torch.rbln.huge_host_empty(64 << 20)
+with torch.rbln.host_register_memory(buffer, device=0) as registration:
+    print(registration.registered_bytes, registration.fully_registered)
+    # Transfer only after registration completes. Ordinary copies also work
+    # for bytes outside registration.registered_ranges.
+```
+
+`registered_ranges` contains `(address, size)` pairs. `covers(ptr, size)` is true
+only when a single native registration contains the entire transfer. Adjacent
+entries can have different device addresses, so a copy crossing their boundary
+still takes the ordinary path. `is_host_memory_registered(ptr, size, device)`
+performs that query for tensor views whose owner is elsewhere, such as a shared
+memory transfer context. The result is not a bool and raises on implicit truth
+testing, preventing partial success from masquerading as whole-buffer pinning.
+
+The result retains the CPU tensor. `close()` waits for pending device transfers,
+unregisters all entries, and then releases that reference. It is idempotent after
+success; object destruction provides the same cleanup as a fallback. A failed
+release retains the backing memory and budget, stops reporting that entry as
+usable, and raises from explicit close. If the runtime erased its record before
+unpin failed, retry cannot recover it; the memory remains retained until process
+exit. Do not resize, unmap, or replace the backing storage while registered, and
+do not share registration handles across `fork`; initialize worker registrations
+after `spawn` instead.
+
+### Temporary page-table admission
+
+Older KMD versions can exhaust their finite page-table pool before safely
+returning an error. By default, both public Python registration APIs share a
+per-device, per-process ledger. The limits are **8,192 ordinary-page leaf
+tables** and **252 GiB of admitted host address space**, including registration
+alignment padding. One ordinary-page table covers 2 MiB, so 8,192 tables allow
+16 GiB of densely packed 4 KiB mappings. Small or fragmented registrations can
+consume that allowance with fewer bytes. Confirmed huge mappings still consume
+address space and upper-level tables; they are not unlimited.
+
+The qualified UMD external VA arena is `[0x4100000000, 0x8000000000)`,
+which is 252 GiB. A 256 GiB allocation therefore retains at least 4 GiB
+unregistered even if every page is huge. This qualification uses KMQ with no
+other users of that external arena. UMQ command buffers and on-demand host
+mappings share the arena; UMQ requires separate capacity qualification and
+accounting before using this large-pool profile.
+
+These limits assume one worker, one context/task per physical device, dual-path
+disabled, 2 MiB-aligned external device VA allocation in UMD, and room for the
+deployment's model mapping in the remaining page-table pool. They are a temporary
+admission policy for that configuration, not a driver capacity guarantee for
+arbitrary context counts or mappings. Calls through private `_C` entry points,
+direct runtime/C++ APIs, or another process are outside this ledger.
+
+| Variable                               | Values                          | Default        |
+| -------------------------------------- | ------------------------------- | -------------- |
+| `TORCH_RBLN_HOST_REGISTRATION_PROFILE` | `conservative`, `thp`, `driver` | `conservative` |
+
+`driver` explicitly bypasses the temporary table and address-space admission
+limits so a fixed KMD can be validated. Both `host_register()` and
+`host_register_memory()` submit the entire requested range in one native
+registration, without page inspection, temporary io_uring pins, or pool-local
+THP promotion by the registration API. It enables registration; it does not
+disable pinning. Existing allocation-time THP advice is unaffected.
+
+Use this mode only when the driver safely rejects insufficient capacity and
+cleans up failed mappings. It does not detect whether a KMD is fixed, increase
+device capacity, or make old drivers safe. Native registration errors propagate;
+they are not converted to an unregistered result or retried with smaller ranges.
+The runtime's unsupported-registration result still yields `False` for the raw
+API or an empty result for the owned API.
+
+If native registration raises and the subsequent unregister also fails, Python
+cannot confirm that the range is safe to release. It preserves the original
+registration error and logs the cleanup failure with the device, address, and
+requested size. The whole requested range remains reserved against overlapping
+retries, and unreleased mapping charges stay in the ledger. For `driver`, that
+is the entire request, since it uses one native registration. The owned API
+retains the tensor but returns no handle on this error; the raw API's caller
+must keep its allocation alive. Use a separate process for each capacity-error
+validation attempt rather than catching the error and retrying in the same one.
+If cleanup succeeds, the range and charges are released and a retry is allowed.
+
+A driver that rolls back a failed mapping may leave nothing for unregister to
+find. The current native API exposes a generic error, so Python cannot treat
+that error as proof of successful rollback. Dropping the allocation or refunding
+its charge requires a verified runtime contract, not an assumption based on the
+selected profile. This option alone does not qualify recovery after exhaustion.
+
+Ownership, overlap checks, coverage queries, and unregister-before-free remain
+active. `driver` records ordinary-page charges for its single native mapping,
+including the initial page offset and device-address alignment padding. This
+can differ from a guarded profile that splits an unaligned range into separate
+registrations. It does not inspect or credit huge pages. Close refunds the
+recorded charges regardless of the current profile.
+
+Switching back to a guarded profile preserves all live charges. If `driver`
+has taken them above either limit, both `conservative` and `thp` refuse new
+registrations before page inspection, including confirmed huge-page ranges.
+Close the existing registrations to restore the allowance. At exactly the
+ordinary-page table limit, `thp` can still admit confirmed huge pages if address
+space remains; ordinary pages cannot be admitted. Set the profile before
+starting the process for reproducible driver validation.
+
+`conservative` counts every admitted window as ordinary pages. `thp` is an
+explicit deployment qualification: use it only when direct/identity DMA
+(`iommu=pt` or a verified equivalent), 2 MiB device VA alignment, and KMD huge
+mapping support are confirmed. Host THP size alone does not prove the size of
+the device mapping. The library does not infer qualification from a global
+huge-page counter or from the absence of an IOMMU group.
+
+For `thp`, registration processes at most 1 GiB at a time:
+
+1. The owned-buffer API requests pool-local `MADV_HUGEPAGE` and best-effort
+   `MADV_COLLAPSE`; the raw pointer API does not alter the caller's THP advice.
+2. Register the window temporarily as io_uring buffers. No I/O is submitted;
+   this holds Linux long-term pins while the mapping is inspected.
+3. Use read-only `PAGEMAP_SCAN` to find present, non-zero, complete 2 MiB huge
+   mappings in that exact range. Unknown and partial windows cost a leaf table.
+4. Reserve budget, coalesce adjacent selected windows, and register them with
+   the device while the temporary pins remain held. An unaligned leading
+   fragment stays separate so it cannot break the body's device alignment.
+5. Release the temporary pins and continue. The device's own pins retain the
+   admitted pages. Unadmitted pages remain ordinary usable host memory.
+
+This requires Linux io_uring buffer registration, sufficient `RLIMIT_MEMLOCK`
+for a bounded inspection window, and the `PAGEMAP_SCAN` UAPI. On unsupported
+kernels, restricted containers, or insufficient memlock, inspection logs its
+failure once per request and charges unverified windows in full. It never
+credits a `smaps` snapshot that can change before registration. Neither API
+changes host-wide THP/compaction settings or tmpfs mount options; tmpfs THP must
+be permitted by the operator's existing mount policy.
+
+When the ordinary-page allowance is exhausted, the owned-buffer API continues
+registering confirmed huge windows and leaves the remaining ordinary windows
+unregistered. For example, an aligned 240 GiB pool with 222 GiB huge and 18 GiB
+ordinary mappings can admit 238 GiB. The separate external-VA limit still applies
+to larger pools. Registration failure with uncertain driver
+cleanup propagates and retains the attempted charge; it is not treated as a
+safe capacity refusal. Replace this temporary guard only after the deployed
+driver/runtime reliably reports exhaustion and rolls back failed registrations.
+
+## NaN/Inf compatibility checks
+
+By default, eager dispatch does not scan inputs for NaN or Inf and does not
+fall back to CPU because of those values. Device arithmetic may interpret or
+propagate them differently from CPU PyTorch, including for bf16. The input
+scan also does not detect non-finite values produced from finite inputs.
+
+To enable host-side input scanning and CPU fallback for NaN/Inf inputs:
+
+```bash
+export TORCH_RBLN_CHECK_NAN_INF=ON
+```
+
+The scan may synchronize device data to the host before each eager operation,
+including warm-cache hits. The pytest suite enables it through a shared fixture
+so upstream ops tests and existing fallback tests retain their behavior.
+Outside pytest, enable it explicitly when running compatibility tests.
+
 ## Deploy mode
 
-Skip NaN/Inf validation checks to reduce runtime overhead in production:
+Deploy mode skips NaN/Inf scanning even when `TORCH_RBLN_CHECK_NAN_INF=ON`.
+Without that opt-in, the scan is already off regardless of deploy mode:
 
 ```bash
 export TORCH_RBLN_DEPLOY=ON
 ```
 
-**Runtime behavior**. `TORCH_RBLN_DEPLOY` and
+**Runtime behavior**. `TORCH_RBLN_CHECK_NAN_INF`, `TORCH_RBLN_DEPLOY` and
 `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` are read on each operator dispatch, so
 changes affect subsequent dispatches without restarting the process. Modify
 these variables only when no RBLN operator dispatch is in progress; concurrent
@@ -106,7 +275,7 @@ runtime warning is emitted once per process the first time this variable is
 observed.
 
 ```bash
-# Disable only the NaN/Inf check (e.g. to benchmark without the scan overhead)
+# Override TORCH_RBLN_CHECK_NAN_INF=ON (the scan is already off by default)
 export TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK=nan_inf
 
 # Disable only the alignment fallback (e.g. to hand unaligned shapes to the compiler)
@@ -138,7 +307,7 @@ The value is a **comma-separated list** of fallback case names to disable:
 | `dtype`          | Falls back on unsupported or mismatched tensor dtypes                                              | Sends such tensors to RBLN — may produce wrong results                             |
 | `scalar`         | Falls back when all input tensors are 0-dim scalars                                                | Sends scalar ops to RBLN — may fail in `rebel-compiler`                            |
 | `storage_offset` | Falls back when a contiguous tensor has `storage_offset != 0`                                      | Sends offset tensors to RBLN — may read wrong data                                 |
-| `nan_inf`        | Falls back when inputs contain NaN or Inf (non-deploy mode only)                                   | Skips the NaN/Inf scan — invalid values reach the device                           |
+| `nan_inf`        | With `TORCH_RBLN_CHECK_NAN_INF=ON`, falls back on NaN/Inf inputs outside deploy mode               | Skips the opt-in scan, even when compatibility checks are enabled                  |
 | `align`          | Falls back when a tensor's last dim is not a multiple of 64, except ops the compiler pads (below)  | Sends unaligned ops to RBLN — slower on small tensors, and each new shape compiles |
 | `all`            | —                                                                                                  | Disables **all** of the above checks                                               |
 

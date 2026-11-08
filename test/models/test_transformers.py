@@ -307,9 +307,8 @@ class TestCausalLM(TestCausalLMBase):
 
         self._assert_logits_match_fp32("meta-llama/Llama-3.2-3B-Instruct", config_kwargs, batch_size, seq_len)
 
-    # Deploy mode is disabled for Qwen2.5 due to float16 overflow issues in certain BMM
-    # operations. This will be enabled in the future when cf16 host padding is
-    # supported.
+    # Keep the shared fixture's NaN/Inf scan enabled for Qwen2.5 because of float16
+    # overflow in certain BMM operations. Deploy mode would override that opt-in.
     @parametrize("dtype,attn_implementation,batch_size,seq_len", small_model_cover_array)
     def test_qwen2(self, dtype, attn_implementation, batch_size, seq_len):
         config_kwargs = {

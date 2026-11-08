@@ -80,6 +80,7 @@ from torch.utils._python_dispatch import TorchDispatchMode
 from torch.utils._pytree import tree_map
 
 from test.filters import custom_instantiate_device_type_tests
+from test.utils import measure_cpu_fallbacks
 
 
 # Set torch._dynamo cache size limit for testing
@@ -735,7 +736,8 @@ class TestCommon(TestCase):
 
             cpu_sample = sample.transform(to_cpu)
 
-            cuda_results = op(sample.input, *sample.args, **sample.kwargs)
+            with measure_cpu_fallbacks():  # the fallback report's window: the op under test only
+                cuda_results = op(sample.input, *sample.args, **sample.kwargs)
             cpu_results = op(cpu_sample.input, *cpu_sample.args, **cpu_sample.kwargs)
 
             # output_process_fn_grad has a very unfortunate name

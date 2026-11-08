@@ -75,7 +75,8 @@ needs different handling.
   or custom ops (`_softmax`, SDPA). Add a plain pointwise or reduction op to the
   matching set; leave an in-place, a backward, or an op with typed non-tensor
   arguments on the Python path. For a single typed argument — `where`'s bool
-  condition — `CPP_SHIM_SKIP_DTYPE_ARGS` exempts that index instead.
+  condition — `PREDICATE_ARGS` exempts that index on both the shim and the
+  Python gate.
 - **A public API name that differs from the schema name** goes in
   `_ops_with_public_api_name_mismatch` in the same file.
 - **`native_functions.yaml` is adapted from upstream PyTorch**. Copy the
@@ -125,7 +126,7 @@ trust agrees exactly.
 1. **Give it an input the device path accepts**: fp16, bf16 or fp32, with a last
    dimension that is a multiple of 64. `SUPPORTED_DTYPES` is those three only,
    and `compile_and_run_view_aware` applies its own alignment fallback after
-   `is_cpu_fallback_cases` (see the 64-element alignment comment in
+   `get_fallback_reason` (see the 64-element alignment comment in
    `ops_utils.py`). Miss the dtype and the op runs on the host however it is
    registered; miss the alignment and the eager Python route does the same for a
    single-tensor op — list ops, C++ kernels, and graph mode are outside that
@@ -162,7 +163,7 @@ Follow `.claude/skills/writing-tests/SKILL.md` for the tests themselves.
 
 - Do not route the op to CPU fallback to make it pass. An op that falls back is
   an op that is not implemented; say so instead.
-- Do not add a special case to `is_cpu_fallback_cases()` for a shape or dtype
+- Do not add a special case to `get_fallback_reason()` for a shape or dtype
   the kernel gets wrong. That hides a correctness bug behind a performance
   cliff.
 - Do not widen a tolerance to make a new op's test agree with the CPU reference.

@@ -22,9 +22,13 @@ programs are not cached on disk.
 - Ops registered directly to the CPU fallback, which have no device
   implementation.
 - Safety and correctness checks: a tracer or dispatch mode, mixed dtypes across
-  operands, all-scalar inputs, a storage offset, NaN/Inf in a floating input,
-  re-entrancy. The NaN/Inf scan covers every floating dtype that can be
-  dispatched.
+  data operands (a bool predicate such as the `where` condition or the
+  `masked_fill` mask is exempt), all-scalar inputs, a storage offset,
+  re-entrancy.
+- With `TORCH_RBLN_CHECK_NAN_INF=ON`, NaN/Inf in a floating input also triggers
+  CPU fallback unless deploy mode or the `nan_inf` / `all` fallback-disable
+  setting overrides it. This host-side scan is off by default; device NaN/Inf
+  behavior can differ from CPU PyTorch. See [Configuration](CONFIGURATION.md).
 - Unaligned last dims, for now (below).
 
 `torch.rbln.explain()` lists, per op, every op-level CPU fallback torch-rbln
