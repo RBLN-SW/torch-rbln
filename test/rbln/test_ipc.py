@@ -4,16 +4,15 @@ import json
 import multiprocessing
 import os
 from multiprocessing import reduction
+from unittest import mock
 
 import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-import torch_rbln  # noqa: F401
-
-
-def _accel_node_accessible() -> bool:
-    return os.access("/dev/accel/accel0", os.R_OK | os.W_OK)
+import torch_rbln.ipc
+from torch_rbln._internal.device_arch_utils import is_atom_device
+from torch_rbln.ipc import _accel_node_accessible
 
 
 def _opener_main(conn):
@@ -107,11 +106,49 @@ def _exportable_arange(n: int, layout: str | None = None) -> torch.Tensor:
     return x
 
 
+def _fake_handle(n: int = 1024, num_fds: int = 1) -> torch.rbln.ipc.IpcHandle:
+    return torch.rbln.ipc.IpcHandle(
+        payload=b"", nbytes=n * 4, shape=torch.Size([n]), dtype=torch.float32, num_fds=num_fds
+    )
+
+
+@pytest.mark.npu(count=1)
+class TestIpcValidation(TestCase):
+    def test_export_rejects_cpu_tensor(self):
+        with self.assertRaisesRegex(RuntimeError, "must be an RBLN tensor"):
+            torch.rbln.ipc.export_tensor(torch.ones(4))
+
+    def test_export_rejects_non_exportable_tensor(self):
+        x = torch.arange(1024, dtype=torch.float32, device="rbln:0")
+        with self.assertRaisesRegex(RuntimeError, "empty_exportable"):
+            torch.rbln.ipc.export_tensor(x)
+
+    def test_open_rejects_wrong_fd_count(self):
+        with self.assertRaisesRegex(RuntimeError, "fd"):
+            torch.rbln.ipc.open_tensor(_fake_handle(), fds=[], device=0)
+
+    def test_open_requires_device(self):
+        with self.assertRaisesRegex(RuntimeError, "device is required"):
+            torch.rbln.ipc.open_tensor(_fake_handle(), fds=[3], device=None)
+
+    @pytest.mark.skipif(not is_atom_device(), reason="ATOM only")
+    def test_rejects_atom(self):
+        with self.assertRaisesRegex(RuntimeError, "RBLN-CR NPUs only"):
+            torch.rbln.ipc.empty_exportable((4,), device="rbln:0")
+
+    @pytest.mark.skipif(is_atom_device(), reason="ATOM is rejected before the accel node check")
+    def test_missing_accel_node_names_driver_requirement(self):
+        with mock.patch.object(torch_rbln.ipc, "_accel_node_accessible", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "driver 4.0"):
+                torch.rbln.ipc.empty_exportable((4,), device="rbln:0")
+            with self.assertRaisesRegex(RuntimeError, "driver 4.0"):
+                torch.rbln.ipc.open_tensor(_fake_handle(), fds=[3], device=0)
+
+
 @pytest.mark.serial
 @pytest.mark.npu(count=1)
-@pytest.mark.skipif(
-    not _accel_node_accessible(), reason="/dev/accel/accel0 not accessible (export/import need the DRM accel node)"
-)
+@pytest.mark.skipif(is_atom_device(), reason="torch.rbln.ipc supports RBLN-CR only")
+@pytest.mark.skipif(not _accel_node_accessible(), reason="needs RBLN driver 4.0+ and access to /dev/accel/accelN")
 class TestIpc(TestCase):
     def test_empty_exportable_is_an_rbln_tensor(self):
         x = torch.rbln.ipc.empty_exportable((4, 8), dtype=torch.bfloat16, device="rbln:0")
@@ -133,39 +170,10 @@ class TestIpc(TestCase):
             for fd in fds:
                 os.close(fd)
 
-    def test_export_rejects_non_exportable_tensor(self):
-        x = torch.arange(1024, dtype=torch.float32, device="rbln:0")
-        with self.assertRaisesRegex(RuntimeError, "empty_exportable"):
-            torch.rbln.ipc.export_tensor(x)
-
     def test_export_rejects_interior_view(self):
         x = _exportable_arange(1024)
         with self.assertRaisesRegex(RuntimeError, "whole storage"):
             torch.rbln.ipc.export_tensor(x[16:])
-
-    def test_export_rejects_cpu_tensor(self):
-        with self.assertRaisesRegex(RuntimeError, "must be an RBLN tensor"):
-            torch.rbln.ipc.export_tensor(torch.ones(4))
-
-    def test_open_rejects_wrong_fd_count(self):
-        x = _exportable_arange(1024)
-        h, fds = torch.rbln.ipc.export_tensor(x)
-        try:
-            with self.assertRaisesRegex(RuntimeError, "fd"):
-                torch.rbln.ipc.open_tensor(h, fds=[], device=0)
-        finally:
-            for fd in fds:
-                os.close(fd)
-
-    def test_open_requires_device(self):
-        x = _exportable_arange(1024)
-        h, fds = torch.rbln.ipc.export_tensor(x)
-        try:
-            with self.assertRaisesRegex(RuntimeError, "device is required"):
-                torch.rbln.ipc.open_tensor(h, fds, device=None)
-        finally:
-            for fd in fds:
-                os.close(fd)
 
     def test_cross_process_open_reads_exporter_data(self):
         x = _exportable_arange(1024)

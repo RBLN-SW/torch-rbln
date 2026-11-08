@@ -17,13 +17,11 @@ import torch
 from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize, run_tests, TestCase
 
 import torch_rbln  # noqa: F401
+from torch_rbln._internal.device_arch_utils import is_atom_device
+from torch_rbln.ipc import _accel_node_accessible
 
 
 DEVICE = "rbln:0"
-
-
-def _accel_node_accessible() -> bool:
-    return os.access("/dev/accel/accel0", os.R_OK | os.W_OK)
 
 
 def _opener_main(conn):
@@ -137,9 +135,8 @@ def _values(shape, dtype, seed=0) -> torch.Tensor:
 
 @pytest.mark.serial
 @pytest.mark.npu(count=1)
-@pytest.mark.skipif(
-    not _accel_node_accessible(), reason="/dev/accel/accel0 not accessible (export/import need the DRM accel node)"
-)
+@pytest.mark.skipif(is_atom_device(), reason="torch.rbln.ipc supports RBLN-CR only")
+@pytest.mark.skipif(not _accel_node_accessible(), reason="needs RBLN driver 4.0+ and access to /dev/accel/accelN")
 class TestIpcScenarios(TestCase):
     @classmethod
     def setUpClass(cls):
