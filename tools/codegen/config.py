@@ -165,6 +165,13 @@ class OpCategories:
     # path skips the 64-element alignment fallback for them.
     ALIGN_EXEMPT_OPS: ClassVar[set[str]] = {"add", "sub", "mul", "div"} | {name.split(".")[0] for name in SHIM_MATMUL}
 
+    # Broadcastable shim ops whose size-1 last-dim operand the device broadcasts, so
+    # the alignment check reads the output's last dim. pow is left out: its
+    # tensor-tensor overload takes the CPU fallback.
+    ALIGN_CHECK_OUTPUT_OPS: ClassVar[set[str]] = (BROADCASTABLE_OPS & {name.split(".")[0] for name in CPP_SHIM_OPS}) - {
+        "pow"
+    }
+
     # Positional predicate args (a bool cond or mask) per root op. A predicate is
     # typed independently of the data operands, so both dtype gates exempt it:
     # the C++ shim pre-check (``_register_cpp_shim(..., skip_dtype_args=)``) and
@@ -240,8 +247,13 @@ class OpCategories:
         return root_name in cls.SINGLE_MEM_LOC_OUT_VIOLATION_OPS
 
     @classmethod
-    def is_align_exempt(cls, root_name: str) -> bool:
-        return root_name in cls.ALIGN_EXEMPT_OPS
+    def align_check(cls, root_name: str) -> str:
+        """What the alignment fallback checks: "none", "output" or "inputs"."""
+        if root_name in cls.ALIGN_EXEMPT_OPS:
+            return "none"
+        if root_name in cls.ALIGN_CHECK_OUTPUT_OPS:
+            return "output"
+        return "inputs"
 
     @classmethod
     def should_skip_dtype_check(cls, root_name: str) -> bool:

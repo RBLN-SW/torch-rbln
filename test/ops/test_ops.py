@@ -101,8 +101,10 @@ _variant_ops = partial(ops, dtypes=OpDTypes.supported, allowed_dtypes=(torch.flo
 #   and Spectral Functions (separately implemented for only 1D as of now, in test/test_spectral_ops.py)
 _ref_test_ops = tuple(
     filter(
-        lambda op: not isinstance(op, (UnaryUfuncInfo, ReductionOpInfo, SpectralFuncInfo, BinaryUfuncInfo))
-        and op.ref is not None,
+        lambda op: (
+            not isinstance(op, (UnaryUfuncInfo, ReductionOpInfo, SpectralFuncInfo, BinaryUfuncInfo))
+            and op.ref is not None
+        ),
         op_db,
     )
 )
@@ -660,7 +662,7 @@ class TestCommon(TestCase):
         #     buckets, so the result lands in a different exponent bin.
         # Element-wise tolerance cannot bound either edge; we mask both
         # boundaries and keep the assertion on well-behaved elements.
-        fp16_div_safe_range: tuple[float, float] | None = None
+        custom_float16_safe_range: tuple[float, float] | None = None
         if dtype is torch.float16 and (op.name, op.variant_test_name) in {
             ("div", "trunc_rounding"),
             ("div", "no_rounding_mode"),
@@ -668,8 +670,8 @@ class TestCommon(TestCase):
             rtol = max(rtol, 0.005)
             atol = max(atol, 0.05)
             ignore_inf_nan = True
-            fp16_div_safe_range = (1e-3, 32000.0)  # |x| in [1e-3, ~half-fp16-max]
-        fp16_div_input_mask: torch.Tensor | None = None
+            custom_float16_safe_range = (1e-3, 32000.0)  # |x| in [1e-3, ~half-fp16-max]
+        custom_float16_input_mask: torch.Tensor | None = None
         # fp32 computes in the device's narrower compDtype: very large values
         # saturate and tiny ones flush to zero. Mask both edges.
         fp32_arith = dtype is torch.float32 and (op.name, op.variant_test_name) in {
@@ -688,7 +690,7 @@ class TestCommon(TestCase):
         }
         if fp32_arith:
             ignore_inf_nan = True
-            fp16_div_safe_range = _FP32_DEVICE_RANGE
+            custom_float16_safe_range = _FP32_DEVICE_RANGE
 
         if dtype is torch.bfloat16:
             if (op.name, op.variant_test_name) in {("add", ""), ("sub", ""), ("mul", "")}:
@@ -766,7 +768,7 @@ class TestCommon(TestCase):
                     ("div", "floor_rounding"),
                     ("div", "trunc_rounding"),
                 }:
-                    fp16_div_input_mask = _custom_float16_input_safe_mask(
+                    custom_float16_input_mask = _custom_float16_input_safe_mask(
                         cpu_sample.input,
                         cpu_sample.args,
                         cpu_sample.kwargs,
@@ -774,7 +776,7 @@ class TestCommon(TestCase):
                     )
                 if fp32_arith:
                     low, high = _FP32_DEVICE_RANGE
-                    fp16_div_input_mask = _custom_float16_input_safe_mask(
+                    custom_float16_input_mask = _custom_float16_input_safe_mask(
                         cpu_sample.input,
                         cpu_sample.args,
                         cpu_sample.kwargs,
@@ -788,8 +790,8 @@ class TestCommon(TestCase):
                     cpu_results,
                     atol=atol,
                     rtol=rtol,
-                    custom_float16_safe_range=fp16_div_safe_range,
-                    custom_float16_input_mask=fp16_div_input_mask,
+                    custom_float16_safe_range=custom_float16_safe_range,
+                    custom_float16_input_mask=custom_float16_input_mask,
                     tolerate_boundary_mismatch=tolerate_boundary_mismatch,
                 )
             else:

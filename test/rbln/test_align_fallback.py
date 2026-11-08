@@ -7,7 +7,13 @@ instead. Results must match the CPU either way.
 from __future__ import annotations
 
 import pytest
-from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize, run_tests, TestCase
+from torch.testing._internal.common_utils import (
+    instantiate_parametrized_tests,
+    parametrize,
+    run_tests,
+    subtest,
+    TestCase,
+)
 
 from test.utils import run_snippet
 
@@ -42,7 +48,7 @@ import os, torch, torch_rbln
 from torch_rbln import _C
 from torch_rbln._internal import ops_utils, register_ops
 register_ops.compile_and_run_view_aware = lambda *a, **k: ops_utils.compile_and_run_view_aware(
-    *a, **{**k, "align_exempt": False}
+    *a, **{**k, "align_check": "inputs"}
 )
 a = torch.full((4, 3), 2.0, dtype=torch.bfloat16).to("rbln")
 b = torch.full((4, 3), 3.0, dtype=torch.bfloat16).to("rbln")
@@ -88,47 +94,41 @@ print("RESULT", (got.device.type, dict(_C._dispatch_fallback_by_op()), close))
 
 
 _EXEMPT_EXPRS = [
-    "a + b",
-    "a - b",
-    "a * b",
-    "a / b",
-    "torch.mm(a, w)",
-    "torch.bmm(a3, w3)",
-    "torch.addmm(bias, a, w)",
-    "torch.nn.functional.linear(a, w, bias)",
+    ("add", "a + b"),
+    ("sub", "a - b"),
+    ("mul", "a * b"),
+    ("div", "a / b"),
+    ("mm", "torch.mm(a, w)"),
+    ("bmm", "torch.bmm(a3, w3)"),
+    ("addmm", "torch.addmm(bias, a, w)"),
+    ("linear", "torch.nn.functional.linear(a, w, bias)"),
 ]
 
 # Unaligned shapes of these still run on the host inside the compiled module.
 _NON_EXEMPT_EXPRS = [
-    "torch.pow(a, 3)",
-    "torch.neg(a)",
-    "torch.abs(a)",
-    "torch.ceil(a)",
-    "torch.floor(a)",
-    "torch.clamp(a, -0.1, 0.1)",
-    "torch.log(p)",
-    "torch.rsqrt(p)",
-    "torch.sigmoid(a)",
-    "torch.nn.functional.silu(a)",
-    "torch.eq(a, b)",
-    "torch.ne(a, b)",
-    "torch.lt(a, b)",
-    "torch.le(a, b)",
-    "torch.gt(a, b)",
-    "torch.ge(a, b)",
-    "torch.maximum(a, b)",
-    "torch.minimum(a, b)",
-    "torch.max(a)",
-    "torch.min(a)",
-    "torch.mean(a)",
-    "torch.softmax(a, -1)",
+    ("pow", "torch.pow(a, 3)"),
+    ("neg", "torch.neg(a)"),
+    ("abs", "torch.abs(a)"),
+    ("ceil", "torch.ceil(a)"),
+    ("floor", "torch.floor(a)"),
+    ("clamp", "torch.clamp(a, -0.1, 0.1)"),
+    ("log", "torch.log(p)"),
+    ("rsqrt", "torch.rsqrt(p)"),
+    ("sigmoid", "torch.sigmoid(a)"),
+    ("silu", "torch.nn.functional.silu(a)"),
+    ("eq", "torch.eq(a, b)"),
+    ("ne", "torch.ne(a, b)"),
+    ("lt", "torch.lt(a, b)"),
+    ("le", "torch.le(a, b)"),
+    ("gt", "torch.gt(a, b)"),
+    ("ge", "torch.ge(a, b)"),
+    ("maximum", "torch.maximum(a, b)"),
+    ("minimum", "torch.minimum(a, b)"),
+    ("max", "torch.max(a)"),
+    ("min", "torch.min(a)"),
+    ("mean", "torch.mean(a)"),
+    ("softmax", "torch.softmax(a, -1)"),
 ]
-
-
-def _expr_name(e: str) -> str:
-    if "(" in e:
-        return e.split("(", 1)[0].rsplit(".", 1)[-1]
-    return {"+": "add", "-": "sub", "*": "mul", "/": "div"}[e[2]]
 
 
 def _run_scenario(**env) -> tuple[str, dict]:
@@ -157,7 +157,7 @@ class TestAlignFallback(TestCase):
         self.assertGreater(fallbacks.get("aten::add.out", 0), 0, "the cached entry bypassed the alignment fallback")
         self.assertEqual(values, [[5.0] * 3] * 4)
 
-    @parametrize("expr", _EXEMPT_EXPRS, name_fn=_expr_name)
+    @parametrize("expr", [subtest(e, name=n) for n, e in _EXEMPT_EXPRS])
     def test_unaligned_exempt_op_stays_on_device_by_default(self, expr):
         device, fallbacks, close = run_snippet(
             _EXEMPT_SCENARIO.replace("EXPR", expr), unset=("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK",)
@@ -166,7 +166,7 @@ class TestAlignFallback(TestCase):
         self.assertEqual(fallbacks, {})
         self.assertTrue(close)
 
-    @parametrize("expr", _NON_EXEMPT_EXPRS, name_fn=_expr_name)
+    @parametrize("expr", [subtest(e, name=n) for n, e in _NON_EXEMPT_EXPRS])
     def test_unaligned_non_exempt_op_falls_back_by_default(self, expr):
         device, fallbacks, close = run_snippet(
             _EXEMPT_SCENARIO.replace("EXPR", expr), unset=("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK",)

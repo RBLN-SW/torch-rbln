@@ -311,8 +311,8 @@ The value is a **comma-separated list** of fallback case names to disable:
 | `align`          | Falls back when a tensor's last dim is not a multiple of 64, except ops the compiler pads (below)  | Sends unaligned ops to RBLN — slower on small tensors, and each new shape compiles |
 | `all`            | —                                                                                                  | Disables **all** of the above checks                                               |
 
-The `align` fallback skips ops whose device inputs the compiler pads itself:
-`add`, `sub`, `mul`, `div`, `mm`, `bmm`, `addmm` and `linear`.
+The `align` fallback skips ops whose device inputs the compiler pads itself. See
+[Alignment fallback](EAGER_DISPATCH.md#alignment-fallback) for the list.
 
 ## Device mapping
 
