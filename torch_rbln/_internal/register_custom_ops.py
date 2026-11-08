@@ -35,7 +35,6 @@ def custom_softmax_out_rbln(self, dim: int, half_to_float: bool, *, out):  # noq
             (self,),
             {"dim": dim},
             out,
-            align_exempt=True,
         )
 
     result_tensor = cast("torch.Tensor", result_tensor)
@@ -85,7 +84,6 @@ def pow_tensor_scalar_out_rbln(self, exponent, *, out):
             (self, exponent),
             {},
             out,
-            align_exempt=True,
         )
 
     result_tensor = cast("torch.Tensor", result_tensor)

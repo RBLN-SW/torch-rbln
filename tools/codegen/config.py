@@ -162,12 +162,8 @@ class OpCategories:
     )
 
     # Shim ops whose unaligned device inputs the compiler pads itself, so the Python
-    # path skips the 64-element alignment fallback for them. `where` keeps the check
-    # (a padded bool predicate is unverified). `logical_not`'s bool operand falls back
-    # before that gate.
-    # Handwritten shim handlers (softmax, pow in register_custom_ops.py) pass the
-    # flag themselves.
-    ALIGN_EXEMPT_OPS: ClassVar[set[str]] = {name.split(".")[0] for name in CPP_SHIM_OPS} - {"where", "logical_not"}
+    # path skips the 64-element alignment fallback for them.
+    ALIGN_EXEMPT_OPS: ClassVar[set[str]] = {"add", "sub", "mul", "div"} | {name.split(".")[0] for name in SHIM_MATMUL}
 
     # Positional predicate args (a bool cond or mask) per root op. A predicate is
     # typed independently of the data operands, so both dtype gates exempt it:

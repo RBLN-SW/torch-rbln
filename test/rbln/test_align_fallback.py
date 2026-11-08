@@ -87,6 +87,50 @@ print("RESULT", (got.device.type, dict(_C._dispatch_fallback_by_op()), close))
 """
 
 
+_EXEMPT_EXPRS = [
+    "a + b",
+    "a - b",
+    "a * b",
+    "a / b",
+    "torch.mm(a, w)",
+    "torch.bmm(a3, w3)",
+    "torch.addmm(bias, a, w)",
+    "torch.nn.functional.linear(a, w, bias)",
+]
+
+# Unaligned shapes of these still run on the host inside the compiled module.
+_NON_EXEMPT_EXPRS = [
+    "torch.pow(a, 3)",
+    "torch.neg(a)",
+    "torch.abs(a)",
+    "torch.ceil(a)",
+    "torch.floor(a)",
+    "torch.clamp(a, -0.1, 0.1)",
+    "torch.log(p)",
+    "torch.rsqrt(p)",
+    "torch.sigmoid(a)",
+    "torch.nn.functional.silu(a)",
+    "torch.eq(a, b)",
+    "torch.ne(a, b)",
+    "torch.lt(a, b)",
+    "torch.le(a, b)",
+    "torch.gt(a, b)",
+    "torch.ge(a, b)",
+    "torch.maximum(a, b)",
+    "torch.minimum(a, b)",
+    "torch.max(a)",
+    "torch.min(a)",
+    "torch.mean(a)",
+    "torch.softmax(a, -1)",
+]
+
+
+def _expr_name(e: str) -> str:
+    if "(" in e:
+        return e.split("(", 1)[0].rsplit(".", 1)[-1]
+    return {"+": "add", "-": "sub", "*": "mul", "/": "div"}[e[2]]
+
+
 def _run_scenario(**env) -> tuple[str, dict]:
     """Run the unaligned bf16 logical_not in a fresh interpreter with the env set, so
     the result does not depend on what earlier tests imported or patched in this
@@ -113,50 +157,22 @@ class TestAlignFallback(TestCase):
         self.assertGreater(fallbacks.get("aten::add.out", 0), 0, "the cached entry bypassed the alignment fallback")
         self.assertEqual(values, [[5.0] * 3] * 4)
 
-    @parametrize(
-        "expr",
-        [
-            "a + b",
-            "a - b",
-            "a * b",
-            "a / b",
-            "torch.pow(a, 2)",
-            "torch.neg(a)",
-            "torch.abs(a)",
-            "torch.ceil(a)",
-            "torch.floor(a)",
-            "torch.clamp(a, -0.1, 0.1)",
-            "torch.log(p)",
-            "torch.rsqrt(p)",
-            "torch.sigmoid(a)",
-            "torch.nn.functional.silu(a)",
-            "torch.eq(a, b)",
-            "torch.ne(a, b)",
-            "torch.lt(a, b)",
-            "torch.le(a, b)",
-            "torch.gt(a, b)",
-            "torch.ge(a, b)",
-            "torch.maximum(a, b)",
-            "torch.minimum(a, b)",
-            "torch.max(a)",
-            "torch.min(a)",
-            "torch.mean(a)",
-            "torch.mm(a, w)",
-            "torch.bmm(a3, w3)",
-            "torch.addmm(bias, a, w)",
-            "torch.nn.functional.linear(a, w, bias)",
-            "torch.softmax(a, -1)",
-        ],
-        name_fn=lambda e: e.split("(")[0].split(".")[-1]
-        if "(" in e
-        else {"+": "add", "-": "sub", "*": "mul", "/": "div"}[e[2]],
-    )
+    @parametrize("expr", _EXEMPT_EXPRS, name_fn=_expr_name)
     def test_unaligned_exempt_op_stays_on_device_by_default(self, expr):
         device, fallbacks, close = run_snippet(
             _EXEMPT_SCENARIO.replace("EXPR", expr), unset=("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK",)
         )
         self.assertEqual(device, "rbln")
         self.assertEqual(fallbacks, {})
+        self.assertTrue(close)
+
+    @parametrize("expr", _NON_EXEMPT_EXPRS, name_fn=_expr_name)
+    def test_unaligned_non_exempt_op_falls_back_by_default(self, expr):
+        device, fallbacks, close = run_snippet(
+            _EXEMPT_SCENARIO.replace("EXPR", expr), unset=("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK",)
+        )
+        self.assertEqual(device, "rbln")
+        self.assertNotEqual(fallbacks, {})
         self.assertTrue(close)
 
 

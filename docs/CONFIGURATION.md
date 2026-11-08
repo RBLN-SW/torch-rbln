@@ -312,7 +312,7 @@ The value is a **comma-separated list** of fallback case names to disable:
 | `all`            | —                                                                                                  | Disables **all** of the above checks                                               |
 
 The `align` fallback skips ops whose device inputs the compiler pads itself:
-`add`, `sub`, `mul`, `div`, `pow`, `neg`, `abs`, `ceil`, `floor`, `clamp`, `log`, `rsqrt`, `sigmoid`, `silu`, the comparisons, `maximum`, `minimum`, `max`, `min`, `mean`, `mm`, `bmm`, `addmm`, `linear` and `softmax`.
+`add`, `sub`, `mul`, `div`, `mm`, `bmm`, `addmm` and `linear`.
 
 ## Device mapping
 
