@@ -603,10 +603,24 @@ bool index_put_native(
     return false;
   }
 
-  const auto [use_masked_fill, mask] =
-      at::native::canDispatchToMaskedFill(self, indices, values_in);
-  if (use_masked_fill) {
-    self.masked_fill_(mask, values_in.item());
+  // `x[mask] = 0.0` passes a 0-D device value, which upstream's check, written
+  // for a host scalar, turns away. Check the mask against a host stand-in and
+  // fill with the device value, but only for a mask shaped like `self`:
+  // masked_fill falls back to CPU for a broadcast mask, and v2v is faster.
+  const bool device_scalar = values_in.numel() == 1 &&
+      values_in.device() == self.device() &&
+      values_in.scalar_type() == self.scalar_type();
+  const auto [use_masked_fill, mask] = at::native::canDispatchToMaskedFill(
+      self,
+      indices,
+      device_scalar ? at::empty({}, values_in.options().device(at::kCPU))
+                    : values_in);
+  if (use_masked_fill && (!device_scalar || mask.sizes() == self.sizes())) {
+    if (device_scalar) {
+      self.masked_fill_(mask, values_in.reshape({}));
+    } else {
+      self.masked_fill_(mask, values_in.item());
+    }
     return true;
   }
 
@@ -663,6 +677,9 @@ bool index_put_native(
     }
   }
   const int64_t n = static_cast<int64_t>(indexed_dims.size());
+  if (n == 0) { // a 0-D mask expands to no index
+    return false;
+  }
   const int64_t bdim = static_cast<int64_t>(bshape.size());
   // `target` is the shape of the indexing result: the non-indexed sizes, with
   // `bshape` at `start` (where the indexed dims sit if adjacent, else first).

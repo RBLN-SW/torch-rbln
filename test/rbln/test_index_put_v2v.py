@@ -5,7 +5,7 @@
 Coverage is organized by behavior:
   - Point writes: the vLLM min_tokens pattern, per-point values, slabs under a
     prefix index, broadcast indices
-  - Index patterns: negative, duplicate (last write wins), empty
+  - Index patterns: negative, duplicate (last write wins), empty, 0-D mask
   - Placement and layout: host indices and host scalar, non-contiguous views
   - Upstream's index forms: ``None`` slots, non-adjacent indices, masks
   - Error paths, raised by the kernel rather than the CPU fallback
@@ -18,6 +18,8 @@ the CPU reference: the op only moves elements.
 
 from __future__ import annotations
 
+from unittest import mock
+
 import pytest
 import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
@@ -25,6 +27,7 @@ from torch.testing._internal.common_utils import parametrize, run_tests, TestCas
 
 from test.utils_v2v import arange as _arange, DEVICE, ENGINE_DTYPES, eq as _eq, to_dev as _to_dev
 from torch_rbln import _C
+from torch_rbln._internal import register_ops
 
 
 _OP = "_index_put_impl_"
@@ -129,6 +132,16 @@ class TestIndexPutV2V(TestCase):
         empty = torch.tensor([], dtype=torch.int32)
         self._check(self_cpu, (empty, empty), torch.tensor(-1.0, dtype=torch.float16))
 
+    def test_zero_dim_mask(self):
+        """A 0-D mask expands to no index; ``x[mask] = v`` handles it before the op."""
+        self_cpu = _arange((2, 64), torch.float16)
+        value_cpu = torch.tensor(-1.0, dtype=torch.float16)
+        mask = torch.ones((), dtype=torch.bool)
+        expected = self_cpu.clone().index_put_((mask,), value_cpu)
+        got = _to_dev(self_cpu)
+        got.index_put_((mask.to(DEVICE),), value_cpu.to(DEVICE))
+        _eq(got, expected)
+
     # ---- placement and layout ----
 
     def test_cpu_indices_and_cpu_scalar_value(self):
@@ -183,8 +196,39 @@ class TestIndexPutV2V(TestCase):
         self.assertEqual(_fallbacks(lambda: got.index_put_((mask,), value), ops=(_OP, "masked_fill")), 0)
         _eq(got, expected)
 
+    def test_mask_with_device_scalar_goes_to_masked_fill(self):
+        """``x[mask] = 0.0`` passes a 0-D device value; it is one masked_fill."""
+        self_cpu = torch.randn(4, 64, dtype=torch.float16)
+        expected = self_cpu.clone()
+        expected[self_cpu > 0] = 0.0
+        got = _to_dev(self_cpu)
+        mask = (self_cpu > 0).to(DEVICE)
+
+        def setitem():
+            got[mask] = 0.0
+
+        with mock.patch.object(register_ops, "masked_fill_rbln", wraps=register_ops.masked_fill_rbln) as masked_fill:
+            self.assertEqual(_fallbacks(setitem, ops=(_OP, "masked_fill")), 0)
+        self.assertEqual(masked_fill.call_count, 1)
+        _eq(got, expected)
+
+    def test_row_mask_with_device_scalar_writes_rows(self):
+        """masked_fill falls back for a broadcast mask, so a row mask writes rows."""
+        self_cpu = _arange((4, 64), torch.float16)
+        mask = torch.tensor([True, False, True, True])
+        expected = self_cpu.clone()
+        expected[mask] = 0.0
+        got = _to_dev(self_cpu)
+        mask_d = mask.to(DEVICE)
+
+        def setitem():
+            got[mask_d] = 0.0
+
+        self.assertEqual(_fallbacks(setitem, ops=(_OP, "masked_fill")), 0)
+        _eq(got, expected)
+
     def test_mask_with_device_values(self):
-        """A device ``values`` skips masked_fill; the mask expands to points."""
+        """Per-element device ``values``: the mask expands to points."""
         self_cpu = _arange((4, 64), torch.float32)
         mask = (_arange((4, 64), torch.int64) % 7) == 0
         values = torch.arange(int(mask.sum()), dtype=torch.float32) + 1000
