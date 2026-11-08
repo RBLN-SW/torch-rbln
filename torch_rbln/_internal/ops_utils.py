@@ -1749,29 +1749,6 @@ def view_recipes_for_positional(view_recipes_flat, positional_count):
     return view_recipes_flat[:positional_count]
 
 
-# Elementwise binary shim ops whose size-1 last-dim operand the backend broadcasts
-# on the device. ``where`` and ``masked_fill`` are left out: three operands, and a
-# size-1 predicate broadcast is unverified, so they keep the input-based align check.
-# Mirrors OpCategories.BROADCASTABLE_OPS in tools/codegen/config.py, except
-# pow: its tensor-tensor overload takes CPU fallback.
-_LAST_DIM_ONE_DEVICE_BROADCAST_OPS = frozenset(
-    {
-        "aten::add",
-        "aten::sub",
-        "aten::mul",
-        "aten::div",
-        "aten::maximum",
-        "aten::minimum",
-        "aten::ne",
-        "aten::eq",
-        "aten::gt",
-        "aten::ge",
-        "aten::lt",
-        "aten::le",
-    }
-)
-
-
 def compile_and_run_view_aware(
     op_callable, op_name, args, kwargs_filtered, out_tensor, *, out_alias_arg_pos=None, align_exempt=False
 ):
@@ -1813,33 +1790,16 @@ def compile_and_run_view_aware(
     if eager:
         raise_if_dummy_execution(f"the eager op {op_name}" if op_name else "an eager op")
 
-    # The align fallback avoids host padding for unaligned inputs.
-    # A size-1 last dim broadcasting to a 64-aligned one is exempt for these
-    # elementwise ops. TensorList inputs keep the fused device path.
-    # align_exempt: the compiler pads this op's device inputs itself
-    # (OpCategories.ALIGN_EXEMPT_OPS in tools/codegen/config.py).
+    # The align fallback avoids host padding. TensorList inputs keep the fused path.
+    # The compiler pads align_exempt ops (OpCategories.ALIGN_EXEMPT_OPS). An empty
+    # input keeps the check: the runtime cannot create a program with one.
     def _last_dim_unaligned(t):
-        return isinstance(t, torch.Tensor) and t.dim() > 0 and t.shape[-1] % 64 != 0
+        return t.dim() > 0 and t.shape[-1] % 64 != 0
 
-    def _inputs_unaligned():
-        return any(_last_dim_unaligned(a) for a in args) or any(
-            _last_dim_unaligned(v) for v in kwargs_filtered.values()
-        )
-
-    out_shape = (
-        torch.broadcast_shapes(*(t.shape for t in (*args, *kwargs_filtered.values()) if isinstance(t, torch.Tensor)))
-        if op_name in _LAST_DIM_ONE_DEVICE_BROADCAST_OPS
-        else ()
-    )
-    if out_shape and out_shape[-1] == 0:
-        # Empty outputs keep the input-based check, even for align-exempt ops.
-        unaligned = _inputs_unaligned()
-    elif align_exempt:
+    tensors = [t for t in (*args, *kwargs_filtered.values()) if isinstance(t, torch.Tensor)]
+    unaligned = any(_last_dim_unaligned(t) for t in tensors)
+    if align_exempt and not any(t.numel() == 0 for t in tensors):
         unaligned = False
-    elif out_shape:
-        unaligned = out_shape[-1] % 64 != 0
-    else:
-        unaligned = _inputs_unaligned()
     if unaligned and "align" not in _parse_disabled_fallback_cases():
         return cpu_fallback_path(
             op_callable,
