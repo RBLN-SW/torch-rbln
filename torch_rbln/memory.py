@@ -9,7 +9,8 @@ import operator
 import os
 import sys
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
+from typing import NamedTuple
 
 import torch
 
@@ -24,6 +25,7 @@ from torch_rbln._host_registration import (
 
 
 __all__ = [
+    "DevicePlacement",
     "HostMemoryRegistration",
     "bind_device_memory",
     "empty_cache",
@@ -45,8 +47,45 @@ __all__ = [
     "release_offload_temp_storage",
     "reset_accumulated_memory_stats",
     "reset_peak_memory_stats",
+    "set_device_alloc",
     "set_device_layout_like",
 ]
+
+
+class DevicePlacement(NamedTuple):
+    """A tensor slice on a node within its logical device and a chiplet.
+
+    ``slice_axes`` contains ``(axis, begin, end)`` triples with exclusive ends.
+    An empty tuple places the whole tensor. Node IDs index the physical NPUs
+    assigned to the tensor's logical device, not system-wide device IDs.
+    """
+
+    node_id: int
+    chiplet_id: int
+    slice_axes: tuple[tuple[int, int, int], ...] = ()
+
+
+def set_device_alloc(
+    tensor: torch.Tensor,
+    placements: Sequence[DevicePlacement],
+    *,
+    physical_dtype: torch.dtype | None = None,
+) -> None:
+    """Configure a tensor's device placement.
+
+    ``tensor`` must be contiguous and cover its whole storage. Placements must
+    split the same axes and cover the tensor exactly, without overlap or gaps.
+    The runtime derives allocation sizes and copy mappings; ``physical_dtype``
+    defaults to the tensor's dtype. Existing aliases share the new layout.
+
+    For example, split a ``(4, 8)`` tensor across two chiplets::
+
+        torch.rbln.set_device_alloc(tensor, [
+            torch.rbln.DevicePlacement(0, 0, ((0, 0, 2),)),
+            torch.rbln.DevicePlacement(0, 1, ((0, 2, 4),)),
+        ])
+    """
+    torch_rbln._C._set_device_alloc(tensor, placements, tensor.dtype if physical_dtype is None else physical_dtype)
 
 
 def _normalize_device(device: int | str | torch.device | None) -> torch.device:

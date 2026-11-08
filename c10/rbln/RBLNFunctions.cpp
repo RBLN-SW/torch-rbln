@@ -735,6 +735,23 @@ void bind_device_memory(void* rbln_data, size_t nbytes) {
       nbytes);
 }
 
+void set_device_alloc(
+    void* data,
+    c10::ScalarType user_dtype,
+    c10::ScalarType physical_dtype,
+    const std::vector<int64_t>& shape,
+    const std::vector<::rbln::DevicePlacement>& placements) {
+  require_runtime("set device allocation");
+  RBLN_CHECK(
+      !::rbln::rbln_set_device_alloc(
+          reinterpret_cast<uint64_t>(data),
+          to_rbln_dtype(user_dtype),
+          to_rbln_dtype(physical_dtype),
+          shape,
+          placements),
+      "rbln_set_device_alloc failed");
+}
+
 void set_device_layout_like(void* target_data, const void* ref_data) {
   RBLN_CHECK(
       target_data != nullptr, "set_device_layout_like: target is nullptr");
