@@ -69,6 +69,11 @@ def _drop_dropout_grad_samples(op):
 for _op in op_db:
     if _op.name == "nn.functional.scaled_dot_product_attention":
         _drop_dropout_grad_samples(_op)
+    elif _op.name == "cumsum":
+        for _skip in _op.skips:
+            if _skip.cls_name == "TestCommon" and _skip.test_name == "test_out":
+                # int64 output skips test_out's floating-to-integral cast check.
+                _skip.dtypes = tuple(dtype for dtype in (_skip.dtypes or _op.dtypes) if dtype != torch.int64)
 
 _ops_with_related_runtime_tests = [
     "clone",
