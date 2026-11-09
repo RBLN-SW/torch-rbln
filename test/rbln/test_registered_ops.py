@@ -528,6 +528,16 @@ class TestRegisteredPythonOps(TestCase):
         with self.assertRaisesRegex(RuntimeError, "cast"):
             op(*device_args, out=torch.empty_like(device_args[0]))
 
+    @parametrize("rounding_mode", ["floor", "trunc"])
+    def test_div_rounding_float_result_rejects_integer_out(self, rounding_mode):
+        x = torch.full((64,), -5, dtype=torch.int64)
+        with self.assertRaisesRegex(RuntimeError, "cast"):
+            torch.div(x, 2.0, rounding_mode=rounding_mode, out=torch.empty_like(x))
+        x = x.to(self.rbln_device)
+        _C._warmcache_clear()
+        with self.assertRaisesRegex(RuntimeError, "cast"):
+            torch.div(x, 2.0, rounding_mode=rounding_mode, out=torch.empty_like(x))
+
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_add(self, dtype, shape):

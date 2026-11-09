@@ -177,10 +177,18 @@ def {kernel_name}(*args, **kwargs):
         def dtype_default(root_name: str) -> str:
             """Generate default dtype validation."""
             code = ""
-            if root_name in {"div", "rsqrt", "sigmoid", "log"}:
-                rounding = 'kwargs.get("rounding_mode") is None and ' if root_name == "div" else ""
-                code += f"""    if {rounding}not (out_tensor.is_floating_point() or out_tensor.is_complex()):
-        raise RuntimeError(f"Floating point result cannot be cast to output dtype {{out_tensor.dtype}}.")
+            if root_name == "div":
+                code += """    result_dtype = torch.result_type(args[0], args[1])
+    if kwargs.get("rounding_mode") is None and not (
+        result_dtype.is_floating_point or result_dtype.is_complex
+    ):
+        result_dtype = torch.get_default_dtype()
+    if not torch.can_cast(result_dtype, out_tensor.dtype):
+        raise RuntimeError(f"Result dtype {result_dtype} cannot be cast to output dtype {out_tensor.dtype}.")
+"""
+            elif root_name in {"rsqrt", "sigmoid", "log"}:
+                code += """    if not (out_tensor.is_floating_point() or out_tensor.is_complex()):
+        raise RuntimeError(f"Floating point result cannot be cast to output dtype {out_tensor.dtype}.")
 """
             return (
                 code
