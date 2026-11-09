@@ -17,7 +17,7 @@ from torch import nn
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from test.utils import SUPPORTED_DTYPES
+from test.utils import SUPPORTED_FLOATING_DTYPES
 
 
 class _SmallNet(nn.Module):
@@ -39,7 +39,7 @@ class TestNNModuleOnRBLN(TestCase):
 
     rbln_device = torch.device("rbln:0")
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_parameters_moved_to_rbln(self, dtype):
         """All parameters should be on RBLN with the requested dtype."""
         model = _SmallNet().to(self.rbln_device, dtype=dtype)
@@ -49,7 +49,7 @@ class TestNNModuleOnRBLN(TestCase):
             self.assertEqual(p.device.type, "rbln")
             self.assertEqual(p.dtype, dtype)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_state_dict_on_rbln(self, dtype):
         """`state_dict()` tensors should live on RBLN after `.to('rbln', ...)`."""
         model = _SmallNet().to(self.rbln_device, dtype=dtype)
@@ -58,7 +58,7 @@ class TestNNModuleOnRBLN(TestCase):
         for tensor in state.values():
             self.assertEqual(tensor.device.type, "rbln")
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_forward_returns_rbln_tensor(self, dtype):
         """A forward pass with an RBLN input should keep the output on RBLN."""
         model = _SmallNet().to(self.rbln_device, dtype=dtype)
@@ -70,7 +70,7 @@ class TestNNModuleOnRBLN(TestCase):
         self.assertEqual(out.device.type, "rbln")
         self.assertEqual(out.dtype, dtype)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_eval_mode_with_inference_mode(self, dtype):
         """`model.eval()` + `torch.inference_mode()` should run on RBLN."""
         model = _SmallNet().to(self.rbln_device, dtype=dtype)

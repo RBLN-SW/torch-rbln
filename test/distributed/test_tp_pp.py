@@ -16,7 +16,7 @@ from test.utils import (
     configure_master_port_for_rccl_tests,
     set_deterministic_seeds,
     spawn_target_with_clean_exit,
-    SUPPORTED_DTYPES,
+    SUPPORTED_FLOATING_DTYPES,
 )
 
 
@@ -1367,7 +1367,7 @@ class TestTPPPRBLNBase(TestCase):
 class TestDefaultGroupAllReduceRBLN(TestTPPPRBLNBase):
     """Test cases for default group allreduce operations."""
 
-    @parametrize("dtype", SUPPORTED_DTYPES)
+    @parametrize("dtype", SUPPORTED_FLOATING_DTYPES)
     @parametrize("c10d_async_env", TestTPPPRBLNBase.c10d_async_envs)
     def test_default_group_allreduce_2ranks(self, dtype, c10d_async_env):
         """Test default group allreduce with 2 ranks."""
@@ -1384,7 +1384,7 @@ class TestDefaultGroupAllReduceRBLN(TestTPPPRBLNBase):
 class TestSingleLinearAllgatherDefaultGroupRBLN(TestTPPPRBLNBase):
     """Test cases for single linear layer with allgather, default group."""
 
-    @parametrize("dtype", SUPPORTED_DTYPES)
+    @parametrize("dtype", SUPPORTED_FLOATING_DTYPES)
     @parametrize("c10d_async_env", TestTPPPRBLNBase.c10d_async_envs)
     def test_single_linear_allgather_default_group(self, dtype, c10d_async_env):
         """Test single linear layer with allgather, default group."""
@@ -1401,7 +1401,7 @@ class TestSingleLinearAllgatherDefaultGroupRBLN(TestTPPPRBLNBase):
 class TestPP2RBLN(TestTPPPRBLNBase):
     """Test cases for PP=2 pipeline parallel operations."""
 
-    @parametrize("dtype", SUPPORTED_DTYPES)
+    @parametrize("dtype", SUPPORTED_FLOATING_DTYPES)
     @parametrize("c10d_async_env", TestTPPPRBLNBase.c10d_async_envs)
     def test_pp2_pipeline_parallel(self, dtype, c10d_async_env):
         """Test PP=2 pipeline parallel."""
@@ -1413,7 +1413,7 @@ class TestPP2RBLN(TestTPPPRBLNBase):
 class TestTwoLinearBiasDefaultGroupRBLN(TestTPPPRBLNBase):
     """Test cases for two linear layers with bias, default group, send/recv."""
 
-    @parametrize("dtype", SUPPORTED_DTYPES)
+    @parametrize("dtype", SUPPORTED_FLOATING_DTYPES)
     @parametrize("c10d_async_env", TestTPPPRBLNBase.c10d_async_envs)
     def test_two_linear_bias_default_group_send_recv(self, dtype, c10d_async_env):
         """Test two linear layers with bias, default group, send/recv."""
@@ -1430,7 +1430,7 @@ class TestTwoLinearBiasDefaultGroupRBLN(TestTPPPRBLNBase):
 class TestTwoLinearNoBiasDefaultGroupRBLN(TestTPPPRBLNBase):
     """Test cases for two linear layers without bias, default group, send/recv."""
 
-    @parametrize("dtype", SUPPORTED_DTYPES)
+    @parametrize("dtype", SUPPORTED_FLOATING_DTYPES)
     @parametrize("c10d_async_env", TestTPPPRBLNBase.c10d_async_envs)
     def test_two_linear_no_bias_default_group_send_recv(self, dtype, c10d_async_env):
         """Test two linear layers without bias, default group, send/recv."""
@@ -1447,7 +1447,7 @@ class TestTwoLinearNoBiasDefaultGroupRBLN(TestTPPPRBLNBase):
 class TestTwoLinearBiasSubgroupRBLN(TestTPPPRBLNBase):
     """Test cases for two linear layers with bias, subgroup, send/recv."""
 
-    @parametrize("dtype", SUPPORTED_DTYPES)
+    @parametrize("dtype", SUPPORTED_FLOATING_DTYPES)
     @parametrize("c10d_async_env", TestTPPPRBLNBase.c10d_async_envs)
     def test_two_linear_bias_subgroup_send_recv(self, dtype, c10d_async_env):
         """Test two linear layers with bias, subgroup, send/recv."""
@@ -1464,7 +1464,7 @@ class TestTwoLinearBiasSubgroupRBLN(TestTPPPRBLNBase):
 class TestTwoLinearBiasReluSubgroupRBLN(TestTPPPRBLNBase):
     """Test cases for two linear layers with bias and ReLU, subgroup, send/recv."""
 
-    @parametrize("dtype", SUPPORTED_DTYPES)
+    @parametrize("dtype", SUPPORTED_FLOATING_DTYPES)
     @parametrize("c10d_async_env", TestTPPPRBLNBase.c10d_async_envs)
     def test_two_linear_bias_relu_subgroup_send_recv(self, dtype, c10d_async_env):
         """Test two linear layers with bias and ReLU, subgroup, send/recv."""
@@ -1481,7 +1481,7 @@ class TestTwoLinearBiasReluSubgroupRBLN(TestTPPPRBLNBase):
 class TestTwoLinearBiasAllgatherSubgroupRBLN(TestTPPPRBLNBase):
     """Test cases for two linear layers with bias, allgather, subgroup, send/recv."""
 
-    @parametrize("dtype", SUPPORTED_DTYPES)
+    @parametrize("dtype", SUPPORTED_FLOATING_DTYPES)
     @parametrize("c10d_async_env", TestTPPPRBLNBase.c10d_async_envs)
     def test_two_linear_bias_allgather_subgroup_send_recv(self, dtype, c10d_async_env):
         """Test two linear layers with bias, allgather, subgroup, send/recv."""

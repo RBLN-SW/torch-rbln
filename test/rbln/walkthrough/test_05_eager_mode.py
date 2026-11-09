@@ -12,10 +12,11 @@ Verifies that standard PyTorch eager ops run on RBLN without `torch.compile`:
 
 import pytest
 import torch
+from torch.testing import make_tensor
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from test.utils import SUPPORTED_DTYPES
+from test.utils import SUPPORTED_DTYPES, SUPPORTED_FLOATING_DTYPES
 
 
 @pytest.mark.npu(count=1)
@@ -27,8 +28,8 @@ class TestEagerMode(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     def test_pointwise_add_and_relu(self, dtype):
         """`x + y` followed by `torch.relu` should stay on RBLN."""
-        x = torch.randn(64, 64, device=self.rbln_device, dtype=dtype)
-        y = torch.randn(64, 64, device=self.rbln_device, dtype=dtype)
+        x = make_tensor(64, 64, device=self.rbln_device, dtype=dtype, low=-2, high=2)
+        y = make_tensor(64, 64, device=self.rbln_device, dtype=dtype, low=-2, high=2)
 
         z = x + y
         w = torch.relu(z)
@@ -40,7 +41,7 @@ class TestEagerMode(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     def test_scalar_broadcast_mul_and_add(self, dtype):
         """Scalar broadcast via `*` and `+` should keep shape and device."""
-        x = torch.randn(64, 64, device=self.rbln_device, dtype=dtype)
+        x = make_tensor(64, 64, device=self.rbln_device, dtype=dtype, low=-2, high=2)
         y = x * 2.0 + 1.0
         self.assertEqual(y.shape, (64, 64))
         self.assertEqual(y.device.type, "rbln")
@@ -48,10 +49,10 @@ class TestEagerMode(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     def test_inplace_mul_(self, dtype):
         """`x.mul_(scalar)` should mutate in place on RBLN without moving storage."""
-        x = torch.randn(64, 64, device=self.rbln_device, dtype=dtype)
+        x = make_tensor(64, 64, device=self.rbln_device, dtype=dtype, low=-2, high=2)
         original_ptr = x.data_ptr()
 
-        returned = x.mul_(2.0)
+        returned = x.mul_(2)
 
         # Same tensor, same storage.
         self.assertIs(returned, x)
@@ -61,7 +62,7 @@ class TestEagerMode(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     def test_reduction_sum_full(self, dtype):
         """Full reduction via `tensor.sum()` should produce a scalar tensor on RBLN."""
-        x = torch.randn(64, 64, device=self.rbln_device, dtype=dtype)
+        x = make_tensor(64, 64, device=self.rbln_device, dtype=dtype, low=-2, high=2)
         s = x.sum()
         self.assertEqual(s.shape, ())
         self.assertEqual(s.device.type, "rbln")
@@ -69,12 +70,12 @@ class TestEagerMode(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     def test_reduction_sum_along_dim(self, dtype):
         """Reduction along a dim should produce a 1-D tensor on RBLN."""
-        x = torch.randn(64, 64, device=self.rbln_device, dtype=dtype)
+        x = make_tensor(64, 64, device=self.rbln_device, dtype=dtype, low=-2, high=2)
         row_sum = x.sum(dim=1)
         self.assertEqual(row_sum.shape, (64,))
         self.assertEqual(row_sum.device.type, "rbln")
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_reduction_mean_full(self, dtype):
         """Full `mean()` should produce a scalar tensor on RBLN."""
         x = torch.randn(64, 64, device=self.rbln_device, dtype=dtype)
@@ -82,7 +83,7 @@ class TestEagerMode(TestCase):
         self.assertEqual(m.shape, ())
         self.assertEqual(m.device.type, "rbln")
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_reduction_mean_along_dim(self, dtype):
         """`mean(dim=...)` should produce a 1-D tensor on RBLN."""
         x = torch.randn(64, 64, device=self.rbln_device, dtype=dtype)
@@ -93,7 +94,7 @@ class TestEagerMode(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     def test_reduction_max_full(self, dtype):
         """Full `max()` should produce a scalar tensor on RBLN."""
-        x = torch.randn(64, 64, device=self.rbln_device, dtype=dtype)
+        x = make_tensor(64, 64, device=self.rbln_device, dtype=dtype, low=-2, high=2)
         m = x.max()
         self.assertEqual(m.shape, ())
         self.assertEqual(m.device.type, "rbln")
@@ -101,7 +102,7 @@ class TestEagerMode(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     def test_reduction_max_along_dim(self, dtype):
         """`max(dim=...)` should return a `(values, indices)` pair, both on RBLN."""
-        x = torch.randn(64, 64, device=self.rbln_device, dtype=dtype)
+        x = make_tensor(64, 64, device=self.rbln_device, dtype=dtype, low=-2, high=2)
         row_max = x.max(dim=1)
         self.assertEqual(row_max.values.shape, (64,))
         self.assertEqual(row_max.indices.shape, (64,))
@@ -111,8 +112,8 @@ class TestEagerMode(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     def test_matmul_and_at_operator_match(self, dtype):
         """`torch.matmul(a, b)` and `a @ b` should produce the same result."""
-        a = torch.randn(64, 64, device=self.rbln_device, dtype=dtype)
-        b = torch.randn(64, 64, device=self.rbln_device, dtype=dtype)
+        a = make_tensor(64, 64, device=self.rbln_device, dtype=dtype, low=-2, high=2)
+        b = make_tensor(64, 64, device=self.rbln_device, dtype=dtype, low=-2, high=2)
 
         z = torch.matmul(a, b)
         z2 = a @ b
@@ -125,9 +126,9 @@ class TestEagerMode(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     def test_matmul_with_broadcast_bias(self, dtype):
         """`matmul(a, b) + bias` with a broadcastable bias should stay on RBLN."""
-        a = torch.randn(64, 64, device=self.rbln_device, dtype=dtype)
-        b = torch.randn(64, 64, device=self.rbln_device, dtype=dtype)
-        bias = torch.randn(64, device=self.rbln_device, dtype=dtype)
+        a = make_tensor(64, 64, device=self.rbln_device, dtype=dtype, low=-2, high=2)
+        b = make_tensor(64, 64, device=self.rbln_device, dtype=dtype, low=-2, high=2)
+        bias = make_tensor(64, device=self.rbln_device, dtype=dtype, low=-2, high=2)
 
         out = torch.matmul(a, b) + bias
 

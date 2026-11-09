@@ -25,7 +25,7 @@ import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from test.utils import SUPPORTED_DTYPES
+from test.utils import SUPPORTED_FLOATING_DTYPES
 
 
 NUM_KV_HEADS, NUM_Q_GROUPS, HEAD_DIM = 2, 4, 64
@@ -141,11 +141,11 @@ class TestAttentionInGraph(TestCase):
         close(graph_cache, reference_cache, cache_tol, f"kv_cache after {phase}")
         self.assertGreater(graph_cache.float().cpu().abs().sum().item(), 0.0, f"kv_cache untouched by {phase}")
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_flash_causal_attention_prefill_in_graph(self, dtype):
         self._check("prefill", dtype)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_flash_causal_attention_decode_in_graph(self, dtype):
         self._check("decode", dtype)
 

@@ -13,6 +13,7 @@ metadata / stride handling:
 
 import pytest
 import torch
+from torch.testing import make_tensor
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
@@ -28,7 +29,7 @@ class TestTensorMetadata(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     def test_view_preserves_data_with_new_shape(self, dtype):
         """view() should produce a tensor with the new shape and shared storage."""
-        x = torch.randn(4, 64, device=self.rbln_device, dtype=dtype)
+        x = make_tensor(4, 64, device=self.rbln_device, dtype=dtype, low=-2, high=2)
         y = x.view(8, 32)
         self.assertEqual(y.shape, (8, 32))
         self.assertEqual(y.device.type, "rbln")
@@ -37,7 +38,7 @@ class TestTensorMetadata(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     def test_transpose_permutes_dimensions(self, dtype):
         """transpose(0, 1) should swap dimensions and share storage."""
-        x = torch.randn(4, 64, device=self.rbln_device, dtype=dtype)
+        x = make_tensor(4, 64, device=self.rbln_device, dtype=dtype, low=-2, high=2)
         z = x.transpose(0, 1)
         self.assertEqual(z.shape, (64, 4))
         self.assertEqual(z.device.type, "rbln")
@@ -46,7 +47,7 @@ class TestTensorMetadata(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     def test_reshape_contiguous(self, dtype):
         """reshape() on a contiguous input should match view() semantics."""
-        x = torch.randn(4, 64, device=self.rbln_device, dtype=dtype)
+        x = make_tensor(4, 64, device=self.rbln_device, dtype=dtype, low=-2, high=2)
         r = x.reshape(2, 128)
         self.assertEqual(r.shape, (2, 128))
         self.assertEqual(r.device.type, "rbln")
@@ -54,7 +55,7 @@ class TestTensorMetadata(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     def test_permute_reorders_dimensions(self, dtype):
         """permute() should reorder dims and share storage with the input."""
-        x = torch.randn(2, 3, 4, device=self.rbln_device, dtype=dtype)
+        x = make_tensor(2, 3, 4, device=self.rbln_device, dtype=dtype, low=-2, high=2)
         p = x.permute(2, 0, 1)
         self.assertEqual(p.shape, (4, 2, 3))
         self.assertEqual(p.device.type, "rbln")
@@ -63,7 +64,7 @@ class TestTensorMetadata(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     def test_transposed_is_not_contiguous(self, dtype):
         """A transposed rectangular tensor should not be contiguous."""
-        x = torch.randn(4, 64, device=self.rbln_device, dtype=dtype)
+        x = make_tensor(4, 64, device=self.rbln_device, dtype=dtype, low=-2, high=2)
         t = x.transpose(0, 1)
         self.assertFalse(t.is_contiguous())
 
@@ -72,7 +73,7 @@ class TestTensorMetadata(TestCase):
         """`.contiguous()` on a non-contiguous view should return a contiguous
         tensor.
         """
-        x = torch.randn(4, 64, device=self.rbln_device, dtype=dtype)
+        x = make_tensor(4, 64, device=self.rbln_device, dtype=dtype, low=-2, high=2)
         t = x.transpose(0, 1)
         c = t.contiguous()
         self.assertTrue(c.is_contiguous())

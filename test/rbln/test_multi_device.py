@@ -5,10 +5,11 @@
 import pytest
 import torch
 from torch import nn
+from torch.testing import make_tensor
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
-from test.utils import SUPPORTED_DTYPES
+from test.utils import SUPPORTED_DTYPES, SUPPORTED_FLOATING_DTYPES
 
 
 @pytest.mark.npu(count=2)
@@ -21,7 +22,7 @@ class TestMultiDevice(TestCase):
         device1 = torch.device("rbln:1")
 
         # Create tensor on device 0
-        x = torch.randn([4, 4], dtype=dtype, device=device0)
+        x = make_tensor([4, 4], dtype=dtype, device=device0, low=-2, high=2)
         self.assertEqual(x.device, device0)
 
         # Move to device 1
@@ -36,7 +37,7 @@ class TestMultiDevice(TestCase):
     def test_tensor_to_same_device(self, dtype):
         """Test that to() on same device returns same tensor"""
         device0 = torch.device("rbln:0")
-        x = torch.randn([4, 4], dtype=dtype, device=device0)
+        x = make_tensor([4, 4], dtype=dtype, device=device0, low=-2, high=2)
         y = x.to(device0)
         # Should be the same tensor (no copy)
         self.assertEqual(x.data_ptr(), y.data_ptr())
@@ -48,7 +49,7 @@ class TestMultiDevice(TestCase):
         device1 = torch.device("rbln:1")
 
         # Create source on device 0
-        src = torch.randn([4, 4], dtype=dtype, device=device0)
+        src = make_tensor([4, 4], dtype=dtype, device=device0, low=-2, high=2)
         src_data = src.cpu().clone()
 
         # Create destination on device 1
@@ -65,7 +66,7 @@ class TestMultiDevice(TestCase):
     def test_copy_same_device(self, dtype):
         """Test copy_() on same device"""
         device0 = torch.device("rbln:0")
-        src = torch.randn([4, 4], dtype=dtype, device=device0)
+        src = make_tensor([4, 4], dtype=dtype, device=device0, low=-2, high=2)
         dst = torch.zeros([4, 4], dtype=dtype, device=device0)
         src_data = src.cpu().clone()
 
@@ -105,7 +106,7 @@ class TestMultiDevice(TestCase):
         with torch.rbln.device(device1):
             # current_device() should be changed to device1
             self.assertEqual(torch.rbln.current_device(), 1)
-            x = torch.randn([2, 2], dtype=dtype, device=device1)
+            x = make_tensor([2, 2], dtype=dtype, device=device1, low=-2, high=2)
             self.assertEqual(x.device.index, 1)
 
         # Device should be restored to original device after context
@@ -138,27 +139,27 @@ class TestMultiDevice(TestCase):
         self.assertEqual(torch.rbln.current_device(), 0)
 
         # Create tensor on device 1
-        x = torch.randn([2, 2], dtype=dtype, device=device1)
+        x = make_tensor([2, 2], dtype=dtype, device=device1, low=-2, high=2)
 
         # Use device_of to switch to tensor's device
         with torch.rbln.device_of(x):
             self.assertEqual(torch.rbln.current_device(), 1)
             # Create another tensor, should be on device 1
-            y = torch.randn([2, 2], dtype=dtype, device=device1)
+            y = make_tensor([2, 2], dtype=dtype, device=device1, low=-2, high=2)
             self.assertEqual(y.device.index, 1)
 
         # Device should be restored to original device after context
         self.assertEqual(torch.rbln.current_device(), 0)
 
         # Test with tensor on device 0
-        z = torch.randn([2, 2], dtype=dtype, device=device0)
+        z = make_tensor([2, 2], dtype=dtype, device=device0, low=-2, high=2)
         with torch.rbln.device_of(z):
             self.assertEqual(torch.rbln.current_device(), 0)
 
         self.assertEqual(torch.rbln.current_device(), 0)
 
         # Test that non-RBLN tensor is a no-op
-        cpu_tensor = torch.randn([2, 2], dtype=dtype, device="cpu")
+        cpu_tensor = make_tensor([2, 2], dtype=dtype, device="cpu", low=-2, high=2)
         original_device = torch.rbln.current_device()
         with torch.rbln.device_of(cpu_tensor):
             # Should remain unchanged (no-op for non-RBLN devices)
@@ -173,7 +174,7 @@ class TestMultiDevice(TestCase):
             self.assertEqual(torch.rbln.current_device(), i)
 
             # Create tensor should be on current device
-            x = torch.randn([2, 2], dtype=dtype, device=device)
+            x = make_tensor([2, 2], dtype=dtype, device=device, low=-2, high=2)
             self.assertEqual(x.device.index, i)
 
     @dtypes(*SUPPORTED_DTYPES)
@@ -183,8 +184,8 @@ class TestMultiDevice(TestCase):
         device1 = torch.device("rbln:1")
 
         # Create tensors on different devices
-        x = torch.randn([4, 4], dtype=dtype, device=device0)
-        y = torch.randn([4, 4], dtype=dtype, device=device1)
+        x = make_tensor([4, 4], dtype=dtype, device=device0, low=-2, high=2)
+        y = make_tensor([4, 4], dtype=dtype, device=device1, low=-2, high=2)
 
         # Operations on same device should preserve device
         z = x + x  # Both on device0
@@ -199,8 +200,8 @@ class TestMultiDevice(TestCase):
         device0 = torch.device("rbln:0")
         device1 = torch.device("rbln:1")
 
-        x = torch.randn([4, 4], dtype=dtype, device=device0)
-        y = torch.randn([4, 4], dtype=dtype, device=device1)
+        x = make_tensor([4, 4], dtype=dtype, device=device0, low=-2, high=2)
+        y = make_tensor([4, 4], dtype=dtype, device=device1, low=-2, high=2)
 
         # Cross-device operations should fail (unless explicitly supported)
         with self.assertRaises(RuntimeError):
@@ -215,7 +216,7 @@ class TestMultiDevice(TestCase):
         device0 = torch.device("rbln:0")
         device1 = torch.device("rbln:1")
 
-        x = torch.randn([4, 4], dtype=dtype, device=device0)
+        x = make_tensor([4, 4], dtype=dtype, device=device0, low=-2, high=2)
         y = x.clone()
         self.assertEqual(y.device, device0)
 
@@ -230,11 +231,11 @@ class TestMultiDevice(TestCase):
         device0 = torch.device("rbln:0")
         device1 = torch.device("rbln:1")
 
-        x = torch.randn([4, 4], dtype=dtype, device=device0)
+        x = make_tensor([4, 4], dtype=dtype, device=device0, low=-2, high=2)
         y = torch.empty_like(x)
         self.assertEqual(y.device, device0)
 
-        x1 = torch.randn([4, 4], dtype=dtype, device=device1)
+        x1 = make_tensor([4, 4], dtype=dtype, device=device1, low=-2, high=2)
         y1 = torch.empty_like(x1)
         self.assertEqual(y1.device, device1)
 
@@ -244,19 +245,19 @@ class TestMultiDevice(TestCase):
         device0 = torch.device("rbln:0")
         device1 = torch.device("rbln:1")
 
-        x = torch.randn([4, 4], dtype=dtype, device=device0)
+        x = make_tensor([4, 4], dtype=dtype, device=device0, low=-2, high=2)
         y = torch.zeros_like(x)
         z = torch.ones_like(x)
         self.assertEqual(y.device, device0)
         self.assertEqual(z.device, device0)
 
-        x1 = torch.randn([4, 4], dtype=dtype, device=device1)
+        x1 = make_tensor([4, 4], dtype=dtype, device=device1, low=-2, high=2)
         y1 = torch.zeros_like(x1)
         z1 = torch.ones_like(x1)
         self.assertEqual(y1.device, device1)
         self.assertEqual(z1.device, device1)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_multi_device_memory_isolation(self, dtype):
         """Test that memory is isolated between devices.
         This ensures that modifying a tensor on device 0 does not affect
@@ -297,7 +298,7 @@ class TestMultiDevice(TestCase):
         device0 = torch.device("rbln:0")
         device1 = torch.device("rbln:1")
 
-        x = torch.randn([4, 4], dtype=dtype, device=device0)
+        x = make_tensor([4, 4], dtype=dtype, device=device0, low=-2, high=2)
         y = x.to(device=device1, dtype=dtype)
 
         self.assertEqual(y.device, device1)
@@ -310,7 +311,7 @@ class TestMultiDevice(TestCase):
         device0 = torch.device("rbln:0")
         device1 = torch.device("rbln:1")
 
-        x = torch.randn([4, 4], dtype=dtype, device=device0)
+        x = make_tensor([4, 4], dtype=dtype, device=device0, low=-2, high=2)
         y = x.to(device1, non_blocking=True)
 
         self.assertEqual(y.device, device1)
@@ -322,7 +323,7 @@ class TestMultiDevice(TestCase):
         device0_str = "rbln:0"
         device1_str = "rbln:1"
 
-        x = torch.randn([4, 4], dtype=dtype, device=device0_str)
+        x = make_tensor([4, 4], dtype=dtype, device=device0_str, low=-2, high=2)
         self.assertEqual(x.device.index, 0)
 
         y = x.to(device1_str)
@@ -333,7 +334,7 @@ class TestMultiDevice(TestCase):
         """Test accessing device index"""
         for device_index in range(2):
             device = torch.device("rbln", device_index)
-            x = torch.randn([2, 2], dtype=dtype, device=device)
+            x = make_tensor([2, 2], dtype=dtype, device=device, low=-2, high=2)
             self.assertEqual(x.device, device)
 
     @dtypes(*SUPPORTED_DTYPES)
@@ -342,7 +343,7 @@ class TestMultiDevice(TestCase):
         devices = [f"rbln:{i}" for i in range(2)]
         tensors = []
         for device_str in devices:
-            x = torch.randn([3, 3], dtype=dtype, device=device_str)
+            x = make_tensor([3, 3], dtype=dtype, device=device_str, low=-2, high=2)
             y = x * 2.0  # Operation on same device
             tensors.append(y)
 
@@ -361,11 +362,11 @@ class TestMultiDevice(TestCase):
         device0 = torch.device("rbln:0")
         device1 = torch.device("rbln:1")
 
-        x = torch.randn([4, 4], dtype=dtype, device=device0)
+        x = make_tensor([4, 4], dtype=dtype, device=device0, low=-2, high=2)
         y = x.view(2, 8)
         self.assertEqual(y.device, device0)
 
-        x1 = torch.randn([4, 4], dtype=dtype, device=device1)
+        x1 = make_tensor([4, 4], dtype=dtype, device=device1, low=-2, high=2)
         y1 = x1.reshape(16)
         self.assertEqual(y1.device, device1)
 
@@ -375,12 +376,12 @@ class TestMultiDevice(TestCase):
         device0 = torch.device("rbln:0")
         device1 = torch.device("rbln:1")
 
-        x = torch.randn([4, 4], dtype=dtype, device=device0)
-        x.add_(1.0)
+        x = make_tensor([4, 4], dtype=dtype, device=device0, low=-2, high=2)
+        x.add_(1)
         self.assertEqual(x.device, device0)
 
-        y = torch.randn([4, 4], dtype=dtype, device=device1)
-        y.mul_(2.0)
+        y = make_tensor([4, 4], dtype=dtype, device=device1, low=-2, high=2)
+        y.mul_(2)
         self.assertEqual(y.device, device1)
 
     @dtypes(*SUPPORTED_DTYPES)
@@ -389,11 +390,11 @@ class TestMultiDevice(TestCase):
         device0 = torch.device("rbln:0")
         device1 = torch.device("rbln:1")
 
-        x = torch.randn([4, 4], dtype=dtype, device=device0)
+        x = make_tensor([4, 4], dtype=dtype, device=device0, low=-2, high=2)
         y = x[1:3, 1:3]
         self.assertEqual(y.device, device0)
 
-        x1 = torch.randn([4, 4], dtype=dtype, device=device1)
+        x1 = make_tensor([4, 4], dtype=dtype, device=device1, low=-2, high=2)
         y1 = x1[:, :2]
         self.assertEqual(y1.device, device1)
 
@@ -421,7 +422,7 @@ class TestDeviceOutputPlacement(TestCase):
     # Basic Linear Layer Tests
     # =========================================================================
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("device_index", [0, 1])
     def test_linear_single_device(self, dtype, device_index):
         """Test nn.Linear on specified device."""
@@ -435,7 +436,7 @@ class TestDeviceOutputPlacement(TestCase):
         self.assertEqual(output.shape, (3, 64))
         self.assertEqual(output.dtype, dtype)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_linear_multiple_devices(self, dtype):
         """Test nn.Linear on multiple devices to catch device placement bugs."""
         for device_id in range(2):
@@ -448,7 +449,7 @@ class TestDeviceOutputPlacement(TestCase):
             self._assert_device_match(output, device, f"Linear output on device {device_id}: ")
             self.assertEqual(output.shape, (2, 32))
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_linear_with_bias_device_1(self, dtype):
         """Test Linear layer with bias on device 1."""
         device = torch.device("rbln:1")
@@ -458,7 +459,7 @@ class TestDeviceOutputPlacement(TestCase):
         output = linear(x)
         self._assert_device_match(output, device, "Linear with bias output: ")
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_linear_without_bias_device_1(self, dtype):
         """Test Linear layer without bias on device 1."""
         device = torch.device("rbln:1")
@@ -472,7 +473,7 @@ class TestDeviceOutputPlacement(TestCase):
     # Multi-Device and Context Tests
     # =========================================================================
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_linear_sequential_devices(self, dtype):
         """Test sequential Linear operations on different devices."""
         device0 = torch.device("rbln:0")
@@ -492,7 +493,7 @@ class TestDeviceOutputPlacement(TestCase):
         out1 = linear1(x1)
         self._assert_device_match(out1, device1, "Second Linear output: ")
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_linear_with_current_device_context(self, dtype):
         """Test that Linear respects device context even when current_device is
         different.
@@ -512,7 +513,7 @@ class TestDeviceOutputPlacement(TestCase):
         self._assert_device_match(output, device1, "Linear should use input device, not current device: ")
         self.assertNotEqual(output.device.index, torch.rbln.current_device())
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_device_0_vs_device_1_comparison(self, dtype):
         """Test that operations on device 0 and device 1 produce outputs on correct
         devices.
@@ -536,7 +537,7 @@ class TestDeviceOutputPlacement(TestCase):
         # Ensure they're on different devices
         self.assertNotEqual(out0.device.index, out1.device.index)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_device_switching_sequence(self, dtype):
         """Test switching between devices in a sequence of operations."""
         device0 = torch.device("rbln:0")
@@ -566,8 +567,8 @@ class TestDeviceOutputPlacement(TestCase):
         device0 = torch.device("rbln:0")
         device1 = torch.device("rbln:1")
 
-        x = torch.randn([4, 8], dtype=dtype, device=device0)
-        y = torch.randn([4, 8], dtype=dtype, device=device1)
+        x = make_tensor([4, 8], dtype=dtype, device=device0, low=-2, high=2)
+        y = make_tensor([4, 8], dtype=dtype, device=device1, low=-2, high=2)
 
         # Cross-device operations should fail
         with self.assertRaises(RuntimeError):
@@ -577,7 +578,7 @@ class TestDeviceOutputPlacement(TestCase):
     # Model Combination Tests
     # =========================================================================
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_multiple_operations_device_1(self, dtype):
         """Test multiple operations in sequence on device 1."""
         device = torch.device("rbln:1")
@@ -595,7 +596,7 @@ class TestDeviceOutputPlacement(TestCase):
         linear_out = linear(mul_out)
         self._assert_device_match(linear_out, device, "Linear output: ")
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_nested_model_device_1(self, dtype):
         """Test nested model with multiple layers on device 1."""
         device = torch.device("rbln:1")
@@ -620,7 +621,7 @@ class TestDeviceOutputPlacement(TestCase):
         self._assert_device_match(output, device, "Nested model output: ")
         self.assertEqual(output.shape, (4, 8))
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_sequential_model_device_1(self, dtype):
         """Test Sequential model device placement."""
         device = torch.device("rbln:1")
@@ -638,7 +639,7 @@ class TestDeviceOutputPlacement(TestCase):
         self._assert_device_match(output, device, "Sequential model output: ")
         self.assertEqual(output.shape, (4, 16))
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_multiple_outputs_device_1(self, dtype):
         """Test model with multiple outputs on device 1."""
         device = torch.device("rbln:1")
@@ -662,7 +663,7 @@ class TestDeviceOutputPlacement(TestCase):
         self._assert_device_match(out1, device, "First output: ")
         self._assert_device_match(out2, device, "Second output: ")
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_complex_model_device_1(self, dtype):
         """Test a complex model using only ops from native_functions.yaml on device
         1.
@@ -699,7 +700,7 @@ class TestDeviceOutputPlacement(TestCase):
         self._assert_device_match(output, device, "Complex model output: ")
         self.assertEqual(output.shape, (4, 16))
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_complex_model_device_1_128aligned(self, dtype):
         """Test complex model with 128-byte aligned last dimension using
         native_functions ops.
@@ -756,8 +757,8 @@ class TestDeviceOutputPlacement(TestCase):
         sub.out).
         """
         device = torch.device("rbln:1")
-        x = torch.randn(shape, dtype=dtype, device=device)
-        y = torch.randn(shape, dtype=dtype, device=device)
+        x = make_tensor(shape, dtype=dtype, device=device, low=-2, high=2)
+        y = make_tensor(shape, dtype=dtype, device=device, low=-2, high=2)
 
         output = binary_op(x, y)
         self._assert_device_match(output, device, f"{binary_op.__name__} output: ")
@@ -767,13 +768,13 @@ class TestDeviceOutputPlacement(TestCase):
     def test_div_device_1(self, dtype, shape):
         """Test div operation device placement (native_functions: div.out)."""
         device = torch.device("rbln:1")
-        x = torch.randn(shape, dtype=dtype, device=device)
-        y = torch.randn(shape, dtype=dtype, device=device) + 0.1  # avoid division by zero
+        x = make_tensor(shape, dtype=dtype, device=device, low=-2, high=2)
+        y = make_tensor(shape, dtype=dtype, device=device, low=-2, high=2, exclude_zero=True)  # avoid division by zero
 
         output = torch.div(x, y)
         self._assert_device_match(output, device, "Div output: ")
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("unary_op", [torch.abs, torch.ceil, torch.floor, torch.neg, torch.sigmoid, torch.nn.functional.silu])
     @parametrize("shape", [(4, 8), (4, 64)])
     def test_unary_ops_device_1(self, dtype, unary_op, shape):
@@ -791,7 +792,7 @@ class TestDeviceOutputPlacement(TestCase):
     def test_clamp_device_1(self, dtype, shape):
         """Test clamp operation device placement (native_functions: clamp.out)."""
         device = torch.device("rbln:1")
-        x = torch.randn(shape, dtype=dtype, device=device)
+        x = make_tensor(shape, dtype=dtype, device=device, low=-2, high=2)
 
         output = torch.clamp(x, min=-1.0, max=1.0)
         self._assert_device_match(output, device, "Clamp output: ")
@@ -801,7 +802,7 @@ class TestDeviceOutputPlacement(TestCase):
     def test_log_device_1(self, dtype, shape):
         """Test log operation device placement (native_functions: log.out)."""
         device = torch.device("rbln:1")
-        x = torch.randn(shape, dtype=dtype, device=device).abs() + 0.1  # ensure positive
+        x = make_tensor(shape, dtype=dtype, device=device, low=0.1, high=4)  # ensure positive
 
         output = torch.log(x)
         self._assert_device_match(output, device, "Log output: ")
@@ -811,12 +812,12 @@ class TestDeviceOutputPlacement(TestCase):
     def test_rsqrt_device_1(self, dtype, shape):
         """Test rsqrt operation device placement (native_functions: rsqrt.out)."""
         device = torch.device("rbln:1")
-        x = torch.randn(shape, dtype=dtype, device=device).abs() + 0.1  # ensure positive
+        x = make_tensor(shape, dtype=dtype, device=device, low=0.1, high=4)  # ensure positive
 
         output = torch.rsqrt(x)
         self._assert_device_match(output, device, "Rsqrt output: ")
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("shape", [(4, 8), (4, 64)])
     def test_pow_tensor_scalar_device_1(self, dtype, shape):
         """Test pow operation device placement (native_functions:
@@ -828,7 +829,7 @@ class TestDeviceOutputPlacement(TestCase):
         output = torch.pow(x, 2.0)
         self._assert_device_match(output, device, "Pow output: ")
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("shape", [(4, 8), (4, 64)])
     def test_mean_device_1(self, dtype, shape):
         """Test mean operation device placement (native_functions: mean.out)."""
@@ -846,8 +847,8 @@ class TestDeviceOutputPlacement(TestCase):
         maximum.out, minimum.out).
         """
         device = torch.device("rbln:1")
-        x = torch.randn(shape, dtype=dtype, device=device)
-        y = torch.randn(shape, dtype=dtype, device=device)
+        x = make_tensor(shape, dtype=dtype, device=device, low=-2, high=2)
+        y = make_tensor(shape, dtype=dtype, device=device, low=-2, high=2)
 
         output = reduction_op(x, y)
         self._assert_device_match(output, device, f"{reduction_op.__name__} output: ")
@@ -857,9 +858,9 @@ class TestDeviceOutputPlacement(TestCase):
     def test_where_device_1(self, dtype, shape):
         """Test where operation device placement (native_functions: where.self)."""
         device = torch.device("rbln:1")
-        condition = torch.randn(shape, dtype=dtype, device=device) > 0
-        x = torch.randn(shape, dtype=dtype, device=device)
-        y = torch.randn(shape, dtype=dtype, device=device)
+        condition = make_tensor(shape, dtype=dtype, device=device, low=-2, high=2) > 0
+        x = make_tensor(shape, dtype=dtype, device=device, low=-2, high=2)
+        y = make_tensor(shape, dtype=dtype, device=device, low=-2, high=2)
 
         output = torch.where(condition, x, y)
         self._assert_device_match(output, device, "Where output: ")
@@ -869,9 +870,9 @@ class TestDeviceOutputPlacement(TestCase):
     def test_cat_device_1(self, dtype, shape):
         """Test cat operation device placement (native_functions: cat.out)."""
         device = torch.device("rbln:1")
-        x = torch.randn(shape, dtype=dtype, device=device)
-        y = torch.randn(shape, dtype=dtype, device=device)
-        z = torch.randn(shape, dtype=dtype, device=device)
+        x = make_tensor(shape, dtype=dtype, device=device, low=-2, high=2)
+        y = make_tensor(shape, dtype=dtype, device=device, low=-2, high=2)
+        z = make_tensor(shape, dtype=dtype, device=device, low=-2, high=2)
 
         output = torch.cat([x, y, z], dim=1)
         self._assert_device_match(output, device, "Cat output: ")
@@ -885,8 +886,8 @@ class TestDeviceOutputPlacement(TestCase):
         ge, lt, le).
         """
         device = torch.device("rbln:1")
-        x = torch.randn(shape, dtype=dtype, device=device)
-        y = torch.randn(shape, dtype=dtype, device=device)
+        x = make_tensor(shape, dtype=dtype, device=device, low=-2, high=2)
+        y = make_tensor(shape, dtype=dtype, device=device, low=-2, high=2)
 
         # Test various comparison ops
         out = comparison_op(x, y)
@@ -899,7 +900,7 @@ class TestDeviceOutputPlacement(TestCase):
         logical_not.out).
         """
         device = torch.device("rbln:1")
-        x = torch.randn(shape, dtype=dtype, device=device) > 0
+        x = make_tensor(shape, dtype=dtype, device=device, low=-2, high=2) > 0
 
         output = torch.logical_not(x)
         self._assert_device_match(output, device, "Logical_not output: ")
@@ -909,8 +910,8 @@ class TestDeviceOutputPlacement(TestCase):
     def test_mm_device_1(self, dtype, n, m, p):
         """Test mm operation device placement (native_functions: mm.out)."""
         device = torch.device("rbln:1")
-        x = torch.randn([n, m], dtype=dtype, device=device)
-        y = torch.randn([m, p], dtype=dtype, device=device)
+        x = make_tensor([n, m], dtype=dtype, device=device, low=-2, high=2)
+        y = make_tensor([m, p], dtype=dtype, device=device, low=-2, high=2)
 
         output = torch.mm(x, y)
         self._assert_device_match(output, device, "MM output: ")
@@ -921,8 +922,8 @@ class TestDeviceOutputPlacement(TestCase):
     def test_bmm_device_1(self, dtype, b, n, m, p):
         """Test bmm operation device placement (native_functions: bmm.out)."""
         device = torch.device("rbln:1")
-        x = torch.randn([b, n, m], dtype=dtype, device=device)
-        y = torch.randn([b, m, p], dtype=dtype, device=device)
+        x = make_tensor([b, n, m], dtype=dtype, device=device, low=-2, high=2)
+        y = make_tensor([b, m, p], dtype=dtype, device=device, low=-2, high=2)
 
         output = torch.bmm(x, y)
         self._assert_device_match(output, device, "BMM output: ")
@@ -933,9 +934,9 @@ class TestDeviceOutputPlacement(TestCase):
     def test_addmm_device_1(self, dtype, n, m, p):
         """Test addmm operation device placement (native_functions: addmm.out)."""
         device = torch.device("rbln:1")
-        x = torch.randn([n, p], dtype=dtype, device=device)
-        y = torch.randn([n, m], dtype=dtype, device=device)
-        z = torch.randn([m, p], dtype=dtype, device=device)
+        x = make_tensor([n, p], dtype=dtype, device=device, low=-2, high=2)
+        y = make_tensor([n, m], dtype=dtype, device=device, low=-2, high=2)
+        z = make_tensor([m, p], dtype=dtype, device=device, low=-2, high=2)
 
         output = torch.addmm(x, y, z)
         self._assert_device_match(output, device, "Addmm output: ")
@@ -946,13 +947,13 @@ class TestDeviceOutputPlacement(TestCase):
     def test_matmul_device_1(self, dtype, n, m, p):
         """Test matrix multiplication device placement."""
         device = torch.device("rbln:1")
-        x = torch.randn([n, m], dtype=dtype, device=device)
-        y = torch.randn([m, p], dtype=dtype, device=device)
+        x = make_tensor([n, m], dtype=dtype, device=device, low=-2, high=2)
+        y = make_tensor([m, p], dtype=dtype, device=device, low=-2, high=2)
 
         matmul_out = torch.matmul(x, y)
         self._assert_device_match(matmul_out, device, "Matmul output: ")
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("in_features,out_features", [(64, 64), (128, 128)])
     def test_linear_device_1(self, dtype, in_features, out_features):
         """Test Linear layer with 64-byte aligned last dimension."""

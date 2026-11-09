@@ -5,10 +5,11 @@
 import pytest
 import torch
 from torch import nn
+from torch.testing import make_tensor
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
-from test.utils import SUPPORTED_DTYPES
+from test.utils import SUPPORTED_DTYPES, SUPPORTED_FLOATING_DTYPES
 
 
 # Tolerance for numerical comparisons
@@ -37,8 +38,8 @@ class TestGraphMode(TestCase):
         """Test that graph mode and eager mode produce same results for add
         operation.
         """
-        x = torch.randn([4, 4], dtype=dtype, device=self.rbln_device)
-        y = torch.randn([4, 4], dtype=dtype, device=self.rbln_device)
+        x = make_tensor([4, 4], dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        y = make_tensor([4, 4], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         self._run_eager_and_graph_mode(torch.add, (x, y))
 
@@ -53,8 +54,8 @@ class TestGraphMode(TestCase):
                 x = x.to(torch.device("cpu"))  # ← to.device
                 return x * 2
 
-        model = Net().to(device=self.rbln_device, dtype=dtype)
-        x = torch.randn([4, 4], dtype=dtype, device=self.rbln_device)
+        model = Net().to(device=self.rbln_device)
+        x = make_tensor([4, 4], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         self._run_eager_and_graph_mode(model, (x,))
 
@@ -69,12 +70,12 @@ class TestGraphMode(TestCase):
                 ref = torch.empty((), dtype=dtype)  # Reference tensor
                 return (x + 1).to(ref)  # ← to.other
 
-        model = Net().to(device=self.rbln_device, dtype=dtype)
-        x = torch.randn([5, 5], dtype=dtype, device=self.rbln_device)
+        model = Net().to(device=self.rbln_device)
+        x = make_tensor([5, 5], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         self._run_eager_and_graph_mode(model, (x,))
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_matmul_bias(self, dtype):
         """Test that graph mode and eager mode produce same results for matmul with
         bias.
@@ -94,7 +95,7 @@ class TestGraphMode(TestCase):
 
         self._run_eager_and_graph_mode(model, (x, y))
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_linear(self, dtype):
         """Test that graph mode and eager mode produce same results for linear layer."""
 
@@ -111,7 +112,7 @@ class TestGraphMode(TestCase):
 
         self._run_eager_and_graph_mode(model, (x,))
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_linear_to_linear(self, dtype):
         """Test that graph mode and eager mode produce same results for complex linear
         layers.
@@ -135,7 +136,7 @@ class TestGraphMode(TestCase):
 
         self._run_eager_and_graph_mode(model, (x,))
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_layernorm_mixed_precision(self, dtype):
         """Test that graph mode and eager mode produce same results for layernorm with
         mixed precision.
@@ -191,7 +192,7 @@ class TestGraphEagerMode(TestCase):
         return Scale().to(device=self.rbln_device, dtype=dtype)
 
     @pytest.mark.usefixtures("enable_deploy_mode")
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("weight_use", ["matmul", "elementwise"])
     def test_eager_after_graph_on_the_same_weights(self, dtype, weight_use):
         """An eager operator on the weights a compiled graph has already run.
@@ -223,7 +224,7 @@ class TestGraphEagerMode(TestCase):
         self.assertEqual(first_eager.cpu().float(), cpu_reference, atol=ATOL, rtol=RTOL)
 
     @pytest.mark.usefixtures("enable_deploy_mode")
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_graph_still_runs_after_eager_touched_its_weights(self, dtype):
         """The graph has to keep working once an eager operator has taken the weights
         back.
@@ -245,8 +246,8 @@ class TestGraphEagerMode(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     def test_mixed_graph_eager_operations(self, dtype):
         """Test mixing graph mode and eager mode operations in sequence."""
-        x = torch.randn([4, 4], dtype=dtype, device=self.rbln_device)
-        y = torch.randn([4, 4], dtype=dtype, device=self.rbln_device)
+        x = make_tensor([4, 4], dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        y = make_tensor([4, 4], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # Compile some operations
         compiled_add = torch.compile(torch.add, backend="rbln", dynamic=False)
@@ -263,7 +264,7 @@ class TestGraphEagerMode(TestCase):
         self.assertEqual(result4.device.type, "rbln")
         self.assertEqual(result4.shape, x.shape)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_nested_graph_eager_calls(self, dtype):
         """Test nested calls where graph mode calls eager mode operations."""
 
@@ -291,8 +292,8 @@ class TestGraphEagerMode(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     def test_multiple_graph_compilations(self, dtype):
         """Test that multiple graph mode compilations work correctly."""
-        x = torch.randn([4, 4], dtype=dtype, device=self.rbln_device)
-        y = torch.randn([4, 4], dtype=dtype, device=self.rbln_device)
+        x = make_tensor([4, 4], dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        y = make_tensor([4, 4], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # Compile multiple operations
         compiled_add = torch.compile(torch.add, backend="rbln", dynamic=False)
@@ -312,8 +313,8 @@ class TestGraphEagerMode(TestCase):
     def test_graph_mode_with_eager_input_preparation(self, dtype):
         """Test graph mode with inputs prepared in eager mode."""
         # Prepare inputs in eager mode
-        x = torch.randn([4, 4], dtype=dtype, device=self.rbln_device)
-        y = torch.randn([4, 4], dtype=dtype, device=self.rbln_device)
+        x = make_tensor([4, 4], dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        y = make_tensor([4, 4], dtype=dtype, device=self.rbln_device, low=-2, high=2)
         z = torch.add(x, y)  # Eager operation
 
         # Use graph mode with eager-prepared inputs
@@ -327,8 +328,8 @@ class TestGraphEagerMode(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     def test_eager_mode_with_graph_output(self, dtype):
         """Test eager mode operations using outputs from graph mode."""
-        x = torch.randn([4, 4], dtype=dtype, device=self.rbln_device)
-        y = torch.randn([4, 4], dtype=dtype, device=self.rbln_device)
+        x = make_tensor([4, 4], dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        y = make_tensor([4, 4], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # Graph mode operation
         compiled_add = torch.compile(torch.add, backend="rbln", dynamic=False)
@@ -345,8 +346,8 @@ class TestGraphEagerMode(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     def test_sequential_graph_eager_alternating(self, dtype):
         """Test alternating between graph mode and eager mode operations."""
-        x = torch.randn([4, 4], dtype=dtype, device=self.rbln_device)
-        y = torch.randn([4, 4], dtype=dtype, device=self.rbln_device)
+        x = make_tensor([4, 4], dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        y = make_tensor([4, 4], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         compiled_add = torch.compile(torch.add, backend="rbln", dynamic=False)
 
@@ -360,7 +361,7 @@ class TestGraphEagerMode(TestCase):
         self.assertEqual(result.device.type, "rbln")
         self.assertEqual(result.shape, x.shape)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_model_with_both_modes(self, dtype):
         """Test a model that uses both graph and eager operations."""
 
@@ -389,7 +390,7 @@ class TestGraphEagerMode(TestCase):
 
         self.assertEqual(eager_out.cpu(), graph_out.cpu(), atol=ATOL, rtol=RTOL)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_functional_ops_graph_eager_mix(self, dtype):
         """Test mixing functional operations in graph and eager modes."""
         x = torch.randn([4, 4], dtype=dtype, device=self.rbln_device)
@@ -415,12 +416,12 @@ class TestGraphEagerMode(TestCase):
         compiled_add = torch.compile(torch.add, backend="rbln", dynamic=False)
 
         # Use compiled function multiple times
-        x1 = torch.randn([4, 4], dtype=dtype, device=self.rbln_device)
-        y1 = torch.randn([4, 4], dtype=dtype, device=self.rbln_device)
+        x1 = make_tensor([4, 4], dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        y1 = make_tensor([4, 4], dtype=dtype, device=self.rbln_device, low=-2, high=2)
         result1 = compiled_add(x1, y1)
 
-        x2 = torch.randn([4, 4], dtype=dtype, device=self.rbln_device)
-        y2 = torch.randn([4, 4], dtype=dtype, device=self.rbln_device)
+        x2 = make_tensor([4, 4], dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        y2 = make_tensor([4, 4], dtype=dtype, device=self.rbln_device, low=-2, high=2)
         result2 = compiled_add(x2, y2)
 
         # Compare with eager mode
@@ -430,7 +431,7 @@ class TestGraphEagerMode(TestCase):
         self.assertEqual(eager_result1.cpu(), result1.cpu(), atol=ATOL, rtol=RTOL)
         self.assertEqual(eager_result2.cpu(), result2.cpu(), atol=ATOL, rtol=RTOL)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_model_with_many_ops_graph_vs_eager(self, dtype):
         """Test a model with many operations comparing graph mode and eager mode."""
 
@@ -510,7 +511,7 @@ class TestRecompileWeightHandling(TestCase):
         def forward(self, x):
             return self.linear(x)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_reseed_recompile_in_loop(self, dtype):
         """Test that reseeding and recompiling a rebuilt module each iteration produces
         consistent results.
@@ -532,7 +533,7 @@ class TestRecompileWeightHandling(TestCase):
         # Identical seeds → identical weights → identical compiled output.
         self.assertEqual(graph_outs[0], graph_outs[1], atol=ATOL, rtol=RTOL)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_identical_weights_distinct_models(self, dtype):
         """Test that two separately built modules with identical weights both compile
         and match.

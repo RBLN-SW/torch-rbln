@@ -13,10 +13,11 @@ Verifies that:
 
 import pytest
 import torch
+from torch.testing import make_tensor
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from test.utils import SUPPORTED_DTYPES
+from test.utils import SUPPORTED_DTYPES, SUPPORTED_FLOATING_DTYPES
 
 
 @pytest.mark.npu(count=1)
@@ -25,7 +26,7 @@ class TestRBLNDeviceTensor(TestCase):
 
     rbln_device = torch.device("rbln:0")
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_randn_on_rbln(self, dtype):
         """`torch.randn` should create a tensor directly on RBLN with the requested
         shape and dtype.
@@ -38,7 +39,7 @@ class TestRBLNDeviceTensor(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     def test_empty_like_on_rbln(self, dtype):
         """`torch.empty_like` should preserve shape and produce an RBLN tensor."""
-        x = torch.randn(2, 64, device=self.rbln_device, dtype=dtype)
+        x = make_tensor(2, 64, device=self.rbln_device, dtype=dtype, low=-2, high=2)
         e = torch.empty_like(x, device=self.rbln_device)
         self.assertEqual(e.device.type, "rbln")
         self.assertEqual(e.shape, x.shape)
@@ -54,7 +55,7 @@ class TestRBLNDeviceTensor(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     def test_cpu_to_rbln_to_cpu_round_trip(self, dtype):
         """A CPU tensor moved to RBLN and back should equal the original."""
-        cpu_tensor = torch.randn(2, 64, device="cpu", dtype=dtype)
+        cpu_tensor = make_tensor(2, 64, device="cpu", dtype=dtype, low=-2, high=2)
         rbln_tensor = cpu_tensor.to("rbln")
         back_to_cpu = rbln_tensor.to("cpu")
 
@@ -65,7 +66,7 @@ class TestRBLNDeviceTensor(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     def test_to_with_device_and_dtype(self, dtype):
         """`.to(device, dtype=...)` should move and cast in a single call."""
-        t = torch.randn(3, 3, device="cpu", dtype=torch.float32)
+        t = make_tensor(3, 3, device="cpu", dtype=torch.float32, low=-2, high=2)
         t_rbln = t.to(self.rbln_device, dtype=dtype)
         self.assertEqual(t_rbln.device.type, "rbln")
         self.assertEqual(t_rbln.device.index, 0)

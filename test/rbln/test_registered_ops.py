@@ -12,10 +12,11 @@ from typing import ClassVar
 
 import pytest
 import torch
+from torch.testing import make_tensor
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
-from test.utils import SUPPORTED_DTYPES
+from test.utils import SUPPORTED_DTYPES, SUPPORTED_FLOATING_DTYPES
 from torch_rbln import _C
 from torch_rbln._internal.ops_utils import (
     _detect_view_recipe,
@@ -76,7 +77,7 @@ class TestRegisteredNativeOps(TestCase):
         if torch.version.debug:
             self.skipTest("Skipping test_copy_from in debug mode due to ref count check issues")
 
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         y = torch.empty_like(x)
         torch.ops.aten._copy_from(y, x)
         self.assertEqual(x.cpu(), y.cpu(), atol=ATOL, rtol=RTOL)
@@ -89,7 +90,7 @@ class TestRegisteredNativeOps(TestCase):
         if torch.version.debug:
             self.skipTest("Skipping test_copy_from_and_resize in debug mode due to ref count check issues")
 
-        x = torch.randn(src_shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(src_shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         y = torch.empty(dst_shape, dtype=dtype, device=self.rbln_device)
         result = torch.ops.aten._copy_from_and_resize(x, y)
         self.assertEqual(result.device, self.rbln_device)
@@ -122,7 +123,7 @@ class TestRegisteredNativeOps(TestCase):
     @parametrize("original_shape,shape", [((3, 4), (5, 6)), ((10,), (20,)), ((2, 3), (4, 5)), ((1, 1), (10, 10))])
     def test_resize_(self, dtype, original_shape, shape):
         """Test resize_ op with various shapes"""
-        x = torch.randn(original_shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(original_shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         x.resize_(shape)
         self.assertEqual(x.device, self.rbln_device)
         self.assertEqual(x.dtype, dtype)
@@ -146,7 +147,7 @@ class TestRegisteredNativeOps(TestCase):
     @parametrize("shape", TEST_SHAPES)
     def test_clone(self, dtype, shape):
         """Test clone op with various shapes"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         y = x.clone()
         self.assertEqual(x.device, y.device)
         self.assertEqual(x.dtype, y.dtype)
@@ -159,7 +160,7 @@ class TestRegisteredNativeOps(TestCase):
     @parametrize("original_shape,shape", [((3, 4), (12,)), ((2, 3, 4), (24,)), ((10, 20), (200,)), ((4, 5, 6), (120,))])
     def test_view(self, dtype, original_shape, shape):
         """Test view op with various shapes"""
-        x = torch.randn(original_shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(original_shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         y = x.view(*shape)
         self.assertEqual(y.device, self.rbln_device)
         self.assertEqual(y.dtype, dtype)
@@ -178,7 +179,7 @@ class TestRegisteredNativeOps(TestCase):
     )
     def test_as_strided(self, dtype, original_shape, size, stride, storage_offset):
         """Test as_strided op with various shapes"""
-        x = torch.randn(original_shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(original_shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         y = x.as_strided(size, stride, storage_offset)
         self.assertEqual(y.device, self.rbln_device)
         self.assertEqual(y.dtype, dtype)
@@ -197,7 +198,7 @@ class TestRegisteredNativeOps(TestCase):
     )
     def test_reshape_alias(self, dtype, original_shape, size, stride):
         """Test _reshape_alias op with various shapes"""
-        x = torch.randn(original_shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(original_shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         y = torch.ops.aten._reshape_alias(x, size, stride)
         self.assertEqual(y.device, self.rbln_device)
         self.assertEqual(y.dtype, dtype)
@@ -208,7 +209,7 @@ class TestRegisteredNativeOps(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     def test_set_tensor(self, dtype):
         """Test set_.source_Tensor op"""
-        x = torch.randn([3, 4], dtype=dtype, device=self.rbln_device)
+        x = make_tensor([3, 4], dtype=dtype, device=self.rbln_device, low=-2, high=2)
         y = torch.empty_like(x)
         y.set_(x)
         self.assertEqual(y.device, self.rbln_device)
@@ -222,7 +223,7 @@ class TestRegisteredNativeOps(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     def test_set_storage(self, dtype):
         """Test set_.source_Storage op"""
-        x = torch.randn([3, 4], dtype=dtype, device=self.rbln_device)
+        x = make_tensor([3, 4], dtype=dtype, device=self.rbln_device, low=-2, high=2)
         storage = x.storage()
         y = torch.empty([2, 2], dtype=dtype, device=self.rbln_device)
         y.set_(storage)
@@ -240,7 +241,7 @@ class TestRegisteredNativeOps(TestCase):
     )
     def test_unfold(self, dtype, original_shape, dimension, size, step, expected_shape):
         """Test unfold op with various shapes"""
-        x = torch.randn(original_shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(original_shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         y = x.unfold(dimension, size, step)
         self.assertEqual(y.device, self.rbln_device)
         self.assertEqual(y.dtype, dtype)
@@ -257,7 +258,7 @@ class TestRegisteredNativeOps(TestCase):
     )
     def test_unsafe_view(self, dtype, original_shape, size):
         """Test _unsafe_view op with various shapes"""
-        x = torch.randn(original_shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(original_shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         y = torch.ops.aten._unsafe_view(x, size)
         self.assertEqual(y.device, self.rbln_device)
         self.assertEqual(y.dtype, dtype)
@@ -267,7 +268,7 @@ class TestRegisteredNativeOps(TestCase):
     @parametrize("shape", TEST_SHAPES)
     def test_alias(self, dtype, shape):
         """Test alias op with various shapes"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         y = torch.ops.aten.alias(x)
         self.assertEqual(y.device, self.rbln_device)
         self.assertEqual(y.dtype, dtype)
@@ -297,7 +298,7 @@ class TestRegisteredFallbackOps(TestCase):
     )
     def test_sum(self, dtype, shape, dim):
         """Test sum fallback op with various shapes"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         result = x.sum(dim=dim) if dim is not None else x.sum()
         expected = x.cpu().sum(dim=dim) if dim is not None else x.cpu().sum()
         self.assertEqual(result.cpu(), expected.cpu(), atol=ATOL, rtol=RTOL)
@@ -308,7 +309,7 @@ class TestRegisteredFallbackOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_clamp_tensor(self, dtype, shape):
         """Test clamp fallback op with various shapes"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         min_val = torch.tensor(-0.5, dtype=dtype, device=self.rbln_device)
         max_val = torch.tensor(0.5, dtype=dtype, device=self.rbln_device)
         result = torch.clamp(x, min_val, max_val)
@@ -317,7 +318,7 @@ class TestRegisteredFallbackOps(TestCase):
         self.assertEqual(result.device, self.rbln_device)
         self.assertEqual(result.dtype, expected.dtype)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_trunc(self, dtype, shape):
         """Test trunc fallback op with various shapes"""
@@ -339,7 +340,7 @@ class TestRegisteredFallbackOps(TestCase):
 
             for fill_value in [2.5, 7.0]:
                 with self.subTest(shape=shape, is_contiguous=is_contiguous, fill_value=fill_value):
-                    x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+                    x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
                     if not is_contiguous:
                         x = x.transpose(0, -1)
                         if x.is_contiguous():
@@ -358,7 +359,7 @@ class TestRegisteredFallbackOps(TestCase):
 
                     self.assertEqual(x.cpu(), x_cpu, atol=ATOL, rtol=RTOL)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize(
         "data,shape",
         [
@@ -382,7 +383,7 @@ class TestRegisteredFallbackOps(TestCase):
         valid_dims = [None, *range(len(shape))]
         for dim in valid_dims:
             with self.subTest(shape=shape, dim=dim):
-                x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+                x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
                 result = torch.argmax(x, dim=dim) if dim is not None else torch.argmax(x)
                 expected = torch.argmax(x.cpu(), dim=dim) if dim is not None else torch.argmax(x.cpu())
                 self.assertEqual(result.cpu(), expected.cpu())
@@ -393,7 +394,7 @@ class TestRegisteredFallbackOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_cos(self, dtype, shape):
         """Test cos fallback op with various shapes"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         result = torch.cos(x)
         expected = torch.cos(x.cpu())
         self.assertEqual(result.cpu(), expected.cpu(), atol=ATOL, rtol=RTOL)
@@ -404,7 +405,7 @@ class TestRegisteredFallbackOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_sin(self, dtype, shape):
         """Test sin fallback op with various shapes"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         result = torch.sin(x)
         expected = torch.sin(x.cpu())
         self.assertEqual(result.cpu(), expected.cpu(), atol=ATOL, rtol=RTOL)
@@ -415,7 +416,7 @@ class TestRegisteredFallbackOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_exp(self, dtype, shape):
         """Test exp fallback op with various shapes"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         result = torch.exp(x)
         expected = torch.exp(x.cpu())
         self.assertEqual(result.cpu(), expected.cpu(), atol=ATOL, rtol=RTOL)
@@ -531,8 +532,8 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_add(self, dtype, shape):
         """Test add op with various shapes"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
-        y = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        y = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         result = x + y
         expected = x.cpu() + y.cpu()
         self.assertEqual(result.cpu(), expected.cpu(), atol=ATOL, rtol=RTOL)
@@ -578,8 +579,8 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_mul(self, dtype, shape):
         """Test mul op with various shapes"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
-        y = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        y = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         result = x * y
         expected = x.cpu() * y.cpu()
         self.assertEqual(result.cpu(), expected.cpu(), atol=ATOL, rtol=RTOL)
@@ -590,7 +591,7 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_abs(self, dtype, shape):
         """Test abs op with various shapes"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         result = torch.abs(x)
         expected = torch.abs(x.cpu())
         self.assertEqual(result.cpu(), expected.cpu(), atol=ATOL, rtol=RTOL)
@@ -601,14 +602,14 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_neg(self, dtype, shape):
         """Test neg op with various shapes"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         result = -x
         expected = -x.cpu()
         self.assertEqual(result.cpu(), expected.cpu(), atol=ATOL, rtol=RTOL)
         self.assertEqual(result.device, self.rbln_device)
         self.assertEqual(result.dtype, expected.dtype)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_silu(self, dtype, shape):
         """Test silu op with various shapes"""
@@ -619,7 +620,7 @@ class TestRegisteredPythonOps(TestCase):
         self.assertEqual(result.device, self.rbln_device)
         self.assertEqual(result.dtype, expected.dtype)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_silu_backward(self, dtype, shape):
         """Test silu_backward op with various shapes"""
@@ -631,7 +632,7 @@ class TestRegisteredPythonOps(TestCase):
         self.assertEqual(result.device, self.rbln_device)
         self.assertEqual(result.dtype, expected.dtype)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize(
         "shape,dim",
         [
@@ -658,8 +659,8 @@ class TestRegisteredPythonOps(TestCase):
         Note: float16 precision limits require relaxed tolerance for matrix
         multiplication.
         """
-        x = torch.randn([n, m], dtype=dtype, device=self.rbln_device)
-        y = torch.randn([m, p], dtype=dtype, device=self.rbln_device)
+        x = make_tensor([n, m], dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        y = make_tensor([m, p], dtype=dtype, device=self.rbln_device, low=-2, high=2)
         result = torch.mm(x, y)
         expected = torch.mm(x.cpu(), y.cpu())
         # Use relaxed tolerance for float16 matrix multiplication
@@ -672,8 +673,8 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_sub(self, dtype, shape):
         """Test sub op with various shapes"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
-        y = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        y = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         result = x - y
         expected = x.cpu() - y.cpu()
         self.assertEqual(result.cpu(), expected.cpu(), atol=ATOL, rtol=RTOL)
@@ -684,8 +685,10 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_div(self, dtype, shape):
         """Test div op with various shapes"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
-        y = torch.randn(shape, dtype=dtype, device=self.rbln_device) + 0.1  # avoid division by zero
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        y = make_tensor(
+            shape, dtype=dtype, device=self.rbln_device, low=-2, high=2, exclude_zero=True
+        )  # avoid division by zero
         result = x / y
         expected = x.cpu() / y.cpu()
         self.assertEqual(result.cpu(), expected.cpu(), atol=ATOL, rtol=RTOL)
@@ -697,15 +700,15 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("mode", ["trunc", "floor"])
     def test_div_mode(self, dtype, shape, mode):
         """Test div with mode (trunc/floor)"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
-        y = torch.randn(shape, dtype=dtype, device=self.rbln_device) + 0.1
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        y = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2, exclude_zero=True)
         result = torch.div(x, y, rounding_mode=mode)
         expected = torch.div(x.cpu(), y.cpu(), rounding_mode=mode)
         self.assertEqual(result.cpu(), expected.cpu(), atol=ATOL, rtol=RTOL)
         self.assertEqual(result.device, self.rbln_device)
         self.assertEqual(result.dtype, expected.dtype)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("shape", TEST_SHAPES_SUBSET)
     @parametrize(
         "exponent",
@@ -726,7 +729,7 @@ class TestRegisteredPythonOps(TestCase):
         self.assertEqual(result.device, self.rbln_device)
         self.assertEqual(result.dtype, expected.dtype)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("exponent", [float("inf"), float("-inf"), float("nan")])
     def test_pow_tensor_scalar_non_finite_exponent(self, dtype, exponent):
         """A non-finite exponent is not an integer: it takes the CPU fallback instead of
@@ -739,7 +742,7 @@ class TestRegisteredPythonOps(TestCase):
         torch.pow(x.to(self.rbln_device), exponent, out=out)
         self.assertEqual(out.cpu(), expected, equal_nan=True)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_pow_tensor_tensor(self, dtype, shape):
         """Test pow with tensor and tensor"""
@@ -751,7 +754,7 @@ class TestRegisteredPythonOps(TestCase):
         self.assertEqual(result.device, self.rbln_device)
         self.assertEqual(result.dtype, expected.dtype)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("shape", TEST_SHAPES_SUBSET)
     @parametrize(
         "base",
@@ -775,7 +778,7 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_rsqrt(self, dtype, shape):
         """Test rsqrt op with various shapes"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device).abs() + 0.1
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=0.1, high=4)
         result = torch.rsqrt(x)
         expected = torch.rsqrt(x.cpu())
         self.assertEqual(result.cpu(), expected.cpu(), atol=ATOL, rtol=RTOL)
@@ -790,8 +793,8 @@ class TestRegisteredPythonOps(TestCase):
         Note: float16 precision limits require relaxed tolerance for batch matrix
         multiplication.
         """
-        x = torch.randn([b, n, m], dtype=dtype, device=self.rbln_device)
-        y = torch.randn([b, m, p], dtype=dtype, device=self.rbln_device)
+        x = make_tensor([b, n, m], dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        y = make_tensor([b, m, p], dtype=dtype, device=self.rbln_device, low=-2, high=2)
         result = torch.bmm(x, y)
         expected = torch.bmm(x.cpu(), y.cpu())
         # Use relaxed tolerance for float16 batch matrix multiplication
@@ -808,9 +811,9 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_where_self(self, dtype, shape):
         """Test where.self op"""
-        condition = torch.randn(shape, dtype=dtype, device=self.rbln_device) > 0
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
-        y = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        condition = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2) > 0
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        y = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         result = torch.where(condition, x, y)
         expected = torch.where(condition.cpu(), x.cpu(), y.cpu())
         self.assertEqual(result.cpu(), expected.cpu(), atol=ATOL, rtol=RTOL)
@@ -821,9 +824,9 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_where_self_out(self, dtype, shape):
         """Test where.self_out op"""
-        condition = torch.randn(shape, dtype=dtype, device=self.rbln_device) > 0
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
-        y = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        condition = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2) > 0
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        y = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         out = torch.empty_like(x)
         result = torch.where(condition, x, y, out=out)
         expected = torch.where(condition.cpu(), x.cpu(), y.cpu())
@@ -832,7 +835,7 @@ class TestRegisteredPythonOps(TestCase):
         self.assertEqual(result.dtype, expected.dtype)
         self.assertEqual(result.data_ptr(), out.data_ptr())
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_ceil(self, dtype, shape):
         """Test ceil op with various shapes"""
@@ -847,7 +850,7 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_clamp(self, dtype, shape):
         """Test clamp op with various shapes"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         min_val = -0.5
         max_val = 0.5
         result = torch.clamp(x, min_val, max_val)
@@ -860,7 +863,7 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_zero_(self, dtype, shape):
         """Test zero_ op with various shapes"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         x.zero_()
         expected = torch.zeros(shape, dtype=dtype, device="cpu")
         self.assertEqual(x.cpu(), expected.cpu(), atol=ATOL, rtol=RTOL)
@@ -871,14 +874,14 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_log(self, dtype, shape):
         """Test log op with various shapes"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device).abs() + 0.1
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=0.1, high=4)
         result = torch.log(x)
         expected = torch.log(x.cpu())
         self.assertEqual(result.cpu(), expected.cpu(), atol=ATOL, rtol=RTOL)
         self.assertEqual(result.device, self.rbln_device)
         self.assertEqual(result.dtype, expected.dtype)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_floor(self, dtype, shape):
         """Test floor op with various shapes"""
@@ -893,8 +896,8 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_masked_fill_tensor(self, dtype, shape):
         """Test masked_fill_.Tensor op"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
-        mask = torch.randn(shape, dtype=dtype, device=self.rbln_device) > 0
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        mask = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2) > 0
         value = torch.tensor(5.0, dtype=dtype, device=self.rbln_device)
         x.masked_fill_(mask, value)
         expected = x.cpu().clone()
@@ -907,8 +910,8 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_masked_fill_scalar(self, dtype, shape):
         """Test masked_fill_.Scalar op"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
-        mask = torch.randn(shape, dtype=dtype, device=self.rbln_device) > 0
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        mask = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2) > 0
         value = 5.0
         x.masked_fill_(mask, value)
         expected = x.cpu().clone()
@@ -929,7 +932,7 @@ class TestRegisteredPythonOps(TestCase):
     )
     def test_max(self, dtype, shape, dim):
         """Test max op (reduction)"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         result = torch.max(x, dim=dim) if dim is not None else torch.max(x)
         expected = torch.max(x.cpu(), dim=dim) if dim is not None else torch.max(x.cpu())
         if isinstance(result, tuple):
@@ -952,7 +955,7 @@ class TestRegisteredPythonOps(TestCase):
     )
     def test_min(self, dtype, shape, dim):
         """Test min op (reduction)"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         result = torch.min(x, dim=dim) if dim is not None else torch.min(x)
         expected = torch.min(x.cpu(), dim=dim) if dim is not None else torch.min(x.cpu())
         if isinstance(result, tuple):
@@ -967,7 +970,7 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_max_unary_out(self, dtype, shape):
         """Test max.unary_out op"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         out = torch.empty([], dtype=dtype, device=self.rbln_device)
         result = torch.max(x, out=out)
         expected = torch.max(x.cpu())
@@ -979,7 +982,7 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_min_unary_out(self, dtype, shape):
         """Test min.unary_out op"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         out = torch.empty([], dtype=dtype, device=self.rbln_device)
         result = torch.min(x, out=out)
         expected = torch.min(x.cpu())
@@ -991,8 +994,8 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_maximum(self, dtype, shape):
         """Test maximum op"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
-        y = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        y = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         result = torch.maximum(x, y)
         expected = torch.maximum(x.cpu(), y.cpu())
         self.assertEqual(result.cpu(), expected.cpu(), atol=ATOL, rtol=RTOL)
@@ -1003,8 +1006,8 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_minimum(self, dtype, shape):
         """Test minimum op"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
-        y = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        y = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         result = torch.minimum(x, y)
         expected = torch.minimum(x.cpu(), y.cpu())
         self.assertEqual(result.cpu(), expected.cpu(), atol=ATOL, rtol=RTOL)
@@ -1017,9 +1020,9 @@ class TestRegisteredPythonOps(TestCase):
         """Test addmm op — matmul accumulated error needs the relaxed
         ``MATMUL_TOLERANCES``.
         """
-        mat1 = torch.randn([n, m], dtype=dtype, device=self.rbln_device)
-        mat2 = torch.randn([m, p], dtype=dtype, device=self.rbln_device)
-        vec = torch.randn([n, p], dtype=dtype, device=self.rbln_device)
+        mat1 = make_tensor([n, m], dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        mat2 = make_tensor([m, p], dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        vec = make_tensor([n, p], dtype=dtype, device=self.rbln_device, low=-2, high=2)
         result = torch.addmm(vec, mat1, mat2)
         expected = torch.addmm(vec.cpu(), mat1.cpu(), mat2.cpu())
         atol, rtol = MATMUL_TOLERANCES.get(dtype, (ATOL, RTOL))
@@ -1028,7 +1031,7 @@ class TestRegisteredPythonOps(TestCase):
         self.assertEqual(result.dtype, expected.dtype)
         self.assertEqual(result.shape, expected.shape)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("batch_size,in_features,out_features", [(3, 64, 32), (5, 128, 64), (10, 32, 16)])
     def test_linear(self, dtype, batch_size, in_features, out_features):
         """Test linear op — matmul accumulated error needs the relaxed
@@ -1046,7 +1049,7 @@ class TestRegisteredPythonOps(TestCase):
         self.assertEqual(result.dtype, expected.dtype)
         self.assertEqual(result.shape, expected.shape)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize(
         "batch_size,in_features,out_features,output_mask",
         [
@@ -1098,14 +1101,14 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_sigmoid(self, dtype, shape):
         """Test sigmoid op with various shapes"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         result = torch.sigmoid(x)
         expected = torch.sigmoid(x.cpu())
         self.assertEqual(result.cpu(), expected.cpu(), atol=ATOL, rtol=RTOL)
         self.assertEqual(result.device, self.rbln_device)
         self.assertEqual(result.dtype, expected.dtype)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize(
         "shape,dim",
         [
@@ -1132,7 +1135,7 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_logical_not(self, dtype, shape):
         """Test logical_not op with various shapes"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device) > 0
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2) > 0
         result = torch.logical_not(x)
         expected = torch.logical_not(x.cpu())
         self.assertEqual(result.cpu(), expected.cpu())
@@ -1143,8 +1146,8 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_ne_tensor(self, dtype, shape):
         """Test ne.Tensor_out op"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
-        y = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        y = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         result = x != y
         expected = x.cpu() != y.cpu()
         self.assertEqual(result.cpu(), expected.cpu())
@@ -1155,7 +1158,7 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_eq_tensor(self, dtype, shape):
         """Test eq.Tensor_out op"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         y = x.clone()  # Make them equal
         result = x == y
         expected = x.cpu() == y.cpu()
@@ -1167,8 +1170,8 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_gt_tensor(self, dtype, shape):
         """Test gt.Tensor_out op"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
-        y = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        y = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         result = x > y
         expected = x.cpu() > y.cpu()
         self.assertEqual(result.cpu(), expected.cpu())
@@ -1179,8 +1182,8 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_ge_tensor(self, dtype, shape):
         """Test ge.Tensor_out op"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
-        y = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        y = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         result = x >= y
         expected = x.cpu() >= y.cpu()
         self.assertEqual(result.cpu(), expected.cpu())
@@ -1191,8 +1194,8 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_lt_tensor(self, dtype, shape):
         """Test lt.Tensor_out op"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
-        y = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        y = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         result = x < y
         expected = x.cpu() < y.cpu()
         self.assertEqual(result.cpu(), expected.cpu())
@@ -1203,8 +1206,8 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_le_tensor(self, dtype, shape):
         """Test le.Tensor_out op"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
-        y = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        y = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         result = x <= y
         expected = x.cpu() <= y.cpu()
         self.assertEqual(result.cpu(), expected.cpu())
@@ -1215,7 +1218,7 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_ne_scalar(self, dtype, shape):
         """Test ne.Scalar_out op"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         scalar = 0.5
         result = x != scalar
         expected = x.cpu() != scalar
@@ -1223,7 +1226,7 @@ class TestRegisteredPythonOps(TestCase):
         self.assertEqual(result.device, self.rbln_device)
         self.assertEqual(result.dtype, expected.dtype)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_eq_scalar(self, dtype, shape):
         """Test eq.Scalar_out op"""
@@ -1239,7 +1242,7 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_gt_scalar(self, dtype, shape):
         """Test gt.Scalar_out op"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         scalar = 0.5
         result = x > scalar
         expected = x.cpu() > scalar
@@ -1251,7 +1254,7 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_ge_scalar(self, dtype, shape):
         """Test ge.Scalar_out op"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         scalar = 0.5
         result = x >= scalar
         expected = x.cpu() >= scalar
@@ -1263,7 +1266,7 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_lt_scalar(self, dtype, shape):
         """Test lt.Scalar_out op"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         scalar = 0.5
         result = x < scalar
         expected = x.cpu() < scalar
@@ -1275,7 +1278,7 @@ class TestRegisteredPythonOps(TestCase):
     @parametrize("shape", TEST_SHAPES_SUBSET)
     def test_le_scalar(self, dtype, shape):
         """Test le.Scalar_out op"""
-        x = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
         scalar = 0.5
         result = x <= scalar
         expected = x.cpu() <= scalar
@@ -1955,8 +1958,8 @@ class TestRegisteredPythonOpsMultiDevice(TestCase):
     def test_add_mixed_devices(self, dtype, shape, device_index):
         """Test add op with tensors on different devices"""
         device = torch.device("rbln", device_index)
-        x = torch.randn(shape, dtype=dtype, device=device)
-        y = torch.randn(shape, dtype=dtype, device=device)
+        x = make_tensor(shape, dtype=dtype, device=device, low=-2, high=2)
+        y = make_tensor(shape, dtype=dtype, device=device, low=-2, high=2)
         result = x + y
         expected = x.cpu() + y.cpu()
         # Looser tolerance: on REBEL NPU, the compiler computes in bf16 even
@@ -1972,8 +1975,8 @@ class TestRegisteredPythonOpsMultiDevice(TestCase):
     def test_mul_mixed_devices(self, dtype, shape, device_index):
         """Test mul op with tensors on different devices"""
         device = torch.device("rbln", device_index)
-        x = torch.randn(shape, dtype=dtype, device=device)
-        y = torch.randn(shape, dtype=dtype, device=device)
+        x = make_tensor(shape, dtype=dtype, device=device, low=-2, high=2)
+        y = make_tensor(shape, dtype=dtype, device=device, low=-2, high=2)
         result = x * y
         expected = x.cpu() * y.cpu()
         self.assertEqual(result.cpu(), expected.cpu(), atol=ATOL, rtol=RTOL)
@@ -1990,8 +1993,8 @@ class TestRegisteredPythonOpsMultiDevice(TestCase):
         multiplication.
         """
         device = torch.device("rbln", device_index)
-        x = torch.randn([n, m], dtype=dtype, device=device)
-        y = torch.randn([m, p], dtype=dtype, device=device)
+        x = make_tensor([n, m], dtype=dtype, device=device, low=-2, high=2)
+        y = make_tensor([m, p], dtype=dtype, device=device, low=-2, high=2)
         result = torch.mm(x, y)
         expected = torch.mm(x.cpu(), y.cpu())
         # Use relaxed tolerance for float16 matrix multiplication
@@ -2008,8 +2011,8 @@ class TestRegisteredPythonOpsMultiDevice(TestCase):
         """
         device0 = torch.device("rbln:0")
         device1 = torch.device("rbln:1")
-        x = torch.randn(shape, dtype=dtype, device=device0)
-        y = torch.randn(shape, dtype=dtype, device=device1)
+        x = make_tensor(shape, dtype=dtype, device=device0, low=-2, high=2)
+        y = make_tensor(shape, dtype=dtype, device=device1, low=-2, high=2)
         # This should either work (with automatic device promotion) or raise an error
         # The behavior depends on PyTorch's implementation
         try:
@@ -2023,7 +2026,7 @@ class TestRegisteredPythonOpsMultiDevice(TestCase):
             # If it fails, that's also acceptable behavior
             pass
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("batch_size,in_features,out_features", [(3, 64, 32)])
     def test_linear_device_context_mismatch(self, dtype, batch_size, in_features, out_features):
         """Test linear op with device context mismatch (0->1 and 1->0)

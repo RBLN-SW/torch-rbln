@@ -16,7 +16,7 @@ from torch import nn
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from test.utils import SUPPORTED_DTYPES
+from test.utils import SUPPORTED_FLOATING_DTYPES
 
 
 # ``test_eager_matches_graph`` compares eager and graph execution on the
@@ -42,7 +42,7 @@ class TestGraphMode(TestCase):
 
     rbln_device = torch.device("rbln:0")
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_eager_forward_on_rbln(self, dtype):
         """Eager forward of the shared SmallNet should produce an RBLN tensor."""
         model = _SmallNet().to(self.rbln_device, dtype=dtype)
@@ -53,7 +53,7 @@ class TestGraphMode(TestCase):
         self.assertEqual(out.shape, (4, 64))
         self.assertEqual(out.device.type, "rbln")
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_compiled_forward_on_rbln(self, dtype):
         """`torch.compile(..., backend='rbln')` should run without raising."""
         model = _SmallNet().to(self.rbln_device, dtype=dtype)
@@ -65,7 +65,7 @@ class TestGraphMode(TestCase):
         self.assertEqual(out.shape, (4, 64))
         self.assertEqual(out.device.type, "rbln")
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_eager_matches_graph(self, dtype):
         """Eager and graph outputs should agree within a small tolerance on CPU."""
         model = _SmallNet().to(self.rbln_device, dtype=dtype)

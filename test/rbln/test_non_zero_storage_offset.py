@@ -13,10 +13,11 @@ from typing_extensions import override
 
 import pytest
 import torch
+from torch.testing import make_tensor
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from test.utils import SUPPORTED_DTYPES
+from test.utils import SUPPORTED_DTYPES, SUPPORTED_FLOATING_DTYPES
 
 
 class BaseTestNonZeroStorageOffset(TestCase):
@@ -42,7 +43,7 @@ class BaseTestNonZeroStorageOffset(TestCase):
             and isinstance(x, torch.Tensor)
             and isinstance(y, torch.Tensor)
             and x.dtype == y.dtype
-            and x.dtype in SUPPORTED_DTYPES
+            and x.dtype in SUPPORTED_FLOATING_DTYPES
         ):
             kwargs.setdefault("rtol", 0.005)
             kwargs.setdefault("atol", 0.05)
@@ -121,7 +122,7 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
     def test_slice_contiguous_then_add(self, dtype):
         """Test slice that produces contiguous tensor, then torch.add."""
         # Create base tensor
-        base_tensor = torch.randn([32, 64], dtype=dtype, device=self.rbln_device)
+        base_tensor = make_tensor([32, 64], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # Slice to get contiguous tensor
         sliced = base_tensor[16:]  # Contiguous slice
@@ -131,17 +132,17 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
         self.assertTrue(sliced.is_contiguous(), "Sliced tensor should be contiguous")
 
         sliced = self._ensure_contiguous_if_needed(sliced, "[test_slice_contiguous_then_add] sliced")
-        result = torch.add(sliced, 1.0)
+        result = torch.add(sliced, 1)
         # Create add tensor: first 16 rows = 1.0
         add_tensor = torch.zeros_like(base_tensor)
-        add_tensor[16:] = 1.0
+        add_tensor[16:] = 1
         self.assertEqual(result.cpu(), (base_tensor + add_tensor)[16:].cpu())
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_slice_non_contiguous_then_add(self, dtype):
         """Test slice that produces non-contiguous tensor, then torch.add."""
         # Create base tensor
-        base_tensor = torch.randn([32, 64], dtype=dtype, device=self.rbln_device)
+        base_tensor = make_tensor([32, 64], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # Slice to get non-contiguous tensor (strided slice)
         sliced = base_tensor[::2]  # Every other row - non-contiguous
@@ -151,17 +152,17 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
         self.assertFalse(sliced.is_contiguous(), "Strided sliced tensor should be non-contiguous")
 
         sliced = self._ensure_contiguous_if_needed(sliced, "[test_slice_non_contiguous_then_add] sliced")
-        result = torch.add(sliced, 1.0)
+        result = torch.add(sliced, 1)
         # Create add tensor: every other row = 1.0
         add_tensor = torch.zeros_like(base_tensor)
-        add_tensor[::2] = 1.0
+        add_tensor[::2] = 1
         self.assertEqual(result.cpu(), (base_tensor + add_tensor)[::2].cpu())
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_chunk_contiguous_then_add(self, dtype):
         """Test chunk that produces contiguous tensors, then torch.add."""
         # Create base tensor
-        base_tensor = torch.randn([32, 64], dtype=dtype, device=self.rbln_device)
+        base_tensor = make_tensor([32, 64], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # Chunk to get contiguous tensors
         chunks = torch.chunk(base_tensor, chunks=4, dim=0)
@@ -169,12 +170,12 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
         # Create add tensor: each chunk gets its own value (1.0, 2.0, 3.0, 4.0)
         add_tensor = torch.zeros_like(base_tensor)
         for i in range(4):
-            add_tensor[i * 8 : (i + 1) * 8] = float(i + 1)
+            add_tensor[i * 8 : (i + 1) * 8] = i + 1
 
         # Check contiguous status for each chunk
         for i, raw_chunk in enumerate(chunks):
             chunk = self._ensure_contiguous_if_needed(raw_chunk, "[test_chunk_contiguous_then_add] chunk")
-            result = torch.add(chunk, float(i + 1))
+            result = torch.add(chunk, i + 1)
             self.assertEqual(result.cpu(), (base_tensor + add_tensor)[i * 8 : (i + 1) * 8].cpu())
 
     @dtypes(*SUPPORTED_DTYPES)
@@ -183,7 +184,7 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
         torch.add.
         """
         # Create base tensor
-        base_tensor = torch.randn([32, 64], dtype=dtype, device=self.rbln_device)
+        base_tensor = make_tensor([32, 64], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # Chunk to get contiguous tensors first
         chunks = torch.chunk(base_tensor, chunks=4, dim=0)
@@ -194,51 +195,51 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
         # Create add tensor: each chunk gets its own value (1.0, 2.0, 3.0, 4.0)
         add_tensor = torch.zeros_like(base_tensor)
         for i in range(4):
-            add_tensor[i * 8 : (i + 1) * 8] = float(i + 1)
+            add_tensor[i * 8 : (i + 1) * 8] = i + 1
 
         # Check contiguous status for each transposed chunk
         for i, raw_chunk_t in enumerate(transposed_chunks):
             chunk_t = self._ensure_contiguous_if_needed(raw_chunk_t, "[test_chunk_non_contiguous_then_add] chunk_t")
-            result = torch.add(chunk_t, float(i + 1))
+            result = torch.add(chunk_t, i + 1)
             self.assertEqual(result.cpu(), (base_tensor + add_tensor)[i * 8 : (i + 1) * 8].transpose(0, 1).cpu())
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_slice_contiguous_column_then_add(self, dtype):
         """Test column slice that produces contiguous tensor, then torch.add."""
         # Create base tensor
-        base_tensor = torch.randn([32, 64], dtype=dtype, device=self.rbln_device)
+        base_tensor = make_tensor([32, 64], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # Column slice to get contiguous tensor
         sliced = base_tensor[:, :32]  # First half of columns
 
         sliced = self._ensure_contiguous_if_needed(sliced, "[test_slice_contiguous_column_then_add] sliced")
-        result = torch.add(sliced, 2.0)
+        result = torch.add(sliced, 2)
         # Create add tensor: first 32 columns = 2.0
         add_tensor = torch.zeros_like(base_tensor)
-        add_tensor[:, :32] = 2.0
+        add_tensor[:, :32] = 2
         self.assertEqual(result.cpu(), (base_tensor + add_tensor)[:, :32].cpu())
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_slice_non_contiguous_column_then_add(self, dtype):
         """Test column slice that produces non-contiguous tensor, then torch.add."""
         # Create base tensor
-        base_tensor = torch.randn([32, 64], dtype=dtype, device=self.rbln_device)
+        base_tensor = make_tensor([32, 64], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # Column slice with stride to get non-contiguous tensor
         sliced = base_tensor[:, ::2]  # Every other column - non-contiguous
 
         sliced = self._ensure_contiguous_if_needed(sliced, "[test_slice_non_contiguous_column_then_add] sliced")
-        result = torch.add(sliced, 2.0)
+        result = torch.add(sliced, 2)
         # Create add tensor: every other column = 2.0
         add_tensor = torch.zeros_like(base_tensor)
-        add_tensor[:, ::2] = 2.0
+        add_tensor[:, ::2] = 2
         self.assertEqual(result.cpu(), (base_tensor + add_tensor)[:, ::2].cpu())
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_split_slice_then_add(self, dtype):
         """Test split using slice, then apply add operation."""
         # Create base tensor
-        base_tensor = torch.randn([32, 64], dtype=dtype, device=self.rbln_device)
+        base_tensor = make_tensor([32, 64], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # Split using slice
         chunk1 = base_tensor[:16]  # First half
@@ -250,12 +251,12 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
 
         chunk1 = self._ensure_contiguous_if_needed(chunk1, "[test_split_slice_then_add] chunk1")
         chunk2 = self._ensure_contiguous_if_needed(chunk2, "[test_split_slice_then_add] chunk2")
-        result1 = torch.add(chunk1, 1.0)
-        result2 = torch.add(chunk2, 2.0)
+        result1 = torch.add(chunk1, 1)
+        result2 = torch.add(chunk2, 2)
         # Create add tensor: first 16 rows = 1.0, rest = 2.0
         add_tensor = torch.zeros_like(base_tensor)
-        add_tensor[:16] = 1.0
-        add_tensor[16:] = 2.0
+        add_tensor[:16] = 1
+        add_tensor[16:] = 2
 
         self.assertEqual(result1.cpu(), (base_tensor + add_tensor)[:16].cpu())
         self.assertEqual(result2.cpu(), (base_tensor + add_tensor)[16:].cpu())
@@ -264,7 +265,7 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
     def test_split_slice_then_transpose(self, dtype):
         """Test split using slice, then apply transpose."""
         # Create base tensor
-        base_tensor = torch.randn([32, 64], dtype=dtype, device=self.rbln_device)
+        base_tensor = make_tensor([32, 64], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # Split using slice
         chunk1 = base_tensor[:16]  # First half
@@ -280,12 +281,12 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
 
         chunk1_t = self._ensure_contiguous_if_needed(chunk1_t, "[test_split_slice_then_transpose] chunk1_t")
         chunk2_t = self._ensure_contiguous_if_needed(chunk2_t, "[test_split_slice_then_transpose] chunk2_t")
-        result1 = torch.add(chunk1_t, 1.0)
-        result2 = torch.add(chunk2_t, 2.0)
+        result1 = torch.add(chunk1_t, 1)
+        result2 = torch.add(chunk2_t, 2)
         # Create add tensor: first 16 rows = 1.0, rest = 2.0
         add_tensor = torch.zeros_like(base_tensor)
-        add_tensor[:16] = 1.0
-        add_tensor[16:] = 2.0
+        add_tensor[:16] = 1
+        add_tensor[16:] = 2
 
         self.assertEqual(result1.cpu(), (base_tensor + add_tensor)[:16].transpose(0, 1).cpu())
         self.assertEqual(result2.cpu(), (base_tensor + add_tensor)[16:].transpose(0, 1).cpu())
@@ -294,7 +295,7 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
     def test_split_slice_then_reshape(self, dtype):
         """Test split using slice, then apply reshape."""
         # Create base tensor
-        base_tensor = torch.randn([32, 64], dtype=dtype, device=self.rbln_device)
+        base_tensor = make_tensor([32, 64], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # Split using slice
         chunk1 = base_tensor[:16]
@@ -310,12 +311,12 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
 
         chunk1_r = self._ensure_contiguous_if_needed(chunk1_r, "[test_split_slice_then_reshape] chunk1_r")
         chunk2_r = self._ensure_contiguous_if_needed(chunk2_r, "[test_split_slice_then_reshape] chunk2_r")
-        result1 = torch.add(chunk1_r, 1.0)
-        result2 = torch.add(chunk2_r, 2.0)
+        result1 = torch.add(chunk1_r, 1)
+        result2 = torch.add(chunk2_r, 2)
         # Create add tensor: first 16 rows = 1.0, rest = 2.0
         add_tensor = torch.zeros_like(base_tensor)
-        add_tensor[:16] = 1.0
-        add_tensor[16:] = 2.0
+        add_tensor[:16] = 1
+        add_tensor[16:] = 2
 
         self.assertEqual(result1.cpu(), (base_tensor + add_tensor)[:16].reshape(16, 64).cpu())
         self.assertEqual(result2.cpu(), (base_tensor + add_tensor)[16:].reshape(16, 64).cpu())
@@ -324,7 +325,7 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
     def test_split_chunk_then_transpose(self, dtype):
         """Test split using torch.chunk, then apply transpose."""
         # Create base tensor
-        base_tensor = torch.randn([32, 64], dtype=dtype, device=self.rbln_device)
+        base_tensor = make_tensor([32, 64], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # Split using chunk
         chunks = torch.chunk(base_tensor, chunks=4, dim=0)
@@ -351,8 +352,8 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
         transposed_chunks = [
             self._ensure_contiguous_if_needed(tc, "[test_split_chunk_then_transpose] tc") for tc in transposed_chunks
         ]
-        results = [torch.add(tc, 1.0) for tc in transposed_chunks]
-        expected_results = [et + 1.0 for et in expected_transposed]
+        results = [torch.add(tc, 1) for tc in transposed_chunks]
+        expected_results = [et + 1 for et in expected_transposed]
 
         for i, (actual, expected) in enumerate(zip(results, expected_results, strict=True)):
             self.assertEqual(actual.cpu(), expected.cpu(), msg=f"chunk {i} operation mismatch")
@@ -361,7 +362,7 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
     def test_split_slice_then_permute(self, dtype):
         """Test split using slice, then apply permute."""
         # Create 3D tensor
-        base_tensor = torch.randn([16, 32, 64], dtype=dtype, device=self.rbln_device)
+        base_tensor = make_tensor([16, 32, 64], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # Split using slice
         chunk1 = base_tensor[:8]
@@ -377,12 +378,12 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
 
         chunk1_p = self._ensure_contiguous_if_needed(chunk1_p, "[test_split_slice_then_permute] chunk1_p")
         chunk2_p = self._ensure_contiguous_if_needed(chunk2_p, "[test_split_slice_then_permute] chunk2_p")
-        result1 = torch.add(chunk1_p, 1.0)
-        result2 = torch.add(chunk2_p, 2.0)
+        result1 = torch.add(chunk1_p, 1)
+        result2 = torch.add(chunk2_p, 2)
         # Create add tensor: first 16 0-dim = 1.0, rest = 2.0
         add_tensor = torch.zeros_like(base_tensor)
-        add_tensor[:8] = 1.0
-        add_tensor[8:] = 2.0
+        add_tensor[:8] = 1
+        add_tensor[8:] = 2
 
         self.assertEqual(result1.cpu(), (base_tensor + add_tensor)[:8].permute(1, 2, 0).cpu())
         self.assertEqual(result2.cpu(), (base_tensor + add_tensor)[8:].permute(1, 2, 0).cpu())
@@ -391,7 +392,7 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
     def test_split_slice_then_transpose_then_reshape(self, dtype):
         """Test split, then transpose, then reshape."""
         # Create base tensor
-        base_tensor = torch.randn([32, 64], dtype=dtype, device=self.rbln_device)
+        base_tensor = make_tensor([32, 64], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # Split using slice
         chunk1 = base_tensor[:16]
@@ -415,12 +416,12 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
         chunk2_tr = self._ensure_contiguous_if_needed(
             chunk2_tr, "[test_split_slice_then_transpose_then_reshape] chunk2_tr"
         )
-        result1 = torch.add(chunk1_tr, 1.0)
-        result2 = torch.add(chunk2_tr, 2.0)
+        result1 = torch.add(chunk1_tr, 1)
+        result2 = torch.add(chunk2_tr, 2)
         # Create add tensor: first 16 rows = 1.0, rest = 2.0
         add_tensor = torch.zeros_like(base_tensor)
-        add_tensor[:16] = 1.0
-        add_tensor[16:] = 2.0
+        add_tensor[:16] = 1
+        add_tensor[16:] = 2
 
         self.assertEqual(result1.cpu(), (base_tensor + add_tensor)[:16].transpose(0, 1).reshape(64, 16).cpu())
         self.assertEqual(result2.cpu(), (base_tensor + add_tensor)[16:].transpose(0, 1).reshape(64, 16).cpu())
@@ -429,7 +430,7 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
     def test_split_strided_slice_then_add(self, dtype):
         """Test split using strided slice, then apply transpose."""
         # Create base tensor
-        base_tensor = torch.randn([32, 64], dtype=dtype, device=self.rbln_device)
+        base_tensor = make_tensor([32, 64], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # Split using strided slice
         chunk1 = base_tensor[::2]  # Every other row
@@ -441,12 +442,12 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
 
         chunk1 = self._ensure_contiguous_if_needed(chunk1, "[test_split_strided_slice_then_add] chunk1")
         chunk2 = self._ensure_contiguous_if_needed(chunk2, "[test_split_strided_slice_then_add] chunk2")
-        result1 = torch.add(chunk1, 1.0)
-        result2 = torch.add(chunk2, 2.0)
+        result1 = torch.add(chunk1, 1)
+        result2 = torch.add(chunk2, 2)
         # Create add tensor: first 16 rows = 1.0, rest = 2.0
         add_tensor = torch.zeros_like(base_tensor)
-        add_tensor[::2] = 1.0
-        add_tensor[1::2] = 2.0
+        add_tensor[::2] = 1
+        add_tensor[1::2] = 2
 
         self.assertEqual(result1.cpu(), (base_tensor + add_tensor)[::2].cpu())
         self.assertEqual(result2.cpu(), (base_tensor + add_tensor)[1::2].cpu())
@@ -455,7 +456,7 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
     def test_split_strided_slice_then_transpose(self, dtype):
         """Test split using strided slice, then apply transpose."""
         # Create base tensor
-        base_tensor = torch.randn([32, 64], dtype=dtype, device=self.rbln_device)
+        base_tensor = make_tensor([32, 64], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # Split using strided slice
         chunk1 = base_tensor[::2]  # Every other row
@@ -471,12 +472,12 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
 
         chunk1_t = self._ensure_contiguous_if_needed(chunk1_t, "[test_split_strided_slice_then_transpose] chunk1_t")
         chunk2_t = self._ensure_contiguous_if_needed(chunk2_t, "[test_split_strided_slice_then_transpose] chunk2_t")
-        result1 = torch.add(chunk1_t, 1.0)
-        result2 = torch.add(chunk2_t, 2.0)
+        result1 = torch.add(chunk1_t, 1)
+        result2 = torch.add(chunk2_t, 2)
         # Create add tensor: first 16 rows = 1.0, rest = 2.0
         add_tensor = torch.zeros_like(base_tensor)
-        add_tensor[::2] = 1.0
-        add_tensor[1::2] = 2.0
+        add_tensor[::2] = 1
+        add_tensor[1::2] = 2
 
         self.assertEqual(result1.cpu(), (base_tensor + add_tensor)[::2].transpose(0, 1).cpu())
         self.assertEqual(result2.cpu(), (base_tensor + add_tensor)[1::2].transpose(0, 1).cpu())
@@ -485,7 +486,7 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
     def test_split_column_slice_then_add(self, dtype):
         """Test split using column slice, then apply add."""
         # Create base tensor
-        base_tensor = torch.randn([32, 64], dtype=dtype, device=self.rbln_device)
+        base_tensor = make_tensor([32, 64], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # Split using column slice
         chunk1 = base_tensor[:, :32]  # First half of columns
@@ -497,12 +498,12 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
 
         chunk1 = self._ensure_contiguous_if_needed(chunk1, "[test_split_column_slice_then_add] chunk1")
         chunk2 = self._ensure_contiguous_if_needed(chunk2, "[test_split_column_slice_then_add] chunk2")
-        result1 = torch.add(chunk1, 1.0)
-        result2 = torch.add(chunk2, 2.0)
+        result1 = torch.add(chunk1, 1)
+        result2 = torch.add(chunk2, 2)
         # Create add tensor: first 16 rows = 1.0, rest = 2.0
         add_tensor = torch.zeros_like(base_tensor)
-        add_tensor[:, :32] = 1.0
-        add_tensor[:, 32:] = 2.0
+        add_tensor[:, :32] = 1
+        add_tensor[:, 32:] = 2
 
         self.assertEqual(result1.cpu(), (base_tensor + add_tensor)[:, :32].cpu())
         self.assertEqual(result2.cpu(), (base_tensor + add_tensor)[:, 32:].cpu())
@@ -511,7 +512,7 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
     def test_split_column_slice_then_transpose(self, dtype):
         """Test split using column slice, then apply transpose."""
         # Create base tensor
-        base_tensor = torch.randn([32, 64], dtype=dtype, device=self.rbln_device)
+        base_tensor = make_tensor([32, 64], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # Split using column slice
         chunk1 = base_tensor[:, :32]  # First half of columns
@@ -527,12 +528,12 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
 
         chunk1_t = self._ensure_contiguous_if_needed(chunk1_t, "[test_split_column_slice_then_transpose] chunk1_t")
         chunk2_t = self._ensure_contiguous_if_needed(chunk2_t, "[test_split_column_slice_then_transpose] chunk2_t")
-        result1 = torch.add(chunk1_t, 1.0)
-        result2 = torch.add(chunk2_t, 2.0)
+        result1 = torch.add(chunk1_t, 1)
+        result2 = torch.add(chunk2_t, 2)
         # Create add tensor: first 16 rows = 1.0, rest = 2.0
         add_tensor = torch.zeros_like(base_tensor)
-        add_tensor[:, :32] = 1.0
-        add_tensor[:, 32:] = 2.0
+        add_tensor[:, :32] = 1
+        add_tensor[:, 32:] = 2
 
         self.assertEqual(result1.cpu(), (base_tensor + add_tensor)[:, :32].transpose(0, 1).cpu())
         self.assertEqual(result2.cpu(), (base_tensor + add_tensor)[:, 32:].transpose(0, 1).cpu())
@@ -541,7 +542,7 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
     def test_split_3d_then_transpose_then_reshape(self, dtype):
         """Test split 3D tensor, then transpose, then reshape."""
         # Create 3D tensor
-        base_tensor = torch.randn([16, 32, 64], dtype=dtype, device=self.rbln_device)
+        base_tensor = make_tensor([16, 32, 64], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # Split along first dimension
         chunk1 = base_tensor[:8]
@@ -561,12 +562,12 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
         chunk2_tr = self._ensure_contiguous_if_needed(
             chunk2_tr, "[test_split_3d_then_transpose_then_reshape] chunk2_tr"
         )
-        result1 = torch.add(chunk1_tr, 1.0)
-        result2 = torch.add(chunk2_tr, 2.0)
+        result1 = torch.add(chunk1_tr, 1)
+        result2 = torch.add(chunk2_tr, 2)
         # Create add tensor: first 16 rows = 1.0, rest = 2.0
         add_tensor = torch.zeros_like(base_tensor)
-        add_tensor[:8] = 1.0
-        add_tensor[8:] = 2.0
+        add_tensor[:8] = 1
+        add_tensor[8:] = 2
 
         self.assertEqual(result1.cpu(), (base_tensor + add_tensor)[:8].transpose(1, 2).reshape(8, 64, 32).cpu())
         self.assertEqual(result2.cpu(), (base_tensor + add_tensor)[8:].transpose(1, 2).reshape(8, 64, 32).cpu())
@@ -575,7 +576,7 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
     def test_split_multiple_chunks_then_transpose_each(self, dtype):
         """Test split into multiple chunks, then transpose each."""
         # Create base tensor
-        base_tensor = torch.randn([64, 128], dtype=dtype, device=self.rbln_device)
+        base_tensor = make_tensor([64, 128], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # Split into 8 chunks
         chunks = torch.chunk(base_tensor, chunks=16, dim=0)
@@ -597,8 +598,8 @@ class TestSplitOps(BaseTestNonZeroStorageOffset):
         # Check contiguous status before operations
         for tc in transposed_chunks:
             self._ensure_contiguous_if_needed(tc, "[test_split_multiple_chunks_then_transpose_each] tc")
-        results = [torch.add(tc, 1.0) for tc in transposed_chunks]
-        expected_results = [et + 1.0 for et in expected_transposed]
+        results = [torch.add(tc, 1) for tc in transposed_chunks]
+        expected_results = [et + 1 for et in expected_transposed]
 
         for i, (actual, expected) in enumerate(zip(results, expected_results, strict=True)):
             # Compare values directly since they may have different storage layouts
@@ -615,7 +616,7 @@ class TestSplitAndMerge(BaseTestNonZeroStorageOffset):
     def test_split_slice_then_merge(self, dtype):
         """Test split using slice, then merge back."""
         # Create base tensor
-        base_tensor = torch.randn([32, 64], dtype=dtype, device=self.rbln_device)
+        base_tensor = make_tensor([32, 64], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # Split using slice
         chunk1 = base_tensor[:16]
@@ -637,7 +638,7 @@ class TestSplitAndMerge(BaseTestNonZeroStorageOffset):
     def test_split_chunk_then_merge(self, dtype):
         """Test split using torch.chunk, then merge back."""
         # Create base tensor
-        base_tensor = torch.randn([32, 64], dtype=dtype, device=self.rbln_device)
+        base_tensor = make_tensor([32, 64], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # Split using chunk
         chunks = torch.chunk(base_tensor, chunks=4, dim=0)
@@ -658,7 +659,7 @@ class TestSplitAndMerge(BaseTestNonZeroStorageOffset):
     def test_split_along_different_dims_then_merge(self, dtype):
         """Test split along different dimensions, then merge."""
         # Create 3D tensor
-        base_tensor = torch.randn([16, 32, 64], dtype=dtype, device=self.rbln_device)
+        base_tensor = make_tensor([16, 32, 64], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # Split along dimension 0
         chunks_dim0 = torch.chunk(base_tensor, chunks=4, dim=0)
@@ -690,7 +691,7 @@ class TestSplitAndMerge(BaseTestNonZeroStorageOffset):
     def test_nested_split_and_merge(self, dtype):
         """Test nested splitting and merging."""
         # Create base tensor
-        base_tensor = torch.randn([64, 128], dtype=dtype, device=self.rbln_device)
+        base_tensor = make_tensor([64, 128], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # First level split
         first_level_chunks = torch.chunk(base_tensor, chunks=4, dim=0)
@@ -721,7 +722,7 @@ class TestSplitAndMerge(BaseTestNonZeroStorageOffset):
     def test_split_process_merge_multiple_rounds(self, dtype):
         """Test multiple rounds of split, process, merge."""
         # Create base tensor
-        base_tensor = torch.randn([64, 128], dtype=dtype, device=self.rbln_device)
+        base_tensor = make_tensor([64, 128], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # Round 1: Split and merge
         chunks1 = torch.chunk(base_tensor, chunks=4, dim=0)
@@ -751,7 +752,7 @@ class TestSplitAndMerge(BaseTestNonZeroStorageOffset):
     def test_split_uneven_chunks_then_merge(self, dtype):
         """Test split into uneven chunks, then merge."""
         # Create tensor with size that doesn't divide evenly
-        base_tensor = torch.randn([100, 200], dtype=dtype, device=self.rbln_device)
+        base_tensor = make_tensor([100, 200], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # Split into uneven chunks
         chunk_sizes = [25, 30, 20, 25]  # Sums to 100
@@ -780,7 +781,7 @@ class TestSplitAndMerge(BaseTestNonZeroStorageOffset):
         total_size = (world_size * per_rank_size[0], per_rank_size[1])
 
         # Create full tensor
-        full_tensor = torch.randn(total_size, dtype=dtype, device=self.rbln_device)
+        full_tensor = make_tensor(total_size, dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # Scatter: split into chunks
         rank_chunks = []
@@ -797,7 +798,7 @@ class TestSplitAndMerge(BaseTestNonZeroStorageOffset):
     def test_split_column_then_merge(self, dtype):
         """Test split along columns, then merge."""
         # Create base tensor
-        base_tensor = torch.randn([32, 64], dtype=dtype, device=self.rbln_device)
+        base_tensor = make_tensor([32, 64], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # Split along columns
         chunk1 = base_tensor[:, :32]
@@ -820,7 +821,7 @@ class TestSplitAndMerge(BaseTestNonZeroStorageOffset):
     def test_large_tensor_chunked_processing_pipeline(self, dtype):
         """Test complete pipeline: split -> process -> merge -> split again."""
         # Initial large tensor
-        large_tensor = torch.randn([128, 256], dtype=dtype, device=self.rbln_device)
+        large_tensor = make_tensor([128, 256], dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         # Stage 1: Split into chunks
         chunks_stage1 = torch.chunk(large_tensor, chunks=8, dim=0)

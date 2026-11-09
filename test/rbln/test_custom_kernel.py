@@ -23,7 +23,7 @@ import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from test.utils import SUPPORTED_DTYPES
+from test.utils import SUPPORTED_FLOATING_DTYPES
 
 
 MAX_SEQ_LENGTH = 8192  # one block; block_size == the whole cache
@@ -157,7 +157,7 @@ class TestCustomKernelRBLN(TestCase):
         self._assert_cache_written(device_inputs["kcache"], kcache_reference, f"{name}: kcache")
         self._assert_cache_written(device_inputs["vcache"], vcache_reference, f"{name}: vcache")
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_paged_attn_prefill(self, dtype):
         inputs = self._prefill_inputs(dtype)
         mask = torch.ones([1, SEQ_LEN, MAX_SEQ_LENGTH], dtype=dtype).tril()
@@ -180,7 +180,7 @@ class TestCustomKernelRBLN(TestCase):
             )
         self._check("paged_attn_prefill", out, device, reference)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_paged_attn_decode(self, dtype):
         inputs = self._decode_inputs(dtype)
         batch = inputs["q"].shape[0]
@@ -204,7 +204,7 @@ class TestCustomKernelRBLN(TestCase):
             )
         self._check("paged_attn_decode", out, device, reference)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_paged_causal_attn_prefill(self, dtype):
         inputs = self._prefill_inputs(dtype)
         reference = self._prefill_reference(inputs, None)
@@ -225,7 +225,7 @@ class TestCustomKernelRBLN(TestCase):
             )
         self._check("paged_causal_attn_prefill", out, device, reference)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_paged_causal_attn_decode(self, dtype):
         inputs = self._decode_inputs(dtype)
         reference = self._decode_reference(inputs, None)
@@ -247,11 +247,11 @@ class TestCustomKernelRBLN(TestCase):
 
     # flash_attention_naive: the reference arrives with the op's single-sourcing in
     # rebel_compiler.
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_flash_attention_naive_prefill(self, dtype):  # noqa: ARG002
         self.skipTest("pending flash_attention_naive single-sourcing in rebel_compiler")
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_flash_attention_naive_decode(self, dtype):  # noqa: ARG002
         self.skipTest("pending flash_attention_naive single-sourcing in rebel_compiler")
 
