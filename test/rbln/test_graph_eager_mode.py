@@ -15,6 +15,9 @@ from test.utils import SUPPORTED_DTYPES
 ATOL = 0.04
 RTOL = 0.07
 
+# Raise on a failed compile instead of running the graph eagerly.
+STRICT = {"mode": "strict"}
+
 
 @pytest.mark.npu(count=1)
 class TestGraphMode(TestCase):
@@ -155,6 +158,46 @@ class TestGraphMode(TestCase):
         x = torch.randn([6, 32], dtype=dtype, device=self.rbln_device)
 
         self._run_eager_and_graph_mode(model, (x,))
+
+    # `.bool()` is `aten.to.dtype(x, torch.bool)`. A graph that drops that cast keeps
+    # the integer mask, and `~` on it is integer NOT: 0 -> -1, 1 -> -2, both truthy,
+    # so `masked_fill(~mask)` fills every cell (#316). The inputs stay on the host, as
+    # in the report; the CPU result is the reference. `strict` keeps a failed compile
+    # from running the graph eagerly, which would pass these tests without the device.
+
+    def test_bool_cast_maps_nonzero_to_true(self):
+        """`.bool()` in a graph turns every non-zero value into True, not into
+        itself.
+        """
+        m = torch.tensor([0, 2, -3, 1, 0, 7], dtype=torch.int64)
+        fn = lambda m: m.bool().to(torch.int64)  # noqa: E731
+        out = torch.compile(fn, backend="rbln", dynamic=False, options=STRICT)(m)
+        self.assertEqual(out.cpu(), fn(m))
+
+    def test_bitwise_not_on_bool_is_logical_not(self):
+        """`~` on a bool tensor in a graph is logical NOT, as in eager PyTorch."""
+        m = torch.tensor([0, 1, 0, 1, 1, 0], dtype=torch.int64)
+        fn = lambda m: ~m.bool()  # noqa: E731
+        out = torch.compile(fn, backend="rbln", dynamic=False, options=STRICT)(m)
+        self.assertEqual(out.cpu(), fn(m))
+
+    def test_masked_fill_with_inverted_bool_mask(self):
+        """BERT-style attention masking: `softmax(scores.masked_fill(~mask.bool(),
+        min))` puts no probability on the masked columns.
+        """
+
+        def fn(s, m):
+            return torch.softmax(s.masked_fill(~m.bool(), -1e4), dim=-1)
+
+        real = 6  # a [real, real] block of real tokens; the rest is padding
+        s = torch.randn(1, 2, 16, 16)
+        m = torch.zeros(1, 1, 16, 16, dtype=torch.int64)
+        m[..., :real, :real] = 1
+
+        out = torch.compile(fn, backend="rbln", dynamic=False, options=STRICT)(s, m).cpu()
+
+        self.assertEqual(out[..., :real, real:], torch.zeros_like(out[..., :real, real:]))
+        self.assertEqual(out, fn(s, m), atol=ATOL, rtol=RTOL)
 
 
 @pytest.mark.npu(count=1)
