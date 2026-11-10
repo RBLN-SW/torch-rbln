@@ -168,9 +168,9 @@ class OpCategories:
     # Broadcastable shim ops whose size-1 last-dim operand the device broadcasts, so
     # the alignment check reads the output's last dim. pow is left out: its
     # tensor-tensor overload takes the CPU fallback.
-    ALIGN_CHECK_OUTPUT_OPS: ClassVar[set[str]] = (BROADCASTABLE_OPS & {name.split(".")[0] for name in CPP_SHIM_OPS}) - {
-        "pow"
-    }
+    ALIGN_CHECK_OUTPUT_OPS: ClassVar[set[str]] = (
+        (BROADCASTABLE_OPS & {name.split(".")[0] for name in CPP_SHIM_OPS}) - {"pow"} - ALIGN_EXEMPT_OPS
+    )
 
     # Positional predicate args (a bool cond or mask) per root op. A predicate is
     # typed independently of the data operands, so both dtype gates exempt it:
