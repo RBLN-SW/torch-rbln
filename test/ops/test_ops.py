@@ -635,12 +635,9 @@ class TestCommon(TestCase):
         elif op.name == "_refs.floor" or op.name == "_refs.ceil":
             atol = 1
         elif op.name == "_refs.rsqrt" or op.name == "rsqrt":
-            # The device has no inf: rsqrt(0) / log(0) come back finite.
             ignore_inf_nan = True
-            tolerate_boundary_mismatch = True
         elif op.name == "_refs.log" or op.name == "log":
             ignore_inf_nan = True
-            tolerate_boundary_mismatch = True
         elif op.name == "_refs.pow" or op.name == "pow":
             ignore_inf_nan = True
             clamp_inf_fp16_safe = True
@@ -692,14 +689,6 @@ class TestCommon(TestCase):
             ("sub", ""),
             ("mul", ""),
             ("div", "no_rounding_mode"),
-            ("abs", ""),
-            ("neg", ""),
-            ("ceil", ""),
-            ("floor", ""),
-            ("maximum", ""),
-            ("minimum", ""),
-            ("max", "binary"),
-            ("min", "binary"),
         }
         device_range_arith = fp32_arith
         if fp32_arith:

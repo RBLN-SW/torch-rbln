@@ -32,7 +32,7 @@ class TestBorrowFastPath(TestCase):
     borrow correctness.
     """
 
-    def test_fallback_unary_int32_input(self) -> None:
+    def test_fallback_unary_fp64_input(self) -> None:
         x = torch.arange(48, dtype=torch.int32, device="rbln").reshape(6, 8)
         out = torch.sigmoid(x.double()).to("cpu")
         # Reference computation on CPU.
