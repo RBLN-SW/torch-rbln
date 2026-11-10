@@ -541,6 +541,20 @@ class TestRegisteredPythonOps(TestCase):
         torch.add(x.to(self.rbln_device), y.to(self.rbln_device), out=out)
         self.assertEqual(out.cpu(), expected)
 
+    @parametrize("size", [64, 5])
+    def test_add_into_out_of_another_shape(self, size):
+        """A non-empty out= of another shape is resized with a warning, as on the CPU.
+        The first call compiles, the second takes the cached runtime.
+        """
+        x_cpu, y_cpu = torch.rand(size), torch.rand(size)
+        x, y = x_cpu.to(self.rbln_device), y_cpu.to(self.rbln_device)
+        for _ in range(2):
+            out = torch.empty(size + 1, device=self.rbln_device)
+            with self.assertWarnsRegex(UserWarning, "An output with one or more elements"):
+                torch.add(x, y, out=out)
+            self.assertEqual(out.shape, x_cpu.shape)
+            self.assertEqual(out.cpu(), x_cpu + y_cpu, atol=ATOL, rtol=RTOL)
+
     @parametrize("op", [torch.eq, torch.ne, torch.lt, torch.le, torch.gt, torch.ge])
     def test_compare_into_float_out(self, op):
         """A comparison casts its bool result into a float out=. Cold warm cache first,

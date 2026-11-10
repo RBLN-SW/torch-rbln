@@ -1899,6 +1899,9 @@ def compile_and_run_view_aware(
         options=compile_options,
         device_cache_key=extract_warm_cache_key(*view_args, **view_kwargs),
     )
+    # An ``out`` of another shape is not bound: the shim resizes it and copies into it.
+    if result_tensor is not None and entry.out_shape not in (None, result_tensor.shape):
+        result_tensor = None
     out_list = None if result_tensor is None else [result_tensor]
     # The caller's ``out`` is bound as the program's output buffer, as the C++
     # hit path binds it. A device copy into ``out`` is not the same thing: when
@@ -1922,6 +1925,10 @@ def compile_and_run_view_aware(
         runtime = entry.runtime()
         if runtime is not None and entry.input_order is None:
             entry.input_order = _graph_input_order(runtime, tensors)
+        if isinstance(external_result, torch.Tensor):
+            entry.out_shape = external_result.shape
+            if result_tensor is not None and result_tensor.shape != entry.out_shape:
+                result_tensor = None
         if result_tensor is not None:
             if runtime is not None and entry.input_order is not None:
                 runtime.run(*(tensors[i] for i in entry.input_order), out=out_list)
