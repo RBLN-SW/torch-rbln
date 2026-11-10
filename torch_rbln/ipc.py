@@ -7,14 +7,20 @@ only deal with the logical tensor. How the runtime lays the memory out on device
 (sharding across chiplets, dtype transforms) travels inside ``IpcHandle.payload`` and is
 rebuilt on open.
 
-Both processes must be able to open the device's DRM accel node (``/dev/accel/accelN``).
+Experimental. Supported on RBLN-CR NPUs only, with a logical device that maps to a
+single NPU (no RSD). Both processes must be able to open the device's DRM accel node
+(``/dev/accel/accelN``), which needs RBLN driver 4.0 or later.
 """
 
+import os
+from pathlib import Path
 from typing import NamedTuple
 
 import torch
 
 import torch_rbln._C
+from torch_rbln._internal.device_arch_utils import _arch_from_npu_name
+from torch_rbln.device.device import get_device_properties
 from torch_rbln.memory import _normalize_device
 
 
@@ -24,6 +30,26 @@ __all__ = [
     "export_tensor",
     "open_tensor",
 ]
+
+
+def _accel_node_accessible() -> bool:
+    return any(os.access(p, os.R_OK | os.W_OK) for p in Path("/dev/accel").glob("accel*"))
+
+
+def _check_supported(dev: torch.device) -> None:
+    props = get_device_properties(dev)
+    if _arch_from_npu_name(props.name) != "rebel":
+        msg = f"torch.rbln.ipc supports RBLN-CR NPUs only, but {dev} is {props.name}"
+        raise RuntimeError(msg)
+    if props.npu_count != 1:
+        msg = (
+            f"torch.rbln.ipc does not support RSD: {dev} maps to {props.npu_count} NPUs. "
+            "Use a logical device that maps to a single NPU"
+        )
+        raise RuntimeError(msg)
+    if not _accel_node_accessible():
+        msg = "torch.rbln.ipc needs RBLN driver 4.0 or later and read/write access to /dev/accel/accelN"
+        raise RuntimeError(msg)
 
 
 class IpcHandle(NamedTuple):
@@ -57,6 +83,7 @@ def empty_exportable(
         device: The rbln device to allocate on. Defaults to the current device.
     """
     dev = _normalize_device(device)
+    _check_supported(dev)
     return torch_rbln._C._empty_exportable(dev.index, list(shape), dtype)
 
 
@@ -113,7 +140,11 @@ def open_tensor(
     if len(fds) != handle.num_fds:
         msg = f"open_tensor: the handle has {handle.num_fds} fd(s) but {len(fds)} were given"
         raise RuntimeError(msg)
-    index = torch_rbln._C._resolve_import_device(handle.payload) if device is None else _normalize_device(device).index
+    if device is None:
+        dev = torch.device("rbln", torch_rbln._C._resolve_import_device(handle.payload))
+    else:
+        dev = _normalize_device(device)
+    _check_supported(dev)
     return torch_rbln._C._import_device_memory(
-        index, handle.nbytes, handle.payload, fds, list(handle.shape), handle.dtype
+        dev.index, handle.nbytes, handle.payload, fds, list(handle.shape), handle.dtype
     )

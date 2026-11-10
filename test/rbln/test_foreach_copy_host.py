@@ -546,11 +546,13 @@ class TestForeachCopyHost(TestCase):
 
         with torch.rbln.explain() as p:
             torch._foreach_copy_(dst_dev, src_cpu)
-        by_site = p.dump()["hidden_host_bounce"]["by_site"]
+        d = p.dump()
+        by_site = d["hidden_host_bounce"]["by_site"]
 
         hit = {name: v["count"] for name, v in by_site.items() if v["count"]}
-        for site in ("host_batch_to_per_entry", "strided_v2v_cpu_fallback"):
-            self.assertEqual(by_site.get(site, {}).get("count", 0), 0, f"unexpected fallback: {hit}")
+        self.assertEqual(by_site["host_batch_to_per_entry"]["count"], 0, f"unexpected fallback: {hit}")
+        reasons = {r for rs in d["cpu_fallback_reasons_by_op"].values() for r in rs}
+        self.assertNotIn("strided_copy_error", reasons, d["cpu_fallback_reasons_by_op"])
 
 
 instantiate_device_type_tests(TestForeachCopyHost, globals(), only_for="privateuse1")
