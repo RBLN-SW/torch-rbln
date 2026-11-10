@@ -391,6 +391,15 @@ C10_RBLN_API void* import_device_memory(
     const std::vector<int>& fds);
 
 /**
+ * @brief Finds the logical device of this process that holds the NPUs an
+ * export came from.
+ *
+ * Raises when no device or several devices qualify.
+ */
+C10_RBLN_API c10::DeviceIndex resolve_import_device(
+    const std::vector<uint8_t>& payload);
+
+/**
  * @brief Non-throwing free() for `noexcept` contexts (the c10 DataPtr deleter).
  *
  * The deleter runs in a noexcept destructor, so a throwing free() would

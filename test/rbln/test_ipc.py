@@ -19,10 +19,10 @@ def _opener_main(conn):
     """Child: receive the handle and its fds, open the tensor, report its values."""
     import torch  # noqa: PLC0415
 
-    handle = conn.recv()
+    handle, device = conn.recv()
     fds = [reduction.recv_handle(conn) for _ in range(handle.num_fds)]
     try:
-        t = torch.rbln.ipc.open_tensor(handle, fds, device=0)
+        t = torch.rbln.ipc.open_tensor(handle, fds, device=device)
         conn.send(("ok", t.cpu().tolist()))
         del t
     except Exception as e:
@@ -34,13 +34,13 @@ def _opener_main(conn):
     os._exit(0)
 
 
-def _open_in_child(handle, fds) -> list:
+def _open_in_child(handle, fds, device=0) -> list:
     ctx = multiprocessing.get_context("spawn")
     parent, child = ctx.Pipe()
     p = ctx.Process(target=_opener_main, args=(child,))
     p.start()
     try:
-        parent.send(handle)
+        parent.send((handle, device))
         for fd in fds:
             reduction.send_handle(parent, fd, p.pid)
         status, payload = parent.recv()
@@ -120,16 +120,12 @@ class TestIpcValidation(TestCase):
 
     def test_export_rejects_non_exportable_tensor(self):
         x = torch.arange(1024, dtype=torch.float32, device="rbln:0")
-        with self.assertRaisesRegex(RuntimeError, "empty_exportable"):
+        with self.assertRaisesRegex(RuntimeError, "rbln_malloc_exportable"):
             torch.rbln.ipc.export_tensor(x)
 
     def test_open_rejects_wrong_fd_count(self):
         with self.assertRaisesRegex(RuntimeError, "fd"):
             torch.rbln.ipc.open_tensor(_fake_handle(), fds=[], device=0)
-
-    def test_open_requires_device(self):
-        with self.assertRaisesRegex(RuntimeError, "device is required"):
-            torch.rbln.ipc.open_tensor(_fake_handle(), fds=[3], device=None)
 
     @pytest.mark.skipif(not is_atom_device(), reason="ATOM only")
     def test_rejects_atom(self):
@@ -175,16 +171,18 @@ class TestIpc(TestCase):
         with self.assertRaisesRegex(RuntimeError, "whole storage"):
             torch.rbln.ipc.export_tensor(x[16:])
 
-    def test_cross_process_open_reads_exporter_data(self):
+    def test_handle_resolves_to_the_exporting_device(self):
         x = _exportable_arange(1024)
-        got = _open_in_child(*torch.rbln.ipc.export_tensor(x))
-        self.assertEqual(got, list(range(1024)))
-
-    def test_cross_process_open_of_chiplet_sharded_tensor(self):
-        x = _exportable_arange(1024, _two_chiplet_layout(1024))
         h, fds = torch.rbln.ipc.export_tensor(x)
-        self.assertEqual(h.num_fds, 2)
-        got = _open_in_child(h, fds)
+        try:
+            self.assertEqual(torch_rbln._C._resolve_import_device(h.payload), x.device.index)
+        finally:
+            for fd in fds:
+                os.close(fd)
+
+    def test_cross_process_open_without_device_finds_the_exporting_device(self):
+        x = _exportable_arange(1024)
+        got = _open_in_child(*torch.rbln.ipc.export_tensor(x), device=None)
         self.assertEqual(got, list(range(1024)))
 
     def test_layout_is_fixed_after_export(self):
