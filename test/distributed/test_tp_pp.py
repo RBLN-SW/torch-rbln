@@ -191,15 +191,13 @@ def run_pp2_test(rank: int, world_size: int, backend: str, dtype: torch.dtype) -
         set_deterministic_seeds(42)
         input_tensor = torch.randn(batch_size, input_size, dtype=dtype, device=device)
 
-        if rank == 0:
-            sequential_model = SequentialModel(input_size, hidden_size, output_size).to(device)
-            with torch.no_grad():
-                nn.init.xavier_uniform_(sequential_model.layer1.weight)
-                nn.init.xavier_uniform_(sequential_model.layer2.weight)
-            with torch.no_grad():
-                sequential_output = sequential_model(input_tensor)
-        else:
-            sequential_model = SequentialModel(input_size, hidden_size, output_size).to(device)
+        # Let every rank reach the compiler's collective AoT CCL bootstrap.
+        sequential_model = SequentialModel(input_size, hidden_size, output_size).to(device)
+        with torch.no_grad():
+            nn.init.xavier_uniform_(sequential_model.layer1.weight)
+            nn.init.xavier_uniform_(sequential_model.layer2.weight)
+        with torch.no_grad():
+            sequential_output = sequential_model(input_tensor)
 
         pp_model = PipelineParallelModel(input_size, hidden_size, output_size, rank, world_size).to(device)
 
@@ -300,12 +298,10 @@ def run_single_linear_allgather_default_group_test(
         tensor_group = tensor_groups[rank // tensor_world_size]
 
         model = None
-        sequential_model = None
-        data = None
-        if rank == 0:
-            sequential_model = SequentialModel(in_dim_1, out_dim_1).to(device=device)
-            data = torch.randn((in_dim_0, in_dim_1), dtype=dtype, device=device)
-            output_seq = sequential_model(data)
+        # Let every rank reach the compiler's collective AoT CCL bootstrap.
+        sequential_model = SequentialModel(in_dim_1, out_dim_1).to(device=device)
+        data = torch.randn((in_dim_0, in_dim_1), dtype=dtype, device=device)
+        output_seq = sequential_model(data)
 
         if rank < tensor_world_size:
             layers = [
@@ -427,12 +423,10 @@ def run_two_linear_bias_default_group_send_recv_test(
         tensor_group = tensor_groups[rank // tensor_world_size]
 
         model = None
-        sequential_model = None
-        data = None
-        if rank == 0:
-            sequential_model = SequentialModel(512, 2048, 256).to(device=device)
-            data = torch.randn((64, 512), dtype=dtype, device=device)
-            output_seq = sequential_model(data)
+        # Let every rank reach the compiler's collective AoT CCL bootstrap.
+        sequential_model = SequentialModel(512, 2048, 256).to(device=device)
+        data = torch.randn((64, 512), dtype=dtype, device=device)
+        output_seq = sequential_model(data)
 
         if rank < tensor_world_size:
             layers = [TensorParallelLinear(512, 2048, tensor_world_size, rank, tensor_group)]
@@ -601,12 +595,10 @@ def run_two_linear_no_bias_default_group_send_recv_test(
         tensor_group = tensor_groups[rank // tensor_world_size]
 
         model = None
-        sequential_model = None
-        data = None
-        if rank == 0:
-            sequential_model = SequentialModel(512, 2048, 256).to(device=device)
-            data = torch.randn((64, 512), dtype=dtype, device=device)
-            output_seq = sequential_model(data)
+        # Let every rank reach the compiler's collective AoT CCL bootstrap.
+        sequential_model = SequentialModel(512, 2048, 256).to(device=device)
+        data = torch.randn((64, 512), dtype=dtype, device=device)
+        output_seq = sequential_model(data)
 
         if rank < tensor_world_size:
             layers = [TensorParallelLinear(512, 2048, tensor_world_size, rank, tensor_group)]
@@ -757,12 +749,10 @@ def run_two_linear_bias_subgroup_send_recv_test(rank: int, world_size: int, back
         pipe_group = pipe_groups[rank % tensor_world_size]
 
         model = None
-        sequential_model = None
-        data = None
-        if rank == 0:
-            sequential_model = SequentialModel(512, 2048, 256).to(device=device)
-            data = torch.randn((64, 512), dtype=dtype, device=device)
-            output_seq = sequential_model(data)
+        # Let every rank reach the compiler's collective AoT CCL bootstrap.
+        sequential_model = SequentialModel(512, 2048, 256).to(device=device)
+        data = torch.randn((64, 512), dtype=dtype, device=device)
+        output_seq = sequential_model(data)
 
         if rank < tensor_world_size:
             layers = [TensorParallelLinear(512, 2048, tensor_world_size, rank, tensor_group)]
@@ -967,12 +957,10 @@ def run_two_linear_bias_relu_subgroup_send_recv_test(
         pipe_group = pipe_groups[rank % tensor_world_size]
 
         model = None
-        sequential_model = None
-        data = None
-        if rank == 0:
-            sequential_model = SequentialModel(512, 2048, 256).to(device=device)
-            data = torch.randn((64, 512), dtype=dtype, device=device)
-            output_seq = sequential_model(data)
+        # Let every rank reach the compiler's collective AoT CCL bootstrap.
+        sequential_model = SequentialModel(512, 2048, 256).to(device=device)
+        data = torch.randn((64, 512), dtype=dtype, device=device)
+        output_seq = sequential_model(data)
 
         if rank < tensor_world_size:
             layers = [TensorParallelLinear(512, 2048, tensor_world_size, rank, tensor_group)]
@@ -1187,12 +1175,10 @@ def run_two_linear_bias_allgather_subgroup_send_recv_test(
         pipe_group = pipe_groups[rank % tensor_world_size]
 
         model = None
-        sequential_model = None
-        data = None
-        if rank == 0:
-            sequential_model = SequentialModel(512, 2048, 256).to(device=device)
-            data = torch.randn((64, 512), dtype=dtype, device=device)
-            output_seq = sequential_model(data)
+        # Let every rank reach the compiler's collective AoT CCL bootstrap.
+        sequential_model = SequentialModel(512, 2048, 256).to(device=device)
+        data = torch.randn((64, 512), dtype=dtype, device=device)
+        output_seq = sequential_model(data)
 
         if rank < tensor_world_size:
             layers = [TensorParallelLinear(512, 2048, tensor_world_size, rank, tensor_group)]

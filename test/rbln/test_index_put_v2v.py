@@ -49,6 +49,13 @@ def _fallbacks(fn, ops=(_OP,)) -> int:
     return sum(count for name, count in dict(_C._dispatch_fallback_by_op()).items() if any(op in name for op in ops))
 
 
+def _device_exact_fp16(shape) -> torch.Tensor:
+    """Random fp16 integers in [-512, 512): masked_fill runs as a compiled
+    program, and the device holds such values exactly (randn values are not).
+    """
+    return torch.randint(-512, 512, shape).to(torch.float16)
+
+
 @pytest.mark.npu(count=1)
 @pytest.mark.usefixtures("enable_deploy_mode")
 class TestIndexPutV2V(TestCase):
@@ -187,7 +194,7 @@ class TestIndexPutV2V(TestCase):
 
     def test_mask_with_host_scalar_goes_to_masked_fill(self):
         """Upstream's canDispatchToMaskedFill route; neither op falls back."""
-        self_cpu = torch.randn(4, 64, dtype=torch.float16)
+        self_cpu = _device_exact_fp16((4, 64))
         mask_cpu = self_cpu > 0
         expected = self_cpu.clone().index_put_((mask_cpu,), torch.tensor(-1.0, dtype=torch.float16))
         got = _to_dev(self_cpu)
@@ -198,7 +205,7 @@ class TestIndexPutV2V(TestCase):
 
     def test_mask_with_device_scalar_goes_to_masked_fill(self):
         """``x[mask] = 0.0`` passes a 0-D device value; it is one masked_fill."""
-        self_cpu = torch.randn(4, 64, dtype=torch.float16)
+        self_cpu = _device_exact_fp16((4, 64))
         expected = self_cpu.clone()
         expected[self_cpu > 0] = 0.0
         got = _to_dev(self_cpu)
