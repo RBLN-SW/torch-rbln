@@ -28,6 +28,7 @@ from unittest import mock
 import pytest
 import rebel._C
 import torch
+from torch.testing import make_tensor
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize, run_tests, TestCase
 
@@ -66,7 +67,7 @@ class TestAliasedTensors(TestCase):
     @parametrize("binary_op", binary_ops)
     @parametrize("shape", shapes)
     def test_same_base_tensor(self, dtype, binary_op, shape):
-        x_base = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x_base = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         input = x_base
         other = x_base
@@ -78,8 +79,8 @@ class TestAliasedTensors(TestCase):
     @parametrize("binary_op", binary_ops)
     @parametrize("shape", shapes)
     def test_different_base_tensors(self, dtype, binary_op, shape):
-        x_base = torch.randn(shape, dtype=dtype, device=self.rbln_device)
-        y_base = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x_base = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        y_base = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         input = x_base
         other = y_base
@@ -91,7 +92,7 @@ class TestAliasedTensors(TestCase):
     @parametrize("binary_op", binary_ops)
     @parametrize("shape", shapes)
     def test_same_view_tensor_from_same_base_tensor(self, dtype, binary_op, shape):
-        x_base = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x_base = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         x_view = x_base.view(shape)
         self.assertEqual(x_view.size(), x_base.size())
@@ -109,7 +110,7 @@ class TestAliasedTensors(TestCase):
     @parametrize("binary_op", binary_ops)
     @parametrize("shape", shapes)
     def test_different_view_tensors_from_same_base_tensor(self, dtype, binary_op, shape):
-        x_base = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x_base = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         x_view = x_base.view(shape)
         self.assertEqual(x_view.size(), x_base.size())
@@ -132,8 +133,8 @@ class TestAliasedTensors(TestCase):
     @parametrize("binary_op", binary_ops)
     @parametrize("shape", shapes)
     def test_different_view_tensors_from_different_base_tensors(self, dtype, binary_op, shape):
-        x_base = torch.randn(shape, dtype=dtype, device=self.rbln_device)
-        y_base = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x_base = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
+        y_base = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         x_view = x_base.view(shape)
         self.assertEqual(x_view.size(), x_base.size())
@@ -156,7 +157,7 @@ class TestAliasedTensors(TestCase):
     @parametrize("binary_op", binary_ops)
     @parametrize("shape", shapes)
     def test_mixed_base_and_view_tensors(self, dtype, binary_op, shape):
-        x_base = torch.randn(shape, dtype=dtype, device=self.rbln_device)
+        x_base = make_tensor(shape, dtype=dtype, device=self.rbln_device, low=-2, high=2)
 
         x_view = x_base.view(shape)
         self.assertEqual(x_view.size(), x_base.size())
@@ -177,7 +178,7 @@ def _input_output_tensor_memory_independence_worker(rbln_device, dtype):
     """
     # Create a seed input tensor whose internal key value may collide with output tensor
     # memory keys.
-    seed_tensor = torch.randn([2, 2], dtype=dtype, device=rbln_device)
+    seed_tensor = make_tensor([2, 2], dtype=dtype, device=rbln_device, low=-2, high=2)
     seed_data_ptr = seed_tensor.data_ptr()
 
     rbln_out = torch.abs(seed_tensor)  # First output tensor allocation.
@@ -188,14 +189,14 @@ def _input_output_tensor_memory_independence_worker(rbln_device, dtype):
     # tensor receives a key equal to seed_data_ptr, forcing a key collision.
     for i in range(seed_data_ptr - 1):
         # Vary the size of the tensor to ensure unique memory allocation.
-        t = torch.randn([i], dtype=dtype, device=rbln_device)
+        t = make_tensor([i], dtype=dtype, device=rbln_device, low=-2, high=2)
         rbln_out = torch.abs(t)
         cpu_out = torch.abs(t.cpu())
         torch.testing.assert_close(rbln_out.cpu(), cpu_out, atol=ATOL, rtol=RTOL)
     # After the loop, the next output tensor key may collide with the seed tensor key.
 
-    x = torch.randn([2, 2, 4], dtype=dtype, device=rbln_device)
-    y = torch.randn([2, 2, 4], dtype=dtype, device=rbln_device)
+    x = make_tensor([2, 2, 4], dtype=dtype, device=rbln_device, low=-2, high=2)
+    y = make_tensor([2, 2, 4], dtype=dtype, device=rbln_device, low=-2, high=2, exclude_zero=True)
 
     # Use trunc-mode division to amplify numerical divergence if the backend silently
     # returns wrong data.

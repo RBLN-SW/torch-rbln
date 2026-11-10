@@ -9,7 +9,7 @@ from torch.testing._internal.common_device_type import instantiate_device_type_t
 from torch.testing._internal.common_methods_invocations import op_db
 from torchgen.model import dispatch_keys
 
-from test.utils import SUPPORTED_DTYPES
+from torch_rbln._internal.ops_utils import SupportedDtypes
 
 
 __all__ = [
@@ -69,6 +69,11 @@ def _drop_dropout_grad_samples(op):
 for _op in op_db:
     if _op.name == "nn.functional.scaled_dot_product_attention":
         _drop_dropout_grad_samples(_op)
+    elif _op.name == "cumsum":
+        for _skip in _op.skips:
+            if _skip.cls_name == "TestCommon" and _skip.test_name == "test_out":
+                # int64 output skips test_out's floating-to-integral cast check.
+                _skip.dtypes = tuple(dtype for dtype in (_skip.dtypes or _op.dtypes) if dtype != torch.int64)
 
 _ops_with_related_runtime_tests = [
     "clone",
@@ -251,7 +256,11 @@ def _skip_if_not_implemented(fn):
                 raise SkipTest(msg)
             # `dtype` restriction - SDPA is an exception to test CPU fallback with
             # various dtypes
-            if name == "dtype" and value not in SUPPORTED_DTYPES and op_name not in _ops_with_cpu_fallback_dtype_tests:
+            if (
+                name == "dtype"
+                and value not in SupportedDtypes.dispatch
+                and op_name not in _ops_with_cpu_fallback_dtype_tests
+            ):
                 msg = f"Skipping {fn.__name__} because it is not supported dtype"
                 raise SkipTest(msg)
 

@@ -17,6 +17,7 @@ from torch_rbln._internal.rdma_env import apply_default_rbln_network_environment
 
 
 SUPPORTED_DTYPES = list(SupportedDtypes.dispatch)
+SUPPORTED_FLOATING_DTYPES = [dtype for dtype in SUPPORTED_DTYPES if dtype.is_floating_point]
 
 _DEFAULT_DISTRIBUTED_MASTER_PORT = "29604"
 

@@ -32,7 +32,8 @@ bool contains(const Arr& arr, const T& value) {
 } // namespace
 
 TEST_F(RBLNSupportedDtypesTest, DispatchCatalogContents) {
-  constexpr std::array kExpected = {c10::kHalf, c10::kBFloat16, c10::kFloat};
+  constexpr std::array kExpected = {
+      c10::kHalf, c10::kBFloat16, c10::kFloat, c10::kLong};
   for (const auto scalar_type : kExpected) {
     EXPECT_TRUE(contains(c10::rbln::kDispatchDtypes, scalar_type));
   }
@@ -75,7 +76,7 @@ TEST_F(RBLNSupportedDtypesTest, IsDispatchDtypeAcceptsAdmitted) {
 TEST_F(RBLNSupportedDtypesTest, IsDispatchDtypeRejectsUnsupported) {
   constexpr std::array kUnsupported = {
       c10::kInt,
-      c10::kLong,
+      c10::kShort,
       c10::kBool,
   };
   for (const auto scalar_type : kUnsupported) {
@@ -90,15 +91,16 @@ TEST_F(RBLNSupportedDtypesTest, DispatchExtensionAdmitsOnlyWhatIsSet) {
   c10::rbln::set_dispatch_extension({c10::kInt, c10::kBool});
   EXPECT_TRUE(c10::rbln::is_dispatch_dtype_rt(c10::kInt));
   EXPECT_TRUE(c10::rbln::is_dispatch_dtype_rt(c10::kBool));
-  EXPECT_FALSE(c10::rbln::is_dispatch_dtype_rt(c10::kLong));
+  EXPECT_TRUE(c10::rbln::is_dispatch_dtype_rt(c10::kLong));
+  EXPECT_FALSE(c10::rbln::is_dispatch_dtype_rt(c10::kShort));
 
   // A dtype outside kDispatchExtensionDtypes is rejected and the previous
   // extension stays in place.
   EXPECT_THROW(
-      c10::rbln::set_dispatch_extension({c10::kLong, c10::kComplexFloat}),
+      c10::rbln::set_dispatch_extension({c10::kShort, c10::kComplexFloat}),
       c10::Error);
   EXPECT_TRUE(c10::rbln::is_dispatch_dtype_rt(c10::kInt));
-  EXPECT_FALSE(c10::rbln::is_dispatch_dtype_rt(c10::kLong));
+  EXPECT_FALSE(c10::rbln::is_dispatch_dtype_rt(c10::kShort));
 
   c10::rbln::set_dispatch_extension({});
   EXPECT_FALSE(c10::rbln::is_dispatch_dtype_rt(c10::kInt));

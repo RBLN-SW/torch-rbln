@@ -6,6 +6,7 @@ import math
 
 import pytest
 import torch
+from torch.testing import make_tensor
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
@@ -300,25 +301,25 @@ class TestTensorCopy(TestCase):
         src = torch.tensor([3.14], dtype=src_dtype, device=self.rbln_device)
         dst = torch.empty([1024], dtype=dst_dtype, device=self.rbln_device)
         dst.copy_(src.expand(1024))
-        expected = torch.full((1024,), 3.14, dtype=dst_dtype)
+        expected = src.cpu().expand(1024).to(dst_dtype)
         self.assertEqual(dst.cpu(), expected, atol=ATOL, rtol=RTOL)
 
         # (1, 8) → (4, 8)
-        src_small = torch.randn([1, 8], dtype=src_dtype, device=self.rbln_device)
+        src_small = make_tensor([1, 8], dtype=src_dtype, device=self.rbln_device, low=-2, high=2)
         dst_large = torch.empty([4, 8], dtype=dst_dtype, device=self.rbln_device)
         dst_large.copy_(src_small.expand(4, 8))
         expected = src_small.cpu().expand(4, 8).to(dst_dtype)
         self.assertEqual(dst_large.cpu(), expected, atol=ATOL, rtol=RTOL)
 
         # (1, 64) → (8, 64)
-        src = torch.randn([1, 64], dtype=src_dtype, device=self.rbln_device)
+        src = make_tensor([1, 64], dtype=src_dtype, device=self.rbln_device, low=-2, high=2)
         dst = torch.empty([8, 64], dtype=dst_dtype, device=self.rbln_device)
         dst.copy_(src.expand(8, 64))
         expected = src.cpu().expand(8, 64).to(dst_dtype)
         self.assertEqual(dst.cpu(), expected, atol=ATOL, rtol=RTOL)
 
         # (1, 1, 64) → (4, 8, 64)
-        src = torch.randn([1, 1, 64], dtype=src_dtype, device=self.rbln_device)
+        src = make_tensor([1, 1, 64], dtype=src_dtype, device=self.rbln_device, low=-2, high=2)
         dst = torch.empty([4, 8, 64], dtype=dst_dtype, device=self.rbln_device)
         dst.copy_(src.expand(4, 8, 64))
         expected = src.cpu().expand(4, 8, 64).to(dst_dtype)
@@ -329,7 +330,7 @@ class TestTensorCopy(TestCase):
 class TestToOps(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     def test_to_cpu(self, dtype):
-        x_cpu = torch.randn([2, 4], dtype=dtype, device="cpu")
+        x_cpu = make_tensor([2, 4], dtype=dtype, device="cpu", low=-2, high=2)
         self.assertEqual(x_cpu.dtype, dtype)
 
         x = torch.tensor(x_cpu, dtype=x_cpu.dtype, device="rbln")
@@ -345,7 +346,7 @@ class TestToOps(TestCase):
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_to_copy(self, dtype):
-        x_cpu = torch.randn([2, 4], dtype=dtype, device="cpu")
+        x_cpu = make_tensor([2, 4], dtype=dtype, device="cpu", low=-2, high=2)
         self.assertEqual(x_cpu.dtype, dtype)
 
         x = torch.tensor(x_cpu, dtype=x_cpu.dtype, device="rbln")

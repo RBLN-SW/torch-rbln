@@ -132,6 +132,6 @@ class OpCodeGenerator:
         if root_name in self.op_categories.COMPARE_OPS:
             code += self.templates.Validation.dtype_compare(root_name)
         else:
-            code += self.templates.Validation.dtype_default()
+            code += self.templates.Validation.dtype_default(root_name)
 
         return code

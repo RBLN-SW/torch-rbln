@@ -9,7 +9,7 @@ from torch.testing._internal.common_device_type import dtypes, instantiate_devic
 from torch.testing._internal.common_utils import parametrize, run_tests, subtest, TestCase
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from test.utils import SUPPORTED_DTYPES
+from test.utils import SUPPORTED_FLOATING_DTYPES
 from torch_rbln._internal.device_arch_utils import is_atom_device
 
 
@@ -203,16 +203,17 @@ def _small_model_cover_array(full_matrix_at=None, skip_shapes=()):
         if (bs, sl) not in skip_shapes
     ]
     attns = TestCausalLMBase.attn_implementations
-    n_dtype, n_attn = len(SUPPORTED_DTYPES), len(attns)
+    n_dtype, n_attn = len(SUPPORTED_FLOATING_DTYPES), len(attns)
 
     array = []
     rotate = 0
     for bs, sl in shapes:
         if (bs, sl) == full_matrix_at:
-            combos = [(dtype, attn) for dtype in SUPPORTED_DTYPES for attn in attns]
+            combos = [(dtype, attn) for dtype in SUPPORTED_FLOATING_DTYPES for attn in attns]
         else:
             combos = [
-                (SUPPORTED_DTYPES[(rotate + j) % n_dtype], attns[j % n_attn]) for j in range(max(n_dtype, n_attn))
+                (SUPPORTED_FLOATING_DTYPES[(rotate + j) % n_dtype], attns[j % n_attn])
+                for j in range(max(n_dtype, n_attn))
             ]
             rotate += 1
         for dtype, attn in combos:
@@ -350,7 +351,7 @@ class TestCausalLMGraph(TestCausalLMBase):
     """
 
     @pytest.mark.usefixtures("enable_deploy_mode")
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("attn_implementation", TestCausalLMBase.attn_implementations)
     @parametrize("batch_size,seq_len", [(1, 128)])
     def test_llama(self, dtype, attn_implementation, batch_size, seq_len):

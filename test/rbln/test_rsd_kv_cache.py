@@ -44,7 +44,7 @@ import rebel  # noqa: F401  -- defines the rbln_custom_ops schemas the decoder c
 import torch
 from torch.testing._internal.common_utils import run_tests
 
-from test.utils import SUPPORTED_DTYPES
+from test.utils import SUPPORTED_FLOATING_DTYPES
 from torch_rbln._internal.device_arch_utils import is_rebel_device
 
 
@@ -380,7 +380,7 @@ def _skip_unless_two_atom_npus() -> None:
         pytest.skip("RSD spans NPUs; the REBEL lineup exposes one device")
 
 
-@pytest.mark.parametrize("dtype", SUPPORTED_DTYPES, ids=lambda d: str(d).removeprefix("torch."))
+@pytest.mark.parametrize("dtype", SUPPORTED_FLOATING_DTYPES, ids=lambda d: str(d).removeprefix("torch."))
 def test_rsd_programs_compile_on_dummy_device(dtype, tmp_path):
     """Both KV-cache programs compile for a two-NPU ATOM logical device with no NPU
     present.
@@ -394,7 +394,7 @@ def test_rsd_programs_compile_on_dummy_device(dtype, tmp_path):
 
 @pytest.mark.serial
 @pytest.mark.npu(count=2)
-@pytest.mark.parametrize("dtype", SUPPORTED_DTYPES, ids=lambda d: str(d).removeprefix("torch."))
+@pytest.mark.parametrize("dtype", SUPPORTED_FLOATING_DTYPES, ids=lambda d: str(d).removeprefix("torch."))
 def test_sharded_kv_cache_lifecycle_and_parity(dtype):
     _skip_unless_two_atom_npus()
     rsd = _run_on_device(dtype, npus=2)

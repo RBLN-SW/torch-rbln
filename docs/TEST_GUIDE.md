@@ -399,6 +399,7 @@ From `test/utils.py`:
 | Utility                                | Description                                                                                                                     |
 | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | `SUPPORTED_DTYPES`                     | Baseline dtype list for RBLN backend tests, derived from `torch_rbln._internal.ops_utils.SupportedDtypes.dispatch`.             |
+| `SUPPORTED_FLOATING_DTYPES`            | Floating-point subset of `SUPPORTED_DTYPES` for tests that require floating-point inputs.                                       |
 | `set_deterministic_seeds(seed)`        | Sets `torch`, `numpy`, and `random` seeds. Must be called in each spawned process for reproducibility.                          |
 | `run_in_isolated_process(func, *args)` | Runs `func` in a fresh `spawn`-method process. Useful when tests need clean process state. `func` and `args` must be picklable. |
 
@@ -472,6 +473,7 @@ The simplest pattern for a new RBLN backend test:
 
 import pytest
 import torch
+from torch.testing import make_tensor
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
@@ -484,8 +486,8 @@ class TestMyFeature(TestCase):
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_basic_op(self, dtype):
-        x = torch.randn([4, 4], dtype=dtype, device="rbln")
-        y = torch.randn([4, 4], dtype=dtype, device="rbln")
+        x = make_tensor([4, 4], dtype=dtype, device="rbln")
+        y = make_tensor([4, 4], dtype=dtype, device="rbln")
         result = x + y
         expected = x.cpu() + y.cpu()
         self.assertEqual(result.cpu(), expected)
@@ -504,7 +506,8 @@ if __name__ == "__main__":
 > [criteria](#when-to-use-the-periodic-marker).
 > - Mark the class with `@pytest.mark.npu(count=N)` as described in
 > [Markers](#markers).
-> - Use `@dtypes(*SUPPORTED_DTYPES)` to parametrize over RBLN-supported dtypes.
+> - Use `@dtypes(*SUPPORTED_FLOATING_DTYPES)` for tests that require
+>   floating-point inputs.
 > - Call `instantiate_device_type_tests(..., only_for="privateuse1")` at module
 >   scope to generate RBLN-only test classes.
 > - End with `if __name__ == "__main__": run_tests()`.
@@ -517,6 +520,7 @@ When tests need specific environment configurations, use
 ```python
 import pytest
 import torch
+from torch.testing import make_tensor
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, TestCase
 
@@ -531,7 +535,7 @@ class TestDeployFeature(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("shape", [(2, 3), (4, 5, 6), (8, 8)])
     def test_registered_op(self, dtype, shape):
-        x = torch.randn(shape, dtype=dtype, device="rbln")
+        x = make_tensor(shape, dtype=dtype, device="rbln")
         result = torch.ops.aten.clone(x)
         self.assertEqual(x.cpu(), result.cpu())
 
@@ -546,6 +550,7 @@ For tests that require multiple RBLN devices:
 ```python
 import pytest
 import torch
+from torch.testing import make_tensor
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import TestCase
 
@@ -562,7 +567,7 @@ class TestMultiDevice(TestCase):
         device0 = torch.device("rbln:0")
         device1 = torch.device("rbln:1")
 
-        x = torch.randn([4, 4], dtype=dtype, device=device0)
+        x = make_tensor([4, 4], dtype=dtype, device=device0)
         y = x.to(device1)
 
         self.assertEqual(y.device, device1)

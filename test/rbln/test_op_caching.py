@@ -6,6 +6,7 @@ from typing import ClassVar
 
 import pytest
 import torch
+from torch.testing import make_tensor
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
@@ -43,7 +44,7 @@ class TestOpCaching(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("shape", shapes)
     def test_same_input(self, dtype, shape):
-        cpu_tensor = torch.randn(shape, dtype=dtype, device="cpu")
+        cpu_tensor = make_tensor(shape, dtype=dtype, device="cpu", low=-2, high=2)
         cpu_out = torch.abs(cpu_tensor)
 
         rbln_tensor = cpu_tensor.to(self.rbln_device)
@@ -65,12 +66,12 @@ class TestOpCaching(TestCase):
         # compile path (see comment on ``shapes`` above).
         shape = (2, 64)
 
-        cpu_tensor = torch.randn(shape, dtype=dtype, device="cpu")
+        cpu_tensor = make_tensor(shape, dtype=dtype, device="cpu", low=-2, high=2)
         cpu_out = torch.abs(cpu_tensor)
 
         different_shape = (4, 64)
         self.assertNotEqual(different_shape, shape)
-        different_shape_cpu_tensor = torch.randn(different_shape, dtype=dtype, device="cpu")
+        different_shape_cpu_tensor = make_tensor(different_shape, dtype=dtype, device="cpu", low=-2, high=2)
         different_shape_cpu_out = torch.abs(different_shape_cpu_tensor)
 
         rbln_tensor = cpu_tensor.to(self.rbln_device)
@@ -91,7 +92,7 @@ class TestOpCaching(TestCase):
     @dtypes(*SUPPORTED_DTYPES)
     @parametrize("shape", shapes)
     def test_no_recompilation_across_instances(self, dtype, shape):
-        cpu_tensor = torch.randn(shape, dtype=dtype, device="cpu")
+        cpu_tensor = make_tensor(shape, dtype=dtype, device="cpu", low=-2, high=2)
         cpu_out = torch.abs(cpu_tensor)
 
         rbln_tensor = cpu_tensor.to(self.rbln_device)
@@ -160,7 +161,7 @@ class TestOpCaching(TestCase):
         result must match the upstream CPU result element-wise.
         """
         unaligned_shape = (2, 16)  # 16 % 64 != 0 → ``_last_dim_unaligned`` True
-        cpu_tensor = torch.randn(unaligned_shape, dtype=dtype, device="cpu")
+        cpu_tensor = make_tensor(unaligned_shape, dtype=dtype, device="cpu", low=-2, high=2)
         cpu_out = torch.abs(cpu_tensor)
         rbln_tensor = cpu_tensor.to(self.rbln_device)
 

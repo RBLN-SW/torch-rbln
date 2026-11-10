@@ -17,7 +17,7 @@ import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from test.utils import SUPPORTED_DTYPES
+from test.utils import SUPPORTED_FLOATING_DTYPES
 
 
 class TestAcceleratorInterface(TestCase):
@@ -89,7 +89,7 @@ class TestAcceleratorMemory(TestCase):
         self.assertIsInstance(max_alloc, int)
         self.assertIsInstance(stats, dict)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_lazy_device_allocation_after_op(self, dtype):
         """Running a device op should not decrease `memory_allocated`."""
         self._reset_memory_state()

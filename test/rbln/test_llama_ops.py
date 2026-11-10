@@ -18,7 +18,7 @@ import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
-from test.utils import SUPPORTED_DTYPES
+from test.utils import SUPPORTED_FLOATING_DTYPES
 
 
 def convert_tensor(arg: Any) -> Any:
@@ -81,7 +81,7 @@ class TestLlamaOps(TestCase):
         else:
             self.assertEqual(cpu_out, rbln_out.cpu(), atol=atol, rtol=rtol)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("batch_size", batch_sizes)
     @parametrize("input_shape", [(8, 1), (8, 2048), (1, 8, 8), (8, 8, 64), (32, 8, 8), (32, 8, 64)])
     def test_llama_add(self, dtype, batch_size, input_shape):
@@ -89,7 +89,7 @@ class TestLlamaOps(TestCase):
         other = torch.randn([batch_size, *input_shape], dtype=dtype)
         self._run_op(torch.add, input, other)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("batch_size", batch_sizes)
     @parametrize("n,m,p", [(32, 1, 8), (8, 64, 8)])
     def test_llama_bmm(self, dtype, batch_size, n, m, p):
@@ -97,14 +97,14 @@ class TestLlamaOps(TestCase):
         mat2 = torch.randn([batch_size, m, p], dtype=dtype)
         self._run_op(torch.bmm, input, mat2)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("b,n,m,p", [(32, 8, 8, 64)])
     def test_llama_bmm_without_batch(self, dtype, b, n, m, p):
         input = torch.randn([b, n, m], dtype=dtype)
         mat2 = torch.randn([b, m, p], dtype=dtype)
         self._run_op(torch.bmm, input, mat2)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("batch_size", batch_sizes)
     def test_llama_matmul(self, dtype, batch_size):
         input = torch.randn([batch_size, 128, 12, 128], dtype=dtype)
@@ -116,7 +116,7 @@ class TestLlamaOps(TestCase):
         mat2 = mat2.transpose(-1, -2)
         self._run_op(torch.matmul, input, mat2)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("batch_size", batch_sizes)
     @parametrize("tensor_shape,kwargs", [((8, 32), {"dim": 2}), ((32, 8, 32), {"dim": 3})])
     def test_llama_cat(self, dtype, batch_size, tensor_shape, kwargs):
@@ -126,14 +126,14 @@ class TestLlamaOps(TestCase):
         )
         self._run_op(torch.cat, tensors, **kwargs)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("batch_size", batch_sizes)
     @parametrize("input_shape,kwargs", [((8, 2048), {"dim": 2, "keepdim": True})])
     def test_llama_mean(self, dtype, batch_size, input_shape, kwargs):
         input = torch.randn([batch_size, *input_shape], dtype=dtype)
         self._run_op(torch.mean, input, **kwargs)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     def test_llama_mean_specific(self, dtype):
         # Test case from test_mean_simple.py with specific tensor values
         input = torch.tensor(
@@ -148,7 +148,7 @@ class TestLlamaOps(TestCase):
         keepdim = True
         self._run_op(torch.mean, input, dim=dim, keepdim=keepdim)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("batch_size", batch_sizes)
     @parametrize("input_shape", [(8, 64), (8, 2048), (8, 8, 64), (32, 8, 8), (32, 8, 64), (8, 8192)])
     def test_llama_mul(self, dtype, batch_size, input_shape):
@@ -156,21 +156,21 @@ class TestLlamaOps(TestCase):
         other = torch.randn([batch_size, *input_shape], dtype=dtype)
         self._run_op(torch.mul, input, other)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("input_shape", [(8, 8)])
     def test_llama_mul_without_batch(self, dtype, input_shape):
         input = torch.randn(*input_shape, dtype=dtype)
         other = torch.randn(*input_shape, dtype=dtype)
         self._run_op(torch.mul, input, other)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("batch_size", batch_sizes)
     @parametrize("input_shape", [(8, 8, 64), (32, 8, 32)])
     def test_llama_neg(self, dtype, batch_size, input_shape):
         input = torch.randn([batch_size, *input_shape], dtype=dtype)
         self._run_op(torch.neg, input)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("batch_size", batch_sizes)
     @parametrize("in_features,out_features", [(2048, 512), (2048, 2048), (2048, 8192), (8192, 2048), (2048, 128256)])
     def test_llama_nn_functional_linear(self, dtype, batch_size, in_features, out_features):
@@ -190,7 +190,7 @@ class TestLlamaOps(TestCase):
     # (1, 16, 1024) x (640, 1024) case is the one reported on Slack; the (192) and (768)
     # siblings were in the same trace and were empirically verified to reproduce the
     # identical runtime assert on rebel-compiler==dev281, but not on dev307+.
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize(
         "batch_size,seq_len,in_features,out_features",
         [
@@ -206,7 +206,7 @@ class TestLlamaOps(TestCase):
         weight = torch.randn([out_features, in_features], dtype=dtype)
         self._run_op(torch.nn.functional.linear, input, weight, None)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("batch_size", batch_sizes)
     @parametrize("input_shape", [(8, 2048)])
     def test_llama_pow(self, dtype, batch_size, input_shape):
@@ -214,7 +214,7 @@ class TestLlamaOps(TestCase):
         exponent = torch.randn([batch_size, *input_shape], dtype=dtype)
         self._run_op(torch.pow, input, exponent)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("batch_size", batch_sizes)
     @parametrize("input_shape", [(8, 1)])
     def test_llama_rsqrt(self, dtype, batch_size, input_shape):
@@ -225,7 +225,7 @@ class TestLlamaOps(TestCase):
         input = torch.randn([batch_size, *input_shape], dtype=dtype).abs() + 0.1
         self._run_op(torch.rsqrt, input)
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("batch_size", batch_sizes)
     @parametrize("input_shape", [(32, 8, 8)])
     def test_llama_nn_functional_softmax(self, dtype, batch_size, input_shape):

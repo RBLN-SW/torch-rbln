@@ -37,7 +37,7 @@ import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
-from test.utils import SUPPORTED_DTYPES
+from test.utils import SUPPORTED_DTYPES, SUPPORTED_FLOATING_DTYPES
 from torch_rbln import _C
 from torch_rbln._internal.compile_cache import _compiled_op_cache
 from torch_rbln._internal.device_arch_utils import is_atom_device
@@ -158,7 +158,7 @@ class TestBoolOperandCompilation(TestCase):
         copied = "aten::copy_" in [event.key for event in prof.key_averages()]
         self.assertEqual(copied, not bound, f"{layout}: copy-back {'missing' if bound else 'expected'}")
 
-    @dtypes(*SUPPORTED_DTYPES)
+    @dtypes(*SUPPORTED_FLOATING_DTYPES)
     @parametrize("scan_enabled", [False, True])
     def test_masked_fill_neg_inf_respects_scan_policy(self, device, dtype, scan_enabled):
         # With the scan off the fill runs on the device, which has no infinities
