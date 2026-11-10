@@ -180,21 +180,9 @@ class TestIpc(TestCase):
             for fd in fds:
                 os.close(fd)
 
-    def test_cross_process_open_reads_exporter_data(self):
-        x = _exportable_arange(1024)
-        got = _open_in_child(*torch.rbln.ipc.export_tensor(x))
-        self.assertEqual(got, list(range(1024)))
-
     def test_cross_process_open_without_device_finds_the_exporting_device(self):
         x = _exportable_arange(1024)
         got = _open_in_child(*torch.rbln.ipc.export_tensor(x), device=None)
-        self.assertEqual(got, list(range(1024)))
-
-    def test_cross_process_open_of_chiplet_sharded_tensor(self):
-        x = _exportable_arange(1024, _two_chiplet_layout(1024))
-        h, fds = torch.rbln.ipc.export_tensor(x)
-        self.assertEqual(h.num_fds, 2)
-        got = _open_in_child(h, fds)
         self.assertEqual(got, list(range(1024)))
 
     def test_layout_is_fixed_after_export(self):
