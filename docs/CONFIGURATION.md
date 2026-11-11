@@ -308,8 +308,11 @@ The value is a **comma-separated list** of fallback case names to disable:
 | `scalar`         | Falls back when all input tensors are 0-dim scalars                                                | Sends scalar ops to RBLN — may fail in `rebel-compiler`                            |
 | `storage_offset` | Falls back when a contiguous tensor has `storage_offset != 0`                                      | Sends offset tensors to RBLN — may read wrong data                                 |
 | `nan_inf`        | With `TORCH_RBLN_CHECK_NAN_INF=ON`, falls back on NaN/Inf inputs outside deploy mode               | Skips the opt-in scan, even when compatibility checks are enabled                  |
-| `align`          | Falls back to CPU when a tensor argument's last dim is not a multiple of 64                        | Sends unaligned ops to RBLN — slower on small tensors, and each new shape compiles |
+| `align`          | Falls back when a tensor's last dim is not a multiple of 64, except ops the compiler pads (below)  | Sends unaligned ops to RBLN — slower on small tensors, and each new shape compiles |
 | `all`            | —                                                                                                  | Disables **all** of the above checks                                               |
+
+The `align` fallback skips ops whose device inputs the compiler pads itself. See
+[Alignment fallback](EAGER_DISPATCH.md#alignment-fallback) for the list.
 
 ## Device mapping
 

@@ -541,6 +541,20 @@ class TestRegisteredPythonOps(TestCase):
         torch.add(x.to(self.rbln_device), y.to(self.rbln_device), out=out)
         self.assertEqual(out.cpu(), expected)
 
+    @parametrize("size", [64, 5])
+    def test_add_into_out_of_another_shape(self, size):
+        """A non-empty out= of another shape is resized with a warning, as on the CPU.
+        The first call compiles, the second takes the cached runtime.
+        """
+        x_cpu, y_cpu = torch.rand(size), torch.rand(size)
+        x, y = x_cpu.to(self.rbln_device), y_cpu.to(self.rbln_device)
+        for _ in range(2):
+            out = torch.empty(size + 1, device=self.rbln_device)
+            with self.assertWarnsRegex(UserWarning, "An output with one or more elements"):
+                torch.add(x, y, out=out)
+            self.assertEqual(out.shape, x_cpu.shape)
+            self.assertEqual(out.cpu(), x_cpu + y_cpu, atol=ATOL, rtol=RTOL)
+
     @parametrize("op", [torch.eq, torch.ne, torch.lt, torch.le, torch.gt, torch.ge])
     def test_compare_into_float_out(self, op):
         """A comparison casts its bool result into a float out=. Cold warm cache first,
@@ -1311,13 +1325,12 @@ BROADCAST_PATTERNS = [
     ((4, 8, 16), ()),  # scalar rhs
     # ----- Last-dim-size-one broadcast: ``(N, D) x (N, 1)`` from
     # ``output * S.sum(dim=-1, keepdim=True)`` (softmax backward) and from
-    # ``x * rsqrt(var)`` (RMSNorm). With an unaligned D the op takes the CPU
-    # fallback; with a 64-aligned D the backend broadcasts the size-1 side on
-    # the device, so both groups are here.
+    # ``x * rsqrt(var)`` (RMSNorm). The backend broadcasts the size-1 side on
+    # the device and pads an unaligned D, so both groups are here.
     # -----
     ((3, 4), (3, 1)),  # softmax_backward shape0 (last-dim small)
     ((2, 3, 4), (2, 3, 1)),  # softmax_backward shape2 (3D last-dim)
-    ((4, 8, 16), (4, 8, 1)),  # last-dim 16: unaligned, CPU fallback
+    ((4, 8, 16), (4, 8, 1)),  # last-dim 16: unaligned
     ((1, 32, 4), (1, 32, 1)),  # head-shaped, last-dim small
     ((4, 8, 1), (1, 1, 16)),  # both sides have last-dim==1 in one operand
     ((32, 128), (32, 1)),  # aligned: broadcast on the device
@@ -1426,7 +1439,7 @@ class TestBinaryOpsBroadcast(TestCase):
         self.assertEqual(result.cpu(), expected.cpu())
         self.assertEqual(result.device, self.rbln_device)
 
-    # Unaligned outputs retain CPU fallback without host pre-broadcasting.
+    # Unaligned outputs take the device path without host pre-broadcasting.
     _LAST_DIM_ONE_PATTERNS: ClassVar[list[tuple[tuple[int, ...], tuple[int, ...], str]]] = [
         ((3, 4), (3, 1), "softmax_backward shape0_dim_1"),
         ((2, 3, 4), (2, 3, 1), "softmax_backward shape2_dim_2"),
