@@ -881,6 +881,14 @@ deselects them (`-m "not dtype_variant"`). It reads the dtype from
 `pytest.mark.parametrize("dtype", ...)`; any other way of sweeping dtypes is
 not seen and runs in full.
 
+A `float16` variant stands in for its siblings only when it runs and must pass.
+One that is skipped or xfailed at collection — a `skip`, `skipif`, or `xfail`
+marker whose condition holds, `@unittest.skip`, or an entry in `_REBEL_XFAILS`
+— leaves its `bfloat16` and `float32` variants unmarked. A skip decided in the
+test body (`self.skipTest`) is not visible at collection, so skipping the
+`float16` variant that way drops the test from that CI in every dtype; skip it
+with a decorator or a marker instead.
+
 A test with no `float16` variant keeps all of its dtypes there, and integer and
 `bool` variants are never marked: they take different paths from `float16`. So
 when a test covers something only `bfloat16` or `float32` reaches, write it as

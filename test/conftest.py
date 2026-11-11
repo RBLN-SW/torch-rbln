@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from _pytest.skipping import evaluate_skip_marks, evaluate_xfail_marks
 
 import torch_rbln
 from test.utils import CpuFallbackRecorder, set_cpu_fallback_recorder, set_deterministic_seeds, xfail_rebel
@@ -283,18 +284,34 @@ def _dtype_and_siblings_key(item):
     return dtype, (item.parent.nodeid, name, rest)
 
 
+def _runs_and_must_pass(item):
+    """Whether, as far as collection can tell, ``item`` runs and a failure fails it.
+
+    Reads the skip and xfail marks the way pytest does when it runs them, so a
+    ``skipif`` whose condition is false still counts. A skip decided in the test
+    body is not visible here.
+    """
+    if getattr(item.obj, "__unittest_skip__", False):  # @unittest.skip / skipIf
+        return False
+    return evaluate_skip_marks(item) is None and evaluate_xfail_marks(item) is None
+
+
 def _mark_dtype_variants(items):
-    """Mark ``dtype_variant`` on the bf16/fp32 items whose fp16 sibling is collected."""
+    """Mark ``dtype_variant`` on the bf16/fp32 items whose fp16 sibling runs.
+
+    An fp16 item that is skipped or xfailed does not stand in for its siblings, so
+    they stay unmarked and still run in every lane.
+    """
     keyed = [(item, _dtype_and_siblings_key(item)) for item in items]
-    representative = {k[1] for _, k in keyed if k is not None and k[0] == _REPRESENTATIVE_DTYPE}
+    representative = {
+        k[1] for item, k in keyed if k is not None and k[0] == _REPRESENTATIVE_DTYPE and _runs_and_must_pass(item)
+    }
     for item, k in keyed:
         if k is not None and k[0] in _DTYPE_VARIANTS and k[1] in representative:
             item.add_marker(pytest.mark.dtype_variant)
 
 
 def pytest_collection_modifyitems(items):
-    _mark_dtype_variants(items)
-
     matched = set()
     for item in items:
         entry = _REBEL_XFAILS.get(item.name)
@@ -310,6 +327,9 @@ def pytest_collection_modifyitems(items):
     if stale:
         msg = f"Stale _REBEL_XFAILS keys (file collected, name unmatched): {stale}"
         raise pytest.UsageError(msg)
+
+    # After the xfails above, so an fp16 item they mark is not taken as representative.
+    _mark_dtype_variants(items)
 
     # The check covers every item, including those that -m deselects afterward.
     for item in items:
