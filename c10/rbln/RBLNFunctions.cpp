@@ -208,7 +208,7 @@ int to_device_id(c10::DeviceIndex device_index) {
       DeviceMappingManager::getInstance().getLogicalDeviceCount() > 0,
       "Cannot use rbln:{}: no logical device available (this process sees 0 RBLN device(s)). "
       "If this host has no NPU, set RBLN_DUMMY_DEVICE=1 for host-backed tensors/compilation "
-      "(execution still needs hardware); otherwise check RBLN_DEVICES and that the NPU driver is available.",
+      "(device computation is skipped, so output values are undefined); otherwise check RBLN_DEVICES and that the NPU driver is available.",
       static_cast<int>(device_index));
   // Cast directly — do NOT round through `unsigned char`, which would alias a
   // stray negative index to a real id (e.g. -1 -> 255).

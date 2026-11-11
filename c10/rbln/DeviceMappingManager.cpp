@@ -528,7 +528,7 @@ void DeviceMappingManager::initializeDummyDevices() const {
 
   RBLN_LOG_INFO(
       "RBLN_DUMMY_DEVICE active: {} host-backed logical device(s), 0 physical NPU. "
-      "Tensor construction/compilation run on host memory; execution still needs an NPU.",
+      "Tensors are host-backed; calls complete but device computation is skipped, so output values are undefined.",
       groups.size());
 
   for (size_t i = 0; i < groups.size(); ++i) {
