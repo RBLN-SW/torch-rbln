@@ -1,0 +1,203 @@
+"""torch.rbln.ipc: empty_exportable / export_tensor / open_tensor across processes."""
+
+import json
+import multiprocessing
+import os
+from multiprocessing import reduction
+from unittest import mock
+
+import pytest
+import torch
+from torch.testing._internal.common_utils import run_tests, TestCase
+
+import torch_rbln.ipc
+from torch_rbln._internal.device_arch_utils import is_atom_device
+from torch_rbln.ipc import _accel_node_accessible
+
+
+def _opener_main(conn):
+    """Child: receive the handle and its fds, open the tensor, report its values."""
+    import torch  # noqa: PLC0415
+
+    handle = conn.recv()
+    fds = [reduction.recv_handle(conn) for _ in range(handle.num_fds)]
+    try:
+        t = torch.rbln.ipc.open_tensor(handle, fds, device=0)
+        conn.send(("ok", t.cpu().tolist()))
+        del t
+    except Exception as e:
+        conn.send(("err", repr(e)))
+    finally:
+        for fd in fds:
+            os.close(fd)
+        conn.close()
+    os._exit(0)
+
+
+def _open_in_child(handle, fds) -> list:
+    ctx = multiprocessing.get_context("spawn")
+    parent, child = ctx.Pipe()
+    p = ctx.Process(target=_opener_main, args=(child,))
+    p.start()
+    try:
+        parent.send(handle)
+        for fd in fds:
+            reduction.send_handle(parent, fd, p.pid)
+        status, payload = parent.recv()
+    finally:
+        for fd in fds:
+            os.close(fd)
+        p.join(timeout=120)
+    assert status == "ok", payload
+    return payload
+
+
+def _two_chiplet_layout(n: int) -> str:
+    half = n // 2
+    return json.dumps(
+        {
+            "on_device": {
+                "allocs": [
+                    {"node_id": 0, "chiplet_id": 0, "size": half * 4},
+                    {"node_id": 0, "chiplet_id": 1, "size": half * 4},
+                ],
+                "tensor_transform": {
+                    "user_tensor_meta": {"dtype": 7, "shape": [n]},
+                    "physical_tensor_meta": {"dtype": 7, "shape": [n]},
+                    "op_replay": [
+                        {
+                            "src_elem_count": n,
+                            "dst_elem_counts": [half, half],
+                            "relocations": [
+                                {
+                                    "original_elems_start_index": 0,
+                                    "elems_count": half,
+                                    "device_alloc_idx": 0,
+                                    "device_elems_start_index": 0,
+                                },
+                                {
+                                    "original_elems_start_index": half,
+                                    "elems_count": half,
+                                    "device_alloc_idx": 1,
+                                    "device_elems_start_index": 0,
+                                },
+                            ],
+                            "empty_elements_value": [],
+                        }
+                    ],
+                },
+            }
+        }
+    )
+
+
+def _flat_layout(n: int) -> str:
+    return json.dumps({"on_device": {"allocs": [{"node_id": 0, "chiplet_id": 0, "size": n * 4}]}})
+
+
+def _exportable_arange(n: int, layout: str | None = None) -> torch.Tensor:
+    x = torch.rbln.ipc.empty_exportable((n,), dtype=torch.float32, device="rbln:0")
+    if layout is not None:
+        from rebel import _C  # noqa: PLC0415
+
+        _C.vmem.debug.set_device_alloc_by_json(x.data_ptr(), layout)
+    x.copy_(torch.arange(n, dtype=torch.float32))
+    torch.rbln.synchronize()
+    return x
+
+
+def _fake_handle(n: int = 1024, num_fds: int = 1) -> torch.rbln.ipc.IpcHandle:
+    return torch.rbln.ipc.IpcHandle(
+        payload=b"", nbytes=n * 4, shape=torch.Size([n]), dtype=torch.float32, num_fds=num_fds
+    )
+
+
+@pytest.mark.npu(count=1)
+class TestIpcValidation(TestCase):
+    def test_export_rejects_cpu_tensor(self):
+        with self.assertRaisesRegex(RuntimeError, "must be an RBLN tensor"):
+            torch.rbln.ipc.export_tensor(torch.ones(4))
+
+    def test_export_rejects_non_exportable_tensor(self):
+        x = torch.arange(1024, dtype=torch.float32, device="rbln:0")
+        with self.assertRaisesRegex(RuntimeError, "empty_exportable"):
+            torch.rbln.ipc.export_tensor(x)
+
+    def test_open_rejects_wrong_fd_count(self):
+        with self.assertRaisesRegex(RuntimeError, "fd"):
+            torch.rbln.ipc.open_tensor(_fake_handle(), fds=[], device=0)
+
+    def test_open_requires_device(self):
+        with self.assertRaisesRegex(RuntimeError, "device is required"):
+            torch.rbln.ipc.open_tensor(_fake_handle(), fds=[3], device=None)
+
+    @pytest.mark.skipif(not is_atom_device(), reason="ATOM only")
+    def test_rejects_atom(self):
+        with self.assertRaisesRegex(RuntimeError, "RBLN-CR NPUs only"):
+            torch.rbln.ipc.empty_exportable((4,), device="rbln:0")
+
+    @pytest.mark.skipif(is_atom_device(), reason="ATOM is rejected before the accel node check")
+    def test_missing_accel_node_names_driver_requirement(self):
+        with mock.patch.object(torch_rbln.ipc, "_accel_node_accessible", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "driver 4.0"):
+                torch.rbln.ipc.empty_exportable((4,), device="rbln:0")
+            with self.assertRaisesRegex(RuntimeError, "driver 4.0"):
+                torch.rbln.ipc.open_tensor(_fake_handle(), fds=[3], device=0)
+
+
+@pytest.mark.serial
+@pytest.mark.npu(count=1)
+@pytest.mark.skipif(is_atom_device(), reason="torch.rbln.ipc supports RBLN-CR only")
+@pytest.mark.skipif(not _accel_node_accessible(), reason="needs RBLN driver 4.0+ and access to /dev/accel/accelN")
+class TestIpc(TestCase):
+    def test_empty_exportable_is_an_rbln_tensor(self):
+        x = torch.rbln.ipc.empty_exportable((4, 8), dtype=torch.bfloat16, device="rbln:0")
+        self.assertEqual(x.shape, torch.Size([4, 8]))
+        self.assertEqual(x.dtype, torch.bfloat16)
+        self.assertEqual(x.device, torch.device("rbln:0"))
+
+    def test_export_describes_the_logical_tensor(self):
+        x = _exportable_arange(1024)
+        h, fds = torch.rbln.ipc.export_tensor(x)
+        try:
+            self.assertEqual(h.nbytes, 1024 * 4)
+            self.assertEqual(h.shape, x.shape)
+            self.assertEqual(h.dtype, torch.float32)
+            self.assertIsInstance(h.payload, bytes)
+            self.assertEqual(h.num_fds, 1)
+            self.assertEqual(len(fds), 1)
+        finally:
+            for fd in fds:
+                os.close(fd)
+
+    def test_export_rejects_interior_view(self):
+        x = _exportable_arange(1024)
+        with self.assertRaisesRegex(RuntimeError, "whole storage"):
+            torch.rbln.ipc.export_tensor(x[16:])
+
+    def test_cross_process_open_reads_exporter_data(self):
+        x = _exportable_arange(1024)
+        got = _open_in_child(*torch.rbln.ipc.export_tensor(x))
+        self.assertEqual(got, list(range(1024)))
+
+    def test_cross_process_open_of_chiplet_sharded_tensor(self):
+        x = _exportable_arange(1024, _two_chiplet_layout(1024))
+        h, fds = torch.rbln.ipc.export_tensor(x)
+        self.assertEqual(h.num_fds, 2)
+        got = _open_in_child(h, fds)
+        self.assertEqual(got, list(range(1024)))
+
+    def test_layout_is_fixed_after_export(self):
+        from rebel import _C  # noqa: PLC0415
+
+        x = _exportable_arange(1024, _two_chiplet_layout(1024))
+        _, fds = torch.rbln.ipc.export_tensor(x)
+        for fd in fds:
+            os.close(fd)
+        with self.assertRaisesRegex(RuntimeError, "dma-buf"):
+            _C.vmem.debug.set_device_alloc_by_json(x.data_ptr(), _flat_layout(1024))
+        self.assertEqual(x.cpu().tolist(), list(range(1024)))
+
+
+if __name__ == "__main__":
+    run_tests()
