@@ -316,4 +316,5 @@ markers = [
   "npu(count=N): marks tests that require N NPUs; N=0 marks tests that run only without an NPU (select with '-m \"npu(count=N)\"')",
   "no_dynamo_reset: skips autouse TorchDynamo reset fixture",
   "torch_rbln_only: marks tests whose outcome does not depend on rebel-compiler -- torch-rbln's own logic, packaging, or the torch-facing contract. rebel_compiler's CI deselects these (`-m \"not torch_rbln_only\"`); torch-rbln's own lanes still run them",
+  "dtype_variant: set by test/conftest.py, not by hand, on the bfloat16 and float32 variants of a test whose float16 variant is also collected. rebel_compiler's CI deselects these (`-m \"not dtype_variant\"`); torch-rbln's own lanes still run them",
 ]

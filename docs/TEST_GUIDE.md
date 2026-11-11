@@ -300,13 +300,14 @@ xfail_strict = true
 
 The suite registers these markers in `pyproject.toml`:
 
-| Marker            | Description                                                                                     |
-| ----------------- | ----------------------------------------------------------------------------------------------- |
-| `periodic`        | Runs only in release checks.                                                                    |
-| `serial`          | Runs on a single worker and fails at setup when run in parallel.                                |
-| `npu(count=N)`    | Requires N NPUs, where N is 1, 2, 4, or 8. When N is 0, runs only without an NPU.               |
-| `no_dynamo_reset` | Keeps the TorchDynamo cache from earlier tests by skipping the autouse `reset_dynamo` fixture.  |
-| `torch_rbln_only` | Has an outcome that does not depend on `rebel-compiler`, so `rebel-compiler`'s CI deselects it. |
+| Marker            | Description                                                                                                                             |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `periodic`        | Runs only in release checks.                                                                                                            |
+| `serial`          | Runs on a single worker and fails at setup when run in parallel.                                                                        |
+| `npu(count=N)`    | Requires N NPUs, where N is 1, 2, 4, or 8. When N is 0, runs only without an NPU.                                                       |
+| `no_dynamo_reset` | Keeps the TorchDynamo cache from earlier tests by skipping the autouse `reset_dynamo` fixture.                                          |
+| `torch_rbln_only` | Has an outcome that does not depend on `rebel-compiler`, so `rebel-compiler`'s CI deselects it.                                         |
+| `dtype_variant`   | Set by `test/conftest.py`, not by hand: a `bfloat16` or `float32` variant whose `float16` variant also runs. `rebel-compiler` skips it. |
 
 To make a test require NPUs, mark it with `npu(count=N)`, not with
 `deviceCountAtLeast` from `torch.testing._internal`, which breaks device-type
@@ -869,3 +870,19 @@ stays in the lane even when its subject is arguably ours, because the risk of
 dropping a signal outweighs the seconds. `test_torch_compile_patch.py` is mostly
 helper unit tests and still runs there — two of its cases drive a real compile
 through the rbln backend, and the whole file is a fraction of a second.
+
+### The `dtype_variant` marker
+
+`rebel-compiler`'s CI also runs each dtype-parametrized test in `float16` only.
+`test/conftest.py` marks the `bfloat16` and `float32` variants of a test
+`dtype_variant` when its `float16` variant is collected too, and that CI
+deselects them (`-m "not dtype_variant"`). It reads the dtype from
+`instantiate_device_type_tests` (`@dtypes` and torch's `@parametrize`) and from
+`pytest.mark.parametrize("dtype", ...)`; any other way of sweeping dtypes is
+not seen and runs in full.
+
+A test with no `float16` variant keeps all of its dtypes there, and integer and
+`bool` variants are never marked: they take different paths from `float16`. So
+when a test covers something only `bfloat16` or `float32` reaches, write it as
+its own test rather than as one more dtype of a `float16` test, or that
+CI drops it. Do not set the marker by hand.
