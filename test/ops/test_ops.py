@@ -2211,7 +2211,7 @@ class TestCompositeCompliance(TestCase):
             rtol = 1.0
         elif op.name == "nn.functional.scaled_dot_product_attention":
             # The decomposed matmuls run on the device.
-            atol = 0.5
+            atol = 0.2
             rtol = 0.1
 
         samples = op.sample_inputs(device, dtype, requires_grad=True)
