@@ -1797,9 +1797,6 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     ``get_rbln_compile_op_depth`` is imported in the body because
     ``torch_compile_patch_helpers`` imports this module.
     """
-    from torch_rbln._internal.torch_compile_patch_helpers import get_rbln_compile_op_depth  # noqa: PLC0415
-
-    eager = get_rbln_compile_op_depth() == 0
 
     # The align fallback avoids host padding for unaligned inputs.
     # A size-1 last dim broadcasting to a 64-aligned one is exempt for these
@@ -1866,7 +1863,9 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
             for k, v in kwargs_filtered.items()
         }
 
-    if eager:
+    from torch_rbln._internal.torch_compile_patch_helpers import get_rbln_compile_op_depth  # noqa: PLC0415
+
+    if get_rbln_compile_op_depth() == 0:
         _warn_float32_on_device_once(op_name, args, kwargs_filtered)
 
     # A CPU 0-dim tensor is a scalar operand (the CUDA rule): `torch.tensor(2.0) * x` is

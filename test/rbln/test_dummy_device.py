@@ -443,10 +443,9 @@ class Net(torch.nn.Module):
 
 m = Net().eval().to("rbln:0")
 x = torch.tensor([-1.0, 0.0, 1.0, 2.0], device="rbln:0")
-try:  # compile_only writes the artifact; the call itself errors (no real device)
-    torch.compile(m, backend="rbln", dynamic=False, options=opts)(x)
-except Exception as e:
-    print("COMPILE_EXC:", type(e).__name__, str(e))
+# compile_only writes the artifact and returns placeholder outputs without executing.
+out = torch.compile(m, backend="rbln", dynamic=False, options=opts)(x)
+assert out.device.type == "rbln" and tuple(out.shape) == (4,), (out.device, out.shape)
 arts = glob.glob(os.path.join(cache, "*.rbln"))
 assert len(arts) == 1 and os.path.getsize(arts[0]) > 0, arts
 print("OK")
@@ -529,11 +528,8 @@ def test_compile_only_decorator_form_is_allowed():
         opts = {"mode": ["compile_only"], "cache_dir": cache, "npu": "RBLN-CA25"}
         m = torch.nn.Linear(4, 4).eval().to("rbln:0")
         f = torch.compile(backend="rbln", dynamic=False, options=opts)(m)
-        try:  # compile_only writes the artifact; the call itself may error (no real device)
-            f(torch.ones(1, 4, device="rbln:0"))
-        except RuntimeError as e:
-            # A compile_only build must never be rejected because of dummy mode.
-            assert "RBLN_DUMMY_DEVICE" not in str(e), str(e)
+        out = f(torch.ones(1, 4, device="rbln:0"))
+        assert out.device.type == "rbln" and tuple(out.shape) == (1, 4), (out.device, out.shape)
         arts = glob.glob(os.path.join(cache, "*.rbln"))
         assert len(arts) == 1 and os.path.getsize(arts[0]) > 0, arts
         print("OK")
@@ -562,6 +558,29 @@ def test_eager_device_dtype_op_executes_on_dummy_context():
                     assert out.dtype == dt and tuple(out.shape) == shape, (dt, shape, out.dtype, out.shape)
         print("OK")
         """,
+    )
+    _assert_ok(proc)
+    assert "OK" in proc.stdout
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="#344: an op under a remapped RBLN_DEVICE_MAP runs on a different device than its inputs",
+)
+def test_op_under_remapped_device_map_runs_on_device():
+    # Under a remapped map the inputs sit on the mapped device, but the op is run on
+    # another one and rejected. With CPU fallback on, that is silent (correct values,
+    # wrong place), so this relies on the suite disabling compile_error fallback.
+    proc = _run_with_dummy(
+        """
+        import torch, torch_rbln
+        a = torch.ones(4, 64, device="rbln:0", dtype=torch.float16)
+        a + a
+        m = torch.nn.Linear(4, 4).eval().to("rbln:0")
+        torch.compile(m, backend="rbln", dynamic=False, options={"npu": "RBLN-CA25"})(torch.ones(1, 4, device="rbln:0"))
+        print("OK")
+        """,
+        env_extra={"RBLN_DEVICE_MAP": _NO_NPU_MAP},
     )
     _assert_ok(proc)
     assert "OK" in proc.stdout
