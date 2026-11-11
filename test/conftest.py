@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from _pytest.skipping import evaluate_skip_marks, evaluate_xfail_marks
 
 import torch_rbln
 from test.utils import CpuFallbackRecorder, set_cpu_fallback_recorder, set_deterministic_seeds, xfail_rebel
@@ -249,6 +250,67 @@ def enable_eager_malloc(monkeypatch):
 _REBEL_XFAILS: dict[str, tuple[str, str]] = {}
 
 
+# The dtype rebel_compiler's CI keeps of a test that also runs in other device
+# dtypes, and the dtypes it then leaves out. Integer and bool variants stay: they
+# take other paths.
+_REPRESENTATIVE_DTYPE = torch.float16
+_DTYPE_VARIANTS = (torch.bfloat16, torch.float32)
+
+
+def _dtype_and_siblings_key(item):
+    """Return ``(dtype, key)`` for an item parametrized over ``dtype``, else ``None``.
+
+    Items sharing ``key`` differ only in ``dtype``. Covers
+    ``instantiate_device_type_tests`` (``@dtypes`` and torch's ``@parametrize``,
+    whose values the instantiated test keeps as its ``param_kwargs`` default,
+    under the wrapper torch's ``TestCase`` adds) and ``pytest.mark.parametrize``.
+    """
+    callspec = getattr(item, "callspec", None)
+    if callspec is not None and "dtype" in callspec.params:
+        params, name = callspec.params, item.originalname
+    else:
+        func, params = getattr(item.obj, "__func__", item.obj), {}
+        name = getattr(func, "__name__", item.name)
+        while func is not None:
+            defaults = getattr(func, "__defaults__", None) or ()
+            if len(defaults) == 1 and isinstance(defaults[0], dict):
+                params = defaults[0]
+                break
+            func = getattr(func, "__wrapped__", None)
+    dtype = params.get("dtype")
+    if not isinstance(dtype, torch.dtype):
+        return None
+    rest = tuple(sorted((k, repr(v)) for k, v in params.items() if k not in ("dtype", "device")))
+    return dtype, (item.parent.nodeid, name, rest)
+
+
+def _runs_and_must_pass(item):
+    """Whether, as far as collection can tell, ``item`` runs and a failure fails it.
+
+    Reads the skip and xfail marks the way pytest does when it runs them, so a
+    ``skipif`` whose condition is false still counts. A skip decided in the test
+    body is not visible here.
+    """
+    if getattr(item.obj, "__unittest_skip__", False):  # @unittest.skip / skipIf
+        return False
+    return evaluate_skip_marks(item) is None and evaluate_xfail_marks(item) is None
+
+
+def _mark_dtype_variants(items):
+    """Mark ``dtype_variant`` on the bf16/fp32 items whose fp16 sibling runs.
+
+    An fp16 item that is skipped or xfailed does not stand in for its siblings, so
+    they stay unmarked and still run in every lane.
+    """
+    keyed = [(item, _dtype_and_siblings_key(item)) for item in items]
+    representative = {
+        k[1] for item, k in keyed if k is not None and k[0] == _REPRESENTATIVE_DTYPE and _runs_and_must_pass(item)
+    }
+    for item, k in keyed:
+        if k is not None and k[0] in _DTYPE_VARIANTS and k[1] in representative:
+            item.add_marker(pytest.mark.dtype_variant)
+
+
 def pytest_collection_modifyitems(items):
     matched = set()
     for item in items:
@@ -265,6 +327,9 @@ def pytest_collection_modifyitems(items):
     if stale:
         msg = f"Stale _REBEL_XFAILS keys (file collected, name unmatched): {stale}"
         raise pytest.UsageError(msg)
+
+    # After the xfails above, so an fp16 item they mark is not taken as representative.
+    _mark_dtype_variants(items)
 
     # The check covers every item, including those that -m deselects afterward.
     for item in items:
