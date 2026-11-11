@@ -34,6 +34,12 @@ from torch_rbln._internal.log_utils import rbln_record_cpu_fallback
 from torch_rbln._internal.ops_utils import _ALL_FALLBACK_CASES
 
 
+# Deselected by rebel_compiler's CI (`-m "not torch_rbln_only"`); see the marker in
+# pyproject. Whether a fallback logs and which reason it records is torch-rbln's own
+# logic: the fallbacks here are decided before anything is compiled.
+pytestmark = pytest.mark.torch_rbln_only
+
+
 _PROJECT_ROOT = str(Path(__file__).absolute().parents[2])
 _FALLBACK_LOG = "op ran on CPU instead of RBLN"
 
