@@ -291,9 +291,11 @@ _FP32_NONCONTIG_DEVICE_OPS = {
     ("addmm", "decomposed"),
     ("div", "no_rounding_mode"),
     ("mul", ""),
+    ("neg", ""),
     ("nn.functional.linear", ""),
     ("pow", ""),
     ("sub", ""),
+    ("where", ""),
 }
 
 
@@ -689,6 +691,7 @@ class TestCommon(TestCase):
             ("sub", ""),
             ("mul", ""),
             ("div", "no_rounding_mode"),
+            ("neg", ""),
         }
         device_range_arith = fp32_arith
         if fp32_arith:
@@ -696,7 +699,7 @@ class TestCommon(TestCase):
             custom_float16_safe_range = _FP32_DEVICE_RANGE
 
         if dtype is torch.bfloat16:
-            if (op.name, op.variant_test_name) in {("add", ""), ("sub", ""), ("mul", "")}:
+            if (op.name, op.variant_test_name) in {("add", ""), ("sub", ""), ("mul", ""), ("neg", "")}:
                 # The device has no inf/nan: an overflow lands on a value torch
                 # reads as nan.
                 ignore_inf_nan = True
@@ -1138,6 +1141,7 @@ class TestCommon(TestCase):
                 ("sub", ""),
                 ("uniform", ""),
                 ("view_as", ""),
+                ("where", ""),
             }:
                 assert_kwargs = {"rtol": 0.005, "atol": 0.05}
             elif dtype is torch.float16 and (op.name, op.variant_test_name) in {
