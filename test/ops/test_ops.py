@@ -699,7 +699,7 @@ class TestCommon(TestCase):
             custom_float16_safe_range = _FP32_DEVICE_RANGE
 
         if dtype is torch.bfloat16:
-            if (op.name, op.variant_test_name) in {("add", ""), ("sub", ""), ("mul", "")}:
+            if (op.name, op.variant_test_name) in {("add", ""), ("sub", ""), ("mul", ""), ("neg", "")}:
                 # The device has no inf/nan: an overflow lands on a value torch
                 # reads as nan.
                 ignore_inf_nan = True
