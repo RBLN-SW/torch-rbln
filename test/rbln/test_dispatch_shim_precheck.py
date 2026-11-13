@@ -39,7 +39,8 @@ from torch.testing._internal.common_utils import parametrize, run_tests, TestCas
 
 from test.utils import SUPPORTED_DTYPES
 from torch_rbln import _C
-from torch_rbln._internal.compile_cache import _compiled_op_cache
+from torch_rbln._internal import register_ops
+from torch_rbln._internal.compile_cache import _compiled_op_cache, clear_rbln_compile_cache
 from torch_rbln._internal.device_arch_utils import is_atom_device
 from torch_rbln._internal.ops_utils import can_use_out_tensor_directly, get_fallback_reason
 
@@ -105,6 +106,64 @@ class TestBoolOperandCompilation(TestCase):
             any(name.startswith("aten::where") for name, count in _C._dispatch_fallback_by_op() if count),
             "where used dispatch CPU fallback",
         )
+
+    @dtypes(*SUPPORTED_DTYPES)
+    @parametrize("value_kind", ["scalar", "cpu_tensor", "device_tensor"])
+    def test_masked_fill_functional_traces_original_input(self, device, dtype, value_kind):
+        clear_rbln_compile_cache()
+        reference = torch.arange(256, dtype=dtype).reshape(4, 64)
+        mask_cpu = torch.arange(256).reshape(4, 64) % 2 == 0
+        x, mask = reference.to(device), mask_cpu.to(device)
+        value = 5.0 if value_kind == "scalar" else torch.tensor(5.0, dtype=dtype)
+        if value_kind == "device_tensor":
+            value = value.to(device)
+        with (
+            torch.no_grad(),
+            mock.patch.object(
+                register_ops, "compile_and_run_view_aware", wraps=register_ops.compile_and_run_view_aware
+            ) as dispatch,
+        ):
+            result = x.masked_fill(mask, value)
+        self.assertIs(dispatch.call_args.args[2][0], x)
+        self.assertIsNone(dispatch.call_args.args[4])
+        self.assertEqual(torch._C._storage_Use_Count(torch._C._storage_address(result)), 1)
+        self.assertNotEqual(torch._C._storage_address(result), torch._C._storage_address(x))
+        self.assertEqual(result.cpu(), reference.masked_fill(mask_cpu, 5.0))
+        self.assertEqual(x.cpu(), reference)
+        compiled = len(_compiled_op_cache)
+        for inplace in (True, False):
+            x = (reference + 1).to(device)
+            with torch.no_grad(), torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as prof:
+                result = x.masked_fill_(mask, value) if inplace else x.masked_fill(mask, value)
+                torch.rbln.synchronize()
+            self.assertEqual(result.cpu(), (reference + 1).masked_fill(mask_cpu, 5.0))
+            self.assertEqual(len(_compiled_op_cache), compiled)
+            if value_kind != "cpu_tensor":
+                self.assertNotIn("aten::clone", [event.key for event in prof.key_averages()])
+                self.assertNotIn("aten::copy_", [event.key for event in prof.key_averages()])
+        self.assertFalse(_C._dispatch_fallback_by_op_reason())
+
+    @dtypes(*SUPPORTED_DTYPES)
+    @parametrize("self_shape,mask_shape", [((0, 1), (0, 64)), ((1, 0, 1), (2, 1, 64)), ((0, 64), ())])
+    def test_masked_fill_functional_empty_broadcast(self, device, dtype, self_shape, mask_shape):
+        x = torch.empty(self_shape, dtype=dtype)
+        mask = torch.ones(mask_shape, dtype=torch.bool)
+        compiled = len(_compiled_op_cache)
+        result = x.to(device).masked_fill(mask.to(device), 5.0)
+        self.assertEqual(result.cpu(), x.masked_fill(mask, 5.0))
+        self.assertEqual(len(_compiled_op_cache), compiled)
+
+    @parametrize("invalid", ["mask_dtype", "value_rank"])
+    def test_masked_fill_functional_empty_checks_operands(self, device, invalid):
+        x = torch.empty((0, 64), dtype=torch.float16, device=device)
+        mask_dtype = torch.int64 if invalid == "mask_dtype" else torch.bool
+        mask = torch.empty((0, 64), dtype=mask_dtype, device=device)
+        value = 5.0 if invalid == "mask_dtype" else torch.ones(1, device=device, dtype=torch.float16)
+        message = (
+            "only supports boolean masks" if invalid == "mask_dtype" else "only supports a 0-dimensional value tensor"
+        )
+        with self.assertRaisesRegex(RuntimeError, message):
+            x.masked_fill(mask, value)
 
     @dtypes(*SUPPORTED_DTYPES)
     def test_masked_fill_inplace_reuses_program_without_copy_back(self, device, dtype):

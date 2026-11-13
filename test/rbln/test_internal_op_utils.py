@@ -7,12 +7,12 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from torch.testing._internal.common_device_type import instantiate_device_type_tests
-from torch.testing._internal.common_utils import run_tests, TestCase
+from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
+from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 from torch.utils._python_dispatch import TorchDispatchMode
 
 from torch_rbln import _C
-from torch_rbln._internal.compile_cache import _compiled_op_cache
+from torch_rbln._internal.compile_cache import _compiled_op_cache, clear_rbln_compile_cache
 from torch_rbln._internal.ops_utils import (
     broadcast_args_general,
     can_use_out_tensor_directly,
@@ -560,6 +560,55 @@ class TestOutTensors(TestCase):
 
     atol = 0.01
     rtol = 0.01
+
+    def test_inplace_compilation_preserves_storage_ownership(self):
+        clear_rbln_compile_cache()
+        mask = torch.eye(64, dtype=torch.bool)
+        device_mask = mask.to("rbln:0")
+        before = _C._dispatch_fallback_by_op_reason()
+        with torch.no_grad():
+            for call in range(2):
+                reference = torch.full((64, 64), float(call + 1), dtype=torch.float16)
+                value = reference.to("rbln:0")
+                # Composite operators mutate a fresh result below autograd
+                # before returning it.
+                with (
+                    patch.object(value, "clone", side_effect=AssertionError("tracing copied the in-place input")),
+                    torch._C._AutoDispatchBelowAutograd(),
+                ):
+                    value.masked_fill_(device_mask, -1.0)
+                self.assertEqual(
+                    torch._C._storage_Use_Count(torch._C._storage_address(value)),
+                    1,
+                    f"call {call}: compilation retained the caller's storage",
+                )
+                self.assertFalse(_is_host_latest(value), f"call {call}: output was not bound on device")
+                self.assertEqual(value.cpu(), reference.masked_fill(mask, -1.0), atol=0, rtol=0)
+        self.assertEqual(_C._dispatch_fallback_by_op_reason(), before)
+
+    @dtypes(torch.float16, torch.bfloat16, torch.float32)
+    @parametrize("operation", ["masked_fill", "index_put"])
+    @parametrize("device_value", [False, True])
+    def test_composite_masked_fill_preserves_fresh_output(self, device, dtype, operation, device_value):
+        reference = torch.arange(256, dtype=dtype).reshape(4, 64)
+        mask = torch.arange(256).reshape(4, 64) % 2 == 0
+        value = torch.tensor(-1.0, dtype=dtype)
+        x, device_mask = reference.to(device), mask.to(device)
+        before = _C._dispatch_fallback_by_op_reason()
+        for call in range(2):
+            value.fill_(-1.0 - call)
+            fill = value.to(device) if device_value else value
+            with torch.no_grad():
+                result = (
+                    x.masked_fill(device_mask, fill)
+                    if operation == "masked_fill"
+                    else x.index_put((device_mask,), fill)
+                )
+            self.assertEqual(torch._C._storage_Use_Count(torch._C._storage_address(result)), 1)
+            self.assertNotEqual(torch._C._storage_address(result), torch._C._storage_address(x))
+            self.assertEqual(result.cpu(), reference.masked_fill(mask, value), atol=0, rtol=0)
+            self.assertEqual(x.cpu(), reference, atol=0, rtol=0)
+        self.assertEqual(_C._dispatch_fallback_by_op_reason(), before)
 
     def test_host_latest_out_becomes_device_resident_on_every_path(self):
         """An ``out`` whose host view is authoritative ends device-resident after
