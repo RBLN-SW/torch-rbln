@@ -1145,7 +1145,9 @@ def _is_known_bad_pattern(recipe):
     correctly. The BFS will then prefer an algebraically-equivalent
     alternative (e.g. ``narrow → permute`` instead of ``permute → narrow``).
 
-    Add new entries here as new rebel bugs surface.
+    Add new entries here as new rebel bugs surface. Each rule matches one step or
+    two adjacent steps, so a recipe that matches still matches however it is
+    extended; ``_bfs_search_recipe`` relies on that to stop extending it.
     """
     # 1. ``permute → narrow(non-leading dim)`` → ``inf`` outputs; ``narrow →
     #    permute`` works. (repro 2026-04-30: ``base.narrow(0,2,4).permute(2,0,1)``)
@@ -1319,30 +1321,26 @@ def _bfs_search_recipe(base, t, max_steps=4):
     if start == target:
         return ()
 
-    visited: dict[tuple, tuple] = {start: ()}
-    frontier = [start]
-
+    visited: set[tuple] = {(start, None)}
+    frontier = [(start, ())]
     for _ in range(max_steps):
         next_frontier = []
-        for cur in frontier:
-            cur_recipe = visited[cur]
+        for cur, cur_recipe in frontier:
             for step in _gen_step_candidates(cur, target):
+                new_recipe = (*cur_recipe, step)
+                if _is_known_bad_pattern(new_recipe):
+                    continue
                 new_state = _simulate_recipe(cur[0], cur[1], cur[2], (step,))
                 if new_state is None:
                     continue
-                new_recipe = (*cur_recipe, step)
                 if new_state == target:
-                    # Reached the goal — accept if not blocklisted, else keep
-                    # exploring other paths through OTHER intermediate states
-                    # (do NOT add target to visited, so alternative-route
-                    # arrivals can also be considered).
-                    if not _is_known_bad_pattern(new_recipe):
-                        return new_recipe
+                    return new_recipe
+                # Blocklist rules depend on the previous op, so keep it in the key.
+                key = (new_state, step[0])
+                if key in visited:
                     continue
-                if new_state in visited:
-                    continue
-                visited[new_state] = new_recipe
-                next_frontier.append(new_state)
+                visited.add(key)
+                next_frontier.append((new_state, new_recipe))
         frontier = next_frontier
         if not frontier:
             break

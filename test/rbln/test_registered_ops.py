@@ -8,7 +8,9 @@ This test suite verifies:
 3. Python-registered ops from register_ops.py work correctly
 """
 
+import itertools
 from typing import ClassVar
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -17,8 +19,10 @@ from torch.testing._internal.common_utils import parametrize, run_tests, TestCas
 
 from test.utils import SUPPORTED_DTYPES
 from torch_rbln import _C
+from torch_rbln._internal import ops_utils
 from torch_rbln._internal.ops_utils import (
     _detect_view_recipe,
+    _is_known_bad_pattern,
     _simulate_recipe,
     _view_fallback_count_get,
     _view_fallback_count_reset,
@@ -1736,6 +1740,18 @@ class TestViewOpsOnDevice(TestCase):
         self.assertEqual(result.cpu(), expected.cpu(), atol=ATOL, rtol=RTOL)
         self.assertEqual(result.shape, expected.shape)
 
+    def test_blocked_route_alternative_via_binary_op(self):
+        cpu_base = torch.randint(-4, 5, (8, 128)).to(torch.float16)
+        base = cpu_base.to(self.rbln_device)
+        view = base[1:3, 64:].t()
+        other = torch.ones(view.shape, dtype=torch.float16, device=self.rbln_device)
+        fallbacks_before = _C._dispatch_fallback_by_op()
+        view_fallbacks_before = _view_fallback_count_get()
+        result = torch.add(view, other)
+        self.assertEqual(_C._dispatch_fallback_by_op(), fallbacks_before)
+        self.assertEqual(_view_fallback_count_get(), view_fallbacks_before)
+        self.assertEqual(result.cpu(), cpu_base[1:3, 64:].t() + 1, atol=0, rtol=0)
+
     def test_view_with_matmul(self):
         # mm with one transposed input — common in attention (Q @ K.T).
         a = torch.randn(8, 16, dtype=torch.float16, device=self.rbln_device)
@@ -1943,6 +1959,82 @@ class TestViewOpsOnDevice(TestCase):
         self.assertEqual(
             _view_fallback_count_get(), 0, "Recognized permute view should NOT trigger .contiguous() fallback."
         )
+
+
+class TestViewRecipeSearch(TestCase):
+    """The search behind ``_detect_view_recipe``: metadata only, so no device."""
+
+    def test_a_blocklisted_route_is_not_extended(self):
+        """``x[:, -1:, :]`` is one ``narrow`` that rule 2 blocklists, as is every
+        route that moves the offset. Extending them made the search expand every
+        offset it could reach, a count that grows with the sliced dim.
+        """
+        expanded = {}
+        for seq in (32, 64):
+            base = torch.empty(2, seq, 64)
+            with patch.object(ops_utils, "_gen_step_candidates", wraps=ops_utils._gen_step_candidates) as gen:
+                recipe = ops_utils._bfs_search_recipe(base, base[:, -1:, :])
+            self.assertIsNone(recipe, f"seq={seq}")
+            expanded[seq] = gen.call_count
+        self.assertEqual(expanded[64], expanded[32], f"the search grew with the sliced dim: {expanded}")
+
+    def test_unblocked_routes_are_not_hidden_by_other_histories(self):
+        base = torch.arange(24).reshape(2, 3, 4)
+        cases = [
+            ("blocked prefix", base[0, 1:2, :].t()),
+            ("different continuation rules", base.narrow(2, 0, 2).unsqueeze(2).permute(0, 1, 3, 2)),
+        ]
+        for label, view in cases:
+            with self.subTest(history=label):
+                self.assertIsNone(ops_utils._bfs_search_recipe(base, view, max_steps=2))
+                recipe = ops_utils._bfs_search_recipe(base, view, max_steps=3)
+                self.assertIsNotNone(recipe)
+                self.assertFalse(_is_known_bad_pattern(recipe), f"blocklisted recipe: {recipe}")
+                target = (tuple(view.size()), tuple(view.stride()), view.storage_offset())
+                self.assertEqual(_simulate_recipe(tuple(base.size()), tuple(base.stride()), 0, recipe), target)
+                replayed = base
+                for step in recipe:
+                    replayed = ops_utils._apply_view_step(replayed, step)
+                self.assertEqual(replayed, view)
+
+    def test_search_returns_shortest_recipe(self):
+        base = torch.empty(2, 3, 4)
+        view = base[1]
+        self.assertEqual(ops_utils._bfs_search_recipe(base, base, max_steps=0), ())
+        self.assertIsNone(ops_utils._bfs_search_recipe(base, view, max_steps=0))
+        self.assertEqual(ops_utils._bfs_search_recipe(base, view), (("select", 0, 1),))
+
+    def test_a_blocklisted_recipe_stays_blocklisted_when_extended(self):
+        """The search stops extending a route once it is blocklisted, which is sound
+        only while every rule in ``_is_known_bad_pattern`` survives extension.
+        """
+        blocked_recipes = [
+            (("permute", (1, 0)), ("narrow", 1, 0, 1)),
+            (("narrow", 1, 1, 1),),
+            (("expand", 0, 2), ("permute", (1, 0))),
+            (("unsqueeze", 0), ("narrow", 0, 0, 1)),
+        ]
+        for recipe in blocked_recipes:
+            self.assertTrue(_is_known_bad_pattern(recipe), f"expected a blocklisted recipe: {recipe}")
+
+        steps = [
+            ("permute", (1, 0)),
+            ("narrow", 0, 0, 1),
+            ("narrow", 0, 1, 1),
+            ("narrow", 1, 0, 1),
+            ("narrow", 1, 1, 1),
+            ("expand", 0, 2),
+            ("select", 0, 1),
+            ("squeeze", 0),
+            ("unsqueeze", 0),
+            ("reshape", (2,)),
+        ]
+        for length in range(1, 4):
+            for recipe in itertools.product(steps, repeat=length):
+                if not _is_known_bad_pattern(recipe):
+                    continue
+                for step in steps:
+                    self.assertTrue(_is_known_bad_pattern((*recipe, step)), f"{recipe} + {step}")
 
 
 @pytest.mark.npu(count=2)
