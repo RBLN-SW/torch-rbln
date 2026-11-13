@@ -183,6 +183,19 @@
     PrivateUse1: floor_out_rbln
   tags: pointwise
 
+- func: masked_fill.Tensor(Tensor self, Tensor mask, Tensor value) -> Tensor
+  device_check: NoCheck   # TensorIterator
+  variants: function, method
+  dispatch:
+    PrivateUse1: masked_fill_rbln
+
+- func: masked_fill.Scalar(Tensor self, Tensor mask, Scalar value) -> Tensor
+  device_check: NoCheck   # TensorIterator
+  variants: function, method
+  dispatch:
+    PrivateUse1: masked_fill_rbln
+  tags: pointwise
+
 - func: masked_fill_.Tensor(Tensor(a!) self, Tensor mask, Tensor value) -> Tensor(a!)
   device_check: NoCheck   # TensorIterator
   variants: method

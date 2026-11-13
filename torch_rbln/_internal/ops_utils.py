@@ -334,11 +334,22 @@ def handle_empty_where(args):
 
 
 def handle_empty_masked_fill(args, out=None):
-    # ``masked_fill`` keeps ``self``'s shape, so an empty ``self`` gives an empty
-    # result even when the mask is a non-empty (0-dim, broadcast) tensor. Such a
-    # call must not reach the compiler: a program with an empty input fails in
-    # runtime creation (``std::bad_alloc``).
-    ret = out if out is not None else torch.empty_like(args[0], device="rbln")
+    # Empty inputs fail in runtime creation (``std::bad_alloc``), including an
+    # empty self with a non-empty scalar mask.
+    if isinstance(args[2], torch.Tensor) and args[2].dim() != 0:
+        msg = (
+            "masked_fill_ only supports a 0-dimensional value tensor, "
+            f"but got tensor with {args[2].dim()} dimension(s)."
+        )
+        raise RuntimeError(msg)
+    if args[1].dtype != torch.bool:
+        msg = f"masked_fill_ only supports boolean masks, but got mask with dtype {args[1].dtype}"
+        raise RuntimeError(msg)
+    if out is not None:
+        ret = out
+    else:
+        shape = torch.broadcast_shapes(args[0].shape, args[1].shape)
+        ret = torch.empty(shape, dtype=args[0].dtype, device=args[0].device)
     return ret, ret.shape
 
 
@@ -1907,18 +1918,32 @@ def compile_and_run_view_aware(
         outputs = runtime.run(*(tensors[i] for i in entry.input_order), out=out_list)
         external_result = outputs[0] if len(outputs) == 1 else tuple(outputs)
     else:
-        # First call for this key: the backend builds the runtime while the
-        # callable runs, into a buffer of its own that is dropped here. Binding
-        # ``out`` costs a second run, once, under the compile that just happened.
-        external_result = entry.compiled(*view_args, **view_kwargs)
+        # Dynamo may retain in-place input storage, including a composite's fresh
+        # result. Trace an independent buffer there and discard that execution's
+        # values; the runtime then consumes the real input.
+        trace_args = view_args
+        if out_tensor is not None and out_alias_arg_pos is not None:
+            trace_args = tuple(
+                torch.empty_strided(tensor.shape, tensor.stride(), dtype=tensor.dtype, device=tensor.device)
+                if index == out_alias_arg_pos
+                else tensor
+                for index, tensor in enumerate(view_args)
+            )
+        external_result = entry.compiled(*trace_args, **view_kwargs)
         runtime = entry.runtime()
         if runtime is not None and entry.input_order is None:
-            entry.input_order = _graph_input_order(runtime, tensors)
+            entry.input_order = _graph_input_order(runtime, extract_tensors(trace_args) + extract_tensors(view_kwargs))
         if isinstance(external_result, torch.Tensor):
             entry.out_shape = external_result.shape
             if result_tensor is not None and result_tensor.shape != entry.out_shape:
                 result_tensor = None
-        if result_tensor is not None:
+        if out_tensor is not None and out_alias_arg_pos is not None:
+            if runtime is None or entry.input_order is None:
+                msg = f"{op_name}: cannot bind the original in-place input after tracing"
+                raise RuntimeError(msg)
+            outputs = runtime.run(*(tensors[i] for i in entry.input_order), out=out_list)
+            external_result = outputs[0] if len(outputs) == 1 else tuple(outputs)
+        elif result_tensor is not None:
             if runtime is not None and entry.input_order is not None:
                 runtime.run(*(tensors[i] for i in entry.input_order), out=out_list)
             else:
@@ -1947,7 +1972,10 @@ def compile_and_run_view_aware(
 
 def _rank0_as_ones(tensors):
     """Give each 0-dim tensor the shape ``[1] * ndim`` of the widest tensor operand."""
-    ndim = max((t.dim() for t in tensors if isinstance(t, torch.Tensor)), default=0)
+    ndim = 0
+    for tensor in tensors:
+        if isinstance(tensor, torch.Tensor):
+            ndim = max(ndim, tensor.dim())
     return [t.reshape((1,) * ndim) if isinstance(t, torch.Tensor) and t.dim() == 0 else t for t in tensors]
 
 
