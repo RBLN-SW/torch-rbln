@@ -477,7 +477,7 @@ inline std::optional<ScalarValue> wrapped_scalar_value(const at::Tensor& t) {
 
 // Cheap C++-side pre-check mirroring the cheap branches of
 // torch_rbln._internal.ops_utils.get_fallback_reason():
-//   2. dtype outside the dispatch catalog on any input tensor
+//   2. dtype outside the dispatch catalog, or mixed input dtypes
 //   3. all input tensors are scalar (ndim == 0)
 //   4. any input tensor is_contiguous() with storage_offset != 0
 //   5. NaN/Inf in any input tensor, only with TORCH_RBLN_CHECK_NAN_INF=ON,
@@ -517,6 +517,9 @@ std::optional<c10::rbln::CpuFallbackReason> quick_fallback_check(
   bool has_input_tensor = false;
   bool all_input_scalar = true;
   bool nan_inf_found = false;
+  bool mixed_input_dtypes = false;
+  bool has_empty_input = false;
+  bool has_contiguous_offset_input = false;
   std::optional<c10::ScalarType> input_dtype;
   for (size_t i = 0; i < cache.num_args; ++i) {
     const auto& iv = args[i];
@@ -530,6 +533,8 @@ std::optional<c10::rbln::CpuFallbackReason> quick_fallback_check(
     if (cache.is_write_alias[i]) {
       continue;
     }
+    has_contiguous_offset_input |= t.is_contiguous() && t.storage_offset() != 0;
+    has_empty_input |= t.numel() == 0;
 
     // NaN/Inf scan: applies BEFORE the dtype / skip_dtype / wrapped-0-dim
     // gates that skip args from the shortcut counter. We want to catch
@@ -564,6 +569,8 @@ std::optional<c10::rbln::CpuFallbackReason> quick_fallback_check(
     }
     if (!input_dtype) {
       input_dtype = t.scalar_type();
+    } else if (t.scalar_type() != *input_dtype) {
+      mixed_input_dtypes = true;
     }
     if (t.dim() != 0) {
       all_input_scalar = false;
@@ -583,6 +590,10 @@ std::optional<c10::rbln::CpuFallbackReason> quick_fallback_check(
   }
   if (has_input_tensor && all_input_scalar) {
     return c10::rbln::CpuFallbackReason::kScalar;
+  }
+  if (mixed_input_dtypes && !has_empty_input && !has_contiguous_offset_input &&
+      !is_fallback_case_disabled("dtype")) {
+    return c10::rbln::CpuFallbackReason::kDtype;
   }
   return std::nullopt;
 }

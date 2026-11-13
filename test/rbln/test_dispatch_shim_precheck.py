@@ -423,7 +423,7 @@ class TestDispatchShimAllScalarFallback(TestCase):
 
 @pytest.mark.npu(count=1)
 class TestDispatchShimDtypeMismatch(TestCase):
-    """Non-fp16 input falls through to the Python wrapper / CPU fallback."""
+    """Unsupported or mixed input dtypes preserve CPU semantics."""
 
     def test_int32_add_runs_correctly(self) -> None:
         # fp16-only ops must still produce correct results when the input
@@ -432,6 +432,67 @@ class TestDispatchShimDtypeMismatch(TestCase):
         y = x + 3
         self.assertEqual(y.device.type, "rbln")
         self.assertEqual(y.to("cpu"), torch.arange(8, dtype=torch.int32) + 3)
+
+    @parametrize(
+        "op,left_dtype,right_dtype",
+        [
+            (torch.sub, torch.float32, torch.bfloat16),
+            (torch.Tensor.sub_, torch.bfloat16, torch.float32),
+            (torch.where, torch.bfloat16, torch.float32),
+        ],
+    )
+    def test_mixed_supported_dtypes_use_native_fallback(self, op, left_dtype, right_dtype) -> None:
+        x_cpu = torch.arange(64, dtype=left_dtype)
+        y_cpu = torch.full((64,), 1.25, dtype=right_dtype)
+        x, y = x_cpu.to("rbln"), y_cpu.to("rbln")
+        args_cpu, args = (x_cpu, y_cpu), (x, y)
+        op_name = "aten::sub.out"
+        if op is torch.where:
+            mask_cpu = torch.arange(64) % 2 == 0
+            args_cpu = (mask_cpu, *args_cpu)
+            args = (mask_cpu.to("rbln"), *args)
+            op_name = "aten::where.self"
+        expected = op(*args_cpu)
+        ptr = x.data_ptr()
+        _C._dispatch_fallback_by_op_reset()
+        before = _dispatch_counts()
+        result = op(*args)
+        after = _dispatch_counts()
+        self.assertEqual(result.cpu(), expected)
+        self.assertEqual(after[1] - before[1], 1, "mixed dtypes did not use native CPU fallback")
+        self.assertEqual(after[3], before[3], "mixed dtypes entered the Python shim")
+        self.assertIn((op_name, "dtype", 1), _C._dispatch_fallback_by_op_reason())
+        if op is torch.Tensor.sub_:
+            self.assertIs(result, x)
+            self.assertEqual(x.data_ptr(), ptr)
+
+    def test_mixed_empty_inputs_keep_the_no_fallback_path(self) -> None:
+        x = torch.empty((0, 64), dtype=torch.bfloat16, device="rbln")
+        y = torch.empty((0, 64), dtype=torch.float32, device="rbln")
+        _C._dispatch_fallback_by_op_reset()
+        before = _dispatch_counts()
+        self.assertIs(x.sub_(y), x)
+        self.assertEqual(x.shape, (0, 64))
+        self.assertEqual(x.dtype, torch.bfloat16)
+        self.assertEqual(_dispatch_counts()[1], before[1])
+        self.assertEqual(_C._dispatch_fallback_by_op_reason(), [])
+
+    @parametrize("offset_operand", [0, 1])
+    def test_mixed_contiguous_offset_keeps_python_fallback(self, offset_operand) -> None:
+        inputs_cpu = [torch.arange(128, dtype=torch.bfloat16), torch.full((128,), 1.25, dtype=torch.float32)]
+        inputs = [t.to("rbln") for t in inputs_cpu]
+        inputs_cpu[offset_operand] = inputs_cpu[offset_operand][64:]
+        inputs[offset_operand] = inputs[offset_operand][64:]
+        inputs_cpu[1 - offset_operand] = inputs_cpu[1 - offset_operand][:64]
+        inputs[1 - offset_operand] = inputs[1 - offset_operand][:64]
+        _C._dispatch_fallback_by_op_reset()
+        before = _dispatch_counts()
+        result = inputs[0].sub_(inputs[1])
+        after = _dispatch_counts()
+        self.assertEqual(result.cpu(), inputs_cpu[0].sub_(inputs_cpu[1]))
+        self.assertEqual(after[1], before[1], "offset input entered native CPU fallback")
+        self.assertEqual(after[3] - before[3], 1)
+        self.assertIn(("aten::sub.out", "dtype", 1), _C._dispatch_fallback_by_op_reason())
 
 
 @pytest.mark.npu(count=1)
