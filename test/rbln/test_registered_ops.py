@@ -1740,6 +1740,18 @@ class TestViewOpsOnDevice(TestCase):
         self.assertEqual(result.cpu(), expected.cpu(), atol=ATOL, rtol=RTOL)
         self.assertEqual(result.shape, expected.shape)
 
+    def test_blocked_route_alternative_via_binary_op(self):
+        cpu_base = torch.randint(-4, 5, (8, 128)).to(torch.float16)
+        base = cpu_base.to(self.rbln_device)
+        view = base[1:3, 64:].t()
+        other = torch.ones(view.shape, dtype=torch.float16, device=self.rbln_device)
+        fallbacks_before = _C._dispatch_fallback_by_op()
+        view_fallbacks_before = _view_fallback_count_get()
+        result = torch.add(view, other)
+        self.assertEqual(_C._dispatch_fallback_by_op(), fallbacks_before)
+        self.assertEqual(_view_fallback_count_get(), view_fallbacks_before)
+        self.assertEqual(result.cpu(), cpu_base[1:3, 64:].t() + 1, atol=0, rtol=0)
+
     def test_view_with_matmul(self):
         # mm with one transposed input — common in attention (Q @ K.T).
         a = torch.randn(8, 16, dtype=torch.float16, device=self.rbln_device)
