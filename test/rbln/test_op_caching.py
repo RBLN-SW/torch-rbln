@@ -159,22 +159,24 @@ class TestOpCaching(TestCase):
         Correctness on the value side is also asserted: the cpu_fallback
         result must match the upstream CPU result element-wise.
         """
+        # logical_not is not in the alignment exemption list, so it still meets the
+        # gate.
         unaligned_shape = (2, 16)  # 16 % 64 != 0 → ``_last_dim_unaligned`` True
         cpu_tensor = torch.randn(unaligned_shape, dtype=dtype, device="cpu")
-        cpu_out = torch.abs(cpu_tensor)
+        cpu_out = torch.logical_not(cpu_tensor)
         rbln_tensor = cpu_tensor.to(self.rbln_device)
 
         self._reset_dynamo_counters()
 
-        rbln_out = torch.abs(rbln_tensor)
+        rbln_out = torch.logical_not(rbln_tensor)
         # cpu_fallback never triggers torch.compile → unique_graphs stays 0.
         self.assertEqual(torch._dynamo.utils.counters["stats"]["unique_graphs"], 0)
 
         # Second call: same routing decision, still no compile.
-        _ = torch.abs(rbln_tensor)
+        _ = torch.logical_not(rbln_tensor)
         self.assertEqual(torch._dynamo.utils.counters["stats"]["unique_graphs"], 0)
 
-        self.assertEqual(rbln_out, cpu_out, atol=ATOL, rtol=RTOL)
+        self.assertEqual(rbln_out.cpu(), cpu_out)
 
 
 instantiate_device_type_tests(TestOpCaching, globals(), only_for="privateuse1")

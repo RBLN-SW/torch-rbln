@@ -34,6 +34,13 @@ finally:
         os.environ["TORCH_RBLN_DIAGNOSE"] = _prev_diagnose
 
 
+# Deselected by rebel_compiler's CI (`-m "not torch_rbln_only"`); see the marker in
+# pyproject. The handshake is torch-rbln's own gate, driven against a fake library; the
+# one case that reads the installed librbln.so is covered there by the import itself,
+# which runs the same check and fails every test on a mismatch.
+pytestmark = pytest.mark.torch_rbln_only
+
+
 # An empty value reads as "not disabled", so this pins the opt-out off regardless of
 # what the machine running the tests has exported.
 _ABI_CHECK_ENABLED = {abi_check._SKIP_ENV: ""}

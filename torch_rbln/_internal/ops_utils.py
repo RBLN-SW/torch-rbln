@@ -11,7 +11,6 @@ from torch.utils._pytree import tree_flatten, tree_unflatten
 
 from torch_rbln import _C
 from torch_rbln._internal.compile_cache import compile_rbln_cached_entry
-from torch_rbln._internal.dummy_device import raise_if_dummy_execution
 from torch_rbln._internal.env_utils import is_nan_inf_check_enabled, is_rbln_deploy, use_device_group_num_devices
 from torch_rbln._internal.log_utils import rbln_log_warn, rbln_log_warn_once, rbln_record_cpu_fallback
 from torch_rbln._internal.warm_cache import install_pending as _install_warm_cache_pending
@@ -1749,30 +1748,9 @@ def view_recipes_for_positional(view_recipes_flat, positional_count):
     return view_recipes_flat[:positional_count]
 
 
-# Elementwise binary shim ops whose size-1 last-dim operand the backend broadcasts
-# on the device. ``where`` and ``masked_fill`` are left out: three operands, and a
-# size-1 predicate broadcast is unverified, so they keep the input-based align check.
-# Mirrors OpCategories.BROADCASTABLE_OPS in tools/codegen/config.py, except
-# pow: its tensor-tensor overload takes CPU fallback.
-_LAST_DIM_ONE_DEVICE_BROADCAST_OPS = frozenset(
-    {
-        "aten::add",
-        "aten::sub",
-        "aten::mul",
-        "aten::div",
-        "aten::maximum",
-        "aten::minimum",
-        "aten::ne",
-        "aten::eq",
-        "aten::gt",
-        "aten::ge",
-        "aten::lt",
-        "aten::le",
-    }
-)
-
-
-def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_tensor, *, out_alias_arg_pos=None):
+def compile_and_run_view_aware(
+    op_callable, op_name, args, kwargs_filtered, out_tensor, *, out_alias_arg_pos=None, align_check="inputs"
+):
     """Centralized view-aware rbln-compile dispatch.
 
     The single entry point used by all generated ``*_rbln`` handlers (via the
@@ -1798,37 +1776,21 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
     ``get_rbln_compile_op_depth`` is imported in the body because
     ``torch_compile_patch_helpers`` imports this module.
     """
-    # Policy precondition, checked before any device-compile machinery runs: this is the
-    # device-compute entry (only supported dtypes reach here; host-dtype / unsupported
-    # ops already took cpu_fallback_path). On RBLN_DUMMY_DEVICE that means an NPU-bound
-    # eager op with no NPU, so reject it through the shared policy gate — same rule as a
-    # compiled graph, and independent of the 64-alignment fallback below so the behavior
-    # does not depend on tensor shape. depth > 0 means we are nested inside a compile op
-    # (e.g. an artifact build); those must proceed so builds still work.
-    from torch_rbln._internal.torch_compile_patch_helpers import get_rbln_compile_op_depth  # noqa: PLC0415
 
-    eager = get_rbln_compile_op_depth() == 0
-    if eager:
-        raise_if_dummy_execution(f"the eager op {op_name}" if op_name else "an eager op")
-
-    # The align fallback avoids host padding for unaligned inputs.
-    # A size-1 last dim broadcasting to a 64-aligned one is exempt for these
-    # elementwise ops. TensorList inputs keep the fused device path.
+    # Avoids host padding. TensorList inputs keep the fused path. align_check comes from
+    # OpCategories.align_check: "none" skips it unless an input is empty (no program can
+    # hold one), "output" reads the broadcast output's last dim.
     def _last_dim_unaligned(t):
-        return isinstance(t, torch.Tensor) and t.dim() > 0 and t.shape[-1] % 64 != 0
+        return t.dim() > 0 and t.shape[-1] % 64 != 0
 
-    out_shape = (
-        torch.broadcast_shapes(*(t.shape for t in (*args, *kwargs_filtered.values()) if isinstance(t, torch.Tensor)))
-        if op_name in _LAST_DIM_ONE_DEVICE_BROADCAST_OPS
-        else ()
-    )
-    if out_shape and out_shape[-1] != 0:
-        unaligned = out_shape[-1] % 64 != 0
-    else:
-        # Preserve the input-based check for empty last dimensions and other ops.
-        unaligned = any(_last_dim_unaligned(a) for a in args) or any(
-            _last_dim_unaligned(v) for v in kwargs_filtered.values()
-        )
+    tensors = [t for t in (*args, *kwargs_filtered.values()) if isinstance(t, torch.Tensor)]
+    unaligned = any(_last_dim_unaligned(t) for t in tensors)
+    if align_check == "none" and all(t.numel() for t in tensors):
+        unaligned = False
+    elif align_check == "output":
+        out_shape = torch.broadcast_shapes(*(t.shape for t in tensors))
+        if out_shape and out_shape[-1] != 0:
+            unaligned = out_shape[-1] % 64 != 0
     if unaligned and "align" not in _parse_disabled_fallback_cases():
         return cpu_fallback_path(
             op_callable,
@@ -1876,7 +1838,9 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
             for k, v in kwargs_filtered.items()
         }
 
-    if eager:
+    from torch_rbln._internal.torch_compile_patch_helpers import get_rbln_compile_op_depth  # noqa: PLC0415
+
+    if get_rbln_compile_op_depth() == 0:
         _warn_float32_on_device_once(op_name, args, kwargs_filtered)
 
     # A CPU 0-dim tensor is a scalar operand (the CUDA rule): `torch.tensor(2.0) * x` is
@@ -1924,6 +1888,9 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
         options=compile_options,
         device_cache_key=extract_warm_cache_key(*view_args, **view_kwargs),
     )
+    # An ``out`` of another shape is not bound: the shim resizes it and copies into it.
+    if result_tensor is not None and entry.out_shape not in (None, result_tensor.shape):
+        result_tensor = None
     out_list = None if result_tensor is None else [result_tensor]
     # The caller's ``out`` is bound as the program's output buffer, as the C++
     # hit path binds it. A device copy into ``out`` is not the same thing: when
@@ -1947,6 +1914,10 @@ def compile_and_run_view_aware(op_callable, op_name, args, kwargs_filtered, out_
         runtime = entry.runtime()
         if runtime is not None and entry.input_order is None:
             entry.input_order = _graph_input_order(runtime, tensors)
+        if isinstance(external_result, torch.Tensor):
+            entry.out_shape = external_result.shape
+            if result_tensor is not None and result_tensor.shape != entry.out_shape:
+                result_tensor = None
         if result_tensor is not None:
             if runtime is not None and entry.input_order is not None:
                 runtime.run(*(tensors[i] for i in entry.input_order), out=out_list)

@@ -232,15 +232,16 @@ def run_send_recv_test(rank: int, world_size: int, backend: str, src: int, dst: 
             # Destination rank receives data from source rank
             tensor = torch.zeros(64, dtype=dtype, device=device)
             dist.recv(tensor, src=src)
-            # Verify received data
-            expected_tensor = torch.full_like(tensor, send_value, device=device)
+            # The sender can leave the group before verification; keep it off-device.
+            received_tensor = tensor.cpu()
+            expected_tensor = torch.full(tensor.shape, send_value, dtype=dtype, device="cpu")
             torch.testing.assert_close(
-                tensor.cpu(),
-                expected_tensor.cpu(),
+                received_tensor,
+                expected_tensor,
                 msg=(
                     f"send/recv failed on rank {rank} with dtype {dtype}: "
                     f"expected all elements to be {send_value}, "
-                    f"but got tensor with values: {tensor}"
+                    f"but got tensor with values: {received_tensor}"
                     f"expected tensor with values: {expected_tensor}"
                 ),
             )

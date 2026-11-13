@@ -80,6 +80,7 @@ class GeneralFunctionGenerator:
             op_namespace,
             predicate_args=self.op_categories.get_predicate_args(root_name),
             out_alias_arg_pos=0 if self.op_categories.reuses_self_inplace(root_name) else None,
+            align_check=self.op_categories.align_check(root_name),
         )
 
         return code

@@ -34,6 +34,12 @@ from torch_rbln._internal.log_utils import rbln_record_cpu_fallback
 from torch_rbln._internal.ops_utils import _ALL_FALLBACK_CASES
 
 
+# Deselected by rebel_compiler's CI (`-m "not torch_rbln_only"`); see the marker in
+# pyproject. Whether a fallback logs and which reason it records is torch-rbln's own
+# logic: the fallbacks here are decided before anything is compiled.
+pytestmark = pytest.mark.torch_rbln_only
+
+
 _PROJECT_ROOT = str(Path(__file__).absolute().parents[2])
 _FALLBACK_LOG = "op ran on CPU instead of RBLN"
 
@@ -77,28 +83,28 @@ class TestCpuFallbackIsLogged(TestCase):
         return p.stdout + p.stderr
 
     def test_shim_op_dtype_fallback_is_logged(self):
-        """fp32 is outside the dispatch dtype catalog, so ``add`` falls back in the
+        """fp64 is outside the dispatch dtype catalog, so ``add`` falls back in the
         shim's pre-check, before Python is reached. Fails without the fix: the
         values are right and nothing is logged.
         """
         p = self._run(
             """
-            a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32, device="rbln")
-            b = torch.tensor([4.0, 5.0, 6.0], dtype=torch.float32, device="rbln")
+            a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64, device="rbln")
+            b = torch.tensor([4.0, 5.0, 6.0], dtype=torch.float64, device="rbln")
             assert (a + b).cpu().tolist() == [5.0, 7.0, 9.0]
             """
         )
         out = self._assert_ran(p)
-        self.assertIn(_FALLBACK_LOG, out, f"an fp32 add fell back to CPU with no log\n{out}")
+        self.assertIn(_FALLBACK_LOG, out, f"an fp64 add fell back to CPU with no log\n{out}")
         self.assertIn("aten::add", out, f"the log did not name the op that fell back\n{out}")
 
     def test_fallback_log_stays_off_by_default(self):
         """The line is INFO, so the default (WARNING) keeps it out of a user's console.
-        Pins the level: raising it to WARNING would make every fp32 workload noisy.
+        Pins the level: raising it to WARNING would make every fp64 workload noisy.
         """
         p = self._run(
             """
-            a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32, device="rbln")
+            a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64, device="rbln")
             assert (a + a).cpu().tolist() == [2.0, 4.0, 6.0]
             """,
             log_level="WARNING",
@@ -159,7 +165,7 @@ def compile_error_retry():
 
 cases = {
     "wrapper_check": lambda: offset + offset,
-    "device_entry_check": lambda: unaligned + unaligned,
+    "device_entry_check": lambda: torch.neg(unaligned),
     "shim_precheck": lambda: scalar * scalar,
     "registered_op": lambda: aligned.flip(0),
     "unregistered_op": lambda: torch.lgamma(aligned),
@@ -194,7 +200,7 @@ class TestCpuFallbackRecordsItsReason(TestCase):
             reasons,
             {
                 "wrapper_check": {"aten::add.out": {"storage_offset": 1}},
-                "device_entry_check": {"aten::add.out": {"align": 1}},
+                "device_entry_check": {"aten::neg.out": {"align": 1}},
                 "shim_precheck": {"aten::mul.out": {"scalar": 1}},
                 "registered_op": {"aten::flip": {"registered": 1}},
                 "unregistered_op": {"aten::lgamma.out": {"unsupported_op": 1}},

@@ -95,15 +95,15 @@ def patch_torch_compile() -> None:
             # the positional model on recompile.
             model = args[0] if args else kwargs.pop("model", None)
 
-            # Model provided (either form): wrap the compiled callable so RBLN failover,
-            # CPU fallback, and the RBLN_DUMMY_DEVICE execution guard apply.
+            # Model provided (either form): wrap the compiled callable so RBLN failover
+            # and CPU fallback apply.
             if model is not None:
                 compiled_fn = original_torch_compile(model, **kwargs)
                 return CompiledFunctionWrapper(compiled_fn, model, original_torch_compile, kwargs.copy())
 
             # No model: factory/decorator form, e.g. torch.compile(backend="rbln")(fn)
             # or @torch.compile(backend="rbln"). torch returns a *decorator* here; wrap
-            # the eventual compiled fn so the same guard/failover/fallback apply to this
+            # the eventual compiled fn so the same failover/fallback apply to this
             # form as to the model path above.
             torch_decorator = original_torch_compile(**kwargs)
 

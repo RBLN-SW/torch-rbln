@@ -25,6 +25,12 @@ common:
     plugins:
       - kubernetes:
           podSpecPatch:
+            # Also schedule on the CI cluster's nodes dedicated to framework SW.
+            tolerations:
+              - key: rebellions.ai/dedicated
+                operator: Equal
+                value: framework.sw
+                effect: NoSchedule
             containers:
               - name: container-0
                 volumeMounts:
