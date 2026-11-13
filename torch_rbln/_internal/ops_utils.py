@@ -1335,10 +1335,8 @@ def _bfs_search_recipe(base, t, max_steps=4):
                     continue
                 if new_state == target:
                     return new_recipe
-                # For unblocked prefixes, only these last ops constrain which
-                # steps may follow. Equal geometry alone cannot merge histories.
-                context = step[0] if step[0] in ("permute", "expand", "unsqueeze") else None
-                key = (new_state, context)
+                # Blocklist rules depend on the previous op, so keep it in the key.
+                key = (new_state, step[0])
                 if key in visited:
                     continue
                 visited.add(key)
