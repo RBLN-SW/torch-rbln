@@ -391,6 +391,7 @@ class Shard:
             raise pytest.UsageError(msg)
         self.index = int(k) - 1
         self.count = int(n)
+        os.environ.setdefault("MASTER_PORT", str(29604 + self.index))
 
     # Last, so the shards split what -m and -k leave selected.
     @pytest.hookimpl(trylast=True)

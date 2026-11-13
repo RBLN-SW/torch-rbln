@@ -136,6 +136,20 @@ The `core` suite runs `test/rbln`; `distributed`, `models`, and `ops` run
 [model-test dependencies](#prerequisites). CI counts a `pytest` run that
 collects nothing (exit code 5) as no failure.
 
+### Split a run into shards
+
+`--shard=K/N` runs the K-th of N shards, with K numbered from 1. Sharding
+keeps every N-th test in collection order after `-m` and `-k` filtering, so
+running all N shards with the same filters runs each selected test once.
+
+For concurrent local distributed shards, set `RCCL_PORT_GEN=1` and give
+each shard disjoint physical NPUs through `RBLN_DEVICES`. The default RCCL
+initialization path cannot run two groups on one host.
+
+Each shard defaults `MASTER_PORT` to `29604 + K - 1`, preserving an existing
+value. Concurrent jobs must not inherit the same `MASTER_PORT`; unset it to
+use the defaults, or assign distinct unused ports if needed.
+
 ### Run individual tests
 
 ```bash
@@ -401,7 +415,9 @@ From `test/utils.py`:
 | `SUPPORTED_DTYPES`                     | Baseline dtype list for RBLN backend tests, derived from `torch_rbln._internal.ops_utils.SupportedDtypes.dispatch`.             |
 | `set_deterministic_seeds(seed)`        | Sets `torch`, `numpy`, and `random` seeds. Must be called in each spawned process for reproducibility.                          |
 | `run_in_isolated_process(func, *args)` | Runs `func` in a fresh `spawn`-method process. Useful when tests need clean process state. `func` and `args` must be picklable. |
-| `run_ranks(test_func, args, nprocs)`   | Runs `test_func(rank, *args)` on `nprocs` ranks, as `mp.spawn` does, forked from a forkserver that has imported `torch`.        |
+| `run_ranks(test_func, args, nprocs)`   | Forks ranks with `torch` preloaded; import-time env values retain the forkserver's settings. Vary them with `mp.spawn`.         |
+
+Pass `spawn_target_with_clean_exit` as the target of `mp.spawn`.
 
 ### Op filtering
 
