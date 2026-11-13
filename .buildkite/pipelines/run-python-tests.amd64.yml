@@ -175,6 +175,8 @@ steps:
         --npu-product ${TORCH_RBLN_NPU_PRODUCT?} \
         --num-npus 2 \
         --num-workers 32
+    # Its tests run one at a time, so two jobs split them, two NPUs each.
+    parallelism: 2
     agents:
       queue: ${TORCH_RBLN_QUEUE_AMD64_NPU?}
     if: '",${TORCH_RBLN_TEST_SUITES?}," =~ /,distributed,/'

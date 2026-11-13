@@ -7,17 +7,11 @@ from unittest import mock
 import pytest
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 from torch import nn
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, subtest, TestCase
 
-from test.utils import (
-    configure_master_port_for_rccl_tests,
-    set_deterministic_seeds,
-    spawn_target_with_clean_exit,
-    SUPPORTED_DTYPES,
-)
+from test.utils import configure_master_port_for_rccl_tests, run_ranks, set_deterministic_seeds, SUPPORTED_DTYPES
 
 
 # Reduction collectives (allreduce, send/recv) drift from sequential by
@@ -1341,11 +1335,10 @@ class TestTPPPRBLNBase(TestCase):
         self.backend = "rbln-ccl"
 
     def run_c10d_test(self, c10d_async_env, nprocs, test_func, args):
-        """Helper to run a test function with mp.spawn."""
         with pytest.MonkeyPatch.context() as ctx:
             ctx.setenv("TORCH_RBLN_C10D_ASYNC", c10d_async_env)
 
-            mp.spawn(spawn_target_with_clean_exit, args=(test_func, *args), nprocs=nprocs, join=True)
+            run_ranks(test_func, args, nprocs)
 
 
 @pytest.mark.serial

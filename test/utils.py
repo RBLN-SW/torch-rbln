@@ -110,6 +110,34 @@ def spawn_target_with_clean_exit(rank: int, test_func, *args) -> None:
     os._exit(0)
 
 
+def _run_rank_in_env(rank: int, env: dict[str, str], test_func, *args) -> None:
+    os.environ.clear()
+    os.environ.update(env)
+    spawn_target_with_clean_exit(rank, test_func, *args)
+
+
+def run_ranks(test_func, args: tuple, nprocs: int) -> None:
+    """Run ``test_func(rank, *args)`` on ``nprocs`` ranks, as ``mp.spawn`` does.
+
+    The ranks fork from a forkserver that has imported ``torch`` -- and with it
+    ``torch_rbln`` -- and has never touched a device, so a rank pays for neither the
+    imports nor inherited device state. A rank would otherwise keep the environment the
+    server started with, so it first takes the caller's. A value read before that still
+    comes from the server's: what ``torch_rbln`` reads at import, and what the test
+    module's top level reads, since a rank imports it while unpickling ``test_func``. A
+    test that varies such a variable uses ``mp.spawn`` with
+    ``spawn_target_with_clean_exit``.
+    """
+    multiprocessing.set_forkserver_preload(["torch"])
+    torch.multiprocessing.start_processes(
+        _run_rank_in_env,
+        args=(dict(os.environ), test_func, *args),
+        nprocs=nprocs,
+        join=True,
+        start_method="forkserver",
+    )
+
+
 def run_snippet(code: str, *, env: dict[str, str] | None = None, unset: tuple[str, ...] = (), timeout: int = 600):
     """Run ``code`` in a fresh interpreter; return its printed ``RESULT <literal>``.
 
