@@ -551,6 +551,14 @@ class TestInternalOpUtils(TestCase):
         self.assertNotEqual(extract_warm_cache_key([a, b], 0), extract_warm_cache_key([a, b], 1))
         self.assertNotEqual(extract_warm_cache_key([a, b], 0), extract_warm_cache_key([a], 0))
 
+    def test_warm_cache_key_separates_inputs_sharing_a_buffer(self):
+        """``add(a, a.view(...))`` compiles one buffer, so it cannot share ``add(a, b)``'s key."""
+        device = torch.device("rbln:0")
+        a = torch.ones(2, 64, device=device, dtype=torch.float16)
+        b = torch.zeros(2, 64, device=device, dtype=torch.float16)
+        self.assertNotEqual(extract_warm_cache_key(a, a.view(2, 64)), extract_warm_cache_key(a, b))
+        self.assertEqual(extract_warm_cache_key(a, a.view(2, 64)), extract_warm_cache_key(b, b.view(2, 64)))
+
 
 @pytest.mark.npu(count=1)
 class TestOutTensors(TestCase):
