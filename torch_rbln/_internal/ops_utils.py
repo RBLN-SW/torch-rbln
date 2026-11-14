@@ -252,7 +252,14 @@ def extract_warm_cache_key(*args, **kwargs):
     # and ``add(a, b)`` are different graphs even at equal profiles.
     first_seen: dict[int, int] = {}
     identity = tuple(first_seen.setdefault(id(t), i) for i, t in enumerate(input_tensors))
-    return (device_id, tuple(profiles), scalars, identity)
+    # The compiler keys a device input by data_ptr, so ``add(a, a.view(...))``
+    # compiles one buffer where ``add(a, b)`` needs two (the C++ key does the same).
+    first_ptr: dict[int, int] = {}
+    alias = tuple(
+        first_ptr.setdefault(t.data_ptr(), i) if t.device.type == "rbln" and t.data_ptr() else i
+        for i, t in enumerate(input_tensors)
+    )
+    return (device_id, tuple(profiles), scalars, identity, alias)
 
 
 def _scalar_key_part(value):
