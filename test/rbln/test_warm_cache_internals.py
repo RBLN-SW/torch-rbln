@@ -154,6 +154,40 @@ class TestWarmCacheHitPath(TestCase):
         self.assertGreater(hits_after, hits_before, "warm-cache hit path never ran")
 
 
+@pytest.mark.npu(count=1)
+class TestWarmCacheAliasedInputs(TestCase):
+    """A runtime compiled on inputs sharing a buffer must not serve distinct ones.
+
+    The compiler keys a device input by data_ptr, so ``x + x.view(...)`` is compiled
+    with one port for both inputs. Served from either cache, ``x + y`` read ``y`` twice.
+    """
+
+    def test_distinct_inputs_after_aliased_ones(self) -> None:
+        # Read back only after the adds: a host copy first reroutes the inputs.
+        x = torch.randn(2, 64, dtype=torch.float16, device="rbln")
+        y = torch.randn(2, 64, dtype=torch.float16, device="rbln")
+        aliased = torch.add(x, x.view(2, 64))
+        distinct = [torch.add(x, y) for _ in range(3)]
+
+        x_cpu, y_cpu = x.to("cpu"), y.to("cpu")
+        self.assertEqual(aliased.to("cpu"), x_cpu * 2, atol=1e-2, rtol=1e-2)
+        for out in distinct:
+            self.assertEqual(out.to("cpu"), x_cpu + y_cpu, atol=1e-2, rtol=1e-2)
+
+    def test_aliased_inputs_after_distinct_ones(self) -> None:
+        x = torch.randn(4, 64, dtype=torch.float16, device="rbln")
+        y = torch.randn(4, 64, dtype=torch.float16, device="rbln")
+        distinct = [torch.add(x, y) for _ in range(3)]
+        aliased = [torch.add(y, y.detach()) for _ in range(3)]
+        distinct_again = torch.add(x, y)
+
+        x_cpu, y_cpu = x.to("cpu"), y.to("cpu")
+        for out in [*distinct, distinct_again]:
+            self.assertEqual(out.to("cpu"), x_cpu + y_cpu, atol=1e-2, rtol=1e-2)
+        for out in aliased:
+            self.assertEqual(out.to("cpu"), y_cpu * 2, atol=1e-2, rtol=1e-2)
+
+
 class TestWarmCacheHandleGate(TestCase):
     """Which runtime handles the hit path accepts.
 
