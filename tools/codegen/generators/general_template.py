@@ -133,6 +133,7 @@ def {kernel_name}(*args, **kwargs):
             *,
             predicate_args: list[int] | None = None,
             out_alias_arg_pos: int | None = None,
+            align_check: str = "inputs",
         ) -> str:
             """Generate main function body logic.
 
@@ -151,6 +152,7 @@ def {kernel_name}(*args, **kwargs):
                 else "get_fallback_reason(args)"
             )
             reuse = f" out_alias_arg_pos={out_alias_arg_pos}," if out_alias_arg_pos is not None else ""
+            check = f'\n            align_check="{align_check}",' if align_check != "inputs" else ""
             return f"""
     out_tensor = kwargs.get('out', None)
     fallback_reason = {gate}
@@ -165,7 +167,7 @@ def {kernel_name}(*args, **kwargs):
         )
     else:
         result_tensor = compile_and_run_view_aware(
-            {target}, "{op_namespace}::{root_name}", args, kwargs_filtered, out_tensor,{reuse}
+            {target}, "{op_namespace}::{root_name}", args, kwargs_filtered, out_tensor,{reuse}{check}
         )
 
     return result_tensor, result_tensor.shape

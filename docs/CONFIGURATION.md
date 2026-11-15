@@ -308,8 +308,11 @@ The value is a **comma-separated list** of fallback case names to disable:
 | `scalar`         | Falls back when all input tensors are 0-dim scalars                                                | Sends scalar ops to RBLN — may fail in `rebel-compiler`                            |
 | `storage_offset` | Falls back when a contiguous tensor has `storage_offset != 0`                                      | Sends offset tensors to RBLN — may read wrong data                                 |
 | `nan_inf`        | With `TORCH_RBLN_CHECK_NAN_INF=ON`, falls back on NaN/Inf inputs outside deploy mode               | Skips the opt-in scan, even when compatibility checks are enabled                  |
-| `align`          | Falls back to CPU when a tensor argument's last dim is not a multiple of 64                        | Sends unaligned ops to RBLN — slower on small tensors, and each new shape compiles |
+| `align`          | Falls back when a tensor's last dim is not a multiple of 64, except ops the compiler pads (below)  | Sends unaligned ops to RBLN — slower on small tensors, and each new shape compiles |
 | `all`            | —                                                                                                  | Disables **all** of the above checks                                               |
+
+The `align` fallback skips ops whose device inputs the compiler pads itself. See
+[Alignment fallback](EAGER_DISPATCH.md#alignment-fallback) for the list.
 
 ## Device mapping
 
@@ -432,14 +435,15 @@ export RBLN_DUMMY_DEVICE=1 RBLN_DEVICE_MAP="[0,1],[2,3]"
   are rejected — but physical-id ranges are **not** checked, so a map valid under
   dummy is not guaranteed to be valid on a specific machine.
 - **Scope**: device tensor construction, host/device copies, and compile-only
-  `torch.compile` (building artifacts). Anything that must run on the NPU raises
-  a clear error — a compiled graph, or an eager op on a dispatch dtype
-  (fp16/bf16/fp32) — since there is no NPU to run it. Host-side ops (e.g. fp64,
-  which never runs on the NPU even with real hardware) fall back to CPU exactly
-  as they would on a real device. Distributed collectives still require real
-  hardware, and memory-stat APIs (`memory_stats`, `memory_allocated`, ...)
-  report zeros rather than real usage. `mem_get_info()` and
-  `mem_get_info_per_chiplet()` raise: there is no device DRAM to report.
+  `torch.compile` (building artifacts). Anything that would run on the NPU — a
+  compiled graph, or an eager op on a dispatch dtype (fp16/bf16/fp32) — runs
+  without error, but its **outputs are undefined** since there is no NPU to
+  compute them; do not read them. Host-side ops (e.g. fp64, which never runs on
+  the NPU even with real hardware) fall back to CPU exactly as they would on a
+  real device. Distributed collectives still require real hardware, and
+  memory-stat APIs (`memory_stats`, `memory_allocated`, ...) report zeros rather
+  than real usage. `mem_get_info()` and `mem_get_info_per_chiplet()` raise:
+  there is no device DRAM to report.
 - `torch.rbln.is_available()` returns `True` in this mode — treat it as a
   development flag, not real hardware availability.
 

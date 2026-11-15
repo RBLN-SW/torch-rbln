@@ -386,11 +386,11 @@ class TestDispatchShimLastDimOneBroadcast(TestCase):
         with self._expect_warm_hit():
             self.assertEqual(op(x, threshold).cpu(), updated)
 
-    def test_unaligned_output_keeps_the_cpu_fallback(self) -> None:
+    def test_unaligned_output_takes_device_path(self) -> None:
         x = torch.arange(4 * 8, dtype=torch.float16, device="rbln").reshape(4, 8)
         s = torch.tensor([[1.0], [2.0], [3.0], [4.0]], dtype=torch.float16, device="rbln")
         self.assertEqual((x * s).cpu(), x.cpu() * s.cpu())
-        self.assertEqual(_C._warmcache_size(), 0)
+        self.assertGreater(_C._warmcache_size(), 0, "mul is align-exempt and must install a device entry")
 
     def test_empty_output_keeps_the_cpu_fallback(self) -> None:
         x_cpu = torch.empty((4, 0), dtype=torch.float16)
@@ -562,9 +562,8 @@ class TestDispatchShimNanInfFallback(TestCase):
         size_before = _C._warmcache_size()
         # 8 % 64 != 0 → ``_last_dim_unaligned`` returns True → cpu_fallback.
         x = torch.arange(8, dtype=torch.float16, device="rbln")
-        y = torch.ones(8, dtype=torch.float16, device="rbln")
-        z = x + y
-        self.assertEqual(z.to("cpu"), torch.arange(1, 9, dtype=torch.float16))
+        z = torch.logical_not(x)
+        self.assertEqual(z.to("cpu"), torch.logical_not(x.cpu()))
         # No new warm-cache entry was installed (cpu_fallback never primes).
         self.assertEqual(_C._warmcache_size(), size_before)
 

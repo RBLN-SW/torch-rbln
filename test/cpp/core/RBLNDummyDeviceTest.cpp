@@ -6,7 +6,7 @@
 // `torch-rbln` adds no host-memory shim of its own. The returned device pointer
 // is an opaque v-memory handle, NOT host-dereferenceable, so these tests move
 // data only through memcpy_h2v / memcpy_v2h / memcpy_v2v. Kernel/graph
-// execution still requires a real NPU (guarded elsewhere).
+// execution completes but computes nothing, so its outputs are undefined.
 //
 // The env MUST be set before the DeviceMappingManager singleton initializes (it
 // reads the flags once at init). A file-scope static initializer sets them

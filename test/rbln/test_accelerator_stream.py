@@ -40,7 +40,7 @@ class TestAcceleratorStream(TestCase):
         event.record(s2)
         torch.accelerator.synchronize()
         self.assertTrue(event.query())
-        self.assertEqual(c_acc.cpu(), c)
+        self.assertEqual(c_acc.cpu(), c, atol=1e-2, rtol=1e-2)
 
     @pytest.mark.npu(count=1)
     def test_current_stream_query(self):

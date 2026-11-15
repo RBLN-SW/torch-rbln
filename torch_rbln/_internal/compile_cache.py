@@ -98,12 +98,13 @@ class CompiledOp:
     how a call's tensors map onto the graph's inputs once that is known.
     """
 
-    __slots__ = ("compiled", "copy_fallback_warned", "input_order", "runtime_holder")
+    __slots__ = ("compiled", "copy_fallback_warned", "input_order", "out_shape", "runtime_holder")
 
     def __init__(self, compiled: Any, runtime_holder: list):
         self.compiled = compiled
         self.runtime_holder = runtime_holder
         self.input_order: tuple[int, ...] | None = None
+        self.out_shape: torch.Size | None = None
         self.copy_fallback_warned = False
 
     def runtime(self) -> Any:

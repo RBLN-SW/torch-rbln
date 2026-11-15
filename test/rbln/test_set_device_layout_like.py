@@ -38,7 +38,7 @@ class TestSetDeviceLayoutLike:
         ``ref`` — is exercised by the LMCache-RBLN device-tensor integration,
         which a standalone unit test cannot easily set up.
         """
-        ref = torch.ones((2, 4, 8), dtype=torch.float16, device=DEVICE) + 1
+        ref = torch.full((2, 4, 8), 2.0, dtype=torch.float16, device=DEVICE)
         target = torch.empty(2 * 4 * 8, dtype=torch.float16, device=DEVICE)
         with pytest.raises(RuntimeError, match="layout_like"):
             torch.rbln.set_device_layout_like(target, ref)

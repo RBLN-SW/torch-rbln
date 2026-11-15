@@ -49,6 +49,13 @@ from test.utils import run_in_isolated_process
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+# Deselected by rebel_compiler's CI (`-m "not torch_rbln_only"`); see the marker in
+# pyproject. The generators and the random ops they drive run on the host, so these pin
+# torch-rbln's generator plumbing and the torch-facing RNG contract. Nothing here
+# reaches rebel-compiler.
+pytestmark = pytest.mark.torch_rbln_only
+
+
 # torch's default seed for a generator nobody seeded (c10/core/GeneratorImpl.h).
 DEFAULT_RNG_SEED = 67280421310721
 
