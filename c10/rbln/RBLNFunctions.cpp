@@ -320,6 +320,14 @@ DeviceProperties get_device_properties(c10::DeviceIndex device_index) {
           npu.name,
           npu.num_chiplet);
     }
+    std::array<char, RBLN_PCI_BUS_ID_LEN> bus_id{};
+    RBLN_CHECK(
+        !rbln_get_device_pci_bus_id(
+            physical_device_id, bus_id.data(), bus_id.size()),
+        "rbln_get_device_pci_bus_id failed for NPU {} behind rbln:{}",
+        physical_device_id,
+        static_cast<int>(device_index));
+    properties.pci_bus_ids.emplace_back(bus_id.data());
     properties.total_memory += npu.total_memory;
     properties.npu_count++;
   }
