@@ -228,6 +228,12 @@ if [[ "${test_suite}" == "ops" ]]; then
   parallel_report=(--fallback-report="test-reports/${test_suite}-parallel.json")
 fi
 
+# A step with `parallelism: N` runs as N jobs numbered from 0, one per shard.
+shard=()
+if [[ "${BUILDKITE_PARALLEL_JOB_COUNT:-1}" -gt 1 ]]; then
+  shard=(--shard="$((BUILDKITE_PARALLEL_JOB + 1))/${BUILDKITE_PARALLEL_JOB_COUNT}")
+fi
+
 echo "--- Running ${test_suite} suite, ${test_dir}, serial tests"
 pytest_exit_code=0
 env \
@@ -238,6 +244,7 @@ env \
       "${test_dir}" \
       -m "${selection} and serial" \
       "${serial_report[@]}" \
+      "${shard[@]}" \
       --numprocesses=1 \
   || pytest_exit_code=$?
 # Exit 5 means `pytest` selected no tests, which is not a failure.
@@ -255,6 +262,7 @@ env \
       "${test_dir}" \
       -m "${selection} and (not serial)" \
       "${parallel_report[@]}" \
+      "${shard[@]}" \
       --numprocesses="${num_workers}" \
   || pytest_exit_code=$?
 if [[ "${pytest_exit_code}" -ne 0 && "${pytest_exit_code}" -ne 5 ]]; then
