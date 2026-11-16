@@ -1,6 +1,5 @@
 ---
 env:
-  TORCH_RBLN_QUEUE_DEFAULT: ${TORCH_RBLN_QUEUE_DEFAULT?}
   TORCH_RBLN_QUEUE_AMD64_NPU: ${TORCH_RBLN_QUEUE_AMD64_NPU?}
   TORCH_RBLN_PYTHON_VERSION: ${TORCH_RBLN_PYTHON_VERSION?}
   TORCH_RBLN_BUILD_TYPE: ${TORCH_RBLN_BUILD_TYPE?}
@@ -60,17 +59,16 @@ steps:
         --num-npus 0 \
         --num-workers 32
     agents:
-      queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
+      queue: ${TORCH_RBLN_QUEUE_AMD64_NPU?}
     env:
       LD_LIBRARY_PATH: ${UMD_PATH}
-    secrets: *index-secrets
     if: '",${TORCH_RBLN_TEST_SUITES?}," =~ /,core,/'
     timeout_in_minutes: 10
-    image: *test-image
     resources:
       cpu:
         requests: "32"
         limits: "32"
+    <<: *npu-test
 
   - label: >-
       Run Python tests (py${TORCH_RBLN_PYTHON_VERSION?}, x86_64,
