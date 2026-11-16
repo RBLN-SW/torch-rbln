@@ -57,7 +57,7 @@ steps:
         --test-suite core \
         --npu-product ${TORCH_RBLN_NPU_PRODUCT?} \
         --num-npus 0 \
-        --num-workers 32
+        --num-workers 16
     agents:
       queue: ${TORCH_RBLN_QUEUE_AMD64_NPU?}
     env:
@@ -66,8 +66,8 @@ steps:
     timeout_in_minutes: 10
     resources:
       cpu:
-        requests: "32"
-        limits: "32"
+        requests: "16"
+        limits: "16"
     <<: *npu-test
 
   - label: >-
@@ -84,15 +84,15 @@ steps:
         --test-suite core \
         --npu-product ${TORCH_RBLN_NPU_PRODUCT?} \
         --num-npus 1 \
-        --num-workers 32
+        --num-workers 16
     agents:
       queue: ${TORCH_RBLN_QUEUE_AMD64_NPU?}
     if: '",${TORCH_RBLN_TEST_SUITES?}," =~ /,core,/'
     timeout_in_minutes: 20
     resources:
       cpu:
-        requests: "32"
-        limits: "32"
+        requests: "16"
+        limits: "16"
       npu:
         count: 1
         product:
@@ -113,15 +113,15 @@ steps:
         --test-suite core \
         --npu-product ${TORCH_RBLN_NPU_PRODUCT?} \
         --num-npus 2 \
-        --num-workers 32
+        --num-workers 16
     agents:
       queue: ${TORCH_RBLN_QUEUE_AMD64_NPU?}
     if: '",${TORCH_RBLN_TEST_SUITES?}," =~ /,core,/'
     timeout_in_minutes: 10
     resources:
       cpu:
-        requests: "32"
-        limits: "32"
+        requests: "16"
+        limits: "16"
       npu:
         count: 2
         product:
