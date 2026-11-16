@@ -292,7 +292,7 @@ steps:
         --test-suite models \
         --npu-product ${TORCH_RBLN_NPU_PRODUCT?} \
         --num-npus 1 \
-        --num-workers 32
+        --num-workers 16
     agents:
       queue: ${TORCH_RBLN_QUEUE_AMD64_NPU?}
     env:
@@ -302,8 +302,8 @@ steps:
     timeout_in_minutes: 30
     resources:
       cpu:
-        requests: "32"
-        limits: "32"
+        requests: "16"
+        limits: "16"
       npu:
         count: 1
         product:
