@@ -57,6 +57,20 @@ def _clean_env() -> dict:
     return env
 
 
+def _real_npu_env() -> dict:
+    """A non-dummy env that keeps the caller's RBLN_DEVICES.
+
+    `_clean_env` drops RBLN_DEVICES so dummy cases resolve their own target, but a run
+    on real hardware must stay on the NPU this test was given; without it the run
+    opens physical NPU 0, which may belong to another job.
+    """
+    env = _clean_env()
+    env.pop("RBLN_DUMMY_DEVICE", None)
+    if "RBLN_DEVICES" in os.environ:
+        env["RBLN_DEVICES"] = os.environ["RBLN_DEVICES"]
+    return env
+
+
 def _run_with_dummy(snippet: str, env_extra: dict | None = None) -> subprocess.CompletedProcess:
     env = _clean_env()
     env["RBLN_DUMMY_DEVICE"] = "1"
@@ -798,7 +812,7 @@ def test_dummy_compiled_prefill_decode_runs_on_real_npu(tmp_path):
     probe = subprocess.run(
         [sys.executable, "-c", "from rebel._C import get_npu_name; print(get_npu_name(0) or '')"],
         check=False,
-        env=_clean_env(),
+        env=_real_npu_env(),
         capture_output=True,
         text=True,
         errors="replace",
@@ -812,7 +826,7 @@ def test_dummy_compiled_prefill_decode_runs_on_real_npu(tmp_path):
     _assert_ok(proc)
     assert "OK" in proc.stdout
 
-    env = _clean_env()  # non-dummy: the real NPU loads and runs the dummy-built graphs
+    env = _real_npu_env()  # non-dummy: the real NPU loads and runs the dummy-built graphs
     proc = subprocess.run(
         [sys.executable, "-c", textwrap.dedent(_DECODER_RUN.format(cache=cache, npu=npu))],
         check=False,

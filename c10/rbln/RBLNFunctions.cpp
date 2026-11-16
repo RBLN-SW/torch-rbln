@@ -278,10 +278,6 @@ c10::DeviceIndex get_device_count() {
 }
 
 DeviceProperties get_device_properties(c10::DeviceIndex device_index) {
-  RBLN_CHECK(
-      !is_dummy_device(),
-      "get_device_properties() reports what the hardware says, and RBLN_DUMMY_DEVICE has no NPU behind it");
-
   const auto physical_device_ids =
       DeviceMappingManager::getInstance().getPhysicalDeviceIds(device_index);
   RBLN_CHECK(
@@ -292,8 +288,15 @@ DeviceProperties get_device_properties(c10::DeviceIndex device_index) {
   DeviceProperties properties;
   for (const int physical_device_id : physical_device_ids) {
     RBLNDeviceProperties npu{};
+    const auto rc = rbln_get_device_properties(physical_device_id, &npu);
     RBLN_CHECK(
-        !rbln_get_device_properties(physical_device_id, &npu),
+        rc != RBLNRetCode_UNSUPPORTED,
+        "Device properties are not available for rbln:{} (physical NPU {}): RBLN_DUMMY_DEVICE is set, "
+        "or the runtime cannot identify this NPU",
+        static_cast<int>(device_index),
+        physical_device_id);
+    RBLN_CHECK(
+        rc == RBLNRetCode_SUCCESS,
         "rbln_get_device_properties failed for NPU {} behind rbln:{}; the device may be absent or held by "
         "another process — check $rbln-smi",
         physical_device_id,
@@ -1641,9 +1644,6 @@ void empty_cache(const c10::Device& device) {
   if (!device_context_initialized(device_index)) {
     return;
   }
-  if (is_dummy_device()) {
-    return;
-  }
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG("Calling rbln_empty_cache: device_id={}", device_id);
   // Live context: surface a genuine failure (CUDA parity — an initialized
@@ -1815,9 +1815,6 @@ void reset_accumulated_memory_stats(const c10::Device& device) {
   if (!device_context_initialized(device_index)) {
     return;
   }
-  if (is_dummy_device()) {
-    return;
-  }
   const auto device_id = to_device_id(device_index);
   RBLN_LOG_DEBUG(
       "Calling rbln_reset_accumulated_memory_stats: device_id={}", device_id);
@@ -1842,9 +1839,6 @@ void reset_peak_memory_stats(const c10::Device& device) {
   const auto device_index = device.index();
   check_device_index(device_index);
   if (!device_context_initialized(device_index)) {
-    return;
-  }
-  if (is_dummy_device()) {
     return;
   }
   const auto device_id = to_device_id(device_index);
