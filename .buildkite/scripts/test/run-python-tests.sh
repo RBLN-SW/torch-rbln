@@ -264,6 +264,7 @@ env \
       "${parallel_report[@]}" \
       "${shard[@]}" \
       --numprocesses="${num_workers}" \
+      --dist=worksteal \
   || pytest_exit_code=$?
 if [[ "${pytest_exit_code}" -ne 0 && "${pytest_exit_code}" -ne 5 ]]; then
   failed_pytest_runs+=("parallel tests (pytest exit code ${pytest_exit_code})")
