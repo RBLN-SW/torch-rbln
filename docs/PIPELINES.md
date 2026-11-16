@@ -66,10 +66,11 @@ must therefore pass with its own defaults.
 
 Each Python test suite runs as one step per NPU count, and each step runs the
 tests whose [`npu` marker](TEST_GUIDE.md#markers) declares that count. An
-NPU-less step runs the tests that do not require an NPU. For the dummy devices
-those tests create, it sets `RBLN_FORCE_NPU_NAME` to the step's NPU product and
-`LD_LIBRARY_PATH` to the `UMD_PATH` environment variable, because only NPU pods
-have the RBLN user-mode driver.
+NPU-less step runs the tests that do not require an NPU. It runs on the queue of
+the step's NPU product but is allocated no NPU. For the dummy devices those
+tests create, it sets `RBLN_FORCE_NPU_NAME` to the step's NPU product and
+`LD_LIBRARY_PATH` to the `UMD_PATH` environment variable, because only pods
+allocated an NPU have the RBLN user-mode driver.
 
 Before running `pytest`, each step checks that the pod has exactly the requested
 NPUs of the step's product and that it can load the RBLN user-mode driver. A
@@ -140,8 +141,8 @@ them fails.
 
 | Variable                      | Description                                       |
 | ----------------------------- | ------------------------------------------------- |
-| `TORCH_RBLN_QUEUE_AMD64_CA25` | AMD64 agents with RBLN-CA25 for NPU tests         |
-| `TORCH_RBLN_QUEUE_AMD64_CR13` | AMD64 agents with RBLN-CR13 for NPU tests         |
+| `TORCH_RBLN_QUEUE_AMD64_CA25` | AMD64 agents with RBLN-CA25 for tests             |
+| `TORCH_RBLN_QUEUE_AMD64_CR13` | AMD64 agents with RBLN-CR13 for tests             |
 | `TORCH_RBLN_QUEUE_AMD64`      | AMD64 agents for x86_64 builds and source linting |
 | `TORCH_RBLN_QUEUE_ARM64`      | Arm64 agents for aarch64 builds                   |
-| `TORCH_RBLN_QUEUE_DEFAULT`    | Agents for NPU-less steps and every other step    |
+| `TORCH_RBLN_QUEUE_DEFAULT`    | Agents for every other step                       |
