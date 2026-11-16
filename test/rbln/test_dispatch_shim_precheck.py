@@ -235,6 +235,27 @@ class TestBoolOperandCompilation(TestCase):
             f"{op} with a rank-0 value used dispatch CPU fallback",
         )
 
+    @parametrize("shapes", [((0, 1), (0, 3)), ((1, 64), (0, 64)), ((0, 2), (0, 3))])
+    @parametrize("tensor_value", [False, True])
+    def test_functional_masked_fill_empty_broadcast(self, device, shapes, tensor_value):
+        x = torch.empty(shapes[0], device=device, dtype=torch.float16)
+        mask = torch.empty(shapes[1], device=device, dtype=torch.bool)
+        value = x.new_tensor(2.0) if tensor_value else 2.0
+        if shapes == ((0, 2), (0, 3)):
+            with self.assertRaisesRegex(RuntimeError, "must match"):
+                x.masked_fill(mask, value)
+        else:
+            result = x.masked_fill(mask, value)
+            self.assertEqual(result.shape, torch.broadcast_shapes(*shapes))
+            self.assertEqual(result.dtype, x.dtype)
+
+    @parametrize("shape", [(64,), (0, 64)])
+    def test_functional_masked_fill_rejects_non_scalar_value(self, device, shape):
+        x = torch.empty(shape, device=device, dtype=torch.float16)
+        mask = torch.ones((), device=device, dtype=torch.bool)
+        with self.assertRaisesRegex(RuntimeError, "only supports a 0-dimensional value tensor"):
+            x.masked_fill(mask, x.new_ones((2, 64)))
+
     @parametrize("self_shape,mask_shape", [((1, 64), (4, 64)), ((0, 64), (4, 64)), ((4, 64), (3,))])
     def test_masked_fill_inplace_shape_errors_match_cpu(self, device, self_shape, mask_shape):
         # Binding self as the compiled output must not change the error for a
@@ -245,6 +266,15 @@ class TestBoolOperandCompilation(TestCase):
         with self.assertRaises(RuntimeError) as dev_err:
             torch.zeros(self_shape, dtype=torch.float16, device=device).masked_fill_(mask_cpu.to(device), 5.0)
         self.assertEqual(str(dev_err.exception), str(cpu_err.exception))
+
+
+@pytest.mark.npu(count=2)
+def test_functional_masked_fill_empty_result_device():
+    with torch.rbln.device(0):
+        x = torch.empty((0, 64), device="rbln:1", dtype=torch.float16)
+        mask = torch.empty_like(x, dtype=torch.bool)
+        result = x.masked_fill(mask, 1.0)
+        assert result.device == x.device, f"expected {x.device}, got {result.device}"
 
 
 @pytest.mark.npu(count=1)

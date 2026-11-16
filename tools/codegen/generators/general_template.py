@@ -63,8 +63,8 @@ class GeneralTemplates:
 
         @staticmethod
         def masked_fill() -> str:
-            """Empty ``self`` gives an empty result even with a non-empty 0-dim mask."""
-            return """    if args[0].numel() == 0:
+            return """    validate_masked_fill_operands(args[1], args[2])
+    if args[0].numel() == 0 or args[1].numel() == 0:
         return handle_empty_masked_fill(args, kwargs.get('out', None))
 """
 
