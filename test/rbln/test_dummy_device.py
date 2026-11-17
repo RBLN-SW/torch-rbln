@@ -577,14 +577,11 @@ def test_eager_device_dtype_op_executes_on_dummy_context():
     assert "OK" in proc.stdout
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="#344: an op under a remapped RBLN_DEVICE_MAP runs on a different device than its inputs",
-)
 def test_op_under_remapped_device_map_runs_on_device():
-    # Under a remapped map the inputs sit on the mapped device, but the op is run on
-    # another one and rejected. With CPU fallback on, that is silent (correct values,
-    # wrong place), so this relies on the suite disabling compile_error fallback.
+    # Under a remapped map the inputs sit on the mapped device, and the op must run
+    # there too (#344). A runtime built on any other device rejects the inputs, and
+    # with CPU fallback on that is silent (correct values, wrong place), so this
+    # relies on the suite disabling compile_error fallback.
     proc = _run_with_dummy(
         """
         import torch, torch_rbln

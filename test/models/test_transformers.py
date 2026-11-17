@@ -358,6 +358,9 @@ class TestCausalLMGraph(TestCausalLMBase):
         # overflows the device's custom float there and wipes out eager attention.
         if is_atom_device() and dtype is torch.bfloat16 and attn_implementation == "eager":
             self.skipTest("bfloat16 x eager attention on ATOM: see test/rbln/test_bf16_range.py")
+        if dtype is torch.float16:
+            # rebel-compiler #14172: runtime cannot run an int64 -> float16 input cast.
+            pytest.xfail("rebel-compiler folds an int64 -> float16 cast into a device input view")
 
         config_kwargs = {
             "dtype": dtype,
