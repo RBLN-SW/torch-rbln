@@ -356,7 +356,7 @@ def test_offload_runs_in_dummy_mode():
     assert "OK" in proc.stdout
 
 
-def test_cache_management_is_a_noop_in_dummy_mode():
+def test_cache_management_reaches_runtime_in_dummy_mode():
     proc = _run_with_dummy(
         """
         import torch, torch_rbln
