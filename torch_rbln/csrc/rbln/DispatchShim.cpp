@@ -6,6 +6,7 @@
 #include <ATen/native/rbln/RBLNCPUFallback.h>
 #include <ATen/ops/empty.h>
 #include <c10/rbln/RBLNFunctions.h>
+#include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNProfiler.h>
 #include <c10/rbln/RBLNSupportedDtypes.h>
 #include <c10/util/ScopeExit.h>
@@ -325,30 +326,28 @@ bool is_nan_inf_check_enabled() {
 }
 
 // True when TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK (a comma-separated list)
-// names `case_name` or "all".
-bool is_fallback_case_disabled(std::string_view case_name) {
+// names `reason` or "all".
+bool is_fallback_case_disabled(c10::rbln::CpuFallbackReason reason) {
+  TORCH_INTERNAL_ASSERT_DEBUG_ONLY(c10::rbln::is_dev_disable_case(reason));
   const char* env = std::getenv("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK");
   if (env == nullptr)
     return false;
-  std::string s = env;
-  size_t start = 0;
-  while (start <= s.size()) {
-    size_t end = s.find(',', start);
-    if (end == std::string::npos)
-      end = s.size();
-    std::string token = s.substr(start, end - start);
+  const auto name = c10::rbln::cpu_fallback_reason_name(reason);
+  std::string_view rest = env;
+  while (true) {
+    const size_t end = rest.find(',');
+    std::string_view token = rest.substr(0, end);
     const auto l = token.find_first_not_of(" \t");
-    const auto r = token.find_last_not_of(" \t");
-    if (l != std::string::npos) {
+    if (l != std::string_view::npos) {
+      const auto r = token.find_last_not_of(" \t");
       token = token.substr(l, r - l + 1);
-    } else {
-      token.clear();
+      if (token == "all" || token == name)
+        return true;
     }
-    if (token == "all" || token == case_name)
-      return true;
-    start = end + 1;
+    if (end == std::string_view::npos)
+      return false;
+    rest.remove_prefix(end + 1);
   }
-  return false;
 }
 
 // NaN/Inf bit-pattern check. Every IEEE format encodes NaN/Inf as "exponent
@@ -485,6 +484,12 @@ inline std::optional<ScalarValue> wrapped_scalar_value(const at::Tensor& t) {
 //      The Python path uses the same gates; checking before warm-cache lookup
 //      keeps a cache hit from bypassing the opt-in scan.
 //
+// TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK turns 2 off with `dtype`, 3 with
+// `scalar` and 5 with `nan_inf` (or all three with `all`), as it turns off the
+// Python checks; the op then reaches the Python wrapper, which skips the same
+// checks and compiles it for the device. The out-dtype check below has no
+// switch.
+//
 // Inputs means args NOT schema-marked as write aliases (out-tensor skipped).
 // `skip_dtype_args` indexes positional args whose dtype check is ignored (e.g.
 // where.self_out's cond, which is bool).
@@ -511,9 +516,11 @@ std::optional<c10::rbln::CpuFallbackReason> quick_fallback_check(
     torch::jit::Stack* stack,
     const SchemaCache& cache,
     const std::vector<size_t>& skip_dtype_args) {
+  using c10::rbln::CpuFallbackReason;
   auto args = torch::jit::last(stack, cache.num_args);
   const bool nan_inf_scan_enabled = is_nan_inf_check_enabled() &&
-      !is_deploy_mode() && !is_fallback_case_disabled("nan_inf");
+      !is_deploy_mode() &&
+      !is_fallback_case_disabled(CpuFallbackReason::kNanInf);
   bool has_input_tensor = false;
   bool all_input_scalar = true;
   bool nan_inf_found = false;
@@ -564,8 +571,9 @@ std::optional<c10::rbln::CpuFallbackReason> quick_fallback_check(
     has_input_tensor = true;
     // Catalog plus the TORCH_RBLN_DISPATCH_DTYPES extension
     // (RBLNSupportedDtypes.h).
-    if (!c10::rbln::is_dispatch_dtype_rt(t.scalar_type())) {
-      return c10::rbln::CpuFallbackReason::kDtype; // not a dispatch dtype
+    if (!c10::rbln::is_dispatch_dtype_rt(t.scalar_type()) &&
+        !is_fallback_case_disabled(CpuFallbackReason::kDtype)) {
+      return CpuFallbackReason::kDtype; // not a dispatch dtype
     }
     if (!input_dtype) {
       input_dtype = t.scalar_type();
@@ -577,23 +585,24 @@ std::optional<c10::rbln::CpuFallbackReason> quick_fallback_check(
     }
   }
   if (nan_inf_found) {
-    return c10::rbln::CpuFallbackReason::kNanInf; // opt-in scan
+    return CpuFallbackReason::kNanInf; // opt-in scan
   }
   if (cache.out_positional_idx >= 0 && input_dtype) {
     const auto& out_iv = args[cache.out_positional_idx];
     if (out_iv.isTensor() && out_iv.toTensor().defined()) {
       const auto out_dtype = out_iv.toTensor().scalar_type();
       if (out_dtype != c10::kBool && out_dtype != *input_dtype) {
-        return c10::rbln::CpuFallbackReason::kOutDtype; // see above
+        return CpuFallbackReason::kOutDtype; // see above
       }
     }
   }
-  if (has_input_tensor && all_input_scalar) {
-    return c10::rbln::CpuFallbackReason::kScalar;
+  if (has_input_tensor && all_input_scalar &&
+      !is_fallback_case_disabled(CpuFallbackReason::kScalar)) {
+    return CpuFallbackReason::kScalar;
   }
   if (mixed_input_dtypes && !has_empty_input && !has_contiguous_offset_input &&
-      !is_fallback_case_disabled("dtype")) {
-    return c10::rbln::CpuFallbackReason::kDtype;
+      !is_fallback_case_disabled(CpuFallbackReason::kDtype)) {
+    return CpuFallbackReason::kDtype;
   }
   return std::nullopt;
 }
@@ -747,7 +756,8 @@ bool try_warmcache_hit(
   if (!entry)
     return false;
   // The alignment fallback is back on: let the Python path apply it.
-  if (entry->align_bypassed && !is_fallback_case_disabled("align"))
+  if (entry->align_bypassed &&
+      !is_fallback_case_disabled(c10::rbln::CpuFallbackReason::kAlign))
     return false;
 
   // Input binding, in the order tensor inputs appear on the stack. Device-only:
@@ -941,7 +951,8 @@ void generic_shim_boxed(
   const char* op_name_intern = entry->op_name_intern;
 
   // The C++ precheck identifies cheap "must fallback" cases (input dtype
-  // outside the dispatch catalog or all-0-dim) and short-circuits straight
+  // outside the dispatch catalog or mixed, all-0-dim, ...; each obeys
+  // TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK) and short-circuits straight
   // into cpu_fallback_rbln,
   // bypassing the pybind hop into the Python wrapper. The wrapped-0-dim
   // case (e.g. `tensor + 1.0` where PyTorch wraps `1.0` as a 0-dim CPU

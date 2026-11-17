@@ -12,6 +12,9 @@ The shim short-circuits to the CPU fallback path on these conditions
      deploy mode is off, and ``nan_inf`` / ``all`` fallback checks are not disabled.
      The C++ scan runs before warm-cache lookup; the Python path uses the same gates.
 
+``TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK`` turns these off by case (``dtype``,
+``scalar``, ``nan_inf`` or ``all``), as it does the Python checks.
+
 Two important non-trivial properties:
 
   * Wrapped Python scalars (0-dim tensors with `is_wrapped_number=True`)
@@ -695,6 +698,31 @@ class TestDispatchShimGateLiveRead(TestCase):
             self._assert_gate_read_live("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK", "nan_inf")
 
 
+@pytest.mark.npu(count=1)
+class TestDispatchShimDisabledCases(TestCase):
+    """A case ``TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK`` names skips its C++ check."""
+
+    @parametrize(
+        "case,lhs_dtype,rhs_dtype,shape",
+        [
+            ("dtype", torch.int32, torch.int32, (64,)),  # outside the dispatch catalog
+            # mixed supported dtypes; the promoted dtype first, or the out_dtype check
+            # (which has no switch) decides first
+            ("dtype", torch.float32, torch.bfloat16, (64,)),
+            ("scalar", torch.float16, torch.float16, ()),  # all 0-dim
+        ],
+    )
+    def test_disabled_case_skips_native_fallback(self, case, lhs_dtype, rhs_dtype, shape) -> None:
+        x = torch.ones(shape, dtype=lhs_dtype, device="rbln")
+        y = torch.ones(shape, dtype=rhs_dtype, device="rbln")
+        _C._dispatch_fallback_by_op_reset()
+        before = _dispatch_counts()
+        with mock.patch.dict(os.environ, {"TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK": case}):
+            torch.add(x, y)
+        self.assertEqual(_dispatch_counts()[1], before[1], f"disabled {case} check still used native CPU fallback")
+        self.assertNotIn(case, [reason for _, reason, _ in _C._dispatch_fallback_by_op_reason()])
+
+
 instantiate_device_type_tests(TestDispatchShimWrappedScalar, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestDispatchShimLastDimOneBroadcast, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestBoolOperandCompilation, globals(), only_for="privateuse1")
@@ -702,6 +730,7 @@ instantiate_device_type_tests(TestDispatchShimAllScalarFallback, globals(), only
 instantiate_device_type_tests(TestDispatchShimDtypeMismatch, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestDispatchShimNanInfFallback, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestDispatchShimGateLiveRead, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestDispatchShimDisabledCases, globals(), only_for="privateuse1")
 
 
 if __name__ == "__main__":
