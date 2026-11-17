@@ -359,7 +359,7 @@ class TestCausalLMGraph(TestCausalLMBase):
         if is_atom_device() and dtype is torch.bfloat16 and attn_implementation == "eager":
             self.skipTest("bfloat16 x eager attention on ATOM: see test/rbln/test_bf16_range.py")
         if dtype is torch.float16:
-            # rebel-compiler #14172 leaves an int64 -> float16 input cast the runtime cannot run.
+            # rebel-compiler #14172: runtime cannot run an int64 -> float16 input cast.
             pytest.xfail("rebel-compiler folds an int64 -> float16 cast into a device input view")
 
         config_kwargs = {
