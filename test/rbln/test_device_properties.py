@@ -128,7 +128,7 @@ else:
         result = _run_in_subprocess({"RBLN_DUMMY_DEVICE": "1"}, script)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("RAISED", result.stdout)
-        self.assertIn("RBLN_DUMMY_DEVICE", result.stdout)
+        self.assertIn("device properties unavailable: dummy device", result.stdout)
 
 
 if __name__ == "__main__":

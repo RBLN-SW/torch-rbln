@@ -306,11 +306,11 @@ class TestMemGetInfo(TestCase):
     def test_unsupported_driver_raises(self):
         if all(reply is not None for reply in self.replies):
             self.skipTest("installed UMD/KMD provides the device memory-info query")
-        with self.assertRaisesRegex(RuntimeError, "does not provide the device memory query"):
+        with self.assertRaisesRegex(RuntimeError, "device memory info unavailable"):
             torch.rbln.mem_get_info(0)
-        with self.assertRaisesRegex(RuntimeError, "does not provide the device memory query"):
+        with self.assertRaisesRegex(RuntimeError, "device memory info unavailable"):
             torch.accelerator.get_memory_info(0)
-        with self.assertRaisesRegex(RuntimeError, "does not provide the device memory query"):
+        with self.assertRaisesRegex(RuntimeError, "device memory info unavailable"):
             torch.rbln.mem_get_info_per_chiplet(0)
 
     def test_accepts_device_forms_and_rejects_non_rbln(self):
