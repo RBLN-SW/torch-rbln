@@ -1072,17 +1072,18 @@ class TestHostPageSnapshot(TestCase):
         try:
             if snapshot.error:
                 self.skipTest(f"io_uring/PAGEMAP_SCAN unavailable: errno={snapshot.error}")
-            self.assertTrue(all(start + size <= ptr + 2 * h for start, size in snapshot.huge_ranges))
-            if not snapshot.huge_ranges:
+            huge_ranges = snapshot.huge_ranges
+            if not huge_ranges:
                 self.skipTest("THP unavailable for the huge half of this fixture")
-            self.assertEqual(snapshot.huge_ranges, [(ptr, 2 * h)])
-            # The temporary long-term pin must retain that physical huge page
+            # THP promotion is best effort, so either huge page may be absent.
+            self.assertIn(huge_ranges, ([(ptr, h)], [(ptr + h, h)], [(ptr, 2 * h)]))
+            # The temporary long-term pin must retain those physical huge pages
             # even if the process stops asking for future THP allocations.
             self.assertEqual(libc.madvise(ptr, 2 * h, mmap.MADV_NOHUGEPAGE), 0)
             second = torch_rbln._C._HostPageSnapshot(ptr, 2 * h, promote=False)
             try:
                 self.assertEqual(second.error, 0)
-                self.assertEqual(second.huge_ranges, [(ptr, 2 * h)])
+                self.assertEqual(second.huge_ranges, huge_ranges)
             finally:
                 second.close()
         finally:
