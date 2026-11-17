@@ -1673,33 +1673,24 @@ def prepare_args_view_aware(args, kwargs_filtered):
 _view_op_module_cache: dict = {}
 
 
-def get_view_op_module(op_callable_or_module, view_recipes):
+def get_view_op_module(op_callable, view_recipes):
     """Return an ``nn.Module`` whose forward applies the per-arg view recipes
     to its positional args, then invokes the underlying op.
 
-    Accepts either a plain callable (e.g. ``torch.mul``) or a pre-built
-    ``nn.Module`` (e.g. the custom-kernel modules defined in
-    ``register_custom_ops.py``). With recipes that are all ``None``, returns
-    the original module/callable directly (avoids unnecessary wrapping —
-    preserves compile_rbln_cached cache hits for the existing module
-    identity in ``register_custom_ops``). With non-trivial recipes, builds
-    a wrapping module that applies each per-arg recipe step inside its
-    forward, then calls the underlying op.
+    ``op_callable`` is a plain callable (e.g. ``torch.mul``). With recipes that
+    are all ``None``, returns a cached pass-through module. With non-trivial
+    recipes, builds a wrapping module that applies each per-arg recipe step
+    inside its forward, then calls the underlying op.
 
     Cache key is ``(id(callable), recipes)`` so distinct view patterns get
     distinct compiled graphs while a fresh pass-through doesn't churn the
     cache.
     """
-    is_module = isinstance(op_callable_or_module, torch.nn.Module)
-    op_callable = op_callable_or_module
     has_views = any(r is not None for r in view_recipes)
 
     if not has_views:
-        if is_module:
-            return op_callable_or_module  # reuse as-is, no wrap
-        # Plain callable, no views: cache a pass-through nn.Module so
-        # compile_rbln_cached's identity-keyed cache works the same as the
-        # historical ``_<op>_op_module`` style.
+        # No views: cache a pass-through nn.Module so compile_rbln_cached's
+        # identity-keyed cache hits on every call for this op.
         key = (id(op_callable), ())
         cached = _view_op_module_cache.get(key)
         if cached is not None:

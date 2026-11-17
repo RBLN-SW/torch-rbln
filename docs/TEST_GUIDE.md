@@ -58,8 +58,6 @@ test/
 │
 ├── rbln/                                  # RBLN backend-specific tests
 │   ├── test_abi_check.py                  # rebel ABI handshake between this build and the loaded librbln.so
-│   ├── test_custom_kernel.py              # RBLN custom kernels
-│   ├── test_custom_op_compile.py          # Paged-attention custom ops inside a larger compiled graph (engine graph mode)
 │   ├── test_device_mapping.py             # Device mapping and topology APIs
 │   ├── test_graph_eager_mode.py           # Numerical agreement between torch.compile graph mode and eager mode
 │   ├── test_internal_op_utils.py          # Internal op utilities
@@ -636,36 +634,6 @@ class TestMemoryStats(TestCase):
 > selected RBLN device and the current stream — rely on the autouse
 > `restore_current_device` / `restore_current_stream` guards in
 > `test/conftest.py` that repair them after each test.
-
-### Custom kernel template
-
-For testing custom RBLN operators registered via `torch.library.custom_op`:
-
-```python
-import pytest
-import rebel  # noqa: F401
-import torch
-from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
-from torch.testing._internal.common_utils import TestCase
-
-from test.utils import SUPPORTED_DTYPES
-
-
-@pytest.mark.npu(count=1)
-@pytest.mark.no_dynamo_reset  # Keep the compile cache across tests
-class TestCustomKernel(TestCase):
-
-    @dtypes(*SUPPORTED_DTYPES)
-    def test_custom_op(self, device, dtype):
-        # Call the custom operator
-        result = torch.ops.rbln_custom_ops.my_custom_op(
-            torch.randn([4, 4], dtype=dtype, device=device)
-        )
-        self.assertEqual(result.shape, (4, 4))
-
-
-instantiate_device_type_tests(TestCustomKernel, globals(), only_for="privateuse1")
-```
 
 ### C++ template
 
