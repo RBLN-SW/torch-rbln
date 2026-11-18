@@ -705,7 +705,8 @@ DeviceMemoryExport export_device_memory(const void* rbln_data) {
   DeviceMemoryExport out{};
   RBLN_CHECK(
       !::rbln::rbln_export_device_memory(vaddr, out.size, out.payload, out.fds),
-      "rbln_export_device_memory failed for vaddr={:#x}: {}",
+      "rbln_export_device_memory failed for vaddr={:#x}: {}. Only tensors from "
+      "torch.rbln.ipc.empty_exportable can be exported",
       vaddr,
       runtime_cause());
   RBLN_LOG_DEBUG(
