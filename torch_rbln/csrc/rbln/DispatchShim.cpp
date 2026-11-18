@@ -121,6 +121,7 @@ struct SchemaCache {
   std::vector<std::string> arg_names; // only populated for kwarg_only slots
   std::vector<bool> is_write_alias; // alias_info != nullptr && isWrite()
   int out_positional_idx = -1; // -1 if no arg is named "out"
+  int self_positional_idx = -1; // -1 if no arg is named "self"
   size_t num_args = 0;
   size_t num_positional = 0;
   std::vector<c10::TypePtr> return_types; // parallel to schema returns
@@ -259,6 +260,8 @@ void populate_schema_cache(
     }
     if (cache.arg_names[i] == "out") {
       cache.out_positional_idx = static_cast<int>(i);
+    } else if (cache.arg_names[i] == "self") {
+      cache.self_positional_idx = static_cast<int>(i);
     }
   }
   cache.num_positional = n_pos;
@@ -519,6 +522,31 @@ std::optional<c10::rbln::CpuFallbackReason> quick_fallback_check(
     const std::vector<size_t>& skip_dtype_args) {
   using c10::rbln::CpuFallbackReason;
   auto args = torch::jit::last(stack, cache.num_args);
+  const at::Tensor* out = nullptr;
+  if (cache.out_positional_idx >= 0) {
+    const auto& out_iv = args[cache.out_positional_idx];
+    if (out_iv.isTensor() && out_iv.toTensor().defined()) {
+      out = &out_iv.toTensor();
+    }
+  }
+  // Match the generated wrapper's device check before a C++ path can bypass
+  // it. A CPU 0-dim self can be a scalar operand on another device.
+  if (out && cache.self_positional_idx >= 0) {
+    const auto& self_iv = args[cache.self_positional_idx];
+    if (self_iv.isTensor()) {
+      const auto& self = self_iv.toTensor();
+      if (self.defined() && !(self.is_cpu() && self.dim() == 0)) {
+        TORCH_CHECK(
+            self.device() == out->device(),
+            "Input device ",
+            self.device(),
+            " does not match output device ",
+            out->device(),
+            ".");
+      }
+    }
+  }
+
   const bool nan_inf_scan_enabled = is_nan_inf_check_enabled() &&
       !is_deploy_mode() &&
       !is_fallback_case_disabled(CpuFallbackReason::kNanInf);
@@ -588,13 +616,10 @@ std::optional<c10::rbln::CpuFallbackReason> quick_fallback_check(
   if (nan_inf_found) {
     return CpuFallbackReason::kNanInf; // opt-in scan
   }
-  if (cache.out_positional_idx >= 0 && input_dtype) {
-    const auto& out_iv = args[cache.out_positional_idx];
-    if (out_iv.isTensor() && out_iv.toTensor().defined()) {
-      const auto out_dtype = out_iv.toTensor().scalar_type();
-      if (out_dtype != c10::kBool && out_dtype != *input_dtype) {
-        return CpuFallbackReason::kOutDtype; // see above
-      }
+  if (out && input_dtype) {
+    const auto out_dtype = out->scalar_type();
+    if (out_dtype != c10::kBool && out_dtype != *input_dtype) {
+      return CpuFallbackReason::kOutDtype; // see above
     }
   }
   if (has_input_tensor && all_input_scalar &&

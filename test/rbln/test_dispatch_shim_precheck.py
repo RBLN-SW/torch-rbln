@@ -517,6 +517,39 @@ class TestDispatchShimDtypeMismatch(TestCase):
         self.assertIn(("aten::sub.out", "dtype", 1), _C._dispatch_fallback_by_op_reason())
 
 
+@pytest.mark.npu(count=2)
+class TestDispatchShimOutDevice(TestCase):
+    @parametrize(
+        "lhs_dtype,rhs_dtype,out_dtype,warm_cache",
+        [
+            (torch.float32, torch.bfloat16, torch.float32, False),
+            (torch.float16, torch.float16, torch.float16, True),
+            (torch.float16, torch.float16, torch.float32, False),
+        ],
+    )
+    def test_out_on_different_device_raises(self, lhs_dtype, rhs_dtype, out_dtype, warm_cache) -> None:
+        x = torch.arange(64, dtype=lhs_dtype).to("rbln:0")
+        y = torch.ones(64, dtype=rhs_dtype).to("rbln:0")
+        expected_out = torch.full((64,), -99, dtype=out_dtype)
+        out = expected_out.to("rbln:1")
+        _C._warmcache_clear()
+        self.addCleanup(_C._warmcache_clear)
+
+        with mock.patch.dict(os.environ):
+            os.environ.pop("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK", None)
+            if warm_cache:
+                valid_out = torch.empty_like(x)
+                torch.ops.aten.sub.out(x, y, out=valid_out)
+                hits = _dispatch_counts()[2]
+                torch.ops.aten.sub.out(x, y, out=valid_out)
+                self.assertEqual(_dispatch_counts()[2], hits + 1)
+
+            with self.assertRaisesRegex(RuntimeError, r"Input device rbln:0 does not match output device rbln:1\."):
+                torch.ops.aten.sub.out(x, y, out=out)
+
+        self.assertEqual(out.cpu(), expected_out)
+
+
 @pytest.mark.npu(count=1)
 class TestDispatchShimNanInfFallback(TestCase):
     """Opted-in NaN/Inf inputs must fall back even after a clean call primes the cache.
@@ -747,6 +780,7 @@ instantiate_device_type_tests(TestDispatchShimLastDimOneBroadcast, globals(), on
 instantiate_device_type_tests(TestBoolOperandCompilation, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestDispatchShimAllScalarFallback, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestDispatchShimDtypeMismatch, globals(), only_for="privateuse1")
+instantiate_device_type_tests(TestDispatchShimOutDevice, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestDispatchShimNanInfFallback, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestDispatchShimGateLiveRead, globals(), only_for="privateuse1")
 instantiate_device_type_tests(TestDispatchShimDisabledCases, globals(), only_for="privateuse1")
