@@ -120,7 +120,7 @@ def export_tensor(tensor: torch.Tensor) -> tuple[IpcHandle, list[int]]:
 def open_tensor(
     handle: IpcHandle,
     fds: list[int],
-    device: int | str | torch.device,
+    device: int | str | torch.device | None = None,
 ) -> torch.Tensor:
     """Open a tensor exported by :func:`export_tensor` in another process.
 
@@ -132,16 +132,18 @@ def open_tensor(
         handle: The exporter's handle, typically unpickled.
         fds: The dma-buf fds as received in this process, in the exporter's order.
         device: The rbln device the memory lives on, as a logical device of this
-            process. It must map to the exporter's physical NPUs.
+            process. It must map to the exporter's physical NPUs. If omitted, the
+            device that holds those NPUs is used, and opening raises when no device
+            or several devices do.
     """
-    if device is None:
-        msg = "open_tensor: device is required"
-        raise RuntimeError(msg)
-    dev = _normalize_device(device)
     fds = list(fds)
     if len(fds) != handle.num_fds:
         msg = f"open_tensor: the handle has {handle.num_fds} fd(s) but {len(fds)} were given"
         raise RuntimeError(msg)
+    if device is None:
+        dev = torch.device("rbln", torch_rbln._C._resolve_import_device(handle.payload))
+    else:
+        dev = _normalize_device(device)
     _check_supported(dev)
     return torch_rbln._C._import_device_memory(
         dev.index, handle.nbytes, handle.payload, fds, list(handle.shape), handle.dtype

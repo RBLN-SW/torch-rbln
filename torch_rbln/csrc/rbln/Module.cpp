@@ -428,6 +428,14 @@ void register_internal_api(py::module_& module) {
         return owning_rbln_tensor(base, device_index, sizes, dtype);
       },
       "Internal: rebuild an owning RBLN tensor from (size, payload, dma_buf_fds)");
+  module.def(
+      "_resolve_import_device",
+      [](const py::bytes& payload) {
+        const std::string raw = payload;
+        return c10::rbln::resolve_import_device(
+            std::vector<uint8_t>(raw.begin(), raw.end()));
+      },
+      "Internal: the logical device that holds the NPUs an export came from");
 
   // Used by torch_rbln.host_register() / host_unregister().
   module.def(

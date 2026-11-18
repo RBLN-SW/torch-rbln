@@ -219,6 +219,12 @@ int to_device_id(c10::DeviceIndex device_index) {
   return static_cast<int>(device_index);
 }
 
+std::string runtime_cause() {
+  const char* message = rbln_get_last_error_message();
+  return (message != nullptr && *message != '\0') ? message
+                                                  : "see the runtime log";
+}
+
 // Throws unless `rc` is success, with the runtime's own reason
 // (rbln_get_last_error_message()).
 void check_runtime_rc(
@@ -228,15 +234,13 @@ void check_runtime_rc(
   if (rc == RBLNRetCode_SUCCESS) {
     return;
   }
-  const char* reason = rbln_get_last_error_message();
   RBLN_CHECK(
       false,
       "{} failed for {} (rc={}): {}",
       api,
       target,
       static_cast<int>(rc),
-      (reason != nullptr && reason[0] != '\0') ? reason
-                                               : "see the runtime log");
+      runtime_cause());
 }
 
 } // namespace
@@ -716,9 +720,10 @@ DeviceMemoryExport export_device_memory(const void* rbln_data) {
   DeviceMemoryExport out{};
   RBLN_CHECK(
       !::rbln::rbln_export_device_memory(vaddr, out.size, out.payload, out.fds),
-      "rbln_export_device_memory failed for vaddr={:#x}; see the runtime log for the cause. The tensor must come "
-      "from torch.rbln.ipc.empty_exportable, and an unplaced tensor must fit the default placement",
-      vaddr);
+      "rbln_export_device_memory failed for vaddr={:#x}: {}. Only tensors from "
+      "torch.rbln.ipc.empty_exportable can be exported",
+      vaddr,
+      runtime_cause());
   RBLN_LOG_DEBUG(
       "export_device_memory: vaddr={:#x} size={} fds={}",
       vaddr,
@@ -740,9 +745,10 @@ void* malloc_exportable(c10::DeviceIndex device_index, size_t nbytes) {
   RBLN_CHECK(
       !::rbln::rbln_malloc_exportable(
           torch_device_id, static_cast<uint64_t>(nbytes), vaddr),
-      "rbln_malloc_exportable failed (rbln:{}, {} bytes); check that /dev/accel is accessible",
+      "rbln_malloc_exportable failed (rbln:{}, {} bytes): {}",
       static_cast<int>(device_index),
-      nbytes);
+      nbytes,
+      runtime_cause());
   auto* data =
       reinterpret_cast<void*>(vaddr); // NOLINT(performance-no-int-to-ptr)
   RBLN_CHECK(data != nullptr, "malloc_exportable returned a null pointer");
@@ -753,6 +759,25 @@ void* malloc_exportable(c10::DeviceIndex device_index, size_t nbytes) {
       nbytes,
       vaddr);
   return data;
+}
+
+c10::DeviceIndex resolve_import_device(const std::vector<uint8_t>& payload) {
+  require_runtime("resolve the import device");
+  auto& manager = DeviceMappingManager::getInstance();
+  manager.commit();
+  uint32_t torch_device_id = 0;
+  RBLN_CHECK(
+      !::rbln::rbln_resolve_import_device(payload, torch_device_id),
+      "rbln_resolve_import_device failed: {}",
+      runtime_cause());
+  const auto device_count = manager.getLogicalDeviceCount();
+  RBLN_CHECK(
+      torch_device_id < static_cast<uint32_t>(device_count),
+      "the exporter's NPUs map to runtime device {}, which is not one of this process's {} rbln device(s); pass "
+      "device explicitly",
+      torch_device_id,
+      static_cast<int>(device_count));
+  return static_cast<c10::DeviceIndex>(torch_device_id);
 }
 
 void* import_device_memory(
@@ -773,11 +798,11 @@ void* import_device_memory(
   RBLN_CHECK(
       !::rbln::rbln_import_device_memory(
           torch_device_id, static_cast<uint64_t>(nbytes), payload, fds, vaddr),
-      "rbln_import_device_memory failed (rbln:{}, {} fds, {} bytes); check that /dev/accel is accessible and the "
-      "handle was exported from the same device",
+      "rbln_import_device_memory failed (rbln:{}, {} fds, {} bytes): {}",
       static_cast<int>(device_index),
       fds.size(),
-      nbytes);
+      nbytes,
+      runtime_cause());
   auto* data =
       reinterpret_cast<void*>(vaddr); // NOLINT(performance-no-int-to-ptr)
   RBLN_CHECK(data != nullptr, "import_device_memory returned a null pointer");
