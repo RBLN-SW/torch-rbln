@@ -58,8 +58,6 @@ test/
 │
 ├── rbln/                                  # RBLN backend-specific tests
 │   ├── test_abi_check.py                  # rebel ABI handshake between this build and the loaded librbln.so
-│   ├── test_custom_kernel.py              # RBLN custom kernels
-│   ├── test_custom_op_compile.py          # Paged-attention custom ops inside a larger compiled graph (engine graph mode)
 │   ├── test_device_mapping.py             # Device mapping and topology APIs
 │   ├── test_graph_eager_mode.py           # Numerical agreement between torch.compile graph mode and eager mode
 │   ├── test_internal_op_utils.py          # Internal op utilities
@@ -135,6 +133,20 @@ The `core` suite runs `test/rbln`; `distributed`, `models`, and `ops` run
 `test/<suite>`, and `models` needs the
 [model-test dependencies](#prerequisites). CI counts a `pytest` run that
 collects nothing (exit code 5) as no failure.
+
+### Split a run into shards
+
+`--shard=K/N` runs the K-th of N shards, with K numbered from 1. Sharding
+keeps every N-th test in collection order after `-m` and `-k` filtering, so
+running all N shards with the same filters runs each selected test once.
+
+For concurrent local distributed shards, set `RCCL_PORT_GEN=1` and give
+each shard disjoint physical NPUs through `RBLN_DEVICES`. The default RCCL
+initialization path cannot run two groups on one host.
+
+Each shard defaults `MASTER_PORT` to `29604 + K - 1`, preserving an existing
+value. Concurrent jobs must not inherit the same `MASTER_PORT`; unset it to
+use the defaults, or assign distinct unused ports if needed.
 
 ### Run individual tests
 
@@ -402,6 +414,9 @@ From `test/utils.py`:
 | `SUPPORTED_DTYPES`                     | Baseline dtype list for RBLN backend tests, derived from `torch_rbln._internal.ops_utils.SupportedDtypes.dispatch`.             |
 | `set_deterministic_seeds(seed)`        | Sets `torch`, `numpy`, and `random` seeds. Must be called in each spawned process for reproducibility.                          |
 | `run_in_isolated_process(func, *args)` | Runs `func` in a fresh `spawn`-method process. Useful when tests need clean process state. `func` and `args` must be picklable. |
+| `run_ranks(test_func, args, nprocs)`   | Forks ranks with `torch` preloaded; import-time env values retain the forkserver's settings. Vary them with `mp.spawn`.         |
+
+Pass `spawn_target_with_clean_exit` as the target of `mp.spawn`.
 
 ### Op filtering
 
@@ -619,36 +634,6 @@ class TestMemoryStats(TestCase):
 > selected RBLN device and the current stream — rely on the autouse
 > `restore_current_device` / `restore_current_stream` guards in
 > `test/conftest.py` that repair them after each test.
-
-### Custom kernel template
-
-For testing custom RBLN operators registered via `torch.library.custom_op`:
-
-```python
-import pytest
-import rebel  # noqa: F401
-import torch
-from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
-from torch.testing._internal.common_utils import TestCase
-
-from test.utils import SUPPORTED_DTYPES
-
-
-@pytest.mark.npu(count=1)
-@pytest.mark.no_dynamo_reset  # Keep the compile cache across tests
-class TestCustomKernel(TestCase):
-
-    @dtypes(*SUPPORTED_DTYPES)
-    def test_custom_op(self, device, dtype):
-        # Call the custom operator
-        result = torch.ops.rbln_custom_ops.my_custom_op(
-            torch.randn([4, 4], dtype=dtype, device=device)
-        )
-        self.assertEqual(result.shape, (4, 4))
-
-
-instantiate_device_type_tests(TestCustomKernel, globals(), only_for="privateuse1")
-```
 
 ### C++ template
 

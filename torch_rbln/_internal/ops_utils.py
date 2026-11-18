@@ -1145,7 +1145,9 @@ def _is_known_bad_pattern(recipe):
     correctly. The BFS will then prefer an algebraically-equivalent
     alternative (e.g. ``narrow → permute`` instead of ``permute → narrow``).
 
-    Add new entries here as new rebel bugs surface.
+    Add new entries here as new rebel bugs surface. Each rule matches one step or
+    two adjacent steps, so a recipe that matches still matches however it is
+    extended; ``_bfs_search_recipe`` relies on that to stop extending it.
     """
     # 1. ``permute → narrow(non-leading dim)`` → ``inf`` outputs; ``narrow →
     #    permute`` works. (repro 2026-04-30: ``base.narrow(0,2,4).permute(2,0,1)``)
@@ -1319,30 +1321,26 @@ def _bfs_search_recipe(base, t, max_steps=4):
     if start == target:
         return ()
 
-    visited: dict[tuple, tuple] = {start: ()}
-    frontier = [start]
-
+    visited: set[tuple] = {(start, None)}
+    frontier = [(start, ())]
     for _ in range(max_steps):
         next_frontier = []
-        for cur in frontier:
-            cur_recipe = visited[cur]
+        for cur, cur_recipe in frontier:
             for step in _gen_step_candidates(cur, target):
+                new_recipe = (*cur_recipe, step)
+                if _is_known_bad_pattern(new_recipe):
+                    continue
                 new_state = _simulate_recipe(cur[0], cur[1], cur[2], (step,))
                 if new_state is None:
                     continue
-                new_recipe = (*cur_recipe, step)
                 if new_state == target:
-                    # Reached the goal — accept if not blocklisted, else keep
-                    # exploring other paths through OTHER intermediate states
-                    # (do NOT add target to visited, so alternative-route
-                    # arrivals can also be considered).
-                    if not _is_known_bad_pattern(new_recipe):
-                        return new_recipe
+                    return new_recipe
+                # Blocklist rules depend on the previous op, so keep it in the key.
+                key = (new_state, step[0])
+                if key in visited:
                     continue
-                if new_state in visited:
-                    continue
-                visited[new_state] = new_recipe
-                next_frontier.append(new_state)
+                visited.add(key)
+                next_frontier.append((new_state, new_recipe))
         frontier = next_frontier
         if not frontier:
             break
@@ -1675,33 +1673,24 @@ def prepare_args_view_aware(args, kwargs_filtered):
 _view_op_module_cache: dict = {}
 
 
-def get_view_op_module(op_callable_or_module, view_recipes):
+def get_view_op_module(op_callable, view_recipes):
     """Return an ``nn.Module`` whose forward applies the per-arg view recipes
     to its positional args, then invokes the underlying op.
 
-    Accepts either a plain callable (e.g. ``torch.mul``) or a pre-built
-    ``nn.Module`` (e.g. the custom-kernel modules defined in
-    ``register_custom_ops.py``). With recipes that are all ``None``, returns
-    the original module/callable directly (avoids unnecessary wrapping —
-    preserves compile_rbln_cached cache hits for the existing module
-    identity in ``register_custom_ops``). With non-trivial recipes, builds
-    a wrapping module that applies each per-arg recipe step inside its
-    forward, then calls the underlying op.
+    ``op_callable`` is a plain callable (e.g. ``torch.mul``). With recipes that
+    are all ``None``, returns a cached pass-through module. With non-trivial
+    recipes, builds a wrapping module that applies each per-arg recipe step
+    inside its forward, then calls the underlying op.
 
     Cache key is ``(id(callable), recipes)`` so distinct view patterns get
     distinct compiled graphs while a fresh pass-through doesn't churn the
     cache.
     """
-    is_module = isinstance(op_callable_or_module, torch.nn.Module)
-    op_callable = op_callable_or_module
     has_views = any(r is not None for r in view_recipes)
 
     if not has_views:
-        if is_module:
-            return op_callable_or_module  # reuse as-is, no wrap
-        # Plain callable, no views: cache a pass-through nn.Module so
-        # compile_rbln_cached's identity-keyed cache works the same as the
-        # historical ``_<op>_op_module`` style.
+        # No views: cache a pass-through nn.Module so compile_rbln_cached's
+        # identity-keyed cache hits on every call for this op.
         key = (id(op_callable), ())
         cached = _view_op_module_cache.get(key)
         if cached is not None:

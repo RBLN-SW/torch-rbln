@@ -77,14 +77,16 @@ cpu = {
     "w": torch.randn(100, 100) * 0.1,
     "bias": torch.randn(100) * 0.1,
     "p": torch.rand(5, 100) + 0.1,
+    "m": torch.rand(5, 100) > 0.5,
 }
 cpu["a3"], cpu["w3"] = cpu["a"].expand(2, 5, 100), cpu["w"].expand(2, 100, 100)
-dev = {k: v.to(torch.bfloat16).contiguous().to("rbln") for k, v in cpu.items()}
-fn = lambda a, b, w, bias, a3, w3, p: EXPR
+cast = lambda v: v if v.dtype == torch.bool else v.to(torch.bfloat16)
+dev = {k: cast(v).contiguous().to("rbln") for k, v in cpu.items()}
+fn = lambda a, b, w, bias, a3, w3, p, m: EXPR
 _C._dispatch_fallback_by_op_reset()
 got = fn(**dev)
 torch.rbln.synchronize()
-want = fn(**{k: v.to(torch.bfloat16).float() for k, v in cpu.items()})
+want = fn(**{k: v if v.dtype == torch.bool else cast(v).float() for k, v in cpu.items()})
 if want.dtype == torch.bool:
     close = torch.equal(got.cpu(), want)
 else:
@@ -102,12 +104,13 @@ _EXEMPT_EXPRS = [
     ("bmm", "torch.bmm(a3, w3)"),
     ("addmm", "torch.addmm(bias, a, w)"),
     ("linear", "torch.nn.functional.linear(a, w, bias)"),
+    ("neg", "torch.neg(a)"),
+    ("where", "torch.where(m, a, b)"),
 ]
 
 # Unaligned shapes of these still run on the host inside the compiled module.
 _NON_EXEMPT_EXPRS = [
     ("pow", "torch.pow(a, 3)"),
-    ("neg", "torch.neg(a)"),
     ("abs", "torch.abs(a)"),
     ("ceil", "torch.ceil(a)"),
     ("floor", "torch.floor(a)"),

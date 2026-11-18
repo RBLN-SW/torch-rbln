@@ -165,7 +165,7 @@ def compile_error_retry():
 
 cases = {
     "wrapper_check": lambda: offset + offset,
-    "device_entry_check": lambda: torch.neg(unaligned),
+    "device_entry_check": lambda: torch.abs(unaligned),
     "shim_precheck": lambda: scalar * scalar,
     "registered_op": lambda: aligned.flip(0),
     "unregistered_op": lambda: torch.lgamma(aligned),
@@ -200,7 +200,7 @@ class TestCpuFallbackRecordsItsReason(TestCase):
             reasons,
             {
                 "wrapper_check": {"aten::add.out": {"storage_offset": 1}},
-                "device_entry_check": {"aten::neg.out": {"align": 1}},
+                "device_entry_check": {"aten::abs.out": {"align": 1}},
                 "shim_precheck": {"aten::mul.out": {"scalar": 1}},
                 "registered_op": {"aten::flip": {"registered": 1}},
                 "unregistered_op": {"aten::lgamma.out": {"unsupported_op": 1}},

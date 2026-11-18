@@ -163,7 +163,9 @@ class OpCategories:
 
     # Shim ops whose unaligned device inputs the compiler pads itself, so the Python
     # path skips the 64-element alignment fallback for them.
-    ALIGN_EXEMPT_OPS: ClassVar[set[str]] = {"add", "sub", "mul", "div"} | {name.split(".")[0] for name in SHIM_MATMUL}
+    ALIGN_EXEMPT_OPS: ClassVar[set[str]] = {"add", "sub", "mul", "div", "neg", "where"} | {
+        name.split(".")[0] for name in SHIM_MATMUL
+    }
 
     # Broadcastable shim ops whose size-1 last-dim operand the device broadcasts, so
     # the alignment check reads the output's last dim. pow is left out: its

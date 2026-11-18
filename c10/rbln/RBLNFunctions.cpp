@@ -225,6 +225,24 @@ std::string runtime_cause() {
                                                   : "see the runtime log";
 }
 
+// Throws unless `rc` is success, with the runtime's own reason
+// (rbln_get_last_error_message()).
+void check_runtime_rc(
+    RBLNRetCode rc,
+    const char* api,
+    const std::string& target) {
+  if (rc == RBLNRetCode_SUCCESS) {
+    return;
+  }
+  RBLN_CHECK(
+      false,
+      "{} failed for {} (rc={}): {}",
+      api,
+      target,
+      static_cast<int>(rc),
+      runtime_cause());
+}
+
 } // namespace
 
 ::rbln::DataType to_rbln_dtype(c10::ScalarType dtype) {
@@ -284,10 +302,6 @@ c10::DeviceIndex get_device_count() {
 }
 
 DeviceProperties get_device_properties(c10::DeviceIndex device_index) {
-  RBLN_CHECK(
-      !is_dummy_device(),
-      "get_device_properties() reports what the hardware says, and RBLN_DUMMY_DEVICE has no NPU behind it");
-
   const auto physical_device_ids =
       DeviceMappingManager::getInstance().getPhysicalDeviceIds(device_index);
   RBLN_CHECK(
@@ -298,12 +312,13 @@ DeviceProperties get_device_properties(c10::DeviceIndex device_index) {
   DeviceProperties properties;
   for (const int physical_device_id : physical_device_ids) {
     RBLNDeviceProperties npu{};
-    RBLN_CHECK(
-        !rbln_get_device_properties(physical_device_id, &npu),
-        "rbln_get_device_properties failed for NPU {} behind rbln:{}; the device may be absent or held by "
-        "another process — check $rbln-smi",
-        physical_device_id,
-        static_cast<int>(device_index));
+    check_runtime_rc(
+        rbln_get_device_properties(physical_device_id, &npu),
+        "rbln_get_device_properties",
+        fmt::format(
+            "rbln:{} (physical NPU {})",
+            static_cast<int>(device_index),
+            physical_device_id));
 
     if (properties.npu_count == 0) {
       properties.name = npu.name;
@@ -1654,12 +1669,15 @@ c10::CachingDeviceAllocator::DeviceStats get_device_stats(
   return stats;
 }
 
-void empty_cache(const c10::Device& device) {
-  RBLN_LOG_DEBUG("logical device={}", c10::str(device));
-  // Two-level context gate (CUDA parity). Context flag FIRST: no allocator
-  // state anywhere → no-op (a no-context parent or malformed config; nothing to
-  // free). Otherwise validate the index (invalid throws) and skip a device
-  // never used here.
+namespace {
+
+// Shared by empty_cache / reset_*_memory_stats (CUDA parity): a no-op unless
+// this device has a live context; there, a runtime failure is raised.
+void run_cache_mgmt(
+    const c10::Device& device,
+    const char* api,
+    RBLNRetCode (*call)(int)) {
+  RBLN_LOG_DEBUG("{}: logical device={}", api, c10::str(device));
   if (!any_device_context_initialized() || !runtime_available()) {
     return;
   }
@@ -1668,19 +1686,18 @@ void empty_cache(const c10::Device& device) {
   if (!device_context_initialized(device_index)) {
     return;
   }
-  if (is_dummy_device()) {
-    return;
-  }
   const auto device_id = to_device_id(device_index);
-  RBLN_LOG_DEBUG("Calling rbln_empty_cache: device_id={}", device_id);
-  // Live context: surface a genuine failure (CUDA parity — an initialized
-  // allocator propagates real errors); rc included for diagnosis.
-  const auto rc = rbln_empty_cache(device_id);
-  RBLN_CHECK(
-      !rc,
-      "rbln_empty_cache failed for rbln:{} (rc={}); the device may be busy or in a faulted state",
-      static_cast<int>(device_index),
-      static_cast<int>(rc));
+  RBLN_LOG_DEBUG("Calling {}: device_id={}", api, device_id);
+  check_runtime_rc(
+      call(device_id),
+      api,
+      fmt::format("rbln:{}", static_cast<int>(device_index)));
+}
+
+} // namespace
+
+void empty_cache(const c10::Device& device) {
+  run_cache_mgmt(device, "rbln_empty_cache", &rbln_empty_cache);
 }
 
 std::map<std::string, uint64_t> memory_stats(const c10::Device& device) {
@@ -1766,19 +1783,10 @@ std::vector<RBLNDeviceMemoryInfo> device_memory_info_per_npu(
   for (const int physical_id :
        DeviceMappingManager::getInstance().getPhysicalDeviceIds(device_index)) {
     RBLNDeviceMemoryInfo info{};
-    const auto rc = rbln_get_device_memory_info(physical_id, &info);
-    RBLN_CHECK(
-        rc != RBLNRetCode_UNSUPPORTED,
-        "Device memory info is not available for {} (physical NPU {}): the installed RBLN UMD/KMD does not "
-        "provide the device memory query, or RBLN_DUMMY_DEVICE is set. Update the driver to use mem_get_info().",
-        c10::str(device),
-        physical_id);
-    RBLN_CHECK(
-        rc == RBLNRetCode_SUCCESS,
-        "rbln_get_device_memory_info failed for {} (physical NPU {}, rc={}); see the runtime log",
-        c10::str(device),
-        physical_id,
-        static_cast<int>(rc));
+    check_runtime_rc(
+        rbln_get_device_memory_info(physical_id, &info),
+        "rbln_get_device_memory_info",
+        fmt::format("{} (physical NPU {})", c10::str(device), physical_id));
     replies.push_back(info);
   }
   return replies;
@@ -1832,58 +1840,17 @@ std::map<std::string, uint64_t> per_chiplet_memory_map(
 }
 
 void reset_accumulated_memory_stats(const c10::Device& device) {
-  RBLN_LOG_DEBUG("logical device={}", c10::str(device));
-  // Two-level context gate (see empty_cache); context flag first.
-  if (!any_device_context_initialized() || !runtime_available()) {
-    return;
-  }
-  const auto device_index = device.index();
-  check_device_index(device_index);
-  if (!device_context_initialized(device_index)) {
-    return;
-  }
-  if (is_dummy_device()) {
-    return;
-  }
-  const auto device_id = to_device_id(device_index);
-  RBLN_LOG_DEBUG(
-      "Calling rbln_reset_accumulated_memory_stats: device_id={}", device_id);
-  // Live context: surface a genuine failure (a silent success would mislead the
-  // caller).
-  const auto rc = rbln_reset_accumulated_memory_stats(device_id);
-  RBLN_CHECK(
-      !rc,
-      "rbln_reset_accumulated_memory_stats failed for rbln:{} (rc={})",
-      static_cast<int>(device_index),
-      static_cast<int>(rc));
+  run_cache_mgmt(
+      device,
+      "rbln_reset_accumulated_memory_stats",
+      &rbln_reset_accumulated_memory_stats);
 }
 
 void reset_peak_memory_stats(const c10::Device& device) {
-  RBLN_LOG_DEBUG("logical device={}", c10::str(device));
-  // Two-level context gate (see empty_cache); context flag first. This is also
-  // the only guard for the generic torch.accelerator.reset_peak path (no Python
-  // init-guard upstream).
-  if (!any_device_context_initialized() || !runtime_available()) {
-    return;
-  }
-  const auto device_index = device.index();
-  check_device_index(device_index);
-  if (!device_context_initialized(device_index)) {
-    return;
-  }
-  if (is_dummy_device()) {
-    return;
-  }
-  const auto device_id = to_device_id(device_index);
-  RBLN_LOG_DEBUG(
-      "Calling rbln_reset_peak_memory_stats: device_id={}", device_id);
-  // Live context: surface a genuine failure.
-  const auto rc = rbln_reset_peak_memory_stats(device_id);
-  RBLN_CHECK(
-      !rc,
-      "rbln_reset_peak_memory_stats failed for rbln:{} (rc={})",
-      static_cast<int>(device_index),
-      static_cast<int>(rc));
+  // run_cache_mgmt's context gate is also the only guard for the generic
+  // torch.accelerator.reset_peak path (no Python init-guard upstream).
+  run_cache_mgmt(
+      device, "rbln_reset_peak_memory_stats", &rbln_reset_peak_memory_stats);
 }
 
 void set_file_offloading_enabled(bool enabled) {

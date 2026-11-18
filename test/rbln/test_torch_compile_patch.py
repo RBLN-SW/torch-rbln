@@ -9,7 +9,7 @@ import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from torch_rbln._internal import monkey_patches, register_custom_ops, warm_cache
+from torch_rbln._internal import monkey_patches, warm_cache
 from torch_rbln._internal.compile_cache import clear_rbln_compile_cache, compile_rbln_cached
 from torch_rbln._internal.monkey_patches import patch_torch_compile, remove_all_patches
 from torch_rbln._internal.ops_utils import extract_device_id_from_inputs
@@ -993,56 +993,6 @@ class TestTorchCompileMonkeyPatch(TestCase):
         monkey_patches._rbln_backend_registered = False
         monkey_patches.apply_all_patches()
 
-    def _make_paged_attn_inputs(self):
-        q = torch.zeros((1, 1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
-        k = torch.zeros((1, 1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
-        v = torch.zeros((1, 1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
-        attn_mask = torch.zeros((1, 1, 1), device="rbln:0", dtype=torch.float16)
-        k_cache = torch.zeros((1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
-        v_cache = torch.zeros((1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
-        seq = torch.zeros((1, 1), dtype=torch.int32)
-        scale = torch.tensor(1.0)
-        block_table = torch.zeros((1, 1), dtype=torch.int32)
-        block_size = 16
-        return (q, k, v, attn_mask, k_cache, v_cache, seq, scale, block_table, block_size)
-
-    def _make_paged_causal_attn_prefill_inputs(self):
-        q = torch.zeros((1, 1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
-        k = torch.zeros((1, 1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
-        v = torch.zeros((1, 1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
-        k_cache = torch.zeros((1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
-        v_cache = torch.zeros((1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
-        seq = torch.zeros((1, 1), dtype=torch.int32)
-        scale = torch.tensor(1.0)
-        block_table = torch.zeros((1, 1), dtype=torch.int32)
-        block_size = 16
-        is_bidirectional = False
-        return (q, k, v, k_cache, v_cache, seq, scale, block_table, block_size, is_bidirectional)
-
-    def _make_paged_causal_attn_decode_inputs(self):
-        q = torch.zeros((1, 1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
-        k = torch.zeros((1, 1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
-        v = torch.zeros((1, 1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
-        k_cache = torch.zeros((1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
-        v_cache = torch.zeros((1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
-        seq = torch.zeros((1, 1), dtype=torch.int32)
-        scale = torch.tensor(1.0)
-        block_table = torch.zeros((1, 1), dtype=torch.int32)
-        block_size = 16
-        return (q, k, v, k_cache, v_cache, seq, scale, block_table, block_size)
-
-    def _make_flash_attention_naive_inputs(self):
-        q = torch.zeros((1, 1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
-        k = torch.zeros((1, 1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
-        v = torch.zeros((1, 1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
-        kv_cache = torch.zeros((1, 1, 1, 64), device="rbln:0", dtype=torch.float16)
-        mask = torch.zeros((1, 1, 1), device="rbln:0", dtype=torch.float16)
-        scale = torch.tensor(1.0)
-        seq_idx = torch.zeros((1, 1), dtype=torch.int32)
-        block_tables = torch.zeros((1, 1), dtype=torch.int32)
-        slot_mapping = torch.zeros((1, 1), dtype=torch.int32)
-        return (q, k, v, kv_cache, mask, scale, seq_idx, block_tables, slot_mapping)
-
     def test_patch_torch_compile_idempotent(self):
         """Test that patching multiple times is safe."""
         patch_torch_compile()
@@ -1149,59 +1099,6 @@ class TestTorchCompileMonkeyPatch(TestCase):
         self.assertIs(first, compiled_a)
         self.assertIs(second, compiled_b)
         self.assertEqual(mock_compile.call_count, 2)
-
-    @pytest.mark.npu(count=1)
-    def test_custom_attn_kernel_paths_reuse_singleton_modules(self):
-        """Custom attention kernels should hand a stable module singleton to the compile
-        cache.
-        """
-        cases = [
-            (
-                register_custom_ops.paged_attn_prefill_rbln,
-                register_custom_ops._paged_attn_prefill_op_module,
-                self._make_paged_attn_inputs,
-            ),
-            (
-                register_custom_ops.paged_attn_decode_rbln,
-                register_custom_ops._paged_attn_decode_op_module,
-                self._make_paged_attn_inputs,
-            ),
-            (
-                register_custom_ops.paged_causal_attn_prefill_rbln,
-                register_custom_ops._paged_causal_attn_prefill_op_module,
-                self._make_paged_causal_attn_prefill_inputs,
-            ),
-            (
-                register_custom_ops.paged_causal_attn_decode_rbln,
-                register_custom_ops._paged_causal_attn_decode_op_module,
-                self._make_paged_causal_attn_decode_inputs,
-            ),
-            (
-                register_custom_ops.flash_attention_naive_prefill_rbln,
-                register_custom_ops._flash_attention_naive_prefill_op_module,
-                self._make_flash_attention_naive_inputs,
-            ),
-            (
-                register_custom_ops.flash_attention_naive_decode_rbln,
-                register_custom_ops._flash_attention_naive_decode_op_module,
-                self._make_flash_attention_naive_inputs,
-            ),
-        ]
-
-        for kernel_fn, expected_module, make_inputs in cases:
-            seen_models = []
-
-            def fake_dispatch(op_module, args, view_recipes, seen_models=seen_models):  # noqa: ARG001
-                seen_models.append(op_module)
-                return args[0].clone()
-
-            with patch.object(register_custom_ops, "_dispatch_custom_kernel", side_effect=fake_dispatch):
-                kernel_fn(*make_inputs())
-                kernel_fn(*make_inputs())
-
-            self.assertEqual(len(seen_models), 2)
-            self.assertIs(seen_models[0], expected_module)
-            self.assertIs(seen_models[1], expected_module)
 
     def test_compile_rbln_cached_recompiles_after_dynamo_reset(self):
         """torch._dynamo.reset should also clear the RBLN eager compile cache."""

@@ -58,8 +58,8 @@ steps:
     timeout_in_minutes: 5
     resources:
       cpu:
-        requests: "32"
-        limits: "32"
+        requests: "1"
+        limits: "1"
       npu:
         count: 2
         product:
