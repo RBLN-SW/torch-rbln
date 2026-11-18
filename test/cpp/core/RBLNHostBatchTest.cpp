@@ -152,8 +152,8 @@ TEST_F(RBLNHostBatchTest, H2VMultipleEntriesOneSubmit) {
 }
 
 // Past the v2v per-destination limit, which h2v/v2h do not have, and past the
-// 16-entry bulk cap: the batch splits into many bulk calls and every entry must
-// still land.
+// copies one device command buffer takes: the runtime splits the one bulk call
+// into many buffers and every entry must still land.
 TEST_F(RBLNHostBatchTest, H2VLargeBatchExceedsV2VCap) {
   constexpr size_t entries = 2048; // > kMaxV2VMultiCopies (1024)
   constexpr size_t chunk = 8;
