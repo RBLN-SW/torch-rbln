@@ -469,6 +469,25 @@ class TestDispatchShimDtypeMismatch(TestCase):
             self.assertIs(result, x)
             self.assertEqual(x.data_ptr(), ptr)
 
+    def test_mixed_where_with_cpu_scalar_condition_preserves_device(self, device) -> None:
+        cond = torch.ones((), dtype=torch.bool, device="cpu")
+        x = torch.ones(64, dtype=torch.float32, device=device)
+        y = torch.zeros(64, dtype=torch.bfloat16, device=device)
+        expected = torch.where(cond, x.cpu(), y.cpu())
+        _C._warmcache_clear()
+        _C._dispatch_fallback_by_op_reset()
+        before = _dispatch_counts()
+        with mock.patch.dict(os.environ):
+            os.environ.pop("TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK", None)
+            result = torch.where(cond, x, y)
+        after = _dispatch_counts()
+
+        self.assertEqual(result.device, x.device)
+        self.assertEqual(result.cpu(), expected)
+        self.assertEqual(after[1], before[1], "CPU scalar condition entered native CPU fallback")
+        self.assertEqual(after[3] - before[3], 1)
+        self.assertIn(("aten::where.self", "dtype", 1), _C._dispatch_fallback_by_op_reason())
+
     def test_mixed_empty_inputs_keep_the_no_fallback_path(self) -> None:
         x = torch.empty((0, 64), dtype=torch.bfloat16, device="rbln")
         y = torch.empty((0, 64), dtype=torch.float32, device="rbln")
