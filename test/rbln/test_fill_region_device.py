@@ -126,10 +126,8 @@ class TestFillRegionDevice(TestCase):
         host = x.cpu()
         self.assertTrue(torch.all(host[:, :100] == -1.0) and torch.all(host[:, 100:] == 2.5))
 
-    def test_region_above_bulk_caps_is_split_and_correct(self):
-        # more entries and more bytes than one bulk call may carry (RBLNHostBatch.cpp
-        # caps):
-        # H2VBatch must split the submit
+    def test_large_region_fill_is_correct(self):
+        # a region of many MiB-sized runs: filled without reading the storage back
         x = _device_latest((32, 524288))
         ref = x.cpu()
         ref[:, :262144].fill_(1.0)
