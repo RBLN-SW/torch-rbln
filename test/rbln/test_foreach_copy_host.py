@@ -444,9 +444,8 @@ class TestForeachCopyHost(TestCase):
             self.assertTrue(torch.equal(got, want))
 
     def test_large_batch_is_one_submit(self):
-        """The runtime splits a bulk call into the command buffers the device takes
-        and runs them back to back, so a batch is one call whatever its size:
-        40 pairs of 1 MiB, 40 pairs of 64 KiB, or one pair of 12 MiB.
+        """A batch is one call whatever its size: 40 pairs of 1 MiB, 40 pairs of
+        64 KiB, or one pair of 12 MiB.
         """
         for elems, n_pairs in (((1 << 20) // 4, 40), ((64 << 10) // 4, 40), ((12 << 20) // 4, 1)):
             what = f"{n_pairs} pairs of {elems * 4} B"

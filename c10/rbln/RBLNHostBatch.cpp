@@ -50,25 +50,6 @@ void submit_one_call(
 }
 
 /**
- * @brief Flush one homogeneous group as one bulk call.
- *
- * The runtime splits a bulk call into the command buffers the device takes
- * (copy count and bytes per buffer) and runs them back to back, so the group is
- * not split here: each extra call is a synchronous round trip of its own.
- */
-template <typename Desc, typename BulkFn, typename OneFn>
-void flush_group(
-    const std::vector<Desc>& group,
-    const char* who,
-    const BulkFn& bulk,
-    const OneFn& one) {
-  if (group.empty()) {
-    return;
-  }
-  submit_one_call(group, who, bulk, one);
-}
-
-/**
  * @brief Submit every entry, one bulk call per anchoring device.
  *
  * The homogeneous case submits the pending vector as is — no copy, no per-entry
@@ -88,7 +69,7 @@ void submit_grouped(
         "{}::submit draining {} entries (single device)",
         who,
         st.pending.size());
-    flush_group(st.pending, who, bulk, one);
+    submit_one_call(st.pending, who, bulk, one);
     return;
   }
   // Ordered so submit order is deterministic by device index.
@@ -102,7 +83,7 @@ void submit_grouped(
       st.pending.size(),
       by_device.size());
   for (const auto& [dev, group] : by_device) {
-    flush_group(group, who, bulk, one);
+    submit_one_call(group, who, bulk, one);
   }
 }
 

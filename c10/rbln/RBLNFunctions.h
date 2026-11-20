@@ -642,8 +642,7 @@ struct C10_RBLN_API V2HCopyOp {
  *   - every `src` valid and unchanged until this call returns
  *
  * Entries are unordered and a failed call may have applied some of them (no
- * rollback). rbln_runtime_api.h documents no entry cap, but oversized calls do
- * time out in practice — see the cap in RBLNHostBatch.cpp.
+ * rollback).
  */
 C10_RBLN_API void memcpy_h2v_multi(const std::vector<H2VCopyOp>& copies);
 
