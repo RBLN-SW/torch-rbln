@@ -12,7 +12,7 @@ prefill<->decode alternation.
 
 The cache is allocated the way an engine allocates it, because the allocation is what
 the sharding applies to: an untyped buffer, reinterpreted as the KV dtype and shaped
-``[blocks, heads, 1, block_size, head_dim]``.
+``[blocks, 2, heads, 1, block_size, head_dim]`` -- K and V packed on dim 1.
 
 What this checks, from the torch-rbln side only:
 
@@ -64,29 +64,18 @@ DECODE_TOKENS = [7, 3, 11, 5]  # then 4 decode steps
 REPORTED_POSITIONS = 32
 
 
-def new_caches(device, dtype):
-    """Allocate the KV caches the way an engine does: untyped buffers, viewed as the KV
+def new_cache(device, dtype):
+    """Allocate the KV cache the way an engine does: an untyped buffer, viewed as the KV
     dtype.
 
     An engine sizes its KV pool in bytes and allocates it untyped, then reinterprets it
-    as the cache dtype and shapes it ``[blocks, heads, 1, block_size, head_dim]``. That
-    untyped buffer is the allocation the sharding applies to, and every access in this
-    test -- the graph's and the engine's -- goes through a view of it.
-
-    K and V get a buffer each. An engine keeps them in one allocation and hands the
-    kernel the combined ``[2, blocks, ...]`` tensor; the paged-attention op here takes
-    them as two arguments, and two mutated graph inputs that alias one storage are
-    rejected by the runtime.
+    as the cache dtype and shapes it ``[blocks, 2, heads, 1, block_size, head_dim]``.
+    That untyped buffer is the allocation the sharding applies to, and every access in
+    this test -- the graph's and the engine's -- goes through a view of it.
     """
-
-    def one():
-        elements = NBLOCKS * KV_HEADS * MAXLEN * HD
-        raw = torch.zeros(elements * torch.empty((), dtype=dtype).element_size(), dtype=torch.int8, device=device)
-        return raw, raw.view(dtype).view(NBLOCKS, KV_HEADS, 1, MAXLEN, HD)
-
-    k_raw, k_cache = one()
-    v_raw, v_cache = one()
-    return (k_raw, v_raw), k_cache, v_cache
+    elements = NBLOCKS * 2 * KV_HEADS * MAXLEN * HD
+    raw = torch.zeros(elements * torch.empty((), dtype=dtype).element_size(), dtype=torch.int8, device=device)
+    return raw, raw.view(dtype).view(NBLOCKS, 2, KV_HEADS, 1, MAXLEN, HD)
 
 
 def step_inputs(ids, ctx, device, dtype, block=SEQ_BLOCK):
@@ -104,9 +93,9 @@ def step_inputs(ids, ctx, device, dtype, block=SEQ_BLOCK):
 class Decoder(torch.nn.Module):
     """Embedding -> paged attention over a persistent KV cache -> MLP -> LM head.
 
-    The attention is ``rbln_custom_ops.paged_attn_{prefill,decode}``: the kernel an
+    The attention is ``rbln_custom_ops.attention_naive_{prefill,decode}``: the kernel an
     engine's graph mode runs, which writes the new k/v into the block ``block_table``
-    names and attends over it. The caches are *inputs* of the program; ``seq`` is the
+    names and attends over it. The cache is an *input* of the program; ``seq`` is the
     context length already in the block, so prefill writes positions ``0..T-1`` and a
     decode step writes position ``seq``. Both phases are static-shape programs (T =
     prompt length, T = 1).
@@ -126,19 +115,25 @@ class Decoder(torch.nn.Module):
         self.lnf = torch.nn.LayerNorm(D)
         self.head = torch.nn.Linear(D, VOCAB)
 
-    def attention(self, q, k, v, mask, k_cache, v_cache, seq, block_table):
+    def attention(self, q, k, v, mask, kv_cache, seq, block_table):
         scale = torch.tensor(1.0 / HD**0.5)  # the kernel takes scale as a constant tensor
         prefill = q.shape[3] > 1
-        op = torch.ops.rbln_custom_ops.paged_attn_prefill if prefill else torch.ops.rbln_custom_ops.paged_attn_decode
-        return op(q, k, v, mask, k_cache, v_cache, seq, scale, block_table, MAXLEN)
+        op = (
+            torch.ops.rbln_custom_ops.attention_naive_prefill
+            if prefill
+            else torch.ops.rbln_custom_ops.attention_naive_decode
+        )
+        # The last operand is ``dummy``, which the kernel does not read but needs as a
+        # constant scalar; ``scale`` serves.
+        return op(q, k, v, kv_cache, mask, seq, scale, block_table, scale)
 
-    def forward(self, ids, seq, mask, block_table, k_cache, v_cache):
+    def forward(self, ids, seq, mask, block_table, kv_cache):
         t = ids.shape[1]
         x = self.emb(ids)
         h = self.ln(x)
         q = self.q(h).view(1, t, KV_HEADS, Q_PER_KV, HD).permute(0, 2, 3, 1, 4)  # [1, KV, Q, T, HD]
         k, v = self.kv(h).view(1, t, 2, KV_HEADS, 1, HD).permute(2, 0, 3, 4, 1, 5)  # [1, KV, 1, T, HD]
-        a = self.attention(q, k, v, mask, k_cache, v_cache, seq, block_table)
+        a = self.attention(q, k, v, mask, kv_cache, seq, block_table)
         x = x + self.o(a.permute(0, 3, 1, 2, 4).reshape(1, t, D))
         x = x + self.fc2(torch.nn.functional.gelu(self.fc1(self.ln2(x))))
         return self.head(self.lnf(x))[:, -1]  # next-token logits [1, VOCAB]
@@ -149,12 +144,12 @@ class CPUDecoder(Decoder):
     reference).
     """
 
-    def attention(self, q, k, v, mask, k_cache, v_cache, seq, block_table):
+    def attention(self, q, k, v, mask, kv_cache, seq, block_table):
         block = int(block_table.reshape(-1)[0])
         t, pos = k.shape[3], int(seq[0, 0])
-        k_cache[block : block + 1, :, :, pos : pos + t] = k
-        v_cache[block : block + 1, :, :, pos : pos + t] = v
-        kc, vc = k_cache[block : block + 1], v_cache[block : block + 1]
+        kv_cache[block, 0, :, :, pos : pos + t] = k[0]
+        kv_cache[block, 1, :, :, pos : pos + t] = v[0]
+        kc, vc = kv_cache[block : block + 1, 0], kv_cache[block : block + 1, 1]
         scores = torch.matmul(q, kc.transpose(3, 4)) / HD**0.5  # [1, KV, Q, T, MAXLEN]
         scores = scores.masked_fill(mask == 0, float("-inf"))
         return torch.matmul(torch.softmax(scores, dim=-1), vc)
@@ -163,12 +158,12 @@ class CPUDecoder(Decoder):
 def _cpu_reference() -> dict:
     """The same sequence in fp32 on the CPU, uncompiled."""
     m = CPUDecoder().eval()
-    _, k_cache, v_cache = new_caches("cpu", torch.float32)
+    _, kv_cache = new_cache("cpu", torch.float32)
     with torch.no_grad():
-        prefill = m(*step_inputs(PROMPT, 0, "cpu", torch.float32), k_cache, v_cache)
+        prefill = m(*step_inputs(PROMPT, 0, "cpu", torch.float32), kv_cache)
         decode = []
         for i, tok in enumerate(DECODE_TOKENS):
-            decode.append(m(*step_inputs([tok], len(PROMPT) + i, "cpu", torch.float32), k_cache, v_cache)[0].tolist())
+            decode.append(m(*step_inputs([tok], len(PROMPT) + i, "cpu", torch.float32), kv_cache)[0].tolist())
     return {"prefill": prefill[0].tolist(), "decode": decode}
 
 
@@ -181,7 +176,7 @@ from torch_rbln._internal.rsd_utils import auto_determine_num_devices
 from torch_rbln import profiler as rprof
 from test.rbln.test_rsd_kv_cache import (
     COPY_BLOCK, DECODE_TOKENS, Decoder, HD, KV_HEADS, PROMPT, REPORTED_POSITIONS, SEQ_BLOCK,
-    STAGE_BLOCKS, new_caches, step_inputs,
+    STAGE_BLOCKS, new_cache, step_inputs,
 )
 
 dtype = getattr(torch, sys.argv[1])
@@ -205,23 +200,23 @@ def used(block):
 
 with torch.no_grad():
     # (A) the cache is an eager allocation; nothing has placed it on the device yet.
-    raws, k_cache, v_cache = new_caches(dev, dtype)
-    cache_bytes = sum(r.numel() for r in raws)
+    raw, kv_cache = new_cache(dev, dtype)
+    cache_bytes = raw.numel()
 
     # (B) prefill binds the cache to the first program: the cache takes that program's
     # (sharded) placement here.
-    out["prefill"] = logits(run(*step_inputs(PROMPT, 0, dev, dtype), k_cache, v_cache))
+    out["prefill"] = logits(run(*step_inputs(PROMPT, 0, dev, dtype), kv_cache))
     torch.rbln.synchronize()
 
     # (C) decode: a second program over the same cache. Warm it once (its own compile
     # and first bind), then measure a steady run of every remaining step.
     steps = [step_inputs([tok], len(PROMPT) + i, dev, dtype) for i, tok in enumerate(DECODE_TOKENS)]
-    decode = [run(*steps[0], k_cache, v_cache)]
+    decode = [run(*steps[0], kv_cache)]
     torch.rbln.synchronize()
     alloc0 = torch.rbln.memory_stats(dev).get("allocated.total_allocated")
     with rprof.explain() as region:
         for step in steps[1:]:
-            decode.append(run(*step, k_cache, v_cache))
+            decode.append(run(*step, kv_cache))
         torch.rbln.synchronize()
     alloc1 = torch.rbln.memory_stats(dev).get("allocated.total_allocated")
     rr = region.dump()["runtime_residency"]
@@ -238,10 +233,10 @@ with torch.no_grad():
     #
     # Whole read, and the same block read on its own: a partial read of a sharded buffer has
     # to gather the shards at an offset, which reading all of it does not exercise.
-    out["k_block"] = used(k_cache[SEQ_BLOCK])
-    whole = k_cache.float().cpu()
+    out["k_block"] = used(kv_cache[SEQ_BLOCK, 0])
+    whole = kv_cache.float().cpu()
     out["partial_read_matches_whole"] = bool(
-        torch.equal(k_cache[SEQ_BLOCK].float().cpu(), whole[SEQ_BLOCK])
+        torch.equal(kv_cache[SEQ_BLOCK].float().cpu(), whole[SEQ_BLOCK])
     )
 
     # Block-granular staging, the shape a KV-transfer connector uses: per-block views of the
@@ -250,32 +245,30 @@ with torch.no_grad():
     # host dtype's, so the value comes back rounded rather than byte for byte; what has to hold
     # is that each block landed in the block it was addressed to, which the error scale says.
     torch.manual_seed(2)
-    staged = [torch.randn(KV_HEADS, 1, k_cache.shape[3], HD, dtype=dtype) for _ in STAGE_BLOCKS]
-    torch._foreach_copy_([k_cache[b] for b in STAGE_BLOCKS], staged)
+    staged = [torch.randn(2, KV_HEADS, 1, kv_cache.shape[4], HD, dtype=dtype) for _ in STAGE_BLOCKS]
+    torch._foreach_copy_([kv_cache[b] for b in STAGE_BLOCKS], staged)
     out["staged_error"] = max(
-        float((k_cache[b].float().cpu() - src.float()).abs().max() / src.float().abs().max())
+        float((kv_cache[b].float().cpu() - src.float()).abs().max() / src.float().abs().max())
         for b, src in zip(STAGE_BLOCKS, staged)
     )
-    out["staging_left_sequence_block"] = used(k_cache[SEQ_BLOCK])
+    out["staging_left_sequence_block"] = used(kv_cache[SEQ_BLOCK, 0])
 
     # A block copied inside the device, then decoded through: the kernel must see the same
     # bytes in the copy as in the original, which comparing the two decodes proves end to end.
-    torch._foreach_copy_(
-        [k_cache[COPY_BLOCK], v_cache[COPY_BLOCK]], [k_cache[SEQ_BLOCK], v_cache[SEQ_BLOCK]]
-    )
-    out["block_copy_exact"] = bool(torch.equal(k_cache[COPY_BLOCK].cpu(), k_cache[SEQ_BLOCK].cpu()))
+    torch._foreach_copy_([kv_cache[COPY_BLOCK]], [kv_cache[SEQ_BLOCK]])
+    out["block_copy_exact"] = bool(torch.equal(kv_cache[COPY_BLOCK].cpu(), kv_cache[SEQ_BLOCK].cpu()))
     pos = len(PROMPT) + len(DECODE_TOKENS)
-    out["decode_from_original"] = logits(run(*step_inputs([DECODE_TOKENS[0]], pos, dev, dtype), k_cache, v_cache))
+    out["decode_from_original"] = logits(run(*step_inputs([DECODE_TOKENS[0]], pos, dev, dtype), kv_cache))
     step = step_inputs([DECODE_TOKENS[0]], pos, dev, dtype, block=COPY_BLOCK)
-    out["decode_from_copy"] = logits(run(*step, k_cache, v_cache))
+    out["decode_from_copy"] = logits(run(*step, kv_cache))
 
     # A sub-block write from eager code -- one slot of one block -- and a decode on top of it.
     slot = len(PROMPT) - 1
     torch.manual_seed(1)
-    k_cache[SEQ_BLOCK, :, :, slot].copy_(torch.randn(KV_HEADS, 1, HD).to(dtype=dtype, device=dev))
+    kv_cache[SEQ_BLOCK, 0, :, :, slot].copy_(torch.randn(KV_HEADS, 1, HD).to(dtype=dtype, device=dev))
     step = step_inputs([DECODE_TOKENS[0]], pos + 1, dev, dtype)
-    out["after_write"] = logits(run(*step, k_cache, v_cache))
-    out["k_block_after_write"] = used(k_cache[SEQ_BLOCK])
+    out["after_write"] = logits(run(*step, kv_cache))
+    out["k_block_after_write"] = used(kv_cache[SEQ_BLOCK, 0])
 
 print("RESULT " + json.dumps(out))
 """
@@ -286,7 +279,7 @@ _DUMMY_COMPILE_DRIVER = """
 import glob, os, sys
 import torch, torch_rbln
 from torch_rbln._internal.rsd_utils import auto_determine_num_devices
-from test.rbln.test_rsd_kv_cache import Decoder, new_caches, step_inputs, PROMPT, DECODE_TOKENS
+from test.rbln.test_rsd_kv_cache import Decoder, new_cache, step_inputs, PROMPT, DECODE_TOKENS
 
 dtype = getattr(torch, sys.argv[1])
 cache_dir = sys.argv[2]
@@ -296,14 +289,14 @@ assert auto_determine_num_devices(0) == 2, auto_determine_num_devices(0)
 m = Decoder().eval().to(device="rbln:0", dtype=dtype)
 opt = {"mode": ["compile_only"], "cache_dir": cache_dir}
 run = torch.compile(m, backend="rbln", dynamic=False, options=opt)
-_, k_cache, v_cache = new_caches("rbln:0", dtype)
+_, kv_cache = new_cache("rbln:0", dtype)
 with torch.no_grad():
     for step in (
         step_inputs(PROMPT, 0, "rbln:0", dtype),
         step_inputs([DECODE_TOKENS[0]], len(PROMPT), "rbln:0", dtype),
     ):
         try:  # compile_only writes the artifact; the call itself errors (no real device)
-            run(*step, k_cache, v_cache)
+            run(*step, kv_cache)
         except Exception:
             pass
 arts = glob.glob(os.path.join(cache_dir, "**", "*.rbln"), recursive=True)

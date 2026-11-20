@@ -19,11 +19,11 @@ def _opener_main(conn):
     """Child: receive the handle and its fds, open the tensor, report its values."""
     import torch  # noqa: PLC0415
 
-    handle = conn.recv()
+    handle, device = conn.recv()
     fds = [reduction.recv_handle(conn) for _ in range(handle.num_fds)]
     try:
-        t = torch.rbln.ipc.open_tensor(handle, fds, device=0)
-        conn.send(("ok", t.cpu().tolist()))
+        t = torch.rbln.ipc.open_tensor(handle, fds, device=device)
+        conn.send(("ok", (t.device.index, t.cpu().tolist())))
         del t
     except Exception as e:
         conn.send(("err", repr(e)))
@@ -34,13 +34,13 @@ def _opener_main(conn):
     os._exit(0)
 
 
-def _open_in_child(handle, fds) -> list:
+def _open_in_child(handle, fds, device=0) -> tuple[int, list]:
     ctx = multiprocessing.get_context("spawn")
     parent, child = ctx.Pipe()
     p = ctx.Process(target=_opener_main, args=(child,))
     p.start()
     try:
-        parent.send(handle)
+        parent.send((handle, device))
         for fd in fds:
             reduction.send_handle(parent, fd, p.pid)
         status, payload = parent.recv()
@@ -95,8 +95,8 @@ def _flat_layout(n: int) -> str:
     return json.dumps({"on_device": {"allocs": [{"node_id": 0, "chiplet_id": 0, "size": n * 4}]}})
 
 
-def _exportable_arange(n: int, layout: str | None = None) -> torch.Tensor:
-    x = torch.rbln.ipc.empty_exportable((n,), dtype=torch.float32, device="rbln:0")
+def _exportable_arange(n: int, layout: str | None = None, device: str = "rbln:0") -> torch.Tensor:
+    x = torch.rbln.ipc.empty_exportable((n,), dtype=torch.float32, device=device)
     if layout is not None:
         from rebel import _C  # noqa: PLC0415
 
@@ -120,16 +120,12 @@ class TestIpcValidation(TestCase):
 
     def test_export_rejects_non_exportable_tensor(self):
         x = torch.arange(1024, dtype=torch.float32, device="rbln:0")
-        with self.assertRaisesRegex(RuntimeError, "empty_exportable"):
+        with self.assertRaisesRegex(RuntimeError, r"rbln_malloc_exportable.*torch\.rbln\.ipc\.empty_exportable"):
             torch.rbln.ipc.export_tensor(x)
 
     def test_open_rejects_wrong_fd_count(self):
         with self.assertRaisesRegex(RuntimeError, "fd"):
             torch.rbln.ipc.open_tensor(_fake_handle(), fds=[], device=0)
-
-    def test_open_requires_device(self):
-        with self.assertRaisesRegex(RuntimeError, "device is required"):
-            torch.rbln.ipc.open_tensor(_fake_handle(), fds=[3], device=None)
 
     @pytest.mark.skipif(not is_atom_device(), reason="ATOM only")
     def test_rejects_atom(self):
@@ -175,17 +171,20 @@ class TestIpc(TestCase):
         with self.assertRaisesRegex(RuntimeError, "whole storage"):
             torch.rbln.ipc.export_tensor(x[16:])
 
-    def test_cross_process_open_reads_exporter_data(self):
+    def test_handle_resolves_to_the_exporting_device(self):
         x = _exportable_arange(1024)
-        got = _open_in_child(*torch.rbln.ipc.export_tensor(x))
-        self.assertEqual(got, list(range(1024)))
-
-    def test_cross_process_open_of_chiplet_sharded_tensor(self):
-        x = _exportable_arange(1024, _two_chiplet_layout(1024))
         h, fds = torch.rbln.ipc.export_tensor(x)
-        self.assertEqual(h.num_fds, 2)
-        got = _open_in_child(h, fds)
-        self.assertEqual(got, list(range(1024)))
+        try:
+            self.assertEqual(torch_rbln._C._resolve_import_device(h.payload), x.device.index)
+        finally:
+            for fd in fds:
+                os.close(fd)
+
+    def test_cross_process_open_without_device_finds_the_exporting_device(self):
+        x = _exportable_arange(1024)
+        index, values = _open_in_child(*torch.rbln.ipc.export_tensor(x), device=None)
+        self.assertEqual(index, 0)
+        self.assertEqual(values, list(range(1024)))
 
     def test_layout_is_fixed_after_export(self):
         from rebel import _C  # noqa: PLC0415
@@ -197,6 +196,33 @@ class TestIpc(TestCase):
         with self.assertRaisesRegex(RuntimeError, "dma-buf"):
             _C.vmem.debug.set_device_alloc_by_json(x.data_ptr(), _flat_layout(1024))
         self.assertEqual(x.cpu().tolist(), list(range(1024)))
+
+
+@pytest.mark.serial
+@pytest.mark.npu(count=2)
+@pytest.mark.skipif(is_atom_device(), reason="torch.rbln.ipc supports RBLN-CR only")
+@pytest.mark.skipif(not _accel_node_accessible(), reason="needs RBLN driver 4.0+ and access to /dev/accel/accelN")
+class TestIpcMultiDevice(TestCase):
+    def setUp(self):
+        super().setUp()
+        if torch.rbln.device_count() < 2:
+            self.skipTest("needs two logical RBLN devices")
+
+    def test_handle_resolves_to_each_exporting_device(self):
+        for index in (0, 1):
+            x = _exportable_arange(1024, device=f"rbln:{index}")
+            h, fds = torch.rbln.ipc.export_tensor(x)
+            try:
+                self.assertEqual(torch_rbln._C._resolve_import_device(h.payload), index)
+            finally:
+                for fd in fds:
+                    os.close(fd)
+
+    def test_cross_process_open_without_device_finds_the_second_device(self):
+        x = _exportable_arange(1024, device="rbln:1")
+        index, values = _open_in_child(*torch.rbln.ipc.export_tensor(x), device=None)
+        self.assertEqual(index, 1)
+        self.assertEqual(values, list(range(1024)))
 
 
 if __name__ == "__main__":

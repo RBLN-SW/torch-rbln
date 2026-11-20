@@ -90,3 +90,4 @@ htmlcov/
 *.orig
 *.rej
 temp
+/session_*/

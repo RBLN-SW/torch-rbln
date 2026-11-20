@@ -12,6 +12,8 @@ Verifies that:
 - Device memory is allocated lazily (a device op increases `memory_allocated`).
 """
 
+import gc
+
 import pytest
 import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
@@ -72,6 +74,7 @@ class TestAcceleratorMemory(TestCase):
     device = torch.device("rbln:0")
 
     def _reset_memory_state(self):
+        gc.collect()
         torch.accelerator.set_device_index(self.device_index)
         torch.accelerator.memory.empty_cache()
         torch.accelerator.memory.reset_peak_memory_stats(self.device_index)

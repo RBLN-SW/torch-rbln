@@ -280,8 +280,8 @@ ignorelist = ["input"]
 
 
 [tool.ruff.lint.pep8-naming]
-# These names mirror `torch.cuda` context managers and the custom ops.
-extend-ignore-names = ["custom_rbln_*", "device", "device_of"]
+# These names mirror `torch.cuda` context managers.
+extend-ignore-names = ["device", "device_of"]
 
 
 [tool.ruff.lint.pycodestyle]

@@ -363,12 +363,21 @@ def pytest_addoption(parser):
         "measure_cpu_fallbacks(), per op and reason, to PATH as JSON, leaving out skipped tests and tests "
         "that mark nothing",
     )
+    parser.addoption(
+        "--shard",
+        metavar="K/N",
+        help="Run only the K-th of N shards of the selected tests, so N runs with K from 1 to N run each "
+        "selected test once",
+    )
 
 
 def pytest_configure(config):
     path = config.getoption("--fallback-report")
     if path is not None:
         config.pluginmanager.register(CpuFallbackReport(config, path), "fallback-report")
+    shard = config.getoption("--shard")
+    if shard is not None:
+        config.pluginmanager.register(Shard(shard), "shard")
 
 
 _CPU_FALLBACK = pytest.StashKey[dict]()
@@ -428,3 +437,29 @@ class CpuFallbackReport:
         if not self.worker:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.path.write_text(json.dumps(self.tests, indent=2))
+
+
+# =============================================================================
+# Sharding: --shard K/N
+# =============================================================================
+class Shard:
+    """Keep every N-th selected test in collection order, starting at the K-th.
+
+    Taking neighbors in turn spreads a run of similar tests, such as one test's dtype
+    parametrizations, over the shards.
+    """
+
+    def __init__(self, spec: str):
+        k, sep, n = spec.partition("/")
+        if not (sep and k.isdigit() and n.isdigit() and 1 <= int(k) <= int(n)):
+            msg = f"--shard must be K/N with 1 <= K <= N, not {spec!r}"
+            raise pytest.UsageError(msg)
+        self.index = int(k) - 1
+        self.count = int(n)
+        os.environ.setdefault("MASTER_PORT", str(29604 + self.index))
+
+    # Last, so the shards split what -m and -k leave selected.
+    @pytest.hookimpl(trylast=True)
+    def pytest_collection_modifyitems(self, config, items):
+        config.hook.pytest_deselected(items=[item for i, item in enumerate(items) if i % self.count != self.index])
+        items[:] = items[self.index :: self.count]
