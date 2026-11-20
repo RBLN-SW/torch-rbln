@@ -13,8 +13,8 @@ supported-markers = [
 ]
 
 [manifest]
-constraints = [{ name = "rebel-compiler", specifier = "==0.12.1.dev687+gb7114105.prod" }]
-build-constraints = [{ name = "rebel-compiler", specifier = "==0.12.1.dev687+gb7114105.prod" }]
+constraints = [{ name = "rebel-compiler", specifier = "==0.12.1.dev961+gd59077f6.prod" }]
+build-constraints = [{ name = "rebel-compiler", specifier = "==0.12.1.dev961+gd59077f6.prod" }]
 
 [[package]]
 name = "attrs"
@@ -1128,7 +1128,7 @@ wheels = [
 
 [[package]]
 name = "rebel-compiler"
-version = "0.12.1.dev687+gb7114105.prod"
+version = "0.12.1.dev961+gd59077f6.prod"
 source = { registry = "https://nexus.mgmt.rbln.in/repository/pypi-group-nightly/simple/" }
 dependencies = [
     { name = "attrs", marker = "sys_platform == 'linux'" },
@@ -1150,11 +1150,11 @@ dependencies = [
     { name = "typing-extensions", marker = "sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://nexus.mgmt.rbln.in/repository/pypi-group-nightly/packages/rebel-compiler/0.12.1.dev687+gb7114105.prod/rebel_compiler-0.12.1.dev687+gb7114105.prod-cp310-cp310-manylinux_2_34_x86_64.whl", hash = "md5:eafa9408e219e1ac9d04aad4adb09fb9" },
-    { url = "https://nexus.mgmt.rbln.in/repository/pypi-group-nightly/packages/rebel-compiler/0.12.1.dev687+gb7114105.prod/rebel_compiler-0.12.1.dev687+gb7114105.prod-cp311-cp311-manylinux_2_34_x86_64.whl", hash = "md5:a9b1713e5cc3abf800e395a6cf39f420" },
-    { url = "https://nexus.mgmt.rbln.in/repository/pypi-group-nightly/packages/rebel-compiler/0.12.1.dev687+gb7114105.prod/rebel_compiler-0.12.1.dev687+gb7114105.prod-cp312-cp312-manylinux_2_34_x86_64.whl", hash = "md5:1a76f636c0da3bc2e2248da3fd9b344f" },
-    { url = "https://nexus.mgmt.rbln.in/repository/pypi-group-nightly/packages/rebel-compiler/0.12.1.dev687+gb7114105.prod/rebel_compiler-0.12.1.dev687+gb7114105.prod-cp313-cp313-manylinux_2_34_x86_64.whl", hash = "md5:726609eb9766ebef589ba9bf5c1a460b" },
-    { url = "https://nexus.mgmt.rbln.in/repository/pypi-group-nightly/packages/rebel-compiler/0.12.1.dev687+gb7114105.prod/rebel_compiler-0.12.1.dev687+gb7114105.prod-cp314-cp314-manylinux_2_34_x86_64.whl", hash = "md5:3a8f2e15a804b72b7f7b2ceba4365473" },
+    { url = "https://nexus.mgmt.rbln.in/repository/pypi-group-nightly/packages/rebel-compiler/0.12.1.dev961+gd59077f6.prod/rebel_compiler-0.12.1.dev961+gd59077f6.prod-cp310-cp310-manylinux_2_34_x86_64.whl", hash = "md5:1699142d5d2e00c22bc0d938d3c8b192" },
+    { url = "https://nexus.mgmt.rbln.in/repository/pypi-group-nightly/packages/rebel-compiler/0.12.1.dev961+gd59077f6.prod/rebel_compiler-0.12.1.dev961+gd59077f6.prod-cp311-cp311-manylinux_2_34_x86_64.whl", hash = "md5:9a96a1804d3dd3c0c5526a5d83cf494d" },
+    { url = "https://nexus.mgmt.rbln.in/repository/pypi-group-nightly/packages/rebel-compiler/0.12.1.dev961+gd59077f6.prod/rebel_compiler-0.12.1.dev961+gd59077f6.prod-cp312-cp312-manylinux_2_34_x86_64.whl", hash = "md5:7f4a69ee4aed82bec596e65e5d772789" },
+    { url = "https://nexus.mgmt.rbln.in/repository/pypi-group-nightly/packages/rebel-compiler/0.12.1.dev961+gd59077f6.prod/rebel_compiler-0.12.1.dev961+gd59077f6.prod-cp313-cp313-manylinux_2_34_x86_64.whl", hash = "md5:3df5f4ba6f9e4924b853325eba02debc" },
+    { url = "https://nexus.mgmt.rbln.in/repository/pypi-group-nightly/packages/rebel-compiler/0.12.1.dev961+gd59077f6.prod/rebel_compiler-0.12.1.dev961+gd59077f6.prod-cp314-cp314-manylinux_2_34_x86_64.whl", hash = "md5:6e57f4a38817d5da8f81c20f838e12f5" },
 ]
 
 [[package]]
@@ -1659,7 +1659,7 @@ test = [
 
 [package.metadata]
 requires-dist = [
-    { name = "rebel-compiler", marker = "extra == 'runtime'", specifier = "~=0.12.1.dev687" },
+    { name = "rebel-compiler", marker = "extra == 'runtime'", specifier = "~=0.12.1.dev961" },
     { name = "torch", specifier = "==2.13.0+cpu", index = "https://download.pytorch.org/whl/cpu" },
 ]
 provides-extras = ["runtime"]
