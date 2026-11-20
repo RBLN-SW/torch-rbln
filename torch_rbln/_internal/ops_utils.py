@@ -1745,7 +1745,15 @@ def view_recipes_for_positional(view_recipes_flat, positional_count):
 
 
 def compile_and_run_view_aware(
-    op_callable, op_name, args, kwargs_filtered, out_tensor, *, out_alias_arg_pos=None, align_check="inputs"
+    op_callable,
+    op_name,
+    args,
+    kwargs_filtered,
+    out_tensor,
+    *,
+    out_alias_arg_pos=None,
+    align_check="inputs",
+    allow_alias=False,
 ):
     """Centralized view-aware rbln-compile dispatch.
 
@@ -1768,6 +1776,12 @@ def compile_and_run_view_aware(
       while the runtime is now compiled for the (different) base shape.
       Future calls re-enter Python and hit the compile_rbln_cached cache —
       ~50 µs/call overhead, still cheap relative to host materialization.
+
+    ``allow_alias`` lets ``out_tensor`` share storage with an input even when the
+    input is not the declared ``out_alias_arg_pos``. A program that writes a buffer
+    it is still reading is only correct for schedules that finish reading a region
+    before writing it; ``copy_strided_view_inplace`` verifies that once per geometry
+    and then passes True so the program writes the aliased buffer directly.
 
     ``get_rbln_compile_op_depth`` is imported in the body because
     ``torch_compile_patch_helpers`` imports this module.
@@ -1871,7 +1885,9 @@ def compile_and_run_view_aware(
         reusable = None
         if out_alias_arg_pos is not None and view_args[out_alias_arg_pos] is args[out_alias_arg_pos]:
             reusable = args[out_alias_arg_pos]
-        if can_use_out_tensor_directly(view_args, dict(view_kwargs, out=out_tensor), reusable=reusable):
+        if can_use_out_tensor_directly(
+            view_args, dict(view_kwargs, out=out_tensor), reusable=reusable, allow_alias=allow_alias
+        ):
             result_tensor = out_tensor
         else:
             result_tensor = None
@@ -2316,13 +2332,13 @@ def _out_alias_allowed(args: tuple, kwargs: dict, out_tensor: torch.Tensor, reus
     return all(t is reusable for t in overlapping)
 
 
-def can_use_out_tensor_directly(args: tuple, kwargs: dict, *, reusable=None) -> bool:
+def can_use_out_tensor_directly(args: tuple, kwargs: dict, *, reusable=None, allow_alias: bool = False) -> bool:
     """Check if the out_tensor can be used directly by the compiler.
 
     This function checks several conditions to determine if the output tensor
     can be used directly without creating a temporary tensor:
     1. ``out`` does not alias an input, except the input passed as ``reusable``
-       (see ``_out_alias_allowed``)
+       (see ``_out_alias_allowed``) (waived when ``allow_alias`` is True)
     2. Tensor is neither empty nor scalar
     3. Tensor is contiguous
     4. Tensor has zero storage offset
@@ -2333,6 +2349,7 @@ def can_use_out_tensor_directly(args: tuple, kwargs: dict, *, reusable=None) -> 
         kwargs (dict): Keyword arguments containing 'out' key with the output
             tensor to check.
         reusable: The one input ``out`` may be (an in-place ``self``), or None.
+        allow_alias (bool): Accept an out tensor that shares storage with an input.
 
     Returns:
         bool: True if the out_tensor can be used directly, False otherwise.
@@ -2342,7 +2359,7 @@ def can_use_out_tensor_directly(args: tuple, kwargs: dict, *, reusable=None) -> 
         return False
 
     return (
-        _out_alias_allowed(args, kwargs, out_tensor, reusable)
+        (allow_alias or _out_alias_allowed(args, kwargs, out_tensor, reusable))
         and ((out_tensor.numel() > 0) and len(out_tensor.size()) > 0)
         and out_tensor.is_contiguous()
         and (out_tensor.storage_offset() == 0)
