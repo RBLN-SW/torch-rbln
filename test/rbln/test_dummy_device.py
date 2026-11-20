@@ -26,6 +26,7 @@ import pytest
 from torch.testing._internal.common_utils import run_tests
 
 from test.utils import is_rebel_device
+from torch_rbln._internal.torch_compile_patch_helpers import DUMMY_EXECUTION_WARNING
 
 
 def _clean_env() -> dict:
@@ -471,7 +472,14 @@ def test_compile_only_uses_force_npu_name_when_no_npu_option():
     # dummy mode registers against), and a .rbln artifact is written for it.
     proc = _run_with_dummy(
         _COMPILE_ONLY_SNIPPET,
-        env_extra={"RBLN_FORCE_NPU_NAME": "RBLN-CA25", "RBLN_DEVICE_MAP": _NO_NPU_MAP},
+        env_extra={
+            "RBLN_FORCE_NPU_NAME": "RBLN-CA25",
+            "RBLN_DEVICE_MAP": _NO_NPU_MAP,
+            # Pin the level so the result does not depend on the caller's shell: an
+            # inherited ERROR hides the warning, and the no-warning check below would
+            # pass even if the compile_only exemption broke.
+            "TORCH_RBLN_LOG_LEVEL": "WARNING",
+        },
     )
     _assert_ok(proc)
     assert "OK" in proc.stdout
@@ -479,6 +487,8 @@ def test_compile_only_uses_force_npu_name_when_no_npu_option():
     out = proc.stdout + proc.stderr
     assert "Target NPU: RBLN-CA25" in out, proc.stderr
     assert "differs from" not in out, proc.stderr
+    # A compile_only build runs nothing on the device, so it must not log the warning.
+    assert DUMMY_EXECUTION_WARNING not in proc.stderr, proc.stderr
 
 
 def test_compile_only_npu_option_overrides_force_npu_name():
@@ -575,6 +585,37 @@ def test_eager_device_dtype_op_executes_on_dummy_context():
     )
     _assert_ok(proc)
     assert "OK" in proc.stdout
+
+
+# Each snippet runs more than one program, so a warning per program shows up as a
+# count above one.
+_DEVICE_RUN_SNIPPETS = {
+    "eager": """
+        import torch, torch_rbln
+        a = torch.ones(4, 64, device="rbln:0", dtype=torch.float16)
+        a + a
+        torch.softmax(a, dim=-1)
+        print("OK")
+        """,
+    "graph": """
+        import torch, torch_rbln
+        m = torch.nn.Linear(4, 4).eval().to("rbln:0")
+        f = torch.compile(m, backend="rbln", dynamic=False, options={"npu": "RBLN-CA25"})
+        f(torch.ones(1, 4, device="rbln:0"))
+        f(torch.ones(2, 4, device="rbln:0"))
+        print("OK")
+        """,
+}
+
+
+@pytest.mark.parametrize("path", list(_DEVICE_RUN_SNIPPETS))
+def test_device_run_warns_once_on_dummy_context(path):
+    # Pin the level so the result does not depend on the caller's shell: an inherited
+    # ERROR hides the warning, and this test would fail with correct code.
+    proc = _run_with_dummy(_DEVICE_RUN_SNIPPETS[path], env_extra={"TORCH_RBLN_LOG_LEVEL": "WARNING"})
+    _assert_ok(proc)
+    count = proc.stderr.count(DUMMY_EXECUTION_WARNING)
+    assert count == 1, f"expected the warning once, got {count}:\n{proc.stderr}"
 
 
 def test_op_under_remapped_device_map_runs_on_device():

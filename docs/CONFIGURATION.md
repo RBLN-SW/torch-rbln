@@ -438,12 +438,13 @@ export RBLN_DUMMY_DEVICE=1 RBLN_DEVICE_MAP="[0,1],[2,3]"
   `torch.compile` (building artifacts). Anything that would run on the NPU — a
   compiled graph, or an eager op on a dispatch dtype (fp16/bf16/fp32) — runs
   without error, but its **outputs are undefined** since there is no NPU to
-  compute them; do not read them. Host-side ops (e.g. fp64, which never runs on
-  the NPU even with real hardware) fall back to CPU exactly as they would on a
-  real device. Distributed collectives still require real hardware, and
-  memory-stat APIs (`memory_stats`, `memory_allocated`, ...) report zeros rather
-  than real usage. `mem_get_info()` and `mem_get_info_per_chiplet()` raise:
-  there is no device DRAM to report.
+  compute them; do not read them. The first such run logs a warning, once per
+  process. Host-side ops (e.g. fp64, which never runs on the NPU even with real
+  hardware) fall back to CPU exactly as they would on a real device. Distributed
+  collectives still require real hardware, and memory-stat APIs
+  (`memory_stats`, `memory_allocated`, ...) report zeros rather than real usage.
+  `mem_get_info()` and `mem_get_info_per_chiplet()` raise: there is no device
+  DRAM to report.
 - `torch.rbln.is_available()` returns `True` in this mode — treat it as a
   development flag, not real hardware availability.
 
