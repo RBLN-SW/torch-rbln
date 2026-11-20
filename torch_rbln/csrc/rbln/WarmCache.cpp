@@ -28,6 +28,7 @@ std::size_t CacheKeyHash::operator()(const CacheKey& k) const noexcept {
     hash_combine_size_t(h, std::hash<int>{}(static_cast<int>(in.dtype)));
     hash_combine_size_t(h, std::hash<int>{}(in.device_index));
     hash_combine_size_t(h, std::hash<int64_t>{}(in.storage_offset));
+    hash_combine_size_t(h, std::hash<int>{}(in.alias_of));
     for (int64_t d : in.shape) {
       hash_combine_size_t(h, std::hash<int64_t>{}(d));
     }
