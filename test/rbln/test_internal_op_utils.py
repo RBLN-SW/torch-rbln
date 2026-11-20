@@ -552,7 +552,7 @@ class TestInternalOpUtils(TestCase):
         self.assertNotEqual(extract_warm_cache_key([a, b], 0), extract_warm_cache_key([a], 0))
 
     def test_warm_cache_key_separates_inputs_sharing_a_buffer(self):
-        """``add(a, a.view(...))`` compiles one buffer, so it cannot share ``add(a, b)``'s key."""
+        """Inputs over one buffer compile to one port, so they need their own key."""
         device = torch.device("rbln:0")
         a = torch.ones(2, 64, device=device, dtype=torch.float16)
         b = torch.zeros(2, 64, device=device, dtype=torch.float16)
