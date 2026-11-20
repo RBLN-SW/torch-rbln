@@ -292,6 +292,40 @@ class TestViewCopyInPlace(TestCase):
             torch.ops.torch_rbln.copy_strided_view(src[:1], buf.view(rows, block, heads, dim)[:1], inplace=True)
 
     @pytest.mark.npu(count=1)
+    @parametrize(
+        "dtype,dim",
+        [(torch.float16, _DIM), (torch.bfloat16, 32)],
+        name_fn=lambda dtype, dim: f"{str(dtype).removeprefix('torch.')}_dim{dim}",
+    )
+    def test_declines_a_copy_the_device_would_not_return_exactly(self, dtype, dim):
+        # The device narrows every dtype but bf16, and lowers a last dim only in
+        # multiples of 64. A kept program must copy exactly, so these are declined, the
+        # way copy_ declines them, and the buffer is left as it was.
+        rows, heads, block = 2 * _ROWS, _HEADS, _BLOCK
+        host = torch.randn(rows, heads, block, dim).to(dtype)
+        buf = _to_dev(host)
+        src = buf.view(rows, heads, block, dim).permute(0, 2, 1, 3)
+        out = buf.view(rows, block, heads, dim)
+        self.assertFalse(torch.ops.torch_rbln.copy_strided_view(src, out, inplace=True))
+        self.assertTrue(torch.equal(buf.cpu().view(torch.uint8), host.view(torch.uint8)))
+
+    @pytest.mark.npu(count=1)
+    def test_the_first_call_does_not_check_on_the_callers_data(self):
+        # The first call for a geometry checks the program on random values of its
+        # own, so a buffer of NaN -- what uninitialized memory can hold -- is not
+        # refused, and it is permuted bit for bit. A block size no other test uses
+        # keeps this call the geometry's first.
+        rows, heads, block, dim = 2 * _ROWS, _HEADS, 2 * _BLOCK, _DIM
+        host = torch.full((rows, heads, block, dim), float("nan"), dtype=torch.bfloat16)
+        host[0, 0, 0, 0] = 1.0
+        buf = _to_dev(host)
+        src = buf.view(rows, heads, block, dim).permute(0, 2, 1, 3)
+        out = buf.view(rows, block, heads, dim)
+        self.assertTrue(torch.ops.torch_rbln.copy_strided_view(src, out, inplace=True))
+        want = host.permute(0, 2, 1, 3).contiguous()
+        self.assertTrue(torch.equal(out.cpu().view(torch.uint8), want.view(torch.uint8)))
+
+    @pytest.mark.npu(count=1)
     def test_declines_an_unclassifiable_view(self):
         # Same contract as copy_strided_view: False, and the buffer untouched.
         sizes = (_ROWS, _HEADS, _BLOCK, _DIM)

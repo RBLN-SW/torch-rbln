@@ -121,12 +121,25 @@ def _run_view_copy(src: torch.Tensor, out: torch.Tensor, *, allow_alias: bool) -
         out.copy_(result)
 
 
-def _verify_inplace_geometry(src: torch.Tensor, out: torch.Tensor) -> None:
-    """Run the first in-place copy of a geometry against a host reference, once.
+def _copies_exactly(src: torch.Tensor, out: torch.Tensor) -> bool:
+    """Whether the compiled program returns ``src``'s bytes unchanged in ``out``.
 
-    The reference costs a device-to-host copy rather than a second device buffer, which
-    is what the in-place form exists to avoid. It uses the caller's data, so a constant
-    buffer proves less than a varied one.
+    The gate ``copy_`` applies before it reaches this op (``try_view_copy`` in
+    RBLNCopy.cpp): the device rewrites every dtype but bf16 to a narrower float, and
+    the compiler lowers a tensor to the device only when its last dim is a multiple of
+    64 elements.
+    """
+    return src.dtype == torch.bfloat16 and out.dtype == src.dtype and src.size(-1) % 64 == 0 and out.size(-1) % 64 == 0
+
+
+def _verify_inplace_geometry(src: torch.Tensor, out: torch.Tensor) -> None:
+    """Check the first in-place copy of a geometry against a host reference, once.
+
+    The check runs on random values of its own, not the caller's: a constant or
+    uninitialized buffer proves little, and NaN bit patterns would fail a value
+    comparison, so bytes are compared. The caller's bytes wait on the host meanwhile
+    and go back before the real copy, which costs host copies rather than the second
+    device buffer the in-place form exists to avoid.
     """
     key = _inplace_view_copy_key(src)
     verified = _inplace_view_copy_verified.get(key)
@@ -134,15 +147,14 @@ def _verify_inplace_geometry(src: torch.Tensor, out: torch.Tensor) -> None:
         with _inplace_view_copy_lock:
             verified = _inplace_view_copy_verified.get(key)
             if verified is None:
-                # Read the source view to the host first: it is both the reference and
-                # the last chance to see the input, since the copy overwrites it.
-                reference = src.cpu()
+                saved = out.cpu()
+                generator = torch.Generator().manual_seed(0)
+                out.copy_(torch.randn(out.shape, generator=generator).to(out.dtype))
+                reference = src.cpu().contiguous()
                 _run_view_copy(src, out, allow_alias=True)
-                verified = torch.equal(out.cpu(), reference)
+                verified = torch.equal(out.cpu().view(torch.uint8), reference.view(torch.uint8))
                 _inplace_view_copy_verified[key] = verified
-                if not verified:
-                    raise _inplace_unsupported(src)
-                return
+                out.copy_(saved)
     if not verified:
         raise _inplace_unsupported(src)
     _run_view_copy(src, out, allow_alias=True)
@@ -173,14 +185,18 @@ def copy_strided_view_rbln(src, out, inplace=False) -> bool:  # noqa: FBT002
     buffer instead of two. ``copy_`` never asks for it -- ATen refuses partially
     overlapping pairs before dispatch -- so an aliasing pair is always a caller's
     explicit intent. ``out`` must then be the whole storage ``src`` views: contiguous,
-    storage offset 0, the same base address and byte size. Correctness rests on the
-    compiled schedule finishing its reads of a region before writing it, which is the
-    compiler's tiling rather than anything here, so the first call for a geometry is
-    checked against a host reference and a geometry that fails raises.
+    storage offset 0, the same base address and byte size. A caller that keeps the
+    program relies on it copying exactly, so an in-place copy the device would not
+    return bit for bit (not bf16, or a last dim not a multiple of 64) is declined, the
+    way ``copy_`` declines it. Correctness also rests on the compiled schedule finishing
+    its reads of a region before writing it, which is the compiler's tiling rather than
+    anything here, so the first call for a geometry is checked against a host reference
+    and a geometry that fails raises.
 
-    Returns False when the detector cannot classify ``src``, leaving the caller on its
-    existing route. Raises RuntimeError when ``inplace`` is set and ``out`` is not
-    ``src``'s whole storage, or the program does not permute that geometry in place.
+    Returns False, leaving ``out`` untouched and the caller on its existing route, when
+    the detector cannot classify ``src`` or, with ``inplace``, when the copy would not
+    be exact. Raises RuntimeError when ``inplace`` is set and ``out`` is not ``src``'s
+    whole storage, or the program does not permute that geometry in place.
     """
     if _detect_view_recipe(src) is None:
         return False
@@ -199,6 +215,8 @@ def copy_strided_view_rbln(src, out, inplace=False) -> bool:  # noqa: FBT002
             "(contiguous, storage_offset 0, same base address and size)"
         )
         raise RuntimeError(msg)
+    if not _copies_exactly(src, out):
+        return False
     _verify_inplace_geometry(src, out)
     return True
 
