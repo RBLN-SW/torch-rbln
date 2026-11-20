@@ -635,6 +635,7 @@ bool build_cache_key(
   out_key.scalars.clear();
 
   auto arguments = torch::jit::last(stack, cache.num_args);
+  c10::SmallVector<const void*, 4> input_ptrs;
   for (size_t i = 0; i < cache.num_args; ++i) {
     const auto& iv = arguments[i];
     if (iv.isTensor()) {
@@ -656,6 +657,20 @@ bool build_cache_key(
       tp.strides.assign(t.strides().begin(), t.strides().end());
       tp.storage_offset = t.storage_offset();
       tp.device_index = static_cast<int8_t>(t.device().index());
+      // The compiler keys a device input by data_ptr, so inputs sharing one
+      // are compiled as one buffer and a runtime built for that cannot serve
+      // distinct ones.
+      const void* ptr = t.data_ptr();
+      const auto self = input_ptrs.size();
+      if (self > UINT8_MAX)
+        return false;
+      tp.alias_of = static_cast<uint8_t>(self);
+      if (ptr != nullptr) {
+        const auto it = std::ranges::find(input_ptrs, ptr);
+        if (it != input_ptrs.end())
+          tp.alias_of = static_cast<uint8_t>(it - input_ptrs.begin());
+      }
+      input_ptrs.push_back(ptr);
       out_key.inputs.emplace_back(std::move(tp));
     } else if (iv.isNone()) {
       // Treat `None` slot as a Missing scalar — keeps positional structure

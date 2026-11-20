@@ -70,11 +70,13 @@ struct TensorProfile {
   c10::SmallVector<int64_t, 6> strides;
   int64_t storage_offset{0};
   int8_t device_index{-1};
+  // Index of the first earlier tensor input at the same data_ptr, else its own.
+  uint8_t alias_of{0};
 
   bool operator==(const TensorProfile& o) const noexcept {
     return dtype == o.dtype && device_index == o.device_index &&
-        storage_offset == o.storage_offset && shape == o.shape &&
-        strides == o.strides;
+        storage_offset == o.storage_offset && alias_of == o.alias_of &&
+        shape == o.shape && strides == o.strides;
   }
 };
 
