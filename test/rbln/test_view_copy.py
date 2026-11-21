@@ -19,6 +19,8 @@ served cases also assert that the runtime ran no host primitive.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
@@ -335,6 +337,35 @@ class TestViewCopyInPlace(TestCase):
         src = buf.as_strided(sizes, (100000, 20000, _DIM + 1, 1), 0)
         self.assertFalse(torch.ops.torch_rbln.copy_strided_view(src, buf, inplace=True))
         self.assertEqual(buf.cpu(), host)
+
+    @pytest.mark.npu(count=1)
+    def test_a_buffer_split_by_rows_across_chiplets_stays_split(self):
+        # A buffer set_device_alloc split by rows is permuted where it lies: every row
+        # stays on its chiplet, so the program declares the cut on both sides and the
+        # runtime binds the buffer without moving it to the first chiplet.
+        chiplets = torch.rbln.get_device_properties(0).num_chiplet
+        if chiplets < 2:
+            self.skipTest("needs a device with several chiplets")
+        from rebel._C import vmem  # noqa: PLC0415
+
+        rows, heads, block, dim = 2 * chiplets, _HEADS, _BLOCK, _DIM
+        buf = torch.empty(rows, heads, block, dim, dtype=torch.bfloat16, device="rbln")
+        torch.rbln.set_device_alloc(
+            buf,
+            [
+                torch.rbln.DevicePlacement(0, c, ((0, rows * c // chiplets, rows * (c + 1) // chiplets),))
+                for c in range(chiplets)
+            ],
+        )
+        cut = json.loads(vmem.get_pv(buf.data_ptr()))["view"]["shards"]
+        for _ in range(2):
+            host = torch.randint(-1000, 1000, (rows, heads, block, dim)).to(torch.bfloat16)
+            buf.copy_(host)
+            src = buf.permute(0, 2, 1, 3)
+            out = buf.view(rows, block, heads, dim)
+            self.assertTrue(torch.ops.torch_rbln.copy_strided_view(src, out, inplace=True))
+            self.assertEqual(out.cpu(), host.permute(0, 2, 1, 3))
+            self.assertEqual(json.loads(vmem.get_pv(buf.data_ptr()))["view"]["shards"], cut)
 
 
 instantiate_device_type_tests(TestViewCopyInPlace, globals(), only_for="privateuse1")

@@ -1754,6 +1754,7 @@ def compile_and_run_view_aware(
     out_alias_arg_pos=None,
     align_check="inputs",
     allow_alias=False,
+    held_output_view=None,
 ):
     """Centralized view-aware rbln-compile dispatch.
 
@@ -1782,6 +1783,12 @@ def compile_and_run_view_aware(
     it is still reading is only correct for schedules that finish reading a region
     before writing it; ``copy_strided_view_inplace`` verifies that once per geometry
     and then passes True so the program writes the aliased buffer directly.
+
+    ``held_output_view`` is the cut ``out``'s buffer already holds, restated on
+    ``out``'s shape (a ``vmem.get_pv`` view), for a program that writes its input's
+    buffer back in place. The compile then declares the cut on both sides -- the input's
+    held view and the output's -- so the program reads and writes the buffer where it
+    lies instead of the runtime moving it to the first chiplet.
 
     ``get_rbln_compile_op_depth`` is imported in the body because
     ``torch_compile_patch_helpers`` imports this module.
@@ -1875,6 +1882,9 @@ def compile_and_run_view_aware(
     if not use_device_group_num_devices():
         compile_options["num_devices"] = 1
     compile_options["_runtime_holder"] = []
+    if held_output_view is not None:
+        compile_options["declare_held_pv"] = True
+        compile_options["held_output_views"] = [held_output_view]
 
     if out_tensor is None:
         result_tensor = None

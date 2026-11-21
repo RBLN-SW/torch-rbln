@@ -1,3 +1,4 @@
+import json
 import threading
 from typing import cast
 
@@ -12,6 +13,7 @@ from torch_rbln._internal.ops_utils import (
     handle_empty_binary,
     is_type_promotion_allowed,
 )
+from torch_rbln.device.device import get_device_properties
 
 
 def custom_softmax_out_rbln(self, dim: int, half_to_float: bool, *, out):  # noqa: ARG001, FBT001
@@ -96,29 +98,78 @@ def _materialize(t: torch.Tensor) -> torch.Tensor:
     return t.contiguous()
 
 
-# Geometries (sizes, strides, storage offset, dtype, device) for which the compiled
-# view copy has been shown to permute a buffer in place correctly. Writing the buffer
-# a program reads is only correct when its schedule finishes reading a region before
-# writing it -- a property of the compiler's tiling, not of anything here -- so the
-# first in-place copy of a geometry is checked against a host reference and the
-# verdict remembered.
+# Geometries (sizes, strides, storage offset, dtype, device, and the row cut the
+# buffer holds) for which the compiled view copy has been shown to permute a buffer in
+# place correctly. Writing the buffer a program reads is only correct when its schedule
+# finishes reading a region before writing it -- a property of the compiler's tiling,
+# not of anything here, and a cut buffer gets a program of its own -- so the first
+# in-place copy of a geometry is checked against a host reference and the verdict
+# remembered.
 _inplace_view_copy_verified: dict[tuple, bool] = {}
 _inplace_view_copy_lock = threading.Lock()
 
 
-def _inplace_view_copy_key(src: torch.Tensor) -> tuple:
-    return (tuple(src.shape), tuple(src.stride()), src.storage_offset(), src.dtype, str(src.device))
+def _inplace_view_copy_key(src: torch.Tensor, held_output_view: dict | None) -> tuple:
+    return (
+        tuple(src.shape),
+        tuple(src.stride()),
+        src.storage_offset(),
+        src.dtype,
+        str(src.device),
+        json.dumps(held_output_view, sort_keys=True),
+    )
 
 
-def _run_view_copy(src: torch.Tensor, out: torch.Tensor, *, allow_alias: bool) -> None:
+def _run_view_copy(
+    src: torch.Tensor, out: torch.Tensor, *, allow_alias: bool, held_output_view: dict | None = None
+) -> None:
     result = compile_and_run_view_aware(
-        _materialize, "torch_rbln::copy_strided_view", (src,), {}, out, allow_alias=allow_alias
+        _materialize,
+        "torch_rbln::copy_strided_view",
+        (src,),
+        {},
+        out,
+        allow_alias=allow_alias,
+        held_output_view=held_output_view,
     )
     if isinstance(result, torch.Tensor) and result.data_ptr() != out.data_ptr():
         # The compile path only writes the caller's buffer for dtypes in
         # SupportedDtypes.dispatch; otherwise it hands back its own. Both are contiguous
         # here, so this lands on copy_'s direct memcpy and cannot recurse.
         out.copy_(result)
+
+
+def _rows_cut_view(src: torch.Tensor, out: torch.Tensor) -> dict | None:
+    """The cut ``out``'s buffer holds by rows, restated on ``out``'s shape, or None.
+
+    ``torch.rbln.set_device_alloc`` can split a buffer by its leading axis across the
+    chiplets. When ``src`` keeps that axis -- its rows are the buffer's rows, permuted
+    only inside -- each row of ``out`` is made of the bytes the same row held, so the
+    program can permute every chiplet's rows where they lie. The compiler spreads the
+    program over every chiplet of the device in equal parts, so only a cut that gives
+    each of them as many rows can be declared. None for any other layout, which the
+    program then reads and writes whole on the first chiplet.
+    """
+    from rebel._C import vmem  # noqa: PLC0415
+
+    held = vmem.get_pv(out.data_ptr())
+    if held is None:
+        return None
+    view = json.loads(held)["view"]
+    shards = view.get("shards", [])
+    if view.get("host_op_seq") or not shards:
+        return None
+    chiplets = get_device_properties(out.device).num_chiplet
+    if sorted((shard["node_id"], shard["chiplet_id"]) for shard in shards) != [(0, c) for c in range(chiplets)]:
+        return None
+    cuts = [shard["slice_axes"] for shard in shards]
+    if any(len(cut) != 1 or cut[0]["axis"] != 0 for cut in cuts):
+        return None
+    if len({cut[0]["end"] - cut[0]["begin"] for cut in cuts}) != 1:
+        return None
+    if src.size(0) != out.size(0) or src.stride(0) != out.stride(0):
+        return None
+    return dict(view, shape=list(out.shape))
 
 
 def _copies_exactly(src: torch.Tensor, out: torch.Tensor) -> bool:
@@ -132,7 +183,7 @@ def _copies_exactly(src: torch.Tensor, out: torch.Tensor) -> bool:
     return src.dtype == torch.bfloat16 and out.dtype == src.dtype and src.size(-1) % 64 == 0 and out.size(-1) % 64 == 0
 
 
-def _verify_inplace_geometry(src: torch.Tensor, out: torch.Tensor) -> None:
+def _verify_inplace_geometry(src: torch.Tensor, out: torch.Tensor, held_output_view: dict | None) -> None:
     """Check the first in-place copy of a geometry against a host reference, once.
 
     The check runs on random values of its own, not the caller's: a constant or
@@ -141,7 +192,7 @@ def _verify_inplace_geometry(src: torch.Tensor, out: torch.Tensor) -> None:
     and go back before the real copy, which costs host copies rather than the second
     device buffer the in-place form exists to avoid.
     """
-    key = _inplace_view_copy_key(src)
+    key = _inplace_view_copy_key(src, held_output_view)
     verified = _inplace_view_copy_verified.get(key)
     if verified is None:
         with _inplace_view_copy_lock:
@@ -151,13 +202,13 @@ def _verify_inplace_geometry(src: torch.Tensor, out: torch.Tensor) -> None:
                 generator = torch.Generator().manual_seed(0)
                 out.copy_(torch.randn(out.shape, generator=generator).to(out.dtype))
                 reference = src.cpu().contiguous()
-                _run_view_copy(src, out, allow_alias=True)
+                _run_view_copy(src, out, allow_alias=True, held_output_view=held_output_view)
                 verified = torch.equal(out.cpu().view(torch.uint8), reference.view(torch.uint8))
                 _inplace_view_copy_verified[key] = verified
                 out.copy_(saved)
     if not verified:
         raise _inplace_unsupported(src)
-    _run_view_copy(src, out, allow_alias=True)
+    _run_view_copy(src, out, allow_alias=True, held_output_view=held_output_view)
 
 
 def _inplace_unsupported(src: torch.Tensor) -> RuntimeError:
@@ -191,7 +242,10 @@ def copy_strided_view_rbln(src, out, inplace=False) -> bool:  # noqa: FBT002
     way ``copy_`` declines it. Correctness also rests on the compiled schedule finishing
     its reads of a region before writing it, which is the compiler's tiling rather than
     anything here, so the first call for a geometry is checked against a host reference
-    and a geometry that fails raises.
+    and a geometry that fails raises. A buffer ``torch.rbln.set_device_alloc`` split by
+    rows across the chiplets stays split when ``src`` keeps the row axis: the compile
+    declares the cut for the program's input and output, and each chiplet permutes its
+    own rows.
 
     Returns False, leaving ``out`` untouched and the caller on its existing route, when
     the detector cannot classify ``src`` or, with ``inplace``, when the copy would not
@@ -217,7 +271,7 @@ def copy_strided_view_rbln(src, out, inplace=False) -> bool:  # noqa: FBT002
         raise RuntimeError(msg)
     if not _copies_exactly(src, out):
         return False
-    _verify_inplace_geometry(src, out)
+    _verify_inplace_geometry(src, out, _rows_cut_view(src, out))
     return True
 
 
