@@ -663,9 +663,10 @@ class TestIndexSelectV2V(TestCase):
 # `x[idx]` lowers to aten::index.Tensor and reaches the native `index.Tensor_out`
 # kernel through the composite out wrapper. The kernel serves any SINGLE index on
 # one axis natively (via the v2v index_select) — an integer index of any rank, or
-# a 1-D boolean mask — and hands every other form (multiple index tensors,
-# non-leading masks, non-contiguous self) to the CPU fallback. Both paths must
-# match the CPU reference bit-for-bit.
+# a 1-D boolean mask — and integer indices on adjacent dims (`x[r, c]`) by
+# linearizing them over the merged dims. Every other form (non-adjacent or
+# boolean multi-index, non-leading masks, non-contiguous self) goes to the CPU
+# fallback. Both paths must match the CPU reference bit-for-bit.
 # ---------------------------------------------------------------------------
 
 
@@ -801,11 +802,61 @@ class TestIndexTensorV2V(TestCase):
 
     # -- non-white-listed: CPU fallback, must still match the reference ---------
 
-    def test_index_two_tensor_fallback(self):
-        src = torch.arange(30, dtype=torch.float32).reshape(5, 6)
-        r = torch.tensor([0, 2, 4], dtype=torch.long)
-        c = torch.tensor([1, 3, 5], dtype=torch.long)
+    # -- multi-index native path: integer indices on adjacent dims -------------
+
+    @dtypes(torch.float16, torch.bfloat16, torch.float32, torch.int32)
+    def test_index_two_tensor(self, dtype):
+        src = torch.arange(30, dtype=dtype).reshape(5, 6)
+        r = torch.tensor([0, 2, 4, 2], dtype=torch.long)
+        c = torch.tensor([1, 3, 5, 3], dtype=torch.long)
         _check(to_dev(src)[r.to(DEVICE), c.to(DEVICE)], src[r, c])
+
+    def test_index_two_tensor_int32_cpu_index(self):
+        src = torch.arange(4 * 151, dtype=torch.float32).reshape(4, 151)
+        r = torch.tensor([0, 0, 1, 3, 3], dtype=torch.int32)
+        c = torch.tensor([13, 30, 150, 0, 7], dtype=torch.int32)
+        _check(to_dev(src)[r, c], src[r, c])
+
+    def test_index_two_tensor_broadcast(self):
+        """`x[r[:, None], c[None, :]]` broadcasts to a 2-D grid of picks."""
+        src = torch.arange(5 * 6, dtype=torch.float32).reshape(5, 6)
+        r = torch.tensor([4, 0, 2], dtype=torch.long)
+        c = torch.tensor([5, 1], dtype=torch.long)
+        _check(to_dev(src)[r[:, None], c[None, :]], src[r[:, None], c[None, :]])
+
+    def test_index_two_tensor_negative_wrap(self):
+        src = torch.arange(30, dtype=torch.float32).reshape(5, 6)
+        r = torch.tensor([-1, 0, -5], dtype=torch.long)
+        c = torch.tensor([-6, 5, -1], dtype=torch.long)
+        _check(to_dev(src)[r, c], src[r, c])
+
+    def test_index_two_tensor_mid_axes(self):
+        """`x[:, r, c]` with trailing dims kept: out = (2, n, 4)."""
+        src = torch.arange(2 * 3 * 5 * 4, dtype=torch.float32).reshape(2, 3, 5, 4)
+        r = torch.tensor([2, 0, 1], dtype=torch.long)
+        c = torch.tensor([4, 4, 0], dtype=torch.long)
+        _check(to_dev(src)[:, r, c], src[:, r, c])
+
+    def test_index_three_tensor(self):
+        src = torch.arange(3 * 4 * 5, dtype=torch.float32).reshape(3, 4, 5)
+        a = torch.tensor([2, 0, 1], dtype=torch.long)
+        b = torch.tensor([3, 1, 0], dtype=torch.long)
+        c = torch.tensor([4, 0, 2], dtype=torch.long)
+        _check(to_dev(src)[a, b, c], src[a, b, c])
+
+    def test_index_two_tensor_out_of_bounds_raises_indexerror(self):
+        src = to_dev(torch.arange(30, dtype=torch.float32).reshape(5, 6))
+        with self.assertRaises(IndexError):
+            src[torch.tensor([0, 1]), torch.tensor([2, 6])]
+        with self.assertRaises(IndexError):
+            src[torch.tensor([-6, 1]), torch.tensor([2, 3])]
+
+    def test_index_two_tensor_non_adjacent_fallback(self):
+        """`x[r, :, c]` moves the result dims to the front -> CPU fallback."""
+        src = torch.arange(3 * 4 * 5, dtype=torch.float32).reshape(3, 4, 5)
+        r = torch.tensor([2, 0], dtype=torch.long)
+        c = torch.tensor([4, 1], dtype=torch.long)
+        _check(to_dev(src)[r, :, c], src[r, :, c])
 
     def test_index_full_mask_fallback(self):
         """A full-shape mask selects individual elements (data-dependent, scalar
@@ -855,13 +906,16 @@ class TestIndexTensorV2V(TestCase):
         self.assertTrue(
             self._ran_native_gather(lambda: to_dev(src)[torch.tensor([True, False, True, False, True]).to(DEVICE)])
         )
+        r = torch.tensor([0, 2, 4])
+        c = torch.tensor([1, 3, 5])
+        self.assertTrue(self._ran_native_gather(lambda: to_dev(src)[r, c]))
 
     def test_index_fallback_not_native(self):
         """A non-white-listed form must NOT take the native gather."""
-        src = torch.arange(30, dtype=torch.float16).reshape(5, 6)
-        r = torch.tensor([0, 2, 4]).to(DEVICE)
-        c = torch.tensor([1, 3, 5]).to(DEVICE)
-        self.assertFalse(self._ran_native_gather(lambda: to_dev(src)[r, c]))
+        src = torch.arange(60, dtype=torch.float16).reshape(3, 4, 5)
+        r = torch.tensor([0, 2])
+        c = torch.tensor([1, 3])
+        self.assertFalse(self._ran_native_gather(lambda: to_dev(src)[r, :, c]))
 
     def test_index_transposed_nd_routes_native_via_staging(self):
         """A transposed N-D index makes the wrapper allocate a non-contiguous

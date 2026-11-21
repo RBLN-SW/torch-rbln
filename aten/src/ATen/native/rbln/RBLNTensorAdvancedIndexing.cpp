@@ -12,6 +12,7 @@
 #include <ATen/native/rbln/RBLNStrideUtils.h>
 #include <ATen/native/rbln/RBLNStridedV2V.h>
 #include <ATen/native/rbln/RBLNTensorUtils.h>
+#include <ATen/ops/broadcast_tensors.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/index_copy.h>
 #include <ATen/ops/index_select.h>
@@ -200,10 +201,111 @@ at::Tensor index_select_rbln(
 // The fast path is taken only when `out` already has the exact expected shape
 // (else the resize the .out contract may require is left to the fallback).
 //
-// Everything else (multiple index tensors, N-D / non-leading masks,
-// broadcasting, non-contiguous `self`) stays on the CPU fallback. Boxed so that
+// Integer indices on two or more adjacent dims (`x[rows, cols]`) are linearized
+// on host into one index over the merged dims and take the same index_select
+// path (see index_multi_int_out).
+//
+// Everything else (non-adjacent or boolean multi-index, N-D / non-leading
+// masks, non-contiguous `self`) stays on the CPU fallback. Boxed so that
 // path can reuse `cpu_fallback_rbln`. The functional `index.Tensor` (`x[idx]`)
 // reaches this via the CompositeExplicitAutogradNonFunctional out wrapper.
+namespace {
+
+// Integer indices on adjacent dims [first, first + k), k >= 2: fold the indexed
+// dims of contiguous `self` into one, linearize the indices on host and gather
+// with index_select along the merged dim. Returns false to leave the call to
+// the fallback.
+bool index_multi_int_out(
+    const at::Tensor& self,
+    const c10::List<c10::optional<at::Tensor>>& indices,
+    at::Tensor& out) {
+  std::vector<at::Tensor> idxs;
+  int64_t first = -1;
+  for (size_t i = 0; i < indices.size(); ++i) {
+    const c10::optional<at::Tensor> e = indices.get(i);
+    if (!e.has_value() || !e->defined()) {
+      continue;
+    }
+    if (first < 0) {
+      first = static_cast<int64_t>(i);
+    } else if (
+        static_cast<int64_t>(i) != first + static_cast<int64_t>(idxs.size())) {
+      return false; // non-adjacent: PyTorch moves the result dims to the front
+    }
+    const auto st = e->scalar_type();
+    if (st != at::kLong && st != at::kInt) {
+      return false;
+    }
+    idxs.push_back(*e);
+  }
+  const int64_t k = static_cast<int64_t>(idxs.size());
+  if (k < 2 || !self.defined() || self.numel() == 0 ||
+      !self.device().is_privateuseone() || !self.is_contiguous() ||
+      static_cast<int64_t>(indices.size()) > self.dim() || !out.defined()) {
+    return false;
+  }
+
+  std::vector<at::Tensor> host;
+  host.reserve(k);
+  for (const auto& t : idxs) {
+    host.push_back((t.is_cpu() ? t : t.cpu()).to(at::kLong));
+  }
+  // The out wrapper already checked that the indices broadcast.
+  const std::vector<at::Tensor> bcast = at::broadcast_tensors(host);
+
+  at::Tensor flat;
+  int64_t merged = 1;
+  for (int64_t j = k - 1; j >= 0; --j) {
+    const int64_t size = self.size(first + j);
+    at::Tensor t = bcast[j];
+    if (t.numel() > 0 && t.lt(0).any().item<bool>()) {
+      t = at::where(t.lt(0), t + size, t);
+    }
+    TORCH_CHECK_INDEX(
+        t.numel() == 0 ||
+            (t.ge(0).all().item<bool>() && t.lt(size).all().item<bool>()),
+        "index out of bounds for dimension ",
+        first + j,
+        " with size ",
+        size);
+    flat = flat.defined() ? flat + t * merged : t * merged;
+    merged *= size;
+  }
+
+  std::vector<int64_t> expected(
+      self.sizes().begin(), self.sizes().begin() + first);
+  const auto bshape = bcast[0].sizes();
+  expected.insert(expected.end(), bshape.begin(), bshape.end());
+  expected.insert(
+      expected.end(), self.sizes().begin() + first + k, self.sizes().end());
+  if (!out.sizes().equals(expected)) {
+    return false;
+  }
+
+  std::vector<int64_t> mshape(
+      self.sizes().begin(), self.sizes().begin() + first);
+  mshape.push_back(merged);
+  mshape.insert(
+      mshape.end(), self.sizes().begin() + first + k, self.sizes().end());
+  const at::Tensor self_m = self.view(mshape);
+  const at::Tensor flat_idx = flat.reshape({-1}).contiguous();
+
+  std::vector<int64_t> vshape = mshape;
+  vshape[first] = flat_idx.numel();
+  if (out.is_contiguous()) {
+    at::Tensor out_view = out.view(vshape);
+    index_select_out_rbln(self_m, first, flat_idx, out_view);
+  } else {
+    at::Tensor staging = at::empty(
+        vshape, out.options().memory_format(c10::MemoryFormat::Contiguous));
+    index_select_out_rbln(self_m, first, flat_idx, staging);
+    out.copy_(staging.view(expected));
+  }
+  return true;
+}
+
+} // namespace
+
 void index_out_rbln(const c10::OperatorHandle& op, torch::jit::Stack* stack) {
   // aten::index.Tensor_out(Tensor self, Tensor?[] indices, *, Tensor(a!) out)
   const int64_t num_args = static_cast<int64_t>(op.schema().arguments().size());
@@ -315,6 +417,15 @@ void index_out_rbln(const c10::OperatorHandle& op, torch::jit::Stack* stack) {
         index_select_out_rbln(self, axis, flat_idx, staging);
         out.copy_(staging.view(expected));
       }
+      torch::jit::drop(*stack, static_cast<size_t>(num_args));
+      torch::jit::push(*stack, std::move(out));
+      return;
+    }
+  }
+
+  if (num_present >= 2) {
+    at::Tensor out = (*stack)[base + 2].toTensor();
+    if (index_multi_int_out(self, indices, out)) {
       torch::jit::drop(*stack, static_cast<size_t>(num_args));
       torch::jit::push(*stack, std::move(out));
       return;
