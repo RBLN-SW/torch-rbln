@@ -163,15 +163,11 @@ class OpCategories:
 
     # Shim ops whose unaligned device inputs the compiler pads itself, so the Python
     # path skips the 64-element alignment fallback for them.
-    ALIGN_EXEMPT_OPS: ClassVar[set[str]] = {"add", "sub", "mul", "div", "neg", "where"} | {
-        name.split(".")[0] for name in SHIM_MATMUL
-    }
-
-    # Broadcastable shim ops whose size-1 last-dim operand the device broadcasts, so
-    # the alignment check reads the output's last dim. pow is left out: its
-    # tensor-tensor overload takes the CPU fallback.
-    ALIGN_CHECK_OUTPUT_OPS: ClassVar[set[str]] = (
-        (BROADCASTABLE_OPS & {name.split(".")[0] for name in CPP_SHIM_OPS}) - {"pow"} - ALIGN_EXEMPT_OPS
+    ALIGN_EXEMPT_OPS: ClassVar[set[str]] = (
+        {"add", "sub", "mul", "div", "maximum", "minimum", "where"}
+        | {"neg", "abs", "ceil", "clamp", "floor", "log", "rsqrt", "sigmoid", "silu"}
+        | {"eq", "ne", "gt", "ge", "lt", "le"}
+        | {name.split(".")[0] for name in SHIM_MATMUL}
     )
 
     # Positional predicate args (a bool cond or mask) per root op. A predicate is
@@ -250,11 +246,9 @@ class OpCategories:
 
     @classmethod
     def align_check(cls, root_name: str) -> str:
-        """What the alignment fallback checks: "none", "output" or "inputs"."""
+        """What the alignment fallback checks: "none" or "inputs"."""
         if root_name in cls.ALIGN_EXEMPT_OPS:
             return "none"
-        if root_name in cls.ALIGN_CHECK_OUTPUT_OPS:
-            return "output"
         return "inputs"
 
     @classmethod

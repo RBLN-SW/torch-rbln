@@ -30,6 +30,7 @@ def custom_softmax_out_rbln(self, dim: int, half_to_float: bool, *, out):  # noq
             (self,),
             {"dim": dim},
             out,
+            align_check="none",
         )
 
     result_tensor = cast("torch.Tensor", result_tensor)
