@@ -34,7 +34,7 @@ through the compiled callable.
 from __future__ import annotations
 
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import torch
@@ -171,6 +171,18 @@ def compile_rbln_cached_entry(
         return entry
 
 
+# State that is only valid for the programs this cache holds, such as a verdict
+# about one compiled program, registers a callback here to be dropped with them.
+_clear_hooks: list[Callable[[], None]] = []
+
+
+def register_compile_cache_clear_hook(hook: Callable[[], None]) -> None:
+    """Run ``hook`` each time :func:`clear_rbln_compile_cache` drops the programs."""
+    _clear_hooks.append(hook)
+
+
 def clear_rbln_compile_cache() -> None:
     with _compiled_op_cache_lock:
         _compiled_op_cache.clear()
+    for hook in _clear_hooks:
+        hook()

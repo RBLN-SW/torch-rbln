@@ -25,6 +25,7 @@ from torch.testing._internal.common_device_type import dtypes, instantiate_devic
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
 from test.utils_v2v import to_dev as _to_dev
+from torch_rbln._internal.compile_cache import clear_rbln_compile_cache
 from torch_rbln._internal.ops_utils import _detect_view_recipe
 
 
@@ -324,6 +325,24 @@ class TestViewCopyInPlace(TestCase):
         self.assertTrue(torch.ops.torch_rbln.copy_strided_view(src, out, inplace=True))
         want = host.permute(0, 2, 1, 3).contiguous()
         self.assertTrue(torch.equal(out.cpu().view(torch.uint8), want.view(torch.uint8)))
+
+    @pytest.mark.npu(count=1)
+    def test_clearing_the_compile_cache_checks_the_next_call_again(self):
+        # The verdict describes the program the compile cache held. Once the cache drops
+        # it, the next call builds a new program and checks it again; the check is the
+        # only part of an in-place call that moves data to or from the host.
+        rows, heads, block, dim = 2 * _ROWS, _HEADS, 3 * _BLOCK, _DIM
+        buf = _to_dev(torch.randint(-1000, 1000, (rows, heads, block, dim)).to(torch.bfloat16))
+        src = buf.view(rows, heads, block, dim).permute(0, 2, 1, 3)
+        out = buf.view(rows, block, heads, dim)
+        checked = []
+        for clear in (False, False, True, False):
+            if clear:
+                clear_rbln_compile_cache()
+            with torch.rbln.explain() as p:
+                self.assertTrue(torch.ops.torch_rbln.copy_strided_view(src, out, inplace=True))
+            checked.append(bool(_host_primitives(p.dump())))
+        self.assertEqual(checked, [True, False, True, False])
 
     @pytest.mark.npu(count=1)
     def test_declines_an_unclassifiable_view(self):

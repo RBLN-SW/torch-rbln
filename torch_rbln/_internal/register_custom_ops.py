@@ -3,6 +3,7 @@ from typing import cast
 
 import torch
 
+from torch_rbln._internal.compile_cache import register_compile_cache_clear_hook
 from torch_rbln._internal.ops_utils import (
     _detect_view_recipe,
     compile_and_run_view_aware,
@@ -101,9 +102,18 @@ def _materialize(t: torch.Tensor) -> torch.Tensor:
 # a program reads is only correct when its schedule finishes reading a region before
 # writing it -- a property of the compiler's tiling, not of anything here -- so the
 # first in-place copy of a geometry is checked against a host reference and the
-# verdict remembered.
+# verdict remembered until the compile cache, which holds the program it describes,
+# is cleared.
 _inplace_view_copy_verified: dict[tuple, bool] = {}
 _inplace_view_copy_lock = threading.Lock()
+
+
+def _forget_inplace_view_copy_verdicts() -> None:
+    with _inplace_view_copy_lock:
+        _inplace_view_copy_verified.clear()
+
+
+register_compile_cache_clear_hook(_forget_inplace_view_copy_verdicts)
 
 
 def _inplace_view_copy_key(src: torch.Tensor) -> tuple:
