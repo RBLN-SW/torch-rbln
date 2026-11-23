@@ -128,17 +128,19 @@ def _permutes_in_place(src: torch.Tensor, out: torch.Tensor, run: Callable[[], N
     caller's buffer in place. The check runs on random values of its own, not the
     caller's: a constant or uninitialized buffer proves little, and NaN bit patterns
     would fail a value comparison, so bytes are compared. The caller's bytes wait on
-    the host meanwhile and go back before the real copy, which costs host copies
-    rather than the second device buffer the in-place form exists to avoid.
+    the host meanwhile and go back before the real copy, also when the check raises,
+    which costs host copies rather than the second device buffer the in-place form
+    exists to avoid.
     """
     saved = out.cpu()
-    generator = torch.Generator().manual_seed(0)
-    out.copy_(torch.randn(out.shape, generator=generator).to(out.dtype))
-    reference = src.cpu().contiguous()
-    run()
-    verified = torch.equal(out.cpu().view(torch.uint8), reference.view(torch.uint8))
-    out.copy_(saved)
-    return verified
+    try:
+        generator = torch.Generator().manual_seed(0)
+        out.copy_(torch.randn(out.shape, generator=generator).to(out.dtype))
+        reference = src.cpu().contiguous()
+        run()
+        return torch.equal(out.cpu().view(torch.uint8), reference.view(torch.uint8))
+    finally:
+        out.copy_(saved)
 
 
 # ``inplace`` is positional because the op schema declares it so.
@@ -157,14 +159,16 @@ def copy_strided_view_rbln(src, out, inplace=False) -> bool:  # noqa: FBT002
     it in its own storage and a caller that only needs the permuted layout holds one
     buffer instead of two. ``copy_`` never asks for it -- ATen refuses partially
     overlapping pairs before dispatch -- so an aliasing pair is always a caller's
-    explicit intent. ``out`` must then be the whole storage ``src`` views: contiguous,
-    storage offset 0, the same base address and byte size. A caller that keeps the
-    program relies on it copying exactly, so an in-place copy the device would not
-    return bit for bit (not bf16, or a last dim not a multiple of 64) is declined, the
-    way ``copy_`` declines it. Correctness also rests on the compiled schedule finishing
-    its reads of a region before writing it, which is the compiler's tiling rather than
-    anything here, so the first in-place call of each compiled program is checked
-    against a host reference and a program that fails raises.
+    explicit intent. ``out`` must then be the whole storage ``src`` views, in ``src``'s
+    shape: contiguous, storage offset 0, the same base address and byte size. A caller
+    that keeps the program relies on it copying exactly, so an in-place copy the device
+    would not return bit for bit (not bf16, or a last dim not a multiple of 64) is
+    declined, the way ``copy_`` declines it. Correctness also rests on the compiled
+    schedule finishing its reads of a region before writing it, which is the compiler's
+    tiling rather than anything here, so the first in-place call of each compiled
+    program is checked against a host reference and a program that fails raises. Only
+    a fault in the real copy after that check can leave ``out`` partly written, since
+    the program writes the buffer it reads.
 
     Returns False, leaving ``out`` untouched and the caller on its existing route, when
     the detector cannot classify ``src`` or, with ``inplace``, when the copy would not
@@ -180,13 +184,15 @@ def copy_strided_view_rbln(src, out, inplace=False) -> bool:  # noqa: FBT002
     base_ptr = src.data_ptr() - src.storage_offset() * src.element_size()
     if (
         out.data_ptr() != base_ptr
+        or out.device != src.device
+        or out.shape != src.shape
         or out.storage_offset() != 0
         or not out.is_contiguous()
-        or out.numel() * out.element_size() != src.storage().nbytes()
+        or out.numel() * out.element_size() != src.untyped_storage().nbytes()
     ):
         msg = (
-            "copy_strided_view(inplace=True): out must be the whole buffer src views "
-            "(contiguous, storage_offset 0, same base address and size)"
+            "copy_strided_view(inplace=True): out must be the whole buffer src views, in src's "
+            "shape (contiguous, storage_offset 0, same base address and size)"
         )
         raise RuntimeError(msg)
     if not _copies_exactly(src, out):

@@ -31,6 +31,7 @@ from torch.testing._internal.common_device_type import dtypes, instantiate_devic
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
 from test.utils_v2v import to_dev as _to_dev
+from torch_rbln._internal import register_custom_ops
 from torch_rbln._internal.compile_cache import clear_rbln_compile_cache
 from torch_rbln._internal.ops_utils import _detect_view_recipe
 
@@ -292,18 +293,24 @@ class TestViewCopyInPlace(TestCase):
     @pytest.mark.npu(count=1)
     def test_rejects_an_out_that_is_not_the_whole_buffer(self):
         rows, heads, block, dim = self._SHAPE
-        buf = _to_dev(torch.zeros(self._SHAPE, dtype=torch.bfloat16))
+        host = torch.randint(-1000, 1000, self._SHAPE).to(torch.bfloat16)
+        buf = _to_dev(host)
         src = buf.view(rows, heads, block, dim).permute(0, 2, 1, 3)
         other = torch.empty(rows, block, heads, dim, dtype=torch.bfloat16, device=buf.device)
         with self.assertRaisesRegex(RuntimeError, "whole buffer"):
             torch.ops.torch_rbln.copy_strided_view(src, other, inplace=True)
         with self.assertRaisesRegex(RuntimeError, "whole buffer"):
             torch.ops.torch_rbln.copy_strided_view(src[:1], buf.view(rows, block, heads, dim)[:1], inplace=True)
+        # The buffer in its own shape: same address, offset and size, but heads and
+        # tokens where src has tokens and heads. Refused before anything is written.
+        with self.assertRaisesRegex(RuntimeError, "whole buffer"):
+            torch.ops.torch_rbln.copy_strided_view(src, buf, inplace=True)
+        self.assertTrue(torch.equal(buf.cpu().view(torch.uint8), host.view(torch.uint8)))
 
     @pytest.mark.npu(count=1)
     @parametrize(
         "dtype,dim",
-        [(torch.float16, _DIM), (torch.bfloat16, 32)],
+        [(torch.float16, _DIM), (torch.float32, _DIM), (torch.bfloat16, 32)],
         name_fn=lambda dtype, dim: f"{str(dtype).removeprefix('torch.')}_dim{dim}",
     )
     def test_declines_a_copy_the_device_would_not_return_exactly(self, dtype, dim):
@@ -333,6 +340,32 @@ class TestViewCopyInPlace(TestCase):
         self.assertTrue(torch.ops.torch_rbln.copy_strided_view(src, out, inplace=True))
         want = host.permute(0, 2, 1, 3).contiguous()
         self.assertTrue(torch.equal(out.cpu().view(torch.uint8), want.view(torch.uint8)))
+
+    @pytest.mark.npu(count=1)
+    def test_a_check_that_fails_gives_the_buffer_back(self):
+        # The check writes its own values into the caller's buffer and runs the program
+        # on them. When that run raises, the caller's bytes still go back.
+        rows, heads, block, dim = self._SHAPE
+        host = torch.randint(-1000, 1000, self._SHAPE).to(torch.bfloat16)
+        buf = _to_dev(host)
+        src = buf.view(rows, heads, block, dim).permute(0, 2, 1, 3)
+        out = buf.view(rows, block, heads, dim)
+        check = register_custom_ops._permutes_in_place
+
+        def check_with_a_failing_run(src, out, run):
+            def run_then_fail():
+                run()
+                msg = "run failed"
+                raise RuntimeError(msg)
+
+            return check(src, out, run_then_fail)
+
+        with (
+            mock.patch.object(register_custom_ops, "_permutes_in_place", check_with_a_failing_run),
+            self.assertRaisesRegex(RuntimeError, "run failed"),
+        ):
+            torch.ops.torch_rbln.copy_strided_view(src, out, inplace=True)
+        self.assertTrue(torch.equal(buf.cpu().view(torch.uint8), host.view(torch.uint8)))
 
     @pytest.mark.npu(count=1)
     def test_clearing_the_compile_cache_checks_the_next_call_again(self):
