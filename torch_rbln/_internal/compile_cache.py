@@ -34,7 +34,7 @@ through the compiled callable.
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import torch
@@ -96,9 +96,14 @@ def _options_cache_view(options: Mapping[str, Any] | None) -> Mapping[str, Any]:
 class CompiledOp:
     """A compiled callable, the runtimes the rebel backend built for it, and
     how a call's tensors map onto the graph's inputs once that is known.
+
+    ``alias_verified`` is whether the runtime writes an ``out`` that is also its
+    input correctly (see ``compile_and_run_view_aware``'s ``check_alias``), or
+    None until a caller has checked. It describes this entry's program, so it
+    goes when the entry does.
     """
 
-    __slots__ = ("compiled", "copy_fallback_warned", "input_order", "out_shape", "runtime_holder")
+    __slots__ = ("alias_verified", "compiled", "copy_fallback_warned", "input_order", "out_shape", "runtime_holder")
 
     def __init__(self, compiled: Any, runtime_holder: list):
         self.compiled = compiled
@@ -106,6 +111,7 @@ class CompiledOp:
         self.input_order: tuple[int, ...] | None = None
         self.out_shape: torch.Size | None = None
         self.copy_fallback_warned = False
+        self.alias_verified: bool | None = None
 
     def runtime(self) -> Any:
         """The one ``DynamoRuntime`` behind ``compiled``, or ``None``.
@@ -171,18 +177,6 @@ def compile_rbln_cached_entry(
         return entry
 
 
-# State that is only valid for the programs this cache holds, such as a verdict
-# about one compiled program, registers a callback here to be dropped with them.
-_clear_hooks: list[Callable[[], None]] = []
-
-
-def register_compile_cache_clear_hook(hook: Callable[[], None]) -> None:
-    """Run ``hook`` each time :func:`clear_rbln_compile_cache` drops the programs."""
-    _clear_hooks.append(hook)
-
-
 def clear_rbln_compile_cache() -> None:
     with _compiled_op_cache_lock:
         _compiled_op_cache.clear()
-    for hook in _clear_hooks:
-        hook()

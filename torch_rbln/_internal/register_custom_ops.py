@@ -1,9 +1,9 @@
-import threading
+import functools
+from collections.abc import Callable
 from typing import cast
 
 import torch
 
-from torch_rbln._internal.compile_cache import register_compile_cache_clear_hook
 from torch_rbln._internal.ops_utils import (
     _detect_view_recipe,
     compile_and_run_view_aware,
@@ -97,32 +97,11 @@ def _materialize(t: torch.Tensor) -> torch.Tensor:
     return t.contiguous()
 
 
-# Geometries (sizes, strides, storage offset, dtype, device) for which the compiled
-# view copy has been shown to permute a buffer in place correctly. Writing the buffer
-# a program reads is only correct when its schedule finishes reading a region before
-# writing it -- a property of the compiler's tiling, not of anything here -- so the
-# first in-place copy of a geometry is checked against a host reference and the
-# verdict remembered until the compile cache, which holds the program it describes,
-# is cleared.
-_inplace_view_copy_verified: dict[tuple, bool] = {}
-_inplace_view_copy_lock = threading.Lock()
-
-
-def _forget_inplace_view_copy_verdicts() -> None:
-    with _inplace_view_copy_lock:
-        _inplace_view_copy_verified.clear()
-
-
-register_compile_cache_clear_hook(_forget_inplace_view_copy_verdicts)
-
-
-def _inplace_view_copy_key(src: torch.Tensor) -> tuple:
-    return (tuple(src.shape), tuple(src.stride()), src.storage_offset(), src.dtype, str(src.device))
-
-
-def _run_view_copy(src: torch.Tensor, out: torch.Tensor, *, allow_alias: bool) -> None:
+def _run_view_copy(
+    src: torch.Tensor, out: torch.Tensor, *, check_alias: Callable[[Callable[[], None]], bool] | None = None
+) -> None:
     result = compile_and_run_view_aware(
-        _materialize, "torch_rbln::copy_strided_view", (src,), {}, out, allow_alias=allow_alias
+        _materialize, "torch_rbln::copy_strided_view", (src,), {}, out, check_alias=check_alias
     )
     if isinstance(result, torch.Tensor) and result.data_ptr() != out.data_ptr():
         # The compile path only writes the caller's buffer for dtypes in
@@ -142,40 +121,24 @@ def _copies_exactly(src: torch.Tensor, out: torch.Tensor) -> bool:
     return src.dtype == torch.bfloat16 and out.dtype == src.dtype and src.size(-1) % 64 == 0 and out.size(-1) % 64 == 0
 
 
-def _verify_inplace_geometry(src: torch.Tensor, out: torch.Tensor) -> None:
-    """Check the first in-place copy of a geometry against a host reference, once.
+def _permutes_in_place(src: torch.Tensor, out: torch.Tensor, run: Callable[[], None]) -> bool:
+    """Whether ``run``, the program bound to write ``out`` over ``src``, copies exactly.
 
-    The check runs on random values of its own, not the caller's: a constant or
-    uninitialized buffer proves little, and NaN bit patterns would fail a value
-    comparison, so bytes are compared. The caller's bytes wait on the host meanwhile
-    and go back before the real copy, which costs host copies rather than the second
-    device buffer the in-place form exists to avoid.
+    The compile path calls this once per compiled program, before it writes the
+    caller's buffer in place. The check runs on random values of its own, not the
+    caller's: a constant or uninitialized buffer proves little, and NaN bit patterns
+    would fail a value comparison, so bytes are compared. The caller's bytes wait on
+    the host meanwhile and go back before the real copy, which costs host copies
+    rather than the second device buffer the in-place form exists to avoid.
     """
-    key = _inplace_view_copy_key(src)
-    verified = _inplace_view_copy_verified.get(key)
-    if verified is None:
-        with _inplace_view_copy_lock:
-            verified = _inplace_view_copy_verified.get(key)
-            if verified is None:
-                saved = out.cpu()
-                generator = torch.Generator().manual_seed(0)
-                out.copy_(torch.randn(out.shape, generator=generator).to(out.dtype))
-                reference = src.cpu().contiguous()
-                _run_view_copy(src, out, allow_alias=True)
-                verified = torch.equal(out.cpu().view(torch.uint8), reference.view(torch.uint8))
-                _inplace_view_copy_verified[key] = verified
-                out.copy_(saved)
-    if not verified:
-        raise _inplace_unsupported(src)
-    _run_view_copy(src, out, allow_alias=True)
-
-
-def _inplace_unsupported(src: torch.Tensor) -> RuntimeError:
-    return RuntimeError(
-        f"copy_strided_view(inplace=True): the compiled program does not permute "
-        f"{list(src.shape)} (strides {list(src.stride())}) correctly in place; copy into a "
-        "separate buffer instead"
-    )
+    saved = out.cpu()
+    generator = torch.Generator().manual_seed(0)
+    out.copy_(torch.randn(out.shape, generator=generator).to(out.dtype))
+    reference = src.cpu().contiguous()
+    run()
+    verified = torch.equal(out.cpu().view(torch.uint8), reference.view(torch.uint8))
+    out.copy_(saved)
+    return verified
 
 
 # ``inplace`` is positional because the op schema declares it so.
@@ -200,18 +163,19 @@ def copy_strided_view_rbln(src, out, inplace=False) -> bool:  # noqa: FBT002
     return bit for bit (not bf16, or a last dim not a multiple of 64) is declined, the
     way ``copy_`` declines it. Correctness also rests on the compiled schedule finishing
     its reads of a region before writing it, which is the compiler's tiling rather than
-    anything here, so the first call for a geometry is checked against a host reference
-    and a geometry that fails raises.
+    anything here, so the first in-place call of each compiled program is checked
+    against a host reference and a program that fails raises.
 
     Returns False, leaving ``out`` untouched and the caller on its existing route, when
     the detector cannot classify ``src`` or, with ``inplace``, when the copy would not
     be exact. Raises RuntimeError when ``inplace`` is set and ``out`` is not ``src``'s
-    whole storage, or the program does not permute that geometry in place.
+    whole storage, ``out`` cannot be bound as the program's output, or the program
+    does not permute it in place correctly.
     """
     if _detect_view_recipe(src) is None:
         return False
     if not inplace:
-        _run_view_copy(src, out, allow_alias=False)
+        _run_view_copy(src, out)
         return True
     base_ptr = src.data_ptr() - src.storage_offset() * src.element_size()
     if (
@@ -227,7 +191,7 @@ def copy_strided_view_rbln(src, out, inplace=False) -> bool:  # noqa: FBT002
         raise RuntimeError(msg)
     if not _copies_exactly(src, out):
         return False
-    _verify_inplace_geometry(src, out)
+    _run_view_copy(src, out, check_alias=functools.partial(_permutes_in_place, src, out))
     return True
 
 

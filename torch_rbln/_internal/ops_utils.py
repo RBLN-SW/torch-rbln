@@ -1753,7 +1753,7 @@ def compile_and_run_view_aware(
     *,
     out_alias_arg_pos=None,
     align_check="inputs",
-    allow_alias=False,
+    check_alias=None,
 ):
     """Centralized view-aware rbln-compile dispatch.
 
@@ -1777,11 +1777,8 @@ def compile_and_run_view_aware(
       Future calls re-enter Python and hit the compile_rbln_cached cache —
       ~50 µs/call overhead, still cheap relative to host materialization.
 
-    ``allow_alias`` lets ``out_tensor`` share storage with an input even when the
-    input is not the declared ``out_alias_arg_pos``. A program that writes a buffer
-    it is still reading is only correct for schedules that finish reading a region
-    before writing it; ``copy_strided_view_inplace`` verifies that once per geometry
-    and then passes True so the program writes the aliased buffer directly.
+    ``check_alias`` lets ``out_tensor`` share storage with an input even when the
+    input is not the declared ``out_alias_arg_pos`` (see ``_run_with_aliased_out``).
 
     ``get_rbln_compile_op_depth`` is imported in the body because
     ``torch_compile_patch_helpers`` imports this module.
@@ -1886,7 +1883,7 @@ def compile_and_run_view_aware(
         if out_alias_arg_pos is not None and view_args[out_alias_arg_pos] is args[out_alias_arg_pos]:
             reusable = args[out_alias_arg_pos]
         if can_use_out_tensor_directly(
-            view_args, dict(view_kwargs, out=out_tensor), reusable=reusable, allow_alias=allow_alias
+            view_args, dict(view_kwargs, out=out_tensor), reusable=reusable, allow_alias=check_alias is not None
         ):
             result_tensor = out_tensor
         else:
@@ -1900,6 +1897,8 @@ def compile_and_run_view_aware(
         options=compile_options,
         device_cache_key=extract_warm_cache_key(*view_args, **view_kwargs),
     )
+    if check_alias is not None:
+        return _run_with_aliased_out(entry, op_name, view_args, view_kwargs, result_tensor, check_alias)
     # An ``out`` of another shape is not bound: the shim resizes it and copies into it.
     if result_tensor is not None and entry.out_shape not in (None, result_tensor.shape):
         result_tensor = None
@@ -1955,6 +1954,57 @@ def compile_and_run_view_aware(
         # so the C++ hit path skips it once the alignment fallback is on again.
         _install_warm_cache_pending(list(entry.runtime_holder), external_result, align_bypassed=unaligned)
     return result_tensor
+
+
+def _run_with_aliased_out(entry, op_name, args, kwargs, out, check_alias):
+    """Run ``entry``'s program with ``out``, which shares storage with an input, bound
+    as its output buffer.
+
+    A program that writes a buffer it is still reading is only correct when its
+    schedule finishes reading a region before writing it, which is the compiler's
+    tiling and not something the caller controls. ``check_alias(run)`` therefore
+    vouches for each program before ``out`` is written: ``run`` runs the program
+    with ``out`` bound, and the check returns whether the result is right. The
+    verdict is kept on the cache entry, so it goes with the program, and a program
+    built for another base layout or compile option is checked on its own.
+
+    Only a directly bound ``out`` is accepted. Filling ``out`` by copy from a buffer
+    of the program's own would prove nothing about a run that writes ``out``, so a
+    call that cannot bind it raises before ``out`` is written. Nothing is installed
+    in the C++ warm cache, whose hit path would run the program without the check.
+    """
+    unbound = f"{op_name}: out shares storage with an input but cannot be bound as the program's output"
+    if out is None:
+        raise RuntimeError(unbound)
+    tensors = extract_tensors(args) + extract_tensors(kwargs)
+    if entry.runtime() is None or entry.input_order is None:
+        # First call for this key: the backend builds the runtime while the callable
+        # runs, into a buffer of its own.
+        result = entry.compiled(*args, **kwargs)
+        if isinstance(result, torch.Tensor):
+            entry.out_shape = result.shape
+        if entry.runtime() is not None and entry.input_order is None:
+            entry.input_order = _graph_input_order(entry.runtime(), tensors)
+    runtime = entry.runtime()
+    if runtime is None or entry.input_order is None or entry.out_shape not in (None, out.shape):
+        # Dynamo recompiled inside the callable or the call fell back, so which
+        # runtime ran is unknown, or the graph's inputs could not be matched.
+        raise RuntimeError(unbound)
+    inputs = [tensors[i] for i in entry.input_order]
+
+    def run():
+        runtime.run(*inputs, out=[out])
+
+    if entry.alias_verified is None:
+        entry.alias_verified = check_alias(run)
+    if not entry.alias_verified:
+        msg = (
+            f"{op_name}: the compiled program does not write {list(out.shape)} correctly over the input it "
+            "reads; write a separate buffer instead"
+        )
+        raise RuntimeError(msg)
+    run()
+    return out
 
 
 def _rank0_as_ones(tensors):

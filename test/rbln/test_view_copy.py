@@ -19,6 +19,12 @@ served cases also assert that the runtime ran no host primitive.
 
 from __future__ import annotations
 
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+from unittest import mock
+
 import pytest
 import torch
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
@@ -28,6 +34,8 @@ from test.utils_v2v import to_dev as _to_dev
 from torch_rbln._internal.compile_cache import clear_rbln_compile_cache
 from torch_rbln._internal.ops_utils import _detect_view_recipe
 
+
+_PROJECT_ROOT = str(Path(__file__).absolute().parents[2])
 
 # Past ::rbln::kMaxV2VMultiCopies once permuted: the strided engine declines and the
 # alternative is a host bounce, which is what makes the route observable.
@@ -343,6 +351,93 @@ class TestViewCopyInPlace(TestCase):
                 self.assertTrue(torch.ops.torch_rbln.copy_strided_view(src, out, inplace=True))
             checked.append(bool(_host_primitives(p.dump())))
         self.assertEqual(checked, [True, False, True, False])
+
+    @pytest.mark.npu(count=1)
+    def test_each_program_is_checked_on_its_own(self):
+        # The same source sizes and strides over a buffer allocated in the source's
+        # rank, then over one with its leading dims merged: the second replays a
+        # reshape too, so it is another program, and the first one's check says
+        # nothing about it.
+        rows, heads, block, dim = 2 * _ROWS, _HEADS, _BLOCK, _DIM
+        checked = []
+        for base_shape in ((rows, heads, block, dim), (rows * heads, block, dim)):
+            host = torch.randint(-1000, 1000, base_shape).to(torch.bfloat16)
+            buf = _to_dev(host)
+            src = buf.view(rows, heads, block, dim).permute(0, 2, 1, 3)
+            out = buf.view(rows, block, heads, dim)
+            with torch.rbln.explain() as p:
+                self.assertTrue(torch.ops.torch_rbln.copy_strided_view(src, out, inplace=True))
+            checked.append(bool(_host_primitives(p.dump())))
+            self.assertEqual(out.cpu(), host.view(rows, heads, block, dim).permute(0, 2, 1, 3))
+        self.assertEqual(checked, [True, True])
+
+    @pytest.mark.npu(count=1)
+    def test_refuses_a_program_it_cannot_bind_the_buffer_to(self):
+        # When the graph's inputs cannot be matched to the call's tensors, the buffer
+        # could only be filled by copy from one of the program's own. That says nothing
+        # about a run that writes the buffer itself, which is what a caller keeping the
+        # program does, so the call raises before the buffer is written.
+        host = torch.randint(-1000, 1000, self._SHAPE).to(torch.bfloat16)
+        rows, heads, block, dim = self._SHAPE
+        buf = _to_dev(host)
+        src = buf.view(rows, heads, block, dim).permute(0, 2, 1, 3)
+        out = buf.view(rows, block, heads, dim)
+        with (
+            mock.patch("torch_rbln._internal.ops_utils._graph_input_order", return_value=None),
+            self.assertRaisesRegex(RuntimeError, "cannot be bound"),
+        ):
+            torch.ops.torch_rbln.copy_strided_view(src, out, inplace=True)
+        self.assertTrue(torch.equal(buf.cpu().view(torch.uint8), host.view(torch.uint8)))
+
+    @pytest.mark.npu(count=1)
+    def test_the_captured_program_permutes_the_buffer_in_place(self):
+        # The LMCache transfer keeps the program the first in-place call builds and runs
+        # it with the one buffer as both input and output.
+        rows, heads, block, dim = self._SHAPE
+        buf = _to_dev(torch.randint(-1000, 1000, self._SHAPE).to(torch.bfloat16))
+        src = buf.view(rows, heads, block, dim).permute(0, 2, 1, 3)
+        out = buf.view(rows, block, heads, dim)
+        with torch.rbln.capture_programs() as built:
+            self.assertTrue(torch.ops.torch_rbln.copy_strided_view(src, out, inplace=True))
+        self.assertEqual(len(built), 1)
+        host = torch.randint(-1000, 1000, self._SHAPE).to(torch.bfloat16)
+        buf.copy_(host)
+        built[0].runtime.run(buf, out=[out])
+        torch.rbln.synchronize()
+        self.assertEqual(out.cpu(), host.permute(0, 2, 1, 3))
+
+    @pytest.mark.npu(count=1)
+    def test_a_reset_at_the_recompile_limit_does_not_hang(self):
+        # A second block size recompiles the same view-copy module. At the limit,
+        # torch-rbln's compile wrapper resets dynamo inside the call, which clears the
+        # compile cache; nothing the in-place call holds may be waited on there. A
+        # subprocess bounds the hang this once was.
+        script = """
+            import torch
+            import torch_rbln
+
+            with torch._dynamo.config.patch(recompile_limit=1, fail_on_recompile_limit_hit=True):
+                for block in (256, 512):
+                    host = torch.randint(-1000, 1000, (4, 4, block, 128)).to(torch.bfloat16)
+                    buf = host.to("rbln")
+                    src = buf.view(4, 4, block, 128).permute(0, 2, 1, 3)
+                    out = buf.view(4, block, 4, 128)
+                    assert torch.ops.torch_rbln.copy_strided_view(src, out, inplace=True)
+                    assert torch.equal(out.cpu(), host.permute(0, 2, 1, 3))
+            print("RESET_OK")
+        """
+        result = subprocess.run(
+            [sys.executable, "-c", textwrap.dedent(script)],
+            check=False,
+            cwd=_PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        self.assertTrue(
+            result.returncode == 0 and "RESET_OK" in result.stdout,
+            f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}",
+        )
 
     @pytest.mark.npu(count=1)
     def test_declines_an_unclassifiable_view(self):
