@@ -114,6 +114,12 @@ _EXEMPT_EXPRS = [
     ("rsqrt", "torch.rsqrt(p)"),
     ("sigmoid", "torch.sigmoid(a)"),
     ("silu", "torch.nn.functional.silu(a)"),
+    ("softmax", "torch.softmax(a, -1)"),
+]
+
+# These keep the alignment fallback.
+_NON_EXEMPT_EXPRS = [
+    ("pow", "torch.pow(a, 3)"),
     ("eq", "torch.eq(a, b)"),
     ("ne", "torch.ne(a, b)"),
     ("lt", "torch.lt(a, b)"),
@@ -122,12 +128,6 @@ _EXEMPT_EXPRS = [
     ("ge", "torch.ge(a, b)"),
     ("maximum", "torch.maximum(a, b)"),
     ("minimum", "torch.minimum(a, b)"),
-    ("softmax", "torch.softmax(a, -1)"),
-]
-
-# These keep the alignment fallback.
-_NON_EXEMPT_EXPRS = [
-    ("pow", "torch.pow(a, 3)"),
     ("max", "torch.max(a)"),
     ("min", "torch.min(a)"),
     ("mean", "torch.mean(a)"),

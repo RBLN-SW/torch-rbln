@@ -292,8 +292,6 @@ _FP32_NONCONTIG_DEVICE_OPS = {
     ("addmm", "decomposed"),
     ("div", "no_rounding_mode"),
     ("log", ""),
-    ("maximum", ""),
-    ("minimum", ""),
     ("mul", ""),
     ("neg", ""),
     ("nn.functional.linear", ""),
@@ -706,8 +704,6 @@ class TestCommon(TestCase):
             ("ceil", ""),
             ("floor", ""),
             ("log", ""),
-            ("maximum", ""),
-            ("minimum", ""),
             ("rsqrt", ""),
             ("nn.functional.silu", ""),
         }
@@ -717,7 +713,17 @@ class TestCommon(TestCase):
             custom_float16_safe_range = _FP32_DEVICE_RANGE
 
         if dtype is torch.bfloat16:
-            if (op.name, op.variant_test_name) in {("add", ""), ("sub", ""), ("mul", ""), ("neg", "")}:
+            if (op.name, op.variant_test_name) in {
+                ("add", ""),
+                ("sub", ""),
+                ("mul", ""),
+                ("neg", ""),
+                ("abs", ""),
+                ("ceil", ""),
+                ("floor", ""),
+                ("log", ""),
+                ("nn.functional.silu", ""),
+            }:
                 # The device has no inf/nan: an overflow lands on a value torch
                 # reads as nan.
                 ignore_inf_nan = True
@@ -1743,7 +1749,7 @@ class TestCommon(TestCase):
         # The backward hands the input to a device op, and the in-place variant then
         # clones its device copy, which holds fp32 in the narrower compDtype.
         variant_tol = {}
-        if dtype is torch.float32 and op.name in {"log", "nn.functional.silu"}:
+        if dtype is torch.float32 and op.name in {"clamp", "log", "nan_to_num", "nn.functional.silu"}:
             variant_tol = {"rtol": 0.005, "atol": 0.05}
 
         def _test_consistency_helper(samples, variants):

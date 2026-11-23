@@ -1775,7 +1775,7 @@ def compile_and_run_view_aware(
 
     # Avoids host padding. TensorList inputs keep the fused path. align_check comes from
     # OpCategories.align_check: "none" skips it unless an input is empty (no program can
-    # hold one).
+    # hold one), "output" reads the broadcast output's last dim.
     def _last_dim_unaligned(t):
         return t.dim() > 0 and t.shape[-1] % 64 != 0
 
@@ -1783,6 +1783,10 @@ def compile_and_run_view_aware(
     unaligned = any(_last_dim_unaligned(t) for t in tensors)
     if align_check == "none" and all(t.numel() for t in tensors):
         unaligned = False
+    elif align_check == "output":
+        out_shape = torch.broadcast_shapes(*(t.shape for t in tensors))
+        if out_shape and out_shape[-1] != 0:
+            unaligned = out_shape[-1] % 64 != 0
     if unaligned and "align" not in _parse_disabled_fallback_cases():
         return cpu_fallback_path(
             op_callable,
