@@ -469,6 +469,21 @@ class TestDispatchShimDtypeMismatch(TestCase):
             self.assertIs(result, x)
             self.assertEqual(x.data_ptr(), ptr)
 
+    @parametrize("cpu_self", [False, True], name_fn=lambda cpu_self: "cpu_self" if cpu_self else "rbln_self")
+    def test_mixed_where_with_a_cpu_scalar_cond_returns_on_rbln(self, cpu_self) -> None:
+        cond = torch.ones((), dtype=torch.bool)
+        x_cpu = torch.tensor(2.5, dtype=torch.bfloat16) if cpu_self else torch.arange(64, dtype=torch.bfloat16)
+        y_cpu = torch.full((64,), 1.25, dtype=torch.float32)
+        x = x_cpu if cpu_self else x_cpu.to("rbln")
+        y = y_cpu.to("rbln")
+        _C._dispatch_fallback_by_op_reset()
+        before = _dispatch_counts()
+        result = torch.where(cond, x, y)
+        self.assertEqual(_dispatch_counts()[1] - before[1], 1, "mixed dtypes did not use native CPU fallback")
+        self.assertIn(("aten::where.self", "dtype", 1), _C._dispatch_fallback_by_op_reason())
+        self.assertEqual(result.device, y.device)
+        self.assertEqual(result.cpu(), torch.where(cond, x_cpu, y_cpu))
+
     def test_mixed_empty_inputs_keep_the_no_fallback_path(self) -> None:
         x = torch.empty((0, 64), dtype=torch.bfloat16, device="rbln")
         y = torch.empty((0, 64), dtype=torch.float32, device="rbln")
