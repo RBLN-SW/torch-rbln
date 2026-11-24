@@ -13,7 +13,6 @@
 #include <torch/csrc/jit/python/pybind_utils.h>
 #include <torch/library.h>
 
-#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -602,16 +601,7 @@ std::optional<c10::rbln::CpuFallbackReason> quick_fallback_check(
     return CpuFallbackReason::kScalar;
   }
   if (mixed_input_dtypes && !has_empty_input && !has_contiguous_offset_input &&
-      !is_fallback_case_disabled(CpuFallbackReason::kDtype) &&
-      // Boxed fallback uses the first tensor's device for fresh results. A
-      // CPU predicate such as where's condition can precede the RBLN inputs.
-      std::ranges::none_of(args, [](const c10::IValue& iv) {
-        if (!iv.isTensor()) {
-          return false;
-        }
-        const auto& tensor = iv.toTensor();
-        return tensor.defined() && tensor.is_cpu();
-      })) {
+      !is_fallback_case_disabled(CpuFallbackReason::kDtype)) {
     return CpuFallbackReason::kDtype;
   }
   return std::nullopt;
