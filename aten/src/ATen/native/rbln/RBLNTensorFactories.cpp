@@ -274,7 +274,7 @@ at::Tensor& fill_scalar_via_cpu(at::Tensor& self, const at::Scalar& value) {
 //
 // The contiguous suffix of the view's dims is one run; the dims above it are
 // the outer iteration, enqueued with a source stride of 0 so one pattern buffer
-// feeds every run, and H2VBatch splits the submit to the runtime's bulk caps.
+// feeds every run, in one H2VBatch submit.
 // Declined, and left to the paths below: a view whose runs could alias (bulk
 // destinations must be disjoint), more runs than kMaxFillRuns, or a run larger
 // than the pattern buffer cap.

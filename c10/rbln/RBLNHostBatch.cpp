@@ -15,13 +15,6 @@ namespace c10::rbln {
 
 namespace {
 
-// Work one bulk call may carry. Past it the job never completes: the device
-// reports SYS_KERNEL_TIMEOUT and cancels the context, so the per-entry retry
-// below cannot recover either. Measured on LMCache's D2H store, 24 entries /
-// 12 MiB pass and 32 / 16 MiB start timing out.
-constexpr size_t kMaxBulkEntries = 16;
-constexpr size_t kMaxBulkBytes = size_t{8} * 1024 * 1024;
-
 /**
  * @brief Submit one group as a single bulk call, per-entry on rejection.
  *
@@ -57,59 +50,6 @@ void submit_one_call(
 }
 
 /**
- * @brief Flush one homogeneous group, in as few bulk calls as the cap allows.
- */
-template <typename Desc, typename BulkFn, typename OneFn>
-void flush_group(
-    const std::vector<Desc>& group,
-    const char* who,
-    const BulkFn& bulk,
-    const OneFn& one) {
-  if (group.empty()) {
-    return;
-  }
-  size_t total = 0;
-  for (const auto& e : group) {
-    total += e.nbytes;
-  }
-  if (group.size() <= kMaxBulkEntries && total <= kMaxBulkBytes) {
-    submit_one_call(group, who, bulk, one);
-    return;
-  }
-  RBLN_LOG_DEBUG(
-      "{}::submit splitting {} entries / {} bytes to stay under the cap ({} entries, {} bytes)",
-      who,
-      group.size(),
-      total,
-      kMaxBulkEntries,
-      kMaxBulkBytes);
-  for (size_t i = 0; i < group.size();) {
-    if (group[i].nbytes > kMaxBulkBytes) {
-      // No bulk form for a descriptor past the cap; the single-copy path has no
-      // such limit and is where this pair went before batching.
-      one(group[i]);
-      ++i;
-      continue;
-    }
-    size_t j = i + 1;
-    size_t bytes = group[i].nbytes;
-    while (j < group.size() && j - i < kMaxBulkEntries &&
-           bytes + group[j].nbytes <= kMaxBulkBytes) {
-      bytes += group[j].nbytes;
-      ++j;
-    }
-    submit_one_call(
-        std::vector<Desc>(
-            group.begin() + static_cast<ptrdiff_t>(i),
-            group.begin() + static_cast<ptrdiff_t>(j)),
-        who,
-        bulk,
-        one);
-    i = j;
-  }
-}
-
-/**
  * @brief Submit every entry, one bulk call per anchoring device.
  *
  * The homogeneous case submits the pending vector as is — no copy, no per-entry
@@ -129,7 +69,7 @@ void submit_grouped(
         "{}::submit draining {} entries (single device)",
         who,
         st.pending.size());
-    flush_group(st.pending, who, bulk, one);
+    submit_one_call(st.pending, who, bulk, one);
     return;
   }
   // Ordered so submit order is deterministic by device index.
@@ -143,7 +83,7 @@ void submit_grouped(
       st.pending.size(),
       by_device.size());
   for (const auto& [dev, group] : by_device) {
-    flush_group(group, who, bulk, one);
+    submit_one_call(group, who, bulk, one);
   }
 }
 

@@ -443,79 +443,30 @@ class TestForeachCopyHost(TestCase):
         for got, want in zip(dst_cpu, src_cpu, strict=True):
             self.assertTrue(torch.equal(got, want))
 
-    def test_oversized_batch_is_split_across_capped_submits(self):
-        """One bulk call carries at most 16 entries / 8 MiB — past that the
-        runtime's job never completes and the per-entry retry cannot recover. So
-        40 pairs of 1 MiB land in five calls, and 8 pairs stay one.
+    def test_large_batch_is_one_submit(self):
+        """A batch is one call whatever its size: 40 pairs of 1 MiB, 40 pairs of
+        64 KiB, or one pair of 12 MiB.
         """
-        one_mib = (1 << 20) // 4  # float32 elements
-        for n_pairs, want_calls in ((8, 1), (40, 5)):
-            src_cpu = [_arange((one_mib,), torch.float32) + i for i in range(n_pairs)]
-            src_dev = [_to_dev(s) for s in src_cpu]
-            dst_cpu = [torch.zeros(one_mib, dtype=torch.float32) for _ in range(n_pairs)]
-            dst_dev = [_to_dev(torch.zeros(one_mib, dtype=torch.float32)) for _ in range(n_pairs)]
-
-            with torch.rbln.explain() as p:
-                torch._foreach_copy_(dst_cpu, src_dev)
-            calls = _prim_calls(p.dump())
-            self.assertEqual(
-                calls.get("v2h_multi", 0), want_calls, f"{n_pairs} pairs of 1MiB: expected {want_calls}, got {calls}"
-            )
-            self.assertEqual(calls.get("v2h", 0), 0, f"splitting must not degrade to per-entry: {calls}")
-            for got, want in zip(dst_cpu, src_cpu, strict=True):
-                self.assertTrue(torch.equal(got, want))
-
+        for elems, n_pairs in (((1 << 20) // 4, 40), ((64 << 10) // 4, 40), ((12 << 20) // 4, 1)):
+            what = f"{n_pairs} pairs of {elems * 4} B"
+            src_cpu = [_arange((elems,), torch.float32) + i for i in range(n_pairs)]
+            dst_dev = [_to_dev(torch.zeros(elems, dtype=torch.float32)) for _ in range(n_pairs)]
             with torch.rbln.explain() as p:
                 torch._foreach_copy_(dst_dev, src_cpu)
             calls = _prim_calls(p.dump())
-            self.assertEqual(
-                calls.get("h2v_multi", 0), want_calls, f"{n_pairs} pairs of 1MiB: expected {want_calls}, got {calls}"
-            )
-            self.assertEqual(calls.get("h2v", 0), 0, f"splitting must not degrade to per-entry: {calls}")
+            self.assertEqual(calls.get("h2v_multi", 0), 1, f"{what}: expected one submit, got {calls}")
+            self.assertEqual(calls.get("h2v", 0), 0, f"{what}: no per-entry h2v expected, got {calls}")
             for got, want in zip(dst_dev, src_cpu, strict=True):
                 _eq(got, want)
 
-    def test_entry_cap_splits_a_batch_under_the_byte_cap(self):
-        """The 16-entry limit is the separate half of the cap: 40 entries of 64 KiB
-        total 2.5 MiB, so only the entry count can split them — three calls, not
-        one.
-        """
-        elems = (64 << 10) // 4  # float32 elements
-        n_pairs = 40
-        srcs = [_arange((elems,), torch.float32) + i for i in range(n_pairs)]
-        dsts = [_to_dev(torch.zeros(elems, dtype=torch.float32)) for _ in range(n_pairs)]
-
-        with torch.rbln.explain() as p:
-            torch._foreach_copy_(dsts, srcs)
-        calls = _prim_calls(p.dump())
-
-        self.assertEqual(calls.get("h2v_multi", 0), 3, f"40 entries must split at 16: {calls}")
-        self.assertEqual(calls.get("h2v", 0), 0, f"splitting must not degrade to per-entry: {calls}")
-        for got, want in zip(dsts, srcs, strict=True):
-            _eq(got, want)
-
-    def test_entry_over_the_cap_goes_per_entry(self):
-        """A single descriptor larger than the 8 MiB cap cannot be split, so it
-        takes the single-copy path — which has no cap — instead of a bulk call.
-        """
-        elems = (12 << 20) // 4  # 12 MiB of float32
-        src_cpu = _arange((elems,), torch.float32)
-
-        dst_dev = _to_dev(torch.zeros(elems, dtype=torch.float32))
-        with torch.rbln.explain() as p:
-            torch._foreach_copy_([dst_dev], [src_cpu])
-        calls = _prim_calls(p.dump())
-        self.assertEqual(calls.get("h2v_multi", 0), 0, f"oversized entry must not use the bulk call: {calls}")
-        self.assertEqual(calls.get("h2v", 0), 1, f"{calls}")
-        _eq(dst_dev, src_cpu)
-
-        dst_cpu = torch.zeros(elems, dtype=torch.float32)
-        with torch.rbln.explain() as p:
-            torch._foreach_copy_([dst_cpu], [dst_dev])
-        calls = _prim_calls(p.dump())
-        self.assertEqual(calls.get("v2h_multi", 0), 0, f"oversized entry must not use the bulk call: {calls}")
-        self.assertEqual(calls.get("v2h", 0), 1, f"{calls}")
-        self.assertTrue(torch.equal(dst_cpu, src_cpu))
+            dst_cpu = [torch.zeros(elems, dtype=torch.float32) for _ in range(n_pairs)]
+            with torch.rbln.explain() as p:
+                torch._foreach_copy_(dst_cpu, dst_dev)
+            calls = _prim_calls(p.dump())
+            self.assertEqual(calls.get("v2h_multi", 0), 1, f"{what}: expected one submit, got {calls}")
+            self.assertEqual(calls.get("v2h", 0), 0, f"{what}: no per-entry v2h expected, got {calls}")
+            for got, want in zip(dst_cpu, src_cpu, strict=True):
+                self.assertTrue(torch.equal(got, want))
 
     def test_mixed_directions_use_one_submit_each(self):
         """A list spanning all three directions costs one submit per direction —
