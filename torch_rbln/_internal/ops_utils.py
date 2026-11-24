@@ -225,6 +225,8 @@ def held_view_key(tensors, *, declare_held_pv: bool) -> tuple | None:
         declare_held_pv = flags.RBLN_DECLARE_HELD_PV == "on"
     if not declare_held_pv:
         return None
+    # The released rebel-compiler wheel is obfuscated, so pyrefly cannot see this name.
+    # pyrefly: ignore[missing-module-attribute]
     from rebel.core.compilation._physical_view import _held_hash  # noqa: PLC0415
 
     return tuple(_held_hash(t) if t.device.type == "rbln" else None for t in tensors)
