@@ -249,8 +249,8 @@ class TestViewCopyInPlace(TestCase):
     buffer, not two.
 
     ``copy_`` never reaches this op (ATen refuses partially overlapping pairs), so it is
-    called directly, the way the LMCache transfer does. The op checks the first call for
-    a geometry against a host copy of its source; these tests compute their own host
+    called directly, the way the LMCache transfer does. The op checks the first call of
+    each program against a host copy of its source; these tests compute their own host
     reference, so a verification that compared two equally wrong results would still be
     caught.
     """
@@ -274,10 +274,10 @@ class TestViewCopyInPlace(TestCase):
 
     @pytest.mark.npu(count=1)
     def test_repeated_calls_stay_exact_and_allocate_nothing(self):
-        # After the geometry's one-time verification, a call must not grow device
-        # memory: the program writes the caller's buffer and keeps no output of its own.
+        # After the program's one-time check, a call must not grow device memory:
+        # the program writes the caller's buffer and keeps no output of its own.
         host = torch.randint(-1000, 1000, self._SHAPE).to(torch.bfloat16)
-        buf = self._permute_in_place(host)  # verifies the geometry
+        buf = self._permute_in_place(host)  # checks the program
         rows, heads, block, dim = self._SHAPE
         for _ in range(3):
             host = torch.randint(-1000, 1000, self._SHAPE).to(torch.bfloat16)
@@ -327,10 +327,11 @@ class TestViewCopyInPlace(TestCase):
 
     @pytest.mark.npu(count=1)
     def test_the_first_call_does_not_check_on_the_callers_data(self):
-        # The first call for a geometry checks the program on random values of its
-        # own, so a buffer of NaN -- what uninitialized memory can hold -- is not
-        # refused, and it is permuted bit for bit. A block size no other test uses
-        # keeps this call the geometry's first.
+        # The first call of a program checks it on random values of its own, so a
+        # buffer of NaN -- what uninitialized memory can hold -- is not refused, and
+        # it is permuted. Which NaN bit pattern comes out is the device's choice, so
+        # NaNs are compared by position and every other value exactly. A block size
+        # no other test uses keeps this call the program's first.
         rows, heads, block, dim = 2 * _ROWS, _HEADS, 2 * _BLOCK, _DIM
         host = torch.full((rows, heads, block, dim), float("nan"), dtype=torch.bfloat16)
         host[0, 0, 0, 0] = 1.0
@@ -338,8 +339,7 @@ class TestViewCopyInPlace(TestCase):
         src = buf.view(rows, heads, block, dim).permute(0, 2, 1, 3)
         out = buf.view(rows, block, heads, dim)
         self.assertTrue(torch.ops.torch_rbln.copy_strided_view(src, out, inplace=True))
-        want = host.permute(0, 2, 1, 3).contiguous()
-        self.assertTrue(torch.equal(out.cpu().view(torch.uint8), want.view(torch.uint8)))
+        self.assertEqual(out.cpu(), host.permute(0, 2, 1, 3), atol=0, rtol=0, equal_nan=True)
 
     @pytest.mark.npu(count=1)
     def test_a_check_that_fails_gives_the_buffer_back(self):

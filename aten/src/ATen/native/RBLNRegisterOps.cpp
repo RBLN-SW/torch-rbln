@@ -173,7 +173,7 @@ TORCH_LIBRARY(torch_rbln, m) {
   // views, so the program permutes it in its own storage. Only a direct call
   // can ask for that -- `copy_` refuses overlapping pairs before dispatch --
   // and the alias is then the caller's intent; the Python side holds `out` to
-  // the whole storage and verifies each geometry once.
+  // the whole storage and checks each compiled program once.
   m.def(
       "copy_strided_view(Tensor src, Tensor(a!) out, bool inplace=False) -> bool");
 }
