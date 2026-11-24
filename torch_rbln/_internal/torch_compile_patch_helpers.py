@@ -19,7 +19,7 @@ except Exception:  # pragma: no cover - torch internals may move
 
 from torch_rbln import _C
 from torch_rbln._internal.env_utils import is_fallback_disabled, use_tp_failover
-from torch_rbln._internal.log_utils import rbln_log_error, rbln_log_warn, rbln_record_cpu_fallback
+from torch_rbln._internal.log_utils import rbln_log_error, rbln_log_warn, rbln_log_warn_once, rbln_record_cpu_fallback
 from torch_rbln._internal.ops_utils import extract_device_id_from_inputs, to_cpu
 from torch_rbln._internal.rsd_utils import auto_determine_num_devices, get_physical_device_ids
 
@@ -164,6 +164,17 @@ def get_num_devices_from_options(compile_kwargs):
     return num_devices
 
 
+def _is_compile_only(compile_kwargs) -> bool:
+    """Whether torch.compile requested mode=compile_only (build artifacts, no run)."""
+    options = compile_kwargs.get("options", {})
+    if not isinstance(options, dict):
+        return False
+    mode = options.get("mode")
+    if isinstance(mode, (list, tuple)):
+        return "compile_only" in mode
+    return mode == "compile_only"
+
+
 def _resolve_current_num_devices(device_id, compile_kwargs):
     """Resolve the ``num_devices`` currently in use for this compiled function.
 
@@ -277,6 +288,12 @@ def handle_tp_failover(model, compile_kwargs, device_id, original_compile_fn):
     except Exception:
         # If recompilation fails, return None to re-raise original error
         return None
+
+
+DUMMY_EXECUTION_WARNING = (
+    "RBLN_DUMMY_DEVICE is set: device computation is skipped, so the output values of eager device ops and "
+    "compiled graphs are undefined."
+)
 
 
 class CompiledFunctionWrapper:
@@ -457,6 +474,14 @@ class CompiledFunctionWrapper:
             _exit_rbln_compile_op()
 
     def _call_impl(self, *args, **kwargs):
+        # Compiled graphs reach here on every call, eager ops only on their first
+        # run (later runs reuse the runtime or the C++ warm cache), so the warning
+        # is once per process. A compile_only build runs nothing, so it does not
+        # warn. torch._dynamo.optimize("rbln") bypasses this wrapper and does not
+        # warn either.
+        if _C.is_dummy_device() and not _is_compile_only(self._compile_kwargs):
+            rbln_log_warn_once(DUMMY_EXECUTION_WARNING)
+
         # Extract device_id for TP operations
         device_id = extract_device_id_from_inputs(*args, **kwargs)
 
