@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import tomlkit
@@ -28,14 +29,25 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--torch-version", required=True)
     parser.add_argument("--torch-index", required=True)
+    parser.add_argument(
+        "--lock-current-python",
+        action="store_true",
+        help="Limit uv lock to the Python minor version running this script.",
+    )
     args = parser.parse_args()
     path = Path("pyproject.toml")
     document = tomlkit.parse(path.read_text(encoding="utf-8"))
     pin_torch_requirement(document["project"]["dependencies"], args.torch_version, "[project].dependencies")
     pin_torch_requirement(document["build-system"]["requires"], args.torch_version, "[build-system].requires")
     pin_torch_requirement(document["dependency-groups"]["build"], args.torch_version, "[dependency-groups].build")
-    document["tool"]["uv"]["sources"]["torch"]["index"] = args.torch_index
+    uv_settings = document["tool"]["uv"]
+    uv_settings["sources"]["torch"]["index"] = args.torch_index
     print(f"[tool.uv.sources].torch: index {args.torch_index}")
+    if args.lock_current_python:
+        python_marker = f"python_version == '{sys.version_info.major}.{sys.version_info.minor}'"
+        uv_settings["environments"] = [
+            f"({environment}) and {python_marker}" for environment in uv_settings["environments"]
+        ]
     path.write_text(tomlkit.dumps(document), encoding="utf-8")
 
 

@@ -70,9 +70,11 @@ fi
 echo "Resolved ${requirement} to ${torch_version}"
 
 echo "--- Pinning torch to ${torch_version}"
+# PyTorch nightlies may omit wheels for Python versions outside this build.
 .buildkite/scripts/package/pin_torch.py \
   --torch-version "${torch_version}" \
-  --torch-index pytorch-nightly-cpu
+  --torch-index pytorch-nightly-cpu \
+  --lock-current-python
 uv lock
 
 .buildkite/scripts/package/build-wheel.sh \
