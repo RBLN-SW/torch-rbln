@@ -212,6 +212,24 @@ def extract_device_id_from_inputs(*args, **kwargs):
     return None
 
 
+def held_view_key(tensors, *, declare_held_pv: bool) -> tuple | None:
+    """The physical view each device input holds, while the backend declares it.
+
+    The backend compiles one variant per held view and picks it in ``HeldViewGuard``,
+    which the cached-runtime path skips, so the cache key splits them instead.
+    ``RBLN_DECLARE_HELD_PV`` overrides the option, as it does in the backend.
+    """
+    from rebel import flags  # noqa: PLC0415
+
+    if flags.is_set("RBLN_DECLARE_HELD_PV"):
+        declare_held_pv = flags.RBLN_DECLARE_HELD_PV == "on"
+    if not declare_held_pv:
+        return None
+    from rebel.core.compilation._physical_view import _held_hash  # noqa: PLC0415
+
+    return tuple(_held_hash(t) if t.device.type == "rbln" else None for t in tensors)
+
+
 def extract_warm_cache_key(*args, **kwargs):
     # Build a per-(device, input shape/dtype) cache key for compile_rbln_cached
     # so the rebel backend re-runs (and the C++ warm cache picks up a fresh
@@ -1745,7 +1763,15 @@ def view_recipes_for_positional(view_recipes_flat, positional_count):
 
 
 def compile_and_run_view_aware(
-    op_callable, op_name, args, kwargs_filtered, out_tensor, *, out_alias_arg_pos=None, align_check="inputs"
+    op_callable,
+    op_name,
+    args,
+    kwargs_filtered,
+    out_tensor,
+    *,
+    out_alias_arg_pos=None,
+    align_check="inputs",
+    declare_held_pv=False,
 ):
     """Centralized view-aware rbln-compile dispatch.
 
@@ -1861,6 +1887,8 @@ def compile_and_run_view_aware(
     if not use_device_group_num_devices():
         compile_options["num_devices"] = 1
     compile_options["_runtime_holder"] = []
+    if declare_held_pv:
+        compile_options["declare_held_pv"] = True
 
     if out_tensor is None:
         result_tensor = None
@@ -1878,11 +1906,16 @@ def compile_and_run_view_aware(
 
     op_module = get_view_op_module(op_callable, view_recipes)
 
+    tensors = extract_tensors(view_args) + extract_tensors(view_kwargs)
+    held_key = held_view_key(tensors, declare_held_pv=declare_held_pv)
+    device_cache_key = extract_warm_cache_key(*view_args, **view_kwargs)
+    if held_key is not None:
+        device_cache_key = (*device_cache_key, held_key)
     entry = compile_rbln_cached_entry(
         op_module,
         dynamic=False,
         options=compile_options,
-        device_cache_key=extract_warm_cache_key(*view_args, **view_kwargs),
+        device_cache_key=device_cache_key,
     )
     # An ``out`` of another shape is not bound: the shim resizes it and copies into it.
     if result_tensor is not None and entry.out_shape not in (None, result_tensor.shape):
@@ -1894,7 +1927,6 @@ def compile_and_run_view_aware(
     # runtime serves the copy on the host view and ``out`` stays off the device
     # until something else consumes it, while a bound output is written on the
     # device and marked device-latest.
-    tensors = extract_tensors(view_args) + extract_tensors(view_kwargs)
     runtime = entry.runtime()
     if runtime is not None and entry.input_order is not None:
         # The compiled callable is skipped: the cache key separates what its
@@ -1933,7 +1965,8 @@ def compile_and_run_view_aware(
             external_result = result_tensor
     if result_tensor is None:
         result_tensor = external_result
-    if not has_views and not moved_cpu_scalars:
+    # The C++ key has no held view, so a held-view variant stays on this path.
+    if not has_views and not moved_cpu_scalars and held_key is None:
         # install_pending empties the list it is given; the entry keeps its own. An
         # unaligned call got here only because `align` is disabled: mark its entry,
         # so the C++ hit path skips it once the alignment fallback is on again.

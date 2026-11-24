@@ -112,7 +112,9 @@ def copy_strided_view_rbln(src, out) -> bool:
     """
     if _detect_view_recipe(src) is None:
         return False
-    result = compile_and_run_view_aware(_materialize, "torch_rbln::copy_strided_view", (src,), {}, out)
+    result = compile_and_run_view_aware(
+        _materialize, "torch_rbln::copy_strided_view", (src,), {}, out, declare_held_pv=True
+    )
     if isinstance(result, torch.Tensor) and result.data_ptr() != out.data_ptr():
         # The compile path only writes the caller's buffer for dtypes in
         # SupportedDtypes.dispatch; otherwise it hands back its own. Both are contiguous
