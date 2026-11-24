@@ -22,6 +22,7 @@ from unittest import mock
 
 import pytest
 import torch
+from packaging.version import Version
 from torch.testing._internal.common_device_type import dtypes, instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
@@ -219,6 +220,16 @@ class TestIndexPutV2V(TestCase):
         self.assertEqual(masked_fill.call_count, 1)
         _eq(got, expected)
 
+    # Remove this test once the minimum supported PyTorch version is 2.15.
+    # test_prefix_index_broadcast_value covers whole-row V2V writes.
+    # test_mask_with_device_values covers boolean masks with per-element writes.
+    @pytest.mark.skipif(
+        Version(torch.__version__) >= Version("2.15.0"),
+        reason=(
+            "PyTorch dispatches Python scalar mask assignment directly to masked_fill_ (pytorch/pytorch#188330). "
+            "The [4, 1] broadcast mask triggers an align CPU fallback and fails the zero-fallback assertion."
+        ),
+    )
     def test_row_mask_with_device_scalar_writes_rows(self):
         """masked_fill falls back for a broadcast mask, so a row mask writes rows."""
         self_cpu = _arange((4, 64), torch.float16)
