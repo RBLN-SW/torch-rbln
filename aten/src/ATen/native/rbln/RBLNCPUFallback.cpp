@@ -179,6 +179,20 @@ std::optional<c10::Device> compute_target_device(
   // The current convention is that we use the first tensor arg to pick the
   // device Barring that, we take the first tensor from a TensorList arg.
   if (!t_args.empty()) {
+    // A CPU 0-dim tensor is a scalar operand (e.g. where's condition), not the
+    // op's device: skip it, as TensorIterator does.
+    //
+    // TODO(minkyu): An N-d CPU tensor is not skipped, so the result goes to CPU
+    // when that tensor comes first, e.g. `where(cpu_cond, rbln_x, rbln_y)` with
+    // mixed dtypes. The Python fallback (extract_device_id_from_inputs) picks
+    // the first RBLN tensor's device instead, and upstream (CUDA) rejects this
+    // mix in TensorIterator with "Expected all tensors to be on the same
+    // device". Handle this case in the fallback refactoring.
+    for (const auto& t : t_args) {
+      if (!(t.is_cpu() && t.dim() == 0)) {
+        return t.device();
+      }
+    }
     return t_args[0].device();
   } else {
     // We need to loop through all of the (potentially multiple) TensorList

@@ -357,8 +357,9 @@ And the auxiliary readouts (in `dump()`):
   (`compile_error`, `unsupported_op`, `strided_copy_error`) that decided it, or
   else the check itself (`registered` for an op registered to the CPU fallback,
   `out_dtype`, `div_rounding`, `index_pattern`, ...). The C++ shim's own `dtype`
-  and `scalar` checks use those names too, but
-  `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` does not turn them off.
+  and `scalar` checks use those names too, and
+  `TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK` turns them off as it turns off the
+  Python ones.
 - `cpu_fallback_unaccelerated` (A) — fallback ops with no fast-path handler,
   among those that went through the boxed C++ CPU fallback (the only path that
   consults one).
