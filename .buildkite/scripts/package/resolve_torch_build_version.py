@@ -4,18 +4,12 @@
 from __future__ import annotations
 
 import argparse
-import sys
+import tomllib
 from pathlib import Path
 
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
-
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib
 
 
 def torch_build_version(pyproject: str, build_type: str) -> str:

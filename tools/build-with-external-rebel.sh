@@ -242,7 +242,7 @@ setup_compiler_env() {
 }
 
 check_rebel_python_version() {
-    # Get current Python version (e.g., "310" for Python 3.10)
+    # Get current Python version (e.g., "312" for Python 3.12)
     local current_py_version
     current_py_version=$(python -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')")
 
