@@ -9,6 +9,7 @@ import os
 import posixpath
 import re
 import sys
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -16,12 +17,6 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from packaging.utils import InvalidWheelFilename, parse_wheel_filename
-
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib
 
 
 TIMEOUT_SECONDS = 60

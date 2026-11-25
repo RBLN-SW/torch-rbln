@@ -19,7 +19,6 @@ common:
   test-image: &test-image >-
     harbor.k8s.rebellions.in/rebellions-sw/rbln-test:0.12.0rc0-ubuntu24.04-py3.12
   python-versions: &python-versions
-    - "3.10"
     - "3.11"
     - "3.12"
     - "3.13"

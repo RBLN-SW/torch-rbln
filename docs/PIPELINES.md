@@ -46,8 +46,8 @@ coverage:
 
 |                | Pre-merge checks               | Post-merge checks              | Release checks                                                                                          |
 | -------------- | ------------------------------ | ------------------------------ | ------------------------------------------------------------------------------------------------------- |
-| Source linting | Python 3.12, x86_64, `Release` | Python 3.12, x86_64, `Release` | Python 3.10–3.14, x86_64, `Release` and `Debug`                                                         |
-| Wheel builds   | Python 3.12, x86_64, `Release` | Python 3.12, x86_64, `Release` | Python 3.10–3.14, x86_64 and aarch64, `Release`; Python 3.12, x86_64, `Debug`                           |
+| Source linting | Python 3.12, x86_64, `Release` | Python 3.12, x86_64, `Release` | Python 3.11–3.14, x86_64, `Release` and `Debug`                                                         |
+| Wheel builds   | Python 3.12, x86_64, `Release` | Python 3.12, x86_64, `Release` | Python 3.11–3.14, x86_64 and aarch64, `Release`; Python 3.12, x86_64, `Debug`                           |
 | NPU tests      | RBLN-CA25, RBLN-CR13           | RBLN-CA25                      | `Release` wheel: RBLN-CA25, RBLN-CR13; `Debug` wheel: RBLN-CA25, without the `models` Python test suite |
 | Periodic tests | Not run                        | Not run                        | Run                                                                                                     |
 

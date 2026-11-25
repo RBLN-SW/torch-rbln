@@ -101,7 +101,7 @@ def reset_caching_allocator():
     for idx in range(num_devices):
         try:
             torch.rbln.synchronize(idx)
-        except Exception as exc:  # noqa: PERF203
+        except Exception as exc:
             sync_errors.append(f"synchronize(rbln:{idx}): {exc!r}")
 
     # Drain failed: the device is faulted and may still have in-flight DMA, so don't

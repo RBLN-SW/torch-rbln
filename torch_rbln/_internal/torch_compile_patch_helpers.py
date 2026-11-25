@@ -497,7 +497,7 @@ class CompiledFunctionWrapper:
         for attempt in range(self._max_retries + 1):
             try:
                 return self._compiled_fn(*args, **kwargs)
-            except RuntimeError as e:  # noqa: PERF203
+            except RuntimeError as e:
                 result = self._handle_runtime_error(e, device_id, args, kwargs)
                 if result is None:
                     continue
