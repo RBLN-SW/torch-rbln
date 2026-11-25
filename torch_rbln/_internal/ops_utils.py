@@ -1745,7 +1745,15 @@ def view_recipes_for_positional(view_recipes_flat, positional_count):
 
 
 def compile_and_run_view_aware(
-    op_callable, op_name, args, kwargs_filtered, out_tensor, *, out_alias_arg_pos=None, align_check="inputs"
+    op_callable,
+    op_name,
+    args,
+    kwargs_filtered,
+    out_tensor,
+    *,
+    out_alias_arg_pos=None,
+    align_check="inputs",
+    check_alias=None,
 ):
     """Centralized view-aware rbln-compile dispatch.
 
@@ -1768,6 +1776,9 @@ def compile_and_run_view_aware(
       while the runtime is now compiled for the (different) base shape.
       Future calls re-enter Python and hit the compile_rbln_cached cache —
       ~50 µs/call overhead, still cheap relative to host materialization.
+
+    ``check_alias`` lets ``out_tensor`` share storage with an input even when the
+    input is not the declared ``out_alias_arg_pos`` (see ``_run_with_aliased_out``).
 
     ``get_rbln_compile_op_depth`` is imported in the body because
     ``torch_compile_patch_helpers`` imports this module.
@@ -1871,7 +1882,9 @@ def compile_and_run_view_aware(
         reusable = None
         if out_alias_arg_pos is not None and view_args[out_alias_arg_pos] is args[out_alias_arg_pos]:
             reusable = args[out_alias_arg_pos]
-        if can_use_out_tensor_directly(view_args, dict(view_kwargs, out=out_tensor), reusable=reusable):
+        if can_use_out_tensor_directly(
+            view_args, dict(view_kwargs, out=out_tensor), reusable=reusable, allow_alias=check_alias is not None
+        ):
             result_tensor = out_tensor
         else:
             result_tensor = None
@@ -1884,6 +1897,8 @@ def compile_and_run_view_aware(
         options=compile_options,
         device_cache_key=extract_warm_cache_key(*view_args, **view_kwargs),
     )
+    if check_alias is not None:
+        return _run_with_aliased_out(entry, op_name, view_args, view_kwargs, result_tensor, check_alias)
     # An ``out`` of another shape is not bound: the shim resizes it and copies into it.
     if result_tensor is not None and entry.out_shape not in (None, result_tensor.shape):
         result_tensor = None
@@ -1939,6 +1954,57 @@ def compile_and_run_view_aware(
         # so the C++ hit path skips it once the alignment fallback is on again.
         _install_warm_cache_pending(list(entry.runtime_holder), external_result, align_bypassed=unaligned)
     return result_tensor
+
+
+def _run_with_aliased_out(entry, op_name, args, kwargs, out, check_alias):
+    """Run ``entry``'s program with ``out``, which shares storage with an input, bound
+    as its output buffer.
+
+    A program that writes a buffer it is still reading is only correct when its
+    schedule finishes reading a region before writing it, which is the compiler's
+    tiling and not something the caller controls. ``check_alias(run)`` therefore
+    vouches for each program before ``out`` is written: ``run`` runs the program
+    with ``out`` bound, and the check returns whether the result is right. The
+    verdict is kept on the cache entry, so it goes with the program, and a program
+    built for another base layout or compile option is checked on its own.
+
+    Only a directly bound ``out`` is accepted. Filling ``out`` by copy from a buffer
+    of the program's own would prove nothing about a run that writes ``out``, so a
+    call that cannot bind it raises before ``out`` is written. Nothing is installed
+    in the C++ warm cache, whose hit path would run the program without the check.
+    """
+    unbound = f"{op_name}: out shares storage with an input but cannot be bound as the program's output"
+    if out is None:
+        raise RuntimeError(unbound)
+    tensors = extract_tensors(args) + extract_tensors(kwargs)
+    if entry.runtime() is None or entry.input_order is None:
+        # First call for this key: the backend builds the runtime while the callable
+        # runs, into a buffer of its own.
+        result = entry.compiled(*args, **kwargs)
+        if isinstance(result, torch.Tensor):
+            entry.out_shape = result.shape
+        if entry.runtime() is not None and entry.input_order is None:
+            entry.input_order = _graph_input_order(entry.runtime(), tensors)
+    runtime = entry.runtime()
+    if runtime is None or entry.input_order is None or entry.out_shape not in (None, out.shape):
+        # Dynamo recompiled inside the callable or the call fell back, so which
+        # runtime ran is unknown, or the graph's inputs could not be matched.
+        raise RuntimeError(unbound)
+    inputs = [tensors[i] for i in entry.input_order]
+
+    def run():
+        runtime.run(*inputs, out=[out])
+
+    if entry.alias_verified is None:
+        entry.alias_verified = check_alias(run)
+    if not entry.alias_verified:
+        msg = (
+            f"{op_name}: the compiled program does not write {list(out.shape)} correctly over the input it "
+            "reads; write a separate buffer instead"
+        )
+        raise RuntimeError(msg)
+    run()
+    return out
 
 
 def _rank0_as_ones(tensors):
@@ -2316,13 +2382,13 @@ def _out_alias_allowed(args: tuple, kwargs: dict, out_tensor: torch.Tensor, reus
     return all(t is reusable for t in overlapping)
 
 
-def can_use_out_tensor_directly(args: tuple, kwargs: dict, *, reusable=None) -> bool:
+def can_use_out_tensor_directly(args: tuple, kwargs: dict, *, reusable=None, allow_alias: bool = False) -> bool:
     """Check if the out_tensor can be used directly by the compiler.
 
     This function checks several conditions to determine if the output tensor
     can be used directly without creating a temporary tensor:
     1. ``out`` does not alias an input, except the input passed as ``reusable``
-       (see ``_out_alias_allowed``)
+       (see ``_out_alias_allowed``) (waived when ``allow_alias`` is True)
     2. Tensor is neither empty nor scalar
     3. Tensor is contiguous
     4. Tensor has zero storage offset
@@ -2333,6 +2399,7 @@ def can_use_out_tensor_directly(args: tuple, kwargs: dict, *, reusable=None) -> 
         kwargs (dict): Keyword arguments containing 'out' key with the output
             tensor to check.
         reusable: The one input ``out`` may be (an in-place ``self``), or None.
+        allow_alias (bool): Accept an out tensor that shares storage with an input.
 
     Returns:
         bool: True if the out_tensor can be used directly, False otherwise.
@@ -2342,7 +2409,7 @@ def can_use_out_tensor_directly(args: tuple, kwargs: dict, *, reusable=None) -> 
         return False
 
     return (
-        _out_alias_allowed(args, kwargs, out_tensor, reusable)
+        (allow_alias or _out_alias_allowed(args, kwargs, out_tensor, reusable))
         and ((out_tensor.numel() > 0) and len(out_tensor.size()) > 0)
         and out_tensor.is_contiguous()
         and (out_tensor.storage_offset() == 0)
