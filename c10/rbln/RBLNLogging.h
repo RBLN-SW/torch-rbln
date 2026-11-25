@@ -148,6 +148,12 @@ enum class CpuFallbackReason : uint8_t {
 inline constexpr size_t kNumCpuFallbackReasons =
     static_cast<size_t>(CpuFallbackReason::kNumCpuFallbackReasons);
 
+// True for the reasons TORCH_RBLN_DEV_DISABLE_OP_CPU_FALLBACK can turn off:
+// the first block of CpuFallbackReason, kDispatchMode through kAlign.
+constexpr bool is_dev_disable_case(CpuFallbackReason reason) {
+  return reason <= CpuFallbackReason::kAlign;
+}
+
 C10_RBLN_API std::string_view cpu_fallback_reason_name(
     CpuFallbackReason reason);
 // The reason named `name`, or nullopt if no reason has that name.
