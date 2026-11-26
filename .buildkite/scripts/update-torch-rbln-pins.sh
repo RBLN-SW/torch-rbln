@@ -5,8 +5,8 @@
 # Usage:
 #   update-torch-rbln-pins.sh vllm-rbln|rebel-compiler
 #
-# The version is TORCH_RBLN_PIN_VERSION, or the latest release on pypi.org when
-# it is empty.
+# The version is TORCH_RBLN_PIN_VERSION, which must be a release on pypi.org,
+# or the latest release there when it is empty.
 set -euo pipefail
 
 package="torch-rbln"
@@ -22,13 +22,14 @@ target_repo="$1"
 : "${GH_REPO:?is not set}"
 : "${GH_TOKEN:?is not set}"
 
-# pin_pattern captures the text before the version, the version, and the text
-# after it.
+# pin_pattern captures the text before the pin, the pin, and the text after it.
 case "${target_repo}" in
   vllm-rbln)
+    # The range in pyproject.toml admits a whole patch line, and uv.lock pins
+    # the version in it.
     pin_file="pyproject.toml"
-    # "torch-rbln>=0.12.1a1,<0.12.2 ; platform_machine == 'x86_64'"
-    pin_pattern='("torch-rbln>=)([^,"]+)(,<[^ ;"]+)'
+    # "torch-rbln>=0.12.1.dev0,<0.12.2 ; platform_machine == 'x86_64'"
+    pin_pattern='("torch-rbln)([<>=!~][^ ;"]*)()'
     proposed_files=("${pin_file}" uv.lock)
     title_prefix="other(deps): update ${package} to "
     ;;
@@ -46,14 +47,18 @@ case "${target_repo}" in
 esac
 
 echo "--- Resolving ${package} version"
+# A release of vllm-rbln requires the pinned version from pypi.org, so the pin
+# is always a release there.
+release_options=(--package "${package}")
 if [[ -n "${TORCH_RBLN_PIN_VERSION:-}" ]]; then
-  target="${TORCH_RBLN_PIN_VERSION}"
-else
-  target="$(
-    .buildkite/scripts/latest_pypi_version.py \
-      --package "${package}"
-  )"
+  .buildkite/scripts/check_pin_version.py \
+    --version "${TORCH_RBLN_PIN_VERSION}"
+  release_options+=(--version "${TORCH_RBLN_PIN_VERSION}")
 fi
+target="$(
+  .buildkite/scripts/pypi_release.py \
+    "${release_options[@]}"
+)"
 echo "Resolved ${package} to ${target}"
 
 echo "--- Cloning ${GH_REPO} at ${base_branch}"
@@ -84,16 +89,25 @@ if [[ "$(grep --count --extended-regexp "${pin_pattern}" "${checkout_dir}/${pin_
   echo "${pin_file} does not pin ${package} exactly once" >&2
   exit 1
 fi
-current="$(
-  grep \
-    --only-matching \
-    --extended-regexp \
-    "${pin_pattern}" \
-    "${checkout_dir}/${pin_file}" \
-    | sed \
-      --regexp-extended \
-      "s/${pin_pattern}/\2/"
-)"
+if [[ "${target_repo}" == "vllm-rbln" ]]; then
+  current="$(
+    .buildkite/scripts/project_pin.py \
+      --project "${checkout_dir}" \
+      --package "${package}" \
+      locked
+  )"
+else
+  current="$(
+    grep \
+      --only-matching \
+      --extended-regexp \
+      "${pin_pattern}" \
+      "${checkout_dir}/${pin_file}" \
+      | sed \
+        --regexp-extended \
+        "s/${pin_pattern}/\2/"
+  )"
+fi
 echo "Current pin: ${current}"
 if [[ "${target}" == "${current}" ]]; then
   echo "Already pinned to ${target}; nothing to do"
@@ -110,28 +124,32 @@ if [[ "${is_later}" != "true" ]]; then
 fi
 
 echo "--- Pinning ${package} to ${target}"
-replacement="\1${target}\3"
+pin="${target}"
 if [[ "${target_repo}" == "vllm-rbln" ]]; then
-  # The ceiling admits the rest of the patch line, as vllm-rbln's own pins do.
-  release="$(
-    sed \
-      --quiet \
-      --regexp-extended \
-      's/^([0-9]+)\.([0-9]+)\.([0-9]+).*/\1 \2 \3/p' \
-      <<<"${target}"
+  pin=""
+  admitted="$(
+    .buildkite/scripts/project_pin.py \
+      --project "${checkout_dir}" \
+      --package "${package}" \
+      allows "${target}"
   )"
-  if [[ -z "${release}" ]]; then
-    echo "Cannot derive a patch-line ceiling from ${target}" >&2
-    exit 1
+  if [[ "${admitted}" != "true" ]]; then
+    # A new patch line: the range moves to it, and stays until the next one.
+    pin="$(
+      .buildkite/scripts/project_pin.py \
+        --project "${checkout_dir}" \
+        --package "${package}" \
+        patch-line "${target}"
+    )"
   fi
-  read -r major minor patch <<<"${release}"
-  replacement="\1${target},<${major}.${minor}.$((patch + 1))"
 fi
-sed \
-  --in-place \
-  --regexp-extended \
-  "s/${pin_pattern}/${replacement}/" \
-  "${checkout_dir}/${pin_file}"
+if [[ -n "${pin}" ]]; then
+  sed \
+    --in-place \
+    --regexp-extended \
+    "s/${pin_pattern}/\1${pin}\3/" \
+    "${checkout_dir}/${pin_file}"
+fi
 if [[ "${target_repo}" == "vllm-rbln" ]]; then
   # Only torch-rbln and what its new version needs may move. The range also
   # admits the development builds on the nightly index, so name the version.

@@ -133,12 +133,15 @@ request against `dev`.
 
 | Repository       | Pin                                                                                     |
 | ---------------- | --------------------------------------------------------------------------------------- |
-| `vllm-rbln`      | The lower bound of `torch-rbln` in `pyproject.toml`, and `uv.lock`                      |
+| `vllm-rbln`      | `uv.lock`, and the range in `pyproject.toml` when the version starts a new patch line   |
 | `rebel-compiler` | `TORCH_RBLN` in `.buildkite/pr.yml`, which also picks the tag its test suite comes from |
 
-| Variable                 | Default                        | Description           |
-| ------------------------ | ------------------------------ | --------------------- |
-| `TORCH_RBLN_PIN_VERSION` | The latest release on pypi.org | The version to pin to |
+The range of a new patch line admits it from its first development release, such
+as `>=0.12.2.dev0,<0.12.3`.
+
+| Variable                 | Default                        | Description                                                                                       |
+| ------------------------ | ------------------------------ | ------------------------------------------------------------------------------------------------- |
+| `TORCH_RBLN_PIN_VERSION` | The latest release on pypi.org | The version to pin to, such as `0.12.1a1` without a leading `v`. It must be a release on pypi.org |
 
 The latest release counts pre-releases but not development releases.
 
