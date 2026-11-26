@@ -286,17 +286,25 @@ _FP32_DEVICE_RANGE = (2.0**-29, 8.0e9)
 
 _FP32_NONCONTIG_DEVICE_OPS = {
     ("_softmax_backward_data", ""),
+    ("abs", ""),
     ("add", ""),
     ("addmm", ""),
     ("addmm", "decomposed"),
     ("div", "no_rounding_mode"),
+    ("log", ""),
     ("mul", ""),
     ("neg", ""),
     ("nn.functional.linear", ""),
+    ("nn.functional.silu", ""),
     ("pow", ""),
+    ("rsqrt", ""),
+    ("sigmoid", ""),
     ("sub", ""),
     ("where", ""),
 }
+
+# fp16/fp32 inputs near an integer can round onto it on the device.
+_ROUNDING_OPS = {("ceil", ""), ("floor", "")}
 
 
 def _custom_float16_input_safe_mask(
@@ -692,6 +700,12 @@ class TestCommon(TestCase):
             ("mul", ""),
             ("div", "no_rounding_mode"),
             ("neg", ""),
+            ("abs", ""),
+            ("ceil", ""),
+            ("floor", ""),
+            ("log", ""),
+            ("rsqrt", ""),
+            ("nn.functional.silu", ""),
         }
         device_range_arith = fp32_arith
         if fp32_arith:
@@ -699,7 +713,17 @@ class TestCommon(TestCase):
             custom_float16_safe_range = _FP32_DEVICE_RANGE
 
         if dtype is torch.bfloat16:
-            if (op.name, op.variant_test_name) in {("add", ""), ("sub", ""), ("mul", ""), ("neg", "")}:
+            if (op.name, op.variant_test_name) in {
+                ("add", ""),
+                ("sub", ""),
+                ("mul", ""),
+                ("neg", ""),
+                ("abs", ""),
+                ("ceil", ""),
+                ("floor", ""),
+                ("log", ""),
+                ("nn.functional.silu", ""),
+            }:
                 # The device has no inf/nan: an overflow lands on a value torch
                 # reads as nan.
                 ignore_inf_nan = True
@@ -722,6 +746,10 @@ class TestCommon(TestCase):
                 rtol = max(rtol, 0.02)
                 atol = max(atol, 0.05)
                 ignore_inf_nan = True
+            elif (op.name, op.variant_test_name) == ("rsqrt", ""):
+                # A negative input gives nan on the CPU and a finite value on the device.
+                ignore_inf_nan = True
+                tolerate_boundary_mismatch = True
             elif op.name == "_softmax_backward_data":
                 # Softmax output saturates near the 0 / 1 edges; bf16 amplifies
                 # the backward grad drift past the default atol there.
@@ -1154,6 +1182,8 @@ class TestCommon(TestCase):
                 ("sum", ""),
             }:
                 assert_kwargs = {"rtol": 0.2, "atol": 1.0}
+            elif dtype in (torch.float16, torch.float32) and (op.name, op.variant_test_name) in _ROUNDING_OPS:
+                assert_kwargs = {"rtol": 0, "atol": 1}
             # fp32: the contiguous sample runs on the device in its narrower
             # compDtype, the noncontiguous one on the CPU.
             elif dtype is torch.float32 and (op.name, op.variant_test_name) in _FP32_NONCONTIG_DEVICE_OPS:
@@ -1719,7 +1749,7 @@ class TestCommon(TestCase):
         # The backward hands the input to a device op, and the in-place variant then
         # clones its device copy, which holds fp32 in the narrower compDtype.
         variant_tol = {}
-        if dtype is torch.float32 and op.name in {"log", "nn.functional.silu"}:
+        if dtype is torch.float32 and op.name in {"clamp", "log", "nan_to_num", "nn.functional.silu"}:
             variant_tol = {"rtol": 0.005, "atol": 0.05}
 
         def _test_consistency_helper(samples, variants):

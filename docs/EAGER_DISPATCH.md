@@ -45,10 +45,12 @@ and as a runtime signal.
 The common eager Python path falls back to CPU for tensor arguments whose last
 dim is not a multiple of 64. This check does not cover TensorList inputs such as
 `cat`/`stack`, separate C++ kernels, or graph mode. It also skips ops whose
-device inputs the compiler pads itself: `add`, `sub`, `mul`, `div`, `neg`,
-`where` and the matmul family (`OpCategories.ALIGN_EXEMPT_OPS` in
-`tools/codegen/config.py`). For other ops such a shape is costly on the device
-today:
+device inputs the compiler pads itself: `add`, `sub`, `mul`, `div`, `where`,
+the small unary ops (`neg`, `abs`, `ceil`, `floor`, `clamp`, `log`, `rsqrt`,
+`sigmoid`, `silu`) and the matmul family (`OpCategories.ALIGN_EXEMPT_OPS` in
+`tools/codegen/config.py`), plus `softmax` (its custom handler in
+`torch_rbln/_internal/register_custom_ops.py`). For other ops
+such a shape is costly on the device today:
 
 - the compiler wraps the op in host pad/depad steps, which cost more than the
   compute on small tensors;

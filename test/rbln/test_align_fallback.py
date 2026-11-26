@@ -106,11 +106,6 @@ _EXEMPT_EXPRS = [
     ("linear", "torch.nn.functional.linear(a, w, bias)"),
     ("neg", "torch.neg(a)"),
     ("where", "torch.where(m, a, b)"),
-]
-
-# Unaligned shapes of these still run on the host inside the compiled module.
-_NON_EXEMPT_EXPRS = [
-    ("pow", "torch.pow(a, 3)"),
     ("abs", "torch.abs(a)"),
     ("ceil", "torch.ceil(a)"),
     ("floor", "torch.floor(a)"),
@@ -119,6 +114,12 @@ _NON_EXEMPT_EXPRS = [
     ("rsqrt", "torch.rsqrt(p)"),
     ("sigmoid", "torch.sigmoid(a)"),
     ("silu", "torch.nn.functional.silu(a)"),
+    ("softmax", "torch.softmax(a, -1)"),
+]
+
+# These keep the alignment fallback.
+_NON_EXEMPT_EXPRS = [
+    ("pow", "torch.pow(a, 3)"),
     ("eq", "torch.eq(a, b)"),
     ("ne", "torch.ne(a, b)"),
     ("lt", "torch.lt(a, b)"),
@@ -130,7 +131,6 @@ _NON_EXEMPT_EXPRS = [
     ("max", "torch.max(a)"),
     ("min", "torch.min(a)"),
     ("mean", "torch.mean(a)"),
-    ("softmax", "torch.softmax(a, -1)"),
 ]
 
 
