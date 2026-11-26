@@ -47,13 +47,13 @@ void index_out_rbln(const c10::OperatorHandle& op, torch::jit::Stack* stack);
 // ---------------------------------------------------------------------------
 // Row kernel for `x[(rows, cols)]` on a 2-D tensor
 //
-// `x[(r, c)]`, `x[(r, c)] = v` and `x.index_put_((r, c), v, accumulate=True)`
-// with two 1-D integer indices into a contiguous 2-D half/bfloat16 `x` whose
-// last dim is a multiple of 64 (vLLM's logit bias and min-tokens). Instead of
-// one copy or CPU fallback per point, one compiled program updates the touched
-// 64-wide rows of `x` viewed as [B, V/64, 64]. The kernel lives in
-// torch_rbln/_internal/kernels/index_rows.py; it returns false, changing
-// nothing, for a call it does not take.
+// `x[(r, c)]`, `x[(r, c)] = v` with one value per point, and
+// `x.index_put_((r, c), v, accumulate=True)` with two 1-D integer indices into
+// a contiguous 2-D half/bfloat16 `x` whose last dim is a multiple of 64 (vLLM's
+// logit bias). Instead of one copy or CPU fallback per point, one compiled
+// program updates the touched 64-wide rows of `x` viewed as [B, V/64, 64].
+// The kernel lives in torch_rbln/_internal/kernels/index_rows.py; it returns
+// false, changing nothing, for a call it does not take.
 // ---------------------------------------------------------------------------
 
 enum class IndexRowsKind : int { kGather = 0, kPut = 1, kPutAccumulate = 2 };

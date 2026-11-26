@@ -92,10 +92,12 @@ bool try_index_rows(
   }
   const auto& [rows, cols] = *operands;
   const int64_t len = rows.numel();
-  const bool shape_ok = kind == IndexRowsKind::kGather
-      ? values_or_out.dim() == 1 && values_or_out.numel() == len
-      : values_or_out.numel() == 1 ||
-          (values_or_out.dim() == 1 && values_or_out.numel() == len);
+  const bool per_point =
+      values_or_out.dim() == 1 && values_or_out.numel() == len;
+  // A put of one value (min-tokens' -inf) is cheaper as index_put_native.
+  const bool shape_ok = kind == IndexRowsKind::kPutAccumulate
+      ? per_point || values_or_out.numel() == 1
+      : per_point;
   return shape_ok && fn(kind, self, rows, cols, values_or_out);
 }
 

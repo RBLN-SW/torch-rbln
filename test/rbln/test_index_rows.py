@@ -5,7 +5,7 @@
 ``index.Tensor_out`` and ``_index_put_impl_`` hand two 1-D integer indices into a
 contiguous 2-D half/bfloat16 tensor whose last dim is a multiple of 64 to
 ``torch_rbln/_internal/kernels/index_rows.py``: vLLM's logit bias
-(``logits[(req, tok)] += bias``) and min-tokens (``logits[(req, tok)] = -inf``).
+(``logits[(req, tok)] += bias``); a single-value put (min-tokens) stays point by point.
 
 Values are integers in [-512, 512), which the device holds exactly (it rounds
 fp16 to a shorter mantissa in compiled programs), so results compare bitwise
@@ -74,7 +74,7 @@ class TestIndexRows(TestCase):
         _eq(got, x.clone().index_put_((rows, cols), v))
 
     def test_put_scalar_value(self, device):  # noqa: ARG002
-        """vLLM's min_tokens: (request, stop token) points set to a 0-D -inf."""
+        """vLLM's min_tokens: a 0-D -inf put stays on index_put_native (cheaper)."""
         x = _values((_B, _V), torch.bfloat16)
         rows, cols = _points(20)
         neg_inf = torch.tensor(-float("inf"), dtype=torch.bfloat16)
@@ -83,13 +83,14 @@ class TestIndexRows(TestCase):
         def setitem():
             got[(rows.to(DEVICE), cols.to(DEVICE))] = neg_inf.to(DEVICE)
 
-        self._run(setitem)
+        self._run(setitem, row_kernel=False)
         expected = x.clone()
         expected[(rows, cols)] = neg_inf
         _eq(got, expected)
 
-    def test_put_accumulate(self, device):  # noqa: ARG002
-        x, v = _values((_B, _V), torch.float16), _values((100,), torch.float16)
+    @parametrize("one_value", [False, True])
+    def test_put_accumulate(self, device, one_value):  # noqa: ARG002
+        x, v = _values((_B, _V), torch.float16), _values((1 if one_value else 100,), torch.float16)
         rows, cols = _points(100)
         got = _to_dev(x)
         self._run(lambda: got.index_put_((rows.to(DEVICE), cols.to(DEVICE)), v.to(DEVICE), accumulate=True))

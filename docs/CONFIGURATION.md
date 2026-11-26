@@ -223,11 +223,13 @@ environment mutation and dispatch are unsupported.
 
 ## Row kernel for `x[(rows, cols)]`
 
-`x[(rows, cols)]`, `x[(rows, cols)] = v` and
+`x[(rows, cols)]`, `x[(rows, cols)] = v` with one value per point and
 `x.index_put_((rows, cols), v, accumulate=True)` with two 1-D integer indices
 into a contiguous 2-D float16/bfloat16 `x` whose last dim is a multiple of 64
 run as one compiled program over the 64-wide rows the points touch (vLLM's
-logit bias and min-tokens processors). To go back to the point-by-point path:
+logit bias processor). A put of a single value, such as min-tokens' `-inf`,
+stays point by point, which is cheaper for it. To go back to the point-by-point
+path:
 
 ```bash
 export TORCH_RBLN_INDEX_ROW_KERNEL=OFF

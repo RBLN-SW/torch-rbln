@@ -1,7 +1,8 @@
 """Row kernel for ``x[(rows, cols)]`` on a 2-D tensor.
 
-Serves ``x[(r, c)]``, ``x[(r, c)] = v`` and ``x.index_put_((r, c), v, accumulate=True)``
-for the form ``try_index_rows`` in RBLNTensorAdvancedIndexing.cpp lets through.
+Serves ``x[(r, c)]``, ``x[(r, c)] = v`` (one value per point) and
+``x.index_put_((r, c), v, accumulate=True)`` for the form ``try_index_rows`` in
+RBLNTensorAdvancedIndexing.cpp lets through.
 
 ``x`` [B, V] is viewed as [B, V/64, 64]. A host plan, built when a pair of index
 tensors is first seen and reused while neither changes, maps the K points onto
