@@ -171,17 +171,12 @@ class TestIndexRows(TestCase):
         self.assertFalse(run.called)
         _eq(got, x.clone().index_put_((rows, cols), v))
 
-    @parametrize("why", ["env_off", "no_rebel_ops"])
-    def test_turned_off_takes_point_path(self, device, why):  # noqa: ARG002
-        """TORCH_RBLN_INDEX_ROW_KERNEL=OFF, or a rebel without the batched row ops."""
+    def test_without_rebel_ops_takes_point_path(self, device):  # noqa: ARG002
+        """A rebel without the batched row ops leaves the kernel off."""
         x, v = _values((_B, _V), torch.float16), _values((10,), torch.float16)
         rows, cols = _points(10)
         got = _to_dev(x)
-        if why == "env_off":
-            off = mock.patch.dict("os.environ", {"TORCH_RBLN_INDEX_ROW_KERNEL": "OFF"})
-        else:
-            off = mock.patch.object(index_rows, "_row_ops_ok", new=False)
-        with off:
+        with mock.patch.object(index_rows, "_row_ops_ok", new=False):
             self._run(lambda: got.index_put_((rows.to(DEVICE), cols.to(DEVICE)), v.to(DEVICE)), row_kernel=False)
         _eq(got, x.clone().index_put_((rows, cols), v))
 

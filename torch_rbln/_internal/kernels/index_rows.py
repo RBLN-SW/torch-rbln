@@ -20,6 +20,11 @@ per-batch-row slots:
 
 Values stay on the device: the program places them by gathering rows of the
 values expanded to 64 lanes. One program per (kind, B, V/64, T, J, Kp) shape.
+
+The program computes on the device, which rounds float16 to a shorter mantissa
+as any compiled op does: a float16 value the device did not produce can change
+in its last bit, anywhere in ``x`` for a put. Device-produced values (a model's
+logits) and bfloat16 are unchanged.
 """
 
 from __future__ import annotations
@@ -33,7 +38,7 @@ import torch
 
 import torch_rbln._C
 from torch_rbln._internal.compile_cache import compile_rbln_cached_entry
-from torch_rbln._internal.env_utils import use_device_group_num_devices, use_index_row_kernel
+from torch_rbln._internal.env_utils import use_device_group_num_devices
 from torch_rbln._internal.log_utils import rbln_log_debug, rbln_log_warn_once
 from torch_rbln._internal.ops_utils import _graph_input_order
 
@@ -287,7 +292,7 @@ def _padded_values(values: torch.Tensor, plan: _Plan) -> torch.Tensor:
 
 
 def _index_rows(kind: int, self: torch.Tensor, rows: torch.Tensor, cols: torch.Tensor, values_or_out) -> bool:
-    if not use_index_row_kernel() or not _row_ops_available():
+    if not _row_ops_available():
         return False
     plan = _plan_for(self, rows, cols)
     if plan is None:
