@@ -1,5 +1,8 @@
 #!/usr/bin/env -S uv run --isolated --only-group ci --locked python
-"""Propose pyproject.toml and uv.lock as a pull request."""
+"""Propose the updated files of a checkout as a pull request.
+
+The pull request goes to GH_REPO, on top of the commit the checkout has.
+"""
 
 from __future__ import annotations
 
@@ -23,7 +26,7 @@ if TYPE_CHECKING:
 
 # PyGithub does not wrap the exceptions of requests, its HTTP library.
 GITHUB_ERRORS = (GithubException, RequestException)
-PROPOSED_FILES = ("pyproject.toml", "uv.lock")
+DEFAULT_FILES = ("pyproject.toml", "uv.lock")
 BOT_AUTHOR = InputGitAuthor("github-actions[bot]", "41898282+github-actions[bot]@users.noreply.github.com")
 
 
@@ -41,11 +44,11 @@ def branch_ref(repo: Repository, branch: str) -> GitRef | None:
         return None
 
 
-def proposal_tree(repo: Repository, build_commit: GitCommit) -> GitTree:
+def proposal_tree(repo: Repository, build_commit: GitCommit, repo_dir: Path, files: list[str]) -> GitTree:
     return repo.create_git_tree(
         [
-            InputGitTreeElement(path, "100644", "blob", content=Path(path).read_text(encoding="utf-8"))
-            for path in PROPOSED_FILES
+            InputGitTreeElement(path, "100644", "blob", content=(repo_dir / path).read_text(encoding="utf-8"))
+            for path in files
         ],
         base_tree=build_commit.tree,
     )
@@ -71,19 +74,28 @@ def main() -> None:
     parser.add_argument("--package-version", required=True)
     parser.add_argument("--head-branch", required=True)
     parser.add_argument("--base-branch", required=True)
+    parser.add_argument("--repo-dir", type=Path, default=Path(), help="the checkout to propose from (default: .)")
+    parser.add_argument(
+        "--file",
+        dest="files",
+        action="append",
+        help=f"a path in the checkout to propose; repeatable (default: {', '.join(DEFAULT_FILES)})",
+    )
+    parser.add_argument("--title", help="the commit and pull request title (default: chore: update ...)")
     args = parser.parse_args()
     for name in ("GH_REPO", "GH_TOKEN"):
         if not os.environ.get(name):
             msg = f"{name} is not set"
             raise SystemExit(msg)
-    title = f"chore: update {args.package} to {args.package_version}"
+    files = args.files or list(DEFAULT_FILES)
+    title = args.title or f"chore: update {args.package} to {args.package_version}"
     body = (
         f"Updates the `{args.package}` dependency to `{args.package_version}`.\n\n"
         "The next update force-pushes this branch and drops any commit pushed to it, "
         "so merge a fix pushed here before then."
     )
-    build_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"],  # noqa: S607
+    build_sha = subprocess.run(  # noqa: S603
+        ["git", "-C", str(args.repo_dir), "rev-parse", "HEAD"],  # noqa: S607
         stdout=subprocess.PIPE,
         text=True,
         check=True,
@@ -92,7 +104,7 @@ def main() -> None:
     try:
         repo = repository()
         build_commit = repo.get_git_commit(build_sha)
-        tree = proposal_tree(repo, build_commit)
+        tree = proposal_tree(repo, build_commit, args.repo_dir, files)
         commit = commit_proposal(repo, args.head_branch, title, build_commit, tree)
     except GITHUB_ERRORS as error:
         msg = f"Could not propose {args.package_version} on {args.head_branch} in {os.environ['GH_REPO']}: {error}"

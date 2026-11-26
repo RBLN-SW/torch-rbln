@@ -1,0 +1,40 @@
+---
+env:
+  TORCH_RBLN_QUEUE_DEFAULT: ${TORCH_RBLN_QUEUE_DEFAULT?}
+  TORCH_RBLN_PIN_VERSION: ${TORCH_RBLN_PIN_VERSION:-}
+
+common:
+  test-image: &test-image >-
+    harbor.k8s.rebellions.in/rebellions-sw/rbln-test:0.12.0rc0-ubuntu24.04-py3.12
+
+steps:
+  - group: Pin updates
+    key: pin-updates
+    steps:
+      - label: Update torch-rbln pin (vllm-rbln)
+        key: update-torch-rbln-pin-vllm-rbln
+        command: |
+          .buildkite/scripts/update-torch-rbln-pins.sh vllm-rbln
+        agents:
+          queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
+        env:
+          GH_REPO: RBLN-SW/vllm-rbln
+        secrets:
+          GH_TOKEN: GIT_PAT
+          UV_INDEX_RBLN_NEXUS_NIGHTLY_USERNAME: MGMT_NEXUS_USERNAME
+          UV_INDEX_RBLN_NEXUS_NIGHTLY_PASSWORD: MGMT_NEXUS_PASSWORD
+        timeout_in_minutes: 15
+        image: *test-image
+
+      - label: Update torch-rbln pin (rebel-compiler)
+        key: update-torch-rbln-pin-rebel-compiler
+        command: |
+          .buildkite/scripts/update-torch-rbln-pins.sh rebel-compiler
+        agents:
+          queue: ${TORCH_RBLN_QUEUE_DEFAULT?}
+        env:
+          GH_REPO: rebellions-sw/rebel_compiler
+        secrets:
+          GH_TOKEN: GIT_PAT
+        timeout_in_minutes: 5
+        image: *test-image

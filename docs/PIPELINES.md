@@ -14,15 +14,16 @@ scripts.
 
 ## Pipelines
 
-| Pipeline                                                              | Build source             | Description                                                              | Commit status       |
-| --------------------------------------------------------------------- | ------------------------ | ------------------------------------------------------------------------ | ------------------- |
-| [PR title lint](../.buildkite/pipeline.pr-title-lint.yml)             | Pull requests            | Checks that the pull request title follows Conventional Commits          | `PR title lint`     |
-| [Pre-merge checks](../.buildkite/pipeline.pre-merge-checks.yml)       | Pull requests            | Lints, builds, and tests the pull request                                | `Pre-merge checks`  |
-| [Post-merge checks](../.buildkite/pipeline.post-merge-checks.yml)     | Pushes to `main`         | Lints, builds, and tests the merged commit                               | `Post-merge checks` |
-| [Release checks](../.buildkite/pipeline.release-checks.yml)           | Daily schedule on `main` | Checks the wheels a release ships, then promotes them                    | `Release checks`    |
-| [Release](../.buildkite/pipeline.release.yml)                         | Manual                   | Tags a commit and publishes its wheels                                   | —                   |
-| [Dependency updates](../.buildkite/pipeline.dependency-updates.yml)   | Daily schedule on `main` | Opens a pull request that updates `rebel-compiler` to the latest version | —                   |
-| [Nightly `torch` test](../.buildkite/pipeline.nightly-torch-test.yml) | Daily schedule on `main` | Tests against nightly `torch`                                            | —                   |
+| Pipeline                                                                        | Build source             | Description                                                                               | Commit status       |
+| ------------------------------------------------------------------------------- | ------------------------ | ----------------------------------------------------------------------------------------- | ------------------- |
+| [PR title lint](../.buildkite/pipeline.pr-title-lint.yml)                       | Pull requests            | Checks that the pull request title follows Conventional Commits                           | `PR title lint`     |
+| [Pre-merge checks](../.buildkite/pipeline.pre-merge-checks.yml)                 | Pull requests            | Lints, builds, and tests the pull request                                                 | `Pre-merge checks`  |
+| [Post-merge checks](../.buildkite/pipeline.post-merge-checks.yml)               | Pushes to `main`         | Lints, builds, and tests the merged commit                                                | `Post-merge checks` |
+| [Release checks](../.buildkite/pipeline.release-checks.yml)                     | Daily schedule on `main` | Checks the wheels a release ships, then promotes them                                     | `Release checks`    |
+| [Release](../.buildkite/pipeline.release.yml)                                   | Manual                   | Tags a commit and publishes its wheels                                                    | —                   |
+| [Dependency updates](../.buildkite/pipeline.dependency-updates.yml)             | Daily schedule on `main` | Opens a pull request that updates `rebel-compiler` to the latest version                  | —                   |
+| [Nightly `torch` test](../.buildkite/pipeline.nightly-torch-test.yml)           | Daily schedule on `main` | Tests against nightly `torch`                                                             | —                   |
+| [Post-release pin updates](../.buildkite/pipeline.post-release-pin-updates.yml) | Manual                   | Opens pull requests that update the `torch-rbln` pins of `vllm-rbln` and `rebel-compiler` | —                   |
 
 A build created by a GitHub event or a schedule reports its commit status. A
 manual build reports one only with `TORCH_RBLN_COMMIT_STATUS=true`.
@@ -122,6 +123,27 @@ pin, the pipeline force-pushes the
 [pin update](THIRD_PARTY_UPDATE.md#rebel-compiler) to the
 `update-rebel-compiler` branch, dropping any change pushed there, and opens or
 updates its pull request. It runs only on `main`.
+
+## Post-release pin updates
+
+For each repository below whose pin is older than the target version, the
+pipeline force-pushes the pin update to the `update-torch-rbln` branch of that
+repository, dropping any change pushed there, and opens or updates its pull
+request against `dev`.
+
+| Repository       | Pin                                                                                     |
+| ---------------- | --------------------------------------------------------------------------------------- |
+| `vllm-rbln`      | `uv.lock`, and the range in `pyproject.toml` when the version starts a new patch line   |
+| `rebel-compiler` | `TORCH_RBLN` in `.buildkite/pr.yml`, which also picks the tag its test suite comes from |
+
+The range of a new patch line admits it from its first development release, such
+as `>=0.12.2.dev0,<0.12.3`.
+
+| Variable                 | Default                        | Description                                                                                       |
+| ------------------------ | ------------------------------ | ------------------------------------------------------------------------------------------------- |
+| `TORCH_RBLN_PIN_VERSION` | The latest release on pypi.org | The version to pin to, such as `0.12.1a1` without a leading `v`. It must be a release on pypi.org |
+
+The latest release counts pre-releases but not development releases.
 
 ## Nightly `torch` test
 
