@@ -10,10 +10,8 @@ from torch_rbln._internal.torch_compile_patch_helpers import CompiledFunctionWra
 
 # Module-level state to track if patches have been applied
 _torch_compile_patched: bool = False
-_torch_dynamo_reset_patched: bool = False
 _rbln_backend_registered: bool = False
 _original_torch_compile = None
-_original_dynamo_reset = None
 
 
 def _is_backend_registered(backend_name: str) -> bool:
@@ -25,11 +23,28 @@ def _is_backend_registered(backend_name: str) -> bool:
     return backend_name in backends
 
 
+def _rbln_backend_reset() -> None:
+    """Defined as ``reset`` on the 'rbln' backend; torch._dynamo.reset() calls it."""
+    clear_rbln_compile_cache()
+    # torch._dynamo.reset() means "forget all compiled state". Also flush
+    # the C++ warm cache — otherwise a matching input profile still hits a
+    # stale runtime directly after reset, bypassing the cleared Python
+    # cache and Dynamo. Lazy import avoids an import cycle.
+    #
+    # Caveat: the flush can drop the last reference to a warm runtime and
+    # free its device buffers. Drain in-flight work (torch.rbln.synchronize)
+    # before reset(); resetting a device with pending DMA is undefined.
+    from torch_rbln._internal import warm_cache  # noqa: PLC0415
+
+    warm_cache.clear()
+
+
 def _register_rbln_backend() -> bool:
     """Register the RBLN backend with torch._dynamo; True on success."""
     global _rbln_backend_registered
 
     if _rbln_backend_registered or _is_backend_registered("rbln"):
+        setattr(torch._dynamo.lookup_backend("rbln"), "reset", _rbln_backend_reset)  # noqa: B010
         _rbln_backend_registered = True
         return True
 
@@ -46,6 +61,7 @@ def _register_rbln_backend() -> bool:
         return False
 
     if _is_backend_registered("rbln"):
+        setattr(torch._dynamo.lookup_backend("rbln"), "reset", _rbln_backend_reset)  # noqa: B010
         _rbln_backend_registered = True
         return True
     warnings.warn(
@@ -65,12 +81,10 @@ def patch_torch_compile() -> None:
     the first compilation. The registration is lazy (happens on first call) to avoid
     import-time dependencies.
     """
-    global _original_dynamo_reset, _original_torch_compile, _torch_compile_patched, _torch_dynamo_reset_patched
+    global _original_torch_compile, _torch_compile_patched
 
     if _original_torch_compile is None:
         _original_torch_compile = torch.compile
-    if _original_dynamo_reset is None:
-        _original_dynamo_reset = torch._dynamo.reset
 
     if not _torch_compile_patched:
         original_torch_compile = _original_torch_compile
@@ -115,27 +129,6 @@ def patch_torch_compile() -> None:
         torch.compile = wrapper
         _torch_compile_patched = True
 
-    if not _torch_dynamo_reset_patched:
-        original_dynamo_reset = _original_dynamo_reset
-
-        def reset_wrapper(*args, **kwargs):
-            clear_rbln_compile_cache()
-            # torch._dynamo.reset() means "forget all compiled state". Also flush
-            # the C++ warm cache — otherwise a matching input profile still hits a
-            # stale runtime directly after reset, bypassing the cleared Python
-            # cache and Dynamo. Lazy import avoids an import cycle.
-            #
-            # Caveat: the flush can drop the last reference to a warm runtime and
-            # free its device buffers. Drain in-flight work (torch.rbln.synchronize)
-            # before reset(); resetting a device with pending DMA is undefined.
-            from torch_rbln._internal import warm_cache  # noqa: PLC0415
-
-            warm_cache.clear()
-            return original_dynamo_reset(*args, **kwargs)
-
-        torch._dynamo.reset = reset_wrapper
-        _torch_dynamo_reset_patched = True
-
 
 def apply_all_patches() -> None:
     """Apply all RBLN monkey patches. Idempotent."""
@@ -147,19 +140,13 @@ def remove_all_patches() -> None:
 
     WARNING: This function is primarily for testing purposes.
     """
-    global _rbln_backend_registered, _torch_compile_patched, _torch_dynamo_reset_patched
+    global _rbln_backend_registered, _torch_compile_patched
 
     if _original_torch_compile is not None:
         torch.compile = _original_torch_compile
-    if _original_dynamo_reset is not None:
-        torch._dynamo.reset = _original_dynamo_reset
+    if _rbln_backend_registered:
+        delattr(torch._dynamo.lookup_backend("rbln"), "reset")
 
-    clear_rbln_compile_cache()
-    # Mirror reset_wrapper's teardown: drop the C++ warm cache's runtime
-    # references too, so removal fully undoes apply. Lazy import avoids a cycle.
-    from torch_rbln._internal import warm_cache  # noqa: PLC0415
-
-    warm_cache.clear()
+    _rbln_backend_reset()
     _torch_compile_patched = False
-    _torch_dynamo_reset_patched = False
     _rbln_backend_registered = False
