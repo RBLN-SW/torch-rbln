@@ -1,6 +1,7 @@
 #include <ATen/native/rbln/RBLNCPUFallback.h>
 #include <ATen/native/rbln/RBLNCPUFastPaths.h>
 #include <ATen/native/rbln/RBLNCopy.h>
+#include <ATen/native/rbln/RBLNTensorAdvancedIndexing.h>
 #include <ATen/native/rbln/RBLNTensorUtils.h>
 #include <c10/core/impl/VirtualGuardImpl.h>
 #include <c10/rbln/DeviceMappingManager.h>
@@ -26,6 +27,33 @@
 #include <vector>
 
 namespace {
+
+// The Python row kernel installed by `_set_index_rows_kernel`. Set and read
+// under the GIL. Never freed: a dispatch during interpreter teardown must not
+// find a destroyed py::object.
+py::object* g_index_rows_py = nullptr;
+
+bool index_rows_trampoline(
+    at::native::rbln::IndexRowsKind kind,
+    const at::Tensor& self,
+    const at::Tensor& rows,
+    const at::Tensor& cols,
+    const at::Tensor& values_or_out) {
+  // The dispatcher may have released the GIL on the way here.
+  py::gil_scoped_acquire gil;
+  return (*g_index_rows_py)(
+             static_cast<int>(kind), self, rows, cols, values_or_out)
+      .cast<bool>();
+}
+
+void set_index_rows_kernel(py::object fn) {
+  if (fn.is_none()) {
+    at::native::rbln::set_index_rows_fn(nullptr);
+    return;
+  }
+  g_index_rows_py = new py::object(std::move(fn));
+  at::native::rbln::set_index_rows_fn(&index_rows_trampoline);
+}
 
 // Holds a c10::rbln::CpuFallbackScope for the length of a Python `with` block.
 struct PyCpuFallbackScope {
@@ -694,6 +722,11 @@ void register_internal_api(py::module_& module) {
       pybind11::arg("op_name"),
       pybind11::arg("py_fn"),
       pybind11::arg("skip_dtype_args") = std::vector<size_t>{});
+  module.def(
+      "_set_index_rows_kernel",
+      &set_index_rows_kernel,
+      "Internal: install the Python row kernel for x[(rows, cols)] gathers and puts (None removes it)",
+      pybind11::arg("fn"));
 
   // Warm-cache API. The C++ shim populates a thread-local `pending` entry on
   // every miss-path dispatch; the generated Python wrapper calls

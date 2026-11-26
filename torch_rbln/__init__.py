@@ -80,6 +80,7 @@ def torch_backends_entry_point() -> None:
         atexit.register(torch_rbln._C._set_runtime_shutting_down, shutting_down=True)
 
         # Import operators #####################################################
+        import torch_rbln._internal.kernels.index_rows  # noqa: PLC0415
         import torch_rbln._internal.register_ops  # noqa: PLC0415
 
         # Apply monkey patches for RBLN functionality ###########################
