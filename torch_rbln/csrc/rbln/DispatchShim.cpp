@@ -828,36 +828,28 @@ bool try_warmcache_hit(
     bind_input(ptr);
   }
 
-  // User-provided out= with a shape that doesn't match the cached runtime's
-  // output. PyTorch native eager resizes the out tensor and emits a warning;
-  // the hit path can't, since the runtime was compiled for the cached shape
-  // and writes ``numel(cached) * itemsize`` contig bytes into out.data_ptr().
-  // Fall through to the pybind miss-path so the Python wrapper handles
-  // resize-with-warning. The key leaves `out` out, so an `out` of another dtype
-  // (a float `out` for a comparison cached with a bool one) misses as well.
-  if (out_tensor.defined() && !entry->out_profiles.empty()) {
-    const auto& cached = entry->out_profiles[0];
-    if (out_tensor.sizes() !=
-            at::IntArrayRef(cached.shape.data(), cached.shape.size()) ||
-        out_tensor.scalar_type() != cached.dtype) {
-      return false;
-    }
-  }
-
-  // For non-out ops (e.g. max.unary, min.unary with no overload), allocate a
-  // fresh output tensor per the cached profile.
+  if (entry->out_profiles.empty() ||
+      !entry->out_profiles.front().is_rbln_device)
+    return false;
+  const auto& output = entry->out_profiles.front();
+  const auto device = c10::Device(
+      c10::DeviceType::PrivateUse1,
+      key.inputs.empty() ? c10::DeviceIndex{0}
+                         : key.inputs.front().device_index);
   if (!out_tensor.defined()) {
-    if (entry->out_profiles.empty())
-      return false;
-    const OutputProfile& op0 = entry->out_profiles[0];
-    if (!op0.is_rbln_device)
-      return false; // CPU output unsupported on hit path
-    int8_t dev_idx = 0;
-    if (!key.inputs.empty())
-      dev_idx = key.inputs.front().device_index;
-    auto device = c10::Device(c10::DeviceType::PrivateUse1, dev_idx);
     out_tensor = at::empty(
-        op0.shape, at::TensorOptions().dtype(op0.dtype).device(device));
+        output.shape, at::TensorOptions().dtype(output.dtype).device(device));
+  } else if (
+      out_tensor.device() != device ||
+      out_tensor.scalar_type() != output.dtype) {
+    return false;
+  } else if (out_tensor.sizes() != at::IntArrayRef(output.shape)) {
+    // Composite unary ops pass a fresh empty out. An existing buffer can
+    // alias an input on resize, and nonempty outputs require a warning.
+    if (out_tensor.numel() != 0 || out_tensor.storage().nbytes() != 0 ||
+        out_tensor.storage_offset() != 0)
+      return false;
+    out_tensor.resize_(output.shape);
   }
 
   void* out_ptr = out_tensor.data_ptr();

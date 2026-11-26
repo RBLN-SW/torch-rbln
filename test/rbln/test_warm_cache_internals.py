@@ -13,10 +13,11 @@ generated Python wrappers depend on:
 """
 
 import threading
+import warnings
 
 import pytest
 import torch
-from torch.testing._internal.common_utils import run_tests, TestCase
+from torch.testing._internal.common_utils import instantiate_parametrized_tests, parametrize, run_tests, TestCase
 
 from torch_rbln import _C
 from torch_rbln._internal import warm_cache
@@ -126,7 +127,7 @@ class TestWarmCacheBuildingGuard(TestCase):
         self.assertTrue(_C._warmcache_is_building())
 
 
-@pytest.mark.npu(count=1)
+@instantiate_parametrized_tests
 class TestWarmCacheHitPath(TestCase):
     """Repeated dispatch of one input profile must keep taking the hit path.
 
@@ -137,6 +138,61 @@ class TestWarmCacheHitPath(TestCase):
     that, since correctness is unaffected.
     """
 
+    @pytest.mark.npu(count=1)
+    @parametrize("op", [torch.abs, torch.logical_not], name_fn=lambda op: op.__name__)
+    def test_functional_unary_with_empty_out_takes_hit_path(self, op) -> None:
+        x_cpu = torch.arange(-64, 64, dtype=torch.bfloat16)
+        x = x_cpu.to("rbln")
+        expected = op(x_cpu)
+        self.assertEqual(op(x).cpu(), expected)
+        hits = _C._dispatch_shim_diag_dump()[2]
+        result = op(x)
+        self.assertEqual(_C._dispatch_shim_diag_dump()[2] - hits, 1)
+        self.assertEqual(result.cpu(), expected)
+
+    def _warm_add_out(self) -> tuple[torch.Tensor, torch.Tensor]:
+        x = torch.arange(64, dtype=torch.float16, device="rbln:0")
+        y = torch.ones_like(x)
+        out = torch.empty_like(x)
+        torch.add(x, y, out=out)
+        hits = _C._dispatch_shim_diag_dump()[2]
+        torch.add(x, y, out=out)
+        self.assertEqual(_C._dispatch_shim_diag_dump()[2] - hits, 1)
+        return x, y
+
+    @pytest.mark.npu(count=1)
+    def test_empty_out_resizes_on_hit(self) -> None:
+        x, y = self._warm_add_out()
+        out = x.new_empty(0)
+        expected = x.cpu() + y.cpu()
+        hits = _C._dispatch_shim_diag_dump()[2]
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            result = torch.add(x, y, out=out)
+        self.assertIs(result, out)
+        self.assertEqual(_C._dispatch_shim_diag_dump()[2] - hits, 1)
+        self.assertEqual(out.cpu(), expected)
+
+    @pytest.mark.npu(count=1)
+    def test_empty_out_aliasing_input_misses(self) -> None:
+        x, y = self._warm_add_out()
+        x_cpu = x.cpu()
+        expected = torch.add(x_cpu, y.cpu(), out=x_cpu[:0])
+        out = x[:0]
+        hits = _C._dispatch_shim_diag_dump()[2]
+        torch.add(x, y, out=out)
+        self.assertEqual(_C._dispatch_shim_diag_dump()[2], hits)
+        self.assertEqual(out.cpu(), expected)
+        self.assertEqual(x.cpu(), x_cpu)
+
+    @pytest.mark.npu(count=2)
+    def test_out_on_other_rbln_device_raises(self) -> None:
+        x, y = self._warm_add_out()
+        out = torch.empty_like(x, device="rbln:1")
+        with self.assertRaisesRegex(RuntimeError, f"Input device {x.device} does not match output device {out.device}"):
+            torch.add(x, y, out=out)
+
+    @pytest.mark.npu(count=1)
     def test_repeated_same_profile_dispatch_takes_hit_path(self) -> None:
         x = torch.arange(64, dtype=torch.float16, device="rbln")
         y = torch.ones(64, dtype=torch.float16, device="rbln")
