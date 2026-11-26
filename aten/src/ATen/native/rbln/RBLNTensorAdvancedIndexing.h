@@ -2,6 +2,7 @@
 
 #include <ATen/core/Tensor.h>
 #include <ATen/native/CPUFallback.h> // c10::OperatorHandle, torch::jit::Stack
+#include <c10/rbln/RBLNMacros.h>
 
 // Mirrors aten/src/ATen/native/TensorAdvancedIndexing.cpp upstream — the file
 // that hosts index_select / index_copy / index_add / index_put / gather /
@@ -42,6 +43,29 @@ at::Tensor index_select_rbln(
 // ---------------------------------------------------------------------------
 
 void index_out_rbln(const c10::OperatorHandle& op, torch::jit::Stack* stack);
+
+// ---------------------------------------------------------------------------
+// Row kernel for `x[(rows, cols)]` on a 2-D tensor
+//
+// `x[(r, c)]`, `x[(r, c)] = v` and `x.index_put_((r, c), v, accumulate=True)`
+// with two 1-D integer indices into a contiguous 2-D half/bfloat16 `x` whose
+// last dim is a multiple of 64 (vLLM's logit bias and min-tokens). Instead of
+// one copy or CPU fallback per point, one compiled program updates the touched
+// 64-wide rows of `x` viewed as [B, V/64, 64]. The kernel lives in
+// torch_rbln/_internal/kernels/index_rows.py; it returns false, changing
+// nothing, for a call it does not take.
+// ---------------------------------------------------------------------------
+
+enum class IndexRowsKind : int { kGather = 0, kPut = 1, kPutAccumulate = 2 };
+
+using IndexRowsFn = bool (*)(
+    IndexRowsKind kind,
+    const at::Tensor& self,
+    const at::Tensor& rows,
+    const at::Tensor& cols,
+    const at::Tensor& values_or_out);
+
+C10_RBLN_API void set_index_rows_fn(IndexRowsFn fn) noexcept;
 
 // ---------------------------------------------------------------------------
 // index_copy

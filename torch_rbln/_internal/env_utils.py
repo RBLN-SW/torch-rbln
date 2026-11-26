@@ -82,6 +82,13 @@ def use_device_group_num_devices() -> bool:
     return os.getenv("TORCH_RBLN_USE_DEVICE_TP") == "ON"
 
 
+def use_index_row_kernel() -> bool:
+    """Whether ``x[(rows, cols)]`` gathers and puts may run as the row kernel
+    (``kernels/index_rows.py``); ``TORCH_RBLN_INDEX_ROW_KERNEL=OFF`` turns it off.
+    """
+    return os.getenv("TORCH_RBLN_INDEX_ROW_KERNEL", "ON") != "OFF"
+
+
 def use_tp_failover() -> bool:
     """Check if tensor parallel failover is enabled.
 

@@ -21,13 +21,89 @@
 #include <c10/rbln/RBLNLogging.h>
 #include <c10/rbln/RBLNV2VBatch.h>
 
+#include <array>
+#include <atomic>
 #include <cstdint>
 #include <optional>
 #include <tuple>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace at::native::rbln {
+
+// ===========================================================================
+// Row kernel for x[(rows, cols)] (see the header)
+// ===========================================================================
+
+namespace {
+
+std::atomic<IndexRowsFn> g_index_rows_fn{nullptr};
+
+// Lanes in one row of the [B, V/64, 64] view the row kernel works on.
+constexpr int64_t kIndexRowLanes = 64;
+
+// The (rows, cols) of the form the row kernel takes, or nullopt; anything else
+// keeps the existing paths. The value / out checks are the caller's, since
+// they differ between gather and put.
+std::optional<std::pair<at::Tensor, at::Tensor>> index_rows_operands(
+    const at::Tensor& self,
+    const c10::List<std::optional<at::Tensor>>& indices) {
+  if (indices.size() != 2 || !self.defined() ||
+      !self.device().is_privateuseone() || self.dim() != 2 ||
+      self.numel() == 0 || !self.is_contiguous() ||
+      (self.scalar_type() != at::kHalf &&
+       self.scalar_type() != at::kBFloat16) ||
+      self.size(1) % kIndexRowLanes != 0) {
+    return std::nullopt;
+  }
+  std::array<at::Tensor, 2> idx;
+  for (size_t i = 0; i < 2; ++i) {
+    const std::optional<at::Tensor> t = indices.get(i);
+    if (!t.has_value() || !t->defined() || t->dim() != 1 ||
+        (t->scalar_type() != at::kLong && t->scalar_type() != at::kInt) ||
+        (!t->is_cpu() && t->device() != self.device())) {
+      return std::nullopt;
+    }
+    idx[i] = *t;
+  }
+  if (idx[0].numel() == 0 || idx[0].numel() != idx[1].numel()) {
+    return std::nullopt;
+  }
+  return std::make_pair(std::move(idx[0]), std::move(idx[1]));
+}
+
+bool try_index_rows(
+    IndexRowsKind kind,
+    const at::Tensor& self,
+    const c10::List<std::optional<at::Tensor>>& indices,
+    const at::Tensor& values_or_out) {
+  const IndexRowsFn fn = g_index_rows_fn.load(std::memory_order_acquire);
+  if (fn == nullptr || !values_or_out.defined() ||
+      values_or_out.scalar_type() != self.scalar_type() ||
+      values_or_out.device() != self.device() ||
+      !values_or_out.is_contiguous()) {
+    return false;
+  }
+  const auto operands = index_rows_operands(self, indices);
+  if (!operands.has_value() ||
+      at::get_overlap_status(self, values_or_out) != at::MemOverlapStatus::No) {
+    return false;
+  }
+  const auto& [rows, cols] = *operands;
+  const int64_t len = rows.numel();
+  const bool shape_ok = kind == IndexRowsKind::kGather
+      ? values_or_out.dim() == 1 && values_or_out.numel() == len
+      : values_or_out.numel() == 1 ||
+          (values_or_out.dim() == 1 && values_or_out.numel() == len);
+  return shape_ok && fn(kind, self, rows, cols, values_or_out);
+}
+
+} // namespace
+
+void set_index_rows_fn(IndexRowsFn fn) noexcept {
+  g_index_rows_fn.store(fn, std::memory_order_release);
+}
 
 // ===========================================================================
 // index_select
@@ -211,6 +287,15 @@ void index_out_rbln(const c10::OperatorHandle& op, torch::jit::Stack* stack) {
   const at::Tensor self = (*stack)[base].toTensor();
   const c10::List<c10::optional<at::Tensor>> indices =
       (*stack)[base + 1].toOptionalTensorList();
+
+  {
+    at::Tensor out = (*stack)[base + 2].toTensor();
+    if (try_index_rows(IndexRowsKind::kGather, self, indices, out)) {
+      torch::jit::drop(*stack, static_cast<size_t>(num_args));
+      torch::jit::push(*stack, std::move(out));
+      return;
+    }
+  }
 
   // Find the single non-None index and its axis (its position in `indices` is
   // the indexed dim; leading `None`s shift it, e.g. `x[:, idx]` -> axis 1).
@@ -793,7 +878,12 @@ void index_put_impl_rbln_(
   const at::Tensor values = (*stack)[base + 2].toTensor();
   const bool accumulate = (*stack)[base + 3].toBool();
 
-  if (index_put_native(self, indices, values, accumulate)) {
+  if (try_index_rows(
+          accumulate ? IndexRowsKind::kPutAccumulate : IndexRowsKind::kPut,
+          self,
+          indices,
+          values) ||
+      index_put_native(self, indices, values, accumulate)) {
     torch::jit::drop(*stack, static_cast<size_t>(num_args));
     torch::jit::push(*stack, std::move(self));
     return;

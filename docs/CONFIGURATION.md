@@ -221,6 +221,24 @@ changes affect subsequent dispatches without restarting the process. Modify
 these variables only when no RBLN operator dispatch is in progress; concurrent
 environment mutation and dispatch are unsupported.
 
+## Row kernel for `x[(rows, cols)]`
+
+`x[(rows, cols)]`, `x[(rows, cols)] = v` and
+`x.index_put_((rows, cols), v, accumulate=True)` with two 1-D integer indices
+into a contiguous 2-D float16/bfloat16 `x` whose last dim is a multiple of 64
+run as one compiled program over the 64-wide rows the points touch (vLLM's
+logit bias and min-tokens processors). To go back to the point-by-point path:
+
+```bash
+export TORCH_RBLN_INDEX_ROW_KERNEL=OFF
+```
+
+Read on each call, like the variables above. The program computes on the
+device, which rounds float16 to a shorter mantissa, as in any other compiled op:
+a float16 value the device did not produce can change in its last bit, anywhere
+in `x` for a put. Values the device produced, such as a model's logits, and
+bfloat16 are unchanged.
+
 ## Fallback control
 
 By default, `torch-rbln` falls back to CPU execution when it encounters
