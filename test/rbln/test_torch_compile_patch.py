@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from torch._dynamo.backends.registry import lookup_backend
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torch_rbln._internal import monkey_patches, warm_cache
@@ -959,37 +960,30 @@ class TestTorchCompileMonkeyPatch(TestCase):
     """Tests for torch.compile monkey patching."""
 
     def setUp(self):
-        """Store original torch.compile and torch._dynamo.reset before tests."""
+        """Store original torch.compile before tests."""
         # apply_all_patches() runs at torch_rbln import time, so torch.compile
-        # is already the wrapper by the time tests run. Pull the true originals
-        # from the module state instead of capturing the current (wrapped) values.
+        # is already the wrapper by the time tests run. Pull the true original
+        # from the module state instead of capturing the current (wrapped) value.
         self._original_compile = (
             monkey_patches._original_torch_compile
             if monkey_patches._original_torch_compile is not None
             else torch.compile
         )
-        self._original_dynamo_reset = (
-            monkey_patches._original_dynamo_reset
-            if monkey_patches._original_dynamo_reset is not None
-            else torch._dynamo.reset
-        )
         clear_rbln_compile_cache()
 
     def tearDown(self):
-        """Restore torch.compile / torch._dynamo.reset, then re-apply the RBLN patches.
+        """Restore torch.compile, then re-apply the RBLN patches.
 
-        This class's tests deliberately unpatch to the bare originals; without
+        This class's tests deliberately unpatch to the bare original; without
         re-applying, later tests on the same worker would run against the un-patched
-        functions. Re-applying here fixes that at the source (so no global autouse guard
-        is needed).
+        torch.compile. Re-applying here fixes that at the source (so no global
+        autouse guard is needed).
         """
         torch.compile = self._original_compile
-        torch._dynamo.reset = self._original_dynamo_reset
         clear_rbln_compile_cache()
 
         # Reset the bookkeeping to un-patched, then re-apply from a clean slate.
         monkey_patches._torch_compile_patched = False
-        monkey_patches._torch_dynamo_reset_patched = False
         monkey_patches._rbln_backend_registered = False
         monkey_patches.apply_all_patches()
 
@@ -1004,21 +998,21 @@ class TestTorchCompileMonkeyPatch(TestCase):
         self.assertIs(first_compile, second_compile)
 
     def test_remove_all_patches_restores_original_functions(self):
-        """remove_all_patches should restore both torch.compile and
-        torch._dynamo.reset.
+        """remove_all_patches should restore torch.compile and drop the rbln
+        backend's reset.
         """
         patch_torch_compile()
+        self.assertTrue(monkey_patches._register_rbln_backend())
 
         self.assertIsNot(torch.compile, self._original_compile)
-        self.assertIsNot(torch._dynamo.reset, self._original_dynamo_reset)
+        self.assertIs(lookup_backend("rbln").reset, monkey_patches._rbln_backend_reset)
 
         remove_all_patches()
 
         self.assertIs(torch.compile, self._original_compile)
-        self.assertIs(torch._dynamo.reset, self._original_dynamo_reset)
+        self.assertFalse(hasattr(lookup_backend("rbln"), "reset"))
 
         self.assertFalse(monkey_patches._torch_compile_patched)
-        self.assertFalse(monkey_patches._torch_dynamo_reset_patched)
 
     def test_patch_torch_compile_non_rbln_backend(self):
         """Test that non-RBLN backends pass through normally."""
@@ -1103,9 +1097,12 @@ class TestTorchCompileMonkeyPatch(TestCase):
     def test_compile_rbln_cached_recompiles_after_dynamo_reset(self):
         """torch._dynamo.reset should also clear the RBLN eager compile cache."""
         patch_torch_compile()
-        model = Mock()
 
-        with patch("torch_rbln._internal.compile_cache.torch.compile", side_effect=[Mock(), Mock()]) as mock_compile:
+        def model(x):
+            return x
+
+        # Dynamo calls a backend's reset only if torch.compile used it, so no stub.
+        with patch("torch_rbln._internal.compile_cache.torch.compile", wraps=torch.compile) as mock_compile:
             compile_rbln_cached(
                 model,
                 dynamic=False,
@@ -1137,6 +1134,8 @@ class TestTorchCompileMonkeyPatch(TestCase):
         reset, bypassing Dynamo.
         """
         patch_torch_compile()
+        # Dynamo calls a backend's reset only if torch.compile used it.
+        torch.compile(lambda x: x, backend="rbln")
 
         with patch.object(warm_cache, "clear") as mock_clear:
             torch._dynamo.reset()
