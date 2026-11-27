@@ -340,12 +340,22 @@ def handle_empty_where(args):
     return ret, ret.shape
 
 
+def validate_masked_fill_operands(mask, value):
+    if isinstance(value, torch.Tensor) and value.dim() != 0:
+        msg = (
+            f"masked_fill_ only supports a 0-dimensional value tensor, but got tensor with {value.dim()} dimension(s)."
+        )
+        raise RuntimeError(msg)
+    if mask.dtype != torch.bool:
+        msg = f"masked_fill only supports boolean masks, but got dtype {mask.dtype}"
+        raise RuntimeError(msg)
+
+
 def handle_empty_masked_fill(args, out=None):
-    # ``masked_fill`` keeps ``self``'s shape, so an empty ``self`` gives an empty
-    # result even when the mask is a non-empty (0-dim, broadcast) tensor. Such a
-    # call must not reach the compiler: a program with an empty input fails in
-    # runtime creation (``std::bad_alloc``).
-    ret = out if out is not None else torch.empty_like(args[0], device="rbln")
+    # An empty input to a compiled program can cause std::bad_alloc at runtime creation.
+    input, mask, _ = args
+    shape = torch._C._infer_size(mask.size(), input.size())
+    ret = out if out is not None else input.new_empty(shape)
     return ret, ret.shape
 
 
